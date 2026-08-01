@@ -5704,6 +5704,8 @@ function evidenceReadinessSource(input: {
   generatedAt: string;
   applicable?: boolean;
   applicability?: Exclude<FleetReadinessEvidenceApplicability, 'disabled'>;
+  /** Whether source degradation may synthesize FleetNextAction records. */
+  actionSynthesis?: 'eligible' | 'observational-only';
 }): FleetReadinessSourceHealth {
   if (input.applicable === false) {
     const source = readinessSource(
@@ -5724,7 +5726,7 @@ function evidenceReadinessSource(input: {
     };
   }
   const quality = input.quality;
-  const observational = input.role === 'forensics';
+  const observational = input.role === 'forensics' || input.actionSynthesis === 'observational-only';
   const degraded = !quality || quality.sourceState === 'degraded' || !quality.complete;
   const missing = quality?.sourceState === 'missing';
   const eligibility: FleetReadinessEvidenceEligibility = observational
@@ -5802,11 +5804,11 @@ function learningEvidenceReadinessSources(
     }),
     evidenceReadinessSource({
       id: 'agent-actions', label: 'Agent Actions', role: 'learning',
-      quality: status.workspace?.sourceQuality, generatedAt,
+      quality: status.workspace?.sourceQuality, generatedAt, actionSynthesis: 'observational-only',
     }),
     evidenceReadinessSource({
       id: 'dispatch-production', label: 'Dispatch Outcomes', role: 'analytics',
-      quality: status.dispatchProductionSource, generatedAt,
+      quality: status.dispatchProductionSource, generatedAt, actionSynthesis: 'observational-only',
     }),
     evidenceReadinessSource({
       id: 'dispatch-manifests', label: 'Dispatch Intent', role: 'forensics',

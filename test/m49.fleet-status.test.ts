@@ -186,6 +186,20 @@ function withFoundry(foundry: NonNullable<AshlrConfig['foundry']>): AshlrConfig 
   return { ...baseConfig(), foundry };
 }
 
+function actionAuthorityProjection(status: FleetStatus): unknown {
+  return {
+    nextActions: status.nextActions,
+    readinessVerdict: status.autonomousShipReadiness?.verdict,
+    topBlocker: status.autonomousShipReadiness?.topBlocker,
+    primaryAction: status.autonomousShipReadiness?.primaryAction,
+    missionAction: status.missionBrief?.action,
+    missionDirective: status.missionBrief?.directive,
+    persistentPlaybookCommands: (status.nextActions ?? [])
+      .flatMap((action) => action.commands ?? [])
+      .filter((command) => command.argv.includes('--persist')),
+  };
+}
+
 function withRoutableMid(foundry: NonNullable<AshlrConfig['foundry']> = {}): AshlrConfig {
   return withFoundry({
     ...foundry,
@@ -738,7 +752,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatted).toContain('Proposal funnel:');
     expect(formatted).toContain('sample:    0 canonical attempt(s) from 0 event(s)');
     expect(formatted).toContain('output:    withheld (insufficient-sample)');
-    expect(formatted).toContain('diagnosis: insufficient-sample · collect-attempts');
+    expect(formatted).toContain('diagnosis: insufficient-sample');
+    expect(formatted).toContain('diagnostic hint (non-authoritative): collect-attempts');
     expect(formatted).not.toContain('reported proposal-created 0/0');
   });
 
@@ -3225,7 +3240,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         emptyAttempts: { count: 1, rate: 1 / 3 },
       },
       primaryBlocker: 'gate-blocking',
-      primaryAction: 'inspect-verification-gates',
+      diagnosticHint: 'inspect-verification-gates',
     });
     expect(s.attemptCoverage?.production.generatedRepairAttempts).toMatchObject({
       attempts: 1,
@@ -3276,7 +3291,10 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatted).toContain(
       'reported proposal-created 1/3 (33%), proposal references 1/3 (33%)',
     );
-    expect(formatted).toContain('diagnosis: gate-blocking · inspect-verification-gates');
+    expect(formatted).toContain('diagnosis: gate-blocking');
+    expect(formatted).toContain(
+      'diagnostic hint (non-authoritative): inspect-verification-gates',
+    );
     for (const canary of [
       'PROMPT_CANARY_M49',
       'ENV_CANARY_M49',
@@ -3598,7 +3616,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       source: { sourceState: 'degraded', complete: false },
       sample: { observedEvents: 2, includedAttempts: 2 },
       primaryBlocker: 'source-unavailable',
-      primaryAction: 'repair-telemetry-source',
+      diagnosticHint: 'repair-telemetry-source',
     });
     expect(s.proposalFunnel?.metrics).toBeUndefined();
     const formatted = formatFleetStatus(s);
@@ -4644,6 +4662,70 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       .not.toContain('ashlr reflect playbooks --persist');
     expect(s.missionBrief?.action?.id).not.toBe('improve-context-efficiency');
     expect(s.missionBrief?.directive).not.toBe('Run context reflection');
+  });
+
+  it('keeps malformed owner-writable agent actions observational and outside action authority', async () => {
+    const now = new Date().toISOString();
+    writeRunningDaemon(tmpHome, [], now);
+    const baseline = await buildFleetStatus(baseConfig());
+
+    const dir = agentActionsDir();
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(dir, `${now.slice(0, 10)}.jsonl`), 'not-json\n', { mode: 0o600 });
+
+    const malformed = await buildFleetStatus(baseConfig());
+    const source = malformed.autonomousShipReadiness?.evidenceMatrix?.sources
+      .find((candidate) => candidate.id === 'agent-actions');
+
+    expect(malformed.workspace?.sourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
+    });
+    expect(malformed.contextEfficiency).toBeDefined();
+    expect(source).toMatchObject({
+      evidenceRole: 'learning',
+      eligibility: 'observational',
+      status: 'degraded',
+      sourceQuality: { badge: 'degraded-source' },
+    });
+    expect(actionAuthorityProjection(malformed)).toEqual(actionAuthorityProjection(baseline));
+  });
+
+  it('keeps malformed owner-writable dispatch production observational and outside action authority', async () => {
+    const now = new Date().toISOString();
+    writeRunningDaemon(tmpHome, [], now);
+    const baseline = await buildFleetStatus(baseConfig());
+
+    const dir = join(process.env.ASHLR_HOME!, 'dispatch-production');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(dir, `${now.slice(0, 10)}.jsonl`), 'not-json\n', { mode: 0o600 });
+
+    const malformed = await buildFleetStatus(baseConfig());
+    const source = malformed.autonomousShipReadiness?.evidenceMatrix?.sources
+      .find((candidate) => candidate.id === 'dispatch-production');
+
+    expect(malformed.dispatchProductionSource).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
+    });
+    expect(malformed.dispatchProduction).toBeUndefined();
+    expect(malformed.learningMetrics).toMatchObject({
+      state: 'withheld',
+      reason: 'dispatch-source-degraded',
+    });
+    expect(malformed.proposalFunnel).toMatchObject({
+      state: 'withheld',
+      diagnosticHint: 'repair-telemetry-source',
+    });
+    expect(source).toMatchObject({
+      evidenceRole: 'analytics',
+      eligibility: 'observational',
+      status: 'degraded',
+      sourceQuality: { badge: 'degraded-source' },
+    });
+    expect(actionAuthorityProjection(malformed)).toEqual(actionAuthorityProjection(baseline));
   });
 
   it('promotes poor durable dispatch yield into next actions', async () => {
@@ -6498,6 +6580,11 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       topBlocker: { id: 'signed-evidence-degraded', source: 'autonomy-packs' },
       primaryAction: { id: 'inspect-signed-evidence', priority: 'high' },
     });
+    expect(status.nextActions).toContainEqual(expect.objectContaining({
+      id: 'inspect-signed-evidence',
+      priority: 'high',
+    }));
+    expect(status.missionBrief?.action).toMatchObject({ id: 'inspect-signed-evidence' });
     expect(status.autonomousShipReadiness?.primaryAction?.commands?.[0]?.argv)
       .toEqual(['ashlr', 'fleet', 'evidence', 'doctor', 'autonomy-packs', '--json']);
   });
@@ -6713,9 +6800,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       state: 'cold-start',
       summary: {
         eligible: 1,
-        'cold-start': 4,
+        'cold-start': 2,
         withheld: 0,
-        observational: 1,
+        observational: 3,
         'not-applicable': 2,
       },
     });
@@ -6943,6 +7030,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       ],
     });
     expect(action?.commands?.every((command) => command.endpointPath === undefined)).toBe(true);
+    expect(status.nextActions).toContainEqual(expect.objectContaining({ id: 'inspect-learning-evidence' }));
     expect(status.autonomousShipReadiness?.primaryAction).not.toMatchObject({ id: 'drain-ready-auto-merges' });
     expect(status.nextActions?.map((candidate) => candidate.id)).not.toContain('drain-ready-auto-merges');
   });

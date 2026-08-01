@@ -103,7 +103,7 @@ describe('buildProposalFunnelObservability', () => {
     });
 
     expect(result).toMatchObject({
-      schemaVersion: 4,
+      schemaVersion: 5,
       state: 'observational',
       authority: {
         integrityClass: 'owner-writable-local',
@@ -133,7 +133,7 @@ describe('buildProposalFunnelObservability', () => {
         otherAttempts: { count: 1, rate: 1 / 6 },
       },
       primaryBlocker: 'capture-errors',
-      primaryAction: 'repair-proposal-capture',
+      diagnosticHint: 'repair-proposal-capture',
     });
     const serialized = JSON.stringify(result);
     expect(serialized).not.toContain('SECRET_PROMPT_TEXT');
@@ -164,7 +164,7 @@ describe('buildProposalFunnelObservability', () => {
       source: { sourceState: 'degraded', complete: false, stopReasons: ['row-limit'] },
       sample: { requestedWindowHours: 1, observedEvents: 2, includedAttempts: 2 },
       primaryBlocker: 'source-unavailable',
-      primaryAction: 'repair-telemetry-source',
+      diagnosticHint: 'repair-telemetry-source',
     });
     expect(result.metrics).toBeUndefined();
     expect(JSON.stringify(result)).not.toContain('proposal-2');
@@ -183,7 +183,7 @@ describe('buildProposalFunnelObservability', () => {
       withheldReason: 'sample-limit-exceeded',
       sample: { eventLimit: 1, observedEvents: 1, includedAttempts: 1 },
       primaryBlocker: 'sample-incomplete',
-      primaryAction: 'increase-or-narrow-sample-window',
+      diagnosticHint: 'increase-or-narrow-sample-window',
     });
     expect(result.metrics).toBeUndefined();
   });
@@ -201,7 +201,7 @@ describe('buildProposalFunnelObservability', () => {
       withheldReason: 'insufficient-sample',
       sample: { includedAttempts: 0, duplicateEvents: 0, conflictingAttemptIdentities: 0 },
       primaryBlocker: 'insufficient-sample',
-      primaryAction: 'collect-attempts',
+      diagnosticHint: 'collect-attempts',
     });
     expect(result.metrics).toBeUndefined();
   });
@@ -267,7 +267,7 @@ describe('buildProposalFunnelObservability', () => {
       withheldReason: 'attempt-identity-conflict',
       sample: { conflictingAttemptIdentities: 1 },
       primaryBlocker: 'identity-conflict',
-      primaryAction: 'inspect-attempt-identity-conflicts',
+      diagnosticHint: 'inspect-attempt-identity-conflicts',
     });
     expect(result.metrics).toBeUndefined();
     expect(JSON.stringify(result)).not.toContain('run-conflict');

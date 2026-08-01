@@ -30,7 +30,7 @@ export type ProposalFunnelBlocker =
   | 'identity-unavailable'
   | 'identity-conflict';
 
-export type ProposalFunnelAction =
+export type ProposalFunnelDiagnosticHint =
   | 'keep-routing'
   | 'collect-attempts'
   | 'repair-proposal-capture'
@@ -60,7 +60,7 @@ export interface ProposalFunnelMetrics {
 }
 
 export interface ProposalFunnelObservability {
-  schemaVersion: 4;
+  schemaVersion: 5;
   state: 'observational' | 'withheld';
   authority: {
     integrityClass: 'owner-writable-local';
@@ -92,7 +92,8 @@ export interface ProposalFunnelObservability {
   metrics?: ProposalFunnelMetrics;
   withheldReason?: ProposalFunnelWithheldReason;
   primaryBlocker: ProposalFunnelBlocker;
-  primaryAction: ProposalFunnelAction;
+  /** Display-only diagnostic vocabulary; never an executable or readiness action. */
+  diagnosticHint: ProposalFunnelDiagnosticHint;
 }
 
 export interface BuildProposalFunnelObservabilityInput {
@@ -140,10 +141,10 @@ function observationBounds(events: readonly DispatchProductionEvent[]): {
 
 function dominantBlocker(metrics: ProposalFunnelMetrics): {
   primaryBlocker: ProposalFunnelBlocker;
-  primaryAction: ProposalFunnelAction;
+  diagnosticHint: ProposalFunnelDiagnosticHint;
 } {
   if (metrics.attempts === 0) {
-    return { primaryBlocker: 'insufficient-sample', primaryAction: 'collect-attempts' };
+    return { primaryBlocker: 'insufficient-sample', diagnosticHint: 'collect-attempts' };
   }
   const candidates = [
     ['capture-errors', 'repair-proposal-capture', metrics.captureErrors.count],
@@ -153,8 +154,8 @@ function dominantBlocker(metrics: ProposalFunnelMetrics): {
     ['other-failures', 'inspect-other-failures', metrics.otherAttempts.count],
   ] as const;
   const dominant = candidates.reduce((best, candidate) => candidate[2] > best[2] ? candidate : best);
-  if (dominant[2] === 0) return { primaryBlocker: 'none', primaryAction: 'keep-routing' };
-  return { primaryBlocker: dominant[0], primaryAction: dominant[1] };
+  if (dominant[2] === 0) return { primaryBlocker: 'none', diagnosticHint: 'keep-routing' };
+  return { primaryBlocker: dominant[0], diagnosticHint: dominant[1] };
 }
 
 /**
@@ -195,19 +196,19 @@ export function buildProposalFunnelObservability(
 
   if (input.events.length > eventLimit) {
     return {
-      schemaVersion: 4,
+      schemaVersion: 5,
       state: 'withheld',
       authority: OBSERVATIONAL_AUTHORITY,
       source,
       sample,
       withheldReason: 'sample-limit-exceeded',
       primaryBlocker: 'sample-incomplete',
-      primaryAction: 'increase-or-narrow-sample-window',
+      diagnosticHint: 'increase-or-narrow-sample-window',
     };
   }
   if (input.sourceQuality.sourceState !== 'healthy' || !input.sourceQuality.complete) {
     return {
-      schemaVersion: 4,
+      schemaVersion: 5,
       state: 'withheld',
       authority: OBSERVATIONAL_AUTHORITY,
       source,
@@ -216,46 +217,46 @@ export function buildProposalFunnelObservability(
         ? 'source-missing'
         : 'source-degraded',
       primaryBlocker: 'source-unavailable',
-      primaryAction: 'repair-telemetry-source',
+      diagnosticHint: 'repair-telemetry-source',
     };
   }
 
   if (canonical.invalidAttemptIdentities > 0) {
     return {
-      schemaVersion: 4,
+      schemaVersion: 5,
       state: 'withheld',
       authority: OBSERVATIONAL_AUTHORITY,
       source,
       sample,
       withheldReason: 'attempt-identity-unavailable',
       primaryBlocker: 'identity-unavailable',
-      primaryAction: 'repair-attempt-identity',
+      diagnosticHint: 'repair-attempt-identity',
     };
   }
 
   if (canonical.conflictingAttemptIdentities > 0) {
     return {
-      schemaVersion: 4,
+      schemaVersion: 5,
       state: 'withheld',
       authority: OBSERVATIONAL_AUTHORITY,
       source,
       sample,
       withheldReason: 'attempt-identity-conflict',
       primaryBlocker: 'identity-conflict',
-      primaryAction: 'inspect-attempt-identity-conflicts',
+      diagnosticHint: 'inspect-attempt-identity-conflicts',
     };
   }
 
   if (attempts.length === 0) {
     return {
-      schemaVersion: 4,
+      schemaVersion: 5,
       state: 'withheld',
       authority: OBSERVATIONAL_AUTHORITY,
       source,
       sample,
       withheldReason: 'insufficient-sample',
       primaryBlocker: 'insufficient-sample',
-      primaryAction: 'collect-attempts',
+      diagnosticHint: 'collect-attempts',
     };
   }
 
@@ -291,7 +292,7 @@ export function buildProposalFunnelObservability(
     otherAttempts: rate(otherAttempts, attempts.length),
   };
   return {
-    schemaVersion: 4,
+    schemaVersion: 5,
     state: 'observational',
     authority: OBSERVATIONAL_AUTHORITY,
     source,
@@ -319,11 +320,11 @@ export function withholdProposalFunnelForUnstableSnapshot(
       };
   return {
     ...withoutMetrics,
-    schemaVersion: 4,
+    schemaVersion: 5,
     state: 'withheld',
     source,
     withheldReason: 'snapshot-unstable',
     primaryBlocker: 'source-unavailable',
-    primaryAction: 'repair-telemetry-source',
+    diagnosticHint: 'repair-telemetry-source',
   };
 }

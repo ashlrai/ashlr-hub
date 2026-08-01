@@ -536,7 +536,7 @@ export function formatFleetStatus(s: FleetStatus): string {
         `conflicts ${proposalFunnel.sample.conflictingAttemptIdentities ?? 'unknown'}`,
     );
     const metrics = proposalFunnel.metrics;
-    const currentMetricSchema = proposalFunnel.schemaVersion === 4 &&
+    const currentMetricSchema = proposalFunnel.schemaVersion === 5 &&
       metrics?.reportedProposalCreatedOutcomes !== undefined &&
       metrics.observedProposalReferences !== undefined &&
       proposalFunnel.authority.readinessEligible === false &&
@@ -559,9 +559,8 @@ export function formatFleetStatus(s: FleetStatus): string {
           `other ${metrics.otherAttempts.count}`,
       );
     }
-    lines.push(
-      `  diagnosis: ${proposalFunnel.primaryBlocker} · ${proposalFunnel.primaryAction}`,
-    );
+    lines.push(`  diagnosis: ${proposalFunnel.primaryBlocker}`);
+    lines.push(`  diagnostic hint (non-authoritative): ${proposalFunnel.diagnosticHint}`);
   }
   lines.push('');
 
