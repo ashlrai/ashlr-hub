@@ -15,12 +15,58 @@
  * imports — mirrors m142.best-of-n.test.ts.
  */
 
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { deriveCandidateAttemptIdentity } from '../src/core/fleet/attempt-identity.js';
+import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
+import { canonicalFilesystemPathIdentity } from '../src/core/sandbox/policy.js';
 
 const MOCK_REPO = '/tmp/fake-repo';
 const mockPersistedProposals = new Map<string, import('../src/core/types.js').Proposal>();
+const originalHome = process.env.HOME;
+let testHome: string;
+
+function proposalAuthorityFields(
+  id: string,
+  diff: string,
+  runId: string,
+  opts: { isPartial?: boolean; status?: string; engine?: string } = {},
+) {
+  const engineModel = `${opts.engine ?? 'local-coder'}:mock-model`;
+  const engineTier = 'frontier' as const;
+  const diffHash = hashDiff(diff);
+  const isPartial = opts.isPartial === true;
+  return {
+    diffHash,
+    provenanceSig: signProvenance(engineModel, engineTier, diffHash),
+    engineModel,
+    engineTier,
+    runId,
+    trajectoryId: `run:${runId}`,
+    runEventSummary: isPartial
+      ? {
+          runId,
+          status: opts.status ?? 'failed',
+          outcome: 'gate-blocked',
+          proposalCreated: false,
+        }
+      : {
+          runId,
+          status: 'done',
+          outcome: 'filed',
+          proposalCreated: true,
+          proposalId: id,
+        },
+  };
+}
+
+beforeEach(() => {
+  testHome = mkdtempSync(join(tmpdir(), 'ashlr-best-of-n-m333-'));
+  process.env.HOME = testHome;
+});
 
 function makeItem() {
   return {
@@ -72,18 +118,16 @@ function makeSandboxMock(costUsd: number, label: string) {
             };
       if (runOpts['propose'] !== false) {
         const runId = String(runOpts['runId'] ?? `run-${label}-${idx}`);
+        const diff = `PROPOSAL_DIFF_${label}_${idx}`;
         mockPersistedProposals.set(proposalOutcome.proposalId, {
           id: proposalOutcome.proposalId,
-          repo: String(runOpts['sourceRepo'] ?? MOCK_REPO),
+          repo: canonicalFilesystemPathIdentity(String(runOpts['sourceRepo'] ?? MOCK_REPO), { foldWindowsCase: false }),
           origin: 'agent',
           kind: 'patch',
           title: `${label} candidate ${idx}`,
           summary: `${label} candidate ${idx}`,
-          diff: `PROPOSAL_DIFF_${label}_${idx}`,
-          diffHash: `hash-${label}-${idx}`,
-          provenanceSig: `sig-${label}-${idx}`,
-          runId,
-          trajectoryId: `run:${runId}`,
+          diff,
+          ...proposalAuthorityFields(proposalOutcome.proposalId, diff, runId, { engine: String(engine) }),
           workItemId: runOpts['workItemId'] as string | undefined,
           workItemGenerationId: runOpts['workItemGenerationId'] as string | undefined,
           status: 'pending',
@@ -164,8 +208,10 @@ async function harness(opts: {
       const producerStatus = capOpts['producerStatus'] === 'failed' || capOpts['producerStatus'] === 'aborted'
         ? capOpts['producerStatus']
         : 'done';
+      const draftId = `draft-${sandboxId}`;
+      const runId = String(capOpts['runId'] ?? `run-${safeIdx}`);
       const baseProposal = {
-        id: `draft-${sandboxId}`,
+        id: draftId,
         repo: sb?.sourceRepo ?? MOCK_REPO,
         origin: 'agent' as const,
         kind: 'patch' as const,
@@ -173,14 +219,13 @@ async function harness(opts: {
         summary: `draft ${safeIdx}`,
         diff,
         sandboxId,
-        runId: String(capOpts['runId'] ?? `run-${safeIdx}`),
-        trajectoryId: `run:${String(capOpts['runId'] ?? `run-${safeIdx}`)}`,
         workItemId: capOpts['workItemId'] as string | undefined,
         workItemGenerationId: capOpts['workItemGenerationId'] as string | undefined,
-        engineModel: `${String(engine)}:mock-model`,
-        engineTier: 'frontier' as const,
-        diffHash: `hash-${safeIdx}`,
-        provenanceSig: `sig-${safeIdx}`,
+        ...proposalAuthorityFields(draftId, diff, runId, {
+          engine: String(engine),
+          isPartial,
+          status: producerStatus,
+        }),
         status: 'pending' as const,
         createdAt: now,
         updatedAt: now,
@@ -197,7 +242,17 @@ async function harness(opts: {
           proposalDraft: baseProposal,
         };
       }
-      const proposal = { ...baseProposal, id: `proposal-${sandboxId}` };
+      const proposalId = `proposal-${sandboxId}`;
+      const proposal = {
+        ...baseProposal,
+        id: proposalId,
+        repo: canonicalFilesystemPathIdentity(baseProposal.repo, { foldWindowsCase: false }),
+        ...proposalAuthorityFields(proposalId, diff, runId, {
+          engine: String(engine),
+          isPartial,
+          status: producerStatus,
+        }),
+      };
       filedProposals.set(proposal.id, proposal);
       const proposalOutcome = {
         kind: 'filed',
@@ -307,6 +362,9 @@ afterEach(() => {
   vi.doUnmock('../src/core/fleet/subscription-usage.js');
   vi.doUnmock('../src/core/fleet/skill-shadow-observer.js');
   vi.resetModules();
+  if (originalHome === undefined) delete process.env.HOME;
+  else process.env.HOME = originalHome;
+  rmSync(testHome, { recursive: true, force: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -335,14 +393,14 @@ describe('M333 — candidate specs', () => {
     expect(h.observeShadowSkills.mock.calls.map((call) => call[0])).toEqual([
       expect.objectContaining({
         identity: {
-          trajectoryId: `run:${attemptId}`,
+          trajectoryId: `run:${deriveCandidateAttemptIdentity(attemptId, 0)}`,
           runId: deriveCandidateAttemptIdentity(attemptId, 0),
         },
         route: { backend: 'claude', tier: 'frontier', model: 'claude-sonnet-5' },
       }),
       expect.objectContaining({
         identity: {
-          trajectoryId: `run:${attemptId}`,
+          trajectoryId: `run:${deriveCandidateAttemptIdentity(attemptId, 1)}`,
           runId: deriveCandidateAttemptIdentity(attemptId, 1),
         },
         route: { backend: 'local-coder', tier: 'mid', model: 'qwen3-coder-next' },
@@ -705,7 +763,13 @@ describe('M333 — file-once proposal capture', () => {
         return result;
       }
       if (!draft) throw new Error('expected draft before final capture');
-      const existing = { ...draft, id: 'proposal-existing', status: 'pending' as const };
+      const existing = {
+        ...draft,
+        id: 'proposal-existing',
+        repo: canonicalFilesystemPathIdentity(draft.repo!, { foldWindowsCase: false }),
+        status: 'pending' as const,
+        ...proposalAuthorityFields('proposal-existing', draft.diff!, draft.runId!),
+      };
       h.filedProposals!.set(existing.id, existing);
       const proposalOutcome = {
         kind: 'proposal-disabled' as const,
@@ -727,11 +791,60 @@ describe('M333 — file-once proposal capture', () => {
     expect(result.candidates[0]?.proposalDisposition).toEqual({
       kind: 'duplicate-owned',
       proposalId: 'proposal-existing',
-      diffHash: 'hash-0',
+      diffHash: hashDiff('DRAFT_DIFF_0'),
     });
   });
 
-  it('refuses a final-capture dedup claim when the loaded proposal owns different bytes', async () => {
+  it('refuses stale final-capture duplicate ownership even when bytes still match', async () => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const h = await harness({ cli: cli.fn, api: cli.fn, draftMode: true });
+    const capture = h.captureSandboxedProposal!;
+    const originalCapture = capture.getMockImplementation()!;
+    let draft: import('../src/core/types.js').Proposal | undefined;
+
+    capture.mockImplementation(async (...args: Parameters<typeof originalCapture>) => {
+      if (args[3]?.['draftOnly'] === true) {
+        const result = await originalCapture(...args);
+        draft = result.proposalDraft;
+        return result;
+      }
+      if (!draft) throw new Error('expected draft before final capture');
+      const existing = {
+        ...draft,
+        id: 'proposal-stale-owner',
+        repo: canonicalFilesystemPathIdentity(draft.repo!, { foldWindowsCase: false }),
+        status: 'pending' as const,
+        createdAt: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
+        ...proposalAuthorityFields('proposal-stale-owner', draft.diff!, draft.runId!),
+      };
+      h.filedProposals!.set(existing.id, existing);
+      const proposalOutcome = {
+        kind: 'proposal-disabled' as const,
+        reason: `duplicate diff skipped; existing pending proposal ${existing.id} remains authoritative`,
+        proposalId: existing.id,
+      };
+      return {
+        state: { id: draft.runId!, status: 'done' as const, result: proposalOutcome.reason, proposalOutcome },
+        proposalOutcome,
+      };
+    });
+
+    const cfg = makeConfig();
+    cfg.foundry = {
+      ...cfg.foundry,
+      productionVelocity: {
+        enabled: true,
+        profile: 'resource-control',
+        stalePendingTtlHours: 24,
+      },
+    } as never;
+    const result = await h.runBestOfN(makeItem(), cfg, { n: 1 });
+
+    expect(result.winner).toBeUndefined();
+    expect(result.candidates[0]?.proposalDisposition).toEqual({ kind: 'capture-missing' });
+  });
+
+  it('refuses a replaced final-capture row when the loaded proposal owns different bytes', async () => {
     const cli = makeSandboxMock(0.1, 'cli');
     const h = await harness({ cli: cli.fn, api: cli.fn, draftMode: true });
     const capture = h.captureSandboxedProposal!;

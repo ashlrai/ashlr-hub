@@ -34,6 +34,7 @@ import { mergeDelegationScope, scopeFromWorkItem } from './delegation-scope.js';
 import { observeShadowSkills } from '../fleet/skill-shadow-observer.js';
 import type { SandboxRetentionEvidence } from './sandboxed-engine.js';
 import { runTests, runTestsForProposal } from './run-tests.js';
+import { isAuthoritativeDurablePendingProposal } from '../inbox/pending-authority.js';
 import {
   abandonExecutionAuthority,
   acquireExecutionAuthority,
@@ -54,6 +55,8 @@ export interface CandidateResult {
   proposalId?: string;
   /** Opaque execution id for joining this candidate, including losers. */
   runId?: string;
+  /** Causal trajectory bound to this candidate run. */
+  trajectoryId?: string;
   /** Verdict from the critic judge. undefined when judging failed. */
   verdict?: ManagerVerdict;
   /** Score derived from verdict dimensions (value+correctness+scope+alignment). */
@@ -251,6 +254,7 @@ function durableDuplicateDisposition(
   candidate: InternalCandidateResult,
   outcome: RunProposalOutcome | undefined,
   loadProposal: ((id: string) => Proposal | null) | undefined,
+  cfg: AshlrConfig,
 ): CandidateProposalDisposition | undefined {
   const draft = candidate.proposalDraft;
   if (
@@ -262,16 +266,18 @@ function durableDuplicateDisposition(
 
   try {
     const existing = loadProposal(outcome.proposalId);
-    if (
-      existing?.status !== 'pending' ||
-      existing.id !== outcome.proposalId ||
-      existing.repo !== draft.repo ||
-      existing.workItemId !== draft.workItemId ||
-      existing.workItemGenerationId !== draft.workItemGenerationId ||
-      existing.diffHash !== draft.diffHash ||
-      existing.diff !== draft.diff
-    ) return undefined;
-    return { kind: 'duplicate-owned', proposalId: existing.id, diffHash: existing.diffHash };
+    if (!isAuthoritativeDurablePendingProposal(existing, {
+      id: outcome.proposalId,
+      repo: draft.repo as string,
+      origin: 'agent',
+      kind: 'patch',
+      diff: draft.diff,
+      diffHash: draft.diffHash,
+      workItemId: draft.workItemId,
+      workItemGenerationId: draft.workItemGenerationId,
+      isPartial: draft.isPartial === true,
+    }, cfg)) return undefined;
+    return { kind: 'duplicate-owned', proposalId: existing.id, diffHash: existing.diffHash as string };
   } catch {
     return undefined;
   }
@@ -281,8 +287,9 @@ function finalCaptureDisposition(
   candidate: InternalCandidateResult,
   outcome: RunProposalOutcome | undefined,
   loadProposal: ((id: string) => Proposal | null) | undefined,
+  cfg: AshlrConfig,
 ): CandidateProposalDisposition | undefined {
-  const duplicate = durableDuplicateDisposition(candidate, outcome, loadProposal);
+  const duplicate = durableDuplicateDisposition(candidate, outcome, loadProposal, cfg);
   if (duplicate) return duplicate;
   if (
     typeof candidate.proposalDraft?.diff === 'string' &&
@@ -302,6 +309,7 @@ function exactDurablePendingProposal(
     workItemId: string;
     workItemGenerationId?: string;
   },
+  cfg: AshlrConfig,
 ): Proposal | undefined {
   if (
     !proposalId ||
@@ -317,34 +325,23 @@ function exactDurablePendingProposal(
   } catch {
     return undefined;
   }
-  if (
-    persisted?.status !== 'pending' ||
-    persisted.id !== proposalId ||
-    persisted.repo !== expected.repo ||
-    persisted.origin !== 'agent' ||
-    persisted.kind !== 'patch' ||
-    persisted.runId !== candidate.runId ||
-    persisted.trajectoryId !== `run:${candidate.runId}` ||
-    persisted.workItemId !== expected.workItemId ||
-    persisted.workItemGenerationId !== expected.workItemGenerationId ||
-    typeof persisted.diff !== 'string' ||
-    persisted.diff.trim().length === 0 ||
-    typeof persisted.diffHash !== 'string' ||
-    persisted.diffHash.length === 0
-  ) return undefined;
-
   const draft = candidate.proposalDraft;
-  if (draft && (
-    persisted.repo !== draft.repo ||
-    persisted.sandboxId !== draft.sandboxId ||
-    persisted.runId !== draft.runId ||
-    persisted.workItemId !== draft.workItemId ||
-    persisted.workItemGenerationId !== draft.workItemGenerationId ||
-    persisted.diffHash !== draft.diffHash ||
-    persisted.provenanceSig !== draft.provenanceSig ||
-    persisted.diff !== draft.diff ||
-    (persisted.isPartial === true) !== (draft.isPartial === true)
-  )) return undefined;
+  const trajectoryId = candidate.trajectoryId ?? `run:${candidate.runId}`;
+  if (!isAuthoritativeDurablePendingProposal(persisted, {
+    id: proposalId,
+    repo: expected.repo,
+    origin: 'agent',
+    kind: 'patch',
+    diff: draft?.diff ?? candidate.diff,
+    ...(draft?.diffHash ? { diffHash: draft.diffHash } : {}),
+    ...(draft?.provenanceSig ? { provenanceSig: draft.provenanceSig } : {}),
+    ...(draft?.sandboxId ? { sandboxId: draft.sandboxId } : {}),
+    runId: candidate.runId,
+    trajectoryId,
+    workItemId: expected.workItemId,
+    workItemGenerationId: expected.workItemGenerationId,
+    isPartial: draft?.isPartial === true || outcome.isPartial === true,
+  }, cfg)) return undefined;
 
   return persisted;
 }
@@ -618,6 +615,7 @@ async function runBestOfNInternal(
       engine: cEngine,
       model: cModel,
       runId,
+      trajectoryId: `run:${runId}`,
       requestedModel,
     };
     if (opts?.signal?.aborted) return { ...base, error: 'cancelled' };
@@ -672,7 +670,7 @@ async function runBestOfNInternal(
               reason: `best-of-${n} candidate ${i + 1}`,
             },
           },
-          identity: { trajectoryId: `run:${opts.attemptId}`, runId },
+          identity: { trajectoryId: `run:${runId}`, runId },
           selectedAt: opts.shadowSkillSelectedAt,
           route: {
             backend: executedBackend,
@@ -1095,6 +1093,7 @@ async function runBestOfNInternal(
             workItemId: opts?.workItemId ?? item.id,
             workItemGenerationId: opts?.workItemGenerationId,
           },
+          cfg,
         );
         if (persisted) {
           winner = { ...c, diff: persisted.diff ?? c.diff };
@@ -1147,6 +1146,7 @@ async function runBestOfNInternal(
           workItemId: opts?.workItemId ?? item.id,
           workItemGenerationId: opts?.workItemGenerationId,
         },
+        cfg,
       );
 
       if (persisted && filed.proposalId && outcome) {
@@ -1168,7 +1168,7 @@ async function runBestOfNInternal(
         : outcome;
       const error = candidateErrorFromState(filed.state, false, captureOutcome)
         ?? 'final proposal capture did not file a proposal';
-      const proposalDisposition = finalCaptureDisposition(c, captureOutcome, loadProposal);
+      const proposalDisposition = finalCaptureDisposition(c, captureOutcome, loadProposal, cfg);
       scored[c.index] = {
         ...c,
         ...(captureOutcome ? { proposalOutcome: captureOutcome } : {}),

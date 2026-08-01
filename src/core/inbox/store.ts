@@ -87,13 +87,15 @@ import {
   verifyLocalRealizedMergeEvidence,
 } from './realized-merge.js';
 import {
-  hashDiff,
   signProducerProvenanceV2,
   signLocalRealizedMergeReceipt,
   verifyProvenance,
   verifyLocalMergeIntent,
 } from '../foundry/provenance.js';
-import { pendingProposalIsStaleForProductionVelocity } from '../fabric/production-velocity-pending.js';
+import {
+  canonicalProposalDiffHash,
+  isAuthoritativeDurablePendingProposal,
+} from './pending-authority.js';
 import { pruneQueuedSelfHealItems } from '../fleet/self-heal-queue-prune.js';
 import { proposalRepairId } from '../fleet/proposal-repair-identity.js';
 import {
@@ -944,27 +946,13 @@ type ProposalDedupCandidate = Pick<
   Proposal,
   | 'repo'
   | 'origin'
+  | 'kind'
   | 'diff'
   | 'diffHash'
   | 'workItemId'
   | 'workItemGenerationId'
+  | 'isPartial'
 >;
-
-function canonicalProposalDiffHash(
-  proposal: Pick<Proposal, 'diff' | 'diffHash'>,
-): string | null {
-  if (
-    typeof proposal.diff !== 'string' ||
-    proposal.diff.trim().length === 0 ||
-    typeof proposal.diffHash !== 'string'
-  ) return null;
-  try {
-    const recomputed = hashDiff(canonicalizeProposalDiff(proposal.diff));
-    return proposal.diffHash === recomputed ? recomputed : null;
-  } catch {
-    return null;
-  }
-}
 
 function isAuthoritativeProposalDuplicate(
   existing: Proposal,
@@ -973,13 +961,17 @@ function isAuthoritativeProposalDuplicate(
   cfg: Pick<AshlrConfig, 'foundry'> | undefined,
   now: string,
 ): boolean {
-  if (typeof input.repo !== 'string' || existing.repo !== input.repo) return false;
-  if (
-    existing.workItemId !== input.workItemId ||
-    existing.workItemGenerationId !== input.workItemGenerationId
-  ) return false;
-  if (pendingProposalIsStaleForProductionVelocity(existing, cfg, { now })) return false;
-  return canonicalProposalDiffHash(existing) === inputHash;
+  if (typeof input.repo !== 'string' || typeof input.diff !== 'string') return false;
+  return isAuthoritativeDurablePendingProposal(existing, {
+    repo: input.repo,
+    origin: input.origin,
+    kind: input.kind,
+    diff: input.diff,
+    diffHash: inputHash,
+    workItemId: input.workItemId,
+    workItemGenerationId: input.workItemGenerationId,
+    isPartial: input.isPartial === true,
+  }, cfg, { now });
 }
 
 /**

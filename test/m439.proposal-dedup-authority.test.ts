@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { hashDiff } from '../src/core/foundry/provenance.js';
+import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
 import {
   createProposal,
   inboxDir,
@@ -19,6 +19,7 @@ import {
   listProposals,
   loadProposal,
 } from '../src/core/inbox/store.js';
+import { isAuthoritativeDurablePendingProposal } from '../src/core/inbox/pending-authority.js';
 import { selectInboxStore } from '../src/core/seams/inbox.js';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
 
@@ -62,16 +63,32 @@ function proposalInput(
   repo: string,
   overrides: Partial<Omit<Proposal, 'id' | 'status' | 'createdAt'>> = {},
 ): Omit<Proposal, 'id' | 'status' | 'createdAt'> {
+  const diff = overrides.diff ?? DIFF_A;
+  const diffHash = overrides.diffHash ?? hashDiff(diff);
+  const engineModel = overrides.engineModel ?? 'local-coder:mock-model';
+  const engineTier = overrides.engineTier ?? 'mid';
+  const runId = overrides.runId ?? 'run-proposal-dedup-authority';
   return {
     repo,
     origin: 'agent',
     kind: 'patch',
     title: 'same work retry',
     summary: 'same canonical change',
-    diff: DIFF_A,
-    diffHash: hashDiff(DIFF_A),
+    diff,
+    diffHash,
+    engineModel,
+    engineTier,
+    provenanceSig: overrides.provenanceSig ?? signProvenance(engineModel, engineTier, diffHash),
     workItemId: 'issue:authority-fix',
     workItemGenerationId: GENERATION_A,
+    runId,
+    trajectoryId: `run:${runId}`,
+    runEventSummary: {
+      runId,
+      status: 'done',
+      outcome: 'filed',
+      proposalCreated: true,
+    },
     ...overrides,
   };
 }
@@ -88,6 +105,51 @@ function durableProposalFiles(): string[] {
 }
 
 describe('proposal dedup authority', () => {
+  it('requires canonical bytes, provenance, freshness, and exact causal filing identity', () => {
+    const input = proposalInput(repoA);
+    const proposal = createProposal(input);
+    const expected = {
+      id: proposal.id,
+      repo: repoA,
+      origin: 'agent' as const,
+      kind: 'patch' as const,
+      diff: input.diff,
+      diffHash: input.diffHash,
+      runId: input.runId,
+      trajectoryId: input.trajectoryId,
+      workItemId: input.workItemId,
+      workItemGenerationId: input.workItemGenerationId,
+      isPartial: false,
+    };
+    const velocityCfg = {
+      foundry: {
+        productionVelocity: {
+          enabled: true,
+          profile: 'resource-control',
+          stalePendingTtlHours: 24,
+        },
+      },
+    } as AshlrConfig;
+
+    expect(isAuthoritativeDurablePendingProposal(proposal, expected, velocityCfg)).toBe(true);
+    expect(isAuthoritativeDurablePendingProposal({
+      ...proposal,
+      diff: `${proposal.diff}\n# replaced bytes`,
+    }, expected, velocityCfg)).toBe(false);
+    expect(isAuthoritativeDurablePendingProposal({
+      ...proposal,
+      provenanceSig: '0'.repeat(64),
+    }, expected, velocityCfg)).toBe(false);
+    expect(isAuthoritativeDurablePendingProposal({
+      ...proposal,
+      runEventSummary: { ...proposal.runEventSummary, proposalId: 'replaced-row' },
+    }, expected, velocityCfg)).toBe(false);
+    expect(isAuthoritativeDurablePendingProposal({
+      ...proposal,
+      createdAt: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
+    }, expected, velocityCfg)).toBe(false);
+  });
+
   it('files identical canonical diffs independently across repositories', () => {
     const first = createProposal(proposalInput(repoA));
     const second = createProposal(proposalInput(repoB));
