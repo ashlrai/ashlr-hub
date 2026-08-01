@@ -370,6 +370,26 @@ describe('daemon valid flags remain supported', () => {
     expect(result.stderr).not.toContain('activation trust roots unavailable');
   });
 
+  it('reports retryable startup persistence refusal truthfully to a supervisor', async () => {
+    effects.runDaemon.mockResolvedValue({
+      ...daemonState,
+      startRefusal: 'daemon-running-state-persistence-failed',
+      termination: {
+        reason: 'persistence-failure',
+        retryable: true,
+        exitCode: 1,
+        diagnosticCode: 'state-io-transient',
+      },
+    });
+
+    const result = await capture(['start', '--supervised']);
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('daemon start refused [state-io-transient]');
+    expect(result.stderr).toContain('supervisor restart is permitted');
+    expect(result.stderr).not.toContain('daemon-running-state-persistence-failed');
+  });
+
   it.each([
     ['persistence-failure', 'state-io-transient'],
     ['runtime-failure', 'runtime-transient'],

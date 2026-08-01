@@ -376,7 +376,8 @@ async function cmdDaemonStart(flags: StartFlags): Promise<number> {
     console.error(
       col.red('error: ') +
         `daemon start refused [${finalState.termination.diagnosticCode ?? 'start-refused'}]; ` +
-        'supervisor restart is not permitted.',
+        'supervisor restart is ' +
+        `${finalState.termination.retryable ? 'permitted' : 'not permitted'}.`,
     );
     return flags.supervised ? finalState.termination.exitCode : 1;
   }
