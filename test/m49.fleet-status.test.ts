@@ -64,6 +64,7 @@ import {
   recordGeneratedRepairLifecycle,
 } from '../src/core/fleet/generated-repair-lifecycle.js';
 import * as fleetRouter from '../src/core/fleet/router.js';
+import { recommendRoute } from '../src/core/run/learned-router.js';
 import {
   readRepairHandoffs,
   recordRepairHandoffs,
@@ -197,6 +198,28 @@ function actionAuthorityProjection(status: FleetStatus): unknown {
     persistentPlaybookCommands: (status.nextActions ?? [])
       .flatMap((action) => action.commands ?? [])
       .filter((command) => command.argv.includes('--persist')),
+  };
+}
+
+async function operationalAuthorityProjection(
+  status: FleetStatus,
+  cfg: AshlrConfig,
+  item: WorkItem,
+): Promise<unknown> {
+  return {
+    nextActions: status.nextActions,
+    primaryAction: status.autonomousShipReadiness?.primaryAction,
+    missionDirective: status.missionBrief?.directive,
+    persistentCommands: (status.nextActions ?? [])
+      .flatMap((action) => action.commands ?? [])
+      .filter((command) => command.argv.includes('--persist')),
+    cooldowns: {
+      cooldownItems: status.queue.cooldownItems,
+      pendingItems: status.queue.pendingItems,
+      nextEligibleAt: status.queue.nextEligibleAt,
+    },
+    router: fleetRouter.routeBackend(item, cfg),
+    learnedRouter: await recommendRoute(item, cfg),
   };
 }
 
@@ -3814,7 +3837,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     )).toMatchObject({ eligibility: 'not-applicable', evidenceRole: 'forensics' });
   });
 
-  it('marks complete Best-of-N evidence eligible only when candidate racing is enabled', async () => {
+  it('keeps complete Best-of-N evidence observational when candidate racing is enabled', async () => {
     const now = new Date().toISOString();
     recordBestOfN({
       ts: now,
@@ -3841,7 +3864,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(status.autonomousShipReadiness?.evidenceMatrix?.sources.find(
       (source) => source.id === 'best-of-n',
     )).toMatchObject({
-      category: 'evidence', evidenceRole: 'learning', eligibility: 'eligible', applicability: 'optional',
+      category: 'evidence', evidenceRole: 'learning', eligibility: 'observational', applicability: 'optional',
       status: 'healthy', evidenceQuality: { complete: true, rowsScanned: 1, invalidRows: 0 },
     });
   });
@@ -4726,6 +4749,81 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       sourceQuality: { badge: 'degraded-source' },
     });
     expect(actionAuthorityProjection(malformed)).toEqual(actionAuthorityProjection(baseline));
+  });
+
+  it('keeps malformed owner-writable judge traces observational across operational authority', async () => {
+    const now = new Date().toISOString();
+    const repo = join(tmpHome, 'repo-judge-observation');
+    const item = makeBacklogItem(repo, 'repo:goal:judge-observation', 'Judge observation', 8);
+    const cfg = withFoundry({
+      allowedBackends: ['builtin'],
+      intelligence: { anomalyK: 4, minFrontierSuccessRate: 0.5 },
+    });
+    writeRunningDaemon(tmpHome, [], now);
+    writeBacklogSnapshot(tmpHome, repo, [item], now);
+    recordOutcome(item.id, 'empty', now);
+
+    const baseline = await buildFleetStatus(cfg);
+    const baselineAuthority = await operationalAuthorityProjection(baseline, cfg, item);
+
+    const dir = join(process.env.ASHLR_HOME!, 'judge-traces');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(dir, `${now.slice(0, 10)}.jsonl`), 'not-json\n', { mode: 0o600 });
+
+    const malformed = await buildFleetStatus(cfg);
+    const source = malformed.autonomousShipReadiness?.evidenceMatrix?.sources
+      .find((candidate) => candidate.id === 'judge-traces');
+
+    expect(malformed.judgeTraceSource).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
+    });
+    expect(source).toMatchObject({
+      evidenceRole: 'learning',
+      eligibility: 'observational',
+      status: 'degraded',
+      sourceQuality: { badge: 'degraded-source' },
+    });
+    expect(await operationalAuthorityProjection(malformed, cfg, item)).toEqual(baselineAuthority);
+  });
+
+  it('keeps malformed enabled Best-of-N telemetry observational across operational authority', async () => {
+    const now = new Date().toISOString();
+    const repo = join(tmpHome, 'repo-best-of-n-observation');
+    const item = makeBacklogItem(repo, 'repo:goal:best-of-n-observation', 'Best-of-N observation', 8);
+    const cfg = withFoundry({
+      allowedBackends: ['builtin'],
+      bestOfN: 2,
+      intelligence: { anomalyK: 4, minFrontierSuccessRate: 0.5 },
+    });
+    writeRunningDaemon(tmpHome, [], now);
+    writeBacklogSnapshot(tmpHome, repo, [item], now);
+    recordOutcome(item.id, 'empty', now);
+
+    const baseline = await buildFleetStatus(cfg);
+    const baselineAuthority = await operationalAuthorityProjection(baseline, cfg, item);
+
+    const dir = join(process.env.ASHLR_HOME!, 'best-of-n');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(dir, `${now.slice(0, 10)}.jsonl`), 'not-json\n', { mode: 0o600 });
+
+    const malformed = await buildFleetStatus(cfg);
+    const source = malformed.autonomousShipReadiness?.evidenceMatrix?.sources
+      .find((candidate) => candidate.id === 'best-of-n');
+
+    expect(malformed.bestOfNSource).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
+    });
+    expect(source).toMatchObject({
+      evidenceRole: 'learning',
+      eligibility: 'observational',
+      status: 'degraded',
+      sourceQuality: { badge: 'degraded-source' },
+    });
+    expect(await operationalAuthorityProjection(malformed, cfg, item)).toEqual(baselineAuthority);
   });
 
   it('promotes poor durable dispatch yield into next actions', async () => {
@@ -6800,9 +6898,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       state: 'cold-start',
       summary: {
         eligible: 1,
-        'cold-start': 2,
+        'cold-start': 1,
         withheld: 0,
-        observational: 3,
+        observational: 4,
         'not-applicable': 2,
       },
     });

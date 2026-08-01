@@ -5800,7 +5800,7 @@ function learningEvidenceReadinessSources(
     }),
     evidenceReadinessSource({
       id: 'judge-traces', label: 'Judge Outcomes', role: 'learning',
-      quality: status.judgeTraceSource, generatedAt,
+      quality: status.judgeTraceSource, generatedAt, actionSynthesis: 'observational-only',
     }),
     evidenceReadinessSource({
       id: 'agent-actions', label: 'Agent Actions', role: 'learning',
@@ -5817,7 +5817,7 @@ function learningEvidenceReadinessSources(
     }),
     evidenceReadinessSource({
       id: 'best-of-n', label: 'Candidate Races', role: 'learning',
-      quality: status.bestOfNSource, generatedAt,
+      quality: status.bestOfNSource, generatedAt, actionSynthesis: 'observational-only',
       applicable: status.evidencePolicy?.bestOfNEnabled !== false,
     }),
     evidenceReadinessSource({
