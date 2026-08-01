@@ -78,21 +78,95 @@ function tick(overrides: Partial<DaemonTick> = {}): DaemonTick {
   };
 }
 
+const RETRYABLE_WINDOWS_FENCE_REASON = 'outward mutation fence unavailable; kill remains active';
+
+type FixtureKillSetter = () => ReturnType<typeof setKill>;
+
+function resetFixtureKillSwitch(
+  platform: NodeJS.Platform = process.platform,
+  clearKill: FixtureKillSetter = () => setKill(false, { waitMs: 500 }),
+): ReturnType<typeof setKill> {
+  const attempts = platform === 'win32' ? 3 : 1;
+  let result = clearKill();
+  for (let attempt = 1; attempt < attempts && !result.ok; attempt += 1) {
+    if (result.changed || result.reason !== RETRYABLE_WINDOWS_FENCE_REASON) break;
+    // Each retry re-runs the complete fail-closed Windows authority proof.
+    result = clearKill();
+  }
+  return result;
+}
+
 beforeEach(() => {
   oldHome = process.env['HOME'];
   oldAshlrHome = process.env['ASHLR_HOME'];
   home = resolve(mkdtempSync(join(tmpdir(), 'ashlr-m385-')));
   process.env['HOME'] = home;
   process.env['ASHLR_HOME'] = join(home, '.ashlr');
-  expect(setKill(false, { waitMs: 500 }).ok).toBe(true);
+  expect(resetFixtureKillSwitch().ok).toBe(true);
 });
 
 afterEach(() => {
-  try { setKill(false, { waitMs: 500 }); } catch { /* best effort */ }
+  try { resetFixtureKillSwitch(); } catch { /* best effort */ }
   if (oldHome === undefined) delete process.env['HOME']; else process.env['HOME'] = oldHome;
   if (oldAshlrHome === undefined) delete process.env['ASHLR_HOME']; else process.env['ASHLR_HOME'] = oldAshlrHome;
   try { chmodSync(join(home, '.ashlr', 'fleet'), 0o700); } catch { /* absent */ }
   rmSync(home, { recursive: true, force: true });
+});
+
+describe('M385 fixture kill-switch retry classification', () => {
+  it('bounds an unchanged Windows fence-unavailable result to three complete attempts', () => {
+    const retryable = {
+      ok: false,
+      changed: false,
+      quiesced: false,
+      reason: RETRYABLE_WINDOWS_FENCE_REASON,
+    };
+    const clearKill = vi.fn<FixtureKillSetter>(() => retryable);
+
+    expect(resetFixtureKillSwitch('win32', clearKill)).toEqual(retryable);
+    expect(clearKill).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not retry changed, terminal, or non-Windows failures', () => {
+    const cases: Array<{
+      platform: NodeJS.Platform;
+      result: ReturnType<typeof setKill>;
+    }> = [
+      {
+        platform: 'win32',
+        result: {
+          ok: false,
+          changed: true,
+          quiesced: false,
+          reason: RETRYABLE_WINDOWS_FENCE_REASON,
+        },
+      },
+      {
+        platform: 'win32',
+        result: {
+          ok: false,
+          changed: false,
+          quiesced: false,
+          reason: 'kill-clear-readback-failed',
+        },
+      },
+      {
+        platform: 'linux',
+        result: {
+          ok: false,
+          changed: false,
+          quiesced: false,
+          reason: RETRYABLE_WINDOWS_FENCE_REASON,
+        },
+      },
+    ];
+
+    for (const testCase of cases) {
+      const clearKill = vi.fn<FixtureKillSetter>(() => testCase.result);
+      expect(resetFixtureKillSwitch(testCase.platform, clearKill)).toEqual(testCase.result);
+      expect(clearKill).toHaveBeenCalledOnce();
+    }
+  });
 });
 
 describe('M385 cutoff checkpoint cadence state', () => {
