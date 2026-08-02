@@ -349,7 +349,7 @@ describe('M468 detached post-merge runner', () => {
     expect(readDetachedPostMergeVerificationCohorts({ requireComplete: true }).summary.cohorts).toBe(0);
   });
 
-  it('persists pseudonymous metadata only and exposes read-only Fleet Status quality', async () => {
+  it('persists pseudonymous metadata without treating a singleton as fleet completeness', async () => {
     const sensitive = 'customer-acme-incident-42';
     const fixture = createRepo('process.exit(0)');
     fixture.input.cohortId = `cohort-${sensitive}`;
@@ -377,19 +377,31 @@ describe('M468 detached post-merge runner', () => {
       mergePermitted: false,
       rollbackPermitted: false,
       deployPermitted: false,
-      state: 'conclusive',
-      passRate: 1,
+      state: 'missing',
+      passRate: null,
+      denominator: {
+        candidateSetDigest: null,
+        eligibleCandidates: 0,
+        observedCandidates: 0,
+        conclusiveCandidates: 0,
+        unobservedCandidates: 0,
+      },
       summary: { cohorts: 1, pass: 1, fail: 0, unknown: 0 },
+    });
+    expect(status.detachedPostMergeDenominatorSource).toMatchObject({
+      sourceState: 'missing',
+      sourcePresent: false,
+      complete: true,
     });
     expect(status.autoMergeCanaryPromotionReadiness).toMatchObject({
       authority: 'observation-only',
       verdict: 'blocked',
       activationPermitted: false,
     });
-    expect(status.autoMergeCanaryPromotionReadiness?.blockers.map((entry) => entry.code)).not.toContain(
+    expect(status.autoMergeCanaryPromotionReadiness?.blockers.map((entry) => entry.code)).toContain(
       'post-merge-source-unhealthy',
     );
-    expect(status.autoMergeCanaryPromotionReadiness?.blockers.map((entry) => entry.code)).not.toContain(
+    expect(status.autoMergeCanaryPromotionReadiness?.blockers.map((entry) => entry.code)).toContain(
       'post-merge-cohort-insufficient',
     );
     expect(formatted).toContain('Detached post-merge verification (observation only):');

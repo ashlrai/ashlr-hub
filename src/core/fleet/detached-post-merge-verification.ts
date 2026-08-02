@@ -128,6 +128,23 @@ export interface DetachedPostMergeVerificationMemberInput {
   workItemId?: string;
 }
 
+export interface DetachedPostMergeCandidateIdentityInput {
+  repo: string;
+  proposalId: string;
+  baseBranch: string;
+  candidateHead: string;
+  mergeCommit: string;
+}
+
+export interface DetachedPostMergeCandidateIdentity {
+  candidateId: string;
+  repoDigest: string;
+  proposalDigest: string;
+  baseBranchDigest: string;
+  candidateHead: string;
+  mergeCommit: string;
+}
+
 export interface DetachedPostMergeVerificationCohortInput {
   cohortId: string;
   observedAt: string;
@@ -240,6 +257,72 @@ function memberIdentity(
   ];
 }
 
+function candidateIdFromPseudonyms(input: {
+  repoDigest: string;
+  proposalDigest: string;
+  baseBranchDigest: string;
+  candidateHead: string;
+  mergeCommit: string;
+}): string {
+  return sha('ashlr:detached-post-merge-verification:candidate-id:v1', [
+    input.repoDigest,
+    input.proposalDigest,
+    input.baseBranchDigest,
+    input.candidateHead,
+    input.mergeCommit,
+  ]);
+}
+
+/** Project the privacy-bounded identity shared by denominator and observation records. */
+export function buildDetachedPostMergeCandidateIdentity(
+  input: DetachedPostMergeCandidateIdentityInput,
+  key: Buffer,
+): DetachedPostMergeCandidateIdentity | null {
+  const repo = canonicalRepo(input.repo);
+  const proposalId = canonicalCausalId(input.proposalId);
+  const baseBranch = canonicalBranch(input.baseBranch);
+  if (!repo || !proposalId || !baseBranch || key.length !== 32 ||
+    !GIT_SHA_RE.test(input.candidateHead) || !GIT_SHA_RE.test(input.mergeCommit)) return null;
+  const repoDigest = hmac(key, 'ashlr:detached-post-merge-verification:repo:v1', repo);
+  const proposalDigest = hmac(
+    key,
+    'ashlr:detached-post-merge-verification:proposal:v1',
+    proposalId,
+  );
+  const baseBranchDigest = hmac(
+    key,
+    'ashlr:detached-post-merge-verification:base-branch:v1',
+    baseBranch,
+  );
+  return {
+    candidateId: candidateIdFromPseudonyms({
+      repoDigest,
+      proposalDigest,
+      baseBranchDigest,
+      candidateHead: input.candidateHead,
+      mergeCommit: input.mergeCommit,
+    }),
+    repoDigest,
+    proposalDigest,
+    baseBranchDigest,
+    candidateHead: input.candidateHead,
+    mergeCommit: input.mergeCommit,
+  };
+}
+
+export function detachedPostMergeCandidateIdForMember(
+  member: Pick<DetachedPostMergeVerificationMember,
+    'repoDigest' | 'proposalId' | 'baseBranch' | 'candidateHead' | 'mergeCommit'>,
+): string {
+  return candidateIdFromPseudonyms({
+    repoDigest: member.repoDigest,
+    proposalDigest: member.proposalId,
+    baseBranchDigest: member.baseBranch,
+    candidateHead: member.candidateHead,
+    mergeCommit: member.mergeCommit,
+  });
+}
+
 function evidenceFresh(verifiedAt: string, observedAt: string): boolean {
   const verifiedMs = Date.parse(verifiedAt);
   const observedMs = Date.parse(observedAt);
@@ -324,19 +407,18 @@ function buildMember(
     failureCategory = input.failureCategory ?? null;
   }
 
-  const repoDigest = hmac(key, 'ashlr:detached-post-merge-verification:repo:v1', repo);
+  const candidateIdentity = buildDetachedPostMergeCandidateIdentity({
+    repo,
+    proposalId,
+    baseBranch,
+    candidateHead: input.candidateHead,
+    mergeCommit: input.mergeCommit,
+  }, key);
+  if (!candidateIdentity) return null;
   const identity = {
-    repoDigest,
-    proposalId: hmac(
-      key,
-      'ashlr:detached-post-merge-verification:proposal:v1',
-      proposalId,
-    ),
-    baseBranch: hmac(
-      key,
-      'ashlr:detached-post-merge-verification:base-branch:v1',
-      baseBranch,
-    ),
+    repoDigest: candidateIdentity.repoDigest,
+    proposalId: candidateIdentity.proposalDigest,
+    baseBranch: candidateIdentity.baseBranchDigest,
     baseHead: input.baseHead,
     candidateHead: input.candidateHead,
     mergeCommit: input.mergeCommit,
