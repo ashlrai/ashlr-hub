@@ -3778,6 +3778,16 @@ export interface ProposalVerifyResult {
   browser?: ProposalBrowserVerifyEvidence;
   baseBranch?: string;
   baseHead?: string;
+  /** Versioned repository-verifier authority snapshot bound to this result. */
+  verifierAuthoritySnapshotVersion?: 1;
+  /** Git object format used by the bound verifier authority tree identities. */
+  verifierAuthorityObjectFormat?: 'sha1' | 'sha256';
+  /** Base Git tree whose verifier authority inputs were measured. */
+  baseTreeOid?: string;
+  /** Candidate Git tree that was exercised by verification. */
+  candidateTreeOid?: string;
+  /** SHA-256 digest of the canonical verifier authority snapshot. */
+  authoritySnapshotDigest?: string;
   /** Hash of the proposal diff that was verified. Required for judge-free evidence reuse. */
   diffHash?: string;
   verifiedAt?: string;

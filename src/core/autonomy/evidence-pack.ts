@@ -99,6 +99,11 @@ export interface AutonomyVerificationEvidence {
   commandKinds: string[];
   baseBranch?: string;
   baseHead?: string;
+  verifierAuthoritySnapshotVersion?: 1;
+  verifierAuthorityObjectFormat?: 'sha1' | 'sha256';
+  baseTreeOid?: string;
+  candidateTreeOid?: string;
+  authoritySnapshotDigest?: string;
   diffHash?: string;
   verifiedAt?: string;
   source?: ProposalVerifyResult['source'];
@@ -395,6 +400,15 @@ function copyVerificationEvidence(input: AutonomyVerificationEvidence): Autonomy
     commandKinds: [...input.commandKinds],
     ...(input.baseBranch ? { baseBranch: input.baseBranch } : {}),
     ...(input.baseHead ? { baseHead: input.baseHead } : {}),
+    ...(input.verifierAuthoritySnapshotVersion !== undefined
+      ? { verifierAuthoritySnapshotVersion: input.verifierAuthoritySnapshotVersion }
+      : {}),
+    ...(input.verifierAuthorityObjectFormat
+      ? { verifierAuthorityObjectFormat: input.verifierAuthorityObjectFormat }
+      : {}),
+    ...(input.baseTreeOid ? { baseTreeOid: input.baseTreeOid } : {}),
+    ...(input.candidateTreeOid ? { candidateTreeOid: input.candidateTreeOid } : {}),
+    ...(input.authoritySnapshotDigest ? { authoritySnapshotDigest: input.authoritySnapshotDigest } : {}),
     ...(input.diffHash ? { diffHash: input.diffHash } : {}),
     ...(input.verifiedAt ? { verifiedAt: input.verifiedAt } : {}),
     ...(input.source ? { source: input.source } : {}),
@@ -450,7 +464,58 @@ const POLICY_ACTIONS = new Set([
   'merge-main', 'deploy-preview', 'deploy-prod',
 ]);
 const SHA256_RE = /^[0-9a-f]{64}$/;
-const GIT_OID_RE = /^[0-9a-f]{40}$/;
+const GIT_OID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+const SHA1_OID_RE = /^[0-9a-f]{40}$/;
+const SHA256_OID_RE = /^[0-9a-f]{64}$/;
+
+const VERIFIER_AUTHORITY_FIELDS = [
+  'verifierAuthoritySnapshotVersion',
+  'verifierAuthorityObjectFormat',
+  'baseTreeOid',
+  'candidateTreeOid',
+  'authoritySnapshotDigest',
+] as const;
+
+type VerifierAuthorityTupleState = 'absent' | 'complete' | 'invalid';
+type VerifierAuthorityMetadata = Pick<ProposalVerifyResult,
+  | 'verifierAuthoritySnapshotVersion'
+  | 'verifierAuthorityObjectFormat'
+  | 'baseTreeOid'
+  | 'candidateTreeOid'
+  | 'authoritySnapshotDigest'>;
+
+function verifierAuthorityTupleState(record: JsonRecord): VerifierAuthorityTupleState {
+  const present = VERIFIER_AUTHORITY_FIELDS.filter((field) => record[field] !== undefined).length;
+  if (present === 0) return 'absent';
+  if (present !== VERIFIER_AUTHORITY_FIELDS.length ||
+    record['verifierAuthoritySnapshotVersion'] !== 1) return 'invalid';
+  const objectFormat = record['verifierAuthorityObjectFormat'];
+  const oidPattern = objectFormat === 'sha1'
+    ? SHA1_OID_RE
+    : objectFormat === 'sha256'
+      ? SHA256_OID_RE
+      : null;
+  return oidPattern &&
+    typeof record['baseTreeOid'] === 'string' && oidPattern.test(record['baseTreeOid']) &&
+    typeof record['candidateTreeOid'] === 'string' && oidPattern.test(record['candidateTreeOid']) &&
+    typeof record['authoritySnapshotDigest'] === 'string' &&
+    SHA256_RE.test(record['authoritySnapshotDigest'])
+    ? 'complete'
+    : 'invalid';
+}
+
+/** Exact, fail-closed authority binding used by evidence authorization paths. */
+export function verifierAuthorityBindingsMatch(
+  left: VerifierAuthorityMetadata | undefined,
+  right: VerifierAuthorityMetadata | undefined,
+): boolean {
+  if (!left || !right) return false;
+  const leftRecord = left as unknown as JsonRecord;
+  const rightRecord = right as unknown as JsonRecord;
+  return verifierAuthorityTupleState(leftRecord) === 'complete' &&
+    verifierAuthorityTupleState(rightRecord) === 'complete' &&
+    VERIFIER_AUTHORITY_FIELDS.every((field) => leftRecord[field] === rightRecord[field]);
+}
 const PROPOSAL_ID_RE = /^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,199}$/;
 
 function enumString(value: unknown, allowed: ReadonlySet<string>): value is string {
@@ -708,7 +773,7 @@ function strictEvidencePackV3Payload(value: unknown): value is AutonomyEvidenceP
   const verification = jsonRecord(record['verification']);
   if (!verification || !hasOnlyKeys(verification, [
     'passed', 'detail', 'commandKinds', 'baseBranch', 'baseHead', 'diffHash',
-    'verifiedAt', 'source', 'browser',
+    'verifiedAt', 'source', 'browser', ...VERIFIER_AUTHORITY_FIELDS,
   ]) || typeof verification['passed'] !== 'boolean' ||
     !boundedNonEmptyString(verification['detail'], 16 * 1024) ||
     !Array.isArray(verification['commandKinds']) || verification['commandKinds'].length > 100 ||
@@ -722,6 +787,8 @@ function strictEvidencePackV3Payload(value: unknown): value is AutonomyEvidenceP
     (verification['verifiedAt'] !== undefined && !canonicalTimestamp(verification['verifiedAt'])) ||
     (verification['source'] !== undefined && !enumString(verification['source'], VERIFY_SOURCES)) ||
     (verification['browser'] !== undefined && !strictBrowserEvidence(verification['browser']))) return false;
+  const verifierAuthorityState = verifierAuthorityTupleState(verification);
+  if (verifierAuthorityState === 'invalid') return false;
   if (diff['hash'] !== undefined && verification['diffHash'] !== undefined &&
     diff['hash'] !== verification['diffHash']) return false;
   if (verification['verifiedAt'] !== undefined &&
@@ -1491,6 +1558,7 @@ export function evidencePackMatchesLiveProposal(
     typeof verify.baseHead === 'string' &&
     verify.baseHead.length > 0 &&
     pack.verification.baseHead === verify.baseHead &&
+    verifierAuthorityBindingsMatch(pack.verification, verify) &&
     typeof verify.source === 'string' &&
     verify.source.length > 0 &&
     pack.verification.source === verify.source &&

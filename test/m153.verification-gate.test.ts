@@ -114,6 +114,7 @@ import {
 import { createProposal, setStatus, loadProposal } from '../src/core/inbox/store.js';
 import { enroll, setKill } from '../src/core/sandbox/policy.js';
 import { hashDiff, signProvenance, signJudgeAttestation } from '../src/core/foundry/provenance.js';
+import { captureVerifierAuthoritySnapshot } from '../src/core/run/verifier-authority.js';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
 import type { DecisionEntry } from '../src/core/types.js';
 
@@ -138,6 +139,86 @@ function initRepo(dir: string, branch = 'main'): void {
   fs.writeFileSync(path.join(dir, 'README.md'), '# m153 fixture\n', 'utf8');
   git(dir, ['add', 'README.md']);
   git(dir, ['commit', '-m', 'init']);
+}
+
+const MERGE_COMMAND = {
+  id: 'merge-test',
+  kind: 'test' as const,
+  cmd: ['node', '-e', 'process.exit(0)'],
+  required: true,
+  profiles: ['merge' as const],
+};
+
+function installVerifierAuthorityContract(repo: string): void {
+  if (fs.existsSync(path.join(repo, 'ashlr.verify.json'))) return;
+  if (!fs.existsSync(path.join(repo, 'package.json'))) {
+    fs.writeFileSync(path.join(repo, 'package.json'), '{"scripts":{}}\n', 'utf8');
+  }
+  fs.writeFileSync(path.join(repo, 'ashlr.verify.json'), `${JSON.stringify({
+    schemaVersion: 1,
+    mode: 'replace-detected',
+    authorityFiles: ['README.md'],
+    commands: [MERGE_COMMAND],
+  })}\n`, 'utf8');
+  git(repo, ['add', 'package.json', 'ashlr.verify.json']);
+  git(repo, ['commit', '-m', 'add verifier authority']);
+}
+
+function candidateTreeOidForDiff(repo: string, diff: string): string {
+  const candidateDir = fs.mkdtempSync(path.join(tmpHome, 'authority-candidate-'));
+  const indexPath = path.join(candidateDir, 'index');
+  const patchPath = path.join(candidateDir, 'candidate.patch');
+  const env = { ...process.env, GIT_INDEX_FILE: indexPath };
+  try {
+    fs.writeFileSync(patchPath, diff, 'utf8');
+    execFileSync('git', ['-C', repo, 'read-tree', 'HEAD'], { stdio: 'pipe', env });
+    try {
+      execFileSync('git', ['-C', repo, 'apply', '--cached', patchPath], { stdio: 'pipe', env });
+    } catch {
+      const blobOid = execFileSync('git', ['-C', repo, 'hash-object', '-w', '--stdin'], {
+        encoding: 'utf8',
+        input: `${hashDiff(diff)}\n`,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+      execFileSync('git', [
+        '-C', repo, 'update-index', '--add', '--cacheinfo', '100644', blobOid, '.ashlr-fixture-candidate',
+      ], { stdio: 'pipe', env });
+    }
+    return execFileSync('git', ['-C', repo, 'write-tree'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env,
+    }).trim();
+  } finally {
+    fs.rmSync(candidateDir, { recursive: true, force: true });
+  }
+}
+
+function verifierAuthorityForDiff(repo: string, diff: string): Pick<NonNullable<Proposal['verifyResult']>,
+  | 'ran'
+  | 'baseBranch'
+  | 'baseHead'
+  | 'verifierAuthoritySnapshotVersion'
+  | 'verifierAuthorityObjectFormat'
+  | 'baseTreeOid'
+  | 'candidateTreeOid'
+  | 'authoritySnapshotDigest'> {
+  const capture = captureVerifierAuthoritySnapshot({
+    repoRoot: repo,
+    baseRevision: 'HEAD',
+    mergeCommands: [MERGE_COMMAND],
+  });
+  if (!capture.ok) throw new Error(`failed to capture M153 authority: ${capture.reason}`);
+  return {
+    ran: [MERGE_COMMAND],
+    baseBranch: 'main',
+    baseHead: capture.snapshot.baseCommitOid,
+    verifierAuthoritySnapshotVersion: 1,
+    verifierAuthorityObjectFormat: capture.snapshot.objectFormat,
+    baseTreeOid: capture.snapshot.baseTreeOid,
+    candidateTreeOid: candidateTreeOidForDiff(repo, diff),
+    authoritySnapshotDigest: capture.snapshot.authoritySnapshotDigest,
+  };
 }
 
 function attachOrigin(repo: string, branch: string): void {
@@ -648,6 +729,8 @@ describe('M153 evaluateVerificationGate — pure, all 5 criteria', () => {
 
 describe('M342 evaluateEvidenceGate — pure, no judge evidence required', () => {
   function evidenceProposal(proposalId = 'e1', diff = docsDiff('docs/evidence.md')): Proposal {
+    if (!fs.existsSync(path.join(tmpRepo, '.git'))) initRepo(tmpRepo, 'main');
+    installVerifierAuthorityContract(tmpRepo);
     const diffHash = hashDiff(diff);
     const sig = signProvenance('local:qwen3-coder', 'local', diffHash);
     return {
@@ -665,9 +748,7 @@ describe('M342 evaluateEvidenceGate — pure, no judge evidence required', () =>
       verifyResult: {
         passed: true,
         detail: 'all checks passed',
-        ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
-        baseBranch: 'main',
-        baseHead: '0123456789abcdef0123456789abcdef01234567',
+        ...verifierAuthorityForDiff(tmpRepo, diff),
         diffHash,
       },
       status: 'pending' as const,
@@ -1051,16 +1132,17 @@ describe("M153 autoMergeProposal trustBasis='verification'", () => {
 
   it('[A4] local producer + suite NOT green → refused (criterion 2)', async () => {
     initRepo(tmpRepo, 'main');
+    installVerifierAuthorityContract(tmpRepo);
     enroll(tmpRepo);
 
     const a4diff = docsDiff('docs/a4.md');
+    const authority = verifierAuthorityForDiff(tmpRepo, a4diff);
     const p = makePatch(a4diff, {
       engineTier: 'local',
       verifyResult: {
         passed: false,
         failed: ['vitest'],
-        baseBranch: 'main',
-        baseHead: git(tmpRepo, ['rev-parse', 'main']),
+        ...authority,
         diffHash: hashDiff(a4diff),
       },
     });
@@ -1174,10 +1256,12 @@ describe("M153 autoMergeProposal trustBasis='verification'", () => {
     // This test confirms the EDV path by using a negative verifier entry
     // AND verifyResult.passed=false (making both signals negative).
     initRepo(tmpRepo, 'main');
+    installVerifierAuthorityContract(tmpRepo);
     enroll(tmpRepo);
 
     const diff = docsDiff('docs/a7.md');
     const diffHash = hashDiff(diff);
+    const authority = verifierAuthorityForDiff(tmpRepo, diff);
     const sig = signProvenance('local:qwen3-coder', 'local', diffHash);
     const p = createProposal({
       repo: tmpRepo, origin: 'agent', kind: 'patch',
@@ -1187,8 +1271,7 @@ describe("M153 autoMergeProposal trustBasis='verification'", () => {
       verifyResult: {
         passed: false,
         failed: ['vitest'],
-        baseBranch: 'main',
-        baseHead: git(tmpRepo, ['rev-parse', 'main']),
+        ...authority,
         diffHash,
       },
     });
@@ -1344,6 +1427,7 @@ describe("M342 autoMergeProposal trustBasis='evidence'", () => {
     fs.writeFileSync(path.join(tmpRepo, 'src/b.ts'), 'old\n', 'utf8');
     git(tmpRepo, ['add', 'src/a.ts', 'src/b.ts']);
     git(tmpRepo, ['commit', '-m', 'add source files']);
+    installVerifierAuthorityContract(tmpRepo);
     enroll(tmpRepo);
 
     const diff = [
@@ -1361,15 +1445,14 @@ describe("M342 autoMergeProposal trustBasis='evidence'", () => {
       '+new',
       '',
     ].join('\n');
+    const authority = verifierAuthorityForDiff(tmpRepo, diff);
     const p = makePatch(diff, {
       engineTier: 'local',
       engineModel: 'local:qwen3-coder',
       verifyResult: {
         passed: true,
         detail: 'preverified command-bound evidence',
-        ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
-        baseBranch: 'main',
-        baseHead: '0123456789abcdef0123456789abcdef01234567',
+        ...authority,
         diffHash: hashDiff(diff),
       },
     });

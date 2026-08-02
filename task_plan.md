@@ -4,7 +4,23 @@
 - [x] Confirm the full Ubuntu suite is active but can exceed the 15-minute hermetic runtime cap.
 - [x] Partition the complete suite through Vitest's deterministic three-way file sharding.
 - [x] Bind CI topology coverage to the three shard labels, arguments, and one-time pack smoke.
-- [ ] Verify a representative hermetic shard invocation and require the protected matrix.
+- [x] Verify all eight exact-head jobs and bind branch protection to the three Ubuntu authority shards.
+
+## Verifier Git-Authority Binding (2026-07-21)
+- [x] Capture a strict base Git-tree authority snapshot from the tracked root contract and declared regular blobs.
+- [x] Bind canonical merge commands, object format, base/candidate tree OIDs, and the authority digest through proposal and signed evidence records.
+- [x] Refuse candidate, index, and worktree authority drift before/between/after verifier execution.
+- [x] Require live snapshot recomputation for cached verification reuse and exact tested-tree equality before outward mutation.
+- [x] Keep snapshotless legacy evidence observational while refusing judge-free authority and positive skill distillation.
+- [x] Pass 260 focused assertions, typecheck, scoped lint, and diff integrity.
+- [ ] Bind immutable dependency/toolchain/runtime image identity before claiming full verifier immutability.
+
+## Protected Production Promotion (2026-07-21)
+- [x] Merge protected PR #94 after all six exact-head checks passed.
+- [x] Rebase and repush #110, #111, and #108 onto production `0a7f3d79`.
+- [x] Promote deterministic Ubuntu CI sharding as production commit `1239b022c36e0c30b22ae063dd269d6a71bab4d9`.
+- [x] Rebase verifier authority declarations onto sharded production and start a fresh protected matrix.
+- [ ] Merge verifier authority declarations, then rebase and retarget the Git-authority binding for its own exact-head matrix.
 
 ## Current Cycle - Verifier Contract Executable Portability
 - [x] Rehydrate a clean `origin/master` worktree and audit parser and runner executable handling.
@@ -2814,8 +2830,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Audit mutable verifier control inputs and distinguish Git-tree drift from runtime/toolchain trust.
 - [x] Add exact, validated contract authority-file declarations and declare Hub verifier inputs.
 - [x] Cover the Hub merge commands' ESLint and Vitest control inputs and reject malformed declaration fixtures.
-- [ ] Bind a base Git-tree authority snapshot through verification reuse and signed merge evidence.
-- [ ] Make authority/dependency inputs read-only for candidate execution before treating the snapshot as judge-free authority.
+- [x] Bind a base Git-tree authority snapshot through verification reuse, signed merge evidence, and remote handoff.
+- [x] Require direct tracked argv authority, canonical nested cwd, and symlink/junction-free authority ancestry.
+- [x] Fence index, tracked worktree, and non-ignored untracked mutation after every verifier command.
+- [x] Generalize evidence-mode test-integrity review beyond Ashlr's named test files.
+- [x] Repair synthetic merge fixtures and pass the consolidated 17-suite authority gate (449 passed, 1 skipped).
+- [ ] Require all eight protected exact-head checks on PR #112 before promotion.
+- [ ] Add a separately designed hermetic toolchain/dependency identity boundary; do not infer it from the Git-object snapshot.
 
 ## Windows Sandbox-Reservation Fixture Budget (2026-07-21)
 - [x] Isolate the hosted-Windows timeout to M426's real-worktree owner-publication case.

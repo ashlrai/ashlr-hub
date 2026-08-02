@@ -785,6 +785,33 @@ describe('repo execution profile', () => {
     }
   });
 
+  it('rejects verifier authority beneath an internal symlink or junction parent', () => {
+    const dir = makeFixture();
+    try {
+      const target = join(dir, 'real-scripts');
+      mkdirSync(target, { recursive: true });
+      writeFileSync(join(target, 'verify.mjs'), 'process.exit(0);\n', 'utf8');
+      try {
+        symlinkSync(target, join(dir, 'scripts'), process.platform === 'win32' ? 'junction' : 'dir');
+      } catch {
+        return;
+      }
+      writeVerifyContract(dir, {
+        schemaVersion: 1,
+        mode: 'replace-detected',
+        authorityFiles: ['scripts/verify.mjs'],
+        commands: [{ id: 'test', kind: 'test', cmd: ['node', '--version'], required: true, profiles: ['merge'] }],
+      });
+
+      const profile = detectRepoExecutionProfile(dir);
+
+      expect(profile.verifyContract).toMatchObject({ valid: false, authorityFileCount: 0 });
+      expect(profile.verifyContract?.errors.join('\n')).toContain('symlink or junction component');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it.each([null, {}, ['package.json', 42]])(
     'rejects malformed verifier authority declaration %j',
     (authorityFiles) => {

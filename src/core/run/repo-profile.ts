@@ -390,6 +390,45 @@ function summarizeVerifyContract(
   };
 }
 
+export type RepoAuthorityFilePathIssue =
+  | 'missing'
+  | 'symlink-component'
+  | 'non-directory-component'
+  | 'not-regular';
+
+export interface RepoAuthorityFilePathError {
+  issue: RepoAuthorityFilePathIssue;
+  path: string;
+}
+
+/** Reject authority paths whose topology can redirect reads outside the repository. */
+export function repoAuthorityFilePathError(
+  repoRoot: string,
+  repoRelativePath: string,
+): RepoAuthorityFilePathError | null {
+  const parts = repoRelativePath.split('/');
+  let current = resolve(repoRoot);
+  for (const [index, part] of parts.entries()) {
+    current = join(current, part);
+    let stat;
+    try {
+      stat = lstatSync(current);
+    } catch {
+      return { issue: 'missing', path: parts.slice(0, index + 1).join('/') };
+    }
+    if (stat.isSymbolicLink()) {
+      return { issue: 'symlink-component', path: parts.slice(0, index + 1).join('/') };
+    }
+    if (index < parts.length - 1 && !stat.isDirectory()) {
+      return { issue: 'non-directory-component', path: parts.slice(0, index + 1).join('/') };
+    }
+    if (index === parts.length - 1 && !stat.isFile()) {
+      return { issue: 'not-regular', path: repoRelativePath };
+    }
+  }
+  return null;
+}
+
 /** Validate one exact repo-relative control input for verifier authority. */
 function parseAuthorityFile(repoRoot: string, raw: unknown, errors: string[], label: string): string | null {
   if (typeof raw !== 'string' || raw.trim().length === 0) {
@@ -411,20 +450,20 @@ function parseAuthorityFile(repoRoot: string, raw: unknown, errors: string[], la
     errors.push(`${label} must stay inside the repo`);
     return null;
   }
-  try {
-    const stat = lstatSync(resolved);
-    if (stat.isSymbolicLink() || !stat.isFile()) {
-      errors.push(`${label} must name a regular non-symlink file`);
-      return null;
-    }
-    const physicalRoot = realpathSync(repoRoot);
-    const physicalFile = realpathSync(resolved);
-    const physicalRel = relative(physicalRoot, physicalFile);
-    if (physicalRel.startsWith('..') || isAbsolute(physicalRel)) {
-      errors.push(`${label} must resolve inside the repo without escaping through a symlink`);
-      return null;
-    }
-  } catch {
+  const topologyError = repoAuthorityFilePathError(repoRoot, normalized);
+  if (topologyError?.issue === 'symlink-component') {
+    errors.push(`${label} must not traverse symlink or junction component '${topologyError.path}'`);
+    return null;
+  }
+  if (topologyError?.issue === 'non-directory-component') {
+    errors.push(`${label} has non-directory parent component '${topologyError.path}'`);
+    return null;
+  }
+  if (topologyError?.issue === 'not-regular') {
+    errors.push(`${label} must name a regular non-symlink file`);
+    return null;
+  }
+  if (topologyError?.issue === 'missing') {
     errors.push(`${label} must name an existing regular file`);
     return null;
   }

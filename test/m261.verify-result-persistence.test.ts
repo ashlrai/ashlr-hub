@@ -65,6 +65,11 @@ const {
   mockExecFileSync,
   mockDetectVerifyCommands,
   mockRunVerifyCommand,
+  mockCaptureVerifierAuthoritySnapshot,
+  mockCaptureVerifierCandidateState,
+  mockCompareVerifierAuthorityCandidateTree,
+  mockCompareVerifierAuthorityWorktree,
+  mockCompareVerifierCandidateState,
   mockReadDecisions,
   mockRecordDecision,
 } = vi.hoisted(() => ({
@@ -78,6 +83,11 @@ const {
   mockExecFileSync: vi.fn(() => 'abc1234'),
   mockDetectVerifyCommands: vi.fn(),
   mockRunVerifyCommand: vi.fn(),
+  mockCaptureVerifierAuthoritySnapshot: vi.fn(),
+  mockCaptureVerifierCandidateState: vi.fn(),
+  mockCompareVerifierAuthorityCandidateTree: vi.fn(),
+  mockCompareVerifierAuthorityWorktree: vi.fn(),
+  mockCompareVerifierCandidateState: vi.fn(),
   mockReadDecisions: vi.fn(() => [] as unknown[]),
   mockRecordDecision: vi.fn(),
 }));
@@ -107,6 +117,14 @@ vi.mock('../src/core/run/verify-commands.js', () => ({
   detectVerifyCommands: (...a: unknown[]) => mockDetectVerifyCommands(...a),
   runVerifyCommand: (...a: unknown[]) => mockRunVerifyCommand(...a),
   runVerifyCommandAsync: async (...a: unknown[]) => mockRunVerifyCommand(...a),
+}));
+
+vi.mock('../src/core/run/verifier-authority.js', () => ({
+  captureVerifierAuthoritySnapshot: (...a: unknown[]) => mockCaptureVerifierAuthoritySnapshot(...a),
+  captureVerifierCandidateState: (...a: unknown[]) => mockCaptureVerifierCandidateState(...a),
+  compareVerifierAuthorityCandidateTree: (...a: unknown[]) => mockCompareVerifierAuthorityCandidateTree(...a),
+  compareVerifierAuthorityWorktree: (...a: unknown[]) => mockCompareVerifierAuthorityWorktree(...a),
+  compareVerifierCandidateState: (...a: unknown[]) => mockCompareVerifierCandidateState(...a),
 }));
 
 // diff-safety.js — never destructive.
@@ -197,6 +215,13 @@ const SMALL_DIFF = [
   ' ',
 ].join('\n');
 
+const BASE_COMMIT_OID = 'a'.repeat(40);
+const BASE_TREE_OID = 'b'.repeat(40);
+const CONTRACT_BLOB_OID = 'c'.repeat(40);
+const AUTHORITY_BLOB_OID = 'd'.repeat(40);
+const CANDIDATE_TREE_OID = 'f'.repeat(40);
+const AUTHORITY_SNAPSHOT_DIGEST = 'e'.repeat(64);
+
 function makeProposal(id: string, over: Partial<Proposal> = {}): Proposal {
   return {
     id,
@@ -272,9 +297,67 @@ beforeEach(async () => {
   mockDefaultBranch.mockReset();
   mockDefaultBranch.mockReturnValue('main');
   mockExecFileSync.mockReset();
-  mockExecFileSync.mockReturnValue('abc1234');
+  mockExecFileSync.mockImplementation((_file: unknown, args: unknown) => {
+    const argv = Array.isArray(args) ? args : [];
+    if (argv.includes('write-tree')) return CANDIDATE_TREE_OID;
+    if (argv.some((arg) => typeof arg === 'string' && arg.endsWith('^{tree}'))) return BASE_TREE_OID;
+    return BASE_COMMIT_OID;
+  });
   mockDetectVerifyCommands.mockReset();
   mockRunVerifyCommand.mockReset();
+  mockCaptureVerifierAuthoritySnapshot.mockReset();
+  mockCaptureVerifierAuthoritySnapshot.mockImplementation((options: {
+    mergeCommands: Array<{
+      id?: string;
+      kind: 'typecheck' | 'lint' | 'build' | 'test';
+      cmd: string[];
+      cwd?: string;
+      timeoutMs?: number;
+      required?: boolean;
+      profiles?: Array<'quick' | 'merge' | 'deep'>;
+    }>;
+  }) => ({
+    ok: true,
+    snapshot: {
+      schemaVersion: 1,
+      objectFormat: 'sha1',
+      baseCommitOid: BASE_COMMIT_OID,
+      baseTreeOid: BASE_TREE_OID,
+      contractBlobOid: CONTRACT_BLOB_OID,
+      authorityEntries: [
+        { path: 'ashlr.verify.json', mode: '100644', blobOid: CONTRACT_BLOB_OID },
+        { path: 'package.json', mode: '100644', blobOid: AUTHORITY_BLOB_OID },
+      ],
+      mergeCommands: options.mergeCommands.map((command) => ({
+        id: command.id ?? null,
+        kind: command.kind,
+        cmd: [...command.cmd],
+        cwd: command.cwd ?? '.',
+        timeoutMs: command.timeoutMs ?? null,
+        required: command.required !== false,
+        profiles: [...new Set(command.profiles ?? [])].sort(),
+      })),
+      authoritySnapshotDigest: AUTHORITY_SNAPSHOT_DIGEST,
+    },
+  }));
+  mockCaptureVerifierCandidateState.mockReset();
+  mockCaptureVerifierCandidateState.mockImplementation((options: { candidateTreeOid: string }) => ({
+    ok: true,
+    snapshot: {
+      candidateTreeOid: options.candidateTreeOid,
+      relevantUntrackedEntries: [],
+    },
+  }));
+  mockCompareVerifierAuthorityCandidateTree.mockReset();
+  mockCompareVerifierAuthorityCandidateTree.mockImplementation((options: { candidateRevision: string }) => ({
+    ok: true,
+    checkedEntryCount: 2,
+    candidateTreeOid: options.candidateRevision,
+  }));
+  mockCompareVerifierAuthorityWorktree.mockReset();
+  mockCompareVerifierAuthorityWorktree.mockReturnValue({ ok: true, checkedEntryCount: 2 });
+  mockCompareVerifierCandidateState.mockReset();
+  mockCompareVerifierCandidateState.mockReturnValue({ ok: true });
 
   const m = await import('../src/core/inbox/merge.js');
   autoMergeProposal = m.autoMergeProposal;
@@ -298,7 +381,7 @@ describe('M261 Contract 1 — legit-verified: verifyResult persisted, Criterion 
     mockReadDecisions.mockReturnValue([makeShipDecision(proposal.id)]);
 
     // Test runner: one typecheck command passes.
-    const cmd = { kind: 'typecheck' as const, command: 'tsc --noEmit' };
+    const cmd = { kind: 'typecheck' as const, cmd: ['tsc', '--noEmit'] };
     mockDetectVerifyCommands.mockReturnValue([cmd]);
     mockRunVerifyCommand.mockReturnValue({ ok: true, exitCode: 0 });
 
@@ -332,7 +415,7 @@ describe('M261 Contract 2 — failed-verify: verifyResult.passed=false persisted
     mockReadDecisions.mockReturnValue([makeShipDecision(proposal.id)]);
 
     // Test runner: typecheck fails.
-    const cmd = { kind: 'typecheck' as const, command: 'tsc --noEmit' };
+    const cmd = { kind: 'typecheck' as const, cmd: ['tsc', '--noEmit'] };
     mockDetectVerifyCommands.mockReturnValue([cmd]);
     mockRunVerifyCommand.mockReturnValue({ ok: false, exitCode: 1 });
 
@@ -380,7 +463,7 @@ describe('M261 Contract 3 — never-fabricated: verifyResult origin is the test 
     const proposal = makeProposal('prop-m261-race');
     mockLoadProposal.mockImplementation(() => proposal);
     mockReadDecisions.mockReturnValue([makeShipDecision(proposal.id)]);
-    mockDetectVerifyCommands.mockReturnValue([{ kind: 'test', command: 'vitest run' }]);
+    mockDetectVerifyCommands.mockReturnValue([{ kind: 'test', cmd: ['vitest', 'run'] }]);
     mockRunVerifyCommand.mockReturnValue({ ok: true, exitCode: 0 });
     mockUpdateProposalField.mockImplementation((_id, patch) => {
       proposal.verifyResult = (patch as { verifyResult: Proposal['verifyResult'] }).verifyResult;
@@ -398,7 +481,7 @@ describe('M261 Contract 3 — never-fabricated: verifyResult origin is the test 
     const initial = makeProposal('prop-m261-verify-race');
     let durable = structuredClone(initial);
     mockLoadProposal.mockImplementation(() => structuredClone(durable));
-    mockDetectVerifyCommands.mockReturnValue([{ kind: 'test', command: 'vitest run' }]);
+    mockDetectVerifyCommands.mockReturnValue([{ kind: 'test', cmd: ['vitest', 'run'] }]);
     mockRunVerifyCommand.mockReturnValue({ ok: true, exitCode: 0 });
     mockUpdateProposalField.mockImplementation((_id, patch) => {
       durable = { ...durable, ...structuredClone(patch as Partial<Proposal>) };
@@ -436,7 +519,7 @@ describe('M261 Contract 3 — never-fabricated: verifyResult origin is the test 
     mockLoadProposal.mockReturnValue(proposal);
     mockReadDecisions.mockReturnValue([makeShipDecision(proposal.id)]);
 
-    const cmd = { kind: 'test' as const, command: 'vitest run' };
+    const cmd = { kind: 'test' as const, cmd: ['vitest', 'run'] };
     mockDetectVerifyCommands.mockReturnValue([cmd]);
     mockRunVerifyCommand.mockReturnValue({ ok: true, exitCode: 0 });
 
@@ -454,7 +537,7 @@ describe('M261 Contract 3 — never-fabricated: verifyResult origin is the test 
     mockLoadProposal.mockReturnValue(proposal);
     mockReadDecisions.mockReturnValue([makeShipDecision(proposal.id)]);
 
-    const cmd = { kind: 'typecheck' as const, command: 'tsc --noEmit' };
+    const cmd = { kind: 'typecheck' as const, cmd: ['tsc', '--noEmit'] };
     mockDetectVerifyCommands.mockReturnValue([cmd]);
     mockRunVerifyCommand.mockReturnValue({ ok: false, exitCode: 1 });
 
@@ -471,7 +554,7 @@ describe('M261 Contract 3 — never-fabricated: verifyResult origin is the test 
     mockLoadProposal.mockReturnValue(proposal);
     mockReadDecisions.mockReturnValue([makeShipDecision(proposal.id)]);
 
-    const cmd = { kind: 'typecheck' as const, command: 'tsc --noEmit' };
+    const cmd = { kind: 'typecheck' as const, cmd: ['tsc', '--noEmit'] };
     mockDetectVerifyCommands.mockReturnValue([cmd]);
     mockRunVerifyCommand.mockReturnValue({ ok: true, exitCode: 0 });
 
