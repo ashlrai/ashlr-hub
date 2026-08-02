@@ -33,7 +33,11 @@ import * as path from 'node:path';
 import type { AshlrConfig, WorkItem } from '../src/core/types.js';
 import type { RouteDecision } from '../src/core/fleet/router.js';
 
-const privateStorageMocks = vi.hoisted(() => ({ useRealAssurance: false }));
+const privateStorageMocks = vi.hoisted(() => ({
+  calls: [] as Array<Parameters<
+    typeof import('../src/core/util/private-storage.js').assurePrivateStoragePath
+  >>,
+}));
 
 vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
@@ -41,9 +45,10 @@ vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
     ...actual,
     assurePrivateStoragePath: (
       ...args: Parameters<typeof actual.assurePrivateStoragePath>
-    ) => privateStorageMocks.useRealAssurance
-      ? actual.assurePrivateStoragePath(...args)
-      : { ok: true, reason: 'exact-private-dacl' },
+    ) => {
+      privateStorageMocks.calls.push(args);
+      return { ok: true, reason: 'exact-private-dacl' };
+    },
   };
 });
 
@@ -59,7 +64,6 @@ const origInSwarm = process.env.ASHLR_IN_SWARM;
 
 let tmpHome: string;
 let tmpRepo: string;
-let realWindowsAuthorityProven = process.platform !== 'win32';
 
 // ---------------------------------------------------------------------------
 // Mocks — declared before lazy imports (same pattern as m85 / m106)
@@ -203,27 +207,21 @@ beforeEach(() => {
   process.env.USERPROFILE = tmpHome;
   process.env.ASHLR_HOME = path.join(tmpHome, '.ashlr');
 
-  privateStorageMocks.useRealAssurance = !realWindowsAuthorityProven;
+  privateStorageMocks.calls.length = 0;
+  const fence = acquireOutwardMutationFence();
   try {
-    let authorityReady = false;
-    // Exercise the real Windows adapter once per test file. The remaining
-    // coordinator cases still acquire and verify a fresh fence, but use the
-    // semantic adapter already covered by the native ACL suites.
-    const attempts = realWindowsAuthorityProven ? 1 : 3;
-    for (let attempt = 0; attempt < attempts && !authorityReady; attempt += 1) {
-      const fence = acquireOutwardMutationFence();
-      try {
-        authorityReady = ownsOutwardMutationFence(fence);
-      } finally {
-        releaseOutwardMutationFence(fence);
-      }
-    }
-    if (!authorityReady) {
+    if (!ownsOutwardMutationFence(fence)) {
       throw new Error('M113 fixture failed to establish private authority roots');
     }
-    realWindowsAuthorityProven = true;
   } finally {
-    privateStorageMocks.useRealAssurance = false;
+    releaseOutwardMutationFence(fence);
+  }
+  if (process.platform === 'win32') {
+    const root = path.join(tmpHome, '.ashlr');
+    expect(privateStorageMocks.calls).toEqual([
+      [root, 'directory', 'secure-created', { anchorPath: tmpHome }],
+      [path.join(root, 'authority'), 'directory', 'secure-created', { anchorPath: root }],
+    ]);
   }
 
   initBareGitDir(tmpRepo);
