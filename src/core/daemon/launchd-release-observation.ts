@@ -12,6 +12,7 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { parseBuildIdentity } from '../build-identity.js';
 
@@ -78,7 +79,9 @@ function stableFileIdentity(requestedPath: string, requireCanonicalRequest: bool
   }
 }
 
-function observationDigest(value: Omit<LaunchdReleaseObservation, 'observationDigest'>): string {
+export function launchdReleaseObservationDigest(
+  value: Omit<LaunchdReleaseObservation, 'observationDigest'>,
+): string {
   return createHash('sha256')
     .update('ashlr:launchd-release-observation:v1\0', 'utf8')
     .update(JSON.stringify([
@@ -115,20 +118,29 @@ export function isLaunchdReleaseObservation(value: unknown): value is LaunchdRel
     return false;
   }
   const { observationDigest: digest, ...unsigned } = value as LaunchdReleaseObservation;
-  return observationDigest(unsigned) === digest;
+  return launchdReleaseObservationDigest(unsigned) === digest;
 }
 
-/** Observe only the executable release that is actually running this process. */
-export function observeLaunchdRelease(role: 'supervisor' | 'child'): LaunchdReleaseObservation {
-  const invoked = process.argv[1];
-  if (!invoked) throw new Error('launchd release entrypoint is unavailable');
+function canonicalReleaseRootFromEntrypoint(entrypoint: string, role: 'supervisor' | 'child'): string {
   const expectedName = role === 'supervisor' ? 'launchd-supervisor.js' : 'launchd-daemon-child.js';
-  const invokedRequested = resolve(invoked);
-  const invokedCanonical = realpathSync(invokedRequested);
-  if (invokedRequested !== invokedCanonical) throw new Error('launchd release entrypoint path is not canonical');
-  if (basename(invokedCanonical) !== expectedName) throw new Error('launchd release entrypoint role mismatch');
+  const requested = resolve(entrypoint);
+  const canonical = realpathSync(requested);
+  if (requested !== canonical) throw new Error('launchd release entrypoint path is not canonical');
+  if (basename(canonical) !== expectedName) throw new Error('launchd release entrypoint role mismatch');
+  const releaseRoot = realpathSync(dirname(dirname(dirname(canonical))));
+  const expectedPath = join(releaseRoot, 'dist', 'cli', expectedName);
+  if (canonical !== expectedPath) {
+    throw new Error('launchd release entrypoint is not the canonical release path');
+  }
+  return releaseRoot;
+}
 
-  const releaseRoot = realpathSync(dirname(dirname(dirname(invokedCanonical))));
+function canonicalReleaseRootFromModule(): string {
+  const modulePath = realpathSync(fileURLToPath(import.meta.url));
+  return realpathSync(dirname(dirname(dirname(dirname(modulePath)))));
+}
+
+function observeReleaseRoot(releaseRoot: string): LaunchdReleaseObservation {
   const releaseRevision = basename(releaseRoot);
   if (!REVISION_RE.test(releaseRevision)) throw new Error('launchd release directory is not revision-addressed');
   const releasesRoot = realpathSync(join(realpathSync(resolve(homedir())), '.local', 'share', 'ashlr', 'releases'));
@@ -138,9 +150,6 @@ export function observeLaunchdRelease(role: 'supervisor' | 'child'): LaunchdRele
 
   const supervisorPath = join(releaseRoot, 'dist', 'cli', 'launchd-supervisor.js');
   const childPath = join(releaseRoot, 'dist', 'cli', 'launchd-daemon-child.js');
-  if (invokedCanonical !== (role === 'supervisor' ? supervisorPath : childPath)) {
-    throw new Error('launchd release entrypoint is not the canonical release path');
-  }
   const identity = parseBuildIdentity(readFileSync(join(releaseRoot, 'dist', 'build-identity.json'), 'utf8'));
   if (!identity || identity.revision !== releaseRevision || identity.provenance === 'unavailable' ||
     identity.dirty === true) throw new Error('launchd release build identity is not immutable');
@@ -153,5 +162,17 @@ export function observeLaunchdRelease(role: 'supervisor' | 'child'): LaunchdRele
     supervisor: stableFileIdentity(supervisorPath, true),
     child: stableFileIdentity(childPath, true),
   };
-  return Object.freeze({ ...unsigned, observationDigest: observationDigest(unsigned) });
+  return Object.freeze({ ...unsigned, observationDigest: launchdReleaseObservationDigest(unsigned) });
+}
+
+/** Observe only the executable release that is actually running this process. */
+export function observeLaunchdRelease(role: 'supervisor' | 'child'): LaunchdReleaseObservation {
+  const invoked = process.argv[1];
+  if (!invoked) throw new Error('launchd release entrypoint is unavailable');
+  return observeReleaseRoot(canonicalReleaseRootFromEntrypoint(invoked, role));
+}
+
+/** Observe the immutable packaged release that owns this service module before OS mutation. */
+export function observeLaunchdInstallRelease(): LaunchdReleaseObservation {
+  return observeReleaseRoot(canonicalReleaseRootFromModule());
 }

@@ -11,7 +11,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { observeLaunchdRelease } from '../src/core/daemon/launchd-release-observation.js';
+import {
+  isLaunchdReleaseObservation,
+  observeLaunchdRelease,
+} from '../src/core/daemon/launchd-release-observation.js';
 
 const RELEASE = 'a'.repeat(40);
 
@@ -67,6 +70,15 @@ describe('M472 canonical launchd release observation', () => {
     expect(supervisor.node.path).toBe(realpathSync(process.execPath));
     expect(supervisor.observationDigest).toMatch(/^[0-9a-f]{64}$/);
     expect(child).toEqual(supervisor);
+    expect(isLaunchdReleaseObservation(supervisor)).toBe(true);
+    expect(isLaunchdReleaseObservation({
+      ...supervisor,
+      observationDigest: 'z'.repeat(64),
+    })).toBe(false);
+    expect(isLaunchdReleaseObservation({
+      ...supervisor,
+      child: { ...supervisor.child, sha256: '4'.repeat(64) },
+    })).toBe(false);
   });
 
   it('changes the observation when executable content changes', () => {
@@ -106,6 +118,21 @@ describe('M472 canonical launchd release observation', () => {
       revision: 'b'.repeat(40),
       dirty: false,
       provenance: 'git',
+    }), { mode: 0o400 });
+    expect(() => observeLaunchdRelease('supervisor')).toThrow(
+      'launchd release build identity is not immutable',
+    );
+  });
+
+  it.each([
+    ['dirty Git build', { revision: RELEASE, dirty: true, provenance: 'git' }],
+    ['unavailable build', { revision: null, dirty: null, provenance: 'unavailable' }],
+  ])('rejects %s identity before release authority is established', (_case, identity) => {
+    chmodSync(join(releaseRoot, 'dist', 'build-identity.json'), 0o600);
+    writeFileSync(join(releaseRoot, 'dist', 'build-identity.json'), JSON.stringify({
+      schemaVersion: 1,
+      packageVersion: '3.1.0',
+      ...identity,
     }), { mode: 0o400 });
     expect(() => observeLaunchdRelease('supervisor')).toThrow(
       'launchd release build identity is not immutable',

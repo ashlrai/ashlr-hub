@@ -565,6 +565,7 @@ export async function runLaunchdRetryController(
     nowMs,
   }, trustPolicy);
   if (!supplied.ok) return terminal(receiptFailureReason(supplied.reason));
+  if (nowMs < supplied.value.receipt.maxObservedAtMs) return terminal('clock-rollback', 'verified');
 
   const home = options.homeDir ?? homedir();
   const paths = retryPaths(home);
@@ -593,6 +594,7 @@ export async function runLaunchdRetryController(
     let daemonWasInvoked = false;
     let lastClaimNumber: number | null = null;
     let lastAttemptsRemaining: number | null = null;
+    let recoveredClaim: VerifiedLaunchdRetryEpochReceipt | null = null;
     if (journalExists) {
       const loadedJournal = loadJournal(
         paths,
@@ -614,6 +616,12 @@ export async function runLaunchdRetryController(
       if (!suppliedIsCurrent && !suppliedIsSuccessor) {
         return terminal('external-retry-receipt-replayed');
       }
+      const latestPreparedObservation = Math.max(
+        loadedJournal.current.receipt.maxObservedAtMs,
+        request.nextMaxObservedAtMs,
+        supplied.value.receipt.maxObservedAtMs,
+      );
+      if (nowMs < latestPreparedObservation) return terminal('clock-rollback', 'verified');
       if (loadedState && loadedState.verified.receiptDigest !== loadedJournal.current.receiptDigest &&
         loadedState.verified.receiptDigest !== supplied.value.receiptDigest) {
         return terminal('external-retry-receipt-replayed');
@@ -640,6 +648,7 @@ export async function runLaunchdRetryController(
       }
       lastClaimNumber = current.receipt.claimCount;
       lastAttemptsRemaining = LAUNCHD_RETRY_MAX_ATTEMPTS - current.receipt.claimCount;
+      recoveredClaim = current;
     } else if (loadedState) {
       if (loadedState.verified.receiptDigest !== supplied.value.receiptDigest) {
         return terminal('external-retry-receipt-replayed');
@@ -667,28 +676,52 @@ export async function runLaunchdRetryController(
       if (current.receipt.claimCount >= LAUNCHD_RETRY_MAX_ATTEMPTS) {
         return terminal('retry-exhausted', 'verified', daemonWasInvoked, lastClaimNumber, 0);
       }
-      const wait = await waitForLaunchdRetryNotBefore(
-        current.receipt.notBeforeMs,
-        now,
-        () => killState().state !== 'inactive',
-      );
-      if (wait.status === 'aborted') {
-        return terminal(
-          'operator-stop', 'verified', daemonWasInvoked, lastClaimNumber, lastAttemptsRemaining,
-        );
-      }
-      if (wait.status === 'clock-invalid') {
-        return terminal('clock-rollback', 'verified', daemonWasInvoked, lastClaimNumber);
-      }
-      const attemptAtMs = wait.nowMs;
-      if (attemptAtMs < current.receipt.maxObservedAtMs) {
-        return terminal('clock-rollback', 'verified', daemonWasInvoked, lastClaimNumber);
-      }
-      if (attemptAtMs - current.receipt.windowStartedAtMs > LAUNCHD_RETRY_WINDOW_MS) {
-        return terminal('retry-window-expired', 'verified', daemonWasInvoked, lastClaimNumber, 0);
-      }
-      const claim = await commitTransition(authority, current, 'claim', attemptAtMs, trustPolicy, paths);
-      if (!claim.ok) return terminal(claim.reason, 'verified', daemonWasInvoked, lastClaimNumber);
+      const claim = recoveredClaim === null
+        ? await (async () => {
+            const wait = await waitForLaunchdRetryNotBefore(
+              current.receipt.notBeforeMs,
+              now,
+              () => killState().state !== 'inactive',
+            );
+            if (wait.status === 'aborted') {
+              return {
+                ok: false as const,
+                terminal: terminal(
+                  'operator-stop', 'verified', daemonWasInvoked, lastClaimNumber, lastAttemptsRemaining,
+                ),
+              };
+            }
+            if (wait.status === 'clock-invalid') {
+              return {
+                ok: false as const,
+                terminal: terminal('clock-rollback', 'verified', daemonWasInvoked, lastClaimNumber),
+              };
+            }
+            const attemptAtMs = wait.nowMs;
+            if (attemptAtMs < current.receipt.maxObservedAtMs) {
+              return {
+                ok: false as const,
+                terminal: terminal('clock-rollback', 'verified', daemonWasInvoked, lastClaimNumber),
+              };
+            }
+            if (attemptAtMs - current.receipt.windowStartedAtMs > LAUNCHD_RETRY_WINDOW_MS) {
+              return {
+                ok: false as const,
+                terminal: terminal('retry-window-expired', 'verified', daemonWasInvoked, lastClaimNumber, 0),
+              };
+            }
+            const committed = await commitTransition(authority, current, 'claim', attemptAtMs, trustPolicy, paths);
+            if (!committed.ok) {
+              return {
+                ok: false as const,
+                terminal: terminal(committed.reason, 'verified', daemonWasInvoked, lastClaimNumber),
+              };
+            }
+            return { ok: true as const, value: committed.value };
+          })()
+        : { ok: true as const, value: recoveredClaim };
+      recoveredClaim = null;
+      if (!claim.ok) return claim.terminal;
       const claimNumber = claim.value.receipt.claimCount;
       const remaining = LAUNCHD_RETRY_MAX_ATTEMPTS - claimNumber;
       lastClaimNumber = claimNumber;

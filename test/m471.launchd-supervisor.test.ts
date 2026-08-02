@@ -24,7 +24,6 @@ vi.mock('../src/core/daemon/launchd-release-observation.js', async (importOrigin
   return {
     ...actual,
     observeLaunchdRelease: mocks.observeRelease,
-    isLaunchdReleaseObservation: () => true,
   };
 });
 
@@ -35,19 +34,23 @@ vi.mock('../src/core/daemon/launchd-retry-controller.js', async (importOriginal)
 
 import { runLaunchdSupervisorBootstrap } from '../src/core/daemon/launchd-supervisor-bootstrap.js';
 import { runLaunchdSupervisor } from '../src/core/daemon/launchd-supervisor-runtime.js';
+import { launchdReleaseObservationDigest } from '../src/core/daemon/launchd-release-observation.js';
 
 const RELEASE = 'a'.repeat(40);
 const NODE = '/opt/ashlr/node';
 const SUPERVISOR = '/opt/ashlr/dist/cli/launchd-supervisor.js';
 const CHILD = '/opt/ashlr/dist/cli/launchd-daemon-child.js';
-const OBSERVATION = {
+const OBSERVATION_UNSIGNED = {
   schemaVersion: 1 as const,
   releaseRevision: RELEASE,
   releaseRoot: '/opt/ashlr',
   node: { path: NODE, sha256: '1'.repeat(64) },
   supervisor: { path: SUPERVISOR, sha256: '2'.repeat(64) },
   child: { path: CHILD, sha256: '3'.repeat(64) },
-  observationDigest: '4'.repeat(64),
+};
+const OBSERVATION = {
+  ...OBSERVATION_UNSIGNED,
+  observationDigest: launchdReleaseObservationDigest(OBSERVATION_UNSIGNED),
 };
 const VALID_ARGS = [
   '--budget', '5',
@@ -128,6 +131,21 @@ describe('M471 one-shot launchd supervisor', () => {
     });
     expect(mocks.loadAuthority).not.toHaveBeenCalled();
     expect(mocks.runController).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['malformed shape', { ...OBSERVATION, releaseRoot: 42 }],
+    ['bad digest format', { ...OBSERVATION, observationDigest: 'z'.repeat(64) }],
+    ['mismatched digest', { ...OBSERVATION, observationDigest: '5'.repeat(64) }],
+  ])('withholds external authority when release observation validation rejects %s', async (_case, observation) => {
+    mocks.observeRelease.mockReturnValueOnce(observation);
+    expect(await runLaunchdSupervisor(VALID_ARGS)).toEqual({
+      exitCode: 0,
+      reason: 'release-observation-invalid',
+    });
+    expect(mocks.loadAuthority).not.toHaveBeenCalled();
+    expect(mocks.runController).not.toHaveBeenCalled();
+    expect(mocks.fork).not.toHaveBeenCalled();
   });
 
   it('settles bootstrap import and preload failures at zero', async () => {

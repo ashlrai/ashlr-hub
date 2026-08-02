@@ -37,7 +37,6 @@ vi.mock('../src/core/daemon/launchd-release-observation.js', async (importOrigin
   return {
     ...actual,
     observeLaunchdRelease: runtimeFixture.observe,
-    isLaunchdReleaseObservation: () => true,
   };
 });
 
@@ -68,10 +67,19 @@ import {
   LAUNCHD_RETRY_TRUST_PROTOCOL,
   type LaunchdRetryTrustPolicy,
 } from '../src/core/daemon/launchd-retry-trust-roots.js';
+import { launchdReleaseObservationDigest } from '../src/core/daemon/launchd-release-observation.js';
 import type { DaemonRunResult } from '../src/core/daemon/loop.js';
 
 const RELEASE_A = 'a'.repeat(40);
-const OBSERVATION_DIGEST = 'c'.repeat(64);
+const RELEASE_OBSERVATION_UNSIGNED = {
+  schemaVersion: 1 as const,
+  releaseRevision: RELEASE_A,
+  releaseRoot: `/tmp/releases/${RELEASE_A}`,
+  node: { path: '/usr/bin/node', sha256: '1'.repeat(64) },
+  supervisor: { path: '/tmp/launchd-supervisor.js', sha256: '2'.repeat(64) },
+  child: { path: '/tmp/launchd-daemon-child.js', sha256: '3'.repeat(64) },
+};
+const OBSERVATION_DIGEST = launchdReleaseObservationDigest(RELEASE_OBSERVATION_UNSIGNED);
 
 function daemonResult(
   reason: DaemonRunResult['termination']['reason'],
@@ -129,12 +137,7 @@ describe('M470 externally anchored launchd retry controller', () => {
     nowMs = 10_000;
     receiptNotBefore = undefined;
     runtimeFixture.observe.mockReturnValue({
-      schemaVersion: 1,
-      releaseRevision: RELEASE_A,
-      releaseRoot: `/tmp/releases/${RELEASE_A}`,
-      node: { path: '/usr/bin/node', sha256: '1'.repeat(64) },
-      supervisor: { path: '/tmp/launchd-supervisor.js', sha256: '2'.repeat(64) },
-      child: { path: '/tmp/launchd-daemon-child.js', sha256: '3'.repeat(64) },
+      ...RELEASE_OBSERVATION_UNSIGNED,
       observationDigest: OBSERVATION_DIGEST,
     });
     runtimeFixture.wait.mockImplementation(async (
@@ -353,6 +356,60 @@ describe('M470 externally anchored launchd retry controller', () => {
     expect(runDaemon).not.toHaveBeenCalled();
   });
 
+  it('does not replay a prepared claim when the current clock rolled back', async () => {
+    store.compareAndSwap.mockResolvedValueOnce({ status: 'unavailable' });
+    const runDaemon = vi.fn(async () => daemonResult('persistence-failure', true));
+    expect(await run(runDaemon)).toMatchObject({
+      reason: 'external-retry-transport-unavailable', daemonInvoked: false,
+    });
+    const journalPath = join(home, '.ashlr', 'daemon-supervision', 'launchd-retry-journal.json');
+    expect(readFileSync(journalPath, 'utf8')).toContain('"action":"claim"');
+    nowMs--;
+
+    expect(await run(runDaemon)).toMatchObject({
+      reason: 'clock-rollback', daemonInvoked: false,
+    });
+    expect(runDaemon).not.toHaveBeenCalled();
+    expect(store.compareAndSwap).toHaveBeenCalledOnce();
+    expect(store.current).toMatchObject({ transition: 'initialize', claimCount: 0 });
+  });
+
+  it('does not replay a prepared healthy reset when the current clock rolled back', async () => {
+    const original = store.compareAndSwap.getMockImplementation()!;
+    let resetAttempted = false;
+    store.compareAndSwap.mockImplementation(async (request) => {
+      if (request.action === 'healthy-reset' && !resetAttempted) {
+        resetAttempted = true;
+        return { status: 'unavailable' as const };
+      }
+      return original(request);
+    });
+    const runDaemon = vi.fn(async () => {
+      nowMs++;
+      return daemonResult('clean-completion', false);
+    });
+
+    expect(await run(runDaemon)).toMatchObject({
+      reason: 'external-retry-transport-unavailable',
+      daemonInvoked: true,
+      claimNumber: 1,
+    });
+    const journalPath = join(home, '.ashlr', 'daemon-supervision', 'launchd-retry-journal.json');
+    expect(readFileSync(journalPath, 'utf8')).toContain('"action":"healthy-reset"');
+    expect(store.current).toMatchObject({ transition: 'claim', claimCount: 1 });
+    expect(store.compareAndSwap).toHaveBeenCalledTimes(2);
+    nowMs -= 2;
+
+    const secondDaemon = vi.fn(async () => daemonResult('runtime-failure', false));
+    expect(await run(secondDaemon)).toMatchObject({
+      reason: 'clock-rollback',
+      daemonInvoked: false,
+    });
+    expect(secondDaemon).not.toHaveBeenCalled();
+    expect(store.compareAndSwap).toHaveBeenCalledTimes(2);
+    expect(store.current).toMatchObject({ transition: 'claim', claimCount: 1 });
+  });
+
   it('reconciles an idempotent claim after CAS commits before local persistence', async () => {
     const statePath = join(home, '.ashlr', 'daemon-supervision', 'launchd-retry.json');
     const journalPath = join(home, '.ashlr', 'daemon-supervision', 'launchd-retry-journal.json');
@@ -373,10 +430,12 @@ describe('M470 externally anchored launchd retry controller', () => {
 
     rmSync(statePath, { recursive: true, force: true });
     expect(await run(runDaemon)).toMatchObject({
-      reason: 'daemon-terminal', daemonInvoked: true, claimNumber: 2,
+      reason: 'daemon-terminal', daemonInvoked: true, claimNumber: 1, attemptsRemaining: 2,
     });
     expect(runDaemon).toHaveBeenCalledOnce();
     expect(() => statSync(journalPath)).toThrow();
+    expect(store.current).toMatchObject({ transition: 'claim', claimCount: 1 });
+    expect(store.compareAndSwap).toHaveBeenCalledTimes(2);
     const decisions = store.compareAndSwap.mock.calls.map(([request]) => request.decisionId);
     expect(decisions[0]).toBe(decisions[1]);
   });
@@ -443,6 +502,29 @@ describe('M470 externally anchored launchd retry controller', () => {
 
   it('rejects externally signed notBefore values outside the bounded spacing window', async () => {
     receiptNotBefore = (request) => request.nextNotBeforeMinMs - 1;
+    const runDaemon = vi.fn(async () => daemonResult('persistence-failure', true));
+    expect(await run(runDaemon)).toMatchObject({
+      reason: 'external-retry-receipt-invalid', daemonInvoked: false,
+    });
+    expect(runDaemon).not.toHaveBeenCalled();
+  });
+
+  it('rejects externally signed notBefore values above the bounded spacing window', async () => {
+    store.compareAndSwap.mockImplementationOnce(async (request) => ({
+      status: 'committed' as const,
+      receipt: {
+        ...store.current,
+        previousReceiptDigest: request.expectedReceiptDigest,
+        transition: 'claim' as const,
+        transitionId: request.decisionId,
+        epoch: request.nextEpoch,
+        sequence: request.nextSequence,
+        claimCount: request.nextClaimCount,
+        windowStartedAtMs: request.nextWindowStartedAtMs,
+        maxObservedAtMs: request.nextMaxObservedAtMs,
+        notBeforeMs: request.nextNotBeforeMaxMs + 1,
+      },
+    }));
     const runDaemon = vi.fn(async () => daemonResult('persistence-failure', true));
     expect(await run(runDaemon)).toMatchObject({
       reason: 'external-retry-receipt-invalid', daemonInvoked: false,

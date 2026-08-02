@@ -23,6 +23,7 @@ const installLaunchdPlistTransactionMock = vi.hoisted(() => vi.fn());
 const removeLaunchdPlistTransactionMock = vi.hoisted(() => vi.fn());
 const withServiceFileTransactionLockMock = vi.hoisted(() =>
   vi.fn((_options: unknown, action: () => unknown) => action()));
+const observeLaunchdInstallReleaseMock = vi.hoisted(() => vi.fn());
 
 // ---------------------------------------------------------------------------
 // We import the module AFTER setting up vi.mock so spawnSync is interceptable
@@ -56,6 +57,14 @@ vi.mock('../src/core/daemon/launchd-plist-transaction.js', () => ({
   withServiceFileTransactionLock: withServiceFileTransactionLockMock,
 }));
 
+vi.mock('../src/core/daemon/launchd-release-observation.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/daemon/launchd-release-observation.js')>();
+  return {
+    ...actual,
+    observeLaunchdInstallRelease: observeLaunchdInstallReleaseMock,
+  };
+});
+
 vi.mock('../src/core/util/durability.js', () => ({
   fsyncDirectory: vi.fn(),
 }));
@@ -69,6 +78,10 @@ import {
   serviceStatus,
   serviceStatusCached,
 } from '../src/core/daemon/service.js';
+import {
+  launchdReleaseObservationDigest,
+  type LaunchdReleaseObservation,
+} from '../src/core/daemon/launchd-release-observation.js';
 import { daemonServiceInstallOptions } from '../src/core/daemon/service-config.js';
 import {
   buildWindowsTaskCreateScript,
@@ -88,6 +101,27 @@ const FAKE_NODE = '/usr/local/bin/node';
 const FAKE_BIN = '/home/user/ashlr-hub/bin/ashlr';
 const FAKE_RELEASE = 'a'.repeat(40);
 const FAKE_SUPERVISOR = '/home/user/ashlr-hub/dist/cli/launchd-supervisor.js';
+const FAKE_CHILD = '/home/user/ashlr-hub/dist/cli/launchd-daemon-child.js';
+
+function fakeLaunchdReleaseObservation(
+  overrides: Partial<Omit<LaunchdReleaseObservation, 'observationDigest'>> & {
+    observationDigest?: string;
+  } = {},
+): LaunchdReleaseObservation {
+  const unsigned = {
+    schemaVersion: 1 as const,
+    releaseRevision: FAKE_RELEASE,
+    releaseRoot: '/home/user/ashlr-hub',
+    node: { path: FAKE_NODE, sha256: '1'.repeat(64) },
+    supervisor: { path: FAKE_SUPERVISOR, sha256: '2'.repeat(64) },
+    child: { path: FAKE_CHILD, sha256: '3'.repeat(64) },
+    ...overrides,
+  };
+  return {
+    ...unsigned,
+    observationDigest: overrides.observationDigest ?? launchdReleaseObservationDigest(unsigned),
+  };
+}
 
 function isWindowsPowerShellCommand(command: string): boolean {
   return command === windowsPowerShellPath();
@@ -389,7 +423,6 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
     expect(def.content).not.toContain('<string>--release</string>');
     expect(def.content).not.toContain('<string>--node</string>');
     expect(def.content).not.toContain('<string>--child</string>');
-    expect(def.content).not.toContain(`<string>${FAKE_RELEASE}</string>`);
     expect(def.content).toContain('<string>--budget</string>');
     expect(def.content).toContain('<string>5</string>');
     expect(def.content).toContain('<string>--interval</string>');
@@ -430,13 +463,45 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
   it('does not serialize an absent caller release identity', () => {
     const def = generateServiceDefinition({ ...baseOpts('darwin'), releaseRevision: undefined });
     expect(def.launchdRuntime?.arguments).toEqual(launchdRuntimeArguments());
-    expect(def.content).not.toContain('unavailable');
+    expect(def.content).toContain('<key>ASHLR_LAUNCHD_RELEASE_REVISION</key>');
+    expect(def.content).toContain('<string>unavailable</string>');
   });
 
   it('does not serialize a malformed caller release identity', () => {
     const def = generateServiceDefinition({ ...baseOpts('darwin'), releaseRevision: '<string>forged</string>' });
     expect(def.launchdRuntime?.arguments).toEqual(launchdRuntimeArguments());
     expect(def.content).not.toContain('forged');
+  });
+
+  it('binds exact immutable launchd release artifact identity when supplied', () => {
+    const release = fakeLaunchdReleaseObservation();
+    const def = generateServiceDefinition({
+      ...baseOpts('darwin'),
+      nodePath: '/tmp/caller-node',
+      binPath: '/tmp/caller/bin/ashlr',
+      launchdReleaseObservation: release,
+    });
+    expect(def.launchdRuntime).toEqual({
+      program: release.node.path,
+      arguments: [
+        release.node.path,
+        release.supervisor.path,
+        '--budget',
+        '5',
+        '--interval',
+        '1800000',
+        '--parallel',
+        '1',
+      ],
+    });
+    expect(def.content).toContain(`<string>${release.releaseRevision}</string>`);
+    expect(def.content).toContain(`<string>${release.observationDigest}</string>`);
+    expect(def.content).toContain(`<string>${release.node.sha256}</string>`);
+    expect(def.content).toContain(`<string>${release.supervisor.sha256}</string>`);
+    expect(def.content).toContain(`<string>${release.child.path}</string>`);
+    expect(def.content).toContain(`<string>${release.child.sha256}</string>`);
+    expect(def.content).not.toContain('/tmp/caller-node');
+    expect(def.content).not.toContain('/tmp/caller/bin/ashlr');
   });
 
   it('does not delegate retries or throttling to launchd', () => {
@@ -630,6 +695,7 @@ describe('install() — mocked spawnSync', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     useSuccessfulLaunchdTransactionMock();
+    observeLaunchdInstallReleaseMock.mockReturnValue(fakeLaunchdReleaseObservation());
     spawnSyncMock.mockImplementation(successfulServiceCommands());
     existsSyncMock.mockReturnValue(false);
     (fs.lstatSync as ReturnType<typeof vi.fn>).mockImplementation((candidate: fs.PathLike) => {
@@ -665,6 +731,64 @@ describe('install() — mocked spawnSync', () => {
       ['-0', '123'],
       expect.objectContaining({ timeout: 15_000 }),
     );
+  });
+
+  it('darwin: refuses launchd mutation when immutable release identity is unavailable', async () => {
+    observeLaunchdInstallReleaseMock.mockImplementationOnce(() => {
+      throw new Error('launchd release build identity is not immutable');
+    });
+
+    await expect(install(baseOpts('darwin'))).rejects.toThrow(
+      'Refusing to install launchd service without an immutable release identity',
+    );
+    expect(installLaunchdPlistTransactionMock).not.toHaveBeenCalled();
+    expect(spawnSyncMock).not.toHaveBeenCalled();
+    expect(fs.writeFileSync).not.toHaveBeenCalled();
+  });
+
+  it('darwin: refuses launchd mutation when release observation shape is malformed', async () => {
+    observeLaunchdInstallReleaseMock.mockReturnValueOnce({
+      ...fakeLaunchdReleaseObservation(),
+      observationDigest: 'z'.repeat(64),
+    });
+
+    await expect(install(baseOpts('darwin'))).rejects.toThrow(
+      'Refusing to install launchd service without a valid immutable release observation',
+    );
+    expect(installLaunchdPlistTransactionMock).not.toHaveBeenCalled();
+    expect(spawnSyncMock).not.toHaveBeenCalled();
+  });
+
+  it('darwin: install ignores caller-selected executables and writes the observed immutable descriptor', async () => {
+    let content = '';
+    installLaunchdPlistTransactionMock.mockImplementation((options: {
+      content: string;
+      preflight: (state: { hasPrior: boolean }) => { ok: boolean };
+      unload: () => { ok: boolean };
+      load: () => { ok: boolean };
+      verify: () => { ok: boolean };
+    }) => {
+      content = options.content;
+      expect(options.preflight({ hasPrior: true }).ok).toBe(true);
+      expect(options.unload().ok).toBe(true);
+      expect(options.load().ok).toBe(true);
+      expect(options.verify().ok).toBe(true);
+    });
+
+    await install({
+      ...baseOpts('darwin'),
+      nodePath: '/tmp/caller-node',
+      binPath: '/tmp/caller/bin/ashlr',
+      releaseRevision: 'b'.repeat(40),
+    });
+
+    expect(content).toContain(`<string>${FAKE_NODE}</string>`);
+    expect(content).toContain(`<string>${FAKE_SUPERVISOR}</string>`);
+    expect(content).toContain(`<string>${FAKE_CHILD}</string>`);
+    expect(content).toContain(`<string>${FAKE_RELEASE}</string>`);
+    expect(content).not.toContain('/tmp/caller-node');
+    expect(content).not.toContain('/tmp/caller/bin/ashlr');
+    expect(content).not.toContain('b'.repeat(40));
   });
 
   it('darwin: install rejects a loaded job with stale supervisor argv', async () => {

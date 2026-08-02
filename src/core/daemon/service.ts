@@ -25,6 +25,11 @@ import {
   withServiceFileTransactionLock,
   type LaunchdInstallPhase,
 } from './launchd-plist-transaction.js';
+import {
+  isLaunchdReleaseObservation,
+  observeLaunchdInstallRelease,
+  type LaunchdReleaseObservation,
+} from './launchd-release-observation.js';
 import { validateWindowsFileAuthority } from './windows-file-authority.js';
 import {
   WINDOWS_TASK_CREATE_SCRIPT,
@@ -64,6 +69,8 @@ export interface ServiceInstallOptions {
   platform?: Platform;
   /** Exact clean build revision bound into the dormant launchd controller. */
   releaseRevision?: string;
+  /** Immutable launchd release descriptor for pure generation tests. Ignored by install(). */
+  launchdReleaseObservation?: LaunchdReleaseObservation;
   /**
    * Wrap the daemon process with `caffeinate -i -s` on macOS so the job keeps
    * running while the lid is closed and the machine is idle (prevents both idle
@@ -162,7 +169,7 @@ export function generateServiceDefinition(opts: ServiceInstallOptions = {}): Ser
     case 'darwin':
       return buildLaunchdDefinition({
         nodePath, binPath, home, configDir, budget, intervalMs, restartSec, parallel,
-        releaseRevision, keepAwake,
+        releaseRevision, releaseObservation: opts.launchdReleaseObservation, keepAwake,
       });
     case 'linux':
       return buildSystemdDefinition({
@@ -193,6 +200,7 @@ interface BuildOpts {
   restartSec: number;
   parallel: number;
   releaseRevision: string;
+  releaseObservation?: LaunchdReleaseObservation;
   /** Wrap ProgramArguments with caffeinate -i -s (macOS only). */
   keepAwake?: boolean;
 }
@@ -202,7 +210,12 @@ function buildLaunchdDefinition(o: BuildOpts): ServiceDefinition {
   const outLog = path.join(o.configDir, 'daemon.launchd.out.log');
   const errLog = path.join(o.configDir, 'daemon.launchd.err.log');
   const packageRoot = path.dirname(path.dirname(o.binPath));
-  const supervisorPath = path.join(packageRoot, 'dist', 'cli', 'launchd-supervisor.js');
+  const releaseObservation = o.releaseObservation && isLaunchdReleaseObservation(o.releaseObservation)
+    ? o.releaseObservation
+    : undefined;
+  const nodePath = releaseObservation?.node.path ?? o.nodePath;
+  const supervisorPath = releaseObservation?.supervisor.path
+    ?? path.join(packageRoot, 'dist', 'cli', 'launchd-supervisor.js');
 
   // PATH that mirrors common developer shells without requiring a login shell.
   const pathEnv = buildToolPath({ home: o.home, basePath: '' });
@@ -215,8 +228,8 @@ function buildLaunchdDefinition(o: BuildOpts): ServiceDefinition {
   // caffeinate's `-i` flag prevents idle sleep; `-s` prevents system sleep on AC.
   // On battery, macOS may still sleep — the user must keep the Mac plugged in.
   const runtimeArguments = o.keepAwake
-    ? ['caffeinate', '-i', '-s', o.nodePath, supervisorPath]
-    : [o.nodePath, supervisorPath];
+    ? ['caffeinate', '-i', '-s', nodePath, supervisorPath]
+    : [nodePath, supervisorPath];
   runtimeArguments.push(
     '--budget',
     String(o.budget),
@@ -245,6 +258,18 @@ ${programArgs.join('\n')}
 \t\t<string>${o.home}</string>
 \t\t<key>PATH</key>
 \t\t<string>${pathEnv}</string>
+\t\t<key>ASHLR_LAUNCHD_RELEASE_REVISION</key>
+\t\t<string>${releaseObservation?.releaseRevision ?? o.releaseRevision}</string>
+\t\t<key>ASHLR_LAUNCHD_RELEASE_OBSERVATION_DIGEST</key>
+\t\t<string>${releaseObservation?.observationDigest ?? 'unavailable'}</string>
+\t\t<key>ASHLR_LAUNCHD_NODE_SHA256</key>
+\t\t<string>${releaseObservation?.node.sha256 ?? 'unavailable'}</string>
+\t\t<key>ASHLR_LAUNCHD_SUPERVISOR_SHA256</key>
+\t\t<string>${releaseObservation?.supervisor.sha256 ?? 'unavailable'}</string>
+\t\t<key>ASHLR_LAUNCHD_CHILD_PATH</key>
+\t\t<string>${releaseObservation?.child.path ?? 'unavailable'}</string>
+\t\t<key>ASHLR_LAUNCHD_CHILD_SHA256</key>
+\t\t<string>${releaseObservation?.child.sha256 ?? 'unavailable'}</string>
 \t</dict>
 \t<key>RunAtLoad</key>
 \t<true/>
@@ -1383,8 +1408,29 @@ function recoverWindowsTransactionUnload(
  */
 export async function install(opts: ServiceInstallOptions = {}): Promise<void> {
   const platform = (opts.platform ?? process.platform) as Platform;
-  const def = generateServiceDefinition(opts);
   const autostart = opts.autostart !== false;
+  let launchdReleaseObservation: LaunchdReleaseObservation | undefined;
+  const definitionOpts = { ...opts };
+
+  if (platform === 'darwin') {
+    try {
+      launchdReleaseObservation = observeLaunchdInstallRelease();
+    } catch (error) {
+      throw new Error(
+        'Refusing to install launchd service without an immutable release identity: ' +
+        (error instanceof Error ? error.message : String(error)),
+      );
+    }
+    if (!isLaunchdReleaseObservation(launchdReleaseObservation)) {
+      throw new Error('Refusing to install launchd service without a valid immutable release observation');
+    }
+    definitionOpts.nodePath = launchdReleaseObservation.node.path;
+    definitionOpts.binPath = path.join(launchdReleaseObservation.releaseRoot, 'bin', 'ashlr');
+    definitionOpts.releaseRevision = launchdReleaseObservation.releaseRevision;
+    definitionOpts.launchdReleaseObservation = launchdReleaseObservation;
+  }
+
+  const def = generateServiceDefinition(definitionOpts);
 
   if (platform === 'darwin') {
     const home = resolveHome(opts.homeDir);
