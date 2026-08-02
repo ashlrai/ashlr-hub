@@ -658,6 +658,7 @@ describe('buildProposalFunnelObservability', () => {
     ['route tier', (row: MutableLegacyEvent) => { legacyRoute(row)['tier'] = 'frontier'; }],
     ['route model', (row: MutableLegacyEvent) => { legacyRoute(row)['model'] = 'forged-model'; }],
     ['route assignedBy', (row: MutableLegacyEvent) => { legacyRoute(row)['assignedBy'] = 'forged-router'; }],
+    ['route reason', (row: MutableLegacyEvent) => { legacyRoute(row)['reason'] = 'forged-route-reason'; }],
     ['route policy', (row: MutableLegacyEvent) => {
       legacyRoute(row)['routerPolicyVersion'] = 'fleet-router-v999';
     }],

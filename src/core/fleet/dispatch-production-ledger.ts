@@ -2070,8 +2070,12 @@ function dispatchProductionSuppliedEnvelopeSemanticsAgree(event: DispatchProduct
 
   const rawRoute = raw['routeSnapshot'];
   if (!derivedLifecycle && rawRoute !== undefined) {
+    const incompleteLegacyEnvelope = rawSummary === undefined ||
+      (isPlainRecord(rawSummary) && !isPlainRecord(rawSummary['actionCounts']));
     if (!isPlainRecord(rawRoute) ||
-      !suppliedDuplicatedFieldsAgree(raw, rawRoute, new Set(['reason']))) return false;
+      !suppliedDuplicatedFieldsAgree(raw, rawRoute, new Set(['reason'])) ||
+      (incompleteLegacyEnvelope &&
+        !suppliedAliasAgrees(raw, 'routeReason', rawRoute, 'reason'))) return false;
   }
   if (raw['attemptId'] !== undefined && raw['trajectoryId'] !== undefined &&
     raw['trajectoryId'] !== `run:${String(raw['attemptId'])}`) return false;
