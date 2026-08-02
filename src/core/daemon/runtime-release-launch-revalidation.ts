@@ -14,6 +14,10 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { performance } from 'node:perf_hooks';
 import { fsyncDirectory } from '../util/durability.js';
 import {
+  requireBeforeRuntimeReleaseObservationDeadline,
+  type RuntimeReleaseObservationDeadline,
+} from './runtime-release-observation-deadline.js';
+import {
   parseUnsignedRuntimeReleaseManifest,
   verifyUnsignedRuntimeReleaseManifest,
   type UnsignedRuntimeReleaseArtifact,
@@ -86,11 +90,12 @@ interface RuntimeReleaseLaunchRevalidationTestHooks {
   afterBeforeObservation?: () => void;
   afterDirectoryEntriesRead?: (path: string, label: string) => void;
   afterFilePathSnapshotBeforeOpen?: (path: string, label: string) => void;
+  afterManifestVerification?: () => void;
 }
 
 interface DirectoryObservationBudget {
   bytes: number;
-  deadline: number;
+  deadline: RuntimeReleaseObservationDeadline;
   directories: number;
   entries: number;
   files: number;
@@ -377,14 +382,16 @@ function requireImmutable(stat: BigIntStats, label: string): void {
   }
 }
 
-function observationDeadline(): number {
-  return performance.now() + MAX_OBSERVATION_MS;
+function observationDeadline(): RuntimeReleaseObservationDeadline {
+  const now = (): number => performance.now();
+  return { deadline: now() + MAX_OBSERVATION_MS, now };
 }
 
-function requireBeforeDeadline(deadline: number, label: string): void {
-  if (!Number.isFinite(deadline) || performance.now() >= deadline) {
-    throw new Error(`${label} observation deadline exceeded`);
-  }
+function requireBeforeDeadline(
+  deadline: RuntimeReleaseObservationDeadline,
+  label: string,
+): void {
+  requireBeforeRuntimeReleaseObservationDeadline(deadline, label);
 }
 
 function contained(root: string, candidate: string): boolean {
@@ -421,7 +428,7 @@ function snapshotFile(
   label: string,
   anchor?: string,
   testHooks?: RuntimeReleaseLaunchRevalidationTestHooks,
-  deadline = Number.POSITIVE_INFINITY,
+  deadline = observationDeadline(),
   expectedSnapshot?: BigIntStats,
 ): FileObservation {
   requireBeforeDeadline(deadline, label);
@@ -500,7 +507,7 @@ function observeArtifactRoot(
   packageRoot: string,
   artifacts: readonly UnsignedRuntimeReleaseArtifact[],
   testHooks?: RuntimeReleaseLaunchRevalidationTestHooks,
-  deadline = Number.POSITIVE_INFINITY,
+  deadline = observationDeadline(),
 ): RootObservation {
   requireBeforeDeadline(deadline, 'runtime release artifact root');
   const rootBefore = lstatSync(packageRoot, { bigint: true });
@@ -510,8 +517,10 @@ function observeArtifactRoot(
   const observedDirectories = new Set<string>(['.']);
   let bytes = 0;
   for (const artifact of artifacts) {
+    requireBeforeDeadline(deadline, 'runtime release artifact root');
     const segments = artifact.path.split('/');
     for (let index = 1; index < segments.length; index += 1) {
+      requireBeforeDeadline(deadline, 'runtime release artifact root');
       const logicalDirectory = segments.slice(0, index).join('/');
       if (observedDirectories.has(logicalDirectory)) continue;
       const directoryPath = join(packageRoot, ...segments.slice(0, index));
@@ -544,6 +553,7 @@ function observeArtifactRoot(
     content.push(observation.content);
     stable.push(observation.stable);
   }
+  requireBeforeDeadline(deadline, 'runtime release artifact root');
   const rootAfter = lstatSync(packageRoot, { bigint: true });
   if (!sameSnapshot(rootBefore, rootAfter) || realpathSync(packageRoot) !== packageRoot) {
     throw new Error('runtime release package root changed during artifact scan');
@@ -561,7 +571,7 @@ function observeDirectoryTree(
   rootPath: string,
   label: string,
   testHooks?: RuntimeReleaseLaunchRevalidationTestHooks,
-  deadline = Number.POSITIVE_INFINITY,
+  deadline = observationDeadline(),
 ): RootObservation {
   const root = canonicalDirectory(rootPath, label);
   const content: Array<Record<string, JsonValue>> = [];
@@ -694,6 +704,7 @@ function observeStage(
     __testHooks?: RuntimeReleaseLaunchRevalidationTestHooks;
   };
   const testHooks = process.env['VITEST'] === 'true' ? internal.__testHooks : undefined;
+  requireBeforeDeadline(deadline, 'runtime release launch revalidation');
   if (HOST_PLATFORM === 'win32') {
     throw new Error('runtime release launch revalidation requires available directory durability');
   }
@@ -726,9 +737,12 @@ function observeStage(
   }
 
   fsyncStableDirectory(packageRoot);
+  requireBeforeDeadline(deadline, 'runtime release package root durability');
   fsyncStableDirectory(dependencyRoot);
+  requireBeforeDeadline(deadline, 'runtime release dependency root durability');
   const manifest = parseUnsignedRuntimeReleaseManifest(options.manifest);
   if (!manifest.ok) throw new Error(manifest.reason);
+  requireBeforeDeadline(deadline, 'runtime release manifest verification');
   if (manifest.manifest.expectedRevision !== options.expectedRevision) {
     throw new Error('runtime release manifest revision does not match expected revision');
   }
@@ -742,8 +756,10 @@ function observeStage(
     packageRoot,
     declaredRollbackTargetDigest:
       manifest.manifest.rollbackDeclaration.targetManifestDigest,
-  });
+  }, deadline);
   if (!verified.ok) throw new Error(verified.reason);
+  testHooks?.afterManifestVerification?.();
+  requireBeforeDeadline(deadline, 'runtime release artifact root');
   const artifactRoot = observeArtifactRoot(
     packageRoot,
     manifest.manifest.artifacts,
@@ -910,6 +926,7 @@ export function observeRuntimeReleaseLaunchInputs(
 ): ObserveRuntimeReleaseLaunchInputsResult {
   try {
     const deadline = observationDeadline();
+    requireBeforeDeadline(deadline, 'runtime release launch inputs');
     if (!KEY_ID_RE.test(options.expectedKeyId)) {
       return { ok: false, reason: 'runtime release expected key id is invalid' };
     }
@@ -921,6 +938,7 @@ export function observeRuntimeReleaseLaunchInputs(
       MAX_POLICY_BYTES,
       'runtime release launch policy',
     );
+    requireBeforeDeadline(deadline, 'runtime release launch inputs');
     const policyId = runtimeReleasePolicyId(policyCanonicalJson);
     if (!policyId || policyId !== options.expectedPolicyId) {
       return { ok: false, reason: 'runtime release launch policy identity mismatch' };
@@ -930,6 +948,7 @@ export function observeRuntimeReleaseLaunchInputs(
     }
     const envelopeCanonicalSha256 =
       runtimeReleaseEnvelopeCanonicalSha256(options.envelope);
+    requireBeforeDeadline(deadline, 'runtime release launch inputs');
     if (!envelopeCanonicalSha256 || !equalDigest(
       envelopeCanonicalSha256,
       options.expectedEnvelopeCanonicalSha256,
@@ -938,6 +957,7 @@ export function observeRuntimeReleaseLaunchInputs(
     }
     const trustRootCanonicalSha256 =
       runtimeReleaseTrustRootCanonicalSha256(options.trustRoot);
+    requireBeforeDeadline(deadline, 'runtime release launch inputs');
     if (!trustRootCanonicalSha256 || !equalDigest(
       trustRootCanonicalSha256,
       options.expectedTrustRootCanonicalSha256,
@@ -948,6 +968,7 @@ export function observeRuntimeReleaseLaunchInputs(
       options.executablePath,
       options.argv,
     );
+    requireBeforeDeadline(deadline, 'runtime release launch inputs');
     if (!invocationDigest || !equalDigest(
       invocationDigest,
       options.expectedServiceInvocationDigest,
@@ -965,6 +986,7 @@ export function observeRuntimeReleaseLaunchInputs(
       manifest: options.manifest,
       trustRoot: options.trustRoot,
     });
+    requireBeforeDeadline(deadline, 'runtime release evidence verification');
     if (!signedRelease.ok) return signedRelease;
     if (signedRelease.keyId !== options.expectedKeyId) {
       return { ok: false, reason: 'runtime release signing key does not match expected key id' };

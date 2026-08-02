@@ -234,6 +234,62 @@ describe('unsigned runtime release manifest', () => {
     });
   });
 
+  it('expires the shared monotonic budget during the first manifest scan', () => {
+    const release = fixture();
+    const built = build(release);
+    expect(built.ok).toBe(true);
+    if (!built.ok) return;
+    let monotonicMs = 0;
+    const options = {
+      packageRoot: release.packageRoot,
+      declaredInterpreterPath: release.interpreterPath,
+      declaredInterpreterVersion: 'v22.0.0',
+      expectedRevision: REVISION,
+      manifest: built.canonicalJson,
+      __testHooks: {
+        afterReleaseLayoutDiscovery: (scan: 'first' | 'second') => {
+          if (scan === 'first') monotonicMs = 101;
+        },
+      },
+    } as Parameters<typeof verifyUnsignedRuntimeReleaseManifest>[0];
+
+    expect(verifyUnsignedRuntimeReleaseManifest(options, {
+      deadline: 100,
+      now: () => monotonicMs,
+    })).toEqual({
+      ok: false,
+      reason: 'runtime release manifest scan observation deadline exceeded',
+    });
+  });
+
+  it('expires the same monotonic budget before the second manifest scan', () => {
+    const release = fixture();
+    const built = build(release);
+    expect(built.ok).toBe(true);
+    if (!built.ok) return;
+    let monotonicMs = 0;
+    const options = {
+      packageRoot: release.packageRoot,
+      declaredInterpreterPath: release.interpreterPath,
+      declaredInterpreterVersion: 'v22.0.0',
+      expectedRevision: REVISION,
+      manifest: built.canonicalJson,
+      __testHooks: {
+        afterFirstCompleteScan: () => {
+          monotonicMs = 101;
+        },
+      },
+    } as Parameters<typeof verifyUnsignedRuntimeReleaseManifest>[0];
+
+    expect(verifyUnsignedRuntimeReleaseManifest(options, {
+      deadline: 100,
+      now: () => monotonicMs,
+    })).toEqual({
+      ok: false,
+      reason: 'runtime release manifest second scan observation deadline exceeded',
+    });
+  });
+
   it('labels arbitrary interpreter and rollback values as caller-declared and unresolved', () => {
     const release = fixture();
     const rollback = createHash('sha256').update('unresolved target').digest('hex');

@@ -569,13 +569,20 @@ describe('runtime release closed launch-input observation', () => {
     expect(replaced).toBe(true);
   });
 
-  it('fails closed when bounded traversal reaches its monotonic deadline', () => {
+  it('expires the launch budget after manifest verification and before artifact traversal', () => {
     const release = fixture();
-    const monotonicNow = vi.spyOn(performance, 'now')
-      .mockReturnValueOnce(0)
-      .mockReturnValue(120_001);
+    const options = launchOptions(release) as RuntimeReleaseLaunchObservationOptions & {
+      __testHooks?: { afterManifestVerification?: () => void };
+    };
+    let monotonicMs = 0;
+    options.__testHooks = {
+      afterManifestVerification: () => {
+        monotonicMs = 120_001;
+      },
+    };
+    const monotonicNow = vi.spyOn(performance, 'now').mockImplementation(() => monotonicMs);
     try {
-      expect(observeRuntimeReleaseImmutableStagedTree(stageOptions(release))).toEqual({
+      expect(observeLaunch(options)).toEqual({
         ok: false,
         reason: 'runtime release artifact root observation deadline exceeded',
       });

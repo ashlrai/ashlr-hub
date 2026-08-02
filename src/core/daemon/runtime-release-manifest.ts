@@ -19,6 +19,11 @@ import {
   sep,
   win32,
 } from 'node:path';
+import {
+  requireBeforeRuntimeReleaseObservationDeadline,
+  RuntimeReleaseObservationDeadlineExceededError,
+  type RuntimeReleaseObservationDeadline,
+} from './runtime-release-observation-deadline.js';
 
 const MANIFEST_DIGEST_DOMAIN = 'ashlr:unsigned-runtime-release-manifest:v1';
 const MAX_MANIFEST_BYTES = 512 * 1024;
@@ -172,6 +177,19 @@ interface ReleaseLayout {
   paths: string[];
 }
 
+interface RuntimeReleaseManifestTestHooks {
+  afterFirstCompleteScan?: () => void;
+  afterReleaseLayoutDiscovery?: (scan: 'first' | 'second') => void;
+}
+
+function manifestTestHooks(
+  options: BuildUnsignedRuntimeReleaseManifestOptions | VerifyUnsignedRuntimeReleaseManifestOptions,
+): RuntimeReleaseManifestTestHooks | undefined {
+  if (process.env['VITEST'] !== 'true') return undefined;
+  return (options as typeof options & { __testHooks?: RuntimeReleaseManifestTestHooks })
+    .__testHooks;
+}
+
 function canonicalize(value: unknown, ancestors: Set<object>): JsonValue | undefined {
   if (value === undefined) return undefined;
   if (value === null || typeof value === 'boolean' || typeof value === 'string') return value;
@@ -310,7 +328,9 @@ function snapshotRegularFile(
     label?: string;
     maxBytes?: number;
   } = {},
+  observation?: RuntimeReleaseObservationDeadline,
 ): FileSnapshot {
+  requireBeforeRuntimeReleaseObservationDeadline(observation, options.label ?? 'release artifact');
   const absolutePath = resolve(filePath);
   const anchorPath = options.anchorPath ? realpathSync(options.anchorPath) : undefined;
   const label = options.label ?? 'release artifact';
@@ -338,6 +358,7 @@ function snapshotRegularFile(
     const chunks: Buffer[] = [];
     let bytesRead = 0;
     while (bytesRead < expectedBytes) {
+      requireBeforeRuntimeReleaseObservationDeadline(observation, label);
       const length = Math.min(READ_CHUNK_BYTES, expectedBytes - bytesRead);
       const chunk = Buffer.allocUnsafe(length);
       const count = readSync(fd, chunk, 0, length, bytesRead);
@@ -347,6 +368,7 @@ function snapshotRegularFile(
       if (options.captureBytes) chunks.push(bytes);
       bytesRead += count;
     }
+    requireBeforeRuntimeReleaseObservationDeadline(observation, label);
     const growthProbe = Buffer.allocUnsafe(1);
     if (readSync(fd, growthProbe, 0, 1, expectedBytes) !== 0) {
       throw new Error('release artifact grew during read');
@@ -354,6 +376,7 @@ function snapshotRegularFile(
 
     const openedAfter = fstatSync(fd, { bigint: true });
     const after = lstatSync(absolutePath, { bigint: true });
+    requireBeforeRuntimeReleaseObservationDeadline(observation, label);
     if (!sameSnapshot(openedBefore, openedAfter) || !sameSnapshot(openedAfter, after) ||
       realpathSync(absolutePath) !== realBefore) {
       throw new Error('release artifact changed during read');
@@ -381,7 +404,9 @@ function canonicalPackageRoot(packageRoot: string): string {
 function directoryObservation(
   packageRoot: string,
   relativePath: string,
+  observation?: RuntimeReleaseObservationDeadline,
 ): { identity: string; path: string; realPath: string } {
+  requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest');
   const absolutePath = relativePath === '.' ? packageRoot : join(packageRoot, ...relativePath.split('/'));
   const stat = lstatSync(absolutePath, { bigint: true });
   if (!stat.isDirectory() || stat.isSymbolicLink()) {
@@ -401,7 +426,12 @@ function admitArtifact(
   budget: DiscoveryBudget,
   paths: string[],
   focusedLimit?: { label: string; maxBytes: number },
+  observation?: RuntimeReleaseObservationDeadline,
 ): void {
+  requireBeforeRuntimeReleaseObservationDeadline(
+    observation,
+    focusedLimit?.label ?? 'release artifact',
+  );
   if (!isReleasePath(relativePath)) throw new Error('release artifact path is invalid');
   const absolutePath = join(packageRoot, ...relativePath.split('/'));
   const stat = lstatSync(absolutePath, { bigint: true });
@@ -419,7 +449,10 @@ function admitArtifact(
   paths.push(relativePath);
 }
 
-function discoverReleaseLayout(packageRoot: string): ReleaseLayout {
+function discoverReleaseLayout(
+  packageRoot: string,
+  observation?: RuntimeReleaseObservationDeadline,
+): ReleaseLayout {
   const directories = new Map<string, { identity: string; path: string; realPath: string }>();
   const paths: string[] = [];
   const budget: DiscoveryBudget = { artifacts: 0, directories: 0, totalBytes: 0 };
@@ -428,7 +461,7 @@ function discoverReleaseLayout(packageRoot: string): ReleaseLayout {
     if (!directories.has(relativePath)) {
       budget.directories += 1;
       if (budget.directories > MAX_DIRECTORIES) throw new Error('release directory count exceeds limit');
-      directories.set(relativePath, directoryObservation(packageRoot, relativePath));
+      directories.set(relativePath, directoryObservation(packageRoot, relativePath, observation));
     }
   };
 
@@ -438,15 +471,16 @@ function discoverReleaseLayout(packageRoot: string): ReleaseLayout {
   admitArtifact(packageRoot, PACKAGE_MANIFEST_PATH, budget, paths, {
     label: PACKAGE_MANIFEST_PATH,
     maxBytes: MAX_PACKAGE_MANIFEST_BYTES,
-  });
+  }, observation);
   admitArtifact(packageRoot, LOCKFILE_PATH, budget, paths, {
     label: LOCKFILE_PATH,
     maxBytes: MAX_LOCKFILE_BYTES,
-  });
-  admitArtifact(packageRoot, LAUNCHER_PATH, budget, paths);
-  admitArtifact(packageRoot, VERIFIER_RUNNER_PATH, budget, paths);
+  }, observation);
+  admitArtifact(packageRoot, LAUNCHER_PATH, budget, paths, undefined, observation);
+  admitArtifact(packageRoot, VERIFIER_RUNNER_PATH, budget, paths, undefined, observation);
 
   const visitRuntime = (relativeDirectory: string, depth: number): void => {
+    requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest');
     if (depth > MAX_TRAVERSAL_DEPTH) throw new Error('runtime traversal depth exceeds limit');
     observeDirectory(relativeDirectory);
     const before = directories.get(relativeDirectory)!;
@@ -455,6 +489,7 @@ function discoverReleaseLayout(packageRoot: string): ReleaseLayout {
     const directory = opendirSync(absoluteDirectory);
     try {
       for (;;) {
+        requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest');
         const entry = directory.readSync();
         if (entry === null) break;
         if (entries.length >= MAX_DIRECTORY_ENTRIES) {
@@ -467,15 +502,18 @@ function discoverReleaseLayout(packageRoot: string): ReleaseLayout {
     }
     entries.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
     for (const entry of entries) {
+      requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest');
       const relativePath = `${relativeDirectory}/${entry.name}`;
       const absolutePath = join(packageRoot, ...relativePath.split('/'));
       const stat = lstatSync(absolutePath);
       if (stat.isSymbolicLink()) throw new Error('runtime tree contains a symlink');
       if (stat.isDirectory()) visitRuntime(relativePath, depth + 1);
-      else if (stat.isFile()) admitArtifact(packageRoot, relativePath, budget, paths);
+      else if (stat.isFile()) {
+        admitArtifact(packageRoot, relativePath, budget, paths, undefined, observation);
+      }
       else throw new Error('runtime tree contains a non-file entry');
     }
-    const after = directoryObservation(packageRoot, relativeDirectory);
+    const after = directoryObservation(packageRoot, relativeDirectory, observation);
     if (canonicalJson(before) !== canonicalJson(after)) {
       throw new Error('release directory changed during traversal');
     }
@@ -486,10 +524,15 @@ function discoverReleaseLayout(packageRoot: string): ReleaseLayout {
   return { directories, paths: paths.sort() };
 }
 
-function scanJsonString(raw: string, cursor: { index: number }): string {
+function scanJsonString(
+  raw: string,
+  cursor: { index: number },
+  checkpoint: () => void,
+): string {
   const start = cursor.index;
   cursor.index += 1;
   while (cursor.index < raw.length) {
+    checkpoint();
     const char = raw[cursor.index]!;
     if (char === '\\') {
       cursor.index += 2;
@@ -501,18 +544,31 @@ function scanJsonString(raw: string, cursor: { index: number }): string {
   throw new SyntaxError('unterminated JSON string');
 }
 
-function jsonHasDuplicateObjectKeys(raw: string): boolean {
+function jsonHasDuplicateObjectKeys(
+  raw: string,
+  observation?: RuntimeReleaseObservationDeadline,
+): boolean {
   const cursor = { index: 0 };
   let duplicate = false;
+  let nextDeadlineCheck = 0;
+  const checkpoint = (): void => {
+    if (cursor.index < nextDeadlineCheck) return;
+    requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release JSON');
+    nextDeadlineCheck = cursor.index + 4_096;
+  };
   const skipWhitespace = (): void => {
-    while (/\s/u.test(raw[cursor.index] ?? '')) cursor.index += 1;
+    while (/\s/u.test(raw[cursor.index] ?? '')) {
+      checkpoint();
+      cursor.index += 1;
+    }
   };
   const scanValue = (depth: number): void => {
+    checkpoint();
     if (depth > MAX_JSON_NESTING_DEPTH) throw new SyntaxError('JSON nesting depth exceeded');
     skipWhitespace();
     const char = raw[cursor.index];
     if (char === '"') {
-      scanJsonString(raw, cursor);
+      scanJsonString(raw, cursor, checkpoint);
       return;
     }
     if (char === '{') {
@@ -526,7 +582,7 @@ function jsonHasDuplicateObjectKeys(raw: string): boolean {
       for (;;) {
         skipWhitespace();
         if (raw[cursor.index] !== '"') throw new SyntaxError('JSON object key expected');
-        const key = scanJsonString(raw, cursor);
+        const key = scanJsonString(raw, cursor, checkpoint);
         if (keys.has(key)) duplicate = true;
         keys.add(key);
         skipWhitespace();
@@ -550,6 +606,7 @@ function jsonHasDuplicateObjectKeys(raw: string): boolean {
         return;
       }
       for (;;) {
+        checkpoint();
         scanValue(depth + 1);
         skipWhitespace();
         if (raw[cursor.index] === ']') {
@@ -562,6 +619,7 @@ function jsonHasDuplicateObjectKeys(raw: string): boolean {
     }
     const start = cursor.index;
     while (cursor.index < raw.length && !/[\s,}\]]/u.test(raw[cursor.index]!)) {
+      checkpoint();
       cursor.index += 1;
     }
     if (cursor.index === start) throw new SyntaxError('JSON value expected');
@@ -572,22 +630,31 @@ function jsonHasDuplicateObjectKeys(raw: string): boolean {
   return duplicate;
 }
 
-function parseJsonBytes(bytes: Buffer, label: string): Record<string, unknown> {
+function parseJsonBytes(
+  bytes: Buffer,
+  label: string,
+  observation?: RuntimeReleaseObservationDeadline,
+): Record<string, unknown> {
+  requireBeforeRuntimeReleaseObservationDeadline(observation, label);
   const text = bytes.toString('utf8');
   if (!Buffer.from(text, 'utf8').equals(bytes)) throw new Error(`${label} is not valid UTF-8`);
   let duplicateKeys: boolean;
   try {
-    duplicateKeys = jsonHasDuplicateObjectKeys(text);
-  } catch {
+    duplicateKeys = jsonHasDuplicateObjectKeys(text, observation);
+  } catch (error) {
+    if (error instanceof RuntimeReleaseObservationDeadlineExceededError) throw error;
     throw new Error(`${label} is not valid JSON`);
   }
   if (duplicateKeys) throw new Error(`${label} contains duplicate object keys`);
   let parsed: unknown;
   try {
+    requireBeforeRuntimeReleaseObservationDeadline(observation, label);
     parsed = JSON.parse(text);
-  } catch {
+  } catch (error) {
+    if (error instanceof RuntimeReleaseObservationDeadlineExceededError) throw error;
     throw new Error(`${label} is not valid JSON`);
   }
+  requireBeforeRuntimeReleaseObservationDeadline(observation, label);
   if (!isPlainRecord(parsed)) throw new Error(`${label} must be a JSON object`);
   return parsed;
 }
@@ -633,14 +700,20 @@ function completeReleaseScan(
   packageRoot: string,
   expectedPackageName: string,
   interpreterPath: string,
+  observation?: RuntimeReleaseObservationDeadline,
+  afterLayoutDiscovery?: () => void,
 ): ReleaseSnapshot {
-  const layout = discoverReleaseLayout(packageRoot);
+  requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest');
+  const layout = discoverReleaseLayout(packageRoot, observation);
+  afterLayoutDiscovery?.();
+  requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest scan');
   const artifacts: UnsignedRuntimeReleaseArtifact[] = [];
   const artifactIdentities: Array<{ identity: string; path: string }> = [];
   let packageBytes: Buffer | undefined;
   let lockBytes: Buffer | undefined;
   let totalBytes = 0;
   for (const relativePath of layout.paths) {
+    requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest scan');
     const focused = relativePath === PACKAGE_MANIFEST_PATH
       ? { label: PACKAGE_MANIFEST_PATH, maxBytes: MAX_PACKAGE_MANIFEST_BYTES }
       : relativePath === LOCKFILE_PATH
@@ -650,7 +723,7 @@ function completeReleaseScan(
       anchorPath: packageRoot,
       captureBytes: relativePath === PACKAGE_MANIFEST_PATH || relativePath === LOCKFILE_PATH,
       ...focused,
-    });
+    }, observation);
     totalBytes += snapshot.size;
     if (totalBytes > MAX_RELEASE_BYTES) throw new Error('release artifacts exceed total byte limit');
     if (relativePath === PACKAGE_MANIFEST_PATH) packageBytes = snapshot.bytes;
@@ -665,20 +738,27 @@ function completeReleaseScan(
   }
 
   if (!packageBytes || !lockBytes) throw new Error('release package identity files are missing');
-  const pkg = packageIdentity(parseJsonBytes(packageBytes, PACKAGE_MANIFEST_PATH), expectedPackageName);
+  requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest scan');
+  const pkg = packageIdentity(
+    parseJsonBytes(packageBytes, PACKAGE_MANIFEST_PATH, observation),
+    expectedPackageName,
+  );
+  requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest scan');
   const lockfileVersion = lockfileIdentity(
-    parseJsonBytes(lockBytes, LOCKFILE_PATH),
+    parseJsonBytes(lockBytes, LOCKFILE_PATH, observation),
     pkg.name,
     pkg.version,
   );
+  requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest scan');
   const interpreter = snapshotRegularFile(interpreterPath, {
     label: 'declared interpreter artifact',
     maxBytes: MAX_INTERPRETER_BYTES,
-  });
+  }, observation);
   const directories = [...layout.directories.values()]
     .sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
   for (const before of directories) {
-    const after = directoryObservation(packageRoot, before.path);
+    requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest scan');
+    const after = directoryObservation(packageRoot, before.path, observation);
     if (canonicalJson(before) !== canonicalJson(after)) {
       throw new Error('release directory changed during complete scan');
     }
@@ -699,12 +779,29 @@ function coherentReleaseSnapshot(
   expectedPackageName: string,
   interpreterPath: string,
   afterFirstScan?: () => void,
+  afterLayoutDiscovery?: (scan: 'first' | 'second') => void,
+  observation?: RuntimeReleaseObservationDeadline,
 ): ReleaseSnapshot {
   // This rejects incoherent observations; it cannot prevent mutation after
   // return. Installation authority still requires immutable staged bytes.
-  const first = completeReleaseScan(packageRoot, expectedPackageName, interpreterPath);
+  requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest first scan');
+  const first = completeReleaseScan(
+    packageRoot,
+    expectedPackageName,
+    interpreterPath,
+    observation,
+    () => afterLayoutDiscovery?.('first'),
+  );
   afterFirstScan?.();
-  const second = completeReleaseScan(packageRoot, expectedPackageName, interpreterPath);
+  requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest second scan');
+  const second = completeReleaseScan(
+    packageRoot,
+    expectedPackageName,
+    interpreterPath,
+    observation,
+    () => afterLayoutDiscovery?.('second'),
+  );
+  requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest');
   if (canonicalJson(first) !== canonicalJson(second)) {
     throw new Error('release changed between complete scans');
   }
@@ -917,8 +1014,10 @@ function validateManifestShape(value: unknown): UnsignedRuntimeReleaseManifest {
 
 export function buildUnsignedRuntimeReleaseManifest(
   options: BuildUnsignedRuntimeReleaseManifestOptions,
+  observation?: RuntimeReleaseObservationDeadline,
 ): BuildUnsignedRuntimeReleaseManifestResult {
   try {
+    requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest');
     const packageRoot = canonicalPackageRoot(options.packageRoot);
     const expectedPackageName = options.expectedPackageName ?? '@ashlr/hub';
     if (!isBoundedText(expectedPackageName, 256)) {
@@ -942,18 +1041,16 @@ export function buildUnsignedRuntimeReleaseManifest(
     if (!NODE_VERSION_RE.test(interpreterVersion)) {
       return { ok: false, reason: 'declared interpreter version is invalid' };
     }
-    const internal = options as BuildUnsignedRuntimeReleaseManifestOptions & {
-      __testHooks?: { afterFirstCompleteScan?: () => void };
-    };
-    const afterFirstScan = process.env['VITEST'] === 'true'
-      ? internal.__testHooks?.afterFirstCompleteScan
-      : undefined;
+    const testHooks = manifestTestHooks(options);
     const release = coherentReleaseSnapshot(
       packageRoot,
       expectedPackageName,
       interpreterPath,
-      afterFirstScan,
+      testHooks?.afterFirstCompleteScan,
+      testHooks?.afterReleaseLayoutDiscovery,
+      observation,
     );
+    requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest');
     const packageArtifact = artifactByPath(release.artifacts, PACKAGE_MANIFEST_PATH);
     const lockArtifact = artifactByPath(release.artifacts, LOCKFILE_PATH);
     const payload: Omit<UnsignedRuntimeReleaseManifest, 'manifestDigest'> = {
@@ -1005,6 +1102,7 @@ export function buildUnsignedRuntimeReleaseManifest(
       ...payload,
       manifestDigest: manifestDigest(payload),
     };
+    requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest');
     const encoded = `${canonicalJson(manifest)}\n`;
     if (Buffer.byteLength(encoded, 'utf8') > MAX_MANIFEST_BYTES) {
       return { ok: false, reason: 'generated runtime release manifest exceeds byte limit' };
@@ -1053,22 +1151,41 @@ export function parseUnsignedRuntimeReleaseManifest(
 
 export function verifyUnsignedRuntimeReleaseManifest(
   options: VerifyUnsignedRuntimeReleaseManifestOptions,
+  observation?: RuntimeReleaseObservationDeadline,
 ): VerifyUnsignedRuntimeReleaseManifestResult {
+  try {
+    requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest verification');
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+  }
   const parsed = parseUnsignedRuntimeReleaseManifest(options.manifest);
   if (!parsed.ok) return parsed;
+  try {
+    requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest verification');
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+  }
   if (options.expectedManifestDigest !== undefined &&
     !equalDigest(parsed.manifest.manifestDigest, options.expectedManifestDigest)) {
     return { ok: false, reason: 'runtime release manifest does not match expected digest' };
   }
-  const rebuilt = buildUnsignedRuntimeReleaseManifest({
+  const testHooks = manifestTestHooks(options);
+  const rebuildOptions = {
     packageRoot: options.packageRoot,
     declaredInterpreterPath: options.declaredInterpreterPath,
     declaredInterpreterVersion: options.declaredInterpreterVersion,
     expectedRevision: options.expectedRevision,
     expectedPackageName: options.expectedPackageName,
     declaredRollbackTargetDigest: options.declaredRollbackTargetDigest,
-  });
+    ...(testHooks ? { __testHooks: testHooks } : {}),
+  } as BuildUnsignedRuntimeReleaseManifestOptions;
+  const rebuilt = buildUnsignedRuntimeReleaseManifest(rebuildOptions, observation);
   if (!rebuilt.ok) return rebuilt;
+  try {
+    requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest verification');
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+  }
   if (rebuilt.canonicalJson !== parsed.canonicalJson) {
     return { ok: false, reason: 'runtime release contents do not match manifest' };
   }
