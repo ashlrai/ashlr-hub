@@ -4,6 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const recordDecision = vi.fn();
+const shared = vi.hoisted(() => ({
+  diff: `diff --git a/src/fix.ts b/src/fix.ts\n${Array.from({ length: 20 }, (_, i) => `+const value${i} = ${i};`).join('\n')}`,
+}));
 
 vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
   recordDecision,
@@ -27,7 +30,7 @@ vi.mock('../src/core/sandbox/worktree.js', async (importOriginal) => {
     ...real,
     sandboxDiff: () => ({
       files: 1,
-      patch: `diff --git a/src/fix.ts b/src/fix.ts\n${Array.from({ length: 20 }, (_, i) => `+const value${i} = ${i};`).join('\n')}`,
+      patch: shared.diff,
       insertions: 20,
       deletions: 0,
     }),
@@ -100,9 +103,16 @@ describe('M259 diff dedup producer credit', () => {
       kind: 'patch',
       title: 'original producer',
       summary: 'original producer summary',
-      diff: 'original diff bytes',
+      diff: shared.diff,
       diffHash: 'shared-diff-hash',
       runId: 'run-original',
+      trajectoryId: 'run:run-original',
+      runEventSummary: {
+        runId: 'run-original',
+        status: 'done',
+        outcome: 'filed',
+        proposalCreated: true,
+      },
       workItemId: '/tmp/repo:issue:original',
       workSource: 'issue',
       engineModel: 'claude:claude-sonnet-5',
@@ -129,6 +139,7 @@ describe('M259 diff dedup producer credit', () => {
     expect(result.proposalOutcome).toMatchObject({
       kind: 'proposal-disabled',
       reason: `duplicate diff skipped; existing pending proposal ${existing.id} remains authoritative`,
+      proposalId: existing.id,
     });
     expect(recordDecision).not.toHaveBeenCalled();
     expect(loadProposal(existing.id)).toMatchObject({
@@ -150,9 +161,16 @@ describe('M259 diff dedup producer credit', () => {
       kind: 'patch',
       title: 'first direct producer',
       summary: 'first direct producer summary',
-      diff: 'original diff bytes',
+      diff: shared.diff,
       diffHash: 'shared-diff-hash',
       runId: 'run-first-direct',
+      trajectoryId: 'run:run-first-direct',
+      runEventSummary: {
+        runId: 'run-first-direct',
+        status: 'done',
+        outcome: 'filed',
+        proposalCreated: true,
+      },
       workItemId: '/tmp/repo:issue:first-direct',
       workSource: 'issue',
       engineModel: 'claude:claude-sonnet-5',
@@ -181,6 +199,7 @@ describe('M259 diff dedup producer credit', () => {
     expect(result.proposalOutcome).toMatchObject({
       kind: 'proposal-disabled',
       reason: `duplicate diff skipped; existing pending proposal ${existing.id} remains authoritative`,
+      proposalId: existing.id,
     });
     expect(recordDecision).not.toHaveBeenCalled();
     expect(loadProposal(existing.id)).toMatchObject({

@@ -21,14 +21,38 @@
  * strings on dynamic imports — mirrors m117.api-model-dispatch.test.ts.
  */
 
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  hashDiff,
+  signPendingProposalAuthorityV1,
+  signProvenance,
+} from '../src/core/foundry/provenance.js';
+import { canonicalFilesystemPathIdentity } from '../src/core/sandbox/policy.js';
 
 // ---------------------------------------------------------------------------
 // Shared fixtures
 // ---------------------------------------------------------------------------
 
 const MOCK_REPO = '/tmp/fake-repo';
+const mockPersistedProposals = new Map<string, import('../src/core/types.js').Proposal>();
+const originalHome = process.env.HOME;
+let testHome: string;
+
+beforeEach(() => {
+  testHome = mkdtempSync(join(tmpdir(), 'ashlr-best-of-n-m142-'));
+  process.env.HOME = testHome;
+});
+
+afterEach(() => {
+  vi.resetModules();
+  if (originalHome === undefined) delete process.env.HOME;
+  else process.env.HOME = originalHome;
+  rmSync(testHome, { recursive: true, force: true });
+});
 
 function makeItem(overrides: Partial<{
   id: string; repo: string; title: string; detail: string;
@@ -67,13 +91,63 @@ function makeSandboxMock(opts: {
     const idx = callCount++;
     if (opts.throwAt?.includes(idx)) throw new Error(`sandbox error at ${idx}`);
     const hasProposal = !opts.withProposalAt || opts.withProposalAt.includes(idx);
+    const proposalId = hasProposal ? `proposal-${idx}` : undefined;
+    const runId = String(runOpts['runId'] ?? `run-${idx}`);
+    const proposalOutcome = proposalId
+      ? {
+          kind: 'filed' as const,
+          reason: 'proposal filed',
+          proposalId,
+          files: 1,
+          insertions: 1,
+          deletions: 0,
+        }
+      : undefined;
+    if (proposalId) {
+      const persistedDiff = `diff content for candidate ${idx}`;
+      const diffHash = hashDiff(persistedDiff);
+      const engineModel = 'local-coder:mock-model';
+      const engineTier = 'mid' as const;
+      const proposal: import('../src/core/types.js').Proposal = {
+        id: proposalId,
+        repo: canonicalFilesystemPathIdentity(String(runOpts['sourceRepo'] ?? MOCK_REPO), { foldWindowsCase: false }),
+        origin: 'agent',
+        kind: 'patch',
+        title: `candidate ${idx}`,
+        summary: `candidate ${idx}`,
+        diff: persistedDiff,
+        diffHash,
+        provenanceSig: signProvenance(engineModel, engineTier, diffHash),
+        engineModel,
+        engineTier,
+        runId,
+        trajectoryId: `run:${runId}`,
+        workItemId: runOpts['workItemId'] as string | undefined,
+        workItemGenerationId: runOpts['workItemGenerationId'] as string | undefined,
+        status: 'pending',
+        createdAt: new Date().toISOString(),
+        runEventSummary: {
+          runId,
+          status: 'done',
+          outcome: 'filed',
+          proposalCreated: true,
+          proposalId,
+        },
+        producerStatus: 'done',
+      };
+      proposal.pendingAuthorityVersion = 1;
+      proposal.pendingAuthoritySig = signPendingProposalAuthorityV1(proposal);
+      mockPersistedProposals.set(proposalId, proposal);
+    }
     return {
       state: {
-        id: runOpts['runId'] ?? `run-${idx}`,
+        id: runId,
         status: 'done',
         result: hasProposal ? `diff content for candidate ${idx}` : '',
+        ...(proposalOutcome ? { proposalOutcome } : {}),
       },
-      proposalId: hasProposal ? `proposal-${idx}` : undefined,
+      proposalId,
+      ...(proposalOutcome ? { proposalOutcome } : {}),
     };
   });
 }
@@ -82,9 +156,13 @@ function mockSandboxedEngine(
   apiSandboxMock: ReturnType<typeof vi.fn>,
   engineSandboxMock: ReturnType<typeof vi.fn> = vi.fn(),
 ) {
+  mockPersistedProposals.clear();
   vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
     runApiModelSandboxed: apiSandboxMock,
     runEngineSandboxed: engineSandboxMock,
+  }));
+  vi.doMock('../src/core/inbox/store.js', () => ({
+    loadProposal: vi.fn((id: string) => mockPersistedProposals.get(id) ?? null),
   }));
 }
 
@@ -126,8 +204,6 @@ describe('M142 — EXPORT', () => {
 // ---------------------------------------------------------------------------
 
 describe('M142 — N=1 parity (flag-off)', () => {
-  afterEach(() => { vi.resetModules(); });
-
   it('N=1 produces exactly one candidate and uses it as winner when non-empty', async () => {
     const sandboxMock = makeSandboxMock({ withProposalAt: [0] });
 
@@ -454,12 +530,12 @@ describe('M142 — daemon routing alignment', () => {
     );
   });
 
-  it('judges the persisted proposal diff instead of sandbox stdout', async () => {
-    const sandboxMock = makeSandboxMock({ withProposalAt: [0] });
+  it('rejects tampered persisted bytes and continues to a later durable candidate', async () => {
+    const sandboxMock = makeSandboxMock({ withProposalAt: [0, 1] });
     const judgeMock = vi.fn(async (proposal: { diff?: string }) => ({
       proposalId: 'verdict-real-diff',
       verdict: 'ship' as const,
-      value: proposal.diff === 'REAL_PROPOSAL_DIFF' ? 5 : 1,
+      value: proposal.diff === 'TAMPERED_PROPOSAL_DIFF' ? 5 : 1,
       correctness: 5,
       scope: 1,
       alignment: 5,
@@ -472,29 +548,28 @@ describe('M142 — daemon routing alignment', () => {
       judgeProposal: judgeMock,
     }));
     vi.doMock('../src/core/inbox/store.js', () => ({
-      loadProposal: vi.fn((id: string) => ({
-        id,
-        repo: MOCK_REPO,
-        origin: 'agent',
-        kind: 'patch',
-        title: 'Persisted proposal',
-        summary: 'stored diff',
-        diff: 'REAL_PROPOSAL_DIFF',
-        status: 'pending',
-        createdAt: '2026-07-02T00:00:00.000Z',
-        updatedAt: '2026-07-02T00:00:00.000Z',
-      })),
+      loadProposal: vi.fn((id: string) => {
+        const persisted = mockPersistedProposals.get(id);
+        return persisted && id === 'proposal-0'
+          ? { ...persisted, diff: 'TAMPERED_PROPOSAL_DIFF' }
+          : persisted ?? null;
+      }),
     }));
 
     const { runBestOfN } = await import('../src/core/run/best-of-n.js?realdiff=' + randomUUID());
-    const result = await runBestOfN(makeItem(), makeConfig(1), { n: 1 });
+    const result = await runBestOfN(makeItem(), makeConfig(2), { n: 2 });
 
     expect(judgeMock).toHaveBeenCalledWith(
-      expect.objectContaining({ diff: 'REAL_PROPOSAL_DIFF' }),
+      expect.objectContaining({ diff: 'TAMPERED_PROPOSAL_DIFF' }),
       expect.any(Object),
       expect.any(Object),
       { recordTrace: false },
     );
-    expect(result.winner?.diff).toBe('REAL_PROPOSAL_DIFF');
+    expect(result.winner?.proposalId).toBe('proposal-1');
+    expect(result.winner?.diff).toBe('diff content for candidate 1');
+    expect(result.candidates[0]).toMatchObject({
+      proposalOutcome: { kind: 'proposal-capture-error', proposalId: 'proposal-0' },
+    });
+    expect(result.candidates[0]?.proposalId).toBeUndefined();
   });
 });

@@ -303,6 +303,7 @@ function duplicateDiffOutcome(proposal: Proposal, diff: SandboxDiff): RunProposa
     'proposal-disabled',
     `duplicate diff skipped; existing pending proposal ${proposal.id} remains authoritative`,
     diff,
+    proposal.id,
   );
 }
 
@@ -1164,6 +1165,7 @@ export async function captureSandboxedProposal(
       ...(opts.workItemGenerationId ? { workItemGenerationId: opts.workItemGenerationId } : {}),
       workSource: opts.workSource,
       runId: id,
+      producerStatus,
       engineModel,
       engineTier: tier,
       ...(reviewOnlyVerifyResult ? { verifyResult: reviewOnlyVerifyResult } : {}),

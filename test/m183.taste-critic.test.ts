@@ -32,6 +32,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { AshlrConfig } from '../src/core/types.js';
+import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
 
 // ---------------------------------------------------------------------------
 // HOME isolation
@@ -128,13 +129,83 @@ function makeSandboxMock(withProposalAt: number[] = [0, 1, 2]) {
   return vi.fn(async (_engine: unknown, _goal: unknown, _cfg: unknown, runOpts: Record<string, unknown>) => {
     const idx = callCount++;
     const hasProposal = withProposalAt.includes(idx);
+    const runId = String(runOpts['runId'] ?? `run-${idx}`);
+    const diff = `diff content for candidate ${idx}`;
+    let proposalId: string | undefined;
+    if (hasProposal) {
+      const { createProposal } = await import('../src/core/inbox/store.js');
+      const engineModel = 'local-coder:mock-model';
+      const engineTier = 'mid' as const;
+      const diffHash = hashDiff(diff);
+      const proposal = createProposal({
+        repo: String(runOpts['sourceRepo'] ?? MOCK_REPO),
+        origin: 'agent',
+        kind: 'patch',
+        title: `candidate ${idx}`,
+        summary: `candidate ${idx}`,
+        diff,
+        diffHash,
+        provenanceSig: signProvenance(engineModel, engineTier, diffHash),
+        engineModel,
+        engineTier,
+        runId,
+        trajectoryId: `run:${runId}`,
+        workItemId: runOpts['workItemId'] as string | undefined,
+        workItemGenerationId: runOpts['workItemGenerationId'] as string | undefined,
+        runEventSummary: {
+          runId,
+          status: 'done',
+          outcome: 'filed',
+          proposalCreated: true,
+        },
+      });
+      if (proposal.status !== 'pending' || !proposal.pendingAuthoritySig) {
+        throw new Error(`failed to persist current proposal authority for candidate ${idx}`);
+      }
+      proposalId = proposal.id;
+    }
+    const proposalOutcome = proposalId
+      ? {
+          kind: 'filed' as const,
+          reason: 'proposal filed',
+          proposalId,
+          files: 1,
+          insertions: 1,
+          deletions: 0,
+        }
+      : undefined;
     return {
       state: {
-        id: runOpts['runId'] ?? `run-${idx}`,
+        id: runId,
         status: 'done',
-        result: hasProposal ? `diff content for candidate ${idx}` : '',
+        result: hasProposal ? diff : '',
+        ...(proposalOutcome ? { proposalOutcome } : {}),
       },
-      proposalId: hasProposal ? `proposal-${idx}` : undefined,
+      proposalId,
+      ...(proposalOutcome ? { proposalOutcome } : {}),
+    };
+  });
+}
+
+/** Historical fixture shape: a caller-claimed id with no durable authority. */
+function makeProposalIdOnlySandboxMock() {
+  return vi.fn(async (_engine: unknown, _goal: unknown, _cfg: unknown, runOpts: Record<string, unknown>) => {
+    const runId = String(runOpts['runId'] ?? 'legacy-run');
+    const proposalId = 'legacy-unpersisted-proposal';
+    const proposalOutcome = {
+      kind: 'filed' as const,
+      reason: 'legacy caller claimed proposal filed',
+      proposalId,
+    };
+    return {
+      state: {
+        id: runId,
+        status: 'done',
+        result: 'legacy diff content',
+        proposalOutcome,
+      },
+      proposalId,
+      proposalOutcome,
     };
   });
 }
@@ -488,6 +559,32 @@ describe('M183 — best-of-N prefers highest taste when tasteCritic=true', () =>
 
     // Called exactly twice (candidates with proposalIds: 0 and 2)
     expect(tasteMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps proposal-id-only legacy sandbox results observational', async () => {
+    const sandboxMock = makeProposalIdOnlySandboxMock();
+    const judgeMock = makeJudgeMock([16]);
+    const tasteMock = makeTasteMock([5]);
+
+    vi.doMock('../src/core/run/sandboxed-engine.js', () => makeSandboxModule(sandboxMock));
+    vi.doMock('../src/core/fleet/manager.js', () => ({
+      judgeProposal: judgeMock,
+      resolveFrontierJudgeClient: vi.fn(() => null),
+    }));
+    vi.doMock('../src/core/fleet/taste-critic.js', () => ({
+      scoreTaste: tasteMock,
+    }));
+
+    const { runBestOfN } = await import('../src/core/run/best-of-n.js?' + randomUUID());
+    const result = await runBestOfN(makeItem(), makeConfig({ tasteCritic: true }), { n: 1 });
+
+    expect(result.winner).toBeUndefined();
+    expect(result.candidates[0]).toMatchObject({
+      proposalOutcome: {
+        kind: 'proposal-capture-error',
+        proposalId: 'legacy-unpersisted-proposal',
+      },
+    });
   });
 });
 

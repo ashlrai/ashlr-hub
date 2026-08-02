@@ -142,7 +142,7 @@ import {
   type ProposalRepairWorkResult,
 } from '../fleet/proposal-repair-work.js';
 import { reconcileRemoteHandoffs, type RemoteHandoffReconcileResult } from '../inbox/remote-handoff.js';
-import { runBestOfN } from '../run/best-of-n.js';
+import { runBestOfN, type CandidateResult } from '../run/best-of-n.js';
 import { runSelfHealCycle, runSelfHealCycleForRepos } from '../fleet/self-heal.js';
 import { runInventCycle } from '../generative/invent-cycle.js'; // M186
 import { runCounterfactualReplay } from '../fleet/counterfactual.js'; // M187
@@ -157,7 +157,8 @@ import {
 } from '../fleet/monitoring-cursor.js';
 // M212: proactive notifications (fire-and-forget, never throws, never alters control flow)
 import { notifyFleetEvent } from '../comms/events.js';
-import { pendingCount, listProposals, listProposalsDetailed } from '../inbox/store.js';
+import { pendingCount, listProposals, listProposalsDetailed, loadProposal } from '../inbox/store.js';
+import { isAuthoritativeDurablePendingProposal } from '../inbox/pending-authority.js';
 import { authenticatedRealizedMergeOf, realizedMergeOf } from '../inbox/realized-merge.js';
 import {
   dispatchProductionDir,
@@ -2151,11 +2152,138 @@ function candidateErrorDuplicatesProposalOutcome(
     normalizedError === normalizeBestOfNSignal(`${outcome.kind}: ${reason}`);
 }
 
+function bestOfNCandidateProduction(
+  candidate: CandidateResult,
+  authority: {
+    item: WorkItem;
+    workItemGenerationId?: string;
+    cfg: AshlrConfig;
+  },
+): {
+  production: DaemonDispatchProduction;
+  rank?: number;
+} | undefined {
+  const metadata = dispatchProductionFromProposalOutcome(candidate.proposalOutcome);
+  const diff = {
+    ...(metadata?.diffFiles !== undefined ? { diffFiles: metadata.diffFiles } : {}),
+    ...(metadata?.diffLines !== undefined ? { diffLines: metadata.diffLines } : {}),
+  };
+
+  switch (candidate.proposalDisposition?.kind) {
+    case 'verification-rejected':
+      return {
+        production: {
+          outcome: 'gate-blocked',
+          reason: 'deterministic verification rejected candidate draft',
+          ...diff,
+        },
+      };
+    case 'duplicate-owned':
+      if (!isAuthoritativeDurablePendingProposal(
+        loadProposal(candidate.proposalDisposition.proposalId),
+        {
+          id: candidate.proposalDisposition.proposalId,
+          repo: authority.item.repo,
+          origin: 'agent',
+          kind: 'patch',
+          diff: candidate.diff,
+          diffHash: candidate.proposalDisposition.diffHash,
+          workItemId: authority.item.id,
+          workItemGenerationId: authority.workItemGenerationId,
+          isPartial: candidate.proposalOutcome?.isPartial === true,
+        },
+        authority.cfg,
+      )) {
+        return {
+          production: {
+            outcome: 'proposal-capture-error',
+            proposalId: candidate.proposalDisposition.proposalId,
+            reason: 'duplicate-owned candidate lacked authoritative durable pending proposal evidence',
+            ...diff,
+          },
+          rank: 650,
+        };
+      }
+      return {
+        production: {
+          outcome: 'proposal-disabled',
+          proposalId: candidate.proposalDisposition.proposalId,
+          reason: `duplicate diff skipped; existing pending proposal ${candidate.proposalDisposition.proposalId} remains authoritative`,
+          ...diff,
+        },
+        rank: 675,
+      };
+    case 'capture-missing':
+      return {
+        production: {
+          outcome: 'proposal-capture-error',
+          reason: 'capture-missing: winning candidate diff was neither filed nor durably deduplicated',
+          ...diff,
+        },
+      };
+    default:
+      break;
+  }
+
+  if (!metadata) return undefined;
+  if (metadata.outcome !== 'proposal-created') return { production: metadata };
+  if (!candidate.proposalId || metadata.proposalId !== candidate.proposalId) {
+    return {
+      production: {
+        outcome: 'unknown',
+        reason: 'filed candidate lacked matching durable proposal identity',
+        ...diff,
+      },
+    };
+  }
+  const persisted = loadProposal(candidate.proposalId);
+  const candidateRunId = candidate.runId;
+  const candidateTrajectoryId = candidate.trajectoryId ?? (candidateRunId ? `run:${candidateRunId}` : undefined);
+  if (
+    !candidateRunId ||
+    !candidateTrajectoryId ||
+    !isAuthoritativeDurablePendingProposal(persisted, {
+      id: candidate.proposalId,
+      repo: authority.item.repo,
+      origin: 'agent',
+      kind: 'patch',
+      runId: candidateRunId,
+      trajectoryId: candidateTrajectoryId,
+      workItemId: authority.item.id,
+      workItemGenerationId: authority.workItemGenerationId,
+      isPartial: candidate.proposalOutcome?.isPartial === true,
+    }, authority.cfg)
+  ) {
+    return {
+      production: {
+        outcome: 'proposal-capture-error',
+        proposalId: candidate.proposalId,
+        reason: 'filed candidate lacked authoritative durable pending proposal evidence',
+        ...diff,
+      },
+      rank: 650,
+    };
+  }
+  return {
+    production: {
+      ...metadata,
+      runId: persisted.runId,
+      trajectoryId: persisted.trajectoryId,
+      runEventSummary: persisted.runEventSummary,
+    },
+  };
+}
+
 function bestOfNAuthoritativeNoWinnerProduction(
   result: BestOfNRunResult,
   n: number,
   runId: string,
   costUsd: number,
+  authority: {
+    item: WorkItem;
+    workItemGenerationId?: string;
+    cfg: AshlrConfig;
+  },
 ): DaemonDispatchProduction | undefined {
   const authorityRank: Record<DaemonDispatchProductionOutcome, number> = {
     'proposal-created': 700,
@@ -2173,19 +2301,35 @@ function bestOfNAuthoritativeNoWinnerProduction(
     rank: number;
     tieBreak: string;
   }> = [];
-  const addAuthority = (production: DaemonDispatchProduction, tieBreak: string): void => {
-    authorities.push({ production, rank: authorityRank[production.outcome], tieBreak });
+  const addAuthority = (
+    production: DaemonDispatchProduction,
+    tieBreak: string,
+    rank = authorityRank[production.outcome],
+  ): void => {
+    authorities.push({ production, rank, tieBreak });
   };
-  const structuredErrorAuthorities = new Map<string, DaemonDispatchProduction>();
+  const structuredErrorAuthorities = new Map<string, {
+    production: DaemonDispatchProduction;
+    candidateIndex: number;
+  }>();
 
   for (const candidate of result.candidates) {
-    const candidateProduction = dispatchProductionFromProposalOutcome(candidate.proposalOutcome);
-    if (candidateProduction) {
-      addAuthority(candidateProduction, `outcome:${candidateProduction.outcome}:${candidateProduction.reason ?? ''}`);
+    const classified = bestOfNCandidateProduction(candidate, authority);
+    const candidateProduction = classified?.production;
+    if (candidateProduction && classified) {
+      addAuthority(
+        candidateProduction,
+        `outcome:${candidateProduction.outcome}:${candidateProduction.reason ?? ''}:candidate:${String(candidate.index).padStart(8, '0')}`,
+        classified.rank,
+      );
     }
     const error = candidate.error?.trim();
     if (error && candidateProduction && candidateErrorDuplicatesProposalOutcome(error, candidate.proposalOutcome)) {
-      structuredErrorAuthorities.set(normalizeBestOfNSignal(error), candidateProduction);
+      const key = normalizeBestOfNSignal(error);
+      const existing = structuredErrorAuthorities.get(key);
+      if (!existing || candidate.index < existing.candidateIndex) {
+        structuredErrorAuthorities.set(key, { production: candidateProduction, candidateIndex: candidate.index });
+      }
     }
     if (
       error &&
@@ -2198,9 +2342,15 @@ function bestOfNAuthoritativeNoWinnerProduction(
   for (const entry of result.critique.noProposalReasons ?? []) {
     const reason = entry.reason.trim();
     if (!reason || reason === 'selection cancelled' || reason === 'cancelled') continue;
-    const structuredAuthority = structuredErrorAuthorities.get(normalizeBestOfNSignal(reason));
+    const structuredAuthority = structuredErrorAuthorities.get(normalizeBestOfNSignal(reason))?.production;
     const outcome = structuredAuthority?.outcome ?? noProposalOutcomeFromReason(reason);
-    addAuthority({ ...(structuredAuthority ?? { outcome }), reason }, `critique:${outcome}:${reason}`);
+    const authoritativeReason = structuredAuthority?.outcome === 'proposal-capture-error'
+      ? structuredAuthority.reason ?? reason
+      : reason;
+    addAuthority(
+      { ...(structuredAuthority ?? { outcome }), reason: authoritativeReason },
+      `critique:${outcome}:${authoritativeReason}`,
+    );
   }
 
   const selected = authorities.sort((left, right) =>
@@ -2210,12 +2360,16 @@ function bestOfNAuthoritativeNoWinnerProduction(
   const reason = selected.reason ?? selected.outcome;
   const failed = selected.outcome === 'engine-failed' || selected.outcome === 'sandbox-failed' ||
     selected.outcome === 'proposal-capture-error';
+  const selectedRunId = selected.runId ?? runId;
+  const selectedTrajectoryId = selected.trajectoryId ?? `run:${selectedRunId}`;
   return {
     ...selected,
-    runId,
+    runId: selectedRunId,
+    trajectoryId: selectedTrajectoryId,
     reason: boundedText(`best-of-${n}: ${reason}`, 220),
     runEventSummary: runEventSummary({
-      runId,
+      ...(selected.runEventSummary ?? {}),
+      runId: selectedRunId,
       status: failed
         ? /\b(aborted|budget)\b/i.test(reason) ? 'aborted' : 'failed'
         : 'done',
@@ -2692,6 +2846,7 @@ function dispatchTrace(
     reason: 'route-selected',
   });
   const runId = fields.production?.runId ?? fields.runId;
+  const trajectoryId = fields.production?.trajectoryId ?? fields.trajectoryId;
   const summary = runEventSummary({
     ...(fields.production?.runEventSummary ?? {}),
     runId,
@@ -2704,7 +2859,7 @@ function dispatchTrace(
     costUsd: fields.spentUsd ?? 0,
   });
   const causal = causalMetadata({
-    trajectoryId: fields.trajectoryId,
+    trajectoryId,
     itemId: item.id,
     proposalId: fields.production?.proposalId,
     runId,
@@ -5195,6 +5350,7 @@ export async function tick(
       let assignedBy = 'preflight';
       let selectedModel: string | null | undefined;
       let dispatch: DaemonDispatchTrace | undefined;
+      let runTrajectoryId = `run:${attemptId}`;
 
       // M334 stage 1: observe-only gateway shadow. Runs the M247 gateway
       // BESIDE the live legacy decision and records the comparison — THE
@@ -5936,6 +6092,7 @@ export async function tick(
               bestOfN,
               attemptId,
               swarmSpent,
+              { item, workItemGenerationId, cfg: routingCfg },
             );
             const cancelled = authoritativeProduction === undefined &&
               (dispatchSignal.aborted === true || bestOfNWasCancelled(bonResult));
@@ -5972,6 +6129,7 @@ export async function tick(
           // Cast to the shape runGoal returns (id, status, usage).
           runState = (bonResult.winner as unknown as { state: Awaited<ReturnType<typeof runGoal>> }).state
             ?? { id: bonResult.winner.proposalId ?? `bon-${Date.now()}`, status: 'done' as const, usage: undefined };
+          runTrajectoryId = bonResult.winner.trajectoryId ?? `run:${runState.id}`;
         } else {
           if (stopRequested()) return stopRequestedOutcome(item, attemptId);
           const launch = beginRejectedCaptureRecoveryDispatch(item, () => {
@@ -6014,7 +6172,7 @@ export async function tick(
                 dispatched: true,
                 spentUsd: swarmSpent,
                 runId: runState.id,
-                trajectoryId: `run:${attemptId}`,
+                trajectoryId: runTrajectoryId,
                 skipReason: 'daemon-lock-lost',
                 production: cancelledDispatchProduction(runState.id, 'daemon lock ownership lost', swarmSpent),
               }),
@@ -6063,7 +6221,7 @@ export async function tick(
                   reason: assignmentReason,
                 },
               },
-              identity: { trajectoryId: `run:${attemptId}`, runId: runState.id },
+              identity: { trajectoryId: runTrajectoryId, runId: runState.id },
               selectedAt: shadowSkillSelectedAt,
               route: {
                 backend: executedBackend,
@@ -6128,6 +6286,13 @@ export async function tick(
               proposalRequired: true,
               evidenceOutcome: runState.evidenceOutcome,
             });
+        if (fanOut && dispatchProduction) {
+          dispatchProduction = {
+            ...dispatchProduction,
+            runId: runState.id,
+            trajectoryId: runTrajectoryId,
+          };
+        }
         dispatchSkipReason = noProposalProductionReason(dispatchProduction);
 
         // M80: subscription-tier runs are not dollar-billed — count $0 toward
@@ -6158,7 +6323,7 @@ export async function tick(
               dispatched: true,
               spentUsd: swarmSpent,
               runId: runState.id,
-              trajectoryId: `run:${attemptId}`,
+              trajectoryId: runTrajectoryId,
               skipReason: 'daemon-lock-lost',
               production: cancelledDispatchProduction(runState.id, 'daemon lock ownership lost', swarmSpent),
             }),
@@ -6209,19 +6374,19 @@ export async function tick(
 	      else process.env['ASHLR_IN_SWARM'] = prevInSwarm;
 	    }
 
-	    dispatch ??= dispatchTrace(item, {
-	      backend,
-	      tier: backendTier,
-	      model: selectedModel,
-	      assignedBy,
-	      reason: assignmentReason,
-	      dispatched,
-	      spentUsd: swarmSpent,
-	      runId: attemptId,
-	      trajectoryId: `run:${attemptId}`,
-	      ...(dispatchSkipReason ? { skipReason: dispatchSkipReason } : {}),
-	      ...(dispatchProduction ? { production: dispatchProduction } : {}),
-	    });
+    dispatch ??= dispatchTrace(item, {
+      backend,
+      tier: backendTier,
+      model: selectedModel,
+      assignedBy,
+      reason: assignmentReason,
+      dispatched,
+      spentUsd: swarmSpent,
+      runId: attemptId,
+      trajectoryId: runTrajectoryId,
+      ...(dispatchSkipReason ? { skipReason: dispatchSkipReason } : {}),
+      ...(dispatchProduction ? { production: dispatchProduction } : {}),
+    });
 
     // M53: anomaly-hold — if run cost > k×p50, hold the proposal PENDING and
     // file a TuningProposal. NEVER auto-apply. This block imports NO

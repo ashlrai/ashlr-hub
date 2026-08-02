@@ -3940,6 +3940,8 @@ export interface Proposal {
   routeSnapshot?: RouteSnapshot;
   /** Metadata-only run summary; never includes prompts, diffs, stdout, or stderr. */
   runEventSummary?: RunEventSummary;
+  /** Exact terminal producer state bound into current pending-proposal authority. */
+  producerStatus?: 'running' | 'done' | 'failed' | 'aborted';
   /** Metadata-only evidence/policy outcome summary for learning joins. */
   evidenceOutcome?: EvidenceOutcomeSummary;
   /** Bounded delegation constraints/expectations; never includes raw prompt/output text. */
@@ -3976,6 +3978,10 @@ export interface Proposal {
   producerProvenanceVersion?: 2;
   /** HMAC for the versioned producer attestation described above. */
   producerProvenanceSig?: string;
+  /** Current signed envelope required for autonomous pending-proposal authority. */
+  pendingAuthorityVersion?: 1;
+  /** HMAC covering the complete immutable pending-proposal authority envelope. */
+  pendingAuthoritySig?: string;
   /** Current lifecycle status. Created as 'pending'; NEVER auto-advances. */
   status: ProposalStatus;
   /** ISO timestamp the proposal was created. */

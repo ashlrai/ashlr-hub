@@ -77,6 +77,8 @@ import type {
 } from '../src/core/types.js';
 import type { DispatchPlan } from '../src/core/fabric/concurrent-dispatch.js';
 import { workItemCoverageKey } from '../src/core/fleet/proposal-matching.js';
+import { deriveCandidateAttemptIdentity } from '../src/core/fleet/attempt-identity.js';
+import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
 
 const privateStorageHarness = vi.hoisted(() => ({
   useSemanticAdapter: false,
@@ -1155,6 +1157,40 @@ function persistProposalRunEventProposalId(
     'utf8',
   );
   return bound;
+}
+
+function createAuthoritativeBestOfNProposal(
+  item: WorkItem,
+  runId: string,
+  workItemGenerationId?: string,
+) {
+  const diff = 'diff --git a/src/best-of-n.ts b/src/best-of-n.ts\n--- a/src/best-of-n.ts\n+++ b/src/best-of-n.ts\n@@ -1 +1 @@\n-old\n+new\n';
+  const diffHash = hashDiff(diff);
+  const engineModel = 'local-coder:mock-model';
+  const engineTier = 'mid' as const;
+  return createProposal({
+    repo: item.repo,
+    origin: 'agent',
+    kind: 'patch',
+    title: 'Authoritative Best-of-N proposal',
+    summary: 'A signed Best-of-N candidate proposal.',
+    diff,
+    diffHash,
+    provenanceSig: signProvenance(engineModel, engineTier, diffHash),
+    engineModel,
+    engineTier,
+    workItemId: item.id,
+    ...(workItemGenerationId ? { workItemGenerationId } : {}),
+    workSource: item.source,
+    runId,
+    trajectoryId: `run:${runId}`,
+    runEventSummary: {
+      runId,
+      status: 'done',
+      outcome: 'filed',
+      proposalCreated: true,
+    },
+  });
 }
 
 /** Enroll a repo and seed buildBacklog with N items. */
@@ -4276,7 +4312,439 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
   );
 
   it.each([false, true])(
-    'A1h2a6b: Best-of-N filed proposals beat failures regardless of candidate order (reversed=%s)',
+    'A1h2a6e: Best-of-N changed-but-unfiled candidates become capture repair diagnostics (reversed=%s)',
+    async (reversed) => {
+      const { items } = enrollWithItems(1);
+      mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'capture fan-out' });
+      mockEngineTierOf.mockReturnValue('mid');
+      const unfiledCandidate = {
+        index: 0,
+        engine: 'local-coder',
+        diff: '',
+        score: 0,
+        proposalOutcome: {
+          kind: 'proposal-disabled',
+          reason: 'proposal filing disabled after sandbox changes',
+          files: 2,
+          insertions: 5,
+        },
+        proposalDisposition: { kind: 'capture-missing' as const },
+        error: 'proposal-disabled: proposal filing disabled after sandbox changes',
+        costUsd: 0.02,
+      };
+      const cancelledCandidate = {
+        index: 1,
+        engine: 'local-coder',
+        diff: '',
+        score: 0,
+        error: 'cancelled',
+        costUsd: 0.01,
+      };
+      mockRunBestOfN.mockResolvedValueOnce({
+        winner: undefined,
+        candidates: reversed
+          ? [cancelledCandidate, unfiledCandidate]
+          : [unfiledCandidate, cancelledCandidate],
+        critique: {
+          n: 2,
+          nonEmpty: 0,
+          judged: 0,
+          topScore: 0,
+          winnerIndex: -1,
+          totalCostUsd: 0.03,
+          billableCostUsd: 0.03,
+          noProposalReasons: [
+            { reason: 'proposal-disabled: proposal filing disabled after sandbox changes', count: 1 },
+            { reason: 'selection cancelled', count: 1 },
+          ],
+        },
+      });
+
+      const result = await tick({
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: { allowedBackends: ['local-coder'], bestOfN: 2 },
+      } as AshlrConfig, { dryRun: false });
+
+      expect(result.dispatches?.[0]?.production).toMatchObject({
+        outcome: 'proposal-capture-error',
+        reason: 'best-of-2: capture-missing: winning candidate diff was neither filed nor durably deduplicated',
+        diffFiles: 2,
+        diffLines: 5,
+        runEventSummary: {
+          status: 'failed',
+          outcome: 'proposal-capture-error',
+          proposalCreated: false,
+          costUsd: 0.03,
+        },
+      });
+      expect(readDispatchProductionEvents({ limit: 1 })[0]).toMatchObject({
+        itemId: items[0]!.id,
+        outcome: 'proposal-capture-error',
+        diffFiles: 2,
+        diffLines: 5,
+        proposalCreated: false,
+        learningLabel: {
+          learningKind: 'diagnostic-no-proposal',
+          policySuppressed: false,
+          diagnosticAttempt: true,
+        },
+      });
+    },
+  );
+
+  it.each([false, true])(
+    'A1h2a6e2: same-class Best-of-N diagnostics use stable candidate identity (reversed=%s)',
+    async (reversed) => {
+      enrollWithItems(1);
+      mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'stable fan-out' });
+      mockEngineTierOf.mockReturnValue('mid');
+      const candidates = [
+        {
+          index: 0,
+          engine: 'local-coder',
+          diff: 'diff --git a/x.ts b/x.ts\n',
+          score: 8,
+          proposalOutcome: {
+            kind: 'proposal-disabled',
+            reason: 'proposal filing disabled for candidate generation',
+            files: 1,
+            insertions: 1,
+            deletions: 0,
+          },
+          proposalDisposition: { kind: 'capture-missing' as const },
+          error: 'proposal-disabled: proposal filing disabled for candidate generation',
+          costUsd: 0.02,
+        },
+        {
+          index: 1,
+          engine: 'local-coder',
+          diff: 'diff --git a/y.ts b/y.ts\n',
+          score: 7,
+          proposalOutcome: {
+            kind: 'proposal-disabled',
+            reason: 'proposal filing disabled for candidate generation',
+            files: 2,
+            insertions: 4,
+            deletions: 0,
+          },
+          proposalDisposition: { kind: 'capture-missing' as const },
+          error: 'proposal-disabled: proposal filing disabled for candidate generation',
+          costUsd: 0.01,
+        },
+      ];
+      mockRunBestOfN.mockResolvedValueOnce({
+        winner: undefined,
+        candidates: reversed ? [...candidates].reverse() : candidates,
+        critique: {
+          n: 2,
+          nonEmpty: 2,
+          judged: 2,
+          topScore: 0,
+          winnerIndex: -1,
+          totalCostUsd: 0.03,
+          billableCostUsd: 0.03,
+          noProposalReasons: [{
+            reason: 'proposal-disabled: proposal filing disabled for candidate generation',
+            count: 2,
+          }],
+        },
+      });
+
+      const result = await tick({
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: { allowedBackends: ['local-coder'], bestOfN: 2 },
+      } as AshlrConfig, { dryRun: false });
+
+      expect(result.dispatches?.[0]?.production).toMatchObject({
+        outcome: 'proposal-capture-error',
+        diffFiles: 1,
+        diffLines: 1,
+      });
+    },
+  );
+
+  it.each([false, true])(
+    'A1h2a6f: Best-of-N verification rejection stays expected regardless of candidate order (reversed=%s)',
+    async (reversed) => {
+      enrollWithItems(1);
+      mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'verified fan-out' });
+      mockEngineTierOf.mockReturnValue('mid');
+      const rejectedCandidate = {
+        index: 0,
+        engine: 'local-coder',
+        diff: 'diff --git a/x.ts b/x.ts\n',
+        score: 8,
+        testsPassed: false,
+        proposalOutcome: {
+          kind: 'proposal-disabled',
+          reason: 'proposal filing disabled for candidate generation',
+          files: 1,
+          insertions: 1,
+          deletions: 0,
+        },
+        proposalDisposition: { kind: 'verification-rejected' as const },
+        costUsd: 0.02,
+      };
+      const cancelledCandidate = {
+        index: 1,
+        engine: 'local-coder',
+        diff: '',
+        score: 0,
+        error: 'cancelled',
+        costUsd: 0.01,
+      };
+      mockRunBestOfN.mockResolvedValueOnce({
+        winner: undefined,
+        candidates: reversed
+          ? [cancelledCandidate, rejectedCandidate]
+          : [rejectedCandidate, cancelledCandidate],
+        critique: {
+          n: 2,
+          nonEmpty: 1,
+          judged: 1,
+          topScore: 0,
+          winnerIndex: -1,
+          totalCostUsd: 0.03,
+          billableCostUsd: 0.03,
+          noProposalReasons: [{ reason: 'selection cancelled', count: 1 }],
+        },
+      });
+
+      const result = await tick({
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: { allowedBackends: ['local-coder'], bestOfN: 2 },
+      } as AshlrConfig, { dryRun: false });
+
+      expect(result.dispatches?.[0]?.production).toMatchObject({
+        outcome: 'gate-blocked',
+        reason: 'best-of-2: deterministic verification rejected candidate draft',
+        diffFiles: 1,
+        diffLines: 1,
+        runEventSummary: { status: 'done', outcome: 'gate-blocked', proposalCreated: false },
+      });
+      expect(repairHandoffFromDispatchEvent(readDispatchProductionEvents({ limit: 1 })[0]!)).toBeNull();
+    },
+  );
+
+  it.each([false, true])(
+    'A1h2a6g: Best-of-N missing duplicate ownership fails closed regardless of candidate order (reversed=%s)',
+    async (reversed) => {
+      enrollWithItems(1);
+      mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'dedup fan-out' });
+      mockEngineTierOf.mockReturnValue('mid');
+      const duplicateCandidate = {
+        index: 0,
+        engine: 'local-coder',
+        diff: 'diff --git a/x.ts b/x.ts\n',
+        score: 8,
+        proposalOutcome: {
+          kind: 'proposal-disabled',
+          reason: 'proposal filing disabled for candidate generation',
+          proposalId: 'proposal-existing',
+          files: 1,
+          insertions: 1,
+          deletions: 0,
+        },
+        proposalDisposition: {
+          kind: 'duplicate-owned' as const,
+          proposalId: 'proposal-existing',
+          diffHash: 'a'.repeat(64),
+        },
+        costUsd: 0.02,
+      };
+      const failedCandidate = {
+        index: 1,
+        engine: 'local-coder',
+        diff: '',
+        score: 0,
+        error: 'engine exited with status 1',
+        costUsd: 0.01,
+      };
+      mockRunBestOfN.mockResolvedValueOnce({
+        winner: undefined,
+        candidates: reversed
+          ? [failedCandidate, duplicateCandidate]
+          : [duplicateCandidate, failedCandidate],
+        critique: {
+          n: 2,
+          nonEmpty: 1,
+          judged: 1,
+          topScore: 0,
+          winnerIndex: -1,
+          totalCostUsd: 0.03,
+          billableCostUsd: 0.03,
+          noProposalReasons: [{ reason: 'engine exited with status 1', count: 1 }],
+        },
+      });
+
+      const result = await tick({
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: { allowedBackends: ['local-coder'], bestOfN: 2 },
+      } as AshlrConfig, { dryRun: false });
+
+      expect(result.dispatches?.[0]?.production).toMatchObject({
+        outcome: 'proposal-capture-error',
+        proposalId: 'proposal-existing',
+        reason: 'best-of-2: duplicate-owned candidate lacked authoritative durable pending proposal evidence',
+        runEventSummary: { status: 'failed', outcome: 'proposal-capture-error', proposalCreated: false },
+      });
+      expect(repairHandoffFromDispatchEvent(readDispatchProductionEvents({ limit: 1 })[0]!)).toBeNull();
+    },
+  );
+
+  it('A1h2a6g2: Best-of-N reports duplicate ownership only for an authoritative pending row', async () => {
+    const { items } = enrollWithItems(1);
+    const item = items[0]!;
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'authoritative dedup fan-out' });
+    mockEngineTierOf.mockReturnValue('mid');
+    let proposalId = '';
+    mockRunBestOfN.mockImplementationOnce(async () => {
+      const existing = createAuthoritativeBestOfNProposal(item, 'run-existing-duplicate-owner');
+      proposalId = existing.id;
+      return {
+        winner: undefined,
+        candidates: [{
+          index: 0,
+          engine: 'local-coder' as const,
+          diff: existing.diff!,
+          score: 8,
+          proposalOutcome: {
+            kind: 'proposal-disabled' as const,
+            reason: `duplicate diff skipped; existing pending proposal ${proposalId} remains authoritative`,
+            proposalId,
+          },
+          proposalDisposition: {
+            kind: 'duplicate-owned' as const,
+            proposalId,
+            diffHash: existing.diffHash!,
+          },
+          costUsd: 0.02,
+        }],
+        critique: {
+          n: 2,
+          nonEmpty: 1,
+          judged: 1,
+          topScore: 8,
+          winnerIndex: -1,
+          totalCostUsd: 0.02,
+          billableCostUsd: 0.02,
+        },
+      };
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'], bestOfN: 2 },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.dispatches?.[0]?.production).toMatchObject({
+      outcome: 'proposal-disabled',
+      proposalId,
+      reason: `best-of-2: duplicate diff skipped; existing pending proposal ${proposalId} remains authoritative`,
+      runEventSummary: { status: 'done', outcome: 'proposal-disabled', proposalCreated: false },
+    });
+  });
+
+  it('A1h2a6h: Best-of-N never reports proposal-created without matching candidate identity', async () => {
+    enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'identity fan-out' });
+    mockEngineTierOf.mockReturnValue('mid');
+    mockRunBestOfN.mockResolvedValueOnce({
+      winner: undefined,
+      candidates: [{
+        index: 0,
+        engine: 'local-coder',
+        diff: 'diff --git a/x.ts b/x.ts\n',
+        score: 8,
+        proposalOutcome: {
+          kind: 'filed',
+          reason: 'proposal filed',
+          proposalId: 'proposal-unbound',
+          files: 1,
+          insertions: 1,
+          deletions: 0,
+        },
+        costUsd: 0.02,
+      }],
+      critique: {
+        n: 1,
+        nonEmpty: 1,
+        judged: 1,
+        topScore: 0,
+        winnerIndex: -1,
+        totalCostUsd: 0.02,
+        billableCostUsd: 0.02,
+      },
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'], bestOfN: 2 },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.dispatches?.[0]?.production).toMatchObject({
+      outcome: 'unknown',
+      reason: 'best-of-2: filed candidate lacked matching durable proposal identity',
+      runEventSummary: { status: 'done', outcome: 'unknown', proposalCreated: false },
+    });
+  });
+
+  it('A1h2a6h2: Best-of-N reconciliation ids never report proposal-created', async () => {
+    enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'reconcile fan-out' });
+    mockEngineTierOf.mockReturnValue('mid');
+    mockRunBestOfN.mockResolvedValueOnce({
+      winner: undefined,
+      candidates: [{
+        index: 0,
+        engine: 'local-coder',
+        diff: 'diff --git a/x.ts b/x.ts\n',
+        score: 8,
+        proposalOutcome: {
+          kind: 'proposal-capture-error',
+          reason: 'proposal capture requires persistence reconciliation',
+          proposalId: 'proposal-reconciliation-failed',
+          files: 1,
+          insertions: 1,
+          deletions: 0,
+        },
+        error: 'proposal-capture-error: proposal capture requires persistence reconciliation',
+        costUsd: 0.02,
+      }],
+      critique: {
+        n: 1,
+        nonEmpty: 1,
+        judged: 1,
+        topScore: 0,
+        winnerIndex: -1,
+        totalCostUsd: 0.02,
+        billableCostUsd: 0.02,
+        noProposalReasons: [{
+          reason: 'proposal-capture-error: proposal capture requires persistence reconciliation',
+          count: 1,
+        }],
+      },
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'], bestOfN: 2 },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.dispatches?.[0]?.production).toMatchObject({
+      outcome: 'proposal-capture-error',
+      proposalId: 'proposal-reconciliation-failed',
+      reason: 'best-of-2: proposal capture requires persistence reconciliation',
+      runEventSummary: {
+        status: 'failed',
+        outcome: 'proposal-capture-error',
+        proposalCreated: false,
+      },
+    });
+  });
+
+  it.each([false, true])(
+    'A1h2a6b: Best-of-N missing-row claims fail closed regardless of candidate order (reversed=%s)',
     async (reversed) => {
       enrollWithItems(1);
       mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'filed fan-out' });
@@ -4287,6 +4755,8 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
         diff: 'diff --git a/x.ts b/x.ts\n',
         score: 0,
         proposalId: 'proposal-best-of-n',
+        runId: 'run-missing-best-of-n',
+        trajectoryId: 'run:run-missing-best-of-n',
         proposalOutcome: {
           kind: 'filed',
           reason: 'proposal filed before selection failed',
@@ -4326,18 +4796,161 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       } as AshlrConfig, { dryRun: false });
 
       expect(result.dispatches?.[0]?.production).toMatchObject({
-        outcome: 'proposal-created',
+        outcome: 'proposal-capture-error',
         proposalId: 'proposal-best-of-n',
-        reason: 'best-of-2: proposal filed before selection failed',
+        reason: 'best-of-2: filed candidate lacked authoritative durable pending proposal evidence',
         runEventSummary: {
-          status: 'done',
-          outcome: 'proposal-created',
-          proposalCreated: true,
+          status: 'failed',
+          outcome: 'proposal-capture-error',
+          proposalCreated: false,
           costUsd: 0.03,
         },
       });
     },
   );
+
+  it('A1h2a6c: Best-of-N no-winner recovery requires a durable row and preserves child identity', async () => {
+    const { items } = enrollWithItems(1);
+    const item = items[0]!;
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'durable filed fan-out' });
+    mockEngineTierOf.mockReturnValue('mid');
+    let childRunId = '';
+    let proposalId = '';
+    mockRunBestOfN.mockImplementationOnce(async (_item, _cfg, rawOptions) => {
+      const options = rawOptions as { attemptId: string; workItemGenerationId?: string };
+      childRunId = deriveCandidateAttemptIdentity(options.attemptId as never, 0);
+      const proposal = createAuthoritativeBestOfNProposal(item, childRunId, options.workItemGenerationId);
+      proposalId = proposal.id;
+      const proposalOutcome = {
+        kind: 'filed' as const,
+        reason: 'proposal filed before selection stopped',
+        proposalId,
+        files: 1,
+        insertions: 1,
+        deletions: 1,
+      };
+      return {
+        winner: undefined,
+        candidates: [{
+          index: 0,
+          engine: 'local-coder' as const,
+          diff: proposal.diff!,
+          score: 9,
+          proposalId,
+          runId: childRunId,
+          trajectoryId: `run:${childRunId}`,
+          proposalOutcome,
+          costUsd: 0.02,
+        }],
+        critique: {
+          n: 2,
+          nonEmpty: 1,
+          judged: 1,
+          topScore: 9,
+          winnerIndex: -1,
+          totalCostUsd: 0.02,
+          billableCostUsd: 0.02,
+        },
+      };
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'], bestOfN: 2 },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.dispatches?.[0]).toMatchObject({
+      runId: childRunId,
+      trajectoryId: `run:${childRunId}`,
+      production: {
+        outcome: 'proposal-created',
+        proposalId,
+        runId: childRunId,
+        trajectoryId: `run:${childRunId}`,
+        runEventSummary: {
+          runId: childRunId,
+          proposalId,
+          proposalCreated: true,
+        },
+      },
+    });
+  });
+
+  it('A1h2a6d: a selected Best-of-N winner emits one coherent child run trajectory', async () => {
+    const { items } = enrollWithItems(1);
+    const item = items[0]!;
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'winner identity fan-out' });
+    mockEngineTierOf.mockReturnValue('mid');
+    let childRunId = '';
+    let proposalId = '';
+    mockRunBestOfN.mockImplementationOnce(async (_item, _cfg, rawOptions) => {
+      const options = rawOptions as { attemptId: string; workItemGenerationId?: string };
+      childRunId = deriveCandidateAttemptIdentity(options.attemptId as never, 0);
+      const proposal = createAuthoritativeBestOfNProposal(item, childRunId, options.workItemGenerationId);
+      proposalId = proposal.id;
+      const proposalOutcome = {
+        kind: 'filed' as const,
+        reason: 'proposal filed',
+        proposalId,
+        files: 1,
+        insertions: 1,
+        deletions: 1,
+      };
+      const winner = {
+        index: 0,
+        engine: 'local-coder' as const,
+        diff: proposal.diff!,
+        score: 10,
+        proposalId,
+        runId: childRunId,
+        trajectoryId: `run:${childRunId}`,
+        proposalOutcome,
+        state: {
+          id: childRunId,
+          status: 'done' as const,
+          usage: { totalTokens: 200, estCostUsd: 0.02, steps: 2 },
+          proposalOutcome,
+          runEventSummary: {
+            runId: childRunId,
+            status: 'done',
+            outcome: 'proposal-created',
+            proposalCreated: true,
+            proposalId,
+          },
+        },
+      };
+      return {
+        winner,
+        candidates: [winner],
+        critique: {
+          n: 2,
+          nonEmpty: 1,
+          judged: 1,
+          topScore: 10,
+          winnerIndex: 0,
+          totalCostUsd: 0.02,
+          billableCostUsd: 0.02,
+        },
+      };
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'], bestOfN: 2 },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.dispatches?.[0]).toMatchObject({
+      runId: childRunId,
+      trajectoryId: `run:${childRunId}`,
+      production: {
+        outcome: 'proposal-created',
+        proposalId,
+        runId: childRunId,
+        trajectoryId: `run:${childRunId}`,
+        runEventSummary: { runId: childRunId, proposalId, proposalCreated: true },
+      },
+    });
+  });
 
   it('A1h2a7: a generic aborted producer is failure telemetry, not unknown no-proposal', async () => {
     const { items } = enrollWithItems(1);
