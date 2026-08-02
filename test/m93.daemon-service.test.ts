@@ -324,7 +324,7 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
     expect(def.filePath).toBe(
       path.join(FAKE_HOME, 'Library', 'LaunchAgents', 'ai.ashlr.daemon.plist'),
     );
-    expect(def.launchdRuntime).toEqual({
+    expect(def.launchdRuntime).toMatchObject({
       program: FAKE_NODE,
       arguments: [
         FAKE_NODE,
@@ -338,6 +338,21 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
         '--parallel',
         '1',
       ],
+      environment: { HOME: FAKE_HOME },
+      supervisor: {
+        runAtLoad: true,
+        keepAliveSuccessfulExit: false,
+        throttleIntervalSec: 30,
+      },
+    });
+    expect(Object.keys(def.launchdRuntime!.environment).sort()).toEqual(['HOME', 'PATH']);
+    expect(def.launchdRuntime!.supervisor).toEqual({
+      processType: 'Background',
+      runAtLoad: true,
+      keepAliveSuccessfulExit: false,
+      throttleIntervalSec: 30,
+      standardOutPath: path.join(FAKE_HOME, '.ashlr', 'daemon.launchd.out.log'),
+      standardErrorPath: path.join(FAKE_HOME, '.ashlr', 'daemon.launchd.err.log'),
     });
   });
 
@@ -372,7 +387,7 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
 
   it('binds keepAwake launchd authority to caffeinate and the complete argv', () => {
     const def = generateServiceDefinition({ ...baseOpts('darwin'), keepAwake: true });
-    expect(def.launchdRuntime).toEqual({
+    expect(def.launchdRuntime).toMatchObject({
       program: 'caffeinate',
       arguments: [
         'caffeinate',
@@ -389,6 +404,12 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
         '--parallel',
         '1',
       ],
+      environment: { HOME: FAKE_HOME },
+      supervisor: {
+        runAtLoad: true,
+        keepAliveSuccessfulExit: false,
+        throttleIntervalSec: 30,
+      },
     });
   });
 
@@ -419,12 +440,16 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
     expect(def.content).not.toContain('<integer>1800</integer>');
   });
 
-  it('plist honors custom restartSec with a 5s minimum', () => {
+  it('plist honors custom restartSec within the 5s to 1h supervisor bound', () => {
     const custom = generateServiceDefinition({ ...baseOpts('darwin'), restartSec: 12 });
     expect(custom.content).toContain('<integer>12</integer>');
 
     const clamped = generateServiceDefinition({ ...baseOpts('darwin'), restartSec: 1 });
     expect(clamped.content).toContain('<integer>5</integer>');
+
+    const bounded = generateServiceDefinition({ ...baseOpts('darwin'), restartSec: 10_000 });
+    expect(bounded.content).toContain('<integer>3600</integer>');
+    expect(bounded.launchdRuntime?.supervisor.throttleIntervalSec).toBe(3_600);
   });
 
   it('plist PATH env includes common developer tool bins', () => {

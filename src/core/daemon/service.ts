@@ -42,6 +42,9 @@ import {
 export type Platform = 'darwin' | 'linux' | 'win32';
 export type PlatformSpec = 'launchd' | 'systemd' | 'schtasks' | 'unknown';
 
+const MIN_RESTART_SEC = 5;
+const MAX_LAUNCHD_RESTART_SEC = 3_600;
+
 export interface ServiceInstallOptions {
   /** Override node executable path (default: process.execPath). */
   nodePath?: string;
@@ -134,6 +137,15 @@ export interface ServiceDefinition {
   launchdRuntime?: {
     program: string;
     arguments: string[];
+    environment: Record<'HOME' | 'PATH', string>;
+    supervisor: {
+      processType: 'Background';
+      runAtLoad: true;
+      keepAliveSuccessfulExit: false;
+      throttleIntervalSec: number;
+      standardOutPath: string;
+      standardErrorPath: string;
+    };
   };
 }
 
@@ -147,14 +159,15 @@ export function generateServiceDefinition(opts: ServiceInstallOptions = {}): Ser
   const budget = opts.budget ?? 5;
   const intervalMs = opts.intervalMs ?? 1_800_000;
   const restartSec = Number.isFinite(opts.restartSec) && opts.restartSec !== undefined
-    ? Math.max(5, Math.floor(opts.restartSec))
+    ? Math.max(MIN_RESTART_SEC, Math.floor(opts.restartSec))
     : 30;
+  const launchdRestartSec = Math.min(MAX_LAUNCHD_RESTART_SEC, restartSec);
   const parallel = opts.parallel ?? 1;
   const keepAwake = opts.keepAwake ?? false;
 
   switch (platform) {
     case 'darwin':
-      return buildLaunchdDefinition({ nodePath, binPath, home, configDir, budget, intervalMs, restartSec, parallel, keepAwake });
+      return buildLaunchdDefinition({ nodePath, binPath, home, configDir, budget, intervalMs, restartSec: launchdRestartSec, parallel, keepAwake });
     case 'linux':
       return buildSystemdDefinition({ nodePath, binPath, home, configDir, budget, intervalMs, restartSec, parallel });
     case 'win32':
@@ -188,6 +201,10 @@ function buildLaunchdDefinition(o: BuildOpts): ServiceDefinition {
 
   // PATH that mirrors common developer shells without requiring a login shell.
   const pathEnv = buildToolPath({ home: o.home, basePath: '' });
+  const environment: Record<'HOME' | 'PATH', string> = {
+    HOME: o.home,
+    PATH: pathEnv,
+  };
   const uid = typeof process.getuid === 'function' ? process.getuid() : os.userInfo().uid;
   const domainTarget = `gui/${uid}`;
   const serviceTarget = `${domainTarget}/ai.ashlr.daemon`;
@@ -255,6 +272,15 @@ ${programArgs.join('\n')}
     launchdRuntime: {
       program: runtimeArguments[0]!,
       arguments: runtimeArguments,
+      environment,
+      supervisor: {
+        processType: 'Background',
+        runAtLoad: true,
+        keepAliveSuccessfulExit: false,
+        throttleIntervalSec: o.restartSec,
+        standardOutPath: outLog,
+        standardErrorPath: errLog,
+      },
     },
   };
 }
