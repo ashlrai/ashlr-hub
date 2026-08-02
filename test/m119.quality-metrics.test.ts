@@ -11,7 +11,8 @@
  * Conventions mirror m88.fleet-digest.test.ts.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -20,9 +21,14 @@ import {
   PRIVATE_STORAGE_TEST_CONTROL,
   _setPrivateStorageTestControlForTest,
   assurePrivateStoragePath,
-  type PrivateStorageRunner,
 } from '../src/core/util/private-storage.js';
 import type { Proposal, RealizedMergeEvidence } from '../src/core/types.js';
+import {
+  createSemanticPrivateStorageHarness,
+  trustedWindowsSystemRootForTest,
+  type SemanticPrivateStorageHarness,
+  type SemanticPrivateStorageRequest,
+} from './helpers/semantic-private-storage.js';
 
 // ---------------------------------------------------------------------------
 // HOME isolation
@@ -32,30 +38,186 @@ const origHome = process.env.HOME;
 const origUserProfile = process.env.USERPROFILE;
 const origAshlrHome = process.env.ASHLR_HOME;
 let tmpHome: string;
+let semanticPrivateStorage: SemanticPrivateStorageHarness | undefined;
 
-const semanticPrivateStorageRunner: PrivateStorageRunner = (invocation) => {
-  const request = JSON.parse(invocation.input) as {
-    nonce: string;
-    operation: string;
-    mode?: 'secure-created' | 'inspect-existing' | 'inspect-owned';
-  };
-  const reason = request.operation === 'assure-private-paths'
-    ? 'owned-safe-paths'
-    : request.mode === 'inspect-owned'
-      ? 'owned-safe-path'
-      : 'exact-private-dacl';
-  return {
-    status: 0,
-    stdout: JSON.stringify({
-      nonce: request.nonce,
-      operation: request.operation,
-      ok: true,
-      reason,
-    }),
-  };
-};
+function restoreEnvironment(
+  name: 'HOME' | 'USERPROFILE' | 'ASHLR_HOME',
+  value: string | undefined,
+): void {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
+function installSemanticPrivateStorage(): void {
+  if (process.platform !== 'win32') return;
+  semanticPrivateStorage = createSemanticPrivateStorageHarness({
+    systemRoot: trustedWindowsSystemRootForTest(),
+  });
+  _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+    runner: semanticPrivateStorage.runner,
+  });
+}
+
+function clearSemanticPrivateStorage(): void {
+  _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
+  semanticPrivateStorage?.reset();
+  semanticPrivateStorage = undefined;
+}
+
+function expectPrivateStorageRequests(expected: readonly SemanticPrivateStorageRequest[]): void {
+  if (process.platform !== 'win32') return;
+  expect(semanticPrivateStorage?.requests).toEqual(expected);
+}
+
+function expectProvenanceKeyCreationRequests(): void {
+  if (process.platform !== 'win32') return;
+  const ashlrHome = path.join(tmpHome, '.ashlr');
+  const foundryDir = path.join(ashlrHome, 'foundry');
+  const keyPath = path.join(foundryDir, 'provenance.key');
+  const temporaryKeyPath = semanticPrivateStorage?.requests[2]?.paths[0];
+  expect(temporaryKeyPath).toMatch(
+    new RegExp(`^${escapeRegExp(keyPath)}\\.${process.pid}\\.[a-f0-9]{24}\\.tmp$`, 'u'),
+  );
+  expectPrivateStorageRequests([
+    {
+      operation: 'assure-private-path',
+      anchorPath: tmpHome,
+      paths: [ashlrHome],
+      kind: 'directory',
+      mode: 'secure-created',
+    },
+    {
+      operation: 'assure-private-path',
+      anchorPath: tmpHome,
+      paths: [foundryDir],
+      kind: 'directory',
+      mode: 'secure-created',
+    },
+    {
+      operation: 'assure-private-path',
+      anchorPath: foundryDir,
+      paths: [temporaryKeyPath!],
+      kind: 'file',
+      mode: 'secure-created',
+    },
+    {
+      operation: 'assure-private-path',
+      anchorPath: foundryDir,
+      paths: [keyPath],
+      kind: 'file',
+      mode: 'inspect-existing',
+    },
+  ]);
+}
+
+function lockAcquisitionRequests(
+  root: string,
+  directory: string,
+  canonicalPath: string,
+  requests: readonly SemanticPrivateStorageRequest[],
+  candidateIndex: number,
+): SemanticPrivateStorageRequest[] {
+  const candidatePath = requests[candidateIndex]?.paths[0];
+  expect(candidatePath).toMatch(
+    new RegExp(`^${escapeRegExp(canonicalPath)}\\.${process.pid}\\.` +
+      '[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}\\.candidate$', 'iu'),
+  );
+  const single = (
+    target: string,
+    kind: 'file' | 'directory',
+    mode: 'secure-created' | 'inspect-existing',
+    anchorPath = root,
+  ): SemanticPrivateStorageRequest => ({
+    operation: 'assure-private-path',
+    anchorPath,
+    paths: [target],
+    kind,
+    mode,
+  });
+  return [
+    single(root, 'directory', 'inspect-existing', tmpHome),
+    single(directory, 'directory', 'secure-created'),
+    single(candidatePath!, 'file', 'secure-created'),
+    single(candidatePath!, 'file', 'inspect-existing'),
+    single(candidatePath!, 'file', 'inspect-existing'),
+    single(canonicalPath, 'file', 'inspect-existing'),
+    single(canonicalPath, 'file', 'inspect-existing'),
+    single(canonicalPath, 'file', 'inspect-existing'),
+    single(canonicalPath, 'file', 'inspect-existing'),
+  ];
+}
+
+function expectSetStatusPrivateStorageRequests(proposalId: string): void {
+  if (process.platform !== 'win32') return;
+  const requests = semanticPrivateStorage?.requests ?? [];
+  const root = path.join(tmpHome, '.ashlr');
+  const proposalLockDirectory = path.join(root, '.proposal-mutation-locks');
+  const proposalLockPath = path.join(
+    proposalLockDirectory,
+    `${createHash('sha256').update(proposalId).digest('hex')}.lock`,
+  );
+  const storeLockDirectory = path.join(root, '.proposal-store-locks');
+  const storeLockPath = path.join(storeLockDirectory, 'writer.lock');
+  expectPrivateStorageRequests([
+    ...lockAcquisitionRequests(root, proposalLockDirectory, proposalLockPath, requests, 2),
+    ...lockAcquisitionRequests(root, storeLockDirectory, storeLockPath, requests, 11),
+    {
+      operation: 'assure-private-path',
+      anchorPath: root,
+      paths: [storeLockDirectory],
+      kind: 'directory',
+      mode: 'inspect-existing',
+    },
+    {
+      operation: 'assure-private-path',
+      anchorPath: root,
+      paths: [proposalLockDirectory],
+      kind: 'directory',
+      mode: 'inspect-existing',
+    },
+  ]);
+}
+
+beforeAll(() => {
+  if (process.platform !== 'win32') return;
+  const proofHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m119-native-proof-'));
+  const proofPath = path.join(proofHome, '.ashlr');
+  try {
+    clearSemanticPrivateStorage();
+    process.env.HOME = proofHome;
+    process.env.USERPROFILE = proofHome;
+    process.env.ASHLR_HOME = proofPath;
+    fs.mkdirSync(proofPath, { mode: 0o700 });
+    let assurance = assurePrivateStoragePath(
+      proofPath,
+      'directory',
+      'secure-created',
+      { anchorPath: proofHome },
+    );
+    for (let attempt = 1; !assurance.ok && assurance.reason === 'adapter-failed' && attempt < 3; attempt++) {
+      assurance = assurePrivateStoragePath(
+        proofPath,
+        'directory',
+        'secure-created',
+        { anchorPath: proofHome },
+      );
+    }
+    expect(assurance).toEqual({ ok: true, reason: 'exact-private-dacl' });
+  } finally {
+    clearSemanticPrivateStorage();
+    restoreEnvironment('HOME', origHome);
+    restoreEnvironment('USERPROFILE', origUserProfile);
+    restoreEnvironment('ASHLR_HOME', origAshlrHome);
+    fs.rmSync(proofHome, { recursive: true, force: true });
+  }
+});
 
 beforeEach(() => {
+  clearSemanticPrivateStorage();
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m119-home-'));
   process.env.HOME = tmpHome;
   process.env.USERPROFILE = tmpHome;
@@ -63,12 +225,11 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  clearSemanticPrivateStorage();
   fs.rmSync(tmpHome, { recursive: true, force: true });
-  process.env.HOME = origHome;
-  if (origUserProfile === undefined) delete process.env.USERPROFILE;
-  else process.env.USERPROFILE = origUserProfile;
-  if (origAshlrHome === undefined) delete process.env.ASHLR_HOME;
-  else process.env.ASHLR_HOME = origAshlrHome;
+  restoreEnvironment('HOME', origHome);
+  restoreEnvironment('USERPROFILE', origUserProfile);
+  restoreEnvironment('ASHLR_HOME', origAshlrHome);
 });
 
 // ---------------------------------------------------------------------------
@@ -879,6 +1040,7 @@ describe('m119 decisions-ledger', () => {
 
   it('normalizes and scrubs legacy decision rows on read', async () => {
     const { readDecisions, decisionsDir } = await import('../src/core/fleet/decisions-ledger.js');
+    installSemanticPrivateStorage();
 
     const proposalId = 'prop-legacy-decision';
     const judgeEngine = 'claude-opus-4-5';
@@ -936,6 +1098,7 @@ describe('m119 decisions-ledger', () => {
     expect(entry?.detail).toBeUndefined();
     expect(JSON.stringify(entry)).not.toContain('sk-abcdefghijklmnopqrstuvwxyz');
     expect(JSON.stringify(entry)).not.toContain('RAW_PROMPT_SENTINEL');
+    expectProvenanceKeyCreationRequests();
   });
 
   it('recordDecision never throws on invalid input', async () => {
@@ -951,24 +1114,11 @@ describe('m119 decisions-ledger', () => {
 
 describe('m119 store.setStatus ledger hook', () => {
   beforeEach(() => {
-    _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
-    if (process.platform === 'win32') {
-      const ashlrHome = path.join(tmpHome, '.ashlr');
-      fs.mkdirSync(ashlrHome, { mode: 0o700 });
-      expect(assurePrivateStoragePath(
-        ashlrHome,
-        'directory',
-        'secure-created',
-        { anchorPath: tmpHome },
-      ).ok).toBe(true);
-      _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
-        runner: semanticPrivateStorageRunner,
-      });
-    }
+    installSemanticPrivateStorage();
   });
 
   afterEach(() => {
-    _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
+    clearSemanticPrivateStorage();
   });
 
   it('records a rejection in the ledger without changing proposal behavior', async () => {
@@ -1020,6 +1170,7 @@ describe('m119 store.setStatus ledger hook', () => {
     expect(entries[0]!.action).toBe('rejected');
     expect(entries[0]!.model).toBe('codex:gpt-5.5');
     expect(entries[0]!.reason).toBe('no diff');
+    expectSetStatusPrivateStorageRequests('prop-hook-test-001');
   });
 
   it('setStatus without reason param behaves identically to before M119', async () => {
@@ -1050,6 +1201,7 @@ describe('m119 store.setStatus ledger hook', () => {
     expect(updated.status).toBe('approved');
     // reason was not passed — decisionReason should be absent
     expect(updated.decisionReason).toBeUndefined();
+    expectSetStatusPrivateStorageRequests('prop-hook-test-002');
   });
 });
 

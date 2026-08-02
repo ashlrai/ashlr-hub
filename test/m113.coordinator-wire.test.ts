@@ -24,20 +24,6 @@ import * as path from 'node:path';
 import type { AshlrConfig, WorkItem } from '../src/core/types.js';
 import type { RouteDecision } from '../src/core/fleet/router.js';
 
-const privateStorageMocks = vi.hoisted(() => ({ useRealAssurance: false }));
-
-vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
-  return {
-    ...actual,
-    assurePrivateStoragePath: (
-      ...args: Parameters<typeof actual.assurePrivateStoragePath>
-    ) => privateStorageMocks.useRealAssurance
-      ? actual.assurePrivateStoragePath(...args)
-      : { ok: true, reason: 'exact-private-dacl' },
-  };
-});
-
 // ---------------------------------------------------------------------------
 // HOME isolation — before any module import resolves homedir()
 // ---------------------------------------------------------------------------
@@ -114,10 +100,13 @@ import { SharedStore } from '../src/core/fleet/shared-store.js';
 import { loadFleetQuota } from '../src/core/fleet/quota.js';
 import { readAudit } from '../src/core/sandbox/audit.js';
 import {
-  acquireOutwardMutationFence,
-  ownsOutwardMutationFence,
-  releaseOutwardMutationFence,
-} from '../src/core/sandbox/mutation-fence.js';
+  PRIVATE_STORAGE_TEST_CONTROL,
+  _setPrivateStorageTestControlForTest,
+} from '../src/core/util/private-storage.js';
+import {
+  createSemanticPrivateStorageHarness,
+  trustedWindowsSystemRootForTest,
+} from './helpers/semantic-private-storage.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -193,18 +182,13 @@ beforeEach(() => {
   process.env.USERPROFILE = tmpHome;
   process.env.ASHLR_HOME = path.join(tmpHome, '.ashlr');
 
-  privateStorageMocks.useRealAssurance = true;
-  try {
-    const fence = acquireOutwardMutationFence();
-    try {
-      if (!ownsOutwardMutationFence(fence)) {
-        throw new Error('M113 fixture failed to establish private authority roots');
-      }
-    } finally {
-      releaseOutwardMutationFence(fence);
-    }
-  } finally {
-    privateStorageMocks.useRealAssurance = false;
+  if (process.platform === 'win32') {
+    const semanticPrivateStorage = createSemanticPrivateStorageHarness({
+      systemRoot: trustedWindowsSystemRootForTest(),
+    });
+    _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+      runner: semanticPrivateStorage.runner,
+    });
   }
 
   initBareGitDir(tmpRepo);
@@ -242,6 +226,7 @@ beforeEach(() => {
 afterEach(() => {
   try { unenroll(tmpRepo); } catch { /* ignore */ }
   try { setKill(false); } catch { /* ignore */ }
+  _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
 
   fs.rmSync(tmpHome, { recursive: true, force: true });
   fs.rmSync(tmpRepo, { recursive: true, force: true });
