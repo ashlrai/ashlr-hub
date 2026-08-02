@@ -5,12 +5,13 @@ import {
   fstatSync,
   lstatSync,
   openSync,
-  readdirSync,
+  opendirSync,
   readSync,
   realpathSync,
   type BigIntStats,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { fsyncDirectory } from '../util/durability.js';
 import {
   parseUnsignedRuntimeReleaseManifest,
@@ -44,9 +45,12 @@ const TRUST_ROOT_CANONICAL_DOMAIN =
   'ashlr:runtime-release-launch-trust-root-canonical:v1';
 const MAX_FILES = 32_768;
 const MAX_DIRECTORIES = 8_192;
+const MAX_DIRECTORY_ENTRIES = 1_024;
+const MAX_ENTRIES = MAX_FILES + MAX_DIRECTORIES;
 const MAX_FILE_BYTES = 512 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_DEPTH = 48;
+const MAX_OBSERVATION_MS = 120_000;
 const MAX_ARGUMENTS = 128;
 const MAX_ARGUMENT_BYTES = 64 * 1024;
 const MAX_POLICY_BYTES = 64 * 1024;
@@ -80,7 +84,16 @@ interface FileObservation {
 
 interface RuntimeReleaseLaunchRevalidationTestHooks {
   afterBeforeObservation?: () => void;
+  afterDirectoryEntriesRead?: (path: string, label: string) => void;
   afterFilePathSnapshotBeforeOpen?: (path: string, label: string) => void;
+}
+
+interface DirectoryObservationBudget {
+  bytes: number;
+  deadline: number;
+  directories: number;
+  entries: number;
+  files: number;
 }
 
 interface RootObservation {
@@ -364,6 +377,16 @@ function requireImmutable(stat: BigIntStats, label: string): void {
   }
 }
 
+function observationDeadline(): number {
+  return performance.now() + MAX_OBSERVATION_MS;
+}
+
+function requireBeforeDeadline(deadline: number, label: string): void {
+  if (!Number.isFinite(deadline) || performance.now() >= deadline) {
+    throw new Error(`${label} observation deadline exceeded`);
+  }
+}
+
 function contained(root: string, candidate: string): boolean {
   const nested = relative(root, candidate);
   return nested !== '' && nested !== '..' && !nested.startsWith(`..${sep}`) &&
@@ -398,9 +421,15 @@ function snapshotFile(
   label: string,
   anchor?: string,
   testHooks?: RuntimeReleaseLaunchRevalidationTestHooks,
+  deadline = Number.POSITIVE_INFINITY,
+  expectedSnapshot?: BigIntStats,
 ): FileObservation {
+  requireBeforeDeadline(deadline, label);
   const absolute = resolve(filePath);
   const before = lstatSync(absolute, { bigint: true });
+  if (expectedSnapshot && !sameSnapshot(expectedSnapshot, before)) {
+    throw new Error(`${label} changed before read`);
+  }
   if (!before.isFile() || before.isSymbolicLink()) {
     throw new Error(`${label} is not a regular file`);
   }
@@ -425,6 +454,7 @@ function snapshotFile(
     const hash = createHash('sha256');
     let offset = 0;
     while (offset < size) {
+      requireBeforeDeadline(deadline, label);
       const length = Math.min(READ_CHUNK_BYTES, size - offset);
       const chunk = Buffer.allocUnsafe(length);
       const count = readSync(fd, chunk, 0, length, offset);
@@ -432,6 +462,7 @@ function snapshotFile(
       hash.update(count === length ? chunk : chunk.subarray(0, count));
       offset += count;
     }
+    requireBeforeDeadline(deadline, label);
     const probe = Buffer.allocUnsafe(1);
     if (readSync(fd, probe, 0, 1, size) !== 0) {
       throw new Error(`${label} grew during read`);
@@ -469,7 +500,9 @@ function observeArtifactRoot(
   packageRoot: string,
   artifacts: readonly UnsignedRuntimeReleaseArtifact[],
   testHooks?: RuntimeReleaseLaunchRevalidationTestHooks,
+  deadline = Number.POSITIVE_INFINITY,
 ): RootObservation {
+  requireBeforeDeadline(deadline, 'runtime release artifact root');
   const rootBefore = lstatSync(packageRoot, { bigint: true });
   requireImmutable(rootBefore, 'runtime release package root');
   const content = [];
@@ -500,6 +533,7 @@ function observeArtifactRoot(
       'runtime release artifact',
       packageRoot,
       testHooks,
+      deadline,
     );
     if (observation.content.executable !== artifact.executable ||
       observation.content.size !== artifact.size ||
@@ -527,17 +561,31 @@ function observeDirectoryTree(
   rootPath: string,
   label: string,
   testHooks?: RuntimeReleaseLaunchRevalidationTestHooks,
+  deadline = Number.POSITIVE_INFINITY,
 ): RootObservation {
   const root = canonicalDirectory(rootPath, label);
   const content: Array<Record<string, JsonValue>> = [];
   const stable: Array<{ identity: string; path: string }> = [];
-  let bytes = 0;
-  let directories = 0;
-  let files = 0;
+  const budget: DirectoryObservationBudget = {
+    bytes: 0,
+    deadline,
+    directories: 1,
+    entries: 0,
+    files: 0,
+  };
 
-  const visit = (directoryPath: string, logicalPath: string, depth: number): void => {
+  const visit = (
+    directoryPath: string,
+    logicalPath: string,
+    depth: number,
+    expectedSnapshot?: BigIntStats,
+  ): void => {
+    requireBeforeDeadline(budget.deadline, label);
     if (depth > MAX_DEPTH) throw new Error(`${label} depth exceeds limit`);
     const before = lstatSync(directoryPath, { bigint: true });
+    if (expectedSnapshot && !sameSnapshot(expectedSnapshot, before)) {
+      throw new Error(`${label} changed before traversal`);
+    }
     if (!before.isDirectory() || before.isSymbolicLink()) {
       throw new Error(`${label} contains an unsafe directory`);
     }
@@ -545,32 +593,82 @@ function observeDirectoryTree(
     if (realpathSync(directoryPath) !== directoryPath) {
       throw new Error(`${label} contains a symlink`);
     }
-    directories += 1;
-    if (directories > MAX_DIRECTORIES) throw new Error(`${label} directory count exceeds limit`);
     stable.push({ identity: snapshotIdentity(before), path: logicalPath });
-    const entries = readdirSync(directoryPath, { withFileTypes: true })
-      .sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
+    const entries: Array<{
+      kind: 'directory' | 'file';
+      name: string;
+      snapshot: BigIntStats;
+    }> = [];
+    const directory = opendirSync(directoryPath);
+    try {
+      for (;;) {
+        requireBeforeDeadline(budget.deadline, label);
+        const entry = directory.readSync();
+        if (entry === null) break;
+        if (entries.length >= MAX_DIRECTORY_ENTRIES) {
+          throw new Error(`${label} directory entry count exceeds limit`);
+        }
+        budget.entries += 1;
+        if (budget.entries > MAX_ENTRIES) {
+          throw new Error(`${label} aggregate entry count exceeds limit`);
+        }
+        const childPath = join(directoryPath, entry.name);
+        const snapshot = lstatSync(childPath, { bigint: true });
+        requireBeforeDeadline(budget.deadline, label);
+        if (entry.isSymbolicLink() || snapshot.isSymbolicLink()) {
+          throw new Error(`${label} contains a symlink`);
+        }
+        if (entry.isDirectory() && snapshot.isDirectory()) {
+          budget.directories += 1;
+          if (budget.directories > MAX_DIRECTORIES) {
+            throw new Error(`${label} directory count exceeds limit`);
+          }
+          requireImmutable(snapshot, label);
+          if (realpathSync(childPath) !== childPath) {
+            throw new Error(`${label} contains a symlink`);
+          }
+          entries.push({ kind: 'directory', name: entry.name, snapshot });
+        } else if (entry.isFile() && snapshot.isFile()) {
+          budget.files += 1;
+          if (budget.files > MAX_FILES) throw new Error(`${label} file count exceeds limit`);
+          if (snapshot.nlink !== 1n) throw new Error(`${label} has multiple hard links`);
+          requireImmutable(snapshot, label);
+          if (snapshot.size > BigInt(MAX_FILE_BYTES)) {
+            throw new Error(`${label} exceeds byte limit`);
+          }
+          budget.bytes += Number(snapshot.size);
+          if (budget.bytes > MAX_TOTAL_BYTES) throw new Error(`${label} bytes exceed limit`);
+          entries.push({ kind: 'file', name: entry.name, snapshot });
+        } else {
+          throw new Error(`${label} contains a non-file entry`);
+        }
+      }
+    } finally {
+      directory.closeSync();
+    }
+    testHooks?.afterDirectoryEntriesRead?.(directoryPath, label);
+    entries.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
     for (const entry of entries) {
+      requireBeforeDeadline(budget.deadline, label);
       const childPath = join(directoryPath, entry.name);
       const childLogical = logicalPath === '.' ? entry.name : `${logicalPath}/${entry.name}`;
-      const stat = lstatSync(childPath);
-      if (entry.isSymbolicLink() || stat.isSymbolicLink()) {
-        throw new Error(`${label} contains a symlink`);
-      }
-      if (entry.isDirectory() && stat.isDirectory()) {
-        visit(childPath, childLogical, depth + 1);
-      } else if (entry.isFile() && stat.isFile()) {
-        files += 1;
-        if (files > MAX_FILES) throw new Error(`${label} file count exceeds limit`);
-        const observation = snapshotFile(childPath, childLogical, label, root, testHooks);
-        bytes += observation.content.size;
-        if (bytes > MAX_TOTAL_BYTES) throw new Error(`${label} bytes exceed limit`);
+      if (entry.kind === 'directory') {
+        visit(childPath, childLogical, depth + 1, entry.snapshot);
+      } else {
+        const observation = snapshotFile(
+          childPath,
+          childLogical,
+          label,
+          root,
+          testHooks,
+          budget.deadline,
+          entry.snapshot,
+        );
         content.push(observation.content as unknown as Record<string, JsonValue>);
         stable.push(observation.stable);
-      } else {
-        throw new Error(`${label} contains a non-file entry`);
       }
     }
+    requireBeforeDeadline(budget.deadline, label);
     const after = lstatSync(directoryPath, { bigint: true });
     if (!sameSnapshot(before, after) || realpathSync(directoryPath) !== directoryPath) {
       throw new Error(`${label} changed during traversal`);
@@ -578,11 +676,11 @@ function observeDirectoryTree(
   };
 
   visit(root, '.', 0);
-  if (files === 0) throw new Error(`${label} has no files`);
+  if (budget.files === 0) throw new Error(`${label} has no files`);
   return {
-    bytes,
-    directories,
-    files,
+    bytes: budget.bytes,
+    directories: budget.directories,
+    files: budget.files,
     rootSha256: domainDigest(DEPENDENCY_ROOT_DOMAIN, content),
     stableIdentitySha256: domainDigest(STABLE_IDENTITY_DOMAIN, stable),
   };
@@ -590,6 +688,7 @@ function observeDirectoryTree(
 
 function observeStage(
   options: RuntimeReleaseImmutableStagedTreeOptions,
+  deadline = observationDeadline(),
 ): StageObservation {
   const internal = options as RuntimeReleaseImmutableStagedTreeOptions & {
     __testHooks?: RuntimeReleaseLaunchRevalidationTestHooks;
@@ -649,11 +748,13 @@ function observeStage(
     packageRoot,
     manifest.manifest.artifacts,
     testHooks,
+    deadline,
   );
   const dependencyRootObservation = observeDirectoryTree(
     dependencyRoot,
     'runtime release dependency root',
     testHooks,
+    deadline,
   );
   const interpreter = snapshotFile(
     interpreterPath,
@@ -661,6 +762,7 @@ function observeStage(
     'runtime release declared interpreter',
     undefined,
     testHooks,
+    deadline,
   );
   if (!equalDigest(
     interpreter.content.sha256,
@@ -736,7 +838,10 @@ export function observeRuntimeReleaseImmutableStagedTree(
   options: RuntimeReleaseImmutableStagedTreeOptions,
 ): ObserveRuntimeReleaseImmutableStagedTreeResult {
   try {
-    const receipt = immutableReceipt(observeStage(options), options.expectedRevision);
+    const receipt = immutableReceipt(
+      observeStage(options, observationDeadline()),
+      options.expectedRevision,
+    );
     return {
       ok: true,
       canonicalJson: `${canonicalJson(receipt)}\n`,
@@ -804,6 +909,7 @@ export function observeRuntimeReleaseLaunchInputs(
   options: RuntimeReleaseLaunchObservationOptions,
 ): ObserveRuntimeReleaseLaunchInputsResult {
   try {
+    const deadline = observationDeadline();
     if (!KEY_ID_RE.test(options.expectedKeyId)) {
       return { ok: false, reason: 'runtime release expected key id is invalid' };
     }
@@ -870,7 +976,7 @@ export function observeRuntimeReleaseLaunchInputs(
       return { ok: false, reason: 'runtime release signed revision does not match expected revision' };
     }
 
-    const before = observeStage(options);
+    const before = observeStage(options, deadline);
     if (!equalDigest(before.stagedTreeIdentity, options.expectedStagedTreeIdentity)) {
       return { ok: false, reason: 'runtime release staged tree identity does not match expected' };
     }
@@ -880,7 +986,7 @@ export function observeRuntimeReleaseLaunchInputs(
     if (process.env['VITEST'] === 'true') {
       internal.__testHooks?.afterBeforeObservation?.();
     }
-    const after = observeStage(options);
+    const after = observeStage(options, deadline);
     if (!equalDigest(before.stagedTreeIdentity, after.stagedTreeIdentity) ||
       !equalDigest(before.stableIdentitySha256, after.stableIdentitySha256)) {
       return {

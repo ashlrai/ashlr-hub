@@ -424,6 +424,45 @@ describe('unsigned runtime release manifest', () => {
     });
   });
 
+  it('rejects top-level and nested duplicate keys in package identity files', () => {
+    const duplicatePackage = fixture();
+    write(join(duplicatePackage.packageRoot, 'package.json'), [
+      '{',
+      '  "name": "attacker/package",',
+      '  "name": "@ashlr/hub",',
+      '  "version": "3.1.0",',
+      '  "bin": { "ashlr": "bin/ashlr" }',
+      '}',
+      '',
+    ].join('\n'));
+    expect(build(duplicatePackage)).toEqual({
+      ok: false,
+      reason: 'package.json contains duplicate object keys',
+    });
+
+    const duplicateLockRoot = fixture();
+    write(join(duplicateLockRoot.packageRoot, 'package-lock.json'), [
+      '{',
+      '  "name": "@ashlr/hub",',
+      '  "version": "3.1.0",',
+      '  "lockfileVersion": 3,',
+      '  "packages": {',
+      '    "": {',
+      '      "name": "attacker/package",',
+      '      "na\\u006de": "@ashlr/hub",',
+      '      "version": "3.1.0",',
+      '      "bin": { "ashlr": "bin/ashlr" }',
+      '    }',
+      '  }',
+      '}',
+      '',
+    ].join('\n'));
+    expect(build(duplicateLockRoot)).toEqual({
+      ok: false,
+      reason: 'package-lock.json contains duplicate object keys',
+    });
+  });
+
   it('enforces focused package and lockfile byte limits before parsing', () => {
     const oversizedPackage = fixture();
     truncateSync(join(oversizedPackage.packageRoot, 'package.json'), 1024 * 1024 + 1);

@@ -17,6 +17,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildRuntimeReleaseEvidenceTrustRoot,
@@ -519,6 +520,68 @@ describe('runtime release closed launch-input observation', () => {
     expect(observeRuntimeReleaseImmutableStagedTree(stageOptions(absent))).toMatchObject({
       ok: false,
     });
+  });
+
+  it('fails closed before retaining an oversized dependency directory', () => {
+    const release = fixture();
+    chmodTree(release.packageRoot, false);
+    const overflow = join(release.dependencyRoot, 'overflow');
+    mkdirSync(overflow);
+    for (let index = 0; index <= 1_024; index += 1) {
+      write(join(overflow, `entry-${String(index).padStart(4, '0')}.js`), 'export {};\n');
+    }
+    chmodTree(release.packageRoot, true);
+
+    expect(observeRuntimeReleaseImmutableStagedTree(stageOptions(release))).toEqual({
+      ok: false,
+      reason: 'runtime release dependency root directory entry count exceeds limit',
+    });
+  });
+
+  it('rejects same-content replacement after bounded enumeration and before processing', () => {
+    const release = fixture();
+    const dependencyDirectory = join(release.dependencyRoot, 'example');
+    const dependencyPath = join(dependencyDirectory, 'index.js');
+    const displacedPath = join(dirname(release.packageRoot), 'displaced-dependency.js');
+    let replaced = false;
+    const options = stageOptions(release) as ReturnType<typeof stageOptions> & {
+      __testHooks: {
+        afterDirectoryEntriesRead: (path: string, label: string) => void;
+      };
+    };
+    options.__testHooks = {
+      afterDirectoryEntriesRead: (path, label) => {
+        if (replaced || path !== release.dependencyRoot ||
+          label !== 'runtime release dependency root') return;
+        replaced = true;
+        chmodSync(dependencyDirectory, 0o755);
+        renameSync(dependencyPath, displacedPath);
+        write(dependencyPath, 'export const dependency = true;\n');
+        chmodSync(dependencyPath, 0o444);
+        chmodSync(dependencyDirectory, 0o555);
+      },
+    };
+
+    expect(observeRuntimeReleaseImmutableStagedTree(options)).toEqual({
+      ok: false,
+      reason: 'runtime release dependency root changed before traversal',
+    });
+    expect(replaced).toBe(true);
+  });
+
+  it('fails closed when bounded traversal reaches its monotonic deadline', () => {
+    const release = fixture();
+    const monotonicNow = vi.spyOn(performance, 'now')
+      .mockReturnValueOnce(0)
+      .mockReturnValue(120_001);
+    try {
+      expect(observeRuntimeReleaseImmutableStagedTree(stageOptions(release))).toEqual({
+        ok: false,
+        reason: 'runtime release artifact root observation deadline exceeded',
+      });
+    } finally {
+      monotonicNow.mockRestore();
+    }
   });
 
   it('detects same-content path replacement between final observations', () => {

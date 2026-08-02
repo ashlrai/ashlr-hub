@@ -31,6 +31,7 @@ const MAX_LOCKFILE_BYTES = 16 * 1024 * 1024;
 const MAX_TRAVERSAL_DEPTH = 32;
 const MAX_DIRECTORY_ENTRIES = 1_024;
 const MAX_DIRECTORIES = 512;
+const MAX_JSON_NESTING_DEPTH = 128;
 const READ_CHUNK_BYTES = 64 * 1024;
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const REVISION_RE = /^[a-f0-9]{40}$/;
@@ -485,9 +486,102 @@ function discoverReleaseLayout(packageRoot: string): ReleaseLayout {
   return { directories, paths: paths.sort() };
 }
 
+function scanJsonString(raw: string, cursor: { index: number }): string {
+  const start = cursor.index;
+  cursor.index += 1;
+  while (cursor.index < raw.length) {
+    const char = raw[cursor.index]!;
+    if (char === '\\') {
+      cursor.index += 2;
+      continue;
+    }
+    cursor.index += 1;
+    if (char === '"') return JSON.parse(raw.slice(start, cursor.index)) as string;
+  }
+  throw new SyntaxError('unterminated JSON string');
+}
+
+function jsonHasDuplicateObjectKeys(raw: string): boolean {
+  const cursor = { index: 0 };
+  let duplicate = false;
+  const skipWhitespace = (): void => {
+    while (/\s/u.test(raw[cursor.index] ?? '')) cursor.index += 1;
+  };
+  const scanValue = (depth: number): void => {
+    if (depth > MAX_JSON_NESTING_DEPTH) throw new SyntaxError('JSON nesting depth exceeded');
+    skipWhitespace();
+    const char = raw[cursor.index];
+    if (char === '"') {
+      scanJsonString(raw, cursor);
+      return;
+    }
+    if (char === '{') {
+      cursor.index += 1;
+      skipWhitespace();
+      const keys = new Set<string>();
+      if (raw[cursor.index] === '}') {
+        cursor.index += 1;
+        return;
+      }
+      for (;;) {
+        skipWhitespace();
+        if (raw[cursor.index] !== '"') throw new SyntaxError('JSON object key expected');
+        const key = scanJsonString(raw, cursor);
+        if (keys.has(key)) duplicate = true;
+        keys.add(key);
+        skipWhitespace();
+        if (raw[cursor.index] !== ':') throw new SyntaxError('JSON object colon expected');
+        cursor.index += 1;
+        scanValue(depth + 1);
+        skipWhitespace();
+        if (raw[cursor.index] === '}') {
+          cursor.index += 1;
+          return;
+        }
+        if (raw[cursor.index] !== ',') throw new SyntaxError('JSON object separator expected');
+        cursor.index += 1;
+      }
+    }
+    if (char === '[') {
+      cursor.index += 1;
+      skipWhitespace();
+      if (raw[cursor.index] === ']') {
+        cursor.index += 1;
+        return;
+      }
+      for (;;) {
+        scanValue(depth + 1);
+        skipWhitespace();
+        if (raw[cursor.index] === ']') {
+          cursor.index += 1;
+          return;
+        }
+        if (raw[cursor.index] !== ',') throw new SyntaxError('JSON array separator expected');
+        cursor.index += 1;
+      }
+    }
+    const start = cursor.index;
+    while (cursor.index < raw.length && !/[\s,}\]]/u.test(raw[cursor.index]!)) {
+      cursor.index += 1;
+    }
+    if (cursor.index === start) throw new SyntaxError('JSON value expected');
+  };
+  scanValue(0);
+  skipWhitespace();
+  if (cursor.index !== raw.length) throw new SyntaxError('unexpected JSON transport bytes');
+  return duplicate;
+}
+
 function parseJsonBytes(bytes: Buffer, label: string): Record<string, unknown> {
   const text = bytes.toString('utf8');
   if (!Buffer.from(text, 'utf8').equals(bytes)) throw new Error(`${label} is not valid UTF-8`);
+  let duplicateKeys: boolean;
+  try {
+    duplicateKeys = jsonHasDuplicateObjectKeys(text);
+  } catch {
+    throw new Error(`${label} is not valid JSON`);
+  }
+  if (duplicateKeys) throw new Error(`${label} contains duplicate object keys`);
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
