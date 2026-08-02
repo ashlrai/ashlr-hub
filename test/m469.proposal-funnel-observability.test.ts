@@ -659,6 +659,10 @@ describe('buildProposalFunnelObservability', () => {
     ['route model', (row: MutableLegacyEvent) => { legacyRoute(row)['model'] = 'forged-model'; }],
     ['route assignedBy', (row: MutableLegacyEvent) => { legacyRoute(row)['assignedBy'] = 'forged-router'; }],
     ['route reason', (row: MutableLegacyEvent) => { legacyRoute(row)['reason'] = 'forged-route-reason'; }],
+    ['route reason with complete counts and missing attempt identity', (row: MutableLegacyEvent) => {
+      setLegacyActionCounts(row, {});
+      legacyRoute(row)['reason'] = 'forged-route-reason';
+    }],
     ['route policy', (row: MutableLegacyEvent) => {
       legacyRoute(row)['routerPolicyVersion'] = 'fleet-router-v999';
     }],

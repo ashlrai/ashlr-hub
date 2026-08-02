@@ -319,6 +319,10 @@ const LEGACY_ENVELOPE_MISMATCHES: ReadonlyArray<readonly [string, LegacyEnvelope
   ['route model', (row) => { legacyRoute(row)['model'] = 'forged-model'; }],
   ['route assignedBy', (row) => { legacyRoute(row)['assignedBy'] = 'forged-router'; }],
   ['route reason', (row) => { legacyRoute(row)['reason'] = 'forged-route-reason'; }],
+  ['route reason with complete counts and missing attempt identity', (row) => {
+    setLegacyActionCounts(row, {});
+    legacyRoute(row)['reason'] = 'forged-route-reason';
+  }],
   ['route policy', (row) => { legacyRoute(row)['routerPolicyVersion'] = 'fleet-router-v999'; }],
   ['route selected skills', (row) => { legacyRoute(row)['selectedSkillIds'] = ['skill-forged']; }],
   ['route skill policy', (row) => { legacyRoute(row)['skillPolicyVersion'] = 'skill-policy-v999'; }],

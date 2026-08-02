@@ -2070,8 +2070,7 @@ function dispatchProductionSuppliedEnvelopeSemanticsAgree(event: DispatchProduct
 
   const rawRoute = raw['routeSnapshot'];
   if (!derivedLifecycle && rawRoute !== undefined) {
-    const incompleteLegacyEnvelope = rawSummary === undefined ||
-      (isPlainRecord(rawSummary) && !isPlainRecord(rawSummary['actionCounts']));
+    const incompleteLegacyEnvelope = isPreEnvelopeDispatchProductionEvent(event);
     if (!isPlainRecord(rawRoute) ||
       !suppliedDuplicatedFieldsAgree(raw, rawRoute, new Set(['reason'])) ||
       (incompleteLegacyEnvelope &&
