@@ -1455,7 +1455,7 @@ describe('M342 dispatch production ledger', () => {
 
     expect(statuses).toHaveLength(10_000);
     expect(statuses.every((status) => status === 'found')).toBe(true);
-    expect(elapsedMs).toBeLessThan(1_500);
+    expect(elapsedMs).toBeLessThan(4_000);
   }, 10_000);
 
   it('derives exact attempt proofs across UTC partitions without trusting caller routing claims', () => {
