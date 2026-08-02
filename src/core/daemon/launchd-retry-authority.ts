@@ -15,33 +15,38 @@ import {
   type LaunchdRetryTrustRoot,
 } from './launchd-retry-trust-roots.js';
 
-export const LAUNCHD_RETRY_RECEIPT_PROTOCOL = 'ashlr-launchd-retry-epoch-receipt-v1' as const;
+export const LAUNCHD_RETRY_RECEIPT_PROTOCOL = 'ashlr-launchd-retry-epoch-receipt-v2' as const;
 export const LAUNCHD_RETRY_SERVICE_IDENTITY = 'ai.ashlr.daemon' as const;
+export const LAUNCHD_RETRY_MIN_SPACING_MS = 30_000;
+export const LAUNCHD_RETRY_MAX_SPACING_MS = 120_000;
 
 const DIGEST_RE = /^[0-9a-f]{64}$/;
 const REVISION_RE = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const BASE64URL_RE = /^[A-Za-z0-9_-]+$/;
 const RECEIPT_KEYS = [
-  'claimCount', 'epoch', 'keyId', 'maxObservedAtMs', 'policyGeneration',
-  'previousReceiptDigest', 'protocol', 'releaseRevision', 'schemaVersion',
+  'claimCount', 'epoch', 'keyId', 'maxObservedAtMs', 'notBeforeMs', 'policyGeneration',
+  'previousReceiptDigest', 'protocol', 'releaseObservationDigest', 'releaseRevision', 'schemaVersion',
   'sequence', 'serviceIdentity', 'signature', 'signatureAlgorithm', 'signerRole',
-  'transition', 'trustPolicyDigest', 'windowStartedAtMs',
+  'transition', 'transitionId', 'trustPolicyDigest', 'windowStartedAtMs',
 ] as const;
 const UNSIGNED_RECEIPT_KEYS = RECEIPT_KEYS.filter((key) => key !== 'signature');
 
 export type LaunchdRetryReceiptTransition = 'initialize' | 'claim' | 'healthy-reset';
 
 export interface LaunchdRetryEpochReceiptUnsigned {
-  schemaVersion: 1;
+  schemaVersion: 2;
   protocol: typeof LAUNCHD_RETRY_RECEIPT_PROTOCOL;
   serviceIdentity: typeof LAUNCHD_RETRY_SERVICE_IDENTITY;
   releaseRevision: string;
+  releaseObservationDigest: string;
   epoch: number;
   sequence: number;
   transition: LaunchdRetryReceiptTransition;
+  transitionId: string | null;
   claimCount: number;
   windowStartedAtMs: number;
   maxObservedAtMs: number;
+  notBeforeMs: number;
   previousReceiptDigest: string | null;
   trustPolicyDigest: string;
   policyGeneration: number;
@@ -133,10 +138,11 @@ function trustPolicyShape(value: unknown): value is LaunchdRetryTrustPolicy {
 }
 
 function receiptUnsignedShape(value: unknown): value is LaunchdRetryEpochReceiptUnsigned {
-  if (!exactPlainRecord(value, UNSIGNED_RECEIPT_KEYS) || value['schemaVersion'] !== 1 ||
+  if (!exactPlainRecord(value, UNSIGNED_RECEIPT_KEYS) || value['schemaVersion'] !== 2 ||
     value['protocol'] !== LAUNCHD_RETRY_RECEIPT_PROTOCOL ||
     value['serviceIdentity'] !== LAUNCHD_RETRY_SERVICE_IDENTITY ||
     typeof value['releaseRevision'] !== 'string' || !REVISION_RE.test(value['releaseRevision']) ||
+    typeof value['releaseObservationDigest'] !== 'string' || !DIGEST_RE.test(value['releaseObservationDigest']) ||
     !safeNonNegativeInteger(value['epoch']) || value['epoch'] < 1 ||
     !safeNonNegativeInteger(value['sequence']) ||
     !new Set<LaunchdRetryReceiptTransition>(['initialize', 'claim', 'healthy-reset'])
@@ -145,6 +151,8 @@ function receiptUnsignedShape(value: unknown): value is LaunchdRetryEpochReceipt
     !safeNonNegativeInteger(value['windowStartedAtMs']) ||
     !safeNonNegativeInteger(value['maxObservedAtMs']) ||
     value['maxObservedAtMs'] < value['windowStartedAtMs'] ||
+    !safeNonNegativeInteger(value['notBeforeMs']) || value['notBeforeMs'] < value['maxObservedAtMs'] ||
+    value['notBeforeMs'] - value['maxObservedAtMs'] > LAUNCHD_RETRY_MAX_SPACING_MS ||
     !(value['previousReceiptDigest'] === null ||
       (typeof value['previousReceiptDigest'] === 'string' && DIGEST_RE.test(value['previousReceiptDigest']))) ||
     typeof value['trustPolicyDigest'] !== 'string' || !DIGEST_RE.test(value['trustPolicyDigest']) ||
@@ -153,9 +161,11 @@ function receiptUnsignedShape(value: unknown): value is LaunchdRetryEpochReceipt
     value['signerRole'] !== LAUNCHD_RETRY_SIGNER_ROLE ||
     value['signatureAlgorithm'] !== LAUNCHD_RETRY_SIGNATURE_ALGORITHM) return false;
   if (value['transition'] === 'initialize') {
-    return value['claimCount'] === 0 && value['previousReceiptDigest'] === null;
+    return value['claimCount'] === 0 && value['previousReceiptDigest'] === null &&
+      value['transitionId'] === null && value['notBeforeMs'] === value['maxObservedAtMs'];
   }
-  if (value['previousReceiptDigest'] === null) return false;
+  if (value['previousReceiptDigest'] === null || typeof value['transitionId'] !== 'string' ||
+    !DIGEST_RE.test(value['transitionId'])) return false;
   return value['transition'] === 'claim' ? value['claimCount'] >= 1 : value['claimCount'] === 0;
 }
 
@@ -171,12 +181,15 @@ function receiptProjection(receipt: LaunchdRetryEpochReceipt): LaunchdRetryEpoch
     protocol: receipt.protocol,
     serviceIdentity: receipt.serviceIdentity,
     releaseRevision: receipt.releaseRevision,
+    releaseObservationDigest: receipt.releaseObservationDigest,
     epoch: receipt.epoch,
     sequence: receipt.sequence,
     transition: receipt.transition,
+    transitionId: receipt.transitionId,
     claimCount: receipt.claimCount,
     windowStartedAtMs: receipt.windowStartedAtMs,
     maxObservedAtMs: receipt.maxObservedAtMs,
+    notBeforeMs: receipt.notBeforeMs,
     previousReceiptDigest: receipt.previousReceiptDigest,
     trustPolicyDigest: receipt.trustPolicyDigest,
     policyGeneration: receipt.policyGeneration,
@@ -197,17 +210,20 @@ export function canonicalLaunchdRetryEpochReceiptPayload(value: unknown): Buffer
   try {
     if (!receiptUnsignedShape(value)) return null;
     return Buffer.from(JSON.stringify([
-      'ashlr:launchd-retry-epoch-receipt-signature:v1',
+      'ashlr:launchd-retry-epoch-receipt-signature:v2',
       value.schemaVersion,
       value.protocol,
       value.serviceIdentity,
       value.releaseRevision,
+      value.releaseObservationDigest,
       value.epoch,
       value.sequence,
       value.transition,
+      value.transitionId,
       value.claimCount,
       value.windowStartedAtMs,
       value.maxObservedAtMs,
+      value.notBeforeMs,
       value.previousReceiptDigest,
       value.trustPolicyDigest,
       value.policyGeneration,
@@ -264,7 +280,12 @@ function trustedPublicKey(root: LaunchdRetryTrustRoot): KeyObject | null {
 
 export function verifyLaunchdRetryEpochReceipt(
   value: unknown,
-  context: { releaseRevision: string; serviceIdentity: string; nowMs: number },
+  context: {
+    releaseRevision: string;
+    releaseObservationDigest: string;
+    serviceIdentity: string;
+    nowMs: number;
+  },
   policy: LaunchdRetryTrustPolicy = LAUNCHD_RETRY_TRUST_POLICY,
 ): LaunchdRetryReceiptVerification {
   if (!trustPolicyShape(policy)) return { ok: false, reason: 'trust-policy-invalid' };
@@ -272,6 +293,8 @@ export function verifyLaunchdRetryEpochReceipt(
   if (!receiptShape(value)) return { ok: false, reason: 'receipt-invalid' };
   if (!REVISION_RE.test(context.releaseRevision) || !safeNonNegativeInteger(context.nowMs) ||
     value.releaseRevision !== context.releaseRevision ||
+    !DIGEST_RE.test(context.releaseObservationDigest) ||
+    value.releaseObservationDigest !== context.releaseObservationDigest ||
     value.serviceIdentity !== context.serviceIdentity) {
     return { ok: false, reason: 'receipt-context-mismatch' };
   }

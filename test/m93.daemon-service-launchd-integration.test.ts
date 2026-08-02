@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -41,7 +41,7 @@ function waitUntil(predicate: () => boolean): boolean {
 }
 
 describe.skipIf(!NATIVE_ENABLED)('M93 native launchd runtime admission', () => {
-  it('accepts an exact disposable job and withholds a stale command contract', () => {
+  it('runs a disposable nonzero job exactly once with KeepAlive false', () => {
     const runnerTemp = process.env.RUNNER_TEMP;
     if (!runnerTemp) throw new Error('native launchd integration requires RUNNER_TEMP');
 
@@ -49,6 +49,7 @@ describe.skipIf(!NATIVE_ENABLED)('M93 native launchd runtime admission', () => {
     const homeDir = join(scratch, 'home');
     const binPath = join(scratch, 'bin', 'ashlr');
     const fixturePath = join(scratch, 'dist', 'cli', 'launchd-supervisor.js');
+    const invocationPath = join(homeDir, 'launchd-invocations.log');
     const label = `ai.ashlr.m93.${randomUUID().replaceAll('-', '')}`;
     const uid = typeof process.getuid === 'function' ? process.getuid() : 501;
     const domainTarget = `gui/${uid}`;
@@ -62,6 +63,7 @@ describe.skipIf(!NATIVE_ENABLED)('M93 native launchd runtime admission', () => {
       budget: 1,
       intervalMs: 60_000,
       parallel: 1,
+      restartSec: 5,
     };
     const definition = generateServiceDefinition(opts);
     const runtime = definition.launchdRuntime;
@@ -85,7 +87,12 @@ describe.skipIf(!NATIVE_ENABLED)('M93 native launchd runtime admission', () => {
       mkdirSync(join(homeDir, '.ashlr'), { recursive: true, mode: 0o700 });
       mkdirSync(dirname(binPath), { recursive: true, mode: 0o700 });
       mkdirSync(dirname(fixturePath), { recursive: true, mode: 0o700 });
-      writeFileSync(fixturePath, 'setInterval(() => {}, 1000);\n', { mode: 0o600 });
+      writeFileSync(fixturePath, [
+        "import { appendFileSync } from 'node:fs';",
+        `appendFileSync(${JSON.stringify(invocationPath)}, 'invoked\\n', { encoding: 'utf8', mode: 0o600 });`,
+        'process.exitCode = 23;',
+        '',
+      ].join('\n'), { mode: 0o600 });
       writeFileSync(definition.filePath, content, { mode: 0o600 });
       writeFileSync(manifestPath, JSON.stringify({
         schemaVersion: 1,
@@ -103,28 +110,26 @@ describe.skipIf(!NATIVE_ENABLED)('M93 native launchd runtime admission', () => {
         throw new Error(`launchctl bootstrap failed: ${bootstrapped.stderr || bootstrapped.stdout}`);
       }
 
-      let exactRuntime = parseExactLaunchdPrintRuntime(
-        String(launchctl(['print', serviceTarget]).stdout),
+      expect(waitUntil(() => {
+        if (!existsSync(invocationPath)) return false;
+        return readFileSync(invocationPath, 'utf8') === 'invoked\n';
+      })).toBe(true);
+      expect(content).toContain('<key>KeepAlive</key>\n\t<false/>');
+      expect(content).not.toContain('<key>ThrottleInterval</key>');
+
+      sleep(6_000);
+      expect(readFileSync(invocationPath, 'utf8')).toBe('invoked\n');
+      const printed = launchctl(['print', serviceTarget]);
+      expect(printed.status).toBe(0);
+      expect(parseExactLaunchdPrintRuntime(
+        String(printed.stdout),
         serviceTarget,
         definition.filePath,
         runtime.program,
         runtime.arguments,
-      );
-      expect(waitUntil(() => {
-        const printed = launchctl(['print', serviceTarget]);
-        if (printed.status !== 0 || printed.error || printed.stderr.trim() !== '') return false;
-        exactRuntime = parseExactLaunchdPrintRuntime(
-          String(printed.stdout),
-          serviceTarget,
-          definition.filePath,
-          runtime.program,
-          runtime.arguments,
-        );
-        return exactRuntime?.pid !== undefined;
-      })).toBe(true);
-      expect(exactRuntime?.pid).toBeGreaterThan(0);
+      )).toEqual({ loaded: true });
       expect(parseExactLaunchdPrintRuntime(
-        String(launchctl(['print', serviceTarget]).stdout),
+        String(printed.stdout),
         serviceTarget,
         definition.filePath,
         runtime.program,
@@ -178,5 +183,5 @@ describe.skipIf(!NATIVE_ENABLED)('M93 native launchd runtime admission', () => {
     }
     if (cleanupFailure) throw cleanupFailure;
     if (testFailure) throw testFailure;
-  }, 30_000);
+  }, 35_000);
 });

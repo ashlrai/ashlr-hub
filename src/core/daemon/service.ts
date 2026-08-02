@@ -203,7 +203,6 @@ function buildLaunchdDefinition(o: BuildOpts): ServiceDefinition {
   const errLog = path.join(o.configDir, 'daemon.launchd.err.log');
   const packageRoot = path.dirname(path.dirname(o.binPath));
   const supervisorPath = path.join(packageRoot, 'dist', 'cli', 'launchd-supervisor.js');
-  const childPath = path.join(packageRoot, 'dist', 'cli', 'launchd-daemon-child.js');
 
   // PATH that mirrors common developer shells without requiring a login shell.
   const pathEnv = buildToolPath({ home: o.home, basePath: '' });
@@ -219,12 +218,6 @@ function buildLaunchdDefinition(o: BuildOpts): ServiceDefinition {
     ? ['caffeinate', '-i', '-s', o.nodePath, supervisorPath]
     : [o.nodePath, supervisorPath];
   runtimeArguments.push(
-    '--release',
-    o.releaseRevision,
-    '--node',
-    o.nodePath,
-    '--child',
-    childPath,
     '--budget',
     String(o.budget),
     '--interval',

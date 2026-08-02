@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   fork: vi.fn(),
   loadAuthority: vi.fn(),
+  observeRelease: vi.fn(),
   runController: vi.fn(),
 }));
 
@@ -18,6 +19,15 @@ vi.mock('../src/core/daemon/launchd-retry-transport.js', () => ({
   loadLaunchdRetryExternalAuthority: mocks.loadAuthority,
 }));
 
+vi.mock('../src/core/daemon/launchd-release-observation.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/daemon/launchd-release-observation.js')>();
+  return {
+    ...actual,
+    observeLaunchdRelease: mocks.observeRelease,
+    isLaunchdReleaseObservation: () => true,
+  };
+});
+
 vi.mock('../src/core/daemon/launchd-retry-controller.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/daemon/launchd-retry-controller.js')>();
   return { ...actual, runLaunchdRetryController: mocks.runController };
@@ -28,11 +38,18 @@ import { runLaunchdSupervisor } from '../src/core/daemon/launchd-supervisor-runt
 
 const RELEASE = 'a'.repeat(40);
 const NODE = '/opt/ashlr/node';
+const SUPERVISOR = '/opt/ashlr/dist/cli/launchd-supervisor.js';
 const CHILD = '/opt/ashlr/dist/cli/launchd-daemon-child.js';
+const OBSERVATION = {
+  schemaVersion: 1 as const,
+  releaseRevision: RELEASE,
+  releaseRoot: '/opt/ashlr',
+  node: { path: NODE, sha256: '1'.repeat(64) },
+  supervisor: { path: SUPERVISOR, sha256: '2'.repeat(64) },
+  child: { path: CHILD, sha256: '3'.repeat(64) },
+  observationDigest: '4'.repeat(64),
+};
 const VALID_ARGS = [
-  '--release', RELEASE,
-  '--node', NODE,
-  '--child', CHILD,
   '--budget', '5',
   '--interval', '300000',
   '--parallel', '1',
@@ -69,6 +86,7 @@ function terminalDisposition() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.observeRelease.mockReturnValue(OBSERVATION);
   mocks.loadAuthority.mockResolvedValue({ currentReceipt: {}, compareAndSwap: vi.fn() });
 });
 
@@ -85,6 +103,31 @@ describe('M471 one-shot launchd supervisor', () => {
     expect(mocks.loadAuthority).not.toHaveBeenCalled();
     expect(mocks.runController).not.toHaveBeenCalled();
     expect(mocks.fork).not.toHaveBeenCalled();
+  });
+
+  it.each(['--node', '--child', '--release'])(
+    'rejects caller-selected executable identity through %s before authority loading',
+    async (flag) => {
+      expect(await runLaunchdSupervisor([...VALID_ARGS, flag, '/tmp/caller-selected'])).toEqual({
+        exitCode: 0,
+        reason: 'invalid-supervisor-argv',
+      });
+      expect(mocks.observeRelease).not.toHaveBeenCalled();
+      expect(mocks.loadAuthority).not.toHaveBeenCalled();
+      expect(mocks.fork).not.toHaveBeenCalled();
+    },
+  );
+
+  it('withholds external authority when immutable release observation fails', async () => {
+    mocks.observeRelease.mockImplementationOnce(() => {
+      throw new Error('supervisor content mismatch');
+    });
+    expect(await runLaunchdSupervisor(VALID_ARGS)).toEqual({
+      exitCode: 0,
+      reason: 'release-observation-invalid',
+    });
+    expect(mocks.loadAuthority).not.toHaveBeenCalled();
+    expect(mocks.runController).not.toHaveBeenCalled();
   });
 
   it('settles bootstrap import and preload failures at zero', async () => {
@@ -108,7 +151,7 @@ describe('M471 one-shot launchd supervisor', () => {
     const actual = await vi.importActual<
       typeof import('../src/core/daemon/launchd-retry-transport.js')
     >('../src/core/daemon/launchd-retry-transport.js');
-    await expect(actual.loadLaunchdRetryExternalAuthority()).resolves.toBeUndefined();
+    await expect(actual.loadLaunchdRetryExternalAuthority(OBSERVATION)).resolves.toBeUndefined();
   });
 
   it('turns child spawn failure into a terminal controller disposition', async () => {
@@ -170,6 +213,7 @@ describe('M471 one-shot launchd supervisor', () => {
     });
     expect(mocks.fork).toHaveBeenCalledWith(CHILD, [
       '--release', RELEASE,
+      '--observation', OBSERVATION.observationDigest,
       '--budget', '5',
       '--interval', '300000',
       '--parallel', '1',
@@ -181,6 +225,24 @@ describe('M471 one-shot launchd supervisor', () => {
     const childEnv = mocks.fork.mock.calls[0]?.[2]?.env as NodeJS.ProcessEnv;
     expect(childEnv).not.toHaveProperty('NODE_OPTIONS');
     expect(childEnv).not.toHaveProperty('DYLD_INSERT_LIBRARIES');
+    expect(mocks.loadAuthority).toHaveBeenCalledWith(OBSERVATION);
+  });
+
+  it('consumes the claim but refuses spawn when executable content changes after authority load', async () => {
+    mocks.runController.mockImplementation(async (options: { runDaemon: () => Promise<unknown> }) => {
+      mocks.observeRelease.mockReturnValueOnce({
+        ...OBSERVATION,
+        observationDigest: '5'.repeat(64),
+      });
+      await expect(options.runDaemon()).rejects.toThrow('launchd release changed before child spawn');
+      return controllerResult('daemon-disposition-invalid');
+    });
+
+    await expect(runLaunchdSupervisor(VALID_ARGS)).resolves.toMatchObject({
+      controller: { reason: 'daemon-disposition-invalid' },
+    });
+    expect(mocks.loadAuthority).toHaveBeenCalledOnce();
+    expect(mocks.fork).not.toHaveBeenCalled();
   });
 
   it('keeps the executable entrypoint free of static project imports', () => {
@@ -189,5 +251,14 @@ describe('M471 one-shot launchd supervisor', () => {
     expect(source).not.toMatch(/^import\s.+from\s/m);
     expect(source).toContain("await import('../core/daemon/launchd-supervisor-bootstrap.js')");
     expect(source).toContain('process.exitCode = 0');
+  });
+
+  it('loads the external transport module only after release observation', () => {
+    const path = fileURLToPath(new URL('../src/core/daemon/launchd-supervisor-runtime.ts', import.meta.url));
+    const source = readFileSync(path, 'utf8');
+    expect(source).not.toMatch(/^import.+launchd-retry-transport/m);
+    expect(source.indexOf("observeLaunchdRelease('supervisor')")).toBeLessThan(
+      source.indexOf("await import('./launchd-retry-transport.js')"),
+    );
   });
 });

@@ -1,20 +1,18 @@
 import { fork } from 'node:child_process';
-import { isAbsolute } from 'node:path';
-
 import type { DaemonRunResult } from './loop.js';
 import {
   runLaunchdRetryController,
   type LaunchdRetryControllerResult,
 } from './launchd-retry-controller.js';
-import { loadLaunchdRetryExternalAuthority } from './launchd-retry-transport.js';
+import {
+  isLaunchdReleaseObservation,
+  observeLaunchdRelease,
+  type LaunchdReleaseObservation,
+} from './launchd-release-observation.js';
 
-const RELEASE_REVISION_RE = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const CHILD_RESULT_PROTOCOL = 'ashlr-launchd-daemon-child-result-v1' as const;
 
 interface LaunchdSupervisorSpec {
-  releaseRevision: string;
-  nodePath: string;
-  childPath: string;
   budget: number;
   intervalMs: number;
   parallel: number;
@@ -22,7 +20,11 @@ interface LaunchdSupervisorSpec {
 
 export interface LaunchdSupervisorResult {
   exitCode: 0;
-  reason: 'controller-settled' | 'invalid-supervisor-argv' | 'supervisor-failure';
+  reason:
+    | 'controller-settled'
+    | 'invalid-supervisor-argv'
+    | 'release-observation-invalid'
+    | 'supervisor-failure';
   controller?: LaunchdRetryControllerResult;
 }
 
@@ -32,40 +34,29 @@ function positiveNumber(value: string | undefined): number | null {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
-function safeAbsolutePath(value: string | undefined): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= 4096 &&
-    !value.includes('\0') && isAbsolute(value);
-}
-
 function parseSupervisorArgs(args: readonly string[]): LaunchdSupervisorSpec | null {
   const values = new Map<string, string>();
   for (let index = 0; index < args.length; index += 2) {
     const flag = args[index];
     const value = args[index + 1];
-    if (!flag || value === undefined || values.has(flag) || !new Set([
-      '--release', '--node', '--child', '--budget', '--interval', '--parallel',
-    ]).has(flag)) return null;
+    if (!flag || value === undefined || values.has(flag) ||
+      !new Set(['--budget', '--interval', '--parallel']).has(flag)) return null;
     values.set(flag, value);
   }
-  if (values.size !== 6) return null;
-
-  const releaseRevision = values.get('--release');
-  const nodePath = values.get('--node');
-  const childPath = values.get('--child');
+  if (values.size !== 3) return null;
   const budget = positiveNumber(values.get('--budget'));
   const intervalMs = positiveNumber(values.get('--interval'));
   const parallelRaw = positiveNumber(values.get('--parallel'));
-  if (!releaseRevision || !RELEASE_REVISION_RE.test(releaseRevision) ||
-    !safeAbsolutePath(nodePath) || !safeAbsolutePath(childPath) ||
-    budget === null || intervalMs === null || parallelRaw === null ||
+  if (budget === null || intervalMs === null || parallelRaw === null ||
     !Number.isSafeInteger(parallelRaw)) return null;
 
-  return { releaseRevision, nodePath, childPath, budget, intervalMs, parallel: parallelRaw };
+  return { budget, intervalMs, parallel: parallelRaw };
 }
 
-function daemonChildArgs(spec: LaunchdSupervisorSpec): string[] {
+function daemonChildArgs(spec: LaunchdSupervisorSpec, release: LaunchdReleaseObservation): string[] {
   return [
-    '--release', spec.releaseRevision,
+    '--release', release.releaseRevision,
+    '--observation', release.observationDigest,
     '--budget', String(spec.budget),
     '--interval', String(spec.intervalMs),
     '--parallel', String(spec.parallel),
@@ -96,12 +87,26 @@ function exactChildMessage(value: unknown): value is {
     !Array.isArray(record['result']);
 }
 
-function runDaemonChild(spec: LaunchdSupervisorSpec): Promise<DaemonRunResult> {
+function runDaemonChild(
+  spec: LaunchdSupervisorSpec,
+  release: LaunchdReleaseObservation,
+): Promise<DaemonRunResult> {
   return new Promise((resolve, reject) => {
+    let current: LaunchdReleaseObservation;
+    try {
+      current = observeLaunchdRelease('supervisor');
+    } catch {
+      reject(new Error('launchd release changed before child spawn'));
+      return;
+    }
+    if (!isLaunchdReleaseObservation(current) || current.observationDigest !== release.observationDigest) {
+      reject(new Error('launchd release changed before child spawn'));
+      return;
+    }
     let child: ReturnType<typeof fork>;
     try {
-      child = fork(spec.childPath, daemonChildArgs(spec), {
-        execPath: spec.nodePath,
+      child = fork(release.child.path, daemonChildArgs(spec, release), {
+        execPath: release.node.path,
         env: daemonChildEnvironment(),
         stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
       });
@@ -144,12 +149,22 @@ export async function runLaunchdSupervisor(args: readonly string[]): Promise<Lau
   const spec = parseSupervisorArgs(args);
   if (!spec) return { exitCode: 0, reason: 'invalid-supervisor-argv' };
 
+  let release: LaunchdReleaseObservation;
   try {
-    const externalAuthority = await loadLaunchdRetryExternalAuthority();
+    release = observeLaunchdRelease('supervisor');
+  } catch {
+    return { exitCode: 0, reason: 'release-observation-invalid' };
+  }
+  if (!isLaunchdReleaseObservation(release)) {
+    return { exitCode: 0, reason: 'release-observation-invalid' };
+  }
+
+  try {
+    const { loadLaunchdRetryExternalAuthority } = await import('./launchd-retry-transport.js');
+    const externalAuthority = await loadLaunchdRetryExternalAuthority(release);
     const controller = await runLaunchdRetryController({
-      expectedReleaseRevision: spec.releaseRevision,
       externalAuthority,
-      runDaemon: () => runDaemonChild(spec),
+      runDaemon: () => runDaemonChild(spec, release),
     });
     return { exitCode: 0, reason: 'controller-settled', controller };
   } catch {

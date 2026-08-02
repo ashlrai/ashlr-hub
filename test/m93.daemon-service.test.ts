@@ -88,7 +88,6 @@ const FAKE_NODE = '/usr/local/bin/node';
 const FAKE_BIN = '/home/user/ashlr-hub/bin/ashlr';
 const FAKE_RELEASE = 'a'.repeat(40);
 const FAKE_SUPERVISOR = '/home/user/ashlr-hub/dist/cli/launchd-supervisor.js';
-const FAKE_CHILD = '/home/user/ashlr-hub/dist/cli/launchd-daemon-child.js';
 
 function isWindowsPowerShellCommand(command: string): boolean {
   return command === windowsPowerShellPath();
@@ -107,17 +106,15 @@ function baseOpts(platform: 'darwin' | 'linux' | 'win32') {
   };
 }
 
-function launchdRuntimeArguments(releaseRevision = FAKE_RELEASE): string[] {
+function launchdRuntimeArguments(): string[] {
   return [
-    FAKE_NODE, FAKE_SUPERVISOR, '--release', releaseRevision, '--node', FAKE_NODE,
-    '--child', FAKE_CHILD, '--budget', '5', '--interval', '1800000',
+    FAKE_NODE, FAKE_SUPERVISOR, '--budget', '5', '--interval', '1800000',
     '--parallel', '1',
   ];
 }
 
 function exactLaunchdPrintFixture(options: {
   home?: string;
-  releaseRevision?: string;
   arguments?: string[];
   state?: string;
   pid?: number;
@@ -130,7 +127,7 @@ function exactLaunchdPrintFixture(options: {
     `\tstate = ${options.state ?? 'running'}`,
     `\tprogram = ${FAKE_NODE}`,
     '\targuments = {',
-    ...(options.arguments ?? launchdRuntimeArguments(options.releaseRevision))
+    ...(options.arguments ?? launchdRuntimeArguments())
       .map((argument) => `\t\t${argument}`),
     '\t}',
     `\tpid = ${options.pid ?? 123}`,
@@ -380,19 +377,19 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
     expect(def.content).toContain(`<string>${FAKE_NODE}</string>`);
   });
 
-  it('plist contains only the minimal supervisor and daemon child entrypoints', () => {
+  it('plist contains only the minimal supervisor entrypoint', () => {
     const def = generateServiceDefinition(baseOpts('darwin'));
     expect(def.content).toContain(`<string>${FAKE_SUPERVISOR}</string>`);
-    expect(def.content).toContain(`<string>${FAKE_CHILD}</string>`);
     expect(def.content).not.toContain(`<string>${FAKE_BIN}</string>`);
+    expect(def.content).not.toContain('launchd-daemon-child.js');
   });
 
   it('plist contains the exact bounded supervisor args', () => {
     const def = generateServiceDefinition(baseOpts('darwin'));
-    expect(def.content).toContain('<string>--release</string>');
-    expect(def.content).toContain('<string>--node</string>');
-    expect(def.content).toContain('<string>--child</string>');
-    expect(def.content).toContain(`<string>${FAKE_RELEASE}</string>`);
+    expect(def.content).not.toContain('<string>--release</string>');
+    expect(def.content).not.toContain('<string>--node</string>');
+    expect(def.content).not.toContain('<string>--child</string>');
+    expect(def.content).not.toContain(`<string>${FAKE_RELEASE}</string>`);
     expect(def.content).toContain('<string>--budget</string>');
     expect(def.content).toContain('<string>5</string>');
     expect(def.content).toContain('<string>--interval</string>');
@@ -430,14 +427,15 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
     expect(def.content).not.toContain('<key>ThrottleInterval</key>');
   });
 
-  it('keeps an unbound source build dormant instead of inventing release identity', () => {
+  it('does not serialize an absent caller release identity', () => {
     const def = generateServiceDefinition({ ...baseOpts('darwin'), releaseRevision: undefined });
-    expect(def.launchdRuntime?.arguments).toContain('unavailable');
+    expect(def.launchdRuntime?.arguments).toEqual(launchdRuntimeArguments());
+    expect(def.content).not.toContain('unavailable');
   });
 
-  it('keeps malformed release identity dormant', () => {
+  it('does not serialize a malformed caller release identity', () => {
     const def = generateServiceDefinition({ ...baseOpts('darwin'), releaseRevision: '<string>forged</string>' });
-    expect(def.launchdRuntime?.arguments).toContain('unavailable');
+    expect(def.launchdRuntime?.arguments).toEqual(launchdRuntimeArguments());
     expect(def.content).not.toContain('forged');
   });
 
@@ -669,7 +667,7 @@ describe('install() — mocked spawnSync', () => {
     );
   });
 
-  it('darwin: install rejects a loaded job with stale controller or release argv', async () => {
+  it('darwin: install rejects a loaded job with stale supervisor argv', async () => {
     installLaunchdPlistTransactionMock.mockImplementation((options: {
       verify: () => { ok: boolean; stderr: string };
     }) => {
@@ -685,7 +683,11 @@ describe('install() — mocked spawnSync', () => {
       if (args[0] === 'print') {
         return {
           status: 0,
-          stdout: exactLaunchdPrintFixture({ releaseRevision: 'b'.repeat(40) }),
+          stdout: exactLaunchdPrintFixture({
+            arguments: launchdRuntimeArguments().map(
+              (argument, index) => index === 1 ? `${argument}.stale` : argument,
+            ),
+          }),
           stderr: '',
           error: undefined,
         };
@@ -1464,12 +1466,12 @@ describe('serviceStatus() — mocked OS query output', () => {
     spawnSyncMock
       .mockReturnValueOnce({
         status: 0,
-        stdout: exactLaunchdPrintFixture({ home, releaseRevision: FAKE_RELEASE }),
+        stdout: exactLaunchdPrintFixture({ home }),
         stderr: '',
       })
       .mockReturnValueOnce({
         status: 0,
-        stdout: exactLaunchdPrintFixture({ home, releaseRevision: 'b'.repeat(40) }),
+        stdout: exactLaunchdPrintFixture({ home }),
         stderr: '',
       });
 
