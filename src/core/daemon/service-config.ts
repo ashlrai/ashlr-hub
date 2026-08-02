@@ -1,4 +1,5 @@
 import type { DaemonConfig } from '../types.js';
+import { readBuildIdentity } from '../build-identity.js';
 import type { ServiceInstallOptions } from './service.js';
 
 const DEFAULT_SERVICE_BUDGET_USD = 5;
@@ -16,10 +17,14 @@ export function daemonServiceInstallOptions(
   extras: Partial<ServiceInstallOptions> = {},
 ): ServiceInstallOptions {
   const daemon: Partial<DaemonConfig> = cfg?.daemon ?? {};
+  const buildIdentity = readBuildIdentity();
   return {
     budget: typeof daemon.dailyBudgetUsd === 'number' ? daemon.dailyBudgetUsd : DEFAULT_SERVICE_BUDGET_USD,
     intervalMs: typeof daemon.intervalMs === 'number' ? daemon.intervalMs : DEFAULT_SERVICE_INTERVAL_MS,
     parallel: typeof daemon.parallel === 'number' ? daemon.parallel : DEFAULT_SERVICE_PARALLEL,
+    releaseRevision: buildIdentity.revision !== null && buildIdentity.dirty !== true
+      ? buildIdentity.revision
+      : 'unavailable',
     ...extras,
   };
 }

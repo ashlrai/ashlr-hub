@@ -84,6 +84,8 @@ type PendingCountFn = () => number;
 type LoadConfigFn = () => AshlrConfig;
 type GuardHealthDiagnosis = import('../core/daemon/guard-health.js').GuardHealthDiagnosis;
 type DiagnoseGuardHealthFn = () => GuardHealthDiagnosis;
+type RunLaunchdRetryControllerFn =
+  typeof import('../core/daemon/launchd-retry-controller.js')['runLaunchdRetryController'];
 
 async function importLoop(): Promise<{
   runDaemon: RunDaemonFn;
@@ -153,6 +155,15 @@ async function importGuardHealth(): Promise<DiagnoseGuardHealthFn | null> {
   }
 }
 
+async function importLaunchdRetryController(): Promise<RunLaunchdRetryControllerFn | null> {
+  try {
+    const mod = await import('../core/daemon/launchd-retry-controller.js');
+    return mod.runLaunchdRetryController;
+  } catch {
+    return null;
+  }
+}
+
 async function importServiceConfig(): Promise<
   ((cfg: AshlrConfig | null, overrides?: { autostart?: boolean }) => ServiceInstallOptions) | null
 > {
@@ -199,6 +210,8 @@ interface StartFlags {
   once: boolean;
   dryRun: boolean;
   supervised: boolean;
+  launchdController: boolean;
+  launchdReleaseRevision?: string;
   drain?: DaemonDrainMode;
   limit?: number;
   budgetUsd?: number;
@@ -214,7 +227,12 @@ function parseNum(v: string | undefined): number | undefined {
 }
 
 function parseStartFlags(args: string[]): { flags: StartFlags; err?: string } {
-  const flags: StartFlags = { once: false, dryRun: false, supervised: false };
+  const flags: StartFlags = {
+    once: false,
+    dryRun: false,
+    supervised: false,
+    launchdController: false,
+  };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     switch (a) {
@@ -227,6 +245,17 @@ function parseStartFlags(args: string[]): { flags: StartFlags; err?: string } {
       case '--supervised':
         flags.supervised = true;
         break;
+      case '--launchd-controller':
+        flags.launchdController = true;
+        break;
+      case '--launchd-release': {
+        const revision = args[++i];
+        if (revision === undefined || revision.startsWith('-')) {
+          return { flags, err: '--launchd-release requires a build revision' };
+        }
+        flags.launchdReleaseRevision = revision;
+        break;
+      }
       case '--drain': {
         const v = args[++i];
         if (v !== 'diagnostic-reslices') {
@@ -266,6 +295,12 @@ function parseStartFlags(args: string[]): { flags: StartFlags; err?: string } {
   }
   if (flags.limit !== undefined && flags.drain === undefined) {
     return { flags, err: '--limit requires --drain' };
+  }
+  if (flags.launchdController && (!flags.supervised || flags.launchdReleaseRevision === undefined)) {
+    return { flags, err: '--launchd-controller requires --supervised and --launchd-release' };
+  }
+  if (!flags.launchdController && flags.launchdReleaseRevision !== undefined) {
+    return { flags, err: '--launchd-release requires --launchd-controller' };
   }
   return { flags };
 }
@@ -345,6 +380,28 @@ async function cmdDaemonStart(flags: StartFlags): Promise<number> {
   }
 
   const merged = mergeDaemonConfig(cfg, flags);
+  const daemonOptions = {
+    once: flags.once,
+    dryRun: flags.dryRun,
+    ...(flags.drain ? { drain: flags.drain } : {}),
+    ...(flags.limit ? { drainLimit: flags.limit } : {}),
+  };
+
+  if (flags.launchdController) {
+    const runLaunchdRetryController = await importLaunchdRetryController();
+    if (!runLaunchdRetryController) {
+      console.error(col.red('error: ') + 'launchd retry controller is unavailable.');
+      return 0;
+    }
+    const controlled = await runLaunchdRetryController({
+      expectedReleaseRevision: flags.launchdReleaseRevision!,
+      runDaemon: () => loop.runDaemon(merged, daemonOptions),
+    });
+    const message = `launchd retry controller: ${controlled.reason}`;
+    if (controlled.exitCode === 1) console.error(col.yellow(message));
+    else console.log(col.dim(message));
+    return controlled.exitCode;
+  }
 
   console.log('');
   console.log(
@@ -365,12 +422,7 @@ async function cmdDaemonStart(flags: StartFlags): Promise<number> {
 
   // runDaemon never throws by contract. Its explicit termination disposition
   // prevents retryable resident failures from masquerading as a clean exit.
-  const finalState = await loop.runDaemon(merged, {
-    once: flags.once,
-    dryRun: flags.dryRun,
-    ...(flags.drain ? { drain: flags.drain } : {}),
-    ...(flags.limit ? { drainLimit: flags.limit } : {}),
-  });
+  const finalState = await loop.runDaemon(merged, daemonOptions);
 
   if (finalState.startRefusal) {
     console.error(

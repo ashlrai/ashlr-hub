@@ -41,6 +41,7 @@ import {
 
 export type Platform = 'darwin' | 'linux' | 'win32';
 export type PlatformSpec = 'launchd' | 'systemd' | 'schtasks' | 'unknown';
+const RELEASE_REVISION_RE = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 
 export interface ServiceInstallOptions {
   /** Override node executable path (default: process.execPath). */
@@ -61,6 +62,8 @@ export interface ServiceInstallOptions {
   homeDir?: string;
   /** Override process.platform for generation (useful in tests). */
   platform?: Platform;
+  /** Exact clean build revision bound into the dormant launchd controller. */
+  releaseRevision?: string;
   /**
    * Wrap the daemon process with `caffeinate -i -s` on macOS so the job keeps
    * running while the lid is closed and the machine is idle (prevents both idle
@@ -151,14 +154,26 @@ export function generateServiceDefinition(opts: ServiceInstallOptions = {}): Ser
     : 30;
   const parallel = opts.parallel ?? 1;
   const keepAwake = opts.keepAwake ?? false;
+  const releaseRevision = opts.releaseRevision && RELEASE_REVISION_RE.test(opts.releaseRevision)
+    ? opts.releaseRevision
+    : 'unavailable';
 
   switch (platform) {
     case 'darwin':
-      return buildLaunchdDefinition({ nodePath, binPath, home, configDir, budget, intervalMs, restartSec, parallel, keepAwake });
+      return buildLaunchdDefinition({
+        nodePath, binPath, home, configDir, budget, intervalMs, restartSec, parallel,
+        releaseRevision, keepAwake,
+      });
     case 'linux':
-      return buildSystemdDefinition({ nodePath, binPath, home, configDir, budget, intervalMs, restartSec, parallel });
+      return buildSystemdDefinition({
+        nodePath, binPath, home, configDir, budget, intervalMs, restartSec, parallel,
+        releaseRevision,
+      });
     case 'win32':
-      return buildSchtasksDefinition({ nodePath, binPath, home, configDir, budget, intervalMs, restartSec, parallel });
+      return buildSchtasksDefinition({
+        nodePath, binPath, home, configDir, budget, intervalMs, restartSec, parallel,
+        releaseRevision,
+      });
     default:
       throw new Error(`Unsupported platform: ${platform}`);
   }
@@ -177,6 +192,7 @@ interface BuildOpts {
   intervalMs: number;
   restartSec: number;
   parallel: number;
+  releaseRevision: string;
   /** Wrap ProgramArguments with caffeinate -i -s (macOS only). */
   keepAwake?: boolean;
 }
@@ -203,6 +219,9 @@ function buildLaunchdDefinition(o: BuildOpts): ServiceDefinition {
     'daemon',
     'start',
     '--supervised',
+    '--launchd-controller',
+    '--launchd-release',
+    o.releaseRevision,
     '--budget',
     String(o.budget),
     '--interval',

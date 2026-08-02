@@ -11,6 +11,7 @@ const effects = vi.hoisted(() => ({
   loadDaemonStateStrict: vi.fn(),
   pendingCount: vi.fn(),
   diagnoseGuardHealth: vi.fn(),
+  runLaunchdRetryController: vi.fn(),
   install: vi.fn(),
   uninstall: vi.fn(),
   ensureRunning: vi.fn(),
@@ -24,6 +25,7 @@ const moduleLoads = vi.hoisted(() => ({
   state: 0,
   inbox: 0,
   guardHealth: 0,
+  launchdRetryController: 0,
   service: 0,
   serviceConfig: 0,
 }));
@@ -58,6 +60,11 @@ vi.mock('../src/core/inbox/store.js', () => {
 vi.mock('../src/core/daemon/guard-health.js', () => {
   moduleLoads.guardHealth++;
   return { diagnoseGuardHealth: effects.diagnoseGuardHealth };
+});
+
+vi.mock('../src/core/daemon/launchd-retry-controller.js', () => {
+  moduleLoads.launchdRetryController++;
+  return { runLaunchdRetryController: effects.runLaunchdRetryController };
 });
 
 vi.mock('../src/core/daemon/service.js', () => {
@@ -135,6 +142,7 @@ function expectNoEffectModulesOrCalls(): void {
     state: 0,
     inbox: 0,
     guardHealth: 0,
+    launchdRetryController: 0,
     service: 0,
     serviceConfig: 0,
   });
@@ -166,6 +174,13 @@ beforeEach(async () => {
     generatedAt: '2026-07-21T00:00:00.000Z',
     blocked: false,
     blocks: [],
+  });
+  effects.runLaunchdRetryController.mockResolvedValue({
+    exitCode: 0,
+    reason: 'retry-exhausted',
+    daemonInvoked: false,
+    claimNumber: null,
+    attemptsRemaining: 0,
   });
   effects.serviceStatus.mockReturnValue(serviceStatus);
   effects.ensureRunning.mockResolvedValue({ ...serviceStatus, running: true });
@@ -242,6 +257,30 @@ describe('daemon unknown flags fail before effects', () => {
 });
 
 describe('daemon valid flags remain supported', () => {
+  it('routes the hidden launchd argv through the bounded controller', async () => {
+    const revision = 'a'.repeat(40);
+    const result = await capture([
+      'start', '--supervised', '--launchd-controller', '--launchd-release', revision,
+      '--budget', '5', '--interval', '300000', '--parallel', '1',
+    ]);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('launchd retry controller: retry-exhausted');
+    expect(effects.runLaunchdRetryController).toHaveBeenCalledWith(expect.objectContaining({
+      expectedReleaseRevision: revision,
+      runDaemon: expect.any(Function),
+    }));
+    expect(effects.runDaemon).not.toHaveBeenCalled();
+  });
+
+  it('rejects incomplete hidden launchd argv before importing effect modules', async () => {
+    const result = await capture(['start', '--supervised', '--launchd-controller']);
+
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain('--launchd-controller requires --supervised and --launchd-release');
+    expectNoEffectModulesOrCalls();
+  });
+
   it('preserves install --no-autostart without starting the service', async () => {
     const result = await capture(['install', '--no-autostart']);
 

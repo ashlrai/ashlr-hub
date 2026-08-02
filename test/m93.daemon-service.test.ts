@@ -85,6 +85,7 @@ import {
 const FAKE_HOME = '/tmp/ashlr-test-home';
 const FAKE_NODE = '/usr/local/bin/node';
 const FAKE_BIN = '/home/user/ashlr-hub/bin/ashlr';
+const FAKE_RELEASE = 'a'.repeat(40);
 
 function isWindowsPowerShellCommand(command: string): boolean {
   return command === windowsPowerShellPath();
@@ -99,6 +100,7 @@ function baseOpts(platform: 'darwin' | 'linux' | 'win32') {
     budget: 5,
     intervalMs: 1_800_000,
     parallel: 1,
+    releaseRevision: FAKE_RELEASE,
   };
 }
 
@@ -334,6 +336,9 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
         'daemon',
         'start',
         '--supervised',
+        '--launchd-controller',
+        '--launchd-release',
+        FAKE_RELEASE,
         '--budget',
         '5',
         '--interval',
@@ -366,6 +371,9 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
     expect(def.content).toContain('<string>daemon</string>');
     expect(def.content).toContain('<string>start</string>');
     expect(def.content).toContain('<string>--supervised</string>');
+    expect(def.content).toContain('<string>--launchd-controller</string>');
+    expect(def.content).toContain('<string>--launchd-release</string>');
+    expect(def.content).toContain(`<string>${FAKE_RELEASE}</string>`);
     expect(def.content).toContain('<string>--budget</string>');
     expect(def.content).toContain('<string>5</string>');
     expect(def.content).toContain('<string>--interval</string>');
@@ -387,6 +395,9 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
         'daemon',
         'start',
         '--supervised',
+        '--launchd-controller',
+        '--launchd-release',
+        FAKE_RELEASE,
         '--budget',
         '5',
         '--interval',
@@ -411,6 +422,17 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
     expect(def.content).toContain('<key>KeepAlive</key>');
     expect(def.content).toContain('<key>SuccessfulExit</key>');
     expect(def.content).toContain('<false/>');
+  });
+
+  it('keeps an unbound source build dormant instead of inventing release identity', () => {
+    const def = generateServiceDefinition({ ...baseOpts('darwin'), releaseRevision: undefined });
+    expect(def.launchdRuntime?.arguments).toContain('unavailable');
+  });
+
+  it('keeps malformed release identity dormant', () => {
+    const def = generateServiceDefinition({ ...baseOpts('darwin'), releaseRevision: '<string>forged</string>' });
+    expect(def.launchdRuntime?.arguments).toContain('unavailable');
+    expect(def.content).not.toContain('forged');
   });
 
   it('plist crash restart throttle is independent from daemon work interval', () => {
@@ -1368,7 +1390,8 @@ describe('serviceStatus() — mocked OS query output', () => {
   const launchdTarget = `gui/${typeof process.getuid === 'function' ? process.getuid() : 501}/ai.ashlr.daemon`;
   const launchdPlist = path.join(FAKE_HOME, 'Library', 'LaunchAgents', 'ai.ashlr.daemon.plist');
   const launchdArguments = [
-    FAKE_NODE, FAKE_BIN, 'daemon', 'start', '--supervised', '--budget', '5',
+    FAKE_NODE, FAKE_BIN, 'daemon', 'start', '--supervised', '--launchd-controller',
+    '--launchd-release', FAKE_RELEASE, '--budget', '5',
     '--interval', '1800000', '--parallel', '1',
   ];
   const launchdPrint = (state: string, pid?: number): string => `${[
@@ -1525,7 +1548,8 @@ describe('ensureRunning() — mocked OS activation', () => {
   const launchdTarget = `gui/${typeof process.getuid === 'function' ? process.getuid() : 501}/ai.ashlr.daemon`;
   const launchdPlist = path.join(FAKE_HOME, 'Library', 'LaunchAgents', 'ai.ashlr.daemon.plist');
   const launchdArguments = [
-    FAKE_NODE, FAKE_BIN, 'daemon', 'start', '--supervised', '--budget', '5',
+    FAKE_NODE, FAKE_BIN, 'daemon', 'start', '--supervised', '--launchd-controller',
+    '--launchd-release', FAKE_RELEASE, '--budget', '5',
     '--interval', '1800000', '--parallel', '1',
   ];
   const launchdPrint = (
