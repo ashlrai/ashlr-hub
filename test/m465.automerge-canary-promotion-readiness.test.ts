@@ -23,6 +23,12 @@ function scopeDigest(maxAutomergeFiles: number, maxAutomergeLines: number): stri
   return result.policy.digest;
 }
 
+function defaultScopeDigest(): string {
+  const result = resolveAutoMergeScopePolicy(undefined);
+  if (!result.ok) throw new Error(`invalid default test scope: ${result.reasons.join(',')}`);
+  return result.policy.digest;
+}
+
 function readyInput(): AutoMergeCanaryPromotionReadinessInput {
   return {
     observedAtMs: NOW,
@@ -113,7 +119,7 @@ describe('M465 auto-merge canary promotion readiness', () => {
         maxLines: 150,
         policyMaxFiles: 10,
         policyMaxLines: 300,
-        source: 'explicit-config',
+        source: 'explicit',
         scopePolicyDigest: scopeDigest(4, 150),
       },
       scopeIdentity: {
@@ -182,19 +188,30 @@ describe('M465 auto-merge canary promotion readiness', () => {
     expect(result.activationPermitted).toBe(false);
   });
 
-  it('fails closed when explicit scope caps are missing or malformed', () => {
+  it('uses identified conservative defaults for absent caps but rejects malformed values', () => {
     const missing = readyInput() as unknown as Record<string, Record<string, unknown>>;
     delete missing['policy']!['maxAutomergeFiles'];
     delete missing['policy']!['maxAutomergeLines'];
+    const implicitConfig = {} as AshlrConfig;
+    const typedMissing = missing as unknown as AutoMergeCanaryPromotionReadinessInput;
+    typedMissing.scopeIdentity.expectedConfigDigest = autoMergeCanaryConfigDigest(implicitConfig);
+    typedMissing.scopeIdentity.evidenceConfigDigest = autoMergeCanaryConfigDigest(implicitConfig);
+    typedMissing.scopeIdentity.currentConfigDigest = autoMergeCanaryConfigDigest(implicitConfig);
+    typedMissing.scopeIdentity.currentScopePolicyDigest = defaultScopeDigest();
 
     const missingResult = evaluateAutoMergeCanaryPromotionReadiness(
-      missing as unknown as AutoMergeCanaryPromotionReadinessInput,
+      typedMissing,
     );
     expect(missingResult).toMatchObject({
-      evidenceReady: false,
+      evidenceReady: true,
       activationPermitted: false,
-      scopeCaps: { maxFiles: 4, maxLines: 150, source: 'default-config' },
-      blockers: [{ code: 'scope-caps-unavailable', severity: 'critical' }],
+      scopeCaps: {
+        maxFiles: 4,
+        maxLines: 150,
+        source: 'default',
+        scopePolicyDigest: defaultScopeDigest(),
+      },
+      blockers: [],
     });
 
     const malformed = readyInput();
@@ -204,7 +221,7 @@ describe('M465 auto-merge canary promotion readiness', () => {
     expect(malformedResult.scopeCaps).toMatchObject({
       maxFiles: null,
       maxLines: null,
-      source: 'invalid-config',
+      source: 'invalid',
       scopePolicyDigest: null,
     });
     expect(malformedResult.blockers.map((entry) => entry.code)).toContain('scope-caps-unavailable');
@@ -225,7 +242,7 @@ describe('M465 auto-merge canary promotion readiness', () => {
         maxLines: null,
         policyMaxFiles: 10,
         policyMaxLines: 300,
-        source: 'invalid-config',
+        source: 'invalid',
       },
     });
     expect(result.blockers.map((entry) => entry.code)).toEqual(expect.arrayContaining([
@@ -252,6 +269,34 @@ describe('M465 auto-merge canary promotion readiness', () => {
     expect(result.scopeCaps).toMatchObject({ maxFiles: 10, maxLines: 300 });
     expect(result.scopeIdentity.state).toBe('mismatched');
     expect(result.blockers.map((entry) => entry.code)).toContain('scope-identity-mismatch');
+  });
+
+  it('distinguishes implicit defaults from explicit equal-value policy identities', () => {
+    const implicitPolicy = resolveAutoMergeScopePolicy(undefined);
+    const explicitPolicy = resolveAutoMergeScopePolicy({
+      maxAutomergeFiles: 4,
+      maxAutomergeLines: 150,
+    });
+    expect(implicitPolicy.ok && implicitPolicy.policy.source).toBe('default');
+    expect(explicitPolicy.ok && explicitPolicy.policy.source).toBe('explicit');
+    expect(implicitPolicy.ok && explicitPolicy.ok && implicitPolicy.policy.digest)
+      .not.toBe(explicitPolicy.ok ? explicitPolicy.policy.digest : null);
+
+    const implicitConfig = {} as AshlrConfig;
+    const explicitConfig = configWithCaps(4, 150);
+    expect(autoMergeCanaryConfigDigest(implicitConfig)).not.toBe(
+      autoMergeCanaryConfigDigest(explicitConfig),
+    );
+
+    const input = readyInput();
+    input.scopeIdentity.expectedConfigDigest = autoMergeCanaryConfigDigest(implicitConfig);
+    input.scopeIdentity.evidenceConfigDigest = autoMergeCanaryConfigDigest(implicitConfig);
+    const result = evaluateAutoMergeCanaryPromotionReadiness(input);
+
+    expect(result.scopeCaps.source).toBe('explicit');
+    expect(result.scopeIdentity.state).toBe('mismatched');
+    expect(result.blockers.map((entry) => entry.code)).toContain('scope-identity-mismatch');
+    expect(result.activationPermitted).toBe(false);
   });
 
   it('rejects canary evidence digest mismatch and stale matching identity', () => {

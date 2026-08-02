@@ -126,6 +126,29 @@ function multiFileDiff(n: number, linesEach = 1): string {
   }).join('\n');
 }
 
+function multiDeletionDiff(n: number): string {
+  return Array.from({ length: n }, (_, i) => [
+    `diff --git a/docs/deleted${i}.md b/docs/deleted${i}.md`,
+    'deleted file mode 100644',
+    'index 1111111..0000000',
+    `--- a/docs/deleted${i}.md`,
+    '+++ /dev/null',
+    '@@ -1 +0,0 @@',
+    '-removed',
+    '',
+  ].join('\n')).join('\n');
+}
+
+function multiRenameDiff(n: number): string {
+  return Array.from({ length: n }, (_, i) => [
+    `diff --git a/docs/old${i}.md b/docs/new${i}.md`,
+    'similarity index 100%',
+    `rename from docs/old${i}.md`,
+    `rename to docs/new${i}.md`,
+    '',
+  ].join('\n')).join('\n');
+}
+
 /** Standard frontier config with auto-merge enabled and low maxRisk. */
 function frontierCfg(
   overAutoMerge: Record<string, unknown> = {},
@@ -271,6 +294,66 @@ describe('M86 REFUSE — scope cap', () => {
     expect(r.ok).toBe(false);
     expect(r.merged).toBe(false);
     expect(r.reason).toMatch(/scope cap.*lines/i);
+    expect(loadProposal(p.id)!.status).toBe('approved');
+  });
+
+  it('deletion-only docs count against the default max-4 file cap', async () => {
+    initRepo(tmpRepo);
+    attachOrigin(tmpRepo, 'main');
+    git(tmpRepo, ['checkout', '-b', 'work']);
+    enroll(tmpRepo);
+
+    const diff = multiDeletionDiff(5);
+    expect(classifyRisk({ diff } as any)).toBe('low');
+
+    const p = frontierPatch(diff);
+    const r = await autoMergeProposal(p.id, frontierCfg());
+
+    expect(r.ok).toBe(false);
+    expect(r.merged).toBe(false);
+    expect(r.reason).toMatch(/scope cap.*5 files.*max 4/i);
+    expect(loadProposal(p.id)!.status).toBe('approved');
+  });
+
+  it('rename-only docs count against the default max-4 file cap', async () => {
+    initRepo(tmpRepo);
+    attachOrigin(tmpRepo, 'main');
+    git(tmpRepo, ['checkout', '-b', 'work']);
+    enroll(tmpRepo);
+
+    const diff = multiRenameDiff(5);
+    expect(classifyRisk({ diff } as any)).toBe('low');
+
+    const p = frontierPatch(diff);
+    const r = await autoMergeProposal(p.id, frontierCfg());
+
+    expect(r.ok).toBe(false);
+    expect(r.merged).toBe(false);
+    expect(r.reason).toMatch(/scope cap.*5 files.*max 4/i);
+    expect(loadProposal(p.id)!.status).toBe('approved');
+  });
+
+  it('invalid evidence-mode caps refuse before persisting verification evidence', async () => {
+    initRepo(tmpRepo);
+    git(tmpRepo, ['remote', 'add', 'origin', 'git@github.com:ashlrai/m86-scope.git']);
+    git(tmpRepo, ['checkout', '-b', 'work']);
+    enroll(tmpRepo);
+
+    const p = frontierPatch(addFileDiff('docs/evidence.md', 'doc'));
+    const r = await autoMergeProposal(p.id, frontierCfg({
+      trustBasis: 'evidence',
+      pushToRemote: true,
+      allowWithoutVerification: false,
+      maxAutomergeFiles: Number.MAX_SAFE_INTEGER,
+      protectedRemote: {
+        branchProtection: true,
+        requiredChecks: [{ context: 'ci/test', appId: '15368' }],
+      },
+    }));
+
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/scope cap policy invalid.*max-files-exceeds-policy/i);
+    expect(loadProposal(p.id)!.verifyResult).toBeUndefined();
     expect(loadProposal(p.id)!.status).toBe('approved');
   });
 
@@ -789,6 +872,7 @@ describe('M86 PURE — evidence safety lane', () => {
       '--- a/test/m54.self-guard.test.ts',
       '+++ b/test/m54.self-guard.test.ts',
       '@@ -1 +1 @@',
+      "-describe('focused safety', () => {",
       "+describe.only('focused safety', () => {",
       '',
     ].join('\n');
@@ -803,6 +887,27 @@ describe('M86 PURE — evidence safety lane', () => {
         remoteAvailable: true,
       }).reason,
     ).toMatch(/skipped\/focused/);
+  });
+
+  it('refuses malformed diff headers before evidence activation', () => {
+    const malformed = [
+      'diff --git a/docs/a.md',
+      '--- a/docs/a.md',
+      '+++ b/docs/a.md',
+      '@@ -1 +1 @@',
+      '-old',
+      '+new',
+      '',
+    ].join('\n');
+
+    const result = evaluateEvidenceAutoMergePreflight(
+      evidencePatch('m86-evidence-malformed', malformed),
+      evidenceCfg(),
+      { remoteAvailable: true },
+    );
+
+    expect(result.authorized).toBe(false);
+    expect(result.reason).toMatch(/malformed diff scope \(malformed-diff-header\)/);
   });
 
   it('refuses verification script changes before evidence activation', () => {

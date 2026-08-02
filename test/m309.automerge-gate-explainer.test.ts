@@ -36,6 +36,29 @@ const sourceDiff = [
   '',
 ].join('\n');
 
+function multiDeletionDiff(n: number): string {
+  return Array.from({ length: n }, (_, i) => [
+    `diff --git a/docs/deleted${i}.md b/docs/deleted${i}.md`,
+    'deleted file mode 100644',
+    'index 1111111..0000000',
+    `--- a/docs/deleted${i}.md`,
+    '+++ /dev/null',
+    '@@ -1 +0,0 @@',
+    '-removed',
+    '',
+  ].join('\n')).join('\n');
+}
+
+function multiRenameDiff(n: number): string {
+  return Array.from({ length: n }, (_, i) => [
+    `diff --git a/docs/old${i}.md b/docs/new${i}.md`,
+    'similarity index 100%',
+    `rename from docs/old${i}.md`,
+    `rename to docs/new${i}.md`,
+    '',
+  ].join('\n')).join('\n');
+}
+
 function cfg(autoMerge: Record<string, unknown> = {}): AshlrConfig {
   return {
     version: 1,
@@ -194,6 +217,36 @@ describe('M309 explainAutoMergeGate', () => {
     expect(r.facts.risk).toBe('medium');
     expect(r.blockers.some((b) => b.code === 'risk-threshold')).toBe(true);
     expect(r.reason).toMatch(/risk class 'medium' exceeds maxRisk 'low'/);
+  });
+
+  it('explains five deletion-only docs as over the default max-4 file cap', () => {
+    const r = explainAutoMergeGate(
+      proposal({
+        diff: multiDeletionDiff(5),
+        verifyResult: { passed: true, detail: 'green' },
+      }),
+      cfg(),
+    );
+
+    expect(r.mergeable).toBe(false);
+    expect(r.facts).toMatchObject({ risk: 'low', scopeFiles: 5, scopeLines: 5 });
+    expect(r.blockers.some((b) => b.code === 'scope-cap')).toBe(true);
+    expect(r.reason).toMatch(/scope cap exceeded \(5 file\(s\), 5 line\(s\); max 4\/150\)/);
+  });
+
+  it('explains five rename-only docs as over the default max-4 file cap', () => {
+    const r = explainAutoMergeGate(
+      proposal({
+        diff: multiRenameDiff(5),
+        verifyResult: { passed: true, detail: 'green' },
+      }),
+      cfg(),
+    );
+
+    expect(r.mergeable).toBe(false);
+    expect(r.facts).toMatchObject({ risk: 'low', scopeFiles: 5, scopeLines: 0 });
+    expect(r.blockers.some((b) => b.code === 'scope-cap')).toBe(true);
+    expect(r.reason).toMatch(/scope cap exceeded \(5 file\(s\), 0 line\(s\); max 4\/150\)/);
   });
 
   it('reports mergeable when available read-only evidence satisfies the gates', () => {

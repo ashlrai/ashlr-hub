@@ -187,6 +187,9 @@ function normalizedAutoMergeConfig(cfg: AshlrConfig): Record<string, unknown> {
           maxLines: scopePolicy.policy.maxLines,
           policyMaxFiles: scopePolicy.policy.policyMaxFiles,
           policyMaxLines: scopePolicy.policy.policyMaxLines,
+          source: scopePolicy.policy.source,
+          explicitFiles: scopePolicy.policy.explicitFiles,
+          explicitLines: scopePolicy.policy.explicitLines,
           digest: scopePolicy.policy.digest,
         }
       : { invalid: scopePolicy.reasons },

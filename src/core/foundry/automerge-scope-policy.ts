@@ -37,7 +37,13 @@ function record(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function digestPolicy(maxFiles: number, maxLines: number): string {
+function digestPolicy(
+  maxFiles: number,
+  maxLines: number,
+  source: AutoMergeScopePolicySource,
+  explicitFiles: boolean,
+  explicitLines: boolean,
+): string {
   return createHash('sha256').update(JSON.stringify([
     SCOPE_POLICY_DOMAIN,
     {
@@ -46,6 +52,9 @@ function digestPolicy(maxFiles: number, maxLines: number): string {
       maxLines,
       policyMaxFiles: MAX_AUTOMERGE_POLICY_FILES,
       policyMaxLines: MAX_AUTOMERGE_POLICY_LINES,
+      source,
+      explicitFiles,
+      explicitLines,
     },
   ]), 'utf8').digest('hex');
 }
@@ -95,7 +104,7 @@ export function resolveAutoMergeScopePolicy(autoMerge: unknown): AutoMergeScopeP
       source,
       explicitFiles,
       explicitLines,
-      digest: digestPolicy(files, lines),
+      digest: digestPolicy(files, lines, source, explicitFiles, explicitLines),
     },
   };
 }

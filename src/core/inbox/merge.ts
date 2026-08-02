@@ -147,6 +147,7 @@ import {
   resolveAutoMergeScopePolicy,
   type AutoMergeScopePolicyResolution,
 } from '../foundry/automerge-scope-policy.js';
+import { measureAutoMergeDiffScopeForGate } from '../foundry/automerge-diff-scope.js';
 import {
   judgeProposal,
   resolveFrontierJudgeClient,
@@ -421,50 +422,6 @@ export type RiskClass = 'low' | 'medium' | 'high';
 /** Total ordering for risk comparison: low < medium < high. */
 const RISK_ORDER: Record<RiskClass, number> = { low: 0, medium: 1, high: 2 };
 
-function normalizeDiffPath(raw: string): string | undefined {
-  let p = raw.trim();
-  const tab = p.indexOf('\t');
-  if (tab >= 0) p = p.slice(0, tab);
-  if ((p.startsWith('"') && p.endsWith('"')) || (p.startsWith("'") && p.endsWith("'"))) {
-    p = p.slice(1, -1);
-  }
-  if (!p || p === '/dev/null') return undefined;
-  if (p.startsWith('a/') || p.startsWith('b/')) p = p.slice(2);
-  return p || undefined;
-}
-
-/**
- * Extract the changed file paths from a unified diff. Includes both old and new
- * paths so deletion-only and rename diffs still trigger build/CI/manifest guards.
- */
-function changedFilesFromDiff(diff: string): string[] {
-  const files = new Set<string>();
-  const add = (raw: string): void => {
-    const p = normalizeDiffPath(raw);
-    if (p) files.add(p);
-  };
-  for (const line of diff.split('\n')) {
-    const gitHeader = line.match(/^diff --git (a\/.+?) (b\/.+)$/);
-    if (gitHeader) {
-      add(gitHeader[1]!);
-      add(gitHeader[2]!);
-      continue;
-    }
-    if (line.startsWith('--- ') || line.startsWith('+++ ')) {
-      add(line.slice(4));
-      continue;
-    }
-    if (line.startsWith('rename from ')) {
-      add(line.slice('rename from '.length));
-      continue;
-    }
-    if (line.startsWith('rename to ')) {
-      add(line.slice('rename to '.length));
-    }
-  }
-  return [...files];
-}
-
 /** Lowercase basename of a path (no directory). */
 function baseName(p: string): string {
   const slash = p.lastIndexOf('/');
@@ -587,10 +544,11 @@ function isSecuritySensitive(p: string): boolean {
  */
 export function classifyRisk(proposal: Proposal): RiskClass {
   const diff = proposal.diff ?? '';
-  const files = changedFilesFromDiff(diff);
+  const scope = measureAutoMergeDiffScopeForGate(diff);
 
   // An empty or unparsable diff is the most dangerous: fail to HIGH.
-  if (files.length === 0) return 'high';
+  if (!scope.ok) return 'high';
+  const files = scope.touchedPaths;
 
   // ── H2: dangerous-file classes are unconditionally HIGH (checked FIRST, ──────
   // before any medium/low logic could under-rate them) ────────────────────────
@@ -609,15 +567,9 @@ export function classifyRisk(proposal: Proposal): RiskClass {
     return 'high';
   }
 
-  // Count added/removed body lines (exclude the +++/--- headers) to gauge size.
-  let changedLines = 0;
-  for (const line of diff.split('\n')) {
-    if (line.startsWith('+++') || line.startsWith('---')) continue;
-    if (line.startsWith('+') || line.startsWith('-')) changedLines++;
-  }
   const LARGE_FILES = 10;
   const LARGE_LINES = 400;
-  if (files.length > LARGE_FILES || changedLines > LARGE_LINES) return 'high';
+  if (scope.files > LARGE_FILES || scope.lines > LARGE_LINES) return 'high';
 
   const sourceFiles = files.filter(isSourceFile);
 
@@ -1035,21 +987,6 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function countDiffScope(diff: string): { files: number; lines: number } {
-  let files = 0;
-  let lines = 0;
-  for (const line of diff.split('\n')) {
-    if (line.startsWith('+++ ')) {
-      const p = line.slice(4).trim().split('\t')[0];
-      if (p && p !== '/dev/null') files++;
-      continue;
-    }
-    if (line.startsWith('+++') || line.startsWith('---')) continue;
-    if (line.startsWith('+') || line.startsWith('-')) lines++;
-  }
-  return { files, lines };
-}
-
 export interface EvidenceRemoteProtectionSignal {
   ok: boolean;
   detail: string;
@@ -1327,7 +1264,23 @@ export function evaluateEvidenceAutoMergePreflight(
     return refuse('partial/timeout-captured proposals require judge or human review');
   }
 
-  const changedFiles = changedFilesFromDiff(proposal.diff ?? '');
+  const diff = proposal.diff ?? '';
+  const scope = measureAutoMergeDiffScopeForGate(diff);
+  if (!scope.ok) {
+    return refuse(`malformed diff scope (${scope.reason})`);
+  }
+  const scopePolicy = configuredScopePolicy(cfg);
+  if (!scopePolicy.ok) {
+    return refuse(`scope cap policy invalid (${scopePolicy.reasons.join(', ')})`);
+  }
+  if (scope.files > scopePolicy.policy.maxFiles) {
+    return refuse(`scope cap — diff touches ${scope.files} files (max ${scopePolicy.policy.maxFiles})`);
+  }
+  if (scope.lines > scopePolicy.policy.maxLines) {
+    return refuse(`scope cap — diff has ${scope.lines} changed lines (max ${scopePolicy.policy.maxLines})`);
+  }
+
+  const changedFiles = scope.touchedPaths;
   if (changedFiles.some(isBuildOrCiOrManifest)) {
     return refuse('diff touches build/CI/manifest files — judge or human review required');
   }
@@ -1511,10 +1464,19 @@ export function explainAutoMergeGate(
       : `risk class '${risk}' exceeds maxRisk '${maxRisk}'`,
   );
 
-  const scope = countDiffScope(diff);
-  facts.scopeFiles = scope.files;
-  facts.scopeLines = scope.lines;
-  if (!caps) {
+  const scope = measureAutoMergeDiffScopeForGate(diff);
+  if (scope.ok) {
+    facts.scopeFiles = scope.files;
+    facts.scopeLines = scope.lines;
+  }
+  if (!scope.ok) {
+    add(
+      'scope',
+      'scope-cap',
+      false,
+      `malformed diff scope (${scope.reason})`,
+    );
+  } else if (!caps) {
     add(
       'scope',
       'scope-cap',
@@ -1806,18 +1768,12 @@ export function evaluateVerificationGate(
   }
   const MAX_FILES = scopePolicy.policy.maxFiles;
   const MAX_LINES = scopePolicy.policy.maxLines;
-
-  let scopeFiles = 0;
-  for (const line of diff.split('\n')) {
-    if (!line.startsWith('+++ ')) continue;
-    const p = line.slice(4).trim().split('\t')[0];
-    if (p && p !== '/dev/null') scopeFiles++;
+  const scope = measureAutoMergeDiffScopeForGate(diff);
+  if (!scope.ok) {
+    return refuse(`verification gate: malformed diff scope (${scope.reason})`);
   }
-  let scopeLines = 0;
-  for (const line of diff.split('\n')) {
-    if (line.startsWith('+++') || line.startsWith('---')) continue;
-    if (line.startsWith('+') || line.startsWith('-')) scopeLines++;
-  }
+  const scopeFiles = scope.files;
+  const scopeLines = scope.lines;
 
   if (scopeFiles > MAX_FILES) {
     return refuse(
@@ -1897,7 +1853,11 @@ export function evaluateEvidenceGate(
   }
 
   const diff = proposal.diff ?? '';
-  const changedFiles = changedFilesFromDiff(diff);
+  const scope = measureAutoMergeDiffScopeForGate(diff);
+  if (!scope.ok) {
+    return refuse(`evidence gate: malformed diff scope (${scope.reason})`);
+  }
+  const changedFiles = scope.touchedPaths;
   if (changedFiles.some(isBuildOrCiOrManifest)) {
     return refuse('evidence gate: diff touches build/CI/manifest files — judge or human review required');
   }
@@ -1913,7 +1873,6 @@ export function evaluateEvidenceGate(
     return refuse(`evidence gate: risk class '${risk}' exceeds maxRisk '${maxRisk}'`);
   }
 
-  const scope = countDiffScope(diff);
   const scopePolicy = configuredScopePolicy(cfg);
   if (!scopePolicy.ok) {
     return refuse(`evidence gate: scope cap policy invalid (${scopePolicy.reasons.join(', ')})`);
@@ -2167,6 +2126,10 @@ export async function verifyProposal(
   if (!diff.trim()) {
     return { ok: false, ran: [], detail: 'proposal has no diff to verify' };
   }
+  const scope = measureAutoMergeDiffScopeForGate(diff);
+  if (!scope.ok) {
+    return { ok: false, ran: [], detail: `malformed diff scope (${scope.reason})` };
+  }
 
   // ── M54: self-improvement may never self-disarm ─────────────────────────────
   // When a proposal targets ashlr-hub's OWN source, REFUSE before any
@@ -2186,8 +2149,7 @@ export async function verifyProposal(
   // .github/*, a Dockerfile, CI configs, .npmrc/.yarnrc, or a Makefile can change
   // which commands run (or run arbitrary host code via npm lifecycle / CI), so no
   // in-process verification can be trusted — it must go to manual review.
-  const changed = changedFilesFromDiff(diff);
-  if (changed.some(isBuildOrCiOrManifest)) {
+  if (scope.touchedPaths.some(isBuildOrCiOrManifest)) {
     return {
       ok: false,
       ran: [],
@@ -3156,20 +3118,13 @@ export async function autoMergeProposal(
         );
       }
 
-      // Count files (reuse the same "+++ " header logic as changedFilesFromDiff)
-      let scopeFiles = 0;
-      for (const line of diff.split('\n')) {
-        if (!line.startsWith('+++ ')) continue;
-        const p = line.slice(4).trim().split('\t')[0];
-        if (p && p !== '/dev/null') scopeFiles++;
+      const scope = measureAutoMergeDiffScopeForGate(diff);
+      if (!scope.ok) {
+        return refuse(`malformed diff scope (${scope.reason})`, repo);
       }
+      const scopeFiles = scope.files;
+      const scopeLines = scope.lines;
       scopeFilesForEvidence = scopeFiles;
-      // Count changed lines (same logic as classifyRisk body-line counter)
-      let scopeLines = 0;
-      for (const line of diff.split('\n')) {
-        if (line.startsWith('+++') || line.startsWith('---')) continue;
-        if (line.startsWith('+') || line.startsWith('-')) scopeLines++;
-      }
       scopeLinesForEvidence = scopeLines;
 
       if (scopeFiles > MAX_AUTOMERGE_FILES) {

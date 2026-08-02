@@ -1359,6 +1359,14 @@ export function buildAutoMergeCanaryPromotionReadiness(
     detached.summary.denominatorCompleteCohorts === detached.summary.cohorts &&
     detached.summary.conclusiveCompleteCohorts === detached.summary.cohorts;
   const autoMerge = cfg.foundry?.autoMerge;
+  const autoMergeRecord = autoMerge as Record<string, unknown> | undefined;
+  const configuredScopeCap = (key: 'maxAutomergeFiles' | 'maxAutomergeLines'): number | null | undefined => {
+    if (!autoMergeRecord || !Object.prototype.hasOwnProperty.call(autoMergeRecord, key)) return undefined;
+    const value = autoMergeRecord[key];
+    return typeof value === 'number' ? value : null;
+  };
+  const maxAutomergeFiles = configuredScopeCap('maxAutomergeFiles');
+  const maxAutomergeLines = configuredScopeCap('maxAutomergeLines');
   const currentScopePolicy = resolveAutoMergeScopePolicy(autoMerge);
   const lastShadowEvidence = state?.lastShadowEvidence ?? null;
   const input: AutoMergeCanaryPromotionReadinessInput = {
@@ -1426,8 +1434,8 @@ export function buildAutoMergeCanaryPromotionReadiness(
       allowSelfMerge: autoMerge?.allowSelfMerge === true,
       allowWithoutVerification: autoMerge?.allowWithoutVerification === true,
       localMergeFallback: autoMerge?.enabled === true && autoMerge.pushToRemote !== true,
-      maxAutomergeFiles: autoMerge?.maxAutomergeFiles ?? null,
-      maxAutomergeLines: autoMerge?.maxAutomergeLines ?? null,
+      ...(maxAutomergeFiles !== undefined ? { maxAutomergeFiles } : {}),
+      ...(maxAutomergeLines !== undefined ? { maxAutomergeLines } : {}),
     },
     scopeIdentity: {
       sourceState: read.sourceState,

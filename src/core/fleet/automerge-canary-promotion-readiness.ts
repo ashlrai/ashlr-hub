@@ -99,8 +99,8 @@ export interface AutoMergeCanaryPromotionReadinessInput {
     allowSelfMerge: boolean;
     allowWithoutVerification: boolean;
     localMergeFallback: boolean;
-    maxAutomergeFiles: number | null;
-    maxAutomergeLines: number | null;
+    maxAutomergeFiles?: number | null;
+    maxAutomergeLines?: number | null;
   };
   scopeIdentity: {
     sourceState: 'missing' | 'healthy' | 'degraded';
@@ -127,7 +127,7 @@ export interface AutoMergeCanaryPromotionReadiness {
     maxLines: number | null;
     policyMaxFiles: number;
     policyMaxLines: number;
-    source: 'explicit-config' | 'default-config' | 'mixed-config' | 'invalid-config';
+    source: 'explicit' | 'default' | 'mixed' | 'invalid';
     scopePolicyDigest: string | null;
   };
   scopeIdentity: {
@@ -391,15 +391,13 @@ export function evaluateAutoMergeCanaryPromotionReadiness(
   const maxFiles = scopePolicy.ok ? scopePolicy.policy.maxFiles : null;
   const maxLines = scopePolicy.ok ? scopePolicy.policy.maxLines : null;
   const scopeSource = !scopePolicy.ok
-    ? 'invalid-config' as const
-    : scopePolicy.policy.source === 'explicit'
-      ? 'explicit-config' as const
-      : scopePolicy.policy.source === 'default' ? 'default-config' as const : 'mixed-config' as const;
-  if (!scopePolicy.ok || scopePolicy.policy.source !== 'explicit') {
+    ? 'invalid' as const
+    : scopePolicy.policy.source;
+  if (!scopePolicy.ok) {
     blockers.push(blocker(
       'scope-caps-unavailable',
       'critical',
-      'Explicit canonical file and line scope caps are required for promotion evidence.',
+      'Canonical file and line scope caps are unavailable or invalid.',
     ));
   }
   if (!scopePolicy.ok && scopePolicy.reasons.some((reason) => reason.endsWith('exceeds-policy'))) {

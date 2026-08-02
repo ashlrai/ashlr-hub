@@ -105,6 +105,23 @@ describe('M305 evaluateAutoMergeReadinessPreflight', () => {
     expect(r.reason).toMatch(/invalid auto-merge maxRisk/);
   });
 
+  it('rejects invalid evidence-mode scope caps before the pre-verification success path', () => {
+    const r = evaluateAutoMergeReadinessPreflight(proposal(), cfg({
+      trustBasis: 'evidence',
+      pushToRemote: true,
+      allowWithoutVerification: false,
+      maxAutomergeFiles: Number.MAX_SAFE_INTEGER,
+      protectedRemote: {
+        branchProtection: true,
+        requiredChecks: [{ context: 'ci/test', appId: '15368' }],
+      },
+    }));
+
+    expect(r).toMatchObject({ ready: false, permanent: true });
+    expect(r.reason).toMatch(/evidence preflight: scope cap policy invalid/);
+    expect(r.reason).toMatch(/max-files-exceeds-policy/);
+  });
+
   it('reuses authority, provenance, and risk basics as blockers', () => {
     expect(
       evaluateAutoMergeReadinessPreflight(

@@ -9390,12 +9390,36 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('machines:  unavailable');
     expect(out).not.toContain('events:    0\n');
     expect(out).toContain('Auto-merge canary promotion readiness (observation only):');
-    expect(out).toContain('scope caps: unavailable file(s), unavailable changed line(s)');
+    expect(out).toContain('scope caps: 4 file(s), 150 changed line(s)');
+    expect(out).toContain('cap source: default');
     expect(status.autoMergeCanaryPromotionReadiness).toMatchObject({
       authority: 'observation-only',
       verdict: 'blocked',
       activationPermitted: false,
-      scopeCaps: { maxFiles: null, maxLines: null },
+      scopeCaps: { maxFiles: 4, maxLines: 150, source: 'default' },
+    });
+    expect(status.autoMergeCanaryPromotionReadiness?.blockers.map((entry) => entry.code))
+      .not.toContain('scope-caps-unavailable');
+  });
+
+  it('keeps explicit null scope caps blocked and unavailable', async () => {
+    const cfg = baseConfig();
+    cfg.foundry = {
+      autoMerge: {
+        maxAutomergeFiles: null,
+        maxAutomergeLines: null,
+      },
+    } as unknown as NonNullable<AshlrConfig['foundry']>;
+
+    const status = await buildFleetStatus(cfg);
+    const out = formatFleetStatus(status);
+
+    expect(out).toContain('scope caps: unavailable file(s), unavailable changed line(s)');
+    expect(out).toContain('cap source: invalid');
+    expect(status.autoMergeCanaryPromotionReadiness).toMatchObject({
+      verdict: 'blocked',
+      activationPermitted: false,
+      scopeCaps: { maxFiles: null, maxLines: null, source: 'invalid' },
     });
     expect(status.autoMergeCanaryPromotionReadiness?.blockers.map((entry) => entry.code))
       .toContain('scope-caps-unavailable');
