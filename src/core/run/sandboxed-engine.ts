@@ -39,6 +39,7 @@ import type {
   EngineId,
   EngineTier,
   ProposalVerifyResult,
+  ProposalCaptureGateCode,
   Proposal,
   RunActionCounts,
   RunContextSummary,
@@ -97,7 +98,10 @@ import { hashDiff, signProvenance } from '../foundry/provenance.js';
 // incurs zero module load cost; the dynamic import is cached by Node after first call).
 import { buildCacheKeyInput, buildCacheKey } from '../fabric/cache/key.js';
 // M275: completeness + self-verify gate (additive, flag-off byte-identical).
-import { runCompletenessGate } from './completeness-gate.js';
+import {
+  runCompletenessGate,
+  type CompletenessGateResult,
+} from './completeness-gate.js';
 import { lookup as cacheLookup, write as cacheWrite } from '../fabric/cache/store.js';
 import type { CacheEntry } from '../fabric/cache/store.js';
 // M195: resolve api-model keys (e.g. NVIDIA_NIM_API_KEY) via the engine-auth
@@ -308,22 +312,105 @@ function proposalGateOutcome(
     'code' | 'category' | 'reason'
   >>,
 ): RunProposalOutcome {
-  const label = kind === 'partial-completeness-gate'
-    ? 'partial completeness gate'
-    : 'completeness gate';
   const gateCode = gate.code ?? (
     kind === 'partial-completeness-gate' ? 'partial-run' : 'gate-error'
   );
   const gateCategory = gate.category ?? (
     kind === 'partial-completeness-gate' ? 'actionable' : 'infrastructure'
   );
-  const reason = gate.code
-    ? `${label} blocked proposal (${gateCode})`
-    : gate.reason ?? `${label} blocked proposal (${gateCode})`;
+  const reason = gateCode === 'partial-run'
+    ? '[partial] run'
+    : `completeness gate blocked proposal (${gateCode})`;
   return {
     ...proposalOutcome(kind, reason, diff),
     gateCode,
     gateCategory,
+  };
+}
+
+function captureGateVerifyResult(
+  gate: Pick<CompletenessGateResult, 'code' | 'category'>,
+): ProposalVerifyResult {
+  const reason = gate.code === 'partial-run'
+    ? '[partial] run'
+    : `capture gate review-only (${gate.code})`;
+  return {
+    passed: false,
+    failed: [reason],
+    detail: reason,
+    source: 'capture-gate',
+    captureGateCode: gate.code,
+    captureGateCategory: gate.category,
+    captureAssurance: 'review-only',
+  };
+}
+
+function filedProposalOutcome(
+  diff: { files: number; insertions: number; deletions: number },
+  proposalId: string | undefined,
+  gate: Pick<CompletenessGateResult, 'code' | 'category' | 'verified'> | undefined,
+): RunProposalOutcome {
+  const reviewOnly = gate !== undefined && !gate.verified;
+  return {
+    ...proposalOutcome(
+      'filed',
+      reviewOnly ? `review-only proposal filed (${gate.code})` : 'proposal filed',
+      diff,
+      proposalId,
+      reviewOnly,
+    ),
+    ...(gate
+      ? {
+          gateCode: gate.code,
+          gateCategory: gate.category,
+          captureAssurance: reviewOnly ? 'review-only' as const : 'verified' as const,
+        }
+      : {}),
+  };
+}
+
+function gateRepairInstruction(code: ProposalCaptureGateCode): string {
+  switch (code) {
+    case 'lockfile-mismatch':
+      return 'capture-gate:lockfile-mismatch. Update the repository lockfile consistently with the dependency manifest.';
+    case 'typecheck-failed':
+      return 'capture-gate:typecheck-failed. Repair the candidate so the repository typecheck succeeds.';
+    case 'test-regression':
+      return 'capture-gate:test-regression. Repair the candidate so it introduces no test regression.';
+    default:
+      return `capture-gate:${code}. Stop; this outcome is not eligible for model repair.`;
+  }
+}
+
+function gateRepairEligible(
+  gate: Pick<CompletenessGateResult, 'code' | 'category'>,
+): boolean {
+  return gate.category === 'actionable' && (
+    gate.code === 'lockfile-mismatch' ||
+    gate.code === 'typecheck-failed' ||
+    gate.code === 'test-regression'
+  );
+}
+
+function normalizeCompletenessGateResult(
+  raw: Partial<CompletenessGateResult> & { pass: boolean },
+): CompletenessGateResult {
+  const code = raw.code ?? (raw.pass ? 'passed' : 'gate-error');
+  const category = raw.category ?? (raw.pass ? 'passed' : 'infrastructure');
+  const verified = raw.verified ?? (
+    raw.pass && code === 'passed' && category === 'passed'
+  );
+  const captureAllowed = raw.captureAllowed ?? (
+    verified || (raw.pass && category === 'infrastructure')
+  );
+  return {
+    pass: verified,
+    verified,
+    captureAllowed,
+    code,
+    category,
+    ...(raw.cancelled ? { cancelled: true } : {}),
+    ...(raw.reason ? { reason: raw.reason } : {}),
   };
 }
 
@@ -334,15 +421,6 @@ function duplicateDiffOutcome(proposal: Proposal, diff: SandboxDiff): RunProposa
     diff,
     proposal.id,
   );
-}
-
-function captureGateVerifyResult(reason: string): ProposalVerifyResult {
-  return {
-    passed: false,
-    failed: [reason],
-    detail: reason,
-    source: 'capture-gate',
-  };
 }
 
 function diffLineCount(outcome: RunProposalOutcome | undefined): number | undefined {
@@ -1118,13 +1196,29 @@ export async function captureSandboxedProposal(
     }
 
     let reviewOnlyVerifyResult: ProposalVerifyResult | undefined;
+    let filingGate: CompletenessGateResult | undefined;
     if (opts.forceGateBlockReason) {
+      const forcedGate: CompletenessGateResult = opts.isPartial
+        ? {
+            pass: false,
+            verified: false,
+            captureAllowed: true,
+            code: 'partial-run',
+            category: 'actionable',
+            reason: '[partial] run',
+          }
+        : {
+            pass: false,
+            verified: false,
+            captureAllowed: false,
+            code: 'test-regression',
+            category: 'actionable',
+            reason: 'self-verify failed: test regression',
+          };
       const outcome = proposalGateOutcome(
         opts.isPartial ? 'partial-completeness-gate' : 'completeness-gate',
         diff,
-        opts.isPartial
-          ? { code: 'partial-run', category: 'actionable' }
-          : { code: 'test-regression', category: 'actionable' },
+        forcedGate,
       );
       if (!opts.isPartial) {
         return {
@@ -1132,30 +1226,32 @@ export async function captureSandboxedProposal(
           proposalOutcome: outcome,
         };
       }
-      reviewOnlyVerifyResult = captureGateVerifyResult(outcome.reason);
+      filingGate = forcedGate;
+      reviewOnlyVerifyResult = captureGateVerifyResult(forcedGate);
     }
 
     let shouldFile = true;
     let blockedOutcome: RunProposalOutcome | undefined;
     if (reviewOnlyVerifyResult === undefined && cfg.foundry?.completenessGate !== false) {
       incrementRunActionCount(actionCounts, 'completenessGateRuns');
-      const gateResult = await runCompletenessGate({
+      const gateResult = normalizeCompletenessGateResult(await runCompletenessGate({
         worktreePath: sb.worktreePath,
         diff,
         goal,
         cfg,
         ...(opts.isPartial ? { isPartial: true } : {}),
         ...(opts.signal ? { signal: opts.signal } : {}),
-      });
-      if (opts.signal?.aborted) return cancelledCapture();
-      if (!gateResult.pass) {
+      }));
+      if (opts.signal?.aborted || gateResult.cancelled) return cancelledCapture();
+      filingGate = gateResult;
+      if (!gateResult.verified) {
         blockedOutcome = proposalGateOutcome(
           opts.isPartial ? 'partial-completeness-gate' : 'completeness-gate',
           diff,
           gateResult,
         );
-        if (opts.isPartial) {
-          reviewOnlyVerifyResult = captureGateVerifyResult(blockedOutcome.reason);
+        if (opts.isPartial || gateResult.captureAllowed) {
+          reviewOnlyVerifyResult = captureGateVerifyResult(gateResult);
         } else {
           shouldFile = false;
         }
@@ -1169,25 +1265,31 @@ export async function captureSandboxedProposal(
       };
     }
 
+    if (opts.isPartial && filingGate === undefined) {
+      filingGate = {
+        pass: false,
+        verified: false,
+        captureAllowed: true,
+        code: 'partial-run',
+        category: 'actionable',
+        reason: '[partial] run',
+      };
+      reviewOnlyVerifyResult = captureGateVerifyResult(filingGate);
+    }
+    const reviewOnly = opts.isPartial === true || reviewOnlyVerifyResult !== undefined;
     const scrubbed = canonicalizeProposalDiff(diff.patch);
     const diffHash = hashDiff(scrubbed);
     const provenanceSig = signProvenance(engineModel, tier, diffHash);
     const label = opts.sourceLabel ?? 'Sandboxed';
-    const filedOutcomeForMetadata = proposalOutcome(
-      'filed',
-      opts.isPartial ? 'partial proposal filed' : 'proposal filed',
-      diff,
-      undefined,
-      opts.isPartial === true,
-    );
+    const filedOutcomeForMetadata = filedProposalOutcome(diff, undefined, filingGate);
     const draftId = `draft-${id}`;
     const proposalInput = {
       repo: sb.sourceRepo,
       origin: 'agent',
       kind: 'patch',
-      title: `${opts.isPartial ? '[partial] ' : ''}${engine} run: ${goal.slice(0, 80)}`,
+      title: `${reviewOnly ? '[partial] ' : ''}${engine} run: ${goal.slice(0, 80)}`,
       summary:
-        `${opts.isPartial ? 'Partial ' : ''}${label} ${engineModel} run produced ` +
+        `${reviewOnly ? 'Review-only ' : ''}${label} ${engineModel} run produced ` +
         `${diff.files} file(s) (+${diff.insertions}/-${diff.deletions}). Review before applying.`,
       diff: scrubbed,
       diffHash,
@@ -1217,7 +1319,7 @@ export async function captureSandboxedProposal(
         actionCounts: actionCountsWithOutcome(actionCounts, filedOutcomeForMetadata),
         contextSummary: opts.contextSummary,
       }),
-      ...(opts.isPartial ? { isPartial: true } : {}),
+      ...(reviewOnly ? { isPartial: true } : {}),
     } satisfies Omit<Proposal, 'id' | 'status' | 'createdAt'>;
 
     if (opts.draftOnly === true) {
@@ -1229,7 +1331,7 @@ export async function captureSandboxedProposal(
         createdAt: now,
       };
       return {
-        state: mk({ result: opts.isPartial ? 'partial proposal draft captured' : 'proposal draft captured' }),
+        state: mk({ result: reviewOnly ? 'review-only proposal draft captured' : 'proposal draft captured' }),
         proposalDraft: draft,
       };
     }
@@ -1263,7 +1365,13 @@ export async function captureSandboxedProposal(
       persisted.diffHash === diffHash &&
       persisted.provenanceSig === provenanceSig &&
       persisted.diff === scrubbed &&
-      (persisted.isPartial === true) === (opts.isPartial === true) &&
+      (persisted.isPartial === true) === reviewOnly &&
+      (!reviewOnly || (
+        persisted.verifyResult?.passed === false &&
+        persisted.verifyResult.captureGateCode === filingGate?.code &&
+        persisted.verifyResult.captureGateCategory === filingGate?.category &&
+        persisted.verifyResult.captureAssurance === 'review-only'
+      )) &&
       typeof persisted.diff === 'string' &&
       persisted.diff.trim().length > 0;
     if (!durablePending) {
@@ -1293,13 +1401,7 @@ export async function captureSandboxedProposal(
         proposalOutcome: outcome,
       };
     }
-    const outcome = proposalOutcome(
-      'filed',
-      opts.isPartial ? 'partial proposal filed' : 'proposal filed',
-      diff,
-      proposal.id,
-      opts.isPartial === true,
-    );
+    const outcome = filedProposalOutcome(diff, proposal.id, filingGate);
 
     try {
       const { recordDecision } = await import('../fleet/decisions-ledger.js');
@@ -2003,15 +2105,16 @@ export async function runEngineSandboxed(
           // M275: completeness + self-verify gate. Runs typecheck/test in the
           // sandbox worktree before filing. Flag-off → byte-identical to pre-M275.
           let _m275ShouldFile = true;
+          let _m275FilingGate: CompletenessGateResult | undefined;
           if (cfg.foundry?.completenessGate !== false) {
             incrementRunActionCount(actionCounts, 'completenessGateRuns');
-            let _gateResult = await runCompletenessGate({
+            let _gateResult = normalizeCompletenessGateResult(await runCompletenessGate({
               worktreePath: sb.worktreePath,
               diff: effDiff,
               goal,
               cfg,
               ...(opts.signal ? { signal: opts.signal } : {}),
-            });
+            }));
             if (opts.signal?.aborted) return cancelledAfterSpawn();
             // M331: verify-to-green — bounded repair loop (DEFAULT OFF). When
             // the gate fails, re-invoke the SAME engine inside the SAME confined
@@ -2020,30 +2123,35 @@ export async function runEngineSandboxed(
             // re-verify. Only a green worktree is filed, re-signed against the
             // repaired diff. Flag-off ⇒ the single-shot gate above, unchanged.
             const _v2g = cfg.foundry?.verifyToGreen;
+            let _latestGateResult = _gateResult;
             // Repair invocations are model steps. Book each returned invocation
             // directly into the shared usage exactly once so cancellation and
             // proposal telemetry observe the same authoritative totals.
-            if (!_gateResult.pass && _v2g?.enabled === true) {
+            if (gateRepairEligible(_gateResult) && _v2g?.enabled === true) {
               const _v2gOut = await iterateToGreen({
                 cfg,
-                initialFailure: String(_gateResult.reason ?? ''),
+                initialFailure: gateRepairInstruction(_gateResult.code),
                 ...(opts.signal ? { signal: opts.signal } : {}),
                 verify: async () => {
-                  if (opts.signal?.aborted) return { pass: false, reason: 'cancelled' };
+                  if (opts.signal?.aborted) return { pass: false, reason: 'capture-gate:cancelled' };
                   const d = wt.sandboxDiff(sb);
                   incrementRunActionCount(actionCounts, 'completenessGateRuns');
-                  const g = await runCompletenessGate({
+                  const g = normalizeCompletenessGateResult(await runCompletenessGate({
                     worktreePath: sb.worktreePath,
                     diff: d,
                     goal,
                     cfg,
                     ...(opts.signal ? { signal: opts.signal } : {}),
-                  });
-                  if (opts.signal?.aborted) return { pass: false, reason: 'cancelled' };
-                  return { pass: g.pass, reason: String(g.reason ?? '') };
+                  }));
+                  _latestGateResult = g;
+                  if (opts.signal?.aborted || g.cancelled) {
+                    return { pass: false, reason: 'capture-gate:cancelled' };
+                  }
+                  return { pass: g.verified, reason: gateRepairInstruction(g.code) };
                 },
                 repair: async (failureTail: string) => {
                   if (opts.signal?.aborted) return null;
+                  if (!gateRepairEligible(_latestGateResult)) return null;
                   const maxSteps = opts.budget?.maxSteps;
                   if (maxSteps !== undefined && usage.steps >= Math.max(0, maxSteps)) {
                     return null;
@@ -2051,7 +2159,7 @@ export async function runEngineSandboxed(
                   const repairGoal =
                     `${goal}\n\n[verify-to-green] A previous attempt failed verification. ` +
                     `Fix ONLY what is needed to make the checks pass — do not start new work.\n` +
-                    `Verification failure (tail):\n${failureTail}`;
+                    `Trusted repair instruction:\n${failureTail}`;
                   const repairCmd = buildEngineCommand(engine, repairGoal, cfg, {
                     cwd: sb.worktreePath,
                     model,
@@ -2089,6 +2197,9 @@ export async function runEngineSandboxed(
               if (opts.signal?.aborted || _v2gOut.stopped === 'cancelled') {
                 return cancelledAfterSpawn();
               }
+              if (!_v2gOut.green) {
+                _gateResult = _latestGateResult;
+              }
               if (_v2gOut.green) {
                 const repaired = wt.sandboxDiff(sb);
                 if (repaired.files > 0 && repaired.patch.trim().length > 0) {
@@ -2098,6 +2209,8 @@ export async function runEngineSandboxed(
                   provenanceSig = signProvenance(engineModel, tier, diffHash);
                   _gateResult = {
                     pass: true,
+                    verified: true,
+                    captureAllowed: true,
                     code: 'passed',
                     category: 'passed',
                     reason: `verify-to-green: green after ${_v2gOut.iterations} repair iteration(s)`,
@@ -2106,7 +2219,9 @@ export async function runEngineSandboxed(
                 }
               }
             }
-            if (!_gateResult.pass) {
+            if (opts.signal?.aborted || _gateResult.cancelled) return cancelledAfterSpawn();
+            _m275FilingGate = _gateResult;
+            if (!_gateResult.captureAllowed) {
               console.log(`[M275] completeness gate blocked proposal: ${_gateResult.reason}`);
               proposalOutcomeResult = proposalGateOutcome(
                 'completeness-gate',
@@ -2118,15 +2233,23 @@ export async function runEngineSandboxed(
           }
           if (_m275ShouldFile) {
           if (opts.signal?.aborted) return cancelledAfterSpawn();
-          const filedOutcomeForMetadata = proposalOutcome('filed', 'proposal filed', effDiff);
+          const _m275ReviewOnly = _m275FilingGate !== undefined && !_m275FilingGate.verified;
+          const _m275VerifyResult = _m275ReviewOnly
+            ? captureGateVerifyResult(_m275FilingGate!)
+            : undefined;
+          const filedOutcomeForMetadata = filedProposalOutcome(
+            effDiff,
+            undefined,
+            _m275FilingGate,
+          );
           const inbox = selectInboxStore(cfg);
           const proposal = inbox.create({
             repo: sb.sourceRepo,
             origin: 'agent',
             kind: 'patch',
-            title: `${engine} run: ${goal.slice(0, 80)}`,
+            title: `${_m275ReviewOnly ? '[partial] ' : ''}${engine} run: ${goal.slice(0, 80)}`,
             summary:
-              `Sandboxed ${engineModel} run produced ${effDiff.files} file(s) ` +
+              `${_m275ReviewOnly ? 'Review-only ' : 'Sandboxed '}${engineModel} run produced ${effDiff.files} file(s) ` +
               `(+${effDiff.insertions}/-${effDiff.deletions}). Review before applying.`,
             diff: scrubbed,
             diffHash,
@@ -2138,6 +2261,7 @@ export async function runEngineSandboxed(
             runId: id,
             engineModel,
             engineTier: tier,
+            ...(_m275VerifyResult ? { verifyResult: _m275VerifyResult, isPartial: true } : {}),
             ...(delegationScopeSummary ? { delegationScope: delegationScopeSummary } : {}),
             ...sandboxedProducerCausalMetadata({
               engine,
@@ -2166,7 +2290,14 @@ export async function runEngineSandboxed(
               persisted.runId === id &&
               persisted.diffHash === diffHash &&
               persisted.provenanceSig === provenanceSig &&
-              persisted.diff === scrubbed;
+              persisted.diff === scrubbed &&
+              (persisted.isPartial === true) === _m275ReviewOnly &&
+              (!_m275ReviewOnly || (
+                persisted.verifyResult?.passed === false &&
+                persisted.verifyResult.captureGateCode === _m275FilingGate?.code &&
+                persisted.verifyResult.captureGateCategory === _m275FilingGate?.category &&
+                persisted.verifyResult.captureAssurance === 'review-only'
+              ));
             if (!durablePending) {
               proposalOutcomeResult = proposalOutcome(
                 'proposal-capture-error',
@@ -2187,7 +2318,11 @@ export async function runEngineSandboxed(
             } else {
               candidateProposalId = undefined;
               proposalId = proposal.id;
-              proposalOutcomeResult = proposalOutcome('filed', 'proposal filed', effDiff, proposal.id);
+              proposalOutcomeResult = filedProposalOutcome(
+                effDiff,
+                proposal.id,
+                _m275FilingGate,
+              );
               // M246: record telemetry fields on the decision entry (additive, never-throws).
             try {
               const { recordDecision } = await import('../fleet/decisions-ledger.js');

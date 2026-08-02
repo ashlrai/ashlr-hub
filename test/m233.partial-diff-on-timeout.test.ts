@@ -152,7 +152,11 @@ describe('M233 partial-diff capture on timeout', () => {
           passed: false,
           source: 'capture-gate',
           failed: [expect.stringContaining('[partial] run')],
+          captureGateCode: 'partial-run',
+          captureGateCategory: 'actionable',
+          captureAssurance: 'review-only',
         });
+        expect(JSON.stringify(proposal!.verifyResult)).not.toContain('ETIMEDOUT');
 
         // Safety: provenance remains bound to the review diff, while the failed
         // verifyResult + isPartial marker keep auto-merge fail-closed.
@@ -238,8 +242,8 @@ describe('M233 truly-empty diff on failure', () => {
 // Test 3: successful run still produces a clean (non-partial) proposal
 // ---------------------------------------------------------------------------
 
-describe('M233 successful run still produces a clean proposal', () => {
-  it('ok:true + non-empty diff → proposal with isPartial undefined/false', async () => {
+describe('M233 successful run without verifier commands', () => {
+  it('files a no-commands candidate as review-only rather than verified', async () => {
     await withTmpHome(async (fx) => {
       const prevAllow = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
       process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
@@ -272,10 +276,23 @@ describe('M233 successful run still produces a clean proposal', () => {
         const proposals = listProposals();
         const proposal = proposals.find((p) => p.id === result.proposalId);
         expect(proposal).toBeDefined();
-        // Not partial — clean run.
-        expect(proposal!.isPartial).toBeFalsy();
-        expect(proposal!.title).not.toContain('[partial]');
+        expect(proposal!.isPartial).toBe(true);
+        expect(proposal!.title).toContain('[partial]');
         expect(proposal!.status).toBe('pending');
+        expect(proposal!.verifyResult).toMatchObject({
+          passed: false,
+          source: 'capture-gate',
+          captureGateCode: 'no-commands',
+          captureGateCategory: 'infrastructure',
+          captureAssurance: 'review-only',
+        });
+        expect(result.proposalOutcome).toMatchObject({
+          kind: 'filed',
+          isPartial: true,
+          gateCode: 'no-commands',
+          gateCategory: 'infrastructure',
+          captureAssurance: 'review-only',
+        });
       } finally {
         if (prevAllow === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
         else process.env.ASHLR_TEST_ALLOW_ANY_REPO = prevAllow;

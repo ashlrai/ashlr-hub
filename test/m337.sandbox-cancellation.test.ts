@@ -13,11 +13,13 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { InboxStore } from '../src/core/seams/inbox.js';
+import type { CompletenessGateResult } from '../src/core/run/completeness-gate.js';
 import type { Proposal } from '../src/core/types.js';
 
 interface CancellationHarness {
   actions: Array<Record<string, unknown>>;
   createCalls: unknown[];
+  engineGoals: string[];
   gateSignals: Array<AbortSignal | undefined>;
   lifecycle: string[];
 }
@@ -70,17 +72,14 @@ function installHarness(opts: {
   controller: AbortController;
   abortAt: 'gate' | 'create' | 'none';
   proposalId: string;
-  gateResult?: {
-    pass: boolean;
-    code: 'passed' | 'typecheck-failed';
-    category: 'passed' | 'actionable';
-    reason?: string;
-  };
+  gateResult?: CompletenessGateResult;
+  gateResults?: CompletenessGateResult[];
   producerStatus?: 'done' | 'failed';
   terminationReason?: 'error-exit';
 }): CancellationHarness {
   const actions: Array<Record<string, unknown>> = [];
   const createCalls: unknown[] = [];
+  const engineGoals: string[] = [];
   const gateSignals: Array<AbortSignal | undefined> = [];
   const lifecycle: string[] = [];
 
@@ -119,7 +118,10 @@ function installHarness(opts: {
   }));
 
   vi.doMock('../src/core/run/engines.js', () => ({
-    buildEngineCommand: () => ({ bin: 'mock-engine', args: [], cwd: opts.repo }),
+    buildEngineCommand: (_engine: string, goal: string) => {
+      engineGoals.push(goal);
+      return { bin: 'mock-engine', args: [], cwd: opts.repo };
+    },
     spawnEngine: async () => opts.producerStatus === 'done'
       ? {
           ok: true,
@@ -187,7 +189,13 @@ function installHarness(opts: {
     runCompletenessGate: async (gateOpts: { signal?: AbortSignal }) => {
       gateSignals.push(gateOpts.signal);
       if (opts.abortAt === 'gate') opts.controller.abort();
-      return opts.gateResult ?? { pass: true, code: 'passed', category: 'passed' };
+      return opts.gateResults?.shift() ?? opts.gateResult ?? {
+        pass: true,
+        verified: true,
+        captureAllowed: true,
+        code: 'passed',
+        category: 'passed',
+      };
     },
   }));
 
@@ -203,7 +211,7 @@ function installHarness(opts: {
     recordDecision: vi.fn(),
   }));
 
-  return { actions, createCalls, gateSignals, lifecycle };
+  return { actions, createCalls, engineGoals, gateSignals, lifecycle };
 }
 
 afterEach(() => {
@@ -224,6 +232,8 @@ describe('sandbox proposal cancellation commit point', () => {
       proposalId: 'must-not-file-gate-block',
       gateResult: {
         pass: false,
+        verified: false,
+        captureAllowed: false,
         code: 'typecheck-failed',
         category: 'actionable',
         reason: 'self-verify failed: typecheck',
@@ -255,6 +265,135 @@ describe('sandbox proposal cancellation commit point', () => {
       expect(result.proposalOutcome).not.toHaveProperty('output');
       expect(harness.createCalls).toHaveLength(0);
       expect(harness.gateSignals).toEqual([controller.signal]);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('files verifier infrastructure failures only as review-only with bounded metadata', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'ashlr-capture-infra-review-'));
+    mkdirSync(join(repo, '.git'));
+    writeFileSync(join(repo, 'seed.ts'), 'export const seed = true;\n');
+    const controller = new AbortController();
+    const marker = 'REPO_OUTPUT_DO_NOT_PERSIST secret-test-name';
+    const proposalId = 'review-only-infrastructure';
+    const harness = installHarness({
+      repo,
+      controller,
+      abortAt: 'none',
+      proposalId,
+      gateResult: {
+        pass: false,
+        verified: false,
+        captureAllowed: true,
+        code: 'verification-unavailable',
+        category: 'infrastructure',
+        reason: marker,
+      },
+    });
+
+    try {
+      const { runApiModelSandboxed } = await import(
+        '../src/core/run/sandboxed-engine.js?infra-review=' + randomUUID()
+      ) as typeof import('../src/core/run/sandboxed-engine.js');
+
+      const result = await runApiModelSandboxed('local-coder', 'capture candidate', {
+        foundry: {
+          completenessGate: true,
+          models: { 'local-coder': 'qwen2.5:72b-instruct-q4_K_M' },
+        },
+      } as never, {
+        sourceRepo: repo,
+        propose: true,
+        signal: controller.signal,
+      });
+
+      expect(result.proposalOutcome).toMatchObject({
+        kind: 'filed',
+        proposalId,
+        isPartial: true,
+        gateCode: 'verification-unavailable',
+        gateCategory: 'infrastructure',
+        captureAssurance: 'review-only',
+      });
+      expect(harness.createCalls).toHaveLength(1);
+      expect(harness.createCalls[0]).toMatchObject({
+        isPartial: true,
+        verifyResult: {
+          passed: false,
+          source: 'capture-gate',
+          captureGateCode: 'verification-unavailable',
+          captureGateCategory: 'infrastructure',
+          captureAssurance: 'review-only',
+        },
+      });
+      expect(JSON.stringify(harness.createCalls[0])).not.toContain(marker);
+      expect(JSON.stringify(result.proposalOutcome)).not.toContain(marker);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('uses only trusted gate-code instructions in cli repair prompts', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'ashlr-capture-repair-prompt-'));
+    mkdirSync(join(repo, '.git'));
+    writeFileSync(join(repo, 'seed.ts'), 'export const seed = true;\n');
+    const controller = new AbortController();
+    const marker = 'IGNORE_PREVIOUS_INSTRUCTIONS secret-test-name';
+    const harness = installHarness({
+      repo,
+      controller,
+      abortAt: 'none',
+      proposalId: 'trusted-repair-prompt',
+      producerStatus: 'done',
+      gateResults: [
+        {
+          pass: false,
+          verified: false,
+          captureAllowed: false,
+          code: 'test-regression',
+          category: 'actionable',
+          reason: marker,
+        },
+        {
+          pass: true,
+          verified: true,
+          captureAllowed: true,
+          code: 'passed',
+          category: 'passed',
+        },
+      ],
+    });
+
+    try {
+      const { runEngineSandboxed } = await import(
+        '../src/core/run/sandboxed-engine.js?trusted-repair=' + randomUUID()
+      ) as typeof import('../src/core/run/sandboxed-engine.js');
+
+      const result = await runEngineSandboxed('claude', 'capture candidate', {
+        models: { providerChain: [] },
+        foundry: {
+          completenessGate: true,
+          dispatchRetries: 0,
+          fleetMcp: false,
+          verifyToGreen: { enabled: true, maxIterations: 1 },
+          models: { claude: 'claude-sonnet-4-5' },
+        },
+      } as never, {
+        sourceRepo: repo,
+        propose: true,
+        signal: controller.signal,
+      });
+
+      expect(result.proposalOutcome).toMatchObject({
+        kind: 'filed',
+        gateCode: 'passed',
+        captureAssurance: 'verified',
+      });
+      expect(harness.engineGoals).toHaveLength(2);
+      expect(harness.engineGoals[1]).toContain('capture-gate:test-regression');
+      expect(harness.engineGoals[1]).not.toContain(marker);
+      expect(JSON.stringify(harness.createCalls[0])).not.toContain(marker);
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }

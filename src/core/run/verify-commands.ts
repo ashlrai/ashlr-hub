@@ -26,6 +26,7 @@ import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AshlrConfig } from '../types.js';
+import type { SandboxLauncher } from '../sandbox/confine.js';
 import { renderToolText } from '../mcp-native.js';
 import { audit } from '../sandbox/audit.js';
 import { detectRepoExecutionProfile, verifyExecutablePathError } from './repo-profile.js';
@@ -136,6 +137,12 @@ export interface VerifySubprocessResult {
 export interface RunVerifyCommandAsyncOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
+  /** Optional proven OS confinement wrapper for repository-controlled commands. */
+  launcher?: SandboxLauncher;
+  /** Minimal caller-owned environment; defaults to the daemon environment. */
+  baseEnv?: NodeJS.ProcessEnv;
+  /** Parent for the invocation-local HOME, used by confined snapshot verification. */
+  isolatedHomeParent?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -290,8 +297,11 @@ function formatVerifyCommand(vc: VerifyCommand, workspaceRoot: string): string {
     : command;
 }
 
-function makeIsolatedVerifyEnv(baseEnv: NodeJS.ProcessEnv): { env: NodeJS.ProcessEnv; cleanup: () => void } {
-  const home = mkdtempSync(join(tmpdir(), VERIFY_HOME_PREFIX));
+function makeIsolatedVerifyEnv(
+  baseEnv: NodeJS.ProcessEnv,
+  parent = tmpdir(),
+): { env: NodeJS.ProcessEnv; cleanup: () => void } {
+  const home = mkdtempSync(join(parent, VERIFY_HOME_PREFIX));
   const realHome = baseEnv.HOME ?? baseEnv.USERPROFILE ?? '';
   const env: NodeJS.ProcessEnv = {
     ...baseEnv,
@@ -317,7 +327,7 @@ export function spawnOptionsFor(
   timeout: number,
   bin?: string,
   platform: NodeJS.Platform = process.platform,
-  opts?: { extraBinRoots?: string[] },
+  opts?: { extraBinRoots?: string[]; baseEnv?: NodeJS.ProcessEnv },
 ): SpawnSyncOptionsWithStringEncoding {
   const isWin = platform === 'win32';
   const needsShell = isWin && bin !== undefined && WINDOWS_SHIM_BINS.has(bin);
@@ -341,7 +351,7 @@ export function spawnOptionsFor(
   ].map((root) => resolve(root, 'node_modules', '.bin'));
   const localBins = [...new Set(binRoots)].filter((binRoot) => existsSync(binRoot));
   const env: NodeJS.ProcessEnv = {
-    ...process.env,
+    ...(opts?.baseEnv ?? process.env),
     PATH: buildToolPath({
       // Keep package-manager shims on the Node runtime that launched Ashlr.
       // Isolating HOME must not promote an unrelated system Node ahead of it.
@@ -955,14 +965,18 @@ export async function runVerifyCommandAsync(
   try {
     const baseOptions = spawnOptionsFor(commandRoot, timeout, bin, process.platform, {
       extraBinRoots: [workspaceRoot],
+      ...(opts?.baseEnv ? { baseEnv: opts.baseEnv } : {}),
     });
     const runner = verifyRunnerPath();
-    isolated = makeIsolatedVerifyEnv(baseOptions.env ?? process.env);
+    isolated = makeIsolatedVerifyEnv(
+      baseOptions.env ?? opts?.baseEnv ?? process.env,
+      opts?.isolatedHomeParent,
+    );
     const useWindowsWrapper = process.platform === 'win32';
     if (useWindowsWrapper && !runner) {
       throw new Error('verification process-tree runner is unavailable on Windows');
     }
-    const argv = useWindowsWrapper
+    const commandArgv = useWindowsWrapper
       ? [
           process.execPath,
           runner!,
@@ -972,6 +986,9 @@ export async function runVerifyCommandAsync(
           Buffer.from(JSON.stringify(vc.cmd), 'utf8').toString('base64'),
         ]
       : vc.cmd;
+    const argv = opts?.launcher
+      ? [opts.launcher.bin, ...opts.launcher.prefixArgs, ...commandArgv]
+      : commandArgv;
     const subprocess = await runVerifySubprocessAsync(argv, {
       cwd: commandRoot,
       env: useWindowsWrapper

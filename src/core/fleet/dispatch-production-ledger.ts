@@ -36,6 +36,8 @@ import type {
   EvidenceOutcomeSummary,
   LabelBasis,
   LearningSource,
+  ProposalCaptureGateCategory,
+  ProposalCaptureGateCode,
   ProductionAttemptShape,
   RepairTreatment,
   RunActionCounts,
@@ -155,6 +157,29 @@ const DISPATCH_PRODUCTION_OUTCOMES = new Set<DaemonDispatchProductionOutcome>([
   'proposal-created', 'cancelled', 'empty-diff', 'gate-blocked', 'engine-failed',
   'sandbox-failed', 'proposal-capture-error', 'proposal-disabled', 'unknown',
 ]);
+const PROPOSAL_CAPTURE_GATE_CODES = new Set<ProposalCaptureGateCode>([
+  'passed', 'no-commands', 'partial-run', 'empty-diff', 'lockfile-mismatch',
+  'typecheck-failed', 'test-regression', 'verification-unavailable', 'cancelled',
+  'gate-error',
+]);
+const PROPOSAL_CAPTURE_GATE_CATEGORIES = new Set<ProposalCaptureGateCategory>([
+  'passed', 'actionable', 'infrastructure', 'cancellation',
+]);
+const PROPOSAL_CAPTURE_GATE_CATEGORY_BY_CODE: Record<
+  ProposalCaptureGateCode,
+  ProposalCaptureGateCategory
+> = {
+  passed: 'passed',
+  'no-commands': 'infrastructure',
+  'partial-run': 'actionable',
+  'empty-diff': 'actionable',
+  'lockfile-mismatch': 'actionable',
+  'typecheck-failed': 'actionable',
+  'test-regression': 'actionable',
+  'verification-unavailable': 'infrastructure',
+  cancelled: 'cancellation',
+  'gate-error': 'infrastructure',
+};
 const DISPATCH_PRODUCTION_BASES = new Set<DispatchProductionBasis>([
   'run-proposal-outcome', 'pending-proposal-delta', 'best-of-n-summary',
   'repair-lifecycle-candidate', 'repair-lifecycle-outcome', 'unknown',
@@ -162,6 +187,7 @@ const DISPATCH_PRODUCTION_BASES = new Set<DispatchProductionBasis>([
 const DISPATCH_PRODUCTION_EVENT_KEYS = new Set([
   'schemaVersion', 'ts', 'machineId', 'itemId', 'source', 'repo', 'title', 'backend',
   'tier', 'model', 'assignedBy', 'routeReason', 'outcome', 'proposalCreated',
+  'gateCode', 'gateCategory', 'captureAssurance',
   'proposalId', 'attemptId', 'runId', 'trajectoryId', 'routeSnapshot', 'runEventSummary',
   'evidenceOutcome', 'learningSource', 'labelBasis', 'routerPolicyVersion',
   'learningEpoch', 'objectiveHash', 'learningLabel', 'spentUsd', 'diffFiles',
@@ -203,6 +229,9 @@ export interface DispatchProductionEvent {
   routeReason: string;
   outcome: DaemonDispatchProductionOutcome;
   proposalCreated: boolean;
+  gateCode?: ProposalCaptureGateCode;
+  gateCategory?: ProposalCaptureGateCategory;
+  captureAssurance?: 'verified' | 'review-only';
   proposalId?: string;
   /** Writer-issued immutable identity allocated before this dispatch begins. */
   attemptId?: string;
@@ -1702,6 +1731,28 @@ export function sanitizeDispatchProductionEvent(
   const { attemptId, proposalId, runId, trajectoryId } = identities;
   const boundedOutcome = boundedText(event.outcome, 80) as DaemonDispatchProductionOutcome;
   const outcome = DISPATCH_PRODUCTION_OUTCOMES.has(boundedOutcome) ? boundedOutcome : 'unknown';
+  const gateCode = PROPOSAL_CAPTURE_GATE_CODES.has(event.gateCode as ProposalCaptureGateCode)
+    ? event.gateCode
+    : undefined;
+  const gateCategory = PROPOSAL_CAPTURE_GATE_CATEGORIES.has(
+    event.gateCategory as ProposalCaptureGateCategory,
+  ) ? event.gateCategory : undefined;
+  const captureAssurance = event.captureAssurance === 'verified' ||
+    event.captureAssurance === 'review-only'
+    ? event.captureAssurance
+    : undefined;
+  const gateFieldsPresent = event.gateCode !== undefined || event.gateCategory !== undefined ||
+    event.captureAssurance !== undefined;
+  const gateFieldsConsistent = gateCode !== undefined && gateCategory !== undefined &&
+    PROPOSAL_CAPTURE_GATE_CATEGORY_BY_CODE[gateCode] === gateCategory && (
+      captureAssurance === undefined ||
+      (captureAssurance === 'verified' && gateCategory === 'passed') ||
+      (captureAssurance === 'review-only' &&
+        (gateCategory === 'actionable' || gateCategory === 'infrastructure'))
+    );
+  if (gateFieldsPresent && !gateFieldsConsistent) {
+    throw new Error('invalid dispatch production capture-gate metadata');
+  }
   const boundedBasis = boundedText(event.basis, 80) as DispatchProductionBasis;
   const basis = DISPATCH_PRODUCTION_BASES.has(boundedBasis) ? boundedBasis : 'unknown';
   const routerPolicyVersion = boundedOptionalText(event.routerPolicyVersion, 80);
@@ -1895,6 +1946,8 @@ export function sanitizeDispatchProductionEvent(
     routeReason,
     outcome,
     proposalCreated: Boolean(event.proposalCreated),
+    ...(gateCode ? { gateCode, gateCategory } : {}),
+    ...(captureAssurance ? { captureAssurance } : {}),
     ...(proposalId ? { proposalId } : {}),
     ...(attemptId ? { attemptId } : {}),
     ...(runId ? { runId } : {}),

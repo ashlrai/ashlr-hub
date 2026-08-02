@@ -698,7 +698,8 @@ describe('queued autonomy work scanner', () => {
     expect(found[0]!.detail).toContain(proposal.workItemId);
     expect(found[0]!.detail).not.toContain('DO_NOT_COPY_DIFF');
     expect(found[0]!.detail).not.toContain('github_pat_1234567890abcdefghijklmnop');
-    expect(found[0]!.detail).toContain('[REDACTED]');
+    expect(found[0]!.detail).toContain('Failure: capture-gate:legacy-actionable');
+    expect(found[0]!.detail).not.toContain('[REDACTED]');
     expect(found[0]!.ts).toBe(proposal.createdAt);
   });
 
@@ -1098,6 +1099,8 @@ describe('queued autonomy work scanner', () => {
       itemId: 'repo:self:gate-capture',
       runId: 'run-gate-capture',
       outcome: 'gate-blocked',
+      gateCode: 'test-regression',
+      gateCategory: 'actionable',
       reason: 'completeness gate blocked proposal: src/gate.ts:9 expected ready state',
       runEventSummary: {
         actionCounts: {
@@ -1108,12 +1111,31 @@ describe('queued autonomy work scanner', () => {
         },
       },
     });
+    const infrastructureEvent = captureFailure(repo.dir, {
+      ts: recent,
+      itemId: 'repo:self:infrastructure-gate',
+      runId: 'run-infrastructure-gate',
+      outcome: 'gate-blocked',
+      gateCode: 'no-commands',
+      gateCategory: 'infrastructure',
+      reason: 'FAIL hostile-infrastructure-name stdout=DO_NOT_COPY_OUTPUT',
+      diffFiles: 1,
+    });
+    expect(gateEvent.repairHandoffId).toMatch(/^[a-f0-9]{64}$/);
+    expect(infrastructureEvent.repairHandoffId).toBeUndefined();
+    expect(readRepairHandoffs().observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        eventId: gateEvent.repairHandoffId,
+        parentGateCode: 'test-regression',
+        parentGateCategory: 'actionable',
+      }),
+    ]));
 
     const first = queueProposalRepairWorkForPendingProposals(undefined, now, {
-      dispatchEvents: [duplicateOlderEvent, event, gateEvent],
+      dispatchEvents: [duplicateOlderEvent, event, gateEvent, infrastructureEvent],
     });
     const second = queueProposalRepairWorkForPendingProposals(undefined, now, {
-      dispatchEvents: [duplicateOlderEvent, event, gateEvent],
+      dispatchEvents: [duplicateOlderEvent, event, gateEvent, infrastructureEvent],
     });
     const rawQueue = JSON.parse(readFileSync(join(fx.ashlrDir, 'self-heal-queue.json'), 'utf8')) as WorkItem[];
     const found = await scanQueuedAutonomyWork(repo.dir);
@@ -1121,16 +1143,16 @@ describe('queued autonomy work scanner', () => {
     const gateRepair = found.find((item) => item.detail.includes(gateEvent.itemId));
 
     expect(first).toMatchObject({
-      scanned: 3,
+      scanned: 4,
       eligible: 2,
       queued: 2,
       failed: 0,
-      dispatchCaptureScanned: 3,
+      dispatchCaptureScanned: 4,
       dispatchCaptureEligible: 2,
       dispatchCaptureQueued: 2,
       dispatchCaptureFailed: 0,
     });
-    expect(second).toMatchObject({ scanned: 3, eligible: 2, queued: 2, failed: 0 });
+    expect(second).toMatchObject({ scanned: 4, eligible: 2, queued: 2, failed: 0 });
     expect(rawQueue).toHaveLength(2);
     expect(found).toHaveLength(2);
     expect(captureRepair).toMatchObject({
@@ -1148,7 +1170,9 @@ describe('queued autonomy work scanner', () => {
     expect(captureRepair!.detail).not.toContain('github_pat_1234567890abcdefghijklmnop');
     expect(captureRepair!.detail).toContain('stdout=[omitted]');
     expect(gateRepair).toBeDefined();
-    expect(gateRepair!.detail).toContain('gate-blocked');
+    expect(gateRepair!.detail).toContain('capture-gate:test-regression');
+    expect(gateRepair!.detail).not.toContain('src/gate.ts');
+    expect(found.some((item) => item.detail.includes('repo:self:infrastructure-gate'))).toBe(false);
   });
 
   it('queues capture repair for generic gate-blocked self dispatches with diff evidence', async () => {
@@ -1360,6 +1384,39 @@ describe('queued autonomy work scanner', () => {
     });
 
     expect(proposalRepairWorkItem(proposal)).toBeNull();
+  });
+
+  it('repairs only actionable structured proposal gates without copying repository diagnostics', () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const actionable = partialProposal(repo.dir, {
+      verifyResult: {
+        passed: false,
+        source: 'capture-gate',
+        captureGateCode: 'typecheck-failed',
+        captureGateCategory: 'actionable',
+        captureAssurance: 'review-only',
+        detail: 'hostile test name stdout=DO_NOT_COPY_OUTPUT',
+      },
+    });
+    const infrastructure = partialProposal(repo.dir, {
+      id: 'prop-infrastructure-review-only',
+      verifyResult: {
+        passed: false,
+        source: 'capture-gate',
+        captureGateCode: 'no-commands',
+        captureGateCategory: 'infrastructure',
+        captureAssurance: 'review-only',
+        detail: 'hostile infrastructure name stdout=DO_NOT_COPY_OUTPUT',
+      },
+    });
+
+    const repair = proposalRepairWorkItem(actionable);
+    expect(repair).not.toBeNull();
+    expect(repair!.detail).toContain('capture-gate:typecheck-failed');
+    expect(repair!.detail).not.toContain('hostile test name');
+    expect(repair!.detail).not.toContain('DO_NOT_COPY_OUTPUT');
+    expect(proposalRepairWorkItem(infrastructure)).toBeNull();
   });
 
   it('assigns stable no-diff treatments and bounds target-localization instructions', () => {

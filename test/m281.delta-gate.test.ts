@@ -7,12 +7,10 @@
  *    the change introduces NO new failures (the core M281 scenario).
  *  - runDeltaAwareTestCheck() BLOCKS when the change introduces a NEW failure
  *    that was NOT present in the baseline (regression protection intact).
- *  - runDeltaAwareTestCheck() PASSES when stash fails (cannot isolate baseline)
- *    and the direct run passes (original behaviour fallback).
- *  - runDeltaAwareTestCheck() BLOCKS when stash fails and the direct run fails.
- *  - runDeltaAwareTestCheck() PASSES safely when the baseline run times out
- *    (safe fallback — never hard-block on infra).
- *  - runDeltaAwareTestCheck() PASSES safely when the after run times out.
+ *  - runDeltaAwareTestCheck() compares immutable baseline and candidate
+ *    snapshots without mutating the source worktree.
+ *  - runDeltaAwareTestCheck() allows review-only capture when verification
+ *    infrastructure times out, without reporting a verified pass.
  *  - runCompletenessGate() with pre-existing failures but no new ones → PASS.
  *  - runCompletenessGate() with a new test failure introduced → BLOCK.
  *  - typecheck failure still BLOCKS regardless of delta logic (hard requirement).
@@ -22,6 +20,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { AshlrConfig } from '../src/core/types.js';
@@ -39,21 +38,16 @@ vi.mock('../src/core/run/verify-commands.js', () => {
   };
 });
 
+vi.mock('../src/core/run/verification-snapshot.js', () => ({
+  prepareDeltaVerificationAuthority: vi.fn(),
+}));
+
 // Mock node:fs existsSync for lockfile repo-root check.
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return {
     ...actual,
     existsSync: vi.fn(actual.existsSync),
-  };
-});
-
-// Mock spawnSync (git stash push/pop in completeness-gate.ts)
-vi.mock('node:child_process', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:child_process')>();
-  return {
-    ...actual,
-    spawnSync: vi.fn(actual.spawnSync),
   };
 });
 
@@ -97,12 +91,12 @@ function vitestFailOutput(...names: string[]): string {
 async function getMocks() {
   const vc = await import('../src/core/run/verify-commands.js');
   const fs = await import('node:fs');
-  const cp = await import('node:child_process');
+  const snapshot = await import('../src/core/run/verification-snapshot.js');
   return {
     detectVerifyCommands: vi.mocked(vc.detectVerifyCommands),
     runVerifyCommand: vi.mocked(vc.runVerifyCommand),
+    prepareDeltaVerificationAuthority: vi.mocked(snapshot.prepareDeltaVerificationAuthority),
     existsSync: vi.mocked(fs.existsSync),
-    spawnSync: vi.mocked(cp.spawnSync),
   };
 }
 
@@ -110,19 +104,21 @@ async function getGate() {
   return import('../src/core/run/completeness-gate.js');
 }
 
-// Fake stash push that says "changes stashed"
-function stashPushSuccess() {
-  return { stdout: 'Saved working directory and index state ashlr-completeness-baseline', stderr: '', status: 0, error: undefined, pid: 1, output: [], signal: null };
-}
-
-// Fake stash push that says "nothing to stash"
-function stashPushNoop() {
-  return { stdout: 'No local changes to stash', stderr: '', status: 0, error: undefined, pid: 1, output: [], signal: null };
-}
-
-// Fake stash pop success
-function stashPopSuccess() {
-  return { stdout: 'Dropped stash', stderr: '', status: 0, error: undefined, pid: 1, output: [], signal: null };
+function immutableAuthority(identity = true) {
+  return {
+    available: true as const,
+    authority: {
+      root: path.join(os.tmpdir(), 'm281-authority'),
+      baselinePath: path.join(os.tmpdir(), 'm281-authority', 'baseline'),
+      candidatePath: path.join(os.tmpdir(), 'm281-authority', 'candidate'),
+      launcher: { bin: '/usr/bin/sandbox-exec', prefixArgs: ['-p', '(version 1)'] },
+      baseEnv: { PATH: '/usr/bin:/bin' },
+      isolatedHomeParent: path.join(os.tmpdir(), 'm281-authority'),
+      candidateDigest: 'b'.repeat(64),
+      confirmCandidateIdentity: vi.fn(() => identity),
+      cleanup: vi.fn(),
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -167,18 +163,15 @@ describe('M281 · parseFailedTestIds()', () => {
 // ---------------------------------------------------------------------------
 
 describe('M281 · runDeltaAwareTestCheck() — core delta logic', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
+  beforeEach(async () => {
+    vi.resetAllMocks();
+    const { prepareDeltaVerificationAuthority } = await getMocks();
+    prepareDeltaVerificationAuthority.mockResolvedValue(immutableAuthority());
   });
 
   it('PASSES when baseline has pre-existing failures but change adds none (core M281 scenario)', async () => {
     const { runDeltaAwareTestCheck } = await getGate();
-    const { runVerifyCommand, spawnSync } = await getMocks();
-
-    // Stash succeeds — changes were stashed
-    spawnSync
-      .mockReturnValueOnce(stashPushSuccess() as ReturnType<typeof spawnSync>)  // stash push
-      .mockReturnValueOnce(stashPopSuccess() as ReturnType<typeof spawnSync>);  // stash pop
+    const { runVerifyCommand } = await getMocks();
 
     const preExistingOutput = vitestFailOutput('m53 > env failure', 'm123 > timing issue');
     const afterOutput = vitestFailOutput('m53 > env failure', 'm123 > timing issue'); // same failures
@@ -195,11 +188,7 @@ describe('M281 · runDeltaAwareTestCheck() — core delta logic', () => {
 
   it('BLOCKS when change introduces a NEW failure not in baseline (regression protection)', async () => {
     const { runDeltaAwareTestCheck } = await getGate();
-    const { runVerifyCommand, spawnSync } = await getMocks();
-
-    spawnSync
-      .mockReturnValueOnce(stashPushSuccess() as ReturnType<typeof spawnSync>)
-      .mockReturnValueOnce(stashPopSuccess() as ReturnType<typeof spawnSync>);
+    const { runVerifyCommand } = await getMocks();
 
     const baselineOutput = vitestFailOutput('m53 > env failure'); // 1 pre-existing
     const afterOutput = vitestFailOutput('m53 > env failure', 'myNewTest > should not regress'); // +1 NEW
@@ -212,16 +201,12 @@ describe('M281 · runDeltaAwareTestCheck() — core delta logic', () => {
 
     expect(result.pass).toBe(false);
     expect(result.reason).toMatch(/new failure/i);
-    expect(result.reason).toMatch(/myNewTest/);
+    expect(result.reason).not.toMatch(/myNewTest/);
   });
 
   it('PASSES when baseline is all-green and after is all-green', async () => {
     const { runDeltaAwareTestCheck } = await getGate();
-    const { runVerifyCommand, spawnSync } = await getMocks();
-
-    spawnSync
-      .mockReturnValueOnce(stashPushSuccess() as ReturnType<typeof spawnSync>)
-      .mockReturnValueOnce(stashPopSuccess() as ReturnType<typeof spawnSync>);
+    const { runVerifyCommand } = await getMocks();
 
     runVerifyCommand
       .mockReturnValueOnce(okResult(TEST_CMD, 'Tests  10 passed'))
@@ -233,11 +218,7 @@ describe('M281 · runDeltaAwareTestCheck() — core delta logic', () => {
 
   it('BLOCKS when baseline is all-green and after introduces a failure', async () => {
     const { runDeltaAwareTestCheck } = await getGate();
-    const { runVerifyCommand, spawnSync } = await getMocks();
-
-    spawnSync
-      .mockReturnValueOnce(stashPushSuccess() as ReturnType<typeof spawnSync>)
-      .mockReturnValueOnce(stashPopSuccess() as ReturnType<typeof spawnSync>);
+    const { runVerifyCommand } = await getMocks();
 
     runVerifyCommand
       .mockReturnValueOnce(okResult(TEST_CMD, 'Tests  10 passed'))
@@ -248,74 +229,192 @@ describe('M281 · runDeltaAwareTestCheck() — core delta logic', () => {
     expect(result.reason).toMatch(/new failure/i);
   });
 
-  it('falls back to direct run when stash fails — PASSES if direct run passes', async () => {
+  it('returns review-only infrastructure when immutable authority is unavailable', async () => {
     const { runDeltaAwareTestCheck } = await getGate();
-    const { runVerifyCommand, spawnSync } = await getMocks();
-
-    // Stash push says nothing to stash
-    spawnSync.mockReturnValueOnce(stashPushNoop() as ReturnType<typeof spawnSync>);
-
-    runVerifyCommand.mockReturnValueOnce(okResult(TEST_CMD));
+    const { prepareDeltaVerificationAuthority, runVerifyCommand } = await getMocks();
+    prepareDeltaVerificationAuthority.mockResolvedValueOnce({
+      available: false,
+      reason: 'confinement-unavailable',
+    });
 
     const result = await runDeltaAwareTestCheck(TEST_CMD, FAKE_WORKTREE, makeCfg(), 60_000);
-    expect(result.pass).toBe(true);
+    expect(result).toMatchObject({
+      pass: false,
+      verified: false,
+      captureAllowed: true,
+      code: 'verification-unavailable',
+      category: 'infrastructure',
+    });
+    expect(runVerifyCommand).not.toHaveBeenCalled();
   });
 
-  it('falls back to direct run when stash fails — BLOCKS if direct run fails', async () => {
+  it('allows review-only capture when the baseline run times out', async () => {
     const { runDeltaAwareTestCheck } = await getGate();
-    const { runVerifyCommand, spawnSync } = await getMocks();
-
-    spawnSync.mockReturnValueOnce(stashPushNoop() as ReturnType<typeof spawnSync>);
-
-    runVerifyCommand.mockReturnValueOnce(failResult(TEST_CMD, 'error output'));
-
-    const result = await runDeltaAwareTestCheck(TEST_CMD, FAKE_WORKTREE, makeCfg(), 60_000);
-    expect(result.pass).toBe(false);
-    expect(result.reason).toMatch(/self-verify failed: test/);
-  });
-
-  it('PASSES safely when baseline run times out (safe fallback)', async () => {
-    const { runDeltaAwareTestCheck } = await getGate();
-    const { runVerifyCommand, spawnSync } = await getMocks();
-
-    spawnSync
-      .mockReturnValueOnce(stashPushSuccess() as ReturnType<typeof spawnSync>)
-      .mockReturnValueOnce(stashPopSuccess() as ReturnType<typeof spawnSync>);
+    const { runVerifyCommand } = await getMocks();
 
     // Baseline run times out
     runVerifyCommand.mockReturnValueOnce(failResult(TEST_CMD, '', true /* timedOut */));
     // After run is not called since we short-circuit on baseline timeout
 
     const result = await runDeltaAwareTestCheck(TEST_CMD, FAKE_WORKTREE, makeCfg(), 60_000);
-    expect(result.pass).toBe(true);
+    expect(result).toMatchObject({
+      pass: false,
+      verified: false,
+      captureAllowed: true,
+      code: 'verification-unavailable',
+      category: 'infrastructure',
+    });
   });
 
-  it('PASSES safely when after run times out', async () => {
+  it('allows review-only capture when the candidate run times out', async () => {
     const { runDeltaAwareTestCheck } = await getGate();
-    const { runVerifyCommand, spawnSync } = await getMocks();
-
-    spawnSync
-      .mockReturnValueOnce(stashPushSuccess() as ReturnType<typeof spawnSync>)
-      .mockReturnValueOnce(stashPopSuccess() as ReturnType<typeof spawnSync>);
+    const { runVerifyCommand } = await getMocks();
 
     runVerifyCommand
       .mockReturnValueOnce(okResult(TEST_CMD)) // baseline passes
       .mockReturnValueOnce(failResult(TEST_CMD, '', true /* timedOut */)); // after times out
 
     const result = await runDeltaAwareTestCheck(TEST_CMD, FAKE_WORKTREE, makeCfg(), 60_000);
-    expect(result.pass).toBe(true);
+    expect(result).toMatchObject({
+      pass: false,
+      verified: false,
+      captureAllowed: true,
+      code: 'verification-unavailable',
+      category: 'infrastructure',
+    });
   });
 
   it('never throws on unexpected error', async () => {
     const { runDeltaAwareTestCheck } = await getGate();
-    const { spawnSync } = await getMocks();
-
-    // Make spawnSync throw
-    spawnSync.mockImplementation(() => { throw new Error('ENOENT git'); });
+    const { prepareDeltaVerificationAuthority } = await getMocks();
+    prepareDeltaVerificationAuthority.mockRejectedValueOnce(new Error('snapshot failed'));
 
     await expect(
       runDeltaAwareTestCheck(TEST_CMD, FAKE_WORKTREE, makeCfg(), 60_000),
-    ).resolves.toMatchObject({ pass: true }); // safe fallback
+    ).resolves.toMatchObject({
+      pass: false,
+      verified: false,
+      captureAllowed: true,
+      code: 'gate-error',
+      category: 'infrastructure',
+    });
+  });
+
+  it('fails closed when candidate bytes or index change during verification', async () => {
+    const { runDeltaAwareTestCheck } = await getGate();
+    const { prepareDeltaVerificationAuthority, runVerifyCommand } = await getMocks();
+    prepareDeltaVerificationAuthority.mockResolvedValueOnce(immutableAuthority(false));
+    runVerifyCommand
+      .mockReturnValueOnce(okResult(TEST_CMD))
+      .mockReturnValueOnce(okResult(TEST_CMD));
+
+    const result = await runDeltaAwareTestCheck(TEST_CMD, FAKE_WORKTREE, makeCfg(), 60_000);
+
+    expect(result).toMatchObject({
+      pass: false,
+      verified: false,
+      captureAllowed: false,
+      code: 'verification-unavailable',
+      category: 'infrastructure',
+    });
+    expect(result.reason).toMatch(/candidate identity changed/i);
+  });
+
+  it('keeps tracked and untracked candidate bytes unchanged when snapshot verifiers mutate files', async () => {
+    const { runDeltaAwareTestCheck } = await getGate();
+    const { prepareDeltaVerificationAuthority, runVerifyCommand } = await getMocks();
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'm281-mutation-'));
+    const source = path.join(root, 'source');
+    const baseline = path.join(root, 'baseline');
+    const candidate = path.join(root, 'candidate');
+    for (const dir of [source, baseline, candidate]) fs.mkdirSync(dir);
+    for (const dir of [source, baseline, candidate]) {
+      fs.writeFileSync(path.join(dir, 'tracked.ts'), 'trusted tracked\n');
+      fs.writeFileSync(path.join(dir, 'untracked.txt'), 'trusted untracked\n');
+    }
+    const prepared = immutableAuthority();
+    prepared.authority.root = root;
+    prepared.authority.baselinePath = baseline;
+    prepared.authority.candidatePath = candidate;
+    prepared.authority.confirmCandidateIdentity = vi.fn(() =>
+      fs.readFileSync(path.join(source, 'tracked.ts'), 'utf8') === 'trusted tracked\n' &&
+      fs.readFileSync(path.join(source, 'untracked.txt'), 'utf8') === 'trusted untracked\n');
+    prepared.authority.cleanup = vi.fn();
+    prepareDeltaVerificationAuthority.mockResolvedValueOnce(prepared);
+    runVerifyCommand.mockImplementation((_cmd, dir) => {
+      fs.writeFileSync(path.join(dir, 'tracked.ts'), 'verifier mutation\n');
+      fs.writeFileSync(path.join(dir, 'untracked.txt'), 'verifier mutation\n');
+      return okResult(TEST_CMD);
+    });
+
+    try {
+      const result = await runDeltaAwareTestCheck(TEST_CMD, source, makeCfg(), 60_000);
+      expect(result).toMatchObject({ pass: true, verified: true, code: 'passed' });
+      expect(fs.readFileSync(path.join(source, 'tracked.ts'), 'utf8')).toBe('trusted tracked\n');
+      expect(fs.readFileSync(path.join(source, 'untracked.txt'), 'utf8')).toBe('trusted untracked\n');
+      expect(runVerifyCommand.mock.calls.map((call) => call[1])).toEqual([baseline, candidate]);
+      expect(prepared.authority.confirmCandidateIdentity).toHaveBeenCalledOnce();
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('forwards cancellation and confirms candidate identity before returning', async () => {
+    const { runDeltaAwareTestCheck } = await getGate();
+    const { prepareDeltaVerificationAuthority, runVerifyCommand } = await getMocks();
+    const controller = new AbortController();
+    const prepared = immutableAuthority();
+    prepareDeltaVerificationAuthority.mockResolvedValueOnce(prepared);
+    runVerifyCommand.mockImplementationOnce(() => {
+      controller.abort();
+      return { ...failResult(TEST_CMD, '', true), cancelled: true, failureCategory: 'cancelled' };
+    });
+
+    const result = await runDeltaAwareTestCheck(
+      TEST_CMD,
+      FAKE_WORKTREE,
+      makeCfg(),
+      60_000,
+      controller.signal,
+    );
+
+    expect(result).toMatchObject({
+      pass: false,
+      captureAllowed: false,
+      code: 'cancelled',
+      category: 'cancellation',
+      cancelled: true,
+    });
+    expect(prepared.authority.confirmCandidateIdentity).toHaveBeenCalledOnce();
+    expect(prepared.authority.cleanup).toHaveBeenCalledOnce();
+  });
+
+  it('does not let cancellation hide a candidate identity mismatch', async () => {
+    const { runDeltaAwareTestCheck } = await getGate();
+    const { prepareDeltaVerificationAuthority, runVerifyCommand } = await getMocks();
+    const controller = new AbortController();
+    prepareDeltaVerificationAuthority.mockResolvedValueOnce(immutableAuthority(false));
+    runVerifyCommand.mockImplementationOnce(() => {
+      controller.abort();
+      return { ...failResult(TEST_CMD, '', true), cancelled: true };
+    });
+
+    const result = await runDeltaAwareTestCheck(
+      TEST_CMD,
+      FAKE_WORKTREE,
+      makeCfg(),
+      60_000,
+      controller.signal,
+    );
+
+    expect(result).toMatchObject({
+      pass: false,
+      verified: false,
+      captureAllowed: false,
+      code: 'verification-unavailable',
+      category: 'infrastructure',
+    });
+    expect(result.reason).toMatch(/candidate identity changed/i);
   });
 });
 
@@ -324,24 +423,23 @@ describe('M281 · runDeltaAwareTestCheck() — core delta logic', () => {
 // ---------------------------------------------------------------------------
 
 describe('M281 · runCompletenessGate() — delta-aware integration', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
+  beforeEach(async () => {
+    vi.resetAllMocks();
+    const { prepareDeltaVerificationAuthority } = await getMocks();
+    prepareDeltaVerificationAuthority.mockResolvedValue(immutableAuthority());
   });
 
   it('PASSES when baseline has pre-existing failures but change adds none', async () => {
     const { runCompletenessGate } = await getGate();
-    const { detectVerifyCommands, runVerifyCommand, existsSync, spawnSync } = await getMocks();
+    const { detectVerifyCommands, runVerifyCommand, existsSync } = await getMocks();
 
     existsSync.mockReturnValue(false); // no lockfile
 
     detectVerifyCommands.mockReturnValue([TYPECHECK_CMD, TEST_CMD]);
     runVerifyCommand.mockReturnValueOnce(okResult(TYPECHECK_CMD)); // typecheck passes
 
-    // For delta logic: stash succeeds, baseline has 7 pre-existing failures,
-    // after also has the same 7 → no new failures
-    spawnSync
-      .mockReturnValueOnce(stashPushSuccess() as ReturnType<typeof spawnSync>)
-      .mockReturnValueOnce(stashPopSuccess() as ReturnType<typeof spawnSync>);
+    // The immutable baseline has 7 pre-existing failures and the candidate has
+    // the same 7, so the candidate introduces no regression.
 
     const preExisting = vitestFailOutput('m53 > env', 'm123 > timing', 'm130 > sandbox',
       'm160 > rate', 'm236 > quota', 'm245 > fleet', 'h8 > infra');
@@ -361,15 +459,11 @@ describe('M281 · runCompletenessGate() — delta-aware integration', () => {
 
   it('BLOCKS when change introduces a new test failure', async () => {
     const { runCompletenessGate } = await getGate();
-    const { detectVerifyCommands, runVerifyCommand, existsSync, spawnSync } = await getMocks();
+    const { detectVerifyCommands, runVerifyCommand, existsSync } = await getMocks();
 
     existsSync.mockReturnValue(false);
     detectVerifyCommands.mockReturnValue([TYPECHECK_CMD, TEST_CMD]);
     runVerifyCommand.mockReturnValueOnce(okResult(TYPECHECK_CMD));
-
-    spawnSync
-      .mockReturnValueOnce(stashPushSuccess() as ReturnType<typeof spawnSync>)
-      .mockReturnValueOnce(stashPopSuccess() as ReturnType<typeof spawnSync>);
 
     const baseline = vitestFailOutput('m53 > env');
     const after = vitestFailOutput('m53 > env', 'myFeature > broke something');
@@ -387,7 +481,7 @@ describe('M281 · runCompletenessGate() — delta-aware integration', () => {
 
     expect(result.pass).toBe(false);
     expect(result.reason).toMatch(/new failure/i);
-    expect(result.reason).toMatch(/myFeature/);
+    expect(result.reason).not.toMatch(/myFeature/);
   });
 
   it('BLOCKS when typecheck fails (hard requirement, not delta-aware)', async () => {

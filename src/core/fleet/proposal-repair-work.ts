@@ -61,6 +61,9 @@ const DECISION_TIMESTAMP_SLOP_MS = 1_000;
 const PROPOSAL_ATTEMPT_SCAN_SLOP_MS = 1_000;
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const MAX_ROOT_ADMISSION_COUNT = 10_000;
+const ACTIONABLE_CAPTURE_GATE_CODES = new Set([
+  'partial-run', 'empty-diff', 'lockfile-mismatch', 'typecheck-failed', 'test-regression',
+]);
 
 export interface GeneratedRepairRootIdentity {
   repairRootId: string;
@@ -461,11 +464,27 @@ function proposalNeedsRepair(
   if (proposal.status !== 'pending' && !isRecentRejectedCaptureArtifact(proposal, now, decisionProof)) return false;
   if (proposal.kind !== 'patch' && proposal.kind !== 'pr') return false;
   if (!proposal.repo) return false;
+  if (proposal.verifyResult?.source === 'capture-gate') {
+    const structured = proposal.verifyResult.captureGateCategory !== undefined ||
+      proposal.verifyResult.captureGateCode !== undefined ||
+      proposal.verifyResult.captureAssurance !== undefined;
+    if (structured) {
+      return proposal.verifyResult.captureGateCategory === 'actionable' &&
+        ACTIONABLE_CAPTURE_GATE_CODES.has(proposal.verifyResult.captureGateCode ?? '');
+    }
+  }
   return proposal.isPartial === true || proposal.verifyResult?.passed === false;
 }
 
 function repairReason(proposal: Proposal): string {
   const verify = proposal.verifyResult;
+  if (verify?.source === 'capture-gate' &&
+    ACTIONABLE_CAPTURE_GATE_CODES.has(verify.captureGateCode ?? '')) {
+    return captureGateRepairInstruction(verify.captureGateCode!);
+  }
+  if (verify?.source === 'capture-gate') {
+    return 'capture-gate:legacy-actionable. Reproduce the intended change and pass repository verification.';
+  }
   const failed = Array.isArray(verify?.failed)
     ? verify.failed.find((line) => typeof line === 'string' && line.trim())
     : undefined;
@@ -478,12 +497,35 @@ function repairReason(proposal: Proposal): string {
   return boundedRepairReason(raw, MAX_REASON);
 }
 
+function captureGateRepairInstruction(code: string): string {
+  switch (code) {
+    case 'partial-run':
+      return 'capture-gate:partial-run. Reproduce the intended change as a complete run.';
+    case 'empty-diff':
+      return 'capture-gate:empty-diff. Produce the requested change with a non-empty diff.';
+    case 'lockfile-mismatch':
+      return 'capture-gate:lockfile-mismatch. Update the lockfile consistently with the dependency manifest.';
+    case 'typecheck-failed':
+      return 'capture-gate:typecheck-failed. Repair the candidate so repository typecheck succeeds.';
+    case 'test-regression':
+      return 'capture-gate:test-regression. Repair the candidate so it introduces no test regression.';
+    default:
+      return 'capture-gate:actionable. Produce a complete candidate that passes repository verification.';
+  }
+}
+
 function isRepairableCaptureFailure(event: DispatchProductionEvent): boolean {
   if (event.source !== 'self' && event.source !== 'issue' && event.source !== 'goal') return false;
   if (event.basis !== 'run-proposal-outcome') return false;
   if (event.proposalCreated !== false) return false;
   if (event.proposalId) return false;
   if (!event.repo || !event.itemId) return false;
+  const structuredGate = event.gateCode !== undefined || event.gateCategory !== undefined ||
+    event.captureAssurance !== undefined;
+  if (structuredGate) {
+    return event.gateCategory === 'actionable' &&
+      ACTIONABLE_CAPTURE_GATE_CODES.has(event.gateCode ?? '');
+  }
   if (event.outcome === 'proposal-capture-error') return true;
   if (event.outcome !== 'gate-blocked') return false;
   if ((event.runEventSummary?.actionCounts?.completenessGateRuns ?? 0) > 0) return true;
@@ -620,7 +662,9 @@ export function captureGateRepairWorkItem(
   }
   const repo = canonicalEnrolledExistingRepo(event.repo);
   if (!repo) return null;
-  const reason = boundedRepairReason(event.reason ?? event.routeReason ?? event.outcome, MAX_REASON) || event.outcome;
+  const reason = event.gateCategory === 'actionable' && event.gateCode
+    ? captureGateRepairInstruction(event.gateCode)
+    : boundedRepairReason(event.reason ?? event.routeReason ?? event.outcome, MAX_REASON) || event.outcome;
   const itemId = bounded(event.itemId, 120) || 'unknown';
   const repairItemId = captureRepairId(repo, itemId);
   const root = dispatchRepairRootIdentity(event, repo, parentRepair);

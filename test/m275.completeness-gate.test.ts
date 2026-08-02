@@ -4,11 +4,11 @@
  * Proves that:
  *  - A run with passing typecheck + test files a proposal (gate passes).
  *  - A run that fails typecheck does NOT file a proposal.
- *  - A run that fails tests (with no stash / fallback path) does NOT file a proposal.
+ *  - A run that introduces a test regression does NOT file a proposal.
  *  - A partial/timed-out run is always blocked.
  *  - A diff with package.json but no lockfile update is blocked.
  *  - A diff with package.json AND lockfile update passes.
- *  - Empty verify commands (no test suite) → gate passes.
+ *  - Empty verify commands allow only explicitly unverified review capture.
  *  - Flag-off (completenessGate: false) → gate is skipped, proposal is filed.
  *  - Gate never throws even on subprocess failure.
  *  - Sandboxed-engine: gate-pass → proposal filed; gate-fail → proposal NOT filed.
@@ -17,12 +17,12 @@
  *
  * All subprocess invocations are mocked — no real processes spawned.
  *
- * Note (M281): test-check is now delta-aware. The "blocks when tests fail" test
- * uses the stash-noop path (simulating a worktree with no stashable changes)
- * which falls back to the direct-run path — still blocks on failure there.
+ * Note (M281): test-check is delta-aware and compares immutable baseline and
+ * candidate snapshots without mutating the source worktree.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { AshlrConfig } from '../src/core/types.js';
@@ -40,21 +40,16 @@ vi.mock('../src/core/run/verify-commands.js', () => {
   };
 });
 
+vi.mock('../src/core/run/verification-snapshot.js', () => ({
+  prepareDeltaVerificationAuthority: vi.fn(),
+}));
+
 // Mock node:fs existsSync for lockfile repo-root check.
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return {
     ...actual,
     existsSync: vi.fn(actual.existsSync),
-  };
-});
-
-// Mock node:child_process spawnSync for git stash push/pop (M281 delta logic).
-vi.mock('node:child_process', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:child_process')>();
-  return {
-    ...actual,
-    spawnSync: vi.fn(actual.spawnSync),
   };
 });
 
@@ -103,29 +98,31 @@ async function getGate() {
 async function getMocks() {
   const vc = await import('../src/core/run/verify-commands.js');
   const fs = await import('node:fs');
-  const cp = await import('node:child_process');
+  const snapshot = await import('../src/core/run/verification-snapshot.js');
   return {
     detectVerifyCommands: vi.mocked(vc.detectVerifyCommands),
     runVerifyCommand: vi.mocked(vc.runVerifyCommand),
     runVerifyCommandAsync: vi.mocked(vc.runVerifyCommandAsync),
+    prepareDeltaVerificationAuthority: vi.mocked(snapshot.prepareDeltaVerificationAuthority),
     existsSync: vi.mocked(fs.existsSync),
-    spawnSync: vi.mocked(cp.spawnSync),
   };
 }
 
-/** Fake spawnSync return for "nothing to stash" — triggers direct-run fallback in delta logic. */
-function stashNoop(): ReturnType<typeof import('node:child_process').spawnSync> {
-  return { stdout: 'No local changes to stash', stderr: '', status: 0, error: undefined, pid: 1, output: [], signal: null } as ReturnType<typeof import('node:child_process').spawnSync>;
-}
-
-/** Fake spawnSync return for successful stash push. */
-function stashSuccess(): ReturnType<typeof import('node:child_process').spawnSync> {
-  return { stdout: 'Saved working directory', stderr: '', status: 0, error: undefined, pid: 1, output: [], signal: null } as ReturnType<typeof import('node:child_process').spawnSync>;
-}
-
-/** Fake spawnSync return for successful stash pop. */
-function stashPopOk(): ReturnType<typeof import('node:child_process').spawnSync> {
-  return { stdout: 'Dropped stash', stderr: '', status: 0, error: undefined, pid: 1, output: [], signal: null } as ReturnType<typeof import('node:child_process').spawnSync>;
+function immutableAuthority() {
+  return {
+    available: true as const,
+    authority: {
+      root: path.join(os.tmpdir(), 'm275-authority'),
+      baselinePath: path.join(os.tmpdir(), 'm275-authority', 'baseline'),
+      candidatePath: path.join(os.tmpdir(), 'm275-authority', 'candidate'),
+      launcher: { bin: '/usr/bin/sandbox-exec', prefixArgs: ['-p', '(version 1)'] },
+      baseEnv: { PATH: '/usr/bin:/bin' },
+      isolatedHomeParent: path.join(os.tmpdir(), 'm275-authority'),
+      candidateDigest: 'a'.repeat(64),
+      confirmCandidateIdentity: vi.fn(() => true),
+      cleanup: vi.fn(),
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -133,23 +130,21 @@ function stashPopOk(): ReturnType<typeof import('node:child_process').spawnSync>
 // ---------------------------------------------------------------------------
 
 describe('M275 · COMPLETENESS-GATE — runCompletenessGate()', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
+  beforeEach(async () => {
+    vi.resetAllMocks();
+    const { prepareDeltaVerificationAuthority } = await getMocks();
+    prepareDeltaVerificationAuthority.mockResolvedValue(immutableAuthority());
   });
 
   it('passes when typecheck + test both pass', async () => {
     const { runCompletenessGate } = await getGate();
-    const { detectVerifyCommands, runVerifyCommand, existsSync, spawnSync } = await getMocks();
+    const { detectVerifyCommands, runVerifyCommand, existsSync } = await getMocks();
     const controller = new AbortController();
 
     existsSync.mockReturnValue(false); // no lockfile in repo
     detectVerifyCommands.mockReturnValue([TYPECHECK_CMD, TEST_CMD]);
     runVerifyCommand.mockReturnValueOnce(okResult(TYPECHECK_CMD)); // typecheck
 
-    // Delta logic: stash succeeds, baseline passes, after passes
-    spawnSync
-      .mockReturnValueOnce(stashSuccess()) // stash push
-      .mockReturnValueOnce(stashPopOk()); // stash pop
     runVerifyCommand
       .mockReturnValueOnce(okResult(TEST_CMD)) // baseline run
       .mockReturnValueOnce(okResult(TEST_CMD)); // after run
@@ -166,8 +161,13 @@ describe('M275 · COMPLETENESS-GATE — runCompletenessGate()', () => {
     expect(result.reason).toBeUndefined();
     // typecheck + baseline-test + after-test = 3 calls
     expect(runVerifyCommand).toHaveBeenCalledTimes(3);
+    expect(runVerifyCommand.mock.calls[0]![1]).toBe(immutableAuthority().authority.candidatePath);
     for (const call of runVerifyCommand.mock.calls) {
-      expect(call[3]).toMatchObject({ signal: controller.signal });
+      expect(call[3]).toMatchObject({
+        signal: controller.signal,
+        launcher: immutableAuthority().authority.launcher,
+        baseEnv: immutableAuthority().authority.baseEnv,
+      });
     }
   });
 
@@ -268,17 +268,17 @@ describe('M275 · COMPLETENESS-GATE — runCompletenessGate()', () => {
     expect(runVerifyCommand).toHaveBeenCalledTimes(1);
   });
 
-  it('blocks when tests fail (stash-noop fallback path — direct run fails)', async () => {
+  it('blocks when the isolated candidate introduces a test failure', async () => {
     const { runCompletenessGate } = await getGate();
-    const { detectVerifyCommands, runVerifyCommand, existsSync, spawnSync } = await getMocks();
+    const { detectVerifyCommands, runVerifyCommand, existsSync } = await getMocks();
 
     existsSync.mockReturnValue(false);
     detectVerifyCommands.mockReturnValue([TYPECHECK_CMD, TEST_CMD]);
     runVerifyCommand.mockReturnValueOnce(okResult(TYPECHECK_CMD));
 
-    // Stash reports nothing to stash → fallback to direct run
-    spawnSync.mockReturnValueOnce(stashNoop());
-    runVerifyCommand.mockReturnValueOnce(failResult(TEST_CMD, 'FAIL src/core/run/foo.test.ts — 2 failed'));
+    runVerifyCommand
+      .mockReturnValueOnce(okResult(TEST_CMD))
+      .mockReturnValueOnce(failResult(TEST_CMD, 'FAIL src/core/run/foo.test.ts — 2 failed'));
 
     const result = await runCompletenessGate({
       worktreePath: FAKE_WORKTREE,
@@ -372,7 +372,7 @@ describe('M275 · COMPLETENESS-GATE — runCompletenessGate()', () => {
     expect(result).toMatchObject({ pass: true, code: 'passed', category: 'passed' });
   });
 
-  it('passes when no verify commands exist (no test suite in repo)', async () => {
+  it('allows review-only capture when no verify commands exist', async () => {
     const { runCompletenessGate } = await getGate();
     const { detectVerifyCommands, runVerifyCommand, existsSync } = await getMocks();
 
@@ -386,7 +386,13 @@ describe('M275 · COMPLETENESS-GATE — runCompletenessGate()', () => {
       cfg: makeCfg(),
     });
 
-    expect(result).toMatchObject({ pass: true, code: 'passed', category: 'passed' });
+    expect(result).toMatchObject({
+      pass: false,
+      verified: false,
+      captureAllowed: true,
+      code: 'no-commands',
+      category: 'infrastructure',
+    });
     expect(runVerifyCommand).not.toHaveBeenCalled();
   });
 
@@ -424,7 +430,7 @@ describe('M275 · COMPLETENESS-GATE — runCompletenessGate()', () => {
     existsSync.mockReturnValue(false);
     // detectVerifyCommands throws — exercises the outer try/catch in gate
     detectVerifyCommands.mockImplementation(() => {
-      throw new Error('spawnSync ENOENT');
+      throw new Error('repository-controlled detail must not persist');
     });
 
     let result: Awaited<ReturnType<typeof runCompletenessGate>> | undefined;
@@ -440,7 +446,7 @@ describe('M275 · COMPLETENESS-GATE — runCompletenessGate()', () => {
     expect(result).toBeDefined();
     expect(result!.pass).toBe(false);
     expect(result).toMatchObject({ code: 'gate-error', category: 'infrastructure' });
-    expect(result!.reason).toMatch(/completeness gate error|spawnSync ENOENT/);
+    expect(result!.reason).toBe('completeness gate error');
     expect(runVerifyCommand).not.toHaveBeenCalled();
   });
 
@@ -527,6 +533,31 @@ describe('M275 · NO-REGRESSION — module exports', () => {
     // Shallow import check — does not invoke the function
     const mod = await import('../src/core/run/sandboxed-engine.js');
     expect(typeof mod.runEngineSandboxed).toBe('function');
+  });
+
+  it('sanitizes hostile Git and filter environment variables and binds Git absolutely', async () => {
+    const actual = await vi.importActual<typeof import('../src/core/run/verification-snapshot.js')>(
+      '../src/core/run/verification-snapshot.js',
+    );
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'm275-hostile-git-env-'));
+    try {
+      const env = actual.sanitizedToolEnv(root);
+      expect(actual.trustedGitPath()).toMatch(/^\/(?:usr\/)?bin\/git$/);
+      for (const key of [
+        'GIT_DIR', 'GIT_WORK_TREE', 'GIT_CONFIG_COUNT', 'GIT_EXTERNAL_DIFF',
+        'GIT_SSH_COMMAND', 'FILTER_BRANCH_SQUELCH_WARNING', 'ASHLR_API_KEY',
+      ]) {
+        expect(env).not.toHaveProperty(key);
+      }
+      expect(env).toMatchObject({
+        GIT_CONFIG_NOSYSTEM: '1',
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_TERMINAL_PROMPT: '0',
+        GIT_NO_REPLACE_OBJECTS: '1',
+      });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

@@ -1866,6 +1866,7 @@ export type RunProposalOutcomeKind =
 /** Bounded result code emitted by the proposal completeness gate. */
 export type ProposalCaptureGateCode =
   | 'passed'
+  | 'no-commands'
   | 'partial-run'
   | 'empty-diff'
   | 'lockfile-mismatch'
@@ -1895,6 +1896,8 @@ export interface RunProposalOutcome {
   gateCode?: ProposalCaptureGateCode;
   /** Bounded policy class for the gate code. */
   gateCategory?: ProposalCaptureGateCategory;
+  /** Capture assurance established before filing; review-only is never merge-grade. */
+  captureAssurance?: 'verified' | 'review-only';
 }
 
 /** Full persisted state of a run. Lives at ~/.ashlr/runs/<id>.json. */
@@ -3805,6 +3808,11 @@ export interface ProposalVerifyResult {
   diffHash?: string;
   verifiedAt?: string;
   source?: 'auto-merge' | 'auto-merge-preflight' | 'manual' | string;
+  /** Structured proposal-capture gate result for review-only artifacts. */
+  captureGateCode?: ProposalCaptureGateCode;
+  captureGateCategory?: ProposalCaptureGateCategory;
+  /** Capture-time assurance only; never substitutes for merge verification. */
+  captureAssurance?: 'review-only';
 }
 
 export interface RemoteHandoffReconciliation {
@@ -4272,6 +4280,11 @@ export type DaemonDispatchProductionOutcome =
 
 export interface DaemonDispatchProduction {
   outcome: DaemonDispatchProductionOutcome;
+  /** Structured capture-gate result; consumers must not parse reason text. */
+  gateCode?: ProposalCaptureGateCode;
+  gateCategory?: ProposalCaptureGateCategory;
+  /** Capture-time assurance only; review-only is never merge-grade. */
+  captureAssurance?: 'verified' | 'review-only';
   proposalId?: string;
   runId?: string;
   trajectoryId?: string;

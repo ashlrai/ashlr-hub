@@ -604,7 +604,14 @@ describe('M236 terminationReason on RunState', () => {
         const repo = fx.makeRepo();
         repo.enroll();
         const controller = new AbortController();
-        completenessGateMock.mockResolvedValueOnce({ pass: false, reason: 'typecheck failed' });
+        completenessGateMock.mockResolvedValueOnce({
+          pass: false,
+          verified: false,
+          captureAllowed: false,
+          code: 'typecheck-failed',
+          category: 'actionable',
+          reason: 'typecheck failed',
+        });
         spawnEngineMock
           .mockImplementationOnce((cmd: { cwd?: string }) => {
             if (cmd.cwd && existsSync(cmd.cwd)) {
@@ -671,8 +678,21 @@ describe('M236 terminationReason on RunState', () => {
         const repo = fx.makeRepo();
         repo.enroll();
         completenessGateMock
-          .mockResolvedValueOnce({ pass: false, reason: 'typecheck failed' })
-          .mockResolvedValueOnce({ pass: true });
+          .mockResolvedValueOnce({
+            pass: false,
+            verified: false,
+            captureAllowed: false,
+            code: 'typecheck-failed',
+            category: 'actionable',
+            reason: 'typecheck failed',
+          })
+          .mockResolvedValueOnce({
+            pass: true,
+            verified: true,
+            captureAllowed: true,
+            code: 'passed',
+            category: 'passed',
+          });
         spawnEngineMock
           .mockImplementationOnce((cmd: { cwd?: string }) => {
             writeFileSync(join(cmd.cwd!, 'repair-target.ts'), 'export const repaired = false;\n', 'utf8');
@@ -719,7 +739,14 @@ describe('M236 terminationReason on RunState', () => {
       try {
         const repo = fx.makeRepo();
         repo.enroll();
-        completenessGateMock.mockResolvedValueOnce({ pass: false, reason: 'typecheck failed' });
+        completenessGateMock.mockResolvedValueOnce({
+          pass: false,
+          verified: false,
+          captureAllowed: false,
+          code: 'typecheck-failed',
+          category: 'actionable',
+          reason: 'typecheck failed',
+        });
         spawnEngineMock.mockImplementationOnce((cmd: { cwd?: string }) => {
           writeFileSync(join(cmd.cwd!, 'repair-target.ts'), 'export const repaired = false;\n', 'utf8');
           return Promise.resolve({

@@ -5320,6 +5320,9 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
         kind: 'filed',
         reason: 'builtin swarm partial proposal filed',
         isPartial: true,
+        gateCode: 'partial-run',
+        gateCategory: 'actionable',
+        captureAssurance: 'review-only',
         proposalId: 'prop-partial-builtin',
         files: 2,
         insertions: 7,
@@ -5336,6 +5339,9 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(result.proposalsCreated).toBe(0);
     expect(result.dispatches?.[0]?.production).toMatchObject({
       outcome: 'gate-blocked',
+      gateCode: 'partial-run',
+      gateCategory: 'actionable',
+      captureAssurance: 'review-only',
       proposalId: 'prop-partial-builtin',
       reason: 'partial artifact filed after aborted producer: builtin swarm partial proposal filed',
       diffFiles: 2,
@@ -5349,6 +5355,9 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
     expect(readDispatchProductionEvents({ limit: 1 })[0]).toMatchObject({
       outcome: 'gate-blocked',
+      gateCode: 'partial-run',
+      gateCategory: 'actionable',
+      captureAssurance: 'review-only',
       proposalCreated: false,
       proposalId: 'prop-partial-builtin',
       reason: expect.stringMatching(/^d1_[a-f0-9]{64}$/),

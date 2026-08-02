@@ -31,7 +31,14 @@ import {
   repairTreatmentForUnitId,
   repairTreatmentUnitId,
 } from './generated-repair-identity.js';
-import type { EngineId, EngineTier, RepairTreatment, WorkSource } from '../types.js';
+import type {
+  EngineId,
+  EngineTier,
+  ProposalCaptureGateCategory,
+  ProposalCaptureGateCode,
+  RepairTreatment,
+  WorkSource,
+} from '../types.js';
 import { isSafeExecutionIdentity } from './attempt-identity.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
 import { assurePrivateStoragePath, type PrivateStorageMode } from '../util/private-storage.js';
@@ -56,6 +63,9 @@ const ENGINE_IDS = new Set<EngineId>([
   'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes', 'kimi', 'nim', 'opencode', 'grok',
 ]);
 const ENGINE_TIERS = new Set<EngineTier>(['local', 'mid', 'frontier']);
+const ACTIONABLE_CAPTURE_GATE_CODES = new Set<ProposalCaptureGateCode>([
+  'partial-run', 'empty-diff', 'lockfile-mismatch', 'typecheck-failed', 'test-regression',
+]);
 
 export type RepairHandoffKind = 'capture-repair' | 'no-diff-reslice';
 
@@ -70,6 +80,9 @@ interface RepairHandoffObservationBase {
   repo: string;
   parentItemId: string;
   parentOutcome: 'proposal-capture-error' | 'gate-blocked' | 'empty-diff';
+  parentGateCode?: ProposalCaptureGateCode;
+  parentGateCategory?: ProposalCaptureGateCategory;
+  parentCaptureAssurance?: 'verified' | 'review-only';
   parentAttemptId: string;
   parentRunId?: string;
   parentTrajectoryId?: string;
@@ -260,6 +273,12 @@ function eligibleKind(event: DispatchProductionEvent): RepairHandoffKind | null 
     return 'no-diff-reslice';
   }
   if (event.source !== 'self' && event.source !== 'issue' && event.source !== 'goal') return null;
+  const structuredGate = event.gateCode !== undefined || event.gateCategory !== undefined ||
+    event.captureAssurance !== undefined;
+  if (structuredGate && (
+    event.gateCategory !== 'actionable' ||
+    !ACTIONABLE_CAPTURE_GATE_CODES.has(event.gateCode as ProposalCaptureGateCode)
+  )) return null;
   if (event.outcome === 'proposal-capture-error') return 'capture-repair';
   if (event.outcome !== 'gate-blocked') return null;
   const actions = event.runEventSummary?.actionCounts;
@@ -332,6 +351,9 @@ export function repairHandoffFromDispatchEvent(
     repo,
     parentItemId: semantic.parentItemId,
     parentOutcome: semantic.parentOutcome,
+    ...(event.gateCode ? { parentGateCode: event.gateCode } : {}),
+    ...(event.gateCategory ? { parentGateCategory: event.gateCategory } : {}),
+    ...(event.captureAssurance ? { parentCaptureAssurance: event.captureAssurance } : {}),
     parentAttemptId,
     parentSource: event.source,
     parentBackend: event.backend,
@@ -362,6 +384,13 @@ function validObservation(value: unknown): value is RepairHandoffObservation {
   ) return false;
   if (row['kind'] === 'no-diff-reslice' && row['parentOutcome'] !== 'empty-diff') return false;
   if (row['kind'] === 'capture-repair' && row['parentOutcome'] === 'empty-diff') return false;
+  const gateFieldsPresent = row['parentGateCode'] !== undefined ||
+    row['parentGateCategory'] !== undefined || row['parentCaptureAssurance'] !== undefined;
+  if (gateFieldsPresent && (
+    !ACTIONABLE_CAPTURE_GATE_CODES.has(row['parentGateCode'] as ProposalCaptureGateCode) ||
+    row['parentGateCategory'] !== 'actionable' ||
+    (row['parentCaptureAssurance'] !== undefined && row['parentCaptureAssurance'] !== 'review-only')
+  )) return false;
   const treatmentMetadataPresent = row['repairTreatmentUnitId'] !== undefined || row['repairTreatment'] !== undefined;
   if (treatmentMetadataPresent && (
     row['kind'] !== 'no-diff-reslice' ||
@@ -444,6 +473,9 @@ function observationFingerprint(row: RepairHandoffObservation): string {
     row.repo,
     row.parentItemId,
     row.parentOutcome,
+    row.parentGateCode ?? null,
+    row.parentGateCategory ?? null,
+    row.parentCaptureAssurance ?? null,
     row.parentAttemptId,
     row.parentRunId ?? null,
     row.parentTrajectoryId ?? null,
@@ -463,6 +495,9 @@ function fullObservationFingerprint(row: RepairHandoffObservation): string {
     row.repo,
     row.parentItemId,
     row.parentOutcome,
+    row.parentGateCode ?? null,
+    row.parentGateCategory ?? null,
+    row.parentCaptureAssurance ?? null,
     row.parentAttemptId,
     row.parentSource ?? null,
     row.parentBackend ?? null,
@@ -1290,8 +1325,13 @@ export function dispatchEventFromRepairHandoff(
     ...(observation.parentObjectiveHash ? { objectiveHash: observation.parentObjectiveHash } : {}),
     assignedBy: 'repair-handoff-journal',
     routeReason: 'durable-parent-handoff',
-    outcome: observation.kind === 'capture-repair' ? 'proposal-capture-error' : 'empty-diff',
+    outcome: observation.parentOutcome,
     proposalCreated: false,
+    ...(observation.parentGateCode ? { gateCode: observation.parentGateCode } : {}),
+    ...(observation.parentGateCategory ? { gateCategory: observation.parentGateCategory } : {}),
+    ...(observation.parentCaptureAssurance
+      ? { captureAssurance: observation.parentCaptureAssurance }
+      : {}),
     ...(observation.parentRunId ? { runId: observation.parentRunId } : {}),
     ...(observation.parentTrajectoryId ? { trajectoryId: observation.parentTrajectoryId } : {}),
     spentUsd: 0,

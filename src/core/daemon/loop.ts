@@ -2023,6 +2023,9 @@ function dispatchProductionFromProposalOutcome(
   const evidence = evidenceOutcomeSummary(options.evidenceOutcome);
   return {
     outcome: productionOutcome,
+    ...(outcome.gateCode ? { gateCode: outcome.gateCode } : {}),
+    ...(outcome.gateCategory ? { gateCategory: outcome.gateCategory } : {}),
+    ...(outcome.captureAssurance ? { captureAssurance: outcome.captureAssurance } : {}),
     ...(outcome.proposalId ? { proposalId: outcome.proposalId } : {}),
     ...(runId ? { runId } : {}),
     ...(summary ? { runEventSummary: summary } : {}),
@@ -2590,6 +2593,9 @@ function dispatchProductionEventFromOutcome(
     routeReason: trace.reason,
     outcome,
     proposalCreated,
+    ...(production?.gateCode ? { gateCode: production.gateCode } : {}),
+    ...(production?.gateCategory ? { gateCategory: production.gateCategory } : {}),
+    ...(production?.captureAssurance ? { captureAssurance: production.captureAssurance } : {}),
     ...(proposalId ? { proposalId } : {}),
     attemptId,
     ...(runId ? { runId } : {}),

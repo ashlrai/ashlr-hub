@@ -67,7 +67,9 @@ export function isTrustedCaptureRepairItem(item: WorkItem): boolean {
   return /\bDispatch capture repair:/i.test(text) &&
     /\bOriginal work item:/i.test(text) &&
     /\bDispatch outcome:\s*(?:proposal-capture-error|gate-blocked)\b/i.test(text) &&
-    (/\bDiff metadata:\s*(?:files|lines)=\d+/i.test(text) || isActionableSelfHealFailureText(text)) &&
+    (/\bDiff metadata:\s*(?:files|lines)=\d+/i.test(text) ||
+      /\bFailure:\s*capture-gate:(?:partial-run|empty-diff|lockfile-mismatch|typecheck-failed|test-regression)\b/i.test(text) ||
+      isActionableSelfHealFailureText(text)) &&
     /\bFailure:/i.test(text) &&
     /\bProduce a fresh complete fix\b/i.test(text);
 }

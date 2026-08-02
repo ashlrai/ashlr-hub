@@ -517,7 +517,14 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     vi.doMock('../src/core/run/completeness-gate.js', () => ({
       runCompletenessGate: async (args: unknown) => {
         capturedGateArgs.push(args);
-        return { pass: false, reason: 'typecheck failed' };
+        return {
+          pass: false,
+          verified: false,
+          captureAllowed: false,
+          code: 'partial-run',
+          category: 'actionable',
+          reason: 'repository-controlled partial output',
+        };
       },
     }));
 
@@ -542,9 +549,13 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
       verifyResult: {
         passed: false,
         source: 'capture-gate',
-        failed: [expect.stringContaining('typecheck failed')],
+        failed: ['[partial] run'],
+        captureGateCode: 'partial-run',
+        captureGateCategory: 'actionable',
+        captureAssurance: 'review-only',
       },
     });
+    expect(JSON.stringify(capturedProposalArgs[0])).not.toContain('repository-controlled');
     expect(result.state.status).toBe('done');
     expect(result.proposalId).toBe('partial-review-prop');
     expect(result.proposalOutcome).toMatchObject({

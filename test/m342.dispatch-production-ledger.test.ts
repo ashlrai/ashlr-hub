@@ -961,6 +961,33 @@ describe('M342 dispatch production ledger', () => {
     });
   });
 
+  it('preserves structured capture-gate routing fields and rejects contradictory assurance', () => {
+    const infrastructure = makeEvent({
+      itemId: 'structured-capture-infrastructure',
+      outcome: 'gate-blocked',
+      proposalCreated: false,
+      gateCode: 'no-commands',
+      gateCategory: 'infrastructure',
+    });
+    expect(recordDispatchProduction(infrastructure)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    expect(readDispatchProductionEvents({ limit: 1 })[0]).toMatchObject({
+      gateCode: 'no-commands',
+      gateCategory: 'infrastructure',
+      outcome: 'gate-blocked',
+    });
+
+    expect(() => sanitizeDispatchProductionEvent(makeEvent({
+      gateCode: 'no-commands',
+      gateCategory: 'infrastructure',
+      captureAssurance: 'verified',
+    }))).toThrow(/capture-gate metadata/);
+    expect(() => sanitizeDispatchProductionEvent(makeEvent({
+      gateCode: 'no-commands',
+      gateCategory: 'actionable',
+      captureAssurance: 'review-only',
+    }))).toThrow(/capture-gate metadata/);
+  });
+
   it('materializes the complete current attempt envelope before accepting a write', () => {
     const input = makeEvent({
       itemId: 'materialize-current-envelope',

@@ -19,7 +19,6 @@
 
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
 import type {
   AshlrConfig,
   ProposalCaptureGateCategory,
@@ -30,13 +29,23 @@ import {
   runVerifyCommandAsync,
   type VerifyCommand,
 } from './verify-commands.js';
+import {
+  prepareDeltaVerificationAuthority,
+  type DeltaVerificationAuthority,
+  type DeltaVerificationAuthorityResult,
+} from './verification-snapshot.js';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 export interface CompletenessGateResult {
+  /** Compatibility alias for verified; never means merely capture-allowed. */
   pass: boolean;
+  /** True only when the configured verification completed successfully. */
+  verified: boolean;
+  /** Whether the diff may be retained; unverified allowance is review-only. */
+  captureAllowed: boolean;
   /** Stable machine-readable outcome; consumers must not parse reason text. */
   code: ProposalCaptureGateCode;
   /** Bounded policy class for repair and retry decisions. */
@@ -77,9 +86,6 @@ export interface RunCompletenessGateOpts {
 /** Hard wall-clock per self-verify command. Mirrors TITRR_TEST_TIMEOUT_MS. */
 const SELF_VERIFY_TIMEOUT_MS = 60_000;
 
-/** Max chars kept in the reason string (keep log lines tight). */
-const REASON_OUTPUT_CAP = 200;
-
 /** Lockfile names that pair with package.json. */
 const LOCKFILE_NAMES = [
   'pnpm-lock.yaml',
@@ -93,13 +99,11 @@ const LOCKFILE_NAMES = [
 // Helpers
 // ---------------------------------------------------------------------------
 
-function truncate(s: string): string {
-  return s.length > REASON_OUTPUT_CAP ? s.slice(0, REASON_OUTPUT_CAP) + '…' : s;
-}
-
 function cancelledResult(reason: string): CompletenessGateResult & { cancelled: true } {
   return {
     pass: false,
+    verified: false,
+    captureAllowed: false,
     code: 'cancelled',
     category: 'cancellation',
     cancelled: true,
@@ -108,22 +112,45 @@ function cancelledResult(reason: string): CompletenessGateResult & { cancelled: 
 }
 
 function passedResult(): CompletenessGateResult {
-  return { pass: true, code: 'passed', category: 'passed' };
+  return {
+    pass: true,
+    verified: true,
+    captureAllowed: true,
+    code: 'passed',
+    category: 'passed',
+  };
 }
 
 function actionableResult(
-  code: Exclude<ProposalCaptureGateCode, 'passed' | 'verification-unavailable' | 'cancelled' | 'gate-error'>,
+  code: Exclude<
+    ProposalCaptureGateCode,
+    'passed' | 'no-commands' | 'verification-unavailable' | 'cancelled' | 'gate-error'
+  >,
   reason: string,
 ): CompletenessGateResult {
-  return { pass: false, code, category: 'actionable', reason };
+  return {
+    pass: false,
+    verified: false,
+    captureAllowed: false,
+    code,
+    category: 'actionable',
+    reason,
+  };
 }
 
 function infrastructureResult(
-  code: 'verification-unavailable' | 'gate-error',
+  code: 'no-commands' | 'verification-unavailable' | 'gate-error',
   reason: string,
-  pass = false,
+  captureAllowed = false,
 ): CompletenessGateResult {
-  return { pass, code, category: 'infrastructure', reason };
+  return {
+    pass: false,
+    verified: false,
+    captureAllowed,
+    code,
+    category: 'infrastructure',
+    reason,
+  };
 }
 
 function verifyInfrastructureReason(
@@ -191,38 +218,6 @@ export function parseFailedTestIds(output: string): Set<string> {
 }
 
 /**
- * Try to stash uncommitted changes in `dir`. Returns true when stash succeeded
- * (meaning changes were stashed). Returns false if nothing to stash or on error.
- * Never throws.
- */
-function gitStashPush(dir: string): boolean {
-  try {
-    const res = spawnSync('git', ['stash', 'push', '--include-untracked', '-m', 'ashlr-completeness-baseline'], {
-      cwd: dir, encoding: 'utf8', stdio: 'pipe',
-    });
-    if (res.error || res.status !== 0) return false;
-    const stdout = (res.stdout ?? '').trim();
-    // "No local changes to stash" means nothing was stashed
-    return !stdout.includes('No local changes');
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Pop the most recent stash in `dir`. Never throws.
- */
-function gitStashPop(dir: string): void {
-  try {
-    spawnSync('git', ['stash', 'pop'], {
-      cwd: dir, encoding: 'utf8', stdio: 'pipe',
-    });
-  } catch {
-    /* ignore */
-  }
-}
-
-/**
  * Run a test command and return structured failure info.
  * On timeout, returns null (caller treats as "baseline unavailable").
  * `ids` is the set of parsed failing test IDs (may be empty if output unparseable).
@@ -234,13 +229,27 @@ async function collectFailingTests(
   cfg: AshlrConfig,
   timeoutMs: number,
   signal?: AbortSignal,
+  authority?: Pick<
+    DeltaVerificationAuthority,
+    'launcher' | 'baseEnv' | 'isolatedHomeParent'
+  >,
 ): Promise<{
   ok: boolean;
   ids: Set<string>;
   cancelled?: boolean;
   infrastructureReason?: string;
 } | null> {
-  const result = await runVerifyCommandAsync(cmd, dir, cfg, { timeoutMs, signal });
+  const result = await runVerifyCommandAsync(cmd, dir, cfg, {
+    timeoutMs,
+    ...(signal ? { signal } : {}),
+    ...(authority
+      ? {
+          launcher: authority.launcher,
+          baseEnv: authority.baseEnv,
+          isolatedHomeParent: authority.isolatedHomeParent,
+        }
+      : {}),
+  });
   if (result.cancelled || result.failureCategory === 'cancelled' || signal?.aborted) {
     return { ok: false, ids: new Set<string>(), cancelled: true };
   }
@@ -253,113 +262,175 @@ async function collectFailingTests(
   return { ok: false, ids: parseFailedTestIds(result.output) };
 }
 
+async function runIsolatedTypecheck(
+  cmd: VerifyCommand,
+  worktreePath: string,
+  cfg: AshlrConfig,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<CompletenessGateResult> {
+  let authority: DeltaVerificationAuthority | undefined;
+  let outcome: CompletenessGateResult | undefined;
+  let identityConfirmed = true;
+  try {
+    const prepared = await prepareDeltaVerificationAuthority(worktreePath, signal);
+    if (!prepared.available) {
+      return prepared.cancelled || signal?.aborted
+        ? cancelledResult('self-verify cancelled: typecheck authority')
+        : infrastructureResult(
+            'verification-unavailable',
+            'self-verify unavailable: immutable typecheck authority unavailable',
+            true,
+          );
+    }
+    authority = prepared.authority;
+    const result = await runVerifyCommandAsync(cmd, authority.candidatePath, cfg, {
+      timeoutMs,
+      launcher: authority.launcher,
+      baseEnv: authority.baseEnv,
+      isolatedHomeParent: authority.isolatedHomeParent,
+      ...(signal ? { signal } : {}),
+    });
+    if (result.cancelled || result.failureCategory === 'cancelled' || signal?.aborted) {
+      outcome = cancelledResult('self-verify cancelled: typecheck');
+    } else if (!result.ok) {
+      const infrastructureReason = verifyInfrastructureReason(result);
+      outcome = infrastructureReason
+        ? infrastructureResult(
+            'verification-unavailable',
+            `self-verify ${infrastructureReason}: typecheck`,
+            true,
+          )
+        : actionableResult('typecheck-failed', 'self-verify failed: typecheck');
+    } else {
+      outcome = passedResult();
+    }
+  } catch {
+    outcome = infrastructureResult('gate-error', 'self-verify gate error', true);
+  } finally {
+    if (authority) {
+      identityConfirmed = authority.confirmCandidateIdentity();
+      authority.cleanup();
+    }
+  }
+
+  if (!identityConfirmed) {
+    return infrastructureResult(
+      'verification-unavailable',
+      'self-verify unavailable: candidate identity changed during typecheck',
+    );
+  }
+  if (signal?.aborted || outcome?.cancelled) {
+    return cancelledResult(outcome?.reason ?? 'self-verify cancelled: typecheck');
+  }
+  return outcome ?? infrastructureResult('gate-error', 'self-verify gate error', true);
+}
+
 /**
  * M281: Delta-aware test verification.
  *
- * Strategy (in the completeness-gate worktree which already has agent changes):
- *   1. Stash agent changes → run test → record BASELINE failing set
- *   2. Unstash → run test → record AFTER failing set
+ * Strategy:
+ *   1. Materialize immutable baseline and candidate snapshots without changing
+ *      the source worktree.
+ *   2. Run both snapshots under an OS write/network sandbox whose descendants
+ *      inherit the same confinement.
  *   3. PASS iff (AFTER minus BASELINE) is empty (no NEW failures)
  *   4. FAIL iff any test that passed in BASELINE now fails in AFTER
  *
  * Safe fallbacks:
- *   - Stash fails (no changes to stash, detached HEAD, etc.) → run AFTER only,
- *     pass if ok (original behaviour — cannot do delta without a baseline)
+ *   - Snapshot or confinement authority unavailable → infrastructure-only
+ *     review capture; never verified.
  *   - Baseline/after timeout → preserve the non-blocking fallback with an infrastructure code
  *   - Any unexpected delta error → preserve the non-blocking fallback with an infrastructure code
  *
  * Returns a bounded code/category for every result and never throws.
  */
+export type DeltaVerificationAuthorityFactory = (
+  worktreePath: string,
+  signal?: AbortSignal,
+) => Promise<DeltaVerificationAuthorityResult>;
+
 export async function runDeltaAwareTestCheck(
   testCmd: VerifyCommand,
   worktreePath: string,
   cfg: AshlrConfig,
   timeoutMs: number,
   signal?: AbortSignal,
+  authorityFactory: DeltaVerificationAuthorityFactory = prepareDeltaVerificationAuthority,
 ): Promise<CompletenessGateResult> {
+  let authority: DeltaVerificationAuthority | undefined;
+  let outcome: CompletenessGateResult | undefined;
+  let gateErrored = false;
+  let identityConfirmed = true;
   try {
     if (signal?.aborted) {
       return cancelledResult('self-verify cancelled: test');
     }
 
-    // Step 1: stash agent changes to get a clean baseline
-    const stashed = gitStashPush(worktreePath);
-
-    if (!stashed) {
-      // Cannot isolate baseline — fall back to direct run (original behaviour)
-      const result = await runVerifyCommandAsync(testCmd, worktreePath, cfg, {
-        timeoutMs,
-        signal,
-      });
-      if (result.cancelled || result.failureCategory === 'cancelled' || signal?.aborted) {
-        return cancelledResult('self-verify cancelled: test');
-      }
-      if (!result.ok) {
-        const infrastructureReason = verifyInfrastructureReason(result);
-        return infrastructureReason
-          ? infrastructureResult('verification-unavailable', `self-verify ${infrastructureReason}: test`)
-          : actionableResult('test-regression', 'self-verify failed: test');
-      }
-      return passedResult();
+    const prepared = await authorityFactory(worktreePath, signal);
+    if (!prepared.available) {
+      return prepared.cancelled || signal?.aborted
+        ? cancelledResult('self-verify cancelled: test baseline')
+        : infrastructureResult(
+            'verification-unavailable',
+            'self-verify unavailable: immutable baseline authority unavailable',
+            true,
+          );
     }
+    authority = prepared.authority;
 
-    // Step 2: run baseline (pre-change)
-    let baseline: Awaited<ReturnType<typeof collectFailingTests>>;
-    try {
-      if (signal?.aborted) {
-        return cancelledResult('self-verify cancelled: test baseline');
-      }
-      baseline = await collectFailingTests(testCmd, worktreePath, cfg, timeoutMs, signal);
-    } finally {
-      // Step 3: restore agent changes before reporting any baseline outcome,
-      // including cancellation or an unexpected command error.
-      gitStashPop(worktreePath);
-    }
-
+    const baseline = await collectFailingTests(
+      testCmd,
+      authority.baselinePath,
+      cfg,
+      timeoutMs,
+      signal,
+      authority,
+    );
     if (baseline?.cancelled || signal?.aborted) {
-      return cancelledResult('self-verify cancelled: test baseline');
-    }
-
-    if (baseline?.infrastructureReason) {
-      return infrastructureResult(
+      outcome = cancelledResult('self-verify cancelled: test baseline');
+    } else if (baseline?.infrastructureReason) {
+      outcome = infrastructureResult(
         'verification-unavailable',
         `self-verify ${baseline.infrastructureReason}: test baseline`,
+        true,
       );
-    }
-
-    if (baseline === null) {
-      // Preserve the existing fallback, but do not label it as a verified pass.
-      return infrastructureResult(
+    } else if (baseline === null) {
+      outcome = infrastructureResult(
         'verification-unavailable',
         'self-verify unavailable: test baseline timed out',
         true,
       );
     }
 
-    // Step 4: run after (with agent changes)
-    const after = await collectFailingTests(testCmd, worktreePath, cfg, timeoutMs, signal);
+    const after = outcome
+      ? undefined
+      : await collectFailingTests(
+          testCmd,
+          authority.candidatePath,
+          cfg,
+          timeoutMs,
+          signal,
+          authority,
+        );
 
-    if (after?.cancelled || signal?.aborted) {
-      return cancelledResult('self-verify cancelled: test');
-    }
-
-    if (after?.infrastructureReason) {
-      return infrastructureResult(
+    if (!outcome && (after?.cancelled || signal?.aborted)) {
+      outcome = cancelledResult('self-verify cancelled: test');
+    } else if (!outcome && after?.infrastructureReason) {
+      outcome = infrastructureResult(
         'verification-unavailable',
         `self-verify ${after.infrastructureReason}: test`,
+        true,
       );
-    }
-
-    if (after === null) {
-      // Preserve the existing fallback, but do not label it as a verified pass.
-      return infrastructureResult(
+    } else if (!outcome && after === null) {
+      outcome = infrastructureResult(
         'verification-unavailable',
         'self-verify unavailable: test timed out',
         true,
       );
     }
 
-    // Step 5: delta analysis
+    // Step 3: delta analysis
     //
     // Case A: both IDs sets are non-empty → set-difference is authoritative.
     // Case B: IDs are empty (test runner uses no vitest/jest markers, e.g. a raw
@@ -368,24 +439,23 @@ export async function runDeltaAwareTestCheck(
     //           - baseline ok=false, after ok=false  → pre-existing failure → tolerate
     //           - baseline ok=true,  after ok=true   → no regression
     //           - baseline ok=false, after ok=true   → improvement, pass
-    if (after.ids.size > 0 || baseline.ids.size > 0) {
+    if (!outcome && baseline && after && (after.ids.size > 0 || baseline.ids.size > 0)) {
       // Named IDs available — use set-difference
       const newFailures = new Set<string>();
       for (const id of after.ids) {
         if (!baseline.ids.has(id)) newFailures.add(id);
       }
       if (newFailures.size > 0) {
-        const listed = [...newFailures].slice(0, 5).join('; ');
-        return actionableResult(
+        outcome = actionableResult(
           'test-regression',
-          `self-verify failed: test: ${newFailures.size} new failure(s) introduced: ${truncate(listed)}`,
+          `self-verify failed: test: ${newFailures.size} new failure(s) introduced`,
         );
       }
-    } else {
+    } else if (!outcome && baseline && after) {
       // No parseable IDs — fall back to ok-flag delta
       if (baseline.ok && !after.ok) {
         // Baseline was passing; change broke it — new regression
-        return actionableResult(
+        outcome = actionableResult(
           'test-regression',
           'self-verify failed: test: regression detected (test suite failed after change, was passing before)',
         );
@@ -393,18 +463,29 @@ export async function runDeltaAwareTestCheck(
       // baseline failed too (pre-existing) → tolerate
     }
 
-    return passedResult();
-  } catch (err) {
-    if (signal?.aborted) {
-      return cancelledResult('self-verify cancelled: test');
+    outcome ??= passedResult();
+  } catch {
+    gateErrored = true;
+  } finally {
+    if (authority) {
+      identityConfirmed = authority.confirmCandidateIdentity();
+      authority.cleanup();
     }
-    const msg = err instanceof Error ? err.message : String(err);
+  }
+
+  if (!identityConfirmed) {
     return infrastructureResult(
-      'gate-error',
-      `self-verify gate error: ${truncate(msg)}`,
-      true,
+      'verification-unavailable',
+      'self-verify unavailable: candidate identity changed during verification',
     );
   }
+  if (signal?.aborted || outcome?.cancelled) {
+    return cancelledResult(outcome?.reason ?? 'self-verify cancelled: test');
+  }
+  if (gateErrored) {
+    return infrastructureResult('gate-error', 'self-verify gate error', true);
+  }
+  return outcome ?? infrastructureResult('gate-error', 'self-verify gate error', true);
 }
 
 // ---------------------------------------------------------------------------
@@ -412,9 +493,8 @@ export async function runDeltaAwareTestCheck(
 // ---------------------------------------------------------------------------
 
 /**
- * Run the M275 completeness gate. `pass` preserves the capture policy while
- * code/category distinguish verified success, actionable failure, unavailable
- * infrastructure, and caller cancellation.
+ * Run the M275 completeness gate. `pass` is verified truth; captureAllowed is
+ * the independent review-retention policy for unverified infrastructure states.
  *
  * @param opts - Gate inputs (worktreePath, diff, goal, cfg, isPartial).
  * @returns CompletenessGateResult — never throws.
@@ -435,7 +515,7 @@ export async function runCompletenessGate(
     if (isPartial === true) {
       return actionableResult(
         'partial-run',
-        '[partial] run — engine timed out or exited non-zero; not filed',
+        '[partial] run',
       );
     }
 
@@ -470,28 +550,24 @@ export async function runCompletenessGate(
     //    with no package.json / tsconfig.json → gate passes).
     // -----------------------------------------------------------------------
     const cmds = detectVerifyCommands(worktreePath);
+    if (cmds.length === 0) {
+      return infrastructureResult(
+        'no-commands',
+        'self-verify unavailable: no verification commands',
+        true,
+      );
+    }
 
     const typecheckCmd = cmds.find((c) => c.kind === 'typecheck');
     if (typecheckCmd) {
-      const result = await runVerifyCommandAsync(typecheckCmd, worktreePath, cfg, {
-        timeoutMs: SELF_VERIFY_TIMEOUT_MS,
+      const typecheckResult = await runIsolatedTypecheck(
+        typecheckCmd,
+        worktreePath,
+        cfg,
+        SELF_VERIFY_TIMEOUT_MS,
         signal,
-      });
-      if (result.cancelled || result.failureCategory === 'cancelled' || signal?.aborted) {
-        return cancelledResult('self-verify cancelled: typecheck');
-      }
-      if (!result.ok) {
-        const infrastructureReason = verifyInfrastructureReason(result);
-        return infrastructureReason
-          ? infrastructureResult(
-              'verification-unavailable',
-              `self-verify ${infrastructureReason}: typecheck`,
-            )
-          : actionableResult(
-              'typecheck-failed',
-              'self-verify failed: typecheck',
-            );
-      }
+      );
+      if (!typecheckResult.pass) return typecheckResult;
     }
 
     const testCmd = cmds.find((c) => c.kind === 'test');
@@ -510,9 +586,7 @@ export async function runCompletenessGate(
       if (!deltaResult.pass) {
         return deltaResult;
       }
-      if (deltaResult.category === 'infrastructure') {
-        return deltaResult;
-      }
+      if (!deltaResult.verified) return deltaResult;
     }
 
     // All checks passed.
@@ -520,15 +594,14 @@ export async function runCompletenessGate(
       return cancelledResult('completeness gate cancelled');
     }
     return passedResult();
-  } catch (err) {
+  } catch {
     if (opts.signal?.aborted) {
       return cancelledResult('completeness gate cancelled');
     }
     // Never throws — surface unexpected errors as a non-filing result.
-    const msg = err instanceof Error ? err.message : String(err);
     return infrastructureResult(
       'gate-error',
-      `completeness gate error: ${truncate(msg)}`,
+      'completeness gate error',
     );
   }
 }
