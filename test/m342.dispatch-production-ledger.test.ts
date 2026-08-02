@@ -210,6 +210,158 @@ function makeEvent(overrides: Partial<DispatchProductionEvent> = {}): DispatchPr
   return row;
 }
 
+type MutableLegacyEvent = DispatchProductionEvent & Record<string, unknown>;
+type LegacyEnvelopeMutation = (row: MutableLegacyEvent) => void;
+
+function legacyProposalProductionEnvelope(itemId: string): MutableLegacyEvent {
+  const row = makeEvent({
+    itemId,
+    ts: new Date().toISOString(),
+    outcome: 'proposal-created',
+    proposalCreated: true,
+    proposalId: 'proposal-legacy',
+    diffFiles: 2,
+    diffLines: 8,
+    spentUsd: 0.25,
+    routerPolicyVersion: 'fleet-router-v1',
+    routeSnapshot: {
+      backend: 'local-coder',
+      tier: 'mid',
+      model: 'qwen',
+      assignedBy: 'daemon',
+      reason: 'local-mid bulk: local-coder',
+      routerPolicyVersion: 'fleet-router-v1',
+    },
+  }) as MutableLegacyEvent;
+  const summary = legacySummary(row);
+  const duplicatedMetadata = {
+    status: 'done',
+    diffBytes: 512,
+    diffHash: 'a'.repeat(64),
+    provenanceSig: 'b'.repeat(64),
+    producerProvenanceVersion: 2,
+    producerProvenanceSig: 'c'.repeat(64),
+    engineModel: 'local-coder:qwen',
+    engineTier: 'mid',
+    tokensIn: 100,
+    tokensOut: 40,
+    durationMs: 1_500,
+    cacheHit: false,
+    contextSummary: { prompt: { profileId: 'profile-safe' } },
+  };
+  Object.assign(row, duplicatedMetadata);
+  Object.assign(summary, duplicatedMetadata);
+  const duplicatedRouteMetadata = {
+    selectedSkillIds: ['skill-safe'],
+    skillPolicyVersion: 'skill-policy-v1',
+    skillMode: 'active',
+  };
+  Object.assign(row, duplicatedRouteMetadata);
+  Object.assign(legacyRoute(row), duplicatedRouteMetadata);
+  delete summary['actionCounts'];
+  return row;
+}
+
+function legacySummary(row: MutableLegacyEvent): Record<string, unknown> {
+  return row.runEventSummary as unknown as Record<string, unknown>;
+}
+
+function legacyRoute(row: MutableLegacyEvent): Record<string, unknown> {
+  return row.routeSnapshot as unknown as Record<string, unknown>;
+}
+
+function setLegacyActionCounts(row: MutableLegacyEvent, overrides: Record<string, number>): void {
+  legacySummary(row)['actionCounts'] = {
+    proposalCreated: 1,
+    proposalBlocked: 0,
+    proposalDisabled: 0,
+    diffFiles: 2,
+    diffLines: 8,
+    ...overrides,
+  };
+  delete row.attemptId;
+}
+
+const LEGACY_ENVELOPE_MISMATCHES: ReadonlyArray<readonly [string, LegacyEnvelopeMutation]> = [
+  ['attempt/trajectory identity', (row) => { row.trajectoryId = 'run:attempt-forged'; }],
+  ['attempt/trajectory identity without summary', (row) => {
+    delete row.runEventSummary;
+    row.trajectoryId = 'run:attempt-forged';
+  }],
+  ['runId', (row) => { legacySummary(row)['runId'] = 'run-forged'; }],
+  ['status', (row) => { legacySummary(row)['status'] = 'failed'; }],
+  ['outcome', (row) => { legacySummary(row)['outcome'] = 'empty-diff'; }],
+  ['proposalCreated', (row) => { legacySummary(row)['proposalCreated'] = false; }],
+  ['proposalId', (row) => { legacySummary(row)['proposalId'] = 'proposal-forged'; }],
+  ['spend/cost', (row) => { legacySummary(row)['costUsd'] = 9.99; }],
+  ['diffFiles', (row) => { legacySummary(row)['diffFiles'] = 7; }],
+  ['diffLines', (row) => { legacySummary(row)['diffLines'] = 70; }],
+  ['diffBytes', (row) => { legacySummary(row)['diffBytes'] = 4_096; }],
+  ['diffHash', (row) => { legacySummary(row)['diffHash'] = 'd'.repeat(64); }],
+  ['provenanceSig', (row) => { legacySummary(row)['provenanceSig'] = 'e'.repeat(64); }],
+  ['producerProvenanceVersion', (row) => { legacySummary(row)['producerProvenanceVersion'] = 1; }],
+  ['producerProvenanceSig', (row) => { legacySummary(row)['producerProvenanceSig'] = 'f'.repeat(64); }],
+  ['engineModel', (row) => { legacySummary(row)['engineModel'] = 'codex:gpt'; }],
+  ['engineTier', (row) => { legacySummary(row)['engineTier'] = 'frontier'; }],
+  ['tokensIn', (row) => { legacySummary(row)['tokensIn'] = 101; }],
+  ['tokensOut', (row) => { legacySummary(row)['tokensOut'] = 41; }],
+  ['durationMs', (row) => { legacySummary(row)['durationMs'] = 1_501; }],
+  ['cacheHit', (row) => { legacySummary(row)['cacheHit'] = true; }],
+  ['contextSummary', (row) => {
+    legacySummary(row)['contextSummary'] = { prompt: { profileId: 'profile-forged' } };
+  }],
+  ['top-level actionCounts', (row) => {
+    setLegacyActionCounts(row, {});
+    row['actionCounts'] = { ...legacySummary(row)['actionCounts'] as Record<string, number>, diffLines: 70 };
+  }],
+  ['route backend', (row) => { legacyRoute(row)['backend'] = 'kimi'; }],
+  ['route tier', (row) => { legacyRoute(row)['tier'] = 'frontier'; }],
+  ['route model', (row) => { legacyRoute(row)['model'] = 'forged-model'; }],
+  ['route assignedBy', (row) => { legacyRoute(row)['assignedBy'] = 'forged-router'; }],
+  ['route policy', (row) => { legacyRoute(row)['routerPolicyVersion'] = 'fleet-router-v999'; }],
+  ['route selected skills', (row) => { legacyRoute(row)['selectedSkillIds'] = ['skill-forged']; }],
+  ['route skill policy', (row) => { legacyRoute(row)['skillPolicyVersion'] = 'skill-policy-v999'; }],
+  ['route skill mode', (row) => { legacyRoute(row)['skillMode'] = 'disabled'; }],
+  ['route backend without summary', (row) => {
+    delete row.runEventSummary;
+    legacyRoute(row)['backend'] = 'kimi';
+  }],
+  ['action proposalCreated', (row) => { setLegacyActionCounts(row, { proposalCreated: 0 }); }],
+  ['action proposalBlocked', (row) => { setLegacyActionCounts(row, { proposalBlocked: 1 }); }],
+  ['action proposalDisabled', (row) => { setLegacyActionCounts(row, { proposalDisabled: 1 }); }],
+  ['action diffFiles', (row) => { setLegacyActionCounts(row, { diffFiles: 7 }); }],
+  ['action diffLines', (row) => { setLegacyActionCounts(row, { diffLines: 70 }); }],
+];
+
+const LEGACY_ENVELOPE_OMISSIONS: ReadonlyArray<readonly [string, LegacyEnvelopeMutation]> = [
+  ['entire summary', (row) => { delete row.runEventSummary; }],
+  ['nested runId', (row) => { delete legacySummary(row)['runId']; }],
+  ['top-level runId', (row) => { delete row.runId; }],
+  ['nested proposalId', (row) => { delete legacySummary(row)['proposalId']; }],
+  ['top-level proposalId', (row) => { delete row.proposalId; }],
+  ['nested costUsd', (row) => { delete legacySummary(row)['costUsd']; }],
+  ['nested diffFiles', (row) => { delete legacySummary(row)['diffFiles']; }],
+  ['top-level diffLines', (row) => { delete row.diffLines; }],
+  ['nested diffBytes', (row) => { delete legacySummary(row)['diffBytes']; }],
+  ['top-level diffHash', (row) => { delete row['diffHash']; }],
+  ['nested provenanceSig', (row) => { delete legacySummary(row)['provenanceSig']; }],
+  ['nested contextSummary', (row) => { delete legacySummary(row)['contextSummary']; }],
+  ['top-level contextSummary', (row) => { delete row['contextSummary']; }],
+  ['top-level producer provenance', (row) => {
+    delete row['producerProvenanceVersion'];
+    delete row['producerProvenanceSig'];
+  }],
+  ['nested engine metadata', (row) => {
+    delete legacySummary(row)['engineModel'];
+    delete legacySummary(row)['engineTier'];
+  }],
+  ['nested route backend', (row) => { delete legacyRoute(row)['backend']; }],
+  ['top-level route model', (row) => { delete row.model; }],
+  ['nested route reason', (row) => { delete legacyRoute(row)['reason']; }],
+  ['nested route skill policy', (row) => { delete legacyRoute(row)['skillPolicyVersion']; }],
+  ['top-level route policy', (row) => { delete row.routerPolicyVersion; }],
+];
+
 function distinctExecution(
   event: DispatchProductionEvent,
   runId: string,
@@ -927,41 +1079,60 @@ describe('M342 dispatch production ledger', () => {
     expect(JSON.stringify(detailed.summary)).not.toContain('sk-legacy-private-token');
   });
 
-  it('degrades a contradictory legacy outcome summary instead of counting it as pre-envelope', () => {
-    const legacy = makeEvent({
-      itemId: 'contradictory-legacy-summary',
-      ts: new Date().toISOString(),
-      outcome: 'empty-diff',
-      proposalCreated: false,
-    });
-    delete legacy.attemptId;
-    legacy.runEventSummary = {
-      ...legacy.runEventSummary!,
-      outcome: 'proposal-created',
-      proposalCreated: true,
-    };
-    delete legacy.runEventSummary.actionCounts;
-    mkdirSync(dispatchProductionDir(), { recursive: true });
-    appendFileSync(
-      join(dispatchProductionDir(), `${legacy.ts.slice(0, 10)}.jsonl`),
-      `${JSON.stringify(legacy)}\n`,
-      'utf8',
-    );
+  it.each(LEGACY_ENVELOPE_MISMATCHES)(
+    'degrades a pre-envelope %s mismatch',
+    (_name, mutate) => {
+      const legacy = legacyProposalProductionEnvelope(`contradictory-${_name}`);
+      mutate(legacy);
+      mkdirSync(dispatchProductionDir(), { recursive: true });
+      appendFileSync(
+        join(dispatchProductionDir(), `${legacy.ts.slice(0, 10)}.jsonl`),
+        `${JSON.stringify(legacy)}\n`,
+        'utf8',
+      );
 
-    expect(readDispatchProductionEventsDetailed({ sinceMs: Date.now() - 60_000 })).toMatchObject({
-      events: [],
-      sourceState: 'degraded',
-      complete: false,
-      invalidRows: 1,
-    });
-    const detailed = readDispatchProductionYieldDetailed({ windowMs: 60_000, limit: 20 });
-    expect(detailed.summary).toBeUndefined();
-    expect(detailed.sourceQuality).toMatchObject({
-      sourceState: 'degraded',
-      complete: false,
-      invalidRows: 1,
-    });
-  });
+      expect(readDispatchProductionEventsDetailed({ sinceMs: Date.now() - 60_000 })).toMatchObject({
+        events: [],
+        sourceState: 'degraded',
+        complete: false,
+        invalidRows: 1,
+      });
+      const detailed = readDispatchProductionYieldDetailed({ windowMs: 60_000, limit: 20 });
+      expect(detailed.summary).toBeUndefined();
+      expect(detailed.sourceQuality).toMatchObject({
+        sourceState: 'degraded',
+        complete: false,
+        invalidRows: 1,
+      });
+    },
+  );
+
+  it.each(LEGACY_ENVELOPE_OMISSIONS)(
+    'retains a coherent pre-envelope omission: %s',
+    (_name, omit) => {
+      const legacy = legacyProposalProductionEnvelope(`coherent-omission-${_name}`);
+      omit(legacy);
+      mkdirSync(dispatchProductionDir(), { recursive: true });
+      appendFileSync(
+        join(dispatchProductionDir(), `${legacy.ts.slice(0, 10)}.jsonl`),
+        `${JSON.stringify(legacy)}\n`,
+        'utf8',
+      );
+
+      const read = readDispatchProductionYieldDetailed({ windowMs: 60_000, limit: 20 });
+      expect(read.sourceQuality).toMatchObject({
+        sourceState: 'healthy',
+        complete: true,
+        invalidRows: 0,
+      });
+      expect(read.summary).toMatchObject({
+        events: 1,
+        attempts: 0,
+        preEnvelopeEvents: 1,
+        invalidAttemptIdentities: 0,
+      });
+    },
+  );
 
   it('keeps pre-envelope writes durable but outside current canonical yield', () => {
     const legacy = makeEvent({
@@ -3513,7 +3684,7 @@ describe('M342 dispatch production ledger', () => {
     expect(recordDispatchProduction(routeMismatch)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
     removeAttemptProofReceipts();
     expect(resolveDispatchProductionAttemptProofs([proofTarget(routeMismatch)])).toEqual([
-      { status: 'unproven', reason: 'event-ineligible' },
+      { status: 'degraded', reason: 'partition-invalid' },
     ]);
   });
 

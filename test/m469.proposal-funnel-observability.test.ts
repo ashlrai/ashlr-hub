@@ -4,6 +4,7 @@ import type {
   DispatchProductionEvent,
   DispatchProductionSourceQuality,
 } from '../src/core/fleet/dispatch-production-ledger.js';
+import type { RouteSnapshot, RunEventSummary } from '../src/core/types.js';
 import { sanitizeDispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
 import { dispatchProductionRunStatusForOutcome } from '../src/core/fleet/dispatch-production-ledger.js';
 import {
@@ -82,6 +83,74 @@ function event(
     },
   };
   return row;
+}
+
+type MutableLegacyEvent = DispatchProductionEvent & Record<string, unknown>;
+
+function legacyProposalProductionEnvelope(itemId: string): MutableLegacyEvent {
+  const row = event(itemId, 'proposal-created', {
+    proposalId: 'proposal-legacy',
+    diffFiles: 2,
+    diffLines: 8,
+    spentUsd: 0.25,
+    model: 'qwen',
+    routerPolicyVersion: 'fleet-router-v1',
+    routeSnapshot: {
+      backend: 'local-coder',
+      tier: 'mid',
+      model: 'qwen',
+      assignedBy: 'daemon',
+      reason: 'PRIVATE_ROUTE_REASON',
+      routerPolicyVersion: 'fleet-router-v1',
+    },
+  }) as MutableLegacyEvent;
+  const summary = row.runEventSummary as RunEventSummary & Record<string, unknown>;
+  const duplicatedMetadata = {
+    status: 'done',
+    diffBytes: 512,
+    diffHash: 'a'.repeat(64),
+    provenanceSig: 'b'.repeat(64),
+    producerProvenanceVersion: 2,
+    producerProvenanceSig: 'c'.repeat(64),
+    engineModel: 'local-coder:qwen',
+    engineTier: 'mid',
+    tokensIn: 100,
+    tokensOut: 40,
+    durationMs: 1_500,
+    cacheHit: false,
+    contextSummary: { prompt: { profileId: 'profile-safe' } },
+  };
+  Object.assign(row, duplicatedMetadata);
+  Object.assign(summary, duplicatedMetadata);
+  const duplicatedRouteMetadata = {
+    selectedSkillIds: ['skill-safe'],
+    skillPolicyVersion: 'skill-policy-v1',
+    skillMode: 'active',
+  };
+  Object.assign(row, duplicatedRouteMetadata);
+  Object.assign(legacyRoute(row), duplicatedRouteMetadata);
+  delete summary.actionCounts;
+  return row;
+}
+
+function legacySummary(row: MutableLegacyEvent): Record<string, unknown> {
+  return row.runEventSummary as RunEventSummary & Record<string, unknown>;
+}
+
+function legacyRoute(row: MutableLegacyEvent): Record<string, unknown> {
+  return row.routeSnapshot as RouteSnapshot & Record<string, unknown>;
+}
+
+function setLegacyActionCounts(row: MutableLegacyEvent, overrides: Record<string, number>): void {
+  legacySummary(row)['actionCounts'] = {
+    proposalCreated: 1,
+    proposalBlocked: 0,
+    proposalDisabled: 0,
+    diffFiles: 2,
+    diffLines: 8,
+    ...overrides,
+  };
+  delete row.attemptId;
 }
 
 describe('buildProposalFunnelObservability', () => {
@@ -546,15 +615,77 @@ describe('buildProposalFunnelObservability', () => {
     expect(JSON.stringify(result)).not.toContain('legacy-proposal-secret');
   });
 
-  it('invalidates a contradictory legacy outcome summary before pre-envelope accounting', () => {
-    const legacy = event('contradictory-legacy', 'empty-diff');
-    delete legacy.attemptId;
-    legacy.runEventSummary = {
-      ...legacy.runEventSummary!,
-      outcome: 'proposal-created',
-      proposalCreated: true,
-    };
-    delete legacy.runEventSummary.actionCounts;
+  it.each([
+    ['attempt/trajectory identity', (row: MutableLegacyEvent) => { row.trajectoryId = 'run:attempt-forged'; }],
+    ['attempt/trajectory identity without summary', (row: MutableLegacyEvent) => {
+      delete row.runEventSummary;
+      row.trajectoryId = 'run:attempt-forged';
+    }],
+    ['runId', (row: MutableLegacyEvent) => { legacySummary(row)['runId'] = 'run-forged'; }],
+    ['status', (row: MutableLegacyEvent) => { legacySummary(row)['status'] = 'failed'; }],
+    ['outcome', (row: MutableLegacyEvent) => { legacySummary(row)['outcome'] = 'empty-diff'; }],
+    ['proposalCreated', (row: MutableLegacyEvent) => { legacySummary(row)['proposalCreated'] = false; }],
+    ['proposalId', (row: MutableLegacyEvent) => { legacySummary(row)['proposalId'] = 'proposal-forged'; }],
+    ['spend/cost', (row: MutableLegacyEvent) => { legacySummary(row)['costUsd'] = 9.99; }],
+    ['diffFiles', (row: MutableLegacyEvent) => { legacySummary(row)['diffFiles'] = 7; }],
+    ['diffLines', (row: MutableLegacyEvent) => { legacySummary(row)['diffLines'] = 70; }],
+    ['diffBytes', (row: MutableLegacyEvent) => { legacySummary(row)['diffBytes'] = 4_096; }],
+    ['diffHash', (row: MutableLegacyEvent) => { legacySummary(row)['diffHash'] = 'd'.repeat(64); }],
+    ['provenanceSig', (row: MutableLegacyEvent) => { legacySummary(row)['provenanceSig'] = 'e'.repeat(64); }],
+    ['producerProvenanceVersion', (row: MutableLegacyEvent) => {
+      legacySummary(row)['producerProvenanceVersion'] = 1;
+    }],
+    ['producerProvenanceSig', (row: MutableLegacyEvent) => {
+      legacySummary(row)['producerProvenanceSig'] = 'f'.repeat(64);
+    }],
+    ['engineModel', (row: MutableLegacyEvent) => { legacySummary(row)['engineModel'] = 'codex:gpt'; }],
+    ['engineTier', (row: MutableLegacyEvent) => { legacySummary(row)['engineTier'] = 'frontier'; }],
+    ['tokensIn', (row: MutableLegacyEvent) => { legacySummary(row)['tokensIn'] = 101; }],
+    ['tokensOut', (row: MutableLegacyEvent) => { legacySummary(row)['tokensOut'] = 41; }],
+    ['durationMs', (row: MutableLegacyEvent) => { legacySummary(row)['durationMs'] = 1_501; }],
+    ['cacheHit', (row: MutableLegacyEvent) => { legacySummary(row)['cacheHit'] = true; }],
+    ['contextSummary', (row: MutableLegacyEvent) => {
+      legacySummary(row)['contextSummary'] = { prompt: { profileId: 'profile-forged' } };
+    }],
+    ['top-level actionCounts', (row: MutableLegacyEvent) => {
+      setLegacyActionCounts(row, {});
+      row['actionCounts'] = {
+        ...legacySummary(row)['actionCounts'] as Record<string, number>,
+        diffLines: 70,
+      };
+    }],
+    ['route backend', (row: MutableLegacyEvent) => { legacyRoute(row)['backend'] = 'kimi'; }],
+    ['route tier', (row: MutableLegacyEvent) => { legacyRoute(row)['tier'] = 'frontier'; }],
+    ['route model', (row: MutableLegacyEvent) => { legacyRoute(row)['model'] = 'forged-model'; }],
+    ['route assignedBy', (row: MutableLegacyEvent) => { legacyRoute(row)['assignedBy'] = 'forged-router'; }],
+    ['route policy', (row: MutableLegacyEvent) => {
+      legacyRoute(row)['routerPolicyVersion'] = 'fleet-router-v999';
+    }],
+    ['route selected skills', (row: MutableLegacyEvent) => {
+      legacyRoute(row)['selectedSkillIds'] = ['skill-forged'];
+    }],
+    ['route skill policy', (row: MutableLegacyEvent) => {
+      legacyRoute(row)['skillPolicyVersion'] = 'skill-policy-v999';
+    }],
+    ['route skill mode', (row: MutableLegacyEvent) => { legacyRoute(row)['skillMode'] = 'disabled'; }],
+    ['route backend without summary', (row: MutableLegacyEvent) => {
+      delete row.runEventSummary;
+      legacyRoute(row)['backend'] = 'kimi';
+    }],
+    ['action proposalCreated', (row: MutableLegacyEvent) => {
+      setLegacyActionCounts(row, { proposalCreated: 0 });
+    }],
+    ['action proposalBlocked', (row: MutableLegacyEvent) => {
+      setLegacyActionCounts(row, { proposalBlocked: 1 });
+    }],
+    ['action proposalDisabled', (row: MutableLegacyEvent) => {
+      setLegacyActionCounts(row, { proposalDisabled: 1 });
+    }],
+    ['action diffFiles', (row: MutableLegacyEvent) => { setLegacyActionCounts(row, { diffFiles: 7 }); }],
+    ['action diffLines', (row: MutableLegacyEvent) => { setLegacyActionCounts(row, { diffLines: 70 }); }],
+  ] as const)('invalidates a pre-envelope %s mismatch', (_name, mutate) => {
+    const legacy = legacyProposalProductionEnvelope(`contradictory-${_name}`);
+    mutate(legacy);
 
     const result = buildProposalFunnelObservability({
       events: [legacy],
@@ -573,6 +704,55 @@ describe('buildProposalFunnelObservability', () => {
       },
     });
     expect(result.metrics).toBeUndefined();
+  });
+
+  it.each([
+    ['entire summary', (row: MutableLegacyEvent) => { delete row.runEventSummary; }],
+    ['nested runId', (row: MutableLegacyEvent) => { delete legacySummary(row)['runId']; }],
+    ['top-level runId', (row: MutableLegacyEvent) => { delete row.runId; }],
+    ['nested proposalId', (row: MutableLegacyEvent) => { delete legacySummary(row)['proposalId']; }],
+    ['top-level proposalId', (row: MutableLegacyEvent) => { delete row.proposalId; }],
+    ['nested costUsd', (row: MutableLegacyEvent) => { delete legacySummary(row)['costUsd']; }],
+    ['nested diffFiles', (row: MutableLegacyEvent) => { delete legacySummary(row)['diffFiles']; }],
+    ['top-level diffLines', (row: MutableLegacyEvent) => { delete row.diffLines; }],
+    ['nested diffBytes', (row: MutableLegacyEvent) => { delete legacySummary(row)['diffBytes']; }],
+    ['top-level diffHash', (row: MutableLegacyEvent) => { delete row['diffHash']; }],
+    ['nested provenanceSig', (row: MutableLegacyEvent) => { delete legacySummary(row)['provenanceSig']; }],
+    ['nested contextSummary', (row: MutableLegacyEvent) => { delete legacySummary(row)['contextSummary']; }],
+    ['top-level contextSummary', (row: MutableLegacyEvent) => { delete row['contextSummary']; }],
+    ['top-level producer provenance', (row: MutableLegacyEvent) => {
+      delete row['producerProvenanceVersion'];
+      delete row['producerProvenanceSig'];
+    }],
+    ['nested engine metadata', (row: MutableLegacyEvent) => {
+      delete legacySummary(row)['engineModel'];
+      delete legacySummary(row)['engineTier'];
+    }],
+    ['nested route backend', (row: MutableLegacyEvent) => { delete legacyRoute(row)['backend']; }],
+    ['top-level route model', (row: MutableLegacyEvent) => { delete row.model; }],
+    ['nested route reason', (row: MutableLegacyEvent) => { delete legacyRoute(row)['reason']; }],
+    ['nested route skill policy', (row: MutableLegacyEvent) => {
+      delete legacyRoute(row)['skillPolicyVersion'];
+    }],
+    ['top-level route policy', (row: MutableLegacyEvent) => { delete row.routerPolicyVersion; }],
+  ] as const)('retains a coherent pre-envelope omission: %s', (_name, omit) => {
+    const legacy = legacyProposalProductionEnvelope(`coherent-omission-${_name}`);
+    omit(legacy);
+    const result = buildProposalFunnelObservability({
+      events: [legacy, event('current-coherent-omission', 'empty-diff')],
+      sourceQuality: healthySource,
+      windowMs: 60_000,
+      eventLimit: 100,
+    });
+
+    expect(result).toMatchObject({
+      state: 'observational',
+      sample: {
+        includedAttempts: 1,
+        preEnvelopeEvents: 1,
+        invalidAttemptIdentities: 0,
+      },
+    });
   });
 
   it.each([

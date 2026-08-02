@@ -28,6 +28,7 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import type {
   DaemonDispatchProductionOutcome,
   EngineId,
@@ -2038,12 +2039,53 @@ function actionCountsAgreeWithOutcome(
   return event.outcome !== 'cancelled' || (actionCounts.proposalBlocked ?? 0) === 0;
 }
 
-function dispatchProductionOutcomeSummarySemanticsAgree(event: DispatchProductionEvent): boolean {
+function suppliedDuplicatedFieldsAgree(
+  outer: Record<string, unknown>,
+  nested: Record<string, unknown>,
+  excluded: ReadonlySet<string> = new Set(),
+): boolean {
+  return Object.entries(nested).every(([key, value]) =>
+    value === undefined || excluded.has(key) || outer[key] === undefined || isDeepStrictEqual(outer[key], value));
+}
+
+function suppliedAliasAgrees(
+  outer: Record<string, unknown>,
+  outerKey: string,
+  nested: Record<string, unknown>,
+  nestedKey: string,
+): boolean {
+  return outer[outerKey] === undefined || nested[nestedKey] === undefined ||
+    isDeepStrictEqual(outer[outerKey], nested[nestedKey]);
+}
+
+function dispatchProductionSuppliedEnvelopeSemanticsAgree(event: DispatchProductionEvent): boolean {
   if (event.proposalCreated !== (event.outcome === 'proposal-created')) return false;
-  const summary = event.runEventSummary;
-  if (summary === undefined) return true;
+  const raw = event as unknown as Record<string, unknown>;
+  const rawSummary = raw['runEventSummary'];
+  const derivedLifecycle = event.basis === 'repair-lifecycle-candidate' ||
+    event.basis === 'repair-lifecycle-outcome';
+  if (rawSummary !== undefined && (!isPlainRecord(rawSummary) || (!derivedLifecycle &&
+    (!suppliedDuplicatedFieldsAgree(raw, rawSummary) ||
+      !suppliedAliasAgrees(raw, 'spentUsd', rawSummary, 'costUsd'))))) return false;
+
+  const rawRoute = raw['routeSnapshot'];
+  if (!derivedLifecycle && rawRoute !== undefined) {
+    if (!isPlainRecord(rawRoute) ||
+      !suppliedDuplicatedFieldsAgree(raw, rawRoute, new Set(['reason']))) return false;
+  }
+  if (raw['attemptId'] !== undefined && raw['trajectoryId'] !== undefined &&
+    raw['trajectoryId'] !== `run:${String(raw['attemptId'])}`) return false;
+
+  if (rawSummary === undefined) return true;
+
+  const summary = rawSummary as RunEventSummary;
   const actionCounts = summary.actionCounts;
   if (!validActionCountValues(actionCounts) || !coherentStepCounts(actionCounts)) return false;
+  if (isPlainRecord(actionCounts) && !suppliedDuplicatedFieldsAgree(
+    rawSummary,
+    actionCounts,
+    new Set(['proposalCreated', 'proposalBlocked', 'proposalDisabled']),
+  )) return false;
   if (summary.status !== undefined && !dispatchProductionRunStatusAgrees(event.outcome, summary.status)) return false;
   if (summary.outcome !== undefined && summary.outcome !== event.outcome) return false;
   if (summary.proposalCreated !== undefined && summary.proposalCreated !== event.proposalCreated) return false;
@@ -4895,7 +4937,7 @@ function canonicalStoredDispatchProductionEvent(
   partitionDate: string,
 ): value is DispatchProductionEvent {
   if (!isPlainRecord(value) || JSON.stringify(value) !== line || !isDispatchProductionEvent(value)) return false;
-  if (!dispatchProductionOutcomeSummarySemanticsAgree(value)) return false;
+  if (!dispatchProductionSuppliedEnvelopeSemanticsAgree(value)) return false;
   try {
     const canonical = sanitizeDispatchProductionEvent(value, { materializeLearningLabel: true });
     if (JSON.stringify(canonical) !== line &&
@@ -7227,7 +7269,7 @@ export function readDispatchProductionEventsDetailed(
           result.invalidRows++;
           continue;
         }
-        if (!dispatchProductionOutcomeSummarySemanticsAgree(parsed)) {
+        if (!dispatchProductionSuppliedEnvelopeSemanticsAgree(parsed)) {
           result.invalidRows++;
           continue;
         }
@@ -7454,7 +7496,7 @@ export function canonicalDispatchProductionAttempts(
   let duplicateEvents = 0;
   let invalidAttemptIdentities = 0;
   for (const row of rows) {
-    if (!dispatchProductionOutcomeSummarySemanticsAgree(row)) {
+    if (!dispatchProductionSuppliedEnvelopeSemanticsAgree(row)) {
       invalidAttemptIdentities++;
       continue;
     }

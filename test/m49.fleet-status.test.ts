@@ -3206,6 +3206,13 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         backend: 'codex',
         tier: 'frontier',
         model: 'gpt-5.5',
+        routeSnapshot: {
+          backend: 'codex',
+          tier: 'frontier',
+          model: 'gpt-5.5',
+          assignedBy: 'ENV_CANARY_M49',
+          reason: 'FILE_CONTENT_CANARY_M49',
+        },
         outcome: 'proposal-created',
         proposalCreated: true,
         proposalId: 'prop-c',
