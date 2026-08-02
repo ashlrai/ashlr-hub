@@ -82,10 +82,15 @@ vi.mock('../src/core/sandbox/policy.js', () => ({
   listEnrolled: vi.fn(() => []),
 }));
 
-// listProposals
+// Proposal store + signed pending authority verification.
 const mockListProposals = vi.fn(() => []);
+const mockLoadProposal = vi.fn();
 vi.mock('../src/core/inbox/store.js', () => ({
   listProposals: (...args: unknown[]) => mockListProposals(...args),
+  loadProposal: (...args: unknown[]) => mockLoadProposal(...args),
+}));
+vi.mock('../src/core/inbox/pending-authority.js', () => ({
+  isAuthoritativeDurablePendingProposal: vi.fn(() => true),
 }));
 
 // runConductor (flag-off)
@@ -154,7 +159,16 @@ function baseTask(overrides: Partial<TaskSpec> = {}): TaskSpec {
 
 const defaultSandboxResult = {
   state: {
+    id: 'run-1',
+    status: 'done',
     proposalOutcome: { kind: 'filed', reason: 'proposal filed', proposalId: 'prop-1' },
+    runEventSummary: {
+      runId: 'run-1',
+      status: 'done',
+      outcome: 'proposal-created',
+      proposalCreated: true,
+      proposalId: 'prop-1',
+    },
   },
   proposalId: 'prop-1',
   proposalOutcome: { kind: 'filed', reason: 'proposal filed', proposalId: 'prop-1' },
@@ -174,6 +188,13 @@ beforeEach(() => {
   mockRunAutoMergePass.mockResolvedValue({ merged: 0, skipped: 0 });
   mockRunEngineSandboxed.mockResolvedValue(defaultSandboxResult);
   mockRunApiModelSandboxed.mockResolvedValue(defaultSandboxResult);
+  mockLoadProposal.mockImplementation((id: string) => ({
+    id,
+    status: 'pending',
+    repo: '/tmp/fake-repo',
+    origin: 'agent',
+    kind: 'patch',
+  }));
   // Default: cli-agent for all engines
   mockResolveEngineSpec.mockImplementation((engine: string) => ({ id: engine, kind: 'cli-agent', tier: 'frontier' }));
 });

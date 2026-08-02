@@ -563,6 +563,61 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     vi.resetModules();
   });
 
+  it('preserves partial capture status when diff dedup reuses an existing pending proposal', async () => {
+    vi.doMock('../src/core/sandbox/worktree.js', () => ({
+      sandboxDiff: () => ({
+        files: 1,
+        patch: '--- a/hello.ts\n+++ b/hello.ts\n@@ -1 +1 @@\n-const x = 1;\n+const x = 2;\n',
+        insertions: 1,
+        deletions: 1,
+      }),
+    }));
+    vi.doMock('../src/core/seams/inbox.js', () => ({
+      selectInboxStore: () => ({
+        create: (input: Record<string, unknown>) => ({
+          ...input,
+          id: 'prop-existing-partial-dedup',
+          status: 'rejected',
+          createdAt: new Date().toISOString(),
+          decisionReason: 'diffHash dedup: duplicate of prop-existing-partial-dedup',
+        }),
+      }),
+    }));
+    vi.doMock('../src/core/foundry/provenance.js', () => ({
+      hashDiff: () => 'hash-abc',
+      signProvenance: () => 'sig-abc',
+    }));
+    vi.doMock('../src/core/run/completeness-gate.js', () => ({
+      runCompletenessGate: async () => ({ pass: true }),
+    }));
+
+    const { captureSandboxedProposal } = await import(
+      '../src/core/run/sandboxed-engine.js?partial-dedup=' + randomUUID()
+    ) as typeof import('../src/core/run/sandboxed-engine.js');
+    const result = await captureSandboxedProposal('local-coder', 'increment x', {
+      foundry: { models: { 'local-coder': 'qwen' } },
+    } as never, {
+      sourceRepo: tmpRepo,
+      existingWorktree: {
+        id: 'sb-partial-dedup',
+        worktreePath: tmpRepo,
+        sourceRepo: tmpRepo,
+        branch: 'ashlr-sandbox-partial-dedup',
+      },
+      runId: 'run-partial-dedup',
+      isPartial: true,
+      producerStatus: 'done',
+    });
+
+    expect(result.proposalId).toBeUndefined();
+    expect(result.proposalOutcome).toMatchObject({
+      kind: 'proposal-disabled',
+      proposalId: 'prop-existing-partial-dedup',
+      isPartial: true,
+    });
+    expect(result.state.proposalOutcome).toEqual(result.proposalOutcome);
+  });
+
   it('fails closed when an optimistic pending proposal is not durably loadable', async () => {
     const capturedProposalArgs: unknown[] = [];
     const setStatus = vi.fn();

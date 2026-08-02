@@ -85,10 +85,17 @@ vi.mock('../src/core/fleet/automerge-pass.js', () => ({
   runAutoMergePass: (...args: unknown[]) => mockRunAutoMergePass(...args),
 }));
 
-// listProposals — controls pending set
+// Proposal store — controls pending set and exact post-capture authority read.
 const mockListProposals = vi.fn(() => []);
+const mockLoadProposal = vi.fn();
 vi.mock('../src/core/inbox/store.js', () => ({
   listProposals: (...args: unknown[]) => mockListProposals(...args),
+  loadProposal: (...args: unknown[]) => mockLoadProposal(...args),
+}));
+
+const mockVerifyPendingAuthority = vi.fn(() => true);
+vi.mock('../src/core/inbox/pending-authority.js', () => ({
+  isAuthoritativeDurablePendingProposal: (...args: unknown[]) => mockVerifyPendingAuthority(...args),
 }));
 
 // runConductor — for flag-off test
@@ -140,6 +147,52 @@ function baseTask(overrides: Partial<TaskSpec> = {}): TaskSpec {
   };
 }
 
+function pendingProposal(id: string) {
+  return { id, status: 'pending', repo: '/tmp/fake-repo', origin: 'agent', kind: 'patch' };
+}
+
+function filedSandboxResult(proposalId = 'prop-abc', runId = 'run-1') {
+  const proposalOutcome = { kind: 'filed', reason: 'proposal filed', proposalId };
+  return {
+    state: {
+      id: runId,
+      status: 'done',
+      proposalOutcome,
+      runEventSummary: {
+        runId,
+        status: 'done',
+        outcome: 'proposal-created',
+        proposalCreated: true,
+        proposalId,
+      },
+    },
+    proposalId,
+    proposalOutcome,
+  };
+}
+
+function duplicateSandboxResult(proposalId = 'prop-existing', runId = 'run-duplicate') {
+  const proposalOutcome = {
+    kind: 'proposal-disabled',
+    reason: `duplicate diff skipped; existing pending proposal ${proposalId} remains authoritative`,
+    proposalId,
+  };
+  return {
+    state: {
+      id: runId,
+      status: 'done',
+      proposalOutcome,
+      runEventSummary: {
+        runId,
+        status: 'done',
+        outcome: 'proposal-disabled',
+        proposalId,
+      },
+    },
+    proposalOutcome,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Setup / teardown
 // ---------------------------------------------------------------------------
@@ -150,20 +203,14 @@ beforeEach(() => {
 
   mockKillSwitchOn.mockReturnValue(false);
   mockAssertMayMutate.mockImplementation(() => { /* enrolled */ });
-  mockRunEngineSandboxed.mockResolvedValue({
-    state: {
-      id: 'run-1',
-      status: 'done',
-      proposalOutcome: { kind: 'filed', reason: 'proposal filed', proposalId: 'prop-abc' },
-    },
-    proposalId: 'prop-abc',
-    proposalOutcome: { kind: 'filed', reason: 'proposal filed', proposalId: 'prop-abc' },
-  });
+  mockRunEngineSandboxed.mockResolvedValue(filedSandboxResult());
   mockRunAutoMergePass.mockResolvedValue({
     attempted: 1, merged: 1, branched: 0, results: [], judged: 1,
     judgeCapped: 0, skipped: [], autoArchived: 0, ttlRejected: 0,
   });
   mockListProposals.mockReturnValue([]);
+  mockLoadProposal.mockImplementation((id: string) => pendingProposal(id));
+  mockVerifyPendingAuthority.mockReturnValue(true);
   mockRunConductor.mockResolvedValue({
     killSwitchTripped: false, daemonFallback: false, goalActivity: [],
     goalsAdvanced: 0, proposalsFiled: 0, goalsDone: 0,
@@ -172,20 +219,14 @@ beforeEach(() => {
   // Re-establish defaults after clearAllMocks
   mockKillSwitchOn.mockReturnValue(false);
   mockAssertMayMutate.mockImplementation(() => { /* enrolled */ });
-  mockRunEngineSandboxed.mockResolvedValue({
-    state: {
-      id: 'run-1',
-      status: 'done',
-      proposalOutcome: { kind: 'filed', reason: 'proposal filed', proposalId: 'prop-abc' },
-    },
-    proposalId: 'prop-abc',
-    proposalOutcome: { kind: 'filed', reason: 'proposal filed', proposalId: 'prop-abc' },
-  });
+  mockRunEngineSandboxed.mockResolvedValue(filedSandboxResult());
   mockRunAutoMergePass.mockResolvedValue({
     attempted: 1, merged: 1, branched: 0, results: [], judged: 1,
     judgeCapped: 0, skipped: [], autoArchived: 0, ttlRejected: 0,
   });
   mockListProposals.mockReturnValue([]);
+  mockLoadProposal.mockImplementation((id: string) => pendingProposal(id));
+  mockVerifyPendingAuthority.mockReturnValue(true);
   mockRunConductor.mockResolvedValue({
     killSwitchTripped: false, daemonFallback: false, goalActivity: [],
     goalsAdvanced: 0, proposalsFiled: 0, goalsDone: 0,
@@ -242,6 +283,7 @@ describe('M280 — dispatches and marks done', () => {
 
     expect(result.tasksAttempted).toBe(1);
     expect(result.proposalsFiled).toBe(1);
+    expect(result.duplicateProposalsOwned).toBe(0);
     expect(result.merged).toBe(1);
     expect(result.errors).toHaveLength(0);
 
@@ -263,7 +305,22 @@ describe('M280 — dispatches and marks done', () => {
     const written = readTasks();
     expect(written[0].done).toBe(true);
     expect(written[0].proposalId).toBe('prop-abc');
+    expect(written[0].proposalDisposition).toBe('newly-filed');
     expect(written[0].dispatchedAt).toBeDefined();
+    expect(mockLoadProposal).toHaveBeenCalledWith('prop-abc');
+    expect(mockVerifyPendingAuthority).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'prop-abc', status: 'pending' }),
+      expect.objectContaining({
+        id: 'prop-abc',
+        repo: '/tmp/repo-a',
+        origin: 'agent',
+        kind: 'patch',
+        runId: 'run-1',
+        trajectoryId: 'run:run-1',
+        isPartial: false,
+      }),
+      expect.anything(),
+    );
   });
 
   it('uses task.engine when specified', async () => {
@@ -308,14 +365,197 @@ describe('M280 — dispatches and marks done', () => {
     });
 
     expect(result.proposalsFiled).toBe(0);
+    expect(result.recoverableFailures).toBe(1);
+    expect(result.coolingFailures).toBe(0);
     const [persistedTask] = readTasks();
     expect(persistedTask).toEqual(expect.objectContaining({
       id: 'task-capture-mismatch',
       done: false,
       attempts: 2,
-      lastError: expect.stringContaining('no durable proposal filed'),
+      captureFailureState: 'recoverable',
+      lastError: expect.stringContaining('persistence reconciliation'),
     }));
     expect(persistedTask?.proposalId).toBeUndefined();
+  });
+
+  it('rejects contradictory top-level and state outcomes', async () => {
+    const sandboxResult = filedSandboxResult();
+    sandboxResult.state.proposalOutcome = {
+      kind: 'empty-diff',
+      reason: 'no material diff',
+    };
+    writeTasks([baseTask()]);
+    mockRunEngineSandboxed.mockResolvedValue(sandboxResult);
+
+    const { runSimpleConductor } = await importConductor();
+    const result = await runSimpleConductor(makeConfig(), { once: true, dryRun: false, allowCloud: false });
+
+    expect(result.proposalsFiled).toBe(0);
+    expect(readTasks()[0]).toEqual(expect.objectContaining({
+      done: false,
+      attempts: 1,
+      lastError: expect.stringContaining('contradictory'),
+    }));
+    expect(mockLoadProposal).not.toHaveBeenCalled();
+  });
+
+  it('rejects a partial filed capture even when both outcome copies agree', async () => {
+    const sandboxResult = filedSandboxResult();
+    sandboxResult.proposalOutcome.isPartial = true;
+    sandboxResult.state.proposalOutcome.isPartial = true;
+    writeTasks([baseTask()]);
+    mockRunEngineSandboxed.mockResolvedValue(sandboxResult);
+
+    const { runSimpleConductor } = await importConductor();
+    await runSimpleConductor(makeConfig(), { once: true, dryRun: false, allowCloud: false });
+
+    expect(readTasks()[0]).toEqual(expect.objectContaining({
+      done: false,
+      lastError: expect.stringContaining('partial or failed producer'),
+    }));
+    expect(mockLoadProposal).not.toHaveBeenCalled();
+  });
+
+  it('rejects a filed outcome from a failed producer state', async () => {
+    const sandboxResult = filedSandboxResult();
+    sandboxResult.state.status = 'failed';
+    sandboxResult.state.runEventSummary.status = 'failed';
+    writeTasks([baseTask()]);
+    mockRunEngineSandboxed.mockResolvedValue(sandboxResult);
+
+    const { runSimpleConductor } = await importConductor();
+    await runSimpleConductor(makeConfig(), { once: true, dryRun: false, allowCloud: false });
+
+    expect(readTasks()[0]).toEqual(expect.objectContaining({
+      done: false,
+      lastError: expect.stringContaining('partial or failed producer'),
+    }));
+    expect(mockLoadProposal).not.toHaveBeenCalled();
+  });
+
+  it('rejects malformed disabled rows and mismatched top-level ids', async () => {
+    const malformedDisabled = duplicateSandboxResult();
+    malformedDisabled.proposalOutcome.reason = 'proposal filing disabled';
+    malformedDisabled.state.proposalOutcome.reason = 'proposal filing disabled';
+    (malformedDisabled as { proposalId?: string }).proposalId = 'prop-existing';
+    writeTasks([baseTask({ id: 'task-disabled' }), baseTask({ id: 'task-id-mismatch', priority: -1 })]);
+    mockRunEngineSandboxed
+      .mockResolvedValueOnce(malformedDisabled)
+      .mockResolvedValueOnce({ ...filedSandboxResult(), proposalId: 'prop-other' });
+
+    const { runSimpleConductor } = await importConductor();
+    const result = await runSimpleConductor(makeConfig(), { once: true, dryRun: false, allowCloud: false });
+
+    expect(result.proposalsFiled).toBe(0);
+    expect(readTasks()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'task-disabled', done: false, lastError: expect.stringContaining('disabled') }),
+      expect.objectContaining({ id: 'task-id-mismatch', done: false, lastError: expect.stringContaining('does not match') }),
+    ]));
+    expect(mockLoadProposal).not.toHaveBeenCalled();
+  });
+
+  it('rejects non-authoritative run state before reading the proposal store', async () => {
+    const sandboxResult = filedSandboxResult();
+    delete (sandboxResult.state as { runEventSummary?: unknown }).runEventSummary;
+    writeTasks([baseTask()]);
+    mockRunEngineSandboxed.mockResolvedValue(sandboxResult);
+
+    const { runSimpleConductor } = await importConductor();
+    await runSimpleConductor(makeConfig(), { once: true, dryRun: false, allowCloud: false });
+
+    expect(readTasks()[0]?.lastError).toContain('run state');
+    expect(mockLoadProposal).not.toHaveBeenCalled();
+  });
+
+  it('accepts an authoritative duplicate whose id exists only in both proposal outcomes', async () => {
+    writeTasks([baseTask()]);
+    mockRunEngineSandboxed.mockResolvedValue(duplicateSandboxResult());
+    mockLoadProposal.mockReturnValue(pendingProposal('prop-existing'));
+
+    const { runSimpleConductor } = await importConductor();
+    const result = await runSimpleConductor(makeConfig(), { once: true, dryRun: false, allowCloud: false });
+
+    expect(result.proposalsFiled).toBe(0);
+    expect(result.duplicateProposalsOwned).toBe(1);
+    expect(readTasks()[0]).toEqual(expect.objectContaining({
+      done: true,
+      proposalId: 'prop-existing',
+      proposalDisposition: 'duplicate-owned',
+    }));
+    expect(mockVerifyPendingAuthority).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'prop-existing' }),
+      expect.not.objectContaining({ runId: expect.anything() }),
+      expect.anything(),
+    );
+  });
+
+  it('rejects a partial duplicate even when it points to an authoritative pending proposal', async () => {
+    const partialDuplicate = duplicateSandboxResult();
+    partialDuplicate.proposalOutcome.isPartial = true;
+    partialDuplicate.state.proposalOutcome.isPartial = true;
+    partialDuplicate.state.runEventSummary.outcome = 'gate-blocked';
+    writeTasks([baseTask()]);
+    mockRunEngineSandboxed.mockResolvedValue(partialDuplicate);
+
+    const { runSimpleConductor } = await importConductor();
+    const result = await runSimpleConductor(makeConfig(), { once: true, dryRun: false, allowCloud: false });
+
+    expect(result.proposalsFiled).toBe(0);
+    expect(result.duplicateProposalsOwned).toBe(0);
+    expect(readTasks()[0]).toEqual(expect.objectContaining({
+      done: false,
+      lastError: expect.stringContaining('partial or failed producer'),
+    }));
+    expect(mockLoadProposal).not.toHaveBeenCalled();
+  });
+
+  it('keeps exhausted store verification failures recoverable and cooling', async () => {
+    writeTasks([baseTask({ attempts: 2 })]);
+    mockLoadProposal.mockReturnValue(null);
+    mockVerifyPendingAuthority.mockReturnValue(false);
+
+    const { runSimpleConductor } = await importConductor();
+    const result = await runSimpleConductor(makeConfig(), { once: true, dryRun: false, allowCloud: false });
+
+    expect(result.recoverableFailures).toBe(1);
+    expect(result.coolingFailures).toBe(1);
+    const [coolingTask] = readTasks();
+    expect(coolingTask).toEqual(expect.objectContaining({
+      done: false,
+      attempts: 3,
+      captureFailureState: 'cooling',
+      lastError: expect.stringContaining('authoritative pending evidence'),
+    }));
+    expect(Date.parse(coolingTask!.retryAfter!)).toBeGreaterThan(Date.now());
+
+    const second = await runSimpleConductor(makeConfig(), { once: true, dryRun: false, allowCloud: false });
+    expect(second.tasksAttempted).toBe(0);
+    expect(mockRunEngineSandboxed).toHaveBeenCalledTimes(1);
+    expect(readTasks()[0]?.done).toBe(false);
+  });
+
+  it('retries after cooling expires and clears recoverable failure state on success', async () => {
+    writeTasks([baseTask({
+      attempts: 4,
+      done: false,
+      captureFailureState: 'cooling',
+      retryAfter: new Date(Date.now() - 1_000).toISOString(),
+      lastError: 'proposal store lacks exact authoritative pending evidence',
+    })]);
+
+    const { runSimpleConductor } = await importConductor();
+    const result = await runSimpleConductor(makeConfig(), { once: true, dryRun: false, allowCloud: false });
+
+    expect(result.proposalsFiled).toBe(1);
+    expect(readTasks()[0]).toEqual(expect.objectContaining({
+      done: true,
+      proposalId: 'prop-abc',
+      proposalDisposition: 'newly-filed',
+    }));
+    expect(readTasks()[0]?.attempts).toBeUndefined();
+    expect(readTasks()[0]?.captureFailureState).toBeUndefined();
+    expect(readTasks()[0]?.retryAfter).toBeUndefined();
+    expect(readTasks()[0]?.lastError).toBeUndefined();
   });
 });
 
@@ -419,15 +659,7 @@ describe('M280 — never-throws per task', () => {
     mockRunEngineSandboxed.mockImplementation(async () => {
       callCount++;
       if (callCount === 1) throw new Error('engine crash');
-      return {
-        state: {
-          id: 'run-2',
-          status: 'done',
-          proposalOutcome: { kind: 'filed', reason: 'proposal filed', proposalId: 'prop-ok' },
-        },
-        proposalId: 'prop-ok',
-        proposalOutcome: { kind: 'filed', reason: 'proposal filed', proposalId: 'prop-ok' },
-      };
+      return filedSandboxResult('prop-ok', 'run-2');
     });
 
     const { runSimpleConductor } = await importConductor();

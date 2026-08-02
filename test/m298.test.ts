@@ -376,18 +376,50 @@ describe('M298 Part 3 — simple-conductor full-suite directive', () => {
     vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
       runEngineSandboxed: vi.fn((_engine: unknown, instruction: string) => {
         capturedInstructions.push(instruction);
-        return Promise.resolve({ proposalId: 'p-test-1' });
+        const proposalOutcome = { kind: 'filed', reason: 'proposal filed', proposalId: 'p-test-1' };
+        return Promise.resolve({
+          state: {
+            id: 'run-m298',
+            status: 'done',
+            proposalOutcome,
+            runEventSummary: {
+              runId: 'run-m298', status: 'done', outcome: 'proposal-created',
+              proposalCreated: true, proposalId: 'p-test-1',
+            },
+          },
+          proposalId: 'p-test-1',
+          proposalOutcome,
+        });
       }),
       // M300 routes api-model engines through runApiModelSandboxed; mirror the
       // capture so the instruction assertion holds regardless of dispatch path.
       runApiModelSandboxed: vi.fn((_engine: unknown, instruction: string) => {
         capturedInstructions.push(instruction);
-        return Promise.resolve({ proposalId: 'p-test-1' });
+        const proposalOutcome = { kind: 'filed', reason: 'proposal filed', proposalId: 'p-test-1' };
+        return Promise.resolve({
+          state: {
+            id: 'run-m298',
+            status: 'done',
+            proposalOutcome,
+            runEventSummary: {
+              runId: 'run-m298', status: 'done', outcome: 'proposal-created',
+              proposalCreated: true, proposalId: 'p-test-1',
+            },
+          },
+          proposalId: 'p-test-1',
+          proposalOutcome,
+        });
       }),
       engineTierOf: vi.fn(() => 'mid'),
     }));
     vi.doMock('../src/core/inbox/store.js', () => ({
       listProposals: vi.fn(() => []),
+      loadProposal: vi.fn((id: string) => ({
+        id, status: 'pending', repo: tmpDir, origin: 'agent', kind: 'patch',
+      })),
+    }));
+    vi.doMock('../src/core/inbox/pending-authority.js', () => ({
+      isAuthoritativeDurablePendingProposal: vi.fn(() => true),
     }));
     vi.doMock('../src/core/fleet/automerge-pass.js', () => ({
       runAutoMergePass: vi.fn(() => Promise.resolve({ merged: 0 })),

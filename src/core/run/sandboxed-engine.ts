@@ -298,12 +298,17 @@ function proposalOutcome(
   };
 }
 
-function duplicateDiffOutcome(proposal: Proposal, diff: SandboxDiff): RunProposalOutcome {
+function duplicateDiffOutcome(
+  proposal: Proposal,
+  diff: SandboxDiff,
+  isPartial = false,
+): RunProposalOutcome {
   return proposalOutcome(
     'proposal-disabled',
     `duplicate diff skipped; existing pending proposal ${proposal.id} remains authoritative`,
     diff,
     proposal.id,
+    isPartial,
   );
 }
 
@@ -1211,7 +1216,7 @@ export async function captureSandboxedProposal(
     proposalCreationStarted = true;
     const proposal = inbox.create(proposalInput);
     if (isDiffDedupResult(proposal)) {
-      const outcome = duplicateDiffOutcome(proposal, diff);
+      const outcome = duplicateDiffOutcome(proposal, diff, opts.isPartial === true);
       return {
         state: withProposalOutcome(mk({ result: outcome.reason }), outcome, actionCounts, opts.contextSummary),
         proposalOutcome: outcome,
