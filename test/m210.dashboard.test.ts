@@ -669,6 +669,10 @@ describe('M210 Panel 1 — Fleet Status: snapshot.daemon', () => {
 
     expect(appSource).toContain('function renderAutoMergeCanaryPromotionReadinessCard');
     expect(appSource).toContain("'Canary Promotion Readiness'");
+    expect(appSource).toContain("['Scope caps', capSummary]");
+    expect(appSource).toContain("['Cap source', scopeCaps?.source ?? 'unavailable']");
+    expect(appSource).toContain("['Policy identity', scopeIdentity?.state ?? 'unavailable']");
+    expect(appSource).toContain("['Identity source', scopeIdentity?.source ?? 'unavailable']");
     expect(appSource).toContain("['Activation', 'disabled']");
     expect(appSource).toContain('f.autoMergeCanaryPromotionReadiness');
     expect(appSource).toContain('d.fleet?.autoMergeCanaryPromotionReadiness');

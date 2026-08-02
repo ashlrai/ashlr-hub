@@ -912,9 +912,24 @@ export function formatFleetStatus(s: FleetStatus): string {
   if (!promotion) {
     lines.push('  unavailable');
   } else {
+    const scopeCaps = promotion.scopeCaps;
+    const scopeIdentity = promotion.scopeIdentity;
     lines.push(`  verdict:    ${promotion.verdict}`);
     lines.push(`  observed:   ${promotion.observedAt ?? 'invalid'}`);
     lines.push(`  evidence:   ${promotion.evidenceReady ? 'complete' : 'incomplete'}`);
+    lines.push(
+      `  scope caps: ${scopeCaps?.maxFiles ?? 'unavailable'} file(s), ` +
+        `${scopeCaps?.maxLines ?? 'unavailable'} changed line(s)`,
+    );
+    lines.push(
+      `  cap source: ${scopeCaps?.source ?? 'unavailable'}` +
+        `${scopeCaps?.scopePolicyDigest ? ` (${scopeCaps.scopePolicyDigest})` : ''}`,
+    );
+    lines.push(
+      `  identity:   ${scopeIdentity?.state ?? 'unavailable'} via ` +
+        `${scopeIdentity?.source ?? 'unavailable'} ` +
+        `(observed ${scopeIdentity?.observedAt ?? 'never'})`,
+    );
     lines.push(`  top block:  ${promotion.primaryBlocker.code}`);
     lines.push(`  blockers:   ${promotion.blockers.map((entry) => entry.code).join(', ') || 'none'}`);
     lines.push('  authority:  activation=false');

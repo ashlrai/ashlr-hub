@@ -1657,6 +1657,10 @@ describe('M213 Dashboard SSE — /api/events', () => {
 
     expect(src).toContain('function renderAutoMergeCanaryPromotionReadinessCard');
     expect(src).toContain("'Canary Promotion Readiness'");
+    expect(src).toContain("['Scope caps', capSummary]");
+    expect(src).toContain("['Cap source', scopeCaps?.source ?? 'unavailable']");
+    expect(src).toContain("['Policy identity', scopeIdentity?.state ?? 'unavailable']");
+    expect(src).toContain("['Identity observed', scopeIdentity?.observedAt ? fmtRelative(scopeIdentity.observedAt) : 'never']");
     expect(src).toContain("['Activation', 'disabled']");
     expect(src).toContain('f.autoMergeCanaryPromotionReadiness');
     expect(src).toContain('fleet.autoMergeCanaryPromotionReadiness ?? null');

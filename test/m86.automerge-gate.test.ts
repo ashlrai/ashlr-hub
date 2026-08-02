@@ -126,6 +126,115 @@ function multiFileDiff(n: number, linesEach = 1): string {
   }).join('\n');
 }
 
+function multiDeletionDiff(n: number): string {
+  return Array.from({ length: n }, (_, i) => [
+    `diff --git a/docs/deleted${i}.md b/docs/deleted${i}.md`,
+    'deleted file mode 100644',
+    'index 1111111..0000000',
+    `--- a/docs/deleted${i}.md`,
+    '+++ /dev/null',
+    '@@ -1 +0,0 @@',
+    '-removed',
+    '',
+  ].join('\n')).join('\n');
+}
+
+function multiRenameDiff(n: number): string {
+  return Array.from({ length: n }, (_, i) => [
+    `diff --git a/docs/old${i}.md b/docs/new${i}.md`,
+    'similarity index 100%',
+    `rename from docs/old${i}.md`,
+    `rename to docs/new${i}.md`,
+    '',
+  ].join('\n')).join('\n');
+}
+
+function specialModeDiff(mode: '120000' | '160000', kind: 'new' | 'deleted' | 'modified'): string {
+  const filename = `docs/${mode}-${kind}.md`;
+  if (kind === 'new') {
+    return [
+      `diff --git a/${filename} b/${filename}`,
+      `new file mode ${mode}`,
+      'index 0000000..1111111',
+      '--- /dev/null',
+      `+++ b/${filename}`,
+      '@@ -0,0 +1 @@',
+      '+target',
+      '',
+    ].join('\n');
+  }
+  if (kind === 'deleted') {
+    return [
+      `diff --git a/${filename} b/${filename}`,
+      `deleted file mode ${mode}`,
+      'index 1111111..0000000',
+      `--- a/${filename}`,
+      '+++ /dev/null',
+      '@@ -1 +0,0 @@',
+      '-target',
+      '',
+    ].join('\n');
+  }
+  return [
+    `diff --git a/${filename} b/${filename}`,
+    `index 1111111..2222222 ${mode}`,
+    `--- a/${filename}`,
+    `+++ b/${filename}`,
+    '@@ -1 +1 @@',
+    '-old-target',
+    '+new-target',
+    '',
+  ].join('\n');
+}
+
+type ModeAmbiguousDiffKind =
+  | 'symlink-rename'
+  | 'symlink-copy'
+  | 'gitlink-rename'
+  | 'gitlink-copy'
+  | 'stripped-symlink-content'
+  | 'stripped-gitlink-content';
+
+function modeAmbiguousDiff(kind: ModeAmbiguousDiffKind): string {
+  const metadata = {
+    'symlink-rename': ['link', 'renamed-link', 'rename'],
+    'symlink-copy': ['link', 'copied-link', 'copy'],
+    'gitlink-rename': ['module', 'renamed-module', 'rename'],
+    'gitlink-copy': ['module', 'copied-module', 'copy'],
+  } as const;
+  if (kind in metadata) {
+    const [oldPath, newPath, operation] = metadata[kind as keyof typeof metadata];
+    return [
+      `diff --git a/${oldPath} b/${newPath}`,
+      'similarity index 100%',
+      `${operation} from ${oldPath}`,
+      `${operation} to ${newPath}`,
+    ].join('\n');
+  }
+  if (kind === 'stripped-symlink-content') {
+    return [
+      'diff --git a/link b/link',
+      'index 094df80..c907aac',
+      '--- a/link',
+      '+++ b/link',
+      '@@ -1 +1 @@',
+      '-first-target',
+      '+second-target',
+      '',
+    ].join('\n');
+  }
+  return [
+    'diff --git a/module b/module',
+    'index 1111111111111111111111111111111111111111..2222222222222222222222222222222222222222',
+    '--- a/module',
+    '+++ b/module',
+    '@@ -1 +1 @@',
+    '-Subproject commit 1111111111111111111111111111111111111111',
+    '+Subproject commit 2222222222222222222222222222222222222222',
+    '',
+  ].join('\n');
+}
+
 /** Standard frontier config with auto-merge enabled and low maxRisk. */
 function frontierCfg(
   overAutoMerge: Record<string, unknown> = {},
@@ -236,6 +345,37 @@ describe('M86 REFUSE — risk level', () => {
 // REFUSE — scope cap [4][5][6][7]
 // ===========================================================================
 describe('M86 REFUSE — scope cap', () => {
+  it('rejects unsupported git patch modes at the mutation scope gate', async () => {
+    initRepo(tmpRepo);
+    enroll(tmpRepo);
+
+    const diff = specialModeDiff('120000', 'modified');
+    expect(classifyRisk({ diff } as Proposal)).toBe('high');
+    const p = frontierPatch(diff);
+    const r = await autoMergeProposal(p.id, frontierCfg({ maxRisk: 'high' }));
+
+    expect(r).toMatchObject({ ok: false, merged: false });
+    expect(r.reason).toMatch(/malformed diff scope \(unsupported-file-mode\)/);
+    expect(loadProposal(p.id)!.status).toBe('approved');
+  });
+
+  it.each([
+    'symlink-rename',
+    'gitlink-copy',
+    'stripped-symlink-content',
+  ] as const)('rejects mode-ambiguous %s at the actual mutation gate', async (kind) => {
+    initRepo(tmpRepo);
+    enroll(tmpRepo);
+
+    const diff = modeAmbiguousDiff(kind);
+    const p = frontierPatch(diff);
+    const r = await autoMergeProposal(p.id, frontierCfg({ maxRisk: 'high' }));
+
+    expect(r).toMatchObject({ ok: false, merged: false });
+    expect(r.reason).toMatch(/malformed diff scope \(mode-ambiguous-file\)/);
+    expect(loadProposal(p.id)!.status).toBe('approved');
+  });
+
   it('[4] files > default cap (4) → refuse', async () => {
     initRepo(tmpRepo);
     attachOrigin(tmpRepo, 'main');
@@ -271,6 +411,66 @@ describe('M86 REFUSE — scope cap', () => {
     expect(r.ok).toBe(false);
     expect(r.merged).toBe(false);
     expect(r.reason).toMatch(/scope cap.*lines/i);
+    expect(loadProposal(p.id)!.status).toBe('approved');
+  });
+
+  it('deletion-only docs count against the default max-4 file cap', async () => {
+    initRepo(tmpRepo);
+    attachOrigin(tmpRepo, 'main');
+    git(tmpRepo, ['checkout', '-b', 'work']);
+    enroll(tmpRepo);
+
+    const diff = multiDeletionDiff(5);
+    expect(classifyRisk({ diff } as any)).toBe('low');
+
+    const p = frontierPatch(diff);
+    const r = await autoMergeProposal(p.id, frontierCfg());
+
+    expect(r.ok).toBe(false);
+    expect(r.merged).toBe(false);
+    expect(r.reason).toMatch(/scope cap.*5 files.*max 4/i);
+    expect(loadProposal(p.id)!.status).toBe('approved');
+  });
+
+  it('mode-ambiguous rename-only docs are refused before scope authority', async () => {
+    initRepo(tmpRepo);
+    attachOrigin(tmpRepo, 'main');
+    git(tmpRepo, ['checkout', '-b', 'work']);
+    enroll(tmpRepo);
+
+    const diff = multiRenameDiff(5);
+    expect(classifyRisk({ diff } as any)).toBe('high');
+
+    const p = frontierPatch(diff);
+    const r = await autoMergeProposal(p.id, frontierCfg({ maxRisk: 'high' }));
+
+    expect(r.ok).toBe(false);
+    expect(r.merged).toBe(false);
+    expect(r.reason).toMatch(/malformed diff scope \(mode-ambiguous-file\)/);
+    expect(loadProposal(p.id)!.status).toBe('approved');
+  });
+
+  it('invalid evidence-mode caps refuse before persisting verification evidence', async () => {
+    initRepo(tmpRepo);
+    git(tmpRepo, ['remote', 'add', 'origin', 'git@github.com:ashlrai/m86-scope.git']);
+    git(tmpRepo, ['checkout', '-b', 'work']);
+    enroll(tmpRepo);
+
+    const p = frontierPatch(addFileDiff('docs/evidence.md', 'doc'));
+    const r = await autoMergeProposal(p.id, frontierCfg({
+      trustBasis: 'evidence',
+      pushToRemote: true,
+      allowWithoutVerification: false,
+      maxAutomergeFiles: Number.MAX_SAFE_INTEGER,
+      protectedRemote: {
+        branchProtection: true,
+        requiredChecks: [{ context: 'ci/test', appId: '15368' }],
+      },
+    }));
+
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/scope cap policy invalid.*max-files-exceeds-policy/i);
+    expect(loadProposal(p.id)!.verifyResult).toBeUndefined();
     expect(loadProposal(p.id)!.status).toBe('approved');
   });
 
@@ -541,6 +741,25 @@ describe('M86 PERMIT — fires when all gates pass', () => {
     expect(r.merged).toBe(true);
   });
 
+  it('[16b] MAX_SAFE_INTEGER caps are rejected before any merge mutation', async () => {
+    initRepo(tmpRepo, 'main');
+    attachOrigin(tmpRepo, 'main');
+    git(tmpRepo, ['checkout', '-b', 'work']);
+    enroll(tmpRepo);
+
+    const p = frontierPatch(addFileDiff('docs/unbounded.md', 'bounded policy'));
+    const mainBefore = git(tmpRepo, ['rev-parse', 'main']);
+    const r = await autoMergeProposal(p.id, frontierCfg({
+      maxAutomergeFiles: Number.MAX_SAFE_INTEGER,
+      maxAutomergeLines: Number.MAX_SAFE_INTEGER,
+    }));
+
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/scope cap policy invalid.*exceeds-policy/i);
+    expect(git(tmpRepo, ['rev-parse', 'main'])).toBe(mainBefore);
+    expect(loadProposal(p.id)!.status).toBe('approved');
+  });
+
   it('[17] flag-off (enabled=false) → no auto-merge (byte-identical to today)', async () => {
     // Confirms the disabled path has not changed behaviour — proposals stay
     // PENDING/approved regardless of risk, caps, or suite state.
@@ -681,6 +900,17 @@ describe('M86 PURE — classifyRisk consistency with scope cap', () => {
     // And confirm what would push to non-low
     expect(classifyRisk({ diff: addFileDiff('src/x.ts', 'x') } as any)).toBe('medium');
   });
+
+  it.each([
+    'symlink-rename',
+    'symlink-copy',
+    'gitlink-rename',
+    'gitlink-copy',
+    'stripped-symlink-content',
+    'stripped-gitlink-content',
+  ] as const)('classifies mode-ambiguous %s as high risk', (kind) => {
+    expect(classifyRisk({ diff: modeAmbiguousDiff(kind) } as Proposal)).toBe('high');
+  });
 });
 
 describe('M86 PURE — evidence safety lane', () => {
@@ -740,6 +970,7 @@ describe('M86 PURE — evidence safety lane', () => {
   it('refuses equal-count assertion rewrites in safety tests before evidence activation', () => {
     const diff = [
       'diff --git a/test/m54.self-guard.test.ts b/test/m54.self-guard.test.ts',
+      'index 1111111..2222222 100644',
       '--- a/test/m54.self-guard.test.ts',
       '+++ b/test/m54.self-guard.test.ts',
       '@@ -1 +1 @@',
@@ -758,6 +989,7 @@ describe('M86 PURE — evidence safety lane', () => {
   it('refuses skipped or focused safety tests before evidence activation', () => {
     const skipDiff = [
       'diff --git a/test/m54.self-guard.test.ts b/test/m54.self-guard.test.ts',
+      'index 1111111..2222222 100644',
       '--- a/test/m54.self-guard.test.ts',
       '+++ b/test/m54.self-guard.test.ts',
       '@@ -1 +1 @@',
@@ -767,9 +999,11 @@ describe('M86 PURE — evidence safety lane', () => {
     ].join('\n');
     const onlyDiff = [
       'diff --git a/test/m54.self-guard.test.ts b/test/m54.self-guard.test.ts',
+      'index 1111111..2222222 100644',
       '--- a/test/m54.self-guard.test.ts',
       '+++ b/test/m54.self-guard.test.ts',
       '@@ -1 +1 @@',
+      "-describe('focused safety', () => {",
       "+describe.only('focused safety', () => {",
       '',
     ].join('\n');
@@ -786,9 +1020,61 @@ describe('M86 PURE — evidence safety lane', () => {
     ).toMatch(/skipped\/focused/);
   });
 
+  it('refuses malformed diff headers before evidence activation', () => {
+    const malformed = [
+      'diff --git a/docs/a.md',
+      '--- a/docs/a.md',
+      '+++ b/docs/a.md',
+      '@@ -1 +1 @@',
+      '-old',
+      '+new',
+      '',
+    ].join('\n');
+
+    const result = evaluateEvidenceAutoMergePreflight(
+      evidencePatch('m86-evidence-malformed', malformed),
+      evidenceCfg(),
+      { remoteAvailable: true },
+    );
+
+    expect(result.authorized).toBe(false);
+    expect(result.reason).toMatch(/malformed diff scope \(malformed-diff-header\)/);
+  });
+
+  it.each([
+    ['symlink', '120000', 'new'],
+    ['gitlink', '160000', 'modified'],
+  ] as const)('refuses %s mode patches before evidence activation', (_label, mode, kind) => {
+    const result = evaluateEvidenceAutoMergePreflight(
+      evidencePatch(`m86-evidence-mode-${mode}`, specialModeDiff(mode, kind)),
+      evidenceCfg(),
+      { remoteAvailable: true },
+    );
+
+    expect(result.authorized).toBe(false);
+    expect(result.reason).toMatch(/malformed diff scope \(unsupported-file-mode\)/);
+  });
+
+  it.each([
+    'symlink-copy',
+    'gitlink-rename',
+    'stripped-symlink-content',
+    'stripped-gitlink-content',
+  ] as const)('refuses mode-ambiguous %s before evidence activation', (kind) => {
+    const result = evaluateEvidenceAutoMergePreflight(
+      evidencePatch(`m86-evidence-${kind}`, modeAmbiguousDiff(kind)),
+      evidenceCfg(),
+      { remoteAvailable: true },
+    );
+
+    expect(result.authorized).toBe(false);
+    expect(result.reason).toMatch(/malformed diff scope \(mode-ambiguous-file\)/);
+  });
+
   it('refuses verification script changes before evidence activation', () => {
     const diff = [
       'diff --git a/package.json b/package.json',
+      'index 1111111..2222222 100644',
       '--- a/package.json',
       '+++ b/package.json',
       '@@ -1 +1 @@',
@@ -831,7 +1117,7 @@ describe('M86 PURE — evidence safety lane', () => {
       evaluateEvidenceAutoMergePreflight(evidencePatch('m86-evidence-rename-contract', renamedContract), evidenceCfg(), {
         remoteAvailable: true,
       }).reason,
-    ).toMatch(/build\/CI\/manifest/);
+    ).toMatch(/malformed diff scope \(mode-ambiguous-file\)/);
   });
 });
 

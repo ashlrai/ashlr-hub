@@ -347,6 +347,7 @@ function makeEvidencePack(id: string, generatedAt: string) {
     summary: 'summary',
     diff: [
       'diff --git a/docs/fleet.md b/docs/fleet.md',
+      'new file mode 100644',
       '--- /dev/null',
       '+++ b/docs/fleet.md',
       '@@ -0,0 +1 @@',
@@ -379,6 +380,7 @@ function makeEvidencePack(id: string, generatedAt: string) {
 function docsDiff(body: string): string {
   return [
     'diff --git a/docs/fleet.md b/docs/fleet.md',
+    'new file mode 100644',
     '--- /dev/null',
     '+++ b/docs/fleet.md',
     '@@ -0,0 +1 @@',
@@ -9390,11 +9392,74 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('machines:  unavailable');
     expect(out).not.toContain('events:    0\n');
     expect(out).toContain('Auto-merge canary promotion readiness (observation only):');
+    expect(out).toContain('scope caps: 4 file(s), 150 changed line(s)');
+    expect(out).toContain('cap source: default');
     expect(status.autoMergeCanaryPromotionReadiness).toMatchObject({
       authority: 'observation-only',
       verdict: 'blocked',
       activationPermitted: false,
+      scopeCaps: { maxFiles: 4, maxLines: 150, source: 'default' },
     });
+    expect(status.autoMergeCanaryPromotionReadiness?.blockers.map((entry) => entry.code))
+      .not.toContain('scope-caps-unavailable');
+  });
+
+  it('keeps explicit null scope caps blocked and unavailable', async () => {
+    const cfg = baseConfig();
+    cfg.foundry = {
+      autoMerge: {
+        maxAutomergeFiles: null,
+        maxAutomergeLines: null,
+      },
+    } as unknown as NonNullable<AshlrConfig['foundry']>;
+
+    const status = await buildFleetStatus(cfg);
+    const out = formatFleetStatus(status);
+
+    expect(out).toContain('scope caps: unavailable file(s), unavailable changed line(s)');
+    expect(out).toContain('cap source: invalid');
+    expect(status.autoMergeCanaryPromotionReadiness).toMatchObject({
+      verdict: 'blocked',
+      activationPermitted: false,
+      scopeCaps: { maxFiles: null, maxLines: null, source: 'invalid' },
+    });
+    expect(status.autoMergeCanaryPromotionReadiness?.blockers.map((entry) => entry.code))
+      .toContain('scope-caps-unavailable');
+  });
+
+  it('renders schema-v1 promotion payloads without inventing scope identity', () => {
+    const out = formatFleetStatus({
+      generatedAt: '2026-07-29T02:00:00.000Z',
+      daemon: { running: false, lastTickAt: null, todaySpentUsd: 0 },
+      backends: [],
+      queue: { backlogItems: 0 },
+      proposals: { pending: 0, frontierPending: 0, applied: 0 },
+      merges: { recent: 0 },
+      killed: false,
+      autoMergeCanaryPromotionReadiness: {
+        schemaVersion: 1,
+        authority: 'observation-only',
+        observedAt: '2026-07-29T02:00:00.000Z',
+        verdict: 'blocked',
+        evidenceReady: false,
+        activationPermitted: false,
+        blockers: [],
+        authorityBlockers: [{
+          code: 'enforcement-unsupported',
+          severity: 'critical',
+          detail: 'unsupported',
+        }],
+        primaryBlocker: {
+          code: 'enforcement-unsupported',
+          severity: 'critical',
+          detail: 'unsupported',
+        },
+      },
+    } as unknown as FleetStatus);
+
+    expect(out).toContain('scope caps: unavailable file(s), unavailable changed line(s)');
+    expect(out).toContain('cap source: unavailable');
+    expect(out).toContain('identity:   unavailable via unavailable (observed never)');
   });
 
   it('omits the paused banner when not killed', () => {

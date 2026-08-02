@@ -173,6 +173,11 @@ import {
   type AutoMergeCanaryPromotionReadiness,
   type AutoMergeCanaryPromotionReadinessInput,
 } from './automerge-canary-promotion-readiness.js';
+import {
+  autoMergeCanaryConfigDigest,
+  autoMergeCanaryPolicyDigest,
+} from './automerge-canary-observer.js';
+import { resolveAutoMergeScopePolicy } from '../foundry/automerge-scope-policy.js';
 
 export interface FleetBackendResourceStatus {
   availability: BackendAvailability | 'not-sensed';
@@ -1354,6 +1359,16 @@ export function buildAutoMergeCanaryPromotionReadiness(
     detached.summary.denominatorCompleteCohorts === detached.summary.cohorts &&
     detached.summary.conclusiveCompleteCohorts === detached.summary.cohorts;
   const autoMerge = cfg.foundry?.autoMerge;
+  const autoMergeRecord = autoMerge as Record<string, unknown> | undefined;
+  const configuredScopeCap = (key: 'maxAutomergeFiles' | 'maxAutomergeLines'): number | null | undefined => {
+    if (!autoMergeRecord || !Object.prototype.hasOwnProperty.call(autoMergeRecord, key)) return undefined;
+    const value = autoMergeRecord[key];
+    return typeof value === 'number' ? value : null;
+  };
+  const maxAutomergeFiles = configuredScopeCap('maxAutomergeFiles');
+  const maxAutomergeLines = configuredScopeCap('maxAutomergeLines');
+  const currentScopePolicy = resolveAutoMergeScopePolicy(autoMerge);
+  const lastShadowEvidence = state?.lastShadowEvidence ?? null;
   const input: AutoMergeCanaryPromotionReadinessInput = {
     observedAtMs,
     canary: {
@@ -1419,6 +1434,19 @@ export function buildAutoMergeCanaryPromotionReadiness(
       allowSelfMerge: autoMerge?.allowSelfMerge === true,
       allowWithoutVerification: autoMerge?.allowWithoutVerification === true,
       localMergeFallback: autoMerge?.enabled === true && autoMerge.pushToRemote !== true,
+      ...(maxAutomergeFiles !== undefined ? { maxAutomergeFiles } : {}),
+      ...(maxAutomergeLines !== undefined ? { maxAutomergeLines } : {}),
+    },
+    scopeIdentity: {
+      sourceState: read.sourceState,
+      expectedPolicyDigest: state?.policyDigest ?? null,
+      expectedConfigDigest: state?.configDigest ?? null,
+      evidencePolicyDigest: lastShadowEvidence?.policyDigest ?? null,
+      evidenceConfigDigest: lastShadowEvidence?.configDigest ?? null,
+      currentPolicyDigest: autoMergeCanaryPolicyDigest(),
+      currentConfigDigest: autoMergeCanaryConfigDigest(cfg),
+      currentScopePolicyDigest: currentScopePolicy.ok ? currentScopePolicy.policy.digest : null,
+      observedAt: lastShadowEvidence?.observedAt ?? null,
     },
   };
   return evaluateAutoMergeCanaryPromotionReadiness(input);
@@ -3942,6 +3970,14 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       },
       policy: {
         allowSelfMerge: true, allowWithoutVerification: true, localMergeFallback: true,
+        maxAutomergeFiles: null, maxAutomergeLines: null,
+      },
+      scopeIdentity: {
+        sourceState: 'degraded',
+        expectedPolicyDigest: null, expectedConfigDigest: null,
+        evidencePolicyDigest: null, evidenceConfigDigest: null,
+        currentPolicyDigest: null, currentConfigDigest: null,
+        currentScopePolicyDigest: null, observedAt: null,
       },
     });
   }

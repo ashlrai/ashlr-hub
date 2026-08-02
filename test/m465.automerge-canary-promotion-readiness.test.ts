@@ -4,8 +4,30 @@ import {
   evaluateAutoMergeCanaryPromotionReadiness,
   type AutoMergeCanaryPromotionReadinessInput,
 } from '../src/core/fleet/automerge-canary-promotion-readiness.js';
+import {
+  autoMergeCanaryConfigDigest,
+  autoMergeCanaryPolicyDigest,
+} from '../src/core/fleet/automerge-canary-observer.js';
+import { resolveAutoMergeScopePolicy } from '../src/core/foundry/automerge-scope-policy.js';
+import type { AshlrConfig } from '../src/core/types.js';
 
 const NOW = Date.parse('2026-07-29T02:00:00.000Z');
+
+function configWithCaps(maxAutomergeFiles: number, maxAutomergeLines: number): AshlrConfig {
+  return { foundry: { autoMerge: { maxAutomergeFiles, maxAutomergeLines } } } as AshlrConfig;
+}
+
+function scopeDigest(maxAutomergeFiles: number, maxAutomergeLines: number): string {
+  const result = resolveAutoMergeScopePolicy({ maxAutomergeFiles, maxAutomergeLines });
+  if (!result.ok) throw new Error(`invalid test scope: ${result.reasons.join(',')}`);
+  return result.policy.digest;
+}
+
+function defaultScopeDigest(): string {
+  const result = resolveAutoMergeScopePolicy(undefined);
+  if (!result.ok) throw new Error(`invalid default test scope: ${result.reasons.join(',')}`);
+  return result.policy.digest;
+}
 
 function readyInput(): AutoMergeCanaryPromotionReadinessInput {
   return {
@@ -64,6 +86,19 @@ function readyInput(): AutoMergeCanaryPromotionReadinessInput {
       allowSelfMerge: false,
       allowWithoutVerification: false,
       localMergeFallback: false,
+      maxAutomergeFiles: 4,
+      maxAutomergeLines: 150,
+    },
+    scopeIdentity: {
+      sourceState: 'healthy',
+      expectedPolicyDigest: autoMergeCanaryPolicyDigest(),
+      expectedConfigDigest: autoMergeCanaryConfigDigest(configWithCaps(4, 150)),
+      evidencePolicyDigest: autoMergeCanaryPolicyDigest(),
+      evidenceConfigDigest: autoMergeCanaryConfigDigest(configWithCaps(4, 150)),
+      currentPolicyDigest: autoMergeCanaryPolicyDigest(),
+      currentConfigDigest: autoMergeCanaryConfigDigest(configWithCaps(4, 150)),
+      currentScopePolicyDigest: scopeDigest(4, 150),
+      observedAt: '2026-07-29T01:58:00.000Z',
     },
   };
 }
@@ -73,12 +108,27 @@ describe('M465 auto-merge canary promotion readiness', () => {
     const result = evaluateAutoMergeCanaryPromotionReadiness(readyInput());
 
     expect(result).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       authority: 'observation-only',
       observedAt: '2026-07-29T02:00:00.000Z',
       verdict: 'evidence-ready',
       evidenceReady: true,
       activationPermitted: false,
+      scopeCaps: {
+        maxFiles: 4,
+        maxLines: 150,
+        policyMaxFiles: 10,
+        policyMaxLines: 300,
+        source: 'explicit',
+        scopePolicyDigest: scopeDigest(4, 150),
+      },
+      scopeIdentity: {
+        state: 'matched',
+        source: 'controller-attested-canary-store',
+        observedAt: '2026-07-29T01:58:00.000Z',
+        policyDigest: autoMergeCanaryPolicyDigest(),
+        configDigest: autoMergeCanaryConfigDigest(configWithCaps(4, 150)),
+      },
       blockers: [],
       authorityBlockers: [{
         code: 'enforcement-unsupported',
@@ -136,6 +186,145 @@ describe('M465 auto-merge canary promotion readiness', () => {
       'unsafe-merge-policy',
     ]);
     expect(result.activationPermitted).toBe(false);
+  });
+
+  it('uses identified conservative defaults for absent caps but rejects malformed values', () => {
+    const missing = readyInput() as unknown as Record<string, Record<string, unknown>>;
+    delete missing['policy']!['maxAutomergeFiles'];
+    delete missing['policy']!['maxAutomergeLines'];
+    const implicitConfig = {} as AshlrConfig;
+    const typedMissing = missing as unknown as AutoMergeCanaryPromotionReadinessInput;
+    typedMissing.scopeIdentity.expectedConfigDigest = autoMergeCanaryConfigDigest(implicitConfig);
+    typedMissing.scopeIdentity.evidenceConfigDigest = autoMergeCanaryConfigDigest(implicitConfig);
+    typedMissing.scopeIdentity.currentConfigDigest = autoMergeCanaryConfigDigest(implicitConfig);
+    typedMissing.scopeIdentity.currentScopePolicyDigest = defaultScopeDigest();
+
+    const missingResult = evaluateAutoMergeCanaryPromotionReadiness(
+      typedMissing,
+    );
+    expect(missingResult).toMatchObject({
+      evidenceReady: true,
+      activationPermitted: false,
+      scopeCaps: {
+        maxFiles: 4,
+        maxLines: 150,
+        source: 'default',
+        scopePolicyDigest: defaultScopeDigest(),
+      },
+      blockers: [],
+    });
+
+    const malformed = readyInput();
+    malformed.policy.maxAutomergeFiles = 1.5;
+    malformed.policy.maxAutomergeLines = Number.POSITIVE_INFINITY;
+    const malformedResult = evaluateAutoMergeCanaryPromotionReadiness(malformed);
+    expect(malformedResult.scopeCaps).toMatchObject({
+      maxFiles: null,
+      maxLines: null,
+      source: 'invalid',
+      scopePolicyDigest: null,
+    });
+    expect(malformedResult.blockers.map((entry) => entry.code)).toContain('scope-caps-unavailable');
+  });
+
+  it('rejects effectively unbounded safe-integer caps', () => {
+    const input = readyInput();
+    input.policy.maxAutomergeFiles = Number.MAX_SAFE_INTEGER;
+    input.policy.maxAutomergeLines = Number.MAX_SAFE_INTEGER;
+
+    const result = evaluateAutoMergeCanaryPromotionReadiness(input);
+
+    expect(result).toMatchObject({
+      evidenceReady: false,
+      activationPermitted: false,
+      scopeCaps: {
+        maxFiles: null,
+        maxLines: null,
+        policyMaxFiles: 10,
+        policyMaxLines: 300,
+        source: 'invalid',
+      },
+    });
+    expect(result.blockers.map((entry) => entry.code)).toEqual(expect.arrayContaining([
+      'scope-caps-unavailable',
+      'scope-caps-exceed-policy',
+    ]));
+  });
+
+  it('rejects mutable config widening that is not the canary evidence identity', () => {
+    const input = readyInput();
+    const widenedConfig = configWithCaps(10, 300);
+    expect(autoMergeCanaryConfigDigest(widenedConfig)).not.toBe(
+      input.scopeIdentity.expectedConfigDigest,
+    );
+    input.policy.maxAutomergeFiles = 10;
+    input.policy.maxAutomergeLines = 300;
+    input.scopeIdentity.currentConfigDigest = autoMergeCanaryConfigDigest(widenedConfig);
+    input.scopeIdentity.currentScopePolicyDigest = scopeDigest(10, 300);
+
+    const result = evaluateAutoMergeCanaryPromotionReadiness(input);
+
+    expect(result.evidenceReady).toBe(false);
+    expect(result.activationPermitted).toBe(false);
+    expect(result.scopeCaps).toMatchObject({ maxFiles: 10, maxLines: 300 });
+    expect(result.scopeIdentity.state).toBe('mismatched');
+    expect(result.blockers.map((entry) => entry.code)).toContain('scope-identity-mismatch');
+  });
+
+  it('distinguishes implicit defaults from explicit equal-value policy identities', () => {
+    const implicitPolicy = resolveAutoMergeScopePolicy(undefined);
+    const explicitPolicy = resolveAutoMergeScopePolicy({
+      maxAutomergeFiles: 4,
+      maxAutomergeLines: 150,
+    });
+    expect(implicitPolicy.ok && implicitPolicy.policy.source).toBe('default');
+    expect(explicitPolicy.ok && explicitPolicy.policy.source).toBe('explicit');
+    expect(implicitPolicy.ok && explicitPolicy.ok && implicitPolicy.policy.digest)
+      .not.toBe(explicitPolicy.ok ? explicitPolicy.policy.digest : null);
+
+    const implicitConfig = {} as AshlrConfig;
+    const explicitConfig = configWithCaps(4, 150);
+    expect(autoMergeCanaryConfigDigest(implicitConfig)).not.toBe(
+      autoMergeCanaryConfigDigest(explicitConfig),
+    );
+
+    const input = readyInput();
+    input.scopeIdentity.expectedConfigDigest = autoMergeCanaryConfigDigest(implicitConfig);
+    input.scopeIdentity.evidenceConfigDigest = autoMergeCanaryConfigDigest(implicitConfig);
+    const result = evaluateAutoMergeCanaryPromotionReadiness(input);
+
+    expect(result.scopeCaps.source).toBe('explicit');
+    expect(result.scopeIdentity.state).toBe('mismatched');
+    expect(result.blockers.map((entry) => entry.code)).toContain('scope-identity-mismatch');
+    expect(result.activationPermitted).toBe(false);
+  });
+
+  it('rejects canary evidence digest mismatch and stale matching identity', () => {
+    const mismatched = readyInput();
+    mismatched.scopeIdentity.evidenceConfigDigest = 'b'.repeat(64);
+    const mismatchResult = evaluateAutoMergeCanaryPromotionReadiness(mismatched);
+    expect(mismatchResult.scopeIdentity.state).toBe('mismatched');
+    expect(mismatchResult.blockers.map((entry) => entry.code)).toContain('scope-identity-mismatch');
+
+    const stale = readyInput();
+    stale.scopeIdentity.observedAt = '2026-07-29T01:49:59.999Z';
+    const staleResult = evaluateAutoMergeCanaryPromotionReadiness(stale);
+    expect(staleResult.scopeIdentity.state).toBe('stale');
+    expect(staleResult.blockers.map((entry) => entry.code)).toContain('scope-identity-stale');
+  });
+
+  it('fails closed without throwing when scope identity is absent', () => {
+    const input = readyInput() as unknown as Record<string, unknown>;
+    delete input['scopeIdentity'];
+
+    const result = evaluateAutoMergeCanaryPromotionReadiness(
+      input as unknown as AutoMergeCanaryPromotionReadinessInput,
+    );
+
+    expect(result.evidenceReady).toBe(false);
+    expect(result.activationPermitted).toBe(false);
+    expect(result.scopeIdentity).toMatchObject({ state: 'unavailable', source: 'unavailable' });
+    expect(result.blockers.map((entry) => entry.code)).toContain('scope-identity-unavailable');
   });
 
   it('withholds readiness for canary mismatches, inspection errors, and adverse outcomes', () => {

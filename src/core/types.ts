@@ -1100,9 +1100,9 @@ export interface AshlrConfig {
       managerGate?: boolean;
       /** Permit self-target auto-merge after self safety checks. Default false. */
       allowSelfMerge?: boolean;
-      /** Max files permitted in an auto-merge diff (default 4). */
+      /** Max files permitted in an auto-merge diff (default 4, hard maximum 10). */
       maxAutomergeFiles?: number;
-      /** Max changed lines permitted in an auto-merge diff (default 150). */
+      /** Max changed lines permitted in an auto-merge diff (default 150, hard maximum 300). */
       maxAutomergeLines?: number;
       /** Also merge/push on the remote (gh pr merge) when applying (default false). */
       pushToRemote?: boolean;

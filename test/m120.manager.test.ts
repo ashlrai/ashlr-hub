@@ -129,13 +129,15 @@ function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
   } as Proposal;
 }
 
-/** Build a small diff touching N files with M changed lines. */
+/** Build a valid diff touching N files with M replacements per file. */
 function makeDiff(files: number, linesPerFile: number): string {
   const parts: string[] = [];
   for (let i = 0; i < files; i++) {
+    parts.push(`diff --git a/file${i}.ts b/file${i}.ts`);
+    parts.push('index 1111111..2222222 100644');
     parts.push(`--- a/file${i}.ts`);
     parts.push(`+++ b/file${i}.ts`);
-    parts.push('@@ -1,1 +1,1 @@');
+    parts.push(`@@ -1,${linesPerFile} +1,${linesPerFile} @@`);
     for (let j = 0; j < linesPerFile; j++) {
       parts.push(`-old line ${j} in file ${i}`);
       parts.push(`+new line ${j} in file ${i}`);
@@ -645,12 +647,14 @@ describe('m120 runManager — shadow mode', () => {
       workItemId: '/repos/alpha:issue:001',
       workSource: 'issue',
       runId: 'run-shadow-001',
+      diff: makeDiff(1, 1),
     }));
     mockProposals.push(makeProposal({
       id: SEMANTIC_PROPOSAL_B,
       workItemId: '/repos/alpha:todo:002',
       workSource: 'todo',
       runId: 'run-shadow-002',
+      diff: makeDiff(1, 1),
     }));
 
     const { runManager } = await import('../src/core/fleet/manager.js');
