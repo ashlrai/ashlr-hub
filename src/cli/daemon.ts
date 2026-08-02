@@ -84,8 +84,6 @@ type PendingCountFn = () => number;
 type LoadConfigFn = () => AshlrConfig;
 type GuardHealthDiagnosis = import('../core/daemon/guard-health.js').GuardHealthDiagnosis;
 type DiagnoseGuardHealthFn = () => GuardHealthDiagnosis;
-type RunLaunchdRetryControllerFn =
-  typeof import('../core/daemon/launchd-retry-controller.js')['runLaunchdRetryController'];
 
 async function importLoop(): Promise<{
   runDaemon: RunDaemonFn;
@@ -155,15 +153,6 @@ async function importGuardHealth(): Promise<DiagnoseGuardHealthFn | null> {
   }
 }
 
-async function importLaunchdRetryController(): Promise<RunLaunchdRetryControllerFn | null> {
-  try {
-    const mod = await import('../core/daemon/launchd-retry-controller.js');
-    return mod.runLaunchdRetryController;
-  } catch {
-    return null;
-  }
-}
-
 async function importServiceConfig(): Promise<
   ((cfg: AshlrConfig | null, overrides?: { autostart?: boolean }) => ServiceInstallOptions) | null
 > {
@@ -210,8 +199,6 @@ interface StartFlags {
   once: boolean;
   dryRun: boolean;
   supervised: boolean;
-  launchdController: boolean;
-  launchdReleaseRevision?: string;
   drain?: DaemonDrainMode;
   limit?: number;
   budgetUsd?: number;
@@ -231,7 +218,6 @@ function parseStartFlags(args: string[]): { flags: StartFlags; err?: string } {
     once: false,
     dryRun: false,
     supervised: false,
-    launchdController: false,
   };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -245,17 +231,6 @@ function parseStartFlags(args: string[]): { flags: StartFlags; err?: string } {
       case '--supervised':
         flags.supervised = true;
         break;
-      case '--launchd-controller':
-        flags.launchdController = true;
-        break;
-      case '--launchd-release': {
-        const revision = args[++i];
-        if (revision === undefined || revision.startsWith('-')) {
-          return { flags, err: '--launchd-release requires a build revision' };
-        }
-        flags.launchdReleaseRevision = revision;
-        break;
-      }
       case '--drain': {
         const v = args[++i];
         if (v !== 'diagnostic-reslices') {
@@ -295,12 +270,6 @@ function parseStartFlags(args: string[]): { flags: StartFlags; err?: string } {
   }
   if (flags.limit !== undefined && flags.drain === undefined) {
     return { flags, err: '--limit requires --drain' };
-  }
-  if (flags.launchdController && (!flags.supervised || flags.launchdReleaseRevision === undefined)) {
-    return { flags, err: '--launchd-controller requires --supervised and --launchd-release' };
-  }
-  if (!flags.launchdController && flags.launchdReleaseRevision !== undefined) {
-    return { flags, err: '--launchd-release requires --launchd-controller' };
   }
   return { flags };
 }
@@ -344,41 +313,6 @@ function relAge(iso: string | null): string {
 async function cmdDaemonStart(flags: StartFlags): Promise<number> {
   const tty = process.stdout.isTTY === true;
   const col = makeColors(tty);
-
-  if (flags.launchdController) {
-    const runLaunchdRetryController = await importLaunchdRetryController();
-    if (!runLaunchdRetryController) {
-      console.error(col.red('error: ') + 'launchd retry controller unavailable; restart authority blocked.');
-      return 0;
-    }
-    const controlled = await runLaunchdRetryController({
-      expectedReleaseRevision: flags.launchdReleaseRevision!,
-      // All fallible startup work stays behind the externally committed claim.
-      // Production supplies neither trust roots nor a CAS adapter, so this
-      // callback remains dormant until external authority is provisioned.
-      runDaemon: async () => {
-        if (process.env['ASHLR_IN_DAEMON'] || process.env['ASHLR_IN_SWARM']) {
-          throw new Error('daemon re-entrancy refused before invocation');
-        }
-        const loadConfig = await importConfig(true, true);
-        if (!loadConfig) throw new Error('daemon config module unavailable');
-        const loop = await importLoop();
-        if (!loop) throw new Error('daemon loop module unavailable');
-        const cfg = loadConfig();
-        const merged = mergeDaemonConfig(cfg, flags);
-        return loop.runDaemon(merged, {
-          once: flags.once,
-          dryRun: flags.dryRun,
-          ...(flags.drain ? { drain: flags.drain } : {}),
-          ...(flags.limit ? { drainLimit: flags.limit } : {}),
-        });
-      },
-    });
-    const message = `launchd retry controller: ${controlled.reason}`;
-    if (controlled.exitCode === 1) console.error(col.yellow(message));
-    else console.log(col.dim(message));
-    return controlled.exitCode;
-  }
 
   // ── Re-entrancy guard (clear, nonzero refusal) ──────────────────────────
   // runDaemon ALSO refuses internally; we surface a friendly message here so
@@ -898,14 +832,7 @@ export async function cmdDaemon(args: string[]): Promise<number> {
         : NO_FLAGS;
     validationError = validateExactFlags(rest, allowed);
   }
-  if (validationError) {
-    const code = printDaemonUsageError(validationError, sub);
-    if (sub === 'start' && rest.includes('--launchd-controller')) {
-      console.error('launchd retry controller: invalid hidden service argv; restart authority blocked.');
-      return 0;
-    }
-    return code;
-  }
+  if (validationError) return printDaemonUsageError(validationError, sub);
 
   switch (sub) {
     case 'start':

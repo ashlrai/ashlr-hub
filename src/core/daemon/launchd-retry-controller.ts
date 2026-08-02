@@ -26,7 +26,7 @@ import {
   type VerifiedLaunchdRetryEpochReceipt,
 } from './launchd-retry-authority.js';
 import {
-  LAUNCHD_RETRY_TRUST_POLICY,
+  readLaunchdRetryTrustPolicy,
   type LaunchdRetryTrustPolicy,
 } from './launchd-retry-trust-roots.js';
 import type { DaemonRunResult } from './loop.js';
@@ -81,12 +81,10 @@ export type LaunchdRetryCasResult =
 
 export interface LaunchdRetryExternalAuthority {
   currentReceipt: unknown;
-  trustPolicy?: LaunchdRetryTrustPolicy;
   compareAndSwap: (request: LaunchdRetryCasRequest) => Promise<LaunchdRetryCasResult>;
 }
 
 export type LaunchdRetryReason =
-  | 'retry-authorized'
   | 'healthy-completion'
   | 'retry-exhausted'
   | 'retry-window-expired'
@@ -405,7 +403,7 @@ export async function runLaunchdRetryController(
   if (!authority || typeof authority.compareAndSwap !== 'function') {
     return terminal('external-retry-transport-unavailable');
   }
-  const trustPolicy = authority.trustPolicy ?? LAUNCHD_RETRY_TRUST_POLICY;
+  const trustPolicy = readLaunchdRetryTrustPolicy();
   const supplied = verifyLaunchdRetryEpochReceipt(authority.currentReceipt, {
     releaseRevision: runtimeRevision,
     serviceIdentity: LAUNCHD_RETRY_SERVICE_IDENTITY,
@@ -439,58 +437,75 @@ export async function runLaunchdRetryController(
       return terminal('retry-state-uninitialized');
     }
 
-    if (nowMs < current.receipt.maxObservedAtMs) return terminal('clock-rollback');
-    if (nowMs - current.receipt.windowStartedAtMs > LAUNCHD_RETRY_WINDOW_MS) {
-      return terminal('retry-window-expired', 'verified', false, null, 0);
-    }
-    if (current.receipt.claimCount >= LAUNCHD_RETRY_MAX_ATTEMPTS) {
-      return terminal('retry-exhausted', 'verified', false, null, 0);
-    }
+    let attemptAtMs = nowMs;
+    let daemonWasInvoked = false;
+    let lastClaimNumber: number | null = null;
+    let lastAttemptsRemaining: number | null = null;
+    while (true) {
+      if (killState().state !== 'inactive') {
+        return terminal(
+          'operator-stop', 'verified', daemonWasInvoked, lastClaimNumber, lastAttemptsRemaining,
+        );
+      }
+      if (attemptAtMs < current.receipt.maxObservedAtMs) {
+        return terminal('clock-rollback', 'verified', daemonWasInvoked, lastClaimNumber);
+      }
+      if (attemptAtMs - current.receipt.windowStartedAtMs > LAUNCHD_RETRY_WINDOW_MS) {
+        return terminal('retry-window-expired', 'verified', daemonWasInvoked, lastClaimNumber, 0);
+      }
+      if (current.receipt.claimCount >= LAUNCHD_RETRY_MAX_ATTEMPTS) {
+        return terminal('retry-exhausted', 'verified', daemonWasInvoked, lastClaimNumber, 0);
+      }
 
-    const claim = await commitTransition(authority, current, 'claim', nowMs, trustPolicy);
-    if (!claim.ok) return terminal(claim.reason);
-    if (!persistState(paths, claim.value, nowMs, trustPolicy)) {
-      return terminal('state-persistence-failed', 'verified');
-    }
-    const claimNumber = claim.value.receipt.claimCount;
-    const remaining = LAUNCHD_RETRY_MAX_ATTEMPTS - claimNumber;
-    if (killState().state !== 'inactive') {
-      return terminal('operator-stop', 'verified', false, claimNumber, remaining);
-    }
+      const claim = await commitTransition(authority, current, 'claim', attemptAtMs, trustPolicy);
+      if (!claim.ok) return terminal(claim.reason, 'verified', daemonWasInvoked, lastClaimNumber);
+      const claimNumber = claim.value.receipt.claimCount;
+      const remaining = LAUNCHD_RETRY_MAX_ATTEMPTS - claimNumber;
+      lastClaimNumber = claimNumber;
+      lastAttemptsRemaining = remaining;
+      if (!persistState(paths, claim.value, attemptAtMs, trustPolicy)) {
+        return terminal(
+          'state-persistence-failed', 'verified', daemonWasInvoked, claimNumber, remaining,
+        );
+      }
+      if (killState().state !== 'inactive') {
+        return terminal('operator-stop', 'verified', daemonWasInvoked, claimNumber, remaining);
+      }
 
-    let result: DaemonRunResult;
-    try {
-      result = await options.runDaemon();
-    } catch {
-      return terminal('daemon-disposition-invalid', 'verified', true, claimNumber, remaining);
-    }
-    if (!validDaemonDisposition(result)) {
-      return terminal('daemon-disposition-invalid', 'verified', true, claimNumber, remaining);
-    }
-    if (result.termination.reason === 'clean-completion' && !result.termination.retryable) {
-      const completedAtMs = now();
-      if (!Number.isSafeInteger(completedAtMs) || completedAtMs < claim.value.receipt.maxObservedAtMs) {
+      let result: DaemonRunResult;
+      try {
+        daemonWasInvoked = true;
+        result = await options.runDaemon();
+      } catch {
+        return terminal('daemon-disposition-invalid', 'verified', true, claimNumber, remaining);
+      }
+      if (!validDaemonDisposition(result)) {
+        return terminal('daemon-disposition-invalid', 'verified', true, claimNumber, remaining);
+      }
+      if (result.termination.reason === 'clean-completion' && !result.termination.retryable) {
+        const completedAtMs = now();
+        if (!Number.isSafeInteger(completedAtMs) || completedAtMs < claim.value.receipt.maxObservedAtMs) {
+          return terminal('clock-rollback', 'verified', true, claimNumber, remaining);
+        }
+        const reset = await commitTransition(authority, claim.value, 'healthy-reset', completedAtMs, trustPolicy);
+        if (!reset.ok) return terminal(reset.reason, 'verified', true, claimNumber, remaining);
+        return persistState(paths, reset.value, completedAtMs, trustPolicy)
+          ? terminal('healthy-completion', 'verified', true, claimNumber, LAUNCHD_RETRY_MAX_ATTEMPTS)
+          : terminal('state-persistence-failed', 'verified', true, claimNumber, remaining);
+      }
+      if (!result.termination.retryable) {
+        return terminal('daemon-terminal', 'verified', true, claimNumber, remaining);
+      }
+      if (remaining === 0) {
+        return terminal('retry-exhausted', 'verified', true, claimNumber, 0);
+      }
+
+      current = claim.value;
+      attemptAtMs = now();
+      if (!Number.isSafeInteger(attemptAtMs) || attemptAtMs < 0) {
         return terminal('clock-rollback', 'verified', true, claimNumber, remaining);
       }
-      const reset = await commitTransition(authority, claim.value, 'healthy-reset', completedAtMs, trustPolicy);
-      if (!reset.ok) return terminal(reset.reason, 'verified', true, claimNumber, remaining);
-      return persistState(paths, reset.value, completedAtMs, trustPolicy)
-        ? terminal('healthy-completion', 'verified', true, claimNumber, LAUNCHD_RETRY_MAX_ATTEMPTS)
-        : terminal('state-persistence-failed', 'verified', true, claimNumber, remaining);
     }
-    if (!result.termination.retryable) {
-      return terminal('daemon-terminal', 'verified', true, claimNumber, remaining);
-    }
-    return remaining > 0
-      ? {
-          exitCode: 1,
-          reason: 'retry-authorized',
-          daemonInvoked: true,
-          claimNumber,
-          attemptsRemaining: remaining,
-          externalAuthority: 'verified',
-        }
-      : terminal('retry-exhausted', 'verified', true, claimNumber, 0);
   } finally {
     releaseLocalStoreLock(lock);
   }

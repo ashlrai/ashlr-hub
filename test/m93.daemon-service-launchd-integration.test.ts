@@ -47,7 +47,8 @@ describe.skipIf(!NATIVE_ENABLED)('M93 native launchd runtime admission', () => {
 
     const scratch = mkdtempSync(join(runnerTemp, `ashlr-m93-launchd-${randomUUID()}-`));
     const homeDir = join(scratch, 'home');
-    const fixturePath = join(scratch, 'fixture.mjs');
+    const binPath = join(scratch, 'bin', 'ashlr');
+    const fixturePath = join(scratch, 'dist', 'cli', 'launchd-supervisor.js');
     const label = `ai.ashlr.m93.${randomUUID().replaceAll('-', '')}`;
     const uid = typeof process.getuid === 'function' ? process.getuid() : 501;
     const domainTarget = `gui/${uid}`;
@@ -57,7 +58,7 @@ describe.skipIf(!NATIVE_ENABLED)('M93 native launchd runtime admission', () => {
       platform: 'darwin',
       homeDir,
       nodePath: process.execPath,
-      binPath: fixturePath,
+      binPath,
       budget: 1,
       intervalMs: 60_000,
       parallel: 1,
@@ -82,6 +83,8 @@ describe.skipIf(!NATIVE_ENABLED)('M93 native launchd runtime admission', () => {
 
       mkdirSync(dirname(definition.filePath), { recursive: true, mode: 0o700 });
       mkdirSync(join(homeDir, '.ashlr'), { recursive: true, mode: 0o700 });
+      mkdirSync(dirname(binPath), { recursive: true, mode: 0o700 });
+      mkdirSync(dirname(fixturePath), { recursive: true, mode: 0o700 });
       writeFileSync(fixturePath, 'setInterval(() => {}, 1000);\n', { mode: 0o600 });
       writeFileSync(definition.filePath, content, { mode: 0o600 });
       writeFileSync(manifestPath, JSON.stringify({

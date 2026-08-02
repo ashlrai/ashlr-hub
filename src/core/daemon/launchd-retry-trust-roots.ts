@@ -32,3 +32,14 @@ export const LAUNCHD_RETRY_TRUST_POLICY: LaunchdRetryTrustPolicy = Object.freeze
   policyGeneration: 0,
   roots: Object.freeze([]),
 });
+
+/**
+ * Return the deployment-owned retry trust policy.
+ *
+ * This intentionally has no config, environment, transport, or caller input.
+ * Tests replace this module at the loader boundary rather than widening the
+ * production controller options with injectable trust roots.
+ */
+export function readLaunchdRetryTrustPolicy(): LaunchdRetryTrustPolicy {
+  return LAUNCHD_RETRY_TRUST_POLICY;
+}

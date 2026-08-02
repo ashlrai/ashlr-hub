@@ -52,7 +52,7 @@ export interface ServiceInstallOptions {
   budget?: number;
   /** Interval in ms passed to `daemon start --interval`. */
   intervalMs?: number;
-  /** Crash restart throttle in seconds (default: 30). Independent of intervalMs. */
+  /** Non-launchd crash restart throttle in seconds (default: 30). Independent of intervalMs. */
   restartSec?: number;
   /** Parallelism passed to `daemon start --parallel`. */
   parallel?: number;
@@ -201,6 +201,9 @@ function buildLaunchdDefinition(o: BuildOpts): ServiceDefinition {
   const plistPath = path.join(o.home, 'Library', 'LaunchAgents', 'ai.ashlr.daemon.plist');
   const outLog = path.join(o.configDir, 'daemon.launchd.out.log');
   const errLog = path.join(o.configDir, 'daemon.launchd.err.log');
+  const packageRoot = path.dirname(path.dirname(o.binPath));
+  const supervisorPath = path.join(packageRoot, 'dist', 'cli', 'launchd-supervisor.js');
+  const childPath = path.join(packageRoot, 'dist', 'cli', 'launchd-daemon-child.js');
 
   // PATH that mirrors common developer shells without requiring a login shell.
   const pathEnv = buildToolPath({ home: o.home, basePath: '' });
@@ -213,15 +216,15 @@ function buildLaunchdDefinition(o: BuildOpts): ServiceDefinition {
   // caffeinate's `-i` flag prevents idle sleep; `-s` prevents system sleep on AC.
   // On battery, macOS may still sleep — the user must keep the Mac plugged in.
   const runtimeArguments = o.keepAwake
-    ? ['caffeinate', '-i', '-s', o.nodePath, o.binPath]
-    : [o.nodePath, o.binPath];
+    ? ['caffeinate', '-i', '-s', o.nodePath, supervisorPath]
+    : [o.nodePath, supervisorPath];
   runtimeArguments.push(
-    'daemon',
-    'start',
-    '--supervised',
-    '--launchd-controller',
-    '--launchd-release',
+    '--release',
     o.releaseRevision,
+    '--node',
+    o.nodePath,
+    '--child',
+    childPath,
     '--budget',
     String(o.budget),
     '--interval',
@@ -253,12 +256,7 @@ ${programArgs.join('\n')}
 \t<key>RunAtLoad</key>
 \t<true/>
 \t<key>KeepAlive</key>
-\t<dict>
-\t\t<key>SuccessfulExit</key>
-\t\t<false/>
-\t</dict>
-\t<key>ThrottleInterval</key>
-\t<integer>${o.restartSec}</integer>
+\t<false/>
 \t<key>StandardOutPath</key>
 \t<string>${outLog}</string>
 \t<key>StandardErrorPath</key>

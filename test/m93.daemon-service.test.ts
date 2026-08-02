@@ -87,6 +87,8 @@ const FAKE_HOME = '/tmp/ashlr-test-home';
 const FAKE_NODE = '/usr/local/bin/node';
 const FAKE_BIN = '/home/user/ashlr-hub/bin/ashlr';
 const FAKE_RELEASE = 'a'.repeat(40);
+const FAKE_SUPERVISOR = '/home/user/ashlr-hub/dist/cli/launchd-supervisor.js';
+const FAKE_CHILD = '/home/user/ashlr-hub/dist/cli/launchd-daemon-child.js';
 
 function isWindowsPowerShellCommand(command: string): boolean {
   return command === windowsPowerShellPath();
@@ -107,8 +109,8 @@ function baseOpts(platform: 'darwin' | 'linux' | 'win32') {
 
 function launchdRuntimeArguments(releaseRevision = FAKE_RELEASE): string[] {
   return [
-    FAKE_NODE, FAKE_BIN, 'daemon', 'start', '--supervised', '--launchd-controller',
-    '--launchd-release', releaseRevision, '--budget', '5', '--interval', '1800000',
+    FAKE_NODE, FAKE_SUPERVISOR, '--release', releaseRevision, '--node', FAKE_NODE,
+    '--child', FAKE_CHILD, '--budget', '5', '--interval', '1800000',
     '--parallel', '1',
   ];
 }
@@ -362,22 +364,7 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
     );
     expect(def.launchdRuntime).toEqual({
       program: FAKE_NODE,
-      arguments: [
-        FAKE_NODE,
-        FAKE_BIN,
-        'daemon',
-        'start',
-        '--supervised',
-        '--launchd-controller',
-        '--launchd-release',
-        FAKE_RELEASE,
-        '--budget',
-        '5',
-        '--interval',
-        '1800000',
-        '--parallel',
-        '1',
-      ],
+      arguments: launchdRuntimeArguments(),
     });
   });
 
@@ -393,18 +380,18 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
     expect(def.content).toContain(`<string>${FAKE_NODE}</string>`);
   });
 
-  it('plist contains bin/ashlr path', () => {
+  it('plist contains only the minimal supervisor and daemon child entrypoints', () => {
     const def = generateServiceDefinition(baseOpts('darwin'));
-    expect(def.content).toContain(`<string>${FAKE_BIN}</string>`);
+    expect(def.content).toContain(`<string>${FAKE_SUPERVISOR}</string>`);
+    expect(def.content).toContain(`<string>${FAKE_CHILD}</string>`);
+    expect(def.content).not.toContain(`<string>${FAKE_BIN}</string>`);
   });
 
-  it('plist contains daemon start args', () => {
+  it('plist contains the exact bounded supervisor args', () => {
     const def = generateServiceDefinition(baseOpts('darwin'));
-    expect(def.content).toContain('<string>daemon</string>');
-    expect(def.content).toContain('<string>start</string>');
-    expect(def.content).toContain('<string>--supervised</string>');
-    expect(def.content).toContain('<string>--launchd-controller</string>');
-    expect(def.content).toContain('<string>--launchd-release</string>');
+    expect(def.content).toContain('<string>--release</string>');
+    expect(def.content).toContain('<string>--node</string>');
+    expect(def.content).toContain('<string>--child</string>');
     expect(def.content).toContain(`<string>${FAKE_RELEASE}</string>`);
     expect(def.content).toContain('<string>--budget</string>');
     expect(def.content).toContain('<string>5</string>');
@@ -422,20 +409,7 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
         'caffeinate',
         '-i',
         '-s',
-        FAKE_NODE,
-        FAKE_BIN,
-        'daemon',
-        'start',
-        '--supervised',
-        '--launchd-controller',
-        '--launchd-release',
-        FAKE_RELEASE,
-        '--budget',
-        '5',
-        '--interval',
-        '1800000',
-        '--parallel',
-        '1',
+        ...launchdRuntimeArguments(),
       ],
     });
   });
@@ -447,13 +421,13 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
     expect(def.content).toContain(path.join(configDir, 'daemon.launchd.err.log'));
   });
 
-  it('plist has RunAtLoad true and KeepAlive with SuccessfulExit false', () => {
+  it('plist is one-shot with literal KeepAlive false', () => {
     const def = generateServiceDefinition(baseOpts('darwin'));
     expect(def.content).toContain('<key>RunAtLoad</key>');
     expect(def.content).toContain('<true/>');
-    expect(def.content).toContain('<key>KeepAlive</key>');
-    expect(def.content).toContain('<key>SuccessfulExit</key>');
-    expect(def.content).toContain('<false/>');
+    expect(def.content).toContain('<key>KeepAlive</key>\n\t<false/>');
+    expect(def.content).not.toContain('<key>SuccessfulExit</key>');
+    expect(def.content).not.toContain('<key>ThrottleInterval</key>');
   });
 
   it('keeps an unbound source build dormant instead of inventing release identity', () => {
@@ -467,23 +441,24 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
     expect(def.content).not.toContain('forged');
   });
 
-  it('plist crash restart throttle is independent from daemon work interval', () => {
+  it('does not delegate retries or throttling to launchd', () => {
     const def = generateServiceDefinition({
       ...baseOpts('darwin'),
       intervalMs: 1_800_000,
     });
-    expect(def.content).toContain('<key>ThrottleInterval</key>');
-    expect(def.content).toContain('<integer>30</integer>');
+    expect(def.content).not.toContain('<key>ThrottleInterval</key>');
+    expect(def.content).not.toContain('<integer>30</integer>');
     expect(def.content).toContain('<string>1800000</string>');
     expect(def.content).not.toContain('<integer>1800</integer>');
   });
 
-  it('plist honors custom restartSec with a 5s minimum', () => {
+  it('ignores restartSec because launchd no longer owns retry policy', () => {
     const custom = generateServiceDefinition({ ...baseOpts('darwin'), restartSec: 12 });
-    expect(custom.content).toContain('<integer>12</integer>');
+    expect(custom.content).not.toContain('<integer>12</integer>');
 
     const clamped = generateServiceDefinition({ ...baseOpts('darwin'), restartSec: 1 });
-    expect(clamped.content).toContain('<integer>5</integer>');
+    expect(clamped.content).not.toContain('<integer>5</integer>');
+    expect(clamped.content).not.toContain('<key>ThrottleInterval</key>');
   });
 
   it('plist PATH env includes common developer tool bins', () => {
@@ -1451,9 +1426,7 @@ describe('serviceStatus() — mocked OS query output', () => {
   const launchdTarget = `gui/${typeof process.getuid === 'function' ? process.getuid() : 501}/ai.ashlr.daemon`;
   const launchdPlist = path.join(FAKE_HOME, 'Library', 'LaunchAgents', 'ai.ashlr.daemon.plist');
   const launchdArguments = [
-    FAKE_NODE, FAKE_BIN, 'daemon', 'start', '--supervised', '--launchd-controller',
-    '--launchd-release', FAKE_RELEASE, '--budget', '5',
-    '--interval', '1800000', '--parallel', '1',
+    ...launchdRuntimeArguments(),
   ];
   const launchdPrint = (state: string, pid?: number): string => `${[
     `${launchdTarget} = {`,
@@ -1633,9 +1606,7 @@ describe('ensureRunning() — mocked OS activation', () => {
   const launchdTarget = `gui/${typeof process.getuid === 'function' ? process.getuid() : 501}/ai.ashlr.daemon`;
   const launchdPlist = path.join(FAKE_HOME, 'Library', 'LaunchAgents', 'ai.ashlr.daemon.plist');
   const launchdArguments = [
-    FAKE_NODE, FAKE_BIN, 'daemon', 'start', '--supervised', '--launchd-controller',
-    '--launchd-release', FAKE_RELEASE, '--budget', '5',
-    '--interval', '1800000', '--parallel', '1',
+    ...launchdRuntimeArguments(),
   ];
   const launchdPrint = (
     state: 'running' | 'waiting' | 'not running' | 'exited' | 'stopped',
