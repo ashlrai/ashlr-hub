@@ -88,6 +88,7 @@ vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
 
 import {
   _setDispatchProductionLedgerRetentionHooksForTest,
+  canonicalDispatchProductionAttempts,
   dispatchProductionRunStatusForOutcome,
   dispatchProductionDir,
   hasExactDispatchProductionTreatmentOutcomeReceipt,
@@ -926,6 +927,35 @@ describe('M342 dispatch production ledger', () => {
     expect(JSON.stringify(detailed.summary)).not.toContain('sk-legacy-private-token');
   });
 
+  it('keeps pre-envelope writes durable but outside current canonical yield', () => {
+    const legacy = makeEvent({
+      ts: new Date().toISOString(),
+      itemId: 'legacy-writer-without-envelope',
+    });
+    delete legacy.attemptId;
+    delete legacy.runId;
+    delete legacy.trajectoryId;
+    delete legacy.runEventSummary;
+
+    expect(recordDispatchProduction(legacy)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    const read = readDispatchProductionYieldDetailed({ windowMs: 60 * 60 * 1000, limit: 20 });
+
+    expect(read.events).toHaveLength(1);
+    expect(read.summary).toMatchObject({
+      events: 1,
+      attempts: 0,
+      preEnvelopeEvents: 1,
+      invalidAttemptIdentities: 0,
+      conflictingAttemptIdentities: 0,
+    });
+    expect(canonicalDispatchProductionAttempts(read.events)).toMatchObject({
+      events: [],
+      preEnvelopeEvents: 1,
+      invalidAttemptIdentities: 0,
+      conflictingAttemptIdentities: 0,
+    });
+  });
+
   it('persists physical repo identity and rejects legacy lexical or linked aliases', () => {
     useWindowsSemanticPrivateStorageFixture();
     const physicalRepo = join(home, 'physical-repo');
@@ -1394,7 +1424,22 @@ describe('M342 dispatch production ledger', () => {
         ...(index === 0 ? { repairRootId: undefined, repairDepth: undefined } : {}),
       });
     });
-    expect(recordDispatchProduction(invalid)).toEqual({ attempted: 2, recorded: 1, failed: 1 });
+    expect(recordDispatchProduction(invalid)).toEqual({ attempted: 2, recorded: 2, failed: 0 });
+    const persistedInvalid = readDispatchProductionEvents().filter((event) =>
+      invalid.some((candidate) => candidate.attemptId === event.attemptId));
+    const canonicalInvalid = canonicalDispatchProductionAttempts(persistedInvalid);
+    expect(canonicalInvalid).toMatchObject({
+      preEnvelopeEvents: 0,
+      invalidAttemptIdentities: 0,
+    });
+    expect(canonicalInvalid.events).toHaveLength(1);
+    expect(canonicalInvalid.events[0]).not.toHaveProperty('repairRootId');
+    expect(canonicalInvalid.events[0]).not.toHaveProperty('repairDepth');
+    expect(canonicalDispatchProductionAttempts(readDispatchProductionEvents())).toMatchObject({
+      events: [expect.any(Object), expect.any(Object), expect.any(Object)],
+      preEnvelopeEvents: 1,
+      invalidAttemptIdentities: 0,
+    });
     for (const event of invalid) {
       expect(existsSync(join(receiptDir, failureAttemptReceiptName(event)))).toBe(false);
     }

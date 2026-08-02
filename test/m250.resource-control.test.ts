@@ -947,7 +947,7 @@ describe('M252 Gateway — resource-aware demote', () => {
     expect(decision.reason).toMatch(/resourceDemote: claude→builtin/i);
   });
 
-  it('resource-aware learned target gate allows open or near m53 nudges', async () => {
+  it('does not let owner-writable dispatch observations steer resource-aware routing', async () => {
     let dispatchProductionEvents: DispatchProductionEvent[] = [];
     vi.doMock('../src/core/fleet/dispatch-production-ledger.js', async () => ({
       ...(await vi.importActual<typeof import('../src/core/fleet/dispatch-production-ledger.js')>(
@@ -999,8 +999,8 @@ describe('M252 Gateway — resource-aware demote', () => {
     const decision = await decide(item, cfg);
 
     expect(base.tier).toBe('frontier');
-    expect(decision.backend).toBe(alternate);
-    expect(decision.trace.some(t => t.stage === 'm53Nudge')).toBe(true);
+    expect(decision.backend).toBe(base.backend);
+    expect(decision.trace.some(t => t.stage === 'm53Nudge')).toBe(false);
     expect(decision.trace.some(t => t.stage === 'finalResourceDemote')).toBe(false);
   });
 

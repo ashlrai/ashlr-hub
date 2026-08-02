@@ -387,6 +387,7 @@ import {
 import { readAudit } from '../src/core/sandbox/audit.js';
 import {
   dispatchProductionDir,
+  dispatchProductionRunStatusForOutcome,
   readDispatchProductionEvents,
   recordDispatchProduction,
   resolveDispatchProductionFailureAttemptReceipt,
@@ -675,6 +676,36 @@ function testRepairRootId(repoDir: string, identity: string): string {
   return createHash('sha256')
     .update(JSON.stringify(['m201:repair-root:v1', resolve(repoDir), identity]))
     .digest('hex');
+}
+
+function currentDispatchObservation(
+  event: DispatchProductionEvent,
+  seed: string,
+): DispatchProductionEvent {
+  const digest = createHash('sha256').update(seed).digest('hex');
+  const attemptId = `attempt-${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+  const runId = event.runId ?? attemptId;
+  return {
+    ...event,
+    attemptId,
+    runId,
+    trajectoryId: `run:${attemptId}`,
+    runEventSummary: {
+      runId,
+      status: dispatchProductionRunStatusForOutcome(event.outcome),
+      outcome: event.outcome,
+      proposalCreated: event.proposalCreated,
+      proposalId: event.proposalId,
+      diffFiles: event.diffFiles,
+      diffLines: event.diffLines,
+      costUsd: event.spentUsd,
+      actionCounts: {
+        proposalCreated: event.proposalCreated ? 1 : 0,
+        proposalBlocked: event.outcome === 'gate-blocked' || event.outcome === 'proposal-capture-error' ? 1 : 0,
+        proposalDisabled: event.outcome === 'proposal-disabled' ? 1 : 0,
+      },
+    },
+  };
 }
 
 function makeDiagnosticResliceItem(
@@ -6916,7 +6947,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       repairAttemptOrdinal: 2,
       phase: 'launched',
     });
-    const noise = Array.from({ length: 257 }, (_, index): DispatchProductionEvent => ({
+    const noise = Array.from({ length: 257 }, (_, index): DispatchProductionEvent => currentDispatchObservation({
       schemaVersion: 1,
       ts: new Date(Date.now() + index + 1).toISOString(),
       machineId: 'm201',
@@ -6932,7 +6963,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       proposalCreated: false,
       spentUsd: 0,
       basis: 'run-proposal-outcome',
-    }));
+    }, `terminal-receipt-noise-${index}`));
     expect(recordDispatchProduction(noise)).toEqual({ attempted: 257, recorded: 257, failed: 0 });
     mockBuildBacklog.mockResolvedValue({
       generatedAt: new Date().toISOString(),
@@ -7071,7 +7102,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       '2026-07-14T08:00:00.000Z',
       '2026-07-15T08:00:00.000Z',
     ].entries()) {
-      expect(recordDispatchProduction({
+      expect(recordDispatchProduction(currentDispatchObservation({
         schemaVersion: 1,
         ts,
         machineId: 'm201',
@@ -7088,7 +7119,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
         spentUsd: 0,
         reason: 'test partition rotation',
         basis: 'run-proposal-outcome',
-      })).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+      }, `partition-rotation-${index}`))).toEqual({ attempted: 1, recorded: 1, failed: 0 });
     }
     vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'));
     const unrelatedRepair = makeDiagnosticResliceItem(repo.dir, 'aaabbf123456', 10, 'mid');
@@ -7183,7 +7214,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     const proposalRepair = actualProposalRepair.proposalRepairWorkItem(proposal, now);
     expect(proposalRepair).not.toBeNull();
     if (!proposalRepair) throw new Error('expected ordinary proposal repair');
-    const captureParent: DispatchProductionEvent = {
+    const captureParent: DispatchProductionEvent = currentDispatchObservation({
       schemaVersion: 1,
       ts: now.toISOString(),
       machineId: 'm201',
@@ -7198,14 +7229,13 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       routeReason: 'self-improvement local route',
       outcome: 'proposal-capture-error',
       proposalCreated: false,
-      runId: 'run-ordinary-capture-parent',
       spentUsd: 0.001,
       reason: 'proposal-capture-error: completeness gate failed for src/app.ts:12',
       diffFiles: 1,
       diffLines: 4,
       objectiveHash: 'b'.repeat(64),
       basis: 'run-proposal-outcome',
-    };
+    }, 'ordinary-capture-parent');
     expect(recordRepairHandoffs(captureParent, {
       schemaVersion: 2,
       activation: { id: '11111111-1111-4111-8111-111111111111', activatedAt: '2020-01-01T00:00:00.000Z' },
@@ -7241,7 +7271,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       });
       return marker;
     });
-    const noise = Array.from({ length: 257 }, (_, index): DispatchProductionEvent => ({
+    const noise = Array.from({ length: 257 }, (_, index): DispatchProductionEvent => currentDispatchObservation({
       schemaVersion: 1,
       ts: new Date(Date.now() + index + 1).toISOString(),
       machineId: 'm201',
@@ -7257,7 +7287,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       proposalCreated: false,
       spentUsd: 0,
       basis: 'run-proposal-outcome',
-    }));
+    }, `ordinary-success-noise-${index}`));
     expect(recordDispatchProduction(noise)).toEqual({ attempted: 257, recorded: 257, failed: 0 });
     for (const [index, ts] of [
       '2026-07-16T08:00:00.000Z',

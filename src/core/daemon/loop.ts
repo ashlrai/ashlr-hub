@@ -163,6 +163,7 @@ import { authenticatedRealizedMergeOf, realizedMergeOf } from '../inbox/realized
 import {
   dispatchProductionDir,
   dispatchProductionRunStatusForOutcome,
+  materializeDispatchProductionAttemptEnvelope,
   readDispatchProductionFailureAttemptReceipts,
   readDispatchProductionEventsDetailed,
   readDispatchProductionAttemptProtocolQuality,
@@ -2494,6 +2495,17 @@ function dispatchProductionEventFromOutcome(
     diffLines: production?.diffLines ?? trace.runEventSummary?.diffLines,
     costUsd: value.spentUsd,
   });
+  const canonicalActionCounts = eventRunSummary?.actionCounts
+    ? (() => {
+        const {
+          proposalBlocked: _proposalBlocked,
+          proposalCreated: _proposalCreated,
+          proposalDisabled: _proposalDisabled,
+          ...counts
+        } = eventRunSummary.actionCounts;
+        return counts;
+      })()
+    : undefined;
   const learningLabel = productionAttemptLearningLabelFromSignals({
     outcome,
     proposalCreated,
@@ -2594,7 +2606,7 @@ function dispatchProductionEventFromOutcome(
       ? exactFailureReceiptLineage === null
       : exactSuccessReceiptLineage === null)
   );
-  return {
+  return materializeDispatchProductionAttemptEnvelope({
     schemaVersion: 1,
     ts,
     machineId,
@@ -2614,7 +2626,14 @@ function dispatchProductionEventFromOutcome(
     ...(runId ? { runId } : {}),
     ...(trace.trajectoryId ? { trajectoryId: trace.trajectoryId } : {}),
     ...(trace.routeSnapshot ? { routeSnapshot: trace.routeSnapshot } : {}),
-    ...(eventRunSummary ? { runEventSummary: eventRunSummary } : {}),
+    ...(eventRunSummary
+      ? {
+          runEventSummary: {
+            ...eventRunSummary,
+            ...(canonicalActionCounts ? { actionCounts: canonicalActionCounts } : {}),
+          },
+        }
+      : {}),
     ...(production?.evidenceOutcome ? { evidenceOutcome: production.evidenceOutcome } : {}),
     ...(trace.learningSource ? { learningSource: trace.learningSource } : {}),
     ...(trace.labelBasis ? { labelBasis: trace.labelBasis } : {}),
@@ -2630,7 +2649,7 @@ function dispatchProductionEventFromOutcome(
     ...(typeof production?.diffLines === 'number' ? { diffLines: production.diffLines } : {}),
     ...(production?.reason ? { reason: production.reason } : trace.skipReason ? { reason: trace.skipReason } : {}),
     basis: dispatchProductionBasis(production, proposal),
-  };
+  });
 }
 
 function agentOutcomeFromDispatchEvent(event: DispatchProductionEvent): AgentActionOutcome {

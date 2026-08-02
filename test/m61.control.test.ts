@@ -561,8 +561,9 @@ describe('logs section (M61)', () => {
     expect(snap.fleet.dispatchProduction).toMatchObject({
       events: 1,
       proposalsCreated: 0,
-      noProposal: 1,
-      byBackend: [expect.objectContaining({ key: 'builtin', attempts: 1 })],
+      noProposal: 0,
+      preEnvelopeEvents: 1,
+      byBackend: [],
     });
     const activity = await buildFleetActivity(withFoundry({ autonomyControlLoop: true }));
     expect(activity.recentTicks[0]?.proposalProduction?.noProposalDispatches).toBe(1);

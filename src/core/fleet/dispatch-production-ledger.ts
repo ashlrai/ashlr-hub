@@ -1642,10 +1642,15 @@ function dispatchProductionRunStatusAgrees(
   status: unknown,
 ): status is 'done' | 'failed' | 'aborted' {
   if (outcome === 'cancelled') return status === 'aborted';
-  if (outcome === 'engine-failed' || outcome === 'sandbox-failed') {
-    return status === 'failed' || status === 'aborted';
+  if (outcome === 'proposal-created') {
+    return status === 'done' || status === 'failed' || status === 'aborted';
   }
-  if (outcome === 'proposal-capture-error') {
+  if (
+    outcome === 'engine-failed' ||
+    outcome === 'sandbox-failed' ||
+    outcome === 'proposal-capture-error' ||
+    outcome === 'proposal-disabled'
+  ) {
     return status === 'done' || status === 'failed' || status === 'aborted';
   }
   if (outcome === 'gate-blocked') return status === 'done' || status === 'failed' || status === 'aborted';
@@ -2033,11 +2038,13 @@ function actionCountsAgreeWithOutcome(
   return event.outcome !== 'cancelled' || (actionCounts.proposalBlocked ?? 0) === 0;
 }
 
-function materializeDispatchProductionAttemptEnvelope(
+export function materializeDispatchProductionAttemptEnvelope(
   event: DispatchProductionEvent,
 ): DispatchProductionEvent {
   const attemptId = event.attemptId ??
-    (isOuterAttemptIdentity(event.runId) ? event.runId : undefined);
+    (event.trajectoryId === `run:${event.runId}` && isOuterAttemptIdentity(event.runId)
+      ? event.runId
+      : undefined);
   const trajectoryId = event.trajectoryId ?? (attemptId ? `run:${attemptId}` : undefined);
   if (event.proposalCreated !== (event.outcome === 'proposal-created')) {
     throw new Error('dispatch production outcome contradicts proposal creation');
@@ -2137,9 +2144,6 @@ export function recordDispatchProduction(
         const writeEvent = lifecycle ? event : materializeDispatchProductionAttemptEnvelope(event);
         const record = sanitizeDispatchProductionEvent(writeEvent, { materializeLearningLabel: true });
         if (!isDispatchProductionEvent(record)) throw new Error('dispatch production repository identity is not canonical');
-        if (!lifecycle && canonicalAttemptIdentity(record) === null) {
-          throw new Error('dispatch production attempt envelope is incomplete');
-        }
         const canonicalLine = JSON.stringify(record);
         const attemptAuthority = parseDispatchProductionAttemptAuthority(record, canonicalLine);
         const failureAuthority = parseDispatchProductionFailureAttemptAuthority(record, canonicalLine);
