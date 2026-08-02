@@ -30,8 +30,11 @@ const moduleLoads = vi.hoisted(() => ({
   serviceConfig: 0,
 }));
 
+const moduleFailures = vi.hoisted(() => ({ config: false, loop: false }));
+
 vi.mock('../src/core/config.js', () => {
   moduleLoads.config++;
+  if (moduleFailures.config) throw new Error('config module unavailable');
   return {
     loadConfig: effects.loadConfig,
     loadConfigReadOnly: effects.loadConfig,
@@ -41,7 +44,13 @@ vi.mock('../src/core/config.js', () => {
 
 vi.mock('../src/core/daemon/loop.js', () => {
   moduleLoads.loop++;
-  return { runDaemon: effects.runDaemon, stopDaemon: effects.stopDaemon };
+  return {
+    get runDaemon() {
+      if (moduleFailures.loop) throw new Error('loop module unavailable');
+      return effects.runDaemon;
+    },
+    stopDaemon: effects.stopDaemon,
+  };
 });
 
 vi.mock('../src/core/daemon/state.js', () => {
@@ -164,6 +173,8 @@ beforeEach(async () => {
   for (const key of Object.keys(moduleLoads) as Array<keyof typeof moduleLoads>) {
     moduleLoads[key] = 0;
   }
+  moduleFailures.config = false;
+  moduleFailures.loop = false;
 
   effects.loadConfig.mockReturnValue({ daemon: { dailyBudgetUsd: 5, intervalMs: 300_000, parallel: 1 } });
   effects.runDaemon.mockResolvedValue(daemonState);
@@ -270,15 +281,54 @@ describe('daemon valid flags remain supported', () => {
       expectedReleaseRevision: revision,
       runDaemon: expect.any(Function),
     }));
+    expect(effects.runLaunchdRetryController.mock.calls[0]?.[0]).not.toHaveProperty('externalAuthority');
     expect(effects.runDaemon).not.toHaveBeenCalled();
   });
 
-  it('rejects incomplete hidden launchd argv before importing effect modules', async () => {
+  it('settles incomplete hidden launchd argv at zero before importing effect modules', async () => {
     const result = await capture(['start', '--supervised', '--launchd-controller']);
 
-    expect(result.code).toBe(2);
+    expect(result.code).toBe(0);
     expect(result.stderr).toContain('--launchd-controller requires --supervised and --launchd-release');
+    expect(result.stderr).toContain('restart authority blocked');
     expectNoEffectModulesOrCalls();
+  });
+
+  it.each([
+    ['malformed config', async () => effects.loadConfig.mockImplementationOnce(() => { throw new Error('bad config'); })],
+    ['missing loop module', async () => {
+      moduleFailures.loop = true;
+      vi.resetModules();
+      ({ cmdDaemon } = await import('../src/cli/daemon.js'));
+    }],
+    ['daemon re-entrancy', async () => { process.env['ASHLR_IN_DAEMON'] = '1'; }],
+  ] as const)('settles %s inside the claimed controller callback without a nonzero exit', async (_label, arrange) => {
+    await arrange();
+    effects.runLaunchdRetryController.mockImplementationOnce(async (options: {
+      runDaemon: () => Promise<unknown>;
+    }) => {
+      try {
+        await options.runDaemon();
+        throw new Error('fixture expected startup refusal');
+      } catch {
+        return {
+          exitCode: 0,
+          reason: 'daemon-disposition-invalid',
+          daemonInvoked: true,
+          claimNumber: 1,
+          attemptsRemaining: 2,
+          externalAuthority: 'verified',
+        };
+      }
+    });
+
+    const result = await capture([
+      'start', '--supervised', '--launchd-controller', '--launchd-release', 'a'.repeat(40),
+    ]);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('launchd retry controller: daemon-disposition-invalid');
+    expect(effects.runDaemon).not.toHaveBeenCalled();
   });
 
   it('preserves install --no-autostart without starting the service', async () => {

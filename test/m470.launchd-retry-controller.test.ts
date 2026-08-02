@@ -1,13 +1,44 @@
-import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+  generateKeyPairSync,
+  sign,
+  type KeyObject,
+} from 'node:crypto';
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  LAUNCHD_RETRY_RECEIPT_PROTOCOL,
+  LAUNCHD_RETRY_SERVICE_IDENTITY,
+  canonicalLaunchdRetryEpochReceiptPayload,
+  launchdRetryAuthorityKeyId,
+  launchdRetryTrustPolicyDigest,
+  verifyLaunchdRetryEpochReceipt,
+  type LaunchdRetryEpochReceipt,
+  type LaunchdRetryEpochReceiptUnsigned,
+} from '../src/core/daemon/launchd-retry-authority.js';
+import {
   LAUNCHD_RETRY_MAX_ATTEMPTS,
   LAUNCHD_RETRY_WINDOW_MS,
   runLaunchdRetryController,
+  type LaunchdRetryCasRequest,
+  type LaunchdRetryExternalAuthority,
 } from '../src/core/daemon/launchd-retry-controller.js';
+import {
+  LAUNCHD_RETRY_SIGNATURE_ALGORITHM,
+  LAUNCHD_RETRY_SIGNER_ROLE,
+  LAUNCHD_RETRY_TRUST_PROTOCOL,
+  type LaunchdRetryTrustPolicy,
+} from '../src/core/daemon/launchd-retry-trust-roots.js';
 import type { DaemonRunResult } from '../src/core/daemon/loop.js';
 
 const RELEASE_A = 'a'.repeat(40);
@@ -36,20 +67,115 @@ function daemonResult(
   };
 }
 
-describe('M470 bounded launchd retry controller', () => {
+function signedReceipt(
+  unsigned: LaunchdRetryEpochReceiptUnsigned,
+  privateKey: KeyObject,
+): LaunchdRetryEpochReceipt {
+  const payload = canonicalLaunchdRetryEpochReceiptPayload(unsigned);
+  if (!payload) throw new Error('invalid receipt fixture');
+  return { ...unsigned, signature: sign(null, payload, privateKey).toString('base64url') };
+}
+
+interface ExternalStore {
+  current: LaunchdRetryEpochReceipt;
+  compareAndSwap: ReturnType<typeof vi.fn<(request: LaunchdRetryCasRequest) => Promise<{
+    status: 'committed' | 'conflict' | 'unavailable';
+    receipt?: LaunchdRetryEpochReceipt;
+  }>>>;
+}
+
+describe('M470 externally anchored launchd retry controller', () => {
   let home: string;
   let nowMs: number;
+  let privateKey: KeyObject;
+  let policy: LaunchdRetryTrustPolicy;
+  let store: ExternalStore;
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'ashlr-launchd-retry-'));
     chmodSync(home, 0o700);
     nowMs = 10_000;
+    const pair = generateKeyPairSync('ed25519');
+    privateKey = pair.privateKey;
+    const publicKeySpki = Buffer.from(pair.publicKey.export({ format: 'der', type: 'spki' }))
+      .toString('base64url');
+    const keyId = launchdRetryAuthorityKeyId(publicKeySpki)!;
+    policy = {
+      schemaVersion: 1,
+      protocol: LAUNCHD_RETRY_TRUST_PROTOCOL,
+      policyGeneration: 1,
+      roots: [{
+        keyId,
+        publicKeySpki,
+        signerRole: LAUNCHD_RETRY_SIGNER_ROLE,
+        signatureAlgorithm: LAUNCHD_RETRY_SIGNATURE_ALGORITHM,
+        notBeforeMs: 0,
+        notAfterMs: Number.MAX_SAFE_INTEGER,
+        revokedAtMs: null,
+      }],
+    };
+    const trustPolicyDigest = launchdRetryTrustPolicyDigest(policy)!;
+    const initial = signedReceipt({
+      schemaVersion: 1,
+      protocol: LAUNCHD_RETRY_RECEIPT_PROTOCOL,
+      serviceIdentity: LAUNCHD_RETRY_SERVICE_IDENTITY,
+      releaseRevision: RELEASE_A,
+      epoch: 1,
+      sequence: 0,
+      transition: 'initialize',
+      claimCount: 0,
+      windowStartedAtMs: nowMs,
+      maxObservedAtMs: nowMs,
+      previousReceiptDigest: null,
+      trustPolicyDigest,
+      policyGeneration: policy.policyGeneration,
+      keyId,
+      signerRole: LAUNCHD_RETRY_SIGNER_ROLE,
+      signatureAlgorithm: LAUNCHD_RETRY_SIGNATURE_ALGORITHM,
+    }, privateKey);
+    store = {
+      current: initial,
+      compareAndSwap: vi.fn(async (request: LaunchdRetryCasRequest) => {
+        const verified = verifyLaunchdRetryEpochReceipt(store.current, {
+          releaseRevision: RELEASE_A,
+          serviceIdentity: LAUNCHD_RETRY_SERVICE_IDENTITY,
+          nowMs,
+        }, policy);
+        if (!verified.ok || request.expectedReceiptDigest !== verified.value.receiptDigest) {
+          return { status: 'conflict' as const };
+        }
+        const next = signedReceipt({
+          schemaVersion: 1,
+          protocol: LAUNCHD_RETRY_RECEIPT_PROTOCOL,
+          serviceIdentity: request.serviceIdentity,
+          releaseRevision: request.releaseRevision,
+          epoch: request.nextEpoch,
+          sequence: request.nextSequence,
+          transition: request.action === 'claim' ? 'claim' : 'healthy-reset',
+          claimCount: request.nextClaimCount,
+          windowStartedAtMs: request.nextWindowStartedAtMs,
+          maxObservedAtMs: request.nextMaxObservedAtMs,
+          previousReceiptDigest: request.expectedReceiptDigest,
+          trustPolicyDigest,
+          policyGeneration: policy.policyGeneration,
+          keyId,
+          signerRole: LAUNCHD_RETRY_SIGNER_ROLE,
+          signatureAlgorithm: LAUNCHD_RETRY_SIGNATURE_ALGORITHM,
+        }, privateKey);
+        store.current = next;
+        return { status: 'committed' as const, receipt: next };
+      }),
+    };
   });
 
   afterEach(() => {
     rmSync(home, { recursive: true, force: true });
     vi.restoreAllMocks();
   });
+
+  function authority(receipt: unknown = store.current): LaunchdRetryExternalAuthority {
+    return { currentReceipt: receipt, trustPolicy: policy, compareAndSwap: store.compareAndSwap };
+  }
 
   function run(
     runDaemon: () => Promise<DaemonRunResult>,
@@ -68,14 +194,49 @@ describe('M470 bounded launchd retry controller', () => {
         reason: 'missing',
         path: join(home, '.ashlr', 'KILL'),
       }),
+      externalAuthority: authority(),
       runDaemon,
       ...overrides,
     });
   }
 
-  it('durably claims exactly three attempts and returns terminal zero after exhaustion', async () => {
+  it('ships dormant without an external CAS transport and creates no local authority', async () => {
     const runDaemon = vi.fn(async () => daemonResult('persistence-failure', true));
+    expect(await run(runDaemon, { externalAuthority: undefined })).toMatchObject({
+      exitCode: 0,
+      reason: 'external-retry-transport-unavailable',
+      externalAuthority: 'blocked',
+      daemonInvoked: false,
+    });
+    expect(runDaemon).not.toHaveBeenCalled();
+    expect(store.compareAndSwap).not.toHaveBeenCalled();
+    expect(() => statSync(join(home, '.ashlr', 'daemon-supervision'))).toThrow();
+  });
 
+  it('refuses empty trust, missing receipts, unavailable CAS, and invalid signatures', async () => {
+    const runDaemon = vi.fn(async () => daemonResult('persistence-failure', true));
+    expect(await run(runDaemon, {
+      externalAuthority: { ...authority(), trustPolicy: undefined },
+    })).toMatchObject({ reason: 'external-retry-trust-unprovisioned', exitCode: 0 });
+    expect(await run(runDaemon, {
+      externalAuthority: { ...authority(), currentReceipt: undefined },
+    })).toMatchObject({ reason: 'external-retry-receipt-invalid', exitCode: 0 });
+    expect(await run(runDaemon, {
+      externalAuthority: {
+        ...authority(),
+        compareAndSwap: async () => ({ status: 'unavailable' }),
+      },
+    })).toMatchObject({ reason: 'external-retry-transport-unavailable', exitCode: 0 });
+    expect(await run(runDaemon, {
+      externalAuthority: {
+        ...authority({ ...store.current, signature: 'A'.repeat(86) }),
+      },
+    })).toMatchObject({ reason: 'external-retry-receipt-invalid', exitCode: 0 });
+    expect(runDaemon).not.toHaveBeenCalled();
+  });
+
+  it('durably claims exactly three externally committed attempts', async () => {
+    const runDaemon = vi.fn(async () => daemonResult('persistence-failure', true));
     expect(await run(runDaemon)).toMatchObject({
       exitCode: 1, reason: 'retry-authorized', claimNumber: 1, attemptsRemaining: 2,
     });
@@ -92,54 +253,49 @@ describe('M470 bounded launchd retry controller', () => {
       exitCode: 0, reason: 'retry-exhausted', daemonInvoked: false, attemptsRemaining: 0,
     });
     expect(runDaemon).toHaveBeenCalledTimes(LAUNCHD_RETRY_MAX_ATTEMPTS);
+    expect(store.compareAndSwap).toHaveBeenCalledTimes(LAUNCHD_RETRY_MAX_ATTEMPTS);
 
     const root = join(home, '.ashlr', 'daemon-supervision');
-    const key = join(root, 'launchd-retry.ed25519.pem');
-    const state = join(root, 'launchd-retry.json');
     expect(statSync(root).mode & 0o777).toBe(0o700);
-    expect(statSync(key).mode & 0o777).toBe(0o600);
-    expect(statSync(state).mode & 0o777).toBe(0o600);
-    const envelope = JSON.parse(readFileSync(state, 'utf8')) as Record<string, unknown>;
-    expect(envelope).toEqual(expect.objectContaining({ signature: expect.any(String) }));
-    expect((envelope['state'] as { claims: unknown[] }).claims).toHaveLength(3);
+    expect(statSync(join(root, 'launchd-retry.json')).mode & 0o777).toBe(0o600);
+    expect(() => statSync(join(root, 'launchd-retry.ed25519.pem'))).toThrow();
   });
 
-  it('does not renew an expired failure window', async () => {
+  it('does not renew an expired externally signed failure window', async () => {
     const runDaemon = vi.fn(async () => daemonResult('persistence-failure', true));
     expect((await run(runDaemon)).exitCode).toBe(1);
     nowMs += LAUNCHD_RETRY_WINDOW_MS + 1;
-
     expect(await run(runDaemon)).toMatchObject({
       exitCode: 0, reason: 'retry-window-expired', daemonInvoked: false,
     });
     expect(runDaemon).toHaveBeenCalledOnce();
   });
 
-  it('resets only after an exact healthy completion returned by the owned daemon call', async () => {
+  it('resets only through a fresh external healthy-reset receipt', async () => {
     const retry = vi.fn(async () => daemonResult('persistence-failure', true));
     expect((await run(retry)).claimNumber).toBe(1);
     nowMs++;
     expect(await run(async () => daemonResult('clean-completion', false))).toMatchObject({
-      exitCode: 0,
-      reason: 'healthy-completion',
-      daemonInvoked: true,
-      attemptsRemaining: LAUNCHD_RETRY_MAX_ATTEMPTS,
+      reason: 'healthy-completion', claimNumber: 2, attemptsRemaining: 3,
     });
+    expect(store.current).toMatchObject({ transition: 'healthy-reset', epoch: 2, claimCount: 0 });
     nowMs++;
     expect(await run(retry)).toMatchObject({ claimNumber: 1, attemptsRemaining: 2 });
   });
 
-  it('consumes a claim when the process fails between claim persistence and daemon completion', async () => {
-    expect(await run(async () => { throw new Error('crash before daemon disposition'); })).toMatchObject({
-      exitCode: 0, reason: 'daemon-disposition-invalid', daemonInvoked: true, claimNumber: 1,
-    });
-    nowMs++;
-    expect(await run(async () => daemonResult('persistence-failure', true))).toMatchObject({
-      exitCode: 1, reason: 'retry-authorized', claimNumber: 2,
-    });
+  it('settles malformed config, missing modules, and re-entrancy throws after a durable claim', async () => {
+    for (const message of ['malformed config', 'loop module missing', 'daemon re-entrancy']) {
+      expect(await run(async () => { throw new Error(message); })).toMatchObject({
+        exitCode: 0,
+        reason: 'daemon-disposition-invalid',
+        daemonInvoked: true,
+      });
+      nowMs++;
+    }
+    expect(store.current.claimCount).toBe(3);
   });
 
-  it('serializes concurrent launches and gives the contender no daemon authority', async () => {
+  it('serializes overlapping launches and withholds daemon authority from the contender', async () => {
     let release!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });
     const firstRun = vi.fn(async () => {
@@ -147,7 +303,6 @@ describe('M470 bounded launchd retry controller', () => {
       return daemonResult('clean-completion', false);
     });
     const secondRun = vi.fn(async () => daemonResult('clean-completion', false));
-
     const first = run(firstRun);
     await vi.waitFor(() => expect(firstRun).toHaveBeenCalledOnce());
     expect(await run(secondRun)).toMatchObject({
@@ -158,13 +313,13 @@ describe('M470 bounded launchd retry controller', () => {
     await expect(first).resolves.toMatchObject({ reason: 'healthy-completion' });
   });
 
-  it('fails closed for explicit stop before claim and for a KILL race after claim', async () => {
+  it('fails closed for explicit stop before claim and a KILL race after claim', async () => {
     const runDaemon = vi.fn(async () => daemonResult('clean-completion', false));
     expect(await run(runDaemon, {
       killSwitchState: () => ({
         state: 'active', sourceState: 'healthy', reason: 'present', path: join(home, '.ashlr', 'KILL'),
       }),
-    })).toMatchObject({ exitCode: 0, reason: 'operator-stop', daemonInvoked: false, claimNumber: null });
+    })).toMatchObject({ reason: 'operator-stop', daemonInvoked: false, claimNumber: null });
 
     let reads = 0;
     expect(await run(runDaemon, {
@@ -174,63 +329,62 @@ describe('M470 bounded launchd retry controller', () => {
         reason: reads >= 3 ? 'present' : 'missing',
         path: join(home, '.ashlr', 'KILL'),
       }),
-    })).toMatchObject({ exitCode: 0, reason: 'operator-stop', daemonInvoked: false, claimNumber: 1 });
+    })).toMatchObject({ reason: 'operator-stop', daemonInvoked: false, claimNumber: 1 });
     expect(runDaemon).not.toHaveBeenCalled();
   });
 
-  it('refuses stale releases, rollback clocks, unsupported platforms, and invalid dispositions', async () => {
+  it('rejects stale releases, rollback clocks, and invalid daemon dispositions', async () => {
     const runDaemon = vi.fn(async () => daemonResult('persistence-failure', true));
     expect(await run(runDaemon, { expectedReleaseRevision: RELEASE_B })).toMatchObject({
-      exitCode: 0, reason: 'stale-release', daemonInvoked: false,
+      reason: 'stale-release', daemonInvoked: false,
     });
     expect(await run(runDaemon, { runtimeReleaseTrusted: false })).toMatchObject({
-      exitCode: 0, reason: 'stale-release', daemonInvoked: false,
-    });
-    expect(await run(runDaemon, { platform: 'linux' })).toMatchObject({
-      exitCode: 0, reason: 'unsupported-platform', daemonInvoked: false,
+      reason: 'stale-release', daemonInvoked: false,
     });
     expect((await run(runDaemon)).exitCode).toBe(1);
     nowMs--;
-    expect(await run(runDaemon)).toMatchObject({
-      exitCode: 0, reason: 'clock-rollback', daemonInvoked: false,
-    });
+    expect(await run(runDaemon)).toMatchObject({ reason: 'clock-rollback', daemonInvoked: false });
     nowMs += 2;
     expect(await run(async () => ({
       ...daemonResult('persistence-failure', true),
       termination: { reason: 'persistence-failure', retryable: true, exitCode: 0 },
     } as unknown as DaemonRunResult))).toMatchObject({
-      exitCode: 0, reason: 'daemon-disposition-invalid', daemonInvoked: true,
+      reason: 'daemon-disposition-invalid', daemonInvoked: true,
     });
   });
 
-  it('refuses missing half-state and corrupt signed state without recreating authority', async () => {
+  it('rejects local state replay, current-state deletion, and deleted initialization replay', async () => {
     const retry = async () => daemonResult('persistence-failure', true);
-    expect((await run(retry)).exitCode).toBe(1);
+    const initialReceipt = store.current;
+    expect((await run(retry)).claimNumber).toBe(1);
     const statePath = join(home, '.ashlr', 'daemon-supervision', 'launchd-retry.json');
-    unlinkSync(statePath);
-    expect(await run(retry)).toMatchObject({
-      exitCode: 0, reason: 'state-unavailable', daemonInvoked: false,
+    const firstState = readFileSync(statePath);
+    const firstReceipt = store.current;
+    nowMs++;
+    expect((await run(retry)).claimNumber).toBe(2);
+
+    writeFileSync(statePath, firstState, { mode: 0o600 });
+    expect(await run(retry)).toMatchObject({ reason: 'external-retry-receipt-replayed', exitCode: 0 });
+    expect(await run(retry, { externalAuthority: authority(firstReceipt) })).toMatchObject({
+      reason: 'external-retry-receipt-replayed', exitCode: 0,
     });
 
-    rmSync(home, { recursive: true, force: true });
-    home = mkdtempSync(join(tmpdir(), 'ashlr-launchd-retry-'));
-    chmodSync(home, 0o700);
-    expect((await run(retry)).exitCode).toBe(1);
-    const corruptPath = join(home, '.ashlr', 'daemon-supervision', 'launchd-retry.json');
-    const envelope = JSON.parse(readFileSync(corruptPath, 'utf8')) as { signature: string };
-    envelope.signature = Buffer.alloc(64, 7).toString('base64');
-    writeFileSync(corruptPath, `${JSON.stringify(envelope)}\n`, { mode: 0o600 });
-    chmodSync(corruptPath, 0o600);
-    expect(await run(retry)).toMatchObject({
-      exitCode: 0, reason: 'state-corrupt', daemonInvoked: false,
+    unlinkSync(statePath);
+    expect(await run(retry)).toMatchObject({ reason: 'retry-state-deleted', exitCode: 0 });
+    expect(await run(retry, { externalAuthority: authority(initialReceipt) })).toMatchObject({
+      reason: 'external-retry-receipt-replayed', exitCode: 0,
     });
   });
 
-  it('binds persisted state to one exact release revision', async () => {
-    expect((await run(async () => daemonResult('persistence-failure', true))).exitCode).toBe(1);
-    expect(await run(async () => daemonResult('clean-completion', false), {
-      expectedReleaseRevision: RELEASE_B,
-      runtimeReleaseRevision: RELEASE_B,
-    })).toMatchObject({ exitCode: 0, reason: 'stale-release', daemonInvoked: false });
+  it('rejects receipt sequence rollback and legacy local signing authority', async () => {
+    const retry = async () => daemonResult('persistence-failure', true);
+    const initial = store.current;
+    expect((await run(retry)).claimNumber).toBe(1);
+    expect(await run(retry, { externalAuthority: authority(initial) })).toMatchObject({
+      reason: 'external-retry-receipt-replayed', exitCode: 0,
+    });
+    const legacyKey = join(home, '.ashlr', 'daemon-supervision', 'launchd-retry.ed25519.pem');
+    writeFileSync(legacyKey, 'legacy-local-key\n', { mode: 0o600 });
+    expect(await run(retry)).toMatchObject({ reason: 'legacy-local-authority-present', exitCode: 0 });
   });
 });

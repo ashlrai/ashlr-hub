@@ -1435,7 +1435,18 @@ export async function install(opts: ServiceInstallOptions = {}): Promise<void> {
       verify: () => {
         try {
           const disabled = launchdDisabled(domainTarget, label);
-          const loaded = launchdLoaded(serviceTarget);
+          if (autostart && !def.launchdRuntime) {
+            throw new Error('launchd runtime contract is unavailable');
+          }
+          const runtime = autostart
+            ? readLaunchdRuntimeState(serviceTarget, {
+                expectedPath: def.filePath,
+                expectedProgram: def.launchdRuntime!.program,
+                expectedArguments: def.launchdRuntime!.arguments,
+                timeoutMs: 15_000,
+              })
+            : readLaunchdRuntimeState(serviceTarget);
+          const loaded = runtime.loaded;
           return disabled === !autostart && loaded === autostart
             ? { ok: true, stdout: '', stderr: '' }
             : {
@@ -1991,6 +2002,7 @@ export function serviceStatusCached(
     intervalMs: opts.intervalMs ?? null,
     parallel: opts.parallel ?? null,
     keepAwake: opts.keepAwake ?? null,
+    releaseRevision: opts.releaseRevision ?? null,
   });
   const now = Date.now();
   if (cachedServiceStatus && cachedServiceStatus.key === key && cachedServiceStatus.expiresAt > now) {

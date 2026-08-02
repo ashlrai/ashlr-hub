@@ -1,12 +1,4 @@
-import {
-  createPrivateKey,
-  createPublicKey,
-  generateKeyPairSync,
-  randomUUID,
-  sign,
-  verify,
-  type KeyObject,
-} from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import {
   closeSync,
   constants as fsConstants,
@@ -25,15 +17,26 @@ import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-sto
 import { readKillSwitch } from '../sandbox/policy.js';
 import { assurePrivateStoragePath } from '../util/private-storage.js';
 import { writePrivateFileAtomically } from '../util/private-file-write.js';
+import {
+  LAUNCHD_RETRY_SERVICE_IDENTITY,
+  launchdRetryReceiptBytesEqual,
+  verifyLaunchdRetryEpochReceipt,
+  type LaunchdRetryEpochReceipt,
+  type LaunchdRetryReceiptTransition,
+  type VerifiedLaunchdRetryEpochReceipt,
+} from './launchd-retry-authority.js';
+import {
+  LAUNCHD_RETRY_TRUST_POLICY,
+  type LaunchdRetryTrustPolicy,
+} from './launchd-retry-trust-roots.js';
 import type { DaemonRunResult } from './loop.js';
 
 export const LAUNCHD_RETRY_MAX_ATTEMPTS = 3;
 export const LAUNCHD_RETRY_WINDOW_MS = 5 * 60_000;
 
-const POLICY_VERSION = 'launchd-bounded-retry-v1';
+const POLICY_VERSION = 'launchd-bounded-retry-v2';
 const REVISION_RE = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
-const MAX_KEY_BYTES = 4_096;
-const MAX_STATE_BYTES = 16_384;
+const MAX_STATE_BYTES = 32_768;
 const DAEMON_REASONS = new Set([
   'clean-completion', 'kill-switch', 'signal', 'start-refused', 'persistence-failure',
   'runtime-failure', 'ownership-loss',
@@ -44,26 +47,42 @@ const DAEMON_DIAGNOSTICS = new Set([
   'runtime-transient', 'runtime-unclassified',
 ]);
 
-interface RetryClaim {
-  claimId: string;
-  claimedAtMs: number;
-}
-
 interface LaunchdRetryState {
-  schemaVersion: 1;
+  schemaVersion: 2;
   policyVersion: typeof POLICY_VERSION;
+  serviceIdentity: typeof LAUNCHD_RETRY_SERVICE_IDENTITY;
   releaseRevision: string;
-  generationId: string;
-  windowStartedAtMs: number;
-  maxObservedAtMs: number;
-  resetSequence: number;
-  claims: RetryClaim[];
-  lastHealthyAtMs: number | null;
+  epoch: number;
+  sequence: number;
+  claimCount: number;
+  receiptDigest: string;
+  receipt: LaunchdRetryEpochReceipt;
 }
 
-interface SignedLaunchdRetryState {
-  state: LaunchdRetryState;
-  signature: string;
+export interface LaunchdRetryCasRequest {
+  schemaVersion: 1;
+  action: 'claim' | 'healthy-reset';
+  serviceIdentity: typeof LAUNCHD_RETRY_SERVICE_IDENTITY;
+  releaseRevision: string;
+  expectedReceiptDigest: string;
+  expectedEpoch: number;
+  expectedSequence: number;
+  nextEpoch: number;
+  nextSequence: number;
+  nextClaimCount: number;
+  nextWindowStartedAtMs: number;
+  nextMaxObservedAtMs: number;
+  currentReceipt: LaunchdRetryEpochReceipt;
+}
+
+export type LaunchdRetryCasResult =
+  | { status: 'committed'; receipt: unknown }
+  | { status: 'conflict' | 'unavailable' | 'refused' };
+
+export interface LaunchdRetryExternalAuthority {
+  currentReceipt: unknown;
+  trustPolicy?: LaunchdRetryTrustPolicy;
+  compareAndSwap: (request: LaunchdRetryCasRequest) => Promise<LaunchdRetryCasResult>;
 }
 
 export type LaunchdRetryReason =
@@ -76,7 +95,13 @@ export type LaunchdRetryReason =
   | 'unsupported-platform'
   | 'stale-release'
   | 'clock-rollback'
-  | 'state-unavailable'
+  | 'external-retry-transport-unavailable'
+  | 'external-retry-trust-unprovisioned'
+  | 'external-retry-receipt-invalid'
+  | 'external-retry-receipt-replayed'
+  | 'retry-state-uninitialized'
+  | 'retry-state-deleted'
+  | 'legacy-local-authority-present'
   | 'state-corrupt'
   | 'state-persistence-failed'
   | 'daemon-terminal'
@@ -88,11 +113,13 @@ export interface LaunchdRetryControllerResult {
   daemonInvoked: boolean;
   claimNumber: number | null;
   attemptsRemaining: number | null;
+  externalAuthority: 'verified' | 'blocked';
 }
 
-interface LaunchdRetryControllerOptions {
+export interface LaunchdRetryControllerOptions {
   expectedReleaseRevision: string;
   runDaemon: () => Promise<DaemonRunResult>;
+  externalAuthority?: LaunchdRetryExternalAuthority;
   homeDir?: string;
   now?: () => number;
   platform?: NodeJS.Platform;
@@ -103,7 +130,7 @@ interface LaunchdRetryControllerOptions {
 
 interface RetryPaths {
   root: string;
-  key: string;
+  legacyKey: string;
   state: string;
   lock: string;
 }
@@ -112,7 +139,7 @@ function retryPaths(home: string): RetryPaths {
   const root = join(home, '.ashlr', 'daemon-supervision');
   return {
     root,
-    key: join(root, 'launchd-retry.ed25519.pem'),
+    legacyKey: join(root, 'launchd-retry.ed25519.pem'),
     state: join(root, 'launchd-retry.json'),
     lock: join(root, 'launchd-retry.lock'),
   };
@@ -155,144 +182,96 @@ function readPrivateFile(path: string, maxBytes: number, anchorPath: string): Bu
   }
 }
 
-function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+function exactPlainRecord(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return false;
+  if (Object.values(Object.getOwnPropertyDescriptors(value)).some(
+    (descriptor) => !Object.hasOwn(descriptor, 'value'),
+  )) return false;
   const actual = Object.keys(value).sort();
   const expected = [...keys].sort();
   return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function parseState(value: unknown): LaunchdRetryState | null {
-  if (!isRecord(value) || !exactKeys(value, [
-    'schemaVersion', 'policyVersion', 'releaseRevision', 'generationId', 'windowStartedAtMs',
-    'maxObservedAtMs', 'resetSequence', 'claims', 'lastHealthyAtMs',
-  ])) return null;
-  if (value['schemaVersion'] !== 1 || value['policyVersion'] !== POLICY_VERSION ||
-    typeof value['releaseRevision'] !== 'string' || !REVISION_RE.test(value['releaseRevision']) ||
-    typeof value['generationId'] !== 'string' || value['generationId'].length < 16 ||
-    !Number.isSafeInteger(value['windowStartedAtMs']) || (value['windowStartedAtMs'] as number) < 0 ||
-    !Number.isSafeInteger(value['maxObservedAtMs']) || (value['maxObservedAtMs'] as number) < 0 ||
-    !Number.isSafeInteger(value['resetSequence']) || (value['resetSequence'] as number) < 0 ||
-    !Array.isArray(value['claims']) || value['claims'].length > LAUNCHD_RETRY_MAX_ATTEMPTS ||
-    !(value['lastHealthyAtMs'] === null || (Number.isSafeInteger(value['lastHealthyAtMs']) &&
-      (value['lastHealthyAtMs'] as number) >= 0))) return null;
-  const claims: RetryClaim[] = [];
-  for (const claim of value['claims']) {
-    if (!isRecord(claim) || !exactKeys(claim, ['claimId', 'claimedAtMs']) ||
-      typeof claim['claimId'] !== 'string' || claim['claimId'].length < 16 ||
-      !Number.isSafeInteger(claim['claimedAtMs']) || (claim['claimedAtMs'] as number) < 0) return null;
-    claims.push({ claimId: claim['claimId'], claimedAtMs: claim['claimedAtMs'] as number });
-  }
-  const windowStartedAtMs = value['windowStartedAtMs'] as number;
-  const maxObservedAtMs = value['maxObservedAtMs'] as number;
-  if (maxObservedAtMs < windowStartedAtMs || claims.some((claim) =>
-    claim.claimedAtMs < windowStartedAtMs || claim.claimedAtMs > maxObservedAtMs)) return null;
+function stateFromReceipt(value: VerifiedLaunchdRetryEpochReceipt): LaunchdRetryState {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     policyVersion: POLICY_VERSION,
-    releaseRevision: value['releaseRevision'],
-    generationId: value['generationId'],
-    windowStartedAtMs,
-    maxObservedAtMs,
-    resetSequence: value['resetSequence'] as number,
-    claims,
-    lastHealthyAtMs: value['lastHealthyAtMs'] as number | null,
+    serviceIdentity: LAUNCHD_RETRY_SERVICE_IDENTITY,
+    releaseRevision: value.receipt.releaseRevision,
+    epoch: value.receipt.epoch,
+    sequence: value.receipt.sequence,
+    claimCount: value.receipt.claimCount,
+    receiptDigest: value.receiptDigest,
+    receipt: value.receipt,
   };
 }
 
 function stateBytes(state: LaunchdRetryState): Buffer {
-  return Buffer.from(JSON.stringify(state), 'utf8');
+  return Buffer.from(`${JSON.stringify(state)}\n`, 'utf8');
 }
 
-function signState(state: LaunchdRetryState, key: KeyObject): SignedLaunchdRetryState {
-  return { state, signature: sign(null, stateBytes(state), key).toString('base64') };
-}
-
-function serializeEnvelope(state: LaunchdRetryState, key: KeyObject): string {
-  return `${JSON.stringify(signState(state, key))}\n`;
-}
-
-function loadKey(paths: RetryPaths): KeyObject | null {
-  const raw = readPrivateFile(paths.key, MAX_KEY_BYTES, paths.root);
-  if (!raw) return null;
-  try {
-    const key = createPrivateKey(raw);
-    return key.type === 'private' && key.asymmetricKeyType === 'ed25519' ? key : null;
-  } catch {
-    return null;
-  }
-}
-
-function loadState(paths: RetryPaths, key: KeyObject): LaunchdRetryState | null {
+function loadState(
+  paths: RetryPaths,
+  releaseRevision: string,
+  nowMs: number,
+  trustPolicy: LaunchdRetryTrustPolicy,
+): { state: LaunchdRetryState; verified: VerifiedLaunchdRetryEpochReceipt } | null {
   const raw = readPrivateFile(paths.state, MAX_STATE_BYTES, paths.root);
   if (!raw) return null;
   try {
     const parsed: unknown = JSON.parse(raw.toString('utf8'));
-    if (!isRecord(parsed) || !exactKeys(parsed, ['state', 'signature']) ||
-      typeof parsed['signature'] !== 'string') return null;
-    const state = parseState(parsed['state']);
-    if (!state || `${JSON.stringify(parsed)}\n` !== raw.toString('utf8')) return null;
-    const signature = Buffer.from(parsed['signature'], 'base64');
-    return verify(null, stateBytes(state), createPublicKey(key), signature) ? state : null;
+    if (!exactPlainRecord(parsed, [
+      'claimCount', 'epoch', 'policyVersion', 'receipt', 'receiptDigest', 'releaseRevision',
+      'schemaVersion', 'sequence', 'serviceIdentity',
+    ]) || parsed['schemaVersion'] !== 2 || parsed['policyVersion'] !== POLICY_VERSION ||
+      parsed['serviceIdentity'] !== LAUNCHD_RETRY_SERVICE_IDENTITY ||
+      parsed['releaseRevision'] !== releaseRevision) return null;
+    const verified = verifyLaunchdRetryEpochReceipt(parsed['receipt'], {
+      releaseRevision,
+      serviceIdentity: LAUNCHD_RETRY_SERVICE_IDENTITY,
+      nowMs,
+    }, trustPolicy);
+    if (!verified.ok) return null;
+    const expected = stateFromReceipt(verified.value);
+    if (parsed['epoch'] !== expected.epoch || parsed['sequence'] !== expected.sequence ||
+      parsed['claimCount'] !== expected.claimCount || parsed['receiptDigest'] !== expected.receiptDigest ||
+      !launchdRetryReceiptBytesEqual(stateBytes(expected), raw)) return null;
+    return { state: expected, verified: verified.value };
   } catch {
     return null;
   }
 }
 
-function persistState(paths: RetryPaths, state: LaunchdRetryState, key: KeyObject): boolean {
+function persistState(
+  paths: RetryPaths,
+  value: VerifiedLaunchdRetryEpochReceipt,
+  nowMs: number,
+  trustPolicy: LaunchdRetryTrustPolicy,
+): boolean {
   try {
+    const state = stateFromReceipt(value);
     writePrivateFileAtomically(
       `${paths.state}.${process.pid}.${randomUUID()}.tmp`,
       paths.state,
-      serializeEnvelope(state, key),
-      { anchorPath: paths.root, label: 'launchd retry state' },
+      stateBytes(state),
+      { anchorPath: paths.root, label: 'external launchd retry state' },
     );
-    return loadState(paths, key) !== null;
+    const loaded = loadState(paths, state.releaseRevision, nowMs, trustPolicy);
+    return loaded?.verified.receiptDigest === value.receiptDigest;
   } catch {
     return false;
   }
 }
 
-function bootstrap(paths: RetryPaths, releaseRevision: string, nowMs: number): {
-  key: KeyObject;
-  state: LaunchdRetryState;
-} | null {
-  if (existsSync(paths.key) || existsSync(paths.state)) return null;
-  try {
-    const { privateKey } = generateKeyPairSync('ed25519');
-    const pem = privateKey.export({ type: 'pkcs8', format: 'pem' });
-    writePrivateFileAtomically(
-      `${paths.key}.${process.pid}.${randomUUID()}.tmp`,
-      paths.key,
-      pem,
-      { anchorPath: paths.root, label: 'launchd retry signing key' },
-    );
-    const key = loadKey(paths);
-    if (!key) return null;
-    const state: LaunchdRetryState = {
-      schemaVersion: 1,
-      policyVersion: POLICY_VERSION,
-      releaseRevision,
-      generationId: randomUUID(),
-      windowStartedAtMs: nowMs,
-      maxObservedAtMs: nowMs,
-      resetSequence: 0,
-      claims: [],
-      lastHealthyAtMs: null,
-    };
-    return persistState(paths, state, key) ? { key, state } : null;
-  } catch {
-    return null;
-  }
-}
-
 function validDaemonDisposition(result: DaemonRunResult): boolean {
   const termination = result?.termination;
-  if (!isRecord(termination) || typeof termination['reason'] !== 'string' ||
-    !DAEMON_REASONS.has(termination['reason']) || typeof termination['retryable'] !== 'boolean' ||
+  if (!exactPlainRecord(termination, termination?.diagnosticCode === undefined
+    ? ['exitCode', 'reason', 'retryable']
+    : ['diagnosticCode', 'exitCode', 'reason', 'retryable']) ||
+    typeof termination['reason'] !== 'string' || !DAEMON_REASONS.has(termination['reason']) ||
+    typeof termination['retryable'] !== 'boolean' ||
     (termination['exitCode'] !== 0 && termination['exitCode'] !== 1) ||
     termination['exitCode'] !== (termination['retryable'] ? 1 : 0) ||
     !(termination['diagnosticCode'] === undefined ||
@@ -305,9 +284,103 @@ function validDaemonDisposition(result: DaemonRunResult): boolean {
   );
 }
 
-function terminal(reason: LaunchdRetryReason, daemonInvoked = false,
-  claimNumber: number | null = null, attemptsRemaining: number | null = null): LaunchdRetryControllerResult {
-  return { exitCode: 0, reason, daemonInvoked, claimNumber, attemptsRemaining };
+function terminal(
+  reason: LaunchdRetryReason,
+  externalAuthority: 'verified' | 'blocked' = 'blocked',
+  daemonInvoked = false,
+  claimNumber: number | null = null,
+  attemptsRemaining: number | null = null,
+): LaunchdRetryControllerResult {
+  return { exitCode: 0, reason, daemonInvoked, claimNumber, attemptsRemaining, externalAuthority };
+}
+
+function expectedTransition(
+  current: VerifiedLaunchdRetryEpochReceipt,
+  action: 'claim' | 'healthy-reset',
+  atMs: number,
+): Omit<LaunchdRetryCasRequest, 'schemaVersion' | 'currentReceipt'> {
+  const healthy = action === 'healthy-reset';
+  return {
+    action,
+    serviceIdentity: LAUNCHD_RETRY_SERVICE_IDENTITY,
+    releaseRevision: current.receipt.releaseRevision,
+    expectedReceiptDigest: current.receiptDigest,
+    expectedEpoch: current.receipt.epoch,
+    expectedSequence: current.receipt.sequence,
+    nextEpoch: healthy ? current.receipt.epoch + 1 : current.receipt.epoch,
+    nextSequence: current.receipt.sequence + 1,
+    nextClaimCount: healthy ? 0 : current.receipt.claimCount + 1,
+    nextWindowStartedAtMs: healthy ? atMs : current.receipt.windowStartedAtMs,
+    nextMaxObservedAtMs: atMs,
+  };
+}
+
+function exactTransitionReceipt(
+  current: VerifiedLaunchdRetryEpochReceipt,
+  next: VerifiedLaunchdRetryEpochReceipt,
+  expected: ReturnType<typeof expectedTransition>,
+): boolean {
+  const transition: LaunchdRetryReceiptTransition = expected.action === 'claim'
+    ? 'claim'
+    : 'healthy-reset';
+  return next.receipt.previousReceiptDigest === current.receiptDigest &&
+    next.receipt.transition === transition &&
+    next.receipt.releaseRevision === expected.releaseRevision &&
+    next.receipt.serviceIdentity === expected.serviceIdentity &&
+    next.receipt.epoch === expected.nextEpoch && next.receipt.sequence === expected.nextSequence &&
+    next.receipt.claimCount === expected.nextClaimCount &&
+    next.receipt.windowStartedAtMs === expected.nextWindowStartedAtMs &&
+    next.receipt.maxObservedAtMs === expected.nextMaxObservedAtMs;
+}
+
+async function commitTransition(
+  authority: LaunchdRetryExternalAuthority,
+  current: VerifiedLaunchdRetryEpochReceipt,
+  action: 'claim' | 'healthy-reset',
+  atMs: number,
+  trustPolicy: LaunchdRetryTrustPolicy,
+): Promise<
+  | { ok: true; value: VerifiedLaunchdRetryEpochReceipt }
+  | { ok: false; reason: LaunchdRetryReason }
+> {
+  const expected = expectedTransition(current, action, atMs);
+  if (!Number.isSafeInteger(expected.nextEpoch) || !Number.isSafeInteger(expected.nextSequence) ||
+    expected.nextClaimCount > LAUNCHD_RETRY_MAX_ATTEMPTS) {
+    return { ok: false, reason: 'external-retry-receipt-invalid' };
+  }
+  let response: LaunchdRetryCasResult;
+  try {
+    response = await authority.compareAndSwap({
+      schemaVersion: 1,
+      ...expected,
+      currentReceipt: current.receipt,
+    });
+  } catch {
+    return { ok: false, reason: 'external-retry-transport-unavailable' };
+  }
+  if (!exactPlainRecord(response, response.status === 'committed' ? ['receipt', 'status'] : ['status'])) {
+    return { ok: false, reason: 'external-retry-receipt-invalid' };
+  }
+  if (response.status === 'conflict') return { ok: false, reason: 'external-retry-receipt-replayed' };
+  if (response.status === 'unavailable') {
+    return { ok: false, reason: 'external-retry-transport-unavailable' };
+  }
+  if (response.status !== 'committed') return { ok: false, reason: 'external-retry-receipt-invalid' };
+  const verified = verifyLaunchdRetryEpochReceipt(response.receipt, {
+    releaseRevision: expected.releaseRevision,
+    serviceIdentity: LAUNCHD_RETRY_SERVICE_IDENTITY,
+    nowMs: atMs,
+  }, trustPolicy);
+  if (!verified.ok || !exactTransitionReceipt(current, verified.value, expected)) {
+    return { ok: false, reason: 'external-retry-receipt-invalid' };
+  }
+  return { ok: true, value: verified.value };
+}
+
+function receiptFailureReason(reason: string): LaunchdRetryReason {
+  return reason === 'trust-root-unprovisioned'
+    ? 'external-retry-trust-unprovisioned'
+    : 'external-retry-receipt-invalid';
 }
 
 export async function runLaunchdRetryController(
@@ -320,14 +393,25 @@ export async function runLaunchdRetryController(
   const runtimeReleaseTrusted = options.runtimeReleaseTrusted ?? (
     buildIdentity.provenance !== 'unavailable' && buildIdentity.dirty !== true
   );
-  if (!REVISION_RE.test(options.expectedReleaseRevision) ||
-    !runtimeReleaseTrusted || runtimeRevision !== options.expectedReleaseRevision) {
-    return terminal('stale-release');
-  }
-  const nowMs = (options.now ?? Date.now)();
+  if (!REVISION_RE.test(options.expectedReleaseRevision) || !runtimeReleaseTrusted ||
+    runtimeRevision !== options.expectedReleaseRevision) return terminal('stale-release');
+  const now = options.now ?? Date.now;
+  const nowMs = now();
   if (!Number.isSafeInteger(nowMs) || nowMs < 0) return terminal('clock-rollback');
   const killState = options.killSwitchState ?? readKillSwitch;
   if (killState().state !== 'inactive') return terminal('operator-stop');
+
+  const authority = options.externalAuthority;
+  if (!authority || typeof authority.compareAndSwap !== 'function') {
+    return terminal('external-retry-transport-unavailable');
+  }
+  const trustPolicy = authority.trustPolicy ?? LAUNCHD_RETRY_TRUST_POLICY;
+  const supplied = verifyLaunchdRetryEpochReceipt(authority.currentReceipt, {
+    releaseRevision: runtimeRevision,
+    serviceIdentity: LAUNCHD_RETRY_SERVICE_IDENTITY,
+    nowMs,
+  }, trustPolicy);
+  if (!supplied.ok) return terminal(receiptFailureReason(supplied.reason));
 
   const home = options.homeDir ?? homedir();
   const paths = retryPaths(home);
@@ -339,72 +423,74 @@ export async function runLaunchdRetryController(
 
   try {
     if (killState().state !== 'inactive') return terminal('operator-stop');
-    const keyExists = existsSync(paths.key);
+    if (existsSync(paths.legacyKey)) return terminal('legacy-local-authority-present');
     const stateExists = existsSync(paths.state);
-    let loaded = !keyExists && !stateExists
-      ? bootstrap(paths, runtimeRevision, nowMs)
-      : null;
-    if (keyExists !== stateExists) return terminal('state-unavailable');
-    if (!loaded && keyExists && stateExists) {
-      const key = loadKey(paths);
-      const state = key ? loadState(paths, key) : null;
-      if (!key || !state) return terminal('state-corrupt');
-      loaded = { key, state };
-    }
-    if (!loaded) return terminal('state-persistence-failed');
-    const { key, state } = loaded;
-    if (state.releaseRevision !== runtimeRevision) return terminal('stale-release');
-    if (nowMs < state.maxObservedAtMs) return terminal('clock-rollback');
-    if (nowMs - state.windowStartedAtMs > LAUNCHD_RETRY_WINDOW_MS) {
-      return terminal('retry-window-expired', false, null, 0);
-    }
-    if (state.claims.length >= LAUNCHD_RETRY_MAX_ATTEMPTS) {
-      return terminal('retry-exhausted', false, null, 0);
+    let current = supplied.value;
+    if (stateExists) {
+      const loaded = loadState(paths, runtimeRevision, nowMs, trustPolicy);
+      if (!loaded) return terminal('state-corrupt');
+      if (loaded.verified.receiptDigest !== supplied.value.receiptDigest) {
+        return terminal('external-retry-receipt-replayed');
+      }
+      current = loaded.verified;
+    } else if (current.receipt.transition !== 'initialize') {
+      return terminal('retry-state-deleted');
+    } else if (current.receipt.sequence !== 0 || current.receipt.claimCount !== 0) {
+      return terminal('retry-state-uninitialized');
     }
 
-    const claimed: LaunchdRetryState = {
-      ...state,
-      maxObservedAtMs: nowMs,
-      claims: [...state.claims, { claimId: randomUUID(), claimedAtMs: nowMs }],
-    };
-    if (!persistState(paths, claimed, key)) return terminal('state-persistence-failed');
-    const claimNumber = claimed.claims.length;
+    if (nowMs < current.receipt.maxObservedAtMs) return terminal('clock-rollback');
+    if (nowMs - current.receipt.windowStartedAtMs > LAUNCHD_RETRY_WINDOW_MS) {
+      return terminal('retry-window-expired', 'verified', false, null, 0);
+    }
+    if (current.receipt.claimCount >= LAUNCHD_RETRY_MAX_ATTEMPTS) {
+      return terminal('retry-exhausted', 'verified', false, null, 0);
+    }
+
+    const claim = await commitTransition(authority, current, 'claim', nowMs, trustPolicy);
+    if (!claim.ok) return terminal(claim.reason);
+    if (!persistState(paths, claim.value, nowMs, trustPolicy)) {
+      return terminal('state-persistence-failed', 'verified');
+    }
+    const claimNumber = claim.value.receipt.claimCount;
     const remaining = LAUNCHD_RETRY_MAX_ATTEMPTS - claimNumber;
-    if (killState().state !== 'inactive') return terminal('operator-stop', false, claimNumber, remaining);
+    if (killState().state !== 'inactive') {
+      return terminal('operator-stop', 'verified', false, claimNumber, remaining);
+    }
 
     let result: DaemonRunResult;
     try {
       result = await options.runDaemon();
     } catch {
-      return terminal('daemon-disposition-invalid', true, claimNumber, remaining);
+      return terminal('daemon-disposition-invalid', 'verified', true, claimNumber, remaining);
     }
     if (!validDaemonDisposition(result)) {
-      return terminal('daemon-disposition-invalid', true, claimNumber, remaining);
+      return terminal('daemon-disposition-invalid', 'verified', true, claimNumber, remaining);
     }
     if (result.termination.reason === 'clean-completion' && !result.termination.retryable) {
-      const completedAtMs = (options.now ?? Date.now)();
-      if (!Number.isSafeInteger(completedAtMs) || completedAtMs < claimed.maxObservedAtMs) {
-        return terminal('clock-rollback', true, claimNumber, remaining);
+      const completedAtMs = now();
+      if (!Number.isSafeInteger(completedAtMs) || completedAtMs < claim.value.receipt.maxObservedAtMs) {
+        return terminal('clock-rollback', 'verified', true, claimNumber, remaining);
       }
-      const reset: LaunchdRetryState = {
-        ...claimed,
-        generationId: randomUUID(),
-        windowStartedAtMs: completedAtMs,
-        maxObservedAtMs: completedAtMs,
-        resetSequence: claimed.resetSequence + 1,
-        claims: [],
-        lastHealthyAtMs: completedAtMs,
-      };
-      return persistState(paths, reset, key)
-        ? terminal('healthy-completion', true, claimNumber, LAUNCHD_RETRY_MAX_ATTEMPTS)
-        : terminal('state-persistence-failed', true, claimNumber, remaining);
+      const reset = await commitTransition(authority, claim.value, 'healthy-reset', completedAtMs, trustPolicy);
+      if (!reset.ok) return terminal(reset.reason, 'verified', true, claimNumber, remaining);
+      return persistState(paths, reset.value, completedAtMs, trustPolicy)
+        ? terminal('healthy-completion', 'verified', true, claimNumber, LAUNCHD_RETRY_MAX_ATTEMPTS)
+        : terminal('state-persistence-failed', 'verified', true, claimNumber, remaining);
     }
     if (!result.termination.retryable) {
-      return terminal('daemon-terminal', true, claimNumber, remaining);
+      return terminal('daemon-terminal', 'verified', true, claimNumber, remaining);
     }
     return remaining > 0
-      ? { exitCode: 1, reason: 'retry-authorized', daemonInvoked: true, claimNumber, attemptsRemaining: remaining }
-      : terminal('retry-exhausted', true, claimNumber, 0);
+      ? {
+          exitCode: 1,
+          reason: 'retry-authorized',
+          daemonInvoked: true,
+          claimNumber,
+          attemptsRemaining: remaining,
+          externalAuthority: 'verified',
+        }
+      : terminal('retry-exhausted', 'verified', true, claimNumber, 0);
   } finally {
     releaseLocalStoreLock(lock);
   }

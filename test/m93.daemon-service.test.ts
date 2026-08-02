@@ -67,6 +67,7 @@ import {
   install,
   uninstall,
   serviceStatus,
+  serviceStatusCached,
 } from '../src/core/daemon/service.js';
 import { daemonServiceInstallOptions } from '../src/core/daemon/service-config.js';
 import {
@@ -102,6 +103,37 @@ function baseOpts(platform: 'darwin' | 'linux' | 'win32') {
     parallel: 1,
     releaseRevision: FAKE_RELEASE,
   };
+}
+
+function launchdRuntimeArguments(releaseRevision = FAKE_RELEASE): string[] {
+  return [
+    FAKE_NODE, FAKE_BIN, 'daemon', 'start', '--supervised', '--launchd-controller',
+    '--launchd-release', releaseRevision, '--budget', '5', '--interval', '1800000',
+    '--parallel', '1',
+  ];
+}
+
+function exactLaunchdPrintFixture(options: {
+  home?: string;
+  releaseRevision?: string;
+  arguments?: string[];
+  state?: string;
+  pid?: number;
+} = {}): string {
+  const home = options.home ?? FAKE_HOME;
+  const serviceTarget = `gui/${typeof process.getuid === 'function' ? process.getuid() : 501}/ai.ashlr.daemon`;
+  return `${[
+    `${serviceTarget} = {`,
+    `\tpath = ${path.join(home, 'Library', 'LaunchAgents', 'ai.ashlr.daemon.plist')}`,
+    `\tstate = ${options.state ?? 'running'}`,
+    `\tprogram = ${FAKE_NODE}`,
+    '\targuments = {',
+    ...(options.arguments ?? launchdRuntimeArguments(options.releaseRevision))
+      .map((argument) => `\t\t${argument}`),
+    '\t}',
+    `\tpid = ${options.pid ?? 123}`,
+    '}',
+  ].join('\n')}\n`;
 }
 
 function useSuccessfulLaunchdTransactionMock(): void {
@@ -145,7 +177,7 @@ function windowsTaskSnapshotFixture(state: string): string {
   });
 }
 
-function successfulServiceCommands() {
+function successfulServiceCommands(home = FAKE_HOME) {
   let launchdLoaded = true;
   let launchdDisabled = false;
   let systemdActive = false;
@@ -164,7 +196,7 @@ function successfulServiceCommands() {
       }
       if (args[0] === 'print') {
         return launchdLoaded
-          ? { status: 0, stdout: '{ "PID" = 123; }', stderr: '', error: undefined }
+          ? { status: 0, stdout: exactLaunchdPrintFixture({ home }), stderr: '', error: undefined }
           : { status: 113, stdout: '', stderr: 'Could not find service', error: undefined };
       }
       if (args[0] === 'bootout') launchdLoaded = false;
@@ -659,6 +691,35 @@ describe('install() — mocked spawnSync', () => {
       '/bin/kill',
       ['-0', '123'],
       expect.objectContaining({ timeout: 15_000 }),
+    );
+  });
+
+  it('darwin: install rejects a loaded job with stale controller or release argv', async () => {
+    installLaunchdPlistTransactionMock.mockImplementation((options: {
+      verify: () => { ok: boolean; stderr: string };
+    }) => {
+      const verified = options.verify();
+      expect(verified.ok).toBe(false);
+      expect(verified.stderr).toContain('returned an unrecognized native state');
+      throw new Error(`service final verification failed: ${verified.stderr}`);
+    });
+    spawnSyncMock.mockImplementation((_cmd: string, args: string[]) => {
+      if (args[0] === 'print-disabled') {
+        return { status: 0, stdout: launchctlPrintDisabledFixture(false), stderr: '', error: undefined };
+      }
+      if (args[0] === 'print') {
+        return {
+          status: 0,
+          stdout: exactLaunchdPrintFixture({ releaseRevision: 'b'.repeat(40) }),
+          stderr: '',
+          error: undefined,
+        };
+      }
+      return { status: 0, stdout: '', stderr: '', error: undefined };
+    });
+
+    await expect(install(baseOpts('darwin'))).rejects.toThrow(
+      'service final verification failed',
     );
   });
 
@@ -1184,7 +1245,7 @@ describe('install() — transactional launchd plist', () => {
   it('delegates the daemon plist and private lock directory to the shared transaction', async () => {
     const home = '/tmp/ashlr-launchd-transaction';
     useSuccessfulLaunchdTransactionMock();
-    (cp.spawnSync as ReturnType<typeof vi.fn>).mockImplementation(successfulServiceCommands());
+    (cp.spawnSync as ReturnType<typeof vi.fn>).mockImplementation(successfulServiceCommands(home));
 
     await install({ ...baseOpts('darwin'), homeDir: home });
 
@@ -1422,6 +1483,30 @@ describe('serviceStatus() — mocked OS query output', () => {
     expect(s.running).toBe(true);
     expect(s.runtimeState).toBe('running');
     expect(s.platformSpec).toBe('launchd');
+  });
+
+  it('keys cached runtime identity by the expected release revision', () => {
+    const home = `${FAKE_HOME}-release-cache`;
+    existsSyncMock.mockReturnValue(true);
+    spawnSyncMock
+      .mockReturnValueOnce({
+        status: 0,
+        stdout: exactLaunchdPrintFixture({ home, releaseRevision: FAKE_RELEASE }),
+        stderr: '',
+      })
+      .mockReturnValueOnce({
+        status: 0,
+        stdout: exactLaunchdPrintFixture({ home, releaseRevision: 'b'.repeat(40) }),
+        stderr: '',
+      });
+
+    expect(serviceStatusCached({
+      ...baseOpts('darwin'), homeDir: home, releaseRevision: FAKE_RELEASE,
+    }, 15_000).runtimeState).toBe('running');
+    expect(serviceStatusCached({
+      ...baseOpts('darwin'), homeDir: home, releaseRevision: 'b'.repeat(40),
+    }, 15_000).runtimeState).toBe('running');
+    expect(spawnSyncMock).toHaveBeenCalledTimes(2);
   });
 
   it('darwin: runtime is unknown when native running state has PID zero', () => {

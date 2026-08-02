@@ -345,6 +345,41 @@ async function cmdDaemonStart(flags: StartFlags): Promise<number> {
   const tty = process.stdout.isTTY === true;
   const col = makeColors(tty);
 
+  if (flags.launchdController) {
+    const runLaunchdRetryController = await importLaunchdRetryController();
+    if (!runLaunchdRetryController) {
+      console.error(col.red('error: ') + 'launchd retry controller unavailable; restart authority blocked.');
+      return 0;
+    }
+    const controlled = await runLaunchdRetryController({
+      expectedReleaseRevision: flags.launchdReleaseRevision!,
+      // All fallible startup work stays behind the externally committed claim.
+      // Production supplies neither trust roots nor a CAS adapter, so this
+      // callback remains dormant until external authority is provisioned.
+      runDaemon: async () => {
+        if (process.env['ASHLR_IN_DAEMON'] || process.env['ASHLR_IN_SWARM']) {
+          throw new Error('daemon re-entrancy refused before invocation');
+        }
+        const loadConfig = await importConfig(true, true);
+        if (!loadConfig) throw new Error('daemon config module unavailable');
+        const loop = await importLoop();
+        if (!loop) throw new Error('daemon loop module unavailable');
+        const cfg = loadConfig();
+        const merged = mergeDaemonConfig(cfg, flags);
+        return loop.runDaemon(merged, {
+          once: flags.once,
+          dryRun: flags.dryRun,
+          ...(flags.drain ? { drain: flags.drain } : {}),
+          ...(flags.limit ? { drainLimit: flags.limit } : {}),
+        });
+      },
+    });
+    const message = `launchd retry controller: ${controlled.reason}`;
+    if (controlled.exitCode === 1) console.error(col.yellow(message));
+    else console.log(col.dim(message));
+    return controlled.exitCode;
+  }
+
   // ── Re-entrancy guard (clear, nonzero refusal) ──────────────────────────
   // runDaemon ALSO refuses internally; we surface a friendly message here so
   // the user gets a non-silent explanation and a nonzero exit code.
@@ -386,22 +421,6 @@ async function cmdDaemonStart(flags: StartFlags): Promise<number> {
     ...(flags.drain ? { drain: flags.drain } : {}),
     ...(flags.limit ? { drainLimit: flags.limit } : {}),
   };
-
-  if (flags.launchdController) {
-    const runLaunchdRetryController = await importLaunchdRetryController();
-    if (!runLaunchdRetryController) {
-      console.error(col.red('error: ') + 'launchd retry controller is unavailable.');
-      return 0;
-    }
-    const controlled = await runLaunchdRetryController({
-      expectedReleaseRevision: flags.launchdReleaseRevision!,
-      runDaemon: () => loop.runDaemon(merged, daemonOptions),
-    });
-    const message = `launchd retry controller: ${controlled.reason}`;
-    if (controlled.exitCode === 1) console.error(col.yellow(message));
-    else console.log(col.dim(message));
-    return controlled.exitCode;
-  }
 
   console.log('');
   console.log(
@@ -879,7 +898,14 @@ export async function cmdDaemon(args: string[]): Promise<number> {
         : NO_FLAGS;
     validationError = validateExactFlags(rest, allowed);
   }
-  if (validationError) return printDaemonUsageError(validationError, sub);
+  if (validationError) {
+    const code = printDaemonUsageError(validationError, sub);
+    if (sub === 'start' && rest.includes('--launchd-controller')) {
+      console.error('launchd retry controller: invalid hidden service argv; restart authority blocked.');
+      return 0;
+    }
+    return code;
+  }
 
   switch (sub) {
     case 'start':
