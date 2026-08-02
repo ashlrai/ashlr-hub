@@ -15,7 +15,10 @@ export type AutoMergeDiffScopeInvalidReason =
   | 'malformed-hunk-header'
   | 'malformed-hunk-body'
   | 'hunk-count-mismatch'
+  | 'unsupported-file-mode'
   | 'binary-patch-unsupported';
+
+type GitPatchMode = '100644' | '100755' | '120000' | '160000';
 
 export interface AutoMergeDiffScopeFile {
   oldPath: string | null;
@@ -49,6 +52,11 @@ interface FileSection {
   renameFrom?: string;
   renameTo?: string;
   declaredKind?: 'added' | 'deleted' | 'mode';
+  declaredMode?: GitPatchMode;
+  oldMode?: GitPatchMode;
+  newMode?: GitPatchMode;
+  indexMode?: GitPatchMode;
+  indexSeen: boolean;
   oldModeSeen: boolean;
   newModeSeen: boolean;
   additions: number;
@@ -152,8 +160,13 @@ function hunkComplete(hunk: HunkState): boolean {
   return hunk.observedOld === hunk.expectedOld && hunk.observedNew === hunk.expectedNew;
 }
 
-function validGitModeMetadata(line: string, prefix: string): boolean {
-  return new RegExp(`^${prefix} (?:100644|100755|120000|160000)$`).test(line);
+function parseGitModeMetadata(line: string, prefix: string): GitPatchMode | null {
+  const match = line.match(new RegExp(`^${prefix} (100644|100755|120000|160000)$`));
+  return (match?.[1] as GitPatchMode | undefined) ?? null;
+}
+
+function unsupportedGitMode(mode: GitPatchMode): boolean {
+  return mode === '120000' || mode === '160000';
 }
 
 /**
@@ -191,6 +204,15 @@ export function measureAutoMergeDiffScope(diff: string | null | undefined): Auto
     }
     if (renamed && section.declaredKind !== undefined) return 'malformed-file-header';
     if (section.oldModeSeen !== section.newModeSeen) return 'malformed-file-header';
+    if (section.declaredKind === 'mode' &&
+      (section.oldMode === undefined || section.newMode === undefined ||
+        section.oldMode === section.newMode || section.indexMode !== undefined)) {
+      return 'malformed-file-header';
+    }
+    if (section.declaredMode !== undefined && section.indexMode !== undefined &&
+      section.declaredMode !== section.indexMode) {
+      return 'malformed-file-header';
+    }
     let headerOldPath = section.oldPath;
     let headerNewPath = section.newPath;
     if (headerOldPath === undefined && headerNewPath === undefined && !renamed) {
@@ -260,6 +282,7 @@ export function measureAutoMergeDiffScope(diff: string | null | undefined): Auto
         additions: 0,
         deletions: 0,
         hunks: 0,
+        indexSeen: false,
         oldModeSeen: false,
         newModeSeen: false,
       };
@@ -344,43 +367,70 @@ export function measureAutoMergeDiffScope(diff: string | null | undefined): Auto
       continue;
     }
     if (line.startsWith('new file mode ')) {
-      if (!validGitModeMetadata(line, 'new file mode') || section.declaredKind !== undefined ||
+      const mode = parseGitModeMetadata(line, 'new file mode');
+      if (!mode || section.declaredKind !== undefined ||
         section.oldPath !== undefined || section.hunks > 0) {
         return { ok: false, reason: 'malformed-file-header' };
       }
+      if (unsupportedGitMode(mode)) return { ok: false, reason: 'unsupported-file-mode' };
       section.declaredKind = 'added';
+      section.declaredMode = mode;
       continue;
     }
     if (line.startsWith('deleted file mode ')) {
-      if (!validGitModeMetadata(line, 'deleted file mode') || section.declaredKind !== undefined ||
+      const mode = parseGitModeMetadata(line, 'deleted file mode');
+      if (!mode || section.declaredKind !== undefined ||
         section.oldPath !== undefined || section.hunks > 0) {
         return { ok: false, reason: 'malformed-file-header' };
       }
+      if (unsupportedGitMode(mode)) return { ok: false, reason: 'unsupported-file-mode' };
       section.declaredKind = 'deleted';
+      section.declaredMode = mode;
       continue;
     }
     if (line.startsWith('old mode ')) {
-      if (!validGitModeMetadata(line, 'old mode') || section.declaredKind !== undefined ||
+      const mode = parseGitModeMetadata(line, 'old mode');
+      if (!mode || section.declaredKind !== undefined ||
         section.oldPath !== undefined || section.hunks > 0) {
         return { ok: false, reason: 'malformed-file-header' };
       }
+      if (unsupportedGitMode(mode)) return { ok: false, reason: 'unsupported-file-mode' };
       section.declaredKind = 'mode';
+      section.oldMode = mode;
       section.oldModeSeen = true;
       continue;
     }
     if (line.startsWith('new mode ')) {
-      if (!validGitModeMetadata(line, 'new mode') || section.declaredKind !== 'mode' ||
+      const mode = parseGitModeMetadata(line, 'new mode');
+      if (!mode || section.declaredKind !== 'mode' ||
         !section.oldModeSeen || section.newModeSeen ||
         section.oldPath !== undefined || section.hunks > 0) {
         return { ok: false, reason: 'malformed-file-header' };
       }
+      if (unsupportedGitMode(mode)) return { ok: false, reason: 'unsupported-file-mode' };
+      section.newMode = mode;
       section.newModeSeen = true;
+      continue;
+    }
+    if (line.startsWith('index ')) {
+      const match = line.match(
+        /^index [0-9a-f]{7,64}\.\.[0-9a-f]{7,64}(?: (100644|100755|120000|160000))?$/,
+      );
+      if (!match || section.indexSeen || section.oldPath !== undefined || section.hunks > 0) {
+        return { ok: false, reason: 'malformed-file-header' };
+      }
+      const mode = match[1] as GitPatchMode | undefined;
+      if (mode && unsupportedGitMode(mode)) {
+        return { ok: false, reason: 'unsupported-file-mode' };
+      }
+      section.indexSeen = true;
+      section.indexMode = mode;
       continue;
     }
     if (line.startsWith('Binary files ') || line === 'GIT binary patch') {
       return { ok: false, reason: 'binary-patch-unsupported' };
     }
-    if (line === '' || /^(?:similarity index|dissimilarity index|index) /.test(line)) {
+    if (line === '' || /^(?:similarity index|dissimilarity index) /.test(line)) {
       continue;
     }
     return { ok: false, reason: 'malformed-file-header' };

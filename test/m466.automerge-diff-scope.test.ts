@@ -14,6 +14,44 @@ function deletionDiff(name: string): string {
   ].join('\n');
 }
 
+function specialModeDiff(mode: '120000' | '160000', kind: 'new' | 'deleted' | 'modified'): string {
+  const path = `fixtures/${mode}-${kind}`;
+  if (kind === 'new') {
+    return [
+      `diff --git a/${path} b/${path}`,
+      `new file mode ${mode}`,
+      'index 0000000..1111111',
+      '--- /dev/null',
+      `+++ b/${path}`,
+      '@@ -0,0 +1 @@',
+      '+target',
+      '',
+    ].join('\n');
+  }
+  if (kind === 'deleted') {
+    return [
+      `diff --git a/${path} b/${path}`,
+      `deleted file mode ${mode}`,
+      'index 1111111..0000000',
+      `--- a/${path}`,
+      '+++ /dev/null',
+      '@@ -1 +0,0 @@',
+      '-target',
+      '',
+    ].join('\n');
+  }
+  return [
+    `diff --git a/${path} b/${path}`,
+    `index 1111111..2222222 ${mode}`,
+    `--- a/${path}`,
+    `+++ b/${path}`,
+    '@@ -1 +1 @@',
+    '-old-target',
+    '+new-target',
+    '',
+  ].join('\n');
+}
+
 describe('M466 canonical auto-merge diff scope', () => {
   it('counts five deletion-only files against a four-file cap', () => {
     const result = measureAutoMergeDiffScope(
@@ -74,6 +112,65 @@ describe('M466 canonical auto-merge diff scope', () => {
       expect.objectContaining({ oldPath: 'docs/empty-old.md', newPath: null }),
       expect.objectContaining({ oldPath: 'scripts/tool', newPath: 'scripts/tool' }),
     ]);
+  });
+
+  it.each([
+    ['120000', 'new'],
+    ['120000', 'deleted'],
+    ['120000', 'modified'],
+    ['160000', 'new'],
+    ['160000', 'deleted'],
+    ['160000', 'modified'],
+  ] as const)('rejects %s %s patches from autonomous scope authority', (mode, kind) => {
+    expect(measureAutoMergeDiffScope(specialModeDiff(mode, kind))).toEqual({
+      ok: false,
+      reason: 'unsupported-file-mode',
+    });
+  });
+
+  it.each([
+    [
+      'regular new-file declaration with a conflicting index mode',
+      [
+        'diff --git a/docs/mixed.md b/docs/mixed.md',
+        'new file mode 100644',
+        'index 0000000..1111111 100755',
+        '--- /dev/null',
+        '+++ b/docs/mixed.md',
+        '@@ -0,0 +1 @@',
+        '+content',
+        '',
+      ].join('\n'),
+      'malformed-file-header',
+    ],
+    [
+      'mode transition with contradictory index mode',
+      [
+        'diff --git a/scripts/tool b/scripts/tool',
+        'old mode 100644',
+        'new mode 100755',
+        'index 1111111..2222222 100755',
+        '',
+      ].join('\n'),
+      'malformed-file-header',
+    ],
+    [
+      'regular file converted to symlink',
+      [
+        'diff --git a/docs/a.md b/docs/a.md',
+        'old mode 100644',
+        'new mode 120000',
+        '',
+      ].join('\n'),
+      'unsupported-file-mode',
+    ],
+    [
+      'unknown file mode spelling',
+      'diff --git a/docs/a.md b/docs/a.md\nnew file mode 12000\n',
+      'malformed-file-header',
+    ],
+  ])('rejects %s fail-closed', (_label, diff, reason) => {
+    expect(measureAutoMergeDiffScope(diff)).toEqual({ ok: false, reason });
   });
 
   it('uses additions plus deletions as the sole changed-line definition', () => {

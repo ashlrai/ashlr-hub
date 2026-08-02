@@ -162,6 +162,20 @@ function docsDiff(name = 'docs/m153.md'): string {
   ].join('\n');
 }
 
+function unsupportedModeDiff(mode: '120000' | '160000'): string {
+  const name = `docs/m153-${mode}.md`;
+  return [
+    `diff --git a/${name} b/${name}`,
+    `index 1111111..2222222 ${mode}`,
+    `--- a/${name}`,
+    `+++ b/${name}`,
+    '@@ -1 +1 @@',
+    '-old-target',
+    '+new-target',
+    '',
+  ].join('\n');
+}
+
 /** Diff that exceeds the default file scope cap (5 files). */
 function wideFileDiff(): string {
   const header = (n: number) =>
@@ -534,10 +548,22 @@ describe('M153 evaluateVerificationGate — pure, all 5 criteria', () => {
     expect(r.reason).toMatch(/lines/);
   });
 
+  it('rejects symlink mode patches from verification authority', () => {
+    const diff = unsupportedModeDiff('120000');
+    const p = goodProposal('p-mode-symlink', diff);
+    const r = evaluateVerificationGate(
+      p,
+      verifyCfg({ maxRisk: 'high' }),
+      fullDecisions(p.id, diff),
+    );
+
+    expect(r.authorized).toBe(false);
+    expect(r.reason).toMatch(/malformed diff scope \(unsupported-file-mode\)/);
+  });
+
   it('[V10] EDV not confirmed (no verifyResult on p, no verifier entry) → refused (criterion 4)', () => {
     // Manually craft: no verifyResult.passed and no 'verified' decision entry
     // but DO have a frontier ship decision — so criterion 1 passes
-    const p: Proposal = { ...goodProposal(), verifyResult: { passed: true } };
     // No 'verified' decision, but verifyResult.passed is set → EDV confirmed via testPass
     // To hit criterion 4 refuse we need verifyResult absent AND no verified entry
     const pNoVerify: Proposal = { ...goodProposal('p10'), verifyResult: { passed: false } };
@@ -728,6 +754,14 @@ describe('M342 evaluateEvidenceGate — pure, no judge evidence required', () =>
 
     expect(r.authorized).toBe(false);
     expect(r.reason).toMatch(/build\/CI\/manifest/);
+  });
+
+  it('rejects gitlink mode patches from judge-free evidence authority', () => {
+    const p = evidenceProposal('e-mode-gitlink', unsupportedModeDiff('160000'));
+    const r = evaluateEvidenceGate(p, evidenceCfg({ maxRisk: 'high' }), []);
+
+    expect(r.authorized).toBe(false);
+    expect(r.reason).toMatch(/malformed diff scope \(unsupported-file-mode\)/);
   });
 
   it('[E4] no-command verification evidence is refused', () => {

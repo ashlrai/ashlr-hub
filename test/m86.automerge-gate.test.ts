@@ -149,6 +149,44 @@ function multiRenameDiff(n: number): string {
   ].join('\n')).join('\n');
 }
 
+function specialModeDiff(mode: '120000' | '160000', kind: 'new' | 'deleted' | 'modified'): string {
+  const filename = `docs/${mode}-${kind}.md`;
+  if (kind === 'new') {
+    return [
+      `diff --git a/${filename} b/${filename}`,
+      `new file mode ${mode}`,
+      'index 0000000..1111111',
+      '--- /dev/null',
+      `+++ b/${filename}`,
+      '@@ -0,0 +1 @@',
+      '+target',
+      '',
+    ].join('\n');
+  }
+  if (kind === 'deleted') {
+    return [
+      `diff --git a/${filename} b/${filename}`,
+      `deleted file mode ${mode}`,
+      'index 1111111..0000000',
+      `--- a/${filename}`,
+      '+++ /dev/null',
+      '@@ -1 +0,0 @@',
+      '-target',
+      '',
+    ].join('\n');
+  }
+  return [
+    `diff --git a/${filename} b/${filename}`,
+    `index 1111111..2222222 ${mode}`,
+    `--- a/${filename}`,
+    `+++ b/${filename}`,
+    '@@ -1 +1 @@',
+    '-old-target',
+    '+new-target',
+    '',
+  ].join('\n');
+}
+
 /** Standard frontier config with auto-merge enabled and low maxRisk. */
 function frontierCfg(
   overAutoMerge: Record<string, unknown> = {},
@@ -259,6 +297,20 @@ describe('M86 REFUSE — risk level', () => {
 // REFUSE — scope cap [4][5][6][7]
 // ===========================================================================
 describe('M86 REFUSE — scope cap', () => {
+  it('rejects unsupported git patch modes at the mutation scope gate', async () => {
+    initRepo(tmpRepo);
+    enroll(tmpRepo);
+
+    const diff = specialModeDiff('120000', 'modified');
+    expect(classifyRisk({ diff } as Proposal)).toBe('high');
+    const p = frontierPatch(diff);
+    const r = await autoMergeProposal(p.id, frontierCfg({ maxRisk: 'high' }));
+
+    expect(r).toMatchObject({ ok: false, merged: false });
+    expect(r.reason).toMatch(/malformed diff scope \(unsupported-file-mode\)/);
+    expect(loadProposal(p.id)!.status).toBe('approved');
+  });
+
   it('[4] files > default cap (4) → refuse', async () => {
     initRepo(tmpRepo);
     attachOrigin(tmpRepo, 'main');
@@ -908,6 +960,20 @@ describe('M86 PURE — evidence safety lane', () => {
 
     expect(result.authorized).toBe(false);
     expect(result.reason).toMatch(/malformed diff scope \(malformed-diff-header\)/);
+  });
+
+  it.each([
+    ['symlink', '120000', 'new'],
+    ['gitlink', '160000', 'modified'],
+  ] as const)('refuses %s mode patches before evidence activation', (_label, mode, kind) => {
+    const result = evaluateEvidenceAutoMergePreflight(
+      evidencePatch(`m86-evidence-mode-${mode}`, specialModeDiff(mode, kind)),
+      evidenceCfg(),
+      { remoteAvailable: true },
+    );
+
+    expect(result.authorized).toBe(false);
+    expect(result.reason).toMatch(/malformed diff scope \(unsupported-file-mode\)/);
   });
 
   it('refuses verification script changes before evidence activation', () => {
