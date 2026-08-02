@@ -90,7 +90,10 @@ interface RuntimeReleaseLaunchRevalidationTestHooks {
   afterBeforeObservation?: () => void;
   afterDirectoryEntriesRead?: (path: string, label: string) => void;
   afterFilePathSnapshotBeforeOpen?: (path: string, label: string) => void;
+  afterLaunchReceiptConstruction?: () => void;
   afterManifestVerification?: () => void;
+  afterSecondObservation?: () => void;
+  afterStageDigestConstruction?: () => void;
 }
 
 interface DirectoryObservationBudget {
@@ -800,6 +803,8 @@ function observeStage(
     interpreterRootSha256,
     manifestDigest: manifest.manifest.manifestDigest,
   });
+  testHooks?.afterStageDigestConstruction?.();
+  requireBeforeDeadline(deadline, 'runtime release staged tree digest');
   return {
     artifactRoot,
     dependencyRoot: dependencyRootObservation,
@@ -1009,6 +1014,10 @@ export function observeRuntimeReleaseLaunchInputs(
       internal.__testHooks?.afterBeforeObservation?.();
     }
     const after = observeStage(options, deadline);
+    if (process.env['VITEST'] === 'true') {
+      internal.__testHooks?.afterSecondObservation?.();
+    }
+    requireBeforeDeadline(deadline, 'runtime release launch inputs');
     if (!equalDigest(before.stagedTreeIdentity, after.stagedTreeIdentity) ||
       !equalDigest(before.stableIdentitySha256, after.stableIdentitySha256)) {
       return {
@@ -1102,9 +1111,14 @@ export function observeRuntimeReleaseLaunchInputs(
         verifiedAtMs: signedRelease.verifiedAtMs,
       },
     };
+    const receiptCanonicalJson = `${canonicalJson(receipt)}\n`;
+    if (process.env['VITEST'] === 'true') {
+      internal.__testHooks?.afterLaunchReceiptConstruction?.();
+    }
+    requireBeforeDeadline(deadline, 'runtime release launch receipt');
     return {
       ok: true,
-      canonicalJson: `${canonicalJson(receipt)}\n`,
+      canonicalJson: receiptCanonicalJson,
       receipt,
     };
   } catch (error) {

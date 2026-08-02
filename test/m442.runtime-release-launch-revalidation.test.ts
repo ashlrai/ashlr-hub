@@ -591,6 +591,75 @@ describe('runtime release closed launch-input observation', () => {
     }
   });
 
+  it('fails closed at the exact deadline after final staged-tree digest construction', () => {
+    const release = fixture();
+    const options = launchOptions(release) as RuntimeReleaseLaunchObservationOptions & {
+      __testHooks?: { afterStageDigestConstruction?: () => void };
+    };
+    let digestPasses = 0;
+    let monotonicMs = 0;
+    options.__testHooks = {
+      afterStageDigestConstruction: () => {
+        digestPasses += 1;
+        if (digestPasses === 2) monotonicMs = 120_000;
+      },
+    };
+    const monotonicNow = vi.spyOn(performance, 'now').mockImplementation(() => monotonicMs);
+    try {
+      expect(observeLaunch(options)).toEqual({
+        ok: false,
+        reason: 'runtime release staged tree digest observation deadline exceeded',
+      });
+      expect(digestPasses).toBe(2);
+    } finally {
+      monotonicNow.mockRestore();
+    }
+  });
+
+  it('fails closed at the exact deadline immediately after the second observation', () => {
+    const release = fixture();
+    const options = launchOptions(release) as RuntimeReleaseLaunchObservationOptions & {
+      __testHooks?: { afterSecondObservation?: () => void };
+    };
+    let monotonicMs = 0;
+    options.__testHooks = {
+      afterSecondObservation: () => {
+        monotonicMs = 120_000;
+      },
+    };
+    const monotonicNow = vi.spyOn(performance, 'now').mockImplementation(() => monotonicMs);
+    try {
+      expect(observeLaunch(options)).toEqual({
+        ok: false,
+        reason: 'runtime release launch inputs observation deadline exceeded',
+      });
+    } finally {
+      monotonicNow.mockRestore();
+    }
+  });
+
+  it('fails closed at the exact deadline after final receipt construction', () => {
+    const release = fixture();
+    const options = launchOptions(release) as RuntimeReleaseLaunchObservationOptions & {
+      __testHooks?: { afterLaunchReceiptConstruction?: () => void };
+    };
+    let monotonicMs = 0;
+    options.__testHooks = {
+      afterLaunchReceiptConstruction: () => {
+        monotonicMs = 120_000;
+      },
+    };
+    const monotonicNow = vi.spyOn(performance, 'now').mockImplementation(() => monotonicMs);
+    try {
+      expect(observeLaunch(options)).toEqual({
+        ok: false,
+        reason: 'runtime release launch receipt observation deadline exceeded',
+      });
+    } finally {
+      monotonicNow.mockRestore();
+    }
+  });
+
   it('detects same-content path replacement between final observations', () => {
     const release = fixture();
     const launcher = join(release.packageRoot, 'bin', 'ashlr');
