@@ -19,6 +19,15 @@ import {
   type ToolEffectInput,
 } from '../src/core/util/effect-journal.js';
 import { loadOrCreateKey } from '../src/core/foundry/provenance.js';
+import {
+  PRIVATE_STORAGE_TEST_CONTROL,
+  _setPrivateStorageTestControlForTest,
+} from '../src/core/util/private-storage.js';
+import {
+  createSemanticPrivateStorageHarness,
+  trustedWindowsSystemRootForTest,
+  type SemanticPrivateStorageHarness,
+} from './helpers/semantic-private-storage.js';
 
 const GENERATION = '123e4567-e89b-12d3-a456-426614174000';
 const NEXT_GENERATION = '223e4567-e89b-12d3-a456-426614174000';
@@ -44,6 +53,7 @@ let home: string;
 let previousHome: string | undefined;
 let previousUserProfile: string | undefined;
 let previousAshlrHome: string | undefined;
+let semanticPrivateStorage: SemanticPrivateStorageHarness | undefined;
 
 function effectInput(
   label: string,
@@ -237,6 +247,8 @@ function writeSignedPackFixture(label: string): { effectId: string; names: strin
 }
 
 beforeEach(() => {
+  _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
+  semanticPrivateStorage = undefined;
   previousHome = process.env.HOME;
   previousUserProfile = process.env.USERPROFILE;
   previousAshlrHome = process.env.ASHLR_HOME;
@@ -244,9 +256,20 @@ beforeEach(() => {
   process.env.HOME = home;
   process.env.USERPROFILE = home;
   process.env.ASHLR_HOME = path.join(home, '.ashlr');
+  if (process.platform === 'win32') {
+    semanticPrivateStorage = createSemanticPrivateStorageHarness({
+      systemRoot: trustedWindowsSystemRootForTest(),
+    });
+    _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+      runner: semanticPrivateStorage.runner,
+    });
+  }
 });
 
 afterEach(() => {
+  _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
+  semanticPrivateStorage?.reset();
+  semanticPrivateStorage = undefined;
   fs.rmSync(home, { recursive: true, force: true });
   if (previousHome === undefined) delete process.env.HOME;
   else process.env.HOME = previousHome;
