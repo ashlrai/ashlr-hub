@@ -927,6 +927,42 @@ describe('M342 dispatch production ledger', () => {
     expect(JSON.stringify(detailed.summary)).not.toContain('sk-legacy-private-token');
   });
 
+  it('degrades a contradictory legacy outcome summary instead of counting it as pre-envelope', () => {
+    const legacy = makeEvent({
+      itemId: 'contradictory-legacy-summary',
+      ts: new Date().toISOString(),
+      outcome: 'empty-diff',
+      proposalCreated: false,
+    });
+    delete legacy.attemptId;
+    legacy.runEventSummary = {
+      ...legacy.runEventSummary!,
+      outcome: 'proposal-created',
+      proposalCreated: true,
+    };
+    delete legacy.runEventSummary.actionCounts;
+    mkdirSync(dispatchProductionDir(), { recursive: true });
+    appendFileSync(
+      join(dispatchProductionDir(), `${legacy.ts.slice(0, 10)}.jsonl`),
+      `${JSON.stringify(legacy)}\n`,
+      'utf8',
+    );
+
+    expect(readDispatchProductionEventsDetailed({ sinceMs: Date.now() - 60_000 })).toMatchObject({
+      events: [],
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
+    });
+    const detailed = readDispatchProductionYieldDetailed({ windowMs: 60_000, limit: 20 });
+    expect(detailed.summary).toBeUndefined();
+    expect(detailed.sourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
+    });
+  });
+
   it('keeps pre-envelope writes durable but outside current canonical yield', () => {
     const legacy = makeEvent({
       ts: new Date().toISOString(),

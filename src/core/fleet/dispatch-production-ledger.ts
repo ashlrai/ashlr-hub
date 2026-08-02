@@ -2038,6 +2038,18 @@ function actionCountsAgreeWithOutcome(
   return event.outcome !== 'cancelled' || (actionCounts.proposalBlocked ?? 0) === 0;
 }
 
+function dispatchProductionOutcomeSummarySemanticsAgree(event: DispatchProductionEvent): boolean {
+  if (event.proposalCreated !== (event.outcome === 'proposal-created')) return false;
+  const summary = event.runEventSummary;
+  if (summary === undefined) return true;
+  const actionCounts = summary.actionCounts;
+  if (!validActionCountValues(actionCounts) || !coherentStepCounts(actionCounts)) return false;
+  if (summary.status !== undefined && !dispatchProductionRunStatusAgrees(event.outcome, summary.status)) return false;
+  if (summary.outcome !== undefined && summary.outcome !== event.outcome) return false;
+  if (summary.proposalCreated !== undefined && summary.proposalCreated !== event.proposalCreated) return false;
+  return actionCountsAgreeWithOutcome(event, actionCounts);
+}
+
 export function materializeDispatchProductionAttemptEnvelope(
   event: DispatchProductionEvent,
 ): DispatchProductionEvent {
@@ -4883,6 +4895,7 @@ function canonicalStoredDispatchProductionEvent(
   partitionDate: string,
 ): value is DispatchProductionEvent {
   if (!isPlainRecord(value) || JSON.stringify(value) !== line || !isDispatchProductionEvent(value)) return false;
+  if (!dispatchProductionOutcomeSummarySemanticsAgree(value)) return false;
   try {
     const canonical = sanitizeDispatchProductionEvent(value, { materializeLearningLabel: true });
     if (JSON.stringify(canonical) !== line &&
@@ -7214,6 +7227,10 @@ export function readDispatchProductionEventsDetailed(
           result.invalidRows++;
           continue;
         }
+        if (!dispatchProductionOutcomeSummarySemanticsAgree(parsed)) {
+          result.invalidRows++;
+          continue;
+        }
         const eventMs = Date.parse(parsed.ts);
         if (!Number.isFinite(eventMs)) {
           result.invalidRows++;
@@ -7437,6 +7454,10 @@ export function canonicalDispatchProductionAttempts(
   let duplicateEvents = 0;
   let invalidAttemptIdentities = 0;
   for (const row of rows) {
+    if (!dispatchProductionOutcomeSummarySemanticsAgree(row)) {
+      invalidAttemptIdentities++;
+      continue;
+    }
     const preEnvelope = isPreEnvelopeDispatchProductionEvent(row);
     let event: DispatchProductionEvent;
     try {

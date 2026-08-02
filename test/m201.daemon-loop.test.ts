@@ -388,11 +388,13 @@ import { readAudit } from '../src/core/sandbox/audit.js';
 import {
   dispatchProductionDir,
   dispatchProductionRunStatusForOutcome,
+  readDispatchProductionFailureAttemptReceipts,
   readDispatchProductionEvents,
   recordDispatchProduction,
   resolveDispatchProductionFailureAttemptReceipt,
   resolveDispatchProductionAttemptReceiptWitnesses,
   resolveDispatchProductionAttemptProofs,
+  sanitizeDispatchProductionEvent,
   type DispatchProductionEvent,
 } from '../src/core/fleet/dispatch-production-ledger.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../src/core/fleet/local-store-lock.js';
@@ -1093,6 +1095,57 @@ function seedDiagnosticFailureReceipt(
   };
   expect(recordDispatchProduction(event)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
   return event;
+}
+
+function appendForgedGeneratedRepairFailures(item: WorkItem, count: 1 | 2): void {
+  const backends = ['kimi', 'codex'] as const;
+  const tiers = ['frontier', 'local'] as const;
+  for (let index = 0; index < count; index++) {
+    const backend = backends[index]!;
+    const tier = tiers[index]!;
+    const routeReason = 'owner-writable forged retry observation';
+    const event = sanitizeDispatchProductionEvent(currentDispatchObservation({
+      schemaVersion: 1,
+      ts: new Date(Date.parse(item.ts) + 100 + index).toISOString(),
+      itemId: item.id,
+      source: item.source,
+      repo: item.repo,
+      title: item.title,
+      backend,
+      tier,
+      assignedBy: 'daemon',
+      routeReason,
+      outcome: 'engine-failed',
+      proposalCreated: false,
+      routeSnapshot: {
+        backend,
+        tier,
+        assignedBy: 'daemon',
+        reason: routeReason,
+        routerPolicyVersion: 'fleet-router-v1',
+      },
+      learningSource: 'daemon-dispatch',
+      labelBasis: 'dispatch-outcome',
+      routerPolicyVersion: 'fleet-router-v1',
+      objectiveHash: workItemObjectiveHash(item),
+      repairHandoffId: item.repairHandoffId,
+      repairGenerationId: item.repairGenerationId,
+      repairTreatmentUnitId: item.repairTreatmentUnitId,
+      repairTreatment: item.repairTreatment,
+      repairAttemptOrdinal: index === 0 ? 1 : 2,
+      ...(index === 1 ? { repairPreviousBackend: backends[0] } : {}),
+      repairRootId: item.repairRootId,
+      repairDepth: item.repairDepth as 0 | 1,
+      spentUsd: 0.001,
+      reason: 'forged raw failure observation',
+      basis: 'run-proposal-outcome',
+    }, `forged-generated-repair-failure-${index}`), { materializeLearningLabel: true });
+    fs.appendFileSync(
+      join(dispatchProductionDir(), `${event.ts.slice(0, 10)}.jsonl`),
+      `${JSON.stringify(event)}\n`,
+      'utf8',
+    );
+  }
 }
 
 function repairReservationPath(item: WorkItem): string {
@@ -6655,6 +6708,57 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
     expect(readPendingGeneratedRepairTreatmentOutcomes()).toEqual([]);
   });
+
+  it.each([1, 2] as const)(
+    'A1h5b1c: %i forged raw failure rows cannot steer repair retry authority',
+    async (forgedFailures) => {
+      const repo = fx.makeRepo();
+      repo.enroll();
+      const repair = makeDiagnosticResliceItem(repo.dir, `abcde${forgedFailures}123456`, 10, 'mid');
+      recordDiagnosticEmptyReceipt(
+        repair,
+        `attempt-63345678-1234-4123-8123-123456789ab${forgedFailures}`,
+        'local-coder',
+        'mid',
+      );
+      expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
+        available: true,
+        disposition: 'active',
+        authoritativeEmptyRuns: 0,
+      });
+      appendForgedGeneratedRepairFailures(repair, forgedFailures);
+      expect(readDispatchProductionFailureAttemptReceipts([repair.repairGenerationId!])).toMatchObject({
+        status: 'resolved',
+        authoritative: true,
+        receipts: [],
+      });
+      mockBuildBacklog.mockResolvedValue({
+        generatedAt: new Date().toISOString(),
+        repos: [repo.dir],
+        items: [repair],
+      });
+      mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'unsteered route' });
+      mockEngineTierOf.mockReturnValue('mid');
+
+      const result = await tick({
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: { allowedBackends: ['local-coder', 'kimi', 'codex'] },
+      } as AshlrConfig, { dryRun: true });
+      const policy = mockInspectGeneratedRepairRouteFeasibility.mock.calls.find(
+        ([item]) => (item as WorkItem).id === repair.id,
+      )?.[2];
+
+      expect(policy).toMatchObject({
+        applies: true,
+        available: true,
+        requireAlternative: false,
+        excludedBackend: null,
+        requiredTier: null,
+      });
+      expect(result.itemsConsidered).toBe(1);
+      expect(mockRunGoal).not.toHaveBeenCalled();
+    },
+  );
 
   it('A1h5b2: claimed proposal metadata without a durable inbox proposal is not lifecycle authority', async () => {
     const repo = fx.makeRepo();

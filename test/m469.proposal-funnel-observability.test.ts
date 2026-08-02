@@ -546,6 +546,35 @@ describe('buildProposalFunnelObservability', () => {
     expect(JSON.stringify(result)).not.toContain('legacy-proposal-secret');
   });
 
+  it('invalidates a contradictory legacy outcome summary before pre-envelope accounting', () => {
+    const legacy = event('contradictory-legacy', 'empty-diff');
+    delete legacy.attemptId;
+    legacy.runEventSummary = {
+      ...legacy.runEventSummary!,
+      outcome: 'proposal-created',
+      proposalCreated: true,
+    };
+    delete legacy.runEventSummary.actionCounts;
+
+    const result = buildProposalFunnelObservability({
+      events: [legacy],
+      sourceQuality: healthySource,
+      windowMs: 60_000,
+      eventLimit: 100,
+    });
+
+    expect(result).toMatchObject({
+      state: 'withheld',
+      withheldReason: 'attempt-identity-unavailable',
+      sample: {
+        includedAttempts: 0,
+        preEnvelopeEvents: 0,
+        invalidAttemptIdentities: 1,
+      },
+    });
+    expect(result.metrics).toBeUndefined();
+  });
+
   it.each([
     ['created plus blocked', 'proposal-created', { proposalBlocked: 1 }],
     ['created plus disabled', 'proposal-created', { proposalDisabled: 1 }],
