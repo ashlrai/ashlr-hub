@@ -149,25 +149,31 @@ describe('M367 bounded advisory resolution observer', () => {
   });
 
   it('records an authenticated transition and advances only after the witness write', () => {
-    expect(writeResolutionObserverCheckpoint(checkpoint())).toBe(true);
-    const result = runResolutionObserver({
-      now: () => new Date('2026-07-11T11:31:00.000Z'),
-      deps: { loadBacklog: () => backlog('2026-07-11T11:29:00.000Z', [absent()]) },
-    });
+    const wallClock = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-07-11T11:31:00.000Z'));
 
-    expect(result).toMatchObject({ outcome: 'completed', transitionsMatched: 1, recorded: 1, pendingObjectives: 0 });
-    expect(readResolutionObserverCheckpoint().checkpoint).toMatchObject({
-      backlogGeneratedAt: '2026-07-11T11:29:00.000Z',
-      pending: [],
-    });
-    expect(readResolutionWitnesses()).toMatchObject({
-      sourceState: 'healthy',
-      witnesses: [expect.objectContaining({
-        observerRunId: expect.stringMatching(/^resolution-observer:[a-f0-9]{32}$/),
-        observationBaseDigest: present().sourceBase?.baseDigest,
-        postStateBaseDigest: absent().sourceBase?.baseDigest,
-      })],
-    });
+    try {
+      expect(writeResolutionObserverCheckpoint(checkpoint())).toBe(true);
+      const result = runResolutionObserver({
+        now: () => new Date('2026-07-11T11:31:00.000Z'),
+        deps: { loadBacklog: () => backlog('2026-07-11T11:29:00.000Z', [absent()]) },
+      });
+
+      expect(result).toMatchObject({ outcome: 'completed', transitionsMatched: 1, recorded: 1, pendingObjectives: 0 });
+      expect(readResolutionObserverCheckpoint().checkpoint).toMatchObject({
+        backlogGeneratedAt: '2026-07-11T11:29:00.000Z',
+        pending: [],
+      });
+      expect(readResolutionWitnesses()).toMatchObject({
+        sourceState: 'healthy',
+        witnesses: [expect.objectContaining({
+          observerRunId: expect.stringMatching(/^resolution-observer:[a-f0-9]{32}$/),
+          observationBaseDigest: present().sourceBase?.baseDigest,
+          postStateBaseDigest: absent().sourceBase?.baseDigest,
+        })],
+      });
+    } finally {
+      wallClock.mockRestore();
+    }
   });
 
   it('replays after a checkpoint crash without duplicating physical witness rows', () => {

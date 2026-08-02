@@ -41,6 +41,7 @@ import type { SemanticPrivateStorageHarness } from './helpers/semantic-private-s
 
 const privateStorageHarness = vi.hoisted(() => ({
   harness: undefined as SemanticPrivateStorageHarness | undefined,
+  useSemanticAdapter: false,
 }));
 
 vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
@@ -56,7 +57,8 @@ vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
       ...args: Parameters<typeof actual.assurePrivateStoragePath>
     ) => {
       const options = args[3];
-      if (process.platform !== 'win32' || options?.runner !== undefined) {
+      if (process.platform !== 'win32' || !privateStorageHarness.useSemanticAdapter ||
+        options?.runner !== undefined) {
         return actual.assurePrivateStoragePath(...args);
       }
       return actual.assurePrivateStoragePath(args[0], args[1], args[2], {
@@ -249,6 +251,9 @@ beforeAll(() => {
   initBareGitDir(tmpRepo);
   fs.writeFileSync(path.join(tmpRepo, 'package.json'), JSON.stringify({ name: 'r' }), 'utf8');
 
+  // Native Windows DACL behavior is covered by H4/H7/M379. M220 owns verdict
+  // feedback semantics and must not contend for PowerShell-backed fence setup.
+  privateStorageHarness.useSemanticAdapter = process.platform === 'win32';
   privateStorageHarness.harness?.reset();
   const enrollment = enroll(tmpRepo);
   if (!enrollment.ok) {

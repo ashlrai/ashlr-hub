@@ -32,26 +32,6 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { AshlrConfig, WorkItem } from '../src/core/types.js';
 import type { RouteDecision } from '../src/core/fleet/router.js';
-
-const privateStorageMocks = vi.hoisted(() => ({
-  calls: [] as Array<Parameters<
-    typeof import('../src/core/util/private-storage.js').assurePrivateStoragePath
-  >>,
-}));
-
-vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
-  return {
-    ...actual,
-    assurePrivateStoragePath: (
-      ...args: Parameters<typeof actual.assurePrivateStoragePath>
-    ) => {
-      privateStorageMocks.calls.push(args);
-      return { ok: true, reason: 'exact-private-dacl' };
-    },
-  };
-});
-
 // ---------------------------------------------------------------------------
 // HOME isolation — before any module import resolves homedir()
 // ---------------------------------------------------------------------------
@@ -64,6 +44,7 @@ const origInSwarm = process.env.ASHLR_IN_SWARM;
 
 let tmpHome: string;
 let tmpRepo: string;
+let semanticPrivateStorage: ReturnType<typeof createSemanticPrivateStorageHarness> | undefined;
 
 // ---------------------------------------------------------------------------
 // Mocks — declared before lazy imports (same pattern as m85 / m106)
@@ -128,10 +109,18 @@ import { SharedStore } from '../src/core/fleet/shared-store.js';
 import { loadFleetQuota } from '../src/core/fleet/quota.js';
 import { readAudit } from '../src/core/sandbox/audit.js';
 import {
+  PRIVATE_STORAGE_TEST_CONTROL,
+  _setPrivateStorageTestControlForTest,
+} from '../src/core/util/private-storage.js';
+import {
   acquireOutwardMutationFence,
   ownsOutwardMutationFence,
   releaseOutwardMutationFence,
 } from '../src/core/sandbox/mutation-fence.js';
+import {
+  createSemanticPrivateStorageHarness,
+  trustedWindowsSystemRootForTest,
+} from './helpers/semantic-private-storage.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -207,7 +196,16 @@ beforeEach(() => {
   process.env.USERPROFILE = tmpHome;
   process.env.ASHLR_HOME = path.join(tmpHome, '.ashlr');
 
-  privateStorageMocks.calls.length = 0;
+  semanticPrivateStorage = undefined;
+  if (process.platform === 'win32') {
+    semanticPrivateStorage = createSemanticPrivateStorageHarness({
+      systemRoot: trustedWindowsSystemRootForTest(),
+    });
+    _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+      runner: semanticPrivateStorage.runner,
+    });
+  }
+
   const fence = acquireOutwardMutationFence();
   try {
     if (!ownsOutwardMutationFence(fence)) {
@@ -218,9 +216,21 @@ beforeEach(() => {
   }
   if (process.platform === 'win32') {
     const root = path.join(tmpHome, '.ashlr');
-    expect(privateStorageMocks.calls).toEqual([
-      [root, 'directory', 'secure-created', { anchorPath: tmpHome }],
-      [path.join(root, 'authority'), 'directory', 'secure-created', { anchorPath: root }],
+    expect(semanticPrivateStorage?.requests).toEqual([
+      {
+        operation: 'assure-private-path',
+        anchorPath: tmpHome,
+        paths: [root],
+        kind: 'directory',
+        mode: 'secure-created',
+      },
+      {
+        operation: 'assure-private-path',
+        anchorPath: root,
+        paths: [path.join(root, 'authority')],
+        kind: 'directory',
+        mode: 'secure-created',
+      },
     ]);
   }
 
@@ -259,6 +269,9 @@ beforeEach(() => {
 afterEach(() => {
   try { unenroll(tmpRepo); } catch { /* ignore */ }
   try { setKill(false); } catch { /* ignore */ }
+  _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
+  semanticPrivateStorage?.reset();
+  semanticPrivateStorage = undefined;
 
   fs.rmSync(tmpHome, { recursive: true, force: true });
   fs.rmSync(tmpRepo, { recursive: true, force: true });
