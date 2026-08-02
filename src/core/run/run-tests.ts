@@ -9,8 +9,8 @@
  * winner-only Best-of-N capture behind the same verification path.
  *
  * Flow: loadProposal → createSandbox (policy-gated, kill-switch aware) →
- * `git apply` the diff → detectRepoExecutionProfile INSIDE the worktree (so a
- * diff that adds a test script counts) → run verify commands cheap-first
+ * select verification from the trusted base → `git apply` the diff → reject
+ * verifier-selection drift → run the base commands cheap-first
  * (typecheck → lint → build → test) → removeSandbox.
  *
  * Semantics: absence of verification (no proposal, no diff, no commands,
@@ -23,13 +23,31 @@
  * for orphan recovery when subprocess closure cannot be confirmed.
  */
 
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import {
+  closeSync,
+  fstatSync,
+  lstatSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 
 import type { AshlrConfig, Proposal, Sandbox } from '../types.js';
 import type { SandboxRetentionEvidence } from './sandboxed-engine.js';
-import { detectRepoExecutionProfile } from './repo-profile.js';
+import {
+  canonicalizeVerifyCommands,
+  detectRepoExecutionProfile,
+  type MergeVerifyContractScannerSource,
+  type RepoExecutionProfile,
+  type RepoVerifyContractSource,
+} from './repo-profile.js';
 import {
   filterVerifyCommandsForProfile,
   runVerifyCommandAsync,
@@ -63,6 +81,8 @@ export interface TestRunResult {
     | 'no-diff'
     | 'sandbox-failed'
     | 'apply-failed'
+    | 'verification-selection-unavailable'
+    | 'verification-selection-drift'
     | 'no-commands'
     | 'cancelled'
     | 'process-cleanup-unconfirmed';
@@ -78,6 +98,236 @@ export interface RunTestsOptions {
 const KIND_RANK: Record<VerifyCommand['kind'], number> = { typecheck: 0, lint: 1, build: 2, test: 3 };
 
 const PER_COMMAND_TIMEOUT_MS = 180_000;
+const MAX_VERIFIER_CONTROL_FILES = 512;
+const MAX_VERIFIER_CONTROL_FILE_BYTES = 2 * 1024 * 1024;
+const MAX_VERIFIER_CONTROL_TOTAL_BYTES = 16 * 1024 * 1024;
+
+interface VerifierControlFileIdentity {
+  path: string;
+  sha256: string;
+  size: number;
+  mode: number;
+  device: number;
+  inode: number;
+}
+
+interface VerificationSelectionSnapshot {
+  profile: VerifyCommandProfile;
+  verifyContractSource: RepoVerifyContractSource;
+  source: MergeVerifyContractScannerSource;
+  commandPlan: ReturnType<typeof canonicalizeVerifyCommands>;
+  controlFiles: VerifierControlFileIdentity[];
+}
+
+function safeRelativeFile(root: string, path: string): string | null {
+  const rel = relative(root, path).replace(/\\/g, '/');
+  if (!rel || rel.startsWith('../') || isAbsolute(rel)) return null;
+  return rel;
+}
+
+function detectedManifestPaths(profile: RepoExecutionProfile): string[] | null {
+  const repoRoot = resolve(profile.repoRoot);
+  const paths = new Set<string>();
+  for (const project of profile.projects) {
+    const projectRoot = resolve(project.root);
+    const projectRel = relative(repoRoot, projectRoot);
+    if (projectRel.startsWith('..') || isAbsolute(projectRel)) return null;
+    for (const manifest of project.manifests) {
+      const exact = resolve(projectRoot, manifest);
+      const exactRel = safeRelativeFile(repoRoot, exact);
+      if (!exactRel) return null;
+      try {
+        lstatSync(exact);
+        paths.add(exactRel);
+        continue;
+      } catch {
+        // `vitest.config` is a detector marker for its supported extensions.
+      }
+      let matches: string[];
+      try {
+        matches = readdirSync(projectRoot)
+          .filter((entry) => entry.startsWith(`${manifest}.`))
+          .sort();
+      } catch {
+        return null;
+      }
+      if (matches.length === 0) return null;
+      for (const match of matches) {
+        const matchRel = safeRelativeFile(repoRoot, resolve(projectRoot, match));
+        if (!matchRel) return null;
+        paths.add(matchRel);
+      }
+    }
+  }
+  for (const command of profile.verifyCommands) {
+    const cwd = resolve(command.cwd ?? repoRoot);
+    const cwdRel = relative(repoRoot, cwd);
+    if (cwdRel.startsWith('..') || isAbsolute(cwdRel)) return null;
+    for (const [index, argument] of command.cmd.entries()) {
+      if (
+        !argument ||
+        argument.includes('\0') ||
+        argument.startsWith('-') ||
+        (index === 0 && !argument.includes('/') && !argument.includes('\\'))
+      ) {
+        continue;
+      }
+      const candidate = resolve(cwd, argument);
+      const candidateRel = safeRelativeFile(repoRoot, candidate);
+      if (!candidateRel) continue;
+      try {
+        const stat = lstatSync(candidate);
+        if (stat.isFile() || stat.isSymbolicLink()) paths.add(candidateRel);
+      } catch {
+        // Non-file argv values do not belong to the available control closure.
+      }
+    }
+  }
+  for (const authorityFile of profile.mergeVerifyContractSource.verifyContract?.authorityFiles ?? []) {
+    const authorityRel = safeRelativeFile(repoRoot, resolve(repoRoot, authorityFile));
+    if (!authorityRel || authorityRel !== authorityFile) return null;
+    paths.add(authorityRel);
+  }
+  const out = [...paths].sort();
+  return out.length <= MAX_VERIFIER_CONTROL_FILES ? out : null;
+}
+
+function readControlFileIdentity(
+  repoRoot: string,
+  relativePath: string,
+): VerifierControlFileIdentity | null {
+  const root = resolve(repoRoot);
+  const path = resolve(root, relativePath);
+  if (safeRelativeFile(root, path) !== relativePath) return null;
+  let fd: number | null = null;
+  try {
+    const beforePath = lstatSync(path);
+    if (beforePath.isSymbolicLink() || !beforePath.isFile()) return null;
+    if (beforePath.size > MAX_VERIFIER_CONTROL_FILE_BYTES) return null;
+    const physicalRoot = realpathSync(root);
+    const physicalPath = realpathSync(path);
+    const physicalRel = relative(physicalRoot, physicalPath);
+    if (!physicalRel || physicalRel.startsWith('..') || isAbsolute(physicalRel)) return null;
+
+    fd = openSync(path, 'r');
+    const before = fstatSync(fd);
+    if (!before.isFile() || before.size > MAX_VERIFIER_CONTROL_FILE_BYTES) return null;
+    if (
+      beforePath.dev !== before.dev ||
+      beforePath.ino !== before.ino ||
+      beforePath.mode !== before.mode ||
+      beforePath.size !== before.size ||
+      beforePath.mtimeMs !== before.mtimeMs
+    ) {
+      return null;
+    }
+    const bytes = readFileSync(fd);
+    const after = fstatSync(fd);
+    const afterPath = lstatSync(path);
+    if (
+      afterPath.isSymbolicLink() ||
+      !afterPath.isFile() ||
+      bytes.length !== before.size ||
+      before.dev !== after.dev ||
+      before.ino !== after.ino ||
+      before.mode !== after.mode ||
+      before.size !== after.size ||
+      before.mtimeMs !== after.mtimeMs ||
+      after.dev !== afterPath.dev ||
+      after.ino !== afterPath.ino ||
+      after.mode !== afterPath.mode ||
+      after.size !== afterPath.size ||
+      after.mtimeMs !== afterPath.mtimeMs
+    ) {
+      return null;
+    }
+    return {
+      path: relativePath,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+      size: after.size,
+      mode: after.mode & 0o777,
+      device: after.dev,
+      inode: after.ino,
+    };
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* best-effort descriptor cleanup */
+      }
+    }
+  }
+}
+
+function captureControlFiles(profile: RepoExecutionProfile): VerifierControlFileIdentity[] | null {
+  const paths = detectedManifestPaths(profile);
+  if (!paths) return null;
+  const identities: VerifierControlFileIdentity[] = [];
+  let totalBytes = 0;
+  for (const path of paths) {
+    const identity = readControlFileIdentity(profile.repoRoot, path);
+    if (!identity) return null;
+    totalBytes += identity.size;
+    if (totalBytes > MAX_VERIFIER_CONTROL_TOTAL_BYTES) return null;
+    identities.push(identity);
+  }
+  return identities;
+}
+
+function captureVerificationSelectionOnce(
+  worktreePath: string,
+  profile: VerifyCommandProfile,
+): { snapshot: VerificationSelectionSnapshot; commands: VerifyCommand[] } | null {
+  try {
+    const executionProfile = detectRepoExecutionProfile(worktreePath);
+    if (
+      executionProfile.mergeVerifyContractSource.inputState !== 'complete' ||
+      !['missing', 'tracked-clean'].includes(executionProfile.verifyContractSource) ||
+      (executionProfile.verifyContract?.present === true && !executionProfile.verifyContract.valid)
+    ) {
+      return null;
+    }
+    const controlFiles = captureControlFiles(executionProfile);
+    if (!controlFiles) return null;
+    const commands = filterVerifyCommandsForProfile(
+      executionProfile.verifyCommands,
+      profile,
+    ).sort((a, b) => KIND_RANK[a.kind] - KIND_RANK[b.kind]);
+    return {
+      commands,
+      snapshot: {
+        profile,
+        verifyContractSource: executionProfile.verifyContractSource,
+        source: executionProfile.mergeVerifyContractSource,
+        // Preserve execution order while canonicalizing repository-relative cwd values.
+        commandPlan: commands.flatMap((command) => canonicalizeVerifyCommands(worktreePath, [command])),
+        controlFiles,
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+function captureVerificationSelection(
+  worktreePath: string,
+  profile: VerifyCommandProfile,
+): { snapshot: VerificationSelectionSnapshot; commands: VerifyCommand[] } | null {
+  const first = captureVerificationSelectionOnce(worktreePath, profile);
+  const second = captureVerificationSelectionOnce(worktreePath, profile);
+  if (!first || !second || !verificationSelectionMatches(first.snapshot, second.snapshot)) return null;
+  return first;
+}
+
+function verificationSelectionMatches(
+  trusted: VerificationSelectionSnapshot,
+  candidate: VerificationSelectionSnapshot,
+): boolean {
+  return JSON.stringify(trusted) === JSON.stringify(candidate);
+}
 
 const PROCESS_CLEANUP_UNCONFIRMED_RE =
   /(?:termination authority lost|termination deadline elapsed[^\n]*(?:unconfirmed|could not be authenticated)|process(?:-group)?[^\n]*(?:closure|exit)[^\n]*unconfirmed)/i;
@@ -196,6 +446,14 @@ export async function runTestsForProposalDetailed(
     }
     if (options.signal?.aborted) return cancelled();
 
+    // Select the complete verification plan from the clean base. Candidate
+    // bytes are not allowed to add, remove, replace, or re-profile their own
+    // verifier before this draft is evaluated.
+    const trustedSelection = captureVerificationSelection(sb.worktreePath, profile);
+    if (!trustedSelection) {
+      return { passed: false, commands: [], skipped: 'verification-selection-unavailable' };
+    }
+
     // 3. Apply the diff. A diff that does not apply is a REAL negative — the
     //    candidate's patch is broken against the current tree.
     const patchDir = mkdtempSync(join(tmpdir(), 'ashlr-run-tests-'));
@@ -232,19 +490,29 @@ export async function runTestsForProposalDetailed(
 
     if (options.signal?.aborted) return cancelled();
 
-    // 4. Detect verification commands INSIDE the patched worktree.
-    const executionProfile = detectRepoExecutionProfile(sb.worktreePath);
-    const verifyCommands = filterVerifyCommandsForProfile(
-      executionProfile.verifyCommands,
-      profile,
-    ).sort(
-      (a, b) => KIND_RANK[a.kind] - KIND_RANK[b.kind],
-    );
-    if (verifyCommands.length === 0) return { passed: true, commands: [], skipped: 'no-commands' };
+    // 4. Re-read selection inputs after apply. Any candidate-induced change is
+    // an authority violation, including changes outside the requested profile.
+    const candidateSelection = captureVerificationSelection(sb.worktreePath, profile);
+    if (
+      !candidateSelection ||
+      !verificationSelectionMatches(trustedSelection.snapshot, candidateSelection.snapshot)
+    ) {
+      return { passed: false, commands: [], skipped: 'verification-selection-drift' };
+    }
 
-    // 5. Run cheap-first; stop at the first failure.
+    const verifyCommands = trustedSelection.commands;
+    if (verifyCommands.length === 0) return { passed: true, commands: [], skipped: 'no-commands' };
+    const selectionStillTrusted = (): boolean => {
+      const current = captureVerificationSelection(sb!.worktreePath, profile);
+      return current !== null && verificationSelectionMatches(trustedSelection.snapshot, current.snapshot);
+    };
+
+    // 5. Run the base-derived plan cheap-first; stop at the first failure.
     for (const [index, vc] of verifyCommands.entries()) {
       if (options.signal?.aborted) return cancelled();
+      if (!selectionStillTrusted()) {
+        return { passed: false, commands: results, skipped: 'verification-selection-drift' };
+      }
       const r = await runVerifyCommandAsync(vc, sb.worktreePath, cfg, {
         timeoutMs: vc.timeoutMs ?? PER_COMMAND_TIMEOUT_MS,
         ...(options.signal ? { signal: options.signal } : {}),
@@ -269,6 +537,9 @@ export async function runTestsForProposalDetailed(
       if (commandCleanupUnconfirmed) {
         sandboxRetention = retainedSandboxEvidence(sb);
         return cleanupUnconfirmed();
+      }
+      if (!selectionStillTrusted()) {
+        return { passed: false, commands: results, skipped: 'verification-selection-drift' };
       }
       if (commandCancelled) return cancelled();
       if (!r.ok && vc.required !== false) return { passed: false, commands: results };

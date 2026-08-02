@@ -19,7 +19,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -136,6 +136,30 @@ function repoWithContract(commands: Array<Record<string, unknown>>, diff = ADD_F
   fixtureProposal = { repo: fixtureRepo, diff };
 }
 
+function trackedFileDiff(repo: string, fileName: string, next: string): string {
+  writeFileSync(join(repo, fileName), next, 'utf8');
+  const diff = execFileSync('git', ['diff', '--binary', '--', fileName], {
+    cwd: repo,
+    encoding: 'utf8',
+  });
+  execFileSync('git', ['checkout', '--', fileName], { cwd: repo, stdio: 'pipe' });
+  return diff;
+}
+
+function commitFile(repo: string, fileName: string, content: string): void {
+  const segments = fileName.split('/');
+  if (segments.length > 1) {
+    mkdirSync(join(repo, ...segments.slice(0, -1)), { recursive: true });
+  }
+  writeFileSync(join(repo, fileName), content, 'utf8');
+  execFileSync('git', ['add', '--', fileName], { cwd: repo, stdio: 'pipe' });
+  execFileSync('git', ['commit', '--quiet', '-m', `add ${fileName}`], {
+    cwd: repo,
+    stdio: 'pipe',
+    env: GIT_ENV,
+  });
+}
+
 // ---------------------------------------------------------------------------
 // runTestsDetailed
 // ---------------------------------------------------------------------------
@@ -227,6 +251,208 @@ describe('M331 runTestsDetailed', () => {
     expect(r.passed).toBe(false);
     expect(r.commands.at(-1)?.ok).toBe(false);
     expect(await runTests('p2', cfg)).toBe(false);
+  }, 30_000);
+
+  it('does not let a candidate replace the base verifier with a no-op contract', async () => {
+    const manifestDiff = [
+      'diff --git a/ashlr.verify.json b/ashlr.verify.json',
+      'new file mode 100644',
+      'index 0000000..d95f3ad',
+      '--- /dev/null',
+      '+++ b/ashlr.verify.json',
+      '@@ -0,0 +1 @@',
+      '+{"schemaVersion":1,"mode":"replace-detected","commands":[{"id":"candidate-noop","kind":"test","cmd":["node","-e","process.exit(0)"],"required":true,"profiles":["merge"]}]}',
+      '',
+    ].join('\n');
+    repoWith(
+      { name: 'fx', version: '1.0.0', scripts: { test: 'node -e "process.exit(1)"' } },
+      manifestDiff,
+    );
+
+    const result = await runTestsForProposalDetailed({ repo: fixtureRepo, diff: manifestDiff }, cfg);
+
+    expect(result).toEqual({
+      passed: false,
+      commands: [],
+      skipped: 'verification-selection-drift',
+    });
+  }, 30_000);
+
+  it('fails closed when a candidate adds the only verifier', async () => {
+    const manifestDiff = [
+      'diff --git a/ashlr.verify.json b/ashlr.verify.json',
+      'new file mode 100644',
+      'index 0000000..d95f3ad',
+      '--- /dev/null',
+      '+++ b/ashlr.verify.json',
+      '@@ -0,0 +1 @@',
+      '+{"schemaVersion":1,"mode":"replace-detected","commands":[{"id":"candidate-only","kind":"test","cmd":["node","-e","process.exit(0)"],"required":true,"profiles":["merge"]}]}',
+      '',
+    ].join('\n');
+    repoWith({ name: 'fx', version: '1.0.0' }, manifestDiff);
+
+    const result = await runTestsDetailed('p-candidate-only-verifier', cfg);
+
+    expect(result).toEqual({
+      passed: false,
+      commands: [],
+      skipped: 'verification-selection-drift',
+    });
+  }, 30_000);
+
+  it('does not let a candidate reprofile a required base command out of merge', async () => {
+    const baseContract = {
+      schemaVersion: 1,
+      mode: 'replace-detected',
+      commands: [{
+        id: 'required-merge',
+        kind: 'test',
+        cmd: ['node', '-e', 'process.exit(1)'],
+        required: true,
+        profiles: ['merge'],
+      }],
+    };
+    fixtureRepo = makeRepo({ name: 'fx', version: '1.0.0' }, baseContract);
+    created.push(fixtureRepo);
+    const diff = trackedFileDiff(
+      fixtureRepo,
+      'ashlr.verify.json',
+      JSON.stringify({
+        ...baseContract,
+        commands: [{ ...baseContract.commands[0], profiles: ['quick'] }],
+      }, null, 2) + '\n',
+    );
+    fixtureProposal = { repo: fixtureRepo, diff };
+
+    const result = await runTestsDetailed('p-candidate-reprofile', cfg, 'merge');
+
+    expect(result).toEqual({
+      passed: false,
+      commands: [],
+      skipped: 'verification-selection-drift',
+    });
+  }, 30_000);
+
+  it('rejects changed declared verifier bytes when argv is unchanged', async () => {
+    const contract = {
+      schemaVersion: 1,
+      mode: 'replace-detected',
+      authorityFiles: ['scripts/verify.mjs'],
+      commands: [{
+        id: 'script-test',
+        kind: 'test',
+        cmd: ['npm', 'run', 'test'],
+        required: true,
+        profiles: ['merge'],
+      }],
+    };
+    fixtureRepo = makeRepo({
+      name: 'fx',
+      version: '1.0.0',
+      scripts: { test: 'node scripts/verify.mjs' },
+    }, contract);
+    commitFile(fixtureRepo, 'scripts/verify.mjs', 'process.exit(1);\n');
+    created.push(fixtureRepo);
+    const diff = trackedFileDiff(fixtureRepo, 'scripts/verify.mjs', 'process.exit(0);\n');
+    fixtureProposal = { repo: fixtureRepo, diff };
+
+    const result = await runTestsDetailed('p-candidate-script', cfg);
+
+    expect(result).toEqual({
+      passed: false,
+      commands: [],
+      skipped: 'verification-selection-drift',
+    });
+  }, 30_000);
+
+  it('rejects changed detected verifier config when command argv is unchanged', async () => {
+    fixtureRepo = makeRepo({
+      name: 'fx',
+      version: '1.0.0',
+      devDependencies: { vitest: '1.0.0' },
+    });
+    commitFile(fixtureRepo, 'vitest.config.ts', 'export default { test: { passWithNoTests: false } };\n');
+    created.push(fixtureRepo);
+    const diff = trackedFileDiff(
+      fixtureRepo,
+      'vitest.config.ts',
+      'export default { test: { passWithNoTests: true } };\n',
+    );
+    fixtureProposal = { repo: fixtureRepo, diff };
+
+    const result = await runTestsDetailed('p-candidate-config', cfg);
+
+    expect(result).toEqual({
+      passed: false,
+      commands: [],
+      skipped: 'verification-selection-drift',
+    });
+  }, 30_000);
+
+  it('stops when an earlier command mutates authority for a later command', async () => {
+    const mutator = [
+      "require('fs').writeFileSync(",
+      "  'scripts/later.mjs',",
+      "  'process.exit(0);\\n',",
+      ');',
+    ].join(' ');
+    fixtureRepo = makeRepo(
+      { name: 'fx', version: '1.0.0' },
+      {
+        schemaVersion: 1,
+        mode: 'replace-detected',
+        authorityFiles: ['scripts/later.mjs'],
+        commands: [
+          {
+            id: 'mutate-later',
+            kind: 'typecheck',
+            cmd: ['node', '-e', mutator],
+            required: true,
+            profiles: ['merge'],
+          },
+          {
+            id: 'later',
+            kind: 'test',
+            cmd: ['node', 'scripts/later.mjs'],
+            required: true,
+            profiles: ['merge'],
+          },
+        ],
+      },
+    );
+    commitFile(fixtureRepo, 'scripts/later.mjs', 'process.exit(1);\n');
+    created.push(fixtureRepo);
+    fixtureProposal = { repo: fixtureRepo, diff: ADD_FILE_DIFF };
+
+    const result = await runTestsDetailed('p-command-mutation', cfg);
+
+    expect(result).toMatchObject({
+      passed: false,
+      skipped: 'verification-selection-drift',
+      commands: [{ kind: 'typecheck', ok: true }],
+    });
+    expect(result.commands).toHaveLength(1);
+  }, 30_000);
+
+  it('fails closed when base verification metadata is malformed', async () => {
+    fixtureRepo = makeRepo({ name: 'fx', version: '1.0.0' });
+    writeFileSync(join(fixtureRepo, 'package.json'), '{"scripts":');
+    execFileSync('git', ['add', 'package.json'], { cwd: fixtureRepo, stdio: 'pipe' });
+    execFileSync('git', ['commit', '--quiet', '-m', 'malformed'], {
+      cwd: fixtureRepo,
+      stdio: 'pipe',
+      env: GIT_ENV,
+    });
+    created.push(fixtureRepo);
+    fixtureProposal = { repo: fixtureRepo, diff: ADD_FILE_DIFF };
+
+    const result = await runTestsDetailed('p-malformed-base', cfg);
+
+    expect(result).toEqual({
+      passed: false,
+      commands: [],
+      skipped: 'verification-selection-unavailable',
+    });
   }, 30_000);
 
   it('runs detected commands cheap-first with build before test', async () => {
