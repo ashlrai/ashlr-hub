@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 
 import type { AshlrConfig } from '../types.js';
 import { resolveGitHubOriginAuthorityDetails, type GitHubOriginAuthority } from '../git.js';
+import { resolveAutoMergeScopePolicy } from '../foundry/automerge-scope-policy.js';
 import { audit } from '../sandbox/audit.js';
 import {
   inspectCommittedAutoMergeCanaryPatch,
@@ -173,13 +174,22 @@ function stableHash(domain: string, value: unknown): string {
 function normalizedAutoMergeConfig(cfg: AshlrConfig): Record<string, unknown> {
   const value = cfg.foundry?.autoMerge;
   const checks = value?.protectedRemote?.requiredChecks ?? [];
+  const scopePolicy = resolveAutoMergeScopePolicy(value);
   return {
     allowSelfMerge: value?.allowSelfMerge === true,
     allowWithoutVerification: value?.allowWithoutVerification === true,
     enabled: value?.enabled === true,
     managerGate: value?.managerGate === true,
-    maxAutomergeFiles: value?.maxAutomergeFiles ?? 4,
-    maxAutomergeLines: value?.maxAutomergeLines ?? 150,
+    scopePolicy: scopePolicy.ok
+      ? {
+          schemaVersion: scopePolicy.policy.schemaVersion,
+          maxFiles: scopePolicy.policy.maxFiles,
+          maxLines: scopePolicy.policy.maxLines,
+          policyMaxFiles: scopePolicy.policy.policyMaxFiles,
+          policyMaxLines: scopePolicy.policy.policyMaxLines,
+          digest: scopePolicy.policy.digest,
+        }
+      : { invalid: scopePolicy.reasons },
     maxRisk: value?.maxRisk ?? 'low',
     midToBranch: value?.midToBranch === true,
     protectedRemote: value?.protectedRemote
@@ -198,6 +208,14 @@ function normalizedAutoMergeConfig(cfg: AshlrConfig): Record<string, unknown> {
     trustBasis: value?.trustBasis ?? 'tier',
     verifyBeforeJudgePerPass: value?.verifyBeforeJudgePerPass ?? null,
   };
+}
+
+export function autoMergeCanaryPolicyDigest(): string {
+  return stableHash(HASH_DOMAINS.policy, POLICY_FACTS);
+}
+
+export function autoMergeCanaryConfigDigest(cfg: AshlrConfig): string {
+  return stableHash(HASH_DOMAINS.config, normalizedAutoMergeConfig(cfg));
 }
 
 function canonicalBaseRef(baseRef: string): string | null {
@@ -228,8 +246,8 @@ function deriveStaticBindings(
       urls: [...origin.pushUrls].sort(),
     }),
     baseRefDigest: stableHash(HASH_DOMAINS.baseRef, baseRef),
-    policyDigest: stableHash(HASH_DOMAINS.policy, POLICY_FACTS),
-    configDigest: stableHash(HASH_DOMAINS.config, normalizedAutoMergeConfig(input.cfg)),
+    policyDigest: autoMergeCanaryPolicyDigest(),
+    configDigest: autoMergeCanaryConfigDigest(input.cfg),
     classifierDigest: stableHash(HASH_DOMAINS.classifier, CLASSIFIER_FACTS),
   };
 }

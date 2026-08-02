@@ -9401,6 +9401,41 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
       .toContain('scope-caps-unavailable');
   });
 
+  it('renders schema-v1 promotion payloads without inventing scope identity', () => {
+    const out = formatFleetStatus({
+      generatedAt: '2026-07-29T02:00:00.000Z',
+      daemon: { running: false, lastTickAt: null, todaySpentUsd: 0 },
+      backends: [],
+      queue: { backlogItems: 0 },
+      proposals: { pending: 0, frontierPending: 0, applied: 0 },
+      merges: { recent: 0 },
+      killed: false,
+      autoMergeCanaryPromotionReadiness: {
+        schemaVersion: 1,
+        authority: 'observation-only',
+        observedAt: '2026-07-29T02:00:00.000Z',
+        verdict: 'blocked',
+        evidenceReady: false,
+        activationPermitted: false,
+        blockers: [],
+        authorityBlockers: [{
+          code: 'enforcement-unsupported',
+          severity: 'critical',
+          detail: 'unsupported',
+        }],
+        primaryBlocker: {
+          code: 'enforcement-unsupported',
+          severity: 'critical',
+          detail: 'unsupported',
+        },
+      },
+    } as unknown as FleetStatus);
+
+    expect(out).toContain('scope caps: unavailable file(s), unavailable changed line(s)');
+    expect(out).toContain('cap source: unavailable');
+    expect(out).toContain('identity:   unavailable via unavailable (observed never)');
+  });
+
   it('omits the paused banner when not killed', () => {
     const out = formatFleetStatus({
       generatedAt: '2026-06-17T00:00:00.000Z',

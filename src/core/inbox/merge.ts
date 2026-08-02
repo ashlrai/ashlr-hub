@@ -28,10 +28,9 @@
  * ║        (e) valid signed HMAC provenance.                                    ║
  * ║   5. classifyRisk(proposal) ≤ cfg.foundry.autoMerge.maxRisk (default low). ║
  * ║  5.5 SCOPE CAP (M86): risk must be 'low' AND the diff must be within tight ║
- * ║      size caps — files ≤ MAX_AUTOMERGE_FILES (default 4, override via      ║
- * ║      cfg.foundry.autoMerge.maxAutomergeFiles) AND changed lines ≤          ║
- * ║      MAX_AUTOMERGE_LINES (default 150, override via                        ║
- * ║      cfg.foundry.autoMerge.maxAutomergeLines). Pure check, no I/O.        ║
+ * ║      size caps — files ≤ MAX_AUTOMERGE_FILES (default 4, policy max 10)    ║
+ * ║      AND changed lines ≤ MAX_AUTOMERGE_LINES (default 150, policy max      ║
+ * ║      300). Explicit overrides outside those bounds fail closed.            ║
  * ║   6. verifyProposal: apply the diff to an ISOLATED temp worktree off the   ║
  * ║      default branch and run EVERY detected verify command — ALL must pass. ║
  * ║      Verify commands are detected from the BASE tree BEFORE the diff is    ║
@@ -144,6 +143,10 @@ import {
   verifyJudgeAttestation,
   verifyProvenance,
 } from '../foundry/provenance.js';
+import {
+  resolveAutoMergeScopePolicy,
+  type AutoMergeScopePolicyResolution,
+} from '../foundry/automerge-scope-policy.js';
 import {
   judgeProposal,
   resolveFrontierJudgeClient,
@@ -1022,13 +1025,10 @@ function configuredMaxRisk(cfg: AshlrConfig): RiskClass {
   return value === 'medium' || value === 'high' ? value : 'low';
 }
 
-function configuredScopeCaps(cfg: AshlrConfig): { maxFiles: number; maxLines: number } {
-  const rawFiles = autoMergeConfigValue(cfg, 'maxAutomergeFiles');
-  const rawLines = autoMergeConfigValue(cfg, 'maxAutomergeLines');
-  return {
-    maxFiles: typeof rawFiles === 'number' && rawFiles >= 1 ? Math.floor(rawFiles) : 4,
-    maxLines: typeof rawLines === 'number' && rawLines >= 1 ? Math.floor(rawLines) : 150,
-  };
+function configuredScopePolicy(cfg: AshlrConfig): AutoMergeScopePolicyResolution {
+  return resolveAutoMergeScopePolicy(
+    (cfg.foundry as Record<string, unknown> | undefined)?.['autoMerge'],
+  );
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
@@ -1416,13 +1416,13 @@ export function explainAutoMergeGate(
   ];
   const trustBasis = configuredTrustBasis(cfg);
   const maxRisk = configuredMaxRisk(cfg);
-  const caps = configuredScopeCaps(cfg);
+  const scopePolicy = configuredScopePolicy(cfg);
+  const caps = scopePolicy.ok ? scopePolicy.policy : null;
   const facts: AutoMergeGateFacts = {
     trustBasis,
     target: 'none',
     maxRisk,
-    maxFiles: caps.maxFiles,
-    maxLines: caps.maxLines,
+    ...(caps ? { maxFiles: caps.maxFiles, maxLines: caps.maxLines } : {}),
   };
   const add = (gate: string, code: AutoMergeGateCheckCode, ok: boolean, detail: string): void => {
     checks.push({ gate, code, ok, detail });
@@ -1514,14 +1514,23 @@ export function explainAutoMergeGate(
   const scope = countDiffScope(diff);
   facts.scopeFiles = scope.files;
   facts.scopeLines = scope.lines;
-  add(
-    'scope',
-    'scope-cap',
-    scope.files <= caps.maxFiles && scope.lines <= caps.maxLines,
-    scope.files <= caps.maxFiles && scope.lines <= caps.maxLines
-      ? `scope is within caps (${scope.files} file(s), ${scope.lines} line(s); max ${caps.maxFiles}/${caps.maxLines})`
-      : `scope cap exceeded (${scope.files} file(s), ${scope.lines} line(s); max ${caps.maxFiles}/${caps.maxLines})`,
-  );
+  if (!caps) {
+    add(
+      'scope',
+      'scope-cap',
+      false,
+      `scope cap policy is invalid (${scopePolicy.reasons.join(', ')})`,
+    );
+  } else {
+    add(
+      'scope',
+      'scope-cap',
+      scope.files <= caps.maxFiles && scope.lines <= caps.maxLines,
+      scope.files <= caps.maxFiles && scope.lines <= caps.maxLines
+        ? `scope is within caps (${scope.files} file(s), ${scope.lines} line(s); max ${caps.maxFiles}/${caps.maxLines})`
+        : `scope cap exceeded (${scope.files} file(s), ${scope.lines} line(s); max ${caps.maxFiles}/${caps.maxLines})`,
+    );
+  }
 
   if (proposal.verifyResult?.passed !== true) {
     add(
@@ -1791,14 +1800,12 @@ export function evaluateVerificationGate(
   }
 
   const diff = proposal.diff ?? '';
-  const rawFiles = (cfg.foundry as Record<string, unknown> | undefined)?.['autoMerge']
-    ? ((cfg.foundry as Record<string, unknown>)['autoMerge'] as Record<string, unknown>)?.['maxAutomergeFiles'] as number
-    : undefined;
-  const MAX_FILES: number = typeof rawFiles === 'number' && rawFiles >= 1 ? Math.floor(rawFiles) : 4;
-  const rawLines = (cfg.foundry as Record<string, unknown> | undefined)?.['autoMerge']
-    ? ((cfg.foundry as Record<string, unknown>)['autoMerge'] as Record<string, unknown>)?.['maxAutomergeLines'] as number
-    : undefined;
-  const MAX_LINES: number = typeof rawLines === 'number' && rawLines >= 1 ? Math.floor(rawLines) : 150;
+  const scopePolicy = configuredScopePolicy(cfg);
+  if (!scopePolicy.ok) {
+    return refuse(`verification gate: scope cap policy invalid (${scopePolicy.reasons.join(', ')})`);
+  }
+  const MAX_FILES = scopePolicy.policy.maxFiles;
+  const MAX_LINES = scopePolicy.policy.maxLines;
 
   let scopeFiles = 0;
   for (const line of diff.split('\n')) {
@@ -1907,7 +1914,11 @@ export function evaluateEvidenceGate(
   }
 
   const scope = countDiffScope(diff);
-  const caps = configuredScopeCaps(cfg);
+  const scopePolicy = configuredScopePolicy(cfg);
+  if (!scopePolicy.ok) {
+    return refuse(`evidence gate: scope cap policy invalid (${scopePolicy.reasons.join(', ')})`);
+  }
+  const caps = scopePolicy.policy;
   if (scope.files > caps.maxFiles) {
     return refuse(`evidence gate: scope cap — diff touches ${scope.files} files (max ${caps.maxFiles})`);
   }
@@ -3107,33 +3118,25 @@ export async function autoMergeProposal(
 
     let scopeFilesForEvidence = 0;
     let scopeLinesForEvidence = 0;
-    let maxFilesForEvidence = 4;
-    let maxLinesForEvidence = 150;
+    let maxFilesForEvidence = 0;
+    let maxLinesForEvidence = 0;
 
     // ── Gate 5.5 (M86): scope cap — only small, fully-bounded diffs auto-merge
-    // to main. Defaults are conservative; config keys allow opt-in relaxation.
+    // to main. Defaults are conservative; bounded config keys allow opt-in relaxation.
     // We require risk==='low' here (Gate 5 already enforces ≤maxRisk, but
     // maxRisk could be raised to 'medium' — scope cap applies ONLY when risk is
     // strictly 'low', so even a cfg.maxRisk='medium' run is scoped to low-risk
     // diffs for the size check). File + line counts reuse the same diff parser
     // as classifyRisk so the two gates are consistent.
     {
-      // Clamp to a positive integer ≥ 1 so a zero, negative, or non-numeric
-      // config value cannot disable the scope cap (a SAFETY gate).  Any value
-      // < 1 would make the cap impossible to satisfy (every diff has ≥ 1
-      // file/line), so we floor at 1 instead of silently disabling it.
       const autoMergeCfg = (cfg.foundry as { autoMerge?: Record<string, unknown> } | undefined)
         ?.autoMerge;
-      const rawFiles = autoMergeCfg?.maxAutomergeFiles;
-      const MAX_AUTOMERGE_FILES: number =
-        typeof rawFiles === 'number' && rawFiles >= 1
-          ? Math.floor(rawFiles)
-          : 4;
-      const rawLines = autoMergeCfg?.maxAutomergeLines;
-      const MAX_AUTOMERGE_LINES: number =
-        typeof rawLines === 'number' && rawLines >= 1
-          ? Math.floor(rawLines)
-          : 150;
+      const scopePolicy = resolveAutoMergeScopePolicy(autoMergeCfg);
+      if (!scopePolicy.ok) {
+        return refuse(`scope cap policy invalid (${scopePolicy.reasons.join(', ')})`, repo);
+      }
+      const MAX_AUTOMERGE_FILES = scopePolicy.policy.maxFiles;
+      const MAX_AUTOMERGE_LINES = scopePolicy.policy.maxLines;
       maxFilesForEvidence = MAX_AUTOMERGE_FILES;
       maxLinesForEvidence = MAX_AUTOMERGE_LINES;
 

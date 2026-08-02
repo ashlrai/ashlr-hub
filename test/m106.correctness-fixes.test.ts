@@ -466,23 +466,26 @@ describe('M106 BUG4 — round-robin handles 0-repo list and exhaustion correctly
 });
 
 // ===========================================================================
-// BUG 5: negative maxAutomergeFiles / maxAutomergeLines clamp to ≥ 1
+// BUG 5: malformed maxAutomergeFiles / maxAutomergeLines fail closed
 // ===========================================================================
 
 describe('M106 BUG5 — negative maxAutomergeFiles/Lines do NOT disable the scope cap', () => {
-  it('negative maxAutomergeFiles is treated as the default (4), not 0/negative', () => {
-    const mergeSrc = fs.readFileSync(
-      path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../src/core/inbox/merge.ts'),
-      'utf8',
+  it('negative scope caps are rejected by the canonical policy', async () => {
+    const { resolveAutoMergeScopePolicy } = await import(
+      '../src/core/foundry/automerge-scope-policy.js'
     );
-    // The fix introduces a typeof + >= 1 guard before applying the override.
-    expect(mergeSrc).toMatch(/typeof rawFiles === 'number' && rawFiles >= 1/);
-    expect(mergeSrc).toMatch(/typeof rawLines === 'number' && rawLines >= 1/);
+    expect(resolveAutoMergeScopePolicy({ maxAutomergeFiles: -1 })).toMatchObject({
+      ok: false,
+      reasons: ['max-files-invalid'],
+    });
+    expect(resolveAutoMergeScopePolicy({ maxAutomergeLines: -1 })).toMatchObject({
+      ok: false,
+      reasons: ['max-lines-invalid'],
+    });
   });
 
   it('autoMergeProposal with maxAutomergeFiles=-1 still enforces the default cap (4)', async () => {
-    // A diff with 5 docs files should be refused even when maxAutomergeFiles=-1
-    // is passed (negative is clamped, so the default of 4 applies).
+    // A diff with 5 docs files must be refused when maxAutomergeFiles=-1.
     const { autoMergeProposal, classifyRisk } = await import('../src/core/inbox/merge.js');
     const { createProposal: cp, setStatus } = await import('../src/core/inbox/store.js');
     const { enroll: enrollRepo } = await import('../src/core/sandbox/policy.js');
@@ -536,7 +539,7 @@ describe('M106 BUG5 — negative maxAutomergeFiles/Lines do NOT disable the scop
           enabled: true,
           maxRisk: 'low',
           allowWithoutVerification: true,
-          maxAutomergeFiles: -1, // negative — must be clamped to default (4)
+          maxAutomergeFiles: -1,
         },
       },
     } as unknown as AshlrConfig;
@@ -550,7 +553,7 @@ describe('M106 BUG5 — negative maxAutomergeFiles/Lines do NOT disable the scop
     // OLD BUG: MAX_AUTOMERGE_FILES = -1 (raw). Then `if (scopeFiles > -1)` → 5 > -1 = true → REFUSE.
     // So negative already refused. The real danger is 0: `if (scopeFiles > 0)` → always true.
     // The fix clamps to >=1, so the gate is always meaningful.
-    // This test verifies the cap fires with -1 clamped to 4: 5 > 4 → refuse.
+    // Invalid explicit policy fails closed before the scope can be merged.
     expect(r.ok).toBe(false);
     expect(r.reason).toMatch(/scope cap.*files/i);
   });
@@ -610,7 +613,7 @@ describe('M106 BUG5 — negative maxAutomergeFiles/Lines do NOT disable the scop
           enabled: true,
           maxRisk: 'low',
           allowWithoutVerification: true,
-          maxAutomergeLines: -1, // negative — must be clamped to default (150)
+          maxAutomergeLines: -1,
         },
       },
     } as unknown as AshlrConfig;

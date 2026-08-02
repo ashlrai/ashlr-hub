@@ -1,9 +1,17 @@
+import {
+  MAX_AUTOMERGE_POLICY_FILES,
+  MAX_AUTOMERGE_POLICY_LINES,
+  resolveAutoMergeScopePolicy,
+} from '../foundry/automerge-scope-policy.js';
+
 export const AUTOMERGE_CANARY_PROMOTION_READINESS_SCHEMA_VERSION = 2 as const;
 export const AUTOMERGE_CANARY_PROMOTION_AUTHORITY = 'observation-only' as const;
 
 const MAX_FUTURE_SKEW_MS = 60_000;
 const MAX_REMOTE_PROTECTION_AGE_MS = 10 * 60_000;
+const MAX_SCOPE_IDENTITY_AGE_MS = 10 * 60_000;
 const MAX_POST_MERGE_COHORT_AGE_MS = 30 * 24 * 60 * 60_000;
+const DIGEST_RE = /^[a-f0-9]{64}$/;
 
 export type AutoMergeCanaryPromotionBlockerCode =
   | 'invalid-observation-time'
@@ -22,6 +30,10 @@ export type AutoMergeCanaryPromotionBlockerCode =
   | 'post-merge-cohort-insufficient'
   | 'post-merge-adverse-observed'
   | 'scope-caps-unavailable'
+  | 'scope-caps-exceed-policy'
+  | 'scope-identity-unavailable'
+  | 'scope-identity-mismatch'
+  | 'scope-identity-stale'
   | 'unsafe-merge-policy'
   | 'enforcement-unsupported';
 
@@ -90,6 +102,17 @@ export interface AutoMergeCanaryPromotionReadinessInput {
     maxAutomergeFiles: number | null;
     maxAutomergeLines: number | null;
   };
+  scopeIdentity: {
+    sourceState: 'missing' | 'healthy' | 'degraded';
+    expectedPolicyDigest: string | null;
+    expectedConfigDigest: string | null;
+    evidencePolicyDigest: string | null;
+    evidenceConfigDigest: string | null;
+    currentPolicyDigest: string | null;
+    currentConfigDigest: string | null;
+    currentScopePolicyDigest: string | null;
+    observedAt: string | null;
+  };
 }
 
 export interface AutoMergeCanaryPromotionReadiness {
@@ -102,6 +125,17 @@ export interface AutoMergeCanaryPromotionReadiness {
   scopeCaps: {
     maxFiles: number | null;
     maxLines: number | null;
+    policyMaxFiles: number;
+    policyMaxLines: number;
+    source: 'explicit-config' | 'default-config' | 'mixed-config' | 'invalid-config';
+    scopePolicyDigest: string | null;
+  };
+  scopeIdentity: {
+    state: 'matched' | 'mismatched' | 'stale' | 'unavailable';
+    source: 'controller-attested-canary-store' | 'unavailable';
+    observedAt: string | null;
+    policyDigest: string | null;
+    configDigest: string | null;
   };
   blockers: AutoMergeCanaryPromotionBlocker[];
   authorityBlockers: AutoMergeCanaryPromotionBlocker[];
@@ -110,10 +144,6 @@ export interface AutoMergeCanaryPromotionReadiness {
 
 function nonNegativeInteger(value: number): boolean {
   return Number.isSafeInteger(value) && value >= 0;
-}
-
-function positiveInteger(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1;
 }
 
 function canonicalEpochTime(value: number): string | null {
@@ -354,17 +384,82 @@ export function evaluateAutoMergeCanaryPromotionReadiness(
     ));
   }
 
-  const maxFiles = positiveInteger(input.policy.maxAutomergeFiles)
-    ? input.policy.maxAutomergeFiles
-    : null;
-  const maxLines = positiveInteger(input.policy.maxAutomergeLines)
-    ? input.policy.maxAutomergeLines
-    : null;
-  if (maxFiles === null || maxLines === null) {
+  const scopePolicy = resolveAutoMergeScopePolicy({
+    maxAutomergeFiles: input.policy.maxAutomergeFiles,
+    maxAutomergeLines: input.policy.maxAutomergeLines,
+  });
+  const maxFiles = scopePolicy.ok ? scopePolicy.policy.maxFiles : null;
+  const maxLines = scopePolicy.ok ? scopePolicy.policy.maxLines : null;
+  const scopeSource = !scopePolicy.ok
+    ? 'invalid-config' as const
+    : scopePolicy.policy.source === 'explicit'
+      ? 'explicit-config' as const
+      : scopePolicy.policy.source === 'default' ? 'default-config' as const : 'mixed-config' as const;
+  if (!scopePolicy.ok || scopePolicy.policy.source !== 'explicit') {
     blockers.push(blocker(
       'scope-caps-unavailable',
       'critical',
-      'Explicit positive-integer file and line scope caps are required for promotion evidence.',
+      'Explicit canonical file and line scope caps are required for promotion evidence.',
+    ));
+  }
+  if (!scopePolicy.ok && scopePolicy.reasons.some((reason) => reason.endsWith('exceeds-policy'))) {
+    blockers.push(blocker(
+      'scope-caps-exceed-policy',
+      'critical',
+      'Configured scope caps exceed the conservative auto-merge policy maximum.',
+    ));
+  }
+
+  const identity = input.scopeIdentity ?? {
+    sourceState: 'missing' as const,
+    expectedPolicyDigest: null,
+    expectedConfigDigest: null,
+    evidencePolicyDigest: null,
+    evidenceConfigDigest: null,
+    currentPolicyDigest: null,
+    currentConfigDigest: null,
+    currentScopePolicyDigest: null,
+    observedAt: null,
+  };
+  const identityDigests = [
+    identity.expectedPolicyDigest,
+    identity.expectedConfigDigest,
+    identity.evidencePolicyDigest,
+    identity.evidenceConfigDigest,
+    identity.currentPolicyDigest,
+    identity.currentConfigDigest,
+    identity.currentScopePolicyDigest,
+  ];
+  const identityAvailable = identity.sourceState === 'healthy' &&
+    identityDigests.every((value) => typeof value === 'string' && DIGEST_RE.test(value));
+  const identityMatched = identityAvailable &&
+    identity.expectedPolicyDigest === identity.evidencePolicyDigest &&
+    identity.expectedPolicyDigest === identity.currentPolicyDigest &&
+    identity.expectedConfigDigest === identity.evidenceConfigDigest &&
+    identity.expectedConfigDigest === identity.currentConfigDigest &&
+    scopePolicy.ok && identity.currentScopePolicyDigest === scopePolicy.policy.digest;
+  const identityFresh = identityAvailable && validNow &&
+    freshTime(identity.observedAt, nowMs, MAX_SCOPE_IDENTITY_AGE_MS);
+  const identityState = !identityAvailable
+    ? 'unavailable' as const
+    : !identityMatched ? 'mismatched' as const : !identityFresh ? 'stale' as const : 'matched' as const;
+  if (!identityAvailable) {
+    blockers.push(blocker(
+      'scope-identity-unavailable',
+      'critical',
+      'Attested canary policy and configuration identity evidence is unavailable.',
+    ));
+  } else if (!identityMatched) {
+    blockers.push(blocker(
+      'scope-identity-mismatch',
+      'critical',
+      'Current scope policy does not match the exact canary state and evidence identity.',
+    ));
+  } else if (!identityFresh && validNow) {
+    blockers.push(blocker(
+      'scope-identity-stale',
+      'critical',
+      'The matching canary scope-policy identity evidence is stale.',
     ));
   }
 
@@ -393,7 +488,21 @@ export function evaluateAutoMergeCanaryPromotionReadiness(
     verdict: evidenceReady ? 'evidence-ready' : 'blocked',
     evidenceReady,
     activationPermitted: false,
-    scopeCaps: { maxFiles, maxLines },
+    scopeCaps: {
+      maxFiles,
+      maxLines,
+      policyMaxFiles: MAX_AUTOMERGE_POLICY_FILES,
+      policyMaxLines: MAX_AUTOMERGE_POLICY_LINES,
+      source: scopeSource,
+      scopePolicyDigest: scopePolicy.ok ? scopePolicy.policy.digest : null,
+    },
+    scopeIdentity: {
+      state: identityState,
+      source: identityAvailable ? 'controller-attested-canary-store' : 'unavailable',
+      observedAt: canonicalTime(identity.observedAt) === null ? null : identity.observedAt,
+      policyDigest: identityAvailable ? identity.currentPolicyDigest : null,
+      configDigest: identityAvailable ? identity.currentConfigDigest : null,
+    },
     blockers,
     authorityBlockers,
     primaryBlocker: blockers[0] ?? authorityBlockers[0]!,

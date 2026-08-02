@@ -541,6 +541,25 @@ describe('M86 PERMIT — fires when all gates pass', () => {
     expect(r.merged).toBe(true);
   });
 
+  it('[16b] MAX_SAFE_INTEGER caps are rejected before any merge mutation', async () => {
+    initRepo(tmpRepo, 'main');
+    attachOrigin(tmpRepo, 'main');
+    git(tmpRepo, ['checkout', '-b', 'work']);
+    enroll(tmpRepo);
+
+    const p = frontierPatch(addFileDiff('docs/unbounded.md', 'bounded policy'));
+    const mainBefore = git(tmpRepo, ['rev-parse', 'main']);
+    const r = await autoMergeProposal(p.id, frontierCfg({
+      maxAutomergeFiles: Number.MAX_SAFE_INTEGER,
+      maxAutomergeLines: Number.MAX_SAFE_INTEGER,
+    }));
+
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/scope cap policy invalid.*exceeds-policy/i);
+    expect(git(tmpRepo, ['rev-parse', 'main'])).toBe(mainBefore);
+    expect(loadProposal(p.id)!.status).toBe('approved');
+  });
+
   it('[17] flag-off (enabled=false) → no auto-merge (byte-identical to today)', async () => {
     // Confirms the disabled path has not changed behaviour — proposals stay
     // PENDING/approved regardless of risk, caps, or suite state.

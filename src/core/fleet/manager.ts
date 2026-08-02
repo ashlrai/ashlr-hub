@@ -22,6 +22,7 @@ import { recordDecision } from './decisions-ledger.js';
 import { judgeDecisionReasonCode } from './judge-decision-metadata.js';
 import { recordJudgeTrace } from './judge-trace.js';
 import { hashDiff, signJudgeAttestation } from '../foundry/provenance.js';
+import { resolveAutoMergeScopePolicy } from '../foundry/automerge-scope-policy.js';
 import { computeQualityMetrics } from './quality-metrics.js';
 import { renderPlaybook } from '../vision/playbook.js';
 import { engineInstalled, buildEngineCommand, spawnEngine } from '../run/engines.js';
@@ -554,6 +555,7 @@ function autoMergeBounds(cfg: AshlrConfig): {
   maxRisk: 'low' | 'medium' | 'high';
   maxFiles: number;
   maxLines: number;
+  scopePolicyValid: boolean;
 } {
   const autoMerge =
     ((cfg.foundry as Record<string, unknown> | undefined)?.['autoMerge'] as
@@ -563,15 +565,13 @@ function autoMergeBounds(cfg: AshlrConfig): {
     autoMerge['maxRisk'] === 'medium' || autoMerge['maxRisk'] === 'high'
       ? autoMerge['maxRisk']
       : 'low';
-  const maxFiles =
-    typeof autoMerge['maxAutomergeFiles'] === 'number' && autoMerge['maxAutomergeFiles'] >= 1
-      ? Math.floor(autoMerge['maxAutomergeFiles'])
-      : 4;
-  const maxLines =
-    typeof autoMerge['maxAutomergeLines'] === 'number' && autoMerge['maxAutomergeLines'] >= 1
-      ? Math.floor(autoMerge['maxAutomergeLines'])
-      : 150;
-  return { maxRisk, maxFiles, maxLines };
+  const scopePolicy = resolveAutoMergeScopePolicy(autoMerge);
+  return {
+    maxRisk,
+    maxFiles: scopePolicy.ok ? scopePolicy.policy.maxFiles : 0,
+    maxLines: scopePolicy.ok ? scopePolicy.policy.maxLines : 0,
+    scopePolicyValid: scopePolicy.ok,
+  };
 }
 
 /**
@@ -686,6 +686,7 @@ export async function judgeProposal(
       const diffFiles = countDiffFiles(proposal.diff);
       const bounds = autoMergeBounds(cfg);
       wouldMerge =
+        bounds.scopePolicyValid &&
         RISK_ORDER[risk] <= RISK_ORDER[bounds.maxRisk] &&
         diffFiles <= bounds.maxFiles &&
         diffLines <= bounds.maxLines;

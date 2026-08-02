@@ -3565,6 +3565,11 @@ function renderAutoMergeCanaryPromotionReadinessCard(readiness, cls = 'ctrl-card
   if (!readiness) return null;
   const blockers = Array.isArray(readiness.blockers) ? readiness.blockers : [];
   const primary = readiness.primaryBlocker ?? null;
+  const scopeCaps = readiness.scopeCaps ?? null;
+  const scopeIdentity = readiness.scopeIdentity ?? null;
+  const capSummary = scopeCaps?.maxFiles != null && scopeCaps?.maxLines != null
+    ? `${scopeCaps.maxFiles} files / ${scopeCaps.maxLines} lines`
+    : 'unavailable';
   const card = el('div', { cls });
   card.appendChild(el('div', { cls: 'card-header' },
     el('span', { cls: 'card-title' }, 'Canary Promotion Readiness'),
@@ -3578,6 +3583,11 @@ function renderAutoMergeCanaryPromotionReadinessCard(readiness, cls = 'ctrl-card
     ['Verdict', readiness.verdict ?? 'blocked'],
     ['Observed', readiness.observedAt ? fmtRelative(readiness.observedAt) : 'invalid'],
     ['Evidence ready', readiness.evidenceReady === true ? 'yes' : 'no'],
+    ['Scope caps', capSummary],
+    ['Cap source', scopeCaps?.source ?? 'unavailable'],
+    ['Policy identity', scopeIdentity?.state ?? 'unavailable'],
+    ['Identity source', scopeIdentity?.source ?? 'unavailable'],
+    ['Identity observed', scopeIdentity?.observedAt ? fmtRelative(scopeIdentity.observedAt) : 'never'],
     ['Activation', 'disabled'],
     ['Blockers', blockers.length],
     ['Primary blocker', primary?.code ?? 'enforcement-unsupported'],
