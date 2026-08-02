@@ -162,11 +162,11 @@ import { isAuthoritativeDurablePendingProposal } from '../inbox/pending-authorit
 import { authenticatedRealizedMergeOf, realizedMergeOf } from '../inbox/realized-merge.js';
 import {
   dispatchProductionDir,
+  dispatchProductionRunStatusForOutcome,
+  materializeDispatchProductionAttemptEnvelope,
   readDispatchProductionFailureAttemptReceipts,
-  readDispatchProductionEventsDetailed,
   readDispatchProductionAttemptProtocolQuality,
   recordDispatchProduction,
-  readDispatchProductionYieldDetailed,
   resolveDispatchProductionFailureAttemptReceipt,
   resolveDispatchProductionAttemptReceiptWitnesses,
   type DispatchProductionBasis,
@@ -269,14 +269,9 @@ import { writePrivateFileAtomically } from '../util/private-file-write.js';
 import { readStableRegularFile } from '../util/stable-file-read.js';
 import { fsyncDirectory } from '../util/durability.js';
 
-const GENERATED_REPAIR_RECOVERY_WINDOW_MS = 24 * 60 * 60 * 1000;
 const GENERATED_REPAIR_RESERVATION_SCHEMA_VERSION = 1;
 const GENERATED_REPAIR_RESERVATION_MAX_BYTES = 2_048;
 const GENERATED_REPAIR_RESERVATION_MAX_GENERATIONS = 8;
-const GENERATED_REPAIR_ATTEMPT_READ_MAX_FILES = 3;
-const GENERATED_REPAIR_ATTEMPT_READ_MAX_BYTES = 2 * 1024 * 1024;
-const GENERATED_REPAIR_ATTEMPT_READ_MAX_ROWS = 4_096;
-const GENERATED_REPAIR_ATTEMPT_READ_LIMIT = 256;
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const GENERATED_REPAIR_FAILED_OUTCOMES = new Set<DaemonDispatchProductionOutcome>([
   'engine-failed',
@@ -348,41 +343,16 @@ function canonicalGeneratedRepairAttemptEvent(item: WorkItem, event: DispatchPro
   }
 }
 
-function readGeneratedRepairAttemptEvents(
-  item: WorkItem,
-  sinceMs: number,
-): { available: boolean; events: DispatchProductionEvent[] } {
-  try {
-    const read = readDispatchProductionEventsDetailed({
-      sinceMs: Math.max(0, sinceMs),
-      limit: GENERATED_REPAIR_ATTEMPT_READ_LIMIT,
-      maxFiles: GENERATED_REPAIR_ATTEMPT_READ_MAX_FILES,
-      maxBytes: GENERATED_REPAIR_ATTEMPT_READ_MAX_BYTES,
-      maxRows: GENERATED_REPAIR_ATTEMPT_READ_MAX_ROWS,
-    });
-    if (!read.complete || read.sourceState === 'degraded') return { available: false, events: [] };
-    return {
-      available: true,
-      events: read.events.filter((event) => canonicalGeneratedRepairAttemptEvent(item, event)),
-    };
-  } catch {
-    return { available: false, events: [] };
-  }
-}
-
 function readGeneratedRepairFailedAttempts(item: WorkItem): GeneratedRepairAttemptHistory {
   const generationIds = generatedRepairReservationFamily(item);
   if (!generationIds) return { available: false, failures: [] };
   const durable = readDispatchProductionFailureAttemptReceipts(generationIds);
   if (durable.status !== 'resolved') return { available: false, failures: [] };
-  const itemMs = Date.parse(item.ts);
-  const sinceMs = Number.isFinite(itemMs)
-    ? Math.max(itemMs, Date.now() - GENERATED_REPAIR_RECOVERY_WINDOW_MS)
-    : Date.now() - GENERATED_REPAIR_RECOVERY_WINDOW_MS;
-  const read = readGeneratedRepairAttemptEvents(item, sinceMs);
-  if (!read.available && !durable.authoritative) return { available: false, failures: [] };
+  // An inactive receipt protocol contributes no retry history. Only a degraded
+  // protocol blocks dispatch; raw observations never fill either state.
+  if (!durable.authoritative) return { available: true, failures: [] };
   const byAttempt = new Map<string, DispatchProductionEvent>();
-  for (const event of [...(read.available ? read.events : []), ...durable.receipts.map((receipt) => receipt.event)]) {
+  for (const { event } of durable.receipts) {
     if (!GENERATED_REPAIR_FAILED_OUTCOMES.has(event.outcome) || event.proposalCreated) continue;
     if (!canonicalGeneratedRepairAttemptEvent(item, event)) continue;
     const attemptId = event.trajectoryId ?? (event.runId ? `run:${event.runId}` : undefined);
@@ -988,7 +958,6 @@ function generatedRepairShouldSkip(
   }
   return workedEventIsCooling(latest, policy.cooldownMs);
 }
-const GENERATED_REPAIR_RECOVERY_MIN_ATTEMPTS = 3;
 const RESOURCE_SNAPSHOT_MAX_AGE_MS = 30_000;
 type DispatchPreflightState =
   | 'dispatchable'
@@ -2467,6 +2436,7 @@ function dispatchProductionBasis(
 function dispatchProductionEventFromOutcome(
   value: TickItemOutcome,
   proposal: Proposal | undefined,
+  attemptId: string,
   machineId: string,
   ts: string,
   cfg: AshlrConfig,
@@ -2486,6 +2456,7 @@ function dispatchProductionEventFromOutcome(
   const eventRunSummary = runEventSummary({
     ...(trace.runEventSummary ?? {}),
     runId,
+    status: trace.runEventSummary?.status ?? dispatchProductionRunStatusForOutcome(outcome),
     outcome,
     proposalCreated,
     proposalId,
@@ -2493,6 +2464,17 @@ function dispatchProductionEventFromOutcome(
     diffLines: production?.diffLines ?? trace.runEventSummary?.diffLines,
     costUsd: value.spentUsd,
   });
+  const canonicalActionCounts = eventRunSummary?.actionCounts
+    ? (() => {
+        const {
+          proposalBlocked: _proposalBlocked,
+          proposalCreated: _proposalCreated,
+          proposalDisabled: _proposalDisabled,
+          ...counts
+        } = eventRunSummary.actionCounts;
+        return counts;
+      })()
+    : undefined;
   const learningLabel = productionAttemptLearningLabelFromSignals({
     outcome,
     proposalCreated,
@@ -2593,7 +2575,7 @@ function dispatchProductionEventFromOutcome(
       ? exactFailureReceiptLineage === null
       : exactSuccessReceiptLineage === null)
   );
-  return {
+  return materializeDispatchProductionAttemptEnvelope({
     schemaVersion: 1,
     ts,
     machineId,
@@ -2609,10 +2591,18 @@ function dispatchProductionEventFromOutcome(
     outcome,
     proposalCreated,
     ...(proposalId ? { proposalId } : {}),
+    attemptId,
     ...(runId ? { runId } : {}),
     ...(trace.trajectoryId ? { trajectoryId: trace.trajectoryId } : {}),
     ...(trace.routeSnapshot ? { routeSnapshot: trace.routeSnapshot } : {}),
-    ...(eventRunSummary ? { runEventSummary: eventRunSummary } : {}),
+    ...(eventRunSummary
+      ? {
+          runEventSummary: {
+            ...eventRunSummary,
+            ...(canonicalActionCounts ? { actionCounts: canonicalActionCounts } : {}),
+          },
+        }
+      : {}),
     ...(production?.evidenceOutcome ? { evidenceOutcome: production.evidenceOutcome } : {}),
     ...(trace.learningSource ? { learningSource: trace.learningSource } : {}),
     ...(trace.labelBasis ? { labelBasis: trace.labelBasis } : {}),
@@ -2628,7 +2618,7 @@ function dispatchProductionEventFromOutcome(
     ...(typeof production?.diffLines === 'number' ? { diffLines: production.diffLines } : {}),
     ...(production?.reason ? { reason: production.reason } : trace.skipReason ? { reason: trace.skipReason } : {}),
     basis: dispatchProductionBasis(production, proposal),
-  };
+  });
 }
 
 function agentOutcomeFromDispatchEvent(event: DispatchProductionEvent): AgentActionOutcome {
@@ -3206,27 +3196,11 @@ async function tieredBounded<T>(
 // tick — one operator cycle
 // ---------------------------------------------------------------------------
 
-function configuredLowRepairYieldRate(cfg: AshlrConfig): number {
-  const raw = cfg.foundry?.intelligence?.minProposalYieldRate;
-  if (typeof raw !== 'number' || !Number.isFinite(raw)) return 0.2;
-  return Math.max(0, Math.min(1, raw));
-}
-
-function generatedRepairRecoveryHealthy(cfg: AshlrConfig): boolean {
-  try {
-    const read = readDispatchProductionYieldDetailed({
-      windowMs: GENERATED_REPAIR_RECOVERY_WINDOW_MS,
-      limit: 1200,
-      limitPerDimension: 1,
-    });
-    if (read.sourceQuality.sourceState !== 'healthy' || !read.sourceQuality.complete) return false;
-    const yieldSummary = read.summary;
-    const generated = yieldSummary?.generatedRepairAttempts;
-    if (!generated || generated.attempts < GENERATED_REPAIR_RECOVERY_MIN_ATTEMPTS) return false;
-    return generated.proposalRate >= Math.max(configuredLowRepairYieldRate(cfg), 0.5);
-  } catch {
-    return false;
-  }
+function generatedRepairRecoveryHealthy(_cfg: AshlrConfig): boolean {
+  // Generated-repair attempt rows and receipts are owner-writable local
+  // diagnostics. Without a writer-authenticated receipt verifier, they cannot
+  // shorten a control-plane cooldown.
+  return false;
 }
 
 function cooldownMsForSelectionItem(
@@ -6730,6 +6704,7 @@ export async function tick(
     const event = dispatchProductionEventFromOutcome(
       outcome.value,
       newPendingProposalsByItemId.get(outcome.value.item.id),
+      attemptIds.get(outcome.value.item.id)!,
       machineId,
       productionCompletedAt,
       routingCfg,

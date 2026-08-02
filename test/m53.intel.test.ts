@@ -759,7 +759,7 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
     expect(rec.tier).toBe(base.tier);
   });
 
-  it('low dispatch-production yield can reroute to an installed same-tier alternative', async () => {
+  it('forged owner-writable yield replays cannot reroute to a same-tier alternative', async () => {
     const cfg = withInstalledFrontierEngines(withIntelligence({
       allowedBackends: ['builtin', 'claude', 'codex'],
       minProposalYieldRate: 0.5,
@@ -781,11 +781,11 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
     });
 
     expect(base.tier).toBe('frontier');
-    expect(rec.backend).toBe(alternate);
+    expect(rec.backend).toBe(base.backend);
     expect(rec.tier).toBe(base.tier);
-    expect(rec.reason).toContain('recent proposal yield');
-    expect(rec.reason).toContain('same-tier reroute');
-    expect(rec.reason).toContain('candidate yield 2/3');
+    expect(rec.reason).not.toContain('recent proposal yield');
+    expect(rec.reason).not.toContain('same-tier reroute');
+    expect(rec.reason).not.toContain('candidate yield');
   });
 
   it('cancelled rows do not enter learned-router attempt or proposal-yield denominators', async () => {
@@ -833,7 +833,7 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
     expect(rec.reason).not.toContain('same-tier reroute');
   });
 
-  it('counts a created proposal with a cancellation reason in both yield numerator and denominator', async () => {
+  it('does not learn from caller-labelled proposal and cancellation rows', async () => {
     const cfg = withInstalledFrontierEngines(withIntelligence({
       allowedBackends: ['builtin', 'claude', 'codex'],
       minProposalYieldRate: 0.5,
@@ -859,10 +859,9 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
       dispatchProductionEvents,
     });
 
-    expect(rec.backend).toBe(alternate);
-    expect(rec.reason).toContain('recent proposal yield');
-    expect(rec.reason).toContain('1/3 < threshold');
-    expect(rec.reason).toContain('candidate yield 2/3');
+    expect(rec.backend).toBe(base.backend);
+    expect(rec.reason).not.toContain('recent proposal yield');
+    expect(rec.reason).not.toContain('candidate yield');
   });
 
   it('degraded dispatch-production input cannot change learned routing', async () => {
@@ -878,7 +877,11 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
       makeDispatchProductionEvent({ backend: base.backend, outcome: 'gate-blocked', proposalCreated: false }),
       makeDispatchProductionEvent({ backend: base.backend, outcome: 'engine-failed', proposalCreated: false }),
       ...comparativeCandidateEvents(alternate),
-    ].map((event, index) => ({ ...event, itemId: `repo:security:degraded-${index}` }));
+    ].map((event, index) => ({
+      ...event,
+      itemId: `repo:security:degraded-${index}`,
+      runId: `attempt-00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+    }));
     recordDispatchProduction(events);
     const ledger = join(tmpHome, 'dispatch-production', `${new Date().toISOString().slice(0, 10)}.jsonl`);
     writeFileSync(ledger, `${readFileSync(ledger, 'utf8')}not-json\n`, 'utf8');
@@ -906,7 +909,11 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
       makeDispatchProductionEvent({ backend: base.backend, outcome: 'gate-blocked', proposalCreated: false }),
       makeDispatchProductionEvent({ backend: base.backend, outcome: 'engine-failed', proposalCreated: false }),
       ...comparativeCandidateEvents(alternate),
-    ].map((event, index) => ({ ...event, itemId: `repo:security:legacy-${index}` }));
+    ].map((event, index) => ({
+      ...event,
+      itemId: `repo:security:legacy-${index}`,
+      runId: `attempt-00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+    }));
     recordDispatchProduction(events);
     const ledger = join(tmpHome, 'dispatch-production', `${new Date().toISOString().slice(0, 10)}.jsonl`);
     const legacyRows = readFileSync(ledger, 'utf8')
@@ -990,7 +997,7 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
     expect(rec.reason).not.toContain('candidate yield');
   });
 
-  it('resource-aware learned target gate allows open or near same-tier candidates', async () => {
+  it('resource state cannot confer authority on owner-writable yield rows', async () => {
     const cfg = withInstalledFrontierEngines(withIntelligence({
       allowedBackends: ['builtin', 'claude', 'codex'],
       minProposalYieldRate: 0.5,
@@ -1016,9 +1023,9 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
     });
 
     expect(base.tier).toBe('frontier');
-    expect(rec.backend).toBe(alternate);
+    expect(rec.backend).toBe(base.backend);
     expect(rec.tier).toBe(base.tier);
-    expect(rec.reason).toContain('same-tier reroute');
+    expect(rec.reason).not.toContain('same-tier reroute');
   });
 
   it('resource-aware learned target gate blocks unavailable candidates', async () => {
@@ -1270,7 +1277,7 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
     expect(rec.reason).not.toContain('recent proposal yield');
   });
 
-  it('gate-dominant action counts keep the same backend for capture repair', async () => {
+  it('owner-writable gate-dominant action counts cannot steer capture repair', async () => {
     const cfg = withInstalledFrontierEngines(withIntelligence({
       allowedBackends: ['builtin', 'claude', 'codex'],
       minProposalYieldRate: 0.5,
@@ -1308,12 +1315,12 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
     expect(base.tier).toBe('frontier');
     expect(rec.backend).toBe(base.backend);
     expect(rec.tier).toBe(base.tier);
-    expect(rec.reason).toContain('gate-dominant');
-    expect(rec.reason).toContain('verification/capture repair');
+    expect(rec.reason).not.toContain('gate-dominant');
+    expect(rec.reason).not.toContain('verification/capture repair');
     expect(rec.reason).not.toContain('same-tier reroute');
   });
 
-  it('empty-diff action counts remain learnable and annotate same-tier reroutes', async () => {
+  it('owner-writable empty-diff action counts cannot annotate or trigger reroutes', async () => {
     const cfg = withInstalledFrontierEngines(withIntelligence({
       allowedBackends: ['builtin', 'claude', 'codex'],
       minProposalYieldRate: 0.5,
@@ -1347,10 +1354,10 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
     });
 
     expect(base.tier).toBe('frontier');
-    expect(rec.backend).toBe(alternate);
+    expect(rec.backend).toBe(base.backend);
     expect(rec.tier).toBe(base.tier);
-    expect(rec.reason).toContain('same-tier reroute');
-    expect(rec.reason).toContain('action signal: no-diff');
+    expect(rec.reason).not.toContain('same-tier reroute');
+    expect(rec.reason).not.toContain('action signal: no-diff');
   });
 
   it('dispatch-production yield sample floor keeps routing byte-identical', async () => {
@@ -1515,7 +1522,7 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
     expect(rec.reason).not.toContain('recent proposal yield');
   });
 
-  it('real non-proposal dispatch outcomes remain learnable after proposal-disabled rows are ignored', async () => {
+  it('owner-writable non-proposal outcomes remain diagnostic after proposal-disabled rows are ignored', async () => {
     const cfg = withInstalledFrontierEngines(withIntelligence({
       allowedBackends: ['builtin', 'claude', 'codex'],
       minProposalYieldRate: 0.5,
@@ -1540,10 +1547,10 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
     });
 
     expect(base.tier).toBe('frontier');
-    expect(rec.backend).toBe(alternate);
+    expect(rec.backend).toBe(base.backend);
     expect(rec.tier).toBe(base.tier);
-    expect(rec.reason).toContain('recent proposal yield');
-    expect(rec.reason).toContain('0/3');
+    expect(rec.reason).not.toContain('recent proposal yield');
+    expect(rec.reason).not.toContain('0/3');
     expect(rec.reason).not.toContain('proposal-disabled');
   });
 

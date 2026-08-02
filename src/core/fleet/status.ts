@@ -19,7 +19,6 @@ import { existsSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { basename, resolve } from 'node:path';
 import { readBuildIdentity, type BuildIdentity } from '../build-identity.js';
-import { DEFAULT_DIAGNOSTIC_RESLICE_DRAIN_LIMIT } from '../types.js';
 import type {
   AshlrConfig,
   AutoMergeTrustBasis,
@@ -114,6 +113,11 @@ import {
   type DispatchProductionYieldBucket,
   type DispatchProductionYieldSummary,
 } from './dispatch-production-ledger.js';
+import {
+  buildProposalFunnelObservability,
+  withholdProposalFunnelForUnstableSnapshot,
+  type ProposalFunnelObservability,
+} from './proposal-funnel-observability.js';
 import { readDecisionsDetailed, type DecisionSourceQuality } from './decisions-ledger.js';
 import { readJudgeTracesDetailed, type JudgeTraceSourceQuality } from './judge-trace.js';
 import type { DispatchManifestSourceQuality } from './dispatch-manifest.js';
@@ -1557,6 +1561,8 @@ export interface FleetStatus {
   dispatchProduction?: DispatchProductionYieldSummary;
   /** Storage/read completeness for dispatch-production analytics. */
   dispatchProductionSource?: DispatchProductionSourceQuality;
+  /** Metadata-only proposal-funnel rates; withheld whenever the bounded source is incomplete. */
+  proposalFunnel?: ProposalFunnelObservability;
   /** Whether dispatch-backed learning metrics have a complete denominator. */
   learningMetrics?: {
     state: 'available' | 'withheld';
@@ -1702,6 +1708,33 @@ function learningSnapshotSourceQuality(value: unknown): Record<string, unknown> 
     semanticRejectedRows: source.semanticRejectedRows,
     unreadableFiles: source.unreadableFiles,
     limitExceeded: source.limitExceeded,
+  };
+}
+
+function invalidatedDispatchProductionSource(
+  source: DispatchProductionSourceQuality | undefined,
+  stopReason?: 'io-error',
+): DispatchProductionSourceQuality {
+  const fallback: DispatchProductionSourceQuality = {
+    sourceState: 'degraded',
+    sourcePresent: true,
+    complete: false,
+    stopReasons: [],
+    filesRead: 0,
+    datedFilesRead: 0,
+    looseFilesRead: 0,
+    bytesRead: 0,
+    rowsScanned: 0,
+    invalidRows: 0,
+    unreadableFiles: 0,
+  };
+  const base = source ?? fallback;
+  return {
+    ...base,
+    sourceState: base.sourceState === 'missing' ? 'missing' : 'degraded',
+    complete: false,
+    stopReasons: [...new Set([...base.stopReasons, ...(stopReason ? [stopReason] : [])])],
+    unreadableFiles: base.unreadableFiles + (stopReason ? 1 : 0),
   };
 }
 
@@ -1860,7 +1893,6 @@ function buildQueueEligibility(
 ): FleetQueueEligibility {
   const cooldownMs = configCooldownMs(cfg) ?? DEFAULT_COOLDOWN_MS;
   const nowMs = Date.now();
-  const repairRecoveryHealthy = healthyGeneratedRepairRecovery(cfg);
   const workedEvents = selectWorkQueueCoordinator(cfg).readWorkedEvents();
   const repairQueue = (() => {
     try {
@@ -1949,7 +1981,7 @@ function buildQueueEligibility(
     const last = lastEvent && Number.isFinite(lastMs)
       ? { event: lastEvent, tsMs: lastMs, suppressible: isSuppressibleWorkedOutcome(lastEvent.outcome) }
       : undefined;
-    const itemCooldownMs = cooldownMsForWorkItem(item, cooldownMs, repairRecoveryHealthy, last?.event);
+    const itemCooldownMs = cooldownMsForWorkItem(item, cooldownMs, last?.event);
     const cooldownUntil = last && last.suppressible ? last.tsMs + itemCooldownMs : null;
     if (cooldownUntil !== null && cooldownUntil > nowMs) {
       cooldownItems++;
@@ -2020,42 +2052,15 @@ function buildQueueEligibility(
   };
 }
 
-const GENERATED_REPAIR_EMPTY_FAST_COOLDOWN_MS = 30 * 60 * 1000;
-
 function cooldownMsForWorkItem(
   item: WorkItem,
   baseCooldownMs: number,
-  repairRecoveryHealthy: boolean,
   latestEvent?: WorkedEvent,
 ): number {
   if (latestEvent?.outcome === 'dispatch-blocked' && isTrustedGeneratedRepairItem(item)) {
     return Math.min(baseCooldownMs, GENERATED_REPAIR_DISPATCH_BLOCKED_COOLDOWN_MS);
   }
-  if (
-    repairRecoveryHealthy &&
-    latestEvent?.outcome === 'empty' &&
-    isTrustedGeneratedRepairItem(item)
-  ) {
-    return Math.min(baseCooldownMs, GENERATED_REPAIR_EMPTY_FAST_COOLDOWN_MS);
-  }
   return baseCooldownMs;
-}
-
-function healthyGeneratedRepairRecovery(cfg: AshlrConfig): boolean {
-  try {
-    const read = readDispatchProductionYieldDetailed({
-      windowMs: RECENT_WINDOW_MS,
-      limit: 1200,
-      limitPerDimension: 1,
-    });
-    if (read.sourceQuality.sourceState !== 'healthy' || !read.sourceQuality.complete) return false;
-    const yieldSummary = read.summary;
-    const generated = yieldSummary?.generatedRepairAttempts;
-    if (!generated || generated.attempts < MIN_DISPATCH_YIELD_ACTION_ATTEMPTS) return false;
-    return generated.proposalRate >= Math.max(configuredLowDispatchYieldRate(cfg), 0.5);
-  } catch {
-    return false;
-  }
 }
 
 export function resolveAutonomyControlMode(cfg: AshlrConfig): FleetAutonomyControlMode {
@@ -2349,6 +2354,7 @@ export async function readFleetDaemonStatus(): Promise<FleetDaemonStatusRead> {
 export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   const generatedAt = new Date().toISOString();
   let dispatchLearningEvents: DispatchProductionEvent[] | undefined;
+  let initialDispatchRead: ReturnType<typeof readDispatchProductionYieldDetailed> | undefined;
   let queueSnapshotAt: string | null = null;
   let queueAuthorityObservedAt: string | null = null;
   let queueSourceStatus: FleetReadinessSourceStatus = 'unknown';
@@ -3164,7 +3170,14 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       limit: 1200,
       limitPerDimension: 8,
     });
+    initialDispatchRead = dispatchRead;
     status.dispatchProductionSource = dispatchRead.sourceQuality;
+    status.proposalFunnel = buildProposalFunnelObservability({
+      events: dispatchRead.events,
+      sourceQuality: dispatchRead.sourceQuality,
+      windowMs: RECENT_WINDOW_MS,
+      eventLimit: 1200,
+    });
     const dispatchAvailabilitySource = learningSourceAvailability(
       'dispatch-production', dispatchRead.sourceQuality,
     );
@@ -3206,6 +3219,12 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       bytesRead: 0, rowsScanned: 0, invalidRows: 0, unreadableFiles: 1,
     };
     status.dispatchProductionSource = sourceQuality;
+    status.proposalFunnel = buildProposalFunnelObservability({
+      events: [],
+      sourceQuality,
+      windowMs: RECENT_WINDOW_MS,
+      eventLimit: 1200,
+    });
     status.learningMetrics = {
       state: 'withheld',
       denominator: 'dispatch-production',
@@ -3493,11 +3512,19 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
         (observation) => observation.observedAt,
       );
 
+      const dispatchSnapshotStable = initialDispatchRead !== undefined &&
+        learningSnapshotDigest(
+          learningSnapshotSourceQuality(initialDispatchRead.sourceQuality),
+          initialDispatchRead.events,
+        ) === learningSnapshotDigest(
+          learningSnapshotSourceQuality(dispatchReadAfter.sourceQuality),
+          dispatchReadAfter.events,
+        );
+
       const stable = [
         learningSnapshotDigest(learningSnapshotSourceQuality(proposalSourceQuality), learningProposals) ===
           learningSnapshotDigest(learningSnapshotSourceQuality(proposalReadAfter), proposalRowsAfter),
-        learningSnapshotDigest(learningSnapshotSourceQuality(status.dispatchProductionSource), learningDispatchEvents) ===
-          learningSnapshotDigest(learningSnapshotSourceQuality(dispatchReadAfter.sourceQuality), dispatchRowsAfter),
+        dispatchSnapshotStable,
         learningSnapshotDigest(learningSnapshotSourceQuality(workspaceRead?.sourceQuality), learningActions) ===
           learningSnapshotDigest(learningSnapshotSourceQuality(actionReadAfter.sourceQuality), actionRowsAfter),
         learningSnapshotDigest(learningSnapshotSourceQuality(learningDecisionsRead), learningDecisions) ===
@@ -3513,6 +3540,37 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       ].every(Boolean);
 
       if (stable) {
+        status.dispatchProductionSource = dispatchReadAfter.sourceQuality;
+        const dispatchAvailabilitySource = learningSourceAvailability(
+          'dispatch-production',
+          dispatchReadAfter.sourceQuality,
+        );
+        status.learningMetrics = {
+          ...status.learningMetrics,
+          sourceQuality: dispatchReadAfter.sourceQuality,
+          dispatchProduction: learningMetricAvailability(
+            [dispatchAvailabilitySource],
+            [],
+            1,
+          ),
+        };
+        if (dispatchReadAfter.summary) {
+          status.dispatchProduction = dispatchReadAfter.summary;
+          status.dispatchYieldDiagnostics = buildDispatchYieldDiagnostics(
+            dispatchReadAfter.summary,
+            cfg,
+            backends,
+          );
+        } else {
+          delete status.dispatchProduction;
+          delete status.dispatchYieldDiagnostics;
+        }
+        status.proposalFunnel = buildProposalFunnelObservability({
+          events: dispatchReadAfter.events,
+          sourceQuality: dispatchReadAfter.sourceQuality,
+          windowMs: RECENT_WINDOW_MS,
+          eventLimit: 1200,
+        });
         learningProposals = proposalRowsAfter;
         learningDispatchEvents = dispatchRowsAfter;
         learningActions = actionRowsAfter;
@@ -3522,6 +3580,33 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
         learningWorkedEvents = workedRowsAfter;
         learningPostMergeObservations = postMergeRowsAfter;
       } else {
+        if (!dispatchSnapshotStable) {
+          const invalidatingSource = invalidatedDispatchProductionSource(
+            dispatchReadAfter.sourceQuality,
+          );
+          status.dispatchProductionSource = invalidatingSource;
+          delete status.dispatchProduction;
+          delete status.dispatchYieldDiagnostics;
+          const dispatchAvailabilitySource = learningSourceAvailability(
+            'dispatch-production',
+            invalidatingSource,
+          );
+          status.learningMetrics = {
+            ...status.learningMetrics,
+            sourceQuality: invalidatingSource,
+            dispatchProduction: learningMetricAvailability(
+              [dispatchAvailabilitySource],
+              ['dispatchProduction'],
+              1,
+            ),
+          };
+        }
+        if (status.proposalFunnel) {
+          status.proposalFunnel = withholdProposalFunnelForUnstableSnapshot(
+            status.proposalFunnel,
+            !dispatchSnapshotStable ? status.dispatchProductionSource : undefined,
+          );
+        }
         status.learningMetrics = {
           ...status.learningMetrics,
           state: 'withheld',
@@ -3529,10 +3614,33 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
         };
       }
     } catch {
+      const invalidatingSource = invalidatedDispatchProductionSource(
+        status.dispatchProductionSource,
+        'io-error',
+      );
+      status.dispatchProductionSource = invalidatingSource;
+      delete status.dispatchProduction;
+      delete status.dispatchYieldDiagnostics;
+      if (status.proposalFunnel) {
+        status.proposalFunnel = withholdProposalFunnelForUnstableSnapshot(
+          status.proposalFunnel,
+          invalidatingSource,
+        );
+      }
+      const dispatchAvailabilitySource = learningSourceAvailability(
+        'dispatch-production',
+        invalidatingSource,
+      );
       status.learningMetrics = {
         ...status.learningMetrics,
         state: 'withheld',
         reason: 'learning-snapshot-unstable',
+        sourceQuality: invalidatingSource,
+        dispatchProduction: learningMetricAvailability(
+          [dispatchAvailabilitySource],
+          ['dispatchProduction'],
+          1,
+        ),
       };
     }
   }
@@ -4330,34 +4438,6 @@ function formatActionPercent(rate: number): string {
   return `${Math.round(Math.max(0, Math.min(1, rate)) * 100)}%`;
 }
 
-interface DiagnosticDispatchYieldAction {
-  detail: string;
-  backend?: EngineId | null;
-}
-
-interface GeneratedRepairRecoveryStatus {
-  active: boolean;
-  healthy: boolean;
-  detail: string;
-}
-
-function isDiagnosticResliceQueueItem(item: FleetQueueNextItem): boolean {
-  return item.id.includes(':proposal-repair-nodiff:') ||
-    item.title.toLowerCase().startsWith('reslice no-diff dispatch');
-}
-
-function isCaptureRepairQueueItem(item: FleetQueueNextItem): boolean {
-  return item.id.includes(':proposal-repair-capture:') ||
-    item.title.toLowerCase().startsWith('repair dispatch capture failure');
-}
-
-function isGeneratedRepairQueueItem(item: FleetQueueNextItem): boolean {
-  return isDiagnosticResliceQueueItem(item) ||
-    isCaptureRepairQueueItem(item) ||
-    item.id.includes(':proposal-repair:') ||
-    item.title.toLowerCase().startsWith('repair proposal ');
-}
-
 function diagnosticPolicyDisabled(
   value: Pick<DispatchProductionYieldSummary, 'outcomes' | 'attemptShape'>,
 ): number {
@@ -4420,44 +4500,6 @@ function diagnosticTopReasonForDispatchSummary(summary: DispatchProductionYieldS
     return summary.diagnosticTopReasons[0]?.reason;
   }
   return summary.topReasons.find((reason) => !isSuppressedProposalProductionReason(reason.reason))?.reason;
-}
-
-function formatAttemptShapeDetail(shape: DispatchProductionYieldSummary['attemptShape']): string {
-  if (!shape) return '';
-  const total =
-    (shape.backendNoDiff ?? 0) +
-    (shape.captureOrGateBlocked ?? 0) +
-    (shape.repairAttempts ?? 0) +
-    (shape.policyDisabled ?? 0);
-  if (total <= 0) return '';
-  return `; shape: no-diff ${shape.backendNoDiff ?? 0}, gate/capture ${shape.captureOrGateBlocked ?? 0}, repairs ${shape.repairAttempts ?? 0}, policy-off ${shape.policyDisabled ?? 0}`;
-}
-
-function formatGeneratedRepairRecoveryDetail(
-  generated: DispatchProductionYieldSummary['generatedRepairAttempts'],
-): string {
-  const summary = formatGeneratedRepairRecoverySummary(generated);
-  return summary ? `; repair recovery: ${summary}` : '';
-}
-
-function formatGeneratedRepairRecoverySummary(
-  generated: DispatchProductionYieldSummary['generatedRepairAttempts'],
-): string {
-  if (!generated || generated.attempts <= 0) return '';
-  const kinds = [
-    formatGeneratedRepairKindCount(generated.captureRepairs ?? 0, 'capture'),
-    formatGeneratedRepairKindCount(generated.diagnosticReslices ?? 0, 'no-diff'),
-    formatGeneratedRepairKindCount(generated.proposalRepairs ?? 0, 'proposal'),
-  ].filter((part): part is string => part !== null);
-  const kindDetail = kinds.length > 0 ? `; ${kinds.join(', ')}` : '';
-  const conversion = `${generated.proposalsCreated}/${generated.attempts}`;
-  const rate = formatActionPercent(generated.proposalRate ?? 0);
-  return `generated repairs ${conversion} converted (${rate}${kindDetail})`;
-}
-
-function formatGeneratedRepairKindCount(count: number, label: string): string | null {
-  if (count <= 0) return null;
-  return `${label} ${count}`;
 }
 
 function dispatchYieldVerdict(
@@ -4710,183 +4752,6 @@ function dispatchYieldRecommendation(input: {
     return `Tighten context or reslice ${subject}; ${input.actionReason}.`;
   }
   return `Tighten context or reslice ${subject}; capture/gate blocking dominates the low-yield sample.`;
-}
-
-function formatDispatchYieldDiagnosticDetail(
-  diagnostic: FleetDispatchYieldDiagnostics,
-  generatedWork?: FleetQueueGeneratedWorkStatus,
-): string {
-  const candidate = diagnostic.primaryCandidate;
-  const subject = candidate ? dispatchYieldSubject(candidate) : 'dispatches';
-  const attempts = candidate?.diagnosticAttempts ?? diagnostic.diagnosticAttempts;
-  const proposals = candidate?.proposalsCreated ?? diagnostic.proposalsCreated;
-  const rate = candidate?.proposalRate ?? diagnostic.proposalRate;
-  const topReason = candidate?.topReason ?? diagnostic.topReason;
-  const reason = topReason ? `; top reason: ${topReason}` : '';
-  const actionReason = candidate?.actionReason ?? diagnostic.actionReason;
-  const actionReasonDetail = actionReason ? `; action reason: ${actionReason}` : '';
-  const shape = formatAttemptShapeDetail(candidate?.attemptShape ?? diagnostic.attemptShape);
-  const repairRecovery = formatGeneratedRepairRecoveryDetail(diagnostic.generatedRepairAttempts);
-  const action = diagnostic.action === 'route-same-tier-alternative'
-    ? 'same-tier reroute'
-    : diagnostic.action === 'tighten-context-or-reslice'
-      ? 'tighten context/reslice'
-      : diagnostic.action === 'collect-more-samples'
-      ? 'collect more samples'
-      : 'keep routing';
-  const repairCoverage = formatQueuedRepairCoverage(generatedWork);
-  return `${subject} proposal yield ${proposals}/${attempts} (${formatActionPercent(rate)}); ` +
-    `sample-gated action: ${action}${reason}${actionReasonDetail}${shape}${repairRecovery}${repairCoverage}`;
-}
-
-function formatQueuedRepairCoverage(generatedWork: FleetQueueGeneratedWorkStatus | undefined): string {
-  if (!generatedWork) return '';
-  const parts = [
-    formatQueuedRepairCount(generatedWork.captureRepairs ?? 0, 'capture repair'),
-    formatQueuedRepairCount(generatedWork.diagnosticReslices ?? 0, 'no-diff reslice'),
-  ].filter((part): part is string => part !== null);
-  return parts.length > 0 ? `; queued repair coverage: ${parts.join(', ')}` : '';
-}
-
-function formatQueuedRepairCount(count: number, label: string): string | null {
-  if (count <= 0) return null;
-  return `${count} ${label}${count === 1 ? '' : 's'} queued`;
-}
-
-function dispatchYieldNextAction(status: FleetStatus): DiagnosticDispatchYieldAction | null {
-  const diagnostic = status.dispatchYieldDiagnostics;
-  if (!diagnostic) return null;
-  if (diagnostic.verdict !== 'actionable') return null;
-  const candidate = diagnostic.primaryCandidate;
-  return {
-    detail: formatDispatchYieldDiagnosticDetail(diagnostic, status.queue.generatedWork),
-    ...(candidate?.backend ? { backend: candidate.backend } : {}),
-  };
-}
-
-function generatedRepairRecoveryStatus(status: FleetStatus): GeneratedRepairRecoveryStatus | null {
-  const productionSourceHealthy = status.dispatchProductionSource?.sourceState === 'healthy' &&
-    status.dispatchProductionSource.complete;
-  const generated =
-    status.dispatchYieldDiagnostics?.generatedRepairAttempts ??
-    (productionSourceHealthy ? status.dispatchProduction?.generatedRepairAttempts : undefined) ??
-    status.attemptCoverage?.production.generatedRepairAttempts;
-  const detail = formatGeneratedRepairRecoverySummary(generated);
-  if (!generated || generated.attempts <= 0 || !detail) return null;
-  const active =
-    (status.queue.generatedWork?.total ?? 0) > 0 ||
-    (status.queue.next?.some(isGeneratedRepairQueueItem) ?? false);
-  const enoughSamples = generated.attempts >= MIN_DISPATCH_YIELD_ACTION_ATTEMPTS;
-  const healthyRate = Math.max(
-    status.dispatchYieldDiagnostics?.lowYieldRate ?? LOW_DISPATCH_YIELD_ACTION_RATE,
-    0.5,
-  );
-  return {
-    active,
-    healthy: active && enoughSamples && (generated.proposalRate ?? 0) >= healthyRate,
-    detail,
-  };
-}
-
-function diagnosticResliceDrainNextAction(status: FleetStatus): FleetNextAction | null {
-  const diagnostic = status.dispatchYieldDiagnostics;
-  const resliceCount = status.queue.generatedWork?.diagnosticReslices ?? 0;
-  const eligibleReslices = status.queue.next?.filter(isDiagnosticResliceQueueItem) ?? [];
-  const eligibleResliceCount = eligibleReslices.length;
-  if (
-    !diagnostic ||
-    diagnostic.verdict !== 'actionable' ||
-    diagnostic.action !== 'tighten-context-or-reslice' ||
-    resliceCount <= 0 ||
-    eligibleResliceCount <= 0
-  ) {
-    return null;
-  }
-
-  const topReslice = eligibleReslices[0] ?? null;
-  const diagnosticDetail = formatDispatchYieldDiagnosticDetail(diagnostic, status.queue.generatedWork);
-  const target = topReslice?.repo ?? diagnostic.primaryCandidate?.backend;
-  const first = topReslice ? ` First: ${topReslice.title}.` : '';
-  const stalled = status.queue.diagnosticResliceDrain?.stalled === true ||
-    status.queue.generatedWork?.diagnosticResliceDrainStalled === true
-    ? ' reslice-drain-stalled: the latest targeted drain tick selected none.'
-    : '';
-  const daemonRunning = status.daemon.running === true;
-  const label = daemonRunning ? 'Monitor diagnostic auto-drain' : 'Drain diagnostic reslices';
-  const countDetail = eligibleResliceCount === resliceCount
-    ? `${eligibleResliceCount} diagnostic no-diff reslice item(s) are eligible`
-    : `${eligibleResliceCount}/${resliceCount} diagnostic no-diff reslice item(s) are daemon-eligible`;
-  return {
-    id: 'drain-diagnostic-reslices',
-    priority: 'high',
-    label,
-    detail:
-      `${countDetail} while dispatch yield is actionable: ` +
-      `${diagnosticDetail}.${first}${stalled}`,
-    ...(target ? { target } : {}),
-    commands: daemonRunning
-      ? [
-          nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only', {
-            note: 'Launchd daemon auto-drains eligible diagnostic reslices during normal live ticks.',
-          }),
-          nextActionCommand('Inspect daemon status', ['ashlr', 'daemon', 'status'], 'read-only'),
-        ]
-      : [
-          nextActionCommand('Drain diagnostic reslices', [
-            'ashlr',
-            'daemon',
-            'start',
-            '--once',
-            '--drain',
-            'diagnostic-reslices',
-            '--limit',
-            String(DEFAULT_DIAGNOSTIC_RESLICE_DRAIN_LIMIT),
-          ], 'autonomous-dispatch', {
-            note: 'Runs one guarded daemon tick targeted at already-queued diagnostic no-diff reslices.',
-          }),
-          nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
-        ],
-  };
-}
-
-function captureRepairNextAction(status: FleetStatus): FleetNextAction | null {
-  const diagnostic = status.dispatchYieldDiagnostics;
-  const captureRepairCount = status.queue.generatedWork?.captureRepairs ?? 0;
-  const eligibleRepairs = status.queue.next?.filter(isCaptureRepairQueueItem) ?? [];
-  const eligibleRepairCount = eligibleRepairs.length;
-  if (
-    !diagnostic ||
-    diagnostic.verdict !== 'actionable' ||
-    diagnostic.action !== 'tighten-context-or-reslice' ||
-    status.daemon.running !== true ||
-    captureRepairCount <= 0 ||
-    eligibleRepairCount <= 0
-  ) {
-    return null;
-  }
-
-  const topRepair = eligibleRepairs[0] ?? null;
-  const diagnosticDetail = formatDispatchYieldDiagnosticDetail(diagnostic, status.queue.generatedWork);
-  const target = topRepair?.repo ?? diagnostic.primaryCandidate?.backend;
-  const first = topRepair ? ` First: ${topRepair.title}.` : '';
-  const countDetail = eligibleRepairCount === captureRepairCount
-    ? `${eligibleRepairCount} capture repair item(s) are eligible`
-    : `${eligibleRepairCount}/${captureRepairCount} capture repair item(s) are daemon-eligible`;
-  return {
-    id: 'process-capture-repairs',
-    priority: 'high',
-    label: 'Monitor capture repairs',
-    detail:
-      `${countDetail} while dispatch yield is actionable: ` +
-      `${diagnosticDetail}.${first}`,
-    ...(target ? { target } : {}),
-    commands: [
-      nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only', {
-        note: 'Launchd daemon processes eligible capture repairs during normal live ticks.',
-      }),
-      nextActionCommand('Inspect daemon status', ['ashlr', 'daemon', 'status'], 'read-only'),
-    ],
-  };
 }
 
 function buildAutonomyEffectiveness(status: FleetStatus): FleetAutonomyEffectivenessStatus {
@@ -5407,33 +5272,6 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
     });
   }
 
-  const contextEfficiency = status.contextEfficiency;
-  const contextRisk = contextEfficiency?.risks.find((risk) => risk.severity === 'high' || risk.severity === 'medium');
-  if (contextEfficiency && (contextEfficiency.posture === 'strained' || contextRisk)) {
-    const shouldDrainReslices = contextEfficiency.risks.some((risk) => risk.id === 'proposal-yield-low') ||
-      (status.queue.generatedWork?.diagnosticReslices ?? 0) > 0;
-    add({
-      id: 'improve-context-efficiency',
-      priority: 'medium',
-      label: 'Improve context efficiency',
-      detail: contextRisk?.detail ?? contextEfficiency.recommendations[0] ?? 'Context efficiency is degraded; inspect reflection, retrieval, and proposal-yield signals.',
-      commands: [
-        nextActionCommand('Run reflection', ['ashlr', 'reflect', 'playbooks', '--persist'], 'control-plane', {
-          note: 'Writes only metadata-derived playbooks under the Ashlr genome hub; no repo source, merge, or network authority.',
-        }),
-        nextActionCommand('Evaluate attention', ['ashlr', 'eval', 'attention', '--json'], 'read-only'),
-        ...(shouldDrainReslices && status.daemon.running
-          ? [nextActionCommand('Inspect daemon status', ['ashlr', 'daemon', 'status'], 'read-only', {
-              note: 'Daemon auto-drains eligible diagnostic reslices during normal live ticks.',
-            })]
-          : []),
-        nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
-      ],
-    });
-  }
-  const causalCoverageAction = causalCoverageNextAction(status.attemptCoverage);
-  if (causalCoverageAction) add(causalCoverageAction);
-
   const goalFocus = status.goalFocus;
   const staleLane = status.laneLocks?.samples.find(
     (sample) => sample.reason === 'stale-in-progress' && sample.goalId && sample.milestoneId,
@@ -5496,52 +5334,6 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
   const eligibleBacklogItems = status.queue.eligibleBacklogItems ?? status.queue.backlogItems;
   if (eligibleBacklogItems === 0) addRestoreRepairRoutes();
   if (eligibleBacklogItems > 0 && !controlBlocked) {
-    const diagnosticResliceDrainAction = diagnosticResliceDrainNextAction(status);
-    if (diagnosticResliceDrainAction) add(diagnosticResliceDrainAction);
-    const captureRepairAction = captureRepairNextAction(status);
-    if (captureRepairAction) add(captureRepairAction);
-    const repairRecovery = generatedRepairRecoveryStatus(status);
-    const repairMonitorActive = Boolean(diagnosticResliceDrainAction || captureRepairAction);
-    const dispatchYieldDetail = dispatchYieldNextAction(status);
-    if (dispatchYieldDetail && !(repairRecovery?.healthy && repairMonitorActive)) {
-      add({
-        id: 'inspect-dispatch-yield',
-        priority: 'medium',
-        label: 'Inspect dispatch yield',
-        detail: dispatchYieldDetail.detail,
-        ...(dispatchYieldDetail.backend ? { target: dispatchYieldDetail.backend } : {}),
-        commands: [
-          nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
-          nextActionCommand('Inspect direction', ['ashlr', 'fleet', 'direction', '--json'], 'read-only'),
-        ],
-      });
-    }
-    const production = status.proposalProduction;
-    const diagnosticNoProposalDispatches = production?.diagnosticNoProposalDispatches ?? production?.noProposalDispatches ?? 0;
-    if (production && production.skipped > 0) {
-      const topSkip = production.skipReasons[0];
-      add({
-        id: 'inspect-dispatch-skips',
-        priority: 'medium',
-        label: 'Inspect dispatch skips',
-        detail: `${production.skipped} selected item(s) were not attempted${topSkip ? `; top skip: ${topSkip.reason}` : ''}`,
-        commands: [
-          nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
-        ],
-      });
-    }
-    if (production && (production.errors > 0 || diagnosticNoProposalDispatches > 0)) {
-      add({
-        id: 'inspect-proposal-production',
-        priority: production.errors > 0 ? 'high' : 'medium',
-        label: 'Inspect proposal production',
-        detail: proposalProductionDiagnosis(production),
-        commands: [
-          nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
-          nextActionCommand('Inspect inbox', ['ashlr', 'inbox', '--json'], 'read-only'),
-        ],
-      });
-    }
     const top = status.queue.next?.[0];
     add({
       id: 'build-backlog',
@@ -5668,7 +5460,6 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
     if (action.id === 'process-capture-repairs' && (status.autoMergeReadiness?.knownVerificationFailed ?? 0) === 0) return -1.1;
     if (action.id === 'inspect-dispatch-yield') return -1;
     if (action.id === 'inspect-learning-evidence') return 1;
-    if (action.id === 'inspect-attempt-causal-coverage') return -0.5;
     if (action.id === 'add-explicit-merge-verify-contracts') return 0.5;
     return 0;
   };
@@ -5775,39 +5566,6 @@ function phantomAuditReadinessSource(
       sourcePresent: true,
     },
   );
-}
-
-function causalCoverageNextAction(status: AttemptCoverageStatus | undefined): FleetNextAction | null {
-  if (!status?.causalWeak.weak) return null;
-  const weak = status.causalWeak.reasons[0];
-  if (!weak) return null;
-  const percent = Math.round(weak.rate * 100);
-  const denominator = weak.denominator ?? status.attempts;
-  const topCause = status.causalGapDiagnostics.causes[0];
-  const actionableCause = status.causalGapDiagnostics.actionableCauses[0];
-  const topBasis = status.causalGapDiagnostics.byLabelBasis[0];
-  const topSource = status.causalGapDiagnostics.byLearningSource[0];
-  const diagnostics = [
-    topCause ? `top cause: ${topCause.cause} on ${countPhrase(topCause.count, 'attempt')}` : null,
-    actionableCause && actionableCause.cause !== topCause?.cause
-      ? `actionable cause: ${actionableCause.cause} on ${countPhrase(actionableCause.count, 'attempt')}`
-      : null,
-    topBasis ? `basis ${topBasis.key}:${topBasis.count}` : null,
-    topSource ? `learning ${topSource.key}:${topSource.count}` : null,
-  ].filter((part): part is string => part !== null);
-  return {
-    id: 'inspect-attempt-causal-coverage',
-    priority: 'medium',
-    label: 'Inspect causal coverage',
-    detail:
-      `Attempt causal metadata coverage is weak: ` +
-      `${weak.kind} ${weak.count}/${denominator} (${percent}%).` +
-      `${diagnostics.length > 0 ? ` ${diagnostics.join('; ')}.` : ''}`,
-    commands: [
-      nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
-      nextActionCommand('Evaluate attention', ['ashlr', 'eval', 'attention', '--json'], 'read-only'),
-    ],
-  };
 }
 
 function countSignal(count: number, singular: string): string | null {
@@ -5946,6 +5704,8 @@ function evidenceReadinessSource(input: {
   generatedAt: string;
   applicable?: boolean;
   applicability?: Exclude<FleetReadinessEvidenceApplicability, 'disabled'>;
+  /** Whether source degradation may synthesize FleetNextAction records. */
+  actionSynthesis?: 'eligible' | 'observational-only';
 }): FleetReadinessSourceHealth {
   if (input.applicable === false) {
     const source = readinessSource(
@@ -5966,7 +5726,7 @@ function evidenceReadinessSource(input: {
     };
   }
   const quality = input.quality;
-  const observational = input.role === 'forensics';
+  const observational = input.role === 'forensics' || input.actionSynthesis === 'observational-only';
   const degraded = !quality || quality.sourceState === 'degraded' || !quality.complete;
   const missing = quality?.sourceState === 'missing';
   const eligibility: FleetReadinessEvidenceEligibility = observational
@@ -6040,15 +5800,15 @@ function learningEvidenceReadinessSources(
     }),
     evidenceReadinessSource({
       id: 'judge-traces', label: 'Judge Outcomes', role: 'learning',
-      quality: status.judgeTraceSource, generatedAt,
+      quality: status.judgeTraceSource, generatedAt, actionSynthesis: 'observational-only',
     }),
     evidenceReadinessSource({
       id: 'agent-actions', label: 'Agent Actions', role: 'learning',
-      quality: status.workspace?.sourceQuality, generatedAt,
+      quality: status.workspace?.sourceQuality, generatedAt, actionSynthesis: 'observational-only',
     }),
     evidenceReadinessSource({
       id: 'dispatch-production', label: 'Dispatch Outcomes', role: 'analytics',
-      quality: status.dispatchProductionSource, generatedAt,
+      quality: status.dispatchProductionSource, generatedAt, actionSynthesis: 'observational-only',
     }),
     evidenceReadinessSource({
       id: 'dispatch-manifests', label: 'Dispatch Intent', role: 'forensics',
@@ -6057,7 +5817,7 @@ function learningEvidenceReadinessSources(
     }),
     evidenceReadinessSource({
       id: 'best-of-n', label: 'Candidate Races', role: 'learning',
-      quality: status.bestOfNSource, generatedAt,
+      quality: status.bestOfNSource, generatedAt, actionSynthesis: 'observational-only',
       applicable: status.evidencePolicy?.bestOfNEnabled !== false,
     }),
     evidenceReadinessSource({
@@ -6648,29 +6408,6 @@ function chooseReadinessBlocker(
       'resources',
     );
   }
-  if (
-    eligibleBacklogItems > 0 &&
-    status.proposals.pending === 0 &&
-    status.dispatchYieldDiagnostics?.verdict === 'actionable'
-  ) {
-    const repairRecovery = generatedRepairRecoveryStatus(status);
-    if (repairRecovery?.healthy) {
-      return readinessBlocker(
-        'generated-repair-recovery-active',
-        'Repair recovery active',
-        `${repairRecovery.detail}; dispatch yield is still sample-gated, but active generated repair work is converting above the recovery threshold.`,
-        'low',
-        'queue',
-      );
-    }
-    return readinessBlocker(
-      'dispatch-yield-actionable',
-      'Dispatch yield needs attention',
-      formatDispatchYieldDiagnosticDetail(status.dispatchYieldDiagnostics, status.queue.generatedWork),
-      'medium',
-      'queue',
-    );
-  }
   if (eligibleBacklogItems > 0 && status.proposals.pending === 0) {
     return readinessBlocker(
       'proposal-production-needed',
@@ -6810,26 +6547,10 @@ function missionDirective(
       return 'Drain failed proposal blockers';
     case 'inspect-auto-merge-blockers':
       return 'Inspect merge blockers';
-    case 'drain-diagnostic-reslices':
-      return action.label === 'Monitor diagnostic auto-drain'
-        ? 'Monitor diagnostic auto-drain'
-        : 'Drain diagnostic reslices';
-    case 'process-capture-repairs':
-      return 'Monitor capture repairs';
-    case 'inspect-dispatch-yield':
-      return 'Recover dispatch yield';
-    case 'inspect-dispatch-skips':
-      return 'Inspect dispatch skips';
-    case 'inspect-proposal-production':
-      return 'Recover proposal production';
-    case 'improve-context-efficiency':
-      return 'Run context reflection';
     case 'review-phantom-audit':
       return 'Review Phantom audit';
     case 'repair-enrollment-registry':
       return 'Repair enrollment authority';
-    case 'inspect-attempt-causal-coverage':
-      return 'Inspect causal learning coverage';
     case 'inspect-learning-evidence':
       return 'Diagnose withheld evidence';
     case 'build-backlog':

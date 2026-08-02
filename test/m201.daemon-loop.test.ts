@@ -387,11 +387,14 @@ import {
 import { readAudit } from '../src/core/sandbox/audit.js';
 import {
   dispatchProductionDir,
+  dispatchProductionRunStatusForOutcome,
+  readDispatchProductionFailureAttemptReceipts,
   readDispatchProductionEvents,
   recordDispatchProduction,
   resolveDispatchProductionFailureAttemptReceipt,
   resolveDispatchProductionAttemptReceiptWitnesses,
   resolveDispatchProductionAttemptProofs,
+  sanitizeDispatchProductionEvent,
   type DispatchProductionEvent,
 } from '../src/core/fleet/dispatch-production-ledger.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../src/core/fleet/local-store-lock.js';
@@ -677,6 +680,36 @@ function testRepairRootId(repoDir: string, identity: string): string {
     .digest('hex');
 }
 
+function currentDispatchObservation(
+  event: DispatchProductionEvent,
+  seed: string,
+): DispatchProductionEvent {
+  const digest = createHash('sha256').update(seed).digest('hex');
+  const attemptId = `attempt-${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+  const runId = event.runId ?? attemptId;
+  return {
+    ...event,
+    attemptId,
+    runId,
+    trajectoryId: `run:${attemptId}`,
+    runEventSummary: {
+      runId,
+      status: dispatchProductionRunStatusForOutcome(event.outcome),
+      outcome: event.outcome,
+      proposalCreated: event.proposalCreated,
+      proposalId: event.proposalId,
+      diffFiles: event.diffFiles,
+      diffLines: event.diffLines,
+      costUsd: event.spentUsd,
+      actionCounts: {
+        proposalCreated: event.proposalCreated ? 1 : 0,
+        proposalBlocked: event.outcome === 'gate-blocked' || event.outcome === 'proposal-capture-error' ? 1 : 0,
+        proposalDisabled: event.outcome === 'proposal-disabled' ? 1 : 0,
+      },
+    },
+  };
+}
+
 function makeDiagnosticResliceItem(
   repoDir: string,
   hash = 'abcdef123456',
@@ -692,6 +725,7 @@ function makeDiagnosticResliceItem(
     resolve(repoDir),
     repairRootAuthorityId,
   ])).digest('hex');
+  const parentRunId = `attempt-${hash.slice(0, 8)}-1234-4123-8123-${hash.padEnd(12, '0').slice(0, 12)}`;
   const parentEvent: DispatchProductionEvent = {
     schemaVersion: 1,
     ts,
@@ -705,7 +739,15 @@ function makeDiagnosticResliceItem(
     routeReason: 'test diagnostic parent route',
     outcome: 'empty-diff',
     proposalCreated: false,
-    runId: `attempt-${hash.slice(0, 8)}-1234-4123-8123-${hash.padEnd(12, '0').slice(0, 12)}`,
+    attemptId: parentRunId,
+    runId: parentRunId,
+    trajectoryId: `run:${parentRunId}`,
+    runEventSummary: {
+      runId: parentRunId,
+      status: 'done',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+    },
     objectiveHash,
     spentUsd: 0,
     basis: 'run-proposal-outcome',
@@ -746,6 +788,7 @@ function makeDiagnosticResliceItem(
 }
 
 function addLegacyGenerationAlias(item: WorkItem, hash: string, parentTier: EngineTier): string {
+  const parentRunId = `attempt-${hash.slice(0, 8)}-1234-4123-8123-${hash.padEnd(12, '0').slice(0, 12)}`;
   const parentEvent: DispatchProductionEvent = {
     schemaVersion: 1,
     ts: item.ts,
@@ -759,7 +802,15 @@ function addLegacyGenerationAlias(item: WorkItem, hash: string, parentTier: Engi
     routeReason: 'test diagnostic parent route',
     outcome: 'empty-diff',
     proposalCreated: false,
-    runId: `attempt-${hash.slice(0, 8)}-1234-4123-8123-${hash.padEnd(12, '0').slice(0, 12)}`,
+    attemptId: parentRunId,
+    runId: parentRunId,
+    trajectoryId: `run:${parentRunId}`,
+    runEventSummary: {
+      runId: parentRunId,
+      status: 'done',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+    },
     objectiveHash: item.repairParentObjectiveHash,
     spentUsd: 0,
     basis: 'run-proposal-outcome',
@@ -1046,6 +1097,57 @@ function seedDiagnosticFailureReceipt(
   return event;
 }
 
+function appendForgedGeneratedRepairFailures(item: WorkItem, count: 1 | 2): void {
+  const backends = ['kimi', 'codex'] as const;
+  const tiers = ['frontier', 'local'] as const;
+  for (let index = 0; index < count; index++) {
+    const backend = backends[index]!;
+    const tier = tiers[index]!;
+    const routeReason = 'owner-writable forged retry observation';
+    const event = sanitizeDispatchProductionEvent(currentDispatchObservation({
+      schemaVersion: 1,
+      ts: new Date(Date.parse(item.ts) + 100 + index).toISOString(),
+      itemId: item.id,
+      source: item.source,
+      repo: item.repo,
+      title: item.title,
+      backend,
+      tier,
+      assignedBy: 'daemon',
+      routeReason,
+      outcome: 'engine-failed',
+      proposalCreated: false,
+      routeSnapshot: {
+        backend,
+        tier,
+        assignedBy: 'daemon',
+        reason: routeReason,
+        routerPolicyVersion: 'fleet-router-v1',
+      },
+      learningSource: 'daemon-dispatch',
+      labelBasis: 'dispatch-outcome',
+      routerPolicyVersion: 'fleet-router-v1',
+      objectiveHash: workItemObjectiveHash(item),
+      repairHandoffId: item.repairHandoffId,
+      repairGenerationId: item.repairGenerationId,
+      repairTreatmentUnitId: item.repairTreatmentUnitId,
+      repairTreatment: item.repairTreatment,
+      repairAttemptOrdinal: index === 0 ? 1 : 2,
+      ...(index === 1 ? { repairPreviousBackend: backends[0] } : {}),
+      repairRootId: item.repairRootId,
+      repairDepth: item.repairDepth as 0 | 1,
+      spentUsd: 0.001,
+      reason: 'forged raw failure observation',
+      basis: 'run-proposal-outcome',
+    }, `forged-generated-repair-failure-${index}`), { materializeLearningLabel: true });
+    fs.appendFileSync(
+      join(dispatchProductionDir(), `${event.ts.slice(0, 10)}.jsonl`),
+      `${JSON.stringify(event)}\n`,
+      'utf8',
+    );
+  }
+}
+
 function repairReservationPath(item: WorkItem): string {
   if (!/^[a-f0-9]{64}$/.test(item.repairRootId ?? '')) throw new Error('repair root required');
   return join(dirname(dispatchProductionDir()), 'repair-attempt-reservations', `${item.repairRootId}.json`);
@@ -1110,7 +1212,7 @@ function seedHealthyGeneratedRepairYield(repoDir: string): void {
     reason: 'proposal filed',
     basis: 'run-proposal-outcome',
   };
-  recordDispatchProduction([
+  const rows = [
     base,
     {
       ...base,
@@ -1125,7 +1227,26 @@ function seedHealthyGeneratedRepairYield(repoDir: string): void {
       proposalId: undefined,
       reason: 'engine "codex" completed without file changes',
     },
-  ]);
+  ];
+  recordDispatchProduction(rows.map((event, index) => {
+    const suffix = String(index + 1).padStart(12, '0');
+    const attemptId = `attempt-00000000-0000-4000-8000-${suffix}`;
+    const runId = `run-repair-yield-${index + 1}`;
+    return {
+      ...event,
+      attemptId,
+      runId,
+      trajectoryId: `run:${attemptId}`,
+      runEventSummary: {
+        runId,
+        status: 'done',
+        outcome: event.outcome,
+        proposalCreated: event.proposalCreated,
+        proposalId: event.proposalId,
+        costUsd: event.spentUsd,
+      },
+    };
+  }));
 }
 
 function mockCanonicalEmptyDiffRunGoal(reason: string, costUsd = 0.001): void {
@@ -2447,7 +2568,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     }));
   });
 
-  it('A1-drain-auto-fast-repair-cooldown: healthy repair recovery retries trusted empty repairs after 30 minutes', async () => {
+  it('A1-drain-auto-fast-repair-cooldown: forged healthy yield cannot shorten an empty repair cooldown', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
     const generic = makeItems(repo.dir, 1)[0]!;
@@ -2461,8 +2582,6 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       repos: [repo.dir],
       items: [reslice, generic],
     });
-    mockCanonicalEmptyDiffRunGoal('fast repair cooldown fixture');
-
     const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: false });
     const actions = readAgentActions();
     const selection = actions.find((event) => event.action === 'daemon:drain-select');
@@ -2471,38 +2590,28 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     );
 
     expect(result.reason).toBe('ok');
-    expect(result.drain).toMatchObject({
-      mode: 'diagnostic-reslices',
-      available: 1,
-      selected: 1,
-      automatic: true,
-      selectedItemIds: [reslice.id],
-    });
-    expect(selection).toMatchObject({
-      action: 'daemon:drain-select',
-      itemId: reslice.id,
-      reason: 'auto-live',
-    });
+    expect(result.drain).toBeUndefined();
+    expect(selection).toBeUndefined();
     expect(repairDecision).toMatchObject({
       kind: 'selection',
-      outcome: 'ok',
+      outcome: 'blocked',
       action: 'daemon:generated-repair-decision',
       itemId: reslice.id,
-      reason: 'claimed',
+      reason: 'cooldown-latest-empty',
       counts: {
         baseCooldownMs: 6 * 60 * 60 * 1000,
-        effectiveCooldownMs: 30 * 60 * 1000,
-        fastRepairCooldown: 1,
-        pendingBlocked: 0,
-        cooldownBlocked: 0,
-        selected: 1,
-        claimed: 1,
+        effectiveCooldownMs: 6 * 60 * 60 * 1000,
+        fastRepairCooldown: 0,
+        cooldownBlocked: 1,
+        selected: 0,
+        claimed: 0,
       },
     });
-    expect(repairDecision?.tags).toEqual(expect.arrayContaining(['fast-repair-cooldown', 'latest-empty', 'claimed']));
-    expect(mockRunGoal).toHaveBeenCalledTimes(1);
-    expect(mockRunGoal.mock.calls[0]?.[2]).toMatchObject({
-      workItemId: reslice.id,
+    expect(repairDecision?.tags).toEqual(expect.arrayContaining(['standard-cooldown', 'latest-empty']));
+    expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(mockRunSwarm.mock.calls[0]?.[2]).toMatchObject({
+      workItemId: generic.id,
     });
   });
 
@@ -3771,11 +3880,11 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       itemId: items[0]!.id,
       source: 'todo',
       repo: items[0]!.repo,
-      title: items[0]!.title,
+      title: expect.stringMatching(/^d1_[a-f0-9]{64}$/),
       backend: 'local-coder',
       tier: 'mid',
-      assignedBy: 'router',
-      routeReason: 'mock local-coder',
+      assignedBy: expect.stringMatching(/^d1_[a-f0-9]{64}$/),
+      routeReason: expect.stringMatching(/^d1_[a-f0-9]{64}$/),
       outcome: 'empty-diff',
       proposalCreated: false,
       runId: 'run-empty-diff',
@@ -3783,8 +3892,8 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       routeSnapshot: {
         backend: 'local-coder',
         tier: 'mid',
-        assignedBy: 'router',
-        reason: 'route-selected',
+        assignedBy: expect.stringMatching(/^d1_[a-f0-9]{64}$/),
+        reason: expect.stringMatching(/^d1_[a-f0-9]{64}$/),
       },
       runEventSummary: {
         runId: 'run-empty-diff',
@@ -3793,6 +3902,35 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
         proposalCreated: false,
         costUsd: 0.004,
       },
+      evidenceOutcome: {
+        target: expect.stringMatching(/^d1_[a-f0-9]{64}$/),
+        trustBasis: expect.stringMatching(/^d1_[a-f0-9]{64}$/),
+        riskClass: expect.stringMatching(/^d1_[a-f0-9]{64}$/),
+        verificationPassed: true,
+        policyAllowed: true,
+        policyAction: expect.stringMatching(/^d1_[a-f0-9]{64}$/),
+        policyTier: expect.stringMatching(/^d1_[a-f0-9]{64}$/),
+        gateCount: 3,
+      },
+      learningSource: 'daemon-dispatch',
+      labelBasis: 'dispatch-outcome',
+      objectiveHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      spentUsd: 0.004,
+      reason: expect.stringMatching(/^d1_[a-f0-9]{64}$/),
+      basis: 'run-proposal-outcome',
+    });
+    const persistedMetadata = JSON.stringify(productionEvent);
+    for (const prose of [items[0]!.title, 'mock local-coder', 'route-selected',
+      'engine "local-coder" completed without file changes']) {
+      expect(persistedMetadata).not.toContain(prose);
+    }
+    expect(persistedMetadata).not.toContain('"assignedBy":"router"');
+    const dispatchAction = readAgentActions({ limit: 10 }).find((event) => event.action === 'daemon:dispatch');
+    expect(dispatchAction).toMatchObject({
+      itemId: items[0]!.id,
+      outcome: 'no-proposal',
+      trajectoryId: productionEvent?.trajectoryId,
+      runEventSummary: productionEvent?.runEventSummary,
       evidenceOutcome: {
         target: 'main',
         trustBasis: 'verification',
@@ -3803,20 +3941,6 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
         policyTier: 'docs',
         gateCount: 3,
       },
-      learningSource: 'daemon-dispatch',
-      labelBasis: 'dispatch-outcome',
-      objectiveHash: expect.stringMatching(/^[a-f0-9]{64}$/),
-      spentUsd: 0.004,
-      reason: 'engine "local-coder" completed without file changes',
-      basis: 'run-proposal-outcome',
-    });
-    const dispatchAction = readAgentActions({ limit: 10 }).find((event) => event.action === 'daemon:dispatch');
-    expect(dispatchAction).toMatchObject({
-      itemId: items[0]!.id,
-      outcome: 'no-proposal',
-      trajectoryId: productionEvent?.trajectoryId,
-      runEventSummary: productionEvent?.runEventSummary,
-      evidenceOutcome: productionEvent?.evidenceOutcome,
     });
   });
 
@@ -4174,7 +4298,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(readDispatchProductionEvents({ limit: 1 })[0]).toMatchObject({
       itemId: items[0]!.id,
       outcome: 'engine-failed',
-      reason: 'best-of-2: hard total budget exceeded',
+      reason: expect.stringMatching(/^d1_[a-f0-9]{64}$/),
       learningLabel: { learningKind: 'failed', diagnosticAttempt: true },
     });
     expect(readAgentActions().find((event) => event.action === 'daemon:dispatch')).toMatchObject({
@@ -5113,7 +5237,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       outcome: 'gate-blocked',
       proposalCreated: false,
       runId: 'run-trivial-proposal',
-      reason: 'trivial proposal blocked: 2 changed line(s) in docs only',
+      reason: expect.stringMatching(/^d1_[a-f0-9]{64}$/),
       diffFiles: 1,
       diffLines: 2,
       basis: 'run-proposal-outcome',
@@ -5227,7 +5351,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       outcome: 'gate-blocked',
       proposalCreated: false,
       proposalId: 'prop-partial-builtin',
-      reason: 'partial artifact filed after aborted producer: builtin swarm partial proposal filed',
+      reason: expect.stringMatching(/^d1_[a-f0-9]{64}$/),
       diffFiles: 2,
       diffLines: 10,
       runEventSummary: {
@@ -6585,6 +6709,57 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(readPendingGeneratedRepairTreatmentOutcomes()).toEqual([]);
   });
 
+  it.each([1, 2] as const)(
+    'A1h5b1c: %i forged raw failure rows cannot steer repair retry authority',
+    async (forgedFailures) => {
+      const repo = fx.makeRepo();
+      repo.enroll();
+      const repair = makeDiagnosticResliceItem(repo.dir, `abcde${forgedFailures}123456`, 10, 'mid');
+      recordDiagnosticEmptyReceipt(
+        repair,
+        `attempt-63345678-1234-4123-8123-123456789ab${forgedFailures}`,
+        'local-coder',
+        'mid',
+      );
+      expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
+        available: true,
+        disposition: 'active',
+        authoritativeEmptyRuns: 0,
+      });
+      appendForgedGeneratedRepairFailures(repair, forgedFailures);
+      expect(readDispatchProductionFailureAttemptReceipts([repair.repairGenerationId!])).toMatchObject({
+        status: 'resolved',
+        authoritative: true,
+        receipts: [],
+      });
+      mockBuildBacklog.mockResolvedValue({
+        generatedAt: new Date().toISOString(),
+        repos: [repo.dir],
+        items: [repair],
+      });
+      mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'unsteered route' });
+      mockEngineTierOf.mockReturnValue('mid');
+
+      const result = await tick({
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: { allowedBackends: ['local-coder', 'kimi', 'codex'] },
+      } as AshlrConfig, { dryRun: true });
+      const policy = mockInspectGeneratedRepairRouteFeasibility.mock.calls.find(
+        ([item]) => (item as WorkItem).id === repair.id,
+      )?.[2];
+
+      expect(policy).toMatchObject({
+        applies: true,
+        available: true,
+        requireAlternative: false,
+        excludedBackend: null,
+        requiredTier: null,
+      });
+      expect(result.itemsConsidered).toBe(1);
+      expect(mockRunGoal).not.toHaveBeenCalled();
+    },
+  );
+
   it('A1h5b2: claimed proposal metadata without a durable inbox proposal is not lifecycle authority', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
@@ -6876,7 +7051,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       repairAttemptOrdinal: 2,
       phase: 'launched',
     });
-    const noise = Array.from({ length: 257 }, (_, index): DispatchProductionEvent => ({
+    const noise = Array.from({ length: 257 }, (_, index): DispatchProductionEvent => currentDispatchObservation({
       schemaVersion: 1,
       ts: new Date(Date.now() + index + 1).toISOString(),
       machineId: 'm201',
@@ -6892,7 +7067,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       proposalCreated: false,
       spentUsd: 0,
       basis: 'run-proposal-outcome',
-    }));
+    }, `terminal-receipt-noise-${index}`));
     expect(recordDispatchProduction(noise)).toEqual({ attempted: 257, recorded: 257, failed: 0 });
     mockBuildBacklog.mockResolvedValue({
       generatedAt: new Date().toISOString(),
@@ -7031,7 +7206,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       '2026-07-14T08:00:00.000Z',
       '2026-07-15T08:00:00.000Z',
     ].entries()) {
-      expect(recordDispatchProduction({
+      expect(recordDispatchProduction(currentDispatchObservation({
         schemaVersion: 1,
         ts,
         machineId: 'm201',
@@ -7048,7 +7223,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
         spentUsd: 0,
         reason: 'test partition rotation',
         basis: 'run-proposal-outcome',
-      })).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+      }, `partition-rotation-${index}`))).toEqual({ attempted: 1, recorded: 1, failed: 0 });
     }
     vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'));
     const unrelatedRepair = makeDiagnosticResliceItem(repo.dir, 'aaabbf123456', 10, 'mid');
@@ -7143,7 +7318,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     const proposalRepair = actualProposalRepair.proposalRepairWorkItem(proposal, now);
     expect(proposalRepair).not.toBeNull();
     if (!proposalRepair) throw new Error('expected ordinary proposal repair');
-    const captureParent: DispatchProductionEvent = {
+    const captureParent: DispatchProductionEvent = currentDispatchObservation({
       schemaVersion: 1,
       ts: now.toISOString(),
       machineId: 'm201',
@@ -7158,14 +7333,13 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       routeReason: 'self-improvement local route',
       outcome: 'proposal-capture-error',
       proposalCreated: false,
-      runId: 'run-ordinary-capture-parent',
       spentUsd: 0.001,
       reason: 'proposal-capture-error: completeness gate failed for src/app.ts:12',
       diffFiles: 1,
       diffLines: 4,
       objectiveHash: 'b'.repeat(64),
       basis: 'run-proposal-outcome',
-    };
+    }, 'ordinary-capture-parent');
     expect(recordRepairHandoffs(captureParent, {
       schemaVersion: 2,
       activation: { id: '11111111-1111-4111-8111-111111111111', activatedAt: '2020-01-01T00:00:00.000Z' },
@@ -7201,7 +7375,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       });
       return marker;
     });
-    const noise = Array.from({ length: 257 }, (_, index): DispatchProductionEvent => ({
+    const noise = Array.from({ length: 257 }, (_, index): DispatchProductionEvent => currentDispatchObservation({
       schemaVersion: 1,
       ts: new Date(Date.now() + index + 1).toISOString(),
       machineId: 'm201',
@@ -7217,7 +7391,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       proposalCreated: false,
       spentUsd: 0,
       basis: 'run-proposal-outcome',
-    }));
+    }, `ordinary-success-noise-${index}`));
     expect(recordDispatchProduction(noise)).toEqual({ attempted: 257, recorded: 257, failed: 0 });
     for (const [index, ts] of [
       '2026-07-16T08:00:00.000Z',
@@ -7755,7 +7929,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       outcome: 'proposal-capture-error',
       proposalCreated: false,
       runId: 'run-capture-missing',
-      reason: 'capture-missing: required proposal dispatch ended before final capture',
+      reason: expect.stringMatching(/^d1_[a-f0-9]{64}$/),
       runEventSummary: {
         status: 'failed',
       },
@@ -7840,7 +8014,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       outcome: 'proposal-capture-error',
       proposalCreated: false,
       runId: 'run-done-diff-no-proposal',
-      reason: 'capture-missing: required proposal dispatch produced changes without proposal filing',
+      reason: expect.stringMatching(/^d1_[a-f0-9]{64}$/),
       diffFiles: 2,
       diffLines: 5,
       basis: 'run-proposal-outcome',
@@ -7907,7 +8081,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       itemId: items[0]!.id,
       outcome: 'proposal-capture-error',
       runId: 'run-done-diff-no-counts',
-      reason: 'capture-missing: required proposal dispatch produced changes without proposal filing',
+      reason: expect.stringMatching(/^d1_[a-f0-9]{64}$/),
       diffFiles: 1,
       diffLines: 4,
       runEventSummary: {
@@ -8005,7 +8179,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       itemId: items[0]!.id,
       outcome: 'engine-failed',
       proposalCreated: false,
-      reason: 'dispatch-error: executor threw',
+      reason: expect.stringMatching(/^d1_[a-f0-9]{64}$/),
       basis: 'run-proposal-outcome',
     });
   });
@@ -8403,6 +8577,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(productionEvents).toHaveLength(1);
     expect(productionEvents[0]).toMatchObject({
       itemId: items[0]!.id,
+      attemptId: manifestAttemptId,
       runId: manifestAttemptId,
       trajectoryId: `run:${manifestAttemptId}`,
     });

@@ -14,6 +14,7 @@ import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, 
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 import type { AshlrConfig, DaemonTick, EngineId, Goal, WorkItem } from '../src/core/types.js';
 import {
@@ -26,6 +27,7 @@ import {
   type FleetReadinessSourceQuality,
 } from '../src/core/fleet/status.js';
 import { formatFleetStatus } from '../src/cli/fleet.js';
+import { buildProposalFunnelObservability } from '../src/core/fleet/proposal-funnel-observability.js';
 import { buildFleetLaneLocks } from '../src/core/fleet/lane-lock.js';
 import { buildContextEfficiencyStatus } from '../src/core/fleet/context-efficiency.js';
 import { ROUTER_POLICY_VERSION } from '../src/core/learning/causal.js';
@@ -42,7 +44,11 @@ import {
   signLocalRealizedMergeReceipt,
   signProvenance,
 } from '../src/core/foundry/provenance.js';
-import { recordDispatchProduction, type DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
+import {
+  dispatchProductionRunStatusForOutcome,
+  recordDispatchProduction as recordDispatchProductionRaw,
+  type DispatchProductionEvent,
+} from '../src/core/fleet/dispatch-production-ledger.js';
 import { recordDispatchManifest } from '../src/core/fleet/dispatch-manifest.js';
 import { recordBestOfN } from '../src/core/fleet/best-of-n-ledger.js';
 import {
@@ -58,6 +64,7 @@ import {
   recordGeneratedRepairLifecycle,
 } from '../src/core/fleet/generated-repair-lifecycle.js';
 import * as fleetRouter from '../src/core/fleet/router.js';
+import { recommendRoute } from '../src/core/run/learned-router.js';
 import {
   readRepairHandoffs,
   recordRepairHandoffs,
@@ -180,6 +187,42 @@ function withFoundry(foundry: NonNullable<AshlrConfig['foundry']>): AshlrConfig 
   return { ...baseConfig(), foundry };
 }
 
+function actionAuthorityProjection(status: FleetStatus): unknown {
+  return {
+    nextActions: status.nextActions,
+    readinessVerdict: status.autonomousShipReadiness?.verdict,
+    topBlocker: status.autonomousShipReadiness?.topBlocker,
+    primaryAction: status.autonomousShipReadiness?.primaryAction,
+    missionAction: status.missionBrief?.action,
+    missionDirective: status.missionBrief?.directive,
+    persistentPlaybookCommands: (status.nextActions ?? [])
+      .flatMap((action) => action.commands ?? [])
+      .filter((command) => command.argv.includes('--persist')),
+  };
+}
+
+async function operationalAuthorityProjection(
+  status: FleetStatus,
+  cfg: AshlrConfig,
+  item: WorkItem,
+): Promise<unknown> {
+  return {
+    nextActions: status.nextActions,
+    primaryAction: status.autonomousShipReadiness?.primaryAction,
+    missionDirective: status.missionBrief?.directive,
+    persistentCommands: (status.nextActions ?? [])
+      .flatMap((action) => action.commands ?? [])
+      .filter((command) => command.argv.includes('--persist')),
+    cooldowns: {
+      cooldownItems: status.queue.cooldownItems,
+      pendingItems: status.queue.pendingItems,
+      nextEligibleAt: status.queue.nextEligibleAt,
+    },
+    router: fleetRouter.routeBackend(item, cfg),
+    learnedRouter: await recommendRoute(item, cfg),
+  };
+}
+
 function withRoutableMid(foundry: NonNullable<AshlrConfig['foundry']> = {}): AshlrConfig {
   return withFoundry({
     ...foundry,
@@ -251,6 +294,47 @@ async function withFakeNow<T>(now: Date, fn: () => Promise<T>): Promise<T> {
 
 function settledLearningTimestamp(): string {
   return new Date(Date.now() - 5 * 60 * 1000).toISOString();
+}
+
+function testAttemptId(event: DispatchProductionEvent): string {
+  const digest = createHash('sha256')
+    .update(`${event.itemId}\0${event.runId ?? ''}\0${event.ts}`)
+    .digest('hex');
+  return `attempt-${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+}
+
+function canonicalDispatchFixture(event: DispatchProductionEvent): DispatchProductionEvent {
+  const legacyWriterAttempt = typeof event.runId === 'string' &&
+    /^attempt-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(event.runId) &&
+    event.trajectoryId === `run:${event.runId}`
+    ? event.runId
+    : undefined;
+  const attemptId = event.attemptId ?? legacyWriterAttempt ?? testAttemptId(event);
+  const runId = event.runId ?? `run-${attemptId}`;
+  return {
+    ...event,
+    attemptId,
+    runId,
+    trajectoryId: `run:${attemptId}`,
+    runEventSummary: {
+      ...(event.runEventSummary ?? {}),
+      runId,
+      status: dispatchProductionRunStatusForOutcome(event.outcome),
+      outcome: event.outcome,
+      proposalCreated: event.proposalCreated,
+      proposalId: event.proposalId,
+    },
+  };
+}
+
+function recordDispatchProduction(
+  input: DispatchProductionEvent | readonly DispatchProductionEvent[],
+): ReturnType<typeof recordDispatchProductionRaw> {
+  return recordDispatchProductionRaw(
+    Array.isArray(input)
+      ? input.map(canonicalDispatchFixture)
+      : canonicalDispatchFixture(input as DispatchProductionEvent),
+  );
 }
 
 function makeEvidencePack(id: string, generatedAt: string) {
@@ -340,7 +424,9 @@ function makeTrustedDiagnosticResliceItem(repo: string, hash = 'abcdef123456', s
     routeReason: 'test parent route',
     outcome: 'empty-diff',
     proposalCreated: false,
+    attemptId: 'attempt-12345678-1234-4123-8123-123456789abc',
     runId: 'attempt-12345678-1234-4123-8123-123456789abc',
+    trajectoryId: 'run:attempt-12345678-1234-4123-8123-123456789abc',
     objectiveHash: hash.padEnd(64, 'a').slice(0, 64),
     spentUsd: 0,
     basis: 'run-proposal-outcome',
@@ -663,6 +749,97 @@ function writeDaemonLock(home: string, heartbeatAt: string, pid = process.pid): 
 // ---------------------------------------------------------------------------
 
 describe('buildFleetStatus — read-only aggregation (M49)', () => {
+  it('formats a healthy zero-attempt proposal funnel as withheld without rates', async () => {
+    const status = await buildFleetStatus(baseConfig());
+    const proposalFunnel = buildProposalFunnelObservability({
+      events: [],
+      sourceQuality: {
+        sourceState: 'healthy',
+        sourcePresent: true,
+        complete: true,
+        stopReasons: [],
+        filesRead: 1,
+        datedFilesRead: 1,
+        looseFilesRead: 0,
+        bytesRead: 0,
+        rowsScanned: 0,
+        invalidRows: 0,
+        unreadableFiles: 0,
+      },
+      windowMs: 24 * 60 * 60 * 1000,
+      eventLimit: 1_200,
+    });
+
+    const formatted = formatFleetStatus({ ...status, proposalFunnel });
+
+    expect(formatted).toContain('Proposal funnel:');
+    expect(formatted).toContain('sample:    0 canonical attempt(s) from 0 event(s)');
+    expect(formatted).toContain('output:    withheld (insufficient-sample)');
+    expect(formatted).toContain('diagnosis: insufficient-sample');
+    expect(formatted).toContain('diagnostic hint (non-authoritative): collect-attempts');
+    expect(formatted).not.toContain('reported proposal-created 0/0');
+  });
+
+  it('withholds dispatch and backend rates when canonical denominators are zero', async () => {
+    const status = await buildFleetStatus(baseConfig());
+    const outcomes = {
+      proposalCreated: 0,
+      emptyDiff: 0,
+      gateBlocked: 0,
+      engineFailed: 0,
+      cancelled: 1,
+      sandboxFailed: 0,
+      proposalCaptureError: 0,
+      proposalDisabled: 0,
+      unknown: 0,
+    };
+    const formatted = formatFleetStatus({
+      ...status,
+      dispatchProductionSource: {
+        sourceState: 'healthy',
+        sourcePresent: true,
+        complete: true,
+        stopReasons: [],
+        filesRead: 1,
+        datedFilesRead: 1,
+        looseFilesRead: 0,
+        bytesRead: 100,
+        rowsScanned: 1,
+        invalidRows: 0,
+        unreadableFiles: 0,
+      },
+      dispatchProduction: {
+        windowHours: 24,
+        events: 1,
+        attempts: 0,
+        proposalsCreated: 0,
+        noProposal: 0,
+        cancelledEvents: 1,
+        spentUsd: 0,
+        outcomes,
+        topReasons: [],
+        byBackend: [{
+          key: 'local-coder',
+          backend: 'local-coder',
+          attempts: 0,
+          proposalsCreated: 0,
+          noProposal: 0,
+          spentUsd: 0,
+          outcomes,
+          topReasons: [],
+        }],
+        bySource: [],
+        byRepo: [],
+        byBackendModel: [],
+        byBackendSource: [],
+      },
+    });
+
+    expect(formatted).toContain('reported proposal-created 0/0 (—)');
+    expect(formatted).toContain('local-coder 0/0 —');
+    expect(formatted).not.toContain('0/0 0%');
+  });
+
   let tmpHome: string;
   let prevHome: string | undefined;
   let prevUserProfile: string | undefined;
@@ -2317,12 +2494,13 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       'local-coder',
       1,
     );
-    expect(recordDiagnosticEmpty(
+    const secondDiagnostic = recordDiagnosticEmpty(
       quarantined,
       'attempt-32345678-1234-4123-8123-123456789abc',
       'kimi',
       2,
-    )).toMatchObject({ disposition: 'quarantined' });
+    );
+    expect(secondDiagnostic).toMatchObject({ disposition: 'quarantined' });
     writeBacklogSnapshot(tmpHome, repo, [quarantined]);
     writeRunningDaemon(tmpHome);
 
@@ -2504,7 +2682,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     }));
   });
 
-  it('summarizes proposal starvation when the daemon is running with backlog but no proposals', async () => {
+  it('summarizes proposal starvation without letting daemon ticks steer next actions', async () => {
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo');
     mkdirSync(repo, { recursive: true });
@@ -2630,15 +2808,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
     expect(s.autonomyEffectiveness?.summary).toContain('2 recent dispatch(es) produced no proposal');
     expect(s.autonomyEffectiveness?.summary).toContain('top reason: gate-blocked: completeness gate blocked proposal: typecheck failed');
-    expect(s.nextActions).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          id: 'inspect-proposal-production',
-          label: 'Inspect proposal production',
-          detail: expect.stringContaining('typecheck failed'),
-        }),
-      ]),
-    );
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-proposal-production');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-dispatch-skips');
+    expect(s.missionBrief?.action?.id).not.toBe('inspect-proposal-production');
   });
 
   it('keeps proposal-disabled attempts out of operator production diagnosis', async () => {
@@ -2764,9 +2936,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.contextEfficiency?.signals.suppressedNoProposalDispatches).toBe(3);
     expect(s.contextEfficiency?.risks.map((risk) => risk.id)).not.toContain('proposal-yield-low');
     expect(s.contextEfficiency?.recommendations.join('\n')).not.toContain('Reslice low-yield backlog items');
-    const inspectAction = s.nextActions?.find((action) => action.id === 'inspect-proposal-production');
-    expect(inspectAction?.detail).toContain('agent returned no diff');
-    expect(inspectAction?.detail).not.toContain('proposal-disabled');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-proposal-production');
     const dispatchYieldAction = s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield');
     expect(dispatchYieldAction?.detail ?? '').not.toContain('proposal-disabled');
   });
@@ -2904,9 +3074,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.autonomyEffectiveness?.summary).toContain('3 recent dispatch(es) produced no proposal');
     expect(s.autonomyEffectiveness?.summary).toContain('empty-diff: engine "local-coder" completed without file changes');
     expect(s.autonomyEffectiveness?.summary).not.toContain('proposal-disabled');
-    const productionAction = s.nextActions?.find((action) => action.id === 'inspect-proposal-production');
-    expect(productionAction?.detail).toContain('empty-diff: engine "local-coder" completed without file changes');
-    expect(productionAction?.detail).not.toContain('proposal-disabled');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-proposal-production');
   });
 
   it('keeps skipped not-attempted rows out of no-proposal diagnostics', async () => {
@@ -2983,16 +3151,15 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.autonomyEffectiveness?.summary).toContain('3 recent dispatch(es) produced no proposal');
     expect(s.autonomyEffectiveness?.summary).toContain('empty-diff: engine "local-coder" completed without file changes');
 
-    const skipAction = s.nextActions?.find((action) => action.id === 'inspect-dispatch-skips');
-    expect(skipAction?.detail).toContain('6 selected item(s) were not attempted');
-    expect(skipAction?.detail).toContain('top skip: not-attempted');
-    const productionAction = s.nextActions?.find((action) => action.id === 'inspect-proposal-production');
-    expect(productionAction?.detail).toContain('empty-diff: engine "local-coder" completed without file changes');
-    expect(productionAction?.detail).not.toContain('not-attempted');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-dispatch-skips');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-proposal-production');
   });
 
   it('reports durable dispatch-production yield from the append-only ledger', async () => {
     const now = settledLearningTimestamp();
+    const attemptA = 'attempt-00000000-0000-4000-8000-00000000000a';
+    const attemptB = 'attempt-00000000-0000-4000-8000-00000000000b';
+    const attemptC = 'attempt-00000000-0000-4000-8000-00000000000c';
     const baseEvent: DispatchProductionEvent = {
       schemaVersion: 1,
       ts: now,
@@ -3000,21 +3167,37 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       itemId: 'item-a',
       source: 'todo',
       repo: '/repo/a',
-      title: 'Improve proposal yield',
+      title: 'PROMPT_CANARY_M49',
       backend: 'local-coder',
       tier: 'mid',
       model: 'qwen',
-      assignedBy: 'daemon',
-      routeReason: 'local-mid bulk',
+      assignedBy: 'ENV_CANARY_M49',
+      routeReason: 'STDOUT_CANARY_M49',
+      routeSnapshot: {
+        backend: 'local-coder',
+        tier: 'mid',
+        reason: 'FILE_CONTENT_CANARY_M49',
+      },
       outcome: 'empty-diff',
       proposalCreated: false,
+      attemptId: attemptA,
+      runId: 'run-item-a',
+      trajectoryId: `run:${attemptA}`,
       spentUsd: 0.001,
-      reason: 'agent returned no diff',
+      reason: 'DIFF_CANARY_M49',
       basis: 'run-proposal-outcome',
     };
     recordDispatchProduction([
       baseEvent,
-      { ...baseEvent, itemId: 'item-b', outcome: 'gate-blocked', reason: 'completeness gate blocked proposal' },
+      {
+        ...baseEvent,
+        itemId: 'item-b',
+        attemptId: attemptB,
+        runId: 'run-item-b',
+        trajectoryId: `run:${attemptB}`,
+        outcome: 'gate-blocked',
+        reason: 'completeness gate blocked proposal',
+      },
       {
         ...baseEvent,
         itemId: 'repo:proposal-repair-capture:abcdef123456',
@@ -3023,9 +3206,19 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         backend: 'codex',
         tier: 'frontier',
         model: 'gpt-5.5',
+        routeSnapshot: {
+          backend: 'codex',
+          tier: 'frontier',
+          model: 'gpt-5.5',
+          assignedBy: 'ENV_CANARY_M49',
+          reason: 'FILE_CONTENT_CANARY_M49',
+        },
         outcome: 'proposal-created',
         proposalCreated: true,
         proposalId: 'prop-c',
+        attemptId: attemptC,
+        runId: 'run-item-c',
+        trajectoryId: `run:${attemptC}`,
         reason: 'proposal filed',
       },
     ]);
@@ -3064,6 +3257,20 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         diagnosticReslices: 0,
         proposalRepairs: 0,
       },
+    });
+    expect(s.proposalFunnel).toMatchObject({
+      state: 'observational',
+      source: { sourceState: 'healthy', complete: true },
+      sample: { requestedWindowHours: 24, observedEvents: 3, includedAttempts: 3 },
+      metrics: {
+        attempts: 3,
+        reportedProposalCreatedOutcomes: { count: 1, rate: 1 / 3 },
+        observedProposalReferences: { count: 1, rate: 1 / 3 },
+        gateBlocked: { count: 1, rate: 1 / 3 },
+        emptyAttempts: { count: 1, rate: 1 / 3 },
+      },
+      primaryBlocker: 'gate-blocking',
+      diagnosticHint: 'inspect-verification-gates',
     });
     expect(s.attemptCoverage?.production.generatedRepairAttempts).toMatchObject({
       attempts: 1,
@@ -3104,12 +3311,27 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const formatted = formatFleetStatus(s);
     expect(formatted).toContain('Dispatch yield:');
     expect(formatted).toContain('source:    healthy; files 1');
-    expect(formatted).toContain('proposals 1/3');
+    expect(formatted).toContain('reported proposal-created 1/3');
     expect(formatted).toContain('shape:     no-diff 1, gate/capture 1, repairs 1, policy-off 0');
     expect(formatted).toContain('repair yield: capture 1 attempt; 1/1 converted (100%)');
     expect(formatted).toContain('diagnosis: healthy · fleet 1/3 33% · keep routing');
     expect(formatted).toContain('local-coder 0/2 0%');
     expect(formatted).toContain('codex 1/1 100%');
+    expect(formatted).toContain('Proposal funnel:');
+    expect(formatted).toContain(
+      'reported proposal-created 1/3 (33%), proposal references 1/3 (33%)',
+    );
+    expect(formatted).toContain('diagnosis: gate-blocking');
+    expect(formatted).toContain(
+      'diagnostic hint (non-authoritative): inspect-verification-gates',
+    );
+    for (const canary of [
+      'PROMPT_CANARY_M49',
+      'ENV_CANARY_M49',
+      'STDOUT_CANARY_M49',
+      'DIFF_CANARY_M49',
+      'FILE_CONTENT_CANARY_M49',
+    ]) expect(formatted).not.toContain(canary);
   });
 
   it('withholds joined learning metrics when a settled source changes during snapshot construction', async () => {
@@ -3181,6 +3403,152 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       expect(formatFleetStatus(status)).toContain(
         'withheld (cross-source learning snapshot changed during read)',
       );
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+
+  it('withholds dispatch summary and funnel when a recent append changes only the raw second snapshot', async () => {
+    const now = settledLearningTimestamp();
+    const firstAttempt = 'attempt-00000000-0000-4000-8000-000000000011';
+    const appendedAttempt = 'attempt-00000000-0000-4000-8000-000000000012';
+    recordDispatchProduction({
+      schemaVersion: 1,
+      ts: now,
+      itemId: 'settled-dispatch',
+      source: 'goal',
+      repo: '/repo/a',
+      title: 'Settled dispatch',
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      routeReason: 'local route',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      attemptId: firstAttempt,
+      runId: 'run-settled',
+      trajectoryId: `run:${firstAttempt}`,
+      spentUsd: 0,
+      basis: 'run-proposal-outcome',
+    });
+    const inboxStore = await import('../src/core/inbox/store.js');
+    const proposalSnapshot = inboxStore.listProposalsDetailed();
+    let appended = false;
+    const readSpy = vi.spyOn(inboxStore, 'listProposalsDetailed')
+      .mockReturnValueOnce(proposalSnapshot)
+      .mockImplementation(() => {
+        if (!appended) {
+          appended = true;
+          recordDispatchProduction({
+            schemaVersion: 1,
+            ts: new Date().toISOString(),
+            itemId: 'recent-second-read-append',
+            source: 'goal',
+            repo: '/repo/a',
+            title: 'Recent second read append',
+            backend: 'local-coder',
+            tier: 'mid',
+            assignedBy: 'daemon',
+            routeReason: 'local route',
+            outcome: 'proposal-created',
+            proposalCreated: true,
+            proposalId: 'proposal-recent',
+            attemptId: appendedAttempt,
+            runId: 'run-recent',
+            trajectoryId: `run:${appendedAttempt}`,
+            spentUsd: 0,
+            basis: 'run-proposal-outcome',
+          });
+        }
+        return proposalSnapshot;
+      });
+    try {
+      const status = await buildFleetStatus(baseConfig());
+      expect(appended).toBe(true);
+      expect(status.dispatchProduction).toBeUndefined();
+      expect(status.dispatchYieldDiagnostics).toBeUndefined();
+      expect(status.dispatchProductionSource).toMatchObject({
+        sourceState: 'degraded',
+        complete: false,
+        rowsScanned: 2,
+      });
+      expect(status.proposalFunnel).toMatchObject({
+        state: 'withheld',
+        withheldReason: 'snapshot-unstable',
+        source: { sourceState: 'degraded', complete: false },
+        sample: { observedEvents: 1, includedAttempts: 1 },
+      });
+      expect(status.proposalFunnel?.metrics).toBeUndefined();
+      expect(status.learningMetrics).toMatchObject({
+        state: 'withheld',
+        reason: 'learning-snapshot-unstable',
+        sourceQuality: { sourceState: 'degraded', complete: false, rowsScanned: 2 },
+      });
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+
+  it('propagates a degraded second dispatch read into every invalidated projection', async () => {
+    const now = settledLearningTimestamp();
+    const attemptId = 'attempt-00000000-0000-4000-8000-000000000021';
+    recordDispatchProduction({
+      schemaVersion: 1,
+      ts: now,
+      itemId: 'degraded-second-read',
+      source: 'goal',
+      repo: '/repo/a',
+      title: 'Degraded second read',
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      routeReason: 'local route',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      attemptId,
+      runId: 'run-degraded-second-read',
+      trajectoryId: `run:${attemptId}`,
+      spentUsd: 0,
+      basis: 'run-proposal-outcome',
+    });
+    const inboxStore = await import('../src/core/inbox/store.js');
+    const proposalSnapshot = inboxStore.listProposalsDetailed();
+    let degraded = false;
+    const readSpy = vi.spyOn(inboxStore, 'listProposalsDetailed')
+      .mockReturnValueOnce(proposalSnapshot)
+      .mockImplementation(() => {
+        if (!degraded) {
+          degraded = true;
+          const path = join(
+            process.env.ASHLR_HOME!,
+            'dispatch-production',
+            `${now.slice(0, 10)}.jsonl`,
+          );
+          writeFileSync(path, `${readFileSync(path, 'utf8')}not-json\n`, 'utf8');
+        }
+        return proposalSnapshot;
+      });
+    try {
+      const status = await buildFleetStatus(baseConfig());
+      expect(degraded).toBe(true);
+      expect(status.dispatchProduction).toBeUndefined();
+      expect(status.dispatchProductionSource).toMatchObject({
+        sourceState: 'degraded',
+        complete: false,
+        invalidRows: 1,
+      });
+      expect(status.proposalFunnel).toMatchObject({
+        state: 'withheld',
+        withheldReason: 'snapshot-unstable',
+        source: { sourceState: 'degraded', complete: false },
+      });
+      expect(status.proposalFunnel?.metrics).toBeUndefined();
+      expect(status.learningMetrics).toMatchObject({
+        state: 'withheld',
+        reason: 'learning-snapshot-unstable',
+        sourceQuality: { sourceState: 'degraded', complete: false, invalidRows: 1 },
+        dispatchProduction: { state: 'withheld' },
+      });
     } finally {
       readSpy.mockRestore();
     }
@@ -3272,9 +3640,20 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.attemptCoverage).toBeUndefined();
     expect(s.trajectoryLearning).toBeUndefined();
     expect(s.dispatchYieldDiagnostics).toBeUndefined();
+    expect(s.proposalFunnel).toMatchObject({
+      state: 'withheld',
+      withheldReason: 'source-degraded',
+      source: { sourceState: 'degraded', complete: false },
+      sample: { observedEvents: 2, includedAttempts: 2 },
+      primaryBlocker: 'source-unavailable',
+      diagnosticHint: 'repair-telemetry-source',
+    });
+    expect(s.proposalFunnel?.metrics).toBeUndefined();
     const formatted = formatFleetStatus(s);
     expect(formatted).toContain('source:    degraded (partial)');
     expect(formatted).toContain('withheld because the bounded dispatch source is incomplete');
+    expect(formatted).toContain('Proposal funnel:');
+    expect(formatted).toContain('output:    withheld (source-degraded)');
     expect(formatted).toContain('withheld (dispatch denominator degraded; 4 invalid row(s))');
     expect(formatted).not.toContain('proposals 0/2');
     expect(JSON.stringify(s)).not.toContain('"diagnosticProposalRate":0');
@@ -3465,7 +3844,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     )).toMatchObject({ eligibility: 'not-applicable', evidenceRole: 'forensics' });
   });
 
-  it('marks complete Best-of-N evidence eligible only when candidate racing is enabled', async () => {
+  it('keeps complete Best-of-N evidence observational when candidate racing is enabled', async () => {
     const now = new Date().toISOString();
     recordBestOfN({
       ts: now,
@@ -3492,7 +3871,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(status.autonomousShipReadiness?.evidenceMatrix?.sources.find(
       (source) => source.id === 'best-of-n',
     )).toMatchObject({
-      category: 'evidence', evidenceRole: 'learning', eligibility: 'eligible', applicability: 'optional',
+      category: 'evidence', evidenceRole: 'learning', eligibility: 'observational', applicability: 'optional',
       status: 'healthy', evidenceQuality: { complete: true, rowsScanned: 1, invalidRows: 0 },
     });
   });
@@ -3699,6 +4078,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
 
   it('reports attempt coverage from joined metadata-only ledgers', async () => {
     const now = settledLearningTimestamp();
+    const attemptId = 'attempt-00000000-0000-4000-8000-000000000031';
+    const trajectoryId = `run:${attemptId}`;
     const repo = join(tmpHome, 'repo-attempts');
     const cfg = withFoundry({
       autoMerge: {
@@ -3738,8 +4119,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       outcome: 'proposal-created',
       proposalCreated: true,
       proposalId: proposal.id,
+      attemptId,
       runId: 'run-attempt-coverage',
-      trajectoryId: 'traj-attempt-coverage',
+      trajectoryId,
       routeSnapshot: {
         backend: 'codex',
         tier: 'frontier',
@@ -3776,7 +4158,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       source: 'goal',
       proposalId: proposal.id,
       runId: 'run-attempt-coverage',
-      trajectoryId: 'traj-attempt-coverage',
+      trajectoryId,
       backend: 'codex',
       tier: 'frontier',
       model: 'gpt-5.5',
@@ -3788,7 +4170,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       proposalId: proposal.id,
       workItemId: itemId,
       runId: 'run-attempt-coverage',
-      trajectoryId: 'traj-attempt-coverage',
+      trajectoryId,
       action: 'judged',
       verdict: 'ship',
       reason: 'metadata-only approval',
@@ -3812,7 +4194,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       reason: 'private observe-only selection',
       proposalId: proposal.id,
       runId: 'run-attempt-coverage',
-      trajectoryId: 'traj-attempt-coverage',
+      trajectoryId,
     });
     expect(readSkillUseEvents({ limit: 10 })).toHaveLength(1);
 
@@ -3836,8 +4218,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         currentRouterPolicyVersion: { count: 1, rate: 1 },
         learningEpoch: { count: 1, rate: 1 },
         currentLearningEpoch: { count: 1, rate: 1 },
-        labelAuthoritative: { count: 1, rate: 1 },
-        currentAuthoritativeLabel: { count: 1, rate: 1 },
+        labelAuthoritative: { count: 0, rate: 0 },
+        currentAuthoritativeLabel: { count: 0, rate: 0 },
       },
       causalWeak: {
         weak: false,
@@ -3875,8 +4257,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         currentRouterPolicyVersion: true,
         learningEpoch: true,
         currentLearningEpoch: true,
-        labelAuthoritative: true,
-        currentAuthoritativeLabel: true,
+        labelAuthoritative: false,
+        currentAuthoritativeLabel: false,
       },
     });
     expect(s.attemptCoverage?.recent[0]).not.toHaveProperty('repo');
@@ -3945,7 +4327,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatted).toContain('joins:     actions 1 (100%), worked 1 (100%), decisions 1 (100%), evidence 1 (100%)');
     expect(formatted).toContain('metadata:  trajectory 1 (100%), route 1 (100%), run 1 (100%)');
     expect(formatted).toContain('policy:    version 1 (100%), current 1 (100%), epoch 1 (100%), current epoch 1 (100%)');
-    expect(formatted).toContain('labels:    authoritative 1 (100%), current 1 (100%)');
+    expect(formatted).toContain('labels:    authoritative 0 (0%), current 0 (0%)');
     expect(formatted).toContain('Trajectory learning:');
     expect(formatted).toContain('Recent trajectory traces:');
     expect(formatted).toContain('trajectories: 1 in 24h');
@@ -3995,7 +4377,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatted).not.toContain('Recent trajectory traces: none');
   });
 
-  it('promotes weak causal attempt coverage into next actions', async () => {
+  it('keeps weak causal attempt coverage visible without steering next actions', async () => {
     const now = settledLearningTimestamp();
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo-causal');
@@ -4070,41 +4452,23 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     ]);
 
     const s = await buildFleetStatus(baseConfig());
-    const action = s.nextActions?.find((candidate) => candidate.id === 'inspect-attempt-causal-coverage');
-
     expect(s.attemptCoverage?.causalWeak).toMatchObject({
       weak: true,
       reasons: expect.arrayContaining([
         expect.objectContaining({ kind: 'routeSnapshot', count: 0, rate: 0 }),
-        expect.objectContaining({ kind: 'runEventSummary', count: 0, rate: 0 }),
       ]),
     });
     expect(s.attemptCoverage?.causalGapDiagnostics).toMatchObject({
-      blockedCurrentLabels: 0,
+      blockedCurrentLabels: 3,
       causes: expect.arrayContaining([
         expect.objectContaining({ cause: 'missing-route-snapshot', count: 3 }),
-        expect.objectContaining({ cause: 'missing-run-summary', count: 3 }),
       ]),
       byLearningSource: [expect.objectContaining({ key: 'daemon-dispatch', count: 3 })],
       byLabelBasis: [expect.objectContaining({ key: 'dispatch-outcome', count: 3 })],
     });
-    expect(action).toMatchObject({
-      priority: 'medium',
-      label: 'Inspect causal coverage',
-      detail: expect.stringContaining('top cause: missing-route-snapshot on 3 attempts'),
-      commands: expect.arrayContaining([
-        expect.objectContaining({
-          label: 'Evaluate attention',
-          argv: ['ashlr', 'eval', 'attention', '--json'],
-          safety: 'read-only',
-        }),
-      ]),
-    });
-    expect(s.nextActions?.[0]?.id).toBe('inspect-attempt-causal-coverage');
-    expect(s.missionBrief).toMatchObject({
-      directive: 'Inspect causal learning coverage',
-      action: { id: 'inspect-attempt-causal-coverage' },
-    });
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-attempt-causal-coverage');
+    expect(s.missionBrief?.action?.id).not.toBe('inspect-attempt-causal-coverage');
+    expect(s.missionBrief?.directive).not.toBe('Inspect causal learning coverage');
   });
 
   it('does not report healthy context efficiency when genome health is unavailable', () => {
@@ -4144,7 +4508,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     ]);
   });
 
-  it('promotes degraded context efficiency into next actions', async () => {
+  it('keeps degraded context efficiency visible without steering actions or persistent commands', async () => {
     const now = new Date().toISOString();
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo-a');
@@ -4179,35 +4543,14 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         expect.objectContaining({ id: 'reflection-missing', severity: 'low' }),
       ],
     });
-    expect(s.nextActions).toContainEqual(expect.objectContaining({
-      id: 'improve-context-efficiency',
-      priority: 'medium',
-      label: 'Improve context efficiency',
-      detail: expect.stringContaining('No hub genome memories'),
-    }));
-    const action = s.nextActions?.find((candidate) => candidate.id === 'improve-context-efficiency');
-    expect(action?.commands).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        label: 'Run reflection',
-        argv: ['ashlr', 'reflect', 'playbooks', '--persist'],
-        safety: 'control-plane',
-      }),
-      expect.objectContaining({
-        label: 'Evaluate attention',
-        argv: ['ashlr', 'eval', 'attention', '--json'],
-        safety: 'read-only',
-      }),
-    ]));
-    expect(action?.commands?.map((command) => command.label)).not.toContain('Drain reslice queue');
-    expect(s.missionBrief).toMatchObject({
-      directive: 'Run context reflection',
-      action: {
-        id: 'improve-context-efficiency',
-      },
-    });
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('improve-context-efficiency');
+    expect(s.nextActions?.flatMap((action) => action.commands ?? []).map((command) => command.argv.join(' ')))
+      .not.toContain('ashlr reflect playbooks --persist');
+    expect(s.missionBrief?.action?.id).not.toBe('improve-context-efficiency');
+    expect(s.missionBrief?.directive).not.toBe('Run context reflection');
   });
 
-  it('adds a daemon monitor command to context-efficiency action when generated reslices are queued', async () => {
+  it('keeps generated-reslice context diagnostics display-only', async () => {
     const now = new Date().toISOString();
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo-a');
@@ -4256,23 +4599,16 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
 
     const s = await buildFleetStatus(baseConfig());
-    const action = s.nextActions?.find((candidate) => candidate.id === 'improve-context-efficiency');
-
     expect(s.queue.generatedWork).toMatchObject({
       diagnosticReslices: 1,
       proposalRepair: 1,
     });
-    expect(action?.commands).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        label: 'Inspect daemon status',
-        argv: ['ashlr', 'daemon', 'status'],
-        safety: 'read-only',
-      }),
-    ]));
-    expect(action?.commands?.map((command) => command.label)).not.toContain('Drain reslice queue');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('improve-context-efficiency');
+    expect(s.nextActions?.flatMap((action) => action.commands ?? []).map((command) => command.argv.join(' ')))
+      .not.toContain('ashlr reflect playbooks --persist');
   });
 
-  it('uses the reflection mission directive when low yield is the primary action', async () => {
+  it('keeps low-yield tick counters out of mission selection', async () => {
     const now = new Date().toISOString();
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo-a');
@@ -4349,16 +4685,152 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     ], now);
 
     const s = await buildFleetStatus(baseConfig());
-    const action = s.nextActions?.find((candidate) => candidate.id === 'improve-context-efficiency');
+    expect(s.contextEfficiency?.risks.map((risk) => risk.id)).toContain('proposal-yield-low');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('improve-context-efficiency');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-proposal-production');
+    expect(s.nextActions?.flatMap((action) => action.commands ?? []).map((command) => command.argv.join(' ')))
+      .not.toContain('ashlr reflect playbooks --persist');
+    expect(s.missionBrief?.action?.id).not.toBe('improve-context-efficiency');
+    expect(s.missionBrief?.directive).not.toBe('Run context reflection');
+  });
 
-    expect(action?.commands?.map((command) => command.label)).not.toContain('Drain reslice queue');
-    expect(action?.commands?.map((command) => command.label)).toContain('Inspect daemon status');
-    expect(s.missionBrief).toMatchObject({
-      directive: 'Run context reflection',
-      action: {
-        id: 'improve-context-efficiency',
-      },
+  it('keeps malformed owner-writable agent actions observational and outside action authority', async () => {
+    const now = new Date().toISOString();
+    writeRunningDaemon(tmpHome, [], now);
+    const baseline = await buildFleetStatus(baseConfig());
+
+    const dir = agentActionsDir();
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(dir, `${now.slice(0, 10)}.jsonl`), 'not-json\n', { mode: 0o600 });
+
+    const malformed = await buildFleetStatus(baseConfig());
+    const source = malformed.autonomousShipReadiness?.evidenceMatrix?.sources
+      .find((candidate) => candidate.id === 'agent-actions');
+
+    expect(malformed.workspace?.sourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
     });
+    expect(malformed.contextEfficiency).toBeDefined();
+    expect(source).toMatchObject({
+      evidenceRole: 'learning',
+      eligibility: 'observational',
+      status: 'degraded',
+      sourceQuality: { badge: 'degraded-source' },
+    });
+    expect(actionAuthorityProjection(malformed)).toEqual(actionAuthorityProjection(baseline));
+  });
+
+  it('keeps malformed owner-writable dispatch production observational and outside action authority', async () => {
+    const now = new Date().toISOString();
+    writeRunningDaemon(tmpHome, [], now);
+    const baseline = await buildFleetStatus(baseConfig());
+
+    const dir = join(process.env.ASHLR_HOME!, 'dispatch-production');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(dir, `${now.slice(0, 10)}.jsonl`), 'not-json\n', { mode: 0o600 });
+
+    const malformed = await buildFleetStatus(baseConfig());
+    const source = malformed.autonomousShipReadiness?.evidenceMatrix?.sources
+      .find((candidate) => candidate.id === 'dispatch-production');
+
+    expect(malformed.dispatchProductionSource).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
+    });
+    expect(malformed.dispatchProduction).toBeUndefined();
+    expect(malformed.learningMetrics).toMatchObject({
+      state: 'withheld',
+      reason: 'dispatch-source-degraded',
+    });
+    expect(malformed.proposalFunnel).toMatchObject({
+      state: 'withheld',
+      diagnosticHint: 'repair-telemetry-source',
+    });
+    expect(source).toMatchObject({
+      evidenceRole: 'analytics',
+      eligibility: 'observational',
+      status: 'degraded',
+      sourceQuality: { badge: 'degraded-source' },
+    });
+    expect(actionAuthorityProjection(malformed)).toEqual(actionAuthorityProjection(baseline));
+  });
+
+  it('keeps malformed owner-writable judge traces observational across operational authority', async () => {
+    const now = new Date().toISOString();
+    const repo = join(tmpHome, 'repo-judge-observation');
+    const item = makeBacklogItem(repo, 'repo:goal:judge-observation', 'Judge observation', 8);
+    const cfg = withFoundry({
+      allowedBackends: ['builtin'],
+      intelligence: { anomalyK: 4, minFrontierSuccessRate: 0.5 },
+    });
+    writeRunningDaemon(tmpHome, [], now);
+    writeBacklogSnapshot(tmpHome, repo, [item], now);
+    recordOutcome(item.id, 'empty', now);
+
+    const baseline = await buildFleetStatus(cfg);
+    const baselineAuthority = await operationalAuthorityProjection(baseline, cfg, item);
+
+    const dir = join(process.env.ASHLR_HOME!, 'judge-traces');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(dir, `${now.slice(0, 10)}.jsonl`), 'not-json\n', { mode: 0o600 });
+
+    const malformed = await buildFleetStatus(cfg);
+    const source = malformed.autonomousShipReadiness?.evidenceMatrix?.sources
+      .find((candidate) => candidate.id === 'judge-traces');
+
+    expect(malformed.judgeTraceSource).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
+    });
+    expect(source).toMatchObject({
+      evidenceRole: 'learning',
+      eligibility: 'observational',
+      status: 'degraded',
+      sourceQuality: { badge: 'degraded-source' },
+    });
+    expect(await operationalAuthorityProjection(malformed, cfg, item)).toEqual(baselineAuthority);
+  });
+
+  it('keeps malformed enabled Best-of-N telemetry observational across operational authority', async () => {
+    const now = new Date().toISOString();
+    const repo = join(tmpHome, 'repo-best-of-n-observation');
+    const item = makeBacklogItem(repo, 'repo:goal:best-of-n-observation', 'Best-of-N observation', 8);
+    const cfg = withFoundry({
+      allowedBackends: ['builtin'],
+      bestOfN: 2,
+      intelligence: { anomalyK: 4, minFrontierSuccessRate: 0.5 },
+    });
+    writeRunningDaemon(tmpHome, [], now);
+    writeBacklogSnapshot(tmpHome, repo, [item], now);
+    recordOutcome(item.id, 'empty', now);
+
+    const baseline = await buildFleetStatus(cfg);
+    const baselineAuthority = await operationalAuthorityProjection(baseline, cfg, item);
+
+    const dir = join(process.env.ASHLR_HOME!, 'best-of-n');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(dir, `${now.slice(0, 10)}.jsonl`), 'not-json\n', { mode: 0o600 });
+
+    const malformed = await buildFleetStatus(cfg);
+    const source = malformed.autonomousShipReadiness?.evidenceMatrix?.sources
+      .find((candidate) => candidate.id === 'best-of-n');
+
+    expect(malformed.bestOfNSource).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
+    });
+    expect(source).toMatchObject({
+      evidenceRole: 'learning',
+      eligibility: 'observational',
+      status: 'degraded',
+      sourceQuality: { badge: 'degraded-source' },
+    });
+    expect(await operationalAuthorityProjection(malformed, cfg, item)).toEqual(baselineAuthority);
   });
 
   it('promotes poor durable dispatch yield into next actions', async () => {
@@ -4456,64 +4928,35 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         verdict: 'actionable',
         action: 'route-same-tier-alternative',
         sameTierOnly: true,
-        topReason: 'agent returned no diff',
+        topReason: 'empty-diff',
       },
     });
     expect(s.dispatchYieldDiagnostics?.recommendation).toContain('same-tier alternatives only');
     expect(s.dispatchYieldDiagnostics?.recommendation).toContain('avoid tier escalation');
-    expect(s.nextActions).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          id: 'inspect-dispatch-yield',
-          priority: 'medium',
-          label: 'Inspect dispatch yield',
-          detail: expect.stringContaining('nim/goal proposal yield 0/3 (0%)'),
-          target: 'nim',
-        }),
-      ]),
-    );
-    expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.detail)
-      .toContain('top reason: agent returned no diff');
-    expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.detail)
-      .toContain('shape: no-diff 1, gate/capture 1, repairs 0, policy-off 0');
-    expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.detail)
-      .toContain('sample-gated action: same-tier reroute');
-    expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.commands)
-      .toEqual(expect.arrayContaining([
-        expect.objectContaining({
-          label: 'Inspect fleet status',
-          argv: ['ashlr', 'fleet', 'status', '--json'],
-          safety: 'read-only',
-        }),
-      ]));
     const actionIds = s.nextActions?.map((action) => action.id) ?? [];
-    expect(actionIds[0]).toBe('inspect-dispatch-yield');
-    expect(actionIds.indexOf('inspect-dispatch-yield')).toBeLessThan(actionIds.indexOf('build-backlog'));
+    expect(actionIds).not.toContain('inspect-dispatch-yield');
+    expect(actionIds[0]).toBe('build-backlog');
     expect(s.autonomousShipReadiness).toMatchObject({
       verdict: 'degraded',
       topBlocker: {
-        id: 'dispatch-yield-actionable',
+        id: 'proposal-production-needed',
         source: 'queue',
-        detail: expect.stringContaining('nim/goal proposal yield 0/3 (0%)'),
       },
       primaryAction: {
-        id: 'inspect-dispatch-yield',
+        id: 'build-backlog',
       },
     });
     expect(s.missionBrief).toMatchObject({
-      directive: 'Recover dispatch yield',
       blocker: {
-        id: 'dispatch-yield-actionable',
+        id: 'proposal-production-needed',
       },
       action: {
-        id: 'inspect-dispatch-yield',
+        id: 'build-backlog',
       },
     });
 
     const formatted = formatFleetStatus(s);
-    expect(formatted).toContain('[medium] Inspect dispatch yield [nim]');
-    expect(formatted).toContain('cmd: Inspect fleet status: ashlr fleet status --json (read-only)');
-    expect(formatted).toContain('nim/goal proposal yield 0/3 (0%)');
+    expect(formatted).not.toContain('[medium] Inspect dispatch yield [nim]');
     expect(formatted).toContain('diagnosis: actionable · nim/goal 0/3 0% · same-tier reroute');
     expect(formatted).toContain('shape:     no-diff 1, gate/capture 1, repairs 0, policy-off 0');
   });
@@ -4593,8 +5036,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.dispatchYieldDiagnostics?.recommendation)
       .toContain('no open installed same-tier alternative is available');
     const action = s.nextActions?.find((candidate) => candidate.id === 'inspect-dispatch-yield');
-    expect(action?.detail).toContain('sample-gated action: tighten context/reslice');
-    expect(action?.detail).toContain('action reason: no open installed same-tier alternative is available');
+    expect(action).toBeUndefined();
     expect(formatFleetStatus(s)).toContain('diagnosis: actionable · nim/goal 0/3 0% · tighten context/reslice');
   });
 
@@ -4674,49 +5116,23 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         source: 'self',
       },
     });
-    expect(actionIds[0]).toBe('process-capture-repairs');
-    expect(actionIds).toContain('inspect-dispatch-yield');
-    expect(repairAction).toMatchObject({
-      priority: 'high',
-      label: 'Monitor capture repairs',
-      detail: expect.stringContaining('1 capture repair item(s) are eligible'),
-      target: repo,
-      commands: [
-        expect.objectContaining({
-          label: 'Inspect fleet status',
-          argv: ['ashlr', 'fleet', 'status', '--json'],
-          safety: 'read-only',
-        }),
-        expect.objectContaining({
-          label: 'Inspect daemon status',
-          argv: ['ashlr', 'daemon', 'status'],
-          safety: 'read-only',
-        }),
-      ],
-    });
-    expect(repairAction?.detail).toContain('sample-gated action: tighten context/reslice');
-    expect(repairAction?.detail)
-      .toContain('repair recovery: generated repairs 1/1 converted (100%; capture 1)');
-    expect(repairAction?.detail).toContain('queued repair coverage: 1 capture repair queued');
-    expect(repairAction?.detail).toContain('First: Dispatch capture repair: complete the failed proposal capture.');
-    expect(yieldAction?.detail).toContain('queued repair coverage: 1 capture repair queued');
-    expect(yieldAction?.detail)
-      .toContain('repair recovery: generated repairs 1/1 converted (100%; capture 1)');
+    expect(actionIds[0]).toBe('build-backlog');
+    expect(actionIds).not.toContain('process-capture-repairs');
+    expect(actionIds).not.toContain('inspect-dispatch-yield');
+    expect(repairAction).toBeUndefined();
+    expect(yieldAction).toBeUndefined();
     expect(s.autonomousShipReadiness).toMatchObject({
       primaryAction: {
-        id: 'process-capture-repairs',
+        id: 'build-backlog',
       },
     });
     expect(s.missionBrief).toMatchObject({
-      directive: 'Monitor capture repairs',
       action: {
-        id: 'process-capture-repairs',
+        id: 'build-backlog',
       },
     });
     const formatted = formatFleetStatus(s);
-    expect(formatted).toContain('[high] Monitor capture repairs');
-    expect(formatted).toContain('cmd: Inspect fleet status: ashlr fleet status --json (read-only)');
-    expect(repairAction?.commands?.map((command) => command.safety)).toEqual(['read-only', 'read-only']);
+    expect(formatted).not.toContain('[high] Monitor capture repairs');
   });
 
   it('treats healthy generated repair conversion as active recovery', async () => {
@@ -4793,16 +5209,16 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       },
     });
     expect(s.autonomousShipReadiness?.topBlocker).toMatchObject({
-      id: 'generated-repair-recovery-active',
-      severity: 'low',
-      detail: expect.stringContaining('generated repairs 4/5 converted (80%; capture 5)'),
+      id: 'proposal-production-needed',
+      severity: 'medium',
     });
     expect(s.autonomousShipReadiness?.topBlocker?.id).not.toBe('dispatch-yield-actionable');
-    expect(actionIds[0]).toBe('process-capture-repairs');
+    expect(actionIds[0]).toBe('build-backlog');
+    expect(actionIds).not.toContain('process-capture-repairs');
     expect(actionIds).not.toContain('inspect-dispatch-yield');
     expect(s.missionBrief).toMatchObject({
-      blocker: { id: 'generated-repair-recovery-active' },
-      action: { id: 'process-capture-repairs' },
+      blocker: { id: 'proposal-production-needed' },
+      action: { id: 'build-backlog' },
     });
   });
 
@@ -4863,10 +5279,11 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       title: fresh.title,
     });
     expect(actionIds).not.toContain('process-capture-repairs');
-    expect(actionIds[0]).toBe('inspect-dispatch-yield');
+    expect(actionIds).not.toContain('inspect-dispatch-yield');
+    expect(actionIds[0]).toBe('build-backlog');
   });
 
-  it('shortens cooldown for trusted empty generated repairs when recovery is healthy', async () => {
+  it('keeps full cooldown for trusted empty generated repairs despite healthy observations', async () => {
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo');
     const now = new Date().toISOString();
@@ -4913,13 +5330,13 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         source: 'self',
       },
     });
-    expect(s.queue.eligibleBacklogItems).toBe(2);
-    expect(s.queue.cooldownItems).toBe(0);
+    expect(s.queue.eligibleBacklogItems).toBe(1);
+    expect(s.queue.cooldownItems).toBe(1);
     expect(s.queue.next?.[0]).toMatchObject({
-      id: repair.id,
-      title: repair.title,
+      id: fresh.id,
+      title: fresh.title,
     });
-    expect(s.nextActions?.map((action) => action.id)).toContain('drain-diagnostic-reslices');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('drain-diagnostic-reslices');
   });
 
   it('projects the same five-minute dispatch-blocked repair cooldown used by the daemon', async () => {
@@ -5027,42 +5444,23 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         diagnosticAttempts: 3,
       },
     });
-    expect(actionIds[0]).toBe('drain-diagnostic-reslices');
-    expect(actionIds).toContain('inspect-dispatch-yield');
-    expect(drainAction).toMatchObject({
-      priority: 'high',
-      label: 'Monitor diagnostic auto-drain',
-      detail: expect.stringContaining('1 diagnostic no-diff reslice item(s) are eligible'),
-      commands: [
-        expect.objectContaining({
-          label: 'Inspect fleet status',
-          argv: ['ashlr', 'fleet', 'status', '--json'],
-          safety: 'read-only',
-        }),
-        expect.objectContaining({
-          label: 'Inspect daemon status',
-          argv: ['ashlr', 'daemon', 'status'],
-          safety: 'read-only',
-        }),
-      ],
-    });
-    expect(drainAction?.detail).toContain('sample-gated action: tighten context/reslice');
-    expect(drainAction?.detail).toContain('queued repair coverage: 1 no-diff reslice queued');
-    expect(drainAction?.detail).toContain('First: Reslice no-diff dispatch for repo item repo:goal:stalled.');
+    expect(actionIds[0]).toBe('build-backlog');
+    expect(actionIds).not.toContain('drain-diagnostic-reslices');
+    expect(actionIds).not.toContain('inspect-dispatch-yield');
+    expect(drainAction).toBeUndefined();
     expect(s.autonomousShipReadiness).toMatchObject({
       primaryAction: {
-        id: 'drain-diagnostic-reslices',
+        id: 'build-backlog',
       },
     });
     expect(s.missionBrief).toMatchObject({
-      directive: 'Monitor diagnostic auto-drain',
       action: {
-        id: 'drain-diagnostic-reslices',
+        id: 'build-backlog',
       },
     });
     const formatted = formatFleetStatus(s);
-    expect(formatted).toContain('[high] Monitor diagnostic auto-drain');
-    expect(formatted).toContain('cmd: Inspect fleet status: ashlr fleet status --json (read-only)');
+    expect(formatted).toContain('diagnosis: actionable');
+    expect(formatted).not.toContain('[high] Monitor diagnostic auto-drain');
     expect(formatted).not.toContain('cmd: Drain diagnostic reslices: ashlr daemon start --once --drain diagnostic-reslices --limit 3');
 
     writeRunningDaemon(tmpHome, [
@@ -5096,7 +5494,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       proposalsCreated: 0,
       noProposalDispatches: 0,
     });
-    expect(stalledDrainAction?.detail).toContain('reslice-drain-stalled');
+    expect(stalledDrainAction).toBeUndefined();
   });
 
   it('does not promote diagnostic drain when queued reslices are cooling', async () => {
@@ -5151,7 +5549,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       title: fresh.title,
     });
     expect(actionIds).not.toContain('drain-diagnostic-reslices');
-    expect(actionIds[0]).toBe('inspect-dispatch-yield');
+    expect(actionIds).not.toContain('inspect-dispatch-yield');
+    expect(actionIds[0]).toBe('build-backlog');
   });
 
   it('keeps verification failure repair ahead of diagnostic drain while merge gate is blocked', async () => {
@@ -5216,7 +5615,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       blocked: 1,
     });
     expect(actionIds[0]).toBe('repair-verification-failures');
-    expect(actionIds).toContain('drain-diagnostic-reslices');
+    expect(actionIds).not.toContain('drain-diagnostic-reslices');
     const failureAction = s.nextActions?.find((action) => action.id === 'repair-verification-failures');
     expect(failureAction).toMatchObject({
       label: 'Drain failed proposals',
@@ -5366,9 +5765,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
 
     const s = await buildFleetStatus(baseConfig());
 
-    expect(s.dispatchProduction?.topReasons[0]?.reason).toContain('proposal filing disabled');
+    expect(s.dispatchProduction?.topReasons[0]?.reason).toBe('proposal-disabled');
     expect(s.dispatchProduction?.diagnosticTopReasons?.[0]).toEqual({
-      reason: 'agent returned no diff',
+      reason: 'empty-diff',
       count: 3,
     });
     expect(s.dispatchProduction?.byBackend[0]).toMatchObject({
@@ -5384,15 +5783,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       },
     });
     const action = s.nextActions?.find((candidate) => candidate.id === 'inspect-dispatch-yield');
-    expect(action).toMatchObject({
-      target: 'local-coder',
-      detail: expect.stringContaining('local-coder/goal proposal yield 0/3 (0%)'),
-    });
-    expect(action?.detail).toContain('top reason: agent returned no diff');
-    expect(action?.detail).toContain('shape: no-diff 3, gate/capture 0, repairs 0, policy-off 0');
-    expect(action?.detail).not.toContain('proposal filing disabled');
+    expect(action).toBeUndefined();
     const formatted = formatFleetStatus(s);
-    expect(formatted).toContain('reasons:   3x agent returned no diff');
+    expect(formatted).toContain('reasons:   3x empty-diff');
     expect(formatted).not.toContain('reasons:   16x proposal filing disabled');
   });
 
@@ -5515,7 +5908,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const s = await buildFleetStatus(baseConfig());
 
     expect(s.dispatchProduction).toMatchObject({
-      attempts: 3,
+      attempts: 2,
       outcomes: { cancelled: 1 },
     });
     expect(s.dispatchYieldDiagnostics).toMatchObject({
@@ -5610,7 +6003,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       },
       diagnosticTopReasons: [
         {
-          reason: 'capture-missing: required proposal dispatch ended before final capture',
+          reason: 'proposal-capture-missing',
           count: 3,
         },
       ],
@@ -5629,10 +6022,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         verdict: 'actionable',
       },
     });
-    expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.detail)
-      .toContain('top reason: capture-missing: required proposal dispatch ended before final capture');
-    expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.detail)
-      .toContain('shape: no-diff 0, gate/capture 3, repairs 0, policy-off 0');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-dispatch-yield');
     expect(s.attemptCoverage?.production).toMatchObject({
       attempts: 3,
       proposalCreated: 0,
@@ -6295,6 +6685,11 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       topBlocker: { id: 'signed-evidence-degraded', source: 'autonomy-packs' },
       primaryAction: { id: 'inspect-signed-evidence', priority: 'high' },
     });
+    expect(status.nextActions).toContainEqual(expect.objectContaining({
+      id: 'inspect-signed-evidence',
+      priority: 'high',
+    }));
+    expect(status.missionBrief?.action).toMatchObject({ id: 'inspect-signed-evidence' });
     expect(status.autonomousShipReadiness?.primaryAction?.commands?.[0]?.argv)
       .toEqual(['ashlr', 'fleet', 'evidence', 'doctor', 'autonomy-packs', '--json']);
   });
@@ -6510,9 +6905,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       state: 'cold-start',
       summary: {
         eligible: 1,
-        'cold-start': 4,
+        'cold-start': 1,
         withheld: 0,
-        observational: 1,
+        observational: 4,
         'not-applicable': 2,
       },
     });
@@ -6740,6 +7135,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       ],
     });
     expect(action?.commands?.every((command) => command.endpointPath === undefined)).toBe(true);
+    expect(status.nextActions).toContainEqual(expect.objectContaining({ id: 'inspect-learning-evidence' }));
     expect(status.autonomousShipReadiness?.primaryAction).not.toMatchObject({ id: 'drain-ready-auto-merges' });
     expect(status.nextActions?.map((candidate) => candidate.id)).not.toContain('drain-ready-auto-merges');
   });
@@ -8869,7 +9265,7 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('2x agent returned no diff');
     expect(out).toContain('recent:    builtin a Ship autonomy debugger (agent returned no diff)');
     expect(out).toContain('Dispatch yield:');
-    expect(out).toContain('output:    proposals 1/3 (33%), no-proposal 2');
+    expect(out).toContain('output:    reported proposal-created 1/3 (33%), no-proposal 2');
     expect(out).toContain('backends:  local-coder 0/2 0%; codex 1/1 100%');
     expect(out).toContain('2 auto-merge(s)');
     expect(out).toContain('Mission brief:');
