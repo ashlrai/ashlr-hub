@@ -18,6 +18,7 @@ import type { AshlrConfig, DecisionEntry, Proposal } from '../src/core/types.js'
 
 const DIFF = [
   'diff --git a/docs/review.md b/docs/review.md',
+  'index 1111111..2222222 100644',
   '--- a/docs/review.md',
   '+++ b/docs/review.md',
   '@@ -1 +1 @@',

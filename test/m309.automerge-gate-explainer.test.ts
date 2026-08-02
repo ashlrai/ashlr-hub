@@ -18,6 +18,7 @@ let tmpHome: string;
 
 const docDiff = [
   'diff --git a/README.md b/README.md',
+  'index 1111111..2222222 100644',
   '--- a/README.md',
   '+++ b/README.md',
   '@@ -1 +1 @@',
@@ -28,6 +29,7 @@ const docDiff = [
 
 const sourceDiff = [
   'diff --git a/src/widget.ts b/src/widget.ts',
+  'index 1111111..2222222 100644',
   '--- a/src/widget.ts',
   '+++ b/src/widget.ts',
   '@@ -1 +1 @@',
@@ -234,7 +236,7 @@ describe('M309 explainAutoMergeGate', () => {
     expect(r.reason).toMatch(/scope cap exceeded \(5 file\(s\), 5 line\(s\); max 4\/150\)/);
   });
 
-  it('explains five rename-only docs as over the default max-4 file cap', () => {
+  it('explains mode-ambiguous rename-only docs as ineligible for scope authority', () => {
     const r = explainAutoMergeGate(
       proposal({
         diff: multiRenameDiff(5),
@@ -244,9 +246,13 @@ describe('M309 explainAutoMergeGate', () => {
     );
 
     expect(r.mergeable).toBe(false);
-    expect(r.facts).toMatchObject({ risk: 'low', scopeFiles: 5, scopeLines: 0 });
-    expect(r.blockers.some((b) => b.code === 'scope-cap')).toBe(true);
-    expect(r.reason).toMatch(/scope cap exceeded \(5 file\(s\), 0 line\(s\); max 4\/150\)/);
+    expect(r.facts).toMatchObject({ risk: 'high' });
+    expect(r.facts.scopeFiles).toBeUndefined();
+    expect(r.facts.scopeLines).toBeUndefined();
+    expect(r.blockers).toContainEqual(expect.objectContaining({
+      code: 'scope-cap',
+      detail: expect.stringMatching(/malformed diff scope \(mode-ambiguous-file\)/),
+    }));
   });
 
   it('reports mergeable when available read-only evidence satisfies the gates', () => {

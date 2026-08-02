@@ -460,6 +460,8 @@ describe('M157 manager.ts signing path — attestation in recordDecision', () =>
   const LOCAL_ENGINE = 'qwen2.5:72b-instruct-q4_K_M';
   const TEST_DIFF = [
     'diff --git a/docs/manager.md b/docs/manager.md',
+    'new file mode 100644',
+    'index 0000000..1111111',
     '--- /dev/null',
     '+++ b/docs/manager.md',
     '@@ -0,0 +1 @@',
@@ -533,12 +535,14 @@ describe('M157 manager.ts signing path — attestation in recordDecision', () =>
   it('[M1b] frontier judge ship with wouldMerge=false → NO judgeAttestation', async () => {
     const mediumRiskDiff = [
       'diff --git a/src/a.ts b/src/a.ts',
+      'index 1111111..2222222 100644',
       '--- a/src/a.ts',
       '+++ b/src/a.ts',
       '@@ -1 +1 @@',
       '-old',
       '+new',
       'diff --git a/src/b.ts b/src/b.ts',
+      'index 3333333..4444444 100644',
       '--- a/src/b.ts',
       '+++ b/src/b.ts',
       '@@ -1 +1 @@',

@@ -52,6 +52,53 @@ function specialModeDiff(mode: '120000' | '160000', kind: 'new' | 'deleted' | 'm
   ].join('\n');
 }
 
+const gitGeneratedModeAmbiguousDiffs = {
+  symlinkRename: [
+    'diff --git a/link b/renamed-link',
+    'similarity index 100%',
+    'rename from link',
+    'rename to renamed-link',
+  ].join('\n'),
+  symlinkCopy: [
+    'diff --git a/link b/copied-link',
+    'similarity index 100%',
+    'copy from link',
+    'copy to copied-link',
+  ].join('\n'),
+  gitlinkRename: [
+    'diff --git a/module b/renamed-module',
+    'similarity index 100%',
+    'rename from module',
+    'rename to renamed-module',
+  ].join('\n'),
+  gitlinkCopy: [
+    'diff --git a/module b/copied-module',
+    'similarity index 100%',
+    'copy from module',
+    'copy to copied-module',
+  ].join('\n'),
+  strippedSymlinkContent: [
+    'diff --git a/link b/link',
+    'index 094df80..c907aac',
+    '--- a/link',
+    '+++ b/link',
+    '@@ -1 +1 @@',
+    '-first-target',
+    '+second-target',
+    '',
+  ].join('\n'),
+  strippedGitlinkContent: [
+    'diff --git a/module b/module',
+    'index 1111111111111111111111111111111111111111..2222222222222222222222222222222222222222',
+    '--- a/module',
+    '+++ b/module',
+    '@@ -1 +1 @@',
+    '-Subproject commit 1111111111111111111111111111111111111111',
+    '+Subproject commit 2222222222222222222222222222222222222222',
+    '',
+  ].join('\n'),
+} as const;
+
 describe('M466 canonical auto-merge diff scope', () => {
   it('counts five deletion-only files against a four-file cap', () => {
     const result = measureAutoMergeDiffScope(
@@ -67,30 +114,31 @@ describe('M466 canonical auto-merge diff scope', () => {
     });
   });
 
-  it('counts a rename and deletion exactly once each while retaining all paths', () => {
-    const diff = [
-      'diff --git a/docs/before.md b/docs/after.md',
-      'similarity index 100%',
-      'rename from docs/before.md',
-      'rename to docs/after.md',
-      deletionDiff('docs/obsolete.md'),
-    ].join('\n');
+  it.each(Object.entries(gitGeneratedModeAmbiguousDiffs))(
+    'rejects Git-generated or stripped-mode %s patches',
+    (_label, diff) => {
+      expect(measureAutoMergeDiffScope(diff)).toEqual({
+        ok: false,
+        reason: 'mode-ambiguous-file',
+      });
+    },
+  );
 
-    const result = measureAutoMergeDiffScope(diff);
-
-    expect(result).toMatchObject({
-      ok: true,
-      files: 2,
-      changedLines: 1,
-      additions: 0,
-      deletions: 1,
-    });
-    expect(result.ok && result.touchedPaths).toEqual([
-      'docs/after.md',
-      'docs/before.md',
-      'docs/obsolete.md',
-    ]);
-  });
+  it.each(['100644', '100755'] as const)(
+    'retains ordinary content patches with explicit %s mode identity',
+    (mode) => {
+      expect(measureAutoMergeDiffScope([
+        'diff --git a/docs/a.md b/docs/a.md',
+        `index 1111111..2222222 ${mode}`,
+        '--- a/docs/a.md',
+        '+++ b/docs/a.md',
+        '@@ -1 +1 @@',
+        '-old',
+        '+new',
+        '',
+      ].join('\n'))).toMatchObject({ ok: true, files: 1, changedLines: 2 });
+    },
+  );
 
   it('counts empty add, empty delete, and mode-only modifications from Git metadata', () => {
     const result = measureAutoMergeDiffScope([
@@ -176,6 +224,7 @@ describe('M466 canonical auto-merge diff scope', () => {
   it('uses additions plus deletions as the sole changed-line definition', () => {
     const result = measureAutoMergeDiffScope([
       'diff --git a/docs/a.md b/docs/a.md',
+      'index 1111111..2222222 100644',
       '--- a/docs/a.md',
       '+++ b/docs/a.md',
       '@@ -1,2 +1,3 @@',
@@ -198,6 +247,7 @@ describe('M466 canonical auto-merge diff scope', () => {
   it('accepts canonical no-newline markers without counting them', () => {
     const result = measureAutoMergeDiffScope([
       'diff --git a/docs/a.md b/docs/a.md',
+      'index 1111111..2222222 100644',
       '--- a/docs/a.md',
       '+++ b/docs/a.md',
       '@@ -1 +1 @@',
@@ -240,7 +290,7 @@ describe('M466 canonical auto-merge diff scope', () => {
         '+new',
         '',
       ].join('\n'),
-      'file-header-mismatch',
+      'mode-ambiguous-file',
     ],
     [
       'reversed file headers',

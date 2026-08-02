@@ -176,6 +176,54 @@ function unsupportedModeDiff(mode: '120000' | '160000'): string {
   ].join('\n');
 }
 
+type ModeAmbiguousDiffKind =
+  | 'symlink-rename'
+  | 'symlink-copy'
+  | 'gitlink-rename'
+  | 'gitlink-copy'
+  | 'stripped-symlink-content'
+  | 'stripped-gitlink-content';
+
+function modeAmbiguousDiff(kind: ModeAmbiguousDiffKind): string {
+  const metadata = {
+    'symlink-rename': ['link', 'renamed-link', 'rename'],
+    'symlink-copy': ['link', 'copied-link', 'copy'],
+    'gitlink-rename': ['module', 'renamed-module', 'rename'],
+    'gitlink-copy': ['module', 'copied-module', 'copy'],
+  } as const;
+  if (kind in metadata) {
+    const [oldPath, newPath, operation] = metadata[kind as keyof typeof metadata];
+    return [
+      `diff --git a/${oldPath} b/${newPath}`,
+      'similarity index 100%',
+      `${operation} from ${oldPath}`,
+      `${operation} to ${newPath}`,
+    ].join('\n');
+  }
+  if (kind === 'stripped-symlink-content') {
+    return [
+      'diff --git a/link b/link',
+      'index 094df80..c907aac',
+      '--- a/link',
+      '+++ b/link',
+      '@@ -1 +1 @@',
+      '-first-target',
+      '+second-target',
+      '',
+    ].join('\n');
+  }
+  return [
+    'diff --git a/module b/module',
+    'index 1111111111111111111111111111111111111111..2222222222222222222222222222222222222222',
+    '--- a/module',
+    '+++ b/module',
+    '@@ -1 +1 @@',
+    '-Subproject commit 1111111111111111111111111111111111111111',
+    '+Subproject commit 2222222222222222222222222222222222222222',
+    '',
+  ].join('\n');
+}
+
 /** Diff that exceeds the default file scope cap (5 files). */
 function wideFileDiff(): string {
   const header = (n: number) =>
@@ -193,7 +241,7 @@ function wideFileDiff(): string {
 /** Diff that exceeds the default line scope cap (160 lines). */
 function longLineDiff(): string {
   const lines = Array.from({ length: 160 }, (_, i) => `+line${i}`).join('\n');
-  return `diff --git a/docs/big.md b/docs/big.md\n--- /dev/null\n+++ b/docs/big.md\n@@ -0,0 +1,160 @@\n${lines}\n`;
+  return `diff --git a/docs/big.md b/docs/big.md\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n+++ b/docs/big.md\n@@ -0,0 +1,160 @@\n${lines}\n`;
 }
 
 interface PatchOpts {
@@ -491,12 +539,14 @@ describe('M153 evaluateVerificationGate — pure, all 5 criteria', () => {
     // test's maxRisk='low'. Dangerous surfaces still classify high elsewhere.
     const riskyDiff = [
       'diff --git a/src/a.ts b/src/a.ts',
+      'index 1111111..2222222 100644',
       '--- a/src/a.ts',
       '+++ b/src/a.ts',
       '@@ -1 +1 @@',
       '-old',
       '+new',
       'diff --git a/src/b.ts b/src/b.ts',
+      'index 3333333..4444444 100644',
       '--- a/src/b.ts',
       '+++ b/src/b.ts',
       '@@ -1 +1 @@',
@@ -559,6 +609,24 @@ describe('M153 evaluateVerificationGate — pure, all 5 criteria', () => {
 
     expect(r.authorized).toBe(false);
     expect(r.reason).toMatch(/malformed diff scope \(unsupported-file-mode\)/);
+  });
+
+  it.each([
+    'symlink-rename',
+    'gitlink-copy',
+    'stripped-symlink-content',
+    'stripped-gitlink-content',
+  ] as const)('rejects mode-ambiguous %s from verification authority', (kind) => {
+    const diff = modeAmbiguousDiff(kind);
+    const p = goodProposal(`p-mode-ambiguous-${kind}`, diff);
+    const r = evaluateVerificationGate(
+      p,
+      verifyCfg({ maxRisk: 'high' }),
+      fullDecisions(p.id, diff),
+    );
+
+    expect(r.authorized).toBe(false);
+    expect(r.reason).toMatch(/malformed diff scope \(mode-ambiguous-file\)/);
   });
 
   it('[V10] EDV not confirmed (no verifyResult on p, no verifier entry) → refused (criterion 4)', () => {
@@ -742,6 +810,7 @@ describe('M342 evaluateEvidenceGate — pure, no judge evidence required', () =>
   it('[E3] build, CI, and manifest diffs require judge or human review', () => {
     const diff = [
       'diff --git a/package.json b/package.json',
+      'index 1111111..2222222 100644',
       '--- a/package.json',
       '+++ b/package.json',
       '@@ -1 +1 @@',
@@ -762,6 +831,19 @@ describe('M342 evaluateEvidenceGate — pure, no judge evidence required', () =>
 
     expect(r.authorized).toBe(false);
     expect(r.reason).toMatch(/malformed diff scope \(unsupported-file-mode\)/);
+  });
+
+  it.each([
+    'symlink-copy',
+    'gitlink-rename',
+    'stripped-symlink-content',
+    'stripped-gitlink-content',
+  ] as const)('rejects mode-ambiguous %s from evidence authority', (kind) => {
+    const p = evidenceProposal(`e-mode-ambiguous-${kind}`, modeAmbiguousDiff(kind));
+    const r = evaluateEvidenceGate(p, evidenceCfg({ maxRisk: 'high' }), []);
+
+    expect(r.authorized).toBe(false);
+    expect(r.reason).toMatch(/malformed diff scope \(mode-ambiguous-file\)/);
   });
 
   it('[E4] no-command verification evidence is refused', () => {
@@ -815,6 +897,7 @@ describe('M342 evaluateEvidenceGate — pure, no judge evidence required', () =>
 
     const weakeningDiff = [
       'diff --git a/test/h1.safety.test.ts b/test/h1.safety.test.ts',
+      'index 1111111..2222222 100644',
       '--- a/test/h1.safety.test.ts',
       '+++ b/test/h1.safety.test.ts',
       '@@ -1 +0,0 @@',
@@ -840,6 +923,7 @@ describe('M342 evaluateEvidenceGate — pure, no judge evidence required', () =>
 
     const equalCountDiff = [
       'diff --git a/test/m54.self-guard.test.ts b/test/m54.self-guard.test.ts',
+      'index 1111111..2222222 100644',
       '--- a/test/m54.self-guard.test.ts',
       '+++ b/test/m54.self-guard.test.ts',
       '@@ -1 +1 @@',
@@ -854,6 +938,7 @@ describe('M342 evaluateEvidenceGate — pure, no judge evidence required', () =>
 
     const skipDiff = [
       'diff --git a/test/m54.self-guard.test.ts b/test/m54.self-guard.test.ts',
+      'index 1111111..2222222 100644',
       '--- a/test/m54.self-guard.test.ts',
       '+++ b/test/m54.self-guard.test.ts',
       '@@ -1 +1 @@',
@@ -870,6 +955,7 @@ describe('M342 evaluateEvidenceGate — pure, no judge evidence required', () =>
   it('[E8b] weakened verification scripts are refused by evidence preflight', () => {
     const diff = [
       'diff --git a/package.json b/package.json',
+      'index 1111111..2222222 100644',
       '--- a/package.json',
       '+++ b/package.json',
       '@@ -1 +1 @@',
@@ -910,7 +996,7 @@ describe('M342 evaluateEvidenceGate — pure, no judge evidence required', () =>
       evaluateEvidenceAutoMergePreflight(evidenceProposal('e8b-rename-contract', renameContract), evidenceCfg(), {
         remoteAvailable: true,
       }).reason,
-    ).toMatch(/build\/CI\/manifest/);
+    ).toMatch(/malformed diff scope \(mode-ambiguous-file\)/);
   });
 
   it('[E9] evidence mode refuses self-target activation even when allowSelfMerge is true', () => {
@@ -1121,12 +1207,14 @@ describe("M153 autoMergeProposal trustBasis='verification'", () => {
     // (sourceFiles.length > 1 triggers the high-risk path in classifyRisk).
     const riskyDiff = [
       'diff --git a/src/a.ts b/src/a.ts',
+      'index 1111111..2222222 100644',
       '--- a/src/a.ts',
       '+++ b/src/a.ts',
       '@@ -1 +1 @@',
       '-old',
       '+new',
       'diff --git a/src/b.ts b/src/b.ts',
+      'index 3333333..4444444 100644',
       '--- a/src/b.ts',
       '+++ b/src/b.ts',
       '@@ -1 +1 @@',
@@ -1382,12 +1470,14 @@ describe("M342 autoMergeProposal trustBasis='evidence'", () => {
 
     const diff = [
       'diff --git a/src/a.ts b/src/a.ts',
+      'index 1111111..2222222 100644',
       '--- a/src/a.ts',
       '+++ b/src/a.ts',
       '@@ -1 +1 @@',
       '-old',
       '+new',
       'diff --git a/src/b.ts b/src/b.ts',
+      'index 3333333..4444444 100644',
       '--- a/src/b.ts',
       '+++ b/src/b.ts',
       '@@ -1 +1 @@',

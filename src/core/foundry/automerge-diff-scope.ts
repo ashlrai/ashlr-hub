@@ -16,6 +16,7 @@ export type AutoMergeDiffScopeInvalidReason =
   | 'malformed-hunk-body'
   | 'hunk-count-mismatch'
   | 'unsupported-file-mode'
+  | 'mode-ambiguous-file'
   | 'binary-patch-unsupported';
 
 type GitPatchMode = '100644' | '100755' | '120000' | '160000';
@@ -169,6 +170,12 @@ function unsupportedGitMode(mode: GitPatchMode): boolean {
   return mode === '120000' || mode === '160000';
 }
 
+function hasExplicitRegularMode(section: FileSection): boolean {
+  return section.declaredMode !== undefined ||
+    section.indexMode !== undefined ||
+    (section.oldMode !== undefined && section.newMode !== undefined);
+}
+
 /**
  * Parse one canonical git unified diff and return its mutation scope. A changed
  * line is one added or deleted hunk body line; context and metadata never count.
@@ -253,6 +260,7 @@ export function measureAutoMergeDiffScope(diff: string | null | undefined): Auto
     if (oldPath !== null && oldPath !== section.gitOldPath) return 'file-header-mismatch';
     if (newPath !== null && newPath !== section.gitNewPath) return 'file-header-mismatch';
     if (section.hunks === 0 && !renamed && section.declaredKind === undefined) return 'missing-hunk';
+    if (section.hunks > 0 && !hasExplicitRegularMode(section)) return 'mode-ambiguous-file';
     for (const path of [oldPath, newPath]) {
       if (path === null) continue;
       if (seenPaths.has(path)) return 'duplicate-file-section';
@@ -349,22 +357,13 @@ export function measureAutoMergeDiffScope(diff: string | null | undefined): Auto
       continue;
     }
     if (line.startsWith('rename from ')) {
-      if (section.renameTo !== undefined || section.oldPath !== undefined || section.hunks > 0) {
-        return { ok: false, reason: 'incomplete-rename' };
-      }
-      const path = parseHeaderPath(line.slice('rename from '.length));
-      if (!path || section.renameFrom !== undefined) return { ok: false, reason: 'incomplete-rename' };
-      section.renameFrom = path;
-      continue;
+      return { ok: false, reason: 'mode-ambiguous-file' };
     }
     if (line.startsWith('rename to ')) {
-      if (section.renameFrom === undefined || section.oldPath !== undefined || section.hunks > 0) {
-        return { ok: false, reason: 'incomplete-rename' };
-      }
-      const path = parseHeaderPath(line.slice('rename to '.length));
-      if (!path || section.renameTo !== undefined) return { ok: false, reason: 'incomplete-rename' };
-      section.renameTo = path;
-      continue;
+      return { ok: false, reason: 'mode-ambiguous-file' };
+    }
+    if (line.startsWith('copy from ') || line.startsWith('copy to ')) {
+      return { ok: false, reason: 'mode-ambiguous-file' };
     }
     if (line.startsWith('new file mode ')) {
       const mode = parseGitModeMetadata(line, 'new file mode');

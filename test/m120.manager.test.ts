@@ -134,6 +134,7 @@ function makeDiff(files: number, linesPerFile: number): string {
   const parts: string[] = [];
   for (let i = 0; i < files; i++) {
     parts.push(`diff --git a/file${i}.ts b/file${i}.ts`);
+    parts.push('index 1111111..2222222 100644');
     parts.push(`--- a/file${i}.ts`);
     parts.push(`+++ b/file${i}.ts`);
     parts.push(`@@ -1,${linesPerFile} +1,${linesPerFile} @@`);
