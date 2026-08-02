@@ -347,6 +347,7 @@ function makeEvidencePack(id: string, generatedAt: string) {
     summary: 'summary',
     diff: [
       'diff --git a/docs/fleet.md b/docs/fleet.md',
+      'new file mode 100644',
       '--- /dev/null',
       '+++ b/docs/fleet.md',
       '@@ -0,0 +1 @@',
@@ -379,6 +380,7 @@ function makeEvidencePack(id: string, generatedAt: string) {
 function docsDiff(body: string): string {
   return [
     'diff --git a/docs/fleet.md b/docs/fleet.md',
+    'new file mode 100644',
     '--- /dev/null',
     '+++ b/docs/fleet.md',
     '@@ -0,0 +1 @@',
