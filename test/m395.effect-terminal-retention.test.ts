@@ -295,14 +295,37 @@ describe('effect terminal retention platform support', () => {
   it.skipIf(process.platform !== 'win32')('never trusts or mutates packed authority on Windows', () => {
     const fixture = writeSignedPackFixture('windows-packed');
     const before = fs.readdirSync(effectJournalDirectory()).sort();
+    const beforeBytes = new Map(
+      before.map((name) => [name, fs.readFileSync(artifactPath(name))] as const),
+    );
 
-    expect(readEffectJournal()).toMatchObject({ sourceState: 'degraded', records: [] });
-    expect(readEffectRecord(fixture.effectId)).toMatchObject({ sourceState: 'degraded', records: [] });
+    const journal = readEffectJournal();
+    expect(journal).toMatchObject({
+      sourceState: 'degraded',
+      invalidRecords: 1,
+      limitExceeded: false,
+      records: [{ effectId: fixture.effectId, phase: 'prepared' }],
+    });
+    expect(journal.records).toHaveLength(1);
+    expect(journal.records[0]).not.toHaveProperty('committedAt');
+
+    const exact = readEffectRecord(fixture.effectId);
+    expect(exact).toMatchObject({
+      sourceState: 'degraded',
+      invalidRecords: 1,
+      limitExceeded: false,
+      records: [{ effectId: fixture.effectId, phase: 'prepared' }],
+    });
+    expect(exact.records).toHaveLength(1);
+    expect(exact.records[0]).not.toHaveProperty('committedAt');
     expect(hasUnresolvedToolEffects('windows-packed', GENERATION)).toBe(true);
     expect(prepareToolEffect(effectInput('windows-packed'))).toMatchObject({ ok: false, reason: 'unavailable' });
     expect(compactEffectJournal()).toMatchObject({ ok: false, reason: 'unsupported' });
     expect(fs.readdirSync(effectJournalDirectory()).sort()).toEqual(before);
     expect(before).toEqual([...fixture.names].sort());
+    for (const [name, bytes] of beforeBytes) {
+      expect(fs.readFileSync(artifactPath(name))).toEqual(bytes);
+    }
   }, 30_000);
 });
 
