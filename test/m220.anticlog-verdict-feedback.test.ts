@@ -230,11 +230,13 @@ beforeAll(() => {
   initBareGitDir(tmpRepo);
   fs.writeFileSync(path.join(tmpRepo, 'package.json'), JSON.stringify({ name: 'r' }), 'utf8');
 
+  // Native Windows DACL behavior is covered by H4/H7/M379. M220 owns verdict
+  // feedback semantics and must not contend for PowerShell-backed fence setup.
+  privateStorageHarness.useSemanticAdapter = process.platform === 'win32';
   const enrollment = enroll(tmpRepo);
   if (!enrollment.ok) {
     throw new Error(`M220 fixture enrollment failed: ${enrollment.reason}`);
   }
-  privateStorageHarness.useSemanticAdapter = true;
 });
 
 beforeEach(() => {
