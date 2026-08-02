@@ -65,6 +65,29 @@ export interface SimpleConductorResult {
   activationRefused?: boolean;
 }
 
+type ProposalCaptureResult = {
+  proposalId?: string;
+  proposalOutcome?: {
+    kind: string;
+    proposalId?: string;
+  };
+  state?: {
+    proposalOutcome?: {
+      kind: string;
+      proposalId?: string;
+    };
+  };
+};
+
+function durableProposalId(result: ProposalCaptureResult): string | undefined {
+  const proposalId = result.proposalId;
+  const outcome = result.proposalOutcome ?? result.state?.proposalOutcome;
+  if (!proposalId || outcome?.proposalId !== proposalId) return undefined;
+  return outcome.kind === 'filed' || outcome.kind === 'proposal-disabled'
+    ? proposalId
+    : undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -274,6 +297,7 @@ export async function runSimpleConductor(
       const sandboxResult = isApiModel
         ? await runApiModelSandboxed(engineId, instruction, cfg, sandboxOpts)
         : await runEngineSandboxed(engineId, instruction, cfg, sandboxOpts);
+      const filedProposalId = durableProposalId(sandboxResult);
 
       // M287: mark done ONLY when a proposal was actually filed. A dispatch that
       // produced no proposal (empty/incomplete diff, blocked by verify) is NOT
@@ -281,19 +305,19 @@ export async function runSimpleConductor(
       // to avoid looping forever on an unworkable task.
       const idx = mutableTasks.findIndex((t) => t.id === task.id);
       if (idx !== -1) {
-        if (sandboxResult.proposalId) {
+        if (filedProposalId) {
           mutableTasks[idx] = {
             ...mutableTasks[idx],
             done: true,
             dispatchedAt: new Date().toISOString(),
-            proposalId: sandboxResult.proposalId,
+            proposalId: filedProposalId,
           };
         } else {
           const attempts = ((mutableTasks[idx].attempts ?? 0) + 1);
           mutableTasks[idx] = {
             ...mutableTasks[idx],
             dispatchedAt: new Date().toISOString(),
-            lastError: 'no proposal filed (incomplete diff or blocked by verify/completeness)',
+            lastError: 'no durable proposal filed (incomplete diff, capture failure, or blocked by verify/completeness)',
             attempts,
             done: attempts >= 3,
           };
@@ -301,7 +325,7 @@ export async function runSimpleConductor(
       }
       writeTasks(mutableTasks);
 
-      if (sandboxResult.proposalId) {
+      if (filedProposalId) {
         result.proposalsFiled++;
       }
       dispatched++;

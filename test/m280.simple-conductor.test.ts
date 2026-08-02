@@ -151,8 +151,13 @@ beforeEach(() => {
   mockKillSwitchOn.mockReturnValue(false);
   mockAssertMayMutate.mockImplementation(() => { /* enrolled */ });
   mockRunEngineSandboxed.mockResolvedValue({
-    state: { id: 'run-1', status: 'done' },
+    state: {
+      id: 'run-1',
+      status: 'done',
+      proposalOutcome: { kind: 'filed', reason: 'proposal filed', proposalId: 'prop-abc' },
+    },
     proposalId: 'prop-abc',
+    proposalOutcome: { kind: 'filed', reason: 'proposal filed', proposalId: 'prop-abc' },
   });
   mockRunAutoMergePass.mockResolvedValue({
     attempted: 1, merged: 1, branched: 0, results: [], judged: 1,
@@ -168,8 +173,13 @@ beforeEach(() => {
   mockKillSwitchOn.mockReturnValue(false);
   mockAssertMayMutate.mockImplementation(() => { /* enrolled */ });
   mockRunEngineSandboxed.mockResolvedValue({
-    state: { id: 'run-1', status: 'done' },
+    state: {
+      id: 'run-1',
+      status: 'done',
+      proposalOutcome: { kind: 'filed', reason: 'proposal filed', proposalId: 'prop-abc' },
+    },
     proposalId: 'prop-abc',
+    proposalOutcome: { kind: 'filed', reason: 'proposal filed', proposalId: 'prop-abc' },
   });
   mockRunAutoMergePass.mockResolvedValue({
     attempted: 1, merged: 1, branched: 0, results: [], judged: 1,
@@ -262,6 +272,50 @@ describe('M280 — dispatches and marks done', () => {
     await runSimpleConductor(makeConfig(), { once: true, dryRun: false, allowCloud: false });
     const [engine] = mockRunEngineSandboxed.mock.calls[0];
     expect(engine).toBe('codex');
+  });
+
+  it('does not retire a changed task when proposal persistence reconciliation fails', async () => {
+    writeTasks([baseTask({ id: 'task-capture-mismatch', attempts: 1 })]);
+    mockRunEngineSandboxed.mockResolvedValue({
+      state: {
+        id: 'run-capture-mismatch',
+        status: 'failed',
+        proposalOutcome: {
+          kind: 'proposal-capture-error',
+          reason: 'proposal capture requires persistence reconciliation',
+          proposalId: 'prop-optimistic-only',
+          files: 2,
+          insertions: 3,
+          deletions: 1,
+        },
+      },
+      proposalId: 'prop-optimistic-only',
+      proposalOutcome: {
+        kind: 'proposal-capture-error',
+        reason: 'proposal capture requires persistence reconciliation',
+        proposalId: 'prop-optimistic-only',
+        files: 2,
+        insertions: 3,
+        deletions: 1,
+      },
+    });
+
+    const { runSimpleConductor } = await importConductor();
+    const result = await runSimpleConductor(makeConfig(), {
+      once: true,
+      dryRun: false,
+      allowCloud: false,
+    });
+
+    expect(result.proposalsFiled).toBe(0);
+    const [persistedTask] = readTasks();
+    expect(persistedTask).toEqual(expect.objectContaining({
+      id: 'task-capture-mismatch',
+      done: false,
+      attempts: 2,
+      lastError: expect.stringContaining('no durable proposal filed'),
+    }));
+    expect(persistedTask?.proposalId).toBeUndefined();
   });
 });
 
@@ -365,7 +419,15 @@ describe('M280 — never-throws per task', () => {
     mockRunEngineSandboxed.mockImplementation(async () => {
       callCount++;
       if (callCount === 1) throw new Error('engine crash');
-      return { state: { id: 'run-2', status: 'done' }, proposalId: 'prop-ok' };
+      return {
+        state: {
+          id: 'run-2',
+          status: 'done',
+          proposalOutcome: { kind: 'filed', reason: 'proposal filed', proposalId: 'prop-ok' },
+        },
+        proposalId: 'prop-ok',
+        proposalOutcome: { kind: 'filed', reason: 'proposal filed', proposalId: 'prop-ok' },
+      };
     });
 
     const { runSimpleConductor } = await importConductor();

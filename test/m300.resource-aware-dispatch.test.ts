@@ -152,7 +152,13 @@ function baseTask(overrides: Partial<TaskSpec> = {}): TaskSpec {
   };
 }
 
-const defaultSandboxResult = { proposalId: 'prop-1' };
+const defaultSandboxResult = {
+  state: {
+    proposalOutcome: { kind: 'filed', reason: 'proposal filed', proposalId: 'prop-1' },
+  },
+  proposalId: 'prop-1',
+  proposalOutcome: { kind: 'filed', reason: 'proposal filed', proposalId: 'prop-1' },
+};
 
 // ---------------------------------------------------------------------------
 // Setup / teardown
