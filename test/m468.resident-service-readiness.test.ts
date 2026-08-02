@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import { generateKeyPairSync, sign } from 'node:crypto';
 import {
   closeSync,
@@ -14,6 +15,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
+import { generateServiceDefinition } from '../src/core/daemon/service.js';
 import {
   observeResidentServiceDiagnostic,
   residentServiceReleaseManifestPayloadBytes,
@@ -23,7 +25,9 @@ import {
   type ResidentServiceSignedReleaseManifestBinding,
 } from '../src/core/daemon/resident-service-readiness.js';
 
-const HOME = '/Users/tester';
+const TEST_ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-m468-suite-')));
+const HOME = join(TEST_ROOT, 'home');
+mkdirSync(HOME);
 const RELEASE_ID = '0123456789abcdef0123456789abcdef01234567';
 const TREE_SHA = 'a'.repeat(64);
 const INTERPRETER_SHA = 'b'.repeat(64);
@@ -31,7 +35,7 @@ const RELEASE_ROOT = `${HOME}/.local/share/ashlr/releases/${RELEASE_ID}`;
 const NODE = '/opt/homebrew/bin/node';
 const ENTRYPOINT = `${RELEASE_ROOT}/bin/ashlr`;
 const PLIST = `${HOME}/Library/LaunchAgents/ai.ashlr.daemon.plist`;
-const UID = 501;
+const UID = Number(lstatSync(HOME, { bigint: true }).uid);
 const TARGET = `gui/${UID}/ai.ashlr.daemon`;
 const ACTUAL_PLATFORM = process.platform;
 const NOW = Date.parse('2026-08-01T12:00:00.000Z');
@@ -48,6 +52,12 @@ const ARGS = [
   '--parallel',
   '1',
 ];
+const GENERATED_ENVIRONMENT = generateServiceDefinition({
+  platform: 'darwin',
+  homeDir: HOME,
+  nodePath: NODE,
+  binPath: ENTRYPOINT,
+}).launchdRuntime!.environment;
 
 function signedReleaseManifest(
   overrides: Partial<ResidentServiceReleaseManifestPayloadV1> = {},
@@ -65,7 +75,7 @@ function signedReleaseManifest(
       platform: 'darwin',
       program: NODE,
       arguments: [...ARGS],
-      environment: { HOME },
+      environment: { ...GENERATED_ENVIRONMENT },
     },
     issuedAt: '2026-08-01T11:30:00.000Z',
     expiresAt: '2026-08-01T12:30:00.000Z',
@@ -114,7 +124,7 @@ function launchdPrint(
   state = 'running',
   properties = 'runatload',
   minimumRuntime = 30,
-  environment: Record<string, string> | null = { HOME },
+  environment: Record<string, string> | null = GENERATED_ENVIRONMENT,
 ): string {
   return `${[
     `${target} = {`,
@@ -139,10 +149,14 @@ function launchdPrint(
 function plist(overrides: Record<string, unknown> = {}): string {
   const value: Record<string, unknown> = {
     Label: 'ai.ashlr.daemon',
+    ProcessType: 'Background',
     ProgramArguments: ARGS,
-    EnvironmentVariables: { HOME },
+    EnvironmentVariables: { ...GENERATED_ENVIRONMENT },
     RunAtLoad: true,
-    KeepAlive: false,
+    KeepAlive: { SuccessfulExit: false },
+    ThrottleInterval: 30,
+    StandardOutPath: join(HOME, '.ashlr', 'daemon.launchd.out.log'),
+    StandardErrorPath: join(HOME, '.ashlr', 'daemon.launchd.err.log'),
     ...overrides,
   };
   if (overrides['EnvironmentVariables'] === null) delete value['EnvironmentVariables'];
@@ -165,21 +179,17 @@ function dependencies(overrides: {
   killSequence?: Array<'absent' | 'present' | 'unknown'>;
   wallClockMs?: number;
   expectedHome?: string;
+  accountHome?: string;
   uid?: number;
-  realHomeIdentity?: boolean;
   homeDirectoryIdentityFs?: ResidentServiceDiagnosticDependencies['homeDirectoryIdentityFs'];
 } = {}): ResidentServiceDiagnosticDependencies {
   let runtimeReads = 0;
   let killReads = 0;
   return {
-    uid: () => overrides.uid ?? UID,
-    ...(!overrides.realHomeIdentity ? {
-      homeDirectoryIdentity: (path: string, uid: number) => {
-        expect(path).toBe(overrides.expectedHome ?? HOME);
-        expect(uid).toBe(overrides.uid ?? UID);
-        return { state: 'exact' as const, canonicalPath: path, identity: 'fixture-home' };
-      },
-    } : {}),
+    testOnlyTrustedAccountIdentity: () => ({
+      uid: overrides.uid ?? UID,
+      homeDir: overrides.accountHome ?? overrides.expectedHome ?? HOME,
+    }),
     ...(overrides.homeDirectoryIdentityFs
       ? { homeDirectoryIdentityFs: overrides.homeDirectoryIdentityFs }
       : {}),
@@ -257,11 +267,21 @@ function observeRealHomeIdentity(
   home: string,
   overrides: Pick<ResidentServiceDiagnosticDependencies, 'homeDirectoryIdentityFs'> & {
     uid?: number;
+    accountHome?: string;
     environmentHome?: string;
   } = {},
 ) {
   const uid = overrides.uid ?? (typeof process.getuid === 'function' ? process.getuid() : UID);
-  const environment = { HOME: overrides.environmentHome ?? home };
+  const generatedEnvironment = generateServiceDefinition({
+    platform: 'darwin',
+    homeDir: home,
+    nodePath: NODE,
+    binPath: ENTRYPOINT,
+  }).launchdRuntime!.environment;
+  const environment = {
+    ...generatedEnvironment,
+    HOME: overrides.environmentHome ?? home,
+  };
   return observeResidentServiceDiagnostic(
     options({
       homeDir: home,
@@ -277,8 +297,8 @@ function observeRealHomeIdentity(
     }),
     dependencies({
       expectedHome: home,
+      accountHome: overrides.accountHome ?? home,
       uid,
-      realHomeIdentity: true,
       homeDirectoryIdentityFs: overrides.homeDirectoryIdentityFs,
       plist: { status: 0, stdout: plist({ EnvironmentVariables: environment }), stderr: '' },
       runtime: {
@@ -297,13 +317,14 @@ describe('observeResidentServiceDiagnostic', () => {
 
   afterAll(() => {
     Object.defineProperty(process, 'platform', { configurable: true, value: ACTUAL_PLATFORM });
+    rmSync(TEST_ROOT, { recursive: true, force: true });
   });
 
   it('keeps an exact signed environment observation blocked on missing lifecycle authorities', () => {
     const diagnostic = observeResidentServiceDiagnostic(options(), dependencies());
 
     expect(diagnostic).toMatchObject({
-      schemaVersion: 4,
+      schemaVersion: 5,
       scope: 'observation-only-diagnostic',
       diagnosticStatus: 'blocked',
       lifecycleAuthority: 'none',
@@ -321,6 +342,7 @@ describe('observeResidentServiceDiagnostic', () => {
         loadedRestartPolicyHintsCompatible: true,
         signedReleaseManifest: 'signature-consistent',
         homeDirectoryIdentity: 'exact',
+        homeDirectoryIdentityBasis: 'test-injected',
         installedEnvironment: 'exact',
         loadedEnvironment: 'exact',
         environmentMatchesSignedManifest: true,
@@ -345,6 +367,45 @@ describe('observeResidentServiceDiagnostic', () => {
     expect(diagnostic).not.toHaveProperty('residentStartAuthorized');
   });
 
+  it.runIf(ACTUAL_PLATFORM === 'darwin')(
+    'accepts the real generated launchd plist contract as exact diagnostic evidence',
+    () => {
+      const definition = generateServiceDefinition({
+        platform: 'darwin',
+        homeDir: HOME,
+        nodePath: NODE,
+        binPath: ENTRYPOINT,
+      });
+      const runtime = definition.launchdRuntime!;
+      const converted = spawnSync('/usr/bin/plutil', ['-convert', 'json', '-o', '-', '--', '-'], {
+        input: definition.content,
+        encoding: 'utf8',
+      });
+      expect(converted.status).toBe(0);
+      expect(converted.stderr).toBe('');
+
+      const diagnostic = observeResidentServiceDiagnostic(options(), dependencies({
+        plist: { status: 0, stdout: converted.stdout, stderr: '' },
+        runtime: {
+          status: 0,
+          stdout: launchdPrint(runtime.arguments, TARGET, 'running', 'runatload', 30, runtime.environment),
+          stderr: '',
+        },
+      }));
+
+      expect(diagnostic.localChecks).toMatchObject({
+        homeDirectoryIdentity: 'exact',
+        installedEnvironment: 'exact',
+        loadedEnvironment: 'exact',
+        environmentMatchesSignedManifest: true,
+        environmentSafe: true,
+        diskDefinitionRestartPolicyCompatible: true,
+      });
+      expect(diagnostic.operationalAuthority).toBe(false);
+      expect(diagnostic.findings.map(({ code }) => code)).toContain('native-consumer-evidence-missing');
+    },
+  );
+
   it('binds an exact HOME to a stable descriptor-observed directory identity', () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-m468-home-exact-')));
     try {
@@ -359,6 +420,45 @@ describe('observeResidentServiceDiagnostic', () => {
       expect(diagnostic.operationalAuthority).toBe(false);
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a canonical current-user-owned HOME that is not the independently trusted account HOME', () => {
+    const alternate = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-m468-home-override-')));
+    try {
+      const diagnostic = observeRealHomeIdentity(alternate, { accountHome: HOME });
+      expect(diagnostic.localChecks).toMatchObject({
+        homeDirectoryIdentity: 'unbound',
+        homeDirectoryIdentityBasis: 'test-injected',
+        installedEnvironment: 'unbound',
+        loadedEnvironment: 'unbound',
+        environmentMatchesSignedManifest: null,
+        environmentSafe: false,
+      });
+      expect(diagnostic.findings).toContainEqual(expect.objectContaining({
+        code: 'home-directory-identity-unbound',
+        severity: 'blocked',
+      }));
+      expect(diagnostic.operationalAuthority).toBe(false);
+    } finally {
+      rmSync(alternate, { recursive: true, force: true });
+    }
+  });
+
+  it('uses the operating-system account HOME when no test identity is injected', () => {
+    const alternate = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-m468-production-home-')));
+    try {
+      const deps = dependencies({ expectedHome: alternate });
+      delete deps.testOnlyTrustedAccountIdentity;
+      const diagnostic = observeResidentServiceDiagnostic(options({ homeDir: alternate }), deps);
+      expect(diagnostic.localChecks).toMatchObject({
+        homeDirectoryIdentity: 'unbound',
+        homeDirectoryIdentityBasis: 'system-account',
+        environmentSafe: false,
+      });
+      expect(diagnostic.operationalAuthority).toBe(false);
+    } finally {
+      rmSync(alternate, { recursive: true, force: true });
     }
   });
 
@@ -541,7 +641,7 @@ describe('observeResidentServiceDiagnostic', () => {
   });
 
   it('rejects NODE_OPTIONS preload injection even when it is signed and exactly observed', () => {
-    const environment = { HOME, NODE_OPTIONS: '--require /tmp/attacker.js' };
+    const environment = { ...GENERATED_ENVIRONMENT, NODE_OPTIONS: '--require /tmp/attacker.js' };
     const diagnostic = observeResidentServiceDiagnostic(
       options({
         signedReleaseManifest: signedReleaseManifest({
@@ -671,8 +771,8 @@ describe('observeResidentServiceDiagnostic', () => {
     }));
   });
 
-  it('rejects mutable PATH even when installed, loaded, and signed values are exact', () => {
-    const environment = { HOME, PATH: '/usr/local/bin:/usr/bin:/bin' };
+  it('rejects PATH drift even when installed, loaded, and signed values are exact', () => {
+    const environment = { ...GENERATED_ENVIRONMENT, PATH: '/tmp/attacker-bin:/usr/bin:/bin' };
     const diagnostic = observeResidentServiceDiagnostic(
       options({
         signedReleaseManifest: signedReleaseManifest({
@@ -709,7 +809,7 @@ describe('observeResidentServiceDiagnostic', () => {
     'LD_PRELOAD',
     'DYLD_INSERT_LIBRARIES',
   ])('rejects exact signed runtime influence through %s', (name) => {
-    const environment = { HOME, [name]: '/tmp/attacker' };
+    const environment = { ...GENERATED_ENVIRONMENT, [name]: '/tmp/attacker' };
     const diagnostic = observeResidentServiceDiagnostic(
       options({
         signedReleaseManifest: signedReleaseManifest({
@@ -770,7 +870,7 @@ describe('observeResidentServiceDiagnostic', () => {
           platform: 'darwin',
           program: NODE,
           arguments: argumentsWithLoader,
-          environment: { HOME },
+          environment: { ...GENERATED_ENVIRONMENT },
         },
       }),
     }), dependencies());
@@ -850,8 +950,9 @@ describe('observeResidentServiceDiagnostic', () => {
     expect(diagnostic.findings).toContainEqual(expect.objectContaining({ code: 'restart-policy-mismatch' }));
   });
 
-  it('treats restartSec and launchd minimum-runtime hints as irrelevant on macOS', () => {
+  it('binds the generated throttle while treating launchd minimum-runtime hints as non-authoritative', () => {
     const diagnostic = observeResidentServiceDiagnostic(options({ restartSec: 999 }), dependencies({
+      plist: { status: 0, stdout: plist({ ThrottleInterval: 999 }), stderr: '' },
       runtime: { status: 0, stdout: launchdPrint(ARGS, TARGET, 'running', 'runatload', 1), stderr: '' },
     }));
     expect(diagnostic.diagnosticStatus).toBe('blocked');
@@ -903,9 +1004,13 @@ describe('observeResidentServiceDiagnostic', () => {
   it.each([
     ['RunAtLoad', { RunAtLoad: false }],
     ['KeepAlive true', { KeepAlive: true }],
-    ['obsolete SuccessfulExit policy', { KeepAlive: { SuccessfulExit: false }, ThrottleInterval: 30 }],
+    ['KeepAlive false', { KeepAlive: false }],
+    ['successful-exit relaunch', { KeepAlive: { SuccessfulExit: true } }],
+    ['extra keepalive predicate', { KeepAlive: { SuccessfulExit: false, NetworkState: true } }],
     ['conditional keepalive', { KeepAlive: { NetworkState: true } }],
-    ['ThrottleInterval', { ThrottleInterval: 5 }],
+    ['ThrottleInterval mismatch', { ThrottleInterval: 5 }],
+    ['ThrottleInterval above the generated bound', { ThrottleInterval: 3_601 }],
+    ['extra launch trigger', { StartInterval: 30 }],
     ['LaunchOnlyOnce', { LaunchOnlyOnce: true }],
     ['Program override', { Program: '/tmp/substituted-node' }],
   ])('blocks incompatible restart policy: %s', (_name, plistOverrides) => {

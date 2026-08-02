@@ -21,7 +21,7 @@ import {
   realpathSync,
   type BigIntStats,
 } from 'node:fs';
-import { homedir, userInfo } from 'node:os';
+import { userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
   generateServiceDefinition,
@@ -99,6 +99,7 @@ export interface ResidentServiceDiagnosticChecks {
   loadedRestartPolicyHintsCompatible: boolean | null;
   signedReleaseManifest: ResidentServiceManifestState;
   homeDirectoryIdentity: ResidentServiceHomeDirectoryIdentityState;
+  homeDirectoryIdentityBasis: ResidentServiceHomeDirectoryIdentityBasis;
   installedEnvironment: ResidentServiceEnvironmentState;
   loadedEnvironment: ResidentServiceEnvironmentState;
   environmentMatchesSignedManifest: boolean | null;
@@ -111,7 +112,7 @@ export interface ResidentServiceDiagnosticChecks {
 }
 
 export interface ResidentServiceDiagnostic {
-  schemaVersion: 4;
+  schemaVersion: 5;
   scope: 'observation-only-diagnostic';
   diagnosticStatus: 'blocked';
   lifecycleAuthority: 'none';
@@ -142,6 +143,7 @@ export interface ResidentServiceDiagnosticOptions extends ServiceInstallOptions 
 export type ResidentServiceManifestState = 'absent' | 'degraded' | 'stale' | 'mismatch' | 'signature-consistent';
 export type ResidentServiceEnvironmentState = 'absent' | 'degraded' | 'unbound' | 'mismatch' | 'exact';
 export type ResidentServiceHomeDirectoryIdentityState = 'degraded' | 'unbound' | 'exact';
+export type ResidentServiceHomeDirectoryIdentityBasis = 'system-account' | 'test-injected' | 'unavailable';
 
 interface ResidentServiceHomeDirectoryIdentity {
   state: ResidentServiceHomeDirectoryIdentityState;
@@ -155,6 +157,11 @@ interface ResidentServiceHomeDirectoryIdentityFs {
   fstat: (descriptor: number) => BigIntStats;
   close: (descriptor: number) => void;
   realpath: (path: string) => string;
+}
+
+interface ResidentServiceAccountIdentity {
+  uid: number;
+  homeDir: string;
 }
 
 export interface ResidentServiceReleaseManifestPayloadV1 {
@@ -207,9 +214,8 @@ export interface ResidentServiceDiagnosticDependencies {
   releaseTreeBinding?: (entrypointPath: string, timeoutMs: number) => ResidentServiceFileBinding;
   interpreterBinding?: (interpreterPath: string, timeoutMs: number) => ResidentServiceFileBinding;
   killSwitchState?: (path: string) => 'absent' | 'present' | 'unknown';
-  uid?: () => number;
-  /** Test-only home identity result. Production observes the filesystem directly. */
-  homeDirectoryIdentity?: (path: string, uid: number) => ResidentServiceHomeDirectoryIdentity;
+  /** Test-only substitute for the independently obtained operating-system account identity. */
+  testOnlyTrustedAccountIdentity?: () => ResidentServiceAccountIdentity;
   /** Test-only filesystem seam for deterministic home-directory race fixtures. */
   homeDirectoryIdentityFs?: ResidentServiceHomeDirectoryIdentityFs;
   /** Test-only cooperative clock. It never establishes a hard production deadline. */
@@ -508,12 +514,19 @@ function sameEnvironment(left: Record<string, string>, right: Record<string, str
     ));
 }
 
-function exactSafeEnvironment(environment: Record<string, string>, home: string | null): boolean {
-  const entries = Object.entries(environment);
-  return home !== null
-    && entries.length === 1
-    && entries[0]?.[0] === 'HOME'
-    && entries[0]?.[1] === home;
+function exactSafeEnvironment(
+  environment: Record<string, string>,
+  expected: Record<string, string> | null,
+  home: string | null,
+): boolean {
+  const expectedNames = expected === null ? [] : Object.keys(expected).sort();
+  return expected !== null
+    && home !== null
+    && expectedNames.length === 2
+    && expectedNames[0] === 'HOME'
+    && expectedNames[1] === 'PATH'
+    && expected['HOME'] === home
+    && sameEnvironment(environment, expected);
 }
 
 function sameHomeDirectorySnapshot(left: BigIntStats, right: BigIntStats): boolean {
@@ -617,6 +630,28 @@ function observeStableHomeDirectoryIdentity(
     }
   }
   return observation;
+}
+
+function observeAccountBoundHomeDirectoryIdentity(
+  declaredHomePath: string,
+  accountHomePath: string,
+  expectedUid: number,
+  injectedFs?: ResidentServiceHomeDirectoryIdentityFs,
+): ResidentServiceHomeDirectoryIdentity {
+  const account = observeStableHomeDirectoryIdentity(accountHomePath, expectedUid, injectedFs);
+  const declared = declaredHomePath === accountHomePath
+    ? account
+    : observeStableHomeDirectoryIdentity(declaredHomePath, expectedUid, injectedFs);
+  if (account.state === 'degraded' || declared.state === 'degraded') {
+    return { state: 'degraded', canonicalPath: null, identity: null };
+  }
+  if (
+    account.state !== 'exact'
+    || declared.state !== 'exact'
+    || account.canonicalPath !== declared.canonicalPath
+    || account.identity !== declared.identity
+  ) return { state: 'unbound', canonicalPath: null, identity: null };
+  return account;
 }
 
 const UNSAFE_NODE_ARGUMENT_RE = /^(?:-r|--require(?:=|$)|--import(?:=|$)|--loader(?:=|$)|--experimental-loader(?:=|$)|-e|--eval(?:=|$)|--inspect(?:-brk)?(?:=|$))/i;
@@ -791,12 +826,38 @@ function loadedLaunchdEnvironment(output: string): EnvironmentObservation {
     : { state: 'observed', environment: normalized };
 }
 
-function diskDefinitionRestartPolicyCompatible(plist: Record<string, unknown>): boolean {
-  return plist['RunAtLoad'] === true
-    && plist['LaunchOnlyOnce'] !== true
-    && plist['Program'] === undefined
-    && plist['KeepAlive'] === false
-    && plist['ThrottleInterval'] === undefined;
+function diskDefinitionRestartPolicyCompatible(
+  plist: Record<string, unknown>,
+  expected: {
+    processType: 'Background';
+    runAtLoad: true;
+    keepAliveSuccessfulExit: false;
+    throttleIntervalSec: number;
+    standardOutPath: string;
+    standardErrorPath: string;
+  },
+): boolean {
+  const keepAlive = plist['KeepAlive'];
+  return exactObjectKeys(plist, [
+    'Label',
+    'ProcessType',
+    'ProgramArguments',
+    'EnvironmentVariables',
+    'RunAtLoad',
+    'KeepAlive',
+    'ThrottleInterval',
+    'StandardOutPath',
+    'StandardErrorPath',
+  ])
+    && plist['ProcessType'] === expected.processType
+    && plist['RunAtLoad'] === expected.runAtLoad
+    && exactObjectKeys(keepAlive, ['SuccessfulExit'])
+    && keepAlive['SuccessfulExit'] === expected.keepAliveSuccessfulExit
+    && typeof plist['ThrottleInterval'] === 'number'
+    && Number.isSafeInteger(plist['ThrottleInterval'])
+    && plist['ThrottleInterval'] === expected.throttleIntervalSec
+    && plist['StandardOutPath'] === expected.standardOutPath
+    && plist['StandardErrorPath'] === expected.standardErrorPath;
 }
 
 function sameBinding(
@@ -837,7 +898,7 @@ function architecturalBlockers(): ResidentServiceDiagnosticReason[] {
     {
       code: 'exact-loaded-definition-binding-missing',
       severity: 'blocked',
-      detail: 'launchd runtime output cannot prove the exact loaded KeepAlive=false definition',
+      detail: 'launchd runtime output cannot prove the exact loaded conditional crash-relaunch definition',
     },
     {
       code: 'atomic-activation-handoff-missing',
@@ -863,7 +924,7 @@ function result(
   findings: ResidentServiceDiagnosticReason[],
 ): ResidentServiceDiagnostic {
   return {
-    schemaVersion: 4,
+    schemaVersion: 5,
     scope: 'observation-only-diagnostic',
     diagnosticStatus: 'blocked',
     lifecycleAuthority: 'none',
@@ -888,6 +949,7 @@ function emptyChecks(): ResidentServiceDiagnosticChecks {
     loadedRestartPolicyHintsCompatible: null,
     signedReleaseManifest: 'absent',
     homeDirectoryIdentity: 'unbound',
+    homeDirectoryIdentityBasis: 'unavailable',
     installedEnvironment: 'absent',
     loadedEnvironment: 'absent',
     environmentMatchesSignedManifest: null,
@@ -922,21 +984,39 @@ export function observeResidentServiceDiagnostic(
     return result(options.release.identity, checks, reasons);
   }
 
-  let uid = -1;
+  const accountIdentityBasis: ResidentServiceHomeDirectoryIdentityBasis = dependencies.testOnlyTrustedAccountIdentity
+    ? 'test-injected'
+    : 'system-account';
+  let accountIdentity: ResidentServiceAccountIdentity = { uid: -1, homeDir: '' };
   try {
-    uid = (dependencies.uid ?? (() => (
-      typeof process.getuid === 'function' ? process.getuid() : userInfo().uid
-    )))();
+    const observedAccountIdentity = dependencies.testOnlyTrustedAccountIdentity
+      ? dependencies.testOnlyTrustedAccountIdentity()
+      : (() => {
+          const identity = userInfo();
+          return { uid: identity.uid, homeDir: identity.homedir };
+        })();
+    if (
+      observedAccountIdentity !== null
+      && typeof observedAccountIdentity === 'object'
+      && Number.isSafeInteger(observedAccountIdentity.uid)
+      && observedAccountIdentity.uid >= 0
+      && typeof observedAccountIdentity.homeDir === 'string'
+    ) accountIdentity = observedAccountIdentity;
   } catch {
     // Invalid identity observations are normalized below and remain fail-closed.
   }
-  const declaredHomePath = options.homeDir ?? homedir();
-  const rawObserveHomeIdentity = dependencies.homeDirectoryIdentity ?? ((path, ownerUid) => (
-    observeStableHomeDirectoryIdentity(path, ownerUid, dependencies.homeDirectoryIdentityFs)
-  ));
+  const uid = accountIdentity.uid;
+  const accountHomePath = typeof accountIdentity.homeDir === 'string' ? accountIdentity.homeDir : '';
+  const declaredHomePath = options.homeDir ?? accountHomePath;
+  checks.homeDirectoryIdentityBasis = accountIdentityBasis;
   const observeHomeIdentity = (): ResidentServiceHomeDirectoryIdentity => {
     try {
-      const observation = rawObserveHomeIdentity(declaredHomePath, uid);
+      const observation = observeAccountBoundHomeDirectoryIdentity(
+        declaredHomePath,
+        accountHomePath,
+        uid,
+        dependencies.homeDirectoryIdentityFs,
+      );
       if (
         !['degraded', 'unbound', 'exact'].includes(observation?.state)
         || (observation.state === 'exact' && (
@@ -968,7 +1048,7 @@ export function observeResidentServiceDiagnostic(
         blocked(
           reasons,
           'home-directory-identity-unbound',
-          'home directory must be an absolute canonical NFC path to one stable, non-symlink, current-user-owned directory',
+          'declared HOME must match the independently obtained account HOME by canonical path and stable descriptor identity',
         );
       }
     }
@@ -1017,6 +1097,11 @@ export function observeResidentServiceDiagnostic(
   }
   if (!definition.launchdRuntime) {
     degraded(reasons, 'service-definition-unavailable', 'expected launchd runtime contract is unavailable');
+    return result(options.release.identity, checks, reasons);
+  }
+  const expectedEnvironment = normalizedEnvironment(definition.launchdRuntime.environment);
+  if (expectedEnvironment === null) {
+    degraded(reasons, 'service-definition-unavailable', 'expected launchd environment contract is unavailable');
     return result(options.release.identity, checks, reasons);
   }
 
@@ -1068,12 +1153,12 @@ export function observeResidentServiceDiagnostic(
         blocked(reasons, 'signed-release-manifest-mismatch', 'signed release manifest does not match the declared release, interpreter, platform, or invocation');
       } else {
         manifestPayload = payload;
-        if (!exactSafeEnvironment(payload.service.environment, trustedHomePath)) {
+        if (!exactSafeEnvironment(payload.service.environment, expectedEnvironment, trustedHomePath)) {
           checks.environmentSafe = false;
           blocked(
             reasons,
             'service-environment-unsafe',
-            'signed environment must contain only the exact HOME binding; PATH and all Node, npm, loader, and shell startup variables are refused',
+            'signed environment must equal the generated HOME and PATH contract; extra Node, npm, loader, dynamic-linker, and shell startup variables are refused',
           );
         }
       }
@@ -1090,7 +1175,7 @@ export function observeResidentServiceDiagnostic(
   const killSwitchState = dependencies.killSwitchState ?? observeKillSwitch;
   const releaseTreeBinding = dependencies.releaseTreeBinding ?? hashStableReleaseTree;
   const interpreterBinding = dependencies.interpreterBinding ?? hashStableInterpreter;
-  const killPath = join(options.homeDir ?? homedir(), '.ashlr', 'KILL');
+  const killPath = trustedHomePath === null ? null : join(trustedHomePath, '.ashlr', 'KILL');
   const nowMs = dependencies.testOnlyNowMs ?? Date.now;
   const startedAt = nowMs();
   let lastObservedAt = startedAt;
@@ -1139,6 +1224,7 @@ export function observeResidentServiceDiagnostic(
     }
   };
   const observeKillSwitchBounded = (): 'absent' | 'present' | 'unknown' => {
+    if (killPath === null) return 'unknown';
     if (remainingMs() === 0) return 'unknown';
     let observation: 'absent' | 'present' | 'unknown';
     try {
@@ -1246,9 +1332,12 @@ export function observeResidentServiceDiagnostic(
     if (!checks.observedInvocationMatchesDeclaration) {
       blocked(reasons, 'service-invocation-mismatch', 'installed launchd plist does not match the caller-declared invocation');
     }
-    diskRestartPolicyCompatible = diskDefinitionRestartPolicyCompatible(plist);
+    diskRestartPolicyCompatible = diskDefinitionRestartPolicyCompatible(
+      plist,
+      definition.launchdRuntime.supervisor,
+    );
     if (!diskRestartPolicyCompatible) {
-      blocked(reasons, 'restart-policy-mismatch', 'launchd policy does not prove automatic crash relaunch is disabled');
+      blocked(reasons, 'restart-policy-mismatch', 'launchd policy does not match the generated bounded conditional crash-relaunch contract');
     }
   }
 
@@ -1290,7 +1379,7 @@ export function observeResidentServiceDiagnostic(
         'restart-policy-mismatch',
         loadedRestartPolicy === null
           ? 'loaded launchd restart policy could not be proven from native runtime state'
-          : 'loaded launchd state does not prove automatic crash relaunch is disabled',
+          : 'loaded launchd state is incompatible with the generated conditional crash-relaunch hints',
       );
     }
   }
@@ -1342,21 +1431,30 @@ export function observeResidentServiceDiagnostic(
   }
 
   if (installedEnvironment.environment && loadedEnvironment.environment) {
-    const installedSafe = exactSafeEnvironment(installedEnvironment.environment, trustedHomePath);
-    const loadedSafe = exactSafeEnvironment(loadedEnvironment.environment, trustedHomePath);
+    const installedSafe = exactSafeEnvironment(
+      installedEnvironment.environment,
+      expectedEnvironment,
+      trustedHomePath,
+    );
+    const loadedSafe = exactSafeEnvironment(
+      loadedEnvironment.environment,
+      expectedEnvironment,
+      trustedHomePath,
+    );
     const observedSafe = installedSafe && loadedSafe;
     checks.environmentSafe = checks.environmentSafe === false ? false : observedSafe;
     if (!observedSafe && !reasons.some(({ code }) => code === 'service-environment-unsafe')) {
       blocked(
         reasons,
         'service-environment-unsafe',
-        'installed or loaded environment exposes PATH, Node, npm, loader, dynamic-linker, or shell startup influence',
+        'installed or loaded environment differs from the generated HOME and PATH contract or adds runtime-influence variables',
       );
     }
 
     if (manifestPayload && trustedHomePath !== null) {
       const signedEnvironmentBound = exactSafeEnvironment(
         manifestPayload.service.environment,
+        expectedEnvironment,
         trustedHomePath,
       );
       const installedExact = signedEnvironmentBound
