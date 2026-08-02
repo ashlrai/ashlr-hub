@@ -20,7 +20,11 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import type { AshlrConfig } from '../types.js';
+import type {
+  AshlrConfig,
+  ProposalCaptureGateCategory,
+  ProposalCaptureGateCode,
+} from '../types.js';
 import {
   detectVerifyCommands,
   runVerifyCommandAsync,
@@ -33,9 +37,13 @@ import {
 
 export interface CompletenessGateResult {
   pass: boolean;
+  /** Stable machine-readable outcome; consumers must not parse reason text. */
+  code: ProposalCaptureGateCode;
+  /** Bounded policy class for repair and retry decisions. */
+  category: ProposalCaptureGateCategory;
   /** True only when the caller requested cancellation. */
   cancelled?: boolean;
-  /** Human-readable reason for a blocked filing (absent on pass). */
+  /** Bounded human-readable summary; absent only for a verified pass. */
   reason?: string;
 }
 
@@ -90,7 +98,46 @@ function truncate(s: string): string {
 }
 
 function cancelledResult(reason: string): CompletenessGateResult & { cancelled: true } {
-  return { pass: false, cancelled: true, reason };
+  return {
+    pass: false,
+    code: 'cancelled',
+    category: 'cancellation',
+    cancelled: true,
+    reason,
+  };
+}
+
+function passedResult(): CompletenessGateResult {
+  return { pass: true, code: 'passed', category: 'passed' };
+}
+
+function actionableResult(
+  code: Exclude<ProposalCaptureGateCode, 'passed' | 'verification-unavailable' | 'cancelled' | 'gate-error'>,
+  reason: string,
+): CompletenessGateResult {
+  return { pass: false, code, category: 'actionable', reason };
+}
+
+function infrastructureResult(
+  code: 'verification-unavailable' | 'gate-error',
+  reason: string,
+  pass = false,
+): CompletenessGateResult {
+  return { pass, code, category: 'infrastructure', reason };
+}
+
+function verifyInfrastructureReason(
+  result: { failureCategory?: string; timedOut?: boolean },
+): string | undefined {
+  if (result.timedOut || result.failureCategory === 'timeout') return 'verification timed out';
+  if (
+    result.failureCategory === 'infra' ||
+    result.failureCategory === 'tool' ||
+    result.failureCategory === 'invalid-command'
+  ) {
+    return `verification unavailable: ${result.failureCategory}`;
+  }
+  return undefined;
 }
 
 /**
@@ -187,12 +234,21 @@ async function collectFailingTests(
   cfg: AshlrConfig,
   timeoutMs: number,
   signal?: AbortSignal,
-): Promise<{ ok: boolean; ids: Set<string>; cancelled?: boolean } | null> {
+): Promise<{
+  ok: boolean;
+  ids: Set<string>;
+  cancelled?: boolean;
+  infrastructureReason?: string;
+} | null> {
   const result = await runVerifyCommandAsync(cmd, dir, cfg, { timeoutMs, signal });
-  if (result.cancelled || signal?.aborted) {
+  if (result.cancelled || result.failureCategory === 'cancelled' || signal?.aborted) {
     return { ok: false, ids: new Set<string>(), cancelled: true };
   }
   if (result.timedOut) return null;
+  const infrastructureReason = verifyInfrastructureReason(result);
+  if (infrastructureReason) {
+    return { ok: false, ids: new Set<string>(), infrastructureReason };
+  }
   if (result.ok) return { ok: true, ids: new Set<string>() };
   return { ok: false, ids: parseFailedTestIds(result.output) };
 }
@@ -209,10 +265,10 @@ async function collectFailingTests(
  * Safe fallbacks:
  *   - Stash fails (no changes to stash, detached HEAD, etc.) → run AFTER only,
  *     pass if ok (original behaviour — cannot do delta without a baseline)
- *   - Baseline run times out → skip delta, return pass (log warning in reason)
- *   - Any unexpected error → return pass with warning (never hard-block on infra)
+ *   - Baseline/after timeout → preserve the non-blocking fallback with an infrastructure code
+ *   - Any unexpected delta error → preserve the non-blocking fallback with an infrastructure code
  *
- * Returns { pass: true } or { pass: false, reason }.
+ * Returns a bounded code/category for every result and never throws.
  */
 export async function runDeltaAwareTestCheck(
   testCmd: VerifyCommand,
@@ -235,16 +291,16 @@ export async function runDeltaAwareTestCheck(
         timeoutMs,
         signal,
       });
-      if (result.cancelled || signal?.aborted) {
+      if (result.cancelled || result.failureCategory === 'cancelled' || signal?.aborted) {
         return cancelledResult('self-verify cancelled: test');
       }
       if (!result.ok) {
-        return {
-          pass: false,
-          reason: `self-verify failed: test: ${truncate(result.output)}`,
-        };
+        const infrastructureReason = verifyInfrastructureReason(result);
+        return infrastructureReason
+          ? infrastructureResult('verification-unavailable', `self-verify ${infrastructureReason}: test`)
+          : actionableResult('test-regression', 'self-verify failed: test');
       }
-      return { pass: true };
+      return passedResult();
     }
 
     // Step 2: run baseline (pre-change)
@@ -264,9 +320,20 @@ export async function runDeltaAwareTestCheck(
       return cancelledResult('self-verify cancelled: test baseline');
     }
 
+    if (baseline?.infrastructureReason) {
+      return infrastructureResult(
+        'verification-unavailable',
+        `self-verify ${baseline.infrastructureReason}: test baseline`,
+      );
+    }
+
     if (baseline === null) {
-      // Baseline run timed out — safe fallback: don't hard-block
-      return { pass: true };
+      // Preserve the existing fallback, but do not label it as a verified pass.
+      return infrastructureResult(
+        'verification-unavailable',
+        'self-verify unavailable: test baseline timed out',
+        true,
+      );
     }
 
     // Step 4: run after (with agent changes)
@@ -276,9 +343,20 @@ export async function runDeltaAwareTestCheck(
       return cancelledResult('self-verify cancelled: test');
     }
 
+    if (after?.infrastructureReason) {
+      return infrastructureResult(
+        'verification-unavailable',
+        `self-verify ${after.infrastructureReason}: test`,
+      );
+    }
+
     if (after === null) {
-      // After run timed out — treat as unknown, don't hard-block
-      return { pass: true };
+      // Preserve the existing fallback, but do not label it as a verified pass.
+      return infrastructureResult(
+        'verification-unavailable',
+        'self-verify unavailable: test timed out',
+        true,
+      );
     }
 
     // Step 5: delta analysis
@@ -298,33 +376,34 @@ export async function runDeltaAwareTestCheck(
       }
       if (newFailures.size > 0) {
         const listed = [...newFailures].slice(0, 5).join('; ');
-        return {
-          pass: false,
-          reason: `self-verify failed: test: ${newFailures.size} new failure(s) introduced: ${truncate(listed)}`,
-        };
+        return actionableResult(
+          'test-regression',
+          `self-verify failed: test: ${newFailures.size} new failure(s) introduced: ${truncate(listed)}`,
+        );
       }
     } else {
       // No parseable IDs — fall back to ok-flag delta
       if (baseline.ok && !after.ok) {
         // Baseline was passing; change broke it — new regression
-        return {
-          pass: false,
-          reason: `self-verify failed: test: regression detected (test suite failed after change, was passing before)`,
-        };
+        return actionableResult(
+          'test-regression',
+          'self-verify failed: test: regression detected (test suite failed after change, was passing before)',
+        );
       }
       // baseline failed too (pre-existing) → tolerate
     }
 
-    return { pass: true };
+    return passedResult();
   } catch (err) {
     if (signal?.aborted) {
       return cancelledResult('self-verify cancelled: test');
     }
-    // Never hard-block on infrastructure error — log and pass
     const msg = err instanceof Error ? err.message : String(err);
-    // Surface as pass with logged warning; typecheck already guarded type safety
-    void msg; // would log in production; test environment doesn't need the noise
-    return { pass: true };
+    return infrastructureResult(
+      'gate-error',
+      `self-verify gate error: ${truncate(msg)}`,
+      true,
+    );
   }
 }
 
@@ -333,8 +412,9 @@ export async function runDeltaAwareTestCheck(
 // ---------------------------------------------------------------------------
 
 /**
- * Run the M275 completeness gate. Returns { pass: true } on success or
- * { pass: false, reason } when the run should NOT be filed as a proposal.
+ * Run the M275 completeness gate. `pass` preserves the capture policy while
+ * code/category distinguish verified success, actionable failure, unavailable
+ * infrastructure, and caller cancellation.
  *
  * @param opts - Gate inputs (worktreePath, diff, goal, cfg, isPartial).
  * @returns CompletenessGateResult — never throws.
@@ -353,17 +433,17 @@ export async function runCompletenessGate(
     // 1. Partial marker — engine did not complete cleanly
     // -----------------------------------------------------------------------
     if (isPartial === true) {
-      return {
-        pass: false,
-        reason: '[partial] run — engine timed out or exited non-zero; not filed',
-      };
+      return actionableResult(
+        'partial-run',
+        '[partial] run — engine timed out or exited non-zero; not filed',
+      );
     }
 
     // -----------------------------------------------------------------------
     // 2. Empty diff (defense-in-depth; M87 upstream already guards this)
     // -----------------------------------------------------------------------
     if (diff.files === 0 || diff.patch.trim().length === 0) {
-      return { pass: false, reason: 'empty diff — nothing to propose' };
+      return actionableResult('empty-diff', 'empty diff — nothing to propose');
     }
 
     // -----------------------------------------------------------------------
@@ -377,11 +457,10 @@ export async function runCompletenessGate(
       // Derive repo root from worktreePath (worktree shares the same lockfile
       // location as the source repo; also check worktreePath directly).
       if (repoHasLockfile(worktreePath) && !diffTouchesLockfile(diff.patch)) {
-        return {
-          pass: false,
-          reason:
-            'dependency change (package.json) lacks corresponding lockfile update',
-        };
+        return actionableResult(
+          'lockfile-mismatch',
+          'dependency change (package.json) lacks corresponding lockfile update',
+        );
       }
     }
 
@@ -398,14 +477,20 @@ export async function runCompletenessGate(
         timeoutMs: SELF_VERIFY_TIMEOUT_MS,
         signal,
       });
-      if (result.cancelled || signal?.aborted) {
+      if (result.cancelled || result.failureCategory === 'cancelled' || signal?.aborted) {
         return cancelledResult('self-verify cancelled: typecheck');
       }
       if (!result.ok) {
-        return {
-          pass: false,
-          reason: `self-verify failed: typecheck: ${truncate(result.output)}`,
-        };
+        const infrastructureReason = verifyInfrastructureReason(result);
+        return infrastructureReason
+          ? infrastructureResult(
+              'verification-unavailable',
+              `self-verify ${infrastructureReason}: typecheck`,
+            )
+          : actionableResult(
+              'typecheck-failed',
+              'self-verify failed: typecheck',
+            );
       }
     }
 
@@ -423,7 +508,10 @@ export async function runCompletenessGate(
         return cancelledResult(deltaResult.reason ?? 'self-verify cancelled: test');
       }
       if (!deltaResult.pass) {
-        return { pass: false, reason: deltaResult.reason };
+        return deltaResult;
+      }
+      if (deltaResult.category === 'infrastructure') {
+        return deltaResult;
       }
     }
 
@@ -431,13 +519,16 @@ export async function runCompletenessGate(
     if (signal?.aborted) {
       return cancelledResult('completeness gate cancelled');
     }
-    return { pass: true };
+    return passedResult();
   } catch (err) {
     if (opts.signal?.aborted) {
       return cancelledResult('completeness gate cancelled');
     }
     // Never throws — surface unexpected errors as a non-filing result.
     const msg = err instanceof Error ? err.message : String(err);
-    return { pass: false, reason: `completeness gate error: ${truncate(msg)}` };
+    return infrastructureResult(
+      'gate-error',
+      `completeness gate error: ${truncate(msg)}`,
+    );
   }
 }

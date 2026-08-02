@@ -1863,6 +1863,25 @@ export type RunProposalOutcomeKind =
   | 'proposal-disabled'
   | 'proposal-capture-error';
 
+/** Bounded result code emitted by the proposal completeness gate. */
+export type ProposalCaptureGateCode =
+  | 'passed'
+  | 'partial-run'
+  | 'empty-diff'
+  | 'lockfile-mismatch'
+  | 'typecheck-failed'
+  | 'test-regression'
+  | 'verification-unavailable'
+  | 'cancelled'
+  | 'gate-error';
+
+/** Stable policy class for deciding whether a blocked capture is repairable. */
+export type ProposalCaptureGateCategory =
+  | 'passed'
+  | 'actionable'
+  | 'infrastructure'
+  | 'cancellation';
+
 export interface RunProposalOutcome {
   kind: RunProposalOutcomeKind;
   reason: string;
@@ -1872,6 +1891,10 @@ export interface RunProposalOutcome {
   files?: number;
   insertions?: number;
   deletions?: number;
+  /** Structured completeness-gate code; never derived from persisted reason text. */
+  gateCode?: ProposalCaptureGateCode;
+  /** Bounded policy class for the gate code. */
+  gateCategory?: ProposalCaptureGateCategory;
 }
 
 /** Full persisted state of a run. Lives at ~/.ashlr/runs/<id>.json. */

@@ -162,7 +162,7 @@ describe('M275 · COMPLETENESS-GATE — runCompletenessGate()', () => {
       signal: controller.signal,
     });
 
-    expect(result.pass).toBe(true);
+    expect(result).toMatchObject({ pass: true, code: 'passed', category: 'passed' });
     expect(result.reason).toBeUndefined();
     // typecheck + baseline-test + after-test = 3 calls
     expect(runVerifyCommand).toHaveBeenCalledTimes(3);
@@ -185,7 +185,12 @@ describe('M275 · COMPLETENESS-GATE — runCompletenessGate()', () => {
       signal: controller.signal,
     });
 
-    expect(result).toMatchObject({ pass: false, cancelled: true });
+    expect(result).toMatchObject({
+      pass: false,
+      code: 'cancelled',
+      category: 'cancellation',
+      cancelled: true,
+    });
     expect(result.reason).toMatch(/cancelled/);
     expect(detectVerifyCommands).not.toHaveBeenCalled();
     expect(runVerifyCommand).not.toHaveBeenCalled();
@@ -232,7 +237,12 @@ describe('M275 · COMPLETENESS-GATE — runCompletenessGate()', () => {
     releaseCommand?.();
 
     const result = await pending;
-    expect(result).toMatchObject({ pass: false, cancelled: true });
+    expect(result).toMatchObject({
+      pass: false,
+      code: 'cancelled',
+      category: 'cancellation',
+      cancelled: true,
+    });
     expect(result.reason).toMatch(/typecheck.*cancelled|cancelled.*typecheck/);
   });
 
@@ -252,6 +262,7 @@ describe('M275 · COMPLETENESS-GATE — runCompletenessGate()', () => {
     });
 
     expect(result.pass).toBe(false);
+    expect(result).toMatchObject({ code: 'typecheck-failed', category: 'actionable' });
     expect(result.reason).toMatch(/typecheck/);
     // test should NOT run (short-circuit after typecheck fails)
     expect(runVerifyCommand).toHaveBeenCalledTimes(1);
@@ -277,6 +288,7 @@ describe('M275 · COMPLETENESS-GATE — runCompletenessGate()', () => {
     });
 
     expect(result.pass).toBe(false);
+    expect(result).toMatchObject({ code: 'test-regression', category: 'actionable' });
     expect(result.reason).toMatch(/test/);
   });
 
@@ -296,6 +308,7 @@ describe('M275 · COMPLETENESS-GATE — runCompletenessGate()', () => {
     });
 
     expect(result.pass).toBe(false);
+    expect(result).toMatchObject({ code: 'partial-run', category: 'actionable' });
     expect(result.reason).toMatch(/partial/);
     expect(detectVerifyCommands).not.toHaveBeenCalled();
     expect(runVerifyCommand).not.toHaveBeenCalled();
@@ -321,6 +334,7 @@ describe('M275 · COMPLETENESS-GATE — runCompletenessGate()', () => {
     });
 
     expect(result.pass).toBe(false);
+    expect(result).toMatchObject({ code: 'lockfile-mismatch', category: 'actionable' });
     expect(result.reason).toMatch(/lockfile/);
     expect(runVerifyCommand).not.toHaveBeenCalled();
   });
@@ -355,7 +369,7 @@ describe('M275 · COMPLETENESS-GATE — runCompletenessGate()', () => {
       cfg: makeCfg(),
     });
 
-    expect(result.pass).toBe(true);
+    expect(result).toMatchObject({ pass: true, code: 'passed', category: 'passed' });
   });
 
   it('passes when no verify commands exist (no test suite in repo)', async () => {
@@ -372,7 +386,7 @@ describe('M275 · COMPLETENESS-GATE — runCompletenessGate()', () => {
       cfg: makeCfg(),
     });
 
-    expect(result.pass).toBe(true);
+    expect(result).toMatchObject({ pass: true, code: 'passed', category: 'passed' });
     expect(runVerifyCommand).not.toHaveBeenCalled();
   });
 
@@ -425,6 +439,7 @@ describe('M275 · COMPLETENESS-GATE — runCompletenessGate()', () => {
 
     expect(result).toBeDefined();
     expect(result!.pass).toBe(false);
+    expect(result).toMatchObject({ code: 'gate-error', category: 'infrastructure' });
     expect(result!.reason).toMatch(/completeness gate error|spawnSync ENOENT/);
     expect(runVerifyCommand).not.toHaveBeenCalled();
   });
@@ -443,12 +458,13 @@ describe('M275 · COMPLETENESS-GATE — runCompletenessGate()', () => {
     });
 
     expect(result.pass).toBe(false);
+    expect(result).toMatchObject({ code: 'empty-diff', category: 'actionable' });
     expect(result.reason).toMatch(/empty diff/);
     expect(detectVerifyCommands).not.toHaveBeenCalled();
     expect(runVerifyCommand).not.toHaveBeenCalled();
   });
 
-  it('truncates long output in reason string to ~200 chars', async () => {
+  it('does not persist verifier output in the structured gate reason', async () => {
     const { runCompletenessGate } = await getGate();
     const { detectVerifyCommands, runVerifyCommand, existsSync } = await getMocks();
 
@@ -466,8 +482,34 @@ describe('M275 · COMPLETENESS-GATE — runCompletenessGate()', () => {
 
     expect(result.pass).toBe(false);
     expect(result.reason).toMatch(/typecheck/);
-    // Verify the reason is bounded (REASON_OUTPUT_CAP=200 + prefix overhead)
-    expect(result.reason!.length).toBeLessThan(400);
+    expect(result.reason).not.toContain('error TS2304');
+    expect(result.reason).not.toContain('x'.repeat(20));
+  });
+
+  it('separates verifier infrastructure failures from actionable code failures', async () => {
+    const { runCompletenessGate } = await getGate();
+    const { detectVerifyCommands, runVerifyCommandAsync, existsSync } = await getMocks();
+
+    existsSync.mockReturnValue(false);
+    detectVerifyCommands.mockReturnValue([TYPECHECK_CMD]);
+    runVerifyCommandAsync.mockResolvedValueOnce({
+      ...failResult(TYPECHECK_CMD, 'spawn failed'),
+      failureCategory: 'infra',
+    });
+
+    const result = await runCompletenessGate({
+      worktreePath: FAKE_WORKTREE,
+      diff: makeDiff(),
+      goal: 'classify verifier infrastructure',
+      cfg: makeCfg(),
+    });
+
+    expect(result).toMatchObject({
+      pass: false,
+      code: 'verification-unavailable',
+      category: 'infrastructure',
+    });
+    expect(result.reason).not.toContain('spawn failed');
   });
 });
 
@@ -496,7 +538,7 @@ describe('M275 · RUNNER — sync lockfile check', () => {
   it('empty diff still produces no proposal (M87 guard unchanged)', async () => {
     // This is a smoke test for the M87 guard — just ensures the swarm runner
     // module still imports correctly alongside the M275 changes.
-    const { captureSandboxAndCleanup } = await import('../src/core/swarm/runner.js').catch(() => null) ?? {};
+    const { captureSandboxAndCleanup: _captureSandboxAndCleanup } = await import('../src/core/swarm/runner.js').catch(() => null) ?? {};
     // captureSandboxAndCleanup is not exported — that's correct (internal function)
     // Just verify the module loads without error
     const mod = await import('../src/core/swarm/runner.js');

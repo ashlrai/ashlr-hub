@@ -18,6 +18,7 @@ import type { Proposal } from '../src/core/types.js';
 interface CancellationHarness {
   actions: Array<Record<string, unknown>>;
   createCalls: unknown[];
+  gateSignals: Array<AbortSignal | undefined>;
   lifecycle: string[];
 }
 
@@ -67,13 +68,20 @@ function durableInboxStore(
 function installHarness(opts: {
   repo: string;
   controller: AbortController;
-  abortAt: 'gate' | 'create';
+  abortAt: 'gate' | 'create' | 'none';
   proposalId: string;
+  gateResult?: {
+    pass: boolean;
+    code: 'passed' | 'typecheck-failed';
+    category: 'passed' | 'actionable';
+    reason?: string;
+  };
   producerStatus?: 'done' | 'failed';
   terminationReason?: 'error-exit';
 }): CancellationHarness {
   const actions: Array<Record<string, unknown>> = [];
   const createCalls: unknown[] = [];
+  const gateSignals: Array<AbortSignal | undefined> = [];
   const lifecycle: string[] = [];
 
   vi.doMock('../src/core/sandbox/worktree.js', () => ({
@@ -176,9 +184,10 @@ function installHarness(opts: {
   }));
 
   vi.doMock('../src/core/run/completeness-gate.js', () => ({
-    runCompletenessGate: async () => {
+    runCompletenessGate: async (gateOpts: { signal?: AbortSignal }) => {
+      gateSignals.push(gateOpts.signal);
       if (opts.abortAt === 'gate') opts.controller.abort();
-      return { pass: true };
+      return opts.gateResult ?? { pass: true, code: 'passed', category: 'passed' };
     },
   }));
 
@@ -194,7 +203,7 @@ function installHarness(opts: {
     recordDecision: vi.fn(),
   }));
 
-  return { actions, createCalls, lifecycle };
+  return { actions, createCalls, gateSignals, lifecycle };
 }
 
 afterEach(() => {
@@ -203,6 +212,54 @@ afterEach(() => {
 });
 
 describe('sandbox proposal cancellation commit point', () => {
+  it('persists only bounded gate metadata for an actionable capture block', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'ashlr-capture-gate-code-'));
+    mkdirSync(join(repo, '.git'));
+    writeFileSync(join(repo, 'seed.ts'), 'export const seed = true;\n');
+    const controller = new AbortController();
+    const harness = installHarness({
+      repo,
+      controller,
+      abortAt: 'none',
+      proposalId: 'must-not-file-gate-block',
+      gateResult: {
+        pass: false,
+        code: 'typecheck-failed',
+        category: 'actionable',
+        reason: 'self-verify failed: typecheck',
+      },
+    });
+
+    try {
+      const { runApiModelSandboxed } = await import(
+        '../src/core/run/sandboxed-engine.js?gate-code=' + randomUUID()
+      ) as typeof import('../src/core/run/sandboxed-engine.js');
+
+      const result = await runApiModelSandboxed('local-coder', 'capture candidate', {
+        foundry: {
+          completenessGate: true,
+          models: { 'local-coder': 'qwen2.5:72b-instruct-q4_K_M' },
+        },
+      } as never, {
+        sourceRepo: repo,
+        propose: true,
+        signal: controller.signal,
+      });
+
+      expect(result.proposalOutcome).toMatchObject({
+        kind: 'completeness-gate',
+        gateCode: 'typecheck-failed',
+        gateCategory: 'actionable',
+      });
+      expect(result.proposalOutcome).not.toHaveProperty('diff');
+      expect(result.proposalOutcome).not.toHaveProperty('output');
+      expect(harness.createCalls).toHaveLength(0);
+      expect(harness.gateSignals).toEqual([controller.signal]);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
   it('propagates cancellation before create as an aborted api-model run with usage', async () => {
     const repo = mkdtempSync(join(tmpdir(), 'ashlr-capture-cancel-before-'));
     mkdirSync(join(repo, '.git'));
@@ -238,6 +295,7 @@ describe('sandbox proposal cancellation commit point', () => {
       });
       expect(result).not.toHaveProperty('proposalId');
       expect(harness.createCalls).toHaveLength(0);
+      expect(harness.gateSignals).toEqual([controller.signal]);
       expect(harness.actions.at(-1)).toMatchObject({
         runEventSummary: { status: 'aborted', tokensIn: 13, tokensOut: 6 },
       });
@@ -402,6 +460,7 @@ describe('sandbox proposal cancellation commit point', () => {
       expect(result).not.toHaveProperty('proposalId');
       expect(result).not.toHaveProperty('proposalOutcome');
       expect(harness.createCalls).toHaveLength(0);
+      expect(harness.gateSignals).toEqual([controller.signal]);
       expect(harness.actions.at(-1)).toMatchObject({
         outcome: 'blocked',
         runEventSummary: {

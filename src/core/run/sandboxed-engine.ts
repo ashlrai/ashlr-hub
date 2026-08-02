@@ -300,6 +300,33 @@ function proposalOutcome(
   };
 }
 
+function proposalGateOutcome(
+  kind: 'completeness-gate' | 'partial-completeness-gate',
+  diff: { files: number; insertions: number; deletions: number },
+  gate: Partial<Pick<
+    Awaited<ReturnType<typeof runCompletenessGate>>,
+    'code' | 'category' | 'reason'
+  >>,
+): RunProposalOutcome {
+  const label = kind === 'partial-completeness-gate'
+    ? 'partial completeness gate'
+    : 'completeness gate';
+  const gateCode = gate.code ?? (
+    kind === 'partial-completeness-gate' ? 'partial-run' : 'gate-error'
+  );
+  const gateCategory = gate.category ?? (
+    kind === 'partial-completeness-gate' ? 'actionable' : 'infrastructure'
+  );
+  const reason = gate.code
+    ? `${label} blocked proposal (${gateCode})`
+    : gate.reason ?? `${label} blocked proposal (${gateCode})`;
+  return {
+    ...proposalOutcome(kind, reason, diff),
+    gateCode,
+    gateCategory,
+  };
+}
+
 function duplicateDiffOutcome(proposal: Proposal, diff: SandboxDiff): RunProposalOutcome {
   return proposalOutcome(
     'proposal-disabled',
@@ -1092,10 +1119,12 @@ export async function captureSandboxedProposal(
 
     let reviewOnlyVerifyResult: ProposalVerifyResult | undefined;
     if (opts.forceGateBlockReason) {
-      const outcome = proposalOutcome(
+      const outcome = proposalGateOutcome(
         opts.isPartial ? 'partial-completeness-gate' : 'completeness-gate',
-        opts.forceGateBlockReason,
         diff,
+        opts.isPartial
+          ? { code: 'partial-run', category: 'actionable' }
+          : { code: 'test-regression', category: 'actionable' },
       );
       if (!opts.isPartial) {
         return {
@@ -1116,13 +1145,14 @@ export async function captureSandboxedProposal(
         goal,
         cfg,
         ...(opts.isPartial ? { isPartial: true } : {}),
+        ...(opts.signal ? { signal: opts.signal } : {}),
       });
       if (opts.signal?.aborted) return cancelledCapture();
       if (!gateResult.pass) {
-        blockedOutcome = proposalOutcome(
+        blockedOutcome = proposalGateOutcome(
           opts.isPartial ? 'partial-completeness-gate' : 'completeness-gate',
-          `${opts.isPartial ? 'partial ' : ''}completeness gate blocked proposal: ${gateResult.reason ?? 'blocked'}`,
           diff,
+          gateResult,
         );
         if (opts.isPartial) {
           reviewOnlyVerifyResult = captureGateVerifyResult(blockedOutcome.reason);
@@ -1980,6 +2010,7 @@ export async function runEngineSandboxed(
               diff: effDiff,
               goal,
               cfg,
+              ...(opts.signal ? { signal: opts.signal } : {}),
             });
             if (opts.signal?.aborted) return cancelledAfterSpawn();
             // M331: verify-to-green — bounded repair loop (DEFAULT OFF). When
@@ -2006,6 +2037,7 @@ export async function runEngineSandboxed(
                     diff: d,
                     goal,
                     cfg,
+                    ...(opts.signal ? { signal: opts.signal } : {}),
                   });
                   if (opts.signal?.aborted) return { pass: false, reason: 'cancelled' };
                   return { pass: g.pass, reason: String(g.reason ?? '') };
@@ -2065,8 +2097,9 @@ export async function runEngineSandboxed(
                   diffHash = hashDiff(scrubbed);
                   provenanceSig = signProvenance(engineModel, tier, diffHash);
                   _gateResult = {
-                    ..._gateResult,
                     pass: true,
+                    code: 'passed',
+                    category: 'passed',
                     reason: `verify-to-green: green after ${_v2gOut.iterations} repair iteration(s)`,
                   };
                   console.log(`[M331] ${_gateResult.reason}`);
@@ -2075,10 +2108,10 @@ export async function runEngineSandboxed(
             }
             if (!_gateResult.pass) {
               console.log(`[M275] completeness gate blocked proposal: ${_gateResult.reason}`);
-              proposalOutcomeResult = proposalOutcome(
+              proposalOutcomeResult = proposalGateOutcome(
                 'completeness-gate',
-                `completeness gate blocked proposal: ${_gateResult.reason ?? 'blocked'}`,
                 effDiff,
+                _gateResult,
               );
               _m275ShouldFile = false;
             }
