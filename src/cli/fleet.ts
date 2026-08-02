@@ -915,6 +915,10 @@ export function formatFleetStatus(s: FleetStatus): string {
     lines.push(`  verdict:    ${promotion.verdict}`);
     lines.push(`  observed:   ${promotion.observedAt ?? 'invalid'}`);
     lines.push(`  evidence:   ${promotion.evidenceReady ? 'complete' : 'incomplete'}`);
+    lines.push(
+      `  scope caps: ${promotion.scopeCaps.maxFiles ?? 'unavailable'} file(s), ` +
+        `${promotion.scopeCaps.maxLines ?? 'unavailable'} changed line(s)`,
+    );
     lines.push(`  top block:  ${promotion.primaryBlocker.code}`);
     lines.push(`  blockers:   ${promotion.blockers.map((entry) => entry.code).join(', ') || 'none'}`);
     lines.push('  authority:  activation=false');

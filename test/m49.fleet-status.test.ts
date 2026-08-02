@@ -9390,11 +9390,15 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('machines:  unavailable');
     expect(out).not.toContain('events:    0\n');
     expect(out).toContain('Auto-merge canary promotion readiness (observation only):');
+    expect(out).toContain('scope caps: unavailable file(s), unavailable changed line(s)');
     expect(status.autoMergeCanaryPromotionReadiness).toMatchObject({
       authority: 'observation-only',
       verdict: 'blocked',
       activationPermitted: false,
+      scopeCaps: { maxFiles: null, maxLines: null },
     });
+    expect(status.autoMergeCanaryPromotionReadiness?.blockers.map((entry) => entry.code))
+      .toContain('scope-caps-unavailable');
   });
 
   it('omits the paused banner when not killed', () => {

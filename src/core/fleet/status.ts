@@ -1419,6 +1419,8 @@ export function buildAutoMergeCanaryPromotionReadiness(
       allowSelfMerge: autoMerge?.allowSelfMerge === true,
       allowWithoutVerification: autoMerge?.allowWithoutVerification === true,
       localMergeFallback: autoMerge?.enabled === true && autoMerge.pushToRemote !== true,
+      maxAutomergeFiles: autoMerge?.maxAutomergeFiles ?? null,
+      maxAutomergeLines: autoMerge?.maxAutomergeLines ?? null,
     },
   };
   return evaluateAutoMergeCanaryPromotionReadiness(input);
@@ -3942,6 +3944,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       },
       policy: {
         allowSelfMerge: true, allowWithoutVerification: true, localMergeFallback: true,
+        maxAutomergeFiles: null, maxAutomergeLines: null,
       },
     });
   }

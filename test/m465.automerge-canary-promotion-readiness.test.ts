@@ -64,6 +64,8 @@ function readyInput(): AutoMergeCanaryPromotionReadinessInput {
       allowSelfMerge: false,
       allowWithoutVerification: false,
       localMergeFallback: false,
+      maxAutomergeFiles: 4,
+      maxAutomergeLines: 150,
     },
   };
 }
@@ -73,12 +75,13 @@ describe('M465 auto-merge canary promotion readiness', () => {
     const result = evaluateAutoMergeCanaryPromotionReadiness(readyInput());
 
     expect(result).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       authority: 'observation-only',
       observedAt: '2026-07-29T02:00:00.000Z',
       verdict: 'evidence-ready',
       evidenceReady: true,
       activationPermitted: false,
+      scopeCaps: { maxFiles: 4, maxLines: 150 },
       blockers: [],
       authorityBlockers: [{
         code: 'enforcement-unsupported',
@@ -136,6 +139,31 @@ describe('M465 auto-merge canary promotion readiness', () => {
       'unsafe-merge-policy',
     ]);
     expect(result.activationPermitted).toBe(false);
+  });
+
+  it('fails closed when explicit scope caps are missing or malformed', () => {
+    const missing = readyInput() as unknown as Record<string, Record<string, unknown>>;
+    delete missing['policy']!['maxAutomergeFiles'];
+    delete missing['policy']!['maxAutomergeLines'];
+
+    const missingResult = evaluateAutoMergeCanaryPromotionReadiness(
+      missing as unknown as AutoMergeCanaryPromotionReadinessInput,
+    );
+    expect(missingResult).toMatchObject({
+      evidenceReady: false,
+      activationPermitted: false,
+      scopeCaps: { maxFiles: null, maxLines: null },
+      blockers: [{ code: 'scope-caps-unavailable', severity: 'critical' }],
+    });
+
+    const malformed = readyInput();
+    malformed.policy.maxAutomergeFiles = 1.5;
+    malformed.policy.maxAutomergeLines = Number.POSITIVE_INFINITY;
+    const malformedResult = evaluateAutoMergeCanaryPromotionReadiness(malformed);
+    expect(malformedResult.scopeCaps).toEqual({ maxFiles: null, maxLines: null });
+    expect(malformedResult.blockers.map((entry) => entry.code)).toEqual([
+      'scope-caps-unavailable',
+    ]);
   });
 
   it('withholds readiness for canary mismatches, inspection errors, and adverse outcomes', () => {

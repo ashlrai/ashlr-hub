@@ -1,4 +1,4 @@
-export const AUTOMERGE_CANARY_PROMOTION_READINESS_SCHEMA_VERSION = 1 as const;
+export const AUTOMERGE_CANARY_PROMOTION_READINESS_SCHEMA_VERSION = 2 as const;
 export const AUTOMERGE_CANARY_PROMOTION_AUTHORITY = 'observation-only' as const;
 
 const MAX_FUTURE_SKEW_MS = 60_000;
@@ -21,6 +21,7 @@ export type AutoMergeCanaryPromotionBlockerCode =
   | 'post-merge-source-unhealthy'
   | 'post-merge-cohort-insufficient'
   | 'post-merge-adverse-observed'
+  | 'scope-caps-unavailable'
   | 'unsafe-merge-policy'
   | 'enforcement-unsupported';
 
@@ -86,6 +87,8 @@ export interface AutoMergeCanaryPromotionReadinessInput {
     allowSelfMerge: boolean;
     allowWithoutVerification: boolean;
     localMergeFallback: boolean;
+    maxAutomergeFiles: number | null;
+    maxAutomergeLines: number | null;
   };
 }
 
@@ -96,6 +99,10 @@ export interface AutoMergeCanaryPromotionReadiness {
   verdict: 'blocked' | 'evidence-ready';
   evidenceReady: boolean;
   activationPermitted: false;
+  scopeCaps: {
+    maxFiles: number | null;
+    maxLines: number | null;
+  };
   blockers: AutoMergeCanaryPromotionBlocker[];
   authorityBlockers: AutoMergeCanaryPromotionBlocker[];
   primaryBlocker: AutoMergeCanaryPromotionBlocker;
@@ -103,6 +110,10 @@ export interface AutoMergeCanaryPromotionReadiness {
 
 function nonNegativeInteger(value: number): boolean {
   return Number.isSafeInteger(value) && value >= 0;
+}
+
+function positiveInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1;
 }
 
 function canonicalEpochTime(value: number): string | null {
@@ -343,6 +354,20 @@ export function evaluateAutoMergeCanaryPromotionReadiness(
     ));
   }
 
+  const maxFiles = positiveInteger(input.policy.maxAutomergeFiles)
+    ? input.policy.maxAutomergeFiles
+    : null;
+  const maxLines = positiveInteger(input.policy.maxAutomergeLines)
+    ? input.policy.maxAutomergeLines
+    : null;
+  if (maxFiles === null || maxLines === null) {
+    blockers.push(blocker(
+      'scope-caps-unavailable',
+      'critical',
+      'Explicit positive-integer file and line scope caps are required for promotion evidence.',
+    ));
+  }
+
   if (
     input.policy.allowSelfMerge !== false ||
     input.policy.allowWithoutVerification !== false ||
@@ -368,6 +393,7 @@ export function evaluateAutoMergeCanaryPromotionReadiness(
     verdict: evidenceReady ? 'evidence-ready' : 'blocked',
     evidenceReady,
     activationPermitted: false,
+    scopeCaps: { maxFiles, maxLines },
     blockers,
     authorityBlockers,
     primaryBlocker: blockers[0] ?? authorityBlockers[0]!,
