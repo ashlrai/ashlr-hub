@@ -79,6 +79,7 @@ const mockAssertMayMutate = vi.fn();
 vi.mock('../src/core/sandbox/policy.js', () => ({
   killSwitchOn: () => mockKillSwitchOn(),
   assertMayMutate: (repo: string) => mockAssertMayMutate(repo),
+  canonicalFilesystemPathIdentity: (repo: string) => repo,
   listEnrolled: vi.fn(() => []),
 }));
 

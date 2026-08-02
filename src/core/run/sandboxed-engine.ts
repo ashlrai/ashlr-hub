@@ -629,7 +629,11 @@ function sandboxedProducerCausalMetadata(fields: {
   const summary = runEventSummary({
     runId: fields.runId,
     status: fields.status,
-    outcome: fields.outcome?.isPartial === true ? 'gate-blocked' : fields.outcome?.kind,
+    outcome: fields.outcome?.kind === 'filed' && fields.outcome.isPartial !== true
+      ? 'proposal-created'
+      : fields.outcome?.isPartial === true
+        ? 'gate-blocked'
+        : fields.outcome?.kind,
     proposalCreated: fields.outcome?.kind === 'filed' && fields.outcome.isPartial !== true,
     proposalId: fields.proposalId ?? fields.outcome?.proposalId,
     diffFiles: fields.outcome?.files,

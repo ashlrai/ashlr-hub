@@ -341,7 +341,7 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     expect(proposal['runEventSummary']).toMatchObject({
       runId: result.state.id,
       status: 'done',
-      outcome: 'filed',
+      outcome: 'proposal-created',
       proposalCreated: true,
       diffFiles: 1,
       diffLines: 2,

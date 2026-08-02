@@ -92,7 +92,7 @@ function proposalInput(
     runEventSummary: {
       runId,
       status: 'done',
-      outcome: 'filed',
+      outcome: 'proposal-created',
       proposalCreated: true,
     },
     ...overrides,
@@ -118,7 +118,7 @@ describe('proposal dedup authority', () => {
       runEventSummary: {
         runId: 'run-proposal-dedup-authority',
         status: 'done',
-        outcome: 'filed',
+        outcome: 'proposal-created',
         proposalCreated: true,
         actionCounts: {
           proposalCreated: 1,
@@ -228,7 +228,7 @@ describe('proposal dedup authority', () => {
       runEventSummary: {
         runId: `run-contradiction-${_case.replace(/\s+/g, '-')}`,
         status: 'done',
-        outcome: 'filed',
+        outcome: 'proposal-created',
         proposalCreated: true,
         actionCounts,
       },

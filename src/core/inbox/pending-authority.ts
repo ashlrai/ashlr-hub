@@ -183,7 +183,7 @@ export function validatePendingAuthorityRunSummary(proposal: Proposal): PendingA
   }
 
   const exact = summary.status === 'done' &&
-    summary.outcome === 'filed' &&
+    summary.outcome === 'proposal-created' &&
     summary.proposalCreated === true &&
     summary.proposalId === proposal.id;
   return exact

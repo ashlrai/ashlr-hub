@@ -22,6 +22,7 @@
  *    imported; loop.ts uses the old runConductor (byte-identical).
  */
 
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -29,6 +30,7 @@ import type { AshlrConfig, EngineId, Proposal, RunProposalOutcome } from './type
 import type { SandboxedEngineResult } from './run/sandboxed-engine.js';
 import type { AuthoritativePendingProposalExpectation } from './inbox/pending-authority.js';
 import { isSafeExecutionIdentity } from './fleet/attempt-identity.js';
+import { canonicalFilesystemPathIdentity } from './sandbox/policy.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -52,6 +54,8 @@ export interface TaskSpec {
   dispatchedAt?: string;
   /** Proposal id returned by runEngineSandboxed. */
   proposalId?: string;
+  /** Non-authoritative proposal id retained for independent settlement rechecks. */
+  candidateProposalId?: string;
   /** Error message if last dispatch attempt failed. */
   lastError?: string;
   /** M287: count of dispatch attempts that produced no proposal (retry guard). */
@@ -80,8 +84,8 @@ export interface SimpleConductorResult {
 type ProposalCaptureClassification =
   | { kind: 'newly-filed'; proposalId: string }
   | { kind: 'duplicate-owned'; proposalId: string }
-  | { kind: 'recoverable-failure'; reason: string }
-  | { kind: 'rejected'; reason: string };
+  | { kind: 'recoverable-failure'; reason: string; proposalId?: string }
+  | { kind: 'rejected'; reason: string; proposalId?: string };
 
 type ProposalLoader = (id: string) => Proposal | null;
 type PendingAuthorityVerifier = (
@@ -102,6 +106,62 @@ const PROPOSAL_OUTCOME_KEYS = new Set([
 const CAPTURE_FAILURE_ATTEMPT_LIMIT = 3;
 const CAPTURE_FAILURE_BASE_COOLDOWN_MS = 15 * 60_000;
 const CAPTURE_FAILURE_MAX_COOLDOWN_MS = 24 * 60 * 60_000;
+const SIMPLE_CONDUCTOR_TASK_GENERATION_DOMAIN = 'ashlr.simple-conductor-task-generation.v1';
+
+export interface SimpleConductorTaskAuthority {
+  workItemId: string;
+  workItemGenerationId: string;
+  repo: string;
+  instruction: string;
+  engine: EngineId;
+  rowFingerprint: string;
+}
+
+function stableJson(value: unknown): string {
+  if (value === undefined) return 'undefined';
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((entry) => stableJson(entry)).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(',')}}`;
+}
+
+function taskEngine(task: TaskSpec): EngineId {
+  return (task.engine ?? 'claude') as EngineId;
+}
+
+export function simpleConductorWorkItemGenerationId(task: Pick<TaskSpec, 'id' | 'repo' | 'instruction' | 'engine'>): string {
+  const canonicalRepo = canonicalFilesystemPathIdentity(task.repo, { foldWindowsCase: false }) ?? task.repo;
+  return createHash('sha256')
+    .update(stableJson({
+      domain: SIMPLE_CONDUCTOR_TASK_GENERATION_DOMAIN,
+      version: 1,
+      id: task.id,
+      repo: canonicalRepo,
+      instruction: task.instruction,
+      engine: task.engine ?? 'claude',
+    }))
+    .digest('hex');
+}
+
+function taskAuthority(task: TaskSpec): SimpleConductorTaskAuthority {
+  return {
+    workItemId: task.id,
+    workItemGenerationId: simpleConductorWorkItemGenerationId(task),
+    repo: task.repo,
+    instruction: task.instruction,
+    engine: taskEngine(task),
+    rowFingerprint: stableJson(task),
+  };
+}
+
+function taskStillMatchesAuthority(task: TaskSpec, authority: SimpleConductorTaskAuthority): boolean {
+  return task.id === authority.workItemId &&
+    task.repo === authority.repo &&
+    task.instruction === authority.instruction &&
+    taskEngine(task) === authority.engine &&
+    simpleConductorWorkItemGenerationId(task) === authority.workItemGenerationId &&
+    stableJson(task) === authority.rowFingerprint;
+}
 
 function exactProposalOutcome(value: unknown): RunProposalOutcome | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
@@ -163,6 +223,7 @@ function runStateMatchesCapture(
 function classifyProposalCapture(
   result: SandboxedEngineResult,
   task: TaskSpec,
+  authority: SimpleConductorTaskAuthority,
   cfg: AshlrConfig,
   loadProposal: ProposalLoader,
   verifyPendingAuthority: PendingAuthorityVerifier,
@@ -170,15 +231,34 @@ function classifyProposalCapture(
   const topLevel = exactProposalOutcome(result.proposalOutcome);
   const stateLevel = exactProposalOutcome(result.state.proposalOutcome);
   if (!topLevel || !stateLevel || !proposalOutcomesMatch(topLevel, stateLevel)) {
+    const candidateProposalId = topLevel?.proposalId && stateLevel?.proposalId === topLevel.proposalId
+      ? topLevel.proposalId
+      : undefined;
     return recoverableCaptureFailure(topLevel, stateLevel)
-      ? { kind: 'recoverable-failure', reason: 'proposal capture outcomes require persistence reconciliation' }
-      : { kind: 'rejected', reason: 'proposal capture outcomes are missing, malformed, or contradictory' };
+      ? {
+          kind: 'recoverable-failure',
+          reason: 'proposal capture outcomes require persistence reconciliation',
+          ...(candidateProposalId ? { proposalId: candidateProposalId } : {}),
+        }
+      : {
+          kind: 'rejected',
+          reason: 'proposal capture outcomes are missing, malformed, or contradictory',
+          ...(candidateProposalId ? { proposalId: candidateProposalId } : {}),
+        };
   }
   if (topLevel.kind === 'proposal-capture-error') {
-    return { kind: 'recoverable-failure', reason: 'proposal capture requires persistence reconciliation' };
+    return {
+      kind: 'recoverable-failure',
+      reason: 'proposal capture requires persistence reconciliation',
+      ...(topLevel.proposalId ? { proposalId: topLevel.proposalId } : {}),
+    };
   }
   if (topLevel.isPartial === true || result.state.status !== 'done') {
-    return { kind: 'rejected', reason: 'partial or failed producer capture is not authoritative' };
+    return {
+      kind: 'rejected',
+      reason: 'partial or failed producer capture is not authoritative',
+      ...(topLevel.proposalId ? { proposalId: topLevel.proposalId } : {}),
+    };
   }
 
   const proposalId = topLevel.proposalId;
@@ -197,7 +277,11 @@ function classifyProposalCapture(
     }
     disposition = 'duplicate-owned';
   } else {
-    return { kind: 'rejected', reason: `proposal outcome ${topLevel.kind} grants no task settlement authority` };
+    return {
+      kind: 'rejected',
+      reason: `proposal outcome ${topLevel.kind} grants no task settlement authority`,
+      ...(topLevel.proposalId ? { proposalId: topLevel.proposalId } : {}),
+    };
   }
 
   if (!runStateMatchesCapture(result, topLevel, proposalId, disposition)) {
@@ -215,8 +299,8 @@ function classifyProposalCapture(
     repo: task.repo,
     origin: 'agent',
     kind: 'patch',
-    workItemId: undefined,
-    workItemGenerationId: undefined,
+    workItemId: authority.workItemId,
+    workItemGenerationId: authority.workItemGenerationId,
     isPartial: false,
     ...(disposition === 'newly-filed'
       ? { runId: result.state.id, trajectoryId: `run:${result.state.id}` }
@@ -224,10 +308,18 @@ function classifyProposalCapture(
   };
   try {
     if (!verifyPendingAuthority(proposal, expectation, cfg)) {
-      return { kind: 'recoverable-failure', reason: 'proposal store lacks exact authoritative pending evidence' };
+      return {
+        kind: 'recoverable-failure',
+        reason: 'proposal store lacks exact authoritative pending evidence',
+        proposalId,
+      };
     }
   } catch {
-    return { kind: 'recoverable-failure', reason: 'proposal authority verification failed closed' };
+    return {
+      kind: 'recoverable-failure',
+      reason: 'proposal authority verification failed closed',
+      proposalId,
+    };
   }
   return { kind: disposition, proposalId };
 }
@@ -235,6 +327,53 @@ function classifyProposalCapture(
 function captureFailureCooldownMs(attempts: number): number {
   const exponent = Math.max(0, Math.min(10, attempts - CAPTURE_FAILURE_ATTEMPT_LIMIT));
   return Math.min(CAPTURE_FAILURE_MAX_COOLDOWN_MS, CAPTURE_FAILURE_BASE_COOLDOWN_MS * 2 ** exponent);
+}
+
+function pendingAuthorityExpectation(
+  proposalId: string,
+  task: TaskSpec,
+  authority: SimpleConductorTaskAuthority,
+): AuthoritativePendingProposalExpectation {
+  return {
+    id: proposalId,
+    repo: task.repo,
+    origin: 'agent',
+    kind: 'patch',
+    workItemId: authority.workItemId,
+    workItemGenerationId: authority.workItemGenerationId,
+    isPartial: false,
+  };
+}
+
+function loadAuthoritativeCandidate(
+  task: TaskSpec,
+  authority: SimpleConductorTaskAuthority,
+  cfg: AshlrConfig,
+  loadProposal: ProposalLoader,
+  verifyPendingAuthority: PendingAuthorityVerifier,
+): Proposal | null {
+  const candidateId = task.candidateProposalId ?? task.proposalId;
+  if (!candidateId || !isSafeExecutionIdentity(candidateId)) return null;
+  let proposal: Proposal | null;
+  try {
+    proposal = loadProposal(candidateId);
+  } catch {
+    return null;
+  }
+  if (!verifyPendingAuthority(proposal, pendingAuthorityExpectation(candidateId, task, authority), cfg)) {
+    return null;
+  }
+  return proposal;
+}
+
+function candidateStillPending(task: TaskSpec, loadProposal: ProposalLoader): boolean {
+  const candidateId = task.candidateProposalId ?? task.proposalId;
+  if (!candidateId || !isSafeExecutionIdentity(candidateId)) return false;
+  try {
+    return loadProposal(candidateId)?.status === 'pending';
+  } catch {
+    return true;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -334,6 +473,18 @@ export async function runSimpleConductor(
   const { resolveEngineSpec } = await import('./run/engine-registry.js');
   const { getResourceSnapshot } = await import('./fabric/resource-monitor.js');
 
+  function settleTaskIfCurrent(
+    authority: SimpleConductorTaskAuthority,
+    update: (current: TaskSpec) => TaskSpec,
+  ): boolean {
+    const latest = readTasks();
+    const idx = latest.findIndex((candidate) => candidate.id === authority.workItemId);
+    if (idx === -1 || !taskStillMatchesAuthority(latest[idx], authority)) return false;
+    latest[idx] = update(latest[idx]);
+    writeTasks(latest);
+    return true;
+  }
+
   // M300: pre-fetch resource snapshot once per tick (cached 30s, never throws).
   let resourceSnap: Awaited<ReturnType<typeof getResourceSnapshot>> | null = null;
   try {
@@ -382,12 +533,11 @@ export async function runSimpleConductor(
     }
   }
 
-  // Re-read the mutable tasks array so we can write back updates.
-  const mutableTasks = readTasks();
   let dispatched = 0;
 
   for (const task of tasks) {
     if (dispatched >= MAX_TASKS_PER_CYCLE) break;
+    const authority = taskAuthority(task);
 
     // Skip done tasks.
     if (task.done) continue;
@@ -399,17 +549,78 @@ export async function runSimpleConductor(
       if (Number.isFinite(retryAtMs) && retryAtMs > Date.now()) continue;
     }
 
-    // Skip tasks whose filed proposal is still PENDING (in-flight guard).
-    if (task.proposalId && inFlightProposalIds.has(task.proposalId)) continue;
-
-    result.tasksAttempted++;
-
     if (opts.dryRun) {
-      // Dry-run: record intent only — no dispatch, no write.
+      // Dry-run: record intent only — no dispatch, proposal recheck, or write.
+      result.tasksAttempted++;
       console.log(`[simple-conductor] dry-run: would dispatch task ${task.id} → ${task.repo}`);
       dispatched++;
       continue;
     }
+
+    const authoritativeCandidate = loadAuthoritativeCandidate(
+      task,
+      authority,
+      cfg,
+      loadProposal,
+      isAuthoritativeDurablePendingProposal,
+    );
+    if (authoritativeCandidate) {
+      if (settleTaskIfCurrent(authority, (current) => {
+        const {
+          lastError: _lastError,
+          attempts: _attempts,
+          captureFailureState: _captureFailureState,
+          retryAfter: _retryAfter,
+          candidateProposalId: _candidateProposalId,
+          ...settledTask
+        } = current;
+        return {
+          ...settledTask,
+          done: true,
+          dispatchedAt: new Date().toISOString(),
+          proposalId: authoritativeCandidate.id,
+          proposalDisposition: 'duplicate-owned',
+        };
+      })) {
+        result.duplicateProposalsOwned++;
+      } else {
+        result.errors.push({
+          taskId: task.id,
+          error: 'task row changed before pending proposal settlement',
+        });
+      }
+      continue;
+    }
+
+    if (candidateStillPending(task, loadProposal)) {
+      const updated = settleTaskIfCurrent(authority, (current) => {
+        const attempts = (current.attempts ?? 0) + 1;
+        return {
+          ...current,
+          dispatchedAt: new Date().toISOString(),
+          lastError: 'candidate proposal remains pending but lacks exact settlement authority',
+          attempts,
+          done: false,
+          captureFailureState: 'cooling',
+          retryAfter: new Date(Date.now() + captureFailureCooldownMs(attempts)).toISOString(),
+        };
+      });
+      if (updated) {
+        result.recoverableFailures++;
+        result.coolingFailures++;
+      } else {
+        result.errors.push({
+          taskId: task.id,
+          error: 'task row changed before pending proposal recheck',
+        });
+      }
+      continue;
+    }
+
+    // Skip tasks whose filed proposal is still PENDING (legacy in-flight guard).
+    if (task.proposalId && inFlightProposalIds.has(task.proposalId)) continue;
+
+    result.tasksAttempted++;
 
     // assertMayMutate — skip + log if unenrolled or kill switch.
     try {
@@ -443,6 +654,8 @@ export async function runSimpleConductor(
 
       const sandboxOpts = {
         sourceRepo: task.repo,
+        workItemId: authority.workItemId,
+        workItemGenerationId: authority.workItemGenerationId,
         budget: {
           // M287: raised from 50k/40 — substantial high-value work (new file +
           // wiring + test + iterate-to-green) exhausted the old budget on
@@ -460,64 +673,71 @@ export async function runSimpleConductor(
       const capture = classifyProposalCapture(
         sandboxResult,
         task,
+        authority,
         cfg,
         loadProposal,
         isAuthoritativeDurablePendingProposal,
       );
 
-      // M287: mark done ONLY when a proposal was actually filed. A dispatch that
-      // produced no proposal (empty/incomplete diff, blocked by verify) is NOT
-      // success. Non-authoritative production stops after three attempts; capture
-      // infrastructure failures remain recoverable and enter bounded cooling.
-      const idx = mutableTasks.findIndex((t) => t.id === task.id);
-      if (idx !== -1) {
+      // M287: mark done ONLY when a proposal was actually filed and verified as
+      // authoritative for this task generation. Non-authoritative outcomes stay
+      // retryable and enter bounded cooling after repeated failures.
+      const updated = settleTaskIfCurrent(authority, (current) => {
         if (capture.kind === 'newly-filed' || capture.kind === 'duplicate-owned') {
           const {
             lastError: _lastError,
             attempts: _attempts,
             captureFailureState: _captureFailureState,
             retryAfter: _retryAfter,
+            candidateProposalId: _candidateProposalId,
             ...settledTask
-          } = mutableTasks[idx];
-          mutableTasks[idx] = {
+          } = current;
+          return {
             ...settledTask,
             done: true,
             dispatchedAt: new Date().toISOString(),
             proposalId: capture.proposalId,
             proposalDisposition: capture.kind,
           };
-        } else {
-          const attempts = ((mutableTasks[idx].attempts ?? 0) + 1);
-          const recoverable = capture.kind === 'recoverable-failure';
-          const cooling = recoverable && attempts >= CAPTURE_FAILURE_ATTEMPT_LIMIT;
-          const { proposalId: _proposalId, proposalDisposition: _proposalDisposition, ...retryableTask } = mutableTasks[idx];
-          mutableTasks[idx] = {
-            ...retryableTask,
-            dispatchedAt: new Date().toISOString(),
-            lastError: capture.reason,
-            attempts,
-            done: recoverable ? false : attempts >= CAPTURE_FAILURE_ATTEMPT_LIMIT,
-            ...(recoverable
-              ? {
-                  captureFailureState: cooling ? 'cooling' as const : 'recoverable' as const,
-                  ...(cooling
-                    ? { retryAfter: new Date(Date.now() + captureFailureCooldownMs(attempts)).toISOString() }
-                    : { retryAfter: undefined }),
-                }
-              : { captureFailureState: undefined, retryAfter: undefined }),
-          };
-          if (recoverable) {
-            result.recoverableFailures++;
-            if (cooling) result.coolingFailures++;
-          }
         }
+        const attempts = ((current.attempts ?? 0) + 1);
+        const cooling = attempts >= CAPTURE_FAILURE_ATTEMPT_LIMIT;
+        const {
+          proposalId: _proposalId,
+          proposalDisposition: _proposalDisposition,
+          candidateProposalId: _candidateProposalId,
+          ...retryableTask
+        } = current;
+        return {
+          ...retryableTask,
+          dispatchedAt: new Date().toISOString(),
+          lastError: capture.reason,
+          attempts,
+          done: false,
+          ...(capture.proposalId
+            ? { candidateProposalId: capture.proposalId }
+            : {}),
+          captureFailureState: cooling ? 'cooling' as const : 'recoverable' as const,
+          ...(cooling
+            ? { retryAfter: new Date(Date.now() + captureFailureCooldownMs(attempts)).toISOString() }
+            : { retryAfter: undefined }),
+        };
+      });
+      if (!updated) {
+        result.errors.push({
+          taskId: task.id,
+          error: 'task row changed before dispatch settlement',
+        });
+        continue;
       }
-      writeTasks(mutableTasks);
 
       if (capture.kind === 'newly-filed') {
         result.proposalsFiled++;
       } else if (capture.kind === 'duplicate-owned') {
         result.duplicateProposalsOwned++;
+      } else {
+        result.recoverableFailures++;
+        if (((task.attempts ?? 0) + 1) >= CAPTURE_FAILURE_ATTEMPT_LIMIT) result.coolingFailures++;
       }
       dispatched++;
     } catch (err: unknown) {

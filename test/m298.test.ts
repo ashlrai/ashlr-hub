@@ -44,6 +44,7 @@ vi.mock('../src/core/swarm/runner.js', () => ({ runSwarm: vi.fn() }));
 vi.mock('../src/core/sandbox/policy.js', () => ({
   assertMayMutate: vi.fn(),
   killSwitchOn: vi.fn(() => false),
+  canonicalFilesystemPathIdentity: (repo: string) => repo,
   listEnrolled: vi.fn(() => []),
   enroll: vi.fn(),
   unenroll: vi.fn(),
@@ -372,6 +373,7 @@ describe('M298 Part 3 — simple-conductor full-suite directive', () => {
     vi.doMock('../src/core/sandbox/policy.js', () => ({
       assertMayMutate: vi.fn(),
       killSwitchOn: vi.fn(() => false),
+      canonicalFilesystemPathIdentity: (repo: string) => repo,
     }));
     vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
       runEngineSandboxed: vi.fn((_engine: unknown, instruction: string) => {

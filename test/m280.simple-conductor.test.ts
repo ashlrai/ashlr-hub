@@ -47,7 +47,8 @@ const mockKillSwitchOn = vi.fn(() => false);
 const mockAssertMayMutate = vi.fn((_repo: string) => { /* no-op by default */ });
 vi.mock('../src/core/sandbox/policy.js', () => ({
   killSwitchOn: () => mockKillSwitchOn(),
-  assertMayMutate: (repo: string, opts?: unknown) => mockAssertMayMutate(repo),
+  assertMayMutate: (repo: string, _opts?: unknown) => mockAssertMayMutate(repo),
+  canonicalFilesystemPathIdentity: (repo: string) => repo,
   listEnrolled: vi.fn(() => []),
 }));
 
@@ -278,7 +279,7 @@ describe('M280 — dispatches and marks done', () => {
     const task = baseTask({ id: 'task-1', repo: '/tmp/repo-a' });
     writeTasks([task]);
 
-    const { runSimpleConductor } = await importConductor();
+    const { runSimpleConductor, simpleConductorWorkItemGenerationId } = await importConductor();
     const result = await runSimpleConductor(makeConfig(), { once: true, dryRun: false, allowCloud: false });
 
     expect(result.tasksAttempted).toBe(1);
@@ -298,6 +299,8 @@ describe('M280 — dispatches and marks done', () => {
     expect(instruction).toContain('npx tsc --noEmit');
     expect(opts.sourceRepo).toBe('/tmp/repo-a');
     expect(opts.propose).toBe(true);
+    expect(opts.workItemId).toBe('task-1');
+    expect(opts.workItemGenerationId).toBe(simpleConductorWorkItemGenerationId(task));
     expect(opts.budget.maxTokens).toBe(150_000); // M287: raised for substantial work
     expect(opts.budget.maxSteps).toBe(100);
 
@@ -315,6 +318,8 @@ describe('M280 — dispatches and marks done', () => {
         repo: '/tmp/repo-a',
         origin: 'agent',
         kind: 'patch',
+        workItemId: 'task-1',
+        workItemGenerationId: simpleConductorWorkItemGenerationId(task),
         runId: 'run-1',
         trajectoryId: 'run:run-1',
         isPartial: false,
@@ -532,6 +537,151 @@ describe('M280 — dispatches and marks done', () => {
     expect(second.tasksAttempted).toBe(0);
     expect(mockRunEngineSandboxed).toHaveBeenCalledTimes(1);
     expect(readTasks()[0]?.done).toBe(false);
+  });
+
+  it('preserves a non-authoritative durable candidate and does not double-file across restart', async () => {
+    writeTasks([baseTask({ attempts: 2 })]);
+    mockLoadProposal.mockReturnValue(pendingProposal('prop-abc'));
+    mockVerifyPendingAuthority.mockReturnValue(false);
+
+    const { runSimpleConductor } = await importConductor();
+    const first = await runSimpleConductor(makeConfig(), { once: true, dryRun: false, allowCloud: false });
+
+    expect(first.recoverableFailures).toBe(1);
+    expect(first.coolingFailures).toBe(1);
+    expect(mockRunEngineSandboxed).toHaveBeenCalledTimes(1);
+    expect(readTasks()[0]).toEqual(expect.objectContaining({
+      done: false,
+      attempts: 3,
+      candidateProposalId: 'prop-abc',
+      captureFailureState: 'cooling',
+    }));
+    expect(readTasks()[0]?.proposalId).toBeUndefined();
+
+    const coolingTask = readTasks()[0]!;
+    writeTasks([{ ...coolingTask, retryAfter: new Date(Date.now() - 1_000).toISOString() }]);
+    const second = await runSimpleConductor(makeConfig(), { once: true, dryRun: false, allowCloud: false });
+
+    expect(second.tasksAttempted).toBe(0);
+    expect(second.recoverableFailures).toBe(1);
+    expect(second.coolingFailures).toBe(1);
+    expect(mockRunEngineSandboxed).toHaveBeenCalledTimes(1);
+    expect(readTasks()[0]).toEqual(expect.objectContaining({
+      done: false,
+      attempts: 4,
+      candidateProposalId: 'prop-abc',
+      captureFailureState: 'cooling',
+      lastError: expect.stringContaining('candidate proposal remains pending'),
+    }));
+  });
+
+  it('settles a retained candidate only after an independent authority recheck', async () => {
+    writeTasks([baseTask({
+      candidateProposalId: 'prop-authoritative',
+      attempts: 4,
+      captureFailureState: 'cooling',
+      retryAfter: new Date(Date.now() - 1_000).toISOString(),
+      lastError: 'candidate proposal remains pending but lacks exact settlement authority',
+    })]);
+    mockLoadProposal.mockReturnValue(pendingProposal('prop-authoritative'));
+    mockVerifyPendingAuthority.mockReturnValue(true);
+
+    const { runSimpleConductor } = await importConductor();
+    const result = await runSimpleConductor(makeConfig(), { once: true, dryRun: false, allowCloud: false });
+
+    expect(result.tasksAttempted).toBe(0);
+    expect(result.duplicateProposalsOwned).toBe(1);
+    expect(mockRunEngineSandboxed).not.toHaveBeenCalled();
+    expect(readTasks()[0]).toEqual(expect.objectContaining({
+      done: true,
+      proposalId: 'prop-authoritative',
+      proposalDisposition: 'duplicate-owned',
+    }));
+    expect(readTasks()[0]?.candidateProposalId).toBeUndefined();
+    expect(mockVerifyPendingAuthority).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'prop-authoritative' }),
+      expect.objectContaining({
+        id: 'prop-authoritative',
+        workItemId: 'task-1',
+        workItemGenerationId: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
+      expect.anything(),
+    );
+  });
+
+  it('does not settle or mutate retry state when the current task row changed during dispatch', async () => {
+    writeTasks([baseTask({ id: 'task-toctou', repo: '/tmp/repo-original', instruction: 'fix original' })]);
+    mockRunEngineSandboxed.mockImplementation(async () => {
+      writeTasks([baseTask({
+        id: 'task-toctou',
+        repo: '/tmp/repo-changed',
+        instruction: 'fix changed work',
+      })]);
+      return filedSandboxResult('prop-toctou', 'run-toctou');
+    });
+
+    const { runSimpleConductor } = await importConductor();
+    const result = await runSimpleConductor(makeConfig(), { once: true, dryRun: false, allowCloud: false });
+
+    expect(result.proposalsFiled).toBe(0);
+    expect(result.errors).toEqual([
+      { taskId: 'task-toctou', error: 'task row changed before dispatch settlement' },
+    ]);
+    expect(readTasks()[0]).toEqual(expect.objectContaining({
+      id: 'task-toctou',
+      repo: '/tmp/repo-changed',
+      instruction: 'fix changed work',
+    }));
+    expect(readTasks()[0]?.done).toBeUndefined();
+    expect(readTasks()[0]?.attempts).toBeUndefined();
+    expect(readTasks()[0]?.proposalId).toBeUndefined();
+  });
+
+  it('keeps repeated malformed outcomes retryable with cooling instead of terminal done', async () => {
+    writeTasks([baseTask({ attempts: 2 })]);
+    mockRunEngineSandboxed.mockResolvedValue({
+      state: {
+        id: 'run-malformed',
+        status: 'done',
+        proposalOutcome: { kind: 'filed', proposalId: 'prop-malformed' },
+        runEventSummary: {
+          runId: 'run-malformed',
+          status: 'done',
+          outcome: 'proposal-created',
+          proposalCreated: true,
+          proposalId: 'prop-malformed',
+        },
+      },
+      proposalId: 'prop-malformed',
+      proposalOutcome: { kind: 'filed', proposalId: 'prop-malformed' },
+    });
+
+    const { runSimpleConductor } = await importConductor();
+    const first = await runSimpleConductor(makeConfig(), { once: true, dryRun: false, allowCloud: false });
+
+    expect(first.proposalsFiled).toBe(0);
+    expect(first.recoverableFailures).toBe(1);
+    expect(first.coolingFailures).toBe(1);
+    expect(readTasks()[0]).toEqual(expect.objectContaining({
+      done: false,
+      attempts: 3,
+      captureFailureState: 'cooling',
+      lastError: expect.stringContaining('missing, malformed, or contradictory'),
+    }));
+
+    const coolingTask = readTasks()[0]!;
+    writeTasks([{ ...coolingTask, retryAfter: new Date(Date.now() - 1_000).toISOString() }]);
+    mockRunEngineSandboxed.mockResolvedValue(filedSandboxResult('prop-after-malformed', 'run-after-malformed'));
+    const second = await runSimpleConductor(makeConfig(), { once: true, dryRun: false, allowCloud: false });
+
+    expect(second.proposalsFiled).toBe(1);
+    expect(readTasks()[0]).toEqual(expect.objectContaining({
+      done: true,
+      proposalId: 'prop-after-malformed',
+      proposalDisposition: 'newly-filed',
+    }));
+    expect(readTasks()[0]?.attempts).toBeUndefined();
+    expect(readTasks()[0]?.captureFailureState).toBeUndefined();
   });
 
   it('retries after cooling expires and clears recoverable failure state on success', async () => {

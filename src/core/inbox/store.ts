@@ -931,7 +931,9 @@ function bindCreatedProposalRunSummary(
   const outcome = proposalCreated === false &&
     (unboundOutcome === 'proposal-created' || unboundOutcome === 'filed')
     ? undefined
-    : unboundOutcome;
+    : proposalCreated === true && unboundOutcome === 'filed'
+      ? 'proposal-created'
+      : unboundOutcome;
   let actionCounts = unboundActionCounts;
   if (proposalCreated === false && actionCounts) {
     const { proposalCreated: _unboundCreatedCount, ...remainingCounts } = actionCounts;
