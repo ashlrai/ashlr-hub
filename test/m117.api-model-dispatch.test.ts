@@ -378,6 +378,7 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     // Result is 'done' with proposalId
     expect(result.state.status).toBe('done');
     expect(result.proposalId).toBe(fakeProposalId);
+    expect(result.candidateProposalId).toBeUndefined();
     expect(result.state.steps.length).toBeGreaterThan(0);
     expect(result.state.usage.tokensIn).toBe(11);
 
@@ -636,23 +637,24 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
 
     expect(capturedProposalArgs).toHaveLength(1);
     expect(setStatus).not.toHaveBeenCalled();
-    expect(result.proposalId).toBe('optimistic-only-prop');
+    expect(result.proposalId).toBeUndefined();
+    expect(result.candidateProposalId).toBe('optimistic-only-prop');
     expect(result.proposalOutcome).toMatchObject({
       kind: 'proposal-capture-error',
       reason: 'proposal capture requires persistence reconciliation',
-      proposalId: 'optimistic-only-prop',
       files: 1,
       insertions: 1,
       deletions: 1,
     });
+    expect(result.proposalOutcome).not.toHaveProperty('proposalId');
     expect(result.state.proposalOutcome).toMatchObject({
       kind: 'proposal-capture-error',
-      proposalId: 'optimistic-only-prop',
     });
+    expect(result.state.proposalOutcome).not.toHaveProperty('proposalId');
     expect(result.state.runEventSummary).toMatchObject({
-      proposalId: 'optimistic-only-prop',
       proposalCreated: false,
     });
+    expect(result.state.runEventSummary).not.toHaveProperty('proposalId');
 
     returnMismatchedPending = true;
     setStatus.mockClear();
@@ -671,6 +673,11 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
       runId: 'run-m117-durable-mismatch',
     });
     expect(mismatchResult.proposalOutcome?.kind).toBe('proposal-capture-error');
+    expect(mismatchResult.proposalId).toBeUndefined();
+    expect(mismatchResult.candidateProposalId).toBe('optimistic-only-prop');
+    expect(mismatchResult.proposalOutcome).not.toHaveProperty('proposalId');
+    expect(mismatchResult.state.runEventSummary).toMatchObject({ proposalCreated: false });
+    expect(mismatchResult.state.runEventSummary).not.toHaveProperty('proposalId');
     expect(setStatus).toHaveBeenCalledWith(
       'optimistic-only-prop',
       'rejected',
@@ -693,13 +700,16 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
       runId: 'run-m117-durable-load-throws',
     });
     expect(loadFailureResult).toMatchObject({
-      proposalId: 'optimistic-only-prop',
+      candidateProposalId: 'optimistic-only-prop',
       proposalOutcome: {
         kind: 'proposal-capture-error',
         reason: 'proposal capture requires persistence reconciliation',
-        proposalId: 'optimistic-only-prop',
       },
     });
+    expect(loadFailureResult.proposalId).toBeUndefined();
+    expect(loadFailureResult.proposalOutcome).not.toHaveProperty('proposalId');
+    expect(loadFailureResult.state.runEventSummary).toMatchObject({ proposalCreated: false });
+    expect(loadFailureResult.state.runEventSummary).not.toHaveProperty('proposalId');
     expect(JSON.stringify(loadFailureResult)).not.toContain('raw proposal contents');
     expect(setStatus).not.toHaveBeenCalled();
 
