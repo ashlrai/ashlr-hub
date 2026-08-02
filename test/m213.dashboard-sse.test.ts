@@ -1281,7 +1281,11 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain("trajectoryLearning || skillCorpusReadiness");
     expect(src).toContain('snap.fleet?.trajectoryLearning ?? snap.control?.fleet?.trajectoryLearning');
     expect(src).toContain('snap.fleet?.skillCorpusReadiness ?? snap.control?.fleet?.skillCorpusReadiness');
-    expect(src).toContain("['Trajectories', trajectoryLearning?.trajectories ?? 0]");
+    expect(src).toContain('function trajectoryLearningPopulation(trajectoryLearning)');
+    expect(src).toContain("['Observed trajectories', population.observed]");
+    expect(src).toContain("['Learning eligible', population.learningEligible]");
+    expect(src).toContain("['Incomplete', population.incomplete]");
+    expect(src).toContain("['Degraded', population.degraded]");
     expect(src).toContain("['Dispatch -> decision', formatCoverageMetric(routeSpine.dispatchToDecision)]");
     expect(src).toContain("['Dispatch -> evidence', formatCoverageMetric(routeSpine.dispatchToEvidence)]");
     expect(src).toContain("['Dispatch -> merge', formatCoverageMetric(routeSpine.dispatchToMerge)]");
@@ -1335,6 +1339,10 @@ describe('M213 Dashboard SSE — /api/events', () => {
       skillObservation: { sampleState: 'insufficient-sample' },
     }) as Array<[string, string | number]>;
     const values = Object.fromEntries(rows);
+    expect(values['Observed trajectories']).toBe(2);
+    expect(values['Learning eligible']).toBe(2);
+    expect(values.Incomplete).toBe(0);
+    expect(values.Degraded).toBe(0);
     expect(values.Merged).toBe('withheld');
     expect(values['Dispatch -> decision']).toBe('coverage');
     expect(values['Skill-observed trajectories']).toBe('withheld (<3)');
@@ -1482,10 +1490,46 @@ describe('M213 Dashboard SSE — /api/events', () => {
     )(() => 'coverage')({ trajectories: 0 }) as Array<[string, string | number]>;
     const values = Object.fromEntries(rows);
 
-    expect(values.Trajectories).toBe(0);
+    expect(values['Observed trajectories']).toBe(0);
+    expect(values['Learning eligible']).toBe(0);
+    expect(values.Incomplete).toBe(0);
+    expect(values.Degraded).toBe(0);
     expect(values['Skill-observed trajectories']).toBe('withheld (<3)');
     expect(values).not.toHaveProperty('Skill corpus');
     expect(values).not.toHaveProperty('Observed coverage');
+  });
+
+  it('app.js shows zero learning eligibility without hiding observed trajectory work', () => {
+    const src = fs.readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public/app.js'),
+      'utf8',
+    );
+    const formatStart = src.indexOf('function formatTrajectoryLearningGap(trajectoryLearning)');
+    const rendererEnd = src.indexOf('\nfunction formatCountMap', formatStart);
+    const trajectoryUiSource = src.slice(formatStart, rendererEnd);
+    const rows = new Function(
+      'formatCoverageMetric',
+      `${trajectoryUiSource}\nreturn trajectoryLearningRows;`,
+    )(() => 'coverage')({
+      version: 1,
+      trajectories: 5,
+      population: {
+        observed: 'private-population-value',
+        learningEligible: 0,
+        incomplete: 4,
+        degraded: 1,
+        privateField: 'private-population-value',
+      },
+      skillObservation: { sampleState: 'none' },
+    }) as Array<[string, string | number]>;
+    const values = Object.fromEntries(rows);
+
+    expect(values['Observed trajectories']).toBe(5);
+    expect(values['Learning eligible']).toBe(0);
+    expect(values.Incomplete).toBe(4);
+    expect(values.Degraded).toBe(1);
+    expect(JSON.stringify(values)).not.toContain('private-population-value');
+    expect(JSON.stringify(values)).not.toMatch(/repo|item|run|trajectoryId|proposalId/);
   });
 
   it('app.js renders a zero-observation sample as none rather than withheld', () => {

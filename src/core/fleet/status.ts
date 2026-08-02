@@ -3673,6 +3673,12 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     }
   }
   const workspaceSource = status.workspace?.sourceQuality;
+  if (workspaceSource) {
+    Object.defineProperty(learningActions, 'sourceQuality', {
+      value: workspaceSource,
+      enumerable: false,
+    });
+  }
   const dispatchSource = learningSourceAvailability('dispatch-production', status.dispatchProductionSource);
   const actionSource = learningSourceAvailability('agent-actions', workspaceSource);
   const outcomeSource = learningSourceAvailability('outcomes', proposalSourceQuality);
@@ -3680,7 +3686,6 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   const evidenceSource = learningSourceAvailability('evidence', learningEvidenceRead);
   const workedSource = learningSourceAvailability('worked', workedLearningRead.sourceQuality);
   const postMergeSource = learningSourceAvailability('post-merge', learningPostMergeRead);
-  const judgeTraceSource = learningSourceAvailability('judge-traces', status.judgeTraceSource);
   const proposalById = new Map(learningProposals.map((proposal) => [proposal.id, proposal]));
   const evidencePacks = learningEvidencePacks;
   const evidenceByProposal = new Map(evidencePacks.map((pack) => [pack.proposal.id, pack]));
@@ -3826,11 +3831,12 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       if (!learningSourceAvailable(decisionSource)) unavailable.add('decision');
       if (!learningSourceAvailable(actionSource)) unavailable.add('agentAction');
       if (!learningSourceAvailable(skillSource)) unavailable.add('skillUse');
-      const terminalAvailable = learningSourceAvailable(outcomeSource) && learningSourceAvailable(decisionSource);
+      const terminalAvailable = learningSourceAvailable(outcomeSource) &&
+        learningSourceAvailable(decisionSource);
       const realizedAvailable = terminalAvailable && learningSourceAvailable(postMergeSource);
       const tracesAvailable = terminalAvailable && learningSourceAvailable(evidenceSource) &&
         learningSourceAvailable(actionSource) && learningSourceAvailable(workedSource) &&
-        learningSourceAvailable(postMergeSource) && learningSourceAvailable(judgeTraceSource);
+        learningSourceAvailable(postMergeSource);
       status.trajectoryLearning = withholdTrajectoryMetrics(
         summarizeTrajectoryLearning(trajectoryRecords, windowHours),
         unavailable,
@@ -3847,7 +3853,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       status.learningMetrics.trajectoryLearning = learningMetricAvailability(
         [
           dispatchSource, actionSource, outcomeSource, decisionSource, evidenceSource,
-          workedSource, postMergeSource, judgeTraceSource, skillSource,
+          workedSource, postMergeSource, skillSource,
         ],
         withheldMetrics,
         12,

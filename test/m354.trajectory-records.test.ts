@@ -37,6 +37,9 @@ const RAW_SECRET = 'RAW_EVIDENCE_SECRET_SHOULD_NOT_LEAK';
 const DIFF_SECRET = 'diff --git a/secret.ts b/secret.ts';
 const STDOUT_SECRET = 'stdout contained literal-secret-value';
 const SEMANTIC_PROPOSAL_ID = 'prop-m354abc1-000001-dddddddddddddddddddddddd';
+const NO_PROPOSAL_ATTEMPT_ID = 'attempt-00000000-0000-4000-8000-000000000354';
+const NO_PROPOSAL_RUN_ID = 'run-no-proposal';
+const NO_PROPOSAL_TRAJECTORY_ID = `run:${NO_PROPOSAL_ATTEMPT_ID}`;
 
 function dispatch(overrides: Partial<DispatchProductionEvent> = {}): DispatchProductionEvent {
   return {
@@ -110,6 +113,14 @@ function action(overrides: Partial<AgentActionEvent> = {}): AgentActionEvent {
     backend: 'local-coder',
     tier: 'local',
     model: 'qwen',
+    routeSnapshot: {
+      backend: 'local-coder',
+      tier: 'local',
+      model: 'qwen',
+      assignedBy: 'test',
+      reason: 'metadata route snapshot',
+      routerPolicyVersion: ROUTER_POLICY_VERSION,
+    },
     routerPolicyVersion: ROUTER_POLICY_VERSION,
     learningEpoch: '2026-07-09',
     ...overrides,
@@ -742,6 +753,519 @@ describe('Trajectory records', () => {
     });
     expect(record?.id.startsWith('attempt:')).toBe(true);
     expect(record?.trajectoryId).toBeUndefined();
+    expect(summarizeTrajectoryLearning([record!]).traces.records[0]?.sourceState).toBe('incomplete');
+  });
+
+  it('marks an exact-identity no-proposal trajectory complete without proposal-only stages', () => {
+    const privateRepo = '/private/no-proposal-repo';
+    const privateItem = 'private-no-proposal-item';
+    const [record] = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        readDispatchProductionEvents: () => [dispatch({
+          repo: privateRepo,
+          itemId: privateItem,
+          outcome: 'empty-diff',
+          proposalCreated: false,
+          proposalId: undefined,
+          attemptId: NO_PROPOSAL_ATTEMPT_ID,
+          runId: NO_PROPOSAL_RUN_ID,
+          trajectoryId: NO_PROPOSAL_TRAJECTORY_ID,
+          runEventSummary: {
+            runId: NO_PROPOSAL_RUN_ID,
+            status: 'done',
+            outcome: 'empty-diff',
+            proposalCreated: false,
+          },
+          evidenceOutcome: undefined,
+        })],
+        listOutcomeRecords: () => [],
+        readAgentActions: () => [action({
+          repo: privateRepo,
+          itemId: privateItem,
+          outcome: 'no-proposal',
+          proposalId: undefined,
+          runId: NO_PROPOSAL_RUN_ID,
+          trajectoryId: NO_PROPOSAL_TRAJECTORY_ID,
+          runEventSummary: {
+            runId: NO_PROPOSAL_RUN_ID,
+            status: 'done',
+            outcome: 'empty-diff',
+            proposalCreated: false,
+          },
+        })],
+      }),
+    });
+
+    const trace = summarizeTrajectoryLearning([record!]).traces.records[0];
+    expect(record?.coverage).toMatchObject({
+      dispatch: true,
+      proposal: false,
+      evidence: false,
+      decision: false,
+      agentAction: true,
+    });
+    expect(trace).toMatchObject({
+      terminalOutcome: 'no-proposal',
+      sourceState: 'complete',
+      eventState: 'complete',
+      coverage: {
+        dispatch: true,
+        proposal: false,
+        evidence: false,
+        decision: false,
+        agentAction: true,
+      },
+      events: [
+        { kind: 'dispatch', outcome: 'unknown' },
+        { kind: 'agent-action', outcome: 'no-proposal' },
+      ],
+    });
+    const serialized = JSON.stringify(trace);
+    for (const privateValue of [
+      privateRepo,
+      privateItem,
+      NO_PROPOSAL_ATTEMPT_ID,
+      NO_PROPOSAL_RUN_ID,
+      NO_PROPOSAL_TRAJECTORY_ID,
+    ]) {
+      expect(serialized).not.toContain(privateValue);
+    }
+  });
+
+  it('allows only equivalent duplicate terminal carriers', () => {
+    const terminalSummary = {
+      runId: NO_PROPOSAL_RUN_ID,
+      status: 'done',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+    } as const;
+    const terminalDispatch = dispatch({
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      proposalId: undefined,
+      attemptId: NO_PROPOSAL_ATTEMPT_ID,
+      runId: NO_PROPOSAL_RUN_ID,
+      trajectoryId: NO_PROPOSAL_TRAJECTORY_ID,
+      runEventSummary: terminalSummary,
+      evidenceOutcome: undefined,
+    });
+    const terminalAction = action({
+      outcome: 'no-proposal',
+      proposalId: undefined,
+      runId: NO_PROPOSAL_RUN_ID,
+      trajectoryId: NO_PROPOSAL_TRAJECTORY_ID,
+      runEventSummary: terminalSummary,
+    });
+    const reconstruct = (
+      dispatches: DispatchProductionEvent[],
+      actions: AgentActionEvent[],
+    ) => listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        readDispatchProductionEvents: () => dispatches,
+        listOutcomeRecords: () => [],
+        readAgentActions: () => actions,
+      }),
+    })[0]!;
+
+    const equivalent = reconstruct(
+      [terminalDispatch, { ...terminalDispatch, ts: TS1 }],
+      [terminalAction, { ...terminalAction, ts: TS3 }],
+    );
+    expect(summarizeTrajectoryLearning([equivalent]).traces.records[0]?.sourceState)
+      .toBe('complete');
+
+    const contradictoryDispatch = reconstruct(
+      [terminalDispatch, {
+        ...terminalDispatch,
+        ts: TS1,
+        outcome: 'proposal-disabled',
+        runEventSummary: { ...terminalSummary, outcome: 'proposal-disabled' },
+      }],
+      [terminalAction],
+    );
+    expect(summarizeTrajectoryLearning([contradictoryDispatch]).traces.records[0]?.sourceState)
+      .toBe('incomplete');
+
+    const contradictoryIdentityDispatch = reconstruct(
+      [terminalDispatch, {
+        ...terminalDispatch,
+        ts: TS1,
+        runId: 'different-duplicate-run',
+        trajectoryId: 'run:attempt-00000000-0000-4000-8000-000000000999',
+        runEventSummary: { ...terminalSummary, runId: 'different-duplicate-run' },
+      }],
+      [terminalAction],
+    );
+    expect(contradictoryIdentityDispatch.timeline.filter((event) => event.kind === 'dispatch'))
+      .toHaveLength(2);
+    expect(summarizeTrajectoryLearning([contradictoryIdentityDispatch]).traces.records[0]?.sourceState)
+      .toBe('incomplete');
+
+    const contradictoryAction = reconstruct(
+      [terminalDispatch],
+      [terminalAction, {
+        ...terminalAction,
+        ts: TS3,
+        runEventSummary: { ...terminalSummary, diffFiles: 1 },
+      }],
+    );
+    expect(summarizeTrajectoryLearning([contradictoryAction]).traces.records[0]?.sourceState)
+      .toBe('incomplete');
+  });
+
+  const causalCarrierConflicts = [
+    { name: 'repository', overrides: { repo: '/private/conflicting-repo' } },
+    { name: 'work item', overrides: { itemId: 'private-conflicting-item' } },
+    { name: 'work source', overrides: { source: 'todo' as const } },
+    { name: 'backend', overrides: { backend: 'codex' as const } },
+    { name: 'tier', overrides: { tier: 'mid' as const } },
+    { name: 'model', overrides: { model: 'private-conflicting-model' } },
+    {
+      name: 'route snapshot',
+      overrides: {
+        routeSnapshot: {
+          backend: 'local-coder' as const,
+          tier: 'local' as const,
+          model: 'qwen',
+          assignedBy: 'test',
+          reason: 'private conflicting route',
+          routerPolicyVersion: ROUTER_POLICY_VERSION,
+        },
+      },
+    },
+    { name: 'router policy version', overrides: { routerPolicyVersion: 'private-policy-v2' } },
+  ] satisfies Array<{
+    name: string;
+    overrides: Partial<Pick<AgentActionEvent,
+      'repo' | 'itemId' | 'source' | 'backend' | 'tier' | 'model' |
+      'routeSnapshot' | 'routerPolicyVersion'>>;
+  }>;
+
+  it.each(causalCarrierConflicts)(
+    'rejects duplicate dispatches with conflicting $name',
+    ({ overrides }) => {
+      const terminalSummary = {
+        runId: NO_PROPOSAL_RUN_ID,
+        status: 'done',
+        outcome: 'empty-diff',
+        proposalCreated: false,
+      } as const;
+      const terminalDispatch = dispatch({
+        outcome: 'empty-diff',
+        proposalCreated: false,
+        proposalId: undefined,
+        attemptId: NO_PROPOSAL_ATTEMPT_ID,
+        runId: NO_PROPOSAL_RUN_ID,
+        trajectoryId: NO_PROPOSAL_TRAJECTORY_ID,
+        runEventSummary: terminalSummary,
+        evidenceOutcome: undefined,
+      });
+      const [record] = listTrajectoryRecords({
+        windowHours: 1000,
+        deps: deps({
+          readDispatchProductionEvents: () => [
+            terminalDispatch,
+            { ...terminalDispatch, ts: TS1, ...overrides },
+          ],
+          listOutcomeRecords: () => [],
+          readAgentActions: () => [action({
+            outcome: 'no-proposal',
+            proposalId: undefined,
+            runId: NO_PROPOSAL_RUN_ID,
+            trajectoryId: NO_PROPOSAL_TRAJECTORY_ID,
+            runEventSummary: terminalSummary,
+          })],
+        }),
+      });
+
+      const summary = summarizeTrajectoryLearning([record!]);
+      expect(summary.population?.learningEligible).toBe(0);
+      expect(summary.traces.records[0]?.sourceState).toBe('incomplete');
+      expect(JSON.stringify(summary)).not.toMatch(/private-conflicting|conflicting-repo/);
+    },
+  );
+
+  it.each(causalCarrierConflicts)(
+    'rejects duplicate terminal actions with conflicting $name',
+    ({ overrides }) => {
+      const terminalSummary = {
+        runId: NO_PROPOSAL_RUN_ID,
+        status: 'done',
+        outcome: 'empty-diff',
+        proposalCreated: false,
+      } as const;
+      const terminalAction = action({
+        outcome: 'no-proposal',
+        proposalId: undefined,
+        runId: NO_PROPOSAL_RUN_ID,
+        trajectoryId: NO_PROPOSAL_TRAJECTORY_ID,
+        runEventSummary: terminalSummary,
+      });
+      const [record] = listTrajectoryRecords({
+        windowHours: 1000,
+        deps: deps({
+          readDispatchProductionEvents: () => [dispatch({
+            outcome: 'empty-diff',
+            proposalCreated: false,
+            proposalId: undefined,
+            attemptId: NO_PROPOSAL_ATTEMPT_ID,
+            runId: NO_PROPOSAL_RUN_ID,
+            trajectoryId: NO_PROPOSAL_TRAJECTORY_ID,
+            runEventSummary: terminalSummary,
+            evidenceOutcome: undefined,
+          })],
+          listOutcomeRecords: () => [],
+          readAgentActions: () => [
+            terminalAction,
+            { ...terminalAction, ts: TS3, ...overrides },
+          ],
+        }),
+      });
+
+      const summary = summarizeTrajectoryLearning([record!]);
+      expect(summary.population?.learningEligible).toBe(0);
+      expect(summary.traces.records[0]?.sourceState).toBe('incomplete');
+      expect(JSON.stringify(summary)).not.toMatch(/private-conflicting|conflicting-repo/);
+    },
+  );
+
+  it('rejects duplicate dispatches with conflicting top-level route metadata', () => {
+    const terminalSummary = {
+      runId: NO_PROPOSAL_RUN_ID,
+      status: 'done',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+    } as const;
+    const terminalDispatch = dispatch({
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      proposalId: undefined,
+      attemptId: NO_PROPOSAL_ATTEMPT_ID,
+      runId: NO_PROPOSAL_RUN_ID,
+      trajectoryId: NO_PROPOSAL_TRAJECTORY_ID,
+      runEventSummary: terminalSummary,
+      evidenceOutcome: undefined,
+    });
+    const [record] = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        readDispatchProductionEvents: () => [
+          terminalDispatch,
+          {
+            ...terminalDispatch,
+            ts: TS1,
+            assignedBy: 'private-conflicting-router',
+            routeReason: 'private conflicting top-level route',
+          },
+        ],
+        listOutcomeRecords: () => [],
+        readAgentActions: () => [action({
+          outcome: 'no-proposal',
+          proposalId: undefined,
+          runId: NO_PROPOSAL_RUN_ID,
+          trajectoryId: NO_PROPOSAL_TRAJECTORY_ID,
+          runEventSummary: terminalSummary,
+        })],
+      }),
+    });
+
+    const summary = summarizeTrajectoryLearning([record!]);
+    expect(summary.population?.learningEligible).toBe(0);
+    expect(summary.traces.records[0]?.sourceState).toBe('incomplete');
+    expect(JSON.stringify(summary)).not.toContain('private-conflicting-router');
+  });
+
+  it('rejects judge reflection impersonation as a terminal dispatch witness', () => {
+    const terminalSummary = {
+      runId: NO_PROPOSAL_RUN_ID,
+      status: 'done',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+    } as const;
+    const [record] = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        readDispatchProductionEvents: () => [dispatch({
+          outcome: 'empty-diff',
+          proposalCreated: false,
+          proposalId: undefined,
+          attemptId: NO_PROPOSAL_ATTEMPT_ID,
+          runId: NO_PROPOSAL_RUN_ID,
+          trajectoryId: NO_PROPOSAL_TRAJECTORY_ID,
+          runEventSummary: terminalSummary,
+          evidenceOutcome: undefined,
+        })],
+        listOutcomeRecords: () => [],
+        readAgentActions: () => [action({
+          actor: 'judge',
+          kind: 'reflection',
+          outcome: 'no-proposal',
+          action: 'daemon:dispatch',
+          proposalId: undefined,
+          runId: NO_PROPOSAL_RUN_ID,
+          trajectoryId: NO_PROPOSAL_TRAJECTORY_ID,
+          runEventSummary: terminalSummary,
+        })],
+      }),
+    });
+
+    const summary = summarizeTrajectoryLearning([record!]);
+    expect(summary.population).toEqual({ observed: 1, learningEligible: 0, incomplete: 1, degraded: 0 });
+    expect(summary.trajectories).toBe(1);
+    expect(summary.terminalOutcomes['no-proposal']).toBe(0);
+    expect(summary.traces.records[0]?.sourceState).toBe('incomplete');
+  });
+
+  it('quarantines a terminal action that bridges two established attempts', () => {
+    const otherAttemptId = 'attempt-00000000-0000-4000-8000-000000000999';
+    const otherRunId = 'other-established-run';
+    const otherTrajectoryId = `run:${otherAttemptId}`;
+    const terminalSummary = {
+      runId: NO_PROPOSAL_RUN_ID,
+      status: 'done',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+    } as const;
+    const records = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        readDispatchProductionEvents: () => [
+          dispatch({
+            outcome: 'empty-diff',
+            proposalCreated: false,
+            proposalId: undefined,
+            attemptId: NO_PROPOSAL_ATTEMPT_ID,
+            runId: NO_PROPOSAL_RUN_ID,
+            trajectoryId: NO_PROPOSAL_TRAJECTORY_ID,
+            runEventSummary: terminalSummary,
+            evidenceOutcome: undefined,
+          }),
+          dispatch({
+            ts: TS1,
+            itemId: 'other-established-item',
+            outcome: 'empty-diff',
+            proposalCreated: false,
+            proposalId: undefined,
+            attemptId: otherAttemptId,
+            runId: otherRunId,
+            trajectoryId: otherTrajectoryId,
+            runEventSummary: { ...terminalSummary, runId: otherRunId },
+            evidenceOutcome: undefined,
+          }),
+        ],
+        listOutcomeRecords: () => [],
+        readAgentActions: () => [
+          action({
+            ts: TS3,
+            outcome: 'no-proposal',
+            proposalId: undefined,
+            runId: NO_PROPOSAL_RUN_ID,
+            trajectoryId: NO_PROPOSAL_TRAJECTORY_ID,
+            runEventSummary: terminalSummary,
+          }),
+          action({
+            outcome: 'no-proposal',
+            proposalId: undefined,
+            runId: otherRunId,
+            trajectoryId: NO_PROPOSAL_TRAJECTORY_ID,
+            runEventSummary: { ...terminalSummary, runId: otherRunId },
+          }),
+        ],
+      }),
+    });
+
+    expect(records).toHaveLength(2);
+    expect(records.every((record) => record.terminalCarrierConflict)).toBe(true);
+    const summary = summarizeTrajectoryLearning(records);
+    expect(summary.population).toEqual({ observed: 2, learningEligible: 0, incomplete: 2, degraded: 0 });
+    expect(summary.traces.records.every((trace) => trace.sourceState === 'incomplete')).toBe(true);
+  });
+
+  it.each([
+    {
+      name: 'the same trajectory is reused by a different action run',
+      dispatchOverrides: {},
+      actionOverrides: {
+        runId: 'different-run-id',
+        runEventSummary: {
+          runId: 'different-run-id', status: 'done', outcome: 'empty-diff', proposalCreated: false,
+        },
+      },
+    },
+    {
+      name: 'the dispatch attempt id is missing',
+      dispatchOverrides: { attemptId: undefined },
+      actionOverrides: {},
+    },
+    {
+      name: 'the trajectory is not derived from the attempt id',
+      dispatchOverrides: { trajectoryId: 'noncanonical-trajectory' },
+      actionOverrides: { trajectoryId: 'noncanonical-trajectory' },
+    },
+    {
+      name: 'the dispatch is missing its terminal summary',
+      dispatchOverrides: { runEventSummary: undefined },
+      actionOverrides: {},
+    },
+    {
+      name: 'the action is missing its terminal summary',
+      dispatchOverrides: {},
+      actionOverrides: { runEventSummary: undefined },
+    },
+    {
+      name: 'the terminal summary contradicts the dispatch outcome',
+      dispatchOverrides: {
+        runEventSummary: {
+          runId: NO_PROPOSAL_RUN_ID, status: 'done', outcome: 'proposal-created', proposalCreated: true,
+        },
+      },
+      actionOverrides: {},
+    },
+  ] satisfies Array<{
+    name: string;
+    dispatchOverrides: Partial<DispatchProductionEvent>;
+    actionOverrides: Partial<AgentActionEvent>;
+  }>)('keeps no-proposal traces incomplete when $name', ({ dispatchOverrides, actionOverrides }) => {
+    const [record] = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        readDispatchProductionEvents: () => [dispatch({
+          outcome: 'empty-diff',
+          proposalCreated: false,
+          proposalId: undefined,
+          attemptId: NO_PROPOSAL_ATTEMPT_ID,
+          runId: NO_PROPOSAL_RUN_ID,
+          trajectoryId: NO_PROPOSAL_TRAJECTORY_ID,
+          runEventSummary: {
+            runId: NO_PROPOSAL_RUN_ID,
+            status: 'done',
+            outcome: 'empty-diff',
+            proposalCreated: false,
+          },
+          evidenceOutcome: undefined,
+          ...dispatchOverrides,
+        })],
+        listOutcomeRecords: () => [],
+        readAgentActions: () => [action({
+          outcome: 'no-proposal',
+          proposalId: undefined,
+          runId: NO_PROPOSAL_RUN_ID,
+          trajectoryId: NO_PROPOSAL_TRAJECTORY_ID,
+          runEventSummary: {
+            runId: NO_PROPOSAL_RUN_ID,
+            status: 'done',
+            outcome: 'empty-diff',
+            proposalCreated: false,
+          },
+          ...actionOverrides,
+        })],
+      }),
+    });
+
+    expect(record?.coverage).toMatchObject({ dispatch: true, agentAction: true });
+    expect(summarizeTrajectoryLearning([record!]).traces.records[0]?.sourceState).toBe('incomplete');
   });
 
   it('projects cancellation as an explicit terminal outcome', () => {
@@ -765,10 +1289,13 @@ describe('Trajectory records', () => {
       terminalOutcome: 'cancelled',
       coverage: { dispatch: true, proposal: false },
     });
-    expect(summarizeTrajectoryLearning([record!]).terminalOutcomes).toMatchObject({
-      cancelled: 1,
-      'no-proposal': 0,
-      failed: 0,
+    expect(summarizeTrajectoryLearning([record!])).toMatchObject({
+      population: { observed: 1, learningEligible: 0, incomplete: 1, degraded: 0 },
+      terminalOutcomes: {
+        cancelled: 0,
+        'no-proposal': 0,
+        failed: 0,
+      },
     });
   });
 
@@ -820,9 +1347,12 @@ describe('Trajectory records', () => {
       .toMatchObject({ terminalOutcome: 'cancelled' });
     expect(records.find((record) => record.itemId === 'item-provider-failed'))
       .toMatchObject({ terminalOutcome: 'failed' });
-    expect(summarizeTrajectoryLearning(records).terminalOutcomes).toMatchObject({
-      cancelled: 1,
-      failed: 1,
+    expect(summarizeTrajectoryLearning(records)).toMatchObject({
+      population: { observed: 2, learningEligible: 0, incomplete: 2, degraded: 0 },
+      terminalOutcomes: {
+        cancelled: 0,
+        failed: 0,
+      },
     });
   });
 
@@ -1036,6 +1566,22 @@ describe('Trajectory records', () => {
       failed: 0,
       unknown: 0,
     });
+  });
+
+  it('keeps the population extension optional for legacy V1 status consumers', () => {
+    const legacy = {
+      version: 1,
+      windowHours: 24,
+      trajectories: 3,
+      coverage: {},
+      routeSpine: {},
+      skillObservation: { eventState: 'none', sampleState: 'none' },
+      traces: { state: 'available', records: [] },
+      gaps: [],
+    } satisfies TrajectoryLearningStatus;
+
+    expect(legacy.trajectories).toBe(3);
+    expect(legacy).not.toHaveProperty('population');
   });
 
   it('keeps orphaned proposal records pending when no final decision exists', () => {
@@ -1426,7 +1972,8 @@ describe('Trajectory records', () => {
       expect(summary.skillObservation).not.toHaveProperty(exactField);
     }
     expect(summary.coverage).not.toHaveProperty('skillUse');
-    expect(summary.recent[0]?.coverage).not.toHaveProperty('skillUse');
+    expect(summary.population).toEqual({ observed: 2, learningEligible: 0, incomplete: 2, degraded: 0 });
+    expect(summary.recent).toEqual([]);
   });
 
   it('reports only aggregate fixed-key observations and requires three observed trajectories', () => {
@@ -1497,7 +2044,7 @@ describe('Trajectory records', () => {
     expect(observation).not.toHaveProperty('causalEffect');
   });
 
-  it('summarizes trajectory reconstruction without leaking direct ids', () => {
+  it('excludes incomplete traces from authoritative totals without leaking direct ids', () => {
     const records = listTrajectoryRecords({
       windowHours: 1000,
       deps: deps({
@@ -1523,30 +2070,35 @@ describe('Trajectory records', () => {
       version: 1,
       windowHours: 24,
       trajectories: 2,
+      population: {
+        observed: 2,
+        learningEligible: 1,
+        incomplete: 1,
+        degraded: 0,
+      },
       terminalOutcomes: {
         merged: 1,
-        'no-proposal': 1,
+        'no-proposal': 0,
       },
       coverage: {
-        dispatch: { count: 2, rate: 1 },
-        proposal: { count: 1, rate: 0.5 },
-        evidence: { count: 1, rate: 0.5 },
-        decision: { count: 1, rate: 0.5 },
-        agentAction: { count: 1, rate: 0.5 },
+        dispatch: { count: 1, rate: 1 },
+        proposal: { count: 1, rate: 1 },
+        evidence: { count: 1, rate: 1 },
+        decision: { count: 1, rate: 1 },
+        agentAction: { count: 1, rate: 1 },
       },
       routeSpine: {
-        dispatchToDecision: { count: 1, rate: 0.5 },
-        dispatchToEvidence: { count: 1, rate: 0.5 },
-        dispatchToMerge: { count: 1, rate: 0.5 },
+        dispatchToDecision: { count: 1, rate: 1 },
+        dispatchToEvidence: { count: 1, rate: 1 },
+        dispatchToMerge: { count: 1, rate: 1 },
       },
     });
-    expect(summary.gaps).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ kind: 'proposal', count: 1 }),
-        expect.objectContaining({ kind: 'evidence', count: 1 }),
-        expect.objectContaining({ kind: 'decision', count: 1 }),
-      ]),
-    );
+    expect(summary.gaps).toEqual([]);
+    expect(summary.recent).toHaveLength(1);
+    expect(summary.traces.records).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sourceState: 'complete' }),
+      expect.objectContaining({ sourceState: 'incomplete' }),
+    ]));
     expect(summary.recent[0]?.ref).toMatch(/^trajectory:[a-f0-9]{12}$/);
     expect(JSON.stringify(summary)).not.toContain('prop-1');
     expect(JSON.stringify(summary)).not.toContain('item-1');
@@ -1608,6 +2160,54 @@ describe('Trajectory records', () => {
     });
   });
 
+  it('keeps authoritative proposal outcomes eligible without optional evidence or action telemetry', () => {
+    const merged: TrajectoryRecord = {
+      version: 1,
+      id: 'trajectory:private-authoritative-merged',
+      key: 'proposal:private-authoritative-merged',
+      startedAt: TS0,
+      latestAt: TS3,
+      terminalOutcome: 'merged',
+      coverage: {
+        dispatch: true,
+        proposal: true,
+        evidence: false,
+        decision: true,
+        agentAction: false,
+        skillUse: false,
+      },
+      timeline: [
+        { ts: TS0, kind: 'dispatch', outcome: 'proposal-created' },
+        { ts: TS1, kind: 'proposal', outcome: 'applied' },
+        { ts: TS3, kind: 'decision', outcome: 'merged', action: 'merged' },
+      ],
+    };
+
+    const summary = summarizeTrajectoryLearning([merged]);
+
+    expect(summary.population).toEqual({ observed: 1, learningEligible: 1, incomplete: 0, degraded: 0 });
+    expect(summary.terminalOutcomes.merged).toBe(1);
+    expect(summary.routeSpine.dispatchToMerge).toEqual({ count: 1, rate: 1 });
+    expect(summary.traces.records[0]?.sourceState).toBe('incomplete');
+
+    const degraded = summarizeTrajectoryLearning([{
+      ...merged,
+      decisionSourceQuality: {
+        sourceState: 'degraded',
+        sourcePresent: true,
+        complete: false,
+        stopReasons: ['io-error'],
+        filesRead: 0,
+        bytesRead: 0,
+        rowsScanned: 0,
+        invalidRows: 0,
+        unreadableFiles: 1,
+      },
+    }]);
+    expect(degraded.population).toEqual({ observed: 1, learningEligible: 0, incomplete: 0, degraded: 1 });
+    expect(degraded.terminalOutcomes.merged).toBe(0);
+  });
+
   it('prioritizes production trajectories within a 500-record action-only overflow window', () => {
     const dispatches = [
       dispatch({ proposalId: undefined, runId: 'run-production-a', trajectoryId: 'traj-production-a' }),
@@ -1662,22 +2262,15 @@ describe('Trajectory records', () => {
 
     const summary = summarizeTrajectoryLearning(records, 24);
     expect(summary.trajectories).toBe(3);
-    expect(summary.terminalOutcomes).toMatchObject({ pending: 3, unknown: 0 });
+    expect(summary.population).toEqual({ observed: 3, learningEligible: 0, incomplete: 3, degraded: 0 });
+    expect(summary.terminalOutcomes).toMatchObject({ pending: 0, unknown: 0 });
     expect(summary.coverage).toMatchObject({
-      dispatch: { count: 3, rate: 1 },
+      dispatch: { count: 0, rate: 0 },
       proposal: { count: 0, rate: 0 },
       agentAction: { count: 0, rate: 0 },
       skillUse: { count: 3, rate: 1 },
     });
-    expect(summary.gaps).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: 'proposal', count: 3 }),
-      expect.objectContaining({ kind: 'evidence', count: 3 }),
-      expect.objectContaining({ kind: 'decision', count: 3 }),
-      expect.objectContaining({ kind: 'agentAction', count: 3 }),
-    ]));
-    expect(summary.gaps).not.toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: 'dispatch' }),
-    ]));
+    expect(summary.gaps).toEqual([]);
     expect(summary.skillObservation).toMatchObject({
       joined: 3,
       observedTrajectoryCoverage: { count: 3, rate: 1 },

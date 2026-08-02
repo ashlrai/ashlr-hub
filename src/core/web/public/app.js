@@ -3055,6 +3055,21 @@ function formatTrajectoryLearningGap(trajectoryLearning) {
   return `${labels[top.kind]} ${Math.trunc(Number(top.count))} missing`;
 }
 
+function trajectoryLearningPopulation(trajectoryLearning) {
+  const count = (value, fallback, max) => Number.isSafeInteger(value) && value >= 0
+    ? Math.min(value, max)
+    : fallback;
+  const observed = count(trajectoryLearning?.trajectories, 0, Number.MAX_SAFE_INTEGER);
+  const population = trajectoryLearning?.population;
+  if (!population || typeof population !== 'object') {
+    return { observed, learningEligible: observed, incomplete: 0, degraded: 0 };
+  }
+  const learningEligible = count(population.learningEligible ?? population.eligible, observed, observed);
+  const incomplete = count(population.incomplete, 0, observed - learningEligible);
+  const degraded = count(population.degraded, 0, observed - learningEligible - incomplete);
+  return { observed, learningEligible, incomplete, degraded };
+}
+
 function formatSkillCorpusValue(value, labels) {
   return typeof value === 'string' && labels[value] ? labels[value] : 'unavailable';
 }
@@ -3110,6 +3125,7 @@ function skillCorpusReadinessRows(skillCorpusReadiness) {
 }
 
 function trajectoryLearningRows(trajectoryLearning, skillCorpusReadiness = null) {
+  const population = trajectoryLearningPopulation(trajectoryLearning);
   const routeSpine = trajectoryLearning?.routeSpine ?? {};
   const terminal = trajectoryLearning?.terminalOutcomes;
   const skill = trajectoryLearning?.skillObservation ?? {};
@@ -3120,7 +3136,10 @@ function trajectoryLearningRows(trajectoryLearning, skillCorpusReadiness = null)
   const threshold = Number(skillCorpusReadiness?.learning?.minimumObservedTrajectories);
   const withheldLabel = Number.isSafeInteger(threshold) && threshold > 0 ? `withheld (<${threshold})` : 'withheld (<3)';
   return [
-    ['Trajectories', trajectoryLearning?.trajectories ?? 0],
+    ['Observed trajectories', population.observed],
+    ['Learning eligible', population.learningEligible],
+    ['Incomplete', population.incomplete],
+    ['Degraded', population.degraded],
     ['Dispatch -> decision', formatCoverageMetric(routeSpine.dispatchToDecision)],
     ['Dispatch -> evidence', formatCoverageMetric(routeSpine.dispatchToEvidence)],
     ['Dispatch -> merge', formatCoverageMetric(routeSpine.dispatchToMerge)],
@@ -3212,7 +3231,7 @@ function renderTrajectoryTraceList(trajectoryLearning) {
 
 function renderTrajectoryLearningCard(trajectoryLearning, skillCorpusReadiness = null, cls = 'ctrl-card card', availability = null) {
   if (!trajectoryLearning && !skillCorpusReadiness) return null;
-  const trajectories = trajectoryLearning?.trajectories ?? 0;
+  const population = trajectoryLearningPopulation(trajectoryLearning);
   const rows = trajectoryLearning
     ? trajectoryLearningRows(trajectoryLearning, skillCorpusReadiness)
     : skillCorpusReadinessRows(skillCorpusReadiness);
@@ -3220,7 +3239,7 @@ function renderTrajectoryLearningCard(trajectoryLearning, skillCorpusReadiness =
   card.appendChild(el('div', { cls: 'card-header' },
     el('span', { cls: 'card-title' }, trajectoryLearning ? 'Trajectory Learning' : 'Skill Learning'),
     el('span', { cls: 'card-subtitle' }, trajectoryLearning
-      ? `${trajectories} trajector${trajectories === 1 ? 'y' : 'ies'} · ${proposalProductionWindowLabel(trajectoryLearning)}`
+      ? `${population.observed} observed · ${population.learningEligible} eligible · ${proposalProductionWindowLabel(trajectoryLearning)}`
       : 'observe-only readiness')
   ));
   const body = el('div', { cls: 'card-body' }, infoGrid(rows));

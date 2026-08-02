@@ -8,6 +8,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import {
   readAgentActions,
   readAgentActionsDetailed,
@@ -62,6 +63,7 @@ import {
   sanitizeAgentWorkTransitions,
   type AgentWorkTransitionV1,
 } from '../learning/agent-work-transitions.js';
+import { isOuterAttemptIdentity } from '../fleet/attempt-identity.js';
 
 const DEFAULT_WINDOW_HOURS = 24;
 const DEFAULT_LIMIT = 200;
@@ -94,6 +96,9 @@ export interface TrajectoryTimelineEvent {
   kind: TrajectoryTimelineKind;
   outcome: string;
   action?: string;
+  actor?: string;
+  carrierKind?: string;
+  attemptId?: string;
   proposalId?: string;
   runId?: string;
   trajectoryId?: string;
@@ -104,6 +109,8 @@ export interface TrajectoryTimelineEvent {
   tier?: EngineTier | string | null;
   model?: string | null;
   reason?: string;
+  assignedBy?: string;
+  routeReason?: string;
   routeSnapshot?: RouteSnapshot;
   runEventSummary?: RunEventSummary;
   evidenceOutcome?: EvidenceOutcomeSummary;
@@ -170,6 +177,8 @@ export interface TrajectoryRecord {
   learningEpoch?: string;
   decisionSourceQuality?: OutcomeRecord['decisionSourceQuality'];
   agentActionSourceQuality?: AgentActionSourceQuality;
+  /** Conflicting terminal aliases were quarantined during reconstruction. */
+  terminalCarrierConflict?: true;
   coverage: TrajectoryRecordCoverage;
   timeline: TrajectoryTimelineEvent[];
 }
@@ -272,7 +281,15 @@ export type TrajectoryTerminalOutcomeCounts = Omit<
 export interface TrajectoryLearningStatus {
   version: 1;
   windowHours: number;
+  /** Observed dispatch-rooted trajectories; preserved as the V1 denominator. */
   trajectories: number;
+  /** Diagnostic population accounting; excluded traces never enter learning totals. */
+  population?: {
+    observed: number;
+    learningEligible: number;
+    incomplete: number;
+    degraded: number;
+  };
   terminalOutcomes?: TrajectoryTerminalOutcomeCounts;
   realizedOutcomes?: Record<TrajectoryRealizedOutcome, number>;
   coverage: PublishedCoverageMetrics;
@@ -283,6 +300,7 @@ export interface TrajectoryLearningStatus {
   }>;
   /** Bounded action-only preclaim observations, excluded from learning metrics. */
   routeDiagnostics?: TrajectoryRouteDiagnosticSummary;
+  /** Observational skill telemetry, sample-gated separately from outcome eligibility. */
   skillObservation: TrajectorySkillObservationSummary;
   /** Capped, opaque, metadata-only route-to-outcome traces for operators. */
   traces: TrajectoryTraceSummary;
@@ -473,11 +491,13 @@ function alias(namespace: string, value: string | undefined): string | undefined
 }
 
 function aliasesFromIds(input: {
+  attemptId?: string;
   trajectoryId?: string;
   runId?: string;
   proposalId?: string;
 }): string[] {
   return [
+    alias('attempt', input.attemptId),
     !isDerivedWorkTrajectory(input.trajectoryId) ? alias('trajectory', input.trajectoryId) : undefined,
     alias('run', input.runId),
     alias('proposal', input.proposalId),
@@ -665,11 +685,165 @@ function traceEvidence(event: TrajectoryTimelineEvent): TrajectoryTraceEvent['ev
   };
 }
 
+function isNoProposalDispatchOutcome(outcome: string): boolean {
+  return outcome === 'empty-diff' || outcome === 'proposal-disabled';
+}
+
+function terminalNoProposalSummary(
+  summary: RunEventSummary | undefined,
+  runId: string,
+  outcome: string,
+): boolean {
+  if (
+    !summary ||
+    summary.runId !== runId ||
+    summary.outcome !== outcome ||
+    summary.proposalCreated !== false ||
+    summary.proposalId !== undefined
+  ) return false;
+  return outcome === 'empty-diff'
+    ? summary.status === 'done'
+    : summary.status === 'done' || summary.status === 'failed' || summary.status === 'aborted';
+}
+
+interface NoProposalTerminalEnvelope {
+  attemptId: string;
+  repo?: string;
+  itemId?: string;
+  source?: WorkSource;
+  proposalId?: string;
+  trajectoryId: string;
+  runId: string;
+  backend?: EngineId | string | null;
+  tier?: EngineTier | string | null;
+  model?: string | null;
+  assignedBy?: string;
+  routeReason?: string;
+  routeSnapshot?: RouteSnapshot;
+  routerPolicyVersion?: string;
+  learningEpoch?: string;
+  outcome: string;
+  runEventSummary: RunEventSummary;
+}
+
+function causalRouteMetadataCoherent(event: TrajectoryTimelineEvent): boolean {
+  const route = event.routeSnapshot;
+  if (!route) return true;
+  return (route.backend === undefined || event.backend === undefined || route.backend === event.backend) &&
+    (route.tier === undefined || event.tier === undefined || route.tier === event.tier) &&
+    (route.model === undefined || event.model === undefined || route.model === event.model) &&
+    (route.routerPolicyVersion === undefined || event.routerPolicyVersion === undefined ||
+      route.routerPolicyVersion === event.routerPolicyVersion);
+}
+
+function noProposalTerminalEnvelope(
+  dispatch: TrajectoryTimelineEvent,
+): NoProposalTerminalEnvelope | undefined {
+  if (
+    dispatch.kind !== 'dispatch' ||
+    !isOuterAttemptIdentity(dispatch.attemptId) ||
+    dispatch.trajectoryId !== `run:${dispatch.attemptId}` ||
+    dispatch.runId === undefined ||
+    !isNoProposalDispatchOutcome(dispatch.outcome) ||
+    !causalRouteMetadataCoherent(dispatch) ||
+    !terminalNoProposalSummary(dispatch.runEventSummary, dispatch.runId, dispatch.outcome)
+  ) return undefined;
+  return {
+    attemptId: dispatch.attemptId,
+    repo: dispatch.repo,
+    itemId: dispatch.itemId,
+    source: dispatch.source,
+    proposalId: dispatch.proposalId,
+    trajectoryId: dispatch.trajectoryId,
+    runId: dispatch.runId,
+    backend: dispatch.backend,
+    tier: dispatch.tier,
+    model: dispatch.model,
+    assignedBy: dispatch.assignedBy,
+    routeReason: dispatch.routeReason,
+    routeSnapshot: dispatch.routeSnapshot,
+    routerPolicyVersion: dispatch.routerPolicyVersion,
+    learningEpoch: dispatch.learningEpoch,
+    outcome: dispatch.outcome,
+    runEventSummary: dispatch.runEventSummary!,
+  };
+}
+
+function noProposalActionMatchesAuthority(
+  action: TrajectoryTimelineEvent,
+  authority: NoProposalTerminalEnvelope,
+): boolean {
+  return action.actor === 'daemon' &&
+    action.carrierKind === 'dispatch' &&
+    action.action === 'daemon:dispatch' &&
+    action.outcome === 'no-proposal' &&
+    action.repo === authority.repo &&
+    action.itemId === authority.itemId &&
+    action.source === authority.source &&
+    action.proposalId === authority.proposalId &&
+    action.trajectoryId === authority.trajectoryId &&
+    action.runId === authority.runId &&
+    action.backend === authority.backend &&
+    action.tier === authority.tier &&
+    action.model === authority.model &&
+    isDeepStrictEqual(action.routeSnapshot, authority.routeSnapshot) &&
+    action.routerPolicyVersion === authority.routerPolicyVersion &&
+    action.learningEpoch === authority.learningEpoch &&
+    causalRouteMetadataCoherent(action) &&
+    terminalNoProposalSummary(action.runEventSummary, authority.runId, authority.outcome) &&
+    isDeepStrictEqual(action.runEventSummary, authority.runEventSummary);
+}
+
+function isTerminalDispatchCarrier(event: TrajectoryTimelineEvent): boolean {
+  return event.kind === 'agent-action' && (
+    event.outcome === 'no-proposal' ||
+    event.carrierKind === 'dispatch' ||
+    event.action === 'daemon:dispatch'
+  );
+}
+
+function hasExactNoProposalTerminalAction(record: TrajectoryRecord): boolean {
+  const dispatches = record.timeline.filter((event) => event.kind === 'dispatch');
+  const authority = dispatches.length > 0
+    ? noProposalTerminalEnvelope(dispatches[0]!)
+    : undefined;
+  if (!authority) return false;
+  if (!dispatches.every((dispatch) => {
+    const candidate = noProposalTerminalEnvelope(dispatch);
+    return candidate !== undefined && isDeepStrictEqual(candidate, authority);
+  })) return false;
+
+  const terminalActions = record.timeline.filter(isTerminalDispatchCarrier);
+  return terminalActions.length > 0 &&
+    terminalActions.every((action) => noProposalActionMatchesAuthority(action, authority));
+}
+
 function traceSourceState(record: TrajectoryRecord): TrajectoryTrace['sourceState'] {
+  if (record.terminalCarrierConflict) return 'incomplete';
   const qualities = [record.decisionSourceQuality, record.agentActionSourceQuality];
   if (qualities.some((quality) => quality?.sourceState === 'degraded')) return 'degraded';
   if (qualities.some((quality) => quality && (quality.sourceState === 'missing' || !quality.complete))) return 'incomplete';
+  if (record.terminalOutcome === 'no-proposal') {
+    return record.coverage.dispatch && record.coverage.agentAction && hasExactNoProposalTerminalAction(record)
+      ? 'complete'
+      : 'incomplete';
+  }
   return record.coverage.dispatch && record.coverage.proposal && record.coverage.evidence && record.coverage.decision && record.coverage.agentAction
+    ? 'complete'
+    : 'incomplete';
+}
+
+function learningEligibilitySourceState(record: TrajectoryRecord): TrajectoryTrace['sourceState'] {
+  if (record.terminalOutcome === 'no-proposal') return traceSourceState(record);
+  if (record.terminalCarrierConflict) return 'incomplete';
+
+  const quality = record.decisionSourceQuality;
+  if (quality?.sourceState === 'degraded') return 'degraded';
+  if (quality && quality.sourceState !== 'missing' && !quality.complete) {
+    return 'incomplete';
+  }
+
+  return record.coverage.dispatch && record.coverage.proposal
     ? 'complete'
     : 'incomplete';
 }
@@ -880,6 +1054,7 @@ function findOrCreateRecord(
   aliases: string[],
   fallbackKey: string,
   ts: string,
+  onConflict?: (records: MutableTrajectoryRecord[]) => void,
 ): MutableTrajectoryRecord | undefined {
   const existingIds = new Set(
     aliases
@@ -888,7 +1063,14 @@ function findOrCreateRecord(
   );
   // A bridge across established trajectories is contradictory evidence. Keep
   // both mappings intact so later joins can detect and quarantine the conflict.
-  if (existingIds.size > 1) return undefined;
+  if (existingIds.size > 1) {
+    onConflict?.(
+      [...existingIds]
+        .map((recordId) => records.get(recordId))
+        .filter((record): record is MutableTrajectoryRecord => record !== undefined),
+    );
+    return undefined;
+  }
   const [existingId] = existingIds;
   const id = existingId ?? (aliases[0] ?? fallbackKey);
   let record = records.get(id);
@@ -1103,6 +1285,7 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
   const aliasToRecord = new Map<string, string>();
 
   const processDispatch = (event: DispatchProductionEvent): void => {
+    const attemptId = cleanId(event.attemptId, 160);
     const proposalId = cleanId(event.proposalId, 160);
     const runId = cleanId(event.runId, 160);
     const trajectoryId = cleanId(event.trajectoryId, 240);
@@ -1120,9 +1303,14 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
     const record = findOrCreateRecord(
       records,
       aliasToRecord,
-      aliasesFromIds({ trajectoryId, runId, proposalId }),
+      aliasesFromIds({ attemptId, trajectoryId, runId, proposalId }),
       fallbackKey,
       event.ts,
+      (conflictedRecords) => {
+        for (const conflictedRecord of conflictedRecords) {
+          conflictedRecord.terminalCarrierConflict = true;
+        }
+      },
     );
     if (!record) return;
     fillRecordMetadata(record, {
@@ -1155,10 +1343,13 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       backend: event.backend,
       tier: event.tier,
       ...(event.model !== undefined ? { model: event.model } : {}),
+      ...(attemptId ? { attemptId } : {}),
       ...(proposalId ? { proposalId } : {}),
       ...(runId ? { runId } : {}),
       ...(trajectoryId && !isDerivedWorkTrajectory(trajectoryId) ? { trajectoryId } : {}),
       ...(event.reason ? { reason: bounded(event.reason, 180) } : { reason: bounded(event.routeReason, 180) }),
+      assignedBy: bounded(event.assignedBy, 120),
+      routeReason: bounded(event.routeReason, 180),
       ...(event.routeSnapshot ? { routeSnapshot: event.routeSnapshot } : {}),
       ...(event.runEventSummary ? { runEventSummary: event.runEventSummary } : {}),
       ...(event.evidenceOutcome ? { evidenceOutcome: event.evidenceOutcome } : {}),
@@ -1342,7 +1533,23 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       outcome: action.outcome,
       backend: action.backend,
     });
-    const record = findOrCreateRecord(records, aliasToRecord, aliases, fallbackKey, action.ts);
+    const terminalCarrier = action.outcome === 'no-proposal' ||
+      action.kind === 'dispatch' ||
+      action.action === 'daemon:dispatch';
+    const record = findOrCreateRecord(
+      records,
+      aliasToRecord,
+      aliases,
+      fallbackKey,
+      action.ts,
+      terminalCarrier
+        ? (conflictedRecords) => {
+            for (const conflictedRecord of conflictedRecords) {
+              conflictedRecord.terminalCarrierConflict = true;
+            }
+          }
+        : undefined,
+    );
     if (!record) return;
     fillRecordMetadata(record, {
       repo: action.repo,
@@ -1368,6 +1575,8 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       kind: 'agent-action',
       outcome: action.outcome,
       action: action.action,
+      actor: action.actor,
+      carrierKind: action.kind,
       repo: action.repo,
       itemId: action.itemId,
       source: action.source,
@@ -1919,8 +2128,21 @@ export function summarizeTrajectoryLearning(
   records: TrajectoryRecord[],
   windowHours = DEFAULT_WINDOW_HOURS,
 ): TrajectoryLearningStatus {
-  const productionRecords = records.filter((record) => record.coverage.dispatch);
+  const observedProductionRecords = records.filter((record) => record.coverage.dispatch);
+  const sourceStates = observedProductionRecords.map((record) => ({
+    record,
+    sourceState: learningEligibilitySourceState(record),
+  }));
+  const productionRecords = sourceStates
+    .filter(({ sourceState }) => sourceState === 'complete')
+    .map(({ record }) => record);
   const denominator = productionRecords.length;
+  const population = {
+    observed: observedProductionRecords.length,
+    learningEligible: denominator,
+    incomplete: sourceStates.filter(({ sourceState }) => sourceState === 'incomplete').length,
+    degraded: sourceStates.filter(({ sourceState }) => sourceState === 'degraded').length,
+  };
   const terminalOutcomes: Record<TrajectoryTerminalOutcome, number> = {
     merged: 0,
     rejected: 0,
@@ -1993,7 +2215,7 @@ export function summarizeTrajectoryLearning(
   const recordDiagnostics = records
     .map((record) => skillObservationDiagnosticsByRecord.get(record))
     .find((diagnostics) => diagnostics !== undefined);
-  const recordObservations = productionRecords
+  const recordObservations = observedProductionRecords
     .map((record) => skillObservationByRecord.get(record))
     .filter((observation): observation is SkillObservationCounts => Boolean(observation));
   const skillObservation = recordObservations.length > 0
@@ -2012,7 +2234,12 @@ export function summarizeTrajectoryLearning(
         conflicting: batchObservation?.conflicting ?? recordDiagnostics?.conflicting ?? 0,
       })
     : (batchObservation ?? emptySkillObservationCounts());
-  const rawObservedTrajectoryCoverage = metric(coverageCounts.skillUse, denominator);
+  const observedSkillCoverageCount = observedProductionRecords
+    .filter((record) => record.coverage.skillUse).length;
+  const rawObservedTrajectoryCoverage = metric(
+    observedSkillCoverageCount,
+    observedProductionRecords.length,
+  );
   const eventState = skillObservation.joined + skillObservation.unjoined + skillObservation.conflicting > 0
     ? 'present'
     : 'none';
@@ -2024,7 +2251,7 @@ export function summarizeTrajectoryLearning(
   const publishSkillMetrics = sampleState === 'observed';
   const observedTrajectoryCoverage = publishSkillMetrics
     ? rawObservedTrajectoryCoverage
-    : metric(0, denominator);
+    : metric(0, observedProductionRecords.length);
   const { skillUse: _privateSkillCoverage, ...publishedCoverage } = coverage;
   const diagnosticRecords = records.filter(isActionOnlyPreclaimRoute);
   const routeReasonCounts = emptyRouteReasonCounts();
@@ -2035,11 +2262,12 @@ export function summarizeTrajectoryLearning(
   return {
     version: 1,
     windowHours,
-    trajectories: denominator,
+    trajectories: observedProductionRecords.length,
+    population,
     terminalOutcomes,
     realizedOutcomes,
     coverage: publishSkillMetrics
-      ? coverage
+      ? { ...coverage, skillUse: rawObservedTrajectoryCoverage }
       : publishedCoverage,
     routeSpine: {
       dispatchToDecision: metric(dispatchToDecision, dispatchDenominator),

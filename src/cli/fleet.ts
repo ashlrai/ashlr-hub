@@ -36,6 +36,32 @@ import { makeColors, isTty } from './ui.js';
 
 const { bold, dim, green, red, yellow, cyan } = makeColors(isTty());
 
+function trajectoryPopulation(
+  status: NonNullable<FleetStatus['trajectoryLearning']>,
+): { observed: number; learningEligible: number; incomplete: number; degraded: number } {
+  const count = (value: unknown, fallback: number, max: number): number =>
+    Number.isSafeInteger(value) && Number(value) >= 0
+      ? Math.min(Number(value), max)
+      : fallback;
+  const observed = count(status.trajectories, 0, Number.MAX_SAFE_INTEGER);
+  const population = status.population as typeof status.population & { eligible?: number } | undefined;
+  if (!population) {
+    return { observed, learningEligible: observed, incomplete: 0, degraded: 0 };
+  }
+  const learningEligible = count(
+    population.learningEligible ?? population.eligible,
+    observed,
+    observed,
+  );
+  const incomplete = count(population.incomplete, 0, observed - learningEligible);
+  const degraded = count(
+    population.degraded,
+    0,
+    observed - learningEligible - incomplete,
+  );
+  return { observed, learningEligible, incomplete, degraded };
+}
+
 function daemonActivitySummary(daemon: FleetStatus['daemon']): string | null {
   if (!daemon.running) return null;
   const activity = daemon.activity;
@@ -696,7 +722,12 @@ export function formatFleetStatus(s: FleetStatus): string {
     lines.push(`  ${formatLearningMetricsAvailability(learningMetrics)}`);
   } else {
     const outcomes = trajectoryLearning.terminalOutcomes;
-    lines.push(`  trajectories: ${trajectoryLearning.trajectories} in ${formatProductionWindow(trajectoryLearning.windowHours)}`);
+    const population = trajectoryPopulation(trajectoryLearning);
+    lines.push(`  trajectories: ${population.observed} observed in ${formatProductionWindow(trajectoryLearning.windowHours)}`);
+    lines.push(
+      `  eligibility:  ${population.learningEligible} learning-eligible, ` +
+        `${population.incomplete} incomplete, ${population.degraded} degraded`,
+    );
     lines.push(outcomes
       ? `  outcomes:     merged ${outcomes.merged}, pending ${outcomes.pending}, ` +
         `no-proposal ${outcomes['no-proposal']}, cancelled ${outcomes.cancelled ?? 0}, failed ${outcomes.failed}`
