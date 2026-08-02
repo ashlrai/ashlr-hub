@@ -31,16 +31,27 @@ import { runCutoffCheckpointWorker } from '../src/core/daemon/cutoff-checkpoint-
 import { runCutoffCheckpointSupervisor } from '../src/core/daemon/cutoff-checkpoint-child.js';
 import { killSwitchOn, setKill } from '../src/core/sandbox/policy.js';
 import {
+  PRIVATE_STORAGE_TEST_CONTROL,
+  _setPrivateStorageTestControlForTest,
+} from '../src/core/util/private-storage.js';
+import {
   cancelDaemonPostTickChildren,
   scheduleCutoffCheckpointAfterTick,
 } from '../src/core/daemon/loop.js';
 import type { DaemonTick } from '../src/core/types.js';
+import {
+  createSemanticPrivateStorageHarness,
+  trustedWindowsSystemRootForTest,
+  type SemanticPrivateStorageHarness,
+} from './helpers/semantic-private-storage.js';
 
 const NOW = Date.parse('2026-07-12T12:00:00.000Z');
 const posixIt = it.skipIf(process.platform === 'win32');
 let home = '';
 let oldHome: string | undefined;
+let oldUserProfile: string | undefined;
 let oldAshlrHome: string | undefined;
+let semanticPrivateStorage: SemanticPrivateStorageHarness | undefined;
 
 class FakeChild extends EventEmitter {
   pid = 1234;
@@ -97,17 +108,34 @@ function resetFixtureKillSwitch(
 }
 
 beforeEach(() => {
+  _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
+  semanticPrivateStorage = undefined;
   oldHome = process.env['HOME'];
+  oldUserProfile = process.env['USERPROFILE'];
   oldAshlrHome = process.env['ASHLR_HOME'];
   home = resolve(mkdtempSync(join(tmpdir(), 'ashlr-m385-')));
   process.env['HOME'] = home;
+  process.env['USERPROFILE'] = home;
   process.env['ASHLR_HOME'] = join(home, '.ashlr');
+  if (process.platform === 'win32') {
+    semanticPrivateStorage = createSemanticPrivateStorageHarness({
+      systemRoot: trustedWindowsSystemRootForTest(),
+    });
+    _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+      runner: semanticPrivateStorage.runner,
+    });
+  }
   expect(resetFixtureKillSwitch().ok).toBe(true);
 });
 
 afterEach(() => {
   try { resetFixtureKillSwitch(); } catch { /* best effort */ }
+  _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
+  semanticPrivateStorage?.reset();
+  semanticPrivateStorage = undefined;
   if (oldHome === undefined) delete process.env['HOME']; else process.env['HOME'] = oldHome;
+  if (oldUserProfile === undefined) delete process.env['USERPROFILE'];
+  else process.env['USERPROFILE'] = oldUserProfile;
   if (oldAshlrHome === undefined) delete process.env['ASHLR_HOME']; else process.env['ASHLR_HOME'] = oldAshlrHome;
   try { chmodSync(join(home, '.ashlr', 'fleet'), 0o700); } catch { /* absent */ }
   rmSync(home, { recursive: true, force: true });
