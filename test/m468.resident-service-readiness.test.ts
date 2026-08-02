@@ -1,6 +1,19 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { generateKeyPairSync, sign } from 'node:crypto';
-import { join } from 'node:path';
+import {
+  closeSync,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, join } from 'node:path';
 import {
   observeResidentServiceDiagnostic,
   residentServiceReleaseManifestPayloadBytes,
@@ -151,11 +164,25 @@ function dependencies(overrides: {
   varySecondRuntime?: boolean;
   killSequence?: Array<'absent' | 'present' | 'unknown'>;
   wallClockMs?: number;
+  expectedHome?: string;
+  uid?: number;
+  realHomeIdentity?: boolean;
+  homeDirectoryIdentityFs?: ResidentServiceDiagnosticDependencies['homeDirectoryIdentityFs'];
 } = {}): ResidentServiceDiagnosticDependencies {
   let runtimeReads = 0;
   let killReads = 0;
   return {
-    uid: () => UID,
+    uid: () => overrides.uid ?? UID,
+    ...(!overrides.realHomeIdentity ? {
+      homeDirectoryIdentity: (path: string, uid: number) => {
+        expect(path).toBe(overrides.expectedHome ?? HOME);
+        expect(uid).toBe(overrides.uid ?? UID);
+        return { state: 'exact' as const, canonicalPath: path, identity: 'fixture-home' };
+      },
+    } : {}),
+    ...(overrides.homeDirectoryIdentityFs
+      ? { homeDirectoryIdentityFs: overrides.homeDirectoryIdentityFs }
+      : {}),
     testOnlyWallClockMs: () => overrides.wallClockMs ?? NOW,
     releaseTreeBinding: (() => {
       let reads = 0;
@@ -183,7 +210,7 @@ function dependencies(overrides: {
       };
     })(),
     killSwitchState: (path) => {
-      expect(path).toBe(join(HOME, '.ashlr', 'KILL'));
+      expect(path).toBe(join(overrides.expectedHome ?? HOME, '.ashlr', 'KILL'));
       const observation = overrides.killSequence?.[killReads] ?? overrides.kill ?? 'absent';
       killReads += 1;
       return observation;
@@ -204,12 +231,63 @@ function dependencies(overrides: {
         };
       }
       if (command === '/usr/bin/plutil') {
-        expect(args).toEqual(['-convert', 'json', '-o', '-', PLIST]);
+        expect(args).toEqual([
+          '-convert',
+          'json',
+          '-o',
+          '-',
+          join(overrides.expectedHome ?? HOME, 'Library', 'LaunchAgents', 'ai.ashlr.daemon.plist'),
+        ]);
         return overrides.plist ?? { status: 0, stdout: plist(), stderr: '' };
       }
       throw new Error(`unexpected command: ${command} ${args.join(' ')}`);
     },
   };
+}
+
+const realHomeIdentityFs: NonNullable<ResidentServiceDiagnosticDependencies['homeDirectoryIdentityFs']> = {
+  lstat: (path) => lstatSync(path, { bigint: true }),
+  open: (path, flags) => openSync(path, flags),
+  fstat: (descriptor) => fstatSync(descriptor, { bigint: true }),
+  close: closeSync,
+  realpath: (path) => realpathSync.native(path),
+};
+
+function observeRealHomeIdentity(
+  home: string,
+  overrides: Pick<ResidentServiceDiagnosticDependencies, 'homeDirectoryIdentityFs'> & {
+    uid?: number;
+    environmentHome?: string;
+  } = {},
+) {
+  const uid = overrides.uid ?? (typeof process.getuid === 'function' ? process.getuid() : UID);
+  const environment = { HOME: overrides.environmentHome ?? home };
+  return observeResidentServiceDiagnostic(
+    options({
+      homeDir: home,
+      signedReleaseManifest: signedReleaseManifest({
+        service: {
+          label: 'ai.ashlr.daemon',
+          platform: 'darwin',
+          program: NODE,
+          arguments: [...ARGS],
+          environment,
+        },
+      }),
+    }),
+    dependencies({
+      expectedHome: home,
+      uid,
+      realHomeIdentity: true,
+      homeDirectoryIdentityFs: overrides.homeDirectoryIdentityFs,
+      plist: { status: 0, stdout: plist({ EnvironmentVariables: environment }), stderr: '' },
+      runtime: {
+        status: 0,
+        stdout: launchdPrint(ARGS, `gui/${uid}/ai.ashlr.daemon`, 'running', 'runatload', 30, environment),
+        stderr: '',
+      },
+    }),
+  );
 }
 
 describe('observeResidentServiceDiagnostic', () => {
@@ -225,7 +303,7 @@ describe('observeResidentServiceDiagnostic', () => {
     const diagnostic = observeResidentServiceDiagnostic(options(), dependencies());
 
     expect(diagnostic).toMatchObject({
-      schemaVersion: 3,
+      schemaVersion: 4,
       scope: 'observation-only-diagnostic',
       diagnosticStatus: 'blocked',
       lifecycleAuthority: 'none',
@@ -242,6 +320,7 @@ describe('observeResidentServiceDiagnostic', () => {
         diskDefinitionRestartPolicyCompatible: true,
         loadedRestartPolicyHintsCompatible: true,
         signedReleaseManifest: 'signature-consistent',
+        homeDirectoryIdentity: 'exact',
         installedEnvironment: 'exact',
         loadedEnvironment: 'exact',
         environmentMatchesSignedManifest: true,
@@ -266,6 +345,201 @@ describe('observeResidentServiceDiagnostic', () => {
     expect(diagnostic).not.toHaveProperty('residentStartAuthorized');
   });
 
+  it('binds an exact HOME to a stable descriptor-observed directory identity', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-m468-home-exact-')));
+    try {
+      const diagnostic = observeRealHomeIdentity(root);
+      expect(diagnostic.localChecks).toMatchObject({
+        homeDirectoryIdentity: 'exact',
+        installedEnvironment: 'exact',
+        loadedEnvironment: 'exact',
+        environmentMatchesSignedManifest: true,
+        environmentSafe: true,
+      });
+      expect(diagnostic.operationalAuthority).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a lexical parent-segment HOME alias', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-m468-home-lexical-')));
+    const alias = `${root}/../${basename(root)}`;
+    try {
+      const diagnostic = observeRealHomeIdentity(alias);
+      expect(diagnostic.localChecks).toMatchObject({
+        homeDirectoryIdentity: 'unbound',
+        installedEnvironment: 'unbound',
+        loadedEnvironment: 'unbound',
+        environmentMatchesSignedManifest: null,
+        environmentSafe: false,
+      });
+      expect(diagnostic.findings).toContainEqual(expect.objectContaining({
+        code: 'home-directory-identity-unbound',
+        severity: 'blocked',
+      }));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('does not bind signed, installed, or loaded HOME aliases to a canonical home identity', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-m468-home-value-alias-')));
+    const alias = `${root}/../${basename(root)}`;
+    try {
+      const diagnostic = observeRealHomeIdentity(root, { environmentHome: alias });
+      expect(diagnostic.localChecks).toMatchObject({
+        homeDirectoryIdentity: 'exact',
+        installedEnvironment: 'mismatch',
+        loadedEnvironment: 'mismatch',
+        environmentMatchesSignedManifest: false,
+        environmentSafe: false,
+      });
+      expect(diagnostic.findings).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: 'service-environment-unsafe', severity: 'blocked' }),
+        expect.objectContaining({ code: 'service-environment-mismatch', severity: 'blocked' }),
+      ]));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a HOME symlink instead of following its target', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-m468-home-symlink-')));
+    const target = join(root, 'target');
+    const alias = join(root, 'alias');
+    mkdirSync(target);
+    symlinkSync(target, alias, 'dir');
+    try {
+      const diagnostic = observeRealHomeIdentity(alias);
+      expect(diagnostic.localChecks.homeDirectoryIdentity).toBe('unbound');
+      expect(diagnostic.localChecks.environmentSafe).toBe(false);
+      expect(diagnostic.localChecks.environmentMatchesSignedManifest).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a case alias whether the host resolves it or reports it missing', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-m468-home-case-')));
+    const canonical = join(root, 'CanonicalHome');
+    const alias = join(root, 'canonicalhome');
+    mkdirSync(canonical);
+    try {
+      const diagnostic = observeRealHomeIdentity(alias);
+      expect(['unbound', 'degraded']).toContain(diagnostic.localChecks.homeDirectoryIdentity);
+      expect(diagnostic.localChecks.environmentSafe).toBe(false);
+      expect(diagnostic.localChecks.environmentMatchesSignedManifest).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a non-NFC Unicode normalization alias', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-m468-home-unicode-')));
+    const canonical = join(root, 'Caf\u00e9Home');
+    const alias = join(root, 'Cafe\u0301Home');
+    mkdirSync(canonical);
+    try {
+      const diagnostic = observeRealHomeIdentity(alias);
+      expect(diagnostic.localChecks.homeDirectoryIdentity).toBe('unbound');
+      expect(diagnostic.localChecks.environmentSafe).toBe(false);
+      expect(diagnostic.localChecks.environmentMatchesSignedManifest).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('degrades a missing or unreadable HOME identity', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-m468-home-unavailable-')));
+    const missing = join(root, 'missing');
+    try {
+      const absent = observeRealHomeIdentity(missing);
+      expect(absent.localChecks).toMatchObject({
+        homeDirectoryIdentity: 'degraded',
+        installedEnvironment: 'degraded',
+        loadedEnvironment: 'degraded',
+        environmentSafe: false,
+      });
+
+      const unreadable = observeRealHomeIdentity(root, {
+        homeDirectoryIdentityFs: {
+          ...realHomeIdentityFs,
+          open: () => {
+            const error = new Error('permission denied') as NodeJS.ErrnoException;
+            error.code = 'EACCES';
+            throw error;
+          },
+        },
+      });
+      expect(unreadable.localChecks.homeDirectoryIdentity).toBe('degraded');
+      expect(unreadable.localChecks.environmentSafe).toBe(false);
+      expect(unreadable.findings).toContainEqual(expect.objectContaining({
+        code: 'home-directory-identity-unavailable',
+        severity: 'degraded',
+      }));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('degrades a HOME path replaced after the initial descriptor binding', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-m468-home-race-')));
+    const home = join(root, 'home');
+    const original = join(root, 'home-original');
+    const replacement = join(root, 'replacement');
+    mkdirSync(home);
+    mkdirSync(replacement);
+    let namedReads = 0;
+    const racingFs: NonNullable<ResidentServiceDiagnosticDependencies['homeDirectoryIdentityFs']> = {
+      ...realHomeIdentityFs,
+      lstat: (path) => {
+        namedReads += 1;
+        if (namedReads === 3) {
+          renameSync(home, original);
+          symlinkSync(replacement, home, 'dir');
+        }
+        return lstatSync(path, { bigint: true });
+      },
+    };
+    try {
+      const diagnostic = observeRealHomeIdentity(home, { homeDirectoryIdentityFs: racingFs });
+      expect(diagnostic.localChecks).toMatchObject({
+        homeDirectoryIdentity: 'degraded',
+        installedEnvironment: 'degraded',
+        loadedEnvironment: 'degraded',
+        environmentMatchesSignedManifest: null,
+        environmentSafe: false,
+      });
+      expect(diagnostic.operationalAuthority).toBe(false);
+    } finally {
+      try {
+        if (lstatSync(home).isSymbolicLink()) rmSync(home, { force: true });
+      } catch {
+        // The path may not have reached the replacement point.
+      }
+      try {
+        realpathSync.native(original);
+        renameSync(original, home);
+      } catch {
+        // The original path was never moved.
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a HOME directory not owned by the observed service uid', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-m468-home-owner-')));
+    const actualUid = typeof process.getuid === 'function' ? process.getuid() : UID;
+    try {
+      const diagnostic = observeRealHomeIdentity(root, { uid: actualUid + 1 });
+      expect(diagnostic.localChecks.homeDirectoryIdentity).toBe('unbound');
+      expect(diagnostic.localChecks.environmentSafe).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('rejects NODE_OPTIONS preload injection even when it is signed and exactly observed', () => {
     const environment = { HOME, NODE_OPTIONS: '--require /tmp/attacker.js' };
     const diagnostic = observeResidentServiceDiagnostic(
@@ -288,9 +562,9 @@ describe('observeResidentServiceDiagnostic', () => {
 
     expect(diagnostic.localChecks).toMatchObject({
       signedReleaseManifest: 'signature-consistent',
-      installedEnvironment: 'exact',
-      loadedEnvironment: 'exact',
-      environmentMatchesSignedManifest: true,
+      installedEnvironment: 'mismatch',
+      loadedEnvironment: 'mismatch',
+      environmentMatchesSignedManifest: false,
       environmentSafe: false,
     });
     expect(diagnostic.findings).toContainEqual(expect.objectContaining({
@@ -417,7 +691,7 @@ describe('observeResidentServiceDiagnostic', () => {
       }),
     );
 
-    expect(diagnostic.localChecks.environmentMatchesSignedManifest).toBe(true);
+    expect(diagnostic.localChecks.environmentMatchesSignedManifest).toBe(false);
     expect(diagnostic.localChecks.environmentSafe).toBe(false);
     expect(diagnostic.findings).toContainEqual(expect.objectContaining({ code: 'service-environment-unsafe' }));
   });
@@ -454,7 +728,7 @@ describe('observeResidentServiceDiagnostic', () => {
       }),
     );
 
-    expect(diagnostic.localChecks.environmentMatchesSignedManifest).toBe(true);
+    expect(diagnostic.localChecks.environmentMatchesSignedManifest).toBe(false);
     expect(diagnostic.localChecks.environmentSafe).toBe(false);
     expect(diagnostic.findings).toContainEqual(expect.objectContaining({ code: 'service-environment-unsafe' }));
   });

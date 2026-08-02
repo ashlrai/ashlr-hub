@@ -11,6 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash, createPublicKey, verify as verifySignature } from 'node:crypto';
 import {
   closeSync,
+  constants as fsConstants,
   existsSync,
   fstatSync,
   lstatSync,
@@ -46,6 +47,8 @@ export type ResidentServiceDiagnosticReasonCode =
   | 'signed-release-manifest-invalid'
   | 'signed-release-manifest-stale'
   | 'signed-release-manifest-mismatch'
+  | 'home-directory-identity-unbound'
+  | 'home-directory-identity-unavailable'
   | 'installed-service-environment-absent'
   | 'installed-service-environment-unavailable'
   | 'loaded-service-environment-absent'
@@ -95,6 +98,7 @@ export interface ResidentServiceDiagnosticChecks {
   diskDefinitionRestartPolicyCompatible: boolean | null;
   loadedRestartPolicyHintsCompatible: boolean | null;
   signedReleaseManifest: ResidentServiceManifestState;
+  homeDirectoryIdentity: ResidentServiceHomeDirectoryIdentityState;
   installedEnvironment: ResidentServiceEnvironmentState;
   loadedEnvironment: ResidentServiceEnvironmentState;
   environmentMatchesSignedManifest: boolean | null;
@@ -107,7 +111,7 @@ export interface ResidentServiceDiagnosticChecks {
 }
 
 export interface ResidentServiceDiagnostic {
-  schemaVersion: 3;
+  schemaVersion: 4;
   scope: 'observation-only-diagnostic';
   diagnosticStatus: 'blocked';
   lifecycleAuthority: 'none';
@@ -137,6 +141,21 @@ export interface ResidentServiceDiagnosticOptions extends ServiceInstallOptions 
 
 export type ResidentServiceManifestState = 'absent' | 'degraded' | 'stale' | 'mismatch' | 'signature-consistent';
 export type ResidentServiceEnvironmentState = 'absent' | 'degraded' | 'unbound' | 'mismatch' | 'exact';
+export type ResidentServiceHomeDirectoryIdentityState = 'degraded' | 'unbound' | 'exact';
+
+interface ResidentServiceHomeDirectoryIdentity {
+  state: ResidentServiceHomeDirectoryIdentityState;
+  canonicalPath: string | null;
+  identity: string | null;
+}
+
+interface ResidentServiceHomeDirectoryIdentityFs {
+  lstat: (path: string) => BigIntStats;
+  open: (path: string, flags: number) => number;
+  fstat: (descriptor: number) => BigIntStats;
+  close: (descriptor: number) => void;
+  realpath: (path: string) => string;
+}
 
 export interface ResidentServiceReleaseManifestPayloadV1 {
   schemaVersion: 1;
@@ -189,6 +208,10 @@ export interface ResidentServiceDiagnosticDependencies {
   interpreterBinding?: (interpreterPath: string, timeoutMs: number) => ResidentServiceFileBinding;
   killSwitchState?: (path: string) => 'absent' | 'present' | 'unknown';
   uid?: () => number;
+  /** Test-only home identity result. Production observes the filesystem directly. */
+  homeDirectoryIdentity?: (path: string, uid: number) => ResidentServiceHomeDirectoryIdentity;
+  /** Test-only filesystem seam for deterministic home-directory race fixtures. */
+  homeDirectoryIdentityFs?: ResidentServiceHomeDirectoryIdentityFs;
   /** Test-only cooperative clock. It never establishes a hard production deadline. */
   testOnlyNowMs?: () => number;
   /** Test-only wall clock for signed-evidence freshness fixtures. */
@@ -485,9 +508,115 @@ function sameEnvironment(left: Record<string, string>, right: Record<string, str
     ));
 }
 
-function exactSafeEnvironment(environment: Record<string, string>, home: string): boolean {
+function exactSafeEnvironment(environment: Record<string, string>, home: string | null): boolean {
   const entries = Object.entries(environment);
-  return entries.length === 1 && entries[0]?.[0] === 'HOME' && entries[0]?.[1] === home;
+  return home !== null
+    && entries.length === 1
+    && entries[0]?.[0] === 'HOME'
+    && entries[0]?.[1] === home;
+}
+
+function sameHomeDirectorySnapshot(left: BigIntStats, right: BigIntStats): boolean {
+  return left.dev === right.dev
+    && left.ino === right.ino
+    && left.mode === right.mode
+    && left.nlink === right.nlink
+    && left.uid === right.uid
+    && left.gid === right.gid
+    && left.size === right.size
+    && left.mtimeNs === right.mtimeNs
+    && left.ctimeNs === right.ctimeNs;
+}
+
+function safeOwnedHomeDirectory(stat: BigIntStats, uid: bigint): boolean {
+  return stat.isDirectory() && !stat.isSymbolicLink() && stat.uid === uid;
+}
+
+function observeStableHomeDirectoryIdentity(
+  homePath: string,
+  expectedUid: number,
+  injectedFs?: ResidentServiceHomeDirectoryIdentityFs,
+): ResidentServiceHomeDirectoryIdentity {
+  if (
+    !Number.isSafeInteger(expectedUid)
+    || expectedUid < 0
+    || !isAbsolute(homePath)
+    || resolve(homePath) !== homePath
+    || homePath.normalize('NFC') !== homePath
+  ) return { state: 'unbound', canonicalPath: null, identity: null };
+
+  const noFollow = fsConstants.O_NOFOLLOW;
+  const directoryOnly = fsConstants.O_DIRECTORY;
+  if (
+    typeof noFollow !== 'number'
+    || noFollow === 0
+    || typeof directoryOnly !== 'number'
+    || directoryOnly === 0
+  ) return { state: 'unbound', canonicalPath: null, identity: null };
+
+  const fs = injectedFs ?? {
+    lstat: (path: string) => lstatSync(path, { bigint: true }),
+    open: (path: string, flags: number) => openSync(path, flags),
+    fstat: (descriptor: number) => fstatSync(descriptor, { bigint: true }),
+    close: closeSync,
+    realpath: (path: string) => realpathSync.native(path),
+  };
+  let descriptor: number | undefined;
+  let observation: ResidentServiceHomeDirectoryIdentity = {
+    state: 'degraded',
+    canonicalPath: null,
+    identity: null,
+  };
+  try {
+    const uid = BigInt(expectedUid);
+    const before = fs.lstat(homePath);
+    if (!safeOwnedHomeDirectory(before, uid)) {
+      return { state: 'unbound', canonicalPath: null, identity: null };
+    }
+    const canonicalBefore = fs.realpath(homePath);
+    if (
+      canonicalBefore !== homePath
+      || canonicalBefore.normalize('NFC') !== canonicalBefore
+    ) return { state: 'unbound', canonicalPath: null, identity: null };
+
+    descriptor = fs.open(homePath, fsConstants.O_RDONLY | noFollow | directoryOnly);
+    const openedBefore = fs.fstat(descriptor);
+    if (
+      !safeOwnedHomeDirectory(openedBefore, uid)
+      || !sameHomeDirectorySnapshot(before, openedBefore)
+    ) {
+      observation = { state: 'degraded', canonicalPath: null, identity: null };
+    } else {
+      const openedAfter = fs.fstat(descriptor);
+      const namedAfter = fs.lstat(homePath);
+      const canonicalAfter = fs.realpath(homePath);
+      observation = (
+        safeOwnedHomeDirectory(openedAfter, uid)
+        && safeOwnedHomeDirectory(namedAfter, uid)
+        && sameHomeDirectorySnapshot(openedBefore, openedAfter)
+        && sameHomeDirectorySnapshot(openedAfter, namedAfter)
+        && canonicalAfter === canonicalBefore
+        && canonicalAfter === homePath
+      )
+        ? {
+            state: 'exact',
+            canonicalPath: canonicalBefore,
+            identity: `${openedAfter.dev}:${openedAfter.ino}`,
+          }
+        : { state: 'degraded', canonicalPath: null, identity: null };
+    }
+  } catch {
+    observation = { state: 'degraded', canonicalPath: null, identity: null };
+  } finally {
+    if (descriptor !== undefined) {
+      try {
+        fs.close(descriptor);
+      } catch {
+        observation = { state: 'degraded', canonicalPath: null, identity: null };
+      }
+    }
+  }
+  return observation;
 }
 
 const UNSAFE_NODE_ARGUMENT_RE = /^(?:-r|--require(?:=|$)|--import(?:=|$)|--loader(?:=|$)|--experimental-loader(?:=|$)|-e|--eval(?:=|$)|--inspect(?:-brk)?(?:=|$))/i;
@@ -734,7 +863,7 @@ function result(
   findings: ResidentServiceDiagnosticReason[],
 ): ResidentServiceDiagnostic {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     scope: 'observation-only-diagnostic',
     diagnosticStatus: 'blocked',
     lifecycleAuthority: 'none',
@@ -758,6 +887,7 @@ function emptyChecks(): ResidentServiceDiagnosticChecks {
     diskDefinitionRestartPolicyCompatible: null,
     loadedRestartPolicyHintsCompatible: null,
     signedReleaseManifest: 'absent',
+    homeDirectoryIdentity: 'unbound',
     installedEnvironment: 'absent',
     loadedEnvironment: 'absent',
     environmentMatchesSignedManifest: null,
@@ -783,12 +913,68 @@ export function observeResidentServiceDiagnostic(
   const reasons = architecturalBlockers();
   const platform = process.platform as Platform;
   if (platform !== 'darwin') {
+    checks.environmentSafe = false;
     blocked(
       reasons,
       'unsupported-platform',
       'this dormant slice cannot authenticate systemd loaded environments or the inherited environment of Windows Task Scheduler processes',
     );
     return result(options.release.identity, checks, reasons);
+  }
+
+  let uid = -1;
+  try {
+    uid = (dependencies.uid ?? (() => (
+      typeof process.getuid === 'function' ? process.getuid() : userInfo().uid
+    )))();
+  } catch {
+    // Invalid identity observations are normalized below and remain fail-closed.
+  }
+  const declaredHomePath = options.homeDir ?? homedir();
+  const rawObserveHomeIdentity = dependencies.homeDirectoryIdentity ?? ((path, ownerUid) => (
+    observeStableHomeDirectoryIdentity(path, ownerUid, dependencies.homeDirectoryIdentityFs)
+  ));
+  const observeHomeIdentity = (): ResidentServiceHomeDirectoryIdentity => {
+    try {
+      const observation = rawObserveHomeIdentity(declaredHomePath, uid);
+      if (
+        !['degraded', 'unbound', 'exact'].includes(observation?.state)
+        || (observation.state === 'exact' && (
+          typeof observation.canonicalPath !== 'string'
+          || typeof observation.identity !== 'string'
+          || observation.identity.length === 0
+        ))
+      ) return { state: 'degraded', canonicalPath: null, identity: null };
+      return observation;
+    } catch {
+      return { state: 'degraded', canonicalPath: null, identity: null };
+    }
+  };
+  let homeIdentity = observeHomeIdentity();
+  checks.homeDirectoryIdentity = homeIdentity.state;
+  let trustedHomePath = homeIdentity.state === 'exact' ? homeIdentity.canonicalPath : null;
+  const noteHomeIdentityFailure = (): void => {
+    checks.environmentSafe = false;
+    if (homeIdentity.state === 'degraded') {
+      if (!reasons.some(({ code }) => code === 'home-directory-identity-unavailable')) {
+        degraded(
+          reasons,
+          'home-directory-identity-unavailable',
+          'home directory identity is missing, unreadable, unsupported, or changed during descriptor-bound observation',
+        );
+      }
+    } else {
+      if (!reasons.some(({ code }) => code === 'home-directory-identity-unbound')) {
+        blocked(
+          reasons,
+          'home-directory-identity-unbound',
+          'home directory must be an absolute canonical NFC path to one stable, non-symlink, current-user-owned directory',
+        );
+      }
+    }
+  };
+  if (trustedHomePath === null || homeIdentity.identity === null) {
+    noteHomeIdentityFailure();
   }
 
   const releaseRoot = resolve(options.release.root);
@@ -882,7 +1068,7 @@ export function observeResidentServiceDiagnostic(
         blocked(reasons, 'signed-release-manifest-mismatch', 'signed release manifest does not match the declared release, interpreter, platform, or invocation');
       } else {
         manifestPayload = payload;
-        if (!exactSafeEnvironment(payload.service.environment, options.homeDir ?? homedir())) {
+        if (!exactSafeEnvironment(payload.service.environment, trustedHomePath)) {
           checks.environmentSafe = false;
           blocked(
             reasons,
@@ -894,9 +1080,6 @@ export function observeResidentServiceDiagnostic(
     }
   }
 
-  const uid = (dependencies.uid ?? (() => (
-    typeof process.getuid === 'function' ? process.getuid() : userInfo().uid
-  )))();
   const domainTarget = `gui/${uid}`;
   const serviceTarget = `${domainTarget}/${SERVICE_LABEL}`;
   const requestedTimeout = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -1112,6 +1295,22 @@ export function observeResidentServiceDiagnostic(
     }
   }
 
+  if (homeIdentity.state === 'exact') {
+    const initialHomeIdentity = homeIdentity;
+    const finalHomeIdentity = observeHomeIdentity();
+    if (
+      finalHomeIdentity.state !== 'exact'
+      || finalHomeIdentity.canonicalPath !== initialHomeIdentity.canonicalPath
+      || finalHomeIdentity.identity === null
+      || finalHomeIdentity.identity !== initialHomeIdentity.identity
+    ) {
+      homeIdentity = { state: 'degraded', canonicalPath: null, identity: null };
+      trustedHomePath = null;
+      checks.homeDirectoryIdentity = 'degraded';
+      noteHomeIdentityFailure();
+    }
+  }
+
   const installedEnvironment = installedLaunchdEnvironment(plist);
   const loadedEnvironment = launchdAbsent(second.runtime)
     ? { state: 'absent', environment: null } as const
@@ -1121,28 +1320,30 @@ export function observeResidentServiceDiagnostic(
 
   if (installedEnvironment.state === 'absent') {
     checks.installedEnvironment = 'absent';
+    checks.environmentSafe = false;
     blocked(reasons, 'installed-service-environment-absent', 'installed launchd definition has no explicit environment');
   } else if (installedEnvironment.state === 'degraded') {
     checks.installedEnvironment = 'degraded';
+    checks.environmentSafe = false;
     degraded(reasons, 'installed-service-environment-unavailable', 'installed launchd environment is unreadable or structurally ambiguous');
+  } else {
+    checks.installedEnvironment = 'unbound';
   }
   if (loadedEnvironment.state === 'absent') {
     checks.loadedEnvironment = 'absent';
+    checks.environmentSafe = false;
     blocked(reasons, 'loaded-service-environment-absent', 'loaded launchd state has no exact environment observation');
   } else if (loadedEnvironment.state === 'degraded') {
     checks.loadedEnvironment = 'degraded';
+    checks.environmentSafe = false;
     degraded(reasons, 'loaded-service-environment-unavailable', 'loaded launchd environment is unreadable or structurally ambiguous');
+  } else {
+    checks.loadedEnvironment = 'unbound';
   }
 
   if (installedEnvironment.environment && loadedEnvironment.environment) {
-    const installedSafe = exactSafeEnvironment(
-      installedEnvironment.environment,
-      options.homeDir ?? homedir(),
-    );
-    const loadedSafe = exactSafeEnvironment(
-      loadedEnvironment.environment,
-      options.homeDir ?? homedir(),
-    );
+    const installedSafe = exactSafeEnvironment(installedEnvironment.environment, trustedHomePath);
+    const loadedSafe = exactSafeEnvironment(loadedEnvironment.environment, trustedHomePath);
     const observedSafe = installedSafe && loadedSafe;
     checks.environmentSafe = checks.environmentSafe === false ? false : observedSafe;
     if (!observedSafe && !reasons.some(({ code }) => code === 'service-environment-unsafe')) {
@@ -1153,15 +1354,17 @@ export function observeResidentServiceDiagnostic(
       );
     }
 
-    if (manifestPayload) {
-      const installedExact = sameEnvironment(
-        installedEnvironment.environment,
+    if (manifestPayload && trustedHomePath !== null) {
+      const signedEnvironmentBound = exactSafeEnvironment(
         manifestPayload.service.environment,
+        trustedHomePath,
       );
-      const loadedExact = sameEnvironment(
-        loadedEnvironment.environment,
-        manifestPayload.service.environment,
-      );
+      const installedExact = signedEnvironmentBound
+        && installedSafe
+        && sameEnvironment(installedEnvironment.environment, manifestPayload.service.environment);
+      const loadedExact = signedEnvironmentBound
+        && loadedSafe
+        && sameEnvironment(loadedEnvironment.environment, manifestPayload.service.environment);
       checks.installedEnvironment = installedExact ? 'exact' : 'mismatch';
       checks.loadedEnvironment = loadedExact ? 'exact' : 'mismatch';
       checks.environmentMatchesSignedManifest = installedExact
@@ -1171,8 +1374,9 @@ export function observeResidentServiceDiagnostic(
         blocked(reasons, 'service-environment-mismatch', 'installed and loaded environments do not both equal the signed immutable release manifest');
       }
     } else {
-      checks.installedEnvironment = 'unbound';
-      checks.loadedEnvironment = 'unbound';
+      const identityState = homeIdentity.state === 'degraded' ? 'degraded' : 'unbound';
+      checks.installedEnvironment = identityState;
+      checks.loadedEnvironment = identityState;
       checks.environmentMatchesSignedManifest = null;
     }
   }
