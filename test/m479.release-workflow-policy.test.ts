@@ -25,8 +25,8 @@ const actionRefs = steps.flatMap((step) => (typeof step.uses === 'string' ? [ste
 describe('M479 npm release workflow supply-chain admission', () => {
   it('pins every third-party action to a reviewed immutable commit', () => {
     expect(actionRefs).toEqual([
-      'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683',
-      'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
+      'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
+      'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020',
     ]);
 
     for (const ref of actionRefs) {
@@ -36,17 +36,17 @@ describe('M479 npm release workflow supply-chain admission', () => {
     }
 
     expect(workflowText).toContain(
-      'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2',
+      'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1',
     );
     expect(workflowText).toContain(
-      'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0',
+      'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0',
     );
   });
 
   it('checks out the exact tag target without retaining write credentials', () => {
     expect(checkout).toEqual({
       name: 'Checkout the immutable tag target',
-      uses: 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683',
+      uses: 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
       with: {
         'fetch-depth': 0,
         'persist-credentials': false,
