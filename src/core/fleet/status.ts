@@ -91,6 +91,7 @@ import {
 } from '../run/repo-profile.js';
 import { engineInstalled } from '../run/engines.js';
 import { engineTierOf } from '../run/sandboxed-engine.js';
+import type { RoutingLearningAuthority } from '../run/learned-router.js';
 import {
   DEFAULT_COOLDOWN_MS,
   GENERATED_REPAIR_DISPATCH_BLOCKED_COOLDOWN_MS,
@@ -1609,6 +1610,8 @@ export interface FleetStatus {
     attemptCoverage?: FleetLearningMetricAvailability;
     trajectoryLearning?: FleetLearningMetricAvailability;
   };
+  /** Fail-closed authority projection for whether learned history may steer live routing. */
+  routingLearningAuthority?: RoutingLearningAuthority;
   /** Storage/read completeness for cached judge and merge-authority evidence. */
   decisionsSource?: DecisionSourceQuality;
   /** Storage/read completeness for judge calibration and real-world outcome labels. */
@@ -3162,6 +3165,35 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       rowsScanned: 0,
       invalidRows: 0,
       unreadableFiles: 1,
+    };
+  }
+  try {
+    const { inspectRoutingLearningAuthority } = await import('../run/learned-router.js');
+    status.routingLearningAuthority = inspectRoutingLearningAuthority();
+  } catch {
+    status.routingLearningAuthority = {
+      version: 1,
+      state: 'inactive',
+      operationalSteering: false,
+      sourceQuality: {
+        decisions: {
+          sourceState: 'degraded', sourcePresent: true, complete: false, authenticated: false,
+        },
+        assignments: {
+          sourceState: 'degraded', sourcePresent: true, complete: false,
+          denominatorComplete: false, authenticated: false,
+        },
+      },
+      samples: { observed: 0, eligible: 0, minimumPerStratum: 5 },
+      cohort: { policyVersion: null, learningEpoch: null },
+      blockerCodes: [
+        'assignment-authenticity-unavailable',
+        'assignment-denominator-incomplete',
+        'assignment-source-degraded',
+        'decision-authenticity-unavailable',
+        'decision-source-degraded',
+        'sample-floor-unmet',
+      ],
     };
   }
   let learningJudgeTracesRead: ReturnType<typeof readJudgeTracesDetailed> | undefined;
@@ -5837,7 +5869,7 @@ function learningEvidenceReadinessSources(
       quality: autonomyEvidenceQuality, generatedAt, applicability: 'required',
     }),
     evidenceReadinessSource({
-      id: 'decisions', label: 'Decision Authority', role: 'merge-authority',
+      id: 'decisions', label: 'Unsigned Decision Ledger', role: 'merge-authority',
       quality: status.decisionsSource, generatedAt, applicability: 'required',
     }),
     evidenceReadinessSource({

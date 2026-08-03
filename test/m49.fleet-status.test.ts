@@ -64,7 +64,10 @@ import {
   recordGeneratedRepairLifecycle,
 } from '../src/core/fleet/generated-repair-lifecycle.js';
 import * as fleetRouter from '../src/core/fleet/router.js';
-import { recommendRoute } from '../src/core/run/learned-router.js';
+import {
+  LEARNED_ROUTING_MIN_SAMPLES,
+  recommendRoute,
+} from '../src/core/run/learned-router.js';
 import {
   readRepairHandoffs,
   recordRepairHandoffs,
@@ -752,6 +755,32 @@ function writeDaemonLock(home: string, heartbeatAt: string, pid = process.pid): 
 // ---------------------------------------------------------------------------
 
 describe('buildFleetStatus — read-only aggregation (M49)', () => {
+  it('reports operational learning as inactive without authenticated decisions and eligible assignments', async () => {
+    const status = await buildFleetStatus(baseConfig());
+
+    expect(status.routingLearningAuthority).toMatchObject({
+      version: 1,
+      state: 'inactive',
+      operationalSteering: false,
+      sourceQuality: {
+        decisions: { authenticated: false },
+        assignments: { denominatorComplete: false },
+      },
+      samples: { observed: 0, eligible: 0, minimumPerStratum: LEARNED_ROUTING_MIN_SAMPLES },
+    });
+    expect(status.routingLearningAuthority?.blockerCodes).toEqual(expect.arrayContaining([
+      'decision-authenticity-unavailable',
+      'assignment-denominator-incomplete',
+      'sample-floor-unmet',
+    ]));
+    const decisionEvidence = status.autonomousShipReadiness?.evidenceMatrix?.sources
+      .find((source) => source.id === 'decisions');
+    expect(decisionEvidence).toMatchObject({
+      label: 'Unsigned Decision Ledger',
+      evidenceRole: 'merge-authority',
+    });
+  });
+
   it('formats a healthy zero-attempt proposal funnel as withheld without rates', async () => {
     const status = await buildFleetStatus(baseConfig());
     const proposalFunnel = buildProposalFunnelObservability({

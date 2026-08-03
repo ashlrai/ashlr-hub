@@ -190,14 +190,19 @@ function writeDecisions(
 
 import {
   buildEngineScores,
+  buildOperationalEngineScores,
   engineScoreFor,
+  evaluateRoutingLearningAuthority,
+  recommendRoute,
   sortEnginesByScore,
   LEARNED_ROUTING_MIN_SAMPLES,
   LEARNED_ROUTING_HALF_LIFE_MS,
   type EngineScoreMap,
 } from '../src/core/run/learned-router.js';
 import { routeTask, type RoutingContext } from '../src/core/run/router.js';
-import type { AshlrConfig, WorkItem } from '../src/core/types.js';
+import { routeBackend } from '../src/core/fleet/router.js';
+import { listRunsDetailed, saveRun } from '../src/core/run/orchestrator.js';
+import type { AshlrConfig, RunState, WorkItem } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -288,6 +293,157 @@ describe('buildEngineScores — cold-start', () => {
     expect(() => buildEngineScores('issue')).not.toThrow();
     const scores = buildEngineScores('issue');
     expect(scores.size).toBe(0);
+  });
+});
+
+describe('Operational Learning Firewall V1', () => {
+  const healthySources = {
+    decisions: {
+      sourceState: 'healthy' as const,
+      sourcePresent: true,
+      complete: true,
+      authenticated: true,
+    },
+    assignments: {
+      sourceState: 'healthy' as const,
+      sourcePresent: true,
+      complete: true,
+      denominatorComplete: true,
+      authenticated: true,
+    },
+  };
+  const admittedSample = (overrides: Record<string, unknown> = {}) => ({
+    decisionAuthenticated: true,
+    assignmentAuthenticated: true,
+    policyEligible: true,
+    denominatorComplete: true,
+    preExposureVerified: true,
+    assignmentIdentity: 'assignment-1',
+    propensity: 0.5,
+    contextStratum: 'issue:frontier',
+    policyVersion: 'router-v2',
+    learningEpoch: '2026-08-02',
+    decisionPolicyVersion: 'router-v2',
+    decisionLearningEpoch: '2026-08-02',
+    ...overrides,
+  });
+
+  it('admits only a complete authenticated same-cohort stratum at the sample floor', () => {
+    const authority = evaluateRoutingLearningAuthority({
+      ...healthySources,
+      observedSamples: LEARNED_ROUTING_MIN_SAMPLES,
+      samples: Array.from({ length: LEARNED_ROUTING_MIN_SAMPLES }, (_, index) =>
+        admittedSample({ assignmentIdentity: `assignment-${index}` })),
+    });
+
+    expect(authority).toMatchObject({
+      state: 'eligible',
+      operationalSteering: true,
+      samples: { observed: LEARNED_ROUTING_MIN_SAMPLES, eligible: LEARNED_ROUTING_MIN_SAMPLES },
+      cohort: { policyVersion: 'router-v2', learningEpoch: '2026-08-02' },
+      blockerCodes: [],
+    });
+  });
+
+  it('rejects unsigned decisions, mixed epochs, and incomplete assignment receipts', () => {
+    const authority = evaluateRoutingLearningAuthority({
+      decisions: { ...healthySources.decisions, authenticated: false },
+      assignments: {
+        ...healthySources.assignments,
+        denominatorComplete: false,
+        authenticated: false,
+      },
+      observedSamples: LEARNED_ROUTING_MIN_SAMPLES + 1,
+      samples: Array.from({ length: LEARNED_ROUTING_MIN_SAMPLES + 1 }, (_, index) =>
+        admittedSample({
+          decisionAuthenticated: false,
+          denominatorComplete: false,
+          policyEligible: false,
+          preExposureVerified: false,
+          assignmentIdentity: null,
+          propensity: null,
+          learningEpoch: index === 0 ? '2026-08-01' : '2026-08-02',
+          decisionLearningEpoch: '2026-08-02',
+        })),
+    });
+
+    expect(authority.state).toBe('inactive');
+    expect(authority.operationalSteering).toBe(false);
+    expect(authority.samples).toMatchObject({ observed: LEARNED_ROUTING_MIN_SAMPLES + 1, eligible: 0 });
+    expect(authority.cohort.learningEpoch).toBeNull();
+    expect(authority.blockerCodes).toEqual(expect.arrayContaining([
+      'decision-authenticity-unavailable',
+      'assignment-denominator-incomplete',
+      'assignment-authenticity-unavailable',
+      'assignment-policy-ineligible',
+      'assignment-pre-exposure-unverified',
+      'assignment-identity-unavailable',
+      'assignment-propensity-unknown',
+      'mixed-learning-epoch',
+      'learning-epoch-mismatch',
+      'sample-floor-unmet',
+    ]));
+  });
+
+  it('keeps unsigned negative decisions visible diagnostically but neutral operationally', () => {
+    const now = 1_700_000_000_000;
+    writeDecisions(judgedEntries(
+      LEARNED_ROUTING_MIN_SAMPLES + 2,
+      'codex',
+      'gpt-5.5',
+      'todo',
+      'harmful',
+      now,
+    ));
+
+    const projection = buildOperationalEngineScores('todo', now);
+    expect(projection.observational.get('codex:gpt-5.5')?.score).toBeLessThan(0.5);
+    expect(projection.operational.size).toBe(0);
+    expect(projection.authority).toMatchObject({
+      state: 'inactive',
+      operationalSteering: false,
+      samples: { observed: LEARNED_ROUTING_MIN_SAMPLES + 2, eligible: 0 },
+    });
+    expect(projection.authority.blockerCodes).toContain('decision-authenticity-unavailable');
+
+    const item = makeItem('todo', 4, 5);
+    const ctx = makeCtx(['claude', 'codex']);
+    const enabled = routeTask(item, makeCfg({ learnedRouting: true, routingPolicy: 'balanced' }), ctx);
+    const disabled = routeTask(item, makeCfg({ learnedRouting: false, routingPolicy: 'balanced' }), ctx);
+    expect(enabled).toMatchObject({ engine: disabled.engine, model: disabled.model });
+  });
+
+  it('never lets degraded run history downgrade an operational route', async () => {
+    const now = new Date().toISOString();
+    for (let index = 0; index < 3; index += 1) {
+      const run: RunState = {
+        id: `firewall-failed-run-${index}`,
+        goal: 'issue investigation',
+        engine: 'claude',
+        provider: 'anthropic',
+        engineTier: 'frontier',
+        createdAt: now,
+        updatedAt: now,
+        budget: { maxTokens: 1_000, maxSteps: 10, allowCloud: true },
+        usage: { tokensIn: 1, tokensOut: 1, steps: 1, estCostUsd: 0.01 },
+        tasks: [],
+        steps: [],
+        status: 'failed',
+      };
+      saveRun(run);
+    }
+    const runsDir = path.join(tmpHome, '.ashlr', 'runs');
+    fs.writeFileSync(path.join(runsDir, 'firewall-malformed.json'), '{not-json}\n', 'utf8');
+    expect(listRunsDetailed()).toMatchObject({ sourceState: 'degraded' });
+
+    const item = makeItem('issue', 5, 5);
+    const cfg = makeCfg({
+      intelligence: { minFrontierSuccessRate: 0.9 },
+    });
+    const expected = routeBackend(item, cfg);
+    const routed = await recommendRoute(item, cfg);
+    expect(routed).toMatchObject({ backend: expected.backend, tier: expected.tier });
+    expect(routed.reason).not.toContain('frontier success rate');
   });
 });
 
