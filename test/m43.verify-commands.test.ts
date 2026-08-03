@@ -559,7 +559,7 @@ describe('runVerifyCommand', () => {
 // ---------------------------------------------------------------------------
 
 describe('runVerifyCommandAsync', () => {
-  it('passes the 15-minute contract timeout through to the subprocess boundary', async () => {
+  it('preserves the 15-minute contract timeout through the subprocess boundary', async () => {
     const runSubprocess = vi.fn(async () => ({
       stdout: '',
       stderr: '',
@@ -580,7 +580,15 @@ describe('runVerifyCommandAsync', () => {
 
     expect(res.ok).toBe(true);
     expect(runSubprocess).toHaveBeenCalledTimes(1);
-    expect(runSubprocess.mock.calls[0]?.[1]).toMatchObject({ timeoutMs: 900_000 });
+    const [argv, subprocessOptions] = runSubprocess.mock.calls[0]!;
+    expect(subprocessOptions).toMatchObject({
+      timeoutMs: process.platform === 'win32' ? 910_000 : 900_000,
+    });
+    if (process.platform === 'win32') {
+      expect(argv[2]).toBe('900000');
+    } else {
+      expect(argv).toEqual(vc.cmd);
+    }
   });
 
   it('reports the same passing result shape without blocking timers', async () => {
