@@ -38,7 +38,6 @@ const MAX_STATE_FILES = 2_048;
 const MAX_STORE_ENTRIES = 4_096;
 const MAX_RECEIPTS = 3;
 const MAX_TTL_MS = 15 * 60 * 1000;
-const AUTHORITY_LOCK_WAIT_MS = 10_000;
 const DIGEST_RE = /^[a-f0-9]{64}$/;
 const OID_RE = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const REPO_RE = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
@@ -689,11 +688,19 @@ function withAuthorityLock(
   if (!root) return refusal('degraded', authorityId, 'store-unavailable');
   const key = deriveSigningKey();
   if (!key) return refusal('degraded', authorityId, 'signing-key-unavailable');
-  const lock = acquireLocalStoreLock(join(root, `${authorityId}.lock`), AUTHORITY_LOCK_WAIT_MS, {
+  const contention = { liveOwnerObserved: false };
+  const lock = acquireLocalStoreLock(join(root, `${authorityId}.lock`), 2_000, {
     anchorPath: homedir(),
     exactPrivateStorage: true,
+    contention,
   });
-  if (!lock) return refusal('degraded', authorityId, 'state-lock-unavailable');
+  if (!lock) {
+    return refusal(
+      'degraded',
+      authorityId,
+      contention.liveOwnerObserved ? 'state-lock-contended' : 'state-lock-unavailable',
+    );
+  }
   try {
     return ownsLocalStoreLock(lock)
       ? run(root, authorityId, key, lock)

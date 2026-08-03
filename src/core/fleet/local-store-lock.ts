@@ -74,6 +74,10 @@ export interface LocalStoreLock {
   readonly ino: number;
 }
 
+export interface LocalStoreLockContentionObservation {
+  liveOwnerObserved: boolean;
+}
+
 const acquiredLocks = new WeakSet<object>();
 const acquiredLockDirectories = new WeakMap<object, LockDirectory>();
 const retainedReleases = new Map<string, LocalStoreLock>();
@@ -983,8 +987,13 @@ function acquireReclaimElection(
 export function acquireLocalStoreLock(
   path: string,
   waitMs = 2_000,
-  options: { anchorPath?: string; exactPrivateStorage?: boolean } = {},
+  options: {
+    anchorPath?: string;
+    exactPrivateStorage?: boolean;
+    contention?: LocalStoreLockContentionObservation;
+  } = {},
 ): LocalStoreLock | null {
+  if (options.contention) options.contention.liveOwnerObserved = false;
   const start = currentStartIdentity();
   if (!start) return null;
   const deadline = performance.now() + waitMs;
@@ -1002,6 +1011,9 @@ export function acquireLocalStoreLock(
   let postDeadReclaimInstallConsumed = false;
   while (true) {
     const observedState = contendedOwnerState(path);
+    if (observedState === 'alive' && options.contention) {
+      options.contention.liveOwnerObserved = true;
+    }
     if (observedState !== 'absent' && observedState !== 'dead') {
       sawContention = true;
       if (performance.now() >= deadline) return null;
@@ -1093,6 +1105,9 @@ export function acquireLocalStoreLock(
           { dev: stat.dev, ino: stat.ino, mtimeMs: stat.mtimeMs },
           directory,
         );
+        if (owner.state === 'alive' && options.contention) {
+          options.contention.liveOwnerObserved = true;
+        }
         if (owner.state === 'dead' && owner.token) {
           const election = acquireReclaimElection(path, start, directory);
           if (election) {

@@ -108,7 +108,9 @@ describe('local store lock unknown-owner recovery', () => {
     expect(corrupted.ino).toBe(ownerLock.ino);
     expect(Date.now() - corrupted.mtimeMs).toBeGreaterThan(1_000);
 
-    expect(acquireLocalStoreLock(lockPath, 50)).toBeNull();
+    const contention = { liveOwnerObserved: true };
+    expect(acquireLocalStoreLock(lockPath, 50, { contention })).toBeNull();
+    expect(contention.liveOwnerObserved).toBe(false);
     expect(() => process.kill(holder.child.pid!, 0)).not.toThrow();
     const retained = fs.lstatSync(lockPath);
     expect({ dev: retained.dev, ino: retained.ino }).toEqual({
@@ -117,6 +119,17 @@ describe('local store lock unknown-owner recovery', () => {
     });
     expect(fs.readFileSync(lockPath, 'utf8')).toBe('{corrupt owner metadata\n');
     expect(fs.existsSync(`${lockPath}.reclaim.owner`)).toBe(false);
+  });
+
+  it('reports contention only after observing a well-formed live owner', async () => {
+    const lockPath = path.join(tmpDir, 'observed-live-owner.lock');
+    const holder = spawnLockHolder(lockPath);
+    await holder.ready;
+
+    const contention = { liveOwnerObserved: false };
+    expect(acquireLocalStoreLock(lockPath, 50, { contention })).toBeNull();
+    expect(contention.liveOwnerObserved).toBe(true);
+    expect(() => process.kill(holder.child.pid!, 0)).not.toThrow();
   });
 
   it('still reclaims a valid lock after its owner process is proven dead', async () => {
