@@ -53,10 +53,11 @@ describe('M440 dependency audit CI', () => {
           name: 'Dependency audit (root + Raycast)',
           'runs-on': 'ubuntu-latest',
           'timeout-minutes': 15,
+          env: { NPM_CONFIG_REGISTRY: 'https://registry.npmjs.org' },
           steps: [
             {
               name: 'Checkout',
-              uses: 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683',
+              uses: 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
               with: {
                 'persist-credentials': false,
                 ref: '${{ github.event.pull_request.head.sha || github.sha }}',
@@ -64,33 +65,26 @@ describe('M440 dependency audit CI', () => {
             },
             {
               name: 'Set up Node.js 22',
-              uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
-              with: {
-                'node-version': '22',
-                cache: 'npm',
-                'cache-dependency-path': 'package-lock.json\nsrc/raycast/package-lock.json\n',
-              },
+              uses: 'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020',
+              with: { 'node-version': '22' },
             },
-            { name: 'Install root dependencies', run: 'npm ci --ignore-scripts --no-audit' },
-            { name: 'Audit root dependencies', run: 'npm audit --audit-level=high' },
+            {
+              name: 'Audit root dependencies',
+              run: 'npm audit --package-lock-only --ignore-scripts --audit-level=low',
+            },
             {
               name: 'Audit root production dependencies',
-              run: 'npm audit --omit=dev --audit-level=high',
-            },
-            {
-              name: 'Install Raycast dependencies',
-              'working-directory': 'src/raycast',
-              run: 'npm ci --ignore-scripts --no-audit',
+              run: 'npm audit --package-lock-only --ignore-scripts --omit=dev --audit-level=low',
             },
             {
               name: 'Audit Raycast dependencies',
               'working-directory': 'src/raycast',
-              run: 'npm audit --audit-level=high',
+              run: 'npm audit --package-lock-only --ignore-scripts --audit-level=low',
             },
             {
               name: 'Audit Raycast production dependencies',
               'working-directory': 'src/raycast',
-              run: 'npm audit --omit=dev --audit-level=high',
+              run: 'npm audit --package-lock-only --ignore-scripts --omit=dev --audit-level=low',
             },
           ],
         },
@@ -115,42 +109,50 @@ describe('M440 dependency audit CI', () => {
     });
     expect(audit['runs-on']).toBe('ubuntu-latest');
     expect(audit['timeout-minutes']).toBe(15);
+    expect(audit.env).toEqual({ NPM_CONFIG_REGISTRY: 'https://registry.npmjs.org' });
     expect(audit.permissions).toBeUndefined();
   });
 
   it('uses only approved actions with bounded checkout authority', () => {
-    expect(steps).toHaveLength(8);
+    expect(steps).toHaveLength(6);
     expect(steps.filter((step) => step.uses).map((step) => step.uses)).toEqual([
-      'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683',
-      'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
+      'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
+      'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020',
     ]);
     expect(steps[0]).toMatchObject({
-      uses: 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683',
+      uses: 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
       with: {
         'persist-credentials': false,
         ref: '${{ github.event.pull_request.head.sha || github.sha }}',
       },
     });
     expect(steps[1]).toMatchObject({
-      uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
-      with: {
-        'node-version': '22',
-        cache: 'npm',
-        'cache-dependency-path': 'package-lock.json\nsrc/raycast/package-lock.json\n',
-      },
+      uses: 'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020',
+      with: { 'node-version': '22' },
     });
   });
 
-  it('reproducibly installs and audits full and production dependency graphs', () => {
+  it('audits full and production lockfile graphs without installing packages', () => {
     expect(steps.slice(2).map(({ run, ['working-directory']: cwd }) => ({ run, cwd }))).toEqual([
-      { run: 'npm ci --ignore-scripts --no-audit', cwd: undefined },
-      { run: 'npm audit --audit-level=high', cwd: undefined },
-      { run: 'npm audit --omit=dev --audit-level=high', cwd: undefined },
-      { run: 'npm ci --ignore-scripts --no-audit', cwd: 'src/raycast' },
-      { run: 'npm audit --audit-level=high', cwd: 'src/raycast' },
-      { run: 'npm audit --omit=dev --audit-level=high', cwd: 'src/raycast' },
+      {
+        run: 'npm audit --package-lock-only --ignore-scripts --audit-level=low',
+        cwd: undefined,
+      },
+      {
+        run: 'npm audit --package-lock-only --ignore-scripts --omit=dev --audit-level=low',
+        cwd: undefined,
+      },
+      {
+        run: 'npm audit --package-lock-only --ignore-scripts --audit-level=low',
+        cwd: 'src/raycast',
+      },
+      {
+        run: 'npm audit --package-lock-only --ignore-scripts --omit=dev --audit-level=low',
+        cwd: 'src/raycast',
+      },
     ]);
     expect(steps.some((step) => step['continue-on-error'] === true)).toBe(false);
+    expect(steps.some((step) => String(step.run ?? '').includes('npm ci'))).toBe(false);
   });
 
   it('cannot publish, deploy, mutate settings, or consume secrets', () => {
@@ -170,7 +172,6 @@ describe('M440 dependency audit CI', () => {
         timezone: 'America/New_York',
       },
       'open-pull-requests-limit': 5,
-      labels: ['dependencies'],
       groups: {
         'production-dependencies': { 'dependency-type': 'production' },
         'development-dependencies': { 'dependency-type': 'development' },

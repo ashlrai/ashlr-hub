@@ -9,8 +9,6 @@ updates:
       time: "09:17"
       timezone: America/New_York
     open-pull-requests-limit: 5
-    labels:
-      - dependencies
     groups:
       production-dependencies:
         dependency-type: production
@@ -25,8 +23,6 @@ updates:
       time: "09:17"
       timezone: America/New_York
     open-pull-requests-limit: 5
-    labels:
-      - dependencies
     groups:
       production-dependencies:
         dependency-type: production
