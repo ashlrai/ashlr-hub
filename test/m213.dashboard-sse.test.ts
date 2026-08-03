@@ -1704,7 +1704,9 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain('const sources = Array.isArray(readiness.sources) ? readiness.sources : []');
     expect(src).toContain('source?.sourceQuality?.badge === badge');
     expect(src).toContain('function fdReadinessDataTitle');
-    expect(src).toContain("fdMetricPill('Data', fdReadinessDataText(readiness), fdReadinessDataTitle(readiness))");
+    expect(src).toContain('function fdReadinessDataPill');
+    expect(src).toContain('fdReadinessDataPill(readiness)');
+    expect(src).toContain("el('summary', {}, 'Source detail')");
     expect(src).toContain("qualityParts.length > 0 ? qualityParts.join(' / ') : 'healthy sources'");
     expect(src).toContain('const briefDetail = missionBrief?.whyNow ?? primaryAction?.detail ?? actionLabel');
     expect(src).toContain('const actionDetail = primaryAction?.detail ?? briefDetail');
@@ -1713,6 +1715,8 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(css).toContain('.fleet-command-rail');
     expect(css).toContain('.fleet-command-safety--autonomous-dispatch');
     expect(css).toContain('grid-template-columns: repeat(2, minmax(0, 1fr))');
+    expect(css).toContain('.fd-readiness-pill--data .fd-readiness-pill__value');
+    expect(css).toContain('white-space: pre-line');
   });
 
   it('app.js keeps readiness data-quality counts distinct from healthy zero', () => {
@@ -1922,6 +1926,40 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(css).toContain('.fd-lease-samples');
     expect(css).toContain('.fd-lease-active-ids');
     expect(css).toContain('text-overflow: ellipsis');
+  });
+
+  it('renders one bounded read-only Autonomy Lane Board in Fleet Dashboard and Mission Control', () => {
+    const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public');
+    const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
+    const css = fs.readFileSync(path.join(root, 'styles.css'), 'utf8');
+
+    expect(src).toContain('function renderAutonomyLaneBoard');
+    expect(src).toContain('laneLocks.samples.slice(0, 8)');
+    expect(src).toContain('body.appendChild(rows)');
+    expect(src).toContain("el('span', { cls: 'autonomy-lane-board__eyebrow' }, 'Autonomy Lanes')");
+    expect(src).toContain("state === 'healthy' ? 'No occupied autonomy lanes.'");
+    expect(src).toContain('Lane counts are observed from partial sources');
+    expect(src).toContain('Lane data unavailable');
+    expect(src).toContain("quality.complete !== true\n      ? 'degraded'");
+    expect(src).toContain("shell: 'ashlr fleet status --json'");
+    expect(src).toContain("shell: 'ashlr goals list --json'");
+    expect(src).toContain("shell: 'ashlr inbox --json'");
+    expect(src).toContain("fleet-command-safety--read-only");
+    expect(src).not.toContain('autonomyLaneBoardMutation');
+
+    const readinessIndex = src.indexOf('if (readinessRail) body.appendChild(readinessRail)');
+    const dashboardLaneIndex = src.indexOf('body.appendChild(renderAutonomyLaneBoard(fleetSnapshot?.laneLocks))');
+    const leaseIndex = src.indexOf('const leaseBoard = fdRenderLeaseBoard(sharedQueue, activeWork)');
+    expect(readinessIndex).toBeGreaterThanOrEqual(0);
+    expect(dashboardLaneIndex).toBeGreaterThan(readinessIndex);
+    expect(leaseIndex).toBeGreaterThan(dashboardLaneIndex);
+
+    const missionBriefIndex = src.indexOf('const missionBriefCard = renderMissionBriefCard(missionBrief)');
+    const missionLaneIndex = src.indexOf("renderAutonomyLaneBoard(laneLocks, 'ctrl-card card')");
+    expect(missionLaneIndex).toBeGreaterThan(missionBriefIndex);
+    expect(css).toContain('.autonomy-lane-board__rows');
+    expect(css).toContain('.autonomy-lane-board__action');
+    expect(css).toContain('.autonomy-lane-board__reference { grid-column: 1 / -1; }');
   });
 
   it('app.js inbox detail reads current proposal review fields', () => {

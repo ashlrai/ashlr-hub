@@ -1786,6 +1786,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
 
     const staleGoal = makeGoalRecord(repo, 'goal-lane-a', 'active', 'in-progress');
     staleGoal.milestones[0]!.updatedAt = '2026-07-03T00:00:00.000Z';
+    staleGoal.milestones[0]!.title = 'Recover token=abcdefghijklmnopqrstuvwxyz lane';
     const proposedGoal = makeGoalRecord(repo, 'goal-lane-b', 'active', 'proposed');
     proposedGoal.milestones[0]!.proposalId = applied.id;
     const outsideGoal = makeGoalRecord(outsideRepo, 'goal-outside', 'active', 'pending');
@@ -1812,11 +1813,20 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       awaitingHostMerge: 1,
       unverifiedApplied: 1,
       lockedVisibleItems: 2,
+      sourceQuality: {
+        sourceState: 'healthy',
+        complete: true,
+        reasons: [],
+      },
     });
     expect(s.laneLocks?.samples.map((sample) => sample.reason)).toEqual(
       expect.arrayContaining(['stale-in-progress', 'active-goal', 'awaiting-host-merge', 'unverified-applied']),
     );
     expect(s.laneLocks?.samples.every((sample) => !('diff' in sample))).toBe(true);
+    expect(s.laneLocks?.samples.every((sample) => sample.repo === 'repo-lanes')).toBe(true);
+    expect(JSON.stringify(s.laneLocks?.samples)).not.toContain(tmpHome);
+    expect(JSON.stringify(s.laneLocks?.samples)).not.toContain('abcdefghijklmnopqrstuvwxyz');
+    expect(JSON.stringify(s.laneLocks?.samples)).toContain('token=[REDACTED]');
     expect(formatFleetStatus(s)).toContain(
       'lane locks:    2 active, 1 stale, 1 handoff, 1 unverified, 2 visible locked',
     );
@@ -1824,12 +1834,111 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(action).toMatchObject({
       priority: 'high',
       label: 'Recover stale goal lanes',
-      target: repo,
+      target: 'repo-lanes',
     });
     expect(action?.commands?.map((command) => command.argv)).toEqual([
       ['ashlr', 'goals', 'show', 'goal-lane-a', '--json'],
       ['ashlr', 'goals', 'recover-stale'],
     ]);
+  });
+
+  it('keeps missing, malformed, truncated, and partial lane sources distinct from healthy zero', async () => {
+    const repo = join(tmpHome, 'repo-lane-quality');
+    writeBacklogSnapshot(tmpHome, repo, []);
+
+    const missing = await buildFleetStatus(baseConfig());
+    expect(missing.laneLocks).toMatchObject({
+      active: 0,
+      sourceQuality: {
+        sourceState: 'missing',
+        complete: false,
+        reasons: expect.arrayContaining(['goals-missing', 'proposals-missing']),
+      },
+    });
+
+    const goalsDir = join(process.env.ASHLR_HOME!, 'goals');
+    mkdirSync(goalsDir, { recursive: true });
+    writeFileSync(join(goalsDir, 'malformed.json'), '{', 'utf8');
+    const malformed = await buildFleetStatus(baseConfig());
+    expect(malformed.laneLocks?.sourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      reasons: expect.arrayContaining(['goals-incomplete', 'goals-unreadable']),
+    });
+
+    rmSync(goalsDir, { recursive: true, force: true });
+    const manyGoals = Array.from({ length: 201 }, (_, index) =>
+      makeGoalRecord(repo, `goal-quality-${String(index).padStart(3, '0')}`));
+    writeGoalRecords(tmpHome, manyGoals);
+    const truncated = await buildFleetStatus(baseConfig());
+    expect(truncated.laneLocks?.sourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      reasons: expect.arrayContaining(['goals-incomplete', 'goals-limit-exceeded']),
+    });
+
+    rmSync(goalsDir, { recursive: true, force: true });
+    writeGoalRecords(tmpHome, [makeGoalRecord(repo, 'goal-quality-valid')]);
+    const inboxDir = join(process.env.ASHLR_HOME!, 'inbox');
+    mkdirSync(inboxDir, { recursive: true });
+    writeFileSync(join(inboxDir, 'malformed.json'), '{', 'utf8');
+    const partial = await buildFleetStatus(baseConfig());
+    expect(partial.laneLocks?.sourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      reasons: expect.arrayContaining(['proposals-incomplete', 'proposals-invalid']),
+    });
+  });
+
+  it('caps lane samples and bounds every source-quality reason list', () => {
+    const repo = '/private/workspace/ashlr-hub';
+    const proposals = Array.from({ length: 12 }, (_, index): Proposal => ({
+      id: `proposal-${index}`,
+      repo,
+      origin: 'agent',
+      kind: 'patch',
+      title: `Proposal ${index}`,
+      summary: 'bounded fixture',
+      status: 'awaiting-host-merge',
+      createdAt: '2026-07-03T00:00:00.000Z',
+    }));
+    const status = buildFleetLaneLocks({
+      goals: [],
+      proposals,
+      visibleQueueItems: [],
+      sampleLimit: 99,
+      sourceQuality: {
+        goals: { sourceState: 'missing', complete: false, reasons: ['goals-missing'] },
+        proposals: {
+          sourceState: 'degraded', complete: false,
+          reasons: ['proposals-incomplete', 'proposals-invalid', 'proposals-unreadable', 'proposals-limit-exceeded'],
+        },
+        queue: {
+          sourceState: 'degraded', complete: false,
+          reasons: ['queue-missing', 'queue-incomplete', 'queue-stale', 'queue-unavailable'],
+        },
+      },
+    });
+
+    expect(status.samples).toHaveLength(8);
+    expect(status.sourceQuality).toMatchObject({ sourceState: 'degraded', complete: false });
+    expect(status.sourceQuality?.reasons).toHaveLength(8);
+    expect(status.samples.every((sample) => sample.repo === 'ashlr-hub')).toBe(true);
+    expect(JSON.stringify(status.samples)).not.toContain('/private/workspace');
+  });
+
+  it('normalizes an incomplete source that claims healthy to degraded', () => {
+    const status = buildFleetLaneLocks({
+      goals: [],
+      proposals: [],
+      visibleQueueItems: [],
+      sourceQuality: {
+        goals: { sourceState: 'healthy', complete: false, reasons: [] },
+      },
+    });
+
+    expect(status.sourceQuality).toMatchObject({ sourceState: 'degraded', complete: false });
+    expect(status.sourceQuality?.sources.goals).toMatchObject({ sourceState: 'degraded', complete: false });
   });
 
   it('surfaces missing verify repo names, project kinds, and reasons', async () => {

@@ -2,6 +2,7 @@ import { resolve } from 'node:path';
 import type { Goal, Proposal, WorkItem } from '../types.js';
 import { proposalCompletesGoalMilestone } from '../goals/completion.js';
 import { DEFAULT_STALE_GOAL_MILESTONE_MS } from '../goals/store.js';
+import { scrubSecrets } from '../util/scrub.js';
 
 export type FleetLaneLockReason =
   | 'active-goal'
@@ -21,6 +22,37 @@ export interface FleetLaneLockSample {
   ageMs: number | null;
 }
 
+export type FleetLaneLockSourceState = 'missing' | 'healthy' | 'degraded';
+
+export type FleetLaneLockSourceReason =
+  | 'goals-missing'
+  | 'goals-incomplete'
+  | 'goals-unreadable'
+  | 'goals-limit-exceeded'
+  | 'proposals-missing'
+  | 'proposals-incomplete'
+  | 'proposals-invalid'
+  | 'proposals-unreadable'
+  | 'proposals-limit-exceeded'
+  | 'queue-missing'
+  | 'queue-incomplete'
+  | 'queue-stale'
+  | 'queue-unavailable';
+
+export interface FleetLaneLockSourceQualityPart {
+  sourceState: FleetLaneLockSourceState;
+  complete: boolean;
+  reasons: FleetLaneLockSourceReason[];
+}
+
+export interface FleetLaneLockSourceQuality extends FleetLaneLockSourceQualityPart {
+  sources: {
+    goals: FleetLaneLockSourceQualityPart;
+    proposals: FleetLaneLockSourceQualityPart;
+    queue: FleetLaneLockSourceQualityPart;
+  };
+}
+
 export interface FleetLaneLocksStatus {
   generatedAt: string;
   active: number;
@@ -29,6 +61,8 @@ export interface FleetLaneLocksStatus {
   unverifiedApplied: number;
   lockedVisibleItems: number;
   samples: FleetLaneLockSample[];
+  /** Present on current snapshots; omitted only by legacy serialized status. */
+  sourceQuality?: FleetLaneLockSourceQuality;
 }
 
 export interface BuildFleetLaneLocksInput {
@@ -39,11 +73,16 @@ export interface BuildFleetLaneLocksInput {
   staleInProgressMs?: number;
   recentAppliedMs?: number;
   sampleLimit?: number;
+  sourceQuality?: Partial<FleetLaneLockSourceQuality['sources']>;
 }
 
 export const DEFAULT_LANE_LOCK_STALE_IN_PROGRESS_MS = DEFAULT_STALE_GOAL_MILESTONE_MS;
 export const DEFAULT_LANE_LOCK_RECENT_APPLIED_MS = 7 * 24 * 60 * 60 * 1000;
 export const DEFAULT_LANE_LOCK_SAMPLE_LIMIT = 8;
+export const MAX_LANE_LOCK_SOURCE_REASONS = 8;
+
+const MAX_LANE_LOCK_TITLE_LENGTH = 120;
+const MAX_LANE_LOCK_REFERENCE_LENGTH = 96;
 
 const ACTIVE_GOAL_MILESTONE_STATUSES = new Set(['pending', 'in-progress', 'proposed']);
 
@@ -63,8 +102,66 @@ function repoKey(repo: string | null | undefined): string | null {
   return repo ? resolve(repo) : null;
 }
 
+function boundedMetadata(value: string | undefined, limit: number): string | undefined {
+  if (!value) return undefined;
+  const printable = Array.from(scrubSecrets(value), (character) => {
+    const code = character.charCodeAt(0);
+    return code <= 31 || code === 127 ? ' ' : character;
+  }).join('');
+  const normalized = printable
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!normalized) return undefined;
+  return normalized.length <= limit ? normalized : `${normalized.slice(0, Math.max(0, limit - 3))}...`;
+}
+
+function publicRepoName(repo: string | null | undefined): string | null {
+  if (!repo) return null;
+  const normalized = repo.replace(/\\/g, '/').replace(/\/+$/, '');
+  return boundedMetadata(normalized.split('/').pop(), MAX_LANE_LOCK_REFERENCE_LENGTH) ?? null;
+}
+
+function publicLane(repo: string | null | undefined, suffix: string): string {
+  return laneKey(publicRepoName(repo), boundedMetadata(suffix, MAX_LANE_LOCK_REFERENCE_LENGTH) ?? 'unknown');
+}
+
 function laneKey(repo: string | null, suffix: string): string {
   return `${repo ?? 'unknown'}#${suffix}`;
+}
+
+function sourceQualityPart(
+  input: FleetLaneLockSourceQualityPart | undefined,
+): FleetLaneLockSourceQualityPart {
+  if (!input) return { sourceState: 'healthy', complete: true, reasons: [] };
+  return {
+    sourceState: input.sourceState === 'healthy' && !input.complete ? 'degraded' : input.sourceState,
+    complete: input.complete,
+    reasons: input.reasons.slice(0, MAX_LANE_LOCK_SOURCE_REASONS),
+  };
+}
+
+function buildSourceQuality(
+  input: BuildFleetLaneLocksInput['sourceQuality'],
+): FleetLaneLockSourceQuality {
+  const sources = {
+    goals: sourceQualityPart(input?.goals),
+    proposals: sourceQualityPart(input?.proposals),
+    queue: sourceQualityPart(input?.queue),
+  };
+  const parts = Object.values(sources);
+  const sourceState: FleetLaneLockSourceState = parts.some((part) => part.sourceState === 'degraded')
+    ? 'degraded'
+    : parts.some((part) => part.sourceState === 'missing')
+      ? 'missing'
+      : 'healthy';
+  const reasons = Array.from(new Set(parts.flatMap((part) => part.reasons)))
+    .slice(0, MAX_LANE_LOCK_SOURCE_REASONS);
+  return {
+    sourceState,
+    complete: sourceState === 'healthy' && parts.every((part) => part.complete),
+    reasons,
+    sources,
+  };
 }
 
 function goalItemIds(item: WorkItem): { goalId: string; milestoneId?: string } | null {
@@ -119,7 +216,10 @@ export function buildFleetLaneLocks(input: BuildFleetLaneLocksInput): FleetLaneL
   const safeNowMs = Number.isNaN(nowMs) ? Date.now() : nowMs;
   const staleMs = input.staleInProgressMs ?? DEFAULT_LANE_LOCK_STALE_IN_PROGRESS_MS;
   const recentAppliedMs = input.recentAppliedMs ?? DEFAULT_LANE_LOCK_RECENT_APPLIED_MS;
-  const sampleLimit = Math.max(0, input.sampleLimit ?? DEFAULT_LANE_LOCK_SAMPLE_LIMIT);
+  const sampleLimit = Math.max(
+    0,
+    Math.min(DEFAULT_LANE_LOCK_SAMPLE_LIMIT, input.sampleLimit ?? DEFAULT_LANE_LOCK_SAMPLE_LIMIT),
+  );
 
   const samples: FleetLaneLockSample[] = [];
   const seenSamples = new Set<string>();
@@ -147,14 +247,14 @@ export function buildFleetLaneLocks(input: BuildFleetLaneLocksInput): FleetLaneL
       samples,
       seenSamples,
       {
-        lane,
-        repo,
+        lane: publicLane(goal.project, `goal:${goal.id}`),
+        repo: publicRepoName(goal.project),
         reason: stale ? 'stale-in-progress' : 'active-goal',
         goalId: goal.id,
         milestoneId: milestone.id,
         ...(milestone.proposalId ? { proposalId: milestone.proposalId } : {}),
         status: milestone.status,
-        title: milestone.title,
+        title: boundedMetadata(milestone.title, MAX_LANE_LOCK_TITLE_LENGTH),
         ageMs: milestoneAgeMs,
       },
       sampleLimit,
@@ -165,7 +265,6 @@ export function buildFleetLaneLocks(input: BuildFleetLaneLocksInput): FleetLaneL
   let unverifiedApplied = 0;
 
   for (const proposal of input.proposals) {
-    const repo = repoKey(proposal.repo);
     const proposalAgeMs = ageMs(safeNowMs, proposal.decidedAt ?? proposal.createdAt);
     if (proposal.status === 'awaiting-host-merge') {
       awaitingHostMerge++;
@@ -173,12 +272,12 @@ export function buildFleetLaneLocks(input: BuildFleetLaneLocksInput): FleetLaneL
         samples,
         seenSamples,
         {
-          lane: laneKey(repo, `proposal:${proposal.id}`),
-          repo,
+          lane: publicLane(proposal.repo, `proposal:${proposal.id}`),
+          repo: publicRepoName(proposal.repo),
           reason: 'awaiting-host-merge',
           proposalId: proposal.id,
           status: proposal.status,
-          title: proposal.title,
+          title: boundedMetadata(proposal.title, MAX_LANE_LOCK_TITLE_LENGTH),
           ageMs: proposalAgeMs,
         },
         sampleLimit,
@@ -194,12 +293,12 @@ export function buildFleetLaneLocks(input: BuildFleetLaneLocksInput): FleetLaneL
       samples,
       seenSamples,
       {
-        lane: laneKey(repo, `proposal:${proposal.id}`),
-        repo,
+        lane: publicLane(proposal.repo, `proposal:${proposal.id}`),
+        repo: publicRepoName(proposal.repo),
         reason: 'unverified-applied',
         proposalId: proposal.id,
         status: proposal.status,
-        title: proposal.title,
+        title: boundedMetadata(proposal.title, MAX_LANE_LOCK_TITLE_LENGTH),
         ageMs: proposalAgeMs,
       },
       sampleLimit,
@@ -221,5 +320,6 @@ export function buildFleetLaneLocks(input: BuildFleetLaneLocksInput): FleetLaneL
     unverifiedApplied,
     lockedVisibleItems,
     samples,
+    sourceQuality: buildSourceQuality(input.sourceQuality),
   };
 }

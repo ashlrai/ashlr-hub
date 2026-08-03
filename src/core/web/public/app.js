@@ -2391,7 +2391,137 @@ function diagnosticResliceDrainMetric(drain) {
 
 function laneLocksMetric(laneLocks) {
   if (!laneLocks) return null;
-  return `${laneLocks.active ?? 0} active / ${laneLocks.staleInProgress ?? 0} stale / ${laneLocks.awaitingHostMerge ?? 0} handoff / ${laneLocks.unverifiedApplied ?? 0} unverified`;
+  const quality = laneLocks.sourceQuality;
+  if (!quality) return 'source unknown';
+  if (quality.sourceState === 'missing') return 'unavailable';
+  const observed = quality.sourceState === 'degraded' || quality.complete === false ? ' observed' : '';
+  return `${laneLocks.active ?? 0} active${observed} / ${laneLocks.staleInProgress ?? 0} stale / ${laneLocks.awaitingHostMerge ?? 0} handoff / ${laneLocks.unverifiedApplied ?? 0} unverified`;
+}
+
+function laneLockStateLabel(reason) {
+  const labels = {
+    'active-goal': 'active',
+    'stale-in-progress': 'stale',
+    'awaiting-host-merge': 'handoff',
+    'unverified-applied': 'unverified',
+  };
+  return labels[reason] ?? 'unknown';
+}
+
+function laneLockReference(sample) {
+  const parts = [];
+  if (sample?.goalId) parts.push(`goal:${sample.goalId}`);
+  if (sample?.milestoneId) parts.push(`milestone:${sample.milestoneId}`);
+  if (sample?.proposalId) parts.push(`proposal:${sample.proposalId}`);
+  return compactFleetReason(parts.join(' / ') || sample?.lane || 'unknown', 96);
+}
+
+function laneBoardReadOnlyAction(laneLocks) {
+  const quality = laneLocks?.sourceQuality;
+  if (!laneLocks || !quality || quality.sourceState !== 'healthy' || quality.complete !== true) {
+    return { label: 'Inspect lane sources', shell: 'ashlr fleet status --json' };
+  }
+  if ((laneLocks.staleInProgress ?? 0) > 0 || (laneLocks.active ?? 0) > 0) {
+    return { label: 'Inspect goal lanes', shell: 'ashlr goals list --json' };
+  }
+  if ((laneLocks.awaitingHostMerge ?? 0) > 0 || (laneLocks.unverifiedApplied ?? 0) > 0) {
+    return { label: 'Inspect proposal lanes', shell: 'ashlr inbox --json' };
+  }
+  return { label: 'Inspect fleet status', shell: 'ashlr fleet status --json' };
+}
+
+function renderAutonomyLaneBoard(laneLocks, cardClass = '') {
+  const quality = laneLocks?.sourceQuality;
+  const state = !laneLocks || !quality
+    ? 'unknown'
+    : quality.complete !== true
+      ? 'degraded'
+      : quality.sourceState;
+  const samples = Array.isArray(laneLocks?.samples) ? laneLocks.samples.slice(0, 8) : [];
+  const occupied = laneLocks
+    ? (laneLocks.active ?? 0) + (laneLocks.awaitingHostMerge ?? 0) + (laneLocks.unverifiedApplied ?? 0)
+    : null;
+  const stateLabel = state === 'healthy'
+    ? occupied === 0 ? 'Clear' : 'Occupied'
+    : state === 'degraded'
+      ? 'Partial'
+      : 'Unavailable';
+  const wrapper = el('div', {
+    cls: `${cardClass ? `${cardClass} ` : ''}autonomy-lane-board autonomy-lane-board--${state}`.trim(),
+  });
+  if (cardClass) {
+    wrapper.appendChild(el('div', { cls: 'card-header' },
+      el('span', { cls: 'card-title' }, 'Autonomy Lanes'),
+      el('span', { cls: 'card-subtitle' }, 'Observation only')
+    ));
+  }
+  const body = el('div', { cls: cardClass ? 'card-body autonomy-lane-board__body' : 'autonomy-lane-board__body' });
+  body.appendChild(el('div', { cls: 'autonomy-lane-board__head' },
+    el('div', { cls: 'autonomy-lane-board__title' },
+      cardClass ? null : el('span', { cls: 'autonomy-lane-board__eyebrow' }, 'Autonomy Lanes'),
+      el('span', { cls: 'autonomy-lane-board__count' }, occupied == null
+        ? 'count unavailable'
+        : `${occupied}${state === 'degraded' ? ' observed' : ''}`)
+    ),
+    el('span', { cls: `autonomy-lane-board__state autonomy-lane-board__state--${state}` }, stateLabel)
+  ));
+
+  const reasons = Array.isArray(quality?.reasons) ? quality.reasons.slice(0, 8) : [];
+  if (state !== 'healthy') {
+    body.appendChild(el('p', { cls: 'autonomy-lane-board__quality' },
+      state === 'degraded'
+        ? `Lane counts are observed from partial sources${reasons.length ? `: ${reasons.join(', ')}` : '.'}`
+        : `Lane data unavailable${reasons.length ? `: ${reasons.join(', ')}` : '.'}`
+    ));
+  }
+
+  if (laneLocks) {
+    body.appendChild(el('div', { cls: 'autonomy-lane-board__metrics' },
+      fdRenderLeaseMetric('Active', String(laneLocks.active ?? 0)),
+      fdRenderLeaseMetric('Stale', String(laneLocks.staleInProgress ?? 0), (laneLocks.staleInProgress ?? 0) > 0 ? 'warn' : null),
+      fdRenderLeaseMetric('Handoff', String(laneLocks.awaitingHostMerge ?? 0), (laneLocks.awaitingHostMerge ?? 0) > 0 ? 'warn' : null),
+      fdRenderLeaseMetric('Unverified', String(laneLocks.unverifiedApplied ?? 0), (laneLocks.unverifiedApplied ?? 0) > 0 ? 'warn' : null)
+    ));
+  }
+
+  if (samples.length > 0) {
+    const rows = el('div', { cls: 'autonomy-lane-board__rows', role: 'table', 'aria-label': 'Observed autonomy lanes' });
+    rows.appendChild(el('div', { cls: 'autonomy-lane-board__row autonomy-lane-board__row--header', role: 'row' },
+      el('span', { role: 'columnheader' }, 'Repo'),
+      el('span', { role: 'columnheader' }, 'Objective / reference'),
+      el('span', { role: 'columnheader' }, 'State'),
+      el('span', { role: 'columnheader' }, 'Age')
+    ));
+    for (const sample of samples) {
+      const repo = basenameFromPath(sample?.repo ?? '') || 'unknown';
+      const reference = laneLockReference(sample);
+      const title = compactFleetReason(sample?.title ?? reference, 120);
+      const laneState = laneLockStateLabel(sample?.reason);
+      rows.appendChild(el('div', { cls: 'autonomy-lane-board__row', role: 'row' },
+        el('span', { cls: 'autonomy-lane-board__repo', role: 'cell' }, repo),
+        el('span', { cls: 'autonomy-lane-board__reference', role: 'cell' },
+          el('strong', {}, title),
+          el('small', {}, reference)
+        ),
+        el('span', { cls: `autonomy-lane-board__badge autonomy-lane-board__badge--${laneState}`, role: 'cell' }, laneState),
+        el('span', { cls: 'autonomy-lane-board__age', role: 'cell' }, fdFormatDurationMs(sample?.ageMs))
+      ));
+    }
+    body.appendChild(rows);
+  } else {
+    body.appendChild(el('p', { cls: 'autonomy-lane-board__empty' },
+      state === 'healthy' ? 'No occupied autonomy lanes.' : 'No lane rows available from the observed sources.'
+    ));
+  }
+
+  const action = laneBoardReadOnlyAction(laneLocks);
+  body.appendChild(el('div', { cls: 'autonomy-lane-board__action' },
+    el('span', { cls: 'autonomy-lane-board__action-label' }, action.label),
+    el('code', {}, action.shell),
+    el('span', { cls: 'fleet-command-safety fleet-command-safety--read-only' }, 'read-only')
+  ));
+  wrapper.appendChild(body);
+  return wrapper;
 }
 
 function autonomyAuthorityState(autonomy) {
@@ -4479,6 +4609,7 @@ function renderControl() {
 
   const missionBriefCard = renderMissionBriefCard(missionBrief);
   if (missionBriefCard) section.appendChild(missionBriefCard);
+  section.appendChild(renderAutonomyLaneBoard(laneLocks, 'ctrl-card card'));
 
   const missionPhantomCard = renderPhantomAgentReportCard(d.fleet?.phantom ?? fleet.phantom ?? null);
   if (missionPhantomCard) section.appendChild(missionPhantomCard);
@@ -5503,6 +5634,18 @@ function fdMetricPill(label, value, title) {
   );
 }
 
+function fdReadinessDataPill(readiness) {
+  const detail = fdReadinessDataTitle(readiness);
+  return el('div', { cls: 'fd-readiness-pill fd-readiness-pill--data' },
+    el('span', { cls: 'fd-readiness-pill__label' }, 'Data'),
+    el('span', { cls: 'fd-readiness-pill__value' }, fdReadinessDataText(readiness)),
+    el('details', { cls: 'fd-readiness-pill__disclosure' },
+      el('summary', {}, 'Source detail'),
+      el('span', {}, detail)
+    )
+  );
+}
+
 function fdFormatDurationMs(ms) {
   if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return '—';
   if (ms < 60_000) return '<1m';
@@ -5684,7 +5827,7 @@ function fdRenderReadinessRail(snap) {
     fdMetricPill('Brief', compactFleetReason(briefLabel, 54), briefDetail),
     fdMetricPill('Confidence', missionBrief?.confidence ?? readiness.confidence ?? 'unknown'),
     fdMetricPill('Action', compactFleetReason(actionLabel, 54), actionDetail),
-    fdMetricPill('Data', fdReadinessDataText(readiness), fdReadinessDataTitle(readiness)),
+    fdReadinessDataPill(readiness),
     fdMetricPill('Blocker', compactFleetReason(blockerLabel, 54), blockerDetail),
     fdMetricPill('Queue', queueMetric),
     generatedMetric ? fdMetricPill('Generated', generatedMetric) : null,
@@ -5722,6 +5865,7 @@ function fdRenderStatusPanel(snap) {
   const body = el('div', { cls: 'fd-panel__body' });
   const readinessRail = fdRenderReadinessRail(snap);
   if (readinessRail) body.appendChild(readinessRail);
+  body.appendChild(renderAutonomyLaneBoard(fleetSnapshot?.laneLocks));
 
   // Big running indicator
   const dot = el('span', { cls: isRunning ? 'fd-daemon-dot fd-daemon-dot--running' : 'fd-daemon-dot' });

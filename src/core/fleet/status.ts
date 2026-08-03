@@ -40,7 +40,7 @@ import type {
 import type { ResourceStrategyReport } from '../autonomy/resource-strategy.js';
 import { goalFocusSnapshot } from '../goals/focus.js';
 import { createProposalMilestoneCompletionPredicate } from '../goals/completion.js';
-import { listGoals } from '../goals/store.js';
+import { listGoalsDetailed, type ListGoalsDetailedResult } from '../goals/store.js';
 import {
   listAttemptRecords,
   summarizeAttemptCoverage,
@@ -135,7 +135,12 @@ import {
   buildContextEfficiencyStatus,
   type FleetContextEfficiencyStatus,
 } from './context-efficiency.js';
-import { buildFleetLaneLocks, type FleetLaneLocksStatus } from './lane-lock.js';
+import {
+  buildFleetLaneLocks,
+  type FleetLaneLocksStatus,
+  type FleetLaneLockSourceQualityPart,
+  type FleetLaneLockSourceReason,
+} from './lane-lock.js';
 import { isTrustedGeneratedRepairItem } from './self-heal-trust.js';
 import { defaultBranch } from '../git.js';
 import {
@@ -2410,6 +2415,58 @@ export async function readFleetDaemonStatus(): Promise<FleetDaemonStatusRead> {
  * Build a read-only snapshot of the fleet. Async because the backlog scan is
  * async. NEVER throws — each source is independently guarded.
  */
+function laneGoalSourceQuality(read: ListGoalsDetailedResult): FleetLaneLockSourceQualityPart {
+  const reasons: FleetLaneLockSourceReason[] = [];
+  if (read.sourceState === 'missing') reasons.push('goals-missing');
+  if (!read.complete) reasons.push('goals-incomplete');
+  if (read.unreadableFiles > 0) reasons.push('goals-unreadable');
+  if (read.limitExceeded) reasons.push('goals-limit-exceeded');
+  return {
+    sourceState: read.sourceState,
+    complete: read.sourceState === 'healthy' && read.complete,
+    reasons,
+  };
+}
+
+function laneProposalSourceQuality(
+  read: NonNullable<FleetStatus['proposals']['sourceQuality']>,
+): FleetLaneLockSourceQualityPart {
+  const reasons: FleetLaneLockSourceReason[] = [];
+  if (read.sourceState === 'missing') reasons.push('proposals-missing');
+  if (!read.complete) reasons.push('proposals-incomplete');
+  if (read.invalidFiles > 0) reasons.push('proposals-invalid');
+  if (read.unreadableFiles > 0) reasons.push('proposals-unreadable');
+  if (read.stopReasons.some((reason) => reason.includes('limit'))) reasons.push('proposals-limit-exceeded');
+  return {
+    sourceState: read.sourceState,
+    complete: read.sourceState === 'healthy' && read.complete,
+    reasons,
+  };
+}
+
+function laneQueueSourceQuality(
+  status: FleetReadinessSourceStatus,
+  sources: FleetStatus['queue']['sources'],
+): FleetLaneLockSourceQualityPart {
+  const reasons: FleetLaneLockSourceReason[] = [];
+  const parts = sources ? [sources.cachedBacklog, sources.queuedAutonomy] : [];
+  if (parts.length === 0 || parts.some((part) => part.sourceState === 'missing')) reasons.push('queue-missing');
+  if (status === 'degraded') reasons.push('queue-incomplete');
+  if (parts.some((part) => part.sourceState === 'unavailable')) reasons.push('queue-unavailable');
+  if (parts.some((part) => part.freshness === 'stale')) reasons.push('queue-stale');
+  const sourceState: FleetLaneLockSourceQualityPart['sourceState'] =
+    status === 'degraded' || reasons.includes('queue-unavailable') || reasons.includes('queue-stale')
+      ? 'degraded'
+      : status === 'healthy' && !reasons.includes('queue-missing')
+        ? 'healthy'
+        : 'missing';
+  return {
+    sourceState,
+    complete: sourceState === 'healthy',
+    reasons,
+  };
+}
+
 export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   const generatedAt = new Date().toISOString();
   let dispatchLearningEvents: DispatchProductionEvent[] | undefined;
@@ -2985,16 +3042,18 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   }
 
   let goalFocus: FleetGoalFocusStatus | undefined;
-  let goalLaneCandidates: ReturnType<typeof listGoals> = [];
+  let goalRead: ListGoalsDetailedResult = {
+    goals: [],
+    sourceState: 'degraded',
+    sourcePresent: false,
+    complete: false,
+    scannedFiles: 0,
+    unreadableFiles: 0,
+    limitExceeded: false,
+  };
   try {
-    const activeGoals = listGoals({ status: 'active' });
-    const planningGoals = listGoals({ status: 'planning' });
-    const seen = new Set(activeGoals.map((goal) => goal.id));
-    const goals = [
-      ...activeGoals,
-      ...planningGoals.filter((goal) => !seen.has(goal.id)),
-    ];
-    goalLaneCandidates = goals;
+    goalRead = listGoalsDetailed();
+    const goals = goalRead.goals.filter((goal) => goal.status === 'active' || goal.status === 'planning');
     const snapshot = goalFocusSnapshot(goals, cfg, {
       repos: enrolledExistingRepos,
       isMilestoneComplete: createProposalMilestoneCompletionPredicate(),
@@ -3016,11 +3075,8 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
 
   let laneLocks: FleetLaneLocksStatus | undefined;
   try {
-    if (goalLaneCandidates.length === 0) {
-      goalLaneCandidates = listGoals({ status: 'active' });
-    }
     const enrolledRepoSet = new Set(enrolledExistingRepos);
-    const laneGoals = goalLaneCandidates.filter(
+    const laneGoals = goalRead.goals.filter(
       (goal) => goal.project !== null && enrolledRepoSet.has(resolve(goal.project)),
     );
     const laneProposals = allProposals.filter(
@@ -3031,9 +3087,24 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       proposals: laneProposals,
       visibleQueueItems,
       generatedAt,
+      sourceQuality: {
+        goals: laneGoalSourceQuality(goalRead),
+        proposals: laneProposalSourceQuality(proposalSourceQuality),
+        queue: laneQueueSourceQuality(queueSourceStatus, queueInventorySources),
+      },
     });
   } catch {
-    laneLocks = undefined;
+    laneLocks = buildFleetLaneLocks({
+      goals: [],
+      proposals: [],
+      visibleQueueItems: [],
+      generatedAt,
+      sourceQuality: {
+        goals: { sourceState: 'degraded', complete: false, reasons: ['goals-incomplete'] },
+        proposals: { sourceState: 'degraded', complete: false, reasons: ['proposals-incomplete'] },
+        queue: { sourceState: 'degraded', complete: false, reasons: ['queue-unavailable'] },
+      },
+    });
   }
 
   const phantom = await buildFleetPhantomStatus(cfg);
