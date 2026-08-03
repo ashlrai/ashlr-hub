@@ -12,19 +12,10 @@ on:
       - "src/raycast/package-lock.json"
       - "src/raycast/npm-shrinkwrap.json"
       - "src/raycast/.npmrc"
+      - ".github/dependabot.yml"
       - ".github/workflows/dependency-audit.yml"
   pull_request:
     branches: ["**"]
-    paths:
-      - "package.json"
-      - "package-lock.json"
-      - "npm-shrinkwrap.json"
-      - ".npmrc"
-      - "src/raycast/package.json"
-      - "src/raycast/package-lock.json"
-      - "src/raycast/npm-shrinkwrap.json"
-      - "src/raycast/.npmrc"
-      - ".github/workflows/dependency-audit.yml"
   schedule:
     - cron: "17 9 * * 1"
   workflow_dispatch:
@@ -46,6 +37,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Node.js 22
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -60,10 +52,10 @@ jobs:
         run: npm ci --ignore-scripts --no-audit
 
       - name: Audit root dependencies
-        run: npm audit --audit-level=low
+        run: npm audit --audit-level=high
 
       - name: Audit root production dependencies
-        run: npm audit --omit=dev --audit-level=low
+        run: npm audit --omit=dev --audit-level=high
 
       - name: Install Raycast dependencies
         working-directory: src/raycast
@@ -71,8 +63,8 @@ jobs:
 
       - name: Audit Raycast dependencies
         working-directory: src/raycast
-        run: npm audit --audit-level=low
+        run: npm audit --audit-level=high
 
       - name: Audit Raycast production dependencies
         working-directory: src/raycast
-        run: npm audit --omit=dev --audit-level=low
+        run: npm audit --omit=dev --audit-level=high

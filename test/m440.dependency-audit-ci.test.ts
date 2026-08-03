@@ -13,7 +13,9 @@ const workflowText = readFileSync(
   resolve(repoRoot, '.github/workflows/dependency-audit.yml'),
   'utf8',
 );
+const dependabotText = readFileSync(resolve(repoRoot, '.github/dependabot.yml'), 'utf8');
 const workflow = parse(workflowText) as Record<string, unknown>;
+const dependabot = parse(dependabotText) as Record<string, unknown>;
 const events = workflow.on as Record<string, Record<string, unknown> | null>;
 const audit = (workflow.jobs as Record<string, Record<string, unknown>>).audit;
 const steps = audit.steps as Array<Record<string, unknown>>;
@@ -27,6 +29,7 @@ const authorityPaths = [
   'src/raycast/package-lock.json',
   'src/raycast/npm-shrinkwrap.json',
   'src/raycast/.npmrc',
+  '.github/dependabot.yml',
   '.github/workflows/dependency-audit.yml',
 ];
 
@@ -36,7 +39,7 @@ describe('M440 dependency audit CI', () => {
       name: 'Dependency Audit',
       on: {
         push: { branches: ['master'], paths: authorityPaths },
-        pull_request: { branches: ['**'], paths: authorityPaths },
+        pull_request: { branches: ['**'] },
         schedule: [{ cron: '17 9 * * 1' }],
         workflow_dispatch: null,
       },
@@ -54,7 +57,10 @@ describe('M440 dependency audit CI', () => {
             {
               name: 'Checkout',
               uses: 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683',
-              with: { 'persist-credentials': false },
+              with: {
+                'persist-credentials': false,
+                ref: '${{ github.event.pull_request.head.sha || github.sha }}',
+              },
             },
             {
               name: 'Set up Node.js 22',
@@ -66,10 +72,10 @@ describe('M440 dependency audit CI', () => {
               },
             },
             { name: 'Install root dependencies', run: 'npm ci --ignore-scripts --no-audit' },
-            { name: 'Audit root dependencies', run: 'npm audit --audit-level=low' },
+            { name: 'Audit root dependencies', run: 'npm audit --audit-level=high' },
             {
               name: 'Audit root production dependencies',
-              run: 'npm audit --omit=dev --audit-level=low',
+              run: 'npm audit --omit=dev --audit-level=high',
             },
             {
               name: 'Install Raycast dependencies',
@@ -79,12 +85,12 @@ describe('M440 dependency audit CI', () => {
             {
               name: 'Audit Raycast dependencies',
               'working-directory': 'src/raycast',
-              run: 'npm audit --audit-level=low',
+              run: 'npm audit --audit-level=high',
             },
             {
               name: 'Audit Raycast production dependencies',
               'working-directory': 'src/raycast',
-              run: 'npm audit --omit=dev --audit-level=low',
+              run: 'npm audit --omit=dev --audit-level=high',
             },
           ],
         },
@@ -92,9 +98,11 @@ describe('M440 dependency audit CI', () => {
     });
   });
 
-  it('runs for dependency authority changes, weekly drift checks, and manual dispatch', () => {
+  it('runs on every pull request exact head, dependency pushes, weekly drift, and manual dispatch', () => {
     expect(events.push).toEqual({ branches: ['master'], paths: authorityPaths });
-    expect(events.pull_request).toEqual({ branches: ['**'], paths: authorityPaths });
+    expect(events.pull_request).toEqual({ branches: ['**'] });
+    expect(events.pull_request).not.toHaveProperty('paths');
+    expect(events.pull_request).not.toHaveProperty('paths-ignore');
     expect(events.schedule).toEqual([{ cron: '17 9 * * 1' }]);
     expect(events.workflow_dispatch).toBeNull();
   });
@@ -118,7 +126,10 @@ describe('M440 dependency audit CI', () => {
     ]);
     expect(steps[0]).toMatchObject({
       uses: 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683',
-      with: { 'persist-credentials': false },
+      with: {
+        'persist-credentials': false,
+        ref: '${{ github.event.pull_request.head.sha || github.sha }}',
+      },
     });
     expect(steps[1]).toMatchObject({
       uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
@@ -133,17 +144,47 @@ describe('M440 dependency audit CI', () => {
   it('reproducibly installs and audits full and production dependency graphs', () => {
     expect(steps.slice(2).map(({ run, ['working-directory']: cwd }) => ({ run, cwd }))).toEqual([
       { run: 'npm ci --ignore-scripts --no-audit', cwd: undefined },
-      { run: 'npm audit --audit-level=low', cwd: undefined },
-      { run: 'npm audit --omit=dev --audit-level=low', cwd: undefined },
+      { run: 'npm audit --audit-level=high', cwd: undefined },
+      { run: 'npm audit --omit=dev --audit-level=high', cwd: undefined },
       { run: 'npm ci --ignore-scripts --no-audit', cwd: 'src/raycast' },
-      { run: 'npm audit --audit-level=low', cwd: 'src/raycast' },
-      { run: 'npm audit --omit=dev --audit-level=low', cwd: 'src/raycast' },
+      { run: 'npm audit --audit-level=high', cwd: 'src/raycast' },
+      { run: 'npm audit --omit=dev --audit-level=high', cwd: 'src/raycast' },
     ]);
     expect(steps.some((step) => step['continue-on-error'] === true)).toBe(false);
   });
 
   it('cannot publish, deploy, mutate settings, or consume secrets', () => {
-    expect(workflowText).not.toMatch(/\b(npm publish|deploy|release|dependabot)\b/i);
+    const runCommands = steps.flatMap((step) => (typeof step.run === 'string' ? [step.run] : []));
+    expect(runCommands.join('\n')).not.toMatch(/\b(npm publish|deploy|release|dependabot)\b/i);
     expect(workflowText).not.toMatch(/secrets\.|contents: write|id-token: write/i);
+    expect(workflow).not.toHaveProperty('on.pull_request_target');
+  });
+
+  it('covers both npm manifests with bounded grouped Dependabot updates', () => {
+    const commonUpdate = {
+      'package-ecosystem': 'npm',
+      schedule: {
+        interval: 'weekly',
+        day: 'monday',
+        time: '09:17',
+        timezone: 'America/New_York',
+      },
+      'open-pull-requests-limit': 5,
+      labels: ['dependencies'],
+      groups: {
+        'production-dependencies': { 'dependency-type': 'production' },
+        'development-dependencies': { 'dependency-type': 'development' },
+      },
+    };
+
+    expect(dependabot).toEqual({
+      version: 2,
+      updates: [
+        { ...commonUpdate, directory: '/' },
+        { ...commonUpdate, directory: '/src/raycast' },
+      ],
+    });
+    expect(dependabotText).not.toMatch(/password|token|secret|credential/i);
+    expect(dependabotText).not.toMatch(/registries:|insecure-external-code-execution/i);
   });
 });
