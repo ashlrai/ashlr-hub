@@ -91,6 +91,7 @@ import {
 } from '../run/repo-profile.js';
 import { engineInstalled } from '../run/engines.js';
 import { engineTierOf } from '../run/sandboxed-engine.js';
+import type { RoutingLearningAuthority } from '../run/learned-router.js';
 import {
   DEFAULT_COOLDOWN_MS,
   GENERATED_REPAIR_DISPATCH_BLOCKED_COOLDOWN_MS,
@@ -731,6 +732,7 @@ export interface FleetReadinessSourceHealth {
   evidenceRole?: FleetReadinessEvidenceRole;
   eligibility?: FleetReadinessEvidenceEligibility;
   applicability?: FleetReadinessEvidenceApplicability;
+  actionSynthesis?: 'eligible' | 'observational-only';
   evidenceQuality?: FleetReadinessEvidenceQuality;
 }
 
@@ -1631,6 +1633,8 @@ export interface FleetStatus {
     attemptCoverage?: FleetLearningMetricAvailability;
     trajectoryLearning?: FleetLearningMetricAvailability;
   };
+  /** Fail-closed authority projection for whether learned history may steer live routing. */
+  routingLearningAuthority?: RoutingLearningAuthority;
   /** Storage/read completeness for cached judge and merge-authority evidence. */
   decisionsSource?: DecisionSourceQuality;
   /** Storage/read completeness for judge calibration and real-world outcome labels. */
@@ -3190,6 +3194,35 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       unreadableFiles: 1,
     };
   }
+  try {
+    const { inspectRoutingLearningAuthority } = await import('../run/learned-router.js');
+    status.routingLearningAuthority = inspectRoutingLearningAuthority();
+  } catch {
+    status.routingLearningAuthority = {
+      version: 1,
+      state: 'inactive',
+      operationalSteering: false,
+      sourceQuality: {
+        decisions: {
+          sourceState: 'degraded', sourcePresent: true, complete: false, authenticated: false,
+        },
+        assignments: {
+          sourceState: 'degraded', sourcePresent: true, complete: false,
+          denominatorComplete: false, authenticated: false,
+        },
+      },
+      samples: { observed: 0, eligible: 0, minimumPerStratum: 5 },
+      cohort: { policyVersion: null, learningEpoch: null },
+      blockerCodes: [
+        'assignment-authenticity-unavailable',
+        'assignment-denominator-incomplete',
+        'assignment-source-degraded',
+        'decision-authenticity-unavailable',
+        'decision-source-degraded',
+        'sample-floor-unmet',
+      ],
+    };
+  }
   let learningJudgeTracesRead: ReturnType<typeof readJudgeTracesDetailed> | undefined;
   try {
     const traceRead = readJudgeTracesDetailed();
@@ -3767,6 +3800,12 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     }
   }
   const workspaceSource = status.workspace?.sourceQuality;
+  if (workspaceSource) {
+    Object.defineProperty(learningActions, 'sourceQuality', {
+      value: workspaceSource,
+      enumerable: false,
+    });
+  }
   const dispatchSource = learningSourceAvailability('dispatch-production', status.dispatchProductionSource);
   const actionSource = learningSourceAvailability('agent-actions', workspaceSource);
   const outcomeSource = learningSourceAvailability('outcomes', proposalSourceQuality);
@@ -3774,7 +3813,6 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   const evidenceSource = learningSourceAvailability('evidence', learningEvidenceRead);
   const workedSource = learningSourceAvailability('worked', workedLearningRead.sourceQuality);
   const postMergeSource = learningSourceAvailability('post-merge', learningPostMergeRead);
-  const judgeTraceSource = learningSourceAvailability('judge-traces', status.judgeTraceSource);
   const proposalById = new Map(learningProposals.map((proposal) => [proposal.id, proposal]));
   const evidencePacks = learningEvidencePacks;
   const evidenceByProposal = new Map(evidencePacks.map((pack) => [pack.proposal.id, pack]));
@@ -3920,11 +3958,12 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       if (!learningSourceAvailable(decisionSource)) unavailable.add('decision');
       if (!learningSourceAvailable(actionSource)) unavailable.add('agentAction');
       if (!learningSourceAvailable(skillSource)) unavailable.add('skillUse');
-      const terminalAvailable = learningSourceAvailable(outcomeSource) && learningSourceAvailable(decisionSource);
+      const terminalAvailable = learningSourceAvailable(outcomeSource) &&
+        learningSourceAvailable(decisionSource);
       const realizedAvailable = terminalAvailable && learningSourceAvailable(postMergeSource);
       const tracesAvailable = terminalAvailable && learningSourceAvailable(evidenceSource) &&
         learningSourceAvailable(actionSource) && learningSourceAvailable(workedSource) &&
-        learningSourceAvailable(postMergeSource) && learningSourceAvailable(judgeTraceSource);
+        learningSourceAvailable(postMergeSource);
       status.trajectoryLearning = withholdTrajectoryMetrics(
         summarizeTrajectoryLearning(trajectoryRecords, windowHours),
         unavailable,
@@ -3941,7 +3980,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       status.learningMetrics.trajectoryLearning = learningMetricAvailability(
         [
           dispatchSource, actionSource, outcomeSource, decisionSource, evidenceSource,
-          workedSource, postMergeSource, judgeTraceSource, skillSource,
+          workedSource, postMergeSource, skillSource,
         ],
         withheldMetrics,
         12,
@@ -5837,6 +5876,9 @@ function evidenceReadinessSource(input: {
   /** Whether source degradation may synthesize FleetNextAction records. */
   actionSynthesis?: 'eligible' | 'observational-only';
 }): FleetReadinessSourceHealth {
+  const actionSynthesis = input.role === 'forensics' || input.actionSynthesis === 'observational-only'
+    ? 'observational-only'
+    : 'eligible';
   if (input.applicable === false) {
     const source = readinessSource(
       input.id,
@@ -5853,10 +5895,11 @@ function evidenceReadinessSource(input: {
       evidenceRole: input.role,
       eligibility: 'not-applicable',
       applicability: 'disabled',
+      actionSynthesis,
     };
   }
   const quality = input.quality;
-  const observational = input.role === 'forensics' || input.actionSynthesis === 'observational-only';
+  const observational = actionSynthesis === 'observational-only';
   const degraded = !quality || quality.sourceState === 'degraded' || !quality.complete;
   const missing = quality?.sourceState === 'missing';
   const eligibility: FleetReadinessEvidenceEligibility = observational
@@ -5893,6 +5936,7 @@ function evidenceReadinessSource(input: {
     evidenceRole: input.role,
     eligibility,
     applicability: input.applicability ?? 'optional',
+    actionSynthesis,
     ...(quality ? { evidenceQuality: { ...quality, stopReasons: [...quality.stopReasons] } } : {}),
   };
 }
@@ -5925,8 +5969,9 @@ function learningEvidenceReadinessSources(
       quality: autonomyEvidenceQuality, generatedAt, applicability: 'required',
     }),
     evidenceReadinessSource({
-      id: 'decisions', label: 'Decision Authority', role: 'merge-authority',
-      quality: status.decisionsSource, generatedAt, applicability: 'required',
+      id: 'decisions', label: 'Unsigned Decision Observations', role: 'learning',
+      quality: status.decisionsSource, generatedAt, applicability: 'optional',
+      actionSynthesis: 'observational-only',
     }),
     evidenceReadinessSource({
       id: 'judge-traces', label: 'Judge Outcomes', role: 'learning',

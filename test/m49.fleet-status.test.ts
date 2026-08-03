@@ -12,7 +12,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 
@@ -64,7 +64,10 @@ import {
   recordGeneratedRepairLifecycle,
 } from '../src/core/fleet/generated-repair-lifecycle.js';
 import * as fleetRouter from '../src/core/fleet/router.js';
-import { recommendRoute } from '../src/core/run/learned-router.js';
+import {
+  LEARNED_ROUTING_MIN_SAMPLES,
+  recommendRoute,
+} from '../src/core/run/learned-router.js';
 import {
   readRepairHandoffs,
   recordRepairHandoffs,
@@ -84,6 +87,7 @@ import { loadQueuedAutonomyItemsDetailed } from '../src/core/portfolio/queued-au
 import type { Proposal } from '../src/core/types.js';
 import * as inboxMerge from '../src/core/inbox/merge.js';
 import type { PostMergeObservationReadResult } from '../src/core/fleet/post-merge-observations.js';
+import { postMergeObservationLedgerPath } from '../src/core/fleet/post-merge-observations.js';
 import type { PostMergeStabilityReadResult } from '../src/core/fleet/post-merge-stability.js';
 
 function git(repo: string, args: string[]): string {
@@ -751,6 +755,35 @@ function writeDaemonLock(home: string, heartbeatAt: string, pid = process.pid): 
 // ---------------------------------------------------------------------------
 
 describe('buildFleetStatus — read-only aggregation (M49)', () => {
+  it('reports operational learning as inactive without authenticated decisions and eligible assignments', async () => {
+    const status = await buildFleetStatus(baseConfig());
+
+    expect(status.routingLearningAuthority).toMatchObject({
+      version: 1,
+      state: 'inactive',
+      operationalSteering: false,
+      sourceQuality: {
+        decisions: { authenticated: false },
+        assignments: { denominatorComplete: false },
+      },
+      samples: { observed: 0, eligible: 0, minimumPerStratum: LEARNED_ROUTING_MIN_SAMPLES },
+    });
+    expect(status.routingLearningAuthority?.blockerCodes).toEqual(expect.arrayContaining([
+      'decision-authenticity-unavailable',
+      'assignment-denominator-incomplete',
+      'sample-floor-unmet',
+    ]));
+    const decisionEvidence = status.autonomousShipReadiness?.evidenceMatrix?.sources
+      .find((source) => source.id === 'decisions');
+    expect(decisionEvidence).toMatchObject({
+      label: 'Unsigned Decision Observations',
+      evidenceRole: 'learning',
+      eligibility: 'observational',
+      applicability: 'optional',
+      actionSynthesis: 'observational-only',
+    });
+  });
+
   it('formats a healthy zero-attempt proposal funnel as withheld without rates', async () => {
     const status = await buildFleetStatus(baseConfig());
     const proposalFunnel = buildProposalFunnelObservability({
@@ -3661,7 +3694,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(JSON.stringify(s)).not.toContain('"diagnosticProposalRate":0');
     expect(JSON.stringify(s)).not.toContain('"proposalRate":0');
     expect(formatted).not.toContain('attempts:  0 in 24h');
-    expect(formatted).not.toContain('trajectories: 0 in 24h');
+    expect(formatted).not.toContain('trajectories: 0 observed in 24h');
     const staleSummary: NonNullable<FleetStatus['dispatchProduction']> = {
       windowHours: 24,
       events: 2,
@@ -3766,7 +3799,11 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.attemptCoverage?.production).toMatchObject({ attempts: 1, diagnosticAttempts: 1 });
     expect(s.attemptCoverage?.coverage).toEqual({});
     expect(s.attemptCoverage?.recent[0]?.coverage).toEqual({});
-    expect(s.trajectoryLearning?.coverage).toEqual({ dispatch: { count: 1, rate: 1 } });
+    expect(s.trajectoryLearning?.population).toEqual({
+      observed: 1, learningEligible: 0, incomplete: 0, degraded: 1,
+    });
+    expect(s.trajectoryLearning?.trajectories).toBe(1);
+    expect(s.trajectoryLearning?.coverage).toEqual({ dispatch: { count: 0, rate: 0 } });
     expect(s.trajectoryLearning?.terminalOutcomes).toBeUndefined();
     expect(s.trajectoryLearning?.realizedOutcomes).toBeUndefined();
     expect(s.trajectoryLearning?.routeSpine).toEqual({});
@@ -3777,10 +3814,132 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
 
     const formatted = formatFleetStatus(s);
+    expect(formatted).toContain('trajectories: 1 observed in 24h');
+    expect(formatted).toContain('eligibility:  0 learning-eligible, 0 incomplete, 1 degraded');
     expect(formatted).toContain('actions withheld, worked withheld, decisions withheld, evidence withheld');
     expect(formatted).toContain('outcomes:     withheld (outcome denominator unavailable)');
     expect(formatted).not.toContain('actions 0 (0%)');
     expect(formatted).not.toContain('dispatch->decision 0 (0%)');
+  });
+
+  it('requires a healthy action source only for authoritative no-proposal outcomes', async () => {
+    const now = settledLearningTimestamp();
+    const repo = join(tmpHome, 'repo-action-authority');
+    const cfg = baseConfig();
+    const proposalItemId = 'repo-action-authority:goal:proposal';
+    const proposal = createSignedProposal(cfg, {
+      title: 'Action-independent proposal trajectory',
+      diff: docsDiff('action-independent proposal trajectory'),
+    });
+    proposal.createdAt = now;
+    proposal.repo = repo;
+    proposal.workItemId = proposalItemId;
+    proposal.workSource = 'goal';
+    proposal.runId = 'run-action-independent-proposal';
+    proposal.trajectoryId = 'trajectory-action-independent-proposal';
+    writeFileSync(
+      join(tmpHome, '.ashlr', 'inbox', `${proposal.id}.json`),
+      JSON.stringify(proposal),
+      'utf8',
+    );
+    writeBacklogSnapshot(tmpHome, repo, [], now);
+    recordDispatchProduction({
+      schemaVersion: 1,
+      ts: now,
+      itemId: proposalItemId,
+      source: 'goal',
+      repo,
+      title: proposal.title,
+      backend: 'codex',
+      tier: 'frontier',
+      model: 'gpt-5.5',
+      assignedBy: 'daemon',
+      routeReason: 'proposal authority fixture',
+      outcome: 'proposal-created',
+      proposalCreated: true,
+      proposalId: proposal.id,
+      runId: proposal.runId,
+      trajectoryId: proposal.trajectoryId,
+      spentUsd: 0,
+      basis: 'run-proposal-outcome',
+    });
+    recordDecision({
+      ts: now,
+      proposalId: proposal.id,
+      workItemId: proposalItemId,
+      runId: proposal.runId,
+      trajectoryId: proposal.trajectoryId,
+      action: 'judged',
+      verdict: 'ship',
+    });
+
+    const attemptId = 'attempt-00000000-0000-4000-8000-000000000049';
+    const runId = 'run-action-authority-no-proposal';
+    const trajectoryId = `run:${attemptId}`;
+    const itemId = 'repo-action-authority:goal:no-proposal';
+    const runEventSummary = {
+      runId,
+      status: 'done' as const,
+      outcome: 'empty-diff',
+      proposalCreated: false,
+    };
+    recordDispatchProduction({
+      schemaVersion: 1,
+      ts: now,
+      itemId,
+      source: 'goal',
+      repo,
+      title: 'No proposal action authority fixture',
+      backend: 'local-coder',
+      tier: 'local',
+      model: 'qwen',
+      assignedBy: 'daemon',
+      routeReason: 'no-proposal authority fixture',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      attemptId,
+      runId,
+      trajectoryId,
+      runEventSummary,
+      spentUsd: 0,
+      basis: 'run-proposal-outcome',
+    });
+    recordAgentAction({
+      schemaVersion: 1,
+      ts: now,
+      actor: 'daemon',
+      kind: 'dispatch',
+      outcome: 'no-proposal',
+      action: 'daemon:dispatch',
+      summary: 'valid no-proposal terminal carrier',
+      repo,
+      itemId,
+      source: 'goal',
+      runId,
+      trajectoryId,
+      backend: 'local-coder',
+      tier: 'local',
+      model: 'qwen',
+      runEventSummary,
+    });
+    const actionPath = join(agentActionsDir(), `${now.slice(0, 10)}.jsonl`);
+    writeFileSync(actionPath, `${readFileSync(actionPath, 'utf8')}not-json\n`, 'utf8');
+
+    const status = await buildFleetStatus(cfg);
+
+    expect(status.workspace?.sourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
+    });
+    expect(status.trajectoryLearning).toMatchObject({
+      trajectories: 2,
+      population: { observed: 2, learningEligible: 1, incomplete: 0, degraded: 1 },
+      terminalOutcomes: { pending: 1, 'no-proposal': 0 },
+    });
+    expect(status.trajectoryLearning?.terminalOutcomes).toBeDefined();
+    expect(status.learningMetrics?.trajectoryLearning?.withheldMetrics)
+      .not.toEqual(expect.arrayContaining(['terminalOutcomes']));
   });
 
   it('reports recent concurrent dispatch manifests from the append-only ledger', async () => {
@@ -4199,6 +4358,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       trajectoryId,
     });
     expect(readSkillUseEvents({ limit: 10 })).toHaveLength(1);
+    const postMergePath = postMergeObservationLedgerPath();
+    mkdirSync(dirname(postMergePath), { recursive: true, mode: 0o700 });
+    writeFileSync(postMergePath, '', { encoding: 'utf8', mode: 0o600 });
 
     const s = await buildFleetStatus(cfg);
 
@@ -4269,6 +4431,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.trajectoryLearning).toMatchObject({
       windowHours: 24,
       trajectories: 1,
+      population: { observed: 1, learningEligible: 1, incomplete: 0, degraded: 0 },
       terminalOutcomes: {
         pending: 1,
       },
@@ -4310,15 +4473,18 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       },
     });
     expect(s.trajectoryLearning?.recent[0]?.coverage).not.toHaveProperty('skillUse');
-    expect(s.trajectoryLearning?.traces).toEqual({ state: 'degraded', records: [] });
-    expect(s.learningMetrics?.trajectoryLearning).toMatchObject({
-      state: 'partial',
-      reasons: expect.arrayContaining([
-        'post-merge-source-missing',
-        'judge-traces-source-missing',
-      ]),
-      withheldMetrics: expect.arrayContaining(['realizedOutcomes', 'traces']),
+    expect(s.judgeTraceSource).toMatchObject({ sourceState: 'missing', complete: true });
+    expect(s.trajectoryLearning?.traces).toMatchObject({
+      state: 'available',
+      records: [expect.objectContaining({ sourceState: 'complete' })],
     });
+    expect(s.learningMetrics?.trajectoryLearning).toMatchObject({
+      state: 'available',
+      reasons: [],
+      withheldMetrics: [],
+    });
+    expect(s.learningMetrics?.trajectoryLearning?.sources)
+      .not.toEqual(expect.arrayContaining([expect.objectContaining({ source: 'judge-traces' })]));
     expect(JSON.stringify(s.trajectoryLearning)).not.toContain(repo);
     expect(JSON.stringify(s.trajectoryLearning)).not.toContain(itemId);
     expect(JSON.stringify(s.trajectoryLearning)).not.toContain(proposal.id);
@@ -4332,7 +4498,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatted).toContain('labels:    authoritative 0 (0%), current 0 (0%)');
     expect(formatted).toContain('Trajectory learning:');
     expect(formatted).toContain('Recent trajectory traces:');
-    expect(formatted).toContain('trajectories: 1 in 24h');
+    expect(formatted).toContain('trajectories: 1 observed in 24h');
+    expect(formatted).toContain('eligibility:  1 learning-eligible, 0 incomplete, 0 degraded');
     expect(formatted).toContain(
       'outcomes:     merged 0, pending 1, no-proposal 0, cancelled 0, failed 0',
     );
@@ -4353,7 +4520,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       trajectoryLearning: {
         version: 1,
         windowHours: 24,
-        trajectories: 0,
+        trajectories: 2,
+        population: { observed: 2, learningEligible: 0, incomplete: 1, degraded: 1 },
         terminalOutcomes: { merged: 0, rejected: 0, handoff: 0, pending: 0, 'no-proposal': 0, failed: 0, unknown: 0 },
         realizedOutcomes: { 'followed-up': 0, reverted: 0, regressed: 0 },
         coverage: {
@@ -4375,8 +4543,37 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       },
       killed: false,
     } as any);
+    expect(formatted).toContain('trajectories: 2 observed in 24h');
+    expect(formatted).toContain('eligibility:  0 learning-eligible, 1 incomplete, 1 degraded');
     expect(formatted).toContain('Recent trajectory traces: degraded (partial dispatch history withheld)');
     expect(formatted).not.toContain('Recent trajectory traces: none');
+  });
+
+  it('keeps legacy V1 trajectory snapshots renderable as fully observed and eligible', () => {
+    const formatted = formatFleetStatus({
+      generatedAt: '2026-07-21T12:00:00.000Z',
+      daemon: { running: false, lastTickAt: null, todaySpentUsd: 0 },
+      backends: [],
+      queue: { backlogItems: 0 },
+      proposals: { pending: 0, frontierPending: 0, applied: 0 },
+      merges: { recent: 0 },
+      trajectoryLearning: {
+        version: 1,
+        windowHours: 24,
+        trajectories: 3,
+        terminalOutcomes: { merged: 1, rejected: 0, handoff: 0, pending: 2, 'no-proposal': 0, failed: 0, unknown: 0 },
+        coverage: {},
+        routeSpine: {},
+        skillObservation: { eventState: 'none', sampleState: 'none' },
+        traces: { state: 'available', records: [] },
+        gaps: [],
+        recent: [],
+      },
+      killed: false,
+    } as any);
+
+    expect(formatted).toContain('trajectories: 3 observed in 24h');
+    expect(formatted).toContain('eligibility:  3 learning-eligible, 0 incomplete, 0 degraded');
   });
 
   it('keeps weak causal attempt coverage visible without steering next actions', async () => {
@@ -6906,10 +7103,10 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       version: 1,
       state: 'cold-start',
       summary: {
-        eligible: 1,
+        eligible: 0,
         'cold-start': 1,
         withheld: 0,
-        observational: 4,
+        observational: 5,
         'not-applicable': 2,
       },
     });
@@ -7101,8 +7298,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       verdict: 'blocked',
       topBlocker: { id: 'merge-authority-incomplete' },
       evidenceMatrix: {
-        state: 'degraded',
-        summary: { withheld: 1 },
+        state: 'cold-start',
+        summary: { withheld: 0, observational: 5 },
       },
     });
     expect(status.autoMergeReadiness).toMatchObject({
@@ -7115,34 +7312,21 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
     expect(decisionEvidence).toMatchObject({
       category: 'evidence',
-      evidenceRole: 'merge-authority',
-      eligibility: 'withheld',
-      applicability: 'required',
+      evidenceRole: 'learning',
+      eligibility: 'observational',
+      applicability: 'optional',
+      actionSynthesis: 'observational-only',
       status: 'degraded',
       evidenceQuality: { complete: false, invalidRows: 1 },
       sourceQuality: { badge: 'degraded-source' },
     });
-    expect(action).toMatchObject({
-      priority: 'medium',
-      commands: [
-        {
-          argv: ['ashlr', 'fleet', 'evidence', 'doctor', 'decisions', '--json'],
-          safety: 'read-only',
-        },
-        {
-          argv: ['ashlr', 'fleet', 'evidence', 'doctor', 'decisions', '--deep', '--json'],
-          safety: 'read-only',
-        },
-        { argv: ['ashlr', 'fleet', 'status', '--json'], safety: 'read-only' },
-      ],
-    });
-    expect(action?.commands?.every((command) => command.endpointPath === undefined)).toBe(true);
-    expect(status.nextActions).toContainEqual(expect.objectContaining({ id: 'inspect-learning-evidence' }));
+    expect(action).toBeUndefined();
+    expect(status.nextActions).not.toContainEqual(expect.objectContaining({ id: 'inspect-learning-evidence' }));
     expect(status.autonomousShipReadiness?.primaryAction).not.toMatchObject({ id: 'drain-ready-auto-merges' });
     expect(status.nextActions?.map((candidate) => candidate.id)).not.toContain('drain-ready-auto-merges');
   });
 
-  it('keeps evidence diagnosis secondary to eligible operational backlog work', async () => {
+  it('does not synthesize actions from observational decision evidence over backlog work', async () => {
     const repo = join(tmpHome, 'repo');
     mkdirSync(repo, { recursive: true });
     writeBacklogSnapshot(tmpHome, repo, [makeBacklogItem(repo, 'repo:goal:evidence-order', 'Ship useful work', 5)], new Date().toISOString());
@@ -7154,9 +7338,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const status = await buildFleetStatus(withFoundry({
       autoMerge: { enabled: true, trustBasis: 'verification', maxRisk: 'low' },
     }));
-    expect(status.nextActions?.map((action) => action.id)).toEqual(expect.arrayContaining([
-      'build-backlog', 'inspect-learning-evidence',
-    ]));
+    expect(status.nextActions?.map((action) => action.id)).toContain('build-backlog');
+    expect(status.nextActions?.map((action) => action.id)).not.toContain('inspect-learning-evidence');
     expect(status.autonomousShipReadiness?.primaryAction).toMatchObject({ id: 'build-backlog' });
     expect(status.missionBrief?.directive).toBe('Build the highest-value backlog proposal');
   });

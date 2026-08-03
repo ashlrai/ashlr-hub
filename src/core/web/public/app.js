@@ -3055,6 +3055,21 @@ function formatTrajectoryLearningGap(trajectoryLearning) {
   return `${labels[top.kind]} ${Math.trunc(Number(top.count))} missing`;
 }
 
+function trajectoryLearningPopulation(trajectoryLearning) {
+  const count = (value, fallback, max) => Number.isSafeInteger(value) && value >= 0
+    ? Math.min(value, max)
+    : fallback;
+  const observed = count(trajectoryLearning?.trajectories, 0, Number.MAX_SAFE_INTEGER);
+  const population = trajectoryLearning?.population;
+  if (!population || typeof population !== 'object') {
+    return { observed, learningEligible: observed, incomplete: 0, degraded: 0 };
+  }
+  const learningEligible = count(population.learningEligible ?? population.eligible, observed, observed);
+  const incomplete = count(population.incomplete, 0, observed - learningEligible);
+  const degraded = count(population.degraded, 0, observed - learningEligible - incomplete);
+  return { observed, learningEligible, incomplete, degraded };
+}
+
 function formatSkillCorpusValue(value, labels) {
   return typeof value === 'string' && labels[value] ? labels[value] : 'unavailable';
 }
@@ -3110,6 +3125,7 @@ function skillCorpusReadinessRows(skillCorpusReadiness) {
 }
 
 function trajectoryLearningRows(trajectoryLearning, skillCorpusReadiness = null) {
+  const population = trajectoryLearningPopulation(trajectoryLearning);
   const routeSpine = trajectoryLearning?.routeSpine ?? {};
   const terminal = trajectoryLearning?.terminalOutcomes;
   const skill = trajectoryLearning?.skillObservation ?? {};
@@ -3120,7 +3136,10 @@ function trajectoryLearningRows(trajectoryLearning, skillCorpusReadiness = null)
   const threshold = Number(skillCorpusReadiness?.learning?.minimumObservedTrajectories);
   const withheldLabel = Number.isSafeInteger(threshold) && threshold > 0 ? `withheld (<${threshold})` : 'withheld (<3)';
   return [
-    ['Trajectories', trajectoryLearning?.trajectories ?? 0],
+    ['Observed trajectories', population.observed],
+    ['Learning eligible', population.learningEligible],
+    ['Incomplete', population.incomplete],
+    ['Degraded', population.degraded],
     ['Dispatch -> decision', formatCoverageMetric(routeSpine.dispatchToDecision)],
     ['Dispatch -> evidence', formatCoverageMetric(routeSpine.dispatchToEvidence)],
     ['Dispatch -> merge', formatCoverageMetric(routeSpine.dispatchToMerge)],
@@ -3212,7 +3231,7 @@ function renderTrajectoryTraceList(trajectoryLearning) {
 
 function renderTrajectoryLearningCard(trajectoryLearning, skillCorpusReadiness = null, cls = 'ctrl-card card', availability = null) {
   if (!trajectoryLearning && !skillCorpusReadiness) return null;
-  const trajectories = trajectoryLearning?.trajectories ?? 0;
+  const population = trajectoryLearningPopulation(trajectoryLearning);
   const rows = trajectoryLearning
     ? trajectoryLearningRows(trajectoryLearning, skillCorpusReadiness)
     : skillCorpusReadinessRows(skillCorpusReadiness);
@@ -3220,7 +3239,7 @@ function renderTrajectoryLearningCard(trajectoryLearning, skillCorpusReadiness =
   card.appendChild(el('div', { cls: 'card-header' },
     el('span', { cls: 'card-title' }, trajectoryLearning ? 'Trajectory Learning' : 'Skill Learning'),
     el('span', { cls: 'card-subtitle' }, trajectoryLearning
-      ? `${trajectories} trajector${trajectories === 1 ? 'y' : 'ies'} · ${proposalProductionWindowLabel(trajectoryLearning)}`
+      ? `${population.observed} observed · ${population.learningEligible} eligible · ${proposalProductionWindowLabel(trajectoryLearning)}`
       : 'observe-only readiness')
   ));
   const body = el('div', { cls: 'card-body' }, infoGrid(rows));
@@ -6246,6 +6265,40 @@ function fdRenderIntelligencePanel(snap) {
       'Learning telemetry stale; exact intelligence metrics withheld.'));
   }
 
+  const routingAuthority = intel.routingLearningAuthority;
+  const routingOperational = routingAuthority?.operationalSteering === true;
+  const decisionsQuality = routingAuthority?.sourceQuality?.decisions;
+  const intelligenceDecisionsQuality = intel.decisionSourceQuality;
+  const assignmentsQuality = routingAuthority?.sourceQuality?.assignments;
+  const routingSourceDegraded = !routingAuthority ||
+    !decisionsQuality?.sourcePresent || decisionsQuality.sourceState === 'degraded' || !decisionsQuality.complete ||
+    !intelligenceDecisionsQuality?.sourcePresent || intelligenceDecisionsQuality.sourceState === 'degraded' ||
+      !intelligenceDecisionsQuality.complete ||
+    !assignmentsQuality?.sourcePresent || assignmentsQuality.sourceState === 'degraded' || !assignmentsQuality.complete;
+  const observedRoutingSamples = routingAuthority?.samples?.observed ?? 0;
+  const routingSourceLabel = routingSourceDegraded
+    ? 'degraded'
+    : observedRoutingSamples === 0
+      ? 'healthy zero'
+      : 'healthy';
+
+  if (learningSnapshotFresh) {
+    const authorityState = routingOperational ? 'eligible for operational steering' : 'inactive; runtime routing is neutral';
+    const sampleState = routingSourceDegraded
+      ? 'sample counts withheld'
+      : `${observedRoutingSamples} observed / ${routingAuthority?.samples?.eligible ?? 0} eligible`;
+    const cohort = routingAuthority?.cohort?.policyVersion && routingAuthority?.cohort?.learningEpoch
+      ? `${routingAuthority.cohort.policyVersion} / ${routingAuthority.cohort.learningEpoch}`
+      : 'unproven';
+    body.appendChild(el('div', { cls: 'fd-intel-section-title' }, 'Routing learning authority'));
+    body.appendChild(el('p', { cls: 'hint fd-intel-routing-authority' },
+      `${authorityState}; source quality: ${routingSourceLabel}; ${sampleState}; cohort: ${cohort}.`));
+    if (!routingOperational && routingAuthority?.blockerCodes?.length > 0) {
+      body.appendChild(el('p', { cls: 'hint fd-intel-routing-blockers' },
+        `Authority blockers: ${routingAuthority.blockerCodes.slice(0, 4).join(', ')}.`));
+    }
+  }
+
   // ── Per-engine scorecards ─────────────────────────────────────────────────
   if (learningSnapshotFresh && intel.engineScorecards && intel.engineScorecards.length > 0) {
     body.appendChild(el('div', { cls: 'fd-intel-section-title' }, 'Engine scorecards (24h)'));
@@ -6274,14 +6327,16 @@ function fdRenderIntelligencePanel(snap) {
   }
 
   // ── M240: Learned routing scores ─────────────────────────────────────────
-  if (learningSnapshotFresh && intel.routingScores && intel.routingScores.length > 0) {
-    body.appendChild(el('div', { cls: 'fd-intel-section-title', style: 'margin-top:14px' }, 'Learned routing (M240)'));
+  if (learningSnapshotFresh && !routingSourceDegraded && intel.routingScores && intel.routingScores.length > 0) {
+    body.appendChild(el('div', { cls: 'fd-intel-section-title', style: 'margin-top:14px' },
+      routingOperational ? 'Operational routing scores' : 'Observational routing scores'));
     const routeList = el('ul', { cls: 'fd-intel-route-list' });
     for (const rs of intel.routingScores.slice(0, 10)) {
-      const trendColor = rs.trend === 'promoted' ? 'var(--status-done)'
-                       : rs.trend === 'demoted'  ? 'var(--status-failed)'
+      const trendColor = routingOperational && rs.trend === 'promoted' ? 'var(--status-done)'
+                       : routingOperational && rs.trend === 'demoted'  ? 'var(--status-failed)'
                        : 'var(--text-muted)';
-      const trendSymbol = rs.trend === 'promoted' ? '▲' : rs.trend === 'demoted' ? '▼' : '—';
+      const trendSymbol = !routingOperational ? 'obs'
+        : rs.trend === 'promoted' ? '▲' : rs.trend === 'demoted' ? '▼' : '—';
       const scorePct = (rs.score * 100).toFixed(0) + '%';
       const modelPart = rs.model ? `:${rs.model}` : '';
       const label = `${rs.engine}${modelPart} / ${rs.taskClass}`;
@@ -6297,8 +6352,15 @@ function fdRenderIntelligencePanel(snap) {
     }
     body.appendChild(routeList);
   } else if (learningSnapshotFresh) {
+    const emptyRoutingMessage = routingSourceDegraded
+      ? 'Observational routing scores withheld because routing learning sources are degraded.'
+      : observedRoutingSamples === 0
+        ? 'No observational routing scores yet; sources are healthy with zero admitted observations.'
+        : routingOperational
+          ? 'No operational routing scores meet the sample threshold.'
+          : 'No observational routing scores meet the diagnostic sample threshold.';
     body.appendChild(el('p', { cls: 'hint', style: 'margin-top:8px' },
-      'No routing data yet. Scores appear after 5+ judged decisions per engine.'));
+      emptyRoutingMessage));
   }
 
   // ── M235: Anti-playbook lessons ───────────────────────────────────────────

@@ -2962,8 +2962,8 @@ export interface IntelligenceSummary {
     score: number;
     /** Recency-weighted sample count. */
     samples: number;
-    /** Human-readable trend: 'promoted' | 'demoted' | 'neutral'. */
-    trend: 'promoted' | 'demoted' | 'neutral';
+    /** Operational trend, or observational when authority is inactive. */
+    trend: 'promoted' | 'demoted' | 'neutral' | 'observational';
   }[];
   /**
    * M235: Recent anti-playbook lessons written from judge rejections.
