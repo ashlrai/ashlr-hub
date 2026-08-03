@@ -8,7 +8,9 @@
     "eslint.config.js",
     "vitest.config.ts",
     "test/setup/home.ts",
-    "scripts/test-ci.mjs"
+    "scripts/test-ci.mjs",
+    "scripts/copy-assets.mjs",
+    "scripts/build-identity.mjs"
   ],
   "commands": [
     {
@@ -18,7 +20,7 @@
       "cwd": ".",
       "timeoutMs": 180000,
       "required": true,
-      "profiles": ["quick", "merge"]
+      "profiles": ["quick", "merge", "deep"]
     },
     {
       "id": "lint",
@@ -27,16 +29,25 @@
       "cwd": ".",
       "timeoutMs": 300000,
       "required": true,
-      "profiles": ["merge"]
+      "profiles": ["merge", "deep"]
+    },
+    {
+      "id": "build",
+      "kind": "build",
+      "cmd": ["npm", "run", "build"],
+      "cwd": ".",
+      "timeoutMs": 300000,
+      "required": true,
+      "profiles": ["merge", "deep"]
     },
     {
       "id": "test-ci",
       "kind": "test",
       "cmd": ["npm", "run", "test:ci"],
       "cwd": ".",
-      "timeoutMs": 600000,
+      "timeoutMs": 900000,
       "required": true,
-      "profiles": ["merge"]
+      "profiles": ["merge", "deep"]
     }
   ]
 }

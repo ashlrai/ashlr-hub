@@ -340,6 +340,54 @@ describe('repo execution profile', () => {
     }
   });
 
+  it('accepts the 15-minute contract timeout boundary and rejects values above it', () => {
+    const dir = makeFixture();
+    try {
+      writeVerifyContract(dir, {
+        schemaVersion: 1,
+        mode: 'replace-detected',
+        commands: [
+          {
+            id: 'test-ci',
+            kind: 'test',
+            cmd: ['npm', 'run', 'test:ci'],
+            timeoutMs: 900_000,
+            required: true,
+            profiles: ['merge', 'deep'],
+          },
+        ],
+      });
+
+      const accepted = detectRepoExecutionProfile(dir);
+      expect(accepted.verifyContract).toMatchObject({ valid: true, mergeGradeExplicit: true });
+      expect(accepted.verifyCommands[0]).toMatchObject({ timeoutMs: 900_000 });
+
+      writeVerifyContract(dir, {
+        schemaVersion: 1,
+        mode: 'replace-detected',
+        commands: [
+          {
+            id: 'test-ci',
+            kind: 'test',
+            cmd: ['npm', 'run', 'test:ci'],
+            timeoutMs: 900_001,
+            required: true,
+            profiles: ['merge', 'deep'],
+          },
+        ],
+      });
+
+      const rejected = detectRepoExecutionProfile(dir);
+      expect(rejected.verifyCommands).toEqual([]);
+      expect(rejected.verifyContract).toMatchObject({ valid: false, mergeGradeExplicit: false });
+      expect(rejected.verifyContract?.errors.join('\n')).toContain(
+        'timeoutMs must be a positive number at or below 900000',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('augments detected commands with root verification contract commands', () => {
     const dir = makeFixture();
     try {

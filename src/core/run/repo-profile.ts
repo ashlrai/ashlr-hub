@@ -179,7 +179,7 @@ const SKIP_DIRS = new Set([
 ]);
 
 const VERIFY_CONTRACT_FILE = 'ashlr.verify.json';
-const CONTRACT_MAX_TIMEOUT_MS = 600_000;
+const CONTRACT_MAX_TIMEOUT_MS = 900_000;
 const VERIFY_COMMAND_KINDS = new Set<VerifyCommand['kind']>(['typecheck', 'lint', 'build', 'test']);
 const VERIFY_CONTRACT_MODES = new Set<RepoVerifyContractMode>(['replace-detected', 'augment-detected']);
 const VERIFY_COMMAND_PROFILES = new Set<VerifyCommandProfile>(['quick', 'merge', 'deep']);
