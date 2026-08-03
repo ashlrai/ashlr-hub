@@ -3,7 +3,7 @@ name: PR topology admission (shadow)
 on:
   pull_request_target:
     branches: ["**"]
-    types: [opened, reopened, synchronize, edited]
+    types: [opened, reopened, synchronize, edited, closed]
   workflow_dispatch:
     inputs:
       pull_request_number:
@@ -41,6 +41,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number || inputs.pull_request_number }}
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EXPECTED_PR_STATE: ${{ github.event.pull_request.state }}
         run: >-
           node trusted-auditor/scripts/check-pr-topology.mjs
           --repository "$GITHUB_REPOSITORY"

@@ -63,11 +63,13 @@ function snapshot({
   pulls,
   comparisons = [],
   complete = true,
+  dependentCoverageComplete = false,
 }: {
   candidate: number;
   pulls: ReturnType<typeof pullRequest>[];
   comparisons?: Array<Record<string, unknown>>;
   complete?: boolean;
+  dependentCoverageComplete?: boolean;
 }) {
   return {
     schemaVersion: 1,
@@ -76,6 +78,7 @@ function snapshot({
     pullRequestNumber: candidate,
     pullRequests: pulls,
     comparisons,
+    dependentCoverageComplete,
   };
 }
 
@@ -249,7 +252,7 @@ describe('M482 topology graph admission', () => {
 
   it('rejects unbounded fixture comparison input before graph materialization', () => {
     const candidate = pullRequest({ number: 1, headRef: 'candidate', baseRef: 'master' });
-    const comparisons = Array.from({ length: 1_001 }, () => ({}));
+    const comparisons = Array.from({ length: 201 }, () => ({}));
 
     const report = evaluateTopology(snapshot({ candidate: 1, pulls: [candidate], comparisons }));
 
@@ -258,6 +261,29 @@ describe('M482 topology graph admission', () => {
     expect(report.diagnostics).toEqual([
       expect.objectContaining({ code: 'invalid-input', message: expect.stringContaining('comparison bound') }),
     ]);
+  });
+
+  it('rejects an oversized bidirectional comparison plan before comparison GETs', async () => {
+    const candidate = pullRequest({ number: 1, headRef: 'candidate', baseRef: 'master' });
+    const otherRoots = Array.from({ length: 101 }, (_, index) =>
+      pullRequest({ number: index + 2, headRef: `root-${index + 2}`, baseRef: 'master' }),
+    );
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(response({ full_name: repository, default_branch: 'master' }))
+      .mockResolvedValueOnce(response(candidate))
+      .mockResolvedValueOnce(response([candidate, ...otherRoots]));
+
+    await expect(fetchGithubSnapshot({
+      repository,
+      pullRequestNumber: 1,
+      token: 'test-token',
+      expectedHeadSha: candidate.head.sha,
+      expectedBaseSha: candidate.base.sha,
+      expectedState: 'open',
+      fetchImpl,
+    })).rejects.toThrow('dependent comparison plan exceeds the 200 comparison bound');
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(fetchImpl.mock.calls.some(([url]) => String(url).includes('/compare/'))).toBe(false);
   });
 
   it('paginates read-only GitHub GETs and includes every open PR', async () => {
@@ -271,23 +297,188 @@ describe('M482 topology graph admission', () => {
     const pageTwo = 'https://api.github.com/repos/ashlrai/ashlr-hub/pulls?state=open&per_page=100&page=2';
     const fetchImpl = vi.fn()
       .mockResolvedValueOnce(response({ full_name: repository, default_branch: 'master' }))
+      .mockResolvedValueOnce(response(candidate))
       .mockResolvedValueOnce(response([root], { link: `<${pageTwo}>; rel="next"` }))
-      .mockResolvedValueOnce(response([candidate]));
+      .mockResolvedValueOnce(response([candidate]))
+      .mockResolvedValueOnce(response(candidate));
 
     const raw = await fetchGithubSnapshot({
       repository,
       pullRequestNumber: 2,
       token: 'test-token',
+      expectedHeadSha: candidate.head.sha,
+      expectedBaseSha: candidate.base.sha,
+      expectedState: 'open',
       fetchImpl,
     });
 
     expect(raw.complete).toBe(true);
     expect(raw.pullRequests).toHaveLength(2);
-    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(fetchImpl).toHaveBeenCalledTimes(5);
     for (const [, init] of fetchImpl.mock.calls) {
       expect(init).toMatchObject({ method: 'GET', redirect: 'error' });
     }
     expect(evaluateTopology(raw).admission).toBe('admitted');
+  });
+
+  it('rejects event/API identity mismatch before graph comparisons', async () => {
+    const candidate = pullRequest({ number: 2, headRef: 'candidate', baseRef: 'master' });
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(response({ full_name: repository, default_branch: 'master' }))
+      .mockResolvedValueOnce(response(candidate));
+
+    await expect(fetchGithubSnapshot({
+      repository,
+      pullRequestNumber: 2,
+      token: 'test-token',
+      expectedHeadSha: oid(999),
+      expectedBaseSha: candidate.base.sha,
+      expectedState: 'open',
+      fetchImpl,
+    })).rejects.toThrow('initial candidate identity does not match the pull_request_target event');
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects candidate replacement after exact graph comparisons', async () => {
+    const root = pullRequest({ number: 1, headRef: 'root', baseRef: 'master' });
+    const candidate = pullRequest({ number: 2, headRef: 'candidate', baseRef: 'master' });
+    const replaced = { ...candidate, head: { ...candidate.head, sha: oid(999) } };
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(response({ full_name: repository, default_branch: 'master' }))
+      .mockResolvedValueOnce(response(candidate))
+      .mockResolvedValueOnce(response([root, candidate]))
+      .mockResolvedValueOnce(response({
+        status: 'ahead',
+        merge_base_commit: { sha: root.head.sha },
+      }))
+      .mockResolvedValueOnce(response({
+        status: 'diverged',
+        merge_base_commit: { sha: oid(555) },
+      }))
+      .mockResolvedValueOnce(response(replaced));
+
+    await expect(fetchGithubSnapshot({
+      repository,
+      pullRequestNumber: 2,
+      token: 'test-token',
+      expectedHeadSha: candidate.head.sha,
+      expectedBaseSha: candidate.base.sha,
+      expectedState: 'open',
+      fetchImpl,
+    })).rejects.toThrow('post-comparison candidate API identity changed');
+    expect(fetchImpl).toHaveBeenCalledTimes(6);
+    expect(String(fetchImpl.mock.calls[3]?.[0])).toContain('/compare/');
+  });
+
+  it('re-evaluates downstream convergence declarations when a root changes', async () => {
+    const root = pullRequest({ number: 1, headRef: 'root', baseRef: 'master' });
+    const convergence = pullRequest({ number: 3, headRef: 'convergence', baseRef: 'master' });
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(response({ full_name: repository, default_branch: 'master' }))
+      .mockResolvedValueOnce(response(root))
+      .mockResolvedValueOnce(response([root, convergence]))
+      .mockResolvedValueOnce(response({
+        status: 'diverged',
+        merge_base_commit: { sha: oid(555) },
+      }))
+      .mockResolvedValueOnce(response({
+        status: 'ahead',
+        merge_base_commit: { sha: root.head.sha },
+      }))
+      .mockResolvedValueOnce(response(root));
+
+    const raw = await fetchGithubSnapshot({
+      repository,
+      pullRequestNumber: 1,
+      token: 'test-token',
+      expectedHeadSha: root.head.sha,
+      expectedBaseSha: root.base.sha,
+      expectedState: 'open',
+      fetchImpl,
+    });
+    const report = evaluateTopology(raw);
+
+    expect(raw.dependentCoverageComplete).toBe(true);
+    expect(report.admission).toBe('blocked');
+    expect(report.dependentConvergences).toEqual([
+      expect.objectContaining({
+        pullRequest: 3,
+        containedRootPullRequest: 1,
+        containedRootHeadSha: root.head.sha,
+        declarationPresent: false,
+      }),
+    ]);
+    expect(report.diagnostics).toContainEqual(expect.objectContaining({
+      code: 'dependent-supersedes-missing',
+      pullRequest: 3,
+    }));
+    expect(fetchImpl).toHaveBeenCalledTimes(6);
+  });
+
+  it('re-evaluates stale dependent edges when a parent head synchronizes', async () => {
+    const parent = pullRequest({ number: 1, headRef: 'parent', baseRef: 'master' });
+    const child = pullRequest({
+      number: 2,
+      headRef: 'child',
+      baseRef: 'parent',
+      baseSha: oid(777),
+    });
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(response({ full_name: repository, default_branch: 'master' }))
+      .mockResolvedValueOnce(response(parent))
+      .mockResolvedValueOnce(response([parent, child]))
+      .mockResolvedValueOnce(response(parent));
+
+    const raw = await fetchGithubSnapshot({
+      repository,
+      pullRequestNumber: 1,
+      token: 'test-token',
+      expectedHeadSha: parent.head.sha,
+      expectedBaseSha: parent.base.sha,
+      expectedState: 'open',
+      fetchImpl,
+    });
+    const report = evaluateTopology(raw);
+
+    expect(report.admission).toBe('blocked');
+    expect(report.diagnostics).toContainEqual(expect.objectContaining({
+      code: 'stale-parent-head',
+      pullRequest: 2,
+    }));
+  });
+
+  it('re-evaluates dependents as orphaned when their parent closes', async () => {
+    const parent = { ...pullRequest({ number: 1, headRef: 'parent', baseRef: 'master' }), state: 'closed' };
+    const child = pullRequest({
+      number: 2,
+      headRef: 'child',
+      baseRef: 'parent',
+      baseSha: parent.head.sha,
+    });
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(response({ full_name: repository, default_branch: 'master' }))
+      .mockResolvedValueOnce(response(parent))
+      .mockResolvedValueOnce(response([child]))
+      .mockResolvedValueOnce(response(parent));
+
+    const raw = await fetchGithubSnapshot({
+      repository,
+      pullRequestNumber: 1,
+      token: 'test-token',
+      expectedHeadSha: parent.head.sha,
+      expectedBaseSha: parent.base.sha,
+      expectedState: 'closed',
+      fetchImpl,
+    });
+    const report = evaluateTopology(raw);
+
+    expect(report.complete).toBe(true);
+    expect(report.candidate).toMatchObject({ pullRequest: 1, state: 'closed' });
+    expect(report.diagnostics).toContainEqual(expect.objectContaining({
+      code: 'orphan-base',
+      pullRequest: 2,
+    }));
+    expect(report.diagnostics).not.toContainEqual(expect.objectContaining({ code: 'candidate-missing' }));
   });
 
   it('rejects API failure without attempting any mutation', async () => {
@@ -353,6 +544,13 @@ describe('M482 shadow workflow policy', () => {
     expect(workflow.on).toHaveProperty('workflow_dispatch');
     expect(workflow.on).not.toHaveProperty('pull_request');
     expect(workflow.permissions).toEqual({ contents: 'read', 'pull-requests': 'read' });
+    expect(workflow.on.pull_request_target.types).toEqual([
+      'opened',
+      'reopened',
+      'synchronize',
+      'edited',
+      'closed',
+    ]);
     expect(job.name).toBe('PR topology admission (shadow)');
     expect(job).not.toHaveProperty('permissions');
     expect(workflowText).not.toMatch(/\b(comment|label|close|merge|retarget|delete)\b.*\b(pr|pull request)\b/i);
@@ -399,7 +597,13 @@ describe('M482 shadow workflow policy', () => {
     expect(checkout.with.ref).toBe('${{ github.event.repository.default_branch }}');
     expect(checkout.with.path).toBe('trusted-auditor');
     expect(inspect.run).toMatch(/^node trusted-auditor\/scripts\/check-pr-topology\.mjs/);
-    expect(workflowText).not.toContain('github.event.pull_request.head.sha');
+    expect(inspect.env).toEqual({
+      GH_TOKEN: '${{ github.token }}',
+      PR_NUMBER: '${{ github.event.pull_request.number || inputs.pull_request_number }}',
+      EXPECTED_HEAD_SHA: '${{ github.event.pull_request.head.sha }}',
+      EXPECTED_BASE_SHA: '${{ github.event.pull_request.base.sha }}',
+      EXPECTED_PR_STATE: '${{ github.event.pull_request.state }}',
+    });
     expect(workflowText).not.toContain('github.head_ref');
   });
 });

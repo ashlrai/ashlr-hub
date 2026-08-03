@@ -15,6 +15,7 @@ const SCHEMA_VERSION = 1;
 const MAX_PULL_REQUESTS = 1_000;
 const MAX_PAGES = 10;
 const MAX_REPORT_ITEMS = 200;
+const MAX_COMPARISONS = 200;
 const MAX_BODY_BYTES = 100_000;
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -107,6 +108,24 @@ function normalizePullRequest(value, index) {
   };
 }
 
+function normalizeTriggerPullRequest(value, label = 'triggerPullRequest') {
+  if (!isRecord(value)) throw new Error(`${label} must be an object`);
+  if (value.state !== 'open' && value.state !== 'closed') {
+    throw new Error(`${label}.state must be open or closed`);
+  }
+  const body = value.body == null ? '' : String(value.body);
+  if (Buffer.byteLength(body, 'utf8') > MAX_BODY_BYTES) {
+    throw new Error(`${label}.body exceeds ${MAX_BODY_BYTES} bytes`);
+  }
+  return {
+    number: integer(value.number, `${label}.number`),
+    state: value.state,
+    body,
+    head: normalizeSide(value.head, `${label}.head`),
+    base: normalizeSide(value.base, `${label}.base`),
+  };
+}
+
 function normalizeComparison(value, index) {
   if (!isRecord(value)) throw new Error(`comparisons[${index}] must be an object`);
   const status = boundedString(value.status, `comparisons[${index}].status`, 32);
@@ -146,10 +165,20 @@ function normalizeSnapshot(raw) {
   if (!Array.isArray(raw.comparisons)) {
     throw new Error('snapshot.comparisons must be an array');
   }
-  if (raw.comparisons.length > MAX_PULL_REQUESTS) {
-    throw new Error(`snapshot exceeds the ${MAX_PULL_REQUESTS} comparison bound`);
+  if (raw.comparisons.length > MAX_COMPARISONS) {
+    throw new Error(`snapshot exceeds the ${MAX_COMPARISONS} comparison bound`);
   }
   const comparisons = raw.comparisons.map(normalizeComparison);
+  const triggerPullRequest = raw.triggerPullRequest == null
+    ? null
+    : normalizeTriggerPullRequest(raw.triggerPullRequest);
+  const pullRequestNumber = integer(
+    raw.pullRequestNumber ?? raw.pull_request_number,
+    'snapshot.pullRequestNumber',
+  );
+  if (triggerPullRequest && triggerPullRequest.number !== pullRequestNumber) {
+    throw new Error('snapshot.triggerPullRequest does not match pullRequestNumber');
+  }
   return {
     complete: raw.complete === true,
     repository: {
@@ -162,12 +191,11 @@ function normalizeSnapshot(raw) {
         'snapshot.repository.default_branch',
       ),
     },
-    pullRequestNumber: integer(
-      raw.pullRequestNumber ?? raw.pull_request_number,
-      'snapshot.pullRequestNumber',
-    ),
+    pullRequestNumber,
     pullRequests,
     comparisons,
+    triggerPullRequest,
+    dependentCoverageComplete: raw.dependentCoverageComplete === true,
   };
 }
 
@@ -222,11 +250,13 @@ function failureResult(code, message) {
       stackedPullRequests: 0,
       roots: 0,
       containedRoots: 0,
+      dependentConvergences: 0,
       diagnostics: 1,
       emittedDiagnostics: 1,
     },
     relations: [],
     containedRoots: [],
+    dependentConvergences: [],
     supersedes: { declared: [], required: [], missing: [], unverified: [] },
     diagnostics: [{ severity: 'error', code, message }],
     truncated: false,
@@ -252,7 +282,10 @@ export function evaluateTopology(raw) {
   }
 
   const candidate = snapshot.pullRequests.find((pr) => pr.number === snapshot.pullRequestNumber);
-  if (!candidate) {
+  const triggerCandidate = snapshot.triggerPullRequest?.number === snapshot.pullRequestNumber
+    ? snapshot.triggerPullRequest
+    : null;
+  if (!candidate && triggerCandidate?.state !== 'closed') {
     diagnostics.push({
       severity: 'error',
       code: 'candidate-missing',
@@ -392,6 +425,50 @@ export function evaluateTopology(raw) {
     }
   }
 
+  const dependentConvergences = [];
+  const candidateIsDefaultRoot = candidate && roots.some((root) => root.number === candidate.number);
+  if (candidateIsDefaultRoot && snapshot.dependentCoverageComplete) {
+    for (const target of roots) {
+      if (target.number === candidate.number) continue;
+      const comparison = comparisonByPair.get(comparisonKey(candidate.head.sha, target.head.sha));
+      if (!comparison || !comparison.complete) {
+        complete = false;
+        diagnostics.push({
+          severity: 'error',
+          code: 'dependent-comparison-incomplete',
+          pullRequest: target.number,
+          message: `Dependent convergence ancestry from pull request #${candidate.number} to #${target.number} is unavailable.`,
+        });
+        continue;
+      }
+      if (
+        (comparison.status === 'ahead' || comparison.status === 'identical') &&
+        comparison.mergeBaseSha === candidate.head.sha
+      ) {
+        const targetDeclarations = parseSupersedes(target.body);
+        const declarationPresent = targetDeclarations.includes(candidate.number);
+        dependentConvergences.push({
+          pullRequest: target.number,
+          headRef: target.head.ref,
+          headSha: target.head.sha,
+          containedRootPullRequest: candidate.number,
+          containedRootHeadSha: candidate.head.sha,
+          comparisonStatus: comparison.status,
+          mergeBaseSha: comparison.mergeBaseSha,
+          declarationPresent,
+        });
+        if (!declarationPresent) {
+          diagnostics.push({
+            severity: 'error',
+            code: 'dependent-supersedes-missing',
+            pullRequest: target.number,
+            message: `Dependent convergence pull request #${target.number} contains root #${candidate.number} without an explicit Supersedes declaration.`,
+          });
+        }
+      }
+    }
+  }
+
   const declared = candidate ? parseSupersedes(candidate.body) : [];
   const required = containedRoots.map((entry) => entry.pullRequest).sort((a, b) => a - b);
   const requiredSet = new Set(required);
@@ -419,6 +496,7 @@ export function evaluateTopology(raw) {
   if (
     relations.length > MAX_REPORT_ITEMS ||
     containedRoots.length > MAX_REPORT_ITEMS ||
+    dependentConvergences.length > MAX_REPORT_ITEMS ||
     diagnostics.length > MAX_REPORT_ITEMS ||
     declared.length > MAX_REPORT_ITEMS ||
     required.length > MAX_REPORT_ITEMS ||
@@ -436,6 +514,7 @@ export function evaluateTopology(raw) {
 
   const emittedDiagnostics = diagnostics.slice(0, MAX_REPORT_ITEMS);
   const hasErrors = diagnostics.some((entry) => entry.severity === 'error');
+  const reportCandidate = candidate ?? triggerCandidate;
   return {
     schemaVersion: SCHEMA_VERSION,
     mode: 'shadow',
@@ -445,13 +524,14 @@ export function evaluateTopology(raw) {
       fullName: snapshot.repository.fullName,
       defaultBranch: snapshot.repository.defaultBranch,
     },
-    candidate: candidate
+    candidate: reportCandidate
       ? {
-          pullRequest: candidate.number,
-          headRef: candidate.head.ref,
-          headSha: candidate.head.sha,
-          baseRef: candidate.base.ref,
-          baseSha: candidate.base.sha,
+          pullRequest: reportCandidate.number,
+          state: reportCandidate.state,
+          headRef: reportCandidate.head.ref,
+          headSha: reportCandidate.head.sha,
+          baseRef: reportCandidate.base.ref,
+          baseSha: reportCandidate.base.sha,
         }
       : null,
     counts: {
@@ -459,11 +539,13 @@ export function evaluateTopology(raw) {
       stackedPullRequests: snapshot.pullRequests.length - roots.length,
       roots: roots.length,
       containedRoots: containedRoots.length,
+      dependentConvergences: dependentConvergences.length,
       diagnostics: diagnostics.length,
       emittedDiagnostics: emittedDiagnostics.length,
     },
     relations: relations.slice(0, MAX_REPORT_ITEMS),
     containedRoots: containedRoots.slice(0, MAX_REPORT_ITEMS),
+    dependentConvergences: dependentConvergences.slice(0, MAX_REPORT_ITEMS),
     supersedes: {
       declared: declared.slice(0, MAX_REPORT_ITEMS),
       required: required.slice(0, MAX_REPORT_ITEMS),
@@ -511,7 +593,7 @@ export function renderMarkdown(report) {
   }
   lines.push(
     '',
-    `Open PRs: ${report.counts.openPullRequests}; stacked: ${report.counts.stackedPullRequests}; roots: ${report.counts.roots}; contained roots: ${report.counts.containedRoots}.`,
+    `Open PRs: ${report.counts.openPullRequests}; stacked: ${report.counts.stackedPullRequests}; roots: ${report.counts.roots}; contained roots: ${report.counts.containedRoots}; dependent convergences: ${report.counts.dependentConvergences}.`,
     '',
     '## Stack Relations',
     '',
@@ -532,6 +614,16 @@ export function renderMarkdown(report) {
     for (const root of report.containedRoots) {
       lines.push(
         `- #${root.pullRequest}: \`${markdownCode(root.headSha)}\` is contained by \`${markdownCode(root.convergenceHeadSha)}\` (${markdownCode(root.comparisonStatus)}; merge base \`${markdownCode(root.mergeBaseSha)}\`).`,
+      );
+    }
+  }
+  lines.push('', '## Dependent Convergences', '');
+  if (report.dependentConvergences.length === 0) {
+    lines.push('No downstream convergence PRs were proven to contain the triggering root.');
+  } else {
+    for (const dependent of report.dependentConvergences) {
+      lines.push(
+        `- #${dependent.pullRequest}: \`${markdownCode(dependent.headSha)}\` contains root #${dependent.containedRootPullRequest} at \`${markdownCode(dependent.containedRootHeadSha)}\`; Supersedes declaration ${dependent.declarationPresent ? 'present' : 'missing'}.`,
       );
     }
   }
@@ -585,14 +677,66 @@ async function githubGet(url, token, fetchImpl) {
   return { body: await response.json(), next: nextLink(response.headers.get('link')) };
 }
 
+function normalizeExpectedEventIdentity({ expectedHeadSha, expectedBaseSha, expectedState }) {
+  const values = [expectedHeadSha, expectedBaseSha, expectedState].map((value) =>
+    value == null || value === '' ? null : value,
+  );
+  if (values.every((value) => value === null)) return null;
+  if (values.some((value) => value === null)) {
+    throw new Error('expected event head SHA, base SHA, and state must be provided together');
+  }
+  if (values[2] !== 'open' && values[2] !== 'closed') {
+    throw new Error('expected event state must be open or closed');
+  }
+  return {
+    headSha: sha(values[0], 'expected event head SHA'),
+    baseSha: sha(values[1], 'expected event base SHA'),
+    state: values[2],
+  };
+}
+
+function assertExpectedEventIdentity(candidate, expected, phase) {
+  if (!expected) return;
+  if (
+    candidate.head.sha !== expected.headSha ||
+    candidate.base.sha !== expected.baseSha ||
+    candidate.state !== expected.state
+  ) {
+    throw new Error(`${phase} candidate identity does not match the pull_request_target event`);
+  }
+}
+
+function assertSameCandidateIdentity(candidate, expected, phase) {
+  if (
+    candidate.number !== expected.number ||
+    candidate.state !== expected.state ||
+    candidate.head.sha !== expected.head.sha ||
+    candidate.head.ref !== expected.head.ref ||
+    candidate.head.repo.fullName !== expected.head.repo.fullName ||
+    candidate.base.sha !== expected.base.sha ||
+    candidate.base.ref !== expected.base.ref ||
+    candidate.base.repo.fullName !== expected.base.repo.fullName
+  ) {
+    throw new Error(`${phase} candidate API identity changed during topology inspection`);
+  }
+}
+
 export async function fetchGithubSnapshot({
   repository,
   pullRequestNumber,
   token,
+  expectedHeadSha,
+  expectedBaseSha,
+  expectedState,
   fetchImpl = globalThis.fetch,
 }) {
   const fullName = repositoryName(repository, 'repository');
   const number = integer(Number(pullRequestNumber), 'pullRequestNumber');
+  const expectedIdentity = normalizeExpectedEventIdentity({
+    expectedHeadSha,
+    expectedBaseSha,
+    expectedState,
+  });
   if (typeof token !== 'string' || token.length < 1 || token.length > 1_000) {
     throw new Error('a bounded GitHub token is required');
   }
@@ -602,6 +746,20 @@ export async function fetchGithubSnapshot({
     token,
     fetchImpl,
   );
+  const initialCandidateResponse = await githubGet(
+    `https://api.github.com/repos/${fullName}/pulls/${number}`,
+    token,
+    fetchImpl,
+  );
+  const initialCandidate = normalizeTriggerPullRequest(
+    initialCandidateResponse.body,
+    'initial candidate API response',
+  );
+  if (initialCandidate.number !== number) {
+    throw new Error('initial candidate API response has the wrong pull request number');
+  }
+  assertExpectedEventIdentity(initialCandidate, expectedIdentity, 'initial');
+
   let url = `https://api.github.com/repos/${fullName}/pulls?state=open&per_page=100&page=1`;
   const pullRequests = [];
   let pages = 0;
@@ -618,19 +776,38 @@ export async function fetchGithubSnapshot({
   }
 
   const candidate = pullRequests.find((pr) => pr?.number === number);
-  if (!candidate) throw new Error(`open pull request #${number} is absent from GitHub pagination`);
+  if (initialCandidate.state === 'open') {
+    if (!candidate) throw new Error(`open pull request #${number} is absent from GitHub pagination`);
+    const listedCandidate = normalizeTriggerPullRequest(candidate, 'paginated candidate API response');
+    assertSameCandidateIdentity(listedCandidate, initialCandidate, 'pre-comparison');
+    assertExpectedEventIdentity(listedCandidate, expectedIdentity, 'pre-comparison');
+  } else if (candidate) {
+    throw new Error(`closed pull request #${number} appeared in open GitHub pagination`);
+  }
   const defaultBranch = repoResponse.body?.default_branch;
   const comparisons = [];
-  if (candidate.base?.ref === defaultBranch && candidate.base?.repo?.full_name === fullName) {
+  let dependentCoverageComplete = false;
+  if (candidate?.base?.ref === defaultBranch && candidate.base?.repo?.full_name === fullName) {
     const roots = pullRequests.filter(
       (pr) =>
         pr.number !== number &&
         pr.base?.ref === defaultBranch &&
         pr.base?.repo?.full_name === fullName,
     );
-    for (const root of roots) {
-      const baseSha = sha(root.head?.sha, `pull request #${root.number} head SHA`);
-      const headSha = sha(candidate.head?.sha, `pull request #${number} head SHA`);
+    const comparisonPairs = [
+      ...roots.map((root) => ({ base: root, head: candidate })),
+      ...roots.map((root) => ({ base: candidate, head: root })),
+    ];
+    if (comparisonPairs.length > MAX_COMPARISONS) {
+      throw new Error(`dependent comparison plan exceeds the ${MAX_COMPARISONS} comparison bound`);
+    }
+    const seenPairs = new Set();
+    for (const pair of comparisonPairs) {
+      const baseSha = sha(pair.base.head?.sha, `pull request #${pair.base.number} head SHA`);
+      const headSha = sha(pair.head.head?.sha, `pull request #${pair.head.number} head SHA`);
+      const pairKey = comparisonKey(baseSha, headSha);
+      if (seenPairs.has(pairKey)) continue;
+      seenPairs.add(pairKey);
       const response = await githubGet(
         `https://api.github.com/repos/${fullName}/compare/${baseSha}...${headSha}`,
         token,
@@ -644,7 +821,20 @@ export async function fetchGithubSnapshot({
         complete: true,
       });
     }
+    dependentCoverageComplete = true;
   }
+  const finalCandidateResponse = await githubGet(
+    `https://api.github.com/repos/${fullName}/pulls/${number}`,
+    token,
+    fetchImpl,
+  );
+  const finalCandidate = normalizeTriggerPullRequest(
+    finalCandidateResponse.body,
+    'final candidate API response',
+  );
+  assertSameCandidateIdentity(finalCandidate, initialCandidate, 'post-comparison');
+  assertExpectedEventIdentity(finalCandidate, expectedIdentity, 'post-comparison');
+
   return {
     schemaVersion: SCHEMA_VERSION,
     complete: true,
@@ -652,6 +842,8 @@ export async function fetchGithubSnapshot({
     pullRequestNumber: number,
     pullRequests,
     comparisons,
+    triggerPullRequest: initialCandidateResponse.body,
+    dependentCoverageComplete,
   };
 }
 
@@ -677,12 +869,22 @@ export async function runCli(argv, env = process.env) {
   let options = {};
   try {
     options = parseArguments(argv);
+    if (
+      !options.input &&
+      env.GITHUB_EVENT_NAME === 'pull_request_target' &&
+      (!env.EXPECTED_HEAD_SHA || !env.EXPECTED_BASE_SHA || !env.EXPECTED_PR_STATE)
+    ) {
+      throw new Error('pull_request_target identity is incomplete');
+    }
     const raw = options.input
       ? JSON.parse(await readFile(resolve(options.input), 'utf8'))
       : await fetchGithubSnapshot({
           repository: options.repository ?? env.GITHUB_REPOSITORY,
           pullRequestNumber: options['pull-request'] ?? env.PR_NUMBER,
           token: env.GH_TOKEN ?? env.GITHUB_TOKEN,
+          expectedHeadSha: env.EXPECTED_HEAD_SHA,
+          expectedBaseSha: env.EXPECTED_BASE_SHA,
+          expectedState: env.EXPECTED_PR_STATE,
         });
     report = evaluateTopology(raw);
   } catch (error) {
