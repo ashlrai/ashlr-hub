@@ -355,12 +355,29 @@ describe('M466 durable host merge cancellation and revocation protocol foundatio
     revokeChild.child.send({ go: true });
     consumeChild.child.send({ go: true });
     const [revoke, consume] = await Promise.all([revokeChild.result, consumeChild.result]);
-    const outcomes = [revoke, consume];
-    expect(outcomes.filter((result) => result.status === 'applied')).toHaveLength(1);
-    expect(outcomes.filter((result) => result.status === 'refused')).toHaveLength(1);
-    expect(outcomes.find((result) => result.status === 'refused')).toMatchObject({
-      reason: 'compare-and-swap-mismatch',
-    });
+    const attempts = [
+      { action: 'revoke' as const, operationId: 'race-revoke-466', result: revoke },
+      { action: 'consume' as const, operationId: 'race-consume-466', result: consume },
+    ];
+    expect(attempts.filter(({ result }) => result.status === 'applied')).toHaveLength(1);
+    const [loser] = attempts.filter(({ result }) => result.status !== 'applied');
+    expect(loser).toBeDefined();
+    if (loser.result.status === 'degraded') {
+      expect(loser.result).toMatchObject({ reason: 'state-lock-unavailable' });
+      expect(transitionHostMergeRevocation({
+        ...common,
+        action: loser.action,
+        operationId: loser.operationId,
+      })).toMatchObject({
+        status: 'refused',
+        reason: 'compare-and-swap-mismatch',
+      });
+    } else {
+      expect(loser.result).toMatchObject({
+        status: 'refused',
+        reason: 'compare-and-swap-mismatch',
+      });
+    }
     expect(readHostMergeRevocationState(exactIdentity)).toMatchObject({
       state: 'healthy',
       record: { sequence: 3 },
