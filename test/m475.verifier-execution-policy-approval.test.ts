@@ -25,21 +25,28 @@ vi.mock('../src/core/run/verifier-execution-policy-trust-roots.js', async (impor
 }));
 
 import {
+  VERIFIER_EXECUTION_AUTHORITY_PROTOCOL_V2,
   VERIFIER_EXECUTION_SIGNATURE_ALGORITHM,
   VERIFIER_EXECUTION_TRUST_PROTOCOL_V1,
+  canonicalVerifierExecutionAuthorityPayloadV2,
   verifierExecutionAuthorityKeyId,
   verifierExecutionAuthorityTrustPolicyDigest,
+  type InspectVerifierExecutionAuthorityV2Input,
+  type VerifierExecutionAuthorityStatementUnsignedV2,
+  type VerifierExecutionExpectedBindingsV1,
   type VerifierExecutionTrustPolicyV1,
 } from '../src/core/run/verifier-execution-authority.js';
 import {
   VERIFIER_EXECUTION_POLICY_APPROVAL_BLOCKERS_V1,
   VERIFIER_EXECUTION_POLICY_APPROVAL_PROTOCOL_V1,
   canonicalVerifierExecutionPolicyApprovalPayloadV1,
+  inspectVerifierExecutionCompositionV1,
   inspectVerifierExecutionPolicyApprovalV1,
   verifierExecutionApprovedTrustPolicyDigestV1,
   verifierExecutionPolicyApprovalTrustPolicyDigest,
   verifierExecutionPolicyApproverKeyId,
   type InspectVerifierExecutionPolicyApprovalV1Input,
+  type VerifierExecutionCompositionIdentityV1,
   type VerifierExecutionPolicyApprovalEnvelopeV1,
   type VerifierExecutionPolicyApprovalScopeV1,
   type VerifierExecutionPolicyApprovalUnsignedV1,
@@ -62,7 +69,10 @@ interface Fixture {
   approval: VerifierExecutionPolicyApprovalEnvelopeV1;
   approvalPrivateKey: KeyObject;
   approvalPublicKeySpki: string;
+  capsulePrivateKey: KeyObject;
   capsulePublicKeySpki: string;
+  executionAuthorityInput: InspectVerifierExecutionAuthorityV2Input;
+  expectedIdentity: VerifierExecutionCompositionIdentityV1;
   unsignedApproval: VerifierExecutionPolicyApprovalUnsignedV1;
 }
 
@@ -134,6 +144,73 @@ function fixture(options: {
   };
   const approvedTrustPolicyDigest = verifierExecutionAuthorityTrustPolicyDigest(trustPolicy)!;
   expect(verifierExecutionApprovedTrustPolicyDigestV1(trustPolicy)).toBe(approvedTrustPolicyDigest);
+  const expectedBindings: VerifierExecutionExpectedBindingsV1 = {
+    ticketDigest: digest('ticket'),
+    candidateDigest: digest('candidate'),
+    baseDigest: digest('base'),
+    commandPlanDigest: digest('command-plan'),
+    capsuleTreeDigest: digest('capsule-tree'),
+    executableDigest: digest('executable'),
+    dependencyDigest: digest('dependency'),
+    brokerDigest: digest('broker'),
+    isolationPolicyDigest: digest('isolation-policy'),
+    commandEntrypoints: [{
+      commandId: 'test',
+      entrypoint: '/opt/ashlr/verifier-capsule/entrypoints/test',
+    }],
+    capsuleRoot: '/opt/ashlr/verifier-capsule',
+    platform: scope.platform,
+    architecture: scope.architecture,
+    backend: scope.backend,
+  };
+  const unsignedStatement: VerifierExecutionAuthorityStatementUnsignedV2 = {
+    schemaVersion: 1,
+    protocol: VERIFIER_EXECUTION_AUTHORITY_PROTOCOL_V2,
+    assurance: 'externally-signed-capsule-observation',
+    ...structuredClone(expectedBindings),
+    candidateMount: 'read-only',
+    hostMounts: [],
+    networkPolicy: 'denied',
+    descendantOwnership: 'kernel-owned',
+    capsuleMutability: 'immutable',
+    issuedAt: ISSUED_AT,
+    expiresAt: EXPIRES_AT,
+    nonce: Buffer.alloc(24, 3).toString('base64url'),
+    trustPolicyDigest: approvedTrustPolicyDigest,
+    keyId: capsuleKeyId,
+    signatureAlgorithm: VERIFIER_EXECUTION_SIGNATURE_ALGORITHM,
+    executionPermitted: false,
+    mergePermitted: false,
+    evidencePermitted: false,
+  };
+  const executionAuthorityInput: InspectVerifierExecutionAuthorityV2Input = {
+    statement: {
+      ...unsignedStatement,
+      signature: sign(
+        null,
+        canonicalVerifierExecutionAuthorityPayloadV2(unsignedStatement)!,
+        capsuleKeys.privateKey,
+      ).toString('base64url'),
+    },
+    trustPolicy,
+    expectedPolicyDigest: approvedTrustPolicyDigest,
+    expectedBindings,
+    nowMs: NOW,
+  };
+  const expectedIdentity: VerifierExecutionCompositionIdentityV1 = {
+    ticketDigest: expectedBindings.ticketDigest,
+    candidateDigest: expectedBindings.candidateDigest,
+    baseDigest: expectedBindings.baseDigest,
+    commandPlanDigest: expectedBindings.commandPlanDigest,
+    capsuleTreeDigest: expectedBindings.capsuleTreeDigest,
+    executableDigest: expectedBindings.executableDigest,
+    dependencyDigest: expectedBindings.dependencyDigest,
+    brokerDigest: expectedBindings.brokerDigest,
+    isolationPolicyDigest: expectedBindings.isolationPolicyDigest,
+    platform: expectedBindings.platform,
+    architecture: expectedBindings.architecture,
+    backend: expectedBindings.backend,
+  };
   const policyGeneration = options.policyGeneration ?? 4;
   const unsignedApproval: VerifierExecutionPolicyApprovalUnsignedV1 = {
     schemaVersion: 1,
@@ -169,7 +246,10 @@ function fixture(options: {
     approval,
     approvalPrivateKey: approvalKeys.privateKey,
     approvalPublicKeySpki,
+    capsulePrivateKey: capsuleKeys.privateKey,
     capsulePublicKeySpki,
+    executionAuthorityInput,
+    expectedIdentity,
     unsignedApproval,
     input: {
       approval,
@@ -197,9 +277,51 @@ function resignApproval(
   return { ...value.input, approval } as InspectVerifierExecutionPolicyApprovalV1Input;
 }
 
+function compositionInput(value: Fixture) {
+  return {
+    policyApprovalInput: structuredClone(value.input),
+    executionAuthorityInput: structuredClone(value.executionAuthorityInput),
+    expectedIdentity: structuredClone(value.expectedIdentity),
+    timeAuthorityObservation: {
+      schemaVersion: 1 as const,
+      protocol: 'ashlr-verifier-execution-time-authority-observation-v1' as const,
+      state: 'unavailable' as const,
+      authority: 'none' as const,
+      observedAt: null,
+      receiptDigest: null,
+      clockAuthorityVerified: false as const,
+    },
+  };
+}
+
+function authorityWithPolicyVersion(
+  value: Fixture,
+  policyVersion: string,
+): InspectVerifierExecutionAuthorityV2Input {
+  const input = structuredClone(value.executionAuthorityInput);
+  input.trustPolicy.policyVersion = policyVersion;
+  const policyDigest = verifierExecutionAuthorityTrustPolicyDigest(input.trustPolicy)!;
+  const { signature: _signature, ...unsigned } = input.statement;
+  const nextUnsigned = { ...unsigned, trustPolicyDigest: policyDigest };
+  input.statement = {
+    ...nextUnsigned,
+    signature: sign(
+      null,
+      canonicalVerifierExecutionAuthorityPayloadV2(nextUnsigned)!,
+      value.capsulePrivateKey,
+    ).toString('base64url'),
+  };
+  input.expectedPolicyDigest = policyDigest;
+  return input;
+}
+
 function allAuthorityFalse(result: ReturnType<typeof inspectVerifierExecutionPolicyApprovalV1>): void {
   expect(result).toMatchObject({
     authority: 'observation-only',
+    trustPolicyApprovalVerified: false,
+    clockAuthorityVerified: false,
+    freshnessState: 'unavailable',
+    freshnessObservedAt: null,
     replayTransparencyVerified: false,
     executionPermitted: false,
     evidencePermitted: false,
@@ -234,14 +356,14 @@ describe('M475 Verifier Policy Approval Authority V1', () => {
     expect(source).not.toMatch(/process\.env|Deno\.env|Bun\.env|BEGIN (?:PRIVATE|OPENSSH) KEY/);
   });
 
-  it('authenticates an exact role-separated approval while granting no authority', () => {
+  it('verifies exact role-separated cryptography without claiming freshness or authority', () => {
     const value = fixture({ provisionRoot: true });
     const first = inspectVerifierExecutionPolicyApprovalV1(value.input);
     const replay = inspectVerifierExecutionPolicyApprovalV1(structuredClone(value.input));
 
     expect(first).toMatchObject({
-      state: 'authenticated',
-      reason: 'policy-approval-authenticated',
+      state: 'cryptographically-verified',
+      reason: 'policy-approval-cryptography-verified',
       approvalDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
       approvedTrustPolicyDigest: value.unsignedApproval.approvedTrustPolicyDigest,
       approvalTrustPolicyDigest: verifierExecutionPolicyApprovalTrustPolicyDigest(),
@@ -250,9 +372,13 @@ describe('M475 Verifier Policy Approval Authority V1', () => {
       approverKeyId: value.unsignedApproval.approverKeyId,
       capsuleStatementVerified: false,
       signatureVerified: true,
-      trustPolicyApprovalVerified: true,
+      approvalCryptographyVerified: true,
+      trustPolicyApprovalVerified: false,
       trustRootProvisioned: true,
       replayTransparencyVerified: false,
+      clockAuthorityVerified: false,
+      freshnessState: 'unavailable',
+      freshnessObservedAt: null,
     });
     expect(replay).toEqual(first);
     allAuthorityFalse(first);
@@ -363,14 +489,34 @@ describe('M475 Verifier Policy Approval Authority V1', () => {
   });
 
   it.each([
-    ['not-yet-valid', { issuedAt: '2026-08-02T15:06:00.000Z' }, 'approval-not-current'],
-    ['expired', { expiresAt: '2026-08-02T15:05:00.000Z' }, 'approval-expired'],
-    ['reversed', { expiresAt: '2026-08-02T14:59:59.000Z' }, 'approval-expired'],
-    ['too-long', { expiresAt: '2026-08-02T15:10:00.001Z' }, 'approval-lifetime-invalid'],
-  ])('rejects a %s approval window', (_label, changes, reason) => {
+    ['reversed', { expiresAt: '2026-08-02T14:59:59.000Z' }],
+    ['too-long', { expiresAt: '2026-08-02T15:10:00.001Z' }],
+  ])('rejects a structurally %s approval window', (_label, changes) => {
     const value = fixture({ provisionRoot: true });
     expect(inspectVerifierExecutionPolicyApprovalV1(resignApproval(value, changes)).reason)
-      .toBe(reason);
+      .toBe('approval-lifetime-invalid');
+  });
+
+  it('never converts caller-selected historical time into freshness authority', () => {
+    const value = fixture({ provisionRoot: true });
+    const historical = inspectVerifierExecutionPolicyApprovalV1({ ...value.input, nowMs: NOW });
+    const epoch = inspectVerifierExecutionPolicyApprovalV1({ ...value.input, nowMs: 0 });
+    const farFuture = inspectVerifierExecutionPolicyApprovalV1({
+      ...value.input,
+      nowMs: Date.parse('2100-01-01T00:00:00.000Z'),
+    });
+
+    for (const result of [historical, epoch, farFuture]) {
+      expect(result).toMatchObject({
+        state: 'cryptographically-verified',
+        reason: 'policy-approval-cryptography-verified',
+        approvalCryptographyVerified: true,
+        trustPolicyApprovalVerified: false,
+        clockAuthorityVerified: false,
+        freshnessState: 'unavailable',
+      });
+      allAuthorityFalse(result);
+    }
   });
 
   it('rejects inactive and revoked approver roots', () => {
@@ -463,11 +609,12 @@ describe('M475 Verifier Policy Approval Authority V1', () => {
   it('persists only bounded metadata in results', () => {
     const value = fixture({ provisionRoot: true });
     const result = inspectVerifierExecutionPolicyApprovalV1(value.input);
-    const serialized = JSON.stringify(result);
+    const composition = inspectVerifierExecutionCompositionV1(compositionInput(value));
+    const serialized = JSON.stringify([result, composition]);
     for (const secret of [
       'raw prompt canary', 'diff --git canary', '/private/path/canary', 'stdout canary',
       'stderr canary', 'SECRET_ENV=canary', 'file contents canary', value.approval.signature,
-      value.approvalPublicKeySpki,
+      value.approvalPublicKeySpki, '/opt/ashlr/verifier-capsule/entrypoints/test',
     ]) expect(serialized).not.toContain(secret);
   });
 
@@ -483,11 +630,158 @@ describe('M475 Verifier Policy Approval Authority V1', () => {
     secondInput.expectedApprovedTrustPolicyDigest = secondDigest;
     const secondResult = inspectVerifierExecutionPolicyApprovalV1(secondInput);
 
-    expect(firstResult.state).toBe('authenticated');
-    expect(secondResult.state).toBe('authenticated');
+    expect(firstResult.state).toBe('cryptographically-verified');
+    expect(secondResult.state).toBe('cryptographically-verified');
     expect(secondResult.approvedTrustPolicyDigest).not.toBe(firstResult.approvedTrustPolicyDigest);
     allAuthorityFalse(firstResult);
     allAuthorityFalse(secondResult);
+  });
+
+  it('canonically composes both observations but stops at unavailable freshness', () => {
+    const value = fixture({ provisionRoot: true });
+    const result = inspectVerifierExecutionCompositionV1(compositionInput(value));
+
+    expect(result).toMatchObject({
+      state: 'freshness-unavailable',
+      reason: 'clock-authority-unavailable',
+      trustPolicyDigest: value.input.expectedApprovedTrustPolicyDigest,
+      approvalDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+      statementDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+      bindingDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+      policyApprovalCryptographyVerified: true,
+      capsuleStatementCryptographyVerified: true,
+      identityBindingVerified: true,
+      scopeBindingVerified: true,
+      trustPolicyApprovalVerified: false,
+      clockAuthorityVerified: false,
+      freshnessState: 'unavailable',
+      freshnessObservedAt: null,
+    });
+    allAuthorityFalse(result);
+  });
+
+  it('rejects policy A plus independently valid statement B mix-and-match', () => {
+    const value = fixture({ provisionRoot: true });
+    const input = compositionInput(value);
+    input.executionAuthorityInput = authorityWithPolicyVersion(
+      value,
+      'capsule-admission-2026-08-policy-b',
+    );
+
+    const result = inspectVerifierExecutionCompositionV1(input);
+    expect(result).toMatchObject({
+      state: 'withheld',
+      reason: 'trust-policy-mismatch',
+      trustPolicyApprovalVerified: false,
+      clockAuthorityVerified: false,
+    });
+    allAuthorityFalse(result);
+  });
+
+  it.each([
+    'ticketDigest', 'candidateDigest', 'baseDigest', 'commandPlanDigest', 'capsuleTreeDigest',
+    'executableDigest', 'dependencyDigest', 'brokerDigest', 'isolationPolicyDigest',
+  ] as const)('rejects composition identity substitution for %s', (field) => {
+    const value = fixture({ provisionRoot: true });
+    const input = compositionInput(value);
+    input.expectedIdentity[field] = digest(`substituted:${field}`);
+    const result = inspectVerifierExecutionCompositionV1(input);
+    expect(result.reason).toBe('identity-mismatch');
+    allAuthorityFalse(result);
+  });
+
+  it.each([
+    ['platform', 'darwin'],
+    ['architecture', 'arm64'],
+    ['backend', 'macos-virtualization-framework-broker'],
+  ] as const)('rejects composition platform identity substitution for %s', (field, replacement) => {
+    const value = fixture({ provisionRoot: true });
+    const input = compositionInput(value);
+    Object.assign(input.expectedIdentity, { [field]: replacement });
+    const result = inspectVerifierExecutionCompositionV1(input);
+    expect(result.reason).toBe('identity-mismatch');
+    allAuthorityFalse(result);
+  });
+
+  it('rejects a valid policy-approval scope that differs from the statement scope', () => {
+    const value = fixture({ provisionRoot: true });
+    const input = compositionInput(value);
+    input.policyApprovalInput = resignApproval(value, { platform: 'darwin' });
+    input.policyApprovalInput.expectedScope.platform = 'darwin';
+    const result = inspectVerifierExecutionCompositionV1(input);
+    expect(result.reason).toBe('scope-mismatch');
+    allAuthorityFalse(result);
+  });
+
+  it('fails closed when either cryptographic observation is invalid', () => {
+    const policyInvalid = fixture({ provisionRoot: true });
+    const policyInput = compositionInput(policyInvalid);
+    policyInput.policyApprovalInput.approval.signature = Buffer.alloc(64, 7).toString('base64url');
+    expect(inspectVerifierExecutionCompositionV1(policyInput).reason)
+      .toBe('policy-approval-unverified');
+
+    const statementInvalid = fixture({ provisionRoot: true });
+    const statementInput = compositionInput(statementInvalid);
+    statementInput.executionAuthorityInput.statement.signature =
+      Buffer.alloc(64, 8).toString('base64url');
+    expect(inspectVerifierExecutionCompositionV1(statementInput).reason)
+      .toBe('capsule-statement-unverified');
+  });
+
+  it('rejects caller-invented clock authority and retains the unavailable contract', () => {
+    const value = fixture({ provisionRoot: true });
+    const input = compositionInput(value) as unknown as Record<string, unknown>;
+    input['timeAuthorityObservation'] = {
+      schemaVersion: 1,
+      protocol: 'ashlr-verifier-execution-time-authority-observation-v1',
+      state: 'authenticated',
+      authority: 'caller',
+      observedAt: '2026-08-02T15:05:00.000Z',
+      receiptDigest: digest('caller-clock'),
+      clockAuthorityVerified: true,
+    };
+    const result = inspectVerifierExecutionCompositionV1(input);
+    expect(result.reason).toBe('invalid-input');
+    allAuthorityFalse(result);
+  });
+
+  it('keeps historically selected nowMs freshness-unqualified after full composition', () => {
+    const value = fixture({ provisionRoot: true });
+    const input = compositionInput(value);
+    input.policyApprovalInput.nowMs = NOW;
+    input.executionAuthorityInput.nowMs = NOW;
+    const result = inspectVerifierExecutionCompositionV1(input);
+    expect(result).toMatchObject({
+      state: 'freshness-unavailable',
+      reason: 'clock-authority-unavailable',
+      trustPolicyApprovalVerified: false,
+      clockAuthorityVerified: false,
+      freshnessState: 'unavailable',
+    });
+    allAuthorityFalse(result);
+  });
+
+  it('contains hostile composition objects inside the fail-closed boundary', () => {
+    const value = fixture({ provisionRoot: true });
+    const unknown = { ...compositionInput(value), extraAuthority: true };
+    expect(inspectVerifierExecutionCompositionV1(unknown).reason).toBe('invalid-input');
+
+    const getter = compositionInput(value) as Record<string, unknown>;
+    Object.defineProperty(getter, 'expectedIdentity', {
+      enumerable: true,
+      get: () => value.expectedIdentity,
+    });
+    expect(inspectVerifierExecutionCompositionV1(getter).reason).toBe('invalid-input');
+
+    const proxy = new Proxy({}, {
+      getPrototypeOf: () => { throw new Error('composition proxy canary'); },
+    });
+    expect(() => inspectVerifierExecutionCompositionV1(proxy)).not.toThrow();
+    expect(inspectVerifierExecutionCompositionV1(proxy).reason).toBe('invalid-input');
+
+    const cyclic = compositionInput(value) as unknown as Record<string, unknown>;
+    cyclic['cycle'] = cyclic;
+    expect(inspectVerifierExecutionCompositionV1(cyclic).reason).toBe('invalid-input');
   });
 
   it('is a crypto-only verifier with no operational or signing imports', () => {

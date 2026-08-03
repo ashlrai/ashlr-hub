@@ -611,7 +611,7 @@ describe('M473 Verifier Execution Authority V2 observation', () => {
     expect(source).not.toMatch(/writeFile|mkdir|rename|unlink|chmod|chown|openSync|createWriteStream/);
   });
 
-  it('has no runtime wiring from any other production module', () => {
+  it('allows only the canonical policy-approval composition runtime edge', () => {
     const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
     const sourceRoot = join(root, 'src');
     const target = 'verifier-execution-authority.js';
@@ -623,7 +623,9 @@ describe('M473 Verifier Execution Authority V2 observation', () => {
       });
     const references = files(sourceRoot).filter((path) =>
       !path.endsWith('verifier-execution-authority.ts') && readFileSync(path, 'utf8').includes(target));
-    expect(references.map((path) => relative(root, path))).toEqual([]);
+    expect(references.map((path) => relative(root, path))).toEqual([
+      'src/core/run/verifier-execution-policy-approval.ts',
+    ]);
   });
 
   it('never returns authority on malformed values or hostile platform claims', () => {

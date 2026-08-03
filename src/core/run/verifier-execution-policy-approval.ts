@@ -23,6 +23,11 @@ import {
   type VerifierExecutionPolicyBackendV1,
   type VerifierExecutionPolicyPlatformV1,
 } from './verifier-execution-policy-trust-roots.js';
+import {
+  inspectVerifierExecutionAuthorityV2,
+  type InspectVerifierExecutionAuthorityV2Input,
+  type VerifierExecutionExpectedBindingsV1,
+} from './verifier-execution-authority.js';
 
 export const VERIFIER_EXECUTION_POLICY_APPROVAL_PROTOCOL_V1 =
   'ashlr-verifier-execution-policy-approval-v1' as const;
@@ -41,7 +46,6 @@ const POLICY_VERSION = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const MAX_ROOTS = 16;
 const MAX_CAPSULE_KEYS = 16;
 const MAX_LIFETIME_MS = 10 * 60 * 1_000;
-const MAX_FUTURE_SKEW_MS = 30_000;
 const PLATFORMS = ['darwin', 'linux', 'win32'] as const;
 const ARCHITECTURES = ['arm64', 'x64'] as const;
 const BACKENDS = [
@@ -51,6 +55,7 @@ const BACKENDS = [
 ] as const;
 
 export const VERIFIER_EXECUTION_POLICY_APPROVAL_BLOCKERS_V1 = Object.freeze([
+  'clock-authority-unavailable',
   'replay-transparency-unavailable',
   'live-immutability-unproven',
   'execution-wiring-disabled',
@@ -84,6 +89,18 @@ const UNSIGNED_APPROVAL_KEYS = [
   'replayTransparencyVerified', 'repositoryDigest', 'schemaVersion', 'signatureAlgorithm',
 ] as const;
 const APPROVAL_KEYS = [...UNSIGNED_APPROVAL_KEYS, 'signature'] as const;
+const TIME_OBSERVATION_KEYS = [
+  'authority', 'clockAuthorityVerified', 'observedAt', 'protocol', 'receiptDigest',
+  'schemaVersion', 'state',
+] as const;
+const COMPOSITION_INPUT_KEYS = [
+  'executionAuthorityInput', 'expectedIdentity', 'policyApprovalInput', 'timeAuthorityObservation',
+] as const;
+const COMPOSITION_IDENTITY_KEYS = [
+  'architecture', 'backend', 'baseDigest', 'brokerDigest', 'candidateDigest',
+  'capsuleTreeDigest', 'commandPlanDigest', 'dependencyDigest', 'executableDigest',
+  'isolationPolicyDigest', 'platform', 'ticketDigest',
+] as const;
 
 export interface VerifierExecutionPolicyApprovalScopeV1 {
   fleetDigest: string;
@@ -151,7 +168,7 @@ export interface InspectVerifierExecutionPolicyApprovalV1Input {
 }
 
 export type VerifierExecutionPolicyApprovalReasonV1 =
-  | 'policy-approval-authenticated'
+  | 'policy-approval-cryptography-verified'
   | 'invalid-input'
   | 'trust-root-unprovisioned'
   | 'trust-policy-invalid'
@@ -168,8 +185,6 @@ export type VerifierExecutionPolicyApprovalReasonV1 =
   | 'approver-key-inactive'
   | 'approver-key-revoked'
   | 'approver-capsule-role-collision'
-  | 'approval-not-current'
-  | 'approval-expired'
   | 'approval-lifetime-invalid'
   | 'signature-invalid';
 
@@ -183,14 +198,18 @@ interface VerifierExecutionPolicyApprovalResultBaseV1 {
   activationPermitted: false;
   deployPermitted: false;
   replayTransparencyVerified: false;
+  clockAuthorityVerified: false;
+  freshnessState: 'unavailable';
+  freshnessObservedAt: null;
+  trustPolicyApprovalVerified: false;
   blockers: typeof VERIFIER_EXECUTION_POLICY_APPROVAL_BLOCKERS_V1;
 }
 
 export type VerifierExecutionPolicyApprovalResultV1 =
   VerifierExecutionPolicyApprovalResultBaseV1 & (
     | {
-      state: 'authenticated';
-      reason: 'policy-approval-authenticated';
+      state: 'cryptographically-verified';
+      reason: 'policy-approval-cryptography-verified';
       approvalDigest: string;
       approvedTrustPolicyDigest: string;
       approvalTrustPolicyDigest: string;
@@ -200,12 +219,15 @@ export type VerifierExecutionPolicyApprovalResultV1 =
       scope: VerifierExecutionPolicyApprovalScopeV1;
       capsuleStatementVerified: false;
       signatureVerified: true;
-      trustPolicyApprovalVerified: true;
+      approvalCryptographyVerified: true;
       trustRootProvisioned: true;
     }
     | {
       state: 'withheld';
-      reason: Exclude<VerifierExecutionPolicyApprovalReasonV1, 'policy-approval-authenticated'>;
+      reason: Exclude<
+      VerifierExecutionPolicyApprovalReasonV1,
+      'policy-approval-cryptography-verified'
+      >;
       approvalDigest: null;
       approvedTrustPolicyDigest: null;
       approvalTrustPolicyDigest: null;
@@ -215,10 +237,82 @@ export type VerifierExecutionPolicyApprovalResultV1 =
       scope: null;
       capsuleStatementVerified: false;
       signatureVerified: false;
-      trustPolicyApprovalVerified: false;
+      approvalCryptographyVerified: false;
       trustRootProvisioned: boolean;
     }
   );
+
+/**
+ * Reserved input contract for a future independently authenticated clock.
+ * V1 accepts only an explicit unavailable observation and grants no authority.
+ */
+export interface VerifierExecutionTimeAuthorityObservationV1 {
+  schemaVersion: 1;
+  protocol: 'ashlr-verifier-execution-time-authority-observation-v1';
+  state: 'unavailable';
+  authority: 'none';
+  observedAt: null;
+  receiptDigest: null;
+  clockAuthorityVerified: false;
+}
+
+export interface VerifierExecutionCompositionIdentityV1 {
+  ticketDigest: string;
+  candidateDigest: string;
+  baseDigest: string;
+  commandPlanDigest: string;
+  capsuleTreeDigest: string;
+  executableDigest: string;
+  dependencyDigest: string;
+  brokerDigest: string;
+  isolationPolicyDigest: string;
+  platform: VerifierExecutionPolicyPlatformV1;
+  architecture: VerifierExecutionPolicyArchitectureV1;
+  backend: VerifierExecutionPolicyBackendV1;
+}
+
+export interface InspectVerifierExecutionCompositionV1Input {
+  policyApprovalInput: InspectVerifierExecutionPolicyApprovalV1Input;
+  executionAuthorityInput: InspectVerifierExecutionAuthorityV2Input;
+  expectedIdentity: VerifierExecutionCompositionIdentityV1;
+  timeAuthorityObservation: VerifierExecutionTimeAuthorityObservationV1;
+}
+
+export type VerifierExecutionCompositionReasonV1 =
+  | 'clock-authority-unavailable'
+  | 'invalid-input'
+  | 'policy-approval-unverified'
+  | 'capsule-statement-unverified'
+  | 'trust-policy-mismatch'
+  | 'identity-mismatch'
+  | 'scope-mismatch';
+
+export interface VerifierExecutionCompositionResultV1 {
+  schemaVersion: 1;
+  mode: 'verifier-execution-authority-composition-v1';
+  state: 'withheld' | 'freshness-unavailable';
+  reason: VerifierExecutionCompositionReasonV1;
+  authority: 'observation-only';
+  trustPolicyDigest: string | null;
+  approvalDigest: string | null;
+  statementDigest: string | null;
+  bindingDigest: string | null;
+  policyApprovalCryptographyVerified: boolean;
+  capsuleStatementCryptographyVerified: boolean;
+  identityBindingVerified: boolean;
+  scopeBindingVerified: boolean;
+  trustPolicyApprovalVerified: false;
+  clockAuthorityVerified: false;
+  freshnessState: 'unavailable';
+  freshnessObservedAt: null;
+  replayTransparencyVerified: false;
+  executionPermitted: false;
+  evidencePermitted: false;
+  mergePermitted: false;
+  activationPermitted: false;
+  deployPermitted: false;
+  blockers: typeof VERIFIER_EXECUTION_POLICY_APPROVAL_BLOCKERS_V1;
+}
 
 function sha256(domain: string, value: Uint8Array): string {
   return createHash('sha256').update(`${domain}\0`, 'utf8').update(value).digest('hex');
@@ -467,7 +561,10 @@ function trustedPublicKey(root: VerifierExecutionPolicyApprovalRootV1): KeyObjec
 }
 
 function withheld(
-  reason: Exclude<VerifierExecutionPolicyApprovalReasonV1, 'policy-approval-authenticated'>,
+  reason: Exclude<
+  VerifierExecutionPolicyApprovalReasonV1,
+  'policy-approval-cryptography-verified'
+  >,
   trustRootProvisioned = VERIFIER_EXECUTION_POLICY_APPROVAL_TRUST_POLICY.roots.length > 0,
 ): VerifierExecutionPolicyApprovalResultV1 {
   return {
@@ -485,9 +582,13 @@ function withheld(
     scope: null,
     capsuleStatementVerified: false,
     signatureVerified: false,
+    approvalCryptographyVerified: false,
     trustPolicyApprovalVerified: false,
     trustRootProvisioned,
     replayTransparencyVerified: false,
+    clockAuthorityVerified: false,
+    freshnessState: 'unavailable',
+    freshnessObservedAt: null,
     executionPermitted: false,
     evidencePermitted: false,
     mergePermitted: false,
@@ -625,22 +726,14 @@ function inspectUnsafe(input: unknown): VerifierExecutionPolicyApprovalResultV1 
     !root.allowedArchitectures.includes(approval.architecture) ||
     !root.allowedBackends.includes(approval.backend)) return withheld('scope-mismatch');
 
-  const nowMs = snapshot['nowMs'] as number;
   const issuedAt = Date.parse(approval.issuedAt);
   const expiresAt = Date.parse(approval.expiresAt);
   const rootNotBefore = Date.parse(root.notBefore);
   const rootNotAfter = Date.parse(root.notAfter);
-  if (issuedAt < rootNotBefore || expiresAt > rootNotAfter || nowMs >= rootNotAfter) {
+  if (issuedAt < rootNotBefore || expiresAt > rootNotAfter) {
     return withheld('approver-key-inactive');
   }
-  if (root.revokedAt !== null) {
-    const revokedAt = Date.parse(root.revokedAt);
-    if (nowMs >= revokedAt || issuedAt >= revokedAt || expiresAt > revokedAt) {
-      return withheld('approver-key-revoked');
-    }
-  }
-  if (issuedAt > nowMs + MAX_FUTURE_SKEW_MS) return withheld('approval-not-current');
-  if (expiresAt <= nowMs) return withheld('approval-expired');
+  if (root.revokedAt !== null) return withheld('approver-key-revoked');
   if (expiresAt <= issuedAt || expiresAt - issuedAt > MAX_LIFETIME_MS) {
     return withheld('approval-lifetime-invalid');
   }
@@ -655,8 +748,8 @@ function inspectUnsafe(input: unknown): VerifierExecutionPolicyApprovalResultV1 
   return {
     schemaVersion: 1,
     mode: 'verifier-execution-policy-approval-observation-v1',
-    state: 'authenticated',
-    reason: 'policy-approval-authenticated',
+    state: 'cryptographically-verified',
+    reason: 'policy-approval-cryptography-verified',
     authority: 'observation-only',
     approvalDigest: sha256(APPROVAL_DIGEST_DOMAIN, Buffer.concat([payload, signatureBytes])),
     approvedTrustPolicyDigest: approvedPolicyDigest,
@@ -674,8 +767,86 @@ function inspectUnsafe(input: unknown): VerifierExecutionPolicyApprovalResultV1 
     },
     capsuleStatementVerified: false,
     signatureVerified: true,
-    trustPolicyApprovalVerified: true,
+    approvalCryptographyVerified: true,
+    trustPolicyApprovalVerified: false,
     trustRootProvisioned: true,
+    replayTransparencyVerified: false,
+    clockAuthorityVerified: false,
+    freshnessState: 'unavailable',
+    freshnessObservedAt: null,
+    executionPermitted: false,
+    evidencePermitted: false,
+    mergePermitted: false,
+    activationPermitted: false,
+    deployPermitted: false,
+    blockers: VERIFIER_EXECUTION_POLICY_APPROVAL_BLOCKERS_V1,
+  };
+}
+
+/** Verify exact #202 policy-approval cryptography without establishing freshness or authority. */
+export function inspectVerifierExecutionPolicyApprovalV1(
+  input: unknown,
+): VerifierExecutionPolicyApprovalResultV1 {
+  try { return inspectUnsafe(input); } catch { return withheld('invalid-input'); }
+}
+
+function timeAuthorityObservationShape(
+  value: unknown,
+): value is VerifierExecutionTimeAuthorityObservationV1 {
+  return exactPlainRecord(value, TIME_OBSERVATION_KEYS) && value['schemaVersion'] === 1 &&
+    value['protocol'] === 'ashlr-verifier-execution-time-authority-observation-v1' &&
+    value['state'] === 'unavailable' && value['authority'] === 'none' &&
+    value['observedAt'] === null && value['receiptDigest'] === null &&
+    value['clockAuthorityVerified'] === false;
+}
+
+function compositionIdentityShape(value: unknown): value is VerifierExecutionCompositionIdentityV1 {
+  if (!exactPlainRecord(value, COMPOSITION_IDENTITY_KEYS)) return false;
+  for (const key of COMPOSITION_IDENTITY_KEYS) {
+    if (key.endsWith('Digest') && (typeof value[key] !== 'string' || !DIGEST.test(value[key]))) {
+      return false;
+    }
+  }
+  return PLATFORMS.includes(value['platform'] as VerifierExecutionPolicyPlatformV1) &&
+    ARCHITECTURES.includes(value['architecture'] as VerifierExecutionPolicyArchitectureV1) &&
+    BACKENDS.includes(value['backend'] as VerifierExecutionPolicyBackendV1);
+}
+
+function identityMatchesBindings(
+  identity: VerifierExecutionCompositionIdentityV1,
+  bindings: VerifierExecutionExpectedBindingsV1,
+): boolean {
+  return COMPOSITION_IDENTITY_KEYS.every((key) => identity[key] === bindings[key]);
+}
+
+function identityMatchesStatement(
+  identity: VerifierExecutionCompositionIdentityV1,
+  statement: InspectVerifierExecutionAuthorityV2Input['statement'],
+): boolean {
+  return COMPOSITION_IDENTITY_KEYS.every((key) => identity[key] === statement[key]);
+}
+
+function compositionWithheld(
+  reason: Exclude<VerifierExecutionCompositionReasonV1, 'clock-authority-unavailable'>,
+): VerifierExecutionCompositionResultV1 {
+  return {
+    schemaVersion: 1,
+    mode: 'verifier-execution-authority-composition-v1',
+    state: 'withheld',
+    reason,
+    authority: 'observation-only',
+    trustPolicyDigest: null,
+    approvalDigest: null,
+    statementDigest: null,
+    bindingDigest: null,
+    policyApprovalCryptographyVerified: false,
+    capsuleStatementCryptographyVerified: false,
+    identityBindingVerified: false,
+    scopeBindingVerified: false,
+    trustPolicyApprovalVerified: false,
+    clockAuthorityVerified: false,
+    freshnessState: 'unavailable',
+    freshnessObservedAt: null,
     replayTransparencyVerified: false,
     executionPermitted: false,
     evidencePermitted: false,
@@ -686,9 +857,110 @@ function inspectUnsafe(input: unknown): VerifierExecutionPolicyApprovalResultV1 
   };
 }
 
-/** Authenticate an exact #202 policy approval without granting operational authority. */
-export function inspectVerifierExecutionPolicyApprovalV1(
+function inspectCompositionUnsafe(input: unknown): VerifierExecutionCompositionResultV1 {
+  if (!plainDataGraph(input)) return compositionWithheld('invalid-input');
+  const snapshot = structuredClone(input);
+  if (!exactPlainRecord(snapshot, COMPOSITION_INPUT_KEYS) ||
+    !compositionIdentityShape(snapshot['expectedIdentity']) ||
+    !timeAuthorityObservationShape(snapshot['timeAuthorityObservation'])) {
+    return compositionWithheld('invalid-input');
+  }
+
+  const policyApprovalInput = snapshot['policyApprovalInput'];
+  const policyResult = inspectVerifierExecutionPolicyApprovalV1(policyApprovalInput);
+  if (policyResult.state !== 'cryptographically-verified') {
+    return compositionWithheld('policy-approval-unverified');
+  }
+
+  const executionAuthorityInput = snapshot['executionAuthorityInput'];
+  const statementResult = inspectVerifierExecutionAuthorityV2(executionAuthorityInput);
+  if (statementResult.state !== 'statement-verified') {
+    return compositionWithheld('capsule-statement-unverified');
+  }
+
+  const policyInput = policyApprovalInput as InspectVerifierExecutionPolicyApprovalV1Input;
+  const executionInput = executionAuthorityInput as InspectVerifierExecutionAuthorityV2Input;
+  const expectedIdentity = snapshot['expectedIdentity'];
+  if (policyResult.approvedTrustPolicyDigest !== statementResult.trustPolicyDigest ||
+    policyInput.expectedApprovedTrustPolicyDigest !== statementResult.trustPolicyDigest ||
+    executionInput.expectedPolicyDigest !== statementResult.trustPolicyDigest ||
+    executionInput.statement.trustPolicyDigest !== statementResult.trustPolicyDigest) {
+    return compositionWithheld('trust-policy-mismatch');
+  }
+
+  if (!identityMatchesBindings(expectedIdentity, executionInput.expectedBindings) ||
+    !identityMatchesStatement(expectedIdentity, executionInput.statement)) {
+    return compositionWithheld('identity-mismatch');
+  }
+
+  const scope = policyResult.scope;
+  if (scope.platform !== expectedIdentity.platform ||
+    scope.architecture !== expectedIdentity.architecture ||
+    scope.backend !== expectedIdentity.backend ||
+    statementResult.platform !== expectedIdentity.platform ||
+    statementResult.architecture !== expectedIdentity.architecture ||
+    statementResult.backend !== expectedIdentity.backend) {
+    return compositionWithheld('scope-mismatch');
+  }
+
+  const bindingDigest = sha256(
+    'ashlr:verifier-execution-authority-composition-binding:v1',
+    Buffer.from(JSON.stringify([
+      statementResult.trustPolicyDigest,
+      expectedIdentity.ticketDigest,
+      expectedIdentity.candidateDigest,
+      expectedIdentity.baseDigest,
+      expectedIdentity.commandPlanDigest,
+      expectedIdentity.capsuleTreeDigest,
+      expectedIdentity.executableDigest,
+      expectedIdentity.dependencyDigest,
+      expectedIdentity.brokerDigest,
+      expectedIdentity.isolationPolicyDigest,
+      scope.fleetDigest,
+      scope.repositoryDigest,
+      scope.environmentDigest,
+      expectedIdentity.platform,
+      expectedIdentity.architecture,
+      expectedIdentity.backend,
+      policyResult.approvalDigest,
+      statementResult.statementDigest,
+    ]), 'utf8'),
+  );
+
+  return {
+    schemaVersion: 1,
+    mode: 'verifier-execution-authority-composition-v1',
+    state: 'freshness-unavailable',
+    reason: 'clock-authority-unavailable',
+    authority: 'observation-only',
+    trustPolicyDigest: statementResult.trustPolicyDigest,
+    approvalDigest: policyResult.approvalDigest,
+    statementDigest: statementResult.statementDigest,
+    bindingDigest,
+    policyApprovalCryptographyVerified: true,
+    capsuleStatementCryptographyVerified: true,
+    identityBindingVerified: true,
+    scopeBindingVerified: true,
+    trustPolicyApprovalVerified: false,
+    clockAuthorityVerified: false,
+    freshnessState: 'unavailable',
+    freshnessObservedAt: null,
+    replayTransparencyVerified: false,
+    executionPermitted: false,
+    evidencePermitted: false,
+    mergePermitted: false,
+    activationPermitted: false,
+    deployPermitted: false,
+    blockers: VERIFIER_EXECUTION_POLICY_APPROVAL_BLOCKERS_V1,
+  };
+}
+
+/**
+ * Canonically compose policy and capsule cryptography. V1 deliberately stops
+ * at freshness-unavailable until an external clock authority is implemented.
+ */
+export function inspectVerifierExecutionCompositionV1(
   input: unknown,
-): VerifierExecutionPolicyApprovalResultV1 {
-  try { return inspectUnsafe(input); } catch { return withheld('invalid-input'); }
+): VerifierExecutionCompositionResultV1 {
+  try { return inspectCompositionUnsafe(input); } catch { return compositionWithheld('invalid-input'); }
 }
