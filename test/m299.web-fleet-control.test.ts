@@ -134,6 +134,37 @@ describe('daemon dashboard activation guidance', () => {
   });
 });
 
+describe('Fleet OS control capability rendering', () => {
+  it('fails closed to explicit read-only controls until mutation authority is present', () => {
+    const source = readFileSync(join(process.cwd(), 'src/core/web/public/app.js'), 'utf8');
+    const controlFactory = source.match(
+      /function fleetControlButton\(fleet, size = '', capabilitySnapshot = state\.snapshot\) \{[\s\S]*?\n\}/,
+    )?.[0];
+
+    expect(controlFactory).toBeDefined();
+    expect(controlFactory).toContain("capabilitySnapshot?.dispatchEnabled !== true");
+    expect(controlFactory).toContain("Fleet controls: read-only");
+    expect(controlFactory).toContain("if (!getToken())");
+    expect(controlFactory).toContain("Fleet controls: token required");
+    expect(controlFactory).toContain("fleetAuthorizedControlButton(fleet, size)");
+    expect(source).toMatch(/updateTokenIndicator\(\);\n {2}renderActiveView\(\);/);
+    expect(source).toContain(
+      "return state === 'unknown' ? null : fleetPauseResumeButton(state === 'active', size)",
+    );
+  });
+
+  it('routes every Fleet OS pause or clear surface through the capability gate', () => {
+    const source = readFileSync(join(process.cwd(), 'src/core/web/public/app.js'), 'utf8');
+    const directButtonCalls = source.match(/fleetPauseResumeButton\(/g) ?? [];
+
+    expect(directButtonCalls).toHaveLength(2);
+    expect(source).toContain("fleetControlButton(fleetSnapshot, 'btn-sm', snap)");
+    expect(source).toContain("snap ? fleetControlButton(fleetSnapshot, 'btn-sm', snap) : null");
+    expect(source).toContain("fleetControlButton(d.fleet, 'btn-sm')");
+    expect(source).toContain("fleetControlButton(f, 'btn-sm')");
+  });
+});
+
 describe('POST /api/fleet/pause|resume', () => {
   it('returns 404 when dispatch controls are disabled', async () => {
     const h = await startServer(makeCfg(), makeOpts({ allowDispatch: false }));

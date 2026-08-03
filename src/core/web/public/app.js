@@ -256,9 +256,28 @@ function daemonServiceActivity(service) {
   return 'inactive';
 }
 
-function fleetControlButton(fleet, size = '') {
+function fleetControlUnavailable(reason, size = '') {
+  return el('span', {
+    cls: `hint${size ? ` ${size}` : ''}`,
+    role: 'status',
+    title: reason,
+  }, reason);
+}
+
+function fleetAuthorizedControlButton(fleet, size = '') {
   const state = fleetKillState(fleet);
   return state === 'unknown' ? null : fleetPauseResumeButton(state === 'active', size);
+}
+
+function fleetControlButton(fleet, size = '', capabilitySnapshot = state.snapshot) {
+  if (capabilitySnapshot?.dispatchEnabled !== true) {
+    return fleetControlUnavailable('Fleet controls: read-only', size);
+  }
+  if (!getToken()) {
+    return fleetControlUnavailable('Fleet controls: token required', size);
+  }
+  return fleetAuthorizedControlButton(fleet, size)
+    ?? fleetControlUnavailable('Fleet controls: state unavailable', size);
 }
 
 // Show a brief toast notification. Uses #toast-region if present (see index.html).
@@ -323,6 +342,7 @@ function promptToken() {
   const trimmed = entered.trim();
   if (trimmed) { setToken(trimmed); } else { clearToken(); }
   updateTokenIndicator();
+  renderActiveView();
   return trimmed;
 }
 
@@ -3734,7 +3754,7 @@ function renderFleet() {
     section.appendChild(el('div', { cls: 'fleet-banner fleet-banner--paused' },
       el('strong', {}, 'Fleet paused'),
       el('span', {}, ' — the kill switch is engaged.'),
-      fleetPauseResumeButton(true, 'btn-sm')
+      fleetControlButton(f, 'btn-sm')
     ));
   }
 
@@ -4197,7 +4217,7 @@ function renderControl() {
     section.appendChild(el('div', { cls: 'ctrl-banner ctrl-banner--paused' },
       el('strong', {}, 'Fleet paused'),
       el('span', {}, ' — kill switch engaged.'),
-      fleetPauseResumeButton(true, 'btn-sm')
+      fleetControlButton(d.fleet, 'btn-sm')
     ));
   }
 
@@ -5776,7 +5796,7 @@ function fdRenderStatusPanel(snap) {
   } else if (isKilled) {
     body.appendChild(el('div', { cls: 'fd-kill-banner' },
       'Kill switch engaged — fleet paused.',
-      fleetPauseResumeButton(true, 'btn-sm')
+      fleetControlButton(fleetSnapshot, 'btn-sm', snap)
     ));
   }
 
@@ -6693,7 +6713,7 @@ function renderFleetDashboard() {
     ),
     el('div', { cls: 'fd-header-right' },
       el('span', { cls: 'fd-hidden-hint', id: 'fd-hidden-hint', style: 'display:none' }, ''),
-      snap ? fleetControlButton(fleetSnapshot, 'btn-sm') : null,
+      snap ? fleetControlButton(fleetSnapshot, 'btn-sm', snap) : null,
       settingsBtn
     )
   ));
