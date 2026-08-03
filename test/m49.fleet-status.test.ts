@@ -18,6 +18,7 @@ import { createHash } from 'node:crypto';
 
 import type { AshlrConfig, DaemonTick, EngineId, Goal, WorkItem } from '../src/core/types.js';
 import {
+  buildAutoMergeCanaryPromotionReadiness,
   buildFleetStatus,
   buildRepairHandoffRolloutStatus,
   repairHandoffProjectionTick,
@@ -776,10 +777,10 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const decisionEvidence = status.autonomousShipReadiness?.evidenceMatrix?.sources
       .find((source) => source.id === 'decisions');
     expect(decisionEvidence).toMatchObject({
-      label: 'Unsigned Decision Observations',
-      evidenceRole: 'learning',
-      eligibility: 'observational',
-      applicability: 'optional',
+      label: 'Unsigned Decision Merge Gate',
+      evidenceRole: 'merge-gate',
+      eligibility: 'cold-start',
+      applicability: 'required',
       actionSynthesis: 'observational-only',
     });
   });
@@ -7103,10 +7104,10 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       version: 1,
       state: 'cold-start',
       summary: {
-        eligible: 0,
+        eligible: 1,
         'cold-start': 1,
         withheld: 0,
-        observational: 5,
+        observational: 4,
         'not-applicable': 2,
       },
     });
@@ -7298,8 +7299,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       verdict: 'blocked',
       topBlocker: { id: 'merge-authority-incomplete' },
       evidenceMatrix: {
-        state: 'cold-start',
-        summary: { withheld: 0, observational: 5 },
+        state: 'degraded',
+        summary: { withheld: 1, observational: 4 },
       },
     });
     expect(status.autoMergeReadiness).toMatchObject({
@@ -7312,11 +7313,12 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
     expect(decisionEvidence).toMatchObject({
       category: 'evidence',
-      evidenceRole: 'learning',
-      eligibility: 'observational',
-      applicability: 'optional',
+      evidenceRole: 'merge-gate',
+      eligibility: 'withheld',
+      applicability: 'required',
       actionSynthesis: 'observational-only',
       status: 'degraded',
+      detail: expect.stringContaining('ashlr fleet evidence doctor decisions --json (read-only)'),
       evidenceQuality: { complete: false, invalidRows: 1 },
       sourceQuality: { badge: 'degraded-source' },
     });
@@ -7324,6 +7326,135 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(status.nextActions).not.toContainEqual(expect.objectContaining({ id: 'inspect-learning-evidence' }));
     expect(status.autonomousShipReadiness?.primaryAction).not.toMatchObject({ id: 'drain-ready-auto-merges' });
     expect(status.nextActions?.map((candidate) => candidate.id)).not.toContain('drain-ready-auto-merges');
+  });
+
+  it('preserves detached promotion evidence while a degraded unsigned decisions gate blocks merge authority', async () => {
+    const repo = join(tmpHome, 'combined-detached-learning-repo');
+    const observedAt = new Date().toISOString();
+    writeBacklogSnapshot(tmpHome, repo, [], observedAt);
+    writeRunningDaemon(tmpHome, [], observedAt);
+    const cfg = withFoundry({
+      autoMerge: { enabled: true, trustBasis: 'verification', maxRisk: 'low' },
+    });
+    createSignedProposal(cfg, {
+      title: 'Ready proposal blocked by degraded decision gate',
+      diff: docsDiff('combined detached and learning evidence'),
+      verifyResult: { passed: true, source: 'manual' },
+    });
+    const decisions = join(process.env.ASHLR_HOME!, 'decisions');
+    mkdirSync(decisions, { recursive: true, mode: 0o700 });
+    writeFileSync(join(decisions, `${observedAt.slice(0, 10)}.jsonl`), 'not-json\n', { mode: 0o600 });
+
+    const base = await buildFleetStatus(cfg);
+    const evidenceQuality = {
+      sourceState: 'healthy' as const,
+      sourcePresent: true,
+      complete: true,
+      stopReasons: [],
+      filesRead: 1,
+      bytesRead: 256,
+      rowsScanned: 1,
+      invalidRows: 0,
+      unreadableFiles: 0,
+    };
+    const combined: FleetStatus = {
+      ...base,
+      detachedPostMergeVerificationSource: evidenceQuality,
+      detachedPostMergeDenominatorSource: evidenceQuality,
+      detachedPostMergeWorkTicketSource: evidenceQuality,
+      detachedPostMergeVerificationReadiness: {
+        version: 1,
+        authority: 'observation-only',
+        policyEligible: false,
+        mergePermitted: false,
+        rollbackPermitted: false,
+        deployPermitted: false,
+        state: 'conclusive',
+        latestObservedAt: observedAt,
+        passRate: 1,
+        denominator: {
+          candidateSetDigest: 'a'.repeat(64),
+          eligibleCandidates: 1,
+          observedCandidates: 1,
+          conclusiveCandidates: 1,
+          unobservedCandidates: 0,
+          pass: 1,
+          fail: 0,
+          unknown: 0,
+          queuedCandidates: 1,
+        },
+        summary: {
+          cohorts: 1,
+          denominatorCompleteCohorts: 1,
+          conclusiveCompleteCohorts: 1,
+          expectedMembers: 1,
+          observedMembers: 1,
+          pass: 1,
+          fail: 0,
+          unknown: 0,
+        },
+      },
+    };
+    combined.autoMergeCanaryPromotionReadiness = buildAutoMergeCanaryPromotionReadiness(
+      combined,
+      cfg,
+      {
+        sourceState: 'missing',
+        sourcePresent: false,
+        complete: true,
+        status: 'inactive',
+        active: false,
+        state: null,
+      } as Parameters<typeof buildAutoMergeCanaryPromotionReadiness>[2],
+      Date.parse(observedAt),
+    );
+
+    expect(combined.detachedPostMergeVerificationReadiness).toMatchObject({
+      authority: 'observation-only',
+      policyEligible: false,
+      state: 'conclusive',
+      denominator: {
+        eligibleCandidates: 1,
+        observedCandidates: 1,
+        conclusiveCandidates: 1,
+        queuedCandidates: 1,
+        pass: 1,
+      },
+    });
+    expect(combined.detachedPostMergeWorkTicketSource).toMatchObject({
+      sourceState: 'healthy', complete: true, rowsScanned: 1,
+    });
+    expect(combined.autoMergeCanaryPromotionReadiness?.blockers.map((blocker) => blocker.code))
+      .not.toEqual(expect.arrayContaining([
+        'post-merge-source-unhealthy',
+        'post-merge-cohort-insufficient',
+        'post-merge-adverse-observed',
+      ]));
+    expect(combined.routingLearningAuthority).toMatchObject({
+      state: 'inactive', operationalSteering: false,
+    });
+    expect(combined.learningMetrics).toMatchObject({ state: 'withheld' });
+    expect(combined.autonomousShipReadiness).toMatchObject({
+      verdict: 'blocked',
+      topBlocker: { id: 'merge-authority-incomplete' },
+      evidenceMatrix: { state: 'degraded', summary: { withheld: 1 } },
+    });
+    expect(combined.autoMergeReadiness).toMatchObject({
+      preflightReady: 1,
+      authorityReady: 0,
+      authorityBlocked: 1,
+    });
+    expect(combined.autonomousShipReadiness?.evidenceMatrix?.sources.find(
+      (source) => source.id === 'decisions',
+    )).toMatchObject({
+      evidenceRole: 'merge-gate',
+      applicability: 'required',
+      eligibility: 'withheld',
+      actionSynthesis: 'observational-only',
+      status: 'degraded',
+    });
+    expect(combined.nextActions?.map((action) => action.id)).not.toContain('inspect-learning-evidence');
+    expect(combined.nextActions?.map((action) => action.id)).not.toContain('drain-ready-auto-merges');
   });
 
   it('does not synthesize actions from observational decision evidence over backlog work', async () => {

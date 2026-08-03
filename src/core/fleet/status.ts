@@ -514,7 +514,8 @@ export type FleetReadinessSourceQualityBadge =
 export type FleetReadinessSourceCategory = 'operations' | 'evidence';
 export type FleetReadinessEvidenceEligibility =
   | 'eligible' | 'cold-start' | 'withheld' | 'observational' | 'not-applicable';
-export type FleetReadinessEvidenceRole = 'merge-authority' | 'learning' | 'analytics' | 'forensics';
+export type FleetReadinessEvidenceRole =
+  | 'merge-authority' | 'merge-gate' | 'learning' | 'analytics' | 'forensics';
 export type FleetReadinessEvidenceApplicability = 'required' | 'optional' | 'disabled';
 
 export interface FleetReadinessEvidenceQuality {
@@ -5255,7 +5256,8 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
   if (phantomAuditAction) add(phantomAuditAction);
 
   const unhealthyEvidence = learningEvidenceReadinessSources(status, status.generatedAt)
-    .filter((source) => source.eligibility !== 'observational' &&
+    .filter((source) => source.actionSynthesis === 'eligible' &&
+      source.eligibility !== 'observational' &&
       (source.eligibility === 'withheld' || source.status === 'degraded'));
   if (unhealthyEvidence.length > 0) {
     const labels = unhealthyEvidence.slice(0, 3).map((source) => source.label).join(', ');
@@ -5899,7 +5901,8 @@ function evidenceReadinessSource(input: {
     };
   }
   const quality = input.quality;
-  const observational = actionSynthesis === 'observational-only';
+  const gateRole = input.role === 'merge-authority' || input.role === 'merge-gate';
+  const observational = !gateRole && actionSynthesis === 'observational-only';
   const degraded = !quality || quality.sourceState === 'degraded' || !quality.complete;
   const missing = quality?.sourceState === 'missing';
   const eligibility: FleetReadinessEvidenceEligibility = observational
@@ -5917,13 +5920,17 @@ function evidenceReadinessSource(input: {
       : `${input.role} evidence ${eligibility}; ${quality.filesRead} file(s), ${quality.rowsScanned} row(s), ` +
         `${quality.invalidRows} invalid, ${quality.unreadableFiles} unreadable${stop}`
     : `${input.role} evidence diagnostics are unavailable; consumers fail closed`;
+  const sourceDetail = input.role === 'merge-gate' && degraded
+    ? `${detail}; recovery: ashlr fleet evidence doctor ${input.id} --json (read-only); ` +
+      'unsigned evidence cannot grant merge authority'
+    : detail;
   const source = readinessSource(
     input.id,
     input.label,
     status,
     input.generatedAt,
     READINESS_STATUS_STALE_MS,
-    detail,
+    sourceDetail,
     {
       empty: missing || (quality?.rowsScanned ?? 0) === 0,
       sourcePresent: quality?.sourcePresent ?? false,
@@ -5969,8 +5976,8 @@ function learningEvidenceReadinessSources(
       quality: autonomyEvidenceQuality, generatedAt, applicability: 'required',
     }),
     evidenceReadinessSource({
-      id: 'decisions', label: 'Unsigned Decision Observations', role: 'learning',
-      quality: status.decisionsSource, generatedAt, applicability: 'optional',
+      id: 'decisions', label: 'Unsigned Decision Merge Gate', role: 'merge-gate',
+      quality: status.decisionsSource, generatedAt, applicability: 'required',
       actionSynthesis: 'observational-only',
     }),
     evidenceReadinessSource({
@@ -6631,8 +6638,8 @@ function buildAutonomousShipReadiness(
   const sourceQualitySummary = readinessSourceQualitySummary(sources);
   const evidenceSources = learningEvidenceReadinessSources(status, inputs.generatedAt);
   const evidenceSummary = readinessEvidenceSummary(evidenceSources);
-  const authoritySources = evidenceSources.filter((source) => source.eligibility !== 'observational');
-  const evidenceState = evidenceSummary.withheld > 0 || authoritySources.some((source) => source.status === 'degraded')
+  const requiredSources = evidenceSources.filter((source) => source.applicability === 'required');
+  const evidenceState = evidenceSummary.withheld > 0 || requiredSources.some((source) => source.status === 'degraded')
     ? 'degraded'
     : evidenceSummary['cold-start'] > 0
       ? 'cold-start'
