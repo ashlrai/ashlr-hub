@@ -1044,9 +1044,9 @@ function acquireLocalStoreLockInternal(
   path: string,
   waitMs = 2_000,
   options: LocalStoreLockAcquireOptions = {},
-  terminal: { state: 'contended' | 'unavailable' },
+  terminal: { state: 'contended' | 'unavailable' } | null,
 ): LocalStoreLock | null {
-  terminal.state = 'unavailable';
+  if (terminal) terminal.state = 'unavailable';
   const start = currentStartIdentity();
   if (!start) return null;
   const deadline = performance.now() + waitMs;
@@ -1063,6 +1063,7 @@ function acquireLocalStoreLockInternal(
   let postDeadReclaimInstallAvailable = false;
   let postDeadReclaimInstallConsumed = false;
   const terminalFailure = (): null => {
+    if (!terminal) return null;
     const terminalDirectory = directory ??
       assureLockDirectory(dir, anchor, options.exactPrivateStorage === true);
     terminal.state = terminalDirectory && hasVerifiedLiveOwner(path, terminalDirectory)
@@ -1231,8 +1232,7 @@ export function acquireLocalStoreLock(
   waitMs = 2_000,
   options: LocalStoreLockAcquireOptions = {},
 ): LocalStoreLock | null {
-  const result = acquireLocalStoreLockWithOutcome(path, waitMs, options);
-  return result.state === 'acquired' ? result.lock : null;
+  return acquireLocalStoreLockInternal(path, waitMs, options, null);
 }
 
 export function ownsLocalStoreLock(lock: LocalStoreLock | null | undefined): boolean {
