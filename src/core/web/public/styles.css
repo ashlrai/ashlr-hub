@@ -127,6 +127,7 @@ body {
   font-size: 1rem;
   min-height: 100vh;
   overflow-x: hidden;
+  overflow-y: auto;
 }
 
 /* ---------------------------------------------------------------------------
@@ -3764,7 +3765,7 @@ a:hover {
    renderShell() owns the runtime DOM and uses this top navigation surface.
    Keep the brand and authority controls fixed while the view rail scrolls.
    --------------------------------------------------------------------------- */
-body {
+body.live-shell {
   display: flex;
   flex-direction: column;
   height: 100dvh;
@@ -3890,7 +3891,7 @@ body {
   white-space: nowrap;
 }
 
-body > .main {
+body.live-shell > .main {
   flex: 1 1 auto;
   width: 100%;
   min-height: 0;

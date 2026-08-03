@@ -26,6 +26,16 @@ describe('M480 mobile navigation', () => {
   });
 
   it('gives the rendered main region the remaining viewport without sidebar offset', () => {
-    expect(styles).toMatch(/body > \.main\s*\{[\s\S]*?flex:\s*1 1 auto;[\s\S]*?min-height:\s*0;[\s\S]*?margin-left:\s*0;[\s\S]*?overflow:\s*auto;/);
+    expect(styles).toMatch(/body\.live-shell > \.main\s*\{[\s\S]*?flex:\s*1 1 auto;[\s\S]*?min-height:\s*0;[\s\S]*?margin-left:\s*0;[\s\S]*?overflow:\s*auto;/);
+  });
+
+  it('applies viewport locking only after the runtime shell initializes', () => {
+    expect(app).toMatch(
+      /function renderShell\(\) \{\s*document\.body\.classList\.add\('live-shell'\);\s*document\.body\.innerHTML = '';/,
+    );
+    expect(styles).toMatch(/body\.live-shell\s*\{[^}]*overflow:\s*hidden;/);
+    expect(styles).not.toMatch(/\nbody\s*\{[^}]*overflow:\s*hidden;/);
+    expect(styles).toMatch(/\nbody\s*\{[^}]*overflow-y:\s*auto;/);
+    expect(styles).not.toContain('\nbody > .main {');
   });
 });

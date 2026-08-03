@@ -574,6 +574,7 @@ function setActiveNav(view) {
 // ---------------------------------------------------------------------------
 
 function renderShell() {
+  document.body.classList.add('live-shell');
   document.body.innerHTML = '';
 
   // Nav icons per view (inline SVG path data)
