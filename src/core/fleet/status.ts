@@ -156,6 +156,12 @@ import {
   type DetachedPostMergeVerificationSummary,
 } from './detached-post-merge-verification.js';
 import {
+  projectDetachedPostMergeDenominator,
+  readCurrentDetachedPostMergeDenominator,
+  readDetachedPostMergeWorkTickets,
+  type DetachedPostMergeWorkTicketReadResult,
+} from './detached-post-merge-orchestrator.js';
+import {
   readFleetCutoffCheckpointStatus,
   type FleetCutoffCheckpointStatus,
 } from './cutoff-observation-status.js';
@@ -532,6 +538,17 @@ export interface FleetDetachedPostMergeVerificationReadiness {
   state: 'missing' | 'degraded' | 'awaiting-observations' | 'incomplete' | 'conclusive';
   latestObservedAt: string | null;
   passRate: number | null;
+  denominator: {
+    candidateSetDigest: string | null;
+    eligibleCandidates: number;
+    observedCandidates: number;
+    conclusiveCandidates: number;
+    unobservedCandidates: number;
+    pass: number;
+    fail: number;
+    unknown: number;
+    queuedCandidates: number;
+  };
   summary: DetachedPostMergeVerificationSummary;
 }
 
@@ -1352,12 +1369,16 @@ export function buildAutoMergeCanaryPromotionReadiness(
   const registryDegraded = status.queue.repos?.registry?.state === 'degraded';
   const detached = status.detachedPostMergeVerificationReadiness;
   const detachedSource = status.detachedPostMergeVerificationSource;
+  const detachedDenominatorSource = status.detachedPostMergeDenominatorSource;
   const detachedComplete = detachedSource?.sourceState === 'healthy' &&
     detachedSource.complete === true &&
+    detachedDenominatorSource?.sourceState === 'healthy' &&
+    detachedDenominatorSource.complete === true &&
     detached !== undefined &&
-    detached.summary.cohorts > 0 &&
-    detached.summary.denominatorCompleteCohorts === detached.summary.cohorts &&
-    detached.summary.conclusiveCompleteCohorts === detached.summary.cohorts;
+    detached.state === 'conclusive' &&
+    detached.denominator.eligibleCandidates > 0 &&
+    detached.denominator.observedCandidates === detached.denominator.eligibleCandidates &&
+    detached.denominator.conclusiveCandidates === detached.denominator.eligibleCandidates;
   const autoMerge = cfg.foundry?.autoMerge;
   const autoMergeRecord = autoMerge as Record<string, unknown> | undefined;
   const configuredScopeCap = (key: 'maxAutomergeFiles' | 'maxAutomergeLines'): number | null | undefined => {
@@ -1426,8 +1447,9 @@ export function buildAutoMergeCanaryPromotionReadiness(
       sourceState: detachedSource?.sourceState ?? 'missing',
       complete: detachedComplete,
       denominatorComplete: detachedComplete,
-      releasedCohorts: detached?.summary.conclusiveCompleteCohorts ?? 0,
-      adverseObservations: (detached?.summary.fail ?? 0) + (detached?.summary.unknown ?? 0),
+      releasedCohorts: detached?.denominator.conclusiveCandidates ?? 0,
+      adverseObservations: (detached?.denominator.fail ?? 0) +
+        (detached?.denominator.unknown ?? 0),
       latestCompletedAt: detached?.latestObservedAt ?? null,
     },
     policy: {
@@ -1629,6 +1651,10 @@ export interface FleetStatus {
   };
   /** Authenticated metadata from detached post-merge verification runners. */
   detachedPostMergeVerificationSource?: FleetReadinessEvidenceQuality;
+  /** Authenticated current candidate denominator for detached verification. */
+  detachedPostMergeDenominatorSource?: FleetReadinessEvidenceQuality;
+  /** Immutable data-only work tickets. Queue state grants no execution or readiness authority. */
+  detachedPostMergeWorkTicketSource?: FleetReadinessEvidenceQuality;
   /** Read-only detached cohort quality. It is excluded from policy authority. */
   detachedPostMergeVerificationReadiness?: FleetDetachedPostMergeVerificationReadiness;
   /** Authenticated checkpoint availability. Excluded from readiness and policy inputs. */
@@ -3315,8 +3341,35 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       invalidRows: 0, unreadableFiles: 1,
     };
   }
+  let detachedTickets: DetachedPostMergeWorkTicketReadResult | null = null;
+  try {
+    detachedTickets = readDetachedPostMergeWorkTickets({ requireComplete: true });
+    status.detachedPostMergeWorkTicketSource = {
+      sourceState: detachedTickets.sourceState,
+      sourcePresent: detachedTickets.sourcePresent,
+      complete: detachedTickets.complete,
+      stopReasons: detachedTickets.stopReasons,
+      filesRead: detachedTickets.filesRead,
+      bytesRead: detachedTickets.bytesRead,
+      rowsScanned: detachedTickets.tickets.length,
+      invalidRows: detachedTickets.invalidFiles,
+      unreadableFiles: detachedTickets.stopReasons.includes('io-error') ? 1 : 0,
+    };
+  } catch {
+    status.detachedPostMergeWorkTicketSource = {
+      sourceState: 'degraded', sourcePresent: true, complete: false,
+      stopReasons: ['io-error'], filesRead: 0, bytesRead: 0, rowsScanned: 0,
+      invalidRows: 0, unreadableFiles: 1,
+    };
+  }
   try {
     const detached = readDetachedPostMergeVerificationCohorts({ requireComplete: true });
+    const denominator = readCurrentDetachedPostMergeDenominator();
+    const denominatorProjection = projectDetachedPostMergeDenominator(
+      denominator,
+      detached,
+      detachedTickets,
+    );
     status.detachedPostMergeVerificationSource = {
       sourceState: detached.sourceState,
       sourcePresent: detached.sourcePresent,
@@ -3328,16 +3381,30 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       invalidRows: detached.invalidFiles,
       unreadableFiles: detached.stopReasons.includes('io-error') ? 1 : 0,
     };
-    const conclusiveMembers = detached.summary.pass + detached.summary.fail;
+    status.detachedPostMergeDenominatorSource = {
+      sourceState: denominator.sourceState,
+      sourcePresent: denominator.sourcePresent,
+      complete: denominator.complete,
+      stopReasons: denominator.stopReasons,
+      filesRead: denominator.filesRead,
+      bytesRead: denominator.bytesRead,
+      rowsScanned: denominator.receipt ? 1 : 0,
+      invalidRows: denominator.invalidFiles,
+      unreadableFiles: denominator.stopReasons.some((reason) =>
+        ['io-error', 'unsafe-file', 'unsafe-path'].includes(reason)) ? 1 : 0,
+    };
     const state: FleetDetachedPostMergeVerificationReadiness['state'] =
-      detached.sourceState === 'missing'
+      denominator.sourceState === 'missing'
         ? 'missing'
-        : detached.sourceState === 'degraded' || !detached.complete
+        : denominator.sourceState === 'degraded' || !denominator.complete ||
+            detached.sourceState === 'degraded' || !detached.complete
           ? 'degraded'
-          : detached.summary.cohorts === 0
+          : denominatorProjection.eligibleCandidates === 0
+            ? 'conclusive'
+            : denominatorProjection.observedCandidates === 0
             ? 'awaiting-observations'
-            : detached.summary.denominatorCompleteCohorts !== detached.summary.cohorts ||
-                detached.summary.conclusiveCompleteCohorts !== detached.summary.cohorts
+            : denominatorProjection.observedCandidates !== denominatorProjection.eligibleCandidates ||
+                denominatorProjection.conclusiveCandidates !== denominatorProjection.eligibleCandidates
               ? 'incomplete'
               : 'conclusive';
     status.detachedPostMergeVerificationReadiness = {
@@ -3348,12 +3415,28 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       rollbackPermitted: false,
       deployPermitted: false,
       state,
-      latestObservedAt: detached.cohorts.map((cohort) => cohort.observedAt).sort().at(-1) ?? null,
-      passRate: conclusiveMembers > 0 ? detached.summary.pass / conclusiveMembers : null,
+      latestObservedAt: denominatorProjection.latestObservedAt,
+      passRate: denominatorProjection.passRate,
+      denominator: {
+        candidateSetDigest: denominator.receipt?.candidateSetDigest ?? null,
+        eligibleCandidates: denominatorProjection.eligibleCandidates,
+        observedCandidates: denominatorProjection.observedCandidates,
+        conclusiveCandidates: denominatorProjection.conclusiveCandidates,
+        unobservedCandidates: denominatorProjection.unobservedCandidates,
+        pass: denominatorProjection.pass,
+        fail: denominatorProjection.fail,
+        unknown: denominatorProjection.unknown,
+        queuedCandidates: denominatorProjection.queuedCandidates,
+      },
       summary: detached.summary,
     };
   } catch {
     status.detachedPostMergeVerificationSource = {
+      sourceState: 'degraded', sourcePresent: true, complete: false,
+      stopReasons: ['io-error'], filesRead: 0, bytesRead: 0, rowsScanned: 0,
+      invalidRows: 0, unreadableFiles: 1,
+    };
+    status.detachedPostMergeDenominatorSource = {
       sourceState: 'degraded', sourcePresent: true, complete: false,
       stopReasons: ['io-error'], filesRead: 0, bytesRead: 0, rowsScanned: 0,
       invalidRows: 0, unreadableFiles: 1,
@@ -3368,6 +3451,17 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       state: 'degraded',
       latestObservedAt: null,
       passRate: null,
+      denominator: {
+        candidateSetDigest: null,
+        eligibleCandidates: 0,
+        observedCandidates: 0,
+        conclusiveCandidates: 0,
+        unobservedCandidates: 0,
+        pass: 0,
+        fail: 0,
+        unknown: 0,
+        queuedCandidates: 0,
+      },
       summary: {
         cohorts: 0,
         denominatorCompleteCohorts: 0,
