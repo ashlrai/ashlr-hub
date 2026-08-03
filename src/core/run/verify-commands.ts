@@ -39,7 +39,7 @@ import { buildToolPath } from './tool-path.js';
 const DEFAULT_TIMEOUT_MS = 120_000;
 
 /** Hard ceiling on the per-command timeout (ms). */
-const MAX_TIMEOUT_MS = 600_000;
+const MAX_TIMEOUT_MS = 900_000;
 
 /** Extra grace for the wrapper itself after it asks the child tree to exit. */
 const WRAPPER_TIMEOUT_GRACE_MS = 10_000;
@@ -136,6 +136,8 @@ export interface VerifySubprocessResult {
 export interface RunVerifyCommandAsyncOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
+  /** Hermetic test seam; production callers use runVerifySubprocessAsync. */
+  _runSubprocess?: typeof runVerifySubprocessAsync;
 }
 
 // ---------------------------------------------------------------------------
@@ -370,7 +372,7 @@ export function spawnOptionsFor(
 /**
  * Run ONE verification command in `workspaceRoot` (cwd). Arg array, shell only
  * on Windows (see spawnOptionsFor), with a hard timeout (default 120s, capped at
- * 600s). Captures stdout+stderr,
+ * 900s). Captures stdout+stderr,
  * scrubs + caps via renderToolText, and audits the outcome.
  *
  * Never throws — a spawn failure or timeout resolves to { ok:false } with the
@@ -972,7 +974,8 @@ export async function runVerifyCommandAsync(
           Buffer.from(JSON.stringify(vc.cmd), 'utf8').toString('base64'),
         ]
       : vc.cmd;
-    const subprocess = await runVerifySubprocessAsync(argv, {
+    const runSubprocess = opts?._runSubprocess ?? runVerifySubprocessAsync;
+    const subprocess = await runSubprocess(argv, {
       cwd: commandRoot,
       env: useWindowsWrapper
         ? {
