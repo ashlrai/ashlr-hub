@@ -27,7 +27,7 @@ function scrubPublicString(input: string, homes: string[]): string {
  */
 export function sanitizePublicJson(value: unknown): unknown {
   const homes = homeCandidates();
-  const seen = new WeakSet<object>();
+  const active = new WeakSet<object>();
 
   function visit(current: unknown): unknown {
     if (typeof current === 'string') return scrubPublicString(current, homes);
@@ -42,15 +42,19 @@ export function sanitizePublicJson(value: unknown): unknown {
     }
     if (current instanceof Date) return current.toISOString();
     if (typeof current !== 'object') return undefined;
-    if (seen.has(current)) return '[Circular]';
-    seen.add(current);
-    if (Array.isArray(current)) return current.map((item) => visit(item));
+    if (active.has(current)) return '[Circular]';
+    active.add(current);
+    try {
+      if (Array.isArray(current)) return current.map((item) => visit(item));
 
-    const out: Record<string, unknown> = {};
-    for (const [key, nested] of Object.entries(current as Record<string, unknown>)) {
-      out[scrubPublicString(key, homes)] = visit(nested);
+      const out: Record<string, unknown> = {};
+      for (const [key, nested] of Object.entries(current as Record<string, unknown>)) {
+        out[scrubPublicString(key, homes)] = visit(nested);
+      }
+      return out;
+    } finally {
+      active.delete(current);
     }
-    return out;
   }
 
   return visit(value);
