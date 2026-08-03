@@ -761,7 +761,7 @@ export function prepareHostMergeRevocation(
       input.operationId,
       request,
       null,
-      new Date(effectiveNow).toISOString(),
+      now.toISOString(),
     );
     const record = buildState(key, authorityId, identity, [receipt]);
     if (!ownsLocalStoreLock(lock)) return refusal('degraded', authorityId, 'state-lock-lost');
@@ -805,7 +805,7 @@ export function transitionHostMergeRevocation(
     const record = current.record;
     const latest = record.receipts.at(-1)!;
     const effectiveNow = now.getTime() + Math.max(0, performance.now() - startedAt);
-    if (effectiveNow < Date.parse(latest.recordedAt)) {
+    if (now.getTime() < Date.parse(latest.recordedAt)) {
       return refusal('refused', authorityId, 'clock-rollback');
     }
     // Authority-advancing retries must not turn an old idempotency receipt into
@@ -849,7 +849,7 @@ export function transitionHostMergeRevocation(
       input.operationId,
       request,
       latest.receiptDigest,
-      new Date(effectiveNow).toISOString(),
+      now.toISOString(),
     );
     const next = buildState(key, authorityId, identity, [...record.receipts, receipt]);
     if (!ownsLocalStoreLock(lock)) return refusal('degraded', authorityId, 'state-lock-lost');
