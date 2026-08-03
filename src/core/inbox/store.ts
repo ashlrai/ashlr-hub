@@ -57,6 +57,7 @@ import { isDestructiveDiff } from '../run/diff-safety.js';
 import { causalMetadata, causalMetadataFromProposal } from '../learning/causal.js';
 import { canonicalizeProposalDiff, scrubSecrets } from '../util/scrub.js';
 import { fsyncDirectory } from '../util/durability.js';
+import { assurePrivateStoragePath } from '../util/private-storage.js';
 import { canonicalFilesystemPathIdentity } from '../sandbox/policy.js';
 import { proposalCompletesGoalMilestone } from '../goals/completion.js';
 import { isPostMergeCreditReleaseLabel } from '../fleet/post-merge-credit.js';
@@ -121,6 +122,38 @@ const REALIZED_MERGE_FANOUT_VERSION = 3;
  */
 export function inboxDir(): string {
   return join(homedir(), '.ashlr', 'inbox');
+}
+
+/** Ensure a present private inbox so missing storage is never read as empty authority. */
+export function ensureProposalInbox(): boolean {
+  try {
+    const dir = inboxDir();
+    const parent = dirname(dir);
+    const parentStat = lstatSync(parent);
+    if (!safeProposalDirectory(parentStat) || !ownedByCurrentUser(parentStat)) return false;
+    let created = false;
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { mode: 0o700 });
+      created = true;
+    }
+    const before = lstatSync(dir);
+    if (!safeProposalDirectory(before) || !ownedByCurrentUser(before)) return false;
+    if (process.platform !== 'win32') chmodSync(dir, 0o700);
+    const assurance = assurePrivateStoragePath(
+      dir,
+      'directory',
+      created ? 'secure-created' : 'inspect-existing',
+      { anchorPath: homedir() },
+    );
+    if (!assurance.ok) return false;
+    const after = lstatSync(dir);
+    if (!safeProposalDirectory(after) || !ownedByCurrentUser(after) ||
+      !sameProposalSource(before, after)) return false;
+    if (created) fsyncDirectory(parent);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function canonicalProposalRepoIdentity(value: unknown): string | null {
