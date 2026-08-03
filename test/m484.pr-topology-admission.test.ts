@@ -1,5 +1,5 @@
 /**
- * M482 - read-only PR topology admission V1.
+ * M484 - read-only PR topology admission V1.
  *
  * Fixtures are hermetic. Tests never contact or mutate GitHub.
  */
@@ -99,7 +99,7 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-describe('M482 topology graph admission', () => {
+describe('M484 topology graph admission', () => {
   it('maps a linear stack to exactly one open parent with exact SHAs', () => {
     const root = pullRequest({ number: 1, headRef: 'feature/root', baseRef: 'master' });
     const child = pullRequest({
@@ -112,6 +112,10 @@ describe('M482 topology graph admission', () => {
     const report = evaluateTopology(snapshot({ candidate: 2, pulls: [root, child] }));
 
     expect(report.admission).toBe('admitted');
+    expect(report.complete).toBe(true);
+    expect(report.diagnostics).not.toContainEqual(
+      expect.objectContaining({ code: 'dependent-coverage-incomplete' }),
+    );
     expect(report.relations).toContainEqual({
       pullRequest: 2,
       kind: 'stacked',
@@ -193,9 +197,18 @@ describe('M482 topology graph admission', () => {
     const root = pullRequest({ number: 10, headRef: 'convergence-root', baseRef: 'master' });
     const candidate = pullRequest({ number: 20, headRef: 'convergence-final', baseRef: 'master' });
     const ancestry = comparison(root.head.sha, candidate.head.sha);
+    const reverse = {
+      ...comparison(candidate.head.sha, root.head.sha, 'diverged'),
+      mergeBaseSha: oid(998),
+    };
 
     const missing = evaluateTopology(
-      snapshot({ candidate: 20, pulls: [root, candidate], comparisons: [ancestry] }),
+      snapshot({
+        candidate: 20,
+        pulls: [root, candidate],
+        comparisons: [ancestry, reverse],
+        dependentCoverageComplete: true,
+      }),
     );
     expect(missing.admission).toBe('blocked');
     expect(missing.containedRoots).toEqual([
@@ -210,7 +223,12 @@ describe('M482 topology graph admission', () => {
 
     candidate.body = 'Convergence release\n\nSupersedes: #10\n';
     const declared = evaluateTopology(
-      snapshot({ candidate: 20, pulls: [root, candidate], comparisons: [ancestry] }),
+      snapshot({
+        candidate: 20,
+        pulls: [root, candidate],
+        comparisons: [ancestry, reverse],
+        dependentCoverageComplete: true,
+      }),
     );
     expect(declared.admission).toBe('admitted');
     expect(declared.supersedes).toMatchObject({ declared: [10], required: [10], missing: [] });
@@ -226,14 +244,90 @@ describe('M482 topology graph admission', () => {
       ...comparison(independent.head.sha, candidate.head.sha, 'diverged'),
       mergeBaseSha: oid(999),
     };
+    const reverse = {
+      ...comparison(candidate.head.sha, independent.head.sha, 'diverged'),
+      mergeBaseSha: oid(998),
+    };
 
     const report = evaluateTopology(
-      snapshot({ candidate: 20, pulls: [independent, candidate], comparisons: [notContained] }),
+      snapshot({
+        candidate: 20,
+        pulls: [independent, candidate],
+        comparisons: [notContained, reverse],
+        dependentCoverageComplete: true,
+      }),
     );
 
     expect(report.admission).toBe('admitted');
     expect(report.containedRoots).toEqual([]);
     expect(report.supersedes.required).toEqual([]);
+  });
+
+  it('fails closed when a two-root candidate lacks complete reverse coverage', () => {
+    const root = pullRequest({ number: 10, headRef: 'independent', baseRef: 'master' });
+    const candidate = pullRequest({ number: 20, headRef: 'candidate', baseRef: 'master' });
+    const forward = {
+      ...comparison(root.head.sha, candidate.head.sha, 'diverged'),
+      mergeBaseSha: oid(999),
+    };
+
+    const report = evaluateTopology(snapshot({
+      candidate: 20,
+      pulls: [root, candidate],
+      comparisons: [forward],
+      dependentCoverageComplete: false,
+    }));
+
+    expect(report.admission).toBe('blocked');
+    expect(report.complete).toBe(false);
+    expect(report.diagnostics).toContainEqual({
+      severity: 'error',
+      code: 'dependent-coverage-incomplete',
+      pullRequest: 20,
+      message: 'Reverse dependent coverage for default-root pull request #20 is incomplete.',
+    });
+  });
+
+  it('does not require reverse coverage when a candidate is the only default root', () => {
+    const candidate = pullRequest({ number: 20, headRef: 'only-root', baseRef: 'master' });
+
+    const report = evaluateTopology(snapshot({
+      candidate: 20,
+      pulls: [candidate],
+      dependentCoverageComplete: false,
+    }));
+
+    expect(report.admission).toBe('admitted');
+    expect(report.complete).toBe(true);
+    expect(report.diagnostics).not.toContainEqual(
+      expect.objectContaining({ code: 'dependent-coverage-incomplete' }),
+    );
+  });
+
+  it('fails closed when complete coverage is declared but a reverse comparison is absent', () => {
+    const root = pullRequest({ number: 10, headRef: 'independent', baseRef: 'master' });
+    const candidate = pullRequest({ number: 20, headRef: 'candidate', baseRef: 'master' });
+    const forward = {
+      ...comparison(root.head.sha, candidate.head.sha, 'diverged'),
+      mergeBaseSha: oid(999),
+    };
+
+    const report = evaluateTopology(snapshot({
+      candidate: 20,
+      pulls: [root, candidate],
+      comparisons: [forward],
+      dependentCoverageComplete: true,
+    }));
+
+    expect(report.admission).toBe('blocked');
+    expect(report.complete).toBe(false);
+    expect(report.diagnostics).toContainEqual(expect.objectContaining({
+      code: 'dependent-comparison-incomplete',
+      pullRequest: 10,
+    }));
+    expect(report.diagnostics).not.toContainEqual(
+      expect.objectContaining({ code: 'dependent-coverage-incomplete' }),
+    );
   });
 
   it('fails closed for incomplete pagination or absent comparison evidence', () => {
@@ -479,6 +573,9 @@ describe('M482 topology graph admission', () => {
       pullRequest: 2,
     }));
     expect(report.diagnostics).not.toContainEqual(expect.objectContaining({ code: 'candidate-missing' }));
+    expect(report.diagnostics).not.toContainEqual(
+      expect.objectContaining({ code: 'dependent-coverage-incomplete' }),
+    );
   });
 
   it('rejects API failure without attempting any mutation', async () => {
@@ -532,7 +629,7 @@ describe('M482 topology graph admission', () => {
   });
 });
 
-describe('M482 shadow workflow policy', () => {
+describe('M484 shadow workflow policy', () => {
   const workflowText = readFileSync(workflowPath, 'utf8');
   const workflow = parse(workflowText) as Record<string, any>;
   const job = workflow.jobs.topology as Record<string, any>;

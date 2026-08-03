@@ -427,6 +427,16 @@ export function evaluateTopology(raw) {
 
   const dependentConvergences = [];
   const candidateIsDefaultRoot = candidate && roots.some((root) => root.number === candidate.number);
+  const requiresDependentCoverage = candidateIsDefaultRoot && roots.length > 1;
+  if (requiresDependentCoverage && !snapshot.dependentCoverageComplete) {
+    complete = false;
+    diagnostics.push({
+      severity: 'error',
+      code: 'dependent-coverage-incomplete',
+      pullRequest: candidate.number,
+      message: `Reverse dependent coverage for default-root pull request #${candidate.number} is incomplete.`,
+    });
+  }
   if (candidateIsDefaultRoot && snapshot.dependentCoverageComplete) {
     for (const target of roots) {
       if (target.number === candidate.number) continue;
