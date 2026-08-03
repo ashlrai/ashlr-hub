@@ -38,6 +38,13 @@ export type ImmutablePrivateRecordWriteDisposition =
   | 'invalid'
   | 'failed';
 
+export type ImmutablePrivateRecordRecoveryDisposition =
+  | 'clean'
+  | 'recovered'
+  | 'missing'
+  | 'invalid'
+  | 'failed';
+
 export type ImmutablePrivateRecordReadStopReason =
   | 'codec-unavailable'
   | 'unsafe-storage'
@@ -593,6 +600,77 @@ function recoverStagingNamespace<RecordType>(
   }
 }
 
+/**
+ * Cleans the staging namespace without deciding that an uncommitted record
+ * should become durable. One-link artifacts are discarded only after their
+ * authenticated record and canonical path agree. A two-link stage may be
+ * finalized only when its exact target link already exists.
+ */
+function recoverStagingNamespaceConservatively<RecordType>(
+  directories: StoreDirectories<RecordType>,
+  codec: ImmutablePrivateRecordCodec<RecordType>,
+): { ok: boolean; finalizedRecords: number } {
+  let finalizedRecords = 0;
+  try {
+    const snapshot = boundedDirectoryEntries(
+      directories.stagingPath,
+      directories.config.hardMaxFiles + 1,
+    );
+    if (snapshot.overflow) return { ok: false, finalizedRecords };
+    for (const entry of snapshot.entries) {
+      const path = join(directories.stagingPath, entry);
+      const isTemporary = entry.endsWith('.stage.tmp');
+      const isStage = !isTemporary && entry.endsWith('.stage');
+      if (!safePathComponent(entry) || !entry.startsWith('.') || (!isTemporary && !isStage)) {
+        return { ok: false, finalizedRecords };
+      }
+      const stat = lstatSync(path, { bigint: true });
+      const links = Number(stat.nlink);
+      if ((links !== 1 && links !== 2) || !exactPrivateFile(stat, links)) {
+        return { ok: false, finalizedRecords };
+      }
+      const record = readRecordFile(path, codec, directories, links);
+      if (record === null) return { ok: false, finalizedRecords };
+      const paths = recordPaths(directories, codec, record);
+      if (paths === null || path !== (isTemporary ? paths.temporary : paths.stage)) {
+        return { ok: false, finalizedRecords };
+      }
+
+      if (links === 1) {
+        if (!removeExactFile(path, stat, directories)) {
+          return { ok: false, finalizedRecords };
+        }
+        continue;
+      }
+
+      if (isTemporary || !existsSync(paths.target)) {
+        return { ok: false, finalizedRecords };
+      }
+      const target = lstatSync(paths.target, { bigint: true });
+      if (!exactPrivateFile(target, 2) || !sameIdentity(stat, target)) {
+        return { ok: false, finalizedRecords };
+      }
+      const targetRecord = readRecordFile(paths.target, codec, directories, 2);
+      if (targetRecord === null || !recordsEquivalent(codec, targetRecord, record)) {
+        return { ok: false, finalizedRecords };
+      }
+      fsyncDirectory(directories.recordsPath);
+      fsyncDirectory(directories.stagingPath);
+      if (!removeExactFile(path, stat, directories)) {
+        return { ok: false, finalizedRecords };
+      }
+      const finalized = readRecordFile(paths.target, codec, directories);
+      if (finalized === null || !recordsEquivalent(codec, finalized, record)) {
+        return { ok: false, finalizedRecords };
+      }
+      finalizedRecords += 1;
+    }
+    return { ok: true, finalizedRecords };
+  } catch {
+    return { ok: false, finalizedRecords };
+  }
+}
+
 function publishWithoutClobber<RecordType>(
   directories: StoreDirectories<RecordType>,
   paths: { target: string; stage: string; temporary: string },
@@ -706,6 +784,58 @@ export function writeImmutablePrivateRecord<RecordType>(
     return persisted !== null && recordsEquivalent(codec, persisted, record)
       ? 'recorded'
       : 'failed';
+  } catch {
+    return 'failed';
+  } finally {
+    releaseLocalStoreLock(lock);
+  }
+}
+
+/**
+ * Conservatively cleans authenticated interrupted publications without
+ * accepting or publishing a caller-provided record. One-link stages are
+ * uncommitted and removed; only cleanup of an already-linked exact target may
+ * be finalized. The store lock serializes recovery with ordinary writers. A
+ * missing store is reported without creating anything.
+ */
+export function recoverImmutablePrivateRecordStore<RecordType>(
+  config: ImmutablePrivateRecordStoreConfig<RecordType>,
+  options: { lockWaitMs?: number } = {},
+): ImmutablePrivateRecordRecoveryDisposition {
+  let validated: ValidatedConfig<RecordType> | null;
+  try { validated = validateConfig(config); } catch { validated = null; }
+  if (validated === null) return 'invalid';
+  let lockWaitMs: number | null;
+  try {
+    lockWaitMs = options.lockWaitMs === undefined
+      ? MAX_LOCK_WAIT_MS
+      : Number.isFinite(options.lockWaitMs)
+        ? Math.max(0, Math.min(MAX_LOCK_WAIT_MS, Math.floor(options.lockWaitMs)))
+        : null;
+  } catch {
+    return 'invalid';
+  }
+  if (lockWaitMs === null) return 'invalid';
+  if (!existsSync(validated.rootPath)) return 'missing';
+
+  let codec: ImmutablePrivateRecordCodec<RecordType> | null;
+  try { codec = config.codecForWrite(); } catch { codec = null; }
+  if (codec === null) return 'failed';
+
+  let directories: StoreDirectories<RecordType>;
+  try { directories = loadDirectories(validated, false); } catch { return 'failed'; }
+  const lock = acquireLocalStoreLock(directories.lockPath, lockWaitMs, {
+    anchorPath: directories.anchorPath,
+    exactPrivateStorage: true,
+  });
+  if (lock === null) return 'failed';
+
+  try {
+    verifyDirectories(directories);
+    const recovery = recoverStagingNamespaceConservatively(directories, codec);
+    if (!recovery.ok) return 'failed';
+    verifyDirectories(directories);
+    return recovery.finalizedRecords > 0 ? 'recovered' : 'clean';
   } catch {
     return 'failed';
   } finally {
