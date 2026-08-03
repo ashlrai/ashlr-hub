@@ -476,6 +476,48 @@ describe('M466 durable host merge cancellation and revocation protocol foundatio
     });
   });
 
+  it('preserves logical receipt time after a successful delayed lock acquisition', async () => {
+    const exactIdentity = identity();
+    const prepared = prepare(exactIdentity);
+    const authorityId = hostMergeRevocationAuthorityId(exactIdentity)!;
+    const statePath = hostMergeRevocationStatePath(exactIdentity)!;
+    const held = acquireLocalStoreLock(
+      path.join(path.dirname(statePath), `${authorityId}.lock`),
+      2_000,
+      { anchorPath: home, exactPrivateStorage: true },
+    );
+    expect(held).not.toBeNull();
+
+    const logicalArmTime = new Date(NOW.getTime() + 100);
+    const child = spawnTransition({
+      identity: exactIdentity,
+      action: 'arm',
+      operationId: 'delayed-success-arm-466',
+      expectedSequence: prepared.record.sequence,
+      expectedReceiptDigest: prepared.receipt.receiptDigest,
+      now: logicalArmTime,
+    });
+    await child.ready;
+    child.child.send({ go: true });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(releaseLocalStoreLock(held)).toBe(true);
+
+    const armed = applied(await child.result);
+    expect(armed.receipt.recordedAt).toBe(logicalArmTime.toISOString());
+    expect(transitionHostMergeRevocation({
+      identity: exactIdentity,
+      action: 'revoke',
+      operationId: 'after-delayed-arm-revoke-466',
+      expectedSequence: armed.record.sequence,
+      expectedReceiptDigest: armed.receipt.receiptDigest,
+      now: new Date(NOW.getTime() + 200),
+    })).toMatchObject({
+      status: 'applied',
+      receipt: { recordedAt: new Date(NOW.getTime() + 200).toISOString() },
+      record: { phase: 'revoked', sequence: 3 },
+    });
+  });
+
   it('allows only the restrictive revoke transition after expiry', () => {
     const exactIdentity = identity();
     const armed = arm(exactIdentity);
