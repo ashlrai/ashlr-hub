@@ -84,6 +84,10 @@ type PendingCountFn = () => number;
 type LoadConfigFn = () => AshlrConfig;
 type GuardHealthDiagnosis = import('../core/daemon/guard-health.js').GuardHealthDiagnosis;
 type DiagnoseGuardHealthFn = () => GuardHealthDiagnosis;
+type ProductionActivationReadinessV1 =
+  import('../core/daemon/production-activation-readiness.js').ProductionActivationReadinessV1;
+type InspectProductionActivationReadinessFn =
+  typeof import('../core/daemon/production-activation-readiness.js')['inspectProductionActivationReadinessV1'];
 
 async function importLoop(): Promise<{
   runDaemon: RunDaemonFn;
@@ -151,6 +155,76 @@ async function importGuardHealth(): Promise<DiagnoseGuardHealthFn | null> {
   } catch {
     return null;
   }
+}
+
+async function importProductionActivationReadiness(): Promise<
+  InspectProductionActivationReadinessFn | null
+> {
+  try {
+    const mod = await import('../core/daemon/production-activation-readiness.js');
+    return mod.inspectProductionActivationReadinessV1;
+  } catch {
+    return null;
+  }
+}
+
+function unavailableProductionActivationReadiness(): ProductionActivationReadinessV1 {
+  const blocker = {
+    code: 'production-authority-chain-absent' as const,
+    source: 'activation' as const,
+    detail: 'production activation readiness inspection is unavailable',
+  };
+  return {
+    schemaVersion: 1,
+    authority: 'observation-only',
+    verdict: 'blocked',
+    topBlocker: blocker,
+    blockers: [blocker],
+    authorityFlags: {
+      admissionPermitted: false,
+      activationPermitted: false,
+      deployPermitted: false,
+      installPermitted: false,
+      launchPermitted: false,
+      lifecycleMutationPermitted: false,
+      releaseSettlementPermitted: false,
+      rollbackPermitted: false,
+      startPermitted: false,
+    },
+    sourceQuality: {
+      sourceState: 'degraded',
+      complete: false,
+      reasons: ['production-authority-chain-absent'],
+    },
+    observations: {
+      artifactPackaging: {
+        state: 'unavailable',
+        packageManifestPresent: false,
+        sourceLockfilePresent: false,
+        publishableLockfilePresent: false,
+        installedDependencyTreePresent: false,
+        packedLockfileEvidence: 'unknown',
+        packedDependencyEvidence: 'unknown',
+        reason: 'production activation readiness inspection is unavailable',
+      },
+      releaseManifest: { state: 'unavailable', manifestDigest: null, reason: 'unavailable' },
+      releaseEvidence: { state: 'unavailable', keyId: null, reason: 'unavailable' },
+      launchAdmission: { state: 'unavailable', blockerCodes: [], reason: 'unavailable' },
+      residentService: { state: 'unavailable', findingCodes: [], reason: 'unavailable' },
+      activationPermit: {
+        state: 'unavailable',
+        trustRootCount: 0,
+        reason: 'unavailable',
+      },
+      releaseTip: {
+        state: 'unavailable',
+        sourceState: 'unavailable',
+        complete: false,
+        stopReasons: [],
+        reason: 'unavailable',
+      },
+    },
+  };
 }
 
 async function importServiceConfig(): Promise<
@@ -479,11 +553,14 @@ async function cmdDaemonStatus(jsonMode: boolean): Promise<number> {
 
   // Resolve the configured daily cap for display (best-effort).
   let dailyCap: number | undefined;
-  const loadConfig = await importConfig();
+  let config: AshlrConfig | undefined;
+  const loadConfig = await importConfig(true, true);
   if (loadConfig) {
     try {
-      dailyCap = loadConfig().daemon?.dailyBudgetUsd;
+      config = loadConfig();
+      dailyCap = config.daemon?.dailyBudgetUsd;
     } catch {
+      config = undefined;
       dailyCap = undefined;
     }
   }
@@ -516,6 +593,18 @@ async function cmdDaemonStatus(jsonMode: boolean): Promise<number> {
     }
   }
 
+  let productionActivationReadiness = unavailableProductionActivationReadiness();
+  const inspectProductionActivationReadiness = await importProductionActivationReadiness();
+  if (inspectProductionActivationReadiness) {
+    try {
+      productionActivationReadiness = inspectProductionActivationReadiness({
+        ...(config ? { config } : {}),
+      });
+    } catch {
+      productionActivationReadiness = unavailableProductionActivationReadiness();
+    }
+  }
+
   if (jsonMode) {
     console.log(
       JSON.stringify(
@@ -531,6 +620,7 @@ async function cmdDaemonStatus(jsonMode: boolean): Promise<number> {
           pendingProposals: pending,
           stateSource,
           guardHealth,
+          productionActivationReadiness,
         },
         null,
         2,

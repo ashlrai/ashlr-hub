@@ -11,6 +11,7 @@ const effects = vi.hoisted(() => ({
   loadDaemonStateStrict: vi.fn(),
   pendingCount: vi.fn(),
   diagnoseGuardHealth: vi.fn(),
+  inspectProductionActivationReadiness: vi.fn(),
   install: vi.fn(),
   uninstall: vi.fn(),
   ensureRunning: vi.fn(),
@@ -24,6 +25,7 @@ const moduleLoads = vi.hoisted(() => ({
   state: 0,
   inbox: 0,
   guardHealth: 0,
+  productionActivationReadiness: 0,
   service: 0,
   serviceConfig: 0,
 }));
@@ -58,6 +60,13 @@ vi.mock('../src/core/inbox/store.js', () => {
 vi.mock('../src/core/daemon/guard-health.js', () => {
   moduleLoads.guardHealth++;
   return { diagnoseGuardHealth: effects.diagnoseGuardHealth };
+});
+
+vi.mock('../src/core/daemon/production-activation-readiness.js', () => {
+  moduleLoads.productionActivationReadiness++;
+  return {
+    inspectProductionActivationReadinessV1: effects.inspectProductionActivationReadiness,
+  };
 });
 
 vi.mock('../src/core/daemon/service.js', () => {
@@ -130,6 +139,7 @@ function expectNoEffectModulesOrCalls(): void {
     state: 0,
     inbox: 0,
     guardHealth: 0,
+    productionActivationReadiness: 0,
     service: 0,
     serviceConfig: 0,
   });
@@ -161,6 +171,27 @@ beforeEach(async () => {
     generatedAt: '2026-07-21T00:00:00.000Z',
     blocked: false,
     blocks: [],
+  });
+  effects.inspectProductionActivationReadiness.mockReturnValue({
+    schemaVersion: 1,
+    authority: 'observation-only',
+    verdict: 'blocked',
+    topBlocker: {
+      code: 'artifact-packaging-incompatible',
+      source: 'artifact',
+      detail: 'published artifact lacks required lockfile evidence',
+    },
+    authorityFlags: {
+      admissionPermitted: false,
+      activationPermitted: false,
+      deployPermitted: false,
+      installPermitted: false,
+      launchPermitted: false,
+      lifecycleMutationPermitted: false,
+      releaseSettlementPermitted: false,
+      rollbackPermitted: false,
+      startPermitted: false,
+    },
   });
   effects.serviceStatus.mockReturnValue(serviceStatus);
   effects.ensureRunning.mockResolvedValue({ ...serviceStatus, running: true });
@@ -250,9 +281,49 @@ describe('daemon valid flags remain supported', () => {
     const result = await capture(['status', '--json']);
 
     expect(result.code).toBe(0);
-    expect(JSON.parse(result.stdout)).toMatchObject({ running: false, pendingProposals: 0 });
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      running: false,
+      pendingProposals: 0,
+      productionActivationReadiness: {
+        schemaVersion: 1,
+        verdict: 'blocked',
+        topBlocker: { code: 'artifact-packaging-incompatible' },
+        authorityFlags: {
+          activationPermitted: false,
+          lifecycleMutationPermitted: false,
+          startPermitted: false,
+        },
+      },
+    });
     expect(effects.loadDaemonStateStrict).toHaveBeenCalledOnce();
     expect(effects.loadDaemonState).not.toHaveBeenCalled();
+    expect(effects.inspectProductionActivationReadiness).toHaveBeenCalledWith({
+      config: expect.any(Object),
+    });
+  });
+
+  it('keeps a blocked production verdict when readiness inspection fails', async () => {
+    effects.inspectProductionActivationReadiness.mockImplementationOnce(() => {
+      throw new Error('inspection unavailable');
+    });
+
+    const result = await capture(['status', '--json']);
+
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      productionActivationReadiness: {
+        schemaVersion: 1,
+        authority: 'observation-only',
+        verdict: 'blocked',
+        topBlocker: { code: 'production-authority-chain-absent' },
+        sourceQuality: { sourceState: 'degraded', complete: false },
+        authorityFlags: {
+          activationPermitted: false,
+          lifecycleMutationPermitted: false,
+          startPermitted: false,
+        },
+      },
+    });
   });
 
   it('preserves service-status --json', async () => {
