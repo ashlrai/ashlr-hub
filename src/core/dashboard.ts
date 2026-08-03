@@ -152,6 +152,43 @@ function unavailableRoutingLearningAuthority(): RoutingLearningAuthority {
   };
 }
 
+function reconcileRoutingLearningAuthority(
+  authority: RoutingLearningAuthority,
+  decisionSource: DecisionSourceQuality,
+): RoutingLearningAuthority {
+  const prior = authority.sourceQuality.decisions;
+  const bothMissing = prior.sourceState === 'missing' && decisionSource.sourceState === 'missing' &&
+    !prior.sourcePresent && !decisionSource.sourcePresent;
+  const bothHealthy = prior.sourceState === 'healthy' && decisionSource.sourceState === 'healthy' &&
+    prior.sourcePresent && decisionSource.sourcePresent && prior.complete && decisionSource.complete;
+  const sourceState = bothHealthy ? 'healthy' : bothMissing ? 'missing' : 'degraded';
+  const sourcePresent = prior.sourcePresent && decisionSource.sourcePresent;
+  const blockers = new Set(authority.blockerCodes);
+  if (!sourcePresent) blockers.add('decision-source-missing');
+  if (sourceState === 'degraded') blockers.add('decision-source-degraded');
+
+  const operationalSteering = authority.operationalSteering && bothHealthy;
+  return {
+    ...authority,
+    state: operationalSteering ? 'eligible' : 'inactive',
+    operationalSteering,
+    sourceQuality: {
+      ...authority.sourceQuality,
+      decisions: {
+        sourceState,
+        sourcePresent,
+        complete: bothHealthy,
+        authenticated: prior.authenticated && bothHealthy,
+      },
+    },
+    samples: {
+      ...authority.samples,
+      eligible: operationalSteering ? authority.samples.eligible : 0,
+    },
+    blockerCodes: [...blockers].sort(),
+  };
+}
+
 function decisionSourceOf(read: DecisionsReadResult): DecisionSourceQuality {
   const { decisions: _decisions, ...quality } = read;
   return quality;
@@ -545,40 +582,47 @@ async function buildIntelligence(
   } catch {
     // Keep explicit degraded quality and withhold decision-backed metrics.
   }
+  summary.routingLearningAuthority = reconcileRoutingLearningAuthority(
+    summary.routingLearningAuthority,
+    summary.decisionSourceQuality,
+  );
 
   // ── M240: Learned routing scores ──────────────────────────────────────────
-  try {
-    const { buildEngineScores } = await import('./run/learned-router.js');
-    const seen = new Set<string>();
-    const rows: IntelligenceSummary['routingScores'] = [];
-    for (const taskClass of SCORE_TASK_CLASSES) {
-      const scoreMap = buildEngineScores(taskClass);
-      for (const s of scoreMap.values()) {
-        const rowKey = `${s.key}::${taskClass}`;
-        if (seen.has(rowKey)) continue;
-        seen.add(rowKey);
-        rows.push({
-          key: s.key,
-          engine: s.engine,
-          model: s.model,
-          taskClass,
-          score: s.score,
-          samples: s.samples,
-          trend: summary.routingLearningAuthority.operationalSteering
-            ? s.score > 0.55
-              ? 'promoted'
-              : s.score < 0.45
-                ? 'demoted'
-                : 'neutral'
-            : 'observational',
-        });
+  if (summary.decisionSourceQuality.sourceState === 'healthy' &&
+    summary.decisionSourceQuality.sourcePresent && summary.decisionSourceQuality.complete) {
+    try {
+      const { buildEngineScores } = await import('./run/learned-router.js');
+      const seen = new Set<string>();
+      const rows: IntelligenceSummary['routingScores'] = [];
+      for (const taskClass of SCORE_TASK_CLASSES) {
+        const scoreMap = buildEngineScores(taskClass);
+        for (const s of scoreMap.values()) {
+          const rowKey = `${s.key}::${taskClass}`;
+          if (seen.has(rowKey)) continue;
+          seen.add(rowKey);
+          rows.push({
+            key: s.key,
+            engine: s.engine,
+            model: s.model,
+            taskClass,
+            score: s.score,
+            samples: s.samples,
+            trend: summary.routingLearningAuthority.operationalSteering
+              ? s.score > 0.55
+                ? 'promoted'
+                : s.score < 0.45
+                  ? 'demoted'
+                  : 'neutral'
+              : 'observational',
+          });
+        }
       }
+      // Diagnostic ordering remains visible even when authority is inactive.
+      rows.sort((a, b) => b.score - a.score);
+      summary.routingScores = rows.slice(0, MAX_ROUTING_SCORES);
+    } catch {
+      // Degrade to empty.
     }
-    // Diagnostic ordering remains visible even when authority is inactive.
-    rows.sort((a, b) => b.score - a.score);
-    summary.routingScores = rows.slice(0, MAX_ROUTING_SCORES);
-  } catch {
-    // Degrade to empty.
   }
 
   // ── M235: Anti-playbook lessons from genome hub ───────────────────────────

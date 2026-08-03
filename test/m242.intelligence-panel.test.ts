@@ -81,6 +81,28 @@ vi.mock('../src/core/daemon/state.js', () => ({ loadDaemonState: () => FIXTURE_D
 vi.mock('../src/core/usage/frontier-usage.js', () => ({
   getFrontierUsageSync: () => FIXTURE_FRONTIER_USAGE,
 }));
+vi.mock('../src/core/fleet/status.js', () => ({
+  buildFleetStatus: vi.fn(async () => ({
+    generatedAt: FIXED_NOW_ISO,
+    routingLearningAuthority: {
+      version: 1,
+      state: 'inactive',
+      operationalSteering: false,
+      sourceQuality: {
+        decisions: {
+          sourceState: 'healthy', sourcePresent: true, complete: true, authenticated: false,
+        },
+        assignments: {
+          sourceState: 'healthy', sourcePresent: true, complete: true,
+          denominatorComplete: false, authenticated: true,
+        },
+      },
+      samples: { observed: 0, eligible: 0, minimumPerStratum: 5 },
+      cohort: { policyVersion: null, learningEpoch: null },
+      blockerCodes: ['decision-authenticity-unavailable', 'assignment-denominator-incomplete'],
+    },
+  })),
+}));
 vi.mock('../src/core/inbox/store.js', () => ({
   pendingCount: () => 0,
   listProposals: () => [{
@@ -289,6 +311,69 @@ describe('M242 — intelligence panel in buildSnapshot', () => {
       operationalSteering: false,
       sourceQuality: expect.any(Object),
     });
+  });
+
+  it('revokes serialized routing authority when the later intelligence decision read degrades', async () => {
+    const fleetStatus = await import('../src/core/fleet/status.js');
+    vi.mocked(fleetStatus.buildFleetStatus).mockResolvedValueOnce({
+      generatedAt: FIXED_NOW_ISO,
+      routingLearningAuthority: {
+        version: 1,
+        state: 'eligible',
+        operationalSteering: true,
+        sourceQuality: {
+          decisions: {
+            sourceState: 'healthy', sourcePresent: true, complete: true, authenticated: true,
+          },
+          assignments: {
+            sourceState: 'healthy', sourcePresent: true, complete: true,
+            denominatorComplete: true, authenticated: true,
+          },
+        },
+        samples: { observed: 5, eligible: 5, minimumPerStratum: 5 },
+        cohort: { policyVersion: 'router-v2', learningEpoch: '2026-06-17' },
+        blockerCodes: [],
+      },
+    } as never);
+    const decisionsLedger = await import('../src/core/fleet/decisions-ledger.js');
+    vi.mocked(decisionsLedger.readDecisionsDetailed).mockReturnValueOnce({
+      decisions: [],
+      sourceState: 'degraded', sourcePresent: true, complete: false,
+      stopReasons: ['io-error'], filesRead: 1, bytesRead: 64, rowsScanned: 0,
+      invalidRows: 1, unreadableFiles: 0,
+    });
+
+    const payload = JSON.parse(JSON.stringify(await snapshotWithIntelligence())) as {
+      intelligence: {
+        decisionSourceQuality: { sourceState: string; complete: boolean };
+        routingLearningAuthority: {
+          state: string;
+          operationalSteering: boolean;
+          sourceQuality: { decisions: { sourceState: string; complete: boolean; authenticated: boolean } };
+          samples: { eligible: number };
+          blockerCodes: string[];
+        };
+        routingScores: unknown[];
+      };
+    };
+
+    expect(fleetStatus.buildFleetStatus).toHaveBeenCalled();
+    expect(decisionsLedger.readDecisionsDetailed).toHaveBeenCalled();
+    expect(vi.mocked(fleetStatus.buildFleetStatus).mock.invocationCallOrder[0]!)
+      .toBeLessThan(vi.mocked(decisionsLedger.readDecisionsDetailed).mock.invocationCallOrder[0]!);
+    expect(payload.intelligence.decisionSourceQuality).toMatchObject({
+      sourceState: 'degraded', complete: false,
+    });
+    expect(payload.intelligence.routingLearningAuthority).toMatchObject({
+      state: 'inactive',
+      operationalSteering: false,
+      sourceQuality: {
+        decisions: { sourceState: 'degraded', complete: false, authenticated: false },
+      },
+      samples: { eligible: 0 },
+    });
+    expect(payload.intelligence.routingLearningAuthority.blockerCodes).toContain('decision-source-degraded');
+    expect(payload.intelligence.routingScores).toEqual([]);
   });
 
   it('routingScores are sorted highest score first', async () => {

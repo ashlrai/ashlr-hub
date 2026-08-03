@@ -1103,9 +1103,15 @@ describe('M213 Dashboard SSE — /api/events', () => {
         denominatorComplete: false, authenticated: true,
       },
     };
+    const healthyDecisionSource = {
+      sourceState: 'healthy', sourcePresent: true, complete: true,
+      stopReasons: [], filesRead: 1, bytesRead: 0, rowsScanned: 8,
+      invalidRows: 0, unreadableFiles: 0,
+    };
     const observationalText = flatten(renderFreshIntelligence({
       intelligence: {
         engineScorecards: [],
+        decisionSourceQuality: healthyDecisionSource,
         routingLearningAuthority: {
           state: 'inactive', operationalSteering: false,
           sourceQuality: healthySources,
@@ -1128,6 +1134,7 @@ describe('M213 Dashboard SSE — /api/events', () => {
 
     const healthyZeroText = flatten(renderFreshIntelligence({
       intelligence: {
+        decisionSourceQuality: { ...healthyDecisionSource, rowsScanned: 0 },
         routingLearningAuthority: {
           state: 'inactive', operationalSteering: false,
           sourceQuality: healthySources,
@@ -1143,6 +1150,7 @@ describe('M213 Dashboard SSE — /api/events', () => {
 
     const degradedText = flatten(renderFreshIntelligence({
       intelligence: {
+        decisionSourceQuality: healthyDecisionSource,
         routingLearningAuthority: {
           state: 'inactive', operationalSteering: false,
           sourceQuality: {
@@ -1160,6 +1168,29 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(degradedText).toContain('sample counts withheld');
     expect(degradedText).toContain('scores withheld because routing learning sources are degraded');
     expect(degradedText).not.toContain('healthy with zero admitted observations');
+
+    const betweenReadsDegradedText = flatten(renderFreshIntelligence({
+      intelligence: {
+        decisionSourceQuality: {
+          ...healthyDecisionSource,
+          sourceState: 'degraded', complete: false, invalidRows: 1,
+        },
+        routingLearningAuthority: {
+          state: 'inactive', operationalSteering: false,
+          sourceQuality: healthySources,
+          samples: { observed: 0, eligible: 0, minimumPerStratum: 5 },
+          cohort: { policyVersion: null, learningEpoch: null }, blockerCodes: [],
+        },
+        engineScorecards: [],
+        routingScores: [{ engine: 'codex', model: null, taskClass: 'code', score: 0.75, trend: 'observational', samples: 8 }],
+        antiPlaybooks: [], recentEvents: [],
+      },
+    }));
+    expect(betweenReadsDegradedText).toContain('source quality: degraded');
+    expect(betweenReadsDegradedText).toContain('sample counts withheld');
+    expect(betweenReadsDegradedText).toContain('scores withheld because routing learning sources are degraded');
+    expect(betweenReadsDegradedText).not.toContain('healthy zero');
+    expect(betweenReadsDegradedText).not.toContain('75%');
   });
 
   it('withholds stale learning metrics in Fleet and Mission Control as well as Fleet Dashboard', () => {

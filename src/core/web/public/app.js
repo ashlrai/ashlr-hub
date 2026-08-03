@@ -6268,9 +6268,12 @@ function fdRenderIntelligencePanel(snap) {
   const routingAuthority = intel.routingLearningAuthority;
   const routingOperational = routingAuthority?.operationalSteering === true;
   const decisionsQuality = routingAuthority?.sourceQuality?.decisions;
+  const intelligenceDecisionsQuality = intel.decisionSourceQuality;
   const assignmentsQuality = routingAuthority?.sourceQuality?.assignments;
   const routingSourceDegraded = !routingAuthority ||
     !decisionsQuality?.sourcePresent || decisionsQuality.sourceState === 'degraded' || !decisionsQuality.complete ||
+    !intelligenceDecisionsQuality?.sourcePresent || intelligenceDecisionsQuality.sourceState === 'degraded' ||
+      !intelligenceDecisionsQuality.complete ||
     !assignmentsQuality?.sourcePresent || assignmentsQuality.sourceState === 'degraded' || !assignmentsQuality.complete;
   const observedRoutingSamples = routingAuthority?.samples?.observed ?? 0;
   const routingSourceLabel = routingSourceDegraded
@@ -6324,7 +6327,7 @@ function fdRenderIntelligencePanel(snap) {
   }
 
   // ── M240: Learned routing scores ─────────────────────────────────────────
-  if (learningSnapshotFresh && intel.routingScores && intel.routingScores.length > 0) {
+  if (learningSnapshotFresh && !routingSourceDegraded && intel.routingScores && intel.routingScores.length > 0) {
     body.appendChild(el('div', { cls: 'fd-intel-section-title', style: 'margin-top:14px' },
       routingOperational ? 'Operational routing scores' : 'Observational routing scores'));
     const routeList = el('ul', { cls: 'fd-intel-route-list' });
