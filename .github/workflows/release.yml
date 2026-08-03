@@ -25,8 +25,43 @@ jobs:
       contents: write   # gh release create
       id-token: write   # npm --provenance
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout the immutable tag target
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.ref }}
+      - name: Admit only commits from protected master history
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          tag_commit="$(git rev-parse --verify "${GITHUB_REF}^{commit}")"
+          head_commit="$(git rev-parse --verify "HEAD^{commit}")"
+          if [[ "$tag_commit" != "$head_commit" ]]; then
+            echo "Release tag target does not match the checked-out commit." >&2
+            exit 1
+          fi
+
+          branch_json="$(gh api --fail "repos/${GITHUB_REPOSITORY}/branches/master")"
+          master_protected="$(jq -r '.protected // false' <<<"$branch_json")"
+          master_commit="$(jq -r '.commit.sha // empty' <<<"$branch_json")"
+          if [[ "$master_protected" != "true" || ! "$master_commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Protected master authority could not be established." >&2
+            exit 1
+          fi
+
+          comparison="$(gh api --fail \
+            "repos/${GITHUB_REPOSITORY}/compare/${tag_commit}...${master_commit}" \
+            --jq '.status')"
+          if [[ "$comparison" != "ahead" && "$comparison" != "identical" ]]; then
+            echo "Release tag target is not in protected master history." >&2
+            exit 1
+          fi
+      - name: Set up Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
           cache: "npm"
