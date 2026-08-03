@@ -20,6 +20,10 @@ import {
   _setPrivateStorageTestControlForTest,
   type PrivateStorageRunner,
 } from '../src/core/util/private-storage.js';
+import {
+  acquireLocalStoreLock,
+  releaseLocalStoreLock,
+} from '../src/core/fleet/local-store-lock.js';
 
 const originalHome = process.env.HOME;
 const originalUserProfile = process.env.USERPROFILE;
@@ -433,6 +437,43 @@ describe('M466 durable host merge cancellation and revocation protocol foundatio
       expectedReceiptDigest: prepared.receipt.receiptDigest,
       now: new Date(exactIdentity.expiresAt),
     })).toMatchObject({ status: 'refused', reason: 'authority-expired' });
+  });
+
+  it('revalidates expiry after waiting for the authority lock', async () => {
+    const exactIdentity = identity({
+      expiresAt: new Date(NOW.getTime() + 500).toISOString(),
+    });
+    const prepared = prepare(exactIdentity);
+    const authorityId = hostMergeRevocationAuthorityId(exactIdentity)!;
+    const statePath = hostMergeRevocationStatePath(exactIdentity)!;
+    const held = acquireLocalStoreLock(
+      path.join(path.dirname(statePath), `${authorityId}.lock`),
+      2_000,
+      { anchorPath: home, exactPrivateStorage: true },
+    );
+    expect(held).not.toBeNull();
+
+    const child = spawnTransition({
+      identity: exactIdentity,
+      action: 'arm',
+      operationId: 'delayed-expiry-arm-466',
+      expectedSequence: prepared.record.sequence,
+      expectedReceiptDigest: prepared.receipt.receiptDigest,
+      now: new Date(NOW.getTime() + 100),
+    });
+    await child.ready;
+    child.child.send({ go: true });
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(releaseLocalStoreLock(held)).toBe(true);
+
+    await expect(child.result).resolves.toMatchObject({
+      status: 'refused',
+      reason: 'authority-expired',
+    });
+    expect(readHostMergeRevocationState(exactIdentity)).toMatchObject({
+      state: 'healthy',
+      record: { phase: 'prepared', sequence: 1 },
+    });
   });
 
   it('allows only the restrictive revoke transition after expiry', () => {
