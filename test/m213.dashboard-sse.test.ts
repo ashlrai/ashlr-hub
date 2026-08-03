@@ -1088,6 +1088,78 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(staleIntelligenceText).not.toContain('Learned routing');
     expect(staleIntelligenceText).not.toContain('Anti-playbooks');
     expect(staleIntelligenceText).not.toContain('75%');
+
+    const renderFreshIntelligence = new Function(
+      'el', 'fleetSnapshotLearningFresh',
+      `${src.slice(intelligenceStart, intelligenceEnd)}\nreturn fdRenderIntelligencePanel;`,
+    )(
+      (_tag: string, _attrs: unknown, ...children: unknown[]) => node(...children),
+      () => true,
+    ) as (snap: Record<string, unknown>) => FakeNode;
+    const healthySources = {
+      decisions: { sourceState: 'healthy', sourcePresent: true, complete: true, authenticated: false },
+      assignments: {
+        sourceState: 'healthy', sourcePresent: true, complete: true,
+        denominatorComplete: false, authenticated: true,
+      },
+    };
+    const observationalText = flatten(renderFreshIntelligence({
+      intelligence: {
+        engineScorecards: [],
+        routingLearningAuthority: {
+          state: 'inactive', operationalSteering: false,
+          sourceQuality: healthySources,
+          samples: { observed: 8, eligible: 0, minimumPerStratum: 5 },
+          cohort: { policyVersion: null, learningEpoch: null },
+          blockerCodes: ['decision-authenticity-unavailable'],
+        },
+        routingScores: [{ engine: 'codex', model: null, taskClass: 'code', score: 0.75, trend: 'observational', samples: 8 }],
+        antiPlaybooks: [], recentEvents: [],
+      },
+    }));
+    expect(observationalText).toContain('Routing learning authority');
+    expect(observationalText).toContain('inactive; runtime routing is neutral');
+    expect(observationalText).toContain('source quality: healthy');
+    expect(observationalText).toContain('Observational routing scores');
+    expect(observationalText).toContain('obs');
+    expect(observationalText).not.toContain('Operational routing scores');
+    expect(observationalText).not.toContain('▲');
+    expect(observationalText).not.toContain('▼');
+
+    const healthyZeroText = flatten(renderFreshIntelligence({
+      intelligence: {
+        routingLearningAuthority: {
+          state: 'inactive', operationalSteering: false,
+          sourceQuality: healthySources,
+          samples: { observed: 0, eligible: 0, minimumPerStratum: 5 },
+          cohort: { policyVersion: null, learningEpoch: null }, blockerCodes: [],
+        },
+        engineScorecards: [], routingScores: [], antiPlaybooks: [], recentEvents: [],
+      },
+    }));
+    expect(healthyZeroText).toContain('source quality: healthy zero');
+    expect(healthyZeroText).toContain('0 observed / 0 eligible');
+    expect(healthyZeroText).toContain('sources are healthy with zero admitted observations');
+
+    const degradedText = flatten(renderFreshIntelligence({
+      intelligence: {
+        routingLearningAuthority: {
+          state: 'inactive', operationalSteering: false,
+          sourceQuality: {
+            ...healthySources,
+            assignments: { ...healthySources.assignments, sourceState: 'degraded', complete: false },
+          },
+          samples: { observed: 0, eligible: 0, minimumPerStratum: 5 },
+          cohort: { policyVersion: null, learningEpoch: null },
+          blockerCodes: ['assignment-source-degraded'],
+        },
+        engineScorecards: [], routingScores: [], antiPlaybooks: [], recentEvents: [],
+      },
+    }));
+    expect(degradedText).toContain('source quality: degraded');
+    expect(degradedText).toContain('sample counts withheld');
+    expect(degradedText).toContain('scores withheld because routing learning sources are degraded');
+    expect(degradedText).not.toContain('healthy with zero admitted observations');
   });
 
   it('withholds stale learning metrics in Fleet and Mission Control as well as Fleet Dashboard', () => {

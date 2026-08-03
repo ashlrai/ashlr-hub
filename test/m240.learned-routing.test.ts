@@ -385,6 +385,37 @@ describe('Operational Learning Firewall V1', () => {
     ]));
   });
 
+  it('rejects caller-supplied cohort summaries that mask mixed receipt samples', () => {
+    const samples = Array.from({ length: LEARNED_ROUTING_MIN_SAMPLES + 1 }, (_, index) =>
+      admittedSample({
+        assignmentIdentity: `assignment-${index}`,
+        policyVersion: index === 0 ? 'router-v1' : 'router-v2',
+        decisionPolicyVersion: index === 0 ? 'router-v1' : 'router-v2',
+        learningEpoch: index === 0 ? '2026-08-01' : '2026-08-02',
+        decisionLearningEpoch: index === 0 ? '2026-08-01' : '2026-08-02',
+      }));
+    const authority = evaluateRoutingLearningAuthority({
+      ...healthySources,
+      observedSamples: samples.length,
+      samples,
+      observedPolicies: ['router-v2'],
+      observedEpochs: ['2026-08-02'],
+    });
+
+    expect(authority).toMatchObject({
+      state: 'inactive',
+      operationalSteering: false,
+      samples: { observed: samples.length, eligible: 0 },
+      cohort: { policyVersion: null, learningEpoch: null },
+    });
+    expect(authority.blockerCodes).toEqual(expect.arrayContaining([
+      'policy-cohort-mismatch',
+      'learning-epoch-mismatch',
+      'mixed-policy-cohort',
+      'mixed-learning-epoch',
+    ]));
+  });
+
   it('keeps unsigned negative decisions visible diagnostically but neutral operationally', () => {
     const now = 1_700_000_000_000;
     writeDecisions(judgedEntries(

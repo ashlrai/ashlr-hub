@@ -715,6 +715,7 @@ export interface FleetReadinessSourceHealth {
   evidenceRole?: FleetReadinessEvidenceRole;
   eligibility?: FleetReadinessEvidenceEligibility;
   applicability?: FleetReadinessEvidenceApplicability;
+  actionSynthesis?: 'eligible' | 'observational-only';
   evidenceQuality?: FleetReadinessEvidenceQuality;
 }
 
@@ -5781,6 +5782,9 @@ function evidenceReadinessSource(input: {
   /** Whether source degradation may synthesize FleetNextAction records. */
   actionSynthesis?: 'eligible' | 'observational-only';
 }): FleetReadinessSourceHealth {
+  const actionSynthesis = input.role === 'forensics' || input.actionSynthesis === 'observational-only'
+    ? 'observational-only'
+    : 'eligible';
   if (input.applicable === false) {
     const source = readinessSource(
       input.id,
@@ -5797,10 +5801,11 @@ function evidenceReadinessSource(input: {
       evidenceRole: input.role,
       eligibility: 'not-applicable',
       applicability: 'disabled',
+      actionSynthesis,
     };
   }
   const quality = input.quality;
-  const observational = input.role === 'forensics' || input.actionSynthesis === 'observational-only';
+  const observational = actionSynthesis === 'observational-only';
   const degraded = !quality || quality.sourceState === 'degraded' || !quality.complete;
   const missing = quality?.sourceState === 'missing';
   const eligibility: FleetReadinessEvidenceEligibility = observational
@@ -5837,6 +5842,7 @@ function evidenceReadinessSource(input: {
     evidenceRole: input.role,
     eligibility,
     applicability: input.applicability ?? 'optional',
+    actionSynthesis,
     ...(quality ? { evidenceQuality: { ...quality, stopReasons: [...quality.stopReasons] } } : {}),
   };
 }
@@ -5869,8 +5875,9 @@ function learningEvidenceReadinessSources(
       quality: autonomyEvidenceQuality, generatedAt, applicability: 'required',
     }),
     evidenceReadinessSource({
-      id: 'decisions', label: 'Unsigned Decision Ledger', role: 'merge-authority',
-      quality: status.decisionsSource, generatedAt, applicability: 'required',
+      id: 'decisions', label: 'Unsigned Decision Observations', role: 'learning',
+      quality: status.decisionsSource, generatedAt, applicability: 'optional',
+      actionSynthesis: 'observational-only',
     }),
     evidenceReadinessSource({
       id: 'judge-traces', label: 'Judge Outcomes', role: 'learning',

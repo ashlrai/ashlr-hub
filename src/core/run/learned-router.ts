@@ -1007,8 +1007,25 @@ export function evaluateRoutingLearningAuthority(
   if (!input.assignments.authenticated) blockers.add('assignment-authenticity-unavailable');
   if (!input.assignments.denominatorComplete) blockers.add('assignment-denominator-incomplete');
 
-  const policies = new Set(input.observedPolicies ?? input.samples.map((sample) => sample.policyVersion));
-  const epochs = new Set(input.observedEpochs ?? input.samples.map((sample) => sample.learningEpoch));
+  const samplePolicies = new Set(input.samples.map((sample) => sample.policyVersion));
+  const sampleEpochs = new Set(input.samples.map((sample) => sample.learningEpoch));
+  const reportedPolicies = input.observedPolicies === undefined
+    ? samplePolicies
+    : new Set(input.observedPolicies);
+  const reportedEpochs = input.observedEpochs === undefined
+    ? sampleEpochs
+    : new Set(input.observedEpochs);
+  const sameSet = (left: ReadonlySet<string>, right: ReadonlySet<string>): boolean =>
+    left.size === right.size && [...left].every((value) => right.has(value));
+  const policiesCorroborated = input.observedPolicies === undefined || sameSet(reportedPolicies, samplePolicies);
+  const epochsCorroborated = input.observedEpochs === undefined || sameSet(reportedEpochs, sampleEpochs);
+  if (!policiesCorroborated) blockers.add('policy-cohort-mismatch');
+  if (!epochsCorroborated) blockers.add('learning-epoch-mismatch');
+
+  // Union the independently reported and receipt-derived cohorts. A caller
+  // cannot hide a mixed sample population behind a narrower summary set.
+  const policies = new Set([...reportedPolicies, ...samplePolicies]);
+  const epochs = new Set([...reportedEpochs, ...sampleEpochs]);
   if (policies.size > 1) blockers.add('mixed-policy-cohort');
   if (epochs.size > 1) blockers.add('mixed-learning-epoch');
 
@@ -1054,7 +1071,7 @@ export function evaluateRoutingLearningAuthority(
 
   const operationalSteering = blockers.size === 0 && eligible.length === input.samples.length &&
     eligible.length === input.observedSamples && eligible.length > 0 &&
-    policies.size === 1 && epochs.size === 1;
+    policiesCorroborated && epochsCorroborated && policies.size === 1 && epochs.size === 1;
   return {
     version: 1,
     state: operationalSteering ? 'eligible' : 'inactive',
@@ -1069,8 +1086,8 @@ export function evaluateRoutingLearningAuthority(
       minimumPerStratum: LEARNED_ROUTING_MIN_SAMPLES,
     },
     cohort: {
-      policyVersion: policies.size === 1 ? [...policies][0] ?? null : null,
-      learningEpoch: epochs.size === 1 ? [...epochs][0] ?? null : null,
+      policyVersion: policiesCorroborated && policies.size === 1 ? [...policies][0] ?? null : null,
+      learningEpoch: epochsCorroborated && epochs.size === 1 ? [...epochs][0] ?? null : null,
     },
     blockerCodes: [...blockers].sort(),
   };

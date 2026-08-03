@@ -71,6 +71,7 @@ import type { FrontierUsage } from './usage/frontier-usage.js';
 import type { ProductionSummary, IntelligenceSummary } from './types.js';
 import type { ProposalSourceQuality, ProposalsReadResult } from './inbox/store.js';
 import type { DecisionSourceQuality, DecisionsReadResult } from './fleet/decisions-ledger.js';
+import type { RoutingLearningAuthority } from './run/learned-router.js';
 import { realizedMergeOf } from './inbox/realized-merge.js';
 
 /** Additive dashboard contracts; legacy DashboardSnapshot producers remain valid. */
@@ -84,6 +85,8 @@ export interface DashboardIntelligenceSummary extends IntelligenceSummary {
   proposalSourceQuality: ProposalSourceQuality;
   /** Quality of the decisions ledger behind scorecards and recent events. */
   decisionSourceQuality: DecisionSourceQuality;
+  /** Admission truth for whether diagnostic routing scores may steer runtime. */
+  routingLearningAuthority: RoutingLearningAuthority;
 }
 
 export interface DashboardDaemonObservation extends PublicDaemonObservation {
@@ -117,6 +120,35 @@ function degradedDecisionSource(): DecisionSourceQuality {
     sourceState: 'degraded', sourcePresent: false, complete: false,
     stopReasons: ['io-error'], filesRead: 0, bytesRead: 0, rowsScanned: 0,
     invalidRows: 0, unreadableFiles: 1,
+  };
+}
+
+function unavailableRoutingLearningAuthority(): RoutingLearningAuthority {
+  return {
+    version: 1,
+    state: 'inactive',
+    operationalSteering: false,
+    sourceQuality: {
+      decisions: {
+        sourceState: 'degraded', sourcePresent: false, complete: false, authenticated: false,
+      },
+      assignments: {
+        sourceState: 'degraded', sourcePresent: false, complete: false,
+        denominatorComplete: false, authenticated: false,
+      },
+    },
+    samples: { observed: 0, eligible: 0, minimumPerStratum: 5 },
+    cohort: { policyVersion: null, learningEpoch: null },
+    blockerCodes: [
+      'decision-source-missing',
+      'decision-source-degraded',
+      'decision-authenticity-unavailable',
+      'assignment-source-missing',
+      'assignment-source-degraded',
+      'assignment-authenticity-unavailable',
+      'assignment-denominator-incomplete',
+      'sample-floor-unmet',
+    ],
   };
 }
 
@@ -476,7 +508,10 @@ const SCORE_TASK_CLASSES = ['issue', 'todo', 'lint', 'test', 'ci', 'dep', '*'];
  * ALL READ-ONLY. NEVER throws — any failure degrades to empty arrays.
  * Lazily imported so pre-M242 tests that mock only base sources stay valid.
  */
-async function buildIntelligence(generatedAt: string): Promise<DashboardIntelligenceSummary> {
+async function buildIntelligence(
+  generatedAt: string,
+  routingLearningAuthority?: RoutingLearningAuthority,
+): Promise<DashboardIntelligenceSummary> {
   const summary: DashboardIntelligenceSummary = {
     generatedAt,
     routingScores: [],
@@ -485,6 +520,7 @@ async function buildIntelligence(generatedAt: string): Promise<DashboardIntellig
     recentEvents: [],
     proposalSourceQuality: degradedProposalSource(),
     decisionSourceQuality: degradedDecisionSource(),
+    routingLearningAuthority: routingLearningAuthority ?? unavailableRoutingLearningAuthority(),
   };
 
   let intelligenceProposals: Proposal[] | null = null;
@@ -528,11 +564,17 @@ async function buildIntelligence(generatedAt: string): Promise<DashboardIntellig
           taskClass,
           score: s.score,
           samples: s.samples,
-          trend: s.score > 0.55 ? 'promoted' : s.score < 0.45 ? 'demoted' : 'neutral',
+          trend: summary.routingLearningAuthority.operationalSteering
+            ? s.score > 0.55
+              ? 'promoted'
+              : s.score < 0.45
+                ? 'demoted'
+                : 'neutral'
+            : 'observational',
         });
       }
     }
-    // Sort: promoted first, then by score desc
+    // Diagnostic ordering remains visible even when authority is inactive.
     rows.sort((a, b) => b.score - a.score);
     summary.routingScores = rows.slice(0, MAX_ROUTING_SCORES);
   } catch {
@@ -930,7 +972,7 @@ export async function buildSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshot
   // Absent on pre-M242 producers/tests so they stay valid.
   let intelligence: DashboardIntelligenceSummary | undefined;
   try {
-    intelligence = await buildIntelligence(generatedAt);
+    intelligence = await buildIntelligence(generatedAt, fleet?.routingLearningAuthority);
   } catch {
     intelligence = undefined;
   }

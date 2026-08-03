@@ -261,29 +261,34 @@ describe('M242 — intelligence panel in buildSnapshot', () => {
     expect(Array.isArray(intel.antiPlaybooks)).toBe(true);
     expect(Array.isArray(intel.engineScorecards)).toBe(true);
     expect(Array.isArray(intel.recentEvents)).toBe(true);
+    expect(intel).toHaveProperty('routingLearningAuthority');
   });
 
   // ── M240: Learned routing scores ────────────────────────────────────────
 
-  it('routingScores maps EngineScore to trend correctly', async () => {
+  it('keeps routing scores observational while operational learning authority is inactive', async () => {
     const intel = (await snapshotWithIntelligence()).intelligence!;
-    // claude:opus score=0.85 → promoted
     const opus = intel.routingScores.find(r => r.key === 'claude:opus');
     expect(opus).toBeDefined();
     expect(opus!.engine).toBe('claude');
     expect(opus!.model).toBe('opus');
     expect(opus!.score).toBe(0.85);
-    expect(opus!.trend).toBe('promoted');
+    expect(opus!.trend).toBe('observational');
 
-    // codex score=0.30 → demoted
     const codex = intel.routingScores.find(r => r.key === 'codex');
     expect(codex).toBeDefined();
-    expect(codex!.trend).toBe('demoted');
+    expect(codex!.trend).toBe('observational');
 
-    // claude:sonnet score=0.55 → neutral (between 0.45 and 0.55)
     const sonnet = intel.routingScores.find(r => r.key === 'claude:sonnet');
     expect(sonnet).toBeDefined();
-    expect(sonnet!.trend).toBe('neutral');
+    expect(sonnet!.trend).toBe('observational');
+    expect((intel as typeof intel & {
+      routingLearningAuthority: { state: string; operationalSteering: boolean; sourceQuality: unknown };
+    }).routingLearningAuthority).toMatchObject({
+      state: 'inactive',
+      operationalSteering: false,
+      sourceQuality: expect.any(Object),
+    });
   });
 
   it('routingScores are sorted highest score first', async () => {

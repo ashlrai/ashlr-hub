@@ -776,8 +776,11 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const decisionEvidence = status.autonomousShipReadiness?.evidenceMatrix?.sources
       .find((source) => source.id === 'decisions');
     expect(decisionEvidence).toMatchObject({
-      label: 'Unsigned Decision Ledger',
-      evidenceRole: 'merge-authority',
+      label: 'Unsigned Decision Observations',
+      evidenceRole: 'learning',
+      eligibility: 'observational',
+      applicability: 'optional',
+      actionSynthesis: 'observational-only',
     });
   });
 
@@ -7100,10 +7103,10 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       version: 1,
       state: 'cold-start',
       summary: {
-        eligible: 1,
+        eligible: 0,
         'cold-start': 1,
         withheld: 0,
-        observational: 4,
+        observational: 5,
         'not-applicable': 2,
       },
     });
@@ -7295,8 +7298,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       verdict: 'blocked',
       topBlocker: { id: 'merge-authority-incomplete' },
       evidenceMatrix: {
-        state: 'degraded',
-        summary: { withheld: 1 },
+        state: 'cold-start',
+        summary: { withheld: 0, observational: 5 },
       },
     });
     expect(status.autoMergeReadiness).toMatchObject({
@@ -7309,34 +7312,21 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
     expect(decisionEvidence).toMatchObject({
       category: 'evidence',
-      evidenceRole: 'merge-authority',
-      eligibility: 'withheld',
-      applicability: 'required',
+      evidenceRole: 'learning',
+      eligibility: 'observational',
+      applicability: 'optional',
+      actionSynthesis: 'observational-only',
       status: 'degraded',
       evidenceQuality: { complete: false, invalidRows: 1 },
       sourceQuality: { badge: 'degraded-source' },
     });
-    expect(action).toMatchObject({
-      priority: 'medium',
-      commands: [
-        {
-          argv: ['ashlr', 'fleet', 'evidence', 'doctor', 'decisions', '--json'],
-          safety: 'read-only',
-        },
-        {
-          argv: ['ashlr', 'fleet', 'evidence', 'doctor', 'decisions', '--deep', '--json'],
-          safety: 'read-only',
-        },
-        { argv: ['ashlr', 'fleet', 'status', '--json'], safety: 'read-only' },
-      ],
-    });
-    expect(action?.commands?.every((command) => command.endpointPath === undefined)).toBe(true);
-    expect(status.nextActions).toContainEqual(expect.objectContaining({ id: 'inspect-learning-evidence' }));
+    expect(action).toBeUndefined();
+    expect(status.nextActions).not.toContainEqual(expect.objectContaining({ id: 'inspect-learning-evidence' }));
     expect(status.autonomousShipReadiness?.primaryAction).not.toMatchObject({ id: 'drain-ready-auto-merges' });
     expect(status.nextActions?.map((candidate) => candidate.id)).not.toContain('drain-ready-auto-merges');
   });
 
-  it('keeps evidence diagnosis secondary to eligible operational backlog work', async () => {
+  it('does not synthesize actions from observational decision evidence over backlog work', async () => {
     const repo = join(tmpHome, 'repo');
     mkdirSync(repo, { recursive: true });
     writeBacklogSnapshot(tmpHome, repo, [makeBacklogItem(repo, 'repo:goal:evidence-order', 'Ship useful work', 5)], new Date().toISOString());
@@ -7348,9 +7338,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const status = await buildFleetStatus(withFoundry({
       autoMerge: { enabled: true, trustBasis: 'verification', maxRisk: 'low' },
     }));
-    expect(status.nextActions?.map((action) => action.id)).toEqual(expect.arrayContaining([
-      'build-backlog', 'inspect-learning-evidence',
-    ]));
+    expect(status.nextActions?.map((action) => action.id)).toContain('build-backlog');
+    expect(status.nextActions?.map((action) => action.id)).not.toContain('inspect-learning-evidence');
     expect(status.autonomousShipReadiness?.primaryAction).toMatchObject({ id: 'build-backlog' });
     expect(status.missionBrief?.directive).toBe('Build the highest-value backlog proposal');
   });
