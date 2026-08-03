@@ -20,6 +20,8 @@ It is also a local unifying harness: one CLI and web dashboard that indexes your
 
 ### Authority defaults
 
+First activation follows a strict order: run `ashlr preflight`, enroll a repo, and complete a dry-run before enabling real daemon generation. Only then review a generated proposal and use `ashlr inbox approve`; merge, deploy, and service-install authority remain separate and default off.
+
 | Path | Default | Required authority | Possible outward effect |
 |------|---------|--------------------|-------------------------|
 | Daemon generation | Enabled only when you run the daemon against enrolled repos | Enrollment, kill-switch clear, budget and sandbox gates | Pending proposal only; no apply, push, PR, deploy, or service mutation |
