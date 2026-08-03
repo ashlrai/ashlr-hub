@@ -1,36 +1,54 @@
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { dirname, extname, join, resolve } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const releaseMocks = vi.hoisted(() => ({
+  parseManifest: vi.fn(),
+  verifyEvidence: vi.fn(),
+  evaluateAdmission: vi.fn(),
+}));
+
+vi.mock('../src/core/daemon/runtime-release-manifest.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/core/daemon/runtime-release-manifest.js')>(),
+  parseUnsignedRuntimeReleaseManifest: releaseMocks.parseManifest,
+}));
+vi.mock('../src/core/daemon/runtime-release-evidence-envelope.js', () => ({
+  verifyRuntimeReleaseEvidenceEnvelope: releaseMocks.verifyEvidence,
+}));
+vi.mock('../src/core/daemon/runtime-release-launch-admission.js', () => ({
+  evaluateRuntimeReleaseLaunchAdmission: releaseMocks.evaluateAdmission,
+}));
 
 import {
-  inspectArtifactPackaging,
   inspectProductionActivationReadinessV1,
-  type ProductionActivationReadinessDependenciesV1,
-  type ProductionArtifactPackagingObservationV1,
 } from '../src/core/daemon/production-activation-readiness.js';
-import type { DaemonActivationReadiness } from '../src/core/daemon/activation-permit.js';
-import type { ReleaseTipSettlementReadResult } from '../src/core/daemon/release-current-tip-store.js';
-import type { ResidentServiceDiagnostic } from '../src/core/daemon/resident-service-readiness.js';
-import type { RuntimeReleaseLaunchAdmissionDecision } from '../src/core/daemon/runtime-release-launch-admission.js';
+import {
+  observeProductionArtifactPackagingV1,
+} from '../src/core/daemon/production-activation-observations.js';
 import type { RuntimeReleaseLaunchObservationOptions } from '../src/core/daemon/runtime-release-launch-revalidation.js';
 import type { UnsignedRuntimeReleaseManifest } from '../src/core/daemon/runtime-release-manifest.js';
-import type { AshlrConfig } from '../src/core/types.js';
 
 const MANIFEST_DIGEST = 'a'.repeat(64);
 const REVISION = 'b'.repeat(40);
+const KEY_ID = `ed25519-sha256:${'c'.repeat(64)}`;
 const roots: string[] = [];
 
-const compatiblePackaging: ProductionArtifactPackagingObservationV1 = {
-  state: 'compatible',
-  packageManifestPresent: true,
-  sourceLockfilePresent: true,
-  publishableLockfilePresent: true,
-  installedDependencyTreePresent: true,
-  packedLockfileEvidence: 'present',
-  packedDependencyEvidence: 'complete',
-  reason: 'fixture packaging evidence is complete',
-};
+function packageFixture(options: { lockfile?: boolean; dependencies?: boolean } = {}): string {
+  const root = mkdtempSync(join(tmpdir(), 'ashlr-production-readiness-'));
+  roots.push(root);
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ name: '@ashlr/hub', version: '3.1.0' }));
+  if (options.lockfile !== false) writeFileSync(join(root, 'package-lock.json'), '{}\n');
+  if (options.dependencies !== false) mkdirSync(join(root, 'node_modules'));
+  return root;
+}
 
 function launchInput(): RuntimeReleaseLaunchObservationOptions {
   return {
@@ -40,8 +58,8 @@ function launchInput(): RuntimeReleaseLaunchObservationOptions {
     dependencyRoot: '/release/node_modules',
     envelope: Buffer.from('envelope'),
     executablePath: '/release/node',
-    expectedEnvelopeCanonicalSha256: 'c'.repeat(64),
-    expectedKeyId: `ed25519-sha256:${'d'.repeat(64)}`,
+    expectedEnvelopeCanonicalSha256: 'd'.repeat(64),
+    expectedKeyId: KEY_ID,
     expectedManifestDigest: MANIFEST_DIGEST,
     expectedPolicyId: `sha256:${'e'.repeat(64)}`,
     expectedRevision: REVISION,
@@ -59,19 +77,31 @@ function manifest(): UnsignedRuntimeReleaseManifest {
   return {
     manifestDigest: MANIFEST_DIGEST,
     expectedRevision: REVISION,
-    rollbackDeclaration: {
-      resolution: 'unresolved',
-      source: 'caller-declared',
-      targetManifestDigest: null,
-    },
   } as UnsignedRuntimeReleaseManifest;
 }
 
-function launchDecision(
-  code = 'atomic-launch-handoff-absent',
-  detail = 'atomic launch handoff is absent',
-): RuntimeReleaseLaunchAdmissionDecision {
-  return {
+function healthyResident(findings: Array<{ code: unknown; detail?: unknown }> = []) {
+  return { diagnosticStatus: 'blocked' as const, findings };
+}
+
+function healthyTip(stopReasons: unknown[] = []) {
+  return { sourceState: 'healthy' as const, complete: true, stopReasons };
+}
+
+beforeEach(() => {
+  releaseMocks.parseManifest.mockReturnValue({ ok: true, manifest: manifest(), canonicalJson: '{}\n' });
+  releaseMocks.verifyEvidence.mockReturnValue({
+    ok: true,
+    assurance: 'signed-observation-only',
+    expiresAt: '2026-08-03T01:00:00.000Z',
+    issuedAt: '2026-08-03T00:00:00.000Z',
+    keyId: KEY_ID,
+    manifestDigest: MANIFEST_DIGEST,
+    expectedRevision: REVISION,
+    rollbackTargetManifestDigest: null,
+    verifiedAtMs: 1,
+  });
+  releaseMocks.evaluateAdmission.mockReturnValue({
     schemaVersion: 2,
     authority: 'observation-only',
     verdict: 'blocked',
@@ -81,238 +111,214 @@ function launchDecision(
     launchPermitted: false,
     rollbackPermitted: false,
     startPermitted: false,
-    blockers: [{ code, detail }] as RuntimeReleaseLaunchAdmissionDecision['blockers'],
-    evidence: {
-      atomicLaunchHandoff: 'absent-descriptors-closed',
-      callerPinnedEnvelope: 'canonical-digest-and-key-id',
-      closedByteIdentityObservation: 'not-completed',
-      contentAddressedRelease: 'caller-pinned-staged-tree-identity',
-      launchConsumer: 'absent',
-      launchObservation: 'failed',
-      launchObservationReceiptSha256: null,
-      manifestDigest: null,
-      mutationAfterObservation: 'not-prevented',
-      policyAuthority: 'caller-pinned-unsigned',
-      replayPrevention: 'absent-no-durable-consumption-store',
-      revisionBinding: 'unobserved',
-      stagedTreeIdentity: null,
-      trustRootAuthority: 'caller-provided-not-activation-root',
-    },
-    rollback: { resolution: 'unobserved', source: 'unobserved', targetManifestDigest: null },
-  };
-}
-
-function activation(state: 'ready' | 'blocked' | 'degraded' = 'blocked'): DaemonActivationReadiness {
-  return {
-    schemaVersion: 1,
-    policyVersion: 'm461-proposal-once-v1',
-    authority: 'observation-only',
-    sourceState: state === 'degraded' ? 'degraded' : 'healthy',
-    state,
-    commandEligible: state === 'ready',
-    requestedShape: 'proposal-once',
-    trustRootCount: state === 'ready' ? 1 : 0,
-    residentAuthorized: false,
-    installAuthorized: false,
-    repairAuthorized: false,
-    reason: state === 'ready' ? 'valid-proposal-once-permit' : 'no-trusted-activation-roots',
-  };
-}
-
-function resident(): ResidentServiceDiagnostic {
-  return {
-    schemaVersion: 5,
-    scope: 'observation-only-diagnostic',
-    diagnosticStatus: 'blocked',
-    lifecycleAuthority: 'none',
-    operationalAuthority: false,
-    serviceLabel: 'ai.ashlr.daemon',
-    declaredReleaseIdentity: REVISION,
-    localChecks: {} as ResidentServiceDiagnostic['localChecks'],
-    findings: [],
-  };
-}
-
-function releaseTip(): ReleaseTipSettlementReadResult {
-  return {
-    settlements: [],
-    currentTip: null,
-    sourceState: 'healthy',
-    availability: 'available',
-    sourcePresent: true,
-    complete: true,
-    stopReasons: [],
-    filesRead: 1,
-    bytesRead: 100,
-    invalidFiles: 0,
-    limitExceeded: false,
-    authority: 'observation-only',
-    sameUserTamperResistant: false,
-    transparencyAuthority: false,
-    rollbackProtected: false,
-    currentTipAuthority: false,
-    continuityAuthority: false,
-    durableCompareAndSwapVerified: false,
-    bootstrapContinuityVerified: false,
-    releaseAuthority: false,
-    mergePermitted: false,
-    deployPermitted: false,
-    installPermitted: false,
-    startPermitted: false,
-    activationPermitted: false,
-    rollbackPermitted: false,
-  };
-}
-
-function dependencies(
-  overrides: Partial<ProductionActivationReadinessDependenciesV1> = {},
-): ProductionActivationReadinessDependenciesV1 {
-  return {
-    inspectArtifactPackaging: vi.fn(() => compatiblePackaging),
-    parseManifest: vi.fn(() => ({ ok: true, manifest: manifest(), canonicalJson: '{}\n' })),
-    verifyReleaseEvidence: vi.fn(() => ({
-      ok: true,
-      assurance: 'signed-observation-only',
-      expiresAt: '2026-08-03T01:00:00.000Z',
-      issuedAt: '2026-08-03T00:00:00.000Z',
-      keyId: `ed25519-sha256:${'d'.repeat(64)}`,
-      manifestDigest: MANIFEST_DIGEST,
-      expectedRevision: REVISION,
-      rollbackTargetManifestDigest: null,
-      verifiedAtMs: 1,
-    })),
-    evaluateLaunchAdmission: vi.fn(() => launchDecision()),
-    inspectResidentService: vi.fn(() => resident()),
-    inspectActivation: vi.fn(() => activation()),
-    readReleaseTip: vi.fn(() => releaseTip()),
-    ...overrides,
-  };
-}
+    blockers: [{
+      code: 'atomic-launch-handoff-absent',
+      detail: 'descriptors are closed',
+    }],
+  });
+});
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
-  vi.restoreAllMocks();
+  vi.clearAllMocks();
 });
 
 describe('Production Activation Readiness V1', () => {
-  it('reports the npm packaging incompatibility before any authority claim', () => {
-    const root = mkdtempSync(join(tmpdir(), 'ashlr-production-packaging-'));
-    roots.push(root);
-    writeFileSync(join(root, 'package.json'), JSON.stringify({ name: '@ashlr/hub', files: ['dist', 'bin'] }));
-    writeFileSync(join(root, 'package-lock.json'), '{}\n');
-    mkdirSync(join(root, 'node_modules'));
+  it('observes present runtime packaging requirements without npm assumptions', () => {
+    const root = packageFixture();
 
-    const packaging = inspectArtifactPackaging(root);
-    const report = inspectProductionActivationReadinessV1({ packageRoot: root }, dependencies({
-      inspectArtifactPackaging: () => packaging,
-    }));
-
-    expect(packaging).toMatchObject({
-      state: 'incompatible',
-      sourceLockfilePresent: true,
-      installedDependencyTreePresent: true,
-      packedLockfileEvidence: 'missing',
-      packedDependencyEvidence: 'missing',
+    expect(observeProductionArtifactPackagingV1(root)).toEqual({
+      sourceState: 'healthy',
+      complete: true,
+      state: 'requirements-present',
+      packageManifest: 'present',
+      lockfileEvidence: 'package-lock',
+      installedDependencyTree: 'present-unattested',
+      expectation: {
+        schemaVersion: 1,
+        packageManifestPath: 'package.json',
+        lockfilePath: 'package-lock.json',
+        installedDependencyRootPath: 'node_modules',
+      },
+      reasonCode: 'observed',
     });
+  });
+
+  it.each([
+    { options: { lockfile: false }, reasonCode: 'lockfile-missing' },
+    { options: { dependencies: false }, reasonCode: 'dependency-tree-missing' },
+  ])('reports missing packaged evidence from the actual runtime tree: $reasonCode', ({ options, reasonCode }) => {
+    const observation = observeProductionArtifactPackagingV1(packageFixture(options));
+
+    expect(observation).toMatchObject({
+      sourceState: 'missing',
+      complete: false,
+      state: 'requirements-missing',
+      reasonCode,
+    });
+    const report = inspectProductionActivationReadinessV1({ packageRoot: roots.at(-1) });
     expect(report.topBlocker.code).toBe('artifact-packaging-incompatible');
-    expect(report.topBlocker.detail).toContain('npm published artifacts exclude package-lock.json');
-    expect(Object.values(report.authorityFlags).every((value) => value === false)).toBe(true);
+    expect(report.sourceQuality.reasons).toContain('artifact-packaging');
   });
 
-  it('fails closed when a caller-rooted release signature is forged', () => {
-    const deps = dependencies({
-      verifyReleaseEvidence: vi.fn(() => ({ ok: false, reason: 'runtime release evidence signature invalid' })),
+  it('keeps healthy complete evidence separate from a blocked policy verdict', () => {
+    const report = inspectProductionActivationReadinessV1({
+      packageRoot: packageFixture(),
+      launchObservation: launchInput(),
+      residentServiceDiagnostic: healthyResident(),
+      releaseTipObservation: healthyTip(),
     });
 
-    const report = inspectProductionActivationReadinessV1({
-      config: {} as AshlrConfig,
-      launchObservation: launchInput(),
-      residentService: {} as never,
-    }, deps);
-
-    expect(report.topBlocker).toMatchObject({ code: 'release-evidence-invalid', source: 'release' });
-    expect(report.observations.releaseEvidence).toEqual({
-      state: 'invalid',
-      keyId: null,
-      reason: 'runtime release evidence signature invalid',
+    expect(report.sourceQuality).toEqual({
+      sourceState: 'healthy',
+      complete: true,
+      reasons: [],
     });
     expect(report.verdict).toBe('blocked');
-    expect(report.authorityFlags.activationPermitted).toBe(false);
-  });
-
-  it('preserves replacement detection from closed launch revalidation', () => {
-    const report = inspectProductionActivationReadinessV1({
-      config: {} as AshlrConfig,
-      launchObservation: launchInput(),
-      releaseScopeDigest: MANIFEST_DIGEST,
-      residentService: {} as never,
-    }, dependencies({
-      evaluateLaunchAdmission: vi.fn(() => launchDecision(
-        'launch-observation-failed',
-        'runtime release staged tree identity changed during launch revalidation',
-      )),
-    }));
-
     expect(report.topBlocker.code).toBe('launch-admission-blocked');
-    expect(report.observations.launchAdmission).toMatchObject({
-      state: 'observed-blocked',
-      blockerCodes: ['launch-observation-failed'],
-    });
-    expect(report.observations.launchAdmission.reason).toContain('identity changed');
-    expect(Object.values(report.authorityFlags)).toEqual(expect.not.arrayContaining([true]));
-  });
-
-  it('does not promote optimistic advisory inputs into lifecycle authority', () => {
-    const report = inspectProductionActivationReadinessV1({
-      config: {} as AshlrConfig,
-      launchObservation: launchInput(),
-      releaseScopeDigest: MANIFEST_DIGEST,
-      residentService: {} as never,
-    }, dependencies({ inspectActivation: vi.fn(() => activation('ready')) }));
-
-    expect(report.observations.activationPermit).toMatchObject({
-      state: 'blocked',
-      trustRootCount: 1,
-    });
-    expect(report.observations.releaseTip.state).toBe('observed-untrusted');
-    expect(report.blockers.map(({ code }) => code)).toContain('production-authority-chain-absent');
-    expect(report.verdict).toBe('blocked');
+    expect(report.blockers.map(({ code }) => code)).toEqual(expect.arrayContaining([
+      'activation-permit-blocked',
+      'release-tip-untrusted',
+      'production-authority-chain-absent',
+    ]));
     expect(Object.values(report.authorityFlags).every((value) => value === false)).toBe(true);
   });
 
-  it('reports missing inputs without invoking unavailable observers', () => {
-    const deps = dependencies();
-    const report = inspectProductionActivationReadinessV1({}, deps);
+  it('fails closed on forged release evidence without forwarding its detail', () => {
+    const hostile = '/Users/operator/.ssh/id_ed25519 token=super-secret';
+    releaseMocks.verifyEvidence.mockReturnValue({ ok: false, reason: hostile });
 
-    expect(report.topBlocker.code).toBe('release-manifest-unavailable');
-    expect(deps.parseManifest).not.toHaveBeenCalled();
-    expect(deps.verifyReleaseEvidence).not.toHaveBeenCalled();
-    expect(deps.evaluateLaunchAdmission).not.toHaveBeenCalled();
-    expect(deps.inspectResidentService).not.toHaveBeenCalled();
-    expect(deps.inspectActivation).not.toHaveBeenCalled();
-    expect(deps.readReleaseTip).not.toHaveBeenCalled();
-    expect(report.sourceQuality).toMatchObject({ sourceState: 'degraded', complete: false });
+    const report = inspectProductionActivationReadinessV1({
+      packageRoot: packageFixture(),
+      launchObservation: launchInput(),
+      residentServiceDiagnostic: healthyResident(),
+      releaseTipObservation: healthyTip(),
+    });
+    const serialized = JSON.stringify(report);
+
+    expect(report.topBlocker.code).toBe('release-evidence-invalid');
+    expect(report.observations.releaseEvidence).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      reasonCode: 'release-evidence-invalid',
+      keyId: null,
+    });
+    expect(serialized).not.toContain('/Users/operator');
+    expect(serialized).not.toContain('super-secret');
   });
 
-  it('has a static read-only import and call boundary', () => {
+  it('preserves replacement classification but scrubs hostile launch detail', () => {
+    releaseMocks.evaluateAdmission.mockReturnValue({
+      blockers: [{
+        code: 'launch-observation-failed',
+        detail: '/private/release changed; Authorization: Bearer secret-value',
+      }],
+    });
+
+    const report = inspectProductionActivationReadinessV1({
+      packageRoot: packageFixture(),
+      launchObservation: launchInput(),
+      residentServiceDiagnostic: healthyResident(),
+      releaseTipObservation: healthyTip(),
+    });
+    const serialized = JSON.stringify(report);
+
+    expect(report.observations.launchAdmission.blockerCodes).toEqual(['launch-observation-failed']);
+    expect(report.blockers.find(({ code }) => code === 'launch-admission-blocked')?.detail)
+      .toBe('Closed launch admission remains observation-only and blocked.');
+    expect(serialized).not.toContain('/private/release');
+    expect(serialized).not.toContain('secret-value');
+  });
+
+  it('drops hostile resident and release-tip fields from daemon-safe output', () => {
+    const report = inspectProductionActivationReadinessV1({
+      packageRoot: packageFixture(),
+      launchObservation: launchInput(),
+      residentServiceDiagnostic: healthyResident([
+        { code: 'service-not-running', detail: '/Users/mason/.env API_KEY=hunter2' },
+        { code: '/Users/mason/private' },
+        { code: 'token-secret-value' },
+      ]),
+      releaseTipObservation: healthyTip([
+        'bootstrap-required',
+        '/Users/mason/.ashlr',
+        'Authorization:Bearer-secret',
+      ]),
+    });
+    const serialized = JSON.stringify(report);
+
+    expect(report.observations.residentService.findingCodes).toEqual(['service-not-running']);
+    expect(report.observations.releaseTip.stopReasons).toEqual(['bootstrap-required']);
+    for (const secret of ['/Users/mason', 'hunter2', 'Bearer-secret', 'API_KEY']) {
+      expect(serialized).not.toContain(secret);
+    }
+  });
+
+  it('derives degraded source quality only from incomplete observations', () => {
+    const report = inspectProductionActivationReadinessV1({ packageRoot: packageFixture() });
+
+    expect(report.sourceQuality).toEqual({
+      sourceState: 'degraded',
+      complete: false,
+      reasons: [
+        'release-manifest',
+        'release-evidence',
+        'launch-admission',
+        'resident-service',
+        'release-tip',
+      ],
+    });
+    expect(report.sourceQuality.reasons).not.toContain('activation-permit-blocked');
+    expect(report.blockers.map(({ code }) => code)).toContain('activation-permit-blocked');
+  });
+
+  it('has no exported dependency callback seam', () => {
     const source = readFileSync(
       new URL('../src/core/daemon/production-activation-readiness.ts', import.meta.url),
       'utf8',
     );
+    expect(source).not.toContain('ProductionActivationReadinessDependencies');
+    expect(source).not.toContain('DEFAULT_DEPENDENCIES');
+    expect(source).not.toMatch(/inspectProductionActivationReadinessV1\([^)]*,\s*dependencies/);
+  });
+
+  it('cannot transitively import lifecycle mutation modules', () => {
+    const sourceRoot = resolve(process.cwd(), 'src');
+    const entry = resolve(sourceRoot, 'core/daemon/production-activation-readiness.ts');
+    const visited = new Set<string>();
+    const pending = [entry];
+    const importRe = /(?:import|export)\s+(?:type\s+)?(?:[\s\S]*?\s+from\s+)?['"]([^'"]+)['"]/g;
+    while (pending.length > 0) {
+      const file = pending.pop()!;
+      if (visited.has(file)) continue;
+      visited.add(file);
+      const source = readFileSync(file, 'utf8');
+      for (const match of source.matchAll(importRe)) {
+        const specifier = match[1]!;
+        if (!specifier.startsWith('.')) continue;
+        const candidate = resolve(dirname(file), specifier.replace(/\.js$/, '.ts'));
+        if (extname(candidate) === '.ts') pending.push(candidate);
+      }
+      expect(visited.size).toBeLessThan(64);
+    }
+
     const forbidden = [
-      "from './service.js'",
-      'ensureRunning(',
-      'install(',
-      'consumeDaemonActivationPermit(',
-      'consumeDaemonActivationPermitForVerification(',
-      'recordReleaseTipSettlement(',
-      'bootstrapReleaseTipSettlement(',
-      'createReleaseTipSettlement(',
+      'core/daemon/service.ts',
+      'core/daemon/activation-permit.ts',
+      'core/daemon/release-current-tip-store.ts',
+      'core/daemon/loop.ts',
+      'core/daemon/launchd-plist-transaction.ts',
+      'core/inbox/merge.ts',
     ];
-    for (const token of forbidden) expect(source).not.toContain(token);
-    expect(source).toContain('inspectDaemonActivationPermit');
-    expect(source).toContain('readReleaseTipSettlements');
-    expect(source).toContain('observeResidentServiceDiagnostic');
-    expect(source).toContain('evaluateRuntimeReleaseLaunchAdmission');
+    const relative = [...visited].map((file) => file.slice(sourceRoot.length + 1));
+    for (const path of forbidden) expect(relative).not.toContain(path);
+    expect(relative).toContain('core/daemon/activation-trust-roots.ts');
+    expect(relative).toContain('core/daemon/runtime-release-launch-revalidation.ts');
+  });
+
+  it('keeps the observation module bounded to expected source files', () => {
+    const files = readdirSync(resolve(process.cwd(), 'src/core/daemon'));
+    expect(files).toContain('production-activation-observations.ts');
+    expect(files).toContain('activation-trust-roots.ts');
   });
 });

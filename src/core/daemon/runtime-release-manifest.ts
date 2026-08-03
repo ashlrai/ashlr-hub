@@ -41,8 +41,15 @@ const READ_CHUNK_BYTES = 64 * 1024;
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const REVISION_RE = /^[a-f0-9]{40}$/;
 const NODE_VERSION_RE = /^v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
-const PACKAGE_MANIFEST_PATH = 'package.json';
-const LOCKFILE_PATH = 'package-lock.json';
+export const RUNTIME_RELEASE_PACKAGING_EXPECTATION_V1 = Object.freeze({
+  schemaVersion: 1 as const,
+  packageManifestPath: 'package.json' as const,
+  lockfilePath: 'package-lock.json' as const,
+  installedDependencyRootPath: 'node_modules' as const,
+});
+
+const PACKAGE_MANIFEST_PATH = RUNTIME_RELEASE_PACKAGING_EXPECTATION_V1.packageManifestPath;
+const LOCKFILE_PATH = RUNTIME_RELEASE_PACKAGING_EXPECTATION_V1.lockfilePath;
 const LAUNCHER_PATH = 'bin/ashlr';
 const RUNTIME_ENTRY_PATH = 'dist/cli/index.js';
 const VERIFIER_RUNNER_PATH = 'scripts/run-verify-command.mjs';

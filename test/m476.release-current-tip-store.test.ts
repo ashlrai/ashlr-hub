@@ -678,7 +678,7 @@ describe('M476 release current tip store', () => {
     }
   });
 
-  it('keeps the dormant store metadata-only and limits consumers to readiness observation', () => {
+  it('keeps the dormant store metadata-only and isolated from operational consumers', () => {
     const sourcePath = join(process.cwd(), 'src/core/daemon/release-current-tip-store.ts');
     const source = readFileSync(sourcePath, 'utf8');
     for (const forbiddenImport of [
@@ -697,18 +697,7 @@ describe('M476 release current tip store', () => {
     const consumers = boundedTypeScriptFiles(join(process.cwd(), 'src'))
       .filter((path) => path !== sourcePath)
       .filter((path) => readFileSync(path, 'utf8').includes('release-current-tip-store'));
-    expect(consumers).toEqual([
-      join(process.cwd(), 'src/core/daemon/production-activation-readiness.ts'),
-    ]);
-    const readinessConsumer = readFileSync(consumers[0]!, 'utf8');
-    expect(readinessConsumer).toContain('readReleaseTipSettlements');
-    for (const writer of [
-      'bootstrapReleaseTipSettlement',
-      'createReleaseTipSettlement',
-      'recordReleaseTipSettlement',
-    ]) {
-      expect(readinessConsumer).not.toContain(writer);
-    }
+    expect(consumers).toEqual([]);
 
     const first = bootstrap();
     const serialized = JSON.stringify(first.candidate);

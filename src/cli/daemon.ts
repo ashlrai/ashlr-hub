@@ -198,30 +198,49 @@ function unavailableProductionActivationReadiness(): ProductionActivationReadine
     },
     observations: {
       artifactPackaging: {
+        sourceState: 'missing',
+        complete: false,
         state: 'unavailable',
-        packageManifestPresent: false,
-        sourceLockfilePresent: false,
-        publishableLockfilePresent: false,
-        installedDependencyTreePresent: false,
-        packedLockfileEvidence: 'unknown',
-        packedDependencyEvidence: 'unknown',
-        reason: 'production activation readiness inspection is unavailable',
+        packageManifest: 'missing',
+        lockfileEvidence: 'missing',
+        installedDependencyTree: 'missing',
+        expectation: {
+          schemaVersion: 1,
+          packageManifestPath: 'package.json',
+          lockfilePath: 'package-lock.json',
+          installedDependencyRootPath: 'node_modules',
+        },
+        reasonCode: 'artifact-root-unavailable',
       },
-      releaseManifest: { state: 'unavailable', manifestDigest: null, reason: 'unavailable' },
-      releaseEvidence: { state: 'unavailable', keyId: null, reason: 'unavailable' },
-      launchAdmission: { state: 'unavailable', blockerCodes: [], reason: 'unavailable' },
-      residentService: { state: 'unavailable', findingCodes: [], reason: 'unavailable' },
+      releaseManifest: {
+        sourceState: 'missing', complete: false, reasonCode: 'manifest-unavailable',
+        state: 'unavailable', manifestDigest: null,
+      },
+      releaseEvidence: {
+        sourceState: 'missing', complete: false, reasonCode: 'release-evidence-unavailable',
+        state: 'unavailable', keyId: null,
+      },
+      launchAdmission: {
+        sourceState: 'missing', complete: false, reasonCode: 'launch-admission-unavailable',
+        state: 'unavailable', blockerCodes: [],
+      },
+      residentService: {
+        sourceState: 'missing', complete: false, reasonCode: 'diagnostic-unavailable',
+        state: 'unavailable', findingCodes: [],
+      },
       activationPermit: {
-        state: 'unavailable',
+        sourceState: 'missing',
+        complete: false,
+        state: 'inspection-unavailable',
         trustRootCount: 0,
-        reason: 'unavailable',
+        reasonCode: 'permit-inspection-isolated',
       },
       releaseTip: {
-        state: 'unavailable',
-        sourceState: 'unavailable',
+        sourceState: 'missing',
         complete: false,
+        state: 'unavailable',
         stopReasons: [],
-        reason: 'unavailable',
+        reasonCode: 'tip-unavailable',
       },
     },
   };
@@ -597,9 +616,7 @@ async function cmdDaemonStatus(jsonMode: boolean): Promise<number> {
   const inspectProductionActivationReadiness = await importProductionActivationReadiness();
   if (inspectProductionActivationReadiness) {
     try {
-      productionActivationReadiness = inspectProductionActivationReadiness({
-        ...(config ? { config } : {}),
-      });
+      productionActivationReadiness = inspectProductionActivationReadiness();
     } catch {
       productionActivationReadiness = unavailableProductionActivationReadiness();
     }

@@ -297,9 +297,7 @@ describe('daemon valid flags remain supported', () => {
     });
     expect(effects.loadDaemonStateStrict).toHaveBeenCalledOnce();
     expect(effects.loadDaemonState).not.toHaveBeenCalled();
-    expect(effects.inspectProductionActivationReadiness).toHaveBeenCalledWith({
-      config: expect.any(Object),
-    });
+    expect(effects.inspectProductionActivationReadiness).toHaveBeenCalledWith();
   });
 
   it('keeps a blocked production verdict when readiness inspection fails', async () => {
