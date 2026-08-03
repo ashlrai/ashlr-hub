@@ -150,7 +150,7 @@ describe('M309 explainAutoMergeGate', () => {
     expect(r.reason).toMatch(/no 'judged' decision/);
   });
 
-  it('explains evidence-mode authority without requiring judge evidence', () => {
+  it('explains that host verification alone cannot establish evidence authority', () => {
     const diff = docDiff;
     const r = explainAutoMergeGate(
       proposal({
@@ -176,10 +176,10 @@ describe('M309 explainAutoMergeGate', () => {
       { decisionsForProposal: [] },
     );
 
-    expect(r.mergeable).toBe(true);
-    expect(r.blockers).toEqual([]);
+    expect(r.mergeable).toBe(false);
+    expect(r.blockers.some((blocker) => blocker.code === 'evidence-preflight')).toBe(true);
     expect(r.facts.trustBasis).toBe('evidence');
-    expect(r.reason).toMatch(/satisfied by available read-only evidence/);
+    expect(r.reason).toMatch(/verifier execution authority withheld|observation-only/);
   });
 
   it('explains missing protected remote signal in evidence mode', () => {

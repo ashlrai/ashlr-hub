@@ -32,7 +32,10 @@ import {
   spawnOptionsFor,
   type VerifyCommand,
 } from '../src/core/run/verify-commands.js';
-import { verifyTaskStructured } from '../src/core/run/verify.js';
+import {
+  inspectVerifierEvidenceAuthorityV1,
+  verifyTaskStructured,
+} from '../src/core/run/verify.js';
 import { newUsage } from '../src/core/run/budget.js';
 
 // ---------------------------------------------------------------------------
@@ -116,6 +119,34 @@ function mockClientText(text: string): ProviderClient {
 // ---------------------------------------------------------------------------
 // detectVerifyCommands
 // ---------------------------------------------------------------------------
+
+describe('verifier evidence authority consumer', () => {
+  it('keeps absent authority distinct from host command execution', () => {
+    expect(inspectVerifierEvidenceAuthorityV1(undefined)).toEqual(expect.objectContaining({
+      state: 'withheld',
+      reason: 'authority-input-absent',
+      authority: 'observation-only',
+      evidencePermitted: false,
+    }));
+  });
+
+  it('recomputes malformed composition inputs instead of trusting authority-shaped fields', () => {
+    const forged = {
+      state: 'authorized',
+      authority: 'verifier-evidence-authority',
+      evidencePermitted: true,
+      clockAuthorityVerified: true,
+      replayTransparencyVerified: true,
+    };
+
+    expect(inspectVerifierEvidenceAuthorityV1(forged)).toEqual(expect.objectContaining({
+      state: 'withheld',
+      reason: 'composition-withheld',
+      authority: 'observation-only',
+      evidencePermitted: false,
+    }));
+  });
+});
 
 describe('detectVerifyCommands', () => {
   it('detects typecheck + test scripts using npm when no lockfile', () => {

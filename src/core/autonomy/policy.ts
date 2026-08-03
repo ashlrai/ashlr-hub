@@ -9,6 +9,7 @@
 import type { AshlrConfig } from '../types.js';
 import {
   hasRequiredVerifierManifestBinding,
+  hasVerifierExecutionEvidenceAuthority,
   isLiveRemoteProtectionEvidence,
   type AutonomyEvidencePack,
 } from './evidence-pack.js';
@@ -153,6 +154,9 @@ export function evaluateAutonomyPolicy(
       }
       if (!hasVerificationFreshnessMetadata(pack)) {
         return refuse('evidence main merge requires verification freshness metadata');
+      }
+      if (!hasVerifierExecutionEvidenceAuthority(pack)) {
+        return refuse('evidence main merge requires explicit verifier execution evidence authority');
       }
     }
     return allow(

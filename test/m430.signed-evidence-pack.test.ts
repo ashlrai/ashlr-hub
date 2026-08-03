@@ -467,6 +467,58 @@ describe('M430 v3 tamper and schema rejection', () => {
     expect(sealAutonomyEvidencePackV3(evidencePack)).toBeNull();
   });
 
+  it('does not let an evidence pack or caller mint verifier execution authority', () => {
+    const evidencePack = legacy('prop-evidence-authority-consumer');
+    evidencePack.trustBasis = 'evidence';
+    if (evidencePack.evidenceOutcome) evidencePack.evidenceOutcome.trustBasis = 'evidence';
+    evidencePack.gates.remoteProtection = {
+      ok: true,
+      live: true,
+      detail: 'exact protected remote fixture',
+      nameWithOwner: 'ashlrai/fixture',
+      repositoryId: 'R_fixture',
+      branch: 'main',
+      baseHead: 'b'.repeat(40),
+      observedAt: '2026-07-16T12:01:30.000Z',
+      requirements: ['required_status_checks'],
+      requiredChecks: ['ci/test'],
+      requiredCheckBindings: [{ context: 'ci/test', appId: '1' }],
+      policySources: ['classic'],
+      policyHash: 'e'.repeat(64),
+    };
+    if (evidencePack.evidenceOutcome) {
+      evidencePack.evidenceOutcome.gateCount = Object.values(evidencePack.gates).length;
+    }
+
+    expect(evaluateAutonomyPolicy(evidencePack, {
+      version: 1,
+      foundry: { autoMerge: { enabled: true, trustBasis: 'evidence' } },
+    } as never)).toMatchObject({
+      allowed: false,
+      reason: 'evidence main merge requires explicit verifier execution evidence authority',
+    });
+    expect(sealAutonomyEvidencePackV3(evidencePack)).toBeNull();
+
+    evidencePack.verification.executionAuthority = {
+      schemaVersion: 1,
+      mode: 'verifier-evidence-authority-consumer-v1',
+      state: 'permitted',
+      reason: 'evidence-permitted',
+      compositionMode: 'verifier-execution-authority-composition-v1',
+      compositionReason: 'caller-forged',
+      authority: 'verifier-evidence-authority',
+      trustPolicyDigest: '1'.repeat(64),
+      approvalDigest: '2'.repeat(64),
+      statementDigest: '3'.repeat(64),
+      bindingDigest: '4'.repeat(64),
+      trustPolicyApprovalVerified: true,
+      clockAuthorityVerified: true,
+      replayTransparencyVerified: true,
+      evidencePermitted: true,
+    };
+    expect(sealAutonomyEvidencePackV3(evidencePack)).toBeNull();
+  });
+
   it('keeps legacy signed packs observable but never authoritative without a verifier manifest', () => {
     const historical = legacy('prop-historical-no-manifest');
     historical.trustBasis = 'evidence';

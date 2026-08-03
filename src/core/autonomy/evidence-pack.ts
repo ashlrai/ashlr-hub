@@ -53,6 +53,11 @@ import {
 } from '../foundry/provenance.js';
 import { causalMetadata } from '../learning/causal.js';
 import { buildRequiredVerificationManifest } from '../run/verification-manifest.js';
+import {
+  inspectVerifierEvidenceAuthorityV1,
+  VERIFIER_EVIDENCE_AUTHORITY_CONSUMER_V1,
+  type VerifierEvidenceAuthorityObservationV1,
+} from '../run/verify.js';
 import { fsyncDirectory } from '../util/durability.js';
 import {
   assurePrivateStoragePath,
@@ -108,6 +113,8 @@ export interface AutonomyVerificationEvidence {
   verifiedAt?: string;
   source?: ProposalVerifyResult['source'];
   browser?: ProposalBrowserVerifyEvidence;
+  /** Recomputed signed-composition authority; host command success alone is advisory. */
+  executionAuthority?: VerifierEvidenceAuthorityObservationV1;
 }
 
 export interface AutonomyEvidencePackFields {
@@ -410,6 +417,9 @@ function copyVerificationEvidence(input: AutonomyVerificationEvidence): Autonomy
     ...(input.verifiedAt ? { verifiedAt: input.verifiedAt } : {}),
     ...(input.source ? { source: input.source } : {}),
     ...(input.browser ? { browser: copyBrowserEvidence(input.browser) } : {}),
+    ...(input.executionAuthority
+      ? { executionAuthority: structuredClone(input.executionAuthority) }
+      : {}),
   };
 }
 
@@ -525,6 +535,46 @@ function strictRemoteProtectionEvidence(value: unknown): value is AutonomyRemote
     identities.add(identity);
     return true;
   });
+}
+
+function strictVerifierExecutionAuthorityEvidence(
+  value: unknown,
+): value is VerifierEvidenceAuthorityObservationV1 {
+  const record = jsonRecord(value);
+  if (!record || !hasOnlyKeys(record, [
+    'schemaVersion', 'mode', 'state', 'reason', 'compositionMode', 'compositionReason',
+    'authority', 'trustPolicyDigest', 'approvalDigest', 'statementDigest', 'bindingDigest',
+    'trustPolicyApprovalVerified', 'clockAuthorityVerified', 'replayTransparencyVerified',
+    'evidencePermitted',
+  ])) return false;
+  const optionalDigest = (entry: unknown): boolean =>
+    entry === null || (typeof entry === 'string' && SHA256_RE.test(entry));
+  return record['schemaVersion'] === 1 &&
+    record['mode'] === VERIFIER_EVIDENCE_AUTHORITY_CONSUMER_V1 &&
+    (record['state'] === 'permitted' || record['state'] === 'withheld') &&
+    ['evidence-permitted', 'authority-input-absent', 'composition-withheld', 'evidence-not-permitted']
+      .includes(String(record['reason'])) &&
+    (record['compositionMode'] === null ||
+      record['compositionMode'] === 'verifier-execution-authority-composition-v1') &&
+    (record['compositionReason'] === null || boundedNonEmptyString(record['compositionReason'], 256)) &&
+    (record['authority'] === 'observation-only' || record['authority'] === 'verifier-evidence-authority') &&
+    optionalDigest(record['trustPolicyDigest']) && optionalDigest(record['approvalDigest']) &&
+    optionalDigest(record['statementDigest']) && optionalDigest(record['bindingDigest']) &&
+    typeof record['trustPolicyApprovalVerified'] === 'boolean' &&
+    typeof record['clockAuthorityVerified'] === 'boolean' &&
+    typeof record['replayTransparencyVerified'] === 'boolean' &&
+    typeof record['evidencePermitted'] === 'boolean' &&
+    (record['state'] === 'permitted'
+      ? record['reason'] === 'evidence-permitted' &&
+        record['compositionMode'] === 'verifier-execution-authority-composition-v1' &&
+        record['authority'] === 'verifier-evidence-authority' &&
+        record['trustPolicyApprovalVerified'] === true &&
+        record['clockAuthorityVerified'] === true &&
+        record['replayTransparencyVerified'] === true &&
+        record['evidencePermitted'] === true &&
+        [record['trustPolicyDigest'], record['approvalDigest'], record['statementDigest'], record['bindingDigest']]
+          .every((entry) => typeof entry === 'string')
+      : record['authority'] === 'observation-only' && record['evidencePermitted'] === false);
 }
 
 function strictVisualEvidence(value: unknown): boolean {
@@ -720,6 +770,7 @@ function strictEvidencePackV3Payload(value: unknown): value is AutonomyEvidenceP
   if (!verification || !hasOnlyKeys(verification, [
     'passed', 'detail', 'commandKinds', 'requiredManifestDigest', 'requiredCommandCount',
     'baseBranch', 'baseHead', 'diffHash', 'verifiedAt', 'source', 'browser',
+    'executionAuthority',
   ]) || typeof verification['passed'] !== 'boolean' ||
     !boundedNonEmptyString(verification['detail'], 16 * 1024) ||
     !Array.isArray(verification['commandKinds']) || verification['commandKinds'].length > 100 ||
@@ -741,7 +792,9 @@ function strictEvidencePackV3Payload(value: unknown): value is AutonomyEvidenceP
       !SHA256_RE.test(verification['diffHash']))) ||
     (verification['verifiedAt'] !== undefined && !canonicalTimestamp(verification['verifiedAt'])) ||
     (verification['source'] !== undefined && !enumString(verification['source'], VERIFY_SOURCES)) ||
-    (verification['browser'] !== undefined && !strictBrowserEvidence(verification['browser']))) return false;
+    (verification['browser'] !== undefined && !strictBrowserEvidence(verification['browser'])) ||
+    (verification['executionAuthority'] !== undefined &&
+      !strictVerifierExecutionAuthorityEvidence(verification['executionAuthority']))) return false;
   if (diff['hash'] !== undefined && verification['diffHash'] !== undefined &&
     diff['hash'] !== verification['diffHash']) return false;
   if (verification['verifiedAt'] !== undefined &&
@@ -887,11 +940,23 @@ export function verifyAutonomyEvidencePackV3(value: unknown): ProvenanceVerdict 
 
 export function sealAutonomyEvidencePackV3(
   pack: AutonomyEvidencePackLegacy,
+  opts: { verifierExecutionAuthorityInput?: unknown } = {},
 ): SignedAutonomyEvidencePackV3 | null {
   try {
     if (!isAutonomyEvidencePackLegacy(pack)) return null;
     if (pack.trustBasis === 'evidence' && !hasRequiredVerifierManifestBinding(pack)) return null;
-    const payload = { ...pack, version: 3 } as AutonomyEvidencePackV3Payload;
+    const executionAuthority = pack.trustBasis === 'evidence'
+      ? inspectVerifierEvidenceAuthorityV1(opts.verifierExecutionAuthorityInput)
+      : pack.verification.executionAuthority;
+    if (pack.trustBasis === 'evidence' && executionAuthority?.evidencePermitted !== true) return null;
+    const payload = {
+      ...pack,
+      version: 3,
+      verification: {
+        ...pack.verification,
+        ...(executionAuthority ? { executionAuthority } : {}),
+      },
+    } as AutonomyEvidencePackV3Payload;
     if (!strictEvidencePackV3Payload(payload)) return null;
     const signedPayload = signEvidencePackPayloadV3(payload);
     if (!signedPayload) return null;
@@ -907,6 +972,7 @@ export function sealAutonomyEvidencePackV3(
 
 export function buildSignedAutonomyEvidencePackV3(
   input: BuildAutonomyEvidenceInput,
+  opts: { verifierExecutionAuthorityInput?: unknown } = {},
 ): SignedAutonomyEvidencePackV3 | null {
   const rawDiff = input.proposal.diff ?? '';
   const derivedDiffHash = hashDiff(rawDiff);
@@ -917,7 +983,7 @@ export function buildSignedAutonomyEvidencePackV3(
   }
   const pack = buildAutonomyEvidencePack(input);
   if (rawDiff.length > 0) pack.diff.hash = derivedDiffHash;
-  return sealAutonomyEvidencePackV3(pack);
+  return sealAutonomyEvidencePackV3(pack, opts);
 }
 
 interface EvidenceDirectoryEntry {
@@ -1466,6 +1532,24 @@ export function hasRequiredVerifierManifestBinding(pack: AutonomyEvidencePack): 
   );
 }
 
+/** Historical packs remain observable, but only an explicit composed permit is authoritative. */
+export function hasVerifierExecutionEvidenceAuthority(
+  pack: AutonomyEvidencePack,
+): boolean {
+  const authority = pack.verification.executionAuthority;
+  return authority !== undefined &&
+    authority.state === 'permitted' &&
+    authority.reason === 'evidence-permitted' &&
+    authority.compositionMode === 'verifier-execution-authority-composition-v1' &&
+    authority.authority === 'verifier-evidence-authority' &&
+    authority.trustPolicyApprovalVerified === true &&
+    authority.clockAuthorityVerified === true &&
+    authority.replayTransparencyVerified === true &&
+    authority.evidencePermitted === true &&
+    [authority.trustPolicyDigest, authority.approvalDigest, authority.statementDigest, authority.bindingDigest]
+      .every((digest) => typeof digest === 'string' && SHA256_RE.test(digest));
+}
+
 /**
  * Recompute the required verifier contract from the live proposal metadata.
  * Only its digest and count are compared; raw argv/cwd never enter evidence.
@@ -1527,6 +1611,7 @@ export function evidencePackMatchesLiveProposal(
     pack.policy.action === 'merge-main' &&
     pack.verification.passed === true &&
     pack.verification.commandKinds.length > 0 &&
+    hasVerifierExecutionEvidenceAuthority(pack) &&
     evidenceVerifierManifestMatchesProposal(pack, proposal) &&
     (pack.trustBasis !== 'evidence' || isLiveRemoteProtectionEvidence(pack.gates.remoteProtection)) &&
     requiredGates.every((gate) => gate.ok) &&

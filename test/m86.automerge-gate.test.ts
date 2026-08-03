@@ -961,7 +961,10 @@ describe('M86 PURE — evidence safety lane', () => {
     const diff = addFileDiff('docs/evidence-no-command.md', 'doc');
     const p = evidencePatch('m86-evidence-no-command', diff);
     p.verifyResult = { ...p.verifyResult!, detail: 'no commands detected', ran: [] };
-    const r = evaluateEvidenceAutoMergePreflight(p, evidenceCfg(), { remoteAvailable: true });
+    const r = evaluateEvidenceAutoMergePreflight(p, evidenceCfg(), {
+      remoteAvailable: true,
+      requireVerifierExecutionAuthority: false,
+    });
 
     expect(r.authorized).toBe(false);
     expect(r.reason).toMatch(/no verification command evidence|no-command/i);

@@ -21,9 +21,15 @@ import {
   readAutonomyEvidencePack,
   sealAutonomyEvidencePackV3,
   verifyAutonomyEvidencePackV3,
+  type AutonomyEvidencePackLegacy,
+  type SignedAutonomyEvidencePackV3,
 } from '../src/core/autonomy/evidence-pack.js';
 import { evaluateAutonomyPolicy } from '../src/core/autonomy/policy.js';
-import { hashDiff } from '../src/core/foundry/provenance.js';
+import {
+  hashDiff,
+  sealedEvidencePackDigestV3,
+  signEvidencePackPayloadV3,
+} from '../src/core/foundry/provenance.js';
 import { buildRequiredVerificationManifest } from '../src/core/run/verification-manifest.js';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
 import type { VerifyCommand } from '../src/core/run/verify-commands.js';
@@ -139,6 +145,43 @@ function liveRemoteProtection() {
     policySources: ['classic' as const],
     policyHash: 'b'.repeat(64),
   };
+}
+
+function signPermittedAuthorityFixture(
+  draft: AutonomyEvidencePackLegacy,
+): SignedAutonomyEvidencePackV3 {
+  draft.verification.executionAuthority = {
+    schemaVersion: 1,
+    mode: 'verifier-evidence-authority-consumer-v1',
+    state: 'permitted',
+    reason: 'evidence-permitted',
+    compositionMode: 'verifier-execution-authority-composition-v1',
+    compositionReason: 'test-fixture-authorized',
+    authority: 'verifier-evidence-authority',
+    trustPolicyDigest: '1'.repeat(64),
+    approvalDigest: '2'.repeat(64),
+    statementDigest: '3'.repeat(64),
+    bindingDigest: '4'.repeat(64),
+    trustPolicyApprovalVerified: true,
+    clockAuthorityVerified: true,
+    replayTransparencyVerified: true,
+    evidencePermitted: true,
+  };
+  draft.policy = evaluateAutonomyPolicy(draft, cfg());
+  if (draft.evidenceOutcome) {
+    draft.evidenceOutcome.policyAllowed = draft.policy.allowed;
+    draft.evidenceOutcome.policyAction = draft.policy.action;
+    draft.evidenceOutcome.policyTier = draft.policy.tier;
+  }
+  const payload = { ...draft, version: 3 as const };
+  const signedPayload = signEvidencePackPayloadV3(payload)!;
+  const signedWithoutSeal = { ...payload, ...signedPayload };
+  const pack = {
+    ...signedWithoutSeal,
+    sealedPackDigest: sealedEvidencePackDigestV3(signedWithoutSeal)!,
+  } as SignedAutonomyEvidencePackV3;
+  expect(verifyAutonomyEvidencePackV3(pack).ok).toBe(true);
+  return pack;
 }
 
 function packFor(id: string, generatedAt: string) {
@@ -360,7 +403,7 @@ describe('M301 evaluateAutonomyPolicy', () => {
     expect(malformedTimestamp.reason).toMatch(/verification freshness metadata/i);
   });
 
-  it('authorizes evidence-mode main merge only for protected remote command-bound evidence', () => {
+  it('keeps protected remote command evidence advisory without verifier execution authority', () => {
     const verdict = evaluateAutonomyPolicy(
       goodPack({
         trustBasis: 'evidence',
@@ -371,10 +414,11 @@ describe('M301 evaluateAutonomyPolicy', () => {
     );
 
     expect(verdict).toMatchObject({
-      tier: 'T4',
-      action: 'merge-main',
-      allowed: true,
+      tier: 'T0',
+      action: 'escalate-human',
+      allowed: false,
     });
+    expect(verdict.reason).toMatch(/verifier execution evidence authority/i);
   });
 
   it('refuses evidence authority when the required verifier manifest binding is absent', () => {
@@ -395,7 +439,7 @@ describe('M301 evaluateAutonomyPolicy', () => {
     expect(sealAutonomyEvidencePackV3(pack)).toBeNull();
   });
 
-  it('binds evidence authority to every required verifier command field and live base/diff', () => {
+  it('keeps host manifests advisory and binds a future permitted pack to every command field', () => {
     const draft = goodPack({
       trustBasis: 'evidence',
       remotePreferred: true,
@@ -414,15 +458,11 @@ describe('M301 evaluateAutonomyPolicy', () => {
       },
     });
     draft.generatedAt = '2026-07-01T00:02:00.000Z';
-    draft.policy = evaluateAutonomyPolicy(draft, cfg());
-    if (draft.evidenceOutcome) {
-      draft.evidenceOutcome.policyAllowed = draft.policy.allowed;
-      draft.evidenceOutcome.policyAction = draft.policy.action;
-      draft.evidenceOutcome.policyTier = draft.policy.tier;
-    }
-    const signed = sealAutonomyEvidencePackV3(draft);
-    expect(signed).not.toBeNull();
+    expect(evaluateAutonomyPolicy(draft, cfg()).reason)
+      .toMatch(/verifier execution evidence authority/i);
+    expect(sealAutonomyEvidencePackV3(draft)).toBeNull();
 
+    const signed = signPermittedAuthorityFixture(draft);
     const live = proposal({
       verifyResult: {
         passed: true,
@@ -436,7 +476,7 @@ describe('M301 evaluateAutonomyPolicy', () => {
       },
     });
     const matches = (candidate: Proposal) => evidencePackMatchesLiveProposal(
-      signed!,
+      signed,
       candidate,
       { nowMs: Date.parse('2026-07-01T00:02:00.000Z') },
     );
@@ -466,30 +506,28 @@ describe('M301 evaluateAutonomyPolicy', () => {
     expect(matches(staleBase)).toBe(false);
   });
 
-  it('recognizes signed v3 evidence while legacy v1 remains non-authoritative', () => {
-    const legacy = goodPack({
+  it('recognizes signed v3 observation while legacy evidence remains non-authoritative', () => {
+    const signedObservation = goodPack();
+    signedObservation.policy = evaluateAutonomyPolicy(signedObservation, cfg());
+    if (signedObservation.evidenceOutcome) {
+      signedObservation.evidenceOutcome.policyAllowed = signedObservation.policy.allowed;
+      signedObservation.evidenceOutcome.policyAction = signedObservation.policy.action;
+      signedObservation.evidenceOutcome.policyTier = signedObservation.policy.tier;
+    }
+    const signed = sealAutonomyEvidencePackV3(signedObservation);
+
+    expect(signed).not.toBeNull();
+    expect(verifyAutonomyEvidencePackV3(signed).ok).toBe(true);
+
+    const legacyEvidence = goodPack({
       trustBasis: 'evidence',
       remotePreferred: true,
       remoteProtection: liveRemoteProtection(),
     });
-    legacy.policy = evaluateAutonomyPolicy(legacy, cfg());
-    if (legacy.evidenceOutcome) {
-      legacy.evidenceOutcome.policyAllowed = legacy.policy.allowed;
-      legacy.evidenceOutcome.policyAction = legacy.policy.action;
-      legacy.evidenceOutcome.policyTier = legacy.policy.tier;
-    }
-    const signed = sealAutonomyEvidencePackV3(legacy);
-
-    expect(signed).not.toBeNull();
-    expect(verifyAutonomyEvidencePackV3(signed).ok).toBe(true);
-    expect(evaluateAutonomyPolicy(signed!, cfg())).toMatchObject({
-      tier: 'T4',
-      action: 'merge-main',
-      allowed: true,
-    });
-
-    legacy.version = 1;
-    expect(evaluateAutonomyPolicy(legacy, cfg()).allowed).toBe(false);
+    legacyEvidence.version = 1;
+    expect(evaluateAutonomyPolicy(legacyEvidence, cfg()).allowed).toBe(false);
+    expect(evaluateAutonomyPolicy(legacyEvidence, cfg()).reason)
+      .toMatch(/remote protection gate|verifier execution evidence authority/i);
   });
 });
 

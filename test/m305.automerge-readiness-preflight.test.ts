@@ -124,6 +124,24 @@ describe('M305 evaluateAutoMergeReadinessPreflight', () => {
     expect(r.reason).toMatch(/max-files-exceeds-policy/);
   });
 
+  it('holds evidence mode before verification when verifier execution authority is absent', () => {
+    const r = evaluateAutoMergeReadinessPreflight(proposal(), cfg({
+      trustBasis: 'evidence',
+      pushToRemote: true,
+      allowWithoutVerification: false,
+      protectedRemote: {
+        branchProtection: true,
+        requiredChecks: [{ context: 'ci/test', appId: '15368' }],
+      },
+    }));
+
+    expect(r).toMatchObject({ ready: false, permanent: false });
+    expect(r.reason).toMatch(/verifier execution authority withheld|observation-only/);
+    expect(r.advisories).toContain(
+      'verification result absent; autoMergeProposal may run verify before the full gate',
+    );
+  });
+
   it('reuses authority, provenance, and risk basics as blockers', () => {
     expect(
       evaluateAutoMergeReadinessPreflight(

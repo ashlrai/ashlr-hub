@@ -771,7 +771,9 @@ describe('M342 evaluateEvidenceGate — pure, no judge evidence required', () =>
 
   it('[E1] suite-green base-bound evidence authorizes without any judged decision', () => {
     const p = evidenceProposal();
-    const r = evaluateEvidenceGate(p, evidenceCfg(), []);
+    const r = evaluateEvidenceGate(p, evidenceCfg(), [], {
+      requireVerifierExecutionAuthority: false,
+    });
 
     expect(r.authorized).toBe(true);
     expect(r.reason).toMatch(/evidence gate cleared/);
@@ -783,7 +785,9 @@ describe('M342 evaluateEvidenceGate — pure, no judge evidence required', () =>
       ...evidenceProposal('e2'),
       verifyResult: { passed: true, detail: 'legacy green result' },
     };
-    const r = evaluateEvidenceGate(p, evidenceCfg(), []);
+    const r = evaluateEvidenceGate(p, evidenceCfg(), [], {
+      requireVerifierExecutionAuthority: false,
+    });
 
     expect(r.authorized).toBe(false);
     expect(r.reason).toMatch(/base-bound verification is missing/);
@@ -801,7 +805,9 @@ describe('M342 evaluateEvidenceGate — pure, no judge evidence required', () =>
         diffHash: hashDiff(docsDiff('docs/old.md')),
       },
     };
-    const r = evaluateEvidenceGate(p, evidenceCfg(), []);
+    const r = evaluateEvidenceGate(p, evidenceCfg(), [], {
+      requireVerifierExecutionAuthority: false,
+    });
 
     expect(r.authorized).toBe(false);
     expect(r.reason).toMatch(/verification diff binding is missing or stale/);
@@ -819,7 +825,9 @@ describe('M342 evaluateEvidenceGate — pure, no judge evidence required', () =>
       '',
     ].join('\n');
     const p = evidenceProposal('e3', diff);
-    const r = evaluateEvidenceGate(p, evidenceCfg(), []);
+    const r = evaluateEvidenceGate(p, evidenceCfg(), [], {
+      requireVerifierExecutionAuthority: false,
+    });
 
     expect(r.authorized).toBe(false);
     expect(r.reason).toMatch(/build\/CI\/manifest/);
@@ -858,7 +866,9 @@ describe('M342 evaluateEvidenceGate — pure, no judge evidence required', () =>
         diffHash: hashDiff(docsDiff('docs/evidence.md')),
       },
     };
-    const r = evaluateEvidenceGate(p, evidenceCfg(), []);
+    const r = evaluateEvidenceGate(p, evidenceCfg(), [], {
+      requireVerifierExecutionAuthority: false,
+    });
 
     expect(r.authorized).toBe(false);
     expect(r.reason).toMatch(/no verification command evidence|no-command/i);
@@ -1498,7 +1508,9 @@ describe("M342 autoMergeProposal trustBasis='evidence'", () => {
       },
     });
 
-    const r = evaluateEvidenceGate(loadProposal(p.id)!, evidenceCfg(), []);
+    const r = evaluateEvidenceGate(loadProposal(p.id)!, evidenceCfg(), [], {
+      requireVerifierExecutionAuthority: false,
+    });
 
     expect(r.authorized).toBe(false);
     expect(r.reason).toMatch(/risk/);

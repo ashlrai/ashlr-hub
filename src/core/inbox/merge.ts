@@ -185,6 +185,7 @@ import {
 } from '../autonomy/evidence-pack.js';
 import { evaluateAutonomyPolicy } from '../autonomy/policy.js';
 import { buildRequiredVerificationManifest } from '../run/verification-manifest.js';
+import { inspectVerifierEvidenceAuthorityV1 } from '../run/verify.js';
 import { causalMetadataFromProposal, evidenceOutcomeSummary } from '../learning/causal.js';
 import { acquireProposalMutationLock, releaseProposalMutationLock } from './proposal-mutation-lock.js';
 import {
@@ -837,13 +838,15 @@ export function evaluateAutoMergeReadinessPreflight(
     if (trustBasis === 'evidence') {
       const evidencePreflight = evaluateEvidenceAutoMergePreflight(proposal, cfg, {
         requireVerificationEvidence: false,
+        requireVerifierExecutionAuthority: true,
       });
       if (!evidencePreflight.authorized) {
         const configurationBlocker =
           evidencePreflight.reason.includes('allowWithoutVerification=true') ||
           evidencePreflight.reason.includes('pushToRemote=true is required') ||
           evidencePreflight.reason.includes('protected remote signal missing') ||
-          evidencePreflight.reason.includes('a GitHub remote is required');
+          evidencePreflight.reason.includes('a GitHub remote is required') ||
+          evidencePreflight.reason.includes('verifier execution authority withheld');
         return block(evidencePreflight.reason, advisories, !configurationBlocker);
       }
     }
@@ -961,6 +964,8 @@ export interface ExplainAutoMergeGateOptions {
     wouldMerge: boolean;
     reasonCode?: JudgeDecisionReasonCode;
   };
+  /** Signed verifier composition inputs, when available to the read-only caller. */
+  verifierExecutionAuthorityInput?: unknown;
 }
 
 function autoMergeConfigValue(cfg: AshlrConfig, key: string): unknown {
@@ -1009,6 +1014,10 @@ export interface EvidenceAutoMergePreflightOptions {
    * run verification later. The mutating merge gate uses the default true.
    */
   requireVerificationEvidence?: boolean;
+  /** Enforce the external verifier authority boundary for mutation/readiness consumers. */
+  requireVerifierExecutionAuthority?: boolean;
+  /** Signed composition inputs; the consumer recomputes authority and never trusts a result flag. */
+  verifierExecutionAuthorityInput?: unknown;
 }
 
 export function evaluateEvidenceRemoteProtectionSignal(cfg: AshlrConfig): EvidenceRemoteProtectionSignal {
@@ -1295,6 +1304,19 @@ export function evaluateEvidenceAutoMergePreflight(
     return refuse(`signed provenance is required: ${provenance.reason}`);
   }
 
+  if (options.requireVerifierExecutionAuthority !== false) {
+    const verifierAuthority = inspectVerifierEvidenceAuthorityV1(
+      options.verifierExecutionAuthorityInput,
+    );
+    if (!verifierAuthority.evidencePermitted) {
+      return refuse(
+        `verifier execution authority withheld (${verifierAuthority.reason}: ${
+          verifierAuthority.compositionReason ?? 'no composed authority'
+        }); host verification is observation-only`,
+      );
+    }
+  }
+
   if (options.requireVerificationEvidence === false) {
     return {
       authorized: true,
@@ -1431,7 +1453,10 @@ export function explainAutoMergeGate(
     add('authority', verificationBlockerCode(verdict.reason), verdict.authorized, verdict.reason);
   } else if (trustBasis === 'evidence') {
     facts.target = 'main';
-    const verdict = evaluateEvidenceGate(proposal, cfg, options.decisionsForProposal ?? []);
+    const verdict = evaluateEvidenceGate(proposal, cfg, options.decisionsForProposal ?? [], {
+      requireVerifierExecutionAuthority: true,
+      verifierExecutionAuthorityInput: options.verifierExecutionAuthorityInput,
+    });
     add('authority', verificationBlockerCode(verdict.reason), verdict.authorized, verdict.reason);
   } else {
     const target = mergeTargetForTier(proposal.engineTier);
@@ -1828,10 +1853,14 @@ export function evaluateEvidenceGate(
   proposal: Proposal,
   cfg: AshlrConfig,
   decisionsForProposal: DecisionEntry[],
+  options: Pick<
+    EvidenceAutoMergePreflightOptions,
+    'requireVerifierExecutionAuthority' | 'verifierExecutionAuthorityInput'
+  > = { requireVerifierExecutionAuthority: true },
 ): VerificationGateVerdict {
   const refuse = (reason: string): VerificationGateVerdict => ({ authorized: false, reason });
 
-  const activation = evaluateEvidenceAutoMergePreflight(proposal, cfg);
+  const activation = evaluateEvidenceAutoMergePreflight(proposal, cfg, options);
   if (!activation.authorized) return activation;
 
   if (proposal.isPartial === true) {
@@ -2507,6 +2536,11 @@ export interface AutoMergeResult {
   prUrl?: string;
 }
 
+export interface AutoMergeInvocationAuthorityV1 {
+  /** Externally signed composition inputs. Omission keeps evidence mode fail-closed. */
+  verifierExecutionAuthorityInput?: unknown;
+}
+
 /** Repair the narrow crash window between a proven local merge and its receipt. */
 function reconcileLocalMergeIntent(id: string, cfg: AshlrConfig): AutoMergeResult | null {
   const proposal = loadProposal(id);
@@ -2821,6 +2855,7 @@ function mergeLocally(
 export async function autoMergeProposal(
   id: string,
   cfg: AshlrConfig,
+  invocationAuthority: AutoMergeInvocationAuthorityV1 = {},
 ): Promise<AutoMergeResult> {
   const refuse = (reason: string, repo: string | null = null): AutoMergeResult => {
     audit({
@@ -2947,6 +2982,8 @@ export async function autoMergeProposal(
         selfTarget: isSelfTargetProposal(proposal, cfg),
         remoteAvailable: resolveGitHubOriginAuthority(repo) !== null,
         requireVerificationEvidence: false,
+        requireVerifierExecutionAuthority: true,
+        verifierExecutionAuthorityInput: invocationAuthority.verifierExecutionAuthorityInput,
       });
       if (!activation.authorized) {
         return refuse(`merge authority denied: ${activation.reason}`, repo);
@@ -3031,6 +3068,8 @@ export async function autoMergeProposal(
         const activation = evaluateEvidenceAutoMergePreflight(proposal, cfg, {
           selfTarget: isSelfTargetProposal(proposal, cfg),
           remoteAvailable: resolveGitHubOriginAuthority(repo) !== null,
+          requireVerifierExecutionAuthority: true,
+          verifierExecutionAuthorityInput: invocationAuthority.verifierExecutionAuthorityInput,
         });
         if (!activation.authorized) {
           return refuse(`merge authority denied: ${activation.reason}`, repo);
@@ -3038,7 +3077,10 @@ export async function autoMergeProposal(
       }
       authority = trustBasis === 'verification'
         ? evaluateVerificationGate(proposal, cfg, allDecisions)
-        : evaluateEvidenceGate(proposal, cfg, allDecisions);
+        : evaluateEvidenceGate(proposal, cfg, allDecisions, {
+            requireVerifierExecutionAuthority: true,
+            verifierExecutionAuthorityInput: invocationAuthority.verifierExecutionAuthorityInput,
+          });
       // Evidence-backed modes always target main (the bar is the gate).
       toMain = true;
     } else {
@@ -3601,6 +3643,15 @@ export async function autoMergeProposal(
         repo,
       );
     }
+    const verifierExecutionAuthority = trustBasis === 'evidence'
+      ? inspectVerifierEvidenceAuthorityV1(invocationAuthority.verifierExecutionAuthorityInput)
+      : undefined;
+    if (trustBasis === 'evidence' && verifierExecutionAuthority?.evidencePermitted !== true) {
+      return refuse(
+        'verifier execution authority changed before evidence capture — fail closed',
+        repo,
+      );
+    }
     const evidenceDraft = buildAutonomyEvidencePack({
       proposal,
       target: toMain ? 'main' : 'branch',
@@ -3625,6 +3676,7 @@ export async function autoMergeProposal(
         ...(proposal.verifyResult?.verifiedAt ? { verifiedAt: proposal.verifyResult.verifiedAt } : {}),
         ...(proposal.verifyResult?.source ? { source: proposal.verifyResult.source } : {}),
         ...(verify.browser ? { browser: verify.browser } : {}),
+        ...(verifierExecutionAuthority ? { executionAuthority: verifierExecutionAuthority } : {}),
       },
       risk: { ok: true, detail: `risk '${risk}' within maxRisk '${maxRisk}'` },
       scope: {
@@ -3652,7 +3704,9 @@ export async function autoMergeProposal(
       policyAction: policy.action,
       policyTier: policy.tier,
     });
-    const sealedEvidencePack = sealAutonomyEvidencePackV3(evidenceDraft);
+    const sealedEvidencePack = sealAutonomyEvidencePackV3(evidenceDraft, {
+      verifierExecutionAuthorityInput: invocationAuthority.verifierExecutionAuthorityInput,
+    });
     if (!sealedEvidencePack) {
       return refuse('autonomy evidence pack could not be signed and sealed — fail closed', repo);
     }

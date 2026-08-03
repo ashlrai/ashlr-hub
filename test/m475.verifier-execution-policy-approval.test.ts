@@ -51,6 +51,7 @@ import {
   type VerifierExecutionPolicyApprovalScopeV1,
   type VerifierExecutionPolicyApprovalUnsignedV1,
 } from '../src/core/run/verifier-execution-policy-approval.js';
+import { inspectVerifierEvidenceAuthorityV1 } from '../src/core/run/verify.js';
 
 const NOW = Date.parse('2026-08-02T15:05:00.000Z');
 const ISSUED_AT = '2026-08-02T15:00:00.000Z';
@@ -658,6 +659,40 @@ describe('M475 Verifier Policy Approval Authority V1', () => {
       freshnessObservedAt: null,
     });
     allAuthorityFalse(result);
+  });
+
+  it('projects valid cryptography as advisory until clock and replay authority are authenticated', () => {
+    const value = fixture({ provisionRoot: true });
+    const input = compositionInput(value);
+    const first = inspectVerifierEvidenceAuthorityV1(input);
+    const replay = inspectVerifierEvidenceAuthorityV1(input);
+
+    expect(first).toMatchObject({
+      state: 'withheld',
+      reason: 'evidence-not-permitted',
+      compositionReason: 'clock-authority-unavailable',
+      authority: 'observation-only',
+      trustPolicyApprovalVerified: false,
+      clockAuthorityVerified: false,
+      replayTransparencyVerified: false,
+      evidencePermitted: false,
+    });
+    expect(first.bindingDigest).toMatch(/^[0-9a-f]{64}$/);
+    expect(replay).toEqual(first);
+  });
+
+  it('fails closed for stale signed composition inputs', () => {
+    const value = fixture({ provisionRoot: true });
+    const input = compositionInput(value);
+    input.policyApprovalInput.nowMs = Date.parse('2026-08-02T15:11:00.000Z');
+    input.executionAuthorityInput.nowMs = Date.parse('2026-08-02T15:11:00.000Z');
+
+    expect(inspectVerifierEvidenceAuthorityV1(input)).toEqual(expect.objectContaining({
+      state: 'withheld',
+      reason: 'composition-withheld',
+      authority: 'observation-only',
+      evidencePermitted: false,
+    }));
   });
 
   it('rejects policy A plus independently valid statement B mix-and-match', () => {

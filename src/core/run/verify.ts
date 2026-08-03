@@ -22,6 +22,99 @@ import type {
 } from '../types.js';
 import { overBudget, addUsage } from './budget.js';
 import { detectVerifyCommands, runVerifyCommandAsync } from './verify-commands.js';
+import { inspectVerifierExecutionCompositionV1 } from './verifier-execution-policy-approval.js';
+
+export const VERIFIER_EVIDENCE_AUTHORITY_CONSUMER_V1 =
+  'verifier-evidence-authority-consumer-v1' as const;
+const VERIFIER_AUTHORITY_DIGEST = /^[0-9a-f]{64}$/;
+
+export interface VerifierEvidenceAuthorityObservationV1 {
+  schemaVersion: 1;
+  mode: typeof VERIFIER_EVIDENCE_AUTHORITY_CONSUMER_V1;
+  state: 'permitted' | 'withheld';
+  reason: 'evidence-permitted' | 'authority-input-absent' | 'composition-withheld' | 'evidence-not-permitted';
+  compositionMode: 'verifier-execution-authority-composition-v1' | null;
+  compositionReason: string | null;
+  authority: 'observation-only' | 'verifier-evidence-authority';
+  trustPolicyDigest: string | null;
+  approvalDigest: string | null;
+  statementDigest: string | null;
+  bindingDigest: string | null;
+  trustPolicyApprovalVerified: boolean;
+  clockAuthorityVerified: boolean;
+  replayTransparencyVerified: boolean;
+  evidencePermitted: boolean;
+}
+
+/**
+ * Recompute evidence authority from the signed composition inputs. Callers do
+ * not get to supply an authority result or an `evidencePermitted` boolean.
+ * Current V1 composition is intentionally observation-only, so it is projected
+ * as withheld until independently authenticated clock/replay authority exists.
+ */
+export function inspectVerifierEvidenceAuthorityV1(
+  compositionInput: unknown,
+): VerifierEvidenceAuthorityObservationV1 {
+  if (compositionInput === undefined || compositionInput === null) {
+    return {
+      schemaVersion: 1,
+      mode: VERIFIER_EVIDENCE_AUTHORITY_CONSUMER_V1,
+      state: 'withheld',
+      reason: 'authority-input-absent',
+      compositionMode: null,
+      compositionReason: null,
+      authority: 'observation-only',
+      trustPolicyDigest: null,
+      approvalDigest: null,
+      statementDigest: null,
+      bindingDigest: null,
+      trustPolicyApprovalVerified: false,
+      clockAuthorityVerified: false,
+      replayTransparencyVerified: false,
+      evidencePermitted: false,
+    };
+  }
+
+  const composition = inspectVerifierExecutionCompositionV1(compositionInput);
+  const record = composition as unknown as Record<string, unknown>;
+  const authorityDigest = (value: unknown): value is string =>
+    typeof value === 'string' && VERIFIER_AUTHORITY_DIGEST.test(value);
+  const evidencePermitted =
+    record['mode'] === 'verifier-execution-authority-composition-v1' &&
+    record['state'] === 'authorized' &&
+    record['authority'] === 'verifier-evidence-authority' &&
+    record['trustPolicyApprovalVerified'] === true &&
+    record['clockAuthorityVerified'] === true &&
+    record['freshnessState'] === 'current' &&
+    record['replayTransparencyVerified'] === true &&
+    record['evidencePermitted'] === true &&
+    authorityDigest(record['trustPolicyDigest']) &&
+    authorityDigest(record['approvalDigest']) &&
+    authorityDigest(record['statementDigest']) &&
+    authorityDigest(record['bindingDigest']);
+
+  return {
+    schemaVersion: 1,
+    mode: VERIFIER_EVIDENCE_AUTHORITY_CONSUMER_V1,
+    state: evidencePermitted ? 'permitted' : 'withheld',
+    reason: evidencePermitted
+      ? 'evidence-permitted'
+      : composition.state === 'withheld'
+        ? 'composition-withheld'
+        : 'evidence-not-permitted',
+    compositionMode: composition.mode,
+    compositionReason: composition.reason,
+    authority: evidencePermitted ? 'verifier-evidence-authority' : 'observation-only',
+    trustPolicyDigest: composition.trustPolicyDigest,
+    approvalDigest: composition.approvalDigest,
+    statementDigest: composition.statementDigest,
+    bindingDigest: composition.bindingDigest,
+    trustPolicyApprovalVerified: composition.trustPolicyApprovalVerified,
+    clockAuthorityVerified: composition.clockAuthorityVerified,
+    replayTransparencyVerified: composition.replayTransparencyVerified,
+    evidencePermitted,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Internal helpers
