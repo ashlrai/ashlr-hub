@@ -560,9 +560,13 @@ async function loadView(view) {
 // ---------------------------------------------------------------------------
 
 function setActiveNav(view) {
+  let activeLink = null;
   document.querySelectorAll('.nav-link').forEach((a) => {
-    a.classList.toggle('active', a.dataset.view === view);
+    const isActive = a.dataset.view === view;
+    a.classList.toggle('active', isActive);
+    if (isActive) activeLink = a;
   });
+  activeLink?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
 }
 
 // ---------------------------------------------------------------------------
