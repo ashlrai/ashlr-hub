@@ -750,6 +750,7 @@ function observeStage(
     throw new Error('runtime release manifest revision does not match expected revision');
   }
   const verified = verifyUnsignedRuntimeReleaseManifest({
+    dependencyRoot,
     declaredInterpreterPath: interpreterPath,
     declaredInterpreterVersion: options.declaredInterpreterVersion,
     expectedManifestDigest: options.expectedManifestDigest,

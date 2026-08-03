@@ -36,6 +36,10 @@ import {
 import {
   buildUnsignedRuntimeReleaseManifest,
 } from '../src/core/daemon/runtime-release-manifest.js';
+import {
+  buildRuntimeReleaseDependencyInventory,
+  RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH,
+} from '../src/core/daemon/runtime-release-dependency-inventory.js';
 
 const REVISION = 'a'.repeat(40);
 const POLICY = '{"policyVersion":1,"scope":"release-launch"}\n';
@@ -92,6 +96,8 @@ function fixture(declaredRollbackTargetDigest?: string): Fixture {
     version: '3.1.0',
     type: 'module',
     bin: { ashlr: 'bin/ashlr' },
+    dependencies: { example: '1.0.0' },
+    bundledDependencies: ['example'],
   })}\n`);
   write(join(packageRoot, 'package-lock.json'), `${JSON.stringify({
     name: '@ashlr/hub',
@@ -102,7 +108,9 @@ function fixture(declaredRollbackTargetDigest?: string): Fixture {
         name: '@ashlr/hub',
         version: '3.1.0',
         bin: { ashlr: 'bin/ashlr' },
+        dependencies: { example: '1.0.0' },
       },
+      'node_modules/example': { version: '1.0.0' },
     },
   })}\n`);
   write(join(packageRoot, 'bin', 'ashlr'), '#!/usr/bin/env node\n', 0o755);
@@ -112,12 +120,19 @@ function fixture(declaredRollbackTargetDigest?: string): Fixture {
   const dependencyRoot = join(packageRoot, 'node_modules');
   write(join(dependencyRoot, 'example', 'package.json'), '{"name":"example","version":"1.0.0"}\n');
   write(join(dependencyRoot, 'example', 'index.js'), 'export const dependency = true;\n');
+  const inventory = buildRuntimeReleaseDependencyInventory(packageRoot);
+  if (!inventory.ok) throw new Error(inventory.reason);
+  write(
+    join(packageRoot, ...RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH.split('/')),
+    inventory.canonicalJson,
+  );
   const interpreterPath = join(parent, 'node');
   write(interpreterPath, 'fixture node binary\n', 0o755);
 
   const manifestResult = buildUnsignedRuntimeReleaseManifest({
     declaredInterpreterPath: interpreterPath,
     declaredInterpreterVersion: 'v22.0.0',
+    dependencyRoot,
     expectedRevision: REVISION,
     packageRoot,
     ...(declaredRollbackTargetDigest ? { declaredRollbackTargetDigest } : {}),
@@ -481,7 +496,7 @@ describe('runtime release closed launch-input observation', () => {
       chmodTree(linked.packageRoot, true);
       expect(observeRuntimeReleaseImmutableStagedTree(stageOptions(linked))).toEqual({
         ok: false,
-        reason: 'runtime release dependency root contains a symlink',
+        reason: 'installed dependency tree contains a symlink',
       });
     }
 
@@ -522,7 +537,7 @@ describe('runtime release closed launch-input observation', () => {
     });
   });
 
-  it('fails closed before retaining an oversized dependency directory', () => {
+  it('fails closed on an unlisted extra dependency directory', () => {
     const release = fixture();
     chmodTree(release.packageRoot, false);
     const overflow = join(release.dependencyRoot, 'overflow');
@@ -534,7 +549,7 @@ describe('runtime release closed launch-input observation', () => {
 
     expect(observeRuntimeReleaseImmutableStagedTree(stageOptions(release))).toEqual({
       ok: false,
-      reason: 'runtime release dependency root directory entry count exceeds limit',
+      reason: 'installed dependency package set does not match inventory',
     });
   });
 

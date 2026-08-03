@@ -17,8 +17,8 @@ import {
   buildRuntimeReleaseEvidenceTrustRoot,
   parseRuntimeReleaseEvidenceEnvelope,
   parseRuntimeReleaseEvidenceTrustRoot,
-  RUNTIME_RELEASE_EVIDENCE_ENVELOPE_DOMAIN_V1,
-  RUNTIME_RELEASE_EVIDENCE_REQUIRED_COVERAGE_V1,
+  RUNTIME_RELEASE_EVIDENCE_ENVELOPE_DOMAIN_V2,
+  RUNTIME_RELEASE_EVIDENCE_REQUIRED_COVERAGE_V2,
   runtimeReleaseEvidenceKeyId,
   signRuntimeReleaseEvidenceEnvelope,
   verifyRuntimeReleaseEvidenceEnvelope,
@@ -26,6 +26,10 @@ import {
 import {
   buildUnsignedRuntimeReleaseManifest,
 } from '../src/core/daemon/runtime-release-manifest.js';
+import {
+  buildRuntimeReleaseDependencyInventory,
+  RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH,
+} from '../src/core/daemon/runtime-release-dependency-inventory.js';
 
 const ISSUED_AT = '2026-07-29T12:00:00.000Z';
 const EXPIRES_AT = '2026-07-29T12:10:00.000Z';
@@ -33,7 +37,7 @@ const NOW = '2026-07-29T12:05:00.000Z';
 const REVISION = 'a'.repeat(40);
 const KEY_VALID_FROM = '2026-07-29T11:00:00.000Z';
 const KEY_VALID_UNTIL = '2026-07-29T13:00:00.000Z';
-const SIGNATURE_INPUT_DOMAIN = 'ashlr:runtime-release-evidence-signature-input:v1';
+const SIGNATURE_INPUT_DOMAIN = 'ashlr:runtime-release-evidence-signature-input:v2';
 const tempDirs: string[] = [];
 
 function write(path: string, value: string, mode?: number): void {
@@ -53,6 +57,8 @@ function releaseManifest(marker = 'first', expectedRevision = REVISION): string 
     version: '3.1.0',
     type: 'module',
     bin: { ashlr: 'bin/ashlr' },
+    dependencies: { example: '1.0.0' },
+    bundledDependencies: ['example'],
   }, null, 2)}\n`);
   write(join(packageRoot, 'package-lock.json'), `${JSON.stringify({
     name: '@ashlr/hub',
@@ -63,16 +69,28 @@ function releaseManifest(marker = 'first', expectedRevision = REVISION): string 
         name: '@ashlr/hub',
         version: '3.1.0',
         bin: { ashlr: 'bin/ashlr' },
+        dependencies: { example: '1.0.0' },
       },
+      'node_modules/example': { version: '1.0.0' },
     },
   }, null, 2)}\n`);
   write(join(packageRoot, 'bin', 'ashlr'), '#!/usr/bin/env node\n', 0o755);
   write(join(packageRoot, 'dist', 'cli', 'index.js'), `export const marker = '${marker}';\n`);
   write(join(packageRoot, 'scripts', 'run-verify-command.mjs'), 'export const run = true;\n');
+  const dependencyRoot = join(packageRoot, 'node_modules');
+  write(join(dependencyRoot, 'example', 'package.json'), '{"name":"example","version":"1.0.0"}\n');
+  write(join(dependencyRoot, 'example', 'index.js'), 'export const example = true;\n');
+  const inventory = buildRuntimeReleaseDependencyInventory(packageRoot);
+  if (!inventory.ok) throw new Error(inventory.reason);
+  write(
+    join(packageRoot, ...RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH.split('/')),
+    inventory.canonicalJson,
+  );
   const interpreterPath = join(packageRoot, 'fixture-node');
   write(interpreterPath, 'fixture node binary\n', 0o755);
   const built = buildUnsignedRuntimeReleaseManifest({
     packageRoot,
+    dependencyRoot,
     declaredInterpreterPath: interpreterPath,
     declaredInterpreterVersion: 'v22.0.0',
     expectedRevision,
@@ -174,17 +192,17 @@ describe('signed runtime release evidence envelope', () => {
     expect(first.canonicalJson.endsWith('\n')).toBe(true);
     expect(first.envelope).toMatchObject({
       algorithm: 'ed25519',
-      domain: RUNTIME_RELEASE_EVIDENCE_ENVELOPE_DOMAIN_V1,
+      domain: RUNTIME_RELEASE_EVIDENCE_ENVELOPE_DOMAIN_V2,
       keyId: runtimeReleaseEvidenceKeyId(keys.publicKey),
       payload: {
         assurance: 'signed-observation-only',
-        coverage: RUNTIME_RELEASE_EVIDENCE_REQUIRED_COVERAGE_V1,
+        coverage: RUNTIME_RELEASE_EVIDENCE_REQUIRED_COVERAGE_V2,
         expiresAt: EXPIRES_AT,
         expectedRevision: REVISION,
         issuedAt: ISSUED_AT,
-        schemaVersion: 1,
+        schemaVersion: 2,
       },
-      schemaVersion: 1,
+      schemaVersion: 2,
     });
     expect(verifyRuntimeReleaseEvidenceEnvelope({
       envelope: first.canonicalJson,
@@ -265,7 +283,7 @@ describe('signed runtime release evidence envelope', () => {
     const keys = generateKeyPairSync('ed25519');
 
     for (const [field, value, reason] of [
-      ['schemaVersion', 2, 'runtime release evidence envelope schema is unsupported'],
+      ['schemaVersion', 1, 'runtime release evidence envelope schema is unsupported'],
       ['algorithm', 'rsa-pss-sha256', 'runtime release evidence envelope algorithm is unsupported'],
       ['domain', 'ashlr:other:v1', 'runtime release evidence envelope domain is unsupported'],
     ] as const) {

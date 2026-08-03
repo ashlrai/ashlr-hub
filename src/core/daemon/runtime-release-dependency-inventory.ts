@@ -1,0 +1,795 @@
+import { createHash } from 'node:crypto';
+import {
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  opendirSync,
+  realpathSync,
+  readSync,
+  statSync,
+  type BigIntStats,
+} from 'node:fs';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+
+/**
+ * The source lockfile selects the build-time runtime closure only. Published
+ * releases carry bundled dependency bytes plus this inventory; admission never
+ * expects the source lockfile to survive npm packaging.
+ */
+
+export const RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH =
+  'dist/release-dependency-inventory.json' as const;
+export const RUNTIME_RELEASE_DEPENDENCY_INVENTORY_SCHEMA_VERSION = 1 as const;
+
+const INVENTORY_DIGEST_DOMAIN = 'ashlr:runtime-release-dependency-inventory:v1';
+const PACKAGE_CONTENT_DIGEST_DOMAIN = 'ashlr:runtime-release-dependency-package-content:v1';
+const INSTALLED_TREE_DIGEST_DOMAIN = 'ashlr:runtime-release-installed-dependency-tree:v1';
+const MAX_INVENTORY_BYTES = 512 * 1024;
+const MAX_LOCKFILE_BYTES = 16 * 1024 * 1024;
+const MAX_PACKAGE_JSON_BYTES = 1024 * 1024;
+const MAX_PACKAGES = 512;
+const MAX_FILES_PER_PACKAGE = 20_000;
+const MAX_TOTAL_FILES = 100_000;
+const MAX_FILE_BYTES = 128 * 1024 * 1024;
+const MAX_TOTAL_BYTES = 512 * 1024 * 1024;
+const MAX_DEPTH = 48;
+const SHA256_RE = /^[a-f0-9]{64}$/;
+const PACKAGE_NAME_RE = /^(?:@[a-z0-9._~-]+\/[a-z0-9._~-]+|[a-z0-9._~-]+)$/i;
+
+type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+
+export interface RuntimeReleaseDependencyInventoryPackageV1 {
+  contentSha256: string;
+  fileCount: number;
+  name: string;
+  path: string;
+  size: number;
+  version: string;
+}
+
+export interface RuntimeReleaseDependencyInventoryV1 {
+  algorithm: 'sha256';
+  assurance: 'packaged-build-byte-observation';
+  inventoryDigest: string;
+  package: {
+    name: string;
+    version: string;
+  };
+  packages: RuntimeReleaseDependencyInventoryPackageV1[];
+  portability: 'platform-independent-no-native-or-install-variance';
+  rootDependencies: Array<{
+    name: string;
+    requested: string;
+  }>;
+  schemaVersion: typeof RUNTIME_RELEASE_DEPENDENCY_INVENTORY_SCHEMA_VERSION;
+}
+
+export type BuildRuntimeReleaseDependencyInventoryResult =
+  | { ok: true; inventory: RuntimeReleaseDependencyInventoryV1; canonicalJson: string }
+  | { ok: false; reason: string };
+
+export type ParseRuntimeReleaseDependencyInventoryResult =
+  | { ok: true; inventory: RuntimeReleaseDependencyInventoryV1; canonicalJson: string }
+  | { ok: false; reason: string };
+
+export type ObserveInstalledRuntimeDependenciesResult =
+  | {
+    ok: true;
+    inventoryDigest: string;
+    installedTreeSha256: string;
+    packageCount: number;
+  }
+  | { ok: false; reason: string };
+
+export interface BuildRuntimeReleaseDependencyInventoryOptions {
+  /** Exact root npm-pack file report; omitted only for already-normalized fixtures. */
+  packagedFiles?: readonly string[];
+}
+
+interface PackageSnapshot {
+  contentSha256: string;
+  fileCount: number;
+  identitySha256: string;
+  name: string;
+  size: number;
+  version: string;
+}
+
+function canonicalize(value: unknown, ancestors: Set<object>): JsonValue | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') return value;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new TypeError('non-finite JSON number');
+    return Object.is(value, -0) ? 0 : value;
+  }
+  if (typeof value !== 'object' || ancestors.has(value)) throw new TypeError('invalid JSON value');
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      return value.map((entry, index) => {
+        if (!Object.hasOwn(value, index)) throw new TypeError('sparse JSON array');
+        const canonical = canonicalize(entry, ancestors);
+        if (canonical === undefined) throw new TypeError('undefined JSON array entry');
+        return canonical;
+      });
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new TypeError('non-plain JSON object');
+    }
+    const output: Record<string, JsonValue> = Object.create(null) as Record<string, JsonValue>;
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)) {
+      const canonical = canonicalize(entry, ancestors);
+      if (canonical !== undefined) output[key] = canonical;
+    }
+    return output;
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+function canonicalJson(value: unknown): string {
+  const canonical = canonicalize(value, new Set<object>());
+  if (canonical === undefined) throw new TypeError('undefined root JSON value');
+  return JSON.stringify(canonical);
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) &&
+    (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const wanted = [...expected].sort();
+  return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]);
+}
+
+function isBoundedText(value: unknown, max = 4_096): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= max &&
+    !/[\0\r\n]/u.test(value);
+}
+
+function digest(domain: string, value: unknown): string {
+  return createHash('sha256')
+    .update(domain, 'utf8')
+    .update('\n', 'utf8')
+    .update(canonicalJson(value), 'utf8')
+    .digest('hex');
+}
+
+function inventoryPayload(
+  inventory: RuntimeReleaseDependencyInventoryV1,
+): Omit<RuntimeReleaseDependencyInventoryV1, 'inventoryDigest'> {
+  const { inventoryDigest: _inventoryDigest, ...payload } = inventory;
+  return payload;
+}
+
+function sameSnapshot(left: BigIntStats, right: BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode &&
+    left.uid === right.uid && left.gid === right.gid && left.nlink === right.nlink &&
+    left.size === right.size && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+}
+
+function stableFileBytes(
+  path: string,
+  label: string,
+  maxBytes: number,
+  checkpoint: () => void = () => {},
+): Buffer {
+  checkpoint();
+  const before = lstatSync(path, { bigint: true });
+  if (!before.isFile() || before.isSymbolicLink()) throw new Error(`${label} is not a regular file`);
+  if (before.size > BigInt(maxBytes)) throw new Error(`${label} exceeds byte limit`);
+  const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+  const fd = openSync(path, fsConstants.O_RDONLY | noFollow);
+  try {
+    const openedBefore = fstatSync(fd, { bigint: true });
+    if (!openedBefore.isFile() || openedBefore.dev !== before.dev || openedBefore.ino !== before.ino) {
+      throw new Error(`${label} changed before read`);
+    }
+    const expectedBytes = Number(openedBefore.size);
+    const bytes = Buffer.allocUnsafe(expectedBytes);
+    let offset = 0;
+    while (offset < expectedBytes) {
+      checkpoint();
+      const count = readSync(fd, bytes, offset, expectedBytes - offset, offset);
+      if (count <= 0) throw new Error(`${label} changed during read`);
+      offset += count;
+    }
+    const growthProbe = Buffer.allocUnsafe(1);
+    if (readSync(fd, growthProbe, 0, 1, expectedBytes) !== 0) {
+      throw new Error(`${label} grew during read`);
+    }
+    const openedAfter = fstatSync(fd, { bigint: true });
+    const after = lstatSync(path, { bigint: true });
+    if (!sameSnapshot(openedBefore, openedAfter) || !sameSnapshot(openedAfter, after)) {
+      throw new Error(`${label} changed during read`);
+    }
+    return bytes;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function parseJsonObject(bytes: Buffer, label: string): Record<string, unknown> {
+  const text = bytes.toString('utf8');
+  if (!Buffer.from(text, 'utf8').equals(bytes)) throw new Error(`${label} is not valid UTF-8`);
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    throw new Error(`${label} is not valid JSON`);
+  }
+  if (!isPlainRecord(value)) throw new Error(`${label} must be a JSON object`);
+  return value;
+}
+
+function canonicalRoot(path: string, label: string): string {
+  if (!isAbsolute(path)) throw new Error(`${label} must be absolute`);
+  const resolved = resolve(path);
+  const real = realpathSync(resolved);
+  const stat = lstatSync(resolved);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || real !== resolved) {
+    throw new Error(`${label} is not a canonical directory`);
+  }
+  return real;
+}
+
+function isContained(root: string, candidate: string): boolean {
+  const nested = relative(root, candidate);
+  return nested !== '' && nested !== '..' && !nested.startsWith(`..${sep}`) && !isAbsolute(nested);
+}
+
+function packagePathFromLockPath(value: string): string {
+  if (!value.startsWith('node_modules/') || value.includes('\\') || value.includes('\0')) {
+    throw new Error('runtime dependency lock path is invalid');
+  }
+  const path = value.slice('node_modules/'.length);
+  const segments = path.split('/');
+  for (let index = 0; index < segments.length;) {
+    const first = segments[index];
+    if (!first || first === '.' || first === '..' || first === 'node_modules') {
+      throw new Error('runtime dependency lock path is invalid');
+    }
+    index += first.startsWith('@') ? 2 : 1;
+    if (index > segments.length || (first.startsWith('@') && !segments[index - 1])) {
+      throw new Error('runtime dependency lock path is invalid');
+    }
+    if (index === segments.length) break;
+    if (segments[index] !== 'node_modules') throw new Error('runtime dependency lock path is invalid');
+    index += 1;
+  }
+  return path;
+}
+
+function packageNameFromPath(path: string): string {
+  const segments = path.split('/');
+  const marker = segments.lastIndexOf('node_modules');
+  const start = marker < 0 ? 0 : marker + 1;
+  const first = segments[start]!;
+  return first.startsWith('@') ? `${first}/${segments[start + 1] ?? ''}` : first;
+}
+
+function packageIsPortable(packageJson: Record<string, unknown>, files: string[], label: string): void {
+  for (const field of ['os', 'cpu', 'libc', 'optionalDependencies']) {
+    const value = packageJson[field];
+    if (value !== undefined && (!isPlainRecord(value) || Object.keys(value).length > 0)) {
+      throw new Error(`${label} has platform-variant metadata`);
+    }
+  }
+  const scripts = packageJson['scripts'];
+  if (isPlainRecord(scripts) && ['preinstall', 'install', 'postinstall'].some((name) =>
+    typeof scripts[name] === 'string')) {
+    throw new Error(`${label} has an install lifecycle script`);
+  }
+  if (packageJson['gypfile'] === true || files.some((path) => path.endsWith('.node'))) {
+    throw new Error(`${label} contains native install variance`);
+  }
+}
+
+function scanPackageDirectory(
+  packageRoot: string,
+  expectedName: string,
+  expectedVersion: string,
+  checkpoint: () => void = () => {},
+  includedFiles?: ReadonlySet<string>,
+): PackageSnapshot {
+  checkpoint();
+  const root = canonicalRoot(packageRoot, `runtime dependency ${expectedName}`);
+  const files: Array<{ path: string; sha256: string; size: number }> = [];
+  const identities: Array<{ path: string; identity: string }> = [];
+  let totalBytes = 0;
+  const visit = (directory: string, relativeDirectory: string, depth: number): void => {
+    checkpoint();
+    if (depth > MAX_DEPTH) throw new Error('runtime dependency traversal depth exceeds limit');
+    const before = lstatSync(directory, { bigint: true });
+    if (!before.isDirectory() || before.isSymbolicLink()) {
+      throw new Error('runtime dependency tree contains an unsafe directory');
+    }
+    const entries = [];
+    const handle = opendirSync(directory);
+    try {
+      for (;;) {
+        const entry = handle.readSync();
+        if (entry === null) break;
+        entries.push(entry);
+      }
+    } finally {
+      handle.closeSync();
+    }
+    entries.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
+    for (const entry of entries) {
+      checkpoint();
+      if (entry.name === 'node_modules') continue;
+      const absolute = join(directory, entry.name);
+      const relativePath = relativeDirectory ? `${relativeDirectory}/${entry.name}` : entry.name;
+      const stat = lstatSync(absolute, { bigint: true });
+      if (stat.isSymbolicLink()) throw new Error('runtime dependency tree contains a symlink');
+      if (stat.isDirectory()) {
+        visit(absolute, relativePath, depth + 1);
+        continue;
+      }
+      if (!stat.isFile()) throw new Error('runtime dependency tree contains a non-file entry');
+      if (includedFiles && !includedFiles.has(relativePath)) continue;
+      if (stat.size > BigInt(MAX_FILE_BYTES)) throw new Error('runtime dependency file exceeds byte limit');
+      if (files.length >= MAX_FILES_PER_PACKAGE) {
+        throw new Error('runtime dependency package file count exceeds limit');
+      }
+      const bytes = stableFileBytes(
+        absolute,
+        'runtime dependency file',
+        MAX_FILE_BYTES,
+        checkpoint,
+      );
+      totalBytes += bytes.length;
+      if (totalBytes > MAX_TOTAL_BYTES) throw new Error('runtime dependency package bytes exceed limit');
+      files.push({
+        path: relativePath,
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+        size: bytes.length,
+      });
+      identities.push({
+        path: relativePath,
+        identity: [stat.dev, stat.ino, stat.mode, stat.size, stat.mtimeNs, stat.ctimeNs]
+          .map(String).join(':'),
+      });
+    }
+    const after = lstatSync(directory, { bigint: true });
+    if (!sameSnapshot(before, after)) throw new Error('runtime dependency directory changed during scan');
+  };
+  visit(root, '', 0);
+  if (includedFiles && canonicalJson(files.map((entry) => entry.path).sort()) !==
+    canonicalJson([...includedFiles].sort())) {
+    throw new Error(`runtime dependency ${expectedName} packaged file set is unavailable`);
+  }
+  const packageJsonPath = join(root, 'package.json');
+  const packageJson = parseJsonObject(
+    stableFileBytes(
+      packageJsonPath,
+      `${expectedName} package.json`,
+      MAX_PACKAGE_JSON_BYTES,
+      checkpoint,
+    ),
+    `${expectedName} package.json`,
+  );
+  if (packageJson['name'] !== expectedName || packageJson['version'] !== expectedVersion) {
+    throw new Error(`runtime dependency ${expectedName} identity does not match inventory`);
+  }
+  packageIsPortable(packageJson, files.map((entry) => entry.path), `runtime dependency ${expectedName}`);
+  return {
+    contentSha256: digest(PACKAGE_CONTENT_DIGEST_DOMAIN, files),
+    fileCount: files.length,
+    identitySha256: digest(PACKAGE_CONTENT_DIGEST_DOMAIN, identities),
+    name: expectedName,
+    size: totalBytes,
+    version: expectedVersion,
+  };
+}
+
+function rootDependencyEntries(packageJson: Record<string, unknown>): Array<{ name: string; requested: string }> {
+  const dependencies = packageJson['dependencies'];
+  if (dependencies === undefined) return [];
+  if (!isPlainRecord(dependencies)) throw new Error('package dependencies are invalid');
+  const output = Object.entries(dependencies).map(([name, requested]) => {
+    if (!PACKAGE_NAME_RE.test(name) || !isBoundedText(requested, 512)) {
+      throw new Error('package dependency declaration is invalid');
+    }
+    return { name, requested };
+  }).sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
+  const bundled = packageJson['bundledDependencies'] ?? packageJson['bundleDependencies'];
+  if (!Array.isArray(bundled) || bundled.some((name) => typeof name !== 'string')) {
+    throw new Error('package bundled dependencies are missing or invalid');
+  }
+  const bundledNames = [...bundled].sort();
+  if (canonicalJson(bundledNames) !== canonicalJson(output.map((entry) => entry.name))) {
+    throw new Error('package bundled dependencies do not match runtime dependencies');
+  }
+  return output;
+}
+
+function partitionPackagedFiles(
+  lockPaths: readonly string[],
+  packagedFiles: readonly string[] | undefined,
+): Map<string, Set<string>> | undefined {
+  if (!packagedFiles) return undefined;
+  const output = new Map(lockPaths.map((path) => [path, new Set<string>()]));
+  const packagePrefixes = lockPaths
+    .map((path) => ({ path, prefix: `node_modules/${path}/` }))
+    .sort((left, right) => right.prefix.length - left.prefix.length);
+  const seen = new Set<string>();
+  for (const path of packagedFiles) {
+    if (!isBoundedText(path) || path.includes('\\') || path.includes('\0') || seen.has(path)) {
+      throw new Error('npm pack dependency file report is invalid');
+    }
+    seen.add(path);
+    if (!path.startsWith('node_modules/')) continue;
+    const owner = packagePrefixes.find((entry) => path.startsWith(entry.prefix));
+    if (!owner) throw new Error('npm pack contains a runtime dependency outside the lock closure');
+    const relativePath = path.slice(owner.prefix.length);
+    if (!relativePath || relativePath.split('/').some((segment) =>
+      !segment || segment === '.' || segment === '..')) {
+      throw new Error('npm pack dependency file path is invalid');
+    }
+    output.get(owner.path)!.add(relativePath);
+  }
+  for (const [path, files] of output) {
+    if (!files.has('package.json')) {
+      throw new Error(`npm pack omitted runtime dependency package.json: ${path}`);
+    }
+  }
+  return output;
+}
+
+function buildInventory(
+  packageRootInput: string,
+  options: BuildRuntimeReleaseDependencyInventoryOptions,
+): RuntimeReleaseDependencyInventoryV1 {
+  const packageRoot = canonicalRoot(packageRootInput, 'release package root');
+  const packageJson = parseJsonObject(
+    stableFileBytes(join(packageRoot, 'package.json'), 'package.json', MAX_PACKAGE_JSON_BYTES),
+    'package.json',
+  );
+  const name = packageJson['name'];
+  const version = packageJson['version'];
+  if (!isBoundedText(name, 256) || !PACKAGE_NAME_RE.test(name) || !isBoundedText(version, 128)) {
+    throw new Error('release package identity is invalid');
+  }
+  const rootDependencies = rootDependencyEntries(packageJson);
+  const lock = parseJsonObject(
+    stableFileBytes(join(packageRoot, 'package-lock.json'), 'package-lock.json', MAX_LOCKFILE_BYTES),
+    'package-lock.json',
+  );
+  if (lock['name'] !== name || lock['version'] !== version || lock['lockfileVersion'] !== 3) {
+    throw new Error('package lock identity is invalid');
+  }
+  const lockPackages = lock['packages'];
+  if (!isPlainRecord(lockPackages)) throw new Error('package lock packages are invalid');
+  const rootLock = lockPackages[''];
+  if (!isPlainRecord(rootLock) || rootLock['name'] !== name || rootLock['version'] !== version) {
+    throw new Error('package lock root identity is invalid');
+  }
+  if (canonicalJson(rootLock['dependencies'] ?? {}) !==
+    canonicalJson(Object.fromEntries(rootDependencies.map((entry) => [entry.name, entry.requested])))) {
+    throw new Error('package lock root dependencies do not match package.json');
+  }
+  const runtimeLockEntries = Object.entries(lockPackages)
+    .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
+  const runtimeEntries: Array<[string, Record<string, unknown>]> = [];
+  for (const [lockPath, metadata] of runtimeLockEntries) {
+    if (lockPath === '') continue;
+    if (!isPlainRecord(metadata)) throw new Error('runtime dependency lock metadata is invalid');
+    if (metadata['dev'] === true) continue;
+    runtimeEntries.push([lockPath, metadata]);
+  }
+  const packagedFilesByPath = partitionPackagedFiles(
+    runtimeEntries.map(([lockPath]) => packagePathFromLockPath(lockPath)),
+    options.packagedFiles,
+  );
+  const packages: RuntimeReleaseDependencyInventoryPackageV1[] = [];
+  for (const [lockPath, metadata] of runtimeEntries) {
+    if (!isBoundedText(metadata['version'], 128)) {
+      throw new Error('runtime dependency lock version is invalid');
+    }
+    const path = packagePathFromLockPath(lockPath);
+    const expectedName = packageNameFromPath(path);
+    const snapshot = scanPackageDirectory(
+      join(packageRoot, ...lockPath.split('/')),
+      expectedName,
+      metadata['version'],
+      () => {},
+      packagedFilesByPath?.get(path),
+    );
+    packages.push({
+      contentSha256: snapshot.contentSha256,
+      fileCount: snapshot.fileCount,
+      name: snapshot.name,
+      path,
+      size: snapshot.size,
+      version: snapshot.version,
+    });
+    if (packages.length > MAX_PACKAGES) throw new Error('runtime dependency package count exceeds limit');
+  }
+  if (packages.length === 0 && rootDependencies.length > 0) {
+    throw new Error('runtime dependency inventory is empty');
+  }
+  const payload: Omit<RuntimeReleaseDependencyInventoryV1, 'inventoryDigest'> = {
+    algorithm: 'sha256',
+    assurance: 'packaged-build-byte-observation',
+    package: { name, version },
+    packages,
+    portability: 'platform-independent-no-native-or-install-variance',
+    rootDependencies,
+    schemaVersion: RUNTIME_RELEASE_DEPENDENCY_INVENTORY_SCHEMA_VERSION,
+  };
+  return { ...payload, inventoryDigest: digest(INVENTORY_DIGEST_DOMAIN, payload) };
+}
+
+export function buildRuntimeReleaseDependencyInventory(
+  packageRoot: string,
+  options: BuildRuntimeReleaseDependencyInventoryOptions = {},
+): BuildRuntimeReleaseDependencyInventoryResult {
+  try {
+    const inventory = buildInventory(packageRoot, options);
+    const canonical = `${canonicalJson(inventory)}\n`;
+    if (Buffer.byteLength(canonical, 'utf8') > MAX_INVENTORY_BYTES) {
+      return { ok: false, reason: 'runtime dependency inventory exceeds byte limit' };
+    }
+    return { ok: true, inventory, canonicalJson: canonical };
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function validateInventory(value: unknown): RuntimeReleaseDependencyInventoryV1 {
+  if (!isPlainRecord(value) || !hasExactKeys(value, [
+    'algorithm',
+    'assurance',
+    'inventoryDigest',
+    'package',
+    'packages',
+    'portability',
+    'rootDependencies',
+    'schemaVersion',
+  ])) throw new Error('runtime dependency inventory has an invalid top-level shape');
+  if (value['schemaVersion'] !== RUNTIME_RELEASE_DEPENDENCY_INVENTORY_SCHEMA_VERSION) {
+    throw new Error('runtime dependency inventory schema is unsupported');
+  }
+  if (value['algorithm'] !== 'sha256' || value['assurance'] !== 'packaged-build-byte-observation' ||
+    value['portability'] !== 'platform-independent-no-native-or-install-variance') {
+    throw new Error('runtime dependency inventory contract is unsupported');
+  }
+  const packageIdentity = value['package'];
+  if (!isPlainRecord(packageIdentity) || !hasExactKeys(packageIdentity, ['name', 'version']) ||
+    !isBoundedText(packageIdentity['name'], 256) || !PACKAGE_NAME_RE.test(packageIdentity['name']) ||
+    !isBoundedText(packageIdentity['version'], 128)) {
+    throw new Error('runtime dependency inventory package identity is invalid');
+  }
+  const rootDependenciesValue = value['rootDependencies'];
+  if (!Array.isArray(rootDependenciesValue) || rootDependenciesValue.length > MAX_PACKAGES) {
+    throw new Error('runtime dependency inventory root dependencies are invalid');
+  }
+  const rootDependencies = rootDependenciesValue.map((entry) => {
+    if (!isPlainRecord(entry) || !hasExactKeys(entry, ['name', 'requested']) ||
+      !isBoundedText(entry['name'], 256) || !PACKAGE_NAME_RE.test(entry['name']) ||
+      !isBoundedText(entry['requested'], 512)) {
+      throw new Error('runtime dependency inventory root dependency is invalid');
+    }
+    return { name: entry['name'], requested: entry['requested'] };
+  });
+  if (canonicalJson(rootDependencies) !== canonicalJson([...rootDependencies]
+    .sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0))) {
+    throw new Error('runtime dependency inventory root dependencies are not sorted');
+  }
+  const packagesValue = value['packages'];
+  if (!Array.isArray(packagesValue) || packagesValue.length > MAX_PACKAGES) {
+    throw new Error('runtime dependency inventory package count is invalid');
+  }
+  let previousPath: string | null = null;
+  const packages = packagesValue.map((entry): RuntimeReleaseDependencyInventoryPackageV1 => {
+    if (!isPlainRecord(entry) || !hasExactKeys(entry, [
+      'contentSha256', 'fileCount', 'name', 'path', 'size', 'version',
+    ]) || !isBoundedText(entry['path']) || !isBoundedText(entry['name'], 256) ||
+      !PACKAGE_NAME_RE.test(entry['name']) ||
+      packagePathFromLockPath(`node_modules/${entry['path']}`) !== entry['path'] ||
+      packageNameFromPath(entry['path']) !== entry['name'] ||
+      !isBoundedText(entry['version'], 128) || typeof entry['contentSha256'] !== 'string' ||
+      !SHA256_RE.test(entry['contentSha256']) || !Number.isSafeInteger(entry['fileCount']) ||
+      (entry['fileCount'] as number) <= 0 || (entry['fileCount'] as number) > MAX_FILES_PER_PACKAGE ||
+      !Number.isSafeInteger(entry['size']) || (entry['size'] as number) < 0 ||
+      (entry['size'] as number) > MAX_TOTAL_BYTES ||
+      entry['path'].startsWith('/') || entry['path'].includes('\\') || entry['path'].includes('\0') ||
+      entry['path'].split('/').some((segment) => segment === '' || segment === '.' || segment === '..')) {
+      throw new Error('runtime dependency inventory package is invalid');
+    }
+    if (previousPath !== null && entry['path'] <= previousPath) {
+      throw new Error('runtime dependency inventory package paths are not unique and sorted');
+    }
+    previousPath = entry['path'];
+    return {
+      contentSha256: entry['contentSha256'],
+      fileCount: entry['fileCount'] as number,
+      name: entry['name'],
+      path: entry['path'],
+      size: entry['size'] as number,
+      version: entry['version'],
+    };
+  });
+  if (typeof value['inventoryDigest'] !== 'string' || !SHA256_RE.test(value['inventoryDigest'])) {
+    throw new Error('runtime dependency inventory digest is invalid');
+  }
+  const inventory: RuntimeReleaseDependencyInventoryV1 = {
+    algorithm: 'sha256',
+    assurance: 'packaged-build-byte-observation',
+    inventoryDigest: value['inventoryDigest'],
+    package: { name: packageIdentity['name'], version: packageIdentity['version'] },
+    packages,
+    portability: 'platform-independent-no-native-or-install-variance',
+    rootDependencies,
+    schemaVersion: RUNTIME_RELEASE_DEPENDENCY_INVENTORY_SCHEMA_VERSION,
+  };
+  if (digest(INVENTORY_DIGEST_DOMAIN, inventoryPayload(inventory)) !== inventory.inventoryDigest) {
+    throw new Error('runtime dependency inventory digest mismatch');
+  }
+  return inventory;
+}
+
+export function parseRuntimeReleaseDependencyInventory(
+  input: string | Buffer,
+): ParseRuntimeReleaseDependencyInventoryResult {
+  try {
+    const bytes = Buffer.isBuffer(input) ? Buffer.from(input) : Buffer.from(input, 'utf8');
+    if (bytes.length === 0 || bytes.length > MAX_INVENTORY_BYTES) {
+      return { ok: false, reason: 'runtime dependency inventory exceeds byte limit' };
+    }
+    const text = bytes.toString('utf8');
+    if (!Buffer.from(text, 'utf8').equals(bytes)) {
+      return { ok: false, reason: 'runtime dependency inventory is not valid UTF-8' };
+    }
+    const inventory = validateInventory(JSON.parse(text) as unknown);
+    const canonical = `${canonicalJson(inventory)}\n`;
+    if (canonical !== text) {
+      return { ok: false, reason: 'runtime dependency inventory encoding is not canonical' };
+    }
+    return { ok: true, inventory, canonicalJson: canonical };
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function discoverInstalledPackages(
+  dependencyRoot: string,
+  checkpoint: () => void,
+): string[] {
+  const output: string[] = [];
+  const visitNodeModules = (nodeModulesRoot: string, prefix: string, depth: number): void => {
+    checkpoint();
+    if (depth > MAX_DEPTH) throw new Error('installed dependency traversal depth exceeds limit');
+    const entries = readdirNames(nodeModulesRoot);
+    for (const name of entries) {
+      checkpoint();
+      if (name === '.bin' || name === '.package-lock.json') continue;
+      const absolute = join(nodeModulesRoot, name);
+      const stat = lstatSync(absolute);
+      if (stat.isSymbolicLink()) throw new Error('installed dependency tree contains a symlink');
+      if (name.startsWith('@')) {
+        if (!stat.isDirectory()) throw new Error('installed dependency scope is invalid');
+        for (const child of readdirNames(absolute)) {
+          const scopedRoot = join(absolute, child);
+          const scopedStat = lstatSync(scopedRoot);
+          if (!scopedStat.isDirectory() || scopedStat.isSymbolicLink()) {
+            throw new Error('installed dependency package is unsafe');
+          }
+          const relativePath = prefix ? `${prefix}/node_modules/${name}/${child}` : `${name}/${child}`;
+          output.push(relativePath);
+          const nested = join(scopedRoot, 'node_modules');
+          if (existsDirectory(nested)) visitNodeModules(nested, relativePath, depth + 1);
+        }
+        continue;
+      }
+      if (!stat.isDirectory()) throw new Error('installed dependency root contains an unexpected entry');
+      const relativePath = prefix ? `${prefix}/node_modules/${name}` : name;
+      output.push(relativePath);
+      const nested = join(absolute, 'node_modules');
+      if (existsDirectory(nested)) visitNodeModules(nested, relativePath, depth + 1);
+    }
+  };
+  visitNodeModules(dependencyRoot, '', 0);
+  return output.sort();
+}
+
+function readdirNames(directory: string): string[] {
+  const before = statSync(directory, { bigint: true });
+  const names: string[] = [];
+  const handle = opendirSync(directory);
+  try {
+    for (;;) {
+      const entry = handle.readSync();
+      if (entry === null) break;
+      names.push(entry.name);
+    }
+  } finally {
+    handle.closeSync();
+  }
+  const after = statSync(directory, { bigint: true });
+  if (!sameSnapshot(before, after)) throw new Error('installed dependency directory changed during scan');
+  return names.sort();
+}
+
+function existsDirectory(path: string): boolean {
+  try {
+    const stat = lstatSync(path);
+    return stat.isDirectory() && !stat.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+export function observeInstalledRuntimeDependencies(options: {
+  checkpoint?: () => void;
+  dependencyRoot: string;
+  inventory: RuntimeReleaseDependencyInventoryV1;
+  expectedPackageName: string;
+  expectedPackageVersion: string;
+}): ObserveInstalledRuntimeDependenciesResult {
+  try {
+    const checkpoint = options.checkpoint ?? (() => {});
+    checkpoint();
+    const dependencyRoot = canonicalRoot(options.dependencyRoot, 'runtime dependency root');
+    if (options.inventory.package.name !== options.expectedPackageName ||
+      options.inventory.package.version !== options.expectedPackageVersion) {
+      return { ok: false, reason: 'runtime dependency inventory package identity mismatch' };
+    }
+    const discovered = discoverInstalledPackages(dependencyRoot, checkpoint);
+    const expected = options.inventory.packages.map((entry) => entry.path);
+    if (canonicalJson(discovered) !== canonicalJson(expected)) {
+      return { ok: false, reason: 'installed dependency package set does not match inventory' };
+    }
+    let totalFiles = 0;
+    let totalBytes = 0;
+    const observations = options.inventory.packages.map((entry) => {
+      const absolute = join(dependencyRoot, ...entry.path.split('/'));
+      const real = realpathSync(absolute);
+      if (!isContained(dependencyRoot, real) || real !== resolve(absolute)) {
+        throw new Error('installed dependency package escapes dependency root');
+      }
+      const snapshot = scanPackageDirectory(
+        absolute,
+        entry.name,
+        entry.version,
+        checkpoint,
+      );
+      totalFiles += snapshot.fileCount;
+      totalBytes += snapshot.size;
+      if (totalFiles > MAX_TOTAL_FILES) throw new Error('installed dependency file count exceeds limit');
+      if (totalBytes > MAX_TOTAL_BYTES) throw new Error('installed dependency bytes exceed limit');
+      if (snapshot.contentSha256 !== entry.contentSha256 || snapshot.fileCount !== entry.fileCount ||
+        snapshot.size !== entry.size) {
+        throw new Error(`installed dependency ${entry.name} bytes do not match inventory`);
+      }
+      return {
+        contentSha256: snapshot.contentSha256,
+        identitySha256: snapshot.identitySha256,
+        name: snapshot.name,
+        path: entry.path,
+        version: snapshot.version,
+      };
+    });
+    return {
+      ok: true,
+      inventoryDigest: options.inventory.inventoryDigest,
+      installedTreeSha256: digest(INSTALLED_TREE_DIGEST_DOMAIN, observations.map((entry) => ({
+        contentSha256: entry.contentSha256,
+        name: entry.name,
+        path: entry.path,
+        version: entry.version,
+      }))),
+      packageCount: observations.length,
+    };
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
