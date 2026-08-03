@@ -32,10 +32,35 @@ import type { AshlrConfig } from '../core/types.js';
 import type { AuditEntry } from '../core/types.js';
 import type { FleetStatus } from '../core/fleet/status.js';
 import type { ResourceStrategyReport } from '../core/autonomy/resource-strategy.js';
-import { daemonServiceInstallOptions } from '../core/daemon/service-config.js';
 import { makeColors, isTty } from './ui.js';
 
 const { bold, dim, green, red, yellow, cyan } = makeColors(isTty());
+
+function trajectoryPopulation(
+  status: NonNullable<FleetStatus['trajectoryLearning']>,
+): { observed: number; learningEligible: number; incomplete: number; degraded: number } {
+  const count = (value: unknown, fallback: number, max: number): number =>
+    Number.isSafeInteger(value) && Number(value) >= 0
+      ? Math.min(Number(value), max)
+      : fallback;
+  const observed = count(status.trajectories, 0, Number.MAX_SAFE_INTEGER);
+  const population = status.population as typeof status.population & { eligible?: number } | undefined;
+  if (!population) {
+    return { observed, learningEligible: observed, incomplete: 0, degraded: 0 };
+  }
+  const learningEligible = count(
+    population.learningEligible ?? population.eligible,
+    observed,
+    observed,
+  );
+  const incomplete = count(population.incomplete, 0, observed - learningEligible);
+  const degraded = count(
+    population.degraded,
+    0,
+    observed - learningEligible - incomplete,
+  );
+  return { observed, learningEligible, incomplete, degraded };
+}
 
 function daemonActivitySummary(daemon: FleetStatus['daemon']): string | null {
   if (!daemon.running) return null;
@@ -59,7 +84,13 @@ function daemonActivitySummary(daemon: FleetStatus['daemon']): string | null {
  */
 export function formatFleetStatus(s: FleetStatus): string {
   const lines: string[] = [];
-  const pausedTag = s.killed ? '  [PAUSED — kill switch engaged]' : '';
+  const killUnknown = s.killSwitch?.state === 'unknown';
+  const daemonUnknown = s.daemon.sourceQuality?.sourceState !== 'healthy';
+  const pausedTag = killUnknown
+    ? '  [PAUSED — kill switch unknown]'
+    : s.killed
+      ? '  [PAUSED — kill switch engaged]'
+      : '';
 
   lines.push('Fleet status' + pausedTag);
   if (s.buildIdentity) {
@@ -75,7 +106,15 @@ export function formatFleetStatus(s: FleetStatus): string {
   lines.push('');
 
   // Daemon
-  lines.push(`Daemon:    ${s.daemon.running ? 'running' : 'stopped'}`);
+  lines.push(`Daemon:    ${daemonUnknown ? 'unknown' : s.daemon.running ? 'running' : 'stopped'}`);
+  if (s.daemon.sourceQuality) {
+    lines.push(
+      `  state source:  ${s.daemon.sourceQuality.sourceState} (${s.daemon.sourceQuality.reason})`,
+    );
+  }
+  if (s.killSwitch) {
+    lines.push(`Kill switch: ${s.killSwitch.state} (${s.killSwitch.sourceState})`);
+  }
   if (s.daemon.startedAt) {
     lines.push(`  started:       ${s.daemon.startedAt}`);
   }
@@ -93,7 +132,21 @@ export function formatFleetStatus(s: FleetStatus): string {
   if (s.daemon.lockHeartbeatAt) {
     lines.push(`  heartbeat:     ${s.daemon.lockHeartbeatAt}`);
   }
-  lines.push(`  spend today:   $${s.daemon.todaySpentUsd.toFixed(4)}`);
+  if (s.daemon.activation) {
+    lines.push(
+      `  activation:    ${s.daemon.activation.state} (${s.daemon.activation.reason}; ` +
+        `${s.daemon.activation.authority})`,
+    );
+    lines.push(
+      `  start scope:   proposal-once=${s.daemon.activation.commandEligible ? 'eligible' : 'blocked'}, ` +
+        'resident=false, install=false, repair=false',
+    );
+  }
+  lines.push(
+    daemonUnknown
+      ? '  spend today:   unknown'
+      : `  spend today:   $${s.daemon.todaySpentUsd.toFixed(4)}`,
+  );
   lines.push('');
 
   // Mission brief
@@ -401,37 +454,40 @@ export function formatFleetStatus(s: FleetStatus): string {
 
   // Durable dispatch-production yield
   const dispatchProduction = s.dispatchProduction;
+  const dispatchProductionSource = s.dispatchProductionSource;
+  const dispatchProductionComplete = dispatchProductionSource?.sourceState === 'healthy' &&
+    dispatchProductionSource.complete;
   lines.push('Dispatch yield:');
-  if (!dispatchProduction) {
-    const source = s.dispatchProductionSource;
+  if (!dispatchProduction || !dispatchProductionComplete) {
+    const source = dispatchProductionSource;
     if (source?.sourceState === 'degraded') {
       lines.push(
         `  source:    degraded (partial); files ${source.filesRead}, bytes ${source.bytesRead}, ` +
           `rows ${source.rowsScanned}, invalid ${source.invalidRows}, unreadable ${source.unreadableFiles}`,
       );
-      lines.push('  output:    unavailable because no valid bounded rows were readable');
+      lines.push('  output:    withheld because the bounded dispatch source is incomplete');
     } else {
       lines.push(`  unavailable${source?.sourceState === 'missing' ? ' (source missing)' : ''}`);
     }
   } else {
-    const source = s.dispatchProductionSource;
+    const source = dispatchProductionSource;
     const sourceDetail = source
       ? `${source.sourceState}${source.complete ? '' : ' (partial)'}; files ${source.filesRead}, ` +
         `bytes ${source.bytesRead}, rows ${source.rowsScanned}, invalid ${source.invalidRows}, ` +
         `unreadable ${source.unreadableFiles}`
       : 'unknown (legacy snapshot)';
     lines.push(`  source:    ${sourceDetail}`);
+    lines.push('  authority: observational only (owner-writable local rows)');
     lines.push(`  window:    ${formatProductionWindow(dispatchProduction.windowHours)}`);
-    const diagnosticAttempts = dispatchProduction.diagnosticAttempts ??
-      s.dispatchYieldDiagnostics?.diagnosticAttempts ?? dispatchProduction.events;
-    const diagnosticNoProposal = dispatchProduction.diagnosticNoProposal ??
-      Math.max(0, diagnosticAttempts - dispatchProduction.proposalsCreated);
-    const diagnosticProposalRate = dispatchProduction.diagnosticProposalRate ??
-      (diagnosticAttempts > 0 ? dispatchProduction.proposalsCreated / diagnosticAttempts : 0);
     lines.push(
-      `  output:    proposals ${dispatchProduction.proposalsCreated}/${diagnosticAttempts} ` +
-        `(${formatPercent(diagnosticProposalRate)}), no-proposal ${diagnosticNoProposal}, ` +
-        `cancelled ${dispatchProduction.outcomes.cancelled ?? 0}`,
+      `  output:    reported proposal-created ${dispatchProduction.proposalsCreated}/${dispatchProduction.attempts} ` +
+        `(${formatNullablePercent(dispatchProduction.proposalRate)}), ` +
+        `no-proposal ${dispatchProduction.noProposal}, cancelled ${dispatchProduction.cancelledEvents ?? 0}`,
+    );
+    lines.push(
+      `  sample:    ${dispatchProduction.events} physical event(s), ` +
+        `${dispatchProduction.attempts} canonical attempt(s), ` +
+        `${dispatchProduction.duplicateEvents ?? 0} duplicate(s)`,
     );
     const attemptShape = formatAttemptShape(dispatchProduction.attemptShape);
     if (attemptShape) lines.push(`  shape:     ${attemptShape}`);
@@ -485,6 +541,55 @@ export function formatFleetStatus(s: FleetStatus): string {
   }
   lines.push('');
 
+  const proposalFunnel = s.proposalFunnel;
+  lines.push('Proposal funnel:');
+  if (!proposalFunnel) {
+    lines.push('  unavailable (legacy snapshot)');
+  } else {
+    lines.push(
+      `  source:    ${proposalFunnel.source.sourceState}` +
+        `${proposalFunnel.source.complete ? '' : ' (partial)'}`,
+    );
+    lines.push(
+      '  authority: observational only (owner-writable local rows; not readiness/learning eligible)',
+    );
+    lines.push(
+      `  sample:    ${proposalFunnel.sample.includedAttempts} canonical attempt(s) from ` +
+        `${proposalFunnel.sample.observedEvents} event(s); ` +
+        `duplicates ${proposalFunnel.sample.duplicateEvents ?? 'unknown'}, ` +
+        `cancelled ${proposalFunnel.sample.cancelledEvents}, ` +
+        `invalid identities ${proposalFunnel.sample.invalidAttemptIdentities ?? 'unknown'}, ` +
+        `conflicts ${proposalFunnel.sample.conflictingAttemptIdentities ?? 'unknown'}`,
+    );
+    const metrics = proposalFunnel.metrics;
+    const currentMetricSchema = proposalFunnel.schemaVersion === 5 &&
+      metrics?.reportedProposalCreatedOutcomes !== undefined &&
+      metrics.observedProposalReferences !== undefined &&
+      proposalFunnel.authority.readinessEligible === false &&
+      proposalFunnel.authority.learningEligible === false;
+    if (proposalFunnel.state === 'withheld' || !metrics || !currentMetricSchema) {
+      const reason = proposalFunnel.state === 'withheld'
+        ? proposalFunnel.withheldReason ?? 'source-unavailable'
+        : 'legacy-metric-schema';
+      lines.push(`  output:    withheld (${reason})`);
+    } else {
+      lines.push(
+        `  output:    reported proposal-created ${metrics.reportedProposalCreatedOutcomes.count}/${metrics.attempts} ` +
+          `(${formatPercent(metrics.reportedProposalCreatedOutcomes.rate)}), proposal references ` +
+          `${metrics.observedProposalReferences.count}/${metrics.attempts} ` +
+          `(${formatPercent(metrics.observedProposalReferences.rate)})`,
+      );
+      lines.push(
+        `  failures:  capture ${metrics.captureErrors.count}, gate ${metrics.gateBlocked.count}, ` +
+          `empty ${metrics.emptyAttempts.count}, policy ${metrics.policySuppressions.count}, ` +
+          `other ${metrics.otherAttempts.count}`,
+      );
+    }
+    lines.push(`  diagnosis: ${proposalFunnel.primaryBlocker}`);
+    lines.push(`  diagnostic hint (non-authoritative): ${proposalFunnel.diagnosticHint}`);
+  }
+  lines.push('');
+
   // Global workspace
   const workspace = s.workspace;
   lines.push('Global workspace:');
@@ -502,12 +607,12 @@ export function formatFleetStatus(s: FleetStatus): string {
     const policySuppressed = workspace.policySuppressedEvents ?? 0;
     const source = workspace.sourceQuality;
     lines.push(`  window:    ${formatProductionWindow(workspace.windowHours)}`);
+    lines.push(`  source:    ${formatWorkspaceSource(source)}`);
     if (source) {
-      lines.push(`  source:    ${formatWorkspaceSource(source)}`);
       if (source.stopReasons.length > 0) lines.push(`  stopped:   ${source.stopReasons.join(', ')}`);
     }
     lines.push(`  events:    ${formatWorkspaceObserved(workspace, workspace.eventCount ?? 0)}`);
-    lines.push(`  latest:    ${workspace.latestAt ?? '—'}`);
+    lines.push(`  latest:    ${source ? workspace.latestAt ?? '—' : 'unavailable'}`);
     lines.push(`  machines:  ${formatWorkspaceObserved(workspace, activeMachines.length > 0 ? activeMachines.join(', ') : '—')}`);
     lines.push(
       `  outcomes:  proposals ${formatWorkspaceObserved(workspace, workspace.proposalEvents ?? 0)}, ` +
@@ -518,13 +623,13 @@ export function formatFleetStatus(s: FleetStatus): string {
     if (workspace.diagnosticProposalRate !== undefined) {
       lines.push(`  learning:  diagnostic proposal rate ${formatWorkspaceRate(workspace, workspace.diagnosticProposalRate)}`);
     }
-    if (attention.length > 0) {
+    if (source && attention.length > 0) {
       lines.push(`  attention: ${attention.slice(0, 4).map(formatWorkspaceAttention).join('; ')}`);
     }
-    if (byAction.length > 0) {
+    if (source && byAction.length > 0) {
       lines.push(`  actions:   ${byAction.slice(0, 4).map(formatWorkspaceCount).join(', ')}`);
     }
-    if (recentActions.length > 0) {
+    if (source && recentActions.length > 0) {
       const action = recentActions[0]!;
       lines.push(`  recent:    ${action.kind}/${action.outcome}: ${compactResourceReason(action.summary)}`);
     }
@@ -533,9 +638,16 @@ export function formatFleetStatus(s: FleetStatus): string {
 
   // Attempt coverage
   const attemptCoverage = s.attemptCoverage;
+  const learningMetrics = s.learningMetrics;
   lines.push('Attempt coverage:');
+  if (learningMetrics?.settledThrough) {
+    lines.push(
+      `  settled:   through ${learningMetrics.settledThrough}; ` +
+        `${learningMetrics.excludedRows ?? 0} newer row(s) excluded`,
+    );
+  }
   if (!attemptCoverage) {
-    lines.push('  unavailable');
+    lines.push(`  ${formatLearningMetricsAvailability(learningMetrics)}`);
   } else {
     lines.push(`  attempts:  ${attemptCoverage.attempts} in ${formatProductionWindow(attemptCoverage.windowHours)}`);
     lines.push(
@@ -553,6 +665,10 @@ export function formatFleetStatus(s: FleetStatus): string {
         `decisions ${formatCoverageMetric(attemptCoverage.coverage.decision)}, ` +
         `evidence ${formatCoverageMetric(attemptCoverage.coverage.evidence)}`,
     );
+    const attemptAvailability = learningMetrics?.attemptCoverage;
+    if (attemptAvailability && attemptAvailability.state !== 'available') {
+      lines.push(`  withheld: ${formatLearningMetricWithholding(attemptAvailability)}`);
+    }
     lines.push(
       `  metadata:  trajectory ${formatCoverageMetric(attemptCoverage.causalCoverage.trajectoryId)}, ` +
         `route ${formatCoverageMetric(attemptCoverage.causalCoverage.routeSnapshot)}, ` +
@@ -603,14 +719,19 @@ export function formatFleetStatus(s: FleetStatus): string {
   const trajectoryLearning = s.trajectoryLearning;
   lines.push('Trajectory learning:');
   if (!trajectoryLearning) {
-    lines.push('  unavailable');
+    lines.push(`  ${formatLearningMetricsAvailability(learningMetrics)}`);
   } else {
     const outcomes = trajectoryLearning.terminalOutcomes;
-    lines.push(`  trajectories: ${trajectoryLearning.trajectories} in ${formatProductionWindow(trajectoryLearning.windowHours)}`);
+    const population = trajectoryPopulation(trajectoryLearning);
+    lines.push(`  trajectories: ${population.observed} observed in ${formatProductionWindow(trajectoryLearning.windowHours)}`);
     lines.push(
-      `  outcomes:     merged ${outcomes.merged}, pending ${outcomes.pending}, ` +
-        `no-proposal ${outcomes['no-proposal']}, cancelled ${outcomes.cancelled ?? 0}, failed ${outcomes.failed}`,
+      `  eligibility:  ${population.learningEligible} learning-eligible, ` +
+        `${population.incomplete} incomplete, ${population.degraded} degraded`,
     );
+    lines.push(outcomes
+      ? `  outcomes:     merged ${outcomes.merged}, pending ${outcomes.pending}, ` +
+        `no-proposal ${outcomes['no-proposal']}, cancelled ${outcomes.cancelled ?? 0}, failed ${outcomes.failed}`
+      : '  outcomes:     withheld (outcome denominator unavailable)');
     lines.push(
       `  spine:        dispatch->decision ${formatCoverageMetric(trajectoryLearning.routeSpine.dispatchToDecision)}, ` +
         `dispatch->evidence ${formatCoverageMetric(trajectoryLearning.routeSpine.dispatchToEvidence)}, ` +
@@ -626,12 +747,12 @@ export function formatFleetStatus(s: FleetStatus): string {
     if (skillObservation) {
       if (skillObservation.sampleState === 'observed') {
         lines.push(
-          `  skill observations: ${formatCoverageMetric(skillObservation.observedTrajectoryCoverage ?? { count: 0, rate: 0 })} trajectories, ` +
+          `  skill observations: ${formatCoverageMetric(skillObservation.observedTrajectoryCoverage)} trajectories, ` +
             `${skillObservation.joined ?? 0} event(s), ${skillObservation.unjoined ?? 0} unjoined, ` +
             `${skillObservation.conflicting ?? 0} conflicting (observed)`,
         );
       } else if (skillObservation.sampleState === 'unavailable') {
-        lines.push('  skill observations: source degraded (exact counts withheld)');
+        lines.push('  skill observations: source unavailable (exact counts withheld)');
       } else if (skillObservation.sampleState === 'insufficient-sample') {
         lines.push('  skill observations: insufficient sample (<3 trajectories; exact counts withheld)');
       } else if (skillObservation.eventState === 'present') {
@@ -642,7 +763,7 @@ export function formatFleetStatus(s: FleetStatus): string {
     }
     const gap = trajectoryLearning.gaps[0];
     if (gap) lines.push(`  top gap:      ${gap.kind} missing on ${gap.count} trajector${gap.count === 1 ? 'y' : 'ies'}`);
-    const recent = trajectoryLearning.recent[0];
+    const recent = trajectoryLearning.recent?.[0];
     if (recent) {
       lines.push(`  recent:       ${recent.ref} ${recent.terminalOutcome} at ${recent.latestAt}`);
     }
@@ -658,8 +779,9 @@ export function formatFleetStatus(s: FleetStatus): string {
       for (const trace of traces.records.slice(0, 5)) {
         lines.push(
           `    ${trace.ref} ${trace.terminalOutcome} ${trace.sourceState} ` +
-            `coverage d=${trace.coverage.dispatch ? 'y' : 'n'} p=${trace.coverage.proposal ? 'y' : 'n'} ` +
-            `e=${trace.coverage.evidence ? 'y' : 'n'} c=${trace.coverage.decision ? 'y' : 'n'} a=${trace.coverage.agentAction ? 'y' : 'n'}`,
+            `coverage d=${formatCoverageFlag(trace.coverage.dispatch)} p=${formatCoverageFlag(trace.coverage.proposal)} ` +
+            `e=${formatCoverageFlag(trace.coverage.evidence)} c=${formatCoverageFlag(trace.coverage.decision)} ` +
+            `a=${formatCoverageFlag(trace.coverage.agentAction)}`,
         );
         for (const event of trace.events.slice(0, 8)) {
           const route = event.route
@@ -676,6 +798,10 @@ export function formatFleetStatus(s: FleetStatus): string {
           );
         }
       }
+    }
+    const trajectoryAvailability = learningMetrics?.trajectoryLearning;
+    if (trajectoryAvailability && trajectoryAvailability.state !== 'available') {
+      lines.push(`  withheld: ${formatLearningMetricWithholding(trajectoryAvailability)}`);
     }
   }
   lines.push('');
@@ -791,6 +917,56 @@ export function formatFleetStatus(s: FleetStatus): string {
   }
   lines.push('');
 
+  const detachedPostMerge = s.detachedPostMergeVerificationReadiness;
+  lines.push('Detached post-merge verification (observation only):');
+  if (!detachedPostMerge) {
+    lines.push('  unavailable');
+  } else {
+    const summary = detachedPostMerge.summary;
+    lines.push(`  state:      ${detachedPostMerge.state}`);
+    lines.push(`  observed:   ${detachedPostMerge.latestObservedAt ?? 'never'}`);
+    lines.push(
+      `  cohorts:    ${summary.conclusiveCompleteCohorts}/${summary.cohorts} conclusive, ` +
+        `${summary.denominatorCompleteCohorts}/${summary.cohorts} denominator-complete`,
+    );
+    lines.push(
+      `  outcomes:   ${summary.pass} pass, ${summary.fail} fail, ${summary.unknown} unknown`,
+    );
+    lines.push(
+      '  authority:  policy=false, merge=false, rollback=false, deploy=false',
+    );
+  }
+  lines.push('');
+
+  const promotion = s.autoMergeCanaryPromotionReadiness;
+  lines.push('Auto-merge canary promotion readiness (observation only):');
+  if (!promotion) {
+    lines.push('  unavailable');
+  } else {
+    const scopeCaps = promotion.scopeCaps;
+    const scopeIdentity = promotion.scopeIdentity;
+    lines.push(`  verdict:    ${promotion.verdict}`);
+    lines.push(`  observed:   ${promotion.observedAt ?? 'invalid'}`);
+    lines.push(`  evidence:   ${promotion.evidenceReady ? 'complete' : 'incomplete'}`);
+    lines.push(
+      `  scope caps: ${scopeCaps?.maxFiles ?? 'unavailable'} file(s), ` +
+        `${scopeCaps?.maxLines ?? 'unavailable'} changed line(s)`,
+    );
+    lines.push(
+      `  cap source: ${scopeCaps?.source ?? 'unavailable'}` +
+        `${scopeCaps?.scopePolicyDigest ? ` (${scopeCaps.scopePolicyDigest})` : ''}`,
+    );
+    lines.push(
+      `  identity:   ${scopeIdentity?.state ?? 'unavailable'} via ` +
+        `${scopeIdentity?.source ?? 'unavailable'} ` +
+        `(observed ${scopeIdentity?.observedAt ?? 'never'})`,
+    );
+    lines.push(`  top block:  ${promotion.primaryBlocker.code}`);
+    lines.push(`  blockers:   ${promotion.blockers.map((entry) => entry.code).join(', ') || 'none'}`);
+    lines.push('  authority:  activation=false');
+  }
+  lines.push('');
+
   // Authenticated observation checkpoints are deliberately outside readiness.
   const cutoff = s.cutoffCheckpoints;
   lines.push('Cutoff checkpoints (observation only):');
@@ -821,7 +997,11 @@ export function formatFleetStatus(s: FleetStatus): string {
   // Guard health
   const guardHealth = s.guardHealth;
   lines.push('Guard health:');
-  if (!guardHealth || guardHealth.blocks.length === 0) {
+  if (!guardHealth || guardHealth.sourceQuality?.sourceState !== 'healthy') {
+    lines.push(
+      `  unknown: ${guardHealth?.sourceQuality?.reasons.join(', ') || 'source unavailable'}`,
+    );
+  } else if (guardHealth.blocks.length === 0) {
     lines.push('  ok');
   } else {
     lines.push(`  blocked: ${guardHealth.blocks.length} block(s)`);
@@ -1087,8 +1267,42 @@ function formatPercent(rate: number): string {
   return `${Math.round(rate * 100)}%`;
 }
 
-function formatCoverageMetric(metric: { count: number; rate: number }): string {
+function formatCoverageMetric(metric: { count: number; rate: number } | undefined): string {
+  if (!metric) return 'withheld';
   return `${metric.count} (${formatPercent(metric.rate)})`;
+}
+
+function formatCoverageFlag(value: boolean | undefined): string {
+  return value === undefined ? '?' : value ? 'y' : 'n';
+}
+
+function formatLearningMetricWithholding(
+  availability: NonNullable<FleetStatus['learningMetrics']>['dispatchProduction'],
+): string {
+  const metrics = availability.withheldMetrics.slice(0, 6).join(', ');
+  const reasons = availability.reasons.slice(0, 4).join(', ');
+  return `${metrics || 'dependent metrics'}${reasons ? ` (${reasons})` : ''}`;
+}
+
+function formatLearningMetricsAvailability(source: FleetStatus['learningMetrics']): string {
+  if (!source) return 'unavailable';
+  if (source.state === 'available') return 'unavailable';
+  const quality = source.sourceQuality;
+  if (source.reason === 'dispatch-source-missing') {
+    return 'withheld (dispatch denominator missing)';
+  }
+  if (source.reason === 'learning-snapshot-settling') {
+    return 'withheld (dispatch rows are still inside the settlement window)';
+  }
+  if (source.reason === 'learning-snapshot-unstable') {
+    return 'withheld (cross-source learning snapshot changed during read)';
+  }
+  const details = [
+    quality.invalidRows > 0 ? `${quality.invalidRows} invalid row(s)` : null,
+    quality.unreadableFiles > 0 ? `${quality.unreadableFiles} unreadable file(s)` : null,
+    quality.stopReasons.length > 0 ? `stopped: ${quality.stopReasons.join(', ')}` : null,
+  ].filter((detail): detail is string => detail !== null);
+  return `withheld (dispatch denominator degraded${details.length > 0 ? `; ${details.join('; ')}` : ''})`;
 }
 
 function formatNullablePercent(rate: number | null | undefined): string {
@@ -1185,10 +1399,9 @@ function formatDispatchYieldBucket(
   bucket: NonNullable<FleetStatus['dispatchProduction']>['byBackend'][number],
 ): string {
   const label = bucket.backend ?? bucket.source ?? (bucket.repo ? formatActionTarget(bucket.repo) : bucket.key);
-  const attempts = bucket.diagnosticAttempts ?? bucket.attempts;
-  const rate = bucket.diagnosticProposalRate ??
-    (attempts > 0 ? bucket.proposalsCreated / attempts : 0);
-  return `${label} ${bucket.proposalsCreated}/${attempts} ${formatPercent(rate)}`;
+  const attempts = bucket.attempts;
+  const rate = bucket.proposalRate;
+  return `${label} ${bucket.proposalsCreated}/${attempts} ${formatNullablePercent(rate)}`;
 }
 
 function formatDispatchManifestBackend(
@@ -1205,10 +1418,11 @@ type WorkspaceSource = NonNullable<NonNullable<FleetStatus['workspace']>['source
 
 function workspaceSourceHealthy(workspace: NonNullable<FleetStatus['workspace']>): boolean {
   const source = workspace.sourceQuality;
-  return source === undefined || (source.sourceState === 'healthy' && source.complete);
+  return source?.sourceState === 'healthy' && source.complete;
 }
 
-function formatWorkspaceSource(source: WorkspaceSource): string {
+function formatWorkspaceSource(source: WorkspaceSource | undefined): string {
+  if (!source) return 'unknown';
   if (source.sourceState === 'missing') return 'missing';
   return `${source.sourceState}${source.complete ? '' : ' (partial)'}; ` +
     `files ${source.filesRead}, bytes ${source.bytesRead}, rows ${source.rowsScanned}, ` +
@@ -1220,7 +1434,8 @@ function formatWorkspaceObserved(
   value: string | number,
 ): string {
   if (workspaceSourceHealthy(workspace)) return String(value);
-  return workspace.sourceQuality?.sourceState === 'missing' ? 'unavailable' : `${value} observed (partial)`;
+  if (!workspace.sourceQuality || workspace.sourceQuality.sourceState === 'missing') return 'unavailable';
+  return `${value} observed (partial)`;
 }
 
 function formatWorkspaceRate(
@@ -1228,17 +1443,15 @@ function formatWorkspaceRate(
   rate: number | null,
 ): string {
   if (workspaceSourceHealthy(workspace)) return formatNullablePercent(rate);
-  return workspace.sourceQuality?.sourceState === 'missing' ? 'unavailable' : 'partial';
+  if (!workspace.sourceQuality || workspace.sourceQuality.sourceState === 'missing') return 'unavailable';
+  return 'partial';
 }
 
 function formatAttemptActionCoverage(attempt: NonNullable<FleetStatus['attemptCoverage']>): string {
   const source = attempt.agentActionSource;
-  if (!source || (source.sourceState === 'healthy' && source.complete)) {
-    return formatCoverageMetric(attempt.coverage.agentAction);
-  }
-  return source.sourceState === 'missing'
-    ? 'unavailable'
-    : `${formatCoverageMetric(attempt.coverage.agentAction)} observed (partial)`;
+  if (!attempt.coverage.agentAction ||
+    (source && (source.sourceState !== 'healthy' || !source.complete))) return 'withheld';
+  return formatCoverageMetric(attempt.coverage.agentAction);
 }
 
 function formatWorkspaceAttention(row: NonNullable<FleetStatus['workspace']>['attention'][number]): string {
@@ -1546,7 +1759,14 @@ export async function cmdFleetWatch(jsonMode: boolean): Promise<number> {
   // One-line health header.
   const fs = fleetStatus;
   if (fs) {
-    const state = fs.daemon.running ? (fs.killed ? 'PAUSED' : 'running') : 'idle';
+    const sourceUnknown =
+      fs.killSwitch?.state === 'unknown' ||
+      fs.daemon.sourceQuality?.sourceState !== 'healthy';
+    const state = sourceUnknown
+      ? 'UNKNOWN'
+      : fs.daemon.running
+        ? (fs.killed ? 'PAUSED' : 'running')
+        : 'idle';
     const activitySummary = daemonActivitySummary(fs.daemon);
     const header = [
       `fleet: ${state}`,
@@ -1562,13 +1782,14 @@ export async function cmdFleetWatch(jsonMode: boolean): Promise<number> {
       fs.workspace
         ? `workspace ${workspaceSourceHealthy(fs.workspace)
           ? fs.workspace.eventCount
-          : fs.workspace.sourceQuality?.sourceState === 'missing' ? 'missing' : 'degraded'}`
+          : !fs.workspace.sourceQuality ? 'unknown'
+            : fs.workspace.sourceQuality.sourceState === 'missing' ? 'missing' : 'degraded'}`
         : null,
-      `spent today $${fs.daemon.todaySpentUsd.toFixed(2)}`,
+      sourceUnknown ? 'spent today unknown' : `spent today $${fs.daemon.todaySpentUsd.toFixed(2)}`,
       activitySummary,
       `last tick ${relTime(fs.daemon.lastTickAt)}`,
     ].filter(Boolean).join(' · ');
-    if (fs.killed) {
+    if (sourceUnknown || fs.killed) {
       console.log('  ' + yellow(bold(header)));
     } else if (fs.daemon.running && activitySummary && !activitySummary.includes('unavailable') &&
       !activitySummary.includes('stale') && !activitySummary.includes('future')) {
@@ -1618,7 +1839,6 @@ export async function cmdFleetWatch(jsonMode: boolean): Promise<number> {
 // ---------------------------------------------------------------------------
 
 async function setKillSwitch(on: boolean): Promise<number> {
-  let serviceState: string | null = null;
   try {
     const { setKill } = await import('../core/sandbox/policy.js');
     const result = setKill(on);
@@ -1644,23 +1864,6 @@ async function setKillSwitch(on: boolean): Promise<number> {
     return 1;
   }
 
-  if (!on) {
-    try {
-      const cfg = await loadCfg();
-      if (cfg) {
-        const { ensureRunning } = await import('../core/daemon/service.js');
-        const service = await ensureRunning(daemonServiceInstallOptions(cfg, { autostart: true }));
-        serviceState = service.installed
-          ? service.running
-            ? `${service.platformSpec} running`
-            : `${service.platformSpec} installed but stopped`
-          : 'service not installed';
-      }
-    } catch {
-      serviceState = null;
-    }
-  }
-
   console.log('');
   if (on) {
     console.log(green('  ✓ fleet paused') + dim(' — kill switch engaged.'));
@@ -1669,7 +1872,7 @@ async function setKillSwitch(on: boolean): Promise<number> {
   } else {
     console.log(green('  ✓ fleet resumed') + dim(' — kill switch released.'));
     console.log(dim('  The daemon may dispatch again on its next tick (if running).'));
-    if (serviceState) console.log(dim(`  daemon service: ${serviceState}`));
+    console.log(dim('  Daemon activation remains separate and requires exact activation authority.'));
   }
   console.log('');
   return 0;

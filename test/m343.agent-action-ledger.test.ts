@@ -430,7 +430,7 @@ describe('M343 agent action ledger', () => {
       kind: 'dispatch',
       action: 'daemon:dispatch-cancelled',
       outcome: 'skipped',
-      reason: 'run cancelled by owner',
+      reason: 'cancelled',
       runEventSummary: {
         status: 'aborted',
         outcome: 'cancelled',
@@ -449,27 +449,47 @@ describe('M343 agent action ledger', () => {
     });
   });
 
-  it('skips malformed lines and scrubs secret-shaped text before persistence', () => {
+  it('persists metadata-only prose digests and never raw free-form telemetry', () => {
     const dir = agentActionsDir();
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, '2026-07-08.jsonl'), 'not-json\n', 'utf8');
+    const rawCanary = 'RAW_CUSTOMER_STDOUT_CANARY_7f8a91 ordinary private text';
 
     recordAgentAction(makeEvent({
       action: 'secret-action',
-      summary: 'Authorization Bearer sk-supersecretsecretsecret',
-      reason: 'token=ghp_1234567890abcdefABCDEF leaked by tool',
-      tags: ['secret=sk-supersecretsecretsecret'],
-      counts: { 'token=ghp_1234567890abcdefABCDEF': 1 },
+      summary: `${rawCanary} Authorization Bearer sk-supersecretsecretsecret`,
+      reason: `${rawCanary} token=ghp_1234567890abcdefABCDEF leaked by tool`,
+      routeSnapshot: {
+        backend: 'codex',
+        tier: 'frontier',
+        assignedBy: 'router',
+        reason: rawCanary,
+      },
+      tags: [rawCanary, 'secret=sk-supersecretsecretsecret'],
+      counts: { [rawCanary]: 1 },
     }));
 
     const events = readAgentActions();
 
     expect(events).toHaveLength(1);
     expect(events[0]!.action).toBe('secret-action');
+    expect(events[0]!.summary).toMatch(/^secret-action outcome=no-proposal backend=codex source=todo ref=[a-f0-9]{12}$/);
+    expect(events[0]!.reason).toBe('no-proposal');
+    expect(events[0]!.routeSnapshot?.reason).toBeUndefined();
+    expect(events[0]!.proseDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(events[0]!.tags).toEqual([
+      'kind:dispatch',
+      'outcome:no-proposal',
+      'source:todo',
+      'backend:codex',
+      'tier:frontier',
+    ]);
+    expect(events[0]!.counts).toBeUndefined();
     const raw = readFileSync(join(dir, '2026-07-08.jsonl'), 'utf8');
+    expect(raw).not.toContain(rawCanary);
     expect(raw).not.toContain('sk-supersecretsecretsecret');
     expect(raw).not.toContain('ghp_1234567890abcdefABCDEF');
-    expect(raw).toContain('[REDACTED]');
+    expect(raw).toContain('"proseDigest":"sha256:');
   });
 
   it('rejects corrupted enum-like legacy rows before returning summaries', () => {

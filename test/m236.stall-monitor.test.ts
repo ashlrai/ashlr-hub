@@ -859,9 +859,30 @@ describe('M236 terminationReason on RunState', () => {
             unit: 'boolean',
           }),
         ]);
+        expect(event?.workTransitions).toEqual([
+          expect.objectContaining({
+            ordinal: 1,
+            subjectRef: `run:${result.state.id}`,
+            phase: 'orient',
+            transition: 'enter',
+            trigger: 'initial',
+            observedAt: result.state.createdAt,
+          }),
+          expect.objectContaining({
+            ordinal: 2,
+            phase: 'complete',
+            transition: 'complete',
+            trigger: 'unknown',
+          }),
+        ]);
+        expect(event?.workTransitions?.[1]?.predecessorTransitionId)
+          .toBe(event?.workTransitions?.[0]?.transitionId);
         const serialized = JSON.stringify(event);
         expect(serialized).not.toContain('RAW_PROMPT_SENTINEL');
         expect(serialized).not.toContain('RAW_STDOUT_SENTINEL');
+        expect(JSON.stringify(event?.workTransitions)).not.toMatch(
+          /prompt|rationale|toolArgs|toolResults|diff|stdout|stderr|env|fileContents|path|rawSummary/,
+        );
       } finally {
         if (prevAllow === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
         else process.env.ASHLR_TEST_ALLOW_ANY_REPO = prevAllow;

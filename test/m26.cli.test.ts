@@ -376,7 +376,8 @@ describe('reflect playbooks — report-only default + --persist gate', () => {
       actor: 'agent',
       kind: 'reflection',
       outcome: 'ok',
-      summary: expect.stringContaining('reflection playbooks distilled'),
+      summary: expect.stringContaining('reflect:playbooks outcome=ok'),
+      proseDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
       tags: expect.arrayContaining(['reflection', 'playbooks', 'persisted']),
       counts: {
         persisted: expect.any(Number),

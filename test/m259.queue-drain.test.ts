@@ -24,7 +24,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
 import type { AutoMergeResult } from '../src/core/inbox/merge.js';
-import { hashDiff } from '../src/core/foundry/provenance.js';
+import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
 
 // ---------------------------------------------------------------------------
 // HOME isolation
@@ -473,45 +473,81 @@ describe('M259 diffHash dedup at submission (createProposal)', () => {
     );
   }
 
-  it('dedup returns the existing proposal id (not a new one) when diffHash matches pending', async () => {
-    const diff = 'diff --git a/file.ts\n+// fix';
-    const existing: Proposal = {
-      id: 'existing-prop',
+  function currentAuthorityInput(diff: string, runId: string) {
+    const diffHash = hashDiff(diff);
+    const engineModel = 'local-coder:mock-model';
+    const engineTier = 'mid' as const;
+    return {
       repo: REPO,
-      origin: 'swarm',
-      kind: 'patch',
+      origin: 'swarm' as const,
+      kind: 'patch' as const,
       title: 'Fix #38',
-      summary: 'first attempt',
+      summary: 'current signed attempt',
       diff,
-      diffHash: hashDiff(diff),
-      status: 'pending',
-      engineTier: 'frontier',
-      createdAt: NOW_ISO,
+      diffHash,
+      engineModel,
+      engineTier,
+      provenanceSig: signProvenance(engineModel, engineTier, diffHash),
+      workItemId: 'issue:38',
+      workItemGenerationId: 'a'.repeat(64),
+      runId,
+      trajectoryId: `run:${runId}`,
+      runEventSummary: {
+        runId,
+        status: 'done' as const,
+        outcome: 'filed',
+        proposalCreated: true,
+      },
     };
-    seedInbox(existing);
+  }
 
-    // Import the real createProposal (passes through from importOriginal mock).
+  it('dedup returns the existing current-authority proposal id when diffHash matches pending', async () => {
+    const diff = 'diff --git a/file.ts\n+// fix';
     const { createProposal } = await import('../src/core/inbox/store.js');
+    const existing = createProposal(currentAuthorityInput(diff, 'run-existing-prop'));
+    expect(existing).toMatchObject({
+      status: 'pending',
+      pendingAuthorityVersion: 1,
+      pendingAuthoritySig: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
 
     const result = createProposal({
-      repo: REPO,
-      origin: 'swarm',
-      kind: 'patch',
+      ...currentAuthorityInput(diff, 'run-duplicate-prop'),
       title: 'Fix #38 again',
-      summary: 'duplicate attempt',
-      diff,
-      diffHash: hashDiff(diff),
+      summary: 'duplicate current signed attempt',
     });
 
     // Dedup path: returns the existing proposal's id, status rejected (not persisted).
-    expect(result.id).toBe('existing-prop');
+    expect(result.id).toBe(existing.id);
     expect(result.status).toBe('rejected');
     expect(result.decisionReason).toContain('diffHash dedup');
     // No new file should have been written (inbox still has only the original).
     const inboxFiles = fs.readdirSync(path.join(tmpHome, '.ashlr', 'inbox'))
       .filter(f => f.endsWith('.json') && !f.endsWith('.tmp'));
     expect(inboxFiles).toHaveLength(1);
-    expect(inboxFiles[0]).toBe('existing-prop.json');
+    expect(inboxFiles[0]).toBe(`${existing.id}.json`);
+  });
+
+  it('keeps producer-v2-only pending rows observational for dedup', async () => {
+    const diff = 'diff --git a/legacy.ts\n+// legacy fixture';
+    const { createProposal } = await import('../src/core/inbox/store.js');
+    const legacy = createProposal(currentAuthorityInput(diff, 'run-legacy-producer-v2'));
+    const legacyRow = structuredClone(legacy);
+    delete legacyRow.pendingAuthorityVersion;
+    delete legacyRow.pendingAuthoritySig;
+    seedInbox(legacyRow);
+
+    const current = createProposal({
+      ...currentAuthorityInput(diff, 'run-current-after-legacy'),
+      title: 'Current attempt after legacy telemetry',
+    });
+
+    expect(current.status).toBe('pending');
+    expect(current.id).not.toBe(legacy.id);
+    expect(current.pendingAuthorityVersion).toBe(1);
+    const inboxFiles = fs.readdirSync(path.join(tmpHome, '.ashlr', 'inbox'))
+      .filter(f => f.endsWith('.json') && !f.endsWith('.tmp'));
+    expect(inboxFiles.sort()).toEqual([`${current.id}.json`, `${legacy.id}.json`].sort());
   });
 
   it('dedup does NOT fire when diffHash is absent', async () => {

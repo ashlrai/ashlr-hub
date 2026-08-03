@@ -103,6 +103,11 @@ describe('diagnoseGuardHealth', () => {
 
     const diagnosis = diagnoseGuardHealth();
     expect(diagnosis.blocked).toBe(true);
+    expect(diagnosis.sourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      reasons: ['daemon-state-malformed'],
+    });
     expect(diagnosis.blocks.map((b) => b.id)).toEqual([
       'daemon-state-malformed',
       'daemon-spend-guard-armed',
@@ -242,7 +247,19 @@ describe('daemon status guard health', () => {
 
     const json = await captureStdout(() => cmdDaemon(['status', '--json']));
     expect(json.code).toBe(0);
-    const parsed = JSON.parse(json.out) as { guardHealth?: { blocked: boolean; blocks: Array<{ id: string }> } };
+    const parsed = JSON.parse(json.out) as {
+      running: boolean | null;
+      todaySpentUsd: number | null;
+      stateSource?: { sourceState: string; reason: string };
+      guardHealth?: { blocked: boolean; blocks: Array<{ id: string }> };
+    };
+    expect(parsed.running).toBeNull();
+    expect(parsed.todaySpentUsd).toBeNull();
+    expect(parsed.stateSource).toEqual({
+      sourceState: 'degraded',
+      complete: false,
+      reason: 'malformed',
+    });
     expect(parsed.guardHealth?.blocked).toBe(true);
     expect(parsed.guardHealth?.blocks.map((b) => b.id)).toContain('daemon-state-malformed');
 
@@ -250,6 +267,8 @@ describe('daemon status guard health', () => {
     expect(human.code).toBe(0);
     expect(human.out).toContain('guard health:');
     expect(human.out).toContain('daemon-state-malformed');
+    expect(human.out).toContain('running:        unknown');
+    expect(human.out).toContain("today's spend:  unknown");
     expect(human.out).toContain('repair:');
   });
 });
@@ -268,5 +287,94 @@ describe('FleetStatus guard health', () => {
     expect(rendered).toContain('Guard health:');
     expect(rendered).toContain('daemon-spend-guard-malformed');
     expect(rendered).toContain('repair:');
+  });
+
+  it('withholds daemon truth and start actions when daemon state is malformed', async () => {
+    const statePath = daemonStatePath();
+    mkdirSync(dirname(statePath), { recursive: true });
+    writeFileSync(statePath, 'not-json {{{', 'utf8');
+
+    const status = await buildFleetStatus(baseConfig());
+    expect(status.daemon.running).toBe(false);
+    expect(status.daemon.sourceQuality).toEqual({
+      sourceState: 'degraded',
+      complete: false,
+      reason: 'malformed',
+    });
+    expect(status.guardHealth?.sourceQuality.sourceState).toBe('degraded');
+    expect(status.nextActions?.[0]).toMatchObject({
+      id: 'inspect-daemon-state-source',
+      commands: [
+        expect.objectContaining({ safety: 'read-only' }),
+        expect.objectContaining({ safety: 'read-only' }),
+      ],
+    });
+    expect(status.nextActions?.some((action) =>
+      action.id === 'start-daemon' || action.id === 'resume-fleet')).toBe(false);
+    expect(status.autonomousShipReadiness?.topBlocker?.id).toBe('daemon-source-degraded');
+
+    const rendered = formatFleetStatus(status);
+    expect(rendered).toContain('Daemon:    unknown');
+    expect(rendered).toContain('state source:  degraded (malformed)');
+    expect(rendered).toContain('spend today:   unknown');
+    expect(rendered).not.toContain('Daemon:    stopped');
+    expect(rendered).not.toContain('spend today:   $0.0000');
+  });
+
+  it('withholds daemon truth when a live lock contradicts the running ledger owner', async () => {
+    const state = loadDaemonState();
+    state.running = true;
+    state.pid = process.pid;
+    state.startedAt = '2026-07-25T00:00:00.000Z';
+    saveDaemonState(state);
+
+    const lockPath = daemonLockPath();
+    mkdirSync(dirname(lockPath), { recursive: true });
+    const now = new Date().toISOString();
+    writeFileSync(lockPath, JSON.stringify({
+      pid: process.ppid,
+      token: 'mismatched-live-owner',
+      hostname: 'test-host',
+      acquiredAt: now,
+      heartbeatAt: now,
+    }), 'utf8');
+
+    const status = await buildFleetStatus(baseConfig());
+    expect(status.daemon.sourceQuality).toEqual({
+      sourceState: 'degraded',
+      complete: false,
+      reason: 'inconsistent',
+    });
+    expect(status.nextActions?.[0]?.id).toBe('inspect-daemon-state-source');
+    expect(status.nextActions?.flatMap((action) => action.commands ?? [])
+      .every((command) => command.safety === 'read-only')).toBe(true);
+  });
+
+  it('keeps an uninspectable kill source paused with inspection-only actions', async () => {
+    rmSync(tmpHome, { recursive: true, force: true });
+    writeFileSync(tmpHome, 'not a directory', 'utf8');
+
+    const status = await buildFleetStatus(baseConfig());
+    expect(status.killSwitch).toEqual({
+      state: 'unknown',
+      sourceState: 'degraded',
+      reason: 'uninspectable',
+    });
+    expect(status.killed).toBe(true);
+    expect(status.nextActions?.[0]).toMatchObject({
+      id: 'repair-enrollment-registry',
+      commands: [
+        expect.objectContaining({ safety: 'read-only' }),
+        expect.objectContaining({ safety: 'read-only' }),
+      ],
+    });
+    expect(status.nextActions?.flatMap((action) => action.commands ?? [])
+      .every((command) => command.safety === 'read-only')).toBe(true);
+    expect(status.autonomousShipReadiness?.topBlocker?.id).toBe('enrollment-registry-degraded');
+
+    const rendered = formatFleetStatus(status);
+    expect(rendered).toContain('[PAUSED — kill switch unknown]');
+    expect(rendered).toContain('Kill switch: unknown (degraded)');
+    expect(rendered).not.toContain('Clear kill switch');
   });
 });

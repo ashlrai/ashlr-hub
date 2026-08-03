@@ -161,6 +161,27 @@ describe('stepDaemonService — idempotent, never-throw', () => {
     expect(mockInstall).not.toHaveBeenCalled();
   });
 
+  it.each(['running', 'queued'] as const)(
+    'reports scheduler %s as active with daemon liveness unverified',
+    async (runtimeState) => {
+      mockServiceStatus.mockReturnValueOnce({
+        installed: true,
+        running: false,
+        runtimeState,
+        platformSpec: 'schtasks',
+        serviceFilePath: 'C:\\Users\\worker\\.ashlr\\services\\ashlr-daemon.cmd',
+      });
+
+      const { stepDaemonService } = await importNewSteps();
+      const result = await stepDaemonService();
+
+      expect(result.status).toBe('ok');
+      expect(result.detail).toContain('scheduler active, daemon liveness unverified');
+      expect(result.detail).not.toContain('installed but not running');
+      expect(mockInstall).not.toHaveBeenCalled();
+    },
+  );
+
   it('calls install() when service not installed, then returns ok', async () => {
     mockServiceStatus
       .mockReturnValueOnce({ installed: false, running: false, platformSpec: 'launchd', serviceFilePath: '/x' })

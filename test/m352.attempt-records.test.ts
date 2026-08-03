@@ -135,7 +135,7 @@ function evidence(proposalId = 'prop-1'): AutonomyEvidencePack {
 function learningLabel(overrides: Record<string, unknown> = {}) {
   return {
     schemaVersion: 1,
-    classifierVersion: 'attempt-shape-v1',
+    classifierVersion: 'attempt-shape-v2',
     authoritative: true,
     learningKind: 'proposal-created',
     policySuppressed: false,
@@ -172,6 +172,7 @@ function causalDispatch(overrides: Partial<DispatchProductionEvent> = {}): Dispa
     routerPolicyVersion: ROUTER_POLICY_VERSION,
     learningEpoch: '2026-07-09',
     learningLabel: learningLabel(),
+    labelOrigin: 'stored-current',
   });
   return { ...base, ...overrides };
 }
@@ -251,7 +252,7 @@ describe('AttemptRecord coverage', () => {
             },
             learningLabel: {
               schemaVersion: 1,
-              classifierVersion: 'attempt-shape-v1',
+              classifierVersion: 'attempt-shape-v2',
               authoritative: true,
               learningKind: 'policy-suppressed',
               policySuppressed: true,
@@ -264,6 +265,7 @@ describe('AttemptRecord coverage', () => {
                 policyDisabled: 3,
               },
             },
+            labelOrigin: 'stored-current',
           }),
         ],
         readAgentActions: () => [],
@@ -278,7 +280,7 @@ describe('AttemptRecord coverage', () => {
       outcome: 'empty-diff',
       proposalCreated: false,
       learningKind: 'policy-suppressed',
-      labelAuthoritative: true,
+      labelAuthoritative: false,
       diagnosticAttempt: false,
       diagnosticNoProposal: false,
       policySuppressed: true,
@@ -291,8 +293,8 @@ describe('AttemptRecord coverage', () => {
       attempts: 1,
       proposalCreated: 0,
       policySuppressed: 1,
-      labelAuthoritativeAttempts: 1,
-      legacyUnversionedAttempts: 0,
+      labelAuthoritativeAttempts: 0,
+      legacyUnversionedAttempts: 1,
       diagnosticAttempts: 0,
       diagnosticNoProposal: 0,
       diagnosticProposalRate: null,
@@ -303,6 +305,42 @@ describe('AttemptRecord coverage', () => {
         repairAttempts: 0,
         policyDisabled: 3,
       },
+    });
+  });
+
+  it('keeps stored legacy labels visible without granting current learning authority', () => {
+    const records = listAttemptRecords({
+      deps: deps({
+        readDispatchProductionEvents: () => [
+          causalDispatch({
+            learningLabel: {
+              ...learningLabel(),
+              classifierVersion: 'attempt-shape-v1',
+            },
+            labelOrigin: 'stored-legacy',
+          }),
+        ],
+        readAgentActions: () => [],
+        listOutcomeRecords: () => [],
+        readDecisions: () => [],
+        listAutonomyEvidencePacks: () => [],
+        loadWorkedLedger: () => ({ events: [] }),
+      }),
+    });
+
+    expect(records[0]).toMatchObject({
+      learningKind: 'proposal-created',
+      labelOrigin: 'stored-legacy',
+      labelAuthoritative: false,
+      causalCoverage: {
+        labelAuthoritative: false,
+        currentAuthoritativeLabel: false,
+      },
+    });
+    expect(summarizeAttemptCoverage(records).production).toMatchObject({
+      attempts: 1,
+      labelAuthoritativeAttempts: 0,
+      legacyUnversionedAttempts: 1,
     });
   });
 
@@ -470,8 +508,8 @@ describe('AttemptRecord coverage', () => {
       currentRouterPolicyVersion: true,
       learningEpoch: true,
       currentLearningEpoch: true,
-      labelAuthoritative: true,
-      currentAuthoritativeLabel: true,
+      labelAuthoritative: false,
+      currentAuthoritativeLabel: false,
     });
     expect(records[1]?.causalCoverage.currentRouterPolicyVersion).toBe(false);
     expect(records[1]?.causalCoverage.currentAuthoritativeLabel).toBe(false);
@@ -496,8 +534,8 @@ describe('AttemptRecord coverage', () => {
       currentRouterPolicyVersion: { count: 2, rate: 0.5 },
       learningEpoch: { count: 3, rate: 0.75 },
       currentLearningEpoch: { count: 2, rate: 0.5 },
-      labelAuthoritative: { count: 3, rate: 0.75 },
-      currentAuthoritativeLabel: { count: 1, rate: 0.25 },
+      labelAuthoritative: { count: 0, rate: 0 },
+      currentAuthoritativeLabel: { count: 0, rate: 0 },
     });
     expect(summary.causalWeak).toMatchObject({
       weak: true,
@@ -506,12 +544,12 @@ describe('AttemptRecord coverage', () => {
       labelThreshold: 0.8,
       reasons: expect.arrayContaining([
         expect.objectContaining({ kind: 'routeSnapshot', count: 3, rate: 0.75, threshold: 0.95 }),
-        expect.objectContaining({ kind: 'currentAuthoritativeLabel', count: 1, rate: 0.25, threshold: 0.8 }),
+        expect.objectContaining({ kind: 'currentAuthoritativeLabel', count: 0, rate: 0, threshold: 0.8 }),
       ]),
     });
     expect(summary.causalGaps[0]?.sampleRefs[0]).toMatch(/^attempt:[a-f0-9]{12}$/);
     expect(summary.causalGapDiagnostics).toMatchObject({
-      blockedCurrentLabels: 3,
+      blockedCurrentLabels: 4,
       causes: expect.arrayContaining([
         expect.objectContaining({ cause: 'legacy-unlabeled-attempt', count: 1 }),
         expect.objectContaining({ cause: 'stale-router-policy-version', count: 1 }),
@@ -623,7 +661,7 @@ describe('AttemptRecord coverage', () => {
       actionableCauses: [
         expect.objectContaining({ cause: 'current-writer-unlabeled-attempt', count: 1 }),
         expect.objectContaining({ cause: 'stale-router-policy-version', count: 1 }),
-        expect.objectContaining({ cause: 'stale-authoritative-label', count: 1 }),
+        expect.objectContaining({ cause: 'missing-authoritative-label', count: 1 }),
         expect.objectContaining({ cause: 'missing-router-policy-version', count: 1 }),
         expect.objectContaining({ cause: 'missing-learning-epoch', count: 1 }),
       ],
@@ -648,7 +686,7 @@ describe('AttemptRecord coverage', () => {
     expect(JSON.stringify(summary.causalGapDiagnostics)).not.toContain('stale policy route text');
   });
 
-  it('does not mark causal coverage weak when only policy-suppressed attempts lack current labels', () => {
+  it('keeps owner-writable labels weak while separating policy-suppressed attempts', () => {
     const records = listAttemptRecords({
       deps: deps({
         readDispatchProductionEvents: () => [
@@ -720,15 +758,25 @@ describe('AttemptRecord coverage', () => {
 
     const summary = summarizeAttemptCoverage(records);
 
-    expect(summary.causalCoverage.currentAuthoritativeLabel).toEqual({ count: 1, rate: 1 / 3 });
+    expect(summary.causalCoverage.currentAuthoritativeLabel).toEqual({ count: 0, rate: 0 });
     expect(summary.causalWeak).toMatchObject({
-      weak: false,
-      reasons: [],
+      weak: true,
+      reasons: [expect.objectContaining({
+        kind: 'labelAuthoritative',
+        count: 0,
+        rate: 0,
+        threshold: 0.8,
+      })],
     });
     expect(summary.causalGapDiagnostics).toMatchObject({
-      blockedCurrentLabels: 2,
-      causes: [expect.objectContaining({ cause: 'policy-suppressed', count: 2 })],
-      actionableCauses: [],
+      blockedCurrentLabels: 3,
+      causes: expect.arrayContaining([
+        expect.objectContaining({ cause: 'policy-suppressed', count: 2 }),
+        expect.objectContaining({ cause: 'current-writer-unlabeled-attempt', count: 1 }),
+      ]),
+      actionableCauses: [
+        expect.objectContaining({ cause: 'current-writer-unlabeled-attempt', count: 1 }),
+      ],
     });
   });
 
@@ -784,25 +832,26 @@ describe('AttemptRecord coverage', () => {
       });
       expect(records[0]).toMatchObject({
         itemId: 'legacy-top-level',
-        labelAuthoritative: true,
+        labelAuthoritative: false,
+        labelOrigin: 'derived-on-read',
         learningKind: 'diagnostic-no-proposal',
         causalCoverage: {
           routeSnapshot: true,
           runEventSummary: true,
-          labelAuthoritative: true,
-          currentAuthoritativeLabel: true,
+          labelAuthoritative: false,
+          currentAuthoritativeLabel: false,
         },
       });
       expect(summary.causalCoverage).toMatchObject({
         routeSnapshot: { count: 1, rate: 1 },
         runEventSummary: { count: 1, rate: 1 },
-        labelAuthoritative: { count: 1, rate: 1 },
-        currentAuthoritativeLabel: { count: 1, rate: 1 },
+        labelAuthoritative: { count: 0, rate: 0 },
+        currentAuthoritativeLabel: { count: 0, rate: 0 },
       });
       expect(summary.production).toMatchObject({
         attempts: 1,
-        labelAuthoritativeAttempts: 1,
-        legacyUnversionedAttempts: 0,
+        labelAuthoritativeAttempts: 0,
+        legacyUnversionedAttempts: 1,
       });
     } finally {
       if (previousAshlrHome === undefined) delete process.env.ASHLR_HOME;

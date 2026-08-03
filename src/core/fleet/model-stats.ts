@@ -23,8 +23,15 @@ export interface ModelStats extends ModelRoi {
   engineModel: string;
   /** Real-world outcomes (M332 outcome-watcher). */
   outcomes: { reverted: number; followedUp: number };
-  /** Multi-model best-of-N participation (M333). */
-  bestOfN: { entered: number; won: number; winRate: number };
+  /** Multi-model best-of-N participation. `won` counts full proposal wins. */
+  bestOfN: {
+    entered: number;
+    selected: number;
+    partialSelections: number;
+    won: number;
+    selectionRate: number;
+    winRate: number;
+  };
   /** False means the zero-valued race metrics are intentionally withheld. */
   bestOfNAvailable: boolean;
 }
@@ -93,7 +100,14 @@ export function computeModelStatsDetailed(window: '7d' | '30d' | 'all'): ModelSt
           ...base,
           engineModel: key,
           outcomes: { reverted: 0, followedUp: 0 },
-          bestOfN: { entered: 0, won: 0, winRate: 0 },
+          bestOfN: {
+            entered: 0,
+            selected: 0,
+            partialSelections: 0,
+            won: 0,
+            selectionRate: 0,
+            winRate: 0,
+          },
           bestOfNAvailable: false,
         };
         out.set(key, s);
@@ -144,11 +158,18 @@ export function computeModelStatsDetailed(window: '7d' | '30d' | 'all'): ModelSt
             const key = tag ? `${c.engine}:${tag}` : c.engine;
             const s = ensure(key, c.engine, tag || '(default)');
             s.bestOfN.entered++;
-            if (c.won) s.bestOfN.won++;
+            const selected = c.selectionWon ?? c.won;
+            // Historical rows predate structured partial/full truth. Preserve
+            // their prior interpretation while current rows count only full wins.
+            const fullProposalWon = c.fullProposalWon ?? c.won;
+            if (selected) s.bestOfN.selected++;
+            if (selected && c.isPartial === true) s.bestOfN.partialSelections++;
+            if (fullProposalWon) s.bestOfN.won++;
           }
         }
         for (const s of out.values()) {
           s.bestOfNAvailable = true;
+          s.bestOfN.selectionRate = s.bestOfN.entered > 0 ? s.bestOfN.selected / s.bestOfN.entered : 0;
           s.bestOfN.winRate = s.bestOfN.entered > 0 ? s.bestOfN.won / s.bestOfN.entered : 0;
         }
       }

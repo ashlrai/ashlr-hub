@@ -56,6 +56,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, parse, resolve } from 'node:path';
 import type {
   LocalDefaultBranchRealizedMerge,
+  Proposal,
   ProposalLocalMergeIntent,
 } from '../types.js';
 import { fsyncDirectory } from '../util/durability.js';
@@ -992,6 +993,137 @@ export function verifyProducerProvenanceV2(p: ProducerProvenanceV2Fields): Prove
     return {
       ok: false,
       reason: `producer provenance v2 verify error: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+const PENDING_AUTHORITY_DOMAIN = 'ashlr.pending-proposal-authority.v1';
+
+export type PendingProposalAuthorityV1Fields = Pick<
+  Proposal,
+  | 'id'
+  | 'repo'
+  | 'origin'
+  | 'kind'
+  | 'sandboxId'
+  | 'workItemId'
+  | 'workItemGenerationId'
+  | 'workSource'
+  | 'runId'
+  | 'trajectoryId'
+  | 'runEventSummary'
+  | 'producerStatus'
+  | 'engineModel'
+  | 'engineTier'
+  | 'diff'
+  | 'diffHash'
+  | 'provenanceSig'
+  | 'producerProvenanceVersion'
+  | 'producerProvenanceSig'
+  | 'isPartial'
+  | 'status'
+  | 'createdAt'
+  | 'pendingAuthorityVersion'
+  | 'pendingAuthoritySig'
+>;
+
+function canonicalAuthorityJsonValue(value: unknown, stack: Set<object>): string | undefined {
+  if (value === null) return 'null';
+  if (typeof value === 'string' || typeof value === 'boolean') return JSON.stringify(value);
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new Error('pending authority rejects non-finite numbers');
+    return JSON.stringify(value);
+  }
+  if (value === undefined) return undefined;
+  if (typeof value !== 'object') throw new Error('pending authority rejects unsupported values');
+  if (stack.has(value)) throw new Error('pending authority rejects cycles');
+  stack.add(value);
+  try {
+    if (Array.isArray(value)) {
+      return `[${value.map((entry) => canonicalAuthorityJsonValue(entry, stack) ?? 'null').join(',')}]`;
+    }
+    const record = value as Record<string, unknown>;
+    const fields = Object.keys(record).sort().flatMap((key) => {
+      const encoded = canonicalAuthorityJsonValue(record[key], stack);
+      return encoded === undefined ? [] : [`${JSON.stringify(key)}:${encoded}`];
+    });
+    return `{${fields.join(',')}}`;
+  } finally {
+    stack.delete(value);
+  }
+}
+
+function pendingProposalAuthorityPayload(p: PendingProposalAuthorityV1Fields): string | null {
+  try {
+    if (
+      !p.id || !p.repo || !p.origin || !p.kind || !p.workItemId || !p.runId ||
+      !p.trajectoryId || !p.runEventSummary || !p.producerStatus || !p.engineModel ||
+      !p.engineTier || p.diff === undefined || !p.diffHash || !p.provenanceSig ||
+      p.status !== 'pending' || !p.createdAt
+    ) return null;
+    return canonicalAuthorityJsonValue({
+      domain: PENDING_AUTHORITY_DOMAIN,
+      version: 1,
+      id: p.id,
+      repo: p.repo,
+      origin: p.origin,
+      kind: p.kind,
+      sandboxId: p.sandboxId ?? null,
+      workItemId: p.workItemId,
+      workItemGenerationId: p.workItemGenerationId ?? null,
+      workSource: p.workSource ?? null,
+      runId: p.runId,
+      trajectoryId: p.trajectoryId,
+      runEventSummary: p.runEventSummary,
+      producerStatus: p.producerStatus,
+      isPartial: p.isPartial === true,
+      diff: p.diff,
+      diffHash: p.diffHash,
+      engineModel: p.engineModel,
+      engineTier: p.engineTier,
+      provenanceSig: p.provenanceSig,
+      producerProvenanceVersion: p.producerProvenanceVersion ?? null,
+      producerProvenanceSig: p.producerProvenanceSig ?? null,
+      status: p.status,
+      createdAt: p.createdAt,
+    }, new Set()) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Sign every immutable field that can grant pending proposal authority. */
+export function signPendingProposalAuthorityV1(p: PendingProposalAuthorityV1Fields): string {
+  try {
+    const payload = pendingProposalAuthorityPayload(p);
+    return payload
+      ? createHmac('sha256', loadOrCreateKey()).update(payload, 'utf8').digest('hex')
+      : '';
+  } catch {
+    return '';
+  }
+}
+
+/** Verify the current complete pending-proposal envelope. Legacy rows fail closed. */
+export function verifyPendingProposalAuthorityV1(
+  p: PendingProposalAuthorityV1Fields,
+): ProvenanceVerdict {
+  try {
+    if (p.pendingAuthorityVersion !== 1) {
+      return { ok: false, reason: 'missing pending proposal authority v1' };
+    }
+    if (!p.pendingAuthoritySig) {
+      return { ok: false, reason: 'missing pending proposal authority v1 signature' };
+    }
+    const expected = signPendingProposalAuthorityV1(p);
+    if (!expected || !constantTimeEqual(expected, p.pendingAuthoritySig)) {
+      return { ok: false, reason: 'pending proposal authority v1 signature mismatch' };
+    }
+    return { ok: true, reason: 'pending proposal authority v1 signature valid' };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `pending proposal authority v1 verify error: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
 }

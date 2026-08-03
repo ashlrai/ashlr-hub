@@ -28,6 +28,7 @@ import { makeColors } from './ui.js';
 import { DEFAULT_DIAGNOSTIC_RESLICE_DRAIN_LIMIT } from '../core/types.js';
 import type { AshlrConfig, DaemonConfig, DaemonDrainMode, DaemonState } from '../core/types.js';
 import type { ServiceInstallOptions, ServiceStatusResult } from '../core/daemon/service.js';
+import { serviceActivity } from '../core/daemon/service-activity.js';
 import type { PolicyMutationResult } from '../core/sandbox/policy.js';
 
 type DaemonSubcommand = 'start' | 'stop' | 'status' | 'install' | 'uninstall' | 'service-status';
@@ -77,6 +78,8 @@ type RunDaemonFn = (
 ) => Promise<DaemonState>;
 type StopDaemonFn = () => PolicyMutationResult | void;
 type LoadDaemonStateFn = () => DaemonState;
+type LoadDaemonStateStrictFn =
+  typeof import('../core/daemon/state.js')['loadDaemonStateStrict'];
 type PendingCountFn = () => number;
 type LoadConfigFn = () => AshlrConfig;
 type GuardHealthDiagnosis = import('../core/daemon/guard-health.js').GuardHealthDiagnosis;
@@ -97,12 +100,19 @@ async function importLoop(): Promise<{
   }
 }
 
-async function importState(): Promise<{ loadDaemonState: LoadDaemonStateFn } | null> {
+async function importState(): Promise<{
+  loadDaemonState: LoadDaemonStateFn;
+  loadDaemonStateStrict: LoadDaemonStateStrictFn;
+} | null> {
   try {
     const mod = (await import('../core/daemon/state.js')) as {
       loadDaemonState: LoadDaemonStateFn;
+      loadDaemonStateStrict: LoadDaemonStateStrictFn;
     };
-    return { loadDaemonState: mod.loadDaemonState };
+    return {
+      loadDaemonState: mod.loadDaemonState,
+      loadDaemonStateStrict: mod.loadDaemonStateStrict,
+    };
   } catch {
     return null;
   }
@@ -119,10 +129,14 @@ async function importPendingCount(): Promise<PendingCountFn | null> {
   }
 }
 
-async function importConfig(): Promise<LoadConfigFn | null> {
+async function importConfig(readOnly = false, strict = false): Promise<LoadConfigFn | null> {
   try {
-    const mod = (await import('../core/config.js')) as { loadConfig: LoadConfigFn };
-    return mod.loadConfig;
+    const mod = (await import('../core/config.js')) as {
+      loadConfig: LoadConfigFn;
+      loadConfigReadOnly: LoadConfigFn;
+      loadConfigReadOnlyStrict: LoadConfigFn;
+    };
+    return strict ? mod.loadConfigReadOnlyStrict : readOnly ? mod.loadConfigReadOnly : mod.loadConfig;
   } catch {
     return null;
   }
@@ -304,7 +318,7 @@ async function cmdDaemonStart(flags: StartFlags): Promise<number> {
     return 1;
   }
 
-  const loadConfig = await importConfig();
+  const loadConfig = await importConfig(true, true);
   if (!loadConfig) {
     console.error(col.red('error: ') + 'daemon requires src/core/config.ts.');
     return 1;
@@ -354,6 +368,11 @@ async function cmdDaemonStart(flags: StartFlags): Promise<number> {
     ...(flags.drain ? { drain: flags.drain } : {}),
     ...(flags.limit ? { drainLimit: flags.limit } : {}),
   });
+
+  if (finalState.startRefusal) {
+    console.error(col.red('error: ') + `daemon start refused: ${finalState.startRefusal}`);
+    return 1;
+  }
 
   // Summarize the most-recent tick (if any) for human feedback.
   const lastTick = finalState.ticks[finalState.ticks.length - 1];
@@ -434,7 +453,20 @@ async function cmdDaemonStatus(jsonMode: boolean): Promise<number> {
     return 1;
   }
 
-  const state = stateMod.loadDaemonState();
+  const strictState = stateMod.loadDaemonStateStrict();
+  const state = strictState.ok ? strictState.state : stateMod.loadDaemonState();
+  const stateSource = strictState.ok
+    ? {
+        sourceState: 'healthy' as const,
+        complete: true,
+        reason: strictState.fresh ? 'missing' as const : 'healthy' as const,
+      }
+    : {
+        sourceState: 'degraded' as const,
+        complete: false,
+        reason: strictState.reason,
+      };
+  const stateKnown = stateSource.sourceState === 'healthy';
 
   // pendingCount is READ-ONLY; degrade to 0 if the inbox store is absent.
   const pendingCount = await importPendingCount();
@@ -458,15 +490,29 @@ async function cmdDaemonStatus(jsonMode: boolean): Promise<number> {
 
   let guardHealth: GuardHealthDiagnosis = {
     generatedAt: new Date().toISOString(),
-    blocked: false,
+    blocked: true,
     blocks: [],
+    sourceQuality: {
+      sourceState: 'degraded',
+      complete: false,
+      reasons: ['guard-health-unavailable'],
+    },
   };
   const diagnoseGuardHealth = await importGuardHealth();
   if (diagnoseGuardHealth) {
     try {
       guardHealth = diagnoseGuardHealth();
     } catch {
-      guardHealth = { generatedAt: new Date().toISOString(), blocked: false, blocks: [] };
+      guardHealth = {
+        generatedAt: new Date().toISOString(),
+        blocked: true,
+        blocks: [],
+        sourceQuality: {
+          sourceState: 'degraded',
+          complete: false,
+          reasons: ['guard-health-diagnosis-failed'],
+        },
+      };
     }
   }
 
@@ -474,15 +520,16 @@ async function cmdDaemonStatus(jsonMode: boolean): Promise<number> {
     console.log(
       JSON.stringify(
         {
-          running: state.running,
-          pid: state.pid,
-          startedAt: state.startedAt,
-          lastTickAt: state.lastTickAt,
-          todayDate: state.todayDate,
-          todaySpentUsd: state.todaySpentUsd,
+          running: stateKnown ? state.running : null,
+          pid: stateKnown ? state.pid : null,
+          startedAt: stateKnown ? state.startedAt : null,
+          lastTickAt: stateKnown ? state.lastTickAt : null,
+          todayDate: stateKnown ? state.todayDate : null,
+          todaySpentUsd: stateKnown ? state.todaySpentUsd : null,
           dailyBudgetUsd: dailyCap ?? null,
-          itemsProcessed: state.itemsProcessed,
+          itemsProcessed: stateKnown ? state.itemsProcessed : null,
           pendingProposals: pending,
+          stateSource,
           guardHealth,
         },
         null,
@@ -498,15 +545,23 @@ async function cmdDaemonStatus(jsonMode: boolean): Promise<number> {
   console.log(
     '  ' +
       col.bold('running:        ') +
-      (state.running ? col.green('yes') + col.dim(` (pid ${state.pid ?? '?'})`) : col.dim('no (idle)')),
+      (!stateKnown
+        ? col.yellow('unknown')
+        : state.running
+          ? col.green('yes') + col.dim(` (pid ${state.pid ?? '?'})`)
+          : col.dim('no (idle)')),
   );
-  console.log('  ' + col.bold('started:        ') + col.dim(relAge(state.startedAt)));
-  console.log('  ' + col.bold('last tick:      ') + col.dim(relAge(state.lastTickAt)));
+  console.log('  ' + col.bold('state source:   ') +
+    (stateKnown ? col.dim(stateSource.reason) : col.yellow(stateSource.reason)));
+  console.log('  ' + col.bold('started:        ') + col.dim(stateKnown ? relAge(state.startedAt) : 'unknown'));
+  console.log('  ' + col.bold('last tick:      ') + col.dim(stateKnown ? relAge(state.lastTickAt) : 'unknown'));
   const capStr = dailyCap !== undefined ? ` / $${dailyCap}` : '';
   console.log(
-    '  ' + col.bold("today's spend:  ") + col.dim(`$${state.todaySpentUsd.toFixed(4)}${capStr}`),
+    '  ' + col.bold("today's spend:  ") +
+      col.dim(stateKnown ? `$${state.todaySpentUsd.toFixed(4)}${capStr}` : 'unknown'),
   );
-  console.log('  ' + col.bold('items processed:') + ' ' + col.dim(String(state.itemsProcessed)));
+  console.log('  ' + col.bold('items processed:') + ' ' +
+    col.dim(stateKnown ? String(state.itemsProcessed) : 'unknown'));
   console.log(
     '  ' +
       col.bold('pending props:  ') +
@@ -515,7 +570,11 @@ async function cmdDaemonStatus(jsonMode: boolean): Promise<number> {
   console.log(
     '  ' +
       col.bold('guard health:   ') +
-      (guardHealth.blocked ? col.yellow(`${guardHealth.blocks.length} block(s)`) : col.green('ok')),
+      (guardHealth.sourceQuality?.sourceState === 'degraded'
+        ? col.yellow('unknown (source degraded)')
+        : guardHealth.blocked
+          ? col.yellow(`${guardHealth.blocks.length} block(s)`)
+          : col.green('ok')),
   );
   if (guardHealth.blocked) {
     for (const block of guardHealth.blocks) {
@@ -607,8 +666,19 @@ async function cmdDaemonInstall(autostart: boolean): Promise<number> {
     console.log(col.dim(`  service file: ${status.serviceFilePath}`));
   }
   if (autostart) {
+    const activity = serviceActivity(status);
     console.log(col.dim('  auto-start on login: enabled'));
-    console.log(col.dim(`  service state: ${status.running ? 'running' : 'installed but stopped'}`));
+    console.log(col.dim(
+      `  service state: ${
+        activity === 'running'
+          ? 'running'
+          : activity === 'scheduler-active-unverified'
+            ? 'scheduler active; daemon liveness unverified'
+            : activity === 'unknown'
+              ? 'runtime unknown'
+              : 'installed but stopped'
+      }`,
+    ));
   }
   console.log(col.dim('  Use `ashlr daemon service-status` to verify the OS service state.'));
   console.log('');
@@ -657,9 +727,10 @@ async function cmdDaemonServiceStatus(jsonMode: boolean): Promise<number> {
   }
 
   const status = svcMod.serviceStatus({});
+  const activity = serviceActivity(status);
 
   if (jsonMode) {
-    console.log(JSON.stringify(status, null, 2));
+    console.log(JSON.stringify({ ...status, activity }, null, 2));
     return 0;
   }
 
@@ -668,7 +739,16 @@ async function cmdDaemonServiceStatus(jsonMode: boolean): Promise<number> {
   console.log('');
   console.log('  ' + col.bold('platform:   ') + col.dim(status.platformSpec));
   console.log('  ' + col.bold('installed:  ') + (status.installed ? col.green('yes') : col.dim('no')));
-  console.log('  ' + col.bold('running:    ') + (status.running ? col.green('yes') : col.dim('no')));
+  console.log(
+    '  ' + col.bold('running:    ') +
+      (activity === 'unknown'
+        ? col.yellow('unknown')
+        : activity === 'running'
+          ? col.green('yes')
+          : activity === 'scheduler-active-unverified'
+            ? col.yellow(`unverified (scheduler ${status.runtimeState})`)
+            : col.dim('no')),
+  );
   if (status.serviceFilePath) {
     console.log('  ' + col.bold('file:       ') + col.dim(status.serviceFilePath));
   }

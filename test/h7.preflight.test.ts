@@ -53,7 +53,12 @@ vi.mock('../src/core/providers.js', () => ({
 }));
 
 // Post-mock (lazy) imports of the REAL surfaces under test.
-import { buildReadiness, checkAshlrWriteable, readEnrollmentState } from '../src/core/readiness.js';
+import {
+  buildReadiness,
+  checkAshlrWriteable,
+  readEnrollmentState,
+  readKillState,
+} from '../src/core/readiness.js';
 import { cmdPreflight } from '../src/cli/preflight.js';
 import { loadConfig } from '../src/core/config.js';
 import { makeFixture, makeCfg, type H1Fixture } from './helpers/h1-fixture.js';
@@ -164,6 +169,46 @@ describe('h7 preflight — READ-ONLY readiness check', () => {
     expect(report.blockers.some((f) => f.id === 'enrollment')).toBe(false);
     expect(report.ready).toBe(true);
     expect(existsSync(fx!.ashlrDir)).toBe(false);
+  });
+
+  it('preserves active/inactive compatibility and blocks degraded kill-switch evidence', async () => {
+    expect.hasAssertions();
+
+    expect(readKillState()).toEqual(expect.objectContaining({
+      on: false,
+      state: 'inactive',
+      sourceState: 'healthy',
+      reason: 'missing',
+    }));
+
+    fx!.setKill(true);
+    expect(readKillState()).toEqual(expect.objectContaining({
+      on: true,
+      state: 'active',
+      sourceState: 'healthy',
+      reason: 'present',
+    }));
+
+    fx!.setKill(false);
+    mkdirSync(join(fx!.ashlrDir, 'KILL'));
+    const degraded = readKillState();
+    expect(degraded).toEqual(expect.objectContaining({
+      on: true,
+      state: 'unknown',
+      sourceState: 'degraded',
+      reason: 'unsafe',
+    }));
+
+    const report = await buildReadiness(makeCfg());
+    expect(report.ready).toBe(false);
+    expect(report.blockers).toContainEqual({
+      id: 'kill-switch',
+      severity: 'blocker',
+      detail: 'kill switch source degraded: unsafe',
+      fix: 'Repair the KILL authority path before running autonomy.',
+    });
+    expect(report.info.some((finding) => finding.id === 'kill-switch')).toBe(false);
+    expect(report.warnings.some((finding) => finding.id === 'kill-switch')).toBe(false);
   });
 
   it('preserves the healthy enrollment shape and blocks a degraded registry exactly', async () => {

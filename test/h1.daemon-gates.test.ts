@@ -55,6 +55,15 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+vi.mock('../src/core/daemon/activation-permit.js', () => ({
+  consumeDaemonActivationPermit: () => ({
+    authorized: true,
+    required: false,
+    reason: 'test-authorized',
+  }),
+  isDaemonActivationCapability: () => true,
+}));
+
 import type { AshlrConfig, DaemonState, DaemonTick } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------

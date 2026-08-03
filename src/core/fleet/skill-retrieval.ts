@@ -26,6 +26,9 @@ const MAX_LIST_ITEMS = 16;
 const MAX_LIST_ITEM_CHARS = 80;
 const MAX_QUERY_TERMS = 48;
 const MAX_TOKEN_CHARS = 32;
+const SCORING_CANDIDATE_KEYS = [
+  'candidateId', 'commandKinds', 'name', 'summary', 'tags', 'taskKinds',
+] as const;
 
 const RAW_PAYLOAD_MARKER = /\bRAW_[A-Z0-9_]*(?:PROMPT|DIFF|STDOUT|STDERR|ENV|FILE_CONTENTS?|ARGV|COMMAND_OUTPUT)[A-Z0-9_]*\b/gi;
 const RAW_PAYLOAD_LABEL = /\b(?:raw\s+)?(?:prompts?|diffs?|stdout|stderr|env(?:ironment)?|file\s+contents?|argv|command\s+outputs?)\b\s*(?:(?:contained|included|was)\s+|[=:]\s*)[^,;}\]\n]*/gi;
@@ -71,6 +74,26 @@ export interface SkillRetrievalQuery {
 }
 
 export type SkillMatchField = keyof typeof CARD_FIELD_WEIGHTS;
+
+/**
+ * Private, metadata-only scoring input shared by shadow retrieval and offline
+ * calibration. It carries no lifecycle or execution eligibility.
+ */
+export interface SkillRetrievalScoringCandidate {
+  candidateId: string;
+  name: string;
+  summary: string;
+  tags: readonly string[];
+  taskKinds: readonly string[];
+  commandKinds: readonly string[];
+}
+
+export interface SkillRetrievalScoredCandidate {
+  candidateId: string;
+  rank: number;
+  score: number;
+  matchedFields: SkillMatchField[];
+}
 
 export interface ShadowSkillSummary {
   skillId: string;
@@ -198,6 +221,39 @@ function asciiCompare(left: string, right: string): number {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function hasControlCharacter(value: string): boolean {
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if (code <= 0x1f || code === 0x7f) return true;
+  }
+  return false;
+}
+
+function snapshotScoringCandidate(value: unknown): Record<string, unknown> | null {
+  if (!isObject(value)) return null;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return null;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Reflect.ownKeys(descriptors);
+  if (keys.some((key) => typeof key !== 'string')) return null;
+  const actual = (keys as string[]).sort();
+  const expected = [...SCORING_CANDIDATE_KEYS].sort();
+  if (actual.length !== expected.length ||
+    !actual.every((key, index) => key === expected[index])) {
+    return null;
+  }
+  const snapshot: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const key of expected) {
+    const descriptor = descriptors[key];
+    if (descriptor === undefined || !Object.hasOwn(descriptor, 'value') ||
+      descriptor.enumerable !== true) {
+      return null;
+    }
+    snapshot[key] = descriptor.value;
+  }
+  return snapshot;
 }
 
 function metadataChecksum(value: string): string {
@@ -367,6 +423,19 @@ function queryTerms(query: SkillRetrievalQuery | null | undefined): Map<string, 
   return terms;
 }
 
+/**
+ * Pseudonymous identity for the exact weighted term map consumed by the
+ * scorer. Transport-only differences that cannot affect ranking collapse to
+ * the same fingerprint.
+ */
+export function skillRetrievalQueryFingerprint(
+  query: SkillRetrievalQuery | null | undefined,
+): string {
+  const weightedTerms = [...queryTerms(query)]
+    .sort(([left], [right]) => asciiCompare(left, right));
+  return metadataChecksum(JSON.stringify(weightedTerms));
+}
+
 function termSet(values: readonly string[]): Set<string> {
   const out = new Set<string>();
   for (const value of values) {
@@ -375,13 +444,45 @@ function termSet(values: readonly string[]): Set<string> {
   return out;
 }
 
-function scoreCard(card: ParsedCard, terms: ReadonlyMap<string, number>): ScoredCard | null {
+function normalizedScoringCandidate(value: unknown): SkillRetrievalScoringCandidate | null {
+  const snapshot = snapshotScoringCandidate(value);
+  if (snapshot === null) return null;
+  const candidateId = snapshot['candidateId'];
+  const name = safeText(snapshot['name'], MAX_NAME_CHARS);
+  const summary = safeText(snapshot['summary'], MAX_SUMMARY_CHARS);
+  const tags = safeList(snapshot['tags']);
+  const taskKinds = safeList(snapshot['taskKinds']);
+  const commandKinds = safeList(snapshot['commandKinds'], 12);
+  if (typeof candidateId !== 'string' ||
+    candidateId.length === 0 || candidateId.length > MAX_ID_CHARS ||
+    hasControlCharacter(candidateId) ||
+    !name.value || name.tainted || name.truncated ||
+    summary.tainted || summary.truncated ||
+    tags === null || tags.tainted ||
+    taskKinds === null || taskKinds.tainted ||
+    commandKinds === null || commandKinds.tainted) {
+    return null;
+  }
+  return {
+    candidateId,
+    name: name.value,
+    summary: summary.value,
+    tags: tags.values,
+    taskKinds: taskKinds.values,
+    commandKinds: commandKinds.values,
+  };
+}
+
+function scoreCandidate(
+  candidate: SkillRetrievalScoringCandidate,
+  terms: ReadonlyMap<string, number>,
+): Omit<SkillRetrievalScoredCandidate, 'rank'> | null {
   const fields: Array<[SkillMatchField, Set<string>, number]> = [
-    ['taskKinds', termSet(card.taskKinds), CARD_FIELD_WEIGHTS.taskKinds],
-    ['tags', termSet(card.tags), CARD_FIELD_WEIGHTS.tags],
-    ['name', termSet([card.name]), CARD_FIELD_WEIGHTS.name],
-    ['summary', termSet([card.summary]), CARD_FIELD_WEIGHTS.summary],
-    ['commandKinds', termSet(card.commandKinds), CARD_FIELD_WEIGHTS.commandKinds],
+    ['taskKinds', termSet(candidate.taskKinds), CARD_FIELD_WEIGHTS.taskKinds],
+    ['tags', termSet(candidate.tags), CARD_FIELD_WEIGHTS.tags],
+    ['name', termSet([candidate.name]), CARD_FIELD_WEIGHTS.name],
+    ['summary', termSet([candidate.summary]), CARD_FIELD_WEIGHTS.summary],
+    ['commandKinds', termSet(candidate.commandKinds), CARD_FIELD_WEIGHTS.commandKinds],
   ];
   const matchedFields = new Set<SkillMatchField>();
   let numerator = 0;
@@ -400,12 +501,45 @@ function scoreCard(card: ParsedCard, terms: ReadonlyMap<string, number>): Scored
   if (numerator === 0 || denominator === 0) return null;
 
   return {
-    card,
+    candidateId: candidate.candidateId,
     score: Math.round((numerator / denominator) * 1_000_000) / 1_000_000,
     matchedFields: [...matchedFields].sort((left, right) => (
       Object.keys(CARD_FIELD_WEIGHTS).indexOf(left) - Object.keys(CARD_FIELD_WEIGHTS).indexOf(right)
     )),
   };
+}
+
+/**
+ * Rank bounded metadata with the exact kernel used by shadow retrieval.
+ *
+ * This function performs no card eligibility, selection, routing, or prompt
+ * mutation. It exists so offline calibration cannot silently drift to a
+ * different scorer.
+ */
+export function rankSkillRetrievalCandidates(
+  candidates: readonly SkillRetrievalScoringCandidate[] | readonly unknown[] | null | undefined,
+  query: SkillRetrievalQuery | null | undefined,
+): SkillRetrievalScoredCandidate[] {
+  if (!Array.isArray(candidates)) return [];
+  try {
+    const terms = queryTerms(query);
+    if (terms.size === 0) return [];
+    const normalized = Array.from(candidates, normalizedScoringCandidate);
+    if (normalized.some((candidate) => candidate === null)) return [];
+    const typed = normalized as SkillRetrievalScoringCandidate[];
+    if (new Set(typed.map((candidate) => candidate.candidateId)).size !== typed.length) return [];
+    return typed
+      .map((candidate) => scoreCandidate(candidate, terms))
+      .filter((candidate): candidate is Omit<SkillRetrievalScoredCandidate, 'rank'> =>
+        candidate !== null)
+      .sort((left, right) => (
+        right.score - left.score ||
+        asciiCompare(left.candidateId, right.candidateId)
+      ))
+      .map((candidate, index) => ({ ...candidate, rank: index + 1 }));
+  } catch {
+    return [];
+  }
 }
 
 interface CurrentCardInspection extends VerifiedSkillCorpusInspection {
@@ -478,20 +612,24 @@ export function selectVerifiedSkills(
 ): ShadowSkillSelection {
   if (!Array.isArray(cards)) return emptySelection();
   try {
-    const terms = queryTerms(query);
     const latest = inspectCurrentCards(cards);
-    if (terms.size === 0) return emptySelection(latest.considered);
 
     const eligible = latest.cards.filter(isEligibleCard);
-    const scored = eligible
-      .map((card) => scoreCard(card, terms))
-      .filter((card): card is ScoredCard => card !== null)
-      .sort((left, right) => (
-        right.score - left.score
-        || asciiCompare(left.card.skillId, right.card.skillId)
-        || right.card.revision - left.card.revision
-      ))
-      .slice(0, MAX_SELECTED_SKILLS);
+    const eligibleById = new Map(eligible.map((card) => [card.skillId, card]));
+    const scored = rankSkillRetrievalCandidates(eligible.map((card) => ({
+      candidateId: card.skillId,
+      name: card.name,
+      summary: card.summary,
+      tags: card.tags,
+      taskKinds: card.taskKinds,
+      commandKinds: card.commandKinds,
+    })), query)
+      .slice(0, MAX_SELECTED_SKILLS)
+      .map<ScoredCard>((candidate) => ({
+        card: eligibleById.get(candidate.candidateId)!,
+        score: candidate.score,
+        matchedFields: candidate.matchedFields,
+      }));
 
     const selected = scored.map<ShadowSkillSummary>((entry, index) => ({
       skillId: entry.card.skillId,

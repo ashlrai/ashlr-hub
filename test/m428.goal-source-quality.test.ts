@@ -62,6 +62,16 @@ function writeGoalFile(name: string, record: unknown): void {
   writeFileSync(join(goalsDirectory(), `${name}.json`), JSON.stringify(record), 'utf8');
 }
 
+function writeGoalFixtureFiles(
+  records: ReadonlyArray<{ id: string; record: unknown }>,
+): void {
+  const directory = goalsDirectory();
+  mkdirSync(directory, { recursive: true });
+  for (const { id, record } of records) {
+    writeFileSync(join(directory, `${id}.json`), JSON.stringify(record), 'utf8');
+  }
+}
+
 beforeEach(() => {
   home = realpathSync.native(mkdtempSync(join(tmpdir(), 'ashlr-m428-')));
   process.env.HOME = home;
@@ -246,21 +256,26 @@ describe('M428 goal source semantic quality', () => {
   });
 
   it('preserves the 200-file read bound and marks a truncated source incomplete', () => {
-    for (let index = 0; index < 201; index += 1) {
+    const records = Array.from({ length: 201 }, (_, index) => {
       const id = `goal-${String(index).padStart(3, '0')}`;
-      writeGoalFile(id, goal({ id, milestones: [] }));
-    }
+      return { id, record: goal({ id, milestones: [] }) };
+    });
+    writeGoalFixtureFiles(records);
     writeFileSync(join(goalsDirectory(), 'ignored.json.tmp'), '{"partial":', 'utf8');
 
-    expect(listGoalsDetailed()).toMatchObject({
+    const detailed = listGoalsDetailed();
+    expect(detailed).toMatchObject({
       sourceState: 'degraded',
       complete: false,
       scannedFiles: 200,
       unreadableFiles: 0,
       limitExceeded: true,
     });
+    const includedIds = new Set(detailed.goals.map((record) => record.id));
+    expect(includedIds.size).toBe(200);
+    expect(records.filter(({ id }) => !includedIds.has(id))).toHaveLength(1);
     expect(listGoals()).toHaveLength(200);
-  }, 15_000);
+  }, process.platform === 'win32' ? 15_000 : undefined);
 });
 
 describe('M428 goal persistence authorization boundaries', () => {

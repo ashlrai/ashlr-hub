@@ -125,6 +125,7 @@ describe('M30 CI workflow', () => {
       expect(ciYml).toContain(`label: windows, portability ${partition}`);
     }
     expect(ciYml).toContain('label: windows, portability overflow');
+    expect(ciYml).not.toContain('label: macos, queue and launchd authority');
     expect(ciYml).toContain("if: matrix.label == 'ubuntu, authority 1/3'");
 
     const declaredFiles = ciYml.match(/test\/(?:[\w.-]+\/)*[\w.-]+\.test\.ts/g) ?? [];
@@ -141,8 +142,28 @@ describe('M30 CI workflow', () => {
       entry.includes('label: windows, portability overflow')) ?? '';
     const macosEntry =
       nativeMatrixEntries.find((entry) => entry.includes('os: macos-latest')) ?? '';
+    const jobNameTemplate =
+      ciYml.match(/^ {4}name: (CI \(Node 22, \$\{\{ matrix\.label \}\}\))$/m)?.[1] ?? '';
+    const macosLabel = macosEntry.match(/^ {12}label: (.+)$/m)?.[1] ?? '';
+    expect(jobNameTemplate.replace('${{ matrix.label }}', macosLabel)).toBe(
+      'CI (Node 22, macos, shared queue authority)',
+    );
     const terminalRetentionTest = 'test/m395.effect-terminal-retention.test.ts';
     const observerSchedulerTest = 'test/m367.daemon-observer-scheduler.test.ts';
+    const externalSkillMaturityTest = 'test/m455.external-skill-maturity.test.ts';
+    const skillRetrievalCalibrationTest = 'test/m456.skill-retrieval-calibration.test.ts';
+    const externalSkillArtifactFirewallTest =
+      'test/m457.external-skill-artifact-firewall.test.ts';
+    const policyAssignmentReceiptsTest =
+      'test/m460.policy-assignment-receipts.test.ts';
+    const claimedBatchAdmissionTest =
+      'test/m463.claimed-batch-admission.test.ts';
+    const agentWorkTransitionsTest =
+      'test/m464.agent-work-transitions.test.ts';
+    const hostMergeRevocationProtocolTest =
+      'test/m466.host-merge-revocation-protocol.test.ts';
+    const detachedPostMergeVerificationTest =
+      'test/m467.detached-post-merge-verification.test.ts';
     const expectedWindowsPartitions = [
       [
         'test/setup/home.test.ts',
@@ -185,10 +206,18 @@ describe('M30 CI workflow', () => {
         'test/m315.remote-handoff-truth.test.ts',
         'test/m372.test-ci-watchdog.test.ts',
         'test/m423.control-plane-lock-order.test.ts',
+        externalSkillMaturityTest,
+        skillRetrievalCalibrationTest,
+        externalSkillArtifactFirewallTest,
+        policyAssignmentReceiptsTest,
+        claimedBatchAdmissionTest,
       ],
       [
+        'test/activation-readiness-package.test.ts',
+        'test/activation-readiness-windows.test.ts',
         'test/m220.anticlog-verdict-feedback.test.ts',
         'test/m286.worktree-verify-env.test.ts',
+        'test/m299.web-fleet-control.test.ts',
         observerSchedulerTest,
         'test/m379.private-storage.test.ts',
         'test/m385.cutoff-checkpoint-scheduler.test.ts',
@@ -199,6 +228,9 @@ describe('M30 CI workflow', () => {
         'test/m419.remote-handoff-intent.test.ts',
         'test/m420.remote-handoff-recovery.test.ts',
         'test/m421.legacy-pulse-quiescence.test.ts',
+        agentWorkTransitionsTest,
+        hostMergeRevocationProtocolTest,
+        detachedPostMergeVerificationTest,
       ],
     ];
     const expectedMacosFiles = [
@@ -206,10 +238,24 @@ describe('M30 CI workflow', () => {
       'test/m392.queue-lease-epochs.test.ts',
       terminalRetentionTest,
       observerSchedulerTest,
+      'test/m93.daemon-service.test.ts',
+      'test/m93.daemon-service-launchd-integration.test.ts',
+      externalSkillMaturityTest,
+      skillRetrievalCalibrationTest,
+      externalSkillArtifactFirewallTest,
+      policyAssignmentReceiptsTest,
+      claimedBatchAdmissionTest,
+      agentWorkTransitionsTest,
+      hostMergeRevocationProtocolTest,
+      detachedPostMergeVerificationTest,
     ];
     const nativeAliasFiles = [
       'test/m426.sandbox-reservation-identity.test.ts',
       'test/h7.rollback.test.ts',
+    ];
+    const windowsServiceAuthorityFiles = [
+      'test/m93.windows-file-authority.test.ts',
+      'test/m93.daemon-service-windows-integration.test.ts',
     ];
     const nativePathIdentityFiles = [
       'test/h1.fixture.test.ts',
@@ -384,6 +430,7 @@ describe('M30 CI workflow', () => {
       ...expectedMacosFiles,
       ...nativeAliasFiles,
       ...nativePathIdentityFiles,
+      ...windowsServiceAuthorityFiles,
     ];
 
     expect(windowsMatrixEntries).toHaveLength(expectedWindowsPartitions.length);
@@ -401,6 +448,17 @@ describe('M30 CI workflow', () => {
       /test\/(?:[\w.-]+\/)*[\w.-]+\.test\.ts/g,
     ) ?? [];
     expect([...macosDeclaredFiles].sort()).toEqual([...expectedMacosFiles].sort());
+    expect(macosEntry).toContain('native_launchd: "1"');
+    expect(ciYml.match(/native_launchd: "1"/g)).toHaveLength(1);
+    expect(ciYml).toContain(
+      "ASHLR_RUN_NATIVE_LAUNCHD_TEST: ${{ matrix.native_launchd || '0' }}",
+    );
+    expect(ciYml).toContain('if: always() && matrix.os == \'macos-latest\'');
+    expect(ciYml).toContain('run: node scripts/cleanup-launchd-test.mjs');
+    expect(existsSync(resolve(repoRoot, 'scripts/cleanup-launchd-test.mjs'))).toBe(true);
+    for (const entry of nativeMatrixEntries.filter((entry) => entry !== macosEntry)) {
+      expect(entry).not.toContain('native_launchd:');
+    }
 
     expect([...declaredFiles].sort()).toEqual([...expectedFiles].sort());
     expect(windowsPortabilityThree).toContain('--reporter=dot');
@@ -417,6 +475,14 @@ describe('M30 CI workflow', () => {
     expect([...duplicateFiles].sort()).toEqual([
       terminalRetentionTest,
       observerSchedulerTest,
+      externalSkillMaturityTest,
+      skillRetrievalCalibrationTest,
+      externalSkillArtifactFirewallTest,
+      policyAssignmentReceiptsTest,
+      claimedBatchAdmissionTest,
+      agentWorkTransitionsTest,
+      hostMergeRevocationProtocolTest,
+      detachedPostMergeVerificationTest,
       'test/m426.sandbox-reservation-identity.test.ts',
     ].sort());
     expect(windowsEntries.match(/test\/m395\.effect-terminal-retention\.test\.ts/g)).toHaveLength(
@@ -433,6 +499,9 @@ describe('M30 CI workflow', () => {
       "if: matrix.os == 'macos-latest' || matrix.label == 'windows, portability 2/3'",
     );
     expect(ciYml).toContain(`npm run test:ci -- ${nativeAliasFiles.join(' ')}`);
+    expect(ciYml).toContain('windows-service-authority:');
+    expect(ciYml).toContain('runs-on: windows-2022');
+    for (const file of windowsServiceAuthorityFiles) expect(ciYml).toContain(file);
     expect(ciYml).toContain("if: matrix.label == 'windows, portability 1/3'");
     for (const file of nativePathIdentityFiles) expect(ciYml).toContain(file);
     const nativePathStep = ciYml.match(

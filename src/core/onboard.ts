@@ -23,6 +23,7 @@ import { detectEditors, wireEditor } from './integrations/editors.js';
 import { getPhantomStatus } from './phantom.js';
 import { runDoctor } from './doctor.js';
 import { serviceStatus, install } from './daemon/service.js';
+import { serviceActivity } from './daemon/service-activity.js';
 import { fleetReadiness } from './fleet/engine-readiness.js';
 import { listEnrolled, enroll } from './sandbox/policy.js';
 
@@ -229,9 +230,14 @@ export async function stepDaemonService(): Promise<OnboardStep> {
   try {
     const status = serviceStatus();
     if (status.installed) {
-      const detail = status.running
+      const activity = serviceActivity(status);
+      const detail = activity === 'running'
         ? `daemon service installed and running (${status.platformSpec})`
-        : `daemon service installed but not running — start with: ashlr daemon start`;
+        : activity === 'scheduler-active-unverified'
+          ? `daemon service installed; scheduler active, daemon liveness unverified (${status.platformSpec})`
+          : activity === 'unknown'
+            ? `daemon service installed; runtime state unknown (${status.platformSpec})`
+            : `daemon service installed but not running — start with: ashlr daemon start`;
       return step('daemon-service', 'ok', detail);
     }
     // Not installed — attempt install now.

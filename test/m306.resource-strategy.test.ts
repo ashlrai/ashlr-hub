@@ -59,7 +59,12 @@ function proposals(
 function fleet(overrides: Partial<FleetStatus> = {}): FleetStatus {
   return {
     generatedAt: '2026-07-01T00:00:00.000Z',
-    daemon: { running: true, lastTickAt: '2026-07-01T00:00:00.000Z', todaySpentUsd: 1 },
+    daemon: {
+      running: true,
+      sourceQuality: { sourceState: 'healthy', complete: true, reason: 'healthy' },
+      lastTickAt: '2026-07-01T00:00:00.000Z',
+      todaySpentUsd: 1,
+    },
     backends: [
       { backend: 'claude', dispatchesRecent: 2, quota: 'ok' },
       { backend: 'builtin', dispatchesRecent: 1, quota: 'unlimited' },
@@ -76,6 +81,7 @@ function fleet(overrides: Partial<FleetStatus> = {}): FleetStatus {
       recent: [],
     },
     killed: false,
+    killSwitch: { state: 'inactive', sourceState: 'healthy', reason: 'missing' },
     ...overrides,
   };
 }
@@ -119,6 +125,11 @@ function guard(blocked = false): GuardHealthDiagnosis {
           repairCommands: ['ashlr fleet resume'],
         }]
       : [],
+    sourceQuality: {
+      sourceState: 'healthy',
+      complete: true,
+      reasons: [],
+    },
   };
 }
 
@@ -239,6 +250,49 @@ describe('buildResourceStrategyReport', () => {
     expect(report.mode).toBe('pause');
     expect(report.guardHealth.blocked).toBe(true);
     expect(report.reasons.join(' ')).toContain('guard health');
+  });
+
+  it('pauses dispatch and merge maintenance when guard evidence is unavailable', async () => {
+    const report = await buildResourceStrategyReport(cfg(), {
+      deps: deps({
+        diagnoseGuardHealth: () => ({
+          generatedAt: '2026-07-01T00:00:00.000Z',
+          blocked: true,
+          blocks: [],
+          sourceQuality: {
+            sourceState: 'degraded',
+            complete: false,
+            reasons: ['guard-health-unavailable'],
+          },
+        }),
+      }),
+    });
+
+    expect(report.mode).toBe('pause');
+    expect(report.reasons).toContain('guard health source is degraded');
+    expect(resourceStrategyToDaemonPlan(report)).toMatchObject({
+      allowDispatch: false,
+      runAutoMergeMaintenance: false,
+    });
+  });
+
+  it('pauses when legacy guard evidence lacks source provenance', async () => {
+    const report = await buildResourceStrategyReport(cfg(), {
+      deps: deps({
+        diagnoseGuardHealth: () => ({
+          generatedAt: '2026-07-01T00:00:00.000Z',
+          blocked: false,
+          blocks: [],
+        }),
+      }),
+    });
+
+    expect(report.mode).toBe('pause');
+    expect(report.reasons).toContain('guard health source is degraded');
+    expect(resourceStrategyToDaemonPlan(report)).toMatchObject({
+      allowDispatch: false,
+      runAutoMergeMaintenance: false,
+    });
   });
 
   it('recommends local-only when cloud resources are held and local capacity is open', async () => {

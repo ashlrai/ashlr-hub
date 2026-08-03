@@ -150,6 +150,7 @@ function makeDispatchProductionEvent(over: Partial<DispatchProductionEvent> = {}
     spentUsd: 0,
     reason: 'agent returned no diff',
     basis: 'run-proposal-outcome',
+    labelOrigin: 'stored-current',
     ...over,
   };
   if (event.routerPolicyVersion === undefined) event.routerPolicyVersion = ROUTER_POLICY_VERSION;
@@ -946,9 +947,12 @@ describe('M252 Gateway — resource-aware demote', () => {
     expect(decision.reason).toMatch(/resourceDemote: claude→builtin/i);
   });
 
-  it('resource-aware learned target gate allows open or near m53 nudges', async () => {
+  it('does not let owner-writable dispatch observations steer resource-aware routing', async () => {
     let dispatchProductionEvents: DispatchProductionEvent[] = [];
-    vi.doMock('../src/core/fleet/dispatch-production-ledger.js', () => ({
+    vi.doMock('../src/core/fleet/dispatch-production-ledger.js', async () => ({
+      ...(await vi.importActual<typeof import('../src/core/fleet/dispatch-production-ledger.js')>(
+        '../src/core/fleet/dispatch-production-ledger.js',
+      )),
       readDispatchProductionEvents: vi.fn(() => dispatchProductionEvents),
       readDispatchProductionEventsDetailed: vi.fn(() => ({
         events: dispatchProductionEvents,
@@ -995,14 +999,17 @@ describe('M252 Gateway — resource-aware demote', () => {
     const decision = await decide(item, cfg);
 
     expect(base.tier).toBe('frontier');
-    expect(decision.backend).toBe(alternate);
-    expect(decision.trace.some(t => t.stage === 'm53Nudge')).toBe(true);
+    expect(decision.backend).toBe(base.backend);
+    expect(decision.trace.some(t => t.stage === 'm53Nudge')).toBe(false);
     expect(decision.trace.some(t => t.stage === 'finalResourceDemote')).toBe(false);
   });
 
   it('resource-aware learned target gate blocks unavailable m53 nudges', async () => {
     let dispatchProductionEvents: DispatchProductionEvent[] = [];
-    vi.doMock('../src/core/fleet/dispatch-production-ledger.js', () => ({
+    vi.doMock('../src/core/fleet/dispatch-production-ledger.js', async () => ({
+      ...(await vi.importActual<typeof import('../src/core/fleet/dispatch-production-ledger.js')>(
+        '../src/core/fleet/dispatch-production-ledger.js',
+      )),
       readDispatchProductionEvents: vi.fn(() => dispatchProductionEvents),
       readDispatchProductionEventsDetailed: vi.fn(() => ({
         events: dispatchProductionEvents,

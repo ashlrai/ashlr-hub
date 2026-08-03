@@ -9,6 +9,7 @@ import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
 
 const docDiff = [
   'diff --git a/README.md b/README.md',
+  'index 1111111..2222222 100644',
   '--- a/README.md',
   '+++ b/README.md',
   '@@ -1 +1 @@',
@@ -19,6 +20,7 @@ const docDiff = [
 
 const highRiskDiff = [
   'diff --git a/package.json b/package.json',
+  'index 1111111..2222222 100644',
   '--- a/package.json',
   '+++ b/package.json',
   '@@ -1 +1 @@',

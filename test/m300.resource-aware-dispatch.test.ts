@@ -29,6 +29,10 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AshlrConfig, TaskSpec } from '../src/core/types.js';
 
+vi.mock('../src/core/daemon/activation-permit.js', () => ({
+  liveConductorActivationAuthorized: () => true,
+}));
+
 // ---------------------------------------------------------------------------
 // HOME isolation
 // ---------------------------------------------------------------------------
@@ -80,8 +84,35 @@ vi.mock('../src/core/sandbox/policy.js', () => ({
 
 // listProposals
 const mockListProposals = vi.fn(() => []);
+const mockLoadProposal = vi.fn((id: string) => ({ id, status: 'pending' }));
+const mockListProposalsDetailed = vi.fn(() => {
+  const ids = mockRunEngineSandboxed.mock.calls.length > 0 || mockRunApiModelSandboxed.mock.calls.length > 0
+    ? ['prop-1', 'prop-m300-a1', 'prop-m300-s1']
+    : [];
+  return {
+    proposals: ids.map((id) => mockLoadProposal(id)).filter(Boolean),
+    sourceState: 'healthy',
+    sourcePresent: true,
+    complete: true,
+    stopReasons: [],
+    filesDiscovered: ids.length,
+    filesRead: ids.length,
+    bytesRead: 1,
+    invalidFiles: 0,
+    unreadableFiles: 0,
+  };
+});
 vi.mock('../src/core/inbox/store.js', () => ({
+  ensureProposalInbox: () => true,
   listProposals: (...args: unknown[]) => mockListProposals(...args),
+  loadProposal: (...args: unknown[]) => mockLoadProposal(...args),
+  listProposalsDetailed: (...args: unknown[]) => mockListProposalsDetailed(...args),
+}));
+
+const mockVerifyPendingAuthority = vi.fn(() => true);
+vi.mock('../src/core/inbox/pending-authority.js', () => ({
+  isAuthoritativeDurablePendingProposal: (...args: unknown[]) =>
+    mockVerifyPendingAuthority(...args),
 }));
 
 // runConductor (flag-off)
@@ -148,7 +179,7 @@ function baseTask(overrides: Partial<TaskSpec> = {}): TaskSpec {
   };
 }
 
-const defaultSandboxResult = { proposalId: 'prop-1' };
+const defaultSandboxResult = { state: { id: 'run-1' }, proposalId: 'prop-1' };
 
 // ---------------------------------------------------------------------------
 // Setup / teardown
@@ -164,6 +195,8 @@ beforeEach(() => {
   mockRunAutoMergePass.mockResolvedValue({ merged: 0, skipped: 0 });
   mockRunEngineSandboxed.mockResolvedValue(defaultSandboxResult);
   mockRunApiModelSandboxed.mockResolvedValue(defaultSandboxResult);
+  mockLoadProposal.mockImplementation((id: string) => ({ id, status: 'pending' }));
+  mockVerifyPendingAuthority.mockReturnValue(true);
   // Default: cli-agent for all engines
   mockResolveEngineSpec.mockImplementation((engine: string) => ({ id: engine, kind: 'cli-agent', tier: 'frontier' }));
 });

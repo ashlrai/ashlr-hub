@@ -51,7 +51,7 @@ const LEGACY_RECORD_KEYS = new Set([...RECORD_KEYS].filter((key) => key !== 'sch
 const CANDIDATE_KEYS = new Set([
   'index', 'runId', 'engine', 'model', 'score', 'testsPassed', 'costUsd',
   'latencyMs', 'error', 'proposalOutcome', 'proposalOutcomeReason',
-  'proposalId', 'won',
+  'producerStatus', 'isPartial', 'selectionWon', 'fullProposalWon', 'proposalId', 'won',
 ]);
 
 export interface BestOfNCandidateRecord {
@@ -66,7 +66,16 @@ export interface BestOfNCandidateRecord {
   error?: string;
   proposalOutcome?: string;
   proposalOutcomeReason?: string;
+  /** Terminal producer status for current rows; absent on historical rows. */
+  producerStatus?: 'running' | 'done' | 'failed' | 'aborted';
+  /** Structured partial-artifact truth for current rows. */
+  isPartial?: boolean;
+  /** Current explicit selection result; historical `won` remains its alias. */
+  selectionWon?: boolean;
+  /** True only for a selected, non-partial, successfully filed proposal. */
+  fullProposalWon?: boolean;
   proposalId: string | null;
+  /** Historical compatibility alias for selectionWon. */
   won: boolean;
 }
 
@@ -280,6 +289,10 @@ function sanitizeCandidate(value: unknown, persisted: boolean): BestOfNCandidate
   const error = boundedText(raw['error'], 500);
   const proposalOutcome = boundedText(raw['proposalOutcome'], 80);
   const proposalOutcomeReason = boundedText(raw['proposalOutcomeReason'], 500);
+  const producerStatus = raw['producerStatus'] === 'running' || raw['producerStatus'] === 'done' ||
+    raw['producerStatus'] === 'failed' || raw['producerStatus'] === 'aborted'
+    ? raw['producerStatus']
+    : undefined;
   if (raw['testsPassed'] !== undefined && typeof raw['testsPassed'] !== 'boolean') return undefined;
   if (raw['runId'] !== undefined && runId === undefined) return undefined;
   if (raw['costUsd'] !== undefined && costUsd === undefined) return undefined;
@@ -287,6 +300,25 @@ function sanitizeCandidate(value: unknown, persisted: boolean): BestOfNCandidate
   if (raw['error'] !== undefined && error === undefined) return undefined;
   if (raw['proposalOutcome'] !== undefined && proposalOutcome === undefined) return undefined;
   if (raw['proposalOutcomeReason'] !== undefined && proposalOutcomeReason === undefined) return undefined;
+  if (raw['producerStatus'] !== undefined && producerStatus === undefined) return undefined;
+  if (raw['isPartial'] !== undefined && typeof raw['isPartial'] !== 'boolean') return undefined;
+  if (raw['selectionWon'] !== undefined && typeof raw['selectionWon'] !== 'boolean') return undefined;
+  if (raw['fullProposalWon'] !== undefined && typeof raw['fullProposalWon'] !== 'boolean') return undefined;
+
+  const hasCurrentOutcome = raw['isPartial'] !== undefined || raw['selectionWon'] !== undefined ||
+    raw['fullProposalWon'] !== undefined || raw['producerStatus'] !== undefined;
+  if (hasCurrentOutcome) {
+    if (
+      producerStatus === undefined ||
+      typeof raw['isPartial'] !== 'boolean' || typeof raw['selectionWon'] !== 'boolean' ||
+      typeof raw['fullProposalWon'] !== 'boolean' || raw['selectionWon'] !== raw['won']
+    ) return undefined;
+    if (raw['selectionWon'] === true && proposalId === null) return undefined;
+    if (raw['isPartial'] === true && producerStatus !== 'failed' && producerStatus !== 'aborted') return undefined;
+    const expectedFullProposalWin = raw['selectionWon'] === true && raw['isPartial'] === false &&
+      producerStatus === 'done' && proposalOutcome === 'filed' && proposalId !== null;
+    if (raw['fullProposalWon'] !== expectedFullProposalWin) return undefined;
+  }
 
   return {
     index,
@@ -300,6 +332,10 @@ function sanitizeCandidate(value: unknown, persisted: boolean): BestOfNCandidate
     ...(error ? { error } : {}),
     ...(proposalOutcome ? { proposalOutcome } : {}),
     ...(proposalOutcomeReason ? { proposalOutcomeReason } : {}),
+    ...(producerStatus ? { producerStatus } : {}),
+    ...(typeof raw['isPartial'] === 'boolean' ? { isPartial: raw['isPartial'] } : {}),
+    ...(typeof raw['selectionWon'] === 'boolean' ? { selectionWon: raw['selectionWon'] } : {}),
+    ...(typeof raw['fullProposalWon'] === 'boolean' ? { fullProposalWon: raw['fullProposalWon'] } : {}),
     proposalId,
     won: raw['won'],
   };

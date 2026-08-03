@@ -223,6 +223,50 @@ describe('buildControlSnapshot — never throws (M61)', () => {
     const snap = await buildControlSnapshot(baseConfig());
     // No daemon.json in tmpHome => no ticks => empty logs
     expect(snap.logs).toEqual([]);
+    expect(snap.logsSourceQuality).toMatchObject({
+      sourceState: 'healthy',
+      complete: true,
+      reason: 'missing',
+    });
+  });
+
+  it('withholds daemon state, logs, and recent ticks when the daemon ledger is malformed', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    mkdirSync(ashlrDir, { recursive: true });
+    writeFileSync(join(ashlrDir, 'daemon.json'), 'not-json', 'utf8');
+
+    const [snap, activity] = await Promise.all([
+      buildControlSnapshot(baseConfig()),
+      buildFleetActivity(baseConfig()),
+    ]);
+
+    expect(snap.daemonObservation).toMatchObject({
+      runtimeState: 'unknown',
+      running: null,
+      todaySpentUsd: null,
+      sourceQuality: {
+        sourceState: 'degraded',
+        complete: false,
+        reason: 'malformed',
+      },
+    });
+    expect(snap.daemon).toMatchObject({
+      runtimeState: 'unknown',
+      running: false,
+      todaySpentUsd: 0,
+    });
+    expect(snap.logs).toEqual([]);
+    expect(snap.logsSourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      reason: 'malformed',
+    });
+    expect(activity.recentTicks).toEqual([]);
+    expect(activity.recentTicksSourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      reason: 'malformed',
+    });
   });
 });
 
@@ -517,8 +561,9 @@ describe('logs section (M61)', () => {
     expect(snap.fleet.dispatchProduction).toMatchObject({
       events: 1,
       proposalsCreated: 0,
-      noProposal: 1,
-      byBackend: [expect.objectContaining({ key: 'builtin', attempts: 1 })],
+      noProposal: 0,
+      preEnvelopeEvents: 1,
+      byBackend: [],
     });
     const activity = await buildFleetActivity(withFoundry({ autonomyControlLoop: true }));
     expect(activity.recentTicks[0]?.proposalProduction?.noProposalDispatches).toBe(1);

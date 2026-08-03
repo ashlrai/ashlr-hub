@@ -996,12 +996,26 @@ describe('H2 swarm resume — resume of a crashed swarm that had a real sandbox'
       'prop-h2-dedup-recovery-bound',
       '2026-07-04T11:00:00.000Z',
     );
+    const proposalAttempt = diagnosticAttempt(
+      repair,
+      'proposal-created',
+      attemptId,
+      proposal.createdAt,
+      proposal.id,
+    );
     const failedRetry: DispatchProductionEvent = {
-      ...diagnosticAttempt(repair, 'proposal-created', attemptId, proposal.createdAt, proposal.id),
+      ...proposalAttempt,
       outcome: 'proposal-capture-error',
       proposalCreated: false,
       proposalId: undefined,
       reason: 'retry diff deduplicated against the crash-persisted pending proposal',
+      runEventSummary: {
+        ...proposalAttempt.runEventSummary!,
+        status: 'failed',
+        outcome: 'proposal-capture-error',
+        proposalCreated: false,
+        proposalId: undefined,
+      },
     };
     const { generatedRepairProposalDispatchAuthority } = await import(
       '../src/core/fleet/proposal-repair-work.js'

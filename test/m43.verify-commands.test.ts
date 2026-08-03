@@ -46,6 +46,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   try {
     rmSync(workdir, { recursive: true, force: true });
   } catch {
@@ -751,6 +752,55 @@ describe('runVerifyCommandAsync', () => {
       ['-e', 'setInterval(() => {}, 1000)'],
       expect.objectContaining({ cwd: workdir, detached: true, shell: false }),
     );
+  });
+
+  it('does not claim cleanup while a hard-killed owned process group still exists', async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const child = Object.assign(new EventEmitter(), {
+      pid: 24_681,
+      stdout,
+      stderr,
+      kill: vi.fn(() => true),
+      unref: vi.fn(),
+    });
+    const spawnFake = vi.fn(() => child) as unknown as typeof import('node:child_process').spawn;
+    const processKill = vi.fn();
+    let resolved = false;
+
+    const pending = runVerifySubprocessAsync(['node', '-e', 'setInterval(() => {}, 1000)'], {
+      cwd: workdir,
+      env: process.env,
+      timeoutMs: 5_000,
+      signal: controller.signal,
+      _platform: 'linux',
+      _spawn: spawnFake,
+      _processKill: processKill,
+      _terminationGraceMs: 20,
+      _terminationDrainMs: 30,
+    }).finally(() => { resolved = true; });
+
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(20);
+    child.emit('exit', null, 'SIGKILL');
+    child.emit('close', null, 'SIGKILL');
+    await Promise.resolve();
+
+    expect(resolved).toBe(false);
+    await vi.advanceTimersByTimeAsync(30);
+    await expect(pending).resolves.toMatchObject({
+      cancelled: false,
+      error: expect.stringContaining('process-group exit unconfirmed'),
+    });
+    expect(processKill.mock.calls).toEqual([
+      [-24_681, 'SIGINT'],
+      [-24_681, 'SIGKILL'],
+      [-24_681, 0],
+    ]);
+    expect(child.kill).not.toHaveBeenCalled();
+    expect(child.unref).toHaveBeenCalledTimes(1);
   });
 
   it('never signals a recycled PGID after the original leader exits', async () => {

@@ -47,8 +47,8 @@ const WRAPPER_TIMEOUT_GRACE_MS = 10_000;
 /** Graceful cancellation/timeout window before escalating the owned group. */
 const ASYNC_TERMINATION_GRACE_MS = 5_000;
 
-/** Final bounded window for close events and pipe data after SIGKILL. */
-const ASYNC_TERMINATION_DRAIN_MS = 150;
+/** Final bounded window for group exit, close events, and pipe data after SIGKILL. */
+const ASYNC_TERMINATION_DRAIN_MS = 1_000;
 
 /** Prefix for per-command HOME directories used by verification subprocesses. */
 const VERIFY_HOME_PREFIX = 'ashlr-verify-home-';
@@ -678,7 +678,7 @@ export async function runVerifySubprocessAsync(
 
     function probeOwnedGroup(): 'present' | 'absent' | 'failed' {
       if (ownedPgid === null) return 'absent';
-      if (leaderExited) {
+      if (leaderExited && !hardKillSent) {
         authorityFailure = 'process-group ownership identity lost after leader exit; refusing delayed probe';
         ownedPgid = null;
         return 'failed';
@@ -704,19 +704,6 @@ export async function runVerifySubprocessAsync(
         }));
         return;
       }
-      // SIGKILL was delivered while the original leader still authenticated
-      // the PGID. An escaped setsid/detached descendant is out of scope and may
-      // still hold a copied pipe; bounded resource release below does not claim
-      // that such an escaped process was terminated.
-      if (ownsProcessGroup && leaderExited && hardKillSent) {
-        if (terminationReason === 'cancelled') {
-          settle(emptyResult({ ...output, signal: exitSignal, cancelled: true }));
-          return;
-        }
-        settle(emptyResult({ ...output, exitCode: 124, signal: exitSignal, timedOut: true }));
-        return;
-      }
-
       const groupState = ownsProcessGroup
         ? probeOwnedGroup()
         : (childClosed ? 'absent' : 'present');
@@ -829,8 +816,13 @@ export async function runVerifySubprocessAsync(
       leaderExited = true;
       exitCode = code;
       exitSignal = signal;
-      if (!terminationRequested || hardKillSent) {
+      if (!terminationRequested) {
         ownedPgid = null;
+        return;
+      }
+      if (hardKillSent) {
+        // Keep the authenticated PGID only for the final non-mutating exit
+        // probe. Never send another signal after the leader has exited.
         return;
       }
 
@@ -852,10 +844,6 @@ export async function runVerifySubprocessAsync(
       exitSignal = signal;
 
       if (terminationRequested) {
-        if (leaderExited) {
-          settleTermination();
-          return;
-        }
         beginTerminationDrain();
         return;
       }

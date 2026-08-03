@@ -162,7 +162,14 @@ describe('M335 computeModelStats', () => {
     expect(s5!.costPerMergedUsd).toBeNull();
     expect(s5!.judgeCostUsd).toBeCloseTo(0.2, 5);
     expect(s5!.outcomes.reverted).toBe(1); // producer join, not the judge's key
-    expect(s5!.bestOfN).toEqual({ entered: 1, won: 1, winRate: 1 });
+    expect(s5!.bestOfN).toEqual({
+      entered: 1,
+      selected: 1,
+      partialSelections: 0,
+      won: 1,
+      selectionRate: 1,
+      winRate: 1,
+    });
     expect(s5!.bestOfNAvailable).toBe(true);
     // the judge model never appears as a producer row
     expect(stats.some((s) => s.engineModel.includes('fable'))).toBe(false);
@@ -175,7 +182,43 @@ describe('M335 computeModelStats', () => {
     );
     expect(loser).toBeDefined();
     expect(loser!.dispatches).toBe(0);
-    expect(loser!.bestOfN).toEqual({ entered: 1, won: 0, winRate: 0 });
+    expect(loser!.bestOfN).toEqual({
+      entered: 1,
+      selected: 0,
+      partialSelections: 0,
+      won: 0,
+      selectionRate: 0,
+      winRate: 0,
+    });
+  });
+
+  it('counts a current partial selection without fabricating a full proposal win', () => {
+    seed();
+    bonRecords = [{
+      ts: ts(1), source: 'issue', repo: '/r', n: 1, winnerIndex: 0,
+      winnerProposalId: 'partial-1', totalCostUsd: 0.2,
+      candidates: [{
+        index: 0,
+        engine: 'claude',
+        model: 'claude-sonnet-5',
+        producerStatus: 'failed',
+        isPartial: true,
+        selectionWon: true,
+        fullProposalWon: false,
+        proposalId: 'partial-1',
+        won: true,
+      }],
+    }];
+
+    const s5 = computeModelStats('all').find((s) => s.engineModel === 'claude:sonnet-5');
+    expect(s5?.bestOfN).toEqual({
+      entered: 1,
+      selected: 1,
+      partialSelections: 1,
+      won: 0,
+      selectionRate: 1,
+      winRate: 0,
+    });
   });
 
   it('withholds realized-only ROI while preserving adverse outcomes and model joins', () => {
@@ -220,7 +263,14 @@ describe('M335 computeModelStats', () => {
     const result = computeModelStatsDetailed('all');
     const producer = result.models.find((s) => s.engineModel === 'claude:sonnet-5');
     expect(producer?.dispatches).toBe(2);
-    expect(producer?.bestOfN).toEqual({ entered: 0, won: 0, winRate: 0 });
+    expect(producer?.bestOfN).toEqual({
+      entered: 0,
+      selected: 0,
+      partialSelections: 0,
+      won: 0,
+      selectionRate: 0,
+      winRate: 0,
+    });
     expect(producer?.bestOfNAvailable).toBe(false);
     expect(result.models.some((s) => s.engineModel === 'local-coder:qwen3-coder-next')).toBe(false);
     expect(result.bestOfNSource).toMatchObject({

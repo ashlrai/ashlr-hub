@@ -25,7 +25,11 @@ import {
 } from '../fleet/status.js';
 import { getProviderRegistry } from '../providers.js';
 import { buildRollup, modelToProviderKey, LOCAL_PROVIDER_KEYS } from '../observability/rollup.js';
-import { loadDaemonState } from '../daemon/state.js';
+import {
+  readPublicDaemonObservation,
+  type DaemonSourceQuality,
+  type PublicDaemonObservation,
+} from '../daemon/public-observation.js';
 import { usesInWindow, evalQuota, windowToMs } from '../fleet/quota.js';
 import { resolveUsageWindows, type UsageWindow, type ProviderLimitEntry } from '../observability/limits.js';
 import { loadBacklog } from '../portfolio/backlog.js';
@@ -61,7 +65,9 @@ export interface ControlModels {
 }
 
 export interface ControlDaemon {
+  runtimeState: 'running' | 'stopped' | 'unknown';
   running: boolean;
+  sourceQuality: DaemonSourceQuality;
   pid: number | null;
   lastTickAt: string | null;
   todaySpentUsd: number;
@@ -170,10 +176,12 @@ export interface ControlSnapshot {
   models: ControlModels;
   fleet: FleetStatus;
   daemon: ControlDaemon;
+  daemonObservation: PublicDaemonObservation;
   usage: ControlUsage;
   limits: ControlLimit[];
   subscriptionLimits: ControlSubscriptionLimits;
   logs: ControlLogEntry[];
+  logsSourceQuality: DaemonSourceQuality;
   /** M67: supply-chain / binshield security findings from cached backlog. */
   security: ControlSecurity;
   /** M82: per-engine subscription burn-down (5h + weekly windows). */
@@ -207,9 +215,17 @@ async function buildModels(cfg: AshlrConfig): Promise<ControlModels> {
 }
 
 /** Safe fallback for the daemon section. */
-function fallbackDaemon(): ControlDaemon {
+function fallbackDaemon(
+  reason: ControlDaemon['sourceQuality']['reason'] = 'unavailable',
+): ControlDaemon {
   return {
+    runtimeState: 'unknown',
     running: false,
+    sourceQuality: {
+      sourceState: 'degraded',
+      complete: false,
+      reason,
+    },
     pid: null,
     lastTickAt: null,
     todaySpentUsd: 0,
@@ -221,22 +237,30 @@ function fallbackDaemon(): ControlDaemon {
     service: {
       installed: false,
       running: false,
+      runtimeState: 'unknown',
       platformSpec: 'unknown',
     },
   };
 }
 
-function buildDaemon(cfg: AshlrConfig): ControlDaemon {
+function buildDaemon(
+  cfg: AshlrConfig,
+  observation: PublicDaemonObservation,
+): ControlDaemon {
   try {
-    const ds = loadDaemonState();
-    const ticks = Array.isArray(ds.ticks) ? ds.ticks : [];
+    if (observation.runtimeState === 'unknown' || observation.ticks === null) {
+      return fallbackDaemon(observation.sourceQuality.reason);
+    }
+    const ticks = observation.ticks;
     const activeDirectionTick = [...ticks].reverse().find((tick) => tick.directionMode);
     const service = serviceStatusCached(daemonServiceInstallOptions(cfg), 15_000);
     return {
-      running: ds.running === true,
-      pid: typeof ds.pid === 'number' ? ds.pid : null,
-      lastTickAt: ds.lastTickAt ?? null,
-      todaySpentUsd: typeof ds.todaySpentUsd === 'number' ? ds.todaySpentUsd : 0,
+      runtimeState: observation.runtimeState,
+      running: observation.running === true,
+      sourceQuality: observation.sourceQuality,
+      pid: observation.pid,
+      lastTickAt: observation.lastTickAt,
+      todaySpentUsd: observation.todaySpentUsd ?? 0,
       activeDirectionMode: activeDirectionTick?.directionMode ?? null,
       activeDirectionAt: activeDirectionTick?.ts ?? null,
       activeDirectionReason: activeDirectionTick?.directionReason ?? null,
@@ -371,10 +395,21 @@ async function buildSubscriptionLimits(cfg: AshlrConfig): Promise<ControlSubscri
 
 const LOG_CAP = 50;
 
-function buildLogs(cap = LOG_CAP): ControlLogEntry[] {
+function buildLogs(
+  observation: PublicDaemonObservation,
+  cap = LOG_CAP,
+): {
+  entries: ControlLogEntry[];
+  sourceQuality: DaemonSourceQuality;
+} {
   try {
-    const ds = loadDaemonState();
-    const ticks = Array.isArray(ds.ticks) ? ds.ticks : [];
+    if (observation.ticks === null) {
+      return {
+        entries: [],
+        sourceQuality: observation.sourceQuality,
+      };
+    }
+    const ticks = observation.ticks;
     // ticks are oldest-first in the state; reverse for most-recent-first
     const reversed = [...ticks].reverse();
     const entries: ControlLogEntry[] = [];
@@ -451,9 +486,19 @@ function buildLogs(cap = LOG_CAP): ControlLogEntry[] {
         });
       }
     }
-    return entries;
+    return {
+      entries,
+      sourceQuality: observation.sourceQuality,
+    };
   } catch {
-    return [];
+    return {
+      entries: [],
+      sourceQuality: {
+        sourceState: 'degraded',
+        complete: false,
+        reason: 'unavailable',
+      },
+    };
   }
 }
 
@@ -639,6 +684,7 @@ export interface FleetActivitySnapshot {
   cooldownCount: number;
   /** Last N daemon ticks (newest-first, capped 20). */
   recentTicks: FleetTickEntry[];
+  recentTicksSourceQuality: DaemonSourceQuality;
 }
 
 function degradedProposalSourceQuality(): ProposalSourceQuality {
@@ -784,25 +830,36 @@ export async function buildFleetActivity(cfg: AshlrConfig): Promise<FleetActivit
 
   // Recent daemon ticks (newest-first, capped 20)
   let recentTicks: FleetTickEntry[] = [];
+  let recentTicksSourceQuality: DaemonSourceQuality = {
+    sourceState: 'degraded',
+    complete: false,
+    reason: 'unavailable',
+  };
   try {
-    const ds = loadDaemonState();
-    const ticks = Array.isArray(ds.ticks) ? ds.ticks : [];
-    recentTicks = [...ticks].reverse().slice(0, 20).map((t) => ({
-      ts: t.ts,
-      reason: t.reason ?? null,
-      dryRun: t.dryRun === true,
-      backends: t.backends ?? {},
-      spentUsd: typeof t.spentUsd === 'number' ? t.spentUsd : 0,
-      merged: typeof t.merged === 'number' ? t.merged : 0,
-      directionMode: t.directionMode ?? null,
-      directionReason: t.directionReason ?? null,
-      autoMerge: t.autoMerge ?? null,
-      remoteHandoff: t.remoteHandoff ?? null,
-      proposalProduction: t.proposalProduction ?? null,
-      dispatches: Array.isArray(t.dispatches) ? t.dispatches.slice(0, 5) : [],
-    }));
+    const fleet = await buildFleetStatus(cfg);
+    const observation = readPublicDaemonObservation(fleet.daemon);
+    if (observation.ticks !== null) {
+      const ticks = observation.ticks;
+      recentTicks = [...ticks].reverse().slice(0, 20).map((t) => ({
+        ts: t.ts,
+        reason: t.reason ?? null,
+        dryRun: t.dryRun === true,
+        backends: t.backends ?? {},
+        spentUsd: typeof t.spentUsd === 'number' ? t.spentUsd : 0,
+        merged: typeof t.merged === 'number' ? t.merged : 0,
+        directionMode: t.directionMode ?? null,
+        directionReason: t.directionReason ?? null,
+        autoMerge: t.autoMerge ?? null,
+        remoteHandoff: t.remoteHandoff ?? null,
+        proposalProduction: t.proposalProduction ?? null,
+        dispatches: Array.isArray(t.dispatches) ? t.dispatches.slice(0, 5) : [],
+      }));
+      recentTicksSourceQuality = observation.sourceQuality;
+    } else {
+      recentTicksSourceQuality = observation.sourceQuality;
+    }
   } catch {
-    // degrade silently
+    // Keep explicit unavailable provenance.
   }
 
   return {
@@ -821,6 +878,7 @@ export async function buildFleetActivity(cfg: AshlrConfig): Promise<FleetActivit
     subscriptionUsage,
     cooldownCount,
     recentTicks,
+    recentTicksSourceQuality,
   };
 }
 
@@ -841,24 +899,62 @@ export async function buildControlSnapshot(cfg: AshlrConfig): Promise<ControlSna
       console.warn('[ashlr] control:buildControlSnapshot buildFleetStatus failed:', (err as Error)?.message ?? err);
       return {
         generatedAt: ts,
-        daemon: { running: false, lastTickAt: null, todaySpentUsd: 0 },
+        daemon: {
+          running: false,
+          sourceQuality: {
+            sourceState: 'degraded',
+            complete: false,
+            reason: 'unavailable',
+          },
+          lastTickAt: null,
+          todaySpentUsd: 0,
+        },
         backends: [],
         queue: { backlogItems: 0 },
         proposals: { pending: 0, frontierPending: 0, applied: 0 },
         merges: { recent: 0 },
         autonomyControlMode: resolveAutonomyControlMode(cfg),
-        killed: false,
+        guardHealth: {
+          generatedAt: ts,
+          blocked: true,
+          blocks: [],
+          sourceQuality: {
+            sourceState: 'degraded',
+            complete: false,
+            reasons: ['fleet-status-unavailable'],
+          },
+        },
+        killed: true,
+        killSwitch: {
+          state: 'unknown',
+          sourceState: 'degraded',
+          reason: 'unavailable',
+        },
       };
     }),
   ]);
 
-  const daemon = buildDaemon(cfg);
+  const daemonObservation = readPublicDaemonObservation(fleet.daemon);
+  const daemon = buildDaemon(cfg, daemonObservation);
   const usage = buildUsage(cfg);
   const limits = buildLimits(cfg);
   const subscriptionLimits = await buildSubscriptionLimits(cfg);
-  const logs = buildLogs(LOG_CAP);
+  const logs = buildLogs(daemonObservation, LOG_CAP);
   const security = buildSecurity();
   const subscriptionUsage = buildSubscriptionUsage();
 
-  return { ts, models, fleet, daemon, usage, limits, subscriptionLimits, logs, security, subscriptionUsage };
+  return {
+    ts,
+    models,
+    fleet,
+    daemon,
+    daemonObservation,
+    usage,
+    limits,
+    subscriptionLimits,
+    logs: logs.entries,
+    logsSourceQuality: logs.sourceQuality,
+    security,
+    subscriptionUsage,
+  };
 }

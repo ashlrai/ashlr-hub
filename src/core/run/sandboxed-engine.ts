@@ -91,6 +91,7 @@ import {
 } from '../inbox/persistence-mismatch.js';
 import { recordAgentAction, type AgentActionOutcome } from '../fleet/agent-action-ledger.js';
 import { agentRunSemanticEvents } from '../learning/agent-semantic-events.js';
+import { sandboxedRunAgentWorkTransitions } from '../learning/agent-work-transitions.js';
 import { hashDiff, signProvenance } from '../foundry/provenance.js';
 // M249: RunCache shadow mode — key construction + store (import lazy so flag-off path
 // incurs zero module load cost; the dynamic import is cached by Node after first call).
@@ -120,6 +121,8 @@ export interface SandboxedEngineResult {
   state: RunState;
   /** Inbox proposal id when a non-empty diff was captured. */
   proposalId?: string;
+  /** Created inbox id awaiting persistence reconciliation; never grants filing authority. */
+  candidateProposalId?: string;
   /** Proposal-shaped candidate captured without persisting to the inbox. */
   proposalDraft?: Proposal;
   /** Metadata-only explanation of whether proposal filing happened. */
@@ -302,6 +305,7 @@ function duplicateDiffOutcome(proposal: Proposal, diff: SandboxDiff): RunProposa
     'proposal-disabled',
     `duplicate diff skipped; existing pending proposal ${proposal.id} remains authoritative`,
     diff,
+    proposal.id,
   );
 }
 
@@ -487,11 +491,19 @@ function writeSandboxedRunAgentAction(fields: {
   outcome?: RunProposalOutcome;
   status: RunState['status'];
   usage?: RunUsage;
+  startedAt?: string;
   durationMs?: number;
   actionCounts: RunActionCounts;
   contextSummary?: RunContextSummary;
 }): void {
   try {
+    const observedAt = new Date().toISOString();
+    const startedAt = fields.startedAt &&
+      Number.isFinite(Date.parse(fields.startedAt)) &&
+      new Date(Date.parse(fields.startedAt)).toISOString() === fields.startedAt &&
+      Date.parse(fields.startedAt) <= Date.parse(observedAt)
+      ? fields.startedAt
+      : observedAt;
     const counts = sanitizedRunActionCounts(actionCountsWithOutcome(fields.actionCounts, fields.outcome));
     const outcomeLabel = fields.outcome?.kind ?? fields.status;
     const proposalId = fields.proposalId ?? fields.outcome?.proposalId;
@@ -501,6 +513,14 @@ function writeSandboxedRunAgentAction(fields: {
       model: fields.engineModel,
       status: fields.status,
       ...(proposalCreated !== undefined ? { proposalCreated } : {}),
+    });
+    const workTransitions = sandboxedRunAgentWorkTransitions({
+      runId: fields.runId,
+      startedAt,
+      observedAt,
+      status: fields.status,
+      outcomeKind: fields.outcome?.kind,
+      isPartial: fields.outcome?.isPartial,
     });
     const summary = runEventSummary({
       runId: fields.runId,
@@ -523,7 +543,7 @@ function writeSandboxedRunAgentAction(fields: {
     });
     recordAgentAction({
       schemaVersion: 1,
-      ts: new Date().toISOString(),
+      ts: observedAt,
       actor: 'agent',
       kind: 'maintenance',
       outcome: sandboxAgentOutcome(fields.outcome, fields.status),
@@ -545,6 +565,7 @@ function writeSandboxedRunAgentAction(fields: {
       learningSource: 'agent-action',
       labelBasis: 'dispatch-outcome',
       semanticEvents,
+      workTransitions,
       backend: fields.engine,
       tier: fields.tier,
       model: fields.engineModel,
@@ -1146,6 +1167,7 @@ export async function captureSandboxedProposal(
       ...(opts.workItemGenerationId ? { workItemGenerationId: opts.workItemGenerationId } : {}),
       workSource: opts.workSource,
       runId: id,
+      producerStatus,
       engineModel,
       engineTier: tier,
       ...(reviewOnlyVerifyResult ? { verifyResult: reviewOnlyVerifyResult } : {}),
@@ -1234,11 +1256,10 @@ export async function captureSandboxedProposal(
         'proposal-capture-error',
         'proposal capture requires persistence reconciliation',
         diff,
-        proposal.id,
       );
       return {
         state: withProposalOutcome(mk({ result: outcome.reason }), outcome, actionCounts, opts.contextSummary),
-        proposalId: proposal.id,
+        candidateProposalId: proposal.id,
         proposalOutcome: outcome,
       };
     }
@@ -1296,11 +1317,10 @@ export async function captureSandboxedProposal(
         'proposal-capture-error',
         'proposal capture requires persistence reconciliation',
         capturedDiff,
-        createdProposal.id,
       );
       return {
         state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts, opts.contextSummary),
-        proposalId: createdProposal.id,
+        candidateProposalId: createdProposal.id,
         proposalOutcome: outcome,
       };
     }
@@ -1333,9 +1353,11 @@ export async function runEngineSandboxed(
   const id = assertSafeExecutionIdentity(
     opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
   );
+  const runCreatedAtIso = new Date().toISOString();
   const recordSandboxedRunAgentAction = opts.deferTerminalAction
     ? (_fields: Parameters<typeof writeSandboxedRunAgentAction>[0]) => {}
-    : writeSandboxedRunAgentAction;
+    : (fields: Parameters<typeof writeSandboxedRunAgentAction>[0]) =>
+        writeSandboxedRunAgentAction({ ...fields, startedAt: runCreatedAtIso });
   let delegationScope = opts.delegationScope
     ? normalizeDelegationScope(opts.delegationScope, {
         origin: 'run',
@@ -1363,7 +1385,7 @@ export async function runEngineSandboxed(
     provider: 'external',
     engineModel,
     engineTier: tier,
-    createdAt: new Date().toISOString(),
+    createdAt: runCreatedAtIso,
     updatedAt: new Date().toISOString(),
     budget: {
       maxTokens: opts.budget?.maxTokens ?? 0,
@@ -1546,6 +1568,7 @@ export async function runEngineSandboxed(
   env.CLAUDE_SESSION_ID = `ashlr-fleet-${id}`;
 
   let proposalId: string | undefined;
+  let candidateProposalId: string | undefined;
   let proposalOutcomeResult: RunProposalOutcome | undefined;
 
   // M248: write a fleet-owned MCP sidecar to the worktree (guarded: only when ashlr is on PATH).
@@ -1753,6 +1776,7 @@ export async function runEngineSandboxed(
     ): SandboxedEngineResult => {
       if (retainSandbox) sandboxRetention = retainedSandboxEvidence(sb);
       const capturedProposalId = captured?.proposalId;
+      const capturedCandidateProposalId = captured?.candidateProposalId;
       const capturedOutcome = captured?.proposalOutcome;
       const result = retainSandbox
         ? `engine "${engine}" failed with sandbox retained: ${failure.error ?? 'process cleanup unconfirmed'}`
@@ -1782,6 +1806,7 @@ export async function runEngineSandboxed(
           sandboxRetention,
         ),
         ...(capturedProposalId ? { proposalId: capturedProposalId } : {}),
+        ...(capturedCandidateProposalId ? { candidateProposalId: capturedCandidateProposalId } : {}),
         ...(capturedOutcome ? { proposalOutcome: capturedOutcome } : {}),
         ...(sandboxRetention ? { sandboxRetention } : {}),
       };
@@ -1794,6 +1819,7 @@ export async function runEngineSandboxed(
         return failedAfterAuthoritativeTermination(res, processCleanupUnconfirmed(res), captured);
       }
       const capturedProposalId = captured?.proposalId;
+      const capturedCandidateProposalId = captured?.candidateProposalId;
       const capturedOutcome = captured?.proposalOutcome;
       recordSandboxedRunAgentAction({
         engine,
@@ -1817,6 +1843,7 @@ export async function runEngineSandboxed(
           actionCounts,
         ),
         ...(capturedProposalId ? { proposalId: capturedProposalId } : {}),
+        ...(capturedCandidateProposalId ? { candidateProposalId: capturedCandidateProposalId } : {}),
         ...(capturedOutcome ? { proposalOutcome: capturedOutcome } : {}),
       };
     };
@@ -1865,6 +1892,7 @@ export async function runEngineSandboxed(
             return cancelledAfterSpawn(captured);
           }
           proposalId = captured.proposalId;
+          candidateProposalId = captured.candidateProposalId;
           proposalOutcomeResult = captured.proposalOutcome;
           if (proposalOutcomeResult?.kind === 'empty-diff') {
             proposalOutcomeResult = proposalOutcome(
@@ -1916,6 +1944,7 @@ export async function runEngineSandboxed(
           actionCounts,
         ),
         proposalId,
+        candidateProposalId,
         proposalOutcome: proposalOutcomeResult,
       };
     }
@@ -2094,6 +2123,7 @@ export async function runEngineSandboxed(
           if (isDiffDedupResult(proposal)) {
             proposalOutcomeResult = duplicateDiffOutcome(proposal, effDiff);
           } else {
+            candidateProposalId = proposal.id;
             const persisted = proposal.status === 'pending' ? inbox.load(proposal.id) : null;
             const durablePending =
               proposal.status === 'pending' &&
@@ -2107,13 +2137,25 @@ export async function runEngineSandboxed(
             if (!durablePending) {
               proposalOutcomeResult = proposalOutcome(
                 'proposal-capture-error',
-                'proposal was not durably persisted with matching capture metadata',
+                'proposal capture requires persistence reconciliation',
                 effDiff,
               );
+              if (opts.signal?.aborted) {
+                return cancelledAfterSpawn({
+                  state: withProposalOutcome(
+                    mk({ status: 'done', result: proposalOutcomeResult.reason, usage }),
+                    proposalOutcomeResult,
+                    actionCounts,
+                  ),
+                  candidateProposalId,
+                  proposalOutcome: proposalOutcomeResult,
+                });
+              }
             } else {
-            proposalId = proposal.id;
-            proposalOutcomeResult = proposalOutcome('filed', 'proposal filed', effDiff, proposal.id);
-            // M246: record telemetry fields on the decision entry (additive, never-throws).
+              candidateProposalId = undefined;
+              proposalId = proposal.id;
+              proposalOutcomeResult = proposalOutcome('filed', 'proposal filed', effDiff, proposal.id);
+              // M246: record telemetry fields on the decision entry (additive, never-throws).
             try {
               const { recordDecision } = await import('../fleet/decisions-ledger.js');
               recordDecision({
@@ -2196,9 +2238,28 @@ export async function runEngineSandboxed(
         } else {
           proposalOutcomeResult = proposalOutcome('empty-diff', `engine "${engine}" completed without file changes`);
         }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        proposalOutcomeResult = proposalOutcome('proposal-capture-error', `proposal capture failed: ${msg}`);
+      } catch {
+        const captureFailureOutcome = candidateProposalId
+          ? proposalOutcome(
+              'proposal-capture-error',
+              'proposal capture requires persistence reconciliation',
+            )
+          : proposalOutcome(
+              'proposal-capture-error',
+              'proposal capture failed before durable proposal filing',
+            );
+        if (opts.signal?.aborted) {
+          return cancelledAfterSpawn({
+            state: withProposalOutcome(
+              mk({ status: 'done', result: captureFailureOutcome.reason, usage }),
+              captureFailureOutcome,
+              actionCounts,
+            ),
+            ...(candidateProposalId ? { candidateProposalId } : {}),
+            proposalOutcome: captureFailureOutcome,
+          });
+        }
+        proposalOutcomeResult = captureFailureOutcome;
         // diff/proposal capture is best-effort — never fail the run on it.
       }
     } else {
@@ -2224,6 +2285,7 @@ export async function runEngineSandboxed(
     return {
       state: withProposalOutcome(mk({ status: 'done', result: res.output, usage }), proposalOutcomeResult, actionCounts),
       proposalId,
+      candidateProposalId,
       proposalOutcome: proposalOutcomeResult,
     };
   } finally {
@@ -2274,14 +2336,14 @@ export async function runApiModelSandboxed(
   opts: RunEngineSandboxedOptions,
 ): Promise<SandboxedEngineResult> {
   const actionCounts: RunActionCounts = {};
-  const recordSandboxedRunAgentAction = opts.deferTerminalAction
+  const writeApiModelTerminalAction = opts.deferTerminalAction
     ? (_fields: Parameters<typeof writeSandboxedRunAgentAction>[0]) => {}
     : writeSandboxedRunAgentAction;
   const spec = resolveEngineSpec(engine, cfg);
   if (!spec || spec.kind !== 'api-model' || !spec.api) {
     const outcome = proposalOutcome('engine-unsupported', `engine "${engine}" is not an api-model — cannot run in-process`);
     const unsupportedRunId = `run-${Date.now().toString(36)}`;
-    recordSandboxedRunAgentAction({
+    writeApiModelTerminalAction({
       engine,
       engineModel: `${engine}:${resolveConcreteModel(engine, cfg, opts.model)}`,
       tier: engineTierOf(engine, cfg),
@@ -2319,6 +2381,12 @@ export async function runApiModelSandboxed(
   const id = assertSafeExecutionIdentity(
     opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
   );
+  const runCreatedAtIso = new Date().toISOString();
+  const recordSandboxedRunAgentAction = (
+    fields: Parameters<typeof writeSandboxedRunAgentAction>[0],
+  ): void => {
+    writeApiModelTerminalAction({ ...fields, startedAt: runCreatedAtIso });
+  };
   let delegationScope = opts.delegationScope
     ? normalizeDelegationScope(opts.delegationScope, {
         origin: 'run',
@@ -2346,7 +2414,7 @@ export async function runApiModelSandboxed(
     provider: spec.api!.protocol ?? 'openai-compat',
     engineModel,
     engineTier: tier,
-    createdAt: new Date().toISOString(),
+    createdAt: runCreatedAtIso,
     updatedAt: new Date().toISOString(),
     budget: {
       maxTokens: opts.budget?.maxTokens ?? 50_000,
@@ -2496,6 +2564,7 @@ export async function runApiModelSandboxed(
   }
 
   let proposalId: string | undefined;
+  let candidateProposalId: string | undefined;
   let proposalOutcomeResult: RunProposalOutcome | undefined;
   const runStartedAt = Date.now();
 
@@ -2605,6 +2674,7 @@ export async function runApiModelSandboxed(
 
     const cancelledAfterTask = (captured?: SandboxedEngineResult): SandboxedEngineResult => {
       const capturedProposalId = captured?.proposalId;
+      const capturedCandidateProposalId = captured?.candidateProposalId;
       const capturedOutcome = captured?.proposalOutcome;
       recordSandboxedRunAgentAction({
         engine,
@@ -2637,6 +2707,7 @@ export async function runApiModelSandboxed(
           m264ContextSummary,
         ),
         ...(capturedProposalId ? { proposalId: capturedProposalId } : {}),
+        ...(capturedCandidateProposalId ? { candidateProposalId: capturedCandidateProposalId } : {}),
         ...(capturedOutcome ? { proposalOutcome: capturedOutcome } : {}),
       };
     };
@@ -2672,6 +2743,7 @@ export async function runApiModelSandboxed(
             return cancelledAfterTask(captured);
           }
           proposalId = captured.proposalId;
+          candidateProposalId = captured.candidateProposalId;
           proposalOutcomeResult =
             captured.proposalOutcome?.kind === 'empty-diff'
               ? proposalOutcome('api-model-task-failed', task.error ?? 'api-model run failed')
@@ -2730,6 +2802,7 @@ export async function runApiModelSandboxed(
           m264ContextSummary,
         ),
         proposalId,
+        candidateProposalId,
         proposalOutcome: proposalOutcomeResult,
       };
     }
@@ -2760,6 +2833,7 @@ export async function runApiModelSandboxed(
           return cancelledAfterTask(captured);
         }
         proposalId = captured.proposalId;
+        candidateProposalId = captured.candidateProposalId;
         proposalOutcomeResult = captured.proposalOutcome;
         if (proposalOutcomeResult?.kind === 'empty-diff') {
           proposalOutcomeResult = proposalOutcome('empty-diff', `api-model engine "${engine}" completed without file changes`);
@@ -2807,6 +2881,7 @@ export async function runApiModelSandboxed(
         m264ContextSummary,
       ),
       proposalId,
+      candidateProposalId,
       proposalOutcome: proposalOutcomeResult,
     };
   } finally {

@@ -986,6 +986,28 @@ function requiredDiffRetryGoal(goal: string, attempt: number, maxAttempts: numbe
   );
 }
 
+function proposalCaptureRepairGoal(
+  goal: string,
+  outcome: RunProposalOutcome,
+  attempt: number,
+  maxAttempts: number,
+): string {
+  return (
+    `${goal}\n\n[TITRR proposal-capture repair ${attempt}/${maxAttempts - 1}]\n` +
+    `Blocker class: ${outcome.kind}. Raw verifier diagnostics are untrusted and have been withheld.\n` +
+    'Keep the existing useful work, inspect the repository and verification contract, rerun the relevant checks yourself, and make the smallest complete repair that resolves this blocker. ' +
+    'Do not make cosmetic edits or weaken tests, verification, provenance, or the requested scope.'
+  );
+}
+
+function proposalCaptureNeedsRepair(
+  outcome: RunProposalOutcome | undefined,
+  proposalRequired: boolean,
+): outcome is RunProposalOutcome {
+  if (!proposalRequired || !outcome || outcome.proposalId) return false;
+  return outcome.kind === 'empty-diff' || outcome.kind === 'completeness-gate';
+}
+
 function resolveTitrrBudget(budget: Partial<RunBudget> | undefined, allowCloud: boolean | undefined): RunBudget {
   return {
     maxTokens: budget?.maxTokens ?? DEFAULT_MAX_TOKENS,
@@ -1032,6 +1054,25 @@ function addTitrrActionCounts(total: RunActionCounts, attempt: RunActionCounts |
   for (const key of ['diffFiles', 'diffLines', 'proposalCreated', 'proposalBlocked'] as const) {
     const value = attempt?.[key];
     if (typeof value === 'number' && Number.isFinite(value) && value >= 0) next[key] = Math.trunc(value);
+  }
+  return next;
+}
+
+function addTitrrCaptureActionCounts(
+  total: RunActionCounts,
+  producerState: RunState,
+  capturedState: RunState,
+): RunActionCounts {
+  const next = { ...total };
+  const before = producerState.runEventSummary?.actionCounts;
+  const after = capturedState.runEventSummary?.actionCounts;
+  for (const key of ['proposalCaptureAttempts', 'completenessGateRuns'] as const) {
+    const beforeCount = boundedCaptureCount(before?.[key]) ?? 0;
+    const afterCount = boundedCaptureCount(after?.[key]) ?? 0;
+    const delta = Math.max(0, afterCount - beforeCount);
+    if (delta > 0) {
+      next[key] = Math.min(Number.MAX_SAFE_INTEGER, (next[key] ?? 0) + delta);
+    }
   }
   return next;
 }
@@ -2195,18 +2236,26 @@ async function runGoalInternal(
             let titrrUsage = newUsage();
             let titrrActionCounts: RunActionCounts = {};
             let titrrDurationMs = 0;
+            const proposalRequired =
+              delegationScope?.resultContract?.requireProposal === true ||
+              delegationScope?.resultContract?.requireDiff === true;
             const captureApiProposal = async (
               producerState: RunState,
               captureOpts: CaptureSandboxedProposalOptions,
             ) => {
               const captured = await captureSandboxedProposalFailClosed(
-              captureSandboxedProposal,
-              engineId,
-              goal,
-              cfg,
-              captureOpts,
-              producerState,
-            );
+                captureSandboxedProposal,
+                engineId,
+                goal,
+                cfg,
+                captureOpts,
+                producerState,
+              );
+              titrrActionCounts = addTitrrCaptureActionCounts(
+                titrrActionCounts,
+                producerState,
+                captured.state,
+              );
               return captured;
             };
 
@@ -2383,6 +2432,23 @@ async function runGoalInternal(
                         : propR.state,
                     ),
                   };
+                  if (
+                    proposalCaptureNeedsRepair(propR.proposalOutcome, proposalRequired) &&
+                    !isLastAttempt &&
+                    !overBudget(titrrUsage, titrrBudget)
+                  ) {
+                    apiGoal = proposalCaptureRepairGoal(
+                      goal,
+                      propR.proposalOutcome,
+                      titrrAttempt,
+                      titrrMax,
+                    );
+                    emit(sink, {
+                      kind: 'retry',
+                      text: `[TITRR] proposal capture blocked - repair attempt ${titrrAttempt + 1}/${titrrMax}`,
+                    });
+                    continue;
+                  }
                   break;
                 }
 
@@ -2470,7 +2536,23 @@ async function runGoalInternal(
               if (cancelled()) {
                 lastApiR = { ...lastApiR, state: asCancelledRunState(lastApiR.state) };
               }
-              recordSandboxedRunAgentAction({ engine: engineId, engineModel: lastApiR.state.engineModel ?? `${engineId}:${modelEnv ?? 'default'}`, tier: lastApiR.state.engineTier ?? 'mid', runId: lastApiR.state.id, sourceRepo: cwd, workItemId: opts.workItemId, workSource: opts.workSource, proposalId: lastApiR.proposalId, outcome: lastApiR.proposalOutcome, status: lastApiR.state.status, usage: lastApiR.state.usage, durationMs: runDurationMs(lastApiR.state), actionCounts: actionCountsForProposalCapture(lastApiR.state) ?? {}, contextSummary: lastApiR.state.runEventSummary?.contextSummary });
+              recordSandboxedRunAgentAction({
+                engine: engineId,
+                engineModel: lastApiR.state.engineModel ?? `${engineId}:${modelEnv ?? 'default'}`,
+                tier: lastApiR.state.engineTier ?? 'mid',
+                runId: lastApiR.state.id,
+                sourceRepo: cwd,
+                workItemId: opts.workItemId,
+                workSource: opts.workSource,
+                proposalId: lastApiR.proposalId,
+                outcome: lastApiR.proposalOutcome,
+                status: lastApiR.state.status,
+                usage: lastApiR.state.usage,
+                startedAt: lastApiR.state.createdAt,
+                durationMs: runDurationMs(lastApiR.state),
+                actionCounts: actionCountsForProposalCapture(lastApiR.state) ?? {},
+                contextSummary: lastApiR.state.runEventSummary?.contextSummary,
+              });
               emit(sink, {
                 kind: 'log',
                 text: lastApiR.proposalId
@@ -2559,6 +2641,9 @@ async function runGoalInternal(
           let titrrUsage = newUsage();
           let titrrActionCounts: RunActionCounts = {};
           let titrrDurationMs = 0;
+          const proposalRequired =
+            delegationScope?.resultContract?.requireProposal === true ||
+            delegationScope?.resultContract?.requireDiff === true;
           const captureTitrrProposal = async (options: { isPartial?: boolean; forceGateBlockReason?: string } = {}) => {
             if (cancelled()) return;
             const sandbox = titrrSandbox;
@@ -2584,6 +2669,11 @@ async function runGoalInternal(
               actionCounts: actionCountsForProposalCapture(producer.state),
               contextSummary: producer.state.runEventSummary?.contextSummary,
             }, producer.state);
+            titrrActionCounts = addTitrrCaptureActionCounts(
+              titrrActionCounts,
+              producer.state,
+              propR.state,
+            );
             const capturedState = propR.proposalOutcome
               ? { ...propR.state, proposalOutcome: propR.proposalOutcome }
               : propR.state;
@@ -2593,6 +2683,7 @@ async function runGoalInternal(
               proposalOutcome: propR.proposalOutcome,
               state: withCapturedProposalMetadata(producer.state, capturedState),
             };
+            return propR.proposalOutcome;
           };
 
           try {
@@ -2712,13 +2803,37 @@ async function runGoalInternal(
               if (titrrResult === null) {
                 // No test command detected — annotate and stop early.
                 titrrAnnotation = 'tests: not detected (skipped)';
-                await captureTitrrProposal();
+                const captureOutcome = await captureTitrrProposal();
+                if (
+                  proposalCaptureNeedsRepair(captureOutcome, proposalRequired) &&
+                  !isLastAttempt &&
+                  !overBudget(titrrUsage, titrrBudget)
+                ) {
+                  titrrGoal = proposalCaptureRepairGoal(goal, captureOutcome, titrrAttempt, titrrMax);
+                  emit(sink, {
+                    kind: 'retry',
+                    text: `[TITRR] proposal capture blocked - repair attempt ${titrrAttempt + 1}/${titrrMax}`,
+                  });
+                  continue;
+                }
                 break;
               }
 
               if (titrrResult.ok) {
                 titrrAnnotation = `tests: pass (attempt ${titrrAttempt})`;
-                await captureTitrrProposal();
+                const captureOutcome = await captureTitrrProposal();
+                if (
+                  proposalCaptureNeedsRepair(captureOutcome, proposalRequired) &&
+                  !isLastAttempt &&
+                  !overBudget(titrrUsage, titrrBudget)
+                ) {
+                  titrrGoal = proposalCaptureRepairGoal(goal, captureOutcome, titrrAttempt, titrrMax);
+                  emit(sink, {
+                    kind: 'retry',
+                    text: `[TITRR] proposal capture blocked - repair attempt ${titrrAttempt + 1}/${titrrMax}`,
+                  });
+                  continue;
+                }
                 break;
               }
 
@@ -2771,7 +2886,23 @@ async function runGoalInternal(
               ? `[TITRR: ${titrrAnnotation}]\n${finalR.state.result}`
               : `[TITRR: ${titrrAnnotation}]`;
           }
-          recordSandboxedRunAgentAction({ engine: engineId, engineModel: finalR.state.engineModel ?? `${engineId}:${modelEnv ?? 'default'}`, tier: finalR.state.engineTier ?? 'mid', runId: finalR.state.id, sourceRepo: cwd, workItemId: opts.workItemId, workSource: opts.workSource, proposalId: finalR.proposalId, outcome: finalR.proposalOutcome, status: finalR.state.status, usage: finalR.state.usage, durationMs: runDurationMs(finalR.state), actionCounts: actionCountsForProposalCapture(finalR.state) ?? {}, contextSummary: finalR.state.runEventSummary?.contextSummary });
+          recordSandboxedRunAgentAction({
+            engine: engineId,
+            engineModel: finalR.state.engineModel ?? `${engineId}:${modelEnv ?? 'default'}`,
+            tier: finalR.state.engineTier ?? 'mid',
+            runId: finalR.state.id,
+            sourceRepo: cwd,
+            workItemId: opts.workItemId,
+            workSource: opts.workSource,
+            proposalId: finalR.proposalId,
+            outcome: finalR.proposalOutcome,
+            status: finalR.state.status,
+            usage: finalR.state.usage,
+            startedAt: finalR.state.createdAt,
+            durationMs: runDurationMs(finalR.state),
+            actionCounts: actionCountsForProposalCapture(finalR.state) ?? {},
+            contextSummary: finalR.state.runEventSummary?.contextSummary,
+          });
 
           emit(sink, {
             kind: finalR.state.status === 'done' ? 'task-done' : 'log',

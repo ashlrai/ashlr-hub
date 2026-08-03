@@ -8,6 +8,7 @@ const effects = vi.hoisted(() => ({
   runDaemon: vi.fn(),
   stopDaemon: vi.fn(),
   loadDaemonState: vi.fn(),
+  loadDaemonStateStrict: vi.fn(),
   pendingCount: vi.fn(),
   diagnoseGuardHealth: vi.fn(),
   install: vi.fn(),
@@ -29,7 +30,11 @@ const moduleLoads = vi.hoisted(() => ({
 
 vi.mock('../src/core/config.js', () => {
   moduleLoads.config++;
-  return { loadConfig: effects.loadConfig };
+  return {
+    loadConfig: effects.loadConfig,
+    loadConfigReadOnly: effects.loadConfig,
+    loadConfigReadOnlyStrict: effects.loadConfig,
+  };
 });
 
 vi.mock('../src/core/daemon/loop.js', () => {
@@ -39,7 +44,10 @@ vi.mock('../src/core/daemon/loop.js', () => {
 
 vi.mock('../src/core/daemon/state.js', () => {
   moduleLoads.state++;
-  return { loadDaemonState: effects.loadDaemonState };
+  return {
+    loadDaemonState: effects.loadDaemonState,
+    loadDaemonStateStrict: effects.loadDaemonStateStrict,
+  };
 });
 
 vi.mock('../src/core/inbox/store.js', () => {
@@ -147,6 +155,7 @@ beforeEach(async () => {
   effects.loadConfig.mockReturnValue({ daemon: { dailyBudgetUsd: 5, intervalMs: 300_000, parallel: 1 } });
   effects.runDaemon.mockResolvedValue(daemonState);
   effects.loadDaemonState.mockReturnValue(daemonState);
+  effects.loadDaemonStateStrict.mockReturnValue({ ok: true, state: daemonState, fresh: false });
   effects.pendingCount.mockReturnValue(0);
   effects.diagnoseGuardHealth.mockReturnValue({
     generatedAt: '2026-07-21T00:00:00.000Z',
@@ -242,15 +251,73 @@ describe('daemon valid flags remain supported', () => {
 
     expect(result.code).toBe(0);
     expect(JSON.parse(result.stdout)).toMatchObject({ running: false, pendingProposals: 0 });
-    expect(effects.loadDaemonState).toHaveBeenCalledOnce();
+    expect(effects.loadDaemonStateStrict).toHaveBeenCalledOnce();
+    expect(effects.loadDaemonState).not.toHaveBeenCalled();
   });
 
   it('preserves service-status --json', async () => {
     const result = await capture(['service-status', '--json']);
 
     expect(result.code).toBe(0);
-    expect(JSON.parse(result.stdout)).toMatchObject(serviceStatus);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      ...serviceStatus,
+      activity: 'inactive',
+    });
     expect(effects.serviceStatus).toHaveBeenCalledOnce();
+  });
+
+  it.each(['running', 'queued'] as const)(
+    'reports scheduler %s without claiming the daemon is running or stopped',
+    async (runtimeState) => {
+      effects.serviceStatus.mockReturnValue({
+        installed: true,
+        running: false,
+        runtimeState,
+        platformSpec: 'schtasks',
+        serviceFilePath: 'C:\\Users\\worker\\.ashlr\\services\\ashlr-daemon.cmd',
+      });
+
+      const result = await capture(['service-status']);
+
+      expect(result.code).toBe(0);
+      expect(result.stdout).toContain(`unverified (scheduler ${runtimeState})`);
+      expect(result.stdout).not.toContain('running:    no');
+    },
+  );
+
+  it('includes the bounded scheduler activity distinction in JSON status', async () => {
+    effects.serviceStatus.mockReturnValue({
+      installed: true,
+      running: false,
+      runtimeState: 'queued',
+      platformSpec: 'schtasks',
+      serviceFilePath: 'C:\\Users\\worker\\.ashlr\\services\\ashlr-daemon.cmd',
+    });
+
+    const result = await capture(['service-status', '--json']);
+
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      running: false,
+      runtimeState: 'queued',
+      activity: 'scheduler-active-unverified',
+    });
+  });
+
+  it('reports scheduler activity after autostart without calling it stopped', async () => {
+    effects.ensureRunning.mockResolvedValue({
+      installed: true,
+      running: false,
+      runtimeState: 'running',
+      platformSpec: 'schtasks',
+      serviceFilePath: 'C:\\Users\\worker\\.ashlr\\services\\ashlr-daemon.cmd',
+    });
+
+    const result = await capture(['install']);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('scheduler active; daemon liveness unverified');
+    expect(result.stdout).not.toContain('installed but stopped');
   });
 
   it('preserves all start flags and config overrides', async () => {
@@ -277,5 +344,31 @@ describe('daemon valid flags remain supported', () => {
       }),
       { once: true, dryRun: true, drain: 'diagnostic-reslices', drainLimit: 4 },
     );
+  });
+
+  it('returns nonzero and surfaces a structured activation refusal', async () => {
+    effects.runDaemon.mockResolvedValue({
+      ...daemonState,
+      startRefusal: 'activation trust roots unavailable',
+    });
+
+    const result = await capture(['start', '--once']);
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(
+      'daemon start refused: activation trust roots unavailable',
+    );
+  });
+
+  it('refuses start before the daemon loop when strict config loading fails', async () => {
+    effects.loadConfig.mockImplementationOnce(() => {
+      throw new Error('config is not valid JSON');
+    });
+
+    const result = await capture(['start', '--once']);
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('Failed to load config: config is not valid JSON');
+    expect(effects.runDaemon).not.toHaveBeenCalled();
   });
 });

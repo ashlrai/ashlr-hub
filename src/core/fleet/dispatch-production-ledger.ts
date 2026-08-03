@@ -28,6 +28,7 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import type {
   DaemonDispatchProductionOutcome,
   EngineId,
@@ -63,7 +64,7 @@ import {
 import { scrubSecrets } from '../util/scrub.js';
 import { fsyncDirectory } from '../util/durability.js';
 import { canonicalFilesystemPathIdentity } from '../sandbox/policy.js';
-import { isSafeExecutionIdentity } from './attempt-identity.js';
+import { isOuterAttemptIdentity, isSafeExecutionIdentity } from './attempt-identity.js';
 import {
   generatedRepairLifecycleAttemptHash,
   REPAIR_TREATMENTS,
@@ -161,7 +162,7 @@ const DISPATCH_PRODUCTION_BASES = new Set<DispatchProductionBasis>([
 const DISPATCH_PRODUCTION_EVENT_KEYS = new Set([
   'schemaVersion', 'ts', 'machineId', 'itemId', 'source', 'repo', 'title', 'backend',
   'tier', 'model', 'assignedBy', 'routeReason', 'outcome', 'proposalCreated',
-  'proposalId', 'runId', 'trajectoryId', 'routeSnapshot', 'runEventSummary',
+  'proposalId', 'attemptId', 'runId', 'trajectoryId', 'routeSnapshot', 'runEventSummary',
   'evidenceOutcome', 'learningSource', 'labelBasis', 'routerPolicyVersion',
   'learningEpoch', 'objectiveHash', 'learningLabel', 'spentUsd', 'diffFiles',
   'diffLines', 'reason', 'basis', 'repairHandoffId', 'repairGenerationId',
@@ -182,6 +183,11 @@ export type DispatchProductionBasis =
   | 'repair-lifecycle-outcome'
   | 'unknown';
 
+export type DispatchProductionLabelOrigin =
+  | 'stored-current'
+  | 'stored-legacy'
+  | 'derived-on-read';
+
 export interface DispatchProductionEvent {
   schemaVersion: 1;
   ts: string;
@@ -198,6 +204,8 @@ export interface DispatchProductionEvent {
   outcome: DaemonDispatchProductionOutcome;
   proposalCreated: boolean;
   proposalId?: string;
+  /** Writer-issued immutable identity allocated before this dispatch begins. */
+  attemptId?: string;
   runId?: string;
   trajectoryId?: string;
   routeSnapshot?: RouteSnapshot;
@@ -210,6 +218,8 @@ export interface DispatchProductionEvent {
   /** Scrubbed metadata-only hash of the dispatched work item's objective. */
   objectiveHash?: string;
   learningLabel?: ProductionAttemptLearningLabel;
+  /** Read-time provenance only; never persisted as part of the immutable event. */
+  labelOrigin?: DispatchProductionLabelOrigin;
   spentUsd: number;
   diffFiles?: number;
   diffLines?: number;
@@ -229,6 +239,15 @@ export interface DispatchProductionEvent {
   repairRootId?: string;
   repairDepth?: 0 | 1;
   repairLineageInvalid?: true;
+}
+
+export interface CanonicalDispatchProductionAttempts {
+  events: DispatchProductionEvent[];
+  /** Historical rows that predate the complete attempt envelope; observation only. */
+  preEnvelopeEvents: number;
+  duplicateEvents: number;
+  invalidAttemptIdentities: number;
+  conflictingAttemptIdentities: number;
 }
 
 export interface ReadDispatchProductionEventsOptions {
@@ -401,7 +420,9 @@ export type DispatchProductionReadStopReason =
   | 'file-limit'
   | 'byte-limit'
   | 'row-limit'
-  | 'io-error';
+  | 'io-error'
+  | 'attempt-identity-unavailable'
+  | 'attempt-identity-conflict';
 
 export interface DispatchProductionSourceQuality {
   sourceState: 'missing' | 'healthy' | 'degraded';
@@ -424,6 +445,8 @@ export interface DispatchProductionEventsReadResult extends DispatchProductionSo
 export interface DispatchProductionYieldReadResult {
   summary?: DispatchProductionYieldSummary;
   sourceQuality: DispatchProductionSourceQuality;
+  /** Exact bounded event snapshot used to derive both summary and source quality. */
+  events: DispatchProductionEvent[];
 }
 
 export interface DispatchProductionReasonCount {
@@ -498,7 +521,7 @@ export interface GeneratedRepairBackendTransitionBucket {
   attempts: number;
   proposalsCreated: number;
   noProposal: number;
-  proposalRate: number;
+  proposalRate?: number;
   outcomes: DispatchProductionOutcomeCounts;
 }
 
@@ -522,7 +545,7 @@ export interface DispatchProductionYieldBucket {
   attempts: number;
   proposalsCreated: number;
   noProposal: number;
-  proposalRate: number;
+  proposalRate?: number;
   /** Optional for compatibility with summaries persisted before diagnostic accounting. */
   diagnosticAttempts?: number;
   diagnosticNoProposal?: number;
@@ -542,7 +565,12 @@ export interface DispatchProductionYieldSummary {
   events: number;
   proposalsCreated: number;
   noProposal: number;
-  proposalRate: number;
+  proposalRate?: number;
+  preEnvelopeEvents?: number;
+  duplicateEvents?: number;
+  invalidAttemptIdentities?: number;
+  conflictingAttemptIdentities?: number;
+  cancelledEvents?: number;
   /** Optional for compatibility with summaries persisted before diagnostic accounting. */
   diagnosticAttempts?: number;
   diagnosticNoProposal?: number;
@@ -780,7 +808,7 @@ interface TreatmentReceiptAuthorityState {
   pendingCompaction: boolean;
 }
 
-function treatmentOutcomeReceiptDigest(
+function rawTreatmentOutcomeReceiptDigest(
   name: string,
   event: DispatchProductionEvent,
 ): string {
@@ -790,6 +818,37 @@ function treatmentOutcomeReceiptDigest(
     .update('\0', 'utf8')
     .update(JSON.stringify(event), 'utf8')
     .digest('hex');
+}
+
+function treatmentOutcomeReceiptDigest(
+  name: string,
+  event: DispatchProductionEvent,
+): string {
+  const storedLabel: unknown = event.learningLabel;
+  const normalizedLabel = sanitizeProductionAttemptLearningLabel(storedLabel);
+  const digestEvent = isPlainRecord(storedLabel) &&
+    storedLabel['classifierVersion'] === 'attempt-shape-v1' &&
+    normalizedLabel !== undefined
+    ? { ...event, learningLabel: normalizedLabel }
+    : event;
+  return rawTreatmentOutcomeReceiptDigest(name, digestEvent);
+}
+
+function treatmentOutcomeReceiptDigestMatchesExpected(
+  digest: string,
+  name: string,
+  expected: DispatchProductionEvent,
+): boolean {
+  if (digest === treatmentOutcomeReceiptDigest(name, expected)) return true;
+  if (expected.learningLabel === undefined) return false;
+  const legacyExpected = {
+    ...expected,
+    learningLabel: {
+      ...expected.learningLabel,
+      classifierVersion: 'attempt-shape-v1',
+    },
+  } as unknown as DispatchProductionEvent;
+  return digest === rawTreatmentOutcomeReceiptDigest(name, legacyExpected);
 }
 
 function emptyTreatmentRetentionCompactedDigest(): string {
@@ -1264,6 +1323,17 @@ function treatmentReceiptLockPath(): string {
   return join(treatmentOutcomeReceiptDir(), '.receipts.lock');
 }
 
+function treatmentReceiptEventMatchesExpected(
+  stored: DispatchProductionEvent,
+  expected: DispatchProductionEvent,
+): boolean {
+  if (JSON.stringify(stored) === JSON.stringify(expected)) return true;
+  if (storedLearningLabelOrigin(stored.learningLabel) !== 'stored-legacy') return false;
+  const normalizedLabel = sanitizeProductionAttemptLearningLabel(stored.learningLabel);
+  return normalizedLabel !== undefined &&
+    JSON.stringify({ ...stored, learningLabel: normalizedLabel }) === JSON.stringify(expected);
+}
+
 /** Verify an exact immutable terminal-outcome receipt without writing or repairing storage. */
 export function hasExactDispatchProductionTreatmentOutcomeReceipt(
   expected: DispatchProductionEvent,
@@ -1285,27 +1355,35 @@ export function hasExactDispatchProductionTreatmentOutcomeReceipt(
     const retired = tombstone ?? compacted;
     const path = join(treatmentOutcomeReceiptDir(), name);
     if (!existsSync(path)) {
-      if (retired) return retired.receiptDigest === wantedDigest;
+      if (retired) {
+        return treatmentOutcomeReceiptDigestMatchesExpected(
+          retired.receiptDigest, name, canonical,
+        );
+      }
       const retiredSource = retention?.schemaVersion === 1
         ? readRetiredTreatmentOutcomeSources(retention.droppedThrough).get(name)
         : undefined;
-      return retiredSource !== undefined && JSON.stringify(retiredSource) === JSON.stringify(canonical);
+      return retiredSource !== undefined &&
+        treatmentReceiptEventMatchesExpected(retiredSource, canonical);
     }
     const artifact = readTreatmentOutcomeReceiptArtifact(path, name);
     if (retired) {
-      return retired.receiptDigest === artifact.receiptDigest &&
-        retired.receiptDigest === wantedDigest;
+      return treatmentOutcomeReceiptDigestMatchesExpected(
+        retired.receiptDigest, name, canonical,
+      ) &&
+        artifact.receiptDigest === wantedDigest &&
+        treatmentReceiptEventMatchesExpected(artifact.event, canonical);
     }
     const retiredSource = retention?.schemaVersion === 1
       ? readRetiredTreatmentOutcomeSources(retention.droppedThrough).get(name)
       : undefined;
     if (retiredSource) {
-      return JSON.stringify(retiredSource) === JSON.stringify(canonical) &&
-        JSON.stringify(artifact.event) === JSON.stringify(canonical);
+      return treatmentReceiptEventMatchesExpected(retiredSource, canonical) &&
+        treatmentReceiptEventMatchesExpected(artifact.event, canonical);
     }
     if (retention && Date.parse(artifact.ts) <= Date.parse(retention.droppedThrough)) return false;
     return artifact.receiptDigest === wantedDigest &&
-      JSON.stringify(artifact.event) === JSON.stringify(canonical);
+      treatmentReceiptEventMatchesExpected(artifact.event, canonical);
   } catch {
     return false;
   }
@@ -1400,6 +1478,186 @@ function boundedNullableText(value: unknown, max: number): string | null | undef
   return boundedOptionalText(value, max);
 }
 
+const METADATA_DIGEST_RE = /^d1_[a-f0-9]{64}$/;
+
+function metadataDigest(domain: string, value: unknown, fallback = 'unknown'): string {
+  const text = typeof value === 'string' && value.trim() !== '' ? value : fallback;
+  if (METADATA_DIGEST_RE.test(text)) return text;
+  return `d1_${createHash('sha256').update(`ashlr:dispatch:${domain}:v1\0`).update(text).digest('hex')}`;
+}
+
+function optionalMetadataDigest(domain: string, value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() !== '' ? metadataDigest(domain, value) : undefined;
+}
+
+function dispatchRouteSnapshotMetadata(input: RouteSnapshot | undefined): RouteSnapshot | undefined {
+  const normalized = normalizeRouteSnapshot(input);
+  if (!normalized) return undefined;
+  return {
+    ...normalized,
+    ...(normalized.assignedBy ? { assignedBy: metadataDigest('assigned-by', normalized.assignedBy) } : {}),
+    ...(normalized.reason ? { reason: metadataDigest('route-reason', normalized.reason) } : {}),
+    ...(normalized.selectedSkillIds
+      ? { selectedSkillIds: normalized.selectedSkillIds.map((id) => metadataDigest('selected-skill-id', id)) }
+      : {}),
+    ...(normalized.skillPolicyVersion
+      ? { skillPolicyVersion: metadataDigest('skill-policy-version', normalized.skillPolicyVersion) }
+      : {}),
+  };
+}
+
+function dispatchRunEventSummaryMetadata(input: RunEventSummary | undefined): RunEventSummary | undefined {
+  const normalized = normalizeRunEventSummary(input);
+  if (!normalized) return undefined;
+  const contextSummary = normalized.contextSummary;
+  const prompt = contextSummary?.prompt;
+  const compression = contextSummary?.compression;
+  return {
+    ...normalized,
+    ...(contextSummary
+      ? {
+        contextSummary: {
+          ...contextSummary,
+          ...(prompt
+            ? {
+              prompt: {
+                ...prompt,
+                ...(prompt.profileId
+                  ? { profileId: metadataDigest('prompt-profile-id', prompt.profileId) }
+                  : {}),
+              },
+            }
+            : {}),
+          ...(compression
+            ? {
+              compression: {
+                ...compression,
+                ...(compression.droppedLayers
+                  ? {
+                    droppedLayers: compression.droppedLayers.map((layer) =>
+                      metadataDigest('compression-dropped-layer', layer)),
+                  }
+                  : {}),
+              },
+            }
+            : {}),
+        },
+      }
+      : {}),
+  };
+}
+
+function dispatchEvidenceMetadata(input: EvidenceOutcomeSummary | undefined): EvidenceOutcomeSummary | undefined {
+  if (!input) return undefined;
+  return {
+    ...(input.target ? { target: metadataDigest('evidence-target', input.target) } : {}),
+    ...(input.trustBasis ? { trustBasis: metadataDigest('evidence-trust-basis', input.trustBasis) } : {}),
+    ...(input.riskClass ? { riskClass: metadataDigest('evidence-risk-class', input.riskClass) } : {}),
+    ...(typeof input.verificationPassed === 'boolean'
+      ? { verificationPassed: input.verificationPassed }
+      : {}),
+    ...(typeof input.policyAllowed === 'boolean' ? { policyAllowed: input.policyAllowed } : {}),
+    ...(input.policyAction ? { policyAction: metadataDigest('evidence-policy-action', input.policyAction) } : {}),
+    ...(input.policyTier ? { policyTier: metadataDigest('evidence-policy-tier', input.policyTier) } : {}),
+    ...(typeof input.gateCount === 'number' && Number.isFinite(input.gateCount)
+      ? { gateCount: Math.max(0, input.gateCount) }
+      : {}),
+  };
+}
+
+function trustedExecutionIdentity(value: unknown): string | undefined {
+  return isSafeExecutionIdentity(value) && scrubSecrets(value) === value ? value : undefined;
+}
+
+function trustedRunTrajectory(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length > 240 || scrubSecrets(value) !== value) return undefined;
+  return value.startsWith('run:') && isSafeExecutionIdentity(value.slice('run:'.length))
+    ? value
+    : undefined;
+}
+
+function dispatchCausalIdentities(event: DispatchProductionEvent): {
+  attemptId?: string;
+  proposalId?: string;
+  runId?: string;
+  trajectoryId?: string;
+  runEventSummary?: RunEventSummary;
+} {
+  const attemptId = isOuterAttemptIdentity(event.attemptId) && scrubSecrets(event.attemptId) === event.attemptId
+    ? event.attemptId
+    : undefined;
+  const proposalId = trustedExecutionIdentity(event.proposalId);
+  const runId = trustedExecutionIdentity(event.runId);
+  const trajectoryId = trustedRunTrajectory(event.trajectoryId);
+  const rawSummary = event.runEventSummary;
+  const summaryRunId = trustedExecutionIdentity(rawSummary?.runId);
+  const summaryProposalId = trustedExecutionIdentity(rawSummary?.proposalId);
+  const invalidOptionalIdentity =
+    (event.proposalId !== undefined && proposalId === undefined) ||
+    (rawSummary?.runId !== undefined && summaryRunId === undefined) ||
+    (rawSummary?.proposalId !== undefined && summaryProposalId === undefined);
+  const summarySemanticsAgree = rawSummary !== undefined &&
+    summaryRunId === runId &&
+    dispatchProductionRunStatusAgrees(event.outcome, rawSummary.status) &&
+    rawSummary.outcome === event.outcome &&
+    rawSummary.proposalCreated === Boolean(event.proposalCreated) &&
+    summaryProposalId === proposalId;
+  const identitiesAgree =
+    attemptId !== undefined &&
+    runId !== undefined &&
+    trajectoryId === `run:${attemptId}` &&
+    !invalidOptionalIdentity &&
+    summarySemanticsAgree &&
+    (summaryRunId === undefined || summaryRunId === runId) &&
+    (summaryProposalId === undefined || summaryProposalId === proposalId);
+  const safeSummary = rawSummary
+    ? {
+        ...rawSummary,
+        runId: summaryRunId,
+        proposalId: summaryProposalId,
+      }
+    : undefined;
+  return {
+    ...(identitiesAgree ? { attemptId } : {}),
+    ...(proposalId ? { proposalId } : {}),
+    ...(runId ? { runId } : {}),
+    ...(trajectoryId ? { trajectoryId } : {}),
+    ...(safeSummary ? { runEventSummary: safeSummary } : {}),
+  };
+}
+
+export function dispatchProductionRunStatusForOutcome(
+  outcome: DaemonDispatchProductionOutcome,
+): 'done' | 'failed' | 'aborted' {
+  if (outcome === 'cancelled') return 'aborted';
+  if (
+    outcome === 'engine-failed' ||
+    outcome === 'sandbox-failed' ||
+    outcome === 'proposal-capture-error'
+  ) return 'failed';
+  return 'done';
+}
+
+function dispatchProductionRunStatusAgrees(
+  outcome: DaemonDispatchProductionOutcome,
+  status: unknown,
+): status is 'done' | 'failed' | 'aborted' {
+  if (outcome === 'cancelled') return status === 'aborted';
+  if (outcome === 'proposal-created') {
+    return status === 'done' || status === 'failed' || status === 'aborted';
+  }
+  if (
+    outcome === 'engine-failed' ||
+    outcome === 'sandbox-failed' ||
+    outcome === 'proposal-capture-error' ||
+    outcome === 'proposal-disabled'
+  ) {
+    return status === 'done' || status === 'failed' || status === 'aborted';
+  }
+  if (outcome === 'gate-blocked') return status === 'done' || status === 'failed' || status === 'aborted';
+  return status === 'done';
+}
+
 export function canonicalDispatchRepoIdentity(value: unknown): string | null {
   if (typeof value !== 'string' || value.length === 0 || value.length > 500 || !isAbsolute(value)) return null;
   if (scrubSecrets(value) !== value) return null;
@@ -1415,7 +1673,11 @@ function finiteNonNegative(value: unknown): number | undefined {
 
 export function sanitizeDispatchProductionEvent(
   event: DispatchProductionEvent,
-  opts: { materializeLearningLabel?: boolean; deriveLegacyRunOutcomeCausal?: boolean } = {},
+  opts: {
+    materializeLearningLabel?: boolean;
+    deriveLegacyRunOutcomeCausal?: boolean;
+    preserveMissingCausalAuthority?: boolean;
+  } = {},
 ): DispatchProductionEvent {
   const ts = eventTimestamp(event.ts);
   const machineId = boundedOptionalText(event.machineId, 120);
@@ -1423,17 +1685,25 @@ export function sanitizeDispatchProductionEvent(
   const source = boundedText(event.source, 80) as WorkItem['source'];
   const repo = canonicalDispatchRepoIdentity(event.repo);
   if (repo === null) throw new Error('invalid dispatch production repository identity');
-  const title = boundedText(event.title, 160) || 'untitled';
-  const backend = boundedNullableText(event.backend, 80) as EngineId | null | undefined;
-  const tier = boundedNullableText(event.tier, 40) as EngineTier | null | undefined;
+  const rawTitle = boundedText(event.title, 160) || 'untitled';
+  const title = metadataDigest('title', event.title, 'untitled');
+  const boundedBackend = boundedNullableText(event.backend, 80);
+  const backend = boundedBackend === null || ENGINE_IDS.has(boundedBackend as EngineId)
+    ? boundedBackend as EngineId | null
+    : undefined;
+  const boundedTier = boundedNullableText(event.tier, 40);
+  const tier = boundedTier === null || ENGINE_TIERS.has(boundedTier as EngineTier)
+    ? boundedTier as EngineTier | null
+    : undefined;
   const model = boundedNullableText(event.model, 160) as string | null | undefined;
-  const assignedBy = boundedText(event.assignedBy, 80) || 'unknown';
-  const routeReason = boundedText(event.routeReason, 240) || 'unknown';
-  const proposalId = boundedOptionalText(event.proposalId, 160);
-  const runId = boundedOptionalText(event.runId, 160);
-  const trajectoryId = boundedOptionalText(event.trajectoryId, 240);
-  const outcome = boundedText(event.outcome, 80) as DaemonDispatchProductionOutcome;
-  const basis = boundedText(event.basis, 80) as DispatchProductionBasis;
+  const assignedBy = metadataDigest('assigned-by', event.assignedBy);
+  const routeReason = metadataDigest('route-reason', event.routeReason);
+  const identities = dispatchCausalIdentities(event);
+  const { attemptId, proposalId, runId, trajectoryId } = identities;
+  const boundedOutcome = boundedText(event.outcome, 80) as DaemonDispatchProductionOutcome;
+  const outcome = DISPATCH_PRODUCTION_OUTCOMES.has(boundedOutcome) ? boundedOutcome : 'unknown';
+  const boundedBasis = boundedText(event.basis, 80) as DispatchProductionBasis;
+  const basis = DISPATCH_PRODUCTION_BASES.has(boundedBasis) ? boundedBasis : 'unknown';
   const routerPolicyVersion = boundedOptionalText(event.routerPolicyVersion, 80);
   const learningEpoch = boundedOptionalText(event.learningEpoch, 40);
   const objectiveHash = typeof event.objectiveHash === 'string' && /^[a-f0-9]{64}$/.test(event.objectiveHash)
@@ -1536,7 +1806,8 @@ export function sanitizeDispatchProductionEvent(
       event.repairTreatmentOutcome !== undefined ||
       event.repairTreatmentAttemptHash !== undefined) &&
       !repairTreatmentOutcomeComplete && !repairTreatmentCandidateComplete);
-  const reason = boundedOptionalText(event.reason, 240);
+  const rawReason = boundedOptionalText(event.reason, 240);
+  const reason = optionalMetadataDigest('reason', event.reason);
   const diffFiles = finiteNonNegative(event.diffFiles);
   const diffLines = finiteNonNegative(event.diffLines);
   const spentUsd = finiteNonNegative(event.spentUsd) ?? 0;
@@ -1557,31 +1828,58 @@ export function sanitizeDispatchProductionEvent(
           spentUsd: finiteNonNegative(event.spentUsd),
         })
       : {};
-  const causal = causalMetadata({
+  const causal: Partial<ReturnType<typeof causalMetadata>> = causalMetadata({
     ts,
     itemId,
     proposalId,
     runId,
     trajectoryId,
     routeSnapshot: event.routeSnapshot ?? legacyCausal.routeSnapshot,
-    runEventSummary: event.runEventSummary ?? legacyCausal.runEventSummary,
+    runEventSummary: identities.runEventSummary ?? legacyCausal.runEventSummary,
     evidenceOutcome: event.evidenceOutcome,
-    learningSource: event.learningSource ?? 'daemon-dispatch',
-    labelBasis: event.labelBasis ?? 'dispatch-outcome',
+    learningSource: event.learningSource ??
+      (opts.preserveMissingCausalAuthority ? undefined : 'daemon-dispatch'),
+    labelBasis: event.labelBasis ??
+      (opts.preserveMissingCausalAuthority ? undefined : 'dispatch-outcome'),
     routerPolicyVersion,
     learningEpoch,
   });
-  const learningLabel = opts.materializeLearningLabel
+  const metadataRoute = dispatchRouteSnapshotMetadata(causal.routeSnapshot);
+  const metadataRunSummary = dispatchRunEventSummaryMetadata(causal.runEventSummary);
+  const metadataEvidence = dispatchEvidenceMetadata(causal.evidenceOutcome);
+  if (metadataRoute) causal.routeSnapshot = metadataRoute;
+  else delete causal.routeSnapshot;
+  if (metadataRunSummary) causal.runEventSummary = metadataRunSummary;
+  else delete causal.runEventSummary;
+  if (metadataEvidence) causal.evidenceOutcome = metadataEvidence;
+  else delete causal.evidenceOutcome;
+  const legacyTreatmentTrajectoryAllowed =
+    (basis === 'repair-lifecycle-candidate' || basis === 'repair-lifecycle-outcome') &&
+    runId !== undefined;
+  if (trajectoryId === undefined && !legacyTreatmentTrajectoryAllowed) delete causal.trajectoryId;
+  if (opts.preserveMissingCausalAuthority) {
+    if (
+      routerPolicyVersion === undefined &&
+      event.routeSnapshot?.routerPolicyVersion === undefined
+    ) delete causal.routerPolicyVersion;
+    if (learningEpoch === undefined) delete causal.learningEpoch;
+  }
+  const storedLearningLabel = sanitizeProductionAttemptLearningLabel(event.learningLabel);
+  const canonicalNarrative = METADATA_DIGEST_RE.test(event.title) &&
+    METADATA_DIGEST_RE.test(event.assignedBy) &&
+    METADATA_DIGEST_RE.test(event.routeReason) &&
+    (event.reason === undefined || METADATA_DIGEST_RE.test(event.reason));
+  const learningLabel = opts.materializeLearningLabel && !(canonicalNarrative && storedLearningLabel)
     ? productionAttemptLearningLabelFromSignals({
         outcome,
         proposalCreated: Boolean(event.proposalCreated),
         actionCounts: causal.runEventSummary?.actionCounts,
-        reason,
+        reason: rawReason,
         itemId,
-        title,
+        title: rawTitle,
         source,
       })
-    : sanitizeProductionAttemptLearningLabel(event.learningLabel);
+    : storedLearningLabel;
   return {
     schemaVersion: 1,
     ts,
@@ -1598,6 +1896,7 @@ export function sanitizeDispatchProductionEvent(
     outcome,
     proposalCreated: Boolean(event.proposalCreated),
     ...(proposalId ? { proposalId } : {}),
+    ...(attemptId ? { attemptId } : {}),
     ...(runId ? { runId } : {}),
     ...causal,
     ...(learningLabel ? { learningLabel } : {}),
@@ -1687,6 +1986,206 @@ function isDispatchProductionEvent(value: unknown): value is DispatchProductionE
   );
 }
 
+function proposalActionCountsForOutcome(event: Pick<DispatchProductionEvent, 'outcome' | 'proposalCreated'>): {
+  proposalCreated: 0 | 1;
+  proposalBlocked: 0 | 1;
+  proposalDisabled: 0 | 1;
+} {
+  return {
+    proposalCreated: event.proposalCreated ? 1 : 0,
+    proposalBlocked: event.outcome === 'gate-blocked' || event.outcome === 'proposal-capture-error' ? 1 : 0,
+    proposalDisabled: event.outcome === 'proposal-disabled' ? 1 : 0,
+  };
+}
+
+function validActionCountValues(actionCounts: RunActionCounts | undefined): boolean {
+  if (actionCounts === undefined) return true;
+  if (typeof actionCounts !== 'object' || Array.isArray(actionCounts)) return false;
+  return RUN_ACTION_COUNT_KEYS.every((key) => {
+    const value = actionCounts[key];
+    return value === undefined || (Number.isSafeInteger(value) && value >= 0);
+  });
+}
+
+function coherentStepCounts(actionCounts: RunActionCounts | undefined): boolean {
+  if (!actionCounts) return true;
+  const { modelSteps, toolSteps, totalSteps } = actionCounts;
+  if (totalSteps === undefined) return true;
+  if (modelSteps !== undefined && totalSteps < modelSteps) return false;
+  if (toolSteps !== undefined && totalSteps < toolSteps) return false;
+  return modelSteps === undefined || toolSteps === undefined || totalSteps === modelSteps + toolSteps;
+}
+
+function actionCountsAgreeWithOutcome(
+  event: Pick<DispatchProductionEvent, 'outcome' | 'proposalCreated' | 'diffFiles' | 'diffLines'>,
+  actionCounts: RunActionCounts | undefined,
+): boolean {
+  if (!validActionCountValues(actionCounts) || !coherentStepCounts(actionCounts)) return false;
+  if (!actionCounts) return true;
+  const expected = proposalActionCountsForOutcome(event);
+  if (
+    (actionCounts.proposalCreated !== undefined &&
+      actionCounts.proposalCreated !== expected.proposalCreated) ||
+    (actionCounts.proposalBlocked !== undefined &&
+      actionCounts.proposalBlocked !== expected.proposalBlocked) ||
+    (actionCounts.proposalDisabled !== undefined &&
+      actionCounts.proposalDisabled !== expected.proposalDisabled) ||
+    (actionCounts.proposalBlocked ?? 0) +
+      (actionCounts.proposalCreated ?? 0) +
+      (actionCounts.proposalDisabled ?? 0) > 1 ||
+    (actionCounts.diffFiles !== undefined && actionCounts.diffFiles !== event.diffFiles) ||
+    (actionCounts.diffLines !== undefined && actionCounts.diffLines !== event.diffLines)
+  ) return false;
+  return event.outcome !== 'cancelled' || (actionCounts.proposalBlocked ?? 0) === 0;
+}
+
+function suppliedDuplicatedFieldsAgree(
+  outer: Record<string, unknown>,
+  nested: Record<string, unknown>,
+  excluded: ReadonlySet<string> = new Set(),
+): boolean {
+  return Object.entries(nested).every(([key, value]) =>
+    value === undefined || excluded.has(key) || outer[key] === undefined || isDeepStrictEqual(outer[key], value));
+}
+
+function suppliedAliasAgrees(
+  outer: Record<string, unknown>,
+  outerKey: string,
+  nested: Record<string, unknown>,
+  nestedKey: string,
+): boolean {
+  return outer[outerKey] === undefined || nested[nestedKey] === undefined ||
+    isDeepStrictEqual(outer[outerKey], nested[nestedKey]);
+}
+
+function dispatchProductionSuppliedEnvelopeSemanticsAgree(event: DispatchProductionEvent): boolean {
+  if (event.proposalCreated !== (event.outcome === 'proposal-created')) return false;
+  const raw = event as unknown as Record<string, unknown>;
+  const rawSummary = raw['runEventSummary'];
+  const derivedLifecycle = event.basis === 'repair-lifecycle-candidate' ||
+    event.basis === 'repair-lifecycle-outcome';
+  if (rawSummary !== undefined && (!isPlainRecord(rawSummary) || (!derivedLifecycle &&
+    (!suppliedDuplicatedFieldsAgree(raw, rawSummary) ||
+      !suppliedAliasAgrees(raw, 'spentUsd', rawSummary, 'costUsd'))))) return false;
+
+  const rawRoute = raw['routeSnapshot'];
+  if (!derivedLifecycle && rawRoute !== undefined) {
+    const incompleteLegacyEnvelope = isPreEnvelopeDispatchProductionEvent(event);
+    if (!isPlainRecord(rawRoute) ||
+      !suppliedDuplicatedFieldsAgree(raw, rawRoute, new Set(['reason'])) ||
+      (incompleteLegacyEnvelope &&
+        !suppliedAliasAgrees(raw, 'routeReason', rawRoute, 'reason'))) return false;
+  }
+  if (raw['attemptId'] !== undefined && raw['trajectoryId'] !== undefined &&
+    raw['trajectoryId'] !== `run:${String(raw['attemptId'])}`) return false;
+
+  if (rawSummary === undefined) return true;
+
+  const summary = rawSummary as RunEventSummary;
+  const actionCounts = summary.actionCounts;
+  if (!validActionCountValues(actionCounts) || !coherentStepCounts(actionCounts)) return false;
+  if (isPlainRecord(actionCounts) && !suppliedDuplicatedFieldsAgree(
+    rawSummary,
+    actionCounts,
+    new Set(['proposalCreated', 'proposalBlocked', 'proposalDisabled']),
+  )) return false;
+  if (summary.status !== undefined && !dispatchProductionRunStatusAgrees(event.outcome, summary.status)) return false;
+  if (summary.outcome !== undefined && summary.outcome !== event.outcome) return false;
+  if (summary.proposalCreated !== undefined && summary.proposalCreated !== event.proposalCreated) return false;
+  return actionCountsAgreeWithOutcome(event, actionCounts);
+}
+
+export function materializeDispatchProductionAttemptEnvelope(
+  event: DispatchProductionEvent,
+): DispatchProductionEvent {
+  const attemptId = event.attemptId ??
+    (event.trajectoryId === `run:${event.runId}` && isOuterAttemptIdentity(event.runId)
+      ? event.runId
+      : undefined);
+  const trajectoryId = event.trajectoryId ?? (attemptId ? `run:${attemptId}` : undefined);
+  if (event.proposalCreated !== (event.outcome === 'proposal-created')) {
+    throw new Error('dispatch production outcome contradicts proposal creation');
+  }
+  const summary = event.runEventSummary ?? {};
+  const suppliedCounts = summary.actionCounts;
+  if (!validActionCountValues(suppliedCounts) || !coherentStepCounts(suppliedCounts)) {
+    throw new Error('dispatch production action counts are invalid');
+  }
+  if (summary.runId !== undefined && summary.runId !== event.runId) {
+    throw new Error('dispatch production run identity mismatch');
+  }
+  if (summary.status !== undefined && !dispatchProductionRunStatusAgrees(event.outcome, summary.status)) {
+    throw new Error('dispatch production run status mismatch');
+  }
+  if (summary.outcome !== undefined && summary.outcome !== event.outcome) {
+    throw new Error('dispatch production summary outcome mismatch');
+  }
+  if (summary.proposalCreated !== undefined && summary.proposalCreated !== event.proposalCreated) {
+    throw new Error('dispatch production summary proposal mismatch');
+  }
+  if (summary.proposalId !== undefined && summary.proposalId !== event.proposalId) {
+    throw new Error('dispatch production summary proposal identity mismatch');
+  }
+  if (summary.costUsd !== undefined && summary.costUsd !== event.spentUsd) {
+    throw new Error('dispatch production summary spend mismatch');
+  }
+
+  const diffFiles = event.diffFiles ?? summary.diffFiles ?? suppliedCounts?.diffFiles;
+  const diffLines = event.diffLines ?? summary.diffLines ?? suppliedCounts?.diffLines;
+  if (event.outcome === 'empty-diff' && ((diffFiles ?? 0) !== 0 || (diffLines ?? 0) !== 0)) {
+    throw new Error('empty dispatch outcome contradicts diff counts');
+  }
+  if (
+    (event.diffFiles !== undefined && diffFiles !== event.diffFiles) ||
+    (summary.diffFiles !== undefined && diffFiles !== summary.diffFiles) ||
+    (suppliedCounts?.diffFiles !== undefined && diffFiles !== suppliedCounts.diffFiles) ||
+    (event.diffLines !== undefined && diffLines !== event.diffLines) ||
+    (summary.diffLines !== undefined && diffLines !== summary.diffLines) ||
+    (suppliedCounts?.diffLines !== undefined && diffLines !== suppliedCounts.diffLines)
+  ) {
+    throw new Error('dispatch production diff counts mismatch');
+  }
+
+  const expectedProposalCounts = proposalActionCountsForOutcome(event);
+  if (!actionCountsAgreeWithOutcome(
+    { ...event, diffFiles, diffLines },
+    suppliedCounts,
+  )) throw new Error('dispatch production action counts contradict outcome');
+  const actionCounts: RunActionCounts = {
+    ...(suppliedCounts ?? {}),
+    ...expectedProposalCounts,
+    ...(diffFiles !== undefined ? { diffFiles } : {}),
+    ...(diffLines !== undefined ? { diffLines } : {}),
+  };
+  if (
+    actionCounts.totalSteps === undefined &&
+    actionCounts.modelSteps !== undefined &&
+    actionCounts.toolSteps !== undefined
+  ) {
+    actionCounts.totalSteps = actionCounts.modelSteps + actionCounts.toolSteps;
+  }
+
+  return {
+    ...event,
+    ...(attemptId ? { attemptId } : {}),
+    ...(trajectoryId ? { trajectoryId } : {}),
+    ...(diffFiles !== undefined ? { diffFiles } : {}),
+    ...(diffLines !== undefined ? { diffLines } : {}),
+    runEventSummary: {
+      ...summary,
+      runId: event.runId,
+      status: summary.status ?? dispatchProductionRunStatusForOutcome(event.outcome),
+      outcome: event.outcome,
+      proposalCreated: event.proposalCreated,
+      proposalId: event.proposalId,
+      ...(diffFiles !== undefined ? { diffFiles } : {}),
+      ...(diffLines !== undefined ? { diffLines } : {}),
+      costUsd: event.spentUsd,
+      actionCounts,
+    },
+  };
+}
+
 export function recordDispatchProduction(
   input: DispatchProductionEvent | DispatchProductionEvent[],
 ): DispatchProductionWriteResult {
@@ -1697,7 +2196,10 @@ export function recordDispatchProduction(
     if (events.length === 0) return result;
     for (const event of events) {
       try {
-        const record = sanitizeDispatchProductionEvent(event, { materializeLearningLabel: true });
+        const lifecycle = event.basis === 'repair-lifecycle-candidate' ||
+          event.basis === 'repair-lifecycle-outcome';
+        const writeEvent = lifecycle ? event : materializeDispatchProductionAttemptEnvelope(event);
+        const record = sanitizeDispatchProductionEvent(writeEvent, { materializeLearningLabel: true });
         if (!isDispatchProductionEvent(record)) throw new Error('dispatch production repository identity is not canonical');
         const canonicalLine = JSON.stringify(record);
         const attemptAuthority = parseDispatchProductionAttemptAuthority(record, canonicalLine);
@@ -1732,7 +2234,15 @@ export function recordDispatchProduction(
       } catch (error) {
         // Skip only this record; later records in the batch still get a chance.
         result.failed += 1;
-        if (error instanceof AttemptMembershipSaturatedError) {
+        let membershipSaturated = error instanceof AttemptMembershipSaturatedError;
+        if (!membershipSaturated) {
+          try {
+            membershipSaturated = readDispatchProductionAttemptProtocolQuality().status === 'saturated';
+          } catch {
+            // Preserve the original fail-closed write result when quality cannot be read.
+          }
+        }
+        if (membershipSaturated) {
           result.failureReasons = [...new Set([
             ...(result.failureReasons ?? []), 'retirement-membership-saturated' as const,
           ])];
@@ -1888,6 +2398,7 @@ interface DispatchProductionLedgerRetentionHooksForTest {
   afterAttemptRetentionMarker?: () => void;
   afterFailureAttemptAppend?: () => void;
   afterTreatmentCompactedMarkers?: () => void;
+  afterDispatchReadPass?: (path: string) => void;
   assureStableRegularFiles?: (
     paths: string[],
     anchorPath: string,
@@ -3493,6 +4004,32 @@ interface TreatmentOutcomeReceiptArtifact extends TreatmentReceiptTombstone {
   ts: string;
 }
 
+function withLegacyRunTrajectoryAlias(
+  canonical: DispatchProductionEvent,
+  value: Record<string, unknown>,
+): DispatchProductionEvent | null {
+  if (
+    typeof value['runId'] !== 'string' ||
+    typeof value['trajectoryId'] !== 'string' ||
+    value['trajectoryId'] !== `run:${value['runId']}` ||
+    generatedRepairLifecycleAttemptHash(value['runId']) !== value['repairTreatmentAttemptHash'] ||
+    canonical.runId !== value['runId'] ||
+    canonical.trajectoryId !== undefined
+  ) return null;
+  const entries: Array<[string, unknown]> = [];
+  let inserted = false;
+  for (const [key, entryValue] of Object.entries(canonical)) {
+    entries.push([key, entryValue]);
+    if (key === 'runId') {
+      entries.push(['trajectoryId', value['trajectoryId']]);
+      inserted = true;
+    }
+  }
+  return inserted
+    ? Object.fromEntries(entries) as unknown as DispatchProductionEvent
+    : null;
+}
+
 function canonicalTreatmentOutcomeReceiptEvent(
   value: unknown,
   line: string,
@@ -3510,14 +4047,39 @@ function canonicalTreatmentOutcomeReceiptEvent(
     const canonicalInput = hashUsesRunId && value.trajectoryId !== undefined
       ? { ...value, trajectoryId: undefined }
       : value;
-    const canonical = JSON.stringify(sanitizeDispatchProductionEvent(
+    const canonical = sanitizeDispatchProductionEvent(
       canonicalInput,
       { materializeLearningLabel: true },
-    ));
-    return canonical === line;
+    );
+    const candidates = [
+      canonical,
+      ...(hashUsesRunId
+        ? [withLegacyRunTrajectoryAlias(canonical, value)].filter(
+          (candidate): candidate is DispatchProductionEvent => candidate !== null,
+        )
+        : []),
+    ];
+    return candidates.some((candidate) => {
+      if (JSON.stringify(candidate) === line) return true;
+      if (candidate.learningLabel === undefined) return false;
+      return JSON.stringify({
+        ...candidate,
+        learningLabel: {
+          ...candidate.learningLabel,
+          classifierVersion: 'attempt-shape-v1',
+        },
+      }) === line;
+    });
   } catch {
     return false;
   }
+}
+
+function treatmentOutcomeReceiptLine(text: string): string | null {
+  if (text.endsWith('\n')) {
+    return text.indexOf('\n') === text.length - 1 ? text.slice(0, -1) : null;
+  }
+  return text.length > 0 && !text.includes('\n') ? text : null;
 }
 
 function readTreatmentOutcomeReceiptArtifact(
@@ -3532,12 +4094,11 @@ function readTreatmentOutcomeReceiptArtifact(
     remainingBytes: MAX_TREATMENT_RECEIPT_BYTES,
     ...(batchAssurance ? { batchAssurance } : {}),
   });
-  if (!loaded.ok || !loaded.text.endsWith('\n') ||
-    loaded.text.indexOf('\n') !== loaded.text.length - 1) {
+  const line = loaded.ok ? treatmentOutcomeReceiptLine(loaded.text) : null;
+  if (line === null) {
     throw new Error('invalid treatment outcome receipt');
   }
   if (!batchAssurance) inspectExactReceiptAuthorityFile(path);
-  const line = loaded.text.slice(0, -1);
   const parsed: unknown = JSON.parse(line);
   if (!canonicalTreatmentOutcomeReceiptEvent(parsed, line, name)) {
     throw new Error('unbound treatment outcome receipt');
@@ -4087,32 +4648,64 @@ function safeDispatchProductionFile(stat: Stats): boolean {
     (process.platform === 'win32' || (Number(stat.mode) & 0o022) === 0);
 }
 
+function safeDispatchProductionBigIntFile(stat: BigIntStats): boolean {
+  return !stat.isSymbolicLink() && stat.isFile() && stat.nlink === 1n &&
+    (process.platform === 'win32' || typeof process.getuid !== 'function' ||
+      stat.uid === BigInt(process.getuid())) &&
+    (process.platform === 'win32' || (stat.mode & 0o022n) === 0n);
+}
+
+function sameBigIntFileSnapshot(left: BigIntStats, right: BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino &&
+    left.mode === right.mode && left.uid === right.uid && left.gid === right.gid &&
+    left.nlink === right.nlink && left.size === right.size &&
+    left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+}
+
 function readDispatchProductionFileTail(
   path: string,
   maxBytes: number,
 ): { text: string; bytesRead: number; truncated: boolean } | null {
   let fd: number | undefined;
   try {
-    const pathBefore = lstatSync(path);
-    if (!safeDispatchProductionFile(pathBefore)) return null;
-    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-    const before = fstatSync(fd);
-    if (!safeDispatchProductionFile(before) || !sameFile(pathBefore, before)) return null;
-    const bytes = Math.min(before.size, maxBytes);
-    const start = Math.max(0, before.size - bytes);
-    const buffer = Buffer.alloc(bytes);
-    const bytesRead = bytes > 0 ? readSync(fd, buffer, 0, bytes, start) : 0;
-    const after = fstatSync(fd);
-    const pathAfter = lstatSync(path);
+    const pathBefore = lstatSync(path, { bigint: true });
+    if (!safeDispatchProductionBigIntFile(pathBefore)) return null;
+    const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+    fd = openSync(path, fsConstants.O_RDONLY | noFollow);
+    const before = fstatSync(fd, { bigint: true });
+    if (!safeDispatchProductionBigIntFile(before) || !sameBigIntFileSnapshot(pathBefore, before)) return null;
+    const fileSize = Number(before.size);
+    if (!Number.isSafeInteger(fileSize) || fileSize < 0) return null;
+    const bytes = Math.min(fileSize, maxBytes);
+    const start = Math.max(0, fileSize - bytes);
+    const readPass = (): Buffer | null => {
+      const buffer = Buffer.alloc(bytes);
+      let offset = 0;
+      while (offset < bytes) {
+        const count = readSync(fd!, buffer, offset, bytes - offset, start + offset);
+        if (count <= 0) return null;
+        offset += count;
+      }
+      return buffer;
+    };
+    const buffer = readPass();
+    if (buffer === null) return null;
+    dispatchProductionLedgerRetentionHooksForTest?.afterDispatchReadPass?.(path);
+    const between = fstatSync(fd, { bigint: true });
+    const pathBetween = lstatSync(path, { bigint: true });
+    if (!sameBigIntFileSnapshot(before, between) || !sameBigIntFileSnapshot(between, pathBetween)) return null;
+    const verification = readPass();
+    if (verification === null || !buffer.equals(verification)) return null;
+    const after = fstatSync(fd, { bigint: true });
+    const pathAfter = lstatSync(path, { bigint: true });
     if (
       pathAfter.isSymbolicLink() ||
-      !safeDispatchProductionFile(pathAfter) ||
-      !safeDispatchProductionFile(after) ||
-      !sameFile(before, after) ||
-      !sameFile(after, pathAfter) ||
-      after.size !== before.size ||
-      bytesRead !== bytes
+      !safeDispatchProductionBigIntFile(pathAfter) ||
+      !safeDispatchProductionBigIntFile(after) ||
+      !sameBigIntFileSnapshot(before, after) ||
+      !sameBigIntFileSnapshot(after, pathAfter)
     ) return null;
+    const bytesRead = buffer.length;
     let text: string;
     if (start > 0) {
       const boundaryWasNewline = buffer[0] === 0x0a;
@@ -4347,6 +4940,7 @@ function canonicalStoredDispatchProductionEvent(
   partitionDate: string,
 ): value is DispatchProductionEvent {
   if (!isPlainRecord(value) || JSON.stringify(value) !== line || !isDispatchProductionEvent(value)) return false;
+  if (!dispatchProductionSuppliedEnvelopeSemanticsAgree(value)) return false;
   try {
     const canonical = sanitizeDispatchProductionEvent(value, { materializeLearningLabel: true });
     if (JSON.stringify(canonical) !== line &&
@@ -4383,9 +4977,149 @@ function legacyV1LearningLabelMatchesCanonicalEvent(
       'backendNoDiff', 'captureOrGateBlocked', 'repairAttempts', 'policyDisabled',
     ]))) return false;
   const normalized = sanitizeProductionAttemptLearningLabel(label);
-  if (normalized === undefined || canonical.learningLabel === undefined ||
-    JSON.stringify(normalized) !== JSON.stringify(canonical.learningLabel)) return false;
+  const recomputed = sanitizeDispatchProductionEvent({
+    ...stored,
+    learningLabel: undefined,
+  } as unknown as DispatchProductionEvent, { materializeLearningLabel: true });
+  const recomputedLabel = recomputed.learningLabel;
+  if (normalized === undefined || recomputedLabel === undefined ||
+    (
+      JSON.stringify(normalized) !== JSON.stringify(recomputedLabel) &&
+      !legacyV1GeneratedRepairLabelMatchesCurrent(
+        recomputed,
+        label,
+        normalized,
+        recomputedLabel,
+        stored as unknown as DispatchProductionEvent,
+      )
+    )) return false;
   return JSON.stringify({ ...canonical, learningLabel: label }) === line;
+}
+
+function storedLearningLabelOrigin(value: unknown): DispatchProductionLabelOrigin {
+  if (value === undefined) return 'derived-on-read';
+  if (!isPlainRecord(value)) throw new Error('invalid stored learning label');
+  const normalized = sanitizeProductionAttemptLearningLabel(value);
+  if (normalized === undefined) throw new Error('invalid stored learning label');
+  if (value['classifierVersion'] === 'attempt-shape-v2' &&
+    JSON.stringify(value) === JSON.stringify(normalized)) return 'stored-current';
+  if (
+    value['classifierVersion'] === 'attempt-shape-v1' &&
+    hasOnlyKeys(value, new Set([
+      'schemaVersion', 'classifierVersion', 'authoritative', 'learningKind',
+      'policySuppressed', 'diagnosticNoProposal', 'diagnosticAttempt', 'attemptShape',
+    ])) &&
+    isPlainRecord(value['attemptShape']) &&
+    hasOnlyKeys(value['attemptShape'], new Set([
+      'backendNoDiff', 'captureOrGateBlocked', 'repairAttempts', 'policyDisabled',
+    ]))
+  ) return 'stored-legacy';
+  throw new Error('invalid stored learning label');
+}
+
+function legacyV1GeneratedRepairLabelMatchesCurrent(
+  event: DispatchProductionEvent,
+  storedLabel: unknown,
+  normalized: ProductionAttemptLearningLabel,
+  canonical: ProductionAttemptLearningLabel,
+  rawEvent: DispatchProductionEvent = event,
+): boolean {
+  if (
+    !isPlainRecord(storedLabel) ||
+    storedLabel['classifierVersion'] !== 'attempt-shape-v1' ||
+    !legacyGeneratedRepairIdentityMatchesFactory(rawEvent) ||
+    normalized.attemptShape.repairAttempts !== 0 ||
+    canonical.attemptShape.repairAttempts !== 1
+  ) return false;
+  return JSON.stringify({
+    ...normalized,
+    attemptShape: { ...normalized.attemptShape, repairAttempts: 1 },
+  }) === JSON.stringify(canonical);
+}
+
+function legacyGeneratedRepairIdentityMatchesFactory(event: DispatchProductionEvent): boolean {
+  if (event.source !== 'self') return false;
+  const repoName = basename(event.repo);
+  const recipes = [
+    {
+      titlePrefix: `Repair dispatch capture failure for ${repoName} item `,
+      itemPrefix: `${repoName}:proposal-repair-capture:`,
+      domain: 'dispatch-capture-gate-repair',
+    },
+    {
+      titlePrefix: `Reslice no-diff dispatch for ${repoName} item `,
+      itemPrefix: `${repoName}:proposal-repair-nodiff:`,
+      domain: 'dispatch-no-diff-reslice',
+    },
+  ] as const;
+  for (const recipe of recipes) {
+    if (!event.title.startsWith(recipe.titlePrefix)) continue;
+    const parentItemId = event.title.slice(recipe.titlePrefix.length);
+    if (!boundedStoredText(parentItemId, 120)) return false;
+    const hash = createHash('sha1')
+      .update(`${event.repo}\0${parentItemId}\0${recipe.domain}`)
+      .digest('hex')
+      .slice(0, 12);
+    return event.itemId === `${recipe.itemPrefix}${hash}`;
+  }
+  return false;
+}
+
+function withLearningLabelOrigin(
+  event: DispatchProductionEvent,
+  storedLabel: unknown,
+  rawEvent: DispatchProductionEvent = event,
+): DispatchProductionEvent {
+  const labelOrigin = storedLearningLabelOrigin(storedLabel);
+  let learningLabel = event.learningLabel;
+  if (labelOrigin === 'stored-legacy') {
+    const normalized = sanitizeProductionAttemptLearningLabel(storedLabel);
+    const canonicalLabel = sanitizeDispatchProductionEvent({
+      ...rawEvent,
+      learningLabel: undefined,
+    }, {
+      materializeLearningLabel: true,
+    }).learningLabel;
+    if (
+      normalized === undefined ||
+      canonicalLabel === undefined ||
+      (
+        JSON.stringify(normalized) !== JSON.stringify(canonicalLabel) &&
+        !legacyV1GeneratedRepairLabelMatchesCurrent(
+          event,
+          storedLabel,
+          normalized,
+          canonicalLabel,
+          rawEvent,
+        )
+      )
+    ) throw new Error('stored learning label does not match canonical attempt');
+    learningLabel = canonicalLabel;
+  } else if (labelOrigin === 'stored-current') {
+    const normalized = sanitizeProductionAttemptLearningLabel(storedLabel);
+    if (normalized === undefined) throw new Error('invalid stored learning label');
+    learningLabel = normalized;
+  }
+  return {
+    ...event,
+    ...(learningLabel ? { learningLabel } : {}),
+    labelOrigin,
+  };
+}
+
+export function currentAuthoritativeDispatchProductionLearningLabel(
+  _event: DispatchProductionEvent,
+): ProductionAttemptLearningLabel | undefined {
+  // Dispatch rows and their local attempt receipts are owner-writable and
+  // explicitly non-cryptographic. They remain diagnostic until a writer-
+  // authenticated receipt verifier is available for this exact record type.
+  return undefined;
+}
+
+function diagnosticDispatchProductionLearningLabel(
+  event: DispatchProductionEvent,
+): ProductionAttemptLearningLabel | undefined {
+  return sanitizeProductionAttemptLearningLabel(event.learningLabel);
 }
 
 function storedDispatchProductionIdentities(
@@ -6359,10 +7093,10 @@ function mergeTreatmentOutcomeReceipts(
     result.rowsScanned++;
     try {
       inspectExactReceiptAuthorityFile(path);
-      if (!loaded.text.endsWith('\n') || loaded.text.indexOf('\n') !== loaded.text.length - 1) {
+      const line = treatmentOutcomeReceiptLine(loaded.text);
+      if (line === null) {
         throw new Error('invalid receipt');
       }
-      const line = loaded.text.slice(0, -1);
       const parsed: unknown = JSON.parse(line);
       if (!canonicalTreatmentOutcomeReceiptEvent(parsed, line, name)) {
         throw new Error('invalid receipt');
@@ -6390,7 +7124,7 @@ function mergeTreatmentOutcomeReceipts(
         throw new Error('restored retired treatment outcome receipt');
       }
       if (opts.sinceMs !== undefined && eventMs < opts.sinceMs) continue;
-      receipts.set(name, event);
+      receipts.set(name, withLearningLabelOrigin(event, event.learningLabel, event));
     } catch {
       result.invalidRows++;
       result.complete = false;
@@ -6538,6 +7272,10 @@ export function readDispatchProductionEventsDetailed(
           result.invalidRows++;
           continue;
         }
+        if (!dispatchProductionSuppliedEnvelopeSemanticsAgree(parsed)) {
+          result.invalidRows++;
+          continue;
+        }
         const eventMs = Date.parse(parsed.ts);
         if (!Number.isFinite(eventMs)) {
           result.invalidRows++;
@@ -6550,10 +7288,11 @@ export function readDispatchProductionEventsDetailed(
           stopTraversal = true;
           break;
         }
-        result.events.push(sanitizeDispatchProductionEvent(parsed, {
+        result.events.push(withLearningLabelOrigin(sanitizeDispatchProductionEvent(parsed, {
           deriveLegacyRunOutcomeCausal: true,
           materializeLearningLabel: true,
-        }));
+          preserveMissingCausalAuthority: true,
+        }), parsed.learningLabel, parsed));
       } catch {
         result.invalidRows++;
       }
@@ -6680,7 +7419,7 @@ function incrementOutcome(
   }
 }
 
-function isCancelledDispatchProductionEvent(event: DispatchProductionEvent): boolean {
+export function isCancelledDispatchProductionEvent(event: DispatchProductionEvent): boolean {
   if (String(event.outcome).trim().toLowerCase() === 'cancelled') return true;
   const classification = classifyProductionAttemptForLearningWithLabel({
     outcome: event.outcome,
@@ -6690,8 +7429,119 @@ function isCancelledDispatchProductionEvent(event: DispatchProductionEvent): boo
     itemId: event.itemId,
     title: event.title,
     source: event.source,
-  }, event.learningLabel);
+  }, diagnosticDispatchProductionLearningLabel(event));
   return String(classification.kind) === 'cancelled';
+}
+
+function canonicalAttemptIdentity(event: DispatchProductionEvent): string | null {
+  if (!isOuterAttemptIdentity(event.attemptId) || scrubSecrets(event.attemptId) !== event.attemptId) {
+    return null;
+  }
+  if (!trustedExecutionIdentity(event.runId) || event.trajectoryId !== `run:${event.attemptId}`) {
+    return null;
+  }
+  if (event.proposalId !== undefined && !trustedExecutionIdentity(event.proposalId)) return null;
+  const summary = event.runEventSummary;
+  const actionCounts = summary?.actionCounts;
+  const expectedProposalCounts = proposalActionCountsForOutcome(event);
+  if (
+    summary === undefined ||
+    summary.runId !== event.runId ||
+    !dispatchProductionRunStatusAgrees(event.outcome, summary.status) ||
+    summary.outcome !== event.outcome ||
+    event.proposalCreated !== (event.outcome === 'proposal-created') ||
+    summary.proposalCreated !== event.proposalCreated ||
+    summary.proposalId !== event.proposalId ||
+    summary.diffFiles !== event.diffFiles ||
+    summary.diffLines !== event.diffLines ||
+    summary.costUsd !== event.spentUsd ||
+    !actionCountsAgreeWithOutcome(event, actionCounts) ||
+    (actionCounts?.proposalCreated !== undefined &&
+      actionCounts.proposalCreated !== expectedProposalCounts.proposalCreated) ||
+    (actionCounts?.proposalDisabled !== undefined &&
+      actionCounts.proposalDisabled !== expectedProposalCounts.proposalDisabled)
+  ) return null;
+  return event.attemptId;
+}
+
+function isPreEnvelopeDispatchProductionEvent(event: DispatchProductionEvent): boolean {
+  const summary = event.runEventSummary;
+  const actionCounts = summary?.actionCounts;
+  return event.attemptId === undefined ||
+    event.runId === undefined ||
+    event.trajectoryId === undefined ||
+    summary === undefined ||
+    summary.runId === undefined ||
+    summary.status === undefined ||
+    summary.outcome === undefined ||
+    summary.proposalCreated === undefined ||
+    summary.costUsd === undefined ||
+    actionCounts === undefined ||
+    actionCounts.proposalCreated === undefined ||
+    actionCounts.proposalBlocked === undefined ||
+    actionCounts.proposalDisabled === undefined ||
+    (actionCounts.modelSteps !== undefined &&
+      actionCounts.toolSteps !== undefined && actionCounts.totalSteps === undefined);
+}
+
+function canonicalAttemptSignature(event: DispatchProductionEvent): string {
+  const { machineId: _machineId, ...semantic } = event;
+  return JSON.stringify(semantic);
+}
+
+/** Canonical owner-writable attempt accounting shared by every public yield projection. */
+export function canonicalDispatchProductionAttempts(
+  rows: readonly DispatchProductionEvent[],
+): CanonicalDispatchProductionAttempts {
+  const identities = new Map<string, { event: DispatchProductionEvent; signature: string }>();
+  const conflicts = new Set<string>();
+  let preEnvelopeEvents = 0;
+  let duplicateEvents = 0;
+  let invalidAttemptIdentities = 0;
+  for (const row of rows) {
+    if (!dispatchProductionSuppliedEnvelopeSemanticsAgree(row)) {
+      invalidAttemptIdentities++;
+      continue;
+    }
+    const preEnvelope = isPreEnvelopeDispatchProductionEvent(row);
+    let event: DispatchProductionEvent;
+    try {
+      event = sanitizeDispatchProductionEvent(row, {
+        materializeLearningLabel: row.learningLabel === undefined,
+        preserveMissingCausalAuthority: true,
+      });
+      if (row.labelOrigin === 'stored-current' || row.labelOrigin === 'stored-legacy' ||
+        row.labelOrigin === 'derived-on-read') {
+        event = { ...event, labelOrigin: row.labelOrigin };
+      }
+    } catch {
+      invalidAttemptIdentities++;
+      continue;
+    }
+    if (preEnvelope) {
+      preEnvelopeEvents++;
+      continue;
+    }
+    const identity = canonicalAttemptIdentity(event);
+    if (identity === null) {
+      invalidAttemptIdentities++;
+      continue;
+    }
+    const signature = canonicalAttemptSignature(event);
+    const existing = identities.get(identity);
+    if (!existing) identities.set(identity, { event, signature });
+    else if (existing.signature === signature) duplicateEvents++;
+    else conflicts.add(identity);
+  }
+  return {
+    events: [...identities.entries()]
+      .filter(([identity]) => !conflicts.has(identity))
+      .map(([, { event }]) => event),
+    preEnvelopeEvents,
+    duplicateEvents,
+    invalidAttemptIdentities,
+    conflictingAttemptIdentities: conflicts.size,
+  };
 }
 
 function outcomeForAccounting(
@@ -6720,6 +7570,16 @@ function addDiagnosticReason(
 ): void {
   if (!classification.diagnosticAttempt || isSuppressedDispatchProductionReason(reason)) return;
   reasons.set(reason, (reasons.get(reason) ?? 0) + 1);
+}
+
+function dispatchReasonCode(
+  event: DispatchProductionEvent,
+  classification: ProductionAttemptLearningClassification,
+): string {
+  return event.outcome === 'proposal-disabled' && classification.diagnosticAttempt &&
+    !classification.policySuppressed
+    ? 'proposal-capture-missing'
+    : event.outcome;
 }
 
 interface MutableYieldBucket {
@@ -6825,7 +7685,9 @@ function addRepairTreatmentAttempt(
   if (!terminalWitness) attribution.eligibleEvents++;
   const treatment = event.repairTreatment;
   const unitId = event.repairTreatmentUnitId;
-  const executionId = event.trajectoryId ?? event.runId;
+  // Treatment receipts predate writer-issued attempt IDs and are named from the
+  // validated run identity. Never join through a mutable trajectory alias.
+  const executionId = event.runId ?? event.attemptId;
   if (
     !treatment ||
     !unitId ||
@@ -7001,9 +7863,6 @@ function touchBucket(
 }
 
 function addToBucket(bucket: MutableYieldBucket, event: DispatchProductionEvent): void {
-  bucket.attempts++;
-  if (event.proposalCreated) bucket.proposalsCreated++;
-  bucket.spentUsd += Number.isFinite(event.spentUsd) ? event.spentUsd : 0;
   incrementOutcome(bucket.outcomes, outcomeForAccounting(event));
   addRunActionCounts(bucket.actionCounts, event.runEventSummary?.actionCounts);
   const classification = classifyProductionAttemptForLearningWithLabel({
@@ -7014,8 +7873,12 @@ function addToBucket(bucket: MutableYieldBucket, event: DispatchProductionEvent)
     itemId: event.itemId,
     title: event.title,
     source: event.source,
-  }, event.learningLabel);
+  }, diagnosticDispatchProductionLearningLabel(event));
   const cancelled = isCancelledDispatchProductionEvent(event);
+  if (cancelled) return;
+  bucket.attempts++;
+  if (event.proposalCreated) bucket.proposalsCreated++;
+  bucket.spentUsd += Number.isFinite(event.spentUsd) ? event.spentUsd : 0;
   if (!cancelled && classification.diagnosticAttempt) bucket.diagnosticAttempts++;
   if (!cancelled && classification.kind === 'proposal-created') bucket.diagnosticProposalsCreated++;
   if (!cancelled && classification.diagnosticNoProposal) bucket.diagnosticNoProposal++;
@@ -7031,9 +7894,8 @@ function addToBucket(bucket: MutableYieldBucket, event: DispatchProductionEvent)
     cancelled,
   );
   addRepairTreatmentAttempt(bucket.repairTreatments, event);
-  const reason = event.reason ?? event.routeReason ?? event.outcome;
-  bucket.reasons.set(reason, (bucket.reasons.get(reason) ?? 0) + 1);
-  addDiagnosticReason(bucket.diagnosticReasons, reason, classification);
+  bucket.reasons.set(event.outcome, (bucket.reasons.get(event.outcome) ?? 0) + 1);
+  addDiagnosticReason(bucket.diagnosticReasons, dispatchReasonCode(event, classification), classification);
 }
 
 function finalizeBucket(bucket: MutableYieldBucket): DispatchProductionYieldBucket {
@@ -7052,12 +7914,12 @@ function finalizeBucket(bucket: MutableYieldBucket): DispatchProductionYieldBuck
     attempts,
     proposalsCreated,
     noProposal: Math.max(0, attempts - proposalsCreated),
-    proposalRate: attempts > 0 ? proposalsCreated / attempts : 0,
+    ...(attempts > 0 ? { proposalRate: proposalsCreated / attempts } : {}),
     diagnosticAttempts: bucket.diagnosticAttempts,
     diagnosticNoProposal: bucket.diagnosticNoProposal,
-    diagnosticProposalRate: bucket.diagnosticAttempts > 0
-      ? bucket.diagnosticProposalsCreated / bucket.diagnosticAttempts
-      : 0,
+    ...(bucket.diagnosticAttempts > 0
+      ? { diagnosticProposalRate: bucket.diagnosticProposalsCreated / bucket.diagnosticAttempts }
+      : {}),
     spentUsd: bucket.spentUsd,
     outcomes: bucket.outcomes,
     ...(hasRunActionCounts(bucket.actionCounts) ? { actionCounts: bucket.actionCounts } : {}),
@@ -7153,7 +8015,6 @@ function summarizeGeneratedRepairBackendTransitions(
         attempts: 0,
         proposalsCreated: 0,
         noProposal: 0,
-        proposalRate: 0,
         outcomes: emptyOutcomeCounts(),
       };
       buckets.set(bucketKey, bucket);
@@ -7197,6 +8058,18 @@ export function summarizeDispatchProductionYield(
     : 8;
   if (events.length === 0) return undefined;
 
+  const lifecycleEvents = events.filter((event) =>
+    event.basis === 'repair-lifecycle-candidate' || event.basis === 'repair-lifecycle-outcome'
+  );
+  const physicalAttemptEvents = events.filter((event) =>
+    event.basis !== 'repair-lifecycle-candidate' && event.basis !== 'repair-lifecycle-outcome'
+  );
+  const canonical = canonicalDispatchProductionAttempts(physicalAttemptEvents);
+  if (canonical.invalidAttemptIdentities > 0 || canonical.conflictingAttemptIdentities > 0) {
+    return undefined;
+  }
+  const accountingEvents = [...lifecycleEvents, ...canonical.events];
+
   const byBackend = new Map<string, MutableYieldBucket>();
   const bySource = new Map<string, MutableYieldBucket>();
   const byRepo = new Map<string, MutableYieldBucket>();
@@ -7214,9 +8087,10 @@ export function summarizeDispatchProductionYield(
   let diagnosticNoProposal = 0;
   let spentUsd = 0;
   let total = 0;
+  let cancelledEvents = 0;
   const diagnosticTopReasons = new Map<string, number>();
 
-  for (const event of events) {
+  for (const event of accountingEvents) {
     if (event.basis === 'repair-lifecycle-candidate') continue;
     if (event.basis === 'repair-lifecycle-outcome') {
       addRepairTreatmentAttempt(repairTreatments, event);
@@ -7238,9 +8112,6 @@ export function summarizeDispatchProductionYield(
       ).repairTreatments, event);
       continue;
     }
-    total++;
-    if (event.proposalCreated) proposalsCreated++;
-    spentUsd += Number.isFinite(event.spentUsd) ? event.spentUsd : 0;
     incrementOutcome(overall, outcomeForAccounting(event));
     addRunActionCounts(actionCounts, event.runEventSummary?.actionCounts);
     const classification = classifyProductionAttemptForLearningWithLabel({
@@ -7251,8 +8122,29 @@ export function summarizeDispatchProductionYield(
       itemId: event.itemId,
       title: event.title,
       source: event.source,
-    }, event.learningLabel);
+    }, diagnosticDispatchProductionLearningLabel(event));
+    const backendKey = event.backend ?? 'unknown';
+    addToBucket(touchBucket(byBackend, backendKey, { backend: event.backend }), event);
+    addToBucket(touchBucket(bySource, event.source, { source: event.source }), event);
+    addToBucket(touchBucket(byRepo, event.repo, { repo: event.repo }), event);
+    addToBucket(touchBucket(
+      byBackendModel,
+      `${event.backend ?? 'unknown'}:${event.model ?? 'default'}`,
+      { backend: event.backend, model: event.model ?? null },
+    ), event);
+    addToBucket(touchBucket(
+      byBackendSource,
+      `${event.backend ?? 'unknown'}:${event.source}`,
+      { backend: event.backend, source: event.source },
+    ), event);
     const cancelled = isCancelledDispatchProductionEvent(event);
+    if (cancelled) {
+      cancelledEvents++;
+      continue;
+    }
+    total++;
+    if (event.proposalCreated) proposalsCreated++;
+    spentUsd += Number.isFinite(event.spentUsd) ? event.spentUsd : 0;
     if (!cancelled && classification.diagnosticAttempt) diagnosticAttempts++;
     if (!cancelled && classification.kind === 'proposal-created') diagnosticProposalsCreated++;
     if (!cancelled && classification.diagnosticNoProposal) diagnosticNoProposal++;
@@ -7268,27 +8160,9 @@ export function summarizeDispatchProductionYield(
       cancelled,
     );
     addRepairTreatmentAttempt(repairTreatments, event);
-    const reason = event.reason ?? event.routeReason ?? event.outcome;
-    topReasons.set(reason, (topReasons.get(reason) ?? 0) + 1);
-    addDiagnosticReason(diagnosticTopReasons, reason, classification);
+    topReasons.set(event.outcome, (topReasons.get(event.outcome) ?? 0) + 1);
+    addDiagnosticReason(diagnosticTopReasons, dispatchReasonCode(event, classification), classification);
 
-    const backendKey = event.backend ?? 'unknown';
-    addToBucket(touchBucket(byBackend, backendKey, { backend: event.backend }), event);
-
-    const sourceKey = event.source;
-    addToBucket(touchBucket(bySource, sourceKey, { source: event.source }), event);
-
-    const repoKey = event.repo;
-    addToBucket(touchBucket(byRepo, repoKey, { repo: event.repo }), event);
-
-    const modelKey = `${event.backend ?? 'unknown'}:${event.model ?? 'default'}`;
-    addToBucket(touchBucket(byBackendModel, modelKey, { backend: event.backend, model: event.model ?? null }), event);
-
-    const backendSourceKey = `${event.backend ?? 'unknown'}:${event.source}`;
-    addToBucket(
-      touchBucket(byBackendSource, backendSourceKey, { backend: event.backend, source: event.source }),
-      event,
-    );
   }
 
   const treatmentConversions = sampleGatedTreatmentConversions(repairTreatments);
@@ -7296,21 +8170,26 @@ export function summarizeDispatchProductionYield(
   if (treatmentAttribution) generatedRepairAttempts.treatmentAttribution = treatmentAttribution;
   if (treatmentConversions) generatedRepairAttempts.treatmentConversions = treatmentConversions;
   const generatedRepairBackendTransitions = summarizeGeneratedRepairBackendTransitions(
-    events.filter((event) =>
-      event.basis !== 'repair-lifecycle-candidate' && event.basis !== 'repair-lifecycle-outcome'
-    ),
+    canonical.events,
     limit,
   );
   return {
     windowHours: opts?.windowHours ?? 24,
     attempts: total,
-    events: total,
+    events: physicalAttemptEvents.length,
     proposalsCreated,
     noProposal: Math.max(0, total - proposalsCreated),
-    proposalRate: total > 0 ? proposalsCreated / total : 0,
+    ...(total > 0 ? { proposalRate: proposalsCreated / total } : {}),
+    preEnvelopeEvents: canonical.preEnvelopeEvents,
+    duplicateEvents: canonical.duplicateEvents,
+    invalidAttemptIdentities: canonical.invalidAttemptIdentities,
+    conflictingAttemptIdentities: canonical.conflictingAttemptIdentities,
+    cancelledEvents,
     diagnosticAttempts,
     diagnosticNoProposal,
-    diagnosticProposalRate: diagnosticAttempts > 0 ? diagnosticProposalsCreated / diagnosticAttempts : 0,
+    ...(diagnosticAttempts > 0
+      ? { diagnosticProposalRate: diagnosticProposalsCreated / diagnosticAttempts }
+      : {}),
     spentUsd,
     outcomes: overall,
     ...(hasRunActionCounts(actionCounts) ? { actionCounts } : {}),
@@ -7325,30 +8204,6 @@ export function summarizeDispatchProductionYield(
     byBackendModel: sortedBuckets(byBackendModel, limit),
     byBackendSource: sortedBuckets(byBackendSource, limit),
   };
-}
-
-function withholdTreatmentConversions(summary: DispatchProductionYieldSummary | undefined): void {
-  if (!summary) return;
-  const withhold = (generated: GeneratedRepairAttemptSummary | undefined): void => {
-    if (!generated) return;
-    delete generated.treatmentConversions;
-    const attribution = generated.treatmentAttribution;
-    if (!attribution) return;
-    attribution.gate = 'withheld';
-    if (!attribution.blockers.includes('source-incomplete')) {
-      attribution.blockers = [...attribution.blockers, 'source-incomplete'];
-    }
-  };
-  withhold(summary.generatedRepairAttempts);
-  for (const buckets of [
-    summary.byBackend,
-    summary.bySource,
-    summary.byRepo,
-    summary.byBackendModel,
-    summary.byBackendSource,
-  ]) {
-    for (const bucket of buckets) withhold(bucket.generatedRepairAttempts);
-  }
 }
 
 export function readDispatchProductionYieldDetailed(opts?: {
@@ -7368,15 +8223,42 @@ export function readDispatchProductionYieldDetailed(opts?: {
     maxBytes: opts?.maxBytes,
     maxRows: opts?.maxRows,
   });
-  const summary = summarizeDispatchProductionYield(read.events, {
-    windowHours: windowMs / (60 * 60 * 1000),
-    limitPerDimension: opts?.limitPerDimension,
-  });
-  if (read.sourceState !== 'healthy' || !read.complete) withholdTreatmentConversions(summary);
-  const { events: _events, ...sourceQuality } = read;
+  const sourceComplete = read.sourceState === 'healthy' && read.complete;
+  const physicalAttemptEvents = read.events.filter((event) =>
+    event.basis !== 'repair-lifecycle-candidate' && event.basis !== 'repair-lifecycle-outcome'
+  );
+  const canonical = sourceComplete
+    ? canonicalDispatchProductionAttempts(physicalAttemptEvents)
+    : undefined;
+  const identityDegraded = canonical !== undefined &&
+    (canonical.invalidAttemptIdentities > 0 || canonical.conflictingAttemptIdentities > 0);
+  const summary = sourceComplete && !identityDegraded
+    ? summarizeDispatchProductionYield(read.events, {
+        windowHours: windowMs / (60 * 60 * 1000),
+        limitPerDimension: opts?.limitPerDimension,
+      })
+    : undefined;
+  const { events: _events, ...baseSourceQuality } = read;
+  const sourceQuality: DispatchProductionSourceQuality = identityDegraded
+    ? {
+        ...baseSourceQuality,
+        sourceState: 'degraded',
+        complete: false,
+        stopReasons: [
+          ...baseSourceQuality.stopReasons,
+          ...(canonical!.invalidAttemptIdentities > 0
+            ? ['attempt-identity-unavailable' as const]
+            : []),
+          ...(canonical!.conflictingAttemptIdentities > 0
+            ? ['attempt-identity-conflict' as const]
+            : []),
+        ],
+      }
+    : baseSourceQuality;
   return {
     ...(summary ? { summary } : {}),
     sourceQuality,
+    events: read.events,
   };
 }
 

@@ -49,10 +49,15 @@ concurrency:
   group: release-desktop-${{ github.ref }}
   cancel-in-progress: true
 
+permissions: {}
+
 env:
   # Tauri v2's dependency tree requires Cargo's edition2024 (Rust >= 1.85);
-  # use the latest stable toolchain.
-  RUST_VERSION: "stable"
+  # pin every downloaded tool so a release rerun resolves the same toolchain.
+  RUST_VERSION: "1.97.1"
+  NODE_VERSION: "22.23.2"
+  BUN_VERSION: "1.3.14"
+  TAURI_CLI_VERSION: "2.11.4"
   # Let linuxdeploy/appimagetool run without FUSE on the CI runner.
   APPIMAGE_EXTRACT_AND_RUN: "1"
 
@@ -88,13 +93,14 @@ jobs:
             artifact_label: linux
 
     permissions:
-      contents: write   # upload release assets
-      id-token: write   # for future provenance / attestation
+      contents: write   # create the draft release and upload assets
 
     steps:
       # ── Checkout ────────────────────────────────────────────────────────────
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
 
       # ── Linux system deps for WebKit / AppImage ──────────────────────────
       - name: Install Linux system dependencies
@@ -113,26 +119,26 @@ jobs:
 
       # ── Bun ─────────────────────────────────────────────────────────────────
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: latest
+          bun-version: ${{ env.BUN_VERSION }}
 
       # ── Node (needed by prepare-sidecar.mjs which uses plain node APIs) ────
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "22"
+          node-version: ${{ env.NODE_VERSION }}
 
       # ── Rust ─────────────────────────────────────────────────────────────────
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
           toolchain: ${{ env.RUST_VERSION }}
           targets: ${{ matrix.rust_targets }}
 
       # Cargo cache — key on Cargo.lock so hits are maximally useful.
       - name: Cache Cargo registry + build
-        uses: actions/cache@v4
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: |
             ~/.cargo/registry/index/
@@ -145,11 +151,11 @@ jobs:
 
       # ── Install npm dependencies (root workspace) ────────────────────────────
       - name: Install root dependencies
-        run: bun install --frozen-lockfile
+        run: npm ci
 
       # ── Build the @ashlr/hub package ────────────────────────────────────────
       - name: Build @ashlr/hub
-        run: bun run build
+        run: npm run build
 
       # ── Build the Bun SEA sidecar binary ────────────────────────────────────
       - name: Build SEA sidecar (dist-bin/ashlr-<triple>)
@@ -163,17 +169,16 @@ jobs:
       - name: Prepare sidecar for Tauri
         run: node desktop/scripts/prepare-sidecar.mjs
 
+      # ── Install the exact Tauri CLI used for icons and the release build ─────
+      - name: Install Tauri CLI
+        run: npm install --global @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }}
+
       # ── Generate app icons (PNG/icns/ico) from icon.svg ──────────────────────
-      # cargo tauri build requires the raster icons; we ship only the SVG source,
-      # so generate them here via the Tauri CLI before the build step.
+      # cargo tauri build requires raster icons; use the pinned global CLI so the
+      # action cannot fall back to installing a mutable @tauri-apps/cli@v2 tag.
       - name: Generate app icons
         working-directory: desktop
-        run: bunx @tauri-apps/cli@^2 icon src-tauri/icons/icon.svg
-
-      # ── Install desktop deps so `npm run tauri build` resolves @tauri-apps/cli ─
-      - name: Install desktop dependencies
-        working-directory: desktop
-        run: bun install
+        run: tauri icon src-tauri/icons/icon.svg
 
       # ── macOS code-signing setup (skipped if secrets absent) ─────────────────
       # If you don't set APPLE_CERTIFICATE the build produces an unsigned DMG.
@@ -210,14 +215,14 @@ jobs:
           echo "TAURI_WINDOWS_SIGN_PFX=$PWD\certificate.pfx" >> $env:GITHUB_ENV
 
       # ── Build with tauri-apps/tauri-action ───────────────────────────────────
-      # tauri-action handles: cargo install tauri-cli, `cargo tauri build`, and
-      # uploading the produced bundles directly to a GitHub release.
+      # tauri-action uses the exact CLI installed above, runs `tauri build`, and
+      # uploads the produced bundles directly to a GitHub release.
       # The `tagName` / `releaseName` inputs are only used if the action is asked
       # to CREATE the release; here we use `releaseId` via a separate job, so
       # the action only uploads. For simplicity we let it create the release too:
       # it is idempotent on re-runs of the same tag.
       - name: Build and upload desktop installers
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # macOS signing env is intentionally OMITTED → unsigned dev .dmg.
@@ -238,6 +243,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: desktop
+          tauriScript: tauri
           # Tag from the push event, or the manual dispatch input.
           tagName: ${{ github.ref_name || inputs.tag }}
           releaseName: "Ashlr Desktop ${{ github.ref_name || inputs.tag }}"

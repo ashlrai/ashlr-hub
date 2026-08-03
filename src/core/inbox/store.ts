@@ -57,6 +57,7 @@ import { isDestructiveDiff } from '../run/diff-safety.js';
 import { causalMetadata, causalMetadataFromProposal } from '../learning/causal.js';
 import { canonicalizeProposalDiff, scrubSecrets } from '../util/scrub.js';
 import { fsyncDirectory } from '../util/durability.js';
+import { assurePrivateStoragePath } from '../util/private-storage.js';
 import { canonicalFilesystemPathIdentity } from '../sandbox/policy.js';
 import { proposalCompletesGoalMilestone } from '../goals/completion.js';
 import { isPostMergeCreditReleaseLabel } from '../fleet/post-merge-credit.js';
@@ -87,13 +88,18 @@ import {
   verifyLocalRealizedMergeEvidence,
 } from './realized-merge.js';
 import {
-  hashDiff,
+  signPendingProposalAuthorityV1,
   signProducerProvenanceV2,
   signLocalRealizedMergeReceipt,
   verifyProvenance,
   verifyLocalMergeIntent,
 } from '../foundry/provenance.js';
-import { pendingProposalIsStaleForProductionVelocity } from '../fabric/production-velocity-pending.js';
+import {
+  canonicalProposalDiffHash,
+  isAuthoritativeDurablePendingProposal,
+  validatePendingAuthorityActionCounts,
+  validatePendingAuthorityRunSummary,
+} from './pending-authority.js';
 import { pruneQueuedSelfHealItems } from '../fleet/self-heal-queue-prune.js';
 import { proposalRepairId } from '../fleet/proposal-repair-identity.js';
 import {
@@ -116,6 +122,38 @@ const REALIZED_MERGE_FANOUT_VERSION = 3;
  */
 export function inboxDir(): string {
   return join(homedir(), '.ashlr', 'inbox');
+}
+
+/** Ensure a present private inbox so missing storage is never read as empty authority. */
+export function ensureProposalInbox(): boolean {
+  try {
+    const dir = inboxDir();
+    const parent = dirname(dir);
+    const parentStat = lstatSync(parent);
+    if (!safeProposalDirectory(parentStat) || !ownedByCurrentUser(parentStat)) return false;
+    let created = false;
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { mode: 0o700 });
+      created = true;
+    }
+    const before = lstatSync(dir);
+    if (!safeProposalDirectory(before) || !ownedByCurrentUser(before)) return false;
+    if (process.platform !== 'win32') chmodSync(dir, 0o700);
+    const assurance = assurePrivateStoragePath(
+      dir,
+      'directory',
+      created ? 'secure-created' : 'inspect-existing',
+      { anchorPath: homedir() },
+    );
+    if (!assurance.ok) return false;
+    const after = lstatSync(dir);
+    if (!safeProposalDirectory(after) || !ownedByCurrentUser(after) ||
+      !sameProposalSource(before, after)) return false;
+    if (created) fsyncDirectory(parent);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function canonicalProposalRepoIdentity(value: unknown): string | null {
@@ -223,6 +261,8 @@ function sanitizeProposalForStore<T extends Partial<Proposal> & Pick<Proposal, '
       delete next.provenanceSig;
       delete next.producerProvenanceVersion;
       delete next.producerProvenanceSig;
+      delete next.pendingAuthorityVersion;
+      delete next.pendingAuthoritySig;
       changed = true;
     }
   }
@@ -944,27 +984,13 @@ type ProposalDedupCandidate = Pick<
   Proposal,
   | 'repo'
   | 'origin'
+  | 'kind'
   | 'diff'
   | 'diffHash'
   | 'workItemId'
   | 'workItemGenerationId'
+  | 'isPartial'
 >;
-
-function canonicalProposalDiffHash(
-  proposal: Pick<Proposal, 'diff' | 'diffHash'>,
-): string | null {
-  if (
-    typeof proposal.diff !== 'string' ||
-    proposal.diff.trim().length === 0 ||
-    typeof proposal.diffHash !== 'string'
-  ) return null;
-  try {
-    const recomputed = hashDiff(canonicalizeProposalDiff(proposal.diff));
-    return proposal.diffHash === recomputed ? recomputed : null;
-  } catch {
-    return null;
-  }
-}
 
 function isAuthoritativeProposalDuplicate(
   existing: Proposal,
@@ -973,13 +999,17 @@ function isAuthoritativeProposalDuplicate(
   cfg: Pick<AshlrConfig, 'foundry'> | undefined,
   now: string,
 ): boolean {
-  if (typeof input.repo !== 'string' || existing.repo !== input.repo) return false;
-  if (
-    existing.workItemId !== input.workItemId ||
-    existing.workItemGenerationId !== input.workItemGenerationId
-  ) return false;
-  if (pendingProposalIsStaleForProductionVelocity(existing, cfg, { now })) return false;
-  return canonicalProposalDiffHash(existing) === inputHash;
+  if (typeof input.repo !== 'string' || typeof input.diff !== 'string') return false;
+  return isAuthoritativeDurablePendingProposal(existing, {
+    repo: input.repo,
+    origin: input.origin,
+    kind: input.kind,
+    diff: input.diff,
+    diffHash: inputHash,
+    workItemId: input.workItemId,
+    workItemGenerationId: input.workItemGenerationId,
+    isPartial: input.isPartial === true,
+  }, cfg, { now });
 }
 
 /**
@@ -1040,14 +1070,24 @@ export function createProposal(
 
   const proposalId = makeProposalId();
   const createdAt = new Date().toISOString();
+  const inputActionCountsValid = input.runEventSummary === undefined ||
+    validatePendingAuthorityActionCounts(input.runEventSummary).ok;
   const boundRunEventSummary = bindCreatedProposalRunSummary(
     input.runEventSummary,
     input.runId,
     proposalId,
   );
+  const producerStatus = input.producerStatus === 'done' || input.producerStatus === 'failed' ||
+    input.producerStatus === 'aborted'
+    ? input.producerStatus
+    : boundRunEventSummary?.status === 'done' || boundRunEventSummary?.status === 'failed' ||
+      boundRunEventSummary?.status === 'aborted'
+      ? boundRunEventSummary.status
+      : undefined;
   const baseProposal: Proposal = {
     ...input,
     ...(boundRunEventSummary ? { runEventSummary: boundRunEventSummary } : {}),
+    ...(producerStatus ? { producerStatus } : {}),
     ...(owner !== undefined ? { owner } : {}),
     id: proposalId,
     status: initialStatus,
@@ -1078,6 +1118,16 @@ export function createProposal(
     if (producerProvenanceSig) {
       proposal.producerProvenanceVersion = 2;
       proposal.producerProvenanceSig = producerProvenanceSig;
+    }
+  }
+  if (
+    inputActionCountsValid && verifyProvenance(proposal).ok &&
+    validatePendingAuthorityRunSummary(proposal).ok
+  ) {
+    const pendingAuthoritySig = signPendingProposalAuthorityV1(proposal);
+    if (pendingAuthoritySig) {
+      proposal.pendingAuthorityVersion = 1;
+      proposal.pendingAuthoritySig = pendingAuthoritySig;
     }
   }
 

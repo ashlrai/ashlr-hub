@@ -1100,9 +1100,9 @@ export interface AshlrConfig {
       managerGate?: boolean;
       /** Permit self-target auto-merge after self safety checks. Default false. */
       allowSelfMerge?: boolean;
-      /** Max files permitted in an auto-merge diff (default 4). */
+      /** Max files permitted in an auto-merge diff (default 4, hard maximum 10). */
       maxAutomergeFiles?: number;
-      /** Max changed lines permitted in an auto-merge diff (default 150). */
+      /** Max changed lines permitted in an auto-merge diff (default 150, hard maximum 300). */
       maxAutomergeLines?: number;
       /** Also merge/push on the remote (gh pr merge) when applying (default false). */
       pushToRemote?: boolean;
@@ -2962,8 +2962,8 @@ export interface IntelligenceSummary {
     score: number;
     /** Recency-weighted sample count. */
     samples: number;
-    /** Human-readable trend: 'promoted' | 'demoted' | 'neutral'. */
-    trend: 'promoted' | 'demoted' | 'neutral';
+    /** Operational trend, or observational when authority is inactive. */
+    trend: 'promoted' | 'demoted' | 'neutral' | 'observational';
   }[];
   /**
    * M235: Recent anti-playbook lessons written from judge rejections.
@@ -3940,6 +3940,8 @@ export interface Proposal {
   routeSnapshot?: RouteSnapshot;
   /** Metadata-only run summary; never includes prompts, diffs, stdout, or stderr. */
   runEventSummary?: RunEventSummary;
+  /** Exact terminal producer state bound into current pending-proposal authority. */
+  producerStatus?: 'running' | 'done' | 'failed' | 'aborted';
   /** Metadata-only evidence/policy outcome summary for learning joins. */
   evidenceOutcome?: EvidenceOutcomeSummary;
   /** Bounded delegation constraints/expectations; never includes raw prompt/output text. */
@@ -3976,6 +3978,10 @@ export interface Proposal {
   producerProvenanceVersion?: 2;
   /** HMAC for the versioned producer attestation described above. */
   producerProvenanceSig?: string;
+  /** Current signed envelope required for autonomous pending-proposal authority. */
+  pendingAuthorityVersion?: 1;
+  /** HMAC covering the complete immutable pending-proposal authority envelope. */
+  pendingAuthoritySig?: string;
   /** Current lifecycle status. Created as 'pending'; NEVER auto-advances. */
   status: ProposalStatus;
   /** ISO timestamp the proposal was created. */
@@ -4440,6 +4446,8 @@ export interface DaemonTick {
  * METADATA ONLY — no secrets, no diffs. Mutating this NEVER mutates a user repo.
  */
 export interface DaemonState {
+  /** Ephemeral startup refusal returned to the caller; never persisted. */
+  startRefusal?: string;
   /** Whether the daemon loop is currently running. */
   running: boolean;
   /** OS pid of the running daemon process, or null when not running. */

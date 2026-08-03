@@ -132,6 +132,72 @@ describe('M370 bounded best-of-N ledger', () => {
     });
   });
 
+  it('persists current selection and producer outcomes while retaining the historical won alias', () => {
+    const current = record({
+      candidates: record().candidates.map((candidate) => candidate.won
+        ? {
+            ...candidate,
+            producerStatus: 'done',
+            isPartial: false,
+            selectionWon: true,
+            fullProposalWon: true,
+            proposalOutcome: 'filed',
+          }
+        : {
+            ...candidate,
+            producerStatus: 'done',
+            isPartial: false,
+            selectionWon: false,
+            fullProposalWon: false,
+          }),
+    });
+    const partial = record({
+      attemptId: 'partial-attempt',
+      winnerProposalId: 'partial-1',
+      candidates: record().candidates.map((candidate) => candidate.won
+        ? {
+            ...candidate,
+            producerStatus: 'failed',
+            isPartial: true,
+            selectionWon: true,
+            fullProposalWon: false,
+            proposalId: 'partial-1',
+            proposalOutcome: 'filed',
+          }
+        : {
+            ...candidate,
+            producerStatus: 'done',
+            isPartial: false,
+            selectionWon: false,
+            fullProposalWon: false,
+          }),
+    });
+
+    recordBestOfN(current);
+    recordBestOfN(partial);
+
+    expect(readBestOfNRecordsDetailed().records).toEqual([
+      expect.objectContaining({
+        attemptId: 'partial-attempt',
+        candidates: expect.arrayContaining([
+          expect.objectContaining({
+            producerStatus: 'failed', isPartial: true, selectionWon: true,
+            fullProposalWon: false, won: true,
+          }),
+        ]),
+      }),
+      expect.objectContaining({
+        attemptId: 'attempt-1',
+        candidates: expect.arrayContaining([
+          expect.objectContaining({
+            producerStatus: 'done', isPartial: false, selectionWon: true,
+            fullProposalWon: true, won: true,
+          }),
+        ]),
+      }),
+    ]);
+  });
+
   it('rejects malformed records and inconsistent candidates before creating storage', () => {
     const malformed: BestOfNRecord[] = [
       record({ ts: '2026-07-11 12:00:00Z' }),
@@ -146,6 +212,40 @@ describe('M370 bounded best-of-N ledger', () => {
     for (const candidate of malformed) recordBestOfN(candidate);
     expect(existsSync(bestOfNDir())).toBe(false);
     expect(readBestOfNRecordsDetailed().sourceState).toBe('missing');
+  });
+
+  it('rejects contradictory current selection telemetry', () => {
+    const currentCandidates = record().candidates.map((candidate) => ({
+      ...candidate,
+      producerStatus: 'done' as const,
+      isPartial: false,
+      selectionWon: candidate.won,
+      fullProposalWon: candidate.won,
+      ...(candidate.won ? { proposalOutcome: 'filed' } : {}),
+    }));
+    const malformed = [
+      record({ candidates: currentCandidates.map((candidate, index) => index === 1
+        ? { ...candidate, selectionWon: false }
+        : candidate) }),
+      record({ candidates: currentCandidates.map((candidate, index) => index === 1
+        ? { ...candidate, isPartial: true }
+        : candidate) }),
+      record({ candidates: currentCandidates.map((candidate, index) => index === 1
+        ? { ...candidate, producerStatus: 'failed' }
+        : candidate) }),
+      record({ candidates: currentCandidates.map((candidate, index) => index === 1
+        ? { ...candidate, proposalOutcome: 'proposal-disabled' }
+        : candidate) }),
+      record({ candidates: currentCandidates.map((candidate, index) => index === 1
+        ? { ...candidate, producerStatus: undefined }
+        : candidate) }),
+      record({ candidates: currentCandidates.map((candidate, index) => index === 1
+        ? { ...candidate, fullProposalWon: false }
+        : candidate) }),
+    ];
+
+    for (const candidate of malformed) recordBestOfN(candidate);
+    expect(existsSync(bestOfNDir())).toBe(false);
   });
 
   it('preserves proposal IDs produced by losing candidates', () => {

@@ -100,6 +100,25 @@ export interface WorkedLedger {
   events: WorkedEvent[];
 }
 
+export type WorkedLedgerReadReason =
+  | 'source-missing'
+  | 'unsafe-storage'
+  | 'unstable-read'
+  | 'invalid-ledger';
+
+export interface WorkedLedgerSourceQuality {
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  sourcePresent: boolean;
+  complete: boolean;
+  reasons: WorkedLedgerReadReason[];
+  bytesRead: number;
+}
+
+export interface WorkedLedgerReadResult {
+  ledger: WorkedLedger;
+  sourceQuality: WorkedLedgerSourceQuality;
+}
+
 export type WorkedOutcomeReplayResult =
   | 'recorded'
   | 'already-recorded'
@@ -183,6 +202,57 @@ export function loadWorkedLedger(): WorkedLedger {
   } catch {
     // Missing, oversized, linked, unstable, corrupt, or unreadable — fail fresh.
     return freshLedger();
+  }
+}
+
+/** Strict observational read for learning metrics; never maps unavailable storage to a healthy empty ledger. */
+export function loadWorkedLedgerDetailed(): WorkedLedgerReadResult {
+  const missing = (): WorkedLedgerReadResult => ({
+    ledger: freshLedger(),
+    sourceQuality: {
+      sourceState: 'missing',
+      sourcePresent: false,
+      complete: false,
+      reasons: ['source-missing'],
+      bytesRead: 0,
+    },
+  });
+  const degraded = (reason: WorkedLedgerReadReason, sourcePresent: boolean): WorkedLedgerReadResult => ({
+    ledger: freshLedger(),
+    sourceQuality: {
+      sourceState: 'degraded',
+      sourcePresent,
+      complete: false,
+      reasons: [reason],
+      bytesRead: 0,
+    },
+  });
+  try {
+    const path = workedLedgerPath();
+    try {
+      lstatSync(path, { bigint: true });
+    } catch (error) {
+      return missingPath(error) ? missing() : degraded('unsafe-storage', false);
+    }
+    const authority = pinWorkedDirectory();
+    if (authority === null) return degraded('unsafe-storage', true);
+    const loaded = readBoundWorkedFile(authority);
+    if (loaded === null) return degraded('unstable-read', true);
+    if (!loaded.found) return missing();
+    const ledger = parseWorkedLedger(loaded.bytes.toString('utf8'), true);
+    if (ledger === null) return degraded('invalid-ledger', true);
+    return {
+      ledger,
+      sourceQuality: {
+        sourceState: 'healthy',
+        sourcePresent: true,
+        complete: true,
+        reasons: [],
+        bytesRead: loaded.bytes.length,
+      },
+    };
+  } catch {
+    return degraded('unstable-read', true);
   }
 }
 

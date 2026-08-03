@@ -12,7 +12,9 @@ import { createHash } from 'node:crypto';
 import type { AgentActionEvent, AgentActionSourceQuality } from '../fleet/agent-action-ledger.js';
 import { readAgentActions } from '../fleet/agent-action-ledger.js';
 import type { DispatchProductionEvent } from '../fleet/dispatch-production-ledger.js';
+import type { DispatchProductionLabelOrigin } from '../fleet/dispatch-production-ledger.js';
 import {
+  currentAuthoritativeDispatchProductionLearningLabel,
   readDispatchProductionEvents,
   readDispatchProductionEventsDetailed,
 } from '../fleet/dispatch-production-ledger.js';
@@ -93,6 +95,7 @@ export interface AttemptRecord {
   diagnosticAttempt: boolean;
   learningKind: ProductionAttemptLearningKind;
   labelAuthoritative: boolean;
+  labelOrigin: DispatchProductionLabelOrigin;
   learningSource?: string;
   labelBasis?: string;
   coverage: AttemptRecordCoverage;
@@ -159,16 +162,17 @@ export interface AttemptCoverageStatus {
     diagnosticAttempt?: boolean;
     policySuppressed?: boolean;
     labelAuthoritative?: boolean;
-    coverage: AttemptRecordCoverage;
+    labelOrigin?: DispatchProductionLabelOrigin;
+    coverage: Partial<AttemptRecordCoverage>;
     causalCoverage: AttemptCausalCoverage;
   }>;
-  coverage: {
+  coverage: Partial<{
     agentAction: AttemptCoverageMetric;
     outcomeRecord: AttemptCoverageMetric;
     decision: AttemptCoverageMetric;
     evidence: AttemptCoverageMetric;
     worked: AttemptCoverageMetric;
-  };
+  }>;
   causalCoverage: {
     trajectoryId: AttemptCoverageMetric;
     routeSnapshot: AttemptCoverageMetric;
@@ -652,6 +656,9 @@ export function listAttemptRecords(opts?: AttemptRecordListOptions): AttemptReco
       const runSummary = sanitizeRunEventSummary(event.runEventSummary);
       const actionCounts = runSummary?.actionCounts;
       const learningLabel = sanitizeProductionAttemptLearningLabel(event.learningLabel);
+      const authoritativeLearningLabel =
+        currentAuthoritativeDispatchProductionLearningLabel(event);
+      const labelOrigin = event.labelOrigin ?? 'derived-on-read';
       const classification = classifyProductionAttemptForLearningWithLabel({
         outcome: event.outcome,
         proposalCreated: event.proposalCreated,
@@ -661,7 +668,7 @@ export function listAttemptRecords(opts?: AttemptRecordListOptions): AttemptReco
         title: event.title,
         source: event.source,
       }, learningLabel);
-      const labelAuthoritative = Boolean(learningLabel?.authoritative);
+      const labelAuthoritative = authoritativeLearningLabel !== undefined;
       const coverage: AttemptRecordCoverage = {
         agentAction: hasAgentAction(event, actionMaps),
         outcomeRecord: hasOutcomeRecord(proposalId, outcomesByProposal, readProposal),
@@ -715,6 +722,7 @@ export function listAttemptRecords(opts?: AttemptRecordListOptions): AttemptReco
         diagnosticAttempt: classification.diagnosticAttempt,
         learningKind: classification.kind,
         labelAuthoritative,
+        labelOrigin,
         ...(learningSource ? { learningSource } : {}),
         ...(labelBasis ? { labelBasis } : {}),
         coverage,
@@ -890,6 +898,7 @@ export function summarizeAttemptCoverage(
       diagnosticAttempt: record.diagnosticAttempt,
       policySuppressed: record.policySuppressed,
       labelAuthoritative: record.labelAuthoritative,
+      labelOrigin: record.labelOrigin,
       coverage: record.coverage,
       causalCoverage: record.causalCoverage,
     })),

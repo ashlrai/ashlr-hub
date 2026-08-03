@@ -40,7 +40,11 @@ import type {
 } from '../types.js';
 import { routeBackend, type RouteDecision } from '../fleet/router.js';
 import type { CostForecast } from '../types.js';
-import { readDecisions } from '../fleet/decisions-ledger.js';
+import {
+  readDecisions,
+  readDecisionsDetailed,
+  type DecisionSourceQuality,
+} from '../fleet/decisions-ledger.js';
 import { hasReleasedPostMergeCredit } from '../fleet/post-merge-credit.js';
 import { listProposalsDetailed } from '../inbox/store.js';
 import {
@@ -51,6 +55,7 @@ import { engineTierOf as _engineTierOf } from './sandboxed-engine.js';
 import { engineInstalled } from './engines.js';
 import { canonicalModelTag, type ModelEntry } from './model-catalog.js';
 import {
+  currentAuthoritativeDispatchProductionLearningLabel,
   readDispatchProductionEventsDetailed,
   type DispatchProductionEvent,
 } from '../fleet/dispatch-production-ledger.js';
@@ -58,10 +63,11 @@ import {
   learningEpochFromTimestamp,
   ROUTER_POLICY_VERSION,
 } from '../learning/causal.js';
+import { classifyProductionAttemptForLearningWithLabel } from '../learning/attempt-shape.js';
 import {
-  classifyProductionAttemptForLearningWithLabel,
-  sanitizeProductionAttemptLearningLabel,
-} from '../learning/attempt-shape.js';
+  readPolicyAssignmentReceipts,
+  type PolicyAssignmentReceiptReadResult,
+} from '../learning/policy-assignment-receipts.js';
 
 // ---------------------------------------------------------------------------
 // M155: Re-export cascade routing API from router.ts for discoverability.
@@ -230,8 +236,10 @@ const EMPTY_PRIOR: OutcomePrior = { frontierSuccessRate: 1, frontierSampleSize: 
  */
 async function loadPrior(source: string): Promise<OutcomePrior> {
   try {
-    const { listRuns } = await import('../run/orchestrator.js');
-    const runs = listRuns();
+    const { listRunsDetailed } = await import('../run/orchestrator.js');
+    const read = listRunsDetailed();
+    if (read.sourceState !== 'healthy' || !read.complete) return EMPTY_PRIOR;
+    const runs = read.runs;
     // A run is "frontier" if its engine is one of the known frontier backends.
     // We derive this from the run metadata. Runs without engineTier skip.
     const frontierRuns = runs.filter((r) => {
@@ -307,8 +315,8 @@ function isCaptureMissingDispatchEvent(event: DispatchProductionEvent): boolean 
 }
 
 function hasCurrentAuthoritativeAttemptLabel(event: DispatchProductionEvent): boolean {
-  const label = sanitizeProductionAttemptLearningLabel(event.learningLabel);
-  if (!label?.authoritative) return false;
+  const label = currentAuthoritativeDispatchProductionLearningLabel(event);
+  if (!label) return false;
   if (event.routerPolicyVersion !== ROUTER_POLICY_VERSION) return false;
   if (
     event.routeSnapshot?.routerPolicyVersion !== undefined &&
@@ -534,6 +542,7 @@ export async function recommendRoute(
   // ── Base decision from M46 routeBackend ────────────────────────────────────
   const base = routeBackend(item, cfg);
   const allowed = allowedBackends(cfg);
+  const routingLearningAuthority = inspectRoutingLearningAuthority(item.source);
 
   // ── Guard: never return a backend outside allowedBackends ─────────────────
   // (routeBackend already honors this, but we double-check here)
@@ -557,7 +566,10 @@ export async function recommendRoute(
   }
 
   // ── Load priors (or use provided ones) ────────────────────────────────────
-  const prior = opts?.prior ?? (await loadPrior(item.source));
+  const testPrior = process.env.NODE_ENV === 'test' ? opts?.prior : undefined;
+  const prior = testPrior ?? (routingLearningAuthority.operationalSteering
+    ? await loadPrior(item.source)
+    : EMPTY_PRIOR);
   const minSuccessRate = intel.minFrontierSuccessRate ?? 0.5;
 
   // ── Nudge away from frontier when success rate is poor ────────────────────
@@ -621,7 +633,15 @@ export async function recommendRoute(
   // tier and only fires with enough same-backend/source samples, so it is a
   // final same-tier nudge, not a safety authority. Lower-tier safety/cost
   // nudges above get priority.
-  const dispatchEvents = loadDispatchYieldEvents(intel, opts?.dispatchProductionEvents);
+  // Synthetic event overrides are a test seam, never a production authority
+  // source. Production routing must obtain provenance-marked events from the
+  // immutable ledger reader above.
+  const testDispatchEvents = process.env.NODE_ENV === 'test'
+    ? opts?.dispatchProductionEvents
+    : undefined;
+  const dispatchEvents = testDispatchEvents ?? (routingLearningAuthority.operationalSteering
+    ? loadDispatchYieldEvents(intel)
+    : []);
   const yieldPrior = dispatchYieldForBackend(dispatchEvents, base.backend, item.source);
   const minProposalYieldRate = clampRate(intel.minProposalYieldRate, 0.2);
   if (
@@ -894,6 +914,295 @@ export interface EngineScore {
  * Built once per routeTask call and passed into `engineScoreFor`.
  */
 export type EngineScoreMap = Map<string, EngineScore>;
+
+export type RoutingLearningAuthorityBlocker =
+  | 'decision-source-missing'
+  | 'decision-source-degraded'
+  | 'decision-authenticity-unavailable'
+  | 'assignment-source-missing'
+  | 'assignment-source-degraded'
+  | 'assignment-authenticity-unavailable'
+  | 'assignment-denominator-incomplete'
+  | 'assignment-policy-ineligible'
+  | 'assignment-pre-exposure-unverified'
+  | 'assignment-identity-unavailable'
+  | 'assignment-identity-conflict'
+  | 'assignment-propensity-unknown'
+  | 'policy-cohort-mismatch'
+  | 'learning-epoch-mismatch'
+  | 'mixed-policy-cohort'
+  | 'mixed-learning-epoch'
+  | 'sample-floor-unmet';
+
+export interface RoutingLearningAuthoritySample {
+  decisionAuthenticated: boolean;
+  assignmentAuthenticated: boolean;
+  policyEligible: boolean;
+  denominatorComplete: boolean;
+  preExposureVerified: boolean;
+  assignmentIdentity: string | null;
+  propensity: number | null;
+  contextStratum: string;
+  policyVersion: string;
+  learningEpoch: string;
+  decisionPolicyVersion: string | null;
+  decisionLearningEpoch: string | null;
+}
+
+export interface RoutingLearningAuthorityInput {
+  decisions: Pick<DecisionSourceQuality, 'sourceState' | 'sourcePresent' | 'complete'> & {
+    authenticated: boolean;
+  };
+  assignments: Pick<
+    PolicyAssignmentReceiptReadResult,
+    'sourceState' | 'sourcePresent' | 'complete' | 'denominatorComplete'
+  > & {
+    authenticated: boolean;
+  };
+  observedSamples: number;
+  samples: readonly RoutingLearningAuthoritySample[];
+  observedPolicies?: readonly string[];
+  observedEpochs?: readonly string[];
+}
+
+export interface RoutingLearningAuthority {
+  version: 1;
+  state: 'eligible' | 'inactive';
+  operationalSteering: boolean;
+  sourceQuality: {
+    decisions: RoutingLearningAuthorityInput['decisions'];
+    assignments: RoutingLearningAuthorityInput['assignments'];
+  };
+  samples: {
+    observed: number;
+    eligible: number;
+    minimumPerStratum: number;
+  };
+  cohort: {
+    policyVersion: string | null;
+    learningEpoch: string | null;
+  };
+  blockerCodes: RoutingLearningAuthorityBlocker[];
+}
+
+/**
+ * Pure admission contract for operational learning. Diagnostics remain useful
+ * even when this projection is inactive, but no score may steer routing unless
+ * every sample belongs to one authenticated policy/epoch cohort and every
+ * context stratum clears the sample floor.
+ */
+export function evaluateRoutingLearningAuthority(
+  input: RoutingLearningAuthorityInput,
+): RoutingLearningAuthority {
+  const blockers = new Set<RoutingLearningAuthorityBlocker>();
+  if (!input.decisions.sourcePresent) blockers.add('decision-source-missing');
+  if (input.decisions.sourceState === 'degraded' || !input.decisions.complete) {
+    blockers.add('decision-source-degraded');
+  }
+  if (!input.decisions.authenticated) blockers.add('decision-authenticity-unavailable');
+  if (!input.assignments.sourcePresent) blockers.add('assignment-source-missing');
+  if (input.assignments.sourceState === 'degraded' || !input.assignments.complete) {
+    blockers.add('assignment-source-degraded');
+  }
+  if (!input.assignments.authenticated) blockers.add('assignment-authenticity-unavailable');
+  if (!input.assignments.denominatorComplete) blockers.add('assignment-denominator-incomplete');
+
+  const samplePolicies = new Set(input.samples.map((sample) => sample.policyVersion));
+  const sampleEpochs = new Set(input.samples.map((sample) => sample.learningEpoch));
+  const reportedPolicies = input.observedPolicies === undefined
+    ? samplePolicies
+    : new Set(input.observedPolicies);
+  const reportedEpochs = input.observedEpochs === undefined
+    ? sampleEpochs
+    : new Set(input.observedEpochs);
+  const sameSet = (left: ReadonlySet<string>, right: ReadonlySet<string>): boolean =>
+    left.size === right.size && [...left].every((value) => right.has(value));
+  const policiesCorroborated = input.observedPolicies === undefined || sameSet(reportedPolicies, samplePolicies);
+  const epochsCorroborated = input.observedEpochs === undefined || sameSet(reportedEpochs, sampleEpochs);
+  if (!policiesCorroborated) blockers.add('policy-cohort-mismatch');
+  if (!epochsCorroborated) blockers.add('learning-epoch-mismatch');
+
+  // Union the independently reported and receipt-derived cohorts. A caller
+  // cannot hide a mixed sample population behind a narrower summary set.
+  const policies = new Set([...reportedPolicies, ...samplePolicies]);
+  const epochs = new Set([...reportedEpochs, ...sampleEpochs]);
+  if (policies.size > 1) blockers.add('mixed-policy-cohort');
+  if (epochs.size > 1) blockers.add('mixed-learning-epoch');
+
+  const eligible = input.samples.filter((sample) => {
+    if (!sample.policyEligible) blockers.add('assignment-policy-ineligible');
+    if (!sample.preExposureVerified) blockers.add('assignment-pre-exposure-unverified');
+    if (!sample.assignmentIdentity) blockers.add('assignment-identity-unavailable');
+    if (sample.propensity === null || !Number.isFinite(sample.propensity) || sample.propensity <= 0 || sample.propensity > 1) {
+      blockers.add('assignment-propensity-unknown');
+    }
+    if (!sample.denominatorComplete) blockers.add('assignment-denominator-incomplete');
+    if (sample.decisionPolicyVersion !== sample.policyVersion) blockers.add('policy-cohort-mismatch');
+    if (sample.decisionLearningEpoch !== sample.learningEpoch) blockers.add('learning-epoch-mismatch');
+    return sample.decisionAuthenticated && sample.assignmentAuthenticated &&
+      sample.policyEligible && sample.denominatorComplete && sample.preExposureVerified &&
+      sample.assignmentIdentity !== null && sample.propensity !== null &&
+      Number.isFinite(sample.propensity) && sample.propensity > 0 && sample.propensity <= 1 &&
+      sample.decisionPolicyVersion === sample.policyVersion &&
+      sample.decisionLearningEpoch === sample.learningEpoch;
+  });
+
+  const assignmentIdentities = eligible.map((sample) => sample.assignmentIdentity as string);
+  if (new Set(assignmentIdentities).size !== assignmentIdentities.length) {
+    blockers.add('assignment-identity-conflict');
+  }
+  if (input.observedSamples !== input.samples.length) {
+    blockers.add('assignment-denominator-incomplete');
+  }
+
+  const strata = new Map<string, number>();
+  for (const sample of eligible) {
+    strata.set(sample.contextStratum, (strata.get(sample.contextStratum) ?? 0) + 1);
+  }
+  if (eligible.length === 0 || [...strata.values()].some((count) => count < LEARNED_ROUTING_MIN_SAMPLES)) {
+    blockers.add('sample-floor-unmet');
+  }
+  if (input.samples.some((sample) => !sample.decisionAuthenticated)) {
+    blockers.add('decision-authenticity-unavailable');
+  }
+  if (input.samples.some((sample) => !sample.assignmentAuthenticated)) {
+    blockers.add('assignment-source-degraded');
+  }
+
+  const operationalSteering = blockers.size === 0 && eligible.length === input.samples.length &&
+    eligible.length === input.observedSamples && eligible.length > 0 &&
+    policiesCorroborated && epochsCorroborated && policies.size === 1 && epochs.size === 1;
+  return {
+    version: 1,
+    state: operationalSteering ? 'eligible' : 'inactive',
+    operationalSteering,
+    sourceQuality: {
+      decisions: { ...input.decisions },
+      assignments: { ...input.assignments },
+    },
+    samples: {
+      observed: Math.max(0, Math.floor(input.observedSamples)),
+      eligible: operationalSteering ? eligible.length : 0,
+      minimumPerStratum: LEARNED_ROUTING_MIN_SAMPLES,
+    },
+    cohort: {
+      policyVersion: policiesCorroborated && policies.size === 1 ? [...policies][0] ?? null : null,
+      learningEpoch: epochsCorroborated && epochs.size === 1 ? [...epochs][0] ?? null : null,
+    },
+    blockerCodes: [...blockers].sort(),
+  };
+}
+
+/**
+ * Inspect current V1 learning sources. Decision rows are structurally checked
+ * but unsigned, and V1 assignment receipts are authenticated observations that
+ * deliberately carry no policy eligibility or complete denominator.
+ */
+export function inspectRoutingLearningAuthority(taskClass?: string): RoutingLearningAuthority {
+  try {
+    const decisions = readDecisionsDetailed({ requireComplete: true });
+    const assignments = readPolicyAssignmentReceipts({ requireComplete: true });
+    const relevantDecisions = decisions.decisions.filter((entry) =>
+      taskClass === undefined || entry.workSource === undefined || entry.workSource === taskClass,
+    );
+    const relevantAssignments = assignments.receipts.filter((receipt) =>
+      taskClass === undefined || receipt.workSource === taskClass,
+    );
+    const authority = evaluateRoutingLearningAuthority({
+      decisions: {
+        sourceState: decisions.sourceState,
+        sourcePresent: decisions.sourcePresent,
+        complete: decisions.complete,
+        authenticated: false,
+      },
+      assignments: {
+        sourceState: assignments.sourceState,
+        sourcePresent: assignments.sourcePresent,
+        complete: assignments.complete,
+        denominatorComplete: assignments.denominatorComplete,
+        authenticated: assignments.sourceState === 'healthy' && assignments.complete,
+      },
+      observedSamples: relevantDecisions.length,
+      samples: [],
+      observedPolicies: relevantAssignments.map((receipt) => receipt.policyVersion),
+      observedEpochs: relevantAssignments.map((receipt) => receipt.learningEpoch),
+    });
+    const blockers = new Set(authority.blockerCodes);
+    if (relevantAssignments.some((receipt) => !receipt.policyEligible)) {
+      blockers.add('assignment-policy-ineligible');
+    }
+    if (relevantAssignments.some((receipt) => !receipt.preExposureVerified)) {
+      blockers.add('assignment-pre-exposure-unverified');
+    }
+    if (relevantAssignments.length > 0) {
+      blockers.add('assignment-identity-unavailable');
+      blockers.add('assignment-propensity-unknown');
+    }
+    return {
+      ...authority,
+      state: 'inactive',
+      operationalSteering: false,
+      samples: { ...authority.samples, eligible: 0 },
+      blockerCodes: [...blockers].sort(),
+    };
+  } catch {
+    return evaluateRoutingLearningAuthority({
+      decisions: {
+        sourceState: 'degraded', sourcePresent: true, complete: false, authenticated: false,
+      },
+      assignments: {
+        sourceState: 'degraded', sourcePresent: true, complete: false,
+        denominatorComplete: false, authenticated: false,
+      },
+      observedSamples: 0,
+      samples: [],
+    });
+  }
+}
+
+export interface OperationalLearningScores {
+  authority: RoutingLearningAuthority;
+  observational: EngineScoreMap;
+  operational: EngineScoreMap;
+}
+
+export function buildOperationalEngineScores(
+  taskClass: string,
+  nowMs?: number,
+  sinceMs?: number,
+): OperationalLearningScores {
+  const observational = buildEngineScores(taskClass, nowMs, sinceMs);
+  const authority = inspectRoutingLearningAuthority(taskClass);
+  return {
+    authority,
+    observational,
+    operational: authority.operationalSteering ? observational : new Map(),
+  };
+}
+
+export function buildOperationalProducerScores(
+  taskClass: string,
+  nowMs?: number,
+  sinceMs?: number,
+): OperationalLearningScores {
+  const observational = buildProducerScores(taskClass, nowMs, sinceMs);
+  const authority = inspectRoutingLearningAuthority(taskClass);
+  return {
+    authority,
+    observational,
+    operational: authority.operationalSteering ? observational : new Map(),
+  };
+}
+
+export function operationalEngineScoresForRouting(taskClass: string): EngineScoreMap {
+  const authority = inspectRoutingLearningAuthority(taskClass);
+  return authority.operationalSteering ? buildEngineScores(taskClass) : new Map();
+}
+
+export function operationalProducerScoresForRouting(taskClass: string): EngineScoreMap {
+  const authority = inspectRoutingLearningAuthority(taskClass);
+  return authority.operationalSteering ? buildProducerScores(taskClass) : new Map();
+}
 
 function stableLearnedSampleCount(weightedTotal: number): number {
   const missing = LEARNED_ROUTING_MIN_SAMPLES - weightedTotal;
