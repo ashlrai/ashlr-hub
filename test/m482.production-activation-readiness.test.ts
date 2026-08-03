@@ -88,6 +88,14 @@ function healthyTip(stopReasons: unknown[] = []) {
   return { sourceState: 'healthy' as const, complete: true, stopReasons };
 }
 
+function containsCallable(value: unknown, seen = new Set<object>()): boolean {
+  if (typeof value === 'function') return true;
+  if (value === null || typeof value !== 'object' || Buffer.isBuffer(value)) return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  return Object.values(value).some((child) => containsCallable(child, seen));
+}
+
 beforeEach(() => {
   releaseMocks.parseManifest.mockReturnValue({ ok: true, manifest: manifest(), canonicalJson: '{}\n' });
   releaseMocks.verifyEvidence.mockReturnValue({
@@ -254,6 +262,144 @@ describe('Production Activation Readiness V1', () => {
     }
   });
 
+  it('normalizes malformed projected enums to fixed degraded observations', () => {
+    const hostileSourceState = '/Users/attacker/.env Authorization: Bearer source-secret';
+    const hostileDiagnosticStatus = '/private/attacker/token=diagnostic-secret';
+    const report = inspectProductionActivationReadinessV1({
+      packageRoot: packageFixture(),
+      residentServiceDiagnostic: {
+        diagnosticStatus: hostileDiagnosticStatus,
+        findings: [{ code: 'service-not-running' }],
+      } as unknown as Parameters<typeof inspectProductionActivationReadinessV1>[0]['residentServiceDiagnostic'],
+      releaseTipObservation: {
+        sourceState: hostileSourceState,
+        complete: true,
+        stopReasons: ['bootstrap-required', hostileSourceState],
+      } as unknown as Parameters<typeof inspectProductionActivationReadinessV1>[0]['releaseTipObservation'],
+    });
+    const serialized = JSON.stringify(report);
+
+    expect(report.observations.residentService).toEqual({
+      sourceState: 'degraded',
+      complete: false,
+      state: 'invalid',
+      findingCodes: [],
+      reasonCode: 'diagnostic-invalid',
+    });
+    expect(report.observations.releaseTip).toEqual({
+      sourceState: 'degraded',
+      complete: false,
+      state: 'invalid',
+      stopReasons: [],
+      reasonCode: 'tip-invalid',
+    });
+    expect(serialized).not.toContain('/Users/attacker');
+    expect(serialized).not.toContain('/private/attacker');
+    expect(serialized).not.toContain('source-secret');
+    expect(serialized).not.toContain('diagnostic-secret');
+  });
+
+  it('does not invoke projected enum accessors', () => {
+    let sourceStateReads = 0;
+    const releaseTipObservation = {
+      complete: true,
+      stopReasons: ['bootstrap-required'],
+    } as Record<string, unknown>;
+    Object.defineProperty(releaseTipObservation, 'sourceState', {
+      enumerable: true,
+      get() {
+        sourceStateReads += 1;
+        return '/Users/attacker/source-secret';
+      },
+    });
+
+    const report = inspectProductionActivationReadinessV1({
+      packageRoot: packageFixture(),
+      releaseTipObservation: releaseTipObservation as never,
+    });
+
+    expect(sourceStateReads).toBe(0);
+    expect(report.observations.releaseTip.reasonCode).toBe('tip-invalid');
+    expect(JSON.stringify(report)).not.toContain('source-secret');
+  });
+
+  it('reconstructs launch admission input from declared data-only keys', () => {
+    let hookReads = 0;
+    const launchObservation = launchInput() as RuntimeReleaseLaunchObservationOptions &
+      Record<string, unknown>;
+    Object.defineProperty(launchObservation, '__testHooks', {
+      enumerable: true,
+      get() {
+        hookReads += 1;
+        return { afterBeforeObservation: vi.fn() };
+      },
+    });
+    launchObservation['callback'] = vi.fn();
+
+    inspectProductionActivationReadinessV1({
+      packageRoot: packageFixture(),
+      launchObservation,
+    });
+
+    expect(hookReads).toBe(0);
+    expect(releaseMocks.evaluateAdmission).toHaveBeenCalledOnce();
+    const isolated = releaseMocks.evaluateAdmission.mock.calls[0]![0] as Record<string, unknown>;
+    expect(Object.keys(isolated).sort()).toEqual([
+      'argv',
+      'declaredInterpreterPath',
+      'declaredInterpreterVersion',
+      'dependencyRoot',
+      'envelope',
+      'executablePath',
+      'expectedEnvelopeCanonicalSha256',
+      'expectedKeyId',
+      'expectedManifestDigest',
+      'expectedPolicyId',
+      'expectedRevision',
+      'expectedServiceInvocationDigest',
+      'expectedStagedTreeIdentity',
+      'expectedTrustRootCanonicalSha256',
+      'manifest',
+      'packageRoot',
+      'policy',
+      'trustRoot',
+    ]);
+    expect(containsCallable(isolated)).toBe(false);
+    expect(isolated).not.toHaveProperty('__testHooks');
+    expect(isolated).not.toHaveProperty('callback');
+  });
+
+  it('rejects declared launch accessors without invoking or forwarding them', () => {
+    let manifestReads = 0;
+    const launchObservation = launchInput();
+    Object.defineProperty(launchObservation, 'manifest', {
+      enumerable: true,
+      get() {
+        manifestReads += 1;
+        return Buffer.from('/Users/attacker/manifest-secret');
+      },
+    });
+
+    const report = inspectProductionActivationReadinessV1({
+      packageRoot: packageFixture(),
+      launchObservation,
+    });
+
+    expect(manifestReads).toBe(0);
+    expect(releaseMocks.parseManifest).not.toHaveBeenCalled();
+    expect(releaseMocks.verifyEvidence).not.toHaveBeenCalled();
+    expect(releaseMocks.evaluateAdmission).not.toHaveBeenCalled();
+    expect(report.observations.releaseManifest.reasonCode).toBe('manifest-invalid');
+    expect(report.observations.releaseEvidence.reasonCode).toBe('release-evidence-invalid');
+    expect(report.observations.launchAdmission).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      state: 'unavailable',
+    });
+    expect(JSON.stringify(report)).not.toContain('/Users/attacker');
+    expect(JSON.stringify(report)).not.toContain('manifest-secret');
+  });
+
   it('derives degraded source quality only from incomplete observations', () => {
     const report = inspectProductionActivationReadinessV1({ packageRoot: packageFixture() });
 
@@ -280,6 +426,11 @@ describe('Production Activation Readiness V1', () => {
     expect(source).not.toContain('ProductionActivationReadinessDependencies');
     expect(source).not.toContain('DEFAULT_DEPENDENCIES');
     expect(source).not.toMatch(/inspectProductionActivationReadinessV1\([^)]*,\s*dependencies/);
+    expect(source).not.toContain('evaluateRuntimeReleaseLaunchAdmission(input.launchObservation)');
+    const publicInput = source.match(
+      /export interface InspectProductionActivationReadinessInputV1 \{[\s\S]*?\n\}/,
+    )?.[0] ?? '';
+    expect(publicInput).not.toMatch(/__testHooks|callback|Function|=>/i);
   });
 
   it('cannot transitively import lifecycle mutation modules', () => {

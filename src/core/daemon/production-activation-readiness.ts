@@ -37,6 +37,25 @@ const LAUNCH_BLOCKER_CODES = new Set([
   'trusted-activation-root-absent',
   'trusted-policy-authority-absent',
 ]);
+const LAUNCH_STRING_FIELDS = [
+  'declaredInterpreterPath',
+  'declaredInterpreterVersion',
+  'dependencyRoot',
+  'executablePath',
+  'expectedEnvelopeCanonicalSha256',
+  'expectedKeyId',
+  'expectedManifestDigest',
+  'expectedPolicyId',
+  'expectedRevision',
+  'expectedServiceInvocationDigest',
+  'expectedStagedTreeIdentity',
+  'expectedTrustRootCanonicalSha256',
+  'packageRoot',
+] as const;
+const LAUNCH_BYTE_FIELDS = ['envelope', 'manifest', 'policy', 'trustRoot'] as const;
+const MAX_LAUNCH_ARGUMENTS = 128;
+
+type OwnDescriptorMap = Record<string, PropertyDescriptor | undefined>;
 
 export type ProductionActivationReadinessBlockerCodeV1 =
   | 'artifact-packaging-incompatible'
@@ -164,6 +183,101 @@ function unavailableSource(reasonCode: string): SourceObservationV1 {
   return { sourceState: 'missing', complete: false, reasonCode };
 }
 
+function ownDataDescriptors(value: unknown): OwnDescriptorMap | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  try {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return null;
+    return Object.getOwnPropertyDescriptors(value) as OwnDescriptorMap;
+  } catch {
+    return null;
+  }
+}
+
+function ownDataValue(
+  descriptors: OwnDescriptorMap,
+  key: string,
+): { ok: true; value: unknown } | { ok: false } {
+  const descriptor = descriptors[key];
+  if (!descriptor || !Object.hasOwn(descriptor, 'value')) return { ok: false };
+  return { ok: true, value: descriptor.value };
+}
+
+function copyArgv(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  try {
+    const descriptors = Object.getOwnPropertyDescriptors(value) as OwnDescriptorMap;
+    const length = descriptors['length']?.value;
+    if (!Number.isSafeInteger(length) || length < 1 || length > MAX_LAUNCH_ARGUMENTS) return null;
+    const result: string[] = [];
+    for (let index = 0; index < length; index += 1) {
+      const item = ownDataValue(descriptors, String(index));
+      if (!item.ok || typeof item.value !== 'string') return null;
+      result.push(item.value);
+    }
+    return result;
+  } catch {
+    return null;
+  }
+}
+
+function copyBytes(value: unknown): string | Buffer | null {
+  if (typeof value === 'string') return value;
+  return Buffer.isBuffer(value) ? Buffer.from(value) : null;
+}
+
+function isolateLaunchObservation(
+  value: unknown,
+): RuntimeReleaseLaunchObservationOptions | null {
+  const descriptors = ownDataDescriptors(value);
+  if (!descriptors) return null;
+  const rawArgv = ownDataValue(descriptors, 'argv');
+  const argv = rawArgv.ok ? copyArgv(rawArgv.value) : null;
+  if (!argv) return null;
+
+  const strings: Record<(typeof LAUNCH_STRING_FIELDS)[number], string> = {} as never;
+  for (const field of LAUNCH_STRING_FIELDS) {
+    const candidate = ownDataValue(descriptors, field);
+    if (!candidate.ok || typeof candidate.value !== 'string') return null;
+    strings[field] = candidate.value;
+  }
+  const bytes: Record<(typeof LAUNCH_BYTE_FIELDS)[number], string | Buffer> = {} as never;
+  for (const field of LAUNCH_BYTE_FIELDS) {
+    const candidate = ownDataValue(descriptors, field);
+    const copied = candidate.ok ? copyBytes(candidate.value) : null;
+    if (copied === null) return null;
+    bytes[field] = copied;
+  }
+  const rawExpectedPackageName = descriptors['expectedPackageName'];
+  if (rawExpectedPackageName &&
+    (!Object.hasOwn(rawExpectedPackageName, 'value') ||
+      typeof rawExpectedPackageName.value !== 'string')) {
+    return null;
+  }
+
+  return {
+    argv,
+    declaredInterpreterPath: strings.declaredInterpreterPath,
+    declaredInterpreterVersion: strings.declaredInterpreterVersion,
+    dependencyRoot: strings.dependencyRoot,
+    envelope: bytes.envelope,
+    executablePath: strings.executablePath,
+    expectedEnvelopeCanonicalSha256: strings.expectedEnvelopeCanonicalSha256,
+    expectedKeyId: strings.expectedKeyId,
+    expectedManifestDigest: strings.expectedManifestDigest,
+    ...(rawExpectedPackageName ? { expectedPackageName: rawExpectedPackageName.value } : {}),
+    expectedPolicyId: strings.expectedPolicyId,
+    expectedRevision: strings.expectedRevision,
+    expectedServiceInvocationDigest: strings.expectedServiceInvocationDigest,
+    expectedStagedTreeIdentity: strings.expectedStagedTreeIdentity,
+    expectedTrustRootCanonicalSha256: strings.expectedTrustRootCanonicalSha256,
+    manifest: bytes.manifest,
+    packageRoot: strings.packageRoot,
+    policy: bytes.policy,
+    trustRoot: bytes.trustRoot,
+  };
+}
+
 /** Compose production observations without importing or acquiring mutation capability. */
 export function inspectProductionActivationReadinessV1(
   input: InspectProductionActivationReadinessInputV1 = {},
@@ -195,9 +309,34 @@ export function inspectProductionActivationReadinessV1(
     blockerCodes: [],
   };
 
-  if (input.launchObservation) {
+  const launchObservation = input.launchObservation
+    ? isolateLaunchObservation(input.launchObservation)
+    : null;
+  if (input.launchObservation && !launchObservation) {
+    releaseManifest = {
+      sourceState: 'degraded',
+      complete: false,
+      reasonCode: 'manifest-invalid',
+      state: 'invalid',
+      manifestDigest: null,
+    };
+    releaseEvidence = {
+      sourceState: 'degraded',
+      complete: false,
+      reasonCode: 'release-evidence-invalid',
+      state: 'invalid',
+      keyId: null,
+    };
+    launchAdmission = {
+      sourceState: 'degraded',
+      complete: false,
+      reasonCode: 'launch-admission-inspection-failed',
+      state: 'unavailable',
+      blockerCodes: [],
+    };
+  } else if (launchObservation) {
     try {
-      const parsed = parseUnsignedRuntimeReleaseManifest(input.launchObservation.manifest);
+      const parsed = parseUnsignedRuntimeReleaseManifest(launchObservation.manifest);
       releaseManifest = parsed.ok && SHA256_RE.test(parsed.manifest.manifestDigest)
         ? {
           sourceState: 'healthy',
@@ -224,9 +363,9 @@ export function inspectProductionActivationReadinessV1(
     }
     try {
       const verified = verifyRuntimeReleaseEvidenceEnvelope({
-        envelope: input.launchObservation.envelope,
-        manifest: input.launchObservation.manifest,
-        trustRoot: input.launchObservation.trustRoot,
+        envelope: launchObservation.envelope,
+        manifest: launchObservation.manifest,
+        trustRoot: launchObservation.trustRoot,
       });
       releaseEvidence = verified.ok && KEY_ID_RE.test(verified.keyId)
         ? {
@@ -253,7 +392,7 @@ export function inspectProductionActivationReadinessV1(
       };
     }
     try {
-      const decision = evaluateRuntimeReleaseLaunchAdmission(input.launchObservation);
+      const decision = evaluateRuntimeReleaseLaunchAdmission(launchObservation);
       launchAdmission = {
         sourceState: 'healthy',
         complete: true,

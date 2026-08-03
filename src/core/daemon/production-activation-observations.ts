@@ -9,6 +9,7 @@ import { RUNTIME_RELEASE_PACKAGING_EXPECTATION_V1 } from './runtime-release-mani
 
 const MAX_PACKAGE_MANIFEST_BYTES = 1024 * 1024;
 const MAX_LOCKFILE_BYTES = 16 * 1024 * 1024;
+const MAX_PROJECTED_CODES = 32;
 const RESIDENT_FINDING_CODES = new Set([
   'trusted-signed-release-evidence-missing',
   'trusted-signed-interpreter-evidence-missing',
@@ -67,6 +68,8 @@ const RELEASE_TIP_STOP_REASONS = new Set([
   'broken-predecessor',
 ]);
 
+type OwnDescriptorMap = Record<string, PropertyDescriptor | undefined>;
+
 export type ProductionObservationSourceStateV1 = 'healthy' | 'missing' | 'degraded';
 
 export interface ProductionArtifactPackagingObservationV1 {
@@ -99,17 +102,17 @@ export interface ProductionActivationPolicyObservationV1 {
 export interface ProductionResidentServiceObservationV1 {
   sourceState: ProductionObservationSourceStateV1;
   complete: boolean;
-  state: 'observed-blocked' | 'unavailable';
+  state: 'observed-blocked' | 'invalid' | 'unavailable';
   findingCodes: string[];
-  reasonCode: 'diagnostic-observed' | 'diagnostic-unavailable';
+  reasonCode: 'diagnostic-observed' | 'diagnostic-unavailable' | 'diagnostic-invalid';
 }
 
 export interface ProductionReleaseTipObservationV1 {
   sourceState: ProductionObservationSourceStateV1;
   complete: boolean;
-  state: 'observed-untrusted' | 'unavailable';
+  state: 'observed-untrusted' | 'invalid' | 'unavailable';
   stopReasons: string[];
-  reasonCode: 'tip-observed-untrusted' | 'tip-unavailable';
+  reasonCode: 'tip-observed-untrusted' | 'tip-unavailable' | 'tip-invalid';
 }
 
 export interface ResidentServiceDiagnosticProjectionInputV1 {
@@ -279,7 +282,67 @@ ProductionActivationPolicyObservationV1 {
 function allowlistedCodes(values: readonly unknown[], allowed: ReadonlySet<string>): string[] {
   return [...new Set(values
     .filter((value): value is string => typeof value === 'string' && allowed.has(value))
-    .slice(0, 32))];
+    .slice(0, MAX_PROJECTED_CODES))];
+}
+
+function ownDataDescriptors(value: unknown): OwnDescriptorMap | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  try {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return null;
+    return Object.getOwnPropertyDescriptors(value) as OwnDescriptorMap;
+  } catch {
+    return null;
+  }
+}
+
+function ownDataValue(
+  descriptors: OwnDescriptorMap,
+  key: string,
+): { ok: true; value: unknown } | { ok: false } {
+  const descriptor = descriptors[key];
+  if (!descriptor || !Object.hasOwn(descriptor, 'value')) return { ok: false };
+  return { ok: true, value: descriptor.value };
+}
+
+function ownDenseArray(value: unknown): unknown[] | null {
+  if (!Array.isArray(value)) return null;
+  try {
+    const descriptors = Object.getOwnPropertyDescriptors(value) as OwnDescriptorMap;
+    const length = descriptors['length']?.value;
+    if (!Number.isSafeInteger(length) || length < 0 || length > MAX_PROJECTED_CODES) {
+      return null;
+    }
+    const result: unknown[] = [];
+    for (let index = 0; index < length; index += 1) {
+      const item = ownDataValue(descriptors, String(index));
+      if (!item.ok) return null;
+      result.push(item.value);
+    }
+    return result;
+  } catch {
+    return null;
+  }
+}
+
+function invalidResidentServiceObservation(): ProductionResidentServiceObservationV1 {
+  return {
+    sourceState: 'degraded',
+    complete: false,
+    state: 'invalid',
+    findingCodes: [],
+    reasonCode: 'diagnostic-invalid',
+  };
+}
+
+function invalidReleaseTipObservation(): ProductionReleaseTipObservationV1 {
+  return {
+    sourceState: 'degraded',
+    complete: false,
+    state: 'invalid',
+    stopReasons: [],
+    reasonCode: 'tip-invalid',
+  };
 }
 
 /** Strip resident diagnostic details, retaining bounded enum-like codes only. */
@@ -295,14 +358,27 @@ export function projectResidentServiceDiagnosticV1(
       reasonCode: 'diagnostic-unavailable',
     };
   }
+  const descriptors = ownDataDescriptors(input);
+  if (!descriptors) return invalidResidentServiceObservation();
+  const diagnosticStatus = ownDataValue(descriptors, 'diagnosticStatus');
+  const rawFindings = ownDataValue(descriptors, 'findings');
+  const findings = rawFindings.ok ? ownDenseArray(rawFindings.value) : null;
+  if (!diagnosticStatus.ok || diagnosticStatus.value !== 'blocked' || !findings) {
+    return invalidResidentServiceObservation();
+  }
+  const findingCodes: unknown[] = [];
+  for (const finding of findings) {
+    const findingDescriptors = ownDataDescriptors(finding);
+    if (!findingDescriptors) return invalidResidentServiceObservation();
+    const code = ownDataValue(findingDescriptors, 'code');
+    if (!code.ok) return invalidResidentServiceObservation();
+    findingCodes.push(code.value);
+  }
   return {
     sourceState: 'healthy',
     complete: true,
     state: 'observed-blocked',
-    findingCodes: allowlistedCodes(
-      input.findings.map(({ code }) => code),
-      RESIDENT_FINDING_CODES,
-    ),
+    findingCodes: allowlistedCodes(findingCodes, RESIDENT_FINDING_CODES),
     reasonCode: 'diagnostic-observed',
   };
 }
@@ -311,12 +387,36 @@ export function projectResidentServiceDiagnosticV1(
 export function projectReleaseTipObservationV1(
   input: ReleaseTipProjectionInputV1 | undefined,
 ): ProductionReleaseTipObservationV1 {
-  if (!input || !input.complete || input.sourceState !== 'healthy') {
+  if (!input) {
     return {
-      sourceState: input?.sourceState ?? 'missing',
+      sourceState: 'missing',
       complete: false,
       state: 'unavailable',
-      stopReasons: allowlistedCodes(input?.stopReasons ?? [], RELEASE_TIP_STOP_REASONS),
+      stopReasons: [],
+      reasonCode: 'tip-unavailable',
+    };
+  }
+  const descriptors = ownDataDescriptors(input);
+  if (!descriptors) return invalidReleaseTipObservation();
+  const rawSourceState = ownDataValue(descriptors, 'sourceState');
+  const rawComplete = ownDataValue(descriptors, 'complete');
+  const rawStopReasons = ownDataValue(descriptors, 'stopReasons');
+  const stopReasons = rawStopReasons.ok ? ownDenseArray(rawStopReasons.value) : null;
+  if (!rawSourceState.ok ||
+    (rawSourceState.value !== 'healthy' &&
+      rawSourceState.value !== 'missing' &&
+      rawSourceState.value !== 'degraded') ||
+    !rawComplete.ok ||
+    typeof rawComplete.value !== 'boolean' ||
+    !stopReasons) {
+    return invalidReleaseTipObservation();
+  }
+  if (!rawComplete.value || rawSourceState.value !== 'healthy') {
+    return {
+      sourceState: rawSourceState.value === 'healthy' ? 'degraded' : rawSourceState.value,
+      complete: false,
+      state: 'unavailable',
+      stopReasons: allowlistedCodes(stopReasons, RELEASE_TIP_STOP_REASONS),
       reasonCode: 'tip-unavailable',
     };
   }
@@ -324,7 +424,7 @@ export function projectReleaseTipObservationV1(
     sourceState: 'healthy',
     complete: true,
     state: 'observed-untrusted',
-    stopReasons: allowlistedCodes(input.stopReasons, RELEASE_TIP_STOP_REASONS),
+    stopReasons: allowlistedCodes(stopReasons, RELEASE_TIP_STOP_REASONS),
     reasonCode: 'tip-observed-untrusted',
   };
 }
