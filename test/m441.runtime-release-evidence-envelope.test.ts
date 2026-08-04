@@ -57,6 +57,7 @@ function releaseManifest(marker = 'first', expectedRevision = REVISION): string 
     version: '3.1.0',
     type: 'module',
     bin: { ashlr: 'bin/ashlr' },
+    files: ['bin', 'dist', 'scripts/run-verify-command.mjs'],
     dependencies: { example: '1.0.0' },
     bundledDependencies: ['example'],
   }, null, 2)}\n`);

@@ -96,6 +96,7 @@ function fixture(declaredRollbackTargetDigest?: string, includeDependencyBinLink
     version: '3.1.0',
     type: 'module',
     bin: { ashlr: 'bin/ashlr' },
+    files: ['bin', 'dist', 'scripts/run-verify-command.mjs'],
     dependencies: { example: '1.0.0' },
     bundledDependencies: ['example'],
   })}\n`);

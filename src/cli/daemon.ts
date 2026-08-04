@@ -219,11 +219,11 @@ function unavailableProductionActivationReadiness(): ProductionActivationReadine
         packageName: null,
         packageVersion: null,
         expectation: {
-          schemaVersion: 1,
+          schemaVersion: 2,
           packageManifestPath: 'package.json',
           dependencyInventoryPath: 'dist/release-dependency-inventory.json',
           installedDependencyRootPath: 'node_modules',
-          installedByteCoverage: 'inventory-package-bytes-root-unsealed',
+          installedByteCoverage: 'inventory-v2-package-manifest-bound-root-unsealed',
         },
         reasonCode: 'artifact-root-unavailable',
       },

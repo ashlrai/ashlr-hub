@@ -22,9 +22,9 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 export const RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH =
   'dist/release-dependency-inventory.json' as const;
-export const RUNTIME_RELEASE_DEPENDENCY_INVENTORY_SCHEMA_VERSION = 1 as const;
+export const RUNTIME_RELEASE_DEPENDENCY_INVENTORY_SCHEMA_VERSION = 2 as const;
 
-const INVENTORY_DIGEST_DOMAIN = 'ashlr:runtime-release-dependency-inventory:v1';
+const INVENTORY_DIGEST_DOMAIN = 'ashlr:runtime-release-dependency-inventory:v2';
 const PACKAGE_CONTENT_DIGEST_DOMAIN = 'ashlr:runtime-release-dependency-package-content:v1';
 export const RUNTIME_RELEASE_INSTALLED_DEPENDENCY_TREE_DIGEST_DOMAIN_V2 =
   'ashlr:runtime-release-installed-dependency-tree:v2' as const;
@@ -51,11 +51,12 @@ export interface RuntimeReleaseDependencyInventoryPackageV1 {
   version: string;
 }
 
-export interface RuntimeReleaseDependencyInventoryV1 {
+export interface RuntimeReleaseDependencyInventoryV2 {
   algorithm: 'sha256';
   assurance: 'packaged-build-byte-observation';
   inventoryDigest: string;
   package: {
+    manifestSha256: string;
     name: string;
     version: string;
   };
@@ -69,11 +70,11 @@ export interface RuntimeReleaseDependencyInventoryV1 {
 }
 
 export type BuildRuntimeReleaseDependencyInventoryResult =
-  | { ok: true; inventory: RuntimeReleaseDependencyInventoryV1; canonicalJson: string }
+  | { ok: true; inventory: RuntimeReleaseDependencyInventoryV2; canonicalJson: string }
   | { ok: false; reason: string };
 
 export type ParseRuntimeReleaseDependencyInventoryResult =
-  | { ok: true; inventory: RuntimeReleaseDependencyInventoryV1; canonicalJson: string }
+  | { ok: true; inventory: RuntimeReleaseDependencyInventoryV2; canonicalJson: string }
   | { ok: false; reason: string };
 
 export type ObserveInstalledRuntimeDependenciesResult =
@@ -104,10 +105,6 @@ interface DependencyFileContent {
   path: string;
   sha256: string;
   size: number;
-}
-
-interface InstalledDependencyFileContent extends DependencyFileContent {
-  mode: 'portable-executable' | 'portable-regular';
 }
 
 interface DependencyBinLinkContent {
@@ -183,8 +180,8 @@ function digest(domain: string, value: unknown): string {
 }
 
 function inventoryPayload(
-  inventory: RuntimeReleaseDependencyInventoryV1,
-): Omit<RuntimeReleaseDependencyInventoryV1, 'inventoryDigest'> {
+  inventory: RuntimeReleaseDependencyInventoryV2,
+): Omit<RuntimeReleaseDependencyInventoryV2, 'inventoryDigest'> {
   const { inventoryDigest: _inventoryDigest, ...payload } = inventory;
   return payload;
 }
@@ -195,27 +192,11 @@ function sameSnapshot(left: BigIntStats, right: BigIntStats): boolean {
     left.size === right.size && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
 }
 
-function requireTrustedOwner(stat: BigIntStats, label: string): void {
-  const getuid = process.getuid;
-  if (typeof getuid === 'function') {
-    const currentUid = BigInt(getuid.call(process));
-    if (stat.uid !== 0n && stat.uid !== currentUid) {
-      throw new Error(`${label} has an unsafe owner`);
-    }
-  }
-}
-
 function requireSafePortableMode(stat: BigIntStats, label: string, directory = false): void {
   if ((stat.mode & 0o7000n) !== 0n || (stat.mode & 0o400n) === 0n ||
-    (directory && (stat.mode & 0o100n) === 0n) ||
-    (stat.mode & 0o022n) !== 0n) {
+    (directory && (stat.mode & 0o100n) === 0n)) {
     throw new Error(`${label} has an unsafe mode`);
   }
-  requireTrustedOwner(stat, label);
-}
-
-function portableFileMode(stat: BigIntStats): InstalledDependencyFileContent['mode'] {
-  return (stat.mode & 0o111n) !== 0n ? 'portable-executable' : 'portable-regular';
 }
 
 function stableFileBytes(
@@ -307,7 +288,6 @@ function observeDependencyBinLink(
   }
   const before = lstatSync(path, { bigint: true });
   if (!before.isSymbolicLink()) throw new Error('installed dependency bin link changed before read');
-  requireTrustedOwner(before, 'installed dependency bin link');
   const linkTarget = readlinkSync(path, 'utf8');
   if (!isBoundedText(linkTarget) || isAbsolute(linkTarget) || linkTarget.includes('\0') ||
     linkTarget.includes('\\')) {
@@ -324,7 +304,6 @@ function observeDependencyBinLink(
   }
   requireSafePortableMode(target, 'installed dependency bin link target');
   const after = lstatSync(path, { bigint: true });
-  requireTrustedOwner(after, 'installed dependency bin link');
   if (!sameSnapshot(before, after) || readlinkSync(path, 'utf8') !== linkTarget) {
     throw new Error('installed dependency bin link changed during read');
   }
@@ -373,9 +352,42 @@ function packageIsPortable(packageJson: Record<string, unknown>, files: string[]
     typeof scripts[name] === 'string')) {
     throw new Error(`${label} has an install lifecycle script`);
   }
-  if (packageJson['gypfile'] === true || files.some((path) => path.endsWith('.node'))) {
+  if (packageJson['gypfile'] === true || files.some((path) => path.toLowerCase().endsWith('.node'))) {
     throw new Error(`${label} contains native install variance`);
   }
+}
+
+function rootPackageIsPortable(
+  packageJson: Record<string, unknown>,
+  packagedFiles: readonly string[],
+): void {
+  const declaredFiles = packageJson['files'];
+  const allowedFiles = new Set([
+    'CHANGELOG.md',
+    'bin',
+    'dist',
+    'schema',
+    'scripts/run-verify-command.mjs',
+  ]);
+  const requiredFiles = ['bin', 'dist', 'scripts/run-verify-command.mjs'];
+  if (!Array.isArray(declaredFiles) || declaredFiles.length === 0 ||
+    declaredFiles.some((entry) => typeof entry !== 'string' || !allowedFiles.has(entry)) ||
+    new Set(declaredFiles).size !== declaredFiles.length ||
+    requiredFiles.some((entry) => !declaredFiles.includes(entry))) {
+    throw new Error('release package files declaration is not portable');
+  }
+  packageIsPortable(packageJson, [...packagedFiles], 'release package');
+}
+
+export function assertRuntimeReleaseRootPackagePortability(
+  packageJson: Record<string, unknown>,
+  packagedFiles: readonly string[],
+  inventory: RuntimeReleaseDependencyInventoryV2,
+): void {
+  if (inventory.portability !== 'platform-independent-no-native-or-install-variance') {
+    throw new Error('runtime dependency inventory portability contract is unsupported');
+  }
+  rootPackageIsPortable(packageJson, packagedFiles);
 }
 
 function scanPackageDirectory(
@@ -543,23 +555,24 @@ function partitionPackagedFiles(
 function buildInventory(
   packageRootInput: string,
   options: BuildRuntimeReleaseDependencyInventoryOptions,
-): RuntimeReleaseDependencyInventoryV1 {
+): RuntimeReleaseDependencyInventoryV2 {
   const packageRoot = canonicalRoot(packageRootInput, 'release package root');
-  const packageJson = parseJsonObject(
-    stableFileBytes(join(packageRoot, 'package.json'), 'package.json', MAX_PACKAGE_JSON_BYTES),
+  const packageJsonBytes = stableFileBytes(
+    join(packageRoot, 'package.json'),
     'package.json',
+    MAX_PACKAGE_JSON_BYTES,
   );
+  const packageJson = parseJsonObject(packageJsonBytes, 'package.json');
   const name = packageJson['name'];
   const version = packageJson['version'];
   if (!isBoundedText(name, 256) || !PACKAGE_NAME_RE.test(name) || !isBoundedText(version, 128)) {
     throw new Error('release package identity is invalid');
   }
   const rootDependencies = rootDependencyEntries(packageJson);
-  packageIsPortable(
+  rootPackageIsPortable(
     packageJson,
     (options.packagedFiles ?? [])
       .filter((path) => !path.startsWith('node_modules/')),
-    'release package',
   );
   const lock = parseJsonObject(
     stableFileBytes(join(packageRoot, 'package-lock.json'), 'package-lock.json', MAX_LOCKFILE_BYTES),
@@ -618,10 +631,14 @@ function buildInventory(
   if (packages.length === 0 && rootDependencies.length > 0) {
     throw new Error('runtime dependency inventory is empty');
   }
-  const payload: Omit<RuntimeReleaseDependencyInventoryV1, 'inventoryDigest'> = {
+  const payload: Omit<RuntimeReleaseDependencyInventoryV2, 'inventoryDigest'> = {
     algorithm: 'sha256',
     assurance: 'packaged-build-byte-observation',
-    package: { name, version },
+    package: {
+      manifestSha256: createHash('sha256').update(packageJsonBytes).digest('hex'),
+      name,
+      version,
+    },
     packages,
     portability: 'platform-independent-no-native-or-install-variance',
     rootDependencies,
@@ -646,7 +663,7 @@ export function buildRuntimeReleaseDependencyInventory(
   }
 }
 
-function validateInventory(value: unknown): RuntimeReleaseDependencyInventoryV1 {
+function validateInventory(value: unknown): RuntimeReleaseDependencyInventoryV2 {
   if (!isPlainRecord(value) || !hasExactKeys(value, [
     'algorithm',
     'assurance',
@@ -665,7 +682,10 @@ function validateInventory(value: unknown): RuntimeReleaseDependencyInventoryV1 
     throw new Error('runtime dependency inventory contract is unsupported');
   }
   const packageIdentity = value['package'];
-  if (!isPlainRecord(packageIdentity) || !hasExactKeys(packageIdentity, ['name', 'version']) ||
+  if (!isPlainRecord(packageIdentity) ||
+    !hasExactKeys(packageIdentity, ['manifestSha256', 'name', 'version']) ||
+    typeof packageIdentity['manifestSha256'] !== 'string' ||
+    !SHA256_RE.test(packageIdentity['manifestSha256']) ||
     !isBoundedText(packageIdentity['name'], 256) || !PACKAGE_NAME_RE.test(packageIdentity['name']) ||
     !isBoundedText(packageIdentity['version'], 128)) {
     throw new Error('runtime dependency inventory package identity is invalid');
@@ -723,11 +743,15 @@ function validateInventory(value: unknown): RuntimeReleaseDependencyInventoryV1 
   if (typeof value['inventoryDigest'] !== 'string' || !SHA256_RE.test(value['inventoryDigest'])) {
     throw new Error('runtime dependency inventory digest is invalid');
   }
-  const inventory: RuntimeReleaseDependencyInventoryV1 = {
+  const inventory: RuntimeReleaseDependencyInventoryV2 = {
     algorithm: 'sha256',
     assurance: 'packaged-build-byte-observation',
     inventoryDigest: value['inventoryDigest'],
-    package: { name: packageIdentity['name'], version: packageIdentity['version'] },
+    package: {
+      manifestSha256: packageIdentity['manifestSha256'],
+      name: packageIdentity['name'],
+      version: packageIdentity['version'],
+    },
     packages,
     portability: 'platform-independent-no-native-or-install-variance',
     rootDependencies,
@@ -810,7 +834,7 @@ function observeCompleteDependencyTree(
   const dependencyRoot = canonicalRoot(dependencyRootInput, 'runtime dependency root');
   const rootBefore = lstatSync(dependencyRoot, { bigint: true });
   requireSafePortableMode(rootBefore, 'runtime dependency root', true);
-  const content: Array<InstalledDependencyFileContent | DependencyBinLinkContent> = [];
+  const content: Array<DependencyFileContent | DependencyBinLinkContent> = [];
   let totalBytes = 0;
   let totalFiles = 0;
   const visit = (directory: string, relativeDirectory: string, depth: number): void => {
@@ -859,7 +883,6 @@ function observeCompleteDependencyTree(
       if (totalBytes > MAX_TOTAL_BYTES) throw new Error('installed dependency bytes exceed limit');
       content.push({
         executable: (stat.mode & 0o111n) !== 0n,
-        mode: portableFileMode(stat),
         path: relativePath,
         sha256: createHash('sha256').update(bytes).digest('hex'),
         size: bytes.length,
@@ -908,7 +931,7 @@ function existsDirectory(path: string): boolean {
 export function observeInstalledRuntimeDependencies(options: {
   checkpoint?: DependencyObservationCheckpoint;
   dependencyRoot: string;
-  inventory: RuntimeReleaseDependencyInventoryV1;
+  inventory: RuntimeReleaseDependencyInventoryV2;
   expectedPackageName: string;
   expectedPackageVersion: string;
 }): ObserveInstalledRuntimeDependenciesResult {

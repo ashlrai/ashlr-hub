@@ -103,6 +103,7 @@ jobs:
               test/m466.host-merge-revocation-protocol.test.ts
               test/m467.detached-post-merge-verification.test.ts
               test/m299.web-fleet-control.test.ts
+              test/npm-cli-launch.test.ts
               test/activation-readiness-package.test.ts
               test/activation-readiness-windows.test.ts
           - os: macos-latest

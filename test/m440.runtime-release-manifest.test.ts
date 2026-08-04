@@ -47,6 +47,7 @@ function fixture(): ReleaseFixture {
     version: '3.1.0',
     type: 'module',
     bin: { ashlr: 'bin/ashlr' },
+    files: ['bin', 'dist', 'schema', 'scripts/run-verify-command.mjs'],
     dependencies: { example: '1.0.0' },
     bundledDependencies: ['example'],
   }, null, 2)}\n`);
@@ -67,6 +68,7 @@ function fixture(): ReleaseFixture {
   write(join(packageRoot, 'bin', 'ashlr'), '#!/usr/bin/env node\nimport("../dist/cli/index.js");\n', 0o755);
   write(join(packageRoot, 'dist', 'cli', 'index.js'), 'export const runtime = true;\n');
   write(join(packageRoot, 'dist', 'core', 'worker.js'), 'export const worker = true;\n');
+  write(join(packageRoot, 'schema', 'config.schema.json'), '{"type":"object"}\n');
   const dependencyRoot = join(packageRoot, 'node_modules');
   write(join(dependencyRoot, 'example', 'package.json'), `${JSON.stringify({
     name: 'example',
@@ -193,6 +195,7 @@ describe('unsigned runtime release manifest', () => {
       'dist/core/worker.js',
       RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH,
       'package.json',
+      'schema/config.schema.json',
       'scripts/run-verify-command.mjs',
     ]);
     expect(parseUnsignedRuntimeReleaseManifest(first.canonicalJson)).toEqual({
@@ -445,7 +448,7 @@ describe('unsigned runtime release manifest', () => {
     );
     expect(build(inventoryMismatch)).toEqual({
       ok: false,
-      reason: 'runtime dependency inventory package identity mismatch',
+      reason: 'runtime dependency inventory package manifest mismatch',
     });
   });
 
@@ -648,6 +651,17 @@ describe('unsigned runtime release manifest', () => {
     expect(build(release)).toEqual({
       ok: false,
       reason: 'runtime tree contains a symlink',
+    });
+  });
+
+  it.skipIf(process.platform === 'win32')('rejects a dangling schema symlink instead of skipping it', () => {
+    const release = fixture();
+    rmSync(join(release.packageRoot, 'schema'), { recursive: true });
+    symlinkSync('missing-schema', join(release.packageRoot, 'schema'));
+
+    expect(build(release)).toEqual({
+      ok: false,
+      reason: 'release tree contains an unsafe directory',
     });
   });
 
