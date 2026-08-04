@@ -358,7 +358,7 @@ function assertNpmSnapshotDirectoryIdentity(path, identity) {
   }
 }
 
-function removeExactEmptySnapshotContainer(path, identity) {
+export function removeExactEmptySnapshotContainer(path, identity) {
   const current = lstatSync(path);
   if (!current.isDirectory() || current.isSymbolicLink() ||
     current.dev !== identity.dev || current.ino !== identity.ino || realpathSync(path) !== path) {

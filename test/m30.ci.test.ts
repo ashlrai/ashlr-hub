@@ -98,6 +98,11 @@ describe('M30 CI workflow', () => {
     // A Node-20 entry would be wrong — install.sh rejects it at runtime.
     expect(ciYml).toContain('node_version: "22.15.0"');
     expect(ciYml).toContain("node-version: ${{ matrix.node_version || '22' }}");
+    const explicitVersions = [...ciYml.matchAll(/node_version:\s*["'](\d+)\.(\d+)\.(\d+)["']/g)];
+    expect(explicitVersions.length).toBeGreaterThan(0);
+    for (const [, major, minor] of explicitVersions) {
+      expect(Number(major) > 22 || (Number(major) === 22 && Number(minor) >= 15)).toBe(true);
+    }
     // Confirm Node 20 is NOT in the workflow as a version entry.
     expect(ciYml).not.toMatch(/node-version:\s*["']?20["']?/);
   });
