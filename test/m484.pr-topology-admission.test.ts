@@ -295,6 +295,22 @@ describe('M484 topology graph admission', () => {
     expect(parseSupersedes(body)).toEqual(expected);
   });
 
+  it.each([
+    ['backtick fence', '```markdown\nhidden\n````  \nSupersedes: #170'],
+    ['tilde fence', '~~~markdown\nhidden\n~~~~\t\nSupersedes: #170'],
+  ])('accepts a declaration after a valid longer %s closer', (_label, body) => {
+    expect(parseSupersedes(body)).toEqual([170]);
+  });
+
+  it.each([
+    ['backtick closer with trailing text', '```markdown\n``` trailing text\nSupersedes: #170'],
+    ['backtick closer with trailing comment', '```markdown\n```<!-- still code -->\nSupersedes: #170'],
+    ['tilde closer with trailing text', '~~~markdown\n~~~ trailing text\nSupersedes: #170'],
+    ['tilde closer with trailing comment', '~~~markdown\n~~~<!-- still code -->\nSupersedes: #170'],
+  ])('keeps a hidden declaration fenced after a malformed %s', (_label, body) => {
+    expect(parseSupersedes(body)).toEqual([]);
+  });
+
   it('admits an ordinary default-branch PR when exact comparison proves no containment', () => {
     const independent = pullRequest({ number: 10, headRef: 'independent', baseRef: 'master' });
     const candidate = pullRequest({ number: 20, headRef: 'ordinary', baseRef: 'master' });

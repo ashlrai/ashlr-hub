@@ -210,26 +210,30 @@ function normalizeSnapshot(raw) {
 }
 
 export function parseSupersedes(body) {
-  const visibleBody = String(body ?? '')
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/<!--[\s\S]*$/g, '');
   const visibleLines = [];
   let fence = null;
-  for (const line of visibleBody.split(/\r?\n/)) {
+  for (const line of String(body ?? '').split(/\r?\n/)) {
     const marker = line.match(/^[ \t]{0,3}(`{3,}|~{3,})/);
     if (marker) {
       const character = marker[1][0];
       if (fence === null) {
         fence = { character, length: marker[1].length };
-      } else if (fence.character === character && marker[1].length >= fence.length) {
+      } else if (
+        fence.character === character
+        && marker[1].length >= fence.length
+        && /^[ \t]*$/.test(line.slice(marker[0].length))
+      ) {
         fence = null;
       }
       continue;
     }
     if (fence === null) visibleLines.push(line);
   }
+  const visibleBody = visibleLines.join('\n')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<!--[\s\S]*$/g, '');
   const expression = /^[ \t]{0,3}Supersedes[ \t]*:[ \t]*([^\r\n]*)$/gim;
-  const declarations = [...visibleLines.join('\n').matchAll(expression)];
+  const declarations = [...visibleBody.matchAll(expression)];
   if (declarations.length !== 1) return [];
 
   const value = declarations[0][1].trim();
