@@ -21,6 +21,7 @@ import {
   observeInstalledRuntimeDependencies,
   parseRuntimeReleaseDependencyInventory,
   RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH,
+  type RuntimeReleasePackFileRecord,
 } from '../src/core/daemon/runtime-release-dependency-inventory.js';
 import {
   buildUnsignedRuntimeReleaseManifest,
@@ -35,6 +36,7 @@ interface ContractFixture {
   dependencyRoot: string;
   inventoryPath: string;
   interpreterPath: string;
+  packagedFiles: RuntimeReleasePackFileRecord[];
   packageRoot: string;
 }
 
@@ -87,15 +89,19 @@ function fixture(): ContractFixture {
     name: 'example',
     version: '1.0.0',
     main: 'index.js',
-    files: ['index.js'],
+    bin: { example: 'cli.js' },
+    files: ['index.js', 'cli.js'],
   })}\n`);
   write(join(dependencyRoot, 'example', 'index.js'), 'module.exports = 42;\n');
+  write(join(dependencyRoot, 'example', 'cli.js'), '#!/usr/bin/env node\n');
   write(join(dependencyRoot, 'example', 'CHANGELOG.md'), 'source-only release notes\n');
   const dryRun = runNpm(['pack', '--dry-run', '--ignore-scripts', '--json'], packageRoot);
   if (dryRun.status !== 0) throw new Error(dryRun.stderr);
-  const report = JSON.parse(dryRun.stdout) as Array<{ files: Array<{ path: string }> }>;
-  const packagedFiles = report[0]!.files.map((entry) => entry.path);
-  if (packagedFiles.includes('node_modules/example/CHANGELOG.md')) {
+  const report = JSON.parse(dryRun.stdout) as Array<{
+    files: RuntimeReleasePackFileRecord[];
+  }>;
+  const packagedFiles = report[0]!.files;
+  if (packagedFiles.some((entry) => entry.path === 'node_modules/example/CHANGELOG.md')) {
     throw new Error('fixture dependency CHANGELOG was unexpectedly packaged');
   }
   const inventory = buildRuntimeReleaseDependencyInventory(packageRoot, {
@@ -110,7 +116,7 @@ function fixture(): ContractFixture {
   write(inventoryPath, inventory.canonicalJson);
   const interpreterPath = join(packageRoot, 'fixture-node');
   write(interpreterPath, 'fixture node bytes\n', 0o755);
-  return { dependencyRoot, inventoryPath, interpreterPath, packageRoot };
+  return { dependencyRoot, inventoryPath, interpreterPath, packagedFiles, packageRoot };
 }
 
 function parsedInventory(input: ContractFixture) {
@@ -165,7 +171,7 @@ describe('release artifact contract v1', () => {
     expect(packed.status, packed.stderr).toBe(0);
     const report = JSON.parse(packed.stdout) as Array<{
       filename: string;
-      files: Array<{ path: string }>;
+      files: RuntimeReleasePackFileRecord[];
     }>;
     const paths = report[0]!.files.map((entry) => entry.path);
     expect(paths).toContain(RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH);
@@ -353,14 +359,74 @@ describe('release artifact contract v1', () => {
     const release = fixture();
     expect(buildRuntimeReleaseDependencyInventory(release.packageRoot, {
       packagedFiles: [
-        'node_modules/example/index.js',
-        'node_modules/example/package.json',
-        'node_modules/unowned/index.js',
+        ...release.packagedFiles,
+        { mode: 0o644, path: 'node_modules/unowned/index.js', size: 1 },
       ],
     })).toEqual({
       ok: false,
       reason: 'npm pack contains a runtime dependency outside the lock closure',
     });
+  });
+
+  it('derives portable executable identity from normalized pack modes across host modes and order', () => {
+    const release = fixture();
+    const baseline = parsedInventory(release);
+    const cliRecord = release.packagedFiles.find((entry) =>
+      entry.path === 'node_modules/example/cli.js');
+    expect(cliRecord?.mode).toBe(0o644);
+
+    chmodSync(join(release.dependencyRoot, 'example', 'cli.js'), 0o755);
+    const rebuilt = buildRuntimeReleaseDependencyInventory(release.packageRoot, {
+      packagedFiles: [...release.packagedFiles].reverse(),
+    });
+    expect(rebuilt.ok).toBe(true);
+    if (!rebuilt.ok) return;
+    expect(rebuilt.inventory.inventoryDigest).toBe(baseline.inventoryDigest);
+    expect(rebuilt.inventory.packages[0]?.contentSha256)
+      .toBe(baseline.packages[0]?.contentSha256);
+    expect(rebuilt.inventory.packages[0]?.archiveModeSha256)
+      .toBe(baseline.packages[0]?.archiveModeSha256);
+  });
+
+  it.each([0, 0o600, 0o700, 0o777, 0o100644, -1, 420.5])(
+    'rejects malformed npm pack mode %s before calculating an inventory digest',
+    (mode) => {
+      const release = fixture();
+      const malformed = release.packagedFiles.map((entry, index) =>
+        index === 0 ? { ...entry, mode } : entry);
+      expect(buildRuntimeReleaseDependencyInventory(release.packageRoot, {
+        packagedFiles: malformed,
+      })).toEqual({ ok: false, reason: 'npm pack file report is invalid' });
+    },
+  );
+
+  it('rejects false npm pack sizes and binds normalized archive-mode claims into the digest', () => {
+    const release = fixture();
+    const index = release.packagedFiles.findIndex((entry) =>
+      entry.path === 'node_modules/example/index.js');
+    expect(index).toBeGreaterThanOrEqual(0);
+
+    const wrongSize = release.packagedFiles.map((entry, entryIndex) =>
+      entryIndex === index ? { ...entry, size: entry.size + 1 } : entry);
+    expect(buildRuntimeReleaseDependencyInventory(release.packageRoot, {
+      packagedFiles: wrongSize,
+    })).toEqual({
+      ok: false,
+      reason: 'runtime dependency example npm pack size does not match source bytes',
+    });
+
+    const wrongMode = release.packagedFiles.map((entry, entryIndex) =>
+      entryIndex === index ? { ...entry, mode: 0o755 } : entry);
+    const changedMode = buildRuntimeReleaseDependencyInventory(release.packageRoot, {
+      packagedFiles: wrongMode,
+    });
+    expect(changedMode.ok).toBe(true);
+    if (!changedMode.ok) return;
+    expect(changedMode.inventory.inventoryDigest).not.toBe(parsedInventory(release).inventoryDigest);
+    expect(changedMode.inventory.packages[0]?.contentSha256)
+      .toBe(parsedInventory(release).packages[0]?.contentSha256);
+    expect(changedMode.inventory.packages[0]?.archiveModeSha256)
+      .not.toBe(parsedInventory(release).packages[0]?.archiveModeSha256);
   });
 
   it.skipIf(process.platform === 'win32')('rejects symlinks anywhere in dependency package bytes', () => {

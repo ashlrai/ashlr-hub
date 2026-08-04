@@ -79,7 +79,7 @@ export function buildReleaseDependencyInventory() {
     throw new Error(`release dependency inventory npm pack: ${packed.stderr.trim()}`);
   }
   const report = JSON.parse(packed.stdout);
-  const packagedFiles = report[0]?.files?.map((entry) => entry.path);
+  const packagedFiles = report[0]?.files;
   if (!Array.isArray(packagedFiles)) throw new Error('npm pack file report is missing');
   const built = buildRuntimeReleaseDependencyInventory(repositoryRoot, { packagedFiles });
   if (!built.ok) throw new Error(`release dependency inventory: ${built.reason}`);

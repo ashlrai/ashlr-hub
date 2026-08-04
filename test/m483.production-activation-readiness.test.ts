@@ -76,6 +76,7 @@ function writeInventory(
   root: string,
   packageJson: Record<string, unknown>,
   packages: Array<{
+    archiveModeSha256: string;
     contentSha256: string;
     fileCount: number;
     name: string;
@@ -645,12 +646,15 @@ describe('Production Activation Readiness V1', () => {
     const dependencyManifest = Buffer.from(JSON.stringify({ name: 'dependency', version: '1.0.0' }));
     writeFileSync(join(dependencyRoot, 'package.json'), dependencyManifest);
     const files = [{
-      executable: (lstatSync(join(dependencyRoot, 'package.json')).mode & 0o111) !== 0,
       path: 'package.json',
       sha256: createHash('sha256').update(dependencyManifest).digest('hex'),
       size: dependencyManifest.length,
     }];
     writeInventory(root, packageJson, [{
+      archiveModeSha256: contractDigest(
+        'ashlr:runtime-release-dependency-archive-mode:v1',
+        [{ mode: 0o644, path: 'package.json' }],
+      ),
       contentSha256: contractDigest(
         'ashlr:runtime-release-dependency-package-content:v1',
         files,
