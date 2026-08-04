@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
+  closeSync,
   chmodSync,
   linkSync,
   mkdtempSync,
@@ -13,9 +14,11 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { spawnSync } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
-import { resolveNpmCliLaunch } from '../scripts/build-release-dependency-inventory.mjs';
+import {
+  resolveNpmCliLaunch,
+  runTrustedNpmCli,
+} from '../scripts/build-release-dependency-inventory.mjs';
 import {
   buildRuntimeReleaseDependencyInventory,
   observeInstalledRuntimeDependencies,
@@ -46,12 +49,9 @@ function write(path: string, value: string, mode = 0o644): void {
 }
 
 function runNpm(args: string[], cwd?: string) {
-  const launch = resolveNpmCliLaunch();
-  return spawnSync(launch.command, [launch.npmCliPath, ...args], {
+  return runTrustedNpmCli(args, {
     ...(cwd ? { cwd } : {}),
     encoding: 'utf8',
-    shell: false,
-    stdio: ['ignore', 'pipe', 'pipe'],
   });
 }
 
@@ -141,22 +141,27 @@ afterEach(() => {
 });
 
 describe('release artifact contract v1', () => {
-  it('uses a shell-free Node launch for a strictly validated npm CLI path', () => {
+  it('uses a shell-free Node launch rooted in the active Node toolchain', () => {
     const launch = resolveNpmCliLaunch();
     expect(launch.command).toBe(process.execPath);
     expect(launch.npmCliPath).toBe(realpathSync(process.env['npm_execpath']!));
+    closeSync(launch.npmCli.descriptor);
+    closeSync(launch.packageJson.descriptor);
 
     const maliciousRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-malicious-npm-')));
     tempDirs.push(maliciousRoot);
-    const maliciousCli = join(maliciousRoot, 'bin', 'npm-cli.js');
+    const maliciousCli = join(maliciousRoot, 'npm', 'bin', 'npm-cli.js');
     write(maliciousCli, 'process.exit(0);\n');
-    write(join(maliciousRoot, 'package.json'), '{"name":"not-npm","version":"1.0.0"}\n');
+    write(
+      join(maliciousRoot, 'npm', 'package.json'),
+      '{"name":"npm","version":"10.0.0"}\n',
+    );
     expect(() => resolveNpmCliLaunch({ npm_execpath: maliciousCli }))
-      .toThrow('npm_execpath is not rooted in an npm package');
+      .toThrow('npm_execpath does not match the trusted Node toolchain');
     expect(() => resolveNpmCliLaunch({ npm_execpath: 'npm-cli.js' }))
-      .toThrow('npm_execpath is missing or invalid');
+      .toThrow('npm_execpath does not match the trusted Node toolchain');
     expect(() => resolveNpmCliLaunch({ npm_execpath: `${maliciousCli}\n--eval` }))
-      .toThrow('npm_execpath is missing or invalid');
+      .toThrow('npm_execpath does not match the trusted Node toolchain');
   });
 
   it('packs and installs the inventory plus exact bundled dependency bytes without package-lock', () => {

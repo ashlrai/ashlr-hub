@@ -1,4 +1,6 @@
 import {
+  closeSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   realpathSync,
@@ -8,7 +10,10 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { resolveNpmCliLaunch } from '../scripts/build-release-dependency-inventory.mjs';
+import {
+  resolveNpmCliLaunch,
+  runTrustedNpmCli,
+} from '../scripts/build-release-dependency-inventory.mjs';
 
 const tempDirs: string[] = [];
 
@@ -24,10 +29,11 @@ afterEach(() => {
 });
 
 describe('shell-free npm CLI launch', () => {
-  it('uses the current Node process only after strict npm_execpath validation', () => {
+  it('uses only the npm CLI rooted in the active Node toolchain', () => {
     const launch = resolveNpmCliLaunch();
     expect(launch.command).toBe(process.execPath);
     expect(launch.npmCliPath).toBe(realpathSync(process.env['npm_execpath']!));
+    closeLaunch(launch);
 
     const fixtureRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-npm-cli-')));
     tempDirs.push(fixtureRoot);
@@ -35,14 +41,53 @@ describe('shell-free npm CLI launch', () => {
     write(maliciousCli, 'process.exit(0);\n');
     write(
       join(fixtureRoot, 'npm', 'package.json'),
-      '{"name":"not-npm","version":"1.0.0"}\n',
+      '{"name":"npm","version":"10.0.0"}\n',
     );
 
     expect(() => resolveNpmCliLaunch({ npm_execpath: maliciousCli }))
-      .toThrow('npm package identity is invalid');
+      .toThrow('npm_execpath does not match the trusted Node toolchain');
     expect(() => resolveNpmCliLaunch({ npm_execpath: 'npm-cli.js' }))
-      .toThrow('npm_execpath is missing or invalid');
+      .toThrow('npm_execpath does not match the trusted Node toolchain');
     expect(() => resolveNpmCliLaunch({ npm_execpath: `${maliciousCli}\n--eval` }))
-      .toThrow('npm_execpath is missing or invalid');
+      .toThrow('npm_execpath does not match the trusted Node toolchain');
+  });
+
+  it('rejects replacement after validation without executing the replacement path', () => {
+    const fixtureRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-npm-race-')));
+    tempDirs.push(fixtureRoot);
+    const fakeNode = join(fixtureRoot, 'bin', 'node');
+    const trustedCli = join(fixtureRoot, 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js');
+    const packageJson = join(fixtureRoot, 'lib', 'node_modules', 'npm', 'package.json');
+    const replacementMarker = join(fixtureRoot, 'replacement-ran');
+    write(fakeNode, 'fixture node identity\n');
+    write(trustedCli, "process.stdout.write('validated launcher');\n");
+    write(packageJson, '{"name":"npm","version":"10.0.0"}\n');
+
+    expect(() => runTrustedNpmCli([], {
+      environment: { npm_execpath: trustedCli },
+    }, {
+      command: process.execPath,
+      execPath: fakeNode,
+      platform: 'linux',
+      beforeSpawn: () => {
+        write(
+          trustedCli,
+          `require('node:fs').writeFileSync(${JSON.stringify(replacementMarker)}, 'unsafe');\n`,
+        );
+      },
+    })).toThrow('npm CLI changed during execution');
+    expect(existsSync(replacementMarker)).toBe(false);
   });
 });
+
+function closeLaunch(launch: ReturnType<typeof resolveNpmCliLaunch>): void {
+  const descriptors = [launch.npmCli.descriptor, launch.packageJson.descriptor];
+  for (const descriptor of descriptors) {
+    try {
+      // resolveNpmCliLaunch exposes handles so execution never reopens validated bytes.
+      closeSync(descriptor);
+    } catch {
+      // Already closed by an assertion failure.
+    }
+  }
+}
