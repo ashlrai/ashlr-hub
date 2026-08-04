@@ -1,6 +1,8 @@
 import { homedir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 
+import { buildFleetLaneLocks } from '../src/core/fleet/lane-lock.js';
+import type { Proposal } from '../src/core/types.js';
 import { sanitizePublicJson } from '../src/core/util/public-json.js';
 
 describe('M477 public JSON graph readiness', () => {
@@ -78,5 +80,32 @@ describe('M477 public JSON graph readiness', () => {
     expect(encoded).not.toContain(secret);
     expect(encoded).not.toContain(home);
     expect(encoded).not.toMatch(/"(prompt|diff|stdout|stderr|output|env|files)"/);
+  });
+
+  it('keeps raw persisted lane IDs and ambiguous metadata out of sanitized public snapshots', () => {
+    const secret = ['sk', 'live', 'abcdefghijklmnopqrstuvwxyz'].join('_');
+    const proposal: Proposal = {
+      id: `proposal-${secret}`,
+      repo: `/private/workspace/${secret}`,
+      origin: 'agent',
+      kind: 'patch',
+      title: `Inspect ${secret} under /Volumes/Client Data`,
+      summary: 'public projection fixture',
+      status: 'awaiting-host-merge',
+      createdAt: '2026-07-03T00:00:00.000Z',
+    };
+    const laneLocks = buildFleetLaneLocks({ goals: [], proposals: [proposal], visibleQueueItems: [] });
+    const sanitized = sanitizePublicJson({ laneLocks });
+    const encoded = JSON.stringify(sanitized);
+
+    expect(laneLocks.samples[0]).toMatchObject({
+      lane: expect.stringMatching(/^unknown#proposal:p_[0-9a-f]{16}$/),
+      proposalId: expect.stringMatching(/^p_[0-9a-f]{16}$/),
+      repo: null,
+    });
+    expect(laneLocks.samples[0]).not.toHaveProperty('title');
+    expect(encoded).not.toContain(secret);
+    expect(encoded).not.toContain('Client Data');
+    expect(encoded).not.toContain(`proposal-${secret}`);
   });
 });

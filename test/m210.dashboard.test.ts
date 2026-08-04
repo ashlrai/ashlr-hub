@@ -371,11 +371,9 @@ const FIXTURE_FLEET_STATUS = {
     unverifiedApplied: 0,
     lockedVisibleItems: 1,
     samples: [{
-      lane: 'ashlr-hub#goal:goal-dashboard',
+      lane: 'ashlr-hub#goal:g_0123456789abcdef',
       repo: 'ashlr-hub',
       reason: 'active-goal' as const,
-      goalId: 'goal-dashboard',
-      milestoneId: 'goal-dashboard-m0',
       status: 'in-progress',
       title: 'Ship lane board',
       ageMs: 60_000,
@@ -561,8 +559,13 @@ describe('M210 Panel 1 — Fleet Status: snapshot.daemon', () => {
       active: 1,
       awaitingHostMerge: 1,
       sourceQuality: { sourceState: 'healthy', complete: true },
-      samples: [expect.objectContaining({ repo: 'ashlr-hub', reason: 'active-goal' })],
+      samples: [expect.objectContaining({
+        repo: 'ashlr-hub',
+        reason: 'active-goal',
+      })],
     });
+    expect(snap.fleet?.laneLocks.samples[0]).not.toHaveProperty('goalId');
+    expect(snap.fleet?.laneLocks.samples[0]).not.toHaveProperty('milestoneId');
     expect(snap.fleet?.queue.shared?.nextLeaseExpiryAt).toBe('2026-07-09T16:00:00.000Z');
     expect(snap.fleet?.queue.shared?.oldestExpiredMs).toBe(125_000);
     expect(snap.fleet?.queue.shared?.workedEvents).toBe(7);

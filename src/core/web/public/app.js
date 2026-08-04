@@ -2390,33 +2390,79 @@ function diagnosticResliceDrainMetric(drain) {
 }
 
 function laneLocksMetric(laneLocks) {
-  const state = laneLockDisplayState(laneLocks);
-  if (state === 'missing' || state === 'unknown') return 'unavailable';
-  const observed = state === 'degraded' ? ' observed' : '';
-  return `${laneLocks.active} active${observed} / ${laneLocks.staleInProgress} stale / ${laneLocks.awaitingHostMerge} handoff / ${laneLocks.unverifiedApplied} unverified`;
+  const metrics = laneLockMetricObservations(laneLocks);
+  return [
+    laneLockMetricText(metrics.active, 'active'),
+    laneLockMetricText(metrics.stale, 'stale'),
+    laneLockMetricText(metrics.handoff, 'handoff'),
+    laneLockMetricText(metrics.unverified, 'unverified'),
+  ].join(' / ');
+}
+
+function laneLockSourceState(laneLocks, sourceNames) {
+  const sources = laneLocks?.sourceQuality?.sources;
+  if (!sources || typeof sources !== 'object') return 'unknown';
+  const required = sourceNames.map((name) => sources[name]);
+  if (required.some((source) => !source || typeof source !== 'object')) return 'unknown';
+  if (required.some((source) => source.sourceState === 'missing')) return 'missing';
+  if (required.some((source) => !['healthy', 'degraded'].includes(source.sourceState))) return 'unknown';
+  return required.every((source) => source.sourceState === 'healthy' && source.complete === true)
+    ? 'healthy'
+    : 'degraded';
+}
+
+function laneLockMetricObservation(laneLocks, countName, sourceNames) {
+  const value = laneLocks?.[countName];
+  if (!Number.isSafeInteger(value) || value < 0) return { state: 'unknown', value: null };
+  const state = laneLockSourceState(laneLocks, sourceNames);
+  return { state, value: state === 'missing' || state === 'unknown' ? null : value };
+}
+
+function laneLockMetricObservations(laneLocks) {
+  return {
+    active: laneLockMetricObservation(laneLocks, 'active', ['goals', 'proposals']),
+    stale: laneLockMetricObservation(laneLocks, 'staleInProgress', ['goals', 'proposals']),
+    handoff: laneLockMetricObservation(laneLocks, 'awaitingHostMerge', ['proposals']),
+    unverified: laneLockMetricObservation(laneLocks, 'unverifiedApplied', ['goals', 'proposals']),
+  };
+}
+
+function laneLockMetricText(metric, label) {
+  const suffix = label ? ` ${label}` : '';
+  if (metric.state === 'healthy') return `${metric.value}${suffix}`;
+  if (metric.state === 'degraded') return `>=${metric.value}${suffix} observed`;
+  return label ? `${label} unavailable` : 'unavailable';
+}
+
+function laneLockOccupiedObservation(laneLocks) {
+  const metrics = laneLockMetricObservations(laneLocks);
+  const occupied = [metrics.active, metrics.handoff, metrics.unverified];
+  if (occupied.some((metric) => metric.state === 'missing' || metric.state === 'unknown')) {
+    return { state: 'unavailable', value: null };
+  }
+  return {
+    state: occupied.every((metric) => metric.state === 'healthy') ? 'healthy' : 'degraded',
+    value: occupied.reduce((total, metric) => total + metric.value, 0),
+  };
 }
 
 function laneLockDisplayState(laneLocks) {
   const quality = laneLocks?.sourceQuality;
   if (!laneLocks || !quality) return 'unknown';
-  if (quality.sourceState === 'missing') return 'missing';
   const requiredSourceNames = ['goals', 'proposals', 'queue'];
   if (!quality.sources || typeof quality.sources !== 'object') return 'unknown';
   const sources = requiredSourceNames.map((name) => quality.sources[name]);
   if (sources.some((source) => !source || typeof source !== 'object')) return 'unknown';
-  if (sources.some((source) => source.sourceState === 'missing')) {
-    return 'missing';
-  }
-  const validSourceStates = new Set(['healthy', 'degraded']);
+  const validSourceStates = new Set(['missing', 'healthy', 'degraded']);
   if (!validSourceStates.has(quality.sourceState) || sources.some((source) => !validSourceStates.has(source.sourceState))) {
     return 'unknown';
   }
   const requiredCounts = ['active', 'staleInProgress', 'awaitingHostMerge', 'unverifiedApplied'];
   if (requiredCounts.some((name) => !Number.isSafeInteger(laneLocks[name]) || laneLocks[name] < 0)) return 'unknown';
-  if (quality.complete !== true || sources.some((source) => source.complete !== true)) return 'degraded';
-  return quality.sourceState === 'degraded' || sources.some((source) => source.sourceState === 'degraded')
-    ? 'degraded'
-    : 'healthy';
+  const metrics = Object.values(laneLockMetricObservations(laneLocks));
+  if (metrics.every((metric) => metric.state === 'missing')) return 'missing';
+  if (quality.sourceState !== 'healthy' || quality.complete !== true) return 'degraded';
+  return metrics.every((metric) => metric.state === 'healthy') ? 'healthy' : 'degraded';
 }
 
 function laneLockStateLabel(reason) {
@@ -2431,7 +2477,7 @@ function laneLockStateLabel(reason) {
 
 function laneLockReference(sample) {
   const parts = [];
-  const safeReference = (value) => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$/.test(value)
+  const safeReference = (value) => typeof value === 'string' && /^[gmp]_[0-9a-f]{16}$/.test(value)
     ? value
     : null;
   const goalId = safeReference(sample?.goalId);
@@ -2458,15 +2504,18 @@ function laneBoardReadOnlyAction(laneLocks) {
 
 function laneBoardCompactSummary(laneLocks) {
   const state = laneLockDisplayState(laneLocks);
-  const occupied = state === 'healthy' || state === 'degraded'
-    ? laneLocks.active + laneLocks.awaitingHostMerge + laneLocks.unverifiedApplied
-    : null;
+  const occupied = laneLockOccupiedObservation(laneLocks);
   const verdict = state === 'healthy'
-    ? occupied === 0 ? 'Clear' : 'Occupied'
+    ? occupied.value === 0 ? 'Clear' : 'Occupied'
     : state === 'degraded'
       ? 'Partial'
       : 'Unavailable';
-  return `Lanes ${verdict}${occupied == null ? '' : ` · ${occupied}${state === 'degraded' ? ' observed' : ''}`}`;
+  const count = occupied.state === 'healthy'
+    ? ` · ${occupied.value}`
+    : occupied.state === 'degraded'
+      ? ` · >=${occupied.value} observed`
+      : '';
+  return `Lanes ${verdict}${count}`;
 }
 
 function laneBoardCompactViewport() {
@@ -2492,14 +2541,17 @@ function renderReadinessLaneControl(laneLocks) {
 
 function renderCompactLaneControl(laneLocks) {
   const state = laneLockDisplayState(laneLocks);
-  const occupied = state === 'healthy' || state === 'degraded'
-    ? laneLocks.active + laneLocks.awaitingHostMerge + laneLocks.unverifiedApplied
-    : null;
+  const occupied = laneLockOccupiedObservation(laneLocks);
   const verdict = state === 'healthy'
-    ? occupied === 0 ? 'Clear' : 'Occupied'
+    ? occupied.value === 0 ? 'Clear' : 'Occupied'
     : state === 'degraded'
       ? 'Partial'
       : 'Unavailable';
+  const count = occupied.state === 'healthy'
+    ? ` · ${occupied.value}`
+    : occupied.state === 'degraded'
+      ? ` · >=${occupied.value} observed`
+      : '';
   const action = laneBoardReadOnlyAction(laneLocks);
   return el('div', {
     cls: `ctrl-lane-compact ctrl-lane-compact--${state}`,
@@ -2507,7 +2559,7 @@ function renderCompactLaneControl(laneLocks) {
     'aria-label': 'Autonomy lane status',
   },
   el('span', { cls: 'ctrl-lane-compact__label' }, 'Autonomy lanes'),
-  el('span', { cls: 'ctrl-lane-compact__verdict' }, `${verdict}${occupied == null ? '' : ` · ${occupied}`}`),
+  el('span', { cls: 'ctrl-lane-compact__verdict' }, `${verdict}${count}`),
   el('div', { cls: 'ctrl-lane-compact__action' },
     el('span', {}, action.label),
     el('code', {}, action.shell),
@@ -2520,11 +2572,10 @@ function renderAutonomyLaneBoard(laneLocks, cardClass = '') {
   const state = laneLockDisplayState(laneLocks);
   const displayable = state === 'healthy' || state === 'degraded';
   const samples = displayable && Array.isArray(laneLocks?.samples) ? laneLocks.samples.slice(0, 8) : [];
-  const occupied = displayable
-    ? laneLocks.active + laneLocks.awaitingHostMerge + laneLocks.unverifiedApplied
-    : null;
+  const occupied = laneLockOccupiedObservation(laneLocks);
+  const metrics = laneLockMetricObservations(laneLocks);
   const stateLabel = state === 'healthy'
-    ? occupied === 0 ? 'Clear' : 'Occupied'
+    ? occupied.value === 0 ? 'Clear' : 'Occupied'
     : state === 'degraded'
       ? 'Partial'
       : 'Unavailable';
@@ -2541,9 +2592,11 @@ function renderAutonomyLaneBoard(laneLocks, cardClass = '') {
   body.appendChild(el('div', { cls: 'autonomy-lane-board__head' },
     el('div', { cls: 'autonomy-lane-board__title' },
       cardClass ? null : el('span', { cls: 'autonomy-lane-board__eyebrow' }, 'Autonomy Lanes'),
-      el('span', { cls: 'autonomy-lane-board__count' }, occupied == null
+      el('span', { cls: 'autonomy-lane-board__count' }, occupied.state === 'unavailable'
         ? 'count unavailable'
-        : `${occupied}${state === 'degraded' ? ' observed' : ''}`)
+        : occupied.state === 'degraded'
+          ? `>=${occupied.value} observed`
+          : String(occupied.value))
     ),
     el('span', { cls: `autonomy-lane-board__state autonomy-lane-board__state--${state}` }, stateLabel)
   ));
@@ -2566,10 +2619,10 @@ function renderAutonomyLaneBoard(laneLocks, cardClass = '') {
 
   if (displayable) {
     body.appendChild(el('div', { cls: 'autonomy-lane-board__metrics' },
-      fdRenderLeaseMetric('Active', String(laneLocks.active)),
-      fdRenderLeaseMetric('Stale', String(laneLocks.staleInProgress), laneLocks.staleInProgress > 0 ? 'warn' : null),
-      fdRenderLeaseMetric('Handoff', String(laneLocks.awaitingHostMerge), laneLocks.awaitingHostMerge > 0 ? 'warn' : null),
-      fdRenderLeaseMetric('Unverified', String(laneLocks.unverifiedApplied), laneLocks.unverifiedApplied > 0 ? 'warn' : null)
+      fdRenderLeaseMetric('Active', laneLockMetricText(metrics.active, ''), metrics.active.value > 0 ? 'warn' : null),
+      fdRenderLeaseMetric('Stale', laneLockMetricText(metrics.stale, ''), metrics.stale.value > 0 ? 'warn' : null),
+      fdRenderLeaseMetric('Handoff', laneLockMetricText(metrics.handoff, ''), metrics.handoff.value > 0 ? 'warn' : null),
+      fdRenderLeaseMetric('Unverified', laneLockMetricText(metrics.unverified, ''), metrics.unverified.value > 0 ? 'warn' : null)
     ));
   }
 
@@ -4498,13 +4551,15 @@ function renderControl() {
     heroMetrics.appendChild(controlMetric('Diag Drain', queue.diagnosticResliceDrain.selected ?? 0, drainColor));
   }
   const laneLocksState = laneLockDisplayState(laneLocks);
-  const laneLocksDisplayable = laneLocksState === 'healthy' || laneLocksState === 'degraded';
-  const laneLocksWarn = laneLocksState !== 'healthy' || (laneLocksDisplayable && (
-    laneLocks.staleInProgress > 0 || laneLocks.unverifiedApplied > 0 || laneLocks.awaitingHostMerge > 0
-  ));
+  const laneLocksActive = laneLockMetricObservations(laneLocks).active;
+  const laneLocksWarn = laneLocksState !== 'healthy' || (
+    (laneLocks?.staleInProgress ?? 0) > 0 ||
+    (laneLocks?.unverifiedApplied ?? 0) > 0 ||
+    (laneLocks?.awaitingHostMerge ?? 0) > 0
+  );
   heroMetrics.appendChild(controlMetric(
     'Lane Locks',
-    laneLocksDisplayable ? `${laneLocks.active}${laneLocksState === 'degraded' ? ' observed' : ''}` : 'unavailable',
+    laneLockMetricText(laneLocksActive, ''),
     laneLocksWarn ? '#f97316' : '#38bdf8'
   ));
   if (sharedQueue) {

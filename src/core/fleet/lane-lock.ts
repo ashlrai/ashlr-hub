@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import type { Goal, Proposal, WorkItem } from '../types.js';
 import { proposalCompletesGoalMilestone } from '../goals/completion.js';
@@ -83,7 +84,7 @@ export const MAX_LANE_LOCK_SOURCE_REASONS = 8;
 
 const MAX_LANE_LOCK_TITLE_LENGTH = 120;
 const MAX_LANE_LOCK_REFERENCE_LENGTH = 96;
-const PUBLIC_LANE_REFERENCE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$/;
+const PUBLIC_HANDLE_LENGTH = 16;
 
 const QUOTED_ABSOLUTE_PATH_PATTERN = /(["'])(?:[A-Za-z]:[\\/]|\\\\|\/\/|\/(?!\/))[^"'\r\n]*\1/g;
 const WINDOWS_UNC_PATH_PATTERN = /\\\\(?:[?.]\\)?(?:UNC\\)?[^\\/\s"'<>|?*]+\\[^\\/\s"'<>|?*]+(?:\\[^\\/\s"'<>|?*]+)*/gi;
@@ -97,6 +98,7 @@ const AMBIGUOUS_SPACED_FINAL_COMPONENT_PATTERN = /(?:\b[A-Za-z]:[\\/]|\\\\(?:[?.
 const POSIX_ABSOLUTE_PATH_CANDIDATE_PATTERN = /(?:^|[\s"'([{=,:;])(\/(?!\/)[^\s"'<>|?*]+)/gu;
 const DRIVE_ABSOLUTE_PATH_CANDIDATE_PATTERN = /(?:^|[\s"'([{=,:;])([A-Za-z]:[\\/][^\s"'<>|?*]+)/gu;
 const UNC_ABSOLUTE_PATH_CANDIDATE_PATTERN = /(?:^|[\s"'([{=,:;])(\\\\(?:[?.]\\)?(?:UNC\\)?[^\s"'<>|?*]+)/gu;
+const SECRET_SHAPE_PATTERN = /\bsk_(?:live|test)_[A-Za-z0-9_]{8,}\b/i;
 
 const ACTIVE_GOAL_MILESTONE_STATUSES = new Set(['pending', 'in-progress', 'proposed']);
 
@@ -148,14 +150,32 @@ function scrubAbsolutePathSubstrings(value: string): string {
     .replace(POSIX_ABSOLUTE_PATH_PATTERN, '[PATH]');
 }
 
-function publicReference(value: string | null | undefined): string | undefined {
-  if (typeof value !== 'string' || !PUBLIC_LANE_REFERENCE_PATTERN.test(value)) return undefined;
-  return value;
+function hasUnquotedAbsolutePath(value: string): boolean {
+  const withoutQuotedPaths = value.replace(QUOTED_ABSOLUTE_PATH_PATTERN, '');
+  return [
+    POSIX_ABSOLUTE_PATH_CANDIDATE_PATTERN,
+    DRIVE_ABSOLUTE_PATH_CANDIDATE_PATTERN,
+    UNC_ABSOLUTE_PATH_CANDIDATE_PATTERN,
+    WINDOWS_FORWARD_UNC_PATH_PATTERN,
+  ].some((pattern) => Array.from(withoutQuotedPaths.matchAll(pattern)).length > 0);
+}
+
+function publicHandle(kind: 'goal' | 'proposal', value: string | null | undefined): string | undefined {
+  if (typeof value !== 'string' || value.length === 0) return undefined;
+  const digest = createHash('sha256')
+    .update(`ashlr-lane-lock-v1\0${kind}\0${value}`, 'utf8')
+    .digest('hex')
+    .slice(0, PUBLIC_HANDLE_LENGTH);
+  return `${kind[0]}_${digest}`;
 }
 
 function boundedMetadata(value: string | undefined, limit: number): string | undefined {
   if (!value) return undefined;
-  const printable = Array.from(scrubSecrets(scrubAbsolutePathSubstrings(value)), (character) => {
+  const scrubbedSecrets = scrubSecrets(value);
+  if (scrubbedSecrets !== value || SECRET_SHAPE_PATTERN.test(value) || hasUnquotedAbsolutePath(value)) {
+    return undefined;
+  }
+  const printable = Array.from(scrubAbsolutePathSubstrings(scrubbedSecrets), (character) => {
     const code = character.charCodeAt(0);
     return code <= 31 || code === 127 ? ' ' : character;
   }).join('');
@@ -296,9 +316,9 @@ export function buildFleetLaneLocks(input: BuildFleetLaneLocksInput): FleetLaneL
     activeGoalIds.add(goal.id);
     const milestoneAgeMs = ageMs(safeNowMs, milestone.updatedAt ?? goal.updatedAt ?? goal.createdAt);
     const stale = milestone.status === 'in-progress' && milestoneAgeMs !== null && milestoneAgeMs > staleMs;
-    const publicGoalId = publicReference(goal.id);
-    const publicMilestoneId = publicReference(milestone.id);
-    const publicProposalId = publicReference(milestone.proposalId);
+    const publicGoalId = publicHandle('goal', goal.id);
+    const publicProposalId = publicHandle('proposal', milestone.proposalId);
+    const publicTitle = boundedMetadata(milestone.title, MAX_LANE_LOCK_TITLE_LENGTH);
     if (stale) staleInProgress++;
     pushSample(
       samples,
@@ -307,11 +327,9 @@ export function buildFleetLaneLocks(input: BuildFleetLaneLocksInput): FleetLaneL
         lane: publicLane(goal.project, publicGoalId ? `goal:${publicGoalId}` : 'goal:[REDACTED]'),
         repo: publicRepoName(goal.project),
         reason: stale ? 'stale-in-progress' : 'active-goal',
-        ...(publicGoalId ? { goalId: publicGoalId } : {}),
-        ...(publicMilestoneId ? { milestoneId: publicMilestoneId } : {}),
         ...(publicProposalId ? { proposalId: publicProposalId } : {}),
         status: milestone.status,
-        title: boundedMetadata(milestone.title, MAX_LANE_LOCK_TITLE_LENGTH),
+        ...(publicTitle ? { title: publicTitle } : {}),
         ageMs: milestoneAgeMs,
       },
       sampleLimit,
@@ -323,7 +341,8 @@ export function buildFleetLaneLocks(input: BuildFleetLaneLocksInput): FleetLaneL
 
   for (const proposal of input.proposals) {
     const proposalAgeMs = ageMs(safeNowMs, proposal.decidedAt ?? proposal.createdAt);
-    const publicProposalId = publicReference(proposal.id);
+    const publicProposalId = publicHandle('proposal', proposal.id);
+    const publicTitle = boundedMetadata(proposal.title, MAX_LANE_LOCK_TITLE_LENGTH);
     if (proposal.status === 'awaiting-host-merge') {
       awaitingHostMerge++;
       pushSample(
@@ -335,7 +354,7 @@ export function buildFleetLaneLocks(input: BuildFleetLaneLocksInput): FleetLaneL
           reason: 'awaiting-host-merge',
           ...(publicProposalId ? { proposalId: publicProposalId } : {}),
           status: proposal.status,
-          title: boundedMetadata(proposal.title, MAX_LANE_LOCK_TITLE_LENGTH),
+          ...(publicTitle ? { title: publicTitle } : {}),
           ageMs: proposalAgeMs,
         },
         sampleLimit,
@@ -356,7 +375,7 @@ export function buildFleetLaneLocks(input: BuildFleetLaneLocksInput): FleetLaneL
         reason: 'unverified-applied',
         ...(publicProposalId ? { proposalId: publicProposalId } : {}),
         status: proposal.status,
-        title: boundedMetadata(proposal.title, MAX_LANE_LOCK_TITLE_LENGTH),
+        ...(publicTitle ? { title: publicTitle } : {}),
         ageMs: proposalAgeMs,
       },
       sampleLimit,
