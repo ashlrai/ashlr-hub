@@ -1,14 +1,15 @@
 /** Bounded, mutation-free observations used by production readiness. */
 
-import { lstatSync, readFileSync, realpathSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isProxy } from 'node:util/types';
 
 import { DAEMON_ACTIVATION_TRUST_ROOTS } from './activation-trust-roots.js';
-import { RUNTIME_RELEASE_PACKAGING_EXPECTATION_V1 } from './runtime-release-manifest.js';
+import {
+  observeRuntimeReleasePackagingReadinessV1,
+  RUNTIME_RELEASE_PACKAGING_READINESS_EXPECTATION_V1,
+} from './runtime-release-packaging-readiness.js';
 
-const MAX_PACKAGE_MANIFEST_BYTES = 1024 * 1024;
-const MAX_LOCKFILE_BYTES = 16 * 1024 * 1024;
 const MAX_PROJECTED_CODES = 32;
 const RESIDENT_FINDING_CODES = new Set([
   'trusted-signed-release-evidence-missing',
@@ -77,18 +78,22 @@ export interface ProductionArtifactPackagingObservationV1 {
   complete: boolean;
   state: 'requirements-present' | 'requirements-missing' | 'unavailable';
   packageManifest: 'present' | 'missing' | 'unreadable';
-  lockfileEvidence: 'package-lock' | 'missing' | 'unreadable';
-  installedDependencyTree: 'present-unattested' | 'missing' | 'unreadable';
-  expectation: typeof RUNTIME_RELEASE_PACKAGING_EXPECTATION_V1;
+  dependencyInventory: 'canonical-package-bytes-matched' | 'missing' | 'unreadable' | 'mismatch';
+  installedDependencyTree: 'inventory-matched-unsealed-root' | 'missing' | 'unreadable' | 'mismatch';
+  inventoryDigest: string | null;
+  packageCount: number | null;
+  expectation: typeof RUNTIME_RELEASE_PACKAGING_READINESS_EXPECTATION_V1;
   reasonCode:
     | 'observed'
     | 'artifact-root-unavailable'
     | 'package-manifest-missing'
     | 'package-manifest-unreadable'
-    | 'lockfile-missing'
-    | 'lockfile-unreadable'
+    | 'dependency-inventory-missing'
+    | 'dependency-inventory-unreadable'
+    | 'dependency-inventory-mismatch'
     | 'dependency-tree-missing'
-    | 'dependency-tree-unreadable';
+    | 'dependency-tree-unreadable'
+    | 'dependency-tree-mismatch';
 }
 
 export interface ProductionActivationPolicyObservationV1 {
@@ -130,131 +135,60 @@ export function productionRuntimePackageRoot(): string {
   return resolve(fileURLToPath(new URL('../../../', import.meta.url)));
 }
 
-function safeEntry(path: string, kind: 'file' | 'directory', maxBytes?: number):
-  'present' | 'missing' | 'unreadable' {
-  try {
-    const stat = lstatSync(path, { bigint: true });
-    if (stat.isSymbolicLink()) return 'unreadable';
-    if (kind === 'file' && !stat.isFile()) return 'unreadable';
-    if (kind === 'directory' && !stat.isDirectory()) return 'unreadable';
-    if (realpathSync(path) !== resolve(path)) return 'unreadable';
-    if (maxBytes !== undefined && (stat.size < 0n || stat.size > BigInt(maxBytes))) {
-      return 'unreadable';
-    }
-    return 'present';
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'unreadable';
-  }
-}
-
 /** Observe the actual runtime tree; do not infer npm packing behavior. */
 export function observeProductionArtifactPackagingV1(
   rawPackageRoot: string = productionRuntimePackageRoot(),
 ): ProductionArtifactPackagingObservationV1 {
-  let packageRoot: string;
-  try {
-    packageRoot = realpathSync(resolve(rawPackageRoot));
-    if (safeEntry(packageRoot, 'directory') !== 'present') throw new Error('invalid root');
-  } catch {
-    return {
-      sourceState: 'missing',
-      complete: false,
-      state: 'unavailable',
-      packageManifest: 'missing',
-      lockfileEvidence: 'missing',
-      installedDependencyTree: 'missing',
-      expectation: RUNTIME_RELEASE_PACKAGING_EXPECTATION_V1,
-      reasonCode: 'artifact-root-unavailable',
-    };
-  }
-
-  const packagePath = join(packageRoot, 'package.json');
-  const packageState = safeEntry(packagePath, 'file', MAX_PACKAGE_MANIFEST_BYTES);
-  if (packageState !== 'present') {
-    return {
-      sourceState: packageState === 'missing' ? 'missing' : 'degraded',
-      complete: false,
-      state: packageState === 'missing' ? 'requirements-missing' : 'unavailable',
-      packageManifest: packageState,
-      lockfileEvidence: 'missing',
-      installedDependencyTree: 'missing',
-      expectation: RUNTIME_RELEASE_PACKAGING_EXPECTATION_V1,
-      reasonCode: packageState === 'missing'
-        ? 'package-manifest-missing'
-        : 'package-manifest-unreadable',
-    };
-  }
-  try {
-    const parsed = JSON.parse(readFileSync(packagePath, 'utf8')) as unknown;
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error('invalid package manifest');
-    }
-  } catch {
-    return {
-      sourceState: 'degraded',
-      complete: false,
-      state: 'unavailable',
-      packageManifest: 'unreadable',
-      lockfileEvidence: 'unreadable',
-      installedDependencyTree: 'unreadable',
-      expectation: RUNTIME_RELEASE_PACKAGING_EXPECTATION_V1,
-      reasonCode: 'package-manifest-unreadable',
-    };
-  }
-
-  const lockfileState = safeEntry(
-    join(packageRoot, RUNTIME_RELEASE_PACKAGING_EXPECTATION_V1.lockfilePath),
-    'file',
-    MAX_LOCKFILE_BYTES,
-  );
-  const lockfileEvidence = lockfileState === 'present'
-    ? 'package-lock' as const
-    : lockfileState;
-  const dependencyState = safeEntry(
-    join(packageRoot, RUNTIME_RELEASE_PACKAGING_EXPECTATION_V1.installedDependencyRootPath),
-    'directory',
-  );
-  const installedDependencyTree = dependencyState === 'present'
-    ? 'present-unattested' as const
-    : dependencyState;
-
-  if (lockfileEvidence === 'missing' || dependencyState === 'missing') {
-    return {
-      sourceState: 'missing',
-      complete: false,
-      state: 'requirements-missing',
-      packageManifest: 'present',
-      lockfileEvidence,
-      installedDependencyTree,
-      expectation: RUNTIME_RELEASE_PACKAGING_EXPECTATION_V1,
-      reasonCode: lockfileEvidence === 'missing'
-        ? 'lockfile-missing'
-        : 'dependency-tree-missing',
-    };
-  }
-  if (lockfileEvidence === 'unreadable' || dependencyState === 'unreadable') {
-    return {
-      sourceState: 'degraded',
-      complete: false,
-      state: 'unavailable',
-      packageManifest: 'present',
-      lockfileEvidence,
-      installedDependencyTree,
-      expectation: RUNTIME_RELEASE_PACKAGING_EXPECTATION_V1,
-      reasonCode: lockfileEvidence === 'unreadable'
-        ? 'lockfile-unreadable'
-        : 'dependency-tree-unreadable',
-    };
-  }
-  return {
+  const result = observeRuntimeReleasePackagingReadinessV1(rawPackageRoot);
+  if (result.ok) return {
     sourceState: 'healthy',
     complete: true,
     state: 'requirements-present',
     packageManifest: 'present',
-    lockfileEvidence,
-    installedDependencyTree,
-    expectation: RUNTIME_RELEASE_PACKAGING_EXPECTATION_V1,
+    dependencyInventory: 'canonical-package-bytes-matched',
+    installedDependencyTree: 'inventory-matched-unsealed-root',
+    inventoryDigest: result.inventoryDigest,
+    packageCount: result.packageCount,
+    expectation: RUNTIME_RELEASE_PACKAGING_READINESS_EXPECTATION_V1,
     reasonCode: 'observed',
+  };
+
+  const missing = result.kind === 'missing';
+  const packageManifest = result.subject === 'package-manifest'
+    ? missing ? 'missing' as const : 'unreadable' as const
+    : 'present' as const;
+  const dependencyInventory = result.subject === 'dependency-inventory'
+    ? result.kind
+    : result.subject === 'package-manifest'
+      ? 'missing' as const
+      : 'canonical-package-bytes-matched' as const;
+  const installedDependencyTree = result.subject === 'dependency-tree'
+    ? result.kind
+    : 'missing' as const;
+  const reasonCode = result.subject === 'package-manifest'
+    ? missing ? 'package-manifest-missing' as const : 'package-manifest-unreadable' as const
+    : result.subject === 'dependency-inventory'
+      ? result.kind === 'missing'
+        ? 'dependency-inventory-missing' as const
+        : result.kind === 'mismatch'
+          ? 'dependency-inventory-mismatch' as const
+          : 'dependency-inventory-unreadable' as const
+      : result.kind === 'missing'
+        ? 'dependency-tree-missing' as const
+        : result.kind === 'mismatch'
+          ? 'dependency-tree-mismatch' as const
+          : 'dependency-tree-unreadable' as const;
+  return {
+    sourceState: missing ? 'missing' : 'degraded',
+    complete: false,
+    state: missing ? 'requirements-missing' : 'unavailable',
+    packageManifest,
+    dependencyInventory,
+    installedDependencyTree,
+    inventoryDigest: null,
+    packageCount: null,
+    expectation: RUNTIME_RELEASE_PACKAGING_READINESS_EXPECTATION_V1,
+    reasonCode,
   };
 }
 
@@ -286,7 +220,7 @@ function allowlistedCodes(values: readonly unknown[], allowed: ReadonlySet<strin
 }
 
 function ownDataDescriptors(value: unknown): OwnDescriptorMap | null {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  if (value === null || typeof value !== 'object' || Array.isArray(value) || isProxy(value)) return null;
   try {
     const prototype = Object.getPrototypeOf(value);
     if (prototype !== Object.prototype && prototype !== null) return null;
@@ -306,7 +240,7 @@ function ownDataValue(
 }
 
 function ownDenseArray(value: unknown): unknown[] | null {
-  if (!Array.isArray(value)) return null;
+  if (!Array.isArray(value) || isProxy(value)) return null;
   try {
     const descriptors = Object.getOwnPropertyDescriptors(value) as OwnDescriptorMap;
     const length = descriptors['length']?.value;

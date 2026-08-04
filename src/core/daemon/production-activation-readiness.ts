@@ -5,6 +5,8 @@
  * lifecycle flag remains false regardless of caller-provided evidence.
  */
 
+import { isProxy } from 'node:util/types';
+
 import {
   observeProductionActivationPolicyV1,
   observeProductionArtifactPackagingV1,
@@ -18,15 +20,13 @@ import {
   type ReleaseTipProjectionInputV1,
   type ResidentServiceDiagnosticProjectionInputV1,
 } from './production-activation-observations.js';
-import { verifyRuntimeReleaseEvidenceEnvelope } from './runtime-release-evidence-envelope.js';
-import { evaluateRuntimeReleaseLaunchAdmission } from './runtime-release-launch-admission.js';
-import type { RuntimeReleaseLaunchObservationOptions } from './runtime-release-launch-revalidation.js';
-import { parseUnsignedRuntimeReleaseManifest } from './runtime-release-manifest.js';
+import {
+  observeRuntimeReleaseLaunchReadinessV1,
+  type RuntimeReleaseLaunchReadinessInputV1,
+} from './runtime-release-launch-readiness.js';
 
 export const PRODUCTION_ACTIVATION_READINESS_SCHEMA_VERSION = 1 as const;
 
-const SHA256_RE = /^[a-f0-9]{64}$/;
-const KEY_ID_RE = /^ed25519-sha256:[a-f0-9]{64}$/;
 const LAUNCH_BLOCKER_CODES = new Set([
   'launch-observation-failed',
   'release-manifest-incoherent',
@@ -129,7 +129,7 @@ export interface ProductionActivationReadinessV1 {
 }
 
 export interface InspectProductionActivationReadinessInputV1 {
-  launchObservation?: RuntimeReleaseLaunchObservationOptions;
+  launchObservation?: RuntimeReleaseLaunchReadinessInputV1;
   packageRoot?: string;
   releaseTipObservation?: ReleaseTipProjectionInputV1;
   residentServiceDiagnostic?: ResidentServiceDiagnosticProjectionInputV1;
@@ -148,14 +148,14 @@ const AUTHORITY_FLAGS = Object.freeze({
 });
 
 const BLOCKER_DETAILS: Readonly<Record<ProductionActivationReadinessBlockerCodeV1, string>> = {
-  'artifact-packaging-incompatible': 'The observed runtime tree lacks required lockfile or installed dependency evidence.',
+  'artifact-packaging-incompatible': 'The runtime package lacks canonical dependency inventory or matching installed package bytes.',
   'artifact-packaging-unavailable': 'Runtime artifact packaging evidence is unavailable or incomplete.',
   'release-manifest-unavailable': 'Runtime release manifest evidence is unavailable.',
   'release-manifest-invalid': 'Runtime release manifest evidence is invalid.',
   'release-evidence-unavailable': 'Signed runtime release evidence is unavailable.',
   'release-evidence-invalid': 'Signed runtime release evidence is invalid.',
-  'launch-admission-unavailable': 'Closed launch admission evidence is unavailable.',
-  'launch-admission-blocked': 'Closed launch admission remains observation-only and blocked.',
+  'launch-admission-unavailable': 'Read-only launch readiness evidence is unavailable or incomplete.',
+  'launch-admission-blocked': 'Read-only launch readiness is complete but provides no launch authority.',
   'resident-service-diagnostic-unavailable': 'Resident service diagnostic evidence is unavailable.',
   'resident-service-diagnostic-blocked': 'Resident service diagnostic remains observation-only and blocked.',
   'activation-inspection-unavailable': 'Activation permit inspection is unavailable without loading mutation capability.',
@@ -184,7 +184,7 @@ function unavailableSource(reasonCode: string): SourceObservationV1 {
 }
 
 function ownDataDescriptors(value: unknown): OwnDescriptorMap | null {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  if (value === null || typeof value !== 'object' || Array.isArray(value) || isProxy(value)) return null;
   try {
     const prototype = Object.getPrototypeOf(value);
     if (prototype !== Object.prototype && prototype !== null) return null;
@@ -204,7 +204,7 @@ function ownDataValue(
 }
 
 function copyArgv(value: unknown): string[] | null {
-  if (!Array.isArray(value)) return null;
+  if (!Array.isArray(value) || isProxy(value)) return null;
   try {
     const descriptors = Object.getOwnPropertyDescriptors(value) as OwnDescriptorMap;
     const length = descriptors['length']?.value;
@@ -222,13 +222,14 @@ function copyArgv(value: unknown): string[] | null {
 }
 
 function copyBytes(value: unknown): string | Buffer | null {
+  if (value !== null && typeof value === 'object' && isProxy(value)) return null;
   if (typeof value === 'string') return value;
   return Buffer.isBuffer(value) ? Buffer.from(value) : null;
 }
 
 function isolateLaunchObservation(
   value: unknown,
-): RuntimeReleaseLaunchObservationOptions | null {
+): RuntimeReleaseLaunchReadinessInputV1 | null {
   const descriptors = ownDataDescriptors(value);
   if (!descriptors) return null;
   const rawArgv = ownDataValue(descriptors, 'argv');
@@ -278,12 +279,64 @@ function isolateLaunchObservation(
   };
 }
 
+interface IsolatedReadinessInputV1 {
+  valid: boolean;
+  launchDeclared: boolean;
+  launchObservation: RuntimeReleaseLaunchReadinessInputV1 | null;
+  packageRoot?: string;
+  releaseTipObservation?: ReleaseTipProjectionInputV1;
+  residentServiceDiagnostic?: ResidentServiceDiagnosticProjectionInputV1;
+}
+
+const READINESS_INPUT_KEYS = new Set([
+  'launchObservation',
+  'packageRoot',
+  'releaseTipObservation',
+  'residentServiceDiagnostic',
+]);
+
+function isolateReadinessInput(value: unknown): IsolatedReadinessInputV1 {
+  const descriptors = ownDataDescriptors(value);
+  if (!descriptors || Object.keys(descriptors).some((key) => !READINESS_INPUT_KEYS.has(key))) {
+    return { valid: false, launchDeclared: false, launchObservation: null };
+  }
+  for (const descriptor of Object.values(descriptors)) {
+    if (!descriptor || !Object.hasOwn(descriptor, 'value')) {
+      return { valid: false, launchDeclared: false, launchObservation: null };
+    }
+  }
+  const packageRootValue = ownDataValue(descriptors, 'packageRoot');
+  if (packageRootValue.ok && typeof packageRootValue.value !== 'string') {
+    return { valid: false, launchDeclared: false, launchObservation: null };
+  }
+  const packageRoot = packageRootValue.ok && typeof packageRootValue.value === 'string'
+    ? packageRootValue.value
+    : undefined;
+  const launchValue = ownDataValue(descriptors, 'launchObservation');
+  const launchObservation = launchValue.ok ? isolateLaunchObservation(launchValue.value) : null;
+  const releaseTip = ownDataValue(descriptors, 'releaseTipObservation');
+  const resident = ownDataValue(descriptors, 'residentServiceDiagnostic');
+  return {
+    valid: !launchValue.ok || launchObservation !== null,
+    launchDeclared: launchValue.ok,
+    launchObservation,
+    ...(packageRoot !== undefined ? { packageRoot } : {}),
+    ...(releaseTip.ok
+      ? { releaseTipObservation: releaseTip.value as ReleaseTipProjectionInputV1 }
+      : {}),
+    ...(resident.ok
+      ? { residentServiceDiagnostic: resident.value as ResidentServiceDiagnosticProjectionInputV1 }
+      : {}),
+  };
+}
+
 /** Compose production observations without importing or acquiring mutation capability. */
 export function inspectProductionActivationReadinessV1(
   input: InspectProductionActivationReadinessInputV1 = {},
 ): ProductionActivationReadinessV1 {
+  const isolatedInput = isolateReadinessInput(input);
   const blockers: ProductionActivationReadinessBlockerV1[] = [];
-  const artifactPackaging = observeProductionArtifactPackagingV1(input.packageRoot);
+  const artifactPackaging = observeProductionArtifactPackagingV1(isolatedInput.packageRoot);
   if (artifactPackaging.state !== 'requirements-present') {
     blockers.push(blocker(
       artifactPackaging.state === 'requirements-missing'
@@ -309,10 +362,8 @@ export function inspectProductionActivationReadinessV1(
     blockerCodes: [],
   };
 
-  const launchObservation = input.launchObservation
-    ? isolateLaunchObservation(input.launchObservation)
-    : null;
-  if (input.launchObservation && !launchObservation) {
+  const launchObservation = isolatedInput.launchObservation;
+  if (!isolatedInput.valid || (isolatedInput.launchDeclared && !launchObservation)) {
     releaseManifest = {
       sourceState: 'degraded',
       complete: false,
@@ -335,80 +386,16 @@ export function inspectProductionActivationReadinessV1(
       blockerCodes: [],
     };
   } else if (launchObservation) {
-    try {
-      const parsed = parseUnsignedRuntimeReleaseManifest(launchObservation.manifest);
-      releaseManifest = parsed.ok && SHA256_RE.test(parsed.manifest.manifestDigest)
-        ? {
-          sourceState: 'healthy',
-          complete: true,
-          reasonCode: 'manifest-observed',
-          state: 'observed',
-          manifestDigest: parsed.manifest.manifestDigest,
-        }
-        : {
-          sourceState: 'degraded',
-          complete: false,
-          reasonCode: 'manifest-invalid',
-          state: 'invalid',
-          manifestDigest: null,
-        };
-    } catch {
-      releaseManifest = {
-        sourceState: 'degraded',
-        complete: false,
-        reasonCode: 'manifest-inspection-failed',
-        state: 'invalid',
-        manifestDigest: null,
-      };
-    }
-    try {
-      const verified = verifyRuntimeReleaseEvidenceEnvelope({
-        envelope: launchObservation.envelope,
-        manifest: launchObservation.manifest,
-        trustRoot: launchObservation.trustRoot,
-      });
-      releaseEvidence = verified.ok && KEY_ID_RE.test(verified.keyId)
-        ? {
-          sourceState: 'healthy',
-          complete: true,
-          reasonCode: 'release-evidence-observed',
-          state: 'verified-observation-only',
-          keyId: verified.keyId,
-        }
-        : {
-          sourceState: 'degraded',
-          complete: false,
-          reasonCode: 'release-evidence-invalid',
-          state: 'invalid',
-          keyId: null,
-        };
-    } catch {
-      releaseEvidence = {
-        sourceState: 'degraded',
-        complete: false,
-        reasonCode: 'release-evidence-inspection-failed',
-        state: 'invalid',
-        keyId: null,
-      };
-    }
-    try {
-      const decision = evaluateRuntimeReleaseLaunchAdmission(launchObservation);
-      launchAdmission = {
-        sourceState: 'healthy',
-        complete: true,
-        reasonCode: 'launch-admission-observed',
-        state: 'observed-blocked',
-        blockerCodes: safeCodes(decision.blockers.map(({ code }) => code)),
-      };
-    } catch {
-      launchAdmission = {
-        sourceState: 'degraded',
-        complete: false,
-        reasonCode: 'launch-admission-inspection-failed',
-        state: 'unavailable',
-        blockerCodes: [],
-      };
-    }
+    const observed = observeRuntimeReleaseLaunchReadinessV1(
+      launchObservation,
+      artifactPackaging.complete && artifactPackaging.sourceState === 'healthy',
+    );
+    releaseManifest = observed.releaseManifest;
+    releaseEvidence = observed.releaseEvidence;
+    launchAdmission = {
+      ...observed.launchAdmission,
+      blockerCodes: safeCodes(observed.launchAdmission.blockerCodes),
+    };
   }
 
   if (releaseManifest.state !== 'observed') {
@@ -430,7 +417,9 @@ export function inspectProductionActivationReadinessV1(
     'launch',
   ));
 
-  const residentService = projectResidentServiceDiagnosticV1(input.residentServiceDiagnostic);
+  const residentService = projectResidentServiceDiagnosticV1(
+    isolatedInput.residentServiceDiagnostic,
+  );
   blockers.push(blocker(
     residentService.state === 'observed-blocked'
       ? 'resident-service-diagnostic-blocked'
@@ -446,7 +435,7 @@ export function inspectProductionActivationReadinessV1(
     'activation',
   ));
 
-  const releaseTip = projectReleaseTipObservationV1(input.releaseTipObservation);
+  const releaseTip = projectReleaseTipObservationV1(isolatedInput.releaseTipObservation);
   blockers.push(blocker(
     releaseTip.state === 'observed-untrusted'
       ? 'release-tip-untrusted'
