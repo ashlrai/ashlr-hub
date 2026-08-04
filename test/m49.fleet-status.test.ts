@@ -1927,6 +1927,50 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(JSON.stringify(status.samples)).not.toContain('/private/workspace');
   });
 
+  it.each([
+    ['NaN', Number.NaN, 8],
+    ['positive infinity', Number.POSITIVE_INFINITY, 8],
+    ['negative infinity', Number.NEGATIVE_INFINITY, 8],
+    ['non-number', '12', 8],
+    ['negative', -4, 0],
+    ['fractional', 3.9, 3],
+  ])('normalizes hostile %s lane sample limits', (_label, sampleLimit, expected) => {
+    const proposals = Array.from({ length: 12 }, (_, index): Proposal => ({
+      id: `proposal-hostile-limit-${index}`,
+      repo: '/private/workspace/ashlr-hub',
+      origin: 'agent',
+      kind: 'patch',
+      title: `Proposal ${index}`,
+      summary: 'hostile limit fixture',
+      status: 'awaiting-host-merge',
+      createdAt: '2026-07-03T00:00:00.000Z',
+    }));
+    const status = buildFleetLaneLocks({
+      goals: [],
+      proposals,
+      visibleQueueItems: [],
+      sampleLimit: sampleLimit as number,
+    });
+
+    expect(status.samples).toHaveLength(expected);
+    expect(status.samples.length).toBeLessThanOrEqual(8);
+  });
+
+  it('defaults omitted lane source quality to missing and incomplete', () => {
+    const status = buildFleetLaneLocks({ goals: [], proposals: [], visibleQueueItems: [] });
+
+    expect(status.sourceQuality).toMatchObject({
+      sourceState: 'missing',
+      complete: false,
+      reasons: expect.arrayContaining(['goals-missing', 'proposals-missing', 'queue-missing']),
+      sources: {
+        goals: { sourceState: 'missing', complete: false, reasons: ['goals-missing'] },
+        proposals: { sourceState: 'missing', complete: false, reasons: ['proposals-missing'] },
+        queue: { sourceState: 'missing', complete: false, reasons: ['queue-missing'] },
+      },
+    });
+  });
+
   it('normalizes an incomplete source that claims healthy to degraded', () => {
     const status = buildFleetLaneLocks({
       goals: [],
@@ -1934,6 +1978,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       visibleQueueItems: [],
       sourceQuality: {
         goals: { sourceState: 'healthy', complete: false, reasons: [] },
+        proposals: { sourceState: 'healthy', complete: true, reasons: [] },
+        queue: { sourceState: 'healthy', complete: true, reasons: [] },
       },
     });
 
@@ -2002,6 +2048,34 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(goalEncoded).not.toContain('customer');
     expect(goalEncoded).not.toContain('acme');
     expect(goalEncoded).not.toContain('.env');
+  });
+
+  it('redacts the entire title when an unquoted absolute path has ambiguous spaces', () => {
+    const titles = [
+      'Inspect /Volumes/Client Data/acme/.env before release',
+      String.raw`Inspect C:\Program Files\Client\secret.txt before release`,
+      String.raw`Inspect \\server\share with space\launch.txt before release`,
+      'Inspect /tmp/My File.txt before release',
+      String.raw`Inspect C:\tmp\My File.txt before release`,
+      String.raw`Inspect \\server\share\My File.txt before release`,
+    ];
+    const proposals = titles.map((title, index): Proposal => ({
+      id: `proposal-ambiguous-path-${index}`,
+      repo: '/private/workspace/ashlr-hub',
+      origin: 'agent',
+      kind: 'patch',
+      title,
+      summary: 'ambiguous path fixture',
+      status: 'awaiting-host-merge',
+      createdAt: '2026-07-03T00:00:00.000Z',
+    }));
+
+    const status = buildFleetLaneLocks({ goals: [], proposals, visibleQueueItems: [] });
+
+    expect(status.samples.map((sample) => sample.title)).toEqual([
+      '[PATH]', '[PATH]', '[PATH]', '[PATH]', '[PATH]', '[PATH]',
+    ]);
+    expect(JSON.stringify(status.samples)).not.toMatch(/Client Data|Program Files|share with space|My File/);
   });
 
   it('surfaces missing verify repo names, project kinds, and reasons', async () => {

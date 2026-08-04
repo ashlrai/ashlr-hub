@@ -1952,8 +1952,33 @@ describe('M213 Dashboard SSE — /api/events', () => {
       `${src.slice(displayStateStart, displayStateEnd)}\nreturn laneLockDisplayState;`,
     )() as (laneLocks: Record<string, unknown> | null) => string;
     expect(displayState({ sourceQuality: { sourceState: 'missing', complete: false } })).toBe('missing');
+    expect(displayState({
+      sourceQuality: {
+        sourceState: 'degraded',
+        complete: false,
+        sources: { goals: { sourceState: 'missing', complete: false } },
+      },
+    })).toBe('missing');
     expect(displayState({ sourceQuality: { sourceState: 'healthy', complete: false } })).toBe('degraded');
     expect(displayState({ sourceQuality: { sourceState: 'healthy', complete: true } })).toBe('healthy');
+
+    const compactSummaryStart = src.indexOf('function laneBoardCompactSummary(laneLocks)');
+    const compactSummaryEnd = src.indexOf('function laneBoardCompactViewport()', compactSummaryStart);
+    const compactSummary = new Function(
+      `${src.slice(displayStateStart, displayStateEnd)}\n${src.slice(compactSummaryStart, compactSummaryEnd)}\nreturn laneBoardCompactSummary;`,
+    )() as (laneLocks: Record<string, unknown> | null) => string;
+    expect(compactSummary({
+      active: 0,
+      awaitingHostMerge: 0,
+      unverifiedApplied: 0,
+      sourceQuality: { sourceState: 'missing', complete: false },
+    })).toBe('Lanes Unavailable');
+    expect(compactSummary({
+      active: 2,
+      awaitingHostMerge: 1,
+      unverifiedApplied: 0,
+      sourceQuality: { sourceState: 'degraded', complete: false },
+    })).toBe('Lanes Partial · 3 observed');
 
     const laneRenderStart = src.indexOf('function renderAutonomyLaneBoard');
     const laneRenderEnd = src.indexOf('function autonomyAuthorityState', laneRenderStart);
@@ -1964,6 +1989,7 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(laneActionIndex).toBeGreaterThanOrEqual(0);
     expect(laneMetricsIndex).toBeGreaterThan(laneActionIndex);
     expect(laneRowsIndex).toBeGreaterThan(laneActionIndex);
+    expect(laneRenderSource).toContain("if (laneLocks && state !== 'missing' && state !== 'unknown')");
 
     const readinessIndex = src.indexOf('if (readinessRail) body.appendChild(readinessRail)');
     const dashboardLaneIndex = src.indexOf('body.appendChild(renderAutonomyLaneBoard(fleetSnapshot?.laneLocks))');

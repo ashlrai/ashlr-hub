@@ -2401,7 +2401,12 @@ function laneLocksMetric(laneLocks) {
 function laneLockDisplayState(laneLocks) {
   const quality = laneLocks?.sourceQuality;
   if (!laneLocks || !quality) return 'unknown';
-  if (quality.sourceState === 'missing') return 'missing';
+  const sources = quality.sources && typeof quality.sources === 'object'
+    ? Object.values(quality.sources)
+    : [];
+  if (quality.sourceState === 'missing' || sources.some((source) => source?.sourceState === 'missing')) {
+    return 'missing';
+  }
   if (quality.complete !== true) return 'degraded';
   return quality.sourceState === 'healthy' || quality.sourceState === 'degraded'
     ? quality.sourceState
@@ -2442,9 +2447,9 @@ function laneBoardReadOnlyAction(laneLocks) {
 
 function laneBoardCompactSummary(laneLocks) {
   const state = laneLockDisplayState(laneLocks);
-  const occupied = laneLocks
-    ? (laneLocks.active ?? 0) + (laneLocks.awaitingHostMerge ?? 0) + (laneLocks.unverifiedApplied ?? 0)
-    : null;
+  const occupied = state === 'missing' || state === 'unknown' || !laneLocks
+    ? null
+    : (laneLocks.active ?? 0) + (laneLocks.awaitingHostMerge ?? 0) + (laneLocks.unverifiedApplied ?? 0);
   const verdict = state === 'healthy'
     ? occupied === 0 ? 'Clear' : 'Occupied'
     : state === 'degraded'
@@ -2476,9 +2481,9 @@ function renderReadinessLaneControl(laneLocks) {
 
 function renderCompactLaneControl(laneLocks) {
   const state = laneLockDisplayState(laneLocks);
-  const occupied = laneLocks
-    ? (laneLocks.active ?? 0) + (laneLocks.awaitingHostMerge ?? 0) + (laneLocks.unverifiedApplied ?? 0)
-    : null;
+  const occupied = state === 'missing' || state === 'unknown' || !laneLocks
+    ? null
+    : (laneLocks.active ?? 0) + (laneLocks.awaitingHostMerge ?? 0) + (laneLocks.unverifiedApplied ?? 0);
   const verdict = state === 'healthy'
     ? occupied === 0 ? 'Clear' : 'Occupied'
     : state === 'degraded'
@@ -2503,9 +2508,9 @@ function renderAutonomyLaneBoard(laneLocks, cardClass = '') {
   const quality = laneLocks?.sourceQuality;
   const state = laneLockDisplayState(laneLocks);
   const samples = Array.isArray(laneLocks?.samples) ? laneLocks.samples.slice(0, 8) : [];
-  const occupied = laneLocks
-    ? (laneLocks.active ?? 0) + (laneLocks.awaitingHostMerge ?? 0) + (laneLocks.unverifiedApplied ?? 0)
-    : null;
+  const occupied = state === 'missing' || state === 'unknown' || !laneLocks
+    ? null
+    : (laneLocks.active ?? 0) + (laneLocks.awaitingHostMerge ?? 0) + (laneLocks.unverifiedApplied ?? 0);
   const stateLabel = state === 'healthy'
     ? occupied === 0 ? 'Clear' : 'Occupied'
     : state === 'degraded'
@@ -2547,7 +2552,7 @@ function renderAutonomyLaneBoard(laneLocks, cardClass = '') {
     ));
   }
 
-  if (laneLocks) {
+  if (laneLocks && state !== 'missing' && state !== 'unknown') {
     body.appendChild(el('div', { cls: 'autonomy-lane-board__metrics' },
       fdRenderLeaseMetric('Active', String(laneLocks.active ?? 0)),
       fdRenderLeaseMetric('Stale', String(laneLocks.staleInProgress ?? 0), (laneLocks.staleInProgress ?? 0) > 0 ? 'warn' : null),

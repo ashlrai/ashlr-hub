@@ -89,6 +89,10 @@ const WINDOWS_UNC_PATH_PATTERN = /\\\\(?:[?.]\\)?(?:UNC\\)?[^\\/\s"'<>|?*]+\\[^\
 const WINDOWS_FORWARD_UNC_PATH_PATTERN = /(?<!:)\/\/[^/\s"'<>|?*]+\/[^/\s"'<>|?*]+(?:\/[^/\s"'<>|?*]+)*/g;
 const WINDOWS_DRIVE_PATH_PATTERN = /\b[A-Za-z]:[\\/](?:[^\\/\s"'<>|?*]+[\\/])*[^\\/\s"'<>|?*,;:!)]*/g;
 const POSIX_ABSOLUTE_PATH_PATTERN = /(?<![:/A-Za-z0-9_])\/(?:[A-Za-z0-9._~+@%=-]+\/)*[A-Za-z0-9._~+@%=-]+/g;
+const AMBIGUOUS_SPACED_POSIX_PATH_PATTERN = /(?<![:/A-Za-z0-9_])\/(?:[^/\s"'<>|?*]+\/)*[^/\s"'<>|?*]+[ \t]+[^\s"'<>|?*]*[\\/][^\s"'<>|?*]+/;
+const AMBIGUOUS_SPACED_DRIVE_PATH_PATTERN = /\b[A-Za-z]:[\\/](?:[^\\/\s"'<>|?*]+[\\/])*[^\\/\s"'<>|?*]+[ \t]+[^\s"'<>|?*]*[\\/][^\s"'<>|?*]+/;
+const AMBIGUOUS_SPACED_UNC_PATH_PATTERN = /\\\\(?:[?.]\\)?(?:UNC\\)?[^\\/\s"'<>|?*]+\\[^\\/\s"'<>|?*]+[ \t]+(?:[^\s"'<>|?*]+[ \t]+){0,2}[^\s"'<>|?*]*\\[^\s"'<>|?*]+/i;
+const AMBIGUOUS_SPACED_FINAL_COMPONENT_PATTERN = /(?:\b[A-Za-z]:[\\/]|\\\\(?:[?.]\\)?(?:UNC\\)?|(?<![:/A-Za-z0-9_])\/)(?:[^\\/\s"'<>|?*]+[\\/])*[^\\/\s"'<>|?*]+[ \t]+[^\\/\s"'<>|?*]+\.[A-Za-z0-9]{1,16}(?=$|[\s,;:!?)\]}])/i;
 
 const ACTIVE_GOAL_MILESTONE_STATUSES = new Set(['pending', 'in-progress', 'proposed']);
 
@@ -109,6 +113,15 @@ function repoKey(repo: string | null | undefined): string | null {
 }
 
 function scrubAbsolutePathSubstrings(value: string): string {
+  const withoutQuotedPaths = value.replace(QUOTED_ABSOLUTE_PATH_PATTERN, '[PATH]');
+  if (
+    AMBIGUOUS_SPACED_POSIX_PATH_PATTERN.test(withoutQuotedPaths) ||
+    AMBIGUOUS_SPACED_DRIVE_PATH_PATTERN.test(withoutQuotedPaths) ||
+    AMBIGUOUS_SPACED_UNC_PATH_PATTERN.test(withoutQuotedPaths) ||
+    AMBIGUOUS_SPACED_FINAL_COMPONENT_PATTERN.test(withoutQuotedPaths)
+  ) {
+    return '[PATH]';
+  }
   return value
     .replace(QUOTED_ABSOLUTE_PATH_PATTERN, '[PATH]')
     .replace(WINDOWS_UNC_PATH_PATTERN, '[PATH]')
@@ -146,8 +159,9 @@ function laneKey(repo: string | null, suffix: string): string {
 
 function sourceQualityPart(
   input: FleetLaneLockSourceQualityPart | undefined,
+  missingReason: FleetLaneLockSourceReason,
 ): FleetLaneLockSourceQualityPart {
-  if (!input) return { sourceState: 'healthy', complete: true, reasons: [] };
+  if (!input) return { sourceState: 'missing', complete: false, reasons: [missingReason] };
   return {
     sourceState: input.sourceState === 'healthy' && !input.complete ? 'degraded' : input.sourceState,
     complete: input.complete,
@@ -159,9 +173,9 @@ function buildSourceQuality(
   input: BuildFleetLaneLocksInput['sourceQuality'],
 ): FleetLaneLockSourceQuality {
   const sources = {
-    goals: sourceQualityPart(input?.goals),
-    proposals: sourceQualityPart(input?.proposals),
-    queue: sourceQualityPart(input?.queue),
+    goals: sourceQualityPart(input?.goals, 'goals-missing'),
+    proposals: sourceQualityPart(input?.proposals, 'proposals-missing'),
+    queue: sourceQualityPart(input?.queue, 'queue-missing'),
   };
   const parts = Object.values(sources);
   const sourceState: FleetLaneLockSourceState = parts.some((part) => part.sourceState === 'degraded')
@@ -231,10 +245,11 @@ export function buildFleetLaneLocks(input: BuildFleetLaneLocksInput): FleetLaneL
   const safeNowMs = Number.isNaN(nowMs) ? Date.now() : nowMs;
   const staleMs = input.staleInProgressMs ?? DEFAULT_LANE_LOCK_STALE_IN_PROGRESS_MS;
   const recentAppliedMs = input.recentAppliedMs ?? DEFAULT_LANE_LOCK_RECENT_APPLIED_MS;
-  const sampleLimit = Math.max(
-    0,
-    Math.min(DEFAULT_LANE_LOCK_SAMPLE_LIMIT, input.sampleLimit ?? DEFAULT_LANE_LOCK_SAMPLE_LIMIT),
-  );
+  const requestedSampleLimit = input.sampleLimit;
+  const normalizedSampleLimit = typeof requestedSampleLimit === 'number' && Number.isFinite(requestedSampleLimit)
+    ? Math.max(0, Math.floor(requestedSampleLimit))
+    : DEFAULT_LANE_LOCK_SAMPLE_LIMIT;
+  const sampleLimit = Math.min(DEFAULT_LANE_LOCK_SAMPLE_LIMIT, normalizedSampleLimit);
 
   const samples: FleetLaneLockSample[] = [];
   const seenSamples = new Set<string>();
