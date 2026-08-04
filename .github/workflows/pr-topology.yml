@@ -1,4 +1,6 @@
-name: PR topology admission (shadow)
+name: PR topology observation (non-authoritative)
+
+# Shadow telemetry only. Do not add this context to required status checks.
 
 on:
   pull_request_target:
@@ -21,7 +23,7 @@ concurrency:
 
 jobs:
   topology:
-    name: PR topology admission (shadow)
+    name: PR topology observation (non-authoritative)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -58,5 +60,5 @@ jobs:
           if [[ -f pr-topology.md ]]; then
             cat pr-topology.md >> "$GITHUB_STEP_SUMMARY"
           else
-            printf '%s\n' '# PR Topology Admission V1' '' '**Shadow verdict:** BLOCKED' '' 'The bounded report was unavailable.' >> "$GITHUB_STEP_SUMMARY"
+            printf '%s\n' '# PR Topology Shadow Observation V1' '' '**Shadow verdict:** SHADOW BLOCKED' '' '**Operational authority:** NONE' '' '**Atomic snapshot:** NO' '' 'This bounded observation is non-atomic, non-authoritative, and must never authorize a merge.' '' 'The bounded report was unavailable.' >> "$GITHUB_STEP_SUMMARY"
           fi

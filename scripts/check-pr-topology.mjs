@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 
 /**
- * Read-only PR topology admission.
+ * Read-only PR topology shadow observation.
  *
  * The auditor consumes a bounded GitHub API snapshot or fetches one using GET
- * requests. It never comments, labels, closes, merges, retargets, or deletes.
+ * requests. Sequential REST reads are not an atomic snapshot, so the result has
+ * no operational authority and never authorizes a merge. It never comments,
+ * labels, closes, merges, retargets, or deletes.
  */
 
 import { createHash } from 'node:crypto';
@@ -213,7 +215,21 @@ export function parseSupersedes(body) {
   const visibleLines = [];
   let fence = null;
   for (const line of String(body ?? '').split(/\r?\n/)) {
-    const marker = line.match(/^[ \t]{0,3}(`{3,}|~{3,})/);
+    let indentColumns = 0;
+    let contentIndex = 0;
+    while (contentIndex < line.length) {
+      if (line[contentIndex] === ' ') {
+        indentColumns += 1;
+      } else if (line[contentIndex] === '\t') {
+        indentColumns += 4 - (indentColumns % 4);
+      } else {
+        break;
+      }
+      contentIndex += 1;
+    }
+    const marker = indentColumns <= 3
+      ? line.slice(contentIndex).match(/^(`{3,}|~{3,})/)
+      : null;
     if (marker) {
       const character = marker[1][0];
       if (fence === null) {
@@ -221,13 +237,13 @@ export function parseSupersedes(body) {
       } else if (
         fence.character === character
         && marker[1].length >= fence.length
-        && /^[ \t]*$/.test(line.slice(marker[0].length))
+        && /^[ \t]*$/.test(line.slice(contentIndex + marker[0].length))
       ) {
         fence = null;
       }
       continue;
     }
-    if (fence === null) visibleLines.push(line);
+    if (fence === null && indentColumns <= 3) visibleLines.push(line);
   }
   const visibleBody = visibleLines.join('\n')
     .replace(/<!--[\s\S]*?-->/g, '')
@@ -261,8 +277,10 @@ function comparisonKey(baseSha, headSha) {
 function failureResult(code, message) {
   return {
     schemaVersion: SCHEMA_VERSION,
-    mode: 'shadow',
-    admission: 'blocked',
+    mode: 'shadow-observation',
+    operationalAuthority: false,
+    snapshotAtomic: false,
+    verdict: 'shadow-blocked',
     complete: false,
     repository: null,
     candidate: null,
@@ -555,8 +573,10 @@ export function evaluateTopology(raw) {
   const reportCandidate = candidate ?? triggerCandidate;
   return {
     schemaVersion: SCHEMA_VERSION,
-    mode: 'shadow',
-    admission: complete && !hasErrors ? 'admitted' : 'blocked',
+    mode: 'shadow-observation',
+    operationalAuthority: false,
+    snapshotAtomic: false,
+    verdict: complete && !hasErrors ? 'shadow-clear' : 'shadow-blocked',
     complete,
     repository: {
       fullName: snapshot.repository.fullName,
@@ -612,9 +632,15 @@ function markdownCode(value) {
 
 export function renderMarkdown(report) {
   const lines = [
-    '# PR Topology Admission V1',
+    '# PR Topology Shadow Observation V1',
     '',
-    `**Shadow verdict:** ${report.admission === 'admitted' ? 'ADMITTED' : 'BLOCKED'}`,
+    `**Shadow verdict:** ${report.verdict === 'shadow-clear' ? 'SHADOW CLEAR' : 'SHADOW BLOCKED'}`,
+    '',
+    '**Operational authority:** NONE',
+    '',
+    '**Atomic snapshot:** NO',
+    '',
+    'This bounded observation uses sequential REST reads. It is non-atomic, non-authoritative, and must never authorize a merge.',
     '',
   ];
   if (report.repository) {
@@ -708,7 +734,7 @@ async function githubGet(url, token, fetchImpl) {
       Accept: 'application/vnd.github+json',
       Authorization: `Bearer ${token}`,
       'X-GitHub-Api-Version': '2022-11-28',
-      'User-Agent': 'ashlr-pr-topology-admission-v1',
+      'User-Agent': 'ashlr-pr-topology-shadow-observation-v1',
     },
   });
   if (!response.ok) throw new Error(`GitHub API GET failed with status ${response.status}`);
@@ -1038,7 +1064,7 @@ export async function runCli(argv, env = process.env) {
   if (options['json-out']) await writeFile(resolve(options['json-out']), json, 'utf8');
   if (options['markdown-out']) await writeFile(resolve(options['markdown-out']), markdown, 'utf8');
   process.stdout.write(json);
-  return report.admission === 'admitted' ? 0 : 1;
+  return report.verdict === 'shadow-clear' ? 0 : 1;
 }
 
 const invokedPath = process.argv[1] ? resolve(process.argv[1]) : '';

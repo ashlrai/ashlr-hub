@@ -1,5 +1,5 @@
 /**
- * M484 - read-only PR topology admission V1.
+ * M484 - read-only PR topology shadow observation V1.
  *
  * Fixtures are hermetic. Tests never contact or mutate GitHub.
  */
@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
+import { marked } from 'marked';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -129,7 +130,7 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-describe('M484 topology graph admission', () => {
+describe('M484 topology graph shadow observation', () => {
   it('maps a linear stack to exactly one open parent with exact SHAs', () => {
     const root = pullRequest({ number: 1, headRef: 'feature/root', baseRef: 'master' });
     const child = pullRequest({
@@ -141,7 +142,7 @@ describe('M484 topology graph admission', () => {
 
     const report = evaluateTopology(snapshot({ candidate: 2, pulls: [root, child] }));
 
-    expect(report.admission).toBe('admitted');
+    expect(report.verdict).toBe('shadow-clear');
     expect(report.complete).toBe(true);
     expect(report.diagnostics).not.toContainEqual(
       expect.objectContaining({ code: 'dependent-coverage-incomplete' }),
@@ -176,7 +177,7 @@ describe('M484 topology graph admission', () => {
 
     const report = evaluateTopology(snapshot({ candidate: 3, pulls: [fork, parent, child] }));
 
-    expect(report.admission).toBe('admitted');
+    expect(report.verdict).toBe('shadow-clear');
     expect(report.relations.find((entry: { pullRequest: number }) => entry.pullRequest === 3))
       .toMatchObject({ parentPullRequest: 2, parentHeadSha: parent.head.sha });
   });
@@ -188,7 +189,13 @@ describe('M484 topology graph admission', () => {
 
     const report = evaluateTopology(snapshot({ candidate: 3, pulls: [first, second, child] }));
 
-    expect(report.admission).toBe('blocked');
+    expect(report).toMatchObject({
+      mode: 'shadow-observation',
+      operationalAuthority: false,
+      snapshotAtomic: false,
+      verdict: 'shadow-blocked',
+    });
+    expect(report).not.toHaveProperty('admission');
     expect(report.diagnostics).toContainEqual(expect.objectContaining({ code: 'ambiguous-base' }));
   });
 
@@ -196,7 +203,7 @@ describe('M484 topology graph admission', () => {
     const child = pullRequest({ number: 3, headRef: 'child', baseRef: 'missing-parent' });
     const report = evaluateTopology(snapshot({ candidate: 3, pulls: [child] }));
 
-    expect(report.admission).toBe('blocked');
+    expect(report.verdict).toBe('shadow-blocked');
     expect(report.diagnostics).toContainEqual(expect.objectContaining({ code: 'orphan-base' }));
   });
 
@@ -211,7 +218,7 @@ describe('M484 topology graph admission', () => {
 
     const report = evaluateTopology(snapshot({ candidate: 2, pulls: [parent, child] }));
 
-    expect(report.admission).toBe('blocked');
+    expect(report.verdict).toBe('shadow-blocked');
     expect(report.diagnostics).toContainEqual(expect.objectContaining({
       code: 'stale-parent-head',
       pullRequest: 2,
@@ -240,7 +247,7 @@ describe('M484 topology graph admission', () => {
         dependentCoverageComplete: true,
       }),
     );
-    expect(missing.admission).toBe('blocked');
+    expect(missing.verdict).toBe('shadow-blocked');
     expect(missing.containedRoots).toEqual([
       expect.objectContaining({
         pullRequest: 10,
@@ -260,7 +267,7 @@ describe('M484 topology graph admission', () => {
         dependentCoverageComplete: true,
       }),
     );
-    expect(declared.admission).toBe('admitted');
+    expect(declared.verdict).toBe('shadow-clear');
     expect(declared.supersedes).toMatchObject({ declared: [10], required: [10], missing: [] });
     expect(parseSupersedes(
       '<!--\nSupersedes: #8\n-->\n```text\nSupersedes: #9\n```\nSupersedes: #10',
@@ -288,6 +295,16 @@ describe('M484 topology graph admission', () => {
   });
 
   it.each([
+    ['one leading tab', '\tSupersedes: #170'],
+    ['four leading spaces', '    Supersedes: #170'],
+    ['three spaces then a tab stop', '   \tSupersedes: #170'],
+    ['one space then a tab stop', ' \tSupersedes: #170'],
+  ])('ignores %s because CommonMark parses it as an indented code block', (_label, body) => {
+    expect(marked.lexer(body)).toContainEqual(expect.objectContaining({ type: 'code' }));
+    expect(parseSupersedes(body)).toEqual([]);
+  });
+
+  it.each([
     ['one local reference', 'Supersedes: #170', [170]],
     ['comma-separated local references', 'Supersedes: #170, #198', [170, 198]],
     ['tabs around commas', 'Supersedes:\t#198\t,\t#170', [170, 198]],
@@ -311,7 +328,7 @@ describe('M484 topology graph admission', () => {
     expect(parseSupersedes(body)).toEqual([]);
   });
 
-  it('admits an ordinary default-branch PR when exact comparison proves no containment', () => {
+  it('reports an ordinary default-branch PR clear when comparison finds no containment', () => {
     const independent = pullRequest({ number: 10, headRef: 'independent', baseRef: 'master' });
     const candidate = pullRequest({ number: 20, headRef: 'ordinary', baseRef: 'master' });
     const notContained = {
@@ -332,7 +349,7 @@ describe('M484 topology graph admission', () => {
       }),
     );
 
-    expect(report.admission).toBe('admitted');
+    expect(report.verdict).toBe('shadow-clear');
     expect(report.containedRoots).toEqual([]);
     expect(report.supersedes.required).toEqual([]);
   });
@@ -352,7 +369,7 @@ describe('M484 topology graph admission', () => {
       dependentCoverageComplete: false,
     }));
 
-    expect(report.admission).toBe('blocked');
+    expect(report.verdict).toBe('shadow-blocked');
     expect(report.complete).toBe(false);
     expect(report.diagnostics).toContainEqual({
       severity: 'error',
@@ -371,7 +388,7 @@ describe('M484 topology graph admission', () => {
       dependentCoverageComplete: false,
     }));
 
-    expect(report.admission).toBe('admitted');
+    expect(report.verdict).toBe('shadow-clear');
     expect(report.complete).toBe(true);
     expect(report.diagnostics).not.toContainEqual(
       expect.objectContaining({ code: 'dependent-coverage-incomplete' }),
@@ -393,7 +410,7 @@ describe('M484 topology graph admission', () => {
       dependentCoverageComplete: true,
     }));
 
-    expect(report.admission).toBe('blocked');
+    expect(report.verdict).toBe('shadow-blocked');
     expect(report.complete).toBe(false);
     expect(report.diagnostics).toContainEqual(expect.objectContaining({
       code: 'dependent-comparison-incomplete',
@@ -411,7 +428,7 @@ describe('M484 topology graph admission', () => {
     const incomplete = evaluateTopology(
       snapshot({ candidate: 2, pulls: [root, candidate], complete: false }),
     );
-    expect(incomplete.admission).toBe('blocked');
+    expect(incomplete.verdict).toBe('shadow-blocked');
     expect(incomplete.complete).toBe(false);
     expect(incomplete.diagnostics.map((entry: { code: string }) => entry.code)).toEqual(
       expect.arrayContaining(['incomplete-input', 'comparison-incomplete']),
@@ -424,7 +441,7 @@ describe('M484 topology graph admission', () => {
 
     const report = evaluateTopology(snapshot({ candidate: 1, pulls: [candidate], comparisons }));
 
-    expect(report.admission).toBe('blocked');
+    expect(report.verdict).toBe('shadow-blocked');
     expect(report.complete).toBe(false);
     expect(report.diagnostics).toEqual([
       expect.objectContaining({ code: 'invalid-input', message: expect.stringContaining('comparison bound') }),
@@ -489,7 +506,7 @@ describe('M484 topology graph admission', () => {
     for (const [, init] of fetchImpl.mock.calls) {
       expect(init).toMatchObject({ method: 'GET', redirect: 'error' });
     }
-    expect(evaluateTopology(raw).admission).toBe('admitted');
+    expect(evaluateTopology(raw).verdict).toBe('shadow-clear');
   });
 
   it('fails closed when page boundaries change during the second scan', async () => {
@@ -520,7 +537,7 @@ describe('M484 topology graph admission', () => {
     });
 
     expect(raw).toMatchObject({ complete: false, sourceIssue: 'topology-snapshot-changed' });
-    expect(evaluateTopology(raw).admission).toBe('blocked');
+    expect(evaluateTopology(raw).verdict).toBe('shadow-blocked');
     expect(fetchImpl).toHaveBeenCalledTimes(6);
   });
 
@@ -636,7 +653,7 @@ describe('M484 topology graph admission', () => {
     });
 
     expect(raw).toMatchObject({ complete: false, sourceIssue: 'topology-snapshot-changed' });
-    expect(report.admission).toBe('blocked');
+    expect(report.verdict).toBe('shadow-blocked');
     expect(report.diagnostics).toContainEqual(expect.objectContaining({
       code: 'topology-snapshot-changed',
     }));
@@ -700,7 +717,7 @@ describe('M484 topology graph admission', () => {
     });
   });
 
-  it('admits an unchanged second population snapshot', async () => {
+  it('reports an unchanged second population scan as clear but non-atomic', async () => {
     const root = pullRequest({ number: 1, headRef: 'root', baseRef: 'master' });
     const candidate = pullRequest({
       number: 2,
@@ -716,7 +733,14 @@ describe('M484 topology graph admission', () => {
 
     expect(raw).toMatchObject({ complete: true });
     expect(raw).not.toHaveProperty('sourceIssue');
-    expect(report).toMatchObject({ admission: 'admitted', complete: true });
+    expect(report).toMatchObject({
+      mode: 'shadow-observation',
+      operationalAuthority: false,
+      snapshotAtomic: false,
+      verdict: 'shadow-clear',
+      complete: true,
+    });
+    expect(report).not.toHaveProperty('admission');
     expect(fetchImpl).toHaveBeenCalledTimes(6);
   });
 
@@ -738,7 +762,7 @@ describe('M484 topology graph admission', () => {
     });
 
     expect(raw).toMatchObject({ complete: false, sourceIssue: 'topology-revalidation-incomplete' });
-    expect(report.admission).toBe('blocked');
+    expect(report.verdict).toBe('shadow-blocked');
     expect(report.diagnostics).toContainEqual({
       severity: 'error',
       code: 'topology-revalidation-incomplete',
@@ -777,7 +801,7 @@ describe('M484 topology graph admission', () => {
     const report = evaluateTopology(raw);
 
     expect(raw.dependentCoverageComplete).toBe(true);
-    expect(report.admission).toBe('blocked');
+    expect(report.verdict).toBe('shadow-blocked');
     expect(report.dependentConvergences).toEqual([
       expect.objectContaining({
         pullRequest: 3,
@@ -820,7 +844,7 @@ describe('M484 topology graph admission', () => {
     });
     const report = evaluateTopology(raw);
 
-    expect(report.admission).toBe('blocked');
+    expect(report.verdict).toBe('shadow-blocked');
     expect(report.diagnostics).toContainEqual(expect.objectContaining({
       code: 'stale-parent-head',
       pullRequest: 2,
@@ -907,13 +931,19 @@ describe('M484 topology graph admission', () => {
       { encoding: 'utf8' },
     );
 
-    expect(JSON.parse(readFileSync(jsonOut, 'utf8'))).toMatchObject({
+    const serialized = readFileSync(jsonOut, 'utf8');
+    expect(JSON.parse(serialized)).toMatchObject({
       schemaVersion: 1,
-      mode: 'shadow',
-      admission: 'admitted',
+      mode: 'shadow-observation',
+      operationalAuthority: false,
+      snapshotAtomic: false,
+      verdict: 'shadow-clear',
       candidate: { pullRequest: 1, headSha: candidate.head.sha, baseSha: candidate.base.sha },
     });
-    expect(readFileSync(markdownOut, 'utf8')).toContain('# PR Topology Admission V1');
+    expect(JSON.parse(serialized)).not.toHaveProperty('admission');
+    expect(serialized).not.toMatch(/\badmitted\b/i);
+    expect(readFileSync(markdownOut, 'utf8')).toContain('# PR Topology Shadow Observation V1');
+    expect(readFileSync(markdownOut, 'utf8')).toContain('must never authorize a merge');
   });
 });
 
@@ -924,7 +954,7 @@ describe('M484 shadow workflow policy', () => {
   const steps = job.steps as Array<Record<string, any>>;
 
   it('is an explicitly non-mutating shadow check with least privilege', () => {
-    expect(workflow.name).toBe('PR topology admission (shadow)');
+    expect(workflow.name).toBe('PR topology observation (non-authoritative)');
     expect(workflow.on).toHaveProperty('pull_request_target');
     expect(workflow.on).toHaveProperty('workflow_dispatch');
     expect(workflow.on).not.toHaveProperty('pull_request');
@@ -936,8 +966,9 @@ describe('M484 shadow workflow policy', () => {
       'edited',
       'closed',
     ]);
-    expect(job.name).toBe('PR topology admission (shadow)');
+    expect(job.name).toBe('PR topology observation (non-authoritative)');
     expect(job).not.toHaveProperty('permissions');
+    expect(workflowText).toContain('Do not add this context to required status checks.');
     expect(workflowText).not.toMatch(/\b(comment|label|close|merge|retarget|delete)\b.*\b(pr|pull request)\b/i);
   });
 
