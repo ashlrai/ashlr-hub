@@ -1,4 +1,14 @@
 import { createHash } from 'node:crypto';
+import {
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readSync,
+  realpathSync,
+  type BigIntStats,
+} from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 
 import {
@@ -6,7 +16,13 @@ import {
   parseRuntimeReleaseEvidenceTrustRoot,
   verifyRuntimeReleaseEvidenceEnvelope,
 } from './runtime-release-evidence-envelope.js';
-import { parseUnsignedRuntimeReleaseManifest } from './runtime-release-manifest.js';
+import {
+  parseUnsignedRuntimeReleaseManifest,
+  verifyUnsignedRuntimeReleaseManifest,
+  type UnsignedRuntimeReleaseManifest,
+} from './runtime-release-manifest.js';
+import type { RuntimeReleasePackagingReadinessResultV1 } from
+  './runtime-release-packaging-readiness.js';
 
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const REVISION_RE = /^[a-f0-9]{40}$/;
@@ -16,9 +32,14 @@ const INVOCATION_DOMAIN = 'ashlr:runtime-release-service-invocation:v1';
 const ENVELOPE_CANONICAL_DOMAIN = 'ashlr:runtime-release-launch-envelope-canonical:v1';
 const POLICY_CANONICAL_DOMAIN = 'ashlr:runtime-release-launch-policy-canonical:v1';
 const TRUST_ROOT_CANONICAL_DOMAIN = 'ashlr:runtime-release-launch-trust-root-canonical:v1';
+const ARTIFACT_ROOT_DOMAIN = 'ashlr:runtime-release-artifact-root:v1';
+const INTERPRETER_ROOT_DOMAIN = 'ashlr:runtime-release-interpreter-root:v1';
+const STAGED_TREE_IDENTITY_DOMAIN = 'ashlr:runtime-release-immutable-staged-tree:v1';
 const MAX_ARGUMENTS = 128;
 const MAX_ARGUMENT_BYTES = 64 * 1024;
 const MAX_POLICY_BYTES = 64 * 1024;
+const MAX_INTERPRETER_BYTES = 512 * 1024 * 1024;
+const READ_CHUNK_BYTES = 64 * 1024;
 
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
@@ -127,11 +148,92 @@ function parseCanonicalPolicy(value: string | Buffer): string | null {
   }
 }
 
-function callerBindingsValid(input: RuntimeReleaseLaunchReadinessInputV1): boolean {
+function sameSnapshot(left: BigIntStats, right: BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode &&
+    left.uid === right.uid && left.gid === right.gid && left.nlink === right.nlink &&
+    left.size === right.size && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+}
+
+function trustedOwner(stat: BigIntStats): boolean {
+  const getuid = process.getuid;
+  return typeof getuid !== 'function' || stat.uid === 0n || stat.uid === BigInt(getuid.call(process));
+}
+
+function stableInterpreterContent(path: string): {
+  executable: boolean;
+  mode: 'portable-executable' | 'portable-regular';
+  path: string;
+  sha256: string;
+  size: number;
+} | null {
+  let fd: number | null = null;
   try {
-    if (!isAbsolute(input.packageRoot) || !isAbsolute(input.dependencyRoot) ||
+    const absolute = resolve(path);
+    const before = lstatSync(absolute, { bigint: true });
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n ||
+      before.size < 0n || before.size > BigInt(MAX_INTERPRETER_BYTES) ||
+      (before.mode & 0o022n) !== 0n || !trustedOwner(before) ||
+      realpathSync(absolute) !== absolute) return null;
+    const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+    fd = openSync(absolute, fsConstants.O_RDONLY | noFollow);
+    const openedBefore = fstatSync(fd, { bigint: true });
+    if (!sameSnapshot(before, openedBefore)) return null;
+    const hash = createHash('sha256');
+    const size = Number(openedBefore.size);
+    let offset = 0;
+    while (offset < size) {
+      const length = Math.min(READ_CHUNK_BYTES, size - offset);
+      const chunk = Buffer.allocUnsafe(length);
+      const count = readSync(fd, chunk, 0, length, offset);
+      if (count <= 0) return null;
+      hash.update(count === length ? chunk : chunk.subarray(0, count));
+      offset += count;
+    }
+    const probe = Buffer.allocUnsafe(1);
+    if (readSync(fd, probe, 0, 1, size) !== 0) return null;
+    const openedAfter = fstatSync(fd, { bigint: true });
+    const after = lstatSync(absolute, { bigint: true });
+    if (!sameSnapshot(openedBefore, openedAfter) || !sameSnapshot(openedAfter, after) ||
+      after.nlink !== 1n || (after.mode & 0o022n) !== 0n || !trustedOwner(after) ||
+      realpathSync(absolute) !== absolute) return null;
+    const executable = (after.mode & 0o111n) !== 0n;
+    return {
+      executable,
+      mode: executable ? 'portable-executable' : 'portable-regular',
+      path: absolute,
+      sha256: hash.digest('hex'),
+      size,
+    };
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
+}
+
+function callerBindingsValid(
+  input: RuntimeReleaseLaunchReadinessInputV1,
+  packaging: RuntimeReleasePackagingReadinessResultV1,
+  manifest: UnsignedRuntimeReleaseManifest,
+): boolean {
+  try {
+    if (!packaging.ok || !isAbsolute(input.packageRoot) || !isAbsolute(input.dependencyRoot) ||
       resolve(input.dependencyRoot) !== join(resolve(input.packageRoot), 'node_modules') ||
+      resolve(input.packageRoot) !== packaging.packageRoot ||
+      resolve(input.dependencyRoot) !== packaging.dependencyRoot ||
       !isAbsolute(input.declaredInterpreterPath) || !isAbsolute(input.executablePath) ||
+      input.executablePath !== input.declaredInterpreterPath ||
+      input.argv[0] !== join(packaging.packageRoot, 'bin', 'ashlr') ||
+      typeof input.expectedPackageName !== 'string' ||
+      input.expectedPackageName !== packaging.packageName ||
+      manifest.package.name !== packaging.packageName ||
+      manifest.package.version !== packaging.packageVersion ||
+      manifest.dependencyInventory.inventoryDigest !== packaging.inventoryDigest ||
+      manifest.dependencyInventory.installedDependencyRootSha256 !== packaging.installedTreeSha256 ||
+      manifest.dependencyInventory.packageCount !== packaging.packageCount ||
+      manifest.interpreterDeclaration.declaredPath !== input.declaredInterpreterPath ||
+      manifest.interpreterDeclaration.observedResolvedPath !== resolve(input.declaredInterpreterPath) ||
+      manifest.interpreterDeclaration.claimedVersion !== input.declaredInterpreterVersion ||
       !SHA256_RE.test(input.expectedStagedTreeIdentity) ||
       !SHA256_RE.test(input.expectedEnvelopeCanonicalSha256) ||
       !SHA256_RE.test(input.expectedServiceInvocationDigest) ||
@@ -153,10 +255,43 @@ function callerBindingsValid(input: RuntimeReleaseLaunchReadinessInputV1): boole
     const trustRoot = parseRuntimeReleaseEvidenceTrustRoot(input.trustRoot);
     if (!trustRoot.ok || domainBytesDigest(TRUST_ROOT_CANONICAL_DOMAIN, trustRoot.canonicalJson) !==
       input.expectedTrustRootCanonicalSha256) return false;
-    return domainDigest(INVOCATION_DOMAIN, {
+    if (domainDigest(INVOCATION_DOMAIN, {
       argv: [...input.argv],
       executablePath: input.executablePath,
-    }) === input.expectedServiceInvocationDigest;
+    }) !== input.expectedServiceInvocationDigest) return false;
+
+    const verifiedManifest = verifyUnsignedRuntimeReleaseManifest({
+      declaredInterpreterPath: input.declaredInterpreterPath,
+      declaredInterpreterVersion: input.declaredInterpreterVersion,
+      declaredRollbackTargetDigest: manifest.rollbackDeclaration.targetManifestDigest,
+      dependencyRoot: packaging.dependencyRoot,
+      expectedManifestDigest: input.expectedManifestDigest,
+      expectedPackageName: input.expectedPackageName,
+      expectedRevision: input.expectedRevision,
+      manifest: input.manifest,
+      packageRoot: packaging.packageRoot,
+    });
+    if (!verifiedManifest.ok) return false;
+
+    const interpreter = stableInterpreterContent(input.declaredInterpreterPath);
+    if (!interpreter || interpreter.sha256 !==
+      manifest.interpreterDeclaration.observedArtifactSha256) return false;
+    const artifactRootSha256 = domainDigest(
+      ARTIFACT_ROOT_DOMAIN,
+      manifest.artifacts.map((artifact) => ({
+        ...artifact,
+        mode: artifact.executable ? 'portable-executable' : 'portable-regular',
+      })),
+    );
+    const interpreterRootSha256 = domainDigest(INTERPRETER_ROOT_DOMAIN, interpreter);
+    const observedStagedTreeIdentity = domainDigest(STAGED_TREE_IDENTITY_DOMAIN, {
+      artifactRootSha256,
+      dependencyRootSha256: packaging.installedTreeSha256,
+      expectedRevision: input.expectedRevision,
+      interpreterRootSha256,
+      manifestDigest: manifest.manifestDigest,
+    });
+    return observedStagedTreeIdentity === input.expectedStagedTreeIdentity;
   } catch {
     return false;
   }
@@ -214,7 +349,7 @@ function failed(
  */
 export function observeRuntimeReleaseLaunchReadinessV1(
   input: RuntimeReleaseLaunchReadinessInputV1,
-  packagingObservationComplete: boolean,
+  packaging: RuntimeReleasePackagingReadinessResultV1,
 ): RuntimeReleaseLaunchReadinessObservationV1 {
   let parsed: ReturnType<typeof parseUnsignedRuntimeReleaseManifest>;
   try {
@@ -241,8 +376,7 @@ export function observeRuntimeReleaseLaunchReadinessV1(
     verified.manifestDigest === input.expectedManifestDigest &&
     verified.expectedRevision === input.expectedRevision;
   if (!manifestValid || !evidenceValid || !parsed.ok || !verified.ok ||
-    !callerBindingsValid(input) ||
-    !packagingObservationComplete) {
+    !callerBindingsValid(input, packaging, parsed.manifest)) {
     const result = failed(manifestValid, evidenceValid);
     if (manifestValid) result.releaseManifest.manifestDigest = parsed.ok
       ? parsed.manifest.manifestDigest

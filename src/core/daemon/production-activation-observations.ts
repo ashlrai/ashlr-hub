@@ -8,6 +8,7 @@ import { DAEMON_ACTIVATION_TRUST_ROOTS } from './activation-trust-roots.js';
 import {
   observeRuntimeReleasePackagingReadinessV1,
   RUNTIME_RELEASE_PACKAGING_READINESS_EXPECTATION_V1,
+  type RuntimeReleasePackagingReadinessResultV1,
 } from './runtime-release-packaging-readiness.js';
 
 const MAX_PROJECTED_CODES = 32;
@@ -81,7 +82,10 @@ export interface ProductionArtifactPackagingObservationV1 {
   dependencyInventory: 'canonical-package-bytes-matched' | 'missing' | 'unreadable' | 'mismatch';
   installedDependencyTree: 'inventory-matched-unsealed-root' | 'missing' | 'unreadable' | 'mismatch';
   inventoryDigest: string | null;
+  installedTreeSha256: string | null;
   packageCount: number | null;
+  packageName: string | null;
+  packageVersion: string | null;
   expectation: typeof RUNTIME_RELEASE_PACKAGING_READINESS_EXPECTATION_V1;
   reasonCode:
     | 'observed'
@@ -139,7 +143,14 @@ export function productionRuntimePackageRoot(): string {
 export function observeProductionArtifactPackagingV1(
   rawPackageRoot: string = productionRuntimePackageRoot(),
 ): ProductionArtifactPackagingObservationV1 {
-  const result = observeRuntimeReleasePackagingReadinessV1(rawPackageRoot);
+  return projectProductionArtifactPackagingV1(
+    observeRuntimeReleasePackagingReadinessV1(rawPackageRoot),
+  );
+}
+
+export function projectProductionArtifactPackagingV1(
+  result: RuntimeReleasePackagingReadinessResultV1,
+): ProductionArtifactPackagingObservationV1 {
   if (result.ok) return {
     sourceState: 'healthy',
     complete: true,
@@ -148,7 +159,10 @@ export function observeProductionArtifactPackagingV1(
     dependencyInventory: 'canonical-package-bytes-matched',
     installedDependencyTree: 'inventory-matched-unsealed-root',
     inventoryDigest: result.inventoryDigest,
+    installedTreeSha256: result.installedTreeSha256,
     packageCount: result.packageCount,
+    packageName: result.packageName,
+    packageVersion: result.packageVersion,
     expectation: RUNTIME_RELEASE_PACKAGING_READINESS_EXPECTATION_V1,
     reasonCode: 'observed',
   };
@@ -186,7 +200,10 @@ export function observeProductionArtifactPackagingV1(
     dependencyInventory,
     installedDependencyTree,
     inventoryDigest: null,
+    installedTreeSha256: null,
     packageCount: null,
+    packageName: null,
+    packageVersion: null,
     expectation: RUNTIME_RELEASE_PACKAGING_READINESS_EXPECTATION_V1,
     reasonCode,
   };

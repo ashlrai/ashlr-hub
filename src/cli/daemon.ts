@@ -168,13 +168,22 @@ async function importProductionActivationReadiness(): Promise<
   }
 }
 
+function deepFreezeProductionReadiness<T>(value: T, seen = new Set<object>()): T {
+  if (value === null || typeof value !== 'object' || seen.has(value)) return value;
+  seen.add(value);
+  for (const entry of Object.values(value as Record<string, unknown>)) {
+    deepFreezeProductionReadiness(entry, seen);
+  }
+  return Object.freeze(value);
+}
+
 function unavailableProductionActivationReadiness(): ProductionActivationReadinessV1 {
   const blocker = {
     code: 'production-authority-chain-absent' as const,
     source: 'activation' as const,
     detail: 'production activation readiness inspection is unavailable',
   };
-  return {
+  return deepFreezeProductionReadiness({
     schemaVersion: 1,
     authority: 'observation-only',
     verdict: 'blocked',
@@ -205,7 +214,10 @@ function unavailableProductionActivationReadiness(): ProductionActivationReadine
         dependencyInventory: 'missing',
         installedDependencyTree: 'missing',
         inventoryDigest: null,
+        installedTreeSha256: null,
         packageCount: null,
+        packageName: null,
+        packageVersion: null,
         expectation: {
           schemaVersion: 1,
           packageManifestPath: 'package.json',
@@ -246,7 +258,7 @@ function unavailableProductionActivationReadiness(): ProductionActivationReadine
         reasonCode: 'tip-unavailable',
       },
     },
-  };
+  });
 }
 
 async function importServiceConfig(): Promise<

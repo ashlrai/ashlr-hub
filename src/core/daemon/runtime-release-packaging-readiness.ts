@@ -12,6 +12,11 @@ import {
 } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 
+import {
+  observeInstalledRuntimeDependencies,
+  type RuntimeReleaseDependencyInventoryV1,
+} from './runtime-release-dependency-inventory.js';
+
 export const RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH =
   'dist/release-dependency-inventory.json' as const;
 
@@ -63,8 +68,13 @@ interface DependencyInventoryV1 {
 export type RuntimeReleasePackagingReadinessResultV1 =
   | {
     ok: true;
+    dependencyRoot: string;
     inventoryDigest: string;
+    installedTreeSha256: string;
     packageCount: number;
+    packageName: string;
+    packageRoot: string;
+    packageVersion: string;
   }
   | {
     ok: false;
@@ -572,16 +582,31 @@ export function observeRuntimeReleasePackagingReadinessV1(
       bytes += expected.size;
       if (files > MAX_TOTAL_FILES || bytes > MAX_TOTAL_BYTES) throw new Error('dependency budget exceeded');
     }
+    const installed = observeInstalledRuntimeDependencies({
+      dependencyRoot: dependencyRoot.path,
+      inventory: inventory as unknown as RuntimeReleaseDependencyInventoryV1,
+      expectedPackageName: inventory.package.name,
+      expectedPackageVersion: inventory.package.version,
+    });
+    if (!installed.ok || installed.inventoryDigest !== inventory.inventoryDigest ||
+      installed.packageCount !== inventory.packages.length) {
+      throw new Error('complete dependency tree does not match inventory');
+    }
     assertFileStable(packageManifest);
     assertFileStable(inventoryFile);
     assertDirectoryStable(dependencyRoot.path, dependencyRoot.snapshot);
     assertDirectoryStable(packageRoot.path, packageRoot.snapshot);
+    return {
+      ok: true,
+      dependencyRoot: dependencyRoot.path,
+      inventoryDigest: inventory.inventoryDigest,
+      installedTreeSha256: installed.installedTreeSha256,
+      packageCount: inventory.packages.length,
+      packageName: inventory.package.name,
+      packageRoot: packageRoot.path,
+      packageVersion: inventory.package.version,
+    };
   } catch (error) {
     return { ok: false, kind: classifyMissing(error) ? 'missing' : 'mismatch', subject: 'dependency-tree' };
   }
-  return {
-    ok: true,
-    inventoryDigest: inventory.inventoryDigest,
-    packageCount: inventory.packages.length,
-  };
 }

@@ -9,7 +9,8 @@ import { isProxy } from 'node:util/types';
 
 import {
   observeProductionActivationPolicyV1,
-  observeProductionArtifactPackagingV1,
+  productionRuntimePackageRoot,
+  projectProductionArtifactPackagingV1,
   projectReleaseTipObservationV1,
   projectResidentServiceDiagnosticV1,
   type ProductionActivationPolicyObservationV1,
@@ -24,6 +25,8 @@ import {
   observeRuntimeReleaseLaunchReadinessV1,
   type RuntimeReleaseLaunchReadinessInputV1,
 } from './runtime-release-launch-readiness.js';
+import { observeRuntimeReleasePackagingReadinessV1 } from
+  './runtime-release-packaging-readiness.js';
 
 export const PRODUCTION_ACTIVATION_READINESS_SCHEMA_VERSION = 1 as const;
 
@@ -183,6 +186,15 @@ function unavailableSource(reasonCode: string): SourceObservationV1 {
   return { sourceState: 'missing', complete: false, reasonCode };
 }
 
+function deepFreeze<T>(value: T, seen = new Set<object>()): T {
+  if (value === null || typeof value !== 'object' || seen.has(value)) return value;
+  seen.add(value);
+  for (const entry of Object.values(value as Record<string, unknown>)) {
+    deepFreeze(entry, seen);
+  }
+  return Object.freeze(value);
+}
+
 function ownDataDescriptors(value: unknown): OwnDescriptorMap | null {
   if (value === null || typeof value !== 'object' || Array.isArray(value) || isProxy(value)) return null;
   try {
@@ -336,7 +348,10 @@ export function inspectProductionActivationReadinessV1(
 ): ProductionActivationReadinessV1 {
   const isolatedInput = isolateReadinessInput(input);
   const blockers: ProductionActivationReadinessBlockerV1[] = [];
-  const artifactPackaging = observeProductionArtifactPackagingV1(isolatedInput.packageRoot);
+  const packagingResult = observeRuntimeReleasePackagingReadinessV1(
+    isolatedInput.packageRoot ?? productionRuntimePackageRoot(),
+  );
+  const artifactPackaging = projectProductionArtifactPackagingV1(packagingResult);
   if (artifactPackaging.state !== 'requirements-present') {
     blockers.push(blocker(
       artifactPackaging.state === 'requirements-missing'
@@ -388,7 +403,7 @@ export function inspectProductionActivationReadinessV1(
   } else if (launchObservation) {
     const observed = observeRuntimeReleaseLaunchReadinessV1(
       launchObservation,
-      artifactPackaging.complete && artifactPackaging.sourceState === 'healthy',
+      packagingResult,
     );
     releaseManifest = observed.releaseManifest;
     releaseEvidence = observed.releaseEvidence;
@@ -457,7 +472,7 @@ export function inspectProductionActivationReadinessV1(
     .filter(([, observation]) => !observation.complete || observation.sourceState !== 'healthy')
     .map(([name]) => name);
 
-  return {
+  return deepFreeze({
     schemaVersion: PRODUCTION_ACTIVATION_READINESS_SCHEMA_VERSION,
     authority: 'observation-only',
     verdict: 'blocked',
@@ -478,7 +493,7 @@ export function inspectProductionActivationReadinessV1(
       activationPermit,
       releaseTip,
     },
-  };
+  });
 }
 
 export type {

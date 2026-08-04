@@ -1,9 +1,11 @@
 import {
+  chmodSync,
   lstatSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -19,11 +21,13 @@ const releaseMocks = vi.hoisted(() => ({
   parseManifest: vi.fn(),
   parseTrustRoot: vi.fn(),
   verifyEvidence: vi.fn(),
+  verifyManifest: vi.fn(),
 }));
 
 vi.mock('../src/core/daemon/runtime-release-manifest.js', async (importOriginal) => ({
   ...await importOriginal<typeof import('../src/core/daemon/runtime-release-manifest.js')>(),
   parseUnsignedRuntimeReleaseManifest: releaseMocks.parseManifest,
+  verifyUnsignedRuntimeReleaseManifest: releaseMocks.verifyManifest,
 }));
 vi.mock('../src/core/daemon/runtime-release-evidence-envelope.js', () => ({
   parseRuntimeReleaseEvidenceEnvelope: releaseMocks.parseEnvelope,
@@ -102,7 +106,7 @@ function writeInventory(
 }
 
 function packageFixture(options: { inventory?: boolean; dependencies?: boolean } = {}): string {
-  const root = mkdtempSync(join(tmpdir(), 'ashlr-production-readiness-'));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-production-readiness-')));
   roots.push(root);
   const packageJson = { name: '@ashlr/hub', version: '3.1.0' };
   writeFileSync(join(root, 'package.json'), JSON.stringify(packageJson));
@@ -111,24 +115,79 @@ function packageFixture(options: { inventory?: boolean; dependencies?: boolean }
   return root;
 }
 
-function launchInput(): RuntimeReleaseLaunchReadinessInputV1 {
-  const argv = ['/release/bin/ashlr', 'daemon', 'start'];
+let currentManifest: UnsignedRuntimeReleaseManifest;
+
+function launchInput(root: string = roots.at(-1) ?? packageFixture()): RuntimeReleaseLaunchReadinessInputV1 {
+  const interpreterPath = join(root, 'fixture-node');
+  const interpreterBytes = Buffer.from('fixture interpreter bytes\n');
+  writeFileSync(interpreterPath, interpreterBytes, { mode: 0o755 });
+  const packaging = observeProductionArtifactPackagingV1(root);
+  if (!packaging.inventoryDigest || !packaging.installedTreeSha256 ||
+    !packaging.packageName || !packaging.packageVersion || packaging.packageCount === null) {
+    throw new Error('launch fixture packaging is incomplete');
+  }
+  const artifacts: UnsignedRuntimeReleaseManifest['artifacts'] = [];
+  const artifactRootSha256 = contractDigest(
+    'ashlr:runtime-release-artifact-root:v1',
+    artifacts,
+  );
+  const interpreterContent = {
+    executable: true,
+    mode: 'portable-executable',
+    path: interpreterPath,
+    sha256: createHash('sha256').update(interpreterBytes).digest('hex'),
+    size: interpreterBytes.length,
+  };
+  const interpreterRootSha256 = contractDigest(
+    'ashlr:runtime-release-interpreter-root:v1',
+    interpreterContent,
+  );
+  const expectedStagedTreeIdentity = contractDigest(
+    'ashlr:runtime-release-immutable-staged-tree:v1',
+    {
+      artifactRootSha256,
+      dependencyRootSha256: packaging.installedTreeSha256,
+      expectedRevision: REVISION,
+      interpreterRootSha256,
+      manifestDigest: MANIFEST_DIGEST,
+    },
+  );
+  currentManifest = {
+    artifacts,
+    dependencyInventory: {
+      installedDependencyRootSha256: packaging.installedTreeSha256,
+      inventoryDigest: packaging.inventoryDigest,
+      packageCount: packaging.packageCount,
+    },
+    expectedRevision: REVISION,
+    interpreterDeclaration: {
+      claimedVersion: 'v22.0.0',
+      declaredPath: interpreterPath,
+      observedArtifactSha256: interpreterContent.sha256,
+      observedResolvedPath: interpreterPath,
+    },
+    manifestDigest: MANIFEST_DIGEST,
+    package: { name: packaging.packageName, version: packaging.packageVersion },
+    rollbackDeclaration: { targetManifestDigest: null },
+  } as UnsignedRuntimeReleaseManifest;
+  const argv = [join(root, 'bin/ashlr'), 'daemon', 'start'];
   const envelope = Buffer.from('{}\n');
   const policy = Buffer.from('{}\n');
   const trustRoot = Buffer.from('{}\n');
   return {
     argv,
-    declaredInterpreterPath: '/release/node',
+    declaredInterpreterPath: interpreterPath,
     declaredInterpreterVersion: 'v22.0.0',
-    dependencyRoot: '/release/node_modules',
+    dependencyRoot: join(root, 'node_modules'),
     envelope,
-    executablePath: '/release/node',
+    executablePath: interpreterPath,
     expectedEnvelopeCanonicalSha256: bytesDigest(
       'ashlr:runtime-release-launch-envelope-canonical:v1',
       envelope,
     ),
     expectedKeyId: KEY_ID,
     expectedManifestDigest: MANIFEST_DIGEST,
+    expectedPackageName: '@ashlr/hub',
     expectedPolicyId: `sha256:${bytesDigest(
       'ashlr:runtime-release-launch-policy-canonical:v1',
       policy,
@@ -136,25 +195,18 @@ function launchInput(): RuntimeReleaseLaunchReadinessInputV1 {
     expectedRevision: REVISION,
     expectedServiceInvocationDigest: contractDigest(
       'ashlr:runtime-release-service-invocation:v1',
-      { argv, executablePath: '/release/node' },
+      { argv, executablePath: interpreterPath },
     ),
-    expectedStagedTreeIdentity: '1'.repeat(64),
+    expectedStagedTreeIdentity,
     expectedTrustRootCanonicalSha256: bytesDigest(
       'ashlr:runtime-release-launch-trust-root-canonical:v1',
       trustRoot,
     ),
     manifest: Buffer.from('manifest'),
-    packageRoot: '/release',
+    packageRoot: root,
     policy,
     trustRoot,
   };
-}
-
-function manifest(): UnsignedRuntimeReleaseManifest {
-  return {
-    manifestDigest: MANIFEST_DIGEST,
-    expectedRevision: REVISION,
-  } as UnsignedRuntimeReleaseManifest;
 }
 
 function healthyResident(findings: Array<{ code: unknown; detail?: unknown }> = []) {
@@ -167,7 +219,11 @@ function healthyTip(stopReasons: unknown[] = []) {
 
 beforeEach(() => {
   releaseMocks.parseEnvelope.mockReturnValue({ ok: true, canonicalJson: '{}\n' });
-  releaseMocks.parseManifest.mockReturnValue({ ok: true, manifest: manifest(), canonicalJson: '{}\n' });
+  releaseMocks.parseManifest.mockImplementation(() => ({
+    ok: true,
+    manifest: currentManifest,
+    canonicalJson: '{}\n',
+  }));
   releaseMocks.parseTrustRoot.mockReturnValue({ ok: true, canonicalJson: '{}\n' });
   releaseMocks.verifyEvidence.mockReturnValue({
     ok: true,
@@ -179,6 +235,11 @@ beforeEach(() => {
     expectedRevision: REVISION,
     rollbackTargetManifestDigest: null,
     verifiedAtMs: 1,
+  });
+  releaseMocks.verifyManifest.mockReturnValue({
+    ok: true,
+    assurance: 'unsigned-observation-only',
+    manifestDigest: MANIFEST_DIGEST,
   });
 });
 
@@ -199,7 +260,10 @@ describe('Production Activation Readiness V1', () => {
       dependencyInventory: 'canonical-package-bytes-matched',
       installedDependencyTree: 'inventory-matched-unsealed-root',
       inventoryDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      installedTreeSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
       packageCount: 0,
+      packageName: '@ashlr/hub',
+      packageVersion: '3.1.0',
       expectation: {
         schemaVersion: 1,
         packageManifestPath: 'package.json',
@@ -568,6 +632,131 @@ describe('Production Activation Readiness V1', () => {
       installedDependencyTree: 'mismatch',
       reasonCode: 'dependency-tree-mismatch',
     });
+  });
+
+  it.each([
+    'package-root',
+    'inventory-digest',
+    'installed-tree',
+    'staged-tree',
+    'interpreter-declaration',
+    'package-name',
+  ] as const)('blocks a mixed release binding: %s', (mutation) => {
+    const root = packageFixture();
+    const launchObservation = launchInput(root);
+    if (mutation === 'package-root') {
+      launchObservation.packageRoot = packageFixture();
+    } else if (mutation === 'inventory-digest') {
+      currentManifest.dependencyInventory.inventoryDigest = '8'.repeat(64);
+    } else if (mutation === 'installed-tree') {
+      currentManifest.dependencyInventory.installedDependencyRootSha256 = '7'.repeat(64);
+    } else if (mutation === 'staged-tree') {
+      launchObservation.expectedStagedTreeIdentity = '6'.repeat(64);
+    } else if (mutation === 'interpreter-declaration') {
+      currentManifest.interpreterDeclaration.claimedVersion = 'v99.0.0';
+    } else {
+      launchObservation.expectedPackageName = '@ashlr/not-hub';
+    }
+
+    const report = inspectProductionActivationReadinessV1({
+      packageRoot: root,
+      launchObservation,
+      residentServiceDiagnostic: healthyResident(),
+      releaseTipObservation: healthyTip(),
+    });
+
+    expect(report.observations.launchAdmission).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      state: 'unavailable',
+      reasonCode: 'launch-observation-failed',
+    });
+    expect(report.sourceQuality.reasons).toContain('launch-admission');
+  });
+
+  it('binds unsigned .bin bytes into the signed installed-tree identity', () => {
+    const root = packageFixture();
+    const launchObservation = launchInput(root);
+    const binRoot = join(root, 'node_modules/.bin');
+    mkdirSync(binRoot);
+    writeFileSync(join(binRoot, 'injected'), '#!/usr/bin/env node\n', { mode: 0o755 });
+
+    const report = inspectProductionActivationReadinessV1({
+      packageRoot: root,
+      launchObservation,
+      residentServiceDiagnostic: healthyResident(),
+      releaseTipObservation: healthyTip(),
+    });
+
+    expect(report.observations.artifactPackaging.installedTreeSha256)
+      .not.toBe(currentManifest.dependencyInventory.installedDependencyRootSha256);
+    expect(report.observations.launchAdmission.complete).toBe(false);
+    expect(report.sourceQuality.sourceState).toBe('degraded');
+  });
+
+  it('rejects world-writable executable bytes before packaging can be complete', () => {
+    const root = packageFixture();
+    const binRoot = join(root, 'node_modules/.bin');
+    mkdirSync(binRoot);
+    const injected = join(binRoot, 'injected');
+    writeFileSync(injected, '#!/usr/bin/env node\n', { mode: 0o755 });
+    chmodSync(injected, 0o777);
+
+    expect(observeProductionArtifactPackagingV1(root)).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      installedDependencyTree: 'mismatch',
+      reasonCode: 'dependency-tree-mismatch',
+    });
+  });
+
+  it.runIf(typeof process.getuid === 'function')(
+    'rejects executable evidence not owned by root or the observing user',
+    () => {
+      const root = packageFixture();
+      const binRoot = join(root, 'node_modules/.bin');
+      mkdirSync(binRoot);
+      writeFileSync(join(binRoot, 'injected'), '#!/usr/bin/env node\n', { mode: 0o755 });
+      const uid = process.getuid!();
+      const getuid = vi.spyOn(process, 'getuid').mockReturnValue(uid + 1);
+      try {
+        expect(observeProductionArtifactPackagingV1(root)).toMatchObject({
+          sourceState: 'degraded',
+          complete: false,
+          installedDependencyTree: 'mismatch',
+          reasonCode: 'dependency-tree-mismatch',
+        });
+      } finally {
+        getuid.mockRestore();
+      }
+    },
+  );
+
+  it('deep-freezes every authority-bearing output and nested flag', () => {
+    const root = packageFixture();
+    const report = inspectProductionActivationReadinessV1({
+      packageRoot: root,
+      launchObservation: launchInput(root),
+      residentServiceDiagnostic: healthyResident(),
+      releaseTipObservation: healthyTip(),
+    });
+
+    for (const value of [
+      report,
+      report.authorityFlags,
+      report.blockers,
+      report.blockers[0],
+      report.sourceQuality,
+      report.sourceQuality.reasons,
+      report.observations,
+      report.observations.artifactPackaging,
+      report.observations.launchAdmission,
+      report.observations.launchAdmission.blockerCodes,
+    ]) expect(Object.isFrozen(value)).toBe(true);
+    expect(() => {
+      (report.authorityFlags as { launchPermitted: boolean }).launchPermitted = true;
+    }).toThrow(TypeError);
+    expect(() => report.blockers.push(report.blockers[0]!)).toThrow(TypeError);
   });
 
   it('rejects symlinked and oversized inventory files before parsing', () => {

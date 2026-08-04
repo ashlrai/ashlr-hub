@@ -5,6 +5,7 @@ import {
   mkdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   truncateSync,
@@ -18,11 +19,17 @@ import {
   parseUnsignedRuntimeReleaseManifest,
   verifyUnsignedRuntimeReleaseManifest,
 } from '../src/core/daemon/runtime-release-manifest.js';
+import {
+  buildRuntimeReleaseDependencyInventory,
+  parseRuntimeReleaseDependencyInventory,
+  RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH,
+} from '../src/core/daemon/runtime-release-dependency-inventory.js';
 
 const tempDirs: string[] = [];
 const REVISION = 'a'.repeat(40);
 
 interface ReleaseFixture {
+  dependencyRoot: string;
   interpreterPath: string;
   packageRoot: string;
 }
@@ -40,6 +47,8 @@ function fixture(): ReleaseFixture {
     version: '3.1.0',
     type: 'module',
     bin: { ashlr: 'bin/ashlr' },
+    dependencies: { example: '1.0.0' },
+    bundledDependencies: ['example'],
   }, null, 2)}\n`);
   write(join(packageRoot, 'package-lock.json'), `${JSON.stringify({
     name: '@ashlr/hub',
@@ -50,16 +59,28 @@ function fixture(): ReleaseFixture {
         name: '@ashlr/hub',
         version: '3.1.0',
         bin: { ashlr: 'bin/ashlr' },
+        dependencies: { example: '1.0.0' },
       },
+      'node_modules/example': { version: '1.0.0' },
     },
   }, null, 2)}\n`);
   write(join(packageRoot, 'bin', 'ashlr'), '#!/usr/bin/env node\nimport("../dist/cli/index.js");\n', 0o755);
   write(join(packageRoot, 'dist', 'cli', 'index.js'), 'export const runtime = true;\n');
   write(join(packageRoot, 'dist', 'core', 'worker.js'), 'export const worker = true;\n');
+  const dependencyRoot = join(packageRoot, 'node_modules');
+  write(join(dependencyRoot, 'example', 'package.json'), `${JSON.stringify({
+    name: 'example',
+    version: '1.0.0',
+  })}\n`);
+  write(join(dependencyRoot, 'example', 'index.js'), 'export const example = true;\n');
+  const inventory = buildRuntimeReleaseDependencyInventory(packageRoot);
+  if (!inventory.ok) throw new Error(inventory.reason);
+  write(join(packageRoot, ...RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH.split('/')),
+    inventory.canonicalJson);
   write(join(packageRoot, 'scripts', 'run-verify-command.mjs'), 'export const run = true;\n');
   const interpreterPath = join(packageRoot, 'fixture-node');
   write(interpreterPath, 'fixture node binary\n', 0o755);
-  return { interpreterPath, packageRoot };
+  return { dependencyRoot, interpreterPath, packageRoot };
 }
 
 function build(
@@ -70,6 +91,7 @@ function build(
 ) {
   return buildUnsignedRuntimeReleaseManifest({
     packageRoot: input.packageRoot,
+    dependencyRoot: input.dependencyRoot,
     declaredInterpreterPath: input.interpreterPath,
     declaredInterpreterVersion,
     expectedRevision,
@@ -89,6 +111,7 @@ function verify(
 ) {
   return verifyUnsignedRuntimeReleaseManifest({
     packageRoot: input.packageRoot,
+    dependencyRoot: input.dependencyRoot,
     declaredInterpreterPath: input.interpreterPath,
     declaredInterpreterVersion: options.declaredInterpreterVersion ?? 'v22.0.0',
     expectedRevision: options.expectedRevision ?? REVISION,
@@ -127,12 +150,12 @@ describe('unsigned runtime release manifest', () => {
       algorithm: 'sha256',
       assurance: 'unsigned-observation-only',
       expectedRevision: REVISION,
-      schemaVersion: 1,
+      schemaVersion: 2,
       coverage: {
         artifactCoherence: 'two-complete-scans',
         authenticity: 'unsigned',
         configuration: 'excluded',
-        installedDependencies: 'lockfile-only',
+        installedDependencies: 'packaged-byte-inventory-and-installed-tree',
         rollback: 'unresolved-caller-declared-reference',
         serviceInvocation: 'unbound',
       },
@@ -142,9 +165,9 @@ describe('unsigned runtime release manifest', () => {
         name: '@ashlr/hub',
         version: '3.1.0',
       },
-      lockfile: {
-        lockfileVersion: 3,
-        path: 'package-lock.json',
+      dependencyInventory: {
+        packageCount: 1,
+        path: RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH,
       },
       entrypoints: {
         launcher: 'bin/ashlr',
@@ -168,7 +191,7 @@ describe('unsigned runtime release manifest', () => {
       'bin/ashlr',
       'dist/cli/index.js',
       'dist/core/worker.js',
-      'package-lock.json',
+      RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH,
       'package.json',
       'scripts/run-verify-command.mjs',
     ]);
@@ -218,6 +241,7 @@ describe('unsigned runtime release manifest', () => {
     const release = fixture();
     const options = {
       packageRoot: release.packageRoot,
+      dependencyRoot: release.dependencyRoot,
       declaredInterpreterPath: release.interpreterPath,
       declaredInterpreterVersion: 'v22.0.0',
       expectedRevision: REVISION,
@@ -242,6 +266,7 @@ describe('unsigned runtime release manifest', () => {
     let monotonicMs = 0;
     const options = {
       packageRoot: release.packageRoot,
+      dependencyRoot: release.dependencyRoot,
       declaredInterpreterPath: release.interpreterPath,
       declaredInterpreterVersion: 'v22.0.0',
       expectedRevision: REVISION,
@@ -270,6 +295,7 @@ describe('unsigned runtime release manifest', () => {
     let monotonicMs = 0;
     const options = {
       packageRoot: release.packageRoot,
+      dependencyRoot: release.dependencyRoot,
       declaredInterpreterPath: release.interpreterPath,
       declaredInterpreterVersion: 'v22.0.0',
       expectedRevision: REVISION,
@@ -323,23 +349,27 @@ describe('unsigned runtime release manifest', () => {
     });
   });
 
-  it('excludes installed dependencies and configuration exactly as declared by coverage', () => {
+  it('binds installed dependency bytes while continuing to exclude configuration', () => {
     const release = fixture();
-    const dependency = join(release.packageRoot, 'node_modules', 'example', 'index.js');
+    const dependency = join(release.dependencyRoot, 'example', 'index.js');
     const configuration = join(release.packageRoot, 'config', 'runtime.json');
-    write(dependency, 'export const dependency = 1;\n');
     write(configuration, '{"enabled":true}\n');
     const built = build(release);
     expect(built.ok).toBe(true);
     if (!built.ok) return;
 
+    expect(built.manifest.dependencyInventory.packageCount).toBe(1);
     expect(built.manifest.artifacts.some((artifact) => artifact.path.startsWith('node_modules/'))).toBe(false);
     expect(built.manifest.artifacts.some((artifact) => artifact.path.startsWith('config/'))).toBe(false);
-    writeFileSync(dependency, 'export const dependency = 2;\n');
     writeFileSync(configuration, '{"enabled":false}\n');
     expect(verify(release, built.canonicalJson)).toMatchObject({
       ok: true,
       assurance: 'unsigned-observation-only',
+    });
+    writeFileSync(dependency, 'export const dependency = 2;\n');
+    expect(verify(release, built.canonicalJson)).toEqual({
+      ok: false,
+      reason: 'installed dependency example bytes do not match inventory',
     });
 
     const overclaim = jsonObject(built.canonicalJson);
@@ -356,7 +386,7 @@ describe('unsigned runtime release manifest', () => {
     ['runtime entry', 'dist/cli/index.js'],
     ['nested runtime', 'dist/core/worker.js'],
     ['package metadata', 'package.json'],
-    ['dependency lock', 'package-lock.json'],
+    ['dependency inventory', RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH],
     ['verifier runner', 'scripts/run-verify-command.mjs'],
   ])('rejects %s byte drift', (_label, relativePath) => {
     const release = fixture();
@@ -392,7 +422,7 @@ describe('unsigned runtime release manifest', () => {
       .toEqual({ ok: false, reason: 'runtime release contents do not match manifest' });
   });
 
-  it('fails generation when package and lock identities do not agree', () => {
+  it('fails generation when package and packaged inventory identities do not agree', () => {
     const packageMismatch = fixture();
     const packageJson = JSON.parse(readFileSync(join(packageMismatch.packageRoot, 'package.json'), 'utf8')) as {
       bin: Record<string, string>;
@@ -404,15 +434,18 @@ describe('unsigned runtime release manifest', () => {
       reason: 'package launcher does not match bin/ashlr',
     });
 
-    const lockMismatch = fixture();
-    const lockJson = JSON.parse(readFileSync(join(lockMismatch.packageRoot, 'package-lock.json'), 'utf8')) as {
-      packages: Record<string, { version: string }>;
-    };
-    lockJson.packages['']!.version = '9.9.9';
-    writeFileSync(join(lockMismatch.packageRoot, 'package-lock.json'), JSON.stringify(lockJson));
-    expect(build(lockMismatch)).toEqual({
+    const inventoryMismatch = fixture();
+    const mismatchedPackageJson = JSON.parse(
+      readFileSync(join(inventoryMismatch.packageRoot, 'package.json'), 'utf8'),
+    ) as { version: string };
+    mismatchedPackageJson.version = '9.9.9';
+    writeFileSync(
+      join(inventoryMismatch.packageRoot, 'package.json'),
+      JSON.stringify(mismatchedPackageJson),
+    );
+    expect(build(inventoryMismatch)).toEqual({
       ok: false,
-      reason: 'package lock root identity does not match package.json',
+      reason: 'runtime dependency inventory package identity mismatch',
     });
   });
 
@@ -480,7 +513,7 @@ describe('unsigned runtime release manifest', () => {
     });
   });
 
-  it('rejects top-level and nested duplicate keys in package identity files', () => {
+  it('rejects duplicate keys in package and dependency inventory identity files', () => {
     const duplicatePackage = fixture();
     write(join(duplicatePackage.packageRoot, 'package.json'), [
       '{',
@@ -496,30 +529,21 @@ describe('unsigned runtime release manifest', () => {
       reason: 'package.json contains duplicate object keys',
     });
 
-    const duplicateLockRoot = fixture();
-    write(join(duplicateLockRoot.packageRoot, 'package-lock.json'), [
-      '{',
-      '  "name": "@ashlr/hub",',
-      '  "version": "3.1.0",',
-      '  "lockfileVersion": 3,',
-      '  "packages": {',
-      '    "": {',
-      '      "name": "attacker/package",',
-      '      "na\\u006de": "@ashlr/hub",',
-      '      "version": "3.1.0",',
-      '      "bin": { "ashlr": "bin/ashlr" }',
-      '    }',
-      '  }',
-      '}',
-      '',
-    ].join('\n'));
-    expect(build(duplicateLockRoot)).toEqual({
+    const duplicateInventory = fixture();
+    const inventoryBytes = readFileSync(
+      join(duplicateInventory.packageRoot, ...RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH.split('/')),
+      'utf8',
+    );
+    expect(parseRuntimeReleaseDependencyInventory(inventoryBytes.replace(
+      '"algorithm":"sha256"',
+      '"algorithm":"sha256","algorithm":"sha256"',
+    ))).toEqual({
       ok: false,
-      reason: 'package-lock.json contains duplicate object keys',
+      reason: 'runtime dependency inventory encoding is not canonical',
     });
   });
 
-  it('enforces focused package and lockfile byte limits before parsing', () => {
+  it('enforces focused package and dependency inventory byte limits before parsing', () => {
     const oversizedPackage = fixture();
     truncateSync(join(oversizedPackage.packageRoot, 'package.json'), 1024 * 1024 + 1);
     expect(build(oversizedPackage)).toEqual({
@@ -527,11 +551,14 @@ describe('unsigned runtime release manifest', () => {
       reason: 'package.json exceeds byte limit',
     });
 
-    const oversizedLock = fixture();
-    truncateSync(join(oversizedLock.packageRoot, 'package-lock.json'), 16 * 1024 * 1024 + 1);
-    expect(build(oversizedLock)).toEqual({
+    const oversizedInventory = fixture();
+    truncateSync(
+      join(oversizedInventory.packageRoot, ...RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH.split('/')),
+      512 * 1024 + 1,
+    );
+    expect(build(oversizedInventory)).toEqual({
       ok: false,
-      reason: 'package-lock.json exceeds byte limit',
+      reason: `${RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH} exceeds byte limit`,
     });
   });
 
@@ -621,6 +648,50 @@ describe('unsigned runtime release manifest', () => {
     expect(build(release)).toEqual({
       ok: false,
       reason: 'runtime tree contains a symlink',
+    });
+  });
+
+  it('rejects a matching dependency tree outside the admitted package root', () => {
+    const release = fixture();
+    const decoy = fixture();
+    expect(buildUnsignedRuntimeReleaseManifest({
+      packageRoot: release.packageRoot,
+      dependencyRoot: decoy.dependencyRoot,
+      declaredInterpreterPath: release.interpreterPath,
+      declaredInterpreterVersion: 'v22.0.0',
+      expectedRevision: REVISION,
+    })).toEqual({
+      ok: false,
+      reason: 'dependency root is not bound to package root',
+    });
+  });
+
+  it.skipIf(process.platform === 'win32')('rejects a symlinked package dependency root', () => {
+    const release = fixture();
+    const dependencyTarget = join(release.packageRoot, 'dependency-target');
+    renameSync(release.dependencyRoot, dependencyTarget);
+    symlinkSync(dependencyTarget, release.dependencyRoot, 'dir');
+    expect(build(release)).toEqual({
+      ok: false,
+      reason: 'dependency root is not a canonical directory',
+    });
+  });
+
+  it.skipIf(process.platform === 'win32')('rejects a symlinked package root', () => {
+    const release = fixture();
+    const aliasParent = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-runtime-release-alias-')));
+    tempDirs.push(aliasParent);
+    const alias = join(aliasParent, 'release');
+    symlinkSync(release.packageRoot, alias, 'dir');
+    expect(buildUnsignedRuntimeReleaseManifest({
+      packageRoot: alias,
+      dependencyRoot: release.dependencyRoot,
+      declaredInterpreterPath: release.interpreterPath,
+      declaredInterpreterVersion: 'v22.0.0',
+      expectedRevision: REVISION,
+    })).toEqual({
+      ok: false,
+      reason: 'package root is not a canonical directory',
     });
   });
 
