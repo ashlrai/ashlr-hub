@@ -78,6 +78,56 @@ describe('shell-free npm CLI launch', () => {
     })).toThrow('npm CLI changed during execution');
     expect(existsSync(replacementMarker)).toBe(false);
   });
+
+  it('rejects transitive npm runtime replacement after validation', () => {
+    const fixtureRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-npm-runtime-race-')));
+    tempDirs.push(fixtureRoot);
+    const fakeNode = join(fixtureRoot, 'bin', 'node');
+    const trustedCli = join(fixtureRoot, 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js');
+    const transitiveCli = join(fixtureRoot, 'lib', 'node_modules', 'npm', 'lib', 'cli.js');
+    const packageJson = join(fixtureRoot, 'lib', 'node_modules', 'npm', 'package.json');
+    write(fakeNode, 'fixture node identity\n');
+    write(trustedCli, "require('../lib/cli.js');\n");
+    write(transitiveCli, "process.stdout.write('validated runtime');\n");
+    write(packageJson, '{"name":"npm","version":"10.0.0"}\n');
+
+    expect(() => runTrustedNpmCli([], {
+      environment: { npm_execpath: trustedCli },
+    }, {
+      command: process.execPath,
+      execPath: fakeNode,
+      platform: 'linux',
+      beforeSpawn: () => {
+        write(transitiveCli, "process.stdout.write('forged runtime');\n");
+      },
+    })).toThrow('npm runtime closure changed during execution');
+  });
+
+  it('rejects an npm runtime ABA mutation even when the original bytes are restored', () => {
+    const fixtureRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-npm-runtime-aba-')));
+    tempDirs.push(fixtureRoot);
+    const fakeNode = join(fixtureRoot, 'bin', 'node');
+    const trustedCli = join(fixtureRoot, 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js');
+    const transitiveCli = join(fixtureRoot, 'lib', 'node_modules', 'npm', 'lib', 'cli.js');
+    const packageJson = join(fixtureRoot, 'lib', 'node_modules', 'npm', 'package.json');
+    const original = "process.stdout.write('validated runtime');\n";
+    write(fakeNode, 'fixture node identity\n');
+    write(trustedCli, "require('../lib/cli.js');\n");
+    write(transitiveCli, original);
+    write(packageJson, '{"name":"npm","version":"10.0.0"}\n');
+
+    expect(() => runTrustedNpmCli([], {
+      environment: { npm_execpath: trustedCli },
+    }, {
+      command: process.execPath,
+      execPath: fakeNode,
+      platform: 'linux',
+      beforeSpawn: () => {
+        write(transitiveCli, "process.stdout.write('forged runtime');\n");
+        write(transitiveCli, original);
+      },
+    })).toThrow('npm runtime closure changed during execution');
+  });
 });
 
 function closeLaunch(launch: ReturnType<typeof resolveNpmCliLaunch>): void {
