@@ -210,7 +210,6 @@ function normalizeSnapshot(raw) {
 }
 
 export function parseSupersedes(body) {
-  const declared = new Set();
   const visibleBody = String(body ?? '')
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/<!--[\s\S]*$/g, '');
@@ -230,13 +229,21 @@ export function parseSupersedes(body) {
     if (fence === null) visibleLines.push(line);
   }
   const expression = /^[ \t]{0,3}Supersedes[ \t]*:[ \t]*([^\r\n]*)$/gim;
-  for (const match of visibleLines.join('\n').matchAll(expression)) {
-    for (const reference of match[1].matchAll(/#([1-9][0-9]*)\b/g)) {
-      const number = Number(reference[1]);
-      if (Number.isSafeInteger(number)) declared.add(number);
-    }
+  const declarations = [...visibleLines.join('\n').matchAll(expression)];
+  if (declarations.length !== 1) return [];
+
+  const value = declarations[0][1].trim();
+  if (!/^#[1-9][0-9]*(?:[ \t]*,[ \t]*#[1-9][0-9]*)*$/.test(value)) return [];
+
+  const declared = [];
+  const seen = new Set();
+  for (const token of value.split(',')) {
+    const number = Number(token.trim().slice(1));
+    if (!Number.isSafeInteger(number) || number <= 0 || seen.has(number)) return [];
+    seen.add(number);
+    declared.push(number);
   }
-  return [...declared].sort((left, right) => left - right);
+  return declared.sort((left, right) => left - right);
 }
 
 function branchKey(repo, ref) {

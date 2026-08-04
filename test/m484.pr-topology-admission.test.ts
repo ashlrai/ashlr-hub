@@ -267,6 +267,34 @@ describe('M484 topology graph admission', () => {
     )).toEqual([10]);
   });
 
+  it.each([
+    ['cross-repository reference', 'Supersedes: other/project#170'],
+    ['negated reference', 'Supersedes: not #170'],
+    ['extra text', 'Supersedes: #170 because it is obsolete'],
+    ['range', 'Supersedes: #170-#198'],
+    ['missing hash', 'Supersedes: 170'],
+    ['trailing comma', 'Supersedes: #170,'],
+    ['duplicate reference', 'Supersedes: #170, #170'],
+    ['zero reference', 'Supersedes: #0'],
+    ['negative reference', 'Supersedes: #-170'],
+    ['unsafe integer reference', 'Supersedes: #9007199254740992'],
+    ['multiple declaration lines', 'Supersedes: #170\nSupersedes: #198'],
+    ['comment-only declaration', '<!-- Supersedes: #170 -->'],
+    ['fenced declaration', '```markdown\nSupersedes: #170\n```'],
+    ['unterminated comment declaration', '<!-- Supersedes: #170'],
+    ['unterminated fenced declaration', '```markdown\nSupersedes: #170'],
+  ])('rejects %s', (_label, body) => {
+    expect(parseSupersedes(body)).toEqual([]);
+  });
+
+  it.each([
+    ['one local reference', 'Supersedes: #170', [170]],
+    ['comma-separated local references', 'Supersedes: #170, #198', [170, 198]],
+    ['tabs around commas', 'Supersedes:\t#198\t,\t#170', [170, 198]],
+  ])('accepts %s', (_label, body, expected) => {
+    expect(parseSupersedes(body)).toEqual(expected);
+  });
+
   it('admits an ordinary default-branch PR when exact comparison proves no containment', () => {
     const independent = pullRequest({ number: 10, headRef: 'independent', baseRef: 'master' });
     const candidate = pullRequest({ number: 20, headRef: 'ordinary', baseRef: 'master' });
