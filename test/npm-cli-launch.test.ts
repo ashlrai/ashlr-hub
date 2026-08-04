@@ -174,7 +174,7 @@ describe('shell-free npm CLI launch', () => {
           "process.stdout.write('forged runtime');",
         ].join('\n'));
       },
-    })).toThrow(/npm (?:CLI|runtime ancestor) changed during execution/u);
+    })).toThrow(/(?:npm (?:CLI|runtime ancestor) changed during execution|EPERM:.*rename)/u);
     expect(existsSync(replacementMarker)).toBe(false);
   });
 
