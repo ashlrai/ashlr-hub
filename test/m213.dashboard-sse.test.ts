@@ -1704,7 +1704,9 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain('const sources = Array.isArray(readiness.sources) ? readiness.sources : []');
     expect(src).toContain('source?.sourceQuality?.badge === badge');
     expect(src).toContain('function fdReadinessDataTitle');
-    expect(src).toContain("fdMetricPill('Data', fdReadinessDataText(readiness), fdReadinessDataTitle(readiness))");
+    expect(src).toContain('function fdReadinessDataPill');
+    expect(src).toContain('fdReadinessDataPill(readiness)');
+    expect(src).toContain("el('summary', {}, 'Source detail')");
     expect(src).toContain("qualityParts.length > 0 ? qualityParts.join(' / ') : 'healthy sources'");
     expect(src).toContain('const briefDetail = missionBrief?.whyNow ?? primaryAction?.detail ?? actionLabel');
     expect(src).toContain('const actionDetail = primaryAction?.detail ?? briefDetail');
@@ -1713,6 +1715,8 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(css).toContain('.fleet-command-rail');
     expect(css).toContain('.fleet-command-safety--autonomous-dispatch');
     expect(css).toContain('grid-template-columns: repeat(2, minmax(0, 1fr))');
+    expect(css).toContain('.fd-readiness-pill--data .fd-readiness-pill__value');
+    expect(css).toContain('white-space: pre-line');
   });
 
   it('app.js keeps readiness data-quality counts distinct from healthy zero', () => {
@@ -1811,7 +1815,7 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain("['Activation', 'disabled']");
     expect(src).toContain('f.autoMergeCanaryPromotionReadiness');
     expect(src).toContain('fleet.autoMergeCanaryPromotionReadiness ?? null');
-    expect(src).toContain("fdMetricPill(\n          'Canary promotion'");
+    expect(src).toMatch(/fdMetricPill\(\s*'Canary promotion'/);
     expect(src).not.toContain('activateAutoMergeCanaryPromotion');
   });
 
@@ -1922,6 +1926,127 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(css).toContain('.fd-lease-samples');
     expect(css).toContain('.fd-lease-active-ids');
     expect(css).toContain('text-overflow: ellipsis');
+  });
+
+  it('renders one bounded read-only Autonomy Lane Board in Fleet Dashboard and Mission Control', () => {
+    const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public');
+    const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
+    const css = fs.readFileSync(path.join(root, 'styles.css'), 'utf8');
+
+    expect(src).toContain('function renderAutonomyLaneBoard');
+    expect(src).toContain('laneLocks.samples.slice(0, 8)');
+    expect(src).toContain('body.appendChild(rows)');
+    expect(src).toContain("el('span', { cls: 'autonomy-lane-board__eyebrow' }, 'Autonomy Lanes')");
+    expect(src).toContain("state === 'healthy' ? 'No occupied autonomy lanes.'");
+    expect(src).toContain('Lane counts are observed from partial sources');
+    expect(src).toContain('Lane data unavailable');
+    expect(src).toContain("shell: 'ashlr fleet status --json'");
+    expect(src).toContain("shell: 'ashlr goals list --json'");
+    expect(src).toContain("shell: 'ashlr inbox --json'");
+    expect(src).toContain("fleet-command-safety--read-only");
+    expect(src).not.toContain('autonomyLaneBoardMutation');
+
+    const displayStateStart = src.indexOf('function laneLockDisplayState(laneLocks)');
+    const displayStateEnd = src.indexOf('function laneLockStateLabel(reason)', displayStateStart);
+    const displayState = new Function(
+      `${src.slice(displayStateStart, displayStateEnd)}\nreturn laneLockDisplayState;`,
+    )() as (laneLocks: Record<string, unknown> | null) => string;
+    expect(displayState({ sourceQuality: { sourceState: 'missing', complete: false } })).toBe('missing');
+    expect(displayState({
+      sourceQuality: {
+        sourceState: 'degraded',
+        complete: false,
+        sources: { goals: { sourceState: 'missing', complete: false } },
+      },
+    })).toBe('missing');
+    expect(displayState({ sourceQuality: { sourceState: 'healthy', complete: false } })).toBe('degraded');
+    expect(displayState({ sourceQuality: { sourceState: 'healthy', complete: true } })).toBe('healthy');
+
+    const compactSummaryStart = src.indexOf('function laneBoardCompactSummary(laneLocks)');
+    const compactSummaryEnd = src.indexOf('function laneBoardCompactViewport()', compactSummaryStart);
+    const compactSummary = new Function(
+      `${src.slice(displayStateStart, displayStateEnd)}\n${src.slice(compactSummaryStart, compactSummaryEnd)}\nreturn laneBoardCompactSummary;`,
+    )() as (laneLocks: Record<string, unknown> | null) => string;
+    expect(compactSummary({
+      active: 0,
+      awaitingHostMerge: 0,
+      unverifiedApplied: 0,
+      sourceQuality: { sourceState: 'missing', complete: false },
+    })).toBe('Lanes Unavailable');
+    expect(compactSummary({
+      active: 2,
+      awaitingHostMerge: 1,
+      unverifiedApplied: 0,
+      sourceQuality: { sourceState: 'degraded', complete: false },
+    })).toBe('Lanes Partial · 3 observed');
+
+    const laneRenderStart = src.indexOf('function renderAutonomyLaneBoard');
+    const laneRenderEnd = src.indexOf('function autonomyAuthorityState', laneRenderStart);
+    const laneRenderSource = src.slice(laneRenderStart, laneRenderEnd);
+    const laneActionIndex = laneRenderSource.indexOf("cls: 'autonomy-lane-board__action'");
+    const laneMetricsIndex = laneRenderSource.indexOf("cls: 'autonomy-lane-board__metrics'");
+    const laneRowsIndex = laneRenderSource.indexOf("cls: 'autonomy-lane-board__rows'");
+    expect(laneActionIndex).toBeGreaterThanOrEqual(0);
+    expect(laneMetricsIndex).toBeGreaterThan(laneActionIndex);
+    expect(laneRowsIndex).toBeGreaterThan(laneActionIndex);
+    expect(laneRenderSource).toContain("if (laneLocks && state !== 'missing' && state !== 'unknown')");
+
+    const readinessIndex = src.indexOf('if (readinessRail) body.appendChild(readinessRail)');
+    const dashboardLaneIndex = src.indexOf('body.appendChild(renderAutonomyLaneBoard(fleetSnapshot?.laneLocks))');
+    const leaseIndex = src.indexOf('const leaseBoard = fdRenderLeaseBoard(sharedQueue, activeWork)');
+    expect(readinessIndex).toBeGreaterThanOrEqual(0);
+    expect(dashboardLaneIndex).toBeGreaterThan(readinessIndex);
+    expect(leaseIndex).toBeGreaterThan(dashboardLaneIndex);
+
+    const missionBriefIndex = src.indexOf('const missionBriefCard = renderMissionBriefCard(missionBrief)');
+    const missionLaneIndex = src.indexOf("renderAutonomyLaneBoard(laneLocks, 'ctrl-card card')");
+    expect(missionLaneIndex).toBeGreaterThan(missionBriefIndex);
+    expect(css).toContain('.autonomy-lane-board__rows');
+    expect(css).toContain('.autonomy-lane-board__action');
+    expect(css).toContain('.autonomy-lane-board__reference { grid-column: 1 / -1; }');
+    expect(src).toContain('rail.appendChild(renderReadinessLaneControl(fleet?.laneLocks))');
+    expect(src).toContain("const secondary = el('details', { cls: 'fd-readiness-secondary', open: 'open' }");
+    expect(src).toContain('if (laneBoardCompactViewport()) secondary.open = false');
+    expect(src).toContain("typeof window.matchMedia === 'function'");
+    expect(src).not.toContain("if (!window.matchMedia('(max-width: 720px)').matches) secondary.open = true");
+    const readinessRailStart = src.indexOf('function fdRenderReadinessRail(snap)');
+    const readinessRailEnd = src.indexOf('function fdRenderStatusPanel(snap)', readinessRailStart);
+    const readinessRailSource = src.slice(readinessRailStart, readinessRailEnd);
+    expect(readinessRailSource.indexOf('renderReadinessLaneControl')).toBeGreaterThan(
+      readinessRailSource.indexOf("cls: 'fd-readiness-rail__verdict'"),
+    );
+    expect(readinessRailSource.indexOf("cls: 'fd-readiness-strip'")).toBeGreaterThan(
+      readinessRailSource.indexOf('renderReadinessLaneControl'),
+    );
+    expect(readinessRailSource.indexOf("cls: 'fd-readiness-secondary'")).toBeGreaterThan(
+      readinessRailSource.indexOf('renderReadinessLaneControl'),
+    );
+    expect(css).toContain('.fd-readiness-secondary > summary');
+    expect(css).toContain('.fd-readiness-secondary__grid');
+    expect(css).toContain('.fd-readiness-lane-control');
+    expect(css).toContain('.fd-readiness-lane-control__action');
+
+    const readinessControlStart = src.indexOf('function renderReadinessLaneControl(laneLocks)');
+    const readinessControlEnd = src.indexOf('function renderCompactLaneControl', readinessControlStart);
+    const readinessControlSource = src.slice(readinessControlStart, readinessControlEnd);
+    expect(readinessControlSource).toContain('fleet-command-safety--read-only');
+    expect(readinessControlSource).not.toContain('laneLocks.samples');
+
+    const compactControlStart = src.indexOf('function renderCompactLaneControl(laneLocks)');
+    const compactControlEnd = src.indexOf('function renderAutonomyLaneBoard', compactControlStart);
+    const compactControlSource = src.slice(compactControlStart, compactControlEnd);
+    expect(compactControlSource).toContain("'aria-label': 'Autonomy lane status'");
+    expect(compactControlSource).toContain('fleet-command-safety--read-only');
+    expect(compactControlSource).not.toContain('laneLocks.samples');
+
+    const controlStart = src.indexOf('function renderControl()');
+    const controlEnd = src.indexOf('function renderFleetActivity', controlStart);
+    const controlSource = src.slice(controlStart, controlEnd);
+    expect(controlSource.indexOf('heroPulse.appendChild(renderCompactLaneControl(laneLocks))')).toBeGreaterThanOrEqual(0);
+    expect(controlSource.indexOf('const heroMetrics')).toBeGreaterThan(
+      controlSource.indexOf('heroPulse.appendChild(renderCompactLaneControl(laneLocks))'),
+    );
+    expect(css).toContain('.ctrl-lane-compact__action');
   });
 
   it('app.js inbox detail reads current proposal review fields', () => {

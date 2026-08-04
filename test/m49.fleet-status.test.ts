@@ -1786,6 +1786,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
 
     const staleGoal = makeGoalRecord(repo, 'goal-lane-a', 'active', 'in-progress');
     staleGoal.milestones[0]!.updatedAt = '2026-07-03T00:00:00.000Z';
+    staleGoal.milestones[0]!.title = 'Recover token=abcdefghijklmnopqrstuvwxyz lane';
     const proposedGoal = makeGoalRecord(repo, 'goal-lane-b', 'active', 'proposed');
     proposedGoal.milestones[0]!.proposalId = applied.id;
     const outsideGoal = makeGoalRecord(outsideRepo, 'goal-outside', 'active', 'pending');
@@ -1812,11 +1813,20 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       awaitingHostMerge: 1,
       unverifiedApplied: 1,
       lockedVisibleItems: 2,
+      sourceQuality: {
+        sourceState: 'healthy',
+        complete: true,
+        reasons: [],
+      },
     });
     expect(s.laneLocks?.samples.map((sample) => sample.reason)).toEqual(
       expect.arrayContaining(['stale-in-progress', 'active-goal', 'awaiting-host-merge', 'unverified-applied']),
     );
     expect(s.laneLocks?.samples.every((sample) => !('diff' in sample))).toBe(true);
+    expect(s.laneLocks?.samples.every((sample) => sample.repo === 'repo-lanes')).toBe(true);
+    expect(JSON.stringify(s.laneLocks?.samples)).not.toContain(tmpHome);
+    expect(JSON.stringify(s.laneLocks?.samples)).not.toContain('abcdefghijklmnopqrstuvwxyz');
+    expect(JSON.stringify(s.laneLocks?.samples)).toContain('token=[REDACTED]');
     expect(formatFleetStatus(s)).toContain(
       'lane locks:    2 active, 1 stale, 1 handoff, 1 unverified, 2 visible locked',
     );
@@ -1824,12 +1834,248 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(action).toMatchObject({
       priority: 'high',
       label: 'Recover stale goal lanes',
-      target: repo,
+      target: 'repo-lanes',
     });
     expect(action?.commands?.map((command) => command.argv)).toEqual([
       ['ashlr', 'goals', 'show', 'goal-lane-a', '--json'],
       ['ashlr', 'goals', 'recover-stale'],
     ]);
+  });
+
+  it('keeps missing, malformed, truncated, and partial lane sources distinct from healthy zero', async () => {
+    const repo = join(tmpHome, 'repo-lane-quality');
+    writeBacklogSnapshot(tmpHome, repo, []);
+
+    const missing = await buildFleetStatus(baseConfig());
+    expect(missing.laneLocks).toMatchObject({
+      active: 0,
+      sourceQuality: {
+        sourceState: 'missing',
+        complete: false,
+        reasons: expect.arrayContaining(['goals-missing', 'proposals-missing']),
+      },
+    });
+
+    const goalsDir = join(process.env.ASHLR_HOME!, 'goals');
+    mkdirSync(goalsDir, { recursive: true });
+    writeFileSync(join(goalsDir, 'malformed.json'), '{', 'utf8');
+    const malformed = await buildFleetStatus(baseConfig());
+    expect(malformed.laneLocks?.sourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      reasons: expect.arrayContaining(['goals-incomplete', 'goals-unreadable']),
+    });
+
+    rmSync(goalsDir, { recursive: true, force: true });
+    const manyGoals = Array.from({ length: 201 }, (_, index) =>
+      makeGoalRecord(repo, `goal-quality-${String(index).padStart(3, '0')}`));
+    writeGoalRecords(tmpHome, manyGoals);
+    const truncated = await buildFleetStatus(baseConfig());
+    expect(truncated.laneLocks?.sourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      reasons: expect.arrayContaining(['goals-incomplete', 'goals-limit-exceeded']),
+    });
+
+    rmSync(goalsDir, { recursive: true, force: true });
+    writeGoalRecords(tmpHome, [makeGoalRecord(repo, 'goal-quality-valid')]);
+    const inboxDir = join(process.env.ASHLR_HOME!, 'inbox');
+    mkdirSync(inboxDir, { recursive: true });
+    writeFileSync(join(inboxDir, 'malformed.json'), '{', 'utf8');
+    const partial = await buildFleetStatus(baseConfig());
+    expect(partial.laneLocks?.sourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      reasons: expect.arrayContaining(['proposals-incomplete', 'proposals-invalid']),
+    });
+  });
+
+  it('caps lane samples and bounds every source-quality reason list', () => {
+    const repo = '/private/workspace/ashlr-hub';
+    const proposals = Array.from({ length: 12 }, (_, index): Proposal => ({
+      id: `proposal-${index}`,
+      repo,
+      origin: 'agent',
+      kind: 'patch',
+      title: `Proposal ${index}`,
+      summary: 'bounded fixture',
+      status: 'awaiting-host-merge',
+      createdAt: '2026-07-03T00:00:00.000Z',
+    }));
+    const status = buildFleetLaneLocks({
+      goals: [],
+      proposals,
+      visibleQueueItems: [],
+      sampleLimit: 99,
+      sourceQuality: {
+        goals: { sourceState: 'missing', complete: false, reasons: ['goals-missing'] },
+        proposals: {
+          sourceState: 'degraded', complete: false,
+          reasons: ['proposals-incomplete', 'proposals-invalid', 'proposals-unreadable', 'proposals-limit-exceeded'],
+        },
+        queue: {
+          sourceState: 'degraded', complete: false,
+          reasons: ['queue-missing', 'queue-incomplete', 'queue-stale', 'queue-unavailable'],
+        },
+      },
+    });
+
+    expect(status.samples).toHaveLength(8);
+    expect(status.sourceQuality).toMatchObject({ sourceState: 'degraded', complete: false });
+    expect(status.sourceQuality?.reasons).toHaveLength(8);
+    expect(status.samples.every((sample) => sample.repo === 'ashlr-hub')).toBe(true);
+    expect(JSON.stringify(status.samples)).not.toContain('/private/workspace');
+  });
+
+  it.each([
+    ['NaN', Number.NaN, 8],
+    ['positive infinity', Number.POSITIVE_INFINITY, 8],
+    ['negative infinity', Number.NEGATIVE_INFINITY, 8],
+    ['non-number', '12', 8],
+    ['negative', -4, 0],
+    ['fractional', 3.9, 3],
+  ])('normalizes hostile %s lane sample limits', (_label, sampleLimit, expected) => {
+    const proposals = Array.from({ length: 12 }, (_, index): Proposal => ({
+      id: `proposal-hostile-limit-${index}`,
+      repo: '/private/workspace/ashlr-hub',
+      origin: 'agent',
+      kind: 'patch',
+      title: `Proposal ${index}`,
+      summary: 'hostile limit fixture',
+      status: 'awaiting-host-merge',
+      createdAt: '2026-07-03T00:00:00.000Z',
+    }));
+    const status = buildFleetLaneLocks({
+      goals: [],
+      proposals,
+      visibleQueueItems: [],
+      sampleLimit: sampleLimit as number,
+    });
+
+    expect(status.samples).toHaveLength(expected);
+    expect(status.samples.length).toBeLessThanOrEqual(8);
+  });
+
+  it('defaults omitted lane source quality to missing and incomplete', () => {
+    const status = buildFleetLaneLocks({ goals: [], proposals: [], visibleQueueItems: [] });
+
+    expect(status.sourceQuality).toMatchObject({
+      sourceState: 'missing',
+      complete: false,
+      reasons: expect.arrayContaining(['goals-missing', 'proposals-missing', 'queue-missing']),
+      sources: {
+        goals: { sourceState: 'missing', complete: false, reasons: ['goals-missing'] },
+        proposals: { sourceState: 'missing', complete: false, reasons: ['proposals-missing'] },
+        queue: { sourceState: 'missing', complete: false, reasons: ['queue-missing'] },
+      },
+    });
+  });
+
+  it('normalizes an incomplete source that claims healthy to degraded', () => {
+    const status = buildFleetLaneLocks({
+      goals: [],
+      proposals: [],
+      visibleQueueItems: [],
+      sourceQuality: {
+        goals: { sourceState: 'healthy', complete: false, reasons: [] },
+        proposals: { sourceState: 'healthy', complete: true, reasons: [] },
+        queue: { sourceState: 'healthy', complete: true, reasons: [] },
+      },
+    });
+
+    expect(status.sourceQuality).toMatchObject({ sourceState: 'degraded', complete: false });
+    expect(status.sourceQuality?.sources.goals).toMatchObject({ sourceState: 'degraded', complete: false });
+  });
+
+  it('removes absolute POSIX and Windows paths from public lane titles while preserving useful text', () => {
+    const titles = [
+      'Exact hidden file /private/customer/acme/repo/.env should disappear but useful context remains',
+      'Keep useful prefix /opt/company/private/secrets.txt then verify relative src/core.ts remains',
+      String.raw`Review C:\Users\mason\private\agent.log and keep release note`,
+      String.raw`Share \\server\secret\plans\launch.txt today`,
+      String.raw`Inspect "\\?\UNC\server\share\folder with space\launch.txt" without exposing it`,
+      'Inspect "/Volumes/Client Data/acme/.env" without exposing it',
+      'Forward UNC //server/share/private/launch.txt must disappear',
+      'Keep docs https://example.com/path and useful release context',
+    ];
+    const proposals = titles.map((title, index): Proposal => ({
+      id: `proposal-hostile-path-${index}`,
+      repo: '/private/workspace/ashlr-hub',
+      origin: 'agent',
+      kind: 'patch',
+      title,
+      summary: 'hostile path fixture',
+      status: 'awaiting-host-merge',
+      createdAt: '2026-07-03T00:00:00.000Z',
+    }));
+
+    const status = buildFleetLaneLocks({ goals: [], proposals, visibleQueueItems: [] });
+    const projectedTitles = status.samples.map((sample) => sample.title);
+    const encoded = JSON.stringify(status.samples);
+
+    expect(projectedTitles).toEqual([
+      'Exact hidden file [PATH] should disappear but useful context remains',
+      'Keep useful prefix [PATH] then verify relative src/core.ts remains',
+      'Review [PATH] and keep release note',
+      'Share [PATH] today',
+      'Inspect [PATH] without exposing it',
+      'Inspect [PATH] without exposing it',
+      'Forward UNC [PATH] must disappear',
+      'Keep docs https://example.com/path and useful release context',
+    ]);
+    expect(encoded).not.toContain('/private/customer/acme/repo/.env');
+    expect(encoded).not.toContain('/private');
+    expect(encoded).not.toContain('customer');
+    expect(encoded).not.toContain('acme');
+    expect(encoded).not.toContain('.env');
+    expect(encoded).not.toContain('/opt/company');
+    expect(encoded).not.toContain('C:\\Users');
+    expect(encoded).not.toContain('\\\\server\\secret');
+    expect(encoded).not.toContain('Client Data');
+    expect(encoded).not.toContain('folder with space');
+    expect(encoded).not.toContain('//server/share');
+    expect(encoded).toContain('src/core.ts');
+    expect(projectedTitles.every((title) => (title?.length ?? 0) <= 120)).toBe(true);
+
+    const goal = makeGoalRecord('/private/workspace/ashlr-hub', 'goal-hostile-path-title', 'active', 'in-progress');
+    goal.milestones[0]!.title = 'Goal path /private/customer/acme/repo/.env should redact but keep milestone context';
+    const goalStatus = buildFleetLaneLocks({ goals: [goal], proposals: [], visibleQueueItems: [] });
+    const goalEncoded = JSON.stringify(goalStatus.samples);
+    expect(goalStatus.samples[0]?.title).toBe(
+      'Goal path [PATH] should redact but keep milestone context',
+    );
+    expect(goalEncoded).not.toContain('/private/customer/acme/repo/.env');
+    expect(goalEncoded).not.toContain('customer');
+    expect(goalEncoded).not.toContain('acme');
+    expect(goalEncoded).not.toContain('.env');
+  });
+
+  it('redacts the entire title when an unquoted absolute path has ambiguous spaces', () => {
+    const titles = [
+      'Inspect /Volumes/Client Data/acme/.env before release',
+      String.raw`Inspect C:\Program Files\Client\secret.txt before release`,
+      String.raw`Inspect \\server\share with space\launch.txt before release`,
+      'Inspect /tmp/My File.txt before release',
+      String.raw`Inspect C:\tmp\My File.txt before release`,
+      String.raw`Inspect \\server\share\My File.txt before release`,
+    ];
+    const proposals = titles.map((title, index): Proposal => ({
+      id: `proposal-ambiguous-path-${index}`,
+      repo: '/private/workspace/ashlr-hub',
+      origin: 'agent',
+      kind: 'patch',
+      title,
+      summary: 'ambiguous path fixture',
+      status: 'awaiting-host-merge',
+      createdAt: '2026-07-03T00:00:00.000Z',
+    }));
+
+    const status = buildFleetLaneLocks({ goals: [], proposals, visibleQueueItems: [] });
+
+    expect(status.samples.map((sample) => sample.title)).toEqual([
+      '[PATH]', '[PATH]', '[PATH]', '[PATH]', '[PATH]', '[PATH]',
+    ]);
+    expect(JSON.stringify(status.samples)).not.toMatch(/Client Data|Program Files|share with space|My File/);
   });
 
   it('surfaces missing verify repo names, project kinds, and reasons', async () => {

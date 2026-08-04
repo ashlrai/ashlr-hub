@@ -363,6 +363,34 @@ const FIXTURE_FLEET_STATUS = {
       guardBlocked: false,
     },
   },
+  laneLocks: {
+    generatedAt: new Date().toISOString(),
+    active: 1,
+    staleInProgress: 0,
+    awaitingHostMerge: 1,
+    unverifiedApplied: 0,
+    lockedVisibleItems: 1,
+    samples: [{
+      lane: 'ashlr-hub#goal:goal-dashboard',
+      repo: 'ashlr-hub',
+      reason: 'active-goal' as const,
+      goalId: 'goal-dashboard',
+      milestoneId: 'goal-dashboard-m0',
+      status: 'in-progress',
+      title: 'Ship lane board',
+      ageMs: 60_000,
+    }],
+    sourceQuality: {
+      sourceState: 'healthy' as const,
+      complete: true,
+      reasons: [],
+      sources: {
+        goals: { sourceState: 'healthy' as const, complete: true, reasons: [] },
+        proposals: { sourceState: 'healthy' as const, complete: true, reasons: [] },
+        queue: { sourceState: 'healthy' as const, complete: true, reasons: [] },
+      },
+    },
+  },
   killed: false,
   autonomousShipReadiness: {
     verdict: 'degraded' as const,
@@ -528,6 +556,12 @@ describe('M210 Panel 1 — Fleet Status: snapshot.daemon', () => {
       malformed: false,
       itemCount: 2,
       itemIds: ['item-owned', 'item-other'],
+    });
+    expect(snap.fleet?.laneLocks).toMatchObject({
+      active: 1,
+      awaitingHostMerge: 1,
+      sourceQuality: { sourceState: 'healthy', complete: true },
+      samples: [expect.objectContaining({ repo: 'ashlr-hub', reason: 'active-goal' })],
     });
     expect(snap.fleet?.queue.shared?.nextLeaseExpiryAt).toBe('2026-07-09T16:00:00.000Z');
     expect(snap.fleet?.queue.shared?.oldestExpiredMs).toBe(125_000);

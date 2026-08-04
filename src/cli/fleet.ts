@@ -342,14 +342,25 @@ export function formatFleetStatus(s: FleetStatus): string {
   }
   if (s.laneLocks) {
     const locks = s.laneLocks;
-    lines.push(
-      `  lane locks:    ${locks.active} active, ${locks.staleInProgress} stale, ` +
-        `${locks.awaitingHostMerge} handoff, ${locks.unverifiedApplied} unverified, ` +
-        `${locks.lockedVisibleItems} visible locked`,
-    );
+    const quality = locks.sourceQuality;
+    if (quality?.sourceState === 'missing') {
+      lines.push(`  lane locks:    unavailable (${quality.reasons.join(', ') || 'source missing'})`);
+    } else {
+      const observed = quality?.sourceState === 'degraded' || quality?.complete === false ? ' observed' : '';
+      lines.push(
+        `  lane locks:    ${locks.active} active${observed}, ${locks.staleInProgress} stale, ` +
+          `${locks.awaitingHostMerge} handoff, ${locks.unverifiedApplied} unverified, ` +
+          `${locks.lockedVisibleItems} visible locked`,
+      );
+      if (observed) {
+        lines.push(`  lane source:   degraded (${quality?.reasons.join(', ') || 'incomplete'})`);
+      }
+    }
     if (locks.samples.length > 0) {
       const sample = locks.samples[0]!;
-      const repo = sample.repo ? sample.repo.split('/').pop() ?? sample.repo : 'unknown';
+      const repo = sample.repo
+        ? sample.repo.replace(/\\/g, '/').split('/').filter(Boolean).pop() ?? sample.repo
+        : 'unknown';
       lines.push(`  lock sample:   ${sample.reason} ${repo} ${sample.lane}`);
     }
   }

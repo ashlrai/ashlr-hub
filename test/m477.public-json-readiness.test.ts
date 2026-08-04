@@ -50,4 +50,33 @@ describe('M477 public JSON graph readiness', () => {
       '~/[REDACTED]': 'workspace=~/src credential=[REDACTED]',
     });
   });
+
+  it('scrubs hostile lane metadata without adding raw work content', () => {
+    const home = homedir();
+    const secret = 'ghp_abcdefghijklmnopqrstuvwxyz123456';
+    const sanitized = sanitizePublicJson({
+      laneLocks: {
+        sourceQuality: {
+          sourceState: 'degraded',
+          complete: false,
+          reasons: ['goals-unreadable'],
+        },
+        samples: [{
+          repo: 'ashlr-hub',
+          lane: 'ashlr-hub#goal:goal-one',
+          title: `Inspect ${secret} at ${home}/private`,
+          reason: 'stale-in-progress',
+          ageMs: 1000,
+        }],
+      },
+    });
+    const encoded = JSON.stringify(sanitized);
+
+    expect(encoded).toContain('"repo":"ashlr-hub"');
+    expect(encoded).toContain('[REDACTED]');
+    expect(encoded).toContain('~/private');
+    expect(encoded).not.toContain(secret);
+    expect(encoded).not.toContain(home);
+    expect(encoded).not.toMatch(/"(prompt|diff|stdout|stderr|output|env|files)"/);
+  });
 });
