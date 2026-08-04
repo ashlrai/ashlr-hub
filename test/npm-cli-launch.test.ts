@@ -3,16 +3,19 @@ import {
   chmodSync,
   closeSync,
   existsSync,
+  linkSync,
+  lstatSync,
   mkdtempSync,
   mkdirSync,
   realpathSync,
   renameSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -355,7 +358,7 @@ describe('shell-free npm CLI launch', () => {
           snapshot.cleanupRoot,
           'directory',
           'inspect-existing',
-          { anchorPath: homedir() },
+          { anchorPath: dirname(snapshot.cleanupRoot) },
         );
       },
     });
@@ -379,13 +382,21 @@ describe('shell-free npm CLI launch', () => {
   it('refuses to traverse a hostile snapshot cleanup reparse entry', () => {
     let cleanupRoot = '';
     let reparsePath = '';
+    let outsideDirectory = '';
+    let outsideSentinel = '';
+    let sentinelBefore: ReturnType<typeof lstatSync> | undefined;
     expect(() => runTrustedNpmCli(['--version'], {}, {
       beforeSpawn: (_launch: unknown, snapshot: { cleanupRoot: string; root: string }) => {
         cleanupRoot = snapshot.cleanupRoot;
+        outsideDirectory = `${cleanupRoot}.outside`;
+        outsideSentinel = join(outsideDirectory, 'sentinel');
+        mkdirSync(outsideDirectory);
+        writeFileSync(outsideSentinel, 'outside sentinel', { mode: 0o400 });
+        sentinelBefore = lstatSync(outsideSentinel);
         reparsePath = join(snapshot.root, 'zzz-cleanup-reparse');
         chmodSync(snapshot.root, 0o700);
         symlinkSync(
-          fixtureOutside(snapshot.root),
+          outsideDirectory,
           reparsePath,
           process.platform === 'win32' ? 'junction' : undefined,
         );
@@ -393,8 +404,41 @@ describe('shell-free npm CLI launch', () => {
     })).toThrow(/npm snapshot cleanup contains (?:a reparse entry|an unsafe directory)/u);
     expect(cleanupRoot).not.toBe('');
     expect(existsSync(cleanupRoot)).toBe(true);
+    const sentinelAfter = lstatSync(outsideSentinel);
+    expect(readFileSync(outsideSentinel, 'utf8')).toBe('outside sentinel');
+    expect(sentinelAfter.dev).toBe(sentinelBefore!.dev);
+    expect(sentinelAfter.ino).toBe(sentinelBefore!.ino);
+    expect(sentinelAfter.mode).toBe(sentinelBefore!.mode);
     unlinkSync(reparsePath);
     rmSync(cleanupRoot, { recursive: true, force: true });
+    rmSync(outsideDirectory, { recursive: true, force: true });
+    expect(existsSync(cleanupRoot)).toBe(false);
+  });
+
+  it('refuses a snapshot hard link without mutating its external inode', () => {
+    let cleanupRoot = '';
+    let hardLinkPath = '';
+    let outsideFile = '';
+    let outsideBefore: ReturnType<typeof lstatSync> | undefined;
+    expect(() => runTrustedNpmCli(['--version'], {}, {
+      beforeSpawn: (_launch: unknown, snapshot: { cleanupRoot: string; root: string }) => {
+        cleanupRoot = snapshot.cleanupRoot;
+        outsideFile = `${cleanupRoot}.outside-file`;
+        writeFileSync(outsideFile, 'outside hard-link sentinel', { mode: 0o400 });
+        outsideBefore = lstatSync(outsideFile);
+        hardLinkPath = join(snapshot.root, 'zzz-cleanup-hardlink');
+        chmodSync(snapshot.root, 0o700);
+        linkSync(outsideFile, hardLinkPath);
+      },
+    })).toThrow('npm snapshot cleanup contains a hard-linked file');
+    const outsideAfter = lstatSync(outsideFile);
+    expect(readFileSync(outsideFile, 'utf8')).toBe('outside hard-link sentinel');
+    expect(outsideAfter.dev).toBe(outsideBefore!.dev);
+    expect(outsideAfter.ino).toBe(outsideBefore!.ino);
+    expect(outsideAfter.mode).toBe(outsideBefore!.mode);
+    unlinkSync(hardLinkPath);
+    rmSync(cleanupRoot, { recursive: true, force: true });
+    unlinkSync(outsideFile);
     expect(existsSync(cleanupRoot)).toBe(false);
   });
 
@@ -410,15 +454,37 @@ describe('shell-free npm CLI launch', () => {
     expect(existsSync(cleanupRoot)).toBe(false);
   });
 
+  it('rejects a persistent snapshot mutation performed during child execution', () => {
+    const fixtureRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-npm-child-mutation-')));
+    tempDirs.push(fixtureRoot);
+    const fakeNode = join(fixtureRoot, 'bin', 'node');
+    const npmRoot = join(fixtureRoot, 'lib', 'node_modules', 'npm');
+    const trustedCli = join(npmRoot, 'bin', 'npm-cli.js');
+    write(fakeNode, 'fixture node identity\n');
+    write(trustedCli, [
+      "const fs = require('node:fs');",
+      "const path = require('node:path');",
+      "const target = path.join(__dirname, '../lib/mutable.js');",
+      'fs.chmodSync(target, 0o600);',
+      "fs.writeFileSync(target, 'mutated');",
+    ].join('\n'));
+    write(join(npmRoot, 'lib', 'mutable.js'), "module.exports = 'validated';\n");
+    write(join(npmRoot, 'package.json'), '{"name":"npm","version":"10.0.0"}\n');
+
+    expect(() => runTrustedNpmCli([], {
+      environment: { npm_execpath: trustedCli },
+    }, {
+      command: process.execPath,
+      execPath: fakeNode,
+      platform: 'linux',
+    })).toThrow('npm snapshot changed during execution');
+  });
+
   it('rejects unbounded npm child timeouts before spawning', () => {
     expect(() => runTrustedNpmCli([], { timeout: 0 })).toThrow('npm CLI timeout is invalid');
     expect(() => runTrustedNpmCli([], { timeout: 180_001 })).toThrow('npm CLI timeout is invalid');
   });
 });
-
-function fixtureOutside(snapshotRoot: string): string {
-  return dirname(dirname(snapshotRoot));
-}
 
 function closeLaunch(launch: ReturnType<typeof resolveNpmCliLaunch>): void {
   const descriptors = [launch.npmCli.descriptor, launch.packageJson.descriptor];

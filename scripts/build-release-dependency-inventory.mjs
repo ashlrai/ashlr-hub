@@ -291,7 +291,15 @@ function removeNpmRuntimeSnapshot(snapshotRoot) {
     const before = lstatSync(path);
     if (before.isSymbolicLink()) throw new Error('npm snapshot cleanup contains a reparse entry');
     if (before.isFile()) {
-      chmodSync(path, 0o600);
+      if (before.nlink !== 1) throw new Error('npm snapshot cleanup contains a hard-linked file');
+      if (process.platform === 'win32') {
+        chmodSync(path, 0o600);
+        const afterChmod = lstatSync(path);
+        if (!afterChmod.isFile() || afterChmod.isSymbolicLink() || afterChmod.nlink !== 1 ||
+          afterChmod.dev !== before.dev || afterChmod.ino !== before.ino) {
+          throw new Error('npm snapshot cleanup file changed during removal');
+        }
+      }
       retryRemoval(() => unlinkSync(path));
       return;
     }
@@ -350,12 +358,36 @@ function assertNpmSnapshotDirectoryIdentity(path, identity) {
   }
 }
 
+function removeExactEmptySnapshotContainer(path, identity) {
+  const current = lstatSync(path);
+  if (!current.isDirectory() || current.isSymbolicLink() ||
+    current.dev !== identity.dev || current.ino !== identity.ino || realpathSync(path) !== path) {
+    throw new Error('unauthoritative npm snapshot container changed before refusal');
+  }
+  const handle = opendirSync(path);
+  let entry;
+  try {
+    entry = handle.readSync();
+  } finally {
+    handle.closeSync();
+  }
+  if (entry !== null) throw new Error('unauthoritative npm snapshot container is not empty');
+  chmodSync(path, 0o700);
+  const after = lstatSync(path);
+  if (!after.isDirectory() || after.isSymbolicLink() ||
+    after.dev !== identity.dev || after.ino !== identity.ino || realpathSync(path) !== path) {
+    throw new Error('unauthoritative npm snapshot container changed during refusal');
+  }
+  rmdirSync(path);
+}
+
 function createNpmRuntimeSnapshotContainer() {
   const parent = realpathSync(process.platform === 'win32' ? homedir() : tmpdir());
   const snapshotRoot = realpathSync(mkdtempSync(join(parent, '.ashlr-npm-runtime-')));
+  const before = lstatSync(snapshotRoot);
+  let authorityEstablished = false;
   try {
     chmodSync(snapshotRoot, 0o700);
-    const before = lstatSync(snapshotRoot);
     if (!before.isDirectory() || before.isSymbolicLink() || realpathSync(snapshotRoot) !== snapshotRoot) {
       throw new Error('npm snapshot container is unsafe');
     }
@@ -368,9 +400,11 @@ function createNpmRuntimeSnapshotContainer() {
       after.dev !== before.dev || after.ino !== before.ino || realpathSync(snapshotRoot) !== snapshotRoot) {
       throw new Error('npm snapshot container changed during storage assurance');
     }
+    authorityEstablished = true;
     return snapshotRoot;
   } catch (error) {
-    removeNpmRuntimeSnapshot(snapshotRoot);
+    if (authorityEstablished) removeNpmRuntimeSnapshot(snapshotRoot);
+    else removeExactEmptySnapshotContainer(snapshotRoot, before);
     throw error;
   }
 }
@@ -531,6 +565,9 @@ export function runTrustedNpmCli(args, options = {}, runtime = {}) {
         timeout,
       },
     );
+    if (observeNpmRuntimeClosure(snapshot.root) !== snapshot.snapshotClosureSha256) {
+      throw new Error('npm snapshot changed during execution');
+    }
     assertOpenFileIsCurrent(launch.npmCli);
     assertOpenFileIsCurrent(launch.packageJson);
     if (observeNpmRuntimeClosure(launch.npmRoot) !== launch.npmRuntimeClosureSha256) {
