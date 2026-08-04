@@ -31,13 +31,13 @@ jobs:
         include:
           - os: ubuntu-latest
             label: ubuntu, authority 1/3
-            node_version: "22.15.0"
             test_args: "--shard=1/3"
           - os: ubuntu-latest
             label: ubuntu, authority 2/3
             test_args: "--shard=2/3"
           - os: ubuntu-latest
             label: ubuntu, authority 3/3
+            node_version: "22.15.0"
             test_args: "--shard=3/3"
           - os: windows-latest
             label: windows, portability 1/3
