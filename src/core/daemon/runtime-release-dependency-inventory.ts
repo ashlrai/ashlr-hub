@@ -26,6 +26,7 @@ export const RUNTIME_RELEASE_DEPENDENCY_INVENTORY_SCHEMA_VERSION = 2 as const;
 
 const INVENTORY_DIGEST_DOMAIN = 'ashlr:runtime-release-dependency-inventory:v2';
 const PACKAGE_CONTENT_DIGEST_DOMAIN = 'ashlr:runtime-release-dependency-package-content:v1';
+const PACKAGE_ARCHIVE_MODE_DIGEST_DOMAIN = 'ashlr:runtime-release-dependency-archive-mode:v1';
 export const RUNTIME_RELEASE_INSTALLED_DEPENDENCY_TREE_DIGEST_DOMAIN_V2 =
   'ashlr:runtime-release-installed-dependency-tree:v2' as const;
 const MAX_INVENTORY_BYTES = 512 * 1024;
@@ -43,6 +44,7 @@ const PACKAGE_NAME_RE = /^(?:@[a-z0-9._~-]+\/[a-z0-9._~-]+|[a-z0-9._~-]+)$/i;
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
 export interface RuntimeReleaseDependencyInventoryPackageV1 {
+  archiveModeSha256: string;
   contentSha256: string;
   fileCount: number;
   name: string;
@@ -88,10 +90,17 @@ export type ObserveInstalledRuntimeDependenciesResult =
 
 export interface BuildRuntimeReleaseDependencyInventoryOptions {
   /** Exact root npm-pack file report; omitted only for already-normalized fixtures. */
-  packagedFiles?: readonly string[];
+  packagedFiles?: readonly RuntimeReleasePackFileRecord[];
+}
+
+export interface RuntimeReleasePackFileRecord {
+  mode: number;
+  path: string;
+  size: number;
 }
 
 interface PackageSnapshot {
+  archiveModeSha256: string;
   contentSha256: string;
   fileCount: number;
   identitySha256: string;
@@ -102,6 +111,12 @@ interface PackageSnapshot {
 
 interface DependencyFileContent {
   executable: boolean;
+  path: string;
+  sha256: string;
+  size: number;
+}
+
+interface PackageFileContent {
   path: string;
   sha256: string;
   size: number;
@@ -193,6 +208,7 @@ function sameSnapshot(left: BigIntStats, right: BigIntStats): boolean {
 }
 
 function requireSafePortableMode(stat: BigIntStats, label: string, directory = false): void {
+  if (process.platform === 'win32') return;
   if ((stat.mode & 0o7000n) !== 0n || (stat.mode & 0o400n) === 0n ||
     (directory && (stat.mode & 0o100n) === 0n)) {
     throw new Error(`${label} has an unsafe mode`);
@@ -357,6 +373,25 @@ function packageIsPortable(packageJson: Record<string, unknown>, files: string[]
   }
 }
 
+function portablePackageBinPaths(packageJson: Record<string, unknown>, label: string): Set<string> {
+  const declared = packageJson['bin'];
+  if (declared === undefined) return new Set();
+  const values: unknown[] = typeof declared === 'string'
+    ? [declared]
+    : isPlainRecord(declared)
+      ? Object.values(declared)
+      : [];
+  if (values.length === 0 || values.some((value) => typeof value !== 'string')) {
+    throw new Error(`${label} bin declaration is invalid`);
+  }
+  const paths = (values as string[]).map((value) => value.replace(/^\.\//u, ''));
+  if (paths.some((path) => !isBoundedText(path) || path.includes('\\') || isAbsolute(path) ||
+    path.split('/').some((segment) => !segment || segment === '.' || segment === '..'))) {
+    throw new Error(`${label} bin declaration is invalid`);
+  }
+  return new Set(paths);
+}
+
 function rootPackageIsPortable(
   packageJson: Record<string, unknown>,
   packagedFiles: readonly string[],
@@ -395,13 +430,14 @@ function scanPackageDirectory(
   expectedName: string,
   expectedVersion: string,
   checkpoint: DependencyObservationCheckpoint = () => {},
-  includedFiles?: ReadonlySet<string>,
+  includedFiles?: ReadonlyMap<string, RuntimeReleasePackFileRecord>,
 ): PackageSnapshot {
   checkpoint();
   const root = canonicalRoot(packageRoot, `runtime dependency ${expectedName}`);
   const rootBefore = lstatSync(root, { bigint: true });
   requireSafePortableMode(rootBefore, `runtime dependency ${expectedName}`, true);
-  const files: DependencyFileContent[] = [];
+  const files: PackageFileContent[] = [];
+  const hostExecutablePaths = new Set<string>();
   const identities: Array<{ path: string; identity: string }> = [];
   let totalBytes = 0;
   let packageJsonBytes: Buffer | undefined;
@@ -438,7 +474,8 @@ function scanPackageDirectory(
         continue;
       }
       if (!stat.isFile()) throw new Error('runtime dependency tree contains a non-file entry');
-      if (includedFiles && !includedFiles.has(relativePath)) continue;
+      const packagedFile = includedFiles?.get(relativePath);
+      if (includedFiles && !packagedFile) continue;
       const maxBytes = relativePath === 'package.json'
         ? MAX_PACKAGE_JSON_BYTES
         : MAX_FILE_BYTES;
@@ -453,14 +490,17 @@ function scanPackageDirectory(
         checkpoint,
       );
       if (relativePath === 'package.json') packageJsonBytes = Buffer.from(bytes);
+      if (packagedFile && packagedFile.size !== bytes.length) {
+        throw new Error(`runtime dependency ${expectedName} npm pack size does not match source bytes`);
+      }
       totalBytes += bytes.length;
       if (totalBytes > MAX_TOTAL_BYTES) throw new Error('runtime dependency package bytes exceed limit');
       files.push({
-        executable: (stat.mode & 0o111n) !== 0n,
         path: relativePath,
         sha256: createHash('sha256').update(bytes).digest('hex'),
         size: bytes.length,
       });
+      if ((stat.mode & 0o111n) !== 0n) hostExecutablePaths.add(relativePath);
       identities.push({
         path: relativePath,
         identity: [stat.dev, stat.ino, stat.mode, stat.nlink, stat.size, stat.mtimeNs, stat.ctimeNs]
@@ -472,7 +512,7 @@ function scanPackageDirectory(
   };
   visit(root, '', 0);
   if (includedFiles && canonicalJson(files.map((entry) => entry.path).sort()) !==
-    canonicalJson([...includedFiles].sort())) {
+    canonicalJson([...includedFiles.keys()].sort())) {
     throw new Error(`runtime dependency ${expectedName} packaged file set is unavailable`);
   }
   checkpoint('after-package-traversal');
@@ -483,12 +523,25 @@ function scanPackageDirectory(
   if (packageJson['name'] !== expectedName || packageJson['version'] !== expectedVersion) {
     throw new Error(`runtime dependency ${expectedName} identity does not match inventory`);
   }
+  const binPaths = portablePackageBinPaths(packageJson, `runtime dependency ${expectedName}`);
+  const filePaths = new Set(files.map((entry) => entry.path));
+  if ([...binPaths].some((path) => !filePaths.has(path))) {
+    throw new Error(`runtime dependency ${expectedName} bin target is not packaged`);
+  }
+  const archiveModes = files.map((file) => ({
+    mode: includedFiles?.get(file.path)?.mode ??
+      (process.platform === 'win32'
+        ? (binPaths.has(file.path) ? 0o755 : 0o644)
+        : (hostExecutablePaths.has(file.path) ? 0o755 : 0o644)),
+    path: file.path,
+  }));
   packageIsPortable(packageJson, files.map((entry) => entry.path), `runtime dependency ${expectedName}`);
   const rootAfter = lstatSync(root, { bigint: true });
   if (!sameSnapshot(rootBefore, rootAfter) || realpathSync(root) !== root) {
     throw new Error(`runtime dependency ${expectedName} root changed during scan`);
   }
   return {
+    archiveModeSha256: digest(PACKAGE_ARCHIVE_MODE_DIGEST_DOMAIN, archiveModes),
     contentSha256: digest(PACKAGE_CONTENT_DIGEST_DOMAIN, files),
     fileCount: files.length,
     identitySha256: digest(PACKAGE_CONTENT_DIGEST_DOMAIN, identities),
@@ -519,21 +572,43 @@ function rootDependencyEntries(packageJson: Record<string, unknown>): Array<{ na
   return output;
 }
 
+function normalizePackagedFiles(
+  packagedFiles: readonly RuntimeReleasePackFileRecord[] | undefined,
+): readonly RuntimeReleasePackFileRecord[] | undefined {
+  if (!packagedFiles) return undefined;
+  const output: RuntimeReleasePackFileRecord[] = [];
+  const seen = new Set<string>();
+  for (const value of packagedFiles as readonly unknown[]) {
+    if (!isPlainRecord(value) || !hasExactKeys(value, ['mode', 'path', 'size'])) {
+      throw new Error('npm pack file report is invalid');
+    }
+    const path = value['path'];
+    const size = value['size'];
+    const mode = value['mode'];
+    if (!isBoundedText(path) || path.includes('\\') || path.startsWith('/') ||
+      path.split('/').some((segment) => !segment || segment === '.' || segment === '..') ||
+      !Number.isSafeInteger(size) || (size as number) < 0 || (size as number) > MAX_FILE_BYTES ||
+      !Number.isSafeInteger(mode) || (mode !== 0o644 && mode !== 0o755) ||
+      seen.has(path)) {
+      throw new Error('npm pack file report is invalid');
+    }
+    output.push({ mode: mode as number, path, size: size as number });
+    seen.add(path);
+  }
+  return output.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+}
+
 function partitionPackagedFiles(
   lockPaths: readonly string[],
-  packagedFiles: readonly string[] | undefined,
-): Map<string, Set<string>> | undefined {
+  packagedFiles: readonly RuntimeReleasePackFileRecord[] | undefined,
+): Map<string, Map<string, RuntimeReleasePackFileRecord>> | undefined {
   if (!packagedFiles) return undefined;
-  const output = new Map(lockPaths.map((path) => [path, new Set<string>()]));
+  const output = new Map(lockPaths.map((path) => [path, new Map<string, RuntimeReleasePackFileRecord>()]));
   const packagePrefixes = lockPaths
     .map((path) => ({ path, prefix: `node_modules/${path}/` }))
     .sort((left, right) => right.prefix.length - left.prefix.length);
-  const seen = new Set<string>();
-  for (const path of packagedFiles) {
-    if (!isBoundedText(path) || path.includes('\\') || path.includes('\0') || seen.has(path)) {
-      throw new Error('npm pack dependency file report is invalid');
-    }
-    seen.add(path);
+  for (const packagedFile of packagedFiles) {
+    const { path } = packagedFile;
     if (!path.startsWith('node_modules/')) continue;
     const owner = packagePrefixes.find((entry) => path.startsWith(entry.prefix));
     if (!owner) throw new Error('npm pack contains a runtime dependency outside the lock closure');
@@ -542,7 +617,7 @@ function partitionPackagedFiles(
       !segment || segment === '.' || segment === '..')) {
       throw new Error('npm pack dependency file path is invalid');
     }
-    output.get(owner.path)!.add(relativePath);
+    output.get(owner.path)!.set(relativePath, packagedFile);
   }
   for (const [path, files] of output) {
     if (!files.has('package.json')) {
@@ -569,9 +644,11 @@ function buildInventory(
     throw new Error('release package identity is invalid');
   }
   const rootDependencies = rootDependencyEntries(packageJson);
+  const packagedFiles = normalizePackagedFiles(options.packagedFiles);
   rootPackageIsPortable(
     packageJson,
-    (options.packagedFiles ?? [])
+    (packagedFiles ?? [])
+      .map((entry) => entry.path)
       .filter((path) => !path.startsWith('node_modules/')),
   );
   const lock = parseJsonObject(
@@ -602,7 +679,7 @@ function buildInventory(
   }
   const packagedFilesByPath = partitionPackagedFiles(
     runtimeEntries.map(([lockPath]) => packagePathFromLockPath(lockPath)),
-    options.packagedFiles,
+    packagedFiles,
   );
   const packages: RuntimeReleaseDependencyInventoryPackageV1[] = [];
   for (const [lockPath, metadata] of runtimeEntries) {
@@ -619,6 +696,7 @@ function buildInventory(
       packagedFilesByPath?.get(path),
     );
     packages.push({
+      archiveModeSha256: snapshot.archiveModeSha256,
       contentSha256: snapshot.contentSha256,
       fileCount: snapshot.fileCount,
       name: snapshot.name,
@@ -713,12 +791,13 @@ function validateInventory(value: unknown): RuntimeReleaseDependencyInventoryV2 
   let previousPath: string | null = null;
   const packages = packagesValue.map((entry): RuntimeReleaseDependencyInventoryPackageV1 => {
     if (!isPlainRecord(entry) || !hasExactKeys(entry, [
-      'contentSha256', 'fileCount', 'name', 'path', 'size', 'version',
+      'archiveModeSha256', 'contentSha256', 'fileCount', 'name', 'path', 'size', 'version',
     ]) || !isBoundedText(entry['path']) || !isBoundedText(entry['name'], 256) ||
       !PACKAGE_NAME_RE.test(entry['name']) ||
       packagePathFromLockPath(`node_modules/${entry['path']}`) !== entry['path'] ||
       packageNameFromPath(entry['path']) !== entry['name'] ||
-      !isBoundedText(entry['version'], 128) || typeof entry['contentSha256'] !== 'string' ||
+      !isBoundedText(entry['version'], 128) || typeof entry['archiveModeSha256'] !== 'string' ||
+      !SHA256_RE.test(entry['archiveModeSha256']) || typeof entry['contentSha256'] !== 'string' ||
       !SHA256_RE.test(entry['contentSha256']) || !Number.isSafeInteger(entry['fileCount']) ||
       (entry['fileCount'] as number) <= 0 || (entry['fileCount'] as number) > MAX_FILES_PER_PACKAGE ||
       !Number.isSafeInteger(entry['size']) || (entry['size'] as number) < 0 ||
@@ -732,6 +811,7 @@ function validateInventory(value: unknown): RuntimeReleaseDependencyInventoryV2 
     }
     previousPath = entry['path'];
     return {
+      archiveModeSha256: entry['archiveModeSha256'],
       contentSha256: entry['contentSha256'],
       fileCount: entry['fileCount'] as number,
       name: entry['name'],
