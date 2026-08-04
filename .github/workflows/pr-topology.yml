@@ -39,6 +39,10 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Install trusted auditor dependencies
+        working-directory: trusted-auditor
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
       - name: Inspect open PR topology without mutation
         env:
           GH_TOKEN: ${{ github.token }}

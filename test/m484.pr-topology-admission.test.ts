@@ -1021,8 +1021,14 @@ describe('M484 shadow workflow policy', () => {
   });
 
   it('keeps audit failure fail-closed while still publishing the bounded summary', () => {
+    const install = steps.find((step) => step.name === 'Install trusted auditor dependencies');
     const inspect = steps.find((step) => step.name === 'Inspect open PR topology without mutation');
     const summary = steps.find((step) => step.name === 'Publish bounded shadow summary');
+    expect(install).toEqual({
+      name: 'Install trusted auditor dependencies',
+      'working-directory': 'trusted-auditor',
+      run: 'npm ci --ignore-scripts --no-audit --no-fund',
+    });
     expect(inspect).not.toHaveProperty('continue-on-error');
     expect(inspect.run).toContain('node trusted-auditor/scripts/check-pr-topology.mjs');
     expect(inspect.run).toContain('--json-out pr-topology.json');
