@@ -24,7 +24,11 @@ import {
   removeExactEmptySnapshotContainer,
   runTrustedNpmCli,
 } from '../scripts/build-release-dependency-inventory.mjs';
-import { assurePrivateStoragePath } from '../src/core/util/private-storage.js';
+import {
+  _setPrivateStorageTestControlForTest,
+  assurePrivateStoragePath,
+  PRIVATE_STORAGE_TEST_CONTROL,
+} from '../src/core/util/private-storage.js';
 
 const tempDirs: string[] = [];
 
@@ -34,6 +38,7 @@ function write(path: string, value: string): void {
 }
 
 afterEach(() => {
+  _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
   for (const directory of tempDirs.splice(0)) {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -389,18 +394,24 @@ describe('shell-free npm CLI launch', () => {
 
   it.runIf(process.platform === 'win32')('uses an exact private Windows snapshot DACL', () => {
     let assurance: ReturnType<typeof assurePrivateStoragePath> | undefined;
+    const timeouts: number[] = [];
+    _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+      observeInvocation: (invocation) => timeouts.push(invocation.timeoutMs),
+    });
     const result = runTrustedNpmCli(['--version'], {}, {
       beforeSpawn: (_launch: unknown, snapshot: { cleanupRoot: string }) => {
         assurance = assurePrivateStoragePath(
           snapshot.cleanupRoot,
           'directory',
           'inspect-existing',
-          { anchorPath: dirname(snapshot.cleanupRoot) },
+          { anchorPath: dirname(snapshot.cleanupRoot), timeoutMs: 15_000 },
         );
       },
     });
     expect(result.status).toBe(0);
     expect(assurance).toEqual({ ok: true, reason: 'exact-private-dacl' });
+    expect(timeouts.length).toBeGreaterThanOrEqual(4);
+    expect(timeouts).toEqual(timeouts.map(() => 15_000));
   });
 
   it.runIf(process.platform === 'win32')('rejects a permissive snapshot DACL before spawning', () => {

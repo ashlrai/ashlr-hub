@@ -38,6 +38,7 @@ const MAX_NPM_RUNTIME_DEPTH = 48;
 const MAX_NPM_RUNTIME_SCAN_MS = 30_000;
 const MAX_NPM_CLI_TIMEOUT_MS = 180_000;
 const MAX_NPM_SNAPSHOT_CLEANUP_MS = 30_000;
+const WINDOWS_NPM_SNAPSHOT_AUTHORITY_TIMEOUT_MS = 15_000;
 const NPM_CLI_BOOTSTRAP = [
   "const fs = require('node:fs');",
   "const path = require('node:path');",
@@ -341,7 +342,10 @@ function removeNpmRuntimeSnapshot(snapshotRoot) {
 }
 
 function assertNpmSnapshotDirectory(path, identity, anchorPath) {
-  const assurance = assurePrivateStoragePath(path, 'directory', 'inspect-existing', { anchorPath });
+  const assurance = assurePrivateStoragePath(path, 'directory', 'inspect-existing', {
+    anchorPath,
+    timeoutMs: WINDOWS_NPM_SNAPSHOT_AUTHORITY_TIMEOUT_MS,
+  });
   if (!assurance.ok) throw new Error(`npm snapshot storage changed: ${assurance.reason}`);
   const current = lstatSync(path);
   if (!current.isDirectory() || current.isSymbolicLink() ||
@@ -393,6 +397,7 @@ function createNpmRuntimeSnapshotContainer() {
     }
     const assurance = assurePrivateStoragePath(snapshotRoot, 'directory', 'secure-created', {
       anchorPath: parent,
+      timeoutMs: WINDOWS_NPM_SNAPSHOT_AUTHORITY_TIMEOUT_MS,
     });
     if (!assurance.ok) throw new Error(`npm snapshot container is unsafe: ${assurance.reason}`);
     const after = lstatSync(snapshotRoot);
