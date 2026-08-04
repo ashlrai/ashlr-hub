@@ -21,6 +21,7 @@ import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   resolveNpmCliLaunch,
+  removeExactEmptySnapshotContainer,
   runTrustedNpmCli,
 } from '../scripts/build-release-dependency-inventory.mjs';
 import { assurePrivateStoragePath } from '../src/core/util/private-storage.js';
@@ -148,14 +149,50 @@ describe('shell-free npm CLI launch', () => {
         write(transitiveCli, original);
       },
     });
-    if (process.platform === 'win32') {
-      const result = run();
+    let result: ReturnType<typeof run> | undefined;
+    let failure: Error | undefined;
+    try {
+      result = run();
+    } catch (error) {
+      failure = error instanceof Error ? error : new Error(String(error));
+    }
+    if (failure !== undefined) {
+      expect(failure.message).toContain('npm runtime closure changed during execution');
+    } else {
+      expect(result).toBeDefined();
       expect(result.status).toBe(0);
       expect(result.stdout).toBe('validated runtime');
-    } else {
-      expect(run).toThrow('npm runtime closure changed during execution');
     }
     expect(existsSync(replacementMarker)).toBe(false);
+  });
+
+  it('removes only an exact pinned empty pre-authority snapshot container', () => {
+    const fixtureRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-npm-empty-refusal-')));
+    tempDirs.push(fixtureRoot);
+
+    const empty = join(fixtureRoot, 'empty');
+    mkdirSync(empty);
+    removeExactEmptySnapshotContainer(empty, lstatSync(empty));
+    expect(existsSync(empty)).toBe(false);
+
+    const populated = join(fixtureRoot, 'populated');
+    const populatedFile = join(populated, 'sentinel');
+    mkdirSync(populated);
+    writeFileSync(populatedFile, 'preserve');
+    expect(() => removeExactEmptySnapshotContainer(populated, lstatSync(populated)))
+      .toThrow('unauthoritative npm snapshot container is not empty');
+    expect(readFileSync(populatedFile, 'utf8')).toBe('preserve');
+
+    const replaced = join(fixtureRoot, 'replaced');
+    const displaced = join(fixtureRoot, 'displaced');
+    mkdirSync(replaced);
+    const replacedIdentity = lstatSync(replaced);
+    renameSync(replaced, displaced);
+    mkdirSync(replaced);
+    expect(() => removeExactEmptySnapshotContainer(replaced, replacedIdentity))
+      .toThrow('unauthoritative npm snapshot container changed before refusal');
+    expect(existsSync(replaced)).toBe(true);
+    expect(existsSync(displaced)).toBe(true);
   });
 
   it('rejects an enclosing-directory ABA that restores the validated npm closure', () => {
