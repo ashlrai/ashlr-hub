@@ -218,6 +218,7 @@ describe('M30 CI workflow', () => {
         'test/m220.anticlog-verdict-feedback.test.ts',
         'test/m286.worktree-verify-env.test.ts',
         'test/m299.web-fleet-control.test.ts',
+        'test/npm-cli-launch.test.ts',
         observerSchedulerTest,
         'test/m379.private-storage.test.ts',
         'test/m385.cutoff-checkpoint-scheduler.test.ts',

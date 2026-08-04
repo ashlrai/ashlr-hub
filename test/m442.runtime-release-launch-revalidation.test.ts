@@ -86,7 +86,7 @@ function readFileNames(path: string): string[] {
   return readdirSync(path);
 }
 
-function fixture(declaredRollbackTargetDigest?: string): Fixture {
+function fixture(declaredRollbackTargetDigest?: string, includeDependencyBinLink = false): Fixture {
   const parent = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-launch-revalidation-')));
   tempDirs.push(parent);
   const packageRoot = join(parent, REVISION);
@@ -126,6 +126,10 @@ function fixture(declaredRollbackTargetDigest?: string): Fixture {
     join(packageRoot, ...RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH.split('/')),
     inventory.canonicalJson,
   );
+  if (includeDependencyBinLink && process.platform !== 'win32') {
+    mkdirSync(join(dependencyRoot, '.bin'));
+    symlinkSync('../example/index.js', join(dependencyRoot, '.bin', 'example'));
+  }
   const interpreterPath = join(parent, 'node');
   write(interpreterPath, 'fixture node binary\n', 0o755);
 
@@ -524,7 +528,7 @@ describe('runtime release closed launch-input observation', () => {
       );
       expect(observeRuntimeReleaseImmutableStagedTree(stageOptions(linkedInode))).toEqual({
         ok: false,
-        reason: 'runtime release dependency root has multiple hard links',
+        reason: 'runtime dependency file has multiple hard links',
       });
     }
 
@@ -583,6 +587,43 @@ describe('runtime release closed launch-input observation', () => {
     });
     expect(replaced).toBe(true);
   });
+
+  it('compares the complete dependency root with signer-bound manifest evidence', () => {
+    const release = fixture();
+    let injected = false;
+    const options = stageOptions(release) as ReturnType<typeof stageOptions> & {
+      __testHooks?: { afterManifestVerification?: () => void };
+    };
+    options.__testHooks = {
+      afterManifestVerification: () => {
+        if (injected) return;
+        injected = true;
+        chmodSync(release.dependencyRoot, 0o755);
+        const binRoot = join(release.dependencyRoot, '.bin');
+        mkdirSync(binRoot);
+        write(join(binRoot, 'injected'), '#!/usr/bin/env node\n', 0o555);
+        chmodSync(binRoot, 0o555);
+        chmodSync(release.dependencyRoot, 0o555);
+      },
+    };
+
+    expect(observeRuntimeReleaseImmutableStagedTree(options)).toEqual({
+      ok: false,
+      reason: 'runtime release dependency root does not match signed manifest',
+    });
+    expect(injected).toBe(true);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'admits a signer-bound canonical npm dependency bin link',
+    () => {
+      const release = fixture(undefined, true);
+      const observed = observeRuntimeReleaseImmutableStagedTree(stageOptions(release));
+      expect(observed.ok).toBe(true);
+      if (!observed.ok) return;
+      expect(observed.receipt.roots.dependencyRootSha256).toMatch(/^[a-f0-9]{64}$/u);
+    },
+  );
 
   it('expires the launch budget after manifest verification and before artifact traversal', () => {
     const release = fixture();

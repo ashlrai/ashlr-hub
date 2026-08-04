@@ -6,12 +6,13 @@ import {
   lstatSync,
   openSync,
   opendirSync,
+  readlinkSync,
   realpathSync,
   readSync,
   statSync,
   type BigIntStats,
 } from 'node:fs';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 /**
  * The source lockfile selects the build-time runtime closure only. Published
@@ -25,7 +26,8 @@ export const RUNTIME_RELEASE_DEPENDENCY_INVENTORY_SCHEMA_VERSION = 1 as const;
 
 const INVENTORY_DIGEST_DOMAIN = 'ashlr:runtime-release-dependency-inventory:v1';
 const PACKAGE_CONTENT_DIGEST_DOMAIN = 'ashlr:runtime-release-dependency-package-content:v1';
-const INSTALLED_TREE_DIGEST_DOMAIN = 'ashlr:runtime-release-installed-dependency-tree:v1';
+export const RUNTIME_RELEASE_INSTALLED_DEPENDENCY_TREE_DIGEST_DOMAIN_V2 =
+  'ashlr:runtime-release-installed-dependency-tree:v2' as const;
 const MAX_INVENTORY_BYTES = 512 * 1024;
 const MAX_LOCKFILE_BYTES = 16 * 1024 * 1024;
 const MAX_PACKAGE_JSON_BYTES = 1024 * 1024;
@@ -96,6 +98,21 @@ interface PackageSnapshot {
   size: number;
   version: string;
 }
+
+interface DependencyFileContent {
+  executable: boolean;
+  path: string;
+  sha256: string;
+  size: number;
+}
+
+interface DependencyBinLinkContent {
+  linkTarget: string;
+  path: string;
+  symlink: true;
+}
+
+type DependencyObservationCheckpoint = (phase?: string) => void;
 
 function canonicalize(value: unknown, ancestors: Set<object>): JsonValue | undefined {
   if (value === undefined) return undefined;
@@ -174,15 +191,24 @@ function sameSnapshot(left: BigIntStats, right: BigIntStats): boolean {
     left.size === right.size && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
 }
 
+function requireSafePortableMode(stat: BigIntStats, label: string, directory = false): void {
+  if ((stat.mode & 0o7000n) !== 0n || (stat.mode & 0o400n) === 0n ||
+    (directory && (stat.mode & 0o100n) === 0n)) {
+    throw new Error(`${label} has an unsafe mode`);
+  }
+}
+
 function stableFileBytes(
   path: string,
   label: string,
   maxBytes: number,
-  checkpoint: () => void = () => {},
+  checkpoint: DependencyObservationCheckpoint = () => {},
 ): Buffer {
   checkpoint();
   const before = lstatSync(path, { bigint: true });
   if (!before.isFile() || before.isSymbolicLink()) throw new Error(`${label} is not a regular file`);
+  if (before.nlink !== 1n) throw new Error(`${label} has multiple hard links`);
+  requireSafePortableMode(before, label);
   if (before.size > BigInt(maxBytes)) throw new Error(`${label} exceeds byte limit`);
   const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
   const fd = openSync(path, fsConstants.O_RDONLY | noFollow);
@@ -191,6 +217,8 @@ function stableFileBytes(
     if (!openedBefore.isFile() || openedBefore.dev !== before.dev || openedBefore.ino !== before.ino) {
       throw new Error(`${label} changed before read`);
     }
+    if (openedBefore.nlink !== 1n) throw new Error(`${label} has multiple hard links`);
+    requireSafePortableMode(openedBefore, label);
     const expectedBytes = Number(openedBefore.size);
     const bytes = Buffer.allocUnsafe(expectedBytes);
     let offset = 0;
@@ -209,6 +237,11 @@ function stableFileBytes(
     if (!sameSnapshot(openedBefore, openedAfter) || !sameSnapshot(openedAfter, after)) {
       throw new Error(`${label} changed during read`);
     }
+    if (openedAfter.nlink !== 1n || after.nlink !== 1n) {
+      throw new Error(`${label} has multiple hard links`);
+    }
+    requireSafePortableMode(openedAfter, label);
+    requireSafePortableMode(after, label);
     return bytes;
   } finally {
     closeSync(fd);
@@ -242,6 +275,38 @@ function canonicalRoot(path: string, label: string): string {
 function isContained(root: string, candidate: string): boolean {
   const nested = relative(root, candidate);
   return nested !== '' && nested !== '..' && !nested.startsWith(`..${sep}`) && !isAbsolute(nested);
+}
+
+function observeDependencyBinLink(
+  dependencyRoot: string,
+  path: string,
+  logicalPath: string,
+): DependencyBinLinkContent {
+  if (!logicalPath.startsWith('.bin/') || logicalPath.slice('.bin/'.length).includes('/')) {
+    throw new Error('installed dependency tree contains a symlink');
+  }
+  const before = lstatSync(path, { bigint: true });
+  if (!before.isSymbolicLink()) throw new Error('installed dependency bin link changed before read');
+  const linkTarget = readlinkSync(path, 'utf8');
+  if (!isBoundedText(linkTarget) || isAbsolute(linkTarget) || linkTarget.includes('\0') ||
+    linkTarget.includes('\\')) {
+    throw new Error('installed dependency bin link target is invalid');
+  }
+  const targetPath = resolve(dirname(path), linkTarget);
+  const targetRealPath = realpathSync(targetPath);
+  if (!isContained(dependencyRoot, targetRealPath) || targetRealPath !== targetPath) {
+    throw new Error('installed dependency bin link escapes dependency root');
+  }
+  const target = lstatSync(targetPath, { bigint: true });
+  if (!target.isFile() || target.isSymbolicLink() || target.nlink !== 1n) {
+    throw new Error('installed dependency bin link target is unsafe');
+  }
+  requireSafePortableMode(target, 'installed dependency bin link target');
+  const after = lstatSync(path, { bigint: true });
+  if (!sameSnapshot(before, after) || readlinkSync(path, 'utf8') !== linkTarget) {
+    throw new Error('installed dependency bin link changed during read');
+  }
+  return { linkTarget, path: logicalPath, symlink: true };
 }
 
 function packagePathFromLockPath(value: string): string {
@@ -295,14 +360,17 @@ function scanPackageDirectory(
   packageRoot: string,
   expectedName: string,
   expectedVersion: string,
-  checkpoint: () => void = () => {},
+  checkpoint: DependencyObservationCheckpoint = () => {},
   includedFiles?: ReadonlySet<string>,
 ): PackageSnapshot {
   checkpoint();
   const root = canonicalRoot(packageRoot, `runtime dependency ${expectedName}`);
-  const files: Array<{ path: string; sha256: string; size: number }> = [];
+  const rootBefore = lstatSync(root, { bigint: true });
+  requireSafePortableMode(rootBefore, `runtime dependency ${expectedName}`, true);
+  const files: DependencyFileContent[] = [];
   const identities: Array<{ path: string; identity: string }> = [];
   let totalBytes = 0;
+  let packageJsonBytes: Buffer | undefined;
   const visit = (directory: string, relativeDirectory: string, depth: number): void => {
     checkpoint();
     if (depth > MAX_DEPTH) throw new Error('runtime dependency traversal depth exceeds limit');
@@ -310,6 +378,7 @@ function scanPackageDirectory(
     if (!before.isDirectory() || before.isSymbolicLink()) {
       throw new Error('runtime dependency tree contains an unsafe directory');
     }
+    requireSafePortableMode(before, 'runtime dependency directory', true);
     const entries = [];
     const handle = opendirSync(directory);
     try {
@@ -330,31 +399,37 @@ function scanPackageDirectory(
       const stat = lstatSync(absolute, { bigint: true });
       if (stat.isSymbolicLink()) throw new Error('runtime dependency tree contains a symlink');
       if (stat.isDirectory()) {
+        requireSafePortableMode(stat, 'runtime dependency directory', true);
         visit(absolute, relativePath, depth + 1);
         continue;
       }
       if (!stat.isFile()) throw new Error('runtime dependency tree contains a non-file entry');
       if (includedFiles && !includedFiles.has(relativePath)) continue;
-      if (stat.size > BigInt(MAX_FILE_BYTES)) throw new Error('runtime dependency file exceeds byte limit');
+      const maxBytes = relativePath === 'package.json'
+        ? MAX_PACKAGE_JSON_BYTES
+        : MAX_FILE_BYTES;
+      if (stat.size > BigInt(maxBytes)) throw new Error('runtime dependency file exceeds byte limit');
       if (files.length >= MAX_FILES_PER_PACKAGE) {
         throw new Error('runtime dependency package file count exceeds limit');
       }
       const bytes = stableFileBytes(
         absolute,
         'runtime dependency file',
-        MAX_FILE_BYTES,
+        maxBytes,
         checkpoint,
       );
+      if (relativePath === 'package.json') packageJsonBytes = Buffer.from(bytes);
       totalBytes += bytes.length;
       if (totalBytes > MAX_TOTAL_BYTES) throw new Error('runtime dependency package bytes exceed limit');
       files.push({
+        executable: (stat.mode & 0o111n) !== 0n,
         path: relativePath,
         sha256: createHash('sha256').update(bytes).digest('hex'),
         size: bytes.length,
       });
       identities.push({
         path: relativePath,
-        identity: [stat.dev, stat.ino, stat.mode, stat.size, stat.mtimeNs, stat.ctimeNs]
+        identity: [stat.dev, stat.ino, stat.mode, stat.nlink, stat.size, stat.mtimeNs, stat.ctimeNs]
           .map(String).join(':'),
       });
     }
@@ -366,20 +441,19 @@ function scanPackageDirectory(
     canonicalJson([...includedFiles].sort())) {
     throw new Error(`runtime dependency ${expectedName} packaged file set is unavailable`);
   }
-  const packageJsonPath = join(root, 'package.json');
-  const packageJson = parseJsonObject(
-    stableFileBytes(
-      packageJsonPath,
-      `${expectedName} package.json`,
-      MAX_PACKAGE_JSON_BYTES,
-      checkpoint,
-    ),
-    `${expectedName} package.json`,
-  );
+  checkpoint('after-package-traversal');
+  if (!packageJsonBytes) {
+    throw new Error(`runtime dependency ${expectedName} package.json is unavailable`);
+  }
+  const packageJson = parseJsonObject(packageJsonBytes, `${expectedName} package.json`);
   if (packageJson['name'] !== expectedName || packageJson['version'] !== expectedVersion) {
     throw new Error(`runtime dependency ${expectedName} identity does not match inventory`);
   }
   packageIsPortable(packageJson, files.map((entry) => entry.path), `runtime dependency ${expectedName}`);
+  const rootAfter = lstatSync(root, { bigint: true });
+  if (!sameSnapshot(rootBefore, rootAfter) || realpathSync(root) !== root) {
+    throw new Error(`runtime dependency ${expectedName} root changed during scan`);
+  }
   return {
     contentSha256: digest(PACKAGE_CONTENT_DIGEST_DOMAIN, files),
     fileCount: files.length,
@@ -459,6 +533,12 @@ function buildInventory(
     throw new Error('release package identity is invalid');
   }
   const rootDependencies = rootDependencyEntries(packageJson);
+  packageIsPortable(
+    packageJson,
+    (options.packagedFiles ?? [])
+      .filter((path) => !path.startsWith('node_modules/')),
+    'release package',
+  );
   const lock = parseJsonObject(
     stableFileBytes(join(packageRoot, 'package-lock.json'), 'package-lock.json', MAX_LOCKFILE_BYTES),
     'package-lock.json',
@@ -662,7 +742,7 @@ export function parseRuntimeReleaseDependencyInventory(
 
 function discoverInstalledPackages(
   dependencyRoot: string,
-  checkpoint: () => void,
+  checkpoint: DependencyObservationCheckpoint,
 ): string[] {
   const output: string[] = [];
   const visitNodeModules = (nodeModulesRoot: string, prefix: string, depth: number): void => {
@@ -701,6 +781,80 @@ function discoverInstalledPackages(
   return output.sort();
 }
 
+function observeCompleteDependencyTree(
+  dependencyRootInput: string,
+  checkpoint: DependencyObservationCheckpoint,
+): string {
+  const dependencyRoot = canonicalRoot(dependencyRootInput, 'runtime dependency root');
+  const rootBefore = lstatSync(dependencyRoot, { bigint: true });
+  requireSafePortableMode(rootBefore, 'runtime dependency root', true);
+  const content: Array<DependencyFileContent | DependencyBinLinkContent> = [];
+  let totalBytes = 0;
+  let totalFiles = 0;
+  const visit = (directory: string, relativeDirectory: string, depth: number): void => {
+    checkpoint();
+    if (depth > MAX_DEPTH) throw new Error('installed dependency traversal depth exceeds limit');
+    const before = lstatSync(directory, { bigint: true });
+    if (!before.isDirectory() || before.isSymbolicLink()) {
+      throw new Error('installed dependency tree contains an unsafe directory');
+    }
+    requireSafePortableMode(before, 'installed dependency directory', true);
+    const entries = readdirNames(directory);
+    for (const name of entries) {
+      checkpoint();
+      const absolute = join(directory, name);
+      const relativePath = relativeDirectory ? `${relativeDirectory}/${name}` : name;
+      const stat = lstatSync(absolute, { bigint: true });
+      if (stat.isSymbolicLink()) {
+        content.push(observeDependencyBinLink(
+          dependencyRoot,
+          absolute,
+          relativePath,
+        ));
+        totalFiles += 1;
+        if (totalFiles > MAX_TOTAL_FILES) {
+          throw new Error('installed dependency file count exceeds limit');
+        }
+        continue;
+      }
+      if (stat.isDirectory()) {
+        requireSafePortableMode(stat, 'installed dependency directory', true);
+        visit(absolute, relativePath, depth + 1);
+        continue;
+      }
+      if (!stat.isFile()) throw new Error('installed dependency tree contains a non-file entry');
+      if (stat.nlink !== 1n) throw new Error('installed dependency tree has multiple hard links');
+      requireSafePortableMode(stat, 'installed dependency file');
+      const bytes = stableFileBytes(
+        absolute,
+        'installed dependency file',
+        MAX_FILE_BYTES,
+        checkpoint,
+      );
+      totalFiles += 1;
+      totalBytes += bytes.length;
+      if (totalFiles > MAX_TOTAL_FILES) throw new Error('installed dependency file count exceeds limit');
+      if (totalBytes > MAX_TOTAL_BYTES) throw new Error('installed dependency bytes exceed limit');
+      content.push({
+        executable: (stat.mode & 0o111n) !== 0n,
+        path: relativePath,
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+        size: bytes.length,
+      });
+    }
+    const after = lstatSync(directory, { bigint: true });
+    if (!sameSnapshot(before, after) || realpathSync(directory) !== directory) {
+      throw new Error('installed dependency directory changed during scan');
+    }
+  };
+  visit(dependencyRoot, '', 0);
+  const rootAfter = lstatSync(dependencyRoot, { bigint: true });
+  if (!sameSnapshot(rootBefore, rootAfter) || realpathSync(dependencyRoot) !== dependencyRoot) {
+    throw new Error('runtime dependency root changed during scan');
+  }
+  return digest(RUNTIME_RELEASE_INSTALLED_DEPENDENCY_TREE_DIGEST_DOMAIN_V2, content);
+}
+
 function readdirNames(directory: string): string[] {
   const before = statSync(directory, { bigint: true });
   const names: string[] = [];
@@ -729,7 +883,7 @@ function existsDirectory(path: string): boolean {
 }
 
 export function observeInstalledRuntimeDependencies(options: {
-  checkpoint?: () => void;
+  checkpoint?: DependencyObservationCheckpoint;
   dependencyRoot: string;
   inventory: RuntimeReleaseDependencyInventoryV1;
   expectedPackageName: string;
@@ -778,15 +932,11 @@ export function observeInstalledRuntimeDependencies(options: {
         version: snapshot.version,
       };
     });
+    const installedTreeSha256 = observeCompleteDependencyTree(dependencyRoot, checkpoint);
     return {
       ok: true,
       inventoryDigest: options.inventory.inventoryDigest,
-      installedTreeSha256: digest(INSTALLED_TREE_DIGEST_DOMAIN, observations.map((entry) => ({
-        contentSha256: entry.contentSha256,
-        name: entry.name,
-        path: entry.path,
-        version: entry.version,
-      }))),
+      installedTreeSha256,
       packageCount: observations.length,
     };
   } catch (error) {

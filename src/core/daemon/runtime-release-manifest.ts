@@ -95,6 +95,7 @@ export interface UnsignedRuntimeReleaseManifest {
   };
   dependencyInventory: {
     inventoryDigest: string;
+    installedDependencyRootSha256: string;
     packageCount: number;
     path: typeof RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH;
     sha256: string;
@@ -922,10 +923,12 @@ function validateManifestShape(value: unknown): UnsignedRuntimeReleaseManifest {
 
   const dependencyInventory = value['dependencyInventory'];
   if (!isPlainRecord(dependencyInventory) || !hasExactKeys(dependencyInventory, [
-    'inventoryDigest', 'packageCount', 'path', 'sha256',
+    'installedDependencyRootSha256', 'inventoryDigest', 'packageCount', 'path', 'sha256',
   ]) || dependencyInventory['path'] !== RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH ||
     typeof dependencyInventory['inventoryDigest'] !== 'string' ||
     !SHA256_RE.test(dependencyInventory['inventoryDigest']) ||
+    typeof dependencyInventory['installedDependencyRootSha256'] !== 'string' ||
+    !SHA256_RE.test(dependencyInventory['installedDependencyRootSha256']) ||
     !Number.isSafeInteger(dependencyInventory['packageCount']) ||
     (dependencyInventory['packageCount'] as number) < 0 ||
     (dependencyInventory['packageCount'] as number) > 512 ||
@@ -1042,6 +1045,7 @@ function validateManifestShape(value: unknown): UnsignedRuntimeReleaseManifest {
     },
     dependencyInventory: {
       inventoryDigest: dependencyInventory['inventoryDigest'],
+      installedDependencyRootSha256: dependencyInventory['installedDependencyRootSha256'],
       packageCount: dependencyInventory['packageCount'] as number,
       path: RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH,
       sha256: dependencyInventory['sha256'],
@@ -1137,6 +1141,7 @@ export function buildUnsignedRuntimeReleaseManifest(
       },
       dependencyInventory: {
         inventoryDigest: release.dependencyInventory.inventoryDigest,
+        installedDependencyRootSha256: release.installedDependencyTreeSha256,
         packageCount: release.dependencyInventory.packages.length,
         path: RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH,
         sha256: dependencyInventoryArtifact.sha256,

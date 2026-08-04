@@ -6,6 +6,7 @@ import {
   lstatSync,
   openSync,
   opendirSync,
+  readlinkSync,
   readSync,
   realpathSync,
   type BigIntStats,
@@ -22,6 +23,8 @@ import {
   verifyUnsignedRuntimeReleaseManifest,
   type UnsignedRuntimeReleaseArtifact,
 } from './runtime-release-manifest.js';
+import { RUNTIME_RELEASE_INSTALLED_DEPENDENCY_TREE_DIGEST_DOMAIN_V2 } from
+  './runtime-release-dependency-inventory.js';
 import {
   parseRuntimeReleaseEvidenceEnvelope,
   parseRuntimeReleaseEvidenceTrustRoot,
@@ -35,7 +38,6 @@ export const RUNTIME_RELEASE_IMMUTABLE_STAGED_TREE_RECEIPT_DOMAIN_V2 =
 export const RUNTIME_RELEASE_LAUNCH_OBSERVATION_RECEIPT_DOMAIN_V2 =
   'ashlr:runtime-release-launch-observation-receipt:v2' as const;
 const ARTIFACT_ROOT_DOMAIN = 'ashlr:runtime-release-artifact-root:v1';
-const DEPENDENCY_ROOT_DOMAIN = 'ashlr:runtime-release-dependency-root:v1';
 const INTERPRETER_ROOT_DOMAIN = 'ashlr:runtime-release-interpreter-root:v1';
 const STABLE_IDENTITY_DOMAIN = 'ashlr:runtime-release-stable-identity:v1';
 const INVOCATION_DOMAIN = 'ashlr:runtime-release-service-invocation:v1';
@@ -506,6 +508,44 @@ function snapshotFile(
   }
 }
 
+function snapshotDependencyBinLink(
+  dependencyRoot: string,
+  linkPath: string,
+  logicalPath: string,
+  expectedSnapshot: BigIntStats,
+): { content: Record<string, JsonValue>; stable: { identity: string; path: string } } {
+  if (!logicalPath.startsWith('.bin/') || logicalPath.slice('.bin/'.length).includes('/')) {
+    throw new Error('runtime release dependency root contains a symlink');
+  }
+  const before = lstatSync(linkPath, { bigint: true });
+  if (!before.isSymbolicLink() || !sameSnapshot(expectedSnapshot, before)) {
+    throw new Error('runtime release dependency bin link changed before read');
+  }
+  const linkTarget = readlinkSync(linkPath, 'utf8');
+  if (linkTarget.length === 0 || linkTarget.length > 4_096 || /[\0\r\n]/u.test(linkTarget) ||
+    isAbsolute(linkTarget) || linkTarget.includes('\\')) {
+    throw new Error('runtime release dependency bin link target is invalid');
+  }
+  const targetPath = resolve(dirname(linkPath), linkTarget);
+  const targetRealPath = realpathSync(targetPath);
+  if (!contained(dependencyRoot, targetRealPath) || targetRealPath !== targetPath) {
+    throw new Error('runtime release dependency bin link escapes dependency root');
+  }
+  const target = lstatSync(targetPath, { bigint: true });
+  if (!target.isFile() || target.isSymbolicLink() || target.nlink !== 1n) {
+    throw new Error('runtime release dependency bin link target is unsafe');
+  }
+  requireImmutable(target, 'runtime release dependency bin link target');
+  const after = lstatSync(linkPath, { bigint: true });
+  if (!sameSnapshot(before, after) || readlinkSync(linkPath, 'utf8') !== linkTarget) {
+    throw new Error('runtime release dependency bin link changed during read');
+  }
+  return {
+    content: { linkTarget, path: logicalPath, symlink: true },
+    stable: { identity: snapshotIdentity(after), path: logicalPath },
+  };
+}
+
 function observeArtifactRoot(
   packageRoot: string,
   artifacts: readonly UnsignedRuntimeReleaseArtifact[],
@@ -608,7 +648,7 @@ function observeDirectoryTree(
     }
     stable.push({ identity: snapshotIdentity(before), path: logicalPath });
     const entries: Array<{
-      kind: 'directory' | 'file';
+      kind: 'directory' | 'file' | 'symlink';
       name: string;
       snapshot: BigIntStats;
     }> = [];
@@ -629,7 +669,13 @@ function observeDirectoryTree(
         const snapshot = lstatSync(childPath, { bigint: true });
         requireBeforeDeadline(budget.deadline, label);
         if (entry.isSymbolicLink() || snapshot.isSymbolicLink()) {
-          throw new Error(`${label} contains a symlink`);
+          if (!entry.isSymbolicLink() || !snapshot.isSymbolicLink() || logicalPath !== '.bin') {
+            throw new Error(`${label} contains a symlink`);
+          }
+          budget.files += 1;
+          if (budget.files > MAX_FILES) throw new Error(`${label} file count exceeds limit`);
+          entries.push({ kind: 'symlink', name: entry.name, snapshot });
+          continue;
         }
         if (entry.isDirectory() && snapshot.isDirectory()) {
           budget.directories += 1;
@@ -667,6 +713,15 @@ function observeDirectoryTree(
       const childLogical = logicalPath === '.' ? entry.name : `${logicalPath}/${entry.name}`;
       if (entry.kind === 'directory') {
         visit(childPath, childLogical, depth + 1, entry.snapshot);
+      } else if (entry.kind === 'symlink') {
+        const observation = snapshotDependencyBinLink(
+          root,
+          childPath,
+          childLogical,
+          entry.snapshot,
+        );
+        content.push(observation.content);
+        stable.push(observation.stable);
       } else {
         const observation = snapshotFile(
           childPath,
@@ -694,7 +749,7 @@ function observeDirectoryTree(
     bytes: budget.bytes,
     directories: budget.directories,
     files: budget.files,
-    rootSha256: domainDigest(DEPENDENCY_ROOT_DOMAIN, content),
+    rootSha256: domainDigest(RUNTIME_RELEASE_INSTALLED_DEPENDENCY_TREE_DIGEST_DOMAIN_V2, content),
     stableIdentitySha256: domainDigest(STABLE_IDENTITY_DOMAIN, stable),
   };
 }
@@ -776,6 +831,12 @@ function observeStage(
     testHooks,
     deadline,
   );
+  if (!equalDigest(
+    dependencyRootObservation.rootSha256,
+    manifest.manifest.dependencyInventory.installedDependencyRootSha256,
+  )) {
+    throw new Error('runtime release dependency root does not match signed manifest');
+  }
   const interpreter = snapshotFile(
     interpreterPath,
     interpreterPath,

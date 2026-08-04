@@ -1,9 +1,12 @@
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
+  linkSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -12,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
+import { resolveNpmCliLaunch } from '../scripts/build-release-dependency-inventory.mjs';
 import {
   buildRuntimeReleaseDependencyInventory,
   observeInstalledRuntimeDependencies,
@@ -21,6 +25,7 @@ import {
 import {
   buildUnsignedRuntimeReleaseManifest,
   parseUnsignedRuntimeReleaseManifest,
+  verifyUnsignedRuntimeReleaseManifest,
 } from '../src/core/daemon/runtime-release-manifest.js';
 
 const tempDirs: string[] = [];
@@ -36,6 +41,16 @@ interface ContractFixture {
 function write(path: string, value: string, mode = 0o644): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, value, { encoding: 'utf8', mode });
+}
+
+function runNpm(args: string[], cwd?: string) {
+  const launch = resolveNpmCliLaunch();
+  return spawnSync(launch.command, [launch.npmCliPath, ...args], {
+    ...(cwd ? { cwd } : {}),
+    encoding: 'utf8',
+    shell: false,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
 }
 
 function fixture(): ContractFixture {
@@ -76,11 +91,7 @@ function fixture(): ContractFixture {
   })}\n`);
   write(join(dependencyRoot, 'example', 'index.js'), 'module.exports = 42;\n');
   write(join(dependencyRoot, 'example', 'CHANGELOG.md'), 'source-only release notes\n');
-  const dryRun = spawnSync(
-    'npm',
-    ['pack', '--dry-run', '--ignore-scripts', '--json'],
-    { cwd: packageRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
-  );
+  const dryRun = runNpm(['pack', '--dry-run', '--ignore-scripts', '--json'], packageRoot);
   if (dryRun.status !== 0) throw new Error(dryRun.stderr);
   const report = JSON.parse(dryRun.stdout) as Array<{ files: Array<{ path: string }> }>;
   const packagedFiles = report[0]!.files.map((entry) => entry.path);
@@ -124,15 +135,32 @@ afterEach(() => {
 });
 
 describe('release artifact contract v1', () => {
+  it('uses a shell-free Node launch for a strictly validated npm CLI path', () => {
+    const launch = resolveNpmCliLaunch();
+    expect(launch.command).toBe(process.execPath);
+    expect(launch.npmCliPath).toBe(realpathSync(process.env['npm_execpath']!));
+
+    const maliciousRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-malicious-npm-')));
+    tempDirs.push(maliciousRoot);
+    const maliciousCli = join(maliciousRoot, 'bin', 'npm-cli.js');
+    write(maliciousCli, 'process.exit(0);\n');
+    write(join(maliciousRoot, 'package.json'), '{"name":"not-npm","version":"1.0.0"}\n');
+    expect(() => resolveNpmCliLaunch({ npm_execpath: maliciousCli }))
+      .toThrow('npm_execpath is not rooted in an npm package');
+    expect(() => resolveNpmCliLaunch({ npm_execpath: 'npm-cli.js' }))
+      .toThrow('npm_execpath is missing or invalid');
+    expect(() => resolveNpmCliLaunch({ npm_execpath: `${maliciousCli}\n--eval` }))
+      .toThrow('npm_execpath is missing or invalid');
+  });
+
   it('packs and installs the inventory plus exact bundled dependency bytes without package-lock', () => {
     const release = fixture();
     const packDestination = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-release-pack-')));
     const installRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-release-install-')));
     tempDirs.push(packDestination, installRoot);
-    const packed = spawnSync(
-      'npm',
+    const packed = runNpm(
       ['pack', '--ignore-scripts', '--json', '--pack-destination', packDestination],
-      { cwd: release.packageRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+      release.packageRoot,
     );
     expect(packed.status, packed.stderr).toBe(0);
     const report = JSON.parse(packed.stdout) as Array<{
@@ -146,8 +174,7 @@ describe('release artifact contract v1', () => {
     expect(paths).not.toContain('node_modules/example/CHANGELOG.md');
     expect(paths).not.toContain('package-lock.json');
 
-    const installed = spawnSync(
-      'npm',
+    const installed = runNpm(
       [
         'install',
         join(packDestination, report[0]!.filename),
@@ -159,7 +186,6 @@ describe('release artifact contract v1', () => {
         '--no-audit',
         '--no-fund',
       ],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
     );
     expect(installed.status, installed.stderr).toBe(0);
     const installedPackage = join(installRoot, 'node_modules', '@fixture', 'release');
@@ -242,6 +268,87 @@ describe('release artifact contract v1', () => {
     });
   });
 
+  it('rejects a package-directory replacement at the post-traversal checkpoint', () => {
+    const release = fixture();
+    const packagePath = join(release.dependencyRoot, 'example');
+    const replacement = join(release.packageRoot, 'replacement-example');
+    const displaced = join(release.packageRoot, 'displaced-example');
+    write(join(replacement, 'package.json'), '{"name":"example","version":"1.0.0"}\n');
+    write(join(replacement, 'index.js'), 'module.exports = "UNSIGNED-B";\n');
+    let swapped = false;
+    const result = observeInstalledRuntimeDependencies({
+      checkpoint: (phase) => {
+        if (phase !== 'after-package-traversal' || swapped) return;
+        swapped = true;
+        renameSync(packagePath, displaced);
+        renameSync(replacement, packagePath);
+      },
+      dependencyRoot: release.dependencyRoot,
+      inventory: parsedInventory(release),
+      expectedPackageName: '@fixture/release',
+      expectedPackageVersion: '1.2.3',
+    });
+    expect(swapped).toBe(true);
+    expect(result).toEqual({
+      ok: false,
+      reason: 'runtime dependency example root changed during scan',
+    });
+  });
+
+  function expectCompleteRootMutationRejected(
+    release: ContractFixture,
+    mutate: (input: ContractFixture) => void,
+  ): void {
+    const built = buildUnsignedRuntimeReleaseManifest({
+      packageRoot: release.packageRoot,
+      dependencyRoot: release.dependencyRoot,
+      declaredInterpreterPath: release.interpreterPath,
+      declaredInterpreterVersion: 'v22.0.0',
+      expectedRevision: REVISION,
+      expectedPackageName: '@fixture/release',
+    });
+    expect(built.ok).toBe(true);
+    if (!built.ok) return;
+    mutate(release);
+    expect(verifyUnsignedRuntimeReleaseManifest({
+      packageRoot: release.packageRoot,
+      dependencyRoot: release.dependencyRoot,
+      declaredInterpreterPath: release.interpreterPath,
+      declaredInterpreterVersion: 'v22.0.0',
+      expectedRevision: REVISION,
+      expectedPackageName: '@fixture/release',
+      expectedManifestDigest: built.manifest.manifestDigest,
+      manifest: built.canonicalJson,
+    })).toMatchObject({ ok: false });
+  }
+
+  it('binds the complete dependency root against a .bin executable injection', () => {
+    expectCompleteRootMutationRejected(fixture(), (release) => {
+      write(join(release.dependencyRoot, '.bin', 'injected'), '#!/usr/bin/env node\n', 0o755);
+    });
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'binds the complete dependency root against an executable-mode change',
+    () => {
+      expectCompleteRootMutationRejected(fixture(), (release) => {
+        chmodSync(join(release.dependencyRoot, 'example', 'index.js'), 0o755);
+      });
+    },
+  );
+
+  it('rejects external hardlink aliases in installed dependency bytes', () => {
+    const release = fixture();
+    linkSync(
+      join(release.dependencyRoot, 'example', 'index.js'),
+      join(release.packageRoot, 'external-hardlink'),
+    );
+    expect(observe(release)).toEqual({
+      ok: false,
+      reason: 'runtime dependency file has multiple hard links',
+    });
+  });
+
   it('rejects packaged dependency bytes outside the build lock closure', () => {
     const release = fixture();
     expect(buildRuntimeReleaseDependencyInventory(release.packageRoot, {
@@ -268,6 +375,26 @@ describe('release artifact contract v1', () => {
     });
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'binds canonical npm .bin links and rejects targets outside the dependency root',
+    () => {
+      const release = fixture();
+      mkdirSync(join(release.dependencyRoot, '.bin'));
+      symlinkSync('../example/index.js', join(release.dependencyRoot, '.bin', 'example'));
+      expect(observe(release)).toMatchObject({ ok: true, packageCount: 1 });
+
+      const escaped = fixture();
+      const outside = join(escaped.packageRoot, 'outside-bin-target');
+      write(outside, '#!/usr/bin/env node\n', 0o755);
+      mkdirSync(join(escaped.dependencyRoot, '.bin'));
+      symlinkSync('../../outside-bin-target', join(escaped.dependencyRoot, '.bin', 'escape'));
+      expect(observe(escaped)).toEqual({
+        ok: false,
+        reason: 'installed dependency bin link escapes dependency root',
+      });
+    },
+  );
+
   it.each([
     ['os constraint', { os: ['darwin'] }, undefined],
     ['cpu constraint', { cpu: ['arm64'] }, undefined],
@@ -280,6 +407,23 @@ describe('release artifact contract v1', () => {
     const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as Record<string, unknown>;
     writeFileSync(packagePath, `${JSON.stringify({ ...packageJson, ...additions })}\n`);
     if (nativeFile) write(join(release.dependencyRoot, 'example', nativeFile), 'native bytes');
+    const rebuilt = buildRuntimeReleaseDependencyInventory(release.packageRoot);
+    expect(rebuilt.ok).toBe(false);
+    if (rebuilt.ok) return;
+    expect(rebuilt.reason).toMatch(/platform-variant|install lifecycle|native install variance/u);
+  });
+
+  it.each([
+    ['root os constraint', { os: ['darwin'] }],
+    ['root cpu constraint', { cpu: ['arm64'] }],
+    ['root optional dependency', { optionalDependencies: { optional: '1.0.0' } }],
+    ['root install script', { scripts: { install: 'node install.js' } }],
+    ['root native package', { gypfile: true }],
+  ])('refuses %s instead of claiming portable root bytes', (_label, additions) => {
+    const release = fixture();
+    const packagePath = join(release.packageRoot, 'package.json');
+    const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as Record<string, unknown>;
+    writeFileSync(packagePath, `${JSON.stringify({ ...packageJson, ...additions })}\n`);
     const rebuilt = buildRuntimeReleaseDependencyInventory(release.packageRoot);
     expect(rebuilt.ok).toBe(false);
     if (rebuilt.ok) return;
