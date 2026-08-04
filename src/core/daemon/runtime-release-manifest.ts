@@ -25,10 +25,11 @@ import {
   type RuntimeReleaseObservationDeadline,
 } from './runtime-release-observation-deadline.js';
 import {
+  assertRuntimeReleaseRootPackagePortability,
   observeInstalledRuntimeDependencies,
   parseRuntimeReleaseDependencyInventory,
   RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH,
-  type RuntimeReleaseDependencyInventoryV1,
+  type RuntimeReleaseDependencyInventoryV2,
 } from './runtime-release-dependency-inventory.js';
 
 const MANIFEST_DIGEST_DOMAIN = 'ashlr:unsigned-runtime-release-manifest:v2';
@@ -169,7 +170,7 @@ interface ReleaseSnapshot {
   artifactIdentities: Array<{ identity: string; path: string }>;
   directories: Array<{ identity: string; path: string; realPath: string }>;
   interpreter: FileSnapshot & { path: string };
-  dependencyInventory: RuntimeReleaseDependencyInventoryV1;
+  dependencyInventory: RuntimeReleaseDependencyInventoryV2;
   dependencyInventorySha256: string;
   installedDependencyTreeSha256: string;
   packageName: string;
@@ -286,7 +287,8 @@ function isCoveredArtifactPath(value: unknown): value is string {
   if (!isReleasePath(value)) return false;
   if (FIXED_ARTIFACT_PATHS.has(value)) return true;
   const segments = value.split('/');
-  return segments[0] === 'dist' && segments.length >= 2 &&
+  return (segments[0] === 'bin' || segments[0] === 'dist' || segments[0] === 'schema') &&
+    segments.length >= 2 &&
     segments.length - 2 <= MAX_TRAVERSAL_DEPTH;
 }
 
@@ -492,13 +494,11 @@ function discoverReleaseLayout(
   };
 
   observeDirectory('.');
-  observeDirectory('bin');
   observeDirectory('scripts');
   admitArtifact(packageRoot, PACKAGE_MANIFEST_PATH, budget, paths, {
     label: PACKAGE_MANIFEST_PATH,
     maxBytes: MAX_PACKAGE_MANIFEST_BYTES,
   }, observation);
-  admitArtifact(packageRoot, LAUNCHER_PATH, budget, paths, undefined, observation);
   admitArtifact(packageRoot, VERIFIER_RUNNER_PATH, budget, paths, undefined, observation);
 
   const visitRuntime = (relativeDirectory: string, depth: number): void => {
@@ -540,7 +540,21 @@ function discoverReleaseLayout(
       throw new Error('release directory changed during traversal');
     }
   };
+  visitRuntime('bin', 0);
   visitRuntime('dist', 0);
+  let schemaStat: ReturnType<typeof lstatSync> | undefined;
+  try {
+    schemaStat = lstatSync(join(packageRoot, 'schema'));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  if (schemaStat) {
+    if (!schemaStat.isDirectory() || schemaStat.isSymbolicLink()) {
+      throw new Error('release tree contains an unsafe directory');
+    }
+    visitRuntime('schema', 0);
+  }
+  if (!paths.includes(LAUNCHER_PATH)) throw new Error('launcher bin/ashlr is missing');
   if (!paths.includes(RUNTIME_ENTRY_PATH)) throw new Error('runtime entry dist/cli/index.js is missing');
   if (new Set(paths).size !== paths.length) throw new Error('release artifact paths are not unique');
   return { directories, paths: paths.sort() };
@@ -764,13 +778,20 @@ function completeReleaseScan(
     throw new Error('release package identity files are missing');
   }
   requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest scan');
-  const pkg = packageIdentity(
-    parseJsonBytes(packageBytes, PACKAGE_MANIFEST_PATH, observation),
-    expectedPackageName,
-  );
+  const packageJson = parseJsonBytes(packageBytes, PACKAGE_MANIFEST_PATH, observation);
+  const pkg = packageIdentity(packageJson, expectedPackageName);
   requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest scan');
   const parsedInventory = parseRuntimeReleaseDependencyInventory(dependencyInventoryBytes);
   if (!parsedInventory.ok) throw new Error(parsedInventory.reason);
+  assertRuntimeReleaseRootPackagePortability(
+    packageJson,
+    layout.paths,
+    parsedInventory.inventory,
+  );
+  const packageManifestSha256 = createHash('sha256').update(packageBytes).digest('hex');
+  if (!equalDigest(packageManifestSha256, parsedInventory.inventory.package.manifestSha256)) {
+    throw new Error('runtime dependency inventory package manifest mismatch');
+  }
   if (canonicalJson(parsedInventory.inventory.rootDependencies) !==
     canonicalJson(pkg.rootDependencies)) {
     throw new Error('runtime dependency inventory root dependencies do not match package.json');

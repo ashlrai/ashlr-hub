@@ -398,9 +398,14 @@ describe('release artifact contract v1', () => {
   it.each([
     ['os constraint', { os: ['darwin'] }, undefined],
     ['cpu constraint', { cpu: ['arm64'] }, undefined],
+    ['libc constraint', { libc: ['glibc'] }, undefined],
     ['optional dependency', { optionalDependencies: { optional: '1.0.0' } }, undefined],
+    ['preinstall script', { scripts: { preinstall: 'node preinstall.js' } }, undefined],
     ['install script', { scripts: { install: 'node install.js' } }, undefined],
+    ['postinstall script', { scripts: { postinstall: 'node postinstall.js' } }, undefined],
+    ['native package metadata', { gypfile: true }, undefined],
     ['native addon', {}, 'binding.node'],
+    ['mixed-case native addon', {}, 'binding.NODE'],
   ])('refuses %s instead of claiming platform-independent bytes', (_label, additions, nativeFile) => {
     const release = fixture();
     const packagePath = join(release.dependencyRoot, 'example', 'package.json');
@@ -416,8 +421,11 @@ describe('release artifact contract v1', () => {
   it.each([
     ['root os constraint', { os: ['darwin'] }],
     ['root cpu constraint', { cpu: ['arm64'] }],
+    ['root libc constraint', { libc: ['glibc'] }],
     ['root optional dependency', { optionalDependencies: { optional: '1.0.0' } }],
+    ['root preinstall script', { scripts: { preinstall: 'node preinstall.js' } }],
     ['root install script', { scripts: { install: 'node install.js' } }],
+    ['root postinstall script', { scripts: { postinstall: 'node postinstall.js' } }],
     ['root native package', { gypfile: true }],
   ])('refuses %s instead of claiming portable root bytes', (_label, additions) => {
     const release = fixture();
@@ -428,6 +436,77 @@ describe('release artifact contract v1', () => {
     expect(rebuilt.ok).toBe(false);
     if (rebuilt.ok) return;
     expect(rebuilt.reason).toMatch(/platform-variant|install lifecycle|native install variance/u);
+  });
+
+  it('refuses a root files declaration that omits required runtime entries', () => {
+    const release = fixture();
+    const packagePath = join(release.packageRoot, 'package.json');
+    const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as Record<string, unknown>;
+    writeFileSync(packagePath, `${JSON.stringify({ ...packageJson, files: ['dist'] })}\n`);
+    expect(buildRuntimeReleaseDependencyInventory(release.packageRoot)).toEqual({
+      ok: false,
+      reason: 'release package files declaration is not portable',
+    });
+  });
+
+  it.each([
+    ['install lifecycle script', { scripts: { install: 'node install.js' } }, undefined],
+    ['os constraint', { os: ['darwin'] }, undefined],
+    ['cpu constraint', { cpu: ['arm64'] }, undefined],
+    ['libc constraint', { libc: ['glibc'] }, undefined],
+    ['optional dependency', { optionalDependencies: { optional: '1.0.0' } }, undefined],
+    ['preinstall lifecycle script', { scripts: { preinstall: 'node preinstall.js' } }, undefined],
+    ['postinstall lifecycle script', { scripts: { postinstall: 'node postinstall.js' } }, undefined],
+    ['native package metadata', { gypfile: true }, undefined],
+    ['mixed-case native addon bytes', {}, 'bin/helper.NODE'],
+  ])(
+    'revalidates root %s after inventory generation during every complete manifest scan',
+    (_label, additions, nativeFile) => {
+      const release = fixture();
+      const packagePath = join(release.packageRoot, 'package.json');
+      const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as Record<string, unknown>;
+      writeFileSync(packagePath, `${JSON.stringify({ ...packageJson, ...additions })}\n`);
+      if (nativeFile) write(join(release.packageRoot, nativeFile), 'native bytes');
+
+      const built = buildUnsignedRuntimeReleaseManifest({
+        packageRoot: release.packageRoot,
+        dependencyRoot: release.dependencyRoot,
+        declaredInterpreterPath: release.interpreterPath,
+        declaredInterpreterVersion: 'v22.0.0',
+        expectedRevision: REVISION,
+        expectedPackageName: '@fixture/release',
+      });
+      expect(built.ok).toBe(false);
+      if (built.ok) return;
+      expect(built.reason).toMatch(/platform-variant|install lifecycle|native install variance/u);
+    },
+  );
+
+  it('revalidates injected install lifecycle metadata during the second complete scan', () => {
+    const release = fixture();
+    const packagePath = join(release.packageRoot, 'package.json');
+    const options = {
+      packageRoot: release.packageRoot,
+      dependencyRoot: release.dependencyRoot,
+      declaredInterpreterPath: release.interpreterPath,
+      declaredInterpreterVersion: 'v22.0.0',
+      expectedRevision: REVISION,
+      expectedPackageName: '@fixture/release',
+      __testHooks: {
+        afterFirstCompleteScan: () => {
+          const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as Record<string, unknown>;
+          writeFileSync(packagePath, `${JSON.stringify({
+            ...packageJson,
+            scripts: { install: 'node install.js' },
+          })}\n`);
+        },
+      },
+    } as Parameters<typeof buildUnsignedRuntimeReleaseManifest>[0];
+
+    expect(buildUnsignedRuntimeReleaseManifest(options)).toEqual({
+      ok: false,
+      reason: 'release package has an install lifecycle script',
+    });
   });
 
   it('fails closed on old manifest and inventory schemas and forged inventory digests', () => {
@@ -450,7 +529,8 @@ describe('release artifact contract v1', () => {
     });
 
     const oldInventory = JSON.parse(readFileSync(release.inventoryPath, 'utf8')) as Record<string, unknown>;
-    oldInventory['schemaVersion'] = 0;
+    oldInventory['schemaVersion'] = 1;
+    delete (oldInventory['package'] as Record<string, unknown>)['manifestSha256'];
     expect(parseRuntimeReleaseDependencyInventory(`${JSON.stringify(oldInventory)}\n`)).toEqual({
       ok: false,
       reason: 'runtime dependency inventory schema is unsupported',
