@@ -13,6 +13,7 @@ import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { marked } from 'marked';
 
 const SCHEMA_VERSION = 1;
 const MAX_PULL_REQUESTS = 1_000;
@@ -23,6 +24,10 @@ const MAX_BODY_BYTES = 100_000;
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const ALLOWED_COMPARE_STATUSES = new Set(['ahead', 'behind', 'diverged', 'identical']);
+const HTML_VOID_ELEMENTS = new Set([
+  'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta',
+  'param', 'source', 'track', 'wbr',
+]);
 const SOURCE_ISSUES = Object.freeze({
   'topology-snapshot-changed': 'Open pull request topology changed during inspection.',
   'topology-revalidation-incomplete': 'Open pull request topology revalidation was incomplete.',
@@ -211,45 +216,81 @@ function normalizeSnapshot(raw) {
   };
 }
 
-export function parseSupersedes(body) {
-  const visibleLines = [];
-  let fence = null;
-  for (const line of String(body ?? '').split(/\r?\n/)) {
-    let indentColumns = 0;
-    let contentIndex = 0;
-    while (contentIndex < line.length) {
-      if (line[contentIndex] === ' ') {
-        indentColumns += 1;
-      } else if (line[contentIndex] === '\t') {
-        indentColumns += 4 - (indentColumns % 4);
-      } else {
-        break;
-      }
-      contentIndex += 1;
-    }
-    const marker = indentColumns <= 3
-      ? line.slice(contentIndex).match(/^(`{3,}|~{3,})/)
-      : null;
-    if (marker) {
-      const character = marker[1][0];
-      if (fence === null) {
-        fence = { character, length: marker[1].length };
-      } else if (
-        fence.character === character
-        && marker[1].length >= fence.length
-        && /^[ \t]*$/.test(line.slice(contentIndex + marker[0].length))
-      ) {
-        fence = null;
-      }
+function updateHtmlAncestors(raw, ancestors) {
+  let cursor = 0;
+  while (cursor < raw.length) {
+    const opening = raw.indexOf('<', cursor);
+    if (opening === -1) break;
+    if (raw.startsWith('<!--', opening)) {
+      const commentEnd = raw.indexOf('-->', opening + 4);
+      if (commentEnd === -1) return false;
+      cursor = commentEnd + 3;
       continue;
     }
-    if (fence === null && indentColumns <= 3) visibleLines.push(line);
+
+    let position = opening + 1;
+    let closing = false;
+    if (raw[position] === '/') {
+      closing = true;
+      position += 1;
+    }
+    const nameMatch = raw.slice(position).match(/^[A-Za-z][A-Za-z0-9-]*/);
+    if (!nameMatch) {
+      const declarationEnd = raw.indexOf('>', position);
+      if (declarationEnd === -1) return false;
+      cursor = declarationEnd + 1;
+      continue;
+    }
+
+    const name = nameMatch[0].toLowerCase();
+    position += nameMatch[0].length;
+    let quote = null;
+    let tagEnd = -1;
+    for (; position < raw.length; position += 1) {
+      const character = raw[position];
+      if (quote !== null) {
+        if (character === quote) quote = null;
+      } else if (character === '"' || character === "'") {
+        quote = character;
+      } else if (character === '>') {
+        tagEnd = position;
+        break;
+      }
+    }
+    if (tagEnd === -1 || quote !== null) return false;
+
+    const selfClosing = /\/\s*$/.test(raw.slice(opening + 1, tagEnd));
+    if (closing) {
+      if (ancestors.at(-1) !== name) return false;
+      ancestors.pop();
+    } else if (!selfClosing && !HTML_VOID_ELEMENTS.has(name)) {
+      ancestors.push(name);
+    }
+    cursor = tagEnd + 1;
   }
-  const visibleBody = visibleLines.join('\n')
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/<!--[\s\S]*$/g, '');
-  const expression = /^[ \t]{0,3}Supersedes[ \t]*:[ \t]*([^\r\n]*)$/gim;
-  const declarations = [...visibleBody.matchAll(expression)];
+  return true;
+}
+
+export function parseSupersedes(body) {
+  const declarations = [];
+  const htmlAncestors = [];
+  for (const token of marked.lexer(String(body ?? ''))) {
+    if (token.type === 'html') {
+      if (!updateHtmlAncestors(token.raw, htmlAncestors)) return [];
+      continue;
+    }
+    if (
+      htmlAncestors.length !== 0
+      || token.type !== 'paragraph'
+      || token.tokens?.length !== 1
+      || token.tokens[0]?.type !== 'text'
+    ) {
+      continue;
+    }
+    const declaration = token.tokens[0].text.match(/^Supersedes[ \t]*:[ \t]*([^\r\n]*)$/i);
+    if (declaration !== null) declarations.push(declaration);
+  }
+  if (htmlAncestors.length !== 0) return [];
   if (declarations.length !== 1) return [];
 
   const value = declarations[0][1].trim();

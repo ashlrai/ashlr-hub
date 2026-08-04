@@ -314,7 +314,7 @@ describe('M484 topology graph shadow observation', () => {
 
   it.each([
     ['backtick fence', '```markdown\nhidden\n````  \nSupersedes: #170'],
-    ['tilde fence', '~~~markdown\nhidden\n~~~~\t\nSupersedes: #170'],
+    ['tilde fence', '~~~markdown\nhidden\n~~~~  \nSupersedes: #170'],
   ])('accepts a declaration after a valid longer %s closer', (_label, body) => {
     expect(parseSupersedes(body)).toEqual([170]);
   });
@@ -326,6 +326,38 @@ describe('M484 topology graph shadow observation', () => {
     ['tilde closer with trailing comment', '~~~markdown\n~~~<!-- still code -->\nSupersedes: #170'],
   ])('keeps a hidden declaration fenced after a malformed %s', (_label, body) => {
     expect(parseSupersedes(body)).toEqual([]);
+  });
+
+  it.each([
+    ['pre block', '<pre>\nSupersedes: #170\n</pre>'],
+    ['script block', '<script>\nSupersedes: #170\n</script>'],
+    ['style block', '<style>\nSupersedes: #170\n</style>'],
+    ['textarea block', '<textarea>\nSupersedes: #170\n</textarea>'],
+    ['HTML comment', '<!--\nSupersedes: #170\n-->'],
+    ['blockquote', '> Supersedes: #170'],
+    ['unordered list', '- Supersedes: #170'],
+    ['ordered list', '1. Supersedes: #170'],
+    ['heading', '## Supersedes: #170'],
+    ['details block', '<details>\n<summary>Topology</summary>\n\nSupersedes: #170\n</details>'],
+    ['div block', '<div data-note="</div>">\n\nSupersedes: #170\n\n</div>'],
+    ['inline HTML wrapper', '<span>Supersedes: #170</span>'],
+    ['formatted paragraph', 'Supersedes: **#170**'],
+  ])('ignores a declaration in a non-top-level plain paragraph: %s', (_label, body) => {
+    expect(parseSupersedes(body)).toEqual([]);
+  });
+
+  it('ignores nested declarations while accepting one unambiguous top-level paragraph', () => {
+    expect(parseSupersedes([
+      '<pre>',
+      'Supersedes: #1',
+      '</pre>',
+      '',
+      '> Supersedes: #2',
+      '',
+      '- Supersedes: #3',
+      '',
+      'Supersedes: #170, #198',
+    ].join('\n'))).toEqual([170, 198]);
   });
 
   it('reports an ordinary default-branch PR clear when comparison finds no containment', () => {
