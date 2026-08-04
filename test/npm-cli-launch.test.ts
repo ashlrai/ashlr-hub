@@ -1,4 +1,6 @@
+import { spawnSync } from 'node:child_process';
 import {
+  chmodSync,
   closeSync,
   existsSync,
   mkdtempSync,
@@ -6,15 +8,19 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   resolveNpmCliLaunch,
   runTrustedNpmCli,
 } from '../scripts/build-release-dependency-inventory.mjs';
+import { assurePrivateStoragePath } from '../src/core/util/private-storage.js';
 
 const tempDirs: string[] = [];
 
@@ -140,7 +146,9 @@ describe('shell-free npm CLI launch', () => {
       },
     });
     if (process.platform === 'win32') {
-      expect(run).not.toThrow();
+      const result = run();
+      expect(result.status).toBe(0);
+      expect(result.stdout).toBe('validated runtime');
     } else {
       expect(run).toThrow('npm runtime closure changed during execution');
     }
@@ -210,11 +218,207 @@ describe('shell-free npm CLI launch', () => {
     expect(existsSync(escapeMarker)).toBe(false);
   });
 
+  it('does not import an absolute ESM module outside the npm snapshot', () => {
+    const fixtureRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-npm-esm-escape-')));
+    tempDirs.push(fixtureRoot);
+    const fakeNode = join(fixtureRoot, 'bin', 'node');
+    const trustedCli = join(fixtureRoot, 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js');
+    const packageJson = join(fixtureRoot, 'lib', 'node_modules', 'npm', 'package.json');
+    const outsideModule = join(fixtureRoot, 'outside.mjs');
+    const escapeMarker = join(fixtureRoot, 'esm-escape-ran');
+    write(fakeNode, 'fixture node identity\n');
+    write(trustedCli, `import(${JSON.stringify(pathToFileURL(outsideModule).href)});\n`);
+    write(packageJson, '{"name":"npm","version":"10.0.0"}\n');
+    write(outsideModule, [
+      "import fs from 'node:fs';",
+      `fs.writeFileSync(${JSON.stringify(escapeMarker)}, 'unsafe');`,
+    ].join('\n'));
+
+    const result = runTrustedNpmCli([], {
+      environment: { npm_execpath: trustedCli },
+    }, {
+      command: process.execPath,
+      execPath: fakeNode,
+      platform: 'linux',
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/npm module escaped snapshot/u);
+    expect(existsSync(escapeMarker)).toBe(false);
+  });
+
+  it('does not import an ESM package from an unmeasured ancestor', () => {
+    const fixtureRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-npm-esm-ancestor-')));
+    tempDirs.push(fixtureRoot);
+    const fakeNode = join(fixtureRoot, 'bin', 'node');
+    const nodeModules = join(fixtureRoot, 'lib', 'node_modules');
+    const trustedCli = join(nodeModules, 'npm', 'bin', 'npm-cli.js');
+    const packageJson = join(nodeModules, 'npm', 'package.json');
+    const escapeMarker = join(fixtureRoot, 'esm-ancestor-ran');
+    write(fakeNode, 'fixture node identity\n');
+    write(trustedCli, "import('unmeasured-esm');\n");
+    write(packageJson, '{"name":"npm","version":"10.0.0"}\n');
+    const result = runTrustedNpmCli([], {
+      environment: { npm_execpath: trustedCli },
+    }, {
+      command: process.execPath,
+      execPath: fakeNode,
+      platform: 'linux',
+      beforeSpawn: (_launch: unknown, snapshot: { cleanupRoot: string }) => {
+        const ancestorPackage = join(snapshot.cleanupRoot, 'node_modules', 'unmeasured-esm');
+        write(join(ancestorPackage, 'package.json'),
+          '{"name":"unmeasured-esm","type":"module","main":"index.mjs"}\n');
+        write(join(ancestorPackage, 'index.mjs'), [
+          "import fs from 'node:fs';",
+          `fs.writeFileSync(${JSON.stringify(escapeMarker)}, 'unsafe');`,
+        ].join('\n'));
+      },
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/npm module escaped snapshot/u);
+    expect(existsSync(escapeMarker)).toBe(false);
+  });
+
+  it('imports a relative ESM module from inside the npm snapshot', () => {
+    const fixtureRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-npm-esm-inside-')));
+    tempDirs.push(fixtureRoot);
+    const fakeNode = join(fixtureRoot, 'bin', 'node');
+    const npmRoot = join(fixtureRoot, 'lib', 'node_modules', 'npm');
+    const trustedCli = join(npmRoot, 'bin', 'npm-cli.js');
+    write(fakeNode, 'fixture node identity\n');
+    write(trustedCli, "import('../lib/inside.mjs');\n");
+    write(join(npmRoot, 'lib', 'inside.mjs'), "process.stdout.write('inside esm');\n");
+    write(join(npmRoot, 'package.json'), '{"name":"npm","version":"10.0.0"}\n');
+
+    const result = runTrustedNpmCli([], {
+      environment: { npm_execpath: trustedCli },
+    }, {
+      command: process.execPath,
+      execPath: fakeNode,
+      platform: 'linux',
+    });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe('inside esm');
+  });
+
+  it('does not require an absolute CommonJS module outside the npm snapshot', () => {
+    const fixtureRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-npm-cjs-escape-')));
+    tempDirs.push(fixtureRoot);
+    const fakeNode = join(fixtureRoot, 'bin', 'node');
+    const trustedCli = join(fixtureRoot, 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js');
+    const packageJson = join(fixtureRoot, 'lib', 'node_modules', 'npm', 'package.json');
+    const outsideModule = join(fixtureRoot, 'outside.cjs');
+    const escapeMarker = join(fixtureRoot, 'cjs-escape-ran');
+    write(fakeNode, 'fixture node identity\n');
+    write(trustedCli, `require(${JSON.stringify(outsideModule)});\n`);
+    write(packageJson, '{"name":"npm","version":"10.0.0"}\n');
+    write(outsideModule, `require('node:fs').writeFileSync(${JSON.stringify(escapeMarker)}, 'unsafe');\n`);
+
+    const result = runTrustedNpmCli([], {
+      environment: { npm_execpath: trustedCli },
+    }, {
+      command: process.execPath,
+      execPath: fakeNode,
+      platform: 'linux',
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/npm module escaped snapshot/u);
+    expect(existsSync(escapeMarker)).toBe(false);
+  });
+
+  it('does not import a data URL outside the npm snapshot', () => {
+    const fixtureRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-npm-data-url-')));
+    tempDirs.push(fixtureRoot);
+    const fakeNode = join(fixtureRoot, 'bin', 'node');
+    const trustedCli = join(fixtureRoot, 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js');
+    const packageJson = join(fixtureRoot, 'lib', 'node_modules', 'npm', 'package.json');
+    write(fakeNode, 'fixture node identity\n');
+    write(trustedCli, "import('data:text/javascript,process.stdout.write(%22unsafe%22)');\n");
+    write(packageJson, '{"name":"npm","version":"10.0.0"}\n');
+
+    const result = runTrustedNpmCli([], {
+      environment: { npm_execpath: trustedCli },
+    }, {
+      command: process.execPath,
+      execPath: fakeNode,
+      platform: 'linux',
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toMatch(/npm module escaped snapshot/u);
+  });
+
+  it.runIf(process.platform === 'win32')('uses an exact private Windows snapshot DACL', () => {
+    let assurance: ReturnType<typeof assurePrivateStoragePath> | undefined;
+    const result = runTrustedNpmCli(['--version'], {}, {
+      beforeSpawn: (_launch: unknown, snapshot: { cleanupRoot: string }) => {
+        assurance = assurePrivateStoragePath(
+          snapshot.cleanupRoot,
+          'directory',
+          'inspect-existing',
+          { anchorPath: homedir() },
+        );
+      },
+    });
+    expect(result.status).toBe(0);
+    expect(assurance).toEqual({ ok: true, reason: 'exact-private-dacl' });
+  });
+
+  it.runIf(process.platform === 'win32')('rejects a permissive snapshot DACL before spawning', () => {
+    expect(() => runTrustedNpmCli(['--version'], {}, {
+      beforeSpawn: (_launch: unknown, snapshot: { cleanupRoot: string }) => {
+        const changed = spawnSync(
+          'icacls.exe',
+          [snapshot.cleanupRoot, '/grant', '*S-1-1-0:(OI)(CI)M'],
+          { encoding: 'utf8', windowsHide: true },
+        );
+        expect(changed.status).toBe(0);
+      },
+    })).toThrow(/npm snapshot storage changed/u);
+  });
+
+  it('refuses to traverse a hostile snapshot cleanup reparse entry', () => {
+    let cleanupRoot = '';
+    let reparsePath = '';
+    expect(() => runTrustedNpmCli(['--version'], {}, {
+      beforeSpawn: (_launch: unknown, snapshot: { cleanupRoot: string; root: string }) => {
+        cleanupRoot = snapshot.cleanupRoot;
+        reparsePath = join(snapshot.root, 'zzz-cleanup-reparse');
+        chmodSync(snapshot.root, 0o700);
+        symlinkSync(
+          fixtureOutside(snapshot.root),
+          reparsePath,
+          process.platform === 'win32' ? 'junction' : undefined,
+        );
+      },
+    })).toThrow(/npm snapshot cleanup contains (?:a reparse entry|an unsafe directory)/u);
+    expect(cleanupRoot).not.toBe('');
+    expect(existsSync(cleanupRoot)).toBe(true);
+    unlinkSync(reparsePath);
+    rmSync(cleanupRoot, { recursive: true, force: true });
+    expect(existsSync(cleanupRoot)).toBe(false);
+  });
+
+  it('removes the private snapshot after successful execution', () => {
+    let cleanupRoot = '';
+    const result = runTrustedNpmCli(['--version'], {}, {
+      beforeSpawn: (_launch: unknown, snapshot: { cleanupRoot: string }) => {
+        cleanupRoot = snapshot.cleanupRoot;
+      },
+    });
+    expect(result.status).toBe(0);
+    expect(cleanupRoot).not.toBe('');
+    expect(existsSync(cleanupRoot)).toBe(false);
+  });
+
   it('rejects unbounded npm child timeouts before spawning', () => {
     expect(() => runTrustedNpmCli([], { timeout: 0 })).toThrow('npm CLI timeout is invalid');
     expect(() => runTrustedNpmCli([], { timeout: 180_001 })).toThrow('npm CLI timeout is invalid');
   });
 });
+
+function fixtureOutside(snapshotRoot: string): string {
+  return dirname(dirname(snapshotRoot));
+}
 
 function closeLaunch(launch: ReturnType<typeof resolveNpmCliLaunch>): void {
   const descriptors = [launch.npmCli.descriptor, launch.packageJson.descriptor];

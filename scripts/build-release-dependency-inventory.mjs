@@ -5,6 +5,7 @@ import {
   closeSync,
   constants,
   fstatSync,
+  existsSync,
   lstatSync,
   mkdtempSync,
   mkdirSync,
@@ -12,13 +13,15 @@ import {
   opendirSync,
   readSync,
   realpathSync,
-  rmSync,
+  rmdirSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildRuntimeReleaseDependencyInventory } from '../dist/core/daemon/runtime-release-dependency-inventory.js';
+import { assurePrivateStoragePath } from '../dist/core/util/private-storage.js';
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const outputPath = join(repositoryRoot, 'dist', 'release-dependency-inventory.json');
@@ -34,26 +37,34 @@ const MAX_NPM_RUNTIME_BYTES = 512 * 1024 * 1024;
 const MAX_NPM_RUNTIME_DEPTH = 48;
 const MAX_NPM_RUNTIME_SCAN_MS = 30_000;
 const MAX_NPM_CLI_TIMEOUT_MS = 180_000;
+const MAX_NPM_SNAPSHOT_CLEANUP_MS = 30_000;
 const NPM_CLI_BOOTSTRAP = [
   "const fs = require('node:fs');",
   "const path = require('node:path');",
   "const Module = require('node:module');",
+  "const { fileURLToPath } = require('node:url');",
   'const filename = process.argv[1];',
   "const snapshotRoot = fs.realpathSync(process.env.ASHLR_NPM_SNAPSHOT_ROOT);",
   'delete process.env.ASHLR_NPM_SNAPSHOT_ROOT;',
-  'const originalResolveFilename = Module._resolveFilename;',
-  'const builtins = new Set(Module.builtinModules.flatMap((name) => [name, `node:${name}`]));',
   'const insideSnapshot = (candidate) => {',
   '  const nested = path.relative(snapshotRoot, candidate);',
   "  return nested === '' || (nested !== '..' && !nested.startsWith(`..${path.sep}`) && !path.isAbsolute(nested));",
   '};',
-  'Module._resolveFilename = function(request, parent, isMain, options) {',
-  '  const resolved = originalResolveFilename.call(this, request, parent, isMain, options);',
-  '  if (builtins.has(request) || builtins.has(resolved)) return resolved;',
-  '  const canonical = fs.realpathSync(resolved);',
-  "  if (canonical !== resolved || !insideSnapshot(canonical)) throw new Error('npm module escaped snapshot');",
-  '  return resolved;',
+  "if (typeof Module.registerHooks !== 'function') throw new Error('Node 22.15 or newer is required');",
+  'const confineModuleUrl = (url) => {',
+  "  if (typeof url !== 'string') throw new Error('npm module escaped snapshot');",
+  '  let candidate;',
+  "  try { candidate = fileURLToPath(url); } catch { throw new Error('npm module escaped snapshot'); }",
+  '  const canonical = fs.realpathSync(candidate);',
+  "  if (canonical !== candidate || !insideSnapshot(canonical)) throw new Error('npm module escaped snapshot');",
   '};',
+  'Module.registerHooks({',
+  '  resolve(specifier, context, nextResolve) {',
+  '    const resolved = nextResolve(specifier, context);',
+  '    if (!Module.isBuiltin(specifier)) confineModuleUrl(resolved.url);',
+  '    return resolved;',
+  '  },',
+  '});',
   "const source = fs.readFileSync(0, 'utf8');",
   'const npmCli = new Module(filename);',
   'npmCli.filename = filename;',
@@ -239,10 +250,13 @@ function prepareNpmRuntimeSnapshot(launch, snapshotContainer) {
       JSON.stringify(launch.npmRuntimeAncestors)) {
       throw new Error('npm runtime ancestor changed before snapshot');
     }
+    const snapshotClosureSha256 = observeNpmRuntimeClosure(snapshotRoot);
     return {
       npmCliPath: join(snapshotRoot, 'bin', 'npm-cli.js'),
       cleanupRoot: snapshotContainer,
       root: snapshotRoot,
+      rootIdentity: lstatSync(snapshotRoot),
+      snapshotClosureSha256,
     };
   } catch (error) {
     removeNpmRuntimeSnapshot(snapshotContainer);
@@ -251,25 +265,113 @@ function prepareNpmRuntimeSnapshot(launch, snapshotContainer) {
 }
 
 function removeNpmRuntimeSnapshot(snapshotRoot) {
-  const makeWritable = (directory) => {
-    chmodSync(directory, 0o700);
-    const handle = opendirSync(directory);
+  if (!existsSync(snapshotRoot)) return;
+  const deadline = process.hrtime.bigint() + BigInt(MAX_NPM_SNAPSHOT_CLEANUP_MS) * 1_000_000n;
+  let directoryCount = 0;
+  let entryCount = 0;
+  const checkDeadline = () => {
+    if (process.hrtime.bigint() > deadline) throw new Error('npm snapshot cleanup exceeded deadline');
+  };
+  const retryRemoval = (operation) => {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      checkDeadline();
+      try {
+        operation();
+        return;
+      } catch (error) {
+        const code = error && typeof error === 'object' ? error.code : undefined;
+        if (attempt === 3 || !['EBUSY', 'ENOTEMPTY', 'EPERM'].includes(code)) throw error;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100 * (attempt + 1));
+      }
+    }
+  };
+  const removeEntry = (path, depth) => {
+    checkDeadline();
+    if (depth > MAX_NPM_RUNTIME_DEPTH) throw new Error('npm snapshot cleanup exceeds traversal depth');
+    const before = lstatSync(path);
+    if (before.isSymbolicLink()) throw new Error('npm snapshot cleanup contains a reparse entry');
+    if (before.isFile()) {
+      chmodSync(path, 0o600);
+      retryRemoval(() => unlinkSync(path));
+      return;
+    }
+    if (!before.isDirectory() || realpathSync(path) !== path) {
+      throw new Error('npm snapshot cleanup contains an unsafe directory');
+    }
+    directoryCount += 1;
+    if (directoryCount > MAX_NPM_RUNTIME_DIRECTORIES) {
+      throw new Error('npm snapshot cleanup exceeds directory limit');
+    }
+    chmodSync(path, 0o700);
+    const entries = [];
+    const handle = opendirSync(path);
     try {
       for (;;) {
+        checkDeadline();
         const entry = handle.readSync();
         if (entry === null) break;
-        const path = join(directory, entry.name);
-        if (entry.isDirectory()) makeWritable(path);
-        else chmodSync(path, 0o600);
+        entries.push(entry);
+        entryCount += 1;
+        if (entries.length > MAX_NPM_RUNTIME_ENTRIES_PER_DIRECTORY ||
+          entryCount > MAX_NPM_RUNTIME_ENTRIES) {
+          throw new Error('npm snapshot cleanup exceeds entry limit');
+        }
       }
     } finally {
       handle.closeSync();
     }
+    entries.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
+    for (const entry of entries) removeEntry(join(path, entry.name), depth + 1);
+    const after = lstatSync(path);
+    if (!after.isDirectory() || after.isSymbolicLink() ||
+      after.dev !== before.dev || after.ino !== before.ino || realpathSync(path) !== path) {
+      throw new Error('npm snapshot cleanup directory changed during traversal');
+    }
+    retryRemoval(() => rmdirSync(path));
   };
+  removeEntry(snapshotRoot, 0);
+}
+
+function assertNpmSnapshotDirectory(path, identity, anchorPath) {
+  const assurance = assurePrivateStoragePath(path, 'directory', 'inspect-existing', { anchorPath });
+  if (!assurance.ok) throw new Error(`npm snapshot storage changed: ${assurance.reason}`);
+  const current = lstatSync(path);
+  if (!current.isDirectory() || current.isSymbolicLink() ||
+    current.dev !== identity.dev || current.ino !== identity.ino || realpathSync(path) !== path) {
+    throw new Error('npm snapshot storage changed during execution');
+  }
+}
+
+function assertNpmSnapshotDirectoryIdentity(path, identity) {
+  const current = lstatSync(path);
+  if (!current.isDirectory() || current.isSymbolicLink() ||
+    current.dev !== identity.dev || current.ino !== identity.ino || realpathSync(path) !== path) {
+    throw new Error('npm snapshot storage changed during execution');
+  }
+}
+
+function createNpmRuntimeSnapshotContainer() {
+  const parent = realpathSync(process.platform === 'win32' ? homedir() : tmpdir());
+  const snapshotRoot = realpathSync(mkdtempSync(join(parent, '.ashlr-npm-runtime-')));
   try {
-    makeWritable(snapshotRoot);
-  } finally {
-    rmSync(snapshotRoot, { force: true, recursive: true });
+    chmodSync(snapshotRoot, 0o700);
+    const before = lstatSync(snapshotRoot);
+    if (!before.isDirectory() || before.isSymbolicLink() || realpathSync(snapshotRoot) !== snapshotRoot) {
+      throw new Error('npm snapshot container is unsafe');
+    }
+    const assurance = assurePrivateStoragePath(snapshotRoot, 'directory', 'secure-created', {
+      anchorPath: parent,
+    });
+    if (!assurance.ok) throw new Error(`npm snapshot container is unsafe: ${assurance.reason}`);
+    const after = lstatSync(snapshotRoot);
+    if (!after.isDirectory() || after.isSymbolicLink() ||
+      after.dev !== before.dev || after.ino !== before.ino || realpathSync(snapshotRoot) !== snapshotRoot) {
+      throw new Error('npm snapshot container changed during storage assurance');
+    }
+    return snapshotRoot;
+  } catch (error) {
+    removeNpmRuntimeSnapshot(snapshotRoot);
+    throw error;
   }
 }
 
@@ -389,15 +491,23 @@ export function runTrustedNpmCli(args, options = {}, runtime = {}) {
   if (!Number.isSafeInteger(timeout) || timeout <= 0 || timeout > MAX_NPM_CLI_TIMEOUT_MS) {
     throw new Error('npm CLI timeout is invalid');
   }
-  const snapshotContainer = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-npm-runtime-')));
+  const snapshotContainer = createNpmRuntimeSnapshotContainer();
+  const snapshotContainerIdentity = lstatSync(snapshotContainer);
   const childTemporaryRoot = join(snapshotContainer, 'tmp');
   mkdirSync(childTemporaryRoot, { mode: 0o700 });
+  const childTemporaryIdentity = lstatSync(childTemporaryRoot);
   let launch;
   let snapshot;
   try {
     launch = resolveNpmCliLaunch(launchEnvironment, runtime);
     snapshot = prepareNpmRuntimeSnapshot(launch, snapshotContainer);
-    runtime.beforeSpawn?.(launch);
+    runtime.beforeSpawn?.(launch, snapshot);
+    assertNpmSnapshotDirectory(snapshotContainer, snapshotContainerIdentity, dirname(snapshotContainer));
+    assertNpmSnapshotDirectoryIdentity(snapshot.root, snapshot.rootIdentity);
+    assertNpmSnapshotDirectoryIdentity(childTemporaryRoot, childTemporaryIdentity);
+    if (observeNpmRuntimeClosure(snapshot.root) !== snapshot.snapshotClosureSha256) {
+      throw new Error('npm snapshot changed before execution');
+    }
     const environment = { ...process.env, ...requestedEnvironment };
     delete environment.NODE_OPTIONS;
     delete environment.NODE_PATH;
@@ -432,11 +542,14 @@ export function runTrustedNpmCli(args, options = {}, runtime = {}) {
     }
     return result;
   } finally {
-    if (snapshot !== undefined) removeNpmRuntimeSnapshot(snapshot.cleanupRoot);
-    else if (launch === undefined) removeNpmRuntimeSnapshot(snapshotContainer);
-    if (launch !== undefined) {
-      closeSync(launch.npmCli.descriptor);
-      closeSync(launch.packageJson.descriptor);
+    try {
+      if (launch !== undefined) {
+        closeSync(launch.npmCli.descriptor);
+        closeSync(launch.packageJson.descriptor);
+      }
+    } finally {
+      if (snapshot !== undefined) removeNpmRuntimeSnapshot(snapshot.cleanupRoot);
+      else if (launch === undefined) removeNpmRuntimeSnapshot(snapshotContainer);
     }
   }
 }

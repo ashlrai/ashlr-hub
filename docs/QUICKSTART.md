@@ -1,6 +1,6 @@
 # Quickstart — zero to running fleet in 5 steps
 
-Requires **Node.js 22+**. Works on macOS, Linux, and Windows.
+Requires **Node.js 22.15+**. Works on macOS, Linux, and Windows.
 
 ---
 

@@ -1,6 +1,6 @@
 # Architecture
 
-ashlr-hub is a single Node binary (`@ashlr/hub`) that runs an autonomous agent fleet against enrolled git repositories. It is TypeScript/ESM, Node 22+, with zero runtime dependencies in `core/` and `cli/` except `@modelcontextprotocol/sdk` (MCP gateway only).
+ashlr-hub is a single Node binary (`@ashlr/hub`) that runs an autonomous agent fleet against enrolled git repositories. It is TypeScript/ESM, Node 22.15+, with zero runtime dependencies in `core/` and `cli/` except `@modelcontextprotocol/sdk` (MCP gateway only).
 
 ---
 

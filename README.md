@@ -77,7 +77,7 @@ End-State Spec (your vision)
 
 ### Requirements
 
-- Node.js 22+
+- Node.js 22.15+
 - Git
 - At least one backend: Ollama running locally, `claude` CLI, `codex` CLI, or an `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`
 
@@ -96,7 +96,7 @@ cd ashlr-hub
 ./install.sh   # builds dist/, symlinks bin/ashlr → ~/.local/bin/ashlr
 ```
 
-`install.sh` requires Node 22+ and is idempotent — safe to re-run after pulling updates.
+`install.sh` requires Node 22.15+ and is idempotent — safe to re-run after pulling updates.
 
 ### 1. Run the setup wizard
 
