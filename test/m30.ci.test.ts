@@ -432,6 +432,8 @@ describe('M30 CI workflow', () => {
       ...nativeAliasFiles,
       ...nativePathIdentityFiles,
       ...windowsServiceAuthorityFiles,
+      'test/npm-cli-launch.test.ts',
+      'test/npm-cli-launch.test.ts',
     ];
 
     expect(windowsMatrixEntries).toHaveLength(expectedWindowsPartitions.length);
@@ -485,6 +487,8 @@ describe('M30 CI workflow', () => {
       hostMergeRevocationProtocolTest,
       detachedPostMergeVerificationTest,
       'test/m426.sandbox-reservation-identity.test.ts',
+      'test/npm-cli-launch.test.ts',
+      'test/npm-cli-launch.test.ts',
     ].sort());
     expect(windowsEntries.match(/test\/m395\.effect-terminal-retention\.test\.ts/g)).toHaveLength(
       1,
@@ -502,6 +506,8 @@ describe('M30 CI workflow', () => {
     expect(ciYml).toContain(`npm run test:ci -- ${nativeAliasFiles.join(' ')}`);
     expect(ciYml).toContain('windows-service-authority:');
     expect(ciYml).toContain('runs-on: windows-2022');
+    expect(ciYml.match(/npm run test:ci -- test\/npm-cli-launch\.test\.ts/g)).toHaveLength(2);
+    expect(ciYml).toContain("if: matrix.os == 'macos-latest'");
     for (const file of windowsServiceAuthorityFiles) expect(ciYml).toContain(file);
     expect(ciYml).toContain("if: matrix.label == 'windows, portability 1/3'");
     for (const file of nativePathIdentityFiles) expect(ciYml).toContain(file);

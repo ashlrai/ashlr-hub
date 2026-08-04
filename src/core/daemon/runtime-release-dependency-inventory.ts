@@ -35,9 +35,12 @@ const MAX_PACKAGE_JSON_BYTES = 1024 * 1024;
 const MAX_PACKAGES = 512;
 const MAX_FILES_PER_PACKAGE = 20_000;
 const MAX_TOTAL_FILES = 100_000;
+const MAX_TOTAL_DIRECTORIES = 20_000;
+const MAX_DIRECTORY_ENTRIES = 20_000;
 const MAX_FILE_BYTES = 128 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 512 * 1024 * 1024;
 const MAX_DEPTH = 48;
+const MAX_BUILD_OBSERVATION_MS = 120_000;
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const PACKAGE_NAME_RE = /^(?:@[a-z0-9._~-]+\/[a-z0-9._~-]+|[a-z0-9._~-]+)$/i;
 
@@ -439,11 +442,17 @@ function scanPackageDirectory(
   const files: PackageFileContent[] = [];
   const hostExecutablePaths = new Set<string>();
   const identities: Array<{ path: string; identity: string }> = [];
+  let directoryCount = 0;
+  let entryCount = 0;
   let totalBytes = 0;
   let packageJsonBytes: Buffer | undefined;
   const visit = (directory: string, relativeDirectory: string, depth: number): void => {
     checkpoint();
     if (depth > MAX_DEPTH) throw new Error('runtime dependency traversal depth exceeds limit');
+    directoryCount += 1;
+    if (directoryCount > MAX_TOTAL_DIRECTORIES) {
+      throw new Error('runtime dependency directory count exceeds limit');
+    }
     const before = lstatSync(directory, { bigint: true });
     if (!before.isDirectory() || before.isSymbolicLink()) {
       throw new Error('runtime dependency tree contains an unsafe directory');
@@ -456,6 +465,10 @@ function scanPackageDirectory(
         const entry = handle.readSync();
         if (entry === null) break;
         entries.push(entry);
+        entryCount += 1;
+        if (entries.length > MAX_DIRECTORY_ENTRIES || entryCount > MAX_TOTAL_FILES) {
+          throw new Error('runtime dependency tree entry count exceeds limit');
+        }
       }
     } finally {
       handle.closeSync();
@@ -631,6 +644,13 @@ function buildInventory(
   packageRootInput: string,
   options: BuildRuntimeReleaseDependencyInventoryOptions,
 ): RuntimeReleaseDependencyInventoryV2 {
+  const deadline = process.hrtime.bigint() + BigInt(MAX_BUILD_OBSERVATION_MS) * 1_000_000n;
+  const checkpoint = (): void => {
+    if (process.hrtime.bigint() > deadline) {
+      throw new Error('runtime dependency inventory build exceeded deadline');
+    }
+  };
+  checkpoint();
   const packageRoot = canonicalRoot(packageRootInput, 'release package root');
   const packageJsonBytes = stableFileBytes(
     join(packageRoot, 'package.json'),
@@ -692,7 +712,7 @@ function buildInventory(
       join(packageRoot, ...lockPath.split('/')),
       expectedName,
       metadata['version'],
-      () => {},
+      checkpoint,
       packagedFilesByPath?.get(path),
     );
     packages.push({
@@ -889,8 +909,11 @@ function discoverInstalledPackages(
           if (!scopedStat.isDirectory() || scopedStat.isSymbolicLink()) {
             throw new Error('installed dependency package is unsafe');
           }
-          const relativePath = prefix ? `${prefix}/node_modules/${name}/${child}` : `${name}/${child}`;
-          output.push(relativePath);
+      const relativePath = prefix ? `${prefix}/node_modules/${name}/${child}` : `${name}/${child}`;
+      output.push(relativePath);
+      if (output.length > MAX_PACKAGES) {
+        throw new Error('installed dependency package count exceeds limit');
+      }
           const nested = join(scopedRoot, 'node_modules');
           if (existsDirectory(nested)) visitNodeModules(nested, relativePath, depth + 1);
         }
@@ -899,6 +922,9 @@ function discoverInstalledPackages(
       if (!stat.isDirectory()) throw new Error('installed dependency root contains an unexpected entry');
       const relativePath = prefix ? `${prefix}/node_modules/${name}` : name;
       output.push(relativePath);
+      if (output.length > MAX_PACKAGES) {
+        throw new Error('installed dependency package count exceeds limit');
+      }
       const nested = join(absolute, 'node_modules');
       if (existsDirectory(nested)) visitNodeModules(nested, relativePath, depth + 1);
     }
@@ -915,17 +941,27 @@ function observeCompleteDependencyTree(
   const rootBefore = lstatSync(dependencyRoot, { bigint: true });
   requireSafePortableMode(rootBefore, 'runtime dependency root', true);
   const content: Array<DependencyFileContent | DependencyBinLinkContent> = [];
+  let directoryCount = 0;
+  let entryCount = 0;
   let totalBytes = 0;
   let totalFiles = 0;
   const visit = (directory: string, relativeDirectory: string, depth: number): void => {
     checkpoint();
     if (depth > MAX_DEPTH) throw new Error('installed dependency traversal depth exceeds limit');
+    directoryCount += 1;
+    if (directoryCount > MAX_TOTAL_DIRECTORIES) {
+      throw new Error('installed dependency directory count exceeds limit');
+    }
     const before = lstatSync(directory, { bigint: true });
     if (!before.isDirectory() || before.isSymbolicLink()) {
       throw new Error('installed dependency tree contains an unsafe directory');
     }
     requireSafePortableMode(before, 'installed dependency directory', true);
     const entries = readdirNames(directory);
+    entryCount += entries.length;
+    if (entryCount > MAX_TOTAL_FILES) {
+      throw new Error('installed dependency tree entry count exceeds limit');
+    }
     for (const name of entries) {
       checkpoint();
       const absolute = join(directory, name);
@@ -990,6 +1026,9 @@ function readdirNames(directory: string): string[] {
       const entry = handle.readSync();
       if (entry === null) break;
       names.push(entry.name);
+      if (names.length > MAX_DIRECTORY_ENTRIES) {
+        throw new Error('installed dependency directory entry count exceeds limit');
+      }
     }
   } finally {
     handle.closeSync();
