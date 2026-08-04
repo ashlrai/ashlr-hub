@@ -1941,6 +1941,69 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(status.sourceQuality?.sources.goals).toMatchObject({ sourceState: 'degraded', complete: false });
   });
 
+  it('removes absolute POSIX and Windows paths from public lane titles while preserving useful text', () => {
+    const titles = [
+      'Exact hidden file /private/customer/acme/repo/.env should disappear but useful context remains',
+      'Keep useful prefix /opt/company/private/secrets.txt then verify relative src/core.ts remains',
+      String.raw`Review C:\Users\mason\private\agent.log and keep release note`,
+      String.raw`Share \\server\secret\plans\launch.txt today`,
+      String.raw`Inspect "\\?\UNC\server\share\folder with space\launch.txt" without exposing it`,
+      'Inspect "/Volumes/Client Data/acme/.env" without exposing it',
+      'Forward UNC //server/share/private/launch.txt must disappear',
+      'Keep docs https://example.com/path and useful release context',
+    ];
+    const proposals = titles.map((title, index): Proposal => ({
+      id: `proposal-hostile-path-${index}`,
+      repo: '/private/workspace/ashlr-hub',
+      origin: 'agent',
+      kind: 'patch',
+      title,
+      summary: 'hostile path fixture',
+      status: 'awaiting-host-merge',
+      createdAt: '2026-07-03T00:00:00.000Z',
+    }));
+
+    const status = buildFleetLaneLocks({ goals: [], proposals, visibleQueueItems: [] });
+    const projectedTitles = status.samples.map((sample) => sample.title);
+    const encoded = JSON.stringify(status.samples);
+
+    expect(projectedTitles).toEqual([
+      'Exact hidden file [PATH] should disappear but useful context remains',
+      'Keep useful prefix [PATH] then verify relative src/core.ts remains',
+      'Review [PATH] and keep release note',
+      'Share [PATH] today',
+      'Inspect [PATH] without exposing it',
+      'Inspect [PATH] without exposing it',
+      'Forward UNC [PATH] must disappear',
+      'Keep docs https://example.com/path and useful release context',
+    ]);
+    expect(encoded).not.toContain('/private/customer/acme/repo/.env');
+    expect(encoded).not.toContain('/private');
+    expect(encoded).not.toContain('customer');
+    expect(encoded).not.toContain('acme');
+    expect(encoded).not.toContain('.env');
+    expect(encoded).not.toContain('/opt/company');
+    expect(encoded).not.toContain('C:\\Users');
+    expect(encoded).not.toContain('\\\\server\\secret');
+    expect(encoded).not.toContain('Client Data');
+    expect(encoded).not.toContain('folder with space');
+    expect(encoded).not.toContain('//server/share');
+    expect(encoded).toContain('src/core.ts');
+    expect(projectedTitles.every((title) => (title?.length ?? 0) <= 120)).toBe(true);
+
+    const goal = makeGoalRecord('/private/workspace/ashlr-hub', 'goal-hostile-path-title', 'active', 'in-progress');
+    goal.milestones[0]!.title = 'Goal path /private/customer/acme/repo/.env should redact but keep milestone context';
+    const goalStatus = buildFleetLaneLocks({ goals: [goal], proposals: [], visibleQueueItems: [] });
+    const goalEncoded = JSON.stringify(goalStatus.samples);
+    expect(goalStatus.samples[0]?.title).toBe(
+      'Goal path [PATH] should redact but keep milestone context',
+    );
+    expect(goalEncoded).not.toContain('/private/customer/acme/repo/.env');
+    expect(goalEncoded).not.toContain('customer');
+    expect(goalEncoded).not.toContain('acme');
+    expect(goalEncoded).not.toContain('.env');
+  });
+
   it('surfaces missing verify repo names, project kinds, and reasons', async () => {
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'make-repo');

@@ -2398,6 +2398,16 @@ function laneLocksMetric(laneLocks) {
   return `${laneLocks.active ?? 0} active${observed} / ${laneLocks.staleInProgress ?? 0} stale / ${laneLocks.awaitingHostMerge ?? 0} handoff / ${laneLocks.unverifiedApplied ?? 0} unverified`;
 }
 
+function laneLockDisplayState(laneLocks) {
+  const quality = laneLocks?.sourceQuality;
+  if (!laneLocks || !quality) return 'unknown';
+  if (quality.sourceState === 'missing') return 'missing';
+  if (quality.complete !== true) return 'degraded';
+  return quality.sourceState === 'healthy' || quality.sourceState === 'degraded'
+    ? quality.sourceState
+    : 'unknown';
+}
+
 function laneLockStateLabel(reason) {
   const labels = {
     'active-goal': 'active',
@@ -2430,13 +2440,68 @@ function laneBoardReadOnlyAction(laneLocks) {
   return { label: 'Inspect fleet status', shell: 'ashlr fleet status --json' };
 }
 
+function laneBoardCompactSummary(laneLocks) {
+  const state = laneLockDisplayState(laneLocks);
+  const occupied = laneLocks
+    ? (laneLocks.active ?? 0) + (laneLocks.awaitingHostMerge ?? 0) + (laneLocks.unverifiedApplied ?? 0)
+    : null;
+  const verdict = state === 'healthy'
+    ? occupied === 0 ? 'Clear' : 'Occupied'
+    : state === 'degraded'
+      ? 'Partial'
+      : 'Unavailable';
+  return `Lanes ${verdict}${occupied == null ? '' : ` · ${occupied}${state === 'degraded' ? ' observed' : ''}`}`;
+}
+
+function laneBoardCompactViewport() {
+  return typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(max-width: 720px)').matches;
+}
+
+function renderReadinessLaneControl(laneLocks) {
+  const action = laneBoardReadOnlyAction(laneLocks);
+  return el('div', {
+    cls: 'fd-readiness-lane-control',
+    role: 'status',
+    'aria-label': 'Autonomy lane status',
+  },
+  el('span', { cls: 'fd-readiness-lane-control__summary' }, laneBoardCompactSummary(laneLocks)),
+  el('div', { cls: 'fd-readiness-lane-control__action' },
+    el('span', {}, action.label),
+    el('code', {}, action.shell),
+    el('span', { cls: 'fleet-command-safety fleet-command-safety--read-only' }, 'read-only')
+  ));
+}
+
+function renderCompactLaneControl(laneLocks) {
+  const state = laneLockDisplayState(laneLocks);
+  const occupied = laneLocks
+    ? (laneLocks.active ?? 0) + (laneLocks.awaitingHostMerge ?? 0) + (laneLocks.unverifiedApplied ?? 0)
+    : null;
+  const verdict = state === 'healthy'
+    ? occupied === 0 ? 'Clear' : 'Occupied'
+    : state === 'degraded'
+      ? 'Partial'
+      : 'Unavailable';
+  const action = laneBoardReadOnlyAction(laneLocks);
+  return el('div', {
+    cls: `ctrl-lane-compact ctrl-lane-compact--${state}`,
+    role: 'status',
+    'aria-label': 'Autonomy lane status',
+  },
+  el('span', { cls: 'ctrl-lane-compact__label' }, 'Autonomy lanes'),
+  el('span', { cls: 'ctrl-lane-compact__verdict' }, `${verdict}${occupied == null ? '' : ` · ${occupied}`}`),
+  el('div', { cls: 'ctrl-lane-compact__action' },
+    el('span', {}, action.label),
+    el('code', {}, action.shell),
+    el('span', { cls: 'fleet-command-safety fleet-command-safety--read-only' }, 'read-only')
+  ));
+}
+
 function renderAutonomyLaneBoard(laneLocks, cardClass = '') {
   const quality = laneLocks?.sourceQuality;
-  const state = !laneLocks || !quality
-    ? 'unknown'
-    : quality.complete !== true
-      ? 'degraded'
-      : quality.sourceState;
+  const state = laneLockDisplayState(laneLocks);
   const samples = Array.isArray(laneLocks?.samples) ? laneLocks.samples.slice(0, 8) : [];
   const occupied = laneLocks
     ? (laneLocks.active ?? 0) + (laneLocks.awaitingHostMerge ?? 0) + (laneLocks.unverifiedApplied ?? 0)
@@ -2464,6 +2529,13 @@ function renderAutonomyLaneBoard(laneLocks, cardClass = '') {
         : `${occupied}${state === 'degraded' ? ' observed' : ''}`)
     ),
     el('span', { cls: `autonomy-lane-board__state autonomy-lane-board__state--${state}` }, stateLabel)
+  ));
+
+  const action = laneBoardReadOnlyAction(laneLocks);
+  body.appendChild(el('div', { cls: 'autonomy-lane-board__action' },
+    el('span', { cls: 'autonomy-lane-board__action-label' }, action.label),
+    el('code', {}, action.shell),
+    el('span', { cls: 'fleet-command-safety fleet-command-safety--read-only' }, 'read-only')
   ));
 
   const reasons = Array.isArray(quality?.reasons) ? quality.reasons.slice(0, 8) : [];
@@ -2513,13 +2585,6 @@ function renderAutonomyLaneBoard(laneLocks, cardClass = '') {
       state === 'healthy' ? 'No occupied autonomy lanes.' : 'No lane rows available from the observed sources.'
     ));
   }
-
-  const action = laneBoardReadOnlyAction(laneLocks);
-  body.appendChild(el('div', { cls: 'autonomy-lane-board__action' },
-    el('span', { cls: 'autonomy-lane-board__action-label' }, action.label),
-    el('code', {}, action.shell),
-    el('span', { cls: 'fleet-command-safety fleet-command-safety--read-only' }, 'read-only')
-  ));
   wrapper.appendChild(body);
   return wrapper;
 }
@@ -4313,6 +4378,7 @@ function renderControl() {
   const props  = d.fleet?.proposals ?? fleet.proposals ?? {};
   const merges = d.fleet?.merges ?? fleet.merges ?? {};
   const autonomy = d.fleet?.autonomy ?? fleet.autonomy ?? null;
+  const laneLocks = d.fleet?.laneLocks ?? fleet.laneLocks ?? null;
   const direction = d.fleet?.autonomyDirection ?? fleet.autonomyDirection ?? null;
   const activeDirectionMode = daemon.activeDirectionMode ?? null;
   const daemonState = fleetDaemonState(fleetDaemon);
@@ -4385,6 +4451,7 @@ function renderControl() {
   if (fleetDaemon.lastTickAt ?? daemonObservation.lastTickAt) {
     heroPulse.appendChild(el('div', { cls: 'ctrl-last-tick' }, `Last tick ${fmtRelative(fleetDaemon.lastTickAt ?? daemonObservation.lastTickAt)}`));
   }
+  heroPulse.appendChild(renderCompactLaneControl(laneLocks));
 
   const heroMetrics = el('div', { cls: 'ctrl-hero-metrics' });
   const sharedQueue = queue.shared;
@@ -4413,7 +4480,6 @@ function renderControl() {
     const drainColor = queue.diagnosticResliceDrain.stalled ? '#ef4444' : '#f97316';
     heroMetrics.appendChild(controlMetric('Diag Drain', queue.diagnosticResliceDrain.selected ?? 0, drainColor));
   }
-  const laneLocks = d.fleet?.laneLocks ?? fleet.laneLocks ?? null;
   if (laneLocks) {
     const laneLocksWarn = (laneLocks.staleInProgress ?? 0) > 0 || (laneLocks.unverifiedApplied ?? 0) > 0 || (laneLocks.awaitingHostMerge ?? 0) > 0;
     heroMetrics.appendChild(controlMetric('Lane Locks', laneLocks.active ?? 0, laneLocksWarn ? '#f97316' : '#38bdf8'));
@@ -5820,31 +5886,39 @@ function fdRenderReadinessRail(snap) {
   });
   rail.appendChild(el('div', { cls: 'fd-readiness-rail__head' },
     el('span', { cls: 'fd-readiness-rail__label' }, 'Fleet OS'),
-    el('span', { cls: 'fd-readiness-rail__verdict' }, verdict),
-    el('span', { cls: 'fd-readiness-rail__loop' }, `Loop: ${loop}`)
+    el('span', { cls: 'fd-readiness-rail__verdict' }, verdict)
   ));
+  rail.appendChild(renderReadinessLaneControl(fleet?.laneLocks));
   rail.appendChild(el('div', { cls: 'fd-readiness-strip' },
     fdMetricPill('Brief', compactFleetReason(briefLabel, 54), briefDetail),
-    fdMetricPill('Confidence', missionBrief?.confidence ?? readiness.confidence ?? 'unknown'),
-    fdMetricPill('Action', compactFleetReason(actionLabel, 54), actionDetail),
-    fdReadinessDataPill(readiness),
-    fdMetricPill('Blocker', compactFleetReason(blockerLabel, 54), blockerDetail),
-    fdMetricPill('Queue', queueMetric),
-    generatedMetric ? fdMetricPill('Generated', generatedMetric) : null,
-    repairRecovery ? fdMetricPill('Repair Loop', repairRecovery.value, repairRecovery.detail) : null,
-    drainMetric ? fdMetricPill('Diag Drain', drainMetric) : null,
-    fdMetricPill('Leases', leases ?? 'local only'),
-    promotion
-      ? fdMetricPill(
-          'Canary promotion',
-          promotion.verdict ?? 'blocked',
-          promotion.primaryBlocker?.detail ?? promotion.primaryBlocker?.code ?? 'observation only'
-        )
-      : null,
-    fdMetricPill('Yield', learningSnapshotFresh
-      ? fdDispatchYieldText(dispatchProduction, dispatchProductionSource)
-      : 'withheld (stale snapshot)')
+    fdMetricPill('Action', compactFleetReason(actionLabel, 54), actionDetail)
   ));
+  const secondary = el('details', { cls: 'fd-readiness-secondary', open: 'open' },
+    el('summary', {}, 'Readiness detail'),
+    el('div', { cls: 'fd-readiness-secondary__grid' },
+      fdMetricPill('Loop', loop),
+      fdMetricPill('Confidence', missionBrief?.confidence ?? readiness.confidence ?? 'unknown'),
+      fdReadinessDataPill(readiness),
+      fdMetricPill('Blocker', compactFleetReason(blockerLabel, 54), blockerDetail),
+      fdMetricPill('Queue', queueMetric),
+      generatedMetric ? fdMetricPill('Generated', generatedMetric) : null,
+      repairRecovery ? fdMetricPill('Repair Loop', repairRecovery.value, repairRecovery.detail) : null,
+      drainMetric ? fdMetricPill('Diag Drain', drainMetric) : null,
+      fdMetricPill('Leases', leases ?? 'local only'),
+      promotion
+        ? fdMetricPill(
+            'Canary promotion',
+            promotion.verdict ?? 'blocked',
+            promotion.primaryBlocker?.detail ?? promotion.primaryBlocker?.code ?? 'observation only'
+          )
+        : null,
+      fdMetricPill('Yield', learningSnapshotFresh
+        ? fdDispatchYieldText(dispatchProduction, dispatchProductionSource)
+        : 'withheld (stale snapshot)')
+    )
+  );
+  if (laneBoardCompactViewport()) secondary.open = false;
+  rail.appendChild(secondary);
   return rail;
 }
 

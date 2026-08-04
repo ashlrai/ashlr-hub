@@ -84,6 +84,12 @@ export const MAX_LANE_LOCK_SOURCE_REASONS = 8;
 const MAX_LANE_LOCK_TITLE_LENGTH = 120;
 const MAX_LANE_LOCK_REFERENCE_LENGTH = 96;
 
+const QUOTED_ABSOLUTE_PATH_PATTERN = /(["'])(?:[A-Za-z]:[\\/]|\\\\|\/\/|\/(?!\/))[^"'\r\n]*\1/g;
+const WINDOWS_UNC_PATH_PATTERN = /\\\\(?:[?.]\\)?(?:UNC\\)?[^\\/\s"'<>|?*]+\\[^\\/\s"'<>|?*]+(?:\\[^\\/\s"'<>|?*]+)*/gi;
+const WINDOWS_FORWARD_UNC_PATH_PATTERN = /(?<!:)\/\/[^/\s"'<>|?*]+\/[^/\s"'<>|?*]+(?:\/[^/\s"'<>|?*]+)*/g;
+const WINDOWS_DRIVE_PATH_PATTERN = /\b[A-Za-z]:[\\/](?:[^\\/\s"'<>|?*]+[\\/])*[^\\/\s"'<>|?*,;:!)]*/g;
+const POSIX_ABSOLUTE_PATH_PATTERN = /(?<![:/A-Za-z0-9_])\/(?:[A-Za-z0-9._~+@%=-]+\/)*[A-Za-z0-9._~+@%=-]+/g;
+
 const ACTIVE_GOAL_MILESTONE_STATUSES = new Set(['pending', 'in-progress', 'proposed']);
 
 function parseMs(value: string | undefined): number | null {
@@ -102,9 +108,18 @@ function repoKey(repo: string | null | undefined): string | null {
   return repo ? resolve(repo) : null;
 }
 
+function scrubAbsolutePathSubstrings(value: string): string {
+  return value
+    .replace(QUOTED_ABSOLUTE_PATH_PATTERN, '[PATH]')
+    .replace(WINDOWS_UNC_PATH_PATTERN, '[PATH]')
+    .replace(WINDOWS_FORWARD_UNC_PATH_PATTERN, '[PATH]')
+    .replace(WINDOWS_DRIVE_PATH_PATTERN, '[PATH]')
+    .replace(POSIX_ABSOLUTE_PATH_PATTERN, '[PATH]');
+}
+
 function boundedMetadata(value: string | undefined, limit: number): string | undefined {
   if (!value) return undefined;
-  const printable = Array.from(scrubSecrets(value), (character) => {
+  const printable = Array.from(scrubSecrets(scrubAbsolutePathSubstrings(value)), (character) => {
     const code = character.charCodeAt(0);
     return code <= 31 || code === 127 ? ' ' : character;
   }).join('');
