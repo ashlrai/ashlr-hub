@@ -4,6 +4,7 @@ import {
   mkdtempSync,
   mkdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -86,6 +87,7 @@ describe('shell-free npm CLI launch', () => {
     const trustedCli = join(fixtureRoot, 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js');
     const transitiveCli = join(fixtureRoot, 'lib', 'node_modules', 'npm', 'lib', 'cli.js');
     const packageJson = join(fixtureRoot, 'lib', 'node_modules', 'npm', 'package.json');
+    const replacementMarker = join(fixtureRoot, 'transitive-replacement-ran');
     write(fakeNode, 'fixture node identity\n');
     write(trustedCli, "require('../lib/cli.js');\n");
     write(transitiveCli, "process.stdout.write('validated runtime');\n");
@@ -98,9 +100,14 @@ describe('shell-free npm CLI launch', () => {
       execPath: fakeNode,
       platform: 'linux',
       beforeSpawn: () => {
-        write(transitiveCli, "process.stdout.write('forged runtime');\n");
+        write(transitiveCli, [
+          "const fs = require('node:fs');",
+          `fs.writeFileSync(${JSON.stringify(replacementMarker)}, 'unsafe');`,
+          "process.stdout.write('forged runtime');",
+        ].join('\n'));
       },
     })).toThrow('npm runtime closure changed during execution');
+    expect(existsSync(replacementMarker)).toBe(false);
   });
 
   it('rejects an npm runtime ABA mutation even when the original bytes are restored', () => {
@@ -110,6 +117,7 @@ describe('shell-free npm CLI launch', () => {
     const trustedCli = join(fixtureRoot, 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js');
     const transitiveCli = join(fixtureRoot, 'lib', 'node_modules', 'npm', 'lib', 'cli.js');
     const packageJson = join(fixtureRoot, 'lib', 'node_modules', 'npm', 'package.json');
+    const replacementMarker = join(fixtureRoot, 'aba-replacement-ran');
     const original = "process.stdout.write('validated runtime');\n";
     write(fakeNode, 'fixture node identity\n');
     write(trustedCli, "require('../lib/cli.js');\n");
@@ -123,10 +131,83 @@ describe('shell-free npm CLI launch', () => {
       execPath: fakeNode,
       platform: 'linux',
       beforeSpawn: () => {
-        write(transitiveCli, "process.stdout.write('forged runtime');\n");
+        write(transitiveCli, [
+          "const fs = require('node:fs');",
+          `fs.writeFileSync(${JSON.stringify(replacementMarker)}, 'unsafe');`,
+          "process.stdout.write('forged runtime');",
+        ].join('\n'));
         write(transitiveCli, original);
       },
     })).toThrow('npm runtime closure changed during execution');
+    expect(existsSync(replacementMarker)).toBe(false);
+  });
+
+  it('rejects an enclosing-directory ABA that restores the validated npm closure', () => {
+    const fixtureRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-npm-ancestor-aba-')));
+    tempDirs.push(fixtureRoot);
+    const fakeNode = join(fixtureRoot, 'bin', 'node');
+    const nodeModules = join(fixtureRoot, 'lib', 'node_modules');
+    const displaced = join(fixtureRoot, 'lib', 'node_modules.validated');
+    const forged = join(fixtureRoot, 'lib', 'node_modules.forged');
+    const trustedCli = join(nodeModules, 'npm', 'bin', 'npm-cli.js');
+    const transitiveCli = join(nodeModules, 'npm', 'lib', 'cli.js');
+    const packageJson = join(nodeModules, 'npm', 'package.json');
+    const replacementMarker = join(fixtureRoot, 'ancestor-replacement-ran');
+    write(fakeNode, 'fixture node identity\n');
+    write(trustedCli, "require('../lib/cli.js');\n");
+    write(transitiveCli, "process.stdout.write('validated runtime');\n");
+    write(packageJson, '{"name":"npm","version":"10.0.0"}\n');
+
+    expect(() => runTrustedNpmCli([], {
+      environment: { npm_execpath: trustedCli },
+    }, {
+      command: process.execPath,
+      execPath: fakeNode,
+      platform: 'linux',
+      beforeSpawn: () => {
+        renameSync(nodeModules, displaced);
+        write(join(nodeModules, 'npm', 'lib', 'cli.js'), [
+          "const fs = require('node:fs');",
+          `fs.writeFileSync(${JSON.stringify(replacementMarker)}, 'unsafe');`,
+          `fs.renameSync(${JSON.stringify(nodeModules)}, ${JSON.stringify(forged)});`,
+          `fs.renameSync(${JSON.stringify(displaced)}, ${JSON.stringify(nodeModules)});`,
+          "process.stdout.write('forged runtime');",
+        ].join('\n'));
+      },
+    })).toThrow(/npm (?:CLI|runtime ancestor) changed during execution/u);
+    expect(existsSync(replacementMarker)).toBe(false);
+  });
+
+  it('does not resolve npm modules from an unmeasured ancestor package', () => {
+    const fixtureRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-npm-ancestor-module-')));
+    tempDirs.push(fixtureRoot);
+    const fakeNode = join(fixtureRoot, 'bin', 'node');
+    const nodeModules = join(fixtureRoot, 'lib', 'node_modules');
+    const trustedCli = join(nodeModules, 'npm', 'bin', 'npm-cli.js');
+    const packageJson = join(nodeModules, 'npm', 'package.json');
+    const escapeMarker = join(fixtureRoot, 'ancestor-module-ran');
+    write(fakeNode, 'fixture node identity\n');
+    write(trustedCli, "require('unmeasured-escape');\n");
+    write(packageJson, '{"name":"npm","version":"10.0.0"}\n');
+    write(join(nodeModules, 'unmeasured-escape', 'index.js'), [
+      "const fs = require('node:fs');",
+      `fs.writeFileSync(${JSON.stringify(escapeMarker)}, 'unsafe');`,
+    ].join('\n'));
+
+    const result = runTrustedNpmCli([], {
+      environment: { npm_execpath: trustedCli },
+    }, {
+      command: process.execPath,
+      execPath: fakeNode,
+      platform: 'linux',
+    });
+    expect(result.status).not.toBe(0);
+    expect(existsSync(escapeMarker)).toBe(false);
+  });
+
+  it('rejects unbounded npm child timeouts before spawning', () => {
+    expect(() => runTrustedNpmCli([], { timeout: 0 })).toThrow('npm CLI timeout is invalid');
+    expect(() => runTrustedNpmCli([], { timeout: 180_001 })).toThrow('npm CLI timeout is invalid');
   });
 });
 
