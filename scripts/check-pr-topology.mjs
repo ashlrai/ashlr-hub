@@ -7,6 +7,7 @@
  * requests. It never comments, labels, closes, merges, retargets, or deletes.
  */
 
+import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,6 +21,10 @@ const MAX_BODY_BYTES = 100_000;
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const ALLOWED_COMPARE_STATUSES = new Set(['ahead', 'behind', 'diverged', 'identical']);
+const SOURCE_ISSUES = Object.freeze({
+  'topology-snapshot-changed': 'Open pull request topology changed during inspection.',
+  'topology-revalidation-incomplete': 'Open pull request topology revalidation was incomplete.',
+});
 
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -179,8 +184,12 @@ function normalizeSnapshot(raw) {
   if (triggerPullRequest && triggerPullRequest.number !== pullRequestNumber) {
     throw new Error('snapshot.triggerPullRequest does not match pullRequestNumber');
   }
+  const sourceIssue = raw.sourceIssue == null ? null : String(raw.sourceIssue);
+  if (sourceIssue !== null && !Object.hasOwn(SOURCE_ISSUES, sourceIssue)) {
+    throw new Error('snapshot.sourceIssue is unsupported');
+  }
   return {
-    complete: raw.complete === true,
+    complete: raw.complete === true && sourceIssue === null,
     repository: {
       fullName: repositoryName(
         raw.repository.full_name ?? raw.repository.fullName,
@@ -196,6 +205,7 @@ function normalizeSnapshot(raw) {
     comparisons,
     triggerPullRequest,
     dependentCoverageComplete: raw.dependentCoverageComplete === true,
+    sourceIssue,
   };
 }
 
@@ -278,6 +288,13 @@ export function evaluateTopology(raw) {
       severity: 'error',
       code: 'incomplete-input',
       message: 'The pull-request snapshot is incomplete.',
+    });
+  }
+  if (snapshot.sourceIssue) {
+    diagnostics.push({
+      severity: 'error',
+      code: snapshot.sourceIssue,
+      message: SOURCE_ISSUES[snapshot.sourceIssue],
     });
   }
 
@@ -687,6 +704,67 @@ async function githubGet(url, token, fetchImpl) {
   return { body: await response.json(), next: nextLink(response.headers.get('link')) };
 }
 
+function normalizeRepositoryResponse(value, label) {
+  if (!isRecord(value)) throw new Error(`${label} must be an object`);
+  return {
+    fullName: repositoryName(value.full_name, `${label}.full_name`),
+    defaultBranch: gitRef(value.default_branch, `${label}.default_branch`),
+  };
+}
+
+async function fetchOpenPullRequestPopulation({ fullName, token, fetchImpl }) {
+  let url = `https://api.github.com/repos/${fullName}/pulls?state=open&per_page=100&page=1`;
+  const pullRequests = [];
+  const pageSizes = [];
+  let pages = 0;
+  while (url) {
+    pages += 1;
+    if (pages > MAX_PAGES) throw new Error(`pull-request pagination exceeds ${MAX_PAGES} pages`);
+    const response = await githubGet(url, token, fetchImpl);
+    if (!Array.isArray(response.body)) throw new Error('GitHub pull-request response is not an array');
+    pageSizes.push(response.body.length);
+    pullRequests.push(...response.body);
+    if (pullRequests.length > MAX_PULL_REQUESTS) {
+      throw new Error(`GitHub returned more than ${MAX_PULL_REQUESTS} open pull requests`);
+    }
+    url = response.next;
+  }
+  return { pullRequests, pageSizes };
+}
+
+function digest(value) {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+function populationFingerprint(population) {
+  const seenNumbers = new Set();
+  const pullRequests = population.pullRequests.map((value, index) => {
+    const pullRequest = normalizePullRequest(value, index);
+    if (seenNumbers.has(pullRequest.number)) {
+      throw new Error(`duplicate pull request #${pullRequest.number}`);
+    }
+    seenNumbers.add(pullRequest.number);
+    const supersedes = parseSupersedes(pullRequest.body);
+    return {
+      number: pullRequest.number,
+      state: pullRequest.state,
+      head: pullRequest.head,
+      base: pullRequest.base,
+      bodySha256: digest(pullRequest.body),
+      supersedesSha256: digest(JSON.stringify(supersedes)),
+    };
+  });
+  return digest(JSON.stringify({ pageSizes: population.pageSizes, pullRequests }));
+}
+
+function incompleteSnapshot(snapshot, sourceIssue) {
+  return {
+    ...snapshot,
+    complete: false,
+    sourceIssue,
+  };
+}
+
 function normalizeExpectedEventIdentity({ expectedHeadSha, expectedBaseSha, expectedState }) {
   const values = [expectedHeadSha, expectedBaseSha, expectedState].map((value) =>
     value == null || value === '' ? null : value,
@@ -720,6 +798,7 @@ function assertSameCandidateIdentity(candidate, expected, phase) {
   if (
     candidate.number !== expected.number ||
     candidate.state !== expected.state ||
+    candidate.body !== expected.body ||
     candidate.head.sha !== expected.head.sha ||
     candidate.head.ref !== expected.head.ref ||
     candidate.head.repo.fullName !== expected.head.repo.fullName ||
@@ -756,6 +835,13 @@ export async function fetchGithubSnapshot({
     token,
     fetchImpl,
   );
+  const initialRepository = normalizeRepositoryResponse(
+    repoResponse.body,
+    'initial repository API response',
+  );
+  if (initialRepository.fullName !== fullName) {
+    throw new Error('initial repository API response has the wrong repository identity');
+  }
   const initialCandidateResponse = await githubGet(
     `https://api.github.com/repos/${fullName}/pulls/${number}`,
     token,
@@ -770,20 +856,9 @@ export async function fetchGithubSnapshot({
   }
   assertExpectedEventIdentity(initialCandidate, expectedIdentity, 'initial');
 
-  let url = `https://api.github.com/repos/${fullName}/pulls?state=open&per_page=100&page=1`;
-  const pullRequests = [];
-  let pages = 0;
-  while (url) {
-    pages += 1;
-    if (pages > MAX_PAGES) throw new Error(`pull-request pagination exceeds ${MAX_PAGES} pages`);
-    const response = await githubGet(url, token, fetchImpl);
-    if (!Array.isArray(response.body)) throw new Error('GitHub pull-request response is not an array');
-    pullRequests.push(...response.body);
-    if (pullRequests.length > MAX_PULL_REQUESTS) {
-      throw new Error(`GitHub returned more than ${MAX_PULL_REQUESTS} open pull requests`);
-    }
-    url = response.next;
-  }
+  const initialPopulation = await fetchOpenPullRequestPopulation({ fullName, token, fetchImpl });
+  const pullRequests = initialPopulation.pullRequests;
+  const initialPopulationFingerprint = populationFingerprint(initialPopulation);
 
   const candidate = pullRequests.find((pr) => pr?.number === number);
   if (initialCandidate.state === 'open') {
@@ -794,7 +869,7 @@ export async function fetchGithubSnapshot({
   } else if (candidate) {
     throw new Error(`closed pull request #${number} appeared in open GitHub pagination`);
   }
-  const defaultBranch = repoResponse.body?.default_branch;
+  const defaultBranch = initialRepository.defaultBranch;
   const comparisons = [];
   let dependentCoverageComplete = false;
   if (candidate?.base?.ref === defaultBranch && candidate.base?.repo?.full_name === fullName) {
@@ -833,19 +908,7 @@ export async function fetchGithubSnapshot({
     }
     dependentCoverageComplete = true;
   }
-  const finalCandidateResponse = await githubGet(
-    `https://api.github.com/repos/${fullName}/pulls/${number}`,
-    token,
-    fetchImpl,
-  );
-  const finalCandidate = normalizeTriggerPullRequest(
-    finalCandidateResponse.body,
-    'final candidate API response',
-  );
-  assertSameCandidateIdentity(finalCandidate, initialCandidate, 'post-comparison');
-  assertExpectedEventIdentity(finalCandidate, expectedIdentity, 'post-comparison');
-
-  return {
+  const snapshot = {
     schemaVersion: SCHEMA_VERSION,
     complete: true,
     repository: repoResponse.body,
@@ -855,6 +918,61 @@ export async function fetchGithubSnapshot({
     triggerPullRequest: initialCandidateResponse.body,
     dependentCoverageComplete,
   };
+
+  let finalRepositoryResponse;
+  let finalPopulation;
+  try {
+    finalRepositoryResponse = await githubGet(
+      `https://api.github.com/repos/${fullName}`,
+      token,
+      fetchImpl,
+    );
+    finalPopulation = await fetchOpenPullRequestPopulation({ fullName, token, fetchImpl });
+  } catch {
+    return incompleteSnapshot(snapshot, 'topology-revalidation-incomplete');
+  }
+
+  let finalRepository;
+  let finalPopulationFingerprint;
+  try {
+    finalRepository = normalizeRepositoryResponse(
+      finalRepositoryResponse.body,
+      'final repository API response',
+    );
+    finalPopulationFingerprint = populationFingerprint(finalPopulation);
+  } catch {
+    return incompleteSnapshot(snapshot, 'topology-revalidation-incomplete');
+  }
+  if (
+    finalRepository.fullName !== initialRepository.fullName ||
+    finalRepository.defaultBranch !== initialRepository.defaultBranch ||
+    finalPopulationFingerprint !== initialPopulationFingerprint
+  ) {
+    return incompleteSnapshot(snapshot, 'topology-snapshot-changed');
+  }
+
+  let finalCandidateResponse;
+  try {
+    finalCandidateResponse = await githubGet(
+      `https://api.github.com/repos/${fullName}/pulls/${number}`,
+      token,
+      fetchImpl,
+    );
+  } catch {
+    return incompleteSnapshot(snapshot, 'topology-revalidation-incomplete');
+  }
+  try {
+    const finalCandidate = normalizeTriggerPullRequest(
+      finalCandidateResponse.body,
+      'final candidate API response',
+    );
+    assertSameCandidateIdentity(finalCandidate, initialCandidate, 'post-comparison');
+    assertExpectedEventIdentity(finalCandidate, expectedIdentity, 'post-comparison');
+  } catch {
+    return incompleteSnapshot(snapshot, 'topology-snapshot-changed');
+  }
+
+  return snapshot;
 }
 
 function parseArguments(argv) {

@@ -95,6 +95,36 @@ function response(body: unknown, { status = 200, link = null }: { status?: numbe
   };
 }
 
+async function fetchRevalidatedFixture({
+  candidate,
+  initialPulls,
+  finalPulls,
+  finalCandidate = candidate,
+}: {
+  candidate: ReturnType<typeof pullRequest>;
+  initialPulls: ReturnType<typeof pullRequest>[];
+  finalPulls: ReturnType<typeof pullRequest>[];
+  finalCandidate?: ReturnType<typeof pullRequest>;
+}) {
+  const fetchImpl = vi.fn()
+    .mockResolvedValueOnce(response({ full_name: repository, default_branch: 'master' }))
+    .mockResolvedValueOnce(response(candidate))
+    .mockResolvedValueOnce(response(initialPulls))
+    .mockResolvedValueOnce(response({ full_name: repository, default_branch: 'master' }))
+    .mockResolvedValueOnce(response(finalPulls))
+    .mockResolvedValueOnce(response(finalCandidate));
+  const raw = await fetchGithubSnapshot({
+    repository,
+    pullRequestNumber: candidate.number,
+    token: 'test-token',
+    expectedHeadSha: candidate.head.sha,
+    expectedBaseSha: candidate.base.sha,
+    expectedState: 'open',
+    fetchImpl,
+  });
+  return { fetchImpl, raw, report: evaluateTopology(raw) };
+}
+
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
@@ -394,6 +424,9 @@ describe('M484 topology graph admission', () => {
       .mockResolvedValueOnce(response(candidate))
       .mockResolvedValueOnce(response([root], { link: `<${pageTwo}>; rel="next"` }))
       .mockResolvedValueOnce(response([candidate]))
+      .mockResolvedValueOnce(response({ full_name: repository, default_branch: 'master' }))
+      .mockResolvedValueOnce(response([root], { link: `<${pageTwo}>; rel="next"` }))
+      .mockResolvedValueOnce(response([candidate]))
       .mockResolvedValueOnce(response(candidate));
 
     const raw = await fetchGithubSnapshot({
@@ -408,11 +441,77 @@ describe('M484 topology graph admission', () => {
 
     expect(raw.complete).toBe(true);
     expect(raw.pullRequests).toHaveLength(2);
-    expect(fetchImpl).toHaveBeenCalledTimes(5);
+    expect(fetchImpl).toHaveBeenCalledTimes(8);
     for (const [, init] of fetchImpl.mock.calls) {
       expect(init).toMatchObject({ method: 'GET', redirect: 'error' });
     }
     expect(evaluateTopology(raw).admission).toBe('admitted');
+  });
+
+  it('fails closed when page boundaries change during the second scan', async () => {
+    const root = pullRequest({ number: 1, headRef: 'root', baseRef: 'master' });
+    const candidate = pullRequest({
+      number: 2,
+      headRef: 'candidate',
+      baseRef: root.head.ref,
+      baseSha: root.head.sha,
+    });
+    const pageTwo = 'https://api.github.com/repos/ashlrai/ashlr-hub/pulls?state=open&per_page=100&page=2';
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(response({ full_name: repository, default_branch: 'master' }))
+      .mockResolvedValueOnce(response(candidate))
+      .mockResolvedValueOnce(response([root], { link: `<${pageTwo}>; rel="next"` }))
+      .mockResolvedValueOnce(response([candidate]))
+      .mockResolvedValueOnce(response({ full_name: repository, default_branch: 'master' }))
+      .mockResolvedValueOnce(response([root, candidate]));
+
+    const raw = await fetchGithubSnapshot({
+      repository,
+      pullRequestNumber: 2,
+      token: 'test-token',
+      expectedHeadSha: candidate.head.sha,
+      expectedBaseSha: candidate.base.sha,
+      expectedState: 'open',
+      fetchImpl,
+    });
+
+    expect(raw).toMatchObject({ complete: false, sourceIssue: 'topology-snapshot-changed' });
+    expect(evaluateTopology(raw).admission).toBe('blocked');
+    expect(fetchImpl).toHaveBeenCalledTimes(6);
+  });
+
+  it('fails closed when the second pagination pass becomes incomplete', async () => {
+    const root = pullRequest({ number: 1, headRef: 'root', baseRef: 'master' });
+    const candidate = pullRequest({
+      number: 2,
+      headRef: 'candidate',
+      baseRef: root.head.ref,
+      baseSha: root.head.sha,
+    });
+    const pageTwo = 'https://api.github.com/repos/ashlrai/ashlr-hub/pulls?state=open&per_page=100&page=2';
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(response({ full_name: repository, default_branch: 'master' }))
+      .mockResolvedValueOnce(response(candidate))
+      .mockResolvedValueOnce(response([root, candidate]))
+      .mockResolvedValueOnce(response({ full_name: repository, default_branch: 'master' }))
+      .mockResolvedValueOnce(response([root], { link: `<${pageTwo}>; rel="next"` }))
+      .mockResolvedValueOnce(response({}, { status: 503 }));
+
+    const raw = await fetchGithubSnapshot({
+      repository,
+      pullRequestNumber: 2,
+      token: 'test-token',
+      expectedHeadSha: candidate.head.sha,
+      expectedBaseSha: candidate.base.sha,
+      expectedState: 'open',
+      fetchImpl,
+    });
+
+    expect(raw).toMatchObject({ complete: false, sourceIssue: 'topology-revalidation-incomplete' });
+    expect(evaluateTopology(raw).diagnostics).toContainEqual(expect.objectContaining({
+      code: 'topology-revalidation-incomplete',
+    }));
+    expect(fetchImpl).toHaveBeenCalledTimes(6);
   });
 
   it('rejects event/API identity mismatch before graph comparisons', async () => {
@@ -433,7 +532,7 @@ describe('M484 topology graph admission', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
-  it('rejects candidate replacement after exact graph comparisons', async () => {
+  it('fails closed when the candidate changes after exact graph comparisons', async () => {
     const root = pullRequest({ number: 1, headRef: 'root', baseRef: 'master' });
     const candidate = pullRequest({ number: 2, headRef: 'candidate', baseRef: 'master' });
     const replaced = { ...candidate, head: { ...candidate.head, sha: oid(999) } };
@@ -449,9 +548,11 @@ describe('M484 topology graph admission', () => {
         status: 'diverged',
         merge_base_commit: { sha: oid(555) },
       }))
+      .mockResolvedValueOnce(response({ full_name: repository, default_branch: 'master' }))
+      .mockResolvedValueOnce(response([root, candidate]))
       .mockResolvedValueOnce(response(replaced));
 
-    await expect(fetchGithubSnapshot({
+    const raw = await fetchGithubSnapshot({
       repository,
       pullRequestNumber: 2,
       token: 'test-token',
@@ -459,9 +560,146 @@ describe('M484 topology graph admission', () => {
       expectedBaseSha: candidate.base.sha,
       expectedState: 'open',
       fetchImpl,
-    })).rejects.toThrow('post-comparison candidate API identity changed');
-    expect(fetchImpl).toHaveBeenCalledTimes(6);
+    });
+    const report = evaluateTopology(raw);
+
+    expect(raw).toMatchObject({ complete: false, sourceIssue: 'topology-snapshot-changed' });
+    expect(report.complete).toBe(false);
+    expect(report.diagnostics).toContainEqual({
+      severity: 'error',
+      code: 'topology-snapshot-changed',
+      message: 'Open pull request topology changed during inspection.',
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(8);
     expect(String(fetchImpl.mock.calls[3]?.[0])).toContain('/compare/');
+  });
+
+  it('fails closed when the candidate body changes after the population revalidation', async () => {
+    const root = pullRequest({ number: 1, headRef: 'root', baseRef: 'master' });
+    const candidate = pullRequest({
+      number: 2,
+      headRef: 'candidate',
+      baseRef: root.head.ref,
+      baseSha: root.head.sha,
+      body: 'Supersedes: #1',
+    });
+    const finalCandidate = { ...candidate, body: '' };
+    const { fetchImpl, raw, report } = await fetchRevalidatedFixture({
+      candidate,
+      initialPulls: [root, candidate],
+      finalPulls: [root, candidate],
+      finalCandidate,
+    });
+
+    expect(raw).toMatchObject({ complete: false, sourceIssue: 'topology-snapshot-changed' });
+    expect(report.admission).toBe('blocked');
+    expect(report.diagnostics).toContainEqual(expect.objectContaining({
+      code: 'topology-snapshot-changed',
+    }));
+    expect(fetchImpl).toHaveBeenCalledTimes(6);
+  });
+
+  it.each([
+    {
+      name: 'another root opens',
+      mutate: (root: ReturnType<typeof pullRequest>, candidate: ReturnType<typeof pullRequest>) => [
+        root,
+        candidate,
+        pullRequest({ number: 3, headRef: 'new-root', baseRef: 'master' }),
+      ],
+    },
+    {
+      name: 'another root closes',
+      mutate: (_root: ReturnType<typeof pullRequest>, candidate: ReturnType<typeof pullRequest>) => [candidate],
+    },
+    {
+      name: 'another root synchronizes',
+      mutate: (root: ReturnType<typeof pullRequest>, candidate: ReturnType<typeof pullRequest>) => [
+        { ...root, head: { ...root.head, sha: oid(777) } },
+        candidate,
+      ],
+    },
+    {
+      name: 'another root declaration is edited',
+      mutate: (root: ReturnType<typeof pullRequest>, candidate: ReturnType<typeof pullRequest>) => [
+        { ...root, body: 'Supersedes: #99' },
+        candidate,
+      ],
+    },
+    {
+      name: 'the population order changes',
+      mutate: (root: ReturnType<typeof pullRequest>, candidate: ReturnType<typeof pullRequest>) => [
+        candidate,
+        root,
+      ],
+    },
+  ])('fails closed when $name during comparison inspection', async ({ mutate }) => {
+    const root = pullRequest({ number: 1, headRef: 'root', baseRef: 'master' });
+    const candidate = pullRequest({
+      number: 2,
+      headRef: 'candidate',
+      baseRef: root.head.ref,
+      baseSha: root.head.sha,
+    });
+    const { raw, report } = await fetchRevalidatedFixture({
+      candidate,
+      initialPulls: [root, candidate],
+      finalPulls: mutate(root, candidate),
+    });
+
+    expect(raw).toMatchObject({ complete: false, sourceIssue: 'topology-snapshot-changed' });
+    expect(report.complete).toBe(false);
+    expect(report.diagnostics).toContainEqual({
+      severity: 'error',
+      code: 'topology-snapshot-changed',
+      message: 'Open pull request topology changed during inspection.',
+    });
+  });
+
+  it('admits an unchanged second population snapshot', async () => {
+    const root = pullRequest({ number: 1, headRef: 'root', baseRef: 'master' });
+    const candidate = pullRequest({
+      number: 2,
+      headRef: 'candidate',
+      baseRef: root.head.ref,
+      baseSha: root.head.sha,
+    });
+    const { fetchImpl, raw, report } = await fetchRevalidatedFixture({
+      candidate,
+      initialPulls: [root, candidate],
+      finalPulls: [root, candidate],
+    });
+
+    expect(raw).toMatchObject({ complete: true });
+    expect(raw).not.toHaveProperty('sourceIssue');
+    expect(report).toMatchObject({ admission: 'admitted', complete: true });
+    expect(fetchImpl).toHaveBeenCalledTimes(6);
+  });
+
+  it('fails closed when revalidation exceeds the open-PR cap', async () => {
+    const root = pullRequest({ number: 1, headRef: 'root', baseRef: 'master' });
+    const candidate = pullRequest({
+      number: 2,
+      headRef: 'candidate',
+      baseRef: root.head.ref,
+      baseSha: root.head.sha,
+    });
+    const excessive = Array.from({ length: 1_001 }, (_, index) =>
+      pullRequest({ number: index + 10, headRef: `root-${index}`, baseRef: 'master' }),
+    );
+    const { raw, report } = await fetchRevalidatedFixture({
+      candidate,
+      initialPulls: [root, candidate],
+      finalPulls: excessive,
+    });
+
+    expect(raw).toMatchObject({ complete: false, sourceIssue: 'topology-revalidation-incomplete' });
+    expect(report.admission).toBe('blocked');
+    expect(report.diagnostics).toContainEqual({
+      severity: 'error',
+      code: 'topology-revalidation-incomplete',
+      message: 'Open pull request topology revalidation was incomplete.',
+    });
   });
 
   it('re-evaluates downstream convergence declarations when a root changes', async () => {
@@ -479,6 +717,8 @@ describe('M484 topology graph admission', () => {
         status: 'ahead',
         merge_base_commit: { sha: root.head.sha },
       }))
+      .mockResolvedValueOnce(response({ full_name: repository, default_branch: 'master' }))
+      .mockResolvedValueOnce(response([root, convergence]))
       .mockResolvedValueOnce(response(root));
 
     const raw = await fetchGithubSnapshot({
@@ -506,7 +746,7 @@ describe('M484 topology graph admission', () => {
       code: 'dependent-supersedes-missing',
       pullRequest: 3,
     }));
-    expect(fetchImpl).toHaveBeenCalledTimes(6);
+    expect(fetchImpl).toHaveBeenCalledTimes(8);
   });
 
   it('re-evaluates stale dependent edges when a parent head synchronizes', async () => {
@@ -520,6 +760,8 @@ describe('M484 topology graph admission', () => {
     const fetchImpl = vi.fn()
       .mockResolvedValueOnce(response({ full_name: repository, default_branch: 'master' }))
       .mockResolvedValueOnce(response(parent))
+      .mockResolvedValueOnce(response([parent, child]))
+      .mockResolvedValueOnce(response({ full_name: repository, default_branch: 'master' }))
       .mockResolvedValueOnce(response([parent, child]))
       .mockResolvedValueOnce(response(parent));
 
@@ -552,6 +794,8 @@ describe('M484 topology graph admission', () => {
     const fetchImpl = vi.fn()
       .mockResolvedValueOnce(response({ full_name: repository, default_branch: 'master' }))
       .mockResolvedValueOnce(response(parent))
+      .mockResolvedValueOnce(response([child]))
+      .mockResolvedValueOnce(response({ full_name: repository, default_branch: 'master' }))
       .mockResolvedValueOnce(response([child]))
       .mockResolvedValueOnce(response(parent));
 
