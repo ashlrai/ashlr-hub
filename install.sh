@@ -30,12 +30,12 @@ echo "────────────────────────�
 # ── 1. Verify Node ────────────────────────────────────────────────────────────
 log "Checking Node.js version..."
 if ! command -v node &>/dev/null; then
-  fail "Node.js not found. Install Node v22+ and retry."
+  fail "Node.js not found. Install Node v22.15+ and retry."
 fi
 
-NODE_MAJOR=$(node -e 'process.stdout.write(String(process.versions.node.split(".")[0]))')
-if (( NODE_MAJOR < 22 )); then
-  fail "Node v22+ required; found v$(node --version). Please upgrade."
+NODE_SUPPORTED=$(node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.stdout.write(major > 22 || (major === 22 && minor >= 15) ? "1" : "0")')
+if [[ "$NODE_SUPPORTED" != "1" ]]; then
+  fail "Node v22.15+ required; found v$(node --version). Please upgrade."
 fi
 ok "Node $(node --version)"
 

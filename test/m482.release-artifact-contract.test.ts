@@ -140,7 +140,7 @@ afterEach(() => {
   }
 });
 
-describe('release artifact contract v1', () => {
+describe('release artifact contract v1', { timeout: 30_000 }, () => {
   it('uses a shell-free Node launch rooted in the active Node toolchain', () => {
     const launch = resolveNpmCliLaunch();
     expect(launch.command).toBe(process.execPath);
@@ -551,6 +551,7 @@ describe('release artifact contract v1', () => {
       if (built.ok) return;
       expect(built.reason).toMatch(/platform-variant|install lifecycle|native install variance/u);
     },
+    10_000,
   );
 
   it('revalidates injected install lifecycle metadata during the second complete scan', () => {

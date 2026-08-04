@@ -2,8 +2,8 @@
  * M30 POLISH — CI workflow guard.
  *
  * Parses .github/workflows/ci.yml (line-based; no YAML dependency, no new deps)
- * and asserts the CI runs on Node 22 (the hard minimum — install.sh hard-fails
- * below 22, so a 20+22 matrix would silently lie), runs the required
+ * and asserts the CI runs on Node 22.15+ (the hard minimum — install.sh hard-fails
+ * below 22.15, so a 20+22 matrix would silently lie), runs the required
  * typecheck / lint / build / test steps with hermetic isolation, that npm
  * caching is enabled, and that NOTHING public is wired in (no deploy/publish/
  * release step) — per the M30 "nothing public / self-hostable" invariant.
@@ -93,10 +93,11 @@ describe('M30 CI workflow', () => {
     expect(ciYml).toMatch(/^ {2}push:\n {4}branches: \[master\]$/m);
   });
 
-  it('runs on Node 22 only (install.sh hard-fails below 22; no 20+22 matrix)', () => {
-    // The CI uses a single node-version: "22" (not a matrix array).
+  it('runs on Node 22.15 or newer only (install.sh enforces the synchronous-hook floor)', () => {
+    // One exhaustive Ubuntu shard proves the exact floor; other lanes track Node 22 current.
     // A Node-20 entry would be wrong — install.sh rejects it at runtime.
-    expect(ciYml).toMatch(/node-version:\s*["']?22["']?/);
+    expect(ciYml).toContain('node_version: "22.15.0"');
+    expect(ciYml).toContain("node-version: ${{ matrix.node_version || '22' }}");
     // Confirm Node 20 is NOT in the workflow as a version entry.
     expect(ciYml).not.toMatch(/node-version:\s*["']?20["']?/);
   });
@@ -588,6 +589,6 @@ describe('M30 CI workflow', () => {
 
   it('package.json engines field declares the supported Node floor', () => {
     // Keep npm metadata aligned with install.sh, CI, and release workflows.
-    expect(pkg.engines?.node).toBe('>=22');
+    expect(pkg.engines?.node).toBe('>=22.15.0');
   });
 });

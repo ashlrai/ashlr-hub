@@ -60,7 +60,7 @@
     "./package.json": "./package.json"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.15.0"
   },
   "scripts": {
     "prepublishOnly": "npm run typecheck && npm run lint && npm run test:ci",
