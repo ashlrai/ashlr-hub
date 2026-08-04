@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   closeSync,
   constants,
@@ -6,11 +7,12 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readSync,
   realpathSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildRuntimeReleaseDependencyInventory } from '../dist/core/daemon/runtime-release-dependency-inventory.js';
 
@@ -19,6 +21,10 @@ const outputPath = join(repositoryRoot, 'dist', 'release-dependency-inventory.js
 
 const MAX_NPM_CLI_BYTES = 4 * 1024 * 1024;
 const MAX_NPM_PACKAGE_BYTES = 1024 * 1024;
+const MAX_NPM_RUNTIME_FILE_BYTES = 128 * 1024 * 1024;
+const MAX_NPM_RUNTIME_FILES = 20_000;
+const MAX_NPM_RUNTIME_BYTES = 512 * 1024 * 1024;
+const MAX_NPM_RUNTIME_DEPTH = 48;
 const NPM_CLI_BOOTSTRAP = [
   "const fs = require('node:fs');",
   "const path = require('node:path');",
@@ -35,6 +41,18 @@ function sameFileIdentity(left, right) {
   return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode &&
     left.nlink === right.nlink && left.size === right.size && left.mtimeMs === right.mtimeMs &&
     left.ctimeMs === right.ctimeMs;
+}
+
+function fileIdentity(stat) {
+  return {
+    ctimeMs: stat.ctimeMs,
+    dev: stat.dev,
+    ino: stat.ino,
+    mode: stat.mode,
+    mtimeMs: stat.mtimeMs,
+    nlink: stat.nlink,
+    size: stat.size,
+  };
 }
 
 function openStableRegularFile(path, label, maxBytes) {
@@ -74,6 +92,68 @@ function assertOpenFileIsCurrent(opened) {
     !sameFileIdentity(opened.identity, descriptor)) {
     throw new Error(`${opened.label} changed during execution`);
   }
+}
+
+function observeNpmRuntimeClosure(npmRoot) {
+  const records = [];
+  let fileCount = 0;
+  let totalBytes = 0;
+
+  const visit = (directory, depth) => {
+    if (depth > MAX_NPM_RUNTIME_DEPTH) {
+      throw new Error('npm runtime closure exceeds traversal depth');
+    }
+    const before = lstatSync(directory);
+    if (!before.isDirectory() || before.isSymbolicLink() || realpathSync(directory) !== directory) {
+      throw new Error('npm runtime closure contains an unsafe directory');
+    }
+    const entries = readdirSync(directory, { withFileTypes: true })
+      .sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
+    for (const entry of entries) {
+      const path = join(directory, entry.name);
+      const logicalPath = relative(npmRoot, path).split(sep).join('/');
+      if (entry.isSymbolicLink()) {
+        throw new Error('npm runtime closure contains a symbolic link');
+      }
+      if (entry.isDirectory()) {
+        visit(path, depth + 1);
+        continue;
+      }
+      if (!entry.isFile()) throw new Error('npm runtime closure contains a non-file entry');
+      const opened = openStableRegularFile(path, 'npm runtime file', MAX_NPM_RUNTIME_FILE_BYTES);
+      try {
+        fileCount += 1;
+        totalBytes += opened.bytes.length;
+        if (fileCount > MAX_NPM_RUNTIME_FILES || totalBytes > MAX_NPM_RUNTIME_BYTES) {
+          throw new Error('npm runtime closure exceeds resource limits');
+        }
+        records.push({
+          identity: fileIdentity(opened.identity),
+          path: logicalPath,
+          sha256: createHash('sha256').update(opened.bytes).digest('hex'),
+          size: opened.bytes.length,
+          type: 'file',
+        });
+      } finally {
+        closeSync(opened.descriptor);
+      }
+    }
+    const after = lstatSync(directory);
+    if (!sameFileIdentity(before, after) || realpathSync(directory) !== directory) {
+      throw new Error('npm runtime closure changed during validation');
+    }
+    records.push({
+      identity: fileIdentity(after),
+      path: relative(npmRoot, directory).split(sep).join('/') || '.',
+      type: 'directory',
+    });
+  };
+
+  visit(npmRoot, 0);
+  return createHash('sha256')
+    .update('ashlr:npm-runtime-closure:v1\n', 'utf8')
+    .update(JSON.stringify(records), 'utf8')
+    .digest('hex');
 }
 
 function trustedNpmCliPath(execPath, platform) {
@@ -136,7 +216,22 @@ export function resolveNpmCliLaunch(environment = process.env, runtime = {}) {
     closeSync(packageJson.descriptor);
     throw new Error('npm package identity is invalid');
   }
-  return { command, npmCli, npmCliPath: canonicalCli, packageJson };
+  let npmRuntimeClosureSha256;
+  try {
+    npmRuntimeClosureSha256 = observeNpmRuntimeClosure(npmRoot);
+  } catch (error) {
+    closeSync(npmCli.descriptor);
+    closeSync(packageJson.descriptor);
+    throw error;
+  }
+  return {
+    command,
+    npmCli,
+    npmCliPath: canonicalCli,
+    npmRoot,
+    npmRuntimeClosureSha256,
+    packageJson,
+  };
 }
 
 export function runTrustedNpmCli(args, options = {}, runtime = {}) {
@@ -168,6 +263,9 @@ export function runTrustedNpmCli(args, options = {}, runtime = {}) {
     );
     assertOpenFileIsCurrent(launch.npmCli);
     assertOpenFileIsCurrent(launch.packageJson);
+    if (observeNpmRuntimeClosure(launch.npmRoot) !== launch.npmRuntimeClosureSha256) {
+      throw new Error('npm runtime closure changed during execution');
+    }
     return result;
   } finally {
     closeSync(launch.npmCli.descriptor);
