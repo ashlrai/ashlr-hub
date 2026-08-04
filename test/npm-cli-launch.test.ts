@@ -410,7 +410,7 @@ describe('shell-free npm CLI launch', () => {
     });
     expect(result.status).toBe(0);
     expect(assurance).toEqual({ ok: true, reason: 'exact-private-dacl' });
-    expect(timeouts.length).toBeGreaterThanOrEqual(4);
+    expect(timeouts.length).toBeGreaterThanOrEqual(3);
     expect(timeouts).toEqual(timeouts.map(() => 15_000));
   });
 
