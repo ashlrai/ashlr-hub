@@ -83,6 +83,7 @@ export const MAX_LANE_LOCK_SOURCE_REASONS = 8;
 
 const MAX_LANE_LOCK_TITLE_LENGTH = 120;
 const MAX_LANE_LOCK_REFERENCE_LENGTH = 96;
+const PUBLIC_LANE_REFERENCE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$/;
 
 const QUOTED_ABSOLUTE_PATH_PATTERN = /(["'])(?:[A-Za-z]:[\\/]|\\\\|\/\/|\/(?!\/))[^"'\r\n]*\1/g;
 const WINDOWS_UNC_PATH_PATTERN = /\\\\(?:[?.]\\)?(?:UNC\\)?[^\\/\s"'<>|?*]+\\[^\\/\s"'<>|?*]+(?:\\[^\\/\s"'<>|?*]+)*/gi;
@@ -93,6 +94,9 @@ const AMBIGUOUS_SPACED_POSIX_PATH_PATTERN = /(?<![:/A-Za-z0-9_])\/(?:[^/\s"'<>|?
 const AMBIGUOUS_SPACED_DRIVE_PATH_PATTERN = /\b[A-Za-z]:[\\/](?:[^\\/\s"'<>|?*]+[\\/])*[^\\/\s"'<>|?*]+[ \t]+[^\s"'<>|?*]*[\\/][^\s"'<>|?*]+/;
 const AMBIGUOUS_SPACED_UNC_PATH_PATTERN = /\\\\(?:[?.]\\)?(?:UNC\\)?[^\\/\s"'<>|?*]+\\[^\\/\s"'<>|?*]+[ \t]+(?:[^\s"'<>|?*]+[ \t]+){0,2}[^\s"'<>|?*]*\\[^\s"'<>|?*]+/i;
 const AMBIGUOUS_SPACED_FINAL_COMPONENT_PATTERN = /(?:\b[A-Za-z]:[\\/]|\\\\(?:[?.]\\)?(?:UNC\\)?|(?<![:/A-Za-z0-9_])\/)(?:[^\\/\s"'<>|?*]+[\\/])*[^\\/\s"'<>|?*]+[ \t]+[^\\/\s"'<>|?*]+\.[A-Za-z0-9]{1,16}(?=$|[\s,;:!?)\]}])/i;
+const POSIX_ABSOLUTE_PATH_CANDIDATE_PATTERN = /(?:^|[\s"'([{=,:;])(\/(?!\/)[^\s"'<>|?*]+)/gu;
+const DRIVE_ABSOLUTE_PATH_CANDIDATE_PATTERN = /(?:^|[\s"'([{=,:;])([A-Za-z]:[\\/][^\s"'<>|?*]+)/gu;
+const UNC_ABSOLUTE_PATH_CANDIDATE_PATTERN = /(?:^|[\s"'([{=,:;])(\\\\(?:[?.]\\)?(?:UNC\\)?[^\s"'<>|?*]+)/gu;
 
 const ACTIVE_GOAL_MILESTONE_STATUSES = new Set(['pending', 'in-progress', 'proposed']);
 
@@ -112,9 +116,23 @@ function repoKey(repo: string | null | undefined): string | null {
   return repo ? resolve(repo) : null;
 }
 
+function containsNonAscii(value: string): boolean {
+  return Array.from(value).some((character) => (character.codePointAt(0) ?? 0) > 0x7f);
+}
+
+function hasNonAsciiAbsolutePath(value: string): boolean {
+  return [
+    POSIX_ABSOLUTE_PATH_CANDIDATE_PATTERN,
+    DRIVE_ABSOLUTE_PATH_CANDIDATE_PATTERN,
+    UNC_ABSOLUTE_PATH_CANDIDATE_PATTERN,
+  ].some((pattern) => Array.from(value.matchAll(pattern))
+    .some((match) => match[1] ? containsNonAscii(match[1]) : false));
+}
+
 function scrubAbsolutePathSubstrings(value: string): string {
   const withoutQuotedPaths = value.replace(QUOTED_ABSOLUTE_PATH_PATTERN, '[PATH]');
   if (
+    hasNonAsciiAbsolutePath(withoutQuotedPaths) ||
     AMBIGUOUS_SPACED_POSIX_PATH_PATTERN.test(withoutQuotedPaths) ||
     AMBIGUOUS_SPACED_DRIVE_PATH_PATTERN.test(withoutQuotedPaths) ||
     AMBIGUOUS_SPACED_UNC_PATH_PATTERN.test(withoutQuotedPaths) ||
@@ -128,6 +146,11 @@ function scrubAbsolutePathSubstrings(value: string): string {
     .replace(WINDOWS_FORWARD_UNC_PATH_PATTERN, '[PATH]')
     .replace(WINDOWS_DRIVE_PATH_PATTERN, '[PATH]')
     .replace(POSIX_ABSOLUTE_PATH_PATTERN, '[PATH]');
+}
+
+function publicReference(value: string | null | undefined): string | undefined {
+  if (typeof value !== 'string' || !PUBLIC_LANE_REFERENCE_PATTERN.test(value)) return undefined;
+  return value;
 }
 
 function boundedMetadata(value: string | undefined, limit: number): string | undefined {
@@ -146,6 +169,7 @@ function boundedMetadata(value: string | undefined, limit: number): string | und
 function publicRepoName(repo: string | null | undefined): string | null {
   if (!repo) return null;
   const normalized = repo.replace(/\\/g, '/').replace(/\/+$/, '');
+  if (containsNonAscii(normalized)) return '[PATH]';
   return boundedMetadata(normalized.split('/').pop(), MAX_LANE_LOCK_REFERENCE_LENGTH) ?? null;
 }
 
@@ -272,17 +296,20 @@ export function buildFleetLaneLocks(input: BuildFleetLaneLocksInput): FleetLaneL
     activeGoalIds.add(goal.id);
     const milestoneAgeMs = ageMs(safeNowMs, milestone.updatedAt ?? goal.updatedAt ?? goal.createdAt);
     const stale = milestone.status === 'in-progress' && milestoneAgeMs !== null && milestoneAgeMs > staleMs;
+    const publicGoalId = publicReference(goal.id);
+    const publicMilestoneId = publicReference(milestone.id);
+    const publicProposalId = publicReference(milestone.proposalId);
     if (stale) staleInProgress++;
     pushSample(
       samples,
       seenSamples,
       {
-        lane: publicLane(goal.project, `goal:${goal.id}`),
+        lane: publicLane(goal.project, publicGoalId ? `goal:${publicGoalId}` : 'goal:[REDACTED]'),
         repo: publicRepoName(goal.project),
         reason: stale ? 'stale-in-progress' : 'active-goal',
-        goalId: goal.id,
-        milestoneId: milestone.id,
-        ...(milestone.proposalId ? { proposalId: milestone.proposalId } : {}),
+        ...(publicGoalId ? { goalId: publicGoalId } : {}),
+        ...(publicMilestoneId ? { milestoneId: publicMilestoneId } : {}),
+        ...(publicProposalId ? { proposalId: publicProposalId } : {}),
         status: milestone.status,
         title: boundedMetadata(milestone.title, MAX_LANE_LOCK_TITLE_LENGTH),
         ageMs: milestoneAgeMs,
@@ -296,16 +323,17 @@ export function buildFleetLaneLocks(input: BuildFleetLaneLocksInput): FleetLaneL
 
   for (const proposal of input.proposals) {
     const proposalAgeMs = ageMs(safeNowMs, proposal.decidedAt ?? proposal.createdAt);
+    const publicProposalId = publicReference(proposal.id);
     if (proposal.status === 'awaiting-host-merge') {
       awaitingHostMerge++;
       pushSample(
         samples,
         seenSamples,
         {
-          lane: publicLane(proposal.repo, `proposal:${proposal.id}`),
+          lane: publicLane(proposal.repo, publicProposalId ? `proposal:${publicProposalId}` : 'proposal:[REDACTED]'),
           repo: publicRepoName(proposal.repo),
           reason: 'awaiting-host-merge',
-          proposalId: proposal.id,
+          ...(publicProposalId ? { proposalId: publicProposalId } : {}),
           status: proposal.status,
           title: boundedMetadata(proposal.title, MAX_LANE_LOCK_TITLE_LENGTH),
           ageMs: proposalAgeMs,
@@ -323,10 +351,10 @@ export function buildFleetLaneLocks(input: BuildFleetLaneLocksInput): FleetLaneL
       samples,
       seenSamples,
       {
-        lane: publicLane(proposal.repo, `proposal:${proposal.id}`),
+        lane: publicLane(proposal.repo, publicProposalId ? `proposal:${publicProposalId}` : 'proposal:[REDACTED]'),
         repo: publicRepoName(proposal.repo),
         reason: 'unverified-applied',
-        proposalId: proposal.id,
+        ...(publicProposalId ? { proposalId: publicProposalId } : {}),
         status: proposal.status,
         title: boundedMetadata(proposal.title, MAX_LANE_LOCK_TITLE_LENGTH),
         ageMs: proposalAgeMs,

@@ -2390,27 +2390,33 @@ function diagnosticResliceDrainMetric(drain) {
 }
 
 function laneLocksMetric(laneLocks) {
-  if (!laneLocks) return null;
-  const quality = laneLocks.sourceQuality;
-  if (!quality) return 'source unknown';
-  if (quality.sourceState === 'missing') return 'unavailable';
-  const observed = quality.sourceState === 'degraded' || quality.complete === false ? ' observed' : '';
-  return `${laneLocks.active ?? 0} active${observed} / ${laneLocks.staleInProgress ?? 0} stale / ${laneLocks.awaitingHostMerge ?? 0} handoff / ${laneLocks.unverifiedApplied ?? 0} unverified`;
+  const state = laneLockDisplayState(laneLocks);
+  if (state === 'missing' || state === 'unknown') return 'unavailable';
+  const observed = state === 'degraded' ? ' observed' : '';
+  return `${laneLocks.active} active${observed} / ${laneLocks.staleInProgress} stale / ${laneLocks.awaitingHostMerge} handoff / ${laneLocks.unverifiedApplied} unverified`;
 }
 
 function laneLockDisplayState(laneLocks) {
   const quality = laneLocks?.sourceQuality;
   if (!laneLocks || !quality) return 'unknown';
-  const sources = quality.sources && typeof quality.sources === 'object'
-    ? Object.values(quality.sources)
-    : [];
-  if (quality.sourceState === 'missing' || sources.some((source) => source?.sourceState === 'missing')) {
+  if (quality.sourceState === 'missing') return 'missing';
+  const requiredSourceNames = ['goals', 'proposals', 'queue'];
+  if (!quality.sources || typeof quality.sources !== 'object') return 'unknown';
+  const sources = requiredSourceNames.map((name) => quality.sources[name]);
+  if (sources.some((source) => !source || typeof source !== 'object')) return 'unknown';
+  if (sources.some((source) => source.sourceState === 'missing')) {
     return 'missing';
   }
-  if (quality.complete !== true) return 'degraded';
-  return quality.sourceState === 'healthy' || quality.sourceState === 'degraded'
-    ? quality.sourceState
-    : 'unknown';
+  const validSourceStates = new Set(['healthy', 'degraded']);
+  if (!validSourceStates.has(quality.sourceState) || sources.some((source) => !validSourceStates.has(source.sourceState))) {
+    return 'unknown';
+  }
+  const requiredCounts = ['active', 'staleInProgress', 'awaitingHostMerge', 'unverifiedApplied'];
+  if (requiredCounts.some((name) => !Number.isSafeInteger(laneLocks[name]) || laneLocks[name] < 0)) return 'unknown';
+  if (quality.complete !== true || sources.some((source) => source.complete !== true)) return 'degraded';
+  return quality.sourceState === 'degraded' || sources.some((source) => source.sourceState === 'degraded')
+    ? 'degraded'
+    : 'healthy';
 }
 
 function laneLockStateLabel(reason) {
@@ -2425,15 +2431,20 @@ function laneLockStateLabel(reason) {
 
 function laneLockReference(sample) {
   const parts = [];
-  if (sample?.goalId) parts.push(`goal:${sample.goalId}`);
-  if (sample?.milestoneId) parts.push(`milestone:${sample.milestoneId}`);
-  if (sample?.proposalId) parts.push(`proposal:${sample.proposalId}`);
-  return compactFleetReason(parts.join(' / ') || sample?.lane || 'unknown', 96);
+  const safeReference = (value) => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$/.test(value)
+    ? value
+    : null;
+  const goalId = safeReference(sample?.goalId);
+  const milestoneId = safeReference(sample?.milestoneId);
+  const proposalId = safeReference(sample?.proposalId);
+  if (goalId) parts.push(`goal:${goalId}`);
+  if (milestoneId) parts.push(`milestone:${milestoneId}`);
+  if (proposalId) parts.push(`proposal:${proposalId}`);
+  return compactFleetReason(parts.join(' / ') || 'reference unavailable', 96);
 }
 
 function laneBoardReadOnlyAction(laneLocks) {
-  const quality = laneLocks?.sourceQuality;
-  if (!laneLocks || !quality || quality.sourceState !== 'healthy' || quality.complete !== true) {
+  if (laneLockDisplayState(laneLocks) !== 'healthy') {
     return { label: 'Inspect lane sources', shell: 'ashlr fleet status --json' };
   }
   if ((laneLocks.staleInProgress ?? 0) > 0 || (laneLocks.active ?? 0) > 0) {
@@ -2447,9 +2458,9 @@ function laneBoardReadOnlyAction(laneLocks) {
 
 function laneBoardCompactSummary(laneLocks) {
   const state = laneLockDisplayState(laneLocks);
-  const occupied = state === 'missing' || state === 'unknown' || !laneLocks
-    ? null
-    : (laneLocks.active ?? 0) + (laneLocks.awaitingHostMerge ?? 0) + (laneLocks.unverifiedApplied ?? 0);
+  const occupied = state === 'healthy' || state === 'degraded'
+    ? laneLocks.active + laneLocks.awaitingHostMerge + laneLocks.unverifiedApplied
+    : null;
   const verdict = state === 'healthy'
     ? occupied === 0 ? 'Clear' : 'Occupied'
     : state === 'degraded'
@@ -2481,9 +2492,9 @@ function renderReadinessLaneControl(laneLocks) {
 
 function renderCompactLaneControl(laneLocks) {
   const state = laneLockDisplayState(laneLocks);
-  const occupied = state === 'missing' || state === 'unknown' || !laneLocks
-    ? null
-    : (laneLocks.active ?? 0) + (laneLocks.awaitingHostMerge ?? 0) + (laneLocks.unverifiedApplied ?? 0);
+  const occupied = state === 'healthy' || state === 'degraded'
+    ? laneLocks.active + laneLocks.awaitingHostMerge + laneLocks.unverifiedApplied
+    : null;
   const verdict = state === 'healthy'
     ? occupied === 0 ? 'Clear' : 'Occupied'
     : state === 'degraded'
@@ -2507,10 +2518,11 @@ function renderCompactLaneControl(laneLocks) {
 function renderAutonomyLaneBoard(laneLocks, cardClass = '') {
   const quality = laneLocks?.sourceQuality;
   const state = laneLockDisplayState(laneLocks);
-  const samples = Array.isArray(laneLocks?.samples) ? laneLocks.samples.slice(0, 8) : [];
-  const occupied = state === 'missing' || state === 'unknown' || !laneLocks
-    ? null
-    : (laneLocks.active ?? 0) + (laneLocks.awaitingHostMerge ?? 0) + (laneLocks.unverifiedApplied ?? 0);
+  const displayable = state === 'healthy' || state === 'degraded';
+  const samples = displayable && Array.isArray(laneLocks?.samples) ? laneLocks.samples.slice(0, 8) : [];
+  const occupied = displayable
+    ? laneLocks.active + laneLocks.awaitingHostMerge + laneLocks.unverifiedApplied
+    : null;
   const stateLabel = state === 'healthy'
     ? occupied === 0 ? 'Clear' : 'Occupied'
     : state === 'degraded'
@@ -2552,12 +2564,12 @@ function renderAutonomyLaneBoard(laneLocks, cardClass = '') {
     ));
   }
 
-  if (laneLocks && state !== 'missing' && state !== 'unknown') {
+  if (displayable) {
     body.appendChild(el('div', { cls: 'autonomy-lane-board__metrics' },
-      fdRenderLeaseMetric('Active', String(laneLocks.active ?? 0)),
-      fdRenderLeaseMetric('Stale', String(laneLocks.staleInProgress ?? 0), (laneLocks.staleInProgress ?? 0) > 0 ? 'warn' : null),
-      fdRenderLeaseMetric('Handoff', String(laneLocks.awaitingHostMerge ?? 0), (laneLocks.awaitingHostMerge ?? 0) > 0 ? 'warn' : null),
-      fdRenderLeaseMetric('Unverified', String(laneLocks.unverifiedApplied ?? 0), (laneLocks.unverifiedApplied ?? 0) > 0 ? 'warn' : null)
+      fdRenderLeaseMetric('Active', String(laneLocks.active)),
+      fdRenderLeaseMetric('Stale', String(laneLocks.staleInProgress), laneLocks.staleInProgress > 0 ? 'warn' : null),
+      fdRenderLeaseMetric('Handoff', String(laneLocks.awaitingHostMerge), laneLocks.awaitingHostMerge > 0 ? 'warn' : null),
+      fdRenderLeaseMetric('Unverified', String(laneLocks.unverifiedApplied), laneLocks.unverifiedApplied > 0 ? 'warn' : null)
     ));
   }
 
@@ -2575,13 +2587,13 @@ function renderAutonomyLaneBoard(laneLocks, cardClass = '') {
       const title = compactFleetReason(sample?.title ?? reference, 120);
       const laneState = laneLockStateLabel(sample?.reason);
       rows.appendChild(el('div', { cls: 'autonomy-lane-board__row', role: 'row' },
-        el('span', { cls: 'autonomy-lane-board__repo', role: 'cell' }, repo),
-        el('span', { cls: 'autonomy-lane-board__reference', role: 'cell' },
+        el('span', { cls: 'autonomy-lane-board__repo', role: 'cell', 'aria-label': `Repo: ${repo}` }, repo),
+        el('span', { cls: 'autonomy-lane-board__reference', role: 'cell', 'aria-label': `Objective or reference: ${reference}` },
           el('strong', {}, title),
           el('small', {}, reference)
         ),
-        el('span', { cls: `autonomy-lane-board__badge autonomy-lane-board__badge--${laneState}`, role: 'cell' }, laneState),
-        el('span', { cls: 'autonomy-lane-board__age', role: 'cell' }, fdFormatDurationMs(sample?.ageMs))
+        el('span', { cls: `autonomy-lane-board__badge autonomy-lane-board__badge--${laneState}`, role: 'cell', 'aria-label': `State: ${laneState}` }, laneState),
+        el('span', { cls: 'autonomy-lane-board__age', role: 'cell', 'aria-label': `Age: ${fdFormatDurationMs(sample?.ageMs)}` }, fdFormatDurationMs(sample?.ageMs))
       ));
     }
     body.appendChild(rows);
@@ -4485,10 +4497,16 @@ function renderControl() {
     const drainColor = queue.diagnosticResliceDrain.stalled ? '#ef4444' : '#f97316';
     heroMetrics.appendChild(controlMetric('Diag Drain', queue.diagnosticResliceDrain.selected ?? 0, drainColor));
   }
-  if (laneLocks) {
-    const laneLocksWarn = (laneLocks.staleInProgress ?? 0) > 0 || (laneLocks.unverifiedApplied ?? 0) > 0 || (laneLocks.awaitingHostMerge ?? 0) > 0;
-    heroMetrics.appendChild(controlMetric('Lane Locks', laneLocks.active ?? 0, laneLocksWarn ? '#f97316' : '#38bdf8'));
-  }
+  const laneLocksState = laneLockDisplayState(laneLocks);
+  const laneLocksDisplayable = laneLocksState === 'healthy' || laneLocksState === 'degraded';
+  const laneLocksWarn = laneLocksState !== 'healthy' || (laneLocksDisplayable && (
+    laneLocks.staleInProgress > 0 || laneLocks.unverifiedApplied > 0 || laneLocks.awaitingHostMerge > 0
+  ));
+  heroMetrics.appendChild(controlMetric(
+    'Lane Locks',
+    laneLocksDisplayable ? `${laneLocks.active}${laneLocksState === 'degraded' ? ' observed' : ''}` : 'unavailable',
+    laneLocksWarn ? '#f97316' : '#38bdf8'
+  ));
   if (sharedQueue) {
     heroMetrics.appendChild(controlMetric('Shared leases', sharedQueue.activeClaims ?? '—', '#38bdf8'));
     heroMetrics.appendChild(controlMetric('Reclaimable', sharedQueue.reclaimableClaims ?? '—', sharedQueue.reclaimableClaims > 0 ? '#f97316' : '#4ade80'));

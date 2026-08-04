@@ -2050,6 +2050,39 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(goalEncoded).not.toContain('.env');
   });
 
+  it('omits hostile goal and proposal references from public lane samples', () => {
+    const hostileReference = '/\u5ba2\u6237\u7532/private/token=abcdefghijklmnopqrstuvwxyz';
+    const goal = makeGoalRecord('/\u5ba2\u6237\u7532/\u9879\u76ee', 'goal-safe', 'active', 'proposed');
+    goal.milestones[0]!.proposalId = hostileReference;
+    goal.milestones[0]!.title = 'Inspect /tmp/public then /\u041f\u0440\u043e\u0435\u043a\u0442\u044b/\u041a\u043b\u0438\u0435\u043d\u0442/secret.ts before release';
+    const proposal: Proposal = {
+      id: hostileReference,
+      repo: '/\u041f\u0440\u043e\u0435\u043a\u0442\u044b/\u041a\u043b\u0438\u0435\u043d\u0442',
+      origin: 'agent',
+      kind: 'patch',
+      title: 'Inspect /\u5ba2\u6237\u7532/\u9879\u76ee/secret.ts before release',
+      summary: 'hostile reference fixture',
+      status: 'awaiting-host-merge',
+      createdAt: '2026-07-03T00:00:00.000Z',
+    };
+
+    const status = buildFleetLaneLocks({ goals: [goal], proposals: [proposal], visibleQueueItems: [] });
+    const encoded = JSON.stringify(status.samples);
+
+    expect(status.samples).toHaveLength(2);
+    expect(status.samples.every((sample) => sample.proposalId === undefined)).toBe(true);
+    expect(status.samples.every((sample) => sample.repo === '[PATH]')).toBe(true);
+    expect(status.samples.every((sample) => sample.title === '[PATH]')).toBe(true);
+    expect(status.samples.map((sample) => sample.lane)).toEqual([
+      '[PATH]#goal:goal-safe',
+      '[PATH]#proposal:[REDACTED]',
+    ]);
+    expect(encoded).not.toContain('abcdefghijklmnopqrstuvwxyz');
+    expect(encoded).not.toContain('\u5ba2\u6237\u7532');
+    expect(encoded).not.toContain('\u041f\u0440\u043e\u0435\u043a\u0442\u044b');
+    expect(encoded).not.toContain('private');
+  });
+
   it('redacts the entire title when an unquoted absolute path has ambiguous spaces', () => {
     const titles = [
       'Inspect /Volumes/Client Data/acme/.env before release',

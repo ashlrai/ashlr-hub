@@ -1951,16 +1951,62 @@ describe('M213 Dashboard SSE — /api/events', () => {
     const displayState = new Function(
       `${src.slice(displayStateStart, displayStateEnd)}\nreturn laneLockDisplayState;`,
     )() as (laneLocks: Record<string, unknown> | null) => string;
+    const counts = { active: 0, staleInProgress: 0, awaitingHostMerge: 0, unverifiedApplied: 0 };
+    const healthySources = {
+      goals: { sourceState: 'healthy', complete: true },
+      proposals: { sourceState: 'healthy', complete: true },
+      queue: { sourceState: 'healthy', complete: true },
+    };
     expect(displayState({ sourceQuality: { sourceState: 'missing', complete: false } })).toBe('missing');
     expect(displayState({
+      ...counts,
       sourceQuality: {
         sourceState: 'degraded',
         complete: false,
-        sources: { goals: { sourceState: 'missing', complete: false } },
+        sources: { ...healthySources, goals: { sourceState: 'missing', complete: false } },
       },
     })).toBe('missing');
-    expect(displayState({ sourceQuality: { sourceState: 'healthy', complete: false } })).toBe('degraded');
-    expect(displayState({ sourceQuality: { sourceState: 'healthy', complete: true } })).toBe('healthy');
+    expect(displayState({
+      ...counts,
+      sourceQuality: { sourceState: 'healthy', complete: false, sources: healthySources },
+    })).toBe('degraded');
+    expect(displayState({
+      ...counts,
+      sourceQuality: { sourceState: 'healthy', complete: true, sources: healthySources },
+    })).toBe('healthy');
+    expect(displayState({
+      ...counts,
+      sourceQuality: { sourceState: 'healthy', complete: true },
+    })).toBe('unknown');
+    expect(displayState({
+      staleInProgress: 0,
+      awaitingHostMerge: 0,
+      unverifiedApplied: 0,
+      sourceQuality: { sourceState: 'healthy', complete: true, sources: healthySources },
+    })).toBe('unknown');
+
+    const metricStart = src.indexOf('function laneLocksMetric(laneLocks)');
+    const laneMetricSource = src.slice(metricStart, displayStateEnd);
+    const metricHelpers = new Function(
+      `${laneMetricSource}\nreturn { laneLocksMetric, laneLockDisplayState };`,
+    )() as { laneLocksMetric: (laneLocks: Record<string, unknown> | null) => string | null };
+    expect(metricHelpers.laneLocksMetric({
+      ...counts,
+      sourceQuality: {
+        sourceState: 'degraded',
+        complete: false,
+        sources: { ...healthySources, queue: { sourceState: 'missing', complete: false } },
+      },
+    })).toBe('unavailable');
+    expect(metricHelpers.laneLocksMetric({
+      ...counts,
+      active: 2,
+      sourceQuality: {
+        sourceState: 'degraded',
+        complete: false,
+        sources: { ...healthySources, queue: { sourceState: 'degraded', complete: false } },
+      },
+    })).toContain('2 active observed');
 
     const compactSummaryStart = src.indexOf('function laneBoardCompactSummary(laneLocks)');
     const compactSummaryEnd = src.indexOf('function laneBoardCompactViewport()', compactSummaryStart);
@@ -1969,15 +2015,21 @@ describe('M213 Dashboard SSE — /api/events', () => {
     )() as (laneLocks: Record<string, unknown> | null) => string;
     expect(compactSummary({
       active: 0,
+      staleInProgress: 0,
       awaitingHostMerge: 0,
       unverifiedApplied: 0,
       sourceQuality: { sourceState: 'missing', complete: false },
     })).toBe('Lanes Unavailable');
     expect(compactSummary({
       active: 2,
+      staleInProgress: 0,
       awaitingHostMerge: 1,
       unverifiedApplied: 0,
-      sourceQuality: { sourceState: 'degraded', complete: false },
+      sourceQuality: {
+        sourceState: 'degraded',
+        complete: false,
+        sources: { ...healthySources, queue: { sourceState: 'degraded', complete: false } },
+      },
     })).toBe('Lanes Partial · 3 observed');
 
     const laneRenderStart = src.indexOf('function renderAutonomyLaneBoard');
@@ -1989,7 +2041,8 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(laneActionIndex).toBeGreaterThanOrEqual(0);
     expect(laneMetricsIndex).toBeGreaterThan(laneActionIndex);
     expect(laneRowsIndex).toBeGreaterThan(laneActionIndex);
-    expect(laneRenderSource).toContain("if (laneLocks && state !== 'missing' && state !== 'unknown')");
+    expect(laneRenderSource).toContain("const displayable = state === 'healthy' || state === 'degraded'");
+    expect(laneRenderSource).toContain('const samples = displayable && Array.isArray(laneLocks?.samples)');
 
     const readinessIndex = src.indexOf('if (readinessRail) body.appendChild(readinessRail)');
     const dashboardLaneIndex = src.indexOf('body.appendChild(renderAutonomyLaneBoard(fleetSnapshot?.laneLocks))');
@@ -2004,6 +2057,10 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(css).toContain('.autonomy-lane-board__rows');
     expect(css).toContain('.autonomy-lane-board__action');
     expect(css).toContain('.autonomy-lane-board__reference { grid-column: 1 / -1; }');
+    expect(css).not.toContain('.autonomy-lane-board__row--header { display: none; }');
+    expect(css).toContain('.autonomy-lane-board__row--header {\n    position: absolute;');
+    expect(src).toContain("'aria-label': `Repo: ${repo}`");
+    expect(src).toContain("'aria-label': `Objective or reference: ${reference}`");
     expect(src).toContain('rail.appendChild(renderReadinessLaneControl(fleet?.laneLocks))');
     expect(src).toContain("const secondary = el('details', { cls: 'fd-readiness-secondary', open: 'open' }");
     expect(src).toContain('if (laneBoardCompactViewport()) secondary.open = false');
@@ -2046,6 +2103,8 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(controlSource.indexOf('const heroMetrics')).toBeGreaterThan(
       controlSource.indexOf('heroPulse.appendChild(renderCompactLaneControl(laneLocks))'),
     );
+    expect(controlSource).toContain('const laneLocksState = laneLockDisplayState(laneLocks)');
+    expect(controlSource).toContain("laneLocksDisplayable ? `${laneLocks.active}${laneLocksState === 'degraded' ? ' observed' : ''}` : 'unavailable'");
     expect(css).toContain('.ctrl-lane-compact__action');
   });
 
