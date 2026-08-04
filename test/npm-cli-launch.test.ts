@@ -110,7 +110,7 @@ describe('shell-free npm CLI launch', () => {
     expect(existsSync(replacementMarker)).toBe(false);
   });
 
-  it('rejects an npm runtime ABA mutation even when the original bytes are restored', () => {
+  it('isolates execution from an npm runtime ABA even when the original bytes are restored', () => {
     const fixtureRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-npm-runtime-aba-')));
     tempDirs.push(fixtureRoot);
     const fakeNode = join(fixtureRoot, 'bin', 'node');
@@ -124,7 +124,7 @@ describe('shell-free npm CLI launch', () => {
     write(transitiveCli, original);
     write(packageJson, '{"name":"npm","version":"10.0.0"}\n');
 
-    expect(() => runTrustedNpmCli([], {
+    const run = () => runTrustedNpmCli([], {
       environment: { npm_execpath: trustedCli },
     }, {
       command: process.execPath,
@@ -138,7 +138,12 @@ describe('shell-free npm CLI launch', () => {
         ].join('\n'));
         write(transitiveCli, original);
       },
-    })).toThrow('npm runtime closure changed during execution');
+    });
+    if (process.platform === 'win32') {
+      expect(run).not.toThrow();
+    } else {
+      expect(run).toThrow('npm runtime closure changed during execution');
+    }
     expect(existsSync(replacementMarker)).toBe(false);
   });
 
