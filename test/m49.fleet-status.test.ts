@@ -1847,7 +1847,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     ]);
   });
 
-  it('keeps missing, malformed, truncated, and partial lane sources distinct from healthy zero', async () => {
+  it('keeps authoritative empty, malformed, truncated, and partial lane sources distinct', async () => {
     const repo = join(tmpHome, 'repo-lane-quality');
     writeBacklogSnapshot(tmpHome, repo, []);
 
@@ -1855,9 +1855,13 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(missing.laneLocks).toMatchObject({
       active: 0,
       sourceQuality: {
-        sourceState: 'missing',
-        complete: false,
-        reasons: expect.arrayContaining(['goals-missing', 'proposals-missing']),
+        sourceState: 'healthy',
+        complete: true,
+        reasons: [],
+        sources: {
+          goals: { sourceState: 'healthy', complete: true, reasons: [] },
+          proposals: { sourceState: 'healthy', complete: true, reasons: [] },
+        },
       },
     });
 
@@ -7409,7 +7413,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       topBlocker: null,
       freshness: { overall: 'fresh' },
       sourceSummary: {
-        healthy: 6,
+        healthy: 7,
         degraded: 0,
         blocked: 0,
         unavailable: 0,
@@ -7423,6 +7427,10 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
     expect(s.queue.repos?.registry).toBeUndefined();
     expect(s.autonomousShipReadiness?.sourceQualitySummary?.['healthy-zero']).toBeGreaterThan(0);
+    expect(s.autonomousShipReadiness?.sources.find((source) => source.id === 'lane-locks')).toMatchObject({
+      status: 'healthy',
+      sourceQuality: { badge: 'healthy-zero', empty: true },
+    });
     expect(s.autonomousShipReadiness?.evidenceMatrix).toMatchObject({
       version: 1,
       state: 'cold-start',
@@ -7467,6 +7475,46 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         effectivenessPhase: 'merge-ready',
         preflightReady: 1,
       },
+    });
+  });
+
+  it('blocks ship readiness when recent applied work lacks verification', async () => {
+    const repo = join(tmpHome, 'repo');
+    writeBacklogSnapshot(tmpHome, repo, [], new Date().toISOString());
+    writeRunningDaemon(tmpHome, [], new Date().toISOString());
+    const cfg = withFoundry({
+      autoMerge: { enabled: true, trustBasis: 'verification', maxRisk: 'low' },
+    });
+    const ready = createSignedProposal(cfg, {
+      title: 'Ready docs change',
+      diff: docsDiff('ready alongside unverified work'),
+      verifyResult: { passed: true, source: 'manual' },
+    });
+    recordFrontierShipDecision(ready);
+    const unverified = createProposal({
+      repo,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'Applied without verification',
+      summary: 'must remain visible to readiness',
+      diff: docsDiff('unverified applied work'),
+    }, cfg);
+    setStatus(unverified.id, 'applied');
+
+    const status = await buildFleetStatus(cfg);
+
+    expect(status.laneLocks?.unverifiedApplied).toBe(1);
+    expect(status.autonomousShipReadiness).toMatchObject({
+      verdict: 'blocked',
+      topBlocker: {
+        id: 'unverified-applied-work',
+        severity: 'high',
+        source: 'lane-locks',
+      },
+    });
+    expect(status.autonomousShipReadiness?.sources.find((source) => source.id === 'lane-locks')).toMatchObject({
+      status: 'blocked',
+      detail: '1 applied proposal(s) lack verification',
     });
   });
 
@@ -7516,6 +7564,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
 
     const status = await buildFleetStatus(cfg);
     const queueSource = status.autonomousShipReadiness?.sources.find((source) => source.id === 'queue');
+    const laneSource = status.autonomousShipReadiness?.sources.find((source) => source.id === 'lane-locks');
 
     expect(status.queue.repos).toMatchObject({
       enrolled: 0,
@@ -7538,6 +7587,25 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         sourcePresent: true,
       },
     });
+    expect(laneSource).toMatchObject({
+      status: 'degraded',
+      sourceQuality: { badge: 'degraded-source', sourcePresent: true },
+    });
+    expect(status.laneLocks?.sourceQuality?.sources.queue).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      reasons: ['queue-incomplete', 'queue-unavailable'],
+    });
+    expect(status.laneLocks?.sourceQuality?.sources.enrollment).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      reasons: ['enrollment-degraded'],
+    });
+    const laneCli = formatFleetStatus(status);
+    expect(laneCli).toContain('observed active');
+    expect(laneCli).toContain('observed stale');
+    expect(laneCli).toContain('observed handoff');
+    expect(laneCli).toContain('observed unverified');
     expect(status.autonomousShipReadiness).toMatchObject({
       verdict: 'blocked',
       topBlocker: {
@@ -9035,9 +9103,81 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     });
 
     expect(out).toContain(
-      'lane locks:    2 active, 1 stale, 1 handoff, 1 unverified, 2 visible locked',
+      'lane locks:    2 observed active, 1 observed stale, 1 observed handoff, ' +
+        '1 observed unverified, 2 observed visible locked',
     );
+    expect(out).toContain('lane source:   degraded (incomplete)');
     expect(out).toContain('lock sample:   stale-in-progress a /repo/a#goal:goal-lane-a');
+  });
+
+  it('qualifies each lane count from its own source completeness', () => {
+    const out = formatFleetStatus({
+      generatedAt: '2026-06-17T00:00:00.000Z',
+      daemon: { running: false, lastTickAt: null, todaySpentUsd: 0 },
+      backends: [],
+      queue: { backlogItems: 2 },
+      proposals: { pending: 0, frontierPending: 0, applied: 1 },
+      merges: { recent: 0 },
+      laneLocks: {
+        generatedAt: '2026-06-17T00:00:00.000Z',
+        active: 2,
+        staleInProgress: 1,
+        awaitingHostMerge: 1,
+        unverifiedApplied: 1,
+        lockedVisibleItems: 2,
+        samples: [],
+        sourceQuality: {
+          sourceState: 'degraded',
+          complete: false,
+          reasons: ['proposals-incomplete'],
+          sources: {
+            enrollment: { sourceState: 'healthy', complete: true, reasons: [] },
+            goals: { sourceState: 'healthy', complete: true, reasons: [] },
+            proposals: { sourceState: 'degraded', complete: false, reasons: ['proposals-incomplete'] },
+            queue: { sourceState: 'healthy', complete: true, reasons: [] },
+          },
+        },
+      },
+      killed: false,
+    });
+
+    expect(out).toContain(
+      'lane locks:    2 observed active, 1 observed stale, 1 observed handoff, ' +
+        '1 observed unverified, 2 observed visible locked',
+    );
+    expect(out).toContain('lane source:   degraded (proposals-incomplete)');
+  });
+
+  it('renders intermediate lane snapshots without a per-source quality map as partial', () => {
+    const out = formatFleetStatus({
+      generatedAt: '2026-06-17T00:00:00.000Z',
+      daemon: { running: false, lastTickAt: null, todaySpentUsd: 0 },
+      backends: [],
+      queue: { backlogItems: 0 },
+      proposals: { pending: 0, frontierPending: 0, applied: 0 },
+      merges: { recent: 0 },
+      laneLocks: {
+        generatedAt: '2026-06-17T00:00:00.000Z',
+        active: 1,
+        staleInProgress: 0,
+        awaitingHostMerge: 0,
+        unverifiedApplied: 0,
+        lockedVisibleItems: 1,
+        samples: [],
+        sourceQuality: {
+          sourceState: 'degraded',
+          complete: false,
+          reasons: ['goals-incomplete'],
+        } as NonNullable<FleetStatus['laneLocks']>['sourceQuality'],
+      },
+      killed: false,
+    });
+
+    expect(out).toContain(
+      'lane locks:    1 observed active, 0 observed stale, 0 observed handoff, ' +
+        '0 observed unverified, 1 observed visible locked',
+    );
+    expect(out).toContain('lane source:   degraded (goals-incomplete)');
   });
 
   it('renders generated queue work counts compactly', () => {

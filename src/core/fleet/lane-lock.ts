@@ -26,6 +26,8 @@ export interface FleetLaneLockSample {
 export type FleetLaneLockSourceState = 'missing' | 'healthy' | 'degraded';
 
 export type FleetLaneLockSourceReason =
+  | 'enrollment-missing'
+  | 'enrollment-degraded'
   | 'goals-missing'
   | 'goals-incomplete'
   | 'goals-unreadable'
@@ -48,6 +50,7 @@ export interface FleetLaneLockSourceQualityPart {
 
 export interface FleetLaneLockSourceQuality extends FleetLaneLockSourceQualityPart {
   sources: {
+    enrollment: FleetLaneLockSourceQualityPart;
     goals: FleetLaneLockSourceQualityPart;
     proposals: FleetLaneLockSourceQualityPart;
     queue: FleetLaneLockSourceQualityPart;
@@ -217,6 +220,7 @@ function buildSourceQuality(
   input: BuildFleetLaneLocksInput['sourceQuality'],
 ): FleetLaneLockSourceQuality {
   const sources = {
+    enrollment: sourceQualityPart(input?.enrollment, 'enrollment-missing'),
     goals: sourceQualityPart(input?.goals, 'goals-missing'),
     proposals: sourceQualityPart(input?.proposals, 'proposals-missing'),
     queue: sourceQualityPart(input?.queue, 'queue-missing'),

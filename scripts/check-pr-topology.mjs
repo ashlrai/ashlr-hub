@@ -65,6 +65,10 @@ function repositoryName(value, label) {
   return name.toLowerCase();
 }
 
+function repositoryIdentityMatches(value, expected, label) {
+  return repositoryName(value, label) === expected;
+}
+
 function gitRef(value, label) {
   const ref = boundedString(value, label, 255);
   if (
@@ -950,12 +954,23 @@ export async function fetchGithubSnapshot({
   const defaultBranch = initialRepository.defaultBranch;
   const comparisons = [];
   let dependentCoverageComplete = false;
-  if (candidate?.base?.ref === defaultBranch && candidate.base?.repo?.full_name === fullName) {
+  if (
+    candidate?.base?.ref === defaultBranch &&
+    repositoryIdentityMatches(
+      candidate.base?.repo?.full_name,
+      fullName,
+      `pull request #${candidate.number} base repository`,
+    )
+  ) {
     const roots = pullRequests.filter(
       (pr) =>
         pr.number !== number &&
         pr.base?.ref === defaultBranch &&
-        pr.base?.repo?.full_name === fullName,
+        repositoryIdentityMatches(
+          pr.base?.repo?.full_name,
+          fullName,
+          `pull request #${pr.number} base repository`,
+        ),
     );
     const comparisonPairs = [
       ...roots.map((root) => ({ base: root, head: candidate })),

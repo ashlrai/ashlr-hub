@@ -541,6 +541,52 @@ describe('M484 topology graph shadow observation', () => {
     expect(evaluateTopology(raw).verdict).toBe('shadow-clear');
   });
 
+  it('plans complete root comparisons for mixed-case GitHub repository identities', async () => {
+    const mixedCaseRepository = 'AshlrAI/Ashlr-Hub';
+    const root = pullRequest({
+      number: 1,
+      headRef: 'root',
+      baseRef: 'master',
+      baseRepo: mixedCaseRepository,
+    });
+    const candidate = pullRequest({
+      number: 2,
+      headRef: 'candidate',
+      baseRef: 'master',
+      baseRepo: mixedCaseRepository,
+    });
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(response({ full_name: mixedCaseRepository, default_branch: 'master' }))
+      .mockResolvedValueOnce(response(candidate))
+      .mockResolvedValueOnce(response([root, candidate]))
+      .mockResolvedValueOnce(response({
+        status: 'diverged',
+        merge_base_commit: { sha: oid(777) },
+      }))
+      .mockResolvedValueOnce(response({
+        status: 'diverged',
+        merge_base_commit: { sha: oid(778) },
+      }))
+      .mockResolvedValueOnce(response({ full_name: repository, default_branch: 'master' }))
+      .mockResolvedValueOnce(response([root, candidate]))
+      .mockResolvedValueOnce(response(candidate));
+
+    const raw = await fetchGithubSnapshot({
+      repository,
+      pullRequestNumber: candidate.number,
+      token: 'test-token',
+      expectedHeadSha: candidate.head.sha,
+      expectedBaseSha: candidate.base.sha,
+      expectedState: 'open',
+      fetchImpl,
+    });
+
+    expect(raw).toMatchObject({ complete: true, dependentCoverageComplete: true });
+    expect(raw.comparisons).toHaveLength(2);
+    expect(evaluateTopology(raw)).toMatchObject({ verdict: 'shadow-clear', complete: true });
+    expect(fetchImpl.mock.calls.filter(([url]) => String(url).includes('/compare/'))).toHaveLength(2);
+  });
+
   it('fails closed when page boundaries change during the second scan', async () => {
     const root = pullRequest({ number: 1, headRef: 'root', baseRef: 'master' });
     const candidate = pullRequest({

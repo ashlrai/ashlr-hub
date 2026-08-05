@@ -2420,17 +2420,17 @@ function laneLockMetricObservation(laneLocks, countName, sourceNames) {
 
 function laneLockMetricObservations(laneLocks) {
   return {
-    active: laneLockMetricObservation(laneLocks, 'active', ['goals', 'proposals']),
-    stale: laneLockMetricObservation(laneLocks, 'staleInProgress', ['goals', 'proposals']),
-    handoff: laneLockMetricObservation(laneLocks, 'awaitingHostMerge', ['proposals']),
-    unverified: laneLockMetricObservation(laneLocks, 'unverifiedApplied', ['goals', 'proposals']),
+    active: laneLockMetricObservation(laneLocks, 'active', ['enrollment', 'goals', 'proposals']),
+    stale: laneLockMetricObservation(laneLocks, 'staleInProgress', ['enrollment', 'goals', 'proposals']),
+    handoff: laneLockMetricObservation(laneLocks, 'awaitingHostMerge', ['enrollment', 'proposals']),
+    unverified: laneLockMetricObservation(laneLocks, 'unverifiedApplied', ['enrollment', 'goals', 'proposals']),
   };
 }
 
 function laneLockMetricText(metric, label) {
   const suffix = label ? ` ${label}` : '';
   if (metric.state === 'healthy') return `${metric.value}${suffix}`;
-  if (metric.state === 'degraded') return `>=${metric.value}${suffix} observed`;
+  if (metric.state === 'degraded') return `${metric.value}${suffix} observed (partial)`;
   return label ? `${label} unavailable` : 'unavailable';
 }
 
@@ -2449,7 +2449,7 @@ function laneLockOccupiedObservation(laneLocks) {
 function laneLockDisplayState(laneLocks) {
   const quality = laneLocks?.sourceQuality;
   if (!laneLocks || !quality) return 'unknown';
-  const requiredSourceNames = ['goals', 'proposals', 'queue'];
+  const requiredSourceNames = ['enrollment', 'goals', 'proposals', 'queue'];
   if (!quality.sources || typeof quality.sources !== 'object') return 'unknown';
   const sources = requiredSourceNames.map((name) => quality.sources[name]);
   if (sources.some((source) => !source || typeof source !== 'object')) return 'unknown';
@@ -2513,7 +2513,7 @@ function laneBoardCompactSummary(laneLocks) {
   const count = occupied.state === 'healthy'
     ? ` · ${occupied.value}`
     : occupied.state === 'degraded'
-      ? ` · >=${occupied.value} observed`
+      ? ` · ${occupied.value} observed (partial)`
       : '';
   return `Lanes ${verdict}${count}`;
 }
@@ -2550,7 +2550,7 @@ function renderCompactLaneControl(laneLocks) {
   const count = occupied.state === 'healthy'
     ? ` · ${occupied.value}`
     : occupied.state === 'degraded'
-      ? ` · >=${occupied.value} observed`
+      ? ` · ${occupied.value} observed (partial)`
       : '';
   const action = laneBoardReadOnlyAction(laneLocks);
   return el('div', {
@@ -2595,7 +2595,7 @@ function renderAutonomyLaneBoard(laneLocks, cardClass = '') {
       el('span', { cls: 'autonomy-lane-board__count' }, occupied.state === 'unavailable'
         ? 'count unavailable'
         : occupied.state === 'degraded'
-          ? `>=${occupied.value} observed`
+          ? `${occupied.value} observed (partial)`
           : String(occupied.value))
     ),
     el('span', { cls: `autonomy-lane-board__state autonomy-lane-board__state--${state}` }, stateLabel)
