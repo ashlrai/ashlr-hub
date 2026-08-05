@@ -1,7 +1,13 @@
 # Spare-Mac Worker Runbook
 
-Turn an idle MacBook Pro (8 GB) or MacBook Air (16 GB) into an unattended
-autonomous ashlr worker in one command.
+Resident worker provisioning is temporarily unavailable. Production service
+install, reinstall, repair, and restart authority is withheld, so `ashlr worker
+setup` refuses before loading or saving config, running the setup wizard,
+enrolling repos, registering a queue, or touching an OS service. Existing
+services support `ashlr daemon service-status` and `ashlr daemon uninstall`
+only. Status reports registration as `present`, `absent`, or `unknown`; a
+missing file is not treated as absence unless the native manager also proves no
+registration. Admitted one-shot workflows remain available.
 
 ## Quick start
 
@@ -9,13 +15,14 @@ autonomous ashlr worker in one command.
 # 1. Install
 npm i -g @ashlr/hub
 
-# 2. Provision the machine as a named worker
-ashlr worker setup --user "worker-1" \
-  --repos /path/to/repo-a,/path/to/repo-b \
-  --yes
+# 2. Inspect an existing service (read-only)
+ashlr daemon service-status
+
+# 3. Run admitted work without creating a resident service
+ashlr daemon start --once
 ```
 
-That is it.  The command:
+When resident authority is restored, worker setup is designed to:
 
 1. Runs the full identity setup (`ashlr setup --user`) — sets `cfg.user.name` so
    each worker has a unique identity in the fleet.
@@ -26,15 +33,8 @@ That is it.  The command:
 
 ## Shared-queue mode
 
-If you are running a fleet coordinator that writes tasks to a shared directory,
-pass `--queue`:
-
-```sh
-ashlr worker setup --user "worker-2" \
-  --repos /path/to/repos \
-  --queue /Volumes/shared/ashlr-queue \
-  --yes
-```
+Shared-queue registration through `ashlr worker setup --queue` is also
+temporarily unavailable and performs no partial setup mutation.
 
 This stores the queue path in `cfg.fleet.sharedQueue.path`. It does not attest
 that the path is safe for distributed execution authority. After independently
@@ -138,12 +138,13 @@ ashlr config set models.ollama llama3:8b
 
 ## Keep-awake: how it works
 
-On macOS, `ashlr daemon install` normally registers a plain launchd job that
-runs on a `ThrottleInterval`.  When the Mac is idle or the lid is closed,
-macOS may put the system to sleep and the daemon stops ticking.
+The keep-awake design is retained but cannot currently be installed or repaired.
+On macOS, the resident launchd job runs on a `ThrottleInterval`; when the Mac is
+idle or the lid is closed, macOS may put the system to sleep and the daemon
+stops ticking.
 
-`ashlr worker setup` passes `keepAwake: true` to the service installer, which
-wraps the daemon process with:
+The unavailable worker setup path is designed to pass `keepAwake: true` to the
+service installer, wrapping the daemon process with:
 
 ```
 caffeinate -i -s <node> <ashlr> daemon start ...
@@ -215,7 +216,10 @@ tail -f ~/.ashlr/daemon.launchd.err.log
 ashlr daemon uninstall
 ```
 
-## Full provisioning flow (annotated)
+## Withheld provisioning flow (annotated)
+
+The flow below is currently blocked at its shared authority boundary before any
+listed mutation runs. It documents intended internals, not an available command.
 
 ```
 npm i -g @ashlr/hub            # install ashlr globally

@@ -13,6 +13,10 @@ vi.mock('node:child_process', () => ({
   execFileSync: vi.fn(),
 }));
 
+vi.mock('../src/core/daemon/service-install-authority.js', () => ({
+  assertResidentServiceInstallAuthorized: vi.fn(),
+}));
+
 vi.mock('../src/core/daemon/launchd-plist-transaction.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/daemon/launchd-plist-transaction.js')>();
   return {
@@ -44,7 +48,11 @@ vi.mock('../src/core/daemon/launchd-plist-transaction.js', async (importOriginal
 });
 
 import * as cp from 'node:child_process';
-import { generateServiceDefinition, install, uninstall } from '../src/core/daemon/service.js';
+import {
+  generateServiceDefinition,
+  install,
+  uninstall,
+} from '../src/core/daemon/service.js';
 import type {
   LaunchdInstallCheckpoint,
   LaunchdRemovalCheckpoint,

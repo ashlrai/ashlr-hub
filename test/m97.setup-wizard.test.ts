@@ -17,7 +17,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -31,6 +31,8 @@ beforeEach(() => {
   tmpHome = mkdtempSync(join(tmpdir(), 'ashlr-m97-setup-'));
   vi.stubEnv('HOME', tmpHome);
   vi.stubEnv('USERPROFILE', tmpHome);
+  mockAssertResidentServiceInstallAuthorized.mockReset();
+  mockAssertResidentServiceInstallAuthorized.mockImplementation(() => {});
 });
 
 afterEach(() => {
@@ -79,6 +81,14 @@ const mockServiceStatus = vi.fn(() => ({
   serviceFilePath: '/tmp/fake.plist',
 }));
 const mockInstall = vi.fn(async () => { /* no-op */ });
+const mockAssertResidentServiceInstallAuthorized = vi.fn(() => {});
+
+vi.mock('../src/core/daemon/service-install-authority.js', () => ({
+  assertResidentServiceInstallAuthorized: () => mockAssertResidentServiceInstallAuthorized(),
+  RESIDENT_SERVICE_ONE_SHOT_GUIDANCE:
+    'No setup state was inspected or changed. Use admitted one-shot workflows such as '
+    + '`ashlr daemon start --once`; existing services support status and uninstall only.',
+}));
 
 vi.mock('../src/core/daemon/service.js', () => ({
   serviceStatus: (...args: unknown[]) => mockServiceStatus(...args),
@@ -182,14 +192,20 @@ describe('stepDaemonService — idempotent, never-throw', () => {
     },
   );
 
-  it('calls install() when service not installed, then returns ok', async () => {
-    mockServiceStatus
-      .mockReturnValueOnce({ installed: false, running: false, platformSpec: 'launchd', serviceFilePath: '/x' })
-      .mockReturnValueOnce({ installed: true,  running: false, platformSpec: 'launchd', serviceFilePath: '/x' });
+  it('reports manual setup when the shared install boundary denies authority', async () => {
+    mockAssertResidentServiceInstallAuthorized.mockImplementationOnce(() => {
+      throw new Error('resident service install/reinstall/repair/restart authority is unavailable');
+    });
+
     const { stepDaemonService } = await importNewSteps();
     const s = await stepDaemonService();
-    expect(mockInstall).toHaveBeenCalledTimes(1);
-    expect(s.status).toBe('ok');
+
+    expect(mockInstall).not.toHaveBeenCalled();
+    expect(mockServiceStatus).not.toHaveBeenCalled();
+    expect(s).toMatchObject({ name: 'daemon-service', status: 'manual' });
+    expect(s.detail).toContain('resident service install/reinstall/repair/restart authority is unavailable');
+    expect(s.detail).toContain('no service state was inspected or changed');
+    expect(s.detail).not.toContain('ashlr daemon install');
   });
 
   it('returns manual (never throws) when install() throws', async () => {
@@ -372,6 +388,28 @@ describe('setupWizard — full step list', () => {
     expect(Array.isArray(result.nextSteps)).toBe(true);
   });
 
+  it('is not ready and gives no impossible install instruction when daemon service authority is denied', async () => {
+    mockAssertResidentServiceInstallAuthorized.mockImplementationOnce(() => {
+      throw new Error('resident service install/reinstall/repair/restart authority is unavailable');
+    });
+    const { setupWizard } = await importNewSteps();
+
+    const result = await setupWizard(makeConfig(), { wire: false, yes: false });
+
+    expect(result.ready).toBe(false);
+    expect(result.steps).toContainEqual(expect.objectContaining({
+      name: 'daemon-service',
+      status: 'manual',
+    }));
+    expect(result.nextSteps.join('\n')).not.toContain('ashlr daemon install');
+    expect(mockServiceStatus).not.toHaveBeenCalled();
+    expect(mockInstall).not.toHaveBeenCalled();
+    expect(mockFleetReadiness).not.toHaveBeenCalled();
+    expect(mockListEnrolled).not.toHaveBeenCalled();
+    expect(mockEnroll).not.toHaveBeenCalled();
+    expect(readdirSync(tmpHome)).toEqual([]);
+  });
+
   it('nextSteps includes the try: ashlr run line', async () => {
     const { setupWizard } = await importNewSteps();
     const result = await setupWizard(makeConfig(), { wire: false, yes: false });
@@ -444,6 +482,25 @@ describe('cmdSetup --yes — readiness summary', () => {
     expect(Array.isArray(parsed.steps)).toBe(true);
     expect(typeof parsed.ready).toBe('boolean');
     writeSpy.mockRestore();
+  });
+
+  it('exits nonzero and never claims completion or recommends install when service authority is denied', async () => {
+    mockAssertResidentServiceInstallAuthorized.mockImplementationOnce(() => {
+      throw new Error('resident service install/reinstall/repair/restart authority is unavailable');
+    });
+    const { cmdSetup } = await import('../src/cli/setup.js');
+
+    const code = await cmdSetup(['--yes']);
+    const out = logSpy.mock.calls.map((c) => c.map(String).join(' ')).join('\n');
+
+    expect(code).toBe(1);
+    expect(out).toContain('setup incomplete');
+    expect(out).toContain('daemon service changes restricted');
+    expect(out).not.toMatch(/[!✓] setup complete/);
+    expect(out).not.toContain('ashlr daemon install');
+    expect(mockServiceStatus).not.toHaveBeenCalled();
+    expect(mockInstall).not.toHaveBeenCalled();
+    expect(readdirSync(tmpHome)).toEqual([]);
   });
 });
 

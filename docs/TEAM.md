@@ -60,8 +60,10 @@ npm i -g @ashlr/hub
 ashlr setup
 ```
 
-Setup runs the first-run wizard: config, models, editor wiring, daemon
-service install, and repo enrollment discovery. It is idempotent.
+Resident service mutation is withheld in the current release, so `ashlr setup`
+refuses before reading or changing setup state and exits nonzero. Run admitted
+one-shot work with `ashlr daemon start --once`; existing services retain
+status and uninstall support.
 
 Flags:
 - `--yes` — non-interactive, accept defaults, auto-enroll discovered repos
@@ -228,8 +230,9 @@ rm ~/.ashlr/KILL       # clear
 
 ## Daemon
 
-The daemon runs as a background OS service (launchd on macOS, systemd on
-Linux) installed during `ashlr setup`.
+The fleet can run in the foreground or as a bounded one-shot process. Creating,
+repairing, reinstalling, or restarting a background OS service is withheld in
+the current release; an existing service may still be inspected or uninstalled.
 
 ```bash
 ashlr daemon start              # start (or restart) the loop
@@ -250,7 +253,7 @@ touch the live working tree. All mutations flow through the inbox.
 |---------|-------|-----|
 | Pulse not receiving spans | `ashlr pulse connect --status` | Verify `pulse.enabled true` + PAT set |
 | Fleet activity not attributed in pulse | pulse Fleet/Team view shows no owner | Set `cfg.user.id` on that machine |
-| Daemon not running | `ashlr daemon status` | `ashlr daemon start` |
+| Daemon not running | `ashlr daemon status` | `ashlr daemon start --once` |
 | Kill switch engaged | `ashlr doctor` shows WARN | `ashlr enroll kill off` |
 | Repo not being worked | `ashlr enroll list` | `ashlr enroll add <path>` |
 | PAT rejected (401) | `ashlr pulse connect --test` | Re-run `ashlr pulse connect --token <fresh-pat>` |

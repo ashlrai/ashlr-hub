@@ -11,6 +11,16 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+- **Temporary resident-service authority restriction.** Production service
+  install, reinstall, repair, restart, worker setup, and the service portion of
+  first-run setup now fail closed at a shared deny-only boundary. Existing
+  services retain status and uninstall, and admitted one-shot workflows remain
+  available. Both git and npm update channels block before code replacement
+  for present, unknown, or running service state. Status now combines expected
+  service-file and native-manager evidence into explicit `present`, `absent`, or
+  `unknown` registration state; setup refusal occurs before all config/wizard
+  mutation.
+
 - **External-skill quarantine preview (M444/M446).** Audit reports now expose a
   version-2 portable tree digest, and a POSIX-only internal Git-object capture
   can bind that digest into inert, content-addressed private storage. The
