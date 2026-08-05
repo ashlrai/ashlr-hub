@@ -475,6 +475,31 @@ describe('daemon resolution observer child scheduling', () => {
     });
   });
 
+  it('schedules the observer from a durable verify-only freshness snapshot', () => {
+    const handle = {
+      disposition: 'scheduled' as const,
+      cancel: () => {},
+      completion: Promise.resolve({ outcome: 'completed' as const, code: 0, signal: null }),
+    };
+    const schedule = vi.fn(() => handle);
+    const result = scheduleResolutionObserverAfterTick({
+      ts: TICK_AT,
+      reason: 'verify-only',
+      backlogSnapshotAt: SNAPSHOT_AT,
+      backlogSnapshotId: SNAPSHOT_ID,
+      itemsConsidered: 0,
+      proposalsCreated: 0,
+      spentUsd: 0,
+    }, { dryRun: false, once: false }, schedule, () => false);
+
+    expect(result).toBe(handle);
+    expect(schedule).toHaveBeenCalledWith({
+      completedTickAt: TICK_AT,
+      expectedBacklogGeneratedAt: SNAPSHOT_AT,
+      expectedBacklogSnapshotId: SNAPSHOT_ID,
+    });
+  });
+
   it('cancels and awaits observer completion during daemon shutdown', async () => {
     const events: string[] = [];
     let finish!: () => void;

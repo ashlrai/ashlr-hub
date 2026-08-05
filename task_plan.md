@@ -2822,3 +2822,10 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Retain the five-second non-Windows deadline and add a bounded 30-second Windows allowance.
 - [x] Run focused authority/reservation coverage, typecheck, and diff integrity.
 - [ ] Require the refreshed protected matrix before promotion.
+
+## Verify-Only Freshness Maintenance (2026-07-21)
+- [x] Classify complete pending merge candidates separately from partial, failed-capture, empty-diff, repository-less, and non-mergeable observations.
+- [x] Keep non-actionable pending records visible for repair/quarantine without letting them force fleet-wide verify-only routing.
+- [x] Add an enrollment-bound one-hour freshness cadence that persists or reuses exact backlog snapshot identity without dispatch.
+- [x] Prove repeated verify-only ticks do not dispatch, spend, or create a refresh storm and that both post-tick schedulers accept the durable identity.
+- [x] Pass 277 focused assertions, typecheck, scoped lint, and diff integrity.
