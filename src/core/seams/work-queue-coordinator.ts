@@ -112,6 +112,8 @@ export interface WorkQueueCoordinator {
   releaseClaimGenerations(expected: readonly QueueClaimGeneration[], machineId: string): void;
   /** Cross the pre-effect boundary for one exact selected generation. */
   beginClaimGenerationExecution(expected: QueueClaimGeneration, machineId: string): boolean;
+  /** Renew and validate one exact generation already in the executing phase. */
+  fenceExecutingClaimGeneration(expected: QueueClaimGeneration, machineId: string): boolean;
   beginExecution(itemId: string, machineId: string): boolean;
   /** Clear an exact executing claim after a terminal result with no cooldown. */
   settleClaim(claimItemId: string, machineId: string): boolean;
@@ -276,6 +278,13 @@ export class LocalWorkQueueCoordinator implements WorkQueueCoordinator {
     ) return false;
     generation.phase = 'executing';
     return true;
+  }
+
+  fenceExecutingClaimGeneration(expected: QueueClaimGeneration, machineId: string): boolean {
+    const generation = this.claimGenerations.get(expected.itemId);
+    return generation?.machineId === machineId &&
+      generation.phase === 'executing' &&
+      generation.generationId === expected.generationId;
   }
 
   beginExecution(itemId: string, machineId: string): boolean {
@@ -543,6 +552,25 @@ export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
       ref = refreshed;
       this.claims.set(expected.itemId, ref);
     }
+  }
+
+  fenceExecutingClaimGeneration(expected: QueueClaimGeneration, machineId: string): boolean {
+    if (!this.authorityEnabled) return false;
+    const ref = this.claims.get(expected.itemId);
+    if (
+      !ref ||
+      ref.machineId !== machineId ||
+      ref.phase !== 'executing' ||
+      queueClaimGenerationId(ref) !== expected.generationId
+    ) return false;
+    const renewed = this.store.renewClaims([ref])[0] ?? this.store.validateClaims([ref])[0];
+    if (
+      !renewed ||
+      renewed.phase !== 'executing' ||
+      queueClaimGenerationId(renewed) !== expected.generationId
+    ) return false;
+    this.claims.set(expected.itemId, renewed);
+    return true;
   }
 
   beginExecution(itemId: string, machineId: string): boolean {
