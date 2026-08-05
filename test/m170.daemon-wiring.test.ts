@@ -52,6 +52,22 @@ vi.mock('../src/core/run/orchestrator.js', () => ({
   runGoal: (...args: unknown[]) => mockRunGoal(...args),
 }));
 
+const mockEngineInstalled = vi.fn();
+vi.mock('../src/core/run/engines.js', () => ({
+  engineInstalled: (...args: unknown[]) => mockEngineInstalled(...args),
+}));
+
+const mockGetResourceSnapshot = vi.fn();
+vi.mock('../src/core/fabric/resource-monitor.js', () => ({
+  getResourceSnapshot: (...args: unknown[]) => mockGetResourceSnapshot(...args),
+}));
+
+const mockWithinLimit = vi.fn();
+const mockRecordUse = vi.fn();
+
+const mockSubscriptionAllows = vi.fn();
+const mockIsSubscriptionEngine = vi.fn();
+
 const mockRunBestOfN = vi.fn();
 vi.mock('../src/core/run/best-of-n.js', () => ({
   runBestOfN: (...args: unknown[]) => mockRunBestOfN(...args),
@@ -71,6 +87,7 @@ vi.mock('../src/core/fleet/self-heal.js', () => ({
 
 import { tick } from '../src/core/daemon/loop.js';
 import { readAgentActions } from '../src/core/fleet/agent-action-ledger.js';
+import { LocalWorkQueueCoordinator } from '../src/core/seams/work-queue-coordinator.js';
 import {
   makeFixture,
   makeCfg,
@@ -89,11 +106,25 @@ beforeEach(() => {
   mockRunGoal.mockReset();
   mockRunBestOfN.mockReset();
   mockRunSelfHealCycle.mockReset();
+  mockEngineInstalled.mockReset();
+  mockGetResourceSnapshot.mockReset();
+  mockWithinLimit.mockReset();
+  mockRecordUse.mockReset();
+  mockSubscriptionAllows.mockReset();
+  mockIsSubscriptionEngine.mockReset();
 
   fx = makeFixture();
 
   // Default self-heal mock: resolves successfully (never throws).
   mockRunSelfHealCycle.mockResolvedValue({ checked: 1, broken: [], healItems: [] });
+  mockEngineInstalled.mockReturnValue(true);
+  mockWithinLimit.mockReturnValue(true);
+  mockSubscriptionAllows.mockReturnValue({ allowed: true, reason: 'test-open' });
+  mockIsSubscriptionEngine.mockReturnValue(false);
+  mockGetResourceSnapshot.mockResolvedValue({
+    generatedAt: new Date().toISOString(),
+    backends: [],
+  });
 
   // Default runGoal mock: returns a minimal fulfilled run state.
   mockRunGoal.mockResolvedValue({
@@ -180,16 +211,14 @@ vi.mock('../src/core/fleet/router.js', () => ({
   inspectGeneratedRepairRouteFeasibility: () => ({ feasible: true, reason: 'feasible' }),
 }));
 
-// And withinLimit — always allow.
 vi.mock('../src/core/fleet/quota.js', () => ({
-  withinLimit: () => true,
-  recordUse: () => undefined,
+  withinLimit: (...args: unknown[]) => mockWithinLimit(...args),
+  recordUse: (...args: unknown[]) => mockRecordUse(...args),
 }));
 
-// And subscription check — always allowed.
 vi.mock('../src/core/fleet/subscription-usage.js', () => ({
-  subscriptionAllows: () => ({ allowed: true }),
-  isSubscriptionEngine: () => false,
+  subscriptionAllows: (...args: unknown[]) => mockSubscriptionAllows(...args),
+  isSubscriptionEngine: (...args: unknown[]) => mockIsSubscriptionEngine(...args),
 }));
 
 // Match the production tier contract so generated-repair reservations can
@@ -225,6 +254,60 @@ function enrollRepo() {
   // Force routeBackend to return 'claude' (non-builtin) for this test.
   mockRouteBackend.mockReturnValue({ backend: 'claude', tier: 'cloud', reason: 'mock' });
   return repo;
+}
+
+function zeroStepFailedRun(id: string, overrides: Record<string, unknown> = {}) {
+  return {
+    id,
+    status: 'failed',
+    result: 'RAW FAILURE OUTPUT MUST NOT BE PERSISTED',
+    usage: { tokensIn: 0, tokensOut: 0, steps: 0, estCostUsd: 0 },
+    proposalOutcome: {
+      kind: 'engine-command-missing',
+      reason: 'backend command unavailable before execution',
+    },
+    runEventSummary: {
+      runId: id,
+      status: 'failed',
+      outcome: 'engine-command-missing',
+      proposalCreated: false,
+      diffFiles: 0,
+      diffLines: 0,
+      tokensIn: 0,
+      tokensOut: 0,
+      costUsd: 0,
+      actionCounts: {
+        spawnAttempts: 0,
+        modelSteps: 0,
+        toolSteps: 0,
+        totalSteps: 0,
+        diffFiles: 0,
+        diffLines: 0,
+      },
+    },
+    ...overrides,
+  };
+}
+
+function openSnapshot(...backends: string[]) {
+  const ts = new Date().toISOString();
+  return {
+    generatedAt: ts,
+    backends: backends.map((backend) => ({
+      backend,
+      availability: 'open',
+      usedPct: null,
+      cap: null,
+      capUnit: null,
+      capWindow: null,
+      resetsAt: null,
+      costPerMTokenOut: 0,
+      p50LatencyMs: null,
+      snapshotAt: ts,
+      reason: 'test-open',
+      backoffUntilMs: null,
+    })),
+  };
 }
 
 // ===========================================================================
@@ -446,7 +529,358 @@ describe('M170 — best-of-N dispatch: bestOfN absent/1 → single-run path unch
 });
 
 // ===========================================================================
-// 3. selfHeal default (on) → runSelfHealCycle called once at live-tick start
+// 3. zero-step backend failover -> one open same-tier alternative
+// ===========================================================================
+
+describe('M170 — bounded zero-step same-tier backend failover', () => {
+  it('retries once on a distinct open same-tier backend and links metadata-only telemetry', async () => {
+    enrollRepo();
+    mockRouteBackend.mockReturnValue({ backend: 'claude', tier: 'frontier', reason: 'mock' });
+    mockGetResourceSnapshot.mockResolvedValue(openSnapshot('claude', 'codex'));
+    mockRunGoal
+      .mockResolvedValueOnce(zeroStepFailedRun('first-zero-step'))
+      .mockResolvedValueOnce({
+        id: 'second-success',
+        status: 'done',
+        usage: { tokensIn: 10, tokensOut: 5, steps: 1, estCostUsd: 0.001 },
+        proposalOutcome: { kind: 'empty-diff', reason: 'second attempt completed' },
+        runEventSummary: {
+          runId: 'second-success',
+          status: 'done',
+          outcome: 'empty-diff',
+          actionCounts: { spawnAttempts: 1, modelSteps: 1, toolSteps: 0, totalSteps: 1 },
+        },
+      });
+    const cfg = makeCfg({ foundry: { allowedBackends: ['claude', 'codex'] } });
+
+    const result = await tick(cfg, { dryRun: false });
+
+    expect(result.reason).toBe('ok');
+    expect(mockRunGoal).toHaveBeenCalledTimes(2);
+    expect(mockRunGoal.mock.calls.map((call) => (call[2] as { engine: string }).engine))
+      .toEqual(['claude', 'codex']);
+    expect(mockRecordUse.mock.calls.map((call) => call[0])).toEqual(['claude', 'codex']);
+    const firstOpts = mockRunGoal.mock.calls[0]?.[2] as { runId: string };
+    const retryOpts = mockRunGoal.mock.calls[1]?.[2] as {
+      runId: string;
+      delegationScope: { runId: string; backend: { engine: string; tier: string; assignedBy: string } };
+    };
+    expect(retryOpts.runId).not.toBe(firstOpts.runId);
+    expect(retryOpts.delegationScope).toMatchObject({
+      runId: retryOpts.runId,
+      backend: { engine: 'codex', tier: 'frontier', assignedBy: 'zero-step-failover' },
+    });
+    expect(result.dispatches?.[0]).toMatchObject({
+      backend: 'codex',
+      assignedBy: 'zero-step-failover',
+      runId: 'second-success',
+    });
+    const events = readAgentActions();
+    const firstStart = events.find((event) =>
+      event.action === 'daemon:dispatch-start' && event.backend === 'claude');
+    const retryStart = events.find((event) =>
+      event.action === 'daemon:dispatch-start' && event.backend === 'codex');
+    const failover = events.find((event) => event.action === 'daemon:dispatch-zero-step-failover');
+    expect(firstStart?.trajectoryId).toBeTruthy();
+    expect(retryStart?.trajectoryId).toBe(firstStart?.trajectoryId);
+    expect(failover).toMatchObject({
+      backend: 'claude',
+      runId: 'first-zero-step',
+      trajectoryId: firstStart?.trajectoryId,
+      runEventSummary: {
+        status: 'failed',
+        outcome: 'engine-failed',
+        proposalCreated: false,
+        actionCounts: { spawnAttempts: 0, modelSteps: 0, toolSteps: 0 },
+      },
+    });
+    expect(JSON.stringify(events)).not.toContain('RAW FAILURE OUTPUT MUST NOT BE PERSISTED');
+  });
+
+  it('does not retry a substantive empty-diff attempt', async () => {
+    enrollRepo();
+    mockRouteBackend.mockReturnValue({ backend: 'claude', tier: 'frontier', reason: 'mock' });
+    mockGetResourceSnapshot.mockResolvedValue(openSnapshot('codex'));
+    mockRunGoal.mockResolvedValue(zeroStepFailedRun('substantive-empty', {
+      status: 'done',
+      usage: { tokensIn: 20, tokensOut: 5, steps: 1, estCostUsd: 0.002 },
+      proposalOutcome: { kind: 'empty-diff', reason: 'no file changes' },
+      runEventSummary: {
+        status: 'done',
+        outcome: 'empty-diff',
+        actionCounts: { spawnAttempts: 1, modelSteps: 1, toolSteps: 0, totalSteps: 1, diffFiles: 0, diffLines: 0 },
+      },
+    }));
+
+    await tick(makeCfg({ foundry: { allowedBackends: ['claude', 'codex'] } }), { dryRun: false });
+
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    expect(readAgentActions().some((event) =>
+      event.action === 'daemon:dispatch-zero-step-failover')).toBe(false);
+  });
+
+  it('does not retry partial output even when execution counters are zero', async () => {
+    enrollRepo();
+    mockRouteBackend.mockReturnValue({ backend: 'claude', tier: 'frontier', reason: 'mock' });
+    mockGetResourceSnapshot.mockResolvedValue(openSnapshot('codex'));
+    mockRunGoal.mockResolvedValue(zeroStepFailedRun('partial-output', {
+      status: 'done',
+      proposalOutcome: {
+        kind: 'partial-completeness-gate',
+        reason: 'partial diff captured',
+        isPartial: true,
+        files: 1,
+        insertions: 2,
+      },
+      runEventSummary: {
+        status: 'done',
+        outcome: 'partial-completeness-gate',
+        diffFiles: 1,
+        diffLines: 2,
+        actionCounts: {
+          spawnAttempts: 0,
+          modelSteps: 0,
+          toolSteps: 0,
+          totalSteps: 0,
+          diffFiles: 1,
+          diffLines: 2,
+        },
+      },
+    }));
+
+    await tick(makeCfg({ foundry: { allowedBackends: ['claude', 'codex'] } }), { dryRun: false });
+
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    expect(readAgentActions().some((event) =>
+      event.action === 'daemon:dispatch-zero-step-failover')).toBe(false);
+  });
+
+  it('does not retry an alternative that is not installed', async () => {
+    enrollRepo();
+    mockRouteBackend.mockReturnValue({ backend: 'claude', tier: 'frontier', reason: 'mock' });
+    mockGetResourceSnapshot.mockResolvedValue(openSnapshot('claude', 'codex'));
+    mockEngineInstalled.mockImplementation((backend: string) => backend !== 'codex');
+    mockRunGoal.mockResolvedValue(zeroStepFailedRun('not-installed'));
+
+    await tick(makeCfg({ foundry: { allowedBackends: ['claude', 'codex'] } }), { dryRun: false });
+
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry an installed backend in a different routing tier', async () => {
+    enrollRepo();
+    mockRouteBackend.mockReturnValue({ backend: 'claude', tier: 'frontier', reason: 'mock' });
+    mockGetResourceSnapshot.mockResolvedValue(openSnapshot('claude', 'local-coder'));
+    mockRunGoal.mockResolvedValue(zeroStepFailedRun('different-tier'));
+
+    await tick(makeCfg({ foundry: { allowedBackends: ['claude', 'local-coder'] } }), { dryRun: false });
+
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+  });
+
+  it('reruns quota admission and refuses an over-quota retry backend', async () => {
+    enrollRepo();
+    mockRouteBackend.mockReturnValue({ backend: 'claude', tier: 'frontier', reason: 'mock' });
+    mockGetResourceSnapshot.mockResolvedValue(openSnapshot('claude', 'codex'));
+    mockWithinLimit.mockImplementation((backend: string) => backend !== 'codex');
+    mockRunGoal.mockResolvedValue(zeroStepFailedRun('quota-denied'));
+
+    await tick(makeCfg({ foundry: { allowedBackends: ['claude', 'codex'] } }), { dryRun: false });
+
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    expect(mockWithinLimit).toHaveBeenCalledWith('codex', expect.any(Object));
+  });
+
+  it('reruns subscription admission and refuses a throttled retry backend', async () => {
+    enrollRepo();
+    mockRouteBackend.mockReturnValue({ backend: 'claude', tier: 'frontier', reason: 'mock' });
+    mockGetResourceSnapshot.mockResolvedValue(openSnapshot('claude', 'codex'));
+    mockIsSubscriptionEngine.mockImplementation((backend: string) => backend === 'codex');
+    mockSubscriptionAllows.mockImplementation((backend: string) => backend === 'codex'
+      ? { allowed: false, reason: 'subscription exhausted' }
+      : { allowed: true, reason: 'open' });
+    mockRunGoal.mockResolvedValue(zeroStepFailedRun('subscription-denied'));
+    const cfg = makeCfg({ foundry: { allowedBackends: ['claude', 'codex'] } });
+
+    await tick(cfg, { dryRun: false });
+
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    expect(mockSubscriptionAllows).toHaveBeenCalledWith('codex', {
+      maxPercent: 90,
+      cfg,
+    });
+  });
+
+  it('refuses retry when the target has no concurrent capacity', async () => {
+    enrollRepo();
+    mockRouteBackend.mockReturnValue({ backend: 'claude', tier: 'frontier', reason: 'mock' });
+    const snapshot = openSnapshot('claude', 'codex');
+    const codex = snapshot.backends.find((state) => state.backend === 'codex')!;
+    codex.cap = 1;
+    codex.capUnit = 'concurrent';
+    codex.usedPct = 100;
+    mockGetResourceSnapshot.mockResolvedValue(snapshot);
+    mockRunGoal.mockResolvedValue(zeroStepFailedRun('capacity-denied'));
+
+    await tick(makeCfg({
+      foundry: {
+        allowedBackends: ['claude', 'codex'],
+        fabric: { concurrentDispatch: true, gateway: true, maxSlotsPerBackend: 1 },
+      },
+    }), { dryRun: false });
+
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed when zero-step telemetry is sparse', async () => {
+    enrollRepo();
+    mockRouteBackend.mockReturnValue({ backend: 'claude', tier: 'frontier', reason: 'mock' });
+    mockGetResourceSnapshot.mockResolvedValue(openSnapshot('claude', 'codex'));
+    const sparse = zeroStepFailedRun('sparse-summary') as {
+      runEventSummary: { actionCounts: Record<string, number> };
+    };
+    delete sparse.runEventSummary.actionCounts.toolSteps;
+    mockRunGoal.mockResolvedValue(sparse);
+
+    await tick(makeCfg({ foundry: { allowedBackends: ['claude', 'codex'] } }), { dryRun: false });
+
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+  });
+
+  it('requires an explicit proposalCreated false signal', async () => {
+    enrollRepo();
+    mockRouteBackend.mockReturnValue({ backend: 'claude', tier: 'frontier', reason: 'mock' });
+    mockGetResourceSnapshot.mockResolvedValue(openSnapshot('claude', 'codex'));
+    const missingProposalSignal = zeroStepFailedRun('missing-proposal-signal') as {
+      runEventSummary: { proposalCreated?: boolean };
+    };
+    delete missingProposalSignal.runEventSummary.proposalCreated;
+    mockRunGoal.mockResolvedValue(missingProposalSignal);
+
+    await tick(makeCfg({ foundry: { allowedBackends: ['claude', 'codex'] } }), { dryRun: false });
+
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry a generic zero-step engine failure outside the allowlist', async () => {
+    enrollRepo();
+    mockRouteBackend.mockReturnValue({ backend: 'claude', tier: 'frontier', reason: 'mock' });
+    mockGetResourceSnapshot.mockResolvedValue(openSnapshot('claude', 'codex'));
+    const genericFailure = zeroStepFailedRun('generic-failure');
+    genericFailure.proposalOutcome.kind = 'engine-failed-no-diff';
+    genericFailure.runEventSummary.outcome = 'engine-failed-no-diff';
+    mockRunGoal.mockResolvedValue(genericFailure);
+
+    await tick(makeCfg({ foundry: { allowedBackends: ['claude', 'codex'] } }), { dryRun: false });
+
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+  });
+
+  it('aborts retry when the exact executing claim generation is stale', async () => {
+    enrollRepo();
+    mockRouteBackend.mockReturnValue({ backend: 'claude', tier: 'frontier', reason: 'mock' });
+    mockGetResourceSnapshot.mockResolvedValue(openSnapshot('claude', 'codex'));
+    mockRunGoal.mockResolvedValue(zeroStepFailedRun('stale-claim'));
+    const fence = vi.spyOn(
+      LocalWorkQueueCoordinator.prototype,
+      'fenceExecutingClaimGeneration',
+    ).mockReturnValue(false);
+
+    try {
+      await tick(makeCfg({ foundry: { allowedBackends: ['claude', 'codex'] } }), { dryRun: false });
+    } finally {
+      fence.mockRestore();
+    }
+
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    expect(readAgentActions().some((event) =>
+      event.action === 'daemon:dispatch-zero-step-failover')).toBe(false);
+  });
+
+  it('attributes a retry exception to the retry attempt while retaining one trajectory', async () => {
+    enrollRepo();
+    mockRouteBackend.mockReturnValue({ backend: 'claude', tier: 'frontier', reason: 'mock' });
+    mockGetResourceSnapshot.mockResolvedValue(openSnapshot('claude', 'codex'));
+    mockRunGoal
+      .mockResolvedValueOnce(zeroStepFailedRun('first-before-retry-throw'))
+      .mockRejectedValueOnce(new Error('retry backend threw'));
+
+    const result = await tick(
+      makeCfg({ foundry: { allowedBackends: ['claude', 'codex'] } }),
+      { dryRun: false },
+    );
+
+    const retryRunId = (mockRunGoal.mock.calls[1]?.[2] as { runId: string }).runId;
+    const starts = readAgentActions().filter((event) => event.action === 'daemon:dispatch-start');
+    const retryStart = starts.find((event) => event.runId === retryRunId);
+    expect(mockRunGoal).toHaveBeenCalledTimes(2);
+    expect(result.dispatches?.[0]).toMatchObject({
+      backend: 'codex',
+      runId: retryRunId,
+      trajectoryId: starts[0]?.trajectoryId,
+      production: { outcome: 'engine-failed' },
+    });
+    expect(retryStart).toMatchObject({
+      runId: retryRunId,
+      trajectoryId: starts[0]?.trajectoryId,
+      backend: 'codex',
+    });
+  });
+
+  it('never attempts a third backend when the one allowed retry also fails at zero steps', async () => {
+    enrollRepo();
+    mockRouteBackend.mockReturnValue({ backend: 'claude', tier: 'frontier', reason: 'mock' });
+    mockGetResourceSnapshot.mockResolvedValue(openSnapshot('claude', 'codex', 'nim'));
+    mockRunGoal
+      .mockResolvedValueOnce(zeroStepFailedRun('first-zero-step'))
+      .mockResolvedValueOnce(zeroStepFailedRun('second-zero-step'));
+
+    await tick(
+      makeCfg({ foundry: { allowedBackends: ['claude', 'codex', 'nim'] } }),
+      { dryRun: false },
+    );
+
+    expect(mockRunGoal).toHaveBeenCalledTimes(2);
+    expect(mockRunGoal.mock.calls.map((call) => (call[2] as { engine: string }).engine))
+      .toEqual(['claude', 'codex']);
+    expect(readAgentActions().filter((event) =>
+      event.action === 'daemon:dispatch-zero-step-failover')).toHaveLength(1);
+  });
+
+  it('does not retry after the kill switch turns on', async () => {
+    enrollRepo();
+    mockRouteBackend.mockReturnValue({ backend: 'claude', tier: 'frontier', reason: 'mock' });
+    mockGetResourceSnapshot.mockResolvedValue(openSnapshot('codex'));
+    mockRunGoal.mockImplementationOnce(async () => {
+      fx.setKill(true);
+      return zeroStepFailedRun('killed-before-retry');
+    });
+    const cfg = makeCfg({ foundry: { allowedBackends: ['claude', 'codex'] } });
+
+    await tick(cfg, { dryRun: false });
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    expect(readAgentActions().some((event) =>
+      event.action === 'daemon:dispatch-zero-step-failover')).toBe(false);
+  });
+
+  it('does not retry a failed attempt that consumed budget', async () => {
+    enrollRepo();
+    mockRouteBackend.mockReturnValue({ backend: 'claude', tier: 'frontier', reason: 'mock' });
+    mockGetResourceSnapshot.mockResolvedValue(openSnapshot('codex'));
+    mockRunGoal.mockResolvedValue(zeroStepFailedRun('spent-before-retry', {
+      usage: { tokensIn: 1, tokensOut: 0, steps: 0, estCostUsd: 0.01 },
+    }));
+
+    await tick(makeCfg({ foundry: { allowedBackends: ['claude', 'codex'] } }), { dryRun: false });
+
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    expect(readAgentActions().some((event) =>
+      event.action === 'daemon:dispatch-zero-step-failover')).toBe(false);
+  });
+});
+
+// ===========================================================================
+// 4. selfHeal default (on) → runSelfHealCycle called once at live-tick start
 // ===========================================================================
 
 describe('M170 — self-heal cadence: called once at live-tick start by default', () => {
