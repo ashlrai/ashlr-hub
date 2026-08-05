@@ -33,6 +33,10 @@ import {
   prepareToolEffect,
   releasePreparedToolEffect,
 } from '../util/effect-journal.js';
+import type {
+  HarnessActionClassV1,
+  HarnessObservationOutcomeV1,
+} from '../learning/harness-observations.js';
 
 /** Maximum steps per task, regardless of budget (safety backstop). */
 const TASK_STEP_CAP = 20;
@@ -304,6 +308,13 @@ interface ToolSpec {
   [key: string]: unknown;
 }
 
+export function harnessObservationOutcomeForToolReturn(
+  safety: ToolSpec['safety'],
+): HarnessObservationOutcomeV1 {
+  if (safety === 'exec') return 'uncertain';
+  return safety !== undefined && safety !== 'read' ? 'committed' : 'returned';
+}
+
 /**
  * Execute a single RunTask to completion using `client`.
  *
@@ -363,6 +374,11 @@ export async function runTask(
     continuationPolicy?: { maxCorrectiveNudges: 1 };
     /** Metadata-only notification after a mutating tool effect is committed. */
     onToolEffect?: (effect: { kind: 'mutating'; safety: Exclude<ToolSpec['safety'], 'read' | undefined> }) => void;
+    /** Metadata-only harness observation. Never includes tool names, arguments, paths, commands, or results. */
+    onHarnessObservation?: (observation: {
+      actionClass: HarnessActionClassV1;
+      outcome: HarnessObservationOutcomeV1;
+    }) => void;
     /** Exact whole-run generation used to bind mutating tool evidence. */
     effectJournal?: { scopeId: string; generation: string };
   },
@@ -373,6 +389,24 @@ export async function runTask(
 
   // M11: resolve sink — default to nullSink when not provided.
   const sink: StreamSink = ctx.sink ?? nullSink();
+
+  function observeTool(
+    safety: ToolSpec['safety'],
+    outcome: HarnessObservationOutcomeV1,
+  ): void {
+    const actionClass: HarnessActionClassV1 = safety === 'read'
+      ? 'read'
+      : safety === 'exec'
+        ? 'exec'
+        : safety === 'append' || safety === 'proposal' || safety === 'write'
+          ? 'write'
+          : 'other';
+    try {
+      ctx.onHarnessObservation?.({ actionClass, outcome });
+    } catch {
+      // Observation callbacks are advisory and never affect execution.
+    }
+  }
 
   // Helper: emit a RunStreamEvent. Never throws.
   function emitStream(event: Omit<RunStreamEvent, 'ts'>): void {
@@ -764,12 +798,15 @@ export async function runTask(
           if (cancelIfRequested()) break;
 
           let toolResultContent: string;
+          let toolExecutionFailed = false;
+          let returnedObservationOutcome: HarnessObservationOutcomeV1 = 'returned';
           const executor = toolExecutors.get(tc.name);
           const safety = toolSafety.get(tc.name);
 
           if (executor) {
             const effectful = safety !== undefined && safety !== 'read';
             if (effectful && !ctx.effectJournal) {
+              observeTool(safety, 'refused');
               task.status = 'failed';
               task.error = `Tool effect authority is unavailable for ${tc.name}.`;
               delete task.result;
@@ -777,6 +814,7 @@ export async function runTask(
               break;
             }
             if (effectful && effectOrdinal >= TASK_EFFECT_CAP) {
+              observeTool(safety, 'refused');
               task.status = 'failed';
               task.error = `Tool effect cap exceeded (${TASK_EFFECT_CAP}) for this task.`;
               delete task.result;
@@ -796,6 +834,7 @@ export async function runTask(
               : undefined;
             const prepared = effectInput ? prepareToolEffect(effectInput) : undefined;
             if (prepared && !prepared.ok) {
+              observeTool(safety, 'refused');
               task.status = 'failed';
               task.error = `Tool effect authority refused ${tc.name}: ${prepared.reason}`;
               delete task.result;
@@ -804,6 +843,7 @@ export async function runTask(
             }
             try {
               const rawResult = await executor(tc.arguments, ctx.signal);
+              returnedObservationOutcome = harnessObservationOutcomeForToolReturn(safety);
               toolResultContent =
                 typeof rawResult === 'string'
                   ? rawResult
@@ -811,20 +851,27 @@ export async function runTask(
             } catch (toolErr) {
               if (prepared?.ok) {
                 releasePreparedToolEffect(prepared.effect);
+                observeTool(safety, 'uncertain');
                 task.status = 'failed';
                 task.error = `Tool effect outcome is uncertain for ${tc.name}; operator reconciliation is required.`;
                 delete task.result;
                 emitStep('tool', `${tc.name}: effect outcome uncertain`);
                 break;
               }
+              observeTool(safety, 'failed');
+              toolExecutionFailed = true;
               toolResultContent = `Tool execution error: ${String(toolErr)}`;
             }
             if (prepared?.ok && !commitToolEffect(prepared.effect, toolResultContent)) {
+              observeTool(safety, 'uncertain');
               task.status = 'failed';
               task.error = `Tool effect outcome is uncertain for ${tc.name}; operator reconciliation is required.`;
               delete task.result;
               emitStep('tool', `${tc.name}: effect outcome uncertain`);
               break;
+            }
+            if (!toolExecutionFailed) {
+              observeTool(safety, returnedObservationOutcome);
             }
             if (effectful) {
               try {
@@ -838,6 +885,7 @@ export async function runTask(
             }
           } else {
             // No executor — report the tool as unavailable.
+            observeTool(safety, 'unavailable');
             toolResultContent = `Tool '${tc.name}' is not available in this context. Please proceed without it.`;
           }
 
@@ -864,6 +912,7 @@ export async function runTask(
       // If there were tool calls but tools are not supported by the client,
       // ask the model to proceed without tools.
       if (result.toolCalls && result.toolCalls.length > 0 && !useTools) {
+        for (const tc of result.toolCalls) observeTool(toolSafety.get(tc.name), 'unavailable');
         messages.push({
           role: 'user',
           content:

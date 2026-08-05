@@ -22,6 +22,10 @@ import type { AshlrConfig } from '../src/core/types.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import {
+  defineHarnessObservations,
+  harnessObservationSubjectRef,
+} from '../src/core/learning/harness-observations.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -597,6 +601,82 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
       diffFiles: 2,
       diffLines: 13,
     });
+  });
+
+  it('api-model TITRR treats legacy at-cap attempts as a lower-bound final observation', async () => {
+    const firstState = {
+      ...makeRunState({ status: 'done', result: 'first attempt' }),
+      engine: 'local-coder' as const,
+      engineModel: 'local-coder:qwen',
+      engineTier: 'mid' as const,
+    };
+    const secondState = {
+      ...makeRunState({ status: 'done', result: 'second attempt' }),
+      engine: 'local-coder' as const,
+      engineModel: 'local-coder:qwen',
+      engineTier: 'mid' as const,
+    };
+    const now = Date.now() - 10_000;
+    const firstObservations = defineHarnessObservations(
+      harnessObservationSubjectRef(firstState.id),
+      Array.from({ length: 16 }, (_, index) => ({
+        actionClass: index % 2 === 0 ? 'read' as const : 'write' as const,
+        outcome: index % 2 === 0 ? 'returned' as const : 'committed' as const,
+        observedAt: new Date(now + index).toISOString(),
+      })),
+    );
+    const secondObservations = defineHarnessObservations(
+      harnessObservationSubjectRef(secondState.id),
+      Array.from({ length: 16 }, (_, index) => ({
+        actionClass: index % 2 === 0 ? 'exec' as const : 'write' as const,
+        outcome: index % 2 === 0 ? 'failed' as const : 'committed' as const,
+        observedAt: new Date(now + 100 + index).toISOString(),
+      })),
+    );
+    engineMockFn
+      .mockResolvedValueOnce({
+        state: firstState,
+        harnessObservations: firstObservations,
+      })
+      .mockResolvedValueOnce({
+        state: secondState,
+        harnessObservations: secondObservations,
+      });
+    detectVCMockFn.mockReturnValue([{ kind: 'test', cmd: ['npm', 'test'] }]);
+    runVCMockFn
+      .mockReturnValueOnce({ ok: false, command: 'npm test', exitCode: 1, output: 'failed', timedOut: false })
+      .mockReturnValueOnce({ ok: true, command: 'npm test', exitCode: 0, output: 'passed', timedOut: false });
+
+    const runGoal = await loadRunGoal();
+    await runGoal('fix a bug', sandboxCfg(), {
+      engine: 'local-coder',
+      sandboxEngine: true,
+      titrrMaxAttempts: 2,
+      budget: { maxTokens: 1_000_000, maxSteps: 100 },
+      tools: false,
+    });
+
+    expect(engineMockFn).toHaveBeenCalledTimes(2);
+    expect(terminalActionMockFn).toHaveBeenCalledTimes(1);
+    const terminal = terminalActionMockFn.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(terminal['runId']).toBe(secondState.id);
+    expect(terminal['startedAt']).toBe(firstState.createdAt);
+    expect(terminal['harnessObservationCount']).toBeUndefined();
+    expect(terminal['harnessObservationRetainedCount']).toBe(16);
+    expect(terminal['harnessObservationsTruncated']).toBe(true);
+    expect(terminal['harnessObservationCountIsLowerBound']).toBe(true);
+    expect(`${terminal['harnessObservationCountIsLowerBound'] ? '>=' : ''}${terminal['harnessObservationRetainedCount']}`)
+      .toBe('>=16');
+    const terminalObservations = terminal['harnessObservations'] as Array<Record<string, unknown>>;
+    expect(terminalObservations).toHaveLength(16);
+    expect(terminalObservations.every((observation, index) =>
+      observation['subjectRef'] === `run:${secondState.id}` && observation['ordinal'] === index + 1)).toBe(true);
+    expect(terminalObservations.slice(0, 8).map((observation) => observation['actionClass'])).toEqual(
+      firstObservations.slice(0, 8).map((observation) => observation.actionClass),
+    );
+    expect(terminalObservations.slice(8).map((observation) => observation['actionClass'])).toEqual(
+      secondObservations.slice(-8).map((observation) => observation.actionClass),
+    );
   });
 
   it('api-model step-cap output remains partial when TITRR owns capture', async () => {

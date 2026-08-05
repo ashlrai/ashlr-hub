@@ -110,6 +110,10 @@ import { listNativeTools } from '../mcp-native.js';
 import { selectInboxStore } from '../seams/inbox.js';
 import { scrubSecrets } from '../knowledge/index.js';
 import { causalMetadata } from '../learning/causal.js';
+import {
+  aggregateHarnessObservations,
+  type HarnessObservationAttemptV1,
+} from '../learning/harness-observations.js';
 import { assertSafeExecutionIdentity } from '../fleet/attempt-identity.js';
 import {
   assureStableRegularFiles,
@@ -2252,6 +2256,8 @@ async function runGoalInternal(
             let titrrUsage = newUsage();
             let titrrActionCounts: RunActionCounts = {};
             let titrrDurationMs = 0;
+            let titrrStartedAt: string | undefined;
+            const titrrHarnessAttempts: HarnessObservationAttemptV1[] = [];
             const proposalRequired =
               delegationScope?.resultContract?.requireProposal === true ||
               delegationScope?.resultContract?.requireDiff === true;
@@ -2295,6 +2301,22 @@ async function runGoalInternal(
                   ...(opts.runId ? { runId: opts.runId } : {}),
                   deferTerminalAction: true,
                 });
+                titrrHarnessAttempts.push({
+                  runId: rawApiR.state.id,
+                  ...(rawApiR.harnessObservations
+                    ? { observations: rawApiR.harnessObservations }
+                    : {}),
+                  ...(rawApiR.harnessObservationRetainedCount !== undefined
+                    ? { retainedCount: rawApiR.harnessObservationRetainedCount }
+                    : {}),
+                  ...(rawApiR.harnessObservationsTruncated !== undefined
+                    ? { truncated: rawApiR.harnessObservationsTruncated }
+                    : {}),
+                  ...(rawApiR.harnessObservationCountIsLowerBound !== undefined
+                    ? { countIsLowerBound: rawApiR.harnessObservationCountIsLowerBound }
+                    : {}),
+                });
+                titrrStartedAt ??= rawApiR.state.createdAt;
                 titrrUsage = addUsage(titrrUsage, accountedTitrrAttemptUsage(rawApiR.state.usage));
                 titrrActionCounts = addTitrrActionCounts(
                   titrrActionCounts,
@@ -2563,6 +2585,10 @@ async function runGoalInternal(
               if (cancelled()) {
                 lastApiR = { ...lastApiR, state: asCancelledRunState(lastApiR.state) };
               }
+              const harnessObservationCollection = aggregateHarnessObservations(
+                lastApiR.state.id,
+                titrrHarnessAttempts,
+              );
               recordSandboxedRunAgentAction({
                 engine: engineId,
                 engineModel: lastApiR.state.engineModel ?? `${engineId}:${modelEnv ?? 'default'}`,
@@ -2575,10 +2601,18 @@ async function runGoalInternal(
                 outcome: lastApiR.proposalOutcome,
                 status: lastApiR.state.status,
                 usage: lastApiR.state.usage,
-                startedAt: lastApiR.state.createdAt,
+                startedAt: titrrStartedAt ?? lastApiR.state.createdAt,
                 durationMs: runDurationMs(lastApiR.state),
                 actionCounts: actionCountsForProposalCapture(lastApiR.state) ?? {},
                 contextSummary: lastApiR.state.runEventSummary?.contextSummary,
+                ...(harnessObservationCollection
+                  ? {
+                      harnessObservations: harnessObservationCollection.observations,
+                      harnessObservationRetainedCount: harnessObservationCollection.retainedCount,
+                      harnessObservationsTruncated: harnessObservationCollection.truncated,
+                      harnessObservationCountIsLowerBound: harnessObservationCollection.countIsLowerBound,
+                    }
+                  : {}),
               });
               emit(sink, {
                 kind: 'log',
@@ -2668,6 +2702,8 @@ async function runGoalInternal(
           let titrrUsage = newUsage();
           let titrrActionCounts: RunActionCounts = {};
           let titrrDurationMs = 0;
+          let titrrStartedAt: string | undefined;
+          const titrrHarnessAttempts: HarnessObservationAttemptV1[] = [];
           const proposalRequired =
             delegationScope?.resultContract?.requireProposal === true ||
             delegationScope?.resultContract?.requireDiff === true;
@@ -2736,6 +2772,20 @@ async function runGoalInternal(
                 ...(opts.runId ? { runId: opts.runId } : {}),
                 deferTerminalAction: true,
               });
+              titrrHarnessAttempts.push({
+                runId: rawR.state.id,
+                ...(rawR.harnessObservations ? { observations: rawR.harnessObservations } : {}),
+                ...(rawR.harnessObservationRetainedCount !== undefined
+                  ? { retainedCount: rawR.harnessObservationRetainedCount }
+                  : {}),
+                ...(rawR.harnessObservationsTruncated !== undefined
+                  ? { truncated: rawR.harnessObservationsTruncated }
+                  : {}),
+                ...(rawR.harnessObservationCountIsLowerBound !== undefined
+                  ? { countIsLowerBound: rawR.harnessObservationCountIsLowerBound }
+                  : {}),
+              });
+              titrrStartedAt ??= rawR.state.createdAt;
               const retention = sandboxRetentionFrom(rawR);
               titrrUsage = addUsage(titrrUsage, accountedTitrrAttemptUsage(rawR.state.usage));
               titrrActionCounts = addTitrrActionCounts(
@@ -2906,6 +2956,10 @@ async function runGoalInternal(
           const finalR = cancelled()
             ? { ...lastR, state: asCancelledRunState(lastR.state) }
             : lastR;
+          const harnessObservationCollection = aggregateHarnessObservations(
+            finalR.state.id,
+            titrrHarnessAttempts,
+          );
 
           // Annotate the RunState result with the TITRR outcome.
           if (titrrAnnotation) {
@@ -2925,10 +2979,18 @@ async function runGoalInternal(
             outcome: finalR.proposalOutcome,
             status: finalR.state.status,
             usage: finalR.state.usage,
-            startedAt: finalR.state.createdAt,
+            startedAt: titrrStartedAt ?? finalR.state.createdAt,
             durationMs: runDurationMs(finalR.state),
             actionCounts: actionCountsForProposalCapture(finalR.state) ?? {},
             contextSummary: finalR.state.runEventSummary?.contextSummary,
+            ...(harnessObservationCollection
+              ? {
+                  harnessObservations: harnessObservationCollection.observations,
+                  harnessObservationRetainedCount: harnessObservationCollection.retainedCount,
+                  harnessObservationsTruncated: harnessObservationCollection.truncated,
+                  harnessObservationCountIsLowerBound: harnessObservationCollection.countIsLowerBound,
+                }
+              : {}),
           });
 
           emit(sink, {
