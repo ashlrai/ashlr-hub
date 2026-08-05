@@ -287,6 +287,7 @@ function terminalCheckpoint(input: {
   status: RunState['status'];
   outcomeKind?: RunProposalOutcomeKind;
   isPartial?: boolean;
+  hasExecObservation?: boolean;
   observedAt: string;
 }): AgentWorkTransitionDraftV1 {
   switch (input.outcomeKind) {
@@ -316,6 +317,11 @@ function terminalCheckpoint(input: {
       observedAt: input.observedAt,
     };
   }
+  if (input.hasExecObservation === true) {
+    return input.status === 'done'
+      ? { phase: 'inspect', transition: 'advance', trigger: 'unknown', observedAt: input.observedAt }
+      : { phase: 'repair', transition: 'block', trigger: 'unknown', observedAt: input.observedAt };
+  }
   return input.status === 'done'
     ? { phase: 'complete', transition: 'complete', trigger: 'unknown', observedAt: input.observedAt }
     : { phase: 'repair', transition: 'block', trigger: 'unknown', observedAt: input.observedAt };
@@ -331,10 +337,45 @@ function observedTransitionDrafts(
         ...observations.slice(0, Math.floor(maxObservedTransitions / 2)),
         ...observations.slice(-Math.ceil(maxObservedTransitions / 2)),
       ];
-  let recovering = false;
+  let recoveringFrom: 'none' | 'exec' | 'other' = 'none';
   return selected.map((observation): AgentWorkTransitionDraftV1 => {
+    if (observation.actionClass === 'exec') {
+      if (observation.outcome === 'refused') {
+        recoveringFrom = 'exec';
+        return {
+          phase: 'repair',
+          transition: 'block',
+          trigger: 'authority-blocked',
+          observedAt: observation.observedAt,
+        };
+      }
+      if (observation.outcome === 'unavailable') {
+        recoveringFrom = 'exec';
+        return {
+          phase: 'repair',
+          transition: 'block',
+          trigger: 'dependency-unavailable',
+          observedAt: observation.observedAt,
+        };
+      }
+      if (observation.outcome === 'failed' || observation.outcome === 'uncertain') {
+        recoveringFrom = 'exec';
+        return {
+          phase: 'repair',
+          transition: 'replan',
+          trigger: 'evidence-failed',
+          observedAt: observation.observedAt,
+        };
+      }
+      return {
+        phase: 'inspect',
+        transition: 'advance',
+        trigger: 'unknown',
+        observedAt: observation.observedAt,
+      };
+    }
     if (observation.outcome === 'refused') {
-      recovering = true;
+      recoveringFrom = 'other';
       return {
         phase: 'repair',
         transition: 'block',
@@ -343,7 +384,7 @@ function observedTransitionDrafts(
       };
     }
     if (observation.outcome === 'unavailable') {
-      recovering = true;
+      recoveringFrom = 'other';
       return {
         phase: 'repair',
         transition: 'block',
@@ -352,7 +393,7 @@ function observedTransitionDrafts(
       };
     }
     if (observation.outcome === 'failed' || observation.outcome === 'uncertain') {
-      recovering = true;
+      recoveringFrom = 'other';
       return {
         phase: 'repair',
         transition: 'replan',
@@ -364,12 +405,10 @@ function observedTransitionDrafts(
       ? 'inspect'
       : observation.actionClass === 'write'
         ? 'edit'
-        : observation.actionClass === 'exec'
-          ? 'verify'
-          : 'inspect';
-    const transition: AgentWorkTransitionCodeV1 = recovering ? 'retry' : 'advance';
-    const trigger: AgentWorkTriggerV1 = recovering ? 'evidence-passed' : 'unknown';
-    recovering = false;
+        : 'inspect';
+    const transition: AgentWorkTransitionCodeV1 = recoveringFrom === 'none' ? 'advance' : 'retry';
+    const trigger: AgentWorkTriggerV1 = recoveringFrom === 'other' ? 'evidence-passed' : 'unknown';
+    recoveringFrom = 'none';
     return { phase, transition, trigger, observedAt: observation.observedAt };
   });
 }
@@ -435,6 +474,16 @@ export function sandboxedRunAgentWorkTransitions(input: {
   const observations = input.harnessObservations === undefined
     ? []
     : sanitizeHarnessObservations(input.harnessObservations, subjectRef) ?? [];
+  const terminalFloorMs = Math.max(
+    Date.parse(input.startedAt),
+    ...observations.map((observation) => Date.parse(observation.observedAt)),
+  );
+  const candidateTerminalMs = Date.parse(input.observedAt);
+  const terminalObservedAt = Number.isFinite(terminalFloorMs)
+    ? new Date(Number.isFinite(candidateTerminalMs)
+        ? Math.max(terminalFloorMs, candidateTerminalMs)
+        : terminalFloorMs).toISOString()
+    : input.observedAt;
   return defineAgentWorkTransitions(agentWorkTransitionSubjectRef('run', input.runId), [
     {
       phase: 'orient',
@@ -443,6 +492,12 @@ export function sandboxedRunAgentWorkTransitions(input: {
       observedAt: input.startedAt,
     },
     ...observedTransitionDrafts(observations),
-    terminalCheckpoint(input),
+    terminalCheckpoint({
+      status: input.status,
+      outcomeKind: input.outcomeKind,
+      isPartial: input.isPartial,
+      hasExecObservation: observations.some((observation) => observation.actionClass === 'exec'),
+      observedAt: terminalObservedAt,
+    }),
   ]);
 }

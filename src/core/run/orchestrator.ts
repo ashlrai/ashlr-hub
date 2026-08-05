@@ -2306,6 +2306,15 @@ async function runGoalInternal(
                   ...(rawApiR.harnessObservations
                     ? { observations: rawApiR.harnessObservations }
                     : {}),
+                  ...(rawApiR.harnessObservationRetainedCount !== undefined
+                    ? { retainedCount: rawApiR.harnessObservationRetainedCount }
+                    : {}),
+                  ...(rawApiR.harnessObservationsTruncated !== undefined
+                    ? { truncated: rawApiR.harnessObservationsTruncated }
+                    : {}),
+                  ...(rawApiR.harnessObservationCountIsLowerBound !== undefined
+                    ? { countIsLowerBound: rawApiR.harnessObservationCountIsLowerBound }
+                    : {}),
                 });
                 titrrStartedAt ??= rawApiR.state.createdAt;
                 titrrUsage = addUsage(titrrUsage, accountedTitrrAttemptUsage(rawApiR.state.usage));
@@ -2576,7 +2585,7 @@ async function runGoalInternal(
               if (cancelled()) {
                 lastApiR = { ...lastApiR, state: asCancelledRunState(lastApiR.state) };
               }
-              const harnessObservations = aggregateHarnessObservations(
+              const harnessObservationCollection = aggregateHarnessObservations(
                 lastApiR.state.id,
                 titrrHarnessAttempts,
               );
@@ -2596,7 +2605,14 @@ async function runGoalInternal(
                 durationMs: runDurationMs(lastApiR.state),
                 actionCounts: actionCountsForProposalCapture(lastApiR.state) ?? {},
                 contextSummary: lastApiR.state.runEventSummary?.contextSummary,
-                ...(harnessObservations ? { harnessObservations } : {}),
+                ...(harnessObservationCollection
+                  ? {
+                      harnessObservations: harnessObservationCollection.observations,
+                      harnessObservationRetainedCount: harnessObservationCollection.retainedCount,
+                      harnessObservationsTruncated: harnessObservationCollection.truncated,
+                      harnessObservationCountIsLowerBound: harnessObservationCollection.countIsLowerBound,
+                    }
+                  : {}),
               });
               emit(sink, {
                 kind: 'log',
@@ -2759,6 +2775,15 @@ async function runGoalInternal(
               titrrHarnessAttempts.push({
                 runId: rawR.state.id,
                 ...(rawR.harnessObservations ? { observations: rawR.harnessObservations } : {}),
+                ...(rawR.harnessObservationRetainedCount !== undefined
+                  ? { retainedCount: rawR.harnessObservationRetainedCount }
+                  : {}),
+                ...(rawR.harnessObservationsTruncated !== undefined
+                  ? { truncated: rawR.harnessObservationsTruncated }
+                  : {}),
+                ...(rawR.harnessObservationCountIsLowerBound !== undefined
+                  ? { countIsLowerBound: rawR.harnessObservationCountIsLowerBound }
+                  : {}),
               });
               titrrStartedAt ??= rawR.state.createdAt;
               const retention = sandboxRetentionFrom(rawR);
@@ -2931,7 +2956,7 @@ async function runGoalInternal(
           const finalR = cancelled()
             ? { ...lastR, state: asCancelledRunState(lastR.state) }
             : lastR;
-          const harnessObservations = aggregateHarnessObservations(
+          const harnessObservationCollection = aggregateHarnessObservations(
             finalR.state.id,
             titrrHarnessAttempts,
           );
@@ -2958,7 +2983,14 @@ async function runGoalInternal(
             durationMs: runDurationMs(finalR.state),
             actionCounts: actionCountsForProposalCapture(finalR.state) ?? {},
             contextSummary: finalR.state.runEventSummary?.contextSummary,
-            ...(harnessObservations ? { harnessObservations } : {}),
+            ...(harnessObservationCollection
+              ? {
+                  harnessObservations: harnessObservationCollection.observations,
+                  harnessObservationRetainedCount: harnessObservationCollection.retainedCount,
+                  harnessObservationsTruncated: harnessObservationCollection.truncated,
+                  harnessObservationCountIsLowerBound: harnessObservationCollection.countIsLowerBound,
+                }
+              : {}),
           });
 
           emit(sink, {

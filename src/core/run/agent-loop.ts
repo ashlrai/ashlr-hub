@@ -308,6 +308,13 @@ interface ToolSpec {
   [key: string]: unknown;
 }
 
+export function harnessObservationOutcomeForToolReturn(
+  safety: ToolSpec['safety'],
+): HarnessObservationOutcomeV1 {
+  if (safety === 'exec') return 'uncertain';
+  return safety !== undefined && safety !== 'read' ? 'committed' : 'returned';
+}
+
 /**
  * Execute a single RunTask to completion using `client`.
  *
@@ -792,6 +799,7 @@ export async function runTask(
 
           let toolResultContent: string;
           let toolExecutionFailed = false;
+          let returnedObservationOutcome: HarnessObservationOutcomeV1 = 'returned';
           const executor = toolExecutors.get(tc.name);
           const safety = toolSafety.get(tc.name);
 
@@ -835,6 +843,7 @@ export async function runTask(
             }
             try {
               const rawResult = await executor(tc.arguments, ctx.signal);
+              returnedObservationOutcome = harnessObservationOutcomeForToolReturn(safety);
               toolResultContent =
                 typeof rawResult === 'string'
                   ? rawResult
@@ -862,7 +871,7 @@ export async function runTask(
               break;
             }
             if (!toolExecutionFailed) {
-              observeTool(safety, effectful ? 'committed' : 'returned');
+              observeTool(safety, returnedObservationOutcome);
             }
             if (effectful) {
               try {

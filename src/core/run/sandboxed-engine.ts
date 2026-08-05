@@ -97,10 +97,9 @@ import { recordAgentAction, type AgentActionOutcome } from '../fleet/agent-actio
 import { agentRunSemanticEvents } from '../learning/agent-semantic-events.js';
 import { sandboxedRunAgentWorkTransitions } from '../learning/agent-work-transitions.js';
 import {
-  defineHarnessObservations,
-  harnessObservationSubjectRef,
-  MAX_HARNESS_OBSERVATIONS,
-  type HarnessObservationDraftV1,
+  createHarnessObservationAccumulator,
+  finalizeHarnessObservations,
+  recordHarnessObservation,
   type HarnessObservationV1,
 } from '../learning/harness-observations.js';
 import { hashDiff, signProvenance } from '../foundry/provenance.js';
@@ -146,6 +145,9 @@ export interface SandboxedEngineResult {
   };
   /** In-memory-only, metadata-only observations for an enclosing terminal owner. */
   harnessObservations?: HarnessObservationV1[];
+  harnessObservationRetainedCount?: number;
+  harnessObservationsTruncated?: boolean;
+  harnessObservationCountIsLowerBound?: boolean;
 }
 
 export interface SandboxRetentionEvidence {
@@ -513,6 +515,9 @@ function writeSandboxedRunAgentAction(fields: {
   actionCounts: RunActionCounts;
   contextSummary?: RunContextSummary;
   harnessObservations?: HarnessObservationV1[];
+  harnessObservationRetainedCount?: number;
+  harnessObservationsTruncated?: boolean;
+  harnessObservationCountIsLowerBound?: boolean;
 }): void {
   try {
     const observedAt = new Date().toISOString();
@@ -586,6 +591,15 @@ function writeSandboxedRunAgentAction(fields: {
       semanticEvents,
       workTransitions,
       ...(fields.harnessObservations ? { harnessObservations: fields.harnessObservations } : {}),
+      ...(fields.harnessObservationRetainedCount !== undefined
+        ? { harnessObservationRetainedCount: fields.harnessObservationRetainedCount }
+        : {}),
+      ...(fields.harnessObservationsTruncated !== undefined
+        ? { harnessObservationsTruncated: fields.harnessObservationsTruncated }
+        : {}),
+      ...(fields.harnessObservationCountIsLowerBound !== undefined
+        ? { harnessObservationCountIsLowerBound: fields.harnessObservationCountIsLowerBound }
+        : {}),
       backend: fields.engine,
       tier: fields.tier,
       model: fields.engineModel,
@@ -2663,7 +2677,7 @@ export async function runApiModelSandboxed(
     let m264SystemPrefix: string | undefined;
     let m264ContextSummary: RunContextSummary | undefined;
     let mutatingToolActions = 0;
-    const harnessObservationDrafts: HarnessObservationDraftV1[] = [];
+    const harnessObservationAccumulator = createHarnessObservationAccumulator();
     if (isLocalContextEnabled(engine, cfg) && delegationScope?.memoryMode !== 'none') {
       try {
         const bundle = await buildLocalContextBundle(goal, sb.worktreePath, cfg);
@@ -2734,9 +2748,8 @@ export async function runApiModelSandboxed(
             },
           }
         : {}),
-      onHarnessObservation: (observation: Omit<HarnessObservationDraftV1, 'observedAt'>) => {
-        if (harnessObservationDrafts.length >= MAX_HARNESS_OBSERVATIONS) return;
-        harnessObservationDrafts.push({ ...observation, observedAt: new Date().toISOString() });
+      onHarnessObservation: (observation) => {
+        recordHarnessObservation(harnessObservationAccumulator, observation);
       },
       // Direct API runs expose only reversible sandbox write tools. A fresh
       // generation lets a discarded sandbox be reconstructed; callers under a
@@ -2753,9 +2766,15 @@ export async function runApiModelSandboxed(
     setRunActionCount(actionCounts, 'toolSteps', steps.filter((step) => step.kind === 'tool').length);
     setRunActionCount(actionCounts, 'totalSteps', steps.length);
     const durationMs = Date.now() - runStartedAt;
-    const harnessObservations = harnessObservationDrafts.length > 0
-      ? defineHarnessObservations(harnessObservationSubjectRef(id), harnessObservationDrafts)
-      : undefined;
+    const harnessObservationCollection = finalizeHarnessObservations(id, harnessObservationAccumulator);
+    const harnessObservationMetadata = harnessObservationCollection
+      ? {
+          harnessObservations: harnessObservationCollection.observations,
+          harnessObservationRetainedCount: harnessObservationCollection.retainedCount,
+          harnessObservationsTruncated: harnessObservationCollection.truncated,
+          harnessObservationCountIsLowerBound: harnessObservationCollection.countIsLowerBound,
+        }
+      : {};
     const runTelemetry = {
       durationMs,
       ...(m264ContextSummary ? { contextSummary: m264ContextSummary } : {}),
@@ -2783,7 +2802,7 @@ export async function runApiModelSandboxed(
         durationMs,
         actionCounts,
         contextSummary: m264ContextSummary,
-        harnessObservations,
+        ...harnessObservationMetadata,
       });
       return {
         state: withProposalOutcome(
@@ -2804,7 +2823,7 @@ export async function runApiModelSandboxed(
         ...(capturedCandidateProposalId ? { candidateProposalId: capturedCandidateProposalId } : {}),
         ...(capturedOutcome ? { proposalOutcome: capturedOutcome } : {}),
         ...(localApiModel ? { retryEvidence: { mutatingToolActions } } : {}),
-        ...(harnessObservations ? { harnessObservations } : {}),
+        ...harnessObservationMetadata,
       };
     };
 
@@ -2883,7 +2902,7 @@ export async function runApiModelSandboxed(
         durationMs,
         actionCounts,
         contextSummary: m264ContextSummary,
-        harnessObservations,
+        ...harnessObservationMetadata,
       });
       return {
         state: withProposalOutcome(
@@ -2903,7 +2922,7 @@ export async function runApiModelSandboxed(
         candidateProposalId,
         proposalOutcome: proposalOutcomeResult,
         ...(localApiModel ? { retryEvidence: { mutatingToolActions } } : {}),
-        ...(harnessObservations ? { harnessObservations } : {}),
+        ...harnessObservationMetadata,
       };
     }
 
@@ -2972,7 +2991,7 @@ export async function runApiModelSandboxed(
       durationMs,
       actionCounts,
       contextSummary: m264ContextSummary,
-      harnessObservations,
+      ...harnessObservationMetadata,
     });
     return {
       state: withProposalOutcome(
@@ -2992,7 +3011,7 @@ export async function runApiModelSandboxed(
       candidateProposalId,
       proposalOutcome: proposalOutcomeResult,
       ...(localApiModel ? { retryEvidence: { mutatingToolActions } } : {}),
-      ...(harnessObservations ? { harnessObservations } : {}),
+      ...harnessObservationMetadata,
     };
   } finally {
     if (createdHere) {

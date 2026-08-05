@@ -35,9 +35,26 @@ export interface HarnessObservationSequenceProjectionV1 {
 export interface HarnessObservationAttemptV1 {
   runId: string;
   observations?: readonly HarnessObservationV1[];
+  retainedCount?: number;
+  truncated?: boolean;
+  countIsLowerBound?: boolean;
 }
 
 export const MAX_HARNESS_OBSERVATIONS = 16;
+
+export interface HarnessObservationCollectionV1 {
+  observations: HarnessObservationV1[];
+  retainedCount: number;
+  truncated: boolean;
+  countIsLowerBound: boolean;
+}
+
+export interface HarnessObservationAccumulatorV1 {
+  drafts: HarnessObservationDraftV1[];
+  seenCount: number;
+  lastObservedAt?: string;
+  malformed: boolean;
+}
 
 const OBSERVATION_ID_RE = /^aho-[a-f0-9]{64}$/;
 const OPAQUE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/;
@@ -159,15 +176,106 @@ export function sanitizeHarnessObservations(
   return observations;
 }
 
+export function createHarnessObservationAccumulator(): HarnessObservationAccumulatorV1 {
+  return { drafts: [], seenCount: 0, malformed: false };
+}
+
+export function recordHarnessObservation(
+  accumulator: HarnessObservationAccumulatorV1,
+  observation: Omit<HarnessObservationDraftV1, 'observedAt'>,
+  observedAt?: string,
+): void {
+  if (accumulator.malformed) return;
+  try {
+    if (!ACTION_CLASSES.has(observation.actionClass) || !OUTCOMES.has(observation.outcome)) {
+      throw new Error('invalid harness observation metadata');
+    }
+    const candidateObservedAt = observedAt ?? new Date().toISOString();
+    if (!canonicalTimestamp(candidateObservedAt)) {
+      throw new Error('invalid harness observation timestamp');
+    }
+    if (accumulator.seenCount >= Number.MAX_SAFE_INTEGER) {
+      throw new Error('harness observation count exceeds safe integer range');
+    }
+    const previousMs = accumulator.lastObservedAt === undefined
+      ? Number.NEGATIVE_INFINITY
+      : Date.parse(accumulator.lastObservedAt);
+    const clampedObservedAt = new Date(Math.max(previousMs, Date.parse(candidateObservedAt))).toISOString();
+    const draft: HarnessObservationDraftV1 = { ...observation, observedAt: clampedObservedAt };
+    accumulator.seenCount += 1;
+    accumulator.lastObservedAt = clampedObservedAt;
+
+    if (accumulator.drafts.length < MAX_HARNESS_OBSERVATIONS) {
+      accumulator.drafts.push(draft);
+      return;
+    }
+    const headCount = Math.floor(MAX_HARNESS_OBSERVATIONS / 2);
+    if (accumulator.seenCount === MAX_HARNESS_OBSERVATIONS + 1) {
+      const tail = accumulator.drafts.slice(-(MAX_HARNESS_OBSERVATIONS - headCount - 1));
+      accumulator.drafts.splice(headCount, accumulator.drafts.length - headCount, ...tail, draft);
+      return;
+    }
+    accumulator.drafts.splice(headCount, 1);
+    accumulator.drafts.push(draft);
+  } catch {
+    accumulator.malformed = true;
+    accumulator.drafts = [];
+    delete accumulator.lastObservedAt;
+  }
+}
+
+export function finalizeHarnessObservations(
+  runId: string,
+  accumulator: HarnessObservationAccumulatorV1,
+): HarnessObservationCollectionV1 | undefined {
+  if (
+    accumulator.malformed ||
+    accumulator.seenCount < 1 ||
+    accumulator.drafts.length !== Math.min(accumulator.seenCount, MAX_HARNESS_OBSERVATIONS)
+  ) {
+    return undefined;
+  }
+  try {
+    const observations = defineHarnessObservations(
+      harnessObservationSubjectRef(runId),
+      accumulator.drafts,
+    );
+    const truncated = accumulator.seenCount > observations.length;
+    return {
+      observations,
+      retainedCount: observations.length,
+      truncated,
+      countIsLowerBound: truncated,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 export function aggregateHarnessObservations(
   finalRunId: string,
   attempts: readonly HarnessObservationAttemptV1[],
-): HarnessObservationV1[] | undefined {
-  const finalSubjectRef = harnessObservationSubjectRef(finalRunId);
-  const ordered: Array<HarnessObservationDraftV1 & { attemptIndex: number; sourceOrdinal: number }> = [];
+): HarnessObservationCollectionV1 | undefined {
+  let finalSubjectRef: string;
+  try {
+    finalSubjectRef = harnessObservationSubjectRef(finalRunId);
+  } catch {
+    return undefined;
+  }
+  const ordered: HarnessObservationDraftV1[] = [];
+  let sourceTruncated = false;
+  let previousObservedAtMs = Number.NEGATIVE_INFINITY;
   for (let attemptIndex = 0; attemptIndex < attempts.length; attemptIndex += 1) {
     const attempt = attempts[attemptIndex]!;
-    if (attempt.observations === undefined) continue;
+    if (Object.prototype.hasOwnProperty.call(attempt, 'totalCount')) return undefined;
+    if (attempt.observations === undefined) {
+      if (
+        attempt.retainedCount === undefined &&
+        attempt.truncated === undefined &&
+        attempt.countIsLowerBound === undefined
+      ) continue;
+      return undefined;
+    }
     let sourceSubjectRef: string;
     try {
       sourceSubjectRef = harnessObservationSubjectRef(attempt.runId);
@@ -176,32 +284,49 @@ export function aggregateHarnessObservations(
     }
     const accepted = sanitizeHarnessObservations(attempt.observations, sourceSubjectRef);
     if (!accepted) return undefined;
+    const attemptRetainedCount = attempt.retainedCount ?? accepted.length;
+    const attemptTruncated = attempt.truncated ?? accepted.length === MAX_HARNESS_OBSERVATIONS;
+    const attemptCountIsLowerBound = attempt.countIsLowerBound ?? attemptTruncated;
+    if (
+      !Number.isSafeInteger(attemptRetainedCount) ||
+      attemptRetainedCount !== accepted.length ||
+      typeof attemptTruncated !== 'boolean' ||
+      attemptCountIsLowerBound !== attemptTruncated ||
+      (attemptTruncated && accepted.length !== MAX_HARNESS_OBSERVATIONS)
+    ) return undefined;
+    sourceTruncated ||= attemptTruncated;
     for (const observation of accepted) {
+      previousObservedAtMs = Math.max(previousObservedAtMs, Date.parse(observation.observedAt));
       ordered.push({
         actionClass: observation.actionClass,
         outcome: observation.outcome,
-        observedAt: observation.observedAt,
-        attemptIndex,
-        sourceOrdinal: observation.ordinal,
+        observedAt: new Date(previousObservedAtMs).toISOString(),
       });
     }
   }
   if (ordered.length === 0) return undefined;
-  ordered.sort((left, right) =>
-    Date.parse(left.observedAt) - Date.parse(right.observedAt) ||
-    left.attemptIndex - right.attemptIndex ||
-    left.sourceOrdinal - right.sourceOrdinal);
   const selected = ordered.length <= MAX_HARNESS_OBSERVATIONS
     ? ordered
     : [
         ...ordered.slice(0, Math.floor(MAX_HARNESS_OBSERVATIONS / 2)),
         ...ordered.slice(-Math.ceil(MAX_HARNESS_OBSERVATIONS / 2)),
       ];
-  return defineHarnessObservations(finalSubjectRef, selected.map((observation) => ({
-    actionClass: observation.actionClass,
-    outcome: observation.outcome,
-    observedAt: observation.observedAt,
-  })));
+  try {
+    const observations = defineHarnessObservations(finalSubjectRef, selected.map((observation) => ({
+      actionClass: observation.actionClass,
+      outcome: observation.outcome,
+      observedAt: observation.observedAt,
+    })));
+    const truncated = sourceTruncated || ordered.length > observations.length;
+    return {
+      observations,
+      retainedCount: observations.length,
+      truncated,
+      countIsLowerBound: truncated,
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 export function projectHarnessObservationSequence(
