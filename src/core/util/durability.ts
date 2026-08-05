@@ -16,10 +16,15 @@ export interface DirectoryDurabilityFs {
   closeSync(fd: number): void;
 }
 
+export interface DirectoryIdentity {
+  dev: bigint;
+  ino: bigint;
+}
+
 export interface DirectoryDurabilityOptions {
   platform?: NodeJS.Platform;
   fs?: DirectoryDurabilityFs;
-  expectedIdentity?: { dev: bigint; ino: bigint };
+  expectedIdentity?: DirectoryIdentity;
   beforeFsync?: () => void;
 }
 

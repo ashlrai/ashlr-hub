@@ -176,6 +176,30 @@ describe('M373 directory durability', () => {
     expect(fs.closeSync).toHaveBeenCalledWith(41);
   });
 
+  it('preserves an exact caller identity above Number.MAX_SAFE_INTEGER', () => {
+    const preciseIdentity = 2n ** 54n + 1n;
+    const preciseStat = new Proxy(namedStat, {
+      get(target, property, receiver) {
+        if (property === 'dev') return preciseIdentity;
+        if (property === 'ino') return preciseIdentity + 2n;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const fs = fakeFs({
+      lstatSync: vi.fn(() => preciseStat),
+      fstatSync: vi.fn(() => preciseStat),
+    });
+
+    fsyncDirectory(directory, {
+      platform: 'linux',
+      fs,
+      expectedIdentity: { dev: preciseIdentity, ino: preciseIdentity + 2n },
+    });
+
+    expect(fs.fsyncSync).toHaveBeenCalledWith(41);
+    expect(fs.closeSync).toHaveBeenCalledWith(41);
+  });
+
   it('rejects a non-directory named path before attempting descriptor operations', () => {
     const file = join(root, 'not-a-directory');
     writeFileSync(file, 'fixture');

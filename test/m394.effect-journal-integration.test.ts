@@ -92,7 +92,10 @@ describe.skipIf(process.platform === 'win32')('agent-loop effect authority integ
         taskId: 'task-1', ordinal: 1, toolName: 'edit_file', toolCallId: process.pid.toString(),
         arguments: { path: 'x', old_string: 'a', new_string: 'b' }, safety: 'write',
       });
-      process.stdout.write(JSON.stringify(result));
+      process.stdout.write(JSON.stringify(
+        result,
+        (_key, value) => typeof value === 'bigint' ? value.toString(10) : value,
+      ));
     `;
     const runChild = (): Promise<Record<string, unknown>> => new Promise((resolve, reject) => {
       const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '--eval', source], {
@@ -133,7 +136,10 @@ describe.skipIf(process.platform === 'win32')('agent-loop effect authority integ
         safety: 'proposal',
       });
       if (result.ok) fs.appendFileSync(process.env.EFFECT_MARKER, 'happened\n');
-      process.stdout.write(JSON.stringify(result));
+      process.stdout.write(JSON.stringify(
+        result,
+        (_key, value) => typeof value === 'bigint' ? value.toString(10) : value,
+      ));
     `;
     const child = spawnSync(
       process.execPath,

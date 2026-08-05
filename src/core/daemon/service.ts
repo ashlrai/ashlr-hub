@@ -19,7 +19,7 @@ import * as fs from 'node:fs';
 import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { buildToolPath } from '../run/tool-path.js';
-import { fsyncDirectory } from '../util/durability.js';
+import { fsyncDirectory, type DirectoryIdentity } from '../util/durability.js';
 import {
   installLaunchdPlistTransaction,
   removeLaunchdPlistTransaction,
@@ -1172,12 +1172,9 @@ function inspectSafePathLeaf(
     : undefined;
 }
 
-function fsyncDirectoryFor(filePath: string, expected: Pick<fs.Stats, 'dev' | 'ino'>): void {
+function fsyncDirectoryFor(filePath: string, expected: DirectoryIdentity): void {
   fsyncDirectory(path.dirname(filePath), {
-    expectedIdentity: {
-      dev: BigInt(expected.dev),
-      ino: BigInt(expected.ino),
-    },
+    expectedIdentity: { dev: expected.dev, ino: expected.ino },
   });
 }
 
@@ -1215,8 +1212,8 @@ function archiveLegacyWindowsLauncher(home: string, destinationDir: string, expe
       }
       validateLegacyWindowsLauncher(home, legacy, 'legacy Windows launcher');
       if (archivedStat) throw new Error(`legacy Windows launcher archive already exists at ${archived}`);
-      const legacyParent = fs.lstatSync(path.dirname(legacy));
-      const archivedParent = fs.lstatSync(path.dirname(archived));
+      const legacyParent = fs.lstatSync(path.dirname(legacy), { bigint: true });
+      const archivedParent = fs.lstatSync(path.dirname(archived), { bigint: true });
       fs.renameSync(legacy, archived);
       fsyncDirectoryFor(legacy, legacyParent);
       fsyncDirectoryFor(archived, archivedParent);
@@ -1244,8 +1241,8 @@ function restoreLegacyWindowsLauncher(home: string, destinationDir: string, expe
     if (!archivedStat) throw new Error('archived legacy Windows launcher is missing during recovery');
     assertSafePathParents(home, legacy, 'legacy Windows launcher');
     validateLegacyWindowsLauncher(home, archived, 'archived legacy Windows launcher');
-    const archivedParent = fs.lstatSync(path.dirname(archived));
-    const legacyParent = fs.lstatSync(path.dirname(legacy));
+    const archivedParent = fs.lstatSync(path.dirname(archived), { bigint: true });
+    const legacyParent = fs.lstatSync(path.dirname(legacy), { bigint: true });
     fs.renameSync(archived, legacy);
     fsyncDirectoryFor(archived, archivedParent);
     fsyncDirectoryFor(legacy, legacyParent);
