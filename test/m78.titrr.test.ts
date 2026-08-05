@@ -1052,7 +1052,12 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
     { engine: 'local-coder' as const, label: 'API-model' },
   ])('$label required-diff run retries one known-empty attempt before testing', async ({ engine }) => {
     engineMockFn
-      .mockResolvedValueOnce({ state: makeKnownDiffState(0) })
+      .mockResolvedValueOnce({
+        state: makeKnownDiffState(0),
+        ...(engine === 'local-coder'
+          ? { retryEvidence: { mutatingToolActions: 1 } }
+          : {}),
+      })
       .mockResolvedValueOnce({ state: makeKnownDiffState(1) });
     detectVCMockFn.mockReturnValue([{ kind: 'test', cmd: ['npm', 'test'] }]);
     runVCMockFn.mockReturnValue({
@@ -1102,7 +1107,12 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
     { engine: 'claude' as const, label: 'CLI' },
     { engine: 'local-coder' as const, label: 'API-model' },
   ])('$label required-diff run captures once after two empty attempts', async ({ engine }) => {
-    engineMockFn.mockResolvedValue({ state: makeKnownDiffState(0) });
+    engineMockFn.mockResolvedValue({
+      state: makeKnownDiffState(0),
+      ...(engine === 'local-coder'
+        ? { retryEvidence: { mutatingToolActions: 1 } }
+        : {}),
+    });
 
     const runGoal = await loadRunGoal();
     const state = await runGoal('fix a bug', sandboxCfg(), {
@@ -1122,6 +1132,86 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
     expect(runVCMockFn).not.toHaveBeenCalled();
     expect(captureMockFn).toHaveBeenCalledTimes(1);
     expect(state.usage).toEqual({ tokensIn: 2, tokensOut: 2, steps: 2, estCostUsd: 0 });
+    expect(removeSandboxMockFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('API-model inspection-only empty diff does not spend a second TITRR attempt', async () => {
+    const inspected = makeKnownDiffState(0);
+    inspected.runEventSummary = {
+      ...inspected.runEventSummary,
+      durationMs: 76_321,
+      actionCounts: {
+        ...inspected.runEventSummary?.actionCounts,
+        modelSteps: 5,
+        toolSteps: 4,
+        totalSteps: 9,
+      },
+    };
+    engineMockFn.mockResolvedValue({
+      state: inspected,
+      retryEvidence: { mutatingToolActions: 0 },
+    });
+
+    const runGoal = await loadRunGoal();
+    const state = await runGoal('fix a bug', sandboxCfg(), {
+      engine: 'local-coder',
+      sandboxEngine: true,
+      budget: { maxTokens: 1_000_000, maxSteps: 100 },
+      tools: false,
+      titrrMaxAttempts: 2,
+      delegationScope: {
+        origin: 'daemon',
+        sourceRepo: '/mock/repo',
+        resultContract: { kind: 'proposal', requireDiff: true, requireProposal: true },
+      },
+    } as Parameters<typeof runGoal>[2] & { titrrMaxAttempts: number });
+
+    expect(engineMockFn).toHaveBeenCalledTimes(1);
+    expect(runVCMockFn).not.toHaveBeenCalled();
+    expect(captureMockFn).toHaveBeenCalledTimes(1);
+    expect(state.runEventSummary?.durationMs).toBe(76_321);
+    expect(JSON.stringify(state.runEventSummary)).not.toContain('fix a bug');
+    expect(removeSandboxMockFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('API-model unknown diff evidence never authorizes a TITRR capture-repair retry', async () => {
+    const unknownDiffState = makeRunState({ status: 'done', result: 'claimed completion without diff metadata' });
+    engineMockFn.mockResolvedValue({
+      state: unknownDiffState,
+      retryEvidence: { mutatingToolActions: 1 },
+    });
+    captureMockFn.mockResolvedValueOnce({
+      state: {
+        ...makeRunState({ status: 'done' }),
+        id: unknownDiffState.id,
+        proposalOutcome: {
+          kind: 'completeness-gate' as const,
+          reason: 'capture could not establish a complete material diff',
+        },
+      },
+      proposalOutcome: {
+        kind: 'completeness-gate' as const,
+        reason: 'capture could not establish a complete material diff',
+      },
+    });
+    detectVCMockFn.mockReturnValue([]);
+
+    const runGoal = await loadRunGoal();
+    await runGoal('fix a bug', sandboxCfg(), {
+      engine: 'local-coder',
+      sandboxEngine: true,
+      budget: { maxTokens: 1_000_000, maxSteps: 100 },
+      tools: false,
+      titrrMaxAttempts: 2,
+      delegationScope: {
+        origin: 'daemon',
+        sourceRepo: '/mock/repo',
+        resultContract: { kind: 'proposal', requireDiff: false, requireProposal: true },
+      },
+    } as Parameters<typeof runGoal>[2] & { titrrMaxAttempts: number });
+
+    expect(engineMockFn).toHaveBeenCalledTimes(1);
+    expect(captureMockFn).toHaveBeenCalledTimes(1);
     expect(removeSandboxMockFn).toHaveBeenCalledTimes(1);
   });
 

@@ -961,7 +961,9 @@ function failedCaptureOutcome(
   };
 }
 
-function runStateHasKnownEmptyDiff(state: RunState): boolean {
+type RunStateDiffEvidence = 'empty' | 'nonempty' | 'unknown';
+
+function runStateDiffEvidence(state: RunState): RunStateDiffEvidence {
   const summary = state.runEventSummary;
   const counts = summary?.actionCounts;
   const observed = [
@@ -973,8 +975,14 @@ function runStateHasKnownEmptyDiff(state: RunState): boolean {
     state.proposalOutcome?.insertions,
     state.proposalOutcome?.deletions,
   ].filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
-  if (observed.length === 0) return state.proposalOutcome?.kind === 'empty-diff';
-  return observed.every((value) => value <= 0);
+  if (observed.length === 0) {
+    return state.proposalOutcome?.kind === 'empty-diff' ? 'empty' : 'unknown';
+  }
+  return observed.every((value) => value <= 0) ? 'empty' : 'nonempty';
+}
+
+function runStateHasKnownEmptyDiff(state: RunState): boolean {
+  return runStateDiffEvidence(state) === 'empty';
 }
 
 function requiredDiffRetryGoal(goal: string, attempt: number, maxAttempts: number): string {
@@ -1003,9 +1011,16 @@ function proposalCaptureRepairGoal(
 function proposalCaptureNeedsRepair(
   outcome: RunProposalOutcome | undefined,
   proposalRequired: boolean,
+  evidence?: { mutatingToolActions: number; diffEvidence: RunStateDiffEvidence },
 ): outcome is RunProposalOutcome {
   if (!proposalRequired || !outcome || outcome.proposalId) return false;
-  return outcome.kind === 'empty-diff' || outcome.kind === 'completeness-gate';
+  if (evidence && evidence.diffEvidence !== 'nonempty') return false;
+  if (outcome.kind === 'completeness-gate') return true;
+  if (outcome.kind !== 'empty-diff') return false;
+  // Existing CLI-agent behavior is unchanged. API-model callers supply
+  // affirmative in-memory evidence so inspection-only empty runs cannot spend
+  // another full prompt on a speculative retry.
+  return evidence === undefined || evidence.mutatingToolActions > 0 || evidence.diffEvidence === 'nonempty';
 }
 
 function resolveTitrrBudget(budget: Partial<RunBudget> | undefined, allowCloud: boolean | undefined): RunBudget {
@@ -2213,6 +2228,7 @@ async function runGoalInternal(
 
           const { captureSandboxedProposal, recordSandboxedRunAgentAction, runApiModelSandboxed } = await import('./sandboxed-engine.js');
           const titrrMax = Math.max(1, (opts as RunOptions & { titrrMaxAttempts?: number }).titrrMaxAttempts ?? TITRR_MAX_ATTEMPTS);
+          const tokenEfficientApiModel = engineId === 'local-coder';
 
           const wtMod = await import('../sandbox/worktree.js');
           let titrrSandbox: Sandbox | null = null;
@@ -2350,7 +2366,9 @@ async function runGoalInternal(
                     titrrUsage,
                     titrrBudget,
                   );
-                  if (isLastAttempt || retryBudgetExceeded) {
+                  const retryHasExecutionEvidence =
+                    !tokenEfficientApiModel || (rawApiR.retryEvidence?.mutatingToolActions ?? 0) > 0;
+                  if (isLastAttempt || retryBudgetExceeded || !retryHasExecutionEvidence) {
                     const propR = await captureApiProposal(apiR.state, {
                       sourceRepo: cwd,
                       model: modelEnv,
@@ -2433,7 +2451,16 @@ async function runGoalInternal(
                     ),
                   };
                   if (
-                    proposalCaptureNeedsRepair(propR.proposalOutcome, proposalRequired) &&
+                    proposalCaptureNeedsRepair(
+                      propR.proposalOutcome,
+                      proposalRequired,
+                      tokenEfficientApiModel
+                        ? {
+                            mutatingToolActions: rawApiR.retryEvidence?.mutatingToolActions ?? 0,
+                            diffEvidence: runStateDiffEvidence(apiR.state),
+                          }
+                        : undefined,
+                    ) &&
                     !isLastAttempt &&
                     !overBudget(titrrUsage, titrrBudget)
                   ) {

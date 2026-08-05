@@ -453,15 +453,16 @@ export function buildRepoMap(repoDir: string, opts?: RepoMapOptions): RepoMap {
 export function renderRepoMap(map: RepoMap, opts?: RepoMapOptions): string {
   const budget = (opts?.tokenBudget ?? 8_000) * 4; // chars
   const lines: string[] = ['<!-- repo-map (M154) -->'];
-  let chars = lines[0].length + 1;
+  let chars = lines[0].length;
 
   for (const file of map.files) {
     const header = `# ${file.path}  (refs: ${file.refCount})`;
     const symLines = file.symbols.map((s) => `  ${s.sig}`);
     const block = [header, ...symLines, ''].join('\n');
-    if (chars + block.length > budget) break;
+    const addition = 1 + block.length; // join separator plus block content
+    if (chars + addition > budget) break;
     lines.push(block);
-    chars += block.length;
+    chars += addition;
   }
 
   return lines.join('\n');

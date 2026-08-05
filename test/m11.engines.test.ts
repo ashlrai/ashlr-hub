@@ -16,7 +16,21 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AshlrConfig, EngineCommand } from '../src/core/types.js';
+import type {
+  AshlrConfig,
+  ChatMessage,
+  EngineCommand,
+  ProviderClient,
+  RunContextSummary,
+  RunTask,
+} from '../src/core/types.js';
+import {
+  classifyToolFreeResponse,
+  LOCAL_API_MODEL_INITIAL_PROMPT_TOKEN_CAP,
+  runTask,
+} from '../src/core/run/agent-loop.js';
+import { newUsage } from '../src/core/run/budget.js';
+import { serializeOpenAICompatibleWireRequest } from '../src/core/run/provider-client.js';
 
 // ---------------------------------------------------------------------------
 // We mock child_process so no real engine is ever spawned.
@@ -1133,5 +1147,318 @@ describe('engineInstalled', () => {
     for (const e of engines) {
       expect(() => engineInstalled(e)).not.toThrow();
     }
+  });
+});
+
+describe('local API-model prompt efficiency', () => {
+  function task(goal: string): RunTask {
+    return { id: 'token-efficient-task', goal, deps: [], status: 'pending' };
+  }
+
+  function clientWith(contents: string[], observed: ChatMessage[][]): ProviderClient {
+    let index = 0;
+    return {
+      id: 'local-test',
+      model: 'qwen2.5-coder:32b',
+      supportsTools: false,
+      chat: vi.fn(async (messages: ChatMessage[]) => {
+        observed.push(messages.map((message) => ({ ...message })));
+        return {
+          content: contents[index++] ?? contents.at(-1) ?? '',
+          usage: { tokensIn: 321, tokensOut: 12 },
+        };
+      }),
+    };
+  }
+
+  it('caps the complete initial prompt and records metadata-only component estimates', async () => {
+    const rawNeedle = 'github_pat_raw_prompt_text_must_not_persist';
+    const observed: ChatMessage[][] = [];
+    const summaries: RunContextSummary[] = [];
+    const goal = `BEGIN_ESSENTIAL_OBJECTIVE\n${'essential objective '.repeat(100)}${rawNeedle}\nEND_ESSENTIAL_OBJECTIVE`;
+    const run = task(goal);
+
+    await runTask(run, clientWith(['Completed.'], observed), {
+      budget: { maxTokens: 100_000, maxSteps: 10, allowCloud: false },
+      usage: newUsage(),
+      onStep: () => {},
+      continuationPolicy: { maxCorrectiveNudges: 1 },
+      systemPrefix: `local context ${rawNeedle} `.repeat(1_000),
+      initialPromptBudget: {
+        tokenCap: LOCAL_API_MODEL_INITIAL_PROMPT_TOKEN_CAP,
+        userPrefix: `repo map ${rawNeedle} `.repeat(1_000),
+        onSummary: (summary) => summaries.push(summary),
+      },
+    });
+
+    const firstRequestChars = JSON.stringify({ messages: observed[0] }).length;
+    const summary = summaries.at(-1)!;
+    expect(firstRequestChars).toBeLessThanOrEqual(LOCAL_API_MODEL_INITIAL_PROMPT_TOKEN_CAP * 4);
+    expect(observed[0]!.find((message) => message.role === 'user')?.content.endsWith(goal)).toBe(true);
+    expect(observed[0]!.find((message) => message.role === 'user')?.content).toContain('BEGIN_ESSENTIAL_OBJECTIVE');
+    expect(observed[0]!.find((message) => message.role === 'user')?.content).toContain('END_ESSENTIAL_OBJECTIVE');
+    expect(summary.prompt).toMatchObject({
+      profileId: 'local-api-model-bounded-v1',
+      estimatedPromptTokens: expect.any(Number),
+      providerPromptTokens: 321,
+      promptCharCap: LOCAL_API_MODEL_INITIAL_PROMPT_TOKEN_CAP * 4,
+    });
+    expect(summary.prompt!.estimatedPromptTokens).toBeLessThanOrEqual(LOCAL_API_MODEL_INITIAL_PROMPT_TOKEN_CAP);
+    expect(summary.compression).toMatchObject({ truncated: true, maxChars: 10_000, strategy: 'drop-layer' });
+    expect(JSON.stringify(summary)).not.toContain(rawNeedle);
+  });
+
+  it('accounts for serialized tool schemas and bounds every later local request', async () => {
+    const observed: Array<{ messages: ChatMessage[]; tools?: unknown[] }> = [];
+    let call = 0;
+    const client: ProviderClient = {
+      id: 'local-budget-test',
+      model: 'qwen2.5-coder:32b',
+      supportsTools: true,
+      chat: vi.fn(async (messages: ChatMessage[], tools?: unknown[]) => {
+        observed.push({ messages: messages.map((message) => ({ ...message })), tools });
+        return call++ === 0
+          ? {
+              content: '',
+              toolCalls: [{ id: 'read-1', name: 'read_file', arguments: { path: 'src/index.ts' } }],
+              usage: { tokensIn: 100, tokensOut: 5 },
+            }
+          : { content: 'Implemented and verified.', usage: { tokensIn: 100, tokensOut: 5 } };
+      }),
+    };
+    const tools = [{
+      name: 'read_file',
+      safety: 'read',
+      description: 'Read one repository file. '.repeat(100),
+      parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+      fn: vi.fn(async () => 'complete tool section\n\n'.repeat(2_000)),
+    }];
+    const goal = 'BEGIN_OBJECTIVE fix src/index.ts without changing behavior END_OBJECTIVE';
+    const run = task(goal);
+    const requestSizer = (messages: ChatMessage[], requestTools: unknown[] | undefined): number => Math.max(
+      serializeOpenAICompatibleWireRequest({
+        model: client.model!,
+        messages,
+        stream: true,
+        supportsTools: true,
+        tools: requestTools,
+      }).length,
+      serializeOpenAICompatibleWireRequest({
+        model: client.model!,
+        messages,
+        stream: false,
+        supportsTools: true,
+        tools: requestTools,
+      }).length,
+    );
+
+    await runTask(run, client, {
+      tools,
+      budget: { maxTokens: 100_000, maxSteps: 10, allowCloud: false },
+      usage: newUsage(),
+      onStep: () => {},
+      initialPromptBudget: {
+        tokenCap: LOCAL_API_MODEL_INITIAL_PROMPT_TOKEN_CAP,
+        requestSizer,
+      },
+      continuationPolicy: { maxCorrectiveNudges: 1 },
+    });
+
+    expect(run.status).toBe('done');
+    expect(observed).toHaveLength(2);
+    for (const request of observed) {
+      expect(requestSizer(request.messages, request.tools)).toBeLessThanOrEqual(
+        LOCAL_API_MODEL_INITIAL_PROMPT_TOKEN_CAP * 4,
+      );
+      expect(request.messages[1]?.content).toBe(goal);
+    }
+    expect(requestSizer(observed[1]!.messages, observed[1]!.tools)).toBeGreaterThan(9_900);
+    expect(observed[1]!.messages.some((message) => message.content.includes('[optional context omitted]'))).toBe(true);
+  });
+
+  it('fails before calling the model when the immutable objective cannot fit', async () => {
+    const observed: ChatMessage[][] = [];
+    const run = task(`BEGIN_ESSENTIAL_OBJECTIVE ${'required '.repeat(2_000)} END_ESSENTIAL_OBJECTIVE`);
+
+    await runTask(run, clientWith(['must not run'], observed), {
+      budget: { maxTokens: 100_000, maxSteps: 10, allowCloud: false },
+      usage: newUsage(),
+      onStep: () => {},
+      initialPromptBudget: { tokenCap: 256 },
+      continuationPolicy: { maxCorrectiveNudges: 1 },
+    });
+
+    expect(observed).toHaveLength(0);
+    expect(run.status).toBe('failed');
+    expect(run.error).toMatch(/objective and tool schemas exceed/);
+  });
+
+  it('allows one corrective nudge for continuation intent and then completes', async () => {
+    const observed: ChatMessage[][] = [];
+    const run = task('fix the issue');
+    await runTask(run, clientWith(["I'll inspect the file next.", 'Implemented and verified the fix.'], observed), {
+      budget: { maxTokens: 100_000, maxSteps: 10, allowCloud: false },
+      usage: newUsage(),
+      onStep: () => {},
+      continuationPolicy: { maxCorrectiveNudges: 1 },
+    });
+
+    expect(classifyToolFreeResponse("I'll inspect the file next.")).toBe('continuation-intent');
+    expect(observed).toHaveLength(2);
+    expect(observed[1]!.at(-1)?.content).toMatch(/Complete the next action now/);
+    expect(run.status).toBe('done');
+    expect(run.result).toBe('Implemented and verified the fix.');
+  });
+
+  it('fails boundedly after a second continuation-intent response', async () => {
+    const observed: ChatMessage[][] = [];
+    const run = task('fix the issue');
+    await runTask(run, clientWith(["I'll inspect the file next.", 'Now I will run the tests.'], observed), {
+      budget: { maxTokens: 100_000, maxSteps: 10, allowCloud: false },
+      usage: newUsage(),
+      onStep: () => {},
+      continuationPolicy: { maxCorrectiveNudges: 1 },
+    });
+
+    expect(observed).toHaveLength(2);
+    expect(run.status).toBe('failed');
+    expect(run.error).toMatch(/continuation intent twice/);
+    expect(run.result).toBeUndefined();
+  });
+
+  it('fails after one corrective nudge for repeated empty responses', async () => {
+    const observed: ChatMessage[][] = [];
+    const run = task('fix the issue');
+    await runTask(run, clientWith(['', ''], observed), {
+      budget: { maxTokens: 100_000, maxSteps: 32, allowCloud: false },
+      usage: newUsage(),
+      onStep: () => {},
+      continuationPolicy: { maxCorrectiveNudges: 1 },
+    });
+
+    expect(observed).toHaveLength(2);
+    expect(run.status).toBe('failed');
+    expect(run.error).toMatch(/empty response twice/);
+  });
+
+  it('accepts completed work even when the final sentence mentions future review', async () => {
+    const content = "Implemented the requested fix and all tests pass. I'll review the rollout next.";
+    const observed: ChatMessage[][] = [];
+    const run = task('fix the issue');
+    await runTask(run, clientWith([content], observed), {
+      budget: { maxTokens: 100_000, maxSteps: 10, allowCloud: false },
+      usage: newUsage(),
+      onStep: () => {},
+      continuationPolicy: { maxCorrectiveNudges: 1 },
+    });
+
+    expect(classifyToolFreeResponse(content)).toBe('complete');
+    expect(observed).toHaveLength(1);
+    expect(run.status).toBe('done');
+    expect(run.result).toBe(content);
+  });
+
+  it.each([
+    'Implemented the requested fix and all tests pass.\n\nI\'ll review the rollout next.',
+    'We fixed the issue and tests passed.\n\nNow I will review the rollout.',
+  ])('accepts paragraph-separated completion evidence before future review: %s', async (content) => {
+    const observed: ChatMessage[][] = [];
+    const run = task('fix the issue');
+    await runTask(run, clientWith([content], observed), {
+      budget: { maxTokens: 100_000, maxSteps: 10, allowCloud: false },
+      usage: newUsage(),
+      onStep: () => {},
+      continuationPolicy: { maxCorrectiveNudges: 1 },
+    });
+
+    expect(classifyToolFreeResponse(content)).toBe('complete');
+    expect(observed).toHaveLength(1);
+    expect(run.status).toBe('done');
+    expect(run.result).toBe(content);
+  });
+
+  it('classifies paragraph-separated future actions when the whole response is only intent', () => {
+    expect(classifyToolFreeResponse("I'll inspect the file.\n\nNow I will run the tests.")).toBe(
+      'continuation-intent',
+    );
+  });
+
+  it('bounds long responses made entirely of future-action narration', async () => {
+    const content = Array.from(
+      { length: 60 },
+      (_, index) => index % 2 === 0 ? "I'll inspect the file." : 'Now I will run the tests.',
+    ).join('\n\n');
+    const observed: ChatMessage[][] = [];
+    const run = task('fix the issue');
+
+    await runTask(run, clientWith([content, content], observed), {
+      budget: { maxTokens: 100_000, maxSteps: 10, allowCloud: false },
+      usage: newUsage(),
+      onStep: () => {},
+      continuationPolicy: { maxCorrectiveNudges: 1 },
+    });
+
+    expect(content.length).toBeGreaterThan(1_000);
+    expect(classifyToolFreeResponse(content)).toBe('continuation-intent');
+    expect(observed).toHaveLength(2);
+    expect(run.status).toBe('failed');
+    expect(run.error).toContain('continuation intent twice');
+  });
+
+  it('emits affirmative metadata only after a mutating tool effect commits', async () => {
+    withTempHome();
+    const effects: Array<{ kind: string; safety: string }> = [];
+    let call = 0;
+    const client: ProviderClient = {
+      id: 'local-tool-test',
+      supportsTools: true,
+      chat: vi.fn(async () => call++ === 0
+        ? {
+            content: '',
+            toolCalls: [{ id: 'write-1', name: 'write_file', arguments: { path: 'x.ts' } }],
+            usage: { tokensIn: 10, tokensOut: 5 },
+          }
+        : {
+            content: 'Implemented and verified.',
+            usage: { tokensIn: 10, tokensOut: 5 },
+          }),
+    };
+    const run = task('make one edit');
+    await runTask(run, client, {
+      tools: [{ name: 'write_file', safety: 'write', fn: vi.fn(async () => 'write complete') }],
+      budget: { maxTokens: 100_000, maxSteps: 10, allowCloud: false },
+      usage: newUsage(),
+      onStep: () => {},
+      effectJournal: { scopeId: 'token-efficiency-test', generation: 'generation-1' },
+      onToolEffect: (effect) => effects.push(effect),
+    });
+
+    expect(run.status).toBe('done');
+    expect(effects).toEqual([{ kind: 'mutating', safety: 'write' }]);
+    expect(JSON.stringify(effects)).not.toContain('x.ts');
+  });
+
+  it('does not cap callers that do not opt into the local API-model budget', async () => {
+    const observed: ChatMessage[][] = [];
+    const longGoal = 'frontier goal '.repeat(1_000);
+    await runTask(task(longGoal), clientWith(['Completed.'], observed), {
+      budget: { maxTokens: 100_000, maxSteps: 10, allowCloud: true },
+      usage: newUsage(),
+      onStep: () => {},
+    });
+    expect(observed[0]!.find((message) => message.role === 'user')?.content).toBe(longGoal);
+  });
+
+  it('preserves legacy tool-free completion for callers without the local continuation policy', async () => {
+    const observed: ChatMessage[][] = [];
+    const run = task('inspect the issue');
+    await runTask(run, clientWith(["I'll inspect the file next."], observed), {
+      budget: { maxTokens: 100_000, maxSteps: 10, allowCloud: true },
+      usage: newUsage(),
+      onStep: () => {},
+    });
+    expect(observed).toHaveLength(1);
+    expect(run.status).toBe('done');
+    expect(run.result).toBe("I'll inspect the file next.");
   });
 });

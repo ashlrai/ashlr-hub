@@ -10,7 +10,10 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { buildOpenAICompatibleClient } from '../src/core/run/provider-client.js';
+import {
+  buildOpenAICompatibleClient,
+  serializeOpenAICompatibleWireRequest,
+} from '../src/core/run/provider-client.js';
 import type { ChatMessage } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -297,6 +300,43 @@ describe('buildOpenAICompatibleClient — request body', () => {
     const body = JSON.parse(init.body as string) as Record<string, unknown>;
     expect(body['temperature']).toBe(0.7);
   });
+
+  it('emits the exact shared wire serialization with every non-stream field', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(mockJsonResponse(openAIResponse('done')));
+    vi.stubGlobal('fetch', fetchSpy);
+    const messages: ChatMessage[] = [
+      { role: 'system', content: 'system' },
+      { role: 'user', content: 'goal' },
+      { role: 'tool', content: 'result', toolCallId: 'call-1', name: 'read_file' },
+    ];
+    const tools = [{ type: 'function', function: { name: 'read_file', parameters: { type: 'object' } } }];
+    const client = buildOpenAICompatibleClient(
+      'https://api.example.com/v1',
+      'key',
+      'local-model',
+      true,
+      0.25,
+    );
+
+    await client.chat(messages, tools);
+
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(init.body).toBe(serializeOpenAICompatibleWireRequest({
+      model: 'local-model',
+      messages,
+      stream: false,
+      supportsTools: true,
+      tools,
+      temperature: 0.25,
+    }));
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      model: 'local-model',
+      stream: false,
+      temperature: 0.25,
+      tool_choice: 'auto',
+      messages: [{ role: 'system' }, { role: 'user' }, { role: 'tool', tool_call_id: 'call-1' }],
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -342,6 +382,35 @@ describe('buildOpenAICompatibleClient — response parsing', () => {
 
     expect(result.usage.tokensIn).toBeGreaterThan(0);
     expect(result.usage.tokensOut).toBeGreaterThan(0);
+  });
+
+  it('includes serialized tool schemas in local-only fallback input accounting', async () => {
+    const noUsage = { choices: [{ message: { content: 'short reply', tool_calls: null } }] };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockJsonResponse(noUsage)));
+    const tools = [{
+      type: 'function',
+      function: {
+        name: 'read_file',
+        description: 'Read a repository file. '.repeat(100),
+        parameters: { type: 'object', properties: { path: { type: 'string' } } },
+      },
+    }];
+
+    const legacy = buildOpenAICompatibleClient('https://api.example.com/v1', 'key', 'model', true);
+    const local = buildOpenAICompatibleClient(
+      'https://api.example.com/v1',
+      'key',
+      'model',
+      true,
+      undefined,
+      undefined,
+      true,
+    );
+    const legacyResult = await legacy.chat(makeMessages(['a test message']), tools);
+    const localResult = await local.chat(makeMessages(['a test message']), tools);
+
+    expect(localResult.usage.tokensIn).toBeGreaterThan(legacyResult.usage.tokensIn);
+    expect(localResult.usage.tokensIn).toBeGreaterThan(500);
   });
 
   it('returns empty string content when message.content is null/absent', async () => {
@@ -734,5 +803,45 @@ describe('buildOpenAICompatibleClient — caller cancellation', () => {
     expect(addSpy).toHaveBeenCalledOnce();
     expect(removeSpy).toHaveBeenCalledOnce();
     expect(removeSpy.mock.calls[0]?.[1]).toBe(addSpy.mock.calls[0]?.[1]);
+  });
+
+  it('emits the exact shared wire serialization for streaming requests', async () => {
+    const chunks = [
+      new TextEncoder().encode('data: {"choices":[{"delta":{"content":"done"}}]}\n\n'),
+    ];
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      body: {
+        getReader: () => ({
+          read: vi.fn()
+            .mockResolvedValueOnce({ done: false, value: chunks[0] })
+            .mockResolvedValueOnce({ done: true }),
+          releaseLock: () => {},
+        }),
+      },
+    } as unknown as Response);
+    vi.stubGlobal('fetch', fetchSpy);
+    const messages = makeMessages(['stream goal']);
+    const tools = [{ type: 'function', function: { name: 'read_file', parameters: { type: 'object' } } }];
+    const client = buildOpenAICompatibleClient(
+      'https://api.example.com/v1',
+      'key',
+      'local-model',
+      true,
+      0.25,
+    );
+
+    await client.chatStream!(messages, tools, () => {});
+
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(init.body).toBe(serializeOpenAICompatibleWireRequest({
+      model: 'local-model',
+      messages,
+      stream: true,
+      supportsTools: true,
+      tools,
+      temperature: 0.25,
+    }));
   });
 });
