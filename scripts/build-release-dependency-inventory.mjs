@@ -562,9 +562,12 @@ export function runTrustedNpmCli(args, options = {}, runtime = {}) {
     if (observeNpmRuntimeClosure(snapshot.root) !== snapshot.snapshotClosureSha256) {
       throw new Error('npm snapshot changed before execution');
     }
+    const controlledPathKey = process.platform === 'win32' ? 'Path' : 'PATH';
+    const trustedNodeDirectory = dirname(realpathSync(launch.command));
     const environment = {
       ASHLR_NPM_SNAPSHOT_ROOT: snapshot.root,
       HOME: childHome,
+      [controlledPathKey]: trustedNodeDirectory,
       TEMP: childTemporaryRoot,
       TMP: childTemporaryRoot,
       TMPDIR: childTemporaryRoot,

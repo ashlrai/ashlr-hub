@@ -87,6 +87,8 @@ describe('shell-free npm CLI launch', () => {
         HOME: join(fixtureRoot, 'hostile-home'),
         NODE_OPTIONS: '--import=hostile',
         NPM_CONFIG_REGISTRY: 'https://hostile.invalid/',
+        PATH: join(fixtureRoot, 'hostile-path'),
+        Path: join(fixtureRoot, 'hostile-case-path'),
         npm_config_cache: join(fixtureRoot, 'hostile-cache'),
         npm_config_userconfig: hostileUserConfig,
         npm_execpath: trustedCli,
@@ -100,7 +102,15 @@ describe('shell-free npm CLI launch', () => {
     const childEnvironment = JSON.parse(result.stdout) as Record<string, string>;
     expect(childEnvironment).not.toHaveProperty('NODE_OPTIONS');
     expect(childEnvironment).not.toHaveProperty('NPM_CONFIG_REGISTRY');
-    expect(childEnvironment).not.toHaveProperty('PATH');
+    const controlledPathKey = process.platform === 'win32' ? 'Path' : 'PATH';
+    const controlledPathEntries = Object.entries(childEnvironment).filter(
+      ([key]) => key.toLowerCase() === 'path',
+    );
+    expect(controlledPathEntries).toEqual([
+      [controlledPathKey, dirname(realpathSync(process.execPath))],
+    ]);
+    expect(controlledPathEntries[0]?.[1]).not.toContain('node_modules');
+    expect(controlledPathEntries[0]?.[1]).not.toContain('hostile');
     expect(childEnvironment['HOME']).not.toBe(join(fixtureRoot, 'hostile-home'));
     expect(childEnvironment['npm_config_cache']).not.toBe(join(fixtureRoot, 'hostile-cache'));
     expect(childEnvironment['npm_config_userconfig']).not.toBe(hostileUserConfig);
