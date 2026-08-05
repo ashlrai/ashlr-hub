@@ -4327,6 +4327,29 @@ export interface DaemonDrainSummary {
   fairnessDeferred?: boolean;
 }
 
+export type DaemonWorkedOutcomeRecoveryFailureStage =
+  | 'record-claim-outcome-failed'
+  | 'dispatch-event-unavailable'
+  | 'dispatch-receipt-unavailable'
+  | 'replay-invalid'
+  | 'replay-persistence-failed'
+  | 'claim-settlement-failed';
+
+export interface DaemonWorkedOutcomeRecoverySummary {
+  /** Local ordinary outcomes whose initial coordinator write returned false. */
+  attempted: number;
+  /** Attempts certified by the canonical dispatch receipt and settled locally. */
+  recovered: number;
+  /** Attempts that remained uncertain and therefore stopped the resident loop. */
+  failed: number;
+  /** Replay appended the missing worked row. */
+  recorded: number;
+  /** Replay proved a same-outcome, same-or-newer worked row was already durable. */
+  alreadyRecorded: number;
+  /** Bounded operation-stage counts only; no errors, paths, or content. */
+  failureStages: Partial<Record<DaemonWorkedOutcomeRecoveryFailureStage, number>>;
+}
+
 export interface DaemonTick {
   /** ISO timestamp the tick ran. */
   ts: string;
@@ -4351,6 +4374,8 @@ export interface DaemonTick {
   reason: string;
   /** A treatment-only persistence failure safe for the resident loop; any later daemon persistence failure strips this flag. */
   residentSafePersistenceFailure?: 'repair-treatment';
+  /** Bounded local ordinary worked-outcome recovery evidence. */
+  workedOutcomeRecovery?: DaemonWorkedOutcomeRecoverySummary;
   /** True when this tick was produced by a dry-run/simulation path. */
   dryRun?: boolean;
   /** M48: per-backend dispatch counts this tick (e.g. {builtin:2, claude:1}). */

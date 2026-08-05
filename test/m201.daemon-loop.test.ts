@@ -398,6 +398,7 @@ import {
   type DispatchProductionEvent,
 } from '../src/core/fleet/dispatch-production-ledger.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../src/core/fleet/local-store-lock.js';
+import { LocalWorkQueueCoordinator } from '../src/core/seams/work-queue-coordinator.js';
 import { listAttemptRecords } from '../src/core/autonomy/attempt-records.js';
 import { readDispatchManifestEvents } from '../src/core/fleet/dispatch-manifest.js';
 import {
@@ -411,7 +412,11 @@ import {
   recordSkillCard,
   sanitizeSkillCard,
 } from '../src/core/fleet/skill-records.js';
-import { loadWorkedLedger, recordOutcome } from '../src/core/fleet/worked-ledger.js';
+import {
+  loadWorkedLedger,
+  recordOutcome,
+  workedLedgerPath,
+} from '../src/core/fleet/worked-ledger.js';
 import { workItemObjectiveHash } from '../src/core/fleet/work-item-objective.js';
 import { generatedRepairLifecycleAttemptHash } from '../src/core/fleet/generated-repair-identity.js';
 import { SharedStore } from '../src/core/fleet/shared-store.js';
@@ -5987,6 +5992,201 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(loadWorkedLedger().events.some((event) => event.itemId === item.id)).toBe(false);
   });
 
+  it('A1h5b-worked-recovery: certifies a durable local ordinary row after recordClaimOutcome returns false', async () => {
+    const { items } = enrollWithItems(1);
+    const item = items[0]!;
+    mockRunSwarm.mockImplementationOnce(async (_input, _cfg, opts) => ({
+      id: (opts as { runId: string }).runId,
+      status: 'done',
+      usage: { totalTokens: 100, estCostUsd: 0.001, steps: 1 },
+      proposalOutcome: {
+        kind: 'empty-diff' as const,
+        reason: 'durable worked outcome returned false',
+        files: 0,
+        insertions: 0,
+        deletions: 0,
+      },
+    }));
+    const originalRecord = LocalWorkQueueCoordinator.prototype.recordClaimOutcome;
+    const recordSpy = vi.spyOn(
+      LocalWorkQueueCoordinator.prototype,
+      'recordClaimOutcome',
+    ).mockImplementation(function (
+      this: LocalWorkQueueCoordinator,
+      claimItemId,
+      workedItemId,
+      outcome,
+      machineId,
+    ) {
+      expect(originalRecord.call(this, claimItemId, workedItemId, outcome, machineId)).toBe(true);
+      return false;
+    });
+
+    try {
+      const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: false });
+
+      expect(result.reason).toBe('ok');
+      expect(result.workedOutcomeRecovery).toEqual({
+        attempted: 1,
+        recovered: 1,
+        failed: 0,
+        recorded: 0,
+        alreadyRecorded: 1,
+        failureStages: { 'record-claim-outcome-failed': 1 },
+      });
+      expect(loadWorkedLedger().events.filter((event) => event.itemId === item.id)).toEqual([
+        expect.objectContaining({ itemId: item.id, outcome: 'empty' }),
+      ]);
+    } finally {
+      recordSpy.mockRestore();
+    }
+  });
+
+  it('A1h5b-worked-recovery-missing-receipt: missing canonical evidence remains fail-closed', async () => {
+    const { items } = enrollWithItems(1);
+    const item = items[0]!;
+    mockRunSwarm.mockImplementationOnce(async (_input, _cfg, opts) => ({
+      id: (opts as { runId: string }).runId,
+      status: 'done',
+      usage: { totalTokens: 100, estCostUsd: 0.001, steps: 1 },
+      proposalOutcome: {
+        kind: 'empty-diff' as const,
+        reason: 'missing dispatch receipt recovery fixture',
+        files: 0,
+        insertions: 0,
+        deletions: 0,
+      },
+    }));
+    const recordSpy = vi.spyOn(
+      LocalWorkQueueCoordinator.prototype,
+      'recordClaimOutcome',
+    ).mockImplementation(() => {
+      fs.rmSync(dispatchProductionDir(), { recursive: true, force: true });
+      return false;
+    });
+
+    try {
+      const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: false });
+
+      expect(result.reason).toBe('state-persistence-failed');
+      expect(result.workedOutcomeRecovery).toEqual({
+        attempted: 1,
+        recovered: 0,
+        failed: 1,
+        recorded: 0,
+        alreadyRecorded: 0,
+        failureStages: {
+          'record-claim-outcome-failed': 1,
+          'dispatch-receipt-unavailable': 1,
+        },
+      });
+      expect(loadWorkedLedger().events.some((event) => event.itemId === item.id)).toBe(false);
+    } finally {
+      recordSpy.mockRestore();
+    }
+  });
+
+  it('A1h5b-worked-recovery-persistence: replay persistence uncertainty still stops resident mode', async () => {
+    enrollWithItems(1);
+    mockRunSwarm.mockImplementationOnce(async (_input, _cfg, opts) => ({
+      id: (opts as { runId: string }).runId,
+      status: 'done',
+      usage: { totalTokens: 100, estCostUsd: 0.001, steps: 1 },
+      proposalOutcome: {
+        kind: 'empty-diff' as const,
+        reason: 'worked replay persistence failure fixture',
+        files: 0,
+        insertions: 0,
+        deletions: 0,
+      },
+    }));
+    const recordSpy = vi.spyOn(
+      LocalWorkQueueCoordinator.prototype,
+      'recordClaimOutcome',
+    ).mockImplementation(() => {
+      fs.mkdirSync(workedLedgerPath(), { recursive: true });
+      return false;
+    });
+
+    try {
+      const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: false });
+
+      expect(result.reason).toBe('state-persistence-failed');
+      expect(result.workedOutcomeRecovery).toEqual({
+        attempted: 1,
+        recovered: 0,
+        failed: 1,
+        recorded: 0,
+        alreadyRecorded: 0,
+        failureStages: {
+          'record-claim-outcome-failed': 1,
+          'replay-persistence-failed': 1,
+        },
+      });
+    } finally {
+      recordSpy.mockRestore();
+    }
+  });
+
+  it('A1h5b-worked-recovery-settlement: replay certification cannot bypass claim settlement refusal', async () => {
+    const { items } = enrollWithItems(1);
+    const item = items[0]!;
+    mockRunSwarm.mockImplementationOnce(async (_input, _cfg, opts) => ({
+      id: (opts as { runId: string }).runId,
+      status: 'done',
+      usage: { totalTokens: 100, estCostUsd: 0.001, steps: 1 },
+      proposalOutcome: {
+        kind: 'empty-diff' as const,
+        reason: 'claim settlement refusal fixture',
+        files: 0,
+        insertions: 0,
+        deletions: 0,
+      },
+    }));
+    const originalRecord = LocalWorkQueueCoordinator.prototype.recordClaimOutcome;
+    const recordSpy = vi.spyOn(
+      LocalWorkQueueCoordinator.prototype,
+      'recordClaimOutcome',
+    ).mockImplementation(function (
+      this: LocalWorkQueueCoordinator,
+      claimItemId,
+      workedItemId,
+      outcome,
+      machineId,
+    ) {
+      expect(originalRecord.call(this, claimItemId, workedItemId, outcome, machineId)).toBe(true);
+      return false;
+    });
+    const settleSpy = vi.spyOn(
+      LocalWorkQueueCoordinator.prototype,
+      'settleClaim',
+    ).mockReturnValue(false);
+
+    try {
+      const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: false });
+
+      expect(result.reason).toBe('state-persistence-failed');
+      expect(result.workedOutcomeRecovery).toEqual({
+        attempted: 1,
+        recovered: 0,
+        failed: 1,
+        recorded: 0,
+        alreadyRecorded: 0,
+        failureStages: {
+          'record-claim-outcome-failed': 1,
+          'claim-settlement-failed': 1,
+        },
+      });
+      expect(loadWorkedLedger().events.filter((event) => event.itemId === item.id)).toEqual([
+        expect.objectContaining({ itemId: item.id, outcome: 'empty' }),
+      ]);
+      expect(settleSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      recordSpy.mockRestore();
+      settleSpy.mockRestore();
+    }
+  });
+
   it('A1h5b1: generated repair success becomes terminal only when its proposal exists durably', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
@@ -6039,6 +6239,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 
     expect(result.reason).toBe('ok');
     expect(result.proposalsCreated).toBe(1);
+    expect(result.workedOutcomeRecovery).toBeUndefined();
     expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
       available: true,
       disposition: 'retired',
@@ -10364,7 +10565,8 @@ describe('M201 — Group G: concurrent dispatch routing wire guards', () => {
     expect(source).toContain('routeModels.set(workedSet[i]!.id, d.value.model ?? null);');
     expect(source).toContain('routeReasons,');
     expect(source).toContain('const assignedModel = hintedBackend === _backend ? routeModels.get(item.id) : undefined;');
-    expect(source).toContain('return taskEntry.run(_backend, assignedReason, assignedModel);');
+    expect(source).toContain('return await taskEntry.run(');
+    expect(source).toContain('capacityReservation,');
     expect(source).toContain('buildConcurrentDispatchRouteItem(');
   });
 

@@ -47,6 +47,8 @@ import type {
   DaemonDispatchTrace,
   DaemonState,
   DaemonTick,
+  DaemonWorkedOutcomeRecoveryFailureStage,
+  DaemonWorkedOutcomeRecoverySummary,
   EngineId,
   EngineTier,
   EvidenceOutcomeSummary,
@@ -213,6 +215,7 @@ import {
   GENERATED_REPAIR_DISPATCH_BLOCKED_COOLDOWN_MS,
   latestWorkedEventForKeys,
   recordOutcome as recordWorkedOutcome,
+  replayWorkedOutcomeAfterDispatchReceipt,
   sweepJudgedProposals,
   type WorkedEvent,
   type WorkedOutcome,
@@ -2194,6 +2197,22 @@ export function workedOutcomeFromDispatchProduction(
   if (production.runEventSummary?.status === 'aborted') return undefined;
   if (production.outcome === 'proposal-disabled') return undefined;
   return production.outcome === 'proposal-created' ? 'diff' : 'empty';
+}
+
+function workedOutcomeDispatchReceipt(event: DispatchProductionEvent) {
+  const attemptId = event.trajectoryId ?? event.runId;
+  if (!attemptId) return null;
+  return {
+    ts: event.ts,
+    itemId: event.itemId,
+    repo: event.repo,
+    outcome: event.outcome,
+    attemptId,
+    source: event.source,
+    backend: event.backend,
+    tier: event.tier,
+    ...(event.objectiveHash ? { objectiveHash: event.objectiveHash } : {}),
+  };
 }
 
 function productionReason(production: DaemonDispatchProduction): string {
@@ -7098,6 +7117,26 @@ export async function tick(
   const handoffFailedItemIds = new Set<string>();
   const productionWriteFailedItemIds = new Set<string>();
   const workedOutcomeFailedItemIds = new Set<string>();
+  const productionEventByItemId = new Map(productionEvents.map((event) => [event.itemId, event] as const));
+  const workedOutcomeRecovery: DaemonWorkedOutcomeRecoverySummary = {
+    attempted: 0,
+    recovered: 0,
+    failed: 0,
+    recorded: 0,
+    alreadyRecorded: 0,
+    failureStages: {},
+  };
+  const markWorkedOutcomeRecoveryStage = (stage: DaemonWorkedOutcomeRecoveryFailureStage): void => {
+    workedOutcomeRecovery.failureStages[stage] =
+      (workedOutcomeRecovery.failureStages[stage] ?? 0) + 1;
+  };
+  const workedOutcomeRecoverySummary = (): DaemonWorkedOutcomeRecoverySummary | undefined =>
+    workedOutcomeRecovery.attempted > 0
+      ? {
+          ...workedOutcomeRecovery,
+          failureStages: { ...workedOutcomeRecovery.failureStages },
+        }
+      : undefined;
   const generatedRepairLifecycleSucceededItemIds = new Set<string>();
   const generatedRepairCooldownItemIds = new Set<string>();
   const generatedRepairFailedAttemptWitnessItemIds = new Set<string>();
@@ -7236,12 +7275,60 @@ export async function tick(
             (duplicateDiff ? 'empty' : workedOutcomeFromDispatchProduction(production)) ??
             (proposalItemIds.has(outcome.value.item.id) ? 'diff' : 'empty');
           // M113: route through coordinator (Local → worked-ledger; Shared → global store).
-          if (!coordinator.recordClaimOutcome(
+          const recorded = coordinator.recordClaimOutcome(
             outcome.value.item.id,
             frozenWorkedItemId(outcome.value.item),
             outcomeLabel,
             machineId,
-          )) workedOutcomeFailedItemIds.add(outcome.value.item.id);
+          );
+          if (recorded) continue;
+          if (sharedQueueMode) {
+            workedOutcomeFailedItemIds.add(outcome.value.item.id);
+            continue;
+          }
+
+          // A local ordinary write may have reached durable storage before its
+          // final certification returned false. Recover only from the exact
+          // canonical dispatch receipt; every uncertainty still stops resident
+          // mode. Generated repairs never reach this branch.
+          workedOutcomeRecovery.attempted += 1;
+          markWorkedOutcomeRecoveryStage('record-claim-outcome-failed');
+          const productionEvent = productionEventByItemId.get(outcome.value.item.id);
+          const dispatchReceipt = productionEvent
+            ? workedOutcomeDispatchReceipt(productionEvent)
+            : null;
+          if (!dispatchReceipt) {
+            workedOutcomeRecovery.failed += 1;
+            markWorkedOutcomeRecoveryStage('dispatch-event-unavailable');
+            workedOutcomeFailedItemIds.add(outcome.value.item.id);
+            continue;
+          }
+          const replay = replayWorkedOutcomeAfterDispatchReceipt({
+            itemId: frozenWorkedItemId(outcome.value.item),
+            outcome: outcomeLabel,
+            dispatchReceipt,
+          });
+          if (replay !== 'recorded' && replay !== 'already-recorded') {
+            workedOutcomeRecovery.failed += 1;
+            markWorkedOutcomeRecoveryStage(
+              replay === 'dispatch-receipt-unavailable'
+                ? 'dispatch-receipt-unavailable'
+                : replay === 'invalid'
+                  ? 'replay-invalid'
+                  : 'replay-persistence-failed',
+            );
+            workedOutcomeFailedItemIds.add(outcome.value.item.id);
+            continue;
+          }
+          if (!coordinator.settleClaim(outcome.value.item.id, machineId)) {
+            workedOutcomeRecovery.failed += 1;
+            markWorkedOutcomeRecoveryStage('claim-settlement-failed');
+            workedOutcomeFailedItemIds.add(outcome.value.item.id);
+            continue;
+          }
+          workedOutcomeRecovery.recovered += 1;
+          if (replay === 'recorded') workedOutcomeRecovery.recorded += 1;
+          else workedOutcomeRecovery.alreadyRecorded += 1;
         }
       }
     } catch (err) {
@@ -7561,6 +7648,9 @@ export async function tick(
 	      ...(proposalProduction ? { proposalProduction } : {}),
 	      ...(dispatchManifest ? { dispatchManifest } : {}),
 	      ...(drain ? { drain } : {}),
+	      ...(workedOutcomeRecoverySummary()
+	        ? { workedOutcomeRecovery: workedOutcomeRecoverySummary() }
+	        : {}),
 	      ...(dispatches ? { dispatches } : {}),
 	      ...(merged > 0 ? { merged } : {}),
 	    };
@@ -7613,6 +7703,9 @@ export async function tick(
 	    ...(proposalProduction ? { proposalProduction } : {}),
 	    ...(dispatchManifest ? { dispatchManifest } : {}),
 	    ...(drain ? { drain } : {}),
+	    ...(workedOutcomeRecoverySummary()
+	      ? { workedOutcomeRecovery: workedOutcomeRecoverySummary() }
+	      : {}),
 	    ...(dispatches ? { dispatches } : {}),
 	    ...(merged > 0 ? { merged } : {}),
 	  };
