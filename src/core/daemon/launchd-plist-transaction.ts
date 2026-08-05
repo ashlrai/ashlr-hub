@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
-import { fsyncDirectory } from '../util/durability.js';
+import { fsyncDirectory, type DirectoryIdentity } from '../util/durability.js';
 import {
   hardenWindowsFileAuthority,
   validateWindowsFileAuthority,
@@ -12,7 +12,11 @@ import {
 const PRIVATE_FILE_MODE = 0o600;
 const ROLLBACK_RETENTION = 5;
 const JOURNAL_SCHEMA_VERSION = 1;
+const REMOVAL_JOURNAL_SCHEMA_VERSION = 2;
 const MAX_JOURNAL_BYTES = 4 * 1024 * 1024;
+const MAX_PLIST_BYTES = MAX_JOURNAL_BYTES;
+const MAX_PLIST_BYTES_BIGINT = BigInt(MAX_PLIST_BYTES);
+const MAX_JOURNAL_BYTES_BIGINT = BigInt(MAX_JOURNAL_BYTES);
 
 export type LaunchdInstallPhase =
   | 'prepared'
@@ -60,8 +64,8 @@ export interface LaunchdCommandResult {
 interface PlistSnapshot {
   bytes: Buffer;
   mode: number;
-  dev: number;
-  ino: number;
+  dev: bigint;
+  ino: bigint;
 }
 
 interface LaunchdInstallJournal {
@@ -77,15 +81,15 @@ interface LaunchdInstallJournal {
 }
 
 interface LaunchdRemovalJournal {
-  schemaVersion: 1;
+  schemaVersion: 2;
   plistPath: string;
   phase: LaunchdRemovalPhase;
   hadPrior: boolean;
   priorBytesBase64?: string;
   priorMode?: number;
   priorSha256?: string;
-  priorDev?: number;
-  priorIno?: number;
+  priorDev?: string;
+  priorIno?: string;
   recoveryState?: unknown;
 }
 
@@ -162,13 +166,14 @@ export interface ServiceFileTransactionLockOptions {
   lockWaitMs?: number;
 }
 
-function owned(stat: fs.Stats): boolean {
-  return typeof process.getuid !== 'function' || stat.uid === process.getuid();
+function owned(stat: fs.BigIntStats): boolean {
+  return typeof process.getuid !== 'function' || stat.uid === BigInt(process.getuid());
 }
 
-function trustedDirectory(stat: fs.Stats): boolean {
-  const safePosixMode = process.platform === 'win32' || (stat.mode & 0o022) === 0;
-  return !stat.isSymbolicLink() && stat.isDirectory() && owned(stat) && safePosixMode;
+function trustedBigIntDirectory(stat: fs.BigIntStats): boolean {
+  const ownedByCurrentUser = typeof process.getuid !== 'function' || stat.uid === BigInt(process.getuid());
+  const safePosixMode = process.platform === 'win32' || (stat.mode & 0o022n) === 0n;
+  return !stat.isSymbolicLink() && stat.isDirectory() && ownedByCurrentUser && safePosixMode;
 }
 
 function missing(error: unknown): boolean {
@@ -194,10 +199,10 @@ function validateRegularTarget(
   filePath: string,
   label: string,
   trustedRoot?: string,
-): fs.Stats | undefined {
+): fs.BigIntStats | undefined {
   try {
-    const stat = fs.lstatSync(filePath);
-    if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1 || !owned(stat)) {
+    const stat = fs.lstatSync(filePath, { bigint: true });
+    if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1n || !owned(stat)) {
       throw new Error(`unsafe ${label}: expected a regular, singly-linked file at ${filePath}`);
     }
     if (trustedRoot) assertWindowsFileAuthority(filePath, 'file', trustedRoot);
@@ -215,18 +220,25 @@ function readSnapshot(filePath: string, trustedRoot?: string): PlistSnapshot | u
   let fd: number | undefined;
   try {
     fd = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-    const opened = fs.fstatSync(fd);
+    const opened = fs.fstatSync(fd, { bigint: true });
     if (
-      !opened.isFile() || opened.nlink !== 1 || opened.dev !== before.dev || opened.ino !== before.ino
+      !opened.isFile() || opened.nlink !== 1n || opened.dev !== before.dev || opened.ino !== before.ino
     ) {
       throw new Error(`unsafe active plist: changed while opening ${filePath}`);
     }
-    const bytes = Buffer.alloc(opened.size);
+    if (opened.size < 0n || opened.size > MAX_PLIST_BYTES_BIGINT) {
+      throw new Error(`active plist exceeds ${MAX_PLIST_BYTES}-byte size limit at ${filePath}`);
+    }
+    const bytes = Buffer.alloc(Number(opened.size));
     let offset = 0;
     while (offset < bytes.length) {
       const read = fs.readSync(fd, bytes, offset, bytes.length - offset, offset);
       if (read === 0) throw new Error(`short read from active plist ${filePath}`);
       offset += read;
+    }
+    const growthProbe = Buffer.alloc(1);
+    if (fs.readSync(fd, growthProbe, 0, 1, bytes.length) !== 0) {
+      throw new Error(`active plist changed size while reading ${filePath}`);
     }
     return { bytes, mode: PRIVATE_FILE_MODE, dev: opened.dev, ino: opened.ino };
   } finally {
@@ -240,7 +252,7 @@ function artifactPath(plistPath: string, kind: 'tmp' | 'rollback' | 'backup'): s
   return `${plistPath}.${kind}.${timestamp}.${process.pid}.${nonce}`;
 }
 
-function writeExclusive(filePath: string, bytes: Buffer, mode: number): fs.Stats {
+function writeExclusive(filePath: string, bytes: Buffer, mode: number): fs.BigIntStats {
   let fd: number | undefined;
   try {
     fd = fs.openSync(
@@ -256,14 +268,14 @@ function writeExclusive(filePath: string, bytes: Buffer, mode: number): fs.Stats
     }
     fs.fchmodSync(fd, mode);
     fs.fsyncSync(fd);
-    return fs.fstatSync(fd);
+    return fs.fstatSync(fd, { bigint: true });
   } finally {
     if (fd !== undefined) fs.closeSync(fd);
   }
 }
 
-function unlinkIfOwned(filePath: string, expected: Pick<fs.Stats, 'dev' | 'ino'>): void {
-  const current = fs.lstatSync(filePath);
+function unlinkIfOwned(filePath: string, expected: Pick<fs.BigIntStats, 'dev' | 'ino'>): void {
+  const current = fs.lstatSync(filePath, { bigint: true });
   if (
     current.isSymbolicLink() || !current.isFile() || current.dev !== expected.dev || current.ino !== expected.ino
   ) {
@@ -274,7 +286,7 @@ function unlinkIfOwned(filePath: string, expected: Pick<fs.Stats, 'dev' | 'ino'>
 
 function assertOwnedTarget(
   filePath: string,
-  expected: Pick<fs.Stats, 'dev' | 'ino'>,
+  expected: Pick<fs.BigIntStats, 'dev' | 'ino'>,
   trustedRoot?: string,
 ): void {
   const current = validateRegularTarget(filePath, 'installed plist', trustedRoot);
@@ -304,9 +316,9 @@ function atomicReplace(
   mode: number,
   expected?: Pick<PlistSnapshot, 'dev' | 'ino'>,
   requireMissing = false,
-  expectedParent?: Pick<fs.Stats, 'dev' | 'ino'>,
+  expectedParent?: DirectoryIdentity,
   trustedRoot?: string,
-): fs.Stats {
+): fs.BigIntStats {
   const temporary = artifactPath(filePath, 'tmp');
   const created = writeExclusive(temporary, bytes, mode);
   try {
@@ -314,7 +326,7 @@ function atomicReplace(
     if (expectedParent) assertParentIdentity(filePath, expectedParent);
     if (expected || requireMissing) assertExpectedTarget(filePath, expected, trustedRoot);
     fs.renameSync(temporary, filePath);
-    const installed = fs.lstatSync(filePath);
+    const installed = fs.lstatSync(filePath, { bigint: true });
     if (
       installed.isSymbolicLink() || !installed.isFile() ||
       installed.dev !== created.dev || installed.ino !== created.ino
@@ -325,7 +337,7 @@ function atomicReplace(
     return installed;
   } finally {
     try {
-      const remaining = fs.lstatSync(temporary);
+      const remaining = fs.lstatSync(temporary, { bigint: true });
       if (remaining.dev === created.dev && remaining.ino === created.ino) fs.unlinkSync(temporary);
     } catch { /* best-effort cleanup; never mask the transaction result */ }
   }
@@ -334,7 +346,7 @@ function atomicReplace(
 function replaceBackup(
   plistPath: string,
   prior: PlistSnapshot,
-  expectedParent: Pick<fs.Stats, 'dev' | 'ino'>,
+  expectedParent: DirectoryIdentity,
   trustedRoot: string,
 ): void {
   const backupPath = `${plistPath}.bak`;
@@ -348,7 +360,7 @@ function replaceBackup(
     fsyncParent(backupPath, expectedParent);
   } finally {
     try {
-      const remaining = fs.lstatSync(temporary);
+      const remaining = fs.lstatSync(temporary, { bigint: true });
       if (remaining.dev === created.dev && remaining.ino === created.ino) fs.unlinkSync(temporary);
     } catch { /* best-effort cleanup; never mask the backup result */ }
   }
@@ -356,7 +368,7 @@ function replaceBackup(
 
 function retainRecentRollbacks(
   plistPath: string,
-  expectedParent: Pick<fs.Stats, 'dev' | 'ino'>,
+  expectedParent: DirectoryIdentity,
   trustedRoot: string,
 ): void {
   const dir = path.dirname(plistPath);
@@ -366,15 +378,17 @@ function retainRecentRollbacks(
     .filter((name) => name.startsWith(prefix))
     .map((name) => {
       const filePath = path.join(dir, name);
-      const stat = fs.lstatSync(filePath);
+      const stat = fs.lstatSync(filePath, { bigint: true });
       if (stat.isFile() && !stat.isSymbolicLink()) {
         assertWindowsFileAuthority(filePath, 'file', trustedRoot);
       }
       return { filePath, stat };
     })
   const usable = entries
-    .filter((entry) => entry.stat.isFile() && !entry.stat.isSymbolicLink() && entry.stat.nlink === 1 && owned(entry.stat))
-    .sort((left, right) => right.stat.mtimeMs - left.stat.mtimeMs || right.filePath.localeCompare(left.filePath));
+    .filter((entry) => entry.stat.isFile() && !entry.stat.isSymbolicLink() && entry.stat.nlink === 1n && owned(entry.stat))
+    .sort((left, right) => left.stat.mtimeMs === right.stat.mtimeMs
+      ? right.filePath.localeCompare(left.filePath)
+      : left.stat.mtimeMs > right.stat.mtimeMs ? -1 : 1);
 
   let removed = false;
   for (const entry of usable.slice(ROLLBACK_RETENTION)) {
@@ -382,8 +396,8 @@ function retainRecentRollbacks(
     let fd: number | undefined;
     try {
       fd = fs.openSync(entry.filePath, fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW);
-      const opened = fs.fstatSync(fd);
-      if (!opened.isFile() || opened.nlink !== 1 || !owned(opened) ||
+      const opened = fs.fstatSync(fd, { bigint: true });
+      if (!opened.isFile() || opened.nlink !== 1n || !owned(opened) ||
           opened.dev !== entry.stat.dev || opened.ino !== entry.stat.ino) {
         throw new Error(`rollback artifact changed during retention: ${entry.filePath}`);
       }
@@ -396,7 +410,7 @@ function retainRecentRollbacks(
   if (removed) fsyncParent(plistPath, expectedParent);
 }
 
-function ensureTrustedParent(trustedRoot: string, plistPath: string): fs.Stats {
+function ensureTrustedParent(trustedRoot: string, plistPath: string): DirectoryIdentity {
   const root = path.resolve(trustedRoot);
   const target = path.resolve(plistPath);
   const relative = path.relative(root, target);
@@ -404,8 +418,8 @@ function ensureTrustedParent(trustedRoot: string, plistPath: string): fs.Stats {
     throw new Error(`launchd plist must be below trusted root ${root}`);
   }
 
-  const rootStat = fs.lstatSync(root);
-  if (!trustedDirectory(rootStat)) {
+  const rootStat = fs.lstatSync(root, { bigint: true });
+  if (!trustedBigIntDirectory(rootStat)) {
     throw new Error(`unsafe launchd trusted root ${root}`);
   }
   assertWindowsFileAuthority(root, 'directory', root);
@@ -413,36 +427,40 @@ function ensureTrustedParent(trustedRoot: string, plistPath: string): fs.Stats {
   let current = root;
   for (const component of relative.split(path.sep).slice(0, -1)) {
     const parentPath = current;
-    const parent = fs.lstatSync(parentPath);
-    if (!trustedDirectory(parent)) {
+    const parent = fs.lstatSync(parentPath, { bigint: true });
+    if (!trustedBigIntDirectory(parent)) {
       throw new Error(`unsafe launchd plist parent component ${parentPath}`);
     }
     current = path.join(parentPath, component);
     try {
-      const stat = fs.lstatSync(current);
-      if (!trustedDirectory(stat)) {
+      const stat = fs.lstatSync(current, { bigint: true });
+      if (!trustedBigIntDirectory(stat)) {
         throw new Error(`unsafe launchd plist parent component ${current}`);
       }
       assertWindowsFileAuthority(current, 'directory', root);
     } catch (error) {
       if (!missing(error)) throw error;
       fs.mkdirSync(current, { mode: 0o700 });
-      const created = fs.lstatSync(current);
-      if (!trustedDirectory(created)) {
+      const created = fs.lstatSync(current, { bigint: true });
+      if (!trustedBigIntDirectory(created)) {
         throw new Error(`unsafe launchd plist parent component ${current}`);
       }
       assertWindowsFileAuthority(current, 'directory', root, 'harden');
       fsyncDirectory(parentPath, {
-        expectedIdentity: { dev: BigInt(parent.dev), ino: BigInt(parent.ino) },
+        expectedIdentity: { dev: parent.dev, ino: parent.ino },
       });
     }
   }
-  return fs.lstatSync(path.dirname(target));
+  const parent = fs.lstatSync(path.dirname(target), { bigint: true });
+  if (!trustedBigIntDirectory(parent)) {
+    throw new Error(`unsafe launchd plist parent component ${path.dirname(target)}`);
+  }
+  return { dev: parent.dev, ino: parent.ino };
 }
 
-function assertParentIdentity(plistPath: string, expected: Pick<fs.Stats, 'dev' | 'ino'>): void {
-  const parent = fs.lstatSync(path.dirname(plistPath));
-  if (!trustedDirectory(parent) ||
+function assertParentIdentity(plistPath: string, expected: DirectoryIdentity): void {
+  const parent = fs.lstatSync(path.dirname(plistPath), { bigint: true });
+  if (!trustedBigIntDirectory(parent) ||
       parent.dev !== expected.dev || parent.ino !== expected.ino) {
     throw new Error(`launchd plist parent changed during transaction: ${path.dirname(plistPath)}`);
   }
@@ -453,9 +471,9 @@ function lockPath(lockDir: string, plistPath: string): string {
   return path.join(lockDir, `launchd-plist-${key}.lock`);
 }
 
-function lockReleaseFailure(lock: { path: string; dev: number; ino: number }): string | undefined {
+function lockReleaseFailure(lock: { path: string; dev: bigint; ino: bigint }): string | undefined {
   try {
-    const remaining = fs.lstatSync(lock.path);
+    const remaining = fs.lstatSync(lock.path, { bigint: true });
     if (remaining.dev === lock.dev && remaining.ino === lock.ino) {
       return `failed to release launchd plist transaction lock ${lock.path}`;
     }
@@ -510,10 +528,10 @@ function removalJournalPath(lockDir: string, plistPath: string): string {
 
 function fsyncParent(
   filePath: string,
-  expectedParent?: Pick<fs.Stats, 'dev' | 'ino'>,
+  expectedParent?: DirectoryIdentity,
 ): void {
   fsyncDirectory(path.dirname(filePath), expectedParent
-    ? { expectedIdentity: { dev: BigInt(expectedParent.dev), ino: BigInt(expectedParent.ino) } }
+    ? { expectedIdentity: expectedParent }
     : {});
 }
 
@@ -582,8 +600,10 @@ function parseRemovalJournal(bytes: Buffer, expectedPlistPath: string): LaunchdR
     'restoring',
     'restored',
   ];
+  const legacySchema = value.schemaVersion === JOURNAL_SCHEMA_VERSION;
+  const currentSchema = value.schemaVersion === REMOVAL_JOURNAL_SCHEMA_VERSION;
   if (
-    value.schemaVersion !== JOURNAL_SCHEMA_VERSION ||
+    (!legacySchema && !currentSchema) ||
     value.plistPath !== expectedPlistPath ||
     typeof value.hadPrior !== 'boolean' ||
     typeof value.phase !== 'string' ||
@@ -597,8 +617,18 @@ function parseRemovalJournal(bytes: Buffer, expectedPlistPath: string): LaunchdR
       typeof value.priorSha256 !== 'string' ||
       !/^[a-f0-9]{64}$/.test(value.priorSha256) ||
       !Number.isInteger(value.priorMode) ||
-      !Number.isSafeInteger(value.priorDev) ||
-      !Number.isSafeInteger(value.priorIno)
+      (currentSchema && (
+        typeof value.priorDev !== 'string' ||
+        typeof value.priorIno !== 'string' ||
+        !/^(0|[1-9][0-9]*)$/.test(value.priorDev) ||
+        !/^(0|[1-9][0-9]*)$/.test(value.priorIno)
+      )) ||
+      (legacySchema && (
+        !Number.isSafeInteger(value.priorDev) ||
+        Number(value.priorDev) < 0 ||
+        !Number.isSafeInteger(value.priorIno) ||
+        Number(value.priorIno) < 0
+      ))
     ) {
       throw new Error('invalid launchd removal transaction journal prior snapshot');
     }
@@ -618,24 +648,33 @@ function parseRemovalJournal(bytes: Buffer, expectedPlistPath: string): LaunchdR
   ) {
     throw new Error('invalid launchd removal transaction journal: unexpected prior snapshot');
   }
-  return value as unknown as LaunchdRemovalJournal;
+  return {
+    ...value,
+    schemaVersion: REMOVAL_JOURNAL_SCHEMA_VERSION,
+    ...(value.hadPrior
+      ? {
+          priorDev: currentSchema ? value.priorDev as string : String(value.priorDev),
+          priorIno: currentSchema ? value.priorIno as string : String(value.priorIno),
+        }
+      : {}),
+  } as unknown as LaunchdRemovalJournal;
 }
 
 function readJournal(filePath: string, expectedPlistPath: string, trustedRoot?: string): {
   journal: LaunchdInstallJournal;
-  stat: fs.Stats;
+  stat: fs.BigIntStats;
 } | undefined {
   const before = validateRegularTarget(filePath, 'launchd transaction journal', trustedRoot);
   if (!before) return undefined;
   let fd: number | undefined;
   try {
     fd = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-    const opened = fs.fstatSync(fd);
-    if (!opened.isFile() || opened.nlink !== 1 || opened.dev !== before.dev || opened.ino !== before.ino ||
-        opened.size > MAX_JOURNAL_BYTES) {
+    const opened = fs.fstatSync(fd, { bigint: true });
+    if (!opened.isFile() || opened.nlink !== 1n || opened.dev !== before.dev || opened.ino !== before.ino ||
+        opened.size > MAX_JOURNAL_BYTES_BIGINT) {
       throw new Error(`unsafe launchd transaction journal at ${filePath}`);
     }
-    const bytes = Buffer.alloc(opened.size);
+    const bytes = Buffer.alloc(Number(opened.size));
     let offset = 0;
     while (offset < bytes.length) {
       const count = fs.readSync(fd, bytes, offset, bytes.length - offset, offset);
@@ -650,24 +689,24 @@ function readJournal(filePath: string, expectedPlistPath: string, trustedRoot?: 
 
 function readRemovalJournal(filePath: string, expectedPlistPath: string, trustedRoot?: string): {
   journal: LaunchdRemovalJournal;
-  stat: fs.Stats;
+  stat: fs.BigIntStats;
 } | undefined {
   const before = validateRegularTarget(filePath, 'launchd removal transaction journal', trustedRoot);
   if (!before) return undefined;
   let fd: number | undefined;
   try {
     fd = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-    const opened = fs.fstatSync(fd);
+    const opened = fs.fstatSync(fd, { bigint: true });
     if (
       !opened.isFile() ||
-      opened.nlink !== 1 ||
+      opened.nlink !== 1n ||
       opened.dev !== before.dev ||
       opened.ino !== before.ino ||
-      opened.size > MAX_JOURNAL_BYTES
+      opened.size > MAX_JOURNAL_BYTES_BIGINT
     ) {
       throw new Error(`unsafe launchd removal transaction journal at ${filePath}`);
     }
-    const bytes = Buffer.alloc(opened.size);
+    const bytes = Buffer.alloc(Number(opened.size));
     let offset = 0;
     while (offset < bytes.length) {
       const count = fs.readSync(fd, bytes, offset, bytes.length - offset, offset);
@@ -683,10 +722,10 @@ function readRemovalJournal(filePath: string, expectedPlistPath: string, trusted
 function writeJournal(
   filePath: string,
   journal: LaunchdInstallJournal,
-  parent: Pick<fs.Stats, 'dev' | 'ino'>,
-  expected?: Pick<fs.Stats, 'dev' | 'ino'>,
+  parent: DirectoryIdentity,
+  expected?: Pick<fs.BigIntStats, 'dev' | 'ino'>,
   trustedRoot?: string,
-): fs.Stats {
+): fs.BigIntStats {
   const bytes = Buffer.from(`${JSON.stringify(journal)}\n`, 'utf8');
   if (bytes.length > MAX_JOURNAL_BYTES) {
     throw new Error('launchd transaction journal exceeds size limit');
@@ -707,10 +746,10 @@ function writeJournal(
 function writeRemovalJournal(
   filePath: string,
   journal: LaunchdRemovalJournal,
-  parent: Pick<fs.Stats, 'dev' | 'ino'>,
-  expected?: Pick<fs.Stats, 'dev' | 'ino'>,
+  parent: DirectoryIdentity,
+  expected?: Pick<fs.BigIntStats, 'dev' | 'ino'>,
   trustedRoot?: string,
-): fs.Stats {
+): fs.BigIntStats {
   const bytes = Buffer.from(`${JSON.stringify(journal)}\n`, 'utf8');
   if (bytes.length > MAX_JOURNAL_BYTES) {
     throw new Error('launchd removal transaction journal exceeds size limit');
@@ -728,16 +767,16 @@ function writeRemovalJournal(
   return written;
 }
 
-function removeJournal(filePath: string, expected: Pick<fs.Stats, 'dev' | 'ino'>): void {
+function removeJournal(filePath: string, expected: Pick<fs.BigIntStats, 'dev' | 'ino'>): void {
   unlinkIfOwned(filePath, expected);
   fsyncParent(filePath);
 }
 
 function restoreInterruptedTransaction(
   options: LaunchdTransactionRecoveryOptions,
-  parent: Pick<fs.Stats, 'dev' | 'ino'>,
+  parent: DirectoryIdentity,
   filePath: string,
-  pending: { journal: LaunchdInstallJournal; stat: fs.Stats },
+  pending: { journal: LaunchdInstallJournal; stat: fs.BigIntStats },
   validateBeforeUnload = true,
 ): void {
   const operation = options.operationLabel ?? 'launchd';
@@ -861,9 +900,9 @@ function restoreActivationAfterUncertainStop(
 
 function restoreInterruptedRemoval(
   options: LaunchdPlistRemovalOptions | LaunchdPlistTransactionOptions,
-  parent: Pick<fs.Stats, 'dev' | 'ino'>,
+  parent: DirectoryIdentity,
   filePath: string,
-  pending: { journal: LaunchdRemovalJournal; stat: fs.Stats },
+  pending: { journal: LaunchdRemovalJournal; stat: fs.BigIntStats },
 ): void {
   const operation = options.operationLabel ?? 'launchd';
   const journalParent = ensureTrustedParent(options.trustedRoot, filePath);
@@ -871,12 +910,12 @@ function restoreInterruptedRemoval(
   let journalStat = pending.stat;
   const persistRestoration = (
     phase: 'restoring' | 'restored',
-    restored?: Pick<fs.Stats, 'dev' | 'ino'>,
+    restored?: Pick<fs.BigIntStats, 'dev' | 'ino'>,
   ): void => {
     journal = {
       ...journal,
       phase,
-      ...(restored ? { priorDev: restored.dev, priorIno: restored.ino } : {}),
+      ...(restored ? { priorDev: restored.dev.toString(10), priorIno: restored.ino.toString(10) } : {}),
     };
     journalStat = writeRemovalJournal(
       filePath,
@@ -902,8 +941,8 @@ function restoreInterruptedRemoval(
     if (current) {
       const bytesMatch = digest(current.bytes) === journal.priorSha256;
       const identityMatches =
-        current.dev === journal.priorDev &&
-        current.ino === journal.priorIno;
+        current.dev === BigInt(journal.priorDev!) &&
+        current.ino === BigInt(journal.priorIno!);
       if (!bytesMatch || (!identityMatches && journal.phase !== 'restoring')) {
         throw new Error(`${operation} removal recovery rejected an interleaved service file`);
       }
@@ -1198,7 +1237,7 @@ export function removeLaunchdPlistTransaction(options: LaunchdPlistRemovalOption
     }
 
     let journal: LaunchdRemovalJournal = {
-      schemaVersion: JOURNAL_SCHEMA_VERSION,
+      schemaVersion: REMOVAL_JOURNAL_SCHEMA_VERSION,
       plistPath: options.plistPath,
       phase: 'prepared',
       hadPrior: !!prior,
@@ -1207,8 +1246,8 @@ export function removeLaunchdPlistTransaction(options: LaunchdPlistRemovalOption
             priorBytesBase64: prior.bytes.toString('base64'),
             priorMode: prior.mode,
             priorSha256: digest(prior.bytes),
-            priorDev: prior.dev,
-            priorIno: prior.ino,
+            priorDev: prior.dev.toString(10),
+            priorIno: prior.ino.toString(10),
           }
         : {}),
       ...(recoveryState === undefined ? {} : { recoveryState }),

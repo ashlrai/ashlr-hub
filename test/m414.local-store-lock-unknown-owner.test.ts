@@ -46,6 +46,7 @@ function spawnLockHolder(lockPath: string): {
       cwd: process.cwd(),
       env: { ...process.env, LOCK_PATH: lockPath },
       stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+      serialization: 'advanced',
     },
   );
   children.add(child);
@@ -104,17 +105,17 @@ describe('local store lock unknown-owner recovery', () => {
     fs.writeFileSync(lockPath, '{corrupt owner metadata\n', 'utf8');
     const pastGrace = new Date(Date.now() - 5_000);
     fs.utimesSync(lockPath, pastGrace, pastGrace);
-    const corrupted = fs.lstatSync(lockPath);
+    const corrupted = fs.lstatSync(lockPath, { bigint: true });
     expect(corrupted.dev).toBe(ownerLock.dev);
     expect(corrupted.ino).toBe(ownerLock.ino);
-    expect(Date.now() - corrupted.mtimeMs).toBeGreaterThan(1_000);
+    expect(BigInt(Date.now()) - corrupted.mtimeMs).toBeGreaterThan(1_000n);
 
     expect(acquireLocalStoreLockWithOutcome(lockPath, 50)).toEqual({
       state: 'unavailable',
       lock: null,
     });
     expect(() => process.kill(holder.child.pid!, 0)).not.toThrow();
-    const retained = fs.lstatSync(lockPath);
+    const retained = fs.lstatSync(lockPath, { bigint: true });
     expect({ dev: retained.dev, ino: retained.ino }).toEqual({
       dev: ownerLock.dev,
       ino: ownerLock.ino,

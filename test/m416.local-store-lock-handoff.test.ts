@@ -30,10 +30,25 @@ const faults = vi.hoisted(() => ({
   failLstatOnceFor: undefined as string | undefined,
   rejectAssurance: undefined as ((path: string, kind: string, mode: string) => boolean) | undefined,
   shortWriteFor: undefined as 'main' | 'reclaim' | undefined,
+  bigintIdentityRoot: undefined as string | undefined,
+  bigintCanonicalReplacement: false,
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
+  const collidingA = 2n ** 54n;
+  const collidingB = collidingA + 1n;
+  const overrideIdentity = <T extends import('node:fs').BigIntStats>(stat: T, target?: string): T => {
+    const root = faults.bigintIdentityRoot;
+    if (!root || !target || (target !== root && !target.startsWith(`${root}.`))) return stat;
+    const identity = target === root && faults.bigintCanonicalReplacement ? collidingB : collidingA;
+    return new Proxy(stat, {
+      get(value, property, receiver) {
+        if (property === 'dev' || property === 'ino') return identity;
+        return Reflect.get(value, property, receiver);
+      },
+    });
+  };
   return {
     ...actual,
     closeSync(fd: number): void {
@@ -48,6 +63,12 @@ vi.mock('node:fs', async (importOriginal) => {
         });
       }
       actual.fsyncSync(fd);
+    },
+    fstatSync(fd: number, options?: { bigint?: boolean }) {
+      const stat = actual.fstatSync(fd, options as never);
+      return options?.bigint === true
+        ? overrideIdentity(stat as import('node:fs').BigIntStats, faults.fdPaths.get(fd))
+        : stat;
     },
     linkSync(existingPath: PathLike, newPath: PathLike): void {
       const existing = String(existingPath);
@@ -97,7 +118,12 @@ vi.mock('node:fs', async (importOriginal) => {
         faults.failCanonicalLstatCount -= 1;
         throw Object.assign(new Error('injected post-install lstat failure'), { code: 'EIO' });
       }
-      return (actual.lstatSync as (...params: unknown[]) => import('node:fs').Stats)(path, ...args);
+      const stat = (actual.lstatSync as (...params: unknown[]) =>
+        import('node:fs').Stats | import('node:fs').BigIntStats)(path, ...args);
+      const options = args[0] as { bigint?: boolean } | undefined;
+      return options?.bigint === true
+        ? overrideIdentity(stat as import('node:fs').BigIntStats, target)
+        : stat;
     },
     openSync(path: PathLike, flags: number, mode?: number): number {
       const fd = actual.openSync(path, flags, mode);
@@ -238,6 +264,8 @@ beforeEach(() => {
   faults.failLstatOnceFor = undefined;
   faults.rejectAssurance = undefined;
   faults.shortWriteFor = undefined;
+  faults.bigintIdentityRoot = undefined;
+  faults.bigintCanonicalReplacement = false;
   _setPrivateStorageTestControlForTest(
     PRIVATE_STORAGE_TEST_CONTROL,
     process.platform === 'win32' ? { runner: semanticPrivateStorageRunner } : undefined,
@@ -258,6 +286,8 @@ afterEach(() => {
   faults.strandedGuardPath = undefined;
   faults.events.length = 0;
   faults.fdPaths.clear();
+  faults.bigintIdentityRoot = undefined;
+  faults.bigintCanonicalReplacement = false;
   faults.failDirectoryFsyncFor = undefined;
   faults.directoryFsyncErrorCode = 'EIO';
   faults.failLstatOnceFor = undefined;
@@ -292,6 +322,20 @@ describe('local store lock installation handoff', () => {
     expect(faults.assuranceCalls).toEqual([]);
     expect(releaseLocalStoreLock(lock)).toBe(true);
     expect(faults.assuranceCalls).toEqual([]);
+  });
+
+  it('does not own or unlink a colliding replacement lock identity', () => {
+    const lockPath = path.join(tmpDir, 'bigint-collision.lock');
+    faults.bigintIdentityRoot = lockPath;
+    const lock = acquireLocalStoreLock(lockPath, 0);
+
+    expect(lock).not.toBeNull();
+    expect(lock?.dev).toBe(2n ** 54n);
+    expect(lock?.ino).toBe(2n ** 54n);
+    faults.bigintCanonicalReplacement = true;
+    expect(ownsLocalStoreLock(lock)).toBe(false);
+    expect(releaseLocalStoreLock(lock)).toBe(false);
+    expect(fs.existsSync(lockPath)).toBe(true);
   });
 
   it('retains exact storage opt-in through ownership and release', () => {

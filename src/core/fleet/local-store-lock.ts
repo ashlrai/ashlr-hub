@@ -16,7 +16,7 @@ import {
   readdirSync,
   unlinkSync,
   writeSync,
-  type Stats,
+  type BigIntStats,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -70,8 +70,8 @@ export interface VerifiedProcessStartIdentity {
 export interface LocalStoreLock {
   readonly path: string;
   readonly token: string;
-  readonly dev: number;
-  readonly ino: number;
+  readonly dev: bigint;
+  readonly ino: bigint;
 }
 
 export type LocalStoreLockAcquireResult =
@@ -90,8 +90,8 @@ const retainedReleases = new Map<string, LocalStoreLock>();
 function acquiredLock(
   path: string,
   token: string,
-  dev: number,
-  ino: number,
+  dev: bigint,
+  ino: bigint,
   directory: LockDirectory,
 ): LocalStoreLock {
   const lock: LocalStoreLock = Object.freeze({ path, token, dev, ino });
@@ -104,29 +104,32 @@ function isAcquiredLock(lock: LocalStoreLock | null | undefined): lock is LocalS
   return typeof lock === 'object' && lock !== null && acquiredLocks.has(lock);
 }
 
-function owned(uid: number): boolean {
-  return typeof process.getuid !== 'function' || uid === process.getuid();
+function owned(uid: bigint): boolean {
+  return typeof process.getuid !== 'function' || uid === BigInt(process.getuid());
 }
 
 interface LockDirectory {
   readonly path: string;
-  readonly dev: number;
-  readonly ino: number;
+  readonly dev: bigint;
+  readonly ino: bigint;
   readonly anchor: LockAnchor;
   readonly exactPrivateStorage: boolean;
 }
 
 interface LockAnchor {
   readonly path: string;
-  readonly dev: number;
-  readonly ino: number;
+  readonly dev: bigint;
+  readonly ino: bigint;
 }
 
-function privateMode(stat: Pick<Stats, 'mode'>, expected: number): boolean {
-  return process.platform === 'win32' || (stat.mode & 0o777) === expected;
+function privateMode(stat: Pick<BigIntStats, 'mode'>, expected: number): boolean {
+  return process.platform === 'win32' || (stat.mode & 0o777n) === BigInt(expected);
 }
 
-function sameFile(left: Pick<Stats, 'dev' | 'ino'>, right: Pick<Stats, 'dev' | 'ino'>): boolean {
+function sameFile(
+  left: Pick<BigIntStats, 'dev' | 'ino'>,
+  right: Pick<BigIntStats, 'dev' | 'ino'>,
+): boolean {
   return left.dev === right.dev && left.ino === right.ino;
 }
 
@@ -144,7 +147,7 @@ function pinTrustedAnchor(lockDirectory: string, requestedAnchor?: string): Lock
       ? absoluteDirectory !== home && nestedWithin(home, absoluteDirectory) ? home : root
       : resolve(requestedAnchor);
     if (!nestedWithin(anchorPath, absoluteDirectory)) return null;
-    const stat = lstatSync(anchorPath);
+    const stat = lstatSync(anchorPath, { bigint: true });
     if (stat.isSymbolicLink() || !stat.isDirectory()) return null;
     if (anchorPath !== root && !owned(stat.uid)) return null;
     return { path: anchorPath, dev: stat.dev, ino: stat.ino };
@@ -155,7 +158,7 @@ function pinTrustedAnchor(lockDirectory: string, requestedAnchor?: string): Lock
 
 function stableAnchor(anchor: LockAnchor): boolean {
   try {
-    const stat = lstatSync(anchor.path);
+    const stat = lstatSync(anchor.path, { bigint: true });
     return !stat.isSymbolicLink() && stat.isDirectory() && sameFile(stat, anchor);
   } catch {
     return false;
@@ -164,7 +167,7 @@ function stableAnchor(anchor: LockAnchor): boolean {
 
 function stableDirectory(directory: LockDirectory): boolean {
   try {
-    const stat = lstatSync(directory.path);
+    const stat = lstatSync(directory.path, { bigint: true });
     return stat.isDirectory() && !stat.isSymbolicLink() && owned(stat.uid) &&
       privateMode(stat, PRIVATE_DIRECTORY_MODE) && sameFile(stat, directory) &&
       stableAnchor(directory.anchor);
@@ -175,10 +178,10 @@ function stableDirectory(directory: LockDirectory): boolean {
 
 function releaseDirectoryState(directory: LockDirectory): 'stable' | 'retry' | 'lost' {
   try {
-    const anchorBefore = lstatSync(directory.anchor.path);
+    const anchorBefore = lstatSync(directory.anchor.path, { bigint: true });
     if (!sameFile(anchorBefore, directory.anchor)) return 'lost';
     if (anchorBefore.isSymbolicLink() || !anchorBefore.isDirectory()) return 'retry';
-    const before = lstatSync(directory.path);
+    const before = lstatSync(directory.path, { bigint: true });
     if (!sameFile(before, directory)) return 'lost';
     if (before.isSymbolicLink() || !before.isDirectory() || !owned(before.uid) ||
       !privateMode(before, PRIVATE_DIRECTORY_MODE)) return 'retry';
@@ -188,8 +191,8 @@ function releaseDirectoryState(directory: LockDirectory): 'stable' | 'retry' | '
       'inspect-existing',
       { anchorPath: directory.anchor.path },
     ).ok) return 'retry';
-    const anchorAfter = lstatSync(directory.anchor.path);
-    const after = lstatSync(directory.path);
+    const anchorAfter = lstatSync(directory.anchor.path, { bigint: true });
+    const after = lstatSync(directory.path, { bigint: true });
     if (!sameFile(anchorAfter, directory.anchor) || !sameFile(after, directory)) return 'lost';
     return !anchorAfter.isSymbolicLink() && anchorAfter.isDirectory() &&
       !after.isSymbolicLink() && after.isDirectory() && owned(after.uid) &&
@@ -222,12 +225,12 @@ function assureLockDirectory(
       const firstCreated = mkdirSync(path, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
       created = firstCreated !== undefined;
     }
-    const initial = lstatSync(path);
+    const initial = lstatSync(path, { bigint: true });
     if (
       initial.isSymbolicLink() || !initial.isDirectory() || !owned(initial.uid)
     ) return null;
     if (created || process.platform !== 'win32') chmodSync(path, PRIVATE_DIRECTORY_MODE);
-    const before = lstatSync(path);
+    const before = lstatSync(path, { bigint: true });
     if (
       before.isSymbolicLink() || !before.isDirectory() || !owned(before.uid) ||
       !privateMode(before, PRIVATE_DIRECTORY_MODE) || !sameFile(initial, before)
@@ -238,7 +241,7 @@ function assureLockDirectory(
       created ? 'secure-created' : 'inspect-existing',
       { anchorPath: anchor.path },
     ).ok) return null;
-    const after = lstatSync(path);
+    const after = lstatSync(path, { bigint: true });
     if (
       after.isSymbolicLink() || !after.isDirectory() || !owned(after.uid) ||
       !privateMode(after, PRIVATE_DIRECTORY_MODE) || !sameFile(before, after)
@@ -255,14 +258,14 @@ function inspectExistingLockFile(
   path: string,
   allowedLinks: readonly number[] = [1, 2],
   directory?: LockDirectory,
-): Stats | null {
+): BigIntStats | null {
   try {
     const anchor = directory?.anchor ?? pinTrustedAnchor(dirname(path));
     if (!anchor || !stableAnchor(anchor) || !nestedWithin(anchor.path, path)) return null;
-    const before = lstatSync(path);
+    const before = lstatSync(path, { bigint: true });
     if (
       before.isSymbolicLink() || !before.isFile() || !owned(before.uid) ||
-      !privateMode(before, PRIVATE_FILE_MODE) || !allowedLinks.includes(before.nlink)
+      !privateMode(before, PRIVATE_FILE_MODE) || !allowedLinks.some((links) => BigInt(links) === before.nlink)
     ) return null;
     if ((directory?.exactPrivateStorage ?? false) && !assurePrivateStoragePath(
       path,
@@ -270,9 +273,9 @@ function inspectExistingLockFile(
       'inspect-existing',
       { anchorPath: anchor.path },
     ).ok) return null;
-    const after = lstatSync(path);
+    const after = lstatSync(path, { bigint: true });
     return !after.isSymbolicLink() && after.isFile() && owned(after.uid) &&
-      privateMode(after, PRIVATE_FILE_MODE) && allowedLinks.includes(after.nlink) &&
+      privateMode(after, PRIVATE_FILE_MODE) && allowedLinks.some((links) => BigInt(links) === after.nlink) &&
       sameFile(before, after) && before.size === after.size &&
       stableAnchor(anchor) && (directory === undefined || stableDirectory(directory))
       ? after
@@ -285,19 +288,19 @@ function inspectExistingLockFile(
 function secureFreshCandidate(
   path: string,
   fd: number,
-  opened: Stats,
+  opened: BigIntStats,
   directory: LockDirectory,
 ): boolean {
   try {
     if (!stableDirectory(directory)) return false;
     fchmodSync(fd, PRIVATE_FILE_MODE);
-    const before = fstatSync(fd);
-    const namedBefore = lstatSync(path);
+    const before = fstatSync(fd, { bigint: true });
+    const namedBefore = lstatSync(path, { bigint: true });
     if (
-      !before.isFile() || before.nlink !== 1 || before.size !== 0 || !owned(before.uid) ||
+      !before.isFile() || before.nlink !== 1n || before.size !== 0n || !owned(before.uid) ||
       !privateMode(before, PRIVATE_FILE_MODE) || !sameFile(opened, before) ||
-      namedBefore.isSymbolicLink() || !namedBefore.isFile() || namedBefore.nlink !== 1 ||
-      namedBefore.size !== 0 || !owned(namedBefore.uid) || !privateMode(namedBefore, PRIVATE_FILE_MODE) ||
+      namedBefore.isSymbolicLink() || !namedBefore.isFile() || namedBefore.nlink !== 1n ||
+      namedBefore.size !== 0n || !owned(namedBefore.uid) || !privateMode(namedBefore, PRIVATE_FILE_MODE) ||
       !sameFile(before, namedBefore)
     ) return false;
     if (directory.exactPrivateStorage && !assurePrivateStoragePath(
@@ -306,12 +309,12 @@ function secureFreshCandidate(
       'secure-created',
       { anchorPath: directory.anchor.path },
     ).ok) return false;
-    const after = fstatSync(fd);
-    const namedAfter = lstatSync(path);
-    return after.isFile() && after.nlink === 1 && after.size === 0 && owned(after.uid) &&
+    const after = fstatSync(fd, { bigint: true });
+    const namedAfter = lstatSync(path, { bigint: true });
+    return after.isFile() && after.nlink === 1n && after.size === 0n && owned(after.uid) &&
       privateMode(after, PRIVATE_FILE_MODE) && sameFile(before, after) &&
-      namedAfter.isFile() && !namedAfter.isSymbolicLink() && namedAfter.nlink === 1 &&
-      namedAfter.size === 0 && owned(namedAfter.uid) && privateMode(namedAfter, PRIVATE_FILE_MODE) &&
+      namedAfter.isFile() && !namedAfter.isSymbolicLink() && namedAfter.nlink === 1n &&
+      namedAfter.size === 0n && owned(namedAfter.uid) && privateMode(namedAfter, PRIVATE_FILE_MODE) &&
       sameFile(after, namedAfter) && stableDirectory(directory);
   } catch {
     return false;
@@ -539,27 +542,27 @@ function currentStartIdentity(
 
 function hasExpectedToken(
   path: string,
-  expected: { dev: number; ino: number; token: string },
-  expectedLinks: number,
+  expected: { dev: bigint; ino: bigint; token: string },
+  expectedLinks: bigint,
   directory: LockDirectory,
   exactInspection = true,
 ): boolean {
   let fd: number | undefined;
   try {
     const named = exactInspection
-      ? inspectExistingLockFile(path, [expectedLinks], directory)
-      : lstatSync(path);
+      ? inspectExistingLockFile(path, [Number(expectedLinks)], directory)
+      : lstatSync(path, { bigint: true });
     if (!named || named.isSymbolicLink() || !named.isFile() || !owned(named.uid) ||
       !privateMode(named, PRIVATE_FILE_MODE) || named.nlink !== expectedLinks ||
       !sameFile(named, expected) || !stableDirectory(directory)) return false;
     fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-    const opened = fstatSync(fd);
+    const opened = fstatSync(fd, { bigint: true });
     if (
       !opened.isFile() || !owned(opened.uid) || opened.dev !== expected.dev ||
       opened.ino !== expected.ino || opened.nlink !== expectedLinks ||
-      !privateMode(opened, PRIVATE_FILE_MODE) || opened.size < 2 || opened.size > 512
+      !privateMode(opened, PRIVATE_FILE_MODE) || opened.size < 2n || opened.size > 512n
     ) return false;
-    const bytes = Buffer.alloc(opened.size);
+    const bytes = Buffer.alloc(Number(opened.size));
     if (readSync(fd, bytes, 0, bytes.length, 0) !== bytes.length) return false;
     const owner = JSON.parse(bytes.toString('utf8')) as { token?: unknown };
     return owner.token === expected.token;
@@ -572,14 +575,14 @@ function hasExpectedToken(
 
 function removeEmptyCandidate(
   path: string,
-  expected: Pick<Stats, 'dev' | 'ino'>,
+  expected: Pick<BigIntStats, 'dev' | 'ino'>,
   directory: LockDirectory,
 ): boolean {
   try {
     if (!stableDirectory(directory)) return false;
-    const current = lstatSync(path);
+    const current = lstatSync(path, { bigint: true });
     if (
-      current.isSymbolicLink() || !current.isFile() || current.nlink !== 1 || current.size !== 0 ||
+      current.isSymbolicLink() || !current.isFile() || current.nlink !== 1n || current.size !== 0n ||
       !owned(current.uid) || !privateMode(current, PRIVATE_FILE_MODE) || !sameFile(current, expected)
     ) return false;
     unlinkSync(path);
@@ -591,7 +594,7 @@ function removeEmptyCandidate(
 
 function removeSecuredCandidate(
   path: string,
-  expected: Pick<Stats, 'dev' | 'ino'>,
+  expected: Pick<BigIntStats, 'dev' | 'ino'>,
   directory: LockDirectory,
 ): boolean {
   try {
@@ -607,22 +610,22 @@ function removeSecuredCandidate(
 function collapsePublishedCandidate(
   canonical: string,
   candidate: string,
-  expected: { dev: number; ino: number; token: string },
+  expected: { dev: bigint; ino: bigint; token: string },
   directory: LockDirectory,
 ): boolean {
   try {
-    if (!hasExpectedToken(candidate, expected, 2, directory) ||
-      !hasExpectedToken(canonical, expected, 2, directory)) {
+    if (!hasExpectedToken(candidate, expected, 2n, directory) ||
+      !hasExpectedToken(canonical, expected, 2n, directory)) {
       return false;
     }
-    const candidateBefore = lstatSync(candidate);
-    const canonicalBefore = lstatSync(canonical);
+    const candidateBefore = lstatSync(candidate, { bigint: true });
+    const canonicalBefore = lstatSync(canonical, { bigint: true });
     if (
       !sameFile(candidateBefore, expected) || !sameFile(canonicalBefore, expected) ||
-      candidateBefore.nlink !== 2 || canonicalBefore.nlink !== 2
+      candidateBefore.nlink !== 2n || canonicalBefore.nlink !== 2n
     ) return false;
     unlinkSync(candidate);
-    return hasExpectedToken(canonical, expected, 1, directory) &&
+    return hasExpectedToken(canonical, expected, 1n, directory) &&
       fsyncDirectory(dirname(canonical)) && stableDirectory(directory);
   } catch {
     return false;
@@ -631,7 +634,7 @@ function collapsePublishedCandidate(
 
 function safelyUnlink(
   path: string,
-  expected: { dev: number; ino: number; token: string },
+  expected: { dev: bigint; ino: bigint; token: string },
   directory: LockDirectory,
   allowedLinks: readonly number[] = [1],
   exactInspection = true,
@@ -643,20 +646,21 @@ function safelyUnlink(
   try {
     const current = exactInspection
       ? inspectExistingLockFile(path, allowedLinks, directory)
-      : lstatSync(path);
+      : lstatSync(path, { bigint: true });
     if (!current) return false;
     if (
       current.isSymbolicLink() || !current.isFile() || !owned(current.uid) ||
-      !privateMode(current, PRIVATE_FILE_MODE) || !allowedLinks.includes(current.nlink) ||
+      !privateMode(current, PRIVATE_FILE_MODE) ||
+      !allowedLinks.some((links) => BigInt(links) === current.nlink) ||
       current.dev !== expected.dev || current.ino !== expected.ino || !stableDirectory(directory)
     ) return false;
     // Pin this exact inode under a unique name before removing the requested
     // path. The elevated link count makes cooperating contenders fail closed.
     linkSync(path, guard);
     guarded = true;
-    const pinned = lstatSync(guard);
-    const stillCurrent = lstatSync(path);
-    const pinnedLinks = current.nlink + 1;
+    const pinned = lstatSync(guard, { bigint: true });
+    const stillCurrent = lstatSync(path, { bigint: true });
+    const pinnedLinks = current.nlink + 1n;
     if (
       pinned.dev !== expected.dev || pinned.ino !== expected.ino || pinned.nlink !== pinnedLinks ||
       stillCurrent.dev !== expected.dev || stillCurrent.ino !== expected.ino ||
@@ -664,7 +668,7 @@ function safelyUnlink(
       !hasExpectedToken(guard, expected, pinnedLinks, directory, exactInspection)
     ) return false;
     unlinkSync(path);
-    const remaining = lstatSync(guard);
+    const remaining = lstatSync(guard, { bigint: true });
     removed = remaining.dev === expected.dev && remaining.ino === expected.ino &&
       remaining.nlink === current.nlink &&
       hasExpectedToken(guard, expected, current.nlink, directory, exactInspection);
@@ -685,7 +689,7 @@ function settleCanonicalInstallation(
   directory: LockDirectory,
 ): LocalStoreLock | null {
   try {
-    const candidateStat = lstatSync(candidate);
+    const candidateStat = lstatSync(candidate, { bigint: true });
     if (
       !candidateStat.isSymbolicLink() && candidateStat.isFile() && owned(candidateStat.uid) &&
       candidateStat.dev === expected.dev && candidateStat.ino === expected.ino
@@ -697,7 +701,7 @@ function settleCanonicalInstallation(
   }
   if (safelyUnlink(path, expected, directory, [1, 2])) {
     try {
-      const candidateStat = lstatSync(candidate);
+      const candidateStat = lstatSync(candidate, { bigint: true });
       if (sameFile(candidateStat, expected)) safelyUnlink(candidate, expected, directory);
     } catch { /* candidate already absent */ }
     return null;
@@ -707,7 +711,7 @@ function settleCanonicalInstallation(
   }
 
   try {
-    const current = lstatSync(path);
+    const current = lstatSync(path, { bigint: true });
     if (current.dev !== expected.dev || current.ino !== expected.ino) return null;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
@@ -717,32 +721,32 @@ function settleCanonicalInstallation(
 
 function collapseLockAlias(
   path: string,
-  expected: { dev: number; ino: number; token: string },
+  expected: { dev: bigint; ino: bigint; token: string },
   names: readonly string[],
   directory: LockDirectory,
 ): boolean {
   const dir = dirname(path);
   try {
-    if (!hasExpectedToken(path, expected, 2, directory)) return false;
+    if (!hasExpectedToken(path, expected, 2n, directory)) return false;
     for (const name of names) {
       const alias = join(dir, name);
-      const stat = lstatSync(alias);
+      const stat = lstatSync(alias, { bigint: true });
       if (
         stat.isSymbolicLink() || !stat.isFile() || !owned(stat.uid) ||
-        stat.dev !== expected.dev || stat.ino !== expected.ino || stat.nlink !== 2 ||
-        !hasExpectedToken(alias, expected, 2, directory)
+        stat.dev !== expected.dev || stat.ino !== expected.ino || stat.nlink !== 2n ||
+        !hasExpectedToken(alias, expected, 2n, directory)
       ) continue;
-      const canonical = lstatSync(path);
-      const confirmedAlias = lstatSync(alias);
+      const canonical = lstatSync(path, { bigint: true });
+      const confirmedAlias = lstatSync(alias, { bigint: true });
       if (
-        canonical.dev !== expected.dev || canonical.ino !== expected.ino || canonical.nlink !== 2 ||
+        canonical.dev !== expected.dev || canonical.ino !== expected.ino || canonical.nlink !== 2n ||
         confirmedAlias.dev !== expected.dev || confirmedAlias.ino !== expected.ino ||
-        confirmedAlias.nlink !== 2
+        confirmedAlias.nlink !== 2n
       ) return false;
       unlinkSync(alias);
-      const installed = lstatSync(path);
-      return installed.dev === expected.dev && installed.ino === expected.ino && installed.nlink === 1 &&
-        hasExpectedToken(path, expected, 1, directory) && fsyncDirectory(dir) &&
+      const installed = lstatSync(path, { bigint: true });
+      return installed.dev === expected.dev && installed.ino === expected.ino && installed.nlink === 1n &&
+        hasExpectedToken(path, expected, 1n, directory) && fsyncDirectory(dir) &&
         stableDirectory(directory);
     }
   } catch { /* uncertain two-link state remains fail-closed */ }
@@ -751,7 +755,7 @@ function collapseLockAlias(
 
 function collapseInstalledCandidate(
   path: string,
-  expected: { dev: number; ino: number; token: string; pid: number },
+  expected: { dev: bigint; ino: bigint; token: string; pid: number },
   directory: LockDirectory,
 ): boolean {
   const candidate = `${basename(path)}.${expected.pid}.${expected.token}.candidate`;
@@ -782,23 +786,23 @@ function isProcessProvablyDead(pid: number): boolean {
 
 function collapseAbandonedUnlinkGuard(
   path: string,
-  expected: { dev: number; ino: number; token: string },
+  expected: { dev: bigint; ino: bigint; token: string },
   directory: LockDirectory,
 ): boolean {
   const canonicalBasename = basename(path);
   const dir = dirname(path);
   try {
-    if (!hasExpectedToken(path, expected, 2, directory)) return false;
+    if (!hasExpectedToken(path, expected, 2n, directory)) return false;
     for (const name of readdirSync(dir)) {
       const creatorPid = unlinkGuardCreatorPid(canonicalBasename, name);
       if (creatorPid === undefined) continue;
       const guard = join(dir, name);
-      const stat = lstatSync(guard);
+      const stat = lstatSync(guard, { bigint: true });
       if (
-        stat.isSymbolicLink() || !stat.isFile() || !owned(stat.uid) || stat.nlink !== 2 ||
+        stat.isSymbolicLink() || !stat.isFile() || !owned(stat.uid) || stat.nlink !== 2n ||
         stat.dev !== expected.dev || stat.ino !== expected.ino
       ) continue;
-      if (!hasExpectedToken(guard, expected, 2, directory) || !isProcessProvablyDead(creatorPid)) {
+      if (!hasExpectedToken(guard, expected, 2n, directory) || !isProcessProvablyDead(creatorPid)) {
         return false;
       }
       // collapseLockAlias repeats the inode/link/token checks after the death
@@ -813,23 +817,23 @@ function collapseAbandonedUnlinkGuard(
 
 function ownerState(
   path: string,
-  expected: { dev: number; ino: number; mtimeMs: number },
+  expected: { dev: bigint; ino: bigint; mtimeMs: bigint },
   directory: LockDirectory,
 ): { state: 'alive' | 'dead' | 'initializing' | 'unknown'; token?: string; pid?: number } {
   let fd: number | undefined;
   try {
     const named = inspectExistingLockFile(path, [1, 2], directory);
     if (!named || !sameFile(named, expected)) {
-      return { state: Date.now() - expected.mtimeMs < INIT_GRACE_MS ? 'initializing' : 'unknown' };
+      return { state: BigInt(Date.now()) - expected.mtimeMs < BigInt(INIT_GRACE_MS) ? 'initializing' : 'unknown' };
     }
     fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-    const opened = fstatSync(fd);
+    const opened = fstatSync(fd, { bigint: true });
     if (
-      !opened.isFile() || opened.nlink < 1 || opened.nlink > 2 || !owned(opened.uid) ||
+      !opened.isFile() || opened.nlink < 1n || opened.nlink > 2n || !owned(opened.uid) ||
       opened.dev !== expected.dev || opened.ino !== expected.ino ||
-      !privateMode(opened, PRIVATE_FILE_MODE) || opened.size < 2 || opened.size > 512
-    ) return { state: Date.now() - expected.mtimeMs < INIT_GRACE_MS ? 'initializing' : 'unknown' };
-    const bytes = Buffer.alloc(opened.size);
+      !privateMode(opened, PRIVATE_FILE_MODE) || opened.size < 2n || opened.size > 512n
+    ) return { state: BigInt(Date.now()) - expected.mtimeMs < BigInt(INIT_GRACE_MS) ? 'initializing' : 'unknown' };
+    const bytes = Buffer.alloc(Number(opened.size));
     if (readSync(fd, bytes, 0, bytes.length, 0) !== bytes.length) return { state: 'unknown' };
     const owner = JSON.parse(bytes.toString('utf8')) as {
       pid?: unknown; token?: unknown; startRef?: unknown; startRefVerified?: unknown;
@@ -838,7 +842,7 @@ function ownerState(
     if (
       !Number.isInteger(owner.pid) || Number(owner.pid) < 1 ||
       typeof owner.token !== 'string' || owner.token.length < 1 || owner.token.length > 64
-    ) return { state: Date.now() - expected.mtimeMs < INIT_GRACE_MS ? 'initializing' : 'unknown' };
+    ) return { state: BigInt(Date.now()) - expected.mtimeMs < BigInt(INIT_GRACE_MS) ? 'initializing' : 'unknown' };
     const pid = Number(owner.pid);
     try { process.kill(pid, 0); }
     catch (error) {
@@ -855,7 +859,7 @@ function ownerState(
     // steal authority from a live process.
     return { state: 'alive', token: owner.token, pid };
   } catch {
-    return { state: Date.now() - expected.mtimeMs < INIT_GRACE_MS ? 'initializing' : 'unknown' };
+    return { state: BigInt(Date.now()) - expected.mtimeMs < BigInt(INIT_GRACE_MS) ? 'initializing' : 'unknown' };
   } finally {
     if (fd !== undefined) { try { closeSync(fd); } catch { /* best effort */ } }
   }
@@ -863,26 +867,26 @@ function ownerState(
 
 function contendedOwnerState(path: string): 'absent' | 'alive' | 'dead' | 'initializing' | 'unknown' {
   let fd: number | undefined;
-  let observed: Stats | undefined;
+  let observed: BigIntStats | undefined;
   try {
-    observed = lstatSync(path);
+    observed = lstatSync(path, { bigint: true });
     if (
       observed.isSymbolicLink() || !observed.isFile() || !owned(observed.uid) ||
-      !privateMode(observed, PRIVATE_FILE_MODE) || observed.nlink < 1 || observed.nlink > 2
+      !privateMode(observed, PRIVATE_FILE_MODE) || observed.nlink < 1n || observed.nlink > 2n
     ) return 'unknown';
     fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-    const opened = fstatSync(fd);
+    const opened = fstatSync(fd, { bigint: true });
     if (
       !opened.isFile() || !owned(opened.uid) || !privateMode(opened, PRIVATE_FILE_MODE) ||
       opened.dev !== observed.dev || opened.ino !== observed.ino ||
-      opened.nlink < 1 || opened.nlink > 2 || opened.size < 2 || opened.size > 512
-    ) return Date.now() - observed.mtimeMs < INIT_GRACE_MS ? 'initializing' : 'unknown';
-    const bytes = Buffer.alloc(opened.size);
+      opened.nlink < 1n || opened.nlink > 2n || opened.size < 2n || opened.size > 512n
+    ) return BigInt(Date.now()) - observed.mtimeMs < BigInt(INIT_GRACE_MS) ? 'initializing' : 'unknown';
+    const bytes = Buffer.alloc(Number(opened.size));
     if (readSync(fd, bytes, 0, bytes.length, 0) !== bytes.length) return 'unknown';
     const owner = JSON.parse(bytes.toString('utf8')) as { pid?: unknown; token?: unknown };
     if (!Number.isInteger(owner.pid) || Number(owner.pid) < 1 ||
       typeof owner.token !== 'string' || owner.token.length < 1 || owner.token.length > 64) {
-      return Date.now() - observed.mtimeMs < INIT_GRACE_MS ? 'initializing' : 'unknown';
+      return BigInt(Date.now()) - observed.mtimeMs < BigInt(INIT_GRACE_MS) ? 'initializing' : 'unknown';
     }
     try {
       process.kill(Number(owner.pid), 0);
@@ -905,11 +909,11 @@ function hasVerifiedLiveOwner(path: string, directory: LockDirectory): boolean {
     const named = inspectExistingLockFile(path, [1, 2], directory);
     if (!named) return false;
     fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-    const opened = fstatSync(fd);
-    if (!sameFile(named, opened) || opened.nlink !== named.nlink || opened.size < 2 || opened.size > 512) {
+    const opened = fstatSync(fd, { bigint: true });
+    if (!sameFile(named, opened) || opened.nlink !== named.nlink || opened.size < 2n || opened.size > 512n) {
       return false;
     }
-    const bytes = Buffer.alloc(opened.size);
+    const bytes = Buffer.alloc(Number(opened.size));
     if (readSync(fd, bytes, 0, bytes.length, 0) !== bytes.length) return false;
     const owner = JSON.parse(bytes.toString('utf8')) as {
       pid?: unknown;
@@ -959,7 +963,7 @@ function acquireReclaimElection(
   const token = randomUUID();
   const candidate = `${ownerPath}.${process.pid}.${token}.candidate`;
   let fd: number | undefined;
-  let candidateIdentity: Stats | undefined;
+  let candidateIdentity: BigIntStats | undefined;
   let candidateSecured = false;
   let installedLock: LocalStoreLock | undefined;
   let election: LocalStoreLock | null = null;
@@ -969,7 +973,7 @@ function acquireReclaimElection(
       fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
       0o600,
     );
-    const opened = fstatSync(fd);
+    const opened = fstatSync(fd, { bigint: true });
     candidateIdentity = opened;
     if (!secureFreshCandidate(candidate, fd, opened, directory)) return null;
     candidateSecured = true;
@@ -984,14 +988,14 @@ function acquireReclaimElection(
     if (writtenBytes !== bytes.length) return null;
     fchmodSync(fd, PRIVATE_FILE_MODE);
     fsyncSync(fd);
-    const written = fstatSync(fd);
+    const written = fstatSync(fd, { bigint: true });
     if (
-      !written.isFile() || written.nlink !== 1 || written.size !== bytes.length ||
+      !written.isFile() || written.nlink !== 1n || written.size !== BigInt(bytes.length) ||
       !sameFile(written, opened) || !privateMode(written, PRIVATE_FILE_MODE)
     ) return null;
     closeSync(fd);
     fd = undefined;
-    if (!hasExpectedToken(candidate, { ...opened, token }, 1, directory) ||
+    if (!hasExpectedToken(candidate, { ...opened, token }, 1n, directory) ||
       !stableDirectory(directory)) return null;
 
     try {
@@ -1019,7 +1023,7 @@ function acquireReclaimElection(
     }
     const installed = inspectExistingLockFile(ownerPath, [1], directory);
     if (!installed || !sameFile(installed, opened) ||
-      !hasExpectedToken(ownerPath, { ...opened, token }, 1, directory)) {
+      !hasExpectedToken(ownerPath, { ...opened, token }, 1n, directory)) {
       throw new Error('unsafe installed reclaim election');
     }
     if (!installedLock) return null;
@@ -1097,14 +1101,14 @@ function acquireLocalStoreLockInternal(
     authorityAttempted = true;
 
     let fd: number | undefined;
-    let candidateIdentity: Stats | undefined;
+    let candidateIdentity: BigIntStats | undefined;
     let candidateSecured = false;
     let installedLock: LocalStoreLock | undefined;
     let usedPostDeadReclaimInstall = false;
     const candidate = `${path}.${process.pid}.${token}.candidate`;
     try {
       fd = openSync(candidate, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
-      const stat = fstatSync(fd);
+      const stat = fstatSync(fd, { bigint: true });
       candidateIdentity = stat;
       if (!secureFreshCandidate(candidate, fd, stat, directory)) throw new Error('unsafe local store lock');
       candidateSecured = true;
@@ -1119,14 +1123,14 @@ function acquireLocalStoreLockInternal(
       if (writtenBytes !== bytes.length) throw new Error('short local store lock write');
       fchmodSync(fd, PRIVATE_FILE_MODE);
       fsyncSync(fd);
-      const written = fstatSync(fd);
+      const written = fstatSync(fd, { bigint: true });
       if (
-        !written.isFile() || written.nlink !== 1 || written.size !== bytes.length ||
+        !written.isFile() || written.nlink !== 1n || written.size !== BigInt(bytes.length) ||
         !sameFile(written, stat) || !privateMode(written, PRIVATE_FILE_MODE)
       ) throw new Error('unsafe written local store lock');
       closeSync(fd);
       fd = undefined;
-      if (!hasExpectedToken(candidate, { ...stat, token }, 1, directory) ||
+      if (!hasExpectedToken(candidate, { ...stat, token }, 1n, directory) ||
         !stableDirectory(directory)) {
         throw new Error('unsafe persisted local store lock');
       }
@@ -1142,7 +1146,7 @@ function acquireLocalStoreLockInternal(
       }
       const linked = inspectExistingLockFile(path, [1], directory);
       if (!linked || !sameFile(linked, stat) ||
-        !hasExpectedToken(path, { ...stat, token }, 1, directory)) {
+        !hasExpectedToken(path, { ...stat, token }, 1n, directory)) {
         throw new Error('unsafe installed local store lock');
       }
       return installedLock;
@@ -1187,7 +1191,7 @@ function acquireLocalStoreLockInternal(
                 confirmedOwner.pid === undefined
               ) return null;
               const expected = { ...installed, token: owner.token, pid: confirmedOwner.pid };
-              if (installed.nlink === 2 &&
+              if (installed.nlink === 2n &&
                 !collapseInstalledCandidate(path, expected, directory) &&
                 !collapseAbandonedUnlinkGuard(path, expected, directory)) return null;
               const reclaimable = inspectExistingLockFile(path, [1], directory);
@@ -1244,12 +1248,12 @@ export function ownsLocalStoreLock(lock: LocalStoreLock | null | undefined): boo
     const stat = inspectExistingLockFile(lock.path, [1], directory);
     if (!stat || stat.dev !== lock.dev || stat.ino !== lock.ino) return false;
     fd = openSync(lock.path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-    const opened = fstatSync(fd);
+    const opened = fstatSync(fd, { bigint: true });
     if (
-      opened.dev !== lock.dev || opened.ino !== lock.ino || opened.nlink !== 1 ||
-      !privateMode(opened, PRIVATE_FILE_MODE) || opened.size < 2 || opened.size > 512
+      opened.dev !== lock.dev || opened.ino !== lock.ino || opened.nlink !== 1n ||
+      !privateMode(opened, PRIVATE_FILE_MODE) || opened.size < 2n || opened.size > 512n
     ) return false;
-    const bytes = Buffer.alloc(opened.size);
+    const bytes = Buffer.alloc(Number(opened.size));
     if (readSync(fd, bytes, 0, bytes.length, 0) !== bytes.length) return false;
     const owner = JSON.parse(bytes.toString('utf8')) as { token?: unknown };
     return owner.token === lock.token;
@@ -1272,22 +1276,22 @@ export function releaseLocalStoreLock(lock: LocalStoreLock | null | undefined): 
   }
   let fd: number | undefined;
   try {
-    const stat = lstatSync(lock.path);
+    const stat = lstatSync(lock.path, { bigint: true });
     if (stat.dev !== lock.dev || stat.ino !== lock.ino) {
       retainedReleases.delete(lock.path);
       return false;
     }
     if (
-      stat.isSymbolicLink() || !stat.isFile() || !owned(stat.uid) || stat.nlink !== 1 ||
+      stat.isSymbolicLink() || !stat.isFile() || !owned(stat.uid) || stat.nlink !== 1n ||
       !privateMode(stat, PRIVATE_FILE_MODE)
     ) return false;
     fd = openSync(lock.path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-    const opened = fstatSync(fd);
+    const opened = fstatSync(fd, { bigint: true });
     if (
-      opened.dev !== lock.dev || opened.ino !== lock.ino || opened.nlink !== 1 ||
-      !privateMode(opened, PRIVATE_FILE_MODE) || opened.size < 2 || opened.size > 512
+      opened.dev !== lock.dev || opened.ino !== lock.ino || opened.nlink !== 1n ||
+      !privateMode(opened, PRIVATE_FILE_MODE) || opened.size < 2n || opened.size > 512n
     ) return false;
-    const bytes = Buffer.alloc(opened.size);
+    const bytes = Buffer.alloc(Number(opened.size));
     if (readSync(fd, bytes, 0, bytes.length, 0) !== bytes.length) return false;
     const owner = JSON.parse(bytes.toString('utf8')) as { token?: unknown };
     if (owner.token !== lock.token) return false;
@@ -1295,7 +1299,7 @@ export function releaseLocalStoreLock(lock: LocalStoreLock | null | undefined): 
     if (released) retainedReleases.delete(lock.path);
     else {
       try {
-        const remaining = lstatSync(lock.path);
+        const remaining = lstatSync(lock.path, { bigint: true });
         if (sameFile(remaining, lock)) retainedReleases.set(lock.path, lock);
         else retainedReleases.delete(lock.path);
       } catch (error) {

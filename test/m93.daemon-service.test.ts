@@ -72,6 +72,7 @@ import {
   uninstall,
   serviceStatus,
 } from '../src/core/daemon/service.js';
+import { fsyncDirectory } from '../src/core/util/durability.js';
 import { daemonServiceInstallOptions } from '../src/core/daemon/service-config.js';
 import {
   buildWindowsTaskCreateScript,
@@ -1093,6 +1094,7 @@ describe('install() — mocked spawnSync', () => {
   });
 
   it('win32: archives a safe legacy Startup launcher outside Startup', async () => {
+    const exactIdentity = 2n ** 54n + 1n;
     const legacy = path.join(
       FAKE_HOME,
       'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup',
@@ -1108,8 +1110,21 @@ describe('install() — mocked spawnSync', () => {
     (fs.renameSync as ReturnType<typeof vi.fn>).mockImplementation(() => {
       archived = true;
     });
-    (fs.lstatSync as ReturnType<typeof vi.fn>).mockImplementation((candidate: fs.PathLike) => {
+    (fs.lstatSync as ReturnType<typeof vi.fn>).mockImplementation((
+      candidate: fs.PathLike,
+      options?: { bigint?: boolean },
+    ) => {
       const value = candidate.toString();
+      if (options?.bigint) {
+        return {
+          isSymbolicLink: () => false,
+          isDirectory: () => true,
+          mode: 0o700n,
+          dev: exactIdentity,
+          ino: exactIdentity + (value.includes('Startup') ? 1n : 2n),
+          uid: BigInt(typeof process.getuid === 'function' ? process.getuid() : 0),
+        } as fs.BigIntStats;
+      }
       if ((value === legacy && !archived) || (value === archivedPath && archived)) {
         return {
             isSymbolicLink: () => false,
@@ -1137,6 +1152,12 @@ describe('install() — mocked spawnSync', () => {
       legacy,
       archivedPath,
     );
+    expect(fsyncDirectory).toHaveBeenCalledWith(path.dirname(legacy), {
+      expectedIdentity: { dev: exactIdentity, ino: exactIdentity + 1n },
+    });
+    expect(fsyncDirectory).toHaveBeenCalledWith(path.dirname(archivedPath), {
+      expectedIdentity: { dev: exactIdentity, ino: exactIdentity + 2n },
+    });
   });
 
   it('win32: refuses to follow a symlinked legacy Startup launcher', async () => {
