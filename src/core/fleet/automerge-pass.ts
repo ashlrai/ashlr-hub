@@ -400,6 +400,8 @@ export interface AutoMergePassResult {
 const JUDGE_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour — mirrors Gate 7 staleness window
 const JUDGE_ESTIMATE_TOKENS_IN = 4_000;
 const JUDGE_ESTIMATE_TOKENS_OUT = 1_000;
+const VERIFICATION_CONTRACT_BREACH = 'verification contract breach; outcome uncertain; pass aborted';
+const MERGE_GATE_CONTRACT_BREACH = 'merge gate contract breach; outcome uncertain; pass aborted';
 
 function recordAutoMergeVerificationAgentAction(fields: {
   proposal: Proposal;
@@ -979,16 +981,22 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
         let transaction: Awaited<ReturnType<typeof verifyAndPersistProposal>>;
         try {
           transaction = await verifyAndPersistProposal(p, cfg, 'auto-merge-preflight');
-        } catch (err) {
+        } catch {
           recordAutoMergeVerificationAgentAction({
             proposal: p,
             check: verifyCheck,
             phase: 'finish',
             ok: false,
-            detail: (err as Error)?.message ?? String(err),
+            detail: VERIFICATION_CONTRACT_BREACH,
             durationMs: Date.now() - verifyStartedAt,
           });
-          throw err;
+          recordSafetySkip(
+            out,
+            p.id,
+            `${verifyCheck}-contract`,
+            `${verifyCheck}: ${VERIFICATION_CONTRACT_BREACH}`,
+          );
+          return out;
         }
         const verify = transaction.verify;
         recordAutoMergeVerificationAgentAction({
@@ -1264,7 +1272,8 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
       if (res.branched) out.branched++;
       if (res.handoff) out.handoffs++;
     } catch {
-      // autoMergeProposal never throws by contract; defensive only.
+      recordSafetySkip(out, p.id, 'merge-gate-contract', MERGE_GATE_CONTRACT_BREACH);
+      return out;
     }
   }
   return out;
