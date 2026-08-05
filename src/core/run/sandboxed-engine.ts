@@ -96,6 +96,13 @@ import {
 import { recordAgentAction, type AgentActionOutcome } from '../fleet/agent-action-ledger.js';
 import { agentRunSemanticEvents } from '../learning/agent-semantic-events.js';
 import { sandboxedRunAgentWorkTransitions } from '../learning/agent-work-transitions.js';
+import {
+  defineHarnessObservations,
+  harnessObservationSubjectRef,
+  MAX_HARNESS_OBSERVATIONS,
+  type HarnessObservationDraftV1,
+  type HarnessObservationV1,
+} from '../learning/harness-observations.js';
 import { hashDiff, signProvenance } from '../foundry/provenance.js';
 // M249: RunCache shadow mode — key construction + store (import lazy so flag-off path
 // incurs zero module load cost; the dynamic import is cached by Node after first call).
@@ -137,6 +144,8 @@ export interface SandboxedEngineResult {
   retryEvidence?: {
     mutatingToolActions: number;
   };
+  /** In-memory-only, metadata-only observations for an enclosing terminal owner. */
+  harnessObservations?: HarnessObservationV1[];
 }
 
 export interface SandboxRetentionEvidence {
@@ -503,6 +512,7 @@ function writeSandboxedRunAgentAction(fields: {
   durationMs?: number;
   actionCounts: RunActionCounts;
   contextSummary?: RunContextSummary;
+  harnessObservations?: HarnessObservationV1[];
 }): void {
   try {
     const observedAt = new Date().toISOString();
@@ -529,6 +539,7 @@ function writeSandboxedRunAgentAction(fields: {
       status: fields.status,
       outcomeKind: fields.outcome?.kind,
       isPartial: fields.outcome?.isPartial,
+      harnessObservations: fields.harnessObservations,
     });
     const summary = runEventSummary({
       runId: fields.runId,
@@ -574,6 +585,7 @@ function writeSandboxedRunAgentAction(fields: {
       labelBasis: 'dispatch-outcome',
       semanticEvents,
       workTransitions,
+      ...(fields.harnessObservations ? { harnessObservations: fields.harnessObservations } : {}),
       backend: fields.engine,
       tier: fields.tier,
       model: fields.engineModel,
@@ -2651,6 +2663,7 @@ export async function runApiModelSandboxed(
     let m264SystemPrefix: string | undefined;
     let m264ContextSummary: RunContextSummary | undefined;
     let mutatingToolActions = 0;
+    const harnessObservationDrafts: HarnessObservationDraftV1[] = [];
     if (isLocalContextEnabled(engine, cfg) && delegationScope?.memoryMode !== 'none') {
       try {
         const bundle = await buildLocalContextBundle(goal, sb.worktreePath, cfg);
@@ -2721,6 +2734,10 @@ export async function runApiModelSandboxed(
             },
           }
         : {}),
+      onHarnessObservation: (observation: Omit<HarnessObservationDraftV1, 'observedAt'>) => {
+        if (harnessObservationDrafts.length >= MAX_HARNESS_OBSERVATIONS) return;
+        harnessObservationDrafts.push({ ...observation, observedAt: new Date().toISOString() });
+      },
       // Direct API runs expose only reversible sandbox write tools. A fresh
       // generation lets a discarded sandbox be reconstructed; callers under a
       // durable run lease supply that exact lease generation instead.
@@ -2736,6 +2753,9 @@ export async function runApiModelSandboxed(
     setRunActionCount(actionCounts, 'toolSteps', steps.filter((step) => step.kind === 'tool').length);
     setRunActionCount(actionCounts, 'totalSteps', steps.length);
     const durationMs = Date.now() - runStartedAt;
+    const harnessObservations = harnessObservationDrafts.length > 0
+      ? defineHarnessObservations(harnessObservationSubjectRef(id), harnessObservationDrafts)
+      : undefined;
     const runTelemetry = {
       durationMs,
       ...(m264ContextSummary ? { contextSummary: m264ContextSummary } : {}),
@@ -2763,6 +2783,7 @@ export async function runApiModelSandboxed(
         durationMs,
         actionCounts,
         contextSummary: m264ContextSummary,
+        harnessObservations,
       });
       return {
         state: withProposalOutcome(
@@ -2783,6 +2804,7 @@ export async function runApiModelSandboxed(
         ...(capturedCandidateProposalId ? { candidateProposalId: capturedCandidateProposalId } : {}),
         ...(capturedOutcome ? { proposalOutcome: capturedOutcome } : {}),
         ...(localApiModel ? { retryEvidence: { mutatingToolActions } } : {}),
+        ...(harnessObservations ? { harnessObservations } : {}),
       };
     };
 
@@ -2861,6 +2883,7 @@ export async function runApiModelSandboxed(
         durationMs,
         actionCounts,
         contextSummary: m264ContextSummary,
+        harnessObservations,
       });
       return {
         state: withProposalOutcome(
@@ -2880,6 +2903,7 @@ export async function runApiModelSandboxed(
         candidateProposalId,
         proposalOutcome: proposalOutcomeResult,
         ...(localApiModel ? { retryEvidence: { mutatingToolActions } } : {}),
+        ...(harnessObservations ? { harnessObservations } : {}),
       };
     }
 
@@ -2948,6 +2972,7 @@ export async function runApiModelSandboxed(
       durationMs,
       actionCounts,
       contextSummary: m264ContextSummary,
+      harnessObservations,
     });
     return {
       state: withProposalOutcome(
@@ -2967,6 +2992,7 @@ export async function runApiModelSandboxed(
       candidateProposalId,
       proposalOutcome: proposalOutcomeResult,
       ...(localApiModel ? { retryEvidence: { mutatingToolActions } } : {}),
+      ...(harnessObservations ? { harnessObservations } : {}),
     };
   } finally {
     if (createdHere) {

@@ -22,6 +22,10 @@ import type { AshlrConfig } from '../src/core/types.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import {
+  defineHarnessObservations,
+  harnessObservationSubjectRef,
+} from '../src/core/learning/harness-observations.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -597,6 +601,58 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
       diffFiles: 2,
       diffLines: 13,
     });
+  });
+
+  it('api-model TITRR retains deferred observations in its one final terminal action', async () => {
+    const firstState = {
+      ...makeRunState({ status: 'done', result: 'first attempt' }),
+      engine: 'local-coder' as const,
+      engineModel: 'local-coder:qwen',
+      engineTier: 'mid' as const,
+    };
+    const secondState = {
+      ...makeRunState({ status: 'done', result: 'second attempt' }),
+      engine: 'local-coder' as const,
+      engineModel: 'local-coder:qwen',
+      engineTier: 'mid' as const,
+    };
+    const now = Date.now() - 10_000;
+    const firstObservations = defineHarnessObservations(harnessObservationSubjectRef(firstState.id), [
+      { actionClass: 'read', outcome: 'returned', observedAt: new Date(now).toISOString() },
+      { actionClass: 'write', outcome: 'committed', observedAt: new Date(now + 1).toISOString() },
+    ]);
+    const secondObservations = defineHarnessObservations(harnessObservationSubjectRef(secondState.id), [
+      { actionClass: 'exec', outcome: 'failed', observedAt: new Date(now + 2).toISOString() },
+      { actionClass: 'write', outcome: 'committed', observedAt: new Date(now + 3).toISOString() },
+    ]);
+    engineMockFn
+      .mockResolvedValueOnce({ state: firstState, harnessObservations: firstObservations })
+      .mockResolvedValueOnce({ state: secondState, harnessObservations: secondObservations });
+    detectVCMockFn.mockReturnValue([{ kind: 'test', cmd: ['npm', 'test'] }]);
+    runVCMockFn
+      .mockReturnValueOnce({ ok: false, command: 'npm test', exitCode: 1, output: 'failed', timedOut: false })
+      .mockReturnValueOnce({ ok: true, command: 'npm test', exitCode: 0, output: 'passed', timedOut: false });
+
+    const runGoal = await loadRunGoal();
+    await runGoal('fix a bug', sandboxCfg(), {
+      engine: 'local-coder',
+      sandboxEngine: true,
+      titrrMaxAttempts: 2,
+      budget: { maxTokens: 1_000_000, maxSteps: 100 },
+      tools: false,
+    });
+
+    expect(engineMockFn).toHaveBeenCalledTimes(2);
+    expect(terminalActionMockFn).toHaveBeenCalledTimes(1);
+    const terminal = terminalActionMockFn.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(terminal['runId']).toBe(secondState.id);
+    expect(terminal['startedAt']).toBe(firstState.createdAt);
+    expect(terminal['harnessObservations']).toEqual([
+      expect.objectContaining({ subjectRef: `run:${secondState.id}`, ordinal: 1, actionClass: 'read' }),
+      expect.objectContaining({ subjectRef: `run:${secondState.id}`, ordinal: 2, actionClass: 'write' }),
+      expect.objectContaining({ subjectRef: `run:${secondState.id}`, ordinal: 3, actionClass: 'exec' }),
+      expect.objectContaining({ subjectRef: `run:${secondState.id}`, ordinal: 4, actionClass: 'write' }),
+    ]);
   });
 
   it('api-model step-cap output remains partial when TITRR owns capture', async () => {

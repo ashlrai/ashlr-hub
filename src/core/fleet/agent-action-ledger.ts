@@ -34,6 +34,8 @@ import type {
   RepairTreatment,
   RouteSnapshot,
   RunEventSummary,
+  RunProposalOutcomeKind,
+  RunState,
   WorkSource,
 } from '../types.js';
 import { repairTreatmentForUnitId } from './generated-repair-identity.js';
@@ -60,6 +62,7 @@ import {
   sanitizeAgentSemanticEvents,
 } from '../learning/agent-semantic-events.js';
 import {
+  agentWorkTransitionsMatchHarnessObservations,
   agentWorkTransitionBoundSubjectRef,
   projectAgentWorkTransitionSequence,
   sanitizeAgentWorkTransitions,
@@ -68,6 +71,11 @@ import {
   type AgentWorkTransitionV1,
   type AgentWorkTriggerV1,
 } from '../learning/agent-work-transitions.js';
+import {
+  projectHarnessObservationSequence,
+  sanitizeHarnessObservations,
+  type HarnessObservationV1,
+} from '../learning/harness-observations.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DATE_LEDGER_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
@@ -92,6 +100,24 @@ const RUN_SUMMARY_KEYS = new Set([
 const EVIDENCE_OUTCOME_KEYS = new Set([
   'target', 'trustBasis', 'riskClass', 'verificationPassed', 'policyAllowed',
   'policyAction', 'policyTier', 'gateCount',
+]);
+const TERMINAL_RUN_STATUSES = new Set<RunState['status']>([
+  'done', 'failed', 'aborted',
+]);
+const RUN_PROPOSAL_OUTCOME_KINDS = new Set<RunProposalOutcomeKind>([
+  'filed',
+  'empty-diff',
+  'trivial-proposal',
+  'completeness-gate',
+  'partial-completeness-gate',
+  'engine-failed-no-diff',
+  'api-model-task-failed',
+  'sandbox-unavailable',
+  'engine-command-missing',
+  'engine-unsupported',
+  'kill-switch',
+  'proposal-disabled',
+  'proposal-capture-error',
 ]);
 
 export type AgentActionActor =
@@ -164,6 +190,10 @@ export interface AgentActionEvent {
   workTransitions?: AgentWorkTransitionV1[];
   /** Writer rejected a supplied transition sequence; parent history remains readable. */
   workTransitionsState?: 'rejected';
+  /** Harness-observed coarse action outcomes. Metadata-only and non-authoritative. */
+  harnessObservations?: HarnessObservationV1[];
+  /** Writer rejected a supplied observation sequence; parent history remains readable. */
+  harnessObservationsState?: 'rejected';
   repairHandoffId?: string;
   repairGenerationId?: string;
   repairTreatmentUnitId?: string;
@@ -442,6 +472,9 @@ export interface AgentWorkspacePeerState {
   trigger: AgentWorkTriggerV1;
   ordinal: number;
   replanCount: number;
+  actionCount: number;
+  /** V1 action observations contain no independent run-terminal attestation. */
+  semanticHarnessConsistency: 'consistent' | 'inconsistent' | 'unavailable';
   latestAt: string;
   parentSubjectRef?: string;
 }
@@ -655,16 +688,57 @@ function sanitizeEvent(event: AgentActionEvent, remintSemanticOccurrence = false
     : event.semanticEvents !== undefined || event.semanticEventsState === 'rejected'
       ? 'rejected' as const
       : undefined;
+  const harnessSubjectRef = runId ? `run:${runId}` : undefined;
+  const candidateHarnessObservations = event.actor === 'agent' && harnessSubjectRef
+    ? sanitizeHarnessObservations(event.harnessObservations, harnessSubjectRef)
+    : undefined;
   const workTransitionSubjectRef = agentWorkTransitionBoundSubjectRef(event.workTransitions, {
     runId,
     trajectoryId: event.trajectoryId,
   });
-  const workTransitions = event.actor === 'agent' && workTransitionSubjectRef
+  const candidateWorkTransitions = event.actor === 'agent' && workTransitionSubjectRef
     ? sanitizeAgentWorkTransitions(event.workTransitions, workTransitionSubjectRef)
     : undefined;
+  const terminalStatus = runEventSummary?.status !== undefined &&
+    TERMINAL_RUN_STATUSES.has(runEventSummary.status as RunState['status'])
+    ? runEventSummary.status as RunState['status']
+    : undefined;
+  const rawOutcomeKind = event.reason ?? runEventSummary?.outcome;
+  const outcomeKind = typeof rawOutcomeKind === 'string' &&
+    RUN_PROPOSAL_OUTCOME_KINDS.has(rawOutcomeKind as RunProposalOutcomeKind)
+    ? rawOutcomeKind as RunProposalOutcomeKind
+    : undefined;
+  const coupledBatchesSupplied = event.harnessObservations !== undefined &&
+    event.workTransitions !== undefined;
+  const coupledBatchesAccepted = !coupledBatchesSupplied || (
+    runId !== undefined &&
+    terminalStatus !== undefined &&
+    candidateHarnessObservations !== undefined &&
+    candidateWorkTransitions !== undefined &&
+    agentWorkTransitionsMatchHarnessObservations({
+      runId,
+      workTransitions: candidateWorkTransitions,
+      harnessObservations: candidateHarnessObservations,
+      terminal: {
+        status: terminalStatus,
+        ...(outcomeKind ? { outcomeKind } : {}),
+        ...(runEventSummary?.outcome === 'gate-blocked' || outcomeKind === 'partial-completeness-gate'
+          ? { isPartial: true }
+          : {}),
+      },
+    })
+  );
+  const harnessObservations = coupledBatchesAccepted ? candidateHarnessObservations : undefined;
+  const harnessObservationsState = harnessObservations
+    ? undefined
+    : event.harnessObservations !== undefined || event.harnessObservationsState === 'rejected'
+      ? 'rejected' as const
+      : undefined;
+  const workTransitions = coupledBatchesAccepted ? candidateWorkTransitions : undefined;
   const workTransitionsState = workTransitions
     ? undefined
-    : event.workTransitions !== undefined || event.workTransitionsState === 'rejected'
+    : event.workTransitions !== undefined || event.workTransitionsState === 'rejected' ||
+        event.harnessObservations !== undefined
       ? 'rejected' as const
       : undefined;
   const reason = canonicalReason(event, runEventSummary, outcome);
@@ -769,6 +843,8 @@ function sanitizeEvent(event: AgentActionEvent, remintSemanticOccurrence = false
     ...(semanticEventsState ? { semanticEventsState } : {}),
     ...(workTransitions ? { workTransitions } : {}),
     ...(workTransitionsState ? { workTransitionsState } : {}),
+    ...(harnessObservations ? { harnessObservations } : {}),
+    ...(harnessObservationsState ? { harnessObservationsState } : {}),
     ...(repairLineageInvalid
       ? { repairLineageInvalid: true as const }
       : repairLineageComplete
@@ -850,6 +926,13 @@ function isAgentActionEvent(value: unknown): value is AgentActionEvent {
     )) &&
     (obj['workTransitionsState'] === undefined || (
       obj['workTransitionsState'] === 'rejected' && obj['workTransitions'] === undefined
+    )) &&
+    (obj['harnessObservations'] === undefined || (
+      obj['actor'] === 'agent' && runId !== undefined &&
+      sanitizeHarnessObservations(obj['harnessObservations'], `run:${runId}`) !== undefined
+    )) &&
+    (obj['harnessObservationsState'] === undefined || (
+      obj['harnessObservationsState'] === 'rejected' && obj['harnessObservations'] === undefined
     )) &&
     (!['proposal-created', 'verified', 'judged', 'merged', 'rejected'].includes(String(obj['outcome'])) ||
       (typeof obj['proposalId'] === 'string' && obj['proposalId'].trim() !== ''))
@@ -1478,10 +1561,12 @@ function agentWorkspacePeerStates(events: AgentActionEvent[]): {
   state: 'available' | 'withheld';
   peerStates: AgentWorkspacePeerState[];
 } {
-  if (events.some((event) => event.workTransitionsState === 'rejected')) {
+  if (events.some((event) =>
+    event.workTransitionsState === 'rejected' || event.harnessObservationsState === 'rejected')) {
     return { state: 'withheld', peerStates: [] };
   }
   const batchesByRun = new Map<string, AgentWorkTransitionV1[][]>();
+  const observationBatchesByRun = new Map<string, HarnessObservationV1[][]>();
   for (const event of events) {
     if (!event.workTransitions) continue;
     if (!event.runId) return { state: 'withheld', peerStates: [] };
@@ -1491,6 +1576,33 @@ function agentWorkspacePeerStates(events: AgentActionEvent[]): {
     const batches = batchesByRun.get(event.runId) ?? [];
     batches.push(accepted);
     batchesByRun.set(event.runId, batches);
+    if (event.harnessObservations) {
+      const observations = sanitizeHarnessObservations(event.harnessObservations, subjectRef);
+      const terminalStatus = event.runEventSummary?.status;
+      if (!observations || !TERMINAL_RUN_STATUSES.has(terminalStatus as RunState['status'])) {
+        return { state: 'withheld', peerStates: [] };
+      }
+      const rawOutcomeKind = event.reason ?? event.runEventSummary?.outcome;
+      const outcomeKind = typeof rawOutcomeKind === 'string' &&
+        RUN_PROPOSAL_OUTCOME_KINDS.has(rawOutcomeKind as RunProposalOutcomeKind)
+        ? rawOutcomeKind as RunProposalOutcomeKind
+        : undefined;
+      if (!agentWorkTransitionsMatchHarnessObservations({
+        runId: event.runId,
+        workTransitions: accepted,
+        harnessObservations: observations,
+        terminal: {
+          status: terminalStatus as RunState['status'],
+          ...(outcomeKind ? { outcomeKind } : {}),
+          ...(event.runEventSummary?.outcome === 'gate-blocked' || outcomeKind === 'partial-completeness-gate'
+            ? { isPartial: true }
+            : {}),
+        },
+      })) return { state: 'withheld', peerStates: [] };
+      const observationBatches = observationBatchesByRun.get(event.runId) ?? [];
+      observationBatches.push(observations);
+      observationBatchesByRun.set(event.runId, observationBatches);
+    }
   }
   const peerStates: AgentWorkspacePeerState[] = [];
   for (const [runId, batches] of batchesByRun) {
@@ -1498,6 +1610,11 @@ function agentWorkspacePeerStates(events: AgentActionEvent[]): {
     if (projected.state !== 'available') return { state: 'withheld', peerStates: [] };
     const latest = projected.transitions.at(-1);
     if (!latest) continue;
+    const observed = projectHarnessObservationSequence(
+      observationBatchesByRun.get(runId) ?? [],
+      `run:${runId}`,
+    );
+    if (observed.state !== 'available') return { state: 'withheld', peerStates: [] };
     peerStates.push({
       runId,
       phase: latest.phase,
@@ -1505,6 +1622,9 @@ function agentWorkspacePeerStates(events: AgentActionEvent[]): {
       trigger: latest.trigger,
       ordinal: latest.ordinal,
       replanCount: projected.transitions.filter((transition) => transition.transition === 'replan').length,
+      actionCount: observed.observations.length,
+      // V1 action observations do not independently attest the run terminal.
+      semanticHarnessConsistency: 'unavailable',
       latestAt: latest.observedAt,
       ...(latest.parentSubjectRef ? { parentSubjectRef: latest.parentSubjectRef } : {}),
     });
@@ -1650,6 +1770,7 @@ export function summarizeAgentWorkspace(
     ...attentionFromCounts('backend', backendRows, 'backend events', 2),
     ...attentionFromCounts('source', sourceRows, 'source events', 1),
   ].slice(0, 8);
+  const runSignals = agentWorkspaceRunSignals(semanticEvents);
   const peerStateProjection = agentWorkspacePeerStates(semanticEvents);
 
   return {
@@ -1684,7 +1805,7 @@ export function summarizeAgentWorkspace(
       repo: entropy(repoRows),
     },
     recentActions: semanticEvents.slice(0, recentLimit).map(recentAction),
-    runSignals: agentWorkspaceRunSignals(semanticEvents),
+    runSignals,
     runSignalsState: 'available',
     peerStates: peerStateProjection.peerStates,
     peerStatesState: peerStateProjection.state,

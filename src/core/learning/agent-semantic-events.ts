@@ -191,7 +191,7 @@ export function agentRunSemanticEvents(input: {
       kind: 'action',
       predicate: 'agent.run.terminal',
       actionCode: 'agent.run',
-      status: input.status === 'aborted' ? 'blocked' : 'completed',
+      status: input.status === 'done' ? 'completed' : 'blocked',
     },
   ];
   if (input.proposalCreated !== undefined) {
