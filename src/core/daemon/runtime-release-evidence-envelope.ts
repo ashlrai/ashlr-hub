@@ -10,17 +10,17 @@ import {
   parseUnsignedRuntimeReleaseManifest,
 } from './runtime-release-manifest.js';
 
-export const RUNTIME_RELEASE_EVIDENCE_ENVELOPE_DOMAIN_V1 =
-  'ashlr:runtime-release-evidence-envelope:v1' as const;
-export const RUNTIME_RELEASE_EVIDENCE_TRUST_ROOT_DOMAIN_V1 =
-  'ashlr:runtime-release-evidence-trust-root:v1' as const;
-export const RUNTIME_RELEASE_EVIDENCE_SIGNATURE_ALGORITHM_V1 = 'ed25519' as const;
-export const RUNTIME_RELEASE_EVIDENCE_MAX_LIFETIME_MS_V1 = 15 * 60 * 1_000;
+export const RUNTIME_RELEASE_EVIDENCE_ENVELOPE_DOMAIN_V2 =
+  'ashlr:runtime-release-evidence-envelope:v2' as const;
+export const RUNTIME_RELEASE_EVIDENCE_TRUST_ROOT_DOMAIN_V2 =
+  'ashlr:runtime-release-evidence-trust-root:v2' as const;
+export const RUNTIME_RELEASE_EVIDENCE_SIGNATURE_ALGORITHM_V2 = 'ed25519' as const;
+export const RUNTIME_RELEASE_EVIDENCE_MAX_LIFETIME_MS_V2 = 15 * 60 * 1_000;
 
-const SIGNATURE_INPUT_DOMAIN = 'ashlr:runtime-release-evidence-signature-input:v1';
+const SIGNATURE_INPUT_DOMAIN = 'ashlr:runtime-release-evidence-signature-input:v2';
 const MANIFEST_CANONICAL_DIGEST_DOMAIN =
-  'ashlr:runtime-release-evidence-manifest-canonical-bytes:v1';
-const KEY_ID_DOMAIN = 'ashlr:runtime-release-evidence-key-id:v1';
+  'ashlr:runtime-release-evidence-manifest-canonical-bytes:v2';
+const KEY_ID_DOMAIN = 'ashlr:runtime-release-evidence-key-id:v2';
 const MAX_ENVELOPE_BYTES = 16 * 1_024;
 const MAX_TRUST_ROOT_BYTES = 64 * 1_024;
 const MAX_TRUST_KEYS = 32;
@@ -39,65 +39,65 @@ type JsonValue =
   | JsonValue[]
   | { [key: string]: JsonValue };
 
-export interface RuntimeReleaseEvidenceCoverageV1 {
+export interface RuntimeReleaseEvidenceCoverageV2 {
   artifactCoherence: 'two-complete-scans';
-  artifactSet: 'package-manifest-lockfile-launcher-dist-verifier';
+  artifactSet: 'package-manifest-dependency-inventory-launcher-dist-verifier';
   authenticity: 'envelope-signer-only';
   authority: 'observation-only';
   configuration: 'excluded';
-  installedDependencies: 'lockfile-only';
+  installedDependencies: 'packaged-byte-inventory-and-installed-tree';
   interpreter: 'caller-declared-artifact-observed';
   rollback: 'unresolved-caller-declared-reference';
   serviceInvocation: 'unbound';
 }
 
-export const RUNTIME_RELEASE_EVIDENCE_REQUIRED_COVERAGE_V1:
-Readonly<RuntimeReleaseEvidenceCoverageV1> = Object.freeze({
+export const RUNTIME_RELEASE_EVIDENCE_REQUIRED_COVERAGE_V2:
+Readonly<RuntimeReleaseEvidenceCoverageV2> = Object.freeze({
   artifactCoherence: 'two-complete-scans',
-  artifactSet: 'package-manifest-lockfile-launcher-dist-verifier',
+  artifactSet: 'package-manifest-dependency-inventory-launcher-dist-verifier',
   authenticity: 'envelope-signer-only',
   authority: 'observation-only',
   configuration: 'excluded',
-  installedDependencies: 'lockfile-only',
+  installedDependencies: 'packaged-byte-inventory-and-installed-tree',
   interpreter: 'caller-declared-artifact-observed',
   rollback: 'unresolved-caller-declared-reference',
   serviceInvocation: 'unbound',
 });
 
-export interface RuntimeReleaseEvidencePayloadV1 {
+export interface RuntimeReleaseEvidencePayloadV2 {
   assurance: 'signed-observation-only';
-  coverage: RuntimeReleaseEvidenceCoverageV1;
+  coverage: RuntimeReleaseEvidenceCoverageV2;
   expiresAt: string;
   expectedRevision: string;
   issuedAt: string;
   manifestCanonicalSha256: string;
   manifestDigest: string;
-  schemaVersion: 1;
+  schemaVersion: 2;
 }
 
-export interface SignedRuntimeReleaseEvidenceEnvelopeV1 {
-  algorithm: typeof RUNTIME_RELEASE_EVIDENCE_SIGNATURE_ALGORITHM_V1;
-  domain: typeof RUNTIME_RELEASE_EVIDENCE_ENVELOPE_DOMAIN_V1;
+export interface SignedRuntimeReleaseEvidenceEnvelopeV2 {
+  algorithm: typeof RUNTIME_RELEASE_EVIDENCE_SIGNATURE_ALGORITHM_V2;
+  domain: typeof RUNTIME_RELEASE_EVIDENCE_ENVELOPE_DOMAIN_V2;
   keyId: string;
-  payload: RuntimeReleaseEvidencePayloadV1;
-  schemaVersion: 1;
+  payload: RuntimeReleaseEvidencePayloadV2;
+  schemaVersion: 2;
   signature: string;
 }
 
-export interface RuntimeReleaseEvidenceTrustKeyV1 {
-  algorithm: typeof RUNTIME_RELEASE_EVIDENCE_SIGNATURE_ALGORITHM_V1;
+export interface RuntimeReleaseEvidenceTrustKeyV2 {
+  algorithm: typeof RUNTIME_RELEASE_EVIDENCE_SIGNATURE_ALGORITHM_V2;
   keyId: string;
   publicKeySpki: string;
   validFrom: string;
   validUntil: string;
 }
 
-export interface RuntimeReleaseEvidenceTrustRootV1 {
+export interface RuntimeReleaseEvidenceTrustRootV2 {
   assurance: 'caller-provided-public-key-trust-root';
-  domain: typeof RUNTIME_RELEASE_EVIDENCE_TRUST_ROOT_DOMAIN_V1;
-  keys: RuntimeReleaseEvidenceTrustKeyV1[];
-  requiredCoverage: RuntimeReleaseEvidenceCoverageV1;
-  schemaVersion: 1;
+  domain: typeof RUNTIME_RELEASE_EVIDENCE_TRUST_ROOT_DOMAIN_V2;
+  keys: RuntimeReleaseEvidenceTrustKeyV2[];
+  requiredCoverage: RuntimeReleaseEvidenceCoverageV2;
+  schemaVersion: 2;
 }
 
 export interface BuildRuntimeReleaseEvidenceTrustRootOptions {
@@ -111,7 +111,7 @@ export interface BuildRuntimeReleaseEvidenceTrustRootOptions {
 export type BuildRuntimeReleaseEvidenceTrustRootResult =
   | {
     ok: true;
-    trustRoot: RuntimeReleaseEvidenceTrustRootV1;
+    trustRoot: RuntimeReleaseEvidenceTrustRootV2;
     canonicalJson: string;
   }
   | { ok: false; reason: string };
@@ -126,7 +126,7 @@ export interface SignRuntimeReleaseEvidenceEnvelopeOptions {
 export type SignRuntimeReleaseEvidenceEnvelopeResult =
   | {
     ok: true;
-    envelope: SignedRuntimeReleaseEvidenceEnvelopeV1;
+    envelope: SignedRuntimeReleaseEvidenceEnvelopeV2;
     canonicalJson: string;
     keyId: string;
   }
@@ -135,7 +135,7 @@ export type SignRuntimeReleaseEvidenceEnvelopeResult =
 export type ParseRuntimeReleaseEvidenceEnvelopeResult =
   | {
     ok: true;
-    envelope: SignedRuntimeReleaseEvidenceEnvelopeV1;
+    envelope: SignedRuntimeReleaseEvidenceEnvelopeV2;
     canonicalJson: string;
   }
   | { ok: false; reason: string };
@@ -143,7 +143,7 @@ export type ParseRuntimeReleaseEvidenceEnvelopeResult =
 export type ParseRuntimeReleaseEvidenceTrustRootResult =
   | {
     ok: true;
-    trustRoot: RuntimeReleaseEvidenceTrustRootV1;
+    trustRoot: RuntimeReleaseEvidenceTrustRootV2;
     canonicalJson: string;
   }
   | { ok: false; reason: string };
@@ -168,7 +168,7 @@ export type VerifyRuntimeReleaseEvidenceEnvelopeResult =
   }
   | { ok: false; reason: string };
 
-type UnsignedEnvelope = Omit<SignedRuntimeReleaseEvidenceEnvelopeV1, 'signature'>;
+type UnsignedEnvelope = Omit<SignedRuntimeReleaseEvidenceEnvelopeV2, 'signature'>;
 
 function canonicalize(value: unknown, ancestors: Set<object>): JsonValue {
   if (value === null || typeof value === 'boolean' || typeof value === 'string') return value;
@@ -259,12 +259,12 @@ function timestampMs(value: string): number {
 
 function validateLifetime(issuedAt: string, expiresAt: string, label: string): void {
   const lifetime = timestampMs(expiresAt) - timestampMs(issuedAt);
-  if (lifetime <= 0 || lifetime > RUNTIME_RELEASE_EVIDENCE_MAX_LIFETIME_MS_V1) {
+  if (lifetime <= 0 || lifetime > RUNTIME_RELEASE_EVIDENCE_MAX_LIFETIME_MS_V2) {
     throw new Error(`${label} lifetime is invalid`);
   }
 }
 
-function coverageFrom(value: unknown, label: string): RuntimeReleaseEvidenceCoverageV1 {
+function coverageFrom(value: unknown, label: string): RuntimeReleaseEvidenceCoverageV2 {
   if (!isPlainRecord(value) || !hasExactKeys(value, [
     'artifactCoherence',
     'artifactSet',
@@ -277,17 +277,17 @@ function coverageFrom(value: unknown, label: string): RuntimeReleaseEvidenceCove
     'serviceInvocation',
   ]) ||
     value['artifactCoherence'] !== 'two-complete-scans' ||
-    value['artifactSet'] !== 'package-manifest-lockfile-launcher-dist-verifier' ||
+    value['artifactSet'] !== 'package-manifest-dependency-inventory-launcher-dist-verifier' ||
     value['authenticity'] !== 'envelope-signer-only' ||
     value['authority'] !== 'observation-only' ||
     value['configuration'] !== 'excluded' ||
-    value['installedDependencies'] !== 'lockfile-only' ||
+    value['installedDependencies'] !== 'packaged-byte-inventory-and-installed-tree' ||
     value['interpreter'] !== 'caller-declared-artifact-observed' ||
     value['rollback'] !== 'unresolved-caller-declared-reference' ||
     value['serviceInvocation'] !== 'unbound') {
     throw new Error(`${label} is incomplete or unsupported`);
   }
-  return { ...RUNTIME_RELEASE_EVIDENCE_REQUIRED_COVERAGE_V1 };
+  return { ...RUNTIME_RELEASE_EVIDENCE_REQUIRED_COVERAGE_V2 };
 }
 
 function decodeBase64url(value: unknown, expectedBytes?: number): Buffer | null {
@@ -332,7 +332,7 @@ export function runtimeReleaseEvidenceKeyId(publicKey: KeyObject): string | null
 function trustKeyFrom(
   value: unknown,
   previousKeyId: string | null,
-): { key: RuntimeReleaseEvidenceTrustKeyV1; publicKey: KeyObject } {
+): { key: RuntimeReleaseEvidenceTrustKeyV2; publicKey: KeyObject } {
   if (!isPlainRecord(value) || !hasExactKeys(value, [
     'algorithm',
     'keyId',
@@ -342,7 +342,7 @@ function trustKeyFrom(
   ])) {
     throw new Error('runtime release evidence trust key shape is invalid');
   }
-  if (value['algorithm'] !== RUNTIME_RELEASE_EVIDENCE_SIGNATURE_ALGORITHM_V1) {
+  if (value['algorithm'] !== RUNTIME_RELEASE_EVIDENCE_SIGNATURE_ALGORITHM_V2) {
     throw new Error('runtime release evidence trust key algorithm is unsupported');
   }
   if (typeof value['keyId'] !== 'string' || !KEY_ID_RE.test(value['keyId'])) {
@@ -376,7 +376,7 @@ function trustKeyFrom(
   }
   return {
     key: {
-      algorithm: RUNTIME_RELEASE_EVIDENCE_SIGNATURE_ALGORITHM_V1,
+      algorithm: RUNTIME_RELEASE_EVIDENCE_SIGNATURE_ALGORITHM_V2,
       keyId: value['keyId'],
       publicKeySpki: value['publicKeySpki'] as string,
       validFrom,
@@ -389,7 +389,7 @@ function trustKeyFrom(
 function validateTrustRoot(
   value: unknown,
 ): {
-  trustRoot: RuntimeReleaseEvidenceTrustRootV1;
+  trustRoot: RuntimeReleaseEvidenceTrustRootV2;
   publicKeys: Map<string, KeyObject>;
 } {
   if (!isPlainRecord(value) || !hasExactKeys(value, [
@@ -401,10 +401,10 @@ function validateTrustRoot(
   ])) {
     throw new Error('runtime release evidence trust root shape is invalid');
   }
-  if (value['schemaVersion'] !== 1) {
+  if (value['schemaVersion'] !== 2) {
     throw new Error('runtime release evidence trust root schema is unsupported');
   }
-  if (value['domain'] !== RUNTIME_RELEASE_EVIDENCE_TRUST_ROOT_DOMAIN_V1) {
+  if (value['domain'] !== RUNTIME_RELEASE_EVIDENCE_TRUST_ROOT_DOMAIN_V2) {
     throw new Error('runtime release evidence trust root domain is unsupported');
   }
   if (value['assurance'] !== 'caller-provided-public-key-trust-root') {
@@ -415,7 +415,7 @@ function validateTrustRoot(
     keysValue.length > MAX_TRUST_KEYS) {
     throw new Error('runtime release evidence trust key count is invalid');
   }
-  const keys: RuntimeReleaseEvidenceTrustKeyV1[] = [];
+  const keys: RuntimeReleaseEvidenceTrustKeyV2[] = [];
   const publicKeys = new Map<string, KeyObject>();
   let previousKeyId: string | null = null;
   for (const entry of keysValue) {
@@ -427,19 +427,19 @@ function validateTrustRoot(
   return {
     trustRoot: {
       assurance: 'caller-provided-public-key-trust-root',
-      domain: RUNTIME_RELEASE_EVIDENCE_TRUST_ROOT_DOMAIN_V1,
+      domain: RUNTIME_RELEASE_EVIDENCE_TRUST_ROOT_DOMAIN_V2,
       keys,
       requiredCoverage: coverageFrom(
         value['requiredCoverage'],
         'runtime release evidence required coverage',
       ),
-      schemaVersion: 1,
+      schemaVersion: 2,
     },
     publicKeys,
   };
 }
 
-function validateEnvelope(value: unknown): SignedRuntimeReleaseEvidenceEnvelopeV1 {
+function validateEnvelope(value: unknown): SignedRuntimeReleaseEvidenceEnvelopeV2 {
   if (!isPlainRecord(value) || !hasExactKeys(value, [
     'algorithm',
     'domain',
@@ -450,13 +450,13 @@ function validateEnvelope(value: unknown): SignedRuntimeReleaseEvidenceEnvelopeV
   ])) {
     throw new Error('runtime release evidence envelope shape is invalid');
   }
-  if (value['schemaVersion'] !== 1) {
+  if (value['schemaVersion'] !== 2) {
     throw new Error('runtime release evidence envelope schema is unsupported');
   }
-  if (value['domain'] !== RUNTIME_RELEASE_EVIDENCE_ENVELOPE_DOMAIN_V1) {
+  if (value['domain'] !== RUNTIME_RELEASE_EVIDENCE_ENVELOPE_DOMAIN_V2) {
     throw new Error('runtime release evidence envelope domain is unsupported');
   }
-  if (value['algorithm'] !== RUNTIME_RELEASE_EVIDENCE_SIGNATURE_ALGORITHM_V1) {
+  if (value['algorithm'] !== RUNTIME_RELEASE_EVIDENCE_SIGNATURE_ALGORITHM_V2) {
     throw new Error('runtime release evidence envelope algorithm is unsupported');
   }
   if (typeof value['keyId'] !== 'string' || !KEY_ID_RE.test(value['keyId'])) {
@@ -478,7 +478,7 @@ function validateEnvelope(value: unknown): SignedRuntimeReleaseEvidenceEnvelopeV
   ])) {
     throw new Error('runtime release evidence payload shape is invalid');
   }
-  if (payload['schemaVersion'] !== 1 ||
+  if (payload['schemaVersion'] !== 2 ||
     payload['assurance'] !== 'signed-observation-only') {
     throw new Error('runtime release evidence payload schema is unsupported');
   }
@@ -502,8 +502,8 @@ function validateEnvelope(value: unknown): SignedRuntimeReleaseEvidenceEnvelopeV
   );
   validateLifetime(issuedAt, expiresAt, 'runtime release evidence');
   return {
-    algorithm: RUNTIME_RELEASE_EVIDENCE_SIGNATURE_ALGORITHM_V1,
-    domain: RUNTIME_RELEASE_EVIDENCE_ENVELOPE_DOMAIN_V1,
+    algorithm: RUNTIME_RELEASE_EVIDENCE_SIGNATURE_ALGORITHM_V2,
+    domain: RUNTIME_RELEASE_EVIDENCE_ENVELOPE_DOMAIN_V2,
     keyId: value['keyId'],
     payload: {
       assurance: 'signed-observation-only',
@@ -516,14 +516,14 @@ function validateEnvelope(value: unknown): SignedRuntimeReleaseEvidenceEnvelopeV
       issuedAt,
       manifestCanonicalSha256: payload['manifestCanonicalSha256'],
       manifestDigest: payload['manifestDigest'],
-      schemaVersion: 1,
+      schemaVersion: 2,
     },
-    schemaVersion: 1,
+    schemaVersion: 2,
     signature: value['signature'] as string,
   };
 }
 
-function unsignedEnvelope(envelope: SignedRuntimeReleaseEvidenceEnvelopeV1): UnsignedEnvelope {
+function unsignedEnvelope(envelope: SignedRuntimeReleaseEvidenceEnvelopeV2): UnsignedEnvelope {
   const { signature: _signature, ...unsigned } = envelope;
   return unsigned;
 }
@@ -556,7 +556,7 @@ export function buildRuntimeReleaseEvidenceTrustRoot(
       options.keys.length > MAX_TRUST_KEYS) {
       return { ok: false, reason: 'runtime release evidence trust key count is invalid' };
     }
-    const keys = options.keys.map((entry): RuntimeReleaseEvidenceTrustKeyV1 => {
+    const keys = options.keys.map((entry): RuntimeReleaseEvidenceTrustKeyV2 => {
       const der = publicKeyDer(entry.publicKey);
       const validFrom = canonicalTimestamp(
         entry.validFrom,
@@ -570,7 +570,7 @@ export function buildRuntimeReleaseEvidenceTrustRoot(
         throw new Error('runtime release evidence trust key validity is invalid');
       }
       return {
-        algorithm: RUNTIME_RELEASE_EVIDENCE_SIGNATURE_ALGORITHM_V1,
+        algorithm: RUNTIME_RELEASE_EVIDENCE_SIGNATURE_ALGORITHM_V2,
         keyId: keyIdForDer(der),
         publicKeySpki: der.toString('base64url'),
         validFrom,
@@ -580,12 +580,12 @@ export function buildRuntimeReleaseEvidenceTrustRoot(
     if (keys.some((entry, index) => index > 0 && entry.keyId === keys[index - 1]!.keyId)) {
       return { ok: false, reason: 'runtime release evidence trust keys must be unique' };
     }
-    const trustRoot: RuntimeReleaseEvidenceTrustRootV1 = {
+    const trustRoot: RuntimeReleaseEvidenceTrustRootV2 = {
       assurance: 'caller-provided-public-key-trust-root',
-      domain: RUNTIME_RELEASE_EVIDENCE_TRUST_ROOT_DOMAIN_V1,
+      domain: RUNTIME_RELEASE_EVIDENCE_TRUST_ROOT_DOMAIN_V2,
       keys,
-      requiredCoverage: { ...RUNTIME_RELEASE_EVIDENCE_REQUIRED_COVERAGE_V1 },
-      schemaVersion: 1,
+      requiredCoverage: { ...RUNTIME_RELEASE_EVIDENCE_REQUIRED_COVERAGE_V2 },
+      schemaVersion: 2,
     };
     const encoded = `${canonicalJson(trustRoot)}\n`;
     if (Buffer.byteLength(encoded, 'utf8') > MAX_TRUST_ROOT_BYTES) {
@@ -629,26 +629,26 @@ export function signRuntimeReleaseEvidenceEnvelope(
     const publicKey = createPublicKey(options.privateKey);
     const keyId = keyIdForDer(publicKeyDer(publicKey));
     const unsigned: UnsignedEnvelope = {
-      algorithm: RUNTIME_RELEASE_EVIDENCE_SIGNATURE_ALGORITHM_V1,
-      domain: RUNTIME_RELEASE_EVIDENCE_ENVELOPE_DOMAIN_V1,
+      algorithm: RUNTIME_RELEASE_EVIDENCE_SIGNATURE_ALGORITHM_V2,
+      domain: RUNTIME_RELEASE_EVIDENCE_ENVELOPE_DOMAIN_V2,
       keyId,
       payload: {
         assurance: 'signed-observation-only',
-        coverage: { ...RUNTIME_RELEASE_EVIDENCE_REQUIRED_COVERAGE_V1 },
+        coverage: { ...RUNTIME_RELEASE_EVIDENCE_REQUIRED_COVERAGE_V2 },
         expiresAt,
         expectedRevision: manifest.manifest.expectedRevision,
         issuedAt,
         manifestCanonicalSha256: manifestCanonicalSha256(manifest.canonicalJson),
         manifestDigest: manifest.manifest.manifestDigest,
-        schemaVersion: 1,
+        schemaVersion: 2,
       },
-      schemaVersion: 1,
+      schemaVersion: 2,
     };
     const signature = cryptoSign(null, signatureInput(unsigned), options.privateKey);
     if (signature.length !== ED25519_SIGNATURE_BYTES) {
       return { ok: false, reason: 'runtime release evidence signature length is invalid' };
     }
-    const envelope: SignedRuntimeReleaseEvidenceEnvelopeV1 = {
+    const envelope: SignedRuntimeReleaseEvidenceEnvelopeV2 = {
       ...unsigned,
       signature: signature.toString('base64url'),
     };
