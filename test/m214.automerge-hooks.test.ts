@@ -75,7 +75,7 @@ vi.mock('../src/core/sandbox/policy.js', () => ({
 const mockReadDecisions = vi.fn(() => []);
 vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
   readDecisions: (...args: unknown[]) => mockReadDecisions(...args),
-  recordDecision: vi.fn(),
+  recordDecision: vi.fn(() => true),
 }));
 
 const mockJudgeProposal = vi.fn();

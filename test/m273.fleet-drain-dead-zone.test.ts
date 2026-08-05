@@ -87,7 +87,7 @@ vi.mock('../src/core/fleet/manager.js', () => ({
 
 vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
   readDecisions: vi.fn(() => []),
-  recordDecision: vi.fn(),
+  recordDecision: vi.fn(() => true),
 }));
 
 vi.mock('../src/core/run/provider-client.js', () => ({
