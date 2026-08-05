@@ -180,7 +180,6 @@ describe('M30 CI workflow', () => {
         'test/m113.coordinator-wire.test.ts',
         'test/m373.directory-durability.test.ts',
         terminalRetentionTest,
-        'test/m403.automerge-mutation-fence.test.ts',
         'test/m404.policy-result-surfaces.test.ts',
         'test/m428.goal-source-quality.test.ts',
         'test/m409.engine-execution-mutation-fence.test.ts',
@@ -232,7 +231,6 @@ describe('M30 CI workflow', () => {
         'test/m407.verification-mutation-fence.test.ts',
         'test/m408.sandbox-creation-mutation-fence.test.ts',
         'test/m418.pulse-quiescence.test.ts',
-        'test/m419.remote-handoff-intent.test.ts',
         'test/m420.remote-handoff-recovery.test.ts',
         'test/m421.legacy-pulse-quiescence.test.ts',
         agentWorkTransitionsTest,
@@ -259,6 +257,10 @@ describe('M30 CI workflow', () => {
     const nativeAliasFiles = [
       'test/m426.sandbox-reservation-identity.test.ts',
       'test/h7.rollback.test.ts',
+    ];
+    const nativeAclEnrollmentFiles = [
+      'test/m403.automerge-mutation-fence.test.ts',
+      'test/m419.remote-handoff-intent.test.ts',
     ];
     const windowsServiceAuthorityFiles = [
       'test/m93.windows-file-authority.test.ts',
@@ -436,6 +438,7 @@ describe('M30 CI workflow', () => {
       ...expectedWindowsPartitions.flat(),
       ...expectedMacosFiles,
       ...nativeAliasFiles,
+      ...nativeAclEnrollmentFiles,
       ...nativePathIdentityFiles,
       ...windowsServiceAuthorityFiles,
       'test/npm-cli-launch.test.ts',
@@ -510,6 +513,11 @@ describe('M30 CI workflow', () => {
       "if: matrix.os == 'macos-latest' || matrix.label == 'windows, portability 2/3'",
     );
     expect(ciYml).toContain(`npm run test:ci -- ${nativeAliasFiles.join(' ')}`);
+    expect(ciYml).toContain('Test native ACL enrollment fences (hermetic)');
+    expect(ciYml).toContain("if: matrix.label == 'windows, portability overflow'");
+    expect(ciYml).toMatch(
+      /npm run test:ci -- --maxWorkers=1 --no-file-parallelism\s+test\/m403\.automerge-mutation-fence\.test\.ts\s+test\/m419\.remote-handoff-intent\.test\.ts/u,
+    );
     expect(ciYml).toContain('windows-service-authority:');
     expect(ciYml).toContain('runs-on: windows-2022');
     expect(ciYml.match(/npm run test:ci -- test\/npm-cli-launch\.test\.ts/g)).toHaveLength(2);
