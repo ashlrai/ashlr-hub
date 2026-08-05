@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
-import { fsyncDirectory } from '../util/durability.js';
+import { fsyncDirectory, type DirectoryIdentity } from '../util/durability.js';
 import {
   hardenWindowsFileAuthority,
   validateWindowsFileAuthority,
@@ -166,9 +166,10 @@ function owned(stat: fs.Stats): boolean {
   return typeof process.getuid !== 'function' || stat.uid === process.getuid();
 }
 
-function trustedDirectory(stat: fs.Stats): boolean {
-  const safePosixMode = process.platform === 'win32' || (stat.mode & 0o022) === 0;
-  return !stat.isSymbolicLink() && stat.isDirectory() && owned(stat) && safePosixMode;
+function trustedBigIntDirectory(stat: fs.BigIntStats): boolean {
+  const ownedByCurrentUser = typeof process.getuid !== 'function' || stat.uid === BigInt(process.getuid());
+  const safePosixMode = process.platform === 'win32' || (stat.mode & 0o022n) === 0n;
+  return !stat.isSymbolicLink() && stat.isDirectory() && ownedByCurrentUser && safePosixMode;
 }
 
 function missing(error: unknown): boolean {
@@ -304,7 +305,7 @@ function atomicReplace(
   mode: number,
   expected?: Pick<PlistSnapshot, 'dev' | 'ino'>,
   requireMissing = false,
-  expectedParent?: Pick<fs.Stats, 'dev' | 'ino'>,
+  expectedParent?: DirectoryIdentity,
   trustedRoot?: string,
 ): fs.Stats {
   const temporary = artifactPath(filePath, 'tmp');
@@ -334,7 +335,7 @@ function atomicReplace(
 function replaceBackup(
   plistPath: string,
   prior: PlistSnapshot,
-  expectedParent: Pick<fs.Stats, 'dev' | 'ino'>,
+  expectedParent: DirectoryIdentity,
   trustedRoot: string,
 ): void {
   const backupPath = `${plistPath}.bak`;
@@ -356,7 +357,7 @@ function replaceBackup(
 
 function retainRecentRollbacks(
   plistPath: string,
-  expectedParent: Pick<fs.Stats, 'dev' | 'ino'>,
+  expectedParent: DirectoryIdentity,
   trustedRoot: string,
 ): void {
   const dir = path.dirname(plistPath);
@@ -396,7 +397,7 @@ function retainRecentRollbacks(
   if (removed) fsyncParent(plistPath, expectedParent);
 }
 
-function ensureTrustedParent(trustedRoot: string, plistPath: string): fs.Stats {
+function ensureTrustedParent(trustedRoot: string, plistPath: string): DirectoryIdentity {
   const root = path.resolve(trustedRoot);
   const target = path.resolve(plistPath);
   const relative = path.relative(root, target);
@@ -404,8 +405,8 @@ function ensureTrustedParent(trustedRoot: string, plistPath: string): fs.Stats {
     throw new Error(`launchd plist must be below trusted root ${root}`);
   }
 
-  const rootStat = fs.lstatSync(root);
-  if (!trustedDirectory(rootStat)) {
+  const rootStat = fs.lstatSync(root, { bigint: true });
+  if (!trustedBigIntDirectory(rootStat)) {
     throw new Error(`unsafe launchd trusted root ${root}`);
   }
   assertWindowsFileAuthority(root, 'directory', root);
@@ -413,36 +414,40 @@ function ensureTrustedParent(trustedRoot: string, plistPath: string): fs.Stats {
   let current = root;
   for (const component of relative.split(path.sep).slice(0, -1)) {
     const parentPath = current;
-    const parent = fs.lstatSync(parentPath);
-    if (!trustedDirectory(parent)) {
+    const parent = fs.lstatSync(parentPath, { bigint: true });
+    if (!trustedBigIntDirectory(parent)) {
       throw new Error(`unsafe launchd plist parent component ${parentPath}`);
     }
     current = path.join(parentPath, component);
     try {
-      const stat = fs.lstatSync(current);
-      if (!trustedDirectory(stat)) {
+      const stat = fs.lstatSync(current, { bigint: true });
+      if (!trustedBigIntDirectory(stat)) {
         throw new Error(`unsafe launchd plist parent component ${current}`);
       }
       assertWindowsFileAuthority(current, 'directory', root);
     } catch (error) {
       if (!missing(error)) throw error;
       fs.mkdirSync(current, { mode: 0o700 });
-      const created = fs.lstatSync(current);
-      if (!trustedDirectory(created)) {
+      const created = fs.lstatSync(current, { bigint: true });
+      if (!trustedBigIntDirectory(created)) {
         throw new Error(`unsafe launchd plist parent component ${current}`);
       }
       assertWindowsFileAuthority(current, 'directory', root, 'harden');
       fsyncDirectory(parentPath, {
-        expectedIdentity: { dev: BigInt(parent.dev), ino: BigInt(parent.ino) },
+        expectedIdentity: { dev: parent.dev, ino: parent.ino },
       });
     }
   }
-  return fs.lstatSync(path.dirname(target));
+  const parent = fs.lstatSync(path.dirname(target), { bigint: true });
+  if (!trustedBigIntDirectory(parent)) {
+    throw new Error(`unsafe launchd plist parent component ${path.dirname(target)}`);
+  }
+  return { dev: parent.dev, ino: parent.ino };
 }
 
-function assertParentIdentity(plistPath: string, expected: Pick<fs.Stats, 'dev' | 'ino'>): void {
-  const parent = fs.lstatSync(path.dirname(plistPath));
-  if (!trustedDirectory(parent) ||
+function assertParentIdentity(plistPath: string, expected: DirectoryIdentity): void {
+  const parent = fs.lstatSync(path.dirname(plistPath), { bigint: true });
+  if (!trustedBigIntDirectory(parent) ||
       parent.dev !== expected.dev || parent.ino !== expected.ino) {
     throw new Error(`launchd plist parent changed during transaction: ${path.dirname(plistPath)}`);
   }
@@ -510,10 +515,10 @@ function removalJournalPath(lockDir: string, plistPath: string): string {
 
 function fsyncParent(
   filePath: string,
-  expectedParent?: Pick<fs.Stats, 'dev' | 'ino'>,
+  expectedParent?: DirectoryIdentity,
 ): void {
   fsyncDirectory(path.dirname(filePath), expectedParent
-    ? { expectedIdentity: { dev: BigInt(expectedParent.dev), ino: BigInt(expectedParent.ino) } }
+    ? { expectedIdentity: expectedParent }
     : {});
 }
 
@@ -683,7 +688,7 @@ function readRemovalJournal(filePath: string, expectedPlistPath: string, trusted
 function writeJournal(
   filePath: string,
   journal: LaunchdInstallJournal,
-  parent: Pick<fs.Stats, 'dev' | 'ino'>,
+  parent: DirectoryIdentity,
   expected?: Pick<fs.Stats, 'dev' | 'ino'>,
   trustedRoot?: string,
 ): fs.Stats {
@@ -707,7 +712,7 @@ function writeJournal(
 function writeRemovalJournal(
   filePath: string,
   journal: LaunchdRemovalJournal,
-  parent: Pick<fs.Stats, 'dev' | 'ino'>,
+  parent: DirectoryIdentity,
   expected?: Pick<fs.Stats, 'dev' | 'ino'>,
   trustedRoot?: string,
 ): fs.Stats {
@@ -735,7 +740,7 @@ function removeJournal(filePath: string, expected: Pick<fs.Stats, 'dev' | 'ino'>
 
 function restoreInterruptedTransaction(
   options: LaunchdTransactionRecoveryOptions,
-  parent: Pick<fs.Stats, 'dev' | 'ino'>,
+  parent: DirectoryIdentity,
   filePath: string,
   pending: { journal: LaunchdInstallJournal; stat: fs.Stats },
   validateBeforeUnload = true,
@@ -861,7 +866,7 @@ function restoreActivationAfterUncertainStop(
 
 function restoreInterruptedRemoval(
   options: LaunchdPlistRemovalOptions | LaunchdPlistTransactionOptions,
-  parent: Pick<fs.Stats, 'dev' | 'ino'>,
+  parent: DirectoryIdentity,
   filePath: string,
   pending: { journal: LaunchdRemovalJournal; stat: fs.Stats },
 ): void {
