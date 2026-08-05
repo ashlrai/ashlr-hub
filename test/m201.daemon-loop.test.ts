@@ -10565,8 +10565,10 @@ describe('M201 — Group G: concurrent dispatch routing wire guards', () => {
     expect(source).toContain('routeModels.set(workedSet[i]!.id, d.value.model ?? null);');
     expect(source).toContain('routeReasons,');
     expect(source).toContain('const assignedModel = hintedBackend === _backend ? routeModels.get(item.id) : undefined;');
+    expect(source).toContain('const capacityReservation = backendCapacityReservations?.reserve(_backend);');
     expect(source).toContain('return await taskEntry.run(');
     expect(source).toContain('capacityReservation,');
+    expect(source).toContain('backendCapacityReservations?.release(capacityReservation);');
     expect(source).toContain('buildConcurrentDispatchRouteItem(');
   });
 
