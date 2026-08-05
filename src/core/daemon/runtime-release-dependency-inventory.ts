@@ -105,6 +105,7 @@ export interface RuntimeReleasePackFileRecord {
 interface PackageSnapshot {
   archiveModeSha256: string;
   contentSha256: string;
+  declaredBinTargets: ReadonlyMap<string, string>;
   fileCount: number;
   identitySha256: string;
   name: string;
@@ -130,6 +131,10 @@ interface DependencyBinLinkContent {
   path: string;
   symlink: true;
 }
+
+export type RuntimeDependencyBinLinkOwnership =
+  | { kind: 'top-level'; targetPackagePath: string }
+  | { kind: 'nested'; ownerPackagePath: string; targetPackagePath: string };
 
 type DependencyObservationCheckpoint = (phase?: string) => void;
 
@@ -297,25 +302,81 @@ function isContained(root: string, candidate: string): boolean {
   return nested !== '' && nested !== '..' && !nested.startsWith(`..${sep}`) && !isAbsolute(nested);
 }
 
+export function runtimeDependencyBinLinkOwnership(
+  logicalPath: string,
+  targetLogicalPath: string,
+): RuntimeDependencyBinLinkOwnership | null {
+  const linkSegments = logicalPath.split('/');
+  const linkName = linkSegments.at(-1);
+  if (!isBoundedText(linkName, 256) || !/^[A-Za-z0-9._~-]+$/u.test(linkName) ||
+    linkName === '.' || linkName === '..') return null;
+  const immediateTargetPackage = (prefix: string): string | null => {
+    if (!targetLogicalPath.startsWith(prefix)) return null;
+    const targetSegments = targetLogicalPath.slice(prefix.length).split('/');
+    const packageSegmentCount = targetSegments[0]?.startsWith('@') ? 2 : 1;
+    const remainder = targetSegments.slice(packageSegmentCount);
+    if (targetSegments.length <= packageSegmentCount || remainder.includes('node_modules') ||
+      targetSegments.slice(0, packageSegmentCount).some((segment) =>
+        !segment || segment === '.' || segment === '..' || segment === 'node_modules')) return null;
+    const targetPackagePath = `${prefix}${targetSegments.slice(0, packageSegmentCount).join('/')}`;
+    try {
+      return packagePathFromLockPath(`node_modules/${targetPackagePath}`) === targetPackagePath
+        ? targetPackagePath
+        : null;
+    } catch {
+      return null;
+    }
+  };
+  if (linkSegments.length === 2 && linkSegments[0] === '.bin') {
+    const targetPackagePath = immediateTargetPackage('');
+    return targetPackagePath ? { kind: 'top-level', targetPackagePath } : null;
+  }
+  if (linkSegments.length < 4 || linkSegments.at(-2) !== '.bin' ||
+    linkSegments.at(-3) !== 'node_modules') return null;
+  const ownerPackagePath = linkSegments.slice(0, -3).join('/');
+  try {
+    if (packagePathFromLockPath(`node_modules/${ownerPackagePath}`) !== ownerPackagePath) return null;
+  } catch {
+    return null;
+  }
+  const nestedPrefix = `${ownerPackagePath}/node_modules/`;
+  const targetPackagePath = immediateTargetPackage(nestedPrefix);
+  if (!targetPackagePath) return null;
+  return { kind: 'nested', ownerPackagePath, targetPackagePath };
+}
+
 function observeDependencyBinLink(
   dependencyRoot: string,
   path: string,
   logicalPath: string,
+  admittedPackageBins: ReadonlyMap<string, ReadonlyMap<string, string>>,
 ): DependencyBinLinkContent {
-  if (!logicalPath.startsWith('.bin/') || logicalPath.slice('.bin/'.length).includes('/')) {
-    throw new Error('installed dependency tree contains a symlink');
+  if (process.platform === 'win32') {
+    throw new Error('installed dependency tree contains an unexpected symlink');
   }
   const before = lstatSync(path, { bigint: true });
   if (!before.isSymbolicLink()) throw new Error('installed dependency bin link changed before read');
   const linkTarget = readlinkSync(path, 'utf8');
-  if (!isBoundedText(linkTarget) || isAbsolute(linkTarget) || linkTarget.includes('\0') ||
-    linkTarget.includes('\\')) {
+  if (!isBoundedText(linkTarget) || isAbsolute(linkTarget) || /^[A-Za-z]:[\\/]/u.test(linkTarget) ||
+    linkTarget.includes('\0') || linkTarget.includes('\\')) {
     throw new Error('installed dependency bin link target is invalid');
   }
   const targetPath = resolve(dirname(path), linkTarget);
   const targetRealPath = realpathSync(targetPath);
   if (!isContained(dependencyRoot, targetRealPath) || targetRealPath !== targetPath) {
     throw new Error('installed dependency bin link escapes dependency root');
+  }
+  const targetLogicalPath = relative(dependencyRoot, targetPath).split(sep).join('/');
+  const ownership = runtimeDependencyBinLinkOwnership(logicalPath, targetLogicalPath);
+  if (!ownership) throw new Error('installed dependency tree contains an unexpected symlink');
+  if ((ownership.kind === 'nested' && !admittedPackageBins.has(ownership.ownerPackagePath)) ||
+    !admittedPackageBins.has(ownership.targetPackagePath)) {
+    throw new Error('installed dependency bin link is not owned by an admitted nested dependency');
+  }
+  const command = logicalPath.slice(logicalPath.lastIndexOf('/') + 1);
+  const declaredTarget = admittedPackageBins.get(ownership.targetPackagePath)?.get(command);
+  if (!declaredTarget || targetLogicalPath !== `${ownership.targetPackagePath}/${declaredTarget}`) {
+    throw new Error('installed dependency bin link does not match declared package bin');
   }
   const target = lstatSync(targetPath, { bigint: true });
   if (!target.isFile() || target.isSymbolicLink() || target.nlink !== 1n) {
@@ -351,7 +412,7 @@ function packagePathFromLockPath(value: string): string {
   return path;
 }
 
-function packageNameFromPath(path: string): string {
+export function runtimeDependencyPackageNameFromPath(path: string): string {
   const segments = path.split('/');
   const marker = segments.lastIndexOf('node_modules');
   const start = marker < 0 ? 0 : marker + 1;
@@ -376,23 +437,48 @@ function packageIsPortable(packageJson: Record<string, unknown>, files: string[]
   }
 }
 
-function portablePackageBinPaths(packageJson: Record<string, unknown>, label: string): Set<string> {
+function portablePackageBinTargets(
+  packageJson: Record<string, unknown>,
+  label: string,
+): ReadonlyMap<string, string> {
   const declared = packageJson['bin'];
-  if (declared === undefined) return new Set();
-  const values: unknown[] = typeof declared === 'string'
-    ? [declared]
+  if (declared === undefined) return new Map();
+  const packageName = packageJson['name'];
+  const entries: Array<[string, unknown]> = typeof declared === 'string' &&
+    typeof packageName === 'string'
+    ? [[packageName.slice(packageName.lastIndexOf('/') + 1), declared]]
     : isPlainRecord(declared)
-      ? Object.values(declared)
+      ? Object.entries(declared)
       : [];
-  if (values.length === 0 || values.some((value) => typeof value !== 'string')) {
+  if (entries.length === 0 || entries.some(([command, value]) =>
+    !isBoundedText(command, 256) || !/^[A-Za-z0-9._~-]+$/u.test(command) ||
+    typeof value !== 'string')) {
     throw new Error(`${label} bin declaration is invalid`);
   }
-  const paths = (values as string[]).map((value) => value.replace(/^\.\//u, ''));
-  if (paths.some((path) => !isBoundedText(path) || path.includes('\\') || isAbsolute(path) ||
+  const targets = entries.map(([command, value]) =>
+    [command, (value as string).replace(/^\.\//u, '')] as const);
+  if (targets.some(([, path]) => !isBoundedText(path) || path.includes('\\') || isAbsolute(path) ||
     path.split('/').some((segment) => !segment || segment === '.' || segment === '..'))) {
     throw new Error(`${label} bin declaration is invalid`);
   }
-  return new Set(paths);
+  return new Map(targets);
+}
+
+export function runtimeDependencyDeclaredBinTarget(
+  packageJson: Record<string, unknown>,
+  expectedName: string,
+  command: string,
+): string | null {
+  if (packageJson['name'] !== expectedName) return null;
+  try {
+    return portablePackageBinTargets(packageJson, `runtime dependency ${expectedName}`).get(command) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function portablePackageBinPaths(packageJson: Record<string, unknown>, label: string): Set<string> {
+  return new Set(portablePackageBinTargets(packageJson, label).values());
 }
 
 function rootPackageIsPortable(
@@ -537,6 +623,10 @@ function scanPackageDirectory(
     throw new Error(`runtime dependency ${expectedName} identity does not match inventory`);
   }
   const binPaths = portablePackageBinPaths(packageJson, `runtime dependency ${expectedName}`);
+  const declaredBinTargets = portablePackageBinTargets(
+    packageJson,
+    `runtime dependency ${expectedName}`,
+  );
   const filePaths = new Set(files.map((entry) => entry.path));
   if ([...binPaths].some((path) => !filePaths.has(path))) {
     throw new Error(`runtime dependency ${expectedName} bin target is not packaged`);
@@ -556,6 +646,7 @@ function scanPackageDirectory(
   return {
     archiveModeSha256: digest(PACKAGE_ARCHIVE_MODE_DIGEST_DOMAIN, archiveModes),
     contentSha256: digest(PACKAGE_CONTENT_DIGEST_DOMAIN, files),
+    declaredBinTargets,
     fileCount: files.length,
     identitySha256: digest(PACKAGE_CONTENT_DIGEST_DOMAIN, identities),
     name: expectedName,
@@ -707,7 +798,7 @@ function buildInventory(
       throw new Error('runtime dependency lock version is invalid');
     }
     const path = packagePathFromLockPath(lockPath);
-    const expectedName = packageNameFromPath(path);
+      const expectedName = runtimeDependencyPackageNameFromPath(path);
     const snapshot = scanPackageDirectory(
       join(packageRoot, ...lockPath.split('/')),
       expectedName,
@@ -815,7 +906,7 @@ function validateInventory(value: unknown): RuntimeReleaseDependencyInventoryV2 
     ]) || !isBoundedText(entry['path']) || !isBoundedText(entry['name'], 256) ||
       !PACKAGE_NAME_RE.test(entry['name']) ||
       packagePathFromLockPath(`node_modules/${entry['path']}`) !== entry['path'] ||
-      packageNameFromPath(entry['path']) !== entry['name'] ||
+      runtimeDependencyPackageNameFromPath(entry['path']) !== entry['name'] ||
       !isBoundedText(entry['version'], 128) || typeof entry['archiveModeSha256'] !== 'string' ||
       !SHA256_RE.test(entry['archiveModeSha256']) || typeof entry['contentSha256'] !== 'string' ||
       !SHA256_RE.test(entry['contentSha256']) || !Number.isSafeInteger(entry['fileCount']) ||
@@ -936,6 +1027,7 @@ function discoverInstalledPackages(
 function observeCompleteDependencyTree(
   dependencyRootInput: string,
   checkpoint: DependencyObservationCheckpoint,
+  admittedPackageBins: ReadonlyMap<string, ReadonlyMap<string, string>>,
 ): string {
   const dependencyRoot = canonicalRoot(dependencyRootInput, 'runtime dependency root');
   const rootBefore = lstatSync(dependencyRoot, { bigint: true });
@@ -972,6 +1064,7 @@ function observeCompleteDependencyTree(
           dependencyRoot,
           absolute,
           relativePath,
+          admittedPackageBins,
         ));
         totalFiles += 1;
         if (totalFiles > MAX_TOTAL_FILES) {
@@ -1069,6 +1162,7 @@ export function observeInstalledRuntimeDependencies(options: {
     }
     let totalFiles = 0;
     let totalBytes = 0;
+    const admittedPackageBins = new Map<string, ReadonlyMap<string, string>>();
     const observations = options.inventory.packages.map((entry) => {
       const absolute = join(dependencyRoot, ...entry.path.split('/'));
       const real = realpathSync(absolute);
@@ -1089,6 +1183,7 @@ export function observeInstalledRuntimeDependencies(options: {
         snapshot.size !== entry.size) {
         throw new Error(`installed dependency ${entry.name} bytes do not match inventory`);
       }
+      admittedPackageBins.set(entry.path, snapshot.declaredBinTargets);
       return {
         contentSha256: snapshot.contentSha256,
         identitySha256: snapshot.identitySha256,
@@ -1097,7 +1192,11 @@ export function observeInstalledRuntimeDependencies(options: {
         version: snapshot.version,
       };
     });
-    const installedTreeSha256 = observeCompleteDependencyTree(dependencyRoot, checkpoint);
+    const installedTreeSha256 = observeCompleteDependencyTree(
+      dependencyRoot,
+      checkpoint,
+      admittedPackageBins,
+    );
     return {
       ok: true,
       inventoryDigest: options.inventory.inventoryDigest,

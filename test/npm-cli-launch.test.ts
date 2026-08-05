@@ -68,6 +68,84 @@ describe('shell-free npm CLI launch', () => {
       .toThrow('npm_execpath does not match the trusted Node toolchain');
   });
 
+  it('constructs a private npm environment and rejects ambient overrides', () => {
+    const fixtureRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-npm-hermetic-env-')));
+    tempDirs.push(fixtureRoot);
+    const fakeNode = join(fixtureRoot, 'bin', 'node');
+    const trustedCli = join(fixtureRoot, 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js');
+    write(fakeNode, 'fixture node identity\n');
+    write(trustedCli, 'process.stdout.write(JSON.stringify(process.env));\n');
+    write(
+      join(fixtureRoot, 'lib', 'node_modules', 'npm', 'package.json'),
+      '{"name":"npm","version":"10.0.0"}\n',
+    );
+    const hostileUserConfig = join(fixtureRoot, 'hostile-user.npmrc');
+    write(hostileUserConfig, 'registry=https://hostile.invalid/\n');
+
+    const result = runTrustedNpmCli([], {
+      environment: {
+        HOME: join(fixtureRoot, 'hostile-home'),
+        NODE_OPTIONS: '--import=hostile',
+        NPM_CONFIG_REGISTRY: 'https://hostile.invalid/',
+        npm_config_cache: join(fixtureRoot, 'hostile-cache'),
+        npm_config_userconfig: hostileUserConfig,
+        npm_execpath: trustedCli,
+      },
+    }, {
+      command: process.execPath,
+      execPath: fakeNode,
+      platform: 'linux',
+    });
+    expect(result.status).toBe(0);
+    const childEnvironment = JSON.parse(result.stdout) as Record<string, string>;
+    expect(childEnvironment).not.toHaveProperty('NODE_OPTIONS');
+    expect(childEnvironment).not.toHaveProperty('NPM_CONFIG_REGISTRY');
+    expect(childEnvironment).not.toHaveProperty('PATH');
+    expect(childEnvironment['HOME']).not.toBe(join(fixtureRoot, 'hostile-home'));
+    expect(childEnvironment['npm_config_cache']).not.toBe(join(fixtureRoot, 'hostile-cache'));
+    expect(childEnvironment['npm_config_userconfig']).not.toBe(hostileUserConfig);
+    expect(childEnvironment).toMatchObject({
+      HOME: childEnvironment['USERPROFILE'],
+      TEMP: childEnvironment['TMP'],
+      TMP: childEnvironment['TMPDIR'],
+      npm_config_audit: 'false',
+      npm_config_fund: 'false',
+      npm_config_ignore_scripts: 'true',
+      npm_config_loglevel: 'error',
+      npm_config_update_notifier: 'false',
+      npm_node_execpath: process.execPath,
+    });
+
+    expect(() => runTrustedNpmCli([], {
+      env: { npm_config_registry: 'https://hostile.invalid/' },
+      environment: { npm_execpath: trustedCli },
+    }, {
+      command: process.execPath,
+      execPath: fakeNode,
+      platform: 'linux',
+    })).toThrow('npm CLI environment overrides are unsupported');
+
+  });
+
+  it('intrinsically ignores a project npmrc created immediately before spawn', () => {
+    const projectRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-npm-project-race-')));
+    tempDirs.push(projectRoot);
+    write(join(projectRoot, 'package.json'), '{"name":"project-race","version":"1.0.0"}\n');
+    let injected = false;
+    const result = runTrustedNpmCli(['config', 'get', 'registry'], {
+      cwd: projectRoot,
+      encoding: 'utf8',
+    }, {
+      beforeSpawn: () => {
+        injected = true;
+        write(join(projectRoot, '.npmrc'), 'registry=https://hostile.invalid/\n');
+      },
+    });
+    expect(injected).toBe(true);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe('https://registry.npmjs.org/');
+  });
+
   it('rejects replacement after validation without executing the replacement path', () => {
     const fixtureRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-npm-race-')));
     tempDirs.push(fixtureRoot);

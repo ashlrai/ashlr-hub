@@ -125,6 +125,29 @@ function parsedInventory(input: ContractFixture) {
   return parsed.inventory;
 }
 
+function addNestedDependency(input: ContractFixture): void {
+  const lockPath = join(input.packageRoot, 'package-lock.json');
+  const lock = JSON.parse(readFileSync(lockPath, 'utf8')) as {
+    packages: Record<string, Record<string, unknown>>;
+  };
+  lock.packages['node_modules/example/node_modules/nested-bin'] = { version: '2.0.0' };
+  writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`);
+  const nestedRoot = join(input.dependencyRoot, 'example', 'node_modules', 'nested-bin');
+  write(join(nestedRoot, 'package.json'), `${JSON.stringify({
+    name: 'nested-bin',
+    version: '2.0.0',
+    bin: { nested: 'cli.js' },
+  })}\n`);
+  write(join(nestedRoot, 'cli.js'), '#!/usr/bin/env node\n', 0o755);
+  rebuildInventory(input);
+}
+
+function rebuildInventory(input: ContractFixture): void {
+  const inventory = buildRuntimeReleaseDependencyInventory(input.packageRoot);
+  if (!inventory.ok) throw new Error(inventory.reason);
+  writeFileSync(input.inventoryPath, inventory.canonicalJson);
+}
+
 function observe(input: ContractFixture) {
   return observeInstalledRuntimeDependencies({
     dependencyRoot: input.dependencyRoot,
@@ -451,7 +474,7 @@ describe('release artifact contract v1', { timeout: 30_000 }, () => {
     () => {
       const release = fixture();
       mkdirSync(join(release.dependencyRoot, '.bin'));
-      symlinkSync('../example/index.js', join(release.dependencyRoot, '.bin', 'example'));
+      symlinkSync('../example/cli.js', join(release.dependencyRoot, '.bin', 'example'));
       expect(observe(release)).toMatchObject({ ok: true, packageCount: 1 });
 
       const escaped = fixture();
@@ -462,6 +485,183 @@ describe('release artifact contract v1', { timeout: 30_000 }, () => {
       expect(observe(escaped)).toEqual({
         ok: false,
         reason: 'installed dependency bin link escapes dependency root',
+      });
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'admits only package-owned nested npm bin links and rejects nested escapes',
+    () => {
+      const admitted = fixture();
+      addNestedDependency(admitted);
+      const nestedBin = join(admitted.dependencyRoot, 'example', 'node_modules', '.bin');
+      mkdirSync(nestedBin);
+      symlinkSync('../nested-bin/cli.js', join(nestedBin, 'nested'));
+      expect(observe(admitted)).toMatchObject({ ok: true, packageCount: 2 });
+
+      const inventedCommand = fixture();
+      addNestedDependency(inventedCommand);
+      const inventedBin = join(
+        inventedCommand.dependencyRoot,
+        'example',
+        'node_modules',
+        '.bin',
+      );
+      mkdirSync(inventedBin);
+      symlinkSync('../nested-bin/cli.js', join(inventedBin, 'invented'));
+      expect(observe(inventedCommand)).toEqual({
+        ok: false,
+        reason: 'installed dependency bin link does not match declared package bin',
+      });
+
+      const noBin = fixture();
+      addNestedDependency(noBin);
+      writeFileSync(
+        join(noBin.dependencyRoot, 'example', 'node_modules', 'nested-bin', 'package.json'),
+        '{"name":"nested-bin","version":"2.0.0"}\n',
+      );
+      rebuildInventory(noBin);
+      const noBinRoot = join(noBin.dependencyRoot, 'example', 'node_modules', '.bin');
+      mkdirSync(noBinRoot);
+      symlinkSync('../nested-bin/cli.js', join(noBinRoot, 'nested'));
+      expect(observe(noBin)).toEqual({
+        ok: false,
+        reason: 'installed dependency bin link does not match declared package bin',
+      });
+
+      const mismatchedTarget = fixture();
+      addNestedDependency(mismatchedTarget);
+      write(
+        join(
+          mismatchedTarget.dependencyRoot,
+          'example',
+          'node_modules',
+          'nested-bin',
+          'alternate.js',
+        ),
+        '#!/usr/bin/env node\n',
+        0o755,
+      );
+      rebuildInventory(mismatchedTarget);
+      const mismatchedBin = join(
+        mismatchedTarget.dependencyRoot,
+        'example',
+        'node_modules',
+        '.bin',
+      );
+      mkdirSync(mismatchedBin);
+      symlinkSync('../nested-bin/alternate.js', join(mismatchedBin, 'nested'));
+      expect(observe(mismatchedTarget)).toEqual({
+        ok: false,
+        reason: 'installed dependency bin link does not match declared package bin',
+      });
+
+      const crossDepth = fixture();
+      addNestedDependency(crossDepth);
+      const crossDepthLockPath = join(crossDepth.packageRoot, 'package-lock.json');
+      const crossDepthLock = JSON.parse(readFileSync(crossDepthLockPath, 'utf8')) as {
+        packages: Record<string, Record<string, unknown>>;
+      };
+      crossDepthLock.packages[
+        'node_modules/example/node_modules/nested-bin/node_modules/deeper'
+      ] = { version: '3.0.0' };
+      writeFileSync(crossDepthLockPath, `${JSON.stringify(crossDepthLock, null, 2)}\n`);
+      const deeperRoot = join(
+        crossDepth.dependencyRoot,
+        'example',
+        'node_modules',
+        'nested-bin',
+        'node_modules',
+        'deeper',
+      );
+      write(
+        join(deeperRoot, 'package.json'),
+        '{"name":"deeper","version":"3.0.0","bin":{"deeper":"cli.js"}}\n',
+      );
+      write(join(deeperRoot, 'cli.js'), '#!/usr/bin/env node\n', 0o755);
+      rebuildInventory(crossDepth);
+      const crossDepthBin = join(
+        crossDepth.dependencyRoot,
+        'example',
+        'node_modules',
+        '.bin',
+      );
+      mkdirSync(crossDepthBin);
+      symlinkSync(
+        '../nested-bin/node_modules/deeper/cli.js',
+        join(crossDepthBin, 'nested'),
+      );
+      expect(observe(crossDepth)).toEqual({
+        ok: false,
+        reason: 'installed dependency tree contains an unexpected symlink',
+      });
+
+      const wrongTree = fixture();
+      addNestedDependency(wrongTree);
+      const wrongTreeBin = join(wrongTree.dependencyRoot, 'example', 'node_modules', '.bin');
+      mkdirSync(wrongTreeBin);
+      symlinkSync('../../../example/index.js', join(wrongTreeBin, 'wrong-tree'));
+      expect(observe(wrongTree)).toEqual({
+        ok: false,
+        reason: 'installed dependency tree contains an unexpected symlink',
+      });
+
+      const unowned = fixture();
+      addNestedDependency(unowned);
+      const unownedRoot = join(unowned.dependencyRoot, 'example', 'node_modules', 'unowned');
+      write(join(unownedRoot, 'package.json'), '{"name":"unowned","version":"1.0.0"}\n');
+      write(join(unownedRoot, 'cli.js'), '#!/usr/bin/env node\n', 0o755);
+      const unownedBin = join(unowned.dependencyRoot, 'example', 'node_modules', '.bin');
+      mkdirSync(unownedBin);
+      symlinkSync('../unowned/cli.js', join(unownedBin, 'unowned'));
+      expect(observe(unowned)).toEqual({
+        ok: false,
+        reason: 'installed dependency package set does not match inventory',
+      });
+
+      const absolute = fixture();
+      addNestedDependency(absolute);
+      const absoluteBin = join(absolute.dependencyRoot, 'example', 'node_modules', '.bin');
+      mkdirSync(absoluteBin);
+      symlinkSync(join(absolute.dependencyRoot, 'example', 'index.js'), join(absoluteBin, 'absolute'));
+      expect(observe(absolute)).toEqual({
+        ok: false,
+        reason: 'installed dependency bin link target is invalid',
+      });
+
+      const windowsTarget = fixture();
+      addNestedDependency(windowsTarget);
+      const windowsBin = join(windowsTarget.dependencyRoot, 'example', 'node_modules', '.bin');
+      mkdirSync(windowsBin);
+      symlinkSync('C:\\hostile\\cli.js', join(windowsBin, 'windows'));
+      expect(observe(windowsTarget)).toEqual({
+        ok: false,
+        reason: 'installed dependency bin link target is invalid',
+      });
+
+      const deep = fixture();
+      addNestedDependency(deep);
+      const deepBin = join(deep.dependencyRoot, 'example', 'node_modules', '.bin', 'deep');
+      mkdirSync(deepBin, { recursive: true });
+      symlinkSync('../../nested-bin/cli.js', join(deepBin, 'nested'));
+      expect(observe(deep)).toEqual({
+        ok: false,
+        reason: 'installed dependency tree contains an unexpected symlink',
+      });
+
+      const malformedName = fixture();
+      addNestedDependency(malformedName);
+      const malformedBin = join(
+        malformedName.dependencyRoot,
+        'example',
+        'node_modules',
+        '.bin',
+      );
+      mkdirSync(malformedBin);
+      symlinkSync('../nested-bin/cli.js', join(malformedBin, 'bad\nname'));
+      expect(observe(malformedName)).toEqual({
+        ok: false,
+        reason: 'installed dependency tree contains an unexpected symlink',
       });
     },
   );
