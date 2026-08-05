@@ -14,6 +14,8 @@ const ROLLBACK_RETENTION = 5;
 const JOURNAL_SCHEMA_VERSION = 1;
 const REMOVAL_JOURNAL_SCHEMA_VERSION = 2;
 const MAX_JOURNAL_BYTES = 4 * 1024 * 1024;
+const MAX_PLIST_BYTES = MAX_JOURNAL_BYTES;
+const MAX_PLIST_BYTES_BIGINT = BigInt(MAX_PLIST_BYTES);
 const MAX_JOURNAL_BYTES_BIGINT = BigInt(MAX_JOURNAL_BYTES);
 
 export type LaunchdInstallPhase =
@@ -224,8 +226,8 @@ function readSnapshot(filePath: string, trustedRoot?: string): PlistSnapshot | u
     ) {
       throw new Error(`unsafe active plist: changed while opening ${filePath}`);
     }
-    if (opened.size > BigInt(Number.MAX_SAFE_INTEGER)) {
-      throw new Error(`active plist exceeds safe readable size at ${filePath}`);
+    if (opened.size < 0n || opened.size > MAX_PLIST_BYTES_BIGINT) {
+      throw new Error(`active plist exceeds ${MAX_PLIST_BYTES}-byte size limit at ${filePath}`);
     }
     const bytes = Buffer.alloc(Number(opened.size));
     let offset = 0;
@@ -233,6 +235,10 @@ function readSnapshot(filePath: string, trustedRoot?: string): PlistSnapshot | u
       const read = fs.readSync(fd, bytes, offset, bytes.length - offset, offset);
       if (read === 0) throw new Error(`short read from active plist ${filePath}`);
       offset += read;
+    }
+    const growthProbe = Buffer.alloc(1);
+    if (fs.readSync(fd, growthProbe, 0, 1, bytes.length) !== 0) {
+      throw new Error(`active plist changed size while reading ${filePath}`);
     }
     return { bytes, mode: PRIVATE_FILE_MODE, dev: opened.dev, ino: opened.ino };
   } finally {

@@ -11,7 +11,9 @@ const { COLLIDING_A, COLLIDING_B, IDENTITY_OFFSET, identityControl } = vi.hoiste
     mutationOffset: 0n,
     lstatOverrides: new Map<string, { dev: bigint; ino: bigint }>(),
     fstatOverrides: new Map<string, { dev: bigint; ino: bigint }>(),
+    fstatSizeOverrides: new Map<string, bigint>(),
     fdPaths: new Map<number, string>(),
+    readPaths: [] as string[],
     temporaryPrefix: undefined as string | undefined,
     temporaryIdentity: undefined as { dev: bigint; ino: bigint } | undefined,
     journalTemporaryIdentity: undefined as { dev: bigint; ino: bigint } | undefined,
@@ -24,10 +26,12 @@ vi.mock('node:fs', async (importOriginal) => {
   const promoteIdentity = (
     stat: NodeFs.BigIntStats,
     override?: { dev: bigint; ino: bigint },
+    sizeOverride?: bigint,
   ): NodeFs.BigIntStats => new Proxy(stat, {
     get(target, property, receiver) {
       if (property === 'dev') return override?.dev ?? target.dev + IDENTITY_OFFSET + identityControl.mutationOffset;
       if (property === 'ino') return override?.ino ?? target.ino + IDENTITY_OFFSET + identityControl.mutationOffset;
+      if (property === 'size') return sizeOverride ?? target.size;
       return Reflect.get(target, property, receiver);
     },
   });
@@ -61,13 +65,17 @@ vi.mock('node:fs', async (importOriginal) => {
             : target.endsWith('.journal.json') ? identityControl.journalIdentity : undefined)
         : undefined;
       return wantsBigInt(options)
-        ? promoteIdentity(stat as NodeFs.BigIntStats, override)
+        ? promoteIdentity(stat as NodeFs.BigIntStats, override, identityControl.fstatSizeOverrides.get(target ?? ''))
         : stat;
     }),
     openSync: vi.fn((filePath: NodeFs.PathLike, flags: NodeFs.OpenMode, mode?: NodeFs.Mode) => {
       const fd = actual.openSync(filePath, flags, mode);
       identityControl.fdPaths.set(fd, String(filePath));
       return fd;
+    }),
+    readSync: vi.fn((fd: number, ...args: unknown[]) => {
+      identityControl.readPaths.push(identityControl.fdPaths.get(fd) ?? `fd:${fd}`);
+      return (actual.readSync as (...parameters: unknown[]) => number)(fd, ...args);
     }),
   };
 });
@@ -84,7 +92,9 @@ beforeEach(() => {
   identityControl.mutationOffset = 0n;
   identityControl.lstatOverrides.clear();
   identityControl.fstatOverrides.clear();
+  identityControl.fstatSizeOverrides.clear();
   identityControl.fdPaths.clear();
+  identityControl.readPaths.length = 0;
   identityControl.temporaryPrefix = undefined;
   identityControl.temporaryIdentity = undefined;
   identityControl.journalTemporaryIdentity = undefined;
@@ -145,6 +155,32 @@ describe('M93 launchd transaction bigint identity authority', () => {
       unload: () => ({ ok: true, stderr: '' }),
       load: () => ({ ok: true, stderr: '' }),
     })).toThrow('changed while opening');
+  });
+
+  it('rejects oversized trusted plist metadata before allocating or reading it', () => {
+    const serviceFile = path.join(root, 'services', 'ashlr-daemon.cmd');
+    const oversizedBytes = 4 * 1024 * 1024 + 1;
+    fs.mkdirSync(path.dirname(serviceFile), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(serviceFile, 'prior', { mode: 0o600 });
+    identityControl.fstatSizeOverrides.set(serviceFile, BigInt(oversizedBytes));
+    const allocate = vi.spyOn(Buffer, 'alloc');
+    const unload = vi.fn(() => ({ ok: true, stderr: '' }));
+
+    try {
+      expect(() => installLaunchdPlistTransaction({
+        plistPath: serviceFile,
+        trustedRoot: root,
+        content: 'next',
+        lockDir: path.join(root, 'locks'),
+        unload,
+        load: () => ({ ok: true, stderr: '' }),
+      })).toThrow('active plist exceeds 4194304-byte size limit');
+      expect(allocate.mock.calls.some(([size]) => size === oversizedBytes)).toBe(false);
+      expect(identityControl.readPaths).not.toContain(serviceFile);
+      expect(unload).not.toHaveBeenCalled();
+    } finally {
+      allocate.mockRestore();
+    }
   });
 
   it('rejects colliding temporary and installed identities during atomic replacement', () => {
