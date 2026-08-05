@@ -24,15 +24,22 @@ import {
   RuntimeReleaseObservationDeadlineExceededError,
   type RuntimeReleaseObservationDeadline,
 } from './runtime-release-observation-deadline.js';
+import {
+  assertRuntimeReleaseRootPackagePortability,
+  observeInstalledRuntimeDependencies,
+  parseRuntimeReleaseDependencyInventory,
+  RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH,
+  type RuntimeReleaseDependencyInventoryV2,
+} from './runtime-release-dependency-inventory.js';
 
-const MANIFEST_DIGEST_DOMAIN = 'ashlr:unsigned-runtime-release-manifest:v1';
+const MANIFEST_DIGEST_DOMAIN = 'ashlr:unsigned-runtime-release-manifest:v2';
 const MAX_MANIFEST_BYTES = 512 * 1024;
 const MAX_ARTIFACTS = 2_048;
 const MAX_ARTIFACT_BYTES = 128 * 1024 * 1024;
 const MAX_INTERPRETER_BYTES = 512 * 1024 * 1024;
 const MAX_RELEASE_BYTES = 256 * 1024 * 1024;
 const MAX_PACKAGE_MANIFEST_BYTES = 1024 * 1024;
-const MAX_LOCKFILE_BYTES = 16 * 1024 * 1024;
+const MAX_DEPENDENCY_INVENTORY_BYTES = 512 * 1024;
 const MAX_TRAVERSAL_DEPTH = 32;
 const MAX_DIRECTORY_ENTRIES = 1_024;
 const MAX_DIRECTORIES = 512;
@@ -42,13 +49,12 @@ const SHA256_RE = /^[a-f0-9]{64}$/;
 const REVISION_RE = /^[a-f0-9]{40}$/;
 const NODE_VERSION_RE = /^v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
 const PACKAGE_MANIFEST_PATH = 'package.json';
-const LOCKFILE_PATH = 'package-lock.json';
 const LAUNCHER_PATH = 'bin/ashlr';
 const RUNTIME_ENTRY_PATH = 'dist/cli/index.js';
 const VERIFIER_RUNNER_PATH = 'scripts/run-verify-command.mjs';
 const FIXED_ARTIFACT_PATHS = new Set([
   PACKAGE_MANIFEST_PATH,
-  LOCKFILE_PATH,
+  RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH,
   LAUNCHER_PATH,
   VERIFIER_RUNNER_PATH,
 ]);
@@ -70,7 +76,7 @@ export interface UnsignedRuntimeReleaseManifest {
     artifactCoherence: 'two-complete-scans';
     authenticity: 'unsigned';
     configuration: 'excluded';
-    installedDependencies: 'lockfile-only';
+    installedDependencies: 'packaged-byte-inventory-and-installed-tree';
     rollback: 'unresolved-caller-declared-reference';
     serviceInvocation: 'unbound';
   };
@@ -88,9 +94,11 @@ export interface UnsignedRuntimeReleaseManifest {
     observedArtifactSha256: string;
     observedResolvedPath: string;
   };
-  lockfile: {
-    lockfileVersion: number;
-    path: 'package-lock.json';
+  dependencyInventory: {
+    inventoryDigest: string;
+    installedDependencyRootSha256: string;
+    packageCount: number;
+    path: typeof RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH;
     sha256: string;
   };
   manifestDigest: string;
@@ -106,11 +114,12 @@ export interface UnsignedRuntimeReleaseManifest {
     source: 'caller-declared';
     targetManifestDigest: string | null;
   };
-  schemaVersion: 1;
+  schemaVersion: 2;
 }
 
 export interface BuildUnsignedRuntimeReleaseManifestOptions {
   packageRoot: string;
+  dependencyRoot: string;
   declaredInterpreterPath: string;
   declaredInterpreterVersion: string;
   expectedRevision: string;
@@ -161,7 +170,9 @@ interface ReleaseSnapshot {
   artifactIdentities: Array<{ identity: string; path: string }>;
   directories: Array<{ identity: string; path: string; realPath: string }>;
   interpreter: FileSnapshot & { path: string };
-  lockfileVersion: number;
+  dependencyInventory: RuntimeReleaseDependencyInventoryV2;
+  dependencyInventorySha256: string;
+  installedDependencyTreeSha256: string;
   packageName: string;
   packageVersion: string;
 }
@@ -276,7 +287,8 @@ function isCoveredArtifactPath(value: unknown): value is string {
   if (!isReleasePath(value)) return false;
   if (FIXED_ARTIFACT_PATHS.has(value)) return true;
   const segments = value.split('/');
-  return segments[0] === 'dist' && segments.length >= 2 &&
+  return (segments[0] === 'bin' || segments[0] === 'dist' || segments[0] === 'schema') &&
+    segments.length >= 2 &&
     segments.length - 2 <= MAX_TRAVERSAL_DEPTH;
 }
 
@@ -395,10 +407,26 @@ function snapshotRegularFile(
 
 function canonicalPackageRoot(packageRoot: string): string {
   if (!isAbsolute(packageRoot)) throw new Error('package root must be absolute');
-  const root = realpathSync(packageRoot);
-  const stat = lstatSync(root);
-  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('package root is not a regular directory');
+  const resolved = resolve(packageRoot);
+  const stat = lstatSync(resolved);
+  const root = realpathSync(resolved);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || root !== resolved) {
+    throw new Error('package root is not a canonical directory');
+  }
   return root;
+}
+
+function canonicalDependencyRoot(packageRoot: string, dependencyRoot: string): string {
+  if (!isAbsolute(dependencyRoot)) throw new Error('dependency root must be absolute');
+  const expected = join(packageRoot, 'node_modules');
+  const resolved = resolve(dependencyRoot);
+  if (resolved !== expected) throw new Error('dependency root is not bound to package root');
+  const stat = lstatSync(resolved);
+  const real = realpathSync(resolved);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || real !== expected) {
+    throw new Error('dependency root is not a canonical directory');
+  }
+  return real;
 }
 
 function directoryObservation(
@@ -466,17 +494,11 @@ function discoverReleaseLayout(
   };
 
   observeDirectory('.');
-  observeDirectory('bin');
   observeDirectory('scripts');
   admitArtifact(packageRoot, PACKAGE_MANIFEST_PATH, budget, paths, {
     label: PACKAGE_MANIFEST_PATH,
     maxBytes: MAX_PACKAGE_MANIFEST_BYTES,
   }, observation);
-  admitArtifact(packageRoot, LOCKFILE_PATH, budget, paths, {
-    label: LOCKFILE_PATH,
-    maxBytes: MAX_LOCKFILE_BYTES,
-  }, observation);
-  admitArtifact(packageRoot, LAUNCHER_PATH, budget, paths, undefined, observation);
   admitArtifact(packageRoot, VERIFIER_RUNNER_PATH, budget, paths, undefined, observation);
 
   const visitRuntime = (relativeDirectory: string, depth: number): void => {
@@ -518,7 +540,21 @@ function discoverReleaseLayout(
       throw new Error('release directory changed during traversal');
     }
   };
+  visitRuntime('bin', 0);
   visitRuntime('dist', 0);
+  let schemaStat: ReturnType<typeof lstatSync> | undefined;
+  try {
+    schemaStat = lstatSync(join(packageRoot, 'schema'));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  if (schemaStat) {
+    if (!schemaStat.isDirectory() || schemaStat.isSymbolicLink()) {
+      throw new Error('release tree contains an unsafe directory');
+    }
+    visitRuntime('schema', 0);
+  }
+  if (!paths.includes(LAUNCHER_PATH)) throw new Error('launcher bin/ashlr is missing');
   if (!paths.includes(RUNTIME_ENTRY_PATH)) throw new Error('runtime entry dist/cli/index.js is missing');
   if (new Set(paths).size !== paths.length) throw new Error('release artifact paths are not unique');
   return { directories, paths: paths.sort() };
@@ -662,42 +698,37 @@ function parseJsonBytes(
 function packageIdentity(
   packageJson: Record<string, unknown>,
   expectedPackageName: string,
-): { name: string; version: string } {
+): {
+  name: string;
+  rootDependencies: Array<{ name: string; requested: string }>;
+  version: string;
+} {
   if (packageJson['name'] !== expectedPackageName) throw new Error('package name does not match expected identity');
   if (!isBoundedText(packageJson['version'], 128)) throw new Error('package version is invalid');
   const bin = packageJson['bin'];
   if (!isPlainRecord(bin) || bin['ashlr'] !== LAUNCHER_PATH) {
     throw new Error('package launcher does not match bin/ashlr');
   }
-  return { name: expectedPackageName, version: packageJson['version'] };
-}
-
-function lockfileIdentity(
-  lockJson: Record<string, unknown>,
-  expectedName: string,
-  expectedVersion: string,
-): number {
-  const lockfileVersion = lockJson['lockfileVersion'];
-  if (!Number.isSafeInteger(lockfileVersion) || (lockfileVersion as number) <= 0) {
-    throw new Error('package lock version is invalid');
+  const dependencies = packageJson['dependencies'];
+  if (!isPlainRecord(dependencies)) throw new Error('package dependencies are invalid');
+  const rootDependencies = Object.entries(dependencies).map(([name, requested]) => {
+    if (!isBoundedText(name, 256) || !isBoundedText(requested, 512)) {
+      throw new Error('package dependency declaration is invalid');
+    }
+    return { name, requested };
+  }).sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
+  const bundled = packageJson['bundledDependencies'] ?? packageJson['bundleDependencies'];
+  if (!Array.isArray(bundled) || bundled.some((entry) => typeof entry !== 'string') ||
+    canonicalJson([...bundled].sort()) !==
+      canonicalJson(rootDependencies.map((entry) => entry.name))) {
+    throw new Error('package bundled dependencies do not match runtime dependencies');
   }
-  if (lockJson['name'] !== expectedName || lockJson['version'] !== expectedVersion) {
-    throw new Error('package lock identity does not match package.json');
-  }
-  const packages = lockJson['packages'];
-  const root = isPlainRecord(packages) ? packages[''] : undefined;
-  if (!isPlainRecord(root) || root['name'] !== expectedName || root['version'] !== expectedVersion) {
-    throw new Error('package lock root identity does not match package.json');
-  }
-  const bin = root['bin'];
-  if (!isPlainRecord(bin) || bin['ashlr'] !== LAUNCHER_PATH) {
-    throw new Error('package lock launcher does not match bin/ashlr');
-  }
-  return lockfileVersion as number;
+  return { name: expectedPackageName, rootDependencies, version: packageJson['version'] };
 }
 
 function completeReleaseScan(
   packageRoot: string,
+  dependencyRoot: string,
   expectedPackageName: string,
   interpreterPath: string,
   observation?: RuntimeReleaseObservationDeadline,
@@ -710,24 +741,30 @@ function completeReleaseScan(
   const artifacts: UnsignedRuntimeReleaseArtifact[] = [];
   const artifactIdentities: Array<{ identity: string; path: string }> = [];
   let packageBytes: Buffer | undefined;
-  let lockBytes: Buffer | undefined;
+  let dependencyInventoryBytes: Buffer | undefined;
   let totalBytes = 0;
   for (const relativePath of layout.paths) {
     requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest scan');
     const focused = relativePath === PACKAGE_MANIFEST_PATH
       ? { label: PACKAGE_MANIFEST_PATH, maxBytes: MAX_PACKAGE_MANIFEST_BYTES }
-      : relativePath === LOCKFILE_PATH
-        ? { label: LOCKFILE_PATH, maxBytes: MAX_LOCKFILE_BYTES }
+      : relativePath === RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH
+        ? {
+          label: RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH,
+          maxBytes: MAX_DEPENDENCY_INVENTORY_BYTES,
+        }
         : { label: 'release artifact', maxBytes: MAX_ARTIFACT_BYTES };
     const snapshot = snapshotRegularFile(join(packageRoot, ...relativePath.split('/')), {
       anchorPath: packageRoot,
-      captureBytes: relativePath === PACKAGE_MANIFEST_PATH || relativePath === LOCKFILE_PATH,
+      captureBytes: relativePath === PACKAGE_MANIFEST_PATH ||
+        relativePath === RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH,
       ...focused,
     }, observation);
     totalBytes += snapshot.size;
     if (totalBytes > MAX_RELEASE_BYTES) throw new Error('release artifacts exceed total byte limit');
     if (relativePath === PACKAGE_MANIFEST_PATH) packageBytes = snapshot.bytes;
-    if (relativePath === LOCKFILE_PATH) lockBytes = snapshot.bytes;
+    if (relativePath === RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH) {
+      dependencyInventoryBytes = snapshot.bytes;
+    }
     artifacts.push({
       executable: snapshot.executable,
       path: relativePath,
@@ -737,18 +774,39 @@ function completeReleaseScan(
     artifactIdentities.push({ identity: snapshot.identity, path: relativePath });
   }
 
-  if (!packageBytes || !lockBytes) throw new Error('release package identity files are missing');
+  if (!packageBytes || !dependencyInventoryBytes) {
+    throw new Error('release package identity files are missing');
+  }
   requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest scan');
-  const pkg = packageIdentity(
-    parseJsonBytes(packageBytes, PACKAGE_MANIFEST_PATH, observation),
-    expectedPackageName,
-  );
+  const packageJson = parseJsonBytes(packageBytes, PACKAGE_MANIFEST_PATH, observation);
+  const pkg = packageIdentity(packageJson, expectedPackageName);
   requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest scan');
-  const lockfileVersion = lockfileIdentity(
-    parseJsonBytes(lockBytes, LOCKFILE_PATH, observation),
-    pkg.name,
-    pkg.version,
+  const parsedInventory = parseRuntimeReleaseDependencyInventory(dependencyInventoryBytes);
+  if (!parsedInventory.ok) throw new Error(parsedInventory.reason);
+  assertRuntimeReleaseRootPackagePortability(
+    packageJson,
+    layout.paths,
+    parsedInventory.inventory,
   );
+  const packageManifestSha256 = createHash('sha256').update(packageBytes).digest('hex');
+  if (!equalDigest(packageManifestSha256, parsedInventory.inventory.package.manifestSha256)) {
+    throw new Error('runtime dependency inventory package manifest mismatch');
+  }
+  if (canonicalJson(parsedInventory.inventory.rootDependencies) !==
+    canonicalJson(pkg.rootDependencies)) {
+    throw new Error('runtime dependency inventory root dependencies do not match package.json');
+  }
+  const installedDependencies = observeInstalledRuntimeDependencies({
+    checkpoint: () => requireBeforeRuntimeReleaseObservationDeadline(
+      observation,
+      'runtime release installed dependency tree',
+    ),
+    dependencyRoot,
+    inventory: parsedInventory.inventory,
+    expectedPackageName: pkg.name,
+    expectedPackageVersion: pkg.version,
+  });
+  if (!installedDependencies.ok) throw new Error(installedDependencies.reason);
   requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest scan');
   const interpreter = snapshotRegularFile(interpreterPath, {
     label: 'declared interpreter artifact',
@@ -768,7 +826,9 @@ function completeReleaseScan(
     artifactIdentities,
     directories,
     interpreter: { ...interpreter, path: interpreterPath },
-    lockfileVersion,
+    dependencyInventory: parsedInventory.inventory,
+    dependencyInventorySha256: createHash('sha256').update(dependencyInventoryBytes).digest('hex'),
+    installedDependencyTreeSha256: installedDependencies.installedTreeSha256,
     packageName: pkg.name,
     packageVersion: pkg.version,
   };
@@ -776,6 +836,7 @@ function completeReleaseScan(
 
 function coherentReleaseSnapshot(
   packageRoot: string,
+  dependencyRoot: string,
   expectedPackageName: string,
   interpreterPath: string,
   afterFirstScan?: () => void,
@@ -787,6 +848,7 @@ function coherentReleaseSnapshot(
   requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest first scan');
   const first = completeReleaseScan(
     packageRoot,
+    dependencyRoot,
     expectedPackageName,
     interpreterPath,
     observation,
@@ -796,6 +858,7 @@ function coherentReleaseSnapshot(
   requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest second scan');
   const second = completeReleaseScan(
     packageRoot,
+    dependencyRoot,
     expectedPackageName,
     interpreterPath,
     observation,
@@ -823,16 +886,16 @@ function validateManifestShape(value: unknown): UnsignedRuntimeReleaseManifest {
     'artifacts',
     'assurance',
     'coverage',
+    'dependencyInventory',
     'entrypoints',
     'expectedRevision',
     'interpreterDeclaration',
-    'lockfile',
     'manifestDigest',
     'package',
     'rollbackDeclaration',
     'schemaVersion',
   ])) throw new Error('runtime release manifest has an invalid top-level shape');
-  if (value['schemaVersion'] !== 1 || value['algorithm'] !== 'sha256' ||
+  if (value['schemaVersion'] !== 2 || value['algorithm'] !== 'sha256' ||
     value['assurance'] !== 'unsigned-observation-only') {
     throw new Error('runtime release manifest has an unsupported schema');
   }
@@ -853,7 +916,7 @@ function validateManifestShape(value: unknown): UnsignedRuntimeReleaseManifest {
     coverage['artifactCoherence'] !== 'two-complete-scans' ||
     coverage['authenticity'] !== 'unsigned' ||
     coverage['configuration'] !== 'excluded' ||
-    coverage['installedDependencies'] !== 'lockfile-only' ||
+    coverage['installedDependencies'] !== 'packaged-byte-inventory-and-installed-tree' ||
     coverage['rollback'] !== 'unresolved-caller-declared-reference' ||
     coverage['serviceInvocation'] !== 'unbound') {
     throw new Error('runtime release manifest coverage is invalid');
@@ -879,12 +942,20 @@ function validateManifestShape(value: unknown): UnsignedRuntimeReleaseManifest {
     throw new Error('runtime release manifest package identity is invalid');
   }
 
-  const lockfile = value['lockfile'];
-  if (!isPlainRecord(lockfile) || !hasExactKeys(lockfile, ['lockfileVersion', 'path', 'sha256']) ||
-    lockfile['path'] !== LOCKFILE_PATH ||
-    !Number.isSafeInteger(lockfile['lockfileVersion']) || (lockfile['lockfileVersion'] as number) <= 0 ||
-    typeof lockfile['sha256'] !== 'string' || !SHA256_RE.test(lockfile['sha256'])) {
-    throw new Error('runtime release manifest lockfile identity is invalid');
+  const dependencyInventory = value['dependencyInventory'];
+  if (!isPlainRecord(dependencyInventory) || !hasExactKeys(dependencyInventory, [
+    'installedDependencyRootSha256', 'inventoryDigest', 'packageCount', 'path', 'sha256',
+  ]) || dependencyInventory['path'] !== RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH ||
+    typeof dependencyInventory['inventoryDigest'] !== 'string' ||
+    !SHA256_RE.test(dependencyInventory['inventoryDigest']) ||
+    typeof dependencyInventory['installedDependencyRootSha256'] !== 'string' ||
+    !SHA256_RE.test(dependencyInventory['installedDependencyRootSha256']) ||
+    !Number.isSafeInteger(dependencyInventory['packageCount']) ||
+    (dependencyInventory['packageCount'] as number) < 0 ||
+    (dependencyInventory['packageCount'] as number) > 512 ||
+    typeof dependencyInventory['sha256'] !== 'string' ||
+    !SHA256_RE.test(dependencyInventory['sha256'])) {
+    throw new Error('runtime release manifest dependency inventory identity is invalid');
   }
 
   const interpreter = value['interpreterDeclaration'];
@@ -935,16 +1006,19 @@ function validateManifestShape(value: unknown): UnsignedRuntimeReleaseManifest {
   }
 
   const packageArtifact = artifactByPath(artifacts, PACKAGE_MANIFEST_PATH);
-  const lockArtifact = artifactByPath(artifacts, LOCKFILE_PATH);
+  const dependencyInventoryArtifact = artifactByPath(
+    artifacts,
+    RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH,
+  );
   artifactByPath(artifacts, LAUNCHER_PATH);
   artifactByPath(artifacts, RUNTIME_ENTRY_PATH);
   artifactByPath(artifacts, VERIFIER_RUNNER_PATH);
   if (packageArtifact.sha256 !== packageValue['sha256'] ||
-    lockArtifact.sha256 !== lockfile['sha256']) {
+    dependencyInventoryArtifact.sha256 !== dependencyInventory['sha256']) {
     throw new Error('runtime release manifest identity hash does not match its artifact');
   }
   if (packageArtifact.size > MAX_PACKAGE_MANIFEST_BYTES ||
-    lockArtifact.size > MAX_LOCKFILE_BYTES) {
+    dependencyInventoryArtifact.size > MAX_DEPENDENCY_INVENTORY_BYTES) {
     throw new Error('runtime release manifest identity artifact exceeds focused byte limit');
   }
 
@@ -972,7 +1046,7 @@ function validateManifestShape(value: unknown): UnsignedRuntimeReleaseManifest {
       artifactCoherence: 'two-complete-scans',
       authenticity: 'unsigned',
       configuration: 'excluded',
-      installedDependencies: 'lockfile-only',
+      installedDependencies: 'packaged-byte-inventory-and-installed-tree',
       rollback: 'unresolved-caller-declared-reference',
       serviceInvocation: 'unbound',
     },
@@ -990,10 +1064,12 @@ function validateManifestShape(value: unknown): UnsignedRuntimeReleaseManifest {
       observedArtifactSha256: interpreter['observedArtifactSha256'],
       observedResolvedPath: interpreter['observedResolvedPath'],
     },
-    lockfile: {
-      lockfileVersion: lockfile['lockfileVersion'] as number,
-      path: LOCKFILE_PATH,
-      sha256: lockfile['sha256'],
+    dependencyInventory: {
+      inventoryDigest: dependencyInventory['inventoryDigest'],
+      installedDependencyRootSha256: dependencyInventory['installedDependencyRootSha256'],
+      packageCount: dependencyInventory['packageCount'] as number,
+      path: RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH,
+      sha256: dependencyInventory['sha256'],
     },
     manifestDigest: digest,
     package: {
@@ -1008,7 +1084,7 @@ function validateManifestShape(value: unknown): UnsignedRuntimeReleaseManifest {
       source: 'caller-declared',
       targetManifestDigest: rollback['targetManifestDigest'] as string | null,
     },
-    schemaVersion: 1,
+    schemaVersion: 2,
   };
 }
 
@@ -1019,6 +1095,7 @@ export function buildUnsignedRuntimeReleaseManifest(
   try {
     requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest');
     const packageRoot = canonicalPackageRoot(options.packageRoot);
+    const dependencyRoot = canonicalDependencyRoot(packageRoot, options.dependencyRoot);
     const expectedPackageName = options.expectedPackageName ?? '@ashlr/hub';
     if (!isBoundedText(expectedPackageName, 256)) {
       return { ok: false, reason: 'expected package name is invalid' };
@@ -1044,6 +1121,7 @@ export function buildUnsignedRuntimeReleaseManifest(
     const testHooks = manifestTestHooks(options);
     const release = coherentReleaseSnapshot(
       packageRoot,
+      dependencyRoot,
       expectedPackageName,
       interpreterPath,
       testHooks?.afterFirstCompleteScan,
@@ -1052,7 +1130,10 @@ export function buildUnsignedRuntimeReleaseManifest(
     );
     requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest');
     const packageArtifact = artifactByPath(release.artifacts, PACKAGE_MANIFEST_PATH);
-    const lockArtifact = artifactByPath(release.artifacts, LOCKFILE_PATH);
+    const dependencyInventoryArtifact = artifactByPath(
+      release.artifacts,
+      RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH,
+    );
     const payload: Omit<UnsignedRuntimeReleaseManifest, 'manifestDigest'> = {
       algorithm: 'sha256',
       artifacts: release.artifacts,
@@ -1061,7 +1142,7 @@ export function buildUnsignedRuntimeReleaseManifest(
         artifactCoherence: 'two-complete-scans',
         authenticity: 'unsigned',
         configuration: 'excluded',
-        installedDependencies: 'lockfile-only',
+        installedDependencies: 'packaged-byte-inventory-and-installed-tree',
         rollback: 'unresolved-caller-declared-reference',
         serviceInvocation: 'unbound',
       },
@@ -1079,10 +1160,12 @@ export function buildUnsignedRuntimeReleaseManifest(
         observedArtifactSha256: release.interpreter.sha256,
         observedResolvedPath: interpreterPath,
       },
-      lockfile: {
-        lockfileVersion: release.lockfileVersion,
-        path: LOCKFILE_PATH,
-        sha256: lockArtifact.sha256,
+      dependencyInventory: {
+        inventoryDigest: release.dependencyInventory.inventoryDigest,
+        installedDependencyRootSha256: release.installedDependencyTreeSha256,
+        packageCount: release.dependencyInventory.packages.length,
+        path: RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH,
+        sha256: dependencyInventoryArtifact.sha256,
       },
       package: {
         binName: 'ashlr',
@@ -1096,7 +1179,7 @@ export function buildUnsignedRuntimeReleaseManifest(
         source: 'caller-declared',
         targetManifestDigest: rollbackTargetDigest,
       },
-      schemaVersion: 1,
+      schemaVersion: 2,
     };
     const manifest: UnsignedRuntimeReleaseManifest = {
       ...payload,
@@ -1172,6 +1255,7 @@ export function verifyUnsignedRuntimeReleaseManifest(
   const testHooks = manifestTestHooks(options);
   const rebuildOptions = {
     packageRoot: options.packageRoot,
+    dependencyRoot: options.dependencyRoot,
     declaredInterpreterPath: options.declaredInterpreterPath,
     declaredInterpreterVersion: options.declaredInterpreterVersion,
     expectedRevision: options.expectedRevision,

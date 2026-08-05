@@ -8,6 +8,10 @@ vi.mock('node:child_process', () => ({
   execFileSync: vi.fn(),
 }));
 
+vi.mock('../src/core/daemon/service-install-authority.js', () => ({
+  assertResidentServiceInstallAuthorized: vi.fn(),
+}));
+
 import * as cp from 'node:child_process';
 import {
   ensureRunning,

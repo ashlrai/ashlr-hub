@@ -235,6 +235,7 @@ function fallbackDaemon(
     autonomyControlLoop: false,
     autonomyControlMode: 'disabled',
     service: {
+      registrationState: 'unknown',
       installed: false,
       running: false,
       runtimeState: 'unknown',

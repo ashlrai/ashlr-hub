@@ -6,7 +6,7 @@ the real CLI.
 
 ## Prerequisites
 
-- **Node.js 22+** (`node --version` — must be v22 or later; install.sh enforces this)
+- **Node.js 22.15+** (`node --version` — install.sh enforces this minimum)
 - **git** on your `PATH`
 - A repo you are comfortable experimenting with
 

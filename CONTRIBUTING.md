@@ -1,12 +1,12 @@
 # Contributing to ashlr-hub
 
-ashlr-hub is an autonomous engineering fleet + local command center, built contract-first in TypeScript (strict ESM, Node 22+). This guide covers the dev environment, conventions, the contracts-first workflow, and the safety invariants contributors must never weaken.
+ashlr-hub is an autonomous engineering fleet + local command center, built contract-first in TypeScript (strict ESM, Node 22.15+). This guide covers the dev environment, conventions, the contracts-first workflow, and the safety invariants contributors must never weaken.
 
 ---
 
 ## Prerequisites
 
-- **Node.js 22+** (`engines.node` is `>=22`; CI and the build assume it)
+- **Node.js 22.15+** (`engines.node` is `>=22.15.0`; CI and the build assume it)
 - **git** on `PATH`
 - `~/.local/bin` on your `PATH` if you want to install the CLI locally
 - Optional (only exercised at runtime by specific commands): `phantom`, `ollama`, LM Studio, `gh`, `vercel`, `claude`, `codex`. None are required to build or test.

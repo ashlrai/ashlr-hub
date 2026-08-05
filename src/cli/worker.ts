@@ -4,7 +4,8 @@
  * `ashlr worker setup --user "<name>" [--repos <a,b,c>] [--queue <shared-dir>] [--yes]`
  * `ashlr worker status`
  *
- * Turns a spare Mac into an unattended autonomous worker in one command.
+ * Resident worker setup is temporarily unavailable while service install,
+ * reinstall, repair, and restart authority remains withheld.
  * Orchestrates:
  *   1. setupWizard (identity via M110 stepUser)
  *   2. repo enrollment (sandbox/policy.js)
@@ -16,6 +17,7 @@ import { loadConfig, saveConfig } from '../core/config.js';
 import { setupWizard } from '../core/onboard.js';
 import { enroll, listEnrolled } from '../core/sandbox/policy.js';
 import { install as installService, serviceStatus } from '../core/daemon/service.js';
+import { assertResidentServiceInstallAuthorized } from '../core/daemon/service-install-authority.js';
 import { serviceActivity } from '../core/daemon/service-activity.js';
 
 // ─── colour helpers (TTY-aware, same as setup.ts) ────────────────────────────
@@ -50,7 +52,17 @@ function sharedQueueLabel(sharedQueue: unknown, dim: (s: string) => string): str
 
 async function cmdWorkerSetup(args: string[]): Promise<number> {
   const colors = makeColors(isTty());
-  const { bold, green, cyan, yellow, dim, red } = colors;
+  const { bold, green, cyan, dim, red } = colors;
+
+  try {
+    assertResidentServiceInstallAuthorized();
+  } catch (error) {
+    console.error(red(
+      `  error: worker setup is temporarily unavailable: ${error instanceof Error ? error.message : String(error)}. `
+      + 'No config, enrollment, queue, setup-wizard, or service mutation was attempted.',
+    ));
+    return 1;
+  }
 
   const yesMode = args.includes('--yes') || !process.stdin.isTTY;
 
@@ -131,7 +143,8 @@ async function cmdWorkerSetup(args: string[]): Promise<number> {
   try {
     await installService({ keepAwake: true });
   } catch (err) {
-    console.warn(yellow(`  warn: daemon reinstall with keepAwake failed: ${err instanceof Error ? err.message : String(err)}`));
+    console.error(red(`  error: worker service installation failed: ${err instanceof Error ? err.message : String(err)}`));
+    return 1;
   }
 
   // ── 5. Print worker summary ───────────────────────────────────────────────
@@ -223,7 +236,7 @@ export async function cmdWorker(args: string[]): Promise<number> {
       console.error(colors.red('error: ') + `unknown worker subcommand: ${sub ?? '(none)'}`);
       console.error('');
       console.error('usage:');
-      console.error('  ashlr worker setup --user "<name>" [--repos <a,b,c>] [--queue <dir>] [--yes]');
+      console.error('  ashlr worker setup ...  (temporarily unavailable; performs no setup mutation)');
       console.error('  ashlr worker status');
       console.error('');
       return 1;

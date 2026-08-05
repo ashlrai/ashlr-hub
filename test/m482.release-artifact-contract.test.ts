@@ -1,0 +1,818 @@
+import { createHash } from 'node:crypto';
+import {
+  closeSync,
+  chmodSync,
+  linkSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import {
+  resolveNpmCliLaunch,
+  runTrustedNpmCli,
+} from '../scripts/build-release-dependency-inventory.mjs';
+import {
+  buildRuntimeReleaseDependencyInventory,
+  observeInstalledRuntimeDependencies,
+  parseRuntimeReleaseDependencyInventory,
+  RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH,
+  type RuntimeReleasePackFileRecord,
+} from '../src/core/daemon/runtime-release-dependency-inventory.js';
+import {
+  buildUnsignedRuntimeReleaseManifest,
+  parseUnsignedRuntimeReleaseManifest,
+  verifyUnsignedRuntimeReleaseManifest,
+} from '../src/core/daemon/runtime-release-manifest.js';
+
+const tempDirs: string[] = [];
+const REVISION = 'b'.repeat(40);
+
+interface ContractFixture {
+  dependencyRoot: string;
+  inventoryPath: string;
+  interpreterPath: string;
+  packagedFiles: RuntimeReleasePackFileRecord[];
+  packageRoot: string;
+}
+
+function write(path: string, value: string, mode = 0o644): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, value, { encoding: 'utf8', mode });
+}
+
+function runNpm(args: string[], cwd?: string) {
+  return runTrustedNpmCli(args, {
+    ...(cwd ? { cwd } : {}),
+    encoding: 'utf8',
+  });
+}
+
+function fixture(): ContractFixture {
+  const packageRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-release-contract-')));
+  tempDirs.push(packageRoot);
+  write(join(packageRoot, 'package.json'), `${JSON.stringify({
+    name: '@fixture/release',
+    version: '1.2.3',
+    type: 'module',
+    bin: { ashlr: 'bin/ashlr' },
+    files: ['bin', 'dist', 'scripts/run-verify-command.mjs'],
+    dependencies: { example: '1.0.0' },
+    bundledDependencies: ['example'],
+  }, null, 2)}\n`);
+  write(join(packageRoot, 'package-lock.json'), `${JSON.stringify({
+    name: '@fixture/release',
+    version: '1.2.3',
+    lockfileVersion: 3,
+    packages: {
+      '': {
+        name: '@fixture/release',
+        version: '1.2.3',
+        bin: { ashlr: 'bin/ashlr' },
+        dependencies: { example: '1.0.0' },
+      },
+      'node_modules/example': { version: '1.0.0' },
+    },
+  }, null, 2)}\n`);
+  write(join(packageRoot, 'bin', 'ashlr'), '#!/usr/bin/env node\n', 0o755);
+  write(join(packageRoot, 'dist', 'cli', 'index.js'), 'export const runtime = true;\n');
+  write(join(packageRoot, 'scripts', 'run-verify-command.mjs'), 'export const verify = true;\n');
+  const dependencyRoot = join(packageRoot, 'node_modules');
+  write(join(dependencyRoot, 'example', 'package.json'), `${JSON.stringify({
+    name: 'example',
+    version: '1.0.0',
+    main: 'index.js',
+    bin: { example: 'cli.js' },
+    files: ['index.js', 'cli.js'],
+  })}\n`);
+  write(join(dependencyRoot, 'example', 'index.js'), 'module.exports = 42;\n');
+  write(join(dependencyRoot, 'example', 'cli.js'), '#!/usr/bin/env node\n');
+  write(join(dependencyRoot, 'example', 'CHANGELOG.md'), 'source-only release notes\n');
+  const dryRun = runNpm(['pack', '--dry-run', '--ignore-scripts', '--json'], packageRoot);
+  if (dryRun.status !== 0) throw new Error(dryRun.stderr);
+  const report = JSON.parse(dryRun.stdout) as Array<{
+    files: RuntimeReleasePackFileRecord[];
+  }>;
+  const packagedFiles = report[0]!.files;
+  if (packagedFiles.some((entry) => entry.path === 'node_modules/example/CHANGELOG.md')) {
+    throw new Error('fixture dependency CHANGELOG was unexpectedly packaged');
+  }
+  const inventory = buildRuntimeReleaseDependencyInventory(packageRoot, {
+    packagedFiles,
+  });
+  if (!inventory.ok) throw new Error(inventory.reason);
+  rmSync(join(dependencyRoot, 'example', 'CHANGELOG.md'));
+  const inventoryPath = join(
+    packageRoot,
+    ...RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH.split('/'),
+  );
+  write(inventoryPath, inventory.canonicalJson);
+  const interpreterPath = join(packageRoot, 'fixture-node');
+  write(interpreterPath, 'fixture node bytes\n', 0o755);
+  return { dependencyRoot, inventoryPath, interpreterPath, packagedFiles, packageRoot };
+}
+
+function parsedInventory(input: ContractFixture) {
+  const parsed = parseRuntimeReleaseDependencyInventory(readFileSync(input.inventoryPath));
+  if (!parsed.ok) throw new Error(parsed.reason);
+  return parsed.inventory;
+}
+
+function addNestedDependency(input: ContractFixture): void {
+  const lockPath = join(input.packageRoot, 'package-lock.json');
+  const lock = JSON.parse(readFileSync(lockPath, 'utf8')) as {
+    packages: Record<string, Record<string, unknown>>;
+  };
+  lock.packages['node_modules/example/node_modules/nested-bin'] = { version: '2.0.0' };
+  writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`);
+  const nestedRoot = join(input.dependencyRoot, 'example', 'node_modules', 'nested-bin');
+  write(join(nestedRoot, 'package.json'), `${JSON.stringify({
+    name: 'nested-bin',
+    version: '2.0.0',
+    bin: { nested: 'cli.js' },
+  })}\n`);
+  write(join(nestedRoot, 'cli.js'), '#!/usr/bin/env node\n', 0o755);
+  rebuildInventory(input);
+}
+
+function rebuildInventory(input: ContractFixture): void {
+  const inventory = buildRuntimeReleaseDependencyInventory(input.packageRoot);
+  if (!inventory.ok) throw new Error(inventory.reason);
+  writeFileSync(input.inventoryPath, inventory.canonicalJson);
+}
+
+function observe(input: ContractFixture) {
+  return observeInstalledRuntimeDependencies({
+    dependencyRoot: input.dependencyRoot,
+    inventory: parsedInventory(input),
+    expectedPackageName: '@fixture/release',
+    expectedPackageVersion: '1.2.3',
+  });
+}
+
+afterEach(() => {
+  for (const directory of tempDirs.splice(0)) {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+describe('release artifact contract v1', { timeout: 30_000 }, () => {
+  it('uses a shell-free Node launch rooted in the active Node toolchain', () => {
+    const launch = resolveNpmCliLaunch();
+    expect(launch.command).toBe(process.execPath);
+    expect(launch.npmCliPath).toBe(realpathSync(process.env['npm_execpath']!));
+    closeSync(launch.npmCli.descriptor);
+    closeSync(launch.packageJson.descriptor);
+
+    const maliciousRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-malicious-npm-')));
+    tempDirs.push(maliciousRoot);
+    const maliciousCli = join(maliciousRoot, 'npm', 'bin', 'npm-cli.js');
+    write(maliciousCli, 'process.exit(0);\n');
+    write(
+      join(maliciousRoot, 'npm', 'package.json'),
+      '{"name":"npm","version":"10.0.0"}\n',
+    );
+    expect(() => resolveNpmCliLaunch({ npm_execpath: maliciousCli }))
+      .toThrow('npm_execpath does not match the trusted Node toolchain');
+    expect(() => resolveNpmCliLaunch({ npm_execpath: 'npm-cli.js' }))
+      .toThrow('npm_execpath does not match the trusted Node toolchain');
+    expect(() => resolveNpmCliLaunch({ npm_execpath: `${maliciousCli}\n--eval` }))
+      .toThrow('npm_execpath does not match the trusted Node toolchain');
+  });
+
+  it('packs and installs the inventory plus exact bundled dependency bytes without package-lock', () => {
+    const release = fixture();
+    const packDestination = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-release-pack-')));
+    const installRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-release-install-')));
+    tempDirs.push(packDestination, installRoot);
+    const packed = runNpm(
+      ['pack', '--ignore-scripts', '--json', '--pack-destination', packDestination],
+      release.packageRoot,
+    );
+    expect(packed.status, packed.stderr).toBe(0);
+    const report = JSON.parse(packed.stdout) as Array<{
+      filename: string;
+      files: RuntimeReleasePackFileRecord[];
+    }>;
+    const paths = report[0]!.files.map((entry) => entry.path);
+    expect(paths).toContain(RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH);
+    expect(paths).toContain('node_modules/example/package.json');
+    expect(paths).toContain('node_modules/example/index.js');
+    expect(paths).not.toContain('node_modules/example/CHANGELOG.md');
+    expect(paths).not.toContain('package-lock.json');
+
+    const installed = runNpm(
+      [
+        'install',
+        join(packDestination, report[0]!.filename),
+        '--prefix',
+        installRoot,
+        '--ignore-scripts',
+        '--omit=dev',
+        '--offline',
+        '--no-audit',
+        '--no-fund',
+      ],
+    );
+    expect(installed.status, installed.stderr).toBe(0);
+    const installedPackage = join(installRoot, 'node_modules', '@fixture', 'release');
+    const installedInventory = parseRuntimeReleaseDependencyInventory(readFileSync(join(
+      installedPackage,
+      ...RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH.split('/'),
+    )));
+    expect(installedInventory.ok).toBe(true);
+    if (!installedInventory.ok) return;
+    expect(observeInstalledRuntimeDependencies({
+      dependencyRoot: join(installedPackage, 'node_modules'),
+      inventory: installedInventory.inventory,
+      expectedPackageName: '@fixture/release',
+      expectedPackageVersion: '1.2.3',
+    })).toMatchObject({ ok: true, packageCount: 1 });
+    const installedInterpreter = join(installRoot, 'fixture-node');
+    write(installedInterpreter, 'installed fixture node bytes\n', 0o755);
+    expect(buildUnsignedRuntimeReleaseManifest({
+      packageRoot: installedPackage,
+      dependencyRoot: join(installedPackage, 'node_modules'),
+      declaredInterpreterPath: installedInterpreter,
+      declaredInterpreterVersion: 'v22.0.0',
+      expectedRevision: REVISION,
+      expectedPackageName: '@fixture/release',
+    })).toMatchObject({
+      ok: true,
+      manifest: {
+        dependencyInventory: { packageCount: 1 },
+        schemaVersion: 2,
+      },
+    });
+  }, 30_000);
+
+  it('rejects dependency byte tampering and missing or extra files and packages', () => {
+    const tampered = fixture();
+    writeFileSync(join(tampered.dependencyRoot, 'example', 'index.js'), 'module.exports = 7;\n');
+    expect(observe(tampered)).toEqual({
+      ok: false,
+      reason: 'installed dependency example bytes do not match inventory',
+    });
+
+    const missingFile = fixture();
+    rmSync(join(missingFile.dependencyRoot, 'example', 'index.js'));
+    expect(observe(missingFile)).toEqual({
+      ok: false,
+      reason: 'installed dependency example bytes do not match inventory',
+    });
+
+    const extraFile = fixture();
+    write(join(extraFile.dependencyRoot, 'example', 'unexpected.js'), 'unexpected bytes\n');
+    expect(observe(extraFile)).toEqual({
+      ok: false,
+      reason: 'installed dependency example bytes do not match inventory',
+    });
+
+    const missing = fixture();
+    rmSync(join(missing.dependencyRoot, 'example'), { recursive: true });
+    expect(observe(missing)).toEqual({
+      ok: false,
+      reason: 'installed dependency package set does not match inventory',
+    });
+
+    const extra = fixture();
+    write(join(extra.dependencyRoot, 'unexpected', 'package.json'),
+      '{"name":"unexpected","version":"1.0.0"}\n');
+    expect(observe(extra)).toEqual({
+      ok: false,
+      reason: 'installed dependency package set does not match inventory',
+    });
+  });
+
+  it('fails closed when an installed dependency has a mixed version', () => {
+    const release = fixture();
+    const packageJsonPath = join(release.dependencyRoot, 'example', 'package.json');
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8')) as Record<string, unknown>;
+    writeFileSync(packageJsonPath, `${JSON.stringify({ ...packageJson, version: '2.0.0' })}\n`);
+    expect(observe(release)).toEqual({
+      ok: false,
+      reason: 'runtime dependency example identity does not match inventory',
+    });
+  });
+
+  it('rejects a package-directory replacement at the post-traversal checkpoint', () => {
+    const release = fixture();
+    const packagePath = join(release.dependencyRoot, 'example');
+    const replacement = join(release.packageRoot, 'replacement-example');
+    const displaced = join(release.packageRoot, 'displaced-example');
+    write(join(replacement, 'package.json'), '{"name":"example","version":"1.0.0"}\n');
+    write(join(replacement, 'index.js'), 'module.exports = "UNSIGNED-B";\n');
+    let swapped = false;
+    const result = observeInstalledRuntimeDependencies({
+      checkpoint: (phase) => {
+        if (phase !== 'after-package-traversal' || swapped) return;
+        swapped = true;
+        renameSync(packagePath, displaced);
+        renameSync(replacement, packagePath);
+      },
+      dependencyRoot: release.dependencyRoot,
+      inventory: parsedInventory(release),
+      expectedPackageName: '@fixture/release',
+      expectedPackageVersion: '1.2.3',
+    });
+    expect(swapped).toBe(true);
+    expect(result).toEqual({
+      ok: false,
+      reason: 'runtime dependency example root changed during scan',
+    });
+  });
+
+  function expectCompleteRootMutationRejected(
+    release: ContractFixture,
+    mutate: (input: ContractFixture) => void,
+  ): void {
+    const built = buildUnsignedRuntimeReleaseManifest({
+      packageRoot: release.packageRoot,
+      dependencyRoot: release.dependencyRoot,
+      declaredInterpreterPath: release.interpreterPath,
+      declaredInterpreterVersion: 'v22.0.0',
+      expectedRevision: REVISION,
+      expectedPackageName: '@fixture/release',
+    });
+    expect(built.ok).toBe(true);
+    if (!built.ok) return;
+    mutate(release);
+    expect(verifyUnsignedRuntimeReleaseManifest({
+      packageRoot: release.packageRoot,
+      dependencyRoot: release.dependencyRoot,
+      declaredInterpreterPath: release.interpreterPath,
+      declaredInterpreterVersion: 'v22.0.0',
+      expectedRevision: REVISION,
+      expectedPackageName: '@fixture/release',
+      expectedManifestDigest: built.manifest.manifestDigest,
+      manifest: built.canonicalJson,
+    })).toMatchObject({ ok: false });
+  }
+
+  it('binds the complete dependency root against a .bin executable injection', () => {
+    expectCompleteRootMutationRejected(fixture(), (release) => {
+      write(join(release.dependencyRoot, '.bin', 'injected'), '#!/usr/bin/env node\n', 0o755);
+    });
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'binds the complete dependency root against an executable-mode change',
+    () => {
+      expectCompleteRootMutationRejected(fixture(), (release) => {
+        chmodSync(join(release.dependencyRoot, 'example', 'index.js'), 0o755);
+      });
+    },
+  );
+
+  it('rejects external hardlink aliases in installed dependency bytes', () => {
+    const release = fixture();
+    linkSync(
+      join(release.dependencyRoot, 'example', 'index.js'),
+      join(release.packageRoot, 'external-hardlink'),
+    );
+    expect(observe(release)).toEqual({
+      ok: false,
+      reason: 'runtime dependency file has multiple hard links',
+    });
+  });
+
+  it('rejects packaged dependency bytes outside the build lock closure', () => {
+    const release = fixture();
+    expect(buildRuntimeReleaseDependencyInventory(release.packageRoot, {
+      packagedFiles: [
+        ...release.packagedFiles,
+        { mode: 0o644, path: 'node_modules/unowned/index.js', size: 1 },
+      ],
+    })).toEqual({
+      ok: false,
+      reason: 'npm pack contains a runtime dependency outside the lock closure',
+    });
+  });
+
+  it('derives portable executable identity from normalized pack modes across host modes and order', () => {
+    const release = fixture();
+    const baseline = parsedInventory(release);
+    const cliRecord = release.packagedFiles.find((entry) =>
+      entry.path === 'node_modules/example/cli.js');
+    expect(cliRecord?.mode).toBe(0o644);
+
+    chmodSync(join(release.dependencyRoot, 'example', 'cli.js'), 0o755);
+    const rebuilt = buildRuntimeReleaseDependencyInventory(release.packageRoot, {
+      packagedFiles: [...release.packagedFiles].reverse(),
+    });
+    expect(rebuilt.ok).toBe(true);
+    if (!rebuilt.ok) return;
+    expect(rebuilt.inventory.inventoryDigest).toBe(baseline.inventoryDigest);
+    expect(rebuilt.inventory.packages[0]?.contentSha256)
+      .toBe(baseline.packages[0]?.contentSha256);
+    expect(rebuilt.inventory.packages[0]?.archiveModeSha256)
+      .toBe(baseline.packages[0]?.archiveModeSha256);
+  });
+
+  it.each([0, 0o600, 0o700, 0o777, 0o100644, -1, 420.5])(
+    'rejects malformed npm pack mode %s before calculating an inventory digest',
+    (mode) => {
+      const release = fixture();
+      const malformed = release.packagedFiles.map((entry, index) =>
+        index === 0 ? { ...entry, mode } : entry);
+      expect(buildRuntimeReleaseDependencyInventory(release.packageRoot, {
+        packagedFiles: malformed,
+      })).toEqual({ ok: false, reason: 'npm pack file report is invalid' });
+    },
+  );
+
+  it('rejects false npm pack sizes and binds normalized archive-mode claims into the digest', () => {
+    const release = fixture();
+    const index = release.packagedFiles.findIndex((entry) =>
+      entry.path === 'node_modules/example/index.js');
+    expect(index).toBeGreaterThanOrEqual(0);
+
+    const wrongSize = release.packagedFiles.map((entry, entryIndex) =>
+      entryIndex === index ? { ...entry, size: entry.size + 1 } : entry);
+    expect(buildRuntimeReleaseDependencyInventory(release.packageRoot, {
+      packagedFiles: wrongSize,
+    })).toEqual({
+      ok: false,
+      reason: 'runtime dependency example npm pack size does not match source bytes',
+    });
+
+    const wrongMode = release.packagedFiles.map((entry, entryIndex) =>
+      entryIndex === index ? { ...entry, mode: 0o755 } : entry);
+    const changedMode = buildRuntimeReleaseDependencyInventory(release.packageRoot, {
+      packagedFiles: wrongMode,
+    });
+    expect(changedMode.ok).toBe(true);
+    if (!changedMode.ok) return;
+    expect(changedMode.inventory.inventoryDigest).not.toBe(parsedInventory(release).inventoryDigest);
+    expect(changedMode.inventory.packages[0]?.contentSha256)
+      .toBe(parsedInventory(release).packages[0]?.contentSha256);
+    expect(changedMode.inventory.packages[0]?.archiveModeSha256)
+      .not.toBe(parsedInventory(release).packages[0]?.archiveModeSha256);
+  });
+
+  it.skipIf(process.platform === 'win32')('rejects symlinks anywhere in dependency package bytes', () => {
+    const release = fixture();
+    symlinkSync(
+      join(release.dependencyRoot, 'example', 'index.js'),
+      join(release.dependencyRoot, 'example', 'linked.js'),
+    );
+    expect(observe(release)).toEqual({
+      ok: false,
+      reason: 'runtime dependency tree contains a symlink',
+    });
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'binds canonical npm .bin links and rejects targets outside the dependency root',
+    () => {
+      const release = fixture();
+      mkdirSync(join(release.dependencyRoot, '.bin'));
+      symlinkSync('../example/cli.js', join(release.dependencyRoot, '.bin', 'example'));
+      expect(observe(release)).toMatchObject({ ok: true, packageCount: 1 });
+
+      const escaped = fixture();
+      const outside = join(escaped.packageRoot, 'outside-bin-target');
+      write(outside, '#!/usr/bin/env node\n', 0o755);
+      mkdirSync(join(escaped.dependencyRoot, '.bin'));
+      symlinkSync('../../outside-bin-target', join(escaped.dependencyRoot, '.bin', 'escape'));
+      expect(observe(escaped)).toEqual({
+        ok: false,
+        reason: 'installed dependency bin link escapes dependency root',
+      });
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'admits only package-owned nested npm bin links and rejects nested escapes',
+    () => {
+      const admitted = fixture();
+      addNestedDependency(admitted);
+      const nestedBin = join(admitted.dependencyRoot, 'example', 'node_modules', '.bin');
+      mkdirSync(nestedBin);
+      symlinkSync('../nested-bin/cli.js', join(nestedBin, 'nested'));
+      expect(observe(admitted)).toMatchObject({ ok: true, packageCount: 2 });
+
+      const inventedCommand = fixture();
+      addNestedDependency(inventedCommand);
+      const inventedBin = join(
+        inventedCommand.dependencyRoot,
+        'example',
+        'node_modules',
+        '.bin',
+      );
+      mkdirSync(inventedBin);
+      symlinkSync('../nested-bin/cli.js', join(inventedBin, 'invented'));
+      expect(observe(inventedCommand)).toEqual({
+        ok: false,
+        reason: 'installed dependency bin link does not match declared package bin',
+      });
+
+      const noBin = fixture();
+      addNestedDependency(noBin);
+      writeFileSync(
+        join(noBin.dependencyRoot, 'example', 'node_modules', 'nested-bin', 'package.json'),
+        '{"name":"nested-bin","version":"2.0.0"}\n',
+      );
+      rebuildInventory(noBin);
+      const noBinRoot = join(noBin.dependencyRoot, 'example', 'node_modules', '.bin');
+      mkdirSync(noBinRoot);
+      symlinkSync('../nested-bin/cli.js', join(noBinRoot, 'nested'));
+      expect(observe(noBin)).toEqual({
+        ok: false,
+        reason: 'installed dependency bin link does not match declared package bin',
+      });
+
+      const mismatchedTarget = fixture();
+      addNestedDependency(mismatchedTarget);
+      write(
+        join(
+          mismatchedTarget.dependencyRoot,
+          'example',
+          'node_modules',
+          'nested-bin',
+          'alternate.js',
+        ),
+        '#!/usr/bin/env node\n',
+        0o755,
+      );
+      rebuildInventory(mismatchedTarget);
+      const mismatchedBin = join(
+        mismatchedTarget.dependencyRoot,
+        'example',
+        'node_modules',
+        '.bin',
+      );
+      mkdirSync(mismatchedBin);
+      symlinkSync('../nested-bin/alternate.js', join(mismatchedBin, 'nested'));
+      expect(observe(mismatchedTarget)).toEqual({
+        ok: false,
+        reason: 'installed dependency bin link does not match declared package bin',
+      });
+
+      const crossDepth = fixture();
+      addNestedDependency(crossDepth);
+      const crossDepthLockPath = join(crossDepth.packageRoot, 'package-lock.json');
+      const crossDepthLock = JSON.parse(readFileSync(crossDepthLockPath, 'utf8')) as {
+        packages: Record<string, Record<string, unknown>>;
+      };
+      crossDepthLock.packages[
+        'node_modules/example/node_modules/nested-bin/node_modules/deeper'
+      ] = { version: '3.0.0' };
+      writeFileSync(crossDepthLockPath, `${JSON.stringify(crossDepthLock, null, 2)}\n`);
+      const deeperRoot = join(
+        crossDepth.dependencyRoot,
+        'example',
+        'node_modules',
+        'nested-bin',
+        'node_modules',
+        'deeper',
+      );
+      write(
+        join(deeperRoot, 'package.json'),
+        '{"name":"deeper","version":"3.0.0","bin":{"deeper":"cli.js"}}\n',
+      );
+      write(join(deeperRoot, 'cli.js'), '#!/usr/bin/env node\n', 0o755);
+      rebuildInventory(crossDepth);
+      const crossDepthBin = join(
+        crossDepth.dependencyRoot,
+        'example',
+        'node_modules',
+        '.bin',
+      );
+      mkdirSync(crossDepthBin);
+      symlinkSync(
+        '../nested-bin/node_modules/deeper/cli.js',
+        join(crossDepthBin, 'nested'),
+      );
+      expect(observe(crossDepth)).toEqual({
+        ok: false,
+        reason: 'installed dependency tree contains an unexpected symlink',
+      });
+
+      const wrongTree = fixture();
+      addNestedDependency(wrongTree);
+      const wrongTreeBin = join(wrongTree.dependencyRoot, 'example', 'node_modules', '.bin');
+      mkdirSync(wrongTreeBin);
+      symlinkSync('../../../example/index.js', join(wrongTreeBin, 'wrong-tree'));
+      expect(observe(wrongTree)).toEqual({
+        ok: false,
+        reason: 'installed dependency tree contains an unexpected symlink',
+      });
+
+      const unowned = fixture();
+      addNestedDependency(unowned);
+      const unownedRoot = join(unowned.dependencyRoot, 'example', 'node_modules', 'unowned');
+      write(join(unownedRoot, 'package.json'), '{"name":"unowned","version":"1.0.0"}\n');
+      write(join(unownedRoot, 'cli.js'), '#!/usr/bin/env node\n', 0o755);
+      const unownedBin = join(unowned.dependencyRoot, 'example', 'node_modules', '.bin');
+      mkdirSync(unownedBin);
+      symlinkSync('../unowned/cli.js', join(unownedBin, 'unowned'));
+      expect(observe(unowned)).toEqual({
+        ok: false,
+        reason: 'installed dependency package set does not match inventory',
+      });
+
+      const absolute = fixture();
+      addNestedDependency(absolute);
+      const absoluteBin = join(absolute.dependencyRoot, 'example', 'node_modules', '.bin');
+      mkdirSync(absoluteBin);
+      symlinkSync(join(absolute.dependencyRoot, 'example', 'index.js'), join(absoluteBin, 'absolute'));
+      expect(observe(absolute)).toEqual({
+        ok: false,
+        reason: 'installed dependency bin link target is invalid',
+      });
+
+      const windowsTarget = fixture();
+      addNestedDependency(windowsTarget);
+      const windowsBin = join(windowsTarget.dependencyRoot, 'example', 'node_modules', '.bin');
+      mkdirSync(windowsBin);
+      symlinkSync('C:\\hostile\\cli.js', join(windowsBin, 'windows'));
+      expect(observe(windowsTarget)).toEqual({
+        ok: false,
+        reason: 'installed dependency bin link target is invalid',
+      });
+
+      const deep = fixture();
+      addNestedDependency(deep);
+      const deepBin = join(deep.dependencyRoot, 'example', 'node_modules', '.bin', 'deep');
+      mkdirSync(deepBin, { recursive: true });
+      symlinkSync('../../nested-bin/cli.js', join(deepBin, 'nested'));
+      expect(observe(deep)).toEqual({
+        ok: false,
+        reason: 'installed dependency tree contains an unexpected symlink',
+      });
+
+      const malformedName = fixture();
+      addNestedDependency(malformedName);
+      const malformedBin = join(
+        malformedName.dependencyRoot,
+        'example',
+        'node_modules',
+        '.bin',
+      );
+      mkdirSync(malformedBin);
+      symlinkSync('../nested-bin/cli.js', join(malformedBin, 'bad\nname'));
+      expect(observe(malformedName)).toEqual({
+        ok: false,
+        reason: 'installed dependency tree contains an unexpected symlink',
+      });
+    },
+  );
+
+  it.each([
+    ['os constraint', { os: ['darwin'] }, undefined],
+    ['cpu constraint', { cpu: ['arm64'] }, undefined],
+    ['libc constraint', { libc: ['glibc'] }, undefined],
+    ['optional dependency', { optionalDependencies: { optional: '1.0.0' } }, undefined],
+    ['preinstall script', { scripts: { preinstall: 'node preinstall.js' } }, undefined],
+    ['install script', { scripts: { install: 'node install.js' } }, undefined],
+    ['postinstall script', { scripts: { postinstall: 'node postinstall.js' } }, undefined],
+    ['native package metadata', { gypfile: true }, undefined],
+    ['native addon', {}, 'binding.node'],
+    ['mixed-case native addon', {}, 'binding.NODE'],
+  ])('refuses %s instead of claiming platform-independent bytes', (_label, additions, nativeFile) => {
+    const release = fixture();
+    const packagePath = join(release.dependencyRoot, 'example', 'package.json');
+    const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as Record<string, unknown>;
+    writeFileSync(packagePath, `${JSON.stringify({ ...packageJson, ...additions })}\n`);
+    if (nativeFile) write(join(release.dependencyRoot, 'example', nativeFile), 'native bytes');
+    const rebuilt = buildRuntimeReleaseDependencyInventory(release.packageRoot);
+    expect(rebuilt.ok).toBe(false);
+    if (rebuilt.ok) return;
+    expect(rebuilt.reason).toMatch(/platform-variant|install lifecycle|native install variance/u);
+  });
+
+  it.each([
+    ['root os constraint', { os: ['darwin'] }],
+    ['root cpu constraint', { cpu: ['arm64'] }],
+    ['root libc constraint', { libc: ['glibc'] }],
+    ['root optional dependency', { optionalDependencies: { optional: '1.0.0' } }],
+    ['root preinstall script', { scripts: { preinstall: 'node preinstall.js' } }],
+    ['root install script', { scripts: { install: 'node install.js' } }],
+    ['root postinstall script', { scripts: { postinstall: 'node postinstall.js' } }],
+    ['root native package', { gypfile: true }],
+  ])('refuses %s instead of claiming portable root bytes', (_label, additions) => {
+    const release = fixture();
+    const packagePath = join(release.packageRoot, 'package.json');
+    const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as Record<string, unknown>;
+    writeFileSync(packagePath, `${JSON.stringify({ ...packageJson, ...additions })}\n`);
+    const rebuilt = buildRuntimeReleaseDependencyInventory(release.packageRoot);
+    expect(rebuilt.ok).toBe(false);
+    if (rebuilt.ok) return;
+    expect(rebuilt.reason).toMatch(/platform-variant|install lifecycle|native install variance/u);
+  });
+
+  it('refuses a root files declaration that omits required runtime entries', () => {
+    const release = fixture();
+    const packagePath = join(release.packageRoot, 'package.json');
+    const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as Record<string, unknown>;
+    writeFileSync(packagePath, `${JSON.stringify({ ...packageJson, files: ['dist'] })}\n`);
+    expect(buildRuntimeReleaseDependencyInventory(release.packageRoot)).toEqual({
+      ok: false,
+      reason: 'release package files declaration is not portable',
+    });
+  });
+
+  it.each([
+    ['install lifecycle script', { scripts: { install: 'node install.js' } }, undefined],
+    ['os constraint', { os: ['darwin'] }, undefined],
+    ['cpu constraint', { cpu: ['arm64'] }, undefined],
+    ['libc constraint', { libc: ['glibc'] }, undefined],
+    ['optional dependency', { optionalDependencies: { optional: '1.0.0' } }, undefined],
+    ['preinstall lifecycle script', { scripts: { preinstall: 'node preinstall.js' } }, undefined],
+    ['postinstall lifecycle script', { scripts: { postinstall: 'node postinstall.js' } }, undefined],
+    ['native package metadata', { gypfile: true }, undefined],
+    ['mixed-case native addon bytes', {}, 'bin/helper.NODE'],
+  ])(
+    'revalidates root %s after inventory generation during every complete manifest scan',
+    (_label, additions, nativeFile) => {
+      const release = fixture();
+      const packagePath = join(release.packageRoot, 'package.json');
+      const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as Record<string, unknown>;
+      writeFileSync(packagePath, `${JSON.stringify({ ...packageJson, ...additions })}\n`);
+      if (nativeFile) write(join(release.packageRoot, nativeFile), 'native bytes');
+
+      const built = buildUnsignedRuntimeReleaseManifest({
+        packageRoot: release.packageRoot,
+        dependencyRoot: release.dependencyRoot,
+        declaredInterpreterPath: release.interpreterPath,
+        declaredInterpreterVersion: 'v22.0.0',
+        expectedRevision: REVISION,
+        expectedPackageName: '@fixture/release',
+      });
+      expect(built.ok).toBe(false);
+      if (built.ok) return;
+      expect(built.reason).toMatch(/platform-variant|install lifecycle|native install variance/u);
+    },
+    10_000,
+  );
+
+  it('revalidates injected install lifecycle metadata during the second complete scan', () => {
+    const release = fixture();
+    const packagePath = join(release.packageRoot, 'package.json');
+    const options = {
+      packageRoot: release.packageRoot,
+      dependencyRoot: release.dependencyRoot,
+      declaredInterpreterPath: release.interpreterPath,
+      declaredInterpreterVersion: 'v22.0.0',
+      expectedRevision: REVISION,
+      expectedPackageName: '@fixture/release',
+      __testHooks: {
+        afterFirstCompleteScan: () => {
+          const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as Record<string, unknown>;
+          writeFileSync(packagePath, `${JSON.stringify({
+            ...packageJson,
+            scripts: { install: 'node install.js' },
+          })}\n`);
+        },
+      },
+    } as Parameters<typeof buildUnsignedRuntimeReleaseManifest>[0];
+
+    expect(buildUnsignedRuntimeReleaseManifest(options)).toEqual({
+      ok: false,
+      reason: 'release package has an install lifecycle script',
+    });
+  });
+
+  it('fails closed on old manifest and inventory schemas and forged inventory digests', () => {
+    const release = fixture();
+    const built = buildUnsignedRuntimeReleaseManifest({
+      packageRoot: release.packageRoot,
+      dependencyRoot: release.dependencyRoot,
+      declaredInterpreterPath: release.interpreterPath,
+      declaredInterpreterVersion: 'v22.0.0',
+      expectedRevision: REVISION,
+      expectedPackageName: '@fixture/release',
+    });
+    expect(built.ok).toBe(true);
+    if (!built.ok) return;
+    const oldManifest = JSON.parse(built.canonicalJson) as Record<string, unknown>;
+    oldManifest['schemaVersion'] = 1;
+    expect(parseUnsignedRuntimeReleaseManifest(`${JSON.stringify(oldManifest)}\n`)).toEqual({
+      ok: false,
+      reason: 'runtime release manifest has an unsupported schema',
+    });
+
+    const oldInventory = JSON.parse(readFileSync(release.inventoryPath, 'utf8')) as Record<string, unknown>;
+    oldInventory['schemaVersion'] = 1;
+    delete (oldInventory['package'] as Record<string, unknown>)['manifestSha256'];
+    expect(parseRuntimeReleaseDependencyInventory(`${JSON.stringify(oldInventory)}\n`)).toEqual({
+      ok: false,
+      reason: 'runtime dependency inventory schema is unsupported',
+    });
+
+    const forged = JSON.parse(readFileSync(release.inventoryPath, 'utf8')) as Record<string, unknown>;
+    forged['inventoryDigest'] = createHash('sha256').update('forged').digest('hex');
+    expect(parseRuntimeReleaseDependencyInventory(`${JSON.stringify(forged)}\n`)).toEqual({
+      ok: false,
+      reason: 'runtime dependency inventory digest mismatch',
+    });
+  });
+});

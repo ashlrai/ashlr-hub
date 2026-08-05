@@ -6,6 +6,7 @@ import {
   lstatSync,
   openSync,
   opendirSync,
+  readlinkSync,
   readSync,
   realpathSync,
   type BigIntStats,
@@ -23,6 +24,12 @@ import {
   type UnsignedRuntimeReleaseArtifact,
 } from './runtime-release-manifest.js';
 import {
+  RUNTIME_RELEASE_INSTALLED_DEPENDENCY_TREE_DIGEST_DOMAIN_V2,
+  runtimeDependencyDeclaredBinTarget,
+  runtimeDependencyBinLinkOwnership,
+  runtimeDependencyPackageNameFromPath,
+} from './runtime-release-dependency-inventory.js';
+import {
   parseRuntimeReleaseEvidenceEnvelope,
   parseRuntimeReleaseEvidenceTrustRoot,
   verifyRuntimeReleaseEvidenceEnvelope,
@@ -35,7 +42,6 @@ export const RUNTIME_RELEASE_IMMUTABLE_STAGED_TREE_RECEIPT_DOMAIN_V2 =
 export const RUNTIME_RELEASE_LAUNCH_OBSERVATION_RECEIPT_DOMAIN_V2 =
   'ashlr:runtime-release-launch-observation-receipt:v2' as const;
 const ARTIFACT_ROOT_DOMAIN = 'ashlr:runtime-release-artifact-root:v1';
-const DEPENDENCY_ROOT_DOMAIN = 'ashlr:runtime-release-dependency-root:v1';
 const INTERPRETER_ROOT_DOMAIN = 'ashlr:runtime-release-interpreter-root:v1';
 const STABLE_IDENTITY_DOMAIN = 'ashlr:runtime-release-stable-identity:v1';
 const INVOCATION_DOMAIN = 'ashlr:runtime-release-service-invocation:v1';
@@ -74,6 +80,7 @@ type JsonValue =
   | { [key: string]: JsonValue };
 
 interface FileObservation {
+  bytes?: Buffer;
   content: {
     executable: boolean;
     path: string;
@@ -433,6 +440,7 @@ function snapshotFile(
   testHooks?: RuntimeReleaseLaunchRevalidationTestHooks,
   deadline = observationDeadline(),
   expectedSnapshot?: BigIntStats,
+  captureBytes = false,
 ): FileObservation {
   requireBeforeDeadline(deadline, label);
   const absolute = resolve(filePath);
@@ -461,6 +469,8 @@ function snapshotFile(
     if (openedBefore.nlink !== 1n) throw new Error(`${label} has multiple hard links`);
     requireImmutable(openedBefore, label);
     const size = Number(openedBefore.size);
+    if (captureBytes && size > 1024 * 1024) throw new Error(`${label} exceeds byte limit`);
+    const captured = captureBytes ? Buffer.allocUnsafe(size) : undefined;
     const hash = createHash('sha256');
     let offset = 0;
     while (offset < size) {
@@ -470,6 +480,7 @@ function snapshotFile(
       const count = readSync(fd, chunk, 0, length, offset);
       if (count <= 0) throw new Error(`${label} changed during read`);
       hash.update(count === length ? chunk : chunk.subarray(0, count));
+      if (captured) chunk.copy(captured, offset, 0, count);
       offset += count;
     }
     requireBeforeDeadline(deadline, label);
@@ -490,6 +501,7 @@ function snapshotFile(
     requireImmutable(openedAfter, label);
     requireImmutable(after, label);
     return {
+      ...(captured ? { bytes: captured } : {}),
       content: {
         executable: (after.mode & 0o111n) !== 0n,
         path: logicalPath,
@@ -504,6 +516,85 @@ function snapshotFile(
   } finally {
     closeSync(fd);
   }
+}
+
+function snapshotDependencyBinLink(
+  dependencyRoot: string,
+  linkPath: string,
+  logicalPath: string,
+  expectedSnapshot: BigIntStats,
+  packageJsonByPath: Map<string, Record<string, unknown>>,
+  deadline: RuntimeReleaseObservationDeadline,
+): { content: Record<string, JsonValue>; stable: { identity: string; path: string } } {
+  const before = lstatSync(linkPath, { bigint: true });
+  if (!before.isSymbolicLink() || !sameSnapshot(expectedSnapshot, before)) {
+    throw new Error('runtime release dependency bin link changed before read');
+  }
+  const linkTarget = readlinkSync(linkPath, 'utf8');
+  if (linkTarget.length === 0 || linkTarget.length > 4_096 || /[\0\r\n]/u.test(linkTarget) ||
+    isAbsolute(linkTarget) || /^[A-Za-z]:[\\/]/u.test(linkTarget) || linkTarget.includes('\\')) {
+    throw new Error('runtime release dependency bin link target is invalid');
+  }
+  const targetPath = resolve(dirname(linkPath), linkTarget);
+  const targetRealPath = realpathSync(targetPath);
+  if (!contained(dependencyRoot, targetRealPath) || targetRealPath !== targetPath) {
+    throw new Error('runtime release dependency bin link escapes dependency root');
+  }
+  const targetLogicalPath = relative(dependencyRoot, targetPath).split(sep).join('/');
+  const ownership = runtimeDependencyBinLinkOwnership(logicalPath, targetLogicalPath);
+  if (!ownership) {
+    throw new Error('runtime release dependency root contains an unexpected symlink');
+  }
+  let packageJson = packageJsonByPath.get(ownership.targetPackagePath);
+  if (!packageJson) {
+    const packageJsonPath = join(
+      dependencyRoot,
+      ...ownership.targetPackagePath.split('/'),
+      'package.json',
+    );
+    const observed = snapshotFile(
+      packageJsonPath,
+      `${ownership.targetPackagePath}/package.json`,
+      'runtime release dependency bin package manifest',
+      dependencyRoot,
+      undefined,
+      deadline,
+      undefined,
+      true,
+    );
+    const bytes = observed.bytes!;
+    const text = bytes.toString('utf8');
+    if (!Buffer.from(text, 'utf8').equals(bytes)) {
+      throw new Error('runtime release dependency bin package manifest is not valid UTF-8');
+    }
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error();
+      packageJson = parsed as Record<string, unknown>;
+    } catch {
+      throw new Error('runtime release dependency bin package manifest is not valid JSON');
+    }
+    packageJsonByPath.set(ownership.targetPackagePath, packageJson);
+  }
+  const command = logicalPath.slice(logicalPath.lastIndexOf('/') + 1);
+  const expectedName = runtimeDependencyPackageNameFromPath(ownership.targetPackagePath);
+  const declaredTarget = runtimeDependencyDeclaredBinTarget(packageJson, expectedName, command);
+  if (!declaredTarget || targetLogicalPath !== `${ownership.targetPackagePath}/${declaredTarget}`) {
+    throw new Error('runtime release dependency bin link does not match declared package bin');
+  }
+  const target = lstatSync(targetPath, { bigint: true });
+  if (!target.isFile() || target.isSymbolicLink() || target.nlink !== 1n) {
+    throw new Error('runtime release dependency bin link target is unsafe');
+  }
+  requireImmutable(target, 'runtime release dependency bin link target');
+  const after = lstatSync(linkPath, { bigint: true });
+  if (!sameSnapshot(before, after) || readlinkSync(linkPath, 'utf8') !== linkTarget) {
+    throw new Error('runtime release dependency bin link changed during read');
+  }
+  return {
+    content: { linkTarget, path: logicalPath, symlink: true },
+    stable: { identity: snapshotIdentity(after), path: logicalPath },
+  };
 }
 
 function observeArtifactRoot(
@@ -579,6 +670,7 @@ function observeDirectoryTree(
   const root = canonicalDirectory(rootPath, label);
   const content: Array<Record<string, JsonValue>> = [];
   const stable: Array<{ identity: string; path: string }> = [];
+  const dependencyBinPackageJson = new Map<string, Record<string, unknown>>();
   const budget: DirectoryObservationBudget = {
     bytes: 0,
     deadline,
@@ -608,7 +700,7 @@ function observeDirectoryTree(
     }
     stable.push({ identity: snapshotIdentity(before), path: logicalPath });
     const entries: Array<{
-      kind: 'directory' | 'file';
+      kind: 'directory' | 'file' | 'symlink';
       name: string;
       snapshot: BigIntStats;
     }> = [];
@@ -629,7 +721,15 @@ function observeDirectoryTree(
         const snapshot = lstatSync(childPath, { bigint: true });
         requireBeforeDeadline(budget.deadline, label);
         if (entry.isSymbolicLink() || snapshot.isSymbolicLink()) {
-          throw new Error(`${label} contains a symlink`);
+          const isDependencyBinDirectory = logicalPath === '.bin' ||
+            logicalPath.endsWith('/node_modules/.bin');
+          if (!entry.isSymbolicLink() || !snapshot.isSymbolicLink() || !isDependencyBinDirectory) {
+            throw new Error(`${label} contains a symlink`);
+          }
+          budget.files += 1;
+          if (budget.files > MAX_FILES) throw new Error(`${label} file count exceeds limit`);
+          entries.push({ kind: 'symlink', name: entry.name, snapshot });
+          continue;
         }
         if (entry.isDirectory() && snapshot.isDirectory()) {
           budget.directories += 1;
@@ -667,6 +767,17 @@ function observeDirectoryTree(
       const childLogical = logicalPath === '.' ? entry.name : `${logicalPath}/${entry.name}`;
       if (entry.kind === 'directory') {
         visit(childPath, childLogical, depth + 1, entry.snapshot);
+      } else if (entry.kind === 'symlink') {
+        const observation = snapshotDependencyBinLink(
+          root,
+          childPath,
+          childLogical,
+          entry.snapshot,
+          dependencyBinPackageJson,
+          budget.deadline,
+        );
+        content.push(observation.content);
+        stable.push(observation.stable);
       } else {
         const observation = snapshotFile(
           childPath,
@@ -694,7 +805,7 @@ function observeDirectoryTree(
     bytes: budget.bytes,
     directories: budget.directories,
     files: budget.files,
-    rootSha256: domainDigest(DEPENDENCY_ROOT_DOMAIN, content),
+    rootSha256: domainDigest(RUNTIME_RELEASE_INSTALLED_DEPENDENCY_TREE_DIGEST_DOMAIN_V2, content),
     stableIdentitySha256: domainDigest(STABLE_IDENTITY_DOMAIN, stable),
   };
 }
@@ -750,6 +861,7 @@ function observeStage(
     throw new Error('runtime release manifest revision does not match expected revision');
   }
   const verified = verifyUnsignedRuntimeReleaseManifest({
+    dependencyRoot,
     declaredInterpreterPath: interpreterPath,
     declaredInterpreterVersion: options.declaredInterpreterVersion,
     expectedManifestDigest: options.expectedManifestDigest,
@@ -775,6 +887,12 @@ function observeStage(
     testHooks,
     deadline,
   );
+  if (!equalDigest(
+    dependencyRootObservation.rootSha256,
+    manifest.manifest.dependencyInventory.installedDependencyRootSha256,
+  )) {
+    throw new Error('runtime release dependency root does not match signed manifest');
+  }
   const interpreter = snapshotFile(
     interpreterPath,
     interpreterPath,

@@ -36,6 +36,10 @@ import {
 import {
   buildUnsignedRuntimeReleaseManifest,
 } from '../src/core/daemon/runtime-release-manifest.js';
+import {
+  buildRuntimeReleaseDependencyInventory,
+  RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH,
+} from '../src/core/daemon/runtime-release-dependency-inventory.js';
 
 const REVISION = 'a'.repeat(40);
 const POLICY = '{"policyVersion":1,"scope":"release-launch"}\n';
@@ -82,7 +86,11 @@ function readFileNames(path: string): string[] {
   return readdirSync(path);
 }
 
-function fixture(declaredRollbackTargetDigest?: string): Fixture {
+function fixture(
+  declaredRollbackTargetDigest?: string,
+  includeDependencyBinLink = false,
+  includeNestedDependencyBinLink = false,
+): Fixture {
   const parent = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-launch-revalidation-')));
   tempDirs.push(parent);
   const packageRoot = join(parent, REVISION);
@@ -92,6 +100,9 @@ function fixture(declaredRollbackTargetDigest?: string): Fixture {
     version: '3.1.0',
     type: 'module',
     bin: { ashlr: 'bin/ashlr' },
+    files: ['bin', 'dist', 'scripts/run-verify-command.mjs'],
+    dependencies: { example: '1.0.0' },
+    bundledDependencies: ['example'],
   })}\n`);
   write(join(packageRoot, 'package-lock.json'), `${JSON.stringify({
     name: '@ashlr/hub',
@@ -102,7 +113,15 @@ function fixture(declaredRollbackTargetDigest?: string): Fixture {
         name: '@ashlr/hub',
         version: '3.1.0',
         bin: { ashlr: 'bin/ashlr' },
+        dependencies: { example: '1.0.0' },
       },
+      'node_modules/example': { version: '1.0.0' },
+      ...(includeNestedDependencyBinLink
+        ? {
+          'node_modules/example/node_modules/nested-bin': { version: '2.0.0' },
+          'node_modules/example/node_modules/nested-bin/node_modules/deeper': { version: '3.0.0' },
+        }
+        : {}),
     },
   })}\n`);
   write(join(packageRoot, 'bin', 'ashlr'), '#!/usr/bin/env node\n', 0o755);
@@ -110,14 +129,74 @@ function fixture(declaredRollbackTargetDigest?: string): Fixture {
   write(join(packageRoot, 'dist', 'core', 'worker.js'), 'export const worker = true;\n');
   write(join(packageRoot, 'scripts', 'run-verify-command.mjs'), 'export const run = true;\n');
   const dependencyRoot = join(packageRoot, 'node_modules');
-  write(join(dependencyRoot, 'example', 'package.json'), '{"name":"example","version":"1.0.0"}\n');
+  write(
+    join(dependencyRoot, 'example', 'package.json'),
+    '{"name":"example","version":"1.0.0","bin":{"example":"index.js"}}\n',
+  );
   write(join(dependencyRoot, 'example', 'index.js'), 'export const dependency = true;\n');
+  if (includeNestedDependencyBinLink) {
+    write(
+      join(dependencyRoot, 'example', 'node_modules', 'nested-bin', 'package.json'),
+      '{"name":"nested-bin","version":"2.0.0","bin":{"nested":"cli.js"}}\n',
+    );
+    write(
+      join(dependencyRoot, 'example', 'node_modules', 'nested-bin', 'cli.js'),
+      '#!/usr/bin/env node\n',
+      0o755,
+    );
+    write(
+      join(dependencyRoot, 'example', 'node_modules', 'nested-bin', 'alternate.js'),
+      '#!/usr/bin/env node\n',
+      0o755,
+    );
+    write(
+      join(
+        dependencyRoot,
+        'example',
+        'node_modules',
+        'nested-bin',
+        'node_modules',
+        'deeper',
+        'package.json',
+      ),
+      '{"name":"deeper","version":"3.0.0","bin":{"deeper":"cli.js"}}\n',
+    );
+    write(
+      join(
+        dependencyRoot,
+        'example',
+        'node_modules',
+        'nested-bin',
+        'node_modules',
+        'deeper',
+        'cli.js',
+      ),
+      '#!/usr/bin/env node\n',
+      0o755,
+    );
+  }
+  const inventory = buildRuntimeReleaseDependencyInventory(packageRoot);
+  if (!inventory.ok) throw new Error(inventory.reason);
+  write(
+    join(packageRoot, ...RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH.split('/')),
+    inventory.canonicalJson,
+  );
+  if (includeDependencyBinLink && process.platform !== 'win32') {
+    mkdirSync(join(dependencyRoot, '.bin'));
+    symlinkSync('../example/index.js', join(dependencyRoot, '.bin', 'example'));
+  }
+  if (includeNestedDependencyBinLink && process.platform !== 'win32') {
+    const nestedBin = join(dependencyRoot, 'example', 'node_modules', '.bin');
+    mkdirSync(nestedBin);
+    symlinkSync('../nested-bin/cli.js', join(nestedBin, 'nested'));
+  }
   const interpreterPath = join(parent, 'node');
   write(interpreterPath, 'fixture node binary\n', 0o755);
 
   const manifestResult = buildUnsignedRuntimeReleaseManifest({
     declaredInterpreterPath: interpreterPath,
     declaredInterpreterVersion: 'v22.0.0',
+    dependencyRoot,
     expectedRevision: REVISION,
     packageRoot,
     ...(declaredRollbackTargetDigest ? { declaredRollbackTargetDigest } : {}),
@@ -481,7 +560,7 @@ describe('runtime release closed launch-input observation', () => {
       chmodTree(linked.packageRoot, true);
       expect(observeRuntimeReleaseImmutableStagedTree(stageOptions(linked))).toEqual({
         ok: false,
-        reason: 'runtime release dependency root contains a symlink',
+        reason: 'installed dependency tree contains a symlink',
       });
     }
 
@@ -509,7 +588,7 @@ describe('runtime release closed launch-input observation', () => {
       );
       expect(observeRuntimeReleaseImmutableStagedTree(stageOptions(linkedInode))).toEqual({
         ok: false,
-        reason: 'runtime release dependency root has multiple hard links',
+        reason: 'runtime dependency file has multiple hard links',
       });
     }
 
@@ -522,7 +601,7 @@ describe('runtime release closed launch-input observation', () => {
     });
   });
 
-  it('fails closed before retaining an oversized dependency directory', () => {
+  it('fails closed on an unlisted extra dependency directory', () => {
     const release = fixture();
     chmodTree(release.packageRoot, false);
     const overflow = join(release.dependencyRoot, 'overflow');
@@ -534,7 +613,7 @@ describe('runtime release closed launch-input observation', () => {
 
     expect(observeRuntimeReleaseImmutableStagedTree(stageOptions(release))).toEqual({
       ok: false,
-      reason: 'runtime release dependency root directory entry count exceeds limit',
+      reason: 'installed dependency package set does not match inventory',
     });
   });
 
@@ -568,6 +647,130 @@ describe('runtime release closed launch-input observation', () => {
     });
     expect(replaced).toBe(true);
   });
+
+  it('compares the complete dependency root with signer-bound manifest evidence', () => {
+    const release = fixture();
+    let injected = false;
+    const options = stageOptions(release) as ReturnType<typeof stageOptions> & {
+      __testHooks?: { afterManifestVerification?: () => void };
+    };
+    options.__testHooks = {
+      afterManifestVerification: () => {
+        if (injected) return;
+        injected = true;
+        chmodSync(release.dependencyRoot, 0o755);
+        const binRoot = join(release.dependencyRoot, '.bin');
+        mkdirSync(binRoot);
+        write(join(binRoot, 'injected'), '#!/usr/bin/env node\n', 0o555);
+        chmodSync(binRoot, 0o555);
+        chmodSync(release.dependencyRoot, 0o555);
+      },
+    };
+
+    expect(observeRuntimeReleaseImmutableStagedTree(options)).toEqual({
+      ok: false,
+      reason: 'runtime release dependency root does not match signed manifest',
+    });
+    expect(injected).toBe(true);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'admits a signer-bound canonical npm dependency bin link',
+    () => {
+      const release = fixture(undefined, true);
+      const observed = observeRuntimeReleaseImmutableStagedTree(stageOptions(release));
+      expect(observed.ok).toBe(true);
+      if (!observed.ok) return;
+      expect(observed.receipt.roots.dependencyRootSha256).toMatch(/^[a-f0-9]{64}$/u);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'admits a signer-bound package-owned nested npm dependency bin link',
+    () => {
+      const release = fixture(undefined, false, true);
+      const observed = observeRuntimeReleaseImmutableStagedTree(stageOptions(release));
+      expect(observed.ok).toBe(true);
+      if (!observed.ok) return;
+      expect(observed.receipt.roots.dependencyRootSha256).toMatch(/^[a-f0-9]{64}$/u);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects hostile nested bin mappings during launch revalidation',
+    () => {
+      const cases = [
+        {
+          expected: 'runtime release dependency bin link does not match declared package bin',
+          mutate: (release: Fixture) => {
+            const bin = join(release.dependencyRoot, 'example', 'node_modules', '.bin');
+            unlinkSync(join(bin, 'nested'));
+            symlinkSync('../nested-bin/cli.js', join(bin, 'invented'));
+          },
+        },
+        {
+          expected: 'runtime release dependency bin link does not match declared package bin',
+          mutate: (release: Fixture) => {
+            writeFileSync(
+              join(
+                release.dependencyRoot,
+                'example',
+                'node_modules',
+                'nested-bin',
+                'package.json',
+              ),
+              '{"name":"nested-bin","version":"2.0.0"}\n',
+            );
+          },
+        },
+        {
+          expected: 'runtime release dependency bin link does not match declared package bin',
+          mutate: (release: Fixture) => {
+            const link = join(
+              release.dependencyRoot,
+              'example',
+              'node_modules',
+              '.bin',
+              'nested',
+            );
+            unlinkSync(link);
+            symlinkSync('../nested-bin/alternate.js', link);
+          },
+        },
+        {
+          expected: 'runtime release dependency root contains an unexpected symlink',
+          mutate: (release: Fixture) => {
+            const link = join(
+              release.dependencyRoot,
+              'example',
+              'node_modules',
+              '.bin',
+              'nested',
+            );
+            unlinkSync(link);
+            symlinkSync('../nested-bin/node_modules/deeper/cli.js', link);
+          },
+        },
+      ];
+      for (const entry of cases) {
+        const release = fixture(undefined, false, true);
+        const options = stageOptions(release) as ReturnType<typeof stageOptions> & {
+          __testHooks?: { afterManifestVerification?: () => void };
+        };
+        options.__testHooks = {
+          afterManifestVerification: () => {
+            chmodTree(release.packageRoot, false);
+            entry.mutate(release);
+            chmodTree(release.packageRoot, true);
+          },
+        };
+        expect(observeRuntimeReleaseImmutableStagedTree(options)).toEqual({
+          ok: false,
+          reason: entry.expected,
+        });
+      }
+    },
+  );
 
   it('expires the launch budget after manifest verification and before artifact traversal', () => {
     const release = fixture();

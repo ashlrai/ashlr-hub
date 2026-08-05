@@ -2,8 +2,8 @@
  * M30 POLISH — CI workflow guard.
  *
  * Parses .github/workflows/ci.yml (line-based; no YAML dependency, no new deps)
- * and asserts the CI runs on Node 22 (the hard minimum — install.sh hard-fails
- * below 22, so a 20+22 matrix would silently lie), runs the required
+ * and asserts the CI runs on Node 22.15+ (the hard minimum — install.sh hard-fails
+ * below 22.15, so a 20+22 matrix would silently lie), runs the required
  * typecheck / lint / build / test steps with hermetic isolation, that npm
  * caching is enabled, and that NOTHING public is wired in (no deploy/publish/
  * release step) — per the M30 "nothing public / self-hostable" invariant.
@@ -93,10 +93,16 @@ describe('M30 CI workflow', () => {
     expect(ciYml).toMatch(/^ {2}push:\n {4}branches: \[master\]$/m);
   });
 
-  it('runs on Node 22 only (install.sh hard-fails below 22; no 20+22 matrix)', () => {
-    // The CI uses a single node-version: "22" (not a matrix array).
+  it('runs on Node 22.15 or newer only (install.sh enforces the synchronous-hook floor)', () => {
+    // One exhaustive Ubuntu shard proves the exact floor; other lanes track Node 22 current.
     // A Node-20 entry would be wrong — install.sh rejects it at runtime.
-    expect(ciYml).toMatch(/node-version:\s*["']?22["']?/);
+    expect(ciYml).toContain('node_version: "22.15.0"');
+    expect(ciYml).toContain("node-version: ${{ matrix.node_version || '22' }}");
+    const explicitVersions = [...ciYml.matchAll(/node_version:\s*["'](\d+)\.(\d+)\.(\d+)["']/g)];
+    expect(explicitVersions.length).toBeGreaterThan(0);
+    for (const [, major, minor] of explicitVersions) {
+      expect(Number(major) > 22 || (Number(major) === 22 && Number(minor) >= 15)).toBe(true);
+    }
     // Confirm Node 20 is NOT in the workflow as a version entry.
     expect(ciYml).not.toMatch(/node-version:\s*["']?20["']?/);
   });
@@ -174,7 +180,6 @@ describe('M30 CI workflow', () => {
         'test/m113.coordinator-wire.test.ts',
         'test/m373.directory-durability.test.ts',
         terminalRetentionTest,
-        'test/m403.automerge-mutation-fence.test.ts',
         'test/m404.policy-result-surfaces.test.ts',
         'test/m428.goal-source-quality.test.ts',
         'test/m409.engine-execution-mutation-fence.test.ts',
@@ -218,6 +223,7 @@ describe('M30 CI workflow', () => {
         'test/m220.anticlog-verdict-feedback.test.ts',
         'test/m286.worktree-verify-env.test.ts',
         'test/m299.web-fleet-control.test.ts',
+        'test/npm-cli-launch.test.ts',
         observerSchedulerTest,
         'test/m379.private-storage.test.ts',
         'test/m385.cutoff-checkpoint-scheduler.test.ts',
@@ -225,7 +231,6 @@ describe('M30 CI workflow', () => {
         'test/m407.verification-mutation-fence.test.ts',
         'test/m408.sandbox-creation-mutation-fence.test.ts',
         'test/m418.pulse-quiescence.test.ts',
-        'test/m419.remote-handoff-intent.test.ts',
         'test/m420.remote-handoff-recovery.test.ts',
         'test/m421.legacy-pulse-quiescence.test.ts',
         agentWorkTransitionsTest,
@@ -252,6 +257,10 @@ describe('M30 CI workflow', () => {
     const nativeAliasFiles = [
       'test/m426.sandbox-reservation-identity.test.ts',
       'test/h7.rollback.test.ts',
+    ];
+    const nativeAclEnrollmentFiles = [
+      'test/m403.automerge-mutation-fence.test.ts',
+      'test/m419.remote-handoff-intent.test.ts',
     ];
     const windowsServiceAuthorityFiles = [
       'test/m93.windows-file-authority.test.ts',
@@ -429,8 +438,11 @@ describe('M30 CI workflow', () => {
       ...expectedWindowsPartitions.flat(),
       ...expectedMacosFiles,
       ...nativeAliasFiles,
+      ...nativeAclEnrollmentFiles,
       ...nativePathIdentityFiles,
       ...windowsServiceAuthorityFiles,
+      'test/npm-cli-launch.test.ts',
+      'test/npm-cli-launch.test.ts',
     ];
 
     expect(windowsMatrixEntries).toHaveLength(expectedWindowsPartitions.length);
@@ -484,6 +496,8 @@ describe('M30 CI workflow', () => {
       hostMergeRevocationProtocolTest,
       detachedPostMergeVerificationTest,
       'test/m426.sandbox-reservation-identity.test.ts',
+      'test/npm-cli-launch.test.ts',
+      'test/npm-cli-launch.test.ts',
     ].sort());
     expect(windowsEntries.match(/test\/m395\.effect-terminal-retention\.test\.ts/g)).toHaveLength(
       1,
@@ -499,8 +513,15 @@ describe('M30 CI workflow', () => {
       "if: matrix.os == 'macos-latest' || matrix.label == 'windows, portability 2/3'",
     );
     expect(ciYml).toContain(`npm run test:ci -- ${nativeAliasFiles.join(' ')}`);
+    expect(ciYml).toContain('Test native ACL enrollment fences (hermetic)');
+    expect(ciYml).toContain("if: matrix.label == 'windows, portability overflow'");
+    expect(ciYml).toMatch(
+      /npm run test:ci -- --maxWorkers=1 --no-file-parallelism\s+test\/m403\.automerge-mutation-fence\.test\.ts\s+test\/m419\.remote-handoff-intent\.test\.ts/u,
+    );
     expect(ciYml).toContain('windows-service-authority:');
     expect(ciYml).toContain('runs-on: windows-2022');
+    expect(ciYml.match(/npm run test:ci -- test\/npm-cli-launch\.test\.ts/g)).toHaveLength(2);
+    expect(ciYml).toContain("if: matrix.os == 'macos-latest'");
     for (const file of windowsServiceAuthorityFiles) expect(ciYml).toContain(file);
     expect(ciYml).toContain("if: matrix.label == 'windows, portability 1/3'");
     for (const file of nativePathIdentityFiles) expect(ciYml).toContain(file);
@@ -581,6 +602,6 @@ describe('M30 CI workflow', () => {
 
   it('package.json engines field declares the supported Node floor', () => {
     // Keep npm metadata aligned with install.sh, CI, and release workflows.
-    expect(pkg.engines?.node).toBe('>=22');
+    expect(pkg.engines?.node).toBe('>=22.15.0');
   });
 });

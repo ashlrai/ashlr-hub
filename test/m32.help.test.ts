@@ -43,6 +43,17 @@ describe('HELP_ENTRIES — the command table', () => {
       expect(tableCmds.has(cmd), `help table missing "${cmd}"`).toBe(true);
     }
   });
+
+  it('truthfully documents the temporary resident-service restriction', () => {
+    const byCommand = new Map(HELP_ENTRIES.map((entry) => [entry.cmd, entry.desc]));
+
+    expect(byCommand.get('daemon install')).toContain('Temporarily unavailable');
+    expect(byCommand.get('daemon service-status')).toContain('remains available');
+    expect(byCommand.get('daemon uninstall')).toContain('remains available');
+    expect(byCommand.get('worker setup')).toContain('fail-closed');
+    expect(byCommand.get('setup')).toContain('refuses before config or wizard effects');
+    expect(byCommand.get('update [--check] [--json]')).toContain('registration proven absent');
+  });
 });
 
 describe('cmdHelp routing', () => {
@@ -70,6 +81,8 @@ describe('cmdHelp routing', () => {
     expect(text).toContain('resource-aware mode recommendation');
     expect(text).toContain('fleet evidence doctor <source>');
     expect(text).toContain('Bounded read-only diagnosis');
+    expect(text).toContain('daemon install');
+    expect(text).toContain('install/reinstall/repair/restart authority is withheld');
   });
 
   it('help --all → every command', async () => {
