@@ -305,6 +305,7 @@ describe('M85 worked-ledger — pure unit', () => {
       proposalCreated: false,
       runId: 'attempt-d889ccac-023a-478c-8aeb-992afd4b5fa5',
       trajectoryId: 'run:attempt-d889ccac-023a-478c-8aeb-992afd4b5fa5',
+      objectiveHash: 'a'.repeat(64),
       spentUsd: 0.346986,
       basis: 'run-proposal-outcome',
     }, { materializeLearningLabel: true });
@@ -318,6 +319,7 @@ describe('M85 worked-ledger — pure unit', () => {
       source: event.source,
       backend: event.backend,
       tier: event.tier,
+      objectiveHash: event.objectiveHash,
     };
     const replay = {
       itemId: event.itemId,
@@ -325,6 +327,10 @@ describe('M85 worked-ledger — pure unit', () => {
       dispatchReceipt,
     };
 
+    expect(replayWorkedOutcomeAfterDispatchReceipt({
+      ...replay,
+      dispatchReceipt: { ...dispatchReceipt, objectiveHash: 'b'.repeat(64) },
+    })).toBe('dispatch-receipt-unavailable');
     expect(replayWorkedOutcomeAfterDispatchReceipt(replay)).toBe('recorded');
     expect(replayWorkedOutcomeAfterDispatchReceipt(replay)).toBe('already-recorded');
     expect(loadWorkedLedger().events.filter((row) => row.itemId === event.itemId)).toEqual([
@@ -386,6 +392,44 @@ describe('M85 worked-ledger — pure unit', () => {
     expect({ status: restarted.status, stdout: restarted.stdout, stderr: restarted.stderr })
       .toEqual({ status: 0, stdout: 'already-recorded', stderr: '' });
     expect(loadWorkedLedger().events.filter((row) => row.itemId === event.itemId)).toHaveLength(1);
+  });
+
+  it('refuses to certify a same-or-newer worked row with a conflicting outcome', () => {
+    const event = sanitizeDispatchProductionEvent({
+      schemaVersion: 1,
+      ts: '2026-07-21T23:24:36.686Z',
+      itemId: 'binshield:self-heal:conflicting-worked-outcome',
+      source: 'self',
+      repo: tmpRepo,
+      title: 'Reject conflicting worked outcome',
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      routeReason: 'operator recovery fixture',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      runId: 'attempt-aaaa1111-2222-4333-8444-555566667777',
+      trajectoryId: 'run:attempt-aaaa1111-2222-4333-8444-555566667777',
+      spentUsd: 0,
+      basis: 'run-proposal-outcome',
+    }, { materializeLearningLabel: true });
+    expect(recordDispatchProduction(event)).toMatchObject({ recorded: 1, failed: 0 });
+    expect(recordOutcome(event.itemId, 'diff', '2026-07-21T23:24:37.000Z')).toBe(true);
+
+    expect(replayWorkedOutcomeAfterDispatchReceipt({
+      itemId: event.itemId,
+      outcome: 'empty',
+      dispatchReceipt: {
+        ts: event.ts,
+        itemId: event.itemId,
+        repo: event.repo,
+        outcome: event.outcome,
+        attemptId: event.trajectoryId!,
+      },
+    })).toBe('invalid');
+    expect(loadWorkedLedger().events.filter((row) => row.itemId === event.itemId)).toEqual([
+      { itemId: event.itemId, outcome: 'diff', ts: '2026-07-21T23:24:37.000Z' },
+    ]);
   });
 
   it('rejects a caller-supplied future replay timestamp', () => {

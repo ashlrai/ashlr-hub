@@ -723,6 +723,10 @@ function canonicalReplayTimestamp(value: unknown): value is string {
   return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
 }
 
+function canonicalReplayObjectiveHash(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+}
+
 function hasOwn(record: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(record, key);
 }
@@ -747,7 +751,7 @@ function validateWorkedOutcomeReplay(value: unknown): WorkedOutcomeReplay | null
         !boundedReplayText(receipt['backend'], 160)) ||
       (hasOwn(receipt, 'tier') && receipt['tier'] !== null &&
         !boundedReplayText(receipt['tier'], 80)) ||
-      (hasOwn(receipt, 'objectiveHash') && !boundedReplayText(receipt['objectiveHash'], 160))) {
+      (hasOwn(receipt, 'objectiveHash') && !canonicalReplayObjectiveHash(receipt['objectiveHash']))) {
       return null;
     }
     const normalizedReceipt = {
@@ -809,7 +813,9 @@ export function replayWorkedOutcomeAfterDispatchReceipt(
       if (event.itemId !== replay.itemId) continue;
       const eventMs = Date.parse(event.ts);
       if (!Number.isFinite(eventMs)) return 'persistence-failed';
-      if (eventMs >= candidateMs) return 'already-recorded';
+      if (eventMs >= candidateMs) {
+        return event.outcome === replay.outcome ? 'already-recorded' : 'invalid';
+      }
     }
     loaded.ledger.events.push({ itemId: replay.itemId, outcome: replay.outcome, ts: receipt.ts });
     return saveWorkedLedger(loaded.ledger, authority, true, loaded.destination)

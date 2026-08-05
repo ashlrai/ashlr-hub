@@ -552,6 +552,7 @@ describe('SharedWorkQueueCoordinator two-machine disjoint', () => {
 
       expect(result.dispatches?.[0]?.production?.outcome).toBe('empty-diff');
       expect(result.reason).toBe('state-persistence-failed');
+      expect(result.workedOutcomeRecovery).toBeUndefined();
       expect(settleSpy).toHaveBeenCalledWith('shared-repairable-1', 'A');
       expect(readAudit()).toContainEqual(expect.objectContaining({
         action: 'daemon:tick',
