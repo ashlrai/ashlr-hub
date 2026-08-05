@@ -14,6 +14,7 @@ import * as path from 'node:path';
 import {
   buildAutonomyEvidencePack,
   evidenceDir,
+  evidencePackMatchesLiveProposal,
   evidencePath,
   listAutonomyEvidencePacks,
   persistAutonomyEvidencePack,
@@ -23,7 +24,9 @@ import {
 } from '../src/core/autonomy/evidence-pack.js';
 import { evaluateAutonomyPolicy } from '../src/core/autonomy/policy.js';
 import { hashDiff } from '../src/core/foundry/provenance.js';
+import { buildRequiredVerificationManifest } from '../src/core/run/verification-manifest.js';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
+import type { VerifyCommand } from '../src/core/run/verify-commands.js';
 
 const origHome = process.env.HOME;
 const origUserProfile = process.env.USERPROFILE;
@@ -42,6 +45,16 @@ function diff(): string {
 }
 
 const TEST_DIFF_HASH = hashDiff(diff());
+const TEST_VERIFY_COMMANDS: VerifyCommand[] = [{
+  id: 'merge-test',
+  kind: 'test',
+  cmd: ['npm', 'test'],
+  cwd: '.',
+  timeoutMs: 120_000,
+  required: true,
+  profiles: ['merge'],
+}];
+const TEST_VERIFIER_MANIFEST = buildRequiredVerificationManifest('/tmp/repo', TEST_VERIFY_COMMANDS)!;
 
 function proposal(over: Partial<Proposal> = {}): Proposal {
   return {
@@ -75,6 +88,26 @@ function cfg(over: Record<string, unknown> = {}): AshlrConfig {
 }
 
 function goodPack(over: Partial<Parameters<typeof buildAutonomyEvidencePack>[0]> = {}) {
+  const verification = over.verification
+    ? {
+        ...over.verification,
+        requiredManifestDigest:
+          over.verification.requiredManifestDigest ?? TEST_VERIFIER_MANIFEST.digest,
+        requiredCommandCount:
+          over.verification.requiredCommandCount ?? TEST_VERIFIER_MANIFEST.commandCount,
+      }
+    : {
+        passed: true,
+        detail: 'all verify commands passed',
+        commandKinds: ['test', 'typecheck'],
+        requiredManifestDigest: TEST_VERIFIER_MANIFEST.digest,
+        requiredCommandCount: TEST_VERIFIER_MANIFEST.commandCount,
+        baseBranch: 'main',
+        baseHead: 'a'.repeat(40),
+        diffHash: TEST_DIFF_HASH,
+        verifiedAt: '2026-07-01T00:01:00.000Z',
+        source: 'auto-merge' as const,
+      };
   return buildAutonomyEvidencePack({
     proposal: proposal(),
     target: 'main',
@@ -83,19 +116,10 @@ function goodPack(over: Partial<Parameters<typeof buildAutonomyEvidencePack>[0]>
     riskClass: 'low',
     authority: { ok: true, detail: 'frontier authority' },
     provenance: { ok: true, detail: 'valid HMAC provenance' },
-    verification: {
-      passed: true,
-      detail: 'all verify commands passed',
-      commandKinds: ['test', 'typecheck'],
-      baseBranch: 'main',
-      baseHead: 'a'.repeat(40),
-      diffHash: TEST_DIFF_HASH,
-      verifiedAt: '2026-07-01T00:01:00.000Z',
-      source: 'auto-merge',
-    },
     risk: { ok: true, detail: "risk 'low' within maxRisk 'low'" },
     scope: { ok: true, detail: '1 file, 1 line within caps' },
     ...over,
+    verification,
   });
 }
 
@@ -351,6 +375,95 @@ describe('M301 evaluateAutonomyPolicy', () => {
       action: 'merge-main',
       allowed: true,
     });
+  });
+
+  it('refuses evidence authority when the required verifier manifest binding is absent', () => {
+    const pack = goodPack({
+      trustBasis: 'evidence',
+      remotePreferred: true,
+      remoteProtection: liveRemoteProtection(),
+    });
+    delete pack.verification.requiredManifestDigest;
+    delete pack.verification.requiredCommandCount;
+
+    expect(evaluateAutonomyPolicy(pack, cfg())).toMatchObject({
+      tier: 'T0',
+      action: 'escalate-human',
+      allowed: false,
+    });
+    expect(evaluateAutonomyPolicy(pack, cfg()).reason).toMatch(/verifier manifest digest/i);
+    expect(sealAutonomyEvidencePackV3(pack)).toBeNull();
+  });
+
+  it('binds evidence authority to every required verifier command field and live base/diff', () => {
+    const draft = goodPack({
+      trustBasis: 'evidence',
+      remotePreferred: true,
+      remoteProtection: liveRemoteProtection(),
+      verification: {
+        passed: true,
+        detail: 'required merge verifier passed',
+        commandKinds: ['test'],
+        requiredManifestDigest: TEST_VERIFIER_MANIFEST.digest,
+        requiredCommandCount: TEST_VERIFIER_MANIFEST.commandCount,
+        baseBranch: 'main',
+        baseHead: 'a'.repeat(40),
+        diffHash: TEST_DIFF_HASH,
+        verifiedAt: '2026-07-01T00:01:00.000Z',
+        source: 'auto-merge',
+      },
+    });
+    draft.generatedAt = '2026-07-01T00:02:00.000Z';
+    draft.policy = evaluateAutonomyPolicy(draft, cfg());
+    if (draft.evidenceOutcome) {
+      draft.evidenceOutcome.policyAllowed = draft.policy.allowed;
+      draft.evidenceOutcome.policyAction = draft.policy.action;
+      draft.evidenceOutcome.policyTier = draft.policy.tier;
+    }
+    const signed = sealAutonomyEvidencePackV3(draft);
+    expect(signed).not.toBeNull();
+
+    const live = proposal({
+      verifyResult: {
+        passed: true,
+        detail: 'required merge verifier passed',
+        ran: structuredClone(TEST_VERIFY_COMMANDS),
+        baseBranch: 'main',
+        baseHead: 'a'.repeat(40),
+        diffHash: TEST_DIFF_HASH,
+        verifiedAt: '2026-07-01T00:01:00.000Z',
+        source: 'auto-merge',
+      },
+    });
+    const matches = (candidate: Proposal) => evidencePackMatchesLiveProposal(
+      signed!,
+      candidate,
+      { nowMs: Date.parse('2026-07-01T00:02:00.000Z') },
+    );
+    expect(matches(live)).toBe(true);
+
+    const commandMutations: Array<(command: VerifyCommand) => void> = [
+      (command) => { command.cmd = ['npm', 'run', 'test']; },
+      (command) => { command.cwd = 'packages/app'; },
+      (command) => { command.timeoutMs = 60_000; },
+      (command) => { command.profiles = ['quick']; },
+      (command) => { command.id = 'renamed-test'; },
+      (command) => { command.required = false; },
+      (command) => { command.kind = 'lint'; },
+    ];
+    for (const mutate of commandMutations) {
+      const changed = structuredClone(live);
+      mutate(changed.verifyResult!.ran![0]!);
+      expect(matches(changed)).toBe(false);
+    }
+
+    const staleDiff = structuredClone(live);
+    staleDiff.verifyResult!.diffHash = '0'.repeat(64);
+    expect(matches(staleDiff)).toBe(false);
+
+    const staleBase = structuredClone(live);
+    staleBase.verifyResult!.baseHead = 'c'.repeat(40);
+    expect(matches(staleBase)).toBe(false);
   });
 
   it('recognizes signed v3 evidence while legacy v1 remains non-authoritative', () => {

@@ -25,6 +25,15 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+vi.mock('../src/core/daemon/activation-permit.js', () => ({
+  consumeDaemonActivationPermit: () => ({
+    authorized: true,
+    required: false,
+    reason: 'test-authorized',
+  }),
+  isDaemonActivationCapability: () => true,
+}));
+
 // runSwarm MOCKED for the tick-level concurrency probe (M24 convention). The
 // daemon's `tick` imports runSwarm from this module, so mocking it lets the
 // REAL bounded() worker pool run while each "dispatch" is instant + probed.

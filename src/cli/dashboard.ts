@@ -1,12 +1,12 @@
 /**
- * `ashlr dashboard` — M211 persistent fleet dashboard.
+ * `ashlr dashboard` — M211 fleet dashboard status and existing-service client.
  *
- * Ensures the serve service is running as a launchd LaunchAgent
- * (ai.ashlr.serve), then opens the dashboard URL in the default browser.
- * Idempotent: safe to call any number of times.
+ * Opens an already-running ai.ashlr.serve LaunchAgent. Resident installation,
+ * repair, and restart are withheld in this release; foreground serving remains
+ * available through `ashlr serve --open`.
  *
  * Subcommands / flags:
- *   ashlr dashboard              # ensure running + open browser
+ *   ashlr dashboard              # open an existing service
  *   ashlr dashboard --stop       # unload the LaunchAgent
  *   ashlr dashboard --status     # print service state (json with --json)
  *
@@ -18,10 +18,8 @@
  *   ProgramArgs: [node, bin/ashlr, serve, --port, 4317]
  *   Logs:        ~/.ashlr/serve.launchd.{out,err}.log
  *
- * The plist is written to ~/Library/LaunchAgents/ai.ashlr.serve.plist on first
- * run and loaded via `launchctl load`. On macOS < Monterey launchctl bootstrap
- * is also attempted but the load path is the canonical one (both forms are
- * tried; success from either is sufficient).
+ * The dormant installer retains its transactional implementation for a future
+ * release that explicitly restores resident authority.
  *
  * Non-macOS: the plist installation step is skipped with a warning; the
  * command falls back to starting serve in the foreground (same as `ashlr serve
@@ -37,6 +35,7 @@ import {
   installLaunchdPlistTransaction,
   removeLaunchdPlistTransaction,
 } from '../core/daemon/launchd-plist-transaction.js';
+import { assertResidentServiceInstallAuthorized } from '../core/daemon/service-install-authority.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -176,6 +175,43 @@ export function runCmd(args: string[]): RunResult {
   }
 }
 
+function launchdServiceAbsent(result: RunResult): boolean {
+  return !result.ok &&
+    /(?:could not find (?:specified )?service|service .* not found|no such process|not loaded)/i
+      .test(`${result.stdout}\n${result.stderr}`);
+}
+
+function restoreServeActivation(
+  exec: typeof runCmd,
+  pp: string,
+  loaded: boolean,
+): RunResult {
+  const before = exec(['launchctl', 'list', PLIST_LABEL]);
+  const beforeLoaded = before.ok;
+  if (!before.ok && !launchdServiceAbsent(before)) return before;
+  if (beforeLoaded === loaded) return { ok: true, stdout: '', stderr: '' };
+
+  const result = exec(['launchctl', loaded ? 'load' : 'unload', pp]);
+  const commandResult = loaded
+    ? { ...result, ok: result.ok && !/^Load failed:/im.test(result.stderr) }
+    : launchdServiceAbsent(result)
+      ? { ok: true, stdout: '', stderr: '' }
+      : { ...result, ok: result.ok && !/^Unload failed:/im.test(result.stderr) };
+  if (!commandResult.ok) return commandResult;
+
+  const after = exec(['launchctl', 'list', PLIST_LABEL]);
+  const afterLoaded = after.ok;
+  if (!after.ok && !launchdServiceAbsent(after)) return after;
+  if (afterLoaded !== loaded) {
+    return {
+      ok: false,
+      stdout: after.stdout,
+      stderr: `launchctl did not reach expected ${loaded ? 'loaded' : 'unloaded'} state`,
+    };
+  }
+  return { ok: true, stdout: after.stdout, stderr: '' };
+}
+
 /**
  * Open URL in the default browser — detached so the CLI doesn't wait.
  * Exported for mocking in tests.
@@ -198,6 +234,7 @@ export async function openBrowser(url: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export interface ServeServiceStatus {
+  registrationState: 'present' | 'absent' | 'unknown';
   installed: boolean;
   running: boolean;
   plistPath: string;
@@ -208,7 +245,12 @@ export function queryServeService(homeDir?: string): ServeServiceStatus {
   const installed = fs.existsSync(pp);
 
   if (process.platform !== 'darwin') {
-    return { installed, running: false, plistPath: pp };
+    return {
+      registrationState: installed ? 'present' : 'absent',
+      installed,
+      running: false,
+      plistPath: pp,
+    };
   }
 
   try {
@@ -219,10 +261,18 @@ export function queryServeService(homeDir?: string): ServeServiceStatus {
     // launchctl list returns 0 and prints the job dict when it is loaded.
     // The PID key is > 0 when the process is actually running.
     const loaded = r.status === 0 && !!r.stdout;
+    if (!loaded && !launchdServiceAbsent({
+      ok: false,
+      stdout: r.stdout ?? '',
+      stderr: r.stderr ?? r.error?.message ?? '',
+    })) {
+      return { registrationState: 'unknown', installed: false, running: false, plistPath: pp };
+    }
     const running = loaded && !r.stdout.includes('"PID" = 0') && !r.stdout.includes('"PID" = -1');
-    return { installed, running, plistPath: pp };
+    const registrationState = installed || loaded ? 'present' : 'absent';
+    return { registrationState, installed: registrationState === 'present', running, plistPath: pp };
   } catch {
-    return { installed, running: false, plistPath: pp };
+    return { registrationState: 'unknown', installed: false, running: false, plistPath: pp };
   }
 }
 
@@ -245,6 +295,7 @@ export function installServeAgent(opts: {
   /** Override runCmd for testing */
   _runCmd?: typeof runCmd;
 }): void {
+  assertResidentServiceInstallAuthorized();
   const exec = opts._runCmd ?? runCmd;
   const home = opts.homeDir ?? os.homedir();
   const pp = plistPath(home);
@@ -256,16 +307,58 @@ export function installServeAgent(opts: {
   }
 
   const content = generateServePlist(opts);
+  let priorLoaded: boolean | undefined;
   installLaunchdPlistTransaction({
     plistPath: pp,
     trustedRoot: home,
     content,
     lockDir: path.join(home, '.ashlr', 'locks'),
-    unload: () => exec(['launchctl', 'unload', pp]),
-    load: () => {
-      const result = exec(['launchctl', 'load', pp]);
-      return { ...result, ok: result.ok && !/^Load failed:/im.test(result.stderr) };
+    preflight: ({ hasPrior }) => {
+      const listed = exec(['launchctl', 'list', PLIST_LABEL]);
+      if (!listed.ok && !launchdServiceAbsent(listed)) return listed;
+      priorLoaded = listed.ok;
+      if (priorLoaded && !hasPrior) {
+        return {
+          ok: false,
+          stdout: '',
+          stderr: 'refusing to replace loaded serve agent without a trusted prior plist',
+        };
+      }
+      return {
+        ok: true,
+        stdout: '',
+        stderr: '',
+        recoveryState: { loaded: priorLoaded },
+      };
     },
+    unload: () => restoreServeActivation(exec, pp, false),
+    load: () => restoreServeActivation(exec, pp, true),
+    verify: () => restoreServeActivation(exec, pp, true),
+    rollback: () => priorLoaded === undefined
+      ? { ok: false, stdout: '', stderr: 'serve activation preflight state is unavailable' }
+      : restoreServeActivation(exec, pp, priorLoaded),
+    recoverUnload: () => restoreServeActivation(exec, pp, false),
+    recover: (state) => {
+      if (
+        !state ||
+        typeof state !== 'object' ||
+        Array.isArray(state) ||
+        typeof (state as { loaded?: unknown }).loaded !== 'boolean' ||
+        Object.keys(state).some((key) => key !== 'loaded')
+      ) {
+        return { ok: false, stdout: '', stderr: 'invalid persisted serve activation state' };
+      }
+      return restoreServeActivation(exec, pp, (state as { loaded: boolean }).loaded);
+    },
+    validateRecovery: (state) => (
+      state &&
+      typeof state === 'object' &&
+      !Array.isArray(state) &&
+      typeof (state as { loaded?: unknown }).loaded === 'boolean' &&
+      Object.keys(state).every((key) => key === 'loaded')
+    )
+      ? { ok: true, stdout: '', stderr: '' }
+      : { ok: false, stdout: '', stderr: 'invalid persisted serve activation state' },
   });
 }
 
@@ -293,14 +386,56 @@ export function uninstallServeAgent(opts: {
   const exec = opts._runCmd ?? runCmd;
   const home = opts.homeDir ?? os.homedir();
   const pp = plistPath(opts.homeDir);
+  let priorLoaded: boolean | undefined;
   removeLaunchdPlistTransaction({
     plistPath: pp,
     trustedRoot: home,
     lockDir: path.join(home, '.ashlr', 'locks'),
-    unload: () => {
-      const result = exec(['launchctl', 'unload', pp]);
-      return { ...result, ok: result.ok && !/^Unload failed:/im.test(result.stderr) };
+    preflight: ({ hasPrior }) => {
+      const listed = exec(['launchctl', 'list', PLIST_LABEL]);
+      if (!listed.ok && !launchdServiceAbsent(listed)) return listed;
+      priorLoaded = listed.ok;
+      if (priorLoaded && !hasPrior) {
+        return {
+          ok: false,
+          stdout: '',
+          stderr: 'refusing to remove loaded serve agent without a trusted prior plist',
+        };
+      }
+      return {
+        ok: true,
+        stdout: '',
+        stderr: '',
+        recoveryState: { loaded: priorLoaded },
+      };
     },
+    unload: () => restoreServeActivation(exec, pp, false),
+    afterRemove: () => restoreServeActivation(exec, pp, false),
+    load: () => restoreServeActivation(exec, pp, true),
+    recover: (state) => {
+      if (
+        !state ||
+        typeof state !== 'object' ||
+        Array.isArray(state) ||
+        typeof (state as { loaded?: unknown }).loaded !== 'boolean' ||
+        Object.keys(state).some((key) => key !== 'loaded')
+      ) {
+        return { ok: false, stdout: '', stderr: 'invalid persisted serve activation state' };
+      }
+      return restoreServeActivation(exec, pp, (state as { loaded: boolean }).loaded);
+    },
+    validateRecovery: (state) => (
+      state &&
+      typeof state === 'object' &&
+      !Array.isArray(state) &&
+      typeof (state as { loaded?: unknown }).loaded === 'boolean' &&
+      Object.keys(state).every((key) => key === 'loaded')
+    )
+      ? { ok: true, stdout: '', stderr: '' }
+      : { ok: false, stdout: '', stderr: 'invalid persisted serve activation state' },
+    recoverAfterFailedRemove: () => priorLoaded === undefined
+      ? { ok: false, stdout: '', stderr: 'serve activation preflight state is unavailable' }
+      : restoreServeActivation(exec, pp, priorLoaded),
   });
 }
 
@@ -315,10 +450,11 @@ export function uninstallServeAgent(opts: {
 async function ensureRunning(opts: {
   homeDir?: string;
   _runCmd?: typeof runCmd;
+  _queryServeService?: typeof queryServeService;
 }): Promise<{ url: string; installed: boolean }> {
   const home = opts.homeDir ?? os.homedir();
   const url = `http://127.0.0.1:${SERVE_PORT}`;
-  const status = queryServeService(home);
+  const status = (opts._queryServeService ?? queryServeService)(home);
   const needsUpgrade = servePlistNeedsUpgrade({ homeDir: home });
 
   if (!status.installed || !status.running || needsUpgrade) {
@@ -339,7 +475,11 @@ async function ensureRunning(opts: {
 
 async function cmdDashboardOpen(
   args: string[],
-  deps: { _runCmd?: typeof runCmd; _openBrowser?: typeof openBrowser },
+  deps: {
+    _runCmd?: typeof runCmd;
+    _openBrowser?: typeof openBrowser;
+    _queryServeService?: typeof queryServeService;
+  },
 ): Promise<number> {
   const col = makeColors(isTty());
   const openBrowserFn = deps._openBrowser ?? openBrowser;
@@ -370,7 +510,10 @@ async function cmdDashboardOpen(
 
   let url: string;
   try {
-    const result = await ensureRunning({ _runCmd: deps._runCmd });
+    const result = await ensureRunning({
+      _runCmd: deps._runCmd,
+      _queryServeService: deps._queryServeService,
+    });
     url = result.url;
     if (!json && result.installed) {
       console.log('');
@@ -378,7 +521,10 @@ async function cmdDashboardOpen(
       console.log(col.dim('    Survives reboot. Stop with `ashlr dashboard --stop`.'));
     }
   } catch (err) {
-    console.error(col.red('error: ') + 'Failed to install serve agent: ' + String(err));
+    console.error(
+      col.red('error: ')
+      + `Persistent dashboard unavailable: ${String(err)}. Use \`ashlr serve --open\` in the foreground.`,
+    );
     return 1;
   }
 
@@ -435,6 +581,7 @@ function cmdDashboardStatus(args: string[]): number {
   if (json) {
     console.log(JSON.stringify({
       installed: status.installed,
+      registrationState: status.registrationState,
       running: status.running,
       plistPath: status.plistPath,
       url,
@@ -448,16 +595,17 @@ function cmdDashboardStatus(args: string[]): number {
   console.log(col.bold('  ashlr dashboard status'));
   console.log('');
   console.log('  ' + col.bold('installed:  ') + (status.installed ? col.green('yes') : col.dim('no')));
+  console.log('  ' + col.bold('registered: ') + col.dim(status.registrationState));
   console.log('  ' + col.bold('running:    ') + (status.running ? col.green('yes') : col.dim('no')));
   console.log('  ' + col.bold('url:        ') + col.dim(url));
   console.log('  ' + col.bold('plist:      ') + col.dim(status.plistPath));
   console.log('');
 
   if (!status.installed) {
-    console.log(col.dim('  Run `ashlr dashboard` to install and open.'));
+    console.log(col.dim('  Resident install is unavailable; run `ashlr serve --open` in the foreground.'));
     console.log('');
   } else if (!status.running) {
-    console.log(col.dim('  Installed but not running. Run `ashlr dashboard` to restart.'));
+    console.log(col.dim('  Installed but not running. Restart authority is unavailable; status and stop remain available.'));
     console.log('');
   }
 
@@ -479,6 +627,7 @@ export async function cmdDashboard(
   _deps: {
     _runCmd?: typeof runCmd;
     _openBrowser?: typeof openBrowser;
+    _queryServeService?: typeof queryServeService;
   } = {},
 ): Promise<number> {
   const col = makeColors(isTty());
@@ -517,11 +666,11 @@ function printUsage(): void {
   console.log('');
   console.log(col.bold('  ashlr dashboard') + col.dim(' [--stop | --status | --json]'));
   console.log('');
-  console.log('  Ensure the fleet web dashboard is running as a persistent launchd service,');
-  console.log('  then open it in your default browser.');
+  console.log('  Open an existing fleet dashboard service in your default browser.');
+  console.log('  Resident install/restart is unavailable; use `ashlr serve --open` for a new session.');
   console.log('');
   console.log('  ' + col.bold('Subcommands / flags:'));
-  console.log(`    ${col.cyan('(none)')}            Ensure running + open browser`);
+  console.log(`    ${col.cyan('(none)')}            Open an existing service`);
   console.log(`    ${col.cyan('--stop')}            Unload and remove the LaunchAgent`);
   console.log(`    ${col.cyan('--status')}          Print service state`);
   console.log(`    ${col.cyan('--json')}            Machine-readable output`);

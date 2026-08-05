@@ -27,6 +27,10 @@ import { tmpdir } from 'node:os';
 import type { AshlrConfig } from '../src/core/types.js';
 import type { TaskSpec } from '../src/core/simple-conductor.js';
 
+vi.mock('../src/core/daemon/activation-permit.js', () => ({
+  liveConductorActivationAuthorized: () => true,
+}));
+
 // ---------------------------------------------------------------------------
 // HOME isolation — must happen before any module resolves homedir()
 // ---------------------------------------------------------------------------
@@ -83,8 +87,45 @@ vi.mock('../src/core/fleet/automerge-pass.js', () => ({
 
 // listProposals — controls pending set
 const mockListProposals = vi.fn(() => []);
+const mockLoadProposal = vi.fn((id: string) => ({ id, status: 'pending' }));
+function defaultDetailedProposalSnapshot() {
+  const listed = mockListProposals() as Array<{ id: string }>;
+  const listedById = new Map(listed.map((proposal) => [proposal.id, proposal]));
+  const ids = new Set(listed.map((proposal) => proposal.id));
+  try {
+    for (const task of readTasks()) {
+      if (task.proposalId) ids.add(task.proposalId);
+      if (task.candidateProposalId) ids.add(task.candidateProposalId);
+    }
+  } catch { /* malformed-store tests intentionally have no proposal snapshot */ }
+  if (mockRunEngineSandboxed.mock.calls.length > 0) {
+    for (const id of ['prop-abc', 'prop-ok', 'proposal-candidate', 'proposal-stale']) ids.add(id);
+  }
+  return {
+    proposals: [...ids].map((id) => listedById.get(id) ?? mockLoadProposal(id)).filter(Boolean),
+    sourceState: 'healthy',
+    sourcePresent: true,
+    complete: true,
+    stopReasons: [],
+    filesDiscovered: ids.size,
+    filesRead: ids.size,
+    bytesRead: 1,
+    invalidFiles: 0,
+    unreadableFiles: 0,
+  };
+}
+const mockListProposalsDetailed = vi.fn(defaultDetailedProposalSnapshot);
 vi.mock('../src/core/inbox/store.js', () => ({
+  ensureProposalInbox: () => true,
   listProposals: (...args: unknown[]) => mockListProposals(...args),
+  loadProposal: (...args: unknown[]) => mockLoadProposal(...args),
+  listProposalsDetailed: (...args: unknown[]) => mockListProposalsDetailed(...args),
+}));
+
+const mockVerifyPendingAuthority = vi.fn(() => true);
+vi.mock('../src/core/inbox/pending-authority.js', () => ({
+  isAuthoritativeDurablePendingProposal: (...args: unknown[]) =>
+    mockVerifyPendingAuthority(...args),
 }));
 
 // runConductor — for flag-off test
@@ -155,6 +196,9 @@ beforeEach(() => {
     judgeCapped: 0, skipped: [], autoArchived: 0, ttlRejected: 0,
   });
   mockListProposals.mockReturnValue([]);
+  mockLoadProposal.mockImplementation((id: string) => ({ id, status: 'pending' }));
+  mockVerifyPendingAuthority.mockReturnValue(true);
+  mockListProposalsDetailed.mockImplementation(defaultDetailedProposalSnapshot);
   mockRunConductor.mockResolvedValue({
     killSwitchTripped: false, daemonFallback: false, goalActivity: [],
     goalsAdvanced: 0, proposalsFiled: 0, goalsDone: 0,
@@ -172,6 +216,9 @@ beforeEach(() => {
     judgeCapped: 0, skipped: [], autoArchived: 0, ttlRejected: 0,
   });
   mockListProposals.mockReturnValue([]);
+  mockLoadProposal.mockImplementation((id: string) => ({ id, status: 'pending' }));
+  mockVerifyPendingAuthority.mockReturnValue(true);
+  mockListProposalsDetailed.mockImplementation(defaultDetailedProposalSnapshot);
   mockRunConductor.mockResolvedValue({
     killSwitchTripped: false, daemonFallback: false, goalActivity: [],
     goalsAdvanced: 0, proposalsFiled: 0, goalsDone: 0,
@@ -224,6 +271,7 @@ describe('M280 — dispatches and marks done', () => {
     writeTasks([task]);
 
     const { runSimpleConductor } = await importConductor();
+    const { simpleConductorTaskGenerationId } = await import('../src/core/simple-conductor-task-store.js');
     const result = await runSimpleConductor(makeConfig(), { once: true, dryRun: false, allowCloud: false });
 
     expect(result.tasksAttempted).toBe(1);
@@ -242,6 +290,8 @@ describe('M280 — dispatches and marks done', () => {
     expect(instruction).toContain('npx tsc --noEmit');
     expect(opts.sourceRepo).toBe('/tmp/repo-a');
     expect(opts.propose).toBe(true);
+    expect(opts.workItemId).toBe('task-1');
+    expect(opts.workItemGenerationId).toBe(simpleConductorTaskGenerationId(task));
     expect(opts.budget.maxTokens).toBe(150_000); // M287: raised for substantial work
     expect(opts.budget.maxSteps).toBe(100);
 
@@ -371,6 +421,262 @@ describe('M280 — never-throws per task', () => {
     expect(result.errors).toHaveLength(1);
     expect(result.errors[0].taskId).toBe('task-fail');
     expect(result.proposalsFiled).toBe(1); // second task succeeded
+    expect(readTasks().find((task) => task.id === 'task-fail')).toEqual(expect.objectContaining({
+      attempts: 1,
+      done: false,
+      lastError: 'engine crash',
+    }));
+  });
+
+  it('counts throwing invocations against the cycle cap', async () => {
+    writeTasks(Array.from({ length: 5 }, (_, index) => baseTask({
+      id: `task-throw-${index}`,
+      repo: `/tmp/repo-throw-${index}`,
+      priority: 5 - index,
+    })));
+    mockRunEngineSandboxed.mockRejectedValue(new Error('provider unavailable'));
+
+    const { runSimpleConductor } = await importConductor();
+    const result = await runSimpleConductor(makeConfig(), {
+      once: true,
+      dryRun: false,
+      allowCloud: false,
+    });
+
+    expect(mockRunEngineSandboxed).toHaveBeenCalledTimes(3);
+    expect(result.tasksAttempted).toBe(3);
+    expect(readTasks().filter((task) => task.attempts === 1)).toHaveLength(3);
+  });
+
+  it('keeps a third no-proposal attempt retryable instead of reporting false completion', async () => {
+    writeTasks([baseTask({ attempts: 2 })]);
+    mockRunEngineSandboxed.mockResolvedValue({ state: { id: 'run-no-proposal', status: 'done' } });
+
+    const { runSimpleConductor } = await importConductor();
+    await runSimpleConductor(makeConfig(), { once: true, dryRun: false, allowCloud: false });
+
+    expect(readTasks()[0]).toEqual(expect.objectContaining({
+      attempts: 3,
+      done: false,
+      retryAfter: expect.any(String),
+      lastError: expect.stringContaining('no authoritative proposal'),
+    }));
+  });
+
+  it('persists an unresolved candidate and refuses to double-dispatch it on restart', async () => {
+    writeTasks([baseTask()]);
+    mockRunEngineSandboxed.mockResolvedValue({
+      state: { id: 'run-candidate', status: 'failed' },
+      candidateProposalId: 'proposal-candidate',
+    });
+    mockVerifyPendingAuthority.mockReturnValue(false);
+
+    const { runSimpleConductor } = await importConductor();
+    const first = await runSimpleConductor(makeConfig(), {
+      once: true,
+      dryRun: false,
+      allowCloud: false,
+    });
+    const second = await runSimpleConductor(makeConfig(), {
+      once: true,
+      dryRun: false,
+      allowCloud: false,
+    });
+
+    expect(first.proposalsFiled).toBe(0);
+    expect(second.tasksAttempted).toBe(0);
+    expect(mockRunEngineSandboxed).toHaveBeenCalledOnce();
+    expect(readTasks()[0]).toEqual(expect.objectContaining({
+      done: false,
+      candidateProposalId: 'proposal-candidate',
+      retryAfter: expect.any(String),
+    }));
+  });
+
+  it('keeps an invalid pending candidate blocking after its cooldown expires', async () => {
+    writeTasks([baseTask({
+      candidateProposalId: 'proposal-still-pending',
+      retryAfter: '2020-01-01T00:00:00.000Z',
+    })]);
+    mockVerifyPendingAuthority.mockReturnValue(false);
+
+    const { runSimpleConductor } = await importConductor();
+    const result = await runSimpleConductor(makeConfig(), {
+      once: true,
+      dryRun: false,
+      allowCloud: false,
+    });
+
+    expect(result.tasksAttempted).toBe(0);
+    expect(mockRunEngineSandboxed).not.toHaveBeenCalled();
+    expect(result.errors[0]?.error).toContain('reconciliation required');
+  });
+
+  it('does not let a candidate from an explicit older generation block a replacement objective', async () => {
+    writeTasks([baseTask({ candidateProposalId: 'proposal-old-generation' })]);
+    mockLoadProposal.mockImplementation((id: string) => id === 'proposal-old-generation'
+      ? {
+          id,
+          status: 'pending',
+          workItemId: 'task-1',
+          workItemGenerationId: 'a'.repeat(64),
+        }
+      : { id, status: 'pending' });
+    mockVerifyPendingAuthority.mockImplementation((_proposal, expected) =>
+      (expected as { id?: string }).id === 'prop-abc');
+
+    const { runSimpleConductor } = await importConductor();
+    const result = await runSimpleConductor(makeConfig(), {
+      once: true,
+      dryRun: false,
+      allowCloud: false,
+    });
+
+    expect(mockRunEngineSandboxed).toHaveBeenCalledOnce();
+    expect(result.proposalsFiled).toBe(1);
+    expect(readTasks()[0].proposalId).toBe('prop-abc');
+  });
+
+  it('requires reconciliation instead of redispatching an expired same-generation lease', async () => {
+    const row = baseTask();
+    const { simpleConductorTaskGenerationId } = await import('../src/core/simple-conductor-task-store.js');
+    const generationId = simpleConductorTaskGenerationId(row);
+    writeTasks([{
+      ...row,
+      attempts: 1,
+      revision: 1,
+      dispatchLease: {
+        token: '12345678-1234-4123-8123-123456789abc',
+        generationId,
+        claimedAt: '2020-01-01T00:00:00.000Z',
+        expiresAt: '2020-01-02T00:00:00.000Z',
+      },
+    }]);
+
+    const { runSimpleConductor } = await importConductor();
+    const result = await runSimpleConductor(makeConfig(), {
+      once: true,
+      dryRun: false,
+      allowCloud: false,
+    });
+
+    expect(mockRunEngineSandboxed).not.toHaveBeenCalled();
+    expect(result.errors[0]?.error).toContain('expired without terminal authority');
+    expect(readTasks()[0].attempts).toBe(1);
+  });
+
+  it('recovers an authoritative proposal created before an expired lease was settled', async () => {
+    const row = baseTask();
+    const { simpleConductorTaskGenerationId } = await import('../src/core/simple-conductor-task-store.js');
+    const generationId = simpleConductorTaskGenerationId(row);
+    writeTasks([{
+      ...row,
+      attempts: 1,
+      revision: 1,
+      dispatchLease: {
+        token: '12345678-1234-4123-8123-123456789abc',
+        generationId,
+        claimedAt: '2020-01-01T00:00:00.000Z',
+        expiresAt: '2020-01-02T00:00:00.000Z',
+      },
+    }]);
+    mockListProposals.mockReturnValue([{
+      id: 'proposal-crash-recovered',
+      status: 'pending',
+      repo: row.repo,
+      workItemId: row.id,
+      workItemGenerationId: generationId,
+    }]);
+
+    const { runSimpleConductor } = await importConductor();
+    const result = await runSimpleConductor(makeConfig(), {
+      once: true,
+      dryRun: false,
+      allowCloud: false,
+    });
+
+    expect(mockRunEngineSandboxed).not.toHaveBeenCalled();
+    expect(result.proposalsRecovered).toBe(1);
+    expect(readTasks()[0]).toEqual(expect.objectContaining({
+      done: true,
+      proposalId: 'proposal-crash-recovered',
+      attempts: 1,
+    }));
+    expect(readTasks()[0].dispatchLease).toBeUndefined();
+  });
+
+  it('fails closed when the proposal source is degraded', async () => {
+    writeTasks([baseTask()]);
+    mockListProposalsDetailed.mockReturnValue({
+      proposals: [],
+      sourceState: 'degraded',
+      sourcePresent: true,
+      complete: false,
+      stopReasons: ['invalid-file'],
+      filesDiscovered: 1,
+      filesRead: 1,
+      bytesRead: 0,
+      invalidFiles: 1,
+      unreadableFiles: 0,
+    });
+
+    const { runSimpleConductor } = await importConductor();
+    const result = await runSimpleConductor(makeConfig(), {
+      once: true,
+      dryRun: false,
+      allowCloud: false,
+    });
+
+    expect(mockRunEngineSandboxed).not.toHaveBeenCalled();
+    expect(result.errors[0]?.error).toContain('proposal source is degraded');
+  });
+
+  it('does not treat a missing proposal source as authoritative emptiness', async () => {
+    writeTasks([baseTask()]);
+    mockListProposalsDetailed.mockReturnValue({
+      proposals: [],
+      sourceState: 'missing',
+      sourcePresent: false,
+      complete: true,
+      stopReasons: [],
+      filesDiscovered: 0,
+      filesRead: 0,
+      bytesRead: 0,
+      invalidFiles: 0,
+      unreadableFiles: 0,
+    });
+
+    const { runSimpleConductor } = await importConductor();
+    const result = await runSimpleConductor(makeConfig(), {
+      once: true,
+      dryRun: false,
+      allowCloud: false,
+    });
+
+    expect(mockRunEngineSandboxed).not.toHaveBeenCalled();
+    expect(result.errors[0]?.error).toContain('proposal source is degraded');
+  });
+
+  it('does not settle a proposal onto a task generation changed during dispatch', async () => {
+    writeTasks([baseTask()]);
+    mockRunEngineSandboxed.mockImplementation(async () => {
+      const [current] = readTasks();
+      writeTasks([{ ...current, instruction: 'replacement objective' }]);
+      return { state: { id: 'run-stale', status: 'done' }, proposalId: 'proposal-stale' };
+    });
+
+    const { runSimpleConductor } = await importConductor();
+    const result = await runSimpleConductor(makeConfig(), {
+      once: true,
+      dryRun: false,
+      allowCloud: false,
+    });
+
+    expect(result.proposalsFiled).toBe(0);
+    expect(result.errors.some((entry) => entry.error.includes('generation'))).toBe(true);
+    expect(readTasks()[0].instruction).toBe('replacement objective');
+    expect(readTasks()[0].done).not.toBe(true);
+    expect(readTasks()[0].proposalId).toBeUndefined();
   });
 });
 

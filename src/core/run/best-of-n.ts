@@ -34,6 +34,7 @@ import { mergeDelegationScope, scopeFromWorkItem } from './delegation-scope.js';
 import { observeShadowSkills } from '../fleet/skill-shadow-observer.js';
 import type { SandboxRetentionEvidence } from './sandboxed-engine.js';
 import { runTests, runTestsForProposal } from './run-tests.js';
+import { isAuthoritativeDurablePendingProposal } from '../inbox/pending-authority.js';
 import {
   abandonExecutionAuthority,
   acquireExecutionAuthority,
@@ -54,6 +55,8 @@ export interface CandidateResult {
   proposalId?: string;
   /** Opaque execution id for joining this candidate, including losers. */
   runId?: string;
+  /** Causal trajectory bound to this candidate run. */
+  trajectoryId?: string;
   /** Verdict from the critic judge. undefined when judging failed. */
   verdict?: ManagerVerdict;
   /** Score derived from verdict dimensions (value+correctness+scope+alignment). */
@@ -77,9 +80,16 @@ export interface CandidateResult {
   error?: string;
   /** Structured reason the sandbox run did or did not file a proposal. */
   proposalOutcome?: RunProposalOutcome;
+  /** Bounded final-capture classification consumed by the daemon. */
+  proposalDisposition?: CandidateProposalDisposition;
   /** Durable quarantine evidence when process closure could not be confirmed. */
   sandboxRetention?: SandboxRetentionEvidence;
 }
+
+export type CandidateProposalDisposition =
+  | { kind: 'verification-rejected' }
+  | { kind: 'duplicate-owned'; proposalId: string; diffHash: string }
+  | { kind: 'capture-missing' };
 
 interface InternalCandidateResult extends CandidateResult {
   requestedModel?: string | null;
@@ -238,6 +248,117 @@ function proposalForCandidate(item: WorkItem, c: InternalCandidateResult, loadPr
     }
   }
   return syntheticProposal(item, c.diff, c.index);
+}
+
+function durableDuplicateDisposition(
+  candidate: InternalCandidateResult,
+  outcome: RunProposalOutcome | undefined,
+  loadProposal: ((id: string) => Proposal | null) | undefined,
+  cfg: AshlrConfig,
+): CandidateProposalDisposition | undefined {
+  const draft = candidate.proposalDraft;
+  if (
+    outcome?.kind !== 'proposal-disabled' ||
+    !outcome.proposalId ||
+    !draft?.diffHash ||
+    !loadProposal
+  ) return undefined;
+
+  try {
+    const existing = loadProposal(outcome.proposalId);
+    if (!isAuthoritativeDurablePendingProposal(existing, {
+      id: outcome.proposalId,
+      repo: draft.repo as string,
+      origin: 'agent',
+      kind: 'patch',
+      diff: draft.diff,
+      diffHash: draft.diffHash,
+      workItemId: draft.workItemId,
+      workItemGenerationId: draft.workItemGenerationId,
+      isPartial: draft.isPartial === true,
+    }, cfg)) return undefined;
+    return { kind: 'duplicate-owned', proposalId: existing.id, diffHash: existing.diffHash as string };
+  } catch {
+    return undefined;
+  }
+}
+
+function finalCaptureDisposition(
+  candidate: InternalCandidateResult,
+  outcome: RunProposalOutcome | undefined,
+  loadProposal: ((id: string) => Proposal | null) | undefined,
+  cfg: AshlrConfig,
+): CandidateProposalDisposition | undefined {
+  const duplicate = durableDuplicateDisposition(candidate, outcome, loadProposal, cfg);
+  if (duplicate) return duplicate;
+  if (
+    typeof candidate.proposalDraft?.diff === 'string' &&
+    candidate.proposalDraft.diff.trim().length > 0 &&
+    (outcome === undefined || outcome.kind === 'proposal-disabled')
+  ) return { kind: 'capture-missing' };
+  return undefined;
+}
+
+function exactDurablePendingProposal(
+  candidate: InternalCandidateResult,
+  proposalId: string | undefined,
+  outcome: RunProposalOutcome | undefined,
+  loadProposal: ((id: string) => Proposal | null) | undefined,
+  expected: {
+    repo: string;
+    workItemId: string;
+    workItemGenerationId?: string;
+  },
+  cfg: AshlrConfig,
+): Proposal | undefined {
+  if (
+    !proposalId ||
+    outcome?.kind !== 'filed' ||
+    outcome.proposalId !== proposalId ||
+    !candidate.runId ||
+    !loadProposal
+  ) return undefined;
+
+  let persisted: Proposal | null;
+  try {
+    persisted = loadProposal(proposalId);
+  } catch {
+    return undefined;
+  }
+  const draft = candidate.proposalDraft;
+  const trajectoryId = candidate.trajectoryId ?? `run:${candidate.runId}`;
+  if (!isAuthoritativeDurablePendingProposal(persisted, {
+    id: proposalId,
+    repo: expected.repo,
+    origin: 'agent',
+    kind: 'patch',
+    diff: draft?.diff ?? candidate.diff,
+    ...(draft?.diffHash ? { diffHash: draft.diffHash } : {}),
+    ...(draft?.provenanceSig ? { provenanceSig: draft.provenanceSig } : {}),
+    ...(draft?.sandboxId ? { sandboxId: draft.sandboxId } : {}),
+    runId: candidate.runId,
+    trajectoryId,
+    workItemId: expected.workItemId,
+    workItemGenerationId: expected.workItemGenerationId,
+    isPartial: draft?.isPartial === true || outcome.isPartial === true,
+  }, cfg)) return undefined;
+
+  return persisted;
+}
+
+function finalCaptureFailureOutcome(
+  outcome: RunProposalOutcome | undefined,
+  proposalId: string | undefined,
+): RunProposalOutcome {
+  if (outcome?.kind === 'proposal-capture-error') return outcome;
+  return {
+    kind: 'proposal-capture-error',
+    reason: 'final proposal capture lacked exact durable pending proposal identity',
+    ...(proposalId ? { proposalId } : {}),
+    ...(outcome?.files !== undefined ? { files: outcome.files } : {}),
+    ...(outcome?.insertions !== undefined ? { insertions: outcome.insertions } : {}),
+    ...(outcome?.deletions !== undefined ? { deletions: outcome.deletions } : {}),
+  };
 }
 
 function publicCandidate(c: InternalCandidateResult): CandidateResult {
@@ -494,6 +615,7 @@ async function runBestOfNInternal(
       engine: cEngine,
       model: cModel,
       runId,
+      trajectoryId: `run:${runId}`,
       requestedModel,
     };
     if (opts?.signal?.aborted) return { ...base, error: 'cancelled' };
@@ -548,7 +670,7 @@ async function runBestOfNInternal(
               reason: `best-of-${n} candidate ${i + 1}`,
             },
           },
-          identity: { trajectoryId: `run:${opts.attemptId}`, runId },
+          identity: { trajectoryId: `run:${runId}`, runId },
           selectedAt: opts.shadowSkillSelectedAt,
           route: {
             backend: executedBackend,
@@ -778,25 +900,37 @@ async function runBestOfNInternal(
         winnerIndex: winner?.index ?? -1,
         winnerProposalId: winnerPid ?? null,
         totalCostUsd,
-        candidates: candidates.map((c) => ({
-          index: c.index,
-          ...(c.runId ? { runId: c.runId } : {}),
-          engine: String(c.engine ?? ''),
-          model: c.model ?? null,
-          score: c.score,
-          ...(c.testsPassed !== undefined ? { testsPassed: c.testsPassed } : {}),
-          ...(c.costUsd !== undefined ? { costUsd: c.costUsd } : {}),
-          ...(c.latencyMs !== undefined ? { latencyMs: c.latencyMs } : {}),
-          ...(c.error ? { error: c.error } : {}),
-          ...(c.proposalOutcome
-            ? {
-                proposalOutcome: c.proposalOutcome.kind,
-                proposalOutcomeReason: c.proposalOutcome.reason,
-              }
-            : {}),
-          proposalId: c.proposalId && c.proposalId === winnerPid ? c.proposalId : null,
-          won: c.proposalId != null && c.proposalId === winnerPid,
-        })),
+        candidates: candidates.map((c) => {
+          const selectionWon = c.proposalId != null && c.proposalId === winnerPid;
+          const isPartial = candidateHasPartialProposalMaterial(c);
+          const producerStatus = c.state?.status;
+          const fullProposalWon = selectionWon && !isPartial && producerStatus === 'done' &&
+            c.proposalOutcome?.kind === 'filed';
+          return {
+            index: c.index,
+            ...(c.runId ? { runId: c.runId } : {}),
+            engine: String(c.engine ?? ''),
+            model: c.model ?? null,
+            score: c.score,
+            ...(c.testsPassed !== undefined ? { testsPassed: c.testsPassed } : {}),
+            ...(c.costUsd !== undefined ? { costUsd: c.costUsd } : {}),
+            ...(c.latencyMs !== undefined ? { latencyMs: c.latencyMs } : {}),
+            ...(c.error ? { error: c.error } : {}),
+            ...(c.proposalOutcome
+              ? {
+                  proposalOutcome: c.proposalOutcome.kind,
+                  proposalOutcomeReason: c.proposalOutcome.reason,
+                }
+              : {}),
+            ...(producerStatus ? { producerStatus } : {}),
+            isPartial,
+            selectionWon,
+            fullProposalWon,
+            proposalId: selectionWon ? c.proposalId! : null,
+            // Compatibility alias: historical readers interpret `won` as selection.
+            won: selectionWon,
+          };
+        }),
       });
     } catch {
       // Ledger capture is best-effort and must not change execution results.
@@ -909,7 +1043,17 @@ async function runBestOfNInternal(
         }
         if (opts?.signal?.aborted) return { ...c, verdict, score, testsPassed, taste };
 
-        return { ...c, diff: proposal.diff ?? c.diff, verdict, score, testsPassed, taste };
+        return {
+          ...c,
+          diff: proposal.diff ?? c.diff,
+          verdict,
+          score,
+          testsPassed,
+          taste,
+          ...(testsPassed === false && c.proposalDraft
+            ? { proposalDisposition: { kind: 'verification-rejected' } as const }
+            : {}),
+        };
       }),
     );
 
@@ -951,8 +1095,31 @@ async function runBestOfNInternal(
       if (opts?.signal?.aborted) break;
 
       if (c.proposalId) {
-        winner = c;
-        break;
+        const persisted = exactDurablePendingProposal(
+          c,
+          c.proposalId,
+          c.proposalOutcome,
+          loadProposal,
+          {
+            repo: sourceRepo,
+            workItemId: opts?.workItemId ?? item.id,
+            workItemGenerationId: opts?.workItemGenerationId,
+          },
+          cfg,
+        );
+        if (persisted) {
+          winner = { ...c, diff: persisted.diff ?? c.diff };
+          scored[c.index] = winner;
+          break;
+        }
+        const captureFailure = finalCaptureFailureOutcome(c.proposalOutcome, c.proposalId);
+        const { proposalId: _unverifiedProposalId, ...candidateWithoutProposalId } = c;
+        scored[c.index] = {
+          ...candidateWithoutProposalId,
+          proposalOutcome: captureFailure,
+          error: formatProposalOutcome(captureFailure),
+        };
+        continue;
       }
 
       if (!c.sandbox || !captureSandboxedProposal) {
@@ -981,19 +1148,25 @@ async function runBestOfNInternal(
         producerStatus: c.state?.status ?? 'done',
       });
       const outcome = filed.proposalOutcome ?? filed.state.proposalOutcome;
+      const persisted = exactDurablePendingProposal(
+        c,
+        filed.proposalId,
+        outcome,
+        loadProposal,
+        {
+          repo: sourceRepo,
+          workItemId: opts?.workItemId ?? item.id,
+          workItemGenerationId: opts?.workItemGenerationId,
+        },
+        cfg,
+      );
 
-      if (filed.proposalId) {
-        let persisted: Proposal | undefined;
-        try {
-          persisted = loadProposal?.(filed.proposalId) ?? undefined;
-        } catch {
-          persisted = undefined;
-        }
+      if (persisted && filed.proposalId && outcome) {
         winner = {
           ...c,
           proposalId: filed.proposalId,
-          ...(outcome ? { proposalOutcome: outcome } : {}),
-          diff: persisted?.diff ?? c.proposalDraft?.diff ?? c.diff,
+          proposalOutcome: outcome,
+          diff: persisted.diff ?? c.proposalDraft?.diff ?? c.diff,
           state: filed.state,
         };
         scored[c.index] = winner;
@@ -1002,11 +1175,16 @@ async function runBestOfNInternal(
 
       if (opts?.signal?.aborted) break;
 
-      const error = candidateErrorFromState(filed.state, false, outcome)
+      const captureOutcome = filed.proposalId
+        ? finalCaptureFailureOutcome(outcome, filed.proposalId)
+        : outcome;
+      const error = candidateErrorFromState(filed.state, false, captureOutcome)
         ?? 'final proposal capture did not file a proposal';
+      const proposalDisposition = finalCaptureDisposition(c, captureOutcome, loadProposal, cfg);
       scored[c.index] = {
         ...c,
-        ...(outcome ? { proposalOutcome: outcome } : {}),
+        ...(captureOutcome ? { proposalOutcome: captureOutcome } : {}),
+        ...(proposalDisposition ? { proposalDisposition } : {}),
         state: filed.state,
         error,
       };

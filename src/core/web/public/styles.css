@@ -127,6 +127,7 @@ body {
   font-size: 1rem;
   min-height: 100vh;
   overflow-x: hidden;
+  overflow-y: auto;
 }
 
 /* ---------------------------------------------------------------------------
@@ -2109,6 +2110,9 @@ a:hover {
   box-shadow: 0 0 0 0 var(--status-done);
   animation: ctrl-pulse 2s infinite;
 }
+.ctrl-live-dot.observed {
+  background: var(--status-warn, #f5a623);
+}
 @keyframes ctrl-pulse {
   0%   { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.55); }
   70%  { box-shadow: 0 0 0 7px rgba(52, 211, 153, 0); }
@@ -2293,6 +2297,7 @@ a:hover {
   flex-shrink: 0;
 }
 .ctrl-health-dot.up   { background: var(--status-done); }
+.ctrl-health-dot.observed { background: var(--status-warn, #f5a623); }
 .ctrl-health-dot.down { background: var(--status-failed); }
 
 .ctrl-provider-name {
@@ -3752,4 +3757,182 @@ a:hover {
   --status-ok:      #0fa870;
   --status-warn:    #c47800;
   --status-fail:    #cc2222;
+}
+
+/* ---------------------------------------------------------------------------
+   42. Live shell navigation
+
+   renderShell() owns the runtime DOM and uses this top navigation surface.
+   Keep the brand and authority controls fixed while the view rail scrolls.
+   --------------------------------------------------------------------------- */
+body.live-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  min-height: 100vh;
+  overflow: hidden;
+}
+
+.topnav {
+  position: relative;
+  z-index: 100;
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+  height: var(--header-height);
+  min-height: var(--header-height);
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-default);
+}
+
+.nav-brand,
+.nav-status {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  background: var(--bg-surface);
+}
+
+.nav-brand {
+  gap: var(--space-2);
+  padding: 0 var(--space-4);
+  border-right: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+}
+
+.brand-icon {
+  color: var(--accent);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.brand-name {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.nav-links {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: stretch;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+  scroll-snap-type: x proximity;
+}
+
+.nav-links::-webkit-scrollbar {
+  height: 3px;
+}
+
+.nav-links::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+}
+
+.nav-link {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  min-height: var(--header-height);
+  padding: 0 var(--space-3);
+  border-bottom: 2px solid transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+  scroll-snap-align: nearest;
+  transition: background var(--duration-fast), color var(--duration-fast), border-color var(--duration-fast);
+}
+
+.nav-link:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.nav-link.active {
+  background: var(--accent-glow);
+  border-bottom-color: var(--accent);
+  color: var(--accent);
+}
+
+.nav-link svg {
+  flex: 0 0 auto;
+}
+
+.nav-status {
+  gap: var(--space-2);
+  padding: 0 var(--space-3);
+  border-left: 1px solid var(--border-subtle);
+}
+
+.sse-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  background: var(--status-pending);
+}
+
+.sse-dot.connected {
+  background: var(--status-done);
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.12);
+}
+
+.token-btn {
+  min-height: 32px;
+  white-space: nowrap;
+}
+
+body.live-shell > .main {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  margin-left: 0;
+  overflow: auto;
+}
+
+@media (max-width: 768px) {
+  .topnav {
+    height: 48px;
+    min-height: 48px;
+  }
+
+  .nav-brand {
+    padding: 0 var(--space-3);
+  }
+
+  .brand-name {
+    font-size: 12px;
+  }
+
+  .nav-link {
+    min-height: 48px;
+    padding: 0 10px;
+    font-size: 11px;
+  }
+
+  .nav-status {
+    padding: 0 var(--space-2);
+  }
+
+  .token-btn {
+    width: 34px;
+    min-width: 34px;
+    padding: 0;
+    overflow: hidden;
+    color: transparent;
+    font-size: 0;
+  }
+
+  .token-btn svg {
+    color: var(--text-secondary);
+  }
 }

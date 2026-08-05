@@ -39,7 +39,7 @@ import { buildToolPath } from './tool-path.js';
 const DEFAULT_TIMEOUT_MS = 120_000;
 
 /** Hard ceiling on the per-command timeout (ms). */
-const MAX_TIMEOUT_MS = 600_000;
+const MAX_TIMEOUT_MS = 900_000;
 
 /** Extra grace for the wrapper itself after it asks the child tree to exit. */
 const WRAPPER_TIMEOUT_GRACE_MS = 10_000;
@@ -47,8 +47,8 @@ const WRAPPER_TIMEOUT_GRACE_MS = 10_000;
 /** Graceful cancellation/timeout window before escalating the owned group. */
 const ASYNC_TERMINATION_GRACE_MS = 5_000;
 
-/** Final bounded window for close events and pipe data after SIGKILL. */
-const ASYNC_TERMINATION_DRAIN_MS = 150;
+/** Final bounded window for group exit, close events, and pipe data after SIGKILL. */
+const ASYNC_TERMINATION_DRAIN_MS = 1_000;
 
 /** Prefix for per-command HOME directories used by verification subprocesses. */
 const VERIFY_HOME_PREFIX = 'ashlr-verify-home-';
@@ -136,6 +136,8 @@ export interface VerifySubprocessResult {
 export interface RunVerifyCommandAsyncOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
+  /** Hermetic test seam; production callers use runVerifySubprocessAsync. */
+  _runSubprocess?: typeof runVerifySubprocessAsync;
 }
 
 // ---------------------------------------------------------------------------
@@ -370,7 +372,7 @@ export function spawnOptionsFor(
 /**
  * Run ONE verification command in `workspaceRoot` (cwd). Arg array, shell only
  * on Windows (see spawnOptionsFor), with a hard timeout (default 120s, capped at
- * 600s). Captures stdout+stderr,
+ * 900s). Captures stdout+stderr,
  * scrubs + caps via renderToolText, and audits the outcome.
  *
  * Never throws — a spawn failure or timeout resolves to { ok:false } with the
@@ -678,7 +680,7 @@ export async function runVerifySubprocessAsync(
 
     function probeOwnedGroup(): 'present' | 'absent' | 'failed' {
       if (ownedPgid === null) return 'absent';
-      if (leaderExited) {
+      if (leaderExited && !hardKillSent) {
         authorityFailure = 'process-group ownership identity lost after leader exit; refusing delayed probe';
         ownedPgid = null;
         return 'failed';
@@ -704,19 +706,6 @@ export async function runVerifySubprocessAsync(
         }));
         return;
       }
-      // SIGKILL was delivered while the original leader still authenticated
-      // the PGID. An escaped setsid/detached descendant is out of scope and may
-      // still hold a copied pipe; bounded resource release below does not claim
-      // that such an escaped process was terminated.
-      if (ownsProcessGroup && leaderExited && hardKillSent) {
-        if (terminationReason === 'cancelled') {
-          settle(emptyResult({ ...output, signal: exitSignal, cancelled: true }));
-          return;
-        }
-        settle(emptyResult({ ...output, exitCode: 124, signal: exitSignal, timedOut: true }));
-        return;
-      }
-
       const groupState = ownsProcessGroup
         ? probeOwnedGroup()
         : (childClosed ? 'absent' : 'present');
@@ -829,8 +818,13 @@ export async function runVerifySubprocessAsync(
       leaderExited = true;
       exitCode = code;
       exitSignal = signal;
-      if (!terminationRequested || hardKillSent) {
+      if (!terminationRequested) {
         ownedPgid = null;
+        return;
+      }
+      if (hardKillSent) {
+        // Keep the authenticated PGID only for the final non-mutating exit
+        // probe. Never send another signal after the leader has exited.
         return;
       }
 
@@ -852,10 +846,6 @@ export async function runVerifySubprocessAsync(
       exitSignal = signal;
 
       if (terminationRequested) {
-        if (leaderExited) {
-          settleTermination();
-          return;
-        }
         beginTerminationDrain();
         return;
       }
@@ -984,7 +974,8 @@ export async function runVerifyCommandAsync(
           Buffer.from(JSON.stringify(vc.cmd), 'utf8').toString('base64'),
         ]
       : vc.cmd;
-    const subprocess = await runVerifySubprocessAsync(argv, {
+    const runSubprocess = opts?._runSubprocess ?? runVerifySubprocessAsync;
+    const subprocess = await runSubprocess(argv, {
       cwd: commandRoot,
       env: useWindowsWrapper
         ? {

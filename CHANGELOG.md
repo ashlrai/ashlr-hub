@@ -11,6 +11,29 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+- **Temporary resident-service authority restriction.** Production service
+  install, reinstall, repair, restart, worker setup, and the service portion of
+  first-run setup now fail closed at a shared deny-only boundary. Existing
+  services retain status and uninstall, and admitted one-shot workflows remain
+  available. Both git and npm update channels block before code replacement
+  for present, unknown, or running service state. Status now combines expected
+  service-file and native-manager evidence into explicit `present`, `absent`, or
+  `unknown` registration state; setup refusal occurs before all config/wizard
+  mutation.
+
+- **External-skill quarantine preview (M444/M446).** Audit reports now expose a
+  version-2 portable tree digest, and a POSIX-only internal Git-object capture
+  can bind that digest into inert, content-addressed private storage. The
+  capture has no runtime consumer or execution/policy/promotion authority;
+  Windows and authenticated custody remain explicitly withheld. Hostile bare
+  repositories are byte-bounded before Git parsing; common-directory redirects,
+  worktree-local/external config, and partial-clone/promisor settings are rejected.
+- **External custody statement verification preview (M447).** A verifier-only
+  Ed25519 protocol checks a retention-bounded statement against a caller-supplied
+  policy over the exact M446 capture tuple. Hub owns no signing or policy-approval
+  path, and successful verification authenticates neither custody nor live
+  storage; every M446 blocker and all execution authority remain withheld.
+
 - **v3 gate opened — Team Command Center spec.** `docs/SPEC-V3-TEAM.md`: the
   hand-written end-state spec for the team / multi-machine backbone (one team
   memory, shared approval inbox with owner-apply routing, coordinated

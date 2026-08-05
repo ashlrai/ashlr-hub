@@ -17,6 +17,7 @@ import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
 
 const docDiff = [
   'diff --git a/README.md b/README.md',
+  'index 1111111..2222222 100644',
   '--- a/README.md',
   '+++ b/README.md',
   '@@ -1 +1 @@',
@@ -27,6 +28,7 @@ const docDiff = [
 
 const packageDiff = [
   'diff --git a/package.json b/package.json',
+  'index 1111111..2222222 100644',
   '--- a/package.json',
   '+++ b/package.json',
   '@@ -1 +1 @@',
@@ -103,6 +105,23 @@ describe('M305 evaluateAutoMergeReadinessPreflight', () => {
     const r = evaluateAutoMergeReadinessPreflight(proposal(), cfg({ maxRisk: 'extreme' }));
     expect(r).toMatchObject({ ready: false, permanent: false });
     expect(r.reason).toMatch(/invalid auto-merge maxRisk/);
+  });
+
+  it('rejects invalid evidence-mode scope caps before the pre-verification success path', () => {
+    const r = evaluateAutoMergeReadinessPreflight(proposal(), cfg({
+      trustBasis: 'evidence',
+      pushToRemote: true,
+      allowWithoutVerification: false,
+      maxAutomergeFiles: Number.MAX_SAFE_INTEGER,
+      protectedRemote: {
+        branchProtection: true,
+        requiredChecks: [{ context: 'ci/test', appId: '15368' }],
+      },
+    }));
+
+    expect(r).toMatchObject({ ready: false, permanent: true });
+    expect(r.reason).toMatch(/evidence preflight: scope cap policy invalid/);
+    expect(r.reason).toMatch(/max-files-exceeds-policy/);
   });
 
   it('reuses authority, provenance, and risk basics as blockers', () => {

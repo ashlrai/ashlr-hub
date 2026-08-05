@@ -21,6 +21,10 @@
 
 import { loadConfig } from '../core/config.js';
 import { setupWizard } from '../core/onboard.js';
+import {
+  assertResidentServiceInstallAuthorized,
+  RESIDENT_SERVICE_ONE_SHOT_GUIDANCE,
+} from '../core/daemon/service-install-authority.js';
 import type { OnboardResult, OnboardStep } from '../core/types.js';
 import { pad, makeColors, isTty } from './ui.js';
 
@@ -76,7 +80,7 @@ function buildSummary(steps: OnboardStep[]): string {
   if (daemonOk) {
     parts.push('daemon installed');
   } else if (daemonStep) {
-    parts.push(yellow('daemon needs setup'));
+    parts.push(yellow('daemon service changes restricted'));
   }
   if (enrollCount !== null) {
     parts.push(`${enrollCount} repo(s) enrolled`);
@@ -94,8 +98,8 @@ function buildSummary(steps: OnboardStep[]): string {
 /**
  * `ashlr setup` — full first-run setup wizard.
  *
- * Returns 0 on success (even if some steps are 'manual' — those are advisory).
- * Returns 1 only when config is broken or a blocking doctor check fails.
+ * Returns 0 only when every blocking setup requirement is ready.
+ * Daemon-service authority denial is blocking and returns 1.
  */
 export async function cmdSetup(args: string[]): Promise<number> {
   const jsonMode  = args.includes('--json');
@@ -108,6 +112,29 @@ export async function cmdSetup(args: string[]): Promise<number> {
   const userName    = userFlagIdx !== -1 ? args[userFlagIdx + 1] : undefined;
   const userIdFlagIdx = args.findIndex((a) => a === '--user-id');
   const userId      = userIdFlagIdx !== -1 ? args[userIdFlagIdx + 1] : undefined;
+
+  try {
+    assertResidentServiceInstallAuthorized();
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    const result: OnboardResult = {
+      steps: [{
+        name: 'daemon-service',
+        status: 'manual',
+        detail: `setup refused before config or wizard work: ${reason}. ${RESIDENT_SERVICE_ONE_SHOT_GUIDANCE}`,
+      }],
+      ready: false,
+      nextSteps: ['try: ashlr daemon start --once'],
+    };
+    if (jsonMode) {
+      process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+    } else {
+      console.error(`  ${red('error:')} ${result.steps[0]?.detail}`);
+      console.log(`  ${red('✗ setup incomplete')}  ${dim('daemon service changes restricted')}`);
+      console.log(`  ${green(result.nextSteps[0] ?? 'try: ashlr daemon start --once')}`);
+    }
+    return 1;
+  }
 
   const cfg = loadConfig();
 

@@ -219,7 +219,29 @@ function summarizeBudgets(cfg: AshlrConfig, fleet: FleetStatus): ResourceStrateg
 }
 
 function fallbackGuard(fleet: FleetStatus, depsGuard?: GuardHealthDiagnosis): GuardHealthDiagnosis {
-  return depsGuard ?? fleet.guardHealth ?? { generatedAt: fleet.generatedAt, blocked: false, blocks: [] };
+  const guard = depsGuard ?? fleet.guardHealth;
+  if (guard) {
+    return guard.sourceQuality
+      ? guard
+      : {
+          ...guard,
+          sourceQuality: {
+            sourceState: 'degraded',
+            complete: false,
+            reasons: ['legacy-guard-health-source'],
+          },
+        };
+  }
+  return {
+    generatedAt: fleet.generatedAt,
+    blocked: true,
+    blocks: [],
+    sourceQuality: {
+      sourceState: 'degraded',
+      complete: false,
+      reasons: ['guard-health-unavailable'],
+    },
+  };
 }
 
 function joinBackends(fleet: FleetStatus, resources: ResourceSnapshot, max: number): ResourceStrategyBackend[] {
@@ -476,6 +498,13 @@ function recommendMode(
   const actions: string[] = [];
 
   if (fleet.killed) reasons.push('kill switch is engaged');
+  if (fleet.killSwitch?.state === 'unknown') reasons.push('kill switch source is uninspectable');
+  if (fleet.daemon.sourceQuality?.sourceState !== 'healthy') {
+    reasons.push('daemon state source is degraded');
+  }
+  if (guard.sourceQuality?.sourceState === 'degraded') {
+    reasons.push('guard health source is degraded');
+  }
   if (guard.blocked) reasons.push(`guard health has ${guard.blocks.length} blocking issue(s)`);
   if (budgets.daemonBudgetLevel === 'over') reasons.push('daemon daily budget is exhausted');
   if (resources.posture === 'depleted') reasons.push('all sensed resource backends are depleted');

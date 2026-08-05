@@ -539,6 +539,34 @@ function readConfigOrDefaults(configPath: string): AshlrConfig {
   return deepMerge(defaultConfig(), parsed as Partial<AshlrConfig>);
 }
 
+function readConfigStrict(configPath: string): AshlrConfig {
+  let raw: string;
+  try {
+    raw = readFileSync(configPath, 'utf8');
+  } catch (error) {
+    throw new Error(
+      `[ashlr] Refusing autonomous activation: could not read config at ${configPath}: ${String(error)}`,
+    );
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(
+      `[ashlr] Refusing autonomous activation: config at ${configPath} is not valid JSON: ${String(error)}`,
+    );
+  }
+
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(
+      `[ashlr] Refusing autonomous activation: config at ${configPath} must contain a JSON object.`,
+    );
+  }
+
+  return deepMerge(defaultConfig(), parsed as Partial<AshlrConfig>);
+}
+
 /**
  * Read config without creating directories, seeding defaults, or repairing
  * state. A missing config resolves to in-memory defaults only.
@@ -546,6 +574,17 @@ function readConfigOrDefaults(configPath: string): AshlrConfig {
 export function loadConfigReadOnly(): AshlrConfig {
   const configPath = resolveConfigPath();
   return existsSync(configPath) ? readConfigOrDefaults(configPath) : defaultConfig();
+}
+
+/**
+ * Activation-only read. Like loadConfigReadOnly(), it never writes, but any
+ * malformed or unreadable existing config is a hard refusal instead of a
+ * fallback to synthetic defaults. A genuinely absent config remains the
+ * documented default configuration.
+ */
+export function loadConfigReadOnlyStrict(): AshlrConfig {
+  const configPath = resolveConfigPath();
+  return existsSync(configPath) ? readConfigStrict(configPath) : defaultConfig();
 }
 
 /**

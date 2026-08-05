@@ -8,17 +8,34 @@
  */
 
 import { createHash } from 'node:crypto';
-import { readAgentActions, type AgentActionSourceQuality } from '../fleet/agent-action-ledger.js';
-import type { DispatchProductionEvent } from '../fleet/dispatch-production-ledger.js';
+import { isDeepStrictEqual } from 'node:util';
 import {
+  readAgentActions,
+  readAgentActionsDetailed,
+  type AgentActionSourceQuality,
+  type AgentActionsReadResult,
+} from '../fleet/agent-action-ledger.js';
+import type {
+  DispatchProductionEvent,
+  DispatchProductionEventsReadResult,
+  DispatchProductionSourceQuality,
+} from '../fleet/dispatch-production-ledger.js';
+import {
+  currentAuthoritativeDispatchProductionLearningLabel,
   readDispatchProductionEvents,
   readDispatchProductionEventsDetailed,
 } from '../fleet/dispatch-production-ledger.js';
 import { readSkillUseEvents } from '../fleet/skill-records.js';
 import type { GeneratedRepairRouteReason } from '../fleet/router.js';
 import { classifyProductionAttemptForLearningWithLabel } from '../learning/attempt-shape.js';
-import type { OutcomeRecord, OutcomeRecordDecision, OutcomeRecordEvidence } from './outcome-records.js';
-import { listOutcomeRecords } from './outcome-records.js';
+import type {
+  OutcomeRecord,
+  OutcomeRecordDecision,
+  OutcomeRecordEvidence,
+  OutcomeRecordsDetailedResult,
+  OutcomeRecordSourceQuality,
+} from './outcome-records.js';
+import { listOutcomeRecordsDetailed } from './outcome-records.js';
 import { loadProposal } from '../inbox/store.js';
 import { hasRealizedMergeEvidence } from '../inbox/realized-merge.js';
 import type {
@@ -41,6 +58,12 @@ import {
   agentSemanticModelFamily,
   sanitizeAgentSemanticEvents,
 } from '../learning/agent-semantic-events.js';
+import {
+  agentWorkTransitionBoundSubjectRef,
+  sanitizeAgentWorkTransitions,
+  type AgentWorkTransitionV1,
+} from '../learning/agent-work-transitions.js';
+import { isOuterAttemptIdentity } from '../fleet/attempt-identity.js';
 
 const DEFAULT_WINDOW_HOURS = 24;
 const DEFAULT_LIMIT = 200;
@@ -73,6 +96,9 @@ export interface TrajectoryTimelineEvent {
   kind: TrajectoryTimelineKind;
   outcome: string;
   action?: string;
+  actor?: string;
+  carrierKind?: string;
+  attemptId?: string;
   proposalId?: string;
   runId?: string;
   trajectoryId?: string;
@@ -83,6 +109,8 @@ export interface TrajectoryTimelineEvent {
   tier?: EngineTier | string | null;
   model?: string | null;
   reason?: string;
+  assignedBy?: string;
+  routeReason?: string;
   routeSnapshot?: RouteSnapshot;
   runEventSummary?: RunEventSummary;
   evidenceOutcome?: EvidenceOutcomeSummary;
@@ -91,6 +119,7 @@ export interface TrajectoryTimelineEvent {
   routerPolicyVersion?: string;
   learningEpoch?: string;
   semanticEvents?: OutcomeRecordDecision['semanticEvents'];
+  workTransitions?: AgentWorkTransitionV1[];
   evidence?: {
     target: string;
     trustBasis: string;
@@ -148,6 +177,8 @@ export interface TrajectoryRecord {
   learningEpoch?: string;
   decisionSourceQuality?: OutcomeRecord['decisionSourceQuality'];
   agentActionSourceQuality?: AgentActionSourceQuality;
+  /** Conflicting terminal aliases were quarantined during reconstruction. */
+  terminalCarrierConflict?: true;
   coverage: TrajectoryRecordCoverage;
   timeline: TrajectoryTimelineEvent[];
 }
@@ -233,18 +264,15 @@ export function suppressDegradedSkillObservation(
     ...status,
     coverage,
     skillObservation: { eventState, sampleState: 'unavailable' },
-    recent: status.recent.map((record) => {
+    ...(status.recent ? { recent: status.recent.map((record) => {
       const { skillUse: _skillUse, ...publicCoverage } = record.coverage;
       return { ...record, coverage: publicCoverage };
-    }),
+    }) } : {}),
   };
 }
 
-type PublishedTrajectoryCoverage = Omit<TrajectoryRecordCoverage, 'skillUse'> & { skillUse?: boolean };
-type PublishedCoverageMetrics = Omit<
-  Record<keyof TrajectoryRecordCoverage, TrajectoryCoverageMetric>,
-  'skillUse'
-> & { skillUse?: TrajectoryCoverageMetric };
+type PublishedTrajectoryCoverage = Partial<TrajectoryRecordCoverage>;
+type PublishedCoverageMetrics = Partial<Record<keyof TrajectoryRecordCoverage, TrajectoryCoverageMetric>>;
 export type TrajectoryTerminalOutcomeCounts = Omit<
   Record<TrajectoryTerminalOutcome, number>,
   'cancelled'
@@ -253,22 +281,31 @@ export type TrajectoryTerminalOutcomeCounts = Omit<
 export interface TrajectoryLearningStatus {
   version: 1;
   windowHours: number;
+  /** Observed dispatch-rooted trajectories; preserved as the V1 denominator. */
   trajectories: number;
-  terminalOutcomes: TrajectoryTerminalOutcomeCounts;
-  realizedOutcomes: Record<TrajectoryRealizedOutcome, number>;
+  /** Diagnostic population accounting; excluded traces never enter learning totals. */
+  population?: {
+    observed: number;
+    learningEligible: number;
+    incomplete: number;
+    degraded: number;
+  };
+  terminalOutcomes?: TrajectoryTerminalOutcomeCounts;
+  realizedOutcomes?: Record<TrajectoryRealizedOutcome, number>;
   coverage: PublishedCoverageMetrics;
-  routeSpine: {
+  routeSpine: Partial<{
     dispatchToDecision: TrajectoryCoverageMetric;
     dispatchToEvidence: TrajectoryCoverageMetric;
     dispatchToMerge: TrajectoryCoverageMetric;
-  };
+  }>;
   /** Bounded action-only preclaim observations, excluded from learning metrics. */
   routeDiagnostics?: TrajectoryRouteDiagnosticSummary;
+  /** Observational skill telemetry, sample-gated separately from outcome eligibility. */
   skillObservation: TrajectorySkillObservationSummary;
   /** Capped, opaque, metadata-only route-to-outcome traces for operators. */
   traces: TrajectoryTraceSummary;
   gaps: Array<{ kind: keyof TrajectoryRecordCoverage; count: number; sampleRefs: string[] }>;
-  recent: Array<{
+  recent?: Array<{
     ref: string;
     latestAt: string;
     terminalOutcome: TrajectoryTerminalOutcome;
@@ -291,6 +328,58 @@ export interface TrajectoryRecordListOptions {
   windowHours?: number;
   limit?: number;
   deps?: TrajectoryRecordReadDeps;
+}
+
+export type TrajectoryJoinEdge =
+  | 'dispatchToProposal'
+  | 'proposalToVerification'
+  | 'verifiedToProtectedRealizedMerge'
+  | 'realizedMergeToPostMerge';
+
+export interface TrajectoryJoinEdgeQuality {
+  denominator: number;
+  joined: number;
+  unjoined: number;
+  conflicting: number;
+  rate?: number;
+  unjoinedSampleRefs: string[];
+  conflictingSampleRefs: string[];
+}
+
+export interface TrajectoryAgentActionJoinQuality extends TrajectoryJoinEdgeQuality {
+  excludedIdentityFree: number;
+}
+
+export interface TrajectoryJoinSourceQuality {
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  sourcePresent: boolean;
+  complete: boolean;
+  sources: {
+    dispatch: DispatchProductionSourceQuality;
+    outcomes: OutcomeRecordSourceQuality;
+    agentActions: AgentActionSourceQuality;
+  };
+}
+
+export interface TrajectoryJoinQualityResult {
+  records: TrajectoryRecord[];
+  sourceQuality: TrajectoryJoinSourceQuality;
+  edges: Record<TrajectoryJoinEdge, TrajectoryJoinEdgeQuality>;
+  agentActions: TrajectoryAgentActionJoinQuality;
+}
+
+export interface TrajectoryJoinQualityDeps {
+  readDispatchProductionEventsDetailed?: typeof readDispatchProductionEventsDetailed;
+  listOutcomeRecordsDetailed?: typeof listOutcomeRecordsDetailed;
+  readAgentActionsDetailed?: typeof readAgentActionsDetailed;
+  loadProposal?: (id: string) => Proposal | null;
+}
+
+export interface TrajectoryJoinQualityOptions {
+  windowHours?: number;
+  limit?: number;
+  sampleLimit?: number;
+  deps?: TrajectoryJoinQualityDeps;
 }
 
 interface MutableTrajectoryRecord extends Omit<TrajectoryRecord, 'timeline'> {
@@ -402,11 +491,13 @@ function alias(namespace: string, value: string | undefined): string | undefined
 }
 
 function aliasesFromIds(input: {
+  attemptId?: string;
   trajectoryId?: string;
   runId?: string;
   proposalId?: string;
 }): string[] {
   return [
+    alias('attempt', input.attemptId),
     !isDerivedWorkTrajectory(input.trajectoryId) ? alias('trajectory', input.trajectoryId) : undefined,
     alias('run', input.runId),
     alias('proposal', input.proposalId),
@@ -594,11 +685,165 @@ function traceEvidence(event: TrajectoryTimelineEvent): TrajectoryTraceEvent['ev
   };
 }
 
+function isNoProposalDispatchOutcome(outcome: string): boolean {
+  return outcome === 'empty-diff' || outcome === 'proposal-disabled';
+}
+
+function terminalNoProposalSummary(
+  summary: RunEventSummary | undefined,
+  runId: string,
+  outcome: string,
+): boolean {
+  if (
+    !summary ||
+    summary.runId !== runId ||
+    summary.outcome !== outcome ||
+    summary.proposalCreated !== false ||
+    summary.proposalId !== undefined
+  ) return false;
+  return outcome === 'empty-diff'
+    ? summary.status === 'done'
+    : summary.status === 'done' || summary.status === 'failed' || summary.status === 'aborted';
+}
+
+interface NoProposalTerminalEnvelope {
+  attemptId: string;
+  repo?: string;
+  itemId?: string;
+  source?: WorkSource;
+  proposalId?: string;
+  trajectoryId: string;
+  runId: string;
+  backend?: EngineId | string | null;
+  tier?: EngineTier | string | null;
+  model?: string | null;
+  assignedBy?: string;
+  routeReason?: string;
+  routeSnapshot?: RouteSnapshot;
+  routerPolicyVersion?: string;
+  learningEpoch?: string;
+  outcome: string;
+  runEventSummary: RunEventSummary;
+}
+
+function causalRouteMetadataCoherent(event: TrajectoryTimelineEvent): boolean {
+  const route = event.routeSnapshot;
+  if (!route) return true;
+  return (route.backend === undefined || event.backend === undefined || route.backend === event.backend) &&
+    (route.tier === undefined || event.tier === undefined || route.tier === event.tier) &&
+    (route.model === undefined || event.model === undefined || route.model === event.model) &&
+    (route.routerPolicyVersion === undefined || event.routerPolicyVersion === undefined ||
+      route.routerPolicyVersion === event.routerPolicyVersion);
+}
+
+function noProposalTerminalEnvelope(
+  dispatch: TrajectoryTimelineEvent,
+): NoProposalTerminalEnvelope | undefined {
+  if (
+    dispatch.kind !== 'dispatch' ||
+    !isOuterAttemptIdentity(dispatch.attemptId) ||
+    dispatch.trajectoryId !== `run:${dispatch.attemptId}` ||
+    dispatch.runId === undefined ||
+    !isNoProposalDispatchOutcome(dispatch.outcome) ||
+    !causalRouteMetadataCoherent(dispatch) ||
+    !terminalNoProposalSummary(dispatch.runEventSummary, dispatch.runId, dispatch.outcome)
+  ) return undefined;
+  return {
+    attemptId: dispatch.attemptId,
+    repo: dispatch.repo,
+    itemId: dispatch.itemId,
+    source: dispatch.source,
+    proposalId: dispatch.proposalId,
+    trajectoryId: dispatch.trajectoryId,
+    runId: dispatch.runId,
+    backend: dispatch.backend,
+    tier: dispatch.tier,
+    model: dispatch.model,
+    assignedBy: dispatch.assignedBy,
+    routeReason: dispatch.routeReason,
+    routeSnapshot: dispatch.routeSnapshot,
+    routerPolicyVersion: dispatch.routerPolicyVersion,
+    learningEpoch: dispatch.learningEpoch,
+    outcome: dispatch.outcome,
+    runEventSummary: dispatch.runEventSummary!,
+  };
+}
+
+function noProposalActionMatchesAuthority(
+  action: TrajectoryTimelineEvent,
+  authority: NoProposalTerminalEnvelope,
+): boolean {
+  return action.actor === 'daemon' &&
+    action.carrierKind === 'dispatch' &&
+    action.action === 'daemon:dispatch' &&
+    action.outcome === 'no-proposal' &&
+    action.repo === authority.repo &&
+    action.itemId === authority.itemId &&
+    action.source === authority.source &&
+    action.proposalId === authority.proposalId &&
+    action.trajectoryId === authority.trajectoryId &&
+    action.runId === authority.runId &&
+    action.backend === authority.backend &&
+    action.tier === authority.tier &&
+    action.model === authority.model &&
+    isDeepStrictEqual(action.routeSnapshot, authority.routeSnapshot) &&
+    action.routerPolicyVersion === authority.routerPolicyVersion &&
+    action.learningEpoch === authority.learningEpoch &&
+    causalRouteMetadataCoherent(action) &&
+    terminalNoProposalSummary(action.runEventSummary, authority.runId, authority.outcome) &&
+    isDeepStrictEqual(action.runEventSummary, authority.runEventSummary);
+}
+
+function isTerminalDispatchCarrier(event: TrajectoryTimelineEvent): boolean {
+  return event.kind === 'agent-action' && (
+    event.outcome === 'no-proposal' ||
+    event.carrierKind === 'dispatch' ||
+    event.action === 'daemon:dispatch'
+  );
+}
+
+function hasExactNoProposalTerminalAction(record: TrajectoryRecord): boolean {
+  const dispatches = record.timeline.filter((event) => event.kind === 'dispatch');
+  const authority = dispatches.length > 0
+    ? noProposalTerminalEnvelope(dispatches[0]!)
+    : undefined;
+  if (!authority) return false;
+  if (!dispatches.every((dispatch) => {
+    const candidate = noProposalTerminalEnvelope(dispatch);
+    return candidate !== undefined && isDeepStrictEqual(candidate, authority);
+  })) return false;
+
+  const terminalActions = record.timeline.filter(isTerminalDispatchCarrier);
+  return terminalActions.length > 0 &&
+    terminalActions.every((action) => noProposalActionMatchesAuthority(action, authority));
+}
+
 function traceSourceState(record: TrajectoryRecord): TrajectoryTrace['sourceState'] {
+  if (record.terminalCarrierConflict) return 'incomplete';
   const qualities = [record.decisionSourceQuality, record.agentActionSourceQuality];
   if (qualities.some((quality) => quality?.sourceState === 'degraded')) return 'degraded';
   if (qualities.some((quality) => quality && (quality.sourceState === 'missing' || !quality.complete))) return 'incomplete';
+  if (record.terminalOutcome === 'no-proposal') {
+    return record.coverage.dispatch && record.coverage.agentAction && hasExactNoProposalTerminalAction(record)
+      ? 'complete'
+      : 'incomplete';
+  }
   return record.coverage.dispatch && record.coverage.proposal && record.coverage.evidence && record.coverage.decision && record.coverage.agentAction
+    ? 'complete'
+    : 'incomplete';
+}
+
+function learningEligibilitySourceState(record: TrajectoryRecord): TrajectoryTrace['sourceState'] {
+  if (record.terminalOutcome === 'no-proposal') return traceSourceState(record);
+  if (record.terminalCarrierConflict) return 'incomplete';
+
+  const quality = record.decisionSourceQuality;
+  if (quality?.sourceState === 'degraded') return 'degraded';
+  if (quality && quality.sourceState !== 'missing' && !quality.complete) {
+    return 'incomplete';
+  }
+
+  return record.coverage.dispatch && record.coverage.proposal
     ? 'complete'
     : 'incomplete';
 }
@@ -763,7 +1008,7 @@ function dispatchTerminalOutcome(event: DispatchProductionEvent): TrajectoryTerm
     itemId: event.itemId,
     title: event.title,
     source: event.source,
-  }, event.learningLabel);
+  }, currentAuthoritativeDispatchProductionLearningLabel(event));
   if (classification.kind === 'cancelled') return 'cancelled';
   if (event.outcome === 'empty-diff' || event.outcome === 'proposal-disabled') return 'no-proposal';
   if (
@@ -809,6 +1054,7 @@ function findOrCreateRecord(
   aliases: string[],
   fallbackKey: string,
   ts: string,
+  onConflict?: (records: MutableTrajectoryRecord[]) => void,
 ): MutableTrajectoryRecord | undefined {
   const existingIds = new Set(
     aliases
@@ -817,7 +1063,14 @@ function findOrCreateRecord(
   );
   // A bridge across established trajectories is contradictory evidence. Keep
   // both mappings intact so later joins can detect and quarantine the conflict.
-  if (existingIds.size > 1) return undefined;
+  if (existingIds.size > 1) {
+    onConflict?.(
+      [...existingIds]
+        .map((recordId) => records.get(recordId))
+        .filter((record): record is MutableTrajectoryRecord => record !== undefined),
+    );
+    return undefined;
+  }
   const [existingId] = existingIds;
   const id = existingId ?? (aliases[0] ?? fallbackKey);
   let record = records.get(id);
@@ -834,7 +1087,11 @@ function findOrCreateRecord(
 }
 
 function noteTimeline(record: MutableTrajectoryRecord, event: TrajectoryTimelineEvent): void {
-  const { semanticEvents: candidateSemanticEvents, ...metadata } = event;
+  const {
+    semanticEvents: candidateSemanticEvents,
+    workTransitions: candidateWorkTransitions,
+    ...metadata
+  } = event;
   const semanticSubjectRef = agentSemanticBoundSubjectRef(candidateSemanticEvents, {
     proposalId: event.proposalId,
     runId: event.runId,
@@ -847,9 +1104,19 @@ function noteTimeline(record: MutableTrajectoryRecord, event: TrajectoryTimeline
         agentSemanticModelFamily(event.model ?? event.backend),
       )
     : undefined;
+  const workTransitionSubjectRef = agentWorkTransitionBoundSubjectRef(candidateWorkTransitions, {
+    runId: event.runId,
+    trajectoryId: event.trajectoryId,
+  });
+  const workTransitions = workTransitionSubjectRef
+    ? sanitizeAgentWorkTransitions(candidateWorkTransitions, workTransitionSubjectRef)
+    : undefined;
   const sanitized = {
     ...sanitizeMetadata(metadata),
     ...(semanticEvents ? { semanticEvents: semanticEvents.map((semanticEvent) => ({ ...semanticEvent })) } : {}),
+    ...(workTransitions
+      ? { workTransitions: workTransitions.map((transition) => ({ ...transition })) }
+      : {}),
   } as TrajectoryTimelineEvent;
   record.timeline.push(sanitized);
   record.startedAt = firstTime(record.startedAt, sanitized.ts);
@@ -962,9 +1229,17 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
   let outcomeReadQuality: TrajectoryTraceReadQuality | undefined;
   let outcomes: OutcomeRecord[];
   try {
-    const read = (deps.listOutcomeRecords ?? listOutcomeRecords)({ limit: Math.max(limit * 3, 100) });
-    outcomes = Array.isArray(read) ? read : [];
-    outcomeReadQuality = (read as OutcomeRecord[] & { sourceQuality?: TrajectoryTraceReadQuality }).sourceQuality;
+    if (deps.listOutcomeRecords) {
+      const read = deps.listOutcomeRecords({ limit: Math.max(limit * 3, 100) });
+      outcomes = Array.isArray(read) ? read : [];
+      outcomeReadQuality = (read as OutcomeRecord[] & {
+        sourceQuality?: TrajectoryTraceReadQuality;
+      }).sourceQuality;
+    } else {
+      const read = listOutcomeRecordsDetailed({ limit: Math.max(limit * 3, 100) });
+      outcomes = read.records;
+      outcomeReadQuality = read.sourceQuality;
+    }
   } catch {
     outcomes = [];
     outcomeReadQuality = failedTraceRead();
@@ -993,6 +1268,11 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
   const agentActionSourceQuality = (actions as typeof actions & {
     sourceQuality?: AgentActionSourceQuality;
   }).sourceQuality;
+  const workTransitionSourceUsable = agentActionSourceQuality === undefined || (
+    agentActionSourceQuality.sourceState === 'healthy' &&
+    agentActionSourceQuality.complete &&
+    (agentActionSourceQuality.workTransitionRejectedRows ?? 0) === 0
+  );
   const skillUses = safeArray(() =>
     (deps.readSkillUseEvents ?? readSkillUseEvents)({
       sinceMs,
@@ -1005,6 +1285,7 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
   const aliasToRecord = new Map<string, string>();
 
   const processDispatch = (event: DispatchProductionEvent): void => {
+    const attemptId = cleanId(event.attemptId, 160);
     const proposalId = cleanId(event.proposalId, 160);
     const runId = cleanId(event.runId, 160);
     const trajectoryId = cleanId(event.trajectoryId, 240);
@@ -1022,9 +1303,14 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
     const record = findOrCreateRecord(
       records,
       aliasToRecord,
-      aliasesFromIds({ trajectoryId, runId, proposalId }),
+      aliasesFromIds({ attemptId, trajectoryId, runId, proposalId }),
       fallbackKey,
       event.ts,
+      (conflictedRecords) => {
+        for (const conflictedRecord of conflictedRecords) {
+          conflictedRecord.terminalCarrierConflict = true;
+        }
+      },
     );
     if (!record) return;
     fillRecordMetadata(record, {
@@ -1057,10 +1343,13 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       backend: event.backend,
       tier: event.tier,
       ...(event.model !== undefined ? { model: event.model } : {}),
+      ...(attemptId ? { attemptId } : {}),
       ...(proposalId ? { proposalId } : {}),
       ...(runId ? { runId } : {}),
       ...(trajectoryId && !isDerivedWorkTrajectory(trajectoryId) ? { trajectoryId } : {}),
       ...(event.reason ? { reason: bounded(event.reason, 180) } : { reason: bounded(event.routeReason, 180) }),
+      assignedBy: bounded(event.assignedBy, 120),
+      routeReason: bounded(event.routeReason, 180),
       ...(event.routeSnapshot ? { routeSnapshot: event.routeSnapshot } : {}),
       ...(event.runEventSummary ? { runEventSummary: event.runEventSummary } : {}),
       ...(event.evidenceOutcome ? { evidenceOutcome: event.evidenceOutcome } : {}),
@@ -1074,8 +1363,12 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
   const processOutcome = (outcome: OutcomeRecord): void => {
     const proposal = outcome.proposal;
     const liveProposal = safeValue(() => (deps.loadProposal ?? loadProposal)(proposal.id));
-    const realizedMerge = liveProposal?.id === proposal.id && liveProposal.status === 'applied' &&
-      hasRealizedMergeEvidence(liveProposal);
+    const realizedMerge = (
+      proposal.status === 'applied' && proposal.realizedMergeSource !== undefined
+    ) || (
+      liveProposal?.id === proposal.id && liveProposal.status === 'applied' &&
+      hasRealizedMergeEvidence(liveProposal)
+    );
     const aliases = aliasesFromIds({
       trajectoryId: proposal.trajectoryId,
       runId: proposal.runId,
@@ -1240,7 +1533,23 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       outcome: action.outcome,
       backend: action.backend,
     });
-    const record = findOrCreateRecord(records, aliasToRecord, aliases, fallbackKey, action.ts);
+    const terminalCarrier = action.outcome === 'no-proposal' ||
+      action.kind === 'dispatch' ||
+      action.action === 'daemon:dispatch';
+    const record = findOrCreateRecord(
+      records,
+      aliasToRecord,
+      aliases,
+      fallbackKey,
+      action.ts,
+      terminalCarrier
+        ? (conflictedRecords) => {
+            for (const conflictedRecord of conflictedRecords) {
+              conflictedRecord.terminalCarrierConflict = true;
+            }
+          }
+        : undefined,
+    );
     if (!record) return;
     fillRecordMetadata(record, {
       repo: action.repo,
@@ -1266,6 +1575,8 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       kind: 'agent-action',
       outcome: action.outcome,
       action: action.action,
+      actor: action.actor,
+      carrierKind: action.kind,
       repo: action.repo,
       itemId: action.itemId,
       source: action.source,
@@ -1284,6 +1595,9 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       routerPolicyVersion: action.routerPolicyVersion,
       learningEpoch: action.learningEpoch,
       ...(action.semanticEvents ? { semanticEvents: action.semanticEvents } : {}),
+      ...(action.workTransitions && workTransitionSourceUsable
+        ? { workTransitions: action.workTransitions }
+        : {}),
     });
   };
 
@@ -1392,12 +1706,443 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
   return result;
 }
 
+function failedDispatchJoinRead(): DispatchProductionEventsReadResult {
+  return {
+    events: [],
+    sourceState: 'degraded',
+    sourcePresent: false,
+    complete: false,
+    stopReasons: ['io-error'],
+    filesRead: 0,
+    datedFilesRead: 0,
+    looseFilesRead: 0,
+    bytesRead: 0,
+    rowsScanned: 0,
+    invalidRows: 0,
+    unreadableFiles: 1,
+  };
+}
+
+function failedAgentActionJoinRead(): AgentActionsReadResult {
+  return {
+    events: [],
+    sourceState: 'degraded',
+    sourcePresent: false,
+    complete: false,
+    stopReasons: ['io-error'],
+    filesRead: 0,
+    bytesRead: 0,
+    rowsScanned: 0,
+    invalidRows: 0,
+    unreadableFiles: 1,
+  };
+}
+
+function failedOutcomeJoinRead(): OutcomeRecordsDetailedResult {
+  const missing = { sourceState: 'degraded' as const, sourcePresent: false, complete: false };
+  return {
+    records: [],
+    sourceQuality: {
+      ...missing,
+      sources: {
+        proposals: {
+          ...missing,
+          stopReasons: ['io-error'],
+          filesDiscovered: 0,
+          filesRead: 0,
+          bytesRead: 0,
+          invalidFiles: 0,
+          unreadableFiles: 1,
+        },
+        decisions: {
+          ...missing,
+          stopReasons: ['io-error'],
+          filesRead: 0,
+          bytesRead: 0,
+          rowsScanned: 0,
+          invalidRows: 0,
+          unreadableFiles: 1,
+        },
+        evidence: {
+          ...missing,
+          filesRead: 0,
+          bytesRead: 0,
+          invalidFiles: 0,
+          unreadableFiles: 1,
+          limitExceeded: false,
+        },
+        postMerge: {
+          ...missing,
+          stopReasons: ['io-error'],
+          filesRead: 0,
+          bytesRead: 0,
+          physicalRows: 0,
+          invalidRows: 0,
+          conflictingEvents: 0,
+          duplicateRows: 0,
+          supersededRows: 0,
+          limitExceeded: false,
+        },
+      },
+    },
+  };
+}
+
+function attachReadQuality<T, Q>(values: T[], quality: Q): T[] {
+  const copy = [...values];
+  Object.defineProperty(copy, 'sourceQuality', { value: quality, enumerable: false });
+  return copy;
+}
+
+function joinSourceHealthy(source: {
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  complete: boolean;
+}): boolean {
+  return source.sourceState === 'healthy' && source.complete;
+}
+
+function combinedJoinSourceQuality(
+  dispatch: DispatchProductionSourceQuality,
+  outcomes: OutcomeRecordSourceQuality,
+  agentActions: AgentActionSourceQuality,
+): TrajectoryJoinSourceQuality {
+  const sources = { dispatch, outcomes, agentActions };
+  const values = Object.values(sources);
+  const sourceState = values.some((source) => source.sourceState === 'degraded' || !source.complete)
+    ? 'degraded'
+    : values.some((source) => source.sourceState === 'missing')
+      ? 'missing'
+      : 'healthy';
+  return {
+    sourceState,
+    sourcePresent: values.every((source) => source.sourcePresent),
+    complete: sourceState === 'healthy' && values.every((source) => source.complete),
+    sources,
+  };
+}
+
+interface MutableJoinEdge {
+  denominator: number;
+  joined: number;
+  unjoined: number;
+  conflicting: number;
+  unjoinedSampleRefs: Set<string>;
+  conflictingSampleRefs: Set<string>;
+}
+
+function emptyJoinEdge(): MutableJoinEdge {
+  return {
+    denominator: 0,
+    joined: 0,
+    unjoined: 0,
+    conflicting: 0,
+    unjoinedSampleRefs: new Set(),
+    conflictingSampleRefs: new Set(),
+  };
+}
+
+function opaqueJoinRef(kind: string, values: Array<string | undefined>): string {
+  return `join:${createHash('sha256')
+    .update(JSON.stringify(['ashlr:trajectory-join-quality:v1', kind, ...values]))
+    .digest('hex')
+    .slice(0, 12)}`;
+}
+
+function noteJoin(
+  edge: MutableJoinEdge,
+  matchCount: number,
+  ref: string,
+  sampleLimit: number,
+): void {
+  edge.denominator++;
+  if (matchCount === 1) {
+    edge.joined++;
+  } else if (matchCount === 0) {
+    edge.unjoined++;
+    if (edge.unjoinedSampleRefs.size < sampleLimit) edge.unjoinedSampleRefs.add(ref);
+  } else {
+    edge.conflicting++;
+    if (edge.conflictingSampleRefs.size < sampleLimit) edge.conflictingSampleRefs.add(ref);
+  }
+}
+
+function finalizeJoinEdge(edge: MutableJoinEdge, publishRate: boolean): TrajectoryJoinEdgeQuality {
+  return {
+    denominator: edge.denominator,
+    joined: edge.joined,
+    unjoined: edge.unjoined,
+    conflicting: edge.conflicting,
+    ...(publishRate && edge.denominator > 0 ? { rate: edge.joined / edge.denominator } : {}),
+    unjoinedSampleRefs: [...edge.unjoinedSampleRefs],
+    conflictingSampleRefs: [...edge.conflictingSampleRefs],
+  };
+}
+
+function joinAliases(values: {
+  proposalId?: string;
+  runId?: string;
+  trajectoryId?: string;
+}): string[] {
+  return aliasesFromIds({
+    proposalId: cleanId(values.proposalId, 160),
+    runId: cleanId(values.runId, 160),
+    trajectoryId: cleanId(values.trajectoryId, 240),
+  });
+}
+
+function indexAliases<T>(
+  values: T[],
+  aliasesOf: (value: T) => string[],
+): Map<string, Set<number>> {
+  const index = new Map<string, Set<number>>();
+  values.forEach((value, position) => {
+    for (const identity of aliasesOf(value)) {
+      const positions = index.get(identity) ?? new Set<number>();
+      positions.add(position);
+      index.set(identity, positions);
+    }
+  });
+  return index;
+}
+
+function aliasMatches(index: Map<string, Set<number>>, aliases: string[]): Set<number> {
+  const matches = new Set<number>();
+  for (const identity of aliases) {
+    for (const position of index.get(identity) ?? []) matches.add(position);
+  }
+  return matches;
+}
+
+function verificationStates(outcome: OutcomeRecord): Set<boolean> {
+  const states = new Set<boolean>();
+  if (outcome.proposal.verifyResult) states.add(outcome.proposal.verifyResult.passed);
+  for (const evidence of outcome.evidencePacks) states.add(evidence.verification.passed);
+  return states;
+}
+
+/**
+ * Build one bounded, read-only join-quality snapshot.
+ *
+ * Counts are exact for the captured source snapshots. Rates are withheld unless
+ * every source that defines the edge denominator is healthy and complete.
+ */
+export function listTrajectoryJoinQuality(
+  opts: TrajectoryJoinQualityOptions = {},
+): TrajectoryJoinQualityResult {
+  const windowHours = opts.windowHours && opts.windowHours > 0
+    ? opts.windowHours
+    : DEFAULT_WINDOW_HOURS;
+  const limit = opts.limit && opts.limit > 0 ? Math.floor(opts.limit) : DEFAULT_LIMIT;
+  const sampleLimit = opts.sampleLimit && opts.sampleLimit > 0
+    ? Math.min(16, Math.floor(opts.sampleLimit))
+    : 8;
+  const sinceMs = Date.now() - windowHours * 60 * 60 * 1000;
+  const deps = opts.deps ?? {};
+
+  let dispatchRead: DispatchProductionEventsReadResult;
+  try {
+    dispatchRead = (deps.readDispatchProductionEventsDetailed ?? readDispatchProductionEventsDetailed)({
+      sinceMs,
+      limit: Math.max(limit * 6, 200),
+      maxFiles: 3,
+    });
+  } catch {
+    dispatchRead = failedDispatchJoinRead();
+  }
+
+  let outcomeRead: OutcomeRecordsDetailedResult;
+  try {
+    outcomeRead = (deps.listOutcomeRecordsDetailed ?? listOutcomeRecordsDetailed)({
+      limit: Math.max(limit * 3, 100),
+    });
+  } catch {
+    outcomeRead = failedOutcomeJoinRead();
+  }
+
+  let actionRead: AgentActionsReadResult;
+  try {
+    actionRead = (deps.readAgentActionsDetailed ?? readAgentActionsDetailed)({
+      sinceMs,
+      limit: Math.max(limit * 4, 200),
+      maxFiles: 3,
+      inspectionOnly: true,
+    });
+  } catch {
+    actionRead = failedAgentActionJoinRead();
+  }
+
+  const dispatchQuality = (({ events: _events, ...quality }) => quality)(dispatchRead);
+  const actionQuality = (({ events: _events, ...quality }) => quality)(actionRead);
+  const dispatches = attachReadQuality(dispatchRead.events, dispatchQuality);
+  const outcomes = attachReadQuality(outcomeRead.records, outcomeRead.sourceQuality);
+  const actions = attachReadQuality(actionRead.events, actionQuality);
+  const records = listTrajectoryRecords({
+    windowHours,
+    limit,
+    deps: {
+      readDispatchProductionEvents: () => dispatches,
+      listOutcomeRecords: () => outcomes,
+      readAgentActions: () => actions,
+      readSkillUseEvents: () => [],
+      ...(deps.loadProposal ? { loadProposal: deps.loadProposal } : {}),
+    },
+  });
+
+  const proposalIndex = indexAliases(outcomeRead.records, (outcome) => joinAliases({
+    proposalId: outcome.proposal.id,
+    runId: outcome.proposal.runId,
+    trajectoryId: outcome.proposal.trajectoryId,
+  }));
+  const trajectoryIndex = indexAliases(
+    records.filter((record) => record.coverage.dispatch || record.coverage.proposal),
+    (record) => joinAliases(record),
+  );
+
+  const dispatchToProposal = emptyJoinEdge();
+  for (const event of dispatchRead.events) {
+    if (event.proposalCreated !== true && event.proposalId === undefined) continue;
+    const aliases = joinAliases(event);
+    const matches = aliasMatches(proposalIndex, aliases);
+    noteJoin(
+      dispatchToProposal,
+      matches.size,
+      opaqueJoinRef('dispatch', [event.trajectoryId, event.runId, event.proposalId, event.ts]),
+      sampleLimit,
+    );
+  }
+
+  const proposalToVerification = emptyJoinEdge();
+  const verifiedOutcomes: OutcomeRecord[] = [];
+  for (const outcome of outcomeRead.records) {
+    const states = verificationStates(outcome);
+    noteJoin(
+      proposalToVerification,
+      states.size,
+      opaqueJoinRef('proposal', [
+        outcome.proposal.trajectoryId,
+        outcome.proposal.runId,
+        outcome.proposal.id,
+      ]),
+      sampleLimit,
+    );
+    if (states.size === 1 && states.has(true)) verifiedOutcomes.push(outcome);
+  }
+
+  const verifiedToProtectedRealizedMerge = emptyJoinEdge();
+  const protectedRealizedOutcomes: OutcomeRecord[] = [];
+  for (const outcome of verifiedOutcomes) {
+    const protectedRealized = outcome.proposal.status === 'applied' &&
+      outcome.proposal.realizedMergeSource === 'github-host';
+    noteJoin(
+      verifiedToProtectedRealizedMerge,
+      protectedRealized ? 1 : 0,
+      opaqueJoinRef('verified', [
+        outcome.proposal.trajectoryId,
+        outcome.proposal.runId,
+        outcome.proposal.id,
+      ]),
+      sampleLimit,
+    );
+    if (protectedRealized) protectedRealizedOutcomes.push(outcome);
+  }
+
+  const realizedMergeToPostMerge = emptyJoinEdge();
+  for (const outcome of protectedRealizedOutcomes) {
+    const outcomes = new Set((outcome.postMergeObservations ?? []).map((row) => row.outcome));
+    noteJoin(
+      realizedMergeToPostMerge,
+      outcomes.size,
+      opaqueJoinRef('realized-merge', [
+        outcome.proposal.trajectoryId,
+        outcome.proposal.runId,
+        outcome.proposal.id,
+      ]),
+      sampleLimit,
+    );
+  }
+
+  const agentActions = emptyJoinEdge();
+  let excludedIdentityFree = 0;
+  for (const action of actionRead.events) {
+    const aliases = joinAliases(action);
+    if (aliases.length === 0) {
+      excludedIdentityFree++;
+      continue;
+    }
+    const matches = aliasMatches(trajectoryIndex, aliases);
+    noteJoin(
+      agentActions,
+      matches.size,
+      opaqueJoinRef('agent-action', [
+        action.trajectoryId,
+        action.runId,
+        action.proposalId,
+        action.ts,
+      ]),
+      sampleLimit,
+    );
+  }
+
+  const proposalHealthy = joinSourceHealthy(outcomeRead.sourceQuality.sources.proposals);
+  const evidenceHealthy = joinSourceHealthy(outcomeRead.sourceQuality.sources.evidence);
+  const postMergeHealthy = joinSourceHealthy(outcomeRead.sourceQuality.sources.postMerge);
+  const dispatchHealthy = joinSourceHealthy(dispatchQuality);
+  const actionHealthy = joinSourceHealthy(actionQuality);
+
+  return {
+    records,
+    sourceQuality: combinedJoinSourceQuality(
+      dispatchQuality,
+      outcomeRead.sourceQuality,
+      actionQuality,
+    ),
+    edges: {
+      dispatchToProposal: finalizeJoinEdge(
+        dispatchToProposal,
+        dispatchHealthy && proposalHealthy,
+      ),
+      proposalToVerification: finalizeJoinEdge(
+        proposalToVerification,
+        proposalHealthy && evidenceHealthy,
+      ),
+      verifiedToProtectedRealizedMerge: finalizeJoinEdge(
+        verifiedToProtectedRealizedMerge,
+        proposalHealthy && evidenceHealthy,
+      ),
+      realizedMergeToPostMerge: finalizeJoinEdge(
+        realizedMergeToPostMerge,
+        proposalHealthy && evidenceHealthy && postMergeHealthy,
+      ),
+    },
+    agentActions: {
+      ...finalizeJoinEdge(
+        agentActions,
+        actionHealthy && dispatchHealthy && proposalHealthy,
+      ),
+      excludedIdentityFree,
+    },
+  };
+}
+
 export function summarizeTrajectoryLearning(
   records: TrajectoryRecord[],
   windowHours = DEFAULT_WINDOW_HOURS,
 ): TrajectoryLearningStatus {
-  const productionRecords = records.filter((record) => record.coverage.dispatch);
+  const observedProductionRecords = records.filter((record) => record.coverage.dispatch);
+  const sourceStates = observedProductionRecords.map((record) => ({
+    record,
+    sourceState: learningEligibilitySourceState(record),
+  }));
+  const productionRecords = sourceStates
+    .filter(({ sourceState }) => sourceState === 'complete')
+    .map(({ record }) => record);
   const denominator = productionRecords.length;
+  const population = {
+    observed: observedProductionRecords.length,
+    learningEligible: denominator,
+    incomplete: sourceStates.filter(({ sourceState }) => sourceState === 'incomplete').length,
+    degraded: sourceStates.filter(({ sourceState }) => sourceState === 'degraded').length,
+  };
   const terminalOutcomes: Record<TrajectoryTerminalOutcome, number> = {
     merged: 0,
     rejected: 0,
@@ -1470,7 +2215,7 @@ export function summarizeTrajectoryLearning(
   const recordDiagnostics = records
     .map((record) => skillObservationDiagnosticsByRecord.get(record))
     .find((diagnostics) => diagnostics !== undefined);
-  const recordObservations = productionRecords
+  const recordObservations = observedProductionRecords
     .map((record) => skillObservationByRecord.get(record))
     .filter((observation): observation is SkillObservationCounts => Boolean(observation));
   const skillObservation = recordObservations.length > 0
@@ -1489,7 +2234,12 @@ export function summarizeTrajectoryLearning(
         conflicting: batchObservation?.conflicting ?? recordDiagnostics?.conflicting ?? 0,
       })
     : (batchObservation ?? emptySkillObservationCounts());
-  const rawObservedTrajectoryCoverage = metric(coverageCounts.skillUse, denominator);
+  const observedSkillCoverageCount = observedProductionRecords
+    .filter((record) => record.coverage.skillUse).length;
+  const rawObservedTrajectoryCoverage = metric(
+    observedSkillCoverageCount,
+    observedProductionRecords.length,
+  );
   const eventState = skillObservation.joined + skillObservation.unjoined + skillObservation.conflicting > 0
     ? 'present'
     : 'none';
@@ -1501,7 +2251,7 @@ export function summarizeTrajectoryLearning(
   const publishSkillMetrics = sampleState === 'observed';
   const observedTrajectoryCoverage = publishSkillMetrics
     ? rawObservedTrajectoryCoverage
-    : metric(0, denominator);
+    : metric(0, observedProductionRecords.length);
   const { skillUse: _privateSkillCoverage, ...publishedCoverage } = coverage;
   const diagnosticRecords = records.filter(isActionOnlyPreclaimRoute);
   const routeReasonCounts = emptyRouteReasonCounts();
@@ -1512,11 +2262,12 @@ export function summarizeTrajectoryLearning(
   return {
     version: 1,
     windowHours,
-    trajectories: denominator,
+    trajectories: observedProductionRecords.length,
+    population,
     terminalOutcomes,
     realizedOutcomes,
     coverage: publishSkillMetrics
-      ? coverage
+      ? { ...coverage, skillUse: rawObservedTrajectoryCoverage }
       : publishedCoverage,
     routeSpine: {
       dispatchToDecision: metric(dispatchToDecision, dispatchDenominator),

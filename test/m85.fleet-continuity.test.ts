@@ -18,6 +18,15 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+vi.mock('../src/core/daemon/activation-permit.js', () => ({
+  consumeDaemonActivationPermit: () => ({
+    authorized: true,
+    required: false,
+    reason: 'test-authorized',
+  }),
+  isDaemonActivationCapability: () => true,
+}));
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -91,6 +100,7 @@ import {
   replayWorkedOutcomeAfterDispatchReceipt,
   recentlyDeclined,
   loadWorkedLedger,
+  loadWorkedLedgerDetailed,
   latestWorkedEventForKeys,
   workedEventIsCooling,
   workedLedgerPath,
@@ -888,6 +898,10 @@ describe('M85 worked-ledger — pure unit', () => {
     // HOME already set to fresh tmpHome — file doesn't exist yet
     expect(() => recentlyDeclined('no-file-item', 1000)).not.toThrow();
     expect(() => loadWorkedLedger()).not.toThrow();
+    expect(loadWorkedLedgerDetailed()).toMatchObject({
+      ledger: { events: [] },
+      sourceQuality: { sourceState: 'missing', sourcePresent: false, complete: false },
+    });
   });
 
   it('never throws when the ledger file is corrupt', () => {
@@ -898,6 +912,13 @@ describe('M85 worked-ledger — pure unit', () => {
     expect(() => loadWorkedLedger()).not.toThrow();
     // loadWorkedLedger should return a fresh empty ledger
     expect(loadWorkedLedger().events).toEqual([]);
+    expect(loadWorkedLedgerDetailed()).toMatchObject({
+      ledger: { events: [] },
+      sourceQuality: {
+        sourceState: 'degraded', sourcePresent: true, complete: false,
+        reasons: ['invalid-ledger'],
+      },
+    });
   });
 
   it('returns a fresh ledger without reading an oversized worked file', () => {

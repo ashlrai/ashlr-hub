@@ -108,6 +108,11 @@ vi.mock('../src/core/config.js', async (importOriginal) => {
       if (_configDir) process.env.HOME = dirname(_configDir);
       try { return real.loadConfigReadOnly(); } finally { process.env.HOME = savedHome; }
     },
+    loadConfigReadOnlyStrict(): ReturnType<typeof real.loadConfigReadOnlyStrict> {
+      const savedHome = process.env.HOME;
+      if (_configDir) process.env.HOME = dirname(_configDir);
+      try { return real.loadConfigReadOnlyStrict(); } finally { process.env.HOME = savedHome; }
+    },
     saveConfig(c: Parameters<typeof real.saveConfig>[0]): void {
       const savedHome = process.env.HOME;
       if (_configDir) process.env.HOME = dirname(_configDir);
@@ -120,7 +125,7 @@ vi.mock('../src/core/config.js', async (importOriginal) => {
 // After the mock is registered, import the (mocked) module under test.
 // ---------------------------------------------------------------------------
 import {
-  defaultConfig, loadConfig, loadConfigReadOnly, saveConfig,
+  defaultConfig, loadConfig, loadConfigReadOnly, loadConfigReadOnlyStrict, saveConfig,
 } from '../src/core/config.js';
 import type { AshlrConfig } from '../src/core/types.js';
 
@@ -350,6 +355,60 @@ describe('loadConfigReadOnly — observational reads', () => {
     expect(cfg.version).toBe(defaultConfig().version);
     expect(readFileSync(cfgPath, 'utf8')).toBe(bytes);
     expect(warning).toHaveBeenCalledOnce();
+  });
+});
+
+describe('loadConfigReadOnlyStrict — autonomous activation reads', () => {
+  let tmpHome: string;
+  const origHome = process.env.HOME;
+
+  beforeEach(() => {
+    tmpHome = makeTmpHome();
+    useTmpHome(tmpHome);
+  });
+
+  afterEach(() => {
+    cleanup(tmpHome);
+    process.env.HOME = origHome;
+    _configDir = '';
+    _configPath = '';
+    _indexPath = '';
+  });
+
+  it('returns defaults without writing when config.json is absent', () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+
+    const cfg = loadConfigReadOnlyStrict();
+
+    expect(cfg.version).toBe(defaultConfig().version);
+    expect(existsSync(ashlrDir)).toBe(false);
+  });
+
+  it('deep-merges a valid existing object without changing its bytes', () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const cfgPath = join(ashlrDir, 'config.json');
+    mkdirSync(ashlrDir, { recursive: true });
+    const bytes = '{"version":1,"editor":"vscode","foundry":{"autoMerge":{"enabled":false}}}\n';
+    writeFileSync(cfgPath, bytes);
+
+    const cfg = loadConfigReadOnlyStrict();
+
+    expect(cfg.foundry?.autoMerge?.enabled).toBe(false);
+    expect(readFileSync(cfgPath, 'utf8')).toBe(bytes);
+  });
+
+  it.each([
+    ['{malformed', 'not valid JSON'],
+    ['[]', 'must contain a JSON object'],
+    ['null', 'must contain a JSON object'],
+  ])('refuses an invalid existing config without changing it', (bytes, expected) => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const cfgPath = join(ashlrDir, 'config.json');
+    mkdirSync(ashlrDir, { recursive: true });
+    writeFileSync(cfgPath, bytes);
+
+    expect(() => loadConfigReadOnlyStrict()).toThrow(expected);
+    expect(readFileSync(cfgPath, 'utf8')).toBe(bytes);
   });
 });
 

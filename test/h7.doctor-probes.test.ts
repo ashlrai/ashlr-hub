@@ -246,7 +246,7 @@ describe('h7 doctor probes — 5 NEW read-only checks', () => {
     expect(liveProbe?.detail).toContain(String(process.pid));
   }, DOCTOR_PROBE_TIMEOUT_MS);
 
-  it("runDoctor includes a 'kill-switch' probe; OFF ⇒ pass, ON ⇒ warn", async () => {
+  it("runDoctor includes a 'kill-switch' probe; OFF ⇒ pass, ON ⇒ warn, degraded ⇒ fail", async () => {
     expect.hasAssertions();
     fx = makeFixture();
     stubModelUp(false);
@@ -265,6 +265,15 @@ describe('h7 doctor probes — 5 NEW read-only checks', () => {
     expect(onProbe?.status).toBe('warn');
     expect(onProbe?.detail).toMatch(/on/i);
     expect(onProbe?.fix).toBeDefined();
+
+    fx.setKill(false);
+    mkdirSync(join(fx.ashlrDir, 'KILL'));
+    const degraded = await runDoctor(cfg());
+    const degradedProbe = probe(degraded, 'kill-switch');
+    expect(degradedProbe?.status).toBe('fail');
+    expect(degradedProbe?.detail).toMatch(/degraded/i);
+    expect(degradedProbe?.detail).toMatch(/unsafe/i);
+    expect(degradedProbe?.fix).toBeDefined();
   }, DOCTOR_PROBE_TIMEOUT_MS);
 
   it("runDoctor includes an 'ashlr-writeable' probe; writeable ⇒ pass", async () => {

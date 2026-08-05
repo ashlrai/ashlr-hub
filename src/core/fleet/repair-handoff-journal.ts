@@ -36,6 +36,11 @@ import { isSafeExecutionIdentity } from './attempt-identity.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
 import { assurePrivateStoragePath, type PrivateStorageMode } from '../util/private-storage.js';
 import { fsyncDirectory as fsyncDirectoryDurably } from '../util/durability.js';
+import {
+  agentWorkTransitionSubjectRef,
+  defineAgentWorkTransitions,
+  type AgentWorkTransitionV1,
+} from '../learning/agent-work-transitions.js';
 
 const MAX_FILE_BYTES = 256 * 1024 * 1024;
 const MAX_RECORDS = 100_000;
@@ -1302,4 +1307,38 @@ export function dispatchEventFromRepairHandoff(
         }
       : {}),
   };
+}
+
+/**
+ * Observation-only adapter for a repair handoff. The child work subject is a
+ * deterministic opaque trajectory and the durable parent remains explicit.
+ * This metadata never establishes queue, dispatch, verification, or merge authority.
+ */
+export function agentWorkTransitionsFromRepairHandoff(
+  observation: RepairHandoffObservation,
+): AgentWorkTransitionV1[] {
+  try {
+    if (!validObservation(observation)) return [];
+    const parentSubjectRef = observation.parentRunId
+      ? agentWorkTransitionSubjectRef('run', observation.parentRunId)
+      : observation.parentTrajectoryId
+        ? observation.parentTrajectoryId.startsWith('run:')
+          ? agentWorkTransitionSubjectRef('run', observation.parentTrajectoryId.slice(4))
+          : agentWorkTransitionSubjectRef('trajectory', observation.parentTrajectoryId)
+        : undefined;
+    if (!parentSubjectRef) return [];
+    const subjectRef = agentWorkTransitionSubjectRef(
+      'trajectory',
+      `repair:${observation.generationId}`,
+    );
+    return defineAgentWorkTransitions(subjectRef, [{
+      phase: 'handoff',
+      transition: 'handoff',
+      trigger: observation.kind === 'capture-repair' ? 'capture-blocked' : 'empty-diff',
+      parentSubjectRef,
+      observedAt: new Date(Date.parse(observation.ts)).toISOString(),
+    }]);
+  } catch {
+    return [];
+  }
 }

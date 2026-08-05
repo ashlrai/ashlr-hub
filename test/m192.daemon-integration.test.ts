@@ -36,6 +36,15 @@
 import { resolve } from 'node:path';
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+vi.mock('../src/core/daemon/activation-permit.js', () => ({
+  consumeDaemonActivationPermit: () => ({
+    authorized: true,
+    required: false,
+    reason: 'test-authorized',
+  }),
+  isDaemonActivationCapability: () => true,
+}));
 import type {
   AshlrConfig,
   LocalDefaultBranchRealizedMerge,
@@ -95,6 +104,13 @@ vi.mock('../src/core/generative/invent-cycle.js', () => ({
 const mockRunCounterfactualReplay = vi.fn();
 vi.mock('../src/core/fleet/counterfactual.js', () => ({
   runCounterfactualReplay: (...args: unknown[]) => mockRunCounterfactualReplay(...args),
+}));
+
+const mockRunDetachedPostMergeOrchestrator = vi.fn();
+vi.mock('../src/core/fleet/detached-post-merge-orchestrator.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/core/fleet/detached-post-merge-orchestrator.js')>(),
+  runDetachedPostMergeOrchestrator: (...args: unknown[]) =>
+    mockRunDetachedPostMergeOrchestrator(...args),
 }));
 
 const mockDetectRegression = vi.fn();
@@ -185,6 +201,7 @@ beforeEach(() => {
   mockRunViaAshlrcode.mockReset();
   mockRunInventCycle.mockReset();
   mockRunCounterfactualReplay.mockReset();
+  mockRunDetachedPostMergeOrchestrator.mockReset();
   mockDetectRegression.mockReset();
   mockBisectAndRevert.mockReset();
   mockObservePostMergeStability.mockReset();
@@ -228,6 +245,12 @@ beforeEach(() => {
 
   // runCounterfactualReplay: success.
   mockRunCounterfactualReplay.mockResolvedValue({ replayed: 0, proposals: [] });
+
+  mockRunDetachedPostMergeOrchestrator.mockResolvedValue({
+    authority: 'observation-only',
+    disposition: 'idle',
+    reason: 'no-eligible-candidates',
+  });
 
   // detectRegression: no regression by default.
   mockDetectRegression.mockResolvedValue({ regressed: false, details: [] });
@@ -493,6 +516,37 @@ describe('M192 / M186 — generative invent cycle: flag ON → runInventCycle', 
 
     expect(result.reason).toBe('dry-run');
     expect(mockRunInventCycle).not.toHaveBeenCalled();
+  });
+});
+
+describe('M472 — detached post-merge observation scheduling', () => {
+  it('keeps detached repo execution off the daemon tick even when legacy flags are enabled', async () => {
+    enrollBuiltinRepo();
+    mockRunDetachedPostMergeOrchestrator.mockImplementation(() => new Promise(() => undefined));
+    const startedAt = Date.now();
+
+    const result = await tick(makeCfg({
+      foundry: {
+        detachedPostMergeVerification: true,
+        detachedPostMergeScheduling: true,
+      } as unknown as AshlrConfig['foundry'],
+    }), { dryRun: false });
+
+    expect(result.reason).toBe('ok');
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(mockRunDetachedPostMergeOrchestrator).not.toHaveBeenCalled();
+  });
+
+  it('does not run during dry-run or with no detached scheduling configuration', async () => {
+    enrollBuiltinRepo();
+    const controller = new AbortController();
+    controller.abort();
+
+    await tick(makeCfg({}), { dryRun: true });
+    expect(mockRunDetachedPostMergeOrchestrator).not.toHaveBeenCalled();
+
+    await tick(makeCfg({}), { dryRun: false, signal: controller.signal });
+    expect(mockRunDetachedPostMergeOrchestrator).not.toHaveBeenCalled();
   });
 });
 

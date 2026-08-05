@@ -2018,7 +2018,14 @@ describe('generated repair lifecycle store', () => {
     const item = repairItem();
     const event = ordinaryProposalEvent(item, ATTEMPT_ONE, 'prop-run-binding');
     persistDurableProposal(item, event);
-    const mismatchedEvent = { ...event, runId: 'different-durable-run' };
+    const mismatchedEvent = {
+      ...event,
+      runId: 'different-durable-run',
+      runEventSummary: {
+        ...event.runEventSummary!,
+        runId: 'different-durable-run',
+      },
+    };
     expect(recordDispatchProduction(mismatchedEvent)).toEqual({
       attempted: 1, recorded: 1, failed: 0,
     });

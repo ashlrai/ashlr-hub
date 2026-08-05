@@ -22,6 +22,8 @@ import { recordDecision } from './decisions-ledger.js';
 import { judgeDecisionReasonCode } from './judge-decision-metadata.js';
 import { recordJudgeTrace } from './judge-trace.js';
 import { hashDiff, signJudgeAttestation } from '../foundry/provenance.js';
+import { resolveAutoMergeScopePolicy } from '../foundry/automerge-scope-policy.js';
+import { measureAutoMergeDiffScopeForGate } from '../foundry/automerge-diff-scope.js';
 import { computeQualityMetrics } from './quality-metrics.js';
 import { renderPlaybook } from '../vision/playbook.js';
 import { engineInstalled, buildEngineCommand, spawnEngine } from '../run/engines.js';
@@ -166,35 +168,6 @@ export interface ManagerReport {
   narrative: string;
   /** Model id used as the judge (e.g. 'claude-opus-4-5' or 'local'). */
   judgeEngine: string;
-}
-
-// ---------------------------------------------------------------------------
-// Diff helpers
-// ---------------------------------------------------------------------------
-
-/** Count changed lines in a unified diff (+/- lines, excluding +++ / ---). */
-function countDiffLines(diff: string | undefined): number {
-  if (!diff) return 0;
-  let n = 0;
-  for (const line of diff.split('\n')) {
-    if ((line.startsWith('+') && !line.startsWith('+++')) ||
-        (line.startsWith('-') && !line.startsWith('---'))) {
-      n++;
-    }
-  }
-  return n;
-}
-
-/** Count rough file count from diff headers (`--- a/...` or `+++ b/...`). */
-function countDiffFiles(diff: string | undefined): number {
-  if (!diff) return 0;
-  const set = new Set<string>();
-  for (const line of diff.split('\n')) {
-    if (line.startsWith('--- a/') || line.startsWith('+++ b/')) {
-      set.add(line.slice(6));
-    }
-  }
-  return set.size;
 }
 
 /** Truncate diff to ~6KB for the judge prompt. */
@@ -554,6 +527,7 @@ function autoMergeBounds(cfg: AshlrConfig): {
   maxRisk: 'low' | 'medium' | 'high';
   maxFiles: number;
   maxLines: number;
+  scopePolicyValid: boolean;
 } {
   const autoMerge =
     ((cfg.foundry as Record<string, unknown> | undefined)?.['autoMerge'] as
@@ -563,15 +537,13 @@ function autoMergeBounds(cfg: AshlrConfig): {
     autoMerge['maxRisk'] === 'medium' || autoMerge['maxRisk'] === 'high'
       ? autoMerge['maxRisk']
       : 'low';
-  const maxFiles =
-    typeof autoMerge['maxAutomergeFiles'] === 'number' && autoMerge['maxAutomergeFiles'] >= 1
-      ? Math.floor(autoMerge['maxAutomergeFiles'])
-      : 4;
-  const maxLines =
-    typeof autoMerge['maxAutomergeLines'] === 'number' && autoMerge['maxAutomergeLines'] >= 1
-      ? Math.floor(autoMerge['maxAutomergeLines'])
-      : 150;
-  return { maxRisk, maxFiles, maxLines };
+  const scopePolicy = resolveAutoMergeScopePolicy(autoMerge);
+  return {
+    maxRisk,
+    maxFiles: scopePolicy.ok ? scopePolicy.policy.maxFiles : 0,
+    maxLines: scopePolicy.ok ? scopePolicy.policy.maxLines : 0,
+    scopePolicyValid: scopePolicy.ok,
+  };
 }
 
 /**
@@ -682,13 +654,14 @@ export async function judgeProposal(
     try {
       const { classifyRisk } = await import('../inbox/merge.js');
       const risk = classifyRisk(proposal);
-      const diffLines = countDiffLines(proposal.diff);
-      const diffFiles = countDiffFiles(proposal.diff);
+      const diffScope = measureAutoMergeDiffScopeForGate(proposal.diff);
       const bounds = autoMergeBounds(cfg);
       wouldMerge =
+        diffScope.ok &&
+        bounds.scopePolicyValid &&
         RISK_ORDER[risk] <= RISK_ORDER[bounds.maxRisk] &&
-        diffFiles <= bounds.maxFiles &&
-        diffLines <= bounds.maxLines;
+        diffScope.files <= bounds.maxFiles &&
+        diffScope.lines <= bounds.maxLines;
     } catch {
       wouldMerge = false;
     }

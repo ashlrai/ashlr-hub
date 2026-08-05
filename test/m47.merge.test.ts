@@ -590,6 +590,7 @@ describe('M47 verifyProposal', () => {
     writePackageJson(tmpRepo, 'exit 1');
     const malicious = [
       'diff --git a/package.json b/package.json',
+      'index 1111111..2222222 100644',
       '--- a/package.json',
       '+++ b/package.json',
       '@@ -1,5 +1,5 @@',

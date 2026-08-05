@@ -74,6 +74,15 @@ export interface LocalStoreLock {
   readonly ino: number;
 }
 
+export type LocalStoreLockAcquireResult =
+  | { state: 'acquired'; lock: LocalStoreLock }
+  | { state: 'contended' | 'unavailable'; lock: null };
+
+export interface LocalStoreLockAcquireOptions {
+  anchorPath?: string;
+  exactPrivateStorage?: boolean;
+}
+
 const acquiredLocks = new WeakSet<object>();
 const acquiredLockDirectories = new WeakMap<object, LockDirectory>();
 const retainedReleases = new Map<string, LocalStoreLock>();
@@ -890,6 +899,57 @@ function contendedOwnerState(path: string): 'absent' | 'alive' | 'dead' | 'initi
   }
 }
 
+function hasVerifiedLiveOwner(path: string, directory: LockDirectory): boolean {
+  let fd: number | undefined;
+  try {
+    const named = inspectExistingLockFile(path, [1, 2], directory);
+    if (!named) return false;
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const opened = fstatSync(fd);
+    if (!sameFile(named, opened) || opened.nlink !== named.nlink || opened.size < 2 || opened.size > 512) {
+      return false;
+    }
+    const bytes = Buffer.alloc(opened.size);
+    if (readSync(fd, bytes, 0, bytes.length, 0) !== bytes.length) return false;
+    const owner = JSON.parse(bytes.toString('utf8')) as {
+      pid?: unknown;
+      token?: unknown;
+      startRef?: unknown;
+      startRefVerified?: unknown;
+      startRefSource?: unknown;
+    };
+    if (
+      typeof owner.pid !== 'number' || !Number.isSafeInteger(owner.pid) || owner.pid < 1 ||
+      typeof owner.token !== 'string' || owner.token.length < 1 || owner.token.length > 64 ||
+      typeof owner.startRef !== 'string' || owner.startRef.length < 1 || owner.startRef.length > 256 ||
+      owner.startRefVerified !== true || typeof owner.startRefSource !== 'string'
+    ) return false;
+    const canonical = `${JSON.stringify({
+      pid: Number(owner.pid),
+      token: owner.token,
+      startRef: owner.startRef,
+      startRefVerified: true,
+      startRefSource: owner.startRefSource,
+    })}\n`;
+    if (bytes.toString('utf8') !== canonical) return false;
+    try { process.kill(Number(owner.pid), 0); } catch { return false; }
+    const recordedStart = canonicalStartEpochSecond(owner.startRef, owner.startRefSource);
+    const observedStart = verifiedProcessStartIdentity(owner.pid);
+    if (recordedStart === undefined || !observedStart ||
+      Math.abs(recordedStart - observedStart.epochSecond) > 1) return false;
+    return hasExpectedToken(
+      path,
+      { ...named, token: owner.token },
+      named.nlink,
+      directory,
+    );
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* best effort */ } }
+  }
+}
+
 function acquireReclaimElection(
   path: string,
   start: AuthorityStartIdentity,
@@ -980,11 +1040,13 @@ function acquireReclaimElection(
   }
 }
 
-export function acquireLocalStoreLock(
+function acquireLocalStoreLockInternal(
   path: string,
   waitMs = 2_000,
-  options: { anchorPath?: string; exactPrivateStorage?: boolean } = {},
+  options: LocalStoreLockAcquireOptions = {},
+  terminal: { state: 'contended' | 'unavailable' } | null,
 ): LocalStoreLock | null {
+  if (terminal) terminal.state = 'unavailable';
   const start = currentStartIdentity();
   if (!start) return null;
   const deadline = performance.now() + waitMs;
@@ -1000,11 +1062,20 @@ export function acquireLocalStoreLock(
   let authorityAttempted = false;
   let postDeadReclaimInstallAvailable = false;
   let postDeadReclaimInstallConsumed = false;
+  const terminalFailure = (): null => {
+    if (!terminal) return null;
+    const terminalDirectory = directory ??
+      assureLockDirectory(dir, anchor, options.exactPrivateStorage === true);
+    terminal.state = terminalDirectory && hasVerifiedLiveOwner(path, terminalDirectory)
+      ? 'contended'
+      : 'unavailable';
+    return null;
+  };
   while (true) {
     const observedState = contendedOwnerState(path);
     if (observedState !== 'absent' && observedState !== 'dead') {
       sawContention = true;
-      if (performance.now() >= deadline) return null;
+      if (performance.now() >= deadline) return terminalFailure();
       Atomics.wait(SLEEP, 0, 0, 10);
       continue;
     }
@@ -1012,12 +1083,16 @@ export function acquireLocalStoreLock(
     const mayInstallAfterDeadReclaim =
       postDeadReclaimInstallAvailable && observedState === 'absent';
     if (sawContention && performance.now() >= deadline &&
-      (observedState !== 'dead' || authorityAttempted) && !mayInstallAfterDeadReclaim) return null;
+      (observedState !== 'dead' || authorityAttempted) && !mayInstallAfterDeadReclaim) {
+      return terminalFailure();
+    }
     if (!directory) {
       directory = assureLockDirectory(dir, anchor, options.exactPrivateStorage === true);
       if (!directory) return null;
       if (sawContention && performance.now() >= deadline &&
-        (observedState !== 'dead' || authorityAttempted) && !mayInstallAfterDeadReclaim) return null;
+        (observedState !== 'dead' || authorityAttempted) && !mayInstallAfterDeadReclaim) {
+        return terminalFailure();
+      }
     }
     authorityAttempted = true;
 
@@ -1079,11 +1154,11 @@ export function acquireLocalStoreLock(
         else removeEmptyCandidate(candidate, candidateIdentity, directory);
       }
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return null;
-      if (usedPostDeadReclaimInstall && performance.now() >= deadline) return null;
+      if (usedPostDeadReclaimInstall && performance.now() >= deadline) return terminalFailure();
       try {
         const stat = inspectExistingLockFile(path, [1, 2], directory);
         if (!stat) {
-          if (performance.now() >= deadline) return null;
+          if (performance.now() >= deadline) return terminalFailure();
           Atomics.wait(SLEEP, 0, 0, 10);
           continue;
         }
@@ -1134,10 +1209,30 @@ export function acquireLocalStoreLock(
           }
         }
       } catch { /* changing path; retry within bounded deadline */ }
-      if (performance.now() >= deadline) return null;
+      if (performance.now() >= deadline) return terminalFailure();
       Atomics.wait(SLEEP, 0, 0, 10);
     }
   }
+}
+
+export function acquireLocalStoreLockWithOutcome(
+  path: string,
+  waitMs = 2_000,
+  options: LocalStoreLockAcquireOptions = {},
+): LocalStoreLockAcquireResult {
+  const terminal: { state: 'contended' | 'unavailable' } = { state: 'unavailable' };
+  const lock = acquireLocalStoreLockInternal(path, waitMs, options, terminal);
+  return lock
+    ? { state: 'acquired', lock }
+    : { state: terminal.state, lock: null };
+}
+
+export function acquireLocalStoreLock(
+  path: string,
+  waitMs = 2_000,
+  options: LocalStoreLockAcquireOptions = {},
+): LocalStoreLock | null {
+  return acquireLocalStoreLockInternal(path, waitMs, options, null);
 }
 
 export function ownsLocalStoreLock(lock: LocalStoreLock | null | undefined): boolean {

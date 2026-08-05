@@ -12,19 +12,23 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 import type { AshlrConfig, DaemonTick, EngineId, Goal, WorkItem } from '../src/core/types.js';
 import {
+  buildAutoMergeCanaryPromotionReadiness,
   buildFleetStatus,
   buildRepairHandoffRolloutStatus,
   repairHandoffProjectionTick,
   buildSkillCorpusReadiness,
+  projectPostMergeComposite,
   type FleetStatus,
   type FleetReadinessSourceQuality,
 } from '../src/core/fleet/status.js';
 import { formatFleetStatus } from '../src/cli/fleet.js';
+import { buildProposalFunnelObservability } from '../src/core/fleet/proposal-funnel-observability.js';
 import { buildFleetLaneLocks } from '../src/core/fleet/lane-lock.js';
 import { buildContextEfficiencyStatus } from '../src/core/fleet/context-efficiency.js';
 import { ROUTER_POLICY_VERSION } from '../src/core/learning/causal.js';
@@ -41,10 +45,18 @@ import {
   signLocalRealizedMergeReceipt,
   signProvenance,
 } from '../src/core/foundry/provenance.js';
-import { recordDispatchProduction, type DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
+import {
+  dispatchProductionRunStatusForOutcome,
+  recordDispatchProduction as recordDispatchProductionRaw,
+  type DispatchProductionEvent,
+} from '../src/core/fleet/dispatch-production-ledger.js';
 import { recordDispatchManifest } from '../src/core/fleet/dispatch-manifest.js';
 import { recordBestOfN } from '../src/core/fleet/best-of-n-ledger.js';
-import { recordAgentAction, type AgentActionEvent } from '../src/core/fleet/agent-action-ledger.js';
+import {
+  agentActionsDir,
+  recordAgentAction,
+  type AgentActionEvent,
+} from '../src/core/fleet/agent-action-ledger.js';
 import { recordDecision } from '../src/core/fleet/decisions-ledger.js';
 import { recordOutcome } from '../src/core/fleet/worked-ledger.js';
 import {
@@ -53,6 +65,10 @@ import {
   recordGeneratedRepairLifecycle,
 } from '../src/core/fleet/generated-repair-lifecycle.js';
 import * as fleetRouter from '../src/core/fleet/router.js';
+import {
+  LEARNED_ROUTING_MIN_SAMPLES,
+  recommendRoute,
+} from '../src/core/run/learned-router.js';
 import {
   readRepairHandoffs,
   recordRepairHandoffs,
@@ -67,9 +83,13 @@ import {
 import { attestSkillCard } from '../src/core/fleet/skill-attestation.js';
 import { armDaemonSpendGuard, clearDaemonSpendGuard } from '../src/core/daemon/state.js';
 import { writeDaemonActivity } from '../src/core/daemon/activity.js';
+import * as activationPermit from '../src/core/daemon/activation-permit.js';
 import { loadQueuedAutonomyItemsDetailed } from '../src/core/portfolio/queued-autonomy.js';
 import type { Proposal } from '../src/core/types.js';
 import * as inboxMerge from '../src/core/inbox/merge.js';
+import type { PostMergeObservationReadResult } from '../src/core/fleet/post-merge-observations.js';
+import { postMergeObservationLedgerPath } from '../src/core/fleet/post-merge-observations.js';
+import type { PostMergeStabilityReadResult } from '../src/core/fleet/post-merge-stability.js';
 
 function git(repo: string, args: string[]): string {
   return execFileSync('git', ['-C', repo, ...args], {
@@ -172,6 +192,42 @@ function withFoundry(foundry: NonNullable<AshlrConfig['foundry']>): AshlrConfig 
   return { ...baseConfig(), foundry };
 }
 
+function actionAuthorityProjection(status: FleetStatus): unknown {
+  return {
+    nextActions: status.nextActions,
+    readinessVerdict: status.autonomousShipReadiness?.verdict,
+    topBlocker: status.autonomousShipReadiness?.topBlocker,
+    primaryAction: status.autonomousShipReadiness?.primaryAction,
+    missionAction: status.missionBrief?.action,
+    missionDirective: status.missionBrief?.directive,
+    persistentPlaybookCommands: (status.nextActions ?? [])
+      .flatMap((action) => action.commands ?? [])
+      .filter((command) => command.argv.includes('--persist')),
+  };
+}
+
+async function operationalAuthorityProjection(
+  status: FleetStatus,
+  cfg: AshlrConfig,
+  item: WorkItem,
+): Promise<unknown> {
+  return {
+    nextActions: status.nextActions,
+    primaryAction: status.autonomousShipReadiness?.primaryAction,
+    missionDirective: status.missionBrief?.directive,
+    persistentCommands: (status.nextActions ?? [])
+      .flatMap((action) => action.commands ?? [])
+      .filter((command) => command.argv.includes('--persist')),
+    cooldowns: {
+      cooldownItems: status.queue.cooldownItems,
+      pendingItems: status.queue.pendingItems,
+      nextEligibleAt: status.queue.nextEligibleAt,
+    },
+    router: fleetRouter.routeBackend(item, cfg),
+    learnedRouter: await recommendRoute(item, cfg),
+  };
+}
+
 function withRoutableMid(foundry: NonNullable<AshlrConfig['foundry']> = {}): AshlrConfig {
   return withFoundry({
     ...foundry,
@@ -241,6 +297,51 @@ async function withFakeNow<T>(now: Date, fn: () => Promise<T>): Promise<T> {
   }
 }
 
+function settledLearningTimestamp(): string {
+  return new Date(Date.now() - 5 * 60 * 1000).toISOString();
+}
+
+function testAttemptId(event: DispatchProductionEvent): string {
+  const digest = createHash('sha256')
+    .update(`${event.itemId}\0${event.runId ?? ''}\0${event.ts}`)
+    .digest('hex');
+  return `attempt-${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+}
+
+function canonicalDispatchFixture(event: DispatchProductionEvent): DispatchProductionEvent {
+  const legacyWriterAttempt = typeof event.runId === 'string' &&
+    /^attempt-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(event.runId) &&
+    event.trajectoryId === `run:${event.runId}`
+    ? event.runId
+    : undefined;
+  const attemptId = event.attemptId ?? legacyWriterAttempt ?? testAttemptId(event);
+  const runId = event.runId ?? `run-${attemptId}`;
+  return {
+    ...event,
+    attemptId,
+    runId,
+    trajectoryId: `run:${attemptId}`,
+    runEventSummary: {
+      ...(event.runEventSummary ?? {}),
+      runId,
+      status: dispatchProductionRunStatusForOutcome(event.outcome),
+      outcome: event.outcome,
+      proposalCreated: event.proposalCreated,
+      proposalId: event.proposalId,
+    },
+  };
+}
+
+function recordDispatchProduction(
+  input: DispatchProductionEvent | readonly DispatchProductionEvent[],
+): ReturnType<typeof recordDispatchProductionRaw> {
+  return recordDispatchProductionRaw(
+    Array.isArray(input)
+      ? input.map(canonicalDispatchFixture)
+      : canonicalDispatchFixture(input as DispatchProductionEvent),
+  );
+}
+
 function makeEvidencePack(id: string, generatedAt: string) {
   const proposal: Proposal = {
     id,
@@ -251,6 +352,7 @@ function makeEvidencePack(id: string, generatedAt: string) {
     summary: 'summary',
     diff: [
       'diff --git a/docs/fleet.md b/docs/fleet.md',
+      'new file mode 100644',
       '--- /dev/null',
       '+++ b/docs/fleet.md',
       '@@ -0,0 +1 @@',
@@ -283,6 +385,7 @@ function makeEvidencePack(id: string, generatedAt: string) {
 function docsDiff(body: string): string {
   return [
     'diff --git a/docs/fleet.md b/docs/fleet.md',
+    'new file mode 100644',
     '--- /dev/null',
     '+++ b/docs/fleet.md',
     '@@ -0,0 +1 @@',
@@ -328,7 +431,9 @@ function makeTrustedDiagnosticResliceItem(repo: string, hash = 'abcdef123456', s
     routeReason: 'test parent route',
     outcome: 'empty-diff',
     proposalCreated: false,
+    attemptId: 'attempt-12345678-1234-4123-8123-123456789abc',
     runId: 'attempt-12345678-1234-4123-8123-123456789abc',
+    trajectoryId: 'run:attempt-12345678-1234-4123-8123-123456789abc',
     objectiveHash: hash.padEnd(64, 'a').slice(0, 64),
     spentUsd: 0,
     basis: 'run-proposal-outcome',
@@ -651,6 +756,126 @@ function writeDaemonLock(home: string, heartbeatAt: string, pid = process.pid): 
 // ---------------------------------------------------------------------------
 
 describe('buildFleetStatus — read-only aggregation (M49)', () => {
+  it('reports operational learning as inactive without authenticated decisions and eligible assignments', async () => {
+    const status = await buildFleetStatus(baseConfig());
+
+    expect(status.routingLearningAuthority).toMatchObject({
+      version: 1,
+      state: 'inactive',
+      operationalSteering: false,
+      sourceQuality: {
+        decisions: { authenticated: false },
+        assignments: { denominatorComplete: false },
+      },
+      samples: { observed: 0, eligible: 0, minimumPerStratum: LEARNED_ROUTING_MIN_SAMPLES },
+    });
+    expect(status.routingLearningAuthority?.blockerCodes).toEqual(expect.arrayContaining([
+      'decision-authenticity-unavailable',
+      'assignment-denominator-incomplete',
+      'sample-floor-unmet',
+    ]));
+    const decisionEvidence = status.autonomousShipReadiness?.evidenceMatrix?.sources
+      .find((source) => source.id === 'decisions');
+    expect(decisionEvidence).toMatchObject({
+      label: 'Unsigned Decision Merge Gate',
+      evidenceRole: 'merge-gate',
+      eligibility: 'cold-start',
+      applicability: 'required',
+      actionSynthesis: 'observational-only',
+    });
+  });
+
+  it('formats a healthy zero-attempt proposal funnel as withheld without rates', async () => {
+    const status = await buildFleetStatus(baseConfig());
+    const proposalFunnel = buildProposalFunnelObservability({
+      events: [],
+      sourceQuality: {
+        sourceState: 'healthy',
+        sourcePresent: true,
+        complete: true,
+        stopReasons: [],
+        filesRead: 1,
+        datedFilesRead: 1,
+        looseFilesRead: 0,
+        bytesRead: 0,
+        rowsScanned: 0,
+        invalidRows: 0,
+        unreadableFiles: 0,
+      },
+      windowMs: 24 * 60 * 60 * 1000,
+      eventLimit: 1_200,
+    });
+
+    const formatted = formatFleetStatus({ ...status, proposalFunnel });
+
+    expect(formatted).toContain('Proposal funnel:');
+    expect(formatted).toContain('sample:    0 canonical attempt(s) from 0 event(s)');
+    expect(formatted).toContain('output:    withheld (insufficient-sample)');
+    expect(formatted).toContain('diagnosis: insufficient-sample');
+    expect(formatted).toContain('diagnostic hint (non-authoritative): collect-attempts');
+    expect(formatted).not.toContain('reported proposal-created 0/0');
+  });
+
+  it('withholds dispatch and backend rates when canonical denominators are zero', async () => {
+    const status = await buildFleetStatus(baseConfig());
+    const outcomes = {
+      proposalCreated: 0,
+      emptyDiff: 0,
+      gateBlocked: 0,
+      engineFailed: 0,
+      cancelled: 1,
+      sandboxFailed: 0,
+      proposalCaptureError: 0,
+      proposalDisabled: 0,
+      unknown: 0,
+    };
+    const formatted = formatFleetStatus({
+      ...status,
+      dispatchProductionSource: {
+        sourceState: 'healthy',
+        sourcePresent: true,
+        complete: true,
+        stopReasons: [],
+        filesRead: 1,
+        datedFilesRead: 1,
+        looseFilesRead: 0,
+        bytesRead: 100,
+        rowsScanned: 1,
+        invalidRows: 0,
+        unreadableFiles: 0,
+      },
+      dispatchProduction: {
+        windowHours: 24,
+        events: 1,
+        attempts: 0,
+        proposalsCreated: 0,
+        noProposal: 0,
+        cancelledEvents: 1,
+        spentUsd: 0,
+        outcomes,
+        topReasons: [],
+        byBackend: [{
+          key: 'local-coder',
+          backend: 'local-coder',
+          attempts: 0,
+          proposalsCreated: 0,
+          noProposal: 0,
+          spentUsd: 0,
+          outcomes,
+          topReasons: [],
+        }],
+        bySource: [],
+        byRepo: [],
+        byBackendModel: [],
+        byBackendSource: [],
+      },
+    });
+
+    expect(formatted).toContain('reported proposal-created 0/0 (—)');
+    expect(formatted).toContain('local-coder 0/0 —');
+    expect(formatted).not.toContain('0/0 0%');
+  });
+
   let tmpHome: string;
   let prevHome: string | undefined;
   let prevUserProfile: string | undefined;
@@ -745,12 +970,12 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       sourcePresent: false,
       complete: true,
     });
-    expect(s.postMergeCohort).toMatchObject({
-      policyEligible: false,
-      denominatorComplete: false,
-      adverseObservations: 0,
-      stability: { completeCohorts: 0, releasedWitnesses: 0 },
+    expect(s.postMergeSource).toMatchObject({
+      sourceState: 'missing',
+      sourcePresent: false,
+      complete: false,
     });
+    expect(s.postMergeCohort).toBeUndefined();
     expect(s.autonomousShipReadiness?.evidenceMatrix?.sources.find(
       (source) => source.id === 'post-merge',
     )).toMatchObject({ evidenceRole: 'forensics', eligibility: 'observational' });
@@ -786,7 +1011,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.autonomousShipReadiness).toMatchObject({
       verdict: 'blocked',
       confidence: 'low',
-      topBlocker: { id: 'daemon-stopped' },
+      topBlocker: { id: 'daemon-activation-blocked' },
       sourceSummary: expect.objectContaining({
         blocked: expect.any(Number),
         unknown: expect.any(Number),
@@ -795,10 +1020,10 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.autonomousShipReadiness?.sourceSummary.healthy)
       .toBeLessThan(s.autonomousShipReadiness?.sources.length ?? 0);
     expect(s.missionBrief).toMatchObject({
-      directive: 'Start the daemon',
+      directive: 'Inspect daemon activation authority',
       confidence: 'low',
-      blocker: { id: 'daemon-stopped' },
-      action: { id: 'start-daemon' },
+      blocker: { id: 'daemon-activation-blocked' },
+      action: { id: 'inspect-daemon-activation' },
       evidence: {
         readinessVerdict: 'blocked',
         effectivenessPhase: 'control-blocked',
@@ -807,19 +1032,40 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         preflightReady: 0,
       },
     });
-    expect(s.missionBrief?.whyNow).toContain('daemon is stopped');
-    const startDaemon = s.nextActions?.find((action) => action.id === 'start-daemon');
-    expect(startDaemon?.commands?.[0]).toMatchObject({
-      label: 'Start daemon',
-      argv: ['ashlr', 'daemon', 'start'],
-      shell: 'ashlr daemon start',
-      safety: 'autonomous-dispatch',
+    expect(s.daemon.activation).toMatchObject({
+      authority: 'observation-only',
+      state: 'blocked',
+      commandEligible: false,
+      trustRootCount: 0,
+      residentAuthorized: false,
+      installAuthorized: false,
+      repairAuthorized: false,
+      reason: 'no-trusted-activation-roots',
     });
-    expect(startDaemon?.commands?.[1]).toMatchObject({
-      endpointPath: '/api/daemon/service/repair',
-      tokenRequired: true,
-      safety: 'control-plane',
-    });
+    expect(s.missionBrief?.whyNow).toContain('no-trusted-activation-roots');
+    const inspectActivation = s.nextActions?.find(
+      (action) => action.id === 'inspect-daemon-activation',
+    );
+    expect(inspectActivation?.commands).toEqual([
+      expect.objectContaining({
+        label: 'Inspect daemon status',
+        argv: ['ashlr', 'daemon', 'status'],
+        shell: 'ashlr daemon status',
+        safety: 'read-only',
+      }),
+    ]);
+    expect(s.nextActions?.find((action) => action.id === 'start-daemon')).toBeUndefined();
+    const blockedActivationCommands = s.nextActions?.flatMap((action) => action.commands ?? []) ?? [];
+    expect(blockedActivationCommands.length).toBeGreaterThan(0);
+    expect(inspectActivation?.commands?.every((command) => command.safety === 'read-only')).toBe(true);
+    expect(blockedActivationCommands.some((command) =>
+      command.argv.slice(0, 3).join(' ') === 'ashlr daemon start'
+      || command.argv.join(' ') === 'ashlr daemon install'
+      || command.endpointPath === '/api/daemon/service/repair'
+    )).toBe(false);
+    expect(formatFleetStatus(s)).toContain(
+      'activation:    blocked (no-trusted-activation-roots; observation-only)',
+    );
     expect(s.autonomy).toMatchObject({
       evidencePacks: 0,
       latestAt: null,
@@ -848,6 +1094,48 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(['pause', 'local-only', 'verify-only', 'backlog-build', 'auto-merge-ready']).toContain(
       s.autonomyDirection?.mode,
     );
+  });
+
+  it('keeps host reconciliation read-only when stopped activation is blocked', async () => {
+    const cfg = baseConfig();
+    const awaitingHost = createProposal(
+      {
+        repo: join(tmpHome, 'repo-awaiting-host'),
+        origin: 'agent',
+        kind: 'patch',
+        title: 'Awaiting host merge while activation is blocked',
+        summary: 'The host reconciliation action must not create activation authority.',
+        diff: docsDiff('awaiting-host-blocked-activation'),
+      },
+      cfg,
+    );
+    setStatus(awaitingHost.id, 'awaiting-host-merge');
+
+    const status = await buildFleetStatus(cfg);
+    const reconcile = status.nextActions?.find((action) => action.id === 'reconcile-host-prs');
+
+    expect(status.daemon).toMatchObject({
+      running: false,
+      activation: {
+        commandEligible: false,
+        reason: 'no-trusted-activation-roots',
+      },
+    });
+    expect(status.nextActions?.find((action) => action.id === 'inspect-daemon-activation'))
+      .toBeDefined();
+    expect(reconcile).toMatchObject({
+      label: 'Inspect host PR reconciliation',
+      commands: [
+        { argv: ['ashlr', 'inbox', '--json'], safety: 'read-only' },
+        { argv: ['ashlr', 'fleet', 'status', '--json'], safety: 'read-only' },
+      ],
+    });
+    expect(status.nextActions?.flatMap((action) => action.commands ?? []).some((command) =>
+      command.argv.join(' ') === 'ashlr daemon start --once'
+      || command.argv.join(' ') === 'ashlr daemon start'
+      || command.argv.join(' ') === 'ashlr daemon install'
+      || command.endpointPath === '/api/daemon/service/repair'
+    )).toBe(false);
   });
 
   it('derives recent landed work once from authenticated proposal evidence, never tick aggregates', async () => {
@@ -883,6 +1171,56 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         },
       });
     });
+  });
+
+  it('recommends only an exact one-shot start for a snapshot-valid activation candidate', async () => {
+    const inspection = vi.spyOn(activationPermit, 'inspectDaemonActivationPermit').mockReturnValue({
+      schemaVersion: 1,
+      policyVersion: 'm461-proposal-once-v1',
+      authority: 'observation-only',
+      sourceState: 'healthy',
+      state: 'ready',
+      commandEligible: true,
+      requestedShape: 'proposal-once',
+      trustRootCount: 1,
+      residentAuthorized: false,
+      installAuthorized: false,
+      repairAuthorized: false,
+      reason: 'valid-proposal-once-permit',
+    });
+
+    try {
+      const status = await buildFleetStatus(baseConfig());
+      const start = status.nextActions?.find((action) => action.id === 'start-daemon');
+
+      expect(status.daemon.activation).toMatchObject({
+        authority: 'observation-only',
+        state: 'ready',
+        commandEligible: true,
+      });
+      expect(start).toMatchObject({
+        label: 'Start one proposal cycle',
+        commands: [{
+          label: 'Start one proposal cycle',
+          argv: ['ashlr', 'daemon', 'start', '--once'],
+          shell: 'ashlr daemon start --once',
+          safety: 'autonomous-dispatch',
+        }],
+      });
+      expect(start?.commands).toHaveLength(1);
+      expect(status.nextActions?.flatMap((action) => action.commands ?? []).some((command) =>
+        command.argv.join(' ') === 'ashlr daemon start'
+        || command.argv.join(' ') === 'ashlr daemon install'
+        || command.endpointPath === '/api/daemon/service/repair'
+      )).toBe(false);
+      expect(status.autonomousShipReadiness?.topBlocker?.id).toBe('daemon-stopped');
+      expect(status.missionBrief).toMatchObject({
+        directive: 'Start one proposal cycle',
+        action: { id: 'start-daemon' },
+      });
+    } finally {
+      inspection.mockRestore();
+    }
   });
 
   it('surfaces degraded proposal truth instead of presenting a healthy landed zero', async () => {
@@ -2192,12 +2530,13 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       'local-coder',
       1,
     );
-    expect(recordDiagnosticEmpty(
+    const secondDiagnostic = recordDiagnosticEmpty(
       quarantined,
       'attempt-32345678-1234-4123-8123-123456789abc',
       'kimi',
       2,
-    )).toMatchObject({ disposition: 'quarantined' });
+    );
+    expect(secondDiagnostic).toMatchObject({ disposition: 'quarantined' });
     writeBacklogSnapshot(tmpHome, repo, [quarantined]);
     writeRunningDaemon(tmpHome);
 
@@ -2379,7 +2718,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     }));
   });
 
-  it('summarizes proposal starvation when the daemon is running with backlog but no proposals', async () => {
+  it('summarizes proposal starvation without letting daemon ticks steer next actions', async () => {
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo');
     mkdirSync(repo, { recursive: true });
@@ -2505,15 +2844,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
     expect(s.autonomyEffectiveness?.summary).toContain('2 recent dispatch(es) produced no proposal');
     expect(s.autonomyEffectiveness?.summary).toContain('top reason: gate-blocked: completeness gate blocked proposal: typecheck failed');
-    expect(s.nextActions).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          id: 'inspect-proposal-production',
-          label: 'Inspect proposal production',
-          detail: expect.stringContaining('typecheck failed'),
-        }),
-      ]),
-    );
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-proposal-production');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-dispatch-skips');
+    expect(s.missionBrief?.action?.id).not.toBe('inspect-proposal-production');
   });
 
   it('keeps proposal-disabled attempts out of operator production diagnosis', async () => {
@@ -2639,9 +2972,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.contextEfficiency?.signals.suppressedNoProposalDispatches).toBe(3);
     expect(s.contextEfficiency?.risks.map((risk) => risk.id)).not.toContain('proposal-yield-low');
     expect(s.contextEfficiency?.recommendations.join('\n')).not.toContain('Reslice low-yield backlog items');
-    const inspectAction = s.nextActions?.find((action) => action.id === 'inspect-proposal-production');
-    expect(inspectAction?.detail).toContain('agent returned no diff');
-    expect(inspectAction?.detail).not.toContain('proposal-disabled');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-proposal-production');
     const dispatchYieldAction = s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield');
     expect(dispatchYieldAction?.detail ?? '').not.toContain('proposal-disabled');
   });
@@ -2779,9 +3110,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.autonomyEffectiveness?.summary).toContain('3 recent dispatch(es) produced no proposal');
     expect(s.autonomyEffectiveness?.summary).toContain('empty-diff: engine "local-coder" completed without file changes');
     expect(s.autonomyEffectiveness?.summary).not.toContain('proposal-disabled');
-    const productionAction = s.nextActions?.find((action) => action.id === 'inspect-proposal-production');
-    expect(productionAction?.detail).toContain('empty-diff: engine "local-coder" completed without file changes');
-    expect(productionAction?.detail).not.toContain('proposal-disabled');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-proposal-production');
   });
 
   it('keeps skipped not-attempted rows out of no-proposal diagnostics', async () => {
@@ -2858,16 +3187,15 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.autonomyEffectiveness?.summary).toContain('3 recent dispatch(es) produced no proposal');
     expect(s.autonomyEffectiveness?.summary).toContain('empty-diff: engine "local-coder" completed without file changes');
 
-    const skipAction = s.nextActions?.find((action) => action.id === 'inspect-dispatch-skips');
-    expect(skipAction?.detail).toContain('6 selected item(s) were not attempted');
-    expect(skipAction?.detail).toContain('top skip: not-attempted');
-    const productionAction = s.nextActions?.find((action) => action.id === 'inspect-proposal-production');
-    expect(productionAction?.detail).toContain('empty-diff: engine "local-coder" completed without file changes');
-    expect(productionAction?.detail).not.toContain('not-attempted');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-dispatch-skips');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-proposal-production');
   });
 
   it('reports durable dispatch-production yield from the append-only ledger', async () => {
-    const now = new Date().toISOString();
+    const now = settledLearningTimestamp();
+    const attemptA = 'attempt-00000000-0000-4000-8000-00000000000a';
+    const attemptB = 'attempt-00000000-0000-4000-8000-00000000000b';
+    const attemptC = 'attempt-00000000-0000-4000-8000-00000000000c';
     const baseEvent: DispatchProductionEvent = {
       schemaVersion: 1,
       ts: now,
@@ -2875,21 +3203,37 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       itemId: 'item-a',
       source: 'todo',
       repo: '/repo/a',
-      title: 'Improve proposal yield',
+      title: 'PROMPT_CANARY_M49',
       backend: 'local-coder',
       tier: 'mid',
       model: 'qwen',
-      assignedBy: 'daemon',
-      routeReason: 'local-mid bulk',
+      assignedBy: 'ENV_CANARY_M49',
+      routeReason: 'STDOUT_CANARY_M49',
+      routeSnapshot: {
+        backend: 'local-coder',
+        tier: 'mid',
+        reason: 'FILE_CONTENT_CANARY_M49',
+      },
       outcome: 'empty-diff',
       proposalCreated: false,
+      attemptId: attemptA,
+      runId: 'run-item-a',
+      trajectoryId: `run:${attemptA}`,
       spentUsd: 0.001,
-      reason: 'agent returned no diff',
+      reason: 'DIFF_CANARY_M49',
       basis: 'run-proposal-outcome',
     };
     recordDispatchProduction([
       baseEvent,
-      { ...baseEvent, itemId: 'item-b', outcome: 'gate-blocked', reason: 'completeness gate blocked proposal' },
+      {
+        ...baseEvent,
+        itemId: 'item-b',
+        attemptId: attemptB,
+        runId: 'run-item-b',
+        trajectoryId: `run:${attemptB}`,
+        outcome: 'gate-blocked',
+        reason: 'completeness gate blocked proposal',
+      },
       {
         ...baseEvent,
         itemId: 'repo:proposal-repair-capture:abcdef123456',
@@ -2898,9 +3242,19 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         backend: 'codex',
         tier: 'frontier',
         model: 'gpt-5.5',
+        routeSnapshot: {
+          backend: 'codex',
+          tier: 'frontier',
+          model: 'gpt-5.5',
+          assignedBy: 'ENV_CANARY_M49',
+          reason: 'FILE_CONTENT_CANARY_M49',
+        },
         outcome: 'proposal-created',
         proposalCreated: true,
         proposalId: 'prop-c',
+        attemptId: attemptC,
+        runId: 'run-item-c',
+        trajectoryId: `run:${attemptC}`,
         reason: 'proposal filed',
       },
     ]);
@@ -2913,6 +3267,11 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       complete: true,
       filesRead: 1,
       invalidRows: 0,
+    });
+    expect(s.learningMetrics).toMatchObject({
+      state: 'available',
+      denominator: 'dispatch-production',
+      sourceQuality: { sourceState: 'healthy', complete: true },
     });
     expect(s.dispatchProduction).toMatchObject({
       events: 3,
@@ -2934,6 +3293,20 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         diagnosticReslices: 0,
         proposalRepairs: 0,
       },
+    });
+    expect(s.proposalFunnel).toMatchObject({
+      state: 'observational',
+      source: { sourceState: 'healthy', complete: true },
+      sample: { requestedWindowHours: 24, observedEvents: 3, includedAttempts: 3 },
+      metrics: {
+        attempts: 3,
+        reportedProposalCreatedOutcomes: { count: 1, rate: 1 / 3 },
+        observedProposalReferences: { count: 1, rate: 1 / 3 },
+        gateBlocked: { count: 1, rate: 1 / 3 },
+        emptyAttempts: { count: 1, rate: 1 / 3 },
+      },
+      primaryBlocker: 'gate-blocking',
+      diagnosticHint: 'inspect-verification-gates',
     });
     expect(s.attemptCoverage?.production.generatedRepairAttempts).toMatchObject({
       attempts: 1,
@@ -2974,17 +3347,289 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const formatted = formatFleetStatus(s);
     expect(formatted).toContain('Dispatch yield:');
     expect(formatted).toContain('source:    healthy; files 1');
-    expect(formatted).toContain('proposals 1/3');
+    expect(formatted).toContain('reported proposal-created 1/3');
     expect(formatted).toContain('shape:     no-diff 1, gate/capture 1, repairs 1, policy-off 0');
     expect(formatted).toContain('repair yield: capture 1 attempt; 1/1 converted (100%)');
     expect(formatted).toContain('diagnosis: healthy · fleet 1/3 33% · keep routing');
     expect(formatted).toContain('local-coder 0/2 0%');
     expect(formatted).toContain('codex 1/1 100%');
+    expect(formatted).toContain('Proposal funnel:');
+    expect(formatted).toContain(
+      'reported proposal-created 1/3 (33%), proposal references 1/3 (33%)',
+    );
+    expect(formatted).toContain('diagnosis: gate-blocking');
+    expect(formatted).toContain(
+      'diagnostic hint (non-authoritative): inspect-verification-gates',
+    );
+    for (const canary of [
+      'PROMPT_CANARY_M49',
+      'ENV_CANARY_M49',
+      'STDOUT_CANARY_M49',
+      'DIFF_CANARY_M49',
+      'FILE_CONTENT_CANARY_M49',
+    ]) expect(formatted).not.toContain(canary);
   });
 
-  it('surfaces degraded dispatch source quality and withholds yield diagnosis', async () => {
+  it('withholds joined learning metrics when a settled source changes during snapshot construction', async () => {
+    const now = settledLearningTimestamp();
+    const cfg = baseConfig();
+    const proposal = createSignedProposal(cfg, {
+      title: 'Snapshot race fixture',
+      diff: docsDiff('snapshot race'),
+    });
+    proposal.createdAt = now;
+    proposal.routeSnapshot = {
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      reason: 'stable local route',
+      routerPolicyVersion: ROUTER_POLICY_VERSION,
+    };
+    writeFileSync(
+      join(tmpHome, '.ashlr', 'inbox', `${proposal.id}.json`),
+      JSON.stringify(proposal),
+      'utf8',
+    );
+    recordDispatchProduction({
+      schemaVersion: 1,
+      ts: now,
+      machineId: 'm49',
+      itemId: 'snapshot-race-attempt',
+      source: 'goal',
+      repo: '/repo/a',
+      title: 'Snapshot race fixture',
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      routeReason: 'local route',
+      outcome: 'proposal-created',
+      proposalCreated: true,
+      proposalId: proposal.id,
+      spentUsd: 0,
+      basis: 'run-proposal-outcome',
+    });
+
+    const inboxStore = await import('../src/core/inbox/store.js');
+    const first = inboxStore.listProposalsDetailed();
+    const changed = {
+      ...first,
+      proposals: first.proposals.map((row) => row.id === proposal.id
+        ? {
+            ...row,
+            routeSnapshot: row.routeSnapshot
+              ? { ...row.routeSnapshot, reason: 'mutated private route reason' }
+              : row.routeSnapshot,
+          }
+        : row),
+    };
+    const readSpy = vi.spyOn(inboxStore, 'listProposalsDetailed')
+      .mockReturnValueOnce(first)
+      .mockReturnValueOnce(changed);
+    try {
+      const status = await buildFleetStatus(cfg);
+      expect(status.learningMetrics).toMatchObject({
+        state: 'withheld',
+        reason: 'learning-snapshot-unstable',
+        attemptCoverage: { state: 'withheld' },
+        trajectoryLearning: { state: 'withheld' },
+      });
+      expect(status.attemptCoverage).toBeUndefined();
+      expect(status.trajectoryLearning).toBeUndefined();
+      expect(JSON.stringify(status.learningMetrics)).not.toContain('proposalRate');
+      expect(formatFleetStatus(status)).toContain(
+        'withheld (cross-source learning snapshot changed during read)',
+      );
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+
+  it('withholds dispatch summary and funnel when a recent append changes only the raw second snapshot', async () => {
+    const now = settledLearningTimestamp();
+    const firstAttempt = 'attempt-00000000-0000-4000-8000-000000000011';
+    const appendedAttempt = 'attempt-00000000-0000-4000-8000-000000000012';
+    recordDispatchProduction({
+      schemaVersion: 1,
+      ts: now,
+      itemId: 'settled-dispatch',
+      source: 'goal',
+      repo: '/repo/a',
+      title: 'Settled dispatch',
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      routeReason: 'local route',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      attemptId: firstAttempt,
+      runId: 'run-settled',
+      trajectoryId: `run:${firstAttempt}`,
+      spentUsd: 0,
+      basis: 'run-proposal-outcome',
+    });
+    const inboxStore = await import('../src/core/inbox/store.js');
+    const proposalSnapshot = inboxStore.listProposalsDetailed();
+    let appended = false;
+    const readSpy = vi.spyOn(inboxStore, 'listProposalsDetailed')
+      .mockReturnValueOnce(proposalSnapshot)
+      .mockImplementation(() => {
+        if (!appended) {
+          appended = true;
+          recordDispatchProduction({
+            schemaVersion: 1,
+            ts: new Date().toISOString(),
+            itemId: 'recent-second-read-append',
+            source: 'goal',
+            repo: '/repo/a',
+            title: 'Recent second read append',
+            backend: 'local-coder',
+            tier: 'mid',
+            assignedBy: 'daemon',
+            routeReason: 'local route',
+            outcome: 'proposal-created',
+            proposalCreated: true,
+            proposalId: 'proposal-recent',
+            attemptId: appendedAttempt,
+            runId: 'run-recent',
+            trajectoryId: `run:${appendedAttempt}`,
+            spentUsd: 0,
+            basis: 'run-proposal-outcome',
+          });
+        }
+        return proposalSnapshot;
+      });
+    try {
+      const status = await buildFleetStatus(baseConfig());
+      expect(appended).toBe(true);
+      expect(status.dispatchProduction).toBeUndefined();
+      expect(status.dispatchYieldDiagnostics).toBeUndefined();
+      expect(status.dispatchProductionSource).toMatchObject({
+        sourceState: 'degraded',
+        complete: false,
+        rowsScanned: 2,
+      });
+      expect(status.proposalFunnel).toMatchObject({
+        state: 'withheld',
+        withheldReason: 'snapshot-unstable',
+        source: { sourceState: 'degraded', complete: false },
+        sample: { observedEvents: 1, includedAttempts: 1 },
+      });
+      expect(status.proposalFunnel?.metrics).toBeUndefined();
+      expect(status.learningMetrics).toMatchObject({
+        state: 'withheld',
+        reason: 'learning-snapshot-unstable',
+        sourceQuality: { sourceState: 'degraded', complete: false, rowsScanned: 2 },
+      });
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+
+  it('propagates a degraded second dispatch read into every invalidated projection', async () => {
+    const now = settledLearningTimestamp();
+    const attemptId = 'attempt-00000000-0000-4000-8000-000000000021';
+    recordDispatchProduction({
+      schemaVersion: 1,
+      ts: now,
+      itemId: 'degraded-second-read',
+      source: 'goal',
+      repo: '/repo/a',
+      title: 'Degraded second read',
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      routeReason: 'local route',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      attemptId,
+      runId: 'run-degraded-second-read',
+      trajectoryId: `run:${attemptId}`,
+      spentUsd: 0,
+      basis: 'run-proposal-outcome',
+    });
+    const inboxStore = await import('../src/core/inbox/store.js');
+    const proposalSnapshot = inboxStore.listProposalsDetailed();
+    let degraded = false;
+    const readSpy = vi.spyOn(inboxStore, 'listProposalsDetailed')
+      .mockReturnValueOnce(proposalSnapshot)
+      .mockImplementation(() => {
+        if (!degraded) {
+          degraded = true;
+          const path = join(
+            process.env.ASHLR_HOME!,
+            'dispatch-production',
+            `${now.slice(0, 10)}.jsonl`,
+          );
+          writeFileSync(path, `${readFileSync(path, 'utf8')}not-json\n`, 'utf8');
+        }
+        return proposalSnapshot;
+      });
+    try {
+      const status = await buildFleetStatus(baseConfig());
+      expect(degraded).toBe(true);
+      expect(status.dispatchProduction).toBeUndefined();
+      expect(status.dispatchProductionSource).toMatchObject({
+        sourceState: 'degraded',
+        complete: false,
+        invalidRows: 1,
+      });
+      expect(status.proposalFunnel).toMatchObject({
+        state: 'withheld',
+        withheldReason: 'snapshot-unstable',
+        source: { sourceState: 'degraded', complete: false },
+      });
+      expect(status.proposalFunnel?.metrics).toBeUndefined();
+      expect(status.learningMetrics).toMatchObject({
+        state: 'withheld',
+        reason: 'learning-snapshot-unstable',
+        sourceQuality: { sourceState: 'degraded', complete: false, invalidRows: 1 },
+        dispatchProduction: { state: 'withheld' },
+      });
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+
+  it('withholds all-recent learning activity until the shared cutoff settles', async () => {
     const now = new Date().toISOString();
     recordDispatchProduction({
+      schemaVersion: 1,
+      ts: now,
+      machineId: 'm49',
+      itemId: 'still-settling',
+      source: 'goal',
+      repo: '/repo/a',
+      title: 'Still settling',
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      routeReason: 'local route',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      spentUsd: 0,
+      basis: 'run-proposal-outcome',
+    });
+
+    const status = await buildFleetStatus(baseConfig());
+    expect(status.learningMetrics).toMatchObject({
+      state: 'withheld',
+      reason: 'learning-snapshot-settling',
+      excludedRows: 1,
+      settledThrough: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+      attemptCoverage: { state: 'withheld' },
+      trajectoryLearning: { state: 'withheld' },
+    });
+    expect(status.attemptCoverage).toBeUndefined();
+    expect(status.trajectoryLearning).toBeUndefined();
+    const formatted = formatFleetStatus(status);
+    expect(formatted).toContain('1 newer row(s) excluded');
+    expect(formatted).toContain('withheld (dispatch rows are still inside the settlement window)');
+    expect(formatted).not.toContain('attempts:  0 in 24h');
+  });
+
+  it('withholds every public yield projection for the live six-row/four-invalid source shape', async () => {
+    const now = new Date().toISOString();
+    const valid = {
       schemaVersion: 1,
       ts: now,
       itemId: 'valid-partial-source',
@@ -2999,21 +3644,303 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       proposalCreated: false,
       spentUsd: 0.001,
       basis: 'run-proposal-outcome',
-    });
+    } satisfies DispatchProductionEvent;
+    recordDispatchProduction([
+      valid,
+      { ...valid, itemId: 'valid-partial-source-b', title: 'Second valid partial source row' },
+    ]);
     const dir = join(process.env.ASHLR_HOME!, 'dispatch-production');
     const path = join(dir, `${now.slice(0, 10)}.jsonl`);
-    writeFileSync(path, `${readFileSync(path, 'utf8')}not-json\n`, 'utf8');
+    writeFileSync(path, `${readFileSync(path, 'utf8')}not-json\n{}\n[]\n{"schemaVersion":1}\n`, 'utf8');
 
     const s = await buildFleetStatus(baseConfig());
 
-    expect(s.dispatchProduction).toMatchObject({ events: 1 });
+    expect(s.dispatchProduction).toBeUndefined();
     expect(s.dispatchProductionSource).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      rowsScanned: 6,
+      invalidRows: 4,
+    });
+    expect(s.learningMetrics).toMatchObject({
+      state: 'withheld',
+      denominator: 'dispatch-production',
+      reason: 'dispatch-source-degraded',
+      sourceQuality: { sourceState: 'degraded', complete: false, rowsScanned: 6, invalidRows: 4 },
+      dispatchProduction: {
+        state: 'withheld',
+        reasons: ['dispatch-production-source-degraded'],
+        withheldMetrics: ['dispatchProduction'],
+      },
+    });
+    expect(s.attemptCoverage).toBeUndefined();
+    expect(s.trajectoryLearning).toBeUndefined();
+    expect(s.dispatchYieldDiagnostics).toBeUndefined();
+    expect(s.proposalFunnel).toMatchObject({
+      state: 'withheld',
+      withheldReason: 'source-degraded',
+      source: { sourceState: 'degraded', complete: false },
+      sample: { observedEvents: 2, includedAttempts: 2 },
+      primaryBlocker: 'source-unavailable',
+      diagnosticHint: 'repair-telemetry-source',
+    });
+    expect(s.proposalFunnel?.metrics).toBeUndefined();
+    const formatted = formatFleetStatus(s);
+    expect(formatted).toContain('source:    degraded (partial)');
+    expect(formatted).toContain('withheld because the bounded dispatch source is incomplete');
+    expect(formatted).toContain('Proposal funnel:');
+    expect(formatted).toContain('output:    withheld (source-degraded)');
+    expect(formatted).toContain('withheld (dispatch denominator degraded; 4 invalid row(s))');
+    expect(formatted).not.toContain('proposals 0/2');
+    expect(JSON.stringify(s)).not.toContain('"diagnosticProposalRate":0');
+    expect(JSON.stringify(s)).not.toContain('"proposalRate":0');
+    expect(formatted).not.toContain('attempts:  0 in 24h');
+    expect(formatted).not.toContain('trajectories: 0 observed in 24h');
+    const staleSummary: NonNullable<FleetStatus['dispatchProduction']> = {
+      windowHours: 24,
+      events: 2,
+      attempts: 2,
+      noProposal: 2,
+      proposalRate: 0,
+      diagnosticAttempts: 2,
+      diagnosticNoProposal: 2,
+      diagnosticProposalRate: 0,
+      proposalsCreated: 0,
+      spentUsd: 0,
+      outcomes: {
+        proposalCreated: 0, emptyDiff: 2, gateBlocked: 0, engineFailed: 0,
+        sandboxFailed: 0, proposalCaptureError: 0, proposalDisabled: 0,
+      },
+      topReasons: [], diagnosticTopReasons: [], byBackend: [], bySource: [],
+      byRepo: [], byBackendModel: [], byBackendSource: [],
+    };
+    const staleFormatted = formatFleetStatus({
+      ...s,
+      dispatchProduction: staleSummary,
+    });
+    expect(staleFormatted).not.toContain('proposals 0/2');
+    expect(staleFormatted).toContain('withheld because the bounded dispatch source is incomplete');
+    const missingFormatted = formatFleetStatus({
+      ...s,
+      dispatchProduction: staleSummary,
+      dispatchProductionSource: undefined,
+    });
+    expect(missingFormatted).not.toContain('proposals 0/2');
+    expect(missingFormatted).toContain('Dispatch yield:\n  unavailable');
+  });
+
+  it('withholds degraded and missing join metrics instead of publishing false zeros', async () => {
+    const now = settledLearningTimestamp();
+    recordDispatchProduction({
+      schemaVersion: 1,
+      ts: now,
+      machineId: 'm49',
+      itemId: 'join-source-attempt',
+      source: 'goal',
+      repo: '/repo/a',
+      title: 'Join source attempt',
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      routeReason: 'local route',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      spentUsd: 0,
+      basis: 'run-proposal-outcome',
+    });
+    recordAgentAction({
+      schemaVersion: 1,
+      ts: now,
+      machineId: 'm49',
+      actor: 'daemon',
+      kind: 'dispatch',
+      outcome: 'empty-diff',
+      action: 'daemon:dispatch',
+      summary: 'local empty-diff for join source attempt',
+      repo: '/repo/a',
+      itemId: 'join-source-attempt',
+      source: 'goal',
+      backend: 'local-coder',
+      tier: 'mid',
+    });
+    const actionPath = join(agentActionsDir(), `${now.slice(0, 10)}.jsonl`);
+    writeFileSync(actionPath, `${readFileSync(actionPath, 'utf8')}not-json\n`, 'utf8');
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.learningMetrics).toMatchObject({
+      state: 'available',
+      attemptCoverage: {
+        state: 'partial',
+        reasons: expect.arrayContaining([
+          'agent-actions-source-degraded',
+          'outcomes-source-missing',
+          'decisions-source-missing',
+          'evidence-source-missing',
+          'worked-source-missing',
+        ]),
+        withheldMetrics: expect.arrayContaining([
+          'coverage.agentAction',
+          'coverage.outcomeRecord',
+          'coverage.decision',
+          'coverage.evidence',
+          'coverage.worked',
+        ]),
+      },
+      trajectoryLearning: {
+        state: 'partial',
+        reasons: expect.arrayContaining([
+          'agent-actions-source-degraded',
+          'outcomes-source-missing',
+          'post-merge-source-missing',
+          'skill-use-source-missing',
+        ]),
+      },
+    });
+    expect(s.attemptCoverage?.production).toMatchObject({ attempts: 1, diagnosticAttempts: 1 });
+    expect(s.attemptCoverage?.coverage).toEqual({});
+    expect(s.attemptCoverage?.recent[0]?.coverage).toEqual({});
+    expect(s.trajectoryLearning?.population).toEqual({
+      observed: 1, learningEligible: 0, incomplete: 0, degraded: 1,
+    });
+    expect(s.trajectoryLearning?.trajectories).toBe(1);
+    expect(s.trajectoryLearning?.coverage).toEqual({ dispatch: { count: 0, rate: 0 } });
+    expect(s.trajectoryLearning?.terminalOutcomes).toBeUndefined();
+    expect(s.trajectoryLearning?.realizedOutcomes).toBeUndefined();
+    expect(s.trajectoryLearning?.routeSpine).toEqual({});
+    expect(s.trajectoryLearning?.recent).toBeUndefined();
+    expect(s.trajectoryLearning?.traces).toEqual({ state: 'degraded', records: [] });
+    expect(s.trajectoryLearning?.skillObservation).toEqual({
+      eventState: 'none', sampleState: 'unavailable',
+    });
+
+    const formatted = formatFleetStatus(s);
+    expect(formatted).toContain('trajectories: 1 observed in 24h');
+    expect(formatted).toContain('eligibility:  0 learning-eligible, 0 incomplete, 1 degraded');
+    expect(formatted).toContain('actions withheld, worked withheld, decisions withheld, evidence withheld');
+    expect(formatted).toContain('outcomes:     withheld (outcome denominator unavailable)');
+    expect(formatted).not.toContain('actions 0 (0%)');
+    expect(formatted).not.toContain('dispatch->decision 0 (0%)');
+  });
+
+  it('requires a healthy action source only for authoritative no-proposal outcomes', async () => {
+    const now = settledLearningTimestamp();
+    const repo = join(tmpHome, 'repo-action-authority');
+    const cfg = baseConfig();
+    const proposalItemId = 'repo-action-authority:goal:proposal';
+    const proposal = createSignedProposal(cfg, {
+      title: 'Action-independent proposal trajectory',
+      diff: docsDiff('action-independent proposal trajectory'),
+    });
+    proposal.createdAt = now;
+    proposal.repo = repo;
+    proposal.workItemId = proposalItemId;
+    proposal.workSource = 'goal';
+    proposal.runId = 'run-action-independent-proposal';
+    proposal.trajectoryId = 'trajectory-action-independent-proposal';
+    writeFileSync(
+      join(tmpHome, '.ashlr', 'inbox', `${proposal.id}.json`),
+      JSON.stringify(proposal),
+      'utf8',
+    );
+    writeBacklogSnapshot(tmpHome, repo, [], now);
+    recordDispatchProduction({
+      schemaVersion: 1,
+      ts: now,
+      itemId: proposalItemId,
+      source: 'goal',
+      repo,
+      title: proposal.title,
+      backend: 'codex',
+      tier: 'frontier',
+      model: 'gpt-5.5',
+      assignedBy: 'daemon',
+      routeReason: 'proposal authority fixture',
+      outcome: 'proposal-created',
+      proposalCreated: true,
+      proposalId: proposal.id,
+      runId: proposal.runId,
+      trajectoryId: proposal.trajectoryId,
+      spentUsd: 0,
+      basis: 'run-proposal-outcome',
+    });
+    recordDecision({
+      ts: now,
+      proposalId: proposal.id,
+      workItemId: proposalItemId,
+      runId: proposal.runId,
+      trajectoryId: proposal.trajectoryId,
+      action: 'judged',
+      verdict: 'ship',
+    });
+
+    const attemptId = 'attempt-00000000-0000-4000-8000-000000000049';
+    const runId = 'run-action-authority-no-proposal';
+    const trajectoryId = `run:${attemptId}`;
+    const itemId = 'repo-action-authority:goal:no-proposal';
+    const runEventSummary = {
+      runId,
+      status: 'done' as const,
+      outcome: 'empty-diff',
+      proposalCreated: false,
+    };
+    recordDispatchProduction({
+      schemaVersion: 1,
+      ts: now,
+      itemId,
+      source: 'goal',
+      repo,
+      title: 'No proposal action authority fixture',
+      backend: 'local-coder',
+      tier: 'local',
+      model: 'qwen',
+      assignedBy: 'daemon',
+      routeReason: 'no-proposal authority fixture',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      attemptId,
+      runId,
+      trajectoryId,
+      runEventSummary,
+      spentUsd: 0,
+      basis: 'run-proposal-outcome',
+    });
+    recordAgentAction({
+      schemaVersion: 1,
+      ts: now,
+      actor: 'daemon',
+      kind: 'dispatch',
+      outcome: 'no-proposal',
+      action: 'daemon:dispatch',
+      summary: 'valid no-proposal terminal carrier',
+      repo,
+      itemId,
+      source: 'goal',
+      runId,
+      trajectoryId,
+      backend: 'local-coder',
+      tier: 'local',
+      model: 'qwen',
+      runEventSummary,
+    });
+    const actionPath = join(agentActionsDir(), `${now.slice(0, 10)}.jsonl`);
+    writeFileSync(actionPath, `${readFileSync(actionPath, 'utf8')}not-json\n`, 'utf8');
+
+    const status = await buildFleetStatus(cfg);
+
+    expect(status.workspace?.sourceQuality).toMatchObject({
       sourceState: 'degraded',
       complete: false,
       invalidRows: 1,
     });
-    expect(s.dispatchYieldDiagnostics).toBeUndefined();
-    expect(formatFleetStatus(s)).toContain('source:    degraded (partial)');
+    expect(status.trajectoryLearning).toMatchObject({
+      trajectories: 2,
+      population: { observed: 2, learningEligible: 1, incomplete: 0, degraded: 1 },
+      terminalOutcomes: { pending: 1, 'no-proposal': 0 },
+    });
+    expect(status.trajectoryLearning?.terminalOutcomes).toBeDefined();
+    expect(status.learningMetrics?.trajectoryLearning?.withheldMetrics)
+      .not.toEqual(expect.arrayContaining(['terminalOutcomes']));
   });
 
   it('reports recent concurrent dispatch manifests from the append-only ledger', async () => {
@@ -3079,7 +4006,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     )).toMatchObject({ eligibility: 'not-applicable', evidenceRole: 'forensics' });
   });
 
-  it('marks complete Best-of-N evidence eligible only when candidate racing is enabled', async () => {
+  it('keeps complete Best-of-N evidence observational when candidate racing is enabled', async () => {
     const now = new Date().toISOString();
     recordBestOfN({
       ts: now,
@@ -3106,7 +4033,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(status.autonomousShipReadiness?.evidenceMatrix?.sources.find(
       (source) => source.id === 'best-of-n',
     )).toMatchObject({
-      category: 'evidence', evidenceRole: 'learning', eligibility: 'eligible', applicability: 'optional',
+      category: 'evidence', evidenceRole: 'learning', eligibility: 'observational', applicability: 'optional',
       status: 'healthy', evidenceQuality: { complete: true, rowsScanned: 1, invalidRows: 0 },
     });
   });
@@ -3263,8 +4190,58 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatted).toContain('memory:    2 entries');
   });
 
+  it('keeps raw action prose out of Fleet Status JSON', async () => {
+    const rawCanary = 'RAW_CUSTOMER_STDOUT_CANARY_7f8a91 ordinary private text';
+    const repo = join(tmpHome, 'privacy-repo');
+    mkdirSync(repo, { recursive: true });
+    mkdirSync(join(tmpHome, '.ashlr'), { recursive: true });
+    writeFileSync(
+      join(tmpHome, '.ashlr', 'enrollment.json'),
+      JSON.stringify({ repos: [repo] }),
+      'utf8',
+    );
+    recordAgentAction({
+      schemaVersion: 1,
+      ts: new Date().toISOString(),
+      machineId: 'm49-privacy',
+      actor: 'daemon',
+      kind: 'dispatch',
+      outcome: 'no-proposal',
+      action: 'daemon:dispatch',
+      summary: rawCanary,
+      repo,
+      itemId: 'privacy-item',
+      source: 'todo',
+      backend: 'codex',
+      tier: 'frontier',
+      routeSnapshot: {
+        backend: 'codex',
+        tier: 'frontier',
+        assignedBy: 'router',
+        reason: rawCanary,
+      },
+      reason: rawCanary,
+      tags: [rawCanary],
+    });
+
+    const status = await buildFleetStatus(baseConfig());
+    const encoded = JSON.stringify(status);
+
+    expect(encoded).not.toContain(rawCanary);
+    expect(status.workspace?.recentActions[0]).toMatchObject({
+      action: 'daemon:dispatch',
+      outcome: 'no-proposal',
+    });
+    expect(status.workspace?.recentActions[0]).not.toHaveProperty('reason');
+    expect(status.workspace?.recentActions[0]?.summary)
+      .toMatch(/^daemon:dispatch outcome=no-proposal backend=codex source=todo ref=[a-f0-9]{12}$/);
+    expect(status.workspace?.recentActions[0]?.proseDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
+  });
+
   it('reports attempt coverage from joined metadata-only ledgers', async () => {
-    const now = new Date().toISOString();
+    const now = settledLearningTimestamp();
+    const attemptId = 'attempt-00000000-0000-4000-8000-000000000031';
+    const trajectoryId = `run:${attemptId}`;
     const repo = join(tmpHome, 'repo-attempts');
     const cfg = withFoundry({
       autoMerge: {
@@ -3279,6 +4256,12 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       diff: docsDiff('attempt coverage'),
       verifyResult: { passed: true, source: 'manual' },
     });
+    proposal.createdAt = now;
+    writeFileSync(
+      join(tmpHome, '.ashlr', 'inbox', `${proposal.id}.json`),
+      JSON.stringify(proposal),
+      'utf8',
+    );
 
     writeRunningDaemon(tmpHome, [], now);
     writeBacklogSnapshot(tmpHome, repo, [], now);
@@ -3298,8 +4281,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       outcome: 'proposal-created',
       proposalCreated: true,
       proposalId: proposal.id,
+      attemptId,
       runId: 'run-attempt-coverage',
-      trajectoryId: 'traj-attempt-coverage',
+      trajectoryId,
       routeSnapshot: {
         backend: 'codex',
         tier: 'frontier',
@@ -3336,7 +4320,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       source: 'goal',
       proposalId: proposal.id,
       runId: 'run-attempt-coverage',
-      trajectoryId: 'traj-attempt-coverage',
+      trajectoryId,
       backend: 'codex',
       tier: 'frontier',
       model: 'gpt-5.5',
@@ -3348,7 +4332,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       proposalId: proposal.id,
       workItemId: itemId,
       runId: 'run-attempt-coverage',
-      trajectoryId: 'traj-attempt-coverage',
+      trajectoryId,
       action: 'judged',
       verdict: 'ship',
       reason: 'metadata-only approval',
@@ -3372,9 +4356,12 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       reason: 'private observe-only selection',
       proposalId: proposal.id,
       runId: 'run-attempt-coverage',
-      trajectoryId: 'traj-attempt-coverage',
+      trajectoryId,
     });
     expect(readSkillUseEvents({ limit: 10 })).toHaveLength(1);
+    const postMergePath = postMergeObservationLedgerPath();
+    mkdirSync(dirname(postMergePath), { recursive: true, mode: 0o700 });
+    writeFileSync(postMergePath, '', { encoding: 'utf8', mode: 0o600 });
 
     const s = await buildFleetStatus(cfg);
 
@@ -3396,8 +4383,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         currentRouterPolicyVersion: { count: 1, rate: 1 },
         learningEpoch: { count: 1, rate: 1 },
         currentLearningEpoch: { count: 1, rate: 1 },
-        labelAuthoritative: { count: 1, rate: 1 },
-        currentAuthoritativeLabel: { count: 1, rate: 1 },
+        labelAuthoritative: { count: 0, rate: 0 },
+        currentAuthoritativeLabel: { count: 0, rate: 0 },
       },
       causalWeak: {
         weak: false,
@@ -3435,8 +4422,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         currentRouterPolicyVersion: true,
         learningEpoch: true,
         currentLearningEpoch: true,
-        labelAuthoritative: true,
-        currentAuthoritativeLabel: true,
+        labelAuthoritative: false,
+        currentAuthoritativeLabel: false,
       },
     });
     expect(s.attemptCoverage?.recent[0]).not.toHaveProperty('repo');
@@ -3445,6 +4432,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.trajectoryLearning).toMatchObject({
       windowHours: 24,
       trajectories: 1,
+      population: { observed: 1, learningEligible: 1, incomplete: 0, degraded: 0 },
       terminalOutcomes: {
         pending: 1,
       },
@@ -3486,13 +4474,18 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       },
     });
     expect(s.trajectoryLearning?.recent[0]?.coverage).not.toHaveProperty('skillUse');
+    expect(s.judgeTraceSource).toMatchObject({ sourceState: 'missing', complete: true });
     expect(s.trajectoryLearning?.traces).toMatchObject({
       state: 'available',
-      records: [expect.objectContaining({
-        ref: expect.stringMatching(/^trajectory:[a-f0-9]{12}$/),
-        sourceState: expect.stringMatching(/^(complete|incomplete|degraded)$/),
-      })],
+      records: [expect.objectContaining({ sourceState: 'complete' })],
     });
+    expect(s.learningMetrics?.trajectoryLearning).toMatchObject({
+      state: 'available',
+      reasons: [],
+      withheldMetrics: [],
+    });
+    expect(s.learningMetrics?.trajectoryLearning?.sources)
+      .not.toEqual(expect.arrayContaining([expect.objectContaining({ source: 'judge-traces' })]));
     expect(JSON.stringify(s.trajectoryLearning)).not.toContain(repo);
     expect(JSON.stringify(s.trajectoryLearning)).not.toContain(itemId);
     expect(JSON.stringify(s.trajectoryLearning)).not.toContain(proposal.id);
@@ -3503,10 +4496,11 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatted).toContain('joins:     actions 1 (100%), worked 1 (100%), decisions 1 (100%), evidence 1 (100%)');
     expect(formatted).toContain('metadata:  trajectory 1 (100%), route 1 (100%), run 1 (100%)');
     expect(formatted).toContain('policy:    version 1 (100%), current 1 (100%), epoch 1 (100%), current epoch 1 (100%)');
-    expect(formatted).toContain('labels:    authoritative 1 (100%), current 1 (100%)');
+    expect(formatted).toContain('labels:    authoritative 0 (0%), current 0 (0%)');
     expect(formatted).toContain('Trajectory learning:');
     expect(formatted).toContain('Recent trajectory traces:');
-    expect(formatted).toContain('trajectories: 1 in 24h');
+    expect(formatted).toContain('trajectories: 1 observed in 24h');
+    expect(formatted).toContain('eligibility:  1 learning-eligible, 0 incomplete, 0 degraded');
     expect(formatted).toContain(
       'outcomes:     merged 0, pending 1, no-proposal 0, cancelled 0, failed 0',
     );
@@ -3527,7 +4521,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       trajectoryLearning: {
         version: 1,
         windowHours: 24,
-        trajectories: 0,
+        trajectories: 2,
+        population: { observed: 2, learningEligible: 0, incomplete: 1, degraded: 1 },
         terminalOutcomes: { merged: 0, rejected: 0, handoff: 0, pending: 0, 'no-proposal': 0, failed: 0, unknown: 0 },
         realizedOutcomes: { 'followed-up': 0, reverted: 0, regressed: 0 },
         coverage: {
@@ -3549,12 +4544,41 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       },
       killed: false,
     } as any);
+    expect(formatted).toContain('trajectories: 2 observed in 24h');
+    expect(formatted).toContain('eligibility:  0 learning-eligible, 1 incomplete, 1 degraded');
     expect(formatted).toContain('Recent trajectory traces: degraded (partial dispatch history withheld)');
     expect(formatted).not.toContain('Recent trajectory traces: none');
   });
 
-  it('promotes weak causal attempt coverage into next actions', async () => {
-    const now = new Date().toISOString();
+  it('keeps legacy V1 trajectory snapshots renderable as fully observed and eligible', () => {
+    const formatted = formatFleetStatus({
+      generatedAt: '2026-07-21T12:00:00.000Z',
+      daemon: { running: false, lastTickAt: null, todaySpentUsd: 0 },
+      backends: [],
+      queue: { backlogItems: 0 },
+      proposals: { pending: 0, frontierPending: 0, applied: 0 },
+      merges: { recent: 0 },
+      trajectoryLearning: {
+        version: 1,
+        windowHours: 24,
+        trajectories: 3,
+        terminalOutcomes: { merged: 1, rejected: 0, handoff: 0, pending: 2, 'no-proposal': 0, failed: 0, unknown: 0 },
+        coverage: {},
+        routeSpine: {},
+        skillObservation: { eventState: 'none', sampleState: 'none' },
+        traces: { state: 'available', records: [] },
+        gaps: [],
+        recent: [],
+      },
+      killed: false,
+    } as any);
+
+    expect(formatted).toContain('trajectories: 3 observed in 24h');
+    expect(formatted).toContain('eligibility:  3 learning-eligible, 0 incomplete, 0 degraded');
+  });
+
+  it('keeps weak causal attempt coverage visible without steering next actions', async () => {
+    const now = settledLearningTimestamp();
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo-causal');
     mkdirSync(ashlrDir, { recursive: true });
@@ -3628,41 +4652,23 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     ]);
 
     const s = await buildFleetStatus(baseConfig());
-    const action = s.nextActions?.find((candidate) => candidate.id === 'inspect-attempt-causal-coverage');
-
     expect(s.attemptCoverage?.causalWeak).toMatchObject({
       weak: true,
       reasons: expect.arrayContaining([
         expect.objectContaining({ kind: 'routeSnapshot', count: 0, rate: 0 }),
-        expect.objectContaining({ kind: 'runEventSummary', count: 0, rate: 0 }),
       ]),
     });
     expect(s.attemptCoverage?.causalGapDiagnostics).toMatchObject({
-      blockedCurrentLabels: 0,
+      blockedCurrentLabels: 3,
       causes: expect.arrayContaining([
         expect.objectContaining({ cause: 'missing-route-snapshot', count: 3 }),
-        expect.objectContaining({ cause: 'missing-run-summary', count: 3 }),
       ]),
       byLearningSource: [expect.objectContaining({ key: 'daemon-dispatch', count: 3 })],
       byLabelBasis: [expect.objectContaining({ key: 'dispatch-outcome', count: 3 })],
     });
-    expect(action).toMatchObject({
-      priority: 'medium',
-      label: 'Inspect causal coverage',
-      detail: expect.stringContaining('top cause: missing-route-snapshot on 3 attempts'),
-      commands: expect.arrayContaining([
-        expect.objectContaining({
-          label: 'Evaluate attention',
-          argv: ['ashlr', 'eval', 'attention', '--json'],
-          safety: 'read-only',
-        }),
-      ]),
-    });
-    expect(s.nextActions?.[0]?.id).toBe('inspect-attempt-causal-coverage');
-    expect(s.missionBrief).toMatchObject({
-      directive: 'Inspect causal learning coverage',
-      action: { id: 'inspect-attempt-causal-coverage' },
-    });
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-attempt-causal-coverage');
+    expect(s.missionBrief?.action?.id).not.toBe('inspect-attempt-causal-coverage');
+    expect(s.missionBrief?.directive).not.toBe('Inspect causal learning coverage');
   });
 
   it('does not report healthy context efficiency when genome health is unavailable', () => {
@@ -3702,7 +4708,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     ]);
   });
 
-  it('promotes degraded context efficiency into next actions', async () => {
+  it('keeps degraded context efficiency visible without steering actions or persistent commands', async () => {
     const now = new Date().toISOString();
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo-a');
@@ -3737,35 +4743,14 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         expect.objectContaining({ id: 'reflection-missing', severity: 'low' }),
       ],
     });
-    expect(s.nextActions).toContainEqual(expect.objectContaining({
-      id: 'improve-context-efficiency',
-      priority: 'medium',
-      label: 'Improve context efficiency',
-      detail: expect.stringContaining('No hub genome memories'),
-    }));
-    const action = s.nextActions?.find((candidate) => candidate.id === 'improve-context-efficiency');
-    expect(action?.commands).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        label: 'Run reflection',
-        argv: ['ashlr', 'reflect', 'playbooks', '--persist'],
-        safety: 'control-plane',
-      }),
-      expect.objectContaining({
-        label: 'Evaluate attention',
-        argv: ['ashlr', 'eval', 'attention', '--json'],
-        safety: 'read-only',
-      }),
-    ]));
-    expect(action?.commands?.map((command) => command.label)).not.toContain('Drain reslice queue');
-    expect(s.missionBrief).toMatchObject({
-      directive: 'Run context reflection',
-      action: {
-        id: 'improve-context-efficiency',
-      },
-    });
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('improve-context-efficiency');
+    expect(s.nextActions?.flatMap((action) => action.commands ?? []).map((command) => command.argv.join(' ')))
+      .not.toContain('ashlr reflect playbooks --persist');
+    expect(s.missionBrief?.action?.id).not.toBe('improve-context-efficiency');
+    expect(s.missionBrief?.directive).not.toBe('Run context reflection');
   });
 
-  it('adds a daemon monitor command to context-efficiency action when generated reslices are queued', async () => {
+  it('keeps generated-reslice context diagnostics display-only', async () => {
     const now = new Date().toISOString();
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo-a');
@@ -3814,23 +4799,16 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
 
     const s = await buildFleetStatus(baseConfig());
-    const action = s.nextActions?.find((candidate) => candidate.id === 'improve-context-efficiency');
-
     expect(s.queue.generatedWork).toMatchObject({
       diagnosticReslices: 1,
       proposalRepair: 1,
     });
-    expect(action?.commands).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        label: 'Inspect daemon status',
-        argv: ['ashlr', 'daemon', 'status'],
-        safety: 'read-only',
-      }),
-    ]));
-    expect(action?.commands?.map((command) => command.label)).not.toContain('Drain reslice queue');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('improve-context-efficiency');
+    expect(s.nextActions?.flatMap((action) => action.commands ?? []).map((command) => command.argv.join(' ')))
+      .not.toContain('ashlr reflect playbooks --persist');
   });
 
-  it('uses the reflection mission directive when low yield is the primary action', async () => {
+  it('keeps low-yield tick counters out of mission selection', async () => {
     const now = new Date().toISOString();
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo-a');
@@ -3907,16 +4885,152 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     ], now);
 
     const s = await buildFleetStatus(baseConfig());
-    const action = s.nextActions?.find((candidate) => candidate.id === 'improve-context-efficiency');
+    expect(s.contextEfficiency?.risks.map((risk) => risk.id)).toContain('proposal-yield-low');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('improve-context-efficiency');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-proposal-production');
+    expect(s.nextActions?.flatMap((action) => action.commands ?? []).map((command) => command.argv.join(' ')))
+      .not.toContain('ashlr reflect playbooks --persist');
+    expect(s.missionBrief?.action?.id).not.toBe('improve-context-efficiency');
+    expect(s.missionBrief?.directive).not.toBe('Run context reflection');
+  });
 
-    expect(action?.commands?.map((command) => command.label)).not.toContain('Drain reslice queue');
-    expect(action?.commands?.map((command) => command.label)).toContain('Inspect daemon status');
-    expect(s.missionBrief).toMatchObject({
-      directive: 'Run context reflection',
-      action: {
-        id: 'improve-context-efficiency',
-      },
+  it('keeps malformed owner-writable agent actions observational and outside action authority', async () => {
+    const now = new Date().toISOString();
+    writeRunningDaemon(tmpHome, [], now);
+    const baseline = await buildFleetStatus(baseConfig());
+
+    const dir = agentActionsDir();
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(dir, `${now.slice(0, 10)}.jsonl`), 'not-json\n', { mode: 0o600 });
+
+    const malformed = await buildFleetStatus(baseConfig());
+    const source = malformed.autonomousShipReadiness?.evidenceMatrix?.sources
+      .find((candidate) => candidate.id === 'agent-actions');
+
+    expect(malformed.workspace?.sourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
     });
+    expect(malformed.contextEfficiency).toBeDefined();
+    expect(source).toMatchObject({
+      evidenceRole: 'learning',
+      eligibility: 'observational',
+      status: 'degraded',
+      sourceQuality: { badge: 'degraded-source' },
+    });
+    expect(actionAuthorityProjection(malformed)).toEqual(actionAuthorityProjection(baseline));
+  });
+
+  it('keeps malformed owner-writable dispatch production observational and outside action authority', async () => {
+    const now = new Date().toISOString();
+    writeRunningDaemon(tmpHome, [], now);
+    const baseline = await buildFleetStatus(baseConfig());
+
+    const dir = join(process.env.ASHLR_HOME!, 'dispatch-production');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(dir, `${now.slice(0, 10)}.jsonl`), 'not-json\n', { mode: 0o600 });
+
+    const malformed = await buildFleetStatus(baseConfig());
+    const source = malformed.autonomousShipReadiness?.evidenceMatrix?.sources
+      .find((candidate) => candidate.id === 'dispatch-production');
+
+    expect(malformed.dispatchProductionSource).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
+    });
+    expect(malformed.dispatchProduction).toBeUndefined();
+    expect(malformed.learningMetrics).toMatchObject({
+      state: 'withheld',
+      reason: 'dispatch-source-degraded',
+    });
+    expect(malformed.proposalFunnel).toMatchObject({
+      state: 'withheld',
+      diagnosticHint: 'repair-telemetry-source',
+    });
+    expect(source).toMatchObject({
+      evidenceRole: 'analytics',
+      eligibility: 'observational',
+      status: 'degraded',
+      sourceQuality: { badge: 'degraded-source' },
+    });
+    expect(actionAuthorityProjection(malformed)).toEqual(actionAuthorityProjection(baseline));
+  });
+
+  it('keeps malformed owner-writable judge traces observational across operational authority', async () => {
+    const now = new Date().toISOString();
+    const repo = join(tmpHome, 'repo-judge-observation');
+    const item = makeBacklogItem(repo, 'repo:goal:judge-observation', 'Judge observation', 8);
+    const cfg = withFoundry({
+      allowedBackends: ['builtin'],
+      intelligence: { anomalyK: 4, minFrontierSuccessRate: 0.5 },
+    });
+    writeRunningDaemon(tmpHome, [], now);
+    writeBacklogSnapshot(tmpHome, repo, [item], now);
+    recordOutcome(item.id, 'empty', now);
+
+    const baseline = await buildFleetStatus(cfg);
+    const baselineAuthority = await operationalAuthorityProjection(baseline, cfg, item);
+
+    const dir = join(process.env.ASHLR_HOME!, 'judge-traces');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(dir, `${now.slice(0, 10)}.jsonl`), 'not-json\n', { mode: 0o600 });
+
+    const malformed = await buildFleetStatus(cfg);
+    const source = malformed.autonomousShipReadiness?.evidenceMatrix?.sources
+      .find((candidate) => candidate.id === 'judge-traces');
+
+    expect(malformed.judgeTraceSource).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
+    });
+    expect(source).toMatchObject({
+      evidenceRole: 'learning',
+      eligibility: 'observational',
+      status: 'degraded',
+      sourceQuality: { badge: 'degraded-source' },
+    });
+    expect(await operationalAuthorityProjection(malformed, cfg, item)).toEqual(baselineAuthority);
+  });
+
+  it('keeps malformed enabled Best-of-N telemetry observational across operational authority', async () => {
+    const now = new Date().toISOString();
+    const repo = join(tmpHome, 'repo-best-of-n-observation');
+    const item = makeBacklogItem(repo, 'repo:goal:best-of-n-observation', 'Best-of-N observation', 8);
+    const cfg = withFoundry({
+      allowedBackends: ['builtin'],
+      bestOfN: 2,
+      intelligence: { anomalyK: 4, minFrontierSuccessRate: 0.5 },
+    });
+    writeRunningDaemon(tmpHome, [], now);
+    writeBacklogSnapshot(tmpHome, repo, [item], now);
+    recordOutcome(item.id, 'empty', now);
+
+    const baseline = await buildFleetStatus(cfg);
+    const baselineAuthority = await operationalAuthorityProjection(baseline, cfg, item);
+
+    const dir = join(process.env.ASHLR_HOME!, 'best-of-n');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(dir, `${now.slice(0, 10)}.jsonl`), 'not-json\n', { mode: 0o600 });
+
+    const malformed = await buildFleetStatus(cfg);
+    const source = malformed.autonomousShipReadiness?.evidenceMatrix?.sources
+      .find((candidate) => candidate.id === 'best-of-n');
+
+    expect(malformed.bestOfNSource).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
+    });
+    expect(source).toMatchObject({
+      evidenceRole: 'learning',
+      eligibility: 'observational',
+      status: 'degraded',
+      sourceQuality: { badge: 'degraded-source' },
+    });
+    expect(await operationalAuthorityProjection(malformed, cfg, item)).toEqual(baselineAuthority);
   });
 
   it('promotes poor durable dispatch yield into next actions', async () => {
@@ -4014,64 +5128,35 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         verdict: 'actionable',
         action: 'route-same-tier-alternative',
         sameTierOnly: true,
-        topReason: 'agent returned no diff',
+        topReason: 'empty-diff',
       },
     });
     expect(s.dispatchYieldDiagnostics?.recommendation).toContain('same-tier alternatives only');
     expect(s.dispatchYieldDiagnostics?.recommendation).toContain('avoid tier escalation');
-    expect(s.nextActions).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          id: 'inspect-dispatch-yield',
-          priority: 'medium',
-          label: 'Inspect dispatch yield',
-          detail: expect.stringContaining('nim/goal proposal yield 0/3 (0%)'),
-          target: 'nim',
-        }),
-      ]),
-    );
-    expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.detail)
-      .toContain('top reason: agent returned no diff');
-    expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.detail)
-      .toContain('shape: no-diff 1, gate/capture 1, repairs 0, policy-off 0');
-    expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.detail)
-      .toContain('sample-gated action: same-tier reroute');
-    expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.commands)
-      .toEqual(expect.arrayContaining([
-        expect.objectContaining({
-          label: 'Inspect fleet status',
-          argv: ['ashlr', 'fleet', 'status', '--json'],
-          safety: 'read-only',
-        }),
-      ]));
     const actionIds = s.nextActions?.map((action) => action.id) ?? [];
-    expect(actionIds[0]).toBe('inspect-dispatch-yield');
-    expect(actionIds.indexOf('inspect-dispatch-yield')).toBeLessThan(actionIds.indexOf('build-backlog'));
+    expect(actionIds).not.toContain('inspect-dispatch-yield');
+    expect(actionIds[0]).toBe('build-backlog');
     expect(s.autonomousShipReadiness).toMatchObject({
       verdict: 'degraded',
       topBlocker: {
-        id: 'dispatch-yield-actionable',
+        id: 'proposal-production-needed',
         source: 'queue',
-        detail: expect.stringContaining('nim/goal proposal yield 0/3 (0%)'),
       },
       primaryAction: {
-        id: 'inspect-dispatch-yield',
+        id: 'build-backlog',
       },
     });
     expect(s.missionBrief).toMatchObject({
-      directive: 'Recover dispatch yield',
       blocker: {
-        id: 'dispatch-yield-actionable',
+        id: 'proposal-production-needed',
       },
       action: {
-        id: 'inspect-dispatch-yield',
+        id: 'build-backlog',
       },
     });
 
     const formatted = formatFleetStatus(s);
-    expect(formatted).toContain('[medium] Inspect dispatch yield [nim]');
-    expect(formatted).toContain('cmd: Inspect fleet status: ashlr fleet status --json (read-only)');
-    expect(formatted).toContain('nim/goal proposal yield 0/3 (0%)');
+    expect(formatted).not.toContain('[medium] Inspect dispatch yield [nim]');
     expect(formatted).toContain('diagnosis: actionable · nim/goal 0/3 0% · same-tier reroute');
     expect(formatted).toContain('shape:     no-diff 1, gate/capture 1, repairs 0, policy-off 0');
   });
@@ -4151,8 +5236,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.dispatchYieldDiagnostics?.recommendation)
       .toContain('no open installed same-tier alternative is available');
     const action = s.nextActions?.find((candidate) => candidate.id === 'inspect-dispatch-yield');
-    expect(action?.detail).toContain('sample-gated action: tighten context/reslice');
-    expect(action?.detail).toContain('action reason: no open installed same-tier alternative is available');
+    expect(action).toBeUndefined();
     expect(formatFleetStatus(s)).toContain('diagnosis: actionable · nim/goal 0/3 0% · tighten context/reslice');
   });
 
@@ -4232,49 +5316,23 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         source: 'self',
       },
     });
-    expect(actionIds[0]).toBe('process-capture-repairs');
-    expect(actionIds).toContain('inspect-dispatch-yield');
-    expect(repairAction).toMatchObject({
-      priority: 'high',
-      label: 'Monitor capture repairs',
-      detail: expect.stringContaining('1 capture repair item(s) are eligible'),
-      target: repo,
-      commands: [
-        expect.objectContaining({
-          label: 'Inspect fleet status',
-          argv: ['ashlr', 'fleet', 'status', '--json'],
-          safety: 'read-only',
-        }),
-        expect.objectContaining({
-          label: 'Inspect daemon status',
-          argv: ['ashlr', 'daemon', 'status'],
-          safety: 'read-only',
-        }),
-      ],
-    });
-    expect(repairAction?.detail).toContain('sample-gated action: tighten context/reslice');
-    expect(repairAction?.detail)
-      .toContain('repair recovery: generated repairs 1/1 converted (100%; capture 1)');
-    expect(repairAction?.detail).toContain('queued repair coverage: 1 capture repair queued');
-    expect(repairAction?.detail).toContain('First: Dispatch capture repair: complete the failed proposal capture.');
-    expect(yieldAction?.detail).toContain('queued repair coverage: 1 capture repair queued');
-    expect(yieldAction?.detail)
-      .toContain('repair recovery: generated repairs 1/1 converted (100%; capture 1)');
+    expect(actionIds[0]).toBe('build-backlog');
+    expect(actionIds).not.toContain('process-capture-repairs');
+    expect(actionIds).not.toContain('inspect-dispatch-yield');
+    expect(repairAction).toBeUndefined();
+    expect(yieldAction).toBeUndefined();
     expect(s.autonomousShipReadiness).toMatchObject({
       primaryAction: {
-        id: 'process-capture-repairs',
+        id: 'build-backlog',
       },
     });
     expect(s.missionBrief).toMatchObject({
-      directive: 'Monitor capture repairs',
       action: {
-        id: 'process-capture-repairs',
+        id: 'build-backlog',
       },
     });
     const formatted = formatFleetStatus(s);
-    expect(formatted).toContain('[high] Monitor capture repairs');
-    expect(formatted).toContain('cmd: Inspect fleet status: ashlr fleet status --json (read-only)');
-    expect(repairAction?.commands?.map((command) => command.safety)).toEqual(['read-only', 'read-only']);
+    expect(formatted).not.toContain('[high] Monitor capture repairs');
   });
 
   it('treats healthy generated repair conversion as active recovery', async () => {
@@ -4351,16 +5409,16 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       },
     });
     expect(s.autonomousShipReadiness?.topBlocker).toMatchObject({
-      id: 'generated-repair-recovery-active',
-      severity: 'low',
-      detail: expect.stringContaining('generated repairs 4/5 converted (80%; capture 5)'),
+      id: 'proposal-production-needed',
+      severity: 'medium',
     });
     expect(s.autonomousShipReadiness?.topBlocker?.id).not.toBe('dispatch-yield-actionable');
-    expect(actionIds[0]).toBe('process-capture-repairs');
+    expect(actionIds[0]).toBe('build-backlog');
+    expect(actionIds).not.toContain('process-capture-repairs');
     expect(actionIds).not.toContain('inspect-dispatch-yield');
     expect(s.missionBrief).toMatchObject({
-      blocker: { id: 'generated-repair-recovery-active' },
-      action: { id: 'process-capture-repairs' },
+      blocker: { id: 'proposal-production-needed' },
+      action: { id: 'build-backlog' },
     });
   });
 
@@ -4421,10 +5479,11 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       title: fresh.title,
     });
     expect(actionIds).not.toContain('process-capture-repairs');
-    expect(actionIds[0]).toBe('inspect-dispatch-yield');
+    expect(actionIds).not.toContain('inspect-dispatch-yield');
+    expect(actionIds[0]).toBe('build-backlog');
   });
 
-  it('shortens cooldown for trusted empty generated repairs when recovery is healthy', async () => {
+  it('keeps full cooldown for trusted empty generated repairs despite healthy observations', async () => {
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo');
     const now = new Date().toISOString();
@@ -4471,13 +5530,13 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         source: 'self',
       },
     });
-    expect(s.queue.eligibleBacklogItems).toBe(2);
-    expect(s.queue.cooldownItems).toBe(0);
+    expect(s.queue.eligibleBacklogItems).toBe(1);
+    expect(s.queue.cooldownItems).toBe(1);
     expect(s.queue.next?.[0]).toMatchObject({
-      id: repair.id,
-      title: repair.title,
+      id: fresh.id,
+      title: fresh.title,
     });
-    expect(s.nextActions?.map((action) => action.id)).toContain('drain-diagnostic-reslices');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('drain-diagnostic-reslices');
   });
 
   it('projects the same five-minute dispatch-blocked repair cooldown used by the daemon', async () => {
@@ -4585,42 +5644,23 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         diagnosticAttempts: 3,
       },
     });
-    expect(actionIds[0]).toBe('drain-diagnostic-reslices');
-    expect(actionIds).toContain('inspect-dispatch-yield');
-    expect(drainAction).toMatchObject({
-      priority: 'high',
-      label: 'Monitor diagnostic auto-drain',
-      detail: expect.stringContaining('1 diagnostic no-diff reslice item(s) are eligible'),
-      commands: [
-        expect.objectContaining({
-          label: 'Inspect fleet status',
-          argv: ['ashlr', 'fleet', 'status', '--json'],
-          safety: 'read-only',
-        }),
-        expect.objectContaining({
-          label: 'Inspect daemon status',
-          argv: ['ashlr', 'daemon', 'status'],
-          safety: 'read-only',
-        }),
-      ],
-    });
-    expect(drainAction?.detail).toContain('sample-gated action: tighten context/reslice');
-    expect(drainAction?.detail).toContain('queued repair coverage: 1 no-diff reslice queued');
-    expect(drainAction?.detail).toContain('First: Reslice no-diff dispatch for repo item repo:goal:stalled.');
+    expect(actionIds[0]).toBe('build-backlog');
+    expect(actionIds).not.toContain('drain-diagnostic-reslices');
+    expect(actionIds).not.toContain('inspect-dispatch-yield');
+    expect(drainAction).toBeUndefined();
     expect(s.autonomousShipReadiness).toMatchObject({
       primaryAction: {
-        id: 'drain-diagnostic-reslices',
+        id: 'build-backlog',
       },
     });
     expect(s.missionBrief).toMatchObject({
-      directive: 'Monitor diagnostic auto-drain',
       action: {
-        id: 'drain-diagnostic-reslices',
+        id: 'build-backlog',
       },
     });
     const formatted = formatFleetStatus(s);
-    expect(formatted).toContain('[high] Monitor diagnostic auto-drain');
-    expect(formatted).toContain('cmd: Inspect fleet status: ashlr fleet status --json (read-only)');
+    expect(formatted).toContain('diagnosis: actionable');
+    expect(formatted).not.toContain('[high] Monitor diagnostic auto-drain');
     expect(formatted).not.toContain('cmd: Drain diagnostic reslices: ashlr daemon start --once --drain diagnostic-reslices --limit 3');
 
     writeRunningDaemon(tmpHome, [
@@ -4654,7 +5694,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       proposalsCreated: 0,
       noProposalDispatches: 0,
     });
-    expect(stalledDrainAction?.detail).toContain('reslice-drain-stalled');
+    expect(stalledDrainAction).toBeUndefined();
   });
 
   it('does not promote diagnostic drain when queued reslices are cooling', async () => {
@@ -4709,7 +5749,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       title: fresh.title,
     });
     expect(actionIds).not.toContain('drain-diagnostic-reslices');
-    expect(actionIds[0]).toBe('inspect-dispatch-yield');
+    expect(actionIds).not.toContain('inspect-dispatch-yield');
+    expect(actionIds[0]).toBe('build-backlog');
   });
 
   it('keeps verification failure repair ahead of diagnostic drain while merge gate is blocked', async () => {
@@ -4774,17 +5815,26 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       blocked: 1,
     });
     expect(actionIds[0]).toBe('repair-verification-failures');
-    expect(actionIds).toContain('drain-diagnostic-reslices');
+    expect(actionIds).not.toContain('drain-diagnostic-reslices');
     const failureAction = s.nextActions?.find((action) => action.id === 'repair-verification-failures');
     expect(failureAction).toMatchObject({
       label: 'Drain failed proposals',
-      commands: expect.arrayContaining([
+      commands: [
         expect.objectContaining({
-          label: 'Run merge maintenance',
-          argv: ['ashlr', 'daemon', 'start', '--once'],
+          label: 'Inspect failed proposals',
+          argv: ['ashlr', 'inbox', '--json'],
+          safety: 'read-only',
         }),
-      ]),
+        expect.objectContaining({
+          label: 'Inspect fleet status',
+          argv: ['ashlr', 'fleet', 'status', '--json'],
+          safety: 'read-only',
+        }),
+      ],
     });
+    expect(s.nextActions?.flatMap((action) => action.commands ?? []).some((command) =>
+      command.argv.join(' ') === 'ashlr daemon start --once'
+    )).toBe(false);
     expect(s.autonomousShipReadiness?.topBlocker).toMatchObject({
       id: 'verification-failed',
     });
@@ -4915,9 +5965,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
 
     const s = await buildFleetStatus(baseConfig());
 
-    expect(s.dispatchProduction?.topReasons[0]?.reason).toContain('proposal filing disabled');
+    expect(s.dispatchProduction?.topReasons[0]?.reason).toBe('proposal-disabled');
     expect(s.dispatchProduction?.diagnosticTopReasons?.[0]).toEqual({
-      reason: 'agent returned no diff',
+      reason: 'empty-diff',
       count: 3,
     });
     expect(s.dispatchProduction?.byBackend[0]).toMatchObject({
@@ -4933,15 +5983,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       },
     });
     const action = s.nextActions?.find((candidate) => candidate.id === 'inspect-dispatch-yield');
-    expect(action).toMatchObject({
-      target: 'local-coder',
-      detail: expect.stringContaining('local-coder/goal proposal yield 0/3 (0%)'),
-    });
-    expect(action?.detail).toContain('top reason: agent returned no diff');
-    expect(action?.detail).toContain('shape: no-diff 3, gate/capture 0, repairs 0, policy-off 0');
-    expect(action?.detail).not.toContain('proposal filing disabled');
+    expect(action).toBeUndefined();
     const formatted = formatFleetStatus(s);
-    expect(formatted).toContain('reasons:   3x agent returned no diff');
+    expect(formatted).toContain('reasons:   3x empty-diff');
     expect(formatted).not.toContain('reasons:   16x proposal filing disabled');
   });
 
@@ -4963,7 +6007,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     );
     const baseEvent: DispatchProductionEvent = {
       schemaVersion: 1,
-      ts: new Date().toISOString(),
+      ts: settledLearningTimestamp(),
       machineId: 'm49',
       itemId: 'disabled-a',
       source: 'goal',
@@ -5033,7 +6077,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
     const baseEvent: DispatchProductionEvent = {
       schemaVersion: 1,
-      ts: new Date().toISOString(),
+      ts: settledLearningTimestamp(),
       machineId: 'm49',
       itemId: 'diagnostic-a',
       source: 'goal',
@@ -5064,7 +6108,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const s = await buildFleetStatus(baseConfig());
 
     expect(s.dispatchProduction).toMatchObject({
-      attempts: 3,
+      attempts: 2,
       outcomes: { cancelled: 1 },
     });
     expect(s.dispatchYieldDiagnostics).toMatchObject({
@@ -5108,7 +6152,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     );
     const baseEvent: DispatchProductionEvent = {
       schemaVersion: 1,
-      ts: new Date().toISOString(),
+      ts: settledLearningTimestamp(),
       machineId: 'm49',
       itemId: 'capture-missing-a',
       source: 'goal',
@@ -5159,7 +6203,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       },
       diagnosticTopReasons: [
         {
-          reason: 'capture-missing: required proposal dispatch ended before final capture',
+          reason: 'proposal-capture-missing',
           count: 3,
         },
       ],
@@ -5178,10 +6222,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         verdict: 'actionable',
       },
     });
-    expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.detail)
-      .toContain('top reason: capture-missing: required proposal dispatch ended before final capture');
-    expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.detail)
-      .toContain('shape: no-diff 0, gate/capture 3, repairs 0, policy-off 0');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-dispatch-yield');
     expect(s.attemptCoverage?.production).toMatchObject({
       attempts: 3,
       proposalCreated: 0,
@@ -5844,6 +6885,11 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       topBlocker: { id: 'signed-evidence-degraded', source: 'autonomy-packs' },
       primaryAction: { id: 'inspect-signed-evidence', priority: 'high' },
     });
+    expect(status.nextActions).toContainEqual(expect.objectContaining({
+      id: 'inspect-signed-evidence',
+      priority: 'high',
+    }));
+    expect(status.missionBrief?.action).toMatchObject({ id: 'inspect-signed-evidence' });
     expect(status.autonomousShipReadiness?.primaryAction?.commands?.[0]?.argv)
       .toEqual(['ashlr', 'fleet', 'evidence', 'doctor', 'autonomy-packs', '--json']);
   });
@@ -5966,7 +7012,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       },
     });
     const actionIds = s.nextActions?.map((a) => a.id) ?? [];
-    expect(actionIds).toContain('start-daemon');
+    expect(actionIds).toContain('inspect-daemon-activation');
+    expect(actionIds).not.toContain('start-daemon');
     expect(actionIds).not.toContain('drain-ready-auto-merges');
     expect(actionIds).not.toContain('verify-pending-proposals');
     expect(actionIds).not.toContain('repair-verification-failures');
@@ -6058,9 +7105,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       state: 'cold-start',
       summary: {
         eligible: 1,
-        'cold-start': 4,
+        'cold-start': 1,
         withheld: 0,
-        observational: 1,
+        observational: 4,
         'not-applicable': 2,
       },
     });
@@ -6071,6 +7118,22 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.autonomousShipReadiness?.primaryAction).toMatchObject({
       id: 'drain-ready-auto-merges',
     });
+    const mergeDrainAction = s.nextActions?.find(
+      (action) => action.id === 'drain-ready-auto-merges',
+    );
+    expect(mergeDrainAction?.commands).toEqual([
+      expect.objectContaining({
+        argv: ['ashlr', 'inbox', '--json'],
+        safety: 'read-only',
+      }),
+      expect.objectContaining({
+        argv: ['ashlr', 'fleet', 'status', '--json'],
+        safety: 'read-only',
+      }),
+    ]);
+    expect(s.nextActions?.flatMap((action) => action.commands ?? []).some((command) =>
+      command.argv.join(' ') === 'ashlr daemon start --once'
+    )).toBe(false);
     expect(s.missionBrief).toMatchObject({
       directive: 'Drain ready auto-merges',
       confidence: 'high',
@@ -6237,7 +7300,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       topBlocker: { id: 'merge-authority-incomplete' },
       evidenceMatrix: {
         state: 'degraded',
-        summary: { withheld: 1 },
+        summary: { withheld: 1, observational: 4 },
       },
     });
     expect(status.autoMergeReadiness).toMatchObject({
@@ -6250,33 +7313,151 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
     expect(decisionEvidence).toMatchObject({
       category: 'evidence',
-      evidenceRole: 'merge-authority',
+      evidenceRole: 'merge-gate',
       eligibility: 'withheld',
       applicability: 'required',
+      actionSynthesis: 'observational-only',
       status: 'degraded',
+      detail: expect.stringContaining('ashlr fleet evidence doctor decisions --json (read-only)'),
       evidenceQuality: { complete: false, invalidRows: 1 },
       sourceQuality: { badge: 'degraded-source' },
     });
-    expect(action).toMatchObject({
-      priority: 'medium',
-      commands: [
-        {
-          argv: ['ashlr', 'fleet', 'evidence', 'doctor', 'decisions', '--json'],
-          safety: 'read-only',
-        },
-        {
-          argv: ['ashlr', 'fleet', 'evidence', 'doctor', 'decisions', '--deep', '--json'],
-          safety: 'read-only',
-        },
-        { argv: ['ashlr', 'fleet', 'status', '--json'], safety: 'read-only' },
-      ],
-    });
-    expect(action?.commands?.every((command) => command.endpointPath === undefined)).toBe(true);
+    expect(action).toBeUndefined();
+    expect(status.nextActions).not.toContainEqual(expect.objectContaining({ id: 'inspect-learning-evidence' }));
     expect(status.autonomousShipReadiness?.primaryAction).not.toMatchObject({ id: 'drain-ready-auto-merges' });
     expect(status.nextActions?.map((candidate) => candidate.id)).not.toContain('drain-ready-auto-merges');
   });
 
-  it('keeps evidence diagnosis secondary to eligible operational backlog work', async () => {
+  it('preserves detached promotion evidence while a degraded unsigned decisions gate blocks merge authority', async () => {
+    const repo = join(tmpHome, 'combined-detached-learning-repo');
+    const observedAt = new Date().toISOString();
+    writeBacklogSnapshot(tmpHome, repo, [], observedAt);
+    writeRunningDaemon(tmpHome, [], observedAt);
+    const cfg = withFoundry({
+      autoMerge: { enabled: true, trustBasis: 'verification', maxRisk: 'low' },
+    });
+    createSignedProposal(cfg, {
+      title: 'Ready proposal blocked by degraded decision gate',
+      diff: docsDiff('combined detached and learning evidence'),
+      verifyResult: { passed: true, source: 'manual' },
+    });
+    const decisions = join(process.env.ASHLR_HOME!, 'decisions');
+    mkdirSync(decisions, { recursive: true, mode: 0o700 });
+    writeFileSync(join(decisions, `${observedAt.slice(0, 10)}.jsonl`), 'not-json\n', { mode: 0o600 });
+
+    const base = await buildFleetStatus(cfg);
+    const evidenceQuality = {
+      sourceState: 'healthy' as const,
+      sourcePresent: true,
+      complete: true,
+      stopReasons: [],
+      filesRead: 1,
+      bytesRead: 256,
+      rowsScanned: 1,
+      invalidRows: 0,
+      unreadableFiles: 0,
+    };
+    const combined: FleetStatus = {
+      ...base,
+      detachedPostMergeVerificationSource: evidenceQuality,
+      detachedPostMergeDenominatorSource: evidenceQuality,
+      detachedPostMergeWorkTicketSource: evidenceQuality,
+      detachedPostMergeVerificationReadiness: {
+        version: 1,
+        authority: 'observation-only',
+        policyEligible: false,
+        mergePermitted: false,
+        rollbackPermitted: false,
+        deployPermitted: false,
+        state: 'conclusive',
+        latestObservedAt: observedAt,
+        passRate: 1,
+        denominator: {
+          candidateSetDigest: 'a'.repeat(64),
+          eligibleCandidates: 1,
+          observedCandidates: 1,
+          conclusiveCandidates: 1,
+          unobservedCandidates: 0,
+          pass: 1,
+          fail: 0,
+          unknown: 0,
+          queuedCandidates: 1,
+        },
+        summary: {
+          cohorts: 1,
+          denominatorCompleteCohorts: 1,
+          conclusiveCompleteCohorts: 1,
+          expectedMembers: 1,
+          observedMembers: 1,
+          pass: 1,
+          fail: 0,
+          unknown: 0,
+        },
+      },
+    };
+    combined.autoMergeCanaryPromotionReadiness = buildAutoMergeCanaryPromotionReadiness(
+      combined,
+      cfg,
+      {
+        sourceState: 'missing',
+        sourcePresent: false,
+        complete: true,
+        status: 'inactive',
+        active: false,
+        state: null,
+      } as Parameters<typeof buildAutoMergeCanaryPromotionReadiness>[2],
+      Date.parse(observedAt),
+    );
+
+    expect(combined.detachedPostMergeVerificationReadiness).toMatchObject({
+      authority: 'observation-only',
+      policyEligible: false,
+      state: 'conclusive',
+      denominator: {
+        eligibleCandidates: 1,
+        observedCandidates: 1,
+        conclusiveCandidates: 1,
+        queuedCandidates: 1,
+        pass: 1,
+      },
+    });
+    expect(combined.detachedPostMergeWorkTicketSource).toMatchObject({
+      sourceState: 'healthy', complete: true, rowsScanned: 1,
+    });
+    expect(combined.autoMergeCanaryPromotionReadiness?.blockers.map((blocker) => blocker.code))
+      .not.toEqual(expect.arrayContaining([
+        'post-merge-source-unhealthy',
+        'post-merge-cohort-insufficient',
+        'post-merge-adverse-observed',
+      ]));
+    expect(combined.routingLearningAuthority).toMatchObject({
+      state: 'inactive', operationalSteering: false,
+    });
+    expect(combined.learningMetrics).toMatchObject({ state: 'withheld' });
+    expect(combined.autonomousShipReadiness).toMatchObject({
+      verdict: 'blocked',
+      topBlocker: { id: 'merge-authority-incomplete' },
+      evidenceMatrix: { state: 'degraded', summary: { withheld: 1 } },
+    });
+    expect(combined.autoMergeReadiness).toMatchObject({
+      preflightReady: 1,
+      authorityReady: 0,
+      authorityBlocked: 1,
+    });
+    expect(combined.autonomousShipReadiness?.evidenceMatrix?.sources.find(
+      (source) => source.id === 'decisions',
+    )).toMatchObject({
+      evidenceRole: 'merge-gate',
+      applicability: 'required',
+      eligibility: 'withheld',
+      actionSynthesis: 'observational-only',
+      status: 'degraded',
+    });
+    expect(combined.nextActions?.map((action) => action.id)).not.toContain('inspect-learning-evidence');
+    expect(combined.nextActions?.map((action) => action.id)).not.toContain('drain-ready-auto-merges');
+  });
+
+  it('does not synthesize actions from observational decision evidence over backlog work', async () => {
     const repo = join(tmpHome, 'repo');
     mkdirSync(repo, { recursive: true });
     writeBacklogSnapshot(tmpHome, repo, [makeBacklogItem(repo, 'repo:goal:evidence-order', 'Ship useful work', 5)], new Date().toISOString());
@@ -6288,9 +7469,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const status = await buildFleetStatus(withFoundry({
       autoMerge: { enabled: true, trustBasis: 'verification', maxRisk: 'low' },
     }));
-    expect(status.nextActions?.map((action) => action.id)).toEqual(expect.arrayContaining([
-      'build-backlog', 'inspect-learning-evidence',
-    ]));
+    expect(status.nextActions?.map((action) => action.id)).toContain('build-backlog');
+    expect(status.nextActions?.map((action) => action.id)).not.toContain('inspect-learning-evidence');
     expect(status.autonomousShipReadiness?.primaryAction).toMatchObject({ id: 'build-backlog' });
     expect(status.missionBrief?.directive).toBe('Build the highest-value backlog proposal');
   });
@@ -7343,6 +8523,12 @@ describe('skill corpus readiness projection', () => {
 });
 
 describe('formatFleetStatus — pure formatter (M49)', () => {
+  const healthyDispatchProductionSource: NonNullable<FleetStatus['dispatchProductionSource']> = {
+    sourceState: 'healthy', sourcePresent: true, complete: true, stopReasons: [],
+    filesRead: 1, datedFilesRead: 1, looseFilesRead: 0, bytesRead: 1024,
+    rowsScanned: 1, invalidRows: 0, unreadableFiles: 0,
+  };
+
   it('renders compact build identity and omits it for legacy snapshots', () => {
     const base = {
       generatedAt: '2026-07-11T00:00:00.000Z',
@@ -7705,13 +8891,16 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
       byBackendSource: [],
     };
 
-    const out = formatFleetStatus({ ...base, dispatchProduction });
+    const out = formatFleetStatus({
+      ...base, dispatchProduction, dispatchProductionSource: healthyDispatchProductionSource,
+    });
     expect(out).toContain('reasons:   1x engine "local-coder" completed without file changes');
     expect(out).toContain('repair yield: capture 1 attempt, no-diff 1 attempt; 1/2 converted (50%)');
     expect(out).not.toContain('proposal filing disabled');
 
     const emptyDiagnosticOut = formatFleetStatus({
       ...base,
+      dispatchProductionSource: healthyDispatchProductionSource,
       dispatchProduction: {
         ...dispatchProduction,
         diagnosticTopReasons: [],
@@ -7784,7 +8973,9 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
       killed: false,
     };
 
-    const out = formatFleetStatus({ ...base, dispatchProduction });
+    const out = formatFleetStatus({
+      ...base, dispatchProduction, dispatchProductionSource: healthyDispatchProductionSource,
+    });
 
     expect(out).toContain(
       'treatment: baseline-reslice 1/3 terminal, target-localization 2/3 terminal; ' +
@@ -7795,6 +8986,7 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
 
     const withoutTreatment = formatFleetStatus({
       ...base,
+      dispatchProductionSource: healthyDispatchProductionSource,
       dispatchProduction: {
         ...dispatchProduction,
         generatedRepairAttempts: {
@@ -7867,6 +9059,7 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
       queue: { backlogItems: 0 },
       proposals: { pending: 0, frontierPending: 0, applied: 0 },
       dispatchProduction,
+      dispatchProductionSource: healthyDispatchProductionSource,
       merges: { recent: 0 },
       killed: false,
     });
@@ -7881,7 +9074,12 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
   it('renders all sections and flags the paused banner when killed', () => {
     const out = formatFleetStatus({
       generatedAt: '2026-06-17T00:00:00.000Z',
-      daemon: { running: true, lastTickAt: '2026-06-17T00:00:00.000Z', todaySpentUsd: 1.2345 },
+      daemon: {
+        running: true,
+        sourceQuality: { sourceState: 'healthy', complete: true, reason: 'healthy' },
+        lastTickAt: '2026-06-17T00:00:00.000Z',
+        todaySpentUsd: 1.2345,
+      },
       backends: [
         {
           backend: 'builtin',
@@ -8130,6 +9328,7 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
         byBackendModel: [],
         byBackendSource: [],
       },
+      dispatchProductionSource: healthyDispatchProductionSource,
       merges: { recent: 2 },
       nextActions: [
         {
@@ -8336,6 +9535,13 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
         },
       },
       killed: true,
+      killSwitch: { state: 'active', sourceState: 'healthy', reason: 'present' },
+      guardHealth: {
+        generatedAt: '2026-06-17T00:02:00.000Z',
+        blocked: false,
+        blocks: [],
+        sourceQuality: { sourceState: 'healthy', complete: true, reasons: [] },
+      },
     });
 
     expect(out).toContain('Fleet status');
@@ -8375,7 +9581,7 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('2x agent returned no diff');
     expect(out).toContain('recent:    builtin a Ship autonomy debugger (agent returned no diff)');
     expect(out).toContain('Dispatch yield:');
-    expect(out).toContain('output:    proposals 1/3 (33%), no-proposal 2');
+    expect(out).toContain('output:    reported proposal-created 1/3 (33%), no-proposal 2');
     expect(out).toContain('backends:  local-coder 0/2 0%; codex 1/1 100%');
     expect(out).toContain('2 auto-merge(s)');
     expect(out).toContain('Mission brief:');
@@ -8418,6 +9624,156 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('confidence: medium');
     expect(out).toContain('resources:  constrained (1 constrained, 0 depleted)');
     expect(out).toContain('budget:     near');
+  });
+
+  it('withholds composite post-merge metrics when either required source is missing', () => {
+    const adverse: PostMergeObservationReadResult = {
+      observations: [],
+      sourceState: 'healthy',
+      sourcePresent: true,
+      complete: true,
+      stopReasons: [],
+      filesRead: 1,
+      bytesRead: 32,
+      physicalRows: 0,
+      invalidRows: 0,
+      conflictingEvents: 0,
+      duplicateRows: 0,
+      supersededRows: 0,
+      limitExceeded: false,
+    };
+    const stability: PostMergeStabilityReadResult = {
+      witnesses: [],
+      manifests: [],
+      cohortSummary: {
+        completeCohorts: 0,
+        releasedWitnesses: 0,
+        distinctRepoDigests: 0,
+      },
+      sourceState: 'missing',
+      sourcePresent: false,
+      complete: true,
+      stopReasons: [],
+      filesRead: 0,
+      bytesRead: 0,
+      physicalRows: 0,
+      invalidRows: 0,
+      oversizedRows: 0,
+      orphanWitnesses: 0,
+      incompleteManifests: 0,
+      conflictingCohorts: 0,
+      duplicateRows: 0,
+      releasedCohorts: 0,
+      limitExceeded: false,
+    };
+
+    const adverseOnly = projectPostMergeComposite(adverse, stability);
+    expect(adverseOnly).toMatchObject({
+      source: {
+        sourceState: 'degraded',
+        sourcePresent: true,
+        complete: false,
+        stopReasons: ['stability-source-missing'],
+      },
+    });
+    expect(adverseOnly.cohort).toBeUndefined();
+
+    const stabilityOnly = projectPostMergeComposite(
+      { ...adverse, sourceState: 'missing', sourcePresent: false, complete: true, filesRead: 0, bytesRead: 0 },
+      { ...stability, sourceState: 'healthy', sourcePresent: true, complete: true, filesRead: 1, bytesRead: 32 },
+    );
+    expect(stabilityOnly).toMatchObject({
+      source: {
+        sourceState: 'degraded',
+        sourcePresent: true,
+        complete: false,
+        stopReasons: ['adverse-source-missing'],
+      },
+    });
+    expect(stabilityOnly.cohort).toBeUndefined();
+  });
+
+  it('renders omitted workspace provenance as unknown and withholds zero aggregates', async () => {
+    const status = await buildFleetStatus(baseConfig());
+    expect(status.workspace).toBeDefined();
+    status.workspace = { ...status.workspace!, sourceQuality: undefined };
+
+    const out = formatFleetStatus(status);
+
+    expect(out).toContain('Global workspace:');
+    expect(out).toContain('source:    unknown');
+    expect(out).toContain('events:    unavailable');
+    expect(out).toContain('machines:  unavailable');
+    expect(out).not.toContain('events:    0\n');
+    expect(out).toContain('Auto-merge canary promotion readiness (observation only):');
+    expect(out).toContain('scope caps: 4 file(s), 150 changed line(s)');
+    expect(out).toContain('cap source: default');
+    expect(status.autoMergeCanaryPromotionReadiness).toMatchObject({
+      authority: 'observation-only',
+      verdict: 'blocked',
+      activationPermitted: false,
+      scopeCaps: { maxFiles: 4, maxLines: 150, source: 'default' },
+    });
+    expect(status.autoMergeCanaryPromotionReadiness?.blockers.map((entry) => entry.code))
+      .not.toContain('scope-caps-unavailable');
+  });
+
+  it('keeps explicit null scope caps blocked and unavailable', async () => {
+    const cfg = baseConfig();
+    cfg.foundry = {
+      autoMerge: {
+        maxAutomergeFiles: null,
+        maxAutomergeLines: null,
+      },
+    } as unknown as NonNullable<AshlrConfig['foundry']>;
+
+    const status = await buildFleetStatus(cfg);
+    const out = formatFleetStatus(status);
+
+    expect(out).toContain('scope caps: unavailable file(s), unavailable changed line(s)');
+    expect(out).toContain('cap source: invalid');
+    expect(status.autoMergeCanaryPromotionReadiness).toMatchObject({
+      verdict: 'blocked',
+      activationPermitted: false,
+      scopeCaps: { maxFiles: null, maxLines: null, source: 'invalid' },
+    });
+    expect(status.autoMergeCanaryPromotionReadiness?.blockers.map((entry) => entry.code))
+      .toContain('scope-caps-unavailable');
+  });
+
+  it('renders schema-v1 promotion payloads without inventing scope identity', () => {
+    const out = formatFleetStatus({
+      generatedAt: '2026-07-29T02:00:00.000Z',
+      daemon: { running: false, lastTickAt: null, todaySpentUsd: 0 },
+      backends: [],
+      queue: { backlogItems: 0 },
+      proposals: { pending: 0, frontierPending: 0, applied: 0 },
+      merges: { recent: 0 },
+      killed: false,
+      autoMergeCanaryPromotionReadiness: {
+        schemaVersion: 1,
+        authority: 'observation-only',
+        observedAt: '2026-07-29T02:00:00.000Z',
+        verdict: 'blocked',
+        evidenceReady: false,
+        activationPermitted: false,
+        blockers: [],
+        authorityBlockers: [{
+          code: 'enforcement-unsupported',
+          severity: 'critical',
+          detail: 'unsupported',
+        }],
+        primaryBlocker: {
+          code: 'enforcement-unsupported',
+          severity: 'critical',
+          detail: 'unsupported',
+        },
+      },
+    } as unknown as FleetStatus);
+
+    expect(out).toContain('scope caps: unavailable file(s), unavailable changed line(s)');
+    expect(out).toContain('cap source: unavailable');
+    expect(out).toContain('identity:   unavailable via unavailable (observed never)');
   });
 
   it('omits the paused banner when not killed', () => {

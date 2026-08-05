@@ -38,9 +38,9 @@ import { resolveEngineSpec } from './engine-registry.js';
 // M240: learned-bias tie-breaker — reorders engine candidates by historical ship-rate.
 // Import is synchronous (no async); cold-start (empty ledger) = no-op.
 import {
-  buildEngineScores,
+  operationalEngineScoresForRouting,
   sortEnginesByScore,
-  buildProducerScores,
+  operationalProducerScoresForRouting,
   selectCostAwareModel,
   type EngineScoreMap,
 } from './learned-router.js';
@@ -409,7 +409,7 @@ export function routeTask(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const learnedRoutingEnabled = (cfg.foundry as any)?.learnedRouting !== false;
     const learnedScores: EngineScoreMap = learnedRoutingEnabled
-      ? buildEngineScores(item.source)
+      ? operationalEngineScoresForRouting(item.source)
       : new Map();
 
     // ── M323: model-granular cost-aware selection (DEFAULT OFF) ─────────
@@ -422,7 +422,7 @@ export function routeTask(
       | { enabled?: boolean; minShipRate?: number }
       | undefined;
     const producerScores: EngineScoreMap | null =
-      mgCfg?.enabled === true ? buildProducerScores(item.source) : null;
+      mgCfg?.enabled === true ? operationalProducerScoresForRouting(item.source) : null;
     const minShipRate = typeof mgCfg?.minShipRate === 'number' ? mgCfg.minShipRate : 0.6;
 
     const tryLearnedModel = (

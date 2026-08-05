@@ -6,6 +6,9 @@ const OPERATION = 'assure-private-path';
 const MAX_OUTPUT_BYTES = 4 * 1024;
 const DEFAULT_TIMEOUT_MS = 5_000;
 const DEFAULT_BATCH_TIMEOUT_MS = 15_000;
+const MAX_SINGLE_PATH_ADAPTER_ATTEMPTS = 2;
+const SINGLE_PATH_RETRY_BASE_DELAY_MS = 50;
+const SINGLE_PATH_RETRY_MAX_DELAY_MS = 200;
 
 const WINDOWS_ACL_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
@@ -254,6 +257,7 @@ export const PRIVATE_STORAGE_TEST_CONTROL = Symbol.for(
 export interface PrivateStorageTestControl {
   runner?: PrivateStorageRunner;
   observeInvocation?: (invocation: PrivateStorageInvocation) => void;
+  waitForRetry?: (delayMs: number, reason: string) => void;
 }
 
 interface PrivateStorageTestControlState extends PrivateStorageTestControl {
@@ -301,10 +305,14 @@ export function _setPrivateStorageTestControlForTest(
   if (control.observeInvocation !== undefined && typeof control.observeInvocation !== 'function') {
     throw new TypeError('Private-storage invocation observer must be a function');
   }
+  if (control.waitForRetry !== undefined && typeof control.waitForRetry !== 'function') {
+    throw new TypeError('Private-storage retry waiter must be a function');
+  }
   Reflect.set(globalThis, PRIVATE_STORAGE_TEST_CONTROL_STATE, Object.freeze({
     sentinel: PRIVATE_STORAGE_TEST_CONTROL,
     runner: control.runner,
     observeInvocation: control.observeInvocation,
+    waitForRetry: control.waitForRetry,
   } satisfies PrivateStorageTestControlState));
 }
 
@@ -314,7 +322,8 @@ const FAILURE_REASONS = new Set([
   'adapter-error-ancestor-parent', 'adapter-error-ancestor-rules',
   'adapter-error-apply-acl', 'adapter-error-build-acl', 'adapter-error-inspect-ancestors',
   'adapter-error-load-item', 'adapter-error-read-input', 'adapter-error-readback-acl',
-  'adapter-error-verify-acl', 'anchor-not-reached', 'dacl-not-protected', 'deny-ace',
+  'adapter-error-read-owner', 'adapter-error-verify-acl', 'anchor-not-reached',
+  'dacl-not-protected', 'deny-ace',
   'inherited-ace', 'invalid-anchor', 'invalid-input', 'invalid-input-shape', 'invalid-kind',
   'invalid-mode', 'missing-or-duplicate-principal',
   'reparse-ancestor', 'reparse-point', 'unexpected-ace-count', 'untrusted-ancestor-delete',
@@ -335,6 +344,22 @@ const defaultRunner: PrivateStorageRunner = (invocation) => spawnSync(
     shell: false,
   },
 );
+
+function waitForTransientAclRetry(
+  failedAttempt: number,
+  reason: string,
+  testControl: PrivateStorageTestControlState | undefined,
+): void {
+  const delayMs = Math.min(
+    SINGLE_PATH_RETRY_MAX_DELAY_MS,
+    SINGLE_PATH_RETRY_BASE_DELAY_MS * (2 ** failedAttempt),
+  );
+  if (testControl?.waitForRetry) {
+    testControl.waitForRetry(delayMs, reason);
+    return;
+  }
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
+}
 
 function localWindowsPath(value: string | undefined, maxLength: number): string | null {
   if (!value || value.length > maxLength || [...value].some((char) => char.charCodeAt(0) < 32)) return null;
@@ -402,28 +427,46 @@ export function assurePrivateStoragePath(
   };
   const testControl = activePrivateStorageTestControl();
   try {
-    testControl?.observeInvocation?.({
-      ...invocation,
-      args: [...invocation.args],
-    });
-    const result = (options.runner ?? testControl?.runner ?? defaultRunner)(invocation);
-    if (result.error) return { ok: false, reason: 'adapter-failed' };
-    const stdout = Buffer.isBuffer(result.stdout) ? result.stdout.toString('utf8') : result.stdout ?? '';
-    if (!stdout || Buffer.byteLength(stdout, 'utf8') > MAX_OUTPUT_BYTES) return { ok: false, reason: 'invalid-output' };
-    const parsed = JSON.parse(stdout) as Record<string, unknown>;
-    if (Object.keys(parsed).sort().join(',') !== 'nonce,ok,operation,reason' ||
-      parsed['nonce'] !== nonce || parsed['operation'] !== OPERATION ||
-      typeof parsed['reason'] !== 'string') return { ok: false, reason: 'invalid-output' };
-    if (result.status !== 0) {
-      return parsed['ok'] === false && FAILURE_REASONS.has(parsed['reason'])
-        ? { ok: false, reason: parsed['reason'] }
-        : { ok: false, reason: 'adapter-failed' };
+    const runner = options.runner ?? testControl?.runner ?? defaultRunner;
+    for (let attempt = 0; attempt < MAX_SINGLE_PATH_ADAPTER_ATTEMPTS; attempt += 1) {
+      testControl?.observeInvocation?.({
+        ...invocation,
+        args: [...invocation.args],
+      });
+      const result = runner(invocation);
+      if (result.error) {
+        if (attempt + 1 < MAX_SINGLE_PATH_ADAPTER_ATTEMPTS) continue;
+        return { ok: false, reason: 'adapter-failed' };
+      }
+      const stdout = Buffer.isBuffer(result.stdout)
+        ? result.stdout.toString('utf8')
+        : result.stdout ?? '';
+      if (!stdout || Buffer.byteLength(stdout, 'utf8') > MAX_OUTPUT_BYTES) {
+        return { ok: false, reason: 'invalid-output' };
+      }
+      const parsed = JSON.parse(stdout) as Record<string, unknown>;
+      if (Object.keys(parsed).sort().join(',') !== 'nonce,ok,operation,reason' ||
+        parsed['nonce'] !== nonce || parsed['operation'] !== OPERATION ||
+        typeof parsed['reason'] !== 'string') return { ok: false, reason: 'invalid-output' };
+      if (result.status !== 0) {
+        if (parsed['ok'] !== false || !FAILURE_REASONS.has(parsed['reason'])) {
+          return { ok: false, reason: 'adapter-failed' };
+        }
+        if (parsed['reason'].startsWith('adapter-error-')) {
+          if (attempt + 1 < MAX_SINGLE_PATH_ADAPTER_ATTEMPTS) {
+            waitForTransientAclRetry(attempt, parsed['reason'], testControl);
+            continue;
+          }
+        }
+        return { ok: false, reason: parsed['reason'] };
+      }
+      const expectedReason = mode === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl';
+      if (parsed['ok'] !== true || parsed['reason'] !== expectedReason) {
+        return { ok: false, reason: 'invalid-output' };
+      }
+      return { ok: true, reason: expectedReason };
     }
-    const expectedReason = mode === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl';
-    if (parsed['ok'] !== true || parsed['reason'] !== expectedReason) {
-      return { ok: false, reason: 'invalid-output' };
-    }
-    return { ok: true, reason: expectedReason };
+    return { ok: false, reason: 'adapter-failed' };
   } catch {
     return { ok: false, reason: 'adapter-failed' };
   }

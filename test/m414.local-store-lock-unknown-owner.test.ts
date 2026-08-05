@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   acquireLocalStoreLock,
+  acquireLocalStoreLockWithOutcome,
   releaseLocalStoreLock,
   type LocalStoreLock,
 } from '../src/core/fleet/local-store-lock.js';
@@ -108,7 +109,10 @@ describe('local store lock unknown-owner recovery', () => {
     expect(corrupted.ino).toBe(ownerLock.ino);
     expect(Date.now() - corrupted.mtimeMs).toBeGreaterThan(1_000);
 
-    expect(acquireLocalStoreLock(lockPath, 50)).toBeNull();
+    expect(acquireLocalStoreLockWithOutcome(lockPath, 50)).toEqual({
+      state: 'unavailable',
+      lock: null,
+    });
     expect(() => process.kill(holder.child.pid!, 0)).not.toThrow();
     const retained = fs.lstatSync(lockPath);
     expect({ dev: retained.dev, ino: retained.ino }).toEqual({
@@ -117,6 +121,35 @@ describe('local store lock unknown-owner recovery', () => {
     });
     expect(fs.readFileSync(lockPath, 'utf8')).toBe('{corrupt owner metadata\n');
     expect(fs.existsSync(`${lockPath}.reclaim.owner`)).toBe(false);
+  });
+
+  it('reports contention only after observing a well-formed live owner', async () => {
+    const lockPath = path.join(tmpDir, 'observed-live-owner.lock');
+    const holder = spawnLockHolder(lockPath);
+    await holder.ready;
+
+    expect(acquireLocalStoreLockWithOutcome(lockPath, 50)).toEqual({
+      state: 'contended',
+      lock: null,
+    });
+    expect(() => process.kill(holder.child.pid!, 0)).not.toThrow();
+  });
+
+  it('does not report contention for a live pid with a mismatched start identity', async () => {
+    const lockPath = path.join(tmpDir, 'spoofed-live-owner.lock');
+    const holder = spawnLockHolder(lockPath);
+    await holder.ready;
+    const owner = JSON.parse(fs.readFileSync(lockPath, 'utf8')) as Record<string, unknown>;
+    fs.writeFileSync(lockPath, `${JSON.stringify({
+      ...owner,
+      startRef: '0'.repeat(64),
+    })}\n`, { mode: 0o600 });
+
+    expect(acquireLocalStoreLockWithOutcome(lockPath, 50)).toEqual({
+      state: 'unavailable',
+      lock: null,
+    });
+    expect(() => process.kill(holder.child.pid!, 0)).not.toThrow();
   });
 
   it('still reclaims a valid lock after its owner process is proven dead', async () => {

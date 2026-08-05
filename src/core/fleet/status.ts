@@ -19,7 +19,6 @@ import { existsSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { basename, resolve } from 'node:path';
 import { readBuildIdentity, type BuildIdentity } from '../build-identity.js';
-import { DEFAULT_DIAGNOSTIC_RESLICE_DRAIN_LIMIT } from '../types.js';
 import type {
   AshlrConfig,
   AutoMergeTrustBasis,
@@ -35,6 +34,7 @@ import { realizedMergeOf } from '../inbox/realized-merge.js';
 import type { SharedQueueHealth } from './shared-store.js';
 import type {
   AutonomyEvidencePack,
+  AutonomyEvidencePacksReadResult,
   AutonomyEvidenceSourceQuality,
 } from '../autonomy/evidence-pack.js';
 import type { ResourceStrategyReport } from '../autonomy/resource-strategy.js';
@@ -44,8 +44,10 @@ import { listGoals } from '../goals/store.js';
 import {
   listAttemptRecords,
   summarizeAttemptCoverage,
+  type AttemptRecordCoverage,
   type AttemptCoverageStatus,
 } from '../autonomy/attempt-records.js';
+import { listOutcomeRecords, type OutcomeRecord } from '../autonomy/outcome-records.js';
 import {
   readGeneratedRepairQueueSnapshot,
   type GeneratedRepairDispatchState,
@@ -67,6 +69,7 @@ import {
   MIN_SKILL_OBSERVED_TRAJECTORIES,
   suppressDegradedSkillObservation,
   summarizeTrajectoryLearning,
+  type TrajectoryRecordCoverage,
   type TrajectoryLearningStatus,
 } from '../autonomy/trajectory-records.js';
 import {
@@ -75,6 +78,7 @@ import {
 } from './skill-retrieval.js';
 import { readSkillCardCorpus, readSkillUseEventsWithDiagnostics } from './skill-records.js';
 import type { GuardHealthDiagnosis } from '../daemon/guard-health.js';
+import type { DaemonActivationReadiness } from '../daemon/activation-permit.js';
 import type { EcosystemDoctorReport } from '../ecosystem/doctor.js';
 import type { BackendAvailability, BackendResourceState } from '../fabric/resource-monitor.js';
 import { strategicTierOfRepo, type StrategicTier } from '../ecosystem/focus.js';
@@ -87,12 +91,15 @@ import {
 } from '../run/repo-profile.js';
 import { engineInstalled } from '../run/engines.js';
 import { engineTierOf } from '../run/sandboxed-engine.js';
+import type { RoutingLearningAuthority } from '../run/learned-router.js';
 import {
   DEFAULT_COOLDOWN_MS,
   GENERATED_REPAIR_DISPATCH_BLOCKED_COOLDOWN_MS,
   isSuppressibleWorkedOutcome,
   latestWorkedEventForKeys,
+  loadWorkedLedgerDetailed,
   type WorkedEvent,
+  type WorkedLedgerReadResult,
 } from './worked-ledger.js';
 import { selectWorkQueueCoordinator } from '../seams/work-queue-coordinator.js';
 import {
@@ -102,10 +109,16 @@ import {
 } from './proposal-matching.js';
 import {
   readDispatchProductionYieldDetailed,
+  type DispatchProductionEvent,
   type DispatchProductionSourceQuality,
   type DispatchProductionYieldBucket,
   type DispatchProductionYieldSummary,
 } from './dispatch-production-ledger.js';
+import {
+  buildProposalFunnelObservability,
+  withholdProposalFunnelForUnstableSnapshot,
+  type ProposalFunnelObservability,
+} from './proposal-funnel-observability.js';
 import { readDecisionsDetailed, type DecisionSourceQuality } from './decisions-ledger.js';
 import { readJudgeTracesDetailed, type JudgeTraceSourceQuality } from './judge-trace.js';
 import type { DispatchManifestSourceQuality } from './dispatch-manifest.js';
@@ -129,12 +142,26 @@ import {
   readResolutionObserverStatus,
   type ResolutionObserverStatus,
 } from './resolution-observer.js';
-import { readPostMergeObservations } from './post-merge-observations.js';
+import {
+  readPostMergeObservations,
+  type PostMergeObservationReadResult,
+} from './post-merge-observations.js';
 import {
   postMergeStabilityRepoDigest,
   readPostMergeStability,
   type PostMergeStabilityCohortSummary,
+  type PostMergeStabilityReadResult,
 } from './post-merge-stability.js';
+import {
+  readDetachedPostMergeVerificationCohorts,
+  type DetachedPostMergeVerificationSummary,
+} from './detached-post-merge-verification.js';
+import {
+  projectDetachedPostMergeDenominator,
+  readCurrentDetachedPostMergeDenominator,
+  readDetachedPostMergeWorkTickets,
+  type DetachedPostMergeWorkTicketReadResult,
+} from './detached-post-merge-orchestrator.js';
 import {
   readFleetCutoffCheckpointStatus,
   type FleetCutoffCheckpointStatus,
@@ -148,6 +175,16 @@ import {
   type AutoMergeCanaryShadowCountersV1,
   type AutoMergeCanaryShadowEvidenceV1,
 } from './automerge-canary-store.js';
+import {
+  evaluateAutoMergeCanaryPromotionReadiness,
+  type AutoMergeCanaryPromotionReadiness,
+  type AutoMergeCanaryPromotionReadinessInput,
+} from './automerge-canary-promotion-readiness.js';
+import {
+  autoMergeCanaryConfigDigest,
+  autoMergeCanaryPolicyDigest,
+} from './automerge-canary-observer.js';
+import { resolveAutoMergeScopePolicy } from '../foundry/automerge-scope-policy.js';
 
 export interface FleetBackendResourceStatus {
   availability: BackendAvailability | 'not-sensed';
@@ -477,7 +514,8 @@ export type FleetReadinessSourceQualityBadge =
 export type FleetReadinessSourceCategory = 'operations' | 'evidence';
 export type FleetReadinessEvidenceEligibility =
   | 'eligible' | 'cold-start' | 'withheld' | 'observational' | 'not-applicable';
-export type FleetReadinessEvidenceRole = 'merge-authority' | 'learning' | 'analytics' | 'forensics';
+export type FleetReadinessEvidenceRole =
+  | 'merge-authority' | 'merge-gate' | 'learning' | 'analytics' | 'forensics';
 export type FleetReadinessEvidenceApplicability = 'required' | 'optional' | 'disabled';
 
 export interface FleetReadinessEvidenceQuality {
@@ -490,6 +528,35 @@ export interface FleetReadinessEvidenceQuality {
   rowsScanned: number;
   invalidRows: number;
   unreadableFiles: number;
+}
+
+export interface FleetDetachedPostMergeVerificationReadiness {
+  version: 1;
+  authority: 'observation-only';
+  policyEligible: false;
+  mergePermitted: false;
+  rollbackPermitted: false;
+  deployPermitted: false;
+  state: 'missing' | 'degraded' | 'awaiting-observations' | 'incomplete' | 'conclusive';
+  latestObservedAt: string | null;
+  passRate: number | null;
+  denominator: {
+    candidateSetDigest: string | null;
+    eligibleCandidates: number;
+    observedCandidates: number;
+    conclusiveCandidates: number;
+    unobservedCandidates: number;
+    pass: number;
+    fail: number;
+    unknown: number;
+    queuedCandidates: number;
+  };
+  summary: DetachedPostMergeVerificationSummary;
+}
+
+export interface FleetPostMergeCompositeProjection {
+  source: FleetReadinessEvidenceQuality;
+  cohort?: NonNullable<FleetStatus['postMergeCohort']>;
 }
 
 export interface FleetReadinessSourceQuality {
@@ -666,6 +733,7 @@ export interface FleetReadinessSourceHealth {
   evidenceRole?: FleetReadinessEvidenceRole;
   eligibility?: FleetReadinessEvidenceEligibility;
   applicability?: FleetReadinessEvidenceApplicability;
+  actionSynthesis?: 'eligible' | 'observational-only';
   evidenceQuality?: FleetReadinessEvidenceQuality;
 }
 
@@ -1291,6 +1359,151 @@ function degradedAutoMergeCanaryStatus(): FleetAutoMergeCanaryStatus {
   };
 }
 
+export function buildAutoMergeCanaryPromotionReadiness(
+  status: FleetStatus,
+  cfg: AshlrConfig,
+  read: AutoMergeCanaryReadResult,
+  observedAtMs: number,
+): AutoMergeCanaryPromotionReadiness {
+  const state = read.sourceState === 'healthy' ? read.state : null;
+  const counters = state?.shadowCounters;
+  const remote = status.autoMergeReadiness?.remoteProtection;
+  const coverage = status.queue.repos?.executionProfiles;
+  const registryDegraded = status.queue.repos?.registry?.state === 'degraded';
+  const detached = status.detachedPostMergeVerificationReadiness;
+  const detachedSource = status.detachedPostMergeVerificationSource;
+  const detachedDenominatorSource = status.detachedPostMergeDenominatorSource;
+  const detachedComplete = detachedSource?.sourceState === 'healthy' &&
+    detachedSource.complete === true &&
+    detachedDenominatorSource?.sourceState === 'healthy' &&
+    detachedDenominatorSource.complete === true &&
+    detached !== undefined &&
+    detached.state === 'conclusive' &&
+    detached.denominator.eligibleCandidates > 0 &&
+    detached.denominator.observedCandidates === detached.denominator.eligibleCandidates &&
+    detached.denominator.conclusiveCandidates === detached.denominator.eligibleCandidates;
+  const autoMerge = cfg.foundry?.autoMerge;
+  const autoMergeRecord = autoMerge as Record<string, unknown> | undefined;
+  const configuredScopeCap = (key: 'maxAutomergeFiles' | 'maxAutomergeLines'): number | null | undefined => {
+    if (!autoMergeRecord || !Object.prototype.hasOwnProperty.call(autoMergeRecord, key)) return undefined;
+    const value = autoMergeRecord[key];
+    return typeof value === 'number' ? value : null;
+  };
+  const maxAutomergeFiles = configuredScopeCap('maxAutomergeFiles');
+  const maxAutomergeLines = configuredScopeCap('maxAutomergeLines');
+  const currentScopePolicy = resolveAutoMergeScopePolicy(autoMerge);
+  const lastShadowEvidence = state?.lastShadowEvidence ?? null;
+  const input: AutoMergeCanaryPromotionReadinessInput = {
+    observedAtMs,
+    canary: {
+      sourceState: read.sourceState,
+      active: read.active === true && state?.mode === 'shadow',
+      state: state?.state ?? (read.status === 'critical' ? 'critical' : 'inactive'),
+      observationCompletedAt: state?.observation.completedAt ?? null,
+      attempts: counters?.attempts ?? 0,
+      eligible: counters?.eligible ?? 0,
+      rejected: counters?.rejected ?? 0,
+      requiredAttempts: 1,
+      requiredEligible: 1,
+      // No current configuration field binds a minimum promotion sample.
+      requirementsBound: false,
+      bindingMismatches: counters?.bindingMismatches ?? 0,
+      inspectionErrors: counters?.inspectionErrors ?? 0,
+    },
+    remoteProtection: {
+      configured: remote?.configured === 'exact'
+        ? 'exact'
+        : remote?.configured === 'missing' || remote === undefined ? 'missing' : 'partial',
+      live: remote?.live === 'protected' || remote?.live === 'unprotected'
+        ? remote.live
+        : 'unavailable',
+      coverage: remote?.coverage === 'complete'
+        ? 'complete'
+        : remote?.coverage === 'partial' ? 'partial' : 'none',
+      observedAt: remote?.observedAt ?? null,
+    },
+    verification: {
+      sourceState: registryDegraded ? 'degraded' : coverage ? 'healthy' : 'missing',
+      enrolledRepos: status.queue.repos?.enrolled ?? 0,
+      mergeGradeRepos: coverage?.reposWithExplicitMergeContracts ?? 0,
+      noCommandRepos: coverage?.reposMissingVerifyCommands ?? 0,
+    },
+    // Current Fleet Status has no release-scoped signing or rollback authority
+    // source. Missing evidence must remain explicit rather than inferred.
+    evidenceSigning: {
+      sourceState: 'missing',
+      signed: false,
+      writable: false,
+      expiresAt: null,
+    },
+    release: {
+      sourceState: 'missing',
+      signatureVerified: false,
+      manifestComplete: false,
+      artifactBound: false,
+      serviceInvocationBound: false,
+      configurationBound: false,
+      expiresAt: null,
+      rollbackBound: false,
+    },
+    postMerge: {
+      sourceState: detachedSource?.sourceState ?? 'missing',
+      complete: detachedComplete,
+      denominatorComplete: detachedComplete,
+      releasedCohorts: detached?.denominator.conclusiveCandidates ?? 0,
+      adverseObservations: (detached?.denominator.fail ?? 0) +
+        (detached?.denominator.unknown ?? 0),
+      latestCompletedAt: detached?.latestObservedAt ?? null,
+    },
+    policy: {
+      allowSelfMerge: autoMerge?.allowSelfMerge === true,
+      allowWithoutVerification: autoMerge?.allowWithoutVerification === true,
+      localMergeFallback: autoMerge?.enabled === true && autoMerge.pushToRemote !== true,
+      ...(maxAutomergeFiles !== undefined ? { maxAutomergeFiles } : {}),
+      ...(maxAutomergeLines !== undefined ? { maxAutomergeLines } : {}),
+    },
+    scopeIdentity: {
+      sourceState: read.sourceState,
+      expectedPolicyDigest: state?.policyDigest ?? null,
+      expectedConfigDigest: state?.configDigest ?? null,
+      evidencePolicyDigest: lastShadowEvidence?.policyDigest ?? null,
+      evidenceConfigDigest: lastShadowEvidence?.configDigest ?? null,
+      currentPolicyDigest: autoMergeCanaryPolicyDigest(),
+      currentConfigDigest: autoMergeCanaryConfigDigest(cfg),
+      currentScopePolicyDigest: currentScopePolicy.ok ? currentScopePolicy.policy.digest : null,
+      observedAt: lastShadowEvidence?.observedAt ?? null,
+    },
+  };
+  return evaluateAutoMergeCanaryPromotionReadiness(input);
+}
+
+export type FleetLearningSourceName =
+  | 'dispatch-production'
+  | 'agent-actions'
+  | 'outcomes'
+  | 'decisions'
+  | 'evidence'
+  | 'worked'
+  | 'post-merge'
+  | 'judge-traces'
+  | 'skill-use';
+
+export type FleetLearningWithholdingReason = `${FleetLearningSourceName}-source-missing` |
+  `${FleetLearningSourceName}-source-degraded`;
+
+export interface FleetLearningSourceAvailability {
+  source: FleetLearningSourceName;
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  complete: boolean;
+}
+
+export interface FleetLearningMetricAvailability {
+  state: 'available' | 'partial' | 'withheld';
+  reasons: FleetLearningWithholdingReason[];
+  sources: FleetLearningSourceAvailability[];
+  withheldMetrics: string[];
+}
+
 /** One whole-fleet read-only snapshot. */
 export interface FleetStatus {
   /** ISO timestamp this snapshot was generated. */
@@ -1299,6 +1512,12 @@ export interface FleetStatus {
   buildIdentity?: BuildIdentity;
   daemon: {
     running: boolean;
+    sourceQuality?: {
+      sourceState: 'healthy' | 'degraded';
+      complete: boolean;
+      reason: 'healthy' | 'missing' | 'malformed' | 'unreadable' | 'inconsistent' | 'unavailable';
+    };
+    pid?: number | null;
     startedAt?: string | null;
     lastTickAt: string | null;
     lockHeartbeatAt?: string | null;
@@ -1317,6 +1536,7 @@ export interface FleetStatus {
       ownerMatches: boolean;
     };
     todaySpentUsd: number;
+    activation?: DaemonActivationReadiness;
   };
   backends: FleetBackendStatus[];
   queue: {
@@ -1370,6 +1590,8 @@ export interface FleetStatus {
   autoMergeReadiness?: FleetAutoMergeReadinessStatus;
   /** Observation-only shadow canary state; never consumed by fleet policy. */
   autoMergeCanary?: FleetAutoMergeCanaryStatus;
+  /** Observation-only explanation of future canary promotion prerequisites. */
+  autoMergeCanaryPromotionReadiness?: AutoMergeCanaryPromotionReadiness;
   /** Read-only resource-aware autonomous operating recommendation. */
   autonomyDirection?: FleetAutonomyDirectionSummary;
   /** Read-only diagnosis of guard state that can block autonomous work. */
@@ -1392,6 +1614,28 @@ export interface FleetStatus {
   dispatchProduction?: DispatchProductionYieldSummary;
   /** Storage/read completeness for dispatch-production analytics. */
   dispatchProductionSource?: DispatchProductionSourceQuality;
+  /** Metadata-only proposal-funnel rates; withheld whenever the bounded source is incomplete. */
+  proposalFunnel?: ProposalFunnelObservability;
+  /** Whether dispatch-backed learning metrics have a complete denominator. */
+  learningMetrics?: {
+    state: 'available' | 'withheld';
+    denominator: 'dispatch-production';
+    reason?:
+      | 'dispatch-source-missing'
+      | 'dispatch-source-degraded'
+      | 'learning-snapshot-settling'
+      | 'learning-snapshot-unstable';
+    /** Exact upper timestamp bound shared by every joined learning source. */
+    settledThrough?: string;
+    /** Valid rows intentionally excluded because they are newer than settledThrough. */
+    excludedRows?: number;
+    sourceQuality: DispatchProductionSourceQuality;
+    dispatchProduction: FleetLearningMetricAvailability;
+    attemptCoverage?: FleetLearningMetricAvailability;
+    trajectoryLearning?: FleetLearningMetricAvailability;
+  };
+  /** Fail-closed authority projection for whether learned history may steer live routing. */
+  routingLearningAuthority?: RoutingLearningAuthority;
   /** Storage/read completeness for cached judge and merge-authority evidence. */
   decisionsSource?: DecisionSourceQuality;
   /** Storage/read completeness for judge calibration and real-world outcome labels. */
@@ -1410,6 +1654,14 @@ export interface FleetStatus {
     adverseObservations: number;
     stability: PostMergeStabilityCohortSummary;
   };
+  /** Authenticated metadata from detached post-merge verification runners. */
+  detachedPostMergeVerificationSource?: FleetReadinessEvidenceQuality;
+  /** Authenticated current candidate denominator for detached verification. */
+  detachedPostMergeDenominatorSource?: FleetReadinessEvidenceQuality;
+  /** Immutable data-only work tickets. Queue state grants no execution or readiness authority. */
+  detachedPostMergeWorkTicketSource?: FleetReadinessEvidenceQuality;
+  /** Read-only detached cohort quality. It is excluded from policy authority. */
+  detachedPostMergeVerificationReadiness?: FleetDetachedPostMergeVerificationReadiness;
   /** Authenticated checkpoint availability. Excluded from readiness and policy inputs. */
   cutoffCheckpoints?: FleetCutoffCheckpointStatus;
   /** Effective applicability for optional evidence producers. */
@@ -1431,11 +1683,144 @@ export interface FleetStatus {
   contextEfficiency?: FleetContextEfficiencyStatus;
   /** True when the global kill switch is engaged (fleet paused). */
   killed: boolean;
+  /** Exact observation of kill-switch authority. Legacy `killed` stays restrictive. */
+  killSwitch?: {
+    state: 'active' | 'inactive' | 'unknown';
+    sourceState: 'healthy' | 'degraded';
+    reason: 'present' | 'missing' | 'uninspectable' | 'unsafe' | 'unavailable';
+  };
 }
 
 /** Recent window for dispatch + merge counting: the last 24 hours. */
 const RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** Keep concurrently appended rows outside exact cross-source joins until settled. */
+const LEARNING_SNAPSHOT_SETTLE_MS = 2 * 60 * 1000;
 const QUEUE_SOURCE_FUTURE_SKEW_MS = 5 * 60 * 1000;
+
+function processExists(pid: number | null | undefined): boolean {
+  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
+
+const LEARNING_SNAPSHOT_TEXT_KEYS = new Set([
+  'argv',
+  'cmd',
+  'content',
+  'contents',
+  'detail',
+  'diff',
+  'env',
+  'fileContents',
+  'fullReasoning',
+  'promptContext',
+  'reason',
+  'stderr',
+  'stdout',
+  'summary',
+  'title',
+]);
+
+/**
+ * Produce a deterministic metadata-only projection for an in-memory stability
+ * digest. The digest is never returned or persisted.
+ */
+function learningSnapshotMetadata(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(learningSnapshotMetadata);
+  if (value === null || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [
+        key,
+        LEARNING_SNAPSHOT_TEXT_KEYS.has(key)
+          ? `sha256:${createHash('sha256').update(JSON.stringify(entry) ?? 'undefined').digest('hex')}`
+          : learningSnapshotMetadata(entry),
+      ]),
+  );
+}
+
+function learningSnapshotDigest(source: unknown, rows: readonly unknown[]): string {
+  return createHash('sha256')
+    .update(JSON.stringify(learningSnapshotMetadata({ source, rows })))
+    .digest('hex');
+}
+
+function learningSnapshotSourceQuality(value: unknown): Record<string, unknown> {
+  if (value === null || typeof value !== 'object') return { sourceState: 'degraded', complete: false };
+  const source = value as Record<string, unknown>;
+  return {
+    sourceState: source.sourceState,
+    sourcePresent: source.sourcePresent,
+    complete: source.complete,
+    stopReasons: source.stopReasons,
+    reasons: source.reasons,
+    invalidFiles: source.invalidFiles,
+    invalidRows: source.invalidRows,
+    conflictingEvents: source.conflictingEvents,
+    duplicateRows: source.duplicateRows,
+    supersededRows: source.supersededRows,
+    semanticRejectedRows: source.semanticRejectedRows,
+    unreadableFiles: source.unreadableFiles,
+    limitExceeded: source.limitExceeded,
+  };
+}
+
+function invalidatedDispatchProductionSource(
+  source: DispatchProductionSourceQuality | undefined,
+  stopReason?: 'io-error',
+): DispatchProductionSourceQuality {
+  const fallback: DispatchProductionSourceQuality = {
+    sourceState: 'degraded',
+    sourcePresent: true,
+    complete: false,
+    stopReasons: [],
+    filesRead: 0,
+    datedFilesRead: 0,
+    looseFilesRead: 0,
+    bytesRead: 0,
+    rowsScanned: 0,
+    invalidRows: 0,
+    unreadableFiles: 0,
+  };
+  const base = source ?? fallback;
+  return {
+    ...base,
+    sourceState: base.sourceState === 'missing' ? 'missing' : 'degraded',
+    complete: false,
+    stopReasons: [...new Set([...base.stopReasons, ...(stopReason ? [stopReason] : [])])],
+    unreadableFiles: base.unreadableFiles + (stopReason ? 1 : 0),
+  };
+}
+
+function learningSnapshotTimestamp(...values: Array<string | undefined>): string | undefined {
+  let latest: string | undefined;
+  let latestMs = Number.NEGATIVE_INFINITY;
+  for (const value of values) {
+    if (!value) continue;
+    const timestampMs = Date.parse(value);
+    if (Number.isFinite(timestampMs) && timestampMs > latestMs) {
+      latest = value;
+      latestMs = timestampMs;
+    }
+  }
+  return latest;
+}
+
+function settledLearningRows<T>(
+  rows: readonly T[],
+  cutoffMs: number,
+  timestamp: (row: T) => string | undefined,
+): T[] {
+  return rows.filter((row) => {
+    const timestampMs = Date.parse(timestamp(row) ?? '');
+    return Number.isFinite(timestampMs) && timestampMs <= cutoffMs;
+  });
+}
 
 function queueInventoryFreshness(
   observedAt: string | null,
@@ -1567,7 +1952,6 @@ function buildQueueEligibility(
 ): FleetQueueEligibility {
   const cooldownMs = configCooldownMs(cfg) ?? DEFAULT_COOLDOWN_MS;
   const nowMs = Date.now();
-  const repairRecoveryHealthy = healthyGeneratedRepairRecovery(cfg);
   const workedEvents = selectWorkQueueCoordinator(cfg).readWorkedEvents();
   const repairQueue = (() => {
     try {
@@ -1656,7 +2040,7 @@ function buildQueueEligibility(
     const last = lastEvent && Number.isFinite(lastMs)
       ? { event: lastEvent, tsMs: lastMs, suppressible: isSuppressibleWorkedOutcome(lastEvent.outcome) }
       : undefined;
-    const itemCooldownMs = cooldownMsForWorkItem(item, cooldownMs, repairRecoveryHealthy, last?.event);
+    const itemCooldownMs = cooldownMsForWorkItem(item, cooldownMs, last?.event);
     const cooldownUntil = last && last.suppressible ? last.tsMs + itemCooldownMs : null;
     if (cooldownUntil !== null && cooldownUntil > nowMs) {
       cooldownItems++;
@@ -1727,42 +2111,15 @@ function buildQueueEligibility(
   };
 }
 
-const GENERATED_REPAIR_EMPTY_FAST_COOLDOWN_MS = 30 * 60 * 1000;
-
 function cooldownMsForWorkItem(
   item: WorkItem,
   baseCooldownMs: number,
-  repairRecoveryHealthy: boolean,
   latestEvent?: WorkedEvent,
 ): number {
   if (latestEvent?.outcome === 'dispatch-blocked' && isTrustedGeneratedRepairItem(item)) {
     return Math.min(baseCooldownMs, GENERATED_REPAIR_DISPATCH_BLOCKED_COOLDOWN_MS);
   }
-  if (
-    repairRecoveryHealthy &&
-    latestEvent?.outcome === 'empty' &&
-    isTrustedGeneratedRepairItem(item)
-  ) {
-    return Math.min(baseCooldownMs, GENERATED_REPAIR_EMPTY_FAST_COOLDOWN_MS);
-  }
   return baseCooldownMs;
-}
-
-function healthyGeneratedRepairRecovery(cfg: AshlrConfig): boolean {
-  try {
-    const read = readDispatchProductionYieldDetailed({
-      windowMs: RECENT_WINDOW_MS,
-      limit: 1200,
-      limitPerDimension: 1,
-    });
-    if (read.sourceQuality.sourceState !== 'healthy' || !read.sourceQuality.complete) return false;
-    const yieldSummary = read.summary;
-    const generated = yieldSummary?.generatedRepairAttempts;
-    if (!generated || generated.attempts < MIN_DISPATCH_YIELD_ACTION_ATTEMPTS) return false;
-    return generated.proposalRate >= Math.max(configuredLowDispatchYieldRate(cfg), 0.5);
-  } catch {
-    return false;
-  }
 }
 
 export function resolveAutonomyControlMode(cfg: AshlrConfig): FleetAutonomyControlMode {
@@ -1814,30 +2171,181 @@ async function attachBackendResources(backends: FleetBackendStatus[], cfg: Ashlr
   }
 }
 
-/**
- * Build a read-only snapshot of the fleet. Async because the backlog scan is
- * async. NEVER throws — each source is independently guarded.
- */
-export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
-  const generatedAt = new Date().toISOString();
-  let queueSnapshotAt: string | null = null;
-  let queueAuthorityObservedAt: string | null = null;
-  let queueSourceStatus: FleetReadinessSourceStatus = 'unknown';
-  let queueSourceDetail = 'backlog snapshot has not been read yet';
+const MAX_LEARNING_WITHHOLDING_REASONS = 12;
+const MAX_LEARNING_WITHHELD_METRICS = 24;
 
-  // ── daemon ────────────────────────────────────────────────────────────────
+type LearningSourceQualityLike = {
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  complete: boolean;
+};
+
+function learningSourceAvailability(
+  source: FleetLearningSourceName,
+  quality: LearningSourceQualityLike | undefined,
+): FleetLearningSourceAvailability {
+  return {
+    source,
+    sourceState: quality?.sourceState ?? 'degraded',
+    complete: quality?.complete === true,
+  };
+}
+
+function learningSourceAvailable(source: FleetLearningSourceAvailability): boolean {
+  return source.sourceState === 'healthy' && source.complete;
+}
+
+function learningMetricAvailability(
+  sources: FleetLearningSourceAvailability[],
+  withheldMetrics: string[],
+  totalMetrics: number,
+): FleetLearningMetricAvailability {
+  const reasons = sources
+    .filter((source) => !learningSourceAvailable(source))
+    .map((source): FleetLearningWithholdingReason =>
+      `${source.source}-source-${source.sourceState === 'missing' ? 'missing' : 'degraded'}`)
+    .slice(0, MAX_LEARNING_WITHHOLDING_REASONS);
+  const boundedMetrics = [...new Set(withheldMetrics)].slice(0, MAX_LEARNING_WITHHELD_METRICS);
+  return {
+    state: boundedMetrics.length === 0 ? 'available' : boundedMetrics.length >= totalMetrics ? 'withheld' : 'partial',
+    reasons,
+    sources: sources.slice(0, MAX_LEARNING_WITHHOLDING_REASONS),
+    withheldMetrics: boundedMetrics,
+  };
+}
+
+function withholdAttemptJoinMetrics(
+  summary: AttemptCoverageStatus,
+  unavailable: Set<keyof AttemptRecordCoverage>,
+): AttemptCoverageStatus {
+  if (unavailable.size === 0) return summary;
+  const coverage = { ...summary.coverage };
+  for (const key of unavailable) delete coverage[key];
+  return {
+    ...summary,
+    coverage,
+    gaps: summary.gaps.filter((gap) => !unavailable.has(gap.kind)),
+    recent: summary.recent.map((record) => {
+      const recordCoverage = { ...record.coverage };
+      for (const key of unavailable) delete recordCoverage[key];
+      return { ...record, coverage: recordCoverage };
+    }),
+  };
+}
+
+function withholdTrajectoryMetrics(
+  summary: TrajectoryLearningStatus,
+  unavailable: Set<keyof TrajectoryRecordCoverage>,
+  options: { terminal: boolean; realized: boolean; traces: boolean },
+): TrajectoryLearningStatus {
+  const coverage = { ...summary.coverage };
+  for (const key of unavailable) delete coverage[key];
+  const routeSpine = { ...summary.routeSpine };
+  if (unavailable.has('decision')) delete routeSpine.dispatchToDecision;
+  if (unavailable.has('evidence')) delete routeSpine.dispatchToEvidence;
+  if (!options.terminal) delete routeSpine.dispatchToMerge;
+  return {
+    ...summary,
+    coverage,
+    routeSpine,
+    ...(!options.terminal ? { terminalOutcomes: undefined, recent: undefined } : {}),
+    ...(!options.realized ? { realizedOutcomes: undefined } : {}),
+    ...(!options.traces ? { traces: { state: 'degraded', records: [] } } : {}),
+    gaps: summary.gaps.filter((gap) => !unavailable.has(gap.kind)),
+    ...(summary.recent && options.terminal
+      ? {
+          recent: summary.recent.map((record) => {
+            const recordCoverage = { ...record.coverage };
+            for (const key of unavailable) delete recordCoverage[key];
+            return { ...record, coverage: recordCoverage };
+          }),
+        }
+      : {}),
+  };
+}
+
+export function projectPostMergeComposite(
+  adverse: PostMergeObservationReadResult,
+  stability: PostMergeStabilityReadResult,
+): FleetPostMergeCompositeProjection {
+  const bothMissing = adverse.sourceState === 'missing' && stability.sourceState === 'missing';
+  const complete = adverse.sourceState === 'healthy' && adverse.complete &&
+    stability.sourceState === 'healthy' && stability.complete;
+  const source: FleetReadinessEvidenceQuality = {
+    sourceState: complete ? 'healthy' : bothMissing ? 'missing' : 'degraded',
+    sourcePresent: adverse.sourcePresent || stability.sourcePresent,
+    complete,
+    stopReasons: [...new Set([
+      ...adverse.stopReasons,
+      ...stability.stopReasons,
+      ...(adverse.sourceState === 'missing' ? ['adverse-source-missing'] : []),
+      ...(stability.sourceState === 'missing' ? ['stability-source-missing'] : []),
+    ])],
+    filesRead: adverse.filesRead + stability.filesRead,
+    bytesRead: adverse.bytesRead + stability.bytesRead,
+    rowsScanned: adverse.physicalRows + stability.physicalRows,
+    invalidRows: adverse.invalidRows + stability.invalidRows,
+    unreadableFiles: 0,
+  };
+  if (!complete) return { source };
+
+  const adverseMembers = new Set(adverse.observations.flatMap((row) => {
+    const digest = postMergeStabilityRepoDigest(row.repo);
+    return digest ? [JSON.stringify([digest, row.proposalId, row.mergeCommit])] : [];
+  }));
+  const effectiveStability = stability.witnesses.filter((row) => !adverseMembers.has(JSON.stringify([
+    row.repoDigest, row.proposalId, row.mergeCommit,
+  ])));
+  const effectiveSummary: PostMergeStabilityCohortSummary = {
+    completeCohorts: new Set(effectiveStability.map((row) => row.cohortId)).size,
+    releasedWitnesses: effectiveStability.length,
+    distinctRepoDigests: new Set(effectiveStability.map((row) => row.repoDigest)).size,
+    ...(effectiveStability.length > 0
+      ? { latestCompletedAt: effectiveStability.map((row) => row.stableAt).sort().at(-1) }
+      : {}),
+  };
+  return {
+    source,
+    cohort: {
+      policyEligible: false,
+      denominatorComplete: false,
+      adverseObservations: adverse.observations.length,
+      stability: effectiveSummary,
+    },
+  };
+}
+
+export interface FleetDaemonStatusRead {
+  daemon: FleetStatus['daemon'];
+  recentTicks: DaemonTick[];
+}
+
+/** Read daemon ledger, lock, and activity as one fail-closed observation. */
+export async function readFleetDaemonStatus(): Promise<FleetDaemonStatusRead> {
   let daemon: FleetStatus['daemon'] = {
     running: false,
+    sourceQuality: {
+      sourceState: 'degraded',
+      complete: false,
+      reason: 'unavailable',
+    },
     startedAt: null,
     lastTickAt: null,
     todaySpentUsd: 0,
   };
-  // Recent ticks are reused for merge counting below.
   let recentTicks: DaemonTick[] = [];
   try {
-    const { loadDaemonState, readDaemonLockOwner } = await import('../daemon/state.js');
+    const { loadDaemonStateStrict, readDaemonLockOwner } = await import('../daemon/state.js');
     const { readDaemonActivity } = await import('../daemon/activity.js');
-    const ds = loadDaemonState();
+    const daemonState = loadDaemonStateStrict();
+    if (!daemonState.ok) {
+      daemon.sourceQuality = {
+        sourceState: 'degraded',
+        complete: false,
+        reason: daemonState.reason,
+      };
+      throw new Error(`daemon-state-${daemonState.reason}`);
+    }
+    const ds = daemonState.state;
     const startedAt = ds.startedAt ?? null;
     const lastTickAt = ds.lastTickAt ?? null;
     const lockOwner = readDaemonLockOwner();
@@ -1850,11 +2358,28 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       activity.daemonStartedAt === startedAt;
     const activityHealthy = ownerMatches && activityRead.sourceState === 'healthy' &&
       activityRead.freshness === 'fresh' && activityRead.ownerState === 'alive';
+    const lockOwnerAlive = processExists(lockOwner?.pid);
+    const liveLockContradiction = lockOwnerAlive && (
+      daemonState.fresh ||
+      ds.running !== true ||
+      lockOwner?.pid !== ds.pid
+    );
+    const stateConsistent =
+      activityRead.sourceState !== 'degraded' &&
+      !liveLockContradiction;
     const tickInProgress = activityHealthy && activity?.phase === 'tick';
     const childActivity = activityHealthy && activity?.phase === 'post-tick' &&
       typeof activity.activeChildren === 'number' && activity.activeChildren > 0;
     daemon = {
       running: ds.running === true,
+      sourceQuality: {
+        sourceState: stateConsistent ? 'healthy' : 'degraded',
+        complete: stateConsistent,
+        reason: stateConsistent
+          ? daemonState.fresh ? 'missing' : 'healthy'
+          : 'inconsistent',
+      },
+      pid: ds.pid ?? null,
       startedAt,
       lastTickAt,
       ...(lockHeartbeatAt ? { lockHeartbeatAt } : {}),
@@ -1877,6 +2402,49 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     recentTicks = Array.isArray(ds.ticks) ? ds.ticks : [];
   } catch {
     // leave fallback
+  }
+  return { daemon, recentTicks };
+}
+
+/**
+ * Build a read-only snapshot of the fleet. Async because the backlog scan is
+ * async. NEVER throws — each source is independently guarded.
+ */
+export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
+  const generatedAt = new Date().toISOString();
+  let dispatchLearningEvents: DispatchProductionEvent[] | undefined;
+  let initialDispatchRead: ReturnType<typeof readDispatchProductionYieldDetailed> | undefined;
+  let queueSnapshotAt: string | null = null;
+  let queueAuthorityObservedAt: string | null = null;
+  let queueSourceStatus: FleetReadinessSourceStatus = 'unknown';
+  let queueSourceDetail = 'backlog snapshot has not been read yet';
+
+  // ── daemon ────────────────────────────────────────────────────────────────
+  const daemonRead = await readFleetDaemonStatus();
+  const daemon = daemonRead.daemon;
+  // Recent ticks are reused for merge counting below.
+  const recentTicks = daemonRead.recentTicks;
+  try {
+    const { inspectDaemonActivationPermit } = await import('../daemon/activation-permit.js');
+    daemon.activation = inspectDaemonActivationPermit(cfg, {
+      once: true,
+      dryRun: false,
+    });
+  } catch {
+    daemon.activation = {
+      schemaVersion: 1,
+      policyVersion: 'm461-proposal-once-v1',
+      authority: 'observation-only',
+      sourceState: 'degraded',
+      state: 'degraded',
+      commandEligible: false,
+      requestedShape: 'proposal-once',
+      trustRootCount: 0,
+      residentAuthorized: false,
+      installAuthorized: false,
+      repairAuthorized: false,
+      reason: 'activation-readiness-unavailable',
+    };
   }
   const diagnosticResliceDrain = buildDiagnosticResliceDrainStatus(recentTicks);
   const activeWork = await buildActiveWorkStatus();
@@ -2330,12 +2898,23 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   }
 
   // ── kill switch ───────────────────────────────────────────────────────────
-  let killed = false;
+  let killed = true;
+  let killSwitch: NonNullable<FleetStatus['killSwitch']> = {
+    state: 'unknown',
+    sourceState: 'degraded',
+    reason: 'unavailable',
+  };
   try {
-    const { killSwitchOn } = await import('../sandbox/policy.js');
-    killed = killSwitchOn() === true;
+    const { readKillSwitch } = await import('../sandbox/policy.js');
+    const read = readKillSwitch();
+    killSwitch = {
+      state: read.state,
+      sourceState: read.sourceState,
+      reason: read.reason,
+    };
+    killed = read.state !== 'inactive';
   } catch {
-    killed = false;
+    // Restrictive fallback: unobservable authority remains paused.
   }
 
   // ── guard health / state repair UX ──────────────────────────────────────
@@ -2344,7 +2923,16 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     const { diagnoseGuardHealth } = await import('../daemon/guard-health.js');
     guardHealth = diagnoseGuardHealth();
   } catch {
-    guardHealth = undefined;
+    guardHealth = {
+      generatedAt,
+      blocked: true,
+      blocks: [],
+      sourceQuality: {
+        sourceState: 'degraded',
+        complete: false,
+        reasons: ['guard-health-unavailable'],
+      },
+    };
   }
 
   // ── autonomy evidence packs ──────────────────────────────────────────────
@@ -2368,9 +2956,11 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       limitExceeded: false,
     },
   };
+  let learningEvidenceRead: AutonomyEvidencePacksReadResult | undefined;
   try {
     const { readAutonomyEvidencePacksDetailed } = await import('../autonomy/evidence-pack.js');
     const evidenceRead = readAutonomyEvidencePacksDetailed(Number.MAX_SAFE_INTEGER);
+    learningEvidenceRead = evidenceRead;
     autonomy = buildAutonomyStatus(evidenceRead.packs, evidenceRead);
   } catch {
     // leave fallback
@@ -2573,11 +3163,14 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     ...(goalFocus !== undefined ? { goalFocus } : {}),
     ...(laneLocks !== undefined ? { laneLocks } : {}),
     killed,
+    killSwitch,
   };
   const proposalProduction = buildProposalProductionStatus(recentTicks);
   if (proposalProduction) status.proposalProduction = proposalProduction;
+  let learningDecisionsRead: ReturnType<typeof readDecisionsDetailed> | undefined;
   try {
-    const decisionsRead = readDecisionsDetailed({ limit: 1 });
+    const decisionsRead = readDecisionsDetailed();
+    learningDecisionsRead = decisionsRead;
     status.decisionsSource = {
       sourceState: decisionsRead.sourceState,
       sourcePresent: decisionsRead.sourcePresent,
@@ -2603,7 +3196,38 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     };
   }
   try {
-    const traceRead = readJudgeTracesDetailed({ limit: 1 });
+    const { inspectRoutingLearningAuthority } = await import('../run/learned-router.js');
+    status.routingLearningAuthority = inspectRoutingLearningAuthority();
+  } catch {
+    status.routingLearningAuthority = {
+      version: 1,
+      state: 'inactive',
+      operationalSteering: false,
+      sourceQuality: {
+        decisions: {
+          sourceState: 'degraded', sourcePresent: true, complete: false, authenticated: false,
+        },
+        assignments: {
+          sourceState: 'degraded', sourcePresent: true, complete: false,
+          denominatorComplete: false, authenticated: false,
+        },
+      },
+      samples: { observed: 0, eligible: 0, minimumPerStratum: 5 },
+      cohort: { policyVersion: null, learningEpoch: null },
+      blockerCodes: [
+        'assignment-authenticity-unavailable',
+        'assignment-denominator-incomplete',
+        'assignment-source-degraded',
+        'decision-authenticity-unavailable',
+        'decision-source-degraded',
+        'sample-floor-unmet',
+      ],
+    };
+  }
+  let learningJudgeTracesRead: ReturnType<typeof readJudgeTracesDetailed> | undefined;
+  try {
+    const traceRead = readJudgeTracesDetailed();
+    learningJudgeTracesRead = traceRead;
     status.judgeTraceSource = {
       sourceState: traceRead.sourceState,
       sourcePresent: traceRead.sourcePresent,
@@ -2634,7 +3258,41 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       limit: 1200,
       limitPerDimension: 8,
     });
+    initialDispatchRead = dispatchRead;
     status.dispatchProductionSource = dispatchRead.sourceQuality;
+    status.proposalFunnel = buildProposalFunnelObservability({
+      events: dispatchRead.events,
+      sourceQuality: dispatchRead.sourceQuality,
+      windowMs: RECENT_WINDOW_MS,
+      eventLimit: 1200,
+    });
+    const dispatchAvailabilitySource = learningSourceAvailability(
+      'dispatch-production', dispatchRead.sourceQuality,
+    );
+    const dispatchProductionAvailability = learningMetricAvailability(
+      [dispatchAvailabilitySource],
+      learningSourceAvailable(dispatchAvailabilitySource) ? [] : ['dispatchProduction'],
+      1,
+    );
+    status.learningMetrics = dispatchRead.sourceQuality.sourceState === 'healthy' && dispatchRead.sourceQuality.complete
+      ? {
+          state: 'available',
+          denominator: 'dispatch-production',
+          sourceQuality: dispatchRead.sourceQuality,
+          dispatchProduction: dispatchProductionAvailability,
+        }
+      : {
+          state: 'withheld',
+          denominator: 'dispatch-production',
+          reason: dispatchRead.sourceQuality.sourceState === 'missing'
+            ? 'dispatch-source-missing'
+            : 'dispatch-source-degraded',
+          sourceQuality: dispatchRead.sourceQuality,
+          dispatchProduction: dispatchProductionAvailability,
+        };
+    if (status.learningMetrics.state === 'available') {
+      dispatchLearningEvents = dispatchRead.events;
+    }
     const dispatchProduction = dispatchRead.summary;
     if (dispatchProduction) {
       status.dispatchProduction = dispatchProduction;
@@ -2643,8 +3301,29 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       }
     }
   } catch {
-    // Optional history/analytics surface only. Fleet status must stay read-only
-    // and available even when the append-only ledger is absent or corrupt.
+    const sourceQuality: DispatchProductionSourceQuality = {
+      sourceState: 'degraded', sourcePresent: true, complete: false,
+      stopReasons: ['io-error'], filesRead: 0, datedFilesRead: 0, looseFilesRead: 0,
+      bytesRead: 0, rowsScanned: 0, invalidRows: 0, unreadableFiles: 1,
+    };
+    status.dispatchProductionSource = sourceQuality;
+    status.proposalFunnel = buildProposalFunnelObservability({
+      events: [],
+      sourceQuality,
+      windowMs: RECENT_WINDOW_MS,
+      eventLimit: 1200,
+    });
+    status.learningMetrics = {
+      state: 'withheld',
+      denominator: 'dispatch-production',
+      reason: 'dispatch-source-degraded',
+      sourceQuality,
+      dispatchProduction: learningMetricAvailability(
+        [learningSourceAvailability('dispatch-production', sourceQuality)],
+        ['dispatchProduction'],
+        1,
+      ),
+    };
   }
   try {
     const dispatchManifests = await buildDispatchManifestStatus();
@@ -2681,52 +3360,164 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       };
     }
   }
+  let learningPostMergeRead: PostMergeObservationReadResult | undefined;
   try {
     const adverse = readPostMergeObservations({ requireComplete: true });
+    learningPostMergeRead = adverse;
     const stability = readPostMergeStability({ requireComplete: true });
-    const degraded = adverse.sourceState === 'degraded' || stability.sourceState === 'degraded' ||
-      !adverse.complete || !stability.complete;
-    const missing = adverse.sourceState === 'missing' && stability.sourceState === 'missing';
-    const adverseMembers = new Set(adverse.observations.flatMap((row) => {
-      const digest = postMergeStabilityRepoDigest(row.repo);
-      return digest ? [JSON.stringify([digest, row.proposalId, row.mergeCommit])] : [];
-    }));
-    const effectiveStability = stability.witnesses.filter((row) => !adverseMembers.has(JSON.stringify([
-      row.repoDigest, row.proposalId, row.mergeCommit,
-    ])));
-    const effectiveSummary: PostMergeStabilityCohortSummary = {
-      completeCohorts: new Set(effectiveStability.map((row) => row.cohortId)).size,
-      releasedWitnesses: effectiveStability.length,
-      distinctRepoDigests: new Set(effectiveStability.map((row) => row.repoDigest)).size,
-      ...(effectiveStability.length > 0
-        ? { latestCompletedAt: effectiveStability.map((row) => row.stableAt).sort().at(-1) }
-        : {}),
-    };
-    status.postMergeSource = {
-      sourceState: degraded ? 'degraded' : missing ? 'missing' : 'healthy',
-      sourcePresent: adverse.sourcePresent || stability.sourcePresent,
-      complete: !degraded,
-      stopReasons: [...new Set([...adverse.stopReasons, ...stability.stopReasons])],
-      filesRead: adverse.filesRead + stability.filesRead,
-      bytesRead: adverse.bytesRead + stability.bytesRead,
-      rowsScanned: adverse.physicalRows + stability.physicalRows,
-      invalidRows: adverse.invalidRows + stability.invalidRows,
-      unreadableFiles: 0,
-    };
-    status.postMergeCohort = {
-      policyEligible: false,
-      // Stable batches do not yet bind the complete eligible denominator.
-      denominatorComplete: false,
-      adverseObservations: adverse.observations.length,
-      // Signed adverse evidence monotonically supersedes an overlapping
-      // positive witness in the public observational summary.
-      stability: effectiveSummary,
-    };
+    const projection = projectPostMergeComposite(adverse, stability);
+    status.postMergeSource = projection.source;
+    if (projection.cohort) status.postMergeCohort = projection.cohort;
   } catch {
     status.postMergeSource = {
       sourceState: 'degraded', sourcePresent: true, complete: false,
       stopReasons: ['io-error'], filesRead: 0, bytesRead: 0, rowsScanned: 0,
       invalidRows: 0, unreadableFiles: 1,
+    };
+  }
+  let detachedTickets: DetachedPostMergeWorkTicketReadResult | null = null;
+  try {
+    detachedTickets = readDetachedPostMergeWorkTickets({ requireComplete: true });
+    status.detachedPostMergeWorkTicketSource = {
+      sourceState: detachedTickets.sourceState,
+      sourcePresent: detachedTickets.sourcePresent,
+      complete: detachedTickets.complete,
+      stopReasons: detachedTickets.stopReasons,
+      filesRead: detachedTickets.filesRead,
+      bytesRead: detachedTickets.bytesRead,
+      rowsScanned: detachedTickets.tickets.length,
+      invalidRows: detachedTickets.invalidFiles,
+      unreadableFiles: detachedTickets.stopReasons.includes('io-error') ? 1 : 0,
+    };
+  } catch {
+    status.detachedPostMergeWorkTicketSource = {
+      sourceState: 'degraded', sourcePresent: true, complete: false,
+      stopReasons: ['io-error'], filesRead: 0, bytesRead: 0, rowsScanned: 0,
+      invalidRows: 0, unreadableFiles: 1,
+    };
+  }
+  try {
+    const detached = readDetachedPostMergeVerificationCohorts({ requireComplete: true });
+    const denominator = readCurrentDetachedPostMergeDenominator();
+    const denominatorProjection = projectDetachedPostMergeDenominator(
+      denominator,
+      detached,
+      detachedTickets,
+    );
+    status.detachedPostMergeVerificationSource = {
+      sourceState: detached.sourceState,
+      sourcePresent: detached.sourcePresent,
+      complete: detached.complete,
+      stopReasons: detached.stopReasons,
+      filesRead: detached.filesRead,
+      bytesRead: detached.bytesRead,
+      rowsScanned: detached.filesRead,
+      invalidRows: detached.invalidFiles,
+      unreadableFiles: detached.stopReasons.includes('io-error') ? 1 : 0,
+    };
+    status.detachedPostMergeDenominatorSource = {
+      sourceState: denominator.sourceState,
+      sourcePresent: denominator.sourcePresent,
+      complete: denominator.complete,
+      stopReasons: denominator.stopReasons,
+      filesRead: denominator.filesRead,
+      bytesRead: denominator.bytesRead,
+      rowsScanned: denominator.receipt ? 1 : 0,
+      invalidRows: denominator.invalidFiles,
+      unreadableFiles: denominator.stopReasons.some((reason) =>
+        ['io-error', 'unsafe-file', 'unsafe-path'].includes(reason)) ? 1 : 0,
+    };
+    const state: FleetDetachedPostMergeVerificationReadiness['state'] =
+      denominator.sourceState === 'missing'
+        ? 'missing'
+        : denominator.sourceState === 'degraded' || !denominator.complete ||
+            detached.sourceState === 'degraded' || !detached.complete
+          ? 'degraded'
+          : denominatorProjection.eligibleCandidates === 0
+            ? 'conclusive'
+            : denominatorProjection.observedCandidates === 0
+            ? 'awaiting-observations'
+            : denominatorProjection.observedCandidates !== denominatorProjection.eligibleCandidates ||
+                denominatorProjection.conclusiveCandidates !== denominatorProjection.eligibleCandidates
+              ? 'incomplete'
+              : 'conclusive';
+    status.detachedPostMergeVerificationReadiness = {
+      version: 1,
+      authority: 'observation-only',
+      policyEligible: false,
+      mergePermitted: false,
+      rollbackPermitted: false,
+      deployPermitted: false,
+      state,
+      latestObservedAt: denominatorProjection.latestObservedAt,
+      passRate: denominatorProjection.passRate,
+      denominator: {
+        candidateSetDigest: denominator.receipt?.candidateSetDigest ?? null,
+        eligibleCandidates: denominatorProjection.eligibleCandidates,
+        observedCandidates: denominatorProjection.observedCandidates,
+        conclusiveCandidates: denominatorProjection.conclusiveCandidates,
+        unobservedCandidates: denominatorProjection.unobservedCandidates,
+        pass: denominatorProjection.pass,
+        fail: denominatorProjection.fail,
+        unknown: denominatorProjection.unknown,
+        queuedCandidates: denominatorProjection.queuedCandidates,
+      },
+      summary: detached.summary,
+    };
+  } catch {
+    status.detachedPostMergeVerificationSource = {
+      sourceState: 'degraded', sourcePresent: true, complete: false,
+      stopReasons: ['io-error'], filesRead: 0, bytesRead: 0, rowsScanned: 0,
+      invalidRows: 0, unreadableFiles: 1,
+    };
+    status.detachedPostMergeDenominatorSource = {
+      sourceState: 'degraded', sourcePresent: true, complete: false,
+      stopReasons: ['io-error'], filesRead: 0, bytesRead: 0, rowsScanned: 0,
+      invalidRows: 0, unreadableFiles: 1,
+    };
+    status.detachedPostMergeVerificationReadiness = {
+      version: 1,
+      authority: 'observation-only',
+      policyEligible: false,
+      mergePermitted: false,
+      rollbackPermitted: false,
+      deployPermitted: false,
+      state: 'degraded',
+      latestObservedAt: null,
+      passRate: null,
+      denominator: {
+        candidateSetDigest: null,
+        eligibleCandidates: 0,
+        observedCandidates: 0,
+        conclusiveCandidates: 0,
+        unobservedCandidates: 0,
+        pass: 0,
+        fail: 0,
+        unknown: 0,
+        queuedCandidates: 0,
+      },
+      summary: {
+        cohorts: 0,
+        denominatorCompleteCohorts: 0,
+        conclusiveCompleteCohorts: 0,
+        expectedMembers: 0,
+        observedMembers: 0,
+        pass: 0,
+        fail: 0,
+        unknown: 0,
+      },
+    };
+  }
+  let workedLearningRead: WorkedLedgerReadResult;
+  try {
+    workedLearningRead = loadWorkedLedgerDetailed();
+  } catch {
+    workedLearningRead = {
+      ledger: { events: [] },
+      sourceQuality: {
+        sourceState: 'degraded', sourcePresent: true, complete: false,
+        reasons: ['unstable-read'], bytesRead: 0,
+      },
     };
   }
   let workspaceRead: AgentWorkspaceReadResult | undefined;
@@ -2741,22 +3532,351 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   } catch {
     // Optional history/analytics surface only.
   }
+  const learningCutoffMs = Date.parse(generatedAt) - LEARNING_SNAPSHOT_SETTLE_MS;
+  let learningProposals = settledLearningRows(
+    allProposals,
+    learningCutoffMs,
+    (proposal) => learningSnapshotTimestamp(proposal.createdAt, proposal.decidedAt),
+  );
+  let learningDispatchEvents = settledLearningRows(
+    dispatchLearningEvents ?? [],
+    learningCutoffMs,
+    (event) => event.ts,
+  );
+  let learningActions = settledLearningRows(
+    workspaceRead?.events ?? [],
+    learningCutoffMs,
+    (event) => event.ts,
+  );
+  let learningDecisions = settledLearningRows(
+    learningDecisionsRead?.decisions ?? [],
+    learningCutoffMs,
+    (decision) => decision.ts,
+  );
+  let learningJudgeTraces = settledLearningRows(
+    learningJudgeTracesRead?.traces ?? [],
+    learningCutoffMs,
+    (trace) => learningSnapshotTimestamp(trace.ts, trace.outcomeAt),
+  );
+  let learningEvidencePacks = settledLearningRows(
+    learningEvidenceRead?.packs ?? [],
+    learningCutoffMs,
+    (pack) => pack.generatedAt,
+  );
+  let learningWorkedEvents = settledLearningRows(
+    workedLearningRead.ledger.events,
+    learningCutoffMs,
+    (event) => event.ts,
+  );
+  let learningPostMergeObservations = settledLearningRows(
+    learningPostMergeRead?.observations ?? [],
+    learningCutoffMs,
+    (observation) => observation.observedAt,
+  );
+  if (status.learningMetrics) {
+    const rawLearningRows =
+      allProposals.length +
+      (dispatchLearningEvents?.length ?? 0) +
+      (workspaceRead?.events.length ?? 0) +
+      (learningDecisionsRead?.decisions.length ?? 0) +
+      (learningJudgeTracesRead?.traces.length ?? 0) +
+      (learningEvidenceRead?.packs.length ?? 0) +
+      workedLearningRead.ledger.events.length +
+      (learningPostMergeRead?.observations.length ?? 0);
+    const settledLearningRowCount =
+      learningProposals.length +
+      learningDispatchEvents.length +
+      learningActions.length +
+      learningDecisions.length +
+      learningJudgeTraces.length +
+      learningEvidencePacks.length +
+      learningWorkedEvents.length +
+      learningPostMergeObservations.length;
+    status.learningMetrics = {
+      ...status.learningMetrics,
+      settledThrough: new Date(learningCutoffMs).toISOString(),
+      excludedRows: Math.max(0, rawLearningRows - settledLearningRowCount),
+    };
+    if ((dispatchLearningEvents?.length ?? 0) > 0 && learningDispatchEvents.length === 0) {
+      status.learningMetrics = {
+        ...status.learningMetrics,
+        state: 'withheld',
+        reason: 'learning-snapshot-settling',
+      };
+    }
+  }
+  if (status.learningMetrics?.state === 'available') {
+    try {
+      const { listProposalsDetailed } = await import('../inbox/store.js');
+      const proposalReadAfter = listProposalsDetailed();
+      const dispatchReadAfter = readDispatchProductionYieldDetailed({
+        windowMs: RECENT_WINDOW_MS,
+        limit: 1200,
+        limitPerDimension: 8,
+      });
+      const actionReadAfter = readAgentWorkspaceDetailed({
+        windowMs: RECENT_WINDOW_MS,
+        limit: 5000,
+        limitPerDimension: 8,
+        recentLimit: 8,
+      });
+      const decisionReadAfter = readDecisionsDetailed();
+      const judgeTraceReadAfter = readJudgeTracesDetailed();
+      const evidenceReadAfter = (await import('../autonomy/evidence-pack.js'))
+        .readAutonomyEvidencePacksDetailed(Number.MAX_SAFE_INTEGER);
+      const workedReadAfter = loadWorkedLedgerDetailed();
+      const postMergeReadAfter = readPostMergeObservations({ requireComplete: true });
+
+      const proposalRowsAfter = settledLearningRows(
+        proposalReadAfter.proposals,
+        learningCutoffMs,
+        (proposal) => learningSnapshotTimestamp(proposal.createdAt, proposal.decidedAt),
+      );
+      const dispatchRowsAfter = settledLearningRows(
+        dispatchReadAfter.events,
+        learningCutoffMs,
+        (event) => event.ts,
+      );
+      const actionRowsAfter = settledLearningRows(
+        actionReadAfter.events,
+        learningCutoffMs,
+        (event) => event.ts,
+      );
+      const decisionRowsAfter = settledLearningRows(
+        decisionReadAfter.decisions,
+        learningCutoffMs,
+        (decision) => decision.ts,
+      );
+      const judgeTraceRowsAfter = settledLearningRows(
+        judgeTraceReadAfter.traces,
+        learningCutoffMs,
+        (trace) => learningSnapshotTimestamp(trace.ts, trace.outcomeAt),
+      );
+      const evidenceRowsAfter = settledLearningRows(
+        evidenceReadAfter.packs,
+        learningCutoffMs,
+        (pack) => pack.generatedAt,
+      );
+      const workedRowsAfter = settledLearningRows(
+        workedReadAfter.ledger.events,
+        learningCutoffMs,
+        (event) => event.ts,
+      );
+      const postMergeRowsAfter = settledLearningRows(
+        postMergeReadAfter.observations,
+        learningCutoffMs,
+        (observation) => observation.observedAt,
+      );
+
+      const dispatchSnapshotStable = initialDispatchRead !== undefined &&
+        learningSnapshotDigest(
+          learningSnapshotSourceQuality(initialDispatchRead.sourceQuality),
+          initialDispatchRead.events,
+        ) === learningSnapshotDigest(
+          learningSnapshotSourceQuality(dispatchReadAfter.sourceQuality),
+          dispatchReadAfter.events,
+        );
+
+      const stable = [
+        learningSnapshotDigest(learningSnapshotSourceQuality(proposalSourceQuality), learningProposals) ===
+          learningSnapshotDigest(learningSnapshotSourceQuality(proposalReadAfter), proposalRowsAfter),
+        dispatchSnapshotStable,
+        learningSnapshotDigest(learningSnapshotSourceQuality(workspaceRead?.sourceQuality), learningActions) ===
+          learningSnapshotDigest(learningSnapshotSourceQuality(actionReadAfter.sourceQuality), actionRowsAfter),
+        learningSnapshotDigest(learningSnapshotSourceQuality(learningDecisionsRead), learningDecisions) ===
+          learningSnapshotDigest(learningSnapshotSourceQuality(decisionReadAfter), decisionRowsAfter),
+        learningSnapshotDigest(learningSnapshotSourceQuality(learningJudgeTracesRead), learningJudgeTraces) ===
+          learningSnapshotDigest(learningSnapshotSourceQuality(judgeTraceReadAfter), judgeTraceRowsAfter),
+        learningSnapshotDigest(learningSnapshotSourceQuality(learningEvidenceRead), learningEvidencePacks) ===
+          learningSnapshotDigest(learningSnapshotSourceQuality(evidenceReadAfter), evidenceRowsAfter),
+        learningSnapshotDigest(learningSnapshotSourceQuality(workedLearningRead.sourceQuality), learningWorkedEvents) ===
+          learningSnapshotDigest(learningSnapshotSourceQuality(workedReadAfter.sourceQuality), workedRowsAfter),
+        learningSnapshotDigest(learningSnapshotSourceQuality(learningPostMergeRead), learningPostMergeObservations) ===
+          learningSnapshotDigest(learningSnapshotSourceQuality(postMergeReadAfter), postMergeRowsAfter),
+      ].every(Boolean);
+
+      if (stable) {
+        status.dispatchProductionSource = dispatchReadAfter.sourceQuality;
+        const dispatchAvailabilitySource = learningSourceAvailability(
+          'dispatch-production',
+          dispatchReadAfter.sourceQuality,
+        );
+        status.learningMetrics = {
+          ...status.learningMetrics,
+          sourceQuality: dispatchReadAfter.sourceQuality,
+          dispatchProduction: learningMetricAvailability(
+            [dispatchAvailabilitySource],
+            [],
+            1,
+          ),
+        };
+        if (dispatchReadAfter.summary) {
+          status.dispatchProduction = dispatchReadAfter.summary;
+          status.dispatchYieldDiagnostics = buildDispatchYieldDiagnostics(
+            dispatchReadAfter.summary,
+            cfg,
+            backends,
+          );
+        } else {
+          delete status.dispatchProduction;
+          delete status.dispatchYieldDiagnostics;
+        }
+        status.proposalFunnel = buildProposalFunnelObservability({
+          events: dispatchReadAfter.events,
+          sourceQuality: dispatchReadAfter.sourceQuality,
+          windowMs: RECENT_WINDOW_MS,
+          eventLimit: 1200,
+        });
+        learningProposals = proposalRowsAfter;
+        learningDispatchEvents = dispatchRowsAfter;
+        learningActions = actionRowsAfter;
+        learningDecisions = decisionRowsAfter;
+        learningJudgeTraces = judgeTraceRowsAfter;
+        learningEvidencePacks = evidenceRowsAfter;
+        learningWorkedEvents = workedRowsAfter;
+        learningPostMergeObservations = postMergeRowsAfter;
+      } else {
+        if (!dispatchSnapshotStable) {
+          const invalidatingSource = invalidatedDispatchProductionSource(
+            dispatchReadAfter.sourceQuality,
+          );
+          status.dispatchProductionSource = invalidatingSource;
+          delete status.dispatchProduction;
+          delete status.dispatchYieldDiagnostics;
+          const dispatchAvailabilitySource = learningSourceAvailability(
+            'dispatch-production',
+            invalidatingSource,
+          );
+          status.learningMetrics = {
+            ...status.learningMetrics,
+            sourceQuality: invalidatingSource,
+            dispatchProduction: learningMetricAvailability(
+              [dispatchAvailabilitySource],
+              ['dispatchProduction'],
+              1,
+            ),
+          };
+        }
+        if (status.proposalFunnel) {
+          status.proposalFunnel = withholdProposalFunnelForUnstableSnapshot(
+            status.proposalFunnel,
+            !dispatchSnapshotStable ? status.dispatchProductionSource : undefined,
+          );
+        }
+        status.learningMetrics = {
+          ...status.learningMetrics,
+          state: 'withheld',
+          reason: 'learning-snapshot-unstable',
+        };
+      }
+    } catch {
+      const invalidatingSource = invalidatedDispatchProductionSource(
+        status.dispatchProductionSource,
+        'io-error',
+      );
+      status.dispatchProductionSource = invalidatingSource;
+      delete status.dispatchProduction;
+      delete status.dispatchYieldDiagnostics;
+      if (status.proposalFunnel) {
+        status.proposalFunnel = withholdProposalFunnelForUnstableSnapshot(
+          status.proposalFunnel,
+          invalidatingSource,
+        );
+      }
+      const dispatchAvailabilitySource = learningSourceAvailability(
+        'dispatch-production',
+        invalidatingSource,
+      );
+      status.learningMetrics = {
+        ...status.learningMetrics,
+        state: 'withheld',
+        reason: 'learning-snapshot-unstable',
+        sourceQuality: invalidatingSource,
+        dispatchProduction: learningMetricAvailability(
+          [dispatchAvailabilitySource],
+          ['dispatchProduction'],
+          1,
+        ),
+      };
+    }
+  }
   const workspaceSource = status.workspace?.sourceQuality;
-  const agentActionLearningEligible = status.workspace !== undefined &&
-    (workspaceSource === undefined || (workspaceSource.sourceState === 'healthy' && workspaceSource.complete));
-  try {
-    const attemptRecords = listAttemptRecords({
-      windowHours: RECENT_WINDOW_MS / (60 * 60 * 1000),
-      limit: 500,
-      ...(workspaceRead ? {
-        deps: { readAgentActions: () => workspaceRead!.events },
-        useDefaultReaders: true,
-      } : {}),
+  if (workspaceSource) {
+    Object.defineProperty(learningActions, 'sourceQuality', {
+      value: workspaceSource,
+      enumerable: false,
     });
-    status.attemptCoverage = summarizeAttemptCoverage(attemptRecords, RECENT_WINDOW_MS / (60 * 60 * 1000));
-    if (workspaceSource) status.attemptCoverage.agentActionSource = workspaceSource;
-  } catch {
-    // Optional learning coverage surface only.
+  }
+  const dispatchSource = learningSourceAvailability('dispatch-production', status.dispatchProductionSource);
+  const actionSource = learningSourceAvailability('agent-actions', workspaceSource);
+  const outcomeSource = learningSourceAvailability('outcomes', proposalSourceQuality);
+  const decisionSource = learningSourceAvailability('decisions', status.decisionsSource);
+  const evidenceSource = learningSourceAvailability('evidence', learningEvidenceRead);
+  const workedSource = learningSourceAvailability('worked', workedLearningRead.sourceQuality);
+  const postMergeSource = learningSourceAvailability('post-merge', learningPostMergeRead);
+  const proposalById = new Map(learningProposals.map((proposal) => [proposal.id, proposal]));
+  const evidencePacks = learningEvidencePacks;
+  const evidenceByProposal = new Map(evidencePacks.map((pack) => [pack.proposal.id, pack]));
+  const unavailablePostMerge: PostMergeObservationReadResult = {
+    observations: [], sourceState: 'degraded', sourcePresent: true, complete: false,
+    stopReasons: ['io-error'], filesRead: 0, bytesRead: 0, physicalRows: 0,
+    invalidRows: 0, conflictingEvents: 0, duplicateRows: 0, supersededRows: 0,
+    limitExceeded: false,
+  };
+  let outcomeRecords: OutcomeRecord[] = [];
+  if (status.learningMetrics?.state === 'available') {
+    try {
+      outcomeRecords = listOutcomeRecords({
+        limit: 1000,
+        deps: {
+          listProposals: () => learningProposals,
+          readDecisions: () => learningDecisions,
+          readJudgeTraces: () => learningJudgeTraces,
+          listAutonomyEvidencePacks: () => evidencePacks,
+          loadWorkedLedger: () => ({ events: learningWorkedEvents }),
+          readPostMergeObservations: () => learningPostMergeRead
+            ? { ...learningPostMergeRead, observations: learningPostMergeObservations }
+            : unavailablePostMerge,
+        },
+      });
+      const attemptRecords = listAttemptRecords({
+        windowHours: RECENT_WINDOW_MS / (60 * 60 * 1000),
+        limit: 500,
+        deps: {
+          readDispatchProductionEvents: () => learningDispatchEvents,
+          readAgentActions: () => learningActions,
+          listOutcomeRecords: () => outcomeRecords,
+          loadProposal: (id) => proposalById.get(id) ?? null,
+          readDecisions: () => learningDecisions,
+          listAutonomyEvidencePacks: () => evidencePacks,
+          readAutonomyEvidencePack: (id) => evidenceByProposal.get(id) ?? null,
+          loadWorkedLedger: () => ({ events: learningWorkedEvents }),
+        },
+        useDefaultReaders: false,
+      });
+      const unavailable = new Set<keyof AttemptRecordCoverage>();
+      if (!learningSourceAvailable(actionSource)) unavailable.add('agentAction');
+      if (!learningSourceAvailable(outcomeSource)) unavailable.add('outcomeRecord');
+      if (!learningSourceAvailable(decisionSource)) unavailable.add('decision');
+      if (!learningSourceAvailable(evidenceSource)) unavailable.add('evidence');
+      if (!learningSourceAvailable(workedSource)) unavailable.add('worked');
+      status.attemptCoverage = withholdAttemptJoinMetrics(
+        summarizeAttemptCoverage(attemptRecords, RECENT_WINDOW_MS / (60 * 60 * 1000)),
+        unavailable,
+      );
+      if (workspaceSource) status.attemptCoverage.agentActionSource = workspaceSource;
+      status.learningMetrics.attemptCoverage = learningMetricAvailability(
+        [dispatchSource, actionSource, outcomeSource, decisionSource, evidenceSource, workedSource],
+        [...unavailable].map((metric) => `coverage.${metric}`),
+        6,
+      );
+    } catch {
+      status.learningMetrics.attemptCoverage = learningMetricAvailability(
+        [dispatchSource, { source: 'outcomes', sourceState: 'degraded', complete: false }],
+        ['coverage.agentAction', 'coverage.outcomeRecord', 'coverage.decision', 'coverage.evidence', 'coverage.worked'],
+        5,
+      );
+    }
   }
   const windowHours = RECENT_WINDOW_MS / (60 * 60 * 1000);
   const skillUseSource = readSkillUseEventsWithDiagnostics({
@@ -2764,25 +3884,139 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     limit: Math.max(500 * 8, 400),
     maxFiles: 3,
   });
-  if (agentActionLearningEligible) {
+  let learningSkillUseEvents = settledLearningRows(
+    skillUseSource.events,
+    learningCutoffMs,
+    (event) => event.ts,
+  );
+  if (status.learningMetrics) {
+    status.learningMetrics.excludedRows =
+      (status.learningMetrics.excludedRows ?? 0) +
+      Math.max(0, skillUseSource.events.length - learningSkillUseEvents.length);
+  }
+  if (status.learningMetrics?.state === 'available') {
+    try {
+      const skillUseSourceAfter = readSkillUseEventsWithDiagnostics({
+        sinceMs: Date.parse(generatedAt) - RECENT_WINDOW_MS,
+        limit: Math.max(500 * 8, 400),
+        maxFiles: 3,
+      });
+      const skillRowsAfter = settledLearningRows(
+        skillUseSourceAfter.events,
+        learningCutoffMs,
+        (event) => event.ts,
+      );
+      const skillQuality = {
+        sourceState: skillUseSource.sourceState,
+        sourcePresent: skillUseSource.sourcePresent,
+        eventState: skillUseSource.eventState,
+      };
+      const skillQualityAfter = {
+        sourceState: skillUseSourceAfter.sourceState,
+        sourcePresent: skillUseSourceAfter.sourcePresent,
+        eventState: skillUseSourceAfter.eventState,
+      };
+      if (learningSnapshotDigest(skillQuality, learningSkillUseEvents) ===
+          learningSnapshotDigest(skillQualityAfter, skillRowsAfter)) {
+        learningSkillUseEvents = skillRowsAfter;
+      } else {
+        status.learningMetrics = {
+          ...status.learningMetrics,
+          state: 'withheld',
+          reason: 'learning-snapshot-unstable',
+        };
+        status.attemptCoverage = undefined;
+      }
+    } catch {
+      status.learningMetrics = {
+        ...status.learningMetrics,
+        state: 'withheld',
+        reason: 'learning-snapshot-unstable',
+      };
+      status.attemptCoverage = undefined;
+    }
+  }
+  const skillSource = learningSourceAvailability('skill-use', {
+    sourceState: skillUseSource.sourceState,
+    complete: skillUseSource.sourceState === 'healthy',
+  });
+  if (status.learningMetrics?.state === 'available') {
     try {
       const trajectoryRecords = listTrajectoryRecords({
         windowHours,
         limit: 500,
         deps: {
-          ...(workspaceRead ? { readAgentActions: () => workspaceRead!.events } : {}),
-          readSkillUseEvents: () => skillUseSource.events,
+          readDispatchProductionEvents: () => learningDispatchEvents,
+          readAgentActions: () => learningActions,
+          readSkillUseEvents: () => learningSkillUseEvents,
+          listOutcomeRecords: () => outcomeRecords,
+          loadProposal: (id) => proposalById.get(id) ?? null,
         },
       });
-      status.trajectoryLearning = summarizeTrajectoryLearning(trajectoryRecords, windowHours);
+      const unavailable = new Set<keyof TrajectoryRecordCoverage>();
+      if (!learningSourceAvailable(outcomeSource)) unavailable.add('proposal');
+      if (!learningSourceAvailable(evidenceSource)) unavailable.add('evidence');
+      if (!learningSourceAvailable(decisionSource)) unavailable.add('decision');
+      if (!learningSourceAvailable(actionSource)) unavailable.add('agentAction');
+      if (!learningSourceAvailable(skillSource)) unavailable.add('skillUse');
+      const terminalAvailable = learningSourceAvailable(outcomeSource) &&
+        learningSourceAvailable(decisionSource);
+      const realizedAvailable = terminalAvailable && learningSourceAvailable(postMergeSource);
+      const tracesAvailable = terminalAvailable && learningSourceAvailable(evidenceSource) &&
+        learningSourceAvailable(actionSource) && learningSourceAvailable(workedSource) &&
+        learningSourceAvailable(postMergeSource);
+      status.trajectoryLearning = withholdTrajectoryMetrics(
+        summarizeTrajectoryLearning(trajectoryRecords, windowHours),
+        unavailable,
+        { terminal: terminalAvailable, realized: realizedAvailable, traces: tracesAvailable },
+      );
+      const withheldMetrics = [
+        ...[...unavailable].map((metric) => `coverage.${metric}`),
+        ...(!terminalAvailable ? ['terminalOutcomes', 'routeSpine.dispatchToMerge'] : []),
+        ...(!realizedAvailable ? ['realizedOutcomes'] : []),
+        ...(!learningSourceAvailable(decisionSource) ? ['routeSpine.dispatchToDecision'] : []),
+        ...(!learningSourceAvailable(evidenceSource) ? ['routeSpine.dispatchToEvidence'] : []),
+        ...(!tracesAvailable ? ['traces'] : []),
+      ];
+      status.learningMetrics.trajectoryLearning = learningMetricAvailability(
+        [
+          dispatchSource, actionSource, outcomeSource, decisionSource, evidenceSource,
+          workedSource, postMergeSource, skillSource,
+        ],
+        withheldMetrics,
+        12,
+      );
     } catch {
-      // Optional route-to-outcome learning surface only.
+      status.learningMetrics.trajectoryLearning = learningMetricAvailability(
+        [dispatchSource, { source: 'outcomes', sourceState: 'degraded', complete: false }],
+        [
+          'terminalOutcomes', 'realizedOutcomes', 'coverage.proposal', 'coverage.evidence',
+          'coverage.decision', 'coverage.agentAction', 'coverage.skillUse', 'routeSpine', 'traces', 'recent',
+        ],
+        10,
+      );
     }
   }
-  if (status.trajectoryLearning && skillUseSource.eventState === 'degraded') {
+  if (status.trajectoryLearning && !learningSourceAvailable(skillSource)) {
     status.trajectoryLearning = suppressDegradedSkillObservation(
       status.trajectoryLearning,
       skillUseSource.events.length > 0 ? 'present' : 'none',
+    );
+  }
+  if (status.learningMetrics?.state === 'withheld') {
+    status.learningMetrics.attemptCoverage = learningMetricAvailability(
+      [dispatchSource],
+      ['production', 'coverage.agentAction', 'coverage.outcomeRecord', 'coverage.decision', 'coverage.evidence', 'coverage.worked'],
+      6,
+    );
+    status.learningMetrics.trajectoryLearning = learningMetricAvailability(
+      [dispatchSource],
+      [
+        'trajectories', 'terminalOutcomes', 'realizedOutcomes', 'coverage.dispatch',
+        'coverage.proposal', 'coverage.evidence', 'coverage.decision', 'coverage.agentAction',
+        'coverage.skillUse', 'routeSpine', 'traces', 'recent',
+      ],
+      12,
     );
   }
   status.skillCorpusReadiness = await readSkillCorpusReadiness(
@@ -2832,9 +4066,54 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   status.cutoffCheckpoints = readFleetCutoffCheckpointStatus(generatedAt);
   try {
     const { automergeCanaryStatus } = await import('./automerge-canary-store.js');
-    status.autoMergeCanary = projectAutoMergeCanaryStatus(automergeCanaryStatus());
+    const canaryRead = automergeCanaryStatus();
+    status.autoMergeCanary = projectAutoMergeCanaryStatus(canaryRead);
+    status.autoMergeCanaryPromotionReadiness = buildAutoMergeCanaryPromotionReadiness(
+      status,
+      cfg,
+      canaryRead,
+      Date.parse(generatedAt),
+    );
   } catch {
     status.autoMergeCanary = degradedAutoMergeCanaryStatus();
+    status.autoMergeCanaryPromotionReadiness = evaluateAutoMergeCanaryPromotionReadiness({
+      observedAtMs: Date.parse(generatedAt),
+      canary: {
+        sourceState: 'degraded', active: false, state: 'critical',
+        observationCompletedAt: null, attempts: 0, eligible: 0, rejected: 0,
+        requiredAttempts: 1, requiredEligible: 1, requirementsBound: false,
+        bindingMismatches: 0, inspectionErrors: 1,
+      },
+      remoteProtection: {
+        configured: 'missing', live: 'unavailable', coverage: 'none', observedAt: null,
+      },
+      verification: {
+        sourceState: 'degraded', enrolledRepos: 0, mergeGradeRepos: 0, noCommandRepos: 0,
+      },
+      evidenceSigning: {
+        sourceState: 'missing', signed: false, writable: false, expiresAt: null,
+      },
+      release: {
+        sourceState: 'missing', signatureVerified: false, manifestComplete: false,
+        artifactBound: false, serviceInvocationBound: false, configurationBound: false,
+        expiresAt: null, rollbackBound: false,
+      },
+      postMerge: {
+        sourceState: 'degraded', complete: false, denominatorComplete: false,
+        releasedCohorts: 0, adverseObservations: 0, latestCompletedAt: null,
+      },
+      policy: {
+        allowSelfMerge: true, allowWithoutVerification: true, localMergeFallback: true,
+        maxAutomergeFiles: null, maxAutomergeLines: null,
+      },
+      scopeIdentity: {
+        sourceState: 'degraded',
+        expectedPolicyDigest: null, expectedConfigDigest: null,
+        evidencePolicyDigest: null, evidenceConfigDigest: null,
+        currentPolicyDigest: null, currentConfigDigest: null,
+        currentScopePolicyDigest: null, observedAt: null,
+      },
+    });
   }
 
   return status;
@@ -3329,34 +4608,6 @@ function formatActionPercent(rate: number): string {
   return `${Math.round(Math.max(0, Math.min(1, rate)) * 100)}%`;
 }
 
-interface DiagnosticDispatchYieldAction {
-  detail: string;
-  backend?: EngineId | null;
-}
-
-interface GeneratedRepairRecoveryStatus {
-  active: boolean;
-  healthy: boolean;
-  detail: string;
-}
-
-function isDiagnosticResliceQueueItem(item: FleetQueueNextItem): boolean {
-  return item.id.includes(':proposal-repair-nodiff:') ||
-    item.title.toLowerCase().startsWith('reslice no-diff dispatch');
-}
-
-function isCaptureRepairQueueItem(item: FleetQueueNextItem): boolean {
-  return item.id.includes(':proposal-repair-capture:') ||
-    item.title.toLowerCase().startsWith('repair dispatch capture failure');
-}
-
-function isGeneratedRepairQueueItem(item: FleetQueueNextItem): boolean {
-  return isDiagnosticResliceQueueItem(item) ||
-    isCaptureRepairQueueItem(item) ||
-    item.id.includes(':proposal-repair:') ||
-    item.title.toLowerCase().startsWith('repair proposal ');
-}
-
 function diagnosticPolicyDisabled(
   value: Pick<DispatchProductionYieldSummary, 'outcomes' | 'attemptShape'>,
 ): number {
@@ -3419,44 +4670,6 @@ function diagnosticTopReasonForDispatchSummary(summary: DispatchProductionYieldS
     return summary.diagnosticTopReasons[0]?.reason;
   }
   return summary.topReasons.find((reason) => !isSuppressedProposalProductionReason(reason.reason))?.reason;
-}
-
-function formatAttemptShapeDetail(shape: DispatchProductionYieldSummary['attemptShape']): string {
-  if (!shape) return '';
-  const total =
-    (shape.backendNoDiff ?? 0) +
-    (shape.captureOrGateBlocked ?? 0) +
-    (shape.repairAttempts ?? 0) +
-    (shape.policyDisabled ?? 0);
-  if (total <= 0) return '';
-  return `; shape: no-diff ${shape.backendNoDiff ?? 0}, gate/capture ${shape.captureOrGateBlocked ?? 0}, repairs ${shape.repairAttempts ?? 0}, policy-off ${shape.policyDisabled ?? 0}`;
-}
-
-function formatGeneratedRepairRecoveryDetail(
-  generated: DispatchProductionYieldSummary['generatedRepairAttempts'],
-): string {
-  const summary = formatGeneratedRepairRecoverySummary(generated);
-  return summary ? `; repair recovery: ${summary}` : '';
-}
-
-function formatGeneratedRepairRecoverySummary(
-  generated: DispatchProductionYieldSummary['generatedRepairAttempts'],
-): string {
-  if (!generated || generated.attempts <= 0) return '';
-  const kinds = [
-    formatGeneratedRepairKindCount(generated.captureRepairs ?? 0, 'capture'),
-    formatGeneratedRepairKindCount(generated.diagnosticReslices ?? 0, 'no-diff'),
-    formatGeneratedRepairKindCount(generated.proposalRepairs ?? 0, 'proposal'),
-  ].filter((part): part is string => part !== null);
-  const kindDetail = kinds.length > 0 ? `; ${kinds.join(', ')}` : '';
-  const conversion = `${generated.proposalsCreated}/${generated.attempts}`;
-  const rate = formatActionPercent(generated.proposalRate ?? 0);
-  return `generated repairs ${conversion} converted (${rate}${kindDetail})`;
-}
-
-function formatGeneratedRepairKindCount(count: number, label: string): string | null {
-  if (count <= 0) return null;
-  return `${label} ${count}`;
 }
 
 function dispatchYieldVerdict(
@@ -3711,183 +4924,6 @@ function dispatchYieldRecommendation(input: {
   return `Tighten context or reslice ${subject}; capture/gate blocking dominates the low-yield sample.`;
 }
 
-function formatDispatchYieldDiagnosticDetail(
-  diagnostic: FleetDispatchYieldDiagnostics,
-  generatedWork?: FleetQueueGeneratedWorkStatus,
-): string {
-  const candidate = diagnostic.primaryCandidate;
-  const subject = candidate ? dispatchYieldSubject(candidate) : 'dispatches';
-  const attempts = candidate?.diagnosticAttempts ?? diagnostic.diagnosticAttempts;
-  const proposals = candidate?.proposalsCreated ?? diagnostic.proposalsCreated;
-  const rate = candidate?.proposalRate ?? diagnostic.proposalRate;
-  const topReason = candidate?.topReason ?? diagnostic.topReason;
-  const reason = topReason ? `; top reason: ${topReason}` : '';
-  const actionReason = candidate?.actionReason ?? diagnostic.actionReason;
-  const actionReasonDetail = actionReason ? `; action reason: ${actionReason}` : '';
-  const shape = formatAttemptShapeDetail(candidate?.attemptShape ?? diagnostic.attemptShape);
-  const repairRecovery = formatGeneratedRepairRecoveryDetail(diagnostic.generatedRepairAttempts);
-  const action = diagnostic.action === 'route-same-tier-alternative'
-    ? 'same-tier reroute'
-    : diagnostic.action === 'tighten-context-or-reslice'
-      ? 'tighten context/reslice'
-      : diagnostic.action === 'collect-more-samples'
-      ? 'collect more samples'
-      : 'keep routing';
-  const repairCoverage = formatQueuedRepairCoverage(generatedWork);
-  return `${subject} proposal yield ${proposals}/${attempts} (${formatActionPercent(rate)}); ` +
-    `sample-gated action: ${action}${reason}${actionReasonDetail}${shape}${repairRecovery}${repairCoverage}`;
-}
-
-function formatQueuedRepairCoverage(generatedWork: FleetQueueGeneratedWorkStatus | undefined): string {
-  if (!generatedWork) return '';
-  const parts = [
-    formatQueuedRepairCount(generatedWork.captureRepairs ?? 0, 'capture repair'),
-    formatQueuedRepairCount(generatedWork.diagnosticReslices ?? 0, 'no-diff reslice'),
-  ].filter((part): part is string => part !== null);
-  return parts.length > 0 ? `; queued repair coverage: ${parts.join(', ')}` : '';
-}
-
-function formatQueuedRepairCount(count: number, label: string): string | null {
-  if (count <= 0) return null;
-  return `${count} ${label}${count === 1 ? '' : 's'} queued`;
-}
-
-function dispatchYieldNextAction(status: FleetStatus): DiagnosticDispatchYieldAction | null {
-  const diagnostic = status.dispatchYieldDiagnostics;
-  if (!diagnostic) return null;
-  if (diagnostic.verdict !== 'actionable') return null;
-  const candidate = diagnostic.primaryCandidate;
-  return {
-    detail: formatDispatchYieldDiagnosticDetail(diagnostic, status.queue.generatedWork),
-    ...(candidate?.backend ? { backend: candidate.backend } : {}),
-  };
-}
-
-function generatedRepairRecoveryStatus(status: FleetStatus): GeneratedRepairRecoveryStatus | null {
-  const productionSourceHealthy = status.dispatchProductionSource?.sourceState === 'healthy' &&
-    status.dispatchProductionSource.complete;
-  const generated =
-    status.dispatchYieldDiagnostics?.generatedRepairAttempts ??
-    (productionSourceHealthy ? status.dispatchProduction?.generatedRepairAttempts : undefined) ??
-    status.attemptCoverage?.production.generatedRepairAttempts;
-  const detail = formatGeneratedRepairRecoverySummary(generated);
-  if (!generated || generated.attempts <= 0 || !detail) return null;
-  const active =
-    (status.queue.generatedWork?.total ?? 0) > 0 ||
-    (status.queue.next?.some(isGeneratedRepairQueueItem) ?? false);
-  const enoughSamples = generated.attempts >= MIN_DISPATCH_YIELD_ACTION_ATTEMPTS;
-  const healthyRate = Math.max(
-    status.dispatchYieldDiagnostics?.lowYieldRate ?? LOW_DISPATCH_YIELD_ACTION_RATE,
-    0.5,
-  );
-  return {
-    active,
-    healthy: active && enoughSamples && (generated.proposalRate ?? 0) >= healthyRate,
-    detail,
-  };
-}
-
-function diagnosticResliceDrainNextAction(status: FleetStatus): FleetNextAction | null {
-  const diagnostic = status.dispatchYieldDiagnostics;
-  const resliceCount = status.queue.generatedWork?.diagnosticReslices ?? 0;
-  const eligibleReslices = status.queue.next?.filter(isDiagnosticResliceQueueItem) ?? [];
-  const eligibleResliceCount = eligibleReslices.length;
-  if (
-    !diagnostic ||
-    diagnostic.verdict !== 'actionable' ||
-    diagnostic.action !== 'tighten-context-or-reslice' ||
-    resliceCount <= 0 ||
-    eligibleResliceCount <= 0
-  ) {
-    return null;
-  }
-
-  const topReslice = eligibleReslices[0] ?? null;
-  const diagnosticDetail = formatDispatchYieldDiagnosticDetail(diagnostic, status.queue.generatedWork);
-  const target = topReslice?.repo ?? diagnostic.primaryCandidate?.backend;
-  const first = topReslice ? ` First: ${topReslice.title}.` : '';
-  const stalled = status.queue.diagnosticResliceDrain?.stalled === true ||
-    status.queue.generatedWork?.diagnosticResliceDrainStalled === true
-    ? ' reslice-drain-stalled: the latest targeted drain tick selected none.'
-    : '';
-  const daemonRunning = status.daemon.running === true;
-  const label = daemonRunning ? 'Monitor diagnostic auto-drain' : 'Drain diagnostic reslices';
-  const countDetail = eligibleResliceCount === resliceCount
-    ? `${eligibleResliceCount} diagnostic no-diff reslice item(s) are eligible`
-    : `${eligibleResliceCount}/${resliceCount} diagnostic no-diff reslice item(s) are daemon-eligible`;
-  return {
-    id: 'drain-diagnostic-reslices',
-    priority: 'high',
-    label,
-    detail:
-      `${countDetail} while dispatch yield is actionable: ` +
-      `${diagnosticDetail}.${first}${stalled}`,
-    ...(target ? { target } : {}),
-    commands: daemonRunning
-      ? [
-          nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only', {
-            note: 'Launchd daemon auto-drains eligible diagnostic reslices during normal live ticks.',
-          }),
-          nextActionCommand('Inspect daemon status', ['ashlr', 'daemon', 'status'], 'read-only'),
-        ]
-      : [
-          nextActionCommand('Drain diagnostic reslices', [
-            'ashlr',
-            'daemon',
-            'start',
-            '--once',
-            '--drain',
-            'diagnostic-reslices',
-            '--limit',
-            String(DEFAULT_DIAGNOSTIC_RESLICE_DRAIN_LIMIT),
-          ], 'autonomous-dispatch', {
-            note: 'Runs one guarded daemon tick targeted at already-queued diagnostic no-diff reslices.',
-          }),
-          nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
-        ],
-  };
-}
-
-function captureRepairNextAction(status: FleetStatus): FleetNextAction | null {
-  const diagnostic = status.dispatchYieldDiagnostics;
-  const captureRepairCount = status.queue.generatedWork?.captureRepairs ?? 0;
-  const eligibleRepairs = status.queue.next?.filter(isCaptureRepairQueueItem) ?? [];
-  const eligibleRepairCount = eligibleRepairs.length;
-  if (
-    !diagnostic ||
-    diagnostic.verdict !== 'actionable' ||
-    diagnostic.action !== 'tighten-context-or-reslice' ||
-    status.daemon.running !== true ||
-    captureRepairCount <= 0 ||
-    eligibleRepairCount <= 0
-  ) {
-    return null;
-  }
-
-  const topRepair = eligibleRepairs[0] ?? null;
-  const diagnosticDetail = formatDispatchYieldDiagnosticDetail(diagnostic, status.queue.generatedWork);
-  const target = topRepair?.repo ?? diagnostic.primaryCandidate?.backend;
-  const first = topRepair ? ` First: ${topRepair.title}.` : '';
-  const countDetail = eligibleRepairCount === captureRepairCount
-    ? `${eligibleRepairCount} capture repair item(s) are eligible`
-    : `${eligibleRepairCount}/${captureRepairCount} capture repair item(s) are daemon-eligible`;
-  return {
-    id: 'process-capture-repairs',
-    priority: 'high',
-    label: 'Monitor capture repairs',
-    detail:
-      `${countDetail} while dispatch yield is actionable: ` +
-      `${diagnosticDetail}.${first}`,
-    ...(target ? { target } : {}),
-    commands: [
-      nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only', {
-        note: 'Launchd daemon processes eligible capture repairs during normal live ticks.',
-      }),
-      nextActionCommand('Inspect daemon status', ['ashlr', 'daemon', 'status'], 'read-only'),
-    ],
-  };
-}
-
 function buildAutonomyEffectiveness(status: FleetStatus): FleetAutonomyEffectivenessStatus {
   const readiness = status.autoMergeReadiness;
   const eligibleBacklogItems = status.queue.eligibleBacklogItems ?? status.queue.backlogItems;
@@ -3918,12 +4954,30 @@ function buildAutonomyEffectiveness(status: FleetStatus): FleetAutonomyEffective
       counts,
     };
   }
+  if (status.killSwitch?.state === 'unknown' ||
+      status.daemon.sourceQuality?.sourceState !== 'healthy' ||
+      status.guardHealth?.sourceQuality?.sourceState !== 'healthy') {
+    const reason = status.killSwitch?.state === 'unknown'
+      ? 'kill switch source is uninspectable'
+      : status.daemon.sourceQuality?.sourceState !== 'healthy'
+        ? `daemon state source is degraded (${status.daemon.sourceQuality?.reason ?? 'unavailable'})`
+        : 'guard health source is degraded';
+    return {
+      phase: 'control-blocked',
+      canAutoMergeNow: false,
+      bottleneck: 'control',
+      summary: `Autonomy is control-blocked: ${reason}.`,
+      counts,
+    };
+  }
   const firstGuardBlock = status.guardHealth?.blocks?.[0];
   if (status.killed || !status.daemon.running || firstGuardBlock) {
     const reason = status.killed
       ? 'kill switch is engaged'
       : !status.daemon.running
-        ? 'daemon is stopped'
+        ? status.daemon.activation?.commandEligible === true
+          ? 'daemon is stopped with one exact proposal activation eligible'
+          : `daemon activation is blocked (${status.daemon.activation?.reason ?? 'activation-readiness-unavailable'})`
         : firstGuardBlock?.detail ?? 'guard is blocking';
     return {
       phase: 'control-blocked',
@@ -4087,14 +5141,59 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
     return actions;
   }
 
+  if (status.killSwitch?.state === 'unknown') {
+    add({
+      id: 'inspect-kill-switch-source',
+      priority: 'critical',
+      label: 'Inspect kill switch source',
+      detail: 'Kill switch authority is uninspectable; the fleet remains paused until exact state is proven.',
+      commands: [
+        nextActionCommand('Inspect daemon status', ['ashlr', 'daemon', 'status', '--json'], 'read-only'),
+        nextActionCommand('Run diagnostics', ['ashlr', 'doctor'], 'read-only'),
+      ],
+    });
+    return actions;
+  }
+
+  if (status.daemon.sourceQuality?.sourceState !== 'healthy') {
+    add({
+      id: 'inspect-daemon-state-source',
+      priority: 'critical',
+      label: 'Inspect daemon state source',
+      detail:
+        `Daemon state is ${status.daemon.sourceQuality?.reason ?? 'unavailable'}; ` +
+          'stopped/running state and spend are withheld.',
+      commands: [
+        nextActionCommand('Inspect daemon status', ['ashlr', 'daemon', 'status', '--json'], 'read-only'),
+        nextActionCommand('Run diagnostics', ['ashlr', 'doctor'], 'read-only'),
+      ],
+    });
+    return actions;
+  }
+
+  if (status.guardHealth?.sourceQuality?.sourceState !== 'healthy') {
+    add({
+      id: 'inspect-guard-health-source',
+      priority: 'critical',
+      label: 'Inspect guard health source',
+      detail: 'Guard health is incomplete; autonomous work remains paused until all guard sources are readable.',
+      commands: [
+        nextActionCommand('Inspect daemon status', ['ashlr', 'daemon', 'status', '--json'], 'read-only'),
+        nextActionCommand('Run diagnostics', ['ashlr', 'doctor'], 'read-only'),
+      ],
+    });
+    return actions;
+  }
+
   if (status.killed) {
     add({
       id: 'resume-fleet',
       priority: 'critical',
-      label: 'Resume fleet',
-      detail: 'The global kill switch is engaged, so no autonomous dispatch can run.',
+      label: 'Clear kill switch',
+      detail:
+        'The global kill switch is engaged. Clearing it does not authorize or start the daemon.',
       commands: [
-        nextActionCommand('Resume fleet', ['ashlr', 'fleet', 'resume'], 'control-plane', {
+        nextActionCommand('Clear kill switch', ['ashlr', 'fleet', 'resume'], 'control-plane', {
           endpointMethod: 'POST',
           endpointPath: '/api/fleet/resume',
           tokenRequired: true,
@@ -4104,20 +5203,36 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
   }
 
   if (!status.daemon.running) {
-    add({
-      id: 'start-daemon',
-      priority: 'critical',
-      label: 'Start daemon',
-      detail: 'The daemon is stopped; the fleet cannot drain backlog or proposals.',
-      commands: [
-        nextActionCommand('Start daemon', ['ashlr', 'daemon', 'start'], 'autonomous-dispatch'),
-        nextActionCommand('Repair service', ['ashlr', 'daemon', 'install'], 'control-plane', {
-          endpointMethod: 'POST',
-          endpointPath: '/api/daemon/service/repair',
-          tokenRequired: true,
-        }),
-      ],
-    });
+    const activation = status.daemon.activation;
+    if (activation?.commandEligible === true) {
+      add({
+        id: 'start-daemon',
+        priority: 'critical',
+        label: 'Start one proposal cycle',
+        detail:
+          'A runtime-bound one-use proposal permit is currently valid; daemon start will revalidate and consume it.',
+        commands: [
+          nextActionCommand(
+            'Start one proposal cycle',
+            ['ashlr', 'daemon', 'start', '--once'],
+            'autonomous-dispatch',
+            { note: 'Snapshot-only recommendation; daemon start owns final authority and consumption.' },
+          ),
+        ],
+      });
+    } else {
+      add({
+        id: 'inspect-daemon-activation',
+        priority: 'critical',
+        label: 'Inspect daemon activation authority',
+        detail:
+          `The daemon is stopped and no exact one-shot proposal activation is currently eligible ` +
+          `(${activation?.reason ?? 'activation-readiness-unavailable'}).`,
+        commands: [
+          nextActionCommand('Inspect daemon status', ['ashlr', 'daemon', 'status'], 'read-only'),
+        ],
+      });
+    }
   }
 
   const firstGuardBlock = status.guardHealth?.blocks?.[0];
@@ -4141,7 +5256,8 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
   if (phantomAuditAction) add(phantomAuditAction);
 
   const unhealthyEvidence = learningEvidenceReadinessSources(status, status.generatedAt)
-    .filter((source) => source.eligibility !== 'observational' &&
+    .filter((source) => source.actionSynthesis === 'eligible' &&
+      source.eligibility !== 'observational' &&
       (source.eligibility === 'withheld' || source.status === 'degraded'));
   if (unhealthyEvidence.length > 0) {
     const labels = unhealthyEvidence.slice(0, 3).map((source) => source.label).join(', ');
@@ -4176,11 +5292,13 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
     add({
       id: 'reconcile-host-prs',
       priority: 'high',
-      label: 'Reconcile host PRs',
-      detail: `${awaitingHostMerge} proposal(s) are waiting for GitHub/host merge confirmation.`,
+      label: 'Inspect host PR reconciliation',
+      detail:
+        `${awaitingHostMerge} proposal(s) are waiting for GitHub/host merge confirmation. ` +
+        'Daemon activation remains governed by the separate one-shot action.',
       commands: [
-        nextActionCommand('Run reconciliation pass', ['ashlr', 'daemon', 'start', '--once'], 'autonomous-dispatch'),
         nextActionCommand('Inspect inbox', ['ashlr', 'inbox', '--json'], 'read-only'),
+        nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
       ],
     });
   }
@@ -4234,10 +5352,12 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
         id: 'drain-ready-auto-merges',
         priority: 'high',
         label: 'Drain ready auto-merges',
-        detail: `${readiness.authorityReady} pending proposal(s) have complete read-only authority evidence.`,
+        detail:
+          `${readiness.authorityReady} pending proposal(s) have complete read-only authority evidence. ` +
+          'The running daemon owns scheduling; monitor the evidence without starting a second process.',
         commands: [
-          nextActionCommand('Run auto-merge pass', ['ashlr', 'daemon', 'start', '--once'], 'autonomous-dispatch'),
           nextActionCommand('Inspect inbox', ['ashlr', 'inbox', '--json'], 'read-only'),
+          nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
         ],
       });
     }
@@ -4266,10 +5386,12 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
         id: 'verify-pending-proposals',
         priority: 'high',
         label: 'Verify pending proposals',
-        detail: `${readiness.needsVerification} proposal(s) need verification before judge or merge spend.`,
+        detail:
+          `${readiness.needsVerification} proposal(s) need verification before judge or merge spend. ` +
+          'The running daemon owns scheduling; monitor verification without starting a second process.',
         commands: [
-          nextActionCommand('Run verify pass', ['ashlr', 'daemon', 'start', '--once'], 'autonomous-dispatch'),
           nextActionCommand('Inspect inbox', ['ashlr', 'inbox', '--json'], 'read-only'),
+          nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
         ],
       });
     }
@@ -4278,10 +5400,12 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
         id: 'repair-verification-failures',
         priority: 'high',
         label: 'Drain failed proposals',
-        detail: `${readiness.knownVerificationFailed} proposal(s) have permanent verification blockers; run merge maintenance to reject or drain them.`,
+        detail:
+          `${readiness.knownVerificationFailed} proposal(s) have permanent verification blockers. ` +
+          'The running daemon owns maintenance scheduling; inspect the failures without starting a second process.',
         commands: [
           nextActionCommand('Inspect failed proposals', ['ashlr', 'inbox', '--json'], 'read-only'),
-          nextActionCommand('Run merge maintenance', ['ashlr', 'daemon', 'start', '--once'], 'autonomous-dispatch'),
+          nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
         ],
       });
     }
@@ -4318,33 +5442,6 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
       ],
     });
   }
-
-  const contextEfficiency = status.contextEfficiency;
-  const contextRisk = contextEfficiency?.risks.find((risk) => risk.severity === 'high' || risk.severity === 'medium');
-  if (contextEfficiency && (contextEfficiency.posture === 'strained' || contextRisk)) {
-    const shouldDrainReslices = contextEfficiency.risks.some((risk) => risk.id === 'proposal-yield-low') ||
-      (status.queue.generatedWork?.diagnosticReslices ?? 0) > 0;
-    add({
-      id: 'improve-context-efficiency',
-      priority: 'medium',
-      label: 'Improve context efficiency',
-      detail: contextRisk?.detail ?? contextEfficiency.recommendations[0] ?? 'Context efficiency is degraded; inspect reflection, retrieval, and proposal-yield signals.',
-      commands: [
-        nextActionCommand('Run reflection', ['ashlr', 'reflect', 'playbooks', '--persist'], 'control-plane', {
-          note: 'Writes only metadata-derived playbooks under the Ashlr genome hub; no repo source, merge, or network authority.',
-        }),
-        nextActionCommand('Evaluate attention', ['ashlr', 'eval', 'attention', '--json'], 'read-only'),
-        ...(shouldDrainReslices && status.daemon.running
-          ? [nextActionCommand('Inspect daemon status', ['ashlr', 'daemon', 'status'], 'read-only', {
-              note: 'Daemon auto-drains eligible diagnostic reslices during normal live ticks.',
-            })]
-          : []),
-        nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
-      ],
-    });
-  }
-  const causalCoverageAction = causalCoverageNextAction(status.attemptCoverage);
-  if (causalCoverageAction) add(causalCoverageAction);
 
   const goalFocus = status.goalFocus;
   const staleLane = status.laneLocks?.samples.find(
@@ -4408,52 +5505,6 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
   const eligibleBacklogItems = status.queue.eligibleBacklogItems ?? status.queue.backlogItems;
   if (eligibleBacklogItems === 0) addRestoreRepairRoutes();
   if (eligibleBacklogItems > 0 && !controlBlocked) {
-    const diagnosticResliceDrainAction = diagnosticResliceDrainNextAction(status);
-    if (diagnosticResliceDrainAction) add(diagnosticResliceDrainAction);
-    const captureRepairAction = captureRepairNextAction(status);
-    if (captureRepairAction) add(captureRepairAction);
-    const repairRecovery = generatedRepairRecoveryStatus(status);
-    const repairMonitorActive = Boolean(diagnosticResliceDrainAction || captureRepairAction);
-    const dispatchYieldDetail = dispatchYieldNextAction(status);
-    if (dispatchYieldDetail && !(repairRecovery?.healthy && repairMonitorActive)) {
-      add({
-        id: 'inspect-dispatch-yield',
-        priority: 'medium',
-        label: 'Inspect dispatch yield',
-        detail: dispatchYieldDetail.detail,
-        ...(dispatchYieldDetail.backend ? { target: dispatchYieldDetail.backend } : {}),
-        commands: [
-          nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
-          nextActionCommand('Inspect direction', ['ashlr', 'fleet', 'direction', '--json'], 'read-only'),
-        ],
-      });
-    }
-    const production = status.proposalProduction;
-    const diagnosticNoProposalDispatches = production?.diagnosticNoProposalDispatches ?? production?.noProposalDispatches ?? 0;
-    if (production && production.skipped > 0) {
-      const topSkip = production.skipReasons[0];
-      add({
-        id: 'inspect-dispatch-skips',
-        priority: 'medium',
-        label: 'Inspect dispatch skips',
-        detail: `${production.skipped} selected item(s) were not attempted${topSkip ? `; top skip: ${topSkip.reason}` : ''}`,
-        commands: [
-          nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
-        ],
-      });
-    }
-    if (production && (production.errors > 0 || diagnosticNoProposalDispatches > 0)) {
-      add({
-        id: 'inspect-proposal-production',
-        priority: production.errors > 0 ? 'high' : 'medium',
-        label: 'Inspect proposal production',
-        detail: proposalProductionDiagnosis(production),
-        commands: [
-          nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
-          nextActionCommand('Inspect inbox', ['ashlr', 'inbox', '--json'], 'read-only'),
-        ],
-      });
-    }
     const top = status.queue.next?.[0];
     add({
       id: 'build-backlog',
@@ -4580,7 +5631,6 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
     if (action.id === 'process-capture-repairs' && (status.autoMergeReadiness?.knownVerificationFailed ?? 0) === 0) return -1.1;
     if (action.id === 'inspect-dispatch-yield') return -1;
     if (action.id === 'inspect-learning-evidence') return 1;
-    if (action.id === 'inspect-attempt-causal-coverage') return -0.5;
     if (action.id === 'add-explicit-merge-verify-contracts') return 0.5;
     return 0;
   };
@@ -4687,39 +5737,6 @@ function phantomAuditReadinessSource(
       sourcePresent: true,
     },
   );
-}
-
-function causalCoverageNextAction(status: AttemptCoverageStatus | undefined): FleetNextAction | null {
-  if (!status?.causalWeak.weak) return null;
-  const weak = status.causalWeak.reasons[0];
-  if (!weak) return null;
-  const percent = Math.round(weak.rate * 100);
-  const denominator = weak.denominator ?? status.attempts;
-  const topCause = status.causalGapDiagnostics.causes[0];
-  const actionableCause = status.causalGapDiagnostics.actionableCauses[0];
-  const topBasis = status.causalGapDiagnostics.byLabelBasis[0];
-  const topSource = status.causalGapDiagnostics.byLearningSource[0];
-  const diagnostics = [
-    topCause ? `top cause: ${topCause.cause} on ${countPhrase(topCause.count, 'attempt')}` : null,
-    actionableCause && actionableCause.cause !== topCause?.cause
-      ? `actionable cause: ${actionableCause.cause} on ${countPhrase(actionableCause.count, 'attempt')}`
-      : null,
-    topBasis ? `basis ${topBasis.key}:${topBasis.count}` : null,
-    topSource ? `learning ${topSource.key}:${topSource.count}` : null,
-  ].filter((part): part is string => part !== null);
-  return {
-    id: 'inspect-attempt-causal-coverage',
-    priority: 'medium',
-    label: 'Inspect causal coverage',
-    detail:
-      `Attempt causal metadata coverage is weak: ` +
-      `${weak.kind} ${weak.count}/${denominator} (${percent}%).` +
-      `${diagnostics.length > 0 ? ` ${diagnostics.join('; ')}.` : ''}`,
-    commands: [
-      nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
-      nextActionCommand('Evaluate attention', ['ashlr', 'eval', 'attention', '--json'], 'read-only'),
-    ],
-  };
 }
 
 function countSignal(count: number, singular: string): string | null {
@@ -4858,7 +5875,12 @@ function evidenceReadinessSource(input: {
   generatedAt: string;
   applicable?: boolean;
   applicability?: Exclude<FleetReadinessEvidenceApplicability, 'disabled'>;
+  /** Whether source degradation may synthesize FleetNextAction records. */
+  actionSynthesis?: 'eligible' | 'observational-only';
 }): FleetReadinessSourceHealth {
+  const actionSynthesis = input.role === 'forensics' || input.actionSynthesis === 'observational-only'
+    ? 'observational-only'
+    : 'eligible';
   if (input.applicable === false) {
     const source = readinessSource(
       input.id,
@@ -4875,10 +5897,12 @@ function evidenceReadinessSource(input: {
       evidenceRole: input.role,
       eligibility: 'not-applicable',
       applicability: 'disabled',
+      actionSynthesis,
     };
   }
   const quality = input.quality;
-  const observational = input.role === 'forensics';
+  const gateRole = input.role === 'merge-authority' || input.role === 'merge-gate';
+  const observational = !gateRole && actionSynthesis === 'observational-only';
   const degraded = !quality || quality.sourceState === 'degraded' || !quality.complete;
   const missing = quality?.sourceState === 'missing';
   const eligibility: FleetReadinessEvidenceEligibility = observational
@@ -4896,13 +5920,17 @@ function evidenceReadinessSource(input: {
       : `${input.role} evidence ${eligibility}; ${quality.filesRead} file(s), ${quality.rowsScanned} row(s), ` +
         `${quality.invalidRows} invalid, ${quality.unreadableFiles} unreadable${stop}`
     : `${input.role} evidence diagnostics are unavailable; consumers fail closed`;
+  const sourceDetail = input.role === 'merge-gate' && degraded
+    ? `${detail}; recovery: ashlr fleet evidence doctor ${input.id} --json (read-only); ` +
+      'unsigned evidence cannot grant merge authority'
+    : detail;
   const source = readinessSource(
     input.id,
     input.label,
     status,
     input.generatedAt,
     READINESS_STATUS_STALE_MS,
-    detail,
+    sourceDetail,
     {
       empty: missing || (quality?.rowsScanned ?? 0) === 0,
       sourcePresent: quality?.sourcePresent ?? false,
@@ -4915,6 +5943,7 @@ function evidenceReadinessSource(input: {
     evidenceRole: input.role,
     eligibility,
     applicability: input.applicability ?? 'optional',
+    actionSynthesis,
     ...(quality ? { evidenceQuality: { ...quality, stopReasons: [...quality.stopReasons] } } : {}),
   };
 }
@@ -4947,20 +5976,21 @@ function learningEvidenceReadinessSources(
       quality: autonomyEvidenceQuality, generatedAt, applicability: 'required',
     }),
     evidenceReadinessSource({
-      id: 'decisions', label: 'Decision Authority', role: 'merge-authority',
+      id: 'decisions', label: 'Unsigned Decision Merge Gate', role: 'merge-gate',
       quality: status.decisionsSource, generatedAt, applicability: 'required',
+      actionSynthesis: 'observational-only',
     }),
     evidenceReadinessSource({
       id: 'judge-traces', label: 'Judge Outcomes', role: 'learning',
-      quality: status.judgeTraceSource, generatedAt,
+      quality: status.judgeTraceSource, generatedAt, actionSynthesis: 'observational-only',
     }),
     evidenceReadinessSource({
       id: 'agent-actions', label: 'Agent Actions', role: 'learning',
-      quality: status.workspace?.sourceQuality, generatedAt,
+      quality: status.workspace?.sourceQuality, generatedAt, actionSynthesis: 'observational-only',
     }),
     evidenceReadinessSource({
       id: 'dispatch-production', label: 'Dispatch Outcomes', role: 'analytics',
-      quality: status.dispatchProductionSource, generatedAt,
+      quality: status.dispatchProductionSource, generatedAt, actionSynthesis: 'observational-only',
     }),
     evidenceReadinessSource({
       id: 'dispatch-manifests', label: 'Dispatch Intent', role: 'forensics',
@@ -4969,7 +5999,7 @@ function learningEvidenceReadinessSources(
     }),
     evidenceReadinessSource({
       id: 'best-of-n', label: 'Candidate Races', role: 'learning',
-      quality: status.bestOfNSource, generatedAt,
+      quality: status.bestOfNSource, generatedAt, actionSynthesis: 'observational-only',
       applicable: status.evidencePolicy?.bestOfNEnabled !== false,
     }),
     evidenceReadinessSource({
@@ -5076,13 +6106,18 @@ function shipReadinessSources(
   inputs: AutonomousShipReadinessInputs,
 ): FleetReadinessSourceHealth[] {
   const daemonObservedAt = status.daemon.lockHeartbeatAt ?? status.daemon.lastTickAt;
-  const daemonDetail = status.daemon.running
+  const daemonSourceDegraded = status.daemon.sourceQuality?.sourceState !== 'healthy';
+  const daemonDetail = daemonSourceDegraded
+    ? `daemon state source is degraded (${status.daemon.sourceQuality?.reason ?? 'unavailable'})`
+    : status.daemon.running
     ? `daemon running; last tick ${status.daemon.lastTickAt ?? 'unknown'}`
-    : 'daemon is stopped';
+    : status.daemon.activation?.commandEligible === true
+      ? 'daemon is stopped; one exact proposal activation is snapshot-eligible'
+      : `daemon is stopped; activation blocked (${status.daemon.activation?.reason ?? 'activation-readiness-unavailable'})`;
   const daemonSource = readinessSource(
     'daemon',
     'Daemon',
-    status.daemon.running ? 'healthy' : 'blocked',
+    daemonSourceDegraded ? 'unknown' : status.daemon.running ? 'healthy' : 'blocked',
     daemonObservedAt,
     READINESS_DAEMON_STALE_MS,
     daemonDetail,
@@ -5093,13 +6128,23 @@ function shipReadinessSources(
     ? readinessSource(
         'guard',
         'Guard Health',
-        guardHealth.blocks.length > 0 ? 'blocked' : 'healthy',
+        guardHealth.sourceQuality?.sourceState !== 'healthy'
+          ? 'degraded'
+          : guardHealth.blocks.length > 0
+            ? 'blocked'
+            : 'healthy',
         guardHealth.generatedAt,
         READINESS_STATUS_STALE_MS,
-      guardHealth.blocks.length > 0
+      guardHealth.sourceQuality?.sourceState !== 'healthy'
+        ? `guard health source is degraded (${guardHealth.sourceQuality?.reasons.join(', ') || 'incomplete'})`
+        : guardHealth.blocks.length > 0
         ? guardHealth.blocks[0]?.detail ?? 'guard health is blocking autonomous work'
         : 'guard health is clear',
-      { empty: guardHealth.blocks.length === 0, sourcePresent: true },
+      {
+        empty: guardHealth.blocks.length === 0,
+        sourcePresent: true,
+        sourceDegraded: guardHealth.sourceQuality?.sourceState !== 'healthy',
+      },
       )
     : readinessSource(
         'guard',
@@ -5289,6 +6334,15 @@ function chooseReadinessBlocker(
       'queue',
     );
   }
+  if (status.killSwitch?.state === 'unknown') {
+    return readinessBlocker(
+      'kill-switch-source-unknown',
+      'Kill switch source unknown',
+      'The global kill switch cannot be inspected, so autonomous shipping remains paused.',
+      'critical',
+      'fleet',
+    );
+  }
   if (status.killed) {
     return readinessBlocker(
       'kill-switch',
@@ -5298,16 +6352,45 @@ function chooseReadinessBlocker(
       'fleet',
     );
   }
+  if (status.daemon.sourceQuality?.sourceState !== 'healthy') {
+    return readinessBlocker(
+      'daemon-source-degraded',
+      'Daemon state source degraded',
+      `Daemon state is ${status.daemon.sourceQuality?.reason ?? 'unavailable'}; ` +
+        'running state and spend cannot be trusted.',
+      'critical',
+      'daemon',
+    );
+  }
   if (!status.daemon.running) {
+    if (status.daemon.activation?.commandEligible !== true) {
+      return readinessBlocker(
+        'daemon-activation-blocked',
+        'Daemon activation blocked',
+        `The daemon is stopped and no exact one-shot proposal activation is currently eligible ` +
+          `(${status.daemon.activation?.reason ?? 'activation-readiness-unavailable'}).`,
+        'critical',
+        'daemon',
+      );
+    }
     return readinessBlocker(
       'daemon-stopped',
       'Daemon stopped',
-      'The daemon is stopped; no autonomous dispatch or merge drain can run.',
+      'The daemon is stopped; an exact one-shot proposal activation is eligible but must be revalidated at execution.',
       'critical',
       'daemon',
     );
   }
   const guardBlock = status.guardHealth?.blocks?.[0];
+  if (status.guardHealth?.sourceQuality?.sourceState !== 'healthy') {
+    return readinessBlocker(
+      'guard-source-degraded',
+      'Guard health source degraded',
+      'Guard health is incomplete, so autonomous shipping remains paused.',
+      'critical',
+      'guard',
+    );
+  }
   if (guardBlock) {
     return readinessBlocker('guard-block', 'Guard block', guardBlock.detail, 'critical', 'guard');
   }
@@ -5507,29 +6590,6 @@ function chooseReadinessBlocker(
       'resources',
     );
   }
-  if (
-    eligibleBacklogItems > 0 &&
-    status.proposals.pending === 0 &&
-    status.dispatchYieldDiagnostics?.verdict === 'actionable'
-  ) {
-    const repairRecovery = generatedRepairRecoveryStatus(status);
-    if (repairRecovery?.healthy) {
-      return readinessBlocker(
-        'generated-repair-recovery-active',
-        'Repair recovery active',
-        `${repairRecovery.detail}; dispatch yield is still sample-gated, but active generated repair work is converting above the recovery threshold.`,
-        'low',
-        'queue',
-      );
-    }
-    return readinessBlocker(
-      'dispatch-yield-actionable',
-      'Dispatch yield needs attention',
-      formatDispatchYieldDiagnosticDetail(status.dispatchYieldDiagnostics, status.queue.generatedWork),
-      'medium',
-      'queue',
-    );
-  }
   if (eligibleBacklogItems > 0 && status.proposals.pending === 0) {
     return readinessBlocker(
       'proposal-production-needed',
@@ -5578,8 +6638,8 @@ function buildAutonomousShipReadiness(
   const sourceQualitySummary = readinessSourceQualitySummary(sources);
   const evidenceSources = learningEvidenceReadinessSources(status, inputs.generatedAt);
   const evidenceSummary = readinessEvidenceSummary(evidenceSources);
-  const authoritySources = evidenceSources.filter((source) => source.eligibility !== 'observational');
-  const evidenceState = evidenceSummary.withheld > 0 || authoritySources.some((source) => source.status === 'degraded')
+  const requiredSources = evidenceSources.filter((source) => source.applicability === 'required');
+  const evidenceState = evidenceSummary.withheld > 0 || requiredSources.some((source) => source.status === 'degraded')
     ? 'degraded'
     : evidenceSummary['cold-start'] > 0
       ? 'cold-start'
@@ -5650,8 +6710,12 @@ function missionDirective(
   effectiveness: FleetAutonomyEffectivenessStatus | null,
 ): string {
   if (action?.id === 'repair-enrollment-registry') return 'Repair enrollment authority';
-  if (status.killed) return 'Resume the fleet';
-  if (!status.daemon.running) return 'Start the daemon';
+  if (action?.id === 'inspect-kill-switch-source') return 'Inspect kill switch authority';
+  if (action?.id === 'inspect-daemon-state-source') return 'Inspect daemon state';
+  if (action?.id === 'inspect-guard-health-source') return 'Inspect guard health';
+  if (status.killed) return 'Clear the kill switch';
+  if (action?.id === 'inspect-daemon-activation') return 'Inspect daemon activation authority';
+  if (!status.daemon.running) return 'Start one proposal cycle';
   if (status.guardHealth?.blocked) return 'Repair the guard block';
 
   switch (action?.id) {
@@ -5665,26 +6729,10 @@ function missionDirective(
       return 'Drain failed proposal blockers';
     case 'inspect-auto-merge-blockers':
       return 'Inspect merge blockers';
-    case 'drain-diagnostic-reslices':
-      return action.label === 'Monitor diagnostic auto-drain'
-        ? 'Monitor diagnostic auto-drain'
-        : 'Drain diagnostic reslices';
-    case 'process-capture-repairs':
-      return 'Monitor capture repairs';
-    case 'inspect-dispatch-yield':
-      return 'Recover dispatch yield';
-    case 'inspect-dispatch-skips':
-      return 'Inspect dispatch skips';
-    case 'inspect-proposal-production':
-      return 'Recover proposal production';
-    case 'improve-context-efficiency':
-      return 'Run context reflection';
     case 'review-phantom-audit':
       return 'Review Phantom audit';
     case 'repair-enrollment-registry':
       return 'Repair enrollment authority';
-    case 'inspect-attempt-causal-coverage':
-      return 'Inspect causal learning coverage';
     case 'inspect-learning-evidence':
       return 'Diagnose withheld evidence';
     case 'build-backlog':

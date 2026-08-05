@@ -429,6 +429,8 @@ function persistVerifiedAppliedProposal(proposal: Proposal): void {
       passed: true,
       detail: 'verification passed',
       commandKinds: ['test'],
+      requiredManifestDigest: '4'.repeat(64),
+      requiredCommandCount: 1,
       baseBranch: 'main',
       baseHead: '1'.repeat(40),
       diffHash,

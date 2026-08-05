@@ -21,6 +21,7 @@ import {
   readSync,
   writeSync,
 } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import type {
@@ -58,6 +59,15 @@ import {
   remintAgentSemanticEvents,
   sanitizeAgentSemanticEvents,
 } from '../learning/agent-semantic-events.js';
+import {
+  agentWorkTransitionBoundSubjectRef,
+  projectAgentWorkTransitionSequence,
+  sanitizeAgentWorkTransitions,
+  type AgentWorkPhaseV1,
+  type AgentWorkTransitionCodeV1,
+  type AgentWorkTransitionV1,
+  type AgentWorkTriggerV1,
+} from '../learning/agent-work-transitions.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DATE_LEDGER_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
@@ -130,6 +140,8 @@ export interface AgentActionEvent {
   outcome: AgentActionOutcome;
   action: string;
   summary: string;
+  /** Stable digest of omitted free-form prose. Never contains the prose itself. */
+  proseDigest?: string;
   repo?: string;
   itemId?: string;
   source?: WorkSource;
@@ -148,6 +160,10 @@ export interface AgentActionEvent {
   semanticEvents?: AgentSemanticEventV1[];
   /** Writer rejected a supplied semantic batch; parent history remains readable. */
   semanticEventsState?: 'rejected';
+  /** Harness-emitted deterministic work checkpoints; observational and non-authoritative. */
+  workTransitions?: AgentWorkTransitionV1[];
+  /** Writer rejected a supplied transition sequence; parent history remains readable. */
+  workTransitionsState?: 'rejected';
   repairHandoffId?: string;
   repairGenerationId?: string;
   repairTreatmentUnitId?: string;
@@ -209,6 +225,147 @@ const AGENT_ACTION_OUTCOMES = new Set<AgentActionOutcome>([
   'unknown',
 ]);
 
+const AGENT_ACTION_COUNT_KEYS = new Set([
+  'available',
+  'automatic',
+  'backlogItems',
+  'baseCooldownMs',
+  'blocked',
+  'capped',
+  'claimed',
+  'commands',
+  'cooldownBlocked',
+  'diagnosticNoProposal',
+  'diffFiles',
+  'diffLines',
+  'dispatchBlocked',
+  'dispatchEvaluated',
+  'dispatched',
+  'drainAvailable',
+  'drainRequested',
+  'drainSelected',
+  'effectiveCooldownMs',
+  'eligibleEvents',
+  'eligibleItems',
+  'failed',
+  'fairnessDeferred',
+  'fastRepairCooldown',
+  'generatedRepairDecisionDropped',
+  'itemsConsidered',
+  'limit',
+  'merged',
+  'noProposal',
+  'parallel',
+  'pendingBlocked',
+  'perTickItems',
+  'persisted',
+  'policySuppressed',
+  'playbooks',
+  'proposalCaptureAttempts',
+  'proposalCreated',
+  'proposalDisabled',
+  'proposalsCreated',
+  'rawSelectCount',
+  'routeBlocked',
+  'routeEvaluated',
+  'routeFeasible',
+  'routeRequiresAlternative',
+  'selectCount',
+  'selected',
+  'sandboxCreated',
+  'spawnAttempts',
+  'uniqueTrajectories',
+]);
+const AGENT_ACTION_REASON_CODES = new Set([
+  'blocked',
+  'budget-cap',
+  'budget-exhausted',
+  'cancelled',
+  'dry-run',
+  'auto-live',
+  'dispatch-route-unavailable',
+  'dispatch-skip',
+  'empty-diff',
+  'engine-failed',
+  'failed',
+  'gate-blocked',
+  'judged',
+  'kill-switch',
+  'live',
+  'merged',
+  'no-backlog',
+  'no-claim',
+  'no-enrolled-repos',
+  'no-proposal',
+  'not-selected',
+  'ok',
+  'ordinary-turn-fairness',
+  'pause',
+  'pending-proposal',
+  'proposal-capture-error',
+  'proposal-created',
+  'proposal-disabled',
+  'rejected',
+  'route-selected',
+  'same-tier-backend-unavailable',
+  'sandbox-failed',
+  'selected',
+  'claimed',
+  'skipped',
+  'skipped-before-dispatch',
+  'started',
+  'state-persistence-failed',
+  'unknown',
+  'verified',
+  'verify-only',
+]);
+const ACTION_CODE_RE = /^[a-z0-9][a-z0-9:._-]{0,119}$/;
+const PROSE_DIGEST_RE = /^sha256:[a-f0-9]{64}$/;
+const AGENT_ACTION_TAG_CODES = new Set([
+  'auto-merge',
+  'auto-drain',
+  'autonomous',
+  'budget-cap',
+  'capped',
+  'capture-gate',
+  'claimed',
+  'context-rollup',
+  'cooldown-blocked',
+  'diagnostic-reslice',
+  'dispatch-capture-repair',
+  'dispatch-no-diff-reslice',
+  'dispatch-not-evaluated',
+  'dispatch-skip',
+  'dispatch-start',
+  'dispatch-route-unavailable',
+  'dry-run',
+  'drain-select',
+  'high-priority',
+  'fairness-deferred',
+  'fast-repair-cooldown',
+  'generated-repair-decision',
+  'generated-repair',
+  'live',
+  'latest-empty',
+  'latest-judged-decline',
+  'metadata-only',
+  'no-diff',
+  'ordinary-turn',
+  'pending-blocked',
+  'persisted',
+  'playbooks',
+  'proposal-repair',
+  'reflection',
+  'sandboxed-engine',
+  'selection',
+  'self-heal',
+  'standard-cooldown',
+  'swarm',
+  'tick-start',
+  'normal-selection',
+  'verify',
+]);
+
 const ENGINE_IDS = new Set<EngineId>([
   'builtin',
   'local-coder',
@@ -259,6 +416,7 @@ export interface AgentWorkspaceRecentAction {
   outcome: AgentActionOutcome;
   action: string;
   summary: string;
+  proseDigest?: string;
   repo?: string;
   itemId?: string;
   proposalId?: string;
@@ -275,6 +433,17 @@ export interface AgentWorkspaceRunSignal {
   terminal: 'completed' | 'blocked' | 'unknown';
   proposal: 'created' | 'not-created' | 'unknown';
   latestAt: string;
+}
+
+export interface AgentWorkspacePeerState {
+  runId: string;
+  phase: AgentWorkPhaseV1;
+  transition: AgentWorkTransitionCodeV1;
+  trigger: AgentWorkTriggerV1;
+  ordinal: number;
+  replanCount: number;
+  latestAt: string;
+  parentSubjectRef?: string;
 }
 
 export interface AgentWorkspaceStatus {
@@ -308,6 +477,9 @@ export interface AgentWorkspaceStatus {
   /** Advisory closed work-state projection. Never grants dispatch or merge authority. */
   runSignals?: AgentWorkspaceRunSignal[];
   runSignalsState?: 'available' | 'withheld';
+  /** Conflict-free latest harness checkpoint per run. Never grants execution authority. */
+  peerStates?: AgentWorkspacePeerState[];
+  peerStatesState?: 'available' | 'withheld';
   sourceQuality?: AgentActionSourceQuality;
 }
 
@@ -356,19 +528,67 @@ function sanitizeCounts(counts: unknown): Record<string, number> | undefined {
   if (!counts || typeof counts !== 'object' || Array.isArray(counts)) return undefined;
   const out: Record<string, number> = {};
   for (const [key, value] of Object.entries(counts).slice(0, 20)) {
-    if (!Number.isFinite(value)) continue;
-    out[boundedText(key, 64)] = value;
+    if (!AGENT_ACTION_COUNT_KEYS.has(key) || !Number.isFinite(value)) continue;
+    out[key] = value;
   }
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
-function sanitizeTags(tags: unknown): string[] | undefined {
-  if (!Array.isArray(tags)) return undefined;
-  const out = tags
-    .filter((tag): tag is string => typeof tag === 'string' && tag.trim() !== '')
-    .slice(0, 12)
-    .map((tag) => boundedText(tag.trim(), 48));
+function sanitizeActionCode(value: unknown, actor: AgentActionActor, kind: AgentActionKind): string {
+  if (typeof value === 'string' && ACTION_CODE_RE.test(value)) return value;
+  return `${actor}:${kind}`;
+}
+
+function sanitizeTags(fields: {
+  kind: AgentActionKind;
+  outcome: AgentActionOutcome;
+  source?: WorkSource;
+  backend?: EngineId | null;
+  tier?: EngineTier | null;
+  tags?: string[];
+}): string[] | undefined {
+  const out = [
+    ...(fields.tags ?? []).filter((tag) =>
+      AGENT_ACTION_TAG_CODES.has(tag) || /^drain:(?:diagnostic-reslices|ordinary)$/.test(tag)),
+    `kind:${fields.kind}`,
+    `outcome:${fields.outcome}`,
+    ...(fields.source ? [`source:${fields.source}`] : []),
+    ...(fields.backend ? [`backend:${fields.backend}`] : []),
+    ...(fields.tier ? [`tier:${fields.tier}`] : []),
+  ].filter((tag, index, tags) => tags.indexOf(tag) === index).slice(0, 12);
   return out.length > 0 ? out : undefined;
+}
+
+function proseDigest(event: AgentActionEvent): string {
+  if (typeof event.proseDigest === 'string' && PROSE_DIGEST_RE.test(event.proseDigest)) {
+    return event.proseDigest;
+  }
+  const prose = [
+    event.summary,
+    event.reason,
+    event.routeSnapshot?.reason,
+    ...(Array.isArray(event.tags) ? event.tags : []),
+  ].map((value) => typeof value === 'string' ? scrubSecrets(value) : null);
+  return `sha256:${createHash('sha256')
+    .update('ashlr:agent-action-prose:v1\0', 'utf8')
+    .update(JSON.stringify(prose), 'utf8')
+    .digest('hex')}`;
+}
+
+function canonicalReason(
+  event: AgentActionEvent,
+  runEventSummary: RunEventSummary | undefined,
+  outcome: AgentActionOutcome,
+): string {
+  for (const candidate of [event.reason, runEventSummary?.outcome, outcome]) {
+    if (typeof candidate === 'string' && AGENT_ACTION_REASON_CODES.has(candidate)) return candidate;
+    if (typeof candidate === 'string') {
+      const cooldown = /^cooldown: latest=([a-z0-9-]{1,48})$/.exec(candidate);
+      if (cooldown) return `cooldown-latest-${cooldown[1]}`;
+      if (/^cooldown-latest-[a-z0-9-]{1,48}$/.test(candidate)) return candidate;
+    }
+  }
+  return outcome;
 }
 
 function expectedAgentActionSemanticProducer(
@@ -382,7 +602,6 @@ function expectedAgentActionSemanticProducer(
 
 function sanitizeEvent(event: AgentActionEvent, remintSemanticOccurrence = false): AgentActionEvent {
   const ts = eventTimestamp(event.ts);
-  const tags = sanitizeTags(event.tags);
   const counts = sanitizeCounts(event.counts);
   const durationMs = finiteNumber(event.durationMs);
   const spentUsd = finiteNumber(event.spentUsd);
@@ -390,6 +609,21 @@ function sanitizeEvent(event: AgentActionEvent, remintSemanticOccurrence = false
   const source = enumValue(event.source, WORK_SOURCES);
   const backend = event.backend === null ? null : enumValue(event.backend, ENGINE_IDS);
   const tier = event.tier === null ? null : enumValue(event.tier, ENGINE_TIERS);
+  const actor = enumValue(event.actor, AGENT_ACTION_ACTORS) ?? 'system';
+  const kind = enumValue(event.kind, AGENT_ACTION_KINDS) ?? 'reflection';
+  const outcome = enumValue(event.outcome, AGENT_ACTION_OUTCOMES) ?? 'unknown';
+  const action = sanitizeActionCode(event.action, actor, kind);
+  const digest = proseDigest(event);
+  const tags = sanitizeTags({
+    kind,
+    outcome,
+    source,
+    backend,
+    tier,
+    tags: Array.isArray(event.tags)
+      ? event.tags.filter((tag): tag is string => typeof tag === 'string')
+      : undefined,
+  });
   const machineId = boundedOptionalText(event.machineId, 120);
   const repo = boundedOptionalText(event.repo, 500);
   const itemId = boundedOptionalText(event.itemId, 240);
@@ -421,7 +655,19 @@ function sanitizeEvent(event: AgentActionEvent, remintSemanticOccurrence = false
     : event.semanticEvents !== undefined || event.semanticEventsState === 'rejected'
       ? 'rejected' as const
       : undefined;
-  const reason = boundedOptionalText(event.reason, 240);
+  const workTransitionSubjectRef = agentWorkTransitionBoundSubjectRef(event.workTransitions, {
+    runId,
+    trajectoryId: event.trajectoryId,
+  });
+  const workTransitions = event.actor === 'agent' && workTransitionSubjectRef
+    ? sanitizeAgentWorkTransitions(event.workTransitions, workTransitionSubjectRef)
+    : undefined;
+  const workTransitionsState = workTransitions
+    ? undefined
+    : event.workTransitions !== undefined || event.workTransitionsState === 'rejected'
+      ? 'rejected' as const
+      : undefined;
+  const reason = canonicalReason(event, runEventSummary, outcome);
   const repairHandoffId = typeof event.repairHandoffId === 'string' && /^[a-f0-9]{64}$/.test(event.repairHandoffId)
     ? event.repairHandoffId
     : undefined;
@@ -486,15 +732,30 @@ function sanitizeEvent(event: AgentActionEvent, remintSemanticOccurrence = false
     routerPolicyVersion: event.routerPolicyVersion,
     learningEpoch: event.learningEpoch,
   });
+  const metadataOnlyRouteSnapshot = causal.routeSnapshot
+    ? {
+        ...causal.routeSnapshot,
+        reason:
+          typeof causal.routeSnapshot.reason === 'string' &&
+          AGENT_ACTION_REASON_CODES.has(causal.routeSnapshot.reason)
+            ? causal.routeSnapshot.reason
+            : undefined,
+      }
+    : undefined;
 
   return {
     schemaVersion: 1,
     ts,
-    actor: enumValue(event.actor, AGENT_ACTION_ACTORS) ?? 'system',
-    kind: enumValue(event.kind, AGENT_ACTION_KINDS) ?? 'reflection',
-    outcome: enumValue(event.outcome, AGENT_ACTION_OUTCOMES) ?? 'unknown',
-    action: boundedText(event.action, 120),
-    summary: boundedText(event.summary, 240),
+    actor,
+    kind,
+    outcome,
+    action,
+    summary:
+      `${action} outcome=${outcome}` +
+      `${backend ? ` backend=${backend}` : ''}` +
+      `${source ? ` source=${source}` : ''}` +
+      ` ref=${digest.slice('sha256:'.length, 'sha256:'.length + 12)}`,
+    proseDigest: digest,
     ...(machineId ? { machineId } : {}),
     ...(repo ? { repo } : {}),
     ...(itemId ? { itemId } : {}),
@@ -502,9 +763,12 @@ function sanitizeEvent(event: AgentActionEvent, remintSemanticOccurrence = false
     ...(proposalId ? { proposalId } : {}),
     ...(runId ? { runId } : {}),
     ...causal,
+    ...(metadataOnlyRouteSnapshot ? { routeSnapshot: metadataOnlyRouteSnapshot } : {}),
     ...(learningLabel ? { learningLabel } : {}),
     ...(semanticEvents ? { semanticEvents } : {}),
     ...(semanticEventsState ? { semanticEventsState } : {}),
+    ...(workTransitions ? { workTransitions } : {}),
+    ...(workTransitionsState ? { workTransitionsState } : {}),
     ...(repairLineageInvalid
       ? { repairLineageInvalid: true as const }
       : repairLineageComplete
@@ -520,7 +784,7 @@ function sanitizeEvent(event: AgentActionEvent, remintSemanticOccurrence = false
     ...(backend !== undefined ? { backend } : {}),
     ...(tier !== undefined ? { tier } : {}),
     ...(model ? { model } : {}),
-    ...(reason ? { reason } : {}),
+    reason,
     ...(durationMs !== undefined ? { durationMs: Math.max(0, durationMs) } : {}),
     ...(spentUsd !== undefined ? { spentUsd: Math.max(0, spentUsd) } : {}),
     ...(tags ? { tags } : {}),
@@ -544,6 +808,8 @@ function isAgentActionEvent(value: unknown): value is AgentActionEvent {
     enumValue(obj['outcome'], AGENT_ACTION_OUTCOMES) !== undefined &&
     typeof obj['action'] === 'string' && obj['action'].trim() !== '' &&
     typeof obj['summary'] === 'string' && obj['summary'].trim() !== '' &&
+    (obj['proseDigest'] === undefined ||
+      (typeof obj['proseDigest'] === 'string' && PROSE_DIGEST_RE.test(obj['proseDigest']))) &&
     validOptionalCausalRecord(obj['routeSnapshot'], ROUTE_SNAPSHOT_KEYS, normalizeRouteSnapshot, ['routerPolicyVersion']) &&
     validOptionalCausalRecord(obj['runEventSummary'], RUN_SUMMARY_KEYS, normalizeRunEventSummary) &&
     (runId === undefined || runEventSummary?.runId === undefined || runEventSummary.runId === runId) &&
@@ -567,6 +833,23 @@ function isAgentActionEvent(value: unknown): value is AgentActionEvent {
     )) &&
     (obj['semanticEventsState'] === undefined || (
       obj['semanticEventsState'] === 'rejected' && obj['semanticEvents'] === undefined
+    )) &&
+    (obj['workTransitions'] === undefined || (
+      obj['actor'] === 'agent' &&
+      agentWorkTransitionBoundSubjectRef(obj['workTransitions'], {
+        runId: boundedOptionalText(obj['runId'], 160),
+        trajectoryId: boundedOptionalText(obj['trajectoryId'], 240),
+      }) !== undefined &&
+      sanitizeAgentWorkTransitions(
+        obj['workTransitions'],
+        agentWorkTransitionBoundSubjectRef(obj['workTransitions'], {
+          runId: boundedOptionalText(obj['runId'], 160),
+          trajectoryId: boundedOptionalText(obj['trajectoryId'], 240),
+        }),
+      ) !== undefined
+    )) &&
+    (obj['workTransitionsState'] === undefined || (
+      obj['workTransitionsState'] === 'rejected' && obj['workTransitions'] === undefined
     )) &&
     (!['proposal-created', 'verified', 'judged', 'merged', 'rejected'].includes(String(obj['outcome'])) ||
       (typeof obj['proposalId'] === 'string' && obj['proposalId'].trim() !== ''))
@@ -620,6 +903,7 @@ export interface AgentActionSourceQuality {
   rowsScanned: number;
   invalidRows: number;
   semanticRejectedRows?: number;
+  workTransitionRejectedRows?: number;
   unreadableFiles: number;
 }
 
@@ -804,6 +1088,7 @@ function emptyAgentActionRead(
     rowsScanned: 0,
     invalidRows: 0,
     semanticRejectedRows: 0,
+    workTransitionRejectedRows: 0,
     unreadableFiles: 0,
     ...overrides,
   };
@@ -960,6 +1245,9 @@ export function readAgentActionsDetailed(opts: ReadAgentActionsOptions = {}): Ag
           if (parsed.semanticEventsState === 'rejected') {
             result.semanticRejectedRows = (result.semanticRejectedRows ?? 0) + 1;
           }
+          if (parsed.workTransitionsState === 'rejected') {
+            result.workTransitionRejectedRows = (result.workTransitionRejectedRows ?? 0) + 1;
+          }
           const eventMs = Date.parse(parsed.ts);
           const partitionDate = DATE_LEDGER_FILE_RE.exec(file)?.[1];
           if (!Number.isFinite(eventMs) ||
@@ -1038,6 +1326,7 @@ export function readAgentActions(opts: ReadAgentActionsOptions = {}): AgentActio
       rowsScanned: result.rowsScanned,
       invalidRows: result.invalidRows,
       semanticRejectedRows: result.semanticRejectedRows,
+      workTransitionRejectedRows: result.workTransitionRejectedRows,
       unreadableFiles: result.unreadableFiles,
     } satisfies AgentActionSourceQuality,
     enumerable: false,
@@ -1115,6 +1404,7 @@ function recentAction(event: AgentActionEvent): AgentWorkspaceRecentAction {
     outcome: event.outcome,
     action: event.action,
     summary: event.summary,
+    ...(event.proseDigest ? { proseDigest: event.proseDigest } : {}),
     ...(event.repo ? { repo: event.repo } : {}),
     ...(event.itemId ? { itemId: event.itemId } : {}),
     ...(event.proposalId ? { proposalId: event.proposalId } : {}),
@@ -1182,6 +1472,46 @@ function agentWorkspaceRunSignals(events: AgentActionEvent[]): AgentWorkspaceRun
     .sort((left, right) => Date.parse(right.latestAt) - Date.parse(left.latestAt) ||
       left.runId.localeCompare(right.runId))
     .slice(0, 50);
+}
+
+function agentWorkspacePeerStates(events: AgentActionEvent[]): {
+  state: 'available' | 'withheld';
+  peerStates: AgentWorkspacePeerState[];
+} {
+  if (events.some((event) => event.workTransitionsState === 'rejected')) {
+    return { state: 'withheld', peerStates: [] };
+  }
+  const batchesByRun = new Map<string, AgentWorkTransitionV1[][]>();
+  for (const event of events) {
+    if (!event.workTransitions) continue;
+    if (!event.runId) return { state: 'withheld', peerStates: [] };
+    const subjectRef = `run:${event.runId}`;
+    const accepted = sanitizeAgentWorkTransitions(event.workTransitions, subjectRef);
+    if (!accepted) return { state: 'withheld', peerStates: [] };
+    const batches = batchesByRun.get(event.runId) ?? [];
+    batches.push(accepted);
+    batchesByRun.set(event.runId, batches);
+  }
+  const peerStates: AgentWorkspacePeerState[] = [];
+  for (const [runId, batches] of batchesByRun) {
+    const projected = projectAgentWorkTransitionSequence(batches, `run:${runId}`);
+    if (projected.state !== 'available') return { state: 'withheld', peerStates: [] };
+    const latest = projected.transitions.at(-1);
+    if (!latest) continue;
+    peerStates.push({
+      runId,
+      phase: latest.phase,
+      transition: latest.transition,
+      trigger: latest.trigger,
+      ordinal: latest.ordinal,
+      replanCount: projected.transitions.filter((transition) => transition.transition === 'replan').length,
+      latestAt: latest.observedAt,
+      ...(latest.parentSubjectRef ? { parentSubjectRef: latest.parentSubjectRef } : {}),
+    });
+  }
+  peerStates.sort((left, right) =>
+    Date.parse(right.latestAt) - Date.parse(left.latestAt) || left.runId.localeCompare(right.runId));
+  return { state: 'available', peerStates: peerStates.slice(0, 50) };
 }
 
 function isAgentWorkspaceProductionEvent(event: AgentActionEvent): boolean {
@@ -1320,6 +1650,7 @@ export function summarizeAgentWorkspace(
     ...attentionFromCounts('backend', backendRows, 'backend events', 2),
     ...attentionFromCounts('source', sourceRows, 'source events', 1),
   ].slice(0, 8);
+  const peerStateProjection = agentWorkspacePeerStates(semanticEvents);
 
   return {
     generatedAt: new Date().toISOString(),
@@ -1355,6 +1686,8 @@ export function summarizeAgentWorkspace(
     recentActions: semanticEvents.slice(0, recentLimit).map(recentAction),
     runSignals: agentWorkspaceRunSignals(semanticEvents),
     runSignalsState: 'available',
+    peerStates: peerStateProjection.peerStates,
+    peerStatesState: peerStateProjection.state,
   };
 }
 
@@ -1398,12 +1731,16 @@ export function readAgentWorkspaceDetailed(opts?: {
     bytesRead: read.bytesRead,
     rowsScanned: read.rowsScanned,
     invalidRows: read.invalidRows,
+    semanticRejectedRows: read.semanticRejectedRows,
+    workTransitionRejectedRows: read.workTransitionRejectedRows,
     unreadableFiles: read.unreadableFiles,
   };
   workspace.sourceQuality = sourceQuality;
   if (sourceQuality.sourceState !== 'healthy' || !sourceQuality.complete) {
     workspace.runSignals = [];
     workspace.runSignalsState = 'withheld';
+    workspace.peerStates = [];
+    workspace.peerStatesState = 'withheld';
   }
   return { workspace, events, sourceQuality };
 }

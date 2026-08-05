@@ -255,19 +255,37 @@ describe('M23 createProposal — persistence + initial state', () => {
   it('normalizes causal identity on a diff-hash dedup return', () => {
     const diff = safeDiff();
     const diffHash = hashDiff(diff);
+    const engineModel = 'local-coder:mock-model';
+    const engineTier = 'mid' as const;
+    const provenanceSig = signProvenance(engineModel, engineTier, diffHash);
     const dedupAuthority = { origin: 'agent' as const, workItemId: 'issue:causal-dedup' };
     const first = createProposal(makeInput({
       ...dedupAuthority,
       title: 'Canonical diff owner',
       diff,
       diffHash,
+      engineModel,
+      engineTier,
+      provenanceSig,
+      runId: 'run-dedup-owner',
+      trajectoryId: 'run:run-dedup-owner',
+      runEventSummary: {
+        runId: 'run-dedup-owner',
+        status: 'done',
+        outcome: 'filed',
+        proposalCreated: true,
+      },
     }));
     const duplicate = createProposal(makeInput({
       ...dedupAuthority,
       title: 'Duplicate causal attempt',
       diff,
       diffHash,
+      engineModel,
+      engineTier,
+      provenanceSig,
       runId: 'run-dedup-attempt',
+      trajectoryId: 'run:run-dedup-attempt',
       runEventSummary: {
         runId: 'caller-controlled-run-id',
         status: 'done',

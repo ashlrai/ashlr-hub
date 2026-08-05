@@ -1,6 +1,6 @@
 # ashlr-hub
 
-**An autonomous engineering fleet that builds, maintains, and improves your repos — proposal-only, sandboxed, and gated by model-trust tier.**
+**An autonomous engineering fleet that builds, maintains, and improves your repos — proposal-first by default, sandboxed, and gated by explicit merge authority.**
 
 [![npm](https://img.shields.io/npm/v/@ashlr/hub.svg?logo=npm&label=%40ashlr%2Fhub&color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
 [![npm downloads](https://img.shields.io/npm/dm/@ashlr/hub.svg?color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
@@ -14,9 +14,24 @@
 
 ashlr-hub is a single Node binary that runs an autonomous agent fleet against your enrolled repositories.
 
-The fleet scans your backlog, dispatches sandboxed agent swarms across multiple backends (local Ollama/LM Studio, Claude Code, Codex, any OpenAI-compatible API), and deposits proposed diffs into an **Approval Inbox**. Nothing touches a branch until you explicitly approve it. The kill-switch is a single file.
+The fleet scans your backlog, dispatches sandboxed agent swarms across multiple backends (local Ollama/LM Studio, Claude Code, Codex, any OpenAI-compatible API), and deposits proposed diffs into an **Approval Inbox**. By default, nothing touches a branch until you explicitly approve it. A separate, default-off auto-merge subsystem can be enabled only with explicit authority and fail-closed verification. The kill-switch is a single file.
 
 It is also a local unifying harness: one CLI and web dashboard that indexes your enrolled projects, aggregates all your MCP servers into a single gateway, tracks real spend, and provides `ashlr run` / `ashlr swarm` for ad-hoc work.
+
+### Authority defaults
+
+First activation follows a strict order: run `ashlr preflight`, enroll a repo, and complete a dry-run before enabling real daemon generation. Only then review a generated proposal and use `ashlr inbox approve`; merge, deploy, and service-install authority remain separate and default off.
+
+| Path | Default | Required authority | Possible outward effect |
+|------|---------|--------------------|-------------------------|
+| Daemon generation | Enabled only when you run the daemon against enrolled repos | Enrollment, kill-switch clear, budget and sandbox gates | Pending proposal only; no apply, push, PR, deploy, or service mutation |
+| Inbox apply | Manual | Explicit `ashlr inbox approve`, confirmation, enrollment, kill-switch clear | Applies to a dedicated local branch; never silently edits the working tree |
+| Autonomous merge | **Off** | `foundry.autoMerge.enabled: true` plus the selected tier, judge-backed verification, or evidence authority gates | Local merge or protected remote PR, depending on policy; every refusal is fail-closed |
+| Judge-free evidence merge | **Off** | Base- and diff-bound deterministic verification, signed provenance/evidence, strict scope/risk policy, and live protected-branch checks | Protected remote PR handoff only; no local fallback, self-target merge, partial capture, or build/CI/manifest change |
+| Deploy | Never performed by the daemon | Explicit `ashlr ship --deploy <target> --confirm` after pre-ship checks | Runs the selected production deploy command |
+| OS service mutation | **Temporarily unavailable** | No production install/reinstall/repair/restart authority is currently issued | Existing services expose status and uninstall only; admitted one-shot workflows remain available |
+
+No successful test, model verdict, or proposal record grants deployment or service-install authority. Those are separate operator commands.
 
 ---
 
@@ -31,9 +46,9 @@ End-State Spec (your vision)
       → Fleet supervisor (24/7 dispatch to enrolled repos)
         → Backend router (routes each item to the right engine by tier)
           → Sandboxed swarm (throwaway worktree, push severed, diff-only capture)
-            → Manager judge (frontier model scores every proposal)
-              → Tiered-trust merge gate (local→proposal-only; mid→branch; frontier→main)
-                → Approval Inbox (human gate — nothing auto-applies by default)
+            → Manager judge or deterministic evidence gate (policy-selected)
+              → Merge authority gate (default off; protected PR required in evidence mode)
+                → Approval Inbox (default human gate)
                   → Comms channel (Telegram/iMessage for approve-by-text)
                     → Scorecard feedback (outcomes feed learned routing)
 ```
@@ -42,14 +57,14 @@ End-State Spec (your vision)
 
 - The fleet works your backlog while you sleep.
 - You review proposals with `ashlr inbox`, not a chat window.
-- High-confidence work (verified, frontier-authored) can optionally reach `main` without a manual approve — but only after CI passes and HMAC-signed provenance checks out. This is off by default.
+- High-confidence work can optionally reach `main` without a manual approve, but only through an explicitly enabled authority mode and its deterministic gates. Evidence mode additionally requires a protected remote PR path. This is off by default.
 - Adding a new backend (a NIM, a local Qwen, a different API) is one config entry, no code change.
 
 **Key properties:**
 
 - **Preflight-first activation.** `ashlr preflight` verifies daemon readiness, backend connectivity, and key configuration before you enroll any repos. Run it once before your first enroll.
-- **Proposal-only floor.** The daemon can never apply, push, or deploy anything. The only path to a real branch is `ashlr inbox approve`.
-- **Tiered-trust merge gate.** Local-model proposals stay proposals. Frontier models (Claude Opus, Codex GPT) can earn a gated path to `main` — only after CI is green and provenance is HMAC-verified. Default off.
+- **Proposal-only generation floor.** The daemon's generation path emits pending proposals and imports no apply, push, PR, or deploy primitive. Manual inbox approval and the separate default-off auto-merge subsystem are the only code-change authority paths.
+- **Explicit merge authority.** In the default tier mode, local-model proposals stay proposals and allowlisted frontier producers can earn a gated path to `main`. Verification and evidence modes replace producer tier with stricter judge-backed or deterministic evidence authority. Every mode is default off and fail-closed.
 - **Sandboxed by construction.** Every external agent CLI runs in a throwaway git worktree with push credentials severed. Only the scrubbed diff escapes.
 - **OS-level confinement.** Optionally wraps each run with `sandbox-exec` (macOS) or `bwrap`/`firejail` (Linux) — read-jailed to the worktree, network egress blocked.
 - **Kill-switch.** `touch ~/.ashlr/KILL` — all mutating operations refuse immediately, across every backend and repo.
@@ -86,10 +101,10 @@ cd ashlr-hub
 ### 1. Run the setup wizard
 
 ```sh
-ashlr setup
+ashlr setup  # currently exits nonzero at the resident-service step
 ```
 
-Detects local model servers, editors, Phantom Secrets, installs the daemon as an OS service (launchd/systemd), and auto-discovers repos to enroll. Idempotent.
+Setup currently refuses before loading config or running the wizard while install/reinstall/repair/restart authority is withheld. It returns nonzero and leaves setup state untouched. Existing services support `ashlr daemon service-status` and `ashlr daemon uninstall`; admitted one-shot workflows such as `ashlr daemon start --once` remain available. Service status reports registration as `present`, `absent`, or `unknown`; only proven absence permits an in-place update.
 
 ### 1a. Preflight check (optional but recommended)
 
@@ -133,9 +148,9 @@ ashlr inbox approve <id>   # apply to branch — confirm-gated, never silent
 ashlr inbox reject <id>    # discard a pending proposal; applies nothing
 ```
 
-Applied changes always land on a dedicated branch — never your working tree directly — so undoing one is ordinary git. Swarm-applied work has a first-class undo: `ashlr swarm rollback <id>` restores the repo to its pre-swarm git state (confirm-gated, never force-push).
+Changes applied through `ashlr inbox approve` land on a dedicated branch — never your working tree directly — so undoing one is ordinary git. Swarm-applied work has a first-class undo: `ashlr swarm rollback <id>` restores the repo to its pre-swarm git state (confirm-gated, never force-push).
 
-That is the full loop. Nothing touched your branch until step 5. The Approval Inbox is the **human gate** — every applied change passes through it.
+That is the default loop. Nothing touched a branch until step 5. The Approval Inbox is the **default human gate**; only an explicitly enabled auto-merge policy can bypass manual approval, and it must still clear its configured deterministic authority and verification gates.
 
 ### Open Mission Control (optional)
 
@@ -200,9 +215,13 @@ The kill-switch is checked before every mutating operation in every backend and 
 
 ## Backends and model tiers
 
+The table below describes the default `trustBasis: "tier"` policy. Opt-in
+verification and evidence modes replace producer-tier authority with their
+stronger admission contracts; they do not inherit these reach labels.
+
 | Tier | Examples | What it can reach |
 |------|----------|-------------------|
-| `local` | Ollama, LM Studio | Proposals only (always) |
+| `local` | Ollama, LM Studio | Proposals only in tier mode |
 | `mid` | Kimi K2, Hermes, NIM-hosted 70B | Branch/PR (opt-in, `autoMerge.midToBranch`) |
 | `frontier` | Claude Opus, Codex GPT | `main` in default `trustBasis:"tier"` mode — only with CI green + signed provenance + `mergeAuthority` config (default off) |
 
@@ -289,11 +308,11 @@ next actions point at work the daemon can select now instead of phantom backlog.
 
 | Command | What it does |
 |---------|-------------|
-| `ashlr setup` | Guided first-activation wizard (idempotent) |
+| `ashlr setup` | First-activation checks; currently nonzero because resident service mutation is restricted |
 | `ashlr onboard <repo>` | Enroll one repo with walkthrough + dry run |
 | `ashlr enroll add/remove/list` | Manage enrolled repos |
 | `ashlr enroll kill on/off` | Engage/clear the kill-switch |
-| `ashlr daemon start/stop/status` | Autonomous operator (proposal-only) |
+| `ashlr daemon start/stop/status` | Autonomous operator; proposal generation plus a separate default-off auto-merge maintenance pass |
 | `ashlr loop [--watch] [--dry-run]` | Goal-aware conductor — one tick or continuous |
 | `ashlr goal "<objective>"` | Set a strategic goal; plan + dispatch milestones |
 | `ashlr goals list/show/plan/advance` | Manage goals + milestones |
@@ -334,14 +353,14 @@ next actions point at work the daemon can select now instead of phantom backlog.
 
 Every safety property below is proven by a named adversarial test. These invariants are never weakened — the fleet itself is blocked from doing so (M54).
 
-1. **Proposal-only floor.** The daemon's source imports no merge/apply primitive. Auto-merge is a separate gated subsystem, default off. Proven by source-scan grep-guard + `test/h1.daemon-gates.test.ts`.
+1. **Proposal-only generation floor.** The daemon's generation path imports no merge/apply primitive. Auto-merge is a separate gated subsystem, default off. Proven by source-scan grep-guard + `test/h1.daemon-gates.test.ts`.
 2. **Enrollment gate.** Only explicitly enrolled repos receive autonomous work. Proven by `test/h6.*`.
 3. **Kill-switch halts everything.** `~/.ashlr/KILL` stops every backend and repo, including in-flight sandboxed runs. Proven by `test/m48.*` kill-all test.
 4. **Sandboxed-with-diff-capture only.** External engines run only through `runEngineSandboxed`. No raw-external path in the autonomous loop. Sandbox-creation failure is terminal, never a silent fallback. Proven by `test/m45.*`.
 5. **Git push is blocked.** The pre-push hook + credential strip make every push from the worktree fail. Proven by `test/m45.*` pre-push test.
 6. **Only the diff is consumed.** The loop ingests only the captured, scrubbed diff. The agent's own commits die with the sandbox. Proven by `test/m45.*` diff-only test.
 7. **Immutable signed provenance.** Every run and proposal carries write-once `{engineModel, engineTier}`, HMAC-signed at produce time. The merge gate re-verifies the HMAC before any merge-to-main. Proven by `test/m47.*` and `test/m47-1.*`.
-8. **Merge-to-main requires explicit authority + verification.** Default `trustBasis: "tier"` requires CI/verify green plus a matching frontier `cfg.foundry.mergeAuthority` entry. Opt-in `trustBasis: "verification"` can authorize any producer only with a signed frontier judge ship, and opt-in `trustBasis: "evidence"` skips the judge only when base-bound deterministic evidence clears. Proven by `test/m47.*`, `test/m153.*`, and `test/m307.*`.
+8. **Merge-to-main requires explicit authority + verification.** Default `trustBasis: "tier"` requires CI/verify green plus a matching frontier `cfg.foundry.mergeAuthority` entry. Opt-in `trustBasis: "verification"` can authorize any producer only with a signed frontier judge ship. Opt-in `trustBasis: "evidence"` skips the judge only when base- and diff-bound deterministic evidence clears and a live protected remote PR path is available; evidence mode refuses local fallback and self-target merges. Proven by `test/m47.*`, `test/m153.*`, and `test/m307.*`.
 9. **Self-improvement cannot self-disarm.** A self-target diff must pass the invariant suite flag-off and flag-on. Any diff weakening a safety test is refused. Proven by `test/m54.*`.
 10. **Zero new runtime dependencies.** Backends are CLIs or APIs the user already has. Proven by dependency-manifest grep-guard.
 
@@ -399,6 +418,9 @@ The config is validated against [`schema/config.schema.json`](schema/config.sche
     "autoMerge": {
       "enabled": false,            // DEFAULT OFF — fleet never auto-merges to main
       "trustBasis": "tier",        // tier | verification | evidence
+      "pushToRemote": false,       // evidence mode requires true + protected-remote policy
+      "allowWithoutVerification": false,
+      "allowSelfMerge": false,
       "midToBranch": false         // mid-tier proposals to branch (opt-in)
     },
     "mergeAuthority": [

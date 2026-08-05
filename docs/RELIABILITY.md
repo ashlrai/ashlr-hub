@@ -1,8 +1,7 @@
 # Ashlr — Reliability: failure modes & recovery
 
-> Consolidated from the proven H1–H6 facts (each guarantee below is backed by an
-> existing passing regression test and/or a structural grep-guard — this doc
-> states nothing new; it is a CONSOLIDATION). See
+> Consolidated from the safety and authority contracts (each guarantee below is
+> backed by an existing regression test and/or a structural grep-guard). See
 > `docs/contracts/CONTRACT-H8.md` (BUILD ITEM 2) and the activation runbook in
 > the top-level `README.md`.
 
@@ -14,20 +13,49 @@ never touches your portfolio and auto-cleans.
 
 ---
 
-## What can't happen (proven guarantees)
+## Default and fail-closed guarantees
 
 Each row is enforced by code and pinned by a permanent regression test; the live
 structural ones are re-checked any time with `ashlr verify-safety` (5/5).
 
 | Guarantee | What it means | Proven by |
 |-----------|---------------|-----------|
-| **Proposal-only** | The ONLY outward path is `applyProposal`, gated `exist + approved + confirmed + enrolled + kill-off`. The daemon and `advance` emit ONLY `PENDING` proposals and import NO `apply`/`push`/`createPr`/`deploy` primitive. | H1 chain harness + H4 proposal-only suite; the daemon grep-guard (`verify-safety` CHECK 3). |
+| **Proposal-only generation** | The daemon and `advance` emit pending proposals and import no `apply`/`push`/`createPr`/`deploy` primitive. Manual inbox apply and default-off auto-merge are separate authority paths, so proposal production alone cannot mutate a branch. | H1 chain harness + H4 proposal-only suite; the daemon grep-guard (`verify-safety` CHECK 3). |
 | **Sandboxed** | Autonomous code work happens only inside isolated git worktrees. Your real working tree, branch, index and `HEAD` are byte-identical across the entire chain. | H1 (REAL-TREE-UNCHANGED) + H4 sandbox-required + containment suites. |
 | **Enrollment-gated** | Only repos you explicitly `enroll` are ever touched. Default enrollment is `{repos:[]}` ⇒ nothing runs. `allowAnyRepo` is env-gated (no stray flag can bypass). | H4 enrollment suite + H5 `allowAnyRepo` env-gate. |
 | **Kill switch always wins** | `ashlr enroll kill on` (or `touch ~/.ashlr/KILL`) halts everything immediately; the kill check precedes the enrollment / `allowAnyRepo` gate and is unconditional. | H4 kill-switch suite; `verify-safety` CHECK 2 (kill precedes enroll). |
 | **Local-first / no cloud egress** | Code never leaves your machine to a cloud model by default; cloud is opt-in per task (`--allow-cloud`). | H4 local-first suite; `verify-safety` CHECK 5 (provider cloud-gate present). |
 | **Containment** | `removeSandbox` refuses any namespace / path-containment mismatch; git ops only ever target a re-derived safe path; a symlink worktree escape is defeated by `resolve()`. | H4 sandbox-containment suite. |
 | **Fully audited** | Every enroll / unenroll / kill / proposal / apply / daemon action is appended to `~/.ashlr/audit/<date>.jsonl`; secrets are scrubbed before write. | H6 audit-completeness suite (`verify-safety` CHECK 4 exercises the real scrub guard). |
+
+---
+
+## Authority modes
+
+| Path | Default | Admission and effect |
+|------|---------|----------------------|
+| Manual proposal apply | Available, never silent | `ashlr inbox approve` requires confirmation, enrollment, and kill-switch clear, then applies to a dedicated local branch. |
+| Tier or verification auto-merge | Disabled | Requires explicit `foundry.autoMerge.enabled`, configured producer or judge authority, full verification, and risk/scope/provenance gates. Policy selects protected remote PR handoff or the bounded local fallback. |
+| Evidence auto-merge | Disabled | Replaces the judge with base- and diff-bound deterministic evidence. It additionally requires signed evidence/provenance, non-empty verification, and live protected-branch policy, and permits protected remote PR handoff only. Missing or stale evidence, local fallback, self-targets, partial captures, and build/CI/manifest changes are refused. |
+| Deployment | No daemon authority | Only explicit `ashlr ship --deploy <target> --confirm` runs a deploy command. A passing pre-ship gate does not imply deployment. |
+| OS service mutation | Temporarily unavailable | Production install, reinstall, repair, and restart fail closed before service or config mutation. Existing services retain read-only status and explicit uninstall; admitted one-shot workflows remain available. |
+
+Both git and npm update channels also fail before replacing code unless service
+registration is proven `absent` and the service is not running. Status combines
+the expected service file with native launchd, systemd, or Task Scheduler
+evidence: native presence remains `present` even if the file is missing, while
+ambiguous or failed manager evidence is `unknown`. Present, unknown, or running
+states could strand a resident process and therefore block. `ashlr update
+--check` remains read-only and available; the block reports degraded state and
+explicitly confirms that no code was replaced.
+
+`ashlr setup` and exported setup-wizard callers refuse before config, identity,
+editor, symlink, genome, checkpoint, enrollment, or service work. The refusal is
+nonzero/`ready:false` and points only to admitted one-shot execution.
+
+No authority is transitive across these rows: proposal approval or merge evidence
+does not grant deployment or service-install permission. Missing authority fails
+closed.
 
 ---
 
@@ -114,7 +142,7 @@ and **not** papered over.
 Read-only ways to confirm the system is safe and see what it has done:
 
 - **`ashlr verify-safety`** — read-only self-check of the 5 structural safety
-  guards (enrollment default-empty, kill-precedes-enroll, daemon-no-outward,
+  guards (enrollment default-empty, kill-precedes-enroll, generation-path-no-outward,
   secret-scrub, provider cloud-gate). Exit 0 = all pass. CI does not run this
   command directly, but the SAME five structural guards are re-asserted under
   `npm test` by the H4 verify-safety suite (`test/h4.verify-safety.test.ts`,

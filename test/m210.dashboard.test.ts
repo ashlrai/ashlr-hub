@@ -13,7 +13,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import type { AshlrConfig, DashboardSnapshot } from '../src/core/types.js';
+import type { AshlrConfig } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
 // Config fixture
@@ -98,7 +98,14 @@ const FIXTURE_MCP_REGISTRY = { servers: [] };
 const FIXTURE_GENOME_ENTRIES: never[] = [];
 const FIXTURE_FLEET_STATUS = {
   generatedAt: new Date().toISOString(),
-  daemon: { running: true, lastTickAt: FIXTURE_DAEMON_STATE.lastTickAt, todaySpentUsd: 0.0042 },
+  daemon: {
+    running: true,
+    sourceQuality: { sourceState: 'healthy' as const, complete: true, reason: 'healthy' as const },
+    pid: FIXTURE_DAEMON_STATE.pid,
+    startedAt: FIXTURE_DAEMON_STATE.startedAt,
+    lastTickAt: FIXTURE_DAEMON_STATE.lastTickAt,
+    todaySpentUsd: 0.0042,
+  },
   backends: [],
   queue: {
     backlogItems: 4,
@@ -405,7 +412,9 @@ vi.mock('../src/core/inbox/store.js', () => ({
   pendingCount: vi.fn(() => FIXTURE_INBOX_PENDING),
   listProposals: vi.fn(() => []),
 }));
-vi.mock('../src/core/daemon/state.js', () => ({ loadDaemonState: vi.fn(() => FIXTURE_DAEMON_STATE) }));
+vi.mock('../src/core/daemon/state.js', () => ({
+  loadDaemonStateStrict: vi.fn(() => ({ ok: true, state: FIXTURE_DAEMON_STATE, fresh: false })),
+}));
 vi.mock('../src/core/usage/frontier-usage.js', () => ({
   getFrontierUsageSync: vi.fn(() => FIXTURE_FRONTIER_USAGE),
 }));
@@ -432,7 +441,7 @@ beforeEach(async () => {
   const { discoverMcpServers } = await import('../src/core/mcp-registry.js');
   const { loadGenome } = await import('../src/core/genome/store.js');
   const { pendingCount } = await import('../src/core/inbox/store.js');
-  const { loadDaemonState } = await import('../src/core/daemon/state.js');
+  const { loadDaemonStateStrict } = await import('../src/core/daemon/state.js');
   const { getFrontierUsageSync } = await import('../src/core/usage/frontier-usage.js');
   const { buildFleetStatus } = await import('../src/core/fleet/status.js');
 
@@ -444,7 +453,11 @@ beforeEach(async () => {
   vi.mocked(discoverMcpServers).mockReturnValue(FIXTURE_MCP_REGISTRY);
   vi.mocked(loadGenome).mockReturnValue(FIXTURE_GENOME_ENTRIES);
   vi.mocked(pendingCount).mockReturnValue(FIXTURE_INBOX_PENDING);
-  vi.mocked(loadDaemonState).mockReturnValue(FIXTURE_DAEMON_STATE);
+  vi.mocked(loadDaemonStateStrict).mockReturnValue({
+    ok: true,
+    state: FIXTURE_DAEMON_STATE,
+    fresh: false,
+  });
   vi.mocked(getFrontierUsageSync).mockReturnValue(FIXTURE_FRONTIER_USAGE);
   vi.mocked(buildFleetStatus).mockResolvedValue(FIXTURE_FLEET_STATUS);
 });
@@ -581,6 +594,57 @@ describe('M210 Panel 1 — Fleet Status: snapshot.daemon', () => {
     expect(rolloutBlock).not.toContain("el('div', { cls: 'ctrl-card card' }");
   });
 
+  it('renders degraded control sources as unknown without mutation controls', () => {
+    const appSource = readFileSync(
+      fileURLToPath(new URL('../src/core/web/public/app.js', import.meta.url)),
+      'utf8',
+    );
+
+    expect(appSource).toContain("if (daemon?.sourceQuality?.sourceState !== 'healthy') return 'unknown'");
+    expect(appSource).toContain(
+      "return fleet?.killSwitch?.state ?? (fleet?.killed === true ? 'active' : 'unknown')",
+    );
+    expect(appSource).toContain("return state === 'unknown' ? null : fleetPauseResumeButton");
+    expect(appSource).toContain('kill switch authority cannot be inspected');
+    expect(appSource).toContain("'Daemon state unknown'");
+    expect(appSource).toContain("killState === 'unknown' ? 'UNKNOWN'");
+    expect(appSource).toContain("daemonState === 'unknown'");
+    expect(appSource).toContain('const daemonState = fleetDaemonState(d)');
+    expect(appSource).toContain("daemonState === 'unknown' ? 'Unknown' : 'Stopped'");
+    expect(appSource).toContain("daemonState !== 'unknown' && d.todaySpentUsd != null");
+    expect(appSource).toContain("'Daemon history unavailable; inspect daemon state source quality.'");
+    expect(appSource).toContain("'Daemon tick history unavailable; inspect daemon state source quality.'");
+    expect(appSource).not.toContain("d.running ? 'Running' : 'Stopped'");
+  });
+
+  it('renders Windows scheduler activity without claiming daemon liveness or a stopped service', () => {
+    const appSource = readFileSync(
+      fileURLToPath(new URL('../src/core/web/public/app.js', import.meta.url)),
+      'utf8',
+    );
+    const stylesSource = readFileSync(
+      fileURLToPath(new URL('../src/core/web/public/styles.css', import.meta.url)),
+      'utf8',
+    );
+    const activityHelper = appSource.match(
+      /function daemonServiceActivity\(service\) \{[\s\S]*?\n\}/,
+    )?.[0];
+
+    expect(activityHelper).toBeDefined();
+    expect(activityHelper).toContain("service?.platformSpec === 'schtasks'");
+    expect(activityHelper).toContain("service?.runtimeState === 'running'");
+    expect(activityHelper).toContain("service?.runtimeState === 'queued'");
+    expect(activityHelper).toContain("return 'scheduler-active-unverified'");
+    expect(appSource).toContain("'scheduler active'");
+    expect(appSource).toContain("'Scheduler active; daemon liveness unverified'");
+    expect(appSource).toContain('Daemon liveness unverified · scheduler');
+    expect(appSource).toContain('daemon liveness unverified');
+    expect(appSource).toContain("daemonSchedulerObserved ? ' observed' : ''");
+    expect(appSource).toContain("serviceSchedulerActive ? 'observed' : 'down'");
+    expect(stylesSource).toContain('.ctrl-live-dot.observed');
+    expect(stylesSource).toContain('.ctrl-health-dot.observed');
+  });
+
   it('renders cancellations explicitly and excludes them from diagnostic yield', () => {
     const appSource = readFileSync(
       fileURLToPath(new URL('../src/core/web/public/app.js', import.meta.url)),
@@ -593,8 +657,26 @@ describe('M210 Panel 1 — Fleet Status: snapshot.daemon', () => {
     );
     expect(appSource).toContain("['Cancelled', attemptCoverage.production?.cancelled ?? 0]");
     expect(appSource).toContain('topWeak.denominator ?? attempts');
-    expect(appSource).toContain("['Cancelled', terminal.cancelled ?? 0]");
+    expect(appSource).toContain("['Cancelled', terminal ? (terminal.cancelled ?? 0) : 'withheld']");
     expect(appSource).toContain('dispatchProductionDiagnosticRate(dispatchProduction)');
+  });
+
+  it('renders canary promotion as observation-only status in Fleet and Mission Control', () => {
+    const appSource = readFileSync(
+      fileURLToPath(new URL('../src/core/web/public/app.js', import.meta.url)),
+      'utf8',
+    );
+
+    expect(appSource).toContain('function renderAutoMergeCanaryPromotionReadinessCard');
+    expect(appSource).toContain("'Canary Promotion Readiness'");
+    expect(appSource).toContain("['Scope caps', capSummary]");
+    expect(appSource).toContain("['Cap source', scopeCaps?.source ?? 'unavailable']");
+    expect(appSource).toContain("['Policy identity', scopeIdentity?.state ?? 'unavailable']");
+    expect(appSource).toContain("['Identity source', scopeIdentity?.source ?? 'unavailable']");
+    expect(appSource).toContain("['Activation', 'disabled']");
+    expect(appSource).toContain('f.autoMergeCanaryPromotionReadiness');
+    expect(appSource).toContain('d.fleet?.autoMergeCanaryPromotionReadiness');
+    expect(appSource).not.toContain('onClick: () => activateAutoMergeCanary');
   });
 
   it('preserves explicit zero diagnostic attempts without inventing a weakest backend', () => {
@@ -637,15 +719,153 @@ describe('M210 Panel 1 — Fleet Status: snapshot.daemon', () => {
     expect(helper).not.toContain('.find(');
   });
 
-  it('daemon degrades to zeroed fields when loadDaemonState throws', async () => {
-    const { loadDaemonState } = await import('../src/core/daemon/state.js');
-    vi.mocked(loadDaemonState).mockImplementation(() => { throw new Error('no state'); });
+  it('daemon withholds operational values when strict state evidence is unreadable', async () => {
+    const { loadDaemonStateStrict } = await import('../src/core/daemon/state.js');
+    vi.mocked(loadDaemonStateStrict).mockReturnValue({
+      ok: false,
+      path: '/tmp/daemon.json',
+      reason: 'unreadable',
+      error: 'unsafe daemon state',
+    });
     const snap = await buildSnapshot(makeConfig());
-    // Snapshot must still resolve
     expect(snap).toBeDefined();
-    expect(typeof snap.daemon!.running).toBe('boolean');
-    expect(snap.daemon!.running).toBe(false);
-    expect(snap.daemon!.todaySpentUsd).toBe(0);
+    expect(snap.daemon).toEqual({
+      running: false,
+      todaySpentUsd: 0,
+      pendingProposals: FIXTURE_INBOX_PENDING,
+    });
+    expect(snap.daemonObservation).toMatchObject({
+      runtimeState: 'unknown',
+      running: null,
+      todaySpentUsd: null,
+      itemsProcessed: null,
+      sourceQuality: {
+        sourceState: 'degraded',
+        complete: false,
+        reason: 'unreadable',
+      },
+    });
+  });
+
+  it('withholds daemon values when live lock/activity evidence is inconsistent', async () => {
+    const { buildFleetStatus } = await import('../src/core/fleet/status.js');
+    vi.mocked(buildFleetStatus).mockResolvedValueOnce({
+      ...FIXTURE_FLEET_STATUS,
+      daemon: {
+        ...FIXTURE_FLEET_STATUS.daemon,
+        sourceQuality: {
+          sourceState: 'degraded',
+          complete: false,
+          reason: 'inconsistent',
+        },
+      },
+    } as any);
+
+    const snap = await buildSnapshot(makeConfig());
+    expect(snap.daemonObservation).toMatchObject({
+      runtimeState: 'unknown',
+      running: null,
+      todaySpentUsd: null,
+      itemsProcessed: null,
+      ticks: null,
+      sourceQuality: {
+        sourceState: 'degraded',
+        complete: false,
+        reason: 'inconsistent',
+      },
+    });
+  });
+
+  it('does not manufacture healthy provenance when FleetStatus quality is absent', async () => {
+    const { buildFleetStatus } = await import('../src/core/fleet/status.js');
+    vi.mocked(buildFleetStatus).mockResolvedValueOnce({
+      ...FIXTURE_FLEET_STATUS,
+      daemon: {
+        ...FIXTURE_FLEET_STATUS.daemon,
+        sourceQuality: undefined,
+      },
+    } as any);
+
+    const snap = await buildSnapshot(makeConfig());
+    expect(snap.daemonObservation).toMatchObject({
+      runtimeState: 'unknown',
+      running: null,
+      sourceQuality: {
+        sourceState: 'degraded',
+        complete: false,
+        reason: 'unavailable',
+      },
+    });
+  });
+
+  it.each(['pid', 'startedAt'] as const)(
+    'requires %s to bind a healthy daemon generation',
+    async (field) => {
+      const { buildFleetStatus } = await import('../src/core/fleet/status.js');
+      vi.mocked(buildFleetStatus).mockResolvedValueOnce({
+        ...FIXTURE_FLEET_STATUS,
+        daemon: {
+          ...FIXTURE_FLEET_STATUS.daemon,
+          [field]: undefined,
+        },
+      } as any);
+
+      const snap = await buildSnapshot(makeConfig());
+      expect(snap.daemonObservation).toMatchObject({
+        runtimeState: 'unknown',
+        running: null,
+        sourceQuality: {
+          sourceState: 'degraded',
+          complete: false,
+          reason: 'inconsistent',
+        },
+      });
+    },
+  );
+
+  it('rejects a daemon generation that changes between fleet and ledger reads', async () => {
+    const { buildFleetStatus } = await import('../src/core/fleet/status.js');
+    vi.mocked(buildFleetStatus).mockResolvedValueOnce({
+      ...FIXTURE_FLEET_STATUS,
+      daemon: {
+        ...FIXTURE_FLEET_STATUS.daemon,
+        lastTickAt: '2026-07-25T00:00:00.000Z',
+      },
+    } as any);
+
+    const snap = await buildSnapshot(makeConfig());
+    expect(snap.daemonObservation).toMatchObject({
+      runtimeState: 'unknown',
+      running: null,
+      sourceQuality: {
+        sourceState: 'degraded',
+        complete: false,
+        reason: 'inconsistent',
+      },
+    });
+  });
+
+  it('rejects a daemon PID that changes between fleet and ledger reads', async () => {
+    const { buildFleetStatus } = await import('../src/core/fleet/status.js');
+    vi.mocked(buildFleetStatus).mockResolvedValueOnce({
+      ...FIXTURE_FLEET_STATUS,
+      daemon: {
+        ...FIXTURE_FLEET_STATUS.daemon,
+        pid: FIXTURE_DAEMON_STATE.pid + 1,
+      },
+    } as any);
+
+    const snap = await buildSnapshot(makeConfig());
+    expect(snap.daemonObservation).toMatchObject({
+      runtimeState: 'unknown',
+      running: null,
+      pid: null,
+      sourceQuality: {
+        sourceState: 'degraded',
+        complete: false,
+        reason: 'inconsistent',
+      },
+    });
   });
 });
 
@@ -792,7 +1012,7 @@ describe('M210 Panel 4 — Recent Activity: snapshot.runs', () => {
 
 describe('M210 — full snapshot contract', () => {
   it('resolves with all four panel data sources simultaneously', async () => {
-    const snap: DashboardSnapshot = await buildSnapshot(makeConfig());
+    const snap = await buildSnapshot(makeConfig());
 
     // Panel 1: daemon
     expect(snap.daemon).toBeDefined();
@@ -813,12 +1033,12 @@ describe('M210 — full snapshot contract', () => {
   });
 
   it('snapshot never throws even when all M210 sources fail', async () => {
-    const { loadDaemonState } = await import('../src/core/daemon/state.js');
+    const { loadDaemonStateStrict } = await import('../src/core/daemon/state.js');
     const { pendingCount } = await import('../src/core/inbox/store.js');
     const { getFrontierUsageSync } = await import('../src/core/usage/frontier-usage.js');
     const { listRuns } = await import('../src/core/run/orchestrator.js');
 
-    vi.mocked(loadDaemonState).mockImplementation(() => { throw new Error('fail'); });
+    vi.mocked(loadDaemonStateStrict).mockImplementation(() => { throw new Error('fail'); });
     vi.mocked(pendingCount).mockImplementation(() => { throw new Error('fail'); });
     vi.mocked(getFrontierUsageSync).mockImplementation(() => { throw new Error('fail'); });
     vi.mocked(listRuns).mockImplementation(() => { throw new Error('fail'); });
@@ -827,24 +1047,38 @@ describe('M210 — full snapshot contract', () => {
   });
 
   it('snapshot is a valid DashboardSnapshot shape when all M210 sources fail', async () => {
-    const { loadDaemonState } = await import('../src/core/daemon/state.js');
+    const { loadDaemonStateStrict } = await import('../src/core/daemon/state.js');
     const { pendingCount } = await import('../src/core/inbox/store.js');
     const { getFrontierUsageSync } = await import('../src/core/usage/frontier-usage.js');
     const { listRuns } = await import('../src/core/run/orchestrator.js');
 
-    vi.mocked(loadDaemonState).mockImplementation(() => { throw new Error('fail'); });
+    vi.mocked(loadDaemonStateStrict).mockImplementation(() => { throw new Error('fail'); });
     vi.mocked(pendingCount).mockImplementation(() => { throw new Error('fail'); });
     vi.mocked(getFrontierUsageSync).mockImplementation(() => { throw new Error('fail'); });
     vi.mocked(listRuns).mockImplementation(() => { throw new Error('fail'); });
 
-    const snap: DashboardSnapshot = await buildSnapshot(makeConfig());
+    const snap = await buildSnapshot(makeConfig());
 
     expect(typeof snap.generatedAt).toBe('string');
     expect(typeof snap.repos.total).toBe('number');
     expect(snap.inbox).toBeDefined();
     expect(snap.inbox.pending).toBe(0);
-    expect(snap.daemon).toBeDefined();
-    expect(snap.daemon!.running).toBe(false);
+    expect(snap.daemon).toEqual({
+      running: false,
+      todaySpentUsd: 0,
+      pendingProposals: 0,
+    });
+    expect(snap.daemonObservation).toMatchObject({
+      runtimeState: 'unknown',
+      running: null,
+      todaySpentUsd: null,
+      itemsProcessed: null,
+      sourceQuality: {
+        sourceState: 'degraded',
+        complete: false,
+        reason: 'unavailable',
+      },
+    });
     expect(Array.isArray(snap.runs)).toBe(true);
   });
 });

@@ -31,6 +31,10 @@ import { engineTierOf } from '../src/core/run/sandboxed-engine.js';
 import { evaluateMergeAuthority } from '../src/core/inbox/merge.js';
 import type { Proposal } from '../src/core/types.js';
 
+vi.mock('../src/core/daemon/activation-permit.js', () => ({
+  liveConductorActivationAuthorized: () => true,
+}));
+
 // ---------------------------------------------------------------------------
 // Mocks
 // ---------------------------------------------------------------------------
@@ -54,6 +58,7 @@ vi.mock('../src/core/goals/store.js', () => ({
   saveGoal: vi.fn(),
 }));
 vi.mock('../src/core/inbox/store.js', () => ({
+  ensureProposalInbox: vi.fn(() => true),
   listProposals: vi.fn(() => []),
   loadProposal: vi.fn(() => null),
 }));
@@ -383,7 +388,24 @@ describe('M298 Part 3 — simple-conductor full-suite directive', () => {
       engineTierOf: vi.fn(() => 'mid'),
     }));
     vi.doMock('../src/core/inbox/store.js', () => ({
+      ensureProposalInbox: vi.fn(() => true),
       listProposals: vi.fn(() => []),
+      loadProposal: vi.fn((id: string) => ({ id, status: 'pending' })),
+      listProposalsDetailed: vi.fn(() => ({
+        proposals: capturedInstructions.length > 0 ? [{ id: 'p-test-1', status: 'pending' }] : [],
+        sourceState: 'healthy',
+        sourcePresent: true,
+        complete: true,
+        stopReasons: [],
+        filesDiscovered: capturedInstructions.length > 0 ? 1 : 0,
+        filesRead: capturedInstructions.length > 0 ? 1 : 0,
+        bytesRead: 1,
+        invalidFiles: 0,
+        unreadableFiles: 0,
+      })),
+    }));
+    vi.doMock('../src/core/inbox/pending-authority.js', () => ({
+      isAuthoritativeDurablePendingProposal: vi.fn(() => true),
     }));
     vi.doMock('../src/core/fleet/automerge-pass.js', () => ({
       runAutoMergePass: vi.fn(() => Promise.resolve({ merged: 0 })),

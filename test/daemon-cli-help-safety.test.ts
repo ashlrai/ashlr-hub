@@ -5,9 +5,12 @@ import * as path from 'node:path';
 
 const effects = vi.hoisted(() => ({
   loadConfig: vi.fn(),
+  loadConfigReadOnly: vi.fn(),
+  loadConfigReadOnlyStrict: vi.fn(),
   runDaemon: vi.fn(),
   stopDaemon: vi.fn(),
   loadDaemonState: vi.fn(),
+  loadDaemonStateStrict: vi.fn(),
   pendingCount: vi.fn(),
   diagnoseGuardHealth: vi.fn(),
   install: vi.fn(),
@@ -29,7 +32,11 @@ const moduleLoads = vi.hoisted(() => ({
 
 vi.mock('../src/core/config.js', () => {
   moduleLoads.config++;
-  return { loadConfig: effects.loadConfig };
+  return {
+    loadConfig: effects.loadConfig,
+    loadConfigReadOnly: effects.loadConfigReadOnly,
+    loadConfigReadOnlyStrict: effects.loadConfigReadOnlyStrict,
+  };
 });
 
 vi.mock('../src/core/daemon/loop.js', () => {
@@ -39,7 +46,10 @@ vi.mock('../src/core/daemon/loop.js', () => {
 
 vi.mock('../src/core/daemon/state.js', () => {
   moduleLoads.state++;
-  return { loadDaemonState: effects.loadDaemonState };
+  return {
+    loadDaemonState: effects.loadDaemonState,
+    loadDaemonStateStrict: effects.loadDaemonStateStrict,
+  };
 });
 
 vi.mock('../src/core/inbox/store.js', () => {
@@ -87,6 +97,7 @@ const daemonState = {
 };
 
 const serviceStatus = {
+  registrationState: 'present' as const,
   installed: true,
   running: false,
   platformSpec: 'launchd',
@@ -145,8 +156,11 @@ beforeEach(async () => {
   }
 
   effects.loadConfig.mockReturnValue({ daemon: { dailyBudgetUsd: 5, intervalMs: 300_000, parallel: 1 } });
+  effects.loadConfigReadOnly.mockReturnValue({ daemon: { dailyBudgetUsd: 5, intervalMs: 300_000, parallel: 1 } });
+  effects.loadConfigReadOnlyStrict.mockReturnValue({ daemon: { dailyBudgetUsd: 5, intervalMs: 300_000, parallel: 1 } });
   effects.runDaemon.mockResolvedValue(daemonState);
   effects.loadDaemonState.mockReturnValue(daemonState);
+  effects.loadDaemonStateStrict.mockReturnValue({ ok: true, state: daemonState, fresh: false });
   effects.pendingCount.mockReturnValue(0);
   effects.diagnoseGuardHealth.mockReturnValue({
     generatedAt: '2026-07-21T00:00:00.000Z',
@@ -206,6 +220,14 @@ describe('daemon help is read-only', () => {
     expect(result.stdout).toContain('Usage: ashlr daemon install');
     expectNoEffectModulesOrCalls();
   });
+
+  it('marks resident service installation unavailable without loading effect modules', async () => {
+    const result = await capture(['install', '--help']);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('temporarily unavailable');
+    expectNoEffectModulesOrCalls();
+  });
 });
 
 describe('daemon unknown flags fail before effects', () => {
@@ -228,29 +250,81 @@ describe('daemon unknown flags fail before effects', () => {
 });
 
 describe('daemon valid flags remain supported', () => {
-  it('preserves install --no-autostart without starting the service', async () => {
-    const result = await capture(['install', '--no-autostart']);
-
-    expect(result.code).toBe(0);
-    expect(effects.install).toHaveBeenCalledWith(expect.objectContaining({ autostart: false }));
-    expect(effects.serviceStatus).toHaveBeenCalledOnce();
-    expect(effects.ensureRunning).not.toHaveBeenCalled();
-  });
-
   it('preserves status --json', async () => {
     const result = await capture(['status', '--json']);
 
     expect(result.code).toBe(0);
     expect(JSON.parse(result.stdout)).toMatchObject({ running: false, pendingProposals: 0 });
-    expect(effects.loadDaemonState).toHaveBeenCalledOnce();
+    expect(effects.loadDaemonStateStrict).toHaveBeenCalledOnce();
+    expect(effects.loadDaemonState).not.toHaveBeenCalled();
   });
 
   it('preserves service-status --json', async () => {
     const result = await capture(['service-status', '--json']);
 
     expect(result.code).toBe(0);
-    expect(JSON.parse(result.stdout)).toMatchObject(serviceStatus);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      ...serviceStatus,
+      activity: 'inactive',
+    });
     expect(effects.serviceStatus).toHaveBeenCalledOnce();
+  });
+
+  it('does not recommend the unavailable install command when no service is present', async () => {
+    effects.serviceStatus.mockReturnValue({
+      registrationState: 'absent',
+      installed: false,
+      running: false,
+      platformSpec: 'launchd',
+      serviceFilePath: '/tmp/ai.ashlr.daemon.plist',
+    });
+
+    const result = await capture(['service-status']);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('Resident service installation is temporarily unavailable');
+    expect(result.stdout).toContain('One-shot admitted workflows remain available');
+    expect(result.stdout).not.toContain('Run `ashlr daemon install`');
+  });
+
+  it.each(['running', 'queued'] as const)(
+    'reports scheduler %s without claiming the daemon is running or stopped',
+    async (runtimeState) => {
+      effects.serviceStatus.mockReturnValue({
+        registrationState: 'present',
+        installed: true,
+        running: false,
+        runtimeState,
+        platformSpec: 'schtasks',
+        serviceFilePath: 'C:\\Users\\worker\\.ashlr\\services\\ashlr-daemon.cmd',
+      });
+
+      const result = await capture(['service-status']);
+
+      expect(result.code).toBe(0);
+      expect(result.stdout).toContain(`unverified (scheduler ${runtimeState})`);
+      expect(result.stdout).not.toContain('running:    no');
+    },
+  );
+
+  it('includes the bounded scheduler activity distinction in JSON status', async () => {
+    effects.serviceStatus.mockReturnValue({
+      registrationState: 'present',
+      installed: true,
+      running: false,
+      runtimeState: 'queued',
+      platformSpec: 'schtasks',
+      serviceFilePath: 'C:\\Users\\worker\\.ashlr\\services\\ashlr-daemon.cmd',
+    });
+
+    const result = await capture(['service-status', '--json']);
+
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      running: false,
+      runtimeState: 'queued',
+      activity: 'scheduler-active-unverified',
+    });
   });
 
   it('preserves all start flags and config overrides', async () => {
@@ -277,5 +351,59 @@ describe('daemon valid flags remain supported', () => {
       }),
       { once: true, dryRun: true, drain: 'diagnostic-reslices', drainLimit: 4 },
     );
+  });
+
+  it('returns nonzero and surfaces a structured activation refusal', async () => {
+    effects.runDaemon.mockResolvedValue({
+      ...daemonState,
+      startRefusal: 'activation trust roots unavailable',
+    });
+
+    const result = await capture(['start', '--once']);
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(
+      'daemon start refused: activation trust roots unavailable',
+    );
+  });
+
+  it('refuses start before the daemon loop when strict config loading fails', async () => {
+    effects.loadConfigReadOnlyStrict.mockImplementationOnce(() => {
+      throw new Error('config is not valid JSON');
+    });
+
+    const result = await capture(['start', '--once']);
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('Failed to load config: config is not valid JSON');
+    expect(effects.runDaemon).not.toHaveBeenCalled();
+  });
+});
+
+describe('daemon install authority boundary', () => {
+  it.each([
+    { args: ['install'], autostart: true },
+    { args: ['install', '--no-autostart'], autostart: false },
+  ])('reports the shared service refusal for $args', async ({ args }) => {
+    const result = await capture(args);
+
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toContain(
+      'daemon service installation is temporarily unavailable: '
+      + 'resident service install/reinstall/repair/restart authority is unavailable',
+    );
+    expect(result.stderr).toContain('No config or service state was inspected or changed');
+    expect(moduleLoads.config).toBe(0);
+    expect(moduleLoads.service).toBe(0);
+    expect(moduleLoads.serviceConfig).toBe(0);
+    expect(effects.loadConfig).not.toHaveBeenCalled();
+    expect(effects.loadConfigReadOnly).not.toHaveBeenCalled();
+    expect(effects.loadConfigReadOnlyStrict).not.toHaveBeenCalled();
+    expect(effects.serviceOptions).not.toHaveBeenCalled();
+    expect(effects.install).not.toHaveBeenCalled();
+    expect(effects.ensureRunning).not.toHaveBeenCalled();
+    expect(effects.serviceStatus).not.toHaveBeenCalled();
+    expect(fs.readdirSync(tmpHome)).toEqual([]);
   });
 });

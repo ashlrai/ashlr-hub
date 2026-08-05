@@ -21,6 +21,7 @@ afterEach(() => {
     }
   } finally {
     _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
+    vi.restoreAllMocks();
     vi.unstubAllEnvs();
   }
 });
@@ -178,6 +179,81 @@ describe('M379 Windows private-storage assurance', () => {
     expect(assurePrivateStoragePath('C:\\tmp\\private', 'directory', 'inspect-existing', {
       ...base, runner: authenticatedFailure,
     })).toEqual({ ok: false, reason: 'untrusted-ancestor-owner' });
+  });
+
+  it('backs off for authenticated transient ACL errors and returns the final stage silently', () => {
+    const waits: Array<{ delayMs: number; reason: string }> = [];
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    let calls = 0;
+    _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+      waitForRetry: (delayMs, reason) => waits.push({ delayMs, reason }),
+    });
+    const result = assurePrivateStoragePath(
+      'C:\\tmp\\private',
+      'directory',
+      'inspect-existing',
+      {
+        platform: 'win32',
+        systemRoot: 'C:\\Windows',
+        anchorPath: 'C:\\tmp',
+        runner: (invocation) => {
+          calls += 1;
+          const request = JSON.parse(invocation.input) as { nonce: string; operation: string };
+          const reason = calls === 1
+            ? 'adapter-error-load-item'
+            : 'adapter-error-readback-acl';
+          return { status: 1, stdout: JSON.stringify({
+            nonce: request.nonce,
+            operation: request.operation,
+            ok: false,
+            reason,
+          }) };
+        },
+      },
+    );
+
+    expect(result).toEqual({ ok: false, reason: 'adapter-error-readback-acl' });
+    expect(calls).toBe(2);
+    expect(waits).toEqual([
+      { delayMs: 50, reason: 'adapter-error-load-item' },
+    ]);
+    expect(stderr).not.toHaveBeenCalled();
+    expect(stdout).not.toHaveBeenCalled();
+  });
+
+  it('does not retry or emit transient diagnostics for deterministic ACL denial', () => {
+    const waits = vi.fn();
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    let calls = 0;
+    _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+      waitForRetry: waits,
+    });
+    const result = assurePrivateStoragePath(
+      'C:\\tmp\\private',
+      'directory',
+      'inspect-existing',
+      {
+        platform: 'win32',
+        systemRoot: 'C:\\Windows',
+        anchorPath: 'C:\\tmp',
+        runner: (invocation) => {
+          calls += 1;
+          const request = JSON.parse(invocation.input) as { nonce: string; operation: string };
+          return { status: 1, stdout: JSON.stringify({
+            nonce: request.nonce,
+            operation: request.operation,
+            ok: false,
+            reason: 'untrusted-ancestor-owner',
+          }) };
+        },
+      },
+    );
+
+    expect(result).toEqual({ ok: false, reason: 'untrusted-ancestor-owner' });
+    expect(calls).toBe(1);
+    expect(waits).not.toHaveBeenCalled();
+    expect(stderr).not.toHaveBeenCalled();
   });
 
   it('supports non-mutating owner and ancestor assurance for observational reads', () => {

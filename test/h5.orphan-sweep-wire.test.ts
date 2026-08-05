@@ -44,6 +44,15 @@ import {
   sandboxHomeExists,
 } from './helpers/h2-faults.js';
 
+vi.mock('../src/core/daemon/activation-permit.js', () => ({
+  consumeDaemonActivationPermit: () => ({
+    authorized: true,
+    required: false,
+    reason: 'test-authorized',
+  }),
+  isDaemonActivationCapability: () => true,
+}));
+
 let fx: H1Fixture;
 let repo: DisposableRepo;
 

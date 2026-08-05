@@ -12,19 +12,10 @@ on:
       - "src/raycast/package-lock.json"
       - "src/raycast/npm-shrinkwrap.json"
       - "src/raycast/.npmrc"
+      - ".github/dependabot.yml"
       - ".github/workflows/dependency-audit.yml"
   pull_request:
     branches: ["**"]
-    paths:
-      - "package.json"
-      - "package-lock.json"
-      - "npm-shrinkwrap.json"
-      - ".npmrc"
-      - "src/raycast/package.json"
-      - "src/raycast/package-lock.json"
-      - "src/raycast/npm-shrinkwrap.json"
-      - "src/raycast/.npmrc"
-      - ".github/workflows/dependency-audit.yml"
   schedule:
     - cron: "17 9 * * 1"
   workflow_dispatch:
@@ -41,38 +32,30 @@ jobs:
     name: Dependency audit (root + Raycast)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      NPM_CONFIG_REGISTRY: https://registry.npmjs.org
     steps:
       - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Node.js 22
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
-          cache: "npm"
-          cache-dependency-path: |
-            package-lock.json
-            src/raycast/package-lock.json
-
-      - name: Install root dependencies
-        run: npm ci --ignore-scripts --no-audit
 
       - name: Audit root dependencies
-        run: npm audit --audit-level=low
+        run: npm audit --package-lock-only --ignore-scripts --audit-level=low
 
       - name: Audit root production dependencies
-        run: npm audit --omit=dev --audit-level=low
-
-      - name: Install Raycast dependencies
-        working-directory: src/raycast
-        run: npm ci --ignore-scripts --no-audit
+        run: npm audit --package-lock-only --ignore-scripts --omit=dev --audit-level=low
 
       - name: Audit Raycast dependencies
         working-directory: src/raycast
-        run: npm audit --audit-level=low
+        run: npm audit --package-lock-only --ignore-scripts --audit-level=low
 
       - name: Audit Raycast production dependencies
         working-directory: src/raycast
-        run: npm audit --omit=dev --audit-level=low
+        run: npm audit --package-lock-only --ignore-scripts --omit=dev --audit-level=low

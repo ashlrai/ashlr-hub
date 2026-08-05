@@ -22,13 +22,18 @@ ashlr --version
 
 ---
 
-## Step 2 — Run the setup wizard
+## Step 2 — Initialize local configuration
 
 ```sh
-ashlr setup
+ashlr init
 ```
 
-The wizard runs these steps in order and reports the status of each:
+`ashlr init` creates local configuration and reports readiness without creating
+a resident OS service. In the current release, `ashlr setup` refuses before
+reading or changing setup state because resident install/reinstall/repair/restart
+authority is withheld. Use `ashlr daemon start --once` for admitted work.
+
+Initialization reports these steps:
 
 | Step | What it does |
 |------|-------------|
@@ -39,16 +44,16 @@ The wizard runs these steps in order and reports the status of each:
 | `genome` | Creates `~/.ashlr/genome/` for memory storage |
 | `phantom` | Checks Phantom Secrets status (optional) |
 | `doctor` | Runs final readiness checks |
-| `daemon-service` | Installs the daemon as an OS service (launchd/systemd) |
 | `engines` | Checks each configured backend and prints auth guidance |
 | `enroll` | Auto-discovers repos under configured roots and offers enrollment |
 
-Steps marked `!` need manual follow-up (shown in the summary). Steps marked `✓` are complete. The wizard is idempotent — safe to re-run at any time.
+Steps marked `!` need manual follow-up (shown in the summary). Steps marked `✓`
+are complete. Initialization is idempotent and safe to re-run.
 
 **Non-interactive mode** (CI, scripts, desktop app first-launch):
 
 ```sh
-ashlr setup --yes
+ashlr init --yes
 ```
 
 ---
@@ -124,7 +129,7 @@ ashlr daemon start --once --dry-run
 # One real tick — deposits proposals into the inbox
 ashlr daemon start --once
 
-# Continuous loop (runs until stopped or daily budget is hit)
+# Foreground continuous loop (runs until stopped or daily budget is hit)
 ashlr daemon start
 
 # Check status
@@ -141,7 +146,9 @@ ashlr inbox           # list pending proposals
 ashlr inbox show <id> # inspect a proposal
 ```
 
-**Proposals are never applied automatically.** Nothing reaches a real branch until you approve it in the inbox.
+Automatic merge is disabled by default. When explicitly enabled, only proposals
+that satisfy the configured evidence, scope, provenance, and remote-PR gates may
+merge; all others remain pending for inbox review.
 
 ---
 

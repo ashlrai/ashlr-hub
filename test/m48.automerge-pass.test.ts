@@ -1231,7 +1231,6 @@ describe('M48 runAutoMergePass — ENABLED frontier-only filtering', () => {
         tier: 'local',
         model: 'qwen2.5-coder',
         assignedBy: 'daemon',
-        reason: 'evidence mode local verification',
         routerPolicyVersion: 'router-policy-test',
       },
       runEventSummary: {
@@ -1285,7 +1284,6 @@ describe('M48 runAutoMergePass — ENABLED frontier-only filtering', () => {
         tier: 'local',
         model: 'qwen2.5-coder',
         assignedBy: 'daemon',
-        reason: 'evidence mode local verification',
         routerPolicyVersion: 'router-policy-test',
       },
       runEventSummary: {
@@ -1310,6 +1308,8 @@ describe('M48 runAutoMergePass — ENABLED frontier-only filtering', () => {
       learningEpoch: '2026-07-10',
       counts: { commands: 1 },
     });
+    expect(events[0]?.routeSnapshot?.reason).toBeUndefined();
+    expect(events[0]?.proseDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
     expect(events[1]).toMatchObject({
       actor: 'verifier',
       kind: 'verification',
@@ -1362,8 +1362,9 @@ describe('M48 runAutoMergePass — ENABLED frontier-only filtering', () => {
       kind: 'verification',
       outcome: 'failed',
       proposalId: 'evidence-fail',
-      reason: 'mock verification failed',
+      reason: 'failed',
       counts: { commands: 1 },
+      proseDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
     });
   });
 

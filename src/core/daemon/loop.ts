@@ -60,6 +60,7 @@ import { resolveAutonomyControlMode, type FleetStatus } from '../fleet/status.js
 import type { EcosystemDoctorReport } from '../ecosystem/doctor.js';
 import {
   killSwitchOn,
+  readKillSwitch,
   setKill,
   canonicalEnrollmentPath,
   recoverEnrollmentRegistry,
@@ -96,6 +97,11 @@ import {
   writeDaemonActivity,
   type DaemonActivityPhase,
 } from './activity.js';
+import {
+  consumeDaemonActivationPermit,
+  isDaemonActivationCapability,
+  type DaemonActivationCapability,
+} from './activation-permit.js';
 import { nullSink } from '../run/streaming.js';
 import { createOuterAttemptIdentity } from '../fleet/attempt-identity.js';
 import { runSwarm } from '../swarm/runner.js';
@@ -136,7 +142,7 @@ import {
   type ProposalRepairWorkResult,
 } from '../fleet/proposal-repair-work.js';
 import { reconcileRemoteHandoffs, type RemoteHandoffReconcileResult } from '../inbox/remote-handoff.js';
-import { runBestOfN } from '../run/best-of-n.js';
+import { runBestOfN, type CandidateResult } from '../run/best-of-n.js';
 import { runSelfHealCycle, runSelfHealCycleForRepos } from '../fleet/self-heal.js';
 import { runInventCycle } from '../generative/invent-cycle.js'; // M186
 import { runCounterfactualReplay } from '../fleet/counterfactual.js'; // M187
@@ -151,15 +157,16 @@ import {
 } from '../fleet/monitoring-cursor.js';
 // M212: proactive notifications (fire-and-forget, never throws, never alters control flow)
 import { notifyFleetEvent } from '../comms/events.js';
-import { pendingCount, listProposals, listProposalsDetailed } from '../inbox/store.js';
+import { pendingCount, listProposals, listProposalsDetailed, loadProposal } from '../inbox/store.js';
+import { isAuthoritativeDurablePendingProposal } from '../inbox/pending-authority.js';
 import { authenticatedRealizedMergeOf, realizedMergeOf } from '../inbox/realized-merge.js';
 import {
   dispatchProductionDir,
+  dispatchProductionRunStatusForOutcome,
+  materializeDispatchProductionAttemptEnvelope,
   readDispatchProductionFailureAttemptReceipts,
-  readDispatchProductionEventsDetailed,
   readDispatchProductionAttemptProtocolQuality,
   recordDispatchProduction,
-  readDispatchProductionYieldDetailed,
   resolveDispatchProductionFailureAttemptReceipt,
   resolveDispatchProductionAttemptReceiptWitnesses,
   type DispatchProductionBasis,
@@ -262,14 +269,9 @@ import { writePrivateFileAtomically } from '../util/private-file-write.js';
 import { readStableRegularFile } from '../util/stable-file-read.js';
 import { fsyncDirectory } from '../util/durability.js';
 
-const GENERATED_REPAIR_RECOVERY_WINDOW_MS = 24 * 60 * 60 * 1000;
 const GENERATED_REPAIR_RESERVATION_SCHEMA_VERSION = 1;
 const GENERATED_REPAIR_RESERVATION_MAX_BYTES = 2_048;
 const GENERATED_REPAIR_RESERVATION_MAX_GENERATIONS = 8;
-const GENERATED_REPAIR_ATTEMPT_READ_MAX_FILES = 3;
-const GENERATED_REPAIR_ATTEMPT_READ_MAX_BYTES = 2 * 1024 * 1024;
-const GENERATED_REPAIR_ATTEMPT_READ_MAX_ROWS = 4_096;
-const GENERATED_REPAIR_ATTEMPT_READ_LIMIT = 256;
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const GENERATED_REPAIR_FAILED_OUTCOMES = new Set<DaemonDispatchProductionOutcome>([
   'engine-failed',
@@ -341,41 +343,16 @@ function canonicalGeneratedRepairAttemptEvent(item: WorkItem, event: DispatchPro
   }
 }
 
-function readGeneratedRepairAttemptEvents(
-  item: WorkItem,
-  sinceMs: number,
-): { available: boolean; events: DispatchProductionEvent[] } {
-  try {
-    const read = readDispatchProductionEventsDetailed({
-      sinceMs: Math.max(0, sinceMs),
-      limit: GENERATED_REPAIR_ATTEMPT_READ_LIMIT,
-      maxFiles: GENERATED_REPAIR_ATTEMPT_READ_MAX_FILES,
-      maxBytes: GENERATED_REPAIR_ATTEMPT_READ_MAX_BYTES,
-      maxRows: GENERATED_REPAIR_ATTEMPT_READ_MAX_ROWS,
-    });
-    if (!read.complete || read.sourceState === 'degraded') return { available: false, events: [] };
-    return {
-      available: true,
-      events: read.events.filter((event) => canonicalGeneratedRepairAttemptEvent(item, event)),
-    };
-  } catch {
-    return { available: false, events: [] };
-  }
-}
-
 function readGeneratedRepairFailedAttempts(item: WorkItem): GeneratedRepairAttemptHistory {
   const generationIds = generatedRepairReservationFamily(item);
   if (!generationIds) return { available: false, failures: [] };
   const durable = readDispatchProductionFailureAttemptReceipts(generationIds);
   if (durable.status !== 'resolved') return { available: false, failures: [] };
-  const itemMs = Date.parse(item.ts);
-  const sinceMs = Number.isFinite(itemMs)
-    ? Math.max(itemMs, Date.now() - GENERATED_REPAIR_RECOVERY_WINDOW_MS)
-    : Date.now() - GENERATED_REPAIR_RECOVERY_WINDOW_MS;
-  const read = readGeneratedRepairAttemptEvents(item, sinceMs);
-  if (!read.available && !durable.authoritative) return { available: false, failures: [] };
+  // An inactive receipt protocol contributes no retry history. Only a degraded
+  // protocol blocks dispatch; raw observations never fill either state.
+  if (!durable.authoritative) return { available: true, failures: [] };
   const byAttempt = new Map<string, DispatchProductionEvent>();
-  for (const event of [...(read.available ? read.events : []), ...durable.receipts.map((receipt) => receipt.event)]) {
+  for (const { event } of durable.receipts) {
     if (!GENERATED_REPAIR_FAILED_OUTCOMES.has(event.outcome) || event.proposalCreated) continue;
     if (!canonicalGeneratedRepairAttemptEvent(item, event)) continue;
     const attemptId = event.trajectoryId ?? (event.runId ? `run:${event.runId}` : undefined);
@@ -981,7 +958,6 @@ function generatedRepairShouldSkip(
   }
   return workedEventIsCooling(latest, policy.cooldownMs);
 }
-const GENERATED_REPAIR_RECOVERY_MIN_ATTEMPTS = 3;
 const RESOURCE_SNAPSHOT_MAX_AGE_MS = 30_000;
 type DispatchPreflightState =
   | 'dispatchable'
@@ -1043,6 +1019,7 @@ type TickItemOutcome = { item: WorkItem; spentUsd: number; dispatched: boolean; 
 type BestOfNRunResult = Awaited<ReturnType<typeof runBestOfN>>;
 interface TickOptions {
   dryRun: boolean;
+  activationCapability?: DaemonActivationCapability;
   drain?: DaemonDrainMode;
   drainLimit?: number;
   signal?: AbortSignal;
@@ -1498,6 +1475,7 @@ function buildTickFleetStatus(
   }
 
   const proposalAuthority = tickProposalAuthority(proposalSourceQuality);
+  const killSwitch = readKillSwitch();
 
   const recentTicks = Array.isArray(state.ticks) ? state.ticks : [];
   let reportedByTicks = 0;
@@ -1510,6 +1488,11 @@ function buildTickFleetStatus(
     generatedAt: new Date().toISOString(),
     daemon: {
       running: state.running === true,
+      sourceQuality: {
+        sourceState: 'healthy',
+        complete: true,
+        reason: 'healthy',
+      },
       lastTickAt: state.lastTickAt ?? null,
       todaySpentUsd: typeof state.todaySpentUsd === 'number' ? state.todaySpentUsd : 0,
     },
@@ -1530,7 +1513,12 @@ function buildTickFleetStatus(
     merges: { recent: recentMerges, reportedByTicks, sourceQuality: proposalSourceQuality },
     autonomyControlMode: resolveAutonomyControlMode(cfg),
     ...(guardHealth !== undefined ? { guardHealth } : {}),
-    killed: false,
+    killed: killSwitch.state !== 'inactive',
+    killSwitch: {
+      state: killSwitch.state,
+      sourceState: killSwitch.sourceState,
+      reason: killSwitch.reason,
+    },
   };
 }
 
@@ -2133,11 +2121,138 @@ function candidateErrorDuplicatesProposalOutcome(
     normalizedError === normalizeBestOfNSignal(`${outcome.kind}: ${reason}`);
 }
 
+function bestOfNCandidateProduction(
+  candidate: CandidateResult,
+  authority: {
+    item: WorkItem;
+    workItemGenerationId?: string;
+    cfg: AshlrConfig;
+  },
+): {
+  production: DaemonDispatchProduction;
+  rank?: number;
+} | undefined {
+  const metadata = dispatchProductionFromProposalOutcome(candidate.proposalOutcome);
+  const diff = {
+    ...(metadata?.diffFiles !== undefined ? { diffFiles: metadata.diffFiles } : {}),
+    ...(metadata?.diffLines !== undefined ? { diffLines: metadata.diffLines } : {}),
+  };
+
+  switch (candidate.proposalDisposition?.kind) {
+    case 'verification-rejected':
+      return {
+        production: {
+          outcome: 'gate-blocked',
+          reason: 'deterministic verification rejected candidate draft',
+          ...diff,
+        },
+      };
+    case 'duplicate-owned':
+      if (!isAuthoritativeDurablePendingProposal(
+        loadProposal(candidate.proposalDisposition.proposalId),
+        {
+          id: candidate.proposalDisposition.proposalId,
+          repo: authority.item.repo,
+          origin: 'agent',
+          kind: 'patch',
+          diff: candidate.diff,
+          diffHash: candidate.proposalDisposition.diffHash,
+          workItemId: authority.item.id,
+          workItemGenerationId: authority.workItemGenerationId,
+          isPartial: candidate.proposalOutcome?.isPartial === true,
+        },
+        authority.cfg,
+      )) {
+        return {
+          production: {
+            outcome: 'proposal-capture-error',
+            proposalId: candidate.proposalDisposition.proposalId,
+            reason: 'duplicate-owned candidate lacked authoritative durable pending proposal evidence',
+            ...diff,
+          },
+          rank: 650,
+        };
+      }
+      return {
+        production: {
+          outcome: 'proposal-disabled',
+          proposalId: candidate.proposalDisposition.proposalId,
+          reason: `duplicate diff skipped; existing pending proposal ${candidate.proposalDisposition.proposalId} remains authoritative`,
+          ...diff,
+        },
+        rank: 675,
+      };
+    case 'capture-missing':
+      return {
+        production: {
+          outcome: 'proposal-capture-error',
+          reason: 'capture-missing: winning candidate diff was neither filed nor durably deduplicated',
+          ...diff,
+        },
+      };
+    default:
+      break;
+  }
+
+  if (!metadata) return undefined;
+  if (metadata.outcome !== 'proposal-created') return { production: metadata };
+  if (!candidate.proposalId || metadata.proposalId !== candidate.proposalId) {
+    return {
+      production: {
+        outcome: 'unknown',
+        reason: 'filed candidate lacked matching durable proposal identity',
+        ...diff,
+      },
+    };
+  }
+  const persisted = loadProposal(candidate.proposalId);
+  const candidateRunId = candidate.runId;
+  const candidateTrajectoryId = candidate.trajectoryId ?? (candidateRunId ? `run:${candidateRunId}` : undefined);
+  if (
+    !candidateRunId ||
+    !candidateTrajectoryId ||
+    !isAuthoritativeDurablePendingProposal(persisted, {
+      id: candidate.proposalId,
+      repo: authority.item.repo,
+      origin: 'agent',
+      kind: 'patch',
+      runId: candidateRunId,
+      trajectoryId: candidateTrajectoryId,
+      workItemId: authority.item.id,
+      workItemGenerationId: authority.workItemGenerationId,
+      isPartial: candidate.proposalOutcome?.isPartial === true,
+    }, authority.cfg)
+  ) {
+    return {
+      production: {
+        outcome: 'proposal-capture-error',
+        proposalId: candidate.proposalId,
+        reason: 'filed candidate lacked authoritative durable pending proposal evidence',
+        ...diff,
+      },
+      rank: 650,
+    };
+  }
+  return {
+    production: {
+      ...metadata,
+      runId: persisted.runId,
+      trajectoryId: persisted.trajectoryId,
+      runEventSummary: persisted.runEventSummary,
+    },
+  };
+}
+
 function bestOfNAuthoritativeNoWinnerProduction(
   result: BestOfNRunResult,
   n: number,
   runId: string,
   costUsd: number,
+  authority: {
+    item: WorkItem;
+    workItemGenerationId?: string;
+    cfg: AshlrConfig;
+  },
 ): DaemonDispatchProduction | undefined {
   const authorityRank: Record<DaemonDispatchProductionOutcome, number> = {
     'proposal-created': 700,
@@ -2155,19 +2270,35 @@ function bestOfNAuthoritativeNoWinnerProduction(
     rank: number;
     tieBreak: string;
   }> = [];
-  const addAuthority = (production: DaemonDispatchProduction, tieBreak: string): void => {
-    authorities.push({ production, rank: authorityRank[production.outcome], tieBreak });
+  const addAuthority = (
+    production: DaemonDispatchProduction,
+    tieBreak: string,
+    rank = authorityRank[production.outcome],
+  ): void => {
+    authorities.push({ production, rank, tieBreak });
   };
-  const structuredErrorAuthorities = new Map<string, DaemonDispatchProduction>();
+  const structuredErrorAuthorities = new Map<string, {
+    production: DaemonDispatchProduction;
+    candidateIndex: number;
+  }>();
 
   for (const candidate of result.candidates) {
-    const candidateProduction = dispatchProductionFromProposalOutcome(candidate.proposalOutcome);
-    if (candidateProduction) {
-      addAuthority(candidateProduction, `outcome:${candidateProduction.outcome}:${candidateProduction.reason ?? ''}`);
+    const classified = bestOfNCandidateProduction(candidate, authority);
+    const candidateProduction = classified?.production;
+    if (candidateProduction && classified) {
+      addAuthority(
+        candidateProduction,
+        `outcome:${candidateProduction.outcome}:${candidateProduction.reason ?? ''}:candidate:${String(candidate.index).padStart(8, '0')}`,
+        classified.rank,
+      );
     }
     const error = candidate.error?.trim();
     if (error && candidateProduction && candidateErrorDuplicatesProposalOutcome(error, candidate.proposalOutcome)) {
-      structuredErrorAuthorities.set(normalizeBestOfNSignal(error), candidateProduction);
+      const key = normalizeBestOfNSignal(error);
+      const existing = structuredErrorAuthorities.get(key);
+      if (!existing || candidate.index < existing.candidateIndex) {
+        structuredErrorAuthorities.set(key, { production: candidateProduction, candidateIndex: candidate.index });
+      }
     }
     if (
       error &&
@@ -2180,9 +2311,15 @@ function bestOfNAuthoritativeNoWinnerProduction(
   for (const entry of result.critique.noProposalReasons ?? []) {
     const reason = entry.reason.trim();
     if (!reason || reason === 'selection cancelled' || reason === 'cancelled') continue;
-    const structuredAuthority = structuredErrorAuthorities.get(normalizeBestOfNSignal(reason));
+    const structuredAuthority = structuredErrorAuthorities.get(normalizeBestOfNSignal(reason))?.production;
     const outcome = structuredAuthority?.outcome ?? noProposalOutcomeFromReason(reason);
-    addAuthority({ ...(structuredAuthority ?? { outcome }), reason }, `critique:${outcome}:${reason}`);
+    const authoritativeReason = structuredAuthority?.outcome === 'proposal-capture-error'
+      ? structuredAuthority.reason ?? reason
+      : reason;
+    addAuthority(
+      { ...(structuredAuthority ?? { outcome }), reason: authoritativeReason },
+      `critique:${outcome}:${authoritativeReason}`,
+    );
   }
 
   const selected = authorities.sort((left, right) =>
@@ -2192,12 +2329,16 @@ function bestOfNAuthoritativeNoWinnerProduction(
   const reason = selected.reason ?? selected.outcome;
   const failed = selected.outcome === 'engine-failed' || selected.outcome === 'sandbox-failed' ||
     selected.outcome === 'proposal-capture-error';
+  const selectedRunId = selected.runId ?? runId;
+  const selectedTrajectoryId = selected.trajectoryId ?? `run:${selectedRunId}`;
   return {
     ...selected,
-    runId,
+    runId: selectedRunId,
+    trajectoryId: selectedTrajectoryId,
     reason: boundedText(`best-of-${n}: ${reason}`, 220),
     runEventSummary: runEventSummary({
-      runId,
+      ...(selected.runEventSummary ?? {}),
+      runId: selectedRunId,
       status: failed
         ? /\b(aborted|budget)\b/i.test(reason) ? 'aborted' : 'failed'
         : 'done',
@@ -2295,6 +2436,7 @@ function dispatchProductionBasis(
 function dispatchProductionEventFromOutcome(
   value: TickItemOutcome,
   proposal: Proposal | undefined,
+  attemptId: string,
   machineId: string,
   ts: string,
   cfg: AshlrConfig,
@@ -2314,6 +2456,7 @@ function dispatchProductionEventFromOutcome(
   const eventRunSummary = runEventSummary({
     ...(trace.runEventSummary ?? {}),
     runId,
+    status: trace.runEventSummary?.status ?? dispatchProductionRunStatusForOutcome(outcome),
     outcome,
     proposalCreated,
     proposalId,
@@ -2321,6 +2464,17 @@ function dispatchProductionEventFromOutcome(
     diffLines: production?.diffLines ?? trace.runEventSummary?.diffLines,
     costUsd: value.spentUsd,
   });
+  const canonicalActionCounts = eventRunSummary?.actionCounts
+    ? (() => {
+        const {
+          proposalBlocked: _proposalBlocked,
+          proposalCreated: _proposalCreated,
+          proposalDisabled: _proposalDisabled,
+          ...counts
+        } = eventRunSummary.actionCounts;
+        return counts;
+      })()
+    : undefined;
   const learningLabel = productionAttemptLearningLabelFromSignals({
     outcome,
     proposalCreated,
@@ -2421,7 +2575,7 @@ function dispatchProductionEventFromOutcome(
       ? exactFailureReceiptLineage === null
       : exactSuccessReceiptLineage === null)
   );
-  return {
+  return materializeDispatchProductionAttemptEnvelope({
     schemaVersion: 1,
     ts,
     machineId,
@@ -2437,10 +2591,18 @@ function dispatchProductionEventFromOutcome(
     outcome,
     proposalCreated,
     ...(proposalId ? { proposalId } : {}),
+    attemptId,
     ...(runId ? { runId } : {}),
     ...(trace.trajectoryId ? { trajectoryId: trace.trajectoryId } : {}),
     ...(trace.routeSnapshot ? { routeSnapshot: trace.routeSnapshot } : {}),
-    ...(eventRunSummary ? { runEventSummary: eventRunSummary } : {}),
+    ...(eventRunSummary
+      ? {
+          runEventSummary: {
+            ...eventRunSummary,
+            ...(canonicalActionCounts ? { actionCounts: canonicalActionCounts } : {}),
+          },
+        }
+      : {}),
     ...(production?.evidenceOutcome ? { evidenceOutcome: production.evidenceOutcome } : {}),
     ...(trace.learningSource ? { learningSource: trace.learningSource } : {}),
     ...(trace.labelBasis ? { labelBasis: trace.labelBasis } : {}),
@@ -2456,7 +2618,7 @@ function dispatchProductionEventFromOutcome(
     ...(typeof production?.diffLines === 'number' ? { diffLines: production.diffLines } : {}),
     ...(production?.reason ? { reason: production.reason } : trace.skipReason ? { reason: trace.skipReason } : {}),
     basis: dispatchProductionBasis(production, proposal),
-  };
+  });
 }
 
 function agentOutcomeFromDispatchEvent(event: DispatchProductionEvent): AgentActionOutcome {
@@ -2489,7 +2651,7 @@ function agentActionFromDispatchEvent(event: DispatchProductionEvent): AgentActi
     kind: 'dispatch',
     outcome,
     action: 'daemon:dispatch',
-    summary: `${event.backend ?? 'unknown'} ${event.outcome} for ${event.title}`,
+    summary: `${event.backend ?? 'unknown'} ${event.outcome} dispatch`,
     repo: event.repo,
     itemId: event.itemId,
     source: event.source,
@@ -2514,7 +2676,7 @@ function agentActionFromDispatchEvent(event: DispatchProductionEvent): AgentActi
     backend: event.backend,
     tier: event.tier,
     ...(event.model !== undefined ? { model: event.model } : {}),
-    reason: event.reason ?? event.routeReason,
+    reason: event.reason ?? event.routeReason ?? event.outcome,
     spentUsd: event.spentUsd,
     tags: [event.source, event.outcome, event.basis],
     counts: {
@@ -2542,7 +2704,7 @@ function agentActionFromDispatchSkip(
     kind: 'dispatch',
     outcome: 'skipped',
     action: 'daemon:dispatch-skip',
-    summary: `dispatch skipped: ${boundedText(skipReason, 120)}`,
+    summary: 'dispatch skipped before engine invocation',
     repo: value.item.repo,
     itemId: value.item.id,
     source: value.item.source,
@@ -2561,7 +2723,7 @@ function agentActionFromDispatchSkip(
     tags: [
       'dispatch-skip',
       value.item.source,
-      boundedText(skipReason, 48),
+      skipReason,
       ...(isTrustedGeneratedRepairItem(value.item) ? ['generated-repair'] : []),
     ],
     counts: {
@@ -2671,9 +2833,10 @@ function dispatchTrace(
     tier: fields.tier ?? null,
     model: fields.model,
     assignedBy: fields.assignedBy,
-    reason: fields.reason,
+    reason: 'route-selected',
   });
   const runId = fields.production?.runId ?? fields.runId;
+  const trajectoryId = fields.production?.trajectoryId ?? fields.trajectoryId;
   const summary = runEventSummary({
     ...(fields.production?.runEventSummary ?? {}),
     runId,
@@ -2686,7 +2849,7 @@ function dispatchTrace(
     costUsd: fields.spentUsd ?? 0,
   });
   const causal = causalMetadata({
-    trajectoryId: fields.trajectoryId,
+    trajectoryId,
     itemId: item.id,
     proposalId: fields.production?.proposalId,
     runId,
@@ -3033,27 +3196,11 @@ async function tieredBounded<T>(
 // tick — one operator cycle
 // ---------------------------------------------------------------------------
 
-function configuredLowRepairYieldRate(cfg: AshlrConfig): number {
-  const raw = cfg.foundry?.intelligence?.minProposalYieldRate;
-  if (typeof raw !== 'number' || !Number.isFinite(raw)) return 0.2;
-  return Math.max(0, Math.min(1, raw));
-}
-
-function generatedRepairRecoveryHealthy(cfg: AshlrConfig): boolean {
-  try {
-    const read = readDispatchProductionYieldDetailed({
-      windowMs: GENERATED_REPAIR_RECOVERY_WINDOW_MS,
-      limit: 1200,
-      limitPerDimension: 1,
-    });
-    if (read.sourceQuality.sourceState !== 'healthy' || !read.sourceQuality.complete) return false;
-    const yieldSummary = read.summary;
-    const generated = yieldSummary?.generatedRepairAttempts;
-    if (!generated || generated.attempts < GENERATED_REPAIR_RECOVERY_MIN_ATTEMPTS) return false;
-    return generated.proposalRate >= Math.max(configuredLowRepairYieldRate(cfg), 0.5);
-  } catch {
-    return false;
-  }
+function generatedRepairRecoveryHealthy(_cfg: AshlrConfig): boolean {
+  // Generated-repair attempt rows and receipts are owner-writable local
+  // diagnostics. Without a writer-authenticated receipt verifier, they cannot
+  // shorten a control-plane cooldown.
+  return false;
 }
 
 function cooldownMsForSelectionItem(
@@ -3108,6 +3255,26 @@ export async function tick(
   opts: TickOptions,
 ): Promise<DaemonTick> {
   const now = new Date().toISOString();
+  const activationAccepted =
+    !opts.dryRun && isDaemonActivationCapability(opts.activationCapability);
+  if (!opts.dryRun && !activationAccepted) {
+    persistAudit({
+      action: 'daemon:activation-refused',
+      repo: null,
+      sandboxId: null,
+      summary: 'live tick refused: proposal-only activation capability missing or invalid',
+      result: 'refused',
+    });
+    return {
+      ts: now,
+      itemsConsidered: 0,
+      proposalsCreated: 0,
+      spentUsd: 0,
+      reason: 'activation-refused',
+    };
+  }
+  const proposalOnlyActivation =
+    activationAccepted && opts.activationCapability !== undefined;
   let ownershipLost = false;
   const stillOwnsTick = (): boolean => {
     if (!opts.ownerLock) return true;
@@ -3173,7 +3340,7 @@ export async function tick(
     mode: dcfg.mode,
     ...(opts.drain ? { drain: opts.drain } : {}),
   });
-  const startupTreatmentFlush = !opts.dryRun && !stopRequested()
+  const startupTreatmentFlush = !opts.dryRun && !proposalOnlyActivation && !stopRequested()
     ? flushPendingRepairTreatmentOutcomes()
     : { complete: true, publicationFailed: false };
   let repairTreatmentWitnessPersistenceFailed = !startupTreatmentFlush.complete;
@@ -3265,7 +3432,12 @@ export async function tick(
   const runAutoMergeMaintenancePass = async (
     ownershipAlreadyFenced = false,
   ): Promise<AutoMergePassResult | null> => {
-    if (directionPlan?.runAutoMergeMaintenance === false || opts.dryRun || stopRequested()) return null;
+    if (
+      proposalOnlyActivation ||
+      directionPlan?.runAutoMergeMaintenance === false ||
+      opts.dryRun ||
+      stopRequested()
+    ) return null;
     const fence = ownershipAlreadyFenced ? undefined : acquireTickMutationFence();
     if (!ownershipAlreadyFenced && opts.ownerLock && !fence) return null;
     try {
@@ -3284,7 +3456,12 @@ export async function tick(
   let remoteHandoffReconcileResult: RemoteHandoffReconcileResult | null = null;
   let remoteHandoff: DaemonTick['remoteHandoff'] | undefined;
   const runRemoteHandoffReconciliation = (): RemoteHandoffReconcileResult | null => {
-    if (opts.dryRun || stopRequested() || remoteHandoffReconcileResult !== null) return remoteHandoffReconcileResult;
+    if (
+      proposalOnlyActivation ||
+      opts.dryRun ||
+      stopRequested() ||
+      remoteHandoffReconcileResult !== null
+    ) return remoteHandoffReconcileResult;
     try {
       remoteHandoffReconcileResult = reconcileRemoteHandoffs();
       const summary = remoteHandoffTickSummary(remoteHandoffReconcileResult);
@@ -3316,6 +3493,7 @@ export async function tick(
   let producerMaintenanceSkippedByCadence = false;
   let producerMaintenanceNextAfter: string | undefined;
   const generatedRepairDispatchEnabled =
+    !proposalOnlyActivation &&
     (liveCfg.foundry as Record<string, unknown> | undefined)?.['proposalRepair'] !== false &&
     liveCfg.fleet?.sharedQueue?.mode !== 'filesystem';
   const blockedRepairKeys = new Set<string>();
@@ -3327,6 +3505,25 @@ export async function tick(
   let diagnosticResliceParentsResolved = 0;
   let diagnosticResliceParentsMissing = 0;
   const filterGeneratedRepairDispatch = (items: WorkItem[]): WorkItem[] => {
+    if (proposalOnlyActivation) {
+      const ordinarySources = new Set<WorkItem['source']>([
+        'issue',
+        'todo',
+        'test',
+        'dep',
+        'doc',
+        'security',
+        'plugin',
+        'lint',
+        'goal',
+        'hygiene',
+      ]);
+      return items.filter((item) =>
+        ordinarySources.has(item.source) &&
+        !item.tags.includes('proposal-repair') &&
+        !item.tags.includes('self-heal') &&
+        !item.tags.includes('generative'));
+    }
     const winnersByRoot = new Map<string, WorkItem>();
     for (const item of items) {
       if (!item.tags.includes('proposal-repair')) {
@@ -3543,7 +3740,7 @@ export async function tick(
     return false;
   };
   const runSelfHealMaintenance = async (targetRepos?: string[]): Promise<void> => {
-    if (opts.dryRun || stopRequested() || selfHealMaintenanceRan) return;
+    if (proposalOnlyActivation || opts.dryRun || stopRequested() || selfHealMaintenanceRan) return;
     selfHealMaintenanceRan = true;
     try {
       if (targetRepos && targetRepos.length > 0) {
@@ -3557,7 +3754,12 @@ export async function tick(
     }
   };
   const runProposalRepairMaintenance = async (): Promise<ProposalRepairWorkResult | null> => {
-    if (opts.dryRun || stopRequested() || proposalRepairMaintenanceRan) return proposalRepairMaintenanceResult;
+    if (
+      proposalOnlyActivation ||
+      opts.dryRun ||
+      stopRequested() ||
+      proposalRepairMaintenanceRan
+    ) return proposalRepairMaintenanceResult;
     if ((liveCfg.foundry as Record<string, unknown> | undefined)?.['proposalRepair'] === false) return null;
     proposalRepairMaintenanceRan = true;
     try {
@@ -3596,7 +3798,13 @@ export async function tick(
     }
   };
   const runInventMaintenance = async (): Promise<boolean> => {
-    if (opts.dryRun || stopRequested() || inventMaintenanceRan || skipInventAfterSelfHealRefill) return false;
+    if (
+      proposalOnlyActivation ||
+      opts.dryRun ||
+      stopRequested() ||
+      inventMaintenanceRan ||
+      skipInventAfterSelfHealRefill
+    ) return false;
     if (directionPlan?.forceLocalOnly === true) return false;
     if ((liveCfg.foundry as Record<string, unknown>)?.generative !== true) return false;
     inventMaintenanceRan = true;
@@ -3609,7 +3817,7 @@ export async function tick(
     }
   };
   const runAncillaryMaintenance = async (): Promise<void> => {
-    if (opts.dryRun || stopRequested() || ancillaryMaintenanceRan) return;
+    if (proposalOnlyActivation || opts.dryRun || stopRequested() || ancillaryMaintenanceRan) return;
     ancillaryMaintenanceRan = true;
 
     // M187: Counterfactual replay — low-cadence judge calibration.
@@ -4451,7 +4659,7 @@ export async function tick(
     : drainMode
       ? backlogItems.filter((item) => isDrainCandidate(item, drainMode))
       : backlogItems;
-  const rawSelectCount = daemonQueueSelectionLimit({
+  const configuredSelectCount = daemonQueueSelectionLimit({
     perTickItems: dcfg.perTickItems,
     remainingBudgetUsd: remainingBudget,
     backlogItems: selectionItems.length,
@@ -4459,6 +4667,9 @@ export async function tick(
     availableSlots: availableSlotsForSelection,
     minPerItemUsd: MIN_PER_ITEM_USD,
   });
+  const rawSelectCount = proposalOnlyActivation
+    ? Math.min(1, configuredSelectCount)
+    : configuredSelectCount;
   const drainLimit = resolveDrainLimit(liveCfg, drainMode, opts.drainLimit);
   const selectCount = !automaticDrain && typeof drainLimit === 'number'
     ? Math.min(rawSelectCount, drainLimit)
@@ -4684,6 +4895,12 @@ export async function tick(
   }
   const selectionBlockers = summarizeSelectionBlockers(selectionTelemetryItems);
   if (!stillOwnsTick()) {
+    try {
+      const claimedIds = workedSet.map((item) => item.id);
+      if (claimedIds.length > 0) coordinator.release(claimedIds, machineId);
+    } catch {
+      // Exact shared claims expire safely if best-effort shutdown release fails.
+    }
     return ownershipLostTick({ ts: now, itemsConsidered: selected.length, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });
   }
   recordQueueSelectionAgentAction({
@@ -4870,9 +5087,17 @@ export async function tick(
   };
   try {
   const initiallyRenewed = startLeaseRenewer();
-  if (workedSetIds.length > 0 && initiallyRenewed.length === 0) {
+  const expectedClaimIds = new Set(workedSetIds);
+  const renewedClaimIds = new Set(initiallyRenewed);
+  const exactInitialFence =
+    expectedClaimIds.size === workedSetIds.length &&
+    renewedClaimIds.size === initiallyRenewed.length &&
+    expectedClaimIds.size === renewedClaimIds.size &&
+    [...expectedClaimIds].every((itemId) => renewedClaimIds.has(itemId));
+  if (workedSetIds.length > 0 && !exactInitialFence) {
+    stopLeaseRenewer();
     try { coordinator.release(workedSetIds, machineId); } catch { /* exact release is best effort */ }
-    return persistenceRefusal('tick refused: shared queue claim authority unavailable after selection');
+    return persistenceRefusal('tick refused: exact shared queue claim authority unavailable after selection');
   }
 
   // M170/M186/M187/M189 live maintenance cadence. Keep it outside the spend
@@ -5099,6 +5324,7 @@ export async function tick(
       let assignedBy = 'preflight';
       let selectedModel: string | null | undefined;
       let dispatch: DaemonDispatchTrace | undefined;
+      let runTrajectoryId = `run:${attemptId}`;
 
       // M334 stage 1: observe-only gateway shadow. Runs the M247 gateway
       // BESIDE the live legacy decision and records the comparison — THE
@@ -5746,8 +5972,9 @@ export async function tick(
         // M170: best-of-N dispatch — when cfg.foundry.bestOfN > 1, generate N
         // candidates and let the critic pick the winner. Flag-off: bestOfN absent
         // or 1 → single runGoal call, byte-identical to pre-M170 behavior.
-        const bestOfN: number =
-          typeof (routingCfg.foundry as Record<string, unknown> | undefined)?.['bestOfN'] === 'number' &&
+        const bestOfN: number = proposalOnlyActivation
+          ? 1
+          : typeof (routingCfg.foundry as Record<string, unknown> | undefined)?.['bestOfN'] === 'number' &&
           ((routingCfg.foundry as Record<string, unknown>)['bestOfN'] as number) > 1
             ? Math.floor((routingCfg.foundry as Record<string, unknown>)['bestOfN'] as number)
             : 1;
@@ -5839,6 +6066,7 @@ export async function tick(
               bestOfN,
               attemptId,
               swarmSpent,
+              { item, workItemGenerationId, cfg: routingCfg },
             );
             const cancelled = authoritativeProduction === undefined &&
               (dispatchSignal.aborted === true || bestOfNWasCancelled(bonResult));
@@ -5875,6 +6103,7 @@ export async function tick(
           // Cast to the shape runGoal returns (id, status, usage).
           runState = (bonResult.winner as unknown as { state: Awaited<ReturnType<typeof runGoal>> }).state
             ?? { id: bonResult.winner.proposalId ?? `bon-${Date.now()}`, status: 'done' as const, usage: undefined };
+          runTrajectoryId = bonResult.winner.trajectoryId ?? `run:${runState.id}`;
         } else {
           if (stopRequested()) return stopRequestedOutcome(item, attemptId);
           const launch = beginRejectedCaptureRecoveryDispatch(item, () => {
@@ -5917,7 +6146,7 @@ export async function tick(
                 dispatched: true,
                 spentUsd: swarmSpent,
                 runId: runState.id,
-                trajectoryId: `run:${attemptId}`,
+                trajectoryId: runTrajectoryId,
                 skipReason: 'daemon-lock-lost',
                 production: cancelledDispatchProduction(runState.id, 'daemon lock ownership lost', swarmSpent),
               }),
@@ -5966,7 +6195,7 @@ export async function tick(
                   reason: assignmentReason,
                 },
               },
-              identity: { trajectoryId: `run:${attemptId}`, runId: runState.id },
+              identity: { trajectoryId: runTrajectoryId, runId: runState.id },
               selectedAt: shadowSkillSelectedAt,
               route: {
                 backend: executedBackend,
@@ -6031,6 +6260,13 @@ export async function tick(
               proposalRequired: true,
               evidenceOutcome: runState.evidenceOutcome,
             });
+        if (fanOut && dispatchProduction) {
+          dispatchProduction = {
+            ...dispatchProduction,
+            runId: runState.id,
+            trajectoryId: runTrajectoryId,
+          };
+        }
         dispatchSkipReason = noProposalProductionReason(dispatchProduction);
 
         // M80: subscription-tier runs are not dollar-billed — count $0 toward
@@ -6061,7 +6297,7 @@ export async function tick(
               dispatched: true,
               spentUsd: swarmSpent,
               runId: runState.id,
-              trajectoryId: `run:${attemptId}`,
+              trajectoryId: runTrajectoryId,
               skipReason: 'daemon-lock-lost',
               production: cancelledDispatchProduction(runState.id, 'daemon lock ownership lost', swarmSpent),
             }),
@@ -6112,19 +6348,19 @@ export async function tick(
 	      else process.env['ASHLR_IN_SWARM'] = prevInSwarm;
 	    }
 
-	    dispatch ??= dispatchTrace(item, {
-	      backend,
-	      tier: backendTier,
-	      model: selectedModel,
-	      assignedBy,
-	      reason: assignmentReason,
-	      dispatched,
-	      spentUsd: swarmSpent,
-	      runId: attemptId,
-	      trajectoryId: `run:${attemptId}`,
-	      ...(dispatchSkipReason ? { skipReason: dispatchSkipReason } : {}),
-	      ...(dispatchProduction ? { production: dispatchProduction } : {}),
-	    });
+    dispatch ??= dispatchTrace(item, {
+      backend,
+      tier: backendTier,
+      model: selectedModel,
+      assignedBy,
+      reason: assignmentReason,
+      dispatched,
+      spentUsd: swarmSpent,
+      runId: attemptId,
+      trajectoryId: runTrajectoryId,
+      ...(dispatchSkipReason ? { skipReason: dispatchSkipReason } : {}),
+      ...(dispatchProduction ? { production: dispatchProduction } : {}),
+    });
 
     // M53: anomaly-hold — if run cost > k×p50, hold the proposal PENDING and
     // file a TuningProposal. NEVER auto-apply. This block imports NO
@@ -6468,6 +6704,7 @@ export async function tick(
     const event = dispatchProductionEventFromOutcome(
       outcome.value,
       newPendingProposalsByItemId.get(outcome.value.item.id),
+      attemptIds.get(outcome.value.item.id)!,
       machineId,
       productionCompletedAt,
       routingCfg,
@@ -6595,7 +6832,17 @@ export async function tick(
           const production = outcome.value.dispatch?.production;
           const duplicateDiff = production?.outcome === 'proposal-disabled' &&
             production.reason?.startsWith('duplicate diff skipped;') === true;
-          if (production?.runEventSummary?.status === 'aborted') continue;
+          if (production?.runEventSummary?.status === 'aborted') {
+            // A durable partial artifact remains review-only and keeps its
+            // backlog dedupe role, but its completed producer must not strand
+            // the exact shared-queue claim until lease expiry.
+            if (production.outcome === 'gate-blocked' && production.proposalId) {
+              if (!coordinator.settleClaim(outcome.value.item.id, machineId)) {
+                workedOutcomeFailedItemIds.add(outcome.value.item.id);
+              }
+            }
+            continue;
+          }
           if (production?.outcome === 'proposal-disabled' && !duplicateDiff) {
             if (!coordinator.settleClaim(outcome.value.item.id, machineId)) {
               workedOutcomeFailedItemIds.add(outcome.value.item.id);
@@ -6819,7 +7066,7 @@ export async function tick(
 
   const ownershipLostBeforeLifecycleWitnessWrites = postDispatchOwnershipLost();
   if (ownershipLostBeforeLifecycleWitnessWrites) return ownershipLostBeforeLifecycleWitnessWrites;
-  if (repairTreatmentOutcomeWitnesses.length > 0) {
+  if (!proposalOnlyActivation && repairTreatmentOutcomeWitnesses.length > 0) {
     for (const witness of repairTreatmentOutcomeWitnesses) {
       if (
         !witness.repairGenerationId ||
@@ -6837,7 +7084,7 @@ export async function tick(
   }
   const ownershipLostBeforeTreatmentFlush = postDispatchOwnershipLost();
   if (ownershipLostBeforeTreatmentFlush) return ownershipLostBeforeTreatmentFlush;
-  if (!stopRequested()) {
+  if (!proposalOnlyActivation && !stopRequested()) {
     const finalTreatmentFlush = flushPendingRepairTreatmentOutcomes();
     if (!finalTreatmentFlush.complete) repairTreatmentWitnessPersistenceFailed = true;
     if (finalTreatmentFlush.complete) {
@@ -7028,7 +7275,7 @@ export async function tick(
   // the LATEST state immediately before writing, touching ONLY lastPulseExportAt,
   // so it cannot clobber a concurrent tick's todaySpentUsd / itemsProcessed /
   // ticks accounting.
-  if (!stopRequested() && cfg.pulse?.enabled) {
+  if (!proposalOnlyActivation && !stopRequested() && cfg.pulse?.enabled) {
     trackDaemonTickEffect(
       tickRecord,
       runLegacyPulseExport(cfg, tickRecord, {
@@ -7042,7 +7289,7 @@ export async function tick(
 
   // M214: fire-and-forget tick-cost emit to Pulse OTLP — additive, never throws, no control-flow change.
   // Lazy-imported (mirrors the pulse-sync pattern) so loop.ts's static grep-guards stay intact.
-  if (!stopRequested()) {
+  if (!proposalOnlyActivation && !stopRequested()) {
     trackDaemonTickEffect(
       tickRecord,
       import('../integrations/fleet-pulse-emit.js').then(async ({ emitTickCost }) => {
@@ -7060,7 +7307,7 @@ export async function tick(
   // cfg.comms.director is absent/false — byte-identical to absent).
   // SAFETY: director is READ-ONLY god-view access in M257. No goal mutations,
   // no merge/push/apply, no bypass of any safety gate.
-  if (!stopRequested()) void (() => {
+  if (!proposalOnlyActivation && !stopRequested()) void (() => {
     try {
       const directorEnabled =
         (cfg.comms as Record<string, unknown> | undefined)?.['director'] === true;
@@ -7104,6 +7351,11 @@ export async function tick(
   } finally {
     releaseGeneratedRepairReservations();
     stopLeaseRenewer();
+    try {
+      if (workedSetIds.length > 0) coordinator.release(workedSetIds, machineId);
+    } catch {
+      // Only still-claimed generations are releasable; executing ambiguity remains durable.
+    }
   }
 }
 
@@ -7197,12 +7449,15 @@ export async function runDaemon(
   cfg: AshlrConfig,
   opts: DaemonRunOptions,
 ): Promise<DaemonState> {
+  const refusedState = (reason: string): DaemonState => ({
+    ...loadDaemonState(),
+    startRefusal: reason,
+  });
   // -------------------------------------------------------------------------
   // RE-ENTRANCY GUARD — must be the very first check.
   // -------------------------------------------------------------------------
   if (process.env['ASHLR_IN_DAEMON'] || process.env['ASHLR_IN_SWARM']) {
-    // Refuse silently — do not start; return current state unchanged.
-    return loadDaemonState();
+    return refusedState('daemon-reentrancy-guard');
   }
 
   const lockAttempt = acquireDaemonLock();
@@ -7214,7 +7469,7 @@ export async function runDaemon(
       summary: `daemon start refused: singleton lock busy${lockAttempt.owner ? ` (pid ${lockAttempt.owner.pid})` : ''}`,
       result: 'refused',
     });
-    return loadDaemonState();
+    return refusedState('daemon-singleton-lock-busy');
   }
   const daemonLock = lockAttempt.lock;
 
@@ -7228,7 +7483,7 @@ export async function runDaemon(
       summary: `daemon start refused: daemon state ${startLoadedState.reason} (${startLoadedState.error})`,
       result: 'refused',
     });
-    return loadDaemonState();
+    return refusedState(`daemon-state-${startLoadedState.reason}`);
   }
   let state = startLoadedState.state;
   if (state.running === true && typeof state.pid === 'number' && state.pid !== process.pid) {
@@ -7242,7 +7497,28 @@ export async function runDaemon(
         summary: `daemon start refused: persisted resident pid ${state.pid} is still live or cannot be disproved`,
         result: 'refused',
       });
-      return loadDaemonState();
+      return refusedState('persisted-resident-owner-not-stale');
+    }
+  }
+
+  const activation = consumeDaemonActivationPermit(cfg, opts);
+  if (!activation.authorized) {
+    releaseDaemonLock(daemonLock);
+    audit({
+      action: 'daemon:activation-refused',
+      repo: null,
+      sandboxId: null,
+      summary: `daemon start refused: ${activation.reason}`,
+      result: 'refused',
+    });
+    return refusedState(activation.reason);
+  }
+
+  if (state.running === true && typeof state.pid === 'number' && state.pid !== process.pid) {
+    const takeoverProof = staleResidentProof(state);
+    if (!takeoverProof) {
+      releaseDaemonLock(daemonLock);
+      return refusedState('persisted-resident-owner-not-stale');
     }
     audit({
       action: 'daemon:stale-state-recovered',
@@ -7256,7 +7532,7 @@ export async function runDaemon(
     const recovered = saveResidentDaemonState(daemonLock, state);
     if (!recovered.ok) {
       releaseDaemonLock(daemonLock);
-      return loadDaemonState();
+      return refusedState('stale-resident-state-recovery-failed');
     }
   }
 
@@ -7269,7 +7545,8 @@ export async function runDaemon(
   const prevInDaemon = process.env['ASHLR_IN_DAEMON'];
   process.env['ASHLR_IN_DAEMON'] = '1';
 
-  const dcfg = resolveCfg(cfg);
+  const activationCfg = activation.configSnapshot ?? cfg;
+  const dcfg = resolveCfg(activationCfg);
 
   // -------------------------------------------------------------------------
   // Mark daemon as running.
@@ -7290,7 +7567,7 @@ export async function runDaemon(
       summary: `daemon start refused: failed to persist running state (${startSave.error})`,
       result: 'refused',
     });
-    return loadDaemonState();
+    return refusedState('daemon-running-state-persistence-failed');
   }
   const daemonStartedAt = state.startedAt;
   const daemonActivityInstanceId = randomUUID();
@@ -7377,7 +7654,9 @@ export async function runDaemon(
     result: 'ok',
   });
 
-  if (!opts.dryRun) reconcilePreparedGeneratedRepairReservations();
+  if (!opts.dryRun && !activation.capability) {
+    reconcilePreparedGeneratedRepairReservations();
+  }
 
   // -------------------------------------------------------------------------
   // H5 CHANGE 1 — WIRE THE ORPHAN SWEEP (crash-leftover reclaim).
@@ -7418,6 +7697,14 @@ export async function runDaemon(
     } catch {
       // Best-effort: a preview failure must never crash daemon start.
     }
+  } else if (activation.capability) {
+    audit({
+      action: 'daemon:start',
+      repo: null,
+      sandboxId: null,
+      summary: 'proposal-only activation: orphan sweep disabled',
+      result: 'ok',
+    });
   } else if (killSwitchOn()) {
     requestShutdown();
     audit({
@@ -7449,26 +7736,32 @@ export async function runDaemon(
 
   try {
     if (opts.once) {
-      // Single-tick mode — reload full config so a manual tick picks up disk changes.
-      const liveCfg = reloadLiveConfigForDaemon(cfg);
+      // A permit is bound to the exact supplied config snapshot. Other manual
+      // one-shot runs retain the established live-reload behavior.
+      const liveCfg = activation.capability ? activationCfg : reloadLiveConfigForDaemon(cfg);
       if (killSwitchOn()) requestShutdown();
       if (!shutdown.signal.aborted && ownsDaemonLock()) {
         transitionActivity('tick');
         const tickResult = await tick(liveCfg, {
           dryRun: opts.dryRun,
+          ...(activation.capability ? { activationCapability: activation.capability } : {}),
           ...(opts.drain ? { drain: opts.drain } : {}),
           ...(opts.drainLimit ? { drainLimit: opts.drainLimit } : {}),
           signal: shutdown.signal,
           ownerLock: daemonLock,
           onOwnershipLost: requestOwnershipLoss,
         });
-        await runOwnedPulseSync(liveCfg, tickResult, daemonLock, shutdown.signal, requestOwnershipLoss);
+        if (!activation.capability) {
+          await runOwnedPulseSync(liveCfg, tickResult, daemonLock, shutdown.signal, requestOwnershipLoss);
+        }
         if (!shutdown.signal.aborted && ownsDaemonLock()) {
-          recordContextRollupAfterTick(
-            tickResult,
-            opts,
-            reloadLiveConfigForDaemon(liveCfg),
-          );
+          if (!activation.capability) {
+            recordContextRollupAfterTick(
+              tickResult,
+              opts,
+              reloadLiveConfigForDaemon(liveCfg),
+            );
+          }
         }
         if (!shutdown.signal.aborted) transitionActivity('idle');
       }
