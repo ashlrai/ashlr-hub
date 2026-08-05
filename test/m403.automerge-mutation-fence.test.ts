@@ -174,6 +174,7 @@ function spawnWorker(role: 'hold' | 'unenroll', env: Record<string, string> = {}
         ...env,
       },
       stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+      serialization: 'advanced',
     },
   );
   children.add(child);
