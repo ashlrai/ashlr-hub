@@ -34,10 +34,20 @@ import * as path from 'node:path';
 // working tree, pull already up-to-date, npm commands succeed.
 const mockSpawnSync = vi.fn();
 const mockExecFileSync = vi.fn();
+const mockServiceStatus = vi.fn();
+const mockServeServiceStatus = vi.fn();
 
 vi.mock('node:child_process', () => ({
   spawnSync: mockSpawnSync,
   execFileSync: mockExecFileSync,
+}));
+
+vi.mock('../src/core/daemon/service.js', () => ({
+  serviceStatus: (...args: unknown[]) => mockServiceStatus(...args),
+}));
+
+vi.mock('../src/cli/dashboard.js', () => ({
+  queryServeService: (...args: unknown[]) => mockServeServiceStatus(...args),
 }));
 
 // ---------------------------------------------------------------------------
@@ -164,6 +174,21 @@ let cmdUpdate: (args: string[]) => Promise<number>;
 
 beforeEach(async () => {
   mockHappyPath();
+  mockServiceStatus.mockReset();
+  mockServiceStatus.mockReturnValue({
+    registrationState: 'absent',
+    installed: false,
+    running: false,
+    platformSpec: 'launchd',
+    serviceFilePath: '/tmp/ai.ashlr.daemon.plist',
+  });
+  mockServeServiceStatus.mockReset();
+  mockServeServiceStatus.mockReturnValue({
+    registrationState: 'absent',
+    installed: false,
+    running: false,
+    plistPath: '/tmp/ai.ashlr.serve.plist',
+  });
   // Re-import each test to get a fresh module with the current mock.
   // Because of ESM module caching we import once and rely on the mock state.
   if (!cmdUpdate) {
@@ -201,6 +226,169 @@ describe('cmdUpdate — help', () => {
   it('unknown flag writes error to stderr', async () => {
     await cmdUpdate(['--bogus-flag']);
     expect(stderrBuf).toContain('unknown flag');
+  });
+});
+
+describe('cmdUpdate — installed service release gate', () => {
+  beforeEach(() => {
+    mockServiceStatus.mockReturnValue({
+      registrationState: 'present',
+      installed: true,
+      running: true,
+      platformSpec: 'launchd',
+      serviceFilePath: '/tmp/ai.ashlr.daemon.plist',
+    });
+  });
+
+  it.each([
+    ['git', ['--channel', 'git']],
+    ['npm', ['--channel', 'npm', '--yes']],
+  ] as const)('blocks the %s mutation channel before replacing code', async (_channel, args) => {
+    const code = await cmdUpdate([...args]);
+
+    expect(code).toBe(1);
+    expect(stdoutBuf).toContain('Update blocked by resident service restriction');
+    expect(stdoutBuf).toContain('could be stranded');
+    expect(stdoutBuf).toContain('No code was replaced');
+    expect(stdoutBuf).toContain('admitted one-shot workflows remain available');
+    expect(mockSpawnSync).not.toHaveBeenCalled();
+    expect(mockExecFileSync).not.toHaveBeenCalled();
+  });
+
+  it('reports the degraded installed-service gate in JSON', async () => {
+    const code = await cmdUpdate(['--channel', 'git', '--json']);
+    const parsed = JSON.parse(stdoutBuf) as Record<string, unknown>;
+
+    expect(code).toBe(1);
+    expect(parsed).toMatchObject({
+      channel: 'git',
+      updated: false,
+      blocked: true,
+      degraded: true,
+    });
+    expect(String(parsed.message)).toContain('No code was replaced');
+  });
+
+  it.each(['git', 'npm'] as const)(
+    'blocks the %s channel when registration evidence is unknown',
+    async (channel) => {
+      mockServiceStatus.mockReturnValue({
+        registrationState: 'unknown',
+        installed: false,
+        running: false,
+        runtimeState: 'unknown',
+        platformSpec: 'launchd',
+        serviceFilePath: '/tmp/ai.ashlr.daemon.plist',
+      });
+
+      const code = await cmdUpdate(['--channel', channel, ...(channel === 'npm' ? ['--yes'] : [])]);
+
+      expect(code).toBe(1);
+      expect(stdoutBuf).toContain('registration could not be proven absent');
+      expect(stdoutBuf).toContain('No code was replaced');
+      expect(mockSpawnSync).not.toHaveBeenCalled();
+      expect(mockExecFileSync).not.toHaveBeenCalled();
+    },
+  );
+
+  it('blocks a running service even if a contradictory fixture claims registration absent', async () => {
+    mockServiceStatus.mockReturnValue({
+      registrationState: 'absent',
+      installed: false,
+      running: true,
+      runtimeState: 'running',
+      platformSpec: 'systemd',
+      serviceFilePath: '/tmp/ashlr-daemon.service',
+    });
+
+    const code = await cmdUpdate(['--channel', 'git']);
+
+    expect(code).toBe(1);
+    expect(stdoutBuf).toContain('resident service is running');
+    expect(mockSpawnSync).not.toHaveBeenCalled();
+    expect(mockExecFileSync).not.toHaveBeenCalled();
+  });
+
+  it.each(['present', 'unknown'] as const)(
+    'blocks when dashboard registration is %s even if the daemon is absent',
+    async (registrationState) => {
+      mockServiceStatus.mockReturnValue({
+        registrationState: 'absent',
+        installed: false,
+        running: false,
+        platformSpec: 'launchd',
+      });
+      mockServeServiceStatus.mockReturnValue({
+        registrationState,
+        installed: registrationState === 'present',
+        running: false,
+        plistPath: '/tmp/ai.ashlr.serve.plist',
+      });
+
+      const code = await cmdUpdate(['--channel', 'git']);
+
+      expect(code).toBe(1);
+      expect(stdoutBuf).toContain(
+        registrationState === 'present'
+          ? 'resident dashboard service registration is present'
+          : 'resident dashboard service registration could not be proven absent',
+      );
+      expect(mockSpawnSync).not.toHaveBeenCalled();
+      expect(mockExecFileSync).not.toHaveBeenCalled();
+    },
+  );
+
+  it('blocks when the dashboard process is running', async () => {
+    mockServiceStatus.mockReturnValue({
+      registrationState: 'absent',
+      installed: false,
+      running: false,
+      platformSpec: 'launchd',
+    });
+    mockServeServiceStatus.mockReturnValue({
+      registrationState: 'present',
+      installed: true,
+      running: true,
+      plistPath: '/tmp/ai.ashlr.serve.plist',
+    });
+
+    const code = await cmdUpdate(['--channel', 'npm', '--yes']);
+
+    expect(code).toBe(1);
+    expect(stdoutBuf).toContain('resident dashboard service is running');
+    expect(mockSpawnSync).not.toHaveBeenCalled();
+    expect(mockExecFileSync).not.toHaveBeenCalled();
+  });
+
+  it.each(['git', 'npm'] as const)(
+    'admits the %s channel only when registration is proven absent and not running',
+    async (channel) => {
+      mockServiceStatus.mockReturnValue({
+        registrationState: 'absent',
+        installed: false,
+        running: false,
+        runtimeState: 'stopped',
+        platformSpec: channel === 'git' ? 'launchd' : 'systemd',
+      });
+
+      const code = await cmdUpdate(['--channel', channel]);
+
+      expect(code).toBe(0);
+      expect(stdoutBuf).not.toContain('Update blocked by resident service restriction');
+      expect(mockSpawnSync).toHaveBeenCalled();
+    },
+  );
+
+  it('keeps --check read-only and available for an installed service', async () => {
+    const code = await cmdUpdate(['--channel', 'git', '--check']);
+
+    expect(code).toBe(0);
+    expect(stdoutBuf).not.toContain('Update blocked by resident service restriction');
+    const mutationCalls = mockSpawnSync.mock.calls.filter(
+      (call: unknown[]) => call[0] === 'git' && Array.isArray(call[1]) && (call[1] as string[])[0] === 'pull',
+    );
+    expect(mutationCalls).toHaveLength(0);
+    expect(mockExecFileSync).not.toHaveBeenCalled();
   });
 });
 

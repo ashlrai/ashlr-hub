@@ -87,6 +87,13 @@ vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
 // Mock daemon service
 // ---------------------------------------------------------------------------
 
+vi.mock('../src/core/daemon/service-install-authority.js', () => ({
+  assertResidentServiceInstallAuthorized: vi.fn(),
+  RESIDENT_SERVICE_ONE_SHOT_GUIDANCE:
+    'No setup state was inspected or changed. Use admitted one-shot workflows such as '
+    + '`ashlr daemon start --once`; existing services support status and uninstall only.',
+}));
+
 const mockServiceStatus = vi.fn(() => ({
   installed: true,
   running: true,

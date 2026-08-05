@@ -38,7 +38,20 @@ structural ones are re-checked any time with `ashlr verify-safety` (5/5).
 | Tier or verification auto-merge | Disabled | Requires explicit `foundry.autoMerge.enabled`, configured producer or judge authority, full verification, and risk/scope/provenance gates. Policy selects protected remote PR handoff or the bounded local fallback. |
 | Evidence auto-merge | Disabled | Replaces the judge with base- and diff-bound deterministic evidence. It additionally requires signed evidence/provenance, non-empty verification, and live protected-branch policy, and permits protected remote PR handoff only. Missing or stale evidence, local fallback, self-targets, partial captures, and build/CI/manifest changes are refused. |
 | Deployment | No daemon authority | Only explicit `ashlr ship --deploy <target> --confirm` runs a deploy command. A passing pre-ship gate does not imply deployment. |
-| OS service mutation | No fleet-tick authority | Operator-invoked `ashlr setup` installs and autostarts the user service. `ashlr daemon install` does the same unless `--no-autostart` is passed. |
+| OS service mutation | Temporarily unavailable | Production install, reinstall, repair, and restart fail closed before service or config mutation. Existing services retain read-only status and explicit uninstall; admitted one-shot workflows remain available. |
+
+Both git and npm update channels also fail before replacing code unless service
+registration is proven `absent` and the service is not running. Status combines
+the expected service file with native launchd, systemd, or Task Scheduler
+evidence: native presence remains `present` even if the file is missing, while
+ambiguous or failed manager evidence is `unknown`. Present, unknown, or running
+states could strand a resident process and therefore block. `ashlr update
+--check` remains read-only and available; the block reports degraded state and
+explicitly confirms that no code was replaced.
+
+`ashlr setup` and exported setup-wizard callers refuse before config, identity,
+editor, symlink, genome, checkpoint, enrollment, or service work. The refusal is
+nonzero/`ready:false` and points only to admitted one-shot execution.
 
 No authority is transitive across these rows: proposal approval or merge evidence
 does not grant deployment or service-install permission. Missing authority fails

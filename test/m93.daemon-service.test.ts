@@ -60,6 +60,10 @@ vi.mock('../src/core/util/durability.js', () => ({
   fsyncDirectory: vi.fn(),
 }));
 
+vi.mock('../src/core/daemon/service-install-authority.js', () => ({
+  assertResidentServiceInstallAuthorized: vi.fn(),
+}));
+
 import * as cp from 'node:child_process';
 import {
   ensureRunning,
@@ -608,7 +612,7 @@ describe('generateServiceDefinition — win32 (schtasks)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 4. install() — child_process mock assertions
+// 4. install transaction — child_process mock assertions
 // ---------------------------------------------------------------------------
 
 describe('install() — mocked spawnSync', () => {
@@ -1386,6 +1390,7 @@ describe('serviceStatus() — mocked OS query output', () => {
     FAKE_NODE, FAKE_BIN, 'daemon', 'start', '--budget', '5',
     '--interval', '1800000', '--parallel', '1',
   ];
+  const systemdFile = path.join(FAKE_HOME, '.config', 'systemd', 'user', 'ashlr-daemon.service');
   const launchdPrint = (state: string, pid?: number): string => `${[
     `${launchdTarget} = {`,
     `\tpath = ${launchdPlist}`,
@@ -1397,6 +1402,24 @@ describe('serviceStatus() — mocked OS query output', () => {
     ...(pid === undefined ? [] : [`\tpid = ${pid}`]),
     '}',
   ].join('\n')}\n`;
+  const mockSystemdState = (state: 'active' | 'inactive' | 'absent'): void => {
+    spawnSyncMock.mockImplementation((_cmd: string, args: string[]) => {
+      if (args.includes('is-active')) {
+        return state === 'active'
+          ? { status: 0, stdout: 'active\n', stderr: '' }
+          : { status: 3, stdout: 'inactive\n', stderr: '' };
+      }
+      if (args.includes('is-enabled')) {
+        return state === 'absent'
+          ? { status: 1, stdout: 'not-found\n', stderr: '' }
+          : { status: 0, stdout: 'enabled\n', stderr: '' };
+      }
+      if (args.includes('--property=FragmentPath')) {
+        return { status: 0, stdout: `${systemdFile}\n`, stderr: '' };
+      }
+      return { status: 1, stdout: '', stderr: 'unexpected systemctl query' };
+    });
+  };
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -1414,6 +1437,7 @@ describe('serviceStatus() — mocked OS query output', () => {
     expect(s.running).toBe(true);
     expect(s.runtimeState).toBe('running');
     expect(s.platformSpec).toBe('launchd');
+    expect(s.registrationState).toBe('present');
   });
 
   it('darwin: runtime is unknown when native running state has PID zero', () => {
@@ -1427,6 +1451,23 @@ describe('serviceStatus() — mocked OS query output', () => {
     expect(s.running).toBe(false);
     expect(s.runtimeState).toBe('unknown');
     expect(s.platformSpec).toBe('launchd');
+    expect(s.registrationState).toBe('present');
+  });
+
+  it('darwin: definition mismatch preserves native registration presence', () => {
+    existsSyncMock.mockReturnValue(false);
+    spawnSyncMock.mockReturnValue({
+      status: 0,
+      stdout: launchdPrint('waiting').replace(`path = ${launchdPlist}`, 'path = /tmp/untrusted.plist'),
+      stderr: '',
+    });
+
+    expect(serviceStatus(baseOpts('darwin'))).toMatchObject({
+      registrationState: 'present',
+      installed: true,
+      running: false,
+      runtimeState: 'unknown',
+    });
   });
 
   it('darwin: exact loaded waiting state is ready without being running', () => {
@@ -1440,6 +1481,7 @@ describe('serviceStatus() — mocked OS query output', () => {
     expect(s.running).toBe(false);
     expect(s.runtimeState).toBe('ready');
     expect(s.platformSpec).toBe('launchd');
+    expect(s.registrationState).toBe('present');
   });
 
   it('darwin: proven absent launchd job is stopped', () => {
@@ -1449,22 +1491,70 @@ describe('serviceStatus() — mocked OS query output', () => {
     expect(s.running).toBe(false);
     expect(s.installed).toBe(false);
     expect(s.runtimeState).toBe('stopped');
+    expect(s.registrationState).toBe('absent');
+  });
+
+  it('darwin: missing expected file does not hide native registration', () => {
+    existsSyncMock.mockReturnValue(false);
+    spawnSyncMock.mockReturnValue({ status: 0, stdout: launchdPrint('waiting'), stderr: '' });
+
+    expect(serviceStatus(baseOpts('darwin'))).toMatchObject({
+      registrationState: 'present',
+      installed: true,
+      running: false,
+    });
   });
 
   it('linux: running=true when systemctl is-active returns "active"', () => {
     existsSyncMock.mockReturnValue(true);
-    spawnSyncMock.mockReturnValue({ status: 0, stdout: 'active\n', stderr: '' });
+    mockSystemdState('active');
     const s = serviceStatus(baseOpts('linux'));
     expect(s.running).toBe(true);
     expect(s.platformSpec).toBe('systemd');
+    expect(s.registrationState).toBe('present');
   });
 
   it('linux: running=false when systemctl is-active returns "inactive"', () => {
     existsSyncMock.mockReturnValue(true);
-    spawnSyncMock.mockReturnValue({ status: 3, stdout: 'inactive\n', stderr: '' });
+    mockSystemdState('inactive');
     const s = serviceStatus(baseOpts('linux'));
     expect(s.running).toBe(false);
     expect(s.platformSpec).toBe('systemd');
+    expect(s.registrationState).toBe('present');
+  });
+
+  it('linux: missing expected file does not hide native registration', () => {
+    existsSyncMock.mockReturnValue(false);
+    mockSystemdState('inactive');
+
+    expect(serviceStatus(baseOpts('linux'))).toMatchObject({
+      registrationState: 'present',
+      installed: true,
+      running: false,
+    });
+  });
+
+  it('linux: missing file plus native absence is proven absent', () => {
+    existsSyncMock.mockReturnValue(false);
+    mockSystemdState('absent');
+
+    expect(serviceStatus(baseOpts('linux'))).toMatchObject({
+      registrationState: 'absent',
+      installed: false,
+      running: false,
+    });
+  });
+
+  it('linux: missing file plus ambiguous manager evidence is unknown', () => {
+    existsSyncMock.mockReturnValue(false);
+    spawnSyncMock.mockReturnValue({ status: 1, stdout: '', stderr: 'manager unavailable' });
+
+    expect(serviceStatus(baseOpts('linux'))).toMatchObject({
+      registrationState: 'unknown',
+      installed: false,
+      running: false,
+      runtimeState: 'unknown',
+    });
   });
 
   it('win32: Ready means registered but not running', () => {
@@ -1477,6 +1567,29 @@ describe('serviceStatus() — mocked OS query output', () => {
     const s = serviceStatus(baseOpts('win32'));
     expect(s.running).toBe(false);
     expect(s.platformSpec).toBe('schtasks');
+    expect(s.registrationState).toBe('present');
+  });
+
+  it('win32: missing expected file does not hide native registration', () => {
+    existsSyncMock.mockReturnValue(false);
+    spawnSyncMock.mockReturnValue({ status: 0, stdout: '3', stderr: '' });
+
+    expect(serviceStatus(baseOpts('win32'))).toMatchObject({
+      registrationState: 'present',
+      installed: true,
+      running: false,
+    });
+  });
+
+  it('win32: missing file plus native absence is proven absent', () => {
+    existsSyncMock.mockReturnValue(false);
+    spawnSyncMock.mockReturnValue({ status: 0, stdout: 'absent', stderr: '' });
+
+    expect(serviceStatus(baseOpts('win32'))).toMatchObject({
+      registrationState: 'absent',
+      installed: false,
+      running: false,
+    });
   });
 
   it('win32: Running preserves scheduler activity without claiming daemon liveness', () => {
@@ -1508,7 +1621,11 @@ describe('serviceStatus() — mocked OS query output', () => {
   it.each(['0', 'Running', '3\n4', '', '5'])('win32: malformed or unknown authority is distinct (%s)', (stdout) => {
     existsSyncMock.mockReturnValue(true);
     spawnSyncMock.mockReturnValue({ status: 0, stdout, stderr: '' });
-    expect(serviceStatus(baseOpts('win32'))).toMatchObject({ running: false, runtimeState: 'unknown' });
+    expect(serviceStatus(baseOpts('win32'))).toMatchObject({
+      registrationState: 'unknown',
+      running: false,
+      runtimeState: 'unknown',
+    });
   });
 
   it('win32: runtime is unknown when the PowerShell authority exits non-zero', () => {
@@ -1518,6 +1635,7 @@ describe('serviceStatus() — mocked OS query output', () => {
     expect(s.running).toBe(false);
     expect(s.runtimeState).toBe('unknown');
     expect(s.installed).toBe(false);
+    expect(s.registrationState).toBe('unknown');
   });
 
   it('never throws when spawnSync throws', () => {
@@ -1807,7 +1925,19 @@ describe('ensureRunning() — mocked OS activation', () => {
   it('linux: starts an inactive installed user unit', async () => {
     spawnSyncMock
       .mockReturnValueOnce({ status: 3, stdout: 'inactive\n', stderr: '' })
+      .mockReturnValueOnce({ status: 1, stdout: 'disabled\n', stderr: '' })
+      .mockReturnValueOnce({
+        status: 0,
+        stdout: `${path.join(FAKE_HOME, '.config', 'systemd', 'user', 'ashlr-daemon.service')}\n`,
+        stderr: '',
+      })
       .mockReturnValueOnce({ status: 3, stdout: 'inactive\n', stderr: '' })
+      .mockReturnValueOnce({ status: 1, stdout: 'disabled\n', stderr: '' })
+      .mockReturnValueOnce({
+        status: 0,
+        stdout: `${path.join(FAKE_HOME, '.config', 'systemd', 'user', 'ashlr-daemon.service')}\n`,
+        stderr: '',
+      })
       .mockReturnValueOnce({ status: 3, stdout: 'inactive\n', stderr: '' })
       .mockReturnValueOnce({ status: 1, stdout: 'disabled\n', stderr: '' })
       .mockReturnValueOnce({
@@ -1816,7 +1946,13 @@ describe('ensureRunning() — mocked OS activation', () => {
         stderr: '',
       })
       .mockReturnValueOnce({ status: 0, stdout: '', stderr: '' })
-      .mockReturnValueOnce({ status: 0, stdout: 'active\n', stderr: '' });
+      .mockReturnValueOnce({ status: 0, stdout: 'active\n', stderr: '' })
+      .mockReturnValueOnce({ status: 0, stdout: 'enabled\n', stderr: '' })
+      .mockReturnValueOnce({
+        status: 0,
+        stdout: `${path.join(FAKE_HOME, '.config', 'systemd', 'user', 'ashlr-daemon.service')}\n`,
+        stderr: '',
+      });
 
     const status = await ensureRunning(baseOpts('linux'));
 

@@ -25,6 +25,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as durability from '../src/core/util/durability.js';
 
+vi.mock('../src/core/daemon/service-install-authority.js', () => ({
+  assertResidentServiceInstallAuthorized: vi.fn(),
+}));
+
 // ---------------------------------------------------------------------------
 // HOME isolation
 // ---------------------------------------------------------------------------
