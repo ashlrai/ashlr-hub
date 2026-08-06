@@ -40,7 +40,7 @@ import type {
 import type { ResourceStrategyReport } from '../autonomy/resource-strategy.js';
 import { goalFocusSnapshot } from '../goals/focus.js';
 import { createProposalMilestoneCompletionPredicate } from '../goals/completion.js';
-import { listGoals } from '../goals/store.js';
+import { listGoalsDetailed, type ListGoalsDetailedResult } from '../goals/store.js';
 import {
   listAttemptRecords,
   summarizeAttemptCoverage,
@@ -135,7 +135,12 @@ import {
   buildContextEfficiencyStatus,
   type FleetContextEfficiencyStatus,
 } from './context-efficiency.js';
-import { buildFleetLaneLocks, type FleetLaneLocksStatus } from './lane-lock.js';
+import {
+  buildFleetLaneLocks,
+  type FleetLaneLocksStatus,
+  type FleetLaneLockSourceQualityPart,
+  type FleetLaneLockSourceReason,
+} from './lane-lock.js';
 import { isTrustedGeneratedRepairItem } from './self-heal-trust.js';
 import { defaultBranch } from '../git.js';
 import {
@@ -718,7 +723,7 @@ async function readSkillCorpusReadiness(
 
 export interface FleetReadinessSourceHealth {
   id:
-    | 'daemon' | 'guard' | 'auto-merge' | 'queue' | 'resources' | 'direction' | 'phantom'
+    | 'daemon' | 'guard' | 'auto-merge' | 'queue' | 'lane-locks' | 'resources' | 'direction' | 'phantom'
     | 'decisions' | 'judge-traces' | 'agent-actions' | 'dispatch-production'
     | 'dispatch-manifests' | 'best-of-n' | 'post-merge' | 'autonomy-packs';
   label: string;
@@ -2410,6 +2415,81 @@ export async function readFleetDaemonStatus(): Promise<FleetDaemonStatusRead> {
  * Build a read-only snapshot of the fleet. Async because the backlog scan is
  * async. NEVER throws — each source is independently guarded.
  */
+function laneGoalSourceQuality(read: ListGoalsDetailedResult): FleetLaneLockSourceQualityPart {
+  const reasons: FleetLaneLockSourceReason[] = [];
+  if (!read.complete) reasons.push('goals-incomplete');
+  if (read.unreadableFiles > 0) reasons.push('goals-unreadable');
+  if (read.limitExceeded) reasons.push('goals-limit-exceeded');
+  const complete = read.complete && read.unreadableFiles === 0 && !read.limitExceeded;
+  return {
+    // The goal store defines an absent directory as an authoritative empty read.
+    sourceState: complete ? 'healthy' : 'degraded',
+    complete,
+    reasons,
+  };
+}
+
+function laneEnrollmentSourceQuality(
+  state: 'ready' | 'degraded',
+): FleetLaneLockSourceQualityPart {
+  return state === 'ready'
+    ? { sourceState: 'healthy', complete: true, reasons: [] }
+    : { sourceState: 'degraded', complete: false, reasons: ['enrollment-degraded'] };
+}
+
+function laneProposalSourceQuality(
+  read: NonNullable<FleetStatus['proposals']['sourceQuality']>,
+): FleetLaneLockSourceQualityPart {
+  const reasons: FleetLaneLockSourceReason[] = [];
+  if (!read.complete) reasons.push('proposals-incomplete');
+  if (read.invalidFiles > 0) reasons.push('proposals-invalid');
+  if (read.unreadableFiles > 0) reasons.push('proposals-unreadable');
+  if (read.stopReasons.some((reason) => reason.includes('limit'))) reasons.push('proposals-limit-exceeded');
+  const complete = read.complete && read.invalidFiles === 0 && read.unreadableFiles === 0 &&
+    !read.stopReasons.some((reason) => reason.includes('limit'));
+  return {
+    // The inbox store also defines an absent directory as an authoritative empty read.
+    sourceState: complete ? 'healthy' : 'degraded',
+    complete,
+    reasons,
+  };
+}
+
+function laneQueueSourceQuality(
+  status: FleetReadinessSourceStatus,
+  sources: FleetStatus['queue']['sources'],
+  enrollmentState: 'ready' | 'degraded',
+  enrolledRepoCount: number,
+): FleetLaneLockSourceQualityPart {
+  if (enrollmentState === 'degraded') {
+    return {
+      sourceState: 'degraded',
+      complete: false,
+      reasons: ['queue-incomplete', 'queue-unavailable'],
+    };
+  }
+  if (enrolledRepoCount === 0) {
+    return { sourceState: 'healthy', complete: true, reasons: [] };
+  }
+  const reasons: FleetLaneLockSourceReason[] = [];
+  const parts = sources ? [sources.cachedBacklog, sources.queuedAutonomy] : [];
+  if (parts.length === 0 || parts.some((part) => part.sourceState === 'missing')) reasons.push('queue-missing');
+  if (status === 'degraded') reasons.push('queue-incomplete');
+  if (parts.some((part) => part.sourceState === 'unavailable')) reasons.push('queue-unavailable');
+  if (parts.some((part) => part.freshness === 'stale')) reasons.push('queue-stale');
+  const sourceState: FleetLaneLockSourceQualityPart['sourceState'] =
+    status === 'degraded' || reasons.includes('queue-unavailable') || reasons.includes('queue-stale')
+      ? 'degraded'
+      : status === 'healthy' && !reasons.includes('queue-missing')
+        ? 'healthy'
+        : 'missing';
+  return {
+    sourceState,
+    complete: sourceState === 'healthy',
+    reasons,
+  };
+}
+
 export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   const generatedAt = new Date().toISOString();
   let dispatchLearningEvents: DispatchProductionEvent[] | undefined;
@@ -2985,16 +3065,18 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   }
 
   let goalFocus: FleetGoalFocusStatus | undefined;
-  let goalLaneCandidates: ReturnType<typeof listGoals> = [];
+  let goalRead: ListGoalsDetailedResult = {
+    goals: [],
+    sourceState: 'degraded',
+    sourcePresent: false,
+    complete: false,
+    scannedFiles: 0,
+    unreadableFiles: 0,
+    limitExceeded: false,
+  };
   try {
-    const activeGoals = listGoals({ status: 'active' });
-    const planningGoals = listGoals({ status: 'planning' });
-    const seen = new Set(activeGoals.map((goal) => goal.id));
-    const goals = [
-      ...activeGoals,
-      ...planningGoals.filter((goal) => !seen.has(goal.id)),
-    ];
-    goalLaneCandidates = goals;
+    goalRead = listGoalsDetailed();
+    const goals = goalRead.goals.filter((goal) => goal.status === 'active' || goal.status === 'planning');
     const snapshot = goalFocusSnapshot(goals, cfg, {
       repos: enrolledExistingRepos,
       isMilestoneComplete: createProposalMilestoneCompletionPredicate(),
@@ -3016,11 +3098,8 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
 
   let laneLocks: FleetLaneLocksStatus | undefined;
   try {
-    if (goalLaneCandidates.length === 0) {
-      goalLaneCandidates = listGoals({ status: 'active' });
-    }
     const enrolledRepoSet = new Set(enrolledExistingRepos);
-    const laneGoals = goalLaneCandidates.filter(
+    const laneGoals = goalRead.goals.filter(
       (goal) => goal.project !== null && enrolledRepoSet.has(resolve(goal.project)),
     );
     const laneProposals = allProposals.filter(
@@ -3031,9 +3110,31 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       proposals: laneProposals,
       visibleQueueItems,
       generatedAt,
+      sourceQuality: {
+        enrollment: laneEnrollmentSourceQuality(enrollmentRegistry.state),
+        goals: laneGoalSourceQuality(goalRead),
+        proposals: laneProposalSourceQuality(proposalSourceQuality),
+        queue: laneQueueSourceQuality(
+          queueSourceStatus,
+          queueInventorySources,
+          enrollmentRegistry.state,
+          enrolledExistingRepos.length,
+        ),
+      },
     });
   } catch {
-    laneLocks = undefined;
+    laneLocks = buildFleetLaneLocks({
+      goals: [],
+      proposals: [],
+      visibleQueueItems: [],
+      generatedAt,
+      sourceQuality: {
+        enrollment: { sourceState: 'degraded', complete: false, reasons: ['enrollment-degraded'] },
+        goals: { sourceState: 'degraded', complete: false, reasons: ['goals-incomplete'] },
+        proposals: { sourceState: 'degraded', complete: false, reasons: ['proposals-incomplete'] },
+        queue: { sourceState: 'degraded', complete: false, reasons: ['queue-unavailable'] },
+      },
+    });
   }
 
   const phantom = await buildFleetPhantomStatus(cfg);
@@ -6212,6 +6313,42 @@ function shipReadinessSources(
     },
   );
 
+  const laneLocks = status.laneLocks;
+  const laneQuality = laneLocks?.sourceQuality;
+  const laneSource = laneLocks
+    ? readinessSource(
+        'lane-locks',
+        'Autonomy Lanes',
+        laneLocks.unverifiedApplied > 0
+          ? 'blocked'
+          : laneQuality?.sourceState === 'healthy' && laneQuality.complete
+            ? 'healthy'
+            : laneQuality?.sourceState === 'degraded'
+              ? 'degraded'
+              : 'unavailable',
+        laneLocks.generatedAt,
+        READINESS_STATUS_STALE_MS,
+        laneLocks.unverifiedApplied > 0
+          ? `${laneLocks.unverifiedApplied} applied proposal(s) lack verification`
+          : laneQuality?.sourceState === 'healthy' && laneQuality.complete
+            ? `${laneLocks.active} active lane(s); no unverified applied work`
+            : `autonomy lane evidence is incomplete (${laneQuality?.reasons.join(', ') || 'source unavailable'})`,
+        {
+          empty: laneLocks.active === 0 && laneLocks.awaitingHostMerge === 0 && laneLocks.unverifiedApplied === 0,
+          sourcePresent: laneQuality !== undefined && laneQuality.sourceState !== 'missing',
+          sourceDegraded: laneQuality?.sourceState !== 'healthy' || laneQuality.complete !== true,
+        },
+      )
+    : readinessSource(
+        'lane-locks',
+        'Autonomy Lanes',
+        'unavailable',
+        null,
+        READINESS_STATUS_STALE_MS,
+        'autonomy lane evidence is unavailable',
+        { sourcePresent: false },
+      );
+
   const resourcesSource = resourceReadinessSource(status, inputs.generatedAt);
 
   const direction = status.autonomyDirection;
@@ -6244,6 +6381,7 @@ function shipReadinessSources(
     guardSource,
     autoMergeSource,
     queueSource,
+    laneSource,
     resourcesSource,
     directionSource,
     ...(phantomSource ? [phantomSource] : []),
@@ -6469,6 +6607,15 @@ function chooseReadinessBlocker(
       `${status.proposals.awaitingHostMerge} proposal(s) are waiting for host merge reconciliation.`,
       'high',
       'auto-merge',
+    );
+  }
+  if ((status.laneLocks?.unverifiedApplied ?? 0) > 0) {
+    return readinessBlocker(
+      'unverified-applied-work',
+      'Applied work lacks verification',
+      `${status.laneLocks!.unverifiedApplied} applied proposal(s) are recent or goal-linked but lack verification.`,
+      'high',
+      'lane-locks',
     );
   }
   const phantomAudit = phantomAuditSignalSummary(status.phantom?.agentReport);

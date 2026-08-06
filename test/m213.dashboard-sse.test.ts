@@ -1704,7 +1704,9 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain('const sources = Array.isArray(readiness.sources) ? readiness.sources : []');
     expect(src).toContain('source?.sourceQuality?.badge === badge');
     expect(src).toContain('function fdReadinessDataTitle');
-    expect(src).toContain("fdMetricPill('Data', fdReadinessDataText(readiness), fdReadinessDataTitle(readiness))");
+    expect(src).toContain('function fdReadinessDataPill');
+    expect(src).toContain('fdReadinessDataPill(readiness)');
+    expect(src).toContain("el('summary', {}, 'Source detail')");
     expect(src).toContain("qualityParts.length > 0 ? qualityParts.join(' / ') : 'healthy sources'");
     expect(src).toContain('const briefDetail = missionBrief?.whyNow ?? primaryAction?.detail ?? actionLabel');
     expect(src).toContain('const actionDetail = primaryAction?.detail ?? briefDetail');
@@ -1713,6 +1715,8 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(css).toContain('.fleet-command-rail');
     expect(css).toContain('.fleet-command-safety--autonomous-dispatch');
     expect(css).toContain('grid-template-columns: repeat(2, minmax(0, 1fr))');
+    expect(css).toContain('.fd-readiness-pill--data .fd-readiness-pill__value');
+    expect(css).toContain('white-space: pre-line');
   });
 
   it('app.js keeps readiness data-quality counts distinct from healthy zero', () => {
@@ -1811,7 +1815,7 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain("['Activation', 'disabled']");
     expect(src).toContain('f.autoMergeCanaryPromotionReadiness');
     expect(src).toContain('fleet.autoMergeCanaryPromotionReadiness ?? null');
-    expect(src).toContain("fdMetricPill(\n          'Canary promotion'");
+    expect(src).toMatch(/fdMetricPill\(\s*'Canary promotion'/);
     expect(src).not.toContain('activateAutoMergeCanaryPromotion');
   });
 
@@ -1922,6 +1926,443 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(css).toContain('.fd-lease-samples');
     expect(css).toContain('.fd-lease-active-ids');
     expect(css).toContain('text-overflow: ellipsis');
+  });
+
+  it('renders one bounded read-only Autonomy Lane Board in Fleet Dashboard and Mission Control', () => {
+    const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public');
+    const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
+    const css = fs.readFileSync(path.join(root, 'styles.css'), 'utf8');
+
+    expect(src).toContain('function renderAutonomyLaneBoard');
+    expect(src).toContain('laneLocks.samples.slice(0, 8)');
+    expect(src).toContain('body.appendChild(rows)');
+    expect(src).toContain("el('span', { cls: 'autonomy-lane-board__eyebrow' }, 'Autonomy Lanes')");
+    expect(src).toContain("state === 'healthy' ? 'No occupied autonomy lanes.'");
+    expect(src).toContain('Lane counts are observed from partial sources');
+    expect(src).toContain('Lane data unavailable');
+    expect(src).toContain("shell: 'ashlr fleet status --json'");
+    expect(src).toContain("shell: 'ashlr goals list --json'");
+    expect(src).toContain("shell: 'ashlr inbox --json'");
+    expect(src).toContain("fleet-command-safety--read-only");
+    expect(src).not.toContain('autonomyLaneBoardMutation');
+
+    const laneHelpersStart = src.indexOf('function laneLockSourceState(laneLocks, sourceNames)');
+    const displayStateStart = src.indexOf('function laneLockDisplayState(laneLocks)');
+    const displayStateEnd = src.indexOf('function laneLockStateLabel(reason)', displayStateStart);
+    const displayHelpers = new Function(
+      `${src.slice(laneHelpersStart, displayStateEnd)}\nreturn { laneLockDisplayState, laneLockMetricObservations, laneLockMetricText, laneLockOccupiedObservation };`,
+    )() as {
+      laneLockDisplayState: (laneLocks: Record<string, unknown> | null) => string;
+      laneLockMetricObservations: (laneLocks: Record<string, unknown> | null) => Record<string, { state: string; value: number | null }>;
+      laneLockMetricText: (metric: { state: string; value: number | null }, label: string) => string;
+      laneLockOccupiedObservation: (laneLocks: Record<string, unknown> | null) => { state: string; value: number | null };
+    };
+    const displayState = displayHelpers.laneLockDisplayState;
+    const counts = { active: 0, staleInProgress: 0, awaitingHostMerge: 0, unverifiedApplied: 0 };
+    const healthySources = {
+      enrollment: { sourceState: 'healthy', complete: true },
+      goals: { sourceState: 'healthy', complete: true },
+      proposals: { sourceState: 'healthy', complete: true },
+      queue: { sourceState: 'healthy', complete: true },
+    };
+    expect(displayState({ sourceQuality: { sourceState: 'missing', complete: false } })).toBe('unknown');
+    expect(displayState({
+      ...counts,
+      sourceQuality: {
+        sourceState: 'degraded',
+        complete: false,
+        sources: { ...healthySources, goals: { sourceState: 'missing', complete: false } },
+      },
+    })).toBe('degraded');
+    expect(displayState({
+      ...counts,
+      sourceQuality: { sourceState: 'healthy', complete: false, sources: healthySources },
+    })).toBe('degraded');
+    expect(displayState({
+      ...counts,
+      sourceQuality: { sourceState: 'healthy', complete: true, sources: healthySources },
+    })).toBe('healthy');
+    expect(displayState({
+      ...counts,
+      sourceQuality: { sourceState: 'healthy', complete: true },
+    })).toBe('unknown');
+    expect(displayState({
+      staleInProgress: 0,
+      awaitingHostMerge: 0,
+      unverifiedApplied: 0,
+      sourceQuality: { sourceState: 'healthy', complete: true, sources: healthySources },
+    })).toBe('unknown');
+
+    const metricStart = src.indexOf('function laneLocksMetric(laneLocks)');
+    const laneMetricSource = src.slice(metricStart, displayStateEnd);
+    const metricHelpers = new Function(
+      `${laneMetricSource}\nreturn { laneLocksMetric, laneLockDisplayState };`,
+    )() as { laneLocksMetric: (laneLocks: Record<string, unknown> | null) => string | null };
+    expect(metricHelpers.laneLocksMetric({
+      ...counts,
+      sourceQuality: {
+        sourceState: 'degraded',
+        complete: false,
+        sources: { ...healthySources, queue: { sourceState: 'missing', complete: false } },
+      },
+    })).toBe('0 active / 0 stale / 0 handoff / 0 unverified');
+    expect(metricHelpers.laneLocksMetric({
+      ...counts,
+      active: 2,
+      sourceQuality: {
+        sourceState: 'degraded',
+        complete: false,
+        sources: { ...healthySources, queue: { sourceState: 'degraded', complete: false } },
+      },
+    })).toBe('2 active / 0 stale / 0 handoff / 0 unverified');
+
+    const sourceMatrix = [
+      {
+        name: 'degraded enrollment',
+        quality: {
+          sourceState: 'degraded', complete: false,
+          sources: { ...healthySources, enrollment: { sourceState: 'degraded', complete: false } },
+        },
+        state: 'degraded',
+        metric: '0 active observed (partial) / 0 stale observed (partial) / ' +
+          '0 handoff observed (partial) / 0 unverified observed (partial)',
+        occupied: { state: 'degraded', value: 0 },
+      },
+      {
+        name: 'degraded goals',
+        quality: {
+          sourceState: 'degraded', complete: false,
+          sources: { ...healthySources, goals: { sourceState: 'degraded', complete: false } },
+        },
+        state: 'degraded',
+        metric: '0 active observed (partial) / 0 stale observed (partial) / 0 handoff / 0 unverified observed (partial)',
+        occupied: { state: 'degraded', value: 0 },
+      },
+      {
+        name: 'missing goals',
+        quality: {
+          sourceState: 'missing', complete: false,
+          sources: { ...healthySources, goals: { sourceState: 'missing', complete: false } },
+        },
+        state: 'degraded',
+        metric: 'active unavailable / stale unavailable / 0 handoff / unverified unavailable',
+        occupied: { state: 'unavailable', value: null },
+      },
+      {
+        name: 'degraded proposals',
+        quality: {
+          sourceState: 'degraded', complete: false,
+          sources: { ...healthySources, proposals: { sourceState: 'degraded', complete: false } },
+        },
+        state: 'degraded',
+        metric: '0 active observed (partial) / 0 stale observed (partial) / ' +
+          '0 handoff observed (partial) / 0 unverified observed (partial)',
+        occupied: { state: 'degraded', value: 0 },
+      },
+      {
+        name: 'missing proposals',
+        quality: {
+          sourceState: 'missing', complete: false,
+          sources: { ...healthySources, proposals: { sourceState: 'missing', complete: false } },
+        },
+        state: 'missing',
+        metric: 'active unavailable / stale unavailable / handoff unavailable / unverified unavailable',
+        occupied: { state: 'unavailable', value: null },
+      },
+      {
+        name: 'degraded queue only',
+        quality: {
+          sourceState: 'degraded', complete: false,
+          sources: { ...healthySources, queue: { sourceState: 'degraded', complete: false } },
+        },
+        state: 'degraded',
+        metric: '0 active / 0 stale / 0 handoff / 0 unverified',
+        occupied: { state: 'healthy', value: 0 },
+      },
+    ];
+    for (const fixture of sourceMatrix) {
+      const laneLocks = { ...counts, sourceQuality: fixture.quality };
+      expect(displayState(laneLocks), fixture.name).toBe(fixture.state);
+      expect(metricHelpers.laneLocksMetric(laneLocks), fixture.name).toBe(fixture.metric);
+      expect(displayHelpers.laneLockOccupiedObservation(laneLocks), fixture.name).toEqual(fixture.occupied);
+    }
+
+    const compactSummaryStart = src.indexOf('function laneBoardCompactSummary(laneLocks)');
+    const compactSummaryEnd = src.indexOf('function laneBoardCompactViewport()', compactSummaryStart);
+    const compactSummary = new Function(
+      `${src.slice(laneHelpersStart, displayStateEnd)}\n${src.slice(compactSummaryStart, compactSummaryEnd)}\nreturn laneBoardCompactSummary;`,
+    )() as (laneLocks: Record<string, unknown> | null) => string;
+    expect(compactSummary({
+      active: 0,
+      staleInProgress: 0,
+      awaitingHostMerge: 0,
+      unverifiedApplied: 0,
+      sourceQuality: { sourceState: 'missing', complete: false },
+    })).toBe('Lanes Unavailable');
+    expect(compactSummary({
+      active: 2,
+      staleInProgress: 0,
+      awaitingHostMerge: 1,
+      unverifiedApplied: 0,
+      sourceQuality: {
+        sourceState: 'degraded',
+        complete: false,
+        sources: { ...healthySources, queue: { sourceState: 'degraded', complete: false } },
+      },
+    })).toBe('Lanes Partial · 3');
+
+    const laneRenderStart = src.indexOf('function renderAutonomyLaneBoard');
+    const laneRenderEnd = src.indexOf('function autonomyAuthorityState', laneRenderStart);
+    const laneRenderSource = src.slice(laneRenderStart, laneRenderEnd);
+    const laneActionIndex = laneRenderSource.indexOf("cls: 'autonomy-lane-board__action'");
+    const laneMetricsIndex = laneRenderSource.indexOf("cls: 'autonomy-lane-board__metrics'");
+    const laneRowsIndex = laneRenderSource.indexOf("cls: 'autonomy-lane-board__rows'");
+    expect(laneActionIndex).toBeGreaterThanOrEqual(0);
+    expect(laneMetricsIndex).toBeGreaterThan(laneActionIndex);
+    expect(laneRowsIndex).toBeGreaterThan(laneActionIndex);
+    expect(laneRenderSource).toContain("const displayable = state === 'healthy' || state === 'degraded'");
+    expect(laneRenderSource).toContain('const samples = displayable && Array.isArray(laneLocks?.samples)');
+
+    const readinessIndex = src.indexOf('if (readinessRail) body.appendChild(readinessRail)');
+    const dashboardLaneIndex = src.indexOf('body.appendChild(renderAutonomyLaneBoard(fleetSnapshot?.laneLocks))');
+    const leaseIndex = src.indexOf('const leaseBoard = fdRenderLeaseBoard(sharedQueue, activeWork)');
+    expect(readinessIndex).toBeGreaterThanOrEqual(0);
+    expect(dashboardLaneIndex).toBeGreaterThan(readinessIndex);
+    expect(leaseIndex).toBeGreaterThan(dashboardLaneIndex);
+
+    const missionBriefIndex = src.indexOf('const missionBriefCard = renderMissionBriefCard(missionBrief)');
+    const missionLaneIndex = src.indexOf("renderAutonomyLaneBoard(laneLocks, 'ctrl-card card')");
+    expect(missionLaneIndex).toBeGreaterThan(missionBriefIndex);
+    expect(css).toContain('.autonomy-lane-board__rows');
+    expect(css).toContain('.autonomy-lane-board__action');
+    expect(css).toContain('.autonomy-lane-board__reference { grid-column: 1 / -1; }');
+    expect(css).not.toContain('.autonomy-lane-board__row--header { display: none; }');
+    expect(css).toContain('.autonomy-lane-board__row--header {\n    position: absolute;');
+    expect(src).toContain("'aria-label': `Repo: ${repo}`");
+    expect(src).toContain("'aria-label': `Objective or reference: ${reference}`");
+    expect(src).toContain('rail.appendChild(renderReadinessLaneControl(fleet?.laneLocks))');
+    expect(src).toContain("const secondary = el('details', { cls: 'fd-readiness-secondary', open: 'open' }");
+    expect(src).toContain('if (laneBoardCompactViewport()) secondary.open = false');
+    expect(src).toContain("typeof window.matchMedia === 'function'");
+    expect(src).not.toContain("if (!window.matchMedia('(max-width: 720px)').matches) secondary.open = true");
+    const readinessRailStart = src.indexOf('function fdRenderReadinessRail(snap)');
+    const readinessRailEnd = src.indexOf('function fdRenderStatusPanel(snap)', readinessRailStart);
+    const readinessRailSource = src.slice(readinessRailStart, readinessRailEnd);
+    expect(readinessRailSource.indexOf('renderReadinessLaneControl')).toBeGreaterThan(
+      readinessRailSource.indexOf("cls: 'fd-readiness-rail__verdict'"),
+    );
+    expect(readinessRailSource.indexOf("cls: 'fd-readiness-strip'")).toBeGreaterThan(
+      readinessRailSource.indexOf('renderReadinessLaneControl'),
+    );
+    expect(readinessRailSource.indexOf("cls: 'fd-readiness-secondary'")).toBeGreaterThan(
+      readinessRailSource.indexOf('renderReadinessLaneControl'),
+    );
+    expect(css).toContain('.fd-readiness-secondary > summary');
+    expect(css).toContain('.fd-readiness-secondary__grid');
+    expect(css).toContain('.fd-readiness-lane-control');
+    expect(css).toContain('.fd-readiness-lane-control__action');
+
+    const readinessControlStart = src.indexOf('function renderReadinessLaneControl(laneLocks)');
+    const readinessControlEnd = src.indexOf('function renderCompactLaneControl', readinessControlStart);
+    const readinessControlSource = src.slice(readinessControlStart, readinessControlEnd);
+    expect(readinessControlSource).toContain('fleet-command-safety--read-only');
+    expect(readinessControlSource).not.toContain('laneLocks.samples');
+
+    const compactControlStart = src.indexOf('function renderCompactLaneControl(laneLocks)');
+    const compactControlEnd = src.indexOf('function renderAutonomyLaneBoard', compactControlStart);
+    const compactControlSource = src.slice(compactControlStart, compactControlEnd);
+    expect(compactControlSource).toContain("'aria-label': 'Autonomy lane status'");
+    expect(compactControlSource).toContain('fleet-command-safety--read-only');
+    expect(compactControlSource).not.toContain('laneLocks.samples');
+
+    const controlStart = src.indexOf('function renderControl()');
+    const controlEnd = src.indexOf('function renderFleetActivity', controlStart);
+    const controlSource = src.slice(controlStart, controlEnd);
+    expect(controlSource.indexOf('heroPulse.appendChild(renderCompactLaneControl(laneLocks))')).toBeGreaterThanOrEqual(0);
+    expect(controlSource.indexOf('const heroMetrics')).toBeGreaterThan(
+      controlSource.indexOf('heroPulse.appendChild(renderCompactLaneControl(laneLocks))'),
+    );
+    expect(controlSource).toContain('const laneLocksState = laneLockDisplayState(laneLocks)');
+    expect(controlSource).toContain('const laneLocksActive = laneLockMetricObservations(laneLocks).active');
+    expect(controlSource).toContain("laneLockMetricText(laneLocksActive, '')");
+    expect(css).toContain('.ctrl-lane-compact__action');
+  });
+
+  it('executes degraded lane and stale readiness renderers with bounded accessible mobile output', () => {
+    const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public');
+    const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
+    const css = fs.readFileSync(path.join(root, 'styles.css'), 'utf8');
+
+    type RenderNode = {
+      tagName: string;
+      className: string;
+      attributes: Record<string, string>;
+      children: RenderNode[];
+      open: boolean;
+      textContent: string;
+      appendChild: (child: RenderNode) => RenderNode;
+      setAttribute: (name: string, value: unknown) => void;
+      addEventListener: () => void;
+    };
+    const node = (tagName: string, text = ''): RenderNode => {
+      const result = {
+        tagName,
+        className: '',
+        attributes: {} as Record<string, string>,
+        children: [] as RenderNode[],
+        open: false,
+        appendChild(child: RenderNode) {
+          this.children.push(child);
+          return child;
+        },
+        setAttribute(name: string, value: unknown) {
+          this.attributes[name] = String(value);
+          if (name === 'open') this.open = true;
+        },
+        addEventListener() {},
+        get textContent() {
+          return text + this.children.map((child) => child.textContent).join('');
+        },
+      };
+      return result;
+    };
+    const document = {
+      createElement: (tagName: string) => node(tagName),
+      createTextNode: (text: string) => node('#text', text),
+    };
+    const descendants = (rootNode: RenderNode): RenderNode[] => [
+      rootNode,
+      ...rootNode.children.flatMap(descendants),
+    ];
+    const byClass = (rootNode: RenderNode, className: string) => descendants(rootNode)
+      .filter((candidate) => candidate.className.split(/\s+/).includes(className));
+    const byAttribute = (rootNode: RenderNode, name: string, value: string) => descendants(rootNode)
+      .filter((candidate) => candidate.attributes[name] === value);
+
+    const functionSource = (name: string, nextName: string) => {
+      const start = src.indexOf(`function ${name}`);
+      const end = src.indexOf(`\nfunction ${nextName}`, start);
+      expect(start, name).toBeGreaterThanOrEqual(0);
+      expect(end, nextName).toBeGreaterThan(start);
+      return src.slice(start, end);
+    };
+    const elSource = functionSource('el(tag, attrs = {}, ...children)', 'svgEl');
+    const laneHelpers = src.slice(
+      src.indexOf('function laneLockSourceState(laneLocks, sourceNames)'),
+      src.indexOf('\nfunction renderReadinessLaneControl', src.indexOf('function laneLockSourceState(laneLocks, sourceNames)')),
+    );
+    const readinessControl = functionSource('renderReadinessLaneControl(laneLocks)', 'renderCompactLaneControl');
+    const laneBoard = functionSource('renderAutonomyLaneBoard(laneLocks, cardClass = \'\')', 'autonomyAuthorityState');
+    const duration = functionSource('fdFormatDurationMs(ms)', 'fdRenderLeaseMetric');
+    const leaseMetric = functionSource('fdRenderLeaseMetric(label, value, tone, title)', 'fdActiveWorkTitle');
+    const readinessData = src.slice(
+      src.indexOf('function fdReadinessDataText(readiness)'),
+      src.indexOf('\nfunction fdFormatDurationMs', src.indexOf('function fdReadinessDataText(readiness)')),
+    );
+    const readinessRail = functionSource('fdRenderReadinessRail(snap)', 'fdRenderStatusPanel');
+    const buildRenderers = new Function('document', 'window', `
+      ${elSource}
+      const compactFleetReason = (value, limit) => String(value ?? '').slice(0, limit);
+      const basenameFromPath = (value) => String(value).split(/[\\\\/]/).filter(Boolean).pop() ?? '';
+      ${laneHelpers}
+      ${readinessControl}
+      ${laneBoard}
+      ${duration}
+      ${leaseMetric}
+      ${readinessData}
+      const queueEligibilityMetric = () => null;
+      const generatedWorkMetric = () => null;
+      const diagnosticResliceDrainMetric = () => null;
+      const fleetSnapshotLearningFresh = () => false;
+      const fleetRepairRecoveryMetric = () => null;
+      const fleetRepairRecoveryActive = () => false;
+      const sharedQueueMetric = () => null;
+      const formatShipReadinessVerdict = (value) => String(value ?? 'unknown');
+      const shipReadinessAccent = () => '#f97316';
+      ${readinessRail}
+      return { renderAutonomyLaneBoard, renderReadinessLaneControl, fdRenderReadinessRail };
+    `);
+
+    const laneLocks = {
+      active: 1,
+      staleInProgress: 1,
+      awaitingHostMerge: 0,
+      unverifiedApplied: 1,
+      samples: Array.from({ length: 10 }, (_, index) => ({
+        repo: `/workspace/repository-with-a-very-long-name-${index}`,
+        title: `Long objective ${index} that must remain readable without widening the viewport`,
+        goalId: `g_${String(index).padStart(16, '0')}`,
+        reason: index % 2 === 0 ? 'stale-in-progress' : 'unverified-applied',
+        ageMs: 90_000 + index,
+      })),
+      sourceQuality: {
+        sourceState: 'degraded',
+        complete: false,
+        reasons: ['snapshot-stale', 'goal-ledger-partial'],
+        sources: {
+          enrollment: { sourceState: 'healthy', complete: true },
+          goals: { sourceState: 'degraded', complete: false },
+          proposals: { sourceState: 'healthy', complete: true },
+          queue: { sourceState: 'healthy', complete: true },
+        },
+      },
+    };
+    const staleSnapshot = {
+      generatedAt: '2000-01-01T00:00:00.000Z',
+      fleet: {
+        laneLocks,
+        autonomousShipReadiness: {
+          verdict: 'blocked',
+          confidence: 'low',
+          freshness: { overall: 'stale' },
+          sourceQualitySummary: { 'stale-source': 1, 'degraded-source': 1 },
+          sources: [],
+          topBlocker: { id: 'stale-evidence', detail: 'Fresh evidence required' },
+          primaryAction: { id: 'refresh-evidence', detail: 'Refresh evidence' },
+        },
+        queue: { backlogItems: 3 },
+        dispatchProduction: { proposalsCreated: 9 },
+      },
+    };
+
+    for (const mobile of [false, true]) {
+      const window = { matchMedia: () => ({ matches: mobile }) };
+      const renderers = buildRenderers(document, window) as {
+        renderAutonomyLaneBoard: (value: unknown) => RenderNode;
+        renderReadinessLaneControl: (value: unknown) => RenderNode;
+        fdRenderReadinessRail: (value: unknown) => RenderNode;
+      };
+      const board = renderers.renderAutonomyLaneBoard(laneLocks);
+      expect(board.className).toContain('autonomy-lane-board--degraded');
+      expect(board.textContent).toContain('Lane counts are observed from partial sources: snapshot-stale, goal-ledger-partial');
+      expect(board.textContent).toContain('Inspect lane sourcesashlr fleet status --jsonread-only');
+      expect(byClass(board, 'autonomy-lane-board__row')).toHaveLength(9);
+      expect(byAttribute(board, 'role', 'columnheader')).toHaveLength(4);
+      expect(byAttribute(board, 'aria-label', 'Observed autonomy lanes')).toHaveLength(1);
+      expect(byAttribute(board, 'aria-label', 'State: stale')).toHaveLength(4);
+      expect(descendants(board).filter((candidate) => candidate.tagName === 'button')).toHaveLength(0);
+
+      const control = renderers.renderReadinessLaneControl(laneLocks);
+      expect(control.attributes.role).toBe('status');
+      expect(control.attributes['aria-label']).toBe('Autonomy lane status');
+      expect(control.textContent).toContain('Lanes Partial · 2 observed (partial)');
+      expect(control.textContent).toContain('read-only');
+
+      const rail = renderers.fdRenderReadinessRail(staleSnapshot);
+      expect(rail.textContent).toContain('blocked');
+      expect(rail.textContent).toContain('stale · 1 degraded / 1 stale');
+      expect(rail.textContent).toContain('withheld (stale snapshot)');
+      const secondary = byClass(rail, 'fd-readiness-secondary')[0];
+      expect(secondary?.open).toBe(!mobile);
+    }
+
+    expect(css).toMatch(/\.fd-readiness-lane-control\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\) auto;[\s\S]*?min-width:\s*0;/);
+    expect(css).toMatch(/\.fd-readiness-lane-control__summary\s*\{[\s\S]*?overflow:\s*hidden;[\s\S]*?text-overflow:\s*ellipsis;/);
+    expect(css).toMatch(/\.autonomy-lane-board__row\s*\{[\s\S]*?grid-template-columns:\s*minmax\(70px, 0\.75fr\)[\s\S]*?min-width:\s*0;/);
+    expect(css).toMatch(/\.autonomy-lane-board__action\s*\{[\s\S]*?flex-wrap:\s*wrap;/);
+    expect(css).toMatch(/@media \(max-width: 720px\)[\s\S]*?\.fd-readiness-lane-control\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\);/);
+    expect(css).toMatch(/@media \(max-width: 720px\)[\s\S]*?\.autonomy-lane-board__row\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\) auto;/);
+    expect(css).toMatch(/@media \(max-width: 720px\)[\s\S]*?\.autonomy-lane-board__reference\s*\{\s*grid-column:\s*1 \/ -1;/);
   });
 
   it('app.js inbox detail reads current proposal review fields', () => {

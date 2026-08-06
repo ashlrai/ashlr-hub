@@ -2390,8 +2390,273 @@ function diagnosticResliceDrainMetric(drain) {
 }
 
 function laneLocksMetric(laneLocks) {
-  if (!laneLocks) return null;
-  return `${laneLocks.active ?? 0} active / ${laneLocks.staleInProgress ?? 0} stale / ${laneLocks.awaitingHostMerge ?? 0} handoff / ${laneLocks.unverifiedApplied ?? 0} unverified`;
+  const metrics = laneLockMetricObservations(laneLocks);
+  return [
+    laneLockMetricText(metrics.active, 'active'),
+    laneLockMetricText(metrics.stale, 'stale'),
+    laneLockMetricText(metrics.handoff, 'handoff'),
+    laneLockMetricText(metrics.unverified, 'unverified'),
+  ].join(' / ');
+}
+
+function laneLockSourceState(laneLocks, sourceNames) {
+  const sources = laneLocks?.sourceQuality?.sources;
+  if (!sources || typeof sources !== 'object') return 'unknown';
+  const required = sourceNames.map((name) => sources[name]);
+  if (required.some((source) => !source || typeof source !== 'object')) return 'unknown';
+  if (required.some((source) => source.sourceState === 'missing')) return 'missing';
+  if (required.some((source) => !['healthy', 'degraded'].includes(source.sourceState))) return 'unknown';
+  return required.every((source) => source.sourceState === 'healthy' && source.complete === true)
+    ? 'healthy'
+    : 'degraded';
+}
+
+function laneLockMetricObservation(laneLocks, countName, sourceNames) {
+  const value = laneLocks?.[countName];
+  if (!Number.isSafeInteger(value) || value < 0) return { state: 'unknown', value: null };
+  const state = laneLockSourceState(laneLocks, sourceNames);
+  return { state, value: state === 'missing' || state === 'unknown' ? null : value };
+}
+
+function laneLockMetricObservations(laneLocks) {
+  return {
+    active: laneLockMetricObservation(laneLocks, 'active', ['enrollment', 'goals', 'proposals']),
+    stale: laneLockMetricObservation(laneLocks, 'staleInProgress', ['enrollment', 'goals', 'proposals']),
+    handoff: laneLockMetricObservation(laneLocks, 'awaitingHostMerge', ['enrollment', 'proposals']),
+    unverified: laneLockMetricObservation(laneLocks, 'unverifiedApplied', ['enrollment', 'goals', 'proposals']),
+  };
+}
+
+function laneLockMetricText(metric, label) {
+  const suffix = label ? ` ${label}` : '';
+  if (metric.state === 'healthy') return `${metric.value}${suffix}`;
+  if (metric.state === 'degraded') return `${metric.value}${suffix} observed (partial)`;
+  return label ? `${label} unavailable` : 'unavailable';
+}
+
+function laneLockOccupiedObservation(laneLocks) {
+  const metrics = laneLockMetricObservations(laneLocks);
+  const occupied = [metrics.active, metrics.handoff, metrics.unverified];
+  if (occupied.some((metric) => metric.state === 'missing' || metric.state === 'unknown')) {
+    return { state: 'unavailable', value: null };
+  }
+  return {
+    state: occupied.every((metric) => metric.state === 'healthy') ? 'healthy' : 'degraded',
+    value: occupied.reduce((total, metric) => total + metric.value, 0),
+  };
+}
+
+function laneLockDisplayState(laneLocks) {
+  const quality = laneLocks?.sourceQuality;
+  if (!laneLocks || !quality) return 'unknown';
+  const requiredSourceNames = ['enrollment', 'goals', 'proposals', 'queue'];
+  if (!quality.sources || typeof quality.sources !== 'object') return 'unknown';
+  const sources = requiredSourceNames.map((name) => quality.sources[name]);
+  if (sources.some((source) => !source || typeof source !== 'object')) return 'unknown';
+  const validSourceStates = new Set(['missing', 'healthy', 'degraded']);
+  if (!validSourceStates.has(quality.sourceState) || sources.some((source) => !validSourceStates.has(source.sourceState))) {
+    return 'unknown';
+  }
+  const requiredCounts = ['active', 'staleInProgress', 'awaitingHostMerge', 'unverifiedApplied'];
+  if (requiredCounts.some((name) => !Number.isSafeInteger(laneLocks[name]) || laneLocks[name] < 0)) return 'unknown';
+  const metrics = Object.values(laneLockMetricObservations(laneLocks));
+  if (metrics.every((metric) => metric.state === 'missing')) return 'missing';
+  if (quality.sourceState !== 'healthy' || quality.complete !== true) return 'degraded';
+  return metrics.every((metric) => metric.state === 'healthy') ? 'healthy' : 'degraded';
+}
+
+function laneLockStateLabel(reason) {
+  const labels = {
+    'active-goal': 'active',
+    'stale-in-progress': 'stale',
+    'awaiting-host-merge': 'handoff',
+    'unverified-applied': 'unverified',
+  };
+  return labels[reason] ?? 'unknown';
+}
+
+function laneLockReference(sample) {
+  const parts = [];
+  const safeReference = (value) => typeof value === 'string' && /^[gmp]_[0-9a-f]{16}$/.test(value)
+    ? value
+    : null;
+  const goalId = safeReference(sample?.goalId);
+  const milestoneId = safeReference(sample?.milestoneId);
+  const proposalId = safeReference(sample?.proposalId);
+  if (goalId) parts.push(`goal:${goalId}`);
+  if (milestoneId) parts.push(`milestone:${milestoneId}`);
+  if (proposalId) parts.push(`proposal:${proposalId}`);
+  return compactFleetReason(parts.join(' / ') || 'reference unavailable', 96);
+}
+
+function laneBoardReadOnlyAction(laneLocks) {
+  if (laneLockDisplayState(laneLocks) !== 'healthy') {
+    return { label: 'Inspect lane sources', shell: 'ashlr fleet status --json' };
+  }
+  if ((laneLocks.staleInProgress ?? 0) > 0 || (laneLocks.active ?? 0) > 0) {
+    return { label: 'Inspect goal lanes', shell: 'ashlr goals list --json' };
+  }
+  if ((laneLocks.awaitingHostMerge ?? 0) > 0 || (laneLocks.unverifiedApplied ?? 0) > 0) {
+    return { label: 'Inspect proposal lanes', shell: 'ashlr inbox --json' };
+  }
+  return { label: 'Inspect fleet status', shell: 'ashlr fleet status --json' };
+}
+
+function laneBoardCompactSummary(laneLocks) {
+  const state = laneLockDisplayState(laneLocks);
+  const occupied = laneLockOccupiedObservation(laneLocks);
+  const verdict = state === 'healthy'
+    ? occupied.value === 0 ? 'Clear' : 'Occupied'
+    : state === 'degraded'
+      ? 'Partial'
+      : 'Unavailable';
+  const count = occupied.state === 'healthy'
+    ? ` · ${occupied.value}`
+    : occupied.state === 'degraded'
+      ? ` · ${occupied.value} observed (partial)`
+      : '';
+  return `Lanes ${verdict}${count}`;
+}
+
+function laneBoardCompactViewport() {
+  return typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(max-width: 720px)').matches;
+}
+
+function renderReadinessLaneControl(laneLocks) {
+  const action = laneBoardReadOnlyAction(laneLocks);
+  return el('div', {
+    cls: 'fd-readiness-lane-control',
+    role: 'status',
+    'aria-label': 'Autonomy lane status',
+  },
+  el('span', { cls: 'fd-readiness-lane-control__summary' }, laneBoardCompactSummary(laneLocks)),
+  el('div', { cls: 'fd-readiness-lane-control__action' },
+    el('span', {}, action.label),
+    el('code', {}, action.shell),
+    el('span', { cls: 'fleet-command-safety fleet-command-safety--read-only' }, 'read-only')
+  ));
+}
+
+function renderCompactLaneControl(laneLocks) {
+  const state = laneLockDisplayState(laneLocks);
+  const occupied = laneLockOccupiedObservation(laneLocks);
+  const verdict = state === 'healthy'
+    ? occupied.value === 0 ? 'Clear' : 'Occupied'
+    : state === 'degraded'
+      ? 'Partial'
+      : 'Unavailable';
+  const count = occupied.state === 'healthy'
+    ? ` · ${occupied.value}`
+    : occupied.state === 'degraded'
+      ? ` · ${occupied.value} observed (partial)`
+      : '';
+  const action = laneBoardReadOnlyAction(laneLocks);
+  return el('div', {
+    cls: `ctrl-lane-compact ctrl-lane-compact--${state}`,
+    role: 'status',
+    'aria-label': 'Autonomy lane status',
+  },
+  el('span', { cls: 'ctrl-lane-compact__label' }, 'Autonomy lanes'),
+  el('span', { cls: 'ctrl-lane-compact__verdict' }, `${verdict}${count}`),
+  el('div', { cls: 'ctrl-lane-compact__action' },
+    el('span', {}, action.label),
+    el('code', {}, action.shell),
+    el('span', { cls: 'fleet-command-safety fleet-command-safety--read-only' }, 'read-only')
+  ));
+}
+
+function renderAutonomyLaneBoard(laneLocks, cardClass = '') {
+  const quality = laneLocks?.sourceQuality;
+  const state = laneLockDisplayState(laneLocks);
+  const displayable = state === 'healthy' || state === 'degraded';
+  const samples = displayable && Array.isArray(laneLocks?.samples) ? laneLocks.samples.slice(0, 8) : [];
+  const occupied = laneLockOccupiedObservation(laneLocks);
+  const metrics = laneLockMetricObservations(laneLocks);
+  const stateLabel = state === 'healthy'
+    ? occupied.value === 0 ? 'Clear' : 'Occupied'
+    : state === 'degraded'
+      ? 'Partial'
+      : 'Unavailable';
+  const wrapper = el('div', {
+    cls: `${cardClass ? `${cardClass} ` : ''}autonomy-lane-board autonomy-lane-board--${state}`.trim(),
+  });
+  if (cardClass) {
+    wrapper.appendChild(el('div', { cls: 'card-header' },
+      el('span', { cls: 'card-title' }, 'Autonomy Lanes'),
+      el('span', { cls: 'card-subtitle' }, 'Observation only')
+    ));
+  }
+  const body = el('div', { cls: cardClass ? 'card-body autonomy-lane-board__body' : 'autonomy-lane-board__body' });
+  body.appendChild(el('div', { cls: 'autonomy-lane-board__head' },
+    el('div', { cls: 'autonomy-lane-board__title' },
+      cardClass ? null : el('span', { cls: 'autonomy-lane-board__eyebrow' }, 'Autonomy Lanes'),
+      el('span', { cls: 'autonomy-lane-board__count' }, occupied.state === 'unavailable'
+        ? 'count unavailable'
+        : occupied.state === 'degraded'
+          ? `${occupied.value} observed (partial)`
+          : String(occupied.value))
+    ),
+    el('span', { cls: `autonomy-lane-board__state autonomy-lane-board__state--${state}` }, stateLabel)
+  ));
+
+  const action = laneBoardReadOnlyAction(laneLocks);
+  body.appendChild(el('div', { cls: 'autonomy-lane-board__action' },
+    el('span', { cls: 'autonomy-lane-board__action-label' }, action.label),
+    el('code', {}, action.shell),
+    el('span', { cls: 'fleet-command-safety fleet-command-safety--read-only' }, 'read-only')
+  ));
+
+  const reasons = Array.isArray(quality?.reasons) ? quality.reasons.slice(0, 8) : [];
+  if (state !== 'healthy') {
+    body.appendChild(el('p', { cls: 'autonomy-lane-board__quality' },
+      state === 'degraded'
+        ? `Lane counts are observed from partial sources${reasons.length ? `: ${reasons.join(', ')}` : '.'}`
+        : `Lane data unavailable${reasons.length ? `: ${reasons.join(', ')}` : '.'}`
+    ));
+  }
+
+  if (displayable) {
+    body.appendChild(el('div', { cls: 'autonomy-lane-board__metrics' },
+      fdRenderLeaseMetric('Active', laneLockMetricText(metrics.active, ''), metrics.active.value > 0 ? 'warn' : null),
+      fdRenderLeaseMetric('Stale', laneLockMetricText(metrics.stale, ''), metrics.stale.value > 0 ? 'warn' : null),
+      fdRenderLeaseMetric('Handoff', laneLockMetricText(metrics.handoff, ''), metrics.handoff.value > 0 ? 'warn' : null),
+      fdRenderLeaseMetric('Unverified', laneLockMetricText(metrics.unverified, ''), metrics.unverified.value > 0 ? 'warn' : null)
+    ));
+  }
+
+  if (samples.length > 0) {
+    const rows = el('div', { cls: 'autonomy-lane-board__rows', role: 'table', 'aria-label': 'Observed autonomy lanes' });
+    rows.appendChild(el('div', { cls: 'autonomy-lane-board__row autonomy-lane-board__row--header', role: 'row' },
+      el('span', { role: 'columnheader' }, 'Repo'),
+      el('span', { role: 'columnheader' }, 'Objective / reference'),
+      el('span', { role: 'columnheader' }, 'State'),
+      el('span', { role: 'columnheader' }, 'Age')
+    ));
+    for (const sample of samples) {
+      const repo = basenameFromPath(sample?.repo ?? '') || 'unknown';
+      const reference = laneLockReference(sample);
+      const title = compactFleetReason(sample?.title ?? reference, 120);
+      const laneState = laneLockStateLabel(sample?.reason);
+      rows.appendChild(el('div', { cls: 'autonomy-lane-board__row', role: 'row' },
+        el('span', { cls: 'autonomy-lane-board__repo', role: 'cell', 'aria-label': `Repo: ${repo}` }, repo),
+        el('span', { cls: 'autonomy-lane-board__reference', role: 'cell', 'aria-label': `Objective or reference: ${reference}` },
+          el('strong', {}, title),
+          el('small', {}, reference)
+        ),
+        el('span', { cls: `autonomy-lane-board__badge autonomy-lane-board__badge--${laneState}`, role: 'cell', 'aria-label': `State: ${laneState}` }, laneState),
+        el('span', { cls: 'autonomy-lane-board__age', role: 'cell', 'aria-label': `Age: ${fdFormatDurationMs(sample?.ageMs)}` }, fdFormatDurationMs(sample?.ageMs))
+      ));
+    }
+    body.appendChild(rows);
+  } else {
+    body.appendChild(el('p', { cls: 'autonomy-lane-board__empty' },
+      state === 'healthy' ? 'No occupied autonomy lanes.' : 'No lane rows available from the observed sources.'
+    ));
+  }
+  wrapper.appendChild(body);
+  return wrapper;
 }
 
 function autonomyAuthorityState(autonomy) {
@@ -4183,6 +4448,7 @@ function renderControl() {
   const props  = d.fleet?.proposals ?? fleet.proposals ?? {};
   const merges = d.fleet?.merges ?? fleet.merges ?? {};
   const autonomy = d.fleet?.autonomy ?? fleet.autonomy ?? null;
+  const laneLocks = d.fleet?.laneLocks ?? fleet.laneLocks ?? null;
   const direction = d.fleet?.autonomyDirection ?? fleet.autonomyDirection ?? null;
   const activeDirectionMode = daemon.activeDirectionMode ?? null;
   const daemonState = fleetDaemonState(fleetDaemon);
@@ -4255,6 +4521,7 @@ function renderControl() {
   if (fleetDaemon.lastTickAt ?? daemonObservation.lastTickAt) {
     heroPulse.appendChild(el('div', { cls: 'ctrl-last-tick' }, `Last tick ${fmtRelative(fleetDaemon.lastTickAt ?? daemonObservation.lastTickAt)}`));
   }
+  heroPulse.appendChild(renderCompactLaneControl(laneLocks));
 
   const heroMetrics = el('div', { cls: 'ctrl-hero-metrics' });
   const sharedQueue = queue.shared;
@@ -4283,11 +4550,18 @@ function renderControl() {
     const drainColor = queue.diagnosticResliceDrain.stalled ? '#ef4444' : '#f97316';
     heroMetrics.appendChild(controlMetric('Diag Drain', queue.diagnosticResliceDrain.selected ?? 0, drainColor));
   }
-  const laneLocks = d.fleet?.laneLocks ?? fleet.laneLocks ?? null;
-  if (laneLocks) {
-    const laneLocksWarn = (laneLocks.staleInProgress ?? 0) > 0 || (laneLocks.unverifiedApplied ?? 0) > 0 || (laneLocks.awaitingHostMerge ?? 0) > 0;
-    heroMetrics.appendChild(controlMetric('Lane Locks', laneLocks.active ?? 0, laneLocksWarn ? '#f97316' : '#38bdf8'));
-  }
+  const laneLocksState = laneLockDisplayState(laneLocks);
+  const laneLocksActive = laneLockMetricObservations(laneLocks).active;
+  const laneLocksWarn = laneLocksState !== 'healthy' || (
+    (laneLocks?.staleInProgress ?? 0) > 0 ||
+    (laneLocks?.unverifiedApplied ?? 0) > 0 ||
+    (laneLocks?.awaitingHostMerge ?? 0) > 0
+  );
+  heroMetrics.appendChild(controlMetric(
+    'Lane Locks',
+    laneLockMetricText(laneLocksActive, ''),
+    laneLocksWarn ? '#f97316' : '#38bdf8'
+  ));
   if (sharedQueue) {
     heroMetrics.appendChild(controlMetric('Shared leases', sharedQueue.activeClaims ?? '—', '#38bdf8'));
     heroMetrics.appendChild(controlMetric('Reclaimable', sharedQueue.reclaimableClaims ?? '—', sharedQueue.reclaimableClaims > 0 ? '#f97316' : '#4ade80'));
@@ -4479,6 +4753,7 @@ function renderControl() {
 
   const missionBriefCard = renderMissionBriefCard(missionBrief);
   if (missionBriefCard) section.appendChild(missionBriefCard);
+  section.appendChild(renderAutonomyLaneBoard(laneLocks, 'ctrl-card card'));
 
   const missionPhantomCard = renderPhantomAgentReportCard(d.fleet?.phantom ?? fleet.phantom ?? null);
   if (missionPhantomCard) section.appendChild(missionPhantomCard);
@@ -5503,6 +5778,18 @@ function fdMetricPill(label, value, title) {
   );
 }
 
+function fdReadinessDataPill(readiness) {
+  const detail = fdReadinessDataTitle(readiness);
+  return el('div', { cls: 'fd-readiness-pill fd-readiness-pill--data' },
+    el('span', { cls: 'fd-readiness-pill__label' }, 'Data'),
+    el('span', { cls: 'fd-readiness-pill__value' }, fdReadinessDataText(readiness)),
+    el('details', { cls: 'fd-readiness-pill__disclosure' },
+      el('summary', {}, 'Source detail'),
+      el('span', {}, detail)
+    )
+  );
+}
+
 function fdFormatDurationMs(ms) {
   if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return '—';
   if (ms < 60_000) return '<1m';
@@ -5677,31 +5964,39 @@ function fdRenderReadinessRail(snap) {
   });
   rail.appendChild(el('div', { cls: 'fd-readiness-rail__head' },
     el('span', { cls: 'fd-readiness-rail__label' }, 'Fleet OS'),
-    el('span', { cls: 'fd-readiness-rail__verdict' }, verdict),
-    el('span', { cls: 'fd-readiness-rail__loop' }, `Loop: ${loop}`)
+    el('span', { cls: 'fd-readiness-rail__verdict' }, verdict)
   ));
+  rail.appendChild(renderReadinessLaneControl(fleet?.laneLocks));
   rail.appendChild(el('div', { cls: 'fd-readiness-strip' },
     fdMetricPill('Brief', compactFleetReason(briefLabel, 54), briefDetail),
-    fdMetricPill('Confidence', missionBrief?.confidence ?? readiness.confidence ?? 'unknown'),
-    fdMetricPill('Action', compactFleetReason(actionLabel, 54), actionDetail),
-    fdMetricPill('Data', fdReadinessDataText(readiness), fdReadinessDataTitle(readiness)),
-    fdMetricPill('Blocker', compactFleetReason(blockerLabel, 54), blockerDetail),
-    fdMetricPill('Queue', queueMetric),
-    generatedMetric ? fdMetricPill('Generated', generatedMetric) : null,
-    repairRecovery ? fdMetricPill('Repair Loop', repairRecovery.value, repairRecovery.detail) : null,
-    drainMetric ? fdMetricPill('Diag Drain', drainMetric) : null,
-    fdMetricPill('Leases', leases ?? 'local only'),
-    promotion
-      ? fdMetricPill(
-          'Canary promotion',
-          promotion.verdict ?? 'blocked',
-          promotion.primaryBlocker?.detail ?? promotion.primaryBlocker?.code ?? 'observation only'
-        )
-      : null,
-    fdMetricPill('Yield', learningSnapshotFresh
-      ? fdDispatchYieldText(dispatchProduction, dispatchProductionSource)
-      : 'withheld (stale snapshot)')
+    fdMetricPill('Action', compactFleetReason(actionLabel, 54), actionDetail)
   ));
+  const secondary = el('details', { cls: 'fd-readiness-secondary', open: 'open' },
+    el('summary', {}, 'Readiness detail'),
+    el('div', { cls: 'fd-readiness-secondary__grid' },
+      fdMetricPill('Loop', loop),
+      fdMetricPill('Confidence', missionBrief?.confidence ?? readiness.confidence ?? 'unknown'),
+      fdReadinessDataPill(readiness),
+      fdMetricPill('Blocker', compactFleetReason(blockerLabel, 54), blockerDetail),
+      fdMetricPill('Queue', queueMetric),
+      generatedMetric ? fdMetricPill('Generated', generatedMetric) : null,
+      repairRecovery ? fdMetricPill('Repair Loop', repairRecovery.value, repairRecovery.detail) : null,
+      drainMetric ? fdMetricPill('Diag Drain', drainMetric) : null,
+      fdMetricPill('Leases', leases ?? 'local only'),
+      promotion
+        ? fdMetricPill(
+            'Canary promotion',
+            promotion.verdict ?? 'blocked',
+            promotion.primaryBlocker?.detail ?? promotion.primaryBlocker?.code ?? 'observation only'
+          )
+        : null,
+      fdMetricPill('Yield', learningSnapshotFresh
+        ? fdDispatchYieldText(dispatchProduction, dispatchProductionSource)
+        : 'withheld (stale snapshot)')
+    )
+  );
+  if (laneBoardCompactViewport()) secondary.open = false;
+  rail.appendChild(secondary);
   return rail;
 }
 
@@ -5722,6 +6017,7 @@ function fdRenderStatusPanel(snap) {
   const body = el('div', { cls: 'fd-panel__body' });
   const readinessRail = fdRenderReadinessRail(snap);
   if (readinessRail) body.appendChild(readinessRail);
+  body.appendChild(renderAutonomyLaneBoard(fleetSnapshot?.laneLocks));
 
   // Big running indicator
   const dot = el('span', { cls: isRunning ? 'fd-daemon-dot fd-daemon-dot--running' : 'fd-daemon-dot' });
