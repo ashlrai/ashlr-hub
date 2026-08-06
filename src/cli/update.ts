@@ -36,6 +36,9 @@ import { dirname, resolve, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { createRequire } from 'node:module';
+import { serviceStatus } from '../core/daemon/service.js';
+import { assertResidentServiceInstallAuthorized } from '../core/daemon/service-install-authority.js';
+import { queryServeService } from './dashboard.js';
 
 // ---------------------------------------------------------------------------
 // ANSI helpers (non-TTY safe)
@@ -468,6 +471,7 @@ function printHelp(): void {
   console.log(`    ${dim('• Only uses git pull --ff-only — never force-push/reset/rebase.')}`);
   console.log(`    ${dim('• Aborts on a dirty working tree (commit your changes first).')}`);
   console.log(`    ${dim('• If no remote is configured, reports no-op and exits 0.')}`);
+  console.log(`    ${dim('• Mutating update requires service registration proven absent and not running.')}`);
   console.log('');
   console.log('  ' + bold('Exit codes:'));
   console.log('');
@@ -503,6 +507,53 @@ export async function cmdUpdate(args: string[]): Promise<number> {
 
   // ── M33: channel routing — npm installs update via the registry, not git ──
   const channel = parsed.channel ?? detectChannel();
+  if (!parsed.check) {
+    const residentService = serviceStatus();
+    const dashboardService = queryServeService();
+    const residentStateUnsafe = residentService.running
+      || residentService.registrationState !== 'absent'
+      || dashboardService.running
+      || dashboardService.registrationState !== 'absent';
+    if (residentStateUnsafe) {
+      try {
+        assertResidentServiceInstallAuthorized();
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        const residentEvidence = residentService.running
+          ? 'the resident service is running'
+          : residentService.registrationState === 'present'
+            ? 'resident service registration is present'
+            : residentService.registrationState === 'unknown'
+              ? 'resident service registration could not be proven absent'
+              : dashboardService.running
+                ? 'the resident dashboard service is running'
+                : dashboardService.registrationState === 'present'
+                  ? 'resident dashboard service registration is present'
+                  : 'resident dashboard service registration could not be proven absent';
+        const message =
+          `update blocked: ${residentEvidence} for ${residentService.platformSpec} and could be stranded `
+          + `because ${reason}. No code was replaced. Existing services support status and uninstall only; `
+          + 'admitted one-shot workflows remain available.';
+        out(`  ${red('✗')}  ${bold('Update blocked by resident service restriction')}`, jsonMode);
+        out(`  ${dim(message)}`, jsonMode);
+        out('', jsonMode);
+        if (jsonMode) {
+          process.stdout.write(JSON.stringify({
+            channel,
+            updated: false,
+            upToDate: null,
+            blocked: true,
+            degraded: true,
+            service: residentService,
+            dashboardService,
+            message,
+            error: reason,
+          }, null, 2) + '\n');
+        }
+        return 1;
+      }
+    }
+  }
   if (channel === 'npm') {
     return runNpmChannel(parsed, repoRoot);
   }

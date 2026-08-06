@@ -5,7 +5,8 @@
  * Supports macOS (launchd), Linux (systemd --user), and Windows (schtasks).
  *
  * DESIGN CONTRACT:
- *  - install(), uninstall(), and ensureRunning() are side-effectful entry points.
+ *  - install() is the fail-closed production authority boundary.
+ *  - uninstall() and ensureRunning() are side-effectful entry points.
  *  - generateServiceDefinition() / buildRegisterCommand() / buildUnregisterCommand()
  *    are pure and fully testable with a mocked process.platform.
  *  - serviceStatus() queries the OS but never throws.
@@ -18,7 +19,7 @@ import * as fs from 'node:fs';
 import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { buildToolPath } from '../run/tool-path.js';
-import { fsyncDirectory } from '../util/durability.js';
+import { fsyncDirectory, type DirectoryIdentity } from '../util/durability.js';
 import {
   installLaunchdPlistTransaction,
   removeLaunchdPlistTransaction,
@@ -34,6 +35,7 @@ import {
   WINDOWS_TASK_STOP_DELETE_SCRIPT,
   windowsPowerShellPath,
 } from './windows-task-scripts.js';
+import { assertResidentServiceInstallAuthorized } from './service-install-authority.js';
 
 // ---------------------------------------------------------------------------
 // Types (local — do NOT add to types.ts per file-ownership constraints)
@@ -41,6 +43,7 @@ import {
 
 export type Platform = 'darwin' | 'linux' | 'win32';
 export type PlatformSpec = 'launchd' | 'systemd' | 'schtasks' | 'unknown';
+export type ServiceRegistrationState = 'present' | 'absent' | 'unknown';
 
 const MIN_RESTART_SEC = 5;
 const MAX_LAUNCHD_RESTART_SEC = 3_600;
@@ -78,6 +81,9 @@ export interface ServiceInstallOptions {
 }
 
 export interface ServiceStatusResult {
+  /** Proven registration state from both the expected file and native manager. */
+  registrationState: ServiceRegistrationState;
+  /** Compatibility projection: true only when registrationState is present. */
   installed: boolean;
   running: boolean;
   /** Exact runtime authority when the platform exposes one without localized text. */
@@ -410,6 +416,8 @@ interface LaunchdRuntimeReadOptions {
   timeoutMs?: number;
 }
 
+class LaunchdRuntimeContractError extends Error {}
+
 export function parseExactLaunchdPrintRuntime(
   output: string,
   serviceTarget: string,
@@ -495,7 +503,9 @@ function readLaunchdRuntimeState(
           )
         : null;
       if (!exact) {
-        throw new Error(`launchctl print ${serviceTarget} returned an unrecognized native state`);
+        throw new LaunchdRuntimeContractError(
+          `launchctl print ${serviceTarget} returned an unrecognized native state`,
+        );
       }
       return exact;
     }
@@ -629,14 +639,14 @@ interface SystemdActivationState {
   fragmentPath?: string;
 }
 
-function readSystemdActivationState(): SystemdActivationState {
-  const active = runCmd(['systemctl', '--user', 'is-active', 'ashlr-daemon']);
+function readSystemdActivationState(timeoutMs = 15_000): SystemdActivationState {
+  const active = runCmd(['systemctl', '--user', 'is-active', 'ashlr-daemon'], undefined, timeoutMs);
   const activeToken = active.stdout.trim();
   const isActive = active.ok && activeToken === 'active';
   const isInactive = !active.ok && activeToken === 'inactive';
   if (!isActive && !isInactive) throw commandError('systemd active-state query', active);
 
-  const enabled = runCmd(['systemctl', '--user', 'is-enabled', 'ashlr-daemon']);
+  const enabled = runCmd(['systemctl', '--user', 'is-enabled', 'ashlr-daemon'], undefined, timeoutMs);
   const enabledToken = enabled.stdout.trim();
   const isEnabled = enabled.ok && enabledToken === 'enabled';
   const isDisabled = !enabled.ok && enabledToken === 'disabled';
@@ -651,7 +661,7 @@ function readSystemdActivationState(): SystemdActivationState {
     'ashlr-daemon',
     '--property=FragmentPath',
     '--value',
-  ]);
+  ], undefined, timeoutMs);
   const fragmentPath = fragment.stdout.trim();
   if (!fragment.ok || !path.isAbsolute(fragmentPath) || fragmentPath !== fragment.stdout.replace(/\r?\n$/, '')) {
     throw commandError('systemd FragmentPath query', fragment);
@@ -1162,12 +1172,9 @@ function inspectSafePathLeaf(
     : undefined;
 }
 
-function fsyncDirectoryFor(filePath: string, expected: Pick<fs.Stats, 'dev' | 'ino'>): void {
+function fsyncDirectoryFor(filePath: string, expected: DirectoryIdentity): void {
   fsyncDirectory(path.dirname(filePath), {
-    expectedIdentity: {
-      dev: BigInt(expected.dev),
-      ino: BigInt(expected.ino),
-    },
+    expectedIdentity: { dev: expected.dev, ino: expected.ino },
   });
 }
 
@@ -1205,8 +1212,8 @@ function archiveLegacyWindowsLauncher(home: string, destinationDir: string, expe
       }
       validateLegacyWindowsLauncher(home, legacy, 'legacy Windows launcher');
       if (archivedStat) throw new Error(`legacy Windows launcher archive already exists at ${archived}`);
-      const legacyParent = fs.lstatSync(path.dirname(legacy));
-      const archivedParent = fs.lstatSync(path.dirname(archived));
+      const legacyParent = fs.lstatSync(path.dirname(legacy), { bigint: true });
+      const archivedParent = fs.lstatSync(path.dirname(archived), { bigint: true });
       fs.renameSync(legacy, archived);
       fsyncDirectoryFor(legacy, legacyParent);
       fsyncDirectoryFor(archived, archivedParent);
@@ -1234,8 +1241,8 @@ function restoreLegacyWindowsLauncher(home: string, destinationDir: string, expe
     if (!archivedStat) throw new Error('archived legacy Windows launcher is missing during recovery');
     assertSafePathParents(home, legacy, 'legacy Windows launcher');
     validateLegacyWindowsLauncher(home, archived, 'archived legacy Windows launcher');
-    const archivedParent = fs.lstatSync(path.dirname(archived));
-    const legacyParent = fs.lstatSync(path.dirname(legacy));
+    const archivedParent = fs.lstatSync(path.dirname(archived), { bigint: true });
+    const legacyParent = fs.lstatSync(path.dirname(legacy), { bigint: true });
     fs.renameSync(archived, legacy);
     fsyncDirectoryFor(archived, archivedParent);
     fsyncDirectoryFor(legacy, legacyParent);
@@ -1387,7 +1394,8 @@ function recoverWindowsTransactionUnload(
 // ---------------------------------------------------------------------------
 
 /**
- * Install and register the ashlr daemon as an OS service.
+ * Install and register the daemon only after the shared authority boundary.
+ * The current production boundary always refuses before transaction work.
  *
  * Idempotent: backs up any existing service file, writes fresh, then loads.
  * Every platform verifies the requested activation state before returning.
@@ -1395,6 +1403,7 @@ function recoverWindowsTransactionUnload(
  * fail closed so callers cannot mistake a partial install for success.
  */
 export async function install(opts: ServiceInstallOptions = {}): Promise<void> {
+  assertResidentServiceInstallAuthorized();
   const platform = (opts.platform ?? process.platform) as Platform;
   const def = generateServiceDefinition(opts);
   const autostart = opts.autostart !== false;
@@ -1918,6 +1927,7 @@ export async function uninstall(opts: ServiceInstallOptions = {}): Promise<void>
  * the fleet was paused, exited cleanly, and then needed a kick after resume.
  */
 export async function ensureRunning(opts: ServiceInstallOptions = {}): Promise<ServiceStatusResult> {
+  assertResidentServiceInstallAuthorized();
   const before = serviceStatus(opts);
   if (!before.installed || before.running) return before;
 
@@ -1965,21 +1975,29 @@ export async function ensureRunning(opts: ServiceInstallOptions = {}): Promise<S
 
 /**
  * Query the OS for current service state.
- * Never throws — degrades to { installed: false, running: false } on errors.
+ * Never throws. Native ambiguity degrades to registrationState: unknown; only
+ * a missing expected file plus proven native-manager absence yields absent.
  */
 export function serviceStatus(opts: ServiceInstallOptions = {}): ServiceStatusResult {
   const platform = (opts.platform ?? process.platform) as Platform;
   const def = generateServiceDefinition(opts);
-  const installed = fs.existsSync(def.filePath);
+  const serviceFilePresent = fs.existsSync(def.filePath);
 
   if (platform === 'darwin') {
-    return queryLaunchd(def, installed);
+    return queryLaunchd(def, serviceFilePresent);
   } else if (platform === 'linux') {
-    return querySystemd(def.filePath, installed);
+    return querySystemd(def.filePath, serviceFilePresent);
   } else if (platform === 'win32') {
-    return querySchtasks(def.filePath, installed);
+    return querySchtasks(def.filePath, serviceFilePresent);
   }
-  return { installed, running: false, platformSpec: 'unknown', serviceFilePath: def.filePath };
+  return {
+    registrationState: 'unknown',
+    installed: false,
+    running: false,
+    runtimeState: 'unknown',
+    platformSpec: 'unknown',
+    serviceFilePath: def.filePath,
+  };
 }
 
 export function serviceStatusCached(
@@ -2009,7 +2027,14 @@ export function serviceStatusCached(
   return status;
 }
 
-function queryLaunchd(definition: ServiceDefinition, installed: boolean): ServiceStatusResult {
+function knownRegistrationState(
+  serviceFilePresent: boolean,
+  nativeRegistrationPresent: boolean,
+): ServiceRegistrationState {
+  return serviceFilePresent || nativeRegistrationPresent ? 'present' : 'absent';
+}
+
+function queryLaunchd(definition: ServiceDefinition, serviceFilePresent: boolean): ServiceStatusResult {
   const filePath = definition.filePath;
   const uid = typeof process.getuid === 'function' ? process.getuid() : os.userInfo().uid;
   const serviceTarget = `gui/${uid}/ai.ashlr.daemon`;
@@ -2021,8 +2046,10 @@ function queryLaunchd(definition: ServiceDefinition, installed: boolean): Servic
       expectedArguments: definition.launchdRuntime.arguments,
       timeoutMs: 5_000,
     });
+    const registrationState = knownRegistrationState(serviceFilePresent, runtime.loaded);
     return {
-      installed,
+      registrationState,
+      installed: registrationState === 'present',
       running: runtime.pid !== undefined,
       runtimeState: runtime.pid !== undefined
         ? 'running'
@@ -2032,9 +2059,20 @@ function queryLaunchd(definition: ServiceDefinition, installed: boolean): Servic
       platformSpec: 'launchd',
       serviceFilePath: filePath,
     };
-  } catch {
+  } catch (error) {
+    if (error instanceof LaunchdRuntimeContractError) {
+      return {
+        registrationState: 'present',
+        installed: true,
+        running: false,
+        runtimeState: 'unknown',
+        platformSpec: 'launchd',
+        serviceFilePath: filePath,
+      };
+    }
     return {
-      installed,
+      registrationState: 'unknown',
+      installed: false,
       running: false,
       runtimeState: 'unknown',
       platformSpec: 'launchd',
@@ -2043,34 +2081,61 @@ function queryLaunchd(definition: ServiceDefinition, installed: boolean): Servic
   }
 }
 
-function querySystemd(filePath: string, installed: boolean): ServiceStatusResult {
+function querySystemd(filePath: string, serviceFilePresent: boolean): ServiceStatusResult {
   try {
-    const result = spawnSync('systemctl', ['--user', 'is-active', 'ashlr-daemon'], {
-      encoding: 'utf8',
-      timeout: 5_000,
-    });
-    const running = result.status === 0 && result.stdout.trim() === 'active';
-    return { installed, running, platformSpec: 'systemd', serviceFilePath: filePath };
+    const native = readSystemdActivationState(5_000);
+    const registrationState = knownRegistrationState(serviceFilePresent, native.present);
+    return {
+      registrationState,
+      installed: registrationState === 'present',
+      running: native.active,
+      runtimeState: native.active ? 'running' : native.present ? 'ready' : 'stopped',
+      platformSpec: 'systemd',
+      serviceFilePath: filePath,
+    };
   } catch {
-    return { installed, running: false, platformSpec: 'systemd', serviceFilePath: filePath };
+    return {
+      registrationState: 'unknown',
+      installed: false,
+      running: false,
+      runtimeState: 'unknown',
+      platformSpec: 'systemd',
+      serviceFilePath: filePath,
+    };
   }
 }
 
-function querySchtasks(filePath: string, installed: boolean): ServiceStatusResult {
+function querySchtasks(filePath: string, serviceFilePresent: boolean): ServiceStatusResult {
   try {
     const task = readWindowsTaskState();
+    const registrationState = knownRegistrationState(serviceFilePresent, task.present);
     if (!task.present) {
-      return { installed, running: false, runtimeState: 'stopped', platformSpec: 'schtasks', serviceFilePath: filePath };
+      return {
+        registrationState,
+        installed: registrationState === 'present',
+        running: false,
+        runtimeState: 'stopped',
+        platformSpec: 'schtasks',
+        serviceFilePath: filePath,
+      };
     }
     return {
-      installed,
+      registrationState,
+      installed: true,
       running: false,
       runtimeState: task.state,
       platformSpec: 'schtasks',
       serviceFilePath: filePath,
     };
   } catch {
-    return { installed, running: false, runtimeState: 'unknown', platformSpec: 'schtasks', serviceFilePath: filePath };
+    return {
+      registrationState: 'unknown',
+      installed: false,
+      running: false,
+      runtimeState: 'unknown',
+      platformSpec: 'schtasks',
+      serviceFilePath: filePath,
+    };
   }
 }
 

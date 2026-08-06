@@ -1786,6 +1786,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
 
     const staleGoal = makeGoalRecord(repo, 'goal-lane-a', 'active', 'in-progress');
     staleGoal.milestones[0]!.updatedAt = '2026-07-03T00:00:00.000Z';
+    staleGoal.milestones[0]!.title = 'Recover token=abcdefghijklmnopqrstuvwxyz lane';
     const proposedGoal = makeGoalRecord(repo, 'goal-lane-b', 'active', 'proposed');
     proposedGoal.milestones[0]!.proposalId = applied.id;
     const outsideGoal = makeGoalRecord(outsideRepo, 'goal-outside', 'active', 'pending');
@@ -1812,11 +1813,25 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       awaitingHostMerge: 1,
       unverifiedApplied: 1,
       lockedVisibleItems: 2,
+      sourceQuality: {
+        sourceState: 'healthy',
+        complete: true,
+        reasons: [],
+      },
     });
     expect(s.laneLocks?.samples.map((sample) => sample.reason)).toEqual(
       expect.arrayContaining(['stale-in-progress', 'active-goal', 'awaiting-host-merge', 'unverified-applied']),
     );
     expect(s.laneLocks?.samples.every((sample) => !('diff' in sample))).toBe(true);
+    expect(s.laneLocks?.samples.every((sample) => sample.repo === 'repo-lanes')).toBe(true);
+    expect(JSON.stringify(s.laneLocks?.samples)).not.toContain(tmpHome);
+    expect(JSON.stringify(s.laneLocks?.samples)).not.toContain('abcdefghijklmnopqrstuvwxyz');
+    expect(s.laneLocks?.samples.find((sample) => sample.reason === 'stale-in-progress')).not.toHaveProperty('title');
+    expect(s.laneLocks?.samples.every((sample) => sample.goalId === undefined)).toBe(true);
+    expect(s.laneLocks?.samples.every((sample) => sample.milestoneId === undefined)).toBe(true);
+    expect(s.laneLocks?.samples.every((sample) => (
+      sample.proposalId === undefined || /^p_[0-9a-f]{16}$/.test(sample.proposalId)
+    ))).toBe(true);
     expect(formatFleetStatus(s)).toContain(
       'lane locks:    2 active, 1 stale, 1 handoff, 1 unverified, 2 visible locked',
     );
@@ -1824,12 +1839,324 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(action).toMatchObject({
       priority: 'high',
       label: 'Recover stale goal lanes',
-      target: repo,
     });
+    expect(action).not.toHaveProperty('target');
     expect(action?.commands?.map((command) => command.argv)).toEqual([
-      ['ashlr', 'goals', 'show', 'goal-lane-a', '--json'],
+      ['ashlr', 'goals', 'list', '--json'],
       ['ashlr', 'goals', 'recover-stale'],
     ]);
+  });
+
+  it('keeps authoritative empty, malformed, truncated, and partial lane sources distinct', async () => {
+    const repo = join(tmpHome, 'repo-lane-quality');
+    writeBacklogSnapshot(tmpHome, repo, []);
+
+    const missing = await buildFleetStatus(baseConfig());
+    expect(missing.laneLocks).toMatchObject({
+      active: 0,
+      sourceQuality: {
+        sourceState: 'healthy',
+        complete: true,
+        reasons: [],
+        sources: {
+          goals: { sourceState: 'healthy', complete: true, reasons: [] },
+          proposals: { sourceState: 'healthy', complete: true, reasons: [] },
+        },
+      },
+    });
+
+    const goalsDir = join(process.env.ASHLR_HOME!, 'goals');
+    mkdirSync(goalsDir, { recursive: true });
+    writeFileSync(join(goalsDir, 'malformed.json'), '{', 'utf8');
+    const malformed = await buildFleetStatus(baseConfig());
+    expect(malformed.laneLocks?.sourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      reasons: expect.arrayContaining(['goals-incomplete', 'goals-unreadable']),
+    });
+
+    rmSync(goalsDir, { recursive: true, force: true });
+    const manyGoals = Array.from({ length: 201 }, (_, index) =>
+      makeGoalRecord(repo, `goal-quality-${String(index).padStart(3, '0')}`));
+    writeGoalRecords(tmpHome, manyGoals);
+    const truncated = await buildFleetStatus(baseConfig());
+    expect(truncated.laneLocks?.sourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      reasons: expect.arrayContaining(['goals-incomplete', 'goals-limit-exceeded']),
+    });
+
+    rmSync(goalsDir, { recursive: true, force: true });
+    writeGoalRecords(tmpHome, [makeGoalRecord(repo, 'goal-quality-valid')]);
+    const inboxDir = join(process.env.ASHLR_HOME!, 'inbox');
+    mkdirSync(inboxDir, { recursive: true });
+    writeFileSync(join(inboxDir, 'malformed.json'), '{', 'utf8');
+    const partial = await buildFleetStatus(baseConfig());
+    expect(partial.laneLocks?.sourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      reasons: expect.arrayContaining(['proposals-incomplete', 'proposals-invalid']),
+    });
+  });
+
+  it('caps lane samples and bounds every source-quality reason list', () => {
+    const repo = '/private/workspace/ashlr-hub';
+    const proposals = Array.from({ length: 12 }, (_, index): Proposal => ({
+      id: `proposal-${index}`,
+      repo,
+      origin: 'agent',
+      kind: 'patch',
+      title: `Proposal ${index}`,
+      summary: 'bounded fixture',
+      status: 'awaiting-host-merge',
+      createdAt: '2026-07-03T00:00:00.000Z',
+    }));
+    const status = buildFleetLaneLocks({
+      goals: [],
+      proposals,
+      visibleQueueItems: [],
+      sampleLimit: 99,
+      sourceQuality: {
+        goals: { sourceState: 'missing', complete: false, reasons: ['goals-missing'] },
+        proposals: {
+          sourceState: 'degraded', complete: false,
+          reasons: ['proposals-incomplete', 'proposals-invalid', 'proposals-unreadable', 'proposals-limit-exceeded'],
+        },
+        queue: {
+          sourceState: 'degraded', complete: false,
+          reasons: ['queue-missing', 'queue-incomplete', 'queue-stale', 'queue-unavailable'],
+        },
+      },
+    });
+
+    expect(status.samples).toHaveLength(8);
+    expect(status.sourceQuality).toMatchObject({ sourceState: 'degraded', complete: false });
+    expect(status.sourceQuality?.reasons).toHaveLength(8);
+    expect(status.samples.every((sample) => sample.repo === 'ashlr-hub')).toBe(true);
+    expect(JSON.stringify(status.samples)).not.toContain('/private/workspace');
+  });
+
+  it.each([
+    ['NaN', Number.NaN, 8],
+    ['positive infinity', Number.POSITIVE_INFINITY, 8],
+    ['negative infinity', Number.NEGATIVE_INFINITY, 8],
+    ['non-number', '12', 8],
+    ['negative', -4, 0],
+    ['fractional', 3.9, 3],
+  ])('normalizes hostile %s lane sample limits', (_label, sampleLimit, expected) => {
+    const proposals = Array.from({ length: 12 }, (_, index): Proposal => ({
+      id: `proposal-hostile-limit-${index}`,
+      repo: '/private/workspace/ashlr-hub',
+      origin: 'agent',
+      kind: 'patch',
+      title: `Proposal ${index}`,
+      summary: 'hostile limit fixture',
+      status: 'awaiting-host-merge',
+      createdAt: '2026-07-03T00:00:00.000Z',
+    }));
+    const status = buildFleetLaneLocks({
+      goals: [],
+      proposals,
+      visibleQueueItems: [],
+      sampleLimit: sampleLimit as number,
+    });
+
+    expect(status.samples).toHaveLength(expected);
+    expect(status.samples.length).toBeLessThanOrEqual(8);
+  });
+
+  it('defaults omitted lane source quality to missing and incomplete', () => {
+    const status = buildFleetLaneLocks({ goals: [], proposals: [], visibleQueueItems: [] });
+
+    expect(status.sourceQuality).toMatchObject({
+      sourceState: 'missing',
+      complete: false,
+      reasons: expect.arrayContaining(['goals-missing', 'proposals-missing', 'queue-missing']),
+      sources: {
+        goals: { sourceState: 'missing', complete: false, reasons: ['goals-missing'] },
+        proposals: { sourceState: 'missing', complete: false, reasons: ['proposals-missing'] },
+        queue: { sourceState: 'missing', complete: false, reasons: ['queue-missing'] },
+      },
+    });
+  });
+
+  it('normalizes an incomplete source that claims healthy to degraded', () => {
+    const status = buildFleetLaneLocks({
+      goals: [],
+      proposals: [],
+      visibleQueueItems: [],
+      sourceQuality: {
+        goals: { sourceState: 'healthy', complete: false, reasons: [] },
+        proposals: { sourceState: 'healthy', complete: true, reasons: [] },
+        queue: { sourceState: 'healthy', complete: true, reasons: [] },
+      },
+    });
+
+    expect(status.sourceQuality).toMatchObject({ sourceState: 'degraded', complete: false });
+    expect(status.sourceQuality?.sources.goals).toMatchObject({ sourceState: 'degraded', complete: false });
+  });
+
+  it('omits unquoted absolute paths and scrubs exactly bounded quoted paths from public lane titles', () => {
+    const titles = [
+      'Exact hidden file /private/customer/acme/repo/.env should disappear but useful context remains',
+      'Keep useful prefix /opt/company/private/secrets.txt then verify relative src/core.ts remains',
+      String.raw`Review C:\Users\mason\private\agent.log and keep release note`,
+      String.raw`Share \\server\secret\plans\launch.txt today`,
+      String.raw`Inspect "\\?\UNC\server\share\folder with space\launch.txt" without exposing it`,
+      'Inspect "/Volumes/Client Data/acme/.env" without exposing it',
+      'Forward UNC //server/share/private/launch.txt must disappear',
+      'Keep docs https://example.com/path and useful release context',
+    ];
+    const proposals = titles.map((title, index): Proposal => ({
+      id: `proposal-hostile-path-${index}`,
+      repo: '/private/workspace/ashlr-hub',
+      origin: 'agent',
+      kind: 'patch',
+      title,
+      summary: 'hostile path fixture',
+      status: 'awaiting-host-merge',
+      createdAt: '2026-07-03T00:00:00.000Z',
+    }));
+
+    const status = buildFleetLaneLocks({ goals: [], proposals, visibleQueueItems: [] });
+    const projectedTitles = status.samples.map((sample) => sample.title);
+    const encoded = JSON.stringify(status.samples);
+
+    expect(projectedTitles).toEqual([
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'Inspect [PATH] without exposing it',
+      'Inspect [PATH] without exposing it',
+      undefined,
+      'Keep docs https://example.com/path and useful release context',
+    ]);
+    expect(encoded).not.toContain('/private/customer/acme/repo/.env');
+    expect(encoded).not.toContain('/private');
+    expect(encoded).not.toContain('customer');
+    expect(encoded).not.toContain('acme');
+    expect(encoded).not.toContain('.env');
+    expect(encoded).not.toContain('/opt/company');
+    expect(encoded).not.toContain('C:\\Users');
+    expect(encoded).not.toContain('\\\\server\\secret');
+    expect(encoded).not.toContain('Client Data');
+    expect(encoded).not.toContain('folder with space');
+    expect(encoded).not.toContain('//server/share');
+    expect(encoded).not.toContain('src/core.ts');
+    expect(projectedTitles.every((title) => (title?.length ?? 0) <= 120)).toBe(true);
+
+    const goal = makeGoalRecord('/private/workspace/ashlr-hub', 'goal-hostile-path-title', 'active', 'in-progress');
+    goal.milestones[0]!.title = 'Goal path /private/customer/acme/repo/.env should redact but keep milestone context';
+    const goalStatus = buildFleetLaneLocks({ goals: [goal], proposals: [], visibleQueueItems: [] });
+    const goalEncoded = JSON.stringify(goalStatus.samples);
+    expect(goalStatus.samples[0]?.title).toBeUndefined();
+    expect(goalEncoded).not.toContain('/private/customer/acme/repo/.env');
+    expect(goalEncoded).not.toContain('customer');
+    expect(goalEncoded).not.toContain('acme');
+    expect(goalEncoded).not.toContain('.env');
+  });
+
+  it('replaces hostile goal and proposal references with opaque public handles', () => {
+    const hostileReference = '/\u5ba2\u6237\u7532/private/token=abcdefghijklmnopqrstuvwxyz';
+    const goal = makeGoalRecord('/\u5ba2\u6237\u7532/\u9879\u76ee', 'goal-safe', 'active', 'proposed');
+    goal.milestones[0]!.proposalId = hostileReference;
+    goal.milestones[0]!.title = 'Inspect /tmp/public then /\u041f\u0440\u043e\u0435\u043a\u0442\u044b/\u041a\u043b\u0438\u0435\u043d\u0442/secret.ts before release';
+    const proposal: Proposal = {
+      id: hostileReference,
+      repo: '/\u041f\u0440\u043e\u0435\u043a\u0442\u044b/\u041a\u043b\u0438\u0435\u043d\u0442',
+      origin: 'agent',
+      kind: 'patch',
+      title: 'Inspect /\u5ba2\u6237\u7532/\u9879\u76ee/secret.ts before release',
+      summary: 'hostile reference fixture',
+      status: 'awaiting-host-merge',
+      createdAt: '2026-07-03T00:00:00.000Z',
+    };
+
+    const status = buildFleetLaneLocks({ goals: [goal], proposals: [proposal], visibleQueueItems: [] });
+    const encoded = JSON.stringify(status.samples);
+
+    expect(status.samples).toHaveLength(2);
+    expect(status.samples.every((sample) => (
+      sample.proposalId === undefined || /^p_[0-9a-f]{16}$/.test(sample.proposalId)
+    ))).toBe(true);
+    expect(status.samples.every((sample) => sample.repo === '[PATH]')).toBe(true);
+    expect(status.samples.every((sample) => sample.title === undefined)).toBe(true);
+    expect(status.samples.map((sample) => sample.lane)).toEqual([
+      expect.stringMatching(/^\[PATH\]#goal:g_[0-9a-f]{16}$/),
+      expect.stringMatching(/^\[PATH\]#proposal:p_[0-9a-f]{16}$/),
+    ]);
+    expect(status.samples.every((sample) => sample.goalId === undefined)).toBe(true);
+    expect(status.samples.every((sample) => sample.milestoneId === undefined)).toBe(true);
+    expect(encoded).not.toContain('abcdefghijklmnopqrstuvwxyz');
+    expect(encoded).not.toContain('\u5ba2\u6237\u7532');
+    expect(encoded).not.toContain('\u041f\u0440\u043e\u0435\u043a\u0442\u044b');
+    expect(encoded).not.toContain('private');
+  });
+
+  it('redacts the entire title when an unquoted absolute path has ambiguous spaces', () => {
+    const titles = [
+      'Inspect /Volumes/Client Data/acme/.env before release',
+      String.raw`Inspect C:\Program Files\Client\secret.txt before release`,
+      String.raw`Inspect \\server\share with space\launch.txt before release`,
+      'Inspect /tmp/My File.txt before release',
+      String.raw`Inspect C:\tmp\My File.txt before release`,
+      String.raw`Inspect \\server\share\My File.txt before release`,
+    ];
+    const proposals = titles.map((title, index): Proposal => ({
+      id: `proposal-ambiguous-path-${index}`,
+      repo: '/private/workspace/ashlr-hub',
+      origin: 'agent',
+      kind: 'patch',
+      title,
+      summary: 'ambiguous path fixture',
+      status: 'awaiting-host-merge',
+      createdAt: '2026-07-03T00:00:00.000Z',
+    }));
+
+    const status = buildFleetLaneLocks({ goals: [], proposals, visibleQueueItems: [] });
+
+    expect(status.samples.every((sample) => sample.title === undefined)).toBe(true);
+    expect(JSON.stringify(status.samples)).not.toMatch(/Client Data|Program Files|share with space|My File/);
+  });
+
+  it('publishes only deterministic opaque handles and omits secret-or-path-ambiguous metadata', () => {
+    const secret = ['sk', 'live', 'abcdefghijklmnopqrstuvwxyz'].join('_');
+    const project = `/private/workspace/${secret}`;
+    const goal = makeGoalRecord(project, `goal-${secret}`, 'active', 'in-progress');
+    goal.milestones[0]!.id = `milestone-${secret}`;
+    goal.milestones[0]!.proposalId = `proposal-${secret}`;
+    goal.milestones[0]!.title = `Inspect ${secret} under /Volumes/Client Data`;
+    const proposal: Proposal = {
+      id: `proposal-${secret}`,
+      repo: project,
+      origin: 'agent',
+      kind: 'patch',
+      title: `Release ${secret} from /Volumes/Client Data`,
+      summary: 'hostile public projection fixture',
+      status: 'awaiting-host-merge',
+      createdAt: '2026-07-03T00:00:00.000Z',
+    };
+    const input = { goals: [goal], proposals: [proposal], visibleQueueItems: [] };
+
+    const first = buildFleetLaneLocks(input);
+    const second = buildFleetLaneLocks(input);
+    const encoded = JSON.stringify(first.samples);
+
+    expect(first.samples).toHaveLength(2);
+    expect(first.samples.map((sample) => sample.lane)).toEqual(second.samples.map((sample) => sample.lane));
+    expect(first.samples.every((sample) => sample.repo === null)).toBe(true);
+    expect(first.samples.every((sample) => sample.title === undefined)).toBe(true);
+    expect(first.samples.every((sample) => /^unknown#(?:goal:g_|proposal:p_)[0-9a-f]{16}$/.test(sample.lane))).toBe(true);
+    expect(first.samples[0]).toMatchObject({
+      proposalId: expect.stringMatching(/^p_[0-9a-f]{16}$/),
+    });
+    expect(first.samples[0]).not.toHaveProperty('goalId');
+    expect(first.samples[0]).not.toHaveProperty('milestoneId');
+    expect(encoded).not.toContain(secret);
+    expect(encoded).not.toContain('Client Data');
+    expect(encoded).not.toContain('goal-sk_live');
+    expect(encoded).not.toContain('proposal-sk_live');
   });
 
   it('surfaces missing verify repo names, project kinds, and reasons', async () => {
@@ -7086,7 +7413,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       topBlocker: null,
       freshness: { overall: 'fresh' },
       sourceSummary: {
-        healthy: 6,
+        healthy: 7,
         degraded: 0,
         blocked: 0,
         unavailable: 0,
@@ -7100,6 +7427,10 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
     expect(s.queue.repos?.registry).toBeUndefined();
     expect(s.autonomousShipReadiness?.sourceQualitySummary?.['healthy-zero']).toBeGreaterThan(0);
+    expect(s.autonomousShipReadiness?.sources.find((source) => source.id === 'lane-locks')).toMatchObject({
+      status: 'healthy',
+      sourceQuality: { badge: 'healthy-zero', empty: true },
+    });
     expect(s.autonomousShipReadiness?.evidenceMatrix).toMatchObject({
       version: 1,
       state: 'cold-start',
@@ -7144,6 +7475,46 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         effectivenessPhase: 'merge-ready',
         preflightReady: 1,
       },
+    });
+  });
+
+  it('blocks ship readiness when recent applied work lacks verification', async () => {
+    const repo = join(tmpHome, 'repo');
+    writeBacklogSnapshot(tmpHome, repo, [], new Date().toISOString());
+    writeRunningDaemon(tmpHome, [], new Date().toISOString());
+    const cfg = withFoundry({
+      autoMerge: { enabled: true, trustBasis: 'verification', maxRisk: 'low' },
+    });
+    const ready = createSignedProposal(cfg, {
+      title: 'Ready docs change',
+      diff: docsDiff('ready alongside unverified work'),
+      verifyResult: { passed: true, source: 'manual' },
+    });
+    recordFrontierShipDecision(ready);
+    const unverified = createProposal({
+      repo,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'Applied without verification',
+      summary: 'must remain visible to readiness',
+      diff: docsDiff('unverified applied work'),
+    }, cfg);
+    setStatus(unverified.id, 'applied');
+
+    const status = await buildFleetStatus(cfg);
+
+    expect(status.laneLocks?.unverifiedApplied).toBe(1);
+    expect(status.autonomousShipReadiness).toMatchObject({
+      verdict: 'blocked',
+      topBlocker: {
+        id: 'unverified-applied-work',
+        severity: 'high',
+        source: 'lane-locks',
+      },
+    });
+    expect(status.autonomousShipReadiness?.sources.find((source) => source.id === 'lane-locks')).toMatchObject({
+      status: 'blocked',
+      detail: '1 applied proposal(s) lack verification',
     });
   });
 
@@ -7193,6 +7564,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
 
     const status = await buildFleetStatus(cfg);
     const queueSource = status.autonomousShipReadiness?.sources.find((source) => source.id === 'queue');
+    const laneSource = status.autonomousShipReadiness?.sources.find((source) => source.id === 'lane-locks');
 
     expect(status.queue.repos).toMatchObject({
       enrolled: 0,
@@ -7215,6 +7587,25 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         sourcePresent: true,
       },
     });
+    expect(laneSource).toMatchObject({
+      status: 'degraded',
+      sourceQuality: { badge: 'degraded-source', sourcePresent: true },
+    });
+    expect(status.laneLocks?.sourceQuality?.sources.queue).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      reasons: ['queue-incomplete', 'queue-unavailable'],
+    });
+    expect(status.laneLocks?.sourceQuality?.sources.enrollment).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      reasons: ['enrollment-degraded'],
+    });
+    const laneCli = formatFleetStatus(status);
+    expect(laneCli).toContain('observed active');
+    expect(laneCli).toContain('observed stale');
+    expect(laneCli).toContain('observed handoff');
+    expect(laneCli).toContain('observed unverified');
     expect(status.autonomousShipReadiness).toMatchObject({
       verdict: 'blocked',
       topBlocker: {
@@ -8294,7 +8685,7 @@ describe('buildFleetLaneLocks — pure derived lane status', () => {
     expect(status.unverifiedApplied).toBe(1);
     expect(status.samples).toContainEqual(expect.objectContaining({
       reason: 'unverified-applied',
-      proposalId: 'prop-old',
+      proposalId: expect.stringMatching(/^p_[0-9a-f]{16}$/),
     }));
   });
 });
@@ -8712,9 +9103,81 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     });
 
     expect(out).toContain(
-      'lane locks:    2 active, 1 stale, 1 handoff, 1 unverified, 2 visible locked',
+      'lane locks:    2 observed active, 1 observed stale, 1 observed handoff, ' +
+        '1 observed unverified, 2 observed visible locked',
     );
+    expect(out).toContain('lane source:   degraded (incomplete)');
     expect(out).toContain('lock sample:   stale-in-progress a /repo/a#goal:goal-lane-a');
+  });
+
+  it('qualifies each lane count from its own source completeness', () => {
+    const out = formatFleetStatus({
+      generatedAt: '2026-06-17T00:00:00.000Z',
+      daemon: { running: false, lastTickAt: null, todaySpentUsd: 0 },
+      backends: [],
+      queue: { backlogItems: 2 },
+      proposals: { pending: 0, frontierPending: 0, applied: 1 },
+      merges: { recent: 0 },
+      laneLocks: {
+        generatedAt: '2026-06-17T00:00:00.000Z',
+        active: 2,
+        staleInProgress: 1,
+        awaitingHostMerge: 1,
+        unverifiedApplied: 1,
+        lockedVisibleItems: 2,
+        samples: [],
+        sourceQuality: {
+          sourceState: 'degraded',
+          complete: false,
+          reasons: ['proposals-incomplete'],
+          sources: {
+            enrollment: { sourceState: 'healthy', complete: true, reasons: [] },
+            goals: { sourceState: 'healthy', complete: true, reasons: [] },
+            proposals: { sourceState: 'degraded', complete: false, reasons: ['proposals-incomplete'] },
+            queue: { sourceState: 'healthy', complete: true, reasons: [] },
+          },
+        },
+      },
+      killed: false,
+    });
+
+    expect(out).toContain(
+      'lane locks:    2 observed active, 1 observed stale, 1 observed handoff, ' +
+        '1 observed unverified, 2 observed visible locked',
+    );
+    expect(out).toContain('lane source:   degraded (proposals-incomplete)');
+  });
+
+  it('renders intermediate lane snapshots without a per-source quality map as partial', () => {
+    const out = formatFleetStatus({
+      generatedAt: '2026-06-17T00:00:00.000Z',
+      daemon: { running: false, lastTickAt: null, todaySpentUsd: 0 },
+      backends: [],
+      queue: { backlogItems: 0 },
+      proposals: { pending: 0, frontierPending: 0, applied: 0 },
+      merges: { recent: 0 },
+      laneLocks: {
+        generatedAt: '2026-06-17T00:00:00.000Z',
+        active: 1,
+        staleInProgress: 0,
+        awaitingHostMerge: 0,
+        unverifiedApplied: 0,
+        lockedVisibleItems: 1,
+        samples: [],
+        sourceQuality: {
+          sourceState: 'degraded',
+          complete: false,
+          reasons: ['goals-incomplete'],
+        } as NonNullable<FleetStatus['laneLocks']>['sourceQuality'],
+      },
+      killed: false,
+    });
+
+    expect(out).toContain(
+      'lane locks:    1 observed active, 0 observed stale, 0 observed handoff, ' +
+        '0 observed unverified, 1 observed visible locked',
+    );
+    expect(out).toContain('lane source:   degraded (goals-incomplete)');
   });
 
   it('renders generated queue work counts compactly', () => {

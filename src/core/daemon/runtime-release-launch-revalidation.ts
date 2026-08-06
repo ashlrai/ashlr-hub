@@ -23,8 +23,12 @@ import {
   verifyUnsignedRuntimeReleaseManifest,
   type UnsignedRuntimeReleaseArtifact,
 } from './runtime-release-manifest.js';
-import { RUNTIME_RELEASE_INSTALLED_DEPENDENCY_TREE_DIGEST_DOMAIN_V2 } from
-  './runtime-release-dependency-inventory.js';
+import {
+  RUNTIME_RELEASE_INSTALLED_DEPENDENCY_TREE_DIGEST_DOMAIN_V2,
+  runtimeDependencyDeclaredBinTarget,
+  runtimeDependencyBinLinkOwnership,
+  runtimeDependencyPackageNameFromPath,
+} from './runtime-release-dependency-inventory.js';
 import {
   parseRuntimeReleaseEvidenceEnvelope,
   parseRuntimeReleaseEvidenceTrustRoot,
@@ -76,6 +80,7 @@ type JsonValue =
   | { [key: string]: JsonValue };
 
 interface FileObservation {
+  bytes?: Buffer;
   content: {
     executable: boolean;
     path: string;
@@ -458,6 +463,7 @@ function snapshotFile(
   testHooks?: RuntimeReleaseLaunchRevalidationTestHooks,
   deadline = observationDeadline(),
   expectedSnapshot?: BigIntStats,
+  captureBytes = false,
 ): FileObservation {
   requireBeforeDeadline(deadline, label);
   const absolute = resolve(filePath);
@@ -486,6 +492,8 @@ function snapshotFile(
     if (openedBefore.nlink !== 1n) throw new Error(`${label} has multiple hard links`);
     requireImmutable(openedBefore, label);
     const size = Number(openedBefore.size);
+    if (captureBytes && size > 1024 * 1024) throw new Error(`${label} exceeds byte limit`);
+    const captured = captureBytes ? Buffer.allocUnsafe(size) : undefined;
     const hash = createHash('sha256');
     let offset = 0;
     while (offset < size) {
@@ -495,6 +503,7 @@ function snapshotFile(
       const count = readSync(fd, chunk, 0, length, offset);
       if (count <= 0) throw new Error(`${label} changed during read`);
       hash.update(count === length ? chunk : chunk.subarray(0, count));
+      if (captured) chunk.copy(captured, offset, 0, count);
       offset += count;
     }
     requireBeforeDeadline(deadline, label);
@@ -515,6 +524,7 @@ function snapshotFile(
     requireImmutable(openedAfter, label);
     requireImmutable(after, label);
     return {
+      ...(captured ? { bytes: captured } : {}),
       content: {
         executable: (after.mode & 0o111n) !== 0n,
         path: logicalPath,
@@ -536,10 +546,9 @@ function snapshotDependencyBinLink(
   linkPath: string,
   logicalPath: string,
   expectedSnapshot: BigIntStats,
+  packageJsonByPath: Map<string, Record<string, unknown>>,
+  deadline: RuntimeReleaseObservationDeadline,
 ): { content: Record<string, JsonValue>; stable: { identity: string; path: string } } {
-  if (!logicalPath.startsWith('.bin/') || logicalPath.slice('.bin/'.length).includes('/')) {
-    throw new Error('runtime release dependency root contains a symlink');
-  }
   const before = lstatSync(linkPath, { bigint: true });
   if (!before.isSymbolicLink() || !sameSnapshot(expectedSnapshot, before)) {
     throw new Error('runtime release dependency bin link changed before read');
@@ -553,13 +562,55 @@ function snapshotDependencyBinLink(
   }
   const linkTarget = readlinkSync(linkPath, 'utf8');
   if (linkTarget.length === 0 || linkTarget.length > 4_096 || /[\0\r\n]/u.test(linkTarget) ||
-    isAbsolute(linkTarget) || linkTarget.includes('\\')) {
+    isAbsolute(linkTarget) || /^[A-Za-z]:[\\/]/u.test(linkTarget) || linkTarget.includes('\\')) {
     throw new Error('runtime release dependency bin link target is invalid');
   }
   const targetPath = resolve(dirname(linkPath), linkTarget);
   const targetRealPath = realpathSync(targetPath);
   if (!contained(dependencyRoot, targetRealPath) || targetRealPath !== targetPath) {
     throw new Error('runtime release dependency bin link escapes dependency root');
+  }
+  const targetLogicalPath = relative(dependencyRoot, targetPath).split(sep).join('/');
+  const ownership = runtimeDependencyBinLinkOwnership(logicalPath, targetLogicalPath);
+  if (!ownership) {
+    throw new Error('runtime release dependency root contains an unexpected symlink');
+  }
+  let packageJson = packageJsonByPath.get(ownership.targetPackagePath);
+  if (!packageJson) {
+    const packageJsonPath = join(
+      dependencyRoot,
+      ...ownership.targetPackagePath.split('/'),
+      'package.json',
+    );
+    const observed = snapshotFile(
+      packageJsonPath,
+      `${ownership.targetPackagePath}/package.json`,
+      'runtime release dependency bin package manifest',
+      dependencyRoot,
+      undefined,
+      deadline,
+      undefined,
+      true,
+    );
+    const bytes = observed.bytes!;
+    const text = bytes.toString('utf8');
+    if (!Buffer.from(text, 'utf8').equals(bytes)) {
+      throw new Error('runtime release dependency bin package manifest is not valid UTF-8');
+    }
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error();
+      packageJson = parsed as Record<string, unknown>;
+    } catch {
+      throw new Error('runtime release dependency bin package manifest is not valid JSON');
+    }
+    packageJsonByPath.set(ownership.targetPackagePath, packageJson);
+  }
+  const command = logicalPath.slice(logicalPath.lastIndexOf('/') + 1);
+  const expectedName = runtimeDependencyPackageNameFromPath(ownership.targetPackagePath);
+  const declaredTarget = runtimeDependencyDeclaredBinTarget(packageJson, expectedName, command);
+  if (!declaredTarget || targetLogicalPath !== `${ownership.targetPackagePath}/${declaredTarget}`) {
+    throw new Error('runtime release dependency bin link does not match declared package bin');
   }
   const target = lstatSync(targetPath, { bigint: true });
   if (!target.isFile() || target.isSymbolicLink() || target.nlink !== 1n) {
@@ -655,6 +706,7 @@ function observeDirectoryTree(
   const root = canonicalDirectory(rootPath, label);
   const content: Array<Record<string, JsonValue>> = [];
   const stable: Array<{ identity: string; path: string }> = [];
+  const dependencyBinPackageJson = new Map<string, Record<string, unknown>>();
   const budget: DirectoryObservationBudget = {
     bytes: 0,
     deadline,
@@ -705,7 +757,9 @@ function observeDirectoryTree(
         const snapshot = lstatSync(childPath, { bigint: true });
         requireBeforeDeadline(budget.deadline, label);
         if (entry.isSymbolicLink() || snapshot.isSymbolicLink()) {
-          if (!entry.isSymbolicLink() || !snapshot.isSymbolicLink() || logicalPath !== '.bin') {
+          const isDependencyBinDirectory = logicalPath === '.bin' ||
+            logicalPath.endsWith('/node_modules/.bin');
+          if (!entry.isSymbolicLink() || !snapshot.isSymbolicLink() || !isDependencyBinDirectory) {
             throw new Error(`${label} contains a symlink`);
           }
           budget.files += 1;
@@ -755,6 +809,8 @@ function observeDirectoryTree(
           childPath,
           childLogical,
           entry.snapshot,
+          dependencyBinPackageJson,
+          budget.deadline,
         );
         content.push(observation.content);
         stable.push(observation.stable);

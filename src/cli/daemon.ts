@@ -29,6 +29,7 @@ import { DEFAULT_DIAGNOSTIC_RESLICE_DRAIN_LIMIT } from '../core/types.js';
 import type { AshlrConfig, DaemonConfig, DaemonDrainMode, DaemonState } from '../core/types.js';
 import type { ServiceInstallOptions, ServiceStatusResult } from '../core/daemon/service.js';
 import { serviceActivity } from '../core/daemon/service-activity.js';
+import { assertResidentServiceInstallAuthorized } from '../core/daemon/service-install-authority.js';
 import type { PolicyMutationResult } from '../core/sandbox/policy.js';
 
 type DaemonSubcommand = 'start' | 'stop' | 'status' | 'install' | 'uninstall' | 'service-status';
@@ -51,7 +52,7 @@ const DAEMON_USAGE: Record<DaemonSubcommand, string> = {
     'Usage: ashlr daemon start [--once] [--dry-run] [--drain diagnostic-reslices] [--limit <n>] [--budget <usd>] [--interval <ms>] [--parallel <n>]',
   stop: 'Usage: ashlr daemon stop',
   status: 'Usage: ashlr daemon status [--json]',
-  install: 'Usage: ashlr daemon install [--no-autostart]',
+  install: 'Usage: ashlr daemon install [--no-autostart] (temporarily unavailable)',
   uninstall: 'Usage: ashlr daemon uninstall',
   'service-status': 'Usage: ashlr daemon service-status [--json]',
 };
@@ -62,7 +63,7 @@ Subcommands:
   start           Run the proposal-only daemon
   stop            Request an orderly daemon shutdown
   status          Show daemon state [--json]
-  install         Install the OS service [--no-autostart]
+  install         Temporarily unavailable (resident service mutation restricted)
   uninstall       Remove the OS service
   service-status  Show OS service state [--json]
 
@@ -750,6 +751,19 @@ async function cmdDaemonInstall(autostart: boolean): Promise<number> {
   const tty = process.stdout.isTTY === true;
   const col = makeColors(tty);
 
+  try {
+    assertResidentServiceInstallAuthorized();
+  } catch (error) {
+    console.error(
+      col.red('error: ')
+      + 'daemon service installation is temporarily unavailable: '
+      + (error instanceof Error ? error.message : String(error))
+      + '. No config or service state was inspected or changed. '
+      + 'Existing services support status and uninstall only.',
+    );
+    return 1;
+  }
+
   const svcMod = await importServiceManager();
   if (!svcMod) {
     console.error(col.red('error: ') + 'daemon service manager not available (M93 module not built).');
@@ -860,6 +874,13 @@ async function cmdDaemonServiceStatus(jsonMode: boolean): Promise<number> {
   console.log(col.bold('  ashlr daemon service-status'));
   console.log('');
   console.log('  ' + col.bold('platform:   ') + col.dim(status.platformSpec));
+  console.log('  ' + col.bold('registration:') + ' ' + (
+    status.registrationState === 'present'
+      ? col.green('present')
+      : status.registrationState === 'absent'
+        ? col.dim('absent')
+        : col.yellow('unknown (not proven absent)')
+  ));
   console.log('  ' + col.bold('installed:  ') + (status.installed ? col.green('yes') : col.dim('no')));
   console.log(
     '  ' + col.bold('running:    ') +
@@ -879,7 +900,8 @@ async function cmdDaemonServiceStatus(jsonMode: boolean): Promise<number> {
   }
   console.log('');
   if (!status.installed) {
-    console.log(col.dim('  Run `ashlr daemon install` to register as an OS service.'));
+    console.log(col.dim('  Resident service installation is temporarily unavailable.'));
+    console.log(col.dim('  One-shot admitted workflows remain available.'));
     console.log('');
   }
   return 0;

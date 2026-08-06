@@ -524,17 +524,32 @@ export function runTrustedNpmCli(args, options = {}, runtime = {}) {
   const {
     environment: launchEnvironment = process.env,
     env: requestedEnvironment = {},
+    cwd: requestedWorkingDirectory,
     ...spawnOptions
   } = options;
   const timeout = spawnOptions.timeout ?? MAX_NPM_CLI_TIMEOUT_MS;
   if (!Number.isSafeInteger(timeout) || timeout <= 0 || timeout > MAX_NPM_CLI_TIMEOUT_MS) {
     throw new Error('npm CLI timeout is invalid');
   }
+  if (Object.keys(requestedEnvironment).length > 0) {
+    throw new Error('npm CLI environment overrides are unsupported');
+  }
+  const workingDirectory = resolve(requestedWorkingDirectory ?? process.cwd());
   const snapshotContainer = createNpmRuntimeSnapshotContainer();
   const snapshotContainerIdentity = lstatSync(snapshotContainer);
   const childTemporaryRoot = join(snapshotContainer, 'tmp');
   mkdirSync(childTemporaryRoot, { mode: 0o700 });
   const childTemporaryIdentity = lstatSync(childTemporaryRoot);
+  const childHome = join(childTemporaryRoot, 'home');
+  const childCache = join(childTemporaryRoot, 'cache');
+  const childWorkingRoot = join(childTemporaryRoot, 'work');
+  const childUserConfig = join(childTemporaryRoot, 'user.npmrc');
+  const childGlobalConfig = join(childTemporaryRoot, 'global.npmrc');
+  mkdirSync(childHome, { mode: 0o700 });
+  mkdirSync(childCache, { mode: 0o700 });
+  mkdirSync(childWorkingRoot, { mode: 0o700 });
+  writeFileSync(childUserConfig, '', { encoding: 'utf8', mode: 0o600 });
+  writeFileSync(childGlobalConfig, '', { encoding: 'utf8', mode: 0o600 });
   let launch;
   let snapshot;
   try {
@@ -547,21 +562,40 @@ export function runTrustedNpmCli(args, options = {}, runtime = {}) {
     if (observeNpmRuntimeClosure(snapshot.root) !== snapshot.snapshotClosureSha256) {
       throw new Error('npm snapshot changed before execution');
     }
-    const environment = { ...process.env, ...requestedEnvironment };
-    delete environment.NODE_OPTIONS;
-    delete environment.NODE_PATH;
-    environment.ASHLR_NPM_SNAPSHOT_ROOT = snapshot.root;
-    environment.TEMP = childTemporaryRoot;
-    environment.TMP = childTemporaryRoot;
-    environment.TMPDIR = childTemporaryRoot;
-    environment.npm_execpath = snapshot.npmCliPath;
-    environment.npm_node_execpath = launch.command;
-    environment.npm_config_ignore_scripts = 'true';
+    const controlledPathKey = process.platform === 'win32' ? 'Path' : 'PATH';
+    const trustedNodeDirectory = dirname(realpathSync(launch.command));
+    const environment = {
+      ASHLR_NPM_SNAPSHOT_ROOT: snapshot.root,
+      HOME: childHome,
+      [controlledPathKey]: trustedNodeDirectory,
+      TEMP: childTemporaryRoot,
+      TMP: childTemporaryRoot,
+      TMPDIR: childTemporaryRoot,
+      USERPROFILE: childHome,
+      npm_config_audit: 'false',
+      npm_config_cache: childCache,
+      npm_config_fund: 'false',
+      npm_config_globalconfig: childGlobalConfig,
+      npm_config_ignore_scripts: 'true',
+      npm_config_loglevel: 'error',
+      npm_config_update_notifier: 'false',
+      npm_config_userconfig: childUserConfig,
+      npm_execpath: snapshot.npmCliPath,
+      npm_node_execpath: launch.command,
+    };
     const result = spawnSync(
       launch.command,
-      ['--eval', NPM_CLI_BOOTSTRAP, snapshot.npmCliPath, ...args],
+      [
+        '--eval',
+        NPM_CLI_BOOTSTRAP,
+        snapshot.npmCliPath,
+        ...(args[0] === 'pack' && requestedWorkingDirectory !== undefined
+          ? ['pack', workingDirectory, ...args.slice(1)]
+          : args),
+      ],
       {
         ...spawnOptions,
+        cwd: childWorkingRoot,
         encoding: spawnOptions.encoding ?? 'utf8',
         env: environment,
         input: launch.npmCli.bytes,

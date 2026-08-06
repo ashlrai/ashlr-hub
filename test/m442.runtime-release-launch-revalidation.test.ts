@@ -86,7 +86,11 @@ function readFileNames(path: string): string[] {
   return readdirSync(path);
 }
 
-function fixture(declaredRollbackTargetDigest?: string, includeDependencyBinLink = false): Fixture {
+function fixture(
+  declaredRollbackTargetDigest?: string,
+  includeDependencyBinLink = false,
+  includeNestedDependencyBinLink = false,
+): Fixture {
   const parent = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-launch-revalidation-')));
   tempDirs.push(parent);
   const packageRoot = join(parent, REVISION);
@@ -112,6 +116,12 @@ function fixture(declaredRollbackTargetDigest?: string, includeDependencyBinLink
         dependencies: { example: '1.0.0' },
       },
       'node_modules/example': { version: '1.0.0' },
+      ...(includeNestedDependencyBinLink
+        ? {
+          'node_modules/example/node_modules/nested-bin': { version: '2.0.0' },
+          'node_modules/example/node_modules/nested-bin/node_modules/deeper': { version: '3.0.0' },
+        }
+        : {}),
     },
   })}\n`);
   write(join(packageRoot, 'bin', 'ashlr'), '#!/usr/bin/env node\n', 0o755);
@@ -119,8 +129,52 @@ function fixture(declaredRollbackTargetDigest?: string, includeDependencyBinLink
   write(join(packageRoot, 'dist', 'core', 'worker.js'), 'export const worker = true;\n');
   write(join(packageRoot, 'scripts', 'run-verify-command.mjs'), 'export const run = true;\n');
   const dependencyRoot = join(packageRoot, 'node_modules');
-  write(join(dependencyRoot, 'example', 'package.json'), '{"name":"example","version":"1.0.0"}\n');
+  write(
+    join(dependencyRoot, 'example', 'package.json'),
+    '{"name":"example","version":"1.0.0","bin":{"example":"index.js"}}\n',
+  );
   write(join(dependencyRoot, 'example', 'index.js'), 'export const dependency = true;\n');
+  if (includeNestedDependencyBinLink) {
+    write(
+      join(dependencyRoot, 'example', 'node_modules', 'nested-bin', 'package.json'),
+      '{"name":"nested-bin","version":"2.0.0","bin":{"nested":"cli.js"}}\n',
+    );
+    write(
+      join(dependencyRoot, 'example', 'node_modules', 'nested-bin', 'cli.js'),
+      '#!/usr/bin/env node\n',
+      0o755,
+    );
+    write(
+      join(dependencyRoot, 'example', 'node_modules', 'nested-bin', 'alternate.js'),
+      '#!/usr/bin/env node\n',
+      0o755,
+    );
+    write(
+      join(
+        dependencyRoot,
+        'example',
+        'node_modules',
+        'nested-bin',
+        'node_modules',
+        'deeper',
+        'package.json',
+      ),
+      '{"name":"deeper","version":"3.0.0","bin":{"deeper":"cli.js"}}\n',
+    );
+    write(
+      join(
+        dependencyRoot,
+        'example',
+        'node_modules',
+        'nested-bin',
+        'node_modules',
+        'deeper',
+        'cli.js',
+      ),
+      '#!/usr/bin/env node\n',
+      0o755,
+    );
+  }
   const inventory = buildRuntimeReleaseDependencyInventory(packageRoot);
   if (!inventory.ok) throw new Error(inventory.reason);
   write(
@@ -130,6 +184,11 @@ function fixture(declaredRollbackTargetDigest?: string, includeDependencyBinLink
   if (includeDependencyBinLink && process.platform !== 'win32') {
     mkdirSync(join(dependencyRoot, '.bin'));
     symlinkSync('../example/index.js', join(dependencyRoot, '.bin', 'example'));
+  }
+  if (includeNestedDependencyBinLink && process.platform !== 'win32') {
+    const nestedBin = join(dependencyRoot, 'example', 'node_modules', '.bin');
+    mkdirSync(nestedBin);
+    symlinkSync('../nested-bin/cli.js', join(nestedBin, 'nested'));
   }
   const interpreterPath = join(parent, 'node');
   write(interpreterPath, 'fixture node binary\n', 0o755);
@@ -623,6 +682,93 @@ describe('runtime release closed launch-input observation', () => {
       expect(observed.ok).toBe(true);
       if (!observed.ok) return;
       expect(observed.receipt.roots.dependencyRootSha256).toMatch(/^[a-f0-9]{64}$/u);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'admits a signer-bound package-owned nested npm dependency bin link',
+    () => {
+      const release = fixture(undefined, false, true);
+      const observed = observeRuntimeReleaseImmutableStagedTree(stageOptions(release));
+      expect(observed.ok).toBe(true);
+      if (!observed.ok) return;
+      expect(observed.receipt.roots.dependencyRootSha256).toMatch(/^[a-f0-9]{64}$/u);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects hostile nested bin mappings during launch revalidation',
+    () => {
+      const cases = [
+        {
+          expected: 'runtime release dependency bin link does not match declared package bin',
+          mutate: (release: Fixture) => {
+            const bin = join(release.dependencyRoot, 'example', 'node_modules', '.bin');
+            unlinkSync(join(bin, 'nested'));
+            symlinkSync('../nested-bin/cli.js', join(bin, 'invented'));
+          },
+        },
+        {
+          expected: 'runtime release dependency bin link does not match declared package bin',
+          mutate: (release: Fixture) => {
+            writeFileSync(
+              join(
+                release.dependencyRoot,
+                'example',
+                'node_modules',
+                'nested-bin',
+                'package.json',
+              ),
+              '{"name":"nested-bin","version":"2.0.0"}\n',
+            );
+          },
+        },
+        {
+          expected: 'runtime release dependency bin link does not match declared package bin',
+          mutate: (release: Fixture) => {
+            const link = join(
+              release.dependencyRoot,
+              'example',
+              'node_modules',
+              '.bin',
+              'nested',
+            );
+            unlinkSync(link);
+            symlinkSync('../nested-bin/alternate.js', link);
+          },
+        },
+        {
+          expected: 'runtime release dependency root contains an unexpected symlink',
+          mutate: (release: Fixture) => {
+            const link = join(
+              release.dependencyRoot,
+              'example',
+              'node_modules',
+              '.bin',
+              'nested',
+            );
+            unlinkSync(link);
+            symlinkSync('../nested-bin/node_modules/deeper/cli.js', link);
+          },
+        },
+      ];
+      for (const entry of cases) {
+        const release = fixture(undefined, false, true);
+        const options = stageOptions(release) as ReturnType<typeof stageOptions> & {
+          __testHooks?: { afterManifestVerification?: () => void };
+        };
+        options.__testHooks = {
+          afterManifestVerification: () => {
+            chmodTree(release.packageRoot, false);
+            entry.mutate(release);
+            chmodTree(release.packageRoot, true);
+          },
+        };
+        expect(observeRuntimeReleaseImmutableStagedTree(options)).toEqual({
+          ok: false,
+          reason: entry.expected,
+        });
+      }
     },
   );
 

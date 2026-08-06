@@ -32,6 +32,8 @@ beforeEach(() => {
   tmpHome = mkdtempSync(join(tmpdir(), 'ashlr-m112-'));
   vi.stubEnv('HOME', tmpHome);
   vi.stubEnv('USERPROFILE', tmpHome);
+  mockAssertResidentServiceInstallAuthorized.mockReset();
+  mockAssertResidentServiceInstallAuthorized.mockImplementation(() => {});
 });
 
 afterEach(() => {
@@ -72,6 +74,7 @@ vi.mock('node:fs', async (importOriginal) => {
 // ---------------------------------------------------------------------------
 
 const mockInstall = vi.fn(async () => { /* no-op */ });
+const mockAssertResidentServiceInstallAuthorized = vi.fn(() => {});
 const mockServiceStatus = vi.fn(() => ({
   installed: true,
   running: true,
@@ -85,6 +88,10 @@ vi.mock('../src/core/daemon/service.js', () => ({
   generateServiceDefinition: vi.fn(),
   uninstall: vi.fn(),
   execFileSync: vi.fn(),
+}));
+
+vi.mock('../src/core/daemon/service-install-authority.js', () => ({
+  assertResidentServiceInstallAuthorized: () => mockAssertResidentServiceInstallAuthorized(),
 }));
 
 // ---------------------------------------------------------------------------
@@ -125,13 +132,15 @@ let fakeConfig: Record<string, unknown> = { roots: [], version: 1 };
 
 // Track saveConfig calls for assertions
 let savedConfigs: Record<string, unknown>[] = [];
+const mockLoadConfig = vi.fn(() => ({ ...fakeConfig }));
+const mockSaveConfig = vi.fn((cfg: unknown) => {
+  fakeConfig = { ...(cfg as Record<string, unknown>) };
+  savedConfigs.push(fakeConfig);
+});
 
 vi.mock('../src/core/config.js', () => ({
-  loadConfig:  () => ({ ...fakeConfig }),
-  saveConfig:  (cfg: unknown) => {
-    fakeConfig = { ...(cfg as Record<string, unknown>) };
-    savedConfigs.push(fakeConfig);
-  },
+  loadConfig: () => mockLoadConfig(),
+  saveConfig: (cfg: unknown) => mockSaveConfig(cfg),
 }));
 
 // ---------------------------------------------------------------------------
@@ -178,23 +187,34 @@ describe('M112 — cmdWorker setup', () => {
     savedConfigs = [];
     mockSetupWizard.mockClear();
     mockInstall.mockClear();
+    mockLoadConfig.mockClear();
+    mockSaveConfig.mockClear();
     mockEnroll.mockClear();
     mockListEnrolled.mockReturnValue([]);
   });
 
-  it('calls setupWizard + installService with keepAwake: true', async () => {
+  it('stops setup without a success summary when the shared install boundary denies authority', async () => {
+    mockAssertResidentServiceInstallAuthorized.mockImplementationOnce(() => {
+      throw new Error('resident service install/reinstall/repair/restart authority is unavailable');
+    });
     const { cmdWorker } = await importWorker();
     const { lines } = captureConsole();
 
     const exit = await cmdWorker(['setup', '--user', 'WorkerBot', '--yes']);
 
-    expect(exit).toBe(0);
-    expect(mockSetupWizard).toHaveBeenCalledOnce();
-    // setupWizard(cfg, opts) — opts is the second argument (index 1)
-    expect(mockSetupWizard.mock.calls[0]?.[1]).toMatchObject({ userName: 'WorkerBot', yes: true });
-    expect(mockInstall).toHaveBeenCalledWith(expect.objectContaining({ keepAwake: true }));
+    expect(exit).toBe(1);
+    expect(mockLoadConfig).not.toHaveBeenCalled();
+    expect(mockSetupWizard).not.toHaveBeenCalled();
+    expect(mockEnroll).not.toHaveBeenCalled();
+    expect(mockSaveConfig).not.toHaveBeenCalled();
+    expect(mockInstall).not.toHaveBeenCalled();
     const output = lines.join('\n');
-    expect(output).toMatch(/worker/i);
+    expect(output).toContain('worker setup is temporarily unavailable');
+    expect(output).toContain('resident service install/reinstall/repair/restart authority is unavailable');
+    expect(output).toContain('No config, enrollment, queue, setup-wizard, or service mutation was attempted');
+    expect(output).not.toContain('this Mac is now worker');
+    expect(output).not.toContain('keepAwake: on');
+    expect(mockServiceStatus).not.toHaveBeenCalled();
   });
 
   it('enrolls repos from --repos flag', async () => {
@@ -358,11 +378,12 @@ describe('M112 — cmdWorker status', () => {
 describe('M112 — cmdWorker error paths', () => {
   it('unknown subcommand → exits 1', async () => {
     const { cmdWorker } = await importWorker();
-    captureConsole();
+    const { lines } = captureConsole();
 
     const exit = await cmdWorker(['unknown-sub']);
 
     expect(exit).toBe(1);
+    expect(lines.join('\n')).toContain('temporarily unavailable; performs no setup mutation');
   });
 
   it('no subcommand → exits 1', async () => {

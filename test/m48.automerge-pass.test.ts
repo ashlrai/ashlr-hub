@@ -197,6 +197,31 @@ function verificationCfg(): AshlrConfig {
 
 const CURRENT_BASE_HEAD = 'current-base-head';
 
+function successfulVerificationTransaction() {
+  return {
+    verify: {
+      ok: true,
+      ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+      detail: 'mock verification passed',
+      baseBranch: 'main',
+      baseHead: '0123456789abcdef',
+    },
+    verifyResult: {
+      passed: true,
+      ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+      detail: 'mock verification passed',
+      baseBranch: 'main',
+      baseHead: '0123456789abcdef',
+      diffHash: 'mock-diff-hash',
+      verifiedAt: '2026-07-14T00:00:00.000Z',
+      source: 'auto-merge-preflight',
+    },
+    persisted: true,
+    authorityLive: true,
+    reason: 'verification evidence persisted under live authority',
+  };
+}
+
 function proposalRead(
   proposals: Proposal[],
   over?: Partial<{ sourceState: 'missing' | 'healthy' | 'degraded'; complete: boolean }>,
@@ -270,28 +295,7 @@ beforeEach(() => {
       result.baseHead === CURRENT_BASE_HEAD &&
       result.diffHash === hashDiff(proposal.diff ?? '');
   });
-  mockVerifyAndPersistProposal.mockResolvedValue({
-    verify: {
-      ok: true,
-      ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
-      detail: 'mock verification passed',
-      baseBranch: 'main',
-      baseHead: '0123456789abcdef',
-    },
-    verifyResult: {
-      passed: true,
-      ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
-      detail: 'mock verification passed',
-      baseBranch: 'main',
-      baseHead: '0123456789abcdef',
-      diffHash: 'mock-diff-hash',
-      verifiedAt: '2026-07-14T00:00:00.000Z',
-      source: 'auto-merge-preflight',
-    },
-    persisted: true,
-    authorityLive: true,
-    reason: 'verification evidence persisted under live authority',
-  });
+  mockVerifyAndPersistProposal.mockResolvedValue(successfulVerificationTransaction());
   // M172: default judge verdict is 'ship' so frontier proposals reach autoMergeProposal.
   mockJudgeProposal.mockResolvedValue({
     proposalId: 'any',
@@ -586,8 +590,244 @@ describe('M48 runAutoMergePass — cleanup persistence authority', () => {
 });
 
 describe('M48 runAutoMergePass — mutation progression', () => {
+  const faultModes = [
+    {
+      name: 'evidence',
+      cfg: evidenceCfg,
+      engineTier: 'local' as const,
+      verifyCheck: 'verify-before-merge',
+      judgesBeforeMergeFault: 0,
+    },
+    {
+      name: 'verification',
+      cfg: verificationCfg,
+      engineTier: 'frontier' as const,
+      verifyCheck: 'verify-before-judge',
+      judgesBeforeMergeFault: 1,
+    },
+  ];
+
+  it.each(faultModes)(
+    'terminates the pass after a generic verifier exception with uncertain effects in $name mode',
+    async ({ cfg, engineTier, verifyCheck }) => {
+      const createdAt = Date.now();
+      const failed = makeProposal(`verifier-uncertain-${verifyCheck}-a`, {
+        engineTier,
+        createdAt: new Date(createdAt).toISOString(),
+      });
+      const untouched = makeProposal(`verifier-uncertain-${verifyCheck}-b`, {
+        engineTier,
+        createdAt: new Date(createdAt + 1).toISOString(),
+      });
+      pendingProposals = [failed, untouched];
+      const outwardEffects: string[] = [];
+      mockVerifyAndPersistProposal.mockImplementationOnce(async () => {
+        outwardEffects.push('partial verification evidence write');
+        throw new Error('SECRET_VERIFIER_EXCEPTION stdout stderr /private/repo');
+      });
+
+      const out = await runAutoMergePass(cfg());
+
+      expect(out).toMatchObject({ verifyBeforeJudgeRan: 1, attempted: 0, merged: 0, autoArchived: 0 });
+      expect(out.skipped).toContainEqual({
+        proposalId: failed.id,
+        check: `${verifyCheck}-contract`,
+        reason: `${verifyCheck}: verification contract breach; outcome uncertain; pass aborted`,
+      });
+      expect(outwardEffects).toEqual(['partial verification evidence write']);
+      expect(mockVerifyAndPersistProposal.mock.calls.map((call) => call[0].id)).toEqual([failed.id]);
+      expect(mockJudgeProposal).not.toHaveBeenCalled();
+      expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+      expect(failed).toMatchObject({ status: 'pending' });
+      expect(failed.verifyResult).toBeUndefined();
+      expect((failed as unknown as Record<string, unknown>)['stuckPassCount']).toBeUndefined();
+      expect(untouched).toMatchObject({ status: 'pending' });
+      expect(mockSetStatus.mock.calls.some((call) => call[0] === failed.id)).toBe(false);
+      expect(mockUpdateProposalField.mock.calls.some((call) => call[0] === failed.id)).toBe(false);
+
+      const serialized = JSON.stringify({
+        out,
+        events: readAgentActions(),
+      });
+      expect(serialized).not.toContain('SECRET_VERIFIER_EXCEPTION');
+      expect(serialized).not.toContain('stdout');
+      expect(serialized).not.toContain('stderr');
+      expect(serialized).not.toContain('/private/repo');
+    },
+  );
+
+  it.each(faultModes)(
+    'continues only after a structured verifier failure in $name mode',
+    async ({ cfg, engineTier, verifyCheck }) => {
+      const createdAt = Date.now();
+      const failed = makeProposal(`structured-failure-${verifyCheck}-a`, {
+        engineTier,
+        createdAt: new Date(createdAt).toISOString(),
+      });
+      const healthy = makeProposal(`structured-failure-${verifyCheck}-b`, {
+        engineTier,
+        createdAt: new Date(createdAt + 1).toISOString(),
+      });
+      pendingProposals = [failed, healthy];
+      mockVerifyAndPersistProposal
+        .mockResolvedValueOnce({
+          verify: {
+            ok: false,
+            ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+            detail: 'structured verification failure',
+          },
+          verifyResult: {
+            passed: false,
+            failed: ['structured verification failure'],
+            ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+            detail: 'structured verification failure',
+            diffHash: 'mock-diff-hash',
+            verifiedAt: '2026-07-14T00:00:00.000Z',
+            source: 'auto-merge-preflight',
+          },
+          persisted: true,
+          authorityLive: true,
+          reason: 'verification evidence persisted under live authority',
+        })
+        .mockResolvedValueOnce(successfulVerificationTransaction());
+      mergeResults[healthy.id] = { ok: true, merged: true, reason: 'merged' };
+
+      const out = await runAutoMergePass(cfg());
+
+      expect(out).toMatchObject({ verifyBeforeJudgeRan: 2, attempted: 1, merged: 1, autoArchived: 0 });
+      expect(out.skipped).toContainEqual({
+        proposalId: failed.id,
+        check: verifyCheck,
+        reason: `${verifyCheck}: verification failed: structured verification failure`,
+      });
+      expect(mockVerifyAndPersistProposal.mock.calls.map((call) => call[0].id)).toEqual([
+        failed.id,
+        healthy.id,
+      ]);
+      expect(mockJudgeProposal).toHaveBeenCalledTimes(verifyCheck === 'verify-before-judge' ? 1 : 0);
+      expect(mockAutoMergeProposal.mock.calls.map((call) => call[0])).toEqual([healthy.id]);
+      expect(failed).toMatchObject({ status: 'pending' });
+      expect((failed as unknown as Record<string, unknown>)['stuckPassCount']).toBeUndefined();
+    },
+  );
+
+  it.each(faultModes)(
+    'terminates the pass when the merge gate throws after a partial outward effect in $name mode',
+    async ({ cfg, engineTier, judgesBeforeMergeFault }) => {
+      const createdAt = Date.now();
+      const failed = makeProposal('merge-gate-uncertain-a', {
+        engineTier,
+        createdAt: new Date(createdAt).toISOString(),
+      });
+      const untouched = makeProposal('merge-gate-uncertain-b', {
+        engineTier,
+        createdAt: new Date(createdAt + 1).toISOString(),
+      });
+      pendingProposals = [failed, untouched];
+      const outwardEffects: string[] = [];
+      mockAutoMergeProposal.mockImplementationOnce(async () => {
+        outwardEffects.push('partial remote push');
+        throw new Error('SECRET_MERGE_EXCEPTION token=private stdout stderr');
+      });
+
+      const out = await runAutoMergePass(cfg());
+
+      expect(out).toMatchObject({ verifyBeforeJudgeRan: 1, attempted: 1, merged: 0, autoArchived: 0 });
+      expect(out.skipped).toContainEqual({
+        proposalId: failed.id,
+        check: 'merge-gate-contract',
+        reason: 'merge gate contract breach; outcome uncertain; pass aborted',
+      });
+      expect(outwardEffects).toEqual(['partial remote push']);
+      expect(mockVerifyAndPersistProposal.mock.calls.map((call) => call[0].id)).toEqual([failed.id]);
+      expect(mockJudgeProposal).toHaveBeenCalledTimes(judgesBeforeMergeFault);
+      expect(mockAutoMergeProposal.mock.calls.map((call) => call[0])).toEqual([failed.id]);
+      expect(failed).toMatchObject({ status: 'pending' });
+      expect((failed as unknown as Record<string, unknown>)['stuckPassCount']).toBeUndefined();
+      expect(untouched).toMatchObject({ status: 'pending' });
+      expect(mockSetStatus).not.toHaveBeenCalled();
+      expect(mockUpdateProposalField).not.toHaveBeenCalled();
+      expect(mockNotifyFleetEvent).not.toHaveBeenCalled();
+      expect(mockEmitMerge).not.toHaveBeenCalled();
+      expect(mockEventBusEmit).not.toHaveBeenCalled();
+      expect(mockLearnFromApplied).not.toHaveBeenCalled();
+      expect(JSON.stringify(out)).not.toContain('SECRET_MERGE_EXCEPTION');
+      expect(JSON.stringify(out)).not.toContain('token=private');
+      expect(JSON.stringify(out)).not.toContain('stdout');
+      expect(JSON.stringify(out)).not.toContain('stderr');
+    },
+  );
+
+  it('rechecks KILL after a verifier exception before touching a later proposal', async () => {
+    const createdAt = Date.now();
+    const failed = makeProposal('verifier-arms-kill-a', {
+      engineTier: 'local',
+      createdAt: new Date(createdAt).toISOString(),
+    });
+    const untouched = makeProposal('verifier-kill-b', {
+      engineTier: 'local',
+      createdAt: new Date(createdAt + 1).toISOString(),
+    });
+    pendingProposals = [failed, untouched];
+    mockVerifyAndPersistProposal.mockImplementationOnce(async () => {
+      setKill(true);
+      throw new Error('SECRET_KILL_EXCEPTION');
+    });
+
+    const out = await runAutoMergePass(evidenceCfg());
+
+    expect(out).toMatchObject({ verifyBeforeJudgeRan: 1, attempted: 0, merged: 0, autoArchived: 0 });
+    expect(out.skipped).toContainEqual({
+      proposalId: failed.id,
+      check: 'verify-before-merge-contract',
+      reason: 'verify-before-merge: verification contract breach; outcome uncertain; pass aborted',
+    });
+    expect(mockVerifyAndPersistProposal).toHaveBeenCalledTimes(1);
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+    expect(untouched).toMatchObject({ status: 'pending' });
+    expect(mockSetStatus).not.toHaveBeenCalled();
+    expect(mockUpdateProposalField).not.toHaveBeenCalled();
+    expect(JSON.stringify(out)).not.toContain('SECRET_KILL_EXCEPTION');
+  });
+
+  it('rechecks KILL after a merge-gate exception before touching a later proposal', async () => {
+    const createdAt = Date.now();
+    const failed = makeProposal('merge-gate-arms-kill-a', {
+      engineTier: 'local',
+      createdAt: new Date(createdAt).toISOString(),
+    });
+    const untouched = makeProposal('merge-gate-kill-b', {
+      engineTier: 'local',
+      createdAt: new Date(createdAt + 1).toISOString(),
+    });
+    pendingProposals = [failed, untouched];
+    mockAutoMergeProposal.mockImplementationOnce(async () => {
+      setKill(true);
+      throw new Error('SECRET_MERGE_KILL_EXCEPTION');
+    });
+
+    const out = await runAutoMergePass(evidenceCfg());
+
+    expect(out).toMatchObject({ verifyBeforeJudgeRan: 1, attempted: 1, merged: 0, autoArchived: 0 });
+    expect(out.skipped).toContainEqual({
+      proposalId: failed.id,
+      check: 'merge-gate-contract',
+      reason: 'merge gate contract breach; outcome uncertain; pass aborted',
+    });
+    expect(mockVerifyAndPersistProposal).toHaveBeenCalledTimes(1);
+    expect(mockAutoMergeProposal).toHaveBeenCalledTimes(1);
+    expect(untouched).toMatchObject({ status: 'pending' });
+    expect(mockSetStatus).not.toHaveBeenCalled();
+    expect(mockUpdateProposalField).not.toHaveBeenCalled();
+    expect(JSON.stringify(out)).not.toContain('SECRET_MERGE_KILL_EXCEPTION');
+  });
+
   it('does not judge or merge when verification evidence persistence returns false', async () => {
-    pendingProposals = [makeProposal('verification-not-persisted', { engineTier: 'frontier' })];
+    pendingProposals = [
+      makeProposal('verification-not-persisted', { engineTier: 'frontier' }),
+      makeProposal('must-not-run-after-persistence-failure', { engineTier: 'frontier' }),
+    ];
     mockVerifyAndPersistProposal.mockResolvedValueOnce({
       verify: {
         ok: true,
@@ -613,7 +853,10 @@ describe('M48 runAutoMergePass — mutation progression', () => {
   });
 
   it('does not judge or merge after verification authority is revoked', async () => {
-    pendingProposals = [makeProposal('verification-authority-revoked', { engineTier: 'frontier' })];
+    pendingProposals = [
+      makeProposal('verification-authority-revoked', { engineTier: 'frontier' }),
+      makeProposal('must-not-run-after-authority-revocation', { engineTier: 'frontier' }),
+    ];
     mockVerifyAndPersistProposal.mockResolvedValueOnce({
       verify: {
         ok: true,
@@ -643,6 +886,7 @@ describe('M48 runAutoMergePass — mutation progression', () => {
       proposalId: 'verification-authority-revoked',
       check: 'verify-before-judge-authority',
     }));
+    expect(mockVerifyAndPersistProposal).toHaveBeenCalledTimes(1);
     expect(mockJudgeProposal).not.toHaveBeenCalled();
     expect(mockAutoMergeProposal).not.toHaveBeenCalled();
   });

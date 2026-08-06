@@ -23,6 +23,10 @@ import { detectEditors, wireEditor } from './integrations/editors.js';
 import { getPhantomStatus } from './phantom.js';
 import { runDoctor } from './doctor.js';
 import { serviceStatus, install } from './daemon/service.js';
+import {
+  assertResidentServiceInstallAuthorized,
+  RESIDENT_SERVICE_ONE_SHOT_GUIDANCE,
+} from './daemon/service-install-authority.js';
 import { serviceActivity } from './daemon/service-activity.js';
 import { fleetReadiness } from './fleet/engine-readiness.js';
 import { listEnrolled, enroll } from './sandbox/policy.js';
@@ -223,10 +227,23 @@ async function stepPhantom(): Promise<OnboardStep> {
 }
 
 /**
- * Step 6b: install the OS daemon service (idempotent — skip if already installed).
- * Never throws; falls back to 'manual' on any error.
+ * Step 6b: enforce resident-service authority before any service observation or
+ * mutation. The currently unreachable install path remains for a future release
+ * that explicitly restores authority. Never throws; denial is reported manual.
  */
 export async function stepDaemonService(): Promise<OnboardStep> {
+  try {
+    assertResidentServiceInstallAuthorized();
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return step(
+      'daemon-service',
+      'manual',
+      `daemon service changes are temporarily restricted: ${reason}; `
+      + 'no service state was inspected or changed; existing services support status and uninstall only',
+    );
+  }
+
   try {
     const status = serviceStatus();
     if (status.installed) {
@@ -673,6 +690,21 @@ export async function setupWizard(
   cfg: AshlrConfig,
   opts: { wire: boolean; yes: boolean; userName?: string; userId?: string },
 ): Promise<OnboardResult> {
+  try {
+    assertResidentServiceInstallAuthorized();
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return {
+      steps: [step(
+        'daemon-service',
+        'manual',
+        `setup refused before onboarding: ${reason}. ${RESIDENT_SERVICE_ONE_SHOT_GUIDANCE}`,
+      )],
+      ready: false,
+      nextSteps: ['try: ashlr daemon start --once'],
+    };
+  }
+
   const base = await onboard(cfg, opts);
 
   // M110: resolve user identity first — updated cfg flows into subsequent steps.
@@ -695,9 +727,6 @@ export async function setupWizard(
   if (userStep.status === 'detected') {
     nextSteps.push('Set your identity: ashlr setup --user "Your Name" --user-id you@example.com');
   }
-  if (daemonStep.status === 'manual') {
-    nextSteps.push('Install daemon service: ashlr daemon install');
-  }
   if (enginesStep.status !== 'ok') {
     nextSteps.push('Authenticate engines — see fix hints above (never stored by setup)');
   }
@@ -715,5 +744,5 @@ export async function setupWizard(
 
   nextSteps.push('try: ashlr run / ashlr swarm / ashlr tui');
 
-  return { steps, ready: base.ready, nextSteps };
+  return { steps, ready: base.ready && daemonStep.status !== 'manual', nextSteps };
 }

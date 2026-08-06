@@ -342,14 +342,33 @@ export function formatFleetStatus(s: FleetStatus): string {
   }
   if (s.laneLocks) {
     const locks = s.laneLocks;
-    lines.push(
-      `  lane locks:    ${locks.active} active, ${locks.staleInProgress} stale, ` +
-        `${locks.awaitingHostMerge} handoff, ${locks.unverifiedApplied} unverified, ` +
-        `${locks.lockedVisibleItems} visible locked`,
-    );
+    const quality = locks.sourceQuality;
+    if (quality?.sourceState === 'missing') {
+      lines.push(`  lane locks:    unavailable (${quality.reasons.join(', ') || 'source missing'})`);
+    } else {
+      const laneCount = (value: number, complete: boolean): string =>
+        `${value}${complete ? '' : ' observed'}`;
+      const enrollmentComplete = quality?.sources?.enrollment?.complete === true;
+      const goalsComplete = quality?.sources?.goals?.complete === true;
+      const proposalsComplete = quality?.sources?.proposals?.complete === true;
+      const queueComplete = quality?.sources?.queue?.complete === true;
+      const goalStateComplete = enrollmentComplete && goalsComplete && proposalsComplete;
+      lines.push(
+        `  lane locks:    ${laneCount(locks.active, goalStateComplete)} active, ` +
+          `${laneCount(locks.staleInProgress, goalStateComplete)} stale, ` +
+          `${laneCount(locks.awaitingHostMerge, enrollmentComplete && proposalsComplete)} handoff, ` +
+          `${laneCount(locks.unverifiedApplied, goalStateComplete)} unverified, ` +
+          `${laneCount(locks.lockedVisibleItems, goalStateComplete && queueComplete)} visible locked`,
+      );
+      if (quality?.sourceState === 'degraded' || quality?.complete === false || quality === undefined) {
+        lines.push(`  lane source:   degraded (${quality?.reasons.join(', ') || 'incomplete'})`);
+      }
+    }
     if (locks.samples.length > 0) {
       const sample = locks.samples[0]!;
-      const repo = sample.repo ? sample.repo.split('/').pop() ?? sample.repo : 'unknown';
+      const repo = sample.repo
+        ? sample.repo.replace(/\\/g, '/').split('/').filter(Boolean).pop() ?? sample.repo
+        : 'unknown';
       lines.push(`  lock sample:   ${sample.reason} ${repo} ${sample.lane}`);
     }
   }

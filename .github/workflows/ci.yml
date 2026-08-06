@@ -47,7 +47,6 @@ jobs:
               test/m43.verify-commands.test.ts
               test/m113.coordinator-wire.test.ts test/m373.directory-durability.test.ts
               test/m395.effect-terminal-retention.test.ts
-              test/m403.automerge-mutation-fence.test.ts
               test/m404.policy-result-surfaces.test.ts
               test/m428.goal-source-quality.test.ts
               test/m409.engine-execution-mutation-fence.test.ts
@@ -97,7 +96,6 @@ jobs:
               test/m407.verification-mutation-fence.test.ts
               test/m408.sandbox-creation-mutation-fence.test.ts
               test/m418.pulse-quiescence.test.ts
-              test/m419.remote-handoff-intent.test.ts
               test/m420.remote-handoff-recovery.test.ts
               test/m421.legacy-pulse-quiescence.test.ts
               test/m464.agent-work-transitions.test.ts
@@ -157,6 +155,16 @@ jobs:
         # serially in independent checkouts so they cannot share mutable state.
         # This is the canonical CI invocation documented in CONTRIBUTING.md.
         run: npm run test:ci -- ${{ matrix.test_args }}
+
+      - name: Test native ACL enrollment fences (hermetic)
+        if: matrix.label == 'windows, portability overflow'
+        # These files intentionally launch native Windows PowerShell ACL probes.
+        # Keep them out of Vitest file parallelism so a loaded runner cannot turn
+        # the adapter's two bounded 5-second attempts into a false bootstrap failure.
+        run: >-
+          npm run test:ci -- --maxWorkers=1 --no-file-parallelism
+          test/m403.automerge-mutation-fence.test.ts
+          test/m419.remote-handoff-intent.test.ts
 
       - name: Clean disposable native launchd fixture
         if: always() && matrix.os == 'macos-latest'

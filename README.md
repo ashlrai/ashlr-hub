@@ -29,7 +29,7 @@ First activation follows a strict order: run `ashlr preflight`, enroll a repo, a
 | Autonomous merge | **Off** | `foundry.autoMerge.enabled: true` plus the selected tier, judge-backed verification, or evidence authority gates | Local merge or protected remote PR, depending on policy; every refusal is fail-closed |
 | Judge-free evidence merge | **Off** | Base- and diff-bound deterministic verification, signed provenance/evidence, strict scope/risk policy, and live protected-branch checks | Protected remote PR handoff only; no local fallback, self-target merge, partial capture, or build/CI/manifest change |
 | Deploy | Never performed by the daemon | Explicit `ashlr ship --deploy <target> --confirm` after pre-ship checks | Runs the selected production deploy command |
-| OS service install | Never performed by a fleet tick | Operator invokes `ashlr setup` or `ashlr daemon install` | Installs the user-level service; `setup` and `daemon install` autostart it unless explicitly disabled |
+| OS service mutation | **Temporarily unavailable** | No production install/reinstall/repair/restart authority is currently issued | Existing services expose status and uninstall only; admitted one-shot workflows remain available |
 
 No successful test, model verdict, or proposal record grants deployment or service-install authority. Those are separate operator commands.
 
@@ -101,10 +101,10 @@ cd ashlr-hub
 ### 1. Run the setup wizard
 
 ```sh
-ashlr setup
+ashlr setup  # currently exits nonzero at the resident-service step
 ```
 
-Detects local model servers, editors, Phantom Secrets, installs and autostarts the daemon as a user-level OS service (launchd/systemd), and auto-discovers repos to enroll. This operator-invoked setup step mutates service configuration; it is not performed by a fleet tick. Idempotent.
+Setup currently refuses before loading config or running the wizard while install/reinstall/repair/restart authority is withheld. It returns nonzero and leaves setup state untouched. Existing services support `ashlr daemon service-status` and `ashlr daemon uninstall`; admitted one-shot workflows such as `ashlr daemon start --once` remain available. Service status reports registration as `present`, `absent`, or `unknown`; only proven absence permits an in-place update.
 
 ### 1a. Preflight check (optional but recommended)
 
@@ -308,7 +308,7 @@ next actions point at work the daemon can select now instead of phantom backlog.
 
 | Command | What it does |
 |---------|-------------|
-| `ashlr setup` | Guided first-activation wizard (idempotent) |
+| `ashlr setup` | First-activation checks; currently nonzero because resident service mutation is restricted |
 | `ashlr onboard <repo>` | Enroll one repo with walkthrough + dry run |
 | `ashlr enroll add/remove/list` | Manage enrolled repos |
 | `ashlr enroll kill on/off` | Engage/clear the kill-switch |
