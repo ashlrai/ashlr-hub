@@ -70,6 +70,7 @@ import {
   suppressDegradedSkillObservation,
   summarizeTrajectoryLearning,
   type TrajectoryRecordCoverage,
+  type TrajectoryRecord,
   type TrajectoryLearningStatus,
 } from '../autonomy/trajectory-records.js';
 import {
@@ -152,6 +153,7 @@ import {
   type PostMergeObservationReadResult,
 } from './post-merge-observations.js';
 import {
+  postMergeStabilityPolicyDigest,
   postMergeStabilityRepoDigest,
   readPostMergeStability,
   type PostMergeStabilityCohortSummary,
@@ -160,8 +162,22 @@ import {
 import {
   buildProtectedMergePopulationSnapshot,
   projectPostMergeDenominator,
+  type PostMergeDenominatorProjection,
   type ProtectedMergePopulationSnapshot,
 } from './post-merge-denominator.js';
+import {
+  adjacentOutcomeCohortWindows,
+  buildOutcomeCohortDrift,
+  outcomeCohortMergeIdentityKey,
+  OUTCOME_COHORT_OUTCOME_MATURITY_MS,
+  OUTCOME_COHORT_WINDOW_MS,
+  privacySafeModelFamily,
+  withheldOutcomeCohortDrift,
+  type OutcomeCohortDriftStatus,
+  type OutcomeCohortMergeIdentity,
+  type OutcomeCohortObservation,
+  type OutcomeCohortProjectKind,
+} from './outcome-cohort-drift.js';
 import {
   readDetachedPostMergeVerificationCohorts,
   type DetachedPostMergeVerificationSummary,
@@ -1684,6 +1700,8 @@ export interface FleetStatus {
   autonomyEffectiveness?: FleetAutonomyEffectivenessStatus;
   /** Observation-only proof of route-to-realized-outcome coverage. */
   outcomeAssurance?: FleetOutcomeAssuranceStatus;
+  /** Descriptive, observation-only cohort drift sentinel. Never grants authority. */
+  outcomeCohortDrift?: OutcomeCohortDriftStatus;
   /** Read-only Fleet OS verdict for whether autonomous shipping is ready now. */
   autonomousShipReadiness?: FleetAutonomousShipReadinessStatus;
   /** Single-command operating brief derived from readiness, effectiveness, and next actions. */
@@ -2422,6 +2440,168 @@ export function projectPostMergeComposite(
       adverseObservations: denominator.matchedAdverse.length,
       stability: effectiveSummary,
     },
+  };
+}
+
+function outcomeCohortMergePairKey(repoDigest: string, proposalId: string): string {
+  return JSON.stringify([repoDigest, proposalId]);
+}
+
+export interface OutcomeCohortMergeResolution {
+  identity: OutcomeCohortMergeIdentity;
+  outcome: 'pending' | 'withheld' | 'stable' | 'adverse';
+  outcomeObservedAt: string | null;
+}
+
+/** Exact, privacy-safe merge/outcome reconciliation used by Fleet Status. */
+export function projectOutcomeCohortMergeEvidence(input: {
+  population: ProtectedMergePopulationSnapshot;
+  projection: PostMergeDenominatorProjection;
+  observedAt: string;
+  outcomeMaturityMs?: number;
+}, dependencies: {
+  repoDigest?: typeof postMergeStabilityRepoDigest;
+} = {}): {
+  resolutions: OutcomeCohortMergeResolution[];
+  ambiguousRepoProposalKeys: string[];
+  invalidIdentities: number;
+  pendingProtectedMerges: number;
+} {
+  const repoDigestOf = dependencies.repoDigest ?? postMergeStabilityRepoDigest;
+  const maturityMs = input.outcomeMaturityMs ?? OUTCOME_COHORT_OUTCOME_MATURITY_MS;
+  const observedAtMs = Date.parse(input.observedAt);
+  const stableByIdentity = new Map(input.projection.matchedStability.map((row) => [
+    outcomeCohortMergeIdentityKey({
+      repoDigest: row.repoDigest,
+      proposalId: row.proposalId,
+      mergeCommit: row.mergeCommit,
+      mergedAt: row.windowStartedAt,
+    }),
+    row.stableAt,
+  ]));
+  const adverseByIdentity = new Map(input.projection.matchedAdverse.flatMap((row) => {
+    const repoDigest = repoDigestOf(row.repo);
+    return repoDigest ? [[
+      outcomeCohortMergeIdentityKey({
+        repoDigest,
+        proposalId: row.proposalId,
+        mergeCommit: row.mergeCommit,
+        mergedAt: row.observedAt,
+      }),
+      row.observedAt,
+    ] as const] : [];
+  }));
+  const pairCounts = new Map<string, number>();
+  const exact = new Set<string>();
+  const resolutions: OutcomeCohortMergeResolution[] = [];
+  let invalidIdentities = 0;
+  let pendingProtectedMerges = 0;
+
+  for (const merge of input.population.merges) {
+    const repoDigest = repoDigestOf(merge.repo);
+    const mergedAtMs = Date.parse(merge.mergedAt);
+    if (!repoDigest || !Number.isFinite(mergedAtMs) || !Number.isFinite(observedAtMs) || mergedAtMs > observedAtMs) {
+      invalidIdentities++;
+      continue;
+    }
+    const identity: OutcomeCohortMergeIdentity = {
+      repoDigest,
+      proposalId: merge.proposalId,
+      mergeCommit: merge.mergeCommit,
+      mergedAt: merge.mergedAt,
+    };
+    const exactKey = outcomeCohortMergeIdentityKey(identity);
+    if (exact.has(exactKey)) {
+      invalidIdentities++;
+      continue;
+    }
+    exact.add(exactKey);
+    const pairKey = outcomeCohortMergePairKey(repoDigest, merge.proposalId);
+    pairCounts.set(pairKey, (pairCounts.get(pairKey) ?? 0) + 1);
+    const adverseAt = adverseByIdentity.get(exactKey);
+    const stableAt = stableByIdentity.get(exactKey);
+    if (adverseAt) {
+      resolutions.push({ identity, outcome: 'adverse', outcomeObservedAt: adverseAt });
+    } else if (stableAt) {
+      resolutions.push({ identity, outcome: 'stable', outcomeObservedAt: stableAt });
+    } else if (observedAtMs < mergedAtMs + maturityMs) {
+      pendingProtectedMerges++;
+      resolutions.push({ identity, outcome: 'pending', outcomeObservedAt: null });
+    } else {
+      resolutions.push({ identity, outcome: 'withheld', outcomeObservedAt: null });
+    }
+  }
+
+  return {
+    resolutions,
+    ambiguousRepoProposalKeys: [...pairCounts]
+      .filter(([, count]) => count > 1)
+      .map(([key]) => key)
+      .sort(),
+    invalidIdentities,
+    pendingProtectedMerges,
+  };
+}
+
+function projectOutcomeCohortObservation(input: {
+  record: TrajectoryRecord;
+  proposal: Proposal | null;
+  mergeIdentity: OutcomeCohortMergeIdentity | null;
+  postMergeOutcome: OutcomeCohortObservation['postMergeOutcome'];
+  outcomeObservedAt: string | null;
+  projectKindCache: Map<string, OutcomeCohortProjectKind | null>;
+}): OutcomeCohortObservation {
+  const { record, proposal } = input;
+  const timelineEvidence = record.timeline.find((event) => event.evidence !== undefined)?.evidence;
+  const timelineProposal = record.timeline.find((event) => event.proposal !== undefined)?.proposal;
+  const rawRiskClass = record.evidenceOutcome?.riskClass ?? timelineEvidence?.riskClass ??
+    proposal?.evidenceOutcome?.riskClass ?? timelineProposal?.riskClass;
+  const riskClass = rawRiskClass === 'low' || rawRiskClass === 'medium' || rawRiskClass === 'high'
+    ? rawRiskClass
+    : null;
+  const tier = record.tier === 'local' || record.tier === 'mid' || record.tier === 'frontier'
+    ? record.tier
+    : null;
+  const repo = typeof record.repo === 'string' ? record.repo : null;
+  let projectKind: OutcomeCohortProjectKind | null = null;
+  if (repo) {
+    if (!input.projectKindCache.has(repo)) {
+      try {
+        const kinds = [...new Set(detectRepoExecutionProfile(repo).projects.map((project) => project.kind))].sort();
+        input.projectKindCache.set(repo, kinds.length === 1 ? kinds[0]! : kinds.length > 1 ? 'mixed' : null);
+      } catch {
+        input.projectKindCache.set(repo, null);
+      }
+    }
+    projectKind = input.projectKindCache.get(repo) ?? null;
+  }
+  const costUsd = record.runEventSummary?.costUsd ?? record.timeline
+    .find((event) => event.kind === 'dispatch' && event.runEventSummary?.costUsd !== undefined)
+    ?.runEventSummary?.costUsd ?? null;
+  const eligible = record.terminalCarrierConflict !== true;
+
+  return {
+    observationId: record.id,
+    occurredAt: proposal?.decidedAt ?? proposal?.createdAt ?? record.startedAt,
+    projectKind,
+    riskClass,
+    workSource: record.source ?? null,
+    engineTier: tier,
+    modelFamily: privacySafeModelFamily({ backend: record.backend, model: record.model, tier }),
+    routerPolicyDigest: postMergeStabilityPolicyDigest(
+      record.routerPolicyVersion ?? record.routeSnapshot?.routerPolicyVersion ?? '',
+    ),
+    learningEpoch: record.learningEpoch ?? null,
+    repoDigest: repo ? postMergeStabilityRepoDigest(repo) : null,
+    eligible,
+    ...(!eligible ? { exclusionReason: 'degraded' as const } : {}),
+    proposalCreated: record.coverage.proposal,
+    verificationPassed: record.evidenceOutcome?.verificationPassed ??
+      timelineEvidence?.verificationPassed ?? proposal?.evidenceOutcome?.verificationPassed ?? false,
+    mergeIdentity: input.mergeIdentity,
+    postMergeOutcome: input.postMergeOutcome,
+    outcomeObservedAt: input.outcomeObservedAt,
+    costUsd,
   };
 }
 
@@ -3568,6 +3748,8 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     }
   }
   let learningPostMergeRead: PostMergeObservationReadResult | undefined;
+  let learningPostMergePopulation: ProtectedMergePopulationSnapshot | undefined;
+  let learningPostMergeProjection: PostMergeDenominatorProjection | undefined;
   try {
     const adverse = readPostMergeObservations({ requireComplete: true });
     learningPostMergeRead = adverse;
@@ -3576,6 +3758,13 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       proposals: allProposals,
       proposalSource: proposalSourceQuality,
       capturedAt: generatedAt,
+    });
+    learningPostMergePopulation = population;
+    learningPostMergeProjection = projectPostMergeDenominator({
+      population,
+      adverse,
+      stability,
+      observedAt: generatedAt,
     });
     const projection = projectPostMergeComposite(adverse, stability, population, generatedAt);
     status.postMergeSource = projection.source;
@@ -4198,6 +4387,105 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
         withheldMetrics,
         12,
       );
+
+      const cohortWindows = adjacentOutcomeCohortWindows(generatedAt);
+      const cohortStartedAtMs = Date.parse(cohortWindows.baseline.startedAt);
+      const cohortEndedAtMs = Date.parse(cohortWindows.current.endedAt);
+      const cohortLookbackMs = OUTCOME_COHORT_OUTCOME_MATURITY_MS +
+        (2 * OUTCOME_COHORT_WINDOW_MS) + (5 * 60 * 1_000);
+      const cohortRecordLimit = 2_000;
+      const cohortDispatchRead = readDispatchProductionYieldDetailed({
+        windowMs: cohortLookbackMs,
+        limit: 6_000,
+        limitPerDimension: 8,
+      });
+      const cohortDispatchEvents = settledLearningRows(
+        cohortDispatchRead.events,
+        learningCutoffMs,
+        (event) => event.ts,
+      );
+      const cohortTrajectoryRecords = listTrajectoryRecords({
+        windowHours: cohortLookbackMs / (60 * 60 * 1_000),
+        limit: cohortRecordLimit,
+        deps: {
+          readDispatchProductionEvents: () => cohortDispatchEvents,
+          readAgentActions: () => learningActions,
+          readSkillUseEvents: () => learningSkillUseEvents,
+          listOutcomeRecords: () => outcomeRecords,
+          loadProposal: (id) => proposalById.get(id) ?? null,
+        },
+      });
+      const mergeEvidence = learningPostMergePopulation && learningPostMergeProjection
+        ? projectOutcomeCohortMergeEvidence({
+            population: learningPostMergePopulation,
+            projection: learningPostMergeProjection,
+            observedAt: generatedAt,
+          })
+        : null;
+      const ambiguousPairs = new Set(mergeEvidence?.ambiguousRepoProposalKeys ?? []);
+      const resolutionByPair = new Map<string, OutcomeCohortMergeResolution>();
+      for (const resolution of mergeEvidence?.resolutions ?? []) {
+        const pairKey = outcomeCohortMergePairKey(
+          resolution.identity.repoDigest,
+          resolution.identity.proposalId,
+        );
+        if (!ambiguousPairs.has(pairKey)) resolutionByPair.set(pairKey, resolution);
+      }
+      const projectKindCache = new Map<string, OutcomeCohortProjectKind | null>();
+      const observations: OutcomeCohortObservation[] = cohortTrajectoryRecords
+        .filter((record) => {
+          const proposal = record.proposalId ? proposalById.get(record.proposalId) ?? null : null;
+          if (!record.coverage.dispatch && !proposal) return false;
+          const occurredAt = Date.parse(proposal?.decidedAt ?? proposal?.createdAt ?? record.startedAt);
+          return Number.isFinite(occurredAt) && occurredAt >= cohortStartedAtMs && occurredAt < cohortEndedAtMs;
+        })
+        .map((record) => {
+          const proposal = record.proposalId ? proposalById.get(record.proposalId) ?? null : null;
+          const repoDigest = record.repo ? postMergeStabilityRepoDigest(record.repo) : null;
+          const proposalId = record.proposalId ?? proposal?.id;
+          const resolution = repoDigest && proposalId
+            ? resolutionByPair.get(outcomeCohortMergePairKey(repoDigest, proposalId)) ?? null
+            : null;
+          return projectOutcomeCohortObservation({
+            record,
+            proposal,
+            mergeIdentity: resolution?.identity ?? null,
+            postMergeOutcome: resolution?.outcome ?? 'not-merged',
+            outcomeObservedAt: resolution?.outcomeObservedAt ?? null,
+            projectKindCache,
+          });
+        });
+      const postMergeComplete = learningPostMergeProjection?.sourceComplete === true;
+      const dispatchComplete = cohortDispatchRead.sourceQuality.sourceState === 'healthy' &&
+        cohortDispatchRead.sourceQuality.complete;
+      const learningComplete = status.learningMetrics.trajectoryLearning.state === 'available';
+      const sourceComplete = postMergeComplete && dispatchComplete && learningComplete &&
+        (mergeEvidence?.invalidIdentities ?? 1) === 0 && ambiguousPairs.size === 0 &&
+        cohortTrajectoryRecords.length < cohortRecordLimit;
+      const sourceState = cohortDispatchRead.sourceQuality.sourceState === 'missing'
+        ? 'missing' as const
+        : sourceComplete ? 'healthy' as const : 'degraded' as const;
+      status.outcomeCohortDrift = buildOutcomeCohortDrift({
+        observations,
+        source: {
+          sourceState,
+          complete: sourceComplete,
+          snapshotAt: generatedAt,
+          pendingProtectedMerges: mergeEvidence?.pendingProtectedMerges ?? 0,
+          stopReasons: [
+            ...(learningPostMergeProjection?.stopReasons ?? ['post-merge-source-missing']),
+            ...(!postMergeComplete ? ['post-merge-source-incomplete'] : []),
+            ...(!dispatchComplete ? ['dispatch-source-incomplete'] : []),
+            ...(!learningComplete ? ['trajectory-source-incomplete'] : []),
+            ...((mergeEvidence?.invalidIdentities ?? 0) > 0 ? ['exact-merge-identity-invalid'] : []),
+            ...(ambiguousPairs.size > 0 ? ['exact-merge-identity-ambiguous'] : []),
+            ...(cohortTrajectoryRecords.length >= cohortRecordLimit ? ['trajectory-record-limit-reached'] : []),
+          ],
+        },
+        observedAt: generatedAt,
+        windows: cohortWindows,
+        selectionPropensityAvailable: false,
+      });
     } catch {
       status.learningMetrics.trajectoryLearning = learningMetricAvailability(
         [dispatchSource, { source: 'outcomes', sourceState: 'degraded', complete: false }],
@@ -4208,6 +4496,19 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
         10,
       );
     }
+  }
+  if (!status.outcomeCohortDrift) {
+    status.outcomeCohortDrift = withheldOutcomeCohortDrift({
+      source: {
+        sourceState: status.dispatchProductionSource?.sourceState === 'missing' ? 'missing' : 'degraded',
+        complete: false,
+        stopReasons: ['trajectory-source-unavailable'],
+        snapshotAt: generatedAt,
+      },
+      observedAt: generatedAt,
+      windows: adjacentOutcomeCohortWindows(generatedAt),
+      selectionPropensityAvailable: false,
+    }, 'trajectory-source-unavailable');
   }
   if (status.trajectoryLearning && !learningSourceAvailable(skillSource)) {
     status.trajectoryLearning = suppressDegradedSkillObservation(

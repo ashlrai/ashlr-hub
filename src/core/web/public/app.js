@@ -3628,6 +3628,61 @@ function formatCountMap(counts) {
   return entries.length > 0 ? entries.join('/') : 'none';
 }
 
+function outcomeCohortLabel(comparison) {
+  if (!comparison) return 'none';
+  const cohort = comparison.dimension === 'repo-digest'
+    ? String(comparison.cohort ?? '').slice(0, 12)
+    : comparison.dimension === 'router-policy-learning-epoch'
+      ? `${String(comparison.cohort ?? '').slice(0, 12)}/${comparison.matchingPolicy?.learningEpoch ?? 'unknown'}`
+      : comparison.cohort ?? 'unknown';
+  return `${comparison.dimension ?? 'unknown'} · ${cohort}`;
+}
+
+function renderOutcomeCohortDriftCard(drift, cls = 'ctrl-card card') {
+  if (!drift) return null;
+  const denominator = drift.denominatorQuality ?? {};
+  const maturity = drift.maturity ?? {};
+  const thresholds = drift.thresholds ?? {};
+  const highest = drift.highestRiskCohort ?? null;
+  const current = highest?.current ?? {};
+  const card = el('div', { cls });
+  card.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, 'Outcome Cohort Drift'),
+    el('span', { cls: 'card-subtitle' }, `${drift.verdict ?? 'withheld'} · descriptive only`)
+  ));
+  const rows = [
+    ['Denominator', `${denominator.state ?? 'withheld'} · ${denominator.eligible ?? 0}/${denominator.observed ?? 0} eligible`],
+    ['Memberships', `${denominator.actualMemberships ?? 0}/${denominator.expectedMemberships ?? 0}`],
+    ['Maturity', `${Math.round(Number(maturity.minimumAgeMs ?? 0) / 86400000)}d · ` +
+      `${maturity.pendingProtectedMerges ?? 0} pending · ${maturity.withheldMatureMerges ?? 0} withheld`],
+    ['Thresholds', `exclusion +${Math.round(Number(thresholds.exclusionRateRegression ?? 0) * 100)}pp · ` +
+      `cost +${Math.round(Number(thresholds.costToStableMergeRelative ?? 0) * 100)}% and ` +
+      `$${Number(thresholds.costToStableMergeAbsoluteUsd ?? 0).toFixed(2)}`],
+    ['Highest risk', outcomeCohortLabel(highest)],
+  ];
+  if (highest) {
+    rows.push(
+      ['Sample', highest.sampleState ?? 'insufficient-sample'],
+      ['Proposal yield', formatOutcomeAssuranceRate(current.proposalYield)],
+      ['Verification', formatOutcomeAssuranceRate(current.verificationRate)],
+      ['Protected merge', formatOutcomeAssuranceRate(current.protectedMergeRate)],
+      ['Adverse post-merge', formatOutcomeAssuranceRate(current.adversePostMergeRate)],
+      ['Exclusion', formatOutcomeAssuranceRate(current.exclusionRate)],
+      ['Outcome evidence', current.postMergeDenominatorState ?? 'missing-window'],
+      ['Cost / stable merge', Number.isFinite(current.costToStableMergeUsd)
+        ? `$${Number(current.costToStableMergeUsd).toFixed(4)}`
+        : 'withheld'],
+    );
+  }
+  const body = el('div', { cls: 'card-body' }, infoGrid(rows));
+  if (Array.isArray(denominator.stopReasons) && denominator.stopReasons.length > 0) {
+    body.appendChild(el('p', { cls: 'hint' }, `Withheld: ${denominator.stopReasons.join(', ')}`));
+  }
+  if (drift.nextEvidenceAction) body.appendChild(el('p', { cls: 'hint' }, drift.nextEvidenceAction));
+  card.appendChild(body);
+  return card;
+}
+
 function renderPhantomAgentReportCard(phantom, cls = 'ctrl-card card') {
   if (!phantom) return null;
   const report = phantom.agentReport ?? null;
@@ -4159,6 +4214,9 @@ function renderFleet() {
 
   const effectivenessCard = renderAutonomyEffectivenessCard(f.autonomyEffectiveness, 'fleet-card card');
   if (effectivenessCard) section.appendChild(effectivenessCard);
+
+  const cohortDriftCard = renderOutcomeCohortDriftCard(f.outcomeCohortDrift, 'fleet-card card');
+  if (cohortDriftCard) section.appendChild(cohortDriftCard);
 
   if (!learningSnapshotFresh) {
     section.appendChild(renderStaleLearningSnapshotCard('fleet-card card'));
@@ -4913,6 +4971,11 @@ function renderControl() {
 
   const missionOutcomeAssuranceCard = renderOutcomeAssuranceCard(outcomeAssurance);
   if (missionOutcomeAssuranceCard) section.appendChild(missionOutcomeAssuranceCard);
+
+  const missionOutcomeCohortDriftCard = renderOutcomeCohortDriftCard(
+    d.fleet?.outcomeCohortDrift ?? fleet.outcomeCohortDrift ?? null
+  );
+  if (missionOutcomeCohortDriftCard) section.appendChild(missionOutcomeCohortDriftCard);
 
   const missionContextCard = learningSnapshotFresh
     ? renderContextEfficiencyCard(d.fleet?.contextEfficiency ?? fleet.contextEfficiency ?? null)
