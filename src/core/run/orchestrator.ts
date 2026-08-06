@@ -110,7 +110,7 @@ import { listNativeTools } from '../mcp-native.js';
 import { selectInboxStore } from '../seams/inbox.js';
 import { scrubSecrets } from '../knowledge/index.js';
 import { causalMetadata } from '../learning/causal.js';
-import { assertSafeExecutionIdentity } from '../fleet/attempt-identity.js';
+import { assertSafeExecutionIdentity, coherentOuterAttemptIdentity } from '../fleet/attempt-identity.js';
 import {
   assureStableRegularFiles,
   openStableDirectoryGuard,
@@ -245,8 +245,23 @@ function rehydrateRunStateFromPersistence(state: PersistedRunState): RunState {
     cancellationMarkerMatches(runMarker, markerFreeState, fingerprint) &&
     (markerFreeState.terminationReason === undefined ||
       markerFreeState.terminationReason === 'cancelled');
+  const attemptId = coherentOuterAttemptIdentity({
+    attemptId: markerFreeState.attemptId,
+    runId: markerFreeState.id,
+    trajectoryId: markerFreeState.trajectoryId,
+    attemptCandidateIndex: markerFreeState.attemptCandidateIndex,
+  });
+  const {
+    attemptId: _untrustedAttemptId,
+    attemptCandidateIndex: _untrustedAttemptCandidateIndex,
+    ...withoutAttemptId
+  } = markerFreeState;
   return {
-    ...markerFreeState,
+    ...withoutAttemptId,
+    ...(attemptId ? { attemptId } : {}),
+    ...(attemptId && markerFreeState.attemptCandidateIndex !== undefined
+      ? { attemptCandidateIndex: markerFreeState.attemptCandidateIndex }
+      : {}),
     ...(markedCancelled ? { terminationReason: 'cancelled' as const } : {}),
     tasks: taskRecords.map(({ marker, semanticTask }) => {
       const taskMarkedCancelled =
@@ -760,8 +775,23 @@ function normalizeRunStateForPersistence(state: RunState): RunState {
     learningEpoch: state.learningEpoch,
     ts: runCausalTimestamp(state),
   });
+  const attemptId = coherentOuterAttemptIdentity({
+    attemptId: state.attemptId,
+    runId: state.id,
+    trajectoryId: meta.trajectoryId,
+    attemptCandidateIndex: state.attemptCandidateIndex,
+  });
+  const {
+    attemptId: _untrustedAttemptId,
+    attemptCandidateIndex: _untrustedAttemptCandidateIndex,
+    ...withoutAttemptId
+  } = state;
   return {
-    ...state,
+    ...withoutAttemptId,
+    ...(attemptId ? { attemptId } : {}),
+    ...(attemptId && state.attemptCandidateIndex !== undefined
+      ? { attemptCandidateIndex: state.attemptCandidateIndex }
+      : {}),
     ...meta,
   };
 }
@@ -853,6 +883,10 @@ function withCapturedProposalMetadata(producerState: RunState, capturedState: Ru
         }
       : {}),
     ...(capturedState.trajectoryId ? { trajectoryId: capturedState.trajectoryId } : {}),
+    ...(capturedState.attemptId ? { attemptId: capturedState.attemptId } : {}),
+    ...(capturedState.attemptId && capturedState.attemptCandidateIndex !== undefined
+      ? { attemptCandidateIndex: capturedState.attemptCandidateIndex }
+      : {}),
     ...(capturedState.routeSnapshot ? { routeSnapshot: capturedState.routeSnapshot } : {}),
     ...(capturedState.evidenceOutcome ? { evidenceOutcome: capturedState.evidenceOutcome } : {}),
     ...(capturedState.learningSource ? { learningSource: capturedState.learningSource } : {}),

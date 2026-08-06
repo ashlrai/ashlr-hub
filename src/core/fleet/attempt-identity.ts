@@ -22,6 +22,39 @@ export function isSafeExecutionIdentity(value: unknown): value is string {
   return typeof value === 'string' && SAFE_EXECUTION_ID_RE.test(value);
 }
 
+/**
+ * Return one canonical outer attempt identity only when every supplied alias
+ * agrees. This is intentionally metadata-only and never derives an identity
+ * from repo, goal, prompt, or work-item content.
+ */
+export function coherentOuterAttemptIdentity(input: {
+  attemptId?: unknown;
+  runId?: unknown;
+  trajectoryId?: unknown;
+  attemptCandidateIndex?: unknown;
+}): OuterAttemptIdentity | undefined {
+  const explicit = isOuterAttemptIdentity(input.attemptId) ? input.attemptId : undefined;
+  const fromRun = isOuterAttemptIdentity(input.runId) ? input.runId : undefined;
+  const candidate = explicit ?? fromRun;
+  if (!candidate) return undefined;
+  if (input.attemptId !== undefined && explicit !== candidate) return undefined;
+  const hasCandidateIndex = input.attemptCandidateIndex !== undefined;
+  if (hasCandidateIndex) {
+    if (
+      !explicit ||
+      !Number.isSafeInteger(input.attemptCandidateIndex) ||
+      Number(input.attemptCandidateIndex) < 0 ||
+      !isCandidateAttemptIdentity(input.runId) ||
+      deriveCandidateAttemptIdentity(explicit, Number(input.attemptCandidateIndex)) !== input.runId
+    ) return undefined;
+  } else if (input.runId !== undefined && input.runId !== candidate) {
+    return undefined;
+  }
+  const expectedTrajectory = `run:${hasCandidateIndex ? String(input.runId) : candidate}`;
+  if (input.trajectoryId !== undefined && input.trajectoryId !== expectedTrajectory) return undefined;
+  return candidate;
+}
+
 /** Validate caller-supplied ids before they reach run-state or log filenames. */
 export function assertSafeExecutionIdentity(value: string): string {
   if (!isSafeExecutionIdentity(value)) {

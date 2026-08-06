@@ -1288,6 +1288,7 @@ function createAuthoritativeBestOfNProposal(
   item: WorkItem,
   runId: string,
   workItemGenerationId?: string,
+  attempt?: { attemptId: string; candidateIndex: number },
 ) {
   const diff = 'diff --git a/src/best-of-n.ts b/src/best-of-n.ts\n--- a/src/best-of-n.ts\n+++ b/src/best-of-n.ts\n@@ -1 +1 @@\n-old\n+new\n';
   const diffHash = hashDiff(diff);
@@ -1308,6 +1309,9 @@ function createAuthoritativeBestOfNProposal(
     ...(workItemGenerationId ? { workItemGenerationId } : {}),
     workSource: item.source,
     runId,
+    ...(attempt
+      ? { attemptId: attempt.attemptId, attemptCandidateIndex: attempt.candidateIndex }
+      : {}),
     trajectoryId: `run:${runId}`,
     runEventSummary: {
       runId,
@@ -5010,11 +5014,18 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'winner identity fan-out' });
     mockEngineTierOf.mockReturnValue('mid');
     let childRunId = '';
+    let outerAttemptId = '';
     let proposalId = '';
     mockRunBestOfN.mockImplementationOnce(async (_item, _cfg, rawOptions) => {
       const options = rawOptions as { attemptId: string; workItemGenerationId?: string };
+      outerAttemptId = options.attemptId;
       childRunId = deriveCandidateAttemptIdentity(options.attemptId as never, 0);
-      const proposal = createAuthoritativeBestOfNProposal(item, childRunId, options.workItemGenerationId);
+      const proposal = createAuthoritativeBestOfNProposal(
+        item,
+        childRunId,
+        options.workItemGenerationId,
+        { attemptId: options.attemptId, candidateIndex: 0 },
+      );
       proposalId = proposal.id;
       const proposalOutcome = {
         kind: 'filed' as const,
@@ -5077,6 +5088,14 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
         trajectoryId: `run:${childRunId}`,
         runEventSummary: { runId: childRunId, proposalId, proposalCreated: true },
       },
+    });
+    expect(readDispatchProductionEvents({ limit: 1 })[0]).toMatchObject({
+      itemId: item.id,
+      attemptId: outerAttemptId,
+      runId: outerAttemptId,
+      trajectoryId: `run:${outerAttemptId}`,
+      proposalId,
+      runEventSummary: { runId: outerAttemptId, proposalId, proposalCreated: true },
     });
   });
 

@@ -164,6 +164,7 @@ export interface TrajectoryRecord {
   source?: WorkSource;
   proposalId?: string;
   runId?: string;
+  attemptId?: string;
   trajectoryId?: string;
   backend?: EngineId | string | null;
   tier?: EngineTier | string | null;
@@ -1141,6 +1142,7 @@ function fillRecordMetadata(
   if (!record.source && meta.source) record.source = meta.source;
   if (!record.proposalId && meta.proposalId) record.proposalId = bounded(meta.proposalId, 160);
   if (!record.runId && meta.runId) record.runId = bounded(meta.runId, 160);
+  if (!record.attemptId && meta.attemptId) record.attemptId = bounded(meta.attemptId, 160);
   if (!record.trajectoryId && meta.trajectoryId && !isDerivedWorkTrajectory(meta.trajectoryId)) {
     record.trajectoryId = bounded(meta.trajectoryId, 240);
   }
@@ -1319,6 +1321,7 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       source: event.source,
       proposalId,
       runId,
+      attemptId,
       trajectoryId,
       backend: event.backend,
       tier: event.tier,
@@ -1370,6 +1373,7 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       hasRealizedMergeEvidence(liveProposal)
     );
     const aliases = aliasesFromIds({
+      attemptId: proposal.attemptId,
       trajectoryId: proposal.trajectoryId,
       runId: proposal.runId,
       proposalId: proposal.id,
@@ -1383,6 +1387,7 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       source: proposal.workSource,
       proposalId: proposal.id,
       runId: proposal.runId,
+      attemptId: proposal.attemptId,
       trajectoryId: proposal.trajectoryId,
       backend: proposal.routeSnapshot?.backend,
       tier: proposal.routeSnapshot?.tier,
@@ -1413,6 +1418,7 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       itemId: proposal.workItemId,
       source: proposal.workSource,
       runId: proposal.runId,
+      attemptId: proposal.attemptId,
       trajectoryId: proposal.trajectoryId,
       routeSnapshot: proposal.routeSnapshot,
       runEventSummary: proposal.runEventSummary,
@@ -1502,6 +1508,7 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
         kind: 'post-merge',
         outcome: observation.outcome,
         proposalId: proposal.id,
+        attemptId: proposal.attemptId,
         runId: observation.runId ?? proposal.runId,
         trajectoryId: observation.trajectoryId ?? proposal.trajectoryId,
         repo: observation.repo,

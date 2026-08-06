@@ -61,6 +61,7 @@ import { assurePrivateStoragePath } from '../util/private-storage.js';
 import { canonicalFilesystemPathIdentity } from '../sandbox/policy.js';
 import { proposalCompletesGoalMilestone } from '../goals/completion.js';
 import { isPostMergeCreditReleaseLabel } from '../fleet/post-merge-credit.js';
+import { coherentOuterAttemptIdentity } from '../fleet/attempt-identity.js';
 // M228: goal-milestone outcome wiring — additive, best-effort, never-throws.
 // Imported here (not goals/advance.ts) because inbox/store does NOT import from
 // goals/* anywhere, so this import creates no cycle. goals/advance.ts imports
@@ -1037,6 +1038,12 @@ export function createProposal(
     // to persistence/audit. The rejected return is deliberately unscoped.
     repo: repoIdentityValid ? canonicalRepo : null,
   });
+  const attemptId = coherentOuterAttemptIdentity(input);
+  const attemptCandidateIndex = attemptId && input.attemptCandidateIndex !== undefined
+    ? input.attemptCandidateIndex
+    : undefined;
+  delete input.attemptId;
+  delete input.attemptCandidateIndex;
   // Proposal creation is not a post-merge credit release protocol. Normalize
   // the reserved authority label before any causal metadata is signed or saved.
   if (typeof input.labelBasis === 'string' &&
@@ -1086,6 +1093,8 @@ export function createProposal(
       : undefined;
   const baseProposal: Proposal = {
     ...input,
+    ...(attemptId ? { attemptId } : {}),
+    ...(attemptCandidateIndex !== undefined ? { attemptCandidateIndex } : {}),
     ...(boundRunEventSummary ? { runEventSummary: boundRunEventSummary } : {}),
     ...(producerStatus ? { producerStatus } : {}),
     ...(owner !== undefined ? { owner } : {}),

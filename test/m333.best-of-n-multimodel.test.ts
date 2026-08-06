@@ -463,6 +463,8 @@ describe('M333 — candidate specs', () => {
 
     expect(cli.options[0]?.['runId']).toBe(deriveCandidateAttemptIdentity(attemptId, 0));
     expect(api.options[0]?.['runId']).toBe(deriveCandidateAttemptIdentity(attemptId, 1));
+    expect(cli.options[0]).toMatchObject({ attemptId, attemptCandidateIndex: 0 });
+    expect(api.options[0]).toMatchObject({ attemptId, attemptCandidateIndex: 1 });
     expect(result.candidates.map((candidate) => candidate.runId)).toEqual([
       deriveCandidateAttemptIdentity(attemptId, 0),
       deriveCandidateAttemptIdentity(attemptId, 1),
@@ -474,6 +476,47 @@ describe('M333 — candidate specs', () => {
         expect.objectContaining({ runId: deriveCandidateAttemptIdentity(attemptId, 1) }),
       ],
     }));
+  });
+
+  it('preserves the outer attempt while final capture keeps the winning child identity distinct', async () => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const h = await harness({
+      cli: cli.fn,
+      api: cli.fn,
+      draftMode: true,
+      judgeScores: [3, 5],
+    });
+    const attemptId = 'attempt-018f6d2e-7c50-4f15-8a2c-6efc97fb87a1' as const;
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 2,
+      attemptId,
+      candidates: [{ engine: 'claude' as never }, { engine: 'claude' as never }],
+    });
+
+    expect(result.winner?.runId).toBe(deriveCandidateAttemptIdentity(attemptId, 1));
+    expect(h.captureSandboxedProposal).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({
+        attemptId,
+        attemptCandidateIndex: 1,
+        runId: deriveCandidateAttemptIdentity(attemptId, 1),
+        draftOnly: true,
+      }),
+    );
+    expect(h.captureSandboxedProposal).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({
+        attemptId,
+        attemptCandidateIndex: 1,
+        runId: deriveCandidateAttemptIdentity(attemptId, 1),
+      }),
+    );
+    expect(h.captureSandboxedProposal?.mock.lastCall?.[3]).not.toHaveProperty('draftOnly');
   });
 
   it('routes each candidate to its OWN engine + model with the right runner kind', async () => {

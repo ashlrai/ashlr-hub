@@ -106,7 +106,7 @@ import {
   type DaemonActivationCapability,
 } from './activation-permit.js';
 import { nullSink } from '../run/streaming.js';
-import { createOuterAttemptIdentity } from '../fleet/attempt-identity.js';
+import { coherentOuterAttemptIdentity, createOuterAttemptIdentity } from '../fleet/attempt-identity.js';
 import { runSwarm } from '../swarm/runner.js';
 import { runGoal } from '../run/orchestrator.js';
 import { scopeFromWorkItem } from '../run/delegation-scope.js';
@@ -2573,7 +2573,15 @@ function dispatchProductionEventFromOutcome(
     production?.outcome ?? (proposal ? 'proposal-created' : 'unknown');
   const allowProposalFallback = !production || production.outcome === 'proposal-created';
   const proposalId = production?.proposalId ?? (allowProposalFallback ? proposal?.id : undefined);
-  const runId = production?.runId ?? (allowProposalFallback ? proposal?.runId : undefined) ?? trace.runId;
+  const producedRunId = production?.runId ?? (allowProposalFallback ? proposal?.runId : undefined) ?? trace.runId;
+  const candidateProposalAttempt = proposal ? coherentOuterAttemptIdentity(proposal) : undefined;
+  const hasBoundCandidateProposal = candidateProposalAttempt === attemptId &&
+    proposal?.attemptCandidateIndex !== undefined &&
+    proposal.runId === producedRunId;
+  // Dispatch accounting represents the outer execution attempt. The proposal
+  // retains the separately validated child run identity and joins by proposalId.
+  const runId = hasBoundCandidateProposal ? attemptId : producedRunId;
+  const trajectoryId = hasBoundCandidateProposal ? `run:${attemptId}` : trace.trajectoryId;
   const proposalCreated = outcome === 'proposal-created';
   const eventRunSummary = runEventSummary({
     ...(trace.runEventSummary ?? {}),
@@ -2715,7 +2723,7 @@ function dispatchProductionEventFromOutcome(
     ...(proposalId ? { proposalId } : {}),
     attemptId,
     ...(runId ? { runId } : {}),
-    ...(trace.trajectoryId ? { trajectoryId: trace.trajectoryId } : {}),
+    ...(trajectoryId ? { trajectoryId } : {}),
     ...(trace.routeSnapshot ? { routeSnapshot: trace.routeSnapshot } : {}),
     ...(eventRunSummary
       ? {

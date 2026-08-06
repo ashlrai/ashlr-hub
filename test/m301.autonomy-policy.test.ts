@@ -24,6 +24,7 @@ import {
 } from '../src/core/autonomy/evidence-pack.js';
 import { evaluateAutonomyPolicy } from '../src/core/autonomy/policy.js';
 import { hashDiff } from '../src/core/foundry/provenance.js';
+import { deriveCandidateAttemptIdentity } from '../src/core/fleet/attempt-identity.js';
 import { buildRequiredVerificationManifest } from '../src/core/run/verification-manifest.js';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
 import type { VerifyCommand } from '../src/core/run/verify-commands.js';
@@ -464,6 +465,74 @@ describe('M301 evaluateAutonomyPolicy', () => {
     const staleBase = structuredClone(live);
     staleBase.verifyResult!.baseHead = 'c'.repeat(40);
     expect(matches(staleBase)).toBe(false);
+  });
+
+  it('binds signed child-run evidence to coherent live outer-attempt metadata without changing V3', () => {
+    const attemptId = 'attempt-018f6d2e-7c50-4f15-8a2c-6efc97fb87a1' as const;
+    const attemptCandidateIndex = 1;
+    const runId = deriveCandidateAttemptIdentity(attemptId, attemptCandidateIndex);
+    const trajectoryId = `run:${runId}`;
+    const attemptProposal = proposal({
+      attemptId,
+      attemptCandidateIndex,
+      runId,
+      trajectoryId,
+      runEventSummary: {
+        runId,
+        status: 'done',
+        outcome: 'proposal-created',
+        proposalCreated: true,
+      },
+    });
+    const draft = goodPack({
+      proposal: attemptProposal,
+      trustBasis: 'evidence',
+      remotePreferred: true,
+      remoteProtection: liveRemoteProtection(),
+    });
+    draft.generatedAt = '2026-07-01T00:02:00.000Z';
+    draft.policy = evaluateAutonomyPolicy(draft, cfg());
+    if (draft.evidenceOutcome) {
+      draft.evidenceOutcome.policyAllowed = draft.policy.allowed;
+      draft.evidenceOutcome.policyAction = draft.policy.action;
+      draft.evidenceOutcome.policyTier = draft.policy.tier;
+    }
+    const signed = sealAutonomyEvidencePackV3(draft);
+    expect(signed).not.toBeNull();
+    expect(signed).not.toHaveProperty('attemptId');
+
+    const live = proposal({
+      ...attemptProposal,
+      verifyResult: {
+        passed: true,
+        detail: 'all verify commands passed',
+        ran: structuredClone(TEST_VERIFY_COMMANDS),
+        baseBranch: 'main',
+        baseHead: 'a'.repeat(40),
+        diffHash: TEST_DIFF_HASH,
+        verifiedAt: '2026-07-01T00:01:00.000Z',
+        source: 'auto-merge',
+      },
+    });
+    const matches = (candidate: Proposal) => evidencePackMatchesLiveProposal(
+      signed!,
+      candidate,
+      { nowMs: Date.parse('2026-07-01T00:02:00.000Z') },
+    );
+    expect(matches(live)).toBe(true);
+    expect(matches({ ...live, attemptCandidateIndex: 0 })).toBe(false);
+    expect(matches({
+      ...live,
+      attemptId: 'attempt-11111111-1111-4111-8111-111111111111',
+    })).toBe(false);
+    expect(matches({
+      ...live,
+      runEventSummary: { ...live.runEventSummary!, runId: deriveCandidateAttemptIdentity(attemptId, 0) },
+    })).toBe(false);
+    const stripped = structuredClone(live);
+    delete stripped.attemptId;
+    delete stripped.attemptCandidateIndex;
+    expect(matches(stripped)).toBe(false);
   });
 
   it('recognizes signed v3 evidence while legacy v1 remains non-authoritative', () => {
