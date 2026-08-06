@@ -17,7 +17,7 @@ afterEach(() => {
 
 function runFixture(
   source: string,
-  options: { hardMs?: number; idleMs?: number; args?: string[] } = {},
+  options: { hardMs?: number; idleMs?: number; heartbeatMs?: number; args?: string[] } = {},
 ) {
   const root = mkdtempSync(join(tmpdir(), 'ashlr-test-ci-wrapper-'));
   roots.push(root);
@@ -34,6 +34,7 @@ function runFixture(
       ASHLR_TEST_CI_TIMEOUT_MS: String(options.hardMs ?? 2_000),
       ASHLR_TEST_CI_IDLE_TIMEOUT_MS: String(options.idleMs ?? 1_000),
       ASHLR_TEST_CI_TERMINATION_GRACE_MS: '100',
+      ASHLR_TEST_CI_HEARTBEAT_MS: String(options.heartbeatMs ?? 60_000),
     },
   });
 }
@@ -46,9 +47,20 @@ describe('test-ci watchdog', () => {
     );
 
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain(
-      '["run","--no-file-parallelism","--reporter=dot","--shard=2/3"]',
-    );
+    const argv = JSON.parse(result.stdout.trim()) as string[];
+    expect(argv.slice(0, 2)).toEqual(['run', '--no-file-parallelism']);
+    expect(argv.some((arg) => arg.includes('vitest-progress-reporter.mjs'))).toBe(true);
+    expect(argv).toContain('--reporter=dot');
+    expect(argv).toContain('--shard=2/3');
+    expect(argv).not.toContain('--reporter=default');
+  });
+
+  it('keeps the default summary alongside compact module progress', () => {
+    const result = runFixture('console.log(JSON.stringify(process.argv.slice(2)));');
+
+    const argv = JSON.parse(result.stdout.trim()) as string[];
+    expect(argv).toContain('--reporter=default');
+    expect(argv.some((arg) => arg.includes('vitest-progress-reporter.mjs'))).toBe(true);
   });
 
   it('keeps an actively producing process alive past the idle window', () => {
@@ -64,6 +76,19 @@ describe('test-ci watchdog', () => {
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('progress-5');
+    expect(result.stderr).not.toContain('idle-timeout');
+  });
+
+  it('reports liveness without treating its own heartbeat as child output', () => {
+    const result = runFixture(
+      `setTimeout(() => { console.log('done'); process.exit(0); }, 130);`,
+      { idleMs: 500, hardMs: 1_000, heartbeatMs: 25 },
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('done');
+    expect(result.stderr).toContain('[test-ci] heartbeat:');
+    expect(result.stderr).toContain('child silent');
     expect(result.stderr).not.toContain('idle-timeout');
   });
 
