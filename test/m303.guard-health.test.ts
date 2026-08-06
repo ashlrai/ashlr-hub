@@ -93,7 +93,12 @@ describe('diagnoseGuardHealth', () => {
     mkdirSync(dirname(statePath), { recursive: true });
     writeFileSync(statePath, 'not-json {{{', 'utf8');
 
-    const guard = armDaemonSpendGuard(['item-a', 'item-b']);
+    const now = new Date();
+    const guard = armDaemonSpendGuard({
+      itemIds: ['item-a', 'item-b'], daemonStartedAt: null,
+      budgetDay: now.toISOString().slice(0, 10), dailyBudgetUsd: 1,
+      spentUsdAtArm: 0, reservedUsd: 1, now,
+    });
     expect(guard.ok).toBe(true);
 
     setKill(true);
@@ -142,10 +147,18 @@ describe('diagnoseGuardHealth', () => {
     writeFileSync(
       spendGuardPath,
       JSON.stringify({
-        token: 'dead-owner-token',
+        schemaVersion: 2,
+        accountingId: '123e4567-e89b-42d3-a456-426614174001',
+        token: '123e4567-e89b-42d3-a456-426614174002',
         pid: 9_999_999,
         hostname: 'test-host',
         armedAt: '2026-07-08T07:01:26.780Z',
+        daemonStartedAt: '2026-07-08T07:00:00.000Z',
+        budgetDay: '2026-07-08',
+        dailyBudgetUsd: 1,
+        spentUsdAtArm: 0,
+        reservedUsd: 1,
+        exhaustBudgetDay: false,
         itemIds: ['item-a', 'item-b'],
       }, null, 2) + '\n',
       'utf8',
@@ -167,7 +180,12 @@ describe('diagnoseGuardHealth', () => {
     state.pid = process.pid;
     saveDaemonState(state);
 
-    const guard = armDaemonSpendGuard(['item-a']);
+    const nowForGuard = new Date();
+    const guard = armDaemonSpendGuard({
+      itemIds: ['item-a'], daemonStartedAt: null,
+      budgetDay: nowForGuard.toISOString().slice(0, 10), dailyBudgetUsd: 1,
+      spentUsdAtArm: 0, reservedUsd: 1, now: nowForGuard,
+    });
     expect(guard.ok).toBe(true);
 
     const lockPath = daemonLockPath();
@@ -196,7 +214,12 @@ describe('diagnoseGuardHealth', () => {
     state.pid = process.pid;
     saveDaemonState(state);
 
-    const guard = armDaemonSpendGuard(['item-a']);
+    const nowForGuard = new Date();
+    const guard = armDaemonSpendGuard({
+      itemIds: ['item-a'], daemonStartedAt: null,
+      budgetDay: nowForGuard.toISOString().slice(0, 10), dailyBudgetUsd: 1,
+      spentUsdAtArm: 0, reservedUsd: 1, now: nowForGuard,
+    });
     expect(guard.ok).toBe(true);
 
     const diagnosis = diagnoseGuardHealth();
@@ -212,7 +235,12 @@ describe('diagnoseGuardHealth', () => {
     state.pid = process.pid;
     saveDaemonState(state);
 
-    const guard = armDaemonSpendGuard(['item-a']);
+    const nowForGuard = new Date();
+    const guard = armDaemonSpendGuard({
+      itemIds: ['item-a'], daemonStartedAt: null,
+      budgetDay: nowForGuard.toISOString().slice(0, 10), dailyBudgetUsd: 1,
+      spentUsdAtArm: 0, reservedUsd: 1, now: nowForGuard,
+    });
     expect(guard.ok).toBe(true);
 
     const lockPath = daemonLockPath();

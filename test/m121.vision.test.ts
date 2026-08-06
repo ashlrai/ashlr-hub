@@ -53,16 +53,30 @@ vi.mock('../src/core/run/provider-client.js', () => ({
 // Mock: createGoal — track calls
 // ---------------------------------------------------------------------------
 
-const createdGoals: Array<{ objective: string; project?: string | null }> = [];
+const createdGoals: Array<{
+  id: string;
+  objective: string;
+  project: string | null;
+  status: 'planning';
+  milestones: never[];
+  createdAt: string;
+  updatedAt: string;
+}> = [];
 
 vi.mock('../src/core/goals/store.js', () => ({
   createGoal: vi.fn((objective: string, opts?: { project?: string | null }) => {
     const id = `goal-${createdGoals.length}`;
-    createdGoals.push({ objective, project: opts?.project });
-    return { id, objective, project: opts?.project ?? null, status: 'planning', milestones: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    const now = new Date().toISOString();
+    const goal = { id, objective, project: opts?.project ?? null, status: 'planning' as const, milestones: [], createdAt: now, updatedAt: now };
+    createdGoals.push(goal);
+    return goal;
   }),
   listGoals: vi.fn(() => []),
-  loadGoal: vi.fn(() => null),
+  listGoalsDetailed: vi.fn(() => ({
+    goals: [], sourceState: 'healthy', sourcePresent: true, complete: true,
+    scannedFiles: 0, unreadableFiles: 0, limitExceeded: false,
+  })),
+  loadGoal: vi.fn((id: string) => createdGoals.find((goal) => goal.id === id) ?? null),
   saveGoal: vi.fn(),
   deleteGoal: vi.fn(),
   addMilestone: vi.fn(),

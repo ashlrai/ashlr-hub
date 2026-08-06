@@ -66,6 +66,7 @@ import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } 
 import * as fs from 'node:fs';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { hostname } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import type {
   AshlrConfig,
@@ -364,6 +365,7 @@ vi.mock('../src/core/daemon/cutoff-checkpoint-scheduler.js', () => ({
 import {
   tick,
   runDaemon,
+  recoverDaemonSpendGuardOnStartup,
   saveResidentDaemonState,
   stopDaemon,
   buildItemGoal,
@@ -372,8 +374,10 @@ import {
 import {
   acquireDaemonLock,
   daemonLockPath,
+  daemonStatePath,
   daemonSpendGuardPath,
   loadDaemonState,
+  loadDaemonStateStrict,
   readDaemonSpendGuard,
   releaseDaemonLock,
   saveDaemonState,
@@ -8266,6 +8270,17 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockRunSwarm).toHaveBeenCalledTimes(cap);
   });
 
+  it('A3b: a 65-item configured tick clamps to the durable spend-guard capacity', async () => {
+    enrollWithItems(65);
+
+    const result = await tick(cfgBuiltin({ perTickItems: 65, dailyBudgetUsd: 10 }), { dryRun: false });
+
+    expect(result.reason).toBe('ok');
+    expect(result.itemsConsidered).toBe(64);
+    expect(mockRunSwarm).toHaveBeenCalledTimes(64);
+    expect(readDaemonSpendGuard().exists).toBe(false);
+  }, 30_000);
+
   it('A4: near-zero remaining budget still selects exactly 1 item (selectCount floor)', async () => {
     enrollWithItems(5);
     // $0.004 remaining → floor(0.004 / 0.01) = 0, but max(1, 0) = 1
@@ -9195,6 +9210,22 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
     expect(state.ticks.at(-1)?.dryRun).toBe(true);
   });
 
+  it('E1a: one-shot persistence failure is returned as a terminal service outcome', async () => {
+    enrollWithItems(1);
+    const spendStub = makeSpendingSwarmStub({ costUsd: 0.01 });
+    mockRunSwarm.mockImplementation(async (...args: unknown[]) => {
+      fs.writeFileSync(daemonStatePath(), '{ broken during paid work', 'utf8');
+      return spendStub(...args);
+    });
+
+    const state = await runDaemon(cfgBuiltin({ perTickItems: 1 }), { once: true, dryRun: false });
+
+    expect(state).toMatchObject({
+      running: false,
+      terminalFailure: 'daemon-state-persistence-failed',
+    });
+  });
+
   it('E1b: runDaemon once=true reloads Foundry policy from disk before ticking', async () => {
     enrollWithItems(1);
     mockBuildResourceStrategyReport.mockResolvedValue(strategyReport('verify-only', 'caller cfg would enforce verify-only'));
@@ -9998,6 +10029,181 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
     expect(staleSave).toMatchObject({ ok: false });
     expect(loadDaemonState()).toEqual(successorState);
     expect(fs.readFileSync(join(process.env.ASHLR_HOME!, 'daemon.json'), 'utf8')).toBe(successorRaw);
+  });
+
+  it('E3l: unreceipted concurrent v2 exposure is charged once and survives a later cap increase', async () => {
+    const budgetDay = today();
+    const daemonStartedAt = `${budgetDay}T00:00:00.000Z`;
+    const guard = {
+      schemaVersion: 2,
+      accountingId: '123e4567-e89b-42d3-a456-426614174011',
+      token: '123e4567-e89b-42d3-a456-426614174012',
+      pid: 2_147_483_647,
+      hostname: hostname(),
+      armedAt: `${budgetDay}T00:01:00.000Z`,
+      daemonStartedAt,
+      budgetDay,
+      // Three concurrent $0.05 workers can realize $0.15 after all observe a
+      // $0.125 headroom. A crash loses the exact $0.15 total, so recovery may
+      // charge only the durable $0.125 reservation but must close the day.
+      dailyBudgetUsd: 0.125,
+      spentUsdAtArm: 0,
+      reservedUsd: 0.125,
+      exhaustBudgetDay: false,
+      itemIds: ['crash-window-item-a', 'crash-window-item-b', 'crash-window-item-c'],
+    };
+    const before = {
+      running: false,
+      pid: null,
+      startedAt: daemonStartedAt,
+      lastTickAt: null,
+      todayDate: budgetDay,
+      todaySpentUsd: 0,
+      itemsProcessed: 0,
+      ticks: [],
+    };
+    saveDaemonState(before);
+    fs.writeFileSync(daemonSpendGuardPath(), JSON.stringify(guard, null, 2) + '\n', 'utf8');
+    const acquired = acquireDaemonLock();
+    expect(acquired.acquired).toBe(true);
+    if (!acquired.acquired) return;
+    try {
+      const first = recoverDaemonSpendGuardOnStartup(acquired.lock, loadDaemonState());
+      expect(first).toMatchObject({ ok: true, recovered: true, alreadyAccounted: false });
+      expect(loadDaemonState()).toMatchObject({
+        todaySpentUsd: 0.125,
+        spendGuardAccounting: {
+          budgetDay,
+          accountingId: guard.accountingId,
+          budgetExhausted: true,
+        },
+      });
+      expect(readDaemonSpendGuard().exists).toBe(false);
+
+      fs.writeFileSync(daemonSpendGuardPath(), JSON.stringify(guard, null, 2) + '\n', 'utf8');
+      const replay = recoverDaemonSpendGuardOnStartup(acquired.lock, loadDaemonState());
+      expect(replay).toMatchObject({ ok: true, recovered: true, alreadyAccounted: true });
+      expect(loadDaemonState().todaySpentUsd).toBe(0.125);
+      expect(readDaemonSpendGuard().exists).toBe(false);
+
+      // Raising the configured cap must not reopen a day whose real concurrent
+      // exposure was unknowable after the crash.
+      enrollWithItems(1);
+      expect(await tick(cfgBuiltin({ dailyBudgetUsd: 10, perTickItems: 1 }), { dryRun: false }))
+        .toMatchObject({ reason: 'budget-exhausted' });
+      expect(mockRunSwarm).not.toHaveBeenCalled();
+    } finally {
+      releaseDaemonLock(acquired.lock);
+    }
+  });
+
+  it('E3m: an exact persisted receipt permits same-process replay clearing without a second charge', () => {
+    const budgetDay = today();
+    const daemonStartedAt = `${budgetDay}T00:00:00.000Z`;
+    const guard = {
+      schemaVersion: 2 as const,
+      accountingId: '123e4567-e89b-42d3-a456-426614174021',
+      token: '123e4567-e89b-42d3-a456-426614174022',
+      pid: process.pid,
+      hostname: hostname(),
+      armedAt: `${budgetDay}T00:01:00.000Z`,
+      daemonStartedAt,
+      budgetDay,
+      dailyBudgetUsd: 1,
+      spentUsdAtArm: 0.25,
+      reservedUsd: 0.75,
+      exhaustBudgetDay: false,
+      itemIds: ['same-process-replay'],
+    };
+    saveDaemonState({
+      running: false, pid: null, startedAt: daemonStartedAt, lastTickAt: null,
+      todayDate: budgetDay, todaySpentUsd: 1, itemsProcessed: 0, ticks: [],
+      spendGuardAccounting: { budgetDay, accountingId: guard.accountingId },
+    });
+    fs.writeFileSync(daemonSpendGuardPath(), JSON.stringify(guard, null, 2) + '\n', 'utf8');
+    const acquired = acquireDaemonLock();
+    expect(acquired.acquired).toBe(true);
+    if (!acquired.acquired) return;
+    try {
+      expect(recoverDaemonSpendGuardOnStartup(acquired.lock, loadDaemonState()))
+        .toMatchObject({ ok: true, recovered: true, alreadyAccounted: true });
+      expect(loadDaemonState().todaySpentUsd).toBe(1);
+      expect(loadDaemonState().spendGuardAccounting?.budgetExhausted).toBeUndefined();
+      expect(readDaemonSpendGuard().exists).toBe(false);
+    } finally {
+      releaseDaemonLock(acquired.lock);
+    }
+  });
+
+  it('E3n: a same-process guard without its exact receipt remains fail-closed', () => {
+    const budgetDay = today();
+    const daemonStartedAt = `${budgetDay}T00:00:00.000Z`;
+    const guard = {
+      schemaVersion: 2 as const,
+      accountingId: '123e4567-e89b-42d3-a456-426614174031',
+      token: '123e4567-e89b-42d3-a456-426614174032',
+      pid: process.pid,
+      hostname: hostname(),
+      armedAt: `${budgetDay}T00:01:00.000Z`, daemonStartedAt, budgetDay,
+      dailyBudgetUsd: 1, spentUsdAtArm: 0.25, reservedUsd: 0.75,
+      exhaustBudgetDay: false, itemIds: ['same-process-unaccounted'],
+    };
+    const before = {
+      running: false, pid: null, startedAt: daemonStartedAt, lastTickAt: null,
+      todayDate: budgetDay, todaySpentUsd: 0.25, itemsProcessed: 0, ticks: [],
+    };
+    saveDaemonState(before);
+    fs.writeFileSync(daemonSpendGuardPath(), JSON.stringify(guard, null, 2) + '\n', 'utf8');
+    const acquired = acquireDaemonLock();
+    expect(acquired.acquired).toBe(true);
+    if (!acquired.acquired) return;
+    try {
+      expect(recoverDaemonSpendGuardOnStartup(acquired.lock, loadDaemonState()))
+        .toMatchObject({ ok: false, reason: 'spend-guard-owner-not-provably-dead' });
+      expect(loadDaemonState()).toEqual(before);
+      expect(readDaemonSpendGuard().exists).toBe(true);
+    } finally {
+      releaseDaemonLock(acquired.lock);
+    }
+  });
+
+  it('E3o: a state-bound same-host dead-owner v1 guard upgrades, exhausts the day, and clears', async () => {
+    const budgetDay = today();
+    const daemonStartedAt = `${budgetDay}T00:00:00.000Z`;
+    const deadPid = 2_147_483_647;
+    const legacy = {
+      token: 'legacy-exact-token', pid: deadPid, hostname: hostname(),
+      armedAt: `${budgetDay}T00:01:00.000Z`, itemIds: ['legacy-crash-item'],
+    };
+    saveDaemonState({
+      running: true, pid: deadPid, startedAt: daemonStartedAt, lastTickAt: null,
+      todayDate: budgetDay, todaySpentUsd: 0.25, itemsProcessed: 0, ticks: [],
+    });
+    fs.writeFileSync(daemonSpendGuardPath(), JSON.stringify(legacy, null, 2) + '\n', 'utf8');
+    const acquired = acquireDaemonLock();
+    expect(acquired.acquired).toBe(true);
+    if (!acquired.acquired) return;
+    try {
+      const loaded = loadDaemonStateStrict({ preserveOwnerIdentity: true });
+      expect(loaded).toMatchObject({
+        ok: true,
+        state: { running: true, pid: deadPid, startedAt: daemonStartedAt, todayDate: budgetDay },
+      });
+      if (!loaded.ok) return;
+      const recovery = recoverDaemonSpendGuardOnStartup(acquired.lock, loaded.state, 1);
+      expect(recovery, JSON.stringify(recovery))
+        .toMatchObject({ ok: true, recovered: true, alreadyAccounted: false });
+      expect(loadDaemonState()).toMatchObject({
+        todaySpentUsd: 1,
+        spendGuardAccounting: { budgetDay, budgetExhausted: true },
+      });
+      expect(readDaemonSpendGuard().exists).toBe(false);
+      expect(await tick(cfgBuiltin({ dailyBudgetUsd: 2 }), { dryRun: false }))
+        .toMatchObject({ reason: 'budget-exhausted' });
+      expect(mockRunSwarm).not.toHaveBeenCalled();
+    } finally {
+      releaseDaemonLock(acquired.lock);
+    }
   });
 
   it('E4: runDaemon re-entrancy guard — refuses when ASHLR_IN_DAEMON is already set', async () => {

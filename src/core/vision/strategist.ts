@@ -39,9 +39,9 @@
  */
 
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, isAbsolute, join } from 'node:path';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import type { AshlrConfig } from '../types.js';
+import type { AshlrConfig, Goal } from '../types.js';
 import { defaultStrategistModel } from '../run/model-catalog.js';
 import { loadSpec, applyEvolution } from './spec.js';
 import type { EndStateSpec, ToolRoadmapEntry } from './spec.js';
@@ -84,6 +84,67 @@ export interface StrategicBriefing {
   questionsForMason: string[];
   /** Goals to create so the conductor pursues vision-aligned work. */
   proposedGoals: ProposedGoal[];
+}
+
+/** The strategist contract permits at most three new goals per briefing. */
+export const MAX_STRATEGIST_GOALS_PER_BRIEFING = 3;
+
+export type BriefingGoalAdoptionSkipReason =
+  | 'briefing-goal-cap'
+  | 'goal-focus-cap'
+  | 'goal-source-degraded'
+  | 'duplicate-existing-goal'
+  | 'goal-id-collision'
+  | 'target-not-enrolled'
+  | 'target-ambiguous'
+  | 'target-invalid';
+
+export interface BriefingGoalAdoptionEntry {
+  index: number;
+  objective: string;
+  targetRepo: string | null;
+  project: string | null;
+  disposition: 'create' | 'skip';
+  reason: 'ready' | BriefingGoalAdoptionSkipReason;
+}
+
+export interface BriefingAdoptionPreview {
+  briefingGeneratedAt: string;
+  goalSourceState: 'missing' | 'healthy' | 'degraded';
+  activeThreshold: number;
+  openGoalCount: number;
+  availableSlots: number;
+  proposedCount: number;
+  createCount: number;
+  skippedCount: number;
+  entries: BriefingGoalAdoptionEntry[];
+}
+
+export type BriefingGoalAdoptionOutcomeReason =
+  | BriefingGoalAdoptionSkipReason
+  | 'persisted'
+  | 'goal-store-write-failed'
+  | 'adoption-failed';
+
+export interface BriefingGoalAdoptionOutcome {
+  index: number;
+  objective: string;
+  targetRepo: string | null;
+  project: string | null;
+  outcome: 'created' | 'failed' | 'skipped';
+  reason: BriefingGoalAdoptionOutcomeReason;
+  goalId?: string;
+}
+
+export interface AdoptBriefingResult {
+  specId: string;
+  specOutcome: 'not-requested' | 'persisted' | 'failed';
+  goalIds: string[];
+  createdCount: number;
+  failedCount: number;
+  skippedCount: number;
+  outcomes: BriefingGoalAdoptionOutcome[];
+  preview: BriefingAdoptionPreview;
 }
 
 // ---------------------------------------------------------------------------
@@ -843,6 +904,162 @@ export async function runStrategist(
 // Public: adoptBriefing()
 // ---------------------------------------------------------------------------
 
+export interface BriefingAdoptionPreviewOptions {
+  enrolledRepos: readonly string[];
+  existingGoals: readonly Goal[];
+  activeThreshold: number;
+  goalSourceState?: 'missing' | 'healthy' | 'degraded';
+}
+
+type TargetResolution =
+  | { project: string | null; reason: 'ready' }
+  | { project: null; reason: Extract<BriefingGoalAdoptionSkipReason,
+    'target-not-enrolled' | 'target-ambiguous' | 'target-invalid'> };
+
+function goalObjective(pg: ProposedGoal): string {
+  return pg.specPriority
+    ? `[vision:${pg.specPriority}] ${pg.objective}`
+    : pg.objective;
+}
+
+function normalizedGoalIdentity(objective: string, project: string | null): string {
+  const normalizedObjective = objective
+    .replace(/^\s*\[vision:[^\]]+\]\s*/i, '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+  return `${project ?? '<ecosystem>'}\0${normalizedObjective}`;
+}
+
+function resolveBriefingGoalTarget(
+  pg: ProposedGoal,
+  briefingProject: string | null,
+  enrolledRepos: readonly string[],
+): TargetResolution {
+  // Missing targetRepo is the legacy single-project briefing shape. An
+  // explicit null remains an ecosystem-wide, planning-only goal.
+  const requested = pg.targetRepo === undefined ? briefingProject : pg.targetRepo;
+  if (requested === null) return { project: null, reason: 'ready' };
+  if (typeof requested !== 'string' || requested.trim().length === 0) {
+    return { project: null, reason: 'target-invalid' };
+  }
+
+  const target = requested.trim();
+  if (isAbsolute(target)) {
+    const exact = enrolledRepos.filter((repo) => repo === target);
+    if (exact.length === 1) return { project: exact[0]!, reason: 'ready' };
+    return { project: null, reason: 'target-not-enrolled' };
+  }
+
+  // Model briefings use tool names (for example "ashlr-pulse"). Resolve only
+  // an exact basename match. Fuzzy/prefix matching would silently broaden the
+  // repo authority selected by a human-approved briefing.
+  if (target.includes('/') || target.includes('\\')) {
+    return { project: null, reason: 'target-invalid' };
+  }
+  const matches = enrolledRepos.filter((repo) => basename(repo) === target);
+  if (matches.length === 1) return { project: matches[0]!, reason: 'ready' };
+  if (matches.length > 1) return { project: null, reason: 'target-ambiguous' };
+  return { project: null, reason: 'target-not-enrolled' };
+}
+
+/**
+ * Compile a strategist briefing into a deterministic, bounded goal-adoption
+ * preview. This is pure over the supplied snapshots: it writes no goal/spec,
+ * runs no agent, and grants no execution or merge authority.
+ */
+export function previewBriefingAdoption(
+  briefing: StrategicBriefing,
+  opts: BriefingAdoptionPreviewOptions,
+): BriefingAdoptionPreview {
+  const enrolledRepos = [...new Set(opts.enrolledRepos)].sort();
+  const goalSourceState = opts.goalSourceState ?? 'healthy';
+  const activeThreshold = Number.isFinite(opts.activeThreshold)
+    ? Math.max(1, Math.floor(opts.activeThreshold))
+    : 1;
+  const openGoals = opts.existingGoals.filter(
+    (goal) => goal.status === 'active' || goal.status === 'planning',
+  );
+  const enrolledSet = new Set(enrolledRepos);
+  // Match goal-focus policy: only goals bound to currently enrolled roots
+  // consume autonomous-focus capacity. Unbound or unenrolled legacy goals are
+  // still included in duplicate detection so repeated approval cannot clone
+  // their planning records.
+  const focusGoals = openGoals.filter(
+    (goal) => goal.project !== null && enrolledSet.has(goal.project),
+  );
+  const availableSlots = Math.max(0, activeThreshold - focusGoals.length);
+  // Goal ids are deterministically derived from the raw objective, without
+  // project or status. Reserve every persisted raw objective so adopting a
+  // briefing cannot overwrite archived/done history or collide across repos.
+  const claimedObjectives = new Set(opts.existingGoals.map((goal) => goal.objective));
+  const identities = new Set(
+    opts.existingGoals.map((goal) => normalizedGoalIdentity(goal.objective, goal.project)),
+  );
+  const entries: BriefingGoalAdoptionEntry[] = [];
+  let planned = 0;
+
+  for (let index = 0; index < briefing.proposedGoals.length; index++) {
+    const pg = briefing.proposedGoals[index]!;
+    const objective = goalObjective(pg);
+    const targetRepo = pg.targetRepo === undefined ? briefing.project : pg.targetRepo;
+    const target = resolveBriefingGoalTarget(pg, briefing.project, enrolledRepos);
+    const base = {
+      index,
+      objective,
+      targetRepo: targetRepo ?? null,
+      project: target.project,
+    };
+
+    // Dedupe and focus decisions require a complete goal inventory. A missing
+    // directory is authoritative empty; malformed, truncated, unreadable, or
+    // bounded inventories are degraded and must not create new work.
+    if (goalSourceState === 'degraded') {
+      entries.push({ ...base, disposition: 'skip', reason: 'goal-source-degraded' });
+      continue;
+    }
+    if (index >= MAX_STRATEGIST_GOALS_PER_BRIEFING) {
+      entries.push({ ...base, disposition: 'skip', reason: 'briefing-goal-cap' });
+      continue;
+    }
+    if (target.reason !== 'ready') {
+      entries.push({ ...base, disposition: 'skip', reason: target.reason });
+      continue;
+    }
+
+    if (claimedObjectives.has(objective)) {
+      entries.push({ ...base, disposition: 'skip', reason: 'goal-id-collision' });
+      continue;
+    }
+    const identity = normalizedGoalIdentity(objective, target.project);
+    if (identities.has(identity)) {
+      entries.push({ ...base, disposition: 'skip', reason: 'duplicate-existing-goal' });
+      continue;
+    }
+    if (planned >= availableSlots) {
+      entries.push({ ...base, disposition: 'skip', reason: 'goal-focus-cap' });
+      continue;
+    }
+
+    claimedObjectives.add(objective);
+    identities.add(identity);
+    planned += 1;
+    entries.push({ ...base, disposition: 'create', reason: 'ready' });
+  }
+
+  return {
+    briefingGeneratedAt: briefing.generatedAt,
+    goalSourceState,
+    activeThreshold,
+    openGoalCount: focusGoals.length,
+    availableSlots,
+    proposedCount: briefing.proposedGoals.length,
+    createCount: planned,
+    skippedCount: entries.length - planned,
+    entries,
+  };
+}
+
 /**
  * Apply a StrategicBriefing to the fleet:
  *   1. Evolve the EndStateSpec with proposedEvolution (updatedBy:'strategist').
@@ -856,27 +1073,58 @@ export async function runStrategist(
 export async function adoptBriefing(
   cfg: AshlrConfig,
   briefing: StrategicBriefing,
-  opts: { by?: 'mason' | 'strategist' } = {},
-): Promise<{ specId: string; goalIds: string[] }> {
+  opts: {
+    by?: 'mason' | 'strategist';
+    /** Hermetic snapshot seams; production callers omit these. */
+    enrolledRepos?: readonly string[];
+    existingGoals?: readonly Goal[];
+    goalSourceState?: 'missing' | 'healthy' | 'degraded';
+    activeThreshold?: number;
+  } = {},
+): Promise<AdoptBriefingResult> {
   const by = opts.by ?? 'strategist';
   const project = briefing.project;
   const specId = project ? project.replace(/[^a-z0-9._-]/gi, '-').toLowerCase() : 'ecosystem';
+  const emptyPreview = (): BriefingAdoptionPreview => ({
+    briefingGeneratedAt: briefing.generatedAt,
+    goalSourceState: 'degraded',
+    activeThreshold: Math.max(1, Math.floor(opts.activeThreshold ?? 4)),
+    openGoalCount: 0,
+    availableSlots: 0,
+    proposedCount: briefing.proposedGoals.length,
+    createCount: 0,
+    skippedCount: 0,
+    entries: [],
+  });
 
-  try {
-    // ── 1. Evolve the spec ─────────────────────────────────────────────────
-    const acePlaybook = (cfg.foundry as Record<string, unknown> | undefined)?.['acePlaybook'] === true;
-    const hasEvolution = Object.keys(briefing.proposedEvolution).length > 0;
-    if (hasEvolution) {
-      applyEvolution(
+  // Spec persistence is independent of the optional goal-adoption
+  // infrastructure. A missing policy or goal store must never suppress an
+  // otherwise valid spec evolution.
+  const hasEvolution = Object.keys(briefing.proposedEvolution).length > 0;
+  let specOutcome: AdoptBriefingResult['specOutcome'] = 'not-requested';
+  if (hasEvolution) {
+    try {
+      const evolved = applyEvolution(
         specId,
         briefing.proposedEvolution,
         by,
         `Strategist briefing from ${briefing.generatedAt}: ${briefing.recommendedDirection[0] ?? 'vision update'}`,
       );
+      const persisted = loadSpec(specId);
+      specOutcome = persisted !== null && JSON.stringify(persisted) === JSON.stringify(evolved)
+        ? 'persisted'
+        : 'failed';
+    } catch {
+      specOutcome = 'failed';
     }
+  }
 
-    // ── 1b. ACE Playbook: append deltas (no collapse) ──────────────────
-    if (acePlaybook) {
+  // ACE playbook deltas are likewise independent, best-effort local learning.
+  // Preserve their established never-throw behavior even when goal adoption is
+  // unavailable or fail-closed.
+  const acePlaybook = (cfg.foundry as Record<string, unknown> | undefined)?.['acePlaybook'] === true;
+  if (acePlaybook) {
+    try {
       for (const direction of briefing.recommendedDirection) {
         if (direction.trim()) addDelta('strategy', direction);
       }
@@ -884,28 +1132,112 @@ export async function adoptBriefing(
         if (problem.trim()) addDelta('strategy', `Hard problem: ${problem}`);
       }
       curate('strategy');
+    } catch {
+      // Best-effort local playbook behavior remains isolated from spec/goals.
     }
+  }
 
-    // ── 2. Create goals from proposedGoals ────────────────────────────────
-    const goalIds: string[] = [];
-    if (briefing.proposedGoals.length > 0) {
-      const { createGoal } = await import('../goals/store.js');
-      for (const pg of briefing.proposedGoals) {
-        // Encode spec priority linkage in the objective prefix so existing
-        // goal store schema is not changed (backward-compatible).
-        const objective = pg.specPriority
-          ? `[vision:${pg.specPriority}] ${pg.objective}`
-          : pg.objective;
-        const goal = createGoal(objective, {
-          project: project ?? undefined,
+  if (briefing.proposedGoals.length === 0) {
+    return {
+      specId,
+      specOutcome,
+      goalIds: [],
+      createdCount: 0,
+      failedCount: 0,
+      skippedCount: 0,
+      outcomes: [],
+      preview: emptyPreview(),
+    };
+  }
+
+  try {
+    const { createGoal, listGoalsDetailed, loadGoal } = await import('../goals/store.js');
+    const { goalFocusActiveThreshold } = await import('../goals/focus.js');
+    const enrolledRepos = opts.enrolledRepos ?? (await import('../sandbox/policy.js')).listEnrolled();
+    const goalInventory = opts.existingGoals !== undefined
+      ? {
+          goals: opts.existingGoals,
+          sourceState: opts.goalSourceState ?? 'healthy' as const,
+        }
+      : listGoalsDetailed();
+    const preview = previewBriefingAdoption(briefing, {
+      enrolledRepos,
+      existingGoals: goalInventory.goals,
+      goalSourceState: goalInventory.sourceState,
+      activeThreshold: opts.activeThreshold ?? goalFocusActiveThreshold(cfg),
+    });
+
+    // Create goals only after an authoritative inventory and target preview.
+    const outcomes: BriefingGoalAdoptionOutcome[] = [];
+    for (const entry of preview.entries) {
+      const base = {
+        index: entry.index,
+        objective: entry.objective,
+        targetRepo: entry.targetRepo,
+        project: entry.project,
+      };
+      if (entry.disposition !== 'create') {
+        outcomes.push({
+          ...base,
+          outcome: 'skipped',
+          reason: entry.reason as BriefingGoalAdoptionSkipReason,
+        });
+        continue;
+      }
+      try {
+        const goal = createGoal(entry.objective, {
+          project: entry.project,
           cfg,
         });
-        goalIds.push(goal.id);
+        const persisted = loadGoal(goal.id);
+        if (
+          persisted !== null &&
+          persisted.id === goal.id &&
+          persisted.objective === entry.objective &&
+          persisted.project === entry.project &&
+          persisted.createdAt === goal.createdAt &&
+          persisted.updatedAt === goal.updatedAt
+        ) {
+          outcomes.push({ ...base, outcome: 'created', reason: 'persisted', goalId: goal.id });
+        } else {
+          outcomes.push({ ...base, outcome: 'failed', reason: 'goal-store-write-failed' });
+        }
+      } catch {
+        outcomes.push({ ...base, outcome: 'failed', reason: 'goal-store-write-failed' });
       }
     }
 
-    return { specId, goalIds };
+    const goalIds = outcomes.flatMap((outcome) =>
+      outcome.outcome === 'created' && outcome.goalId !== undefined ? [outcome.goalId] : [],
+    );
+    return {
+      specId,
+      specOutcome,
+      goalIds,
+      createdCount: goalIds.length,
+      failedCount: outcomes.filter((outcome) => outcome.outcome === 'failed').length,
+      skippedCount: outcomes.filter((outcome) => outcome.outcome === 'skipped').length,
+      outcomes,
+      preview,
+    };
   } catch {
-    return { specId, goalIds: [] };
+    const outcomes: BriefingGoalAdoptionOutcome[] = briefing.proposedGoals.map((pg, index) => ({
+      index,
+      objective: goalObjective(pg),
+      targetRepo: pg.targetRepo === undefined ? briefing.project : pg.targetRepo,
+      project: null,
+      outcome: 'failed',
+      reason: 'adoption-failed',
+    }));
+    return {
+      specId,
+      specOutcome,
+      goalIds: [],
+      createdCount: 0,
+      failedCount: outcomes.length,
+      skippedCount: 0,
+      outcomes,
+      preview: emptyPreview(),
+    };
   }
 }

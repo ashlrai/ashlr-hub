@@ -414,6 +414,37 @@ describe('M149 — flag-ON: adoptBriefing appends deltas to playbook', () => {
     expect(spec!.northStar).toBe('ACE-updated north star.');
   });
 
+  it('preserves spec and playbook updates when goal-adoption infrastructure is unavailable', async () => {
+    const { adoptBriefing } = await import('../src/core/vision/strategist.js');
+    const { getEntries } = await import('../src/core/vision/playbook.js');
+    const { loadSpec } = await import('../src/core/vision/spec.js');
+    const briefing = {
+      generatedAt: new Date().toISOString(),
+      project: null,
+      currentState: 'State.',
+      gapToVision: 'Gap.',
+      proposedEvolution: { northStar: 'Independent spec phase.' },
+      recommendedDirection: ['Independent playbook phase'],
+      newProblems: [],
+      questionsForMason: [],
+      proposedGoals: [{ objective: 'Unavailable goal phase', rationale: 'Exercise isolation.' }],
+    };
+
+    // This suite intentionally exposes only the legacy goal-store mock surface;
+    // the detailed inventory required by Mission Compiler is unavailable.
+    const result = await adoptBriefing(mockCfgOn, briefing);
+
+    expect(loadSpec('ecosystem')?.northStar).toBe('Independent spec phase.');
+    expect(getEntries().some((entry) => entry.text === 'Independent playbook phase')).toBe(true);
+    expect(result).toMatchObject({
+      specOutcome: 'persisted',
+      createdCount: 0,
+      failedCount: 1,
+      skippedCount: 0,
+      outcomes: [expect.objectContaining({ outcome: 'failed', reason: 'adoption-failed' })],
+    });
+  });
+
   it('flag-OFF: adoptBriefing does NOT write playbook entries', async () => {
     const { adoptBriefing } = await import('../src/core/vision/strategist.js');
     const { getEntries } = await import('../src/core/vision/playbook.js');

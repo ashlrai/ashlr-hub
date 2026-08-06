@@ -342,6 +342,8 @@ describe.skipIf(process.platform !== 'win32')(
         for (const [expected, replacement] of [
           ['<Duration>PT10M</Duration>', '<Duration>PT11M</Duration>'],
           ['<WaitTimeout>PT1H</WaitTimeout>', '<WaitTimeout>PT2H</WaitTimeout>'],
+          ['<Interval>PT1M</Interval>', '<Interval>PT2M</Interval>'],
+          ['<Count>3</Count>', '<Count>4</Count>'],
           ['G:SYD:P', 'G:BAD:P'],
         ]) {
           const rejected = runPowerShellInput(

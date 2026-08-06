@@ -74,6 +74,7 @@ import type { DaemonState } from '../src/core/types.js';
 import { tick } from '../src/core/daemon/loop.js';
 import {
   loadDaemonState,
+  readDaemonSpendGuard,
   saveDaemonState,
   resetDayIfNeeded,
 } from '../src/core/daemon/state.js';
@@ -262,6 +263,37 @@ describe('H3 DAILY-RESET-EXACT — (b) a date change zeroes todaySpentUsd exactl
 // ===========================================================================
 
 describe('H3 DAILY-RESET-EXACT — (c) the reset precedes todaySpentUsd += tickSpent, so a rollover tick counts only the new spend', () => {
+  it('a real UTC midnight crossing accounts and clears the old-day guard before persisting the new day', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-08-05T23:59:59.000Z'));
+      seedMidTickSpend({ spentUsd: 0.2 });
+      const spendStub = makeSpendingSwarmStub({ costUsd: 0.002, repo: repo.dir, propose: true });
+      let crossed = false;
+      mockRunSwarm.mockImplementation(async (...args: unknown[]): Promise<unknown> => {
+        if (!crossed) {
+          crossed = true;
+          vi.setSystemTime(new Date('2026-08-06T00:00:01.000Z'));
+        }
+        return spendStub(...args);
+      });
+
+      const result = await tick(makeCfg(), { dryRun: false });
+
+      expect(result.reason).toBe('ok');
+      expect(result.spentUsd).toBeGreaterThan(0);
+      expect(readDaemonSpendGuard().exists).toBe(false);
+      const after = reloadDaemonState();
+      expect(after.todayDate).toBe('2026-08-06');
+      expect(after.todaySpentUsd).toBe(0);
+      expect(after.spendGuardAccounting).toBeUndefined();
+      expect(after.ticks.at(-1)).toMatchObject({ ts: '2026-08-05T23:59:59.000Z' });
+      expect(after.ticks.at(-1)?.spentUsd).toBeCloseTo(result.spentUsd, 10);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('a rollover tick counts ONLY the new realized spend S (not X+S, not 0, not 2S)', async () => {
     // A prior-day state carried X = $4.00. A tick today crosses the boundary:
     // the entry reset (loop.ts:173) AND the post-async reset (loop.ts:417) zero
@@ -314,7 +346,7 @@ describe('H3 DAILY-RESET-EXACT — (c) the reset precedes todaySpentUsd += tickS
     expect(after.todaySpentUsd).not.toBeCloseTo(S, 10); // X was NOT dropped
   });
 
-  it('the post-async re-check (loop.ts:417) accounts spend to TODAY even when the loaded state is stale-dated', async () => {
+  it('a conflicting stale-dated state writer cannot erase the guard accounting baseline', async () => {
     // Models a long tick whose work crosses midnight: the state RELOADED in the
     // accounting block (loop.ts:416) is past-dated, so the post-async
     // resetDayIfNeeded (loop.ts:417) must roll it to today BEFORE `+= tickSpent`.
@@ -338,17 +370,14 @@ describe('H3 DAILY-RESET-EXACT — (c) the reset precedes todaySpentUsd += tickS
     });
 
     const result = await tick(makeCfg(), { dryRun: false });
-    expect(result.reason).toBe('ok');
+    expect(result.reason).toBe('state-persistence-failed');
     const S = result.spentUsd;
     expect(S).toBeGreaterThan(0);
 
     const after = reloadDaemonState();
-    // The post-async reset rolled the stale date to today and zeroed the stale
-    // spend, THEN added the new S — so the counter is exactly S on today's date.
-    expect(after.todayDate).toBe(today());
-    expect(after.todaySpentUsd).toBeCloseTo(S, 10);
-    // The stale prior spend written mid-tick was NOT carried into today.
-    expect(after.todaySpentUsd).not.toBeCloseTo(stalePriorSpend + S, 10);
+    expect(after.todayDate).toBe(dateNDaysAgo(1));
+    expect(after.todaySpentUsd).toBe(stalePriorSpend);
+    expect(readDaemonSpendGuard().exists).toBe(true);
   });
 });
 

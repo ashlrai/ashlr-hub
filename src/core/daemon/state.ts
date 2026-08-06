@@ -17,20 +17,23 @@ import {
   constants as fsConstants,
   existsSync,
   fstatSync,
+  fsyncSync,
   lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
   renameSync,
   unlinkSync,
+  writeSync,
   writeFileSync,
   type Stats,
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { homedir, hostname as osHostname } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { DaemonState } from '../types.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
+import { fsyncDirectory } from '../util/durability.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -41,6 +44,10 @@ const MAX_TICKS = 100;
 
 /** Conservative stale-lock window used only after the recorded pid is gone. */
 const DEFAULT_LOCK_STALE_MS = 10 * 60_000;
+export const DAEMON_SPEND_GUARD_ITEM_CAPACITY = 64;
+const MAX_SPEND_GUARD_ITEM_ID_BYTES = 512;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const BUDGET_DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 // ---------------------------------------------------------------------------
 // Path helpers (re-resolved at call time so tests can relocate HOME)
@@ -92,6 +99,23 @@ export type SaveDaemonStateResult =
   | { ok: false; path: string; error: string };
 
 export interface DaemonSpendGuard {
+  schemaVersion: 2;
+  accountingId: string;
+  token: string;
+  pid: number;
+  hostname: string;
+  armedAt: string;
+  daemonStartedAt: string | null;
+  budgetDay: string;
+  dailyBudgetUsd: number;
+  spentUsdAtArm: number;
+  reservedUsd: number;
+  exhaustBudgetDay: boolean;
+  itemIds: string[];
+}
+
+/** Strict shape written by releases before the v2 accounting identity. */
+export interface LegacyDaemonSpendGuard {
   token: string;
   pid: number;
   hostname: string;
@@ -99,9 +123,30 @@ export interface DaemonSpendGuard {
   itemIds: string[];
 }
 
+export interface ArmDaemonSpendGuardInput {
+  itemIds: string[];
+  daemonStartedAt: string | null;
+  budgetDay: string;
+  dailyBudgetUsd: number;
+  spentUsdAtArm: number;
+  reservedUsd: number;
+  now?: Date;
+}
+
+export type AccountDaemonSpendGuardResult =
+  | { ok: true; state: DaemonState; alreadyAccounted: boolean }
+  | { ok: false; error: string };
+
 export type ReadDaemonSpendGuardResult =
   | { exists: false; path: string }
-  | { exists: true; path: string; guard: DaemonSpendGuard | null; malformed: boolean; error?: string };
+  | {
+      exists: true;
+      path: string;
+      guard: DaemonSpendGuard | null;
+      legacyGuard: LegacyDaemonSpendGuard | null;
+      malformed: boolean;
+      error?: string;
+    };
 
 export type ArmDaemonSpendGuardResult =
   | { ok: true; path: string; guard: DaemonSpendGuard }
@@ -109,6 +154,10 @@ export type ArmDaemonSpendGuardResult =
 
 export type ClearDaemonSpendGuardResult =
   | { ok: true; path: string; cleared: boolean }
+  | { ok: false; path: string; error: string };
+
+export type UpgradeLegacyDaemonSpendGuardResult =
+  | { ok: true; path: string; guard: DaemonSpendGuard }
   | { ok: false; path: string; error: string };
 
 // ---------------------------------------------------------------------------
@@ -128,7 +177,38 @@ function freshState(): DaemonState {
   };
 }
 
-function parseDaemonState(raw: string, opts?: { strict?: boolean }): DaemonState | null {
+function canonicalTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === value;
+}
+
+function canonicalBudgetDay(value: unknown): value is string {
+  if (typeof value !== 'string' || !BUDGET_DAY_RE.test(value)) return false;
+  const parsed = Date.parse(`${value}T00:00:00.000Z`);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString().slice(0, 10) === value;
+}
+
+function validStrictSpendGuardAccounting(value: unknown, todayDate: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const row = value as Record<string, unknown>;
+  const expectedKeys = row['budgetExhausted'] === undefined
+    ? ['accountingId', 'budgetDay']
+    : ['accountingId', 'budgetDay', 'budgetExhausted'];
+  const keys = Object.keys(row).sort();
+  return keys.length === expectedKeys.length &&
+    keys.every((key, index) => key === expectedKeys[index]) &&
+    canonicalBudgetDay(row['budgetDay']) &&
+    row['budgetDay'] === todayDate &&
+    typeof row['accountingId'] === 'string' &&
+    UUID_RE.test(row['accountingId']) &&
+    (row['budgetExhausted'] === undefined || typeof row['budgetExhausted'] === 'boolean');
+}
+
+function parseDaemonState(
+  raw: string,
+  opts?: { strict?: boolean; preserveOwnerIdentity?: boolean },
+): DaemonState | null {
   const parsed = JSON.parse(raw) as unknown;
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     return null;
@@ -147,6 +227,8 @@ function parseDaemonState(raw: string, opts?: { strict?: boolean }): DaemonState
       typeof obj['itemsProcessed'] !== 'number' ||
       !Number.isFinite(obj['itemsProcessed']) ||
       !Array.isArray(obj['ticks']) ||
+      (obj['spendGuardAccounting'] !== undefined &&
+        !validStrictSpendGuardAccounting(obj['spendGuardAccounting'], obj['todayDate'])) ||
       (obj['automaticDrainOrdinaryTurnDue'] !== undefined &&
         typeof obj['automaticDrainOrdinaryTurnDue'] !== 'boolean')
     ) {
@@ -171,6 +253,19 @@ function parseDaemonState(raw: string, opts?: { strict?: boolean }): DaemonState
       typeof obj['todaySpentUsd'] === 'number' ? obj['todaySpentUsd'] : 0,
     itemsProcessed:
       typeof obj['itemsProcessed'] === 'number' ? obj['itemsProcessed'] : 0,
+    spendGuardAccounting: (() => {
+      const accounting = obj['spendGuardAccounting'];
+      if (typeof accounting !== 'object' || accounting === null || Array.isArray(accounting)) return undefined;
+      const row = accounting as Record<string, unknown>;
+      return canonicalBudgetDay(row['budgetDay']) &&
+        typeof row['accountingId'] === 'string' && UUID_RE.test(row['accountingId'])
+        ? {
+            budgetDay: row['budgetDay'],
+            accountingId: row['accountingId'],
+            ...(row['budgetExhausted'] === true ? { budgetExhausted: true } : {}),
+          }
+        : undefined;
+    })(),
     ticks: Array.isArray(obj['ticks'])
       ? (obj['ticks'] as unknown[]).filter(
           (t): t is DaemonState['ticks'][number] =>
@@ -187,7 +282,7 @@ function parseDaemonState(raw: string, opts?: { strict?: boolean }): DaemonState
     lastPulseExportAt:
       typeof obj['lastPulseExportAt'] === 'string' ? obj['lastPulseExportAt'] : undefined,
   };
-  return reconcileDaemonState(state);
+  return opts?.preserveOwnerIdentity === true ? state : reconcileDaemonState(state);
 }
 
 function ownedByCurrentUser(stat: Stats): boolean {
@@ -228,7 +323,9 @@ export function loadDaemonState(): DaemonState {
  * or unreadable state is returned as an error so spend-sensitive callers can
  * fail closed instead of treating a broken ledger as zero spend.
  */
-export function loadDaemonStateStrict(): LoadDaemonStateStrictResult {
+export function loadDaemonStateStrict(
+  opts: { preserveOwnerIdentity?: boolean } = {},
+): LoadDaemonStateStrictResult {
   const p = daemonStatePath();
   let named: Stats;
   try {
@@ -263,7 +360,10 @@ export function loadDaemonStateStrict(): LoadDaemonStateStrictResult {
         error: 'daemon state changed while being read',
       };
     }
-    const state = parseDaemonState(raw, { strict: true });
+    const state = parseDaemonState(raw, {
+      strict: true,
+      preserveOwnerIdentity: opts.preserveOwnerIdentity === true,
+    });
     if (!state) {
       return { ok: false, path: p, reason: 'malformed', error: 'daemon state is not a JSON object' };
     }
@@ -289,6 +389,80 @@ export function loadDaemonStateStrict(): LoadDaemonStateStrictResult {
 // Save (atomic)
 // ---------------------------------------------------------------------------
 
+function ensureAshlrDirDurable(): string {
+  const dir = ashlrDir();
+  const created = !existsSync(dir);
+  if (created) {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // Persist the new ~/.ashlr directory entry before relying on files in it.
+    fsyncDirectory(dirname(dir));
+  }
+  return dir;
+}
+
+function writeAll(fd: number, value: string): void {
+  const bytes = Buffer.from(value, 'utf8');
+  let offset = 0;
+  while (offset < bytes.length) {
+    const written = writeSync(fd, bytes, offset, bytes.length - offset, offset);
+    if (written <= 0) throw new Error('daemon persistence write made no progress');
+    offset += written;
+  }
+}
+
+/** File fsync -> atomic rename -> platform-aware parent directory fsync. */
+function writeDurableReplacement(path: string, value: string): void {
+  const dir = ensureAshlrDirDurable();
+  const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+  let fd: number | undefined;
+  let published = false;
+  try {
+    fd = openSync(
+      tmp,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollow,
+      0o600,
+    );
+    writeAll(fd, value);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    renameSync(tmp, path);
+    published = true;
+    fsyncDirectory(dir);
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* best effort */ }
+    }
+    if (!published) {
+      try { unlinkSync(tmp); } catch { /* absent or indeterminate temporary */ }
+    }
+  }
+}
+
+/** Exclusive target create with file and parent-directory persistence barriers. */
+function writeDurableExclusive(path: string, value: string): void {
+  const dir = ensureAshlrDirDurable();
+  const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+  let fd: number | undefined;
+  try {
+    fd = openSync(
+      path,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollow,
+      0o600,
+    );
+    writeAll(fd, value);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    fsyncDirectory(dir);
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* preserve fail-closed guard evidence */ }
+    }
+  }
+}
+
 /**
  * Atomically write DaemonState to daemonStatePath() via tmp-file + rename
  * (POSIX-atomic). Creates ~/.ashlr if needed. Never throws.
@@ -299,31 +473,17 @@ export function saveDaemonState(s: DaemonState): void {
 
 /** Like saveDaemonState(), but reports persistence failures to fail-closed callers. */
 export function saveDaemonStateResult(s: DaemonState): SaveDaemonStateResult {
-  let tmp: string | null = null;
   const dest = daemonStatePath();
   try {
-    const dir = ashlrDir();
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
-    }
     // Bound ticks history before persisting.
     const bounded: DaemonState = {
       ...s,
       ticks: s.ticks.slice(-MAX_TICKS),
     };
-    tmp = `${dest}.${process.pid}.${randomUUID()}.tmp`;
-    writeFileSync(tmp, JSON.stringify(bounded, null, 2) + '\n', 'utf8');
-    renameSync(tmp, dest);
+    writeDurableReplacement(dest, JSON.stringify(bounded, null, 2) + '\n');
     return { ok: true, path: dest };
   } catch (err) {
     // Persistence failure must not crash the daemon — swallow silently.
-    if (tmp) {
-      try {
-        if (existsSync(tmp)) unlinkSync(tmp);
-      } catch {
-        // Best-effort cleanup only.
-      }
-    }
     const msg = err instanceof Error ? err.message : String(err);
     return { ok: false, path: dest, error: msg };
   }
@@ -334,22 +494,85 @@ function parseSpendGuard(raw: string): DaemonSpendGuard | null {
     const parsed = JSON.parse(raw) as unknown;
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
     const obj = parsed as Record<string, unknown>;
+    const keys = Object.keys(obj).sort();
+    const expectedKeys = [
+      'accountingId', 'armedAt', 'budgetDay', 'daemonStartedAt', 'dailyBudgetUsd', 'exhaustBudgetDay',
+      'hostname', 'itemIds', 'pid', 'reservedUsd', 'schemaVersion', 'spentUsdAtArm', 'token',
+    ].sort();
+    const itemIds = obj['itemIds'];
     if (
-      typeof obj['token'] !== 'string' ||
-      typeof obj['pid'] !== 'number' ||
-      typeof obj['hostname'] !== 'string' ||
-      typeof obj['armedAt'] !== 'string' ||
-      !Array.isArray(obj['itemIds']) ||
-      !obj['itemIds'].every((id) => typeof id === 'string')
+      keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index]) ||
+      obj['schemaVersion'] !== 2 ||
+      typeof obj['accountingId'] !== 'string' || !UUID_RE.test(obj['accountingId']) ||
+      typeof obj['token'] !== 'string' || !UUID_RE.test(obj['token']) ||
+      !Number.isSafeInteger(obj['pid']) || (obj['pid'] as number) <= 0 ||
+      typeof obj['hostname'] !== 'string' || obj['hostname'].length === 0 || obj['hostname'].length > 255 ||
+      !canonicalTimestamp(obj['armedAt']) ||
+      !(obj['daemonStartedAt'] === null || canonicalTimestamp(obj['daemonStartedAt'])) ||
+      (typeof obj['daemonStartedAt'] === 'string' &&
+        Date.parse(obj['daemonStartedAt']) > Date.parse(obj['armedAt'])) ||
+      !canonicalBudgetDay(obj['budgetDay']) || obj['budgetDay'] !== obj['armedAt'].slice(0, 10) ||
+      typeof obj['dailyBudgetUsd'] !== 'number' || !Number.isFinite(obj['dailyBudgetUsd']) ||
+      obj['dailyBudgetUsd'] <= 0 ||
+      typeof obj['spentUsdAtArm'] !== 'number' || !Number.isFinite(obj['spentUsdAtArm']) ||
+      obj['spentUsdAtArm'] < 0 || obj['spentUsdAtArm'] > obj['dailyBudgetUsd'] ||
+      typeof obj['reservedUsd'] !== 'number' || !Number.isFinite(obj['reservedUsd']) || obj['reservedUsd'] < 0 ||
+      obj['reservedUsd'] > obj['dailyBudgetUsd'] - obj['spentUsdAtArm'] ||
+      typeof obj['exhaustBudgetDay'] !== 'boolean' ||
+      !Array.isArray(itemIds) || itemIds.length > DAEMON_SPEND_GUARD_ITEM_CAPACITY ||
+      !itemIds.every((id) => typeof id === 'string' && id.length > 0 &&
+        Buffer.byteLength(id, 'utf8') <= MAX_SPEND_GUARD_ITEM_ID_BYTES) ||
+      new Set(itemIds).size !== itemIds.length ||
+      (itemIds.length === 0 && obj['reservedUsd'] !== 0)
     ) {
       return null;
     }
     return {
+      schemaVersion: 2,
+      accountingId: obj['accountingId'],
       token: obj['token'],
-      pid: obj['pid'],
+      pid: obj['pid'] as number,
       hostname: obj['hostname'],
       armedAt: obj['armedAt'],
-      itemIds: obj['itemIds'] as string[],
+      daemonStartedAt: obj['daemonStartedAt'] as string | null,
+      budgetDay: obj['budgetDay'],
+      dailyBudgetUsd: obj['dailyBudgetUsd'],
+      spentUsdAtArm: obj['spentUsdAtArm'],
+      reservedUsd: obj['reservedUsd'],
+      exhaustBudgetDay: obj['exhaustBudgetDay'],
+      itemIds: [...itemIds],
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parseLegacySpendGuard(raw: string): LegacyDaemonSpendGuard | null {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
+    const obj = parsed as Record<string, unknown>;
+    const keys = Object.keys(obj).sort();
+    const expectedKeys = ['armedAt', 'hostname', 'itemIds', 'pid', 'token'].sort();
+    const itemIds = obj['itemIds'];
+    if (
+      keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index]) ||
+      typeof obj['token'] !== 'string' || obj['token'].length === 0 || obj['token'].length > 256 ||
+      !Number.isSafeInteger(obj['pid']) || (obj['pid'] as number) <= 0 ||
+      typeof obj['hostname'] !== 'string' || obj['hostname'].length === 0 || obj['hostname'].length > 255 ||
+      !canonicalTimestamp(obj['armedAt']) ||
+      !Array.isArray(itemIds) || itemIds.length === 0 ||
+      itemIds.length > DAEMON_SPEND_GUARD_ITEM_CAPACITY ||
+      !itemIds.every((id) => typeof id === 'string' && id.length > 0 &&
+        Buffer.byteLength(id, 'utf8') <= MAX_SPEND_GUARD_ITEM_ID_BYTES) ||
+      new Set(itemIds).size !== itemIds.length
+    ) return null;
+    return {
+      token: obj['token'],
+      pid: obj['pid'] as number,
+      hostname: obj['hostname'],
+      armedAt: obj['armedAt'],
+      itemIds: [...itemIds],
     };
   } catch {
     return null;
@@ -362,31 +585,128 @@ export function readDaemonSpendGuard(): ReadDaemonSpendGuardResult {
   try {
     const raw = readFileSync(p, 'utf8');
     const guard = parseSpendGuard(raw);
-    return { exists: true, path: p, guard, malformed: guard === null };
+    const legacyGuard = guard ? null : parseLegacySpendGuard(raw);
+    return { exists: true, path: p, guard, legacyGuard, malformed: guard === null };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return { exists: true, path: p, guard: null, malformed: true, error: msg };
+    return { exists: true, path: p, guard: null, legacyGuard: null, malformed: true, error: msg };
   }
 }
 
-export function armDaemonSpendGuard(itemIds: string[]): ArmDaemonSpendGuardResult {
+export function armDaemonSpendGuard(input: ArmDaemonSpendGuardInput): ArmDaemonSpendGuardResult {
   const p = daemonSpendGuardPath();
   try {
-    const dir = ashlrDir();
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    const armedAt = (input.now ?? new Date()).toISOString();
     const guard: DaemonSpendGuard = {
+      schemaVersion: 2,
+      accountingId: randomUUID(),
       token: randomUUID(),
       pid: process.pid,
       hostname: osHostname(),
-      armedAt: new Date().toISOString(),
-      itemIds,
+      armedAt,
+      daemonStartedAt: input.daemonStartedAt,
+      budgetDay: input.budgetDay,
+      dailyBudgetUsd: input.dailyBudgetUsd,
+      spentUsdAtArm: input.spentUsdAtArm,
+      reservedUsd: input.reservedUsd,
+      exhaustBudgetDay: false,
+      itemIds: [...input.itemIds],
     };
-    writeFileSync(p, JSON.stringify(guard, null, 2) + '\n', { encoding: 'utf8', flag: 'wx' });
+    if (!parseSpendGuard(`${JSON.stringify(guard)}\n`)) {
+      return { ok: false, path: p, error: 'invalid daemon spend guard input' };
+    }
+    writeDurableExclusive(p, JSON.stringify(guard, null, 2) + '\n');
     return { ok: true, path: p, guard };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { ok: false, path: p, error: msg };
   }
+}
+
+/** Replace one exact recognized v1 guard with a crash-recoverable v2 guard. */
+export function upgradeLegacyDaemonSpendGuard(
+  expected: LegacyDaemonSpendGuard,
+  input: Omit<ArmDaemonSpendGuardInput, 'itemIds' | 'now'>,
+): UpgradeLegacyDaemonSpendGuardResult {
+  const p = daemonSpendGuardPath();
+  try {
+    const current = readDaemonSpendGuard();
+    if (!current.exists || !current.legacyGuard ||
+      JSON.stringify(current.legacyGuard) !== JSON.stringify(expected)) {
+      return { ok: false, path: p, error: 'legacy spend guard changed before upgrade' };
+    }
+    const guard: DaemonSpendGuard = {
+      schemaVersion: 2,
+      accountingId: randomUUID(),
+      token: randomUUID(),
+      pid: expected.pid,
+      hostname: expected.hostname,
+      armedAt: expected.armedAt,
+      daemonStartedAt: input.daemonStartedAt,
+      budgetDay: input.budgetDay,
+      dailyBudgetUsd: input.dailyBudgetUsd,
+      spentUsdAtArm: input.spentUsdAtArm,
+      reservedUsd: input.reservedUsd,
+      exhaustBudgetDay: true,
+      itemIds: [...expected.itemIds],
+    };
+    if (!parseSpendGuard(`${JSON.stringify(guard)}\n`)) {
+      return { ok: false, path: p, error: 'legacy spend guard upgrade evidence is invalid' };
+    }
+    writeDurableReplacement(p, JSON.stringify(guard, null, 2) + '\n');
+    return { ok: true, path: p, guard };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, path: p, error: msg };
+  }
+}
+
+/**
+ * Charge one exact v2 guard identity at most once for its UTC budget day.
+ * This is pure: callers must persist the returned state while holding daemon
+ * ownership before clearing the guard.
+ */
+export function accountDaemonSpendGuard(
+  state: DaemonState,
+  guard: DaemonSpendGuard,
+  spentUsd: number,
+): AccountDaemonSpendGuardResult {
+  if (!Number.isFinite(spentUsd) || spentUsd < 0) {
+    return { ok: false, error: 'spend guard accounting amount is invalid' };
+  }
+  if (state.todayDate !== guard.budgetDay) {
+    return { ok: false, error: 'spend guard budget day does not match daemon state' };
+  }
+  if (state.startedAt !== guard.daemonStartedAt) {
+    return { ok: false, error: 'spend guard daemon identity does not match daemon state' };
+  }
+  const accounting = state.spendGuardAccounting;
+  if (accounting && accounting.budgetDay !== guard.budgetDay) {
+    return { ok: false, error: 'spend guard accounting day conflicts with daemon state' };
+  }
+  if (accounting?.accountingId === guard.accountingId) {
+    return { ok: true, state, alreadyAccounted: true };
+  }
+  if (state.todaySpentUsd !== guard.spentUsdAtArm) {
+    return { ok: false, error: 'spend guard prior accounting total does not match daemon state' };
+  }
+  const todaySpentUsd = state.todaySpentUsd + spentUsd;
+  if (!Number.isFinite(todaySpentUsd) || todaySpentUsd < state.todaySpentUsd) {
+    return { ok: false, error: 'spend guard accounting total is invalid' };
+  }
+  return {
+    ok: true,
+    alreadyAccounted: false,
+    state: {
+      ...state,
+      todaySpentUsd,
+      spendGuardAccounting: {
+        budgetDay: guard.budgetDay,
+        accountingId: guard.accountingId,
+        ...(guard.exhaustBudgetDay ? { budgetExhausted: true } : {}),
+      },
+    },
+  };
 }
 
 export function clearDaemonSpendGuard(token: string): ClearDaemonSpendGuardResult {
@@ -398,6 +718,7 @@ export function clearDaemonSpendGuard(token: string): ClearDaemonSpendGuardResul
   }
   try {
     unlinkSync(p);
+    fsyncDirectory(dirname(p));
     return { ok: true, path: p, cleared: true };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -634,6 +955,7 @@ export function resetDayIfNeeded(s: DaemonState): DaemonState {
     ...s,
     todayDate: today,
     todaySpentUsd: 0,
+    spendGuardAccounting: undefined,
   };
 }
 

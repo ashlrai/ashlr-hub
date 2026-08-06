@@ -79,6 +79,7 @@ const state = {
   fleetObservedAt: null,            // client receipt time for /api/fleet
   fleetLoading: false,              // suppress overlapping stale refreshes
   fleetDashboardSettings: null,     // persisted settings (loaded lazily)
+  operatorAttentionSignature: null, // announce only meaningful attention transitions
   inboxBadge: 0,            // pending count from SSE, drives nav badge
   loading: {},   // viewName -> boolean
   error: {},     // viewName -> string | null
@@ -564,9 +565,39 @@ function setActiveNav(view) {
   document.querySelectorAll('.nav-link').forEach((a) => {
     const isActive = a.dataset.view === view;
     a.classList.toggle('active', isActive);
+    if (isActive) a.setAttribute('aria-current', 'page');
+    else a.removeAttribute('aria-current');
     if (isActive) activeLink = a;
   });
   activeLink?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+}
+
+function captureMainViewState(main) {
+  if (!main) return null;
+  const active = document.activeElement;
+  const focusKey = active && main.contains(active)
+    ? active.getAttribute?.('data-focus-key') ?? null
+    : null;
+  const details = new Map();
+  main.querySelectorAll('details[data-state-key]').forEach((node) => {
+    details.set(node.getAttribute('data-state-key'), node.open === true);
+  });
+  return { scrollTop: main.scrollTop, focusKey, details };
+}
+
+function restoreMainViewState(main, saved) {
+  if (!main || !saved) return;
+  main.querySelectorAll('details[data-state-key]').forEach((node) => {
+    const key = node.getAttribute('data-state-key');
+    if (saved.details.has(key)) node.open = saved.details.get(key);
+  });
+  main.scrollTop = saved.scrollTop;
+  if (!saved.focusKey) return;
+  const target = Array.from(main.querySelectorAll('[data-focus-key]'))
+    .find((node) => node.getAttribute('data-focus-key') === saved.focusKey);
+  if (!target || typeof target.focus !== 'function') return;
+  try { target.focus({ preventScroll: true }); } catch { target.focus(); }
+  main.scrollTop = saved.scrollTop;
 }
 
 // ---------------------------------------------------------------------------
@@ -647,9 +678,20 @@ function renderShell() {
       tokenBtn
     )
   );
+  nav.setAttribute('aria-label', 'Primary navigation');
 
-  const main = el('main', { cls: 'main', id: 'main' });
+  const skipLink = el('a', { cls: 'skip-link', href: '#main' }, 'Skip to fleet content');
+  const attentionLive = el('div', {
+    cls: 'sr-only',
+    id: 'operator-attention-live',
+    role: 'status',
+    'aria-live': 'polite',
+    'aria-atomic': 'true',
+  });
+  const main = el('main', { cls: 'main', id: 'main', tabindex: '-1' });
+  document.body.appendChild(skipLink);
   document.body.appendChild(nav);
+  document.body.appendChild(attentionLive);
   document.body.appendChild(main);
   updateTokenIndicator();
 }
@@ -6883,9 +6925,270 @@ function fdRenderVisibilityPanel(snap) {
   return body;
 }
 
+// ── Exception-first operator briefing ───────────────────────────────────────
+
+function operatorActionNeedsHuman(action) {
+  if (!action) return false;
+  const commands = action.commands ?? [];
+  if (commands.some((command) =>
+    command?.safety === 'manual' || command?.safety === 'control-plane'
+  )) return true;
+  if (commands.length > 0 && commands.every((command) => command?.safety === 'autonomous-dispatch')) {
+    return false;
+  }
+  return action.priority === 'critical' || action.priority === 'high';
+}
+
+function operatorActionRoute(action) {
+  const id = String(action?.id ?? '');
+  if (/pending|inbox|merge/.test(id)) return 'inbox';
+  if (/proposal|dispatch|yield|route|cooldown/.test(id)) return 'fleet-activity';
+  if (/goal|backlog/.test(id)) return 'goals';
+  return 'fleet';
+}
+
+function operatorProofModel(fleet, snap) {
+  const mergeQuality = fleet?.merges?.sourceQuality;
+  const mergeProofHealthy = mergeQuality?.sourceState === 'healthy' && mergeQuality?.complete === true;
+  const dispatchQuality = fleet?.dispatchProductionSource;
+  const dispatchProofHealthy = dispatchProductionSourceHealthy(dispatchQuality);
+  const recentMerges = fleet?.merges?.recent ?? 0;
+  const production = fleet?.dispatchProduction ?? fleet?.proposalProduction ?? null;
+  const proposalsCreated = production?.proposalsCreated ?? production?.created ?? 0;
+  const dispatches = production?.dispatched ?? production?.attempts ?? 0;
+  const activeWork = fleet?.queue?.activeWork?.itemCount ?? fleet?.queue?.shared?.activeClaims ?? 0;
+
+  let proved = 'No recent landed proof';
+  let proofTone = 'muted';
+  if (mergeProofHealthy && recentMerges > 0) {
+    proved = `${recentMerges} landed merge${recentMerges === 1 ? '' : 's'}`;
+    proofTone = 'ok';
+  } else if (dispatchProofHealthy && proposalsCreated > 0) {
+    proved = `${proposalsCreated} proposal${proposalsCreated === 1 ? '' : 's'} produced`;
+    proofTone = 'ok';
+  } else if (!mergeProofHealthy && !dispatchProofHealthy) {
+    proved = 'Proof withheld · sources incomplete';
+    proofTone = 'warn';
+  }
+
+  return {
+    tone: proofTone,
+    steps: [
+      { label: 'Observed', value: snap?.generatedAt ? fmtRelative(snap.generatedAt) : 'unknown' },
+      { label: 'Decided', value: fleet?.missionBrief?.operatingMode ?? fleet?.autonomyEffectiveness?.phase ?? 'unknown' },
+      { label: 'Acted', value: dispatches > 0 ? `${dispatches} dispatch${dispatches === 1 ? '' : 'es'}` : `${activeWork} active` },
+      { label: 'Proved', value: proved },
+    ],
+  };
+}
+
+function operatorInspectionAction({ snapshotFresh, sourceStale, killState, readiness }) {
+  let detail = 'Inspect the current Fleet Status before relying on autonomous operation.';
+  if (!snapshotFresh || sourceStale) {
+    detail = 'The operator snapshot is stale or incomplete. Inspect fresh Fleet Status evidence.';
+  } else if (killState !== 'inactive') {
+    detail = killState === 'active'
+      ? 'The fleet kill switch is engaged. Inspect state before deciding whether to clear it.'
+      : 'Kill-switch authority is unknown. Inspect state before relying on autonomous operation.';
+  } else if (!readiness || readiness.verdict === 'unknown') {
+    detail = 'Autonomous readiness is unknown. Inspect its evidence before relying on the fleet.';
+  } else if (readiness.verdict === 'blocked') {
+    detail = readiness.topBlocker?.detail ?? 'Autonomous readiness is blocked. Inspect the top blocker.';
+  }
+  return {
+    id: 'inspect-operator-evidence',
+    priority: killState === 'unknown' || !readiness || readiness.verdict === 'unknown' ? 'critical' : 'high',
+    label: 'Inspect fleet state',
+    detail,
+    commands: [{
+      label: 'Inspect Fleet Status',
+      argv: ['ashlr', 'fleet', 'status', '--json'],
+      shell: 'ashlr fleet status --json',
+      safety: 'read-only',
+      note: 'Inspection only. This command does not change fleet state.',
+    }],
+  };
+}
+
+function buildOperatorBriefingModel(snap) {
+  const fleet = snap?.fleet ?? snap?.control?.fleet ?? null;
+  const readiness = fleet?.autonomousShipReadiness ?? null;
+  const brief = fleet?.missionBrief ?? null;
+  const actions = Array.isArray(fleet?.nextActions) ? fleet.nextActions : [];
+  const primary = readiness?.primaryAction ?? brief?.action ?? actions[0] ?? null;
+  const ordered = [primary, ...actions]
+    .filter((action, index, all) => action && all.findIndex((candidate) => candidate?.id === action.id) === index);
+  const killState = fleetKillState(fleet);
+  const snapshotFresh = fleetSnapshotLearningFresh(snap);
+  const sourceStale = readiness?.freshness?.overall !== 'fresh' || !snapshotFresh;
+  const readinessKnown = Boolean(readiness) && readiness.verdict !== 'unknown' && readiness.verdict !== 'blocked';
+  const humanActions = ordered.filter(operatorActionNeedsHuman);
+  const clearEligible = snapshotFresh && !sourceStale && killState === 'inactive' && readinessKnown && humanActions.length === 0;
+  const needsYou = clearEligible
+    ? humanActions.slice(0, 3)
+    : [operatorInspectionAction({ snapshotFresh, sourceStale, killState, readiness }), ...humanActions]
+        .filter((action, index, all) => all.findIndex((candidate) => candidate?.id === action.id) === index)
+        .slice(0, 3);
+  const topPriority = needsYou[0]?.priority ?? readiness?.topBlocker?.severity ?? 'low';
+
+  let tone = 'clear';
+  if (killState === 'unknown' || !readiness || readiness.verdict === 'unknown' || topPriority === 'critical') tone = 'critical';
+  else if (!clearEligible || readiness.verdict === 'blocked' || needsYou.length > 0) tone = 'action';
+  else if (sourceStale || readiness?.verdict === 'degraded') tone = 'watch';
+
+  const daemonState = fleetDaemonState(fleet?.daemon);
+  const activeWork = fleet?.queue?.activeWork?.itemCount ?? fleet?.queue?.shared?.activeClaims ?? 0;
+  const spend = daemonState === 'unknown' || fleet?.daemon?.todaySpentUsd == null
+    ? 'spend unknown'
+    : `$${fleet.daemon.todaySpentUsd.toFixed(2)} today`;
+  const autonomousNow = [
+    daemonState === 'running' ? 'Daemon running' : daemonState === 'unknown' ? 'Daemon state unknown' : 'Daemon stopped',
+    brief?.operatingMode ?? fleet?.autonomyEffectiveness?.phase ?? 'mode unknown',
+    `${activeWork} active`,
+    spend,
+  ];
+
+  return {
+    fleet,
+    readiness,
+    brief,
+    needsYou,
+    tone,
+    sourceStale,
+    clearEligible,
+    directive: clearEligible
+      ? brief?.directive ?? 'Fleet operating within observed authority'
+      : needsYou[0]?.label ?? 'Inspect fleet state',
+    whyNow: clearEligible
+      ? brief?.whyNow ?? 'Current evidence supports continued autonomous operation.'
+      : needsYou[0]?.detail ?? 'Fresh inspection is required before relying on autonomous operation.',
+    autonomousNow,
+    proof: operatorProofModel(fleet, snap),
+    signature: `${tone}:${needsYou.map((action) => action.id).join(',')}:${readiness?.topBlocker?.id ?? ''}`,
+  };
+}
+
+function announceOperatorAttention(model) {
+  const previous = state.operatorAttentionSignature;
+  state.operatorAttentionSignature = model.signature;
+  if (previous === null || previous === model.signature) return;
+  const live = document.getElementById('operator-attention-live');
+  if (!live) return;
+  live.textContent = model.tone === 'clear'
+    ? 'Fleet attention cleared. No operator action is required.'
+    : `Fleet attention changed. ${model.needsYou[0]?.label ?? model.brief?.directive ?? model.tone}.`;
+}
+
+function copyOperatorCommand(action, command, button) {
+  const safety = command?.safety ?? 'manual';
+  const shell = command?.shell ?? '';
+  if (!shell || !navigator.clipboard?.writeText) {
+    showToast(`${safety} command is available in the action detail.`);
+    return;
+  }
+  navigator.clipboard.writeText(shell).then(() => {
+    showToast(`${safety} command copied. It was not executed.`);
+    button.textContent = 'Copied · not executed';
+  }).catch(() => showToast('Command copy failed. Nothing was executed.'));
+}
+
+function renderOperatorAction(action, index) {
+  const commands = Array.isArray(action?.commands) ? action.commands : [];
+  const route = operatorActionRoute(action);
+  const commandList = commands.length > 0 ? el('div', { cls: 'fd-operator-command-list' }) : null;
+  commands.forEach((command) => commandList.appendChild(renderNextActionCommand(command)));
+  const row = el('article', { cls: `fd-operator-action fd-operator-action--${action.priority ?? 'low'}` },
+    el('div', { cls: 'fd-operator-action__priority' }, String(action.priority ?? 'low').toUpperCase()),
+    el('div', { cls: 'fd-operator-action__copy' },
+      el('h3', { cls: 'fd-operator-action__title' }, action.label ?? action.id ?? 'Inspect fleet'),
+      el('p', { cls: 'fd-operator-action__detail' }, action.detail ?? 'Inspect the current fleet evidence.'),
+      commandList
+    )
+  );
+  const controls = el('div', { cls: 'fd-operator-action__controls' });
+  controls.appendChild(el('a', {
+    cls: 'btn btn-secondary btn-sm',
+    href: `#${route}`,
+    'data-focus-key': `operator-action-${action.id ?? index}-open`,
+  }, `Open ${route === 'fleet-activity' ? 'activity' : route}`));
+  commands.forEach((command, commandIndex) => {
+    const safety = command?.safety ?? 'manual';
+    const copy = el('button', {
+      cls: 'btn btn-secondary btn-sm',
+      type: 'button',
+      title: `${safety} command; copying never executes it`,
+      'data-focus-key': `operator-action-${action.id ?? index}-command-${commandIndex}-copy`,
+    }, `Copy ${command?.label ?? safety} · ${safety}`);
+    copy.addEventListener('click', () => copyOperatorCommand(action, command, copy));
+    controls.appendChild(copy);
+  });
+  row.appendChild(controls);
+  return row;
+}
+
+function renderOperatorBriefing(snap) {
+  const model = buildOperatorBriefingModel(snap);
+  announceOperatorAttention(model);
+  const section = el('section', {
+    cls: `fd-operator-deck fd-operator-deck--${model.tone}`,
+    'aria-labelledby': 'fd-operator-heading',
+  });
+  section.appendChild(el('header', { cls: 'fd-operator-deck__header' },
+    el('div', {},
+      el('span', { cls: 'fd-operator-deck__eyebrow' }, 'Operator briefing'),
+      el('h2', { cls: 'fd-operator-deck__directive', id: 'fd-operator-heading' },
+        model.directive)
+    ),
+    el('div', { cls: 'fd-operator-deck__state' },
+      el('strong', {}, model.tone === 'action' ? 'ACTION REQUIRED' : model.tone.toUpperCase()),
+      el('span', {}, `${model.readiness?.confidence ?? 'low'} confidence`)
+    )
+  ));
+
+  const body = el('div', { cls: 'fd-operator-deck__grid' });
+  const attention = el('section', { cls: 'fd-operator-zone', 'aria-labelledby': 'fd-needs-you-heading' },
+    el('h3', { cls: 'fd-operator-zone__title', id: 'fd-needs-you-heading' }, 'Needs you')
+  );
+  if (model.needsYou.length > 0) {
+    model.needsYou.forEach((action, index) => attention.appendChild(renderOperatorAction(action, index)));
+  } else if (model.clearEligible) {
+    attention.appendChild(el('div', { cls: 'fd-operator-clear' },
+      el('strong', {}, 'No operator action'),
+      el('span', {}, 'Fresh evidence shows the fleet can continue within its current authority.')
+    ));
+  } else {
+    attention.appendChild(el('div', { cls: 'fd-operator-inspection' },
+      el('strong', {}, 'Inspection required'),
+      el('span', {}, 'Fresh, authoritative state is required before autonomous operation can be treated as clear.')
+    ));
+  }
+  body.appendChild(attention);
+
+  body.appendChild(el('section', { cls: 'fd-operator-zone', 'aria-labelledby': 'fd-autonomous-now-heading' },
+    el('h3', { cls: 'fd-operator-zone__title', id: 'fd-autonomous-now-heading' }, 'Autonomous now'),
+    el('div', { cls: 'fd-operator-now' },
+      ...model.autonomousNow.map((value) => el('span', {}, value))
+    ),
+    el('p', { cls: 'fd-operator-why' }, model.whyNow)
+  ));
+  section.appendChild(body);
+
+  const proof = el('section', { cls: `fd-proof-line fd-proof-line--${model.proof.tone}`, 'aria-labelledby': 'fd-last-proof-heading' },
+    el('h3', { cls: 'fd-operator-zone__title', id: 'fd-last-proof-heading' }, 'Last proof')
+  );
+  const steps = el('ol', { cls: 'fd-proof-line__steps' });
+  model.proof.steps.forEach((step) => steps.appendChild(el('li', { cls: 'fd-proof-line__step' },
+    el('span', { cls: 'fd-proof-line__label' }, step.label),
+    el('strong', { cls: 'fd-proof-line__value' }, step.value)
+  )));
+  proof.appendChild(steps);
+  section.appendChild(proof);
+  return section;
+}
+
 // ── Settings modal ──────────────────────────────────────────────────────────
 
-function fdOpenSettings() {
+function fdOpenSettings(opener = document.activeElement) {
   const settings = fdLoadSettings();
   const draftSettings = {
     panels: Object.assign({}, settings.panels),
@@ -6893,11 +7196,16 @@ function fdOpenSettings() {
     theme: settings.theme,
   };
 
-  const overlay = el('div', { cls: 'fd-overlay', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Fleet Dashboard settings' });
-  const modal = el('div', { cls: 'fd-modal' });
+  const overlay = el('div', { cls: 'fd-overlay' });
+  const modal = el('div', {
+    cls: 'fd-modal',
+    role: 'dialog',
+    'aria-modal': 'true',
+    'aria-labelledby': 'fd-settings-title',
+  });
 
   // Title
-  modal.appendChild(el('div', { cls: 'fd-modal__title' }, 'Fleet Dashboard Settings'));
+  modal.appendChild(el('div', { cls: 'fd-modal__title', id: 'fd-settings-title' }, 'Fleet Dashboard Settings'));
 
   // Panel visibility
   const panelSection = el('div', { cls: 'fd-modal__section' });
@@ -6950,20 +7258,39 @@ function fdOpenSettings() {
   modal.appendChild(themeSection);
 
   // Footer buttons
+  const focusableSelector = 'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])';
+  const openerKey = opener?.getAttribute?.('data-focus-key') ?? null;
+  let onKey;
+  const close = ({ restore = true } = {}) => {
+    document.removeEventListener('keydown', onKey);
+    overlay.remove();
+    const focusTarget = opener?.isConnected
+      ? opener
+      : openerKey
+        ? Array.from(document.querySelectorAll('[data-focus-key]'))
+            .find((node) => node.getAttribute('data-focus-key') === openerKey)
+        : null;
+    if (restore && focusTarget && typeof focusTarget.focus === 'function') {
+      try { focusTarget.focus({ preventScroll: true }); } catch { focusTarget.focus(); }
+    }
+  };
+
   const cancelBtn = el('button', { cls: 'fd-modal__btn', type: 'button' }, 'Cancel');
-  cancelBtn.addEventListener('click', () => overlay.remove());
+  cancelBtn.addEventListener('click', () => close());
 
   const saveBtn = el('button', { cls: 'fd-modal__btn fd-modal__btn--primary', type: 'button' }, 'Save');
   saveBtn.addEventListener('click', () => {
     fdSaveSettings(draftSettings);
     fdApplyTheme(draftSettings.theme);
-    overlay.remove();
+    close({ restore: false });
     // Restart interval with new refresh period
     if (state.fleetDashboardInterval) {
       clearInterval(state.fleetDashboardInterval);
       state.fleetDashboardInterval = null;
     }
     renderFleetDashboard();
+    const replacement = document.querySelector('[data-focus-key="fleet-dashboard-settings"]');
+    if (replacement && typeof replacement.focus === 'function') replacement.focus({ preventScroll: true });
     // Trigger new interval via a reload
     loadFleetDashboard();
   });
@@ -6972,10 +7299,32 @@ function fdOpenSettings() {
   overlay.appendChild(modal);
 
   // Close on overlay click (outside modal)
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
 
   // Close on Escape
-  const onKey = (e) => { if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', onKey); } };
+  onKey = (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      close();
+      return;
+    }
+    if (e.key !== 'Tab') return;
+    const focusable = Array.from(modal.querySelectorAll(focusableSelector));
+    if (focusable.length === 0) {
+      e.preventDefault();
+      modal.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  };
   document.addEventListener('keydown', onKey);
 
   document.body.appendChild(overlay);
@@ -6988,7 +7337,7 @@ function renderFleetDashboard() {
   if (state.activeView !== 'fleet-dashboard') return;
   const main = getMain();
   if (!main) return;
-  const _scrollY = window.scrollY;
+  const viewState = captureMainViewState(main);
   main.innerHTML = '';
 
   const settings = fdLoadSettings();
@@ -6999,9 +7348,16 @@ function renderFleetDashboard() {
   const fleetSnapshot = snap?.fleet ?? snap?.control?.fleet ?? null;
 
   // Header row with title, last-updated, and settings button
-  const settingsBtn = el('button', { cls: 'fd-settings-btn', type: 'button', 'aria-label': 'Dashboard settings' });
+  const settingsBtn = el('button', {
+    cls: 'fd-settings-btn',
+    type: 'button',
+    'aria-label': 'Dashboard settings',
+    'data-focus-key': 'fleet-dashboard-settings',
+  });
   settingsBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="2.5" stroke="currentColor" stroke-width="1.3" fill="none"/><path d="M8 1.5V3M8 13v1.5M1.5 8H3M13 8h1.5M3.22 3.22l1.06 1.06M11.72 11.72l1.06 1.06M12.78 3.22l-1.06 1.06M4.28 11.72l-1.06 1.06" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg> Settings';
-  settingsBtn.addEventListener('click', fdOpenSettings);
+  settingsBtn.addEventListener('click', () => fdOpenSettings(settingsBtn));
+  const fleetControl = snap ? fleetControlButton(fleetSnapshot, 'btn-sm', snap) : null;
+  if (fleetControl) fleetControl.setAttribute('data-focus-key', 'fleet-dashboard-control');
 
   const snapshotLearningFresh = fleetSnapshotLearningFresh(snap);
   const lastUpdated = snap
@@ -7014,7 +7370,7 @@ function renderFleetDashboard() {
     ),
     el('div', { cls: 'fd-header-right' },
       el('span', { cls: 'fd-hidden-hint', id: 'fd-hidden-hint', style: 'display:none' }, ''),
-      snap ? fleetControlButton(fleetSnapshot, 'btn-sm', snap) : null,
+      fleetControl,
       settingsBtn
     )
   ));
@@ -7024,8 +7380,11 @@ function renderFleetDashboard() {
       el('p', {}, 'Loading fleet data…')
     ));
     main.appendChild(section);
+    restoreMainViewState(main, viewState);
     return;
   }
+
+  section.appendChild(renderOperatorBriefing(snap));
 
   // Count hidden panels for the hint
   const panelDefs = [
@@ -7049,7 +7408,7 @@ function renderFleetDashboard() {
     }
   }
 
-  const grid = el('div', { cls: 'fleet-dashboard-grid', role: 'region', 'aria-label': 'Fleet panels' });
+  const grid = el('div', { cls: 'fleet-dashboard-grid', role: 'region', 'aria-label': 'Fleet evidence panels' });
 
   for (const pd of panelDefs) {
     const isVisible = settings.panels[pd.key] !== false;
@@ -7063,9 +7422,22 @@ function renderFleetDashboard() {
     grid.appendChild(panel);
   }
 
-  section.appendChild(grid);
+  const evidence = el('details', {
+    cls: 'fd-evidence-disclosure',
+    'data-state-key': 'fleet-dashboard-evidence',
+  },
+  el('summary', {
+    cls: 'fd-evidence-disclosure__summary',
+    'data-focus-key': 'fleet-dashboard-evidence-toggle',
+  },
+    el('span', {}, 'Evidence and telemetry'),
+    el('span', { cls: 'fd-evidence-disclosure__meta' },
+      `${panelDefs.length - hiddenCount} visible panel${panelDefs.length - hiddenCount === 1 ? '' : 's'}`)
+  ),
+  grid);
+  section.appendChild(evidence);
   main.appendChild(section);
-  window.scrollTo(0, _scrollY);
+  restoreMainViewState(main, viewState);
 }
 
 // ---------------------------------------------------------------------------

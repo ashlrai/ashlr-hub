@@ -3,6 +3,8 @@ import * as path from 'node:path';
 const DISPOSABLE_TASK_NAME = /^AshlrM93Integration-[a-f0-9-]{1,72}$/;
 const MAX_WINDOWS_TASK_XML_BYTES = 256 * 1024;
 const MAX_WINDOWS_TASK_SECURITY_DESCRIPTOR_BYTES = 64 * 1024;
+const WINDOWS_TASK_RESTART_COUNT = 3;
+const WINDOWS_TASK_RESTART_INTERVAL = 'PT1M';
 
 function assertSupportedTaskName(taskName: string): void {
   if (taskName !== 'AshlrDaemon' && !DISPOSABLE_TASK_NAME.test(taskName)) {
@@ -53,7 +55,7 @@ export const WINDOWS_TASK_DEFINITION_VALIDATION_SCRIPT = [
   "$taskNamespace='http://schemas.microsoft.com/windows/2004/02/mit/task'",
   "if($document.DocumentElement.LocalName -cne 'Task' -or $document.DocumentElement.NamespaceURI -cne $taskNamespace){throw 'unsupported task XML root'}",
   '$allowedPaths=@{}',
-  "@('/Task','/Task/RegistrationInfo','/Task/RegistrationInfo/Date','/Task/RegistrationInfo/Author','/Task/RegistrationInfo/URI','/Task/RegistrationInfo/SecurityDescriptor','/Task/Triggers','/Task/Triggers/LogonTrigger','/Task/Triggers/LogonTrigger/Enabled','/Task/Triggers/LogonTrigger/UserId','/Task/Triggers/LogonTrigger/ExecutionTimeLimit','/Task/Principals','/Task/Principals/Principal','/Task/Principals/Principal/UserId','/Task/Principals/Principal/LogonType','/Task/Principals/Principal/RunLevel','/Task/Settings','/Task/Settings/AllowStartOnDemand','/Task/Settings/MultipleInstancesPolicy','/Task/Settings/DisallowStartIfOnBatteries','/Task/Settings/StopIfGoingOnBatteries','/Task/Settings/AllowHardTerminate','/Task/Settings/StartWhenAvailable','/Task/Settings/RunOnlyIfNetworkAvailable','/Task/Settings/WakeToRun','/Task/Settings/Enabled','/Task/Settings/Hidden','/Task/Settings/ExecutionTimeLimit','/Task/Settings/Priority','/Task/Settings/RunOnlyIfIdle','/Task/Settings/UseUnifiedSchedulingEngine','/Task/Settings/DisallowStartOnRemoteAppSession','/Task/Settings/Compatibility','/Task/Settings/IdleSettings','/Task/Settings/IdleSettings/Duration','/Task/Settings/IdleSettings/WaitTimeout','/Task/Settings/IdleSettings/StopOnIdleEnd','/Task/Settings/IdleSettings/RestartOnIdle','/Task/Actions','/Task/Actions/Exec','/Task/Actions/Exec/Command')|ForEach-Object{$allowedPaths[$_]=$true}",
+  "@('/Task','/Task/RegistrationInfo','/Task/RegistrationInfo/Date','/Task/RegistrationInfo/Author','/Task/RegistrationInfo/URI','/Task/RegistrationInfo/SecurityDescriptor','/Task/Triggers','/Task/Triggers/LogonTrigger','/Task/Triggers/LogonTrigger/Enabled','/Task/Triggers/LogonTrigger/UserId','/Task/Triggers/LogonTrigger/ExecutionTimeLimit','/Task/Principals','/Task/Principals/Principal','/Task/Principals/Principal/UserId','/Task/Principals/Principal/LogonType','/Task/Principals/Principal/RunLevel','/Task/Settings','/Task/Settings/AllowStartOnDemand','/Task/Settings/MultipleInstancesPolicy','/Task/Settings/DisallowStartIfOnBatteries','/Task/Settings/StopIfGoingOnBatteries','/Task/Settings/AllowHardTerminate','/Task/Settings/StartWhenAvailable','/Task/Settings/RunOnlyIfNetworkAvailable','/Task/Settings/WakeToRun','/Task/Settings/Enabled','/Task/Settings/Hidden','/Task/Settings/ExecutionTimeLimit','/Task/Settings/Priority','/Task/Settings/RunOnlyIfIdle','/Task/Settings/UseUnifiedSchedulingEngine','/Task/Settings/DisallowStartOnRemoteAppSession','/Task/Settings/Compatibility','/Task/Settings/RestartOnFailure','/Task/Settings/RestartOnFailure/Interval','/Task/Settings/RestartOnFailure/Count','/Task/Settings/IdleSettings','/Task/Settings/IdleSettings/Duration','/Task/Settings/IdleSettings/WaitTimeout','/Task/Settings/IdleSettings/StopOnIdleEnd','/Task/Settings/IdleSettings/RestartOnIdle','/Task/Actions','/Task/Actions/Exec','/Task/Actions/Exec/Command')|ForEach-Object{$allowedPaths[$_]=$true}",
   '$pathCounts=@{}',
   "foreach($node in @($document.SelectNodes('//*'))){$nodePath=Get-AshlrElementPath $node",
   "if($node.NamespaceURI -cne $taskNamespace -or -not $allowedPaths.ContainsKey($nodePath)){throw ('unsupported task XML element ' + $nodePath)}",
@@ -81,12 +83,15 @@ export const WINDOWS_TASK_DEFINITION_VALIDATION_SCRIPT = [
   "$multipleInstanceNodes=@($document.SelectNodes('/t:Task/t:Settings/t:MultipleInstancesPolicy',$namespaceManager))",
   "$idleDuration=Get-AshlrOne $document $namespaceManager '/t:Task/t:Settings/t:IdleSettings/t:Duration' 'task idle duration'",
   "$idleWaitTimeout=Get-AshlrOne $document $namespaceManager '/t:Task/t:Settings/t:IdleSettings/t:WaitTimeout' 'task idle wait timeout'",
+  "$restartInterval=Get-AshlrOne $document $namespaceManager '/t:Task/t:Settings/t:RestartOnFailure/t:Interval' 'task failure restart interval'",
+  "$restartCount=Get-AshlrOne $document $namespaceManager '/t:Task/t:Settings/t:RestartOnFailure/t:Count' 'task failure restart count'",
   "$registrationSecurity=Get-AshlrOne $document $namespaceManager '/t:Task/t:RegistrationInfo/t:SecurityDescriptor' 'task registration security descriptor'",
   "if([string]$triggerLimit.InnerText -cne 'PT0S'){throw 'task logon trigger execution limit is not unlimited'}",
   "if([string]$taskLimit.InnerText -cne 'PT0S'){throw 'task execution limit is not unlimited'}",
   "if($allowDemandNodes.Count -gt 1 -or ($allowDemandNodes.Count -eq 1 -and [string]$allowDemandNodes[0].InnerText -cne 'true')){throw 'task demand start is not enabled'}",
   "if($multipleInstanceNodes.Count -gt 1 -or ($multipleInstanceNodes.Count -eq 1 -and [string]$multipleInstanceNodes[0].InnerText -cne 'IgnoreNew')){throw 'task multiple-instance policy is not IgnoreNew'}",
   "if([string]$idleDuration.InnerText -cne 'PT10M' -or [string]$idleWaitTimeout.InnerText -cne 'PT1H'){throw 'task idle defaults are not exact'}",
+  `if([string]$restartInterval.InnerText -cne '${WINDOWS_TASK_RESTART_INTERVAL}' -or [string]$restartCount.InnerText -cne '${WINDOWS_TASK_RESTART_COUNT}'){throw 'task failure restart policy is not exact'}`,
   'Assert-AshlrTaskSecurityDescriptor ([string]$registrationSecurity.InnerText)',
   "$authorNodes=@($document.SelectNodes('/t:Task/t:RegistrationInfo/t:Author',$namespaceManager))",
   "if($authorNodes.Count -eq 1){$author=[string]$authorNodes[0].InnerText;try{$authorSid=([Security.Principal.SecurityIdentifier]$author).Value}catch{$authorSid=([Security.Principal.NTAccount]$author).Translate([Security.Principal.SecurityIdentifier]).Value};if($authorSid -cne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value){throw 'task XML author is not the current user'}}",
@@ -123,7 +128,7 @@ export const WINDOWS_TASK_DEFINITION_VALIDATION_SCRIPT = [
   "try{$principalSid=([Security.Principal.SecurityIdentifier]$principalId).Value}catch{$principalSid=([Security.Principal.NTAccount]$principalId).Translate([Security.Principal.SecurityIdentifier]).Value}",
   "if(-not [string]::Equals($principalSid,$current.User.Value,[StringComparison]::OrdinalIgnoreCase)){throw 'task principal is not the current user'}",
   '$settings=$definition.Settings',
-  "if(-not [bool]$settings.Enabled -or [bool]$settings.Hidden -or [bool]$settings.WakeToRun -or [bool]$settings.StartWhenAvailable -or [int]$settings.RestartCount -ne 0 -or -not [bool]$settings.AllowDemandStart -or [int]$settings.MultipleInstances -ne 2 -or [string]$settings.ExecutionTimeLimit -cne 'PT0S' -or [bool]$settings.RunOnlyIfIdle -or [bool]$settings.RunOnlyIfNetworkAvailable -or [bool]$settings.DisallowStartIfOnBatteries -or [bool]$settings.StopIfGoingOnBatteries -or -not [bool]$settings.AllowHardTerminate -or [int]$settings.Priority -ne 7 -or [int]$settings.Compatibility -ne 2 -or [string]$settings.IdleSettings.IdleDuration -cne 'PT10M' -or [string]$settings.IdleSettings.WaitTimeout -cne 'PT1H' -or -not [bool]$settings.IdleSettings.StopOnIdleEnd -or [bool]$settings.IdleSettings.RestartOnIdle){throw 'unsupported task settings'}",
+  `if(-not [bool]$settings.Enabled -or [bool]$settings.Hidden -or [bool]$settings.WakeToRun -or [bool]$settings.StartWhenAvailable -or [int]$settings.RestartCount -ne ${WINDOWS_TASK_RESTART_COUNT} -or [string]$settings.RestartInterval -cne '${WINDOWS_TASK_RESTART_INTERVAL}' -or -not [bool]$settings.AllowDemandStart -or [int]$settings.MultipleInstances -ne 2 -or [string]$settings.ExecutionTimeLimit -cne 'PT0S' -or [bool]$settings.RunOnlyIfIdle -or [bool]$settings.RunOnlyIfNetworkAvailable -or [bool]$settings.DisallowStartIfOnBatteries -or [bool]$settings.StopIfGoingOnBatteries -or -not [bool]$settings.AllowHardTerminate -or [int]$settings.Priority -ne 7 -or [int]$settings.Compatibility -ne 2 -or [string]$settings.IdleSettings.IdleDuration -cne 'PT10M' -or [string]$settings.IdleSettings.WaitTimeout -cne 'PT1H' -or -not [bool]$settings.IdleSettings.StopOnIdleEnd -or [bool]$settings.IdleSettings.RestartOnIdle){throw 'unsupported task settings'}`,
   'Assert-AshlrTaskXml $definition $expectedTaskName',
   '}',
 ].join(';');
@@ -242,7 +247,8 @@ export function buildWindowsTaskCreateScript(taskName: string): string {
     '$settings.Priority=7',
     '$settings.Compatibility=2',
     '$settings.RunOnlyIfIdle=$false',
-    '$settings.RestartCount=0',
+    `$settings.RestartCount=${WINDOWS_TASK_RESTART_COUNT}`,
+    `$settings.RestartInterval='${WINDOWS_TASK_RESTART_INTERVAL}'`,
     "$settings.IdleSettings.IdleDuration='PT10M'",
     "$settings.IdleSettings.WaitTimeout='PT1H'",
     '$settings.IdleSettings.StopOnIdleEnd=$true',

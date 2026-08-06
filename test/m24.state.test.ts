@@ -17,7 +17,7 @@
  *    the structure remains valid and most-recent last)
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -46,6 +46,7 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 import {
+  accountDaemonSpendGuard,
   acquireDaemonLock,
   daemonLockPath,
   daemonSpendGuardPath,
@@ -220,6 +221,31 @@ describe('M24 loadDaemonStateStrict — fail-closed ledger reads', () => {
     }
   });
 
+  it('preserves exact persisted dead-owner identity for guarded crash recovery', () => {
+    const deadPid = 424_299;
+    saveDaemonState({
+      ...zeroedState(), running: true, pid: deadPid,
+      startedAt: '2026-08-05T12:00:00.000Z',
+    });
+    const kill = vi.spyOn(process, 'kill').mockImplementation((pid) => {
+      if (pid === deadPid) throw Object.assign(new Error('gone'), { code: 'ESRCH' });
+      return true;
+    });
+    try {
+      expect(loadDaemonState()).toMatchObject({ running: false, pid: null });
+      expect(loadDaemonStateStrict()).toMatchObject({
+        ok: true,
+        state: { running: false, pid: null },
+      });
+      expect(loadDaemonStateStrict({ preserveOwnerIdentity: true })).toMatchObject({
+        ok: true,
+        state: { running: true, pid: deadPid },
+      });
+    } finally {
+      kill.mockRestore();
+    }
+  });
+
   it('reports malformed JSON while the legacy loader remains forgiving', () => {
     const p = daemonStatePath();
     fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -246,6 +272,40 @@ describe('M24 loadDaemonStateStrict — fail-closed ledger reads', () => {
     const forgiving = loadDaemonState();
     expect(forgiving.todaySpentUsd).toBe(0);
     expect(forgiving.itemsProcessed).toBe(0);
+  });
+
+  it('rejects spend accounting receipts with unknown keys instead of normalizing away authority', () => {
+    const p = daemonStatePath();
+    const budgetDay = todayStr();
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify({
+      ...zeroedState(),
+      todayDate: budgetDay,
+      spendGuardAccounting: {
+        budgetDay,
+        accountingId: '123e4567-e89b-42d3-a456-426614174051',
+        unexpected: true,
+      },
+    }), 'utf8');
+
+    expect(loadDaemonStateStrict()).toMatchObject({ ok: false, reason: 'malformed' });
+  });
+
+  it('rejects spend accounting receipts from a different UTC budget day', () => {
+    const p = daemonStatePath();
+    const budgetDay = todayStr();
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify({
+      ...zeroedState(),
+      todayDate: budgetDay,
+      spendGuardAccounting: {
+        budgetDay: yesterdayStr(),
+        accountingId: '123e4567-e89b-42d3-a456-426614174052',
+        budgetExhausted: true,
+      },
+    }), 'utf8');
+
+    expect(loadDaemonStateStrict()).toMatchObject({ ok: false, reason: 'malformed' });
   });
 
   it('rejects symlinked, directory, and hard-linked daemon state authority', () => {
@@ -404,7 +464,16 @@ describe('M24 daemon spend guard — durable dispatch accounting sentinel', () =
   });
 
   it('arms, reads, and clears a spend guard with token protection', () => {
-    const armed = armDaemonSpendGuard(['item-a', 'item-b']);
+    const now = new Date();
+    const armed = armDaemonSpendGuard({
+      itemIds: ['item-a', 'item-b'],
+      daemonStartedAt: null,
+      budgetDay: now.toISOString().slice(0, 10),
+      dailyBudgetUsd: 1,
+      spentUsdAtArm: 0,
+      reservedUsd: 1,
+      now,
+    });
     expect(armed.ok).toBe(true);
     if (!armed.ok) return;
 
@@ -412,6 +481,7 @@ describe('M24 daemon spend guard — durable dispatch accounting sentinel', () =
     expect(read.exists).toBe(true);
     if (read.exists) {
       expect(read.malformed).toBe(false);
+      expect(read.guard?.schemaVersion).toBe(2);
       expect(read.guard?.itemIds).toEqual(['item-a', 'item-b']);
     }
 
@@ -436,6 +506,80 @@ describe('M24 daemon spend guard — durable dispatch accounting sentinel', () =
       expect(read.malformed).toBe(true);
       expect(read.guard).toBeNull();
     }
+  });
+
+  it('treats the legacy unversioned guard schema as present but unrecoverable', () => {
+    const p = daemonSpendGuardPath();
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify({
+      token: 'legacy-token', pid: process.pid, hostname: 'legacy-host',
+      armedAt: new Date().toISOString(), itemIds: ['item-a'],
+    }) + '\n', 'utf8');
+
+    expect(readDaemonSpendGuard()).toMatchObject({
+      exists: true,
+      malformed: true,
+      guard: null,
+    });
+  });
+
+  it('accounts one exact guard identity at most once and rejects day drift', () => {
+    const startedAt = '2026-08-05T12:00:00.000Z';
+    const armed = armDaemonSpendGuard({
+      itemIds: ['item-a'], daemonStartedAt: startedAt,
+      budgetDay: '2026-08-05', dailyBudgetUsd: 3, spentUsdAtArm: 0.25, reservedUsd: 2,
+      now: new Date('2026-08-05T12:01:00.000Z'),
+    });
+    expect(armed.ok).toBe(true);
+    if (!armed.ok) return;
+    const state: DaemonState = {
+      ...zeroedState(), startedAt, todayDate: '2026-08-05', todaySpentUsd: 0.25,
+    };
+
+    const first = accountDaemonSpendGuard(state, armed.guard, armed.guard.reservedUsd);
+    expect(first).toMatchObject({ ok: true, alreadyAccounted: false });
+    if (!first.ok) return;
+    expect(first.state.todaySpentUsd).toBe(2.25);
+    expect(first.state.spendGuardAccounting?.accountingId).toBe(armed.guard.accountingId);
+
+    const replay = accountDaemonSpendGuard(first.state, armed.guard, armed.guard.reservedUsd);
+    expect(replay).toMatchObject({ ok: true, alreadyAccounted: true });
+    if (replay.ok) expect(replay.state.todaySpentUsd).toBe(2.25);
+
+    expect(accountDaemonSpendGuard({ ...state, todayDate: '2026-08-06' }, armed.guard, 2))
+      .toMatchObject({ ok: false, error: expect.stringContaining('budget day') });
+  });
+
+  it('rolls the singleton accounting receipt across more than 128 same-day ticks', () => {
+    const budgetDay = '2026-08-05';
+    const startedAt = `${budgetDay}T12:00:00.000Z`;
+    let state: DaemonState = {
+      ...zeroedState(), startedAt, todayDate: budgetDay,
+    };
+    for (let index = 0; index < 130; index++) {
+      const suffix = index.toString(16).padStart(12, '0');
+      const guard = {
+        schemaVersion: 2 as const,
+        accountingId: `123e4567-e89b-42d3-a456-${suffix}`,
+        token: `223e4567-e89b-42d3-a456-${suffix}`,
+        pid: process.pid,
+        hostname: 'test-host',
+        armedAt: `${budgetDay}T12:01:00.000Z`,
+        daemonStartedAt: startedAt,
+        budgetDay,
+        dailyBudgetUsd: 10,
+        spentUsdAtArm: state.todaySpentUsd,
+        reservedUsd: 0.01,
+        exhaustBudgetDay: false,
+        itemIds: [`item-${index}`],
+      };
+      const accounted = accountDaemonSpendGuard(state, guard, 0.01);
+      expect(accounted).toMatchObject({ ok: true, alreadyAccounted: false });
+      if (!accounted.ok) return;
+      state = accounted.state;
+    }
+    expect(state.todaySpentUsd).toBeCloseTo(1.3, 10);
+    expect(state.spendGuardAccounting?.accountingId).toBe('123e4567-e89b-42d3-a456-000000000081');
   });
 });
 

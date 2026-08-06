@@ -2834,7 +2834,21 @@
   - This is observation-only global-workspace infrastructure. It does not change prompts, routing, verification, merge authority, recursive-learning eligibility, or positive credit, and it does not claim that externalized work state improves model quality. That hypothesis requires preregistered predictions and independent post-effect outcomes.
   - Two scout recommendations were rejected before implementation because they were stale against the stacked source: exact lease-expiry fencing and positive-credit withholding already exist on the current head. Future autonomous task admission should bind findings to an immutable source revision before allocating an implementation branch.
   - Verification passes 477 assertions across 15 semantic-event, manager, merge-gate, outcome, agent-action, secret-safety, attempt, trajectory, context-rollup, workspace/status, dashboard, and sandbox suites. Typecheck, changed-file lint with zero errors, production build, dependency audit with zero vulnerabilities, and diff checks pass.
-  - Published implementation commits `c743959` and `157d446` as protected stacked draft PR #52 on PR #51. No merge, deployment, prompt mutation, routing change, host automerge activation, positive credit, or recursive-learning authority was introduced; the complete duplicate protected matrix remains required.
+- Published implementation commits `c743959` and `157d446` as protected stacked draft PR #52 on PR #51. No merge, deployment, prompt mutation, routing change, host automerge activation, positive credit, or recursive-learning authority was introduced; the complete duplicate protected matrix remains required.
+
+## Ambitious Fleet OS and 24/7 Autonomy Push (2026-08-05)
+
+### Baseline evidence
+- Primary checkout: `master` at `5eacef59`, 536 commits behind `origin/master`, with pre-existing changes in `notes.md`, `task_plan.md`, `src/core/fleet/router.ts`, `test/m360.generated-repair-lifecycle.test.ts`, and `test/m49.fleet-status.test.ts`. Those changes are preserved and excluded from this lane.
+- Clean implementation lane: `/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub-ambitious-fleet-os-v1`, branch `codex/ambitious-fleet-os-v1`, baseline `origin/master` `3204dc64`.
+- Entire.io is not set up for either branch; `entire resume` found no checkpoint.
+- Installed runtime snapshot from the old compiled CLI: daemon stopped, last tick `2026-07-21T23:20:10.847Z`, 22 cached backlog items, 12 eligible, 0 pending proposals, auto-merge disabled, and overall readiness blocked/stale. This is runtime evidence only and must be refreshed after any build/reinstall before activation claims.
+- Current `origin/master` already contains a large autonomy-convergence UI/status merge: lane readiness truth, topology admission, Mission Control changes, and substantial `m49`/dashboard regression coverage. New work must build on those contracts rather than recreate them.
+
+### Working product thesis
+- Audience: one technical operator supervising an autonomous multi-repo engineering fleet.
+- Single job: understand what the fleet is doing, why it is or is not making progress, and take the smallest safe next action in under a minute.
+- Authority boundary: observation and proposal creation can be autonomous; merge, release, and external mutation remain governed by signed evidence, protected-remote truth, budgets, and explicit configured authority.
 
 - Deterministic Best-of-N draft verification (2026-07-16):
   - Winner-only Best-of-N capture previously scored in-memory proposal drafts without invoking the repo verifier because `runTests` required a persisted proposal id. A high critic score could therefore file a draft that deterministic quick verification would reject.
@@ -2924,3 +2938,15 @@
 - Windows sandbox-reservation fixture budget (2026-07-21):
   - M426's durable-owner pre-effect fixture creates a real Git worktree and exceeded Vitest's default five-second limit on hosted Windows. The test now keeps that default on non-Windows platforms and uses a bounded 30-second Windows allowance.
   - Its reservation publication, worktree, cleanup, and ownership assertions are unchanged; production sandbox behavior is untouched.
+
+- Ambitious Fleet OS V1 (2026-08-05):
+  - Live baseline remained fail-closed: the installed daemon was stopped, its last tick was 2026-07-21, cached work was stale, no pending proposal was eligible, and auto-merge was disabled. The installed service was not restarted from an unmerged worktree.
+  - Mission Compiler adds a read-only preview and explicit adoption path for at most three repository-bound strategist goals. Exact raw objectives are reserved across all historical statuses because goal IDs are objective-derived; exact minted persistence is read back before success is reported.
+  - Spec evolution and ACE playbook deltas remain independent of goal-store availability. Goal setup or persistence failure cannot suppress vision updates and still produces deterministic fail-closed adoption outcomes.
+  - Mission Control is now exception-first: `Needs you`, `Autonomous now`, and `Last proof` lead the page; detailed telemetry is collapsed. Unknown, paused, blocked, or stale authority only offers read-only inspection commands.
+  - Dashboard refresh preserves focus, scroll, and disclosures. Every command is individually copyable and never executed. Mobile settings remain bounded, trap focus, and restore it to the opener.
+  - Provider spend now uses a versioned, durably ordered dispatch guard. Recovery distinguishes exact receipts from unknown exposure, blocks cap-increase reopening, handles old-day accounting before reset, bounds item selection, and fails terminal persistence errors back to the resident service manager.
+  - Windows resident tasks now declare and strictly verify three one-minute failure retries; intentional operator stop/kill continues to exit cleanly.
+  - Adversarial review caught and closed cross-repo deterministic goal overwrites, stale archived-record readback, degraded inventory creation, multi-command truncation, unsafe clear/continue copy, cross-midnight recovery, non-durable filesystem ordering, over-cap concurrency undercharge, Windows non-restart, permissive accounting receipt parsing, and spec/playbook suppression by goal setup.
+  - Final local evidence: Mission/UI 115/115, changed-surface 799/799, safety invariants 445 passed with 5 platform skips, and the full suite passed 13,950 tests with 42 skips across 610 passed and 2 platform-skipped files. Typecheck, build, dependency audit, and diff integrity pass; full lint has zero errors and 101 pre-existing warnings.
+  - Published commit `09f458d5` on `codex/ambitious-fleet-os-v1` and opened draft PR #225. The resident daemon remains intentionally stopped until protected review, merge, deployed-artifact installation, and live verification are complete.

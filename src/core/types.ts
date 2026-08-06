@@ -4448,6 +4448,8 @@ export interface DaemonTick {
 export interface DaemonState {
   /** Ephemeral startup refusal returned to the caller; never persisted. */
   startRefusal?: string;
+  /** Ephemeral fatal loop outcome used by service wrappers to request restart. */
+  terminalFailure?: string;
   /** Whether the daemon loop is currently running. */
   running: boolean;
   /** OS pid of the running daemon process, or null when not running. */
@@ -4462,6 +4464,17 @@ export interface DaemonState {
   todaySpentUsd: number;
   /** Cumulative count of backlog items processed across all ticks. */
   itemsProcessed: number;
+  /**
+   * Latest exact-once identity for a spend guard already charged to the
+   * current UTC budget day. This is an accounting receipt only: it grants no
+   * dispatch, proposal, verification, or merge authority.
+   */
+  spendGuardAccounting?: {
+    budgetDay: string;
+    accountingId: string;
+    /** Unknown legacy exposure pessimistically closes this entire budget day. */
+    budgetExhausted?: boolean;
+  };
   /** Bounded history of recent ticks (most-recent last). */
   ticks: DaemonTick[];
   /** One-slot automatic drain owes the next contended turn to ordinary work. */
