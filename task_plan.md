@@ -2834,7 +2834,7 @@ Make Ashlr Hub materially more useful as a solo operator's always-on autonomous 
 - [x] Select one cohesive high-leverage slice with explicit success metrics and authority boundaries.
 - [x] Implement backend/status contracts, operator UX, and focused regression coverage.
 - [x] Run adversarial review plus focused tests, typecheck, lint, build, invariants, and full CI as proportional.
-- [ ] Reconcile the final branch with current `origin/master`, commit/push, and report live activation separately from source readiness.
+- [x] Reconcile the final branch with current `origin/master`, commit/push, and report live activation separately from source readiness.
 
 ### Key Questions
 1. What stops the fleet from being truthfully 24/7 today, beyond the currently stopped resident daemon?
@@ -2850,4 +2850,4 @@ Make Ashlr Hub materially more useful as a solo operator's always-on autonomous 
 - `entire resume codex/ambitious-fleet-os-v1` was first invoked from the dirty primary checkout and refused because of uncommitted changes; rerunning it in this clean worktree found no checkpoint and changed nothing.
 
 ### Status
-**Source-ready for protected review** — independent P0/P1 review is clear; changed-surface, invariant, full-suite, build, lint, audit, and responsive browser gates pass. Commit/push remains, while resident daemon activation is deliberately a separate post-merge/deployed-artifact gate.
+**Source-ready in draft PR #225** — independent P0/P1 review is clear; changed-surface, invariant, full-suite, build, lint, audit, and responsive browser gates pass. Resident daemon activation is deliberately a separate post-merge/deployed-artifact gate.

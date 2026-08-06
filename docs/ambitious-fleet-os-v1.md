@@ -64,7 +64,7 @@ This work does **not** expand merge, deployment, publication, provider-token, or
 - [x] Typecheck, changed-file lint, build, audit, invariants, and diff integrity pass.
 - [x] Full `npm run test:ci` passes from the synchronized branch.
 - [x] Desktop and constrained/mobile browser inspections pass with no console errors.
-- [ ] Branch is committed and pushed for protected CI.
+- [x] Branch is committed and pushed as draft PR #225 for protected CI.
 - [ ] Resident daemon activation is separately approved and verified from the deployed artifact.
 
 ### Local evidence
@@ -76,4 +76,4 @@ This work does **not** expand merge, deployment, publication, provider-token, or
 - Full lint: 0 errors, 101 pre-existing warnings.
 - Browser: 1440x900 and 390x844; no console errors or warnings; mobile settings containment and focus restoration verified.
 
-Status: source-ready for protected review. Resident activation remains intentionally separate and is not claimed by this branch.
+Status: source-ready in draft PR #225 for protected review. Resident activation remains intentionally separate and is not claimed by this branch.
