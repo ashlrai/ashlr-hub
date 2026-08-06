@@ -769,14 +769,17 @@ describe('M333 — file-once proposal capture', () => {
     const h = await harness({ cli: cli.fn, api: cli.fn, draftMode: true });
     const capture = h.captureSandboxedProposal!;
     const originalCapture = capture.getMockImplementation()!;
-    let draft: import('../src/core/types.js').Proposal | undefined;
+    const drafts = new Map<string, import('../src/core/types.js').Proposal>();
+    let finalCaptureCount = 0;
 
     capture.mockImplementation(async (...args: Parameters<typeof originalCapture>) => {
       if (args[3]?.['draftOnly'] === true) {
         const result = await originalCapture(...args);
-        draft = result.proposalDraft;
+        if (result.proposalDraft) drafts.set(String(args[3]?.['runId']), result.proposalDraft);
         return result;
       }
+      finalCaptureCount += 1;
+      const draft = drafts.get(String(args[3]?.['runId']));
       if (!draft) throw new Error('expected draft before final capture');
       const existing = stampPendingAuthority({
         ...draft,
@@ -800,7 +803,10 @@ describe('M333 — file-once proposal capture', () => {
       };
     });
 
-    const result = await h.runBestOfN(makeItem(), makeConfig(), { n: 1 });
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 2,
+      candidates: [{ engine: 'claude' as never }, { engine: 'claude' as never }],
+    });
 
     expect(result.winner).toBeUndefined();
     expect(result.candidates[0]?.proposalDisposition).toEqual({
@@ -808,6 +814,8 @@ describe('M333 — file-once proposal capture', () => {
       proposalId: 'proposal-existing',
       diffHash: hashDiff('DRAFT_DIFF_0'),
     });
+    expect(finalCaptureCount).toBe(1);
+    expect(h.filedProposals?.size).toBe(1);
   });
 
   it('refuses stale final-capture duplicate ownership even when bytes still match', async () => {
@@ -924,7 +932,7 @@ describe('M333 — file-once proposal capture', () => {
     expect(h.filedProposals?.size).toBe(0);
   });
 
-  it('continues to a later candidate when reconciliation fails with a proposal id', async () => {
+  it('stops before a later candidate when reconciliation fails with a proposal id', async () => {
     const cli = makeSandboxMock(0.1, 'cli');
     const h = await harness({
       cli: cli.fn,
@@ -966,8 +974,8 @@ describe('M333 — file-once proposal capture', () => {
       candidates: [{ engine: 'claude' as never }, { engine: 'claude' as never }],
     });
 
-    expect(result.winner).toMatchObject({ index: 1, proposalId: 'proposal-sb-1' });
-    expect(result.critique.winnerIndex).toBe(1);
+    expect(result.winner).toBeUndefined();
+    expect(result.critique.winnerIndex).toBe(-1);
     expect(result.candidates[0]).toMatchObject({
       index: 0,
       proposalOutcome: {
@@ -976,7 +984,111 @@ describe('M333 — file-once proposal capture', () => {
       },
     });
     expect(result.candidates[0]?.proposalId).toBeUndefined();
-    expect(capture.mock.calls.filter((call) => call[3]?.['draftOnly'] !== true)).toHaveLength(2);
+    expect(capture.mock.calls.filter((call) => call[3]?.['draftOnly'] !== true)).toHaveLength(1);
+    expect(h.filedProposals?.size).toBe(0);
+  });
+
+  it('stops before a later candidate when final proposal capture throws', async () => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const h = await harness({
+      cli: cli.fn,
+      api: cli.fn,
+      judgeScores: [5, 4],
+      draftMode: true,
+    });
+    const capture = h.captureSandboxedProposal!;
+    const originalCapture = capture.getMockImplementation()!;
+    let finalCaptureCount = 0;
+
+    capture.mockImplementation(async (...args: Parameters<typeof originalCapture>) => {
+      if (args[3]?.['draftOnly'] === true) return originalCapture(...args);
+      if (finalCaptureCount++ === 0) throw new Error('sensitive persistence failure');
+      return originalCapture(...args);
+    });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 2,
+      candidates: [{ engine: 'claude' as never }, { engine: 'claude' as never }],
+    });
+
+    expect(result.winner).toBeUndefined();
+    expect(result.critique.winnerIndex).toBe(-1);
+    expect(result.candidates[0]).toMatchObject({
+      index: 0,
+      proposalOutcome: {
+        kind: 'proposal-capture-error',
+        reason: 'final proposal capture state unknown; refusing additional proposal filing',
+      },
+    });
+    expect(result.candidates[0]?.error).not.toContain('sensitive persistence failure');
+    expect(capture.mock.calls.filter((call) => call[3]?.['draftOnly'] !== true)).toHaveLength(1);
+    expect(h.filedProposals?.size).toBe(0);
+  });
+
+  it('does not double-file when capture persists and then throws', async () => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const h = await harness({
+      cli: cli.fn,
+      api: cli.fn,
+      judgeScores: [5, 4],
+      draftMode: true,
+    });
+    const capture = h.captureSandboxedProposal!;
+    const originalCapture = capture.getMockImplementation()!;
+
+    capture.mockImplementation(async (...args: Parameters<typeof originalCapture>) => {
+      if (args[3]?.['draftOnly'] === true) return originalCapture(...args);
+      await originalCapture(...args);
+      throw new Error('post-persistence wrapper fault');
+    });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 2,
+      candidates: [{ engine: 'claude' as never }, { engine: 'claude' as never }],
+    });
+
+    expect(result.winner).toBeUndefined();
+    expect(result.critique.winnerIndex).toBe(-1);
+    expect(capture.mock.calls.filter((call) => call[3]?.['draftOnly'] !== true)).toHaveLength(1);
+    expect(h.filedProposals?.size).toBe(1);
+  });
+
+  it('does not double-file when capture returns a candidate proposal identity', async () => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const h = await harness({
+      cli: cli.fn,
+      api: cli.fn,
+      judgeScores: [5, 4],
+      draftMode: true,
+    });
+    const capture = h.captureSandboxedProposal!;
+    const originalCapture = capture.getMockImplementation()!;
+
+    capture.mockImplementation(async (...args: Parameters<typeof originalCapture>) => {
+      if (args[3]?.['draftOnly'] === true) return originalCapture(...args);
+      const filed = await originalCapture(...args);
+      const proposalOutcome = {
+        kind: 'proposal-capture-error' as const,
+        reason: 'proposal capture requires persistence reconciliation',
+      };
+      return {
+        ...filed,
+        proposalId: undefined,
+        candidateProposalId: filed.proposalId,
+        proposalOutcome,
+        state: { ...filed.state, proposalOutcome, result: proposalOutcome.reason },
+      };
+    });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 2,
+      candidates: [{ engine: 'claude' as never }, { engine: 'claude' as never }],
+    });
+
+    expect(result.winner).toBeUndefined();
+    expect(result.critique.winnerIndex).toBe(-1);
+    expect(result.candidates[0]?.candidateProposalId).toBeDefined();
+    expect(capture.mock.calls.filter((call) => call[3]?.['draftOnly'] !== true)).toHaveLength(1);
     expect(h.filedProposals?.size).toBe(1);
   });
 
