@@ -3582,6 +3582,43 @@ function renderTrajectoryLearningCard(trajectoryLearning, skillCorpusReadiness =
   return card;
 }
 
+function formatOutcomeAssuranceRate(rate) {
+  return typeof rate === 'number' && Number.isFinite(rate) ? formatFleetPercent(rate) : 'withheld';
+}
+
+function renderOutcomeAssuranceCard(assurance, cls = 'ctrl-card card') {
+  if (!assurance) return null;
+  const cohort = assurance.cohort ?? {};
+  const exclusions = cohort.exclusions ?? {};
+  const funnel = assurance.funnel ?? {};
+  const outcomes = assurance.outcomes ?? {};
+  const card = el('div', { cls });
+  card.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, 'Outcome Assurance'),
+    el('span', { cls: 'card-subtitle' }, `${assurance.verdict ?? 'withheld'} · observation only`)
+  ));
+  const body = el('div', { cls: 'card-body' });
+  body.appendChild(infoGrid([
+    ['Eligible cohort', `${cohort.eligible ?? 0}/${cohort.observed ?? 0}`],
+    ['Excluded', `${cohort.excluded ?? 0} · ${exclusions.incomplete ?? 0} incomplete · ${exclusions.degraded ?? 0} degraded`],
+    ['Proposals', `${funnel.proposals ?? 0}/${funnel.dispatched ?? 0} · ${formatOutcomeAssuranceRate(funnel.proposalRate)}`],
+    ['Evidence', `${funnel.evidence ?? 0}/${funnel.proposals ?? 0} · ${formatOutcomeAssuranceRate(funnel.evidenceRate)}`],
+    ['Protected merges', `${funnel.protectedMerges ?? 0} · ${formatOutcomeAssuranceRate(funnel.mergeRate)}`],
+    ['Post-merge observed', `${funnel.postMergeObserved ?? 0}/${funnel.protectedMerges ?? 0} · ${formatOutcomeAssuranceRate(funnel.postMergeCoverage)}`],
+    ['Stable witnesses', funnel.stableWitnesses ?? 0],
+    ['Followed up', outcomes.followedUp ?? 0],
+    ['Adverse', `${outcomes.adverse ?? 0} · ${formatOutcomeAssuranceRate(outcomes.adverseRate)}`],
+  ]));
+  if (assurance.topGap) {
+    body.appendChild(el('p', { cls: 'hint' },
+      `Top gap: ${assurance.topGap.id} (${assurance.topGap.count}) · ${assurance.topGap.detail}`
+    ));
+  }
+  if (assurance.summary) body.appendChild(el('p', { cls: 'hint' }, assurance.summary));
+  card.appendChild(body);
+  return card;
+}
+
 function formatCountMap(counts) {
   const entries = Object.entries(counts ?? {})
     .filter(([, count]) => Number(count) > 0)
@@ -4641,6 +4678,7 @@ function renderControl() {
   const trajectoryLearning = learningDenominatorHealthy
     ? d.fleet?.trajectoryLearning ?? fleet.trajectoryLearning ?? null
     : null;
+  const outcomeAssurance = d.fleet?.outcomeAssurance ?? fleet.outcomeAssurance ?? null;
   const learningMetrics = d.fleet?.learningMetrics ?? fleet.learningMetrics ?? null;
   const skillCorpusReadiness = learningSnapshotFresh
     ? d.fleet?.skillCorpusReadiness ?? fleet.skillCorpusReadiness ?? null
@@ -4872,6 +4910,9 @@ function renderControl() {
     trajectoryLearning, skillCorpusReadiness, 'ctrl-card card', learningMetrics?.trajectoryLearning
   );
   if (missionTrajectoryLearningCard) section.appendChild(missionTrajectoryLearningCard);
+
+  const missionOutcomeAssuranceCard = renderOutcomeAssuranceCard(outcomeAssurance);
+  if (missionOutcomeAssuranceCard) section.appendChild(missionOutcomeAssuranceCard);
 
   const missionContextCard = learningSnapshotFresh
     ? renderContextEfficiencyCard(d.fleet?.contextEfficiency ?? fleet.contextEfficiency ?? null)

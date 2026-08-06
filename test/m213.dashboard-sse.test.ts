@@ -1901,6 +1901,21 @@ describe('M213 Dashboard SSE — /api/events', () => {
       .toBeGreaterThan(src.indexOf('renderAutonomousShipReadinessCard('));
   });
 
+  it('renders denominator-first outcome assurance without treating missing rates as zero', () => {
+    const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public');
+    const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
+
+    expect(src).toContain('function renderOutcomeAssuranceCard(assurance');
+    expect(src).toContain("el('span', { cls: 'card-title' }, 'Outcome Assurance')");
+    expect(src).toContain("['Eligible cohort', `${cohort.eligible ?? 0}/${cohort.observed ?? 0}`]");
+    expect(src).toContain("['Excluded', `${cohort.excluded ?? 0}");
+    expect(src).toContain("['Post-merge observed', `${funnel.postMergeObserved ?? 0}/${funnel.protectedMerges ?? 0}");
+    expect(src).toContain("return typeof rate === 'number' && Number.isFinite(rate) ? formatFleetPercent(rate) : 'withheld'");
+    expect(src).toContain('d.fleet?.outcomeAssurance ?? fleet.outcomeAssurance ?? null');
+    expect(src.indexOf('renderOutcomeAssuranceCard(outcomeAssurance)'))
+      .toBeGreaterThan(src.indexOf('renderTrajectoryLearningCard('));
+  });
+
   it('app.js renders Fleet Dashboard lease board from shared queue machine health', () => {
     const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public');
     const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
