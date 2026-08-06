@@ -53,6 +53,8 @@ export interface CandidateResult {
   diff: string;
   /** The inbox proposal id, if one was created. */
   proposalId?: string;
+  /** Created proposal identity awaiting reconciliation; never winner authority. */
+  candidateProposalId?: string;
   /** Opaque execution id for joining this candidate, including losers. */
   runId?: string;
   /** Causal trajectory bound to this candidate run. */
@@ -1131,22 +1133,36 @@ async function runBestOfNInternal(
       }
 
       const cEngine = c.engine ?? defaultEngine;
-      const filed = await captureSandboxedProposal(cEngine, goal, cfg, {
-        sourceRepo,
-        existingWorktree: c.sandbox,
-        ...(typeof c.requestedModel === 'string' ? { model: c.requestedModel } : {}),
-        runId: c.runId,
-        workItemId: opts?.workItemId ?? item.id,
-        workItemGenerationId: opts?.workItemGenerationId,
-        workSource: opts?.workSource ?? item.source,
-        ...(c.delegationScope ? { delegationScope: c.delegationScope } : {}),
-        ...(opts?.signal ? { signal: opts.signal } : {}),
-        sourceLabel: 'Best-of-N winner',
-        isPartial: c.proposalDraft?.isPartial === true || c.state?.status !== 'done',
-        usage: c.state?.usage,
-        durationMs: c.latencyMs,
-        producerStatus: c.state?.status ?? 'done',
-      });
+      let filed: Awaited<ReturnType<CaptureSandboxedProposal>>;
+      try {
+        filed = await captureSandboxedProposal(cEngine, goal, cfg, {
+          sourceRepo,
+          existingWorktree: c.sandbox,
+          ...(typeof c.requestedModel === 'string' ? { model: c.requestedModel } : {}),
+          runId: c.runId,
+          workItemId: opts?.workItemId ?? item.id,
+          workItemGenerationId: opts?.workItemGenerationId,
+          workSource: opts?.workSource ?? item.source,
+          ...(c.delegationScope ? { delegationScope: c.delegationScope } : {}),
+          ...(opts?.signal ? { signal: opts.signal } : {}),
+          sourceLabel: 'Best-of-N winner',
+          isPartial: c.proposalDraft?.isPartial === true || c.state?.status !== 'done',
+          usage: c.state?.usage,
+          durationMs: c.latencyMs,
+          producerStatus: c.state?.status ?? 'done',
+        });
+      } catch {
+        const captureOutcome: RunProposalOutcome = {
+          kind: 'proposal-capture-error',
+          reason: 'final proposal capture state unknown; refusing additional proposal filing',
+        };
+        scored[c.index] = {
+          ...c,
+          proposalOutcome: captureOutcome,
+          error: formatProposalOutcome(captureOutcome),
+        };
+        break;
+      }
       const outcome = filed.proposalOutcome ?? filed.state.proposalOutcome;
       const persisted = exactDurablePendingProposal(
         c,
@@ -1183,11 +1199,20 @@ async function runBestOfNInternal(
       const proposalDisposition = finalCaptureDisposition(c, captureOutcome, loadProposal, cfg);
       scored[c.index] = {
         ...c,
+        ...(filed.candidateProposalId ? { candidateProposalId: filed.candidateProposalId } : {}),
         ...(captureOutcome ? { proposalOutcome: captureOutcome } : {}),
         ...(proposalDisposition ? { proposalDisposition } : {}),
         state: filed.state,
         error,
       };
+      // A returned identity means durable creation may already have happened.
+      // Never file a second candidate unless the first capture proved that it
+      // created no proposal identity at all.
+      if (
+        filed.proposalId ||
+        filed.candidateProposalId ||
+        proposalDisposition?.kind === 'duplicate-owned'
+      ) break;
     }
 
     if (opts?.signal?.aborted && !winner) {
