@@ -158,6 +158,11 @@ import {
   type PostMergeStabilityReadResult,
 } from './post-merge-stability.js';
 import {
+  buildProtectedMergePopulationSnapshot,
+  projectPostMergeDenominator,
+  type ProtectedMergePopulationSnapshot,
+} from './post-merge-denominator.js';
+import {
   readDetachedPostMergeVerificationCohorts,
   type DetachedPostMergeVerificationSummary,
 } from './detached-post-merge-verification.js';
@@ -2344,14 +2349,16 @@ function withholdTrajectoryMetrics(
 export function projectPostMergeComposite(
   adverse: PostMergeObservationReadResult,
   stability: PostMergeStabilityReadResult,
+  population?: ProtectedMergePopulationSnapshot,
+  observedAt?: string,
 ): FleetPostMergeCompositeProjection {
   const bothMissing = adverse.sourceState === 'missing' && stability.sourceState === 'missing';
-  const complete = adverse.sourceState === 'healthy' && adverse.complete &&
+  const ledgerComplete = adverse.sourceState === 'healthy' && adverse.complete &&
     stability.sourceState === 'healthy' && stability.complete;
-  const source: FleetReadinessEvidenceQuality = {
-    sourceState: complete ? 'healthy' : bothMissing ? 'missing' : 'degraded',
+  const baseSource: FleetReadinessEvidenceQuality = {
+    sourceState: ledgerComplete ? 'healthy' : bothMissing ? 'missing' : 'degraded',
     sourcePresent: adverse.sourcePresent || stability.sourcePresent,
-    complete,
+    complete: ledgerComplete,
     stopReasons: [...new Set([
       ...adverse.stopReasons,
       ...stability.stopReasons,
@@ -2364,13 +2371,39 @@ export function projectPostMergeComposite(
     invalidRows: adverse.invalidRows + stability.invalidRows,
     unreadableFiles: 0,
   };
-  if (!complete) return { source };
+  if (!ledgerComplete) return { source: baseSource };
+  if (!population || !observedAt) {
+    return {
+      source: {
+        ...baseSource,
+        sourceState: 'degraded',
+        complete: false,
+        stopReasons: [...baseSource.stopReasons, 'protected-merge-source-missing'],
+      },
+    };
+  }
 
-  const adverseMembers = new Set(adverse.observations.flatMap((row) => {
+  const denominator = projectPostMergeDenominator({
+    population,
+    adverse,
+    stability,
+    observedAt,
+  });
+  const source: FleetReadinessEvidenceQuality = denominator.sourceComplete
+    ? baseSource
+    : {
+        ...baseSource,
+        sourceState: 'degraded',
+        complete: false,
+        stopReasons: [...new Set([...baseSource.stopReasons, ...denominator.stopReasons])],
+      };
+  if (!denominator.sourceComplete) return { source };
+
+  const adverseMembers = new Set(denominator.matchedAdverse.flatMap((row) => {
     const digest = postMergeStabilityRepoDigest(row.repo);
     return digest ? [JSON.stringify([digest, row.proposalId, row.mergeCommit])] : [];
   }));
-  const effectiveStability = stability.witnesses.filter((row) => !adverseMembers.has(JSON.stringify([
+  const effectiveStability = denominator.matchedStability.filter((row) => !adverseMembers.has(JSON.stringify([
     row.repoDigest, row.proposalId, row.mergeCommit,
   ])));
   const effectiveSummary: PostMergeStabilityCohortSummary = {
@@ -2385,8 +2418,8 @@ export function projectPostMergeComposite(
     source,
     cohort: {
       policyEligible: false,
-      denominatorComplete: false,
-      adverseObservations: adverse.observations.length,
+      denominatorComplete: denominator.denominatorComplete,
+      adverseObservations: denominator.matchedAdverse.length,
       stability: effectiveSummary,
     },
   };
@@ -3539,7 +3572,12 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     const adverse = readPostMergeObservations({ requireComplete: true });
     learningPostMergeRead = adverse;
     const stability = readPostMergeStability({ requireComplete: true });
-    const projection = projectPostMergeComposite(adverse, stability);
+    const population = buildProtectedMergePopulationSnapshot({
+      proposals: allProposals,
+      proposalSource: proposalSourceQuality,
+      capturedAt: generatedAt,
+    });
+    const projection = projectPostMergeComposite(adverse, stability, population, generatedAt);
     status.postMergeSource = projection.source;
     if (projection.cohort) status.postMergeCohort = projection.cohort;
   } catch {
