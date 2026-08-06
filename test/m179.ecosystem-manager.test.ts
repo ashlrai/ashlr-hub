@@ -31,6 +31,7 @@ let tmpHome: string;
 beforeEach(() => {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m179-home-'));
   process.env.HOME = tmpHome;
+  persistedGoals.clear();
   vi.resetModules();
 });
 
@@ -45,6 +46,15 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 const mockComplete = vi.fn<[string, string], Promise<string>>();
+const persistedGoals = new Map<string, {
+  id: string;
+  objective: string;
+  project: string | null;
+  status: 'planning';
+  milestones: never[];
+  createdAt: string;
+  updatedAt: string;
+}>();
 
 vi.mock('../src/core/run/provider-client.js', () => ({
   getActiveClient: vi.fn(async () => ({
@@ -54,16 +64,19 @@ vi.mock('../src/core/run/provider-client.js', () => ({
 }));
 
 vi.mock('../src/core/goals/store.js', () => ({
-  createGoal: vi.fn((objective: string, opts?: { project?: string | null }) => ({
-    id: `goal-${Math.random().toString(36).slice(2, 7)}`,
-    objective,
-    project: opts?.project ?? null,
-    status: 'planning',
-    milestones: [],
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  })),
+  createGoal: vi.fn((objective: string, opts?: { project?: string | null }) => {
+    const id = `goal-${persistedGoals.size}`;
+    const now = new Date().toISOString();
+    const goal = { id, objective, project: opts?.project ?? null, status: 'planning' as const, milestones: [], createdAt: now, updatedAt: now };
+    persistedGoals.set(id, goal);
+    return goal;
+  }),
   listGoals: vi.fn(() => []),
+  listGoalsDetailed: vi.fn(() => ({
+    goals: [], sourceState: 'healthy', sourcePresent: true, complete: true,
+    scannedFiles: 0, unreadableFiles: 0, limitExceeded: false,
+  })),
+  loadGoal: vi.fn((id: string) => persistedGoals.get(id) ?? null),
 }));
 
 vi.mock('../src/core/fleet/quality-metrics.js', () => ({

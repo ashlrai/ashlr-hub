@@ -304,6 +304,9 @@ describe('strict Windows Task Scheduler scripts', () => {
       expect(script).toContain("task multiple-instance policy is not IgnoreNew");
       expect(script).toContain("task execution limit is not unlimited");
       expect(script).toContain("task idle defaults are not exact");
+      expect(script).toContain("task failure restart policy is not exact");
+      expect(script).toContain("RestartCount -ne 3");
+      expect(script).toContain("RestartInterval -cne 'PT1M'");
       expect(script).toContain('task registration security descriptor');
       expect(script).toContain("untrusted identity can modify the task");
       expect(script).not.toContain('/Task/Principals/Principal/RequiredPrivileges');
@@ -602,6 +605,13 @@ describe('generateServiceDefinition — win32 (schtasks)', () => {
     const tr = def.registerArgs[trIdx + 1];
     expect(tr).toBe(`"${path.join(FAKE_HOME, '.ashlr', 'services', 'ashlr-daemon.cmd')}"`);
     expect(tr).not.toContain('Startup');
+  });
+
+  it('uses a bounded Task Scheduler failure restart policy', () => {
+    const script = buildWindowsTaskCreateScript('AshlrDaemon');
+    expect(script).toContain('$settings.RestartCount=3');
+    expect(script).toContain("$settings.RestartInterval='PT1M'");
+    expect(script).not.toContain('$settings.RestartCount=0');
   });
 
   it('unregisterArgs uses schtasks /Delete /TN AshlrDaemon', () => {

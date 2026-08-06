@@ -311,7 +311,16 @@ describe('H3 BUDGET-CAP-HOLDS — tick never overspends the daily cap under load
     mockRunSwarm.mockImplementation(
       makeSpendingSwarmStub({ costUsd: 0.05, repo: repo.dir, propose: true }),
     );
-    const armed = armDaemonSpendGuard(['previous-item']);
+    const now = new Date();
+    const armed = armDaemonSpendGuard({
+      itemIds: ['previous-item'],
+      daemonStartedAt: null,
+      budgetDay: now.toISOString().slice(0, 10),
+      dailyBudgetUsd: 1,
+      spentUsdAtArm: 0,
+      reservedUsd: 1,
+      now,
+    });
     expect(armed.ok).toBe(true);
 
     const result = await tick(cfg, { dryRun: false });
