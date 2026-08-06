@@ -374,6 +374,10 @@ async function cmdDaemonStart(flags: StartFlags): Promise<number> {
     console.error(col.red('error: ') + `daemon start refused: ${finalState.startRefusal}`);
     return 1;
   }
+  if (finalState.terminalFailure) {
+    console.error(col.red('error: ') + `daemon stopped after terminal failure: ${finalState.terminalFailure}`);
+    return 1;
+  }
 
   // Summarize the most-recent tick (if any) for human feedback.
   const lastTick = finalState.ticks[finalState.ticks.length - 1];

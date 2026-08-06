@@ -45,15 +45,41 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 const createdGoals: Array<{ objective: string; project?: string | null }> = [];
+const persistedGoals = new Map<string, ReturnType<typeof makeMockGoal>>();
+let persistGoalWrites = true;
+
+function makeMockGoal(id: string, objective: string, project?: string | null) {
+  const now = new Date().toISOString();
+  return {
+    id,
+    objective,
+    project: project ?? null,
+    status: 'planning' as const,
+    milestones: [],
+    createdAt: now,
+    updatedAt: now,
+  };
+}
 
 vi.mock('../src/core/goals/store.js', () => ({
   createGoal: vi.fn((objective: string, opts?: { project?: string | null }) => {
     const id = `goal-${createdGoals.length}`;
     createdGoals.push({ objective, project: opts?.project });
-    return { id, objective, project: opts?.project ?? null, status: 'planning', milestones: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    const goal = makeMockGoal(id, objective, opts?.project);
+    if (persistGoalWrites) persistedGoals.set(id, goal);
+    return goal;
   }),
   listGoals: vi.fn(() => []),
-  loadGoal: vi.fn(() => null),
+  listGoalsDetailed: vi.fn(() => ({
+    goals: [],
+    sourceState: 'healthy',
+    sourcePresent: true,
+    complete: true,
+    scannedFiles: 0,
+    unreadableFiles: 0,
+    limitExceeded: false,
+  })),
+  loadGoal: vi.fn((id: string) => persistedGoals.get(id) ?? null),
   saveGoal: vi.fn(),
   deleteGoal: vi.fn(),
   addMilestone: vi.fn(),
@@ -102,6 +128,8 @@ vi.mock('../src/core/run/provider-client.js', () => ({
 
 beforeEach(() => {
   createdGoals.length = 0;
+  persistedGoals.clear();
+  persistGoalWrites = true;
   mockComplete.mockReset();
 });
 
@@ -284,6 +312,43 @@ describe('M173 — approve path (loadLatestBriefing + adoptBriefing)', () => {
     const { cmdVision } = await import('../src/cli/vision.js');
     const code = await cmdVision(['approve']);
     expect(code).toBe(0);
+  });
+
+  it('cmdVision approve returns 1 and reports a goal-store persistence failure', async () => {
+    const briefing = makeBriefing({
+      proposedGoals: [
+        { objective: 'Goal whose write fails', rationale: 'Exercise persistence truth.' },
+      ],
+    });
+    writeBriefingFile(briefing);
+    persistGoalWrites = false;
+    const errors: string[] = [];
+    vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      errors.push(args.map(String).join(' '));
+    });
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    const { cmdVision } = await import('../src/cli/vision.js');
+    const code = await cmdVision(['approve']);
+
+    expect(code).toBe(1);
+    expect(errors.join('\n')).toContain('Failed to persist 1 proposed goal(s)');
+    expect(errors.join('\n')).toContain('goal-store-write-failed');
+  });
+
+  it('cmdVision preview compiles the briefing without creating goals', async () => {
+    const briefing = makeBriefing({
+      proposedGoals: [
+        { objective: 'Preview-only mission', rationale: 'Inspect before adoption.' },
+      ],
+    });
+    writeBriefingFile(briefing);
+
+    const { cmdVision } = await import('../src/cli/vision.js');
+    const code = await cmdVision(['preview']);
+
+    expect(code).toBe(0);
+    expect(createdGoals).toHaveLength(0);
   });
 });
 

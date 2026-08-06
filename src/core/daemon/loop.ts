@@ -75,8 +75,10 @@ import { buildBacklog, loadBacklog } from '../portfolio/backlog.js';
 import { loadQueuedAutonomyItems } from '../portfolio/queued-autonomy.js';
 import {
   acquireDaemonLock,
+  accountDaemonSpendGuard,
   armDaemonSpendGuard,
   clearDaemonSpendGuard,
+  DAEMON_SPEND_GUARD_ITEM_CAPACITY,
   daemonStatePath,
   loadDaemonState,
   loadDaemonStateStrict,
@@ -85,6 +87,7 @@ import {
   releaseDaemonLock,
   resetDayIfNeeded,
   saveDaemonStateResult,
+  upgradeLegacyDaemonSpendGuard,
 } from './state.js';
 import type { DaemonLock, SaveDaemonStateResult } from './state.js';
 import {
@@ -1334,6 +1337,125 @@ function staleResidentProof(state: DaemonState): 'dead' | 'reused' | null {
     activity.activity.daemonStartedAt === state.startedAt
     ? 'reused'
     : null;
+}
+
+type StartupSpendGuardRecoveryResult =
+  | { ok: true; state: DaemonState; recovered: boolean; alreadyAccounted: boolean }
+  | { ok: false; reason: string };
+
+function pidDefinitelyDead(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException | undefined)?.code === 'ESRCH';
+  }
+}
+
+/**
+ * Recover only a strict v2 guard from a provably dead daemon instance. The
+ * reserved exposure is charged exactly once before the exact guard token is
+ * cleared. Any ambiguity remains fail-closed.
+ */
+export function recoverDaemonSpendGuardOnStartup(
+  daemonLock: DaemonLock,
+  state: DaemonState,
+  dailyBudgetUsd = DEFAULTS.dailyBudgetUsd,
+): StartupSpendGuardRecoveryResult {
+  const read = readDaemonSpendGuard();
+  if (!read.exists) return { ok: true, state, recovered: false, alreadyAccounted: false };
+  let guard = read.guard;
+  if (!guard && read.legacyGuard) {
+    const legacy = read.legacyGuard;
+    const stateStartedAt = state.startedAt;
+    const armedDay = legacy.armedAt.slice(0, 10);
+    const stateStartedMs = typeof stateStartedAt === 'string' ? Date.parse(stateStartedAt) : Number.NaN;
+    const stateIdentityBound =
+      state.running === true &&
+      state.pid === legacy.pid &&
+      typeof stateStartedAt === 'string' &&
+      Number.isFinite(stateStartedMs) &&
+      new Date(stateStartedMs).toISOString() === stateStartedAt &&
+      stateStartedMs <= Date.parse(legacy.armedAt) &&
+      state.todayDate === armedDay;
+    const budgetAndTimeBound =
+      Number.isFinite(state.todaySpentUsd) && state.todaySpentUsd >= 0 &&
+      Number.isFinite(dailyBudgetUsd) && dailyBudgetUsd > 0 &&
+      state.todaySpentUsd <= dailyBudgetUsd &&
+      armedDay <= new Date().toISOString().slice(0, 10) &&
+      Date.parse(legacy.armedAt) <= Date.now() + 5_000;
+    if (legacy.hostname !== osHostname()) return { ok: false, reason: 'legacy-spend-guard-host-identity-mismatch' };
+    if (!stateIdentityBound) return { ok: false, reason: 'legacy-spend-guard-state-identity-ambiguous' };
+    if (!budgetAndTimeBound) return { ok: false, reason: 'legacy-spend-guard-budget-time-ambiguous' };
+    if (legacy.pid === process.pid || !pidDefinitelyDead(legacy.pid)) {
+      return { ok: false, reason: 'legacy-spend-guard-owner-not-provably-dead' };
+    }
+    const upgraded = upgradeLegacyDaemonSpendGuard(legacy, {
+      daemonStartedAt: stateStartedAt,
+      budgetDay: armedDay,
+      dailyBudgetUsd,
+      spentUsdAtArm: state.todaySpentUsd,
+      reservedUsd: Math.max(0, dailyBudgetUsd - state.todaySpentUsd),
+    });
+    if (!upgraded.ok) {
+      return { ok: false, reason: `legacy-spend-guard-upgrade-failed: ${upgraded.error}` };
+    }
+    guard = upgraded.guard;
+  }
+  if (!guard || (read.malformed && !read.legacyGuard)) {
+    return { ok: false, reason: 'legacy-or-malformed-spend-guard' };
+  }
+  if (guard.hostname !== osHostname()) {
+    return { ok: false, reason: 'spend-guard-host-identity-mismatch' };
+  }
+  if (guard.daemonStartedAt === null || state.startedAt !== guard.daemonStartedAt) {
+    return { ok: false, reason: 'spend-guard-daemon-identity-mismatch' };
+  }
+  const today = new Date().toISOString().slice(0, 10);
+  if (guard.budgetDay > today || Date.parse(guard.armedAt) > Date.now() + 5_000) {
+    return { ok: false, reason: 'spend-guard-time-evidence-invalid' };
+  }
+  const accounting = accountDaemonSpendGuard(state, guard, guard.reservedUsd);
+  if (!accounting.ok) return { ok: false, reason: accounting.error };
+  // A receipt persisted before unlink is authoritative even during an
+  // in-process restart. An unaccounted guard still requires a dead old owner.
+  if (!accounting.alreadyAccounted &&
+    (guard.pid === process.pid || !pidDefinitelyDead(guard.pid))) {
+    return { ok: false, reason: 'spend-guard-owner-not-provably-dead' };
+  }
+  let recoveredState = accounting.state;
+  if (!accounting.alreadyAccounted) {
+    // The reservation is an authority ceiling, not proof of exact provider
+    // spend: concurrent workers can all pass the pre-dispatch budget check
+    // before any of them settles. After a crash, conservatively close this UTC
+    // budget day so a later config increase cannot spend against understated
+    // unknown exposure. An exact persisted receipt takes the replay path above
+    // and preserves its original (non-exhausted) accounting semantics.
+    const exhaustedState: DaemonState = {
+      ...accounting.state,
+      spendGuardAccounting: {
+        budgetDay: guard.budgetDay,
+        accountingId: guard.accountingId,
+        budgetExhausted: true,
+      },
+    };
+    const saved = saveResidentDaemonState(daemonLock, exhaustedState);
+    if (!saved.ok) return { ok: false, reason: `spend-guard-recovery-save-failed: ${saved.error}` };
+    recoveredState = exhaustedState;
+  }
+  const cleared = clearDaemonSpendGuard(guard.token);
+  if (!cleared.ok || !cleared.cleared) {
+    return {
+      ok: false,
+      reason: `spend-guard-recovery-clear-failed: ${cleared.ok ? 'guard missing' : cleared.error}`,
+    };
+  }
+  return {
+    ok: true,
+    state: recoveredState,
+    recovered: true,
+    alreadyAccounted: accounting.alreadyAccounted,
+  };
 }
 
 function lastProducerMaintenanceAtMs(state: DaemonState): number | null {
@@ -4073,7 +4195,12 @@ export async function tick(
     return persistenceRefusal(`tick refused: failed to persist daemon state before dispatch (${initialSave.error})`, 'error');
   }
 
-  const remainingBudget = dcfg.dailyBudgetUsd - state.todaySpentUsd;
+  const budgetDayPessimisticallyExhausted =
+    state.spendGuardAccounting?.budgetDay === state.todayDate &&
+    state.spendGuardAccounting.budgetExhausted === true;
+  const remainingBudget = budgetDayPessimisticallyExhausted
+    ? 0
+    : dcfg.dailyBudgetUsd - state.todaySpentUsd;
   if (remainingBudget <= 0) {
     if (!stillOwnsTick()) {
       return ownershipLostTick({ ts: now, itemsConsidered: 0, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });
@@ -4671,9 +4798,11 @@ export async function tick(
     ? Math.min(1, configuredSelectCount)
     : configuredSelectCount;
   const drainLimit = resolveDrainLimit(liveCfg, drainMode, opts.drainLimit);
-  const selectCount = !automaticDrain && typeof drainLimit === 'number'
+  const uncappedSelectCount = !automaticDrain && typeof drainLimit === 'number'
     ? Math.min(rawSelectCount, drainLimit)
     : rawSelectCount;
+  // Every claimed dispatch must be representable in the durable spend guard.
+  const selectCount = Math.min(uncappedSelectCount, DAEMON_SPEND_GUARD_ITEM_CAPACITY);
   const summarizeSelectionBlockers = (items: WorkItem[]) => {
     let eligibleItems = 0;
     let pendingBlocked = 0;
@@ -5115,7 +5244,14 @@ export async function tick(
     return ownershipLostTick({ ts: now, itemsConsidered: workedSet.length, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });
   }
 
-  const spendGuard = armDaemonSpendGuard(workedSetIds);
+  const spendGuard = armDaemonSpendGuard({
+    itemIds: workedSetIds,
+    daemonStartedAt: state.startedAt,
+    budgetDay: state.todayDate ?? now.slice(0, 10),
+    dailyBudgetUsd: dcfg.dailyBudgetUsd,
+    spentUsdAtArm: state.todaySpentUsd,
+    reservedUsd: workedSetIds.length > 0 ? remainingBudget : 0,
+  });
   if (!spendGuard.ok) {
     stopLeaseRenewer();
     try {
@@ -7192,9 +7328,30 @@ export async function tick(
     return failedTick;
   }
   state = finalLoadedState.state;
-  state = resetDayIfNeeded(state);         // re-check day rollover after async work
   state.automaticDrainOrdinaryTurnDue = automaticDrainOrdinaryTurnDue;
-  state.todaySpentUsd += tickSpent;
+  // The guard is bound to the day on which dispatch began. Account and persist
+  // that old-day receipt before any UTC rollover can erase its exact baseline.
+  const spendAccounting = accountDaemonSpendGuard(state, spendGuard.guard, tickSpent);
+  if (!spendAccounting.ok) {
+    const failedTick: DaemonTick = {
+      ts: now,
+      itemsConsidered: selected.length,
+      proposalsCreated,
+      spentUsd: tickSpent,
+      reason: 'state-persistence-failed',
+      ...(dispatches ? { dispatches } : {}),
+    };
+    audit({
+      action: 'daemon:persistence-failed',
+      repo: null,
+      sandboxId: null,
+      summary: `tick completed but exact spend accounting refused (${spendAccounting.error}); spend guard remains armed`,
+      result: 'error',
+    });
+    recordTickAgentAction(failedTick, machineId);
+    return failedTick;
+  }
+  state = spendAccounting.state;
   state.itemsProcessed += dispatchedCount;
   state.lastTickAt = now;
 
@@ -7259,6 +7416,26 @@ export async function tick(
     const failedTick = nonResidentPersistenceFailureTick(tickRecord);
     recordTickAgentAction(failedTick, machineId);
     return failedTick;
+  }
+
+  // Only after the old-day receipt and guard deletion are durable may a tick
+  // crossing midnight reset and persist the new UTC budget day.
+  const rolledState = resetDayIfNeeded(state);
+  if (rolledState !== state) {
+    const rolloverSave = saveTickState(rolledState);
+    if (!rolloverSave.ok) {
+      audit({
+        action: 'daemon:persistence-failed',
+        repo: null,
+        sandboxId: null,
+        summary: `tick accounted and cleared its spend guard but new-day reset save failed (${rolloverSave.error})`,
+        result: 'error',
+      });
+      const failedTick = nonResidentPersistenceFailureTick(tickRecord);
+      recordTickAgentAction(failedTick, machineId);
+      return failedTick;
+    }
+    state = rolledState;
   }
 
   recordTickAgentAction(tickRecord, machineId);
@@ -7473,7 +7650,7 @@ export async function runDaemon(
   }
   const daemonLock = lockAttempt.lock;
 
-  const startLoadedState = loadDaemonStateStrict();
+  const startLoadedState = loadDaemonStateStrict({ preserveOwnerIdentity: true });
   if (!startLoadedState.ok) {
     releaseDaemonLock(daemonLock);
     audit({
@@ -7486,6 +7663,34 @@ export async function runDaemon(
     return refusedState(`daemon-state-${startLoadedState.reason}`);
   }
   let state = startLoadedState.state;
+  const spendRecovery = recoverDaemonSpendGuardOnStartup(
+    daemonLock,
+    state,
+    resolveCfg(cfg).dailyBudgetUsd,
+  );
+  if (!spendRecovery.ok) {
+    releaseDaemonLock(daemonLock);
+    audit({
+      action: 'daemon:persistence-failed',
+      repo: null,
+      sandboxId: null,
+      summary: `daemon start refused: ${spendRecovery.reason}`,
+      result: 'refused',
+    });
+    return refusedState(spendRecovery.reason);
+  }
+  state = spendRecovery.state;
+  if (spendRecovery.recovered) {
+    audit({
+      action: 'daemon:spend-guard-recovered',
+      repo: null,
+      sandboxId: null,
+      summary: spendRecovery.alreadyAccounted
+        ? 'cleared an already-accounted dead-owner spend guard'
+        : 'pessimistically accounted and cleared a dead-owner spend guard',
+      result: 'ok',
+    });
+  }
   if (state.running === true && typeof state.pid === 'number' && state.pid !== process.pid) {
     const takeoverProof = staleResidentProof(state);
     if (!takeoverProof) {
@@ -7734,6 +7939,7 @@ export async function runDaemon(
     }
   }
 
+  let terminalFailure: string | undefined;
   try {
     if (opts.once) {
       // A permit is bound to the exact supplied config snapshot. Other manual
@@ -7751,6 +7957,10 @@ export async function runDaemon(
           ownerLock: daemonLock,
           onOwnershipLost: requestOwnershipLoss,
         });
+        if (tickResult.reason === 'state-persistence-failed' &&
+          tickResult.residentSafePersistenceFailure !== 'repair-treatment') {
+          terminalFailure = 'daemon-state-persistence-failed';
+        }
         if (!activation.capability) {
           await runOwnedPulseSync(liveCfg, tickResult, daemonLock, shutdown.signal, requestOwnershipLoss);
         }
@@ -7780,6 +7990,7 @@ export async function runDaemon(
 
         const currentLoaded = loadDaemonStateStrict();
         if (!currentLoaded.ok) {
+          terminalFailure = `daemon-state-${currentLoaded.reason}`;
           audit({
             action: 'daemon:persistence-failed',
             repo: null,
@@ -7806,6 +8017,7 @@ export async function runDaemon(
 
         if (tickResult.reason === 'state-persistence-failed' &&
           tickResult.residentSafePersistenceFailure !== 'repair-treatment') {
+          terminalFailure = 'daemon-state-persistence-failed';
           audit({
             action: 'daemon:persistence-failed',
             repo: null,
@@ -7819,6 +8031,7 @@ export async function runDaemon(
         if (killSwitchOn() || shutdown.signal.aborted || !ownsDaemonLock()) break;
         const afterTickLoaded = loadDaemonStateStrict();
         if (!afterTickLoaded.ok) {
+          terminalFailure = `daemon-state-${afterTickLoaded.reason}`;
           audit({
             action: 'daemon:persistence-failed',
             repo: null,
@@ -7879,8 +8092,15 @@ export async function runDaemon(
         if (killSwitchOn() || shutdown.signal.aborted) break;
       }
     }
-  } catch {
-    // Unexpected error — swallow; still clean up running state below.
+  } catch (error) {
+    terminalFailure = 'daemon-unexpected-loop-failure';
+    audit({
+      action: 'daemon:persistence-failed',
+      repo: null,
+      sandboxId: null,
+      summary: `daemon loop stopped after unexpected failure: ${error instanceof Error ? error.message : String(error)}`,
+      result: 'error',
+    });
   }
   transitionToStopping();
   clearInterval(killSwitchPoll);
@@ -7900,6 +8120,7 @@ export async function runDaemon(
         ? { ...current, running: false, pid: null }
         : null);
     if (!stopSave.ok) {
+      terminalFailure ??= 'daemon-stop-state-persistence-failed';
       audit({
         action: 'daemon:persistence-failed',
         repo: null,
@@ -7929,7 +8150,8 @@ export async function runDaemon(
 
   releaseDaemonLock(daemonLock);
 
-  return loadDaemonState();
+  const finalState = loadDaemonState();
+  return terminalFailure ? { ...finalState, terminalFailure } : finalState;
 }
 
 export async function cancelResolutionObserverBeforeShutdown(
@@ -8024,7 +8246,11 @@ function msUntilUtcTimestamp(targetMs: number, nowMs = Date.now()): number {
 }
 
 function budgetExhaustedForCurrentUtcDay(state: DaemonState, dcfg: DaemonConfig): boolean {
-  return state.todayDate === currentUtcBudgetDay() && state.todaySpentUsd >= dcfg.dailyBudgetUsd;
+  return state.todayDate === currentUtcBudgetDay() && (
+    state.todaySpentUsd >= dcfg.dailyBudgetUsd ||
+    (state.spendGuardAccounting?.budgetDay === state.todayDate &&
+      state.spendGuardAccounting.budgetExhausted === true)
+  );
 }
 
 async function sleepUntilNextUtcBudgetDay(lock: DaemonLock, signal?: AbortSignal): Promise<boolean> {

@@ -7100,7 +7100,15 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
 
   it('surfaces daemon spend guard active work without exposing the guard token', async () => {
     await withFakeNow(new Date('2026-07-03T00:10:00.000Z'), async () => {
-      const armed = armDaemonSpendGuard(['active-item-a', 'active-item-b']);
+      const armed = armDaemonSpendGuard({
+        itemIds: ['active-item-a', 'active-item-b'],
+        daemonStartedAt: null,
+        budgetDay: '2026-07-03',
+        dailyBudgetUsd: 1,
+        spentUsdAtArm: 0,
+        reservedUsd: 1,
+        now: new Date('2026-07-03T00:10:00.000Z'),
+      });
       expect(armed.ok).toBe(true);
       if (!armed.ok) return;
       vi.setSystemTime(new Date('2026-07-03T00:12:30.000Z'));

@@ -2822,3 +2822,32 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Retain the five-second non-Windows deadline and add a bounded 30-second Windows allowance.
 - [x] Run focused authority/reservation coverage, typecheck, and diff integrity.
 - [ ] Require the refreshed protected matrix before promotion.
+
+## Ambitious Fleet OS and 24/7 Autonomy Push (2026-08-05)
+
+### Goal
+Make Ashlr Hub materially more useful as a solo operator's always-on autonomous engineering control plane, with an exceptional Mission Control experience and no expansion of consequential authority without explicit evidence and approval.
+
+### Phases
+- [x] Establish the live/runtime, Git, session, and dirty-worktree baseline.
+- [x] Complete parallel reliability, product/autonomy, and Mission Control UX audits against `origin/master` at `3204dc64`.
+- [x] Select one cohesive high-leverage slice with explicit success metrics and authority boundaries.
+- [x] Implement backend/status contracts, operator UX, and focused regression coverage.
+- [x] Run adversarial review plus focused tests, typecheck, lint, build, invariants, and full CI as proportional.
+- [ ] Reconcile the final branch with current `origin/master`, commit/push, and report live activation separately from source readiness.
+
+### Key Questions
+1. What stops the fleet from being truthfully 24/7 today, beyond the currently stopped resident daemon?
+2. Which single control-room workflow most reduces operator cognitive load and time-to-safe-action?
+3. Which ambitious autonomy improvement raises completed verified outcomes without weakening merge or mutation authority?
+
+### Decisions Made
+- Preserve the dirty primary checkout at `5eacef59`; all new implementation work uses this clean worktree and branch.
+- Optimize the first slice for a solo technical operator and local resident daemon deployment.
+- Keep source self-modification proposal-only and fail closed at verification, protected-remote, budget, and explicit authority boundaries.
+
+### Errors Encountered
+- `entire resume codex/ambitious-fleet-os-v1` was first invoked from the dirty primary checkout and refused because of uncommitted changes; rerunning it in this clean worktree found no checkpoint and changed nothing.
+
+### Status
+**Source-ready for protected review** — independent P0/P1 review is clear; changed-surface, invariant, full-suite, build, lint, audit, and responsive browser gates pass. Commit/push remains, while resident daemon activation is deliberately a separate post-merge/deployed-artifact gate.

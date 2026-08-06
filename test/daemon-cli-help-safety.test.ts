@@ -367,6 +367,29 @@ describe('daemon valid flags remain supported', () => {
     );
   });
 
+  it('returns nonzero so the resident service restarts after a terminal persistence failure', async () => {
+    effects.runDaemon.mockResolvedValue({
+      ...daemonState,
+      terminalFailure: 'daemon-state-persistence-failed',
+    });
+
+    const result = await capture(['start']);
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(
+      'daemon stopped after terminal failure: daemon-state-persistence-failed',
+    );
+  });
+
+  it('keeps an ordinary operator-requested stop successful', async () => {
+    effects.runDaemon.mockResolvedValue({ ...daemonState });
+
+    const result = await capture(['start']);
+
+    expect(result.code).toBe(0);
+    expect(result.stderr).toBe('');
+  });
+
   it('refuses start before the daemon loop when strict config loading fails', async () => {
     effects.loadConfigReadOnlyStrict.mockImplementationOnce(() => {
       throw new Error('config is not valid JSON');

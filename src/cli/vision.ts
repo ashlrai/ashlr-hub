@@ -4,6 +4,7 @@
  * Subcommands:
  *   show [id]              Print the current EndStateSpec (default: ecosystem).
  *   review [--project P]   Run the Strategist → print strategic briefing.
+ *   preview                Compile the latest briefing into a read-only adoption plan.
  *   approve                adoptBriefing for the latest briefing → evolve spec + create goals.
  *   set --north-star "…"   Mason edits northStar directly (updatedBy:'mason').
  *   set --end-state "…"    Mason edits endState directly (updatedBy:'mason').
@@ -37,6 +38,10 @@ function yellow(s: string): string {
 
 function green(s: string): string {
   return `\x1b[32m${s}\x1b[0m`;
+}
+
+function red(s: string): string {
+  return `\x1b[31m${s}\x1b[0m`;
 }
 
 function printSpec(spec: EndStateSpec): void {
@@ -103,6 +108,9 @@ function printBriefing(b: import('../core/vision/strategist.js').StrategicBriefi
       console.log(`  ${green(`${i + 1}.`)} ${bold(g.objective)}`);
       if (g.rationale) console.log(`       ${dim(g.rationale)}`);
       if (g.specPriority) console.log(`       ${dim('serves: ' + g.specPriority)}`);
+      if (g.targetRepo !== undefined) {
+        console.log(`       ${dim('target: ' + (g.targetRepo ?? 'ecosystem-wide (planning only)'))}`);
+      }
     });
     console.log('');
   }
@@ -166,14 +174,71 @@ async function cmdApprove(_args: string[]): Promise<number> {
   console.log(dim(`Adopting briefing from ${briefing.generatedAt}...`));
   const result = await adoptBriefing(cfg, briefing, { by: 'mason' });
 
-  const specId = result.specId;
-  const goalCount = result.goalIds.length;
-  console.log(green(`Spec '${specId}' evolved successfully.`));
-  if (goalCount > 0) {
-    console.log(green(`Created ${goalCount} goal(s): ${result.goalIds.join(', ')}`));
+  if (result.specOutcome === 'persisted') {
+    console.log(green(`Spec '${result.specId}' evolution persisted.`));
+  } else if (result.specOutcome === 'failed') {
+    console.error(red(`Spec '${result.specId}' evolution could not be verified as persisted.`));
   } else {
-    console.log(dim('No goals created (briefing had no proposedGoals).'));
+    console.log(dim('No spec evolution requested.'));
   }
+  if (result.createdCount > 0) {
+    console.log(green(`Created ${result.createdCount} goal(s): ${result.goalIds.join(', ')}`));
+  } else {
+    console.log(dim('No goals created.'));
+  }
+  const failed = result.outcomes.filter((outcome) => outcome.outcome === 'failed');
+  if (failed.length > 0) {
+    console.error(red(`Failed to persist ${failed.length} proposed goal(s):`));
+    for (const outcome of failed) {
+      console.error(`  ${outcome.index + 1}. ${outcome.reason} ${dim(outcome.objective)}`);
+    }
+  }
+  const skipped = result.outcomes.filter((outcome) => outcome.outcome === 'skipped');
+  if (skipped.length > 0) {
+    console.log(yellow(`Skipped ${skipped.length} proposed goal(s):`));
+    for (const outcome of skipped) {
+      console.log(`  ${outcome.index + 1}. ${outcome.reason} ${dim(outcome.objective)}`);
+    }
+  }
+  const degradedSource = skipped.some((outcome) => outcome.reason === 'goal-source-degraded');
+  return result.failedCount > 0 || result.specOutcome === 'failed' || degradedSource ? 1 : 0;
+}
+
+async function cmdPreview(_args: string[]): Promise<number> {
+  const cfg = loadConfig();
+  const [strategist, goals, focus, policy] = await Promise.all([
+    import('../core/vision/strategist.js'),
+    import('../core/goals/store.js'),
+    import('../core/goals/focus.js'),
+    import('../core/sandbox/policy.js'),
+  ]);
+  const briefing = strategist.loadLatestBriefing();
+  if (!briefing) {
+    console.error('vision: no briefing found. Run `ashlr vision review` first.');
+    return 1;
+  }
+
+  const inventory = goals.listGoalsDetailed();
+  const preview = strategist.previewBriefingAdoption(briefing, {
+    enrolledRepos: policy.listEnrolled(),
+    existingGoals: inventory.goals,
+    goalSourceState: inventory.sourceState,
+    activeThreshold: focus.goalFocusActiveThreshold(cfg),
+  });
+  console.log(bold('Mission compiler preview'));
+  console.log(
+    dim(
+      `${preview.createCount} ready, ${preview.skippedCount} skipped · ` +
+      `${preview.openGoalCount}/${preview.activeThreshold} open-goal slots occupied`,
+    ),
+  );
+  for (const entry of preview.entries) {
+    const marker = entry.disposition === 'create' ? green('CREATE') : yellow('SKIP');
+    const target = entry.project ?? entry.targetRepo ?? 'ecosystem-wide';
+    console.log(`  ${marker} ${entry.objective}`);
+    console.log(`         ${dim(`${entry.reason} · ${target}`)}`);
+  }
+  console.log(dim('Read-only preview: no spec, goal, repository, proposal, or authority was changed.'));
   return 0;
 }
 
@@ -221,6 +286,7 @@ Usage: ashlr vision <subcommand> [options]
 Subcommands:
   show [id]              Print the EndStateSpec (default: ecosystem).
   review [--project P]   Run the Strategist agent — state, gap, recommendations, proposed goals.
+  preview                Read-only compile: exact targets, dedupe, caps, and skip reasons.
   approve                Apply the latest briefing: evolve spec + create goals.
   set --north-star "…"   Update the north star directly (Mason-owned edit).
   set --end-state "…"    Update the end state directly.
@@ -230,6 +296,7 @@ Examples:
   ashlr vision show
   ashlr vision review
   ashlr vision review --project my-repo
+  ashlr vision preview
   ashlr vision approve
   ashlr vision set --north-star "Build the world's best autonomous engineering fleet."
 `);
@@ -252,6 +319,8 @@ export async function cmdVision(args: string[]): Promise<number> {
       return cmdShow(rest);
     case 'review':
       return cmdReview(rest);
+    case 'preview':
+      return cmdPreview(rest);
     case 'approve':
       return cmdApprove(rest);
     case 'set':
