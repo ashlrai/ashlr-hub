@@ -246,6 +246,39 @@ describe('h7 doctor probes — 5 NEW read-only checks', () => {
     expect(liveProbe?.detail).toContain(String(process.pid));
   }, DOCTOR_PROBE_TIMEOUT_MS);
 
+  it("runDoctor fails daemon-state while a recovery marker is present", async () => {
+    expect.hasAssertions();
+    fx = makeFixture();
+    stubModelUp(false);
+    const markerPath = join(fx.ashlrDir, 'control', 'daemon-state-recovery', 'active.json');
+    mkdirSync(join(fx.ashlrDir, 'control', 'daemon-state-recovery'), { recursive: true, mode: 0o700 });
+    writeFileSync(markerPath, '{"kind":"daemon-state-quarantine-intent"}\n', { mode: 0o600 });
+
+    const report = await runDoctor(cfg());
+
+    expect(probe(report, 'daemon-state')).toEqual({
+      id: 'daemon-state',
+      label: 'Daemon state',
+      status: 'fail',
+      detail: 'daemon state recovery marker is pending resolution',
+      fix: 'Resolve the daemon state recovery before starting the daemon.',
+    });
+  }, DOCTOR_PROBE_TIMEOUT_MS);
+
+  it("runDoctor fails daemon-state when strict state parsing is malformed", async () => {
+    expect.hasAssertions();
+    fx = makeFixture();
+    stubModelUp(false);
+    mkdirSync(fx.ashlrDir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(fx.ashlrDir, 'daemon.json'), '{not-json', { mode: 0o600 });
+
+    const report = await runDoctor(cfg());
+    const daemonState = probe(report, 'daemon-state');
+    expect(daemonState?.status).toBe('fail');
+    expect(daemonState?.detail).toContain('daemon state is malformed');
+    expect(daemonState?.fix).toBe('Resolve the daemon state recovery before starting the daemon.');
+  }, DOCTOR_PROBE_TIMEOUT_MS);
+
   it("runDoctor includes a 'kill-switch' probe; OFF ⇒ pass, ON ⇒ warn, degraded ⇒ fail", async () => {
     expect.hasAssertions();
     fx = makeFixture();

@@ -935,20 +935,29 @@ function checkEnrollment(): DoctorCheck {
  * Probe: daemon state (H7).
  * id: 'daemon-state'
  *
- * READ-ONLY via readDaemonHealth() → loadDaemonState() (which applies the H5
+ * READ-ONLY via readDaemonHealth() -> loadDaemonStateStrict() (which applies the H5
  * reconcileDaemonState self-heal at the load chokepoint). Reports:
  *  - a live running daemon (running flag + a still-alive pid) as a PASS
  *    (truthful, expected during autonomy);
  *  - a stopped daemon as a PASS — this INCLUDES a stale dead-pid `running:true`
  *    flag, which the H5 reconcile has already flipped to running:false at load,
  *    so the probe truthfully reports "stopped" rather than a phantom-live daemon.
- * Never fails — a daemon's run-state is observability, not a blocker. The load's
- * self-heal is observability-only and is not persisted by this read. Mutates
- * nothing. Never throws.
+ * A recovery marker fails the probe because autonomy must remain blocked until
+ * the state transition is resolved. Ordinary daemon run-state remains
+ * observability-only. Mutates nothing. Never throws.
  */
 function checkDaemonState(): DoctorCheck {
   try {
-    const { running, pid, pidAlive } = readDaemonHealth();
+    const { running, pid, pidAlive, recoveryBlocked, recoveryReason } = readDaemonHealth();
+    if (recoveryBlocked) {
+      return check(
+        'daemon-state',
+        'Daemon state',
+        'fail',
+        recoveryReason ?? 'Daemon state recovery is pending resolution',
+        'Resolve the daemon state recovery before starting the daemon.',
+      );
+    }
     if (running && pidAlive) {
       return check(
         'daemon-state',
@@ -961,7 +970,13 @@ function checkDaemonState(): DoctorCheck {
     // self-healed to a truthful stopped state.
     return check('daemon-state', 'Daemon state', 'pass', 'Daemon stopped');
   } catch (err) {
-    return check('daemon-state', 'Daemon state', 'pass', `daemon state unreadable: ${String(err)}`);
+    return check(
+      'daemon-state',
+      'Daemon state',
+      'fail',
+      `daemon state unreadable: ${String(err)}`,
+      'Repair or quarantine the daemon state before running autonomy.',
+    );
   }
 }
 

@@ -22,6 +22,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   renameSync,
   unlinkSync,
   writeSync,
@@ -30,7 +31,7 @@ import {
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { homedir, hostname as osHostname } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import type { DaemonState } from '../types.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
 import { fsyncDirectory } from '../util/durability.js';
@@ -117,6 +118,7 @@ export type DaemonStateDiagnosticCode =
   | 'spend-accounting-id-invalid'
   | 'spend-accounting-exhaustion-invalid'
   | 'automatic-drain-flag-invalid'
+  | 'state-recovery-in-progress'
   | 'unsafe-storage'
   | 'source-changed-during-read'
   | 'read-failed';
@@ -129,6 +131,11 @@ export interface DaemonStateRecoveryDiagnostic {
   sourceBytesPreserved: true;
   automaticRepairAllowed: false;
   mutationAuthorityGranted: false;
+}
+
+/** Durable recovery intent marker. Its presence keeps strict callers fail-closed. */
+export function daemonStateRecoveryMarkerPath(): string {
+  return join(ashlrDir(), 'control', 'daemon-state-recovery', 'active.json');
 }
 
 export type SaveDaemonStateResult =
@@ -255,7 +262,7 @@ function strictSpendGuardAccountingIssues(
   return issues;
 }
 
-function strictDaemonStateIssues(value: unknown): DaemonStateDiagnosticCode[] {
+export function daemonStateIssueCodes(value: unknown): DaemonStateDiagnosticCode[] {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return ['invalid-root'];
   const obj = value as Record<string, unknown>;
   const issues: DaemonStateDiagnosticCode[] = [];
@@ -312,7 +319,7 @@ function parseDaemonState(
   }
   const obj = parsed as Record<string, unknown>;
   if (opts?.strict === true) {
-    if (strictDaemonStateIssues(obj).length > 0) return null;
+    if (daemonStateIssueCodes(obj).length > 0) return null;
   }
   const state: DaemonState = {
     running: typeof obj['running'] === 'boolean' ? obj['running'] : false,
@@ -373,6 +380,28 @@ function safeDaemonStateFile(stat: Stats): boolean {
     ownedByCurrentUser(stat) && (process.platform === 'win32' || (Number(stat.mode) & 0o022) === 0);
 }
 
+function safeDaemonStateRecoveryMarkerFile(path: string, stat: Stats): boolean {
+  // Recovery records are atomically published with a no-clobber hard link from
+  // a private fsynced temp, so the authenticated final may intentionally have
+  // two links until evidence retirement.
+  const safe = stat.isFile() && !stat.isSymbolicLink() &&
+    ownedByCurrentUser(stat) && (process.platform === 'win32' || (Number(stat.mode) & 0o022) === 0);
+  if (!safe || ![1, 2].includes(Number(stat.nlink))) return false;
+  if (Number(stat.nlink) === 1) return true;
+  try {
+    return readdirSync(dirname(path)).some((name) => {
+      if (!name.startsWith(`.${basename(path)}.`) || !name.endsWith('.tmp')) return false;
+      const candidate = lstatSync(join(dirname(path), name));
+      return candidate.isFile() && !candidate.isSymbolicLink() && Number(candidate.nlink) === 2 &&
+        ownedByCurrentUser(candidate) &&
+        (process.platform === 'win32' || (Number(candidate.mode) & 0o022) === 0) &&
+        sameFile(candidate, stat);
+    });
+  } catch {
+    return false;
+  }
+}
+
 function sameFile(left: Stats, right: Stats): boolean {
   return Number(left.dev) === Number(right.dev) && Number(left.ino) === Number(right.ino);
 }
@@ -405,6 +434,32 @@ export function loadDaemonState(): DaemonState {
 export function loadDaemonStateStrict(
   opts: { preserveOwnerIdentity?: boolean } = {},
 ): LoadDaemonStateStrictResult {
+  const recoveryMarker = daemonStateRecoveryMarkerPath();
+  try {
+    const marker = lstatSync(recoveryMarker);
+    return {
+      ok: false,
+      path: recoveryMarker,
+      reason: 'unreadable',
+      error: safeDaemonStateRecoveryMarkerFile(recoveryMarker, marker)
+        ? 'daemon state recovery is in progress'
+        : 'daemon state recovery marker path is unsafe',
+      diagnostic: recoveryDiagnostic([
+        safeDaemonStateRecoveryMarkerFile(recoveryMarker, marker) ? 'state-recovery-in-progress' : 'unsafe-storage',
+      ]),
+    };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        ok: false,
+        path: recoveryMarker,
+        reason: 'unreadable',
+        error: msg,
+        diagnostic: recoveryDiagnostic(['read-failed'], 'retry-read-required'),
+      };
+    }
+  }
   const p = daemonStatePath();
   let named: Stats;
   try {
@@ -470,7 +525,7 @@ export function loadDaemonStateStrict(
         diagnostic: recoveryDiagnostic(['invalid-json']),
       };
     }
-    const issueCodes = strictDaemonStateIssues(decoded);
+    const issueCodes = daemonStateIssueCodes(decoded);
     if (issueCodes.length > 0) {
       return {
         ok: false,
