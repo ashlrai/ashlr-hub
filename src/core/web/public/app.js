@@ -176,6 +176,13 @@ async function apiFetch(path) {
   return res.json();
 }
 
+function mutationIdempotencyKey() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  globalThis.crypto?.getRandomValues(bytes);
+  return `web-${Date.now()}-${Array.from(bytes, (v) => v.toString(16).padStart(2, '0')).join('')}`;
+}
+
 // Token-authenticated POST. Returns parsed JSON or throws with message.
 async function apiPost(path, token) {
   const res = await fetch(API_BASE + path, {
@@ -183,6 +190,7 @@ async function apiPost(path, token) {
     headers: {
       'Content-Type': 'application/json',
       'x-ashlr-token': token,
+      'x-ashlr-idempotency-key': mutationIdempotencyKey(),
     },
     body: '{}',
   });
@@ -302,7 +310,11 @@ async function apiOpenRepo(repo, action) {
   try {
     const res = await fetch(API_BASE + '/api/open', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-ashlr-token': token },
+      headers: {
+        'Content-Type': 'application/json',
+        'x-ashlr-token': token,
+        'x-ashlr-idempotency-key': mutationIdempotencyKey(),
+      },
       body: JSON.stringify({ repo, action }),
     });
     if (!res.ok) {
@@ -957,7 +969,11 @@ function buildDispatchPanel() {
       if (!isNaN(maxTok) && maxTok > 0) body.maxTokens = maxTok;
       const res = await fetch('/api/run', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-ashlr-token': token },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-ashlr-token': token,
+          'x-ashlr-idempotency-key': mutationIdempotencyKey(),
+        },
         body: JSON.stringify(body),
       });
       const json = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));

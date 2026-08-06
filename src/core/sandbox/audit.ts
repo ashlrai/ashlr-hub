@@ -11,15 +11,30 @@
 
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import {
+  chmodSync,
+  closeSync,
+  constants as fsConstants,
   existsSync,
+  fchmodSync,
+  fstatSync,
+  fsyncSync,
+  lstatSync,
   mkdirSync,
+  openSync,
+  readSync,
   readdirSync,
-  appendFileSync,
   readFileSync,
+  writeSync,
 } from 'node:fs';
 import type { AuditEntry } from '../types.js';
 import { scrubSecrets } from '../util/scrub.js';
+import { fsyncDirectory } from '../util/durability.js';
+import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
+
+const O_NOFOLLOW = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+const MAX_AUDIT_TAIL_BYTES = 64 * 1024;
 
 // ---------------------------------------------------------------------------
 // Public: auditDir()
@@ -54,6 +69,126 @@ function stripSecrets(summary: string): string {
   return scrubSecrets(summary);
 }
 
+function metadata(value: string): string {
+  return stripSecrets(value).slice(0, 256);
+}
+
+function digestMetadata(value: string): string {
+  return /^[a-f0-9]{64}$/.test(value) ? value : '[INVALID-DIGEST]';
+}
+
+function owned(uid: number | bigint): boolean {
+  return typeof process.getuid !== 'function' || BigInt(uid) === BigInt(process.getuid());
+}
+
+function exactDirectory(path: string): { dev: bigint; ino: bigint } | null {
+  const stat = lstatSync(path, { bigint: true });
+  if (!stat.isDirectory() || stat.isSymbolicLink() || !owned(stat.uid) ||
+    (process.platform !== 'win32' && (stat.mode & 0o777n) !== 0o700n)) return null;
+  return { dev: stat.dev, ino: stat.ino };
+}
+
+function assureExactDirectory(path: string): { dev: bigint; ino: bigint } | null {
+  try {
+    if (!existsSync(path)) mkdirSync(path, { mode: 0o700 });
+    const before = lstatSync(path, { bigint: true });
+    if (!before.isDirectory() || before.isSymbolicLink() || !owned(before.uid)) return null;
+    if (process.platform !== 'win32') chmodSync(path, 0o700);
+    const after = exactDirectory(path);
+    return after && after.dev === before.dev && after.ino === before.ino ? after : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseAuditLine(line: string): AuditEntry | null {
+  try {
+    const parsed: unknown = JSON.parse(line);
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const obj = parsed as Record<string, unknown>;
+    return typeof obj['ts'] === 'string' &&
+      typeof obj['action'] === 'string' &&
+      typeof obj['summary'] === 'string' &&
+      (obj['result'] === 'ok' || obj['result'] === 'refused' || obj['result'] === 'error')
+      ? obj as unknown as AuditEntry
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function readAuditTail(fd: number, size: bigint): AuditEntry | null {
+  if (size <= 0n || size > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+  const bytesToRead = Math.min(Number(size), MAX_AUDIT_TAIL_BYTES);
+  const buffer = Buffer.allocUnsafe(bytesToRead);
+  let offset = 0;
+  while (offset < bytesToRead) {
+    const read = readSync(fd, buffer, offset, bytesToRead - offset, Number(size) - bytesToRead + offset);
+    if (read <= 0) return null;
+    offset += read;
+  }
+  if (buffer[buffer.length - 1] !== 0x0a) return null;
+  const content = buffer.subarray(0, -1);
+  const previousNewline = content.lastIndexOf(0x0a);
+  if (previousNewline < 0 && Number(size) > bytesToRead) return null;
+  const line = content.subarray(previousNewline + 1).toString('utf8');
+  return line.trim() ? parseAuditLine(line) : null;
+}
+
+function appendDurably(filePath: string, record: AuditEntry, directoryPath: string): boolean {
+  let fd: number | null = null;
+  try {
+    const directoryIdentity = exactDirectory(directoryPath);
+    if (!directoryIdentity) return false;
+    fd = openSync(
+      filePath,
+      fsConstants.O_RDWR | fsConstants.O_APPEND | fsConstants.O_CREAT | O_NOFOLLOW,
+      0o600,
+    );
+    if (process.platform !== 'win32') fchmodSync(fd, 0o600);
+    const opened = fstatSync(fd, { bigint: true });
+    const named = lstatSync(filePath, { bigint: true });
+    if (!opened.isFile() || opened.isSymbolicLink() || !named.isFile() || named.isSymbolicLink() ||
+      !owned(opened.uid) || !owned(named.uid) || opened.nlink !== 1n || named.nlink !== 1n ||
+      opened.dev !== named.dev || opened.ino !== named.ino ||
+      (process.platform !== 'win32' &&
+        ((opened.mode & 0o777n) !== 0o600n || (named.mode & 0o777n) !== 0o600n))) return false;
+    if (opened.size > 0n && readAuditTail(fd, opened.size) === null) return false;
+    const directoryBeforeWrite = exactDirectory(directoryPath);
+    if (!directoryBeforeWrite || directoryBeforeWrite.dev !== directoryIdentity.dev ||
+      directoryBeforeWrite.ino !== directoryIdentity.ino) return false;
+
+    const bytes = Buffer.from(`${JSON.stringify(record)}\n`, 'utf8');
+    let offset = 0;
+    while (offset < bytes.length) {
+      const written = writeSync(fd, bytes, offset, bytes.length - offset, null);
+      if (written <= 0) return false;
+      offset += written;
+    }
+    fsyncSync(fd);
+
+    const openedAfter = fstatSync(fd, { bigint: true });
+    const namedAfter = lstatSync(filePath, { bigint: true });
+    const directoryAfter = exactDirectory(directoryPath);
+    if (!directoryAfter || directoryAfter.dev !== directoryIdentity.dev ||
+      directoryAfter.ino !== directoryIdentity.ino ||
+      openedAfter.dev !== opened.dev || openedAfter.ino !== opened.ino ||
+      namedAfter.dev !== opened.dev || namedAfter.ino !== opened.ino || namedAfter.isSymbolicLink()) return false;
+    const persisted = readAuditTail(fd, openedAfter.size);
+    if (!persisted || persisted.eventId !== record.eventId) return false;
+    closeSync(fd);
+    fd = null;
+    fsyncDirectory(directoryPath, { expectedIdentity: directoryIdentity });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== null) {
+      try { closeSync(fd); } catch { /* best effort */ }
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Public: audit()
 // ---------------------------------------------------------------------------
@@ -63,18 +198,20 @@ function stripSecrets(summary: string): string {
  * Sets `ts` to the current ISO timestamp; the caller supplies everything else.
  *
  * Append-only: never truncates, never rewrites existing lines.
- * Never throws — errors are swallowed silently to keep callers unblocked.
+ * Never throws. Returns the persisted record, or null when append failed.
  */
-export function audit(entry: Omit<AuditEntry, 'ts'>): void {
+export function audit(
+  entry: Omit<AuditEntry, 'ts' | 'schemaVersion' | 'eventId'>,
+): AuditEntry | null {
   try {
     const dir = auditDir();
+    const root = join(homedir(), '.ashlr');
 
-    // Ensure audit directory exists (lazy mkdir).
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
-    }
+    if (!assureExactDirectory(root) || !assureExactDirectory(dir)) return null;
 
     const record: AuditEntry = {
+      schemaVersion: 2,
+      eventId: randomUUID(),
       ts: new Date().toISOString(),
       action: entry.action,
       repo: entry.repo,
@@ -82,15 +219,57 @@ export function audit(entry: Omit<AuditEntry, 'ts'>): void {
       // Strip secret-shaped tokens defensively; summary is metadata only.
       summary: stripSecrets(entry.summary),
       result: entry.result,
+      ...(entry.actor
+        ? {
+            actor: {
+              id: metadata(entry.actor.id),
+              type: entry.actor.type,
+              role: metadata(entry.actor.role),
+            },
+          }
+        : {}),
+      ...(entry.authority
+        ? {
+            authority: {
+              method: metadata(entry.authority.method),
+              capability: metadata(entry.authority.capability),
+              policyVersion: metadata(entry.authority.policyVersion),
+              decision: entry.authority.decision,
+              reasonCode: metadata(entry.authority.reasonCode),
+            },
+          }
+        : {}),
+      ...(entry.mutation
+        ? {
+            mutation: {
+              reservationId: digestMetadata(entry.mutation.reservationId),
+              idempotencyKeyHash: digestMetadata(entry.mutation.idempotencyKeyHash),
+              requestDigest: digestMetadata(entry.mutation.requestDigest),
+              method: metadata(entry.mutation.method),
+              pathHash: digestMetadata(entry.mutation.pathHash),
+              phase: entry.mutation.phase,
+              ...(entry.mutation.outcome ? { outcome: entry.mutation.outcome } : {}),
+              ...(entry.mutation.status !== undefined ? { status: entry.mutation.status } : {}),
+            },
+          }
+        : {}),
     };
 
-    const line = JSON.stringify(record) + '\n';
     const filePath = join(dir, `${todayDateString()}.jsonl`);
 
-    // Append-only — appendFileSync creates the file if missing, never truncates.
-    appendFileSync(filePath, line, 'utf8');
+    const lock = acquireLocalStoreLock(join(dir, '.append.lock'), 2_000, {
+      anchorPath: dir,
+      exactPrivateStorage: true,
+    });
+    if (!lock) return null;
+    try {
+      return appendDurably(filePath, record, dir) ? record : null;
+    } finally {
+      releaseLocalStoreLock(lock);
+    }
   } catch {
     // Intentionally swallowed: audit must never disrupt the caller's flow.
+    return null;
   }
 }
 
@@ -191,29 +370,8 @@ export function readAudit(limit?: number): AuditEntry[] {
       for (const line of lines) {
         if (entries.length >= cap) break;
 
-        try {
-          const parsed: unknown = JSON.parse(line);
-          if (
-            parsed !== null &&
-            typeof parsed === 'object' &&
-            !Array.isArray(parsed)
-          ) {
-            // Light structural validation — skip clearly malformed entries.
-            const obj = parsed as Record<string, unknown>;
-            if (
-              typeof obj['ts'] === 'string' &&
-              typeof obj['action'] === 'string' &&
-              typeof obj['summary'] === 'string' &&
-              (obj['result'] === 'ok' ||
-                obj['result'] === 'refused' ||
-                obj['result'] === 'error')
-            ) {
-              entries.push(obj as unknown as AuditEntry);
-            }
-          }
-        } catch {
-          // Malformed JSON line — skip silently.
-        }
+        const parsed = parseAuditLine(line);
+        if (parsed) entries.push(parsed);
       }
     }
 

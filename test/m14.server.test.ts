@@ -18,6 +18,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as http from 'node:http';
 import * as path from 'node:path';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import type { AshlrConfig, WebServerOptions } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -81,6 +91,10 @@ vi.mock('../src/cli/run.js', () => ({
 // ---------------------------------------------------------------------------
 
 import { startServer, assetsDir } from '../src/core/web/server.js';
+import { runGoal } from '../src/core/run/orchestrator.js';
+import { enroll } from '../src/core/sandbox/policy.js';
+import { auditDir } from '../src/core/sandbox/audit.js';
+import { createProposal, loadProposal } from '../src/core/inbox/store.js';
 
 // ---------------------------------------------------------------------------
 // Config fixture
@@ -143,14 +157,58 @@ function httpGet(
   });
 }
 
+function httpPost(
+  url: string,
+  port: number,
+  token: string,
+  idempotencyKey: string,
+  body: unknown,
+): Promise<{ statusCode: number; body: string; headers: http.IncomingHttpHeaders }> {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const encoded = JSON.stringify(body);
+    const req = http.request({
+      hostname: parsed.hostname,
+      port: Number(parsed.port),
+      path: parsed.pathname,
+      method: 'POST',
+      headers: {
+        Host: `127.0.0.1:${port}`,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(encoded),
+        'x-ashlr-token': token,
+        'x-ashlr-idempotency-key': idempotencyKey,
+      },
+    }, (res) => {
+      let data = '';
+      res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+      res.on('end', () => resolve({
+        statusCode: res.statusCode ?? 0,
+        body: data,
+        headers: res.headers,
+      }));
+    });
+    req.on('error', reject);
+    req.end(encoded);
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Track open handles for cleanup
 // ---------------------------------------------------------------------------
 
 let openHandles: Array<{ close(): Promise<void> }> = [];
+let serverTestHome = '';
+let previousHome: string | undefined;
+let previousUserProfile: string | undefined;
 
 beforeEach(() => {
   openHandles = [];
+  serverTestHome = mkdtempSync(path.join(tmpdir(), 'ashlr-m14-server-'));
+  previousHome = process.env.HOME;
+  previousUserProfile = process.env.USERPROFILE;
+  process.env.HOME = serverTestHome;
+  process.env.USERPROFILE = serverTestHome;
 });
 
 afterEach(async () => {
@@ -159,6 +217,11 @@ afterEach(async () => {
     try { await h.close(); } catch { /* ignore */ }
   }
   openHandles = [];
+  if (previousHome === undefined) delete process.env.HOME;
+  else process.env.HOME = previousHome;
+  if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = previousUserProfile;
+  rmSync(serverTestHome, { recursive: true, force: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -370,5 +433,238 @@ describe('startServer — no secrets in responses', () => {
       Host: `127.0.0.1:${handle.port}`,
     });
     expect(result.body).not.toContain(handle.token);
+  });
+});
+
+describe('startServer — scoped mutation authority', () => {
+  it('enforces operator and approver roles through real server sessions', async () => {
+    const operator = await startServer(makeConfig(), makeOpts({
+      allowDispatch: true,
+      mutationRole: 'operator',
+    }));
+    const approver = await startServer(makeConfig(), makeOpts({
+      allowDispatch: true,
+      mutationRole: 'approver',
+    }));
+    openHandles.push(operator, approver);
+
+    const operatorApproval = await httpPost(
+      `${operator.url}/api/inbox/missing/approve`, operator.port, operator.token,
+      'm14-server-operator-denied', {},
+    );
+    const approverDispatch = await httpPost(
+      `${approver.url}/api/run`, approver.port, approver.token,
+      'm14-server-approver-denied', { goal: 'must not run' },
+    );
+
+    expect(operatorApproval.statusCode).toBe(403);
+    expect(approverDispatch.statusCode).toBe(403);
+  });
+
+  it('executes a caller idempotency key once and returns its completion on replay', async () => {
+    vi.mocked(runGoal).mockClear();
+    vi.mocked(runGoal).mockResolvedValue({
+      id: 'run-once', status: 'completed', goal: 'execute once', usage: {},
+    } as never);
+    const handle = await startServer(makeConfig(), makeOpts({
+      allowDispatch: true,
+      mutationRole: 'operator',
+    }));
+    openHandles.push(handle);
+    const key = 'm14-server-execute-once';
+
+    const first = await httpPost(
+      `${handle.url}/api/run`, handle.port, handle.token, key, { goal: 'execute once' },
+    );
+    const replay = await httpPost(
+      `${handle.url}/api/run`, handle.port, handle.token, key, { goal: 'execute once' },
+    );
+    const conflict = await httpPost(
+      `${handle.url}/api/run`, handle.port, handle.token, key, { goal: 'different mutation' },
+    );
+
+    expect(first.statusCode).toBe(200);
+    expect(replay.statusCode).toBe(200);
+    expect(JSON.parse(replay.body)).toEqual({
+      idempotency: {
+        replayed: true,
+        state: 'completed',
+        outcome: 'succeeded',
+        status: 200,
+      },
+    });
+    expect(conflict.statusCode).toBe(409);
+    expect(vi.mocked(runGoal)).toHaveBeenCalledTimes(1);
+  });
+
+  it('reconciles an exact completion after a server restart with a new token', async () => {
+    vi.mocked(runGoal).mockClear();
+    vi.mocked(runGoal).mockResolvedValue({
+      id: 'restart-run', status: 'completed', goal: 'survive restart', usage: {},
+    } as never);
+    const firstServer = await startServer(makeConfig(), makeOpts({
+      allowDispatch: true,
+      mutationRole: 'operator',
+    }));
+    openHandles.push(firstServer);
+    const key = 'm14-server-restart-replay';
+    const first = await httpPost(
+      `${firstServer.url}/api/run`, firstServer.port, firstServer.token, key,
+      { goal: 'survive restart', secret: 'must-not-be-replayed' },
+    );
+    expect(first.statusCode).toBe(200);
+    await firstServer.close();
+
+    const restarted = await startServer(makeConfig(), makeOpts({
+      allowDispatch: true,
+      mutationRole: 'operator',
+    }));
+    openHandles.push(restarted);
+    expect(restarted.token).not.toBe(firstServer.token);
+    const replay = await httpPost(
+      `${restarted.url}/api/run`, restarted.port, restarted.token, key,
+      { goal: 'survive restart', secret: 'must-not-be-replayed' },
+    );
+
+    expect(replay.statusCode).toBe(200);
+    expect(JSON.parse(replay.body)).toEqual({
+      idempotency: {
+        replayed: true,
+        state: 'completed',
+        outcome: 'succeeded',
+        status: 200,
+      },
+    });
+    expect(replay.body).not.toContain('must-not-be-replayed');
+    expect(vi.mocked(runGoal)).toHaveBeenCalledTimes(1);
+  });
+
+  it('replays completed policy and proposal mutations without duplicate effects', async () => {
+    const handle = await startServer(makeConfig(), makeOpts({
+      allowDispatch: true,
+      mutationRole: 'owner',
+    }));
+    openHandles.push(handle);
+
+    const pauseKey = 'm14-server-pause-once';
+    const pause = await httpPost(
+      `${handle.url}/api/fleet/pause`, handle.port, handle.token, pauseKey, {},
+    );
+    const pauseReplay = await httpPost(
+      `${handle.url}/api/fleet/pause`, handle.port, handle.token, pauseKey, {},
+    );
+    expect(pause.statusCode).toBe(200);
+    expect(pauseReplay.statusCode).toBe(200);
+    expect(JSON.parse(pauseReplay.body)).toMatchObject({
+      idempotency: { replayed: true, state: 'completed', outcome: 'succeeded' },
+    });
+
+    const proposal = createProposal({
+      repo: null,
+      origin: 'manual',
+      kind: 'note',
+      title: 'real-server apply once',
+      summary: 'idempotency regression',
+    });
+    const applyKey = 'm14-server-apply-once';
+    const applied = await httpPost(
+      `${handle.url}/api/inbox/${proposal.id}/approve`,
+      handle.port, handle.token, applyKey, {},
+    );
+    const applyReplay = await httpPost(
+      `${handle.url}/api/inbox/${proposal.id}/approve`,
+      handle.port, handle.token, applyKey, {},
+    );
+    expect(applied.statusCode).toBe(200);
+    expect(applyReplay.statusCode).toBe(200);
+    expect(JSON.parse(applyReplay.body)).toMatchObject({
+      idempotency: { replayed: true, state: 'completed', outcome: 'succeeded', status: 200 },
+    });
+    expect(loadProposal(proposal.id)?.status).toBe('applied');
+  });
+
+  it.runIf(process.platform !== 'win32')('rejects a physical symlink escape through the real server', async () => {
+    const repo = path.join(serverTestHome, 'repo');
+    const outside = path.join(serverTestHome, 'outside.txt');
+    mkdirSync(repo);
+    writeFileSync(outside, 'outside');
+    symlinkSync(outside, path.join(repo, 'escape.txt'));
+    expect(enroll(repo).ok).toBe(true);
+    const handle = await startServer(makeConfig(), makeOpts({
+      allowDispatch: true,
+      mutationRole: 'operator',
+      requireMutationAuditReceipts: false,
+    }));
+    openHandles.push(handle);
+
+    const response = await httpPost(
+      `${handle.url}/api/open`, handle.port, handle.token,
+      'm14-server-symlink-escape', { repo, file: 'escape.txt', action: 'editor' },
+    );
+
+    expect(response.statusCode).toBe(403);
+  });
+
+  it.runIf(process.platform !== 'win32')('fails closed through the real server when audit append is unsafe', async () => {
+    vi.mocked(runGoal).mockClear();
+    mkdirSync(auditDir(), { recursive: true, mode: 0o700 });
+    chmodSync(path.join(serverTestHome, '.ashlr'), 0o700);
+    chmodSync(auditDir(), 0o700);
+    const outside = path.join(serverTestHome, 'audit-target');
+    writeFileSync(outside, 'sentinel\n', { mode: 0o600 });
+    symlinkSync(outside, path.join(auditDir(), `${new Date().toISOString().slice(0, 10)}.jsonl`));
+    const handle = await startServer(makeConfig(), makeOpts({
+      allowDispatch: true,
+      mutationRole: 'operator',
+    }));
+    openHandles.push(handle);
+
+    const response = await httpPost(
+      `${handle.url}/api/run`, handle.port, handle.token,
+      'm14-server-audit-failure', { goal: 'must not run' },
+    );
+
+    expect(response.statusCode).toBe(503);
+    expect(vi.mocked(runGoal)).not.toHaveBeenCalled();
+  });
+
+  it.runIf(process.platform !== 'win32')('persists terminal state when completion audit fails after the effect', async () => {
+    vi.mocked(runGoal).mockClear();
+    const outside = path.join(serverTestHome, 'post-effect-audit-target');
+    writeFileSync(outside, 'sentinel\n', { mode: 0o600 });
+    vi.mocked(runGoal).mockImplementationOnce(async () => {
+      const daily = path.join(auditDir(), `${new Date().toISOString().slice(0, 10)}.jsonl`);
+      rmSync(daily, { force: true });
+      symlinkSync(outside, daily);
+      return {
+        id: 'audit-degraded-run',
+        status: 'completed',
+        goal: 'effect already happened',
+        usage: {},
+      } as never;
+    });
+    const handle = await startServer(makeConfig(), makeOpts({
+      allowDispatch: true,
+      mutationRole: 'operator',
+    }));
+    openHandles.push(handle);
+    const key = 'm14-server-post-effect-audit-failure';
+    const first = await httpPost(
+      `${handle.url}/api/run`, handle.port, handle.token, key,
+      { goal: 'effect already happened' },
+    );
+    const replay = await httpPost(
+      `${handle.url}/api/run`, handle.port, handle.token, key,
+      { goal: 'effect already happened' },
+    );
+
+    expect(first.statusCode).toBe(200);
+    expect(first.headers['x-ashlr-audit-degraded']).toBe('completion-receipt-unavailable');
+    expect(replay.statusCode).toBe(200);
+    expect(JSON.parse(replay.body)).toMatchObject({
+      idempotency: { replayed: true, state: 'completed', outcome: 'succeeded' },
+    });
+    expect(vi.mocked(runGoal)).toHaveBeenCalledTimes(1);
+    expect(readFileSync(outside, 'utf8')).toBe('sentinel\n');
   });
 });

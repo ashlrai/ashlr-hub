@@ -19,9 +19,9 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, resolve, win32 } from 'node:path';
 import { EventEmitter } from 'node:events';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
@@ -41,10 +41,13 @@ vi.mock('../src/cli/open.js', () => ({
 
 vi.mock('../src/core/sandbox/policy.js', async () => {
   const { resolve: resolvePath } = await import('node:path');
-  const enrolled = [resolvePath('/enrolled/repo-a'), resolvePath('/enrolled/repo-b')];
+  const enrolled = () => [
+    resolvePath(process.env.HOME ?? '', 'enrolled', 'repo-a'),
+    resolvePath(process.env.HOME ?? '', 'enrolled', 'repo-b'),
+  ];
   return {
-    listEnrolled: () => enrolled,
-    isEnrolled: (r: string) => enrolled.includes(r),
+    listEnrolled: enrolled,
+    isEnrolled: (r: string) => enrolled().includes(r),
     assertMayMutate: vi.fn(),
     enroll: vi.fn(),
     unenroll: vi.fn(),
@@ -55,7 +58,7 @@ vi.mock('../src/core/sandbox/policy.js', async () => {
 });
 
 // Import AFTER mocks are registered.
-import { handleApi } from '../src/core/web/api.js';
+import { handleApi, isConfinedRelativePath } from '../src/core/web/api.js';
 import * as openMod from '../src/cli/open.js';
 
 // ---------------------------------------------------------------------------
@@ -93,9 +96,25 @@ beforeEach(() => {
   prevUserProfile = process.env.USERPROFILE;
   process.env.HOME = tmpHome;
   process.env.USERPROFILE = tmpHome;
+  mkdirSync(repoA(), { recursive: true });
+  mkdirSync(join(repoA(), 'src'), { recursive: true });
+  mkdirSync(repoB(), { recursive: true });
+  writeFileSync(join(repoA(), 'src', 'index.ts'), 'export {};\n', 'utf8');
   vi.mocked(openMod.openInEditor).mockClear();
   vi.mocked(openMod.openInFinder).mockClear();
 });
+
+function repoA(): string {
+  return resolve(tmpHome, 'enrolled', 'repo-a');
+}
+
+function repoB(): string {
+  return resolve(tmpHome, 'enrolled', 'repo-b');
+}
+
+function physical(path: string): string {
+  return realpathSync.native(path);
+}
 
 afterEach(() => {
   if (prevHome === undefined) delete process.env.HOME;
@@ -130,6 +149,7 @@ function makeFakeReqRes(opts: {
   req.headers = opts.headers ?? {
     'content-type': 'application/json',
     'x-ashlr-token': TEST_TOKEN,
+    'x-ashlr-idempotency-key': `m100-${Date.now()}-${Math.random().toString(16).slice(2)}`,
   };
 
   process.nextTick(() => {
@@ -139,6 +159,10 @@ function makeFakeReqRes(opts: {
 
   const res = {
     headersSent: false,
+    setHeader(name: string, value: string) {
+      captured.headers[name.toLowerCase()] = String(value);
+      return this;
+    },
     writeHead(status: number, headers?: Record<string, string>) {
       captured.statusCode = status;
       if (headers) Object.assign(captured.headers, headers);
@@ -167,7 +191,7 @@ const ctx = { token: TEST_TOKEN, allowDispatch: true };
 describe('POST /api/open — security gates', () => {
   it('returns 404 when allowDispatch is false', async () => {
     const { req, res, captured } = makeFakeReqRes({
-      body: JSON.stringify({ repo: '/enrolled/repo-a', action: 'editor' }),
+      body: JSON.stringify({ repo: repoA(), action: 'editor' }),
     });
     await handleApi(req, res, baseConfig(), { token: TEST_TOKEN, allowDispatch: false });
     expect(captured.statusCode).toBe(404);
@@ -177,7 +201,7 @@ describe('POST /api/open — security gates', () => {
   it('returns 401 when x-ashlr-token is missing', async () => {
     const { req, res, captured } = makeFakeReqRes({
       headers: { 'content-type': 'application/json', 'x-ashlr-token': '' },
-      body: JSON.stringify({ repo: '/enrolled/repo-a', action: 'editor' }),
+      body: JSON.stringify({ repo: repoA(), action: 'editor' }),
     });
     await handleApi(req, res, baseConfig(), ctx);
     expect(captured.statusCode).toBe(401);
@@ -187,7 +211,7 @@ describe('POST /api/open — security gates', () => {
   it('returns 401 when x-ashlr-token is wrong', async () => {
     const { req, res, captured } = makeFakeReqRes({
       headers: { 'content-type': 'application/json', 'x-ashlr-token': 'wrong-token' },
-      body: JSON.stringify({ repo: '/enrolled/repo-a', action: 'editor' }),
+      body: JSON.stringify({ repo: repoA(), action: 'editor' }),
     });
     await handleApi(req, res, baseConfig(), ctx);
     expect(captured.statusCode).toBe(401);
@@ -197,7 +221,7 @@ describe('POST /api/open — security gates', () => {
   it('returns 415 when Content-Type is not application/json', async () => {
     const { req, res, captured } = makeFakeReqRes({
       headers: { 'content-type': 'text/plain', 'x-ashlr-token': TEST_TOKEN },
-      body: JSON.stringify({ repo: '/enrolled/repo-a', action: 'editor' }),
+      body: JSON.stringify({ repo: repoA(), action: 'editor' }),
     });
     await handleApi(req, res, baseConfig(), ctx);
     expect(captured.statusCode).toBe(415);
@@ -217,17 +241,17 @@ describe('POST /api/open — security gates', () => {
 
   it('returns 403 for path traversal via repo field (resolves outside enrolled list)', async () => {
     const { req, res, captured } = makeFakeReqRes({
-      body: JSON.stringify({ repo: '/enrolled/repo-a/../../etc', action: 'editor' }),
+      body: JSON.stringify({ repo: resolve(repoA(), '..', '..', 'outside'), action: 'editor' }),
     });
     await handleApi(req, res, baseConfig(), ctx);
-    // /enrolled/repo-a/../../etc resolves to /etc — not enrolled
+    // The resolved sibling is outside either enrolled repository.
     expect(captured.statusCode).toBe(403);
     expect(vi.mocked(openMod.openInEditor)).not.toHaveBeenCalled();
   });
 
   it('returns 403 when file path escapes the repo root', async () => {
     const { req, res, captured } = makeFakeReqRes({
-      body: JSON.stringify({ repo: '/enrolled/repo-a', file: '../../etc/passwd', action: 'editor' }),
+      body: JSON.stringify({ repo: repoA(), file: '../../outside/passwd', action: 'editor' }),
     });
     await handleApi(req, res, baseConfig(), ctx);
     expect(captured.statusCode).toBe(403);
@@ -238,10 +262,10 @@ describe('POST /api/open — security gates', () => {
 
   it('returns 403 when file path uses sibling-dir traversal', async () => {
     const { req, res, captured } = makeFakeReqRes({
-      body: JSON.stringify({ repo: '/enrolled/repo-a', file: '../repo-b/secret', action: 'editor' }),
+      body: JSON.stringify({ repo: repoA(), file: '../repo-b/secret', action: 'editor' }),
     });
     await handleApi(req, res, baseConfig(), ctx);
-    // /enrolled/repo-a/../repo-b/secret → /enrolled/repo-b/secret — not under repo-a
+    // repo-a/../repo-b/secret is not under repo-a.
     expect(captured.statusCode).toBe(403);
     expect(vi.mocked(openMod.openInEditor)).not.toHaveBeenCalled();
   });
@@ -257,7 +281,7 @@ describe('POST /api/open — security gates', () => {
 
   it('returns 400 when action is an arbitrary string (no exec)', async () => {
     const { req, res, captured } = makeFakeReqRes({
-      body: JSON.stringify({ repo: '/enrolled/repo-a', action: 'shell' }),
+      body: JSON.stringify({ repo: repoA(), action: 'shell' }),
     });
     await handleApi(req, res, baseConfig(), ctx);
     expect(captured.statusCode).toBe(400);
@@ -271,12 +295,20 @@ describe('POST /api/open — security gates', () => {
     await handleApi(req, res, baseConfig(), ctx);
     expect(captured.statusCode).toBe(400);
   });
+
+  it('rejects Windows cross-volume relative results portably', () => {
+    const crossVolume = win32.relative('C:\\repo', 'D:\\outside\\secret.txt');
+    expect(win32.isAbsolute(crossVolume)).toBe(true);
+    expect(isConfinedRelativePath(crossVolume, win32.sep, win32.isAbsolute(crossVolume))).toBe(false);
+    const nested = win32.relative('C:\\repo', 'C:\\repo\\src\\index.ts');
+    expect(isConfinedRelativePath(nested, win32.sep, win32.isAbsolute(nested))).toBe(true);
+  });
 });
 
 describe('POST /api/open — happy paths', () => {
   it('calls openInEditor and returns ok:true for action:editor on enrolled repo', async () => {
     const { req, res, captured } = makeFakeReqRes({
-      body: JSON.stringify({ repo: '/enrolled/repo-a', action: 'editor' }),
+      body: JSON.stringify({ repo: repoA(), action: 'editor' }),
     });
     await handleApi(req, res, baseConfig(), ctx);
     expect(captured.statusCode).toBe(200);
@@ -284,7 +316,7 @@ describe('POST /api/open — happy paths', () => {
     expect(body?.ok).toBe(true);
     expect(vi.mocked(openMod.openInEditor)).toHaveBeenCalledOnce();
     expect(vi.mocked(openMod.openInEditor)).toHaveBeenCalledWith(
-      resolve('/enrolled/repo-a'),
+      physical(repoA()),
       expect.objectContaining({ editor: 'cursor' }),
     );
     expect(vi.mocked(openMod.openInFinder)).not.toHaveBeenCalled();
@@ -292,37 +324,37 @@ describe('POST /api/open — happy paths', () => {
 
   it('calls openInFinder and returns ok:true for action:finder on enrolled repo', async () => {
     const { req, res, captured } = makeFakeReqRes({
-      body: JSON.stringify({ repo: '/enrolled/repo-b', action: 'finder' }),
+      body: JSON.stringify({ repo: repoB(), action: 'finder' }),
     });
     await handleApi(req, res, baseConfig(), ctx);
     expect(captured.statusCode).toBe(200);
     const body = parsedBody(captured) as Record<string, unknown>;
     expect(body?.ok).toBe(true);
     expect(vi.mocked(openMod.openInFinder)).toHaveBeenCalledOnce();
-    expect(vi.mocked(openMod.openInFinder)).toHaveBeenCalledWith(resolve('/enrolled/repo-b'));
+    expect(vi.mocked(openMod.openInFinder)).toHaveBeenCalledWith(physical(repoB()));
     expect(vi.mocked(openMod.openInEditor)).not.toHaveBeenCalled();
   });
 
   it('opens a file within the repo root when file param is provided', async () => {
     const { req, res, captured } = makeFakeReqRes({
-      body: JSON.stringify({ repo: '/enrolled/repo-a', file: 'src/index.ts', action: 'editor' }),
+      body: JSON.stringify({ repo: repoA(), file: 'src/index.ts', action: 'editor' }),
     });
     await handleApi(req, res, baseConfig(), ctx);
     expect(captured.statusCode).toBe(200);
     expect(vi.mocked(openMod.openInEditor)).toHaveBeenCalledWith(
-      resolve('/enrolled/repo-a/src/index.ts'),
+      physical(resolve(repoA(), 'src/index.ts')),
       expect.anything(),
     );
   });
 
   it('works for the second enrolled repo', async () => {
     const { req, res, captured } = makeFakeReqRes({
-      body: JSON.stringify({ repo: '/enrolled/repo-b', action: 'editor' }),
+      body: JSON.stringify({ repo: repoB(), action: 'editor' }),
     });
     await handleApi(req, res, baseConfig(), ctx);
     expect(captured.statusCode).toBe(200);
     expect(vi.mocked(openMod.openInEditor)).toHaveBeenCalledWith(
-      resolve('/enrolled/repo-b'),
+      physical(repoB()),
       expect.anything(),
     );
   });

@@ -40,9 +40,9 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { timingSafeEqual, randomBytes } from 'node:crypto';
-import { resolve as resolvePath, sep as pathSep } from 'node:path';
-import { realpathSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { dirname, isAbsolute, relative, resolve as resolvePath, sep as pathSep } from 'node:path';
+import { existsSync, realpathSync } from 'node:fs';
 
 /**
  * M341c (win32): canonicalize a path for COMPARISON only. Windows paths can
@@ -59,6 +59,46 @@ function canonForCompare(p: string): string {
     // nonexistent path — compare the resolved spelling
   }
   return out.toLowerCase();
+}
+
+export function isConfinedRelativePath(
+  nested: string,
+  separator: string,
+  absolute = isAbsolute(nested),
+): boolean {
+  return nested === '' ||
+    (!absolute && nested !== '..' && !nested.startsWith(`..${separator}`));
+}
+
+function nestedPath(root: string, candidate: string): boolean {
+  const nested = relative(canonForCompare(root), canonForCompare(candidate));
+  return isConfinedRelativePath(nested, pathSep);
+}
+
+/** Resolve symlinks through the nearest existing ancestor and confine physically. */
+function physicallyConfinedTarget(repoPath: string, candidatePath: string): {
+  repo: string;
+  target: string;
+} | null {
+  try {
+    const repo = realpathSync.native(resolvePath(repoPath));
+    let ancestor = resolvePath(candidatePath);
+    while (!existsSync(ancestor)) {
+      const parent = dirname(ancestor);
+      if (parent === ancestor) return null;
+      ancestor = parent;
+    }
+    const physicalAncestor = realpathSync.native(ancestor);
+    const suffix = relative(ancestor, resolvePath(candidatePath));
+    const target = existsSync(candidatePath)
+      ? realpathSync.native(candidatePath)
+      : resolvePath(physicalAncestor, suffix);
+    return nestedPath(repo, physicalAncestor) && nestedPath(repo, target)
+      ? { repo, target }
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 import type { AshlrConfig, DaemonState } from '../types.js';
@@ -87,6 +127,30 @@ import { listEnrolled, setKill } from '../sandbox/policy.js';
 import { listGoals } from '../goals/store.js';
 import { progressOf } from '../goals/advance.js';
 import { sanitizePublicJson } from '../util/public-json.js';
+import { audit } from '../sandbox/audit.js';
+import {
+  authorizeWebMutation,
+  buildLocalWebPrincipal,
+  WEB_MUTATION_AUTHORITY_POLICY,
+  type WebMutationCapability,
+  type WebMutationDecision,
+  type WebMutationPrincipal,
+} from './mutation-authority.js';
+import {
+  canonicalMutationDigest,
+  completeWebMutation,
+  reserveWebMutation,
+  type WebMutationReservation,
+} from './mutation-journal.js';
+
+export interface WebApiContext {
+  token: string;
+  allowDispatch: boolean;
+  /** Server-owned identity. Never derive this from request headers. */
+  mutationPrincipal?: WebMutationPrincipal;
+  /** Fail closed when an authorization receipt cannot be persisted. */
+  requireMutationAuditReceipt?: boolean;
+}
 
 // ---------------------------------------------------------------------------
 // SSE registry — shared across all open SSE connections so server.ts can
@@ -263,22 +327,6 @@ function send500(res: ServerResponse, msg = 'internal error'): void {
 }
 
 /**
- * Constant-time string comparison to defend against timing attacks.
- * Returns true iff a === b (both strings, same bytes).
- */
-function safeEqual(a: string, b: string): boolean {
-  try {
-    // Both must be the same byte length for timingSafeEqual.
-    const ba = Buffer.from(a, 'utf8');
-    const bb = Buffer.from(b, 'utf8');
-    if (ba.length !== bb.length) return false;
-    return timingSafeEqual(ba, bb);
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Parse and validate the `window` query param for /api/pulse.
  * Allowed: '1d' | '7d' | '30d'; default '7d'.
  */
@@ -337,25 +385,252 @@ function headerValue(req: IncomingMessage, name: string): string {
 }
 
 /**
- * The shared gate for the two mutating routes (POST /api/run and the web inbox
- * approve/reject). Enforces, in order:
- *   1. constant-time x-ashlr-token match  -> 401 on mismatch
- *   2. Content-Type: application/json     -> 415 otherwise (CSRF defence in
- *      depth; the token is the real control)
+ * Shared authority gate for every web mutation. Enforces, in order:
+ *   1. constant-time session-token authentication
+ *   2. server-owned role/capability authorization
+ *   3. Content-Type: application/json (CSRF defence in depth)
+ *   4. persisted metadata-only authority receipt when required by the server
  * Writes the failure response itself and returns false when the request should
- * NOT proceed; returns true when both checks pass.
+ * NOT proceed. Request bodies, route ids, tokens, diffs, and prompts are never
+ * copied into the receipt.
  */
-function passesMutationGate(req: IncomingMessage, res: ServerResponse, token: string): boolean {
-  if (!safeEqual(headerValue(req, 'x-ashlr-token'), token)) {
-    sendJson(res, 401, { error: 'unauthorized: missing or invalid x-ashlr-token' });
-    return false;
+interface AuthorizedMutationRequest {
+  decision: WebMutationDecision & { principal: WebMutationPrincipal };
+  body: unknown;
+  bodyTargetDigest: string;
+  method: string;
+  path: string;
+}
+
+interface ReservedMutationRequest extends AuthorizedMutationRequest {
+  reservation: WebMutationReservation;
+}
+
+async function readAuthorizedMutation(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: WebApiContext,
+  capability: WebMutationCapability,
+): Promise<AuthorizedMutationRequest | null> {
+  const principal = ctx.mutationPrincipal ?? buildLocalWebPrincipal(ctx.token);
+  const decision = authorizeWebMutation({
+    expectedToken: ctx.token,
+    presentedToken: headerValue(req, 'x-ashlr-token'),
+    principal,
+    capability,
+  });
+
+  if (!decision.allowed) {
+    recordMutationAuthorityReceipt(res, ctx, decision, 'refused', decision.code);
+    sendJson(
+      res,
+      decision.httpStatus,
+      decision.code === 'invalid-token'
+        ? { error: 'unauthorized: missing or invalid x-ashlr-token' }
+        : { error: 'forbidden: actor role is not authorized for this mutation' },
+    );
+    return null;
   }
+
   const contentType = headerValue(req, 'content-type');
   if (!contentType.toLowerCase().trim().startsWith('application/json')) {
+    recordMutationAuthorityReceipt(res, ctx, decision, 'refused', 'invalid-content-type');
     sendJson(res, 415, { error: 'Content-Type must be application/json' });
-    return false;
+    return null;
   }
+
+  let body: unknown;
+  try {
+    body = JSON.parse(await readBody(req));
+  } catch {
+    sendJson(res, 400, { error: 'invalid JSON body' });
+    return null;
+  }
+  const bodyTargetDigest = canonicalMutationDigest(body);
+  if (!bodyTargetDigest) {
+    sendJson(res, 400, { error: 'body must be bounded canonical JSON' });
+    return null;
+  }
+  return {
+    decision: decision as WebMutationDecision & { principal: WebMutationPrincipal },
+    body,
+    bodyTargetDigest,
+    method: (req.method ?? 'POST').toUpperCase(),
+    path: reqPath(req),
+  };
+}
+
+function reserveAuthorizedMutation(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: WebApiContext,
+  request: AuthorizedMutationRequest,
+): ReservedMutationRequest | null {
+  const reserved = reserveWebMutation({
+    idempotencyKey: headerValue(req, 'x-ashlr-idempotency-key'),
+    actorId: request.decision.principal.actorId,
+    capability: request.decision.capability,
+    method: request.method,
+    path: request.path,
+    bodyTargetDigest: request.bodyTargetDigest,
+  });
+  if (!reserved.ok) {
+    if (reserved.reason === 'replayed') {
+      res.setHeader('X-Ashlr-Idempotency-Replay', reserved.replay.state);
+      if (reserved.replay.state === 'completed') {
+        const priorStatus = reserved.replay.status ?? 500;
+        sendJson(res, priorStatus, {
+          idempotency: {
+            replayed: true,
+            state: 'completed',
+            outcome: reserved.replay.outcome,
+            status: priorStatus,
+          },
+        });
+      } else {
+        sendJson(res, 409, {
+          error: reserved.replay.state === 'recovery-required'
+            ? 'prior mutation outcome is unknown; reconciliation is required before retry'
+            : 'mutation with this idempotency key is still in progress',
+          idempotency: { replayed: true, state: reserved.replay.state },
+        });
+      }
+      return null;
+    }
+    const status = reserved.reason === 'invalid-key' ? 400
+      : reserved.reason === 'conflicted' ? 409 : 503;
+    sendJson(res, status, {
+      error: reserved.reason === 'invalid-key'
+        ? 'valid x-ashlr-idempotency-key required'
+        : reserved.reason === 'conflicted'
+            ? 'idempotency key conflicts with another mutation'
+            : 'mutation reservation unavailable',
+    });
+    return null;
+  }
+  const receiptId = recordMutationAuthorityReceipt(
+    res,
+    ctx,
+    request.decision,
+    'authorized',
+    'authorized',
+    {
+      ...reserved.reservation,
+      method: request.method,
+      phase: 'reserved',
+    },
+  );
+  if (!receiptId) {
+    res.setHeader('X-Ashlr-Audit-Degraded', 'reservation-receipt-unavailable');
+    const terminalPersisted = completeWebMutation({
+      reservation: reserved.reservation,
+      outcome: 'refused',
+      status: 503,
+      result: { code: 'reservation-audit-unavailable' },
+    });
+    sendJson(res, 503, {
+      error: terminalPersisted
+        ? 'mutation audit receipt unavailable'
+        : 'mutation audit and terminal receipts unavailable; no business effect was attempted',
+    });
+    return null;
+  }
+  return { ...request, reservation: reserved.reservation };
+}
+
+function completeReservedMutation(
+  res: ServerResponse,
+  ctx: WebApiContext,
+  request: ReservedMutationRequest,
+  outcome: 'succeeded' | 'refused' | 'failed' | 'uncertain',
+  status: number,
+  result: unknown,
+): boolean {
+  const terminalPersisted = completeWebMutation({
+    reservation: request.reservation,
+    outcome,
+    status,
+    result,
+  });
+  if (!terminalPersisted) return false;
+  const receiptId = recordMutationAuthorityReceipt(
+    res,
+    ctx,
+    request.decision,
+    outcome === 'succeeded' ? 'authorized' : 'refused',
+    `completed-${outcome}`,
+    {
+      ...request.reservation,
+      method: request.method,
+      phase: 'completed',
+      outcome,
+      status,
+    },
+  );
+  if (!receiptId) res.setHeader('X-Ashlr-Audit-Degraded', 'completion-receipt-unavailable');
   return true;
+}
+
+function recordMutationAuthorityReceipt(
+  res: ServerResponse,
+  ctx: WebApiContext,
+  decision: WebMutationDecision,
+  authorityDecision: 'authorized' | 'refused',
+  reasonCode: string,
+  mutation?: WebMutationReservation & {
+    method: string;
+    phase: 'reserved' | 'completed';
+    outcome?: 'succeeded' | 'refused' | 'failed' | 'uncertain';
+    status?: number;
+  },
+): string | null {
+  if (!ctx.allowDispatch && !ctx.requireMutationAuditReceipt) return null;
+
+  const actor = decision.principal
+    ? {
+        id: decision.principal.actorId,
+        type: decision.principal.actorType,
+        role: decision.principal.role,
+      }
+    : {
+        id: 'unauthenticated',
+        type: 'unknown' as const,
+        role: 'none',
+      };
+  const receipt = audit({
+    action: 'web:mutation-authority',
+    repo: null,
+    sandboxId: null,
+    summary: `${authorityDecision} capability=${decision.capability} reason=${reasonCode}`,
+    result: authorityDecision === 'authorized' ? 'ok' : 'refused',
+    actor,
+    authority: {
+      method: decision.principal?.authenticatedBy ?? 'session-token',
+      capability: decision.capability,
+      policyVersion: WEB_MUTATION_AUTHORITY_POLICY,
+      decision: authorityDecision,
+      reasonCode,
+    },
+    ...(mutation
+      ? {
+          mutation: {
+            reservationId: mutation.reservationId,
+            idempotencyKeyHash: mutation.idempotencyKeyHash,
+            requestDigest: mutation.requestDigest,
+            method: mutation.method,
+            pathHash: mutation.pathHash,
+            phase: mutation.phase,
+            ...(mutation.outcome ? { outcome: mutation.outcome } : {}),
+            ...(mutation.status !== undefined ? { status: mutation.status } : {}),
+          },
+        }
+      : {}),
+  });
+  if (receipt?.eventId) {
+    res.setHeader('X-Ashlr-Audit-Event', receipt.eventId);
+    return receipt.eventId;
+  }
+  return null;
 }
 
 /**
@@ -589,23 +864,11 @@ async function handleDispatch(
   req: IncomingMessage,
   res: ServerResponse,
   cfg: AshlrConfig,
-  ctx: { token: string },
+  ctx: WebApiContext,
 ): Promise<void> {
-  // Token (constant-time) + JSON Content-Type gate — blocks simple-request
-  // form-POST CSRF before body parsing (the token is the real control).
-  if (!passesMutationGate(req, res, ctx.token)) {
-    return;
-  }
-
-  // Parse body.
-  let body: unknown;
-  try {
-    const raw = await readBody(req);
-    body = JSON.parse(raw);
-  } catch {
-    sendJson(res, 400, { error: 'invalid JSON body' });
-    return;
-  }
+  const authorized = await readAuthorizedMutation(req, res, ctx, 'run:dispatch');
+  if (!authorized) return;
+  const body = authorized.body;
 
   if (typeof body !== 'object' || body === null || Array.isArray(body)) {
     sendJson(res, 400, { error: 'body must be a JSON object' });
@@ -634,6 +897,8 @@ async function handleDispatch(
   const maxTokens = Math.min(Math.max(1, Math.floor(rawMaxTokens)), MAX_TOKENS_CEILING);
   const maxSteps = Math.min(Math.max(1, Math.floor(rawMaxSteps)), MAX_STEPS_CEILING);
   const parallel = Math.min(Math.max(1, Math.floor(rawParallel)), MAX_PARALLEL_CEILING);
+  const reserved = reserveAuthorizedMutation(req, res, ctx, authorized);
+  if (!reserved) return;
 
   // Run goal (local-first, never cloud).
   try {
@@ -648,15 +913,24 @@ async function handleDispatch(
       json: true,
     });
 
-    sendJson(res, 200, {
+    const response = {
       id: runState.id,
       status: runState.status,
       goal: runState.goal,
       usage: runState.usage,
       result: runState.result,
-    });
+    };
+    if (!completeReservedMutation(res, ctx, reserved, 'succeeded', 200, response)) {
+      sendJson(res, 503, { error: 'mutation completion receipt unavailable; outcome is uncertain' });
+      return;
+    }
+    sendJson(res, 200, response);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    if (!completeReservedMutation(res, ctx, reserved, 'uncertain', 500, { code: 'run-threw' })) {
+      sendJson(res, 503, { error: 'mutation completion receipt unavailable; outcome is uncertain' });
+      return;
+    }
     send500(res, `run failed: ${msg}`);
   }
 }
@@ -677,7 +951,7 @@ export async function handleApi(
   req: IncomingMessage,
   res: ServerResponse,
   cfg: AshlrConfig,
-  ctx: { token: string; allowDispatch: boolean },
+  ctx: WebApiContext,
 ): Promise<boolean> {
   const path = reqPath(req);
 
@@ -886,36 +1160,80 @@ export async function handleApi(
         return true;
       }
 
-      // Same token + Content-Type gate as handleDispatch.
-      if (!passesMutationGate(req, res, ctx.token)) {
-        return true;
-      }
+      const authorized = await readAuthorizedMutation(
+        req,
+        res,
+        ctx,
+        action === 'approve' ? 'proposal:approve' : 'proposal:reject',
+      );
+      if (!authorized) return true;
+
+      const reserved = reserveAuthorizedMutation(req, res, ctx, authorized);
+      if (!reserved) return true;
 
       const proposal = loadProposal(id);
       if (!proposal) {
+        if (!completeReservedMutation(res, ctx, reserved, 'refused', 404, { code: 'proposal-not-found' })) {
+          sendJson(res, 503, { error: 'proposal lookup terminal receipt unavailable' });
+          return true;
+        }
         sendJson(res, 404, { error: `proposal not found: ${id}` });
         return true;
       }
       if (proposal.status !== 'pending') {
+        if (!completeReservedMutation(res, ctx, reserved, 'refused', 409, {
+          code: 'proposal-not-pending',
+          status: proposal.status,
+        })) {
+          sendJson(res, 503, { error: 'proposal status terminal receipt unavailable' });
+          return true;
+        }
         sendJson(res, 409, { error: `proposal is ${proposal.status}, not pending` });
         return true;
       }
 
       if (action === 'reject') {
         if (!setStatus(id, 'rejected')) {
+          if (!completeReservedMutation(res, ctx, reserved, 'failed', 503, { code: 'reject-unavailable' })) {
+            sendJson(res, 503, { error: 'proposal rejection and terminal receipt unavailable; outcome is uncertain' });
+            return true;
+          }
           sendJson(res, 503, { error: 'proposal rejection unavailable; queued recovery could not be revoked' });
           return true;
         }
-        sendJson(res, 200, { ok: true, id, status: 'rejected' });
+        const response = { ok: true, id, status: 'rejected' };
+        if (!completeReservedMutation(res, ctx, reserved, 'succeeded', 200, response)) {
+          sendJson(res, 503, { error: 'mutation completion receipt unavailable; outcome is uncertain' });
+          return true;
+        }
+        sendJson(res, 200, response);
         return true;
       }
 
       // approve → apply (the ONLY outward path; applyProposal owns its gates:
       // enrollment, kill switch, confirm — all still enforced inside).
-      setStatus(id, 'approved');
-      const { applyProposal } = await import('../inbox/apply.js');
-      const result = await applyProposal(id, { confirmed: true });
-      sendJson(res, result.ok ? 200 : 500, result);
+      let result: Awaited<ReturnType<typeof import('../inbox/apply.js')['applyProposal']>>;
+      try {
+        setStatus(id, 'approved');
+        const { applyProposal } = await import('../inbox/apply.js');
+        result = await applyProposal(id, { confirmed: true });
+      } catch {
+        if (!completeReservedMutation(res, ctx, reserved, 'uncertain', 500, { code: 'apply-threw' })) {
+          sendJson(res, 503, { error: 'proposal apply terminal receipt unavailable; outcome is uncertain' });
+          return true;
+        }
+        sendJson(res, 500, { error: 'proposal apply outcome is uncertain' });
+        return true;
+      }
+      const status = result.ok ? 200 : 500;
+      if (!completeReservedMutation(res, ctx, reserved, result.ok ? 'succeeded' : 'failed', status, {
+        ok: result.ok,
+        code: result.ok ? 'applied' : 'apply-failed',
+      })) {
+        sendJson(res, 503, { error: 'mutation completion receipt unavailable; outcome is uncertain' });
+        return true;
+      }
+      sendJson(res, status, result);
       return true;
     }
 
@@ -950,19 +1268,25 @@ export async function handleApi(
         sendJson(res, 404, { error: 'not found' });
         return true;
       }
-      if (!passesMutationGate(req, res, ctx.token)) {
-        return true;
-      }
+      const authorized = await readAuthorizedMutation(req, res, ctx, 'daemon:repair-request');
+      if (!authorized) return true;
+      const reserved = reserveAuthorizedMutation(req, res, ctx, authorized);
+      if (!reserved) return true;
 
       const fleet = await buildFleetStatus(cfg);
       const service = serviceStatus(daemonServiceInstallOptions(cfg));
-      sendJson(res, 409, {
+      const response = {
         ok: false,
         action: 'repair',
         error: 'daemon service repair requires distinct signed repair authority',
         service,
         activation: fleet.daemon.activation,
-      });
+      };
+      if (!completeReservedMutation(res, ctx, reserved, 'refused', 409, { code: 'signed-authority-required' })) {
+        sendJson(res, 503, { error: 'mutation completion receipt unavailable' });
+        return true;
+      }
+      sendJson(res, 409, response);
       return true;
     }
 
@@ -975,12 +1299,28 @@ export async function handleApi(
         sendJson(res, 404, { error: 'not found' });
         return true;
       }
-      if (!passesMutationGate(req, res, ctx.token)) {
-        return true;
-      }
+      const authorized = await readAuthorizedMutation(
+        req,
+        res,
+        ctx,
+        path.endsWith('/pause') ? 'fleet:pause' : 'fleet:resume',
+      );
+      if (!authorized) return true;
+      const reserved = reserveAuthorizedMutation(req, res, ctx, authorized);
+      if (!reserved) return true;
 
       const paused = path.endsWith('/pause');
-      const mutation = setKill(paused);
+      let mutation: ReturnType<typeof setKill>;
+      try {
+        mutation = setKill(paused);
+      } catch {
+        if (!completeReservedMutation(res, ctx, reserved, 'uncertain', 500, { code: 'policy-threw' })) {
+          sendJson(res, 503, { error: 'policy terminal receipt unavailable; outcome is uncertain' });
+          return true;
+        }
+        sendJson(res, 500, { error: 'policy mutation outcome is uncertain' });
+        return true;
+      }
       // `undefined` preserves compatibility with older test doubles. Production
       // policy mutators always return a structured result.
       if (mutation !== undefined && (!mutation.ok || !mutation.quiesced)) {
@@ -988,7 +1328,14 @@ export async function handleApi(
         const retryable = !unsafeStorage && !mutation.quiesced && (mutation.ok ||
           /fence unavailable|has not quiesced|outward mutation.*active|\bbusy\b/i.test(mutation.reason));
         const fleet = await buildFleetStatus(cfg);
-        sendJson(res, retryable ? 409 : 500, {
+        const status = retryable ? 409 : 500;
+        if (!completeReservedMutation(res, ctx, reserved, 'failed', status, {
+          code: unsafeStorage ? 'unsafe-policy-storage' : retryable ? 'policy-busy' : 'policy-degraded',
+        })) {
+          sendJson(res, 503, { error: 'mutation completion receipt unavailable; outcome is uncertain' });
+          return true;
+        }
+        sendJson(res, status, {
           ok: false,
           action: paused ? 'pause' : 'resume',
           error: unsafeStorage
@@ -1004,14 +1351,19 @@ export async function handleApi(
       }
       const fleet = await buildFleetStatus(cfg);
       const service = serviceStatus(daemonServiceInstallOptions(cfg));
-      sendJson(res, 200, {
+      const response = {
         ok: true,
         action: paused ? 'pause' : 'resume',
         ...(mutation ? { mutation } : {}),
         service,
         activation: fleet.daemon.activation,
         fleet,
-      });
+      };
+      if (!completeReservedMutation(res, ctx, reserved, 'succeeded', 200, response)) {
+        sendJson(res, 503, { error: 'mutation completion receipt unavailable; outcome is uncertain' });
+        return true;
+      }
+      sendJson(res, 200, response);
       return true;
     }
 
@@ -1182,18 +1534,9 @@ export async function handleApi(
         return true;
       }
 
-      if (!passesMutationGate(req, res, ctx.token)) {
-        return true;
-      }
-
-      let body: unknown;
-      try {
-        const raw = await readBody(req);
-        body = JSON.parse(raw);
-      } catch {
-        sendJson(res, 400, { error: 'invalid JSON body' });
-        return true;
-      }
+      const authorized = await readAuthorizedMutation(req, res, ctx, 'desktop:open');
+      if (!authorized) return true;
+      const body = authorized.body;
 
       if (typeof body !== 'object' || body === null || Array.isArray(body)) {
         sendJson(res, 400, { error: 'body must be a JSON object' });
@@ -1215,40 +1558,53 @@ export async function handleApi(
         return true;
       }
 
-      // Resolve the requested repo path and verify it is enrolled.
+      // Resolve the requested repo and enrolled roots to physical identities.
       const resolvedRepo = resolvePath(rawRepo);
       const enrolled = listEnrolled();
-      const repoCanon = canonForCompare(resolvedRepo);
-      if (!enrolled.some((e) => canonForCompare(e) === repoCanon)) {
+      const physicalRepo = physicallyConfinedTarget(resolvedRepo, resolvedRepo)?.repo;
+      const enrolledPhysical = enrolled.flatMap((entry) => {
+        const physical = physicallyConfinedTarget(entry, entry)?.repo;
+        return physical ? [canonForCompare(physical)] : [];
+      });
+      if (!physicalRepo || !enrolledPhysical.includes(canonForCompare(physicalRepo))) {
         sendJson(res, 403, { error: 'path not in an enrolled repo' });
         return true;
       }
 
-      // If a file path was provided, ensure it resolves WITHIN the repo root.
-      let targetPath = resolvedRepo;
-      if (rawFile) {
-        const resolvedFile = resolvePath(resolvedRepo, rawFile);
-        // Path-traversal guard: the resolved file must be under the repo root.
-        // M341c: native separator (a hardcoded '/' rejected every win32 file)
-        // + canonical comparison for 8.3/case variance.
-        const fileCanon = canonForCompare(resolvedFile);
-        const repoWithSep = repoCanon.endsWith(pathSep) ? repoCanon : repoCanon + pathSep;
-        if (fileCanon !== repoCanon && !fileCanon.startsWith(repoWithSep)) {
-          sendJson(res, 403, { error: 'file path escapes the repo root' });
-          return true;
-        }
-        targetPath = resolvedFile;
+      const candidatePath = rawFile ? resolvePath(resolvedRepo, rawFile) : resolvedRepo;
+      const confined = physicallyConfinedTarget(physicalRepo, candidatePath);
+      if (!confined) {
+        sendJson(res, 403, { error: 'file path escapes the repo root' });
+        return true;
       }
+      const reserved = reserveAuthorizedMutation(req, res, ctx, authorized);
+      if (!reserved) return true;
 
       try {
-        if (action === 'finder') {
-          openInFinder(targetPath);
-        } else {
-          openInEditor(targetPath, cfg);
+        // Re-resolve immediately before the desktop effect to catch link swaps.
+        const revalidated = physicallyConfinedTarget(physicalRepo, candidatePath);
+        if (!revalidated || revalidated.target !== confined.target) {
+          completeReservedMutation(res, ctx, reserved, 'refused', 409, { code: 'target-changed' });
+          sendJson(res, 409, { error: 'open target changed during authorization' });
+          return true;
         }
-        sendJson(res, 200, { ok: true, action, path: targetPath });
+        if (action === 'finder') {
+          openInFinder(revalidated.target);
+        } else {
+          openInEditor(revalidated.target, cfg);
+        }
+        const response = { ok: true, action, path: revalidated.target };
+        if (!completeReservedMutation(res, ctx, reserved, 'succeeded', 200, response)) {
+          sendJson(res, 503, { error: 'mutation completion receipt unavailable; outcome is uncertain' });
+          return true;
+        }
+        sendJson(res, 200, response);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
+        if (!completeReservedMutation(res, ctx, reserved, 'uncertain', 500, { code: 'open-threw' })) {
+          sendJson(res, 503, { error: 'desktop-open terminal receipt unavailable; outcome is uncertain' });
+          return true;
+        }
         send500(res, `open failed: ${msg}`);
       }
       return true;

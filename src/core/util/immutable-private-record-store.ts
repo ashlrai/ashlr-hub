@@ -728,7 +728,7 @@ function publishWithoutClobber<RecordType>(
 export function writeImmutablePrivateRecord<RecordType>(
   config: ImmutablePrivateRecordStoreConfig<RecordType>,
   record: RecordType,
-  options: { lockWaitMs?: number } = {},
+  options: { lockWaitMs?: number; maxFiles?: number; maxBytes?: number } = {},
 ): ImmutablePrivateRecordWriteDisposition {
   const validated = validateConfig(config);
   if (validated === null) return 'invalid';
@@ -738,6 +738,13 @@ export function writeImmutablePrivateRecord<RecordType>(
       ? Math.max(0, Math.min(MAX_LOCK_WAIT_MS, Math.floor(options.lockWaitMs)))
       : null;
   if (lockWaitMs === null) return 'invalid';
+  const maxFiles = options.maxFiles === undefined
+    ? config.defaultMaxFiles
+    : boundedLimit(options.maxFiles, config.defaultMaxFiles, config.hardMaxFiles);
+  const maxBytes = options.maxBytes === undefined
+    ? config.defaultMaxBytes
+    : boundedLimit(options.maxBytes, config.defaultMaxBytes, config.hardMaxBytes);
+  if (maxFiles === null || maxBytes === null) return 'invalid';
 
   let codec: ImmutablePrivateRecordCodec<RecordType> | null;
   try { codec = config.codecForWrite(); } catch { codec = null; }
@@ -773,6 +780,25 @@ export function writeImmutablePrivateRecord<RecordType>(
       if (existing === null) return 'failed';
       return recordsEquivalent(codec, existing, record) ? 'replayed' : 'conflicted';
     }
+    const before = boundedDirectoryEntries(directories.recordsPath, maxFiles + 1);
+    if (before.overflow || before.entries.length >= maxFiles) return 'failed';
+    let aggregateBytes = 0;
+    for (const entry of before.entries) {
+      if (!safePathComponent(entry) || !codec.isRecordFileName(entry)) return 'failed';
+      const entryPath = join(directories.recordsPath, entry);
+      const stat = lstatSync(entryPath, { bigint: true });
+      if (!exactPrivateFile(stat, 1) || stat.size < 2n ||
+        stat.size > BigInt(config.maxRecordBytes)) return 'failed';
+      const existingRecord = readRecordFile(entryPath, codec, directories);
+      if (existingRecord === null || codec.recordFileName(existingRecord) !== entry ||
+        !safeOpaqueToken(codec.recordId(existingRecord))) return 'failed';
+      aggregateBytes += Number(stat.size);
+      if (!Number.isSafeInteger(aggregateBytes) || aggregateBytes > maxBytes) return 'failed';
+    }
+    if (aggregateBytes + Buffer.byteLength(serialized, 'utf8') > maxBytes) return 'failed';
+    verifyDirectories(directories);
+    const confirmed = boundedDirectoryEntries(directories.recordsPath, maxFiles + 1);
+    if (!snapshotsEqual(before, confirmed)) return 'failed';
     const publication = publishWithoutClobber(directories, paths, serialized);
     if (publication === 'exists') {
       const existing = readRecordFile(paths.target, codec, directories);
