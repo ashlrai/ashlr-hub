@@ -470,6 +470,7 @@ async function cmdDaemonStatus(jsonMode: boolean): Promise<number> {
         sourceState: 'degraded' as const,
         complete: false,
         reason: strictState.reason,
+        diagnostic: strictState.diagnostic,
       };
   const stateKnown = stateSource.sourceState === 'healthy';
 
@@ -558,6 +559,12 @@ async function cmdDaemonStatus(jsonMode: boolean): Promise<number> {
   );
   console.log('  ' + col.bold('state source:   ') +
     (stateKnown ? col.dim(stateSource.reason) : col.yellow(stateSource.reason)));
+  if (!strictState.ok) {
+    console.log('  ' + col.bold('state issues:   ') +
+      col.yellow(strictState.diagnostic.issueCodes.join(', ')));
+    console.log('  ' + col.bold('state recovery: ') +
+      col.dim(`${strictState.diagnostic.disposition}; automatic repair withheld`));
+  }
   console.log('  ' + col.bold('started:        ') + col.dim(stateKnown ? relAge(state.startedAt) : 'unknown'));
   console.log('  ' + col.bold('last tick:      ') + col.dim(stateKnown ? relAge(state.lastTickAt) : 'unknown'));
   const capStr = dailyCap !== undefined ? ` / $${dailyCap}` : '';

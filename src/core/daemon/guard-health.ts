@@ -151,9 +151,12 @@ export function diagnoseGuardHealth(): GuardHealthDiagnosis {
       sourceReasons.push(`daemon-state-${daemonState.reason}`);
       blocks.push({
         id: 'daemon-state-malformed',
-        detail: `daemon state is ${daemonState.reason}: ${daemonState.error}`,
+        detail:
+          `daemon state is ${daemonState.reason}: ${daemonState.error}; ` +
+          `issues=${daemonState.diagnostic.issueCodes.join(',')}; ` +
+          'automatic repair and mutation authority remain withheld',
         path: daemonState.path,
-        repairCommands: [backupCommand(daemonState.path), 'ashlr daemon status'],
+        repairCommands: ['ashlr daemon status --json', 'ashlr daemon service-status --json'],
       });
     }
 

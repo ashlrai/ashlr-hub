@@ -253,7 +253,17 @@ describe('M24 loadDaemonStateStrict — fail-closed ledger reads', () => {
 
     const strict = loadDaemonStateStrict();
     expect(strict.ok).toBe(false);
-    if (!strict.ok) expect(strict.reason).toBe('malformed');
+    if (!strict.ok) {
+      expect(strict.reason).toBe('malformed');
+      expect(strict.diagnostic).toEqual({
+        schemaVersion: 1,
+        issueCodes: ['invalid-json'],
+        disposition: 'operator-inspection-required',
+        sourceBytesPreserved: true,
+        automaticRepairAllowed: false,
+        mutationAuthorityGranted: false,
+      });
+    }
 
     const forgiving = loadDaemonState();
     expect(forgiving.todaySpentUsd).toBe(0);
@@ -278,7 +288,7 @@ describe('M24 loadDaemonStateStrict — fail-closed ledger reads', () => {
     const p = daemonStatePath();
     const budgetDay = todayStr();
     fs.mkdirSync(path.dirname(p), { recursive: true });
-    fs.writeFileSync(p, JSON.stringify({
+    const raw = JSON.stringify({
       ...zeroedState(),
       todayDate: budgetDay,
       spendGuardAccounting: {
@@ -286,9 +296,21 @@ describe('M24 loadDaemonStateStrict — fail-closed ledger reads', () => {
         accountingId: '123e4567-e89b-42d3-a456-426614174051',
         unexpected: true,
       },
-    }), 'utf8');
+    });
+    fs.writeFileSync(p, raw, 'utf8');
 
-    expect(loadDaemonStateStrict()).toMatchObject({ ok: false, reason: 'malformed' });
+    expect(loadDaemonStateStrict()).toMatchObject({
+      ok: false,
+      reason: 'malformed',
+      diagnostic: {
+        issueCodes: ['spend-accounting-keys-invalid'],
+        disposition: 'operator-inspection-required',
+        sourceBytesPreserved: true,
+        automaticRepairAllowed: false,
+        mutationAuthorityGranted: false,
+      },
+    });
+    expect(fs.readFileSync(p, 'utf8')).toBe(raw);
   });
 
   it('rejects spend accounting receipts from a different UTC budget day', () => {
@@ -316,7 +338,15 @@ describe('M24 loadDaemonStateStrict — fail-closed ledger reads', () => {
     fs.writeFileSync(external, JSON.stringify(zeroedState()), 'utf8');
 
     fs.symlinkSync(external, p);
-    expect(loadDaemonStateStrict()).toMatchObject({ ok: false, reason: 'unreadable' });
+    expect(loadDaemonStateStrict()).toMatchObject({
+      ok: false,
+      reason: 'unreadable',
+      diagnostic: {
+        issueCodes: ['unsafe-storage'],
+        automaticRepairAllowed: false,
+        mutationAuthorityGranted: false,
+      },
+    });
     fs.unlinkSync(p);
 
     fs.mkdirSync(p);
