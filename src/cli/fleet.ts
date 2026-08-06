@@ -922,6 +922,60 @@ export function formatFleetStatus(s: FleetStatus): string {
   }
   lines.push('');
 
+  // Observation-only cohort drift. This output is never an authority signal.
+  const cohortDrift = s.outcomeCohortDrift;
+  lines.push('Outcome cohort drift:');
+  if (!cohortDrift) {
+    lines.push('  unavailable');
+  } else {
+    const denominator = cohortDrift.denominatorQuality;
+    const maturity = cohortDrift.maturity;
+    lines.push(`  verdict:    ${cohortDrift.verdict} (descriptive-only)`);
+    lines.push(
+      `  denominator:${denominator.state} · ${denominator.eligible}/${denominator.observed} eligible · ` +
+        `${denominator.excluded} excluded · memberships ` +
+        `${denominator.actualMemberships}/${denominator.expectedMemberships}`,
+    );
+    lines.push(
+      `  maturity:   ${Math.round(maturity.minimumAgeMs / (24 * 60 * 60 * 1_000))}d · ` +
+        `${maturity.pendingProtectedMerges} pending · ${maturity.withheldMatureMerges} withheld mature`,
+    );
+    lines.push(
+      `  thresholds: exclusion +${(cohortDrift.thresholds.exclusionRateRegression * 100).toFixed(0)}pp · ` +
+        `cost +${(cohortDrift.thresholds.costToStableMergeRelative * 100).toFixed(0)}% and ` +
+        `$${cohortDrift.thresholds.costToStableMergeAbsoluteUsd.toFixed(2)}`,
+    );
+    if (denominator.stopReasons.length > 0) {
+      lines.push(`  withheld:   ${denominator.stopReasons.join(', ')}`);
+    }
+    const highest = cohortDrift.highestRiskCohort;
+    if (highest) {
+      const cohortLabel = highest.dimension === 'repo-digest'
+        ? highest.cohort.slice(0, 12)
+        : highest.dimension === 'router-policy-learning-epoch'
+          ? `${highest.cohort.slice(0, 12)}/${highest.matchingPolicy.learningEpoch}`
+          : highest.cohort;
+      lines.push(`  highest:    ${highest.dimension}=${cohortLabel} (${highest.sampleState})`);
+      if (!highest.current) {
+        lines.push('  current:    missing-window evidence');
+      } else {
+        lines.push(
+          `  current:    proposal ${formatNullablePercent(highest.current.proposalYield)}, ` +
+            `verify ${formatNullablePercent(highest.current.verificationRate)}, ` +
+            `protected merge ${formatNullablePercent(highest.current.protectedMergeRate)}, ` +
+            `adverse ${formatNullablePercent(highest.current.adversePostMergeRate)}, ` +
+            `excluded ${formatNullablePercent(highest.current.exclusionRate)}, ` +
+            `outcomes ${highest.current.postMergeDenominatorState}, ` +
+            `cost/stable ${highest.current.costToStableMergeUsd === null
+              ? 'withheld'
+              : `$${highest.current.costToStableMergeUsd.toFixed(4)}`}`,
+        );
+      }
+    }
+    lines.push(`  next:       ${cohortDrift.nextEvidenceAction}`);
+  }
+  lines.push('');
+
   // Merges
   lines.push(`Merges:    ${s.merges.recent} auto-merge(s) in last 24h`);
   lines.push('');

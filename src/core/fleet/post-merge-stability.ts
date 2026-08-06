@@ -254,6 +254,13 @@ export function postMergeStabilityRepoDigest(repo: string): string | null {
   return key ? repoDigest(key, repo) : null;
 }
 
+/** Host-keyed policy identity for privacy-safe cohort joins. */
+export function postMergeStabilityPolicyDigest(policyVersion: string): string | null {
+  const key = existingSigningKey();
+  if (!key || !policyVersion || policyVersion.length > 120 || !noControls(policyVersion)) return null;
+  return hmac(key, 'ashlr:outcome-cohort-router-policy:v1', [policyVersion]);
+}
+
 type WitnessIdentity = Pick<PostMergeStabilityWitness,
   'cohortId' | 'repoDigest' | 'proposalId' | 'mergeCommit'>;
 
