@@ -52,6 +52,10 @@ import {
   type ProvenanceVerdict,
 } from '../foundry/provenance.js';
 import { causalMetadata } from '../learning/causal.js';
+import {
+  coherentOuterAttemptIdentity,
+  isCandidateAttemptIdentity,
+} from '../fleet/attempt-identity.js';
 import { buildRequiredVerificationManifest } from '../run/verification-manifest.js';
 import { fsyncDirectory } from '../util/durability.js';
 import {
@@ -1510,6 +1514,19 @@ export function evidencePackMatchesLiveProposal(
     pack.gates.edv,
     pack.gates.remoteProtection,
   ].filter((gate): gate is AutonomyGateEvidence => gate !== undefined);
+  const proposalAttemptId = coherentOuterAttemptIdentity(proposal);
+  const hasAttemptMetadata = proposal.attemptId !== undefined ||
+    proposal.attemptCandidateIndex !== undefined;
+  const requiresAttemptMetadata = isCandidateAttemptIdentity(proposal.runId);
+  const attemptAliasesMatch = (!requiresAttemptMetadata && !hasAttemptMetadata) || (
+    hasAttemptMetadata &&
+    proposalAttemptId !== undefined &&
+    typeof proposal.runId === 'string' &&
+    proposal.runEventSummary?.runId === proposal.runId &&
+    pack.runEventSummary?.runId === proposal.runId &&
+    typeof proposal.trajectoryId === 'string' &&
+    pack.trajectoryId === proposal.trajectoryId
+  );
 
   return (
     proposal.status === 'pending' &&
@@ -1521,6 +1538,7 @@ export function evidencePackMatchesLiveProposal(
     pack.proposal.createdAt === proposal.createdAt &&
     pack.producer.engineModel === proposal.engineModel &&
     pack.producer.engineTier === proposal.engineTier &&
+    attemptAliasesMatch &&
     pack.target === 'main' &&
     pack.trustBasis === 'evidence' &&
     pack.policy?.allowed === true &&

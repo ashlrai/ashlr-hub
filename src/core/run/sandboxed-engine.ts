@@ -112,7 +112,7 @@ import {
   summarizeLocalContextBundle,
 } from './local-context.js';
 import { causalMetadata, runEventSummary, routeSnapshot } from '../learning/causal.js';
-import { assertSafeExecutionIdentity } from '../fleet/attempt-identity.js';
+import { assertSafeExecutionIdentity, coherentOuterAttemptIdentity } from '../fleet/attempt-identity.js';
 import { classifyDiff, isTrivialProposal } from '../../planning/triviality.js';
 import { isDiffDedupResult } from '../inbox/store.js';
 
@@ -152,6 +152,10 @@ export interface RunEngineSandboxedOptions {
   existingWorktree?: Sandbox;
   /** Pre-generated run id (else one is generated). */
   runId?: string;
+  /** Outer attempt identity when runId identifies a Best-of-N child. */
+  attemptId?: string;
+  /** Zero-based Best-of-N child ordinal used to verify the derived run id. */
+  attemptCandidateIndex?: number;
   /** Optional originating backlog/work item id for causal tracing. */
   workItemId?: string;
   /** Optional immutable generated-repair generation hash. */
@@ -181,6 +185,10 @@ export interface CaptureSandboxedProposalOptions {
   budget?: Partial<RunBudget>;
   /** Pre-generated run id, usually the run that produced the diff. */
   runId?: string;
+  /** Outer attempt identity when runId identifies a Best-of-N child. */
+  attemptId?: string;
+  /** Zero-based Best-of-N child ordinal used to verify the derived run id. */
+  attemptCandidateIndex?: number;
   /** Optional originating backlog/work item id for causal tracing. */
   workItemId?: string;
   /** Optional immutable generated-repair generation hash. */
@@ -1009,6 +1017,12 @@ export async function captureSandboxedProposal(
   const id = assertSafeExecutionIdentity(
     opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
   );
+  const attemptId = coherentOuterAttemptIdentity({
+    attemptId: opts.attemptId,
+    runId: id,
+    trajectoryId: `run:${id}`,
+    attemptCandidateIndex: opts.attemptCandidateIndex,
+  });
   const sb = opts.existingWorktree;
   const now = new Date().toISOString();
   const producerStatus = opts.producerStatus ?? 'done';
@@ -1036,6 +1050,10 @@ export async function captureSandboxedProposal(
   const delegationScopeSummary = summarizeDelegationScope(delegationScope);
   const mk = (over: Partial<RunState>): RunState => ({
     id,
+    ...(attemptId ? { attemptId } : {}),
+    ...(attemptId && opts.attemptCandidateIndex !== undefined
+      ? { attemptCandidateIndex: opts.attemptCandidateIndex }
+      : {}),
     goal,
     engine,
     provider: 'external',
@@ -1167,6 +1185,10 @@ export async function captureSandboxedProposal(
       ...(opts.workItemGenerationId ? { workItemGenerationId: opts.workItemGenerationId } : {}),
       workSource: opts.workSource,
       runId: id,
+      ...(attemptId ? { attemptId } : {}),
+      ...(attemptId && opts.attemptCandidateIndex !== undefined
+        ? { attemptCandidateIndex: opts.attemptCandidateIndex }
+        : {}),
       producerStatus,
       engineModel,
       engineTier: tier,
@@ -1353,6 +1375,12 @@ export async function runEngineSandboxed(
   const id = assertSafeExecutionIdentity(
     opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
   );
+  const attemptId = coherentOuterAttemptIdentity({
+    attemptId: opts.attemptId,
+    runId: id,
+    trajectoryId: `run:${id}`,
+    attemptCandidateIndex: opts.attemptCandidateIndex,
+  });
   const runCreatedAtIso = new Date().toISOString();
   const recordSandboxedRunAgentAction = opts.deferTerminalAction
     ? (_fields: Parameters<typeof writeSandboxedRunAgentAction>[0]) => {}
@@ -1380,6 +1408,10 @@ export async function runEngineSandboxed(
 
   const mk = (over: Partial<RunState>): RunState => ({
     id,
+    ...(attemptId ? { attemptId } : {}),
+    ...(attemptId && opts.attemptCandidateIndex !== undefined
+      ? { attemptCandidateIndex: opts.attemptCandidateIndex }
+      : {}),
     goal,
     engine,
     provider: 'external',
@@ -1876,6 +1908,10 @@ export async function runEngineSandboxed(
             model,
             budget: opts.budget,
             runId: id,
+            ...(attemptId ? { attemptId } : {}),
+            ...(attemptId && opts.attemptCandidateIndex !== undefined
+              ? { attemptCandidateIndex: opts.attemptCandidateIndex }
+              : {}),
             existingWorktree: sb,
             workItemId: opts.workItemId,
             workItemGenerationId: opts.workItemGenerationId,
@@ -2381,6 +2417,12 @@ export async function runApiModelSandboxed(
   const id = assertSafeExecutionIdentity(
     opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
   );
+  const attemptId = coherentOuterAttemptIdentity({
+    attemptId: opts.attemptId,
+    runId: id,
+    trajectoryId: `run:${id}`,
+    attemptCandidateIndex: opts.attemptCandidateIndex,
+  });
   const runCreatedAtIso = new Date().toISOString();
   const recordSandboxedRunAgentAction = (
     fields: Parameters<typeof writeSandboxedRunAgentAction>[0],
@@ -2409,6 +2451,10 @@ export async function runApiModelSandboxed(
 
   const mk = (over: Partial<RunState>): RunState => ({
     id,
+    ...(attemptId ? { attemptId } : {}),
+    ...(attemptId && opts.attemptCandidateIndex !== undefined
+      ? { attemptCandidateIndex: opts.attemptCandidateIndex }
+      : {}),
     goal,
     engine,
     provider: spec.api!.protocol ?? 'openai-compat',
@@ -2725,6 +2771,10 @@ export async function runApiModelSandboxed(
             model,
             budget: opts.budget,
             runId: id,
+            ...(attemptId ? { attemptId } : {}),
+            ...(attemptId && opts.attemptCandidateIndex !== undefined
+              ? { attemptCandidateIndex: opts.attemptCandidateIndex }
+              : {}),
             existingWorktree: sb,
             workItemId: opts.workItemId,
             workItemGenerationId: opts.workItemGenerationId,
@@ -2815,6 +2865,10 @@ export async function runApiModelSandboxed(
           model,
           budget: opts.budget,
           runId: id,
+          ...(attemptId ? { attemptId } : {}),
+          ...(attemptId && opts.attemptCandidateIndex !== undefined
+            ? { attemptCandidateIndex: opts.attemptCandidateIndex }
+            : {}),
           existingWorktree: sb,
           workItemId: opts.workItemId,
           workItemGenerationId: opts.workItemGenerationId,

@@ -30,6 +30,7 @@ import { scrubSecrets } from '../util/scrub.js';
 import { canonicalFilesystemPathIdentity } from '../sandbox/policy.js';
 import { fsyncDirectory } from '../util/durability.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
+import { isOuterAttemptIdentity } from './attempt-identity.js';
 
 const DATE_LEDGER_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
 const DEFAULT_READ_MAX_FILES = 32;
@@ -212,7 +213,8 @@ export function buildDispatchManifestEvent(input: BuildDispatchManifestEventInpu
   const assignments = input.plan.assignments.slice(0, MAX_ITEMS).map(({ item, backend }) => {
     const routeReason = boundedOptionalText(input.routeReasons?.get(item.id), MAX_TEXT.reason);
     const model = boundedNullableText(input.routeModels?.get(item.id), MAX_TEXT.model);
-    const attemptId = boundedOptionalText(input.attemptIds?.get(item.id), 160);
+    const candidateAttemptId = input.attemptIds?.get(item.id);
+    const attemptId = isOuterAttemptIdentity(candidateAttemptId) ? candidateAttemptId : undefined;
     return {
       itemId: boundedText(item.id, MAX_TEXT.itemId, 'unknown'),
       ...(attemptId ? { attemptId } : {}),
@@ -249,7 +251,7 @@ export function sanitizeDispatchManifestEvent(event: DispatchManifestEvent): Dis
   const claimedItemIds = Array.isArray(event.claimedItemIds)
     ? event.claimedItemIds.map((id) => boundedText(id, MAX_TEXT.itemId, 'unknown')).slice(0, MAX_ITEMS) : [];
   const assignments = Array.isArray(event.assignments) ? event.assignments.slice(0, MAX_ITEMS).map((assignment) => {
-    const attemptId = boundedOptionalText(assignment.attemptId, 160);
+    const attemptId = isOuterAttemptIdentity(assignment.attemptId) ? assignment.attemptId : undefined;
     const routeReason = boundedOptionalText(assignment.routeReason, MAX_TEXT.reason);
     const model = boundedNullableText(assignment.model, MAX_TEXT.model);
     const repo = canonicalManifestRepoIdentity(assignment.repo);
@@ -334,7 +336,7 @@ function onlyKeys(value: Record<string, unknown>, allowed: readonly string[]): b
 function isAssignment(value: unknown): value is DispatchManifestAssignment {
   if (!isPlainRecord(value) || !onlyKeys(value, ['itemId', 'attemptId', 'source', 'repo', 'title', 'backend', 'routeReason', 'model'])) return false;
   return isBoundedString(value['itemId'], MAX_TEXT.itemId) &&
-    (value['attemptId'] === undefined || isBoundedString(value['attemptId'], 160)) &&
+    (value['attemptId'] === undefined || isOuterAttemptIdentity(value['attemptId'])) &&
     typeof value['source'] === 'string' && PERSISTED_WORK_SOURCES.has(value['source']) &&
     isBoundedString(value['repo'], MAX_TEXT.repo) && canonicalManifestRepoIdentity(value['repo']) === value['repo'] &&
     isBoundedString(value['title'], MAX_TEXT.title) &&

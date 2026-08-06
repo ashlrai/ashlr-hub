@@ -18,6 +18,7 @@ import {
   sanitizeDispatchManifestEvent,
   type DispatchManifestEvent,
 } from '../src/core/fleet/dispatch-manifest.js';
+import { createOuterAttemptIdentity } from '../src/core/fleet/attempt-identity.js';
 
 let tmpDir: string;
 let prevAshlrHome: string | undefined;
@@ -149,6 +150,52 @@ describe('dispatch manifest ledger', () => {
     expect(raw).not.toContain(secret);
     expect(raw).not.toContain('Authorization sk-');
     expect(raw).not.toContain('api_key=sk-');
+  });
+
+  it('persists only generated outer attempt identities and preserves legacy absence', () => {
+    const validAttemptId = createOuterAttemptIdentity();
+    const hostileAttemptId = '../RAW_PROMPT RAW_DIFF RAW_STDOUT SECRET_TOKEN';
+    const item = makeItem({ id: 'attempt-identity' });
+    const snapshot = makeSnapshot([{ backend: 'codex', availability: 'open' }]);
+    const plan = planConcurrentDispatch([item], snapshot, { maxSlotsPerBackend: 1 }, () => 'codex');
+    const attemptIds = new Map([[item.id, validAttemptId]]);
+    const valid = buildDispatchManifestEvent({
+      ts: '2026-07-10T00:01:30.000Z',
+      plan,
+      attemptIds,
+    });
+    expect(valid.assignments[0]?.attemptId).toBe(validAttemptId);
+
+    attemptIds.set(item.id, hostileAttemptId);
+    const scrubbed = buildDispatchManifestEvent({
+      ts: '2026-07-10T00:01:31.000Z',
+      plan,
+      attemptIds,
+    });
+    expect(scrubbed.assignments[0]).not.toHaveProperty('attemptId');
+    expect(recordDispatchManifest(scrubbed)).toMatchObject({ recorded: true });
+
+    const ledgerPath = path.join(dispatchManifestDir(), '2026-07-10.jsonl');
+    const raw = fs.readFileSync(ledgerPath, 'utf8');
+    expect(raw).not.toContain('RAW_PROMPT');
+    expect(raw).not.toContain('RAW_DIFF');
+    expect(raw).not.toContain('RAW_STDOUT');
+    expect(raw).not.toContain('SECRET_TOKEN');
+    expect(readDispatchManifestEvents()[0]?.assignments[0]).not.toHaveProperty('attemptId');
+
+    const hostilePersisted = {
+      ...valid,
+      manifestId: `${valid.manifestId}-hostile`,
+      assignments: valid.assignments.map((assignment) => ({
+        ...assignment,
+        attemptId: hostileAttemptId,
+      })),
+    };
+    fs.appendFileSync(ledgerPath, `${JSON.stringify(hostilePersisted)}\n`, 'utf8');
+    const read = readDispatchManifestEventsDetailed();
+    expect(read).toMatchObject({ sourceState: 'degraded', complete: false, invalidRows: 1 });
+    expect(read.events).toHaveLength(1);
+    expect(read.events[0]?.assignments[0]).not.toHaveProperty('attemptId');
   });
 
   it('idempotently rejects relative and secret-shaped repo identities without unknown or cwd rows', () => {

@@ -1878,6 +1878,10 @@ export interface RunProposalOutcome {
 export interface RunState {
   /** Stable run id. */
   id: string;
+  /** Opaque writer-issued outer attempt id, present only when it agrees with run aliases. */
+  attemptId?: string;
+  /** Zero-based Best-of-N child ordinal proving the outer-attempt/run relationship. */
+  attemptCandidateIndex?: number;
   /** The original top-level goal. */
   goal: string;
   /** Engine that executed the run ('builtin' | 'ashlrcode' | 'aw' | 'claude' | 'codex'). */
@@ -3934,6 +3938,10 @@ export interface Proposal {
   workSource?: WorkSource;
   /** Optional run/swarm id that produced this proposal. */
   runId?: string;
+  /** Opaque writer-issued outer attempt id; observational and never merge authority. */
+  attemptId?: string;
+  /** Zero-based Best-of-N child ordinal; metadata-only and validated with runId. */
+  attemptCandidateIndex?: number;
   /** Stable attempt/work trajectory id used to join proposal, dispatch, and decisions. */
   trajectoryId?: string;
   /** Metadata-only route snapshot for the producer path; never includes prompts or diffs. */

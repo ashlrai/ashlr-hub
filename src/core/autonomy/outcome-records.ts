@@ -21,6 +21,7 @@ import {
   type ProposalsReadResult,
 } from '../inbox/store.js';
 import { realizedMergeOf } from '../inbox/realized-merge.js';
+import { coherentOuterAttemptIdentity } from '../fleet/attempt-identity.js';
 import type { JudgeTrace } from '../fleet/judge-trace.js';
 import { readJudgeTraces } from '../fleet/judge-trace.js';
 import type { WorkedEvent } from '../fleet/worked-ledger.js';
@@ -69,6 +70,7 @@ export interface OutcomeRecordProposal {
   workItemId?: string;
   workSource?: Proposal['workSource'];
   runId?: string;
+  attemptId?: string;
   trajectoryId?: string;
   routeSnapshot?: Proposal['routeSnapshot'];
   runEventSummary?: Proposal['runEventSummary'];
@@ -241,6 +243,7 @@ function byNewestTs<T>(readTs: (value: T) => string | undefined): (a: T, b: T) =
 
 function proposalSnapshot(proposal: Proposal): OutcomeRecordProposal {
   const realizedMerge = realizedMergeOf(proposal);
+  const attemptId = coherentOuterAttemptIdentity(proposal);
   return {
     id: proposal.id,
     repo: proposal.repo,
@@ -258,6 +261,7 @@ function proposalSnapshot(proposal: Proposal): OutcomeRecordProposal {
     ...(proposal.workItemId ? { workItemId: proposal.workItemId } : {}),
     ...(proposal.workSource ? { workSource: proposal.workSource } : {}),
     ...(proposal.runId ? { runId: proposal.runId } : {}),
+    ...(attemptId ? { attemptId } : {}),
     ...(proposal.trajectoryId ? { trajectoryId: proposal.trajectoryId } : {}),
     ...(proposal.routeSnapshot ? { routeSnapshot: proposal.routeSnapshot } : {}),
     ...(proposal.runEventSummary ? { runEventSummary: proposal.runEventSummary } : {}),
