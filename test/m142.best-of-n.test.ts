@@ -220,6 +220,12 @@ describe('M142 — N=1 parity (flag-off)', () => {
     expect(result.winner).toBeDefined();
     expect(result.winner?.index).toBe(0);
     expect(result.critique.n).toBe(1);
+    expect(result.candidates[0]).not.toHaveProperty('state');
+    expect(result.candidates[0]).not.toHaveProperty('requestedModel');
+    expect(result.candidates[0]?.terminalEvidence).not.toHaveProperty('result');
+    expect(result.candidates[0]?.terminalEvidence).not.toHaveProperty('usage');
+    expect(result.candidates[0]?.terminalEvidence).not.toHaveProperty('taskCount');
+    expect(result.candidates[0]?.terminalEvidence).not.toHaveProperty('stepCount');
   });
 
   it('default cfg (no bestOfN field) is equivalent to N=1', async () => {
@@ -270,6 +276,210 @@ describe('M142 — N=3 candidate selection', () => {
     expect(result.critique.nonEmpty).toBe(3);
     expect(result.critique.judged).toBe(3);
     expect(result.critique.winnerIndex).toBe(1);
+  });
+
+  it('acquires and releases candidate admission around every candidate execution', async () => {
+    const sandboxMock = makeSandboxMock({ withProposalAt: [0, 1, 2] });
+    mockSandboxedEngine(sandboxMock);
+    vi.doMock('../src/core/fleet/manager.js', () => ({
+      judgeProposal: makeJudgeMock([8, 10, 12]),
+    }));
+    let held = false;
+    let active = 0;
+    let peak = 0;
+    let acquired = 0;
+    let released = 0;
+    const waiters: Array<() => void> = [];
+    const candidateExecutionStart = vi.fn();
+    const candidateAdmission = async (): Promise<() => void> => {
+      while (held) await new Promise<void>((resolve) => waiters.push(resolve));
+      held = true;
+      acquired += 1;
+      active += 1;
+      peak = Math.max(peak, active);
+      return () => {
+        active -= 1;
+        released += 1;
+        held = false;
+        waiters.shift()?.();
+      };
+    };
+
+    const { runBestOfN } = await import('../src/core/run/best-of-n.js?admission=' + randomUUID());
+    const result = await runBestOfN(makeItem(), makeConfig(), {
+      n: 3,
+      candidateAdmission,
+      candidateExecutionStart,
+    });
+
+    expect(result.candidates).toHaveLength(3);
+    expect(sandboxMock).toHaveBeenCalledTimes(3);
+    expect(candidateExecutionStart).toHaveBeenCalledTimes(3);
+    expect({ acquired, released, peak, active }).toEqual({ acquired: 3, released: 3, peak: 1, active: 0 });
+  });
+
+  it('classifies admission denial as pre-execution control without running a candidate', async () => {
+    const sandboxMock = makeSandboxMock({ withProposalAt: [0] });
+    mockSandboxedEngine(sandboxMock);
+    const candidateExecutionStart = vi.fn();
+    const mod = await import('../src/core/run/best-of-n.js?admission-denied=' + randomUUID());
+    const result = await mod.runBestOfN(makeItem(), makeConfig(), {
+      n: 1,
+      candidateAdmission: async () => {
+        throw new mod.BestOfNCandidateAdmissionError(
+          'admission-denied',
+          'quota closed OPENAI_API_KEY=sk-1234567890abcdefghij',
+        );
+      },
+      candidateExecutionStart,
+    });
+
+    expect(sandboxMock).not.toHaveBeenCalled();
+    expect(candidateExecutionStart).not.toHaveBeenCalled();
+    expect(result.winner).toBeUndefined();
+    expect(result.candidates[0]).toMatchObject({
+      preExecutionControl: 'admission-denied',
+    });
+    expect(result.candidates[0]?.error).not.toContain('sk-1234567890abcdefghij');
+    expect(result.critique.noProposalReasons?.[0]?.reason).not.toContain('sk-1234567890abcdefghij');
+    expect(result.candidates[0]).not.toHaveProperty('state');
+    expect(result.candidates[0]?.terminalEvidence).toBeUndefined();
+  });
+
+  it('exports an aborted zero-work run as bounded cancellation evidence', async () => {
+    const owner = new AbortController();
+    const oversized = 'x'.repeat(600);
+    const sandboxMock = vi.fn(async (_engine: unknown, _goal: unknown, _cfg: unknown, _opts: { runId: string }) => {
+      owner.abort(new Error('owner stopped before producer execution'));
+      return {
+        state: {
+          id: oversized,
+          engine: oversized,
+          engineTier: 'local',
+          trajectoryId: oversized,
+          status: 'aborted',
+          usage: { tokensIn: 0, tokensOut: 0, steps: 0, estCostUsd: 0 },
+          tasks: [],
+          steps: [],
+          terminationReason: 'cancelled',
+          proposalOutcome: {
+            kind: 'kill-switch',
+            reason: oversized,
+            rawPrompt: 'RAW_NESTED_SENTINEL',
+          },
+          runEventSummary: {
+            runId: oversized,
+            status: 'aborted',
+            outcome: 'kill-switch',
+            proposalCreated: false,
+            actionCounts: { spawnAttempts: 0, modelSteps: 0, toolSteps: 0, totalSteps: 0 },
+            rawStdout: 'RAW_NESTED_SENTINEL',
+          },
+          evidenceOutcome: { target: oversized, rawStderr: 'RAW_NESTED_SENTINEL' },
+          delegationScope: {
+            runId: oversized,
+            objective: 'RAW_NESTED_SENTINEL',
+            backend: { engine: oversized, tier: oversized },
+          },
+        },
+      };
+    });
+    mockSandboxedEngine(sandboxMock);
+
+    const { runBestOfN } = await import('../src/core/run/best-of-n.js?zero-work-abort=' + randomUUID());
+    const result = await runBestOfN(makeItem(), makeConfig(), { n: 1, signal: owner.signal });
+
+    expect(result.winner).toBeUndefined();
+    expect(result.candidates[0]).toMatchObject({
+      preExecutionControl: 'cancelled',
+      terminalEvidence: { status: 'aborted', workObserved: false, taskCount: 0, stepCount: 0 },
+    });
+    expect(result.candidates[0]).not.toHaveProperty('state');
+    expect(result.candidates[0]?.terminalEvidence).not.toHaveProperty('result');
+    expect(JSON.stringify(result.candidates[0]?.terminalEvidence)).not.toContain('RAW_NESTED_SENTINEL');
+    expect(result.candidates[0]?.terminalEvidence?.runId).toHaveLength(240);
+    expect(result.candidates[0]?.terminalEvidence?.engine).toHaveLength(80);
+    expect(result.candidates[0]?.terminalEvidence?.trajectoryId).toHaveLength(240);
+    expect(result.candidates[0]?.terminalEvidence?.proposalOutcome?.reason).toHaveLength(220);
+    expect(result.candidates[0]?.terminalEvidence?.evidenceOutcome?.target).toHaveLength(80);
+    expect(result.candidates[0]?.terminalEvidence?.runEventSummary).not.toHaveProperty('rawStdout');
+    expect(result.candidates[0]?.terminalEvidence?.evidenceOutcome).not.toHaveProperty('rawStderr');
+  });
+
+  it('rechecks owner cancellation after admission and releases without launching', async () => {
+    const owner = new AbortController();
+    const sandboxMock = makeSandboxMock({ withProposalAt: [0] });
+    mockSandboxedEngine(sandboxMock);
+    const release = vi.fn();
+    const candidateAdmission = vi.fn(async () => {
+      owner.abort(new Error('cancelled during admission'));
+      return release;
+    });
+    const candidateExecutionStart = vi.fn();
+
+    const { runBestOfN } = await import('../src/core/run/best-of-n.js?admission-cancel=' + randomUUID());
+    const result = await runBestOfN(makeItem(), makeConfig(), {
+      n: 1,
+      signal: owner.signal,
+      candidateAdmission,
+      candidateExecutionStart,
+    });
+
+    expect(sandboxMock).not.toHaveBeenCalled();
+    expect(candidateExecutionStart).not.toHaveBeenCalled();
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(release).toHaveBeenCalledWith(false);
+    expect(result.candidates[0]).toMatchObject({
+      error: 'cancelled',
+      preExecutionControl: 'cancelled',
+    });
+  });
+
+  it('does not let admission cleanup exceptions reject the selection', async () => {
+    const sandboxMock = makeSandboxMock({ withProposalAt: [] });
+    mockSandboxedEngine(sandboxMock);
+    const candidateAdmission = vi.fn(async () => () => {
+      throw new Error('cleanup callback failed');
+    });
+
+    const { runBestOfN } = await import('../src/core/run/best-of-n.js?cleanup-throws=' + randomUUID());
+    const result = await runBestOfN(makeItem(), makeConfig(), { n: 1, candidateAdmission });
+
+    expect(sandboxMock).toHaveBeenCalledTimes(1);
+    expect(result.winner).toBeUndefined();
+    expect(result.candidates).toHaveLength(1);
+  });
+
+  it('quarantines candidate admission when process cleanup is unconfirmed', async () => {
+    const sandboxMock = vi.fn(async (_engine: unknown, _goal: unknown, _cfg: unknown, opts: { runId: string }) => ({
+      state: {
+        id: opts.runId,
+        engine: 'local-coder',
+        status: 'failed',
+        usage: { tokensIn: 1, tokensOut: 0, steps: 1, estCostUsd: 0 },
+        tasks: [{}],
+        steps: [{}],
+      },
+      sandboxRetention: {
+        status: 'retained',
+        reason: 'process-cleanup-unconfirmed',
+        sandboxId: 'retained-sandbox',
+        worktreePath: '/tmp/retained-sandbox',
+        recovery: 'orphan-sweep',
+      },
+    }));
+    mockSandboxedEngine(sandboxMock);
+    const settle = vi.fn();
+
+    const { runBestOfN } = await import('../src/core/run/best-of-n.js?retained-capacity=' + randomUUID());
+    const result = await runBestOfN(makeItem(), makeConfig(), {
+      n: 1,
+      candidateAdmission: async () => settle,
+    });
+
+    expect(result.candidates[0]?.sandboxRetention).toMatchObject({ status: 'retained' });
+    expect(settle).toHaveBeenCalledTimes(1);
+    expect(settle).toHaveBeenCalledWith(true);
   });
 
   it('prefers candidate 0 when scores tie', async () => {

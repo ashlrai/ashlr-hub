@@ -177,6 +177,11 @@ vi.mock('../src/core/fabric/concurrent-dispatch.js', async (importOriginal) => {
 const mockRunBestOfN = vi.fn();
 vi.mock('../src/core/run/best-of-n.js', () => ({
   runBestOfN: (...args: unknown[]) => mockRunBestOfN(...args),
+  BestOfNCandidateAdmissionError: class BestOfNCandidateAdmissionError extends Error {
+    constructor(readonly control: string, message: string) {
+      super(message);
+    }
+  },
 }));
 
 const mockRunPulseSync = vi.fn();
@@ -5712,6 +5717,24 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       action: 'proceed',
       decision,
     }));
+    const snapshotAt = new Date().toISOString();
+    mockGetResourceSnapshot.mockResolvedValue({
+      generatedAt: snapshotAt,
+      backends: [{
+        backend: 'codex',
+        availability: 'open',
+        usedPct: null,
+        cap: null,
+        capUnit: null,
+        capWindow: null,
+        resetsAt: null,
+        costPerMTokenOut: 0,
+        p50LatencyMs: null,
+        snapshotAt,
+        reason: 'test codex capacity',
+        backoffUntilMs: null,
+      }],
+    });
 
     const result = await tick(
       {

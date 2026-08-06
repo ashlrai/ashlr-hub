@@ -449,6 +449,25 @@ describe('M343 agent action ledger', () => {
     });
   });
 
+  it('preserves a canonical dispatch route-reason digest as metadata-only authority', () => {
+    const digest = `d1_${'a'.repeat(64)}`;
+    recordAgentAction(makeEvent({
+      action: 'daemon:dispatch',
+      routeSnapshot: {
+        backend: 'codex',
+        tier: 'frontier',
+        assignedBy: digest,
+        reason: digest,
+        routerPolicyVersion: 'fleet-router-v1',
+      },
+    }));
+
+    expect(readAgentActions()[0]?.routeSnapshot).toMatchObject({
+      assignedBy: digest,
+      reason: digest,
+    });
+  });
+
   it('persists metadata-only prose digests and never raw free-form telemetry', () => {
     const dir = agentActionsDir();
     mkdirSync(dir, { recursive: true });

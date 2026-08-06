@@ -77,6 +77,11 @@ vi.mock('../src/core/run/orchestrator.js', () => ({
 const mockRunBestOfN = vi.fn();
 vi.mock('../src/core/run/best-of-n.js', () => ({
   runBestOfN: (...args: unknown[]) => mockRunBestOfN(...args),
+  BestOfNCandidateAdmissionError: class BestOfNCandidateAdmissionError extends Error {
+    constructor(readonly control: string, message: string) {
+      super(message);
+    }
+  },
 }));
 
 const mockRunSelfHealCycle = vi.fn();
@@ -385,6 +390,13 @@ describe('M192 / M185 — ashlrcodeExecutor: flag ON → sandboxed runGoal', () 
       workSource: 'todo',
       sandboxEngine: true,
       requireSandbox: true,
+      delegationScope: {
+        backend: {
+          engine: 'ashlrcode',
+          tier: 'local',
+          assignedBy: 'ashlrcode-executor',
+        },
+      },
     });
   });
 

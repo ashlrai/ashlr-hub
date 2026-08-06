@@ -59,7 +59,7 @@ export function canonicalProposalDiffHash(
 }
 
 const RUN_SUMMARY_KEYS = new Set<keyof RunEventSummary>([
-  'runId', 'status', 'outcome', 'proposalCreated', 'proposalId', 'diffFiles', 'diffLines',
+  'runId', 'status', 'outcome', 'failureCode', 'proposalCreated', 'proposalId', 'diffFiles', 'diffLines',
   'tokensIn', 'tokensOut', 'costUsd', 'durationMs', 'cacheHit', 'contextSummary', 'actionCounts',
 ]);
 

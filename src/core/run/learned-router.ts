@@ -300,6 +300,7 @@ interface DispatchYieldPrior {
   attempts: number;
   proposalsCreated: number;
   proposalRate: number;
+  zeroStepFailures: number;
   actionShape?: DispatchYieldActionShape;
 }
 
@@ -568,11 +569,12 @@ function dispatchYieldForBackend(
       proposalBlocked += nonNegativeInteger(counts.proposalBlocked) ?? 0;
     }
   }
-  attempts += zeroStepAttempts.filter((attempt) =>
+  const zeroStepFailures = zeroStepAttempts.filter((attempt) =>
     attempt.backend === backend &&
     attempt.source === source &&
     attempt.tier === tier
   ).length;
+  attempts += zeroStepFailures;
   const avgDiffFiles = diffFileSamples > 0 ? diffFilesTotal / diffFileSamples : 0;
   const gateDominant =
     actionSamples >= MIN_DISPATCH_YIELD_SAMPLES &&
@@ -601,6 +603,7 @@ function dispatchYieldForBackend(
     attempts,
     proposalsCreated,
     proposalRate: attempts > 0 ? proposalsCreated / attempts : 1,
+    zeroStepFailures,
     ...(actionShape ? { actionShape } : {}),
   };
 }
@@ -874,6 +877,19 @@ export async function recommendRoute(
         confidence: Math.min(0.55 + (yieldPrior.attempts / 20) * 0.35, 0.9),
       };
     }
+    return {
+      backend: base.backend,
+      tier: base.tier,
+      reason:
+        `learned-router: recent proposal yield for ${base.backend} ` +
+        `${yieldPrior.proposalsCreated}/${yieldPrior.attempts} ` +
+        `< threshold ${(minProposalYieldRate * 100).toFixed(0)}%` +
+        `${yieldPrior.zeroStepFailures > 0
+          ? `, including ${yieldPrior.zeroStepFailures} validated zero-step backend failure(s)`
+          : ''}` +
+        ' — keeping the authorized backend because no authenticated same-tier alternative qualified',
+      confidence: Math.min(0.55 + (yieldPrior.attempts / 20) * 0.25, 0.8),
+    };
   }
 
   // ── No nudge warranted — return the base decision ─────────────────────────

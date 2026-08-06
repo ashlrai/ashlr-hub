@@ -642,6 +642,17 @@ describe('M23 loadProposal — by id', () => {
       provenanceSig,
       engineModel: 'codex:gpt-5.5',
       engineTier: 'frontier',
+      runEventSummary: {
+        runId: p.runId,
+        status: 'failed',
+        outcome: 'engine-failed',
+        failureCode: `stderr contained ${SECRET_VALUE}`,
+        proposalCreated: false,
+      },
+      producerProvenanceVersion: 2,
+      producerProvenanceSig: 'legacy-producer-signature',
+      pendingAuthorityVersion: 1,
+      pendingAuthoritySig: 'legacy-pending-signature',
     };
     const filePath = path.join(inboxDir(), `${p.id}.json`);
     const legacyRaw = JSON.stringify(legacy, null, 2) + '\n';
@@ -656,6 +667,9 @@ describe('M23 loadProposal — by id', () => {
     expect(loaded!.diff).not.toContain(SECRET_VALUE);
     expect(loaded!.diffHash).toBeUndefined();
     expect(loaded!.provenanceSig).toBeUndefined();
+    expect(loaded!.runEventSummary?.failureCode).toBeUndefined();
+    expect(loaded!.producerProvenanceSig).toBeUndefined();
+    expect(loaded!.pendingAuthoritySig).toBeUndefined();
 
     const listed = listProposals().find((item) => item.id === p.id);
     expect(listed).toBeDefined();
@@ -663,6 +677,9 @@ describe('M23 loadProposal — by id', () => {
     expect(listed!.diff).not.toContain(SECRET_VALUE);
     expect(listed!.diffHash).toBeUndefined();
     expect(listed!.provenanceSig).toBeUndefined();
+    expect(listed!.runEventSummary?.failureCode).toBeUndefined();
+    expect(listed!.producerProvenanceSig).toBeUndefined();
+    expect(listed!.pendingAuthoritySig).toBeUndefined();
     expect(fs.readFileSync(filePath, 'utf8')).toBe(legacyRaw);
   });
 

@@ -28,6 +28,11 @@ import {
 import { readSkillUseEvents } from '../fleet/skill-records.js';
 import type { GeneratedRepairRouteReason } from '../fleet/router.js';
 import { classifyProductionAttemptForLearningWithLabel } from '../learning/attempt-shape.js';
+import {
+  canonicalRunFailureCode,
+  routeSnapshot as normalizeRouteSnapshot,
+  runEventSummary as normalizeRunEventSummary,
+} from '../learning/causal.js';
 import type {
   OutcomeRecord,
   OutcomeRecordDecision,
@@ -216,6 +221,7 @@ export interface TrajectoryTraceEvent {
   kind: TrajectoryTimelineKind;
   outcome: TrajectoryTerminalOutcome | 'passed' | 'failed' | 'unknown';
   action?: TraceAction;
+  failureCode?: string;
   route?: {
     backend?: EngineId;
     tier?: EngineTier;
@@ -685,11 +691,14 @@ function traceEvidence(event: TrajectoryTimelineEvent): TrajectoryTraceEvent['ev
   };
 }
 
-function isNoProposalDispatchOutcome(outcome: string): boolean {
-  return outcome === 'empty-diff' || outcome === 'proposal-disabled';
+function isTerminalWithoutProposalOutcome(outcome: string): boolean {
+  return outcome === 'empty-diff' || outcome === 'proposal-disabled' ||
+    outcome === 'cancelled' || outcome === 'engine-failed' ||
+    outcome === 'sandbox-failed' || outcome === 'proposal-capture-error' ||
+    outcome === 'gate-blocked';
 }
 
-function terminalNoProposalSummary(
+function terminalWithoutProposalSummary(
   summary: RunEventSummary | undefined,
   runId: string,
   outcome: string,
@@ -701,9 +710,9 @@ function terminalNoProposalSummary(
     summary.proposalCreated !== false ||
     summary.proposalId !== undefined
   ) return false;
-  return outcome === 'empty-diff'
-    ? summary.status === 'done'
-    : summary.status === 'done' || summary.status === 'failed' || summary.status === 'aborted';
+  if (outcome === 'empty-diff') return summary.status === 'done';
+  if (outcome === 'cancelled') return summary.status === 'aborted';
+  return summary.status === 'done' || summary.status === 'failed' || summary.status === 'aborted';
 }
 
 interface NoProposalTerminalEnvelope {
@@ -744,9 +753,9 @@ function noProposalTerminalEnvelope(
     !isOuterAttemptIdentity(dispatch.attemptId) ||
     dispatch.trajectoryId !== `run:${dispatch.attemptId}` ||
     dispatch.runId === undefined ||
-    !isNoProposalDispatchOutcome(dispatch.outcome) ||
+    !isTerminalWithoutProposalOutcome(dispatch.outcome) ||
     !causalRouteMetadataCoherent(dispatch) ||
-    !terminalNoProposalSummary(dispatch.runEventSummary, dispatch.runId, dispatch.outcome)
+    !terminalWithoutProposalSummary(dispatch.runEventSummary, dispatch.runId, dispatch.outcome)
   ) return undefined;
   return {
     attemptId: dispatch.attemptId,
@@ -773,31 +782,66 @@ function noProposalActionMatchesAuthority(
   action: TrajectoryTimelineEvent,
   authority: NoProposalTerminalEnvelope,
 ): boolean {
+  const dispatchMetadataDigest = (domain: string, value: string | undefined): string | undefined => {
+    if (value === undefined) return undefined;
+    if (/^d1_[a-f0-9]{64}$/.test(value)) return value;
+    return `d1_${createHash('sha256').update(`ashlr:dispatch:${domain}:v1\0`).update(value).digest('hex')}`;
+  };
+  const comparableRoute = (
+    route: RouteSnapshot | undefined,
+  ): RouteSnapshot | undefined => {
+    const normalized = normalizeRouteSnapshot(route);
+    if (!normalized) return undefined;
+    return {
+      ...normalized,
+      ...(normalized.assignedBy
+        ? { assignedBy: dispatchMetadataDigest('assigned-by', normalized.assignedBy) }
+        : {}),
+      ...(normalized.reason
+        ? { reason: dispatchMetadataDigest('route-reason', normalized.reason) }
+        : {}),
+      ...(normalized.selectedSkillIds
+        ? {
+            selectedSkillIds: normalized.selectedSkillIds.map((id) =>
+              dispatchMetadataDigest('selected-skill-id', id)!,
+            ),
+          }
+        : {}),
+      ...(normalized.skillPolicyVersion
+        ? { skillPolicyVersion: dispatchMetadataDigest('skill-policy-version', normalized.skillPolicyVersion) }
+        : {}),
+    };
+  };
+  const expectedActionOutcome = authority.outcome === 'cancelled'
+    ? 'skipped'
+    : authority.outcome === 'empty-diff' || authority.outcome === 'proposal-disabled' ||
+        authority.outcome === 'gate-blocked'
+      ? 'no-proposal'
+      : 'failed';
   return action.actor === 'daemon' &&
     action.carrierKind === 'dispatch' &&
     action.action === 'daemon:dispatch' &&
-    action.outcome === 'no-proposal' &&
+    action.outcome === expectedActionOutcome &&
     action.repo === authority.repo &&
     action.itemId === authority.itemId &&
     action.source === authority.source &&
     action.proposalId === authority.proposalId &&
     action.trajectoryId === authority.trajectoryId &&
     action.runId === authority.runId &&
-    action.backend === authority.backend &&
-    action.tier === authority.tier &&
-    action.model === authority.model &&
-    isDeepStrictEqual(action.routeSnapshot, authority.routeSnapshot) &&
+    (action.backend ?? null) === (authority.backend ?? null) &&
+    (action.tier ?? null) === (authority.tier ?? null) &&
+    (action.model ?? null) === (authority.model ?? null) &&
+    isDeepStrictEqual(comparableRoute(action.routeSnapshot), comparableRoute(authority.routeSnapshot)) &&
     action.routerPolicyVersion === authority.routerPolicyVersion &&
     action.learningEpoch === authority.learningEpoch &&
     causalRouteMetadataCoherent(action) &&
-    terminalNoProposalSummary(action.runEventSummary, authority.runId, authority.outcome) &&
+    terminalWithoutProposalSummary(action.runEventSummary, authority.runId, authority.outcome) &&
     isDeepStrictEqual(action.runEventSummary, authority.runEventSummary);
 }
 
 function isTerminalDispatchCarrier(event: TrajectoryTimelineEvent): boolean {
   return event.kind === 'agent-action' && (
     event.outcome === 'no-proposal' ||
-    event.carrierKind === 'dispatch' ||
     event.action === 'daemon:dispatch'
   );
 }
@@ -823,7 +867,8 @@ function traceSourceState(record: TrajectoryRecord): TrajectoryTrace['sourceStat
   const qualities = [record.decisionSourceQuality, record.agentActionSourceQuality];
   if (qualities.some((quality) => quality?.sourceState === 'degraded')) return 'degraded';
   if (qualities.some((quality) => quality && (quality.sourceState === 'missing' || !quality.complete))) return 'incomplete';
-  if (record.terminalOutcome === 'no-proposal') {
+  if (record.terminalOutcome === 'no-proposal' || record.terminalOutcome === 'cancelled' ||
+    record.terminalOutcome === 'failed') {
     return record.coverage.dispatch && record.coverage.agentAction && hasExactNoProposalTerminalAction(record)
       ? 'complete'
       : 'incomplete';
@@ -834,7 +879,8 @@ function traceSourceState(record: TrajectoryRecord): TrajectoryTrace['sourceStat
 }
 
 function learningEligibilitySourceState(record: TrajectoryRecord): TrajectoryTrace['sourceState'] {
-  if (record.terminalOutcome === 'no-proposal') return traceSourceState(record);
+  if (record.terminalOutcome === 'no-proposal' || record.terminalOutcome === 'cancelled' ||
+    record.terminalOutcome === 'failed') return traceSourceState(record);
   if (record.terminalCarrierConflict) return 'incomplete';
 
   const quality = record.decisionSourceQuality;
@@ -871,11 +917,17 @@ function projectTrajectoryEvent(event: TrajectoryTimelineEvent): TrajectoryTrace
   const learningSource = typeof event.learningSource === 'string' && TRACE_LEARNING_SOURCES.has(event.learningSource as TraceLearningSource)
     ? event.learningSource as TraceLearningSource
     : event.learningSource ? 'unknown' : undefined;
+  const failureCode = canonicalRunFailureCode(
+    event.runEventSummary?.failureCode,
+    event.runEventSummary?.status,
+    event.runEventSummary?.outcome,
+  );
   return {
     ts: traceTimestamp(event.ts),
     kind: event.kind,
     outcome: traceOutcome(event),
     ...(action ? { action } : {}),
+    ...(failureCode ? { failureCode } : {}),
     ...(Object.keys(route).length > 0 ? { route } : {}),
     ...(evidence ? { evidence } : {}),
     ...(labelBasis ? { labelBasis } : {}),
@@ -1090,6 +1142,7 @@ function noteTimeline(record: MutableTrajectoryRecord, event: TrajectoryTimeline
   const {
     semanticEvents: candidateSemanticEvents,
     workTransitions: candidateWorkTransitions,
+    runEventSummary: candidateRunEventSummary,
     ...metadata
   } = event;
   const semanticSubjectRef = agentSemanticBoundSubjectRef(candidateSemanticEvents, {
@@ -1111,8 +1164,10 @@ function noteTimeline(record: MutableTrajectoryRecord, event: TrajectoryTimeline
   const workTransitions = workTransitionSubjectRef
     ? sanitizeAgentWorkTransitions(candidateWorkTransitions, workTransitionSubjectRef)
     : undefined;
+  const normalizedRunEventSummary = normalizeRunEventSummary(candidateRunEventSummary);
   const sanitized = {
     ...sanitizeMetadata(metadata),
+    ...(normalizedRunEventSummary ? { runEventSummary: normalizedRunEventSummary } : {}),
     ...(semanticEvents ? { semanticEvents: semanticEvents.map((semanticEvent) => ({ ...semanticEvent })) } : {}),
     ...(workTransitions
       ? { workTransitions: workTransitions.map((transition) => ({ ...transition })) }
@@ -1148,7 +1203,9 @@ function fillRecordMetadata(
   if (record.tier === undefined && meta.tier !== undefined) record.tier = sanitizeMetadata(meta.tier);
   if (record.model === undefined && meta.model !== undefined) record.model = sanitizeMetadata(meta.model);
   if (!record.routeSnapshot && meta.routeSnapshot) record.routeSnapshot = sanitizeMetadata(meta.routeSnapshot);
-  if (!record.runEventSummary && meta.runEventSummary) record.runEventSummary = sanitizeMetadata(meta.runEventSummary);
+  if (!record.runEventSummary && meta.runEventSummary) {
+    record.runEventSummary = normalizeRunEventSummary(meta.runEventSummary);
+  }
   if (!record.evidenceOutcome && meta.evidenceOutcome) record.evidenceOutcome = sanitizeMetadata(meta.evidenceOutcome);
   if (!record.learningSource && meta.learningSource) record.learningSource = meta.learningSource;
   if (!record.labelBasis && meta.labelBasis) record.labelBasis = meta.labelBasis;
@@ -1283,6 +1340,52 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
 
   const records = new Map<string, MutableTrajectoryRecord>();
   const aliasToRecord = new Map<string, string>();
+  const authoritativeDispatchOwners = new Map<string, Set<string>>();
+  const authoritativeAliasesByOwner = new Map<string, Set<string>>();
+  for (const event of dispatches) {
+    const attemptId = cleanId(event.attemptId, 160);
+    const trajectoryId = cleanId(event.trajectoryId, 240);
+    const runId = cleanId(event.runId, 160);
+    const owner = JSON.stringify([attemptId ?? '', trajectoryId ?? '', runId ?? '']);
+    const aliases = aliasesFromIds({
+      attemptId,
+      trajectoryId,
+      runId,
+      proposalId: cleanId(event.proposalId, 160),
+    });
+    authoritativeAliasesByOwner.set(owner, new Set([
+      ...(authoritativeAliasesByOwner.get(owner) ?? []),
+      ...aliases,
+    ]));
+    for (const candidate of aliases) {
+      const owners = authoritativeDispatchOwners.get(candidate) ?? new Set<string>();
+      owners.add(owner);
+      authoritativeDispatchOwners.set(candidate, owners);
+    }
+  }
+  const actionIdentityConflict = (aliases: readonly string[]): Set<string> => {
+    const owners = new Set<string>();
+    for (const candidate of aliases) {
+      for (const owner of authoritativeDispatchOwners.get(candidate) ?? []) owners.add(owner);
+    }
+    return owners;
+  };
+  const prequarantinedAliases = new Set<string>();
+  for (const action of actions) {
+    if (action.kind !== 'dispatch') continue;
+    const aliases = aliasesFromIds({
+      trajectoryId: cleanId(action.trajectoryId, 240),
+      runId: cleanId(action.runId, 160),
+      proposalId: cleanId(action.proposalId, 160),
+    });
+    const owners = actionIdentityConflict(aliases);
+    if (owners.size <= 1) continue;
+    for (const owner of owners) {
+      for (const candidate of authoritativeAliasesByOwner.get(owner) ?? []) {
+        prequarantinedAliases.add(candidate);
+      }
+    }
+  }
 
   const processDispatch = (event: DispatchProductionEvent): void => {
     const attemptId = cleanId(event.attemptId, 160);
@@ -1300,10 +1403,11 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       outcome: event.outcome,
       backend: event.backend,
     });
+    const dispatchAliases = aliasesFromIds({ attemptId, trajectoryId, runId, proposalId });
     const record = findOrCreateRecord(
       records,
       aliasToRecord,
-      aliasesFromIds({ attemptId, trajectoryId, runId, proposalId }),
+      dispatchAliases,
       fallbackKey,
       event.ts,
       (conflictedRecords) => {
@@ -1313,6 +1417,9 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       },
     );
     if (!record) return;
+    if (dispatchAliases.some((candidate) => prequarantinedAliases.has(candidate))) {
+      record.terminalCarrierConflict = true;
+    }
     fillRecordMetadata(record, {
       repo,
       itemId,
@@ -1331,6 +1438,18 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       routerPolicyVersion: event.routerPolicyVersion,
       learningEpoch: event.learningEpoch,
     });
+    // Dispatch production is the terminal authority for the producing attempt.
+    if (runId) record.runId = runId;
+    if (event.backend !== undefined) record.backend = sanitizeMetadata(event.backend);
+    if (event.tier !== undefined) record.tier = sanitizeMetadata(event.tier);
+    if (event.model !== undefined) record.model = sanitizeMetadata(event.model);
+    if (event.routeSnapshot) record.routeSnapshot = sanitizeMetadata(event.routeSnapshot);
+    if (event.runEventSummary) record.runEventSummary = normalizeRunEventSummary(event.runEventSummary);
+    if (event.evidenceOutcome) record.evidenceOutcome = sanitizeMetadata(event.evidenceOutcome);
+    if (event.learningSource) record.learningSource = event.learningSource;
+    if (event.labelBasis) record.labelBasis = event.labelBasis;
+    if (event.routerPolicyVersion) record.routerPolicyVersion = bounded(event.routerPolicyVersion, 120);
+    if (event.learningEpoch) record.learningEpoch = bounded(event.learningEpoch, 120);
     record.coverage.dispatch = true;
     record.terminalOutcome = betterTerminalOutcome(record.terminalOutcome, dispatchTerminalOutcome(event));
     noteTimeline(record, {
@@ -1533,16 +1652,28 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       outcome: action.outcome,
       backend: action.backend,
     });
-    const terminalCarrier = action.outcome === 'no-proposal' ||
-      action.kind === 'dispatch' ||
-      action.action === 'daemon:dispatch';
+    const terminalCarrier = action.outcome === 'no-proposal' || action.action === 'daemon:dispatch';
+    const identityCarrier = action.kind === 'dispatch';
+    const authoritativeOwners = identityCarrier ? actionIdentityConflict(aliases) : new Set<string>();
+    if (authoritativeOwners.size > 1) {
+      for (const owner of authoritativeOwners) {
+        for (const candidate of authoritativeAliasesByOwner.get(owner) ?? []) {
+          const recordId = aliasToRecord.get(candidate);
+          if (recordId) {
+            const conflictedRecord = records.get(recordId);
+            if (conflictedRecord) conflictedRecord.terminalCarrierConflict = true;
+          }
+        }
+      }
+      return;
+    }
     const record = findOrCreateRecord(
       records,
       aliasToRecord,
       aliases,
       fallbackKey,
       action.ts,
-      terminalCarrier
+      identityCarrier || terminalCarrier
         ? (conflictedRecords) => {
             for (const conflictedRecord of conflictedRecords) {
               conflictedRecord.terminalCarrierConflict = true;

@@ -763,18 +763,32 @@ describe('SharedWorkQueueCoordinator two-machine disjoint', () => {
 
   it('keeps pre-effect ordering explicit in builtin, direct, and Best-of-N launch branches', () => {
     const source = fs.readFileSync(path.resolve('src/core/daemon/loop.ts'), 'utf8');
+    const bestOfNSource = fs.readFileSync(path.resolve('src/core/run/best-of-n.ts'), 'utf8');
     const builtin = source.slice(source.indexOf("if (backend === 'builtin')"), source.indexOf("if (backend === 'builtin')") + 3_000);
-    const bestOfN = source.slice(source.indexOf('if (fanOut)'), source.indexOf('if (fanOut)') + 3_000);
-    const direct = source.slice(source.indexOf('} else {', source.indexOf('if (fanOut)')), source.indexOf('} else {', source.indexOf('if (fanOut)')) + 2_500);
+    const bestOfNStart = source.indexOf('const candidateBackends = Array.from(');
+    const bestOfNEnd = source.indexOf('bonBillable = bonResult.critique.billableCostUsd', bestOfNStart);
+    const directStart = source.indexOf('const directExecutionReservation = await backendExecutionReservations.acquire(');
+    const directEnd = source.indexOf('if (trackedRunState === null)', directStart);
+    const bestOfN = source.slice(bestOfNStart, bestOfNEnd);
+    const direct = source.slice(directStart, directEnd);
 
     expect(builtin.indexOf('beginQueueExecution()')).toBeLessThan(builtin.indexOf('recordDispatchStartAgentAction'));
     expect(builtin.indexOf('recordDispatchStartAgentAction')).toBeLessThan(builtin.indexOf('return runSwarm('));
-    for (const branch of [bestOfN, direct]) {
-      expect(branch.indexOf('beginQueueExecution()')).toBeLessThan(branch.indexOf('recordUse(backend!)'));
-      expect(branch.indexOf('recordUse(backend!)')).toBeLessThan(branch.indexOf('recordDispatchStartAgentAction'));
-    }
-    expect(bestOfN.indexOf('recordDispatchStartAgentAction')).toBeLessThan(bestOfN.indexOf('return runBestOfN('));
-    expect(direct.indexOf('recordDispatchStartAgentAction')).toBeLessThan(direct.indexOf('return runGoal('));
+    expect(bestOfN.indexOf('backendExecutionReservations.assertAvailable(')).toBeLessThan(bestOfN.indexOf('beginQueueExecution()'));
+    expect(direct.indexOf('backendExecutionReservations.acquire(')).toBeLessThan(direct.indexOf('beginQueueExecution()'));
+    expect(bestOfN.indexOf('beginQueueExecution()')).toBeLessThan(bestOfN.indexOf('recordDispatchStartAgentAction'));
+    expect(direct.indexOf('beginQueueExecution()')).toBeLessThan(direct.indexOf('recordUse(backend!)'));
+    expect(direct.indexOf('recordUse(backend!)')).toBeLessThan(direct.indexOf('recordDispatchStartAgentAction'));
+    expect(bestOfN.indexOf('candidateExecutionStart:')).toBeLessThan(bestOfN.indexOf('beginQueueExecution()'));
+    expect(direct.indexOf('recordDispatchStartAgentAction'))
+      .toBeLessThan(direct.indexOf('runGoal(goal, dispatchCfg'));
+    expect(bestOfNSource.indexOf('await opts?.candidateAdmission?.(cEngine)'))
+      .toBeLessThan(bestOfNSource.indexOf('await opts?.candidateExecutionStart?.(cEngine)'));
+    expect(bestOfNSource.indexOf('await opts?.candidateExecutionStart?.(cEngine)'))
+      .toBeLessThan(bestOfNSource.indexOf('await runSandboxed('));
+    expect(bestOfNSource).toContain('settleCandidateAdmission(retainCandidateAdmission);');
+    expect(bestOfN.indexOf('const finalCandidateAdmission = backendDispatchAdmission('))
+      .toBeLessThan(bestOfN.indexOf('recordUse(candidateBackend)'));
   });
 
   it('machines A and B claim disjoint items from the same backlog', () => {

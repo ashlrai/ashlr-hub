@@ -19,6 +19,42 @@ const FIXED_ACTION_COUNT_KEYS = [
 ] as const;
 
 describe('M351 run actionCounts metadata', () => {
+  it('preserves a bounded metadata-only producer failure code', () => {
+    const summary = runEventSummary({
+      status: 'failed',
+      outcome: 'engine-failed',
+      failureCode: 'engine-command-missing',
+    });
+
+    expect(summary?.outcome).toBe('engine-failed');
+    expect(summary?.failureCode).toBe('engine-command-missing');
+  });
+
+  it('drops secret-bearing or free-form failure text', () => {
+    expect(runEventSummary({
+      status: 'failed',
+      outcome: 'engine-failed',
+      failureCode: `engine-command-missing Authorization: Bearer sk-${'a'.repeat(80)}`,
+    })).not.toHaveProperty('failureCode');
+  });
+
+  it('drops a failure code from a successful summary', () => {
+    expect(runEventSummary({
+      status: 'done',
+      outcome: 'proposal-created',
+      failureCode: 'contradictory-failure',
+      proposalCreated: true,
+    })).not.toHaveProperty('failureCode');
+  });
+
+  it.each([
+    ['unknown code', 'failed', 'engine-failed', 'customer-acme-private-roadmap'],
+    ['wrong outcome', 'failed', 'proposal-created', 'engine-command-missing'],
+    ['wrong status', 'done', 'engine-failed', 'engine-command-missing'],
+  ])('drops an authority-incoherent failure code: %s', (_case, status, outcome, failureCode) => {
+    expect(runEventSummary({ status, outcome, failureCode })).not.toHaveProperty('failureCode');
+  });
+
   it('sanitizes fixed actionCounts keys and drops unknown keys', () => {
     const summary = runEventSummary({
       runId: 'run-actions',

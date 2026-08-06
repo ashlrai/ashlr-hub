@@ -876,6 +876,32 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
     })).toBe(3);
   });
 
+  it('reports validated zero-step samples without trusting owner-writable alternate yield', async () => {
+    const cfg = withInstalledFrontierEngines(withIntelligence({
+      allowedBackends: ['builtin', 'claude', 'codex'],
+      minProposalYieldRate: 0.5,
+    }));
+    const item = makeItem({ source: 'security', effort: 5, score: 10 });
+    const base = routeBackend(item, cfg);
+    const alternate = base.backend === 'claude' ? 'codex' : 'claude';
+    const events = Array.from({ length: 3 }, (_, index) =>
+      makeZeroStepFailoverAction(index, base.backend, base.tier));
+
+    const rec = await recommendRoute(item, cfg, {
+      estimate: makeEstimate(0.001, 10),
+      prior: { frontierSuccessRate: 0.9, frontierSampleSize: 10 },
+      dispatchProductionEvents: comparativeCandidateEvents(alternate),
+      agentActionRead: { sourceState: 'healthy', complete: true, events },
+    });
+
+    expect(base.tier).toBe('frontier');
+    expect(rec).toMatchObject({ backend: base.backend, tier: base.tier });
+    expect(rec.reason).toContain('0/3');
+    expect(rec.reason).toContain('3 validated zero-step backend failure(s)');
+    expect(rec.reason).toContain('no authenticated same-tier alternative qualified');
+    expect(rec.reason).not.toContain('same-tier reroute');
+  });
+
   it('requires a complete healthy action-ledger read before learning from zero-step failures', () => {
     const backend: EngineId = 'claude';
     const tier: EngineTier = 'frontier';

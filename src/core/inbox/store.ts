@@ -38,6 +38,7 @@ import type { Stats } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import type {
   AshlrConfig,
   LocalDefaultBranchMergeObservation,
@@ -54,7 +55,11 @@ import { readDecisionsDetailed, recordDecision } from '../fleet/decisions-ledger
 import { linkOutcome } from '../fleet/judge-trace.js';
 // M158: destructive-diff pre-judge guard — additive, DEFAULT ON, never-throws.
 import { isDestructiveDiff } from '../run/diff-safety.js';
-import { causalMetadata, causalMetadataFromProposal } from '../learning/causal.js';
+import {
+  causalMetadata,
+  causalMetadataFromProposal,
+  runEventSummary as normalizeRunEventSummary,
+} from '../learning/causal.js';
 import { canonicalizeProposalDiff, scrubSecrets } from '../util/scrub.js';
 import { fsyncDirectory } from '../util/durability.js';
 import { assurePrivateStoragePath } from '../util/private-storage.js';
@@ -252,6 +257,20 @@ function sanitizeProposalForStore<T extends Partial<Proposal> & Pick<Proposal, '
   scrubTopLevel('summary');
   scrubTopLevel('result');
   scrubTopLevel('decisionReason');
+
+  if (next.runEventSummary !== undefined) {
+    const normalized = normalizeRunEventSummary(next.runEventSummary);
+    if (!isDeepStrictEqual(normalized, next.runEventSummary)) {
+      if (normalized) next.runEventSummary = normalized;
+      else delete next.runEventSummary;
+      delete next.provenanceSig;
+      delete next.producerProvenanceVersion;
+      delete next.producerProvenanceSig;
+      delete next.pendingAuthorityVersion;
+      delete next.pendingAuthoritySig;
+      changed = true;
+    }
+  }
 
   if (typeof next.diff === 'string') {
     const scrubbedDiff = canonicalizeProposalDiff(next.diff);

@@ -833,6 +833,174 @@ describe('Trajectory records', () => {
     }
   });
 
+  it('keeps failover observations nonterminal while joining both runs into one complete trajectory', () => {
+    const failedRunId = 'run-failed-backend';
+    const retryRunId = NO_PROPOSAL_RUN_ID;
+    const retryRoute = {
+      backend: 'codex' as const,
+      tier: 'frontier' as const,
+      model: 'gpt-retry',
+      assignedBy: 'zero-step-failover',
+      reason: 'same-tier retry',
+      routerPolicyVersion: ROUTER_POLICY_VERSION,
+    };
+    const terminalSummary = {
+      runId: retryRunId,
+      status: 'done',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+    } as const;
+    const [record] = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        readDispatchProductionEvents: () => [dispatch({
+          ts: TS4,
+          outcome: 'empty-diff',
+          proposalCreated: false,
+          proposalId: undefined,
+          attemptId: NO_PROPOSAL_ATTEMPT_ID,
+          runId: retryRunId,
+          trajectoryId: NO_PROPOSAL_TRAJECTORY_ID,
+          backend: 'codex',
+          tier: 'frontier',
+          model: 'gpt-retry',
+          assignedBy: 'zero-step-failover',
+          routeReason: 'same-tier retry',
+          routeSnapshot: retryRoute,
+          runEventSummary: terminalSummary,
+          evidenceOutcome: undefined,
+        })],
+        listOutcomeRecords: () => [],
+        readAgentActions: () => [
+          action({
+            ts: TS0,
+            outcome: 'started',
+            action: 'daemon:dispatch-start',
+            proposalId: undefined,
+            runId: failedRunId,
+            trajectoryId: NO_PROPOSAL_TRAJECTORY_ID,
+            backend: 'claude',
+            tier: 'frontier',
+            model: 'claude-first',
+          }),
+          action({
+            ts: TS1,
+            outcome: 'failed',
+            action: 'daemon:dispatch-zero-step-failover',
+            proposalId: undefined,
+            runId: failedRunId,
+            trajectoryId: NO_PROPOSAL_TRAJECTORY_ID,
+            backend: 'claude',
+            tier: 'frontier',
+            model: 'claude-first',
+            runEventSummary: {
+              runId: failedRunId,
+              status: 'failed',
+              outcome: 'engine-command-missing',
+              proposalCreated: false,
+            },
+          }),
+          action({
+            ts: TS2,
+            outcome: 'started',
+            action: 'daemon:dispatch-start',
+            proposalId: undefined,
+            runId: retryRunId,
+            trajectoryId: NO_PROPOSAL_TRAJECTORY_ID,
+            backend: 'codex',
+            tier: 'frontier',
+            model: 'gpt-retry',
+            routeSnapshot: retryRoute,
+          }),
+          action({
+            ts: TS3,
+            outcome: 'no-proposal',
+            action: 'daemon:dispatch',
+            proposalId: undefined,
+            runId: retryRunId,
+            trajectoryId: NO_PROPOSAL_TRAJECTORY_ID,
+            backend: 'codex',
+            tier: 'frontier',
+            model: 'gpt-retry',
+            routeSnapshot: retryRoute,
+            runEventSummary: terminalSummary,
+          }),
+        ],
+      }),
+    });
+
+    expect(record?.timeline.filter((event) => event.kind === 'agent-action').map((event) => ({
+      action: event.action,
+      runId: event.runId,
+    }))).toEqual([
+      { action: 'daemon:dispatch-start', runId: failedRunId },
+      { action: 'daemon:dispatch-zero-step-failover', runId: failedRunId },
+      { action: 'daemon:dispatch-start', runId: retryRunId },
+      { action: 'daemon:dispatch', runId: retryRunId },
+    ]);
+    const trace = summarizeTrajectoryLearning([record!]).traces.records[0];
+    expect(record).toMatchObject({
+      runId: retryRunId,
+      backend: 'codex',
+      tier: 'frontier',
+      model: 'gpt-retry',
+    });
+    expect(trace).toMatchObject({
+      terminalOutcome: 'no-proposal',
+      sourceState: 'complete',
+      eventState: 'complete',
+    });
+    expect(summarizeTrajectoryLearning([record!]).recent[0]?.backend).toBe('codex');
+    expect(JSON.stringify(trace)).not.toContain(STDOUT_SECRET);
+  });
+
+  it('projects exact code-only terminal failure metadata without raw output', () => {
+    const failedSummary = {
+      runId: NO_PROPOSAL_RUN_ID,
+      status: 'failed',
+      outcome: 'engine-failed',
+      failureCode: 'engine-command-missing',
+      proposalCreated: false,
+    } as const;
+    const [record] = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        readDispatchProductionEvents: () => [dispatch({
+          outcome: 'engine-failed',
+          proposalCreated: false,
+          proposalId: undefined,
+          attemptId: NO_PROPOSAL_ATTEMPT_ID,
+          runId: NO_PROPOSAL_RUN_ID,
+          trajectoryId: NO_PROPOSAL_TRAJECTORY_ID,
+          runEventSummary: failedSummary,
+          reason: STDOUT_SECRET,
+          evidenceOutcome: undefined,
+        })],
+        listOutcomeRecords: () => [],
+        readAgentActions: () => [action({
+          outcome: 'failed',
+          action: 'daemon:dispatch',
+          proposalId: undefined,
+          runId: NO_PROPOSAL_RUN_ID,
+          trajectoryId: NO_PROPOSAL_TRAJECTORY_ID,
+          runEventSummary: failedSummary,
+        })],
+      }),
+    });
+
+    const trace = summarizeTrajectoryLearning([record!]).traces.records[0]!;
+    expect(trace.terminalOutcome).toBe('failed');
+    expect(trace.sourceState).toBe('complete');
+    expect(trace.events.some((event) => event.failureCode === 'engine-command-missing')).toBe(true);
+    expect(summarizeTrajectoryLearning([record!]).population).toEqual({
+      observed: 1,
+      learningEligible: 1,
+      incomplete: 0,
+      degraded: 0,
+    });
+    expect(JSON.stringify(trace)).not.toContain(STDOUT_SECRET);
+  });
+
   it('allows only equivalent duplicate terminal carriers', () => {
     const terminalSummary = {
       runId: NO_PROPOSAL_RUN_ID,
@@ -926,9 +1094,9 @@ describe('Trajectory records', () => {
       name: 'route snapshot',
       overrides: {
         routeSnapshot: {
-          backend: 'local-coder' as const,
-          tier: 'local' as const,
-          model: 'qwen',
+          backend: 'codex' as const,
+          tier: 'frontier' as const,
+          model: 'gpt-conflicting',
           assignedBy: 'test',
           reason: 'private conflicting route',
           routerPolicyVersion: ROUTER_POLICY_VERSION,
@@ -1181,6 +1349,65 @@ describe('Trajectory records', () => {
     const summary = summarizeTrajectoryLearning(records);
     expect(summary.population).toEqual({ observed: 2, learningEligible: 0, incomplete: 2, degraded: 0 });
     expect(summary.traces.records.every((trace) => trace.sourceState === 'incomplete')).toBe(true);
+  });
+
+  it('quarantines a nonterminal failover action that bridges two established attempts', () => {
+    const otherAttemptId = 'attempt-00000000-0000-4000-8000-000000000998';
+    const otherRunId = 'other-nonterminal-run';
+    const otherTrajectoryId = `run:${otherAttemptId}`;
+    const records = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        readDispatchProductionEvents: () => [
+          dispatch({
+            outcome: 'empty-diff',
+            proposalCreated: false,
+            proposalId: undefined,
+            attemptId: NO_PROPOSAL_ATTEMPT_ID,
+            runId: NO_PROPOSAL_RUN_ID,
+            trajectoryId: NO_PROPOSAL_TRAJECTORY_ID,
+            runEventSummary: {
+              runId: NO_PROPOSAL_RUN_ID,
+              status: 'done',
+              outcome: 'empty-diff',
+              proposalCreated: false,
+            },
+            evidenceOutcome: undefined,
+          }),
+          dispatch({
+            ts: TS1,
+            itemId: 'other-nonterminal-item',
+            outcome: 'empty-diff',
+            proposalCreated: false,
+            proposalId: undefined,
+            attemptId: otherAttemptId,
+            runId: otherRunId,
+            trajectoryId: otherTrajectoryId,
+            runEventSummary: {
+              runId: otherRunId,
+              status: 'done',
+              outcome: 'empty-diff',
+              proposalCreated: false,
+            },
+            evidenceOutcome: undefined,
+          }),
+        ],
+        listOutcomeRecords: () => [],
+        readAgentActions: () => [action({
+          ts: TS0,
+          outcome: 'started',
+          action: 'daemon:dispatch-start',
+          proposalId: undefined,
+          runId: otherRunId,
+          trajectoryId: NO_PROPOSAL_TRAJECTORY_ID,
+        })],
+      }),
+    });
+
+    expect(records).toHaveLength(2);
+    expect(records.every((record) => record.terminalCarrierConflict)).toBe(true);
+    expect(summarizeTrajectoryLearning(records).population)
+      .toEqual({ observed: 2, learningEligible: 0, incomplete: 2, degraded: 0 });
   });
 
   it.each([
@@ -1668,7 +1895,7 @@ describe('Trajectory records', () => {
             eventId: 'skill-use:trajectory-2',
             skillId: 'skill.proposal.trajectory-2',
             contentHash: 'b'.repeat(64),
-            ts: TS2,
+            ts: TS0,
             proposalId: undefined,
             runId: 'run-2',
             trajectoryId: 'traj-2',
