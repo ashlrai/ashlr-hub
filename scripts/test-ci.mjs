@@ -11,11 +11,18 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
-import { clearTimeout, setTimeout as setTimer } from 'node:timers';
+import { fileURLToPath, URL } from 'node:url';
+import {
+  clearInterval,
+  clearTimeout,
+  setInterval as setRepeater,
+  setTimeout as setTimer,
+} from 'node:timers';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const DEFAULT_HARD_TIMEOUT_MS = 15 * 60_000;
 const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60_000;
+const DEFAULT_HEARTBEAT_INTERVAL_MS = 60_000;
 const MAX_LINE_TAIL = 2_048;
 
 function readPositiveDuration(name, fallback) {
@@ -35,14 +42,22 @@ const terminationGraceMs = readPositiveDuration(
   'ASHLR_TEST_CI_TERMINATION_GRACE_MS',
   5_000,
 );
+const heartbeatIntervalMs = readPositiveDuration(
+  'ASHLR_TEST_CI_HEARTBEAT_MS',
+  DEFAULT_HEARTBEAT_INTERVAL_MS,
+);
 
 const home = mkdtempSync(join(tmpdir(), 'ashlr-test-ci-home-'));
 const vitestBin = join(process.cwd(), 'node_modules', 'vitest', 'vitest.mjs');
+const progressReporter = fileURLToPath(new URL('./vitest-progress-reporter.mjs', import.meta.url));
 const extraArgs = process.argv.slice(2);
+const hasExplicitReporter = extraArgs.some((arg) => arg === '--reporter' || arg.startsWith('--reporter='));
 const args = [
   vitestBin,
   'run',
   '--no-file-parallelism',
+  ...(!hasExplicitReporter ? ['--reporter=default'] : []),
+  `--reporter=${progressReporter}`,
   ...extraArgs,
 ];
 
@@ -59,13 +74,15 @@ const child = spawn(process.execPath, args, {
   detached: process.platform !== 'win32',
 });
 
-let lastOutputAt = Date.now();
+const startedAt = Date.now();
+let lastOutputAt = startedAt;
 let lastProgressLine = '';
 let sawVitestSummary = false;
 let stdoutTail = '';
 let stderrTail = '';
 let idleTimer;
 let hardTimer;
+let heartbeatTimer;
 let terminationReason;
 let terminationPromise;
 let childExited = false;
@@ -152,6 +169,7 @@ function requestTermination(reason) {
   terminationReason = reason;
   clearTimeout(idleTimer);
   clearTimeout(hardTimer);
+  clearInterval(heartbeatTimer);
 
   if (reason.kind === 'idle-timeout') {
     const summary = sawVitestSummary
@@ -188,6 +206,16 @@ function armIdleTimer() {
 pipeOutput(child.stdout, process.stdout, 'stdout');
 pipeOutput(child.stderr, process.stderr, 'stderr');
 armIdleTimer();
+heartbeatTimer = setRepeater(() => {
+  const now = Date.now();
+  const elapsedMs = now - startedAt;
+  const silentForMs = now - lastOutputAt;
+  const hardCapRemainingMs = Math.max(0, hardTimeoutMs - elapsedMs);
+  console.error(
+    `[test-ci] heartbeat: elapsed ${elapsedMs}ms; child silent ${silentForMs}ms; ` +
+    `hard cap remaining ${hardCapRemainingMs}ms. Waiting for Vitest output.`,
+  );
+}, heartbeatIntervalMs);
 hardTimer = setTimer(() => {
   void requestTermination({ kind: 'hard-runtime-cap' });
 }, hardTimeoutMs);
@@ -201,6 +229,7 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
 const result = await childResult;
 clearTimeout(idleTimer);
 clearTimeout(hardTimer);
+clearInterval(heartbeatTimer);
 if (terminationPromise) await terminationPromise;
 
 try {
