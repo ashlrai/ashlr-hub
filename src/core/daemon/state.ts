@@ -92,7 +92,44 @@ export type AcquireDaemonLockResult =
 
 export type LoadDaemonStateStrictResult =
   | { ok: true; state: DaemonState; fresh: boolean }
-  | { ok: false; path: string; reason: 'malformed' | 'unreadable'; error: string };
+  | {
+      ok: false;
+      path: string;
+      reason: 'malformed' | 'unreadable';
+      error: string;
+      diagnostic: DaemonStateRecoveryDiagnostic;
+    };
+
+export type DaemonStateDiagnosticCode =
+  | 'invalid-json'
+  | 'invalid-root'
+  | 'running-invalid'
+  | 'pid-invalid'
+  | 'started-at-invalid'
+  | 'last-tick-at-invalid'
+  | 'budget-day-invalid'
+  | 'spend-invalid'
+  | 'items-processed-invalid'
+  | 'ticks-invalid'
+  | 'spend-accounting-shape-invalid'
+  | 'spend-accounting-keys-invalid'
+  | 'spend-accounting-day-invalid'
+  | 'spend-accounting-id-invalid'
+  | 'spend-accounting-exhaustion-invalid'
+  | 'automatic-drain-flag-invalid'
+  | 'unsafe-storage'
+  | 'source-changed-during-read'
+  | 'read-failed';
+
+/** Metadata-only recovery guidance. It never authorizes or performs a write. */
+export interface DaemonStateRecoveryDiagnostic {
+  schemaVersion: 1;
+  issueCodes: DaemonStateDiagnosticCode[];
+  disposition: 'operator-inspection-required' | 'retry-read-required';
+  sourceBytesPreserved: true;
+  automaticRepairAllowed: false;
+  mutationAuthorityGranted: false;
+}
 
 export type SaveDaemonStateResult =
   | { ok: true; path: string }
@@ -189,20 +226,80 @@ function canonicalBudgetDay(value: unknown): value is string {
   return Number.isFinite(parsed) && new Date(parsed).toISOString().slice(0, 10) === value;
 }
 
-function validStrictSpendGuardAccounting(value: unknown, todayDate: unknown): boolean {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+function strictSpendGuardAccountingIssues(
+  value: unknown,
+  todayDate: unknown,
+): DaemonStateDiagnosticCode[] {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return ['spend-accounting-shape-invalid'];
+  }
   const row = value as Record<string, unknown>;
   const expectedKeys = row['budgetExhausted'] === undefined
     ? ['accountingId', 'budgetDay']
     : ['accountingId', 'budgetDay', 'budgetExhausted'];
   const keys = Object.keys(row).sort();
-  return keys.length === expectedKeys.length &&
-    keys.every((key, index) => key === expectedKeys[index]) &&
-    canonicalBudgetDay(row['budgetDay']) &&
-    row['budgetDay'] === todayDate &&
-    typeof row['accountingId'] === 'string' &&
-    UUID_RE.test(row['accountingId']) &&
-    (row['budgetExhausted'] === undefined || typeof row['budgetExhausted'] === 'boolean');
+  const issues: DaemonStateDiagnosticCode[] = [];
+  if (keys.length !== expectedKeys.length ||
+    !keys.every((key, index) => key === expectedKeys[index])) {
+    issues.push('spend-accounting-keys-invalid');
+  }
+  if (!canonicalBudgetDay(row['budgetDay']) || row['budgetDay'] !== todayDate) {
+    issues.push('spend-accounting-day-invalid');
+  }
+  if (typeof row['accountingId'] !== 'string' || !UUID_RE.test(row['accountingId'])) {
+    issues.push('spend-accounting-id-invalid');
+  }
+  if (row['budgetExhausted'] !== undefined && typeof row['budgetExhausted'] !== 'boolean') {
+    issues.push('spend-accounting-exhaustion-invalid');
+  }
+  return issues;
+}
+
+function strictDaemonStateIssues(value: unknown): DaemonStateDiagnosticCode[] {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return ['invalid-root'];
+  const obj = value as Record<string, unknown>;
+  const issues: DaemonStateDiagnosticCode[] = [];
+  const pid = obj['pid'];
+  if (typeof obj['running'] !== 'boolean') issues.push('running-invalid');
+  if (!(typeof pid === 'number' || pid === null)) issues.push('pid-invalid');
+  if (!(typeof obj['startedAt'] === 'string' || obj['startedAt'] === null)) {
+    issues.push('started-at-invalid');
+  }
+  if (!(typeof obj['lastTickAt'] === 'string' || obj['lastTickAt'] === null)) {
+    issues.push('last-tick-at-invalid');
+  }
+  if (!(typeof obj['todayDate'] === 'string' || obj['todayDate'] === null)) {
+    issues.push('budget-day-invalid');
+  }
+  if (typeof obj['todaySpentUsd'] !== 'number' || !Number.isFinite(obj['todaySpentUsd'])) {
+    issues.push('spend-invalid');
+  }
+  if (typeof obj['itemsProcessed'] !== 'number' || !Number.isFinite(obj['itemsProcessed'])) {
+    issues.push('items-processed-invalid');
+  }
+  if (!Array.isArray(obj['ticks'])) issues.push('ticks-invalid');
+  if (obj['spendGuardAccounting'] !== undefined) {
+    issues.push(...strictSpendGuardAccountingIssues(obj['spendGuardAccounting'], obj['todayDate']));
+  }
+  if (obj['automaticDrainOrdinaryTurnDue'] !== undefined &&
+    typeof obj['automaticDrainOrdinaryTurnDue'] !== 'boolean') {
+    issues.push('automatic-drain-flag-invalid');
+  }
+  return issues;
+}
+
+function recoveryDiagnostic(
+  issueCodes: DaemonStateDiagnosticCode[],
+  disposition: DaemonStateRecoveryDiagnostic['disposition'] = 'operator-inspection-required',
+): DaemonStateRecoveryDiagnostic {
+  return {
+    schemaVersion: 1,
+    issueCodes: [...new Set(issueCodes)].slice(0, 16),
+    disposition,
+    sourceBytesPreserved: true,
+    automaticRepairAllowed: false,
+    mutationAuthorityGranted: false,
+  };
 }
 
 function parseDaemonState(
@@ -215,25 +312,7 @@ function parseDaemonState(
   }
   const obj = parsed as Record<string, unknown>;
   if (opts?.strict === true) {
-    const pid = obj['pid'];
-    if (
-      typeof obj['running'] !== 'boolean' ||
-      !(typeof pid === 'number' || pid === null) ||
-      !(typeof obj['startedAt'] === 'string' || obj['startedAt'] === null) ||
-      !(typeof obj['lastTickAt'] === 'string' || obj['lastTickAt'] === null) ||
-      !(typeof obj['todayDate'] === 'string' || obj['todayDate'] === null) ||
-      typeof obj['todaySpentUsd'] !== 'number' ||
-      !Number.isFinite(obj['todaySpentUsd']) ||
-      typeof obj['itemsProcessed'] !== 'number' ||
-      !Number.isFinite(obj['itemsProcessed']) ||
-      !Array.isArray(obj['ticks']) ||
-      (obj['spendGuardAccounting'] !== undefined &&
-        !validStrictSpendGuardAccounting(obj['spendGuardAccounting'], obj['todayDate'])) ||
-      (obj['automaticDrainOrdinaryTurnDue'] !== undefined &&
-        typeof obj['automaticDrainOrdinaryTurnDue'] !== 'boolean')
-    ) {
-      return null;
-    }
+    if (strictDaemonStateIssues(obj).length > 0) return null;
   }
   const state: DaemonState = {
     running: typeof obj['running'] === 'boolean' ? obj['running'] : false,
@@ -335,10 +414,22 @@ export function loadDaemonStateStrict(
       return { ok: true, state: freshState(), fresh: true };
     }
     const msg = err instanceof Error ? err.message : String(err);
-    return { ok: false, path: p, reason: 'unreadable', error: msg };
+    return {
+      ok: false,
+      path: p,
+      reason: 'unreadable',
+      error: msg,
+      diagnostic: recoveryDiagnostic(['read-failed'], 'retry-read-required'),
+    };
   }
   if (!safeDaemonStateFile(named)) {
-    return { ok: false, path: p, reason: 'unreadable', error: 'daemon state path is unsafe' };
+    return {
+      ok: false,
+      path: p,
+      reason: 'unreadable',
+      error: 'daemon state path is unsafe',
+      diagnostic: recoveryDiagnostic(['unsafe-storage']),
+    };
   }
   let fd: number | undefined;
   try {
@@ -346,7 +437,13 @@ export function loadDaemonStateStrict(
     fd = openSync(p, fsConstants.O_RDONLY | noFollow);
     const opened = fstatSync(fd);
     if (!safeDaemonStateFile(opened) || !sameFile(named, opened)) {
-      return { ok: false, path: p, reason: 'unreadable', error: 'daemon state identity changed' };
+      return {
+        ok: false,
+        path: p,
+        reason: 'unreadable',
+        error: 'daemon state identity changed',
+        diagnostic: recoveryDiagnostic(['source-changed-during-read'], 'retry-read-required'),
+      };
     }
     const raw = readFileSync(fd, 'utf8');
     const after = fstatSync(fd);
@@ -358,6 +455,29 @@ export function loadDaemonStateStrict(
         path: p,
         reason: 'unreadable',
         error: 'daemon state changed while being read',
+        diagnostic: recoveryDiagnostic(['source-changed-during-read'], 'retry-read-required'),
+      };
+    }
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(raw) as unknown;
+    } catch {
+      return {
+        ok: false,
+        path: p,
+        reason: 'malformed',
+        error: 'daemon state contains invalid JSON',
+        diagnostic: recoveryDiagnostic(['invalid-json']),
+      };
+    }
+    const issueCodes = strictDaemonStateIssues(decoded);
+    if (issueCodes.length > 0) {
+      return {
+        ok: false,
+        path: p,
+        reason: 'malformed',
+        error: `daemon state failed strict validation: ${issueCodes.join(', ')}`,
+        diagnostic: recoveryDiagnostic(issueCodes),
       };
     }
     const state = parseDaemonState(raw, {
@@ -365,7 +485,13 @@ export function loadDaemonStateStrict(
       preserveOwnerIdentity: opts.preserveOwnerIdentity === true,
     });
     if (!state) {
-      return { ok: false, path: p, reason: 'malformed', error: 'daemon state is not a JSON object' };
+      return {
+        ok: false,
+        path: p,
+        reason: 'malformed',
+        error: 'daemon state failed strict validation',
+        diagnostic: recoveryDiagnostic(['invalid-root']),
+      };
     }
     return { ok: true, state, fresh: false };
   } catch (err) {
@@ -373,7 +499,16 @@ export function loadDaemonStateStrict(
     const reason = msg.includes('JSON') || msg.includes('Unexpected') || msg.includes('position')
       ? 'malformed'
       : 'unreadable';
-    return { ok: false, path: p, reason, error: msg };
+    return {
+      ok: false,
+      path: p,
+      reason,
+      error: msg,
+      diagnostic: recoveryDiagnostic(
+        [reason === 'malformed' ? 'invalid-json' : 'read-failed'],
+        reason === 'unreadable' ? 'retry-read-required' : 'operator-inspection-required',
+      ),
+    };
   } finally {
     if (fd !== undefined) {
       try {

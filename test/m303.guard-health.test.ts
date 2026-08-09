@@ -278,15 +278,28 @@ describe('daemon status guard health', () => {
     const parsed = JSON.parse(json.out) as {
       running: boolean | null;
       todaySpentUsd: number | null;
-      stateSource?: { sourceState: string; reason: string };
+      stateSource?: {
+        sourceState: string;
+        reason: string;
+        diagnostic?: {
+          issueCodes: string[];
+          automaticRepairAllowed: boolean;
+          mutationAuthorityGranted: boolean;
+        };
+      };
       guardHealth?: { blocked: boolean; blocks: Array<{ id: string }> };
     };
     expect(parsed.running).toBeNull();
     expect(parsed.todaySpentUsd).toBeNull();
-    expect(parsed.stateSource).toEqual({
+    expect(parsed.stateSource).toMatchObject({
       sourceState: 'degraded',
       complete: false,
       reason: 'malformed',
+      diagnostic: {
+        issueCodes: ['invalid-json'],
+        automaticRepairAllowed: false,
+        mutationAuthorityGranted: false,
+      },
     });
     expect(parsed.guardHealth?.blocked).toBe(true);
     expect(parsed.guardHealth?.blocks.map((b) => b.id)).toContain('daemon-state-malformed');
@@ -297,7 +310,10 @@ describe('daemon status guard health', () => {
     expect(human.out).toContain('daemon-state-malformed');
     expect(human.out).toContain('running:        unknown');
     expect(human.out).toContain("today's spend:  unknown");
+    expect(human.out).toContain('state issues:');
+    expect(human.out).toContain('automatic repair withheld');
     expect(human.out).toContain('repair:');
+    expect(human.out).not.toContain('mv ');
   });
 });
 
