@@ -51,6 +51,8 @@ import type {
   EngineTier,
   EvidenceOutcomeSummary,
   Proposal,
+  RunActionCounts,
+  RunState,
   RunEventSummary,
   RunProposalOutcome,
   SkillCard,
@@ -109,6 +111,7 @@ import { nullSink } from '../run/streaming.js';
 import { createOuterAttemptIdentity } from '../fleet/attempt-identity.js';
 import { runSwarm } from '../swarm/runner.js';
 import { runGoal } from '../run/orchestrator.js';
+import { engineInstalled } from '../run/engines.js';
 import { scopeFromWorkItem } from '../run/delegation-scope.js';
 import {
   generatedRepairCandidateAllowed,
@@ -119,7 +122,7 @@ import {
   type GeneratedRepairRouteReason,
 } from '../fleet/router.js';
 import { withinLimit, recordUse } from '../fleet/quota.js';
-import { engineTierOf } from '../run/sandboxed-engine.js';
+import { engineTierOf, type SandboxRetentionEvidence } from '../run/sandboxed-engine.js';
 import { resolveEngineSpec } from '../run/engine-registry.js';
 import { subscriptionAllows, isSubscriptionEngine } from '../fleet/subscription-usage.js'; // M80
 import { recommendRoute, recoverWithinBudget } from '../run/learned-router.js';
@@ -129,6 +132,7 @@ import {
   concurrentAssignedRouteReason,
   planConcurrentDispatch,
   runConcurrentDispatch,
+  slotsForBackendState,
 } from '../fabric/concurrent-dispatch.js'; // M255/M256
 import { getResourceSnapshot } from '../fabric/resource-monitor.js'; // M255
 import { estimateRun } from '../observability/estimate.js';
@@ -145,7 +149,12 @@ import {
   type ProposalRepairWorkResult,
 } from '../fleet/proposal-repair-work.js';
 import { reconcileRemoteHandoffs, type RemoteHandoffReconcileResult } from '../inbox/remote-handoff.js';
-import { runBestOfN, type CandidateResult } from '../run/best-of-n.js';
+import {
+  BestOfNCandidateAdmissionError,
+  runBestOfN,
+  type CandidateResult,
+  type CandidateTerminalEvidence,
+} from '../run/best-of-n.js';
 import { runSelfHealCycle, runSelfHealCycleForRepos } from '../fleet/self-heal.js';
 import { runInventCycle } from '../generative/invent-cycle.js'; // M186
 import { runCounterfactualReplay } from '../fleet/counterfactual.js'; // M187
@@ -428,6 +437,295 @@ function effectiveGeneratedRepairCandidateAllowed(
 ): boolean {
   return generatedRepairCandidateAllowed(item, backend, cfg) &&
     effectiveGeneratedRepairExecutionBackendAllowed(item, backend, cfg);
+}
+
+const ZERO_STEP_FAILOVER_OUTCOMES = new Set([
+  'engine-command-missing',
+  'engine-unsupported',
+]);
+
+export type ZeroStepFailoverCapacityBlockReason =
+  | 'distributed-capacity-authority-unavailable'
+  | 'best-of-n-capacity-authority-unavailable';
+
+export function zeroStepFailoverCapacityBlockReason(
+  cfg: AshlrConfig,
+  options?: { bestOfNActive?: boolean },
+): ZeroStepFailoverCapacityBlockReason | null {
+  if (cfg.fleet?.sharedQueue?.mode === 'filesystem') {
+    return 'distributed-capacity-authority-unavailable';
+  }
+  const configured = (cfg.foundry as Record<string, unknown> | undefined)?.['bestOfN'];
+  const bestOfNActive = options?.bestOfNActive ?? (
+    typeof configured === 'number' && Number.isFinite(configured) && configured > 1
+  );
+  return bestOfNActive
+    ? 'best-of-n-capacity-authority-unavailable'
+    : null;
+}
+
+type ZeroStepRequiredActionCount = Exclude<keyof RunActionCounts, 'sandboxCreated'>;
+
+function exhaustiveActionCountKeys<T extends readonly ZeroStepRequiredActionCount[]>(
+  keys: T & (Exclude<ZeroStepRequiredActionCount, T[number]> extends never ? unknown : never),
+): T {
+  return keys;
+}
+
+const ZERO_STEP_REQUIRED_ZERO_ACTION_COUNTS = exhaustiveActionCountKeys([
+  'spawnAttempts',
+  'transientRetries',
+  'proposalCaptureAttempts',
+  'completenessGateRuns',
+  'verifyRepairAttempts',
+  'modelSteps',
+  'toolSteps',
+  'totalSteps',
+  'diffFiles',
+  'diffLines',
+  'proposalCreated',
+  'proposalBlocked',
+  'proposalDisabled',
+] as const);
+
+function explicitFiniteZero(record: unknown, key: string): boolean {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) return false;
+  const value = (record as Record<string, unknown>)[key];
+  return typeof value === 'number' && Number.isFinite(value) && value === 0;
+}
+
+function zeroStepBackendFailure(
+  run: RunState,
+  expected: {
+    runId: string;
+    backend: EngineId;
+    tier: EngineTier | null;
+    trajectoryId: string;
+  },
+): boolean {
+  if (run.status !== 'failed') return false;
+  const summary = run.runEventSummary;
+  const counts = summary?.actionCounts;
+  if (!summary || !counts) return false;
+  if (
+    run.id !== expected.runId ||
+    summary.runId !== expected.runId ||
+    summary.status !== 'failed' ||
+    run.engine !== expected.backend ||
+    run.engineTier !== expected.tier ||
+    (run.trajectoryId !== undefined && run.trajectoryId !== expected.trajectoryId) ||
+    run.delegationScope?.runId !== expected.runId ||
+    run.delegationScope.backend?.engine !== expected.backend ||
+    run.delegationScope.backend?.tier !== expected.tier
+  ) return false;
+  if (!Array.isArray(run.tasks) || run.tasks.length !== 0) return false;
+  if (!Array.isArray(run.steps) || run.steps.length !== 0) return false;
+  if (!ZERO_STEP_REQUIRED_ZERO_ACTION_COUNTS
+    .every((key) => explicitFiniteZero(counts, key))) return false;
+  const sandboxCreated = counts.sandboxCreated;
+  if (
+    typeof sandboxCreated !== 'number' ||
+    !Number.isFinite(sandboxCreated) ||
+    (sandboxCreated !== 0 && sandboxCreated !== 1)
+  ) return false;
+  if (!['tokensIn', 'tokensOut', 'steps', 'estCostUsd']
+    .every((key) => explicitFiniteZero(run.usage, key))) return false;
+  if (!['diffFiles', 'diffLines', 'tokensIn', 'tokensOut', 'costUsd']
+    .every((key) => explicitFiniteZero(summary, key))) return false;
+  const outcome = run.proposalOutcome;
+  if (
+    !outcome ||
+    !ZERO_STEP_FAILOVER_OUTCOMES.has(outcome.kind) ||
+    summary.outcome !== outcome.kind ||
+    outcome.isPartial !== undefined ||
+    outcome.proposalId !== undefined ||
+    outcome.files !== undefined ||
+    outcome.insertions !== undefined ||
+    outcome.deletions !== undefined
+  ) return false;
+  return summary.proposalCreated === false && summary.proposalId === undefined;
+}
+
+function zeroStepCandidateFailure(
+  evidence: CandidateTerminalEvidence,
+  expected: {
+    runId: string;
+    backend: EngineId;
+    tier: EngineTier | null;
+    trajectoryId: string;
+  },
+): boolean {
+  const summary = evidence.runEventSummary;
+  const counts = summary?.actionCounts;
+  if (evidence.status !== 'failed' || evidence.workObserved !== false || !summary || !counts) return false;
+  if (
+    evidence.runId !== expected.runId ||
+    summary.runId !== expected.runId ||
+    summary.status !== 'failed' ||
+    evidence.engine !== expected.backend ||
+    evidence.engineTier !== expected.tier ||
+    evidence.trajectoryId !== expected.trajectoryId ||
+    evidence.delegation?.runId !== expected.runId ||
+    evidence.delegation.backend?.engine !== expected.backend ||
+    evidence.delegation.backend?.tier !== expected.tier
+  ) return false;
+  if (evidence.taskCount !== 0 || evidence.stepCount !== 0) return false;
+  if (!ZERO_STEP_REQUIRED_ZERO_ACTION_COUNTS
+    .every((key) => explicitFiniteZero(counts, key))) return false;
+  const sandboxCreated = counts.sandboxCreated;
+  if (
+    typeof sandboxCreated !== 'number' ||
+    !Number.isFinite(sandboxCreated) ||
+    (sandboxCreated !== 0 && sandboxCreated !== 1)
+  ) return false;
+  if (!['tokensIn', 'tokensOut', 'steps', 'estCostUsd']
+    .every((key) => explicitFiniteZero(evidence.usage, key))) return false;
+  if (!['diffFiles', 'diffLines', 'tokensIn', 'tokensOut', 'costUsd']
+    .every((key) => explicitFiniteZero(summary, key))) return false;
+  const outcome = evidence.proposalOutcome;
+  if (
+    !outcome ||
+    !ZERO_STEP_FAILOVER_OUTCOMES.has(outcome.kind) ||
+    summary.outcome !== outcome.kind ||
+    outcome.isPartial !== undefined ||
+    outcome.proposalId !== undefined ||
+    outcome.files !== undefined ||
+    outcome.insertions !== undefined ||
+    outcome.deletions !== undefined
+  ) return false;
+  return summary.proposalCreated === false && summary.proposalId === undefined;
+}
+
+function runStateFromCandidate(
+  candidate: CandidateResult,
+  fallbackRunId: string,
+  fallbackBackend: EngineId,
+): RunState {
+  const evidence = candidate.terminalEvidence;
+  if (!evidence) {
+    return {
+      id: candidate.runId ?? fallbackRunId,
+      status: 'done',
+      engine: candidate.engine ?? fallbackBackend,
+      usage: { tokensIn: 0, tokensOut: 0, steps: 0, estCostUsd: candidate.costUsd ?? 0 },
+      tasks: [],
+      steps: [],
+      ...(candidate.proposalOutcome ? { proposalOutcome: candidate.proposalOutcome } : {}),
+    } as unknown as RunState;
+  }
+  return {
+    id: evidence.runId,
+    status: evidence.status,
+    engine: evidence.engine,
+    ...(evidence.engineTier ? { engineTier: evidence.engineTier } : {}),
+    usage: evidence.usage
+      ? { ...evidence.usage }
+      : { tokensIn: 0, tokensOut: 0, steps: 0, estCostUsd: 0 },
+    tasks: Array.from({
+      length: Number.isSafeInteger(evidence.taskCount) ? evidence.taskCount! : 1,
+    }, () => ({})),
+    steps: Array.from({
+      length: Number.isSafeInteger(evidence.stepCount) ? evidence.stepCount! : 1,
+    }, () => ({})),
+    ...(evidence.trajectoryId ? { trajectoryId: evidence.trajectoryId } : {}),
+    ...(evidence.proposalOutcome ? { proposalOutcome: evidence.proposalOutcome } : {}),
+    ...(evidence.runEventSummary ? { runEventSummary: evidence.runEventSummary } : {}),
+    ...(evidence.evidenceOutcome ? { evidenceOutcome: evidence.evidenceOutcome } : {}),
+    ...(evidence.terminationReason ? { terminationReason: evidence.terminationReason } : {}),
+    ...(evidence.delegation ? {
+      delegationScope: {
+        schemaVersion: 1,
+        memoryMode: 'none',
+        ...(evidence.delegation.runId ? { runId: evidence.delegation.runId } : {}),
+        ...(evidence.delegation.backend ? { backend: evidence.delegation.backend } : {}),
+      },
+    } : {}),
+  } as unknown as RunState;
+}
+
+type BackendAdmissionFailure = 'not-installed' | 'quota' | 'subscription';
+type BackendAdmission =
+  | { allowed: true }
+  | { allowed: false; reason: BackendAdmissionFailure; detail: string };
+
+function subscriptionMaxPercent(cfg: AshlrConfig): number {
+  const raw = (cfg.foundry as Record<string, unknown> | undefined)?.['subscriptionMaxPercent'];
+  return typeof raw === 'number' && Number.isFinite(raw)
+    ? Math.min(100, Math.max(1, raw))
+    : 90;
+}
+
+function backendDispatchAdmission(
+  backend: EngineId,
+  cfg: AshlrConfig,
+  opts: { requireInstalled?: boolean } = {},
+): BackendAdmission {
+  if (opts.requireInstalled === true && !engineInstalled(backend, cfg)) {
+    return { allowed: false, reason: 'not-installed', detail: `${backend} is not installed` };
+  }
+  if (backend !== 'builtin' && !withinLimit(backend, cfg)) {
+    return { allowed: false, reason: 'quota', detail: `${backend} rolling quota is exhausted` };
+  }
+  if (isSubscriptionEngine(backend)) {
+    const subscription = subscriptionAllows(backend, {
+      maxPercent: subscriptionMaxPercent(cfg),
+      cfg,
+    });
+    if (!subscription.allowed) {
+      return { allowed: false, reason: 'subscription', detail: subscription.reason };
+    }
+  }
+  return { allowed: true };
+}
+
+async function openSameTierFailoverBackend(
+  item: WorkItem,
+  failedBackend: EngineId,
+  failedTier: EngineTier | null,
+  cfg: AshlrConfig,
+  maxSlotsPerBackend: number,
+  capacityAvailable: (backend: EngineId, slots: number) => boolean,
+  opts: { forceRefresh?: boolean } = {},
+): Promise<{ backend: EngineId; slots: number } | null> {
+  if (failedBackend === 'builtin' || failedTier === null || isTrustedGeneratedRepairItem(item)) {
+    return null;
+  }
+  const snapshot = await getResourceSnapshot(cfg, opts).catch(() => null);
+  if (!snapshot) return null;
+  const nowMs = Date.now();
+  const snapshotAt = Date.parse(snapshot.generatedAt);
+  if (
+    !Number.isFinite(snapshotAt) ||
+    snapshotAt > nowMs ||
+    nowMs - snapshotAt > RESOURCE_SNAPSHOT_MAX_AGE_MS ||
+    !Array.isArray(snapshot.backends)
+  ) return null;
+  for (const candidate of cfg.foundry?.allowedBackends ?? []) {
+    if (candidate === failedBackend || candidate === 'builtin') continue;
+    const candidateStates = snapshot.backends.filter((entry) => entry?.backend === candidate);
+    if (candidateStates.length !== 1) continue;
+    const state = candidateStates[0]!;
+    if (!state || state.availability !== 'open') continue;
+    const rowSnapshotAt = Date.parse(state.snapshotAt);
+    if (
+      !Number.isFinite(rowSnapshotAt) ||
+      rowSnapshotAt > nowMs ||
+      nowMs - rowSnapshotAt > RESOURCE_SNAPSHOT_MAX_AGE_MS ||
+      (state.backoffUntilMs !== null && (
+        typeof state.backoffUntilMs !== 'number' ||
+        !Number.isFinite(state.backoffUntilMs) ||
+        state.backoffUntilMs > nowMs
+      ))
+    ) continue;
+    const slots = slotsForBackendState(state, maxSlotsPerBackend);
+    if (slots <= 0) continue;
+    if (!capacityAvailable(candidate, slots)) continue;
+    if (!backendDispatchAdmission(candidate, cfg, { requireInstalled: true }).allowed) continue;
+    if (engineTierOf(candidate, cfg) !== failedTier) continue;
+    if (!effectiveGeneratedRepairCandidateAllowed(item, candidate, cfg)) continue;
+    return { backend: candidate, slots };
+  }
+  return null;
 }
 
 function generatedRepairAlternateBackend(
@@ -2403,8 +2701,14 @@ function bestOfNAuthoritativeNoWinnerProduction(
     production: DaemonDispatchProduction;
     candidateIndex: number;
   }>();
+  const preExecutionReasons = new Set<string>();
 
   for (const candidate of result.candidates) {
+    if (candidate.preExecutionControl) {
+      const reason = candidate.error?.trim();
+      if (reason) preExecutionReasons.add(normalizeBestOfNSignal(reason));
+      continue;
+    }
     const classified = bestOfNCandidateProduction(candidate, authority);
     const candidateProduction = classified?.production;
     if (candidateProduction && classified) {
@@ -2433,6 +2737,7 @@ function bestOfNAuthoritativeNoWinnerProduction(
   for (const entry of result.critique.noProposalReasons ?? []) {
     const reason = entry.reason.trim();
     if (!reason || reason === 'selection cancelled' || reason === 'cancelled') continue;
+    if (preExecutionReasons.has(normalizeBestOfNSignal(reason))) continue;
     const structuredAuthority = structuredErrorAuthorities.get(normalizeBestOfNSignal(reason))?.production;
     const outcome = structuredAuthority?.outcome ?? noProposalOutcomeFromReason(reason);
     const authoritativeReason = structuredAuthority?.outcome === 'proposal-capture-error'
@@ -2780,6 +3085,9 @@ function agentActionFromDispatchEvent(event: DispatchProductionEvent): AgentActi
     ...(event.proposalId ? { proposalId: event.proposalId } : {}),
     ...(event.runId ? { runId: event.runId } : {}),
     ...(event.trajectoryId ? { trajectoryId: event.trajectoryId } : {}),
+    ...(event.backend !== undefined ? { backend: event.backend } : {}),
+    ...(event.tier !== undefined ? { tier: event.tier } : {}),
+    ...(event.model !== undefined ? { model: event.model } : {}),
     ...(event.routeSnapshot ? { routeSnapshot: event.routeSnapshot } : {}),
     ...(event.runEventSummary ? { runEventSummary: event.runEventSummary } : {}),
     ...(event.evidenceOutcome ? { evidenceOutcome: event.evidenceOutcome } : {}),
@@ -2959,11 +3267,15 @@ function dispatchTrace(
   });
   const runId = fields.production?.runId ?? fields.runId;
   const trajectoryId = fields.production?.trajectoryId ?? fields.trajectoryId;
+  const producerOutcome = fields.production?.runEventSummary?.outcome;
   const summary = runEventSummary({
     ...(fields.production?.runEventSummary ?? {}),
     runId,
     status: fields.production?.runEventSummary?.status ?? (fields.dispatched ? 'done' : 'skipped'),
     outcome: fields.production?.outcome ?? (fields.dispatched ? 'unknown' : 'skipped'),
+    ...(producerOutcome && producerOutcome !== fields.production?.outcome
+      ? { failureCode: producerOutcome }
+      : {}),
     proposalCreated: fields.production?.outcome === 'proposal-created',
     proposalId: fields.production?.proposalId,
     diffFiles: fields.production?.diffFiles ?? fields.production?.runEventSummary?.diffFiles,
@@ -3024,6 +3336,7 @@ function recordDispatchStartAgentAction(
     assignedBy: string;
     reason: string;
     mode: 'swarm' | 'single' | 'best-of-n';
+    trajectoryId?: string;
   },
 ): void {
   const rs = routeSnapshot({
@@ -3040,7 +3353,7 @@ function recordDispatchStartAgentAction(
     costUsd: 0,
   });
   const causal = causalMetadata({
-    trajectoryId: `run:${fields.runId}`,
+    trajectoryId: fields.trajectoryId ?? `run:${fields.runId}`,
     itemId: item.id,
     runId: fields.runId,
     routeSnapshot: rs,
@@ -3069,6 +3382,119 @@ function recordDispatchStartAgentAction(
     reason: fields.reason,
     tags: ['dispatch-start', fields.mode, item.source],
     counts: { selected: 1, dispatched: 1 },
+  });
+}
+
+function recordZeroStepFailoverAgentAction(
+  item: WorkItem,
+  fields: {
+    ts: string;
+    machineId: string;
+    run: RunState;
+    trajectoryId: string;
+    backend: EngineId;
+    tier: EngineTier | null;
+    model?: string | null;
+    nextBackend: EngineId;
+    assignedBy: string;
+    reason: string;
+  },
+): void {
+  const failureOutcome = fields.run.proposalOutcome?.kind ?? 'engine-failed';
+  const summary = runEventSummary({
+    ...(fields.run.runEventSummary ?? {}),
+    runId: fields.run.id,
+    status: 'failed',
+    outcome: 'engine-failed',
+    failureCode: failureOutcome,
+    proposalCreated: false,
+    tokensIn: fields.run.usage.tokensIn,
+    tokensOut: fields.run.usage.tokensOut,
+    costUsd: fields.run.usage.estCostUsd,
+  });
+  const rs = routeSnapshot({
+    backend: fields.backend,
+    tier: fields.tier,
+    model: fields.model,
+    assignedBy: fields.assignedBy,
+    reason: fields.reason,
+  });
+  recordAgentAction({
+    schemaVersion: 1,
+    ts: fields.ts,
+    machineId: fields.machineId,
+    actor: 'daemon',
+    kind: 'dispatch',
+    outcome: 'failed',
+    action: 'daemon:dispatch-zero-step-failover',
+    summary: `${fields.backend} zero-step failure; retrying with ${fields.nextBackend}`,
+    repo: item.repo,
+    itemId: item.id,
+    source: item.source,
+    runId: fields.run.id,
+    trajectoryId: fields.trajectoryId,
+    ...(rs ? { routeSnapshot: rs } : {}),
+    ...(summary ? { runEventSummary: summary } : {}),
+    learningSource: 'agent-action',
+    labelBasis: 'dispatch-outcome',
+    backend: fields.backend,
+    tier: fields.tier,
+    ...(fields.model !== undefined ? { model: fields.model } : {}),
+    reason: failureOutcome,
+    tags: ['dispatch-failover', 'metadata-only'],
+    counts: {
+      spawnAttempts: summary?.actionCounts?.spawnAttempts ?? 0,
+      diffFiles: summary?.diffFiles ?? 0,
+      diffLines: summary?.diffLines ?? 0,
+      proposalCreated: 0,
+    },
+  });
+}
+
+function recordZeroStepFailoverBlockedAgentAction(
+  item: WorkItem,
+  fields: {
+    ts: string;
+    machineId: string;
+    run: RunState;
+    trajectoryId: string;
+    backend: EngineId;
+    tier: EngineTier | null;
+    model?: string | null;
+    reason: 'distributed-capacity-authority-unavailable' | 'best-of-n-capacity-authority-unavailable';
+  },
+): void {
+  const summary = runEventSummary({
+    ...(fields.run.runEventSummary ?? {}),
+    runId: fields.run.id,
+    status: 'failed',
+    outcome: 'engine-failed',
+    failureCode: fields.run.proposalOutcome?.kind,
+    proposalCreated: false,
+  });
+  recordAgentAction({
+    schemaVersion: 1,
+    ts: fields.ts,
+    machineId: fields.machineId,
+    actor: 'daemon',
+    kind: 'dispatch',
+    outcome: 'blocked',
+    action: 'daemon:dispatch-zero-step-failover-blocked',
+    summary: `${fields.backend} zero-step failover blocked by capacity authority`,
+    repo: item.repo,
+    itemId: item.id,
+    source: item.source,
+    runId: fields.run.id,
+    trajectoryId: fields.trajectoryId,
+    ...(summary ? { runEventSummary: summary } : {}),
+    learningSource: 'agent-action',
+    labelBasis: 'dispatch-outcome',
+    backend: fields.backend,
+    tier: fields.tier,
+    ...(fields.model !== undefined ? { model: fields.model } : {}),
+    reason: fields.reason,
+    tags: ['dispatch-failover', 'metadata-only', 'blocked'],
+    counts: { selected: 1, dispatched: 0 },
   });
 }
 
@@ -3226,6 +3652,153 @@ class TieredPool {
   finish(tier: 'local' | 'cloud'): void {
     if (tier === 'local') this._localInFlight = Math.max(0, this._localInFlight - 1);
     else this._cloudInFlight = Math.max(0, this._cloudInFlight - 1);
+  }
+}
+
+interface BackendCapacityReservation {
+  backend: EngineId;
+  released: boolean;
+}
+
+/** Tracks the concrete in-flight slots admitted by one concurrent dispatch plan. */
+class BackendCapacityReservations {
+  private readonly active = new Map<EngineId, number>();
+
+  constructor(private readonly caps: ReadonlyMap<EngineId, number>) {}
+
+  canReserve(backend: EngineId): boolean {
+    return (this.active.get(backend) ?? 0) < (this.caps.get(backend) ?? 0);
+  }
+
+  reserve(backend: EngineId): BackendCapacityReservation | null {
+    if (!this.canReserve(backend)) return null;
+    this.active.set(backend, (this.active.get(backend) ?? 0) + 1);
+    return { backend, released: false };
+  }
+
+  transfer(reservation: BackendCapacityReservation, nextBackend: EngineId): boolean {
+    if (reservation.released || !this.canReserve(nextBackend)) return false;
+    this.active.set(
+      reservation.backend,
+      Math.max(0, (this.active.get(reservation.backend) ?? 0) - 1),
+    );
+    this.active.set(nextBackend, (this.active.get(nextBackend) ?? 0) + 1);
+    reservation.backend = nextBackend;
+    return true;
+  }
+
+  release(reservation: BackendCapacityReservation | undefined): void {
+    if (!reservation || reservation.released) return;
+    reservation.released = true;
+    this.active.set(
+      reservation.backend,
+      Math.max(0, (this.active.get(reservation.backend) ?? 0) - 1),
+    );
+  }
+}
+
+interface BackendExecutionReservation {
+  backend: EngineId;
+  released: boolean;
+}
+
+function retainedBackendProcess(run: RunState | null | undefined): boolean {
+  const retention = (run as (RunState & { sandboxRetention?: SandboxRetentionEvidence }) | null | undefined)
+    ?.sandboxRetention;
+  return retention?.status === 'retained' && retention.reason === 'process-cleanup-unconfirmed';
+}
+
+class BackendCapacityUnavailableError extends Error {
+  constructor(readonly backend: EngineId, readonly required = 1) {
+    super(`backend capacity unavailable for ${backend} (${required} slot(s) required)`);
+    this.name = 'BackendCapacityUnavailableError';
+  }
+}
+
+class BackendCapacityWaitAbortedError extends Error {
+  constructor(readonly backend: EngineId) {
+    super(`backend capacity wait aborted for ${backend}`);
+    this.name = 'BackendCapacityWaitAbortedError';
+  }
+}
+
+/** Tick-wide active direct executions and retries in every dispatch mode. */
+class TickBackendExecutionReservations {
+  private readonly active = new Map<EngineId, number>();
+  private readonly knownCaps = new Map<EngineId, number>();
+  private readonly waiters = new Map<EngineId, Set<() => void>>();
+
+  configure(backend: EngineId, cap: number): void {
+    if (!Number.isSafeInteger(cap) || cap < 0) return;
+    this.knownCaps.set(backend, Math.min(this.knownCaps.get(backend) ?? cap, cap));
+  }
+
+  canReserve(backend: EngineId, cap: number): boolean {
+    if (!Number.isSafeInteger(cap) || cap <= 0) return false;
+    const effectiveCap = Math.min(cap, this.knownCaps.get(backend) ?? cap);
+    return effectiveCap > 0 && (this.active.get(backend) ?? 0) < effectiveCap;
+  }
+
+  reserve(backend: EngineId, cap: number): BackendExecutionReservation | null {
+    if (!this.canReserve(backend, cap)) return null;
+    this.configure(backend, cap);
+    this.active.set(backend, (this.active.get(backend) ?? 0) + 1);
+    return { backend, released: false };
+  }
+
+  assertAvailable(backends: readonly EngineId[]): void {
+    for (const backend of new Set(backends)) {
+      if (this.knownCaps.get(backend) === 0) throw new BackendCapacityUnavailableError(backend);
+    }
+  }
+
+  async acquire(backend: EngineId, signal: AbortSignal): Promise<BackendExecutionReservation> {
+    if (this.knownCaps.get(backend) === 0) throw new BackendCapacityUnavailableError(backend);
+    while (
+      this.knownCaps.has(backend) &&
+      (this.active.get(backend) ?? 0) >= this.knownCaps.get(backend)!
+    ) {
+      if (this.knownCaps.get(backend) === 0) throw new BackendCapacityUnavailableError(backend);
+      if (signal.aborted) throw new BackendCapacityWaitAbortedError(backend);
+      await new Promise<void>((resolve) => {
+        const waiters = this.waiters.get(backend) ?? new Set<() => void>();
+        const notify = (): void => {
+          signal.removeEventListener('abort', notify);
+          waiters.delete(notify);
+          resolve();
+        };
+        waiters.add(notify);
+        this.waiters.set(backend, waiters);
+        signal.addEventListener('abort', notify, { once: true });
+      });
+    }
+    if (signal.aborted) throw new BackendCapacityWaitAbortedError(backend);
+    this.active.set(backend, (this.active.get(backend) ?? 0) + 1);
+    return { backend, released: false };
+  }
+
+  release(reservation: BackendExecutionReservation | null): void {
+    if (!reservation || reservation.released) return;
+    reservation.released = true;
+    this.active.set(
+      reservation.backend,
+      Math.max(0, (this.active.get(reservation.backend) ?? 0) - 1),
+    );
+    const waiters = this.waiters.get(reservation.backend);
+    if (waiters) {
+      this.waiters.delete(reservation.backend);
+      for (const notify of waiters) notify();
+    }
+  }
+
+  quarantine(reservation: BackendExecutionReservation | null): void {
+    if (!reservation || reservation.released) return;
+    reservation.released = true;
+    this.knownCaps.set(reservation.backend, 0);
+    const waiters = this.waiters.get(reservation.backend);
+    if (!waiters) return;
+    this.waiters.delete(reservation.backend);
+    for (const notify of waiters) notify();
   }
 }
 
@@ -4997,12 +5570,17 @@ export async function tick(
       );
     }
   }
-  const workedSet = coordinator.claimItemsByLane(
+  const claimedWork = coordinator.claimItemsByLaneWithGenerations(
     claimLanes,
     selectCount,
     machineId,
     claimCooldownPolicies,
   );
+  const workedSet = claimedWork.map((claimed) => claimed.item);
+  const claimGenerationByItemId = new Map(
+    claimedWork.map((claimed) => [claimed.item.id, claimed.claim] as const),
+  );
+  const expectedClaimGenerations = claimedWork.map((claimed) => claimed.claim);
   selected = workedSet;
   const drainSelectedItems = drainMode
     ? workedSet.filter((item) => isDrainCandidate(item, drainMode))
@@ -5025,8 +5603,9 @@ export async function tick(
   const selectionBlockers = summarizeSelectionBlockers(selectionTelemetryItems);
   if (!stillOwnsTick()) {
     try {
-      const claimedIds = workedSet.map((item) => item.id);
-      if (claimedIds.length > 0) coordinator.release(claimedIds, machineId);
+      if (expectedClaimGenerations.length > 0) {
+        coordinator.releaseClaimGenerations(expectedClaimGenerations, machineId);
+      }
     } catch {
       // Exact shared claims expire safely if best-effort shutdown release fails.
     }
@@ -5097,8 +5676,9 @@ export async function tick(
       return ownershipLostTick({ ts: now, itemsConsidered: workedSet.length, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });
     }
     try {
-      const claimedIds = workedSet.map((i) => i.id);
-      if (claimedIds.length > 0) coordinator.release(claimedIds, machineId);
+      if (expectedClaimGenerations.length > 0) {
+        coordinator.releaseClaimGenerations(expectedClaimGenerations, machineId);
+      }
     } catch (err) {
       console.warn('[ashlr] daemon:tick dry-run coordinator release failed:', (err as Error)?.message ?? err);
     }
@@ -5215,17 +5795,25 @@ export async function tick(
     return true;
   };
   try {
-  const initiallyRenewed = startLeaseRenewer();
-  const expectedClaimIds = new Set(workedSetIds);
-  const renewedClaimIds = new Set(initiallyRenewed);
+  startLeaseRenewer();
+  const initiallyFenced = coordinator.fenceClaimGenerations(expectedClaimGenerations, machineId);
+  const expectedClaimIds = new Map(
+    expectedClaimGenerations.map((claim) => [claim.itemId, claim.generationId]),
+  );
+  const renewedClaimIds = new Map(
+    initiallyFenced.map((claim) => [claim.itemId, claim.generationId]),
+  );
   const exactInitialFence =
     expectedClaimIds.size === workedSetIds.length &&
-    renewedClaimIds.size === initiallyRenewed.length &&
+    renewedClaimIds.size === initiallyFenced.length &&
     expectedClaimIds.size === renewedClaimIds.size &&
-    [...expectedClaimIds].every((itemId) => renewedClaimIds.has(itemId));
+    [...expectedClaimIds].every(([itemId, generationId]) =>
+      renewedClaimIds.get(itemId) === generationId);
   if (workedSetIds.length > 0 && !exactInitialFence) {
     stopLeaseRenewer();
-    try { coordinator.release(workedSetIds, machineId); } catch { /* exact release is best effort */ }
+    try {
+      coordinator.releaseClaimGenerations(expectedClaimGenerations, machineId);
+    } catch { /* exact release is best effort */ }
     return persistenceRefusal('tick refused: exact shared queue claim authority unavailable after selection');
   }
 
@@ -5240,7 +5828,9 @@ export async function tick(
 
   if (!stillOwnsTick()) {
     stopLeaseRenewer();
-    try { coordinator.release(workedSetIds, machineId); } catch { /* exact release is best effort */ }
+    try {
+      coordinator.releaseClaimGenerations(expectedClaimGenerations, machineId);
+    } catch { /* exact release is best effort */ }
     return ownershipLostTick({ ts: now, itemsConsidered: workedSet.length, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });
   }
 
@@ -5255,7 +5845,9 @@ export async function tick(
   if (!spendGuard.ok) {
     stopLeaseRenewer();
     try {
-      if (workedSetIds.length > 0) coordinator.release(workedSetIds, machineId);
+      if (expectedClaimGenerations.length > 0) {
+        coordinator.releaseClaimGenerations(expectedClaimGenerations, machineId);
+      }
     } catch (err) {
       console.warn('[ashlr] daemon:tick coordinator release after spend-guard failure failed:', (err as Error)?.message ?? err);
     }
@@ -5351,6 +5943,36 @@ export async function tick(
   });
 
   const attemptIds = new Map(workedSet.map((item) => [item.id, createOuterAttemptIdentity()] as const));
+  const concurrentMaxSlotsPerBackend: number =
+    typeof (routingCfg.foundry?.fabric as Record<string, unknown> | undefined)?.['maxSlotsPerBackend'] === 'number'
+      ? Math.max(1, Math.floor(
+          (routingCfg.foundry!.fabric as Record<string, unknown>)['maxSlotsPerBackend'] as number,
+        ))
+      : 3;
+  let backendCapacityReservations: BackendCapacityReservations | null = null;
+  const backendExecutionReservations = new TickBackendExecutionReservations();
+  for (const backend of new Set<EngineId>([
+    'builtin',
+    ...(routingCfg.foundry?.allowedBackends ?? []),
+  ])) {
+    backendExecutionReservations.configure(backend, concurrentMaxSlotsPerBackend);
+  }
+  const executionResourceSnapshot = selectionResourceSnapshot ??
+    await getResourceSnapshot(routingCfg).catch(() => null);
+  const executionSnapshotAt = Date.parse(executionResourceSnapshot?.generatedAt ?? '');
+  if (
+    executionResourceSnapshot &&
+    Number.isFinite(executionSnapshotAt) &&
+    executionSnapshotAt <= Date.now() &&
+    Date.now() - executionSnapshotAt <= RESOURCE_SNAPSHOT_MAX_AGE_MS
+  ) {
+    for (const state of executionResourceSnapshot.backends) {
+      const rowAt = Date.parse(state.snapshotAt);
+      if (!Number.isFinite(rowAt) || rowAt > Date.now() || Date.now() - rowAt > RESOURCE_SNAPSHOT_MAX_AGE_MS) continue;
+      const slots = slotsForBackendState(state, concurrentMaxSlotsPerBackend);
+      backendExecutionReservations.configure(state.backend, slots);
+    }
+  }
   class QueueClaimAuthorityError extends Error {
     constructor(itemId: string) {
       super(`shared queue claim authority unavailable for ${itemId}`);
@@ -5399,14 +6021,27 @@ export async function tick(
       skipReason: 'queue-lease-lost',
     }),
   });
-  const tasks: Array<{ tier: 'local' | 'cloud'; run: (assignedBackend?: EngineId, assignedReason?: string, assignedModel?: string | null) => Promise<ItemOutcome> }> = workedSet.map((item, _taskIdx) => {
+  const tasks: Array<{
+    tier: 'local' | 'cloud';
+    run: (
+      assignedBackend?: EngineId,
+      assignedReason?: string,
+      assignedModel?: string | null,
+      capacityReservation?: BackendCapacityReservation,
+    ) => Promise<ItemOutcome>;
+  }> = workedSet.map((item, _taskIdx) => {
     const attemptId = attemptIds.get(item.id)!;
     const leaseController = leaseAbortControllers.get(item.id)!;
     const dispatchSignal = opts.signal
       ? AbortSignal.any([opts.signal, leaseController.signal])
       : leaseController.signal;
+    const expectedClaim = claimGenerationByItemId.get(item.id);
     const beginQueueExecution = (): void => {
-      if (dispatchSignal.aborted || !coordinator.beginExecution(item.id, machineId)) {
+      if (
+        dispatchSignal.aborted ||
+        !expectedClaim ||
+        !coordinator.beginClaimGenerationExecution(expectedClaim, machineId)
+      ) {
         if (!leaseController.signal.aborted) {
           leaseController.abort(new Error(`shared queue claim authority lost for ${item.id}`));
         }
@@ -5415,7 +6050,12 @@ export async function tick(
     };
     return ({
     tier: itemTiers[_taskIdx] ?? 'local',
-    run: async (assignedBackend?: EngineId, assignedReason?: string, assignedModel?: string | null): Promise<ItemOutcome> => {
+    run: async (
+      assignedBackend?: EngineId,
+      assignedReason?: string,
+      assignedModel?: string | null,
+      capacityReservation?: BackendCapacityReservation,
+    ): Promise<ItemOutcome> => {
       // Re-check kill switch before each item dispatch.
       if (stopRequested()) return stopRequestedOutcome(item, attemptId);
       if (leaseController.signal.aborted) return queueLeaseLostOutcome(item, attemptId);
@@ -5461,6 +6101,7 @@ export async function tick(
       let selectedModel: string | null | undefined;
       let dispatch: DaemonDispatchTrace | undefined;
       let runTrajectoryId = `run:${attemptId}`;
+      let activeAttemptId = attemptId;
 
       // M334 stage 1: observe-only gateway shadow. Runs the M247 gateway
       // BESIDE the live legacy decision and records the comparison — THE
@@ -5671,7 +6312,8 @@ export async function tick(
         selectedModel = routed.model;
         assignmentReason = routed.reason;
         assignedBy = 'router';
-        if (backend !== 'builtin' && !withinLimit(backend, routingCfg)) {
+        const initialAdmission = backendDispatchAdmission(backend, routingCfg);
+        if (!initialAdmission.allowed && initialAdmission.reason === 'quota') {
           assignmentReason = `${assignmentReason}; quota fallback to builtin`;
           assignedBy = 'quota-fallback';
           backend = 'builtin';
@@ -5683,49 +6325,38 @@ export async function tick(
         // KNOWN subscription window is at or above the cap (default 90%). Reads
         // cfg.foundry.subscriptionMaxPercent defensively with a fallback default.
         // allowed:true when usage is unknown (claude) or under the cap.
-        if (isSubscriptionEngine(backend)) {
-          // Read maxPercent from liveCfg.foundry defensively — no types.ts change.
-          // Clamp to [1,100]: a negative or zero value would disable the throttle
-          // (anything is "under 0%"), and >100 could never fire (nothing is ">100%").
-          const rawPct = (liveCfg.foundry as Record<string, unknown> | undefined
-            )?.['subscriptionMaxPercent'];
-          const maxPct: number = typeof rawPct === 'number'
-            ? Math.min(100, Math.max(1, rawPct))
-            : 90;
-          const subCheck = subscriptionAllows(backend, { maxPercent: maxPct });
-          if (!subCheck.allowed) {
-            // M334: shadow the BLOCKED legacy decision — a gateway that would
-            // have dispatched here is the safety-relevant divergence class.
-            await shadowGateway({
-              backend: String(backend),
-              tier: backendTier === null ? null : String(backendTier),
-              model: selectedModel ?? null,
+        if (!initialAdmission.allowed && initialAdmission.reason === 'subscription') {
+          // M334: shadow the BLOCKED legacy decision — a gateway that would
+          // have dispatched here is the safety-relevant divergence class.
+          await shadowGateway({
+            backend: String(backend),
+            tier: backendTier === null ? null : String(backendTier),
+            model: selectedModel ?? null,
+            dispatched: false,
+          });
+          audit({
+            action: 'daemon:tick',
+            repo: item.repo,
+            sandboxId: null,
+            summary: `throttled: ${backend} subscription window — ${initialAdmission.detail}`,
+            result: 'ok',
+          });
+          return {
+            item,
+            spentUsd: 0,
+            dispatched: false,
+            dispatch: dispatchTrace(item, {
+              backend,
+              tier: engineTierOf(backend, routingCfg),
+              model: selectedModel,
+              assignedBy: 'subscription-throttle',
+              reason: `throttled: ${backend} subscription window — ${initialAdmission.detail}`,
               dispatched: false,
-            });
-            audit({
-              action: 'daemon:tick',
-              repo: item.repo,
-              sandboxId: null,
-              summary: `throttled: ${backend} subscription window — ${subCheck.reason}`,
-              result: 'ok',
-            });
-            return {
-              item,
-              spentUsd: 0,
-              dispatched: false,
-              dispatch: dispatchTrace(item, {
-                backend,
-                tier: engineTierOf(backend, routingCfg),
-                model: selectedModel,
-                assignedBy: 'subscription-throttle',
-                reason: `throttled: ${backend} subscription window — ${subCheck.reason}`,
-                dispatched: false,
-                runId: attemptId,
-                trajectoryId: `run:${attemptId}`,
-                skipReason: 'subscription-throttle',
-              }),
-            };
-          }
+              runId: attemptId,
+              trajectoryId: `run:${attemptId}`,
+              skipReason: 'subscription-throttle',
+            }),
+          };
         }
 
         // M53: learned-router recommend + budget cascade (flag-off: no-op when
@@ -5803,12 +6434,14 @@ export async function tick(
         selectedModel = configuredModelForBackend(backend, routingCfg);
       }
       backendTier = engineTierOf(backend, routingCfg);
-      if (backend !== 'builtin' && !withinLimit(backend, routingCfg)) {
+      let finalAdmission = backendDispatchAdmission(backend, routingCfg);
+      if (!finalAdmission.allowed && finalAdmission.reason === 'quota') {
         assignmentReason = `${assignmentReason}; final quota fallback to builtin`;
         assignedBy = 'quota-fallback';
         backend = 'builtin';
         backendTier = engineTierOf(backend, routingCfg);
         selectedModel = null;
+        finalAdmission = backendDispatchAdmission(backend, routingCfg);
       }
       if (isTrustedGeneratedRepairItem(item)) {
         let retryPolicy = effectiveGeneratedRepairRetryPolicy(item);
@@ -5860,19 +6493,14 @@ export async function tick(
           };
         }
       }
-      if (isSubscriptionEngine(backend)) {
-        const rawPct = (routingCfg.foundry as Record<string, unknown> | undefined
-          )?.['subscriptionMaxPercent'];
-        const maxPct: number = typeof rawPct === 'number'
-          ? Math.min(100, Math.max(1, rawPct))
-          : 90;
-        const subCheck = subscriptionAllows(backend, { maxPercent: maxPct });
-        if (!subCheck.allowed) {
+      finalAdmission = backendDispatchAdmission(backend, routingCfg);
+      if (!finalAdmission.allowed) {
+        if (finalAdmission.reason === 'subscription') {
           audit({
             action: 'daemon:tick',
             repo: item.repo,
             sandboxId: null,
-            summary: `throttled: ${backend} subscription window — ${subCheck.reason}`,
+            summary: `throttled: ${backend} subscription window — ${finalAdmission.detail}`,
             result: 'ok',
           });
           return {
@@ -5884,7 +6512,7 @@ export async function tick(
               tier: backendTier,
               model: selectedModel,
               assignedBy: 'subscription-throttle',
-              reason: `throttled: ${backend} subscription window — ${subCheck.reason}`,
+              reason: `throttled: ${backend} subscription window — ${finalAdmission.detail}`,
               dispatched: false,
               runId: attemptId,
               trajectoryId: `run:${attemptId}`,
@@ -5892,6 +6520,22 @@ export async function tick(
             }),
           };
         }
+        return {
+          item,
+          spentUsd: 0,
+          dispatched: false,
+          dispatch: dispatchTrace(item, {
+            backend,
+            tier: backendTier,
+            model: selectedModel,
+            assignedBy: 'backend-admission',
+            reason: finalAdmission.detail,
+            dispatched: false,
+            runId: attemptId,
+            trajectoryId: `run:${attemptId}`,
+            skipReason: 'backend-admission-denied',
+          }),
+        };
       }
       if (isTrustedGeneratedRepairItem(item) &&
         !reserveGeneratedRepairExecution(item, attemptId, backend, backendTier)) {
@@ -5916,7 +6560,7 @@ export async function tick(
       const dispatchCfg = dispatchConfigForItem(item, routingCfg);
       const itemBudget = { maxTokens: perItemMaxTokens, maxSteps: 100, allowCloud: false };
       const workItemGenerationId = generatedRepairGenerationId(item) ?? undefined;
-      const delegationScope = scopeFromWorkItem(item, {
+      let delegationScope = scopeFromWorkItem(item, {
         runId: attemptId,
         budget: itemBudget,
         backend: {
@@ -6095,6 +6739,17 @@ export async function tick(
           selectedModel = routingCfg.foundry?.models?.[backend] ?? null;
           assignedBy = 'ashlrcode-executor';
           assignmentReason = `${assignmentReason}; ashlrcodeExecutor sandboxed ${previousBackend} via ashlrcode`;
+          delegationScope = scopeFromWorkItem(item, {
+            runId: attemptId,
+            budget: itemBudget,
+            backend: {
+              engine: backend,
+              model: selectedModel ?? null,
+              tier: backendTier,
+              assignedBy,
+              reason: assignmentReason,
+            },
+          });
         }
         // M334: shadow the about-to-dispatch legacy decision (observe-only).
         await shadowGateway({
@@ -6129,6 +6784,9 @@ export async function tick(
                 !!c && typeof c.engine === 'string')
               .filter((c) =>
                 ((routingCfg.foundry?.allowedBackends ?? []) as string[]).includes(c.engine))
+              .filter((c) => backendDispatchAdmission(c.engine as EngineId, routingCfg, {
+                requireInstalled: true,
+              }).allowed)
               .filter((c) =>
                 !isTrustedGeneratedRepairItem(item) ||
                 effectiveGeneratedRepairCandidateAllowed(item, c.engine as EngineId, routingCfg))
@@ -6145,30 +6803,99 @@ export async function tick(
           // runBestOfN never throws; if all candidates fail, winner is undefined
           // and we fall through to a zero-cost no-proposal outcome.
           if (stopRequested()) return stopRequestedOutcome(item, attemptId);
-          const launch = beginRejectedCaptureRecoveryDispatch(item, () => {
-            if (!stillOwnsTick()) throw new Error('daemon lock ownership lost before best-of-n launch');
-            beginQueueExecution();
-            recordUse(backend!);
-            recordDispatchStartAgentAction(item, {
-              ts: new Date().toISOString(), machineId, runId: attemptId, backend: backend!,
-              tier: backendTier, model: selectedModel, assignedBy, reason: assignmentReason, mode: 'best-of-n',
-            });
-            if (!stillOwnsTick()) throw new Error('daemon lock ownership lost before best-of-n producer start');
-            if (!markGeneratedRepairExecutionLaunched(item)) {
-              throw new Error('generated repair launch reservation could not be persisted');
-            }
-            return runBestOfN(item, routingCfg, {
-              n: bestOfN, engine: backend, model: selectedModel,
-              ...(_bonCandidates && _bonCandidates.length > 0 ? { candidates: _bonCandidates as never } : {}),
-              workItemId: item.id, workItemGenerationId, workSource: item.source,
-              delegationScope, attemptId, shadowSkillCards, shadowSkillSelectedAt,
-              signal: dispatchSignal,
-            });
-          });
-          if (!launch.authorized) return authorityUnavailableOutcome(item, attemptId);
-          dispatched = true;
-          backendDispatch[backend!] = (backendDispatch[backend!] ?? 0) + 1;
-          const bonResult = await launch.value;
+          const candidateBackends = Array.from({ length: bestOfN }, (_, index) =>
+            _bonCandidates && _bonCandidates.length > 0
+              ? _bonCandidates[index % _bonCandidates.length]!.engine as EngineId
+              : backend!);
+          backendExecutionReservations.assertAvailable(candidateBackends);
+          let bestOfNDispatchStarted = false;
+          let bestOfNStartAuthorityUnavailable = false;
+          if (stopRequested() || !stillOwnsTick()) return authorityUnavailableOutcome(item, attemptId);
+          const bonResult = await runBestOfN(item, routingCfg, {
+                  n: bestOfN, engine: backend, model: selectedModel,
+                  ...(_bonCandidates && _bonCandidates.length > 0 ? { candidates: _bonCandidates as never } : {}),
+                  workItemId: item.id, workItemGenerationId, workSource: item.source,
+                  delegationScope, attemptId, shadowSkillCards, shadowSkillSelectedAt,
+                  signal: dispatchSignal,
+                  candidateAdmission: async (candidateBackend) => {
+                    const initialAdmission = backendDispatchAdmission(candidateBackend, routingCfg, {
+                      requireInstalled: true,
+                    });
+                    if (!initialAdmission.allowed) {
+                      throw new BestOfNCandidateAdmissionError(
+                        'admission-denied',
+                        `best-of-n candidate admission denied: ${initialAdmission.detail}`,
+                      );
+                    }
+                    let reservation: BackendExecutionReservation;
+                    try {
+                      reservation = await backendExecutionReservations.acquire(
+                        candidateBackend,
+                        dispatchSignal,
+                      );
+                    } catch (error) {
+                      if (error instanceof BackendCapacityWaitAbortedError) {
+                        throw new BestOfNCandidateAdmissionError('capacity-wait-aborted', error.message);
+                      }
+                      if (error instanceof BackendCapacityUnavailableError) {
+                        throw new BestOfNCandidateAdmissionError('admission-denied', error.message);
+                      }
+                      throw error;
+                    }
+                    const finalCandidateAdmission = backendDispatchAdmission(candidateBackend, routingCfg, {
+                      requireInstalled: true,
+                    });
+                    if (!finalCandidateAdmission.allowed) {
+                      backendExecutionReservations.release(reservation);
+                      throw new BestOfNCandidateAdmissionError(
+                        'admission-denied',
+                        `best-of-n candidate admission denied: ${finalCandidateAdmission.detail}`,
+                      );
+                    }
+                    return (retained = false) => retained
+                      ? backendExecutionReservations.quarantine(reservation)
+                      : backendExecutionReservations.release(reservation);
+                  },
+                  candidateExecutionStart: async (candidateBackend) => {
+                    if (!bestOfNDispatchStarted) {
+                      try {
+                        const launch = beginRejectedCaptureRecoveryDispatch(item, () => {
+                          if (!stillOwnsTick()) {
+                            throw new Error('daemon lock ownership lost before best-of-n launch');
+                          }
+                          beginQueueExecution();
+                          recordDispatchStartAgentAction(item, {
+                            ts: new Date().toISOString(), machineId, runId: attemptId, backend: backend!,
+                            tier: backendTier, model: selectedModel, assignedBy,
+                            reason: assignmentReason, mode: 'best-of-n',
+                          });
+                          if (!stillOwnsTick()) {
+                            throw new Error('daemon lock ownership lost before best-of-n producer start');
+                          }
+                          if (!markGeneratedRepairExecutionLaunched(item)) {
+                            throw new Error('generated repair launch reservation could not be persisted');
+                          }
+                          bestOfNDispatchStarted = true;
+                          dispatched = true;
+                          backendDispatch[backend!] = (backendDispatch[backend!] ?? 0) + 1;
+                        });
+                        if (!launch.authorized) {
+                          throw new Error('rejected capture recovery authority unavailable');
+                        }
+                      } catch {
+                        bestOfNStartAuthorityUnavailable = true;
+                        throw new BestOfNCandidateAdmissionError(
+                          'admission-denied',
+                          'best-of-n execution authority unavailable',
+                        );
+                      }
+                    }
+                    recordUse(candidateBackend);
+                  },
+                });
+          if (!bestOfNDispatchStarted && bestOfNStartAuthorityUnavailable) {
+            return authorityUnavailableOutcome(item, attemptId);
+          }
           bonBillable = bonResult.critique.billableCostUsd ?? 0;
           if (!stillOwnsTick()) {
             swarmSpent = bonBillable;
@@ -6193,6 +6920,71 @@ export async function tick(
             };
           }
           if (!bonResult.winner) {
+            let candidateWorkObserved = bonResult.candidates.some((candidate) =>
+              typeof candidate.costUsd === 'number' && candidate.costUsd > 0);
+            for (const candidate of bonResult.candidates) {
+              const candidateEvidence = candidate.terminalEvidence;
+              if (!candidateEvidence) continue;
+              candidateWorkObserved = candidateWorkObserved || candidateEvidence.workObserved;
+              const candidateRunId = candidate.runId;
+              if (!candidateRunId || candidateEvidence.runId !== candidateRunId) continue;
+              const candidateBackend = candidate.engine &&
+                (routingCfg.foundry?.allowedBackends ?? []).includes(candidate.engine)
+                ? candidate.engine
+                : backend!;
+              const candidateTier = candidateEvidence.engineTier ?? engineTierOf(candidateBackend, routingCfg);
+              const candidateTrajectoryId = candidate.trajectoryId ?? `run:${candidateRunId}`;
+              const zeroStep = zeroStepCandidateFailure(candidateEvidence, {
+                runId: candidateRunId,
+                backend: candidateBackend,
+                tier: candidateTier,
+                trajectoryId: candidateTrajectoryId,
+              });
+              if (!zeroStep) continue;
+              candidateWorkObserved = true;
+              recordZeroStepFailoverBlockedAgentAction(item, {
+                ts: new Date().toISOString(),
+                machineId,
+                run: runStateFromCandidate(candidate, attemptId, candidateBackend),
+                trajectoryId: candidateTrajectoryId,
+                backend: candidateBackend,
+                tier: candidateTier,
+                model: candidate.model,
+                reason: 'best-of-n-capacity-authority-unavailable',
+              });
+            }
+            const allCandidatesStoppedBeforeExecution =
+              bonResult.candidates.length > 0 &&
+              !candidateWorkObserved &&
+              bonResult.candidates.every((candidate) => candidate.preExecutionControl !== undefined);
+            if (allCandidatesStoppedBeforeExecution && !dispatchSignal.aborted) {
+              dispatched = false;
+              const preExecutionReason = bonResult.candidates
+                .map((candidate) => candidate.error?.trim())
+                .find((reason): reason is string => !!reason) ?? 'best-of-n candidate admission unavailable';
+              return {
+                item,
+                spentUsd: 0,
+                dispatched: false,
+                dispatch: dispatchTrace(item, {
+                  backend,
+                  tier: backendTier,
+                  model: selectedModel,
+                  assignedBy: 'resource-monitor',
+                  reason: boundedText(preExecutionReason, 220),
+                  dispatched: false,
+                  spentUsd: 0,
+                  runId: attemptId,
+                  trajectoryId: `run:${attemptId}`,
+                  skipReason: 'backend-admission-denied',
+                }),
+              };
+            }
+            if (dispatchSignal.aborted && !candidateWorkObserved) {
+              return leaseController.signal.aborted && opts.signal?.aborted !== true
+                ? queueLeaseLostOutcome(item, attemptId)
+                : stopRequestedOutcome(item, attemptId);
+            }
             // All candidates were empty/failing — still count what the fan-out
             // actually spent (M333: the pre-M333 $0 under-reported real spend).
             swarmSpent = bonBillable;
@@ -6235,37 +7027,75 @@ export async function tick(
               }),
             };
           }
-          // Winner's underlying run state lives in the candidate's state field.
-          // Cast to the shape runGoal returns (id, status, usage).
-          runState = (bonResult.winner as unknown as { state: Awaited<ReturnType<typeof runGoal>> }).state
-            ?? { id: bonResult.winner.proposalId ?? `bon-${Date.now()}`, status: 'done' as const, usage: undefined };
+          runState = runStateFromCandidate(bonResult.winner, attemptId, backend!);
           runTrajectoryId = bonResult.winner.trajectoryId ?? `run:${runState.id}`;
+          const candidateBackend = runState.engine as EngineId | undefined;
+          const observedBackend = candidateBackend &&
+            (routingCfg.foundry?.allowedBackends ?? []).includes(candidateBackend)
+            ? candidateBackend
+            : backend!;
+          const observedTier = runState.engineTier ?? engineTierOf(observedBackend, routingCfg);
+          if (zeroStepBackendFailure(runState, {
+            runId: runState.id,
+            backend: observedBackend,
+            tier: observedTier,
+            trajectoryId: runTrajectoryId,
+          })) {
+            recordZeroStepFailoverBlockedAgentAction(item, {
+              ts: new Date().toISOString(),
+              machineId,
+              run: runState,
+              trajectoryId: runTrajectoryId,
+              backend: observedBackend,
+              tier: observedTier,
+              model: selectedModel,
+              reason: 'best-of-n-capacity-authority-unavailable',
+            });
+          }
         } else {
           if (stopRequested()) return stopRequestedOutcome(item, attemptId);
-          const launch = beginRejectedCaptureRecoveryDispatch(item, () => {
-            if (!stillOwnsTick()) throw new Error('daemon lock ownership lost before direct launch');
-            beginQueueExecution();
-            recordUse(backend!);
-            recordDispatchStartAgentAction(item, {
-              ts: new Date().toISOString(), machineId, runId: attemptId, backend: backend!,
-              tier: backendTier, model: selectedModel, assignedBy, reason: assignmentReason, mode: 'single',
-            });
-            if (!stillOwnsTick()) throw new Error('daemon lock ownership lost before direct producer start');
-            if (!markGeneratedRepairExecutionLaunched(item)) {
-              throw new Error('generated repair launch reservation could not be persisted');
+          const directExecutionReservation = await backendExecutionReservations.acquire(
+            backend!,
+            dispatchSignal,
+          );
+          let trackedRunState: Awaited<ReturnType<typeof runGoal>> | null = null;
+          try {
+            trackedRunState = await (async () => {
+              if (stopRequested() || !stillOwnsTick()) return null;
+              const launch = beginRejectedCaptureRecoveryDispatch(item, () => {
+                if (!stillOwnsTick()) throw new Error('daemon lock ownership lost before direct launch');
+                beginQueueExecution();
+                recordUse(backend!);
+                recordDispatchStartAgentAction(item, {
+                  ts: new Date().toISOString(), machineId, runId: attemptId, backend: backend!,
+                  tier: backendTier, model: selectedModel, assignedBy, reason: assignmentReason, mode: 'single',
+                });
+                if (!stillOwnsTick()) throw new Error('daemon lock ownership lost before direct producer start');
+                if (!markGeneratedRepairExecutionLaunched(item)) {
+                  throw new Error('generated repair launch reservation could not be persisted');
+                }
+                return runGoal(goal, dispatchCfg, {
+                  engine: backend, sandboxEngine: true, requireSandbox: true, cwd: item.repo,
+                  budget: itemBudget, tools: true, noMemory: false, runId: attemptId,
+                  ...(selectedModel ? { model: selectedModel } : {}),
+                  workItemId: item.id, workItemGenerationId, workSource: item.source, delegationScope,
+                  signal: dispatchSignal,
+                });
+              });
+              if (!launch.authorized) return null;
+              dispatched = true;
+              backendDispatch[backend!] = (backendDispatch[backend!] ?? 0) + 1;
+              return launch.value;
+            })();
+          } finally {
+            if (retainedBackendProcess(trackedRunState)) {
+              backendExecutionReservations.quarantine(directExecutionReservation);
+            } else {
+              backendExecutionReservations.release(directExecutionReservation);
             }
-            return runGoal(goal, dispatchCfg, {
-              engine: backend, sandboxEngine: true, requireSandbox: true, cwd: item.repo,
-              budget: itemBudget, tools: true, noMemory: false, runId: attemptId,
-              ...(selectedModel ? { model: selectedModel } : {}),
-              workItemId: item.id, workItemGenerationId, workSource: item.source, delegationScope,
-              signal: dispatchSignal,
-            });
-          });
-          if (!launch.authorized) return authorityUnavailableOutcome(item, attemptId);
-          dispatched = true;
-          backendDispatch[backend!] = (backendDispatch[backend!] ?? 0) + 1;
-          runState = await launch.value;
+          }
+          if (trackedRunState === null) return authorityUnavailableOutcome(item, attemptId);
+          runState = trackedRunState;
           if (!stillOwnsTick()) {
             swarmSpent = isSubscriptionEngine(backend ?? 'builtin') ? 0 : (runState.usage?.estCostUsd ?? 0);
             tickSpent += swarmSpent;
@@ -6287,6 +7117,166 @@ export async function tick(
                 production: cancelledDispatchProduction(runState.id, 'daemon lock ownership lost', swarmSpent),
               }),
             };
+          }
+          const isZeroStepBackendFailure = zeroStepBackendFailure(runState, {
+            runId: activeAttemptId,
+            backend: backend!,
+            tier: backendTier,
+            trajectoryId: runTrajectoryId,
+          });
+          const zeroStepCapacityAuthorityBlock = zeroStepFailoverCapacityBlockReason(
+            routingCfg,
+            { bestOfNActive: fanOut },
+          );
+          if (isZeroStepBackendFailure && zeroStepCapacityAuthorityBlock !== null) {
+            recordZeroStepFailoverBlockedAgentAction(item, {
+              ts: new Date().toISOString(),
+              machineId,
+              run: runState,
+              trajectoryId: runTrajectoryId,
+              backend: backend!,
+              tier: backendTier,
+              model: selectedModel,
+              reason: zeroStepCapacityAuthorityBlock,
+            });
+          }
+          if (isZeroStepBackendFailure && zeroStepCapacityAuthorityBlock === null &&
+            !stopRequested() && tickSpent < remainingBudget) {
+            const failedBackend = backend!;
+            const failedTier = backendTier;
+            const failedModel = selectedModel;
+            const failedAssignedBy = assignedBy;
+            const failedReason = assignmentReason;
+            const alternateCandidate = await openSameTierFailoverBackend(
+              item,
+              failedBackend,
+              failedTier,
+              routingCfg,
+              concurrentMaxSlotsPerBackend,
+              (candidate, slots) => backendExecutionReservations.canReserve(candidate, slots) && (
+                backendCapacityReservations === null ||
+                (capacityReservation !== undefined &&
+                  backendCapacityReservations.canReserve(candidate))
+              ),
+            );
+            const confirmedCandidate = alternateCandidate === null
+              ? null
+              : await openSameTierFailoverBackend(
+                  item,
+                  failedBackend,
+                  failedTier,
+                  routingCfg,
+                  concurrentMaxSlotsPerBackend,
+                  (candidate, slots) => candidate === alternateCandidate.backend &&
+                    backendExecutionReservations.canReserve(candidate, slots) && (
+                      backendCapacityReservations === null ||
+                      (capacityReservation !== undefined &&
+                        backendCapacityReservations.canReserve(candidate))
+                    ),
+                  { forceRefresh: true },
+                );
+            if (
+              confirmedCandidate !== null &&
+              alternateCandidate !== null &&
+              confirmedCandidate.backend === alternateCandidate.backend &&
+              !stopRequested() &&
+              !dispatchSignal.aborted &&
+              tickSpent < remainingBudget &&
+              backendDispatchAdmission(
+                confirmedCandidate.backend,
+                routingCfg,
+                { requireInstalled: true },
+              ).allowed
+            ) {
+              const alternate = confirmedCandidate.backend;
+              const retryExecutionReservation = backendExecutionReservations.reserve(
+                alternate,
+                Math.min(alternateCandidate.slots, confirmedCandidate.slots),
+              );
+              if (retryExecutionReservation !== null) {
+                try {
+                const retryRunId = createOuterAttemptIdentity();
+                const retryTier = engineTierOf(alternate, routingCfg);
+                const retryModel = configuredModelForBackend(alternate, routingCfg);
+                const retryReason = `${assignmentReason}; zero-step same-tier failover from ${failedBackend}`;
+                const retryScope = scopeFromWorkItem(item, {
+                  runId: retryRunId,
+                  budget: itemBudget,
+                  backend: {
+                    engine: alternate,
+                    model: retryModel,
+                    tier: retryTier,
+                    assignedBy: 'zero-step-failover',
+                    reason: retryReason,
+                  },
+                });
+                const capacityTransferred = backendCapacityReservations === null ||
+                  (capacityReservation !== undefined &&
+                    backendCapacityReservations.transfer(capacityReservation, alternate));
+                const exactRetryClaim = capacityTransferred &&
+                  expectedClaim !== undefined &&
+                  stillOwnsTick() &&
+                  !stopRequested() &&
+                  !dispatchSignal.aborted &&
+                  tickSpent < remainingBudget &&
+                  coordinator.fenceExecutingClaimGeneration(expectedClaim, machineId);
+                if (!exactRetryClaim) {
+                  backendCapacityReservations?.release(capacityReservation);
+                } else {
+                  recordZeroStepFailoverAgentAction(item, {
+                    ts: new Date().toISOString(),
+                    machineId,
+                    run: runState,
+                    trajectoryId: runTrajectoryId,
+                    backend: failedBackend,
+                    tier: failedTier,
+                    model: failedModel,
+                    nextBackend: alternate,
+                    assignedBy: failedAssignedBy,
+                    reason: failedReason,
+                  });
+                  activeAttemptId = retryRunId;
+                  recordDispatchStartAgentAction(item, {
+                    ts: new Date().toISOString(),
+                    machineId,
+                    runId: retryRunId,
+                    trajectoryId: runTrajectoryId,
+                    backend: alternate,
+                    tier: retryTier,
+                    model: retryModel,
+                    assignedBy: 'zero-step-failover',
+                    reason: retryReason,
+                    mode: 'single',
+                  });
+                  backend = alternate;
+                  backendTier = retryTier;
+                  selectedModel = retryModel;
+                  assignedBy = 'zero-step-failover';
+                  assignmentReason = retryReason;
+                  backendDispatch[alternate] = (backendDispatch[alternate] ?? 0) + 1;
+                  recordUse(alternate);
+                  runState = await runGoal(goal, dispatchCfg, {
+                    engine: alternate,
+                    sandboxEngine: true,
+                    requireSandbox: true,
+                    cwd: item.repo,
+                    budget: itemBudget,
+                    tools: true,
+                    noMemory: false,
+                    runId: retryRunId,
+                    ...(retryModel ? { model: retryModel } : {}),
+                    workItemId: item.id,
+                    workItemGenerationId,
+                    workSource: item.source,
+                    delegationScope: retryScope,
+                    signal: dispatchSignal,
+                  });
+                }
+                } finally {
+                  backendExecutionReservations.release(retryExecutionReservation);
+                }
+              }
+            }
           }
           const runActionCounts = runState.runEventSummary?.actionCounts;
           const runExecuted = runState.status === 'done' || [
@@ -6454,6 +7444,29 @@ export async function tick(
 		      if (err instanceof QueueClaimAuthorityError) {
 		        return queueLeaseLostOutcome(item, attemptId);
 		      }
+		      if (err instanceof BackendCapacityWaitAbortedError) {
+		        return leaseController.signal.aborted && opts.signal?.aborted !== true
+		          ? queueLeaseLostOutcome(item, attemptId)
+		          : stopRequestedOutcome(item, attemptId);
+		      }
+		      if (err instanceof BackendCapacityUnavailableError) {
+		        return {
+		          item,
+		          spentUsd: 0,
+		          dispatched: false,
+		          dispatch: dispatchTrace(item, {
+		            backend: err.backend,
+		            tier: backendTier,
+		            model: selectedModel,
+		            assignedBy: 'resource-monitor',
+		            reason: err.message,
+		            dispatched: false,
+		            runId: attemptId,
+		            trajectoryId: `run:${attemptId}`,
+		            skipReason: 'backend-capacity-unavailable',
+		          }),
+		        };
+		      }
 		      const msg = err instanceof Error ? err.message : String(err);
 		      const errorReason = 'dispatch-error: executor threw';
 		      dispatch = dispatchTrace(item, {
@@ -6464,8 +7477,8 @@ export async function tick(
 		        reason: assignmentReason,
 		        dispatched,
 		        spentUsd: swarmSpent,
-		        runId: attemptId,
-		        trajectoryId: `run:${attemptId}`,
+		        runId: activeAttemptId,
+		        trajectoryId: runTrajectoryId,
 		        skipReason: errorReason,
 		        production: {
 		          outcome: 'engine-failed',
@@ -6580,12 +7593,7 @@ export async function tick(
       backends: [{ backend: 'builtin' as const, availability: 'open' as const, usedPct: null, cap: null, capUnit: null, capWindow: null, resetsAt: null, costPerMTokenOut: 0, p50LatencyMs: null, snapshotAt: new Date().toISOString(), reason: 'snapshot-failed', backoffUntilMs: null }],
     })));
 
-    const maxSlotsPerBackend: number =
-      typeof (routingCfg.foundry?.fabric as Record<string, unknown> | undefined)?.['maxSlotsPerBackend'] === 'number'
-        ? Math.max(1, (routingCfg.foundry!.fabric as Record<string, unknown>)['maxSlotsPerBackend'] as number)
-        : 3;
-
-    const concurrentCfg = { maxSlotsPerBackend };
+    const concurrentCfg = { maxSlotsPerBackend: concurrentMaxSlotsPerBackend };
 
     // planConcurrentDispatch: pure, uses gateway routing hints for suitability.
     // Build routing hints in parallel via gateway.decide, then call the pure planner.
@@ -6620,6 +7628,7 @@ export async function tick(
       (item, backend) => effectiveGeneratedRepairCandidateAllowed(item, backend, routingCfg),
       (backend) => engineTierOf(backend, routingCfg),
     );
+    backendCapacityReservations = new BackendCapacityReservations(concurrentPlan.slotsMap);
     const dispatchManifestEvent = buildDispatchManifestEvent({
       ts: now,
       machineId,
@@ -6653,6 +7662,22 @@ export async function tick(
         // already capture tickSpent/state/liveCfg via closure.
         const taskEntry = tasks.find((_t, idx) => workedSet[idx]?.id === item.id);
         if (taskEntry) {
+          const capacityReservation = backendCapacityReservations?.reserve(_backend);
+          if (!capacityReservation) {
+            return {
+              item,
+              spentUsd: 0,
+              dispatched: false,
+              dispatch: dispatchTrace(item, {
+                backend: _backend,
+                tier: engineTierOf(_backend, routingCfg),
+                assignedBy: 'concurrent-capacity',
+                reason: 'concurrent backend capacity reservation unavailable',
+                dispatched: false,
+                skipReason: 'capacity-unavailable',
+              }),
+            } satisfies ItemOutcome;
+          }
           const hintedBackend = routeHints.get(item.id);
           const baseReason = routeReasons.get(item.id);
           const assignedReason = concurrentAssignedRouteReason({
@@ -6663,7 +7688,16 @@ export async function tick(
             candidateAllowed: effectiveGeneratedRepairCandidateAllowed(item, _backend, routingCfg),
           });
           const assignedModel = hintedBackend === _backend ? routeModels.get(item.id) : undefined;
-          return taskEntry.run(_backend, assignedReason, assignedModel);
+          try {
+            return await taskEntry.run(
+              _backend,
+              assignedReason,
+              assignedModel,
+              capacityReservation,
+            );
+          } finally {
+            backendCapacityReservations?.release(capacityReservation);
+          }
         }
 	        // Fallback: build a minimal no-op outcome (item not in tasks — shouldn't happen).
 	        return {

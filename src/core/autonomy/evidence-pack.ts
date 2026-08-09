@@ -51,7 +51,7 @@ import {
   verifySealedEvidencePackDigestV3,
   type ProvenanceVerdict,
 } from '../foundry/provenance.js';
-import { causalMetadata } from '../learning/causal.js';
+import { causalMetadata, runEventSummary as normalizeRunEventSummary } from '../learning/causal.js';
 import { buildRequiredVerificationManifest } from '../run/verification-manifest.js';
 import { fsyncDirectory } from '../util/durability.js';
 import {
@@ -643,11 +643,16 @@ function strictContextSummary(value: unknown): boolean {
 
 function strictRunEventSummary(value: unknown): boolean {
   const record = jsonRecord(value);
+  const normalized = record
+    ? normalizeRunEventSummary(record as unknown as RunEventSummary)
+    : undefined;
   return record !== null && hasOnlyKeys(record, [
-    'runId', 'status', 'outcome', 'proposalCreated', 'proposalId', 'diffFiles', 'diffLines',
+    'runId', 'status', 'outcome', 'failureCode', 'proposalCreated', 'proposalId', 'diffFiles', 'diffLines',
     'tokensIn', 'tokensOut', 'costUsd', 'durationMs', 'cacheHit', 'contextSummary', 'actionCounts',
   ]) && optionalString(record['runId']) && optionalString(record['status']) &&
-    optionalString(record['outcome']) && optionalString(record['proposalId']) &&
+    optionalString(record['outcome']) && optionalString(record['failureCode']) &&
+    (record['failureCode'] === undefined || record['failureCode'] === normalized?.failureCode) &&
+    optionalString(record['proposalId']) &&
     (record['proposalCreated'] === undefined || typeof record['proposalCreated'] === 'boolean') &&
     (record['cacheHit'] === undefined || typeof record['cacheHit'] === 'boolean') &&
     ['diffFiles', 'diffLines', 'tokensIn', 'tokensOut', 'costUsd', 'durationMs']

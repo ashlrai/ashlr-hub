@@ -60,6 +60,11 @@ import {
   type DispatchProductionEvent,
 } from '../fleet/dispatch-production-ledger.js';
 import {
+  readAgentActionsDetailed,
+  type AgentActionEvent,
+  type AgentActionsReadResult,
+} from '../fleet/agent-action-ledger.js';
+import {
   learningEpochFromTimestamp,
   ROUTER_POLICY_VERSION,
 } from '../learning/causal.js';
@@ -212,6 +217,34 @@ const FRONTIER_PREFERENCE: readonly EngineId[] = ['claude', 'codex'];
 const MIN_DISPATCH_YIELD_SAMPLES = 3;
 const MIN_DISPATCH_YIELD_REROUTE_MARGIN = 0.2;
 const DEFAULT_DISPATCH_YIELD_WINDOW_HOURS = 24;
+const ZERO_STEP_FAILOVER_ACTION = 'daemon:dispatch-zero-step-failover';
+const ZERO_STEP_FAILURE_CODES = new Set([
+  'engine-command-missing',
+  'engine-unsupported',
+]);
+type ZeroStepRequiredActionCount = Exclude<keyof RunActionCounts, 'sandboxCreated'>;
+
+function exhaustiveZeroStepActionCounts<T extends readonly ZeroStepRequiredActionCount[]>(
+  keys: T & (Exclude<ZeroStepRequiredActionCount, T[number]> extends never ? unknown : never),
+): T {
+  return keys;
+}
+
+const ZERO_STEP_REQUIRED_ZERO_ACTION_COUNTS = exhaustiveZeroStepActionCounts([
+  'spawnAttempts',
+  'transientRetries',
+  'proposalCaptureAttempts',
+  'completenessGateRuns',
+  'verifyRepairAttempts',
+  'modelSteps',
+  'toolSteps',
+  'totalSteps',
+  'diffFiles',
+  'diffLines',
+  'proposalCreated',
+  'proposalBlocked',
+  'proposalDisabled',
+] as const);
 
 // ---------------------------------------------------------------------------
 // Verified-outcome prior loading
@@ -267,6 +300,7 @@ interface DispatchYieldPrior {
   attempts: number;
   proposalsCreated: number;
   proposalRate: number;
+  zeroStepFailures: number;
   actionShape?: DispatchYieldActionShape;
 }
 
@@ -281,6 +315,20 @@ interface DispatchYieldActionShape {
   signal?: string;
 }
 
+interface ZeroStepBackendAttempt {
+  ts: string;
+  source: WorkItem['source'];
+  backend: EngineId;
+  tier: EngineTier;
+  runId: string;
+  trajectoryId: string;
+}
+
+type AgentActionLearningRead = Pick<
+  AgentActionsReadResult,
+  'sourceState' | 'complete' | 'events'
+>;
+
 function clampRate(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value)
     ? Math.max(0, Math.min(1, value))
@@ -290,6 +338,124 @@ function clampRate(value: unknown, fallback: number): number {
 function nonNegativeInteger(value: unknown): number | undefined {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return undefined;
   return Math.min(Number.MAX_SAFE_INTEGER, Math.trunc(value));
+}
+
+function explicitFiniteZero(record: unknown, key: string): boolean {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) return false;
+  const value = (record as Record<string, unknown>)[key];
+  return typeof value === 'number' && Number.isFinite(value) && value === 0;
+}
+
+function zeroStepBackendAttempt(event: AgentActionEvent): ZeroStepBackendAttempt | null {
+  if (
+    event.actor !== 'daemon' ||
+    event.kind !== 'dispatch' ||
+    event.action !== ZERO_STEP_FAILOVER_ACTION ||
+    event.outcome !== 'failed'
+  ) return null;
+
+  const summary = event.runEventSummary;
+  const route = event.routeSnapshot;
+  const counts = summary?.actionCounts;
+  const rawFailureCode = (summary as (typeof summary & { failureCode?: unknown }) | undefined)?.failureCode;
+  const failureCode = summary?.outcome === 'engine-failed' &&
+    ZERO_STEP_FAILURE_CODES.has(String(rawFailureCode))
+    ? String(rawFailureCode)
+    : undefined;
+  const eventMs = Date.parse(event.ts);
+  if (
+    !Number.isFinite(eventMs) ||
+    new Date(eventMs).toISOString() !== event.ts ||
+    event.learningSource !== 'agent-action' ||
+    event.labelBasis !== 'dispatch-outcome' ||
+    event.source === undefined ||
+    typeof event.runId !== 'string' ||
+    typeof event.trajectoryId !== 'string' ||
+    event.trajectoryId !== `run:${event.runId}` ||
+    event.backend === undefined ||
+    event.backend === null ||
+    event.tier === undefined ||
+    event.tier === null ||
+    summary?.runId !== event.runId ||
+    summary.status !== 'failed' ||
+    summary.proposalCreated !== false ||
+    summary.proposalId !== undefined ||
+    failureCode === undefined ||
+    event.reason !== failureCode ||
+    route?.backend !== event.backend ||
+    route.tier !== event.tier ||
+    event.routerPolicyVersion !== ROUTER_POLICY_VERSION ||
+    route.routerPolicyVersion !== ROUTER_POLICY_VERSION ||
+    event.learningEpoch !== learningEpochFromTimestamp(event.ts) ||
+    !counts ||
+    !ZERO_STEP_REQUIRED_ZERO_ACTION_COUNTS.every((key) => explicitFiniteZero(counts, key)) ||
+    !['diffFiles', 'diffLines', 'tokensIn', 'tokensOut', 'costUsd']
+      .every((key) => explicitFiniteZero(summary, key))
+  ) return null;
+
+  const sandboxCreated = counts.sandboxCreated;
+  if (
+    typeof sandboxCreated !== 'number' ||
+    !Number.isFinite(sandboxCreated) ||
+    (sandboxCreated !== 0 && sandboxCreated !== 1)
+  ) return null;
+
+  return {
+    ts: event.ts,
+    source: event.source!,
+    backend: event.backend,
+    tier: event.tier,
+    runId: event.runId,
+    trajectoryId: event.trajectoryId,
+  };
+}
+
+function zeroStepBackendAttemptsFromRead(read: AgentActionLearningRead): ZeroStepBackendAttempt[] {
+  if (read.sourceState !== 'healthy' || !read.complete) return [];
+  const attempts = new Map<string, ZeroStepBackendAttempt>();
+  for (const event of read.events) {
+    const attempt = zeroStepBackendAttempt(event);
+    if (!attempt) continue;
+    const identity = `${attempt.trajectoryId}\u0000${attempt.runId}\u0000${attempt.backend}`;
+    if (!attempts.has(identity)) attempts.set(identity, attempt);
+  }
+  return [...attempts.values()];
+}
+
+/** Metadata-only diagnostic count using the same authority gate as routing. */
+export function countZeroStepBackendFailureSamples(input: {
+  read: AgentActionLearningRead;
+  backend: EngineId;
+  tier: EngineTier;
+  source: WorkItem['source'];
+}): number {
+  return zeroStepBackendAttemptsFromRead(input.read).filter((attempt) =>
+    attempt.backend === input.backend &&
+    attempt.tier === input.tier &&
+    attempt.source === input.source
+  ).length;
+}
+
+function loadZeroStepBackendAttempts(intel: FoundryIntelligenceCfg): ZeroStepBackendAttempt[] {
+  try {
+    const hours =
+      typeof intel.dispatchYieldWindowHours === 'number' && intel.dispatchYieldWindowHours > 0
+        ? intel.dispatchYieldWindowHours
+        : DEFAULT_DISPATCH_YIELD_WINDOW_HOURS;
+    return zeroStepBackendAttemptsFromRead(readAgentActionsDetailed({
+      sinceMs: Date.now() - hours * 60 * 60 * 1000,
+      limit: 1000,
+      maxFiles: Math.max(1, Math.ceil(hours / 24) + 1),
+      requireComplete: true,
+      stopAfterLimit: true,
+      filter: (event) => event.actor === 'daemon' &&
+        event.kind === 'dispatch' &&
+        event.action === ZERO_STEP_FAILOVER_ACTION &&
+        event.outcome === 'failed',
+    }));
+  } catch {
+    return [];
+  }
 }
 
 function hasActionCountSignal(counts: RunActionCounts | undefined): counts is RunActionCounts {
@@ -363,8 +529,10 @@ function loadDispatchYieldEvents(
 
 function dispatchYieldForBackend(
   events: DispatchProductionEvent[],
+  zeroStepAttempts: ZeroStepBackendAttempt[],
   backend: EngineId,
   source: WorkItem['source'],
+  tier: EngineTier,
 ): DispatchYieldPrior {
   let attempts = 0;
   let proposalsCreated = 0;
@@ -401,6 +569,12 @@ function dispatchYieldForBackend(
       proposalBlocked += nonNegativeInteger(counts.proposalBlocked) ?? 0;
     }
   }
+  const zeroStepFailures = zeroStepAttempts.filter((attempt) =>
+    attempt.backend === backend &&
+    attempt.source === source &&
+    attempt.tier === tier
+  ).length;
+  attempts += zeroStepFailures;
   const avgDiffFiles = diffFileSamples > 0 ? diffFilesTotal / diffFileSamples : 0;
   const gateDominant =
     actionSamples >= MIN_DISPATCH_YIELD_SAMPLES &&
@@ -429,6 +603,7 @@ function dispatchYieldForBackend(
     attempts,
     proposalsCreated,
     proposalRate: attempts > 0 ? proposalsCreated / attempts : 1,
+    zeroStepFailures,
     ...(actionShape ? { actionShape } : {}),
   };
 }
@@ -438,6 +613,7 @@ function comparativeSameTierAlternative(
   tier: EngineTier,
   source: WorkItem['source'],
   events: DispatchProductionEvent[],
+  zeroStepAttempts: ZeroStepBackendAttempt[],
   allowed: Set<EngineId>,
   cfg: AshlrConfig,
   basePrior: DispatchYieldPrior,
@@ -451,7 +627,7 @@ function comparativeSameTierAlternative(
     if (tierOf(backend, cfg) !== tier) continue;
     if (!engineInstalled(backend, cfg)) continue;
     if (!resourceAllowsLearnedTarget(backend, resourceStates)) continue;
-    const prior = dispatchYieldForBackend(events, backend, source);
+    const prior = dispatchYieldForBackend(events, zeroStepAttempts, backend, source, tier);
     if (prior.attempts < MIN_DISPATCH_YIELD_SAMPLES) continue;
     if (prior.proposalRate < minProposalYieldRate) continue;
     if (prior.proposalRate < basePrior.proposalRate + MIN_DISPATCH_YIELD_REROUTE_MARGIN) continue;
@@ -524,6 +700,7 @@ export async function recommendRoute(
     estimate?: RunEstimate;
     prior?: OutcomePrior;
     dispatchProductionEvents?: DispatchProductionEvent[];
+    agentActionRead?: AgentActionLearningRead;
     resourceStates?: readonly LearnedRouteResourceState[];
   },
 ): Promise<LearnedRoute> {
@@ -639,10 +816,24 @@ export async function recommendRoute(
   const testDispatchEvents = process.env.NODE_ENV === 'test'
     ? opts?.dispatchProductionEvents
     : undefined;
+  const testAgentActionRead = process.env.NODE_ENV === 'test'
+    ? opts?.agentActionRead
+    : undefined;
   const dispatchEvents = testDispatchEvents ?? (routingLearningAuthority.operationalSteering
     ? loadDispatchYieldEvents(intel)
     : []);
-  const yieldPrior = dispatchYieldForBackend(dispatchEvents, base.backend, item.source);
+  const zeroStepAttempts = testAgentActionRead !== undefined
+    ? zeroStepBackendAttemptsFromRead(testAgentActionRead)
+    : routingLearningAuthority.operationalSteering
+      ? loadZeroStepBackendAttempts(intel)
+      : [];
+  const yieldPrior = dispatchYieldForBackend(
+    dispatchEvents,
+    zeroStepAttempts,
+    base.backend,
+    item.source,
+    base.tier,
+  );
   const minProposalYieldRate = clampRate(intel.minProposalYieldRate, 0.2);
   if (
     yieldPrior.attempts >= MIN_DISPATCH_YIELD_SAMPLES &&
@@ -665,6 +856,7 @@ export async function recommendRoute(
       base.tier,
       item.source,
       dispatchEvents,
+      zeroStepAttempts,
       allowed,
       cfg,
       yieldPrior,
@@ -685,6 +877,19 @@ export async function recommendRoute(
         confidence: Math.min(0.55 + (yieldPrior.attempts / 20) * 0.35, 0.9),
       };
     }
+    return {
+      backend: base.backend,
+      tier: base.tier,
+      reason:
+        `learned-router: recent proposal yield for ${base.backend} ` +
+        `${yieldPrior.proposalsCreated}/${yieldPrior.attempts} ` +
+        `< threshold ${(minProposalYieldRate * 100).toFixed(0)}%` +
+        `${yieldPrior.zeroStepFailures > 0
+          ? `, including ${yieldPrior.zeroStepFailures} validated zero-step backend failure(s)`
+          : ''}` +
+        ' — keeping the authorized backend because no authenticated same-tier alternative qualified',
+      confidence: Math.min(0.55 + (yieldPrior.attempts / 20) * 0.25, 0.8),
+    };
   }
 
   // ── No nudge warranted — return the base decision ─────────────────────────

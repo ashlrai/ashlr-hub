@@ -1347,7 +1347,10 @@ export async function getBackendResourceState(
  *     );
  *   }
  */
-export async function getResourceSnapshot(cfg: unknown): Promise<ResourceSnapshot> {
+export async function getResourceSnapshot(
+  cfg: unknown,
+  opts: { forceRefresh?: boolean } = {},
+): Promise<ResourceSnapshot> {
   try {
     const now = Date.now();
 
@@ -1360,15 +1363,19 @@ export async function getResourceSnapshot(cfg: unknown): Promise<ResourceSnapsho
           const allowed = (foundry as Record<string, unknown>)['allowedBackends'];
           if (Array.isArray(allowed) && allowed.length > 0) {
             // Sense only configured backends + builtin (always)
+            const supportedBackends: EngineId[] = [
+              'claude', 'codex', 'nim', 'kimi', 'local-coder', 'builtin',
+              'ashlrcode', 'aw', 'hermes', 'opencode', 'grok',
+            ];
             const configuredSet = new Set<EngineId>(
               (allowed as string[]).filter((b): b is EngineId =>
-                ['builtin', 'local-coder', 'claude', 'codex', 'nim', 'kimi', 'ashlrcode', 'aw', 'hermes', 'opencode'].includes(b)
+                supportedBackends.includes(b as EngineId)
               )
             );
             configuredSet.add('builtin');
             // Replace with configured set but keep all unique
             backendsToSense.splice(0, backendsToSense.length,
-              ...(['claude', 'codex', 'nim', 'kimi', 'local-coder', 'builtin'] as EngineId[]).filter(b => configuredSet.has(b))
+              ...supportedBackends.filter(b => configuredSet.has(b))
             );
           }
         }
@@ -1380,7 +1387,7 @@ export async function getResourceSnapshot(cfg: unknown): Promise<ResourceSnapsho
     const cacheKey = resourceSnapshotCacheKey(cfg, backendsToSense);
 
     // Return cached snapshot if fresh and built for equivalent resource config.
-    if (_snapshotCache && _snapshotCache.expiresAt > now && _snapshotCache.key === cacheKey) {
+    if (!opts.forceRefresh && _snapshotCache && _snapshotCache.expiresAt > now && _snapshotCache.key === cacheKey) {
       return _snapshotCache.snapshot;
     }
 

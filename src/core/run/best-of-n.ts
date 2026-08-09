@@ -19,6 +19,10 @@ import type {
   EngineId,
   RunProposalOutcome,
   RunState,
+  RunEventSummary,
+  RunUsage,
+  EvidenceOutcomeSummary,
+  EngineTier,
   SkillCard,
   DelegationScope,
   Sandbox,
@@ -41,6 +45,11 @@ import {
   beginExecutionAuthority,
   finishExecutionAuthority,
 } from '../util/execution-lease.js';
+import {
+  evidenceOutcomeSummary as sanitizeEvidenceOutcome,
+  runEventSummary as sanitizeRunEventSummary,
+} from '../learning/causal.js';
+import { scrubSecrets } from '../util/scrub.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -84,6 +93,45 @@ export interface CandidateResult {
   proposalDisposition?: CandidateProposalDisposition;
   /** Durable quarantine evidence when process closure could not be confirmed. */
   sandboxRetention?: SandboxRetentionEvidence;
+  /** Metadata-only terminal evidence; raw RunState never crosses this boundary. */
+  terminalEvidence?: CandidateTerminalEvidence;
+  /** Candidate execution never began because owner/admission control stopped it. */
+  preExecutionControl?: BestOfNPreExecutionControl;
+}
+
+export type BestOfNPreExecutionControl =
+  | 'cancelled'
+  | 'capacity-wait-aborted'
+  | 'admission-denied';
+
+export interface CandidateTerminalEvidence {
+  runId: string;
+  status: RunState['status'];
+  engine: string;
+  engineTier?: EngineTier;
+  trajectoryId?: string;
+  usage?: RunUsage;
+  taskCount?: number;
+  stepCount?: number;
+  proposalOutcome?: RunProposalOutcome;
+  runEventSummary?: RunEventSummary;
+  evidenceOutcome?: EvidenceOutcomeSummary;
+  terminationReason?: RunState['terminationReason'];
+  delegation?: {
+    runId?: string;
+    backend?: { engine?: string; tier?: string };
+  };
+  workObserved: boolean;
+}
+
+export class BestOfNCandidateAdmissionError extends Error {
+  constructor(
+    readonly control: Exclude<BestOfNPreExecutionControl, 'cancelled'>,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'BestOfNCandidateAdmissionError';
+  }
 }
 
 export type CandidateProposalDisposition =
@@ -185,6 +233,13 @@ function formatProposalOutcome(outcome?: RunProposalOutcome): string | undefined
   const reason = outcome.reason?.trim();
   const label = reason ? `${outcome.kind}: ${reason}` : outcome.kind;
   return label.length > 220 ? `${label.slice(0, 217)}...` : label;
+}
+
+function boundedCandidateText(value: unknown, max: number): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = scrubSecrets(value).replace(/\s+/g, ' ').trim();
+  if (!normalized) return undefined;
+  return normalized.length > max ? `${normalized.slice(0, max - 3)}...` : normalized;
 }
 
 function candidateErrorFromState(
@@ -366,9 +421,102 @@ function publicCandidate(c: InternalCandidateResult): CandidateResult {
     proposalDraft: _proposalDraft,
     sandbox: _sandbox,
     delegationScope: _delegationScope,
+    requestedModel: _requestedModel,
+    state,
     ...rest
   } = c;
-  return rest;
+  if (!state) return rest;
+  const usage = state.usage;
+  const taskCount = Array.isArray(state.tasks) ? state.tasks.length : undefined;
+  const stepCount = Array.isArray(state.steps) ? state.steps.length : undefined;
+  const actionCounts = state.runEventSummary?.actionCounts;
+  const workObserved = candidateHasProposalMaterial(c) ||
+    state.status === 'done' ||
+    (taskCount ?? 0) > 0 ||
+    (stepCount ?? 0) > 0 ||
+    [
+      actionCounts?.spawnAttempts,
+      actionCounts?.modelSteps,
+      actionCounts?.toolSteps,
+      actionCounts?.totalSteps,
+      usage?.tokensIn,
+      usage?.tokensOut,
+      usage?.steps,
+      usage?.estCostUsd,
+    ].some((value) => typeof value === 'number' && Number.isFinite(value) && value > 0);
+  const preExecutionControl = rest.preExecutionControl ?? (
+    state.status === 'aborted' &&
+    !workObserved &&
+    (state.terminationReason === 'cancelled' || state.proposalOutcome?.kind === 'kill-switch')
+      ? 'cancelled'
+      : undefined
+  );
+  const outcomeSource = rest.proposalOutcome ?? state.proposalOutcome;
+  const boundedOutcome = outcomeSource ? {
+    kind: outcomeSource.kind,
+    reason: boundedCandidateText(outcomeSource.reason, 220) ?? outcomeSource.kind,
+    ...(outcomeSource.isPartial === true ? { isPartial: true } : {}),
+    ...(boundedCandidateText(outcomeSource.proposalId, 240)
+      ? { proposalId: boundedCandidateText(outcomeSource.proposalId, 240) }
+      : {}),
+    ...(typeof outcomeSource.files === 'number' && Number.isFinite(outcomeSource.files)
+      ? { files: Math.max(0, Math.trunc(outcomeSource.files)) }
+      : {}),
+    ...(typeof outcomeSource.insertions === 'number' && Number.isFinite(outcomeSource.insertions)
+      ? { insertions: Math.max(0, Math.trunc(outcomeSource.insertions)) }
+      : {}),
+    ...(typeof outcomeSource.deletions === 'number' && Number.isFinite(outcomeSource.deletions)
+      ? { deletions: Math.max(0, Math.trunc(outcomeSource.deletions)) }
+      : {}),
+  } satisfies RunProposalOutcome : undefined;
+  const terminalRunSummary = sanitizeRunEventSummary(state.runEventSummary);
+  const terminalEvidenceOutcome = sanitizeEvidenceOutcome(state.evidenceOutcome);
+  return {
+    ...rest,
+    ...(boundedOutcome ? { proposalOutcome: boundedOutcome } : {}),
+    ...(preExecutionControl ? { preExecutionControl } : {}),
+    terminalEvidence: {
+      runId: boundedCandidateText(state.id || rest.runId, 240) ?? `candidate-${c.index}`,
+      status: state.status,
+      engine: boundedCandidateText(state.engine || rest.engine, 80) ?? 'unknown',
+      ...(state.engineTier ? { engineTier: state.engineTier } : {}),
+      ...(boundedCandidateText(state.trajectoryId, 240)
+        ? { trajectoryId: boundedCandidateText(state.trajectoryId, 240) }
+        : {}),
+      ...(usage ? {
+        usage: {
+          tokensIn: usage.tokensIn,
+          tokensOut: usage.tokensOut,
+          steps: usage.steps,
+          estCostUsd: usage.estCostUsd,
+        },
+      } : {}),
+      ...(taskCount !== undefined ? { taskCount } : {}),
+      ...(stepCount !== undefined ? { stepCount } : {}),
+      ...(boundedOutcome ? { proposalOutcome: boundedOutcome } : {}),
+      ...(terminalRunSummary ? { runEventSummary: terminalRunSummary } : {}),
+      ...(terminalEvidenceOutcome ? { evidenceOutcome: terminalEvidenceOutcome } : {}),
+      ...(state.terminationReason ? { terminationReason: state.terminationReason } : {}),
+      ...(state.delegationScope ? {
+        delegation: {
+          ...(boundedCandidateText(state.delegationScope.runId, 240)
+            ? { runId: boundedCandidateText(state.delegationScope.runId, 240) }
+            : {}),
+          ...(state.delegationScope.backend ? {
+            backend: {
+              ...(boundedCandidateText(state.delegationScope.backend.engine, 80)
+                ? { engine: boundedCandidateText(state.delegationScope.backend.engine, 80) }
+                : {}),
+              ...(boundedCandidateText(state.delegationScope.backend.tier, 40)
+                ? { tier: boundedCandidateText(state.delegationScope.backend.tier, 40) }
+                : {}),
+            },
+          } : {}),
+        },
+      } : {}),
+      workObserved,
+    },
+  };
 }
 
 function cleanupCandidateSandboxes(candidates: InternalCandidateResult[], removeSandbox?: (sb: Sandbox) => void): void {
@@ -473,6 +621,9 @@ async function runBestOfNInternal(
      * byte-identical).
      */
     candidates?: Array<{ engine: EngineId; model?: string | null }>;
+    /** Acquire and release one backend execution slot around each candidate. */
+    candidateAdmission?: (engine: EngineId) => Promise<(retained?: boolean) => void>;
+    candidateExecutionStart?: (engine: EngineId) => void | Promise<void>;
   },
 ): Promise<BestOfNResult | { winner: undefined; candidates: CandidateResult[]; critique: BestOfNResult['critique'] }> {
   const n = readN(cfg, opts?.n);
@@ -618,7 +769,9 @@ async function runBestOfNInternal(
       trajectoryId: `run:${runId}`,
       requestedModel,
     };
-    if (opts?.signal?.aborted) return { ...base, error: 'cancelled' };
+    if (opts?.signal?.aborted) {
+      return { ...base, error: 'cancelled', preExecutionControl: 'cancelled' };
+    }
     const runSandboxed = runnerFor(cEngine);
 
     if (!runSandboxed) {
@@ -627,7 +780,30 @@ async function runBestOfNInternal(
 
     const t0 = Date.now();
     let ownedSandbox: Sandbox | undefined;
+    let releaseCandidateAdmission: ((retained?: boolean) => void) | undefined;
+    let retainCandidateAdmission = false;
+    let candidateExecutionStarted = false;
+    const settleCandidateAdmission = (retained: boolean): void => {
+      const release = releaseCandidateAdmission;
+      releaseCandidateAdmission = undefined;
+      if (!release) return;
+      try {
+        release(retained);
+      } catch {
+        // Admission cleanup cannot overturn the candidate's terminal result.
+      }
+    };
     try {
+      releaseCandidateAdmission = await opts?.candidateAdmission?.(cEngine);
+      if (opts?.signal?.aborted) {
+        settleCandidateAdmission(false);
+        return { ...base, error: 'cancelled', preExecutionControl: 'cancelled' };
+      }
+      const beginCandidateExecution = async (): Promise<void> => {
+        if (candidateExecutionStarted) return;
+        await opts?.candidateExecutionStart?.(cEngine);
+        candidateExecutionStarted = true;
+      };
       const observeExecutedCandidate = (state: RunState, proposalOutcome?: RunProposalOutcome): void => {
         const actionCounts = state.runEventSummary?.actionCounts;
         const executed = state.status === 'done' || [
@@ -711,6 +887,7 @@ async function runBestOfNInternal(
           };
         }
 
+        await beginCandidateExecution();
         const result = await runSandboxed(cEngine as import('../types.js').EngineId, goal, cfg, {
           ...(typeof requestedModel === 'string' ? { model: requestedModel } : {}),
           sourceRepo,
@@ -726,6 +903,7 @@ async function runBestOfNInternal(
         const generationOutcome = result.proposalOutcome ?? result.state.proposalOutcome;
         observeExecutedCandidate(result.state, generationOutcome);
         if (result.sandboxRetention) {
+          retainCandidateAdmission = true;
           return {
             ...base,
             latencyMs: Date.now() - t0,
@@ -776,6 +954,8 @@ async function runBestOfNInternal(
         });
 
         const proposalOutcome = draft.proposalOutcome ?? result.proposalOutcome ?? result.state.proposalOutcome;
+        const candidateRetention = draft.sandboxRetention ?? result.sandboxRetention;
+        retainCandidateAdmission = candidateRetention !== undefined;
         const proposalDraft = draft.proposalDraft;
         const diff = proposalDraft?.diff ?? '';
         const hasMaterial = !!proposalDraft || diff.trim().length > 0;
@@ -792,12 +972,14 @@ async function runBestOfNInternal(
             : {}),
           ...(candidateError ? { error: candidateError } : {}),
           sandbox: sb,
+          ...(candidateRetention ? { sandboxRetention: candidateRetention } : {}),
           runId,
           delegationScope,
           state: stateForCandidate,
         };
       }
 
+      await beginCandidateExecution();
       const result = await runSandboxed(cEngine as import('../types.js').EngineId, goal, cfg, {
         ...(typeof requestedModel === 'string' ? { model: requestedModel } : {}),
         sourceRepo,
@@ -810,6 +992,7 @@ async function runBestOfNInternal(
         ...(opts?.signal ? { signal: opts.signal } : {}),
       });
       const proposalOutcome = result.proposalOutcome ?? result.state.proposalOutcome;
+      retainCandidateAdmission = result.sandboxRetention !== undefined;
       observeExecutedCandidate(result.state, proposalOutcome);
       if (opts?.signal?.aborted) {
         const diff = typeof result.state.result === 'string' ? result.state.result : '';
@@ -849,12 +1032,24 @@ async function runBestOfNInternal(
         state: result.state,
       } as InternalCandidateResult;
     } catch (err) {
+      if (err instanceof BestOfNCandidateAdmissionError) {
+        return {
+          ...base,
+          latencyMs: Date.now() - t0,
+          error: boundedCandidateText(err.message, 220) ?? 'best-of-n candidate admission unavailable',
+          preExecutionControl: err.control,
+          ...(ownedSandbox ? { sandbox: ownedSandbox } : {}),
+        };
+      }
       return {
         ...base,
         latencyMs: Date.now() - t0,
-        error: err instanceof Error ? err.message : String(err),
+        error: boundedCandidateText(err instanceof Error ? err.message : String(err), 220)
+          ?? 'best-of-n candidate failed',
         ...(ownedSandbox ? { sandbox: ownedSandbox } : {}),
       };
+    } finally {
+      settleCandidateAdmission(retainCandidateAdmission);
     }
   });
 

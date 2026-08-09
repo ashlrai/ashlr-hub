@@ -11,6 +11,7 @@ import type {
   RouteSnapshot,
   RunContextSummary,
   RunEventSummary,
+  RunFailureCode,
 } from '../types.js';
 import { scrubSecrets } from '../util/scrub.js';
 
@@ -236,11 +237,40 @@ export function routeSnapshot(input: RouteSnapshot | undefined): RouteSnapshot |
   };
 }
 
+const RUN_FAILURE_CODE_AUTHORITY = {
+  'trivial-proposal': { outcome: 'gate-blocked', statuses: new Set(['done', 'failed', 'aborted']) },
+  'completeness-gate': { outcome: 'gate-blocked', statuses: new Set(['done', 'failed', 'aborted']) },
+  'partial-completeness-gate': { outcome: 'gate-blocked', statuses: new Set(['done', 'failed', 'aborted']) },
+  'sandbox-unavailable': { outcome: 'sandbox-failed', statuses: new Set(['failed', 'aborted']) },
+  'kill-switch': { outcome: 'sandbox-failed', statuses: new Set(['failed', 'aborted']) },
+  'api-model-task-failed': { outcome: 'engine-failed', statuses: new Set(['failed', 'aborted']) },
+  'engine-command-missing': { outcome: 'engine-failed', statuses: new Set(['failed', 'aborted']) },
+  'engine-failed-no-diff': { outcome: 'engine-failed', statuses: new Set(['failed', 'aborted']) },
+  'engine-unsupported': { outcome: 'engine-failed', statuses: new Set(['failed', 'aborted']) },
+} satisfies Record<RunFailureCode, {
+  outcome: string;
+  statuses: ReadonlySet<string>;
+}>;
+
+export function canonicalRunFailureCode(
+  failureCode: unknown,
+  status: string | undefined,
+  outcome: string | undefined,
+): string | undefined {
+  if (typeof failureCode !== 'string' || status === undefined || outcome === undefined) return undefined;
+  if (!Object.hasOwn(RUN_FAILURE_CODE_AUTHORITY, failureCode)) return undefined;
+  const authority = RUN_FAILURE_CODE_AUTHORITY[failureCode as RunFailureCode];
+  return authority?.outcome === outcome && authority.statuses.has(status)
+    ? failureCode
+    : undefined;
+}
+
 export function runEventSummary(input: RunEventSummary | undefined): RunEventSummary | undefined {
   if (!input) return undefined;
   const runId = boundedText(input.runId, MAX_ID);
   const status = boundedText(input.status, 80);
   const outcome = boundedText(input.outcome, 80);
+  const failureCode = canonicalRunFailureCode(input.failureCode, status, outcome);
   const proposalId = boundedText(input.proposalId, MAX_ID);
   const diffFiles = finiteNumber(input.diffFiles);
   const diffLines = finiteNumber(input.diffLines);
@@ -256,6 +286,7 @@ export function runEventSummary(input: RunEventSummary | undefined): RunEventSum
     ...(runId ? { runId } : {}),
     ...(status ? { status } : {}),
     ...(outcome ? { outcome } : {}),
+    ...(failureCode ? { failureCode } : {}),
     ...(proposalCreated !== undefined ? { proposalCreated } : {}),
     ...(proposalId ? { proposalId } : {}),
     ...(diffFiles !== undefined ? { diffFiles } : {}),

@@ -661,6 +661,18 @@ describe('M250 ResourceMonitor — graceful degradation when all sources fail', 
     expect(localCoder?.capUnit).toBe('concurrent');
   });
 
+  it.each(['ashlrcode', 'aw', 'hermes', 'opencode', 'grok'] as const)(
+    'getResourceSnapshot includes configured supported backend %s',
+    async (backend) => {
+      const { getResourceSnapshot } = await import('../src/core/fabric/resource-monitor.js');
+      const snap = await getResourceSnapshot(withFoundry({
+        allowedBackends: [backend, 'builtin'] as EngineId[],
+      }), { forceRefresh: true });
+
+      expect(snap.backends.map((state) => state.backend)).toContain(backend);
+    },
+  );
+
   it('snapshot cache: second call within TTL returns same generatedAt', async () => {
     vi.doMock('../src/core/observability/codex-source.js', () => ({
       readCodexRateLimits: vi.fn().mockReturnValue(null),
@@ -674,6 +686,22 @@ describe('M250 ResourceMonitor — graceful degradation when all sources fail', 
 
     // Both came from same cache slot → same generatedAt
     expect(snap1.generatedAt).toBe(snap2.generatedAt);
+  });
+
+  it('forceRefresh bypasses the snapshot cache for final admission checks', async () => {
+    vi.doMock('../src/core/observability/codex-source.js', () => ({
+      readCodexRateLimits: vi.fn().mockReturnValue(null),
+    }));
+
+    const { getResourceSnapshot } = await import('../src/core/fabric/resource-monitor.js');
+    const cfg = baseCfg();
+
+    const cached = await getResourceSnapshot(cfg);
+    const same = await getResourceSnapshot(cfg);
+    const refreshed = await getResourceSnapshot(cfg, { forceRefresh: true });
+
+    expect(same).toBe(cached);
+    expect(refreshed).not.toBe(cached);
   });
 
   it('snapshot cache is keyed by allowed backends and local resource config', async () => {

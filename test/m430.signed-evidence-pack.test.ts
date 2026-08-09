@@ -324,6 +324,37 @@ describe('M430 signed evidence-pack v3 protocol', () => {
     expect(verifyAutonomyEvidencePackV3(signedPack).ok).toBe(true);
   });
 
+  it('seals and verifies an exact bounded producer failure code', () => {
+    const payload = legacy('prop-v3-failure-code');
+    payload.runEventSummary = {
+      status: 'failed',
+      outcome: 'engine-failed',
+      failureCode: 'engine-command-missing',
+      proposalCreated: false,
+    };
+
+    const pack = sealAutonomyEvidencePackV3(payload);
+
+    expect(pack?.runEventSummary?.failureCode).toBe('engine-command-missing');
+    expect(verifyAutonomyEvidencePackV3(pack).ok).toBe(true);
+  });
+
+  it.each([
+    ['oversized', 'x'.repeat(81)],
+    ['secret-bearing', `engine-failed Authorization: Bearer sk-${'a'.repeat(80)}`],
+    ['unknown-code', 'customer-acme-private-roadmap'],
+  ])('refuses a non-canonical %s producer failure code', (_case, failureCode) => {
+    const payload = legacy(`prop-v3-failure-code-${_case}`);
+    payload.runEventSummary = {
+      status: 'failed',
+      outcome: 'engine-failed',
+      failureCode,
+      proposalCreated: false,
+    };
+
+    expect(sealAutonomyEvidencePackV3(payload)).toBeNull();
+  });
+
   it('persists and reads only a cryptographically valid v3 pack', () => {
     const pack = signed('prop-v3-read');
     expect(persistAutonomyEvidencePack(pack)).toBe(true);

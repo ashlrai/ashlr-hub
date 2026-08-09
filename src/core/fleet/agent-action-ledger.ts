@@ -85,7 +85,7 @@ const ROUTE_SNAPSHOT_KEYS = new Set([
   'selectedSkillIds', 'skillPolicyVersion', 'skillMode',
 ]);
 const RUN_SUMMARY_KEYS = new Set([
-  'runId', 'status', 'outcome', 'proposalCreated', 'proposalId', 'diffFiles',
+  'runId', 'status', 'outcome', 'failureCode', 'proposalCreated', 'proposalId', 'diffFiles',
   'diffLines', 'tokensIn', 'tokensOut', 'costUsd', 'durationMs', 'cacheHit',
   'contextSummary', 'actionCounts',
 ]);
@@ -284,11 +284,15 @@ const AGENT_ACTION_REASON_CODES = new Set([
   'dry-run',
   'auto-live',
   'dispatch-route-unavailable',
+  'distributed-capacity-authority-unavailable',
   'dispatch-skip',
   'empty-diff',
+  'engine-command-missing',
   'engine-failed',
+  'engine-unsupported',
   'failed',
   'gate-blocked',
+  'best-of-n-capacity-authority-unavailable',
   'judged',
   'kill-switch',
   'live',
@@ -737,7 +741,8 @@ function sanitizeEvent(event: AgentActionEvent, remintSemanticOccurrence = false
         ...causal.routeSnapshot,
         reason:
           typeof causal.routeSnapshot.reason === 'string' &&
-          AGENT_ACTION_REASON_CODES.has(causal.routeSnapshot.reason)
+          (AGENT_ACTION_REASON_CODES.has(causal.routeSnapshot.reason) ||
+            /^d1_[a-f0-9]{64}$/.test(causal.routeSnapshot.reason))
             ? causal.routeSnapshot.reason
             : undefined,
       }
@@ -865,6 +870,7 @@ function validOptionalCausalRecord(
   if (value === undefined) return true;
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const rawKeys = new Set(Object.keys(value));
+  if ([...rawKeys].some((key) => !recognizedKeys.has(key))) return false;
   if (![...rawKeys].some((key) => recognizedKeys.has(key))) return false;
   const normalized = normalize(value as never);
   return normalized !== undefined && Object.keys(normalized).some((key) =>

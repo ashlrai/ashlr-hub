@@ -59,6 +59,7 @@ import type {
   AshlrConfig,
   EngineId,
   EngineTier,
+  RunEventSummary,
   RunEstimate,
   WorkItem,
   WorkSource,
@@ -68,6 +69,7 @@ import {
   recordDispatchProduction,
   type DispatchProductionEvent,
 } from '../src/core/fleet/dispatch-production-ledger.js';
+import type { AgentActionEvent } from '../src/core/fleet/agent-action-ledger.js';
 import {
   learningEpochFromTimestamp,
   ROUTER_POLICY_VERSION,
@@ -81,6 +83,7 @@ import {
 } from '../src/core/learning/attempt-shape.js';
 
 import {
+  countZeroStepBackendFailureSamples,
   recommendRoute,
   recoverWithinBudget,
   p50Cost,
@@ -253,6 +256,74 @@ function comparativeCandidateEvents(backend: EngineId): DispatchProductionEvent[
     makeDispatchProductionEvent({ backend, outcome: 'proposal-created', proposalCreated: true }),
     makeDispatchProductionEvent({ backend, outcome: 'empty-diff', proposalCreated: false }),
   ];
+}
+
+function makeZeroStepFailoverAction(
+  index: number,
+  backend: EngineId,
+  tier: EngineTier,
+  failureCode: 'engine-command-missing' | 'engine-unsupported' = 'engine-command-missing',
+): AgentActionEvent {
+  const ts = new Date(Date.now() - index).toISOString();
+  const runId = `attempt-00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`;
+  return {
+    schemaVersion: 1,
+    ts,
+    machineId: 'm53',
+    actor: 'daemon',
+    kind: 'dispatch',
+    outcome: 'failed',
+    action: 'daemon:dispatch-zero-step-failover',
+    summary: 'metadata-only zero-step backend failure',
+    repo: '/repo',
+    itemId: `repo:security:zero-step-${index}`,
+    source: 'security',
+    runId,
+    trajectoryId: `run:${runId}`,
+    routeSnapshot: {
+      backend,
+      tier,
+      assignedBy: 'daemon-router',
+      reason: 'd1_'.padEnd(67, '0'),
+      routerPolicyVersion: ROUTER_POLICY_VERSION,
+    },
+    runEventSummary: {
+      runId,
+      status: 'failed',
+      outcome: 'engine-failed',
+      failureCode,
+      proposalCreated: false,
+      diffFiles: 0,
+      diffLines: 0,
+      tokensIn: 0,
+      tokensOut: 0,
+      costUsd: 0,
+      actionCounts: {
+        sandboxCreated: 1,
+        spawnAttempts: 0,
+        transientRetries: 0,
+        proposalCaptureAttempts: 0,
+        completenessGateRuns: 0,
+        verifyRepairAttempts: 0,
+        modelSteps: 0,
+        toolSteps: 0,
+        totalSteps: 0,
+        diffFiles: 0,
+        diffLines: 0,
+        proposalCreated: 0,
+        proposalBlocked: 0,
+        proposalDisabled: 0,
+      },
+    } as RunEventSummary & { failureCode: typeof failureCode },
+    learningSource: 'agent-action',
+    labelBasis: 'dispatch-outcome',
+    routerPolicyVersion: ROUTER_POLICY_VERSION,
+    learningEpoch: learningEpochFromTimestamp(ts),
+    backend,
+    tier,
+    reason: failureCode,
+    tags: ['dispatch-failover', 'metadata-only'],
+  };
 }
 
 function learnedResourceStates(
@@ -786,6 +857,136 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
     expect(rec.reason).not.toContain('recent proposal yield');
     expect(rec.reason).not.toContain('same-tier reroute');
     expect(rec.reason).not.toContain('candidate yield');
+  });
+
+  it('counts strictly validated zero-step failovers as failed backend-attempt samples', () => {
+    const backend: EngineId = 'claude';
+    const tier: EngineTier = 'frontier';
+    const events = [
+      makeZeroStepFailoverAction(0, backend, tier, 'engine-command-missing'),
+      makeZeroStepFailoverAction(1, backend, tier, 'engine-unsupported'),
+      makeZeroStepFailoverAction(2, backend, tier, 'engine-command-missing'),
+    ];
+
+    expect(countZeroStepBackendFailureSamples({
+      read: { sourceState: 'healthy', complete: true, events },
+      backend,
+      tier,
+      source: 'security',
+    })).toBe(3);
+  });
+
+  it('reports validated zero-step samples without trusting owner-writable alternate yield', async () => {
+    const cfg = withInstalledFrontierEngines(withIntelligence({
+      allowedBackends: ['builtin', 'claude', 'codex'],
+      minProposalYieldRate: 0.5,
+    }));
+    const item = makeItem({ source: 'security', effort: 5, score: 10 });
+    const base = routeBackend(item, cfg);
+    const alternate = base.backend === 'claude' ? 'codex' : 'claude';
+    const events = Array.from({ length: 3 }, (_, index) =>
+      makeZeroStepFailoverAction(index, base.backend, base.tier));
+
+    const rec = await recommendRoute(item, cfg, {
+      estimate: makeEstimate(0.001, 10),
+      prior: { frontierSuccessRate: 0.9, frontierSampleSize: 10 },
+      dispatchProductionEvents: comparativeCandidateEvents(alternate),
+      agentActionRead: { sourceState: 'healthy', complete: true, events },
+    });
+
+    expect(base.tier).toBe('frontier');
+    expect(rec).toMatchObject({ backend: base.backend, tier: base.tier });
+    expect(rec.reason).toContain('0/3');
+    expect(rec.reason).toContain('3 validated zero-step backend failure(s)');
+    expect(rec.reason).toContain('no authenticated same-tier alternative qualified');
+    expect(rec.reason).not.toContain('same-tier reroute');
+  });
+
+  it('requires a complete healthy action-ledger read before learning from zero-step failures', () => {
+    const backend: EngineId = 'claude';
+    const tier: EngineTier = 'frontier';
+    const events = Array.from({ length: 3 }, (_, index) =>
+      makeZeroStepFailoverAction(index, backend, tier));
+
+    for (const read of [
+      { sourceState: 'degraded' as const, complete: false, events },
+      { sourceState: 'healthy' as const, complete: false, events },
+      { sourceState: 'missing' as const, complete: true, events },
+    ]) {
+      expect(countZeroStepBackendFailureSamples({
+        read,
+        backend,
+        tier,
+        source: 'security',
+      })).toBe(0);
+    }
+  });
+
+  it('deduplicates zero-step attempts by trajectory, run, and backend before the sample floor', () => {
+    const repeated = makeZeroStepFailoverAction(0, 'claude', 'frontier');
+    expect(countZeroStepBackendFailureSamples({
+      read: {
+        sourceState: 'healthy',
+        complete: true,
+        events: [repeated, { ...repeated }, { ...repeated }],
+      },
+      backend: 'claude',
+      tier: 'frontier',
+      source: 'security',
+    })).toBe(1);
+  });
+
+  it('rejects zero-step rows with any identity, authority, code, or action-count mismatch', () => {
+    const invalid = Array.from({ length: 10 }, (_, index) =>
+      makeZeroStepFailoverAction(index, 'claude', 'frontier'));
+    invalid[0] = { ...invalid[0]!, actor: 'agent' };
+    invalid[1] = { ...invalid[1]!, kind: 'route' };
+    invalid[2] = { ...invalid[2]!, action: 'daemon:dispatch-start' };
+    invalid[3] = { ...invalid[3]!, outcome: 'blocked' };
+    invalid[4] = { ...invalid[4]!, trajectoryId: 'run:contradictory' };
+    invalid[5] = {
+      ...invalid[5]!,
+      routeSnapshot: { ...invalid[5]!.routeSnapshot, backend: 'codex' },
+    };
+    invalid[6] = {
+      ...invalid[6]!,
+      routerPolicyVersion: 'stale-router-policy',
+      learningEpoch: '2000-01-01',
+    };
+    invalid[7] = {
+      ...invalid[7]!,
+      runEventSummary: {
+        ...invalid[7]!.runEventSummary,
+        failureCode: 'api-model-task-failed',
+      } as RunEventSummary & { failureCode: string },
+      reason: 'api-model-task-failed',
+    };
+    const exactOutcome = { ...invalid[8]!.runEventSummary } as RunEventSummary & {
+      failureCode?: string;
+    };
+    exactOutcome.outcome = 'engine-command-missing';
+    delete exactOutcome.failureCode;
+    invalid[8] = {
+      ...invalid[8]!,
+      runEventSummary: exactOutcome,
+    };
+    invalid[9] = {
+      ...invalid[9]!,
+      runEventSummary: {
+        ...invalid[9]!.runEventSummary,
+        actionCounts: {
+          ...invalid[9]!.runEventSummary!.actionCounts,
+          spawnAttempts: 1,
+        },
+      },
+    };
+
+    expect(countZeroStepBackendFailureSamples({
+      read: { sourceState: 'healthy', complete: true, events: invalid },
+      backend: 'claude',
+      tier: 'frontier',
+      source: 'security',
+    })).toBe(0);
   });
 
   it('cancelled rows do not enter learned-router attempt or proposal-yield denominators', async () => {

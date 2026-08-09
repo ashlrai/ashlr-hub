@@ -231,10 +231,23 @@ export interface ProductionAttemptShape {
   policyDisabled: number;
 }
 
+export type RunFailureCode =
+  | 'trivial-proposal'
+  | 'completeness-gate'
+  | 'partial-completeness-gate'
+  | 'sandbox-unavailable'
+  | 'kill-switch'
+  | 'api-model-task-failed'
+  | 'engine-command-missing'
+  | 'engine-failed-no-diff'
+  | 'engine-unsupported';
+
 export interface RunEventSummary {
   runId?: string;
   status?: string;
   outcome?: string;
+  /** Exact producer failure reason when the terminal production outcome is intentionally coarser. */
+  failureCode?: string;
   proposalCreated?: boolean;
   proposalId?: string;
   diffFiles?: number;

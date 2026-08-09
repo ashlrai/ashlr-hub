@@ -285,6 +285,7 @@ describe('proposal dedup authority', () => {
         runId,
         status: 'failed',
         outcome: 'gate-blocked',
+        failureCode: 'completeness-gate',
         proposalCreated: false,
         actionCounts: {
           proposalCreated: 0,
@@ -303,6 +304,7 @@ describe('proposal dedup authority', () => {
       runEventSummary: {
         status: 'failed',
         outcome: 'gate-blocked',
+        failureCode: 'completeness-gate',
         proposalCreated: false,
       },
     });
