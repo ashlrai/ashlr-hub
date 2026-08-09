@@ -25,6 +25,7 @@
 
 import { parsePositiveInt } from './args.js';
 import { makeColors, isTty } from './ui.js';
+import type { WebServerOptions } from '../core/types.js';
 
 const { bold, dim, red, green, cyan, yellow, gray } = makeColors(isTty());
 
@@ -60,13 +61,20 @@ interface ServeOptions {
   open: boolean;
   allowDispatch: boolean;
   json: boolean;
+  mutationRole: NonNullable<WebServerOptions['mutationRole']>;
 }
 
-function parseArgs(args: string[]): ServeOptions | { error: string; code: number } {
+const MUTATION_ROLES = new Set<NonNullable<WebServerOptions['mutationRole']>>([
+  'observer', 'operator', 'approver', 'owner',
+]);
+
+export function parseServeArgs(args: string[]): ServeOptions | { error: string; code: number } {
   let port = DEFAULT_PORT;
   let open = false;
   let allowDispatch = false;
   let json = false;
+  let mutationRole: NonNullable<WebServerOptions['mutationRole']> = 'owner';
+  let mutationRoleExplicit = false;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -82,6 +90,14 @@ function parseArgs(args: string[]): ServeOptions | { error: string; code: number
     } else if (arg === '--allow-dispatch') {
       allowDispatch = true;
 
+    } else if (arg === '--mutation-role') {
+      const role = args[++i];
+      if (!role || !MUTATION_ROLES.has(role as NonNullable<WebServerOptions['mutationRole']>)) {
+        return { error: '--mutation-role must be observer, operator, approver, or owner', code: 2 };
+      }
+      mutationRole = role as NonNullable<WebServerOptions['mutationRole']>;
+      mutationRoleExplicit = true;
+
     } else if (arg === '--json') {
       json = true;
 
@@ -93,7 +109,10 @@ function parseArgs(args: string[]): ServeOptions | { error: string; code: number
     }
   }
 
-  return { port, open, allowDispatch, json };
+  if (mutationRoleExplicit && !allowDispatch) {
+    return { error: '--mutation-role requires --allow-dispatch', code: 2 };
+  }
+  return { port, open, allowDispatch, json, mutationRole };
 }
 
 // ---------------------------------------------------------------------------
@@ -120,7 +139,7 @@ async function openBrowser(url: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export async function cmdServe(args: string[]): Promise<number> {
-  const parsed = parseArgs(args);
+  const parsed = parseServeArgs(args);
 
   // Usage/help shortcut or parse error
   if ('error' in parsed) {
@@ -133,7 +152,7 @@ export async function cmdServe(args: string[]): Promise<number> {
     return parsed.code;
   }
 
-  const { port, open, allowDispatch, json } = parsed;
+  const { port, open, allowDispatch, json, mutationRole } = parsed;
 
   // Load config
   let loadConfig: Awaited<ReturnType<typeof importLoadConfig>>;
@@ -162,7 +181,13 @@ export async function cmdServe(args: string[]): Promise<number> {
   // Start server
   let handle: import('../core/types.js').WebServerHandle;
   try {
-    handle = await startServer(cfg, { port, open, allowDispatch });
+    handle = await startServer(cfg, {
+      port,
+      open,
+      allowDispatch,
+      mutationRole,
+      requireMutationAuditReceipts: allowDispatch,
+    });
   } catch (err) {
     console.error(red('error: ') + 'Failed to start server: ' + String(err));
     return 1;
@@ -179,6 +204,7 @@ export async function cmdServe(args: string[]): Promise<number> {
     if (allowDispatch) {
       out.token = handle.token;
       out.tokenHeader = 'X-Ashlr-Token';
+      out.mutationRole = mutationRole;
     }
     console.log(JSON.stringify(out));
   } else {
@@ -192,6 +218,7 @@ export async function cmdServe(args: string[]): Promise<number> {
     if (allowDispatch) {
       console.log(`  ${yellow('⚠')}  ${bold('Dispatch enabled')} (--allow-dispatch)`);
       console.log(`  ${dim('Session token')}  ${bold(handle.token)}`);
+      console.log(`  ${dim('Mutation role')} ${bold(mutationRole)}`);
       console.log(`  ${dim('Required header:')} X-Ashlr-Token: ${handle.token}`);
       console.log('');
       console.log(`  ${dim('POST /api/run is live. Use the token above for all mutating requests.')}`);
@@ -255,7 +282,7 @@ export async function cmdServe(args: string[]): Promise<number> {
 
 function printUsage(): void {
   console.log('');
-  console.log(bold('  ashlr serve') + dim(' [--port N] [--open] [--allow-dispatch] [--json]'));
+  console.log(bold('  ashlr serve') + dim(' [--port N] [--open] [--allow-dispatch] [--mutation-role ROLE] [--json]'));
   console.log('');
   console.log('  Start a localhost-only web dashboard and JSON API server.');
   console.log('');
@@ -263,6 +290,7 @@ function printUsage(): void {
   console.log(`    ${cyan('--port N')}            TCP port to bind on 127.0.0.1 (default ${DEFAULT_PORT})`);
   console.log(`    ${cyan('--open')}              Open the dashboard in your default browser after start`);
   console.log(`    ${cyan('--allow-dispatch')}    Enable POST /api/run (guarded by a per-session token)`);
+  console.log(`    ${cyan('--mutation-role ROLE')} Scope mutation authority: observer, operator, approver, owner`);
   console.log(`    ${cyan('--json')}              Print startup info as JSON (machine-readable)`);
   console.log('');
   console.log('  ' + bold('Security:'));
@@ -289,6 +317,7 @@ function printUsage(): void {
   console.log(`    ${cyan('ashlr serve')}                            # Start on port ${DEFAULT_PORT}, read-only`);
   console.log(`    ${cyan('ashlr serve --port 8080 --open')}         # Custom port + open browser`);
   console.log(`    ${cyan('ashlr serve --allow-dispatch')}           # Enable agent dispatch`);
+  console.log(`    ${cyan('ashlr serve --allow-dispatch --mutation-role operator')} # Operator-scoped token`);
   console.log(`    ${cyan('ashlr serve --json')}                     # Machine-readable startup output`);
   console.log('');
 }

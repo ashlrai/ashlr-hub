@@ -57,7 +57,13 @@ function request(
         port: Number(parsed.port),
         path: parsed.pathname + parsed.search,
         method,
-        headers: { Host: `127.0.0.1:${port}`, ...headers },
+        headers: {
+          Host: `127.0.0.1:${port}`,
+          ...(method === 'POST'
+            ? { 'x-ashlr-idempotency-key': `m32-${Date.now()}-${Math.random().toString(16).slice(2)}` }
+            : {}),
+          ...headers,
+        },
       },
       (res) => {
         let data = '';

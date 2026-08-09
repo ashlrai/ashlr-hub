@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
 import type { AshlrConfig, WebServerOptions, WebServerHandle } from '../types.js';
 import { handleApi, drainSseConnections } from './api.js';
+import { buildLocalWebPrincipal } from './mutation-authority.js';
 import { serveStatic } from './static.js';
 
 // ---------------------------------------------------------------------------
@@ -70,6 +71,9 @@ export async function startServer(
   // Per-session secret token (32 bytes → 64 hex chars). Used only when
   // allowDispatch is true, but always generated so the shape is consistent.
   const token = randomBytes(32).toString('hex');
+  const mutationPrincipal = opts.allowDispatch
+    ? buildLocalWebPrincipal(token, opts.mutationRole ?? 'owner')
+    : undefined;
 
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     // ── 1. Host-header allowlist (anti DNS-rebinding) ──────────────────────
@@ -81,7 +85,12 @@ export async function startServer(
 
     // ── 2. API routes ──────────────────────────────────────────────────────
     // handleApi is async; wrap to catch errors without crashing the server.
-    handleApi(req, res, cfg, { token, allowDispatch: opts.allowDispatch })
+    handleApi(req, res, cfg, {
+      token,
+      allowDispatch: opts.allowDispatch,
+      ...(mutationPrincipal ? { mutationPrincipal } : {}),
+      requireMutationAuditReceipt: opts.allowDispatch,
+    })
       .then((handled) => {
         if (handled) return;
 
