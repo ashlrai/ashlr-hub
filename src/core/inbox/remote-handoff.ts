@@ -349,6 +349,19 @@ function hasStrongIdentity(handoff: ProposalRemoteHandoff, pr: PrView): boolean 
   );
 }
 
+/** Exact PR coordinates whose host head no longer matches the verified proposal. */
+function hasVerifiedHeadMismatch(handoff: ProposalRemoteHandoff, pr: PrView): boolean {
+  return Boolean(
+    handoff.prUrl && pr.url && handoff.prUrl === pr.url &&
+    handoff.branch && pr.headRefName && handoff.branch === pr.headRefName &&
+    handoff.base && pr.baseRefName && handoff.base === pr.baseRefName &&
+    handoff.expectedHeadOid && /^[0-9a-f]{40}$/i.test(handoff.expectedHeadOid) &&
+    pr.headRefOid && /^[0-9a-f]{40}$/i.test(pr.headRefOid) &&
+    handoff.expectedHeadOid.toLowerCase() !== pr.headRefOid.toLowerCase() &&
+    ['open', 'closed', 'merged'].includes(pr.state?.toLowerCase() ?? '')
+  );
+}
+
 /** A URL-less durable intent may bind only a complete observation of its exact PR identity. */
 function canBindPrUrl(handoff: ProposalRemoteHandoff, pr: PrView): boolean {
   return Boolean(
@@ -673,6 +686,27 @@ function reconcileOne(proposal: Proposal): RemoteHandoffReconcileResult {
       }
       if (terminal) result.unknown++;
       else result.open++;
+      return result;
+    }
+
+    if (current.remoteHandoff.mergedAt === undefined &&
+      current.remoteHandoff.mergeCommitOid === undefined &&
+      current.remoteHandoff.reconciliation === undefined &&
+      hasVerifiedHeadMismatch(current.remoteHandoff, pr)) {
+      const detail = `remote handoff invalidated: exact PR head changed from verified ` +
+        `${current.remoteHandoff.expectedHeadOid} to ${pr.headRefOid}; ` +
+        `remote PR requires operator disposition and no merge was credited`;
+      const remoteHandoff = mergeHandoff(current.remoteHandoff, {
+        state: 'closed',
+        prUrl: pr.url,
+        detail,
+      });
+      if (!outwardAuthorityStillValid(current, current.remoteHandoff, outwardFence) ||
+        !setStatus(proposal.id, 'rejected', detail, undefined, mutationLock, { remoteHandoff })) {
+        result.unknown++;
+        return result;
+      }
+      result.closed++;
       return result;
     }
 

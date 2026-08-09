@@ -922,8 +922,14 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
       headRefOid: replacement,
       baseRefName: quarantined?.remoteHandoff?.base,
     });
-    expect(reconcileRemoteHandoffs()).toEqual({ checked: 1, merged: 0, closed: 0, open: 0, unknown: 1 });
-    expect(loadProposal(proposal.id)?.status).toBe('awaiting-host-merge');
+    expect(reconcileRemoteHandoffs()).toEqual({ checked: 1, merged: 0, closed: 1, open: 0, unknown: 0 });
+    expect(loadProposal(proposal.id)).toMatchObject({
+      status: 'rejected',
+      remoteHandoff: {
+        state: 'closed',
+        detail: expect.stringContaining('remote PR requires operator disposition and no merge was credited'),
+      },
+    });
   }, 30_000);
 
   it('quarantines a newly created PR whose observed base does not match the intent', async () => {
@@ -2126,7 +2132,7 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
     });
   });
 
-  it('does not attribute a host merge when the PR head differs from the verified handoff commit', async () => {
+  it('terminally invalidates an exact PR whose head differs from the verified handoff commit', async () => {
     const { proposal } = await createRemoteHandoffProposal();
     const handoff = loadProposal(proposal.id)!.remoteHandoff!;
     viewPrMock.mockReturnValueOnce({
@@ -2139,11 +2145,26 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
       baseRefName: handoff.base,
     });
 
-    expect(reconcileRemoteHandoffs()).toEqual({ checked: 1, merged: 0, closed: 0, open: 0, unknown: 1 });
+    expect(reconcileRemoteHandoffs()).toEqual({ checked: 1, merged: 0, closed: 1, open: 0, unknown: 0 });
     expect(loadProposal(proposal.id)).toMatchObject({
-      status: 'awaiting-host-merge',
-      remoteHandoff: { state: 'awaiting-host-merge', expectedHeadOid: handoff.expectedHeadOid },
+      status: 'rejected',
+      result: expect.stringContaining('remote handoff invalidated'),
+      remoteHandoff: {
+        state: 'closed',
+        expectedHeadOid: handoff.expectedHeadOid,
+        detail: expect.stringContaining('remote PR requires operator disposition and no merge was credited'),
+      },
     });
+    expect(loadProposal(proposal.id)?.realizedMerge).toBeUndefined();
+    expect(readDecisions({ proposalId: proposal.id }).filter((decision) =>
+      decision.action === 'rejected' && decision.verdict === 'rejected')).toHaveLength(1);
+    expect(fs.existsSync(ghCallsFile) ? fs.readFileSync(ghCallsFile, 'utf8') : '').toBe('');
+
+    viewPrMock.mockClear();
+    expect(reconcileRemoteHandoffs()).toEqual({ checked: 0, merged: 0, closed: 0, open: 0, unknown: 0 });
+    expect(viewPrMock).not.toHaveBeenCalled();
+    expect(readDecisions({ proposalId: proposal.id }).filter((decision) =>
+      decision.action === 'rejected' && decision.verdict === 'rejected')).toHaveLength(1);
   });
 
   it('quarantines a legacy handoff that has no expected PR head OID', async () => {
