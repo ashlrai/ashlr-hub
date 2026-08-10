@@ -202,7 +202,7 @@ import {
 import { routeTask, type RoutingContext } from '../src/core/run/router.js';
 import { routeBackend } from '../src/core/fleet/router.js';
 import { listRunsDetailed, saveRun } from '../src/core/run/orchestrator.js';
-import type { AshlrConfig, RunState, WorkItem } from '../src/core/types.js';
+import type { AshlrConfig, RunEstimate, RunState, WorkItem } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -328,6 +328,43 @@ describe('Operational Learning Firewall V1', () => {
     ...overrides,
   });
 
+  const eligibleAuthority = () => evaluateRoutingLearningAuthority({
+    ...healthySources,
+    observedSamples: LEARNED_ROUTING_MIN_SAMPLES,
+    samples: Array.from({ length: LEARNED_ROUTING_MIN_SAMPLES }, (_, index) =>
+      admittedSample({ assignmentIdentity: `route-assignment-${index}` })),
+  });
+
+  const expensiveEstimate = (
+    sourceState: RunEstimate['sourceQuality']['sourceState'],
+    sampleSize = LEARNED_ROUTING_MIN_SAMPLES,
+  ): RunEstimate => ({
+    kind: 'run',
+    goal: 'Test issue item',
+    sourceQuality: {
+      sourceState,
+      sourcePresent: true,
+      complete: true,
+      stopReasons: sourceState === 'degraded' ? ['invalid-file'] : [],
+      entriesExamined: sampleSize,
+      filesDiscovered: sampleSize,
+      filesRead: sampleSize,
+      bytesRead: sampleSize * 100,
+      invalidFiles: sourceState === 'degraded' ? 1 : 0,
+      unreadableFiles: 0,
+      oversizedFiles: 0,
+    },
+    sampleSize,
+    confidence: sampleSize >= 3 ? 'medium' : 'low',
+    tokens: { p25: 100, median: 200, p75: 300 },
+    steps: { p25: 1, median: 2, p75: 3 },
+    estCostUsd: { p25: 0.1, median: 0.2, p75: 0.3 },
+    wouldBeCloudUsd: 0.2,
+    durationMs: { p25: 100, median: 200, p75: 300 },
+    budgetClamped: false,
+    generatedAt: new Date().toISOString(),
+  });
+
   it('admits only a complete authenticated same-cohort stratum at the sample floor', () => {
     const authority = evaluateRoutingLearningAuthority({
       ...healthySources,
@@ -343,6 +380,36 @@ describe('Operational Learning Firewall V1', () => {
       cohort: { policyVersion: 'router-v2', learningEpoch: '2026-08-02' },
       blockerCodes: [],
     });
+  });
+
+  it('inverts the static route only for eligible, healthy, sample-qualified cost evidence', async () => {
+    const item = makeItem('issue', 5, 10);
+    const cfg = makeCfg({ intelligence: {}, allowedBackends: ['claude', 'local-coder', 'builtin'] });
+    const base = routeBackend(item, cfg);
+    expect(base.tier).toBe('frontier');
+
+    const authority = eligibleAuthority();
+    const inactiveAuthority = { ...authority, state: 'inactive' as const, operationalSteering: false };
+    const cases = [
+      { label: 'degraded source', estimate: expensiveEstimate('degraded'), routingLearningAuthority: authority },
+      { label: 'sample floor', estimate: expensiveEstimate('healthy', 2), routingLearningAuthority: authority },
+      { label: 'inactive authority', estimate: expensiveEstimate('healthy'), routingLearningAuthority: inactiveAuthority },
+    ];
+    for (const evidence of cases) {
+      const routed = await recommendRoute(item, cfg, evidence);
+      expect(routed, `${evidence.label}: ${routed.reason}`).toMatchObject({
+        backend: base.backend,
+        tier: base.tier,
+      });
+      expect(routed.reason, evidence.label).not.toContain('p50 cost');
+    }
+
+    const altered = await recommendRoute(item, cfg, {
+      estimate: expensiveEstimate('healthy'),
+      routingLearningAuthority: authority,
+    });
+    expect(altered).toMatchObject({ backend: 'local-coder', tier: 'mid' });
+    expect(altered.reason).toContain('p50 cost');
   });
 
   it('rejects unsigned decisions, mixed epochs, and incomplete assignment receipts', () => {

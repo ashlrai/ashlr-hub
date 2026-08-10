@@ -51,6 +51,12 @@ describe('estimateRun', () => {
     expect(est.sampleSize).toBe(0);
     expect(est.confidence).toBe('low');
     expect(est.tokens.median).toBe(0);
+    expect(est.sourceQuality).toMatchObject({
+      sourceState: 'missing',
+      sourcePresent: false,
+      complete: true,
+      stopReasons: [],
+    });
   });
 
   it('computes percentiles over completed runs', async () => {
@@ -63,6 +69,14 @@ describe('estimateRun', () => {
     expect(est.tokens.median).toBeGreaterThanOrEqual(10_000);
     expect(est.tokens.median).toBeLessThanOrEqual(30_000);
     expect(est.tokens.p25).toBeLessThanOrEqual(est.tokens.p75);
+    expect(est.sourceQuality).toMatchObject({
+      sourceState: 'healthy',
+      sourcePresent: true,
+      complete: true,
+      filesDiscovered: 3,
+      filesRead: 3,
+      invalidFiles: 0,
+    });
   });
 
   it('clamps percentiles to the requested budget and flags it', async () => {
@@ -82,6 +96,13 @@ describe('estimateRun', () => {
     seedRun('ok1', 'valid run', 5_000);
     const est = await estimateRun('valid run', {}, makeCfg());
     expect(est.sampleSize).toBeGreaterThanOrEqual(1);
+    expect(est.sourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      sourcePresent: true,
+      invalidFiles: 1,
+      stopReasons: ['invalid-file'],
+    });
+    expect(JSON.stringify(est.sourceQuality)).not.toContain('corrupt.json');
   });
 
   it('high confidence at 10+ samples', async () => {
@@ -96,6 +117,11 @@ describe('estimateSwarm', () => {
     const est = await estimateSwarm('build the thing', {}, makeCfg());
     expect(est.kind).toBe('swarm');
     expect(est.sampleSize).toBe(0);
+    expect(est.sourceQuality).toMatchObject({
+      sourceState: 'missing',
+      sourcePresent: false,
+      complete: true,
+    });
   });
 });
 

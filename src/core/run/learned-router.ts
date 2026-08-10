@@ -209,6 +209,7 @@ function backendForTier(
 
 /** The preferred frontier backend ordering (mirrors FRONTIER_PREFERENCE in router.ts). */
 const FRONTIER_PREFERENCE: readonly EngineId[] = ['claude', 'codex'];
+export const ROUTE_ESTIMATE_MIN_SAMPLES = 3;
 const MIN_DISPATCH_YIELD_SAMPLES = 3;
 const MIN_DISPATCH_YIELD_REROUTE_MARGIN = 0.2;
 const DEFAULT_DISPATCH_YIELD_WINDOW_HOURS = 24;
@@ -502,6 +503,26 @@ export function anomalyRatio(actualCostUsd: number, estimate: RunEstimate): numb
   return actualCostUsd / p50;
 }
 
+/**
+ * Return an estimate only when it is eligible to steer an operational route.
+ * Degraded estimates remain useful as observations, but are neutral here.
+ */
+export function routeAuthoritativeEstimate(
+  estimate: RunEstimate | null | undefined,
+  authority: Pick<RoutingLearningAuthority, 'operationalSteering'>,
+): RunEstimate | null {
+  if (!estimate || !authority.operationalSteering || estimate.kind !== 'run') return null;
+  const quality = estimate.sourceQuality;
+  if (
+    !quality ||
+    quality.sourceState !== 'healthy' ||
+    !quality.sourcePresent ||
+    !quality.complete ||
+    estimate.sampleSize < ROUTE_ESTIMATE_MIN_SAMPLES
+  ) return null;
+  return estimate;
+}
+
 // ---------------------------------------------------------------------------
 // recommendRoute
 // ---------------------------------------------------------------------------
@@ -525,6 +546,8 @@ export async function recommendRoute(
     prior?: OutcomePrior;
     dispatchProductionEvents?: DispatchProductionEvent[];
     resourceStates?: readonly LearnedRouteResourceState[];
+    /** Test-only authority seam; production always inspects durable sources. */
+    routingLearningAuthority?: RoutingLearningAuthority;
   },
 ): Promise<LearnedRoute> {
   // ── FLAG-OFF: absent intelligence config ⇒ defer to routeBackend exactly ──
@@ -542,7 +565,11 @@ export async function recommendRoute(
   // ── Base decision from M46 routeBackend ────────────────────────────────────
   const base = routeBackend(item, cfg);
   const allowed = allowedBackends(cfg);
-  const routingLearningAuthority = inspectRoutingLearningAuthority(item.source);
+  const testRoutingLearningAuthority = process.env.NODE_ENV === 'test'
+    ? opts?.routingLearningAuthority
+    : undefined;
+  const routingLearningAuthority = testRoutingLearningAuthority ??
+    inspectRoutingLearningAuthority(item.source);
 
   // ── Guard: never return a backend outside allowedBackends ─────────────────
   // (routeBackend already honors this, but we double-check here)
@@ -607,8 +634,8 @@ export async function recommendRoute(
   }
 
   // ── Cost estimate check: if p50 is very high, nudge toward cheaper tier ───
-  const estimate = opts?.estimate;
-  if (estimate !== null && estimate !== undefined && estimate.sampleSize >= 3) {
+  const estimate = routeAuthoritativeEstimate(opts?.estimate, routingLearningAuthority);
+  if (estimate !== null) {
     // If the median cost estimate is greater than 10% of the daily budget, prefer
     // a mid or local backend to conserve budget.
     const dailyBudget = cfg.daemon?.dailyBudgetUsd ?? 1.0;

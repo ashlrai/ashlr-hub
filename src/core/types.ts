@@ -5404,6 +5404,33 @@ export interface PercentileTriple {
   p75: number;
 }
 
+/** Metadata-only quality of the bounded history read behind a RunEstimate. */
+export type EstimateSourceStopReason =
+  | 'unsafe-path'
+  | 'unsafe-file'
+  | 'per-file-byte-limit'
+  | 'byte-limit'
+  | 'changed-during-read'
+  | 'io-error'
+  | 'directory-limit'
+  | 'candidate-limit'
+  | 'invalid-file';
+
+export interface EstimateSourceQuality {
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  sourcePresent: boolean;
+  complete: boolean;
+  /** Closed reason codes only; never filenames or persisted record content. */
+  stopReasons: EstimateSourceStopReason[];
+  entriesExamined: number;
+  filesDiscovered: number;
+  filesRead: number;
+  bytesRead: number;
+  invalidFiles: number;
+  unreadableFiles: number;
+  oversizedFiles: number;
+}
+
 /**
  * M32: pre-flight cost estimate for a run/swarm, derived from persisted
  * history (read-only, never throws — zeroed with confidence 'low' when no
@@ -5412,6 +5439,8 @@ export interface PercentileTriple {
 export interface RunEstimate {
   kind: 'run' | 'swarm';
   goal: string;
+  /** Detailed bounded-read provenance. Routing consumers must fail closed on it. */
+  sourceQuality: EstimateSourceQuality;
   /** How many history samples informed the estimate. */
   sampleSize: number;
   /** low (<3 samples) · medium (<10) · high (≥10). */

@@ -136,9 +136,13 @@ vi.mock('../src/core/portfolio/queued-autonomy.js', () => ({
 }));
 
 const mockRunGoal = vi.fn();
-vi.mock('../src/core/run/orchestrator.js', () => ({
-  runGoal: (...args: unknown[]) => mockRunGoal(...args),
-}));
+vi.mock('../src/core/run/orchestrator.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/run/orchestrator.js')>();
+  return {
+    runGoal: (...args: unknown[]) => mockRunGoal(...args),
+    listRunsDetailed: actual.listRunsDetailed,
+  };
+});
 
 const mockPublishGeneratedRepairTreatmentOutcome = vi.fn();
 const mockReadPendingGeneratedRepairTreatmentOutcomes = vi.fn();
@@ -325,10 +329,14 @@ const mockRecoverWithinBudget = vi.fn((_r: unknown, _c: unknown) => ({
   action: 'proceed',
   decision: { backend: 'builtin', tier: 'local', reason: 'mock' },
 }));
-vi.mock('../src/core/run/learned-router.js', () => ({
-  recommendRoute: (...args: unknown[]) => mockRecommendRoute(...args),
-  recoverWithinBudget: (...args: unknown[]) => mockRecoverWithinBudget(...args),
-}));
+vi.mock('../src/core/run/learned-router.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/run/learned-router.js')>();
+  return {
+    recommendRoute: (...args: unknown[]) => mockRecommendRoute(...args),
+    recoverWithinBudget: (...args: unknown[]) => mockRecoverWithinBudget(...args),
+    routeAuthoritativeEstimate: actual.routeAuthoritativeEstimate,
+  };
+});
 
 function defaultReloadConfig(): AshlrConfig {
   return {
@@ -371,6 +379,7 @@ import {
   buildItemGoal,
   workedOutcomeFromDispatchProduction,
 } from '../src/core/daemon/loop.js';
+import { routeAuthoritativeEstimate } from '../src/core/run/learned-router.js';
 import {
   acquireDaemonLock,
   daemonLockPath,
@@ -1329,6 +1338,31 @@ function enrollWithItems(count: number) {
     items,
   });
   return { repo, items };
+}
+
+function seedRoutingEstimateHistory(degraded: boolean): void {
+  const dir = join(fx.ashlrDir, 'runs');
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const now = new Date().toISOString();
+  for (let index = 0; index < 3; index += 1) {
+    fs.writeFileSync(join(dir, `daemon-routing-history-${index}.json`), JSON.stringify({
+      id: `daemon-routing-history-${index}`,
+      goal: 'Test issue item',
+      engine: 'claude',
+      provider: 'anthropic',
+      engineTier: 'frontier',
+      createdAt: now,
+      updatedAt: now,
+      budget: { maxTokens: 1_000, maxSteps: 10, allowCloud: true },
+      usage: { tokensIn: 10, tokensOut: 10, steps: 1, estCostUsd: 0.2 },
+      tasks: [],
+      steps: [],
+      status: 'done',
+    }), { mode: 0o600 });
+  }
+  if (degraded) {
+    fs.writeFileSync(join(dir, 'daemon-routing-history-invalid.json'), '{not-json}\n', { mode: 0o600 });
+  }
 }
 
 /** A cfg with a builtin backend (routes to runSwarm) and given daemon caps. */
@@ -5694,6 +5728,60 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       backend: 'local-coder',
       model: 'qwen-routed-model',
     });
+  });
+
+  it('A1h3a1: degraded run history stays neutral on the real daemon estimate path', async () => {
+    seedRoutingEstimateHistory(true);
+    enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({ backend: 'claude', tier: 'frontier', reason: 'static frontier route' });
+    mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'claude' ? 'frontier' : 'mid');
+    mockRecommendRoute.mockImplementation(async (_item: unknown, _cfg: unknown, opts: unknown) => {
+      const estimate = (opts as { estimate?: Parameters<typeof routeAuthoritativeEstimate>[0] }).estimate;
+      const authoritative = routeAuthoritativeEstimate(estimate, { operationalSteering: true });
+      return authoritative
+        ? { backend: 'local-coder', tier: 'mid', reason: 'eligible estimate route' }
+        : { backend: 'claude', tier: 'frontier', reason: 'static frontier route' };
+    });
+    mockRecoverWithinBudget.mockImplementation((decision: unknown) => ({ action: 'proceed', decision }));
+
+    await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['claude', 'local-coder'], intelligence: {} },
+    } as AshlrConfig, { dryRun: false });
+
+    const estimate = (mockRecommendRoute.mock.calls[0]?.[2] as { estimate: Parameters<typeof routeAuthoritativeEstimate>[0] }).estimate;
+    expect(estimate).toMatchObject({
+      sampleSize: 3,
+      sourceQuality: { sourceState: 'degraded', sourcePresent: true, invalidFiles: 1 },
+    });
+    expect(mockRunGoal.mock.calls[0]?.[2]).toMatchObject({ engine: 'claude' });
+  });
+
+  it('A1h3a2: eligible healthy history can alter the real daemon estimate path', async () => {
+    seedRoutingEstimateHistory(false);
+    enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({ backend: 'claude', tier: 'frontier', reason: 'static frontier route' });
+    mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'claude' ? 'frontier' : 'mid');
+    mockRecommendRoute.mockImplementation(async (_item: unknown, _cfg: unknown, opts: unknown) => {
+      const estimate = (opts as { estimate?: Parameters<typeof routeAuthoritativeEstimate>[0] }).estimate;
+      const authoritative = routeAuthoritativeEstimate(estimate, { operationalSteering: true });
+      return authoritative
+        ? { backend: 'local-coder', tier: 'mid', reason: 'eligible estimate route' }
+        : { backend: 'claude', tier: 'frontier', reason: 'static frontier route' };
+    });
+    mockRecoverWithinBudget.mockImplementation((decision: unknown) => ({ action: 'proceed', decision }));
+
+    await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['claude', 'local-coder'], intelligence: {} },
+    } as AshlrConfig, { dryRun: false });
+
+    const estimate = (mockRecommendRoute.mock.calls[0]?.[2] as { estimate: Parameters<typeof routeAuthoritativeEstimate>[0] }).estimate;
+    expect(estimate).toMatchObject({
+      sampleSize: 3,
+      sourceQuality: { sourceState: 'healthy', sourcePresent: true, complete: true, invalidFiles: 0 },
+    });
+    expect(mockRunGoal.mock.calls[0]?.[2]).toMatchObject({ engine: 'local-coder' });
   });
 
   it('A1h3b: learned-router backend changes do not keep the previous backend model', async () => {

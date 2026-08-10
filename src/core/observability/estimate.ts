@@ -34,6 +34,52 @@ interface HistorySample {
   durationMs: number;
 }
 
+type DetailedHistoryRead = {
+  sourceState: RunEstimate['sourceQuality']['sourceState'];
+  sourcePresent: boolean;
+  complete: boolean;
+  stopReasons: readonly RunEstimate['sourceQuality']['stopReasons'][number][];
+  entriesExamined: number;
+  filesDiscovered: number;
+  filesRead: number;
+  bytesRead: number;
+  invalidFiles: number;
+  unreadableFiles: number;
+  oversizedFiles: number;
+};
+
+function sourceQuality(read: DetailedHistoryRead): RunEstimate['sourceQuality'] {
+  return {
+    sourceState: read.sourceState,
+    sourcePresent: read.sourcePresent,
+    complete: read.complete,
+    stopReasons: [...read.stopReasons],
+    entriesExamined: read.entriesExamined,
+    filesDiscovered: read.filesDiscovered,
+    filesRead: read.filesRead,
+    bytesRead: read.bytesRead,
+    invalidFiles: read.invalidFiles,
+    unreadableFiles: read.unreadableFiles,
+    oversizedFiles: read.oversizedFiles,
+  };
+}
+
+function unavailableSourceQuality(): RunEstimate['sourceQuality'] {
+  return {
+    sourceState: 'degraded',
+    sourcePresent: false,
+    complete: false,
+    stopReasons: ['io-error'],
+    entriesExamined: 0,
+    filesDiscovered: 0,
+    filesRead: 0,
+    bytesRead: 0,
+    invalidFiles: 0,
+    unreadableFiles: 1,
+    oversizedFiles: 0,
+  };
+}
+
 function keywordSet(text: string): Set<string> {
   return new Set(
     text
@@ -69,10 +115,12 @@ function buildEstimate(
   goal: string,
   samples: HistorySample[],
   opts: { maxTokens?: number; allowCloud?: boolean },
+  quality: RunEstimate['sourceQuality'],
 ): RunEstimate {
   const zeroed: RunEstimate = {
     kind,
     goal,
+    sourceQuality: quality,
     sampleSize: 0,
     confidence: 'low',
     tokens: { p25: 0, median: 0, p75: 0 },
@@ -127,6 +175,7 @@ function buildEstimate(
   return {
     kind,
     goal,
+    sourceQuality: quality,
     sampleSize: used.length,
     confidence,
     tokens: { p25: p25t, median: p50t, p75: p75t },
@@ -154,9 +203,12 @@ export async function estimateRun(
   _cfg: AshlrConfig,
 ): Promise<RunEstimate> {
   let samples: HistorySample[] = [];
+  let quality = unavailableSourceQuality();
   try {
-    const { listRuns } = await import('../run/orchestrator.js');
-    samples = listRuns()
+    const { listRunsDetailed } = await import('../run/orchestrator.js');
+    const read = listRunsDetailed();
+    quality = sourceQuality(read);
+    samples = read.runs
       .filter((r) => r.status === 'done' || r.status === 'failed')
       .map((r) => ({
         goal: r.goal,
@@ -170,7 +222,7 @@ export async function estimateRun(
   } catch {
     samples = [];
   }
-  return buildEstimate('run', goal, samples, opts);
+  return buildEstimate('run', goal, samples, opts, quality);
 }
 
 /** Estimate a `swarm` from swarm history. Never throws. */
@@ -180,9 +232,12 @@ export async function estimateSwarm(
   _cfg: AshlrConfig,
 ): Promise<RunEstimate> {
   let samples: HistorySample[] = [];
+  let quality = unavailableSourceQuality();
   try {
-    const { listSwarms } = await import('../swarm/store.js');
-    samples = listSwarms()
+    const { listSwarmsDetailed } = await import('../swarm/store.js');
+    const read = listSwarmsDetailed();
+    quality = sourceQuality(read);
+    samples = read.swarms
       .filter((s) => s.status === 'done' || s.status === 'failed' || s.status === 'aborted')
       .map((s) => ({
         goal: s.goal,
@@ -196,7 +251,7 @@ export async function estimateSwarm(
   } catch {
     samples = [];
   }
-  return buildEstimate('swarm', goal, samples, opts);
+  return buildEstimate('swarm', goal, samples, opts, quality);
 }
 
 // ---------------------------------------------------------------------------

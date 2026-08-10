@@ -72,11 +72,25 @@ describe('RunEstimate shape lock', () => {
       'goal',
       'kind',
       'sampleSize',
+      'sourceQuality',
       'steps',
       'tokens',
       'wouldBeCloudUsd',
     ]);
     expect(Object.keys(e.tokens).sort()).toEqual(['median', 'p25', 'p75']);
+    expect(Object.keys(e.sourceQuality).sort()).toEqual([
+      'bytesRead',
+      'complete',
+      'entriesExamined',
+      'filesDiscovered',
+      'filesRead',
+      'invalidFiles',
+      'oversizedFiles',
+      'sourcePresent',
+      'sourceState',
+      'stopReasons',
+      'unreadableFiles',
+    ]);
   });
 });
 
