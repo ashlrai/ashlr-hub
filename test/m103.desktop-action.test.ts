@@ -67,7 +67,7 @@ import {
   type DisposableRepo,
 } from './helpers/h1-fixture.js';
 import { createProposal, loadProposal } from '../src/core/inbox/store.js';
-import { applyProposal } from '../src/core/inbox/apply.js';
+import { applyProposal, canonicalPathWithin } from '../src/core/inbox/apply.js';
 import { callNativeTool } from '../src/core/mcp-native.js';
 import { readAudit } from '../src/core/sandbox/audit.js';
 import type { AuditEntry, Proposal } from '../src/core/types.js';
@@ -119,6 +119,9 @@ beforeEach(async () => {
   openInEditorMock.mockClear();
   openInFinderMock.mockClear();
   openInTerminalMock.mockClear();
+  openInEditorMock.mockResolvedValue(true);
+  openInFinderMock.mockResolvedValue(true);
+  openInTerminalMock.mockResolvedValue(true);
   expect.hasAssertions();
 });
 
@@ -130,6 +133,18 @@ afterEach(async () => {
 // ---------------------------------------------------------------------------
 // A-series: applyProposal adversarial gate checks
 // ---------------------------------------------------------------------------
+
+describe('canonical desktop target containment', () => {
+  it('accepts nested Windows paths case-insensitively with native separators', () => {
+    expect(canonicalPathWithin('C:\\Repo', 'c:\\repo\\nested\\file.ts', 'win32')).toBe(true);
+    expect(canonicalPathWithin('C:\\Repo', 'C:\\Repo', 'win32')).toBe(true);
+  });
+
+  it('rejects Windows sibling-prefix and cross-drive targets', () => {
+    expect(canonicalPathWithin('C:\\Repo', 'C:\\Repo-escape\\file.ts', 'win32')).toBe(false);
+    expect(canonicalPathWithin('C:\\Repo', 'D:\\Repo\\file.ts', 'win32')).toBe(false);
+  });
+});
 
 describe('applyProposal — desktop-action gate chain', () => {
   it('A1 REFUSES when proposal does not exist', async () => {
@@ -311,6 +326,23 @@ describe('applyProposal — desktop-action gate chain', () => {
     expect(openInTerminalMock).toHaveBeenCalledOnce();
     expect(openInTerminalMock).toHaveBeenCalledWith(target);
     expect(latestApplyAudit()?.result).toBe('ok');
+  });
+
+  it('A13b REFUSES when the terminal launcher cannot establish a safe target', async () => {
+    repo.enroll();
+    const target = repo.dir;
+    const p = makeDesktopProposal(repo.dir, target, 'open-terminal');
+    const { setStatus } = await import('../src/core/inbox/store.js');
+    setStatus(p.id, 'approved');
+    openInTerminalMock.mockResolvedValueOnce(false);
+
+    const result = await applyProposal(p.id, { confirmed: true });
+
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe('failed');
+    expect(result.detail).toMatch(/refused.*safe launcher|canonical target/i);
+    expect(openInTerminalMock).toHaveBeenCalledWith(target);
+    expect(latestApplyAudit()?.result).toBe('error');
   });
 
   it('A14 browser-action with no action payload refuses — missing action payload (Phase 2b now implemented)', async () => {

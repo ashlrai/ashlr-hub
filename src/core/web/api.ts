@@ -1633,10 +1633,12 @@ export async function handleApi(
       }
 
       try {
-        if (action === 'finder') {
-          openInFinder(targetPath);
-        } else {
-          openInEditor(targetPath, cfg);
+        const dispatched = await (action === 'finder'
+          ? openInFinder(targetPath)
+          : openInEditor(targetPath, cfg));
+        if (!dispatched) {
+          sendJson(res, 503, { error: 'desktop launcher unavailable' });
+          return true;
         }
         sendJson(res, 200, { ok: true, action, path: targetPath });
       } catch (err) {

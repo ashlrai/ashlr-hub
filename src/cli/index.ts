@@ -918,8 +918,10 @@ async function cmdGo(args: string[]): Promise<void> {
   }
 
   if (openFlag) {
-    openInEditor(chosen.path, cfg);
-    console.log(green('opened: ') + chosen.path);
+    if (!await openInEditor(chosen.path, cfg)) {
+      die(`Unable to dispatch the configured editor for: ${chosen.path}`);
+    }
+    console.log(green('launch dispatched: ') + chosen.path);
   } else if (cdFlag) {
     // Print path only — caller shell function can eval $(ashlr go ... --cd)
     process.stdout.write(chosen.path + '\n');
@@ -1329,8 +1331,10 @@ async function cmdOpen(args: string[]): Promise<void> {
     die('Nothing selected.', 1);
   }
 
-  openInEditor(chosen.path, cfg);
-  console.log(green('opened: ') + chosen.path);
+  if (!await openInEditor(chosen.path, cfg)) {
+    die(`Unable to dispatch the configured editor for: ${chosen.path}`);
+  }
+  console.log(green('launch dispatched: ') + chosen.path);
 }
 
 // ─── Command: tidy ────────────────────────────────────────────────────────────
