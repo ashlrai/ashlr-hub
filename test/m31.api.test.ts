@@ -13,7 +13,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { makeFixture, makeCfg, type H1Fixture } from './helpers/h1-fixture.js';
-import { startServer } from '../src/core/web/server.js';
+import { readAuthHeaders, startServer } from './helpers/authenticated-web-server.js';
 import type { WebServerOptions, WorkItem } from '../src/core/types.js';
 
 let fx: H1Fixture;
@@ -50,7 +50,10 @@ function request(
         port: Number(parsed.port),
         path: parsed.pathname + parsed.search,
         method,
-        headers: { Host: `127.0.0.1:${port}` },
+        headers: {
+          Host: `127.0.0.1:${port}`,
+          ...(method === 'GET' ? readAuthHeaders(port) : {}),
+        },
       },
       (res) => {
         let data = '';
