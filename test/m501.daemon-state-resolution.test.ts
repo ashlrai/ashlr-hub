@@ -31,6 +31,7 @@ import {
   acquireDaemonServiceLifecycleFence,
   releaseDaemonServiceLifecycleFence,
 } from '../src/core/daemon/service-lifecycle-fence.js';
+import { fsyncDirectory } from '../src/core/util/durability.js';
 
 const QUARANTINE_PLAN_ID = '11111111-1111-4111-8111-111111111111';
 const RESOLUTION_PLAN_ID = '33333333-3333-4333-8333-333333333333';
@@ -708,6 +709,214 @@ describe.runIf(process.platform !== 'win32')('daemon state resolution protocol',
       expect(fs.existsSync(daemonStateRecoveryMarkerPath())).toBe(false);
       expect(fs.existsSync(daemonStateResolutionRetiredMarkerPath(plan.planId))).toBe(true);
     }
+  });
+
+  it('re-durabilizes an intent left visible by a failed publication sync before executing it', () => {
+    const seeded = seedQuarantine();
+    const plan = previewResolution(seeded.receiptDigest);
+    const intentPath = daemonStateResolutionIntentPath(plan.planId);
+    const intentDirectory = path.dirname(intentPath);
+    let publicationSyncFailed = false;
+
+    const interrupted = executeDaemonStateResolution(executeInput(plan), resolutionRuntime({
+      syncRecordDirectory: (directory) => {
+        if (directory === intentDirectory && !publicationSyncFailed) {
+          publicationSyncFailed = true;
+          throw new Error('simulated intent directory fsync failure after link');
+        }
+        fsyncDirectory(directory);
+      },
+    }));
+
+    expect(interrupted).toMatchObject({ ok: false, reason: 'resolution-intent-conflict' });
+    expect(fs.existsSync(intentPath)).toBe(true);
+    expect(fs.readFileSync(daemonStatePath())).toEqual(seeded.bytes);
+    expect(fs.existsSync(daemonStateRecoveryMarkerPath())).toBe(true);
+
+    let retrySyncs = 0;
+    const resumed = executeDaemonStateResolution(executeInput(plan), resolutionRuntime({
+      syncRecordDirectory: (directory) => {
+        if (directory === intentDirectory) retrySyncs += 1;
+        fsyncDirectory(directory);
+      },
+    }));
+    expect(resumed).toMatchObject({ ok: true, resumed: true });
+    expect(retrySyncs).toBeGreaterThanOrEqual(1);
+  });
+
+  it('refuses to reuse an exact existing intent when its parent cannot be re-synchronized', () => {
+    const seeded = seedQuarantine();
+    const plan = previewResolution(seeded.receiptDigest);
+    const intentPath = daemonStateResolutionIntentPath(plan.planId);
+    const intentDirectory = path.dirname(intentPath);
+    expect(executeDaemonStateResolution(executeInput(plan), resolutionRuntime({
+      beforeStatePublish: () => { throw new Error('pause after durable intent'); },
+    }))).toMatchObject({ ok: false, reason: 'state-publication-failed' });
+    expect(fs.existsSync(intentPath)).toBe(true);
+
+    const refused = executeDaemonStateResolution(executeInput(plan), resolutionRuntime({
+      syncRecordDirectory: (directory) => {
+        if (directory === intentDirectory) {
+          throw new Error('simulated existing intent directory fsync failure');
+        }
+        fsyncDirectory(directory);
+      },
+    }));
+    expect(refused).toMatchObject({ ok: false, reason: 'resolution-intent-conflict' });
+    expect(fs.readFileSync(daemonStatePath())).toEqual(seeded.bytes);
+    expect(fs.existsSync(daemonStateRecoveryMarkerPath())).toBe(true);
+  });
+
+  it('re-durabilizes an exact receipt before retry without publishing state twice', () => {
+    const seeded = seedQuarantine();
+    const plan = previewResolution(seeded.receiptDigest);
+    const receiptPath = daemonStateResolutionReceiptPath(plan.planId);
+    const receiptDirectory = path.dirname(receiptPath);
+    let publicationSyncFailed = false;
+
+    const interrupted = executeDaemonStateResolution(executeInput(plan), resolutionRuntime({
+      syncRecordDirectory: (directory) => {
+        if (directory === receiptDirectory && !publicationSyncFailed) {
+          publicationSyncFailed = true;
+          throw new Error('simulated receipt directory fsync failure after link');
+        }
+        fsyncDirectory(directory);
+      },
+    }));
+
+    expect(interrupted).toMatchObject({ ok: false, reason: 'receipt-write-failed' });
+    expect(fs.existsSync(receiptPath)).toBe(true);
+    expect(fs.existsSync(daemonStateRecoveryMarkerPath())).toBe(true);
+    const stateInodeAfterFirstPublication = fs.lstatSync(daemonStatePath()).ino;
+    const receiptInodeAfterFirstPublication = fs.lstatSync(receiptPath).ino;
+
+    let retrySyncs = 0;
+    const resumed = executeDaemonStateResolution(executeInput(plan), resolutionRuntime({
+      syncRecordDirectory: (directory) => {
+        if (directory === receiptDirectory) retrySyncs += 1;
+        fsyncDirectory(directory);
+      },
+    }));
+    expect(resumed).toMatchObject({ ok: true, resumed: true });
+    expect(retrySyncs).toBeGreaterThanOrEqual(1);
+    expect(fs.lstatSync(daemonStatePath()).ino).toBe(stateInodeAfterFirstPublication);
+    expect(fs.lstatSync(receiptPath).ino).toBe(receiptInodeAfterFirstPublication);
+  });
+
+  it('refuses to reuse an exact existing receipt when its parent cannot be re-synchronized', () => {
+    const seeded = seedQuarantine();
+    const plan = previewResolution(seeded.receiptDigest);
+    const receiptPath = daemonStateResolutionReceiptPath(plan.planId);
+    const receiptDirectory = path.dirname(receiptPath);
+    expect(executeDaemonStateResolution(executeInput(plan), resolutionRuntime({
+      afterReceiptPublish: () => { throw new Error('pause after durable receipt'); },
+    }))).toMatchObject({ ok: false, reason: 'receipt-write-failed' });
+    const stateInodeBeforeRetry = fs.lstatSync(daemonStatePath()).ino;
+
+    const refused = executeDaemonStateResolution(executeInput(plan), resolutionRuntime({
+      syncRecordDirectory: (directory) => {
+        if (directory === receiptDirectory) {
+          throw new Error('simulated existing receipt directory fsync failure');
+        }
+        fsyncDirectory(directory);
+      },
+    }));
+    expect(refused).toMatchObject({ ok: false, reason: 'receipt-write-failed' });
+    expect(fs.lstatSync(daemonStatePath()).ino).toBe(stateInodeBeforeRetry);
+    expect(fs.existsSync(daemonStateRecoveryMarkerPath())).toBe(true);
+  });
+
+  it('re-durabilizes a retired marker left visible by a failed link sync before retry', () => {
+    const seeded = seedQuarantine();
+    const plan = previewResolution(seeded.receiptDigest);
+    const retiredMarkerPath = daemonStateResolutionRetiredMarkerPath(plan.planId);
+    const retiredMarkerDirectory = path.dirname(retiredMarkerPath);
+    let publicationSyncFailed = false;
+
+    const interrupted = executeDaemonStateResolution(executeInput(plan), resolutionRuntime({
+      syncRecordDirectory: (directory) => {
+        if (directory === retiredMarkerDirectory && !publicationSyncFailed) {
+          publicationSyncFailed = true;
+          throw new Error('simulated retired marker directory fsync failure after link');
+        }
+        fsyncDirectory(directory);
+      },
+    }));
+
+    expect(interrupted).toMatchObject({ ok: false, reason: 'marker-retirement-failed' });
+    expect(fs.existsSync(retiredMarkerPath)).toBe(true);
+    expect(fs.existsSync(daemonStateRecoveryMarkerPath())).toBe(true);
+    const stateInodeAfterFirstPublication = fs.lstatSync(daemonStatePath()).ino;
+    const receiptInodeAfterFirstPublication = fs.lstatSync(daemonStateResolutionReceiptPath(plan.planId)).ino;
+
+    let retrySyncs = 0;
+    const resumed = executeDaemonStateResolution(executeInput(plan), resolutionRuntime({
+      syncRecordDirectory: (directory) => {
+        if (directory === retiredMarkerDirectory) retrySyncs += 1;
+        fsyncDirectory(directory);
+      },
+    }));
+    expect(resumed).toMatchObject({ ok: true, resumed: true });
+    expect(retrySyncs).toBeGreaterThanOrEqual(1);
+    expect(fs.lstatSync(daemonStatePath()).ino).toBe(stateInodeAfterFirstPublication);
+    expect(fs.lstatSync(daemonStateResolutionReceiptPath(plan.planId)).ino)
+      .toBe(receiptInodeAfterFirstPublication);
+  });
+
+  it('keeps the active marker when the retired-marker durability barrier fails before unlink', () => {
+    const seeded = seedQuarantine();
+    const plan = previewResolution(seeded.receiptDigest);
+    const retiredMarkerPath = daemonStateResolutionRetiredMarkerPath(plan.planId);
+    const retiredMarkerDirectory = path.dirname(retiredMarkerPath);
+    let retirementValidated = false;
+    let blockedBeforeUnlink = false;
+
+    const interrupted = executeDaemonStateResolution(executeInput(plan), resolutionRuntime({
+      beforeMarkerRetirement: () => { retirementValidated = true; },
+      syncRecordDirectory: (directory) => {
+        if (directory === retiredMarkerDirectory && retirementValidated) {
+          blockedBeforeUnlink = true;
+          throw new Error('simulated crash-consistency barrier failure');
+        }
+        fsyncDirectory(directory);
+      },
+    }));
+
+    expect(interrupted).toMatchObject({ ok: false, reason: 'marker-retirement-failed' });
+    expect(blockedBeforeUnlink).toBe(true);
+    expect(fs.existsSync(daemonStateRecoveryMarkerPath())).toBe(true);
+    expect(fs.existsSync(retiredMarkerPath)).toBe(true);
+    const stateInodeBeforeRetry = fs.lstatSync(daemonStatePath()).ino;
+    const receiptInodeBeforeRetry = fs.lstatSync(daemonStateResolutionReceiptPath(plan.planId)).ino;
+
+    expect(executeDaemonStateResolution(executeInput(plan), resolutionRuntime()))
+      .toMatchObject({ ok: true, resumed: true });
+    expect(fs.lstatSync(daemonStatePath()).ino).toBe(stateInodeBeforeRetry);
+    expect(fs.lstatSync(daemonStateResolutionReceiptPath(plan.planId)).ino).toBe(receiptInodeBeforeRetry);
+  });
+
+  it('fails closed when an existing retired marker cannot be re-synchronized', () => {
+    const seeded = seedQuarantine();
+    const plan = previewResolution(seeded.receiptDigest);
+    const retiredMarkerPath = daemonStateResolutionRetiredMarkerPath(plan.planId);
+    const retiredMarkerDirectory = path.dirname(retiredMarkerPath);
+    expect(executeDaemonStateResolution(executeInput(plan), resolutionRuntime({
+      beforeMarkerRetirement: () => { throw new Error('pause after durable retired marker'); },
+    }))).toMatchObject({ ok: false, reason: 'marker-retirement-failed' });
+    expect(fs.existsSync(retiredMarkerPath)).toBe(true);
+    expect(fs.existsSync(daemonStateRecoveryMarkerPath())).toBe(true);
+
+    const refused = executeDaemonStateResolution(executeInput(plan), resolutionRuntime({
+      syncRecordDirectory: (directory) => {
+        if (directory === retiredMarkerDirectory) {
+          throw new Error('simulated existing retired marker directory fsync failure');
+        }
+        fsyncDirectory(directory);
+      },
+    }));
+    expect(refused).toMatchObject({ ok: false, reason: 'recovery-marker-conflict' });
+    expect(fs.existsSync(daemonStateRecoveryMarkerPath())).toBe(true);
+    expect(fs.existsSync(retiredMarkerPath)).toBe(true);
   });
 
   it('never retires a replacement marker raced in after receipt publication', () => {

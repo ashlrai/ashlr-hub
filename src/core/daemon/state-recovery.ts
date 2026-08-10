@@ -373,6 +373,7 @@ export interface DaemonStateResolutionRuntime {
   afterReceiptPublish?: () => void;
   beforeMarkerRetirement?: () => void;
   afterLifecycleFenceAcquire?: () => void;
+  syncRecordDirectory?: (path: string) => void;
 }
 
 export interface DaemonStateAtomicEvidenceFilesystem {
@@ -849,13 +850,24 @@ function writePrivateRecordTemp(path: string, planId: string, value: unknown): s
   return tempPath;
 }
 
-function publishRecordNoClobber(tempPath: string, finalPath: string): void {
+function syncResolutionRecordDirectory(
+  path: string,
+  runtime: DaemonStateResolutionRuntime,
+): void {
+  (runtime.syncRecordDirectory ?? fsyncDirectory)(dirname(path));
+}
+
+function publishRecordNoClobber(
+  tempPath: string,
+  finalPath: string,
+  syncDirectory: (path: string) => void = fsyncDirectory,
+): void {
   // Node does not expose renameat2(RENAME_NOREPLACE). A same-filesystem hard
   // link provides the required atomic, no-clobber publication without exposing
   // partially-written record bytes. The private temp intentionally remains:
   // pathname-based cleanup cannot be made identity-conditional in Node.
   linkSync(tempPath, finalPath);
-  fsyncDirectory(dirname(finalPath));
+  syncDirectory(dirname(finalPath));
 }
 
 function readRecord(path: string): unknown {
@@ -2937,6 +2949,7 @@ export function executeDaemonStateResolution(
     try {
       activeMarkerPresent = pathEntryExists(activeMarkerPath);
       retiredMarkerPresent = pathEntryExists(retiredMarkerPath);
+      if (retiredMarkerPresent) syncResolutionRecordDirectory(retiredMarkerPath, runtime);
     } catch (error) {
       return { ok: false, reason: 'recovery-marker-conflict', detail: error instanceof Error ? error.message : String(error) };
     }
@@ -2994,6 +3007,7 @@ export function executeDaemonStateResolution(
         if (intent && !exactResolutionIntent(intent, plan)) {
           return { ok: false, reason: 'resolution-intent-conflict', detail: 'resolution intent cannot be authenticated exactly' };
         }
+        if (intent) syncResolutionRecordDirectory(intentPath, runtime);
         if (!intent) partialIntentPresent = true;
       }
     } catch (error) {
@@ -3113,7 +3127,11 @@ export function executeDaemonStateResolution(
       const publicationTime = resolutionPlanTimeRefusal(plan, runtime);
       if (publicationTime) return publicationTime;
       try {
-        publishRecordNoClobber(intentTempPath, intentPath);
+        publishRecordNoClobber(
+          intentTempPath,
+          intentPath,
+          runtime.syncRecordDirectory ?? fsyncDirectory,
+        );
         const publishedIntent = parseResolutionIntent(readPublishedRecord(intentPath));
         if (!publishedIntent || !equalDigest(publishedIntent.intentDigest, intent.intentDigest)) {
           throw new Error('published resolution intent cannot be authenticated exactly');
@@ -3206,6 +3224,7 @@ export function executeDaemonStateResolution(
           !sameGeneration(chain.evidence.stat, receipt.quarantineGeneration)) {
           return { ok: false, reason: 'receipt-write-failed', detail: 'resolution receipt conflicts with durable state' };
         }
+        syncResolutionRecordDirectory(receiptPath, runtime);
         resumed = true;
       }
     } catch (error) {
@@ -3313,7 +3332,11 @@ export function executeDaemonStateResolution(
         return { ok: false, reason: 'receipt-write-failed', detail: 'state or quarantine changed before staged receipt publication' };
       }
       try {
-        publishRecordNoClobber(receiptTempPath, receiptPath);
+        publishRecordNoClobber(
+          receiptTempPath,
+          receiptPath,
+          runtime.syncRecordDirectory ?? fsyncDirectory,
+        );
         const publishedReceipt = parseResolutionReceipt(readPublishedRecord(receiptPath));
         if (!publishedReceipt || !equalDigest(publishedReceipt.receiptDigest, receipt.receiptDigest)) {
           throw new Error('published resolution receipt cannot be authenticated exactly');
@@ -3347,10 +3370,11 @@ export function executeDaemonStateResolution(
       ensurePrivateDirectory(dirname(retiredMarkerPath));
       if (activeMarkerPresent && !retiredMarkerPresent) {
         linkSync(activeMarkerPath, retiredMarkerPath);
-        fsyncDirectory(dirname(retiredMarkerPath));
+        syncResolutionRecordDirectory(retiredMarkerPath, runtime);
         retiredMarkerPresent = true;
       }
       if (!retiredMarkerPresent) throw new Error('retired marker evidence is missing');
+      syncResolutionRecordDirectory(retiredMarkerPath, runtime);
       const retired = stableRead(retiredMarkerPath, false, [1n, 2n, 3n]);
       const parsedRetired = parseMarker(JSON.parse(retired.bytes.toString('utf8')) as unknown);
       if (!parsedRetired || !equalDigest(parsedRetired.markerDigest, plan.quarantineMarkerDigest)) {
@@ -3407,6 +3431,7 @@ export function executeDaemonStateResolution(
         if (!ownsDaemonServiceLifecycleFence(lifecycleFence)) {
           throw new Error('daemon service lifecycle fence ownership was lost before marker retirement');
         }
+        syncResolutionRecordDirectory(retiredMarkerPath, runtime);
         unlinkSync(activeMarkerPath);
         fsyncDirectory(dirname(activeMarkerPath));
       }
