@@ -15,6 +15,7 @@
  *     build/integrate/verify (unit-tests assert argv only, never spawn).
  *   - phantomWrap is a pure arg transform; never logs secret values.
  *   - withToolEnv is allowlist-only (no secrets in env).
+ *   - assertLocusPreMutate is opt-in (LOCUS_ENFORCE); fail-closed when enforce.
  */
 
 import { spawnSync, execFileSync, spawn } from 'node:child_process';
@@ -24,6 +25,10 @@ import { existsSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import type { AshlrConfig, EngineId, EngineCommand } from '../types.js';
 import { withToolEnv } from '../env-bridge.js';
+import {
+  assertLocusPreMutate,
+  formatPreMutateBlockers,
+} from '../integrations/locus.js';
 import { resolveEngineSpec, compileArgv } from './engine-registry.js';
 import { attachStallMonitor } from './run-monitor.js';
 import type { TerminationReason } from './run-monitor.js';
@@ -592,6 +597,28 @@ async function spawnEngineInner(
       terminationReason: 'error-exit',
     };
   }
+
+  // Locus identity pre-mutate gate (opt-in via LOCUS_ENFORCE).
+  // Mirrors phantomWrap: single high-leverage dispatch fence. Default off so
+  // monorepo CI without a pin is unaffected; set LOCUS_ENFORCE=1 to fail closed.
+  const locusGate = assertLocusPreMutate(opts?.env ?? process.env);
+  if (!locusGate.allow) {
+    const msg =
+      formatPreMutateBlockers(locusGate) ||
+      'locus pre-mutate enforce: blocked (no detail)';
+    process.stderr.write(`[ashlr] ${msg}\n`);
+    return {
+      ok: false,
+      output: '',
+      error: msg,
+      terminationReason: 'error-exit',
+    };
+  }
+  if (locusGate.shouldWarn) {
+    const msg = formatPreMutateBlockers(locusGate);
+    if (msg) process.stderr.write(`[ashlr] ${msg}\n`);
+  }
+
   // Apply phantom-exec wrap when enabled, installed, AND the cwd contains
   // .phantom.toml. Self-authenticating CLIs (claude, codex) run in sandbox
   // worktrees that have no .phantom.toml -- wrapping them is both unnecessary

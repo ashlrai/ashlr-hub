@@ -6,18 +6,25 @@
  *
  * SECURITY:
  *   - Never parse or persist secret VALUES from locus/phantom output.
- *   - credential_ref names (phm:NAME) are safe; resolved tokens are not.
+ *   - Credential locators are private configuration; consume only presence/source metadata.
  *   - Prefer REQUIRED_SERVERS = ["locus","phantom"] — never ambient supabase MCP.
  *   - withLocusSession uses `ci mint` (ephemeral); does not mutate active.json.
+ *   - Mint child env is scrubbed (no ambient credentials) + validateMintEnv allowlist.
  *
  * Pure (unit-testable) exports — no spawn / no FS:
  *   parseStatusOneline, isStatusOnelineHealthy, canMutate,
  *   parseRequiredServers, hasRequiredServers, parseAgentReportJson,
- *   blockersFromAgentReport, evaluateFleetGate,
+ *   blockersFromAgentReport, evaluateFleetGate, decidePreMutateGate,
+ *   resolveLocusEnforceMode, scrubbedChildEnv, validateMintEnv,
  *   parseMcpConfigJson, mergeLocusIntoMcpConfig, locusServerSpec
  *
  * Shell-out: locusAvailable, locusAgentReport, ensureLocusReady, locusFleetGate,
- *   withLocusSession, locusDoctorLine, registerLocusInMcpConfig
+ *   assertLocusPreMutate, withLocusSession, locusDoctorLine, registerLocusInMcpConfig
+ *
+ * Pre-mutate enforcement:
+ *   LOCUS_ENFORCE=1|true|yes|enforce → fail closed when fleet gate blocks
+ *   LOCUS_ENFORCE=warn|log           → log blockers, allow dispatch
+ *   unset / 0 / off                  → no CLI probe (monorepo-safe default)
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
@@ -149,12 +156,33 @@ export interface WithLocusSessionOptions {
   ttl?: string;
   /** Allow bindings outside workspace allowlist. */
   force?: boolean;
-  /** Extra env merged into the child handle (mint LOCUS_* wins on conflict). */
+  /** Explicitly authorized env merged into the scrubbed child handle. */
   env?: NodeJS.ProcessEnv;
   /** Override LOCUS_HOME for mint + handle. */
   home?: string;
   /** Spawn timeout for mint (ms). */
   timeoutMs?: number;
+}
+
+/** How the hub should treat locus fleet-gate blockers before mutate/dispatch. */
+export type LocusEnforceMode = "off" | "warn" | "enforce";
+
+/**
+ * Decision from the pre-mutate gate wrapper.
+ * Pure when built via `decidePreMutateGate`; shell-out when via `assertLocusPreMutate`.
+ */
+export interface LocusPreMutateDecision {
+  /** False only when mode=enforce and fleet gate would block. */
+  allow: boolean;
+  mode: LocusEnforceMode;
+  /** Human-readable blockers (never secrets). Empty when healthy or mode=off. */
+  blockers: string[];
+  gateOk?: boolean;
+  status_oneline?: string;
+  status?: AgentStatus | string;
+  available?: boolean;
+  /** True when mode is warn and blockers present (caller may log). */
+  shouldWarn: boolean;
 }
 
 export interface LocusSessionHandle {
@@ -257,6 +285,91 @@ function locusEnv(extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     LOCUS_QUIET: "1",
     ...extra,
   };
+}
+
+const CHILD_RUNTIME_ENV = new Set([
+  "PATH",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "LANG",
+  "TERM",
+  "SystemRoot",
+  "WINDIR",
+  "PATHEXT",
+  "ComSpec",
+]);
+
+const MINT_SCOPE_ENV = new Set([
+  "GH_CONFIG_DIR",
+  "AWS_CONFIG_FILE",
+  "AWS_SHARED_CREDENTIALS_FILE",
+  "AWS_ACCOUNT_ID",
+  "CLOUDFLARE_ACCOUNT_ID",
+  "SUPABASE_PROJECT_ID",
+  "SUPABASE_PROJECT_REF",
+  "VERCEL_ORG_ID",
+  "VERCEL_PROJECT_ID",
+  "VERCEL_TEAM_ID",
+]);
+
+const MINT_IDENTITY_ENV = new Set([
+  "LOCUS_SESSION_ID",
+  "LOCUS_BINDING",
+  "LOCUS_BINDING_ID",
+  "LOCUS_TENANT",
+  "LOCUS_PRINCIPAL",
+  "LOCUS_SEAL",
+  "LOCUS_WORKER_HOME",
+  "LOCUS_EXPIRES_AT",
+  "LOCUS_PROVIDERS",
+]);
+
+function isAllowedMintEnvKey(key: string): boolean {
+  return (
+    MINT_IDENTITY_ENV.has(key) ||
+    MINT_SCOPE_ENV.has(key) ||
+    /^LOCUS_[A-Z0-9_]+_(?:ACCOUNT|CREDENTIAL_RESOLVED|PROJECT_REF|TEAM_ID|ACCOUNT_ID|READ_ONLY|ORGS|REPOS|PROJECTS)$/.test(
+      key,
+    )
+  );
+}
+
+/** Build a child baseline without inheriting ambient credentials. */
+export function scrubbedChildEnv(
+  parent: NodeJS.ProcessEnv = process.env,
+  explicit?: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  const clean: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(parent)) {
+    if (CHILD_RUNTIME_ENV.has(key) || key.startsWith("LC_")) {
+      clean[key] = value;
+    }
+  }
+  return { ...clean, ...explicit };
+}
+
+/** Validate the non-secret identity/scope environment emitted by `ci mint`. */
+export function validateMintEnv(raw: unknown): Record<string, string> {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new LocusMintError("ci mint JSON has invalid env map");
+  }
+  const clean: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (
+      !isAllowedMintEnvKey(key) ||
+      typeof value !== "string" ||
+      /(?:phm|env|test):/i.test(value)
+    ) {
+      throw new LocusMintError("ci mint JSON contains disallowed env metadata");
+    }
+    clean[key] = value;
+  }
+  return clean;
 }
 
 // ---------------------------------------------------------------------------
@@ -437,6 +550,22 @@ export function blockersFromAgentReport(
     blockers.push("ready=false");
   }
 
+  const doctor =
+    report.doctor && typeof report.doctor === "object"
+      ? (report.doctor as { findings?: unknown })
+      : null;
+  const doctorFindings = Array.isArray(doctor?.findings) ? doctor.findings : [];
+  if (
+    doctorFindings.some(
+      (finding) =>
+        finding !== null &&
+        typeof finding === "object" &&
+        (finding as { code?: unknown }).code === "credential_migration_incomplete",
+    )
+  ) {
+    blockers.push("credential migration reconciliation incomplete");
+  }
+
   if (!parsed.healthy) {
     blockers.push(`pin unhealthy: ${parsed.kind} (${parsed.raw})`);
   }
@@ -545,6 +674,130 @@ export function locusFleetGate(env?: NodeJS.ProcessEnv): LocusFleetGateResult {
     ...evaluated,
     available: true,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Pre-mutate gate (opt-in enforce via LOCUS_ENFORCE)
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve LOCUS_ENFORCE into a mode.
+ *
+ * | value | mode |
+ * |-------|------|
+ * | unset, 0, false, no, off | off |
+ * | warn, log | warn |
+ * | 1, true, yes, enforce, block | enforce |
+ *
+ * Unknown non-empty values fail closed to `enforce`.
+ */
+export function resolveLocusEnforceMode(
+  env?: NodeJS.ProcessEnv,
+): LocusEnforceMode {
+  const raw = (env ?? process.env).LOCUS_ENFORCE;
+  if (raw === undefined || raw === null) return "off";
+  const v = String(raw).trim().toLowerCase();
+  if (!v || v === "0" || v === "false" || v === "no" || v === "off") {
+    return "off";
+  }
+  if (v === "warn" || v === "log") return "warn";
+  if (
+    v === "1" ||
+    v === "true" ||
+    v === "yes" ||
+    v === "enforce" ||
+    v === "block"
+  ) {
+    return "enforce";
+  }
+  // Unknown token → enforce (fail closed; do not soft-allow typoed policy)
+  return "enforce";
+}
+
+/**
+ * Pure: map a fleet-gate result + enforce mode into a pre-mutate decision.
+ * Never throws. Never probes the CLI.
+ */
+export function decidePreMutateGate(
+  gate: Pick<
+    LocusFleetGateResult,
+    "allowDispatch" | "blockers" | "gateOk" | "status" | "status_oneline" | "available"
+  >,
+  mode: LocusEnforceMode,
+): LocusPreMutateDecision {
+  if (mode === "off") {
+    return {
+      allow: true,
+      mode,
+      blockers: [],
+      shouldWarn: false,
+      gateOk: gate.gateOk,
+      status: gate.status,
+      status_oneline: gate.status_oneline,
+      available: gate.available,
+    };
+  }
+
+  const blockers = [...(gate.blockers ?? [])];
+  const blocked = !gate.allowDispatch || blockers.length > 0;
+
+  if (mode === "warn") {
+    return {
+      allow: true,
+      mode,
+      blockers: blocked ? blockers : [],
+      shouldWarn: blocked,
+      gateOk: gate.gateOk,
+      status: gate.status,
+      status_oneline: gate.status_oneline,
+      available: gate.available,
+    };
+  }
+
+  // enforce
+  return {
+    allow: !blocked,
+    mode,
+    blockers: blocked ? blockers : [],
+    shouldWarn: false,
+    gateOk: gate.gateOk,
+    status: gate.status,
+    status_oneline: gate.status_oneline,
+    available: gate.available,
+  };
+}
+
+/**
+ * Pre-mutate gate for hub dispatch (fleet/run engines).
+ *
+ * - mode=off: returns allow without shelling out (monorepo-safe default).
+ * - mode=warn|enforce: shells to `locusFleetGate` and decides.
+ *
+ * Prefer this over bare `ensureLocusReady` at shared spawn sites so opt-in
+ * enforcement does not break CI that lacks a Locus pin.
+ */
+export function assertLocusPreMutate(
+  env?: NodeJS.ProcessEnv,
+): LocusPreMutateDecision {
+  const mode = resolveLocusEnforceMode(env);
+  if (mode === "off") {
+    return {
+      allow: true,
+      mode,
+      blockers: [],
+      shouldWarn: false,
+    };
+  }
+  const gate = locusFleetGate(env);
+  return decidePreMutateGate(gate, mode);
+}
+
+/**
+ * Format a pre-mutate decision for stderr / job UI (never includes secrets).
+ */
+export function formatPreMutateBlockers(decision: LocusPreMutateDecision): string {
+  if (!decision.blockers.length) return "";
+  return `locus pre-mutate ${decision.mode}: ${decision.blockers.join("; ")}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -708,6 +961,10 @@ export function locusCiMint(
   if (!mint.session_id || !mint.env) {
     throw new LocusMintError("ci mint JSON missing session_id or env");
   }
+  if (mint.secrets_resolved) {
+    throw new LocusMintError("ci mint unexpectedly returned resolved secrets");
+  }
+  mint.env = validateMintEnv(mint.env);
   return mint;
 }
 
@@ -715,8 +972,8 @@ export function locusCiMint(
  * Run `fn` under an ephemeral Locus pin (`ci mint` → LOCUS_SESSION_ID).
  *
  * Use for hub job isolation so parallel agents do not share/mutate the human
- * shell pin (`active.json`). The mint env map is merged into `handle.env`
- * (scopes + LOCUS_* only — this helper never passes `--resolve`).
+ * shell pin (`active.json`). Parent credentials are scrubbed; the handle gets
+ * runtime basics, caller-explicit env, and validated identity/scope metadata.
  *
  * @example
  * ```ts
@@ -740,7 +997,7 @@ export async function withLocusSession<T>(
     join(homedir(), ".locus");
 
   const env: NodeJS.ProcessEnv = {
-    ...locusEnv(opts?.env),
+    ...scrubbedChildEnv(process.env, opts?.env),
     ...mint.env,
     LOCUS_HOME: home,
     LOCUS_SESSION_ID: mint.session_id,
