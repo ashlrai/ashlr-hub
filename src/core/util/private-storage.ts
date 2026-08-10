@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { win32 } from 'node:path';
+import { userInfo } from 'node:os';
+import { posix, win32 } from 'node:path';
 
 const OPERATION = 'assure-private-path';
 const MAX_OUTPUT_BYTES = 4 * 1024;
@@ -9,6 +10,22 @@ const DEFAULT_BATCH_TIMEOUT_MS = 15_000;
 const MAX_SINGLE_PATH_ADAPTER_ATTEMPTS = 2;
 const SINGLE_PATH_RETRY_BASE_DELAY_MS = 50;
 const SINGLE_PATH_RETRY_MAX_DELAY_MS = 200;
+const DARWIN_ACL_EXECUTABLE = '/bin/ls';
+const DARWIN_MAX_OUTPUT_BYTES = 64 * 1024;
+const DARWIN_MAX_PATH_CHAIN = 64;
+const DARWIN_MAX_ARGV_BYTES = 64 * 1024;
+
+const DARWIN_CUSTODY_RIGHTS = new Set([
+  'read', 'write', 'execute', 'append', 'delete',
+  'list', 'search', 'add_file', 'add_subdirectory', 'delete_child',
+  'writeattr', 'readextattr', 'writeextattr', 'writesecurity', 'chown',
+  'file_inherit', 'directory_inherit',
+]);
+
+const DARWIN_KNOWN_ACL_RIGHTS = new Set([
+  ...DARWIN_CUSTODY_RIGHTS,
+  'readattr', 'readsecurity', 'limit_inherit', 'only_inherit',
+]);
 
 const WINDOWS_ACL_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
@@ -242,6 +259,7 @@ export interface PrivateStorageInvocation {
   input: string;
   timeoutMs: number;
   maxBuffer: number;
+  env?: NodeJS.ProcessEnv;
 }
 
 export type PrivateStorageRunner = (invocation: PrivateStorageInvocation) => {
@@ -342,6 +360,7 @@ const defaultRunner: PrivateStorageRunner = (invocation) => spawnSync(
     maxBuffer: invocation.maxBuffer,
     windowsHide: true,
     shell: false,
+    ...(invocation.env ? { env: invocation.env } : {}),
   },
 );
 
@@ -374,9 +393,118 @@ function powershellPath(systemRoot: string | undefined): string | null {
   return root ? win32.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe') : null;
 }
 
+function localDarwinPath(value: string | undefined): string | null {
+  if (!value || value.length > 4_096 || [...value].some((char) => {
+    const code = char.charCodeAt(0);
+    return code < 32 || code === 127;
+  })) return null;
+  try {
+    const normalized = posix.normalize(value);
+    return posix.isAbsolute(normalized) ? normalized : null;
+  } catch {
+    return null;
+  }
+}
+
+function darwinPathChain(anchorPath: string, privatePath: string): string[] | null {
+  const nested = posix.relative(anchorPath, privatePath);
+  if (nested === '..' || nested.startsWith(`..${posix.sep}`) || posix.isAbsolute(nested)) return null;
+  const parts = nested.split(posix.sep).filter(Boolean);
+  if (parts.length + 1 > DARWIN_MAX_PATH_CHAIN) return null;
+  const paths = [anchorPath];
+  let cursor = anchorPath;
+  for (const part of parts) {
+    cursor = posix.join(cursor, part);
+    paths.push(cursor);
+  }
+  const argvBytes = paths.reduce((total, candidate) => total + Buffer.byteLength(candidate, 'utf8') + 1, 0);
+  return argvBytes <= DARWIN_MAX_ARGV_BYTES ? paths : null;
+}
+
+function inspectDarwinAclOutput(
+  stdout: string,
+  paths: readonly string[],
+  kind: PrivateStorageKind,
+): PrivateStorageAssurance {
+  const metadataModes: string[] = [];
+  const ownerPrincipal = `user:${userInfo().username}`;
+  for (const line of stdout.split(/\r?\n/u)) {
+    if (line.length === 0) continue;
+    const metadata = /^([bcdlps-][rwxStTs-]{9}[+@]?)\s/u.exec(line);
+    if (metadata) {
+      metadataModes.push(metadata[1]!);
+      continue;
+    }
+    const acl = /^\s+\d+:\s+(.+?)\s+(?:(inherited)\s+)?(allow|deny)\s+([a-z_]+(?:,[a-z_]+)*)\s*$/u.exec(line);
+    if (!acl) return { ok: false, reason: 'invalid-output' };
+    const rights = acl[4]!.split(',');
+    if (rights.some((right) => !DARWIN_KNOWN_ACL_RIGHTS.has(right))) {
+      return { ok: false, reason: 'invalid-output' };
+    }
+    const untrustedAllow = acl[3] === 'allow' && acl[1] !== ownerPrincipal;
+    if (untrustedAllow && rights.some((right) => DARWIN_CUSTODY_RIGHTS.has(right))) {
+      return { ok: false, reason: 'darwin-untrusted-allow' };
+    }
+  }
+  if (metadataModes.length !== paths.length) return { ok: false, reason: 'invalid-output' };
+  for (let index = 0; index < metadataModes.length; index += 1) {
+    const expectedDirectory = index < metadataModes.length - 1 || kind === 'directory';
+    if (metadataModes[index]![0] !== (expectedDirectory ? 'd' : '-')) {
+      return { ok: false, reason: 'darwin-wrong-kind' };
+    }
+  }
+  return { ok: true, reason: 'darwin-acl-safe' };
+}
+
+function assureDarwinPrivateStoragePath(
+  path: string,
+  kind: PrivateStorageKind,
+  options: {
+    anchorPath?: string;
+    timeoutMs?: number;
+    runner?: PrivateStorageRunner;
+  },
+): PrivateStorageAssurance {
+  const privatePath = localDarwinPath(path);
+  if (!privatePath) return { ok: false, reason: 'invalid-path' };
+  const anchorPath = localDarwinPath(options.anchorPath);
+  if (!anchorPath) return { ok: false, reason: 'invalid-anchor' };
+  const paths = darwinPathChain(anchorPath, privatePath);
+  if (!paths) return { ok: false, reason: 'invalid-anchor' };
+  const timeoutMs = typeof options.timeoutMs === 'number' && Number.isFinite(options.timeoutMs)
+    ? Math.max(100, Math.min(15_000, Math.floor(options.timeoutMs)))
+    : DEFAULT_TIMEOUT_MS;
+  const invocation: PrivateStorageInvocation = {
+    executable: DARWIN_ACL_EXECUTABLE,
+    args: ['-lde', ...paths],
+    input: '',
+    timeoutMs,
+    maxBuffer: DARWIN_MAX_OUTPUT_BYTES,
+    env: { LC_ALL: 'C', LANG: 'C' },
+  };
+  const testControl = activePrivateStorageTestControl();
+  try {
+    testControl?.observeInvocation?.({
+      ...invocation,
+      args: [...invocation.args],
+      env: invocation.env ? { ...invocation.env } : undefined,
+    });
+    const result = (options.runner ?? testControl?.runner ?? defaultRunner)(invocation);
+    if (result.error || result.status !== 0) return { ok: false, reason: 'adapter-failed' };
+    const stdout = Buffer.isBuffer(result.stdout) ? result.stdout.toString('utf8') : result.stdout ?? '';
+    if (!stdout || Buffer.byteLength(stdout, 'utf8') > DARWIN_MAX_OUTPUT_BYTES) {
+      return { ok: false, reason: 'invalid-output' };
+    }
+    return inspectDarwinAclOutput(stdout, paths, kind);
+  } catch {
+    return { ok: false, reason: 'adapter-failed' };
+  }
+}
+
 /**
- * Apply or inspect an exact current-user + SYSTEM protected Windows DACL.
- * Paths are carried only in bounded JSON stdin; executable and argv are fixed.
+ * Inspect Darwin ACLs after the caller's native owner/mode checks, or apply and
+ * inspect an exact current-user + SYSTEM protected Windows DACL. Each adapter
+ * uses a fixed executable with bounded, non-shell input.
  */
 export function assurePrivateStoragePath(
   path: string,
@@ -391,6 +519,7 @@ export function assurePrivateStoragePath(
   } = {},
 ): PrivateStorageAssurance {
   const platform = options.platform ?? process.platform;
+  if (platform === 'darwin') return assureDarwinPrivateStoragePath(path, kind, options);
   if (platform !== 'win32') return { ok: true, reason: 'posix-checked-by-caller' };
   const privatePath = localWindowsPath(path, 4_096);
   if (!privatePath) return { ok: false, reason: 'invalid-path' };

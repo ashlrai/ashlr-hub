@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ServiceStatusResult } from '../src/core/daemon/service.js';
 import {
   daemonLockPath,
@@ -100,6 +101,15 @@ function preview(bytes: Buffer, overrides: Partial<DaemonStateRecoveryRuntime> =
   return previewDaemonStateQuarantine(sha256(bytes), runtime(overrides));
 }
 
+function runDarwinChmod(args: string[]): void {
+  const result = spawnSync('/bin/chmod', args, {
+    shell: false,
+    timeout: 5_000,
+    encoding: 'utf8',
+  });
+  expect(result.status, result.stderr).toBe(0);
+}
+
 function seedRelocatedRecovery(
   planned: Extract<ReturnType<typeof preview>, { ok: true }>,
 ): { input: { planId: string; planDigest: string; operatorAuthorization: string }; quarantinePath: string } {
@@ -132,11 +142,19 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  if (process.platform === 'darwin' && fs.existsSync(tmpHome)) {
+    spawnSync('/bin/chmod', ['-RN', tmpHome], {
+      shell: false,
+      timeout: 5_000,
+      encoding: 'utf8',
+    });
+  }
   fs.rmSync(tmpHome, { recursive: true, force: true });
   if (originalHome === undefined) delete process.env['HOME'];
   else process.env['HOME'] = originalHome;
   if (originalUserProfile === undefined) delete process.env['USERPROFILE'];
   else process.env['USERPROFILE'] = originalUserProfile;
+  vi.restoreAllMocks();
 });
 
 function generationOf(filePath: string): SourceGeneration {
@@ -356,6 +374,117 @@ describe('daemon state quarantine dry-run plan', () => {
       ok: false,
       reason: 'source-unsafe',
     });
+
+    fs.chmodSync(daemonStatePath(), 0o600);
+    fs.chmodSync(ashlr, 0o755);
+    const publicDescendant = preview(fs.readFileSync(daemonStatePath()));
+    expect(publicDescendant).toMatchObject({ ok: false, reason: 'source-unsafe' });
+    if (!publicDescendant.ok) expect(publicDescendant.detail).toMatch(/unsafe-source-directory/u);
+  });
+
+  it.runIf(process.platform !== 'win32')('accepts a 0755 home anchor but refuses group/world-writable anchors', () => {
+    fs.chmodSync(tmpHome, 0o755);
+    const bytes = writeState(malformedState());
+    expect(preview(bytes)).toMatchObject({ ok: true });
+
+    for (const mode of [0o775, 0o757, 0o777]) {
+      fs.chmodSync(tmpHome, mode);
+      const unsafe = preview(bytes);
+      expect(unsafe).toMatchObject({ ok: false, reason: 'source-unsafe' });
+      if (!unsafe.ok) expect(unsafe.detail).toMatch(/unsafe-source-home/u);
+    }
+  });
+
+  it.runIf(process.platform === 'darwin')('accepts the standard macOS everyone deny delete home ACL', () => {
+    fs.chmodSync(tmpHome, 0o755);
+    runDarwinChmod(['+a', 'everyone deny delete', tmpHome]);
+    const bytes = writeState(malformedState());
+    const planned = preview(bytes);
+
+    expect(planned).toMatchObject({ ok: true });
+    if (!planned.ok) return;
+    expect(executeDaemonStateQuarantine({
+      planId: planned.plan.planId,
+      planDigest: planned.plan.planDigest,
+      operatorAuthorization: planned.plan.planDigest,
+    }, runtime())).toMatchObject({ ok: true });
+  });
+
+  it.runIf(process.platform === 'darwin')('rejects the exact inheritable Everyone ACL before key or plan custody', () => {
+    fs.chmodSync(tmpHome, 0o755);
+    runDarwinChmod([
+      '+a',
+      'everyone allow list,add_file,search,add_subdirectory,delete_child,file_inherit,directory_inherit',
+      tmpHome,
+    ]);
+    const bytes = writeState(malformedState());
+    const ashlr = path.join(tmpHome, '.ashlr');
+    const inheritedDirectoryAcl = spawnSync('/bin/ls', ['-lde', ashlr], {
+      shell: false, timeout: 5_000, encoding: 'utf8',
+    });
+    const inheritedFileAcl = spawnSync('/bin/ls', ['-lde', daemonStatePath()], {
+      shell: false, timeout: 5_000, encoding: 'utf8',
+    });
+    expect(inheritedDirectoryAcl.status, inheritedDirectoryAcl.stderr).toBe(0);
+    expect(inheritedDirectoryAcl.stdout).toMatch(
+      /group:everyone inherited allow .*add_file.*file_inherit.*directory_inherit/u,
+    );
+    expect(inheritedFileAcl.status, inheritedFileAcl.stderr).toBe(0);
+    expect(inheritedFileAcl.stdout).toMatch(
+      /group:everyone inherited allow read,write,execute,append/u,
+    );
+
+    const result = preview(bytes);
+    expect(result).toMatchObject({ ok: false, reason: 'source-unsafe' });
+    if (!result.ok) expect(result.detail).toMatch(/darwin-untrusted-allow/u);
+    expect(fs.existsSync(path.join(ashlr, 'foundry', 'provenance.key'))).toBe(false);
+    expect(fs.existsSync(daemonStateRecoveryPlanPath(PLAN_ID))).toBe(false);
+  });
+
+  it.runIf(process.platform === 'darwin')('rechecks the home ACL before executing an already-authorized plan', () => {
+    fs.chmodSync(tmpHome, 0o755);
+    const bytes = writeState(malformedState());
+    const planned = preview(bytes);
+    expect(planned).toMatchObject({ ok: true });
+    if (!planned.ok) return;
+    runDarwinChmod([
+      '+a',
+      'everyone allow list,add_file,search,add_subdirectory,delete_child,file_inherit,directory_inherit',
+      tmpHome,
+    ]);
+
+    const executed = executeDaemonStateQuarantine({
+      planId: planned.plan.planId,
+      planDigest: planned.plan.planDigest,
+      operatorAuthorization: planned.plan.planDigest,
+    }, runtime());
+    expect(executed).toMatchObject({ ok: false, reason: 'recovery-lock-unavailable' });
+    expect(fs.readFileSync(daemonStatePath())).toEqual(bytes);
+    expect(fs.existsSync(daemonStateRecoveryMarkerPath())).toBe(false);
+    expect(fs.existsSync(daemonStateRecoveryReceiptPath(PLAN_ID))).toBe(false);
+  });
+
+  it.runIf(process.platform === 'darwin')('rejects a symlink home anchor', () => {
+    const bytes = writeState(malformedState());
+    const linkedHome = `${tmpHome}-symlink`;
+    fs.symlinkSync(tmpHome, linkedHome);
+    process.env['HOME'] = linkedHome;
+    process.env['USERPROFILE'] = linkedHome;
+    try {
+      expect(preview(bytes)).toMatchObject({ ok: false, reason: 'source-unsafe' });
+    } finally {
+      process.env['HOME'] = tmpHome;
+      process.env['USERPROFILE'] = tmpHome;
+      fs.unlinkSync(linkedHome);
+    }
+  });
+
+  it.runIf(process.platform === 'darwin')('rejects a home anchor not owned by the effective user', () => {
+    const bytes = writeState(malformedState());
+    const currentUid = process.getuid!();
+    vi.spyOn(process, 'getuid').mockReturnValue(currentUid + 1);
+
+    expect(preview(bytes)).toMatchObject({ ok: false, reason: 'source-unsafe' });
   });
 });
 
