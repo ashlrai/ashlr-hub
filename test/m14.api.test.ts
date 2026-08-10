@@ -169,7 +169,7 @@ vi.mock('../src/cli/run.js', () => ({
 // Import under test (after mocks)
 // ---------------------------------------------------------------------------
 
-import { startServer } from '../src/core/web/server.js';
+import { readAuthHeaders, startServer } from './helpers/authenticated-web-server.js';
 import { createProposal } from '../src/core/inbox/store.js';
 
 // ---------------------------------------------------------------------------
@@ -238,7 +238,11 @@ function httpRequest(
 }
 
 function get(url: string, port: number, extraHeaders: Record<string, string> = {}) {
-  return httpRequest('GET', url, { Host: `127.0.0.1:${port}`, ...extraHeaders });
+  return httpRequest('GET', url, {
+    Host: `127.0.0.1:${port}`,
+    ...readAuthHeaders(port),
+    ...extraHeaders,
+  });
 }
 
 function post(url: string, port: number, headers: Record<string, string> = {}, body = '') {
@@ -260,7 +264,7 @@ function readSseChunk(url: string, port: number): Promise<string> {
         port: Number(parsed.port),
         path: parsed.pathname + parsed.search,
         method: 'GET',
-        headers: { Host: `127.0.0.1:${port}` },
+        headers: { Host: `127.0.0.1:${port}`, ...readAuthHeaders(port) },
       },
       (res) => {
         let data = '';
@@ -680,7 +684,7 @@ describe('GET /api/events', () => {
           port: Number(parsed.port),
           path: parsed.pathname,
           method: 'GET',
-          headers: { Host: `127.0.0.1:${h.port}` },
+          headers: { Host: `127.0.0.1:${h.port}`, ...readAuthHeaders(h.port) },
         },
         (res) => {
           resolve({
