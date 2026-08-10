@@ -23,6 +23,8 @@ import {
   scrubbedChildEnv,
   validateMintEnv,
   applyLocusSessionEnv,
+  parseLocusEnforceToken,
+  extractLocusConfigEnforce,
   resolveLocusEnforceMode,
   decidePreMutateGate,
   decideLocusSessionRun,
@@ -256,6 +258,92 @@ describe('pre-mutate gate decisions (LOCUS_ENFORCE)', () => {
     expect(resolveLocusEnforceMode({ LOCUS_ENFORCE: 'maybe' })).toBe('enforce');
   });
 
+  it('resolveLocusEnforceMode: env wins over config, then config, then off', () => {
+    // Both unset → monorepo-safe default off (never always-on)
+    expect(resolveLocusEnforceMode({}, null)).toBe('off');
+    expect(resolveLocusEnforceMode({}, undefined)).toBe('off');
+    expect(resolveLocusEnforceMode({}, {})).toBe('off');
+    expect(resolveLocusEnforceMode({}, { locus: {} })).toBe('off');
+
+    // Config alone
+    expect(resolveLocusEnforceMode({}, { enforce: 'warn' })).toBe('warn');
+    expect(resolveLocusEnforceMode({}, { locus: { enforce: 'enforce' } })).toBe(
+      'enforce',
+    );
+    expect(resolveLocusEnforceMode({}, { locus: { enforce: 'off' } })).toBe(
+      'off',
+    );
+    expect(resolveLocusEnforceMode({}, { locus: { enforce: 'warn' } })).toBe(
+      'warn',
+    );
+
+    // Full AshlrConfig-shaped object
+    expect(
+      resolveLocusEnforceMode({}, { version: 1, locus: { enforce: 'enforce' } } as never),
+    ).toBe('enforce');
+
+    // Env wins — including explicit off overriding firm config
+    expect(
+      resolveLocusEnforceMode(
+        { LOCUS_ENFORCE: 'off' },
+        { locus: { enforce: 'enforce' } },
+      ),
+    ).toBe('off');
+    expect(
+      resolveLocusEnforceMode(
+        { LOCUS_ENFORCE: '0' },
+        { locus: { enforce: 'enforce' } },
+      ),
+    ).toBe('off');
+    expect(
+      resolveLocusEnforceMode(
+        { LOCUS_ENFORCE: 'warn' },
+        { locus: { enforce: 'enforce' } },
+      ),
+    ).toBe('warn');
+    expect(
+      resolveLocusEnforceMode(
+        { LOCUS_ENFORCE: 'enforce' },
+        { locus: { enforce: 'off' } },
+      ),
+    ).toBe('enforce');
+    // Empty env string is set → off (wins over config)
+    expect(
+      resolveLocusEnforceMode(
+        { LOCUS_ENFORCE: '' },
+        { locus: { enforce: 'enforce' } },
+      ),
+    ).toBe('off');
+  });
+
+  it('parseLocusEnforceToken + extractLocusConfigEnforce helpers', () => {
+    expect(parseLocusEnforceToken(undefined)).toBe('off');
+    expect(parseLocusEnforceToken('WARN')).toBe('warn');
+    expect(parseLocusEnforceToken('block')).toBe('enforce');
+    expect(extractLocusConfigEnforce(null)).toBeUndefined();
+    expect(extractLocusConfigEnforce({ enforce: 'warn' })).toBe('warn');
+    expect(extractLocusConfigEnforce({ locus: { enforce: 'enforce' } })).toBe(
+      'enforce',
+    );
+    expect(extractLocusConfigEnforce({ locus: {} })).toBeUndefined();
+  });
+
+  it('decideLocusSessionRun consults config when env unset', () => {
+    expect(
+      decideLocusSessionRun({}, { locus: { enforce: 'enforce' } }),
+    ).toMatchObject({ kind: 'refuse', mode: 'enforce' });
+    expect(
+      decideLocusSessionRun({}, { locus: { enforce: 'warn' } }),
+    ).toMatchObject({ kind: 'warn', mode: 'warn' });
+    // Env off beats firm config
+    expect(
+      decideLocusSessionRun(
+        { LOCUS_ENFORCE: 'off' },
+        { locus: { enforce: 'enforce' } },
+      ),
+    ).toEqual({ kind: 'pass-through', mode: 'off' });
+  });
+
   it('mode=off always allows without surfacing blockers', () => {
     const d = decidePreMutateGate(blockedGate, 'off');
     expect(d.allow).toBe(true);
@@ -313,15 +401,23 @@ describe('pre-mutate gate decisions (LOCUS_ENFORCE)', () => {
   });
 
   it('assertLocusPreMutate mode=off never shells (allow without blockers)', () => {
-    const d = assertLocusPreMutate({ LOCUS_ENFORCE: 'off' });
+    // Explicit null config: hermetic (do not read ~/.ashlr).
+    const d = assertLocusPreMutate({ LOCUS_ENFORCE: 'off' }, null);
     expect(d.allow).toBe(true);
     expect(d.mode).toBe('off');
     expect(d.blockers).toEqual([]);
     expect(d.shouldWarn).toBe(false);
   });
 
+  it('assertLocusPreMutate uses config when env unset', () => {
+    const d = assertLocusPreMutate({}, { locus: { enforce: 'off' } });
+    expect(d.allow).toBe(true);
+    expect(d.mode).toBe('off');
+    expect(d.blockers).toEqual([]);
+  });
+
   it('applyLocusPreMutateGate mode=off allows without CLI probe', () => {
-    const d = applyLocusPreMutateGate({ LOCUS_ENFORCE: '0' });
+    const d = applyLocusPreMutateGate({ LOCUS_ENFORCE: '0' }, null);
     expect(d.allow).toBe(true);
     expect(d.mode).toBe('off');
   });
@@ -333,7 +429,7 @@ describe('pre-mutate gate decisions (LOCUS_ENFORCE)', () => {
     process.env.PATH = '/nonexistent-locus-bin-path';
     process.env.Path = '/nonexistent-locus-bin-path';
     try {
-      const d = applyLocusPreMutateGate({ LOCUS_ENFORCE: '1' });
+      const d = applyLocusPreMutateGate({ LOCUS_ENFORCE: '1' }, null);
       expect(d.mode).toBe('enforce');
       expect(d.allow).toBe(false);
       expect(d.blockers.length).toBeGreaterThan(0);
@@ -352,7 +448,7 @@ describe('pre-mutate gate decisions (LOCUS_ENFORCE)', () => {
     process.env.PATH = '/nonexistent-locus-bin-path';
     process.env.Path = '/nonexistent-locus-bin-path';
     try {
-      const d = applyLocusPreMutateGate({ LOCUS_ENFORCE: 'warn' });
+      const d = applyLocusPreMutateGate({ LOCUS_ENFORCE: 'warn' }, null);
       expect(d.mode).toBe('warn');
       expect(d.allow).toBe(true);
       expect(d.shouldWarn).toBe(true);
