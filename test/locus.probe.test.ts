@@ -25,6 +25,7 @@ import {
   applyLocusSessionEnv,
   parseLocusEnforceToken,
   extractLocusConfigEnforce,
+  extractLocusConfigFirm,
   resolveLocusEnforceMode,
   decidePreMutateGate,
   decideLocusSessionRun,
@@ -316,7 +317,71 @@ describe('pre-mutate gate decisions (LOCUS_ENFORCE)', () => {
     ).toBe('off');
   });
 
-  it('parseLocusEnforceToken + extractLocusConfigEnforce helpers', () => {
+  it('resolveLocusEnforceMode: firm profile elevates to enforce when unset', () => {
+    // firm + no env → enforce (production fleet profile)
+    expect(resolveLocusEnforceMode({}, { firm: true })).toBe('enforce');
+    expect(resolveLocusEnforceMode({}, { locus: { firm: true } })).toBe(
+      'enforce',
+    );
+    expect(
+      resolveLocusEnforceMode(
+        {},
+        { version: 1, locus: { firm: true } } as never,
+      ),
+    ).toBe('enforce');
+
+    // firm false / absent → off (monorepo default — never always-on)
+    expect(resolveLocusEnforceMode({}, { firm: false })).toBe('off');
+    expect(resolveLocusEnforceMode({}, { locus: { firm: false } })).toBe('off');
+    expect(resolveLocusEnforceMode({}, { locus: {} })).toBe('off');
+
+    // env=off beats firm
+    expect(
+      resolveLocusEnforceMode(
+        { LOCUS_ENFORCE: 'off' },
+        { locus: { firm: true } },
+      ),
+    ).toBe('off');
+    expect(
+      resolveLocusEnforceMode(
+        { LOCUS_ENFORCE: '0' },
+        { locus: { firm: true } },
+      ),
+    ).toBe('off');
+    expect(
+      resolveLocusEnforceMode({ LOCUS_ENFORCE: '' }, { locus: { firm: true } }),
+    ).toBe('off');
+
+    // env warn/enforce also beat firm
+    expect(
+      resolveLocusEnforceMode(
+        { LOCUS_ENFORCE: 'warn' },
+        { locus: { firm: true } },
+      ),
+    ).toBe('warn');
+    expect(
+      resolveLocusEnforceMode(
+        { LOCUS_ENFORCE: 'enforce' },
+        { locus: { firm: false } },
+      ),
+    ).toBe('enforce');
+
+    // Explicit locus.enforce beats firm profile
+    expect(
+      resolveLocusEnforceMode({}, { locus: { firm: true, enforce: 'warn' } }),
+    ).toBe('warn');
+    expect(
+      resolveLocusEnforceMode({}, { locus: { firm: true, enforce: 'off' } }),
+    ).toBe('off');
+    expect(
+      resolveLocusEnforceMode(
+        {},
+        { locus: { firm: false, enforce: 'enforce' } },
+      ),
+    ).toBe('enforce');
+  });
+
+  it('parseLocusEnforceToken + extractLocusConfigEnforce / firm helpers', () => {
     expect(parseLocusEnforceToken(undefined)).toBe('off');
     expect(parseLocusEnforceToken('WARN')).toBe('warn');
     expect(parseLocusEnforceToken('block')).toBe('enforce');
@@ -326,6 +391,17 @@ describe('pre-mutate gate decisions (LOCUS_ENFORCE)', () => {
       'enforce',
     );
     expect(extractLocusConfigEnforce({ locus: {} })).toBeUndefined();
+
+    expect(extractLocusConfigFirm(null)).toBe(false);
+    expect(extractLocusConfigFirm(undefined)).toBe(false);
+    expect(extractLocusConfigFirm({})).toBe(false);
+    expect(extractLocusConfigFirm({ firm: false })).toBe(false);
+    expect(extractLocusConfigFirm({ firm: true })).toBe(true);
+    expect(extractLocusConfigFirm({ locus: { firm: true } })).toBe(true);
+    expect(extractLocusConfigFirm({ locus: { firm: false } })).toBe(false);
+    // Non-boolean truthy must not enable firm (fail closed to monorepo off)
+    expect(extractLocusConfigFirm({ firm: 'true' as never })).toBe(false);
+    expect(extractLocusConfigFirm({ firm: 1 as never })).toBe(false);
   });
 
   it('decideLocusSessionRun consults config when env unset', () => {
@@ -335,11 +411,21 @@ describe('pre-mutate gate decisions (LOCUS_ENFORCE)', () => {
     expect(
       decideLocusSessionRun({}, { locus: { enforce: 'warn' } }),
     ).toMatchObject({ kind: 'warn', mode: 'warn' });
+    // Firm profile → enforce without binding refuses
+    expect(
+      decideLocusSessionRun({}, { locus: { firm: true } }),
+    ).toMatchObject({ kind: 'refuse', mode: 'enforce' });
     // Env off beats firm config
     expect(
       decideLocusSessionRun(
         { LOCUS_ENFORCE: 'off' },
         { locus: { enforce: 'enforce' } },
+      ),
+    ).toEqual({ kind: 'pass-through', mode: 'off' });
+    expect(
+      decideLocusSessionRun(
+        { LOCUS_ENFORCE: 'off' },
+        { locus: { firm: true } },
       ),
     ).toEqual({ kind: 'pass-through', mode: 'off' });
   });
