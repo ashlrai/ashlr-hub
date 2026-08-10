@@ -22,8 +22,10 @@ import {
   missingAgentReportKeys,
   scrubbedChildEnv,
   validateMintEnv,
+  applyLocusSessionEnv,
   resolveLocusEnforceMode,
   decidePreMutateGate,
+  decideLocusSessionRun,
   formatPreMutateBlockers,
   applyLocusPreMutateGate,
   assertLocusPreMutate,
@@ -495,7 +497,118 @@ describe('pre-mutate gate call sites (LOCUS_ENFORCE)', () => {
   });
 });
 
+
+describe('decideLocusSessionRun (CI job isolation)', () => {
+  it('mints when LOCUS_CI_BINDING is set (preferred over LOCUS_BINDING)', () => {
+    const d = decideLocusSessionRun({
+      LOCUS_CI_BINDING: 'ci-acme',
+      LOCUS_BINDING: 'other',
+    });
+    expect(d).toEqual({
+      kind: 'mint',
+      binding: 'ci-acme',
+      source: 'LOCUS_CI_BINDING',
+    });
+  });
+
+  it('mints from LOCUS_BINDING when CI binding unset', () => {
+    const d = decideLocusSessionRun({ LOCUS_BINDING: 'personal' });
+    expect(d).toEqual({
+      kind: 'mint',
+      binding: 'personal',
+      source: 'LOCUS_BINDING',
+    });
+  });
+
+  it('skips re-mint when LOCUS_SESSION_ID already set', () => {
+    const d = decideLocusSessionRun({
+      LOCUS_SESSION_ID: 'sess-abc',
+      LOCUS_CI_BINDING: 'would-mint',
+    });
+    expect(d).toEqual({ kind: 'already-session', sessionId: 'sess-abc' });
+  });
+
+  it('pass-through when no binding and LOCUS_ENFORCE off (monorepo default)', () => {
+    expect(decideLocusSessionRun({})).toEqual({
+      kind: 'pass-through',
+      mode: 'off',
+    });
+    expect(decideLocusSessionRun({ LOCUS_ENFORCE: '0' })).toEqual({
+      kind: 'pass-through',
+      mode: 'off',
+    });
+  });
+
+  it('warns when LOCUS_ENFORCE=warn without a binding', () => {
+    const d = decideLocusSessionRun({ LOCUS_ENFORCE: 'warn' });
+    expect(d.kind).toBe('warn');
+    if (d.kind === 'warn') {
+      expect(d.mode).toBe('warn');
+      expect(d.reason).toMatch(/LOCUS_CI_BINDING|ambient/);
+    }
+  });
+
+  it('refuses when LOCUS_ENFORCE=enforce without a binding', () => {
+    const d = decideLocusSessionRun({ LOCUS_ENFORCE: '1' });
+    expect(d.kind).toBe('refuse');
+    if (d.kind === 'refuse') {
+      expect(d.mode).toBe('enforce');
+      expect(d.reason).toMatch(/LOCUS_CI_BINDING/);
+    }
+  });
+
+  it('trims whitespace on binding aliases', () => {
+    const d = decideLocusSessionRun({ LOCUS_CI_BINDING: '  acme  ' });
+    expect(d).toEqual({
+      kind: 'mint',
+      binding: 'acme',
+      source: 'LOCUS_CI_BINDING',
+    });
+  });
+
+  it('empty binding strings fall through to enforce/pass-through', () => {
+    expect(
+      decideLocusSessionRun({ LOCUS_CI_BINDING: '  ', LOCUS_BINDING: '' }),
+    ).toEqual({
+      kind: 'pass-through',
+      mode: 'off',
+    });
+    expect(
+      decideLocusSessionRun({
+        LOCUS_CI_BINDING: '',
+        LOCUS_ENFORCE: 'enforce',
+      }).kind,
+    ).toBe('refuse');
+  });
+});
+
+describe('applyLocusSessionEnv', () => {
+  it('copies LOCUS identity + scope keys only', () => {
+    const target: NodeJS.ProcessEnv = { PATH: '/usr/bin', KEEP: 'yes' };
+    applyLocusSessionEnv(target, {
+      LOCUS_SESSION_ID: 's1',
+      LOCUS_BINDING: 'acme',
+      LOCUS_HOME: '/tmp/locus',
+      LOCUS_NOTIFY: '0',
+      GH_CONFIG_DIR: '/tmp/gh',
+      AWS_PROFILE: 'should-not-copy',
+      GH_TOKEN: 'secret',
+      PATH: '/evil',
+    });
+    expect(target.PATH).toBe('/usr/bin');
+    expect(target.KEEP).toBe('yes');
+    expect(target.LOCUS_SESSION_ID).toBe('s1');
+    expect(target.LOCUS_BINDING).toBe('acme');
+    expect(target.LOCUS_HOME).toBe('/tmp/locus');
+    expect(target.LOCUS_NOTIFY).toBe('0');
+    expect(target.GH_CONFIG_DIR).toBe('/tmp/gh');
+    expect(target.AWS_PROFILE).toBeUndefined();
+    expect(target.GH_TOKEN).toBeUndefined();
+  });
+});
+
 describe('MCP merge helpers', () => {
+
   it('locusServerSpec uses locus-mcp and LOCUS_* env only', () => {
     const s = locusServerSpec({ locusHome: '/tmp/locus-home', client: 'ashlr-hub' });
     expect(s.command).toBe('locus-mcp');
