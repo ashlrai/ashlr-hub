@@ -726,6 +726,7 @@ describe.skipIf(process.platform === 'win32')('effect terminal retention on POSI
     releasePreparedToolEffect(effect);
   });
 
+  // 8 prepare+commit+compact cycles need headroom under macOS CI's 5s default.
   it('bounds underfilled manual packs before they can exhaust the chain', () => {
     for (let index = 0; index < 8; index += 1) {
       commit(effectInput(`underfilled-${index}`));
@@ -741,7 +742,7 @@ describe.skipIf(process.platform === 'win32')('effect terminal retention on POSI
     });
     expect(artifacts('.terminal-pack-v1-')).toHaveLength(8);
     expect(artifacts('.terminal-v1-')).toHaveLength(1);
-  });
+  }, 30_000);
 
   it('automatically compacts the bounded terminal batch at the real threshold', () => {
     for (let index = 0; index < 200; index += 1) {
