@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { buildEffectiveConfigSnapshot, loadEffectiveConfigSnapshot } from '../src/core/effective-config.js';
-import { startServer } from '../src/core/web/server.js';
+import { readAuthHeaders, startServer } from './helpers/authenticated-web-server.js';
 import { makeFixture, makeCfg, type H1Fixture } from './helpers/h1-fixture.js';
 import type { AshlrConfig, WebServerOptions } from '../src/core/types.js';
 
@@ -45,7 +45,10 @@ function request(
         port: Number(parsed.port),
         path: parsed.pathname + parsed.search,
         method,
-        headers: { Host: `127.0.0.1:${port}` },
+        headers: {
+          Host: `127.0.0.1:${port}`,
+          ...(method === 'GET' ? readAuthHeaders(port) : {}),
+        },
       },
       (res) => {
         let data = '';
