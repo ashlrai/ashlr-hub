@@ -153,6 +153,8 @@ async function detectEmbeddingModel(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 3000);
   try {
+    // The base is reconstructed by localOllamaOrigin from an exact loopback-only grammar.
+    // codeql[js/file-access-to-http]
     const res = await fetch(`${stripTrailingSlashes(ollamaBase)}/api/tags`, {
       signal: controller.signal,
       headers: { Accept: 'application/json' },
@@ -195,6 +197,8 @@ async function fetchEmbedding(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), EMBED_TIMEOUT_MS);
   try {
+    // The base is reconstructed by localOllamaOrigin from an exact loopback-only grammar.
+    // codeql[js/file-access-to-http]
     const res = await fetch(`${stripTrailingSlashes(ollamaBase)}/api/embeddings`, {
       method: 'POST',
       signal: controller.signal,
