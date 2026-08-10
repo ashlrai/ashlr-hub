@@ -64,7 +64,7 @@ async function ensureImported(): Promise<void> {
 // Config helper
 // ---------------------------------------------------------------------------
 
-function makeConfig(maxRecall?: number): AshlrConfig {
+function makeConfig(maxRecall?: number, ollama = 'http://localhost:11434'): AshlrConfig {
   return {
     version: 1,
     roots: [],
@@ -75,7 +75,7 @@ function makeConfig(maxRecall?: number): AshlrConfig {
     keepers: [],
     models: {
       lmstudio: 'http://localhost:1234',
-      ollama: 'http://localhost:11434',
+      ollama,
       providerChain: ['ollama'],
     },
     telemetry: {},
@@ -457,6 +457,72 @@ describe('recall — keyword path (offline, no fetch)', () => {
 // ---------------------------------------------------------------------------
 
 describe('recall — embeddings path falls back to keyword on failure', () => {
+  it.each([
+    'https://localhost:11434',
+    'http://example.com:11434',
+    'http://localhost.evil.example:11434',
+    'http://localhost@evil.example:11434',
+    'http://127.0.0.2:11434',
+    'http://localhost:11434/other',
+    'http://localhost:11434?redirect=https://example.com',
+    ' http://localhost:11434',
+    'http://@localhost:11434',
+    'http://:@localhost:11434',
+    'http://localhost:11434/.',
+    'http://localhost:11434/foo/..',
+    'http://localhost:11434/%2e',
+    'http://localhost:11434/a/%2e%2e',
+    'http://localhost:11434?',
+    'http://localhost:11434#',
+    'http://local\thost:11434',
+    'http://local\nhost:11434',
+    'http:\\localhost:11434',
+    'http://127.1:11434',
+    'http://2130706433:11434',
+    'http://0x7f000001:11434',
+    'http://0177.0.0.1:11434',
+    'http://[0:0:0:0:0:0:0:1]:11434',
+    'http://localhost:0',
+    'http://localhost:00080',
+    'http://localhost:65536',
+    `http://localhost:${'1'.repeat(2049)}`,
+  ])('refuses non-local or ambiguous Ollama base %s before fetch', async (ollama) => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    writeHubEntries(tmpHome, [
+      makeEntry({ id: 'local-only', title: 'TypeScript', text: 'TypeScript patterns.' }),
+    ]);
+
+    const hits = await recall('typescript', makeConfig(undefined, ollama), {
+      embeddings: true,
+    });
+
+    expect(hits[0]?.method).toBe('keyword');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'http://localhost:11434',
+    'http://localhost:11434/',
+    'http://127.0.0.1:11434',
+    'http://[::1]:11434',
+    'http://localhost',
+    'http://localhost:1',
+    'http://localhost:65535',
+  ])('allows an exact loopback HTTP Ollama origin %s', async (ollama) => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error('connection refused'));
+    vi.stubGlobal('fetch', fetchMock);
+    writeHubEntries(tmpHome, [
+      makeEntry({ id: 'loopback-only', title: 'TypeScript', text: 'TypeScript patterns.' }),
+    ]);
+
+    await recall('typescript', makeConfig(undefined, ollama), { embeddings: true });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`${new URL(ollama).origin}/api/tags`);
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ redirect: 'error' });
+  });
+
   it('falls back to keyword scoring when fetch rejects', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('connection refused')));
 
@@ -623,10 +689,12 @@ describe('recall — embeddings path (mocked Ollama success)', () => {
 
   it('only calls Ollama URLs — no cloud API calls', async () => {
     const seenUrls: string[] = [];
+    const seenOptions: RequestInit[] = [];
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockImplementation((url: string) => {
+      vi.fn().mockImplementation((url: string, options?: RequestInit) => {
         seenUrls.push(String(url));
+        seenOptions.push(options ?? {});
         const u = String(url);
         if (u.includes('11434')) {
           return Promise.resolve({
@@ -651,6 +719,8 @@ describe('recall — embeddings path (mocked Ollama success)', () => {
     for (const url of seenUrls) {
       expect(url).not.toMatch(/api\.anthropic\.com|api\.openai\.com|generativeai\.googleapis\.com/);
     }
+    expect(seenUrls.some((url) => url.endsWith('/api/embeddings'))).toBe(true);
+    expect(seenOptions.every((options) => options.redirect === 'error')).toBe(true);
   });
 
   it('never calls fetch on keyword-only path regardless of opts', async () => {
