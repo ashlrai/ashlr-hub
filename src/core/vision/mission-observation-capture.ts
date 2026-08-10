@@ -7,6 +7,7 @@
 
 import { createHash } from 'node:crypto';
 import { isAbsolute, resolve } from 'node:path';
+import { isProxy } from 'node:util/types';
 
 import type { Goal, Milestone, Proposal, ProposalVerifyResult, RealizedMergeEvidence } from '../types.js';
 import type { ListGoalsDetailedResult } from '../goals/store.js';
@@ -41,6 +42,11 @@ const MAX_VERIFICATION_COMMAND_ARG_BYTES = 4_096;
 const MAX_VERIFICATION_SOURCE_BYTES = 1_024;
 const MAX_VERIFICATION_TIMEOUT_MS = 86_400_000;
 const MAX_RECORD_CANONICAL_BYTES = 64 * 1024;
+const MAX_CAPTURE_DEPTH = 32;
+const MAX_CAPTURE_NODES = 250_000;
+const MAX_CAPTURE_PROPERTIES = 1_000_000;
+const MAX_CAPTURE_ARRAY_ENTRIES = 100_000;
+const MAX_CAPTURE_TEXT_BYTES = 72 * 1024 * 1024;
 const CAPTURE_KEYS = new Set([
   'recordedAt', 'graph', 'briefing', 'briefingQuality', 'enrollment', 'goals', 'proposals',
 ]);
@@ -92,6 +98,91 @@ export type MissionObservationCaptureResult =
   | { ok: false; reason: MissionObservationCaptureFailureReason };
 
 type Canonical = null | boolean | number | string | Canonical[] | { [key: string]: Canonical };
+type PlainData = undefined | null | boolean | number | string | PlainData[] | { [key: string]: PlainData };
+
+interface PlainDataSnapshotState {
+  nodes: number;
+  properties: number;
+  textBytes: number;
+  ancestors: WeakSet<object>;
+}
+
+/**
+ * Detach caller-owned evidence before semantic validation. Descriptor-only
+ * traversal prevents getters from running, and proxy/symbol/non-enumerable
+ * properties fail closed instead of becoming hidden authority channels.
+ */
+function detachedPlainData(
+  value: unknown,
+  state: PlainDataSnapshotState = {
+    nodes: 0,
+    properties: 0,
+    textBytes: 0,
+    ancestors: new WeakSet<object>(),
+  },
+  depth = 0,
+): { ok: true; value: PlainData } | { ok: false } {
+  state.nodes += 1;
+  if (state.nodes > MAX_CAPTURE_NODES || depth > MAX_CAPTURE_DEPTH) return { ok: false };
+  if (value === undefined || value === null || typeof value === 'boolean') return { ok: true, value };
+  if (typeof value === 'number') return Number.isFinite(value) ? { ok: true, value } : { ok: false };
+  if (typeof value === 'string') {
+    state.textBytes += Buffer.byteLength(value, 'utf8');
+    return state.textBytes <= MAX_CAPTURE_TEXT_BYTES ? { ok: true, value } : { ok: false };
+  }
+  if (typeof value !== 'object' || isProxy(value)) return { ok: false };
+  if (state.ancestors.has(value)) return { ok: false };
+
+  state.ancestors.add(value);
+  try {
+    const prototype = Reflect.getPrototypeOf(value);
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const keys = Reflect.ownKeys(descriptors);
+    if (keys.some((key) => typeof key !== 'string')) return { ok: false };
+    state.properties += keys.length;
+    if (state.properties > MAX_CAPTURE_PROPERTIES) return { ok: false };
+
+    if (Array.isArray(value)) {
+      if (prototype !== Array.prototype) return { ok: false };
+      const lengthDescriptor = descriptors['length'];
+      if (lengthDescriptor === undefined || !Object.hasOwn(lengthDescriptor, 'value') ||
+        !Number.isSafeInteger(lengthDescriptor.value) || lengthDescriptor.value < 0 ||
+        lengthDescriptor.value > MAX_CAPTURE_ARRAY_ENTRIES || keys.length !== lengthDescriptor.value + 1) {
+        return { ok: false };
+      }
+      const output: PlainData[] = [];
+      for (let index = 0; index < lengthDescriptor.value; index += 1) {
+        const descriptor = descriptors[String(index)];
+        if (descriptor === undefined || descriptor.enumerable !== true || !Object.hasOwn(descriptor, 'value')) {
+          return { ok: false };
+        }
+        const entry = detachedPlainData(descriptor.value, state, depth + 1);
+        if (!entry.ok) return entry;
+        output.push(entry.value);
+      }
+      return { ok: true, value: output };
+    }
+
+    if (prototype !== Object.prototype && prototype !== null) return { ok: false };
+    const output = Object.create(null) as Record<string, PlainData>;
+    for (const key of keys as string[]) {
+      const descriptor = descriptors[key];
+      if (descriptor === undefined || descriptor.enumerable !== true || !Object.hasOwn(descriptor, 'value')) {
+        return { ok: false };
+      }
+      state.textBytes += Buffer.byteLength(key, 'utf8');
+      if (state.textBytes > MAX_CAPTURE_TEXT_BYTES) return { ok: false };
+      const entry = detachedPlainData(descriptor.value, state, depth + 1);
+      if (!entry.ok) return entry;
+      output[key] = entry.value;
+    }
+    return { ok: true, value: output };
+  } catch {
+    return { ok: false };
+  } finally {
+    state.ancestors.delete(value);
+  }
+}
 
 function recordOf(value: unknown): Record<string, unknown> | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
@@ -333,9 +424,12 @@ function observedState(goal: Goal | null, milestones: readonly MissionObservatio
 
 /** Capture a replay-stable, evidence-only receipt input or an explicit fail-closed reason. */
 export function captureMissionObservation(
-  input: MissionObservationCaptureInput,
+  rawInput: MissionObservationCaptureInput,
 ): MissionObservationCaptureResult {
   try {
+    const detached = detachedPlainData(rawInput);
+    if (!detached.ok) return { ok: false, reason: 'invalid-input' };
+    const input = detached.value as unknown as MissionObservationCaptureInput;
     const inputRecord = recordOf(input);
     if (inputRecord === null || !exactKeys(inputRecord, CAPTURE_KEYS)) return { ok: false, reason: 'invalid-input' };
     if (!canonicalTimestamp(input.recordedAt)) return { ok: false, reason: 'invalid-recorded-at' };

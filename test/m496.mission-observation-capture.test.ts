@@ -363,6 +363,105 @@ describe('M496 mission observation capture adapter', () => {
     });
   });
 
+  it('rejects accessors without invoking caller code', () => {
+    let getterCalls = 0;
+    const topLevel = input();
+    Object.defineProperty(topLevel, 'recordedAt', {
+      enumerable: true,
+      get: () => {
+        getterCalls += 1;
+        return NOW;
+      },
+    });
+    expect(captureMissionObservation(topLevel)).toEqual({ ok: false, reason: 'invalid-input' });
+
+    const nested = input([goal()]);
+    Object.defineProperty(nested.goals.goals[0]!, 'id', {
+      enumerable: true,
+      get: () => {
+        getterCalls += 1;
+        return 'goal-build';
+      },
+    });
+    expect(captureMissionObservation(nested)).toEqual({ ok: false, reason: 'invalid-input' });
+    expect(getterCalls).toBe(0);
+  });
+
+  it('rejects proxies before invoking their traps', () => {
+    let trapCalls = 0;
+    const candidate = new Proxy(goal(), {
+      get: (target, property, receiver) => {
+        trapCalls += 1;
+        return Reflect.get(target, property, receiver);
+      },
+      getOwnPropertyDescriptor: (target, property) => {
+        trapCalls += 1;
+        return Reflect.getOwnPropertyDescriptor(target, property);
+      },
+      getPrototypeOf: (target) => {
+        trapCalls += 1;
+        return Reflect.getPrototypeOf(target);
+      },
+      ownKeys: (target) => {
+        trapCalls += 1;
+        return Reflect.ownKeys(target);
+      },
+    });
+    expect(captureMissionObservation(input([candidate]))).toEqual({ ok: false, reason: 'invalid-input' });
+    expect(trapCalls).toBe(0);
+  });
+
+  it.each([
+    ['symbol authority field', (value: MissionObservationCaptureInput) => {
+      Object.defineProperty(value.proposals.proposals[0]!, Symbol('humanApproved'), {
+        enumerable: true,
+        value: true,
+      });
+    }],
+    ['non-enumerable authority field', (value: MissionObservationCaptureInput) => {
+      Object.defineProperty(value.proposals.proposals[0]!, 'humanApproved', {
+        enumerable: false,
+        value: true,
+      });
+    }],
+    ['sparse array', (value: MissionObservationCaptureInput) => {
+      value.proposals.proposals.length = 2;
+    }],
+    ['array authority field', (value: MissionObservationCaptureInput) => {
+      Object.defineProperty(value.proposals.proposals, 'humanApproved', {
+        enumerable: true,
+        value: true,
+      });
+    }],
+  ])('rejects hidden or non-data structure: %s', (_label, mutate) => {
+    const value = input([], [proposal()]);
+    mutate(value);
+    expect(captureMissionObservation(value)).toEqual({ ok: false, reason: 'invalid-input' });
+  });
+
+  it('rejects cyclic evidence and detaches accepted briefing data from its caller', () => {
+    const cyclic = input();
+    const cyclicBriefing: Record<string, unknown> = { schemaVersion: 1 };
+    cyclicBriefing['self'] = cyclicBriefing;
+    cyclic.briefing = cyclicBriefing;
+    expect(captureMissionObservation(cyclic)).toEqual({ ok: false, reason: 'invalid-input' });
+
+    const value = input();
+    const briefing = {
+      schemaVersion: 1,
+      missionKey: 'mission-capture',
+      strategy: { priorities: ['safety', 'autonomy'] },
+    };
+    value.briefing = briefing;
+    const captured = captureMissionObservation(value);
+    expect(captured.ok).toBe(true);
+    if (!captured.ok) return;
+    expect(captured.receiptInput.briefing).not.toBe(briefing);
+    expect((captured.receiptInput.briefing as typeof briefing).strategy).not.toBe(briefing.strategy);
+    briefing.strategy.priorities[0] = 'mutated-after-capture';
+    expect((captured.receiptInput.briefing as typeof briefing).strategy.priorities).toEqual(['safety', 'autonomy']);
+  });
+
   it('is replay-stable for inventory order and excludes recordedAt from source digests', () => {
     const firstGoal = goal({ id: 'goal-a' });
     const secondGoal = goal({ id: 'goal-b', mission: undefined, objective: 'Unrelated' });
