@@ -4,6 +4,7 @@ import {
   accessSync,
   constants as fsConstants,
   lstatSync,
+  readdirSync,
   realpathSync,
   type BigIntStats,
 } from 'node:fs';
@@ -237,6 +238,33 @@ export function trustedSystemGithubCandidates(platform: NodeJS.Platform = proces
   return [];
 }
 
+/** A static, root-custodied empty directory is the only accepted gh config/home root. */
+export function trustedSystemGithubConfigCandidates(
+  platform: NodeJS.Platform = process.platform,
+): readonly string[] {
+  if (platform === 'darwin') return ['/private/var/empty'];
+  if (platform === 'linux') return ['/var/empty', '/usr/share/empty'];
+  return [];
+}
+
+export function resolveTrustedGithubConfigRoot(): PathCustodyProof | null {
+  for (const candidate of trustedSystemGithubConfigCandidates()) {
+    try {
+      const canonical = realpathSync(candidate);
+      if (canonical !== candidate || readdirSync(canonical).length !== 0) continue;
+      const proof = inspectPosixHierarchy(canonical, {
+        leafKind: 'directory',
+        requireCurrentUserLeaf: false,
+        requireRootOwnership: true,
+      });
+      if (proof) return proof;
+    } catch {
+      // Missing, non-empty, or insufficiently custodied roots fail closed.
+    }
+  }
+  return null;
+}
+
 function inspectTrustedSystemGitExecutable(
   executable: string,
   untrustedRoots: readonly string[],
@@ -373,15 +401,21 @@ export function trustedGitEnvironment(pin: TrustedExecutablePin): NodeJS.Process
   };
 }
 
-export function trustedGithubEnvironment(): NodeJS.ProcessEnv {
-  const account = userInfo();
+/**
+ * Construct the whitelist-only gh environment after config-root custody has
+ * already been established. This helper grants no authority by itself.
+ */
+export function sanitizeGithubAuthorityEnvironment(
+  configRoot: string,
+  sourceEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const token = sourceEnv['GH_TOKEN'] ?? sourceEnv['GITHUB_TOKEN'];
   const env: NodeJS.ProcessEnv = {
-    HOME: account.homedir,
-    USER: account.username,
+    HOME: configRoot,
+    GH_CONFIG_DIR: configRoot,
+    XDG_CONFIG_HOME: configRoot,
   };
-  for (const key of ['SystemRoot', 'WINDIR', 'GH_TOKEN', 'GITHUB_TOKEN']) {
-    if (process.env[key]) env[key] = process.env[key];
-  }
+  if (token) env['GH_TOKEN'] = token;
   return {
     ...env,
     GH_HOST: 'github.com',
@@ -391,4 +425,10 @@ export function trustedGithubEnvironment(): NodeJS.ProcessEnv {
     LC_ALL: 'C',
     NO_COLOR: '1',
   };
+}
+
+export function trustedGithubEnvironment(): NodeJS.ProcessEnv | null {
+  const configRoot = resolveTrustedGithubConfigRoot();
+  if (!configRoot) return null;
+  return sanitizeGithubAuthorityEnvironment(configRoot.canonicalPath);
 }

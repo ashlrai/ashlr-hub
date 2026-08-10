@@ -8,24 +8,37 @@ vi.mock('../src/core/portfolio/candidate-admission.js', () => ({
 
 import { cmdEnroll } from '../src/cli/sandbox.js';
 
-function report(admissionReady: boolean): Record<string, unknown> {
+function report(observationComplete: boolean): Record<string, unknown> {
   return {
-    schemaVersion: 7,
+    schemaVersion: 8,
     generatedAt: '2026-08-09T12:00:00.000Z',
     readOnly: true,
+    observationOnly: true,
     authorityGranted: false,
     mutationPerformed: false,
+    consumableForEnrollment: false,
+    consumerRevalidationRequired: true,
+    consumingFenceRequired: true,
     repo: '/candidate',
     name: 'candidate',
-    verdict: admissionReady ? 'proposal-only' : 'blocked',
-    admissionReady,
-    judgeFreeEligible: false,
+    verdict: observationComplete ? 'proposal-only-observation' : 'blocked-observation',
+    observationComplete,
+    judgeFreeEvidenceObserved: false,
+    observationLease: {
+      observedAt: '2026-08-09T12:00:00.000Z',
+      expiresAt: '2026-08-09T12:00:30.000Z',
+      maxAgeMs: 30_000,
+      epochDigest: null,
+      consumableForEnrollment: false,
+      consumerRevalidationRequired: true,
+      consumingFenceRequired: true,
+    },
     primaryAction: 'Review blockers.',
-    admissionBlockers: admissionReady ? [] : [{ id: 'source-dirty', detail: 'dirty', fix: 'clean it' }],
+    admissionBlockers: observationComplete ? [] : [{ id: 'source-dirty', detail: 'dirty', fix: 'clean it' }],
     autonomyBlockers: [{ id: 'sensitive-project-restricted', detail: 'sensitive', fix: 'proposal only' }],
     warnings: [],
     enrollment: { registryState: 'ready', registryReason: 'missing-empty', enrolled: false },
-    source: { detail: admissionReady ? 'clean and current' : 'dirty' },
+    source: { detail: observationComplete ? 'clean and current' : 'dirty' },
     verifier: { detail: 'merge-grade' },
     remotePr: { detail: 'protected PR incomplete' },
     admissionContract: { detail: 'immutable declaration missing' },
@@ -49,11 +62,15 @@ describe('M489 candidate repo admission CLI', () => {
     expect(inspectMock).toHaveBeenCalledWith('/candidate');
     const parsed = JSON.parse(String(log.mock.calls[0]?.[0])) as Record<string, unknown>;
     expect(parsed).toMatchObject({
-      admissionReady: true,
-      judgeFreeEligible: false,
+      observationComplete: true,
+      judgeFreeEvidenceObserved: false,
       readOnly: true,
+      observationOnly: true,
       authorityGranted: false,
       mutationPerformed: false,
+      consumableForEnrollment: false,
+      consumerRevalidationRequired: true,
+      consumingFenceRequired: true,
     });
   });
 

@@ -841,13 +841,15 @@ function runAttestationGh(
     if (authority && !verifyTrustedGithubCli(authority.pin, authority.untrustedRoots)) {
       return { kind: 'unavailable' };
     }
+    const authorityEnv = authority ? trustedGithubEnvironment() : null;
+    if (authority && !authorityEnv) return { kind: 'unavailable' };
     const res = spawnSync(authority?.pin.executable ?? GH_BIN, args, {
       cwd,
       timeout: TIMEOUT_MS,
       maxBuffer: Math.max(1, Math.min(MAX_ATTESTATION_BUFFER_BYTES, Math.floor(maxBuffer))),
       stdio: 'pipe',
       encoding: 'utf8',
-      env: authority ? trustedGithubEnvironment() : {
+      env: authority ? authorityEnv! : {
         ...process.env,
         GH_HOST: 'github.com',
         GH_NO_UPDATE_NOTIFIER: '1',
@@ -3636,9 +3638,10 @@ export function readBranchProtectionAttestation(
   const authority = options.trustedGithubCli
     ? { pin: options.trustedGithubCli, untrustedRoots: options.untrustedRoots ?? [] }
     : undefined;
-  if (authority && !verifyTrustedGithubCli(authority.pin, authority.untrustedRoots)) {
+  if (authority && (!verifyTrustedGithubCli(authority.pin, authority.untrustedRoots) ||
+      !trustedGithubEnvironment())) {
     return Promise.resolve(unavailableAttestation(
-      'Trusted GitHub executable custody is unavailable',
+      'Trusted GitHub executable or empty config-root custody is unavailable',
       branch ?? null,
     ));
   }

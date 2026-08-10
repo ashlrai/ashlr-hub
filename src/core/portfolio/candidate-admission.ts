@@ -56,12 +56,12 @@ import {
   type TrustedExecutablePin,
 } from '../util/trusted-executable.js';
 
-export const CANDIDATE_REPO_ADMISSION_SCHEMA_VERSION = 7 as const;
+export const CANDIDATE_REPO_ADMISSION_SCHEMA_VERSION = 8 as const;
 export const CANDIDATE_ADMISSION_CONTRACT_FILE = 'ashlr.admission.json';
 export const CANDIDATE_VERIFY_CONTRACT_FILE = 'ashlr.verify.json';
 export const CANDIDATE_ADMISSION_AUTHORITY_FILE = 'candidate-admission-authority.json';
-export const CANDIDATE_ATTESTATION_DOMAIN = 'ashlr:candidate-admission-whole-head-attestation:v6';
-export const CANDIDATE_ADMISSION_EVALUATOR_VERSION = 'ashlr-candidate-admission-evaluator-v6';
+export const CANDIDATE_ATTESTATION_DOMAIN = 'ashlr:candidate-admission-whole-head-attestation:v7';
+export const CANDIDATE_ADMISSION_EVALUATOR_VERSION = 'ashlr-candidate-admission-evaluator-v7';
 
 const SELF_REPOSITORY = 'ashlrai/ashlr-hub';
 const SELF_PACKAGE_NAME = '@ashlr/hub';
@@ -84,10 +84,14 @@ const GITHUB_COLLECTION_PAGE_SIZE = 100;
 const MAX_GITHUB_COLLECTION_ITEMS = 1_000;
 const MAX_WORKFLOW_ATTEMPTS = 1_000;
 const MAX_AUTHORITY_FILE_BYTES = 64 * 1024;
-const AUTHORITY_EPOCH_CLOSURE_ROUNDS = 2;
+const OBSERVATION_CONSISTENCY_ROUNDS = 2;
+const OBSERVATION_FRESHNESS_LEASE_MS = 30_000;
 const NULL_DEVICE = process.platform === 'win32' ? 'NUL' : '/dev/null';
 
-export type CandidateAdmissionVerdict = 'blocked' | 'proposal-only' | 'evidence-candidate';
+export type CandidateAdmissionVerdict =
+  | 'blocked-observation'
+  | 'proposal-only-observation'
+  | 'evidence-observed';
 export type CandidateRiskClassification = 'ordinary' | 'sensitive' | 'regulated' | 'critical';
 
 export interface CandidateAdmissionFinding {
@@ -217,7 +221,7 @@ export interface CandidateCheckRunEvidence {
 
 export interface CandidateRemotePrEvidence {
   available: boolean;
-  ready: boolean;
+  evidenceComplete: boolean;
   nameWithOwner: string | null;
   repositoryId: string | null;
   defaultBranch: string | null;
@@ -238,9 +242,9 @@ export interface CandidateRemotePrEvidence {
   remoteStableAfterChecks: boolean;
   trustedPolicyStableAfterChecks: boolean;
   checkEvidenceStableAfterRecheck: boolean;
-  authorityEpochStable: boolean;
-  initialAuthorityEpochDigest: string | null;
-  finalAuthorityEpochDigest: string | null;
+  observationConsistent: boolean;
+  initialObservationDigest: string | null;
+  finalObservationDigest: string | null;
   checkRun: CandidateCheckRunEvidence;
   detail: string;
 }
@@ -251,7 +255,18 @@ export interface CandidateRiskEvidence {
   restricted: boolean;
   selfTarget: boolean | null;
   filenameHeuristicsUsed: false;
-  autonomyCeiling: 'proposal-only' | 'evidence-candidate';
+  observedAutonomyCeiling: 'proposal-only' | 'evidence-observed';
+  detail: string;
+}
+
+export interface CandidateObservationLease {
+  observedAt: string;
+  expiresAt: string;
+  maxAgeMs: typeof OBSERVATION_FRESHNESS_LEASE_MS;
+  epochDigest: string | null;
+  consumableForEnrollment: false;
+  consumerRevalidationRequired: true;
+  consumingFenceRequired: true;
   detail: string;
 }
 
@@ -259,13 +274,18 @@ export interface CandidateRepoAdmissionReport {
   schemaVersion: typeof CANDIDATE_REPO_ADMISSION_SCHEMA_VERSION;
   generatedAt: string;
   readOnly: true;
+  observationOnly: true;
   authorityGranted: false;
   mutationPerformed: false;
+  consumableForEnrollment: false;
+  consumerRevalidationRequired: true;
+  consumingFenceRequired: true;
   repo: string;
   name: string;
   verdict: CandidateAdmissionVerdict;
-  admissionReady: boolean;
-  judgeFreeEligible: boolean;
+  observationComplete: boolean;
+  judgeFreeEvidenceObserved: boolean;
+  observationLease: CandidateObservationLease;
   primaryAction: string;
   admissionBlockers: CandidateAdmissionFinding[];
   autonomyBlockers: CandidateAdmissionFinding[];
@@ -479,10 +499,12 @@ function gitText(
 function ghApi(endpoint: string, pin: TrustedExecutablePin, candidateRoot: string): unknown | null {
   try {
     if (!verifyTrustedGithubCli(pin, [candidateRoot])) return null;
+    const env = trustedGithubEnvironment();
+    if (!env) return null;
     const result = spawnSync(pin.executable, ['api', endpoint], {
       cwd: tmpdir(),
       encoding: 'utf8',
-      env: trustedGithubEnvironment(),
+      env,
       maxBuffer: MAX_GH_OUTPUT,
       shell: false,
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -1068,7 +1090,7 @@ export function readCandidateCheckRunEvidence(
       !Array.isArray(request.expectedAttestations) || request.expectedAttestations.length === 0 ||
       request.expectedAttestations.length > MAX_TRUSTED_APP_IDS ||
       request.expectedAttestations.some((item) => !APP_ID_RE.test(item.appId) ||
-        item.appId === request.workflowAppId || !/^ashlr-admission-v6:[0-9a-f]{64}$/.test(item.externalId)) ||
+        item.appId === request.workflowAppId || !/^ashlr-admission-v7:[0-9a-f]{64}$/.test(item.externalId)) ||
       new Set(request.expectedAttestations.map((item) => item.appId)).size !== request.expectedAttestations.length ||
       new Set(request.expectedAttestations.map((item) => item.externalId)).size !== request.expectedAttestations.length ||
       !SHA256_RE.test(request.trustedPolicyDigest) ||
@@ -1694,7 +1716,7 @@ export function buildCandidateAdmissionAttestationId(input: {
     input.profile,
     input.riskClassification,
   ])).digest('hex');
-  return `ashlr-admission-v6:${digest}`;
+  return `ashlr-admission-v7:${digest}`;
 }
 
 function emptyMutationProof(detail: string): CandidateMutationProof {
@@ -1757,7 +1779,7 @@ function finalizeSource(before: LocalSnapshot, after: LocalSnapshot, remote: Can
 function emptyRemote(detail: string, candidateHead: string | null = null): CandidateRemotePrEvidence {
   return {
     available: false,
-    ready: false,
+    evidenceComplete: false,
     nameWithOwner: null,
     repositoryId: null,
     defaultBranch: null,
@@ -1778,9 +1800,9 @@ function emptyRemote(detail: string, candidateHead: string | null = null): Candi
     remoteStableAfterChecks: false,
     trustedPolicyStableAfterChecks: false,
     checkEvidenceStableAfterRecheck: false,
-    authorityEpochStable: false,
-    initialAuthorityEpochDigest: null,
-    finalAuthorityEpochDigest: null,
+    observationConsistent: false,
+    initialObservationDigest: null,
+    finalObservationDigest: null,
     checkRun: emptyCheckRun('check run was not inspected'),
     detail,
   };
@@ -1875,7 +1897,7 @@ function trustedPolicyAuthoritySnapshot(
   };
 }
 
-function authorityEpochDigest(input: {
+function observationEpochDigest(input: {
   local: LocalSnapshot | null;
   remoteHead: CandidateRemoteHeadEvidence;
   protection: BranchProtectionAttestation;
@@ -1884,7 +1906,7 @@ function authorityEpochDigest(input: {
   checkRun: CandidateCheckRunEvidence;
 }): string | null {
   return canonicalAuthorityDigest({
-    domain: 'ashlr:candidate-admission-authority-epoch:v1',
+    domain: 'ashlr:candidate-admission-observation-epoch:v1',
     localRepo: localAuthoritySnapshot(input.local),
     operatorPolicy: trustedPolicyAuthoritySnapshot(input.trustedAuthority, input.trustedPolicy),
     protectionAndRulesets: protectionAuthoritySnapshot(input.protection),
@@ -2004,7 +2026,7 @@ async function inspectRemotePr(
       initialCheckRun = emptyCheckRun('initial correlated check evidence collection failed');
     }
   }
-  const initialAuthorityEpochDigest = authorityEpochDigest({
+  const initialObservationDigest = observationEpochDigest({
     local: sourceSnapshot,
     remoteHead,
     protection: live,
@@ -2035,7 +2057,7 @@ async function inspectRemotePr(
   } catch {
     closureHookFailed = true;
   }
-  for (let round = 0; round < AUTHORITY_EPOCH_CLOSURE_ROUNDS; round += 1) {
+  for (let round = 0; round < OBSERVATION_CONSISTENCY_ROUNDS; round += 1) {
     const localBefore = captureFinalLocalSnapshot();
     let closingRemote = failedRemote();
     let closingProtection = { ...live, available: false, ok: false, detail: 'closing protection observation failed' };
@@ -2068,7 +2090,7 @@ async function inspectRemotePr(
     const localBeforeDigest = canonicalAuthorityDigest(localAuthoritySnapshot(localBefore));
     const localAfterDigest = canonicalAuthorityDigest(localAuthoritySnapshot(localAfter));
     closingObservations.push({
-      digest: authorityEpochDigest({
+      digest: observationEpochDigest({
         local: localAfter,
         remoteHead: closingRemote,
         protection: closingProtection,
@@ -2098,17 +2120,17 @@ async function inspectRemotePr(
     ));
   const checkEvidenceStableAfterRecheck = checkRequest !== null && closingObservations.every((observation) =>
     sameCandidateCheckAuthority(initialCheckRun, observation.checkRun));
-  const finalAuthorityEpochDigest = finalObservation.digest;
-  const authorityEpochStable = initialAuthorityEpochDigest !== null && closingObservations.length === AUTHORITY_EPOCH_CLOSURE_ROUNDS &&
-    closingObservations.every((observation) => observation.localStable && observation.digest === initialAuthorityEpochDigest) &&
+  const finalObservationDigest = finalObservation.digest;
+  const observationConsistent = initialObservationDigest !== null && closingObservations.length === OBSERVATION_CONSISTENCY_ROUNDS &&
+    closingObservations.every((observation) => observation.localStable && observation.digest === initialObservationDigest) &&
     remoteStableAfterChecks && trustedPolicyStableAfterChecks && checkEvidenceStableAfterRecheck;
   const expectedAttestationId = checkRun.appId
     ? expectedAttestations.find((item) => item.appId === checkRun.appId)?.externalId ?? null
     : expectedAttestations.length === 1 ? expectedAttestations[0]!.externalId : null;
-  const ready = live.available && live.ok && live.protected && pullRequestRequired && identityBound &&
+  const evidenceComplete = live.available && live.ok && live.protected && pullRequestRequired && identityBound &&
     sourceHead === remoteHead.head && bindingsExact && safeMinimum?.ok === true && policyDigest !== null &&
     attestorIndependent && checkRun.ready && checkEvidenceStableAfterRecheck &&
-    remoteStableAfterChecks && trustedPolicyStableAfterChecks && authorityEpochStable;
+    remoteStableAfterChecks && trustedPolicyStableAfterChecks && observationConsistent;
   const detail = !live.available || !live.ok || !live.protected ? live.detail : !pullRequestRequired
     ? 'default branch protection does not require a pull request'
     : !identityBound ? 'branch protection identity/base does not match the exact live candidate source'
@@ -2123,12 +2145,12 @@ async function inspectRemotePr(
     : !checkRun.ready ? checkRun.detail
     : !remoteStableAfterChecks ? 'remote head or protected policy changed during check collection'
     : !trustedPolicyStableAfterChecks ? 'operator signer policy identity or digest changed during check collection'
-    : !authorityEpochStable ? 'complete local, remote, protection, policy, and correlated-check authority epoch did not close unchanged'
+    : !observationConsistent ? 'complete local, remote, protection, policy, and correlated-check observations were not consistent during collection'
     : policyDigest === null ? 'protected-remote policy digest is unavailable'
-    : 'fresh whole-HEAD snapshot, protected policy, Actions workflow attempt, and independent trusted-App attestation are bound and stable across collection';
+    : 'fresh whole-HEAD snapshot, protected policy, Actions workflow attempt, and independent trusted-App attestation were consistently observed; this evidence is not enrollment authority';
   return {
     available: live.available,
-    ready,
+    evidenceComplete,
     nameWithOwner: live.nameWithOwner,
     repositoryId: live.repositoryId,
     defaultBranch: live.defaultBranch,
@@ -2149,9 +2171,9 @@ async function inspectRemotePr(
     remoteStableAfterChecks,
     trustedPolicyStableAfterChecks,
     checkEvidenceStableAfterRecheck,
-    authorityEpochStable,
-    initialAuthorityEpochDigest,
-    finalAuthorityEpochDigest,
+    observationConsistent,
+    initialObservationDigest,
+    finalObservationDigest,
     checkRun,
     detail,
   };
@@ -2160,7 +2182,7 @@ async function inspectRemotePr(
 function primaryAction(admission: CandidateAdmissionFinding[], autonomy: CandidateAdmissionFinding[]): string {
   if (admission[0]) return admission[0].fix;
   if (autonomy[0]) return autonomy[0].fix;
-  return 'Review this evidence, then explicitly enroll the repo if proposal-only fleet work is desired.';
+  return 'Review this observation. Any future enrollment action must recollect and revalidate every bound source under its own consuming fence.';
 }
 
 /** Inspect one candidate without enrollment, verifier execution, state writes, daemon activity, or authority mutation. */
@@ -2321,10 +2343,10 @@ export async function inspectCandidateRepoAdmission(
   } else if (admissionInspection.declaration.riskClassification !== 'ordinary') {
     autonomyBlockers.push(finding('risk-classification-restricted', `repo-owned risk classification is ${admissionInspection.declaration.riskClassification}`, 'Keep sensitive, regulated, or critical repositories proposal-only.'));
   }
-  if (!remotePr.ready) autonomyBlockers.push(finding('protected-remote-pr-incomplete', remotePr.detail, 'Require exact protected base/head plus a fresh trusted-App workflow/check attestation binding both policy digests, evaluator version, verifier digest, merge profile, and risk classification.'));
+  if (!remotePr.evidenceComplete) autonomyBlockers.push(finding('protected-remote-pr-incomplete', remotePr.detail, 'Require exact protected base/head plus a fresh trusted-App workflow/check attestation binding both policy digests, evaluator version, verifier digest, merge profile, and risk classification.'));
 
   for (const blocker of [...admissionBlockers].reverse()) autonomyBlockers.unshift(finding(`admission:${blocker.id}`, blocker.detail, blocker.fix));
-  const riskAttested = admissionInspection.declaration !== null && remotePr.ready;
+  const riskAttested = admissionInspection.declaration !== null && remotePr.evidenceComplete;
   const riskRestricted = selfTarget !== false || !riskAttested || admissionInspection.declaration?.riskClassification !== 'ordinary';
   const risk: CandidateRiskEvidence = {
     state: !admissionInspection.declaration ? (admissionInspection.evidence.state === 'missing' ? 'missing' : admissionInspection.evidence.state === 'invalid' ? 'invalid' : 'unavailable') : riskAttested ? 'attested' : 'declared-unattested',
@@ -2332,26 +2354,46 @@ export async function inspectCandidateRepoAdmission(
     restricted: riskRestricted,
     selfTarget,
     filenameHeuristicsUsed: false,
-    autonomyCeiling: riskRestricted ? 'proposal-only' : 'evidence-candidate',
+    observedAutonomyCeiling: riskRestricted ? 'proposal-only' : 'evidence-observed',
     detail: selfTarget === true ? 'self-target is always proposal-only' : riskAttested
       ? `repo-owned ${admissionInspection.declaration!.riskClassification} risk classification is bound by the exact successful check attestation`
       : 'risk is fail-closed: filename absence is never positive evidence and exact external attestation is missing',
   };
-  const admissionReady = admissionBlockers.length === 0;
-  const judgeFreeEligible = admissionReady && autonomyBlockers.length === 0 && !riskRestricted;
-  const verdict: CandidateAdmissionVerdict = !admissionReady ? 'blocked' : judgeFreeEligible ? 'evidence-candidate' : 'proposal-only';
+  const observationComplete = admissionBlockers.length === 0;
+  const judgeFreeEvidenceObserved = observationComplete && autonomyBlockers.length === 0 && !riskRestricted;
+  const verdict: CandidateAdmissionVerdict = !observationComplete
+    ? 'blocked-observation'
+    : judgeFreeEvidenceObserved ? 'evidence-observed' : 'proposal-only-observation';
+  const leaseExpiresAt = evaluatorClockValid
+    ? new Date(nowValue.getTime() + OBSERVATION_FRESHNESS_LEASE_MS).toISOString()
+    : new Date(0).toISOString();
+  const observationLease: CandidateObservationLease = {
+    observedAt: evaluatedAt,
+    expiresAt: leaseExpiresAt,
+    maxAgeMs: OBSERVATION_FRESHNESS_LEASE_MS,
+    epochDigest: remotePr.finalObservationDigest,
+    consumableForEnrollment: false,
+    consumerRevalidationRequired: true,
+    consumingFenceRequired: true,
+    detail: 'The lease bounds display freshness only. No report or digest is consumable enrollment authority; a future enrollment action must recollect all evidence under its own consuming fence.',
+  };
 
   return {
     schemaVersion: CANDIDATE_REPO_ADMISSION_SCHEMA_VERSION,
     generatedAt: evaluatedAt,
     readOnly: true,
+    observationOnly: true,
     authorityGranted: false,
     mutationPerformed: false,
+    consumableForEnrollment: false,
+    consumerRevalidationRequired: true,
+    consumingFenceRequired: true,
     repo,
     name: basename(repo),
     verdict,
-    admissionReady,
-    judgeFreeEligible,
+    observationComplete,
+    judgeFreeEvidenceObserved,
+    observationLease,
     primaryAction: primaryAction(admissionBlockers, autonomyBlockers),
     admissionBlockers,
     autonomyBlockers,

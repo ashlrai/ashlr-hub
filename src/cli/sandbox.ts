@@ -429,14 +429,14 @@ export async function cmdEnroll(args: string[]): Promise<number> {
     if (json) {
       console.log(JSON.stringify(report, null, 2));
     } else {
-      const admission = report.admissionReady ? green('ready') : red('blocked');
-      const autonomy = report.judgeFreeEligible
-        ? green('evidence candidate')
-        : report.admissionReady ? yellow('proposal only') : red('blocked');
+      const observation = report.observationComplete ? green('complete') : red('incomplete');
+      const autonomy = report.judgeFreeEvidenceObserved
+        ? green('evidence observed')
+        : report.observationComplete ? yellow('proposal-only evidence') : red('blocked');
       console.log('');
-      console.log(bold('  Candidate repo admission'));
+      console.log(bold('  Candidate repo observation'));
       console.log(`  Repo:       ${cyan(report.repo)}`);
-      console.log(`  Admission:  ${admission}`);
+      console.log(`  Observation:${observation}`);
       console.log(`  Autonomy:   ${autonomy}`);
       console.log(`  Verifier:   ${report.verifier.detail}`);
       console.log(`  Source:     ${report.source.detail}`);
@@ -451,10 +451,10 @@ export async function cmdEnroll(args: string[]): Promise<number> {
       }
       console.log('');
       console.log(`  ${bold('Next:')} ${report.primaryAction}`);
-      console.log(dim('  READ-ONLY: no enrollment, mission materialization, runtime state, daemon, verification, or authority mutation occurred.'));
+      console.log(dim('  OBSERVATION ONLY: non-consumable for enrollment; any future mutation must revalidate under its own consuming fence.'));
       console.log('');
     }
-    return report.admissionReady ? 0 : 1;
+    return report.observationComplete ? 0 : 1;
   }
 
   if (sub === 'add') {

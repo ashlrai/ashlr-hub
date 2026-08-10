@@ -187,7 +187,7 @@ The dedicated App must be installed and operated outside the candidate repo,
 keep its private key or installation token unavailable to candidate workflows,
 and use its own Checks-write installation authority only to publish the named
 attestation check. Ashlr separately queries each operator-trusted App's exact-HEAD
-`attestationCheck` and requires the unique latest check to carry the report's v6
+`attestationCheck` and requires the unique latest check to carry the report's v7
 `expectedAttestationId`.
 
 Workflow evidence is ordered by actual execution chronology (`run_started_at`,
@@ -201,7 +201,7 @@ lower-number rerun supersedes an older success; an extra same-name check from
 another workflow fails closed. All timestamps must be present, ordered,
 non-future, and within the configured evidence age.
 
-The v6 statement is explicitly whole-snapshot evidence. It binds the exact
+The v7 statement is explicitly whole-snapshot evidence. It binds the exact
 commit and tree object, repository identity, protected base, workflow and latest
 attempt, workflow App, independent attestor App/check, both policy digests,
 evaluator version, verifier manifest digest, merge profile, and risk
@@ -209,16 +209,24 @@ classification. Credentialed GitHub reads resolve `gh` only from explicit
 platform system paths. The canonical executable and every parent through the
 filesystem root must be root-owned and attacker-nonwritable; user-owned
 Homebrew, npm, candidate, and inherited-`PATH` installations are refused. Calls
-are argv-only with a scrubbed environment that ignores candidate-directed
-`PATH`, `HOME`, GitHub config, temp, and CA paths. Git uses the same explicit,
+are argv-only with a whitelist-only environment. `HOME`, `GH_CONFIG_DIR`, and
+`XDG_CONFIG_HOME` all point to a validated empty root-owned system directory;
+proxy, Unix-socket, transport, repository, enterprise-token, temp, CA, and
+inherited config overrides are absent. Only one normalized token plus the fixed
+`github.com` host reaches `gh`. Git uses the same explicit,
 root-owned system custody boundary, and unsupported platforms fail closed.
 Ashlr recollects every
 correlated workflow run, attempt job, required-context check, and trusted-App
 attestation across stable pagination and rerun chronology, then closes that
 collection with two complete rounds of bracketed local snapshots plus fresh
 remote-head, protection/ruleset, operator-policy, and correlated-check reads.
-Every complete local, remote, policy, and check authority epoch must canonically
-equal the first epoch; the evaluator never converges onto changed authority.
+Matching rounds establish only collection consistency, not an atomic authority
+snapshot. The schema-v8 report is observation-only, carries a bounded 30-second
+display-freshness lease, is explicitly non-consumable for enrollment, and always
+reports `authorityGranted:false`. Any future enrollment action must recollect
+and revalidate every bound source under its own consuming fence immediately
+before mutation. A remote change after the final read can therefore never turn
+this report into enrollable authority.
 Changed IDs, content, status, pages, or any newer pending, failed, or cancelled
 rerun fail closed. Policy changes, source movement, or evidence expiry require a
 new trusted check. Sensitive, regulated,
@@ -421,7 +429,7 @@ next actions point at work the daemon can select now instead of phantom backlog.
 | `ashlr setup` | First-activation checks; currently nonzero because resident service mutation is restricted |
 | `ashlr onboard <repo>` | Enroll one repo with walkthrough + dry run |
 | `ashlr enroll add/remove/list` | Manage enrolled repos |
-| `ashlr enroll preflight <repo> [--json]` | Read-only candidate admission and autonomy blockers |
+| `ashlr enroll preflight <repo> [--json]` | Non-consumable candidate observation and autonomy blockers |
 | `ashlr enroll kill on/off` | Engage/clear the kill-switch |
 | `ashlr daemon start/stop/status` | Autonomous operator; proposal generation plus a separate default-off auto-merge maintenance pass |
 | `ashlr loop [--watch] [--dry-run]` | Goal-aware conductor — one tick or continuous |

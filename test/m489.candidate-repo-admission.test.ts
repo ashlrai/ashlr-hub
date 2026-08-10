@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
@@ -34,10 +34,13 @@ import {
 } from '../src/core/portfolio/candidate-admission.js';
 import type { BranchProtectionAttestation } from '../src/core/integrations/github.js';
 import {
+  resolveTrustedGithubConfigRoot,
   resolveTrustedGithubCli,
   resolveTrustedGitCli,
+  sanitizeGithubAuthorityEnvironment,
   trustedSystemGitCandidates,
   trustedSystemGithubCandidates,
+  trustedSystemGithubConfigCandidates,
   trustedGitEnvironment,
   trustedGithubEnvironment,
   verifyTrustedGithubCli,
@@ -214,7 +217,7 @@ function directCheckRequest(overrides: Partial<CandidateCheckRunRequest> = {}): 
     check: CHECK,
     workflowAppId: WORKFLOW_APP_ID,
     attestationCheck: ATTESTATION_CHECK,
-    expectedAttestations: [{ appId: APP_ID, externalId: `ashlr-admission-v6:${'d'.repeat(64)}` }],
+    expectedAttestations: [{ appId: APP_ID, externalId: `ashlr-admission-v7:${'d'.repeat(64)}` }],
     trustedPolicyDigest: TRUSTED_POLICY.digest,
     evaluatorVersion: CANDIDATE_ADMISSION_EVALUATOR_VERSION,
     evaluatedAt: EVALUATED_AT,
@@ -388,18 +391,114 @@ describe('M489 hardened candidate repo admission preflight', () => {
         'candidate-admission-authority.json',
       ));
       const env = trustedGithubEnvironment();
-      expect(env['HOME']).toBe(userInfo().homedir);
-      expect(env['GH_CONFIG_DIR']).toBeUndefined();
-      expect(env['XDG_CONFIG_HOME']).toBeUndefined();
-      expect(env['SSL_CERT_FILE']).toBeUndefined();
-      expect(env['TMPDIR']).toBeUndefined();
-      expect(env['PATH']).toBeUndefined();
+      const configRoot = resolveTrustedGithubConfigRoot();
+      if (!configRoot) {
+        expect(env).toBeNull();
+        expect(trustedSystemGithubConfigCandidates()).not.toContain(fixture);
+        return;
+      }
+      expect(env).not.toBeNull();
+      expect(env!['HOME']).toBe(configRoot.canonicalPath);
+      expect(env!['GH_CONFIG_DIR']).toBe(configRoot.canonicalPath);
+      expect(env!['XDG_CONFIG_HOME']).toBe(configRoot.canonicalPath);
+      expect(env!['SSL_CERT_FILE']).toBeUndefined();
+      expect(env!['TMPDIR']).toBeUndefined();
+      expect(env!['PATH']).toBeUndefined();
     } finally {
       for (const key of keys) {
         if (prior[key] === undefined) delete process.env[key]; else process.env[key] = prior[key];
       }
     }
   });
+
+  it('keeps a synthetic token away from hostile gh config, proxy, and Unix-socket transports', () => {
+    const trustedEmptyRoot = join(fixture, 'trusted-empty-config');
+    const attackerHome = join(fixture, 'attacker-home');
+    const attackerConfig = join(attackerHome, '.config', 'gh');
+    const socketRoot = mkdtempSync(join(tmpdir(), 'm489-gh-socket-'));
+    const socketPath = join(socketRoot, 'capture.sock');
+    const capturePath = join(socketRoot, 'captured-request');
+    const readyPath = join(socketRoot, 'ready');
+    mkdirSync(trustedEmptyRoot);
+    mkdirSync(attackerConfig, { recursive: true });
+    writeFileSync(join(attackerConfig, 'config.yml'), `http_unix_socket: ${socketPath}\n`, 'utf8');
+    const server = spawn(process.execPath, ['-e', [
+      "const net=require('node:net'),fs=require('node:fs');",
+      'const [socket,capture,ready]=process.argv.slice(1);',
+      "try{fs.unlinkSync(socket)}catch{}",
+      "const server=net.createServer(client=>{client.once('data',data=>fs.writeFileSync(capture,data));client.end('HTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\n\\r\\n{}')});",
+      "server.listen(socket,()=>fs.writeFileSync(ready,'ready'));",
+    ].join(''), socketPath, capturePath, readyPath], { stdio: 'ignore' });
+    for (let attempt = 0; attempt < 100 && !existsSync(readyPath); attempt += 1) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    }
+    expect(existsSync(readyPath)).toBe(true);
+
+    const poisoned = {
+      HOME: attackerHome,
+      GH_CONFIG_DIR: attackerConfig,
+      XDG_CONFIG_HOME: join(attackerHome, '.config'),
+      GH_ENTERPRISE_TOKEN: 'synthetic-enterprise-token',
+      GITHUB_ENTERPRISE_TOKEN: 'synthetic-github-enterprise-token',
+      GH_HOST: 'attacker.invalid',
+      GH_REPO: 'attacker/forged',
+      GH_DEBUG: 'api',
+      HTTP_PROXY: `http+unix://${socketPath}`,
+      HTTPS_PROXY: `http+unix://${socketPath}`,
+      ALL_PROXY: `http+unix://${socketPath}`,
+      http_proxy: `http+unix://${socketPath}`,
+      https_proxy: `http+unix://${socketPath}`,
+      all_proxy: `http+unix://${socketPath}`,
+      NO_PROXY: 'github.com',
+      GH_TOKEN: 'synthetic-m489-token-never-log',
+      GITHUB_TOKEN: 'synthetic-fallback-token-never-log',
+    } as const;
+    const prior = Object.fromEntries(Object.keys(poisoned).map((key) => [key, process.env[key]]));
+    Object.assign(process.env, poisoned);
+    try {
+      const env = sanitizeGithubAuthorityEnvironment(
+        realpathSync(trustedEmptyRoot),
+        process.env,
+      );
+      expect(env).toEqual({
+        HOME: realpathSync(trustedEmptyRoot),
+        GH_CONFIG_DIR: realpathSync(trustedEmptyRoot),
+        XDG_CONFIG_HOME: realpathSync(trustedEmptyRoot),
+        GH_TOKEN: poisoned.GH_TOKEN,
+        GH_HOST: 'github.com',
+        GH_NO_UPDATE_NOTIFIER: '1',
+        GH_PAGER: 'cat',
+        GH_PROMPT_DISABLED: '1',
+        LC_ALL: 'C',
+        NO_COLOR: '1',
+      });
+      const probe = spawnSync(process.execPath, ['-e', [
+        "const fs=require('node:fs'),net=require('node:net'),path=require('node:path');",
+        'const [attackerConfig,attackerSocket]=process.argv.slice(1);',
+        "const roots=[process.env.GH_CONFIG_DIR,process.env.XDG_CONFIG_HOME&&path.join(process.env.XDG_CONFIG_HOME,'gh'),process.env.HOME&&path.join(process.env.HOME,'.config','gh')].filter(Boolean);",
+        "let socket=[process.env.HTTP_PROXY,process.env.HTTPS_PROXY,process.env.ALL_PROXY,process.env.http_proxy,process.env.https_proxy,process.env.all_proxy].find(value=>value&&value.includes(attackerSocket))?attackerSocket:null;",
+        "for(const root of roots){const file=path.join(root,'config.yml');if(root===attackerConfig&&fs.existsSync(file)){const match=fs.readFileSync(file,'utf8').match(/http_unix_socket:\\s*(.+)/);if(match)socket=match[1].trim()}}",
+        "if(socket===attackerSocket){const client=net.createConnection(socket,()=>client.end('Authorization: token '+(process.env.GH_TOKEN||'')));client.on('error',()=>process.exit(2));client.on('close',()=>process.exit(0));setTimeout(()=>process.exit(3),1000)}",
+      ].join(''), attackerConfig, socketPath], {
+        env,
+        encoding: 'utf8',
+        stdio: 'ignore',
+        timeout: 3_000,
+      });
+      expect(probe.status).toBe(0);
+      expect(existsSync(capturePath)).toBe(false);
+      expect(readFileSync(join(attackerConfig, 'config.yml'), 'utf8')).toBe(
+        `http_unix_socket: ${socketPath}\n`,
+      );
+      expect(readFileSync(join(attackerConfig, 'config.yml'), 'utf8')).not.toContain(poisoned.GH_TOKEN);
+    } finally {
+      server.kill('SIGKILL');
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+      rmSync(socketRoot, { recursive: true, force: true });
+    }
+  }, 10_000);
 
   it.each(['bin', 'node_modules/.bin'])('never executes candidate-controlled %s Git under a hostile PATH', async (relativeBin) => {
     const fakeBin = join(fixture, ...relativeBin.split('/'));
@@ -530,7 +629,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
       readProtection,
       readCheckRun,
     }));
-    expect(report.remotePr).toMatchObject({ ready: false, available: false });
+    expect(report.remotePr).toMatchObject({ evidenceComplete: false, available: false });
     expect(report.remotePr.detail).toMatch(/trusted GitHub executable custody is unavailable/i);
     expect(readProtection).not.toHaveBeenCalled();
     expect(readCheckRun).not.toHaveBeenCalled();
@@ -554,7 +653,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
       resolveGitCli: () => fakePin,
       verifyGitCli: verifyTrustedGitCli,
     }));
-    expect(report).toMatchObject({ admissionReady: false, source: { available: false } });
+    expect(report).toMatchObject({ observationComplete: false, source: { available: false } });
     expect(report.admissionBlockers.map((item) => item.id)).toContain('trusted-git-custody-changed');
     expect(gitRunner).not.toHaveBeenCalled();
     expect(existsSync(marker)).toBe(false);
@@ -572,7 +671,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
     const report = await inspectCandidateRepoAdmission(fixture, deps({ git: gitRunner, verifyGitCli }));
     expect(gitRunner).toHaveBeenCalledTimes(1);
     expect(existsSync(marker)).toBe(true);
-    expect(report).toMatchObject({ admissionReady: false, source: { available: false } });
+    expect(report).toMatchObject({ observationComplete: false, source: { available: false } });
     expect(report.admissionBlockers.map((item) => item.id)).toContain('trusted-git-custody-changed');
   });
 
@@ -661,13 +760,17 @@ describe('M489 hardened candidate repo admission preflight', () => {
     const report = await inspectCandidateRepoAdmission(fixture, deps({ readCheckRun }));
 
     expect(report).toMatchObject({
-      schemaVersion: 7,
+      schemaVersion: 8,
       readOnly: true,
+      observationOnly: true,
       authorityGranted: false,
       mutationPerformed: false,
-      verdict: 'evidence-candidate',
-      admissionReady: true,
-      judgeFreeEligible: true,
+      consumableForEnrollment: false,
+      consumerRevalidationRequired: true,
+      consumingFenceRequired: true,
+      verdict: 'evidence-observed',
+      observationComplete: true,
+      judgeFreeEvidenceObserved: true,
       source: {
         available: true,
         clean: true,
@@ -700,7 +803,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
         digest: TRUSTED_POLICY.digest,
       },
       remotePr: {
-        ready: true,
+        evidenceComplete: true,
         baseHead: git(['rev-parse', 'HEAD']),
         candidateHead: git(['rev-parse', 'HEAD']),
         trustedPolicyDigest: TRUSTED_POLICY.digest,
@@ -709,9 +812,9 @@ describe('M489 hardened candidate repo admission preflight', () => {
         remoteStableAfterChecks: true,
         trustedPolicyStableAfterChecks: true,
         checkEvidenceStableAfterRecheck: true,
-        authorityEpochStable: true,
-        initialAuthorityEpochDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
-        finalAuthorityEpochDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+        observationConsistent: true,
+        initialObservationDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+        finalObservationDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
         checkRun: {
           ready: true,
           externalIdMatched: true,
@@ -726,8 +829,8 @@ describe('M489 hardened candidate repo admission preflight', () => {
         filenameHeuristicsUsed: false,
       },
     });
-    expect(report.remotePr.expectedAttestationId).toMatch(/^ashlr-admission-v6:[0-9a-f]{64}$/);
-    expect(report.remotePr.finalAuthorityEpochDigest).toBe(report.remotePr.initialAuthorityEpochDigest);
+    expect(report.remotePr.expectedAttestationId).toMatch(/^ashlr-admission-v7:[0-9a-f]{64}$/);
+    expect(report.remotePr.finalObservationDigest).toBe(report.remotePr.initialObservationDigest);
     expect(report.remotePr.candidateTreeOid).toBe(git(['rev-parse', 'HEAD^{tree}']));
     expect(readCheckRun).toHaveBeenCalledWith(expect.objectContaining({
       nameWithOwner: 'ashlrai/candidate',
@@ -769,7 +872,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
     };
     const first = buildCandidateAdmissionAttestationId({ ...common, candidateTreeOid: 'b'.repeat(40) });
     const changedTree = buildCandidateAdmissionAttestationId({ ...common, candidateTreeOid: 'c'.repeat(40) });
-    expect(first).toMatch(/^ashlr-admission-v6:[0-9a-f]{64}$/);
+    expect(first).toMatch(/^ashlr-admission-v7:[0-9a-f]{64}$/);
     expect(changedTree).not.toBe(first);
   });
 
@@ -798,7 +901,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
     expect(readCandidateCheckRunEvidence(directCheckRequest({
       expectedAttestations: [{
         appId: WORKFLOW_APP_ID,
-        externalId: `ashlr-admission-v6:${'d'.repeat(64)}`,
+        externalId: `ashlr-admission-v7:${'d'.repeat(64)}`,
       }],
     }), () => null).detail).toMatch(/malformed/i);
 
@@ -814,7 +917,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
       }),
       readCheckRun,
     }));
-    expect(report.remotePr).toMatchObject({ ready: false, trustedPolicyStableAfterChecks: true });
+    expect(report.remotePr).toMatchObject({ evidenceComplete: false, trustedPolicyStableAfterChecks: true });
     expect(report.remotePr.detail).toMatch(/attestor App must be independent/i);
     expect(readCheckRun).not.toHaveBeenCalled();
   });
@@ -853,7 +956,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
     process.env['GIT_CONFIG_VALUE_0'] = payload;
     try {
       const report = await inspectCandidateRepoAdmission(fixture, deps());
-      expect(report).toMatchObject({ admissionReady: true, judgeFreeEligible: true });
+      expect(report).toMatchObject({ observationComplete: true, judgeFreeEvidenceObserved: true });
       expect(existsSync(marker)).toBe(false);
       expect(report.source.mutationProof.repoBytesUnchanged).toBe(true);
     } finally {
@@ -901,7 +1004,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
   ] as const)('rejects a %s verifier entry from immutable HEAD', async (_label, mutate) => {
     mutate();
     const report = await inspectCandidateRepoAdmission(fixture, deps());
-    expect(report).toMatchObject({ admissionReady: false, judgeFreeEligible: false });
+    expect(report).toMatchObject({ observationComplete: false, judgeFreeEvidenceObserved: false });
     expect(report.admissionBlockers.map((item) => item.id)).toContain('verifier-contract-not-immutable');
     expect(report.verifier.headMode).toMatch(/^(120000|160000)$/);
   });
@@ -924,8 +1027,8 @@ describe('M489 hardened candidate repo admission preflight', () => {
       detail: 'spoofed external id',
     }));
     const report = await inspectCandidateRepoAdmission(fixture, deps({ readCheckRun }));
-    expect(report).toMatchObject({ admissionReady: true, judgeFreeEligible: false, verdict: 'proposal-only' });
-    expect(report.remotePr).toMatchObject({ ready: false, checkRun: { ready: false, externalIdMatched: false } });
+    expect(report).toMatchObject({ observationComplete: true, judgeFreeEvidenceObserved: false, verdict: 'proposal-only-observation' });
+    expect(report.remotePr).toMatchObject({ evidenceComplete: false, checkRun: { ready: false, externalIdMatched: false } });
     expect(report.autonomyBlockers.map((item) => item.id)).toContain('protected-remote-pr-incomplete');
 
     const arbitrary = await inspectCandidateRepoAdmission(fixture, deps({
@@ -934,7 +1037,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
         requiredCheckBindings: [{ context: 'ci/test', appId: APP_ID }],
       })),
     }));
-    expect(arbitrary.remotePr.ready).toBe(false);
+    expect(arbitrary.remotePr.evidenceComplete).toBe(false);
     expect(arbitrary.remotePr.detail).toMatch(/not bound to exactly one required-check App/i);
   });
 
@@ -953,12 +1056,12 @@ describe('M489 hardened candidate repo admission preflight', () => {
       })),
       readCheckRun,
     }));
-    expect(report).toMatchObject({ admissionReady: true, judgeFreeEligible: false, verdict: 'proposal-only' });
-    expect(report.remotePr).toMatchObject({ ready: false, trustedPolicyDigest: TRUSTED_POLICY.digest });
+    expect(report).toMatchObject({ observationComplete: true, judgeFreeEvidenceObserved: false, verdict: 'proposal-only-observation' });
+    expect(report.remotePr).toMatchObject({ evidenceComplete: false, trustedPolicyDigest: TRUSTED_POLICY.digest });
     expect(report.remotePr.detail).toMatch(/candidate App is not in the trusted attestor set/i);
     expect(readCheckRun).toHaveBeenCalledWith(expect.objectContaining({
       workflowAppId: candidateApp,
-      expectedAttestations: [{ appId: APP_ID, externalId: expect.stringMatching(/^ashlr-admission-v6:/) }],
+      expectedAttestations: [{ appId: APP_ID, externalId: expect.stringMatching(/^ashlr-admission-v7:/) }],
     }));
 
     writeFileSync(join(fixture, 'ashlr.admission.json'), JSON.stringify({
@@ -970,7 +1073,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
     git(['commit', '--quiet', '-m', 'attempt signer nomination']);
     const signerNomination = await inspectCandidateRepoAdmission(fixture, deps());
     expect(signerNomination.admissionContract.state).toBe('invalid');
-    expect(signerNomination.judgeFreeEligible).toBe(false);
+    expect(signerNomination.judgeFreeEvidenceObserved).toBe(false);
   });
 
   it('fails closed when operator-pinned signer policy is absent', async () => {
@@ -979,7 +1082,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
       readTrustedPolicy: () => ({ state: 'missing', path: join(home, 'missing-policy.json'), value: null, proof: null, detail: 'missing' }),
       readCheckRun,
     }));
-    expect(report).toMatchObject({ admissionReady: true, judgeFreeEligible: false, verdict: 'proposal-only' });
+    expect(report).toMatchObject({ observationComplete: true, judgeFreeEvidenceObserved: false, verdict: 'proposal-only-observation' });
     expect(report.trustedPolicy).toMatchObject({ available: false, digest: null, trustedAppIds: [] });
     expect(report.autonomyBlockers.map((item) => item.id)).toContain('trusted-signer-policy-unavailable');
     expect(readCheckRun).not.toHaveBeenCalled();
@@ -994,14 +1097,14 @@ describe('M489 hardened candidate repo admission preflight', () => {
       return { ...readyCheck(request), ready: matched, externalIdMatched: matched };
     });
     const first = await inspectCandidateRepoAdmission(fixture, deps({ readCheckRun }));
-    expect(first.judgeFreeEligible).toBe(true);
+    expect(first.judgeFreeEvidenceObserved).toBe(true);
 
     const changedPolicy = { ...TRUSTED_POLICY_INPUT, evidenceMaxAgeMs: 31 * 60_000 };
     const second = await inspectCandidateRepoAdmission(fixture, deps({
       readTrustedPolicy: () => ({ state: 'verified', path: join(home, 'policy.json'), value: changedPolicy, proof: AUTHORITY_PROOF, detail: 'fixture' }),
       readCheckRun,
     }));
-    expect(second).toMatchObject({ admissionReady: true, judgeFreeEligible: false, verdict: 'proposal-only' });
+    expect(second).toMatchObject({ observationComplete: true, judgeFreeEvidenceObserved: false, verdict: 'proposal-only-observation' });
     expect(second.trustedPolicy.digest).not.toBe(first.trustedPolicy.digest);
     expect(second.remotePr.expectedAttestationId).not.toBe(first.remotePr.expectedAttestationId);
     expect(second.remotePr.checkRun).toMatchObject({ ready: false, externalIdMatched: false });
@@ -1016,13 +1119,13 @@ describe('M489 hardened candidate repo admission preflight', () => {
       return { ...readyCheck(request), ready: matched, externalIdMatched: matched };
     });
     const first = await inspectCandidateRepoAdmission(fixture, deps({ readCheckRun }));
-    expect(first.judgeFreeEligible).toBe(true);
+    expect(first.judgeFreeEvidenceObserved).toBe(true);
 
     const second = await inspectCandidateRepoAdmission(fixture, deps({
       readCheckRun,
       buildPolicyDigest: vi.fn(() => 'c'.repeat(64)),
     }));
-    expect(second).toMatchObject({ admissionReady: true, judgeFreeEligible: false, verdict: 'proposal-only' });
+    expect(second).toMatchObject({ observationComplete: true, judgeFreeEvidenceObserved: false, verdict: 'proposal-only-observation' });
     expect(second.remotePr.policyDigest).not.toBe(first.remotePr.policyDigest);
     expect(second.remotePr.expectedAttestationId).not.toBe(first.remotePr.expectedAttestationId);
     expect(second.remotePr.checkRun).toMatchObject({ ready: false, externalIdMatched: false });
@@ -1345,8 +1448,8 @@ describe('M489 hardened candidate repo admission preflight', () => {
         baseHead: 'a'.repeat(40),
       })),
     }));
-    expect(report).toMatchObject({ admissionReady: true, judgeFreeEligible: false, verdict: 'proposal-only' });
-    expect(report.remotePr).toMatchObject({ ready: false, baseHead: 'a'.repeat(40) });
+    expect(report).toMatchObject({ observationComplete: true, judgeFreeEvidenceObserved: false, verdict: 'proposal-only-observation' });
+    expect(report.remotePr).toMatchObject({ evidenceComplete: false, baseHead: 'a'.repeat(40) });
     expect(report.remotePr.detail).toMatch(/identity\/base/i);
   });
 
@@ -1357,7 +1460,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
       .mockReturnValue({ available: true, nameWithOwner: 'ashlrai/candidate', defaultBranch: 'main', head: 'a'.repeat(40), detail: 'changed' });
     const report = await inspectCandidateRepoAdmission(fixture, deps({ readRemoteHead }));
     expect(readRemoteHead).toHaveBeenCalledTimes(3);
-    expect(report.remotePr).toMatchObject({ ready: false, remoteStableAfterChecks: false });
+    expect(report.remotePr).toMatchObject({ evidenceComplete: false, remoteStableAfterChecks: false });
     expect(report.remotePr.detail).toMatch(/changed during check collection/i);
   });
 
@@ -1373,7 +1476,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
       }));
     const report = await inspectCandidateRepoAdmission(fixture, deps({ readProtection }));
     expect(readProtection).toHaveBeenCalledTimes(3);
-    expect(report.remotePr).toMatchObject({ ready: false, remoteStableAfterChecks: false });
+    expect(report.remotePr).toMatchObject({ evidenceComplete: false, remoteStableAfterChecks: false });
     expect(report.remotePr.detail).toMatch(/changed during check collection/i);
   });
 
@@ -1399,7 +1502,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
       };
     });
     const report = await inspectCandidateRepoAdmission(fixture, deps({ readProtection, readRemoteHead }));
-    expect(report.remotePr.ready).toBe(true);
+    expect(report.remotePr.evidenceComplete).toBe(true);
     expect(readProtection).toHaveBeenCalledTimes(3);
     expect(readRemoteHead).toHaveBeenCalledTimes(3);
   });
@@ -1427,8 +1530,8 @@ describe('M489 hardened candidate repo admission preflight', () => {
     const report = await inspectCandidateRepoAdmission(fixture, deps({ readTrustedPolicy, readCheckRun }));
     expect(readTrustedPolicy).toHaveBeenCalledTimes(3);
     expect(report).toMatchObject({
-      admissionReady: false,
-      verdict: 'blocked',
+      observationComplete: false,
+      verdict: 'blocked-observation',
       source: { mutationProof: { repoBytesUnchanged: false } },
       remotePr: {
         remoteStableAfterChecks: true,
@@ -1463,7 +1566,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
     const report = await inspectCandidateRepoAdmission(fixture, deps({ readTrustedPolicy }));
     expect(readTrustedPolicy).toHaveBeenCalledTimes(3);
     expect(report.remotePr).toMatchObject({
-      ready: false,
+      evidenceComplete: false,
       remoteStableAfterChecks: true,
       trustedPolicyStableAfterChecks: false,
       checkRun: { ready: true },
@@ -1493,9 +1596,9 @@ describe('M489 hardened candidate repo admission preflight', () => {
     expect(readCheckRun).toHaveBeenCalledTimes(3);
     expect(readRemoteHead).toHaveBeenCalledTimes(3);
     expect(report.remotePr).toMatchObject({
-      ready: false,
+      evidenceComplete: false,
       remoteStableAfterChecks: false,
-      authorityEpochStable: false,
+      observationConsistent: false,
     });
   });
 
@@ -1524,9 +1627,9 @@ describe('M489 hardened candidate repo admission preflight', () => {
     expect(readCheckRun).toHaveBeenCalledTimes(3);
     expect(readTrustedPolicy).toHaveBeenCalledTimes(3);
     expect(report.remotePr).toMatchObject({
-      ready: false,
+      evidenceComplete: false,
       trustedPolicyStableAfterChecks: false,
-      authorityEpochStable: false,
+      observationConsistent: false,
     });
   });
 
@@ -1558,9 +1661,9 @@ describe('M489 hardened candidate repo admission preflight', () => {
     expect(readRemoteHead).toHaveBeenCalledTimes(3);
     expect(readTrustedPolicy).toHaveBeenCalledTimes(3);
     expect(report.remotePr).toMatchObject({
-      ready: false,
+      evidenceComplete: false,
       remoteStableAfterChecks: false,
-      authorityEpochStable: false,
+      observationConsistent: false,
     });
   });
 
@@ -1594,10 +1697,62 @@ describe('M489 hardened candidate repo admission preflight', () => {
     expect(readProtection).toHaveBeenCalledTimes(3);
     expect(readTrustedPolicy).toHaveBeenCalledTimes(3);
     expect(report.remotePr).toMatchObject({
-      ready: false,
+      evidenceComplete: false,
       remoteStableAfterChecks: false,
-      authorityEpochStable: false,
+      observationConsistent: false,
     });
+  });
+
+  it('never turns a final-read remote race into consumable enrollment authority', async () => {
+    const original = git(['rev-parse', 'HEAD']);
+    let remote = original;
+    let policyReads = 0;
+    const readRemoteHead = vi.fn((nameWithOwner: string) => ({
+      available: true,
+      nameWithOwner,
+      defaultBranch: 'main',
+      head: remote,
+      detail: 'final-read race remote',
+    }));
+    const readTrustedPolicy = vi.fn(() => {
+      policyReads += 1;
+      if (policyReads === 3) remote = 'a'.repeat(40);
+      return {
+        state: 'verified' as const,
+        path: join(home, 'policy.json'),
+        value: TRUSTED_POLICY_INPUT,
+        proof: AUTHORITY_PROOF,
+        detail: 'final-read race policy',
+      };
+    });
+
+    const report = await inspectCandidateRepoAdmission(fixture, deps({ readRemoteHead, readTrustedPolicy }));
+
+    expect(remote).toBe('a'.repeat(40));
+    expect(report.remotePr).toMatchObject({
+      evidenceComplete: true,
+      observationConsistent: true,
+      candidateHead: original,
+    });
+    expect(report).toMatchObject({
+      observationOnly: true,
+      authorityGranted: false,
+      consumableForEnrollment: false,
+      consumerRevalidationRequired: true,
+      consumingFenceRequired: true,
+      observationLease: {
+        observedAt: EVALUATED_AT,
+        expiresAt: '2026-08-10T12:00:30.000Z',
+        maxAgeMs: 30_000,
+        consumableForEnrollment: false,
+        consumerRevalidationRequired: true,
+        consumingFenceRequired: true,
+      },
+    });
+    expect(report).not.toHaveProperty('admissionReady');
+    expect(report).not.toHaveProperty('judgeFreeEligible');
+    expect(report.remotePr).not.toHaveProperty('ready');
+    expect(report.observationLease.detail).toMatch(/recollect all evidence.*consuming fence/i);
   });
 
   it.each([
@@ -1630,7 +1785,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
     }));
     expect(readCheckRun).toHaveBeenCalledTimes(3);
     expect(report.remotePr).toMatchObject({
-      ready: false,
+      evidenceComplete: false,
       checkEvidenceStableAfterRecheck: false,
       checkRun: { ready: false, workflowRunId: '45', status, conclusion },
     });
@@ -1653,7 +1808,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
       beforeFinalEvidenceRecheck: () => { finalPhase = true; },
     }));
     expect(report.remotePr).toMatchObject({
-      ready: false,
+      evidenceComplete: false,
       checkEvidenceStableAfterRecheck: false,
       checkRun: { ready: true },
     });
@@ -1683,7 +1838,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
     }));
     expect(readCheckRun).toHaveBeenCalledTimes(3);
     expect(report.remotePr).toMatchObject({
-      ready: false,
+      evidenceComplete: false,
       checkEvidenceStableAfterRecheck: false,
       checkRun: { ready: true, attestationCheckRunId: '44' },
     });
@@ -1694,7 +1849,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
   it('prohibits self-target judge-free evidence even when every external check is strong', async () => {
     git(['remote', 'set-url', 'origin', 'https://github.com/ashlrai/ashlr-hub.git']);
     const report = await inspectCandidateRepoAdmission(fixture, deps());
-    expect(report).toMatchObject({ admissionReady: true, judgeFreeEligible: false, verdict: 'proposal-only' });
+    expect(report).toMatchObject({ observationComplete: true, judgeFreeEvidenceObserved: false, verdict: 'proposal-only-observation' });
     expect(report.risk).toMatchObject({ selfTarget: true, restricted: true });
     expect(report.autonomyBlockers.map((item) => item.id)).toContain('self-target-prohibited');
   });
@@ -1711,7 +1866,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
     git(['commit', '--quiet', '-m', 'rename and remove risk declaration']);
 
     const report = await inspectCandidateRepoAdmission(fixture, deps());
-    expect(report).toMatchObject({ admissionReady: true, judgeFreeEligible: false, verdict: 'proposal-only' });
+    expect(report).toMatchObject({ observationComplete: true, judgeFreeEvidenceObserved: false, verdict: 'proposal-only-observation' });
     expect(report.risk).toMatchObject({
       state: 'missing',
       restricted: true,
@@ -1726,7 +1881,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
     git(['add', 'ashlr.admission.json']);
     git(['commit', '--quiet', '-m', 'regulated classification']);
     const report = await inspectCandidateRepoAdmission(fixture, deps());
-    expect(report).toMatchObject({ admissionReady: true, judgeFreeEligible: false, verdict: 'proposal-only' });
+    expect(report).toMatchObject({ observationComplete: true, judgeFreeEvidenceObserved: false, verdict: 'proposal-only-observation' });
     expect(report.risk).toMatchObject({ state: 'attested', classification: 'regulated', restricted: true });
     expect(report.autonomyBlockers.map((item) => item.id)).toContain('risk-classification-restricted');
   });
