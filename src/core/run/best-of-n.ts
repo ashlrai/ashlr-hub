@@ -9,6 +9,14 @@
  * Expose via: import { runBestOfN } from './best-of-n.js'
  *
  * Flag-off parity: cfg.foundry.bestOfN defaults to 1 → identical to a single run.
+ *
+ * CI session isolation (opt-in via LOCUS_CI_BINDING / LOCUS_BINDING):
+ *   runBestOfN mints an ephemeral Locus pin and overlays LOCUS_* onto
+ *   process.env so sandboxed engines (runEngineSandboxed /
+ *   runApiModelSandboxed) inherit the sealed session. LOCUS_ENFORCE without a
+ *   binding refuses as empty-candidate result (never throws). Default is a
+ *   no-op pass-through. Does not add a second pre-mutate gate — that lives on
+ *   spawnEngine / runSwarm / runApiModelSandboxed only.
  */
 
 import type {
@@ -42,6 +50,12 @@ import {
   beginExecutionAuthority,
   finishExecutionAuthority,
 } from '../util/execution-lease.js';
+import {
+  applyLocusSessionEnv,
+  LocusMintError,
+  LocusSessionConfigError,
+  runWithLocusSessionIfConfigured,
+} from '../integrations/locus.js';
 import {
   MAX_BEST_OF_N_CONCURRENCY,
   resolveBestOfNCount,
@@ -438,7 +452,11 @@ function cleanupCandidateSandboxes(candidates: InternalCandidateResult[], remove
  * Generate N candidate diffs for `item`, score each via the Manager critic,
  * filter empties, prefer passing candidates, and return the highest-scoring one.
  *
- * Never throws — all errors surface inside CandidateResult.error.
+ * Never throws — all errors surface inside CandidateResult.error (or as an
+ * empty-candidate refuse for execution-authority / Locus session failures).
+ *
+ * Dispatches via runEngineSandboxed / runApiModelSandboxed (not runTask), so
+ * CI session mint is applied here — same pattern as runSwarm / runTask.
  *
  * @param item  The work item to solve.
  * @param cfg   AshlrConfig — reads cfg.foundry.bestOfN for N (default 1).
@@ -449,10 +467,7 @@ export async function runBestOfN(
   cfg: AshlrConfig,
   opts?: Parameters<typeof runBestOfNInternal>[2],
 ): ReturnType<typeof runBestOfNInternal> {
-  if (!opts?.attemptId || opts.signal?.aborted === true) {
-    return runBestOfNInternal(item, cfg, opts);
-  }
-  const n = readN(cfg, opts.n);
+  const n = readN(cfg, opts?.n);
   const refused = (reason: string): Awaited<ReturnType<typeof runBestOfNInternal>> => ({
     winner: undefined,
     candidates: [],
@@ -467,6 +482,57 @@ export async function runBestOfN(
       noProposalReasons: [{ reason, count: 1 }],
     },
   });
+
+  // CI isolation: when LOCUS_CI_BINDING/LOCUS_BINDING is set, mint an
+  // ephemeral sealed session and overlay LOCUS_* onto process.env so
+  // sandboxed engines inherit it. Restores prior values after the fan-out.
+  // Default (unset binding + LOCUS_ENFORCE off) is a no-op pass-through.
+  // Never throws — session refuse/mint failures become empty-candidate refuse.
+  try {
+    return await runWithLocusSessionIfConfigured(async (handle) => {
+      const restored: Array<[string, string | undefined]> = [];
+      if (handle) {
+        const overlay: NodeJS.ProcessEnv = {};
+        applyLocusSessionEnv(overlay, handle.env);
+        for (const [key, value] of Object.entries(overlay)) {
+          if (typeof value !== 'string') continue;
+          restored.push([key, process.env[key]]);
+          process.env[key] = value;
+        }
+      }
+      try {
+        return await runBestOfNWithAuthority(item, cfg, opts, refused);
+      } finally {
+        for (const [key, prev] of restored) {
+          if (prev === undefined) delete process.env[key];
+          else process.env[key] = prev;
+        }
+      }
+    });
+  } catch (error) {
+    if (
+      error instanceof LocusSessionConfigError ||
+      error instanceof LocusMintError
+    ) {
+      return refused(error.message);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Execution-authority gate + body. Callers must use {@link runBestOfN} so CI
+ * session mint + never-throw locus contract stay intact.
+ */
+async function runBestOfNWithAuthority(
+  item: WorkItem,
+  cfg: AshlrConfig,
+  opts: Parameters<typeof runBestOfNInternal>[2] | undefined,
+  refused: (reason: string) => Awaited<ReturnType<typeof runBestOfNInternal>>,
+): ReturnType<typeof runBestOfNInternal> {
+  if (!opts?.attemptId || opts.signal?.aborted === true) {
+    return runBestOfNInternal(item, cfg, opts);
+  }
   const acquired = acquireExecutionAuthority('run', opts.attemptId);
   if (!acquired.ok) return refused(`execution authority ${acquired.reason}`);
   if (!beginExecutionAuthority(acquired.authority)) {
