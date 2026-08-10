@@ -46,6 +46,13 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Verify root dependency graph installs
+        run: npm ci --ignore-scripts --no-audit --no-fund --force=false --legacy-peer-deps=false --strict-peer-deps
+
+      - name: Verify Raycast dependency graph installs
+        working-directory: src/raycast
+        run: npm ci --ignore-scripts --no-audit --no-fund --force=false --legacy-peer-deps=false --strict-peer-deps
+
       - name: Audit root dependencies
         run: npm audit --package-lock-only --ignore-scripts --audit-level=low
 
