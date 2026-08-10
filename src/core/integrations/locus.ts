@@ -17,7 +17,8 @@
  *   parseStatusOneline, isStatusOnelineHealthy, canMutate,
  *   parseRequiredServers, hasRequiredServers, parseAgentReportJson,
  *   blockersFromAgentReport, evaluateFleetGate, decidePreMutateGate,
- *   parseLocusEnforceToken, resolveLocusEnforceMode, decideLocusSessionRun,
+ *   parseLocusEnforceToken, resolveLocusEnforceMode, extractLocusConfigEnforce,
+ *   extractLocusConfigFirm, decideLocusSessionRun,
  *   scrubbedChildEnv, validateMintEnv, applyLocusSessionEnv, parseMcpConfigJson,
  *   mergeLocusIntoMcpConfig, locusServerSpec
  *
@@ -28,16 +29,20 @@
  * Pre-mutate enforcement (opt-in — never always-on):
  *   Resolution order for mode (see resolveLocusEnforceMode):
  *     1. env LOCUS_ENFORCE when set (wins over config, including LOCUS_ENFORCE=off)
- *     2. ~/.ashlr/config.json → locus.enforce ("off"|"warn"|"enforce")
- *     3. off (monorepo-safe default when both unset)
+ *     2. ~/.ashlr/config.json → locus.enforce ("off"|"warn"|"enforce") when set
+ *     3. locus.firm === true → enforce (production fleet profile)
+ *     4. off (monorepo-safe default when config/env unset)
  *
- *   Tokens (env or config):
+ *   Tokens (env or config.enforce):
  *     1|true|yes|enforce|block → enforce (fail closed when fleet gate blocks)
  *     warn|log                 → warn (log blockers, allow dispatch)
  *     unset / 0 / false / no / off / "" → off (no CLI probe)
  *     unknown non-empty env token → enforce (fail closed; do not soft-allow typos)
  *
- *   Firm mode example (~/.ashlr/config.json):
+ *   Firm profile (production fleets — opt-in, never monorepo default):
+ *     { "locus": { "firm": true } }
+ *     # ashlr config set locus.firm true
+ *   Explicit enforce mode (overrides firm when set):
  *     { "locus": { "enforce": "enforce" } }
  *   Soft roll-out:
  *     { "locus": { "enforce": "warn" } }
@@ -200,7 +205,8 @@ export type LocusEnforceMode = "off" | "warn" | "enforce";
 
 /**
  * Optional config slice consulted by {@link resolveLocusEnforceMode} after env.
- * Accepts either `cfg.locus`, a bare `{ enforce }`, or a full {@link AshlrConfig}.
+ * Accepts either `cfg.locus`, a bare `{ enforce?, firm? }`, or a full
+ * {@link AshlrConfig}.
  */
 export type LocusEnforceConfigInput =
   | Pick<AshlrConfig, "locus">
@@ -828,35 +834,53 @@ export function parseLocusEnforceToken(raw: unknown): LocusEnforceMode {
 }
 
 /**
+ * Normalize a config input to the bare locus slice (`{ enforce?, firm? }`),
+ * accepting AshlrConfig / `{ locus }` / bare locus objects.
+ */
+function locusSliceFromConfig(
+  config?: LocusEnforceConfigInput,
+): NonNullable<AshlrConfig["locus"]> | undefined {
+  if (config == null || typeof config !== "object") return undefined;
+  // AshlrConfig or { locus?: { ... } }
+  if ("locus" in config) {
+    const locus = (config as { locus?: unknown }).locus;
+    if (locus != null && typeof locus === "object") {
+      return locus as NonNullable<AshlrConfig["locus"]>;
+    }
+    return undefined;
+  }
+  // Bare { enforce?, firm? } (or any object without a locus key)
+  return config as NonNullable<AshlrConfig["locus"]>;
+}
+
+/**
  * Extract `locus.enforce` from a config slice / full AshlrConfig / bare
  * `{ enforce }` object. Returns undefined when the field is absent.
  */
 export function extractLocusConfigEnforce(
   config?: LocusEnforceConfigInput,
 ): string | undefined {
-  if (config == null || typeof config !== "object") return undefined;
-  // Bare { enforce: ... }
+  const slice = locusSliceFromConfig(config);
   if (
-    "enforce" in config &&
-    !("locus" in config) &&
-    (config as { enforce?: unknown }).enforce !== undefined &&
-    (config as { enforce?: unknown }).enforce !== null
+    slice == null ||
+    slice.enforce === undefined ||
+    slice.enforce === null
   ) {
-    return String((config as { enforce: unknown }).enforce);
+    return undefined;
   }
-  // AshlrConfig or { locus?: { enforce?: ... } }
-  if ("locus" in config) {
-    const locus = (config as { locus?: { enforce?: unknown } | null }).locus;
-    if (
-      locus != null &&
-      typeof locus === "object" &&
-      locus.enforce !== undefined &&
-      locus.enforce !== null
-    ) {
-      return String(locus.enforce);
-    }
-  }
-  return undefined;
+  return String(slice.enforce);
+}
+
+/**
+ * Extract `locus.firm` from a config slice / full AshlrConfig / bare
+ * `{ firm }` object. Returns true only when the field is strictly boolean true.
+ * Absent / false / non-boolean → false (monorepo-safe).
+ */
+export function extractLocusConfigFirm(
+  config?: LocusEnforceConfigInput,
+): boolean {
+  const slice = locusSliceFromConfig(config);
+  return slice?.firm === true;
 }
 
 /**
@@ -883,11 +907,15 @@ export function readLocusConfigFromAshlr():
  *
  * Order (first match wins):
  *   1. env `LOCUS_ENFORCE` when the key is present (including empty → off)
- *   2. config `locus.enforce` when provided / present
- *   3. `off` (monorepo-safe default — never always-on)
+ *   2. config `locus.enforce` when provided / present (explicit mode)
+ *   3. config `locus.firm === true` → `enforce` (production fleet profile)
+ *   4. `off` (monorepo-safe default — never always-on; firm defaults false)
  *
  * Pure when `config` is passed explicitly (or omitted for env-only). Does not
  * load ~/.ashlr itself; use {@link readLocusConfigFromAshlr} at call sites.
+ *
+ * Env always beats firm/enforce config (including LOCUS_ENFORCE=off). Explicit
+ * `locus.enforce` beats `locus.firm`. Do not flip monorepo defaults to firm.
  */
 export function resolveLocusEnforceMode(
   env?: NodeJS.ProcessEnv,
@@ -902,6 +930,11 @@ export function resolveLocusEnforceMode(
   const rawCfg = extractLocusConfigEnforce(config);
   if (rawCfg !== undefined) {
     return parseLocusEnforceToken(rawCfg);
+  }
+  // Firm profile elevates only when enforce is still unset (not when
+  // enforce is explicitly "off").
+  if (extractLocusConfigFirm(config)) {
+    return "enforce";
   }
   return "off";
 }
@@ -966,8 +999,8 @@ export function decidePreMutateGate(
  * - mode=warn|enforce: shells to `locusFleetGate` and decides.
  *
  * Mode resolution: env LOCUS_ENFORCE wins; else `config` / ~/.ashlr
- * `locus.enforce`; else off. Pass `config` explicitly in tests to avoid
- * reading the real home config (or pass `null` to disable config).
+ * `locus.enforce` / `locus.firm`; else off. Pass `config` explicitly in tests
+ * to avoid reading the real home config (or pass `null` to disable config).
  *
  * Prefer this over bare `ensureLocusReady` at shared spawn sites so opt-in
  * enforcement does not break CI that lacks a Locus pin.
@@ -976,7 +1009,7 @@ export function assertLocusPreMutate(
   env?: NodeJS.ProcessEnv,
   config?: LocusEnforceConfigInput,
 ): LocusPreMutateDecision {
-  // When the second arg is omitted, consult ~/.ashlr (firm-mode config path).
+  // When the second arg is omitted, consult ~/.ashlr (firm profile path).
   // Explicit null/object skips the FS read so unit tests stay hermetic.
   const cfg =
     arguments.length >= 2 ? config : readLocusConfigFromAshlr();
@@ -1135,7 +1168,7 @@ export async function runWithLocusSessionIfConfigured<T>(
   opts?: RunWithLocusSessionOptions,
 ): Promise<T> {
   const env = opts?.env ?? process.env;
-  // Consult ~/.ashlr locus.enforce when env LOCUS_ENFORCE is unset (firm mode).
+  // Consult ~/.ashlr locus.enforce / locus.firm when env LOCUS_ENFORCE is unset.
   const decision = decideLocusSessionRun(env, readLocusConfigFromAshlr());
 
   if (decision.kind === "mint") {

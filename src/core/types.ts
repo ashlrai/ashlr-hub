@@ -525,20 +525,26 @@ export interface AshlrConfig {
   };
 
   /**
-   * Locus identity-plane firm mode for hub fleet / pre-mutate gates.
+   * Locus identity-plane settings for hub fleet / pre-mutate gates.
    * DEFAULT ABSENT → enforce mode is off (monorepo-safe). Never always-on.
    *
    * Resolution order (see `resolveLocusEnforceMode`):
-   *   1. env `LOCUS_ENFORCE` when set (wins over config)
-   *   2. `locus.enforce` from ~/.ashlr/config.json
-   *   3. off
+   *   1. env `LOCUS_ENFORCE` when set (wins over config, including =off)
+   *   2. `locus.enforce` when set explicitly
+   *   3. `locus.firm === true` → enforce (production fleet profile)
+   *   4. off
    *
-   * Firm agencies typically set:
+   * Firm agencies (always-on identity gates) typically set either:
+   *   "locus": { "firm": true }
+   * or the explicit mode:
    *   "locus": { "enforce": "enforce" }
    * Soft roll-out:
    *   "locus": { "enforce": "warn" }
    * Local override without editing config:
    *   LOCUS_ENFORCE=off
+   *
+   * CLI: `ashlr config set locus.firm true`
+   * Do NOT set firm true as a monorepo default.
    */
   locus?: {
     /**
@@ -546,8 +552,15 @@ export interface AshlrConfig {
      * - off: no CLI probe (default when unset)
      * - warn: log blockers, allow dispatch
      * - enforce: fail closed when fleet gate blocks
+     * Explicit value beats `firm` profile.
      */
     enforce?: 'off' | 'warn' | 'enforce';
+    /**
+     * Firm profile for production fleets. When true and `enforce` is unset
+     * (and env LOCUS_ENFORCE is unset), mode resolves to enforce.
+     * Default false/absent — monorepo stays off.
+     */
+    firm?: boolean;
   };
   /**
    * Shared-memory / genome settings (M7). Controls recall limits and whether
