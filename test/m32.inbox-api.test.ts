@@ -16,7 +16,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as http from 'node:http';
 
 import { makeFixture, makeCfg, type H1Fixture } from './helpers/h1-fixture.js';
-import { startServer } from '../src/core/web/server.js';
+import { readAuthHeaders, startServer } from './helpers/authenticated-web-server.js';
 import { createProposal, loadProposal } from '../src/core/inbox/store.js';
 import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
 import type { WebServerOptions } from '../src/core/types.js';
@@ -57,7 +57,11 @@ function request(
         port: Number(parsed.port),
         path: parsed.pathname + parsed.search,
         method,
-        headers: { Host: `127.0.0.1:${port}`, ...headers },
+        headers: {
+          Host: `127.0.0.1:${port}`,
+          ...(method === 'GET' ? readAuthHeaders(port) : {}),
+          ...headers,
+        },
       },
       (res) => {
         let data = '';
@@ -276,7 +280,12 @@ describe('SSE inbox + daemon events', () => {
 
     const frames = await new Promise<string>((resolve, reject) => {
       const req = http.get(
-        { hostname: '127.0.0.1', port: h.port, path: '/api/events', headers: { Host: `127.0.0.1:${h.port}` } },
+        {
+          hostname: '127.0.0.1',
+          port: h.port,
+          path: '/api/events',
+          headers: { Host: `127.0.0.1:${h.port}`, ...readAuthHeaders(h.port) },
+        },
         (res) => {
           let data = '';
           res.on('data', (c: Buffer) => {

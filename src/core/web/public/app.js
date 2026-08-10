@@ -14,7 +14,7 @@
  *   #inbox     — Pending proposals list + approve/reject (M32)
  *   #daemon    — Daemon state card (M32)
  *
- * Live updates via EventSource('/api/events') — patches runs + swarms +
+ * Live updates via a cookie-and-client-bound EventSource — patches runs + swarms +
  * inbox + daemon views.
  */
 
@@ -28,8 +28,13 @@ const VIEWS = ['fleet-dashboard', 'control', 'fleet-activity', 'goals', 'overvie
 const DEFAULT_VIEW = 'fleet-dashboard';
 const API_BASE = '';  // same origin
 
-// sessionStorage key for the session token (never localStorage, never URL).
-const TOKEN_STORAGE_KEY = 'ashlr-token';
+// Only the read capability is persisted in sessionStorage. Mutation authority
+// is requested independently for each exact action and discarded immediately.
+const READ_TOKEN_STORAGE_KEY = 'ashlr-read-token';
+const READ_CLIENT_STORAGE_KEY = 'ashlr-read-client';
+const READ_SESSION_REFRESH_MS = 10 * 60 * 1000;
+const READ_SESSION_RETRY_MS = 30 * 1000;
+let readSessionRefreshTimer = null;
 
 // Status -> color map (matches brand palette from styles.css)
 const STATUS_COLOR = {
@@ -172,9 +177,69 @@ function progressBar(done, total) {
 // ---------------------------------------------------------------------------
 
 async function apiFetch(path) {
-  const res = await fetch(API_BASE + path);
+  const token = getReadToken();
+  const clientProof = getReadClientProof();
+  const headers = {};
+  if (token) headers['x-ashlr-token'] = token;
+  if (clientProof) headers['x-ashlr-read-client'] = clientProof;
+  const res = await fetch(API_BASE + path, {
+    headers,
+  });
   if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
   return res.json();
+}
+
+async function establishReadSession(token) {
+  const clientProof = ensureReadClientProof();
+  const res = await fetch(API_BASE + '/api/session', {
+    method: 'POST',
+    headers: {
+      'x-ashlr-token': token,
+      'x-ashlr-read-client': clientProof,
+    },
+  });
+  if (!res.ok) {
+    const json = await res.json().catch(() => ({}));
+    const error = new Error(json.error ?? `HTTP ${res.status}`);
+    error.status = res.status;
+    throw error;
+  }
+}
+
+async function clearReadSession() {
+  await fetch(API_BASE + '/api/session', { method: 'DELETE' }).catch(() => {});
+}
+
+function cancelReadSessionRefresh() {
+  if (readSessionRefreshTimer !== null) clearTimeout(readSessionRefreshTimer);
+  readSessionRefreshTimer = null;
+}
+
+function scheduleReadSessionRefresh(delayMs = READ_SESSION_REFRESH_MS) {
+  cancelReadSessionRefresh();
+  if (!getReadToken()) return;
+  readSessionRefreshTimer = setTimeout(async () => {
+    readSessionRefreshTimer = null;
+    const token = getReadToken();
+    if (!token) return;
+    try {
+      await establishReadSession(token);
+      scheduleReadSessionRefresh();
+    } catch (err) {
+      if (err?.status === 401) {
+        clearReadToken();
+        await clearReadSession();
+        updateTokenIndicator();
+        showToast('Read token expired — enter the token printed by the current server.');
+        if (state.eventSource) {
+          state.eventSource.close();
+          state.eventSource = null;
+        }
+        return;
+      }
+      scheduleReadSessionRefresh(READ_SESSION_RETRY_MS);
+    }
+  }, delayMs);
 }
 
 // Token-authenticated POST. Returns parsed JSON or throws with message.
@@ -188,14 +253,16 @@ async function apiPost(path, token) {
     body: '{}',
   });
   const json = await res.json().catch(() => ({ ok: false, error: `HTTP ${res.status}` }));
-  if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+  if (!res.ok) {
+    throw new Error(json.error ?? `HTTP ${res.status}`);
+  }
   return json;
 }
 
 async function toggleFleetPaused(targetPaused) {
-  const token = getToken();
+  const token = promptMutationToken();
   if (!token) {
-    showToast('No session token — click the gear icon to set it.');
+    showToast('Mutation cancelled — no mutation token was entered.');
     return;
   }
   try {
@@ -275,9 +342,6 @@ function fleetControlButton(fleet, size = '', capabilitySnapshot = state.snapsho
   if (capabilitySnapshot?.dispatchEnabled !== true) {
     return fleetControlUnavailable('Fleet controls: read-only', size);
   }
-  if (!getToken()) {
-    return fleetControlUnavailable('Fleet controls: token required', size);
-  }
   return fleetAuthorizedControlButton(fleet, size)
     ?? fleetControlUnavailable('Fleet controls: state unavailable', size);
 }
@@ -293,11 +357,11 @@ function showToast(msg) {
 }
 
 // Open an enrolled repo (or file within one) on the local desktop.
-// action: 'editor' | 'finder'. Requires a session token.
+// action: 'editor' | 'finder'. Requires the mutation token at action time.
 async function apiOpenRepo(repo, action) {
-  const token = getToken();
+  const token = promptMutationToken();
   if (!token) {
-    showToast('No session token — click the gear icon to set it.');
+    showToast('Open cancelled — no mutation token was entered.');
     return;
   }
   try {
@@ -316,34 +380,81 @@ async function apiOpenRepo(repo, action) {
 }
 
 // ---------------------------------------------------------------------------
-// Token management (sessionStorage only — never localStorage, never URL)
+// Capability management — read persists per-tab; mutation is per-action only.
 // ---------------------------------------------------------------------------
 
-function getToken() {
-  try { return sessionStorage.getItem(TOKEN_STORAGE_KEY) ?? ''; } catch { return ''; }
+function getReadToken() {
+  try { return sessionStorage.getItem(READ_TOKEN_STORAGE_KEY) ?? ''; } catch { return ''; }
 }
 
-function setToken(t) {
-  try { sessionStorage.setItem(TOKEN_STORAGE_KEY, t); } catch {}
+function setReadToken(t) {
+  try { sessionStorage.setItem(READ_TOKEN_STORAGE_KEY, t); } catch {}
 }
 
-function clearToken() {
-  try { sessionStorage.removeItem(TOKEN_STORAGE_KEY); } catch {}
+function clearReadToken() {
+  try { sessionStorage.removeItem(READ_TOKEN_STORAGE_KEY); } catch {}
 }
 
-// Prompt user for token and store it; returns the entered value (may be empty).
-function promptToken() {
-  const current = getToken();
+function getReadClientProof() {
+  try {
+    const proof = sessionStorage.getItem(READ_CLIENT_STORAGE_KEY) ?? '';
+    return /^[a-f0-9]{64}$/.test(proof) ? proof : '';
+  } catch { return ''; }
+}
+
+function ensureReadClientProof() {
+  const existing = getReadClientProof();
+  if (existing) return existing;
+  const bytes = new Uint8Array(32);
+  window.crypto.getRandomValues(bytes);
+  const proof = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  try { sessionStorage.setItem(READ_CLIENT_STORAGE_KEY, proof); } catch {}
+  if (getReadClientProof() !== proof) {
+    throw new Error('Browser session storage is unavailable for the read-session client proof');
+  }
+  return proof;
+}
+
+function promptMutationToken() {
   const entered = window.prompt(
-    'Enter the ashlr session token printed by the server at startup.\n' +
+    'Enter the separate mutation token printed only when the server starts with --allow-dispatch.\n' +
+    'It is used for this action only and is never retained, written to sessionStorage, a cookie, or a URL.'
+  );
+  return entered?.trim() ?? '';
+}
+
+// Prompt for the raw read token, then exchange it for an HttpOnly read cookie.
+// The read token has no mutation authority and remains sessionStorage-only.
+async function promptReadToken() {
+  const current = getReadToken();
+  const entered = window.prompt(
+    'Enter the read token printed by the server at startup.\n' +
     'It is stored in sessionStorage only (cleared when the tab closes).\n\n' +
     (current ? 'Current token is set. Leave blank to clear it.' : 'No token is set yet.'),
     current
   );
   if (entered === null) return current; // cancelled
   const trimmed = entered.trim();
-  if (trimmed) { setToken(trimmed); } else { clearToken(); }
+  if (trimmed) {
+    try {
+      await establishReadSession(trimmed);
+      setReadToken(trimmed);
+      scheduleReadSessionRefresh();
+    } catch (err) {
+      showToast(`Session failed: ${err.message}`);
+      return current;
+    }
+  } else {
+    clearReadToken();
+    cancelReadSessionRefresh();
+    await clearReadSession();
+  }
   updateTokenIndicator();
+  if (state.eventSource) {
+    state.eventSource.close();
+    state.eventSource = null;
+  }
+  if (trimmed) connectSSE();
   renderActiveView();
   return trimmed;
 }
@@ -352,8 +463,8 @@ function promptToken() {
 function updateTokenIndicator() {
   const el_ = document.getElementById('token-indicator');
   if (!el_) return;
-  const hasToken = Boolean(getToken());
-  el_.title = hasToken ? 'Session token is set (click to change)' : 'No session token — click to enter';
+  const hasToken = Boolean(getReadToken());
+  el_.title = hasToken ? 'Read token is set (click to change)' : 'No read token — click to enter';
   el_.classList.toggle('token-indicator--set', hasToken);
 }
 
@@ -377,10 +488,15 @@ function escapeHtml(s) {
 
 function connectSSE() {
   if (state.eventSource) return;
+  const clientProof = getReadClientProof();
+  if (!clientProof) return;
   try {
-    const es = new EventSource('/api/events');
+    // This per-tab proof is not a bearer credential: the server also requires
+    // the matching HttpOnly signed ticket. Referrer-Policy is no-referrer.
+    const es = new EventSource(`/api/events?client=${encodeURIComponent(clientProof)}`);
     state.eventSource = es;
     ensureFleetSnapshotWatchdog();
+    es.addEventListener('open', () => updateSseDot(true));
 
     es.addEventListener('snapshot', (e) => {
       try {
@@ -654,9 +770,9 @@ function renderShell() {
   const tokenBtn = el('button', {
     cls: 'token-btn',
     id: 'token-indicator',
-    title: 'No session token — click to enter',
+    title: 'No read token — click to enter',
     type: 'button',
-    onClick: () => { promptToken(); },
+    onClick: () => { void promptReadToken(); },
   });
   // gear SVG
   const gearSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -665,7 +781,7 @@ function renderShell() {
   gearSvg.setAttribute('aria-hidden', 'true');
   gearSvg.innerHTML = '<circle cx="8" cy="8" r="2.5" stroke="currentColor" stroke-width="1.3" fill="none"/><path d="M8 1.5V3M8 13v1.5M1.5 8H3M13 8h1.5M3.22 3.22l1.06 1.06M11.72 11.72l1.06 1.06M12.78 3.22l-1.06 1.06M4.28 11.72l-1.06 1.06" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>';
   tokenBtn.appendChild(gearSvg);
-  tokenBtn.appendChild(document.createTextNode(' Token'));
+  tokenBtn.appendChild(document.createTextNode(' Read token'));
 
   // Top nav
   const nav = el('nav', { cls: 'topnav' },
@@ -875,13 +991,11 @@ function renderRuns() {
 function buildDispatchPanel() {
   const snap = state.snapshot;
   const dispatchEnabled = snap ? snap.dispatchEnabled === true : false;
-  const token = getToken();
-  const canDispatch = dispatchEnabled && Boolean(token);
+  const canDispatch = dispatchEnabled;
 
   // Disable reason shown as a note under the button
   let disabledReason = '';
   if (!dispatchEnabled) disabledReason = 'Start the server with --allow-dispatch to enable dispatch.';
-  else if (!token) disabledReason = 'Enter your session token (gear icon) to enable dispatch.';
 
   const panel = el('div', { cls: 'dispatch-panel' });
   panel.appendChild(el('h2', { cls: 'dispatch-panel__title' }, 'Dispatch a run'));
@@ -950,6 +1064,8 @@ function buildDispatchPanel() {
     const goal = goalInput.value.trim();
     if (!goal) { resultLine.textContent = 'Goal is required.'; return; }
     if (!canDispatch) { resultLine.textContent = disabledReason || 'Dispatch not available.'; return; }
+    const token = promptMutationToken();
+    if (!token) { resultLine.textContent = 'Mutation token is required.'; return; }
     dispatchBtn.disabled = true;
     resultLine.textContent = 'Dispatching…';
     try {
@@ -962,7 +1078,9 @@ function buildDispatchPanel() {
         body: JSON.stringify(body),
       });
       const json = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-      if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+      if (!res.ok) {
+        throw new Error(json.error ?? `HTTP ${res.status}`);
+      }
       resultLine.textContent = `Dispatched: run ${json.id ?? ''} (${json.status ?? 'queued'})`;
       resultLine.className = 'dispatch-panel__result dispatch-panel__result--ok';
       goalInput.value = '';
@@ -2078,8 +2196,8 @@ function buildInboxRow(p) {
     el('span', { cls: 'inbox-row__repo' }, repoBase),
     el('span', { cls: 'ts' }, fmtRelative(p.createdAt)),
   ];
-  // Show open-in-editor button when a session token is present.
-  if (getToken() && p.repo) {
+  // Desktop-open is a mutation surface and exists only under --allow-dispatch.
+  if (state.snapshot?.dispatchEnabled === true && p.repo) {
     metaChildren.push(el('button', {
       cls: 'open-repo-btn',
       type: 'button',
@@ -2117,12 +2235,10 @@ function buildInboxRow(p) {
 function buildInboxDetail(p) {
   const snap = state.snapshot;
   const dispatchEnabled = snap ? snap.dispatchEnabled === true : false;
-  const token = getToken();
-  const canAct = dispatchEnabled && Boolean(token);
+  const canAct = dispatchEnabled;
 
   let disabledReason = '';
   if (!dispatchEnabled) disabledReason = 'Start the server with --allow-dispatch to approve or reject.';
-  else if (!token) disabledReason = 'Enter your session token (gear icon) to approve or reject.';
 
   const detail = el('div', { cls: 'inbox-detail' });
 
@@ -2192,8 +2308,8 @@ function buildInboxDetail(p) {
   const actionsDiv = el('div', { cls: 'inbox-detail__actions' });
   const resultLine = el('div', { cls: 'inbox-detail__result', 'aria-live': 'polite' });
 
-  // "Open in editor" — available whenever a token is set, independent of dispatchEnabled.
-  if (getToken() && p.repo) {
+  // "Open in editor" shares the explicit mutation enablement boundary.
+  if (dispatchEnabled && p.repo) {
     actionsDiv.appendChild(el('button', {
       cls: 'btn open-repo-btn',
       type: 'button',
@@ -2218,6 +2334,8 @@ function buildInboxDetail(p) {
 
   approveBtn.addEventListener('click', async () => {
     if (!canAct) return;
+    const token = promptMutationToken();
+    if (!token) { resultLine.textContent = 'Mutation token is required.'; return; }
     approveBtn.disabled = true;
     rejectBtn.disabled = true;
     resultLine.textContent = 'Approving…';
@@ -2238,6 +2356,8 @@ function buildInboxDetail(p) {
 
   rejectBtn.addEventListener('click', async () => {
     if (!canAct) return;
+    const token = promptMutationToken();
+    if (!token) { resultLine.textContent = 'Mutation token is required.'; return; }
     approveBtn.disabled = true;
     rejectBtn.disabled = true;
     resultLine.textContent = 'Rejecting…';
@@ -5643,7 +5763,7 @@ function renderFleetActivity() {
   } else {
     const wrap = el('div', { cls: 'table-wrap fa-card-body' });
     const tbl = el('table');
-    const hasToken = Boolean(getToken());
+    const hasMutationSurface = state.snapshot?.dispatchEnabled === true;
     tbl.appendChild(el('thead', {},
       el('tr', {},
         el('th', {}, 'Repo'),
@@ -5651,13 +5771,13 @@ function renderFleetActivity() {
         el('th', {}, 'Merged'),
         el('th', {}, 'Pending'),
         el('th', {}, 'Declined'),
-        hasToken ? el('th', {}) : null,
+        hasMutationSurface ? el('th', {}) : null,
       )
     ));
     const tbody = el('tbody');
     for (const r of repos) {
       const repoName = (r.repo ?? '(unscoped)').split('/').pop() || r.repo;
-      const openCell = (hasToken && r.repo)
+      const openCell = (hasMutationSurface && r.repo)
         ? el('td', {},
             el('button', {
               cls: 'open-repo-btn',
@@ -7749,17 +7869,26 @@ function renderFleetDashboard() {
 // Boot
 // ---------------------------------------------------------------------------
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
   renderShell();
 
-  // Connect SSE first so events can patch data while views load
-  connectSSE();
-
-  // Wire SSE dot
-  if (state.eventSource) {
-    state.eventSource.addEventListener('open', () => updateSseDot(true));
-    state.eventSource.addEventListener('error', () => updateSseDot(false));
+  // Refresh the short-lived read cookie when this tab retained the raw token.
+  // Header-authenticated fetches still work if cookie establishment fails.
+  const token = getReadToken();
+  if (token) {
+    try {
+      await establishReadSession(token);
+      scheduleReadSessionRefresh();
+    } catch {
+      clearReadToken();
+      await clearReadSession();
+      showToast('Read token expired — enter the token printed by the current server.');
+    }
   }
+
+  // Connect SSE after session bootstrap so EventSource can use the HttpOnly
+  // same-origin cookie without ever putting the raw token in a URL.
+  connectSSE();
 
   // Hash routing
   window.addEventListener('hashchange', onHashChange);

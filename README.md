@@ -161,6 +161,34 @@ ashlr serve --open    # also opens the browser
 
 The dashboard shows fleet status, all runs and swarms, the inbox, rolling spend analytics, and shared memory.
 
+`ashlr serve` prints a fresh read token on every start. Paste it into the
+dashboard's **Read token** control. The browser keeps the raw read token only in
+the current tab's `sessionStorage` and exchanges it for a 15-minute, read-only,
+HttpOnly cookie. Because browser cookies are shared across ports on the same
+host, that ticket is also bound to a random 256-bit, origin-scoped client proof.
+EventSource sends only that non-authority proof in its URL: it is useless
+without the matching signed HttpOnly ticket, and a `no-referrer` policy keeps it
+from leaving the dashboard. Static assets and the minimal `{ "ok": true }`
+liveness response remain public on loopback; every proprietary API read
+requires the read token or the ticket plus its matching client proof.
+The 15-minute limit applies to the cookie ticket, not the raw read token: while
+the current server process and tab remain active, the browser renews the ticket
+using the read token retained in that tab.
+
+Headless clients send the read token as a header:
+
+```sh
+curl -H "X-Ashlr-Token: $ASHLR_DASHBOARD_READ_TOKEN" \
+  http://127.0.0.1:7777/api/snapshot
+```
+
+Read tokens and cookies cannot approve, dispatch, pause, resume, repair, or open
+local paths. When mutations are explicitly enabled, the server prints a second,
+independent mutation token. The browser asks for it anew for every exact action,
+uses it only for that request, and never retains it in JavaScript state,
+`sessionStorage`, a cookie, or a URL. Mutations accept only that token in
+`X-Ashlr-Token`.
+
 ---
 
 ## The autonomous loop

@@ -3089,8 +3089,9 @@ export type TuiTab = 'overview' | 'runs' | 'swarms' | 'pulse' | 'mcp' | 'inbox' 
 // NO CDN — all assets bundled in the repo and served locally) exposes a
 // read-only JSON API + Server-Sent-Events live stream and a hand-built static
 // SPA. SECURITY: binds 127.0.0.1 ONLY; Host-header allowlist (anti DNS-
-// rebinding); read-only by default; the single mutating route (POST /api/run)
-// exists ONLY under --allow-dispatch and is per-session-token-guarded.
+// rebinding); proprietary GET/SSE routes require a per-process read token or a
+// short-lived read-only browser ticket; mutating routes exist ONLY under
+// --allow-dispatch and require an independent raw mutation-token header.
 // METADATA ONLY — never serves secret values.
 // ---------------------------------------------------------------------------
 
@@ -3112,10 +3113,11 @@ export interface WebServerOptions {
 export interface WebServerHandle {
   /** The actual port the server bound on 127.0.0.1. */
   port: number;
+  /** Read-only capability for proprietary GET/SSE and browser-session bootstrap. */
+  readToken: string;
   /**
-   * Per-session secret token. Printed by `ashlr serve` and REQUIRED (in a
-   * request header) for the guarded POST /api/run dispatch route. Defeats
-   * CSRF / drive-by POSTs. Empty/unused when allowDispatch is false.
+   * Mutation-only capability. Emitted by `ashlr serve` only when mutations are
+   * explicitly enabled; never accepted for read-session bootstrap.
    */
   token: string;
   /** The localhost URL the dashboard is served at (e.g. http://127.0.0.1:7777). */
