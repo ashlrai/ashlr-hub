@@ -27,6 +27,10 @@ import { canonicalizeDaemonActivationValue } from '../src/core/daemon/activation
 import { provenanceKeyPath } from '../src/core/foundry/provenance.js';
 import { readDaemonHealth } from '../src/core/readiness.js';
 import { diagnoseGuardHealth } from '../src/core/daemon/guard-health.js';
+import {
+  acquireDaemonServiceLifecycleFence,
+  releaseDaemonServiceLifecycleFence,
+} from '../src/core/daemon/service-lifecycle-fence.js';
 
 const QUARANTINE_PLAN_ID = '11111111-1111-4111-8111-111111111111';
 const RESOLUTION_PLAN_ID = '33333333-3333-4333-8333-333333333333';
@@ -460,6 +464,61 @@ describe.runIf(process.platform !== 'win32')('daemon state resolution protocol',
     expect(fs.existsSync(daemonStateResolutionIntentPath(plan.planId))).toBe(true);
     const resumed = executeDaemonStateResolution(executeInput(plan), resolutionRuntime({ now: () => expired }));
     expect(resumed).toMatchObject({ ok: true, resumed: true });
+  });
+
+  it('rechecks plan expiry immediately before publishing the durable intent', () => {
+    const seeded = seedQuarantine();
+    const plan = previewResolution(seeded.receiptDigest);
+    let now = NOW;
+    const result = executeDaemonStateResolution(executeInput(plan), resolutionRuntime({
+      now: () => now,
+      afterIntentStage: () => { now = new Date(plan.expiresAt); },
+    }));
+
+    expect(result).toMatchObject({ ok: false, reason: 'plan-expired' });
+    expect(fs.existsSync(daemonStateResolutionIntentPath(plan.planId))).toBe(false);
+    expect(fs.existsSync(daemonStateRecoveryMarkerPath())).toBe(true);
+    expect(fs.readFileSync(daemonStatePath())).toEqual(seeded.bytes);
+  });
+
+  it('holds the service lifecycle fence through the final uncached supervisor observation', () => {
+    const seeded = seedQuarantine();
+    const plan = previewResolution(seeded.receiptDigest);
+    let competingFenceAcquired = true;
+    let observations = 0;
+    const result = executeDaemonStateResolution(executeInput(plan), resolutionRuntime({
+      serviceStatus: () => {
+        observations += 1;
+        return inactiveService();
+      },
+      afterLifecycleFenceAcquire: () => {
+        const competing = acquireDaemonServiceLifecycleFence(tmpHome, 0);
+        competingFenceAcquired = competing !== null;
+        releaseDaemonServiceLifecycleFence(competing);
+      },
+    }));
+
+    expect(result).toMatchObject({ ok: true });
+    expect(competingFenceAcquired).toBe(false);
+    expect(observations).toBeGreaterThan(1);
+    expect(fs.existsSync(daemonStateRecoveryMarkerPath())).toBe(false);
+  });
+
+  it('refuses marker retirement when registration appears after the lifecycle fence is held', () => {
+    const seeded = seedQuarantine();
+    const plan = previewResolution(seeded.receiptDigest);
+    let registered = false;
+    const result = executeDaemonStateResolution(executeInput(plan), resolutionRuntime({
+      serviceStatus: () => registered
+        ? inactiveService({ registrationState: 'present', installed: true, runtimeState: 'ready' })
+        : inactiveService(),
+      afterLifecycleFenceAcquire: () => { registered = true; },
+    }));
+
+    expect(result).toMatchObject({ ok: false, reason: 'supervisor-registered' });
+    expect(fs.existsSync(daemonStateRecoveryMarkerPath())).toBe(true);
+    expect(fs.existsSync(daemonStateResolutionReceiptPath(plan.planId))).toBe(true);
+    expect(fs.readFileSync(daemonStatePath())).toEqual(resolvedBytes());
   });
 
   it('fails closed on signer rotation, source drift, marker drift, and quarantine ACL drift', () => {

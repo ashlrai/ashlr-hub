@@ -23,6 +23,11 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import type { ServiceStatusResult } from './service.js';
 import { serviceActivity } from './service-activity.js';
 import {
+  acquireDaemonServiceLifecycleFence,
+  ownsDaemonServiceLifecycleFence,
+  releaseDaemonServiceLifecycleFence,
+} from './service-lifecycle-fence.js';
+import {
   acquireDaemonLock,
   daemonStateIssueCodes,
   daemonStatePath,
@@ -367,6 +372,7 @@ export interface DaemonStateResolutionRuntime {
   afterReceiptStage?: () => void;
   afterReceiptPublish?: () => void;
   beforeMarkerRetirement?: () => void;
+  afterLifecycleFenceAcquire?: () => void;
 }
 
 export interface DaemonStateAtomicEvidenceFilesystem {
@@ -3104,6 +3110,8 @@ export function executeDaemonStateResolution(
       if (stagedIntentPhase.phase !== 'blocked-source') {
         return { ok: false, reason: 'resolution-state-conflict', detail: 'state changed before intent publication' };
       }
+      const publicationTime = resolutionPlanTimeRefusal(plan, runtime);
+      if (publicationTime) return publicationTime;
       try {
         publishRecordNoClobber(intentTempPath, intentPath);
         const publishedIntent = parseResolutionIntent(readPublishedRecord(intentPath));
@@ -3324,7 +3332,16 @@ export function executeDaemonStateResolution(
     if (retirementLocks) return retirementLocks;
     const retirementPreconditions = resolutionPreconditionsRefusal(plan, chain, runtime);
     if (retirementPreconditions) return retirementPreconditions;
+    const lifecycleFence = acquireDaemonServiceLifecycleFence(homedir());
+    if (!lifecycleFence) {
+      return {
+        ok: false,
+        reason: 'marker-retirement-failed',
+        detail: 'daemon service lifecycle fence is unavailable',
+      };
+    }
     try {
+      runtime.afterLifecycleFenceAcquire?.();
       activeMarkerPresent = pathEntryExists(activeMarkerPath);
       retiredMarkerPresent = pathEntryExists(retiredMarkerPath);
       ensurePrivateDirectory(dirname(retiredMarkerPath));
@@ -3353,6 +3370,13 @@ export function executeDaemonStateResolution(
           'lock ownership was lost at marker retirement',
         );
         if (finalLocks) return finalLocks;
+        if (!ownsDaemonServiceLifecycleFence(lifecycleFence)) {
+          return {
+            ok: false,
+            reason: 'marker-retirement-failed',
+            detail: 'daemon service lifecycle fence ownership was lost at marker retirement',
+          };
+        }
         const finalPreconditions = resolutionPreconditionsRefusal(plan, chain, runtime);
         if (finalPreconditions) return finalPreconditions;
         const finalActive = stableRead(activeMarkerPath, false, [1n, 2n, 3n]);
@@ -3380,6 +3404,9 @@ export function executeDaemonStateResolution(
         if (!sameGeneration(finalChain.evidence.stat, receipt.quarantineGeneration)) {
           throw new Error('quarantine evidence generation changed before marker retirement');
         }
+        if (!ownsDaemonServiceLifecycleFence(lifecycleFence)) {
+          throw new Error('daemon service lifecycle fence ownership was lost before marker retirement');
+        }
         unlinkSync(activeMarkerPath);
         fsyncDirectory(dirname(activeMarkerPath));
       }
@@ -3391,6 +3418,8 @@ export function executeDaemonStateResolution(
       }
     } catch (error) {
       return { ok: false, reason: 'marker-retirement-failed', detail: error instanceof Error ? error.message : String(error) };
+    } finally {
+      releaseDaemonServiceLifecycleFence(lifecycleFence);
     }
 
     const finalChain = readQuarantineChain(

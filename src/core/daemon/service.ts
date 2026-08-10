@@ -36,6 +36,10 @@ import {
   windowsPowerShellPath,
 } from './windows-task-scripts.js';
 import { assertResidentServiceInstallAuthorized } from './service-install-authority.js';
+import {
+  acquireDaemonServiceLifecycleFence,
+  releaseDaemonServiceLifecycleFence,
+} from './service-lifecycle-fence.js';
 
 // ---------------------------------------------------------------------------
 // Types (local — do NOT add to types.ts per file-ownership constraints)
@@ -1393,6 +1397,19 @@ function recoverWindowsTransactionUnload(
 // Public API
 // ---------------------------------------------------------------------------
 
+async function withDaemonServiceLifecycleFence<T>(
+  opts: ServiceInstallOptions,
+  action: () => Promise<T>,
+): Promise<T> {
+  const lifecycleFence = acquireDaemonServiceLifecycleFence(resolveHome(opts.homeDir));
+  if (!lifecycleFence) throw new Error('daemon service lifecycle fence unavailable');
+  try {
+    return await action();
+  } finally {
+    releaseDaemonServiceLifecycleFence(lifecycleFence);
+  }
+}
+
 /**
  * Install and register the daemon only after the shared authority boundary.
  * The current production boundary always refuses before transaction work.
@@ -1404,6 +1421,10 @@ function recoverWindowsTransactionUnload(
  */
 export async function install(opts: ServiceInstallOptions = {}): Promise<void> {
   assertResidentServiceInstallAuthorized();
+  return withDaemonServiceLifecycleFence(opts, () => installWithinLifecycleFence(opts));
+}
+
+async function installWithinLifecycleFence(opts: ServiceInstallOptions): Promise<void> {
   const platform = (opts.platform ?? process.platform) as Platform;
   const def = generateServiceDefinition(opts);
   const autostart = opts.autostart !== false;
@@ -1672,6 +1693,10 @@ export async function install(opts: ServiceInstallOptions = {}): Promise<void> {
  * Fails closed when the manager and service file cannot be removed together.
  */
 export async function uninstall(opts: ServiceInstallOptions = {}): Promise<void> {
+  return withDaemonServiceLifecycleFence(opts, () => uninstallWithinLifecycleFence(opts));
+}
+
+async function uninstallWithinLifecycleFence(opts: ServiceInstallOptions): Promise<void> {
   const platform = (opts.platform ?? process.platform) as Platform;
   const def = generateServiceDefinition(opts);
 
@@ -1928,6 +1953,12 @@ export async function uninstall(opts: ServiceInstallOptions = {}): Promise<void>
  */
 export async function ensureRunning(opts: ServiceInstallOptions = {}): Promise<ServiceStatusResult> {
   assertResidentServiceInstallAuthorized();
+  return withDaemonServiceLifecycleFence(opts, () => ensureRunningWithinLifecycleFence(opts));
+}
+
+async function ensureRunningWithinLifecycleFence(
+  opts: ServiceInstallOptions,
+): Promise<ServiceStatusResult> {
   const before = serviceStatus(opts);
   if (!before.installed || before.running) return before;
 
