@@ -78,8 +78,12 @@ vi.mock('node:child_process', async (importOriginal) => {
     ...actual,
     execFile: mockExecFile,
     // spawnSync is used by github.ts (listIssues); keep it passable but
-    // return not-a-repo so scanIssues degrades gracefully.
-    spawnSync: () => ({ pid: 0, output: [], stdout: '', stderr: '', status: 1, signal: null }),
+    // return not-a-repo so scanIssues degrades gracefully. The Darwin private
+    // storage verifier uses one fixed native /bin/ls ACL probe, which must keep
+    // its real semantics for provenance-backed scanner observations.
+    spawnSync: (...args: Parameters<typeof actual.spawnSync>) => args[0] === '/bin/ls'
+      ? actual.spawnSync(...args)
+      : ({ pid: 0, output: [], stdout: '', stderr: '', status: 1, signal: null }),
   };
 });
 
