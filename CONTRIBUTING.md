@@ -21,6 +21,12 @@ The toolchain is intentionally lean: `typescript`, `tsx`, `vitest`, and `eslint`
 npm ci          # clean, lockfile-exact install of devDependencies
 ```
 
+The read-only `Dependency Audit` check performs script-free, lockfile-exact `npm ci` installs for
+both the root package and `src/raycast` before auditing either lockfile. This makes peer-resolution
+or manifest/lockfile drift fail closed even when a package-lock-only vulnerability audit is clean;
+the workflow deliberately does not enable a dependency cache and pins strict peer resolution on the
+command line so inherited npm configuration cannot relax it.
+
 The only runtime dependency is `@modelcontextprotocol/sdk` (MCP gateway). See "Zero-runtime-dep core" below.
 
 To install the CLI while developing:
