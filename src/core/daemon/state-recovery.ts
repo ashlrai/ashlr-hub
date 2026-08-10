@@ -343,6 +343,11 @@ function safePrivateDirectory(stat: BigIntStats): boolean {
     (process.platform === 'win32' || (stat.mode & 0o077n) === 0n);
 }
 
+function safeHomeAnchor(stat: BigIntStats): boolean {
+  return stat.isDirectory() && !stat.isSymbolicLink() && owned(stat) &&
+    (process.platform === 'win32' || (stat.mode & 0o022n) === 0n);
+}
+
 function sameSnapshot(left: BigIntStats, right: BigIntStats): boolean {
   return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode &&
     left.uid === right.uid && left.gid === right.gid && left.nlink === right.nlink &&
@@ -351,7 +356,15 @@ function sameSnapshot(left: BigIntStats, right: BigIntStats): boolean {
 
 function samePrivateDirectoryIdentity(path: string, expected: BigIntStats): boolean {
   const observed = lstatSync(path, { bigint: true });
-  return safePrivateDirectory(observed) && observed.dev === expected.dev && observed.ino === expected.ino &&
+  const aclAssured = process.platform !== 'darwin' || assurePrivateStoragePath(
+    path,
+    'directory',
+    'inspect-owned',
+    { anchorPath: resolve(homedir()) },
+  ).ok;
+  const assured = lstatSync(path, { bigint: true });
+  return aclAssured && sameSnapshot(observed, assured) && safePrivateDirectory(assured) &&
+    observed.dev === expected.dev && observed.ino === expected.ino &&
     observed.mode === expected.mode && observed.uid === expected.uid && observed.gid === expected.gid;
 }
 
@@ -402,7 +415,20 @@ function ensurePrivateDirectory(path: string): void {
   const target = resolve(path);
   if (!nestedWithin(home, target)) throw new Error('path-outside-home');
   const homeStat = lstatSync(home, { bigint: true });
-  if (!safePrivateDirectory(homeStat)) throw new Error('unsafe-home');
+  // A normal macOS home may be 0755. It is a containment anchor, not a state
+  // directory: traversal/read bits are acceptable, but another user must
+  // never be able to replace descendants beneath it. `.ashlr` and every
+  // recovery directory below it still require exact private-directory modes.
+  if (!safeHomeAnchor(homeStat)) throw new Error('unsafe-home');
+  if (process.platform === 'darwin') {
+    const homeAssurance = assurePrivateStoragePath(home, 'directory', 'inspect-owned', {
+      anchorPath: home,
+    });
+    if (!homeAssurance.ok) throw new Error(`unsafe-home:${homeAssurance.reason}`);
+    if (!sameSnapshot(homeStat, lstatSync(home, { bigint: true }))) {
+      throw new Error('home-changed-during-assurance');
+    }
+  }
   const parts = relative(home, target).split(sep).filter(Boolean);
   let cursor = home;
   for (const part of parts) {
@@ -412,10 +438,11 @@ function ensurePrivateDirectory(path: string): void {
       mkdirSync(cursor, { mode: PRIVATE_DIRECTORY_MODE });
       created = true;
     }
-    const stat = lstatSync(cursor, { bigint: true });
+    let stat = lstatSync(cursor, { bigint: true });
     if (!safePrivateDirectory(stat)) throw new Error(`unsafe-directory:${cursor}`);
     if (created) {
       if (process.platform !== 'win32') chmodSync(cursor, PRIVATE_DIRECTORY_MODE);
+      stat = lstatSync(cursor, { bigint: true });
       const assurance = assurePrivateStoragePath(cursor, 'directory', 'secure-created', {
         anchorPath: home,
       });
@@ -427,6 +454,9 @@ function ensurePrivateDirectory(path: string): void {
       });
       if (!assurance.ok) throw new Error(`unsafe-directory:${assurance.reason}`);
     }
+    if (!sameSnapshot(stat, lstatSync(cursor, { bigint: true }))) {
+      throw new Error(`directory-changed-during-assurance:${cursor}`);
+    }
   }
 }
 
@@ -434,6 +464,18 @@ function assureSourceStorage(path: string): void {
   const home = resolve(homedir());
   const target = resolve(path);
   if (!nestedWithin(home, target)) throw new Error('source-outside-home');
+  if (process.platform !== 'win32') {
+    const homeStat = lstatSync(home, { bigint: true });
+    if (!safeHomeAnchor(homeStat)) throw new Error('unsafe-source-home');
+    const parts = relative(home, dirname(target)).split(sep).filter(Boolean);
+    let cursor = home;
+    for (const part of parts) {
+      cursor = join(cursor, part);
+      if (!safePrivateDirectory(lstatSync(cursor, { bigint: true }))) {
+        throw new Error(`unsafe-source-directory:${cursor}`);
+      }
+    }
+  }
   const assurance = assurePrivateStoragePath(target, 'file', 'inspect-owned', { anchorPath: home });
   if (!assurance.ok) throw new Error(`unsafe-source:${assurance.reason}`);
 }
@@ -454,10 +496,12 @@ function stableRead(
   diagnoseState: boolean,
   allowedLinks: readonly bigint[] = [1n],
 ): StableSource {
-  assureSourceStorage(path);
   const namedBefore = lstatSync(path, { bigint: true });
   if (!safePrivateFile(namedBefore, allowedLinks) || namedBefore.size <= 0n ||
     namedBefore.size > BigInt(MAX_STATE_BYTES)) throw new Error('unsafe-source-file');
+  assureSourceStorage(path);
+  const namedAssured = lstatSync(path, { bigint: true });
+  if (!sameSnapshot(namedBefore, namedAssured)) throw new Error('source-changed-during-assurance');
   const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
   const fd = openSync(path, fsConstants.O_RDONLY | noFollow);
   try {
@@ -470,6 +514,14 @@ function stableRead(
     const namedAfter = lstatSync(path, { bigint: true });
     if (!sameSnapshot(openedBefore, openedAfter) || !sameSnapshot(openedAfter, namedAfter)) {
       throw new Error('source-changed-during-read');
+    }
+    if (process.platform === 'darwin') {
+      assureSourceStorage(path);
+      const assuredOpened = fstatSync(fd, { bigint: true });
+      const assuredNamed = lstatSync(path, { bigint: true });
+      if (!sameSnapshot(openedAfter, assuredOpened) || !sameSnapshot(assuredOpened, assuredNamed)) {
+        throw new Error('source-changed-during-assurance');
+      }
     }
     let running: boolean | null = null;
     let issueCodes: DaemonStateDiagnosticCode[] = [];
@@ -520,6 +572,18 @@ function writeExclusiveRecord(path: string, value: unknown): void {
     fchmodSync(fd, PRIVATE_FILE_MODE);
     const initial = fstatSync(fd, { bigint: true });
     if (!safePrivateFile(initial) || initial.size !== 0n) throw new Error('unsafe-new-record');
+    if (process.platform === 'darwin') {
+      const emptyAssurance = assurePrivateStoragePath(path, 'file', 'secure-created', {
+        anchorPath: resolve(homedir()),
+      });
+      if (!emptyAssurance.ok) throw new Error(`unsafe-record:${emptyAssurance.reason}`);
+      const assuredOpened = fstatSync(fd, { bigint: true });
+      const assuredNamed = lstatSync(path, { bigint: true });
+      if (!safePrivateFile(assuredOpened) || assuredOpened.size !== 0n ||
+        !sameSnapshot(initial, assuredOpened) || !sameSnapshot(assuredOpened, assuredNamed)) {
+        throw new Error('record-changed-during-assurance');
+      }
+    }
     const bytes = Buffer.from(`${canonicalizeDaemonActivationValue(value)}\n`, 'utf8');
     writeAll(fd, bytes);
     fsyncSync(fd);
@@ -530,6 +594,13 @@ function writeExclusiveRecord(path: string, value: unknown): void {
       anchorPath: homedir(),
     });
     if (!assurance.ok) throw new Error(`unsafe-record:${assurance.reason}`);
+    if (process.platform === 'darwin') {
+      const assuredOpened = fstatSync(fd, { bigint: true });
+      const assuredNamed = lstatSync(path, { bigint: true });
+      if (!sameSnapshot(after, assuredOpened) || !sameSnapshot(assuredOpened, assuredNamed)) {
+        throw new Error('record-changed-during-final-assurance');
+      }
+    }
     closeSync(fd);
     fd = undefined;
     fsyncDirectory(dirname(path));

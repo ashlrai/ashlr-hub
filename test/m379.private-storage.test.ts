@@ -1,5 +1,13 @@
-import { mkdtempSync, openSync, closeSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import {
+  chmodSync,
+  closeSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir, userInfo } from 'node:os';
 import { join, win32 } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -17,6 +25,11 @@ const homes: string[] = [];
 afterEach(() => {
   try {
     for (const home of homes.splice(0)) {
+      if (process.platform === 'darwin') {
+        spawnSync('/bin/chmod', ['-RN', home], {
+          shell: false, timeout: 5_000, encoding: 'utf8',
+        });
+      }
       rmSync(home, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
     }
   } finally {
@@ -45,7 +58,7 @@ function successfulRunner(
   };
 }
 
-describe('M379 Windows private-storage assurance', () => {
+describe('M379 private-storage assurance', () => {
   it('shares the sentinel-guarded test control across module evaluation boundaries', async () => {
     const runnerCalls: PrivateStorageInvocation[] = [];
     const observed: PrivateStorageInvocation[] = [];
@@ -282,7 +295,7 @@ describe('M379 Windows private-storage assurance', () => {
     expect(calls[0]!.timeoutMs).toBe(15_000);
   });
 
-  it('rejects invalid paths and bypasses PowerShell on POSIX', () => {
+  it('rejects invalid paths and bypasses PowerShell on non-Darwin POSIX', () => {
     const runner = vi.fn<PrivateStorageRunner>();
     for (const invalid of ['relative', '\\root-relative', '\\\\server\\share\\key', '\\\\.\\pipe\\key']) {
       expect(assurePrivateStoragePath(invalid, 'file', 'inspect-existing', {
@@ -290,10 +303,132 @@ describe('M379 Windows private-storage assurance', () => {
       })).toEqual({ ok: false, reason: 'invalid-path' });
     }
     expect(assurePrivateStoragePath('/tmp/private', 'file', 'inspect-existing', {
-      platform: process.platform === 'win32' ? 'linux' : process.platform,
+      platform: 'linux',
       runner,
     })).toEqual({ ok: true, reason: 'posix-checked-by-caller' });
     expect(runner).not.toHaveBeenCalled();
+  });
+
+  it('uses bounded argv-only Darwin ACL inspection and accepts the standard everyone deny delete ACE', () => {
+    const calls: PrivateStorageInvocation[] = [];
+    const result = assurePrivateStoragePath('/Users/alice/.ashlr/daemon.json', 'file', 'inspect-owned', {
+      platform: 'darwin',
+      anchorPath: '/Users/alice',
+      runner: (invocation) => {
+        calls.push(invocation);
+        return {
+          status: 0,
+          stdout: [
+            'drwxr-xr-x+ 1 alice staff 0 Aug 10 00:00 /Users/alice',
+            ' 0: group:everyone deny delete',
+            'drwx------ 1 alice staff 0 Aug 10 00:00 /Users/alice/.ashlr',
+            '-rw------- 1 alice staff 1 Aug 10 00:00 /Users/alice/.ashlr/daemon.json',
+            '',
+          ].join('\n'),
+        };
+      },
+    });
+
+    expect(result).toEqual({ ok: true, reason: 'darwin-acl-safe' });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      executable: '/bin/ls',
+      args: [
+        '-lde',
+        '/Users/alice',
+        '/Users/alice/.ashlr',
+        '/Users/alice/.ashlr/daemon.json',
+      ],
+      input: '',
+      timeoutMs: 5_000,
+      maxBuffer: 64 * 1024,
+      env: { LC_ALL: 'C', LANG: 'C' },
+    });
+  });
+
+  it('rejects dangerous untrusted Darwin allow and inheritance grants but permits owner grants', () => {
+    const metadata = [
+      'drwxr-xr-x+ 1 owner staff 0 Aug 10 00:00 /Users/owner',
+      'drwx------+ 1 owner staff 0 Aug 10 00:00 /Users/owner/.ashlr',
+      '-rw------- 1 owner staff 1 Aug 10 00:00 /Users/owner/.ashlr/daemon.json',
+    ];
+    const inspect = (aclLine: string) => assurePrivateStoragePath(
+      '/Users/owner/.ashlr/daemon.json',
+      'file',
+      'inspect-owned',
+      {
+        platform: 'darwin',
+        anchorPath: '/Users/owner',
+        runner: () => ({
+          status: 0,
+          stdout: [metadata[0], aclLine, ...metadata.slice(1), ''].join('\n'),
+        }),
+      },
+    );
+
+    expect(inspect(
+      ' 0: group:everyone allow list,add_file,search,add_subdirectory,delete_child,file_inherit,directory_inherit',
+    )).toEqual({ ok: false, reason: 'darwin-untrusted-allow' });
+    expect(inspect(' 0: group:everyone inherited allow read,write,execute,append'))
+      .toEqual({ ok: false, reason: 'darwin-untrusted-allow' });
+    expect(inspect(` 0: user:${userInfo().username} allow read,write,append`))
+      .toEqual({ ok: true, reason: 'darwin-acl-safe' });
+  });
+
+  it('fails Darwin ACL inspection closed on malformed output, wrong kinds, and process failure', () => {
+    const options = {
+      platform: 'darwin' as const,
+      anchorPath: '/Users/alice',
+    };
+    expect(assurePrivateStoragePath('/Users/alice/key', 'file', 'inspect-owned', {
+      ...options,
+      runner: () => ({ status: 0, stdout: 'not-ls-output\n' }),
+    })).toEqual({ ok: false, reason: 'invalid-output' });
+    expect(assurePrivateStoragePath('/Users/alice/key', 'file', 'inspect-owned', {
+      ...options,
+      runner: () => ({
+        status: 0,
+        stdout: [
+          'drwxr-xr-x 1 alice staff 0 Aug 10 00:00 /Users/alice',
+          'drwx------ 1 alice staff 0 Aug 10 00:00 /Users/alice/key',
+          '',
+        ].join('\n'),
+      }),
+    })).toEqual({ ok: false, reason: 'darwin-wrong-kind' });
+    expect(assurePrivateStoragePath('/Users/alice/key', 'file', 'inspect-owned', {
+      ...options,
+      runner: () => ({ status: null, error: new Error('timeout') }),
+    })).toEqual({ ok: false, reason: 'adapter-failed' });
+  });
+
+  it.runIf(process.platform === 'darwin')('accepts a native standard home ACL and rejects an inheritable Everyone grant', () => {
+    const home = mkdtempSync(join(tmpdir(), 'ashlr-m379-darwin-'));
+    homes.push(home);
+    chmodSync(home, 0o755);
+    const dir = join(home, '.ashlr');
+    const file = join(dir, 'daemon.json');
+    mkdirSync(dir, { mode: 0o700 });
+    writeFileSync(file, '{}\n', { mode: 0o600 });
+
+    const standardAcl = spawnSync('/bin/chmod', ['+a', 'everyone deny delete', home], {
+      shell: false, timeout: 5_000, encoding: 'utf8',
+    });
+    expect(standardAcl.status, standardAcl.stderr).toBe(0);
+    expect(assurePrivateStoragePath(file, 'file', 'inspect-owned', { anchorPath: home }))
+      .toEqual({ ok: true, reason: 'darwin-acl-safe' });
+
+    const removeStandardAcl = spawnSync('/bin/chmod', ['-N', home], {
+      shell: false, timeout: 5_000, encoding: 'utf8',
+    });
+    expect(removeStandardAcl.status, removeStandardAcl.stderr).toBe(0);
+    const hostileAcl = spawnSync('/bin/chmod', [
+      '+a',
+      'everyone allow list,add_file,search,add_subdirectory,delete_child,file_inherit,directory_inherit',
+      home,
+    ], { shell: false, timeout: 5_000, encoding: 'utf8' });
+    expect(hostileAcl.status, hostileAcl.stderr).toBe(0);
+    expect(assurePrivateStoragePath(file, 'file', 'inspect-owned', { anchorPath: home }))
+      .toEqual({ ok: false, reason: 'darwin-untrusted-allow' });
   });
 
   it.runIf(process.platform === 'win32')('applies and verifies an exact DACL and rejects an added Everyone ACE', () => {
