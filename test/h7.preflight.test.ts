@@ -238,6 +238,24 @@ describe('h7 preflight — READ-ONLY readiness check', () => {
     expect(report.info.some((finding) => finding.id === 'enrollment')).toBe(false);
   });
 
+  it('blocks readiness while daemon state recovery is unresolved', async () => {
+    expect.hasAssertions();
+    const recoveryDirectory = join(fx!.ashlrDir, 'control', 'daemon-state-recovery');
+    mkdirSync(recoveryDirectory, { recursive: true, mode: 0o700 });
+    writeFileSync(join(recoveryDirectory, 'active.json'), '{}\n', { mode: 0o600 });
+
+    const report = await buildReadiness(makeCfg());
+
+    expect(report.ready).toBe(false);
+    expect(report.blockers).toContainEqual({
+      id: 'daemon-recovery',
+      severity: 'blocker',
+      detail: 'daemon state recovery marker is pending resolution',
+      fix: 'Resolve the daemon state recovery before running autonomy.',
+    });
+    expect(report.info.some((finding) => finding.id === 'daemon')).toBe(false);
+  });
+
   it.skipIf(process.platform === 'win32')('rejects an unsafe authority directory without writing through it', async () => {
     const redirected = join(fx!.home, 'redirected-authority');
     mkdirSync(redirected, { recursive: true, mode: 0o700 });

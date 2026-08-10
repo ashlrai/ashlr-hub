@@ -44,7 +44,10 @@ import {
   type EnrollmentRegistrySnapshot,
   type KillSwitchReadResult,
 } from './sandbox/policy.js';
-import { loadDaemonState, daemonStatePath } from './daemon/state.js';
+import {
+  loadDaemonStateStrict,
+  daemonStatePath,
+} from './daemon/state.js';
 import { listSandboxes, ORPHAN_STALE_MS } from './sandbox/worktree.js';
 import { getPhantomStatus } from './phantom.js';
 import { discoverMcpServers } from './mcp-registry.js';
@@ -276,7 +279,7 @@ export function readKillState(): ReadinessKillState {
 }
 
 /**
- * READ-ONLY daemon-health snapshot via loadDaemonState() (which applies the H5
+ * READ-ONLY daemon-health snapshot via loadDaemonStateStrict() (which applies the H5
  * reconcileDaemonState self-heal at the load chokepoint). Returns whether the
  * daemon is reported running, its recorded pid, and whether the recorded pid is
  * still alive (a still-running flag with a live pid is a healthy live daemon; a
@@ -288,9 +291,11 @@ export function readDaemonHealth(): {
   pid: number | null;
   selfHealed: boolean;
   pidAlive: boolean;
+  recoveryBlocked: boolean;
+  recoveryReason: string | null;
 } {
   try {
-    // Peek at the RAW persisted flag BEFORE loadDaemonState() applies the H5
+    // Peek at the RAW persisted flag BEFORE loadDaemonStateStrict() applies the H5
     // reconcileDaemonState self-heal, so we can report whether a stale dead-pid
     // `running:true` flag was healed at the load chokepoint. This peek is a pure
     // read — it never writes.
@@ -311,9 +316,26 @@ export function readDaemonHealth(): {
       rawPid = null;
     }
 
-    // loadDaemonState() applies the self-heal: a dead-pid running flag becomes
-    // running:false. The post-load `running` is therefore the truthful state.
-    const state = loadDaemonState();
+    // Make strict validation the final state read used for the health verdict.
+    // A permissive fallback here would turn malformed accounting into a false
+    // healthy zero state and let doctor/readiness report PASS.
+    const strict = loadDaemonStateStrict();
+    if (!strict.ok) {
+      const recoveryReason = strict.diagnostic.issueCodes.includes('state-recovery-in-progress')
+        ? 'daemon state recovery marker is pending resolution'
+        : strict.diagnostic.issueCodes.includes('unsafe-storage') && strict.path.includes('daemon-state-recovery')
+          ? 'daemon state recovery marker storage is unsafe'
+          : `daemon state is ${strict.reason}: ${strict.error}`;
+      return {
+        running: false,
+        pid: null,
+        selfHealed: false,
+        pidAlive: false,
+        recoveryBlocked: true,
+        recoveryReason,
+      };
+    }
+    const state = strict.state;
 
     // selfHealed iff the RAW file claimed running with a pid that is NOT alive
     // and the post-load state is now stopped (the reconcile flipped it).
@@ -344,9 +366,23 @@ export function readDaemonHealth(): {
       }
     }
 
-    return { running: state.running, pid: state.pid, selfHealed, pidAlive };
+    return {
+      running: state.running,
+      pid: state.pid,
+      selfHealed,
+      pidAlive,
+      recoveryBlocked: false,
+      recoveryReason: null,
+    };
   } catch {
-    return { running: false, pid: null, selfHealed: false, pidAlive: false };
+    return {
+      running: false,
+      pid: null,
+      selfHealed: false,
+      pidAlive: false,
+      recoveryBlocked: true,
+      recoveryReason: 'daemon state health could not be inspected strictly',
+    };
   }
 }
 
@@ -571,8 +607,15 @@ export async function buildReadiness(cfg: AshlrConfig): Promise<ReadinessReport>
 
   // -- daemon not stuck (H5 self-heal already applied at load) -----------------
   {
-    const { running, pid, selfHealed } = readDaemonHealth();
-    if (selfHealed) {
+    const { running, pid, selfHealed, recoveryBlocked, recoveryReason } = readDaemonHealth();
+    if (recoveryBlocked) {
+      blockers.push({
+        id: 'daemon-recovery',
+        severity: 'blocker',
+        detail: recoveryReason ?? 'daemon state recovery is pending resolution',
+        fix: 'Resolve the daemon state recovery before running autonomy.',
+      });
+    } else if (selfHealed) {
       info.push({
         id: 'daemon',
         severity: 'info',

@@ -32,12 +32,20 @@ import { serviceActivity } from '../core/daemon/service-activity.js';
 import { assertResidentServiceInstallAuthorized } from '../core/daemon/service-install-authority.js';
 import type { PolicyMutationResult } from '../core/sandbox/policy.js';
 
-type DaemonSubcommand = 'start' | 'stop' | 'status' | 'install' | 'uninstall' | 'service-status';
+type DaemonSubcommand =
+  | 'start'
+  | 'stop'
+  | 'status'
+  | 'recover-state'
+  | 'install'
+  | 'uninstall'
+  | 'service-status';
 
 const DAEMON_SUBCOMMANDS = new Set<DaemonSubcommand>([
   'start',
   'stop',
   'status',
+  'recover-state',
   'install',
   'uninstall',
   'service-status',
@@ -52,6 +60,9 @@ const DAEMON_USAGE: Record<DaemonSubcommand, string> = {
     'Usage: ashlr daemon start [--once] [--dry-run] [--drain diagnostic-reslices] [--limit <n>] [--budget <usd>] [--interval <ms>] [--parallel <n>]',
   stop: 'Usage: ashlr daemon stop',
   status: 'Usage: ashlr daemon status [--json]',
+  'recover-state':
+    'Usage: ashlr daemon recover-state --dry-run --expected-sha256 <sha256> [--json]\n' +
+    '   or: ashlr daemon recover-state --execute --plan-id <uuid> --plan-sha256 <sha256> --authorize <plan-sha256> [--json]',
   install: 'Usage: ashlr daemon install [--no-autostart] (temporarily unavailable)',
   uninstall: 'Usage: ashlr daemon uninstall',
   'service-status': 'Usage: ashlr daemon service-status [--json]',
@@ -63,6 +74,7 @@ Subcommands:
   start           Run the proposal-only daemon
   stop            Request an orderly daemon shutdown
   status          Show daemon state [--json]
+  recover-state   Preview or explicitly execute one exact state quarantine
   install         Temporarily unavailable (resident service mutation restricted)
   uninstall       Remove the OS service
   service-status  Show OS service state [--json]
@@ -206,6 +218,15 @@ interface StartFlags {
   parallel?: number;
 }
 
+interface RecoverStateFlags {
+  mode?: 'dry-run' | 'execute';
+  expectedSha256?: string;
+  planId?: string;
+  planSha256?: string;
+  authorization?: string;
+  json: boolean;
+}
+
 /** Parse a numeric flag value; returns undefined when missing/invalid. */
 function parseNum(v: string | undefined): number | undefined {
   if (v === undefined) return undefined;
@@ -263,6 +284,47 @@ function parseStartFlags(args: string[]): { flags: StartFlags; err?: string } {
   }
   if (flags.limit !== undefined && flags.drain === undefined) {
     return { flags, err: '--limit requires --drain' };
+  }
+  return { flags };
+}
+
+function parseRecoverStateFlags(args: string[]): { flags: RecoverStateFlags; err?: string } {
+  const flags: RecoverStateFlags = { json: false };
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === '--dry-run' || arg === '--execute') {
+      const mode = arg === '--dry-run' ? 'dry-run' : 'execute';
+      if (flags.mode && flags.mode !== mode) return { flags, err: '--dry-run and --execute are mutually exclusive' };
+      flags.mode = mode;
+      continue;
+    }
+    if (arg === '--json') {
+      flags.json = true;
+      continue;
+    }
+    const value = args[i + 1];
+    if (arg === '--expected-sha256' || arg === '--plan-id' || arg === '--plan-sha256' || arg === '--authorize') {
+      if (!value || value.startsWith('-')) return { flags, err: `${arg} requires a value` };
+      i += 1;
+      if (arg === '--expected-sha256') flags.expectedSha256 = value;
+      if (arg === '--plan-id') flags.planId = value;
+      if (arg === '--plan-sha256') flags.planSha256 = value;
+      if (arg === '--authorize') flags.authorization = value;
+      continue;
+    }
+    return { flags, err: arg?.startsWith('-') ? `Unknown flag: ${arg}` : `Unexpected argument: ${arg}` };
+  }
+  if (!flags.mode) return { flags, err: 'recover-state requires exactly one of --dry-run or --execute' };
+  if (flags.mode === 'dry-run') {
+    if (!flags.expectedSha256) return { flags, err: '--dry-run requires --expected-sha256' };
+    if (flags.planId || flags.planSha256 || flags.authorization) {
+      return { flags, err: '--dry-run does not accept execution authority flags' };
+    }
+  } else {
+    if (!flags.planId || !flags.planSha256 || !flags.authorization) {
+      return { flags, err: '--execute requires --plan-id, --plan-sha256, and --authorize' };
+    }
+    if (flags.expectedSha256) return { flags, err: '--execute is bound by the persisted plan and does not accept --expected-sha256' };
   }
   return { flags };
 }
@@ -606,6 +668,68 @@ async function cmdDaemonStatus(jsonMode: boolean): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
+// Subcommand: recover-state (dry-run plan or explicitly authorized quarantine)
+// ---------------------------------------------------------------------------
+
+async function cmdDaemonRecoverState(flags: RecoverStateFlags): Promise<number> {
+  const col = makeColors(process.stdout.isTTY === true);
+  const svcMod = await importServiceManager();
+  if (!svcMod) {
+    console.error(col.red('error: ') + 'daemon service observation is unavailable. No state was changed.');
+    return 1;
+  }
+  let recovery: typeof import('../core/daemon/state-recovery.js');
+  try {
+    recovery = await import('../core/daemon/state-recovery.js');
+  } catch {
+    console.error(col.red('error: ') + 'daemon state recovery module is unavailable. No state was changed.');
+    return 1;
+  }
+  const runtime = {
+    serviceStatus: () => svcMod.serviceStatus({}),
+    prepareAtomicQuarantineEvidence: recovery.prepareDaemonStateAtomicQuarantineEvidence,
+  };
+  const result = flags.mode === 'dry-run'
+    ? recovery.previewDaemonStateQuarantine(flags.expectedSha256!, runtime)
+    : recovery.executeDaemonStateQuarantine({
+        planId: flags.planId!,
+        planDigest: flags.planSha256!,
+        operatorAuthorization: flags.authorization!,
+      }, runtime);
+
+  if (flags.json) {
+    console.log(JSON.stringify(result, null, 2));
+  } else if (!result.ok) {
+    console.error(col.red('error: ') + `daemon state recovery refused (${result.reason}): ${result.detail}`);
+    console.error(col.dim('No daemon service start, restart, install, or automatic repair was attempted.'));
+  } else if ('plan' in result) {
+    console.log('');
+    console.log(col.bold('  daemon state quarantine preview'));
+    console.log('  ' + col.bold('plan id:       ') + col.dim(result.plan.planId));
+    console.log('  ' + col.bold('plan SHA-256:  ') + col.dim(result.plan.planDigest));
+    console.log('  ' + col.bold('expires:       ') + col.dim(result.plan.expiresAt));
+    console.log('  ' + col.bold('signing key:   ') + col.dim(result.plan.signingKeyId));
+    console.log('  ' + col.bold('source SHA-256:') + ' ' + col.dim(result.plan.expectedSourceSha256));
+    console.log('  ' + col.bold('issues:        ') + col.yellow(result.plan.issueCodes.join(', ')));
+    console.log('');
+    console.log(col.dim('  Dry-run only: daemon.json was not changed. The persisted plan grants no authority.'));
+    console.log(col.dim('  Execution requires --execute plus the exact plan id and digest repeated via --authorize.'));
+    console.log('');
+  } else {
+    console.log('');
+    console.log(col.green('  daemon state quarantined with exact evidence preservation'));
+    console.log('  ' + col.bold('receipt SHA-256:') + ' ' + col.dim(result.receipt.receiptDigest));
+    console.log('  ' + col.bold('source SHA-256: ') + col.dim(result.receipt.sourceSha256));
+    console.log('  ' + col.bold('evidence file:  ') + col.dim(result.quarantinePath));
+    console.log('');
+    console.log(col.yellow('  Daemon startup remains blocked pending a separately authorized migration or resolution.'));
+    console.log(col.dim('  No service start, restart, install, or repair was attempted.'));
+    console.log('');
+  }
+  return result.ok ? 0 : 1;
+}
+
+// ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
@@ -822,10 +946,15 @@ export async function cmdDaemon(args: string[]): Promise<number> {
   }
 
   let startFlags: StartFlags | undefined;
+  let recoverStateFlags: RecoverStateFlags | undefined;
   let validationError: string | undefined;
   if (sub === 'start') {
     const parsed = parseStartFlags(rest);
     startFlags = parsed.flags;
+    validationError = parsed.err;
+  } else if (sub === 'recover-state') {
+    const parsed = parseRecoverStateFlags(rest);
+    recoverStateFlags = parsed.flags;
     validationError = parsed.err;
   } else {
     const allowed = sub === 'install'
@@ -844,6 +973,8 @@ export async function cmdDaemon(args: string[]): Promise<number> {
       return cmdDaemonStop();
     case 'status':
       return cmdDaemonStatus(rest.includes('--json'));
+    case 'recover-state':
+      return cmdDaemonRecoverState(recoverStateFlags!);
     case 'install':
       return cmdDaemonInstall(!rest.includes('--no-autostart'));
     case 'uninstall':
