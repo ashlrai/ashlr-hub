@@ -195,10 +195,11 @@ async function cmdMcpList(args: string[]): Promise<number> {
 
     for (const srv of registry.servers) {
       const isAshlr   = srv.name === 'ashlr';
-      const isPhantom = srv.name === 'phantom-secrets';
+      const isPhantom = srv.name === 'phantom-secrets' || srv.name === 'phantom';
+      const isLocus   = srv.name === 'locus';
       const nameStr   = isAshlr
         ? magenta(srv.name)
-        : isPhantom
+        : isPhantom || isLocus
           ? cyan(srv.name)
           : srv.name;
 
@@ -245,8 +246,12 @@ async function cmdMcpList(args: string[]): Promise<number> {
 // Subcommand: doctor
 // ---------------------------------------------------------------------------
 
-/** Required server names — gateway is unhealthy if these are down. */
-const REQUIRED_SERVERS = new Set(['ashlr', 'phantom-secrets']);
+/**
+ * Required server names — gateway is unhealthy if these are down.
+ * Identity plane (`locus`) + secret plane (`phantom-secrets`) + hub (`ashlr`).
+ * Discovery keys match MCP config server names (not binary names).
+ */
+const REQUIRED_SERVERS = new Set(['ashlr', 'phantom-secrets', 'locus']);
 
 async function cmdMcpDoctor(args: string[]): Promise<number> {
   const jsonMode  = args.includes('--json');
@@ -323,7 +328,7 @@ async function cmdMcpDoctor(args: string[]): Promise<number> {
   // Exit 1 if any REQUIRED server is down
   const anyRequiredDown = healths.some(h => REQUIRED_SERVERS.has(h.name) && !h.ok);
   if (anyRequiredDown && !jsonMode) {
-    console.log(red('  One or more required servers (ashlr, phantom-secrets) are down.'));
+    console.log(red('  One or more required servers (ashlr, phantom-secrets, locus) are down.'));
     console.log('');
   }
 
@@ -516,6 +521,14 @@ const ECOSYSTEM_SERVERS: EcosystemServer[] = [
     args: ['mcp', 'serve'],
     label: 'Phantom Secrets (phantom-mcp)',
   },
+  {
+    // Identity plane — multiplexor only; never ambient provider MCPs.
+    name: 'locus',
+    probe: 'locus-mcp',
+    command: 'locus-mcp',
+    args: [],
+    label: 'Locus (identity plane)',
+  },
 ];
 
 /** Resolve a binary's full path from PATH; returns undefined if not found. */
@@ -696,7 +709,7 @@ function printHelp(): void {
   const cmds: [string, string][] = [
     ['(default)',                       'Run the aggregation gateway on stdio. Point any agent here.'],
     ['list [--json]',                   'Print discovered servers + ecosystem tools summary.'],
-    ['doctor [--json]',                 'Probe each server; exit 1 if required servers (ashlr/phantom) are down.'],
+    ['doctor [--json]',                 'Probe each server; exit 1 if required servers (ashlr/phantom/locus) are down.'],
     ['install <claude|ashlrcode>',      'Idempotently add the ashlr gateway to a target config (backs up first).'],
     ['install <target> --config <path>', 'Install to a specific config path (use in tests to avoid real configs).'],
     ['ecosystem',                        'Detect installed ecosystem MCP servers + show registration status.'],
