@@ -17,23 +17,37 @@
  *   parseStatusOneline, isStatusOnelineHealthy, canMutate,
  *   parseRequiredServers, hasRequiredServers, parseAgentReportJson,
  *   blockersFromAgentReport, evaluateFleetGate, decidePreMutateGate,
- *   resolveLocusEnforceMode, decideLocusSessionRun, scrubbedChildEnv,
- *   validateMintEnv, applyLocusSessionEnv, parseMcpConfigJson,
+ *   parseLocusEnforceToken, resolveLocusEnforceMode, decideLocusSessionRun,
+ *   scrubbedChildEnv, validateMintEnv, applyLocusSessionEnv, parseMcpConfigJson,
  *   mergeLocusIntoMcpConfig, locusServerSpec
  *
- * Shell-out: locusAvailable, locusAgentReport, ensureLocusReady, locusFleetGate,
+ * Shell-out / FS: locusAvailable, locusAgentReport, ensureLocusReady, locusFleetGate,
  *   assertLocusPreMutate, applyLocusPreMutateGate, withLocusSession,
  *   runWithLocusSessionIfConfigured, locusDoctorLine, registerLocusInMcpConfig
  *
- * Pre-mutate enforcement:
- *   LOCUS_ENFORCE=1|true|yes|enforce → fail closed when fleet gate blocks
- *   LOCUS_ENFORCE=warn|log           → log blockers, allow dispatch
- *   unset / 0 / off                  → no CLI probe (monorepo-safe default)
+ * Pre-mutate enforcement (opt-in — never always-on):
+ *   Resolution order for mode (see resolveLocusEnforceMode):
+ *     1. env LOCUS_ENFORCE when set (wins over config, including LOCUS_ENFORCE=off)
+ *     2. ~/.ashlr/config.json → locus.enforce ("off"|"warn"|"enforce")
+ *     3. off (monorepo-safe default when both unset)
+ *
+ *   Tokens (env or config):
+ *     1|true|yes|enforce|block → enforce (fail closed when fleet gate blocks)
+ *     warn|log                 → warn (log blockers, allow dispatch)
+ *     unset / 0 / false / no / off / "" → off (no CLI probe)
+ *     unknown non-empty env token → enforce (fail closed; do not soft-allow typos)
+ *
+ *   Firm mode example (~/.ashlr/config.json):
+ *     { "locus": { "enforce": "enforce" } }
+ *   Soft roll-out:
+ *     { "locus": { "enforce": "warn" } }
+ *   Local override without editing config:
+ *     LOCUS_ENFORCE=off
  *
  * CI session isolation (runWithLocusSessionIfConfigured):
  *   LOCUS_CI_BINDING / LOCUS_BINDING → ephemeral `ci mint` (no ambient active.json)
- *   LOCUS_ENFORCE=enforce without binding → refuse (LocusSessionConfigError)
- *   LOCUS_ENFORCE=warn without binding → warn + pass-through
+ *   enforce mode without binding → refuse (LocusSessionConfigError)
+ *   warn mode without binding → warn + pass-through
  *   LOCUS_SESSION_ID already set → already-session (skip re-mint)
  *   otherwise → pass-through (monorepo-safe default)
  *
@@ -46,6 +60,8 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { loadConfigReadOnly } from "../config.js";
+import type { AshlrConfig } from "../types.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -181,6 +197,17 @@ export interface WithLocusSessionOptions {
 
 /** How the hub should treat locus fleet-gate blockers before mutate/dispatch. */
 export type LocusEnforceMode = "off" | "warn" | "enforce";
+
+/**
+ * Optional config slice consulted by {@link resolveLocusEnforceMode} after env.
+ * Accepts either `cfg.locus`, a bare `{ enforce }`, or a full {@link AshlrConfig}.
+ */
+export type LocusEnforceConfigInput =
+  | Pick<AshlrConfig, "locus">
+  | NonNullable<AshlrConfig["locus"]>
+  | AshlrConfig
+  | null
+  | undefined;
 
 /**
  * Decision from the pre-mutate gate wrapper.
@@ -766,24 +793,21 @@ export function locusFleetGate(env?: NodeJS.ProcessEnv): LocusFleetGateResult {
 }
 
 // ---------------------------------------------------------------------------
-// Pre-mutate gate (opt-in enforce via LOCUS_ENFORCE)
+// Pre-mutate gate (opt-in enforce via LOCUS_ENFORCE and/or config.locus)
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve LOCUS_ENFORCE into a mode.
+ * Parse a single enforce token from env or config into a mode.
  *
  * | value | mode |
  * |-------|------|
- * | unset, 0, false, no, off | off |
+ * | empty, 0, false, no, off | off |
  * | warn, log | warn |
  * | 1, true, yes, enforce, block | enforce |
  *
  * Unknown non-empty values fail closed to `enforce`.
  */
-export function resolveLocusEnforceMode(
-  env?: NodeJS.ProcessEnv,
-): LocusEnforceMode {
-  const raw = (env ?? process.env).LOCUS_ENFORCE;
+export function parseLocusEnforceToken(raw: unknown): LocusEnforceMode {
   if (raw === undefined || raw === null) return "off";
   const v = String(raw).trim().toLowerCase();
   if (!v || v === "0" || v === "false" || v === "no" || v === "off") {
@@ -801,6 +825,85 @@ export function resolveLocusEnforceMode(
   }
   // Unknown token → enforce (fail closed; do not soft-allow typoed policy)
   return "enforce";
+}
+
+/**
+ * Extract `locus.enforce` from a config slice / full AshlrConfig / bare
+ * `{ enforce }` object. Returns undefined when the field is absent.
+ */
+export function extractLocusConfigEnforce(
+  config?: LocusEnforceConfigInput,
+): string | undefined {
+  if (config == null || typeof config !== "object") return undefined;
+  // Bare { enforce: ... }
+  if (
+    "enforce" in config &&
+    !("locus" in config) &&
+    (config as { enforce?: unknown }).enforce !== undefined &&
+    (config as { enforce?: unknown }).enforce !== null
+  ) {
+    return String((config as { enforce: unknown }).enforce);
+  }
+  // AshlrConfig or { locus?: { enforce?: ... } }
+  if ("locus" in config) {
+    const locus = (config as { locus?: { enforce?: unknown } | null }).locus;
+    if (
+      locus != null &&
+      typeof locus === "object" &&
+      locus.enforce !== undefined &&
+      locus.enforce !== null
+    ) {
+      return String(locus.enforce);
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Best-effort read of `locus` from ~/.ashlr/config.json.
+ * Never throws; returns undefined on missing/unreadable config.
+ * Used only by production wrappers (assert / session run) — pure resolvers
+ * take an explicit config argument so unit tests stay hermetic.
+ */
+export function readLocusConfigFromAshlr():
+  | NonNullable<AshlrConfig["locus"]>
+  | undefined {
+  try {
+    const cfg = loadConfigReadOnly();
+    const locus = cfg?.locus;
+    if (locus == null || typeof locus !== "object") return undefined;
+    return locus;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Resolve Locus enforce mode.
+ *
+ * Order (first match wins):
+ *   1. env `LOCUS_ENFORCE` when the key is present (including empty → off)
+ *   2. config `locus.enforce` when provided / present
+ *   3. `off` (monorepo-safe default — never always-on)
+ *
+ * Pure when `config` is passed explicitly (or omitted for env-only). Does not
+ * load ~/.ashlr itself; use {@link readLocusConfigFromAshlr} at call sites.
+ */
+export function resolveLocusEnforceMode(
+  env?: NodeJS.ProcessEnv,
+  config?: LocusEnforceConfigInput,
+): LocusEnforceMode {
+  const e = env ?? process.env;
+  const rawEnv = e.LOCUS_ENFORCE;
+  // Env wins whenever the key is set (including "" / "off" overriding config).
+  if (rawEnv !== undefined && rawEnv !== null) {
+    return parseLocusEnforceToken(rawEnv);
+  }
+  const rawCfg = extractLocusConfigEnforce(config);
+  if (rawCfg !== undefined) {
+    return parseLocusEnforceToken(rawCfg);
+  }
+  return "off";
 }
 
 /**
@@ -862,13 +965,22 @@ export function decidePreMutateGate(
  * - mode=off: returns allow without shelling out (monorepo-safe default).
  * - mode=warn|enforce: shells to `locusFleetGate` and decides.
  *
+ * Mode resolution: env LOCUS_ENFORCE wins; else `config` / ~/.ashlr
+ * `locus.enforce`; else off. Pass `config` explicitly in tests to avoid
+ * reading the real home config (or pass `null` to disable config).
+ *
  * Prefer this over bare `ensureLocusReady` at shared spawn sites so opt-in
  * enforcement does not break CI that lacks a Locus pin.
  */
 export function assertLocusPreMutate(
   env?: NodeJS.ProcessEnv,
+  config?: LocusEnforceConfigInput,
 ): LocusPreMutateDecision {
-  const mode = resolveLocusEnforceMode(env);
+  // When the second arg is omitted, consult ~/.ashlr (firm-mode config path).
+  // Explicit null/object skips the FS read so unit tests stay hermetic.
+  const cfg =
+    arguments.length >= 2 ? config : readLocusConfigFromAshlr();
+  const mode = resolveLocusEnforceMode(env, cfg);
   if (mode === "off") {
     return {
       allow: true,
@@ -890,16 +1002,25 @@ export function formatPreMutateBlockers(decision: LocusPreMutateDecision): strin
 }
 
 /**
- * Shared call-site helper: probe (when LOCUS_ENFORCE is on), log warn/block to
- * stderr, return the decision. Callers refuse when `!decision.allow`.
+ * Shared call-site helper: probe (when enforce mode is on via env or config),
+ * log warn/block to stderr, return the decision. Callers refuse when
+ * `!decision.allow`.
  *
  * Keeps spawnEngine / runSwarm / runApiModelSandboxed on one logging contract.
  * Never throws. Never logs secrets.
+ *
+ * When `config` is omitted, loads `locus` from ~/.ashlr/config.json (same as
+ * {@link assertLocusPreMutate}). Pass `null` or an explicit object in tests.
  */
 export function applyLocusPreMutateGate(
   env?: NodeJS.ProcessEnv,
+  config?: LocusEnforceConfigInput,
 ): LocusPreMutateDecision {
-  const decision = assertLocusPreMutate(env);
+  // Preserve "config omitted → load ~/.ashlr" vs "config null → no config".
+  const decision =
+    arguments.length >= 2
+      ? assertLocusPreMutate(env, config)
+      : assertLocusPreMutate(env);
   if (!decision.allow) {
     const msg =
       formatPreMutateBlockers(decision) ||
@@ -936,14 +1057,17 @@ export function applyLocusPreMutateGate(
  * | LOCUS_SESSION_ID set | already-session (skip re-mint) |
  * | LOCUS_CI_BINDING set | mint (prefer CI binding) |
  * | LOCUS_BINDING set | mint |
- * | LOCUS_ENFORCE=enforce, no binding | refuse |
- * | LOCUS_ENFORCE=warn, no binding | warn |
+ * | enforce mode, no binding | refuse |
+ * | warn mode, no binding | warn |
  * | otherwise | pass-through |
  *
- * Never shells out. Never throws.
+ * Mode uses {@link resolveLocusEnforceMode} (env wins, then config, then off).
+ * Never shells out. Never throws. Does not load ~/.ashlr — pass `config`
+ * (or rely on {@link runWithLocusSessionIfConfigured} which loads it).
  */
 export function decideLocusSessionRun(
   env?: NodeJS.ProcessEnv,
+  config?: LocusEnforceConfigInput,
 ): LocusSessionRunDecision {
   const e = env ?? process.env;
   const sessionId = (e.LOCUS_SESSION_ID ?? "").trim();
@@ -965,7 +1089,7 @@ export function decideLocusSessionRun(
     return { kind: "mint", binding, source: "LOCUS_BINDING" };
   }
 
-  const mode = resolveLocusEnforceMode(e);
+  const mode = resolveLocusEnforceMode(e, config);
   if (mode === "enforce") {
     return {
       kind: "refuse",
@@ -1011,7 +1135,8 @@ export async function runWithLocusSessionIfConfigured<T>(
   opts?: RunWithLocusSessionOptions,
 ): Promise<T> {
   const env = opts?.env ?? process.env;
-  const decision = decideLocusSessionRun(env);
+  // Consult ~/.ashlr locus.enforce when env LOCUS_ENFORCE is unset (firm mode).
+  const decision = decideLocusSessionRun(env, readLocusConfigFromAshlr());
 
   if (decision.kind === "mint") {
     return withLocusSession(

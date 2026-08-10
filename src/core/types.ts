@@ -523,6 +523,32 @@ export interface AshlrConfig {
       cacheTtlMs?: number;
     };
   };
+
+  /**
+   * Locus identity-plane firm mode for hub fleet / pre-mutate gates.
+   * DEFAULT ABSENT → enforce mode is off (monorepo-safe). Never always-on.
+   *
+   * Resolution order (see `resolveLocusEnforceMode`):
+   *   1. env `LOCUS_ENFORCE` when set (wins over config)
+   *   2. `locus.enforce` from ~/.ashlr/config.json
+   *   3. off
+   *
+   * Firm agencies typically set:
+   *   "locus": { "enforce": "enforce" }
+   * Soft roll-out:
+   *   "locus": { "enforce": "warn" }
+   * Local override without editing config:
+   *   LOCUS_ENFORCE=off
+   */
+  locus?: {
+    /**
+     * Pre-mutate / CI session isolation mode.
+     * - off: no CLI probe (default when unset)
+     * - warn: log blockers, allow dispatch
+     * - enforce: fail closed when fleet gate blocks
+     */
+    enforce?: 'off' | 'warn' | 'enforce';
+  };
   /**
    * Shared-memory / genome settings (M7). Controls recall limits and whether
    * the orchestrator injects recall hits into sub-agent prompts.
