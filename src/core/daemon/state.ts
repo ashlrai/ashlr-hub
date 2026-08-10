@@ -208,7 +208,7 @@ export type UpgradeLegacyDaemonSpendGuardResult =
 // Zeroed default state
 // ---------------------------------------------------------------------------
 
-function freshState(): DaemonState {
+export function freshDaemonState(): DaemonState {
   return {
     running: false,
     pid: null,
@@ -416,13 +416,13 @@ function sameFile(left: Stats, right: Stats): boolean {
  */
 export function loadDaemonState(): DaemonState {
   const p = daemonStatePath();
-  if (!existsSync(p)) return freshState();
+  if (!existsSync(p)) return freshDaemonState();
   try {
     const raw = readFileSync(p, 'utf8');
-    return parseDaemonState(raw) ?? freshState();
+    return parseDaemonState(raw) ?? freshDaemonState();
   } catch {
     // Corrupt JSON or any other read error — return zeroed state.
-    return freshState();
+    return freshDaemonState();
   }
 }
 
@@ -466,7 +466,7 @@ export function loadDaemonStateStrict(
     named = lstatSync(p);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { ok: true, state: freshState(), fresh: true };
+      return { ok: true, state: freshDaemonState(), fresh: true };
     }
     const msg = err instanceof Error ? err.message : String(err);
     return {
