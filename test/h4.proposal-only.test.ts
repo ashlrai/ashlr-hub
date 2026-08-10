@@ -13,10 +13,9 @@
  *
  * SAFETY (paramount — see CONTRACT-H4.md): isolated tmp HOME per test (H1
  * fixture), disposable repos only, real ~/.ashlr never touched, DETERMINISTIC.
- * NO live model: node:child_process is mocked so that the real `execFileSync`
- * (git, used by applyPatch) stays intact while `spawnSync` (used ONLY by the
- * github.ts createPr gate) is stubbed to FAIL — proving the `pr` dispatch is
- * gated without ANY network/gh call. The daemon/swarm propose paths are asserted
+ * NO live model: node:child_process is mocked so that real non-GitHub subprocesses
+ * stay intact while every `gh` executable is stubbed to FAIL — proving the `pr`
+ * dispatch is gated without ANY network/gh call. The daemon/swarm propose paths are asserted
  * via the real tick(dryRun) (which creates ZERO proposals), the daemon
  * default-empty semantics, and the real captureSandboxAndCleanup source contract
  * (propose=false ⇒ no _createProposal). Every it() has real expect(); beforeEach
@@ -54,12 +53,23 @@ vi.mock('../src/core/portfolio/backlog.js', () => ({
 // ---------------------------------------------------------------------------
 
 let _spawnSyncImpl: (...args: unknown[]) => unknown;
+let _delegatedSpawnExecutables: string[] = [];
+let _controlledGhExecutables: string[] = [];
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
   return {
     ...actual,
-    spawnSync: (...args: unknown[]) => _spawnSyncImpl(...args),
+    spawnSync: (...args: unknown[]) => {
+      const executable = typeof args[0] === 'string' ? args[0] : '';
+      const basename = executable.replace(/\\/g, '/').split('/').at(-1)?.toLowerCase();
+      if (basename === 'gh' || basename === 'gh.exe') {
+        _controlledGhExecutables.push(executable);
+        return _spawnSyncImpl(...args);
+      }
+      _delegatedSpawnExecutables.push(executable);
+      return Reflect.apply(actual.spawnSync, undefined, args);
+    },
   };
 });
 
@@ -98,6 +108,7 @@ import {
 import { tick } from '../src/core/daemon/loop.js';
 import { readAudit } from '../src/core/sandbox/audit.js';
 import type { AuditEntry, Proposal } from '../src/core/types.js';
+import { spawnSync as harnessSpawnSync } from 'node:child_process';
 
 // ---------------------------------------------------------------------------
 // Per-test fixture lifecycle (explicit makeFixture/cleanup so the suite can read
@@ -108,9 +119,11 @@ let fx: H1Fixture;
 
 beforeEach(() => {
   expect.hasAssertions();
-  fx = makeFixture();
   // Default: any `gh` spawn fails — no real gh, no network.
   _spawnSyncImpl = () => spawnGhFail();
+  _delegatedSpawnExecutables = [];
+  _controlledGhExecutables = [];
+  fx = makeFixture();
   mockBuildBacklog.mockReset();
   // M160: scanDeps/scanLint/scanHygiene are DEFAULT-OFF. Provide a dynamic mock
   // so tick() always has at least one backlog item (returns 'dry-run' not
@@ -181,6 +194,20 @@ function proposalBranches(repo: DisposableRepo): string[] {
 // ===========================================================================
 
 describe('H4 · PROPOSAL-ONLY · applyProposal gates', () => {
+  it('delegates ACL custody probes while every gh executable remains controlled', () => {
+    const repo = fx.makeRepo();
+    const proposal = createProposal(makeInput(repo.dir, { kind: 'note' }));
+    expect(proposal.status).toBe('pending');
+    if (process.platform === 'darwin') {
+      expect(_delegatedSpawnExecutables).toContain('/bin/ls');
+    }
+
+    const blocked = harnessSpawnSync('/usr/local/bin/gh', ['api', 'user']);
+    expect(blocked.status).toBe(1);
+    expect(_controlledGhExecutables).toEqual(['/usr/local/bin/gh']);
+    expect(_delegatedSpawnExecutables).not.toContain('/usr/local/bin/gh');
+  });
+
   it('1.1 REFUSES when the proposal does not exist (loadProposal===null) — no branch, tree unchanged, audit refused', async () => {
     const repo = fx.makeRepo();
     const treeBefore = repo.shasumTree();
