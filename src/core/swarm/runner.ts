@@ -79,6 +79,14 @@ import {
 } from '../util/execution-lease.js';
 import { assertMayMutate, killSwitchOn } from '../sandbox/policy.js';
 import {
+  applyLocusPreMutateGate,
+  applyLocusSessionEnv,
+  formatPreMutateBlockers,
+  LocusMintError,
+  LocusSessionConfigError,
+  runWithLocusSessionIfConfigured,
+} from '../integrations/locus.js';
+import {
   acquireOutwardMutationFence,
   ownsOutwardMutationFence,
   releaseOutwardMutationFence,
@@ -1552,6 +1560,21 @@ async function runSwarmInternal(
   }
 
   // -------------------------------------------------------------------------
+  // Locus identity pre-mutate gate (opt-in via LOCUS_ENFORCE).
+  // Early refuse before sandbox/plan work. Default off; enforce fails closed.
+  // spawnEngine is also gated — this covers swarm entry + fleet tick paths.
+  // -------------------------------------------------------------------------
+  {
+    const locusGate = applyLocusPreMutateGate(process.env);
+    if (!locusGate.allow) {
+      const msg =
+        formatPreMutateBlockers(locusGate) ||
+        'locus pre-mutate enforce: blocked (no detail)';
+      return refuseFreshIdentity(msg);
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Set ASHLR_IN_SWARM=1 on THIS process so all child engine spawns inherit it.
   // This prevents any task (via runGoal → spawnEngine) from recursively
   // invoking `ashlr swarm`.
@@ -2191,8 +2214,38 @@ export async function runSwarm(
   let persistenceFailed = false;
   const execute = async (): Promise<SwarmRun> => {
     try {
-      return await runSwarmInternal(input, cfg, opts, sink);
+      // CI isolation: when LOCUS_CI_BINDING/LOCUS_BINDING is set, mint an
+      // ephemeral sealed session and overlay LOCUS_* onto process.env so child
+      // engines inherit it. Restores prior values after the swarm finishes.
+      // Default (unset binding + LOCUS_ENFORCE off) is a no-op pass-through.
+      return await runWithLocusSessionIfConfigured(async (handle) => {
+        const restored: Array<[string, string | undefined]> = [];
+        if (handle) {
+          const overlay: NodeJS.ProcessEnv = {};
+          applyLocusSessionEnv(overlay, handle.env);
+          for (const [key, value] of Object.entries(overlay)) {
+            if (typeof value !== 'string') continue;
+            restored.push([key, process.env[key]]);
+            process.env[key] = value;
+          }
+        }
+        try {
+          return await runSwarmInternal(input, cfg, opts, sink);
+        } finally {
+          for (const [key, prev] of restored) {
+            if (prev === undefined) delete process.env[key];
+            else process.env[key] = prev;
+          }
+        }
+      });
     } catch (error) {
+      if (
+        error instanceof LocusSessionConfigError ||
+        error instanceof LocusMintError
+      ) {
+        const refusedId = opts.runId ?? opts.resumeId ?? makeId();
+        return refuseAuthority(refusedId, error.message);
+      }
       if (!(error instanceof SwarmPersistenceError)) throw error;
       persistenceFailed = true;
       const run = error.run;

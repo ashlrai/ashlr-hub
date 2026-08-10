@@ -1,9 +1,12 @@
 /**
  * Pure-helper unit tests for src/core/integrations/locus.ts.
  * No real spawn — only parse/gate helpers (fail-closed contract).
+ * Site-wiring tests mock applyLocusPreMutateGate so LOCUS_ENFORCE is exercised
+ * without a real locus CLI (monorepo-safe).
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { randomUUID } from 'node:crypto';
 import {
   REQUIRED_SERVERS,
   parseStatusOneline,
@@ -17,6 +20,16 @@ import {
   mergeLocusIntoMcpConfig,
   locusServerSpec,
   missingAgentReportKeys,
+  scrubbedChildEnv,
+  validateMintEnv,
+  applyLocusSessionEnv,
+  resolveLocusEnforceMode,
+  decidePreMutateGate,
+  decideLocusSessionRun,
+  formatPreMutateBlockers,
+  applyLocusPreMutateGate,
+  assertLocusPreMutate,
+  LocusMintError,
 } from '../src/core/integrations/locus.js';
 
 describe('REQUIRED_SERVERS', () => {
@@ -123,9 +136,479 @@ describe('parseAgentReportJson / fleet gate', () => {
     expect(blockers.some((b) => b.includes('unhealthy') || b.includes('unpinned'))).toBe(true);
     expect(blockers.some((b) => b.includes('required_servers'))).toBe(true);
   });
+
+  it('blocks credential migration incomplete doctor finding', () => {
+    const bad = {
+      ...sample,
+      doctor: {
+        findings: [{ code: 'credential_migration_incomplete', severity: 'error' }],
+      },
+    };
+    const blockers = blockersFromAgentReport(bad as never);
+    expect(blockers).toContain('credential migration reconciliation incomplete');
+    expect(evaluateFleetGate(bad as never).allowDispatch).toBe(false);
+  });
+});
+
+describe('scrubbedChildEnv', () => {
+  it('drops ambient credentials and keeps runtime basics', () => {
+    const parent = {
+      PATH: '/usr/bin',
+      HOME: '/home/u',
+      LANG: 'en_US.UTF-8',
+      LC_ALL: 'C',
+      AWS_PROFILE: 'personal',
+      GH_TOKEN: 'gho_secret',
+      SUPABASE_SERVICE_ROLE_KEY: 'srk',
+      VERCEL_TOKEN: 'v',
+      ANTHROPIC_API_KEY: 'sk-ant',
+      LOCUS_HOME: '/should/not/inherit',
+      CUSTOM: 'nope',
+    };
+    const clean = scrubbedChildEnv(parent, { LOCUS_SESSION_ID: 'sess-1' });
+    expect(clean.PATH).toBe('/usr/bin');
+    expect(clean.HOME).toBe('/home/u');
+    expect(clean.LANG).toBe('en_US.UTF-8');
+    expect(clean.LC_ALL).toBe('C');
+    expect(clean.LOCUS_SESSION_ID).toBe('sess-1');
+    expect(clean.AWS_PROFILE).toBeUndefined();
+    expect(clean.GH_TOKEN).toBeUndefined();
+    expect(clean.SUPABASE_SERVICE_ROLE_KEY).toBeUndefined();
+    expect(clean.VERCEL_TOKEN).toBeUndefined();
+    expect(clean.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(clean.LOCUS_HOME).toBeUndefined();
+    expect(clean.CUSTOM).toBeUndefined();
+  });
+
+  it('lets explicit overrides win over parent runtime keys', () => {
+    const clean = scrubbedChildEnv(
+      { PATH: '/old', HOME: '/old-home' },
+      { PATH: '/new' },
+    );
+    expect(clean.PATH).toBe('/new');
+    expect(clean.HOME).toBe('/old-home');
+  });
+});
+
+describe('validateMintEnv', () => {
+  it('accepts identity + scope keys with plain string values', () => {
+    const env = validateMintEnv({
+      LOCUS_SESSION_ID: 'abc',
+      LOCUS_BINDING: 'acme',
+      LOCUS_TENANT: 'acme-corp',
+      GH_CONFIG_DIR: '/tmp/gh',
+      SUPABASE_PROJECT_REF: 'xyz',
+      LOCUS_SUPABASE_PROJECT_REF: 'xyz',
+      LOCUS_GITHUB_ORGS: 'ashlrai',
+    });
+    expect(env.LOCUS_SESSION_ID).toBe('abc');
+    expect(env.SUPABASE_PROJECT_REF).toBe('xyz');
+  });
+
+  it('rejects non-objects, credential-ref values, and disallowed keys', () => {
+    expect(() => validateMintEnv(null)).toThrow(LocusMintError);
+    expect(() => validateMintEnv([])).toThrow(LocusMintError);
+    expect(() =>
+      validateMintEnv({ LOCUS_SESSION_ID: 'phm:NAME' }),
+    ).toThrow(/disallowed env metadata/);
+    expect(() =>
+      validateMintEnv({ LOCUS_SESSION_ID: 'env:FOO' }),
+    ).toThrow(/disallowed env metadata/);
+    expect(() =>
+      validateMintEnv({ AWS_SECRET_ACCESS_KEY: 'x' }),
+    ).toThrow(/disallowed env metadata/);
+    expect(() =>
+      validateMintEnv({ LOCUS_SESSION_ID: 1 as never }),
+    ).toThrow(/disallowed env metadata/);
+  });
+});
+
+describe('pre-mutate gate decisions (LOCUS_ENFORCE)', () => {
+  const blockedGate = {
+    allowDispatch: false,
+    blockers: ['pin unhealthy: unpinned (unpinned)'],
+    gateOk: false,
+    status: 'protected',
+    status_oneline: 'unpinned',
+    available: true,
+  };
+  const openGate = {
+    allowDispatch: true,
+    blockers: [] as string[],
+    gateOk: true,
+    status: 'ready',
+    status_oneline: 'acme:acme',
+    available: true,
+  };
+
+  it('resolveLocusEnforceMode maps env tokens', () => {
+    expect(resolveLocusEnforceMode({})).toBe('off');
+    expect(resolveLocusEnforceMode({ LOCUS_ENFORCE: '' })).toBe('off');
+    expect(resolveLocusEnforceMode({ LOCUS_ENFORCE: '0' })).toBe('off');
+    expect(resolveLocusEnforceMode({ LOCUS_ENFORCE: 'off' })).toBe('off');
+    expect(resolveLocusEnforceMode({ LOCUS_ENFORCE: 'warn' })).toBe('warn');
+    expect(resolveLocusEnforceMode({ LOCUS_ENFORCE: 'log' })).toBe('warn');
+    expect(resolveLocusEnforceMode({ LOCUS_ENFORCE: '1' })).toBe('enforce');
+    expect(resolveLocusEnforceMode({ LOCUS_ENFORCE: 'true' })).toBe('enforce');
+    expect(resolveLocusEnforceMode({ LOCUS_ENFORCE: 'yes' })).toBe('enforce');
+    expect(resolveLocusEnforceMode({ LOCUS_ENFORCE: 'enforce' })).toBe('enforce');
+    // Unknown → fail closed to enforce
+    expect(resolveLocusEnforceMode({ LOCUS_ENFORCE: 'maybe' })).toBe('enforce');
+  });
+
+  it('mode=off always allows without surfacing blockers', () => {
+    const d = decidePreMutateGate(blockedGate, 'off');
+    expect(d.allow).toBe(true);
+    expect(d.blockers).toEqual([]);
+    expect(d.shouldWarn).toBe(false);
+  });
+
+  it('mode=warn allows but surfaces unpinned blockers', () => {
+    const d = decidePreMutateGate(blockedGate, 'warn');
+    expect(d.allow).toBe(true);
+    expect(d.shouldWarn).toBe(true);
+    expect(d.blockers).toContain('pin unhealthy: unpinned (unpinned)');
+    expect(formatPreMutateBlockers(d)).toMatch(/unpinned/);
+  });
+
+  it('mode=enforce refuses unpinned / unhealthy gate', () => {
+    const d = decidePreMutateGate(blockedGate, 'enforce');
+    expect(d.allow).toBe(false);
+    expect(d.shouldWarn).toBe(false);
+    expect(d.blockers.length).toBeGreaterThan(0);
+    expect(d.status_oneline).toBe('unpinned');
+  });
+
+  it('mode=enforce allows healthy ready gate', () => {
+    const d = decidePreMutateGate(openGate, 'enforce');
+    expect(d.allow).toBe(true);
+    expect(d.blockers).toEqual([]);
+    expect(d.shouldWarn).toBe(false);
+  });
+
+  it('evaluateFleetGate + decidePreMutateGate refuse unpinned report under enforce', () => {
+    const unpinned = {
+      version: '1',
+      ready: false,
+      status: 'protected',
+      status_oneline: 'unpinned',
+      home: '/tmp',
+      pin: null,
+      mcp_registered: { claude: false, cursor: false, codex: false },
+      doctor: {},
+      commands: {},
+      required_servers: ['locus', 'phantom'],
+      mcp_command: 'locus-mcp',
+    };
+    const gate = evaluateFleetGate(unpinned as never);
+    expect(gate.allowDispatch).toBe(false);
+    const decision = decidePreMutateGate(
+      { ...gate, available: true },
+      'enforce',
+    );
+    expect(decision.allow).toBe(false);
+    expect(decision.blockers.some((b) => /unpinned|not ready|ready=false/.test(b))).toBe(
+      true,
+    );
+  });
+
+  it('assertLocusPreMutate mode=off never shells (allow without blockers)', () => {
+    const d = assertLocusPreMutate({ LOCUS_ENFORCE: 'off' });
+    expect(d.allow).toBe(true);
+    expect(d.mode).toBe('off');
+    expect(d.blockers).toEqual([]);
+    expect(d.shouldWarn).toBe(false);
+  });
+
+  it('applyLocusPreMutateGate mode=off allows without CLI probe', () => {
+    const d = applyLocusPreMutateGate({ LOCUS_ENFORCE: '0' });
+    expect(d.allow).toBe(true);
+    expect(d.mode).toBe('off');
+  });
+
+  it('applyLocusPreMutateGate mode=enforce fails closed when locus CLI missing', () => {
+    // locusAvailable() uses process.env.PATH (not the env arg) for `which`.
+    const prevPath = process.env.PATH;
+    const prevPathWin = process.env.Path;
+    process.env.PATH = '/nonexistent-locus-bin-path';
+    process.env.Path = '/nonexistent-locus-bin-path';
+    try {
+      const d = applyLocusPreMutateGate({ LOCUS_ENFORCE: '1' });
+      expect(d.mode).toBe('enforce');
+      expect(d.allow).toBe(false);
+      expect(d.blockers.length).toBeGreaterThan(0);
+      expect(formatPreMutateBlockers(d)).toMatch(/locus pre-mutate enforce/);
+    } finally {
+      if (prevPath === undefined) delete process.env.PATH;
+      else process.env.PATH = prevPath;
+      if (prevPathWin === undefined) delete process.env.Path;
+      else process.env.Path = prevPathWin;
+    }
+  });
+
+  it('applyLocusPreMutateGate mode=warn allows when locus CLI missing', () => {
+    const prevPath = process.env.PATH;
+    const prevPathWin = process.env.Path;
+    process.env.PATH = '/nonexistent-locus-bin-path';
+    process.env.Path = '/nonexistent-locus-bin-path';
+    try {
+      const d = applyLocusPreMutateGate({ LOCUS_ENFORCE: 'warn' });
+      expect(d.mode).toBe('warn');
+      expect(d.allow).toBe(true);
+      expect(d.shouldWarn).toBe(true);
+      expect(d.blockers.length).toBeGreaterThan(0);
+    } finally {
+      if (prevPath === undefined) delete process.env.PATH;
+      else process.env.PATH = prevPath;
+      if (prevPathWin === undefined) delete process.env.Path;
+      else process.env.Path = prevPathWin;
+    }
+  });
+});
+
+/**
+ * Call-site wiring: runApiModelSandboxed + runSwarm refuse under enforce.
+ * Mocks applyLocusPreMutateGate so we never depend on a real pin in CI.
+ */
+describe('pre-mutate gate call sites (LOCUS_ENFORCE)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+    vi.doUnmock('../src/core/integrations/locus.js');
+    vi.doUnmock('../src/core/fleet/agent-action-ledger.js');
+  });
+
+  it('runApiModelSandboxed refuses when enforce blocks (bypasses spawnEngine)', async () => {
+    vi.doMock('../src/core/integrations/locus.js', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('../src/core/integrations/locus.js')>();
+      return {
+        ...actual,
+        applyLocusPreMutateGate: () => ({
+          allow: false,
+          mode: 'enforce' as const,
+          blockers: ['pin unhealthy: unpinned (unpinned)'],
+          shouldWarn: false,
+          gateOk: false,
+          status_oneline: 'unpinned',
+        }),
+      };
+    });
+    // Avoid ledger FS writes when recording the failed action.
+    vi.doMock('../src/core/fleet/agent-action-ledger.js', async (importOriginal) => {
+      const actual = await importOriginal<
+        typeof import('../src/core/fleet/agent-action-ledger.js')
+      >();
+      return {
+        ...actual,
+        recordAgentAction: () => {},
+      };
+    });
+
+    const mod = await import(
+      '../src/core/run/sandboxed-engine.js?locus-gate=' + randomUUID()
+    );
+    const result = await mod.runApiModelSandboxed(
+      'local-coder',
+      'test goal',
+      {} as never,
+      { sourceRepo: '/tmp/fake-locus-gate' },
+    );
+    expect(result.state.status).toBe('failed');
+    expect(result.state.result).toMatch(/locus pre-mutate|unpinned/);
+    expect(result.proposalOutcome?.kind).toBe('engine-failed-no-diff');
+  });
+
+  it('runApiModelSandboxed proceeds past gate when mode=off (mock allow)', async () => {
+    vi.doMock('../src/core/integrations/locus.js', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('../src/core/integrations/locus.js')>();
+      return {
+        ...actual,
+        applyLocusPreMutateGate: () => ({
+          allow: true,
+          mode: 'off' as const,
+          blockers: [],
+          shouldWarn: false,
+        }),
+      };
+    });
+    vi.doMock('../src/core/sandbox/worktree.js', () => ({
+      createSandbox: () => {
+        throw new Error('no git repo here');
+      },
+      removeSandbox: () => {},
+      sandboxDiff: () => ({ files: 0, patch: '', insertions: 0, deletions: 0 }),
+    }));
+    vi.doMock('../src/core/fleet/agent-action-ledger.js', async (importOriginal) => {
+      const actual = await importOriginal<
+        typeof import('../src/core/fleet/agent-action-ledger.js')
+      >();
+      return { ...actual, recordAgentAction: () => {} };
+    });
+
+    const mod = await import(
+      '../src/core/run/sandboxed-engine.js?locus-gate-off=' + randomUUID()
+    );
+    const result = await mod.runApiModelSandboxed(
+      'local-coder',
+      'test goal',
+      {} as never,
+      { sourceRepo: '/tmp/fake-locus-gate-off' },
+    );
+    // Gate allowed; failure is sandbox (proves we did not refuse at locus).
+    expect(result.state.status).toBe('failed');
+    expect(result.state.result).toMatch(/sandbox unavailable/);
+    expect(result.state.result).not.toMatch(/locus pre-mutate/);
+    vi.doUnmock('../src/core/sandbox/worktree.js');
+  });
+
+  it('runSwarm refuses when enforce blocks before nested work', async () => {
+    vi.doMock('../src/core/integrations/locus.js', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('../src/core/integrations/locus.js')>();
+      return {
+        ...actual,
+        applyLocusPreMutateGate: () => ({
+          allow: false,
+          mode: 'enforce' as const,
+          blockers: ['pin unhealthy: unpinned (unpinned)'],
+          shouldWarn: false,
+        }),
+      };
+    });
+
+    // Keep swarm away from real planner/orchestrator: it should refuse at gate
+    // before setting ASHLR_IN_SWARM or planning.
+    const prevInSwarm = process.env['ASHLR_IN_SWARM'];
+    delete process.env['ASHLR_IN_SWARM'];
+    try {
+      const mod = await import('../src/core/swarm/runner.js?locus-gate=' + randomUUID());
+      const run = await mod.runSwarm(
+        { goal: 'locus gate test' },
+        {} as never,
+        { noCapture: true },
+        () => {},
+      );
+      expect(run.status).toBe('failed');
+      expect(run.result).toMatch(/locus pre-mutate|unpinned|Refused/);
+      expect(run.tasks).toEqual([]);
+    } finally {
+      if (prevInSwarm === undefined) delete process.env['ASHLR_IN_SWARM'];
+      else process.env['ASHLR_IN_SWARM'] = prevInSwarm;
+    }
+  });
+});
+
+
+describe('decideLocusSessionRun (CI job isolation)', () => {
+  it('mints when LOCUS_CI_BINDING is set (preferred over LOCUS_BINDING)', () => {
+    const d = decideLocusSessionRun({
+      LOCUS_CI_BINDING: 'ci-acme',
+      LOCUS_BINDING: 'other',
+    });
+    expect(d).toEqual({
+      kind: 'mint',
+      binding: 'ci-acme',
+      source: 'LOCUS_CI_BINDING',
+    });
+  });
+
+  it('mints from LOCUS_BINDING when CI binding unset', () => {
+    const d = decideLocusSessionRun({ LOCUS_BINDING: 'personal' });
+    expect(d).toEqual({
+      kind: 'mint',
+      binding: 'personal',
+      source: 'LOCUS_BINDING',
+    });
+  });
+
+  it('skips re-mint when LOCUS_SESSION_ID already set', () => {
+    const d = decideLocusSessionRun({
+      LOCUS_SESSION_ID: 'sess-abc',
+      LOCUS_CI_BINDING: 'would-mint',
+    });
+    expect(d).toEqual({ kind: 'already-session', sessionId: 'sess-abc' });
+  });
+
+  it('pass-through when no binding and LOCUS_ENFORCE off (monorepo default)', () => {
+    expect(decideLocusSessionRun({})).toEqual({
+      kind: 'pass-through',
+      mode: 'off',
+    });
+    expect(decideLocusSessionRun({ LOCUS_ENFORCE: '0' })).toEqual({
+      kind: 'pass-through',
+      mode: 'off',
+    });
+  });
+
+  it('warns when LOCUS_ENFORCE=warn without a binding', () => {
+    const d = decideLocusSessionRun({ LOCUS_ENFORCE: 'warn' });
+    expect(d.kind).toBe('warn');
+    if (d.kind === 'warn') {
+      expect(d.mode).toBe('warn');
+      expect(d.reason).toMatch(/LOCUS_CI_BINDING|ambient/);
+    }
+  });
+
+  it('refuses when LOCUS_ENFORCE=enforce without a binding', () => {
+    const d = decideLocusSessionRun({ LOCUS_ENFORCE: '1' });
+    expect(d.kind).toBe('refuse');
+    if (d.kind === 'refuse') {
+      expect(d.mode).toBe('enforce');
+      expect(d.reason).toMatch(/LOCUS_CI_BINDING/);
+    }
+  });
+
+  it('trims whitespace on binding aliases', () => {
+    const d = decideLocusSessionRun({ LOCUS_CI_BINDING: '  acme  ' });
+    expect(d).toEqual({
+      kind: 'mint',
+      binding: 'acme',
+      source: 'LOCUS_CI_BINDING',
+    });
+  });
+
+  it('empty binding strings fall through to enforce/pass-through', () => {
+    expect(
+      decideLocusSessionRun({ LOCUS_CI_BINDING: '  ', LOCUS_BINDING: '' }),
+    ).toEqual({
+      kind: 'pass-through',
+      mode: 'off',
+    });
+    expect(
+      decideLocusSessionRun({
+        LOCUS_CI_BINDING: '',
+        LOCUS_ENFORCE: 'enforce',
+      }).kind,
+    ).toBe('refuse');
+  });
+});
+
+describe('applyLocusSessionEnv', () => {
+  it('copies LOCUS identity + scope keys only', () => {
+    const target: NodeJS.ProcessEnv = { PATH: '/usr/bin', KEEP: 'yes' };
+    applyLocusSessionEnv(target, {
+      LOCUS_SESSION_ID: 's1',
+      LOCUS_BINDING: 'acme',
+      LOCUS_HOME: '/tmp/locus',
+      LOCUS_NOTIFY: '0',
+      GH_CONFIG_DIR: '/tmp/gh',
+      AWS_PROFILE: 'should-not-copy',
+      GH_TOKEN: 'secret',
+      PATH: '/evil',
+    });
+    expect(target.PATH).toBe('/usr/bin');
+    expect(target.KEEP).toBe('yes');
+    expect(target.LOCUS_SESSION_ID).toBe('s1');
+    expect(target.LOCUS_BINDING).toBe('acme');
+    expect(target.LOCUS_HOME).toBe('/tmp/locus');
+    expect(target.LOCUS_NOTIFY).toBe('0');
+    expect(target.GH_CONFIG_DIR).toBe('/tmp/gh');
+    expect(target.AWS_PROFILE).toBeUndefined();
+    expect(target.GH_TOKEN).toBeUndefined();
+  });
 });
 
 describe('MCP merge helpers', () => {
+
   it('locusServerSpec uses locus-mcp and LOCUS_* env only', () => {
     const s = locusServerSpec({ locusHome: '/tmp/locus-home', client: 'ashlr-hub' });
     expect(s.command).toBe('locus-mcp');

@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdirSync } from 'node:fs';
 
 import type { McpRegistry, McpServerSpec, McpServerHealth } from '../core/types.js';
+import { locusServerSpec } from '../core/integrations/locus.js';
 
 // ---------------------------------------------------------------------------
 // ANSI helpers
@@ -504,6 +505,14 @@ async function cmdMcpInstall(args: string[]): Promise<number> {
  *
  * Keep this list conservative: only add servers that are verifiably
  * installable and stable. Absent tools are skipped — never error.
+ *
+ * Naming note:
+ *   - MCP config key for Phantom is `phantom-secrets` (discovery / REQUIRED_SERVERS
+ *     health check in this CLI). Do not rename without a migration path.
+ *   - Locus agent-report contract may say `phantom` (binary / plane name) —
+ *     that is a different layer from the MCP server key.
+ *   - Locus write path uses `locusServerSpec()` so env (LOCUS_HOME, LOCUS_CLIENT,
+ *     LOCUS_NOTIFY) is always present — not command-only.
  */
 interface EcosystemServer {
   name: string;         // Key used in mcpServers map
@@ -513,8 +522,17 @@ interface EcosystemServer {
   label: string;        // Human display name
 }
 
+/** Shape written into ~/.ashlr/settings.json mcpServers. */
+export type EcosystemMcpEntry = {
+  name: string;
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+};
+
 const ECOSYSTEM_SERVERS: EcosystemServer[] = [
   {
+    // MCP config key stays `phantom-secrets` (not `phantom`) — gateway + doctor match this name.
     name: 'phantom-secrets',
     probe: 'phantom',
     command: 'phantom',
@@ -523,6 +541,7 @@ const ECOSYSTEM_SERVERS: EcosystemServer[] = [
   },
   {
     // Identity plane — multiplexor only; never ambient provider MCPs.
+    // Env is filled at write time via locusServerSpec() (LOCUS_HOME / LOCUS_CLIENT).
     name: 'locus',
     probe: 'locus-mcp',
     command: 'locus-mcp',
@@ -530,6 +549,47 @@ const ECOSYSTEM_SERVERS: EcosystemServer[] = [
     label: 'Locus (identity plane)',
   },
 ];
+
+/**
+ * True when a stored locus entry already has the identity env keys we require.
+ * Incomplete (command-only) entries should be upgraded on --write.
+ */
+function locusEntryHasRequiredEnv(
+  entry: { env?: Record<string, string> } | undefined,
+): boolean {
+  const env = entry?.env;
+  if (!env) return false;
+  return Boolean(env['LOCUS_HOME']?.trim() && env['LOCUS_CLIENT']?.trim());
+}
+
+/**
+ * Build the mcpServers entry for an ecosystem server.
+ * Locus always goes through locusServerSpec so LOCUS_HOME / LOCUS_CLIENT are set.
+ */
+export function buildEcosystemMcpEntry(srv: EcosystemMcpEntry): {
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+} {
+  if (srv.name === 'locus') {
+    const spec = locusServerSpec({
+      client: 'ashlr-hub',
+      command: srv.command || undefined,
+      locusHome: srv.env?.['LOCUS_HOME'],
+      sessionId: srv.env?.['LOCUS_SESSION_ID'],
+    });
+    return {
+      command: spec.command,
+      args: spec.args ?? [],
+      env: spec.env,
+    };
+  }
+  return {
+    command: srv.command,
+    args: srv.args,
+    ...(srv.env && Object.keys(srv.env).length > 0 ? { env: srv.env } : {}),
+  };
+}
 
 /** Resolve a binary's full path from PATH; returns undefined if not found. */
 function resolveInPath(bin: string): string | undefined {
@@ -569,12 +629,14 @@ function loadAshlrSettings(settingsPath?: string): AshlrSettingsShape {
 /**
  * Merge detected ecosystem servers into ~/.ashlr/settings.json.
  * - Never clobbers unrelated keys.
- * - Skips servers already present (by name) — idempotent.
+ * - Skips servers already present (by name) — idempotent, except locus
+ *   incomplete entries (command-only / missing LOCUS_HOME|LOCUS_CLIENT) which
+ *   are upgraded via locusServerSpec.
  * - Creates the file + parent dir if absent.
- * Returns the names of servers actually written (not already present).
+ * Returns the names of servers actually written or upgraded.
  */
 export function mergeEcosystemServers(
-  detected: Array<{ name: string; command: string; args: string[] }>,
+  detected: EcosystemMcpEntry[],
   settingsPath: string,
 ): string[] {
   const existing = loadAshlrSettings(settingsPath);
@@ -584,8 +646,19 @@ export function mergeEcosystemServers(
   const mergedServers: AshlrSettingsShape['mcpServers'] = { ...existingServers };
 
   for (const srv of detected) {
-    if (mergedServers[srv.name]) continue; // already present — skip
-    mergedServers[srv.name] = { command: srv.command, args: srv.args };
+    const entry = buildEcosystemMcpEntry(srv);
+    const prev = mergedServers[srv.name];
+
+    if (prev) {
+      // Upgrade incomplete locus (command-only) so env is present.
+      if (srv.name === 'locus' && !locusEntryHasRequiredEnv(prev)) {
+        mergedServers[srv.name] = entry;
+        added.push(srv.name);
+      }
+      continue; // already present with good shape — skip
+    }
+
+    mergedServers[srv.name] = entry;
     added.push(srv.name);
   }
 
