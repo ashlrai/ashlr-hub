@@ -111,8 +111,8 @@ describe('release workflow', () => {
     expect(workflow).toContain('runs-on: ubuntu-latest');
     expect(workflow).toContain('node-version: "24"');
     expect(workflow).toContain('package-manager-cache: false');
-    expect(workflow).toContain('npm@11.15.0');
-    expect(workflow).toContain('test "$(npm --version)" = "11.15.0"');
+    expect(workflow).toContain('npm@11.19.0');
+    expect(workflow).toContain('test "$(npm --version)" = "11.19.0"');
     expect(workflow).not.toMatch(/NODE_AUTH_TOKEN|secrets\.NPM_TOKEN/);
   });
 

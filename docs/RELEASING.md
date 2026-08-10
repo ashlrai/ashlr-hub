@@ -19,7 +19,8 @@ On npmjs.com, open `@ashlr/hub` → **Settings** → **Trusted Publisher** and b
 - environment: leave blank (the workflow does not use a GitHub environment);
 - allowed action: **npm publish**.
 
-The equivalent authenticated npm CLI command requires npm 11.15.0 or newer:
+The `npm trust` command requires npm 11.15.0 or newer. The release workflow pins
+the current npm 11 client, 11.19.0; the equivalent authenticated command is:
 
 ```bash
 npm trust github @ashlr/hub \

@@ -69,9 +69,9 @@ jobs:
       # npm trusted publishing requires npm >=11.5.1. Pin the release client
       # so a hosted image's bundled npm version cannot silently change auth.
       - name: Install pinned trusted-publishing npm CLI
-        run: npm install --global npm@11.15.0 --ignore-scripts --no-audit --no-fund
+        run: npm install --global npm@11.19.0 --ignore-scripts --no-audit --no-fund
       - name: Verify trusted-publishing npm CLI
-        run: test "$(npm --version)" = "11.15.0"
+        run: test "$(npm --version)" = "11.19.0"
       - run: npm ci
       - run: npm run build
       - name: Tag must match package.json version
