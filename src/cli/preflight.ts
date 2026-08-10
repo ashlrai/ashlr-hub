@@ -74,7 +74,7 @@ function printHelp(): void {
   for (const [flag, desc] of opts) out(`    ${cyan(pad(flag, w))}  ${desc}`);
   out('');
   out('  ' + gray('READ-ONLY: reports model reachability, enrollment count, kill-switch state,'));
-  out('  ' + gray('daemon health, ~/.ashlr writeability, sandbox health, git + phantom presence.'));
+  out('  ' + gray('daemon health, ~/.ashlr writeability, sandbox health, git + phantom + locus presence.'));
   out('  ' + gray('Mutates nothing. Exit 0 when ready, 1 when a hard blocker is present.'));
   out('');
 }
