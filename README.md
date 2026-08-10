@@ -131,9 +131,12 @@ ashlr enroll preflight ~/path/to/my-project --json
 
 The report separates proposal-only admission from judge-free merge candidacy.
 It reads `ashlr.verify.json` from the immutable `HEAD` blob, requires identical
-regular-file worktree bytes, isolates every Git probe from repository helpers and
-hooks, and proves the index and inspected repository state did not change. It
-does not infer low risk from filenames.
+regular-file worktree bytes, and proves the index and inspected repository state
+did not change. Every Git probe uses one absolute canonical executable pinned
+under a trusted installation root, outside both the candidate and its
+`node_modules`; Ashlr verifies full path/ACL custody before and after every
+invocation and supplies a deterministic scrubbed child environment and `PATH`.
+It does not infer low risk from filenames.
 
 Judge-free candidacy additionally requires a regular immutable
 `ashlr.admission.json` such as:
@@ -184,7 +187,7 @@ The dedicated App must be installed and operated outside the candidate repo,
 keep its private key or installation token unavailable to candidate workflows,
 and use its own Checks-write installation authority only to publish the named
 attestation check. Ashlr separately queries each operator-trusted App's exact-HEAD
-`attestationCheck` and requires the unique latest check to carry the report's v4
+`attestationCheck` and requires the unique latest check to carry the report's v5
 `expectedAttestationId`.
 
 Workflow evidence is ordered by actual execution chronology (`run_started_at`,
@@ -198,17 +201,22 @@ lower-number rerun supersedes an older success; an extra same-name check from
 another workflow fails closed. All timestamps must be present, ordered,
 non-future, and within the configured evidence age.
 
-The v4 statement is explicitly whole-snapshot evidence. It binds the exact
+The v5 statement is explicitly whole-snapshot evidence. It binds the exact
 commit and tree object, repository identity, protected base, workflow and latest
 attempt, workflow App, independent attestor App/check, both policy digests,
 evaluator version, verifier manifest digest, merge profile, and risk
 classification. Credentialed GitHub reads use an absolute canonical `gh`
 executable outside the candidate tree, with full hierarchy custody, argv-only
 invocation, and a scrubbed environment that ignores candidate-directed
-`PATH`, `HOME`, GitHub config, temp, and CA paths. Ashlr then re-reads the remote head,
-protected policy, and operator signer policy and requires exact equality with
-the first observations. Policy changes, source movement, or evidence expiry
-require a new trusted check. Sensitive, regulated,
+`PATH`, `HOME`, GitHub config, temp, and CA paths. Ashlr then re-reads the remote
+head, protected policy, and operator signer policy and requires exact equality
+with the first observations. As the final authority read before verdict, it
+recollects every correlated workflow run, attempt job, required-context check,
+and trusted-App attestation across stable pagination, reruns chronology, and
+canonically compares the complete authority digest with the first collection.
+Changed IDs, content, status, pages, or any newer pending, failed, or cancelled
+rerun fail closed. Policy changes, source movement, or evidence expiry require a
+new trusted check. Sensitive, regulated,
 critical, self-target, missing, or unattested classifications remain
 proposal-only. The command never enrolls, materializes mission goals, executes
 verifier commands, writes runtime state, starts the daemon, or grants merge

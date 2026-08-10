@@ -16,7 +16,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
-import { join, relative } from 'node:path';
+import { delimiter, dirname, join, relative } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -33,7 +33,12 @@ import {
   type CandidateRepoAdmissionDeps,
 } from '../src/core/portfolio/candidate-admission.js';
 import type { BranchProtectionAttestation } from '../src/core/integrations/github.js';
-import { trustedGithubEnvironment } from '../src/core/util/trusted-executable.js';
+import {
+  resolveTrustedGitCli,
+  trustedGitEnvironment,
+  trustedGithubEnvironment,
+  verifyTrustedGitCli,
+} from '../src/core/util/trusted-executable.js';
 
 const POLICY_DIGEST = 'b'.repeat(64);
 const APP_ID = '42424242';
@@ -48,6 +53,7 @@ const TRUSTED_GH_PIN = {
   executable: '/trusted/bin/gh',
   digest: 'e'.repeat(64),
 };
+const TRUSTED_GIT_PIN = resolveTrustedGitCli([])!;
 const TRUSTED_POLICY_INPUT = {
   schemaVersion: 2,
   trustedAppIds: [APP_ID],
@@ -152,6 +158,7 @@ function readyCheck(request: CandidateCheckRunRequest): CandidateCheckRunEvidenc
     attestationStartedAt: '2026-08-10T11:57:00.000Z',
     attestationCompletedAt: '2026-08-10T11:58:00.000Z',
     fresh: true,
+    authorityDigest: 'c'.repeat(64),
     detail: 'exact attestation',
   };
 }
@@ -176,6 +183,8 @@ function deps(overrides: Partial<CandidateRepoAdmissionDeps> = {}): Partial<Cand
     }),
     readProtection: vi.fn(async (_cwd, _branch, options) => protection(options.expectedNameWithOwner)),
     readCheckRun: vi.fn((request) => readyCheck(request)),
+    resolveGitCli: vi.fn(() => TRUSTED_GIT_PIN),
+    verifyGitCli: vi.fn(() => true),
     resolveGithubCli: vi.fn(() => TRUSTED_GH_PIN),
     verifyGithubCli: vi.fn(() => true),
     evaluateSafeMinimum: vi.fn(() => ({
@@ -201,7 +210,7 @@ function directCheckRequest(overrides: Partial<CandidateCheckRunRequest> = {}): 
     check: CHECK,
     workflowAppId: WORKFLOW_APP_ID,
     attestationCheck: ATTESTATION_CHECK,
-    expectedAttestations: [{ appId: APP_ID, externalId: `ashlr-admission-v4:${'d'.repeat(64)}` }],
+    expectedAttestations: [{ appId: APP_ID, externalId: `ashlr-admission-v5:${'d'.repeat(64)}` }],
     trustedPolicyDigest: TRUSTED_POLICY.digest,
     evaluatorVersion: CANDIDATE_ADMISSION_EVALUATOR_VERSION,
     evaluatedAt: EVALUATED_AT,
@@ -211,7 +220,7 @@ function directCheckRequest(overrides: Partial<CandidateCheckRunRequest> = {}): 
   };
 }
 
-function fakeGitHubCheckEvidence(input: {
+interface FakeGitHubEvidenceInput {
   workflowRun?: Record<string, unknown>;
   extraWorkflowRuns?: Record<string, unknown>[];
   job?: Record<string, unknown>;
@@ -219,8 +228,12 @@ function fakeGitHubCheckEvidence(input: {
   extraWorkflowCheckRuns?: Record<string, unknown>[];
   attestationCheckRun?: Record<string, unknown>;
   extraAttestationCheckRuns?: Record<string, unknown>[];
-}): CandidateCheckRunEvidence {
-  const request = directCheckRequest();
+}
+
+function fakeGitHubApi(
+  input: FakeGitHubEvidenceInput,
+  request = directCheckRequest(),
+): CandidateGithubApiReader {
   const workflowRun = {
     id: 41,
     run_number: 7,
@@ -270,12 +283,12 @@ function fakeGitHubCheckEvidence(input: {
     external_id: request.expectedAttestations[0]!.externalId,
     ...input.attestationCheckRun,
   };
-  const api: CandidateGithubApiReader = (endpoint) => {
+  return (endpoint) => {
     const page = Number(new URLSearchParams(endpoint.includes('?') ? endpoint.slice(endpoint.indexOf('?') + 1) : '').get('page') ?? '1');
-    const collection = (key: string, rows: Record<string, unknown>[]): Record<string, unknown> => ({
-      total_count: rows.length,
-      [key]: page === 1 ? rows : [],
-    });
+    const collection = (key: string, rows: Record<string, unknown>[]): Record<string, unknown> => {
+      const start = (page - 1) * 100;
+      return { total_count: rows.length, [key]: rows.slice(start, start + 100) };
+    };
     if (endpoint.includes('/actions/workflows/') && endpoint.includes('/runs?')) {
       return collection('workflow_runs', [workflowRun, ...(input.extraWorkflowRuns ?? [])]);
     }
@@ -289,7 +302,11 @@ function fakeGitHubCheckEvidence(input: {
     }
     return null;
   };
-  return readCandidateCheckRunEvidence(request, api);
+}
+
+function fakeGitHubCheckEvidence(input: FakeGitHubEvidenceInput): CandidateCheckRunEvidence {
+  const request = directCheckRequest();
+  return readCandidateCheckRunEvidence(request, fakeGitHubApi(input, request));
 }
 
 function repositoryDigest(): string {
@@ -380,6 +397,94 @@ describe('M489 hardened candidate repo admission preflight', () => {
     }
   });
 
+  it.each(['bin', 'node_modules/.bin'])('never executes candidate-controlled %s Git under a hostile PATH', async (relativeBin) => {
+    const fakeBin = join(fixture, ...relativeBin.split('/'));
+    const fakeGit = join(fakeBin, 'git');
+    const marker = join(home, `fake-git-${relativeBin.replace(/\W/g, '-')}`);
+    mkdirSync(fakeBin, { recursive: true });
+    writeFileSync(fakeGit, `#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(marker)}\nexit 99\n`, 'utf8');
+    chmodSync(fakeGit, 0o755);
+    const currentHead = git(['rev-parse', 'HEAD']);
+    const protectedBranch = protection('ashlrai/candidate');
+    const priorPath = process.env['PATH'];
+    process.env['PATH'] = [fakeBin, '.', dirname(TRUSTED_GIT_PIN.executable)].join(delimiter);
+    try {
+      const resolved = resolveTrustedGitCli([fixture, join(fixture, 'node_modules')]);
+      expect(resolved).toEqual(TRUSTED_GIT_PIN);
+      const childEnv = trustedGitEnvironment(resolved!);
+      expect(childEnv['PATH']).not.toContain(fixture);
+      expect(childEnv['HOME']).toBe(userInfo().homedir);
+      expect(childEnv['TMPDIR']).toBeUndefined();
+      const report = await inspectCandidateRepoAdmission(fixture, deps({
+        resolveGitCli: () => resolved,
+        readRemoteHead: (nameWithOwner) => ({
+          available: true,
+          nameWithOwner,
+          defaultBranch: 'main',
+          head: currentHead,
+          detail: 'exact remote head',
+        }),
+        readProtection: vi.fn(async () => protectedBranch),
+      }));
+      expect(report.source.available).toBe(true);
+      expect(existsSync(marker) ? readFileSync(marker, 'utf8') : 'missing').toBe('missing');
+    } finally {
+      if (priorPath === undefined) delete process.env['PATH']; else process.env['PATH'] = priorPath;
+    }
+  });
+
+  it('rejects a candidate-owned symlink alias to the trusted Git inode', () => {
+    const fakeBin = join(fixture, 'bin');
+    mkdirSync(fakeBin, { recursive: true });
+    symlinkSync(TRUSTED_GIT_PIN.executable, join(fakeBin, 'git'));
+    const priorPath = process.env['PATH'];
+    process.env['PATH'] = fakeBin;
+    try {
+      expect(resolveTrustedGitCli([fixture, join(fixture, 'node_modules')])).toBeNull();
+    } finally {
+      if (priorPath === undefined) delete process.env['PATH']; else process.env['PATH'] = priorPath;
+    }
+  });
+
+  it('rejects a replaced candidate Git pin before invocation', async () => {
+    const fakeBin = join(fixture, 'bin');
+    const fakeGit = join(fakeBin, 'git');
+    const marker = join(home, 'replaced-git-executed');
+    mkdirSync(fakeBin, { recursive: true });
+    writeFileSync(fakeGit, '#!/bin/sh\nexit 99\n', 'utf8');
+    chmodSync(fakeGit, 0o755);
+    const fakePin = { canonicalPath: fakeGit, executable: fakeGit, digest: 'a'.repeat(64) };
+    const gitRunner = vi.fn(() => {
+      writeFileSync(marker, 'executed', 'utf8');
+      return { status: 0, stdout: Buffer.alloc(0) };
+    });
+    const report = await inspectCandidateRepoAdmission(fixture, deps({
+      git: gitRunner,
+      resolveGitCli: () => fakePin,
+      verifyGitCli: verifyTrustedGitCli,
+    }));
+    expect(report).toMatchObject({ admissionReady: false, source: { available: false } });
+    expect(report.admissionBlockers.map((item) => item.id)).toContain('trusted-git-custody-changed');
+    expect(gitRunner).not.toHaveBeenCalled();
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it('discards every Git result when custody changes across an invocation', async () => {
+    const marker = join(home, 'git-toctou-invoked');
+    const verifyGitCli = vi.fn()
+      .mockReturnValueOnce(true)
+      .mockReturnValue(false);
+    const gitRunner = vi.fn(() => {
+      writeFileSync(marker, 'invoked', 'utf8');
+      return { status: 0, stdout: Buffer.from('forged\n') };
+    });
+    const report = await inspectCandidateRepoAdmission(fixture, deps({ git: gitRunner, verifyGitCli }));
+    expect(gitRunner).toHaveBeenCalledTimes(1);
+    expect(existsSync(marker)).toBe(true);
+    expect(report).toMatchObject({ admissionReady: false, source: { available: false } });
+    expect(report.admissionBlockers.map((item) => item.id)).toContain('trusted-git-custody-changed');
+  });
+
   it('rejects symlinked, over-permissive, wrong-owner, and oversized authority files', () => {
     const target = join(home, 'policy-target.json');
     const path = join(home, 'candidate-admission-authority.json');
@@ -465,7 +570,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
     const report = await inspectCandidateRepoAdmission(fixture, deps({ readCheckRun }));
 
     expect(report).toMatchObject({
-      schemaVersion: 5,
+      schemaVersion: 6,
       readOnly: true,
       authorityGranted: false,
       mutationPerformed: false,
@@ -512,7 +617,13 @@ describe('M489 hardened candidate repo admission preflight', () => {
         evidenceScope: 'whole-head-snapshot',
         remoteStableAfterChecks: true,
         trustedPolicyStableAfterChecks: true,
-        checkRun: { ready: true, externalIdMatched: true, fresh: true },
+        checkEvidenceStableAfterRecheck: true,
+        checkRun: {
+          ready: true,
+          externalIdMatched: true,
+          fresh: true,
+          authorityDigest: 'c'.repeat(64),
+        },
       },
       risk: {
         state: 'attested',
@@ -521,7 +632,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
         filenameHeuristicsUsed: false,
       },
     });
-    expect(report.remotePr.expectedAttestationId).toMatch(/^ashlr-admission-v4:[0-9a-f]{64}$/);
+    expect(report.remotePr.expectedAttestationId).toMatch(/^ashlr-admission-v5:[0-9a-f]{64}$/);
     expect(report.remotePr.candidateTreeOid).toBe(git(['rev-parse', 'HEAD^{tree}']));
     expect(readCheckRun).toHaveBeenCalledWith(expect.objectContaining({
       nameWithOwner: 'ashlrai/candidate',
@@ -563,7 +674,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
     };
     const first = buildCandidateAdmissionAttestationId({ ...common, candidateTreeOid: 'b'.repeat(40) });
     const changedTree = buildCandidateAdmissionAttestationId({ ...common, candidateTreeOid: 'c'.repeat(40) });
-    expect(first).toMatch(/^ashlr-admission-v4:[0-9a-f]{64}$/);
+    expect(first).toMatch(/^ashlr-admission-v5:[0-9a-f]{64}$/);
     expect(changedTree).not.toBe(first);
   });
 
@@ -592,7 +703,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
     expect(readCandidateCheckRunEvidence(directCheckRequest({
       expectedAttestations: [{
         appId: WORKFLOW_APP_ID,
-        externalId: `ashlr-admission-v4:${'d'.repeat(64)}`,
+        externalId: `ashlr-admission-v5:${'d'.repeat(64)}`,
       }],
     }), () => null).detail).toMatch(/malformed/i);
 
@@ -752,7 +863,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
     expect(report.remotePr.detail).toMatch(/candidate App is not in the trusted attestor set/i);
     expect(readCheckRun).toHaveBeenCalledWith(expect.objectContaining({
       workflowAppId: candidateApp,
-      expectedAttestations: [{ appId: APP_ID, externalId: expect.stringMatching(/^ashlr-admission-v4:/) }],
+      expectedAttestations: [{ appId: APP_ID, externalId: expect.stringMatching(/^ashlr-admission-v5:/) }],
     }));
 
     writeFileSync(join(fixture, 'ashlr.admission.json'), JSON.stringify({
@@ -1263,6 +1374,97 @@ describe('M489 hardened candidate repo admission preflight', () => {
       checkRun: { ready: true },
     });
     expect(report.remotePr.detail).toMatch(/operator signer policy identity or digest changed/i);
+  });
+
+  it.each([
+    ['pending', 'in_progress', null],
+    ['failed', 'completed', 'failure'],
+    ['cancelled', 'completed', 'cancelled'],
+  ])('final authority recheck rejects a newer exact-head %s rerun race', async (_label, status, conclusion) => {
+    let finalPhase = false;
+    const readCheckRun = vi.fn((request: CandidateCheckRunRequest) => readCandidateCheckRunEvidence(
+      request,
+      fakeGitHubApi(finalPhase ? {
+        extraWorkflowRuns: [{
+          id: 45,
+          run_number: 7,
+          run_attempt: 2,
+          path: `${WORKFLOW}@main`,
+          head_sha: request.head,
+          head_branch: request.branch,
+          status,
+          conclusion,
+          created_at: '2026-08-10T11:58:00Z',
+          run_started_at: '2026-08-10T11:59:00Z',
+          updated_at: '2026-08-10T11:59:30Z',
+        }],
+      } : {}, request),
+    ));
+    const report = await inspectCandidateRepoAdmission(fixture, deps({
+      readCheckRun,
+      beforeFinalEvidenceRecheck: () => { finalPhase = true; },
+    }));
+    expect(readCheckRun).toHaveBeenCalledTimes(2);
+    expect(report.remotePr).toMatchObject({
+      ready: false,
+      checkEvidenceStableAfterRecheck: false,
+      checkRun: { ready: false, workflowRunId: '45', status, conclusion },
+    });
+    expect(report.remotePr.detail).toMatch(/changed during final evidence recheck/i);
+  });
+
+  it.each([
+    ['workflow run', { workflowRun: { display_title: 'changed after first collection' } }],
+    ['attempt job', { job: { runner_name: 'changed after first collection' } }],
+    ['required check', { workflowCheckRun: { details_url: 'https://example.invalid/changed' } }],
+    ['attestation', { attestationCheckRun: { details_url: 'https://example.invalid/changed' } }],
+  ])('final authority recheck canonically rejects changed correlated %s content', async (_label, changed) => {
+    let finalPhase = false;
+    const readCheckRun = vi.fn((request: CandidateCheckRunRequest) => readCandidateCheckRunEvidence(
+      request,
+      fakeGitHubApi(finalPhase ? changed : {}, request),
+    ));
+    const report = await inspectCandidateRepoAdmission(fixture, deps({
+      readCheckRun,
+      beforeFinalEvidenceRecheck: () => { finalPhase = true; },
+    }));
+    expect(report.remotePr).toMatchObject({
+      ready: false,
+      checkEvidenceStableAfterRecheck: false,
+      checkRun: { ready: true },
+    });
+    expect(report.remotePr.detail).toMatch(/changed during final evidence recheck/i);
+  });
+
+  it('final authority recheck rejects changed pagination/content even when the selected verdict summary is unchanged', async () => {
+    let finalPhase = false;
+    const olderAttestations = Array.from({ length: 100 }, (_, index) => ({
+      id: 1_000 + index,
+      name: ATTESTATION_CHECK,
+      head_sha: git(['rev-parse', 'HEAD']),
+      app: { id: Number(APP_ID) },
+      status: 'completed',
+      conclusion: 'success',
+      started_at: '2026-08-10T11:40:00Z',
+      completed_at: '2026-08-10T11:41:00Z',
+      external_id: null,
+    }));
+    const readCheckRun = vi.fn((request: CandidateCheckRunRequest) => readCandidateCheckRunEvidence(
+      request,
+      fakeGitHubApi(finalPhase ? { extraAttestationCheckRuns: olderAttestations } : {}, request),
+    ));
+    const report = await inspectCandidateRepoAdmission(fixture, deps({
+      readCheckRun,
+      beforeFinalEvidenceRecheck: () => { finalPhase = true; },
+    }));
+    expect(readCheckRun).toHaveBeenCalledTimes(2);
+    expect(report.remotePr).toMatchObject({
+      ready: false,
+      checkEvidenceStableAfterRecheck: false,
+      checkRun: { ready: true, attestationCheckRunId: '44' },
+    });
+    expect(report.remotePr.checkRun.authorityDigest).toMatch(/^[0-9a-f]{64}$/);
+    expect(report.remotePr.detail).toMatch(/changed during final evidence recheck/i);
   });
 
   it('prohibits self-target judge-free evidence even when every external check is strong', async () => {

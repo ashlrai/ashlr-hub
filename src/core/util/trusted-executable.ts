@@ -10,6 +10,7 @@ import {
 import { userInfo } from 'node:os';
 import {
   delimiter,
+  dirname,
   isAbsolute,
   join,
   parse,
@@ -218,25 +219,40 @@ export function inspectOwnedAuthorityPath(path: string, anchorPath: string): Pat
   }
 }
 
-function trustedGithubRoots(): string[] {
+function trustedExecutableRoots(): string[] {
   if (process.platform === 'darwin') return ['/usr', '/opt/homebrew'];
   if (process.platform === 'linux') return ['/usr', '/opt/homebrew', '/home/linuxbrew/.linuxbrew'];
   return [];
 }
 
-function inspectTrustedGithubExecutable(
+function inspectTrustedExecutable(
   executable: string,
   untrustedRoots: readonly string[],
+  requireCanonicalRequest = false,
 ): TrustedExecutablePin | null {
-  if (process.platform === 'win32') return null;
+  if (process.platform === 'win32' || typeof process.getuid !== 'function') return null;
   try {
-    const canonical = realpathSync(executable);
+    const requested = resolve(executable);
+    if (!isAbsolute(executable)) return null;
+    const canonical = realpathSync(requested);
+    if (requireCanonicalRequest && canonical !== requested) {
+      const alias = lstatSync(requested, { bigint: true });
+      const aliasParent = inspectPosixHierarchy(dirname(requested), {
+        leafKind: 'directory',
+        requireCurrentUserLeaf: false,
+        allowTrustedInstallGroupWrite: true,
+        allowedRoots: trustedExecutableRoots(),
+        untrustedRoots,
+      });
+      if (!alias.isSymbolicLink() || !aliasParent ||
+          (alias.uid !== 0n && alias.uid !== BigInt(process.getuid())) || !macosAclSafe(requested)) return null;
+    }
     accessSync(canonical, fsConstants.X_OK);
     const proof = inspectPosixHierarchy(canonical, {
       leafKind: 'file',
       requireCurrentUserLeaf: false,
       allowTrustedInstallGroupWrite: true,
-      allowedRoots: trustedGithubRoots(),
+      allowedRoots: trustedExecutableRoots(),
       untrustedRoots,
     });
     if (!proof) return null;
@@ -251,7 +267,7 @@ function inspectTrustedGithubExecutable(
 export function resolveTrustedGithubCli(untrustedRoots: readonly string[] = []): TrustedExecutablePin | null {
   for (const part of (process.env.PATH ?? '').split(delimiter)) {
     if (!part || !isAbsolute(part)) continue;
-    const pin = inspectTrustedGithubExecutable(join(part, process.platform === 'win32' ? 'gh.exe' : 'gh'), untrustedRoots);
+    const pin = inspectTrustedExecutable(join(part, process.platform === 'win32' ? 'gh.exe' : 'gh'), untrustedRoots);
     if (pin) return pin;
   }
   return null;
@@ -265,8 +281,66 @@ export function verifyTrustedGithubCli(
       typeof pin.canonicalPath !== 'string' || typeof pin.digest !== 'string' ||
       pin.executable !== pin.canonicalPath || !isAbsolute(pin.executable) ||
       !/^[0-9a-f]{64}$/.test(pin.digest)) return false;
-  const observed = inspectTrustedGithubExecutable(pin.executable, untrustedRoots);
+  const observed = inspectTrustedExecutable(pin.executable, untrustedRoots);
   return observed !== null && observed.executable === pin.executable && observed.digest === pin.digest;
+}
+
+export function resolveTrustedGitCli(untrustedRoots: readonly string[] = []): TrustedExecutablePin | null {
+  for (const part of (process.env.PATH ?? '').split(delimiter)) {
+    if (!part || !isAbsolute(part)) continue;
+    const pin = inspectTrustedExecutable(
+      join(part, process.platform === 'win32' ? 'git.exe' : 'git'),
+      untrustedRoots,
+      true,
+    );
+    if (pin) return pin;
+  }
+  return null;
+}
+
+export function verifyTrustedGitCli(
+  pin: TrustedExecutablePin,
+  untrustedRoots: readonly string[] = [],
+): boolean {
+  if (!pin || typeof pin !== 'object' || typeof pin.executable !== 'string' ||
+      typeof pin.canonicalPath !== 'string' || typeof pin.digest !== 'string' ||
+      pin.executable !== pin.canonicalPath || !isAbsolute(pin.executable) ||
+      !/^[0-9a-f]{64}$/.test(pin.digest)) return false;
+  const observed = inspectTrustedExecutable(pin.executable, untrustedRoots, true);
+  return observed !== null && observed.executable === pin.executable && observed.digest === pin.digest;
+}
+
+export function trustedGitEnvironment(pin: TrustedExecutablePin): NodeJS.ProcessEnv {
+  const account = userInfo();
+  const systemPath = process.platform === 'darwin'
+    ? ['/usr/bin', '/bin', '/usr/sbin', '/sbin']
+    : ['/usr/bin', '/bin'];
+  const path = [...new Set([dirname(pin.executable), ...systemPath])].join(delimiter);
+  const env: NodeJS.ProcessEnv = {
+    HOME: account.homedir,
+    USER: account.username,
+    PATH: path,
+  };
+  for (const key of ['SystemRoot', 'WINDIR']) {
+    if (process.env[key]) env[key] = process.env[key];
+  }
+  const nullDevice = process.platform === 'win32' ? 'NUL' : '/dev/null';
+  return {
+    ...env,
+    GIT_ATTR_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: nullDevice,
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_SYSTEM: nullDevice,
+    GIT_NO_LAZY_FETCH: '1',
+    GIT_NO_REPLACE_OBJECTS: '1',
+    GIT_OPTIONAL_LOCKS: '0',
+    GIT_PAGER: 'cat',
+    GIT_PROTOCOL_FROM_USER: '0',
+    GIT_TERMINAL_PROMPT: '0',
+    LC_ALL: 'C',
+    NO_COLOR: '1',
+    PAGER: 'cat',
+  };
 }
 
 export function trustedGithubEnvironment(): NodeJS.ProcessEnv {

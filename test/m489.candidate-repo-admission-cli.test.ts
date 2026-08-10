@@ -10,7 +10,7 @@ import { cmdEnroll } from '../src/cli/sandbox.js';
 
 function report(admissionReady: boolean): Record<string, unknown> {
   return {
-    schemaVersion: 5,
+    schemaVersion: 6,
     generatedAt: '2026-08-09T12:00:00.000Z',
     readOnly: true,
     authorityGranted: false,

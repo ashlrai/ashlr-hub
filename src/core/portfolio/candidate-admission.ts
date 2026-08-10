@@ -12,7 +12,6 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
-  accessSync,
   closeSync,
   constants as fsConstants,
   fstatSync,
@@ -22,10 +21,9 @@ import {
   readlinkSync,
   readSync,
   realpathSync,
-  statSync,
 } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
-import { basename, delimiter, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 
 import {
   buildCanonicalProtectedRemotePolicyDigestV1,
@@ -49,18 +47,21 @@ import {
 import { filterVerifyCommandsForProfile } from '../run/verify-commands.js';
 import {
   inspectOwnedAuthorityPath,
+  resolveTrustedGitCli,
   resolveTrustedGithubCli,
+  trustedGitEnvironment,
   trustedGithubEnvironment,
+  verifyTrustedGitCli,
   verifyTrustedGithubCli,
   type TrustedExecutablePin,
 } from '../util/trusted-executable.js';
 
-export const CANDIDATE_REPO_ADMISSION_SCHEMA_VERSION = 5 as const;
+export const CANDIDATE_REPO_ADMISSION_SCHEMA_VERSION = 6 as const;
 export const CANDIDATE_ADMISSION_CONTRACT_FILE = 'ashlr.admission.json';
 export const CANDIDATE_VERIFY_CONTRACT_FILE = 'ashlr.verify.json';
 export const CANDIDATE_ADMISSION_AUTHORITY_FILE = 'candidate-admission-authority.json';
-export const CANDIDATE_ATTESTATION_DOMAIN = 'ashlr:candidate-admission-whole-head-attestation:v4';
-export const CANDIDATE_ADMISSION_EVALUATOR_VERSION = 'ashlr-candidate-admission-evaluator-v4';
+export const CANDIDATE_ATTESTATION_DOMAIN = 'ashlr:candidate-admission-whole-head-attestation:v5';
+export const CANDIDATE_ADMISSION_EVALUATOR_VERSION = 'ashlr-candidate-admission-evaluator-v5';
 
 const SELF_REPOSITORY = 'ashlrai/ashlr-hub';
 const SELF_PACKAGE_NAME = '@ashlr/hub';
@@ -209,6 +210,7 @@ export interface CandidateCheckRunEvidence {
   attestationStartedAt: string | null;
   attestationCompletedAt: string | null;
   fresh: boolean;
+  authorityDigest: string | null;
   detail: string;
 }
 
@@ -234,6 +236,7 @@ export interface CandidateRemotePrEvidence {
   candidateTreeOid: string | null;
   remoteStableAfterChecks: boolean;
   trustedPolicyStableAfterChecks: boolean;
+  checkEvidenceStableAfterRecheck: boolean;
   checkRun: CandidateCheckRunEvidence;
   detail: string;
 }
@@ -277,6 +280,8 @@ export interface CandidateGitInvocation {
   args: string[];
   maxOutputBytes: number;
   timeoutMs: number;
+  trustedGitCli?: TrustedExecutablePin;
+  untrustedRoots?: string[];
 }
 
 export interface CandidateGitResult {
@@ -349,10 +354,14 @@ export interface CandidateRepoAdmissionDeps {
   ) => Promise<BranchProtectionAttestation>;
   readCheckRun: (request: CandidateCheckRunRequest) => CandidateCheckRunEvidence;
   readTrustedPolicy: () => CandidateTrustedPolicyAuthorityRead;
+  resolveGitCli: typeof resolveTrustedGitCli;
+  verifyGitCli: typeof verifyTrustedGitCli;
   resolveGithubCli: typeof resolveTrustedGithubCli;
   verifyGithubCli: typeof verifyTrustedGithubCli;
   evaluateSafeMinimum: typeof evaluateSafeMinimumProtectedRemotePolicyV1;
   buildPolicyDigest: typeof buildCanonicalProtectedRemotePolicyDigestV1;
+  /** Test-only race hook immediately before the final correlated evidence collection. */
+  beforeFinalEvidenceRecheck?: () => void;
 }
 
 interface GitTreeEntry {
@@ -401,45 +410,8 @@ function finding(id: string, detail: string, fix: string): CandidateAdmissionFin
   return { id, detail, fix };
 }
 
-function resolveGitExecutable(): string | null {
-  for (const part of (process.env.PATH ?? '').split(delimiter)) {
-    if (!part || !isAbsolute(part)) continue;
-    try {
-      const candidate = realpathSync(join(part, process.platform === 'win32' ? 'git.exe' : 'git'));
-      accessSync(candidate, fsConstants.X_OK);
-      if (statSync(candidate).isFile()) return candidate;
-    } catch {
-      // Try the next absolute PATH component.
-    }
-  }
-  return null;
-}
-
-function isolatedGitEnvironment(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
-  for (const key of ['PATH', 'SystemRoot', 'WINDIR', 'TMPDIR', 'TMP', 'TEMP']) {
-    if (process.env[key]) env[key] = process.env[key];
-  }
-  return {
-    ...env,
-    GIT_ATTR_NOSYSTEM: '1',
-    GIT_CONFIG_GLOBAL: NULL_DEVICE,
-    GIT_CONFIG_NOSYSTEM: '1',
-    GIT_CONFIG_SYSTEM: NULL_DEVICE,
-    GIT_NO_LAZY_FETCH: '1',
-    GIT_NO_REPLACE_OBJECTS: '1',
-    GIT_OPTIONAL_LOCKS: '0',
-    GIT_PAGER: 'cat',
-    GIT_PROTOCOL_FROM_USER: '0',
-    GIT_TERMINAL_PROMPT: '0',
-    LC_ALL: 'C',
-    PAGER: 'cat',
-  };
-}
-
 function defaultGitRunner(invocation: CandidateGitInvocation): CandidateGitResult | null {
-  const executable = resolveGitExecutable();
-  if (!executable) return null;
+  if (!invocation.trustedGitCli || !Array.isArray(invocation.untrustedRoots)) return null;
   const hardening = [
     '--no-pager',
     '--no-optional-locks',
@@ -458,9 +430,9 @@ function defaultGitRunner(invocation: CandidateGitInvocation): CandidateGitResul
     '-C', invocation.repo,
   ];
   try {
-    const stdout = execFileSync(executable, [...hardening, ...invocation.args], {
+    const stdout = execFileSync(invocation.trustedGitCli.executable, [...hardening, ...invocation.args], {
       encoding: 'buffer',
-      env: isolatedGitEnvironment(),
+      env: trustedGitEnvironment(invocation.trustedGitCli),
       maxBuffer: invocation.maxOutputBytes,
       shell: false,
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -809,6 +781,7 @@ function emptyCheckRun(detail: string): CandidateCheckRunEvidence {
     attestationStartedAt: null,
     attestationCompletedAt: null,
     fresh: false,
+    authorityDigest: null,
     detail,
   };
 }
@@ -931,6 +904,46 @@ function paginatedEndpoint(endpoint: string, page: number): string | null {
   return `${base}?${query.toString()}`;
 }
 
+function canonicalAuthorityDigest(value: unknown): string | null {
+  let nodes = 0;
+  const normalize = (item: unknown, depth: number): unknown | undefined => {
+    nodes++;
+    if (nodes > 200_000 || depth > 32) return undefined;
+    if (item === null || typeof item === 'boolean' || typeof item === 'string') return item;
+    if (typeof item === 'number') return Number.isFinite(item) ? item : undefined;
+    if (Array.isArray(item)) {
+      const values: unknown[] = [];
+      for (const entry of item) {
+        const normalized = normalize(entry, depth + 1);
+        if (normalized === undefined) return undefined;
+        values.push(normalized);
+      }
+      return values;
+    }
+    const record = objectRecord(item);
+    if (!record) return undefined;
+    const keys = Object.keys(record).sort();
+    if (keys.length > 1_000) return undefined;
+    const normalized: Record<string, unknown> = {};
+    for (const key of keys) {
+      if (record[key] === undefined) continue;
+      const entry = normalize(record[key], depth + 1);
+      if (entry === undefined) return undefined;
+      normalized[key] = entry;
+    }
+    return normalized;
+  };
+  try {
+    const normalized = normalize(value, 0);
+    if (normalized === undefined) return null;
+    const bytes = JSON.stringify(normalized);
+    if (Buffer.byteLength(bytes, 'utf8') > 16 * 1024 * 1024) return null;
+    return createHash('sha256').update(bytes).digest('hex');
+  } catch {
+    return null;
+  }
+}
+
 /** Collect every page twice and reject shifting totals, identities, ordering, or bytes. */
 function stablePaginatedCollection(
   api: CandidateGithubApiReader,
@@ -965,8 +978,8 @@ function stablePaginatedCollection(
   };
   const before = collect();
   const after = collect();
-  return before && after && createHash('sha256').update(JSON.stringify(before)).digest('hex') ===
-    createHash('sha256').update(JSON.stringify(after)).digest('hex')
+  return before && after && canonicalAuthorityDigest(before) !== null &&
+    canonicalAuthorityDigest(before) === canonicalAuthorityDigest(after)
     ? after.rows
     : null;
 }
@@ -1049,7 +1062,7 @@ export function readCandidateCheckRunEvidence(
       !Array.isArray(request.expectedAttestations) || request.expectedAttestations.length === 0 ||
       request.expectedAttestations.length > MAX_TRUSTED_APP_IDS ||
       request.expectedAttestations.some((item) => !APP_ID_RE.test(item.appId) ||
-        item.appId === request.workflowAppId || !/^ashlr-admission-v4:[0-9a-f]{64}$/.test(item.externalId)) ||
+        item.appId === request.workflowAppId || !/^ashlr-admission-v5:[0-9a-f]{64}$/.test(item.externalId)) ||
       new Set(request.expectedAttestations.map((item) => item.appId)).size !== request.expectedAttestations.length ||
       new Set(request.expectedAttestations.map((item) => item.externalId)).size !== request.expectedAttestations.length ||
       !SHA256_RE.test(request.trustedPolicyDigest) ||
@@ -1066,13 +1079,19 @@ export function readCandidateCheckRunEvidence(
     return emptyCheckRun('trusted GitHub executable custody changed before check collection');
   }
   const api = injectedApi ?? ((endpoint: string) => ghApi(endpoint, trustedGithubCli!, request.candidateRoot));
+  const authorityRecords: unknown[] = [];
+  const collectAuthority = (endpoint: string, key: string): Record<string, unknown>[] | null => {
+    const rows = stablePaginatedCollection(api, endpoint, key);
+    if (rows) authorityRecords.push({ endpoint, key, rows });
+    return rows;
+  };
   const query = new URLSearchParams({
     branch: request.branch,
     head_sha: request.head,
     per_page: '100',
   });
   const workflowEndpoint = `repos/${request.nameWithOwner}/actions/workflows/${encodeURIComponent(basename(request.workflow))}/runs?${query.toString()}`;
-  const runs = stablePaginatedCollection(api, workflowEndpoint, 'workflow_runs');
+  const runs = collectAuthority(workflowEndpoint, 'workflow_runs');
   if (!runs) return emptyCheckRun('complete exact-head workflow run history is unavailable');
   const orderedRuns = orderedWorkflowRuns(runs, request);
   if (!orderedRuns) return emptyCheckRun('latest exact-head workflow execution is missing, malformed, or chronologically ambiguous');
@@ -1095,7 +1114,7 @@ export function readCandidateCheckRunEvidence(
         return emptyCheckRun('complete bounded workflow attempt history exceeds the admission evidence cap');
       }
       const jobsEndpoint = `repos/${request.nameWithOwner}/actions/runs/${run.id}/attempts/${attempt}/jobs?per_page=100`;
-      const jobs = stablePaginatedCollection(api, jobsEndpoint, 'jobs');
+      const jobs = collectAuthority(jobsEndpoint, 'jobs');
       if (!jobs || jobs.some((item) => idString(item['run_id']) !== run.id ||
         boundedString(item['head_sha'], 64)?.toLowerCase() !== request.head.toLowerCase() ||
         (item['run_attempt'] !== undefined && positiveInteger(item['run_attempt']) !== attempt))) {
@@ -1125,6 +1144,10 @@ export function readCandidateCheckRunEvidence(
       check: request.check, workflowJobId };
   }
   const workflowCheckRun = objectRecord(api(`repos/${request.nameWithOwner}/check-runs/${workflowCheckRunId}`));
+  if (workflowCheckRun) authorityRecords.push({
+    endpoint: `repos/${request.nameWithOwner}/check-runs/${workflowCheckRunId}`,
+    value: workflowCheckRun,
+  });
   const workflowAppId = idString(objectRecord(workflowCheckRun?.['app'])?.['id']);
   if (!workflowCheckRun || workflowCheckRun['name'] !== request.check || workflowAppId !== request.workflowAppId ||
       boundedString(workflowCheckRun['head_sha'], 64)?.toLowerCase() !== request.head.toLowerCase() ||
@@ -1141,8 +1164,7 @@ export function readCandidateCheckRunEvidence(
     filter: 'all',
     per_page: '100',
   });
-  const workflowCheckRows = stablePaginatedCollection(
-    api,
+  const workflowCheckRows = collectAuthority(
     `repos/${request.nameWithOwner}/commits/${request.head}/check-runs?${workflowCheckQuery.toString()}`,
     'check_runs',
   );
@@ -1173,8 +1195,7 @@ export function readCandidateCheckRunEvidence(
       filter: 'all',
       per_page: '100',
     });
-    const rows = stablePaginatedCollection(
-      api,
+    const rows = collectAuthority(
       `repos/${request.nameWithOwner}/commits/${request.head}/check-runs?${checkQuery.toString()}`,
       'check_runs',
     );
@@ -1196,8 +1217,21 @@ export function readCandidateCheckRunEvidence(
   const conclusion = boundedString(attestationCheckRun['conclusion'], 64);
   const externalId = boundedString(attestationCheckRun['external_id'], 512);
   const times = evidenceTimes(workflowRun, job, workflowCheckRun, attestationCheckRun, request);
+  const authorityDigest = canonicalAuthorityDigest([
+    'ashlr:candidate-admission-correlated-authority:v1',
+    request.nameWithOwner.toLowerCase(),
+    request.branch,
+    request.head.toLowerCase(),
+    request.workflow,
+    request.check,
+    request.workflowAppId,
+    request.attestationCheck,
+    request.expectedAttestations,
+    authorityRecords,
+  ]);
   const ready = appId !== null && expectedExternalId !== null && head === request.head.toLowerCase() &&
-    status === 'completed' && conclusion === 'success' && externalId === expectedExternalId && times !== null;
+    status === 'completed' && conclusion === 'success' && externalId === expectedExternalId && times !== null &&
+    authorityDigest !== null;
   return {
     available: true,
     ready,
@@ -1228,6 +1262,7 @@ export function readCandidateCheckRunEvidence(
     attestationStartedAt: times?.attestationStartedAt.value ?? null,
     attestationCompletedAt: times?.attestationCompletedAt.value ?? null,
     fresh: times !== null,
+    authorityDigest,
     detail: ready
       ? 'latest successful Actions workflow attempt and independent trusted-App exact-head check carry the whole-snapshot admission attestation'
       : times === null
@@ -1245,6 +1280,8 @@ const DEFAULT_DEPS: CandidateRepoAdmissionDeps = {
   readProtection: readBranchProtectionAttestation,
   readCheckRun: readCandidateCheckRunEvidence,
   readTrustedPolicy: readDefaultTrustedPolicy,
+  resolveGitCli: resolveTrustedGitCli,
+  verifyGitCli: verifyTrustedGitCli,
   resolveGithubCli: resolveTrustedGithubCli,
   verifyGithubCli: verifyTrustedGithubCli,
   evaluateSafeMinimum: evaluateSafeMinimumProtectedRemotePolicyV1,
@@ -1651,7 +1688,7 @@ export function buildCandidateAdmissionAttestationId(input: {
     input.profile,
     input.riskClassification,
   ])).digest('hex');
-  return `ashlr-admission-v4:${digest}`;
+  return `ashlr-admission-v5:${digest}`;
 }
 
 function emptyMutationProof(detail: string): CandidateMutationProof {
@@ -1734,6 +1771,7 @@ function emptyRemote(detail: string, candidateHead: string | null = null): Candi
     candidateTreeOid: null,
     remoteStableAfterChecks: false,
     trustedPolicyStableAfterChecks: false,
+    checkEvidenceStableAfterRecheck: false,
     checkRun: emptyCheckRun('check run was not inspected'),
     detail,
   };
@@ -1773,6 +1811,16 @@ function sameTrustedPolicyAuthority(
   return before.state === 'verified' && after.state === 'verified' && before.path === after.path &&
     before.proof !== null && before.proof === after.proof && beforePolicy !== null && afterPolicy !== null &&
     beforePolicy.digest === afterPolicy.digest;
+}
+
+function sameCandidateCheckAuthority(
+  before: CandidateCheckRunEvidence,
+  after: CandidateCheckRunEvidence,
+): boolean {
+  if (!before.ready || !after.ready || !before.authorityDigest ||
+      before.authorityDigest !== after.authorityDigest) return false;
+  const beforeDigest = canonicalAuthorityDigest(before);
+  return beforeDigest !== null && beforeDigest === canonicalAuthorityDigest(after);
 }
 
 async function inspectRemotePr(
@@ -1855,9 +1903,9 @@ async function inspectRemotePr(
       })!,
     })).filter((item) => item.externalId !== null)
     : [];
-  const checkRun = declaration && trustedPolicy && workflowBinding?.appId &&
+  const checkRequest: CandidateCheckRunRequest | null = declaration && trustedPolicy && workflowBinding?.appId &&
     expectedAttestations.length === trustedPolicy.trustedAppIds.length
-    ? deps.readCheckRun({
+    ? {
         candidateRoot,
         trustedGithubCli,
         nameWithOwner: origin,
@@ -1873,8 +1921,18 @@ async function inspectRemotePr(
         evaluatedAt,
         evidenceMaxAgeMs: trustedPolicy.evidenceMaxAgeMs,
         evidenceFutureSkewMs: trustedPolicy.evidenceFutureSkewMs,
-      })
-    : emptyCheckRun('trusted signer policy, immutable admission declaration, or verifier/policy binding is unavailable');
+      }
+    : null;
+  let initialCheckRun = emptyCheckRun(
+    'trusted signer policy, immutable admission declaration, or verifier/policy binding is unavailable',
+  );
+  if (checkRequest) {
+    try {
+      initialCheckRun = deps.readCheckRun(checkRequest);
+    } catch {
+      initialCheckRun = emptyCheckRun('initial correlated check evidence collection failed');
+    }
+  }
   let remoteAfter: CandidateRemoteHeadEvidence;
   let liveAfter: BranchProtectionAttestation;
   let trustedAuthorityAfter: CandidateTrustedPolicyAuthorityRead;
@@ -1905,12 +1963,22 @@ async function inspectRemotePr(
     trustedPolicy,
     trustedPolicyAfter,
   );
+  let checkRun = emptyCheckRun('final correlated check evidence recheck failed');
+  try {
+    deps.beforeFinalEvidenceRecheck?.();
+    checkRun = checkRequest ? deps.readCheckRun(checkRequest) : initialCheckRun;
+  } catch {
+    checkRun = emptyCheckRun('final correlated check evidence recheck failed');
+  }
+  const checkEvidenceStableAfterRecheck = checkRequest !== null &&
+    sameCandidateCheckAuthority(initialCheckRun, checkRun);
   const expectedAttestationId = checkRun.appId
     ? expectedAttestations.find((item) => item.appId === checkRun.appId)?.externalId ?? null
     : expectedAttestations.length === 1 ? expectedAttestations[0]!.externalId : null;
   const ready = live.available && live.ok && live.protected && pullRequestRequired && identityBound &&
     sourceHead === remoteHead.head && bindingsExact && safeMinimum?.ok === true && policyDigest !== null &&
-    attestorIndependent && checkRun.ready && remoteStableAfterChecks && trustedPolicyStableAfterChecks;
+    attestorIndependent && checkRun.ready && checkEvidenceStableAfterRecheck &&
+    remoteStableAfterChecks && trustedPolicyStableAfterChecks;
   const detail = !live.available || !live.ok || !live.protected ? live.detail : !pullRequestRequired
     ? 'default branch protection does not require a pull request'
     : !identityBound ? 'branch protection identity/base does not match the exact live candidate source'
@@ -1920,6 +1988,8 @@ async function inspectRemotePr(
     : !bindingsExact ? 'live required checks do not exactly match the declared workflow check and its App identity'
     : !attestorIndependent ? 'operator-pinned attestor App must be independent from the protected workflow App'
     : !safeMinimum?.ok ? `safe-minimum protected-remote policy failed${safeMinimum ? ` (${safeMinimum.reason})` : ''}`
+    : !checkEvidenceStableAfterRecheck
+      ? `correlated workflow/check authority changed during final evidence recheck (${checkRun.detail})`
     : !checkRun.ready ? checkRun.detail
     : !remoteStableAfterChecks ? 'remote head or protected policy changed during check collection'
     : !trustedPolicyStableAfterChecks ? 'operator signer policy identity or digest changed during check collection'
@@ -1947,6 +2017,7 @@ async function inspectRemotePr(
     candidateTreeOid: sourceTreeOid,
     remoteStableAfterChecks,
     trustedPolicyStableAfterChecks,
+    checkEvidenceStableAfterRecheck,
     checkRun,
     detail,
   };
@@ -1963,7 +2034,7 @@ export async function inspectCandidateRepoAdmission(
   input: string,
   overrides: Partial<CandidateRepoAdmissionDeps> = {},
 ): Promise<CandidateRepoAdmissionReport> {
-  const deps = { ...DEFAULT_DEPS, ...overrides };
+  let deps = { ...DEFAULT_DEPS, ...overrides };
   const nowValue = deps.now();
   const evaluatorClockValid = Number.isFinite(nowValue.getTime());
   const evaluatedAt = evaluatorClockValid ? nowValue.toISOString() : new Date(0).toISOString();
@@ -1994,6 +2065,41 @@ export async function inspectCandidateRepoAdmission(
   let pathReady = canonical !== null;
   try { pathReady = pathReady && lstatSync(repo).isDirectory(); } catch { pathReady = false; }
   if (!pathReady) admissionBlockers.push(finding('repo-path-invalid', 'candidate path is missing, unreadable, or not a directory', 'Provide an existing readable repository directory.'));
+  const untrustedGitRoots = [repo, join(repo, 'node_modules')];
+  const trustedGitCli = pathReady ? deps.resolveGitCli(untrustedGitRoots) : null;
+  let gitCustodyChanged = false;
+  const unboundGitRunner = deps.git;
+  const verifyGitCli = deps.verifyGitCli;
+  deps = {
+    ...deps,
+    git: (invocation) => {
+      if (!trustedGitCli || !verifyGitCli(trustedGitCli, untrustedGitRoots)) {
+        gitCustodyChanged = trustedGitCli !== null;
+        return null;
+      }
+      let result: CandidateGitResult | null = null;
+      let threw = false;
+      try {
+        result = unboundGitRunner({
+          ...invocation,
+          trustedGitCli,
+          untrustedRoots: [...untrustedGitRoots],
+        });
+      } catch {
+        threw = true;
+      }
+      const custodyStable = verifyGitCli(trustedGitCli, untrustedGitRoots);
+      if (!custodyStable) gitCustodyChanged = true;
+      return !threw && custodyStable ? result : null;
+    },
+  };
+  if (pathReady && !trustedGitCli) {
+    admissionBlockers.push(finding(
+      'trusted-git-custody-unavailable',
+      'an absolute canonical Git executable with trusted installation hierarchy custody is unavailable',
+      'Install Git under a trusted system or package-manager root and remove candidate-controlled or symlinked PATH entries.',
+    ));
+  }
   const trustedGithubCli = pathReady ? deps.resolveGithubCli([repo]) : null;
 
   let enrollment: CandidateEnrollmentEvidence;
@@ -2050,6 +2156,11 @@ export async function inspectCandidateRepoAdmission(
   if (!finalLocalCaptured) captureFinalLocalSnapshot();
   const source = before && after ? finalizeSource(before, after, remoteHead) : emptySource('Git source was not inspected');
 
+  if (pathReady && gitCustodyChanged) admissionBlockers.push(finding(
+    'trusted-git-custody-changed',
+    'the pinned Git executable or its installation hierarchy changed around an invocation',
+    'Restore stable private Git installation custody and rerun the complete preflight.',
+  ));
   if (pathReady && !source.available) admissionBlockers.push(finding('source-evidence-unavailable', source.detail, 'Restore bounded immutable Git/source evidence and rerun the preflight.'));
   else if (source.available) {
     if (!source.clean) admissionBlockers.push(finding('source-dirty', source.detail, 'Commit or intentionally remove local changes before admission.'));
