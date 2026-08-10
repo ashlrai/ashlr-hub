@@ -1015,6 +1015,251 @@ describe('runTask CI session isolation (LOCUS_CI_BINDING / LOCUS_ENFORCE)', () =
 });
 
 
+/**
+ * runBestOfN CI session wiring: refuse maps to empty-candidate result
+ * (never throws); pass-through when session helper yields null; mint handle
+ * overlays process.env for sandboxed fan-out only.
+ *
+ * runBestOfN dispatches via runEngineSandboxed / runApiModelSandboxed (not
+ * runTask), so session mint must wrap this entry independently of agent-loop.
+ *
+ * Each case mocks runWithLocusSessionIfConfigured so suite order / ambient
+ * LOCUS_ENFORCE / sticky vi.doMock from adjacent describes cannot leak.
+ */
+describe('runBestOfN CI session isolation (LOCUS_CI_BINDING / LOCUS_ENFORCE)', () => {
+  const LOCUS_ENV_KEYS = [
+    'LOCUS_ENFORCE',
+    'LOCUS_CI_BINDING',
+    'LOCUS_BINDING',
+    'LOCUS_SESSION_ID',
+  ] as const;
+
+  function snapshotLocusEnv(): Record<string, string | undefined> {
+    const out: Record<string, string | undefined> = {};
+    for (const k of LOCUS_ENV_KEYS) out[k] = process.env[k];
+    return out;
+  }
+
+  function restoreLocusEnv(prev: Record<string, string | undefined>): void {
+    for (const k of LOCUS_ENV_KEYS) {
+      if (prev[k] === undefined) delete process.env[k];
+      else process.env[k] = prev[k];
+    }
+  }
+
+  function makeItem() {
+    return {
+      id: 'item-locus-bon',
+      repo: '/tmp/fake-repo-locus-bon',
+      source: 'manual' as const,
+      title: 'Locus best-of-n probe',
+      detail: 'session isolation',
+      value: 3,
+      effort: 2,
+      score: 3,
+      tags: [] as string[],
+      ts: new Date().toISOString(),
+    };
+  }
+
+  function makeConfig() {
+    return {
+      foundry: { bestOfN: 1, allowedBackends: ['local-coder'] },
+    } as unknown as import('../src/core/types.js').AshlrConfig;
+  }
+
+  /** Legacy path only — omit captureSandboxedProposal so createSandbox is skipped. */
+  function mockSandboxedEngine(sandboxMock: ReturnType<typeof vi.fn>) {
+    vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
+      runApiModelSandboxed: sandboxMock,
+      runEngineSandboxed: sandboxMock,
+    }));
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+    vi.doUnmock('../src/core/integrations/locus.js');
+    vi.doUnmock('../src/core/run/sandboxed-engine.js');
+    vi.doUnmock('../src/core/fleet/manager.js');
+  });
+
+  it('refuses as empty candidates when session helper throws LocusSessionConfigError (never throws)', async () => {
+    const prev = snapshotLocusEnv();
+    try {
+      delete process.env.LOCUS_SESSION_ID;
+      vi.doMock('../src/core/integrations/locus.js', async (importOriginal) => {
+        const actual = await importOriginal<
+          typeof import('../src/core/integrations/locus.js')
+        >();
+        return {
+          ...actual,
+          runWithLocusSessionIfConfigured: async () => {
+            throw new actual.LocusSessionConfigError(
+              'LOCUS_ENFORCE requires LOCUS_CI_BINDING or LOCUS_BINDING for isolated CI sessions (no ambient ~/.locus pin)',
+            );
+          },
+        };
+      });
+
+      const sandboxMock = vi.fn(async () => ({
+        proposalId: 'should-not-run',
+        runId: 'run-refuse',
+      }));
+      mockSandboxedEngine(sandboxMock);
+
+      const { runBestOfN } = await import(
+        '../src/core/run/best-of-n.js?locus-bon-refuse=' + randomUUID()
+      );
+      const result = await runBestOfN(makeItem(), makeConfig());
+      expect(result.winner).toBeUndefined();
+      expect(result.candidates).toEqual([]);
+      expect(result.critique.noProposalReasons?.[0]?.reason).toMatch(
+        /LOCUS_CI_BINDING|LOCUS_BINDING|LOCUS_ENFORCE/,
+      );
+      expect(sandboxMock).not.toHaveBeenCalled();
+    } finally {
+      restoreLocusEnv(prev);
+    }
+  });
+
+  it('pass-through when session helper yields null (sandbox runs)', async () => {
+    const prev = snapshotLocusEnv();
+    try {
+      delete process.env.LOCUS_SESSION_ID;
+      vi.doMock('../src/core/integrations/locus.js', async (importOriginal) => {
+        const actual = await importOriginal<
+          typeof import('../src/core/integrations/locus.js')
+        >();
+        return {
+          ...actual,
+          runWithLocusSessionIfConfigured: async (
+            fn: (handle: null) => Promise<unknown>,
+          ) => fn(null),
+        };
+      });
+
+      const sandboxMock = vi.fn(async () => ({
+        proposalId: undefined,
+        runId: 'run-pass',
+        state: { status: 'failed' as const, proposalOutcome: undefined },
+        proposalOutcome: {
+          kind: 'engine-failed-no-diff' as const,
+          reason: 'no proposal',
+        },
+      }));
+      mockSandboxedEngine(sandboxMock);
+      vi.doMock('../src/core/fleet/manager.js', () => ({
+        judgeProposal: vi.fn(),
+      }));
+
+      const { runBestOfN } = await import(
+        '../src/core/run/best-of-n.js?locus-bon-pass=' + randomUUID()
+      );
+      const result = await runBestOfN(makeItem(), makeConfig());
+      expect(sandboxMock).toHaveBeenCalled();
+      expect(result.critique.n).toBe(1);
+      expect(result.candidates.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      restoreLocusEnv(prev);
+    }
+  });
+
+  it('overlays mint handle env on process.env for the best-of-n body only', async () => {
+    const prev = snapshotLocusEnv();
+    const seen: { sessionId?: string } = {};
+    try {
+      delete process.env.LOCUS_SESSION_ID;
+      vi.doMock('../src/core/integrations/locus.js', async (importOriginal) => {
+        const actual = await importOriginal<
+          typeof import('../src/core/integrations/locus.js')
+        >();
+        return {
+          ...actual,
+          runWithLocusSessionIfConfigured: async (
+            fn: (handle: {
+              sessionId: string;
+              binding: string;
+              env: NodeJS.ProcessEnv;
+            } | null) => Promise<unknown>,
+          ) =>
+            fn({
+              sessionId: 'sess-bon-mint',
+              binding: 'ci-acme',
+              env: {
+                LOCUS_SESSION_ID: 'sess-bon-mint',
+                LOCUS_BINDING: 'ci-acme',
+                LOCUS_HOME: '/tmp/locus-bon-mint-test',
+              },
+            }),
+        };
+      });
+
+      const sandboxMock = vi.fn(async () => {
+        seen.sessionId = process.env.LOCUS_SESSION_ID;
+        return {
+          proposalId: undefined,
+          runId: 'run-mint',
+          state: { status: 'failed' as const, proposalOutcome: undefined },
+          proposalOutcome: {
+            kind: 'engine-failed-no-diff' as const,
+            reason: 'no proposal',
+          },
+        };
+      });
+      mockSandboxedEngine(sandboxMock);
+      vi.doMock('../src/core/fleet/manager.js', () => ({
+        judgeProposal: vi.fn(),
+      }));
+
+      const { runBestOfN } = await import(
+        '../src/core/run/best-of-n.js?locus-bon-mint=' + randomUUID()
+      );
+      await runBestOfN(makeItem(), makeConfig());
+      expect(sandboxMock).toHaveBeenCalled();
+      expect(seen.sessionId).toBe('sess-bon-mint');
+      // Restored after body — must not leak mint session into ambient env.
+      expect(process.env.LOCUS_SESSION_ID).toBeUndefined();
+    } finally {
+      restoreLocusEnv(prev);
+    }
+  });
+
+  it('maps LocusMintError to empty-candidate refuse without throwing', async () => {
+    const prev = snapshotLocusEnv();
+    try {
+      vi.doMock('../src/core/integrations/locus.js', async (importOriginal) => {
+        const actual = await importOriginal<
+          typeof import('../src/core/integrations/locus.js')
+        >();
+        return {
+          ...actual,
+          runWithLocusSessionIfConfigured: async () => {
+            throw new actual.LocusMintError('ci mint failed: bon simulated');
+          },
+        };
+      });
+
+      const sandboxMock = vi.fn();
+      mockSandboxedEngine(sandboxMock);
+
+      const { runBestOfN } = await import(
+        '../src/core/run/best-of-n.js?locus-bon-mint-err=' + randomUUID()
+      );
+      const result = await runBestOfN(makeItem(), makeConfig());
+      expect(result.winner).toBeUndefined();
+      expect(result.candidates).toEqual([]);
+      expect(result.critique.noProposalReasons?.[0]?.reason).toMatch(
+        /ci mint failed/,
+      );
+      expect(sandboxMock).not.toHaveBeenCalled();
+    } finally {
+      restoreLocusEnv(prev);
+    }
+  });
+});
+
+
 describe('MCP merge helpers', () => {
 
   it('locusServerSpec uses locus-mcp and LOCUS_* env only', () => {
