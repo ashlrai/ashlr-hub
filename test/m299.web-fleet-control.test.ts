@@ -30,7 +30,7 @@ vi.mock('../src/core/daemon/service.js', () => ({
 
 import { makeFixture, makeCfg, type H1Fixture } from './helpers/h1-fixture.js';
 import { cmdFleet } from '../src/cli/fleet.js';
-import { startServer } from '../src/core/web/server.js';
+import { readAuthHeaders, startServer } from './helpers/authenticated-web-server.js';
 import { killSwitchOn, setKill } from '../src/core/sandbox/policy.js';
 import type { WebServerOptions } from '../src/core/types.js';
 
@@ -86,7 +86,11 @@ function request(
         port: Number(parsed.port),
         path: parsed.pathname + parsed.search,
         method,
-        headers: { Host: `127.0.0.1:${port}`, ...headers },
+        headers: {
+          Host: `127.0.0.1:${port}`,
+          ...(method === 'GET' ? readAuthHeaders(port) : {}),
+          ...headers,
+        },
       },
       (res) => {
         let data = '';
@@ -144,10 +148,12 @@ describe('Fleet OS control capability rendering', () => {
     expect(controlFactory).toBeDefined();
     expect(controlFactory).toContain("capabilitySnapshot?.dispatchEnabled !== true");
     expect(controlFactory).toContain("Fleet controls: read-only");
-    expect(controlFactory).toContain("if (!getToken())");
-    expect(controlFactory).toContain("Fleet controls: token required");
+    expect(controlFactory).not.toContain('getReadToken');
+    expect(source).toContain('const token = promptMutationToken();');
+    expect(source).toContain("Mutation cancelled — no mutation token was entered.");
     expect(controlFactory).toContain("fleetAuthorizedControlButton(fleet, size)");
-    expect(source).toMatch(/updateTokenIndicator\(\);\n {2}renderActiveView\(\);/);
+    expect(source).toContain('await establishReadSession(trimmed);');
+    expect(source).toMatch(/updateTokenIndicator\(\);[\s\S]*?renderActiveView\(\);/);
     expect(source).toContain(
       "return state === 'unknown' ? null : fleetPauseResumeButton(state === 'active', size)",
     );

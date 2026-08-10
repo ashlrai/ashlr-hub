@@ -5,7 +5,8 @@
  * handled the request (so server.ts does NOT fall through to static serving),
  * false otherwise.
  *
- * Read-only routes (always available, no auth):
+ * Read-only routes (the server boundary authenticates these before dispatch;
+ * direct handleApi callers are responsible for establishing read authority):
  *   GET /api/snapshot          -> buildSnapshot(cfg)
  *   GET /api/config/effective  -> effective autonomy/daemon/foundry/backend config
  *   GET /api/portfolio         -> buildSnapshot(cfg).portfolio | null (read-only; M29)
