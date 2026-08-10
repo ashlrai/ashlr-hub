@@ -53,6 +53,14 @@ import { getPhantomStatus } from './phantom.js';
 import { discoverMcpServers } from './mcp-registry.js';
 import type { PhantomStatus } from './types.js';
 import { assurePrivateStoragePath } from './util/private-storage.js';
+import {
+  locusAvailable,
+  locusAgentReport,
+  locusStatusOneline,
+  resolveLocusEnforceMode,
+  type LocusAgentReport,
+  type LocusProbeResult,
+} from './integrations/locus.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -61,10 +69,10 @@ import { assurePrivateStoragePath } from './util/private-storage.js';
 /** Severity of a single readiness finding. */
 export type ReadinessSeverity = 'blocker' | 'warning' | 'info';
 
-/** One readiness finding (model/enrollment/kill/daemon/writeable/sandbox/git/phantom). */
+/** One readiness finding (model/enrollment/kill/daemon/writeable/sandbox/git/phantom/locus). */
 export interface ReadinessFinding {
   /** Stable facet id, e.g. 'model' | 'enrollment' | 'kill-switch' | 'daemon' |
-   *  'ashlr-writeable' | 'sandbox' | 'git' | 'phantom'. */
+   *  'ashlr-writeable' | 'sandbox' | 'git' | 'phantom' | 'locus'. */
   id: string;
   /** Severity. 'blocker' forces ready=false; 'warning'/'info' do not. */
   severity: ReadinessSeverity;
@@ -97,6 +105,29 @@ export interface ReadinessPhantomSnapshot {
   error?: string;
 }
 
+/**
+ * Values-free Locus identity-plane snapshot for preflight/doctor readiness.
+ * Status/pin/ready only — never credential values or CredentialRefs.
+ */
+export interface ReadinessLocusSnapshot {
+  available: boolean;
+  status: string | null;
+  statusOneline: string | null;
+  ready: boolean | null;
+  gateOk: boolean;
+  pin: {
+    sealOk: boolean | null;
+    expired: boolean | null;
+    frozen: boolean | null;
+  } | null;
+  mcpRegistered: {
+    claude: boolean;
+    cursor: boolean;
+    codex: boolean;
+  } | null;
+  error?: string;
+}
+
 /** Full readiness report. `ready` is true iff there are zero 'blocker' findings. */
 export interface ReadinessReport {
   /** True iff no finding has severity 'blocker'. */
@@ -109,6 +140,8 @@ export interface ReadinessReport {
   info: ReadinessFinding[];
   /** Values-free Phantom capability snapshot, if the facet could be evaluated. */
   phantom?: ReadinessPhantomSnapshot;
+  /** Values-free Locus identity-plane snapshot, if the facet could be evaluated. */
+  locus?: ReadinessLocusSnapshot;
   /** ISO timestamp the report was built. */
   generatedAt: string;
 }
@@ -480,6 +513,101 @@ function readinessPhantomSnapshot(status: PhantomStatus): ReadinessPhantomSnapsh
   };
 }
 
+/**
+ * READ-ONLY Locus identity-plane probe for readiness/preflight.
+ * Reuses locusAvailable + locusAgentReport / locusStatusOneline.
+ * Never throws; never surfaces secret values.
+ */
+function readinessLocusSnapshot(): ReadinessLocusSnapshot {
+  if (!locusAvailable()) {
+    return {
+      available: false,
+      status: null,
+      statusOneline: null,
+      ready: null,
+      gateOk: false,
+      pin: null,
+      mcpRegistered: null,
+    };
+  }
+
+  let probe: LocusProbeResult;
+  try {
+    probe = locusAgentReport();
+  } catch (err) {
+    const oneline = safeLocusStatusOneline();
+    return {
+      available: true,
+      status: null,
+      statusOneline: oneline,
+      ready: null,
+      gateOk: false,
+      pin: null,
+      mcpRegistered: null,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  if (!probe.report) {
+    return {
+      available: true,
+      status: null,
+      statusOneline: safeLocusStatusOneline(),
+      ready: null,
+      gateOk: false,
+      pin: null,
+      mcpRegistered: null,
+      ...(probe.error ? { error: probe.error } : {}),
+    };
+  }
+
+  return locusSnapshotFromReport(probe);
+}
+
+function safeLocusStatusOneline(): string | null {
+  try {
+    const oneline = locusStatusOneline();
+    return oneline || null;
+  } catch {
+    return null;
+  }
+}
+
+function locusSnapshotFromReport(probe: LocusProbeResult): ReadinessLocusSnapshot {
+  const report = probe.report as LocusAgentReport;
+  const pin = report.pin;
+  const mcp = report.mcp_registered;
+  return {
+    available: true,
+    status: typeof report.status === 'string' ? report.status : null,
+    statusOneline:
+      (typeof report.status_oneline === 'string' && report.status_oneline) ||
+      safeLocusStatusOneline(),
+    ready: typeof report.ready === 'boolean' ? report.ready : null,
+    gateOk: probe.gateOk === true,
+    pin: pin
+      ? {
+          sealOk: typeof pin.seal_ok === 'boolean' ? pin.seal_ok : null,
+          expired: typeof pin.expired === 'boolean' ? pin.expired : null,
+          frozen: typeof pin.frozen === 'boolean' ? pin.frozen : null,
+        }
+      : null,
+    mcpRegistered: mcp
+      ? {
+          claude: mcp.claude === true,
+          cursor: mcp.cursor === true,
+          codex: mcp.codex === true,
+        }
+      : null,
+  };
+}
+
+/** Install/setup fix for the Locus identity plane (no secrets). */
+const LOCUS_INSTALL_FIX =
+  'Install: cargo install --git https://github.com/ashlrai/locus --package locus-cli --locked  (or brew install ashlrai/tap/locus)';
+const LOCUS_PIN_FIX =
+  'locus enter <alias> && locus agent setup --apply --client all';
+
 // ---------------------------------------------------------------------------
 // buildReadiness — composes the facets into a ReadinessReport
 // ---------------------------------------------------------------------------
@@ -495,6 +623,7 @@ function readinessPhantomSnapshot(status: PhantomStatus): ReadinessPhantomSnapsh
  *  - ~/.ashlr writeable via checkAshlrWriteable (not writeable => BLOCKER)
  *  - sandbox health via readSandboxHealth (high orphan count => WARNING)
  *  - git present (absent => BLOCKER); phantom present (absent => WARNING)
+ *  - locus present (absent => WARNING; LOCUS_ENFORCE=enforce escalates to BLOCKER)
  *
  * `ready` is true iff blockers.length === 0. Never throws.
  *
@@ -728,12 +857,57 @@ export async function buildReadiness(cfg: AshlrConfig): Promise<ReadinessReport>
     }
   }
 
+  // -- locus present (optional; absent => warning; LOCUS_ENFORCE=enforce => blocker) --
+  let locus: ReadinessLocusSnapshot | undefined;
+  {
+    try {
+      locus = readinessLocusSnapshot();
+    } catch {
+      locus = undefined;
+    }
+    // Prefer WARNING when absent/unhealthy (like phantom). Only LOCUS_ENFORCE=enforce
+    // escalates identity-plane gaps to a hard blocker for first activation.
+    const enforce = resolveLocusEnforceMode() === 'enforce';
+    const pushSoftOrHard = (finding: ReadinessFinding): void => {
+      if (finding.severity === 'blocker') blockers.push(finding);
+      else warnings.push(finding);
+    };
+
+    if (!locus?.available) {
+      pushSoftOrHard({
+        id: 'locus',
+        severity: enforce ? 'blocker' : 'warning',
+        detail: 'locus not installed (optional — identity plane; pin with locus enter when used)',
+        fix: LOCUS_INSTALL_FIX,
+      });
+    } else if (locus.gateOk && locus.ready === true && locus.status === 'ready') {
+      info.push({
+        id: 'locus',
+        severity: 'info',
+        detail:
+          `locus ready; pin=${locus.statusOneline ?? 'unknown'}; ` +
+          `status=${locus.status}; values free`,
+      });
+    } else {
+      const detail = locus.error
+        ? `locus present but report failed: ${locus.error}`
+        : `locus status=${locus.status ?? 'unknown'} pin=${locus.statusOneline ?? 'unpinned'} ready=${locus.ready ?? false}`;
+      pushSoftOrHard({
+        id: 'locus',
+        severity: enforce ? 'blocker' : 'warning',
+        detail,
+        fix: LOCUS_PIN_FIX,
+      });
+    }
+  }
+
   return {
     ready: blockers.length === 0,
     blockers,
     warnings,
     info,
     ...(phantom ? { phantom } : {}),
+    ...(locus ? { locus } : {}),
     generatedAt: new Date().toISOString(),
   };
 }

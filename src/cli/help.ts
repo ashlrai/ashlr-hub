@@ -375,7 +375,7 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'seams',                        desc: 'Cloud-ready seam diagnostic: every v2 store, active=local, cloud=gated (read-only).', topic: 'safety' },
   { cmd: 'seams status',                 desc: 'Same as `seams`: list seams + active impl; proves local-first + cloud gated on Mason.', topic: 'safety' },
   { cmd: 'verify-safety',                desc: 'Read-only self-check of the hard safety invariants (enrollment/kill-switch/daemon/scrub/cloud-gate); mutates nothing.', topic: 'safety' },
-  { cmd: 'preflight [--json]',           desc: 'Read-only first-activation readiness check: ready=true|false + blockers/warnings (model/enrollment/kill/daemon/writeable/sandbox/git/phantom); mutates nothing.', topic: 'safety' },
+  { cmd: 'preflight [--json]',           desc: 'Read-only first-activation readiness check: ready=true|false + blockers/warnings (model/enrollment/kill/daemon/writeable/sandbox/git/phantom/locus); mutates nothing.', topic: 'safety' },
   { cmd: 'onboard',                      desc: 'Guided first safe activation: preflight → enroll ONE repo → dry-run PLAN → point at `ashlr inbox`. TTY-aware; --yes/non-TTY prints steps. NEVER auto-applies.', topic: 'safety' },
   { cmd: 'onboard --rollback <repo>',    desc: 'One-command undo of a first activation: unenroll + sweep orphan sandboxes + optional --kill. Inward cleanup only; H6-audited.', topic: 'safety' },
   { cmd: 'demo [--no-cleanup] [--json]', desc: 'Watch the FULL autonomous chain run on a DISPOSABLE tmp repo (isolated tmp ~/.ashlr; proposal-only; auto-cleans). NEVER touches your portfolio or applies anything.', topic: 'safety' },
