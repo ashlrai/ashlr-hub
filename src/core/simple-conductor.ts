@@ -22,12 +22,26 @@
  *  - never-throws per task (catch -> durable failure settlement -> continue).
  *  - Flag off (cfg.foundry.simpleConductor !== true) ⇒ this module is never
  *    imported; loop.ts uses the old runConductor (byte-identical).
+ *
+ * CI session isolation (opt-in via LOCUS_CI_BINDING / LOCUS_BINDING):
+ *   When configured, each task dispatch mints an ephemeral Locus pin and
+ *   overlays LOCUS_* onto process.env so sandboxed engines inherit the sealed
+ *   session. LOCUS_ENFORCE=enforce without a binding refuses as result.errors
+ *   (never throws). Default (unset binding + enforce off) is a no-op.
+ *   Does not add a second pre-mutate gate — that lives on spawnEngine /
+ *   runApiModelSandboxed only.
  */
 
 import type { AshlrConfig, EngineId, Proposal } from './types.js';
 import type { SandboxedEngineResult } from './run/sandboxed-engine.js';
 import type { AuthoritativePendingProposalExpectation } from './inbox/pending-authority.js';
 import { isSafeExecutionIdentity } from './fleet/attempt-identity.js';
+import {
+  applyLocusSessionEnv,
+  LocusMintError,
+  LocusSessionConfigError,
+  runWithLocusSessionIfConfigured,
+} from './integrations/locus.js';
 import {
   claimSimpleConductorTask,
   readSimpleConductorTasks,
@@ -361,6 +375,11 @@ export async function runSimpleConductor(
     dispatched++;
 
     // Dispatch via the proven sandboxed-engine primitive.
+    // CI isolation: when LOCUS_CI_BINDING/LOCUS_BINDING is set, mint an
+    // ephemeral sealed session and overlay LOCUS_* onto process.env so the
+    // sandboxed engine inherits it. Restores prior values after the run.
+    // Default (unset binding + LOCUS_ENFORCE off) is a no-op pass-through.
+    // LocusSessionConfigError / LocusMintError → result.errors (never throw).
     try {
       // M300: resolve effective engine — reroutes away from exhausted backends.
       const engineId: EngineId = resolveEffectiveEngine((task.engine ?? 'claude') as EngineId);
@@ -395,9 +414,29 @@ export async function runSimpleConductor(
         workItemId: task.id,
         workItemGenerationId: generationId,
       };
-      const sandboxResult = isApiModel
-        ? await runApiModelSandboxed(engineId, instruction, cfg, sandboxOpts)
-        : await runEngineSandboxed(engineId, instruction, cfg, sandboxOpts);
+
+      const sandboxResult = await runWithLocusSessionIfConfigured(async (handle) => {
+        const restored: Array<[string, string | undefined]> = [];
+        if (handle) {
+          const overlay: NodeJS.ProcessEnv = {};
+          applyLocusSessionEnv(overlay, handle.env);
+          for (const [key, value] of Object.entries(overlay)) {
+            if (typeof value !== 'string') continue;
+            restored.push([key, process.env[key]]);
+            process.env[key] = value;
+          }
+        }
+        try {
+          return isApiModel
+            ? await runApiModelSandboxed(engineId, instruction, cfg, sandboxOpts)
+            : await runEngineSandboxed(engineId, instruction, cfg, sandboxOpts);
+        } finally {
+          for (const [key, prev] of restored) {
+            if (prev === undefined) delete process.env[key];
+            else process.env[key] = prev;
+          }
+        }
+      });
 
       const candidateId = resultCandidateId(sandboxResult);
       const runId = isSafeExecutionIdentity(sandboxResult.state?.id)
@@ -446,7 +485,14 @@ export async function runSimpleConductor(
         if (!settled.ok) result.errors.push({ taskId: task.id, error: settled.detail });
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
+      // Map Locus session refuse/mint failures (and any other dispatch error)
+      // to result.errors — never throw out of the per-task loop.
+      const msg =
+        err instanceof LocusSessionConfigError || err instanceof LocusMintError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : String(err);
       console.warn(`[simple-conductor] task ${task.id} dispatch error: ${msg}`);
       result.errors.push({ taskId: task.id, error: msg });
       const settled = settleSimpleConductorTask(claim, {
