@@ -41,6 +41,17 @@ import {
   beginExecutionAuthority,
   finishExecutionAuthority,
 } from '../util/execution-lease.js';
+import {
+  MAX_BEST_OF_N_CONCURRENCY,
+  resolveBestOfNCount,
+} from './best-of-n-policy.js';
+
+export {
+  MAX_BEST_OF_N_CANDIDATE_SPECS_INSPECTED,
+  MAX_BEST_OF_N_CANDIDATES,
+  MAX_BEST_OF_N_CONCURRENCY,
+  resolveBestOfNCount,
+} from './best-of-n-policy.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -128,25 +139,6 @@ export interface BestOfNResult {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
-
-/** Hard process/cost containment for one best-of-N selection. */
-export const MAX_BEST_OF_N_CANDIDATES = 8;
-
-/**
- * A best-of-N call already consumes one outer daemon slot. Keep its internal
- * producer and critic fan-out smaller so it cannot bypass the fleet governor.
- */
-export const MAX_BEST_OF_N_CONCURRENCY = 2;
-
-/**
- * Resolve an untrusted/configured candidate count conservatively.
- * Invalid values fail closed to one candidate; valid values are floored and
- * clamped to the hard maximum.
- */
-export function resolveBestOfNCount(value: unknown): number {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value < 1) return 1;
-  return Math.min(MAX_BEST_OF_N_CANDIDATES, Math.floor(value));
-}
 
 /**
  * Read bestOfN from cfg loosely — the field is not yet in types.ts.

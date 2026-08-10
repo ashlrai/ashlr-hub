@@ -34,6 +34,20 @@ Extend Ecosystem Mission OS from planning-only graph compilation into a durable,
 ## Errors Encountered
 - The first M497 fixture was rejected as an unreadable briefing because graph metadata omitted required `humanGate` and `outcome` fields; the fixture was corrected to the exact persisted schema.
 - The same fixture used macOS's lexical `/var` path while enrollment canonicalized to `/private/var`; it now binds the real path, matching production enrollment semantics.
+- The first hosted V1.1 matrix exposed an incomplete-module-mock integration
+  regression: daemon tests replaced the best-of-N runner without exporting its
+  new count resolver. The resolver and hard limits now live in a dependency-free
+  policy module, while the runner re-exports them for compatibility.
+- One local release-contract run exceeded its per-test timeout while competing
+  with parallel checks; the exact failed tamper case passed alone in 10.8s.
 
 ## Status
-**Currently in Phase 6** - Local verification is complete: the combined Mission OS and best-of-N matrix passed 284/284 tests; the invariant suite previously passed 445 with 5 skips; typecheck, build, npm pack dry-run, dependency audit, and diff checks pass; lint has 0 errors and 101 inherited warnings. The full local repository run reached its 15-minute hard cap with no completed failures and is explicitly incomplete. Consolidating the stacked branches and relying on the protected hosted native matrix for merge authority.
+**Currently in Phase 6** - The hosted daemon integration defect has been repaired
+and the formerly failing daemon suites pass locally (381/381). Mission, source
+quality, and Windows lock regressions pass 75/75; policy/CLI hardening adds 32/32
+passing checks. Typecheck, scoped lint, build, version/changelog validation,
+package-content validation, and diff checks pass. One full release-contract run
+had a load-related timeout; its exact failed case passes in isolation. The full
+repository suite remains incomplete, so protected hosted native checks remain
+merge authority. npm publication remains separately blocked on registry
+authentication and must not be inferred from source merge readiness.

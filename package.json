@@ -34,7 +34,10 @@
     "bin",
     "scripts/run-verify-command.mjs",
     "schema",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "docs/MISSION-OS.md",
+    "docs/ELITE-AGENT-EFFICIENCY.md",
+    "docs/contracts/CONTRACT-MISSION-RECEIPT-V1.md"
   ],
   "bundledDependencies": [
     "@modelcontextprotocol/sdk",

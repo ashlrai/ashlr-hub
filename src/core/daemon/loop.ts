@@ -146,10 +146,13 @@ import {
 } from '../fleet/proposal-repair-work.js';
 import { reconcileRemoteHandoffs, type RemoteHandoffReconcileResult } from '../inbox/remote-handoff.js';
 import {
-  resolveBestOfNCount,
   runBestOfN,
   type CandidateResult,
 } from '../run/best-of-n.js';
+import {
+  MAX_BEST_OF_N_CANDIDATE_SPECS_INSPECTED,
+  resolveBestOfNCount,
+} from '../run/best-of-n-policy.js';
 import { runSelfHealCycle, runSelfHealCycleForRepos } from '../fleet/self-heal.js';
 import { runInventCycle } from '../generative/invent-cycle.js'; // M186
 import { runCounterfactualReplay } from '../fleet/counterfactual.js'; // M187
@@ -6126,20 +6129,33 @@ export async function tick(
         const _bonCfg = routingCfg.foundry as Record<string, unknown> | undefined;
         const _bonMinScore = _bonCfg?.['bestOfNMinItemScore'];
         const _bonRawCandidates = _bonCfg?.['bestOfNCandidates'];
-        const _bonCandidates = Array.isArray(_bonRawCandidates)
-          ? (_bonRawCandidates as Array<{ engine?: unknown; model?: unknown }>)
-              .filter((c): c is { engine: string; model?: string | null } =>
-                !!c && typeof c.engine === 'string')
-              .filter((c) =>
-                ((routingCfg.foundry?.allowedBackends ?? []) as string[]).includes(c.engine))
-              .filter((c) =>
-                !isTrustedGeneratedRepairItem(item) ||
-                effectiveGeneratedRepairCandidateAllowed(item, c.engine as EngineId, routingCfg))
-          : undefined;
         const fanOut =
           bestOfN > 1 &&
           !isTrustedGeneratedRepairItem(item) &&
           (typeof _bonMinScore !== 'number' || (item.score ?? 0) >= _bonMinScore);
+        let _bonCandidates: ReadonlyArray<{ engine: string; model?: string | null }> | undefined;
+        if (fanOut && Array.isArray(_bonRawCandidates)) {
+          const accepted: Array<{ engine: string; model?: string | null }> = [];
+          const allowed = new Set((routingCfg.foundry?.allowedBackends ?? []) as string[]);
+          const inspected = Math.min(
+            _bonRawCandidates.length,
+            MAX_BEST_OF_N_CANDIDATE_SPECS_INSPECTED,
+          );
+          for (let index = 0; index < inspected && accepted.length < bestOfN; index += 1) {
+            const candidate = _bonRawCandidates[index];
+            if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+            const engineProperty = Object.getOwnPropertyDescriptor(candidate, 'engine');
+            const modelProperty = Object.getOwnPropertyDescriptor(candidate, 'model');
+            const engine = engineProperty?.value;
+            const model = modelProperty?.value;
+            if (!engineProperty?.enumerable || typeof engine !== 'string' || !allowed.has(engine)) continue;
+            if (modelProperty !== undefined &&
+              (!modelProperty.enumerable ||
+                (typeof model !== 'string' && model !== null && model !== undefined))) continue;
+            accepted.push(modelProperty === undefined ? { engine } : { engine, model });
+          }
+          if (accepted.length > 0) _bonCandidates = Object.freeze(accepted);
+        }
         let bonBillable: number | null = null;
 
         let runState: Awaited<ReturnType<typeof runGoal>>;
@@ -6162,7 +6178,7 @@ export async function tick(
             }
             return runBestOfN(item, routingCfg, {
               n: bestOfN, engine: backend, model: selectedModel,
-              ...(_bonCandidates && _bonCandidates.length > 0 ? { candidates: _bonCandidates as never } : {}),
+              ...(_bonCandidates ? { candidates: _bonCandidates as never } : {}),
               workItemId: item.id, workItemGenerationId, workSource: item.source,
               delegationScope, attemptId, shadowSkillCards, shadowSkillSelectedAt,
               signal: dispatchSignal,

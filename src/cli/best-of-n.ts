@@ -53,13 +53,20 @@ const cmdBestOfN: Cmd = async (args: string[]): Promise<number> => {
   let title: string | undefined;
   let detail: string | undefined;
   let nOverride: number | undefined;
+  let invalidNOverride = false;
   let jsonMode = false;
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === '-n' || a === '--n') {
-      const v = parseInt(args[++i] ?? '', 10);
-      if (!isNaN(v) && v >= 1) nOverride = v;
+      const raw = args[++i];
+      if (raw !== undefined && raw.length <= 16 && /^[1-9][0-9]*$/u.test(raw)) {
+        const value = Number(raw);
+        if (Number.isSafeInteger(value)) nOverride = value;
+        else invalidNOverride = true;
+      } else {
+        invalidNOverride = true;
+      }
     } else if (a === '--repo') {
       repo = args[++i];
     } else if (a === '--title') {
@@ -80,6 +87,11 @@ const cmdBestOfN: Cmd = async (args: string[]): Promise<number> => {
   if (args.includes('--help') || args.includes('-h') || args[0] === 'help') {
     printUsage(console.log);
     return 0;
+  }
+  if (invalidNOverride) {
+    console.error(_red('Error: -n/--n requires a positive integer.'));
+    printUsage();
+    return 2;
   }
   if (!workItemId && !(repo && title)) {
     printUsage();
@@ -132,11 +144,11 @@ const cmdBestOfN: Cmd = async (args: string[]): Promise<number> => {
   }
 
   // ── Run best-of-N ────────────────────────────────────────────────────────
-  const { runBestOfN } = await import('../core/run/best-of-n.js');
+  const { resolveBestOfNCount, runBestOfN } = await import('../core/run/best-of-n.js');
+  const foundryAny = (cfg as unknown as Record<string, unknown>)['foundry'] as Record<string, unknown> | undefined;
+  const n = resolveBestOfNCount(nOverride ?? foundryAny?.['bestOfN']);
 
   if (!jsonMode) {
-    const foundryAny = (cfg as unknown as Record<string, unknown>)['foundry'] as Record<string, unknown> | undefined;
-    const n = nOverride ?? (foundryAny?.['bestOfN'] as number | undefined) ?? 1;
     console.log(`\n${_bold_s}ashlr best-of-N${_reset}  ${_dim('M142 — Rubric-Supervised critic selection')}`);
     console.log(`${_dim('Item:')}  ${item.title}`);
     console.log(`${_dim('Repo:')}  ${item.repo}`);
@@ -145,7 +157,7 @@ const cmdBestOfN: Cmd = async (args: string[]): Promise<number> => {
 
   let result: Awaited<ReturnType<typeof runBestOfN>>;
   try {
-    result = await runBestOfN(item, cfg, nOverride != null ? { n: nOverride } : undefined);
+    result = await runBestOfN(item, cfg, { n });
   } catch (err) {
     console.error(_red('Error: ' + String(err)));
     return 1;

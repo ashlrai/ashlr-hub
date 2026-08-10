@@ -467,8 +467,10 @@ See [`docs/FOUNDRY-CONFIG.md`](docs/FOUNDRY-CONFIG.md) for the full foundry refe
 | **v5.1** (M320–M324) | Claude 5 Model Intelligence — Sonnet 5 workhorse routing, Fable 5 judge with Opus fallback, per-model ROI telemetry, cost-aware learned routing | Shipped |
 | **v6** (M331–M340) | Verification-First — verify-to-green repair loop, real-world outcome watcher, multi-model best-of-N, gateway shadow activation program, Models dashboard tab, SWE-bench regression gate | Shipped |
 
-Current npm release: **3.0.1**. Later repository work remains unreleased until
-an explicitly versioned tag and its publish workflow complete successfully.
+This release candidate was prepared against the public npm baseline **3.0.1**.
+A newer version is authoritative only after its protected tag workflow and the
+npm registry both confirm publication; repository or changelog state alone is
+not release evidence.
 
 ---
 
