@@ -20,6 +20,10 @@ const repoRoot = resolve(here, '..');
 
 const ciYml = readFileSync(resolve(repoRoot, '.github/workflows/ci.yml'), 'utf8');
 const vitestConfig = readFileSync(resolve(repoRoot, 'vitest.config.ts'), 'utf8');
+const windowsLauncherTest = readFileSync(
+  resolve(repoRoot, 'test/m503.windows-open-launcher.test.ts'),
+  'utf8',
+);
 const pkg = JSON.parse(
   readFileSync(resolve(repoRoot, 'package.json'), 'utf8'),
 ) as { engines?: { node?: string }; scripts?: Record<string, string> };
@@ -139,6 +143,11 @@ describe('M30 CI workflow', () => {
       ciYml.match(
         /^ {10}- os: (?:ubuntu|windows|macos)-latest[\s\S]*?(?=^ {10}- os: |^ {4}runs-on:)/gm,
       ) ?? [];
+    const nativeMatrixRows = nativeMatrixEntries.map((entry) => ({
+      entry,
+      label: entry.match(/^ {12}label: (.+)$/m)?.[1] ?? '',
+      os: entry.match(/^ {10}- os: ((?:ubuntu|windows|macos)-latest)$/m)?.[1] ?? '',
+    }));
     const windowsMatrixEntries = nativeMatrixEntries
       .filter((entry) => entry.includes('os: windows-latest'));
     const windowsEntries = windowsMatrixEntries.join('\n');
@@ -437,6 +446,7 @@ describe('M30 CI workflow', () => {
     const expectedFiles = [
       ...expectedWindowsPartitions.flat(),
       ...expectedMacosFiles,
+      'test/m503.windows-open-launcher.test.ts',
       ...nativeAliasFiles,
       ...nativeAclEnrollmentFiles,
       ...nativePathIdentityFiles,
@@ -509,6 +519,22 @@ describe('M30 CI workflow', () => {
       expect(existsSync(resolve(repoRoot, file)), `missing native CI test: ${file}`).toBe(true);
     }
     expect(ciYml).toContain('npm run test:ci -- ${{ matrix.test_args }}');
+    expect(ciYml).toContain('Test Windows launcher authority (M503, hermetic)');
+    expect(ciYml).toContain(
+      "if: matrix.os == 'windows-latest' && startsWith(matrix.label, 'windows, portability')",
+    );
+    const launcherAuthorityRows = nativeMatrixRows.filter(({ label, os }) =>
+      os === 'windows-latest' && label.startsWith('windows, portability'),
+    );
+    expect(launcherAuthorityRows).toHaveLength(4);
+    expect(launcherAuthorityRows.every(({ os }) => os === 'windows-latest')).toBe(true);
+    expect(nativeMatrixRows.filter(({ label, os }) =>
+      os !== 'windows-latest' && label.startsWith('windows, portability'),
+    )).toHaveLength(0);
+    expect(ciYml.match(/npm run test:ci -- test\/m503\.windows-open-launcher\.test\.ts/g))
+      .toHaveLength(1);
+    expect(windowsLauncherTest).toContain("const suite = describe.runIf(onWindows)");
+    expect(windowsLauncherTest).toContain('Manual GUI');
     expect(ciYml).toContain(
       "if: matrix.os == 'macos-latest' || matrix.label == 'windows, portability 2/3'",
     );
