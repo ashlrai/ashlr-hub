@@ -2851,3 +2851,25 @@ Make Ashlr Hub materially more useful as a solo operator's always-on autonomous 
 
 ### Status
 **Source-ready in draft PR #225** — independent P0/P1 review is clear; changed-surface, invariant, full-suite, build, lint, audit, and responsive browser gates pass. Resident daemon activation is deliberately a separate post-merge/deployed-artifact gate.
+
+## Daemon State Resolution V1 (2026-08-10)
+
+### Goal
+Complete the fail-closed recovery lifecycle after authenticated quarantine without mutating live state from an unmerged build.
+
+### Plan
+- [x] Prove the current live blocker is the exact closed diagnostic `spend-accounting-keys-invalid`.
+- [x] Confirm the malformed accounting object contains the undeclared key `unexpected` without reading or persisting values.
+- [x] Confirm quarantine preserves the source inode and publishes a signed startup-blocking marker.
+- [x] Define a separately authorized resolution plan bound to the quarantine receipt, marker, source inode, evidence digest, destination path, and fresh-state digest.
+- [x] Atomically replace only the live daemon-state pathname while preserving immutable quarantine evidence.
+- [x] Retire the exact authenticated marker only after durable fresh-state publication and a signed resolution receipt.
+- [x] Prove retries, crashes, path races, lock loss, signer rotation, service uncertainty, and Windows behavior fail closed.
+- [x] Run focused recovery/CLI/health tests, typecheck, lint, build, local invariants, and diff checks.
+- [ ] Push a review branch, open a PR, and require the protected matrix before merge or activation.
+
+### Authority Boundary
+This worktree is source-only. It grants no authority to execute quarantine or resolution, mutate live state bytes, install/start/restart the service, dispatch work, merge, or deploy.
+
+### Status
+**Locally source-ready on exact protected parent `5995bcd3b097b945652074fdb6566d71322f43c8`.** The distinct dry-run/execute protocol, repeated argv authorization, atomic fresh-state publication, durable signed receipt, exact marker retirement, and crash/race refusal coverage are complete. Push, PR, protected CI, merge, deployed-artifact installation, live quarantine/resolution, and any separate service start remain pending and were not attempted.

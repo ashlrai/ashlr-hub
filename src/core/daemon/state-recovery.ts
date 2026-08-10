@@ -14,6 +14,7 @@ import {
   readdirSync,
   readSync,
   renameSync,
+  unlinkSync,
   writeSync,
   type BigIntStats,
 } from 'node:fs';
@@ -26,6 +27,7 @@ import {
   daemonStateIssueCodes,
   daemonStatePath,
   daemonStateRecoveryMarkerPath,
+  freshDaemonState,
   heartbeatDaemonLock,
   releaseDaemonLock,
   type DaemonStateDiagnosticCode,
@@ -57,6 +59,11 @@ const MARKER_DOMAIN = 'ashlr:daemon-state-quarantine-marker:v1\n';
 const RECEIPT_DOMAIN = 'ashlr:daemon-state-quarantine-receipt:v1\n';
 const SIGNING_KEY_DOMAIN = 'ashlr:daemon-state-quarantine-signing-key:v1\n';
 const SIGNING_KEY_ID_DOMAIN = 'ashlr:daemon-state-quarantine-signing-key-id:v1\n';
+const RESOLUTION_PLAN_DOMAIN = 'ashlr:daemon-state-resolution-plan:v1\n';
+const RESOLUTION_INTENT_DOMAIN = 'ashlr:daemon-state-resolution-intent:v1\n';
+const RESOLUTION_RECEIPT_DOMAIN = 'ashlr:daemon-state-resolution-receipt:v1\n';
+const RESOLUTION_SIGNING_KEY_DOMAIN = 'ashlr:daemon-state-resolution-signing-key:v1\n';
+const RESOLUTION_SIGNING_KEY_ID_DOMAIN = 'ashlr:daemon-state-resolution-signing-key-id:v1\n';
 const SIGNATURE_ALGORITHM = 'hmac-sha256' as const;
 
 const RECOVERABLE_ISSUE_CODES = new Set<DaemonStateDiagnosticCode>([
@@ -130,6 +137,108 @@ export interface DaemonStateQuarantineReceipt {
   signature: string;
 }
 
+export interface DaemonStateResolutionPlan {
+  schemaVersion: 1;
+  kind: 'daemon-state-resolution-plan';
+  planId: string;
+  createdAt: string;
+  expiresAt: string;
+  operation: 'publish-fresh-state';
+  quarantinePlanId: string;
+  quarantinePlanDigest: string;
+  quarantineReceiptDigest: string;
+  quarantineMarkerDigest: string;
+  quarantineSigningKeyId: string;
+  sourcePathSha256: string;
+  sourceGeneration: SourceGeneration;
+  sourceSha256: string;
+  sourceSizeBytes: number;
+  quarantinePathSha256: string;
+  quarantineGeneration: SourceGeneration;
+  quarantineSha256: string;
+  quarantineSizeBytes: number;
+  destinationPathSha256: string;
+  freshStateCanonicalBase64: string;
+  freshStateSha256: string;
+  freshStateSizeBytes: number;
+  requiredServiceActivity: 'inactive';
+  authority: {
+    dryRunFirst: true;
+    operatorAuthorizationRequired: true;
+    repeatedAuthorizationRequired: true;
+    exactDestinationReplacementAllowed: true;
+    quarantineMutationAllowed: false;
+    exactMarkerRetirementAllowed: true;
+    serviceMutationAllowed: false;
+    serviceStartAllowed: false;
+    serviceRestartAllowed: false;
+    serviceInstallAllowed: false;
+  };
+  planDigest: string;
+  signingKeyId: string;
+  signatureAlgorithm: typeof SIGNATURE_ALGORITHM;
+  signature: string;
+}
+
+interface DaemonStateResolutionIntent {
+  schemaVersion: 1;
+  kind: 'daemon-state-resolution-intent';
+  planId: string;
+  planDigest: string;
+  previousDigest: string;
+  authorizedAt: string;
+  operation: 'publish-fresh-state';
+  sourceGeneration: SourceGeneration;
+  sourceSha256: string;
+  quarantineReceiptDigest: string;
+  quarantineMarkerDigest: string;
+  destinationPathSha256: string;
+  freshStateSha256: string;
+  operatorAuthorizationCount: 2;
+  statePublicationAllowed: true;
+  exactMarkerRetirementAllowed: true;
+  serviceMutationAllowed: false;
+  intentDigest: string;
+  signingKeyId: string;
+  signatureAlgorithm: typeof SIGNATURE_ALGORITHM;
+  signature: string;
+}
+
+export interface DaemonStateResolutionReceipt {
+  schemaVersion: 1;
+  kind: 'daemon-state-resolution-receipt';
+  planId: string;
+  planDigest: string;
+  previousDigest: string;
+  completedAt: string;
+  operation: 'publish-fresh-state';
+  quarantinePlanId: string;
+  quarantinePlanDigest: string;
+  quarantineReceiptDigest: string;
+  quarantineMarkerDigest: string;
+  destinationPathSha256: string;
+  freshStateSha256: string;
+  freshStateSizeBytes: number;
+  freshStateGeneration: SourceGeneration;
+  quarantineFileName: string;
+  quarantineSha256: string;
+  quarantineSizeBytes: number;
+  quarantineGeneration: SourceGeneration;
+  sourcePathReplaced: true;
+  quarantineEvidencePreserved: true;
+  markerRetirementAuthorized: true;
+  operatorAuthorizationCount: 2;
+  operatorIdentityAuthenticated: false;
+  serviceMutationPerformed: false;
+  serviceStartPerformed: false;
+  serviceRestartPerformed: false;
+  serviceInstallPerformed: false;
+  receiptDigest: string;
+  signingKeyId: string;
+  signatureAlgorithm: typeof SIGNATURE_ALGORITHM;
+  signature: string;
+}
+
 export type DaemonStateRecoveryRefusal =
   | 'invalid-expected-sha256'
   | 'source-missing'
@@ -159,7 +268,19 @@ export type DaemonStateRecoveryRefusal =
   | 'quarantine-destination-conflict'
   | 'atomic-evidence-unavailable'
   | 'quarantine-failed'
-  | 'receipt-write-failed';
+  | 'receipt-write-failed'
+  | 'invalid-quarantine-plan-id'
+  | 'invalid-quarantine-receipt-digest'
+  | 'quarantine-plan-missing'
+  | 'quarantine-plan-tampered'
+  | 'quarantine-receipt-missing'
+  | 'quarantine-receipt-tampered'
+  | 'quarantine-evidence-drift'
+  | 'resolution-intent-conflict'
+  | 'resolution-state-conflict'
+  | 'atomic-replacement-unavailable'
+  | 'state-publication-failed'
+  | 'marker-retirement-failed';
 
 export interface DaemonStateRecoveryFailure {
   ok: false;
@@ -181,6 +302,21 @@ export type ExecuteDaemonStateQuarantineResult =
     }
   | DaemonStateRecoveryFailure;
 
+export type PreviewDaemonStateResolutionResult =
+  | { ok: true; plan: DaemonStateResolutionPlan; planPath: string }
+  | DaemonStateRecoveryFailure;
+
+export type ExecuteDaemonStateResolutionResult =
+  | {
+      ok: true;
+      receipt: DaemonStateResolutionReceipt;
+      receiptPath: string;
+      quarantinePath: string;
+      retiredMarkerPath: string;
+      resumed: boolean;
+    }
+  | DaemonStateRecoveryFailure;
+
 export interface DaemonStateRecoveryRuntime {
   now?: () => Date;
   randomId?: () => string;
@@ -198,6 +334,20 @@ export interface DaemonStateRecoveryRuntime {
     expectedSourceSha256: string;
     expectedSourceGeneration: SourceGeneration;
   }) => { publish: () => void } | null;
+}
+
+export interface DaemonStateResolutionRuntime {
+  now?: () => Date;
+  randomId?: () => string;
+  platform?: NodeJS.Platform;
+  serviceStatus: () => ServiceStatusResult;
+  beforeIntentPublish?: () => void;
+  beforeStatePublish?: () => void;
+  afterStatePublish?: () => void;
+  beforeReceiptPublish?: () => void;
+  afterReceiptStage?: () => void;
+  afterReceiptPublish?: () => void;
+  beforeMarkerRetirement?: () => void;
 }
 
 export interface DaemonStateAtomicEvidenceFilesystem {
@@ -263,6 +413,22 @@ export function daemonStateRecoveryReceiptPath(planId: string): string {
   return join(recoveryRoot(), 'receipts', `${planId}.json`);
 }
 
+export function daemonStateResolutionPlanPath(planId: string): string {
+  return join(recoveryRoot(), 'resolution-plans', `${planId}.json`);
+}
+
+export function daemonStateResolutionIntentPath(planId: string): string {
+  return join(recoveryRoot(), 'resolution-intents', `${planId}.json`);
+}
+
+export function daemonStateResolutionReceiptPath(planId: string): string {
+  return join(recoveryRoot(), 'resolution-receipts', `${planId}.json`);
+}
+
+export function daemonStateResolutionRetiredMarkerPath(planId: string): string {
+  return join(recoveryRoot(), 'retired-markers', planId, 'active.json');
+}
+
 export function daemonStateQuarantinePath(fileName: string): string {
   return join(homedir(), '.ashlr', 'quarantine', 'daemon-state', fileName);
 }
@@ -303,6 +469,30 @@ function signerForRead(): RecoverySigner | null {
   }
 }
 
+function resolutionSigningKey(provenanceKey: Buffer): RecoverySigner {
+  const key = createHmac('sha256', provenanceKey).update(RESOLUTION_SIGNING_KEY_DOMAIN, 'utf8').digest();
+  return {
+    key,
+    keyId: sha256Bytes(Buffer.concat([Buffer.from(RESOLUTION_SIGNING_KEY_ID_DOMAIN, 'utf8'), key])),
+  };
+}
+
+function resolutionSignerForWrite(): RecoverySigner {
+  loadOrCreateKey();
+  const durable = loadExistingProvenanceKeyReadOnly();
+  if (!durable) throw new Error('durable provenance signing key unavailable');
+  return resolutionSigningKey(durable);
+}
+
+function resolutionSignerForRead(): RecoverySigner | null {
+  try {
+    const durable = loadExistingProvenanceKeyReadOnly();
+    return durable ? resolutionSigningKey(durable) : null;
+  } catch {
+    return null;
+  }
+}
+
 function keyedSignature(domain: string, value: unknown, signer: RecoverySigner): string {
   return createHmac('sha256', signer.key)
     .update(domain, 'utf8')
@@ -320,6 +510,20 @@ function authenticSignature(
   if (algorithm !== SIGNATURE_ALGORITHM || typeof keyId !== 'string' ||
     !SHA256_RE.test(keyId) || typeof signature !== 'string' || !SHA256_RE.test(signature)) return false;
   const signer = signerForRead();
+  if (!signer || !equalDigest(signer.keyId, keyId)) return false;
+  return equalDigest(signature, keyedSignature(domain, value, signer));
+}
+
+function authenticResolutionSignature(
+  domain: string,
+  value: unknown,
+  keyId: unknown,
+  algorithm: unknown,
+  signature: unknown,
+): boolean {
+  if (algorithm !== SIGNATURE_ALGORITHM || typeof keyId !== 'string' ||
+    !SHA256_RE.test(keyId) || typeof signature !== 'string' || !SHA256_RE.test(signature)) return false;
+  const signer = resolutionSignerForRead();
   if (!signer || !equalDigest(signer.keyId, keyId)) return false;
   return equalDigest(signature, keyedSignature(domain, value, signer));
 }
@@ -559,7 +763,7 @@ function writeAll(fd: number, bytes: Buffer): void {
   }
 }
 
-function writeExclusiveRecord(path: string, value: unknown): void {
+function writeExclusiveBytes(path: string, bytes: Buffer): void {
   ensurePrivateDirectory(dirname(path));
   const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
   let fd: number | undefined;
@@ -584,7 +788,6 @@ function writeExclusiveRecord(path: string, value: unknown): void {
         throw new Error('record-changed-during-assurance');
       }
     }
-    const bytes = Buffer.from(`${canonicalizeDaemonActivationValue(value)}\n`, 'utf8');
     writeAll(fd, bytes);
     fsyncSync(fd);
     const after = fstatSync(fd, { bigint: true });
@@ -609,6 +812,10 @@ function writeExclusiveRecord(path: string, value: unknown): void {
       try { closeSync(fd); } catch { /* preserve fail-closed evidence */ }
     }
   }
+}
+
+function writeExclusiveRecord(path: string, value: unknown): void {
+  writeExclusiveBytes(path, Buffer.from(`${canonicalizeDaemonActivationValue(value)}\n`, 'utf8'));
 }
 
 function writePrivateRecordTemp(path: string, planId: string, value: unknown): string {
@@ -708,6 +915,34 @@ function prepareReceiptTemp(
       }
     }
     retirePrivateRecord(candidate, 'receipt-temp', plan.planId);
+  }
+  return reusable ?? writePrivateRecordTemp(receiptPath, plan.planId, receipt);
+}
+
+function prepareResolutionReceiptTemp(
+  receiptPath: string,
+  plan: DaemonStateResolutionPlan,
+  receipt: DaemonStateResolutionReceipt,
+): string {
+  ensurePrivateDirectory(dirname(receiptPath));
+  const prefix = markerTempPrefix(receiptPath, plan.planId);
+  let reusable: string | null = null;
+  for (const name of readdirSync(dirname(receiptPath)).sort()) {
+    if (!name.startsWith(prefix) || !name.endsWith('.tmp')) continue;
+    const candidate = join(dirname(receiptPath), name);
+    let parsed: DaemonStateResolutionReceipt | null = null;
+    try {
+      parsed = parseResolutionReceipt(readRecord(candidate));
+    } catch {
+      // Invalid private temps are retained in the abandoned evidence tree.
+    }
+    if (parsed && equalDigest(parsed.receiptDigest, receipt.receiptDigest)) {
+      if (!reusable) {
+        reusable = candidate;
+        continue;
+      }
+    }
+    retirePrivateRecord(candidate, 'resolution-receipt-temp', plan.planId);
   }
   return reusable ?? writePrivateRecordTemp(receiptPath, plan.planId, receipt);
 }
@@ -1655,5 +1890,1072 @@ export function executeDaemonStateQuarantine(
   } finally {
     if (daemonLock) releaseDaemonLock(daemonLock);
     releaseLocalStoreLock(lock);
+  }
+}
+
+function canonicalFreshDaemonStateBytes(): Buffer {
+  return Buffer.from(`${canonicalizeDaemonActivationValue(freshDaemonState())}\n`, 'utf8');
+}
+
+function resolutionPlanDigestPayload(
+  plan: DaemonStateResolutionPlan,
+): Omit<DaemonStateResolutionPlan, 'planDigest' | 'signature'> {
+  const { planDigest: _planDigest, signature: _signature, ...unsigned } = plan;
+  return unsigned;
+}
+
+function resolutionPlanSignaturePayload(
+  plan: DaemonStateResolutionPlan,
+): Omit<DaemonStateResolutionPlan, 'signature'> {
+  const { signature: _signature, ...unsigned } = plan;
+  return unsigned;
+}
+
+function resolutionIntentDigestPayload(
+  intent: DaemonStateResolutionIntent,
+): Omit<DaemonStateResolutionIntent, 'intentDigest' | 'signature'> {
+  const { intentDigest: _intentDigest, signature: _signature, ...unsigned } = intent;
+  return unsigned;
+}
+
+function resolutionIntentSignaturePayload(
+  intent: DaemonStateResolutionIntent,
+): Omit<DaemonStateResolutionIntent, 'signature'> {
+  const { signature: _signature, ...unsigned } = intent;
+  return unsigned;
+}
+
+function resolutionReceiptDigestPayload(
+  receipt: DaemonStateResolutionReceipt,
+): Omit<DaemonStateResolutionReceipt, 'receiptDigest' | 'signature'> {
+  const { receiptDigest: _receiptDigest, signature: _signature, ...unsigned } = receipt;
+  return unsigned;
+}
+
+function resolutionReceiptSignaturePayload(
+  receipt: DaemonStateResolutionReceipt,
+): Omit<DaemonStateResolutionReceipt, 'signature'> {
+  const { signature: _signature, ...unsigned } = receipt;
+  return unsigned;
+}
+
+function canonicalFreshStateBinding(
+  base64: unknown,
+  digest: unknown,
+  size: unknown,
+): boolean {
+  if (typeof base64 !== 'string' || typeof digest !== 'string' || !SHA256_RE.test(digest) ||
+    !Number.isSafeInteger(size) || Number(size) < 1) return false;
+  const expected = canonicalFreshDaemonStateBytes();
+  const decoded = Buffer.from(base64, 'base64');
+  return decoded.toString('base64') === base64 && decoded.equals(expected) &&
+    Number(size) === expected.length && equalDigest(digest, sha256Bytes(expected));
+}
+
+function resolutionAuthorityValid(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  return canonicalizeDaemonActivationValue(value) === canonicalizeDaemonActivationValue({
+    dryRunFirst: true,
+    operatorAuthorizationRequired: true,
+    repeatedAuthorizationRequired: true,
+    exactDestinationReplacementAllowed: true,
+    quarantineMutationAllowed: false,
+    exactMarkerRetirementAllowed: true,
+    serviceMutationAllowed: false,
+    serviceStartAllowed: false,
+    serviceRestartAllowed: false,
+    serviceInstallAllowed: false,
+  });
+}
+
+function parseResolutionPlan(value: unknown): DaemonStateResolutionPlan | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  const expected = [
+    'authority', 'createdAt', 'destinationPathSha256', 'expiresAt', 'freshStateCanonicalBase64',
+    'freshStateSha256', 'freshStateSizeBytes', 'kind', 'operation', 'planDigest', 'planId',
+    'quarantineGeneration', 'quarantineMarkerDigest', 'quarantinePathSha256', 'quarantinePlanDigest',
+    'quarantinePlanId', 'quarantineReceiptDigest', 'quarantineSha256', 'quarantineSigningKeyId',
+    'quarantineSizeBytes', 'requiredServiceActivity', 'schemaVersion', 'signature',
+    'signatureAlgorithm', 'signingKeyId', 'sourceGeneration', 'sourcePathSha256', 'sourceSha256',
+    'sourceSizeBytes',
+  ].sort();
+  const keys = Object.keys(row).sort();
+  if (keys.length !== expected.length || !keys.every((key, index) => key === expected[index])) return null;
+  if (row['schemaVersion'] !== 1 || row['kind'] !== 'daemon-state-resolution-plan' ||
+    row['operation'] !== 'publish-fresh-state' || typeof row['planId'] !== 'string' ||
+    !UUID_RE.test(row['planId']) || !validBoundedPlanWindow(row['createdAt'], row['expiresAt']) ||
+    typeof row['quarantinePlanId'] !== 'string' || !UUID_RE.test(row['quarantinePlanId']) ||
+    !SHA256_RE.test(String(row['quarantinePlanDigest'])) ||
+    !SHA256_RE.test(String(row['quarantineReceiptDigest'])) ||
+    !SHA256_RE.test(String(row['quarantineMarkerDigest'])) ||
+    !SHA256_RE.test(String(row['quarantineSigningKeyId'])) ||
+    !SHA256_RE.test(String(row['sourcePathSha256'])) || !validGeneration(row['sourceGeneration']) ||
+    !SHA256_RE.test(String(row['sourceSha256'])) ||
+    !Number.isSafeInteger(row['sourceSizeBytes']) || Number(row['sourceSizeBytes']) < 1 ||
+    !SHA256_RE.test(String(row['quarantinePathSha256'])) || !validGeneration(row['quarantineGeneration']) ||
+    !SHA256_RE.test(String(row['quarantineSha256'])) ||
+    !Number.isSafeInteger(row['quarantineSizeBytes']) || Number(row['quarantineSizeBytes']) < 1 ||
+    !SHA256_RE.test(String(row['destinationPathSha256'])) || row['requiredServiceActivity'] !== 'inactive' ||
+    !canonicalFreshStateBinding(
+      row['freshStateCanonicalBase64'], row['freshStateSha256'], row['freshStateSizeBytes'],
+    ) || !resolutionAuthorityValid(row['authority']) ||
+    !SHA256_RE.test(String(row['planDigest'])) || !SHA256_RE.test(String(row['signingKeyId'])) ||
+    row['signatureAlgorithm'] !== SIGNATURE_ALGORITHM || !SHA256_RE.test(String(row['signature']))) return null;
+  const plan = value as DaemonStateResolutionPlan;
+  return equalDigest(plan.planDigest, domainDigest(RESOLUTION_PLAN_DOMAIN, resolutionPlanDigestPayload(plan))) &&
+    authenticResolutionSignature(
+      RESOLUTION_PLAN_DOMAIN,
+      resolutionPlanSignaturePayload(plan),
+      plan.signingKeyId,
+      plan.signatureAlgorithm,
+      plan.signature,
+    ) ? plan : null;
+}
+
+function parseResolutionIntent(value: unknown): DaemonStateResolutionIntent | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  const expected = [
+    'authorizedAt', 'destinationPathSha256', 'exactMarkerRetirementAllowed', 'freshStateSha256',
+    'intentDigest', 'kind', 'operation', 'operatorAuthorizationCount', 'planDigest', 'planId',
+    'previousDigest', 'quarantineMarkerDigest', 'quarantineReceiptDigest', 'schemaVersion',
+    'serviceMutationAllowed', 'signature', 'signatureAlgorithm', 'signingKeyId', 'sourceGeneration',
+    'sourceSha256', 'statePublicationAllowed',
+  ].sort();
+  const keys = Object.keys(row).sort();
+  if (keys.length !== expected.length || !keys.every((key, index) => key === expected[index])) return null;
+  if (row['schemaVersion'] !== 1 || row['kind'] !== 'daemon-state-resolution-intent' ||
+    row['operation'] !== 'publish-fresh-state' || typeof row['planId'] !== 'string' ||
+    !UUID_RE.test(row['planId']) || !SHA256_RE.test(String(row['planDigest'])) ||
+    !SHA256_RE.test(String(row['previousDigest'])) || typeof row['authorizedAt'] !== 'string' ||
+    !Number.isFinite(Date.parse(String(row['authorizedAt']))) || !validGeneration(row['sourceGeneration']) ||
+    !SHA256_RE.test(String(row['sourceSha256'])) ||
+    !SHA256_RE.test(String(row['quarantineReceiptDigest'])) ||
+    !SHA256_RE.test(String(row['quarantineMarkerDigest'])) ||
+    !SHA256_RE.test(String(row['destinationPathSha256'])) ||
+    !SHA256_RE.test(String(row['freshStateSha256'])) || row['operatorAuthorizationCount'] !== 2 ||
+    row['statePublicationAllowed'] !== true || row['exactMarkerRetirementAllowed'] !== true ||
+    row['serviceMutationAllowed'] !== false || !SHA256_RE.test(String(row['intentDigest'])) ||
+    !SHA256_RE.test(String(row['signingKeyId'])) || row['signatureAlgorithm'] !== SIGNATURE_ALGORITHM ||
+    !SHA256_RE.test(String(row['signature']))) return null;
+  const intent = value as DaemonStateResolutionIntent;
+  return equalDigest(intent.intentDigest, domainDigest(RESOLUTION_INTENT_DOMAIN, resolutionIntentDigestPayload(intent))) &&
+    authenticResolutionSignature(
+      RESOLUTION_INTENT_DOMAIN,
+      resolutionIntentSignaturePayload(intent),
+      intent.signingKeyId,
+      intent.signatureAlgorithm,
+      intent.signature,
+    ) ? intent : null;
+}
+
+function parseResolutionReceipt(value: unknown): DaemonStateResolutionReceipt | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  const expected = [
+    'completedAt', 'destinationPathSha256', 'freshStateGeneration', 'freshStateSha256',
+    'freshStateSizeBytes', 'kind', 'markerRetirementAuthorized', 'operation',
+    'operatorAuthorizationCount', 'operatorIdentityAuthenticated', 'planDigest', 'planId',
+    'previousDigest', 'quarantineEvidencePreserved', 'quarantineFileName', 'quarantineGeneration',
+    'quarantineMarkerDigest', 'quarantinePlanDigest', 'quarantinePlanId', 'quarantineReceiptDigest',
+    'quarantineSha256', 'quarantineSizeBytes', 'receiptDigest', 'schemaVersion',
+    'serviceInstallPerformed', 'serviceMutationPerformed', 'serviceRestartPerformed',
+    'serviceStartPerformed', 'signature', 'signatureAlgorithm', 'signingKeyId', 'sourcePathReplaced',
+  ].sort();
+  const keys = Object.keys(row).sort();
+  if (keys.length !== expected.length || !keys.every((key, index) => key === expected[index])) return null;
+  if (row['schemaVersion'] !== 1 || row['kind'] !== 'daemon-state-resolution-receipt' ||
+    row['operation'] !== 'publish-fresh-state' || typeof row['planId'] !== 'string' ||
+    !UUID_RE.test(row['planId']) || !SHA256_RE.test(String(row['planDigest'])) ||
+    !SHA256_RE.test(String(row['previousDigest'])) || typeof row['completedAt'] !== 'string' ||
+    !Number.isFinite(Date.parse(String(row['completedAt']))) || typeof row['quarantinePlanId'] !== 'string' ||
+    !UUID_RE.test(row['quarantinePlanId']) || !SHA256_RE.test(String(row['quarantinePlanDigest'])) ||
+    !SHA256_RE.test(String(row['quarantineReceiptDigest'])) ||
+    !SHA256_RE.test(String(row['quarantineMarkerDigest'])) ||
+    !SHA256_RE.test(String(row['destinationPathSha256'])) || !SHA256_RE.test(String(row['freshStateSha256'])) ||
+    !Number.isSafeInteger(row['freshStateSizeBytes']) || Number(row['freshStateSizeBytes']) < 1 ||
+    !validGeneration(row['freshStateGeneration']) || typeof row['quarantineFileName'] !== 'string' ||
+    basename(row['quarantineFileName']) !== row['quarantineFileName'] ||
+    !SHA256_RE.test(String(row['quarantineSha256'])) ||
+    !Number.isSafeInteger(row['quarantineSizeBytes']) || Number(row['quarantineSizeBytes']) < 1 ||
+    !validGeneration(row['quarantineGeneration']) || row['sourcePathReplaced'] !== true ||
+    row['quarantineEvidencePreserved'] !== true || row['markerRetirementAuthorized'] !== true ||
+    row['operatorAuthorizationCount'] !== 2 || row['operatorIdentityAuthenticated'] !== false ||
+    row['serviceMutationPerformed'] !== false || row['serviceStartPerformed'] !== false ||
+    row['serviceRestartPerformed'] !== false || row['serviceInstallPerformed'] !== false ||
+    !SHA256_RE.test(String(row['receiptDigest'])) || !SHA256_RE.test(String(row['signingKeyId'])) ||
+    row['signatureAlgorithm'] !== SIGNATURE_ALGORITHM || !SHA256_RE.test(String(row['signature']))) return null;
+  const receipt = value as DaemonStateResolutionReceipt;
+  return equalDigest(
+    receipt.receiptDigest,
+    domainDigest(RESOLUTION_RECEIPT_DOMAIN, resolutionReceiptDigestPayload(receipt)),
+  ) && authenticResolutionSignature(
+    RESOLUTION_RECEIPT_DOMAIN,
+    resolutionReceiptSignaturePayload(receipt),
+    receipt.signingKeyId,
+    receipt.signatureAlgorithm,
+    receipt.signature,
+  ) ? receipt : null;
+}
+
+interface AuthenticatedQuarantineChain {
+  plan: DaemonStateQuarantinePlan;
+  marker: RecoveryMarker;
+  receipt: DaemonStateQuarantineReceipt;
+  quarantinePath: string;
+  evidence: StableSource;
+}
+
+function quarantineChainMatches(
+  plan: DaemonStateQuarantinePlan,
+  marker: RecoveryMarker,
+  receipt: DaemonStateQuarantineReceipt,
+): boolean {
+  return marker.planId === plan.planId && equalDigest(marker.planDigest, plan.planDigest) &&
+    equalDigest(marker.expectedSourceSha256, plan.expectedSourceSha256) &&
+    marker.quarantineFileName === plan.quarantineFileName &&
+    receipt.planId === plan.planId && equalDigest(receipt.planDigest, plan.planDigest) &&
+    equalDigest(receipt.previousDigest, marker.markerDigest) &&
+    equalDigest(receipt.sourceSha256, plan.expectedSourceSha256) &&
+    receipt.sourceSizeBytes === plan.sourceSizeBytes && receipt.quarantineFileName === plan.quarantineFileName &&
+    equalDigest(receipt.quarantineSha256, plan.expectedSourceSha256) &&
+    plan.signingKeyId === marker.signingKeyId && marker.signingKeyId === receipt.signingKeyId;
+}
+
+function readQuarantineChain(
+  quarantinePlanId: string,
+  quarantineReceiptDigest: string,
+  markerPath: string,
+  markerLinks: readonly bigint[] = [1n, 2n],
+): AuthenticatedQuarantineChain | DaemonStateRecoveryFailure {
+  let quarantinePlan: DaemonStateQuarantinePlan | null;
+  try {
+    quarantinePlan = parsePlan(readRecord(daemonStateRecoveryPlanPath(quarantinePlanId)));
+  } catch (error) {
+    return {
+      ok: false,
+      reason: (error as NodeJS.ErrnoException).code === 'ENOENT'
+        ? 'quarantine-plan-missing'
+        : 'quarantine-plan-tampered',
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  }
+  if (!quarantinePlan) {
+    return { ok: false, reason: 'quarantine-plan-tampered', detail: 'quarantine plan cannot be authenticated' };
+  }
+
+  let marker: RecoveryMarker | null;
+  try {
+    marker = parseMarker(JSON.parse(stableRead(markerPath, false, markerLinks).bytes.toString('utf8')) as unknown);
+  } catch (error) {
+    return {
+      ok: false,
+      reason: 'recovery-marker-conflict',
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  }
+  if (!marker) {
+    return { ok: false, reason: 'recovery-marker-conflict', detail: 'quarantine marker cannot be authenticated' };
+  }
+
+  let receipt: DaemonStateQuarantineReceipt | null;
+  try {
+    receipt = parseReceipt(readPublishedRecord(daemonStateRecoveryReceiptPath(quarantinePlanId)));
+  } catch (error) {
+    return {
+      ok: false,
+      reason: (error as NodeJS.ErrnoException).code === 'ENOENT'
+        ? 'quarantine-receipt-missing'
+        : 'quarantine-receipt-tampered',
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  }
+  if (!receipt || !equalDigest(receipt.receiptDigest, quarantineReceiptDigest) ||
+    !quarantineChainMatches(quarantinePlan, marker, receipt)) {
+    return {
+      ok: false,
+      reason: 'quarantine-receipt-tampered',
+      detail: 'quarantine plan, marker, and receipt do not form the exact authenticated chain',
+    };
+  }
+
+  const quarantinePath = daemonStateQuarantinePath(quarantinePlan.quarantineFileName);
+  let evidence: StableSource;
+  try {
+    evidence = stableRead(quarantinePath, false, [1n, 2n]);
+  } catch (error) {
+    return {
+      ok: false,
+      reason: 'quarantine-evidence-drift',
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  }
+  if (!sameRelocatedGeneration(evidence.stat, quarantinePlan.sourceGeneration) ||
+    evidence.size !== quarantinePlan.sourceSizeBytes ||
+    !equalDigest(evidence.sha256, quarantinePlan.expectedSourceSha256)) {
+    return {
+      ok: false,
+      reason: 'quarantine-evidence-drift',
+      detail: 'quarantine evidence is not the authenticated preserved source generation',
+    };
+  }
+  return { plan: quarantinePlan, marker, receipt, quarantinePath, evidence };
+}
+
+function resolutionPlanTimeRefusal(
+  plan: DaemonStateResolutionPlan,
+  runtime: DaemonStateResolutionRuntime,
+): DaemonStateRecoveryFailure | null {
+  const observed = runtime.now?.() ?? new Date();
+  const created = Date.parse(plan.createdAt);
+  if (observed.getTime() + MAX_CLOCK_SKEW_MS < created) {
+    return { ok: false, reason: 'plan-not-yet-valid', detail: `plan was created at ${plan.createdAt}` };
+  }
+  return observed.getTime() >= Date.parse(plan.expiresAt)
+    ? { ok: false, reason: 'plan-expired', detail: `plan expired at ${plan.expiresAt}` }
+    : null;
+}
+
+function resolutionLocksRefusal(
+  recoveryLock: LocalStoreLock,
+  daemonLock: DaemonLock,
+  detail: string,
+): DaemonStateRecoveryFailure | null {
+  const recoveryOwned = ownsLocalStoreLock(recoveryLock);
+  const daemonOwned = recoveryOwned && heartbeatDaemonLock(daemonLock);
+  if (recoveryOwned && daemonOwned) return null;
+  return {
+    ok: false,
+    reason: recoveryOwned ? 'daemon-lock-unavailable' : 'recovery-lock-unavailable',
+    detail,
+  };
+}
+
+function exactResolutionIntent(
+  intent: DaemonStateResolutionIntent,
+  plan: DaemonStateResolutionPlan,
+): boolean {
+  return intent.planId === plan.planId && equalDigest(intent.planDigest, plan.planDigest) &&
+    equalDigest(intent.previousDigest, plan.quarantineReceiptDigest) &&
+    equalDigest(intent.sourceSha256, plan.sourceSha256) &&
+    canonicalizeDaemonActivationValue(intent.sourceGeneration) ===
+      canonicalizeDaemonActivationValue(plan.sourceGeneration) &&
+    equalDigest(intent.quarantineReceiptDigest, plan.quarantineReceiptDigest) &&
+    equalDigest(intent.quarantineMarkerDigest, plan.quarantineMarkerDigest) &&
+    equalDigest(intent.destinationPathSha256, plan.destinationPathSha256) &&
+    equalDigest(intent.freshStateSha256, plan.freshStateSha256) &&
+    intent.signingKeyId === plan.signingKeyId;
+}
+
+function exactResolutionReceipt(
+  receipt: DaemonStateResolutionReceipt,
+  intent: DaemonStateResolutionIntent,
+  plan: DaemonStateResolutionPlan,
+): boolean {
+  return receipt.planId === plan.planId && equalDigest(receipt.planDigest, plan.planDigest) &&
+    equalDigest(receipt.previousDigest, intent.intentDigest) && receipt.quarantinePlanId === plan.quarantinePlanId &&
+    equalDigest(receipt.quarantinePlanDigest, plan.quarantinePlanDigest) &&
+    equalDigest(receipt.quarantineReceiptDigest, plan.quarantineReceiptDigest) &&
+    equalDigest(receipt.quarantineMarkerDigest, plan.quarantineMarkerDigest) &&
+    equalDigest(receipt.destinationPathSha256, plan.destinationPathSha256) &&
+    equalDigest(receipt.freshStateSha256, plan.freshStateSha256) &&
+    receipt.freshStateSizeBytes === plan.freshStateSizeBytes &&
+    equalDigest(receipt.quarantineSha256, plan.quarantineSha256) &&
+    receipt.quarantineSizeBytes === plan.quarantineSizeBytes && receipt.signingKeyId === plan.signingKeyId;
+}
+
+function resolutionStateTempPath(plan: DaemonStateResolutionPlan): string {
+  return join(
+    dirname(daemonStatePath()),
+    `.${basename(daemonStatePath())}.resolution.${plan.planId}.${plan.freshStateSha256}.tmp`,
+  );
+}
+
+function prepareResolutionStateTemp(plan: DaemonStateResolutionPlan): string {
+  const path = resolutionStateTempPath(plan);
+  const expected = Buffer.from(plan.freshStateCanonicalBase64, 'base64');
+  if (pathEntryExists(path)) {
+    const existing = stableRead(path, false);
+    if (existing.size !== expected.length || !equalDigest(existing.sha256, plan.freshStateSha256) ||
+      !existing.bytes.equals(expected)) throw new Error('resolution state temp conflicts with the signed plan');
+    return path;
+  }
+  writeExclusiveBytes(path, expected);
+  const staged = stableRead(path, false);
+  if (staged.size !== expected.length || !equalDigest(staged.sha256, plan.freshStateSha256) ||
+    !staged.bytes.equals(expected)) throw new Error('resolution state temp could not be authenticated');
+  return path;
+}
+
+type ResolutionStatePhase =
+  | { phase: 'blocked-source'; state: StableSource }
+  | { phase: 'fresh-published'; state: StableSource }
+  | DaemonStateRecoveryFailure;
+
+function resolutionStatePhase(
+  plan: DaemonStateResolutionPlan,
+  chain: AuthenticatedQuarantineChain,
+): ResolutionStatePhase {
+  let state: StableSource;
+  try {
+    state = stableRead(daemonStatePath(), false, [1n, 2n]);
+  } catch (error) {
+    return {
+      ok: false,
+      reason: (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'source-missing' : 'source-unsafe',
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  }
+  if (state.stat.dev === chain.evidence.stat.dev && state.stat.ino === chain.evidence.stat.ino &&
+    state.stat.nlink === 2n && chain.evidence.stat.nlink === 2n &&
+    sameGeneration(state.stat, plan.sourceGeneration) &&
+    sameGeneration(chain.evidence.stat, plan.quarantineGeneration) &&
+    equalDigest(state.sha256, plan.sourceSha256) && state.size === plan.sourceSizeBytes) {
+    return { phase: 'blocked-source', state };
+  }
+  if (state.stat.nlink === 1n && chain.evidence.stat.nlink === 1n &&
+    equalDigest(state.sha256, plan.freshStateSha256) && state.size === plan.freshStateSizeBytes &&
+    state.bytes.equals(Buffer.from(plan.freshStateCanonicalBase64, 'base64')) &&
+    sameRelocatedGeneration(chain.evidence.stat, plan.quarantineGeneration)) {
+    return { phase: 'fresh-published', state };
+  }
+  return {
+    ok: false,
+    reason: 'resolution-state-conflict',
+    detail: 'daemon state is neither the signed blocked source nor the signed canonical fresh state',
+  };
+}
+
+export function previewDaemonStateResolution(
+  input: { quarantinePlanId: string; quarantineReceiptDigest: string },
+  runtime: DaemonStateResolutionRuntime,
+): PreviewDaemonStateResolutionResult {
+  if (!UUID_RE.test(input.quarantinePlanId)) {
+    return { ok: false, reason: 'invalid-quarantine-plan-id', detail: 'invalid quarantine plan id' };
+  }
+  const expectedReceiptDigest = input.quarantineReceiptDigest.toLowerCase();
+  if (!SHA256_RE.test(expectedReceiptDigest)) {
+    return {
+      ok: false,
+      reason: 'invalid-quarantine-receipt-digest',
+      detail: 'quarantine receipt SHA-256 must be 64 lowercase hex characters',
+    };
+  }
+  const service = serviceRefusal(runtime);
+  if (service) return service;
+  const lock = acquireRecoveryLock();
+  if (!lock) return { ok: false, reason: 'recovery-lock-unavailable', detail: 'recovery lock unavailable' };
+  try {
+    if (!ownsLocalStoreLock(lock)) {
+      return { ok: false, reason: 'recovery-lock-unavailable', detail: 'recovery lock ownership was lost' };
+    }
+    const chain = readQuarantineChain(
+      input.quarantinePlanId,
+      expectedReceiptDigest,
+      daemonStateRecoveryMarkerPath(),
+    );
+    if ('ok' in chain) return chain;
+    let source: StableSource;
+    try {
+      source = stableRead(daemonStatePath(), false, [2n]);
+    } catch (error) {
+      return {
+        ok: false,
+        reason: (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'source-missing' : 'source-unsafe',
+        detail: error instanceof Error ? error.message : String(error),
+      };
+    }
+    if (source.stat.dev !== chain.evidence.stat.dev || source.stat.ino !== chain.evidence.stat.ino ||
+      !sameRelocatedGeneration(source.stat, chain.plan.sourceGeneration) ||
+      !sameRelocatedGeneration(chain.evidence.stat, chain.plan.sourceGeneration) ||
+      !equalDigest(source.sha256, chain.plan.expectedSourceSha256) ||
+      source.size !== chain.plan.sourceSizeBytes) {
+      return {
+        ok: false,
+        reason: 'source-drift',
+        detail: 'live daemon state and quarantine evidence are not the exact authenticated linked source inode',
+      };
+    }
+    const finalService = serviceRefusal(runtime);
+    if (finalService) return finalService;
+    if (!ownsLocalStoreLock(lock)) {
+      return { ok: false, reason: 'recovery-lock-unavailable', detail: 'recovery lock ownership was lost' };
+    }
+
+    const planId = (runtime.randomId ?? randomUUID)();
+    if (!UUID_RE.test(planId)) {
+      return { ok: false, reason: 'plan-write-failed', detail: 'runtime produced an invalid plan id' };
+    }
+    let signer: RecoverySigner;
+    try {
+      signer = resolutionSignerForWrite();
+    } catch (error) {
+      return { ok: false, reason: 'plan-write-failed', detail: error instanceof Error ? error.message : String(error) };
+    }
+    const now = runtime.now?.() ?? new Date();
+    const freshBytes = canonicalFreshDaemonStateBytes();
+    const sourcePathDigest = sha256Bytes(resolve(daemonStatePath()));
+    const unsigned: Omit<DaemonStateResolutionPlan, 'planDigest' | 'signature'> = {
+      schemaVersion: 1,
+      kind: 'daemon-state-resolution-plan',
+      planId,
+      createdAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + PLAN_TTL_MS).toISOString(),
+      operation: 'publish-fresh-state',
+      quarantinePlanId: chain.plan.planId,
+      quarantinePlanDigest: chain.plan.planDigest,
+      quarantineReceiptDigest: chain.receipt.receiptDigest,
+      quarantineMarkerDigest: chain.marker.markerDigest,
+      quarantineSigningKeyId: chain.receipt.signingKeyId,
+      sourcePathSha256: sourcePathDigest,
+      sourceGeneration: sourceGeneration(source.stat),
+      sourceSha256: source.sha256,
+      sourceSizeBytes: source.size,
+      quarantinePathSha256: sha256Bytes(resolve(chain.quarantinePath)),
+      quarantineGeneration: sourceGeneration(chain.evidence.stat),
+      quarantineSha256: chain.evidence.sha256,
+      quarantineSizeBytes: chain.evidence.size,
+      destinationPathSha256: sourcePathDigest,
+      freshStateCanonicalBase64: freshBytes.toString('base64'),
+      freshStateSha256: sha256Bytes(freshBytes),
+      freshStateSizeBytes: freshBytes.length,
+      requiredServiceActivity: 'inactive',
+      authority: {
+        dryRunFirst: true,
+        operatorAuthorizationRequired: true,
+        repeatedAuthorizationRequired: true,
+        exactDestinationReplacementAllowed: true,
+        quarantineMutationAllowed: false,
+        exactMarkerRetirementAllowed: true,
+        serviceMutationAllowed: false,
+        serviceStartAllowed: false,
+        serviceRestartAllowed: false,
+        serviceInstallAllowed: false,
+      },
+      signingKeyId: signer.keyId,
+      signatureAlgorithm: SIGNATURE_ALGORITHM,
+    };
+    const unsignedSigned: Omit<DaemonStateResolutionPlan, 'signature'> = {
+      ...unsigned,
+      planDigest: domainDigest(RESOLUTION_PLAN_DOMAIN, unsigned),
+    };
+    const plan: DaemonStateResolutionPlan = {
+      ...unsignedSigned,
+      signature: keyedSignature(RESOLUTION_PLAN_DOMAIN, unsignedSigned, signer),
+    };
+    const planPath = daemonStateResolutionPlanPath(plan.planId);
+    try {
+      writeExclusiveRecord(planPath, plan);
+    } catch (error) {
+      return { ok: false, reason: 'plan-write-failed', detail: error instanceof Error ? error.message : String(error) };
+    }
+    return { ok: true, plan, planPath };
+  } finally {
+    releaseLocalStoreLock(lock);
+  }
+}
+
+export function executeDaemonStateResolution(
+  input: { planId: string; planDigest: string; operatorAuthorization: string; operatorConfirmation: string },
+  runtime: DaemonStateResolutionRuntime,
+): ExecuteDaemonStateResolutionResult {
+  if (!UUID_RE.test(input.planId)) return { ok: false, reason: 'invalid-plan-id', detail: 'invalid plan id' };
+  if (!SHA256_RE.test(input.planDigest)) {
+    return { ok: false, reason: 'invalid-plan-digest', detail: 'invalid plan digest' };
+  }
+  if (!input.operatorAuthorization || !input.operatorConfirmation) {
+    return {
+      ok: false,
+      reason: 'authorization-required',
+      detail: 'two explicit argv authorizations are required',
+    };
+  }
+  if (!equalDigest(input.operatorAuthorization, input.planDigest) ||
+    !equalDigest(input.operatorConfirmation, input.planDigest)) {
+    return {
+      ok: false,
+      reason: 'authorization-mismatch',
+      detail: 'authorization and confirmation must both equal the exact plan digest',
+    };
+  }
+
+  let plan: DaemonStateResolutionPlan | null;
+  try {
+    plan = parseResolutionPlan(readRecord(daemonStateResolutionPlanPath(input.planId)));
+  } catch (error) {
+    return {
+      ok: false,
+      reason: (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'plan-missing' : 'plan-unsafe',
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  }
+  if (!plan || !equalDigest(plan.planDigest, input.planDigest)) {
+    return { ok: false, reason: 'plan-tampered', detail: 'persisted resolution plan cannot be authenticated exactly' };
+  }
+  if ((runtime.platform ?? process.platform) === 'win32') {
+    return {
+      ok: false,
+      reason: 'atomic-replacement-unavailable',
+      detail: 'Windows resolution execution is disabled until native directory durability is available',
+    };
+  }
+  const destinationPathDigest = sha256Bytes(resolve(daemonStatePath()));
+  if (!equalDigest(plan.sourcePathSha256, destinationPathDigest) ||
+    !equalDigest(plan.destinationPathSha256, destinationPathDigest)) {
+    return { ok: false, reason: 'plan-tampered', detail: 'resolution plan is not bound to this daemon state path' };
+  }
+  const signer = resolutionSignerForRead();
+  if (!signer || !equalDigest(signer.keyId, plan.signingKeyId)) {
+    return { ok: false, reason: 'plan-tampered', detail: 'resolution signing authority is unavailable or changed' };
+  }
+
+  const recoveryLock = acquireRecoveryLock();
+  if (!recoveryLock) {
+    return { ok: false, reason: 'recovery-lock-unavailable', detail: 'recovery lock unavailable' };
+  }
+  let daemonLock: DaemonLock | undefined;
+  try {
+    if (!ownsLocalStoreLock(recoveryLock)) {
+      return { ok: false, reason: 'recovery-lock-unavailable', detail: 'recovery lock ownership was lost' };
+    }
+    const activeMarkerPath = daemonStateRecoveryMarkerPath();
+    const retiredMarkerPath = daemonStateResolutionRetiredMarkerPath(plan.planId);
+    let activeMarkerPresent: boolean;
+    let retiredMarkerPresent: boolean;
+    try {
+      activeMarkerPresent = pathEntryExists(activeMarkerPath);
+      retiredMarkerPresent = pathEntryExists(retiredMarkerPath);
+    } catch (error) {
+      return { ok: false, reason: 'recovery-marker-conflict', detail: error instanceof Error ? error.message : String(error) };
+    }
+    if (!activeMarkerPresent && !retiredMarkerPresent) {
+      return { ok: false, reason: 'recovery-marker-conflict', detail: 'the exact quarantine marker is unavailable' };
+    }
+    const markerPath = activeMarkerPresent ? activeMarkerPath : retiredMarkerPath;
+    const chain = readQuarantineChain(
+      plan.quarantinePlanId,
+      plan.quarantineReceiptDigest,
+      markerPath,
+      activeMarkerPresent && retiredMarkerPresent ? [1n, 2n, 3n] : [1n, 2n],
+    );
+    if ('ok' in chain) return chain;
+    if (!equalDigest(chain.plan.planDigest, plan.quarantinePlanDigest) ||
+      !equalDigest(chain.marker.markerDigest, plan.quarantineMarkerDigest) ||
+      chain.receipt.signingKeyId !== plan.quarantineSigningKeyId ||
+      !equalDigest(chain.plan.expectedSourceSha256, plan.sourceSha256) ||
+      chain.plan.sourceSizeBytes !== plan.sourceSizeBytes ||
+      !equalDigest(sha256Bytes(resolve(chain.quarantinePath)), plan.quarantinePathSha256) ||
+      !equalDigest(chain.evidence.sha256, plan.quarantineSha256) ||
+      chain.evidence.size !== plan.quarantineSizeBytes) {
+      return {
+        ok: false,
+        reason: 'quarantine-evidence-drift',
+        detail: 'quarantine artifacts no longer match the signed resolution plan',
+      };
+    }
+    if (activeMarkerPresent && retiredMarkerPresent) {
+      try {
+        const active = stableRead(activeMarkerPath, false, [1n, 2n, 3n]);
+        const retired = stableRead(retiredMarkerPath, false, [1n, 2n, 3n]);
+        const parsedRetired = parseMarker(JSON.parse(retired.bytes.toString('utf8')) as unknown);
+        if (!parsedRetired || !equalDigest(parsedRetired.markerDigest, plan.quarantineMarkerDigest) ||
+          active.stat.dev !== retired.stat.dev || active.stat.ino !== retired.stat.ino) {
+          return { ok: false, reason: 'recovery-marker-conflict', detail: 'active and retired marker paths conflict' };
+        }
+      } catch (error) {
+        return { ok: false, reason: 'recovery-marker-conflict', detail: error instanceof Error ? error.message : String(error) };
+      }
+    }
+
+    let intent: DaemonStateResolutionIntent | null = null;
+    try {
+      if (pathEntryExists(daemonStateResolutionIntentPath(plan.planId))) {
+        intent = parseResolutionIntent(readRecord(daemonStateResolutionIntentPath(plan.planId)));
+        if (!intent || !exactResolutionIntent(intent, plan)) {
+          return { ok: false, reason: 'resolution-intent-conflict', detail: 'resolution intent cannot be authenticated exactly' };
+        }
+      }
+    } catch (error) {
+      return { ok: false, reason: 'resolution-intent-conflict', detail: error instanceof Error ? error.message : String(error) };
+    }
+    if (!intent) {
+      const timeRefusal = resolutionPlanTimeRefusal(plan, runtime);
+      if (timeRefusal) return timeRefusal;
+      if (!activeMarkerPresent || retiredMarkerPresent) {
+        return { ok: false, reason: 'recovery-marker-conflict', detail: 'marker retirement preceded authorized resolution intent' };
+      }
+    }
+
+    const serviceBeforeLock = serviceRefusal(runtime);
+    if (serviceBeforeLock) return serviceBeforeLock;
+    const daemonLockResult = acquireDaemonLock();
+    if (!daemonLockResult.acquired) {
+      return { ok: false, reason: 'daemon-lock-unavailable', detail: daemonLockResult.reason };
+    }
+    daemonLock = daemonLockResult.lock;
+    let phase = resolutionStatePhase(plan, chain);
+    if ('ok' in phase) return phase;
+    let resumed = intent !== null || phase.phase === 'fresh-published' || retiredMarkerPresent;
+
+    if (!intent) {
+      if (phase.phase !== 'blocked-source') {
+        return {
+          ok: false,
+          reason: 'resolution-state-conflict',
+          detail: 'fresh state appeared without a signed authorized resolution intent',
+        };
+      }
+      try {
+        runtime.beforeIntentPublish?.();
+      } catch (error) {
+        return { ok: false, reason: 'resolution-intent-conflict', detail: error instanceof Error ? error.message : String(error) };
+      }
+      const intentLocks = resolutionLocksRefusal(
+        recoveryLock,
+        daemonLock,
+        'lock ownership was lost before resolution intent publication',
+      );
+      if (intentLocks) return intentLocks;
+      const intentService = serviceRefusal(runtime);
+      if (intentService) return intentService;
+      const intentTime = resolutionPlanTimeRefusal(plan, runtime);
+      if (intentTime) return intentTime;
+      const unsignedIntent: Omit<DaemonStateResolutionIntent, 'intentDigest' | 'signature'> = {
+        schemaVersion: 1,
+        kind: 'daemon-state-resolution-intent',
+        planId: plan.planId,
+        planDigest: plan.planDigest,
+        previousDigest: plan.quarantineReceiptDigest,
+        authorizedAt: (runtime.now?.() ?? new Date()).toISOString(),
+        operation: 'publish-fresh-state',
+        sourceGeneration: plan.sourceGeneration,
+        sourceSha256: plan.sourceSha256,
+        quarantineReceiptDigest: plan.quarantineReceiptDigest,
+        quarantineMarkerDigest: plan.quarantineMarkerDigest,
+        destinationPathSha256: plan.destinationPathSha256,
+        freshStateSha256: plan.freshStateSha256,
+        operatorAuthorizationCount: 2,
+        statePublicationAllowed: true,
+        exactMarkerRetirementAllowed: true,
+        serviceMutationAllowed: false,
+        signingKeyId: signer.keyId,
+        signatureAlgorithm: SIGNATURE_ALGORITHM,
+      };
+      const unsignedSignedIntent: Omit<DaemonStateResolutionIntent, 'signature'> = {
+        ...unsignedIntent,
+        intentDigest: domainDigest(RESOLUTION_INTENT_DOMAIN, unsignedIntent),
+      };
+      intent = {
+        ...unsignedSignedIntent,
+        signature: keyedSignature(RESOLUTION_INTENT_DOMAIN, unsignedSignedIntent, signer),
+      };
+      try {
+        writeExclusiveRecord(daemonStateResolutionIntentPath(plan.planId), intent);
+        const publishedIntent = parseResolutionIntent(readRecord(daemonStateResolutionIntentPath(plan.planId)));
+        if (!publishedIntent || !equalDigest(publishedIntent.intentDigest, intent.intentDigest)) {
+          throw new Error('published resolution intent cannot be authenticated exactly');
+        }
+      } catch (error) {
+        return { ok: false, reason: 'resolution-intent-conflict', detail: error instanceof Error ? error.message : String(error) };
+      }
+    }
+
+    if (phase.phase === 'blocked-source') {
+      let stateTempPath: string;
+      let destinationParent: BigIntStats;
+      let quarantineParent: BigIntStats;
+      try {
+        destinationParent = lstatSync(dirname(daemonStatePath()), { bigint: true });
+        quarantineParent = lstatSync(dirname(chain.quarantinePath), { bigint: true });
+        if (!safePrivateDirectory(destinationParent) || !safePrivateDirectory(quarantineParent)) {
+          throw new Error('unsafe resolution parent directory');
+        }
+        stateTempPath = prepareResolutionStateTemp(plan);
+        runtime.beforeStatePublish?.();
+      } catch (error) {
+        return { ok: false, reason: 'state-publication-failed', detail: error instanceof Error ? error.message : String(error) };
+      }
+      const stateLocks = resolutionLocksRefusal(
+        recoveryLock,
+        daemonLock,
+        'lock ownership was lost before fresh state publication',
+      );
+      if (stateLocks) return stateLocks;
+      const stateService = serviceRefusal(runtime);
+      if (stateService) return stateService;
+      if (!samePrivateDirectoryIdentity(dirname(daemonStatePath()), destinationParent) ||
+        !samePrivateDirectoryIdentity(dirname(chain.quarantinePath), quarantineParent)) {
+        return {
+          ok: false,
+          reason: 'unsafe-recovery-storage',
+          detail: 'destination or quarantine parent changed before fresh state publication',
+        };
+      }
+      const immediateChain = readQuarantineChain(
+        plan.quarantinePlanId,
+        plan.quarantineReceiptDigest,
+        activeMarkerPath,
+        [1n, 2n],
+      );
+      if ('ok' in immediateChain) return immediateChain;
+      const immediatePhase = resolutionStatePhase(plan, immediateChain);
+      if ('ok' in immediatePhase) return immediatePhase;
+      if (immediatePhase.phase !== 'blocked-source' || retiredMarkerPresent) {
+        return { ok: false, reason: 'resolution-state-conflict', detail: 'resolution state changed before publication' };
+      }
+      try {
+        renameSync(stateTempPath, daemonStatePath());
+        fsyncDirectory(dirname(daemonStatePath()));
+        fsyncDirectory(dirname(chain.quarantinePath));
+      } catch (error) {
+        return { ok: false, reason: 'state-publication-failed', detail: error instanceof Error ? error.message : String(error) };
+      }
+      const publishedChain = readQuarantineChain(
+        plan.quarantinePlanId,
+        plan.quarantineReceiptDigest,
+        activeMarkerPath,
+        [1n, 2n],
+      );
+      if ('ok' in publishedChain) return publishedChain;
+      phase = resolutionStatePhase(plan, publishedChain);
+      if ('ok' in phase) return phase;
+      if (phase.phase !== 'fresh-published') {
+        return { ok: false, reason: 'state-publication-failed', detail: 'canonical fresh state was not durably published' };
+      }
+      try {
+        runtime.afterStatePublish?.();
+      } catch (error) {
+        return { ok: false, reason: 'state-publication-failed', detail: error instanceof Error ? error.message : String(error) };
+      }
+    }
+
+    if (phase.phase !== 'fresh-published') {
+      return { ok: false, reason: 'state-publication-failed', detail: 'canonical fresh state is not published' };
+    }
+    let receipt: DaemonStateResolutionReceipt | null = null;
+    const receiptPath = daemonStateResolutionReceiptPath(plan.planId);
+    try {
+      if (pathEntryExists(receiptPath)) {
+        receipt = parseResolutionReceipt(readPublishedRecord(receiptPath));
+        if (!receipt || !exactResolutionReceipt(receipt, intent, plan) ||
+          !sameGeneration(phase.state.stat, receipt.freshStateGeneration) ||
+          !sameGeneration(chain.evidence.stat, receipt.quarantineGeneration)) {
+          return { ok: false, reason: 'receipt-write-failed', detail: 'resolution receipt conflicts with durable state' };
+        }
+        resumed = true;
+      }
+    } catch (error) {
+      return { ok: false, reason: 'receipt-write-failed', detail: error instanceof Error ? error.message : String(error) };
+    }
+    if (!receipt) {
+      try {
+        runtime.beforeReceiptPublish?.();
+      } catch (error) {
+        return { ok: false, reason: 'receipt-write-failed', detail: error instanceof Error ? error.message : String(error) };
+      }
+      const receiptLocks = resolutionLocksRefusal(
+        recoveryLock,
+        daemonLock,
+        'lock ownership was lost before resolution receipt publication',
+      );
+      if (receiptLocks) return receiptLocks;
+      const receiptService = serviceRefusal(runtime);
+      if (receiptService) return receiptService;
+      const receiptChain = readQuarantineChain(
+        plan.quarantinePlanId,
+        plan.quarantineReceiptDigest,
+        activeMarkerPath,
+        [1n, 2n],
+      );
+      if ('ok' in receiptChain) return receiptChain;
+      const receiptPhase = resolutionStatePhase(plan, receiptChain);
+      if ('ok' in receiptPhase) return receiptPhase;
+      if (receiptPhase.phase !== 'fresh-published') {
+        return { ok: false, reason: 'state-publication-failed', detail: 'fresh state changed before receipt publication' };
+      }
+      const unsignedReceipt: Omit<DaemonStateResolutionReceipt, 'receiptDigest' | 'signature'> = {
+        schemaVersion: 1,
+        kind: 'daemon-state-resolution-receipt',
+        planId: plan.planId,
+        planDigest: plan.planDigest,
+        previousDigest: intent.intentDigest,
+        completedAt: (runtime.now?.() ?? new Date()).toISOString(),
+        operation: 'publish-fresh-state',
+        quarantinePlanId: plan.quarantinePlanId,
+        quarantinePlanDigest: plan.quarantinePlanDigest,
+        quarantineReceiptDigest: plan.quarantineReceiptDigest,
+        quarantineMarkerDigest: plan.quarantineMarkerDigest,
+        destinationPathSha256: plan.destinationPathSha256,
+        freshStateSha256: plan.freshStateSha256,
+        freshStateSizeBytes: plan.freshStateSizeBytes,
+        freshStateGeneration: sourceGeneration(receiptPhase.state.stat),
+        quarantineFileName: receiptChain.plan.quarantineFileName,
+        quarantineSha256: receiptChain.evidence.sha256,
+        quarantineSizeBytes: receiptChain.evidence.size,
+        quarantineGeneration: sourceGeneration(receiptChain.evidence.stat),
+        sourcePathReplaced: true,
+        quarantineEvidencePreserved: true,
+        markerRetirementAuthorized: true,
+        operatorAuthorizationCount: 2,
+        operatorIdentityAuthenticated: false,
+        serviceMutationPerformed: false,
+        serviceStartPerformed: false,
+        serviceRestartPerformed: false,
+        serviceInstallPerformed: false,
+        signingKeyId: signer.keyId,
+        signatureAlgorithm: SIGNATURE_ALGORITHM,
+      };
+      const unsignedSignedReceipt: Omit<DaemonStateResolutionReceipt, 'signature'> = {
+        ...unsignedReceipt,
+        receiptDigest: domainDigest(RESOLUTION_RECEIPT_DOMAIN, unsignedReceipt),
+      };
+      receipt = {
+        ...unsignedSignedReceipt,
+        signature: keyedSignature(RESOLUTION_RECEIPT_DOMAIN, unsignedSignedReceipt, signer),
+      };
+      let receiptTempPath: string;
+      try {
+        receiptTempPath = prepareResolutionReceiptTemp(receiptPath, plan, receipt);
+        runtime.afterReceiptStage?.();
+      } catch (error) {
+        return { ok: false, reason: 'receipt-write-failed', detail: error instanceof Error ? error.message : String(error) };
+      }
+      const publishReceiptLocks = resolutionLocksRefusal(
+        recoveryLock,
+        daemonLock,
+        'lock ownership was lost before staged resolution receipt publication',
+      );
+      if (publishReceiptLocks) return publishReceiptLocks;
+      const publishReceiptService = serviceRefusal(runtime);
+      if (publishReceiptService) return publishReceiptService;
+      const publishReceiptChain = readQuarantineChain(
+        plan.quarantinePlanId,
+        plan.quarantineReceiptDigest,
+        activeMarkerPath,
+        [1n, 2n],
+      );
+      if ('ok' in publishReceiptChain) return publishReceiptChain;
+      const publishReceiptPhase = resolutionStatePhase(plan, publishReceiptChain);
+      if ('ok' in publishReceiptPhase) return publishReceiptPhase;
+      if (publishReceiptPhase.phase !== 'fresh-published' ||
+        !sameGeneration(publishReceiptPhase.state.stat, receipt.freshStateGeneration) ||
+        !sameGeneration(publishReceiptChain.evidence.stat, receipt.quarantineGeneration)) {
+        return { ok: false, reason: 'receipt-write-failed', detail: 'state or quarantine changed before staged receipt publication' };
+      }
+      try {
+        publishRecordNoClobber(receiptTempPath, receiptPath);
+        const publishedReceipt = parseResolutionReceipt(readPublishedRecord(receiptPath));
+        if (!publishedReceipt || !equalDigest(publishedReceipt.receiptDigest, receipt.receiptDigest)) {
+          throw new Error('published resolution receipt cannot be authenticated exactly');
+        }
+        runtime.afterReceiptPublish?.();
+      } catch (error) {
+        return { ok: false, reason: 'receipt-write-failed', detail: error instanceof Error ? error.message : String(error) };
+      }
+    }
+
+    const retirementLocks = resolutionLocksRefusal(
+      recoveryLock,
+      daemonLock,
+      'lock ownership was lost before marker retirement',
+    );
+    if (retirementLocks) return retirementLocks;
+    const retirementService = serviceRefusal(runtime);
+    if (retirementService) return retirementService;
+    try {
+      activeMarkerPresent = pathEntryExists(activeMarkerPath);
+      retiredMarkerPresent = pathEntryExists(retiredMarkerPath);
+      ensurePrivateDirectory(dirname(retiredMarkerPath));
+      if (activeMarkerPresent && !retiredMarkerPresent) {
+        linkSync(activeMarkerPath, retiredMarkerPath);
+        fsyncDirectory(dirname(retiredMarkerPath));
+        retiredMarkerPresent = true;
+      }
+      if (!retiredMarkerPresent) throw new Error('retired marker evidence is missing');
+      const retired = stableRead(retiredMarkerPath, false, [1n, 2n, 3n]);
+      const parsedRetired = parseMarker(JSON.parse(retired.bytes.toString('utf8')) as unknown);
+      if (!parsedRetired || !equalDigest(parsedRetired.markerDigest, plan.quarantineMarkerDigest)) {
+        throw new Error('retired marker evidence cannot be authenticated exactly');
+      }
+      if (activeMarkerPresent) {
+        const active = stableRead(activeMarkerPath, false, [1n, 2n, 3n]);
+        const parsedActive = parseMarker(JSON.parse(active.bytes.toString('utf8')) as unknown);
+        if (!parsedActive || !equalDigest(parsedActive.markerDigest, plan.quarantineMarkerDigest) ||
+          active.stat.dev !== retired.stat.dev || active.stat.ino !== retired.stat.ino) {
+          throw new Error('active marker is not the exact authenticated retired inode');
+        }
+        runtime.beforeMarkerRetirement?.();
+        const finalLocks = resolutionLocksRefusal(
+          recoveryLock,
+          daemonLock,
+          'lock ownership was lost at marker retirement',
+        );
+        if (finalLocks) return finalLocks;
+        const finalService = serviceRefusal(runtime);
+        if (finalService) return finalService;
+        const finalActive = stableRead(activeMarkerPath, false, [1n, 2n, 3n]);
+        const finalRetired = stableRead(retiredMarkerPath, false, [1n, 2n, 3n]);
+        if (finalActive.stat.dev !== finalRetired.stat.dev || finalActive.stat.ino !== finalRetired.stat.ino ||
+          !finalActive.bytes.equals(finalRetired.bytes)) {
+          throw new Error('marker identity changed before retirement');
+        }
+        const finalReceipt = parseResolutionReceipt(readPublishedRecord(receiptPath));
+        if (!finalReceipt || !equalDigest(finalReceipt.receiptDigest, receipt.receiptDigest)) {
+          throw new Error('signed resolution receipt changed before marker retirement');
+        }
+        const finalChain = readQuarantineChain(
+          plan.quarantinePlanId,
+          plan.quarantineReceiptDigest,
+          activeMarkerPath,
+          [1n, 2n, 3n],
+        );
+        if ('ok' in finalChain) return finalChain;
+        const finalPhase = resolutionStatePhase(plan, finalChain);
+        if ('ok' in finalPhase) return finalPhase;
+        if (finalPhase.phase !== 'fresh-published') {
+          throw new Error('fresh state or quarantine evidence changed before marker retirement');
+        }
+        if (!sameGeneration(finalChain.evidence.stat, receipt.quarantineGeneration)) {
+          throw new Error('quarantine evidence generation changed before marker retirement');
+        }
+        unlinkSync(activeMarkerPath);
+        fsyncDirectory(dirname(activeMarkerPath));
+      }
+      if (pathEntryExists(activeMarkerPath)) throw new Error('active marker remains after retirement');
+      const finalRetired = stableRead(retiredMarkerPath, false, [1n, 2n]);
+      const finalMarker = parseMarker(JSON.parse(finalRetired.bytes.toString('utf8')) as unknown);
+      if (!finalMarker || !equalDigest(finalMarker.markerDigest, plan.quarantineMarkerDigest)) {
+        throw new Error('retired marker evidence changed after durable retirement');
+      }
+    } catch (error) {
+      return { ok: false, reason: 'marker-retirement-failed', detail: error instanceof Error ? error.message : String(error) };
+    }
+
+    const finalChain = readQuarantineChain(
+      plan.quarantinePlanId,
+      plan.quarantineReceiptDigest,
+      retiredMarkerPath,
+      [1n, 2n],
+    );
+    if ('ok' in finalChain) return finalChain;
+    const finalPhase = resolutionStatePhase(plan, finalChain);
+    if ('ok' in finalPhase) return finalPhase;
+    if (finalPhase.phase !== 'fresh-published' ||
+      !sameGeneration(finalPhase.state.stat, receipt.freshStateGeneration) ||
+      !sameGeneration(finalChain.evidence.stat, receipt.quarantineGeneration)) {
+      return { ok: false, reason: 'state-publication-failed', detail: 'final fresh state generation changed' };
+    }
+    return {
+      ok: true,
+      receipt,
+      receiptPath,
+      quarantinePath: finalChain.quarantinePath,
+      retiredMarkerPath,
+      resumed,
+    };
+  } finally {
+    if (daemonLock) releaseDaemonLock(daemonLock);
+    releaseLocalStoreLock(recoveryLock);
   }
 }

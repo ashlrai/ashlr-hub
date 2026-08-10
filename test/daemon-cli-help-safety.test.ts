@@ -200,6 +200,8 @@ describe('daemon help is read-only', () => {
     { args: ['status', '-h'], usage: 'Usage: ashlr daemon status' },
     { args: ['recover-state', '--help'], usage: 'Usage: ashlr daemon recover-state' },
     { args: ['recover-state', '-h'], usage: 'Usage: ashlr daemon recover-state' },
+    { args: ['resolve-state', '--help'], usage: 'Usage: ashlr daemon resolve-state' },
+    { args: ['resolve-state', '-h'], usage: 'Usage: ashlr daemon resolve-state' },
     { args: ['install', '--help'], usage: 'Usage: ashlr daemon install' },
     { args: ['install', '-h'], usage: 'Usage: ashlr daemon install' },
     { args: ['uninstall', '--help'], usage: 'Usage: ashlr daemon uninstall' },
