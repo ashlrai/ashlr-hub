@@ -84,6 +84,7 @@ describe('release scripts', () => {
 describe('release workflow', () => {
   const workflow = readFileSync(join(REPO_ROOT, '.github/workflows/release.yml'), 'utf8');
   const ciWorkflow = readFileSync(join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8');
+  const releaseDocs = readFileSync(join(REPO_ROOT, 'docs/RELEASING.md'), 'utf8');
   const verifyJob = workflow.match(/^ {2}verify:\n[\s\S]*?(?=^ {2}publish:)/m)?.[0] ?? '';
 
   it('is tag-triggered and reuses the exact native CI gate before publish', () => {
@@ -104,5 +105,25 @@ describe('release workflow', () => {
     expect(workflow).toContain('scripts/check-version.mjs');
     expect(workflow).toContain('scripts/extract-changelog.mjs');
     expect(workflow).toContain('id-token: write');
+  });
+
+  it('uses pinned token-free npm trusted publishing on a GitHub-hosted runner', () => {
+    expect(workflow).toContain('runs-on: ubuntu-latest');
+    expect(workflow).toContain('node-version: "24"');
+    expect(workflow).toContain('package-manager-cache: false');
+    expect(workflow).toContain('npm@11.15.0');
+    expect(workflow).toContain('test "$(npm --version)" = "11.15.0"');
+    expect(workflow).not.toMatch(/NODE_AUTH_TOKEN|secrets\.NPM_TOKEN/);
+  });
+
+  it('documents the exact external trusted-publisher activation boundary', () => {
+    expect(releaseDocs).toContain('npm trust github @ashlr/hub');
+    expect(releaseDocs).toContain('--repo ashlrai/ashlr-hub');
+    expect(releaseDocs).toContain('--file release.yml');
+    expect(releaseDocs).toContain('--allow-publish');
+    expect(releaseDocs).toContain('npm trust list @ashlr/hub');
+    expect(releaseDocs).toMatch(/requires an authenticated\s+maintainer/);
+    expect(releaseDocs).toContain('does not inject `NODE_AUTH_TOKEN`');
+    expect(releaseDocs).not.toContain('gh secret set NPM_TOKEN');
   });
 });
