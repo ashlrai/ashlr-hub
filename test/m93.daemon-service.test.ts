@@ -23,6 +23,13 @@ const installLaunchdPlistTransactionMock = vi.hoisted(() => vi.fn());
 const removeLaunchdPlistTransactionMock = vi.hoisted(() => vi.fn());
 const withServiceFileTransactionLockMock = vi.hoisted(() =>
   vi.fn((_options: unknown, action: () => unknown) => action()));
+const acquireDaemonServiceLifecycleFenceMock = vi.hoisted(() => vi.fn(() => ({
+  path: '/tmp/ashlr-test-home/.ashlr/locks/daemon-service-lifecycle.lock',
+  token: 'test-lifecycle-fence',
+  dev: 1n,
+  ino: 1n,
+})));
+const releaseDaemonServiceLifecycleFenceMock = vi.hoisted(() => vi.fn(() => true));
 
 // ---------------------------------------------------------------------------
 // We import the module AFTER setting up vi.mock so spawnSync is interceptable
@@ -62,6 +69,11 @@ vi.mock('../src/core/util/durability.js', () => ({
 
 vi.mock('../src/core/daemon/service-install-authority.js', () => ({
   assertResidentServiceInstallAuthorized: vi.fn(),
+}));
+
+vi.mock('../src/core/daemon/service-lifecycle-fence.js', () => ({
+  acquireDaemonServiceLifecycleFence: acquireDaemonServiceLifecycleFenceMock,
+  releaseDaemonServiceLifecycleFence: releaseDaemonServiceLifecycleFenceMock,
 }));
 
 import * as cp from 'node:child_process';

@@ -37,6 +37,7 @@ type DaemonSubcommand =
   | 'stop'
   | 'status'
   | 'recover-state'
+  | 'resolve-state'
   | 'install'
   | 'uninstall'
   | 'service-status';
@@ -46,6 +47,7 @@ const DAEMON_SUBCOMMANDS = new Set<DaemonSubcommand>([
   'stop',
   'status',
   'recover-state',
+  'resolve-state',
   'install',
   'uninstall',
   'service-status',
@@ -54,6 +56,14 @@ const DAEMON_SUBCOMMANDS = new Set<DaemonSubcommand>([
 const NO_FLAGS = new Set<string>();
 const JSON_FLAG = new Set(['--json']);
 const INSTALL_FLAGS = new Set(['--no-autostart']);
+const RESOLVE_STATE_VALUE_FLAGS = new Set([
+  '--quarantine-plan-id',
+  '--quarantine-receipt-sha256',
+  '--plan-id',
+  '--plan-sha256',
+  '--authorize',
+  '--confirm',
+]);
 
 const DAEMON_USAGE: Record<DaemonSubcommand, string> = {
   start:
@@ -63,6 +73,9 @@ const DAEMON_USAGE: Record<DaemonSubcommand, string> = {
   'recover-state':
     'Usage: ashlr daemon recover-state --dry-run --expected-sha256 <sha256> [--json]\n' +
     '   or: ashlr daemon recover-state --execute --plan-id <uuid> --plan-sha256 <sha256> --authorize <plan-sha256> [--json]',
+  'resolve-state':
+    'Usage: ashlr daemon resolve-state --dry-run --quarantine-plan-id <uuid> --quarantine-receipt-sha256 <sha256> [--json]\n' +
+    '   or: ashlr daemon resolve-state --execute --plan-id <uuid> --plan-sha256 <sha256> --authorize <plan-sha256> --confirm <plan-sha256> [--json]',
   install: 'Usage: ashlr daemon install [--no-autostart] (temporarily unavailable)',
   uninstall: 'Usage: ashlr daemon uninstall',
   'service-status': 'Usage: ashlr daemon service-status [--json]',
@@ -75,6 +88,7 @@ Subcommands:
   stop            Request an orderly daemon shutdown
   status          Show daemon state [--json]
   recover-state   Preview or explicitly execute one exact state quarantine
+  resolve-state   Preview or explicitly resolve one exact quarantine
   install         Temporarily unavailable (resident service mutation restricted)
   uninstall       Remove the OS service
   service-status  Show OS service state [--json]
@@ -227,6 +241,17 @@ interface RecoverStateFlags {
   json: boolean;
 }
 
+interface ResolveStateFlags {
+  mode?: 'dry-run' | 'execute';
+  quarantinePlanId?: string;
+  quarantineReceiptSha256?: string;
+  planId?: string;
+  planSha256?: string;
+  authorization?: string;
+  confirmation?: string;
+  json: boolean;
+}
+
 /** Parse a numeric flag value; returns undefined when missing/invalid. */
 function parseNum(v: string | undefined): number | undefined {
   if (v === undefined) return undefined;
@@ -325,6 +350,63 @@ function parseRecoverStateFlags(args: string[]): { flags: RecoverStateFlags; err
       return { flags, err: '--execute requires --plan-id, --plan-sha256, and --authorize' };
     }
     if (flags.expectedSha256) return { flags, err: '--execute is bound by the persisted plan and does not accept --expected-sha256' };
+  }
+  return { flags };
+}
+
+function parseResolveStateFlags(args: string[]): { flags: ResolveStateFlags; err?: string } {
+  const flags: ResolveStateFlags = { json: false };
+  const seen = new Set<string>();
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === '--dry-run' || arg === '--execute') {
+      const mode = arg === '--dry-run' ? 'dry-run' : 'execute';
+      if (flags.mode) return { flags, err: '--dry-run and --execute must appear exactly once' };
+      flags.mode = mode;
+      continue;
+    }
+    if (arg === '--json') {
+      if (seen.has(arg)) return { flags, err: '--json must appear at most once' };
+      seen.add(arg);
+      flags.json = true;
+      continue;
+    }
+    if (!arg || !RESOLVE_STATE_VALUE_FLAGS.has(arg)) {
+      return { flags, err: arg?.startsWith('-') ? `Unknown flag: ${arg}` : `Unexpected argument: ${arg}` };
+    }
+    if (seen.has(arg)) return { flags, err: `${arg} must appear exactly once` };
+    seen.add(arg);
+    const value = args[i + 1];
+    if (!value || value.startsWith('-')) return { flags, err: `${arg} requires a value` };
+    i += 1;
+    if (arg === '--quarantine-plan-id') flags.quarantinePlanId = value;
+    if (arg === '--quarantine-receipt-sha256') flags.quarantineReceiptSha256 = value;
+    if (arg === '--plan-id') flags.planId = value;
+    if (arg === '--plan-sha256') flags.planSha256 = value;
+    if (arg === '--authorize') flags.authorization = value;
+    if (arg === '--confirm') flags.confirmation = value;
+  }
+  if (!flags.mode) return { flags, err: 'resolve-state requires exactly one of --dry-run or --execute' };
+  if (flags.mode === 'dry-run') {
+    if (!flags.quarantinePlanId || !flags.quarantineReceiptSha256) {
+      return {
+        flags,
+        err: '--dry-run requires --quarantine-plan-id and --quarantine-receipt-sha256',
+      };
+    }
+    if (flags.planId || flags.planSha256 || flags.authorization || flags.confirmation) {
+      return { flags, err: '--dry-run does not accept execution authority flags' };
+    }
+  } else {
+    if (!flags.planId || !flags.planSha256 || !flags.authorization || !flags.confirmation) {
+      return {
+        flags,
+        err: '--execute requires --plan-id, --plan-sha256, --authorize, and --confirm',
+      };
+    }
+    if (flags.quarantinePlanId || flags.quarantineReceiptSha256) {
+      return { flags, err: '--execute is bound by the persisted plan and does not accept quarantine receipt flags' };
+    }
   }
   return { flags };
 }
@@ -730,6 +812,86 @@ async function cmdDaemonRecoverState(flags: RecoverStateFlags): Promise<number> 
 }
 
 // ---------------------------------------------------------------------------
+// Subcommand: resolve-state (dry-run plan or explicitly authorized publication)
+// ---------------------------------------------------------------------------
+
+async function cmdDaemonResolveState(flags: ResolveStateFlags): Promise<number> {
+  const col = makeColors(process.stdout.isTTY === true);
+  const svcMod = await importServiceManager();
+  if (!svcMod) {
+    console.error(col.red('error: ') + 'daemon service observation is unavailable. No state was changed.');
+    return 1;
+  }
+  let recovery: typeof import('../core/daemon/state-recovery.js');
+  try {
+    recovery = await import('../core/daemon/state-recovery.js');
+  } catch {
+    console.error(col.red('error: ') + 'daemon state resolution module is unavailable. No state was changed.');
+    return 1;
+  }
+  const loadConfig = await importConfig(true, true);
+  if (!loadConfig) {
+    console.error(col.red('error: ') + 'strict daemon budget configuration is unavailable. No state was changed.');
+    return 1;
+  }
+  const configuredDailyBudgetUsd = (): number => {
+    const configured = loadConfig().daemon?.dailyBudgetUsd;
+    if (configured !== undefined &&
+      (typeof configured !== 'number' || !Number.isFinite(configured) || configured <= 0)) {
+      throw new Error('daemon.dailyBudgetUsd must be a finite positive number');
+    }
+    return configured ?? 1;
+  };
+  const runtime = {
+    serviceStatus: () => svcMod.serviceStatus({}),
+    dailyBudgetUsd: configuredDailyBudgetUsd,
+  };
+  const result = flags.mode === 'dry-run'
+    ? recovery.previewDaemonStateResolution({
+        quarantinePlanId: flags.quarantinePlanId!,
+        quarantineReceiptDigest: flags.quarantineReceiptSha256!,
+      }, runtime)
+    : recovery.executeDaemonStateResolution({
+        planId: flags.planId!,
+        planDigest: flags.planSha256!,
+        operatorAuthorization: flags.authorization!,
+        operatorConfirmation: flags.confirmation!,
+      }, runtime);
+
+  if (flags.json) {
+    console.log(JSON.stringify(result, null, 2));
+  } else if (!result.ok) {
+    console.error(col.red('error: ') + `daemon state resolution refused (${result.reason}): ${result.detail}`);
+    console.error(col.dim('No daemon service start, restart, install, or automatic repair was attempted.'));
+  } else if ('plan' in result) {
+    console.log('');
+    console.log(col.bold('  daemon state resolution preview'));
+    console.log('  ' + col.bold('plan id:        ') + col.dim(result.plan.planId));
+    console.log('  ' + col.bold('plan SHA-256:   ') + col.dim(result.plan.planDigest));
+    console.log('  ' + col.bold('expires:        ') + col.dim(result.plan.expiresAt));
+    console.log('  ' + col.bold('signing key:    ') + col.dim(result.plan.signingKeyId));
+    console.log('  ' + col.bold('quarantine rcpt:') + ' ' + col.dim(result.plan.quarantineReceiptDigest));
+    console.log('  ' + col.bold('fresh state:    ') + col.dim(result.plan.freshStateSha256));
+    console.log('');
+    console.log(col.dim('  Dry-run only: daemon.json and the active recovery marker were not changed.'));
+    console.log(col.dim('  Execution requires the exact plan digest via --plan-sha256, --authorize, and --confirm.'));
+    console.log('');
+  } else {
+    console.log('');
+    console.log(col.green('  daemon state resolved with preserved quarantine evidence'));
+    console.log('  ' + col.bold('receipt SHA-256:') + ' ' + col.dim(result.receipt.receiptDigest));
+    console.log('  ' + col.bold('fresh state:    ') + col.dim(result.receipt.freshStateSha256));
+    console.log('  ' + col.bold('evidence file:  ') + col.dim(result.quarantinePath));
+    console.log('  ' + col.bold('retired marker: ') + col.dim(result.retiredMarkerPath));
+    console.log('');
+    console.log(col.yellow('  Daemon remains stopped. Start or install it only through a separate authorized operation.'));
+    console.log(col.dim('  No service start, restart, install, or repair was attempted.'));
+    console.log('');
+  }
+  return result.ok ? 0 : 1;
+}
+
+// ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
@@ -947,6 +1109,7 @@ export async function cmdDaemon(args: string[]): Promise<number> {
 
   let startFlags: StartFlags | undefined;
   let recoverStateFlags: RecoverStateFlags | undefined;
+  let resolveStateFlags: ResolveStateFlags | undefined;
   let validationError: string | undefined;
   if (sub === 'start') {
     const parsed = parseStartFlags(rest);
@@ -955,6 +1118,10 @@ export async function cmdDaemon(args: string[]): Promise<number> {
   } else if (sub === 'recover-state') {
     const parsed = parseRecoverStateFlags(rest);
     recoverStateFlags = parsed.flags;
+    validationError = parsed.err;
+  } else if (sub === 'resolve-state') {
+    const parsed = parseResolveStateFlags(rest);
+    resolveStateFlags = parsed.flags;
     validationError = parsed.err;
   } else {
     const allowed = sub === 'install'
@@ -975,6 +1142,8 @@ export async function cmdDaemon(args: string[]): Promise<number> {
       return cmdDaemonStatus(rest.includes('--json'));
     case 'recover-state':
       return cmdDaemonRecoverState(recoverStateFlags!);
+    case 'resolve-state':
+      return cmdDaemonResolveState(resolveStateFlags!);
     case 'install':
       return cmdDaemonInstall(!rest.includes('--no-autostart'));
     case 'uninstall':

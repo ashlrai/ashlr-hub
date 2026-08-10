@@ -9,8 +9,8 @@ vi.mock('../src/core/daemon/service.js', () => ({
   uninstall: vi.fn(),
   ensureRunning: vi.fn(),
   serviceStatus: () => ({
-    registrationState: 'present',
-    installed: true,
+    registrationState: 'absent',
+    installed: false,
     running: false,
     runtimeState: 'stopped',
     platformSpec: 'launchd',
@@ -18,7 +18,11 @@ vi.mock('../src/core/daemon/service.js', () => ({
 }));
 
 import { cmdDaemon } from '../src/cli/daemon.js';
-import { daemonStatePath } from '../src/core/daemon/state.js';
+import * as service from '../src/core/daemon/service.js';
+import {
+  daemonStatePath,
+  daemonStateRecoveryMarkerPath,
+} from '../src/core/daemon/state.js';
 
 const originalHome = process.env['HOME'];
 const originalUserProfile = process.env['USERPROFILE'];
@@ -58,6 +62,17 @@ async function captureJson(args: string[]): Promise<{ code: number; value: Recor
   }
 }
 
+async function captureCode(args: string[]): Promise<number> {
+  const output = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+  const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  try {
+    return await cmdDaemon(args);
+  } finally {
+    output.mockRestore();
+    error.mockRestore();
+  }
+}
+
 beforeEach(() => {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-recover-state-cli-'));
   fs.chmodSync(tmpHome, 0o700);
@@ -74,6 +89,22 @@ afterEach(() => {
 });
 
 describe('daemon recover-state production CLI filesystem wiring', () => {
+  it('requires argv-only repeated resolution authorization flags exactly once', async () => {
+    const digest = 'a'.repeat(64);
+    expect(await captureCode([
+      'resolve-state', '--execute', '--plan-id', '33333333-3333-4333-8333-333333333333',
+      '--plan-sha256', digest, '--authorize', digest,
+    ])).toBe(2);
+    expect(await captureCode([
+      'resolve-state', '--execute', '--plan-id', '33333333-3333-4333-8333-333333333333',
+      '--plan-sha256', digest, '--authorize', digest, '--authorize', digest, '--confirm', digest,
+    ])).toBe(2);
+    expect(await captureCode([
+      'resolve-state', '--dry-run', '--execute', '--quarantine-plan-id',
+      '11111111-1111-4111-8111-111111111111', '--quarantine-receipt-sha256', digest,
+    ])).toBe(2);
+  });
+
   it.runIf(process.platform !== 'win32')('executes an authorized plan through the real evidence supplier', async () => {
     const bytes = malformedState();
     fs.mkdirSync(path.dirname(daemonStatePath()), { recursive: true, mode: 0o700 });
@@ -100,5 +131,53 @@ describe('daemon recover-state production CLI filesystem wiring', () => {
     expect(fs.readFileSync(quarantinePath)).toEqual(bytes);
     expect(fs.lstatSync(quarantinePath).nlink).toBe(2);
     expect(fs.lstatSync(quarantinePath).ino).toBe(fs.lstatSync(daemonStatePath()).ino);
+  });
+
+  it.runIf(process.platform !== 'win32')('resolves an exact quarantine through the distinct production CLI flow', async () => {
+    const bytes = malformedState();
+    fs.mkdirSync(path.dirname(daemonStatePath()), { recursive: true, mode: 0o700 });
+    fs.chmodSync(path.dirname(daemonStatePath()), 0o700);
+    fs.writeFileSync(daemonStatePath(), bytes, { mode: 0o600 });
+    const expectedSha256 = createHash('sha256').update(bytes).digest('hex');
+    const quarantinePreview = await captureJson([
+      'recover-state', '--dry-run', '--expected-sha256', expectedSha256, '--json',
+    ]);
+    const quarantinePlan = quarantinePreview.value['plan'] as { planId: string; planDigest: string };
+    const quarantine = await captureJson([
+      'recover-state', '--execute', '--plan-id', quarantinePlan.planId,
+      '--plan-sha256', quarantinePlan.planDigest, '--authorize', quarantinePlan.planDigest, '--json',
+    ]);
+    expect(quarantine.code).toBe(0);
+    const quarantineReceipt = quarantine.value['receipt'] as { receiptDigest: string };
+    const quarantinePath = quarantine.value['quarantinePath'] as string;
+
+    const resolutionPreview = await captureJson([
+      'resolve-state', '--dry-run', '--quarantine-plan-id', quarantinePlan.planId,
+      '--quarantine-receipt-sha256', quarantineReceipt.receiptDigest, '--json',
+    ]);
+    expect(resolutionPreview.code).toBe(0);
+    const resolutionPlan = resolutionPreview.value['plan'] as {
+      planId: string;
+      planDigest: string;
+      freshStateCanonicalBase64: string;
+    };
+    const resolution = await captureJson([
+      'resolve-state', '--execute', '--plan-id', resolutionPlan.planId,
+      '--plan-sha256', resolutionPlan.planDigest, '--authorize', resolutionPlan.planDigest,
+      '--confirm', resolutionPlan.planDigest, '--json',
+    ]);
+
+    expect(resolution.code).toBe(0);
+    expect(resolution.value['ok']).toBe(true);
+    expect(fs.readFileSync(daemonStatePath())).toEqual(
+      Buffer.from(resolutionPlan.freshStateCanonicalBase64, 'base64'),
+    );
+    expect(fs.readFileSync(quarantinePath)).toEqual(bytes);
+    expect(fs.lstatSync(quarantinePath).nlink).toBe(1);
+    expect(fs.existsSync(daemonStateRecoveryMarkerPath())).toBe(false);
+    expect(fs.existsSync(resolution.value['receiptPath'] as string)).toBe(true);
+    expect(fs.existsSync(resolution.value['retiredMarkerPath'] as string)).toBe(true);
+    expect(service.install).not.toHaveBeenCalled();
+    expect(service.ensureRunning).not.toHaveBeenCalled();
   });
 });
