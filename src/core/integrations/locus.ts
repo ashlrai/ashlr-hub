@@ -58,7 +58,8 @@
  *
  * Call sites (opt-in only — never always-on):
  *   - spawnEngine / runSwarmInternal / runApiModelSandboxed — pre-mutate gate
- *   - runSwarm / runTask — CI session mint overlay (fleet + single-task paths)
+ *   - runSwarm / runTask / runBestOfN — CI session mint overlay
+ *     (fleet + single-task + best-of-N sandboxed fan-out paths)
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
