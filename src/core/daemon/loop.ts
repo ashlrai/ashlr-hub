@@ -145,7 +145,11 @@ import {
   type ProposalRepairWorkResult,
 } from '../fleet/proposal-repair-work.js';
 import { reconcileRemoteHandoffs, type RemoteHandoffReconcileResult } from '../inbox/remote-handoff.js';
-import { runBestOfN, type CandidateResult } from '../run/best-of-n.js';
+import {
+  resolveBestOfNCount,
+  runBestOfN,
+  type CandidateResult,
+} from '../run/best-of-n.js';
 import { runSelfHealCycle, runSelfHealCycleForRepos } from '../fleet/self-heal.js';
 import { runInventCycle } from '../generative/invent-cycle.js'; // M186
 import { runCounterfactualReplay } from '../fleet/counterfactual.js'; // M187
@@ -6108,12 +6112,11 @@ export async function tick(
         // M170: best-of-N dispatch — when cfg.foundry.bestOfN > 1, generate N
         // candidates and let the critic pick the winner. Flag-off: bestOfN absent
         // or 1 → single runGoal call, byte-identical to pre-M170 behavior.
-        const bestOfN: number = proposalOnlyActivation
+        const bestOfN = proposalOnlyActivation
           ? 1
-          : typeof (routingCfg.foundry as Record<string, unknown> | undefined)?.['bestOfN'] === 'number' &&
-          ((routingCfg.foundry as Record<string, unknown>)['bestOfN'] as number) > 1
-            ? Math.floor((routingCfg.foundry as Record<string, unknown>)['bestOfN'] as number)
-            : 1;
+          : resolveBestOfNCount(
+              (routingCfg.foundry as Record<string, unknown> | undefined)?.['bestOfN'],
+            );
 
         // M333: fan-out gating + multi-model candidate specs + full-cost
         // accounting. bestOfNMinItemScore (absent ⇒ every item, M170 behavior)

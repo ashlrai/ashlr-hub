@@ -362,6 +362,218 @@ async function cmdPreview(_args: string[]): Promise<number> {
   return preview.goalSourceState === 'degraded' || preview.missionGraph?.state === 'invalid' ? 1 : 0;
 }
 
+async function cmdShadow(args: string[]): Promise<number> {
+  const json = args.length === 1 && args[0] === '--json';
+  if (args.length > (json ? 1 : 0)) {
+    console.error('vision shadow: accepts only one optional --json flag');
+    return 2;
+  }
+  type ShadowReceiptReport = {
+    disposition: string;
+    receiptId?: string;
+    receiptDigest?: string;
+  };
+  type ShadowFailureEffects = {
+    missionReceipt: 'none' | 'recorded' | 'replayed' | 'unknown';
+    outward: 'none' | 'unknown';
+  };
+  const fail = (
+    reason: string,
+    detail: string,
+    evidence: { receipt?: ShadowReceiptReport; effects?: ShadowFailureEffects } = {},
+  ): number => {
+    const effects: ShadowFailureEffects = evidence.effects ?? {
+      missionReceipt: 'none',
+      outward: 'none',
+    };
+    if (json) {
+      console.log(JSON.stringify({
+        schemaVersion: 1,
+        mode: 'shadow',
+        authority: 'observation-only',
+        state: 'withheld',
+        reason,
+        ...(evidence.receipt ? { receipt: evidence.receipt } : {}),
+        effects,
+      }));
+    } else {
+      console.error(`vision shadow: ${detail}`);
+      if (evidence.receipt) {
+        console.error(`vision shadow: receipt disposition ${evidence.receipt.disposition}`);
+      }
+      console.error(`vision shadow: mission receipt effect ${effects.missionReceipt}`);
+      console.error(`vision shadow: outward effects ${effects.outward}`);
+    }
+    return 1;
+  };
+
+  const cfg = loadConfig();
+  const [strategist, goalStore, completion, focus, policy, inbox, capture, receipts, shadow] =
+    await Promise.all([
+      import('../core/vision/strategist.js'),
+      import('../core/goals/store.js'),
+      import('../core/goals/completion.js'),
+      import('../core/goals/focus.js'),
+      import('../core/sandbox/policy.js'),
+      import('../core/inbox/store.js'),
+      import('../core/vision/mission-observation-capture.js'),
+      import('../core/vision/mission-receipt.js'),
+      import('../core/vision/mission-reconcile-shadow.js'),
+    ]);
+
+  const briefingRead = strategist.readLatestBriefingDetailed();
+  if (briefingRead.sourceState !== 'healthy' || !briefingRead.complete || !briefingRead.briefing) {
+    return fail('briefing-source-incomplete', 'the latest briefing source is not healthy and complete');
+  }
+  const enrollment = policy.readEnrollmentRegistry();
+  if (enrollment.state !== 'ready') {
+    return fail('enrollment-source-incomplete', `enrollment authority is degraded (${enrollment.reason})`);
+  }
+  const goals = goalStore.listGoalsDetailed();
+  const proposals = inbox.listProposalsDetailed({ requireComplete: true });
+  const graphResult = strategist.compileBriefingMissionGraph(briefingRead.briefing, enrollment.repos);
+  if (!graphResult?.ok) {
+    return fail('mission-graph-invalid', 'the latest briefing does not contain a valid ecosystem mission graph');
+  }
+
+  const proposalById = new Map(proposals.proposals.map((proposal) => [proposal.id, proposal]));
+  const preview = strategist.previewBriefingAdoption(briefingRead.briefing, {
+    enrolledRepos: enrollment.repos,
+    existingGoals: goals.goals,
+    goalSourceState: goals.sourceState,
+    activeThreshold: focus.goalFocusActiveThreshold(cfg),
+    goalRealized: (goal) => {
+      const required = goal.milestones.filter((milestone) => milestone.status !== 'skipped');
+      return required.length > 0 && required.every((milestone) =>
+        milestone.proposalId !== null &&
+        completion.proposalCompletesGoalMilestone(proposalById.get(milestone.proposalId)),
+      );
+    },
+  });
+  const graphOrder = new Map(graphResult.graph.nodes.map((node, index) => [node.key, index]));
+  const graphKind = new Map(graphResult.graph.nodes.map((node) => [node.key, node.kind]));
+  const candidates = preview.entries.flatMap((entry) => {
+    const nodeKey = entry.missionNodeKey;
+    const order = nodeKey === null || nodeKey === undefined ? undefined : graphOrder.get(nodeKey);
+    const kind = nodeKey === null || nodeKey === undefined ? undefined : graphKind.get(nodeKey);
+    if (nodeKey === null || nodeKey === undefined || order === undefined || kind === undefined ||
+      entry.reason === 'goal-source-degraded') return [];
+    return [{
+      graphOrder: order,
+      nodeKey,
+      kind,
+      disposition: entry.disposition,
+      reason: entry.reason,
+    }];
+  });
+  if (candidates.length !== preview.entries.length) {
+    return fail('preview-invalid', 'the current preview could not be bound to every mission node');
+  }
+
+  const captured = capture.captureMissionObservation({
+    recordedAt: new Date().toISOString(),
+    graph: graphResult.graph,
+    briefing: briefingRead.briefing,
+    briefingQuality: {
+      sourceState: briefingRead.sourceState,
+      sourcePresent: briefingRead.sourcePresent,
+      complete: briefingRead.complete,
+    },
+    enrollment,
+    goals,
+    proposals,
+  });
+  if (!captured.ok) return fail(captured.reason, `mission evidence capture was withheld (${captured.reason})`);
+
+  const recorded = receipts.recordMissionObservationReceipt(captured.receiptInput);
+  if (!recorded.receipt) {
+    const persistenceAmbiguous = recorded.disposition === 'conflicted' ||
+      recorded.disposition === 'persistence-failed';
+    return fail(
+      `receipt-${recorded.disposition}`,
+      persistenceAmbiguous
+        ? `durable mission receipt outcome is unknown (${recorded.disposition}); no operational mutation was attempted`
+        : `durable mission receipt unavailable (${recorded.disposition}); no operational mutation was attempted`,
+      {
+        receipt: { disposition: recorded.disposition },
+        effects: persistenceAmbiguous
+          ? { missionReceipt: 'unknown', outward: 'unknown' }
+          : { missionReceipt: 'none', outward: 'none' },
+      },
+    );
+  }
+  const receiptReport: ShadowReceiptReport = {
+    disposition: recorded.disposition,
+    receiptId: recorded.receipt.receiptId,
+    receiptDigest: recorded.receipt.receiptDigest,
+  };
+  const verifiedReceipt = receipts.verifyMissionObservationReceipt(recorded.receipt);
+  if (!verifiedReceipt) {
+    return fail('receipt-invalid', 'the persisted mission receipt failed authentication', {
+      receipt: receiptReport,
+      effects: { missionReceipt: recorded.disposition, outward: 'none' },
+    });
+  }
+
+  const source = (value: typeof captured.receiptInput.goalSource) => ({
+    state: value.sourceState,
+    complete: value.complete,
+    digest: value.digest,
+  });
+  const plan = shadow.planMissionReconcileShadow({
+    mode: 'shadow',
+    receiptEvidence: { state: 'verified', receipt: verifiedReceipt },
+    current: {
+      missionKey: graphResult.graph.missionKey,
+      graphDigest: graphResult.graph.graphDigest,
+      briefingDigest: verifiedReceipt.briefingDigest,
+      briefingSource: source(captured.receiptInput.briefingSource),
+      enrollmentSource: source(captured.receiptInput.enrollmentSource),
+      goalSource: source(captured.receiptInput.goalSource),
+      proposalSource: source(captured.receiptInput.proposalSource),
+      activeGoalThreshold: preview.activeThreshold,
+      candidates,
+    },
+  });
+  if (!plan.suggestion) {
+    return fail(plan.reason, `shadow planning was withheld (${plan.reason})`, {
+      receipt: receiptReport,
+      effects: { missionReceipt: recorded.disposition, outward: 'none' },
+    });
+  }
+  const suggestion = shadow.verifyMissionReconcileSuggestion(plan.suggestion);
+  if (!suggestion) {
+    return fail('suggestion-invalid', 'the shadow suggestion failed integrity validation', {
+      receipt: receiptReport,
+      effects: { missionReceipt: recorded.disposition, outward: 'none' },
+    });
+  }
+
+  if (json) {
+    console.log(JSON.stringify({
+      schemaVersion: 1,
+      mode: 'shadow',
+      authority: 'observation-only',
+      state: plan.disposition,
+      receipt: {
+        disposition: recorded.disposition,
+        receiptId: verifiedReceipt.receiptId,
+        receiptDigest: verifiedReceipt.receiptDigest,
+      },
+      suggestion,
+    }));
+  } else {
+    const action = plan.disposition === 'would-create'
+      ? `WOULD CREATE node ${suggestion.decision.nodeKey}`
+      : `HELD (${suggestion.decision.reason})`;
+    console.log(bold('Mission reconcile shadow'));
+    console.log(`  ${action}`);
+    console.log(dim(`  receipt ${verifiedReceipt.receiptId}`));
+    console.log(dim('  Observation only: no goal, milestone, repository, agent, proposal, merge, release, deployment, publication, external mutation, policy, or budget state changed.'));
+  }
+  return 0;
+}
+
 async function cmdSet(args: string[]): Promise<number> {
   let northStar: string | undefined;
   let endState: string | undefined;
@@ -407,6 +619,7 @@ Subcommands:
   show [id]              Print the EndStateSpec (default: ecosystem).
   review [--project P]   Run the Strategist agent — state, gap, recommendations, proposed goals.
   preview                Read-only compile: exact targets, dedupe, caps, and skip reasons.
+  shadow [--json]        Record an evidence snapshot and show one zero-effect reconcile suggestion.
   approve                Apply the latest briefing: evolve spec + create goals.
   reconcile              Materialize at most one newly dependency-ready goal; planning-only.
   set --north-star "…"   Update the north star directly (Mason-owned edit).
@@ -418,6 +631,7 @@ Examples:
   ashlr vision review
   ashlr vision review --project my-repo
   ashlr vision preview
+  ashlr vision shadow --json
   ashlr vision approve
   ashlr vision reconcile
   ashlr vision set --north-star "Build the world's best autonomous engineering fleet."
@@ -443,6 +657,8 @@ export async function cmdVision(args: string[]): Promise<number> {
       return cmdReview(rest);
     case 'preview':
       return cmdPreview(rest);
+    case 'shadow':
+      return cmdShadow(rest);
     case 'approve':
       return cmdApprove(rest);
     case 'reconcile':

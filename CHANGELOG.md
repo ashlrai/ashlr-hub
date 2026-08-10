@@ -5,11 +5,33 @@ All notable changes to ashlr-hub are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions map to milestone series: **2.1.0** = v2.1 "Harden & Prove" (H1–H8),
 **2.0.0** = v2 "Autonomous Engineering Organization" (M21–M30), **1.0.0** = v1
-hub (M1–M20). Entries below detail each milestone; dates are merge dates into `main`.
+hub (M1–M20). Entries below detail each milestone; dates are merge dates into `master`.
 
 ---
 
 ## [Unreleased]
+
+- **Best-of-N fan-out containment.** Configured and direct best-of-N candidate
+  counts now fail closed for malformed values, clamp to a hard maximum of eight,
+  and run producer and critic work through an order-preserving two-worker pool.
+  One daemon slot can no longer expand into an unbounded `Promise.all` model
+  burst because of a typo or hostile configuration value.
+
+- **Mission OS planning and observation plane.** A bounded mission graph turns
+  strategic briefings into dependency-ordered work for exact enrolled
+  repositories plus explicit human gates. Read-only preview reports deterministic
+  ready/held dispositions, while `vision approve` and `vision reconcile` remain
+  separate, explicit planning mutations.
+  - `vision shadow` captures complete briefing, enrollment, goal, and proposal
+    source state in an immutable, host-HMAC-authenticated metadata receipt, then
+    emits at most one deterministic zero-effect suggestion. Receipts and
+    suggestions grant no dispatch, proposal, merge, release, deployment,
+    publication, external-mutation, policy, learning, or budget authority.
+  - Bounded Cortex mission-candidate and Locus evidence-envelope contracts
+    validate future cross-system inputs without adding live connectors,
+    credential handling, identity approval, business-outcome truth, or execution
+    authority. `docs/MISSION-OS.md` documents the current operator workflow,
+    privacy limits, source-quality holds, and production boundary.
 
 - **Temporary resident-service authority restriction.** Production service
   install, reinstall, repair, restart, worker setup, and the service portion of
