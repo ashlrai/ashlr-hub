@@ -7,7 +7,9 @@
  * SECURITY:
  *   - Never parse or persist secret VALUES from locus/phantom output.
  *   - Credential locators are private configuration; consume only presence/source metadata.
- *   - Prefer REQUIRED_SERVERS = ["locus","phantom"] — never ambient supabase MCP.
+ *   - Prefer REQUIRED_SERVERS = ["locus","phantom"] (agent-report plane names) —
+ *     never ambient supabase MCP. MCP config discovery keys use "phantom-secrets"
+ *     for the Phantom server entry; do not conflate the two layers.
  *   - withLocusSession uses `ci mint` (ephemeral); does not mutate active.json.
  *   - Mint child env is scrubbed (no ambient credentials) + validateMintEnv allowlist.
  *

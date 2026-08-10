@@ -20,7 +20,8 @@ import * as path from 'node:path';
 // ---------------------------------------------------------------------------
 
 import { knownConfigPaths } from '../src/core/mcp-registry.js';
-import { mergeEcosystemServers } from '../src/cli/mcp.js';
+import { buildEcosystemMcpEntry, mergeEcosystemServers } from '../src/cli/mcp.js';
+import { locusServerSpec } from '../src/core/integrations/locus.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -272,5 +273,123 @@ describe('mergeEcosystemServers — partial overlap with existing', () => {
     const obj = readJson(p) as { mcpServers: Record<string, unknown> };
     expect(Object.keys(obj.mcpServers)).toContain('phantom-secrets');
     expect(Object.keys(obj.mcpServers)).toContain('new-server');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. mergeEcosystemServers — locus gets LOCUS_HOME / LOCUS_CLIENT via locusServerSpec
+// ---------------------------------------------------------------------------
+
+describe('mergeEcosystemServers — locus registers with identity env', () => {
+  const prevHome = process.env['LOCUS_HOME'];
+
+  afterEach(() => {
+    if (prevHome === undefined) delete process.env['LOCUS_HOME'];
+    else process.env['LOCUS_HOME'] = prevHome;
+  });
+
+  it('buildEcosystemMcpEntry(locus) matches locusServerSpec env keys', () => {
+    process.env['LOCUS_HOME'] = '/tmp/locus-m66-spec';
+    const entry = buildEcosystemMcpEntry({
+      name: 'locus',
+      command: 'locus-mcp',
+      args: [],
+    });
+    const expected = locusServerSpec({
+      locusHome: '/tmp/locus-m66-spec',
+      client: 'ashlr-hub',
+    });
+    expect(entry.command).toBe('locus-mcp');
+    expect(entry.args).toEqual([]);
+    expect(entry.env?.LOCUS_HOME).toBe(expected.env?.LOCUS_HOME);
+    expect(entry.env?.LOCUS_CLIENT).toBe('ashlr-hub');
+    expect(entry.env?.LOCUS_NOTIFY).toBe('0');
+  });
+
+  it('writes locus with LOCUS_HOME + LOCUS_CLIENT (not command-only)', () => {
+    process.env['LOCUS_HOME'] = '/tmp/locus-m66-write';
+    const p = tmpPath('locus-env');
+    const added = mergeEcosystemServers(
+      [{ name: 'locus', command: 'locus-mcp', args: [] }],
+      p,
+    );
+    expect(added).toEqual(['locus']);
+    const obj = readJson(p) as {
+      mcpServers: Record<string, { command: string; args?: string[]; env?: Record<string, string> }>;
+    };
+    const locus = obj.mcpServers['locus'];
+    expect(locus).toBeDefined();
+    expect(locus!.command).toBe('locus-mcp');
+    expect(locus!.env?.LOCUS_HOME).toBe('/tmp/locus-m66-write');
+    expect(locus!.env?.LOCUS_CLIENT).toBe('ashlr-hub');
+    expect(locus!.env?.LOCUS_NOTIFY).toBe('0');
+  });
+
+  it('upgrades incomplete command-only locus entry on second write', () => {
+    process.env['LOCUS_HOME'] = '/tmp/locus-m66-upgrade';
+    const p = tmpPath('locus-upgrade');
+    // Simulate older write path that only stored command/args.
+    writeJson(p, {
+      mcpServers: {
+        locus: { command: 'locus-mcp', args: [] },
+        'phantom-secrets': { command: 'phantom', args: ['mcp', 'serve'] },
+      },
+    });
+    const added = mergeEcosystemServers(
+      [{ name: 'locus', command: 'locus-mcp', args: [] }],
+      p,
+    );
+    expect(added).toEqual(['locus']);
+    const obj = readJson(p) as {
+      mcpServers: Record<string, { command: string; env?: Record<string, string> }>;
+    };
+    expect(obj.mcpServers['locus']!.env?.LOCUS_HOME).toBe('/tmp/locus-m66-upgrade');
+    expect(obj.mcpServers['locus']!.env?.LOCUS_CLIENT).toBe('ashlr-hub');
+    // sibling entry preserved
+    expect(obj.mcpServers['phantom-secrets']).toBeDefined();
+  });
+
+  it('does not re-write locus when required env is already present', () => {
+    const p = tmpPath('locus-idempotent');
+    writeJson(p, {
+      mcpServers: {
+        locus: {
+          command: 'locus-mcp',
+          args: [],
+          env: {
+            LOCUS_HOME: '/custom/locus',
+            LOCUS_CLIENT: 'ashlr-hub',
+            LOCUS_NOTIFY: '0',
+          },
+        },
+      },
+    });
+    const before = fs.readFileSync(p, 'utf8');
+    const added = mergeEcosystemServers(
+      [{ name: 'locus', command: 'locus-mcp', args: [] }],
+      p,
+    );
+    expect(added).toHaveLength(0);
+    // Existing custom LOCUS_HOME must not be clobbered
+    const obj = readJson(p) as {
+      mcpServers: Record<string, { env?: Record<string, string> }>;
+    };
+    expect(obj.mcpServers['locus']!.env?.LOCUS_HOME).toBe('/custom/locus');
+    expect(fs.readFileSync(p, 'utf8')).toBe(before);
+  });
+
+  it('registers phantom-secrets without inventing a rename to phantom', () => {
+    const p = tmpPath('phantom-name');
+    mergeEcosystemServers(
+      [
+        { name: 'phantom-secrets', command: 'phantom', args: ['mcp', 'serve'] },
+        { name: 'locus', command: 'locus-mcp', args: [] },
+      ],
+      p,
+    );
+    const obj = readJson(p) as { mcpServers: Record<string, unknown> };
+    expect(Object.keys(obj.mcpServers)).toContain('phantom-secrets');
+    expect(Object.keys(obj.mcpServers)).not.toContain('phantom');
+    expect(Object.keys(obj.mcpServers)).toContain('locus');
   });
 });
