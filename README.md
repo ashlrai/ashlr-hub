@@ -479,6 +479,26 @@ state, and it remains distinct from behavior-changing reflection.
 
 See [`docs/FOUNDRY-CONFIG.md`](docs/FOUNDRY-CONFIG.md) for the full foundry reference and [`docs/examples/foundry.config.json`](docs/examples/foundry.config.json) for an annotated example.
 
+### Locus firm profile (opt-in identity gates)
+
+Production fleets that always want Locus pre-mutate / CI session isolation can
+pin a firm profile in `~/.ashlr/config.json`. **Default remains off** (monorepo
+CI without a pin is unaffected). Env `LOCUS_ENFORCE` always wins over config.
+
+```bash
+# Production fleet: enable firm profile → LOCUS_ENFORCE mode resolves to "enforce"
+ashlr config set locus.firm true
+
+# Soft roll-out / explicit mode (beats firm when set)
+ashlr config set locus.enforce warn
+
+# Local override without editing config
+LOCUS_ENFORCE=off ashlr run …
+```
+
+Resolution: env → `locus.enforce` → `locus.firm === true` → off. See
+`src/core/integrations/locus.ts` (`resolveLocusEnforceMode`).
+
 ---
 
 ## Version history
