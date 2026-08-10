@@ -87,6 +87,8 @@ import { listEnrolled, setKill } from '../sandbox/policy.js';
 import { listGoals } from '../goals/store.js';
 import { progressOf } from '../goals/advance.js';
 import { sanitizePublicJson } from '../util/public-json.js';
+import type { MissionShadowObservation } from '../vision/mission-shadow-observer.js';
+import type { ProposalsReadResult } from '../inbox/store.js';
 
 // ---------------------------------------------------------------------------
 // SSE registry — shared across all open SSE connections so server.ts can
@@ -240,6 +242,86 @@ interface VisionMissionSourceStatus {
   reason: string;
 }
 
+const PUBLIC_MISSION_SHADOW_EFFECTS = Object.freeze({
+  goals: false,
+  milestones: false,
+  repositories: false,
+  agents: false,
+  proposals: false,
+  merges: false,
+  releases: false,
+  deployments: false,
+  publications: false,
+  externalMutations: false,
+  policy: false,
+  budgets: false,
+});
+const PUBLIC_MISSION_SHADOW_STATES = new Set(['would-create', 'held', 'missing', 'withheld']);
+const PUBLIC_MISSION_NODE_KEY_RE = /^[a-z0-9](?:[a-z0-9._-]{0,78}[a-z0-9])?$/;
+
+function publicMissionShadowUnavailable(
+  reason: string,
+  state: 'unavailable' | 'withheld' = 'unavailable',
+): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    mode: 'shadow',
+    authority: 'observation-only',
+    state,
+    reason: publicMissionText(reason, 80),
+    decision: null,
+    effects: PUBLIC_MISSION_SHADOW_EFFECTS,
+  };
+}
+
+function publicMissionProposalSource(proposals: ProposalsReadResult): Record<string, unknown> {
+  return {
+    sourceState: proposals.sourceState,
+    sourcePresent: proposals.sourcePresent,
+    complete: proposals.complete,
+    filesRead: proposals.filesRead,
+    unreadableFiles: proposals.unreadableFiles,
+    invalidFiles: proposals.invalidFiles,
+    stopReasons: proposals.stopReasons.slice(0, 8),
+    limitExceeded: proposals.stopReasons.some((reason) =>
+      reason === 'file-limit' || reason === 'byte-limit' || reason === 'per-file-byte-limit'),
+  };
+}
+
+function publicMissionShadow(
+  observation: MissionShadowObservation,
+  nodeKinds: ReadonlyMap<string, 'work' | 'human-gate'>,
+): Record<string, unknown> {
+  const rawDecision = observation.suggestion?.decision;
+  const rawNodeKey = rawDecision?.nodeKey;
+  const nodeKey = typeof rawNodeKey === 'string' && PUBLIC_MISSION_NODE_KEY_RE.test(rawNodeKey)
+    ? rawNodeKey
+    : null;
+  const disposition = rawDecision?.disposition === 'would-create' || rawDecision?.disposition === 'hold'
+    ? rawDecision.disposition
+    : null;
+  const decision = disposition === null
+    ? null
+    : {
+        disposition,
+        reason: publicMissionText(rawDecision?.reason, 80),
+        nodeKey,
+        kind: nodeKey === null ? null : nodeKinds.get(nodeKey) ?? null,
+      };
+  const state = PUBLIC_MISSION_SHADOW_STATES.has(observation.state)
+    ? observation.state
+    : 'withheld';
+  return {
+    schemaVersion: 1,
+    mode: 'shadow',
+    authority: 'observation-only',
+    state,
+    reason: publicMissionText(observation.reason, 80),
+    decision,
+    effects: PUBLIC_MISSION_SHADOW_EFFECTS,
+  };
+}
+
 function publicMissionRepo(value: unknown): string | null {
   if (value === null || value === undefined) return null;
   if (typeof value !== 'string' || value.trim().length === 0) return null;
@@ -369,23 +451,28 @@ async function buildVisionMissionSnapshot(cfg: AshlrConfig): Promise<Record<stri
       authority: 'planning-only',
       briefing: null,
       preview: null,
+      shadow: publicMissionShadowUnavailable('briefing-missing'),
       sources: {
         briefing: briefingSource,
         goals: null,
         enrollment: null,
+        proposals: null,
       },
     };
   }
 
   try {
-    const [strategist, goals, completion, focus, policy] = await Promise.all([
+    const [strategist, goals, completion, focus, policy, inbox, shadowObserver] = await Promise.all([
       strategistModule ?? import('../vision/strategist.js'),
       import('../goals/store.js'),
       import('../goals/completion.js'),
       import('../goals/focus.js'),
       import('../sandbox/policy.js'),
+      import('../inbox/store.js'),
+      import('../vision/mission-shadow-observer.js'),
     ]);
     const inventory = goals.listGoalsDetailed();
+    const proposals = inbox.listProposalsDetailed({ requireComplete: true });
     const enrollment = policy.readEnrollmentRegistry();
     if (enrollment.state === 'degraded') {
       return {
@@ -394,6 +481,7 @@ async function buildVisionMissionSnapshot(cfg: AshlrConfig): Promise<Record<stri
         authority: 'planning-only',
         briefing: publicMissionBriefing(briefing),
         preview: null,
+        shadow: publicMissionShadowUnavailable('enrollment-source-incomplete', 'withheld'),
         sources: {
           briefing: briefingSource,
           goals: {
@@ -408,11 +496,12 @@ async function buildVisionMissionSnapshot(cfg: AshlrConfig): Promise<Record<stri
             sourceState: 'degraded', sourcePresent: true, complete: false,
             reason: enrollment.reason,
           },
+          proposals: publicMissionProposalSource(proposals),
         },
       };
     }
     const enrolledRepos = enrollment.repos;
-    const milestoneComplete = completion.createProposalMilestoneCompletionPredicate();
+    const proposalById = new Map(proposals.proposals.map((proposal) => [proposal.id, proposal]));
     const preview = strategist.previewBriefingAdoption(
       briefing as unknown as Parameters<typeof strategist.previewBriefingAdoption>[0],
       {
@@ -422,10 +511,38 @@ async function buildVisionMissionSnapshot(cfg: AshlrConfig): Promise<Record<stri
         activeThreshold: focus.goalFocusActiveThreshold(cfg),
         goalRealized: (goal) => {
           const required = goal.milestones.filter((milestone) => milestone.status !== 'skipped');
-          return required.length > 0 && required.every((milestone) => milestoneComplete(milestone, goal));
+          return required.length > 0 && required.every((milestone) =>
+            milestone.proposalId !== null &&
+            completion.proposalCompletesGoalMilestone(proposalById.get(milestone.proposalId)),
+          );
         },
       },
     );
+    const graphResult = strategist.compileBriefingMissionGraph(
+      briefing as unknown as Parameters<typeof strategist.compileBriefingMissionGraph>[0],
+      enrolledRepos,
+    );
+    let shadow = publicMissionShadowUnavailable('mission-graph-invalid', 'withheld');
+    if (graphResult?.ok) {
+      try {
+        shadow = publicMissionShadow(shadowObserver.observeMissionReconcileShadow({
+          recordedAt: new Date().toISOString(),
+          graph: graphResult.graph,
+          briefing: briefing as unknown as Parameters<typeof strategist.compileBriefingMissionGraph>[0],
+          briefingQuality: {
+            sourceState: briefingSource.sourceState,
+            sourcePresent: briefingSource.sourcePresent,
+            complete: briefingSource.complete,
+          },
+          enrollment,
+          goals: inventory,
+          proposals,
+          preview,
+        }), new Map(graphResult.graph.nodes.map((node) => [node.key, node.kind])));
+      } catch {
+        shadow = publicMissionShadowUnavailable('shadow-observer-unavailable');
+      }
+    }
     const goalSource = {
       sourceState: inventory.sourceState,
       sourcePresent: inventory.sourcePresent,
@@ -435,6 +552,7 @@ async function buildVisionMissionSnapshot(cfg: AshlrConfig): Promise<Record<stri
       limitExceeded: inventory.limitExceeded,
     };
     const state = briefingSource.sourceState === 'healthy' && inventory.sourceState !== 'degraded' &&
+      proposals.sourceState !== 'degraded' && proposals.complete === true &&
       preview.missionGraph?.state !== 'invalid'
       ? 'healthy'
       : 'degraded';
@@ -443,6 +561,7 @@ async function buildVisionMissionSnapshot(cfg: AshlrConfig): Promise<Record<stri
       state,
       authority: 'planning-only',
       briefing: publicMissionBriefing(briefing),
+      shadow,
       preview: {
         briefingGeneratedAt: publicMissionText(preview.briefingGeneratedAt, 40),
         goalSourceState: preview.goalSourceState,
@@ -471,6 +590,7 @@ async function buildVisionMissionSnapshot(cfg: AshlrConfig): Promise<Record<stri
           enrolledRepos: enrolledRepos.length,
           reason: enrollment.reason,
         },
+        proposals: publicMissionProposalSource(proposals),
       },
     };
   } catch {
@@ -480,6 +600,7 @@ async function buildVisionMissionSnapshot(cfg: AshlrConfig): Promise<Record<stri
       authority: 'planning-only',
       briefing: publicMissionBriefing(briefing),
       preview: null,
+      shadow: publicMissionShadowUnavailable('shadow-observer-unavailable'),
       sources: {
         briefing: briefingSource,
         goals: {
@@ -487,6 +608,7 @@ async function buildVisionMissionSnapshot(cfg: AshlrConfig): Promise<Record<stri
           reason: 'mission-preview-unavailable',
         },
         enrollment: null,
+        proposals: null,
       },
     };
   }

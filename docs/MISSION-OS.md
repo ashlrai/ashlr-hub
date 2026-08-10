@@ -69,6 +69,15 @@ has `maxGoalCreations: 0`, every effect flag is `false`, and the command does no
 call goal adoption, agent dispatch, proposal creation, merge, release,
 deployment, publication, provider, policy, or budget APIs.
 
+The local Mission Control Goals view is stricter: its Mission Outcome Room
+never records a receipt. It requires a complete immutable receipt ledger when
+that ledger exists, recognizes an exactly missing ledger without creating it,
+selects the newest authenticated receipt for the exact mission key and graph,
+recomputes the suggestion from current complete briefing, enrollment, goal,
+and proposal snapshots, and displays only a bounded public summary. It shows
+`missing`, `withheld`, or `unavailable` rather than treating absent, stale,
+partial, malformed, or mismatched evidence as a current suggestion.
+
 ## Recommended operator workflow
 
 ### 1. Establish bounded inputs
@@ -146,6 +155,15 @@ identities, and preserves the earliest stored observation. The full suggestion
 contains false flags for goals, milestones, repositories, agents, proposals,
 merges, releases, deployments, publications, external mutations, policy, and
 budgets.
+
+After a receipt exists, open Mission Control and select **Goals** to see the
+same decision class in the Mission Outcome Room. This dashboard projection is
+read-only: it exposes only the bounded disposition and reason, selected node
+key and kind, observation-only authority, and an all-false effects summary.
+Receipt presence details, timestamps, IDs, digests, HMAC references, source
+digests, objectives, proposal or diff evidence, repository paths, tenant
+aliases, and the full suggestion basis do not cross the unauthenticated public
+API. Refreshing the page does not create or replay a receipt.
 
 Withheld JSON returns nonzero and is intentionally smaller:
 
