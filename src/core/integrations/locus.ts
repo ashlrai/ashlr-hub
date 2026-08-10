@@ -43,9 +43,15 @@
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+
+import {
+  resolveTrustedConfiguredExecutable,
+  verifySystemExecutablePin,
+} from '../util/system-executable-custody.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -53,6 +59,8 @@ import { dirname, join } from "node:path";
 
 const LOCUS_BIN = process.env.LOCUS_BIN ?? "locus";
 const TIMEOUT_MS = 12_000;
+export const LOCUS_CONTROL_CAPABILITY_ENV = "LOCUS_CONTROL_CAPABILITY" as const;
+export const LOCUS_EXECUTOR_CAPABILITY_ENV = "LOCUS_EXECUTOR_CAPABILITY" as const;
 
 /** Identity plane + secret plane — the Ashlr agent safety pair. */
 export const REQUIRED_SERVERS = ["locus", "phantom"] as const;
@@ -208,6 +216,39 @@ export interface LocusSessionHandle {
   /** Env for children: LOCUS_HOME + LOCUS_SESSION_ID + mint env map. */
   env: NodeJS.ProcessEnv;
   mint: LocusCiMint;
+}
+
+export interface LocusV3ShadowAuthoritySummary {
+  schemaVersion: 1;
+  authority: 'delegated';
+  backingType: 'ci';
+  sessionRefDigest: string;
+  tenantRefDigest: string;
+  expiresAt: string;
+  frozen: false;
+  executorCapabilityPresent: true;
+}
+
+export interface LocusV3ShadowAuthorityEvidence {
+  summary: LocusV3ShadowAuthoritySummary;
+  /** Dormant execution overlay derived only from authenticated local adapter state. */
+  childEnv: NodeJS.ProcessEnv;
+}
+
+interface LocusV3Whoami {
+  session_id: string;
+  binding_alias: string;
+  binding_id: string;
+  tenant: string;
+  expires_at: string;
+  worker_home: string;
+  seal_ok: boolean;
+  seal: string;
+  authority: string;
+  authority_anchor_ok: boolean;
+  backing_type: string;
+  backing_path: string;
+  frozen?: boolean;
 }
 
 /** Claude / Cursor style MCP config root. */
@@ -416,6 +457,125 @@ export function scrubbedChildEnv(
     }
   }
   return { ...clean, ...explicit };
+}
+
+function locusShadowDigest(domain: string, value: string): string {
+  return `sha256:${createHash('sha256').update(`${domain}\0${value}`, 'utf8').digest('hex')}`;
+}
+
+function locusShadowIdentifier(value: string): boolean {
+  return value.length > 0 && value.length <= 160 && /^[A-Za-z0-9][A-Za-z0-9._:@-]*$/.test(value);
+}
+
+export interface InspectLocusV3ShadowAuthorityOptions {
+  requiredTenantRef: string;
+  /** Exact Hub-trusted config value. LOCUS_BIN and PATH are never authority inputs. */
+  executable: string;
+  now?: Date;
+  source?: NodeJS.ProcessEnv;
+}
+
+/**
+ * Authenticate the dormant relay against local Locus V3 state. Network payloads
+ * cannot provide binding, path, seal status, or executor authority to this API.
+ */
+export function inspectLocusV3ShadowAuthority(
+  options: InspectLocusV3ShadowAuthorityOptions,
+): LocusV3ShadowAuthorityEvidence | null {
+  const source = options.source ?? process.env;
+  const now = options.now ?? new Date();
+  const sessionId = (source.LOCUS_SESSION_ID ?? '').trim();
+  const executor = (source[LOCUS_EXECUTOR_CAPABILITY_ENV] ?? '').trim();
+  if (!Number.isFinite(now.getTime()) || !locusShadowIdentifier(options.requiredTenantRef) ||
+    !/^ses_[a-f0-9]+$/i.test(sessionId) || !/^[a-f0-9]{64}$/i.test(executor)) return null;
+
+  const configuredHome = source.LOCUS_HOME ?? join(homedir(), '.locus');
+  let home: string;
+  try { home = realpathSync(configuredHome); } catch { return null; }
+  const pin = resolveTrustedConfiguredExecutable(options.executable, [home]);
+  if (!pin) return null;
+  const commandEnv: NodeJS.ProcessEnv = {
+    HOME: home,
+    PATH: dirname(pin.executable),
+    LC_ALL: 'C',
+    NO_COLOR: '1',
+    LOCUS_HOME: home,
+    LOCUS_SESSION_ID: sessionId,
+    [LOCUS_EXECUTOR_CAPABILITY_ENV]: executor,
+    LOCUS_NOTIFY: '0',
+    LOCUS_QUIET: '1',
+  };
+
+  let value: unknown;
+  try {
+    if (!verifySystemExecutablePin(pin, { untrustedRoots: [home] })) return null;
+    const result = spawnSync(pin.executable, ['whoami', '--json'], {
+      encoding: 'utf8', timeout: TIMEOUT_MS, env: commandEnv, maxBuffer: 1024 * 1024,
+      shell: false, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true,
+    });
+    if (result.error || result.status !== 0 ||
+        !verifySystemExecutablePin(pin, { untrustedRoots: [home] })) return null;
+    value = JSON.parse((result.stdout ?? '').trim()) as unknown;
+  } catch { return null; }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const whoami = value as LocusV3Whoami;
+  const expiry = Date.parse(whoami.expires_at);
+  const expectedBacking = join(home, 'sessions', `ci-${sessionId.slice(4)}.json`);
+  const expectedWorker = join(home, 'workers', sessionId);
+  if (typeof whoami.backing_path !== 'string' || !isAbsolute(whoami.backing_path) ||
+    typeof whoami.worker_home !== 'string' || !isAbsolute(whoami.worker_home) ||
+    typeof whoami.expires_at !== 'string' || typeof whoami.tenant !== 'string' ||
+    typeof whoami.binding_alias !== 'string' || typeof whoami.binding_id !== 'string') return null;
+  const backingRelative = relative(resolve(home, 'sessions'), resolve(whoami.backing_path));
+  if (whoami.session_id !== sessionId || !locusShadowIdentifier(whoami.binding_alias) ||
+    !locusShadowIdentifier(whoami.binding_id) || whoami.tenant !== options.requiredTenantRef ||
+    whoami.authority !== 'delegated' || whoami.backing_type !== 'ci' ||
+    whoami.seal_ok !== true || whoami.authority_anchor_ok !== true || whoami.frozen === true ||
+    typeof whoami.seal !== 'string' || whoami.seal.length === 0 ||
+    !Number.isFinite(expiry) || new Date(expiry).toISOString() !== whoami.expires_at ||
+    expiry <= now.getTime() || backingRelative.startsWith('..') || isAbsolute(backingRelative) ||
+    resolve(whoami.backing_path) !== resolve(expectedBacking) ||
+    resolve(whoami.worker_home) !== resolve(expectedWorker)) return null;
+
+  const labels: Record<string, string> = {
+    LOCUS_BINDING: whoami.binding_alias,
+    LOCUS_BINDING_ID: whoami.binding_id,
+    LOCUS_TENANT: whoami.tenant,
+    LOCUS_SEAL: whoami.seal,
+    LOCUS_WORKER_HOME: whoami.worker_home,
+    LOCUS_EXPIRES_AT: whoami.expires_at,
+  };
+  for (const [key, expected] of Object.entries(labels)) {
+    const supplied = source[key];
+    if (typeof supplied === 'string' && supplied !== expected) return null;
+  }
+  const childEnv = scrubbedChildEnv(source, {
+    LOCUS_HOME: home,
+    LOCUS_SESSION_ID: sessionId,
+    ...labels,
+    [LOCUS_EXECUTOR_CAPABILITY_ENV]: executor,
+    LOCUS_NOTIFY: '0',
+    LOCUS_QUIET: '1',
+    HOME: whoami.worker_home,
+    USERPROFILE: whoami.worker_home,
+    GH_CONFIG_DIR: join(whoami.worker_home, 'gh'),
+    AWS_CONFIG_FILE: join(whoami.worker_home, 'aws', 'config'),
+    AWS_SHARED_CREDENTIALS_FILE: join(whoami.worker_home, 'aws', 'credentials'),
+  });
+  delete childEnv[LOCUS_CONTROL_CAPABILITY_ENV];
+  return Object.freeze({
+    summary: Object.freeze({
+      schemaVersion: 1,
+      authority: 'delegated',
+      backingType: 'ci',
+      sessionRefDigest: locusShadowDigest('ashlr:locus-v3:session:v1', sessionId),
+      tenantRefDigest: locusShadowDigest('ashlr:locus-v3:tenant:v1', whoami.tenant),
+      expiresAt: whoami.expires_at,
+      frozen: false,
+      executorCapabilityPresent: true,
+    }),
+    childEnv: Object.freeze(childEnv),
+  });
 }
 
 /** Validate the non-secret identity/scope environment emitted by `ci mint`. */
