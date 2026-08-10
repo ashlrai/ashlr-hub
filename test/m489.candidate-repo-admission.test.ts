@@ -46,6 +46,7 @@ import {
   verifyTrustedGithubCli,
   verifyTrustedGitCli,
 } from '../src/core/util/trusted-executable.js';
+import { createCandidateAdmissionTestOnlyGitFixture } from './helpers/candidate-admission.js';
 
 const POLICY_DIGEST = 'b'.repeat(64);
 const APP_ID = '42424242';
@@ -60,7 +61,8 @@ const TRUSTED_GH_PIN = {
   executable: '/trusted/bin/gh',
   digest: 'e'.repeat(64),
 };
-const TRUSTED_GIT_PIN = resolveTrustedGitCli([])!;
+const PRODUCTION_GIT_PIN = resolveTrustedGitCli([]);
+const TEST_ONLY_GIT = createCandidateAdmissionTestOnlyGitFixture();
 const TRUSTED_POLICY_INPUT = {
   schemaVersion: 2,
   trustedAppIds: [APP_ID],
@@ -172,6 +174,7 @@ function readyCheck(request: CandidateCheckRunRequest): CandidateCheckRunEvidenc
 
 function deps(overrides: Partial<CandidateRepoAdmissionDeps> = {}): Partial<CandidateRepoAdmissionDeps> {
   return {
+    ...TEST_ONLY_GIT.dependencies,
     now: () => new Date(EVALUATED_AT),
     readTrustedPolicy: () => ({
       state: 'verified',
@@ -190,8 +193,6 @@ function deps(overrides: Partial<CandidateRepoAdmissionDeps> = {}): Partial<Cand
     }),
     readProtection: vi.fn(async (_cwd, _branch, options) => protection(options.expectedNameWithOwner)),
     readCheckRun: vi.fn((request) => readyCheck(request)),
-    resolveGitCli: vi.fn(() => TRUSTED_GIT_PIN),
-    verifyGitCli: vi.fn(() => true),
     resolveGithubCli: vi.fn(() => TRUSTED_GH_PIN),
     verifyGithubCli: vi.fn(() => true),
     evaluateSafeMinimum: vi.fn(() => ({
@@ -339,7 +340,8 @@ function indexBytes(): Buffer {
 
 beforeEach(() => {
   priorHome = process.env['HOME'];
-  home = realpathSync(mkdtempSync(join(tmpdir(), 'm489-home-')));
+  const authorityFixtureRoot = process.platform === 'win32' ? tmpdir() : realpathSync(userInfo().homedir);
+  home = realpathSync(mkdtempSync(join(authorityFixtureRoot, 'm489-home-')));
   process.env['HOME'] = home;
   fixture = mkdtempSync(join(tmpdir(), 'm489-repo-'));
   execFileSync('git', ['init', '--quiet', '--initial-branch=main', fixture]);
@@ -510,16 +512,15 @@ describe('M489 hardened candidate repo admission preflight', () => {
     const currentHead = git(['rev-parse', 'HEAD']);
     const protectedBranch = protection('ashlrai/candidate');
     const priorPath = process.env['PATH'];
-    process.env['PATH'] = [fakeBin, '.', dirname(TRUSTED_GIT_PIN.executable)].join(delimiter);
+    process.env['PATH'] = [fakeBin, '.', dirname(TEST_ONLY_GIT.pin.executable)].join(delimiter);
     try {
       const resolved = resolveTrustedGitCli([fixture, join(fixture, 'node_modules')]);
-      expect(resolved).toEqual(TRUSTED_GIT_PIN);
-      const childEnv = trustedGitEnvironment(resolved!);
+      expect(resolved).toEqual(PRODUCTION_GIT_PIN);
+      const childEnv = trustedGitEnvironment(TEST_ONLY_GIT.pin);
       expect(childEnv['PATH']).not.toContain(fixture);
       expect(childEnv['HOME']).toBe(userInfo().homedir);
       expect(childEnv['TMPDIR']).toBeUndefined();
       const report = await inspectCandidateRepoAdmission(fixture, deps({
-        resolveGitCli: () => resolved,
         readRemoteHead: (nameWithOwner) => ({
           available: true,
           nameWithOwner,
@@ -539,11 +540,11 @@ describe('M489 hardened candidate repo admission preflight', () => {
   it('ignores a candidate-owned symlink alias to the trusted Git inode', () => {
     const fakeBin = join(fixture, 'bin');
     mkdirSync(fakeBin, { recursive: true });
-    symlinkSync(TRUSTED_GIT_PIN.executable, join(fakeBin, 'git'));
+    symlinkSync(TEST_ONLY_GIT.pin.executable, join(fakeBin, 'git'));
     const priorPath = process.env['PATH'];
     process.env['PATH'] = fakeBin;
     try {
-      expect(resolveTrustedGitCli([fixture, join(fixture, 'node_modules')])).toEqual(TRUSTED_GIT_PIN);
+      expect(resolveTrustedGitCli([fixture, join(fixture, 'node_modules')])).toEqual(PRODUCTION_GIT_PIN);
     } finally {
       if (priorPath === undefined) delete process.env['PATH']; else process.env['PATH'] = priorPath;
     }
@@ -554,7 +555,12 @@ describe('M489 hardened candidate repo admission preflight', () => {
     expect(trustedSystemGitCandidates('linux')).toEqual([]);
     expect(trustedSystemGitCandidates('win32')).toEqual([]);
     expect(trustedSystemGitCandidates('aix')).toEqual([]);
-    expect(TRUSTED_GIT_PIN.executable).toBe(realpathSync('/usr/bin/git'));
+    expect(verifyTrustedGitCli(TEST_ONLY_GIT.pin, [])).toBe(false);
+    if (process.platform === 'darwin') {
+      expect(PRODUCTION_GIT_PIN?.executable).toBe(realpathSync('/usr/bin/git'));
+    } else {
+      expect(PRODUCTION_GIT_PIN).toBeNull();
+    }
     const platform = vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
     try {
       expect(resolveTrustedGitCli([fixture])).toBeNull();
