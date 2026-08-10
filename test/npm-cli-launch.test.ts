@@ -492,14 +492,14 @@ describe('shell-free npm CLI launch', () => {
           snapshot.cleanupRoot,
           'directory',
           'inspect-existing',
-          { anchorPath: dirname(snapshot.cleanupRoot), timeoutMs: 15_000 },
+          { anchorPath: dirname(snapshot.cleanupRoot), timeoutMs: 30_000 },
         );
       },
     });
     expect(result.status).toBe(0);
     expect(assurance).toEqual({ ok: true, reason: 'exact-private-dacl' });
     expect(timeouts.length).toBeGreaterThanOrEqual(3);
-    expect(timeouts).toEqual(timeouts.map(() => 15_000));
+    expect(timeouts).toEqual(timeouts.map(() => 30_000));
   });
 
   it.runIf(process.platform === 'win32')('rejects a permissive snapshot DACL before spawning', () => {
