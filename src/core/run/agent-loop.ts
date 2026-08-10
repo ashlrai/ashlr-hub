@@ -9,6 +9,14 @@
  * Emits model-delta events via client.chatStream() when available (falls back
  * to client.chat() with a single delta of the full content). Also emits
  * tool-call events per tool execution.
+ *
+ * CI session isolation (opt-in via LOCUS_CI_BINDING / LOCUS_BINDING):
+ *   When configured, runTask mints an ephemeral Locus pin and overlays LOCUS_*
+ *   onto process.env so tools / child engines inherit the sealed session.
+ *   LOCUS_ENFORCE=enforce without a binding refuses as task.status='failed'
+ *   (never throws). Default (unset binding + enforce off) is a no-op.
+ *   Does not add a second pre-mutate gate — that lives on spawnEngine /
+ *   runSwarm / runApiModelSandboxed only.
  */
 
 import type {
@@ -32,6 +40,12 @@ import {
   prepareToolEffect,
   releasePreparedToolEffect,
 } from '../util/effect-journal.js';
+import {
+  applyLocusSessionEnv,
+  LocusMintError,
+  LocusSessionConfigError,
+  runWithLocusSessionIfConfigured,
+} from '../integrations/locus.js';
 
 /** Maximum steps per task, regardless of budget (safety backstop). */
 const TASK_STEP_CAP = 20;
@@ -62,6 +76,38 @@ interface ToolSpec {
   [key: string]: unknown;
 }
 
+/** Context bag for {@link runTask} / {@link runTaskBody}. */
+export type RunTaskContext = {
+  tools?: unknown[];
+  budget: RunBudget;
+  usage: RunUsage;
+  /** M11: optional StreamSink for live progress events. Defaults to nullSink. */
+  sink?: StreamSink;
+  onStep: (s: RunStep) => void;
+  /**
+   * M41: when true, build the system prompt from the model-adaptive prompt
+   * suite and use the model profile's step cap. Default/false → the legacy
+   * two-sentence prompt + TASK_STEP_CAP (byte-identical to prior behavior).
+   */
+  adaptivePrompts?: boolean;
+  /** M41: optional memory block to inject into the executor prompt. */
+  memory?: string;
+  /** Optional caller cancellation for this task's model/tool loop. */
+  signal?: AbortSignal;
+  /** Run-wide authority that reserves a step before any external model call. */
+  reserveModelStep?: ReserveModelStep;
+  /**
+   * M264: optional context prefix prepended to the system prompt.
+   * Used by local-context.ts to inject NORTH-STAR + ecosystem map +
+   * genome recall + repo tree for local api-model engines (local-coder,
+   * local-agent). When absent (default) the system prompt is byte-identical
+   * to pre-M264 behavior. Never affects frontier engines.
+   */
+  systemPrefix?: string;
+  /** Exact whole-run generation used to bind mutating tool evidence. */
+  effectJournal?: { scopeId: string; generation: string };
+};
+
 /**
  * Execute a single RunTask to completion using `client`.
  *
@@ -79,40 +125,69 @@ interface ToolSpec {
  * - On success: task.status='done', task.result=<text>, task.usage=<delta>.
  * - On error: task.status='failed', task.error=<message>.
  * - Returns the SAME task object (mutated) for caller convenience.
+ * - Opt-in CI pin: see module header (LOCUS_CI_BINDING / LOCUS_ENFORCE).
  */
 export async function runTask(
   task: RunTask,
   client: ProviderClient,
-  ctx: {
-    tools?: unknown[];
-    budget: RunBudget;
-    usage: RunUsage;
-    /** M11: optional StreamSink for live progress events. Defaults to nullSink. */
-    sink?: StreamSink;
-    onStep: (s: RunStep) => void;
-    /**
-     * M41: when true, build the system prompt from the model-adaptive prompt
-     * suite and use the model profile's step cap. Default/false → the legacy
-     * two-sentence prompt + TASK_STEP_CAP (byte-identical to prior behavior).
-     */
-    adaptivePrompts?: boolean;
-    /** M41: optional memory block to inject into the executor prompt. */
-    memory?: string;
-    /** Optional caller cancellation for this task's model/tool loop. */
-    signal?: AbortSignal;
-    /** Run-wide authority that reserves a step before any external model call. */
-    reserveModelStep?: ReserveModelStep;
-    /**
-     * M264: optional context prefix prepended to the system prompt.
-     * Used by local-context.ts to inject NORTH-STAR + ecosystem map +
-     * genome recall + repo tree for local api-model engines (local-coder,
-     * local-agent). When absent (default) the system prompt is byte-identical
-     * to pre-M264 behavior. Never affects frontier engines.
-     */
-    systemPrefix?: string;
-    /** Exact whole-run generation used to bind mutating tool evidence. */
-    effectJournal?: { scopeId: string; generation: string };
-  },
+  ctx: RunTaskContext,
+): Promise<RunTask> {
+  // CI isolation: when LOCUS_CI_BINDING/LOCUS_BINDING is set, mint an
+  // ephemeral sealed session and overlay LOCUS_* onto process.env so tools
+  // and child engines inherit it. Restores prior values after the task ends.
+  // Default (unset binding + LOCUS_ENFORCE off) is a no-op pass-through.
+  // Never throws — session refuse/mint failures become task.status='failed'.
+  try {
+    return await runWithLocusSessionIfConfigured(async (handle) => {
+      const restored: Array<[string, string | undefined]> = [];
+      if (handle) {
+        const overlay: NodeJS.ProcessEnv = {};
+        applyLocusSessionEnv(overlay, handle.env);
+        for (const [key, value] of Object.entries(overlay)) {
+          if (typeof value !== 'string') continue;
+          restored.push([key, process.env[key]]);
+          process.env[key] = value;
+        }
+      }
+      try {
+        return await runTaskBody(task, client, ctx);
+      } finally {
+        for (const [key, prev] of restored) {
+          if (prev === undefined) delete process.env[key];
+          else process.env[key] = prev;
+        }
+      }
+    });
+  } catch (error) {
+    if (
+      error instanceof LocusSessionConfigError ||
+      error instanceof LocusMintError
+    ) {
+      task.status = 'failed';
+      task.error = error.message;
+      delete task.result;
+      if (!task.usage) task.usage = newUsage();
+      return task;
+    }
+    // Session wrapper must never leak — map anything unexpected to task error.
+    if (task.status !== 'failed' && task.status !== 'done') {
+      task.status = 'failed';
+      task.error = `Unexpected error in agent loop: ${String(error)}`;
+      delete task.result;
+    }
+    if (!task.usage) task.usage = newUsage();
+    return task;
+  }
+}
+
+/**
+ * Inner ReAct loop. Callers must use {@link runTask} so CI session mint +
+ * never-throw contract stay intact.
+ */
+async function runTaskBody(
+  task: RunTask,
+  client: ProviderClient,
+  ctx: RunTaskContext,
 ): Promise<RunTask> {
   // Track per-task usage delta so we can set task.usage at end.
   let taskUsage: RunUsage = task.usage ? { ...task.usage } : newUsage();
