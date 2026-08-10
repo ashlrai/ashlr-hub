@@ -69,6 +69,15 @@ describe('M440 dependency audit CI', () => {
               with: { 'node-version': '22' },
             },
             {
+              name: 'Verify root dependency graph installs',
+              run: 'npm ci --ignore-scripts --no-audit --no-fund --force=false --legacy-peer-deps=false --strict-peer-deps',
+            },
+            {
+              name: 'Verify Raycast dependency graph installs',
+              'working-directory': 'src/raycast',
+              run: 'npm ci --ignore-scripts --no-audit --no-fund --force=false --legacy-peer-deps=false --strict-peer-deps',
+            },
+            {
               name: 'Audit root dependencies',
               run: 'npm audit --package-lock-only --ignore-scripts --audit-level=low',
             },
@@ -114,7 +123,7 @@ describe('M440 dependency audit CI', () => {
   });
 
   it('uses only approved actions with bounded checkout authority', () => {
-    expect(steps).toHaveLength(6);
+    expect(steps).toHaveLength(8);
     expect(steps.filter((step) => step.uses).map((step) => step.uses)).toEqual([
       'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
       'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020',
@@ -132,8 +141,16 @@ describe('M440 dependency audit CI', () => {
     });
   });
 
-  it('audits full and production lockfile graphs without installing packages', () => {
+  it('fail-closes on clean installs before auditing full and production lockfile graphs', () => {
     expect(steps.slice(2).map(({ run, ['working-directory']: cwd }) => ({ run, cwd }))).toEqual([
+      {
+        run: 'npm ci --ignore-scripts --no-audit --no-fund --force=false --legacy-peer-deps=false --strict-peer-deps',
+        cwd: undefined,
+      },
+      {
+        run: 'npm ci --ignore-scripts --no-audit --no-fund --force=false --legacy-peer-deps=false --strict-peer-deps',
+        cwd: 'src/raycast',
+      },
       {
         run: 'npm audit --package-lock-only --ignore-scripts --audit-level=low',
         cwd: undefined,
@@ -152,7 +169,20 @@ describe('M440 dependency audit CI', () => {
       },
     ]);
     expect(steps.some((step) => step['continue-on-error'] === true)).toBe(false);
-    expect(steps.some((step) => String(step.run ?? '').includes('npm ci'))).toBe(false);
+    const installIndexes = steps
+      .map((step, index) => ({ index, run: String(step.run ?? '') }))
+      .filter(({ run }) => run.startsWith('npm ci'))
+      .map(({ index }) => index);
+    const firstAuditIndex = steps.findIndex((step) => String(step.run ?? '').startsWith('npm audit'));
+    expect(installIndexes).toEqual([2, 3]);
+    expect(Math.max(...installIndexes)).toBeLessThan(firstAuditIndex);
+    for (const index of installIndexes) {
+      const command = String(steps[index]?.run ?? '');
+      expect(command).toContain('--force=false');
+      expect(command).toContain('--legacy-peer-deps=false');
+      expect(command).toContain('--strict-peer-deps');
+    }
+    expect(steps[1]?.with).not.toHaveProperty('cache');
   });
 
   it('cannot publish, deploy, mutate settings, or consume secrets', () => {
