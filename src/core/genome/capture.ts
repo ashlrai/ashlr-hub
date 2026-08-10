@@ -18,6 +18,7 @@
  */
 
 import type { AshlrConfig, RunState, SwarmRun } from '../types.js';
+import { redactPrivateKeyBlocks } from '../util/linear-input.js';
 import { appendHubEntry, loadGenome } from './store.js';
 
 // ---------------------------------------------------------------------------
@@ -52,18 +53,15 @@ const DEDUPE_THRESHOLD = 0.72;
  * credential so the auto-capture is safe even if a result string leaks one.
  *
  * Matches: bearer tokens, API keys (sk-…, pk-…, xoxb-…), AWS access key ids,
- * Google API keys, PEM private-key blocks, long hex/base64 blobs (≥32 chars),
- * passwords in URL authority, and generic token/secret/apikey assignments.
+ * Google API keys, long hex/base64 blobs (≥32 chars), passwords in URL
+ * authority, and generic token/secret/apikey assignments. The shared linear
+ * PEM transform runs before this array.
  *
  * NOTE: PEM blocks must be redacted BEFORE the base64/hex blob rules, otherwise
  * those greedy rules would shred the key body line-by-line and leave the
- * BEGIN/END markers behind. Order matters — keep multi-line patterns first.
+ * BEGIN/END markers behind. Order matters.
  */
 const SECRET_PATTERNS: RegExp[] = [
-  // PEM private-key blocks (multi-line) — redact the whole block first.
-  /-----BEGIN[ A-Z]*PRIVATE KEY-----[\s\S]*?-----END[ A-Z]*PRIVATE KEY-----/g,
-  // Fallback: any stray BEGIN-private-key marker line (truncated/partial blocks).
-  /-----BEGIN[ A-Z]*PRIVATE KEY-----[^\n]*/g,
   /\b(sk|pk|xoxb|xoxp|ghp|ghs|glpat|ey[A-Za-z0-9])[A-Za-z0-9_-]{8,}/g,
   /\bAKIA[0-9A-Z]{16}\b/g,                 // AWS access key id
   /\bAIza[0-9A-Za-z_-]{35}\b/g,            // Google API key
@@ -78,7 +76,7 @@ const SECRET_PATTERNS: RegExp[] = [
 
 /** Strip secret-shaped substrings from a string. */
 function stripSecrets(text: string): string {
-  let out = text;
+  let out = redactPrivateKeyBlocks(text);
   for (const re of SECRET_PATTERNS) {
     out = out.replace(re, '[REDACTED]');
   }

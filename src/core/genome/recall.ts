@@ -10,6 +10,7 @@
  */
 
 import type { AshlrConfig, GenomeEntry, RecallHit } from '../types.js';
+import { stripTrailingSlashes } from '../util/linear-input.js';
 import { loadGenome } from './store.js';
 
 const SKILL_TAG = 'm243:skill';
@@ -113,7 +114,7 @@ async function detectEmbeddingModel(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 3000);
   try {
-    const res = await fetch(`${ollamaBase.replace(/\/+$/, '')}/api/tags`, {
+    const res = await fetch(`${stripTrailingSlashes(ollamaBase)}/api/tags`, {
       signal: controller.signal,
       headers: { Accept: 'application/json' },
     });
@@ -154,7 +155,7 @@ async function fetchEmbedding(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), EMBED_TIMEOUT_MS);
   try {
-    const res = await fetch(`${ollamaBase.replace(/\/+$/, '')}/api/embeddings`, {
+    const res = await fetch(`${stripTrailingSlashes(ollamaBase)}/api/embeddings`, {
       method: 'POST',
       signal: controller.signal,
       headers: { 'Content-Type': 'application/json' },

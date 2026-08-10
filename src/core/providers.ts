@@ -10,6 +10,7 @@
  */
 
 import type { AshlrConfig, ProviderEndpoint, ProviderRegistry } from './types.js';
+import { stripTrailingSlashes } from './util/linear-input.js';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -21,7 +22,7 @@ import type { AshlrConfig, ProviderEndpoint, ProviderRegistry } from './types.js
  * If the URL already ends with the path, it is returned unchanged.
  */
 function ensurePath(base: string, suffix: string): string {
-  const stripped = base.replace(/\/+$/, '');
+  const stripped = stripTrailingSlashes(base);
   if (stripped.endsWith(suffix)) return stripped;
   return stripped + suffix;
 }
@@ -325,7 +326,7 @@ export async function probeApiModelEngine(
 
   // Resolve base URL: env override > defaultBaseUrl > skip probe
   const baseUrlEnvVal = api.baseUrlEnv ? process.env[api.baseUrlEnv] : undefined;
-  const baseUrl = (baseUrlEnvVal ?? api.defaultBaseUrl ?? '').replace(/\/+$/, '');
+  const baseUrl = stripTrailingSlashes(baseUrlEnvVal ?? api.defaultBaseUrl ?? '');
 
   if (!baseUrl) {
     // Key is present but no base URL to probe — treat as reachable (key-only check)

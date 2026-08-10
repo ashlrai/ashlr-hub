@@ -26,6 +26,8 @@
  * PURITY: no I/O, no side-effects. Pure string transform.
  */
 
+import { redactPrivateKeyBlocks } from './linear-input.js';
+
 function scrubLongBase64Like(match: string): string {
   // Preserve ordinary Git SHA-1 commit ids for forensic audit trails. The
   // explicit hex-64 rule above still redacts longer raw-key shapes.
@@ -44,11 +46,9 @@ function scrubLongBase64Like(match: string): string {
  */
 export function scrubSecrets(text: string): string {
   try {
-    return text
+    return redactPrivateKeyBlocks(text)
       // 0. PEM/private-key blocks. Run before generic/base64 redaction so
       // BEGIN/END markers do not survive with only the body removed.
-      .replace(/-----BEGIN[ A-Z]*PRIVATE KEY-----[\s\S]*?-----END[ A-Z]*PRIVATE KEY-----/g, '[REDACTED]')
-      .replace(/-----BEGIN[ A-Z]*PRIVATE KEY-----[^\n]*/g, '[REDACTED]')
       // 1. sk- API keys (Anthropic, OpenAI, etc.)
       .replace(/\bsk-[A-Za-z0-9_-]{16,}/g, '[REDACTED]')
       // 2. GitHub tokens

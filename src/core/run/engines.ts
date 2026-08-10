@@ -33,6 +33,7 @@ import { resolveEngineSpec, compileArgv } from './engine-registry.js';
 import { attachStallMonitor } from './run-monitor.js';
 import type { TerminationReason } from './run-monitor.js';
 import { recordClaudeRateLimitEventLine } from '../fabric/claude-rate-limit-event.js';
+import { stripTrailingSlashes } from '../util/linear-input.js';
 
 // ---------------------------------------------------------------------------
 // RunEvent — normalised event emitted by a streaming engine subprocess
@@ -225,7 +226,7 @@ export function engineInstalled(engine: EngineId, cfg?: AshlrConfig): boolean {
       spec.api?.defaultBaseUrl ||
       'http://localhost:11434/v1';
     try {
-      const url = new URL(`${baseUrl.replace(/\/+$/, '')}/models`);
+      const url = new URL(`${stripTrailingSlashes(baseUrl)}/models`);
       const transport = url.protocol === 'https:' ? https : http;
       let reachable = false;
       // Synchronous-style probe via a shared-nothing child process that exits
