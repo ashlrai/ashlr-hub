@@ -28,11 +28,11 @@ const EMBED_TIMEOUT_MS = 8000;
 /** Minimum keyword score for an entry to be included at all (0 = include everything). */
 const MIN_SCORE = 0;
 
-/** Maximum persisted Ollama base URL length accepted by the recall boundary. */
-const OLLAMA_BASE_URL_MAX_BYTES = 2048;
+/** Maximum canonical Ollama origin length accepted by the recall boundary. */
+const OLLAMA_ORIGIN_MAX_BYTES = 2048;
 
 const LOCAL_OLLAMA_ORIGIN_PATTERN =
-  /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::([1-9][0-9]{0,4}))?\/?$/;
+  /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::([1-9][0-9]{0,4}))?$/;
 
 /**
  * Convert a configured Ollama base URL into a detached, local-only origin.
@@ -42,21 +42,25 @@ const LOCAL_OLLAMA_ORIGIN_PATTERN =
  * refused at each fetch below to keep a local service from forwarding data.
  */
 function localOllamaOrigin(value: unknown): string | null {
-  if (
-    typeof value !== 'string' ||
-    value.length === 0 ||
-    Buffer.byteLength(value, 'utf8') > OLLAMA_BASE_URL_MAX_BYTES ||
-    !LOCAL_OLLAMA_ORIGIN_PATTERN.test(value)
-  ) {
+  if (typeof value !== 'string') {
     return null;
   }
 
+  // Preserve the legacy slash-only suffix normalization, but reduce it with
+  // the monotonic scanner before applying the strict, bounded origin grammar.
+  const originValue = stripTrailingSlashes(value);
+  if (
+    originValue.length === 0 ||
+    Buffer.byteLength(originValue, 'utf8') > OLLAMA_ORIGIN_MAX_BYTES ||
+    !LOCAL_OLLAMA_ORIGIN_PATTERN.test(originValue)
+  ) return null;
+
   try {
-    const match = LOCAL_OLLAMA_ORIGIN_PATTERN.exec(value);
+    const match = LOCAL_OLLAMA_ORIGIN_PATTERN.exec(originValue);
     const port = match?.[2];
     if (port !== undefined && Number(port) > 65_535) return null;
 
-    const parsed = new URL(value);
+    const parsed = new URL(originValue);
     return parsed.origin;
   } catch {
     return null;

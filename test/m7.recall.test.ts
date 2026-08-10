@@ -504,6 +504,7 @@ describe('recall — embeddings path falls back to keyword on failure', () => {
   it.each([
     'http://localhost:11434',
     'http://localhost:11434/',
+    'http://localhost:11434////',
     'http://127.0.0.1:11434',
     'http://[::1]:11434',
     'http://localhost',
