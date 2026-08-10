@@ -2876,3 +2876,43 @@ This worktree is source-only. It grants no authority to execute quarantine or re
 
 ### Status
 **Local remediation complete on exact blocked head `5e0300583fff0226b1bf2c0d419f1f6645d4f9b7`, whose protected parent is `8133c090ef70d0bd4fa07e4d9098d82653079864`.** The resulting remediation commit SHA is intentionally read from Git after commit and reported externally rather than embedded self-referentially. Full invariants, including H4, pass locally. Push, PR, protected CI, merge, deployed-artifact installation, live quarantine/resolution, and any separate service start remain pending and were not attempted.
+
+## Runtime Activation Authority V1 (2026-08-10)
+
+### Goal
+Replace the hard-coded-empty release trust-root observation with a strict
+operator-custodied public-key preflight while preserving the unconditional
+resident-service mutation denial.
+
+### Plan
+- [x] Map M440-M443, M482, M488, activation permit, service transaction, canary rollback, and daemon-state resolution boundaries.
+- [x] Add a fixed-path, public-only Ed25519 trust-root contract with owner, mode, ACL, link, symlink, canonical-byte, and stable-read checks.
+- [x] Add a canonical signed activation manifest binding candidate and rollback revision/tree, tarball, dependency, runtime, interpreter, service, policy, epoch, mode, expiry, and evidence identities.
+- [x] Compose immutable launch observation and candidate/rollback pair verification without granting mutation authority.
+- [x] Add deterministic metadata-only plan evidence over the immutable no-clobber record store.
+- [x] Add a read-only `daemon activation-preflight` CLI that reports exact blockers and always keeps execution authority false.
+- [x] Add adversarial custody, substitution, signature, expiry, epoch, replay, conflict, canonicalization, and immutable-artifact tests.
+- [x] Complete broad verification, independent review remediation, and a local-only commit. Do not push, install, start, restart, deploy, roll back, or mutate live state.
+
+### Authority Boundary
+The preflight can establish `evidenceReady`; it cannot establish
+`activationPermitted`. Transactional install/launch, replay consumption,
+revision-object proof, protected post-merge evidence, rollback execution, and
+live daemon-state resolution remain explicit blockers. The local policy epoch
+also remains rollback-susceptible until an external monotonic anchor exists.
+
+### Verification
+- Release authority matrix: 191 passed, 1 platform skip across M440-M443,
+  M482, M488, M502, and daemon CLI safety.
+- Safety invariants: 449 passed, 5 platform skips across 41 files.
+- Typecheck, build, scoped and full lint, dependency audit, Semgrep, diff
+  integrity, package creation, packaged CLI help, and package import smoke pass.
+- Independent review found one P2 expiry race. The preflight now rechecks the
+  signed plan after artifact observation, with a regression test. A second
+  automated pass was unavailable after the local Codex account reached its
+  review usage limit.
+- The broad `test:ci` run reached two unchanged harness failures before it was
+  stopped: nine M22 provenance tests fail because its child-process mock also
+  intercepts the Darwin ACL adapter, and one M117 test fails on uncertain run
+  execution authority. Both reproduce in isolation and do not import or touch
+  this activation authority surface.
