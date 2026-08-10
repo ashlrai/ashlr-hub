@@ -490,6 +490,9 @@ function rootPackageIsPortable(
     'CHANGELOG.md',
     'bin',
     'dist',
+    'docs/ELITE-AGENT-EFFICIENCY.md',
+    'docs/MISSION-OS.md',
+    'docs/contracts/CONTRACT-MISSION-RECEIPT-V1.md',
     'schema',
     'scripts/run-verify-command.mjs',
   ]);

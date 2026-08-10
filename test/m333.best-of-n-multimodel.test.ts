@@ -184,6 +184,9 @@ function judgeMockWithScores(scoreOrder: number[]) {
 
 interface Harness {
   runBestOfN: typeof import('../src/core/run/best-of-n.js').runBestOfN;
+  resolveBestOfNCount: typeof import('../src/core/run/best-of-n.js').resolveBestOfNCount;
+  maxCandidates: number;
+  maxConcurrency: number;
   setStatus: ReturnType<typeof vi.fn>;
   recordBestOfN: ReturnType<typeof vi.fn>;
   captureSandboxedProposal?: ReturnType<typeof vi.fn>;
@@ -359,6 +362,9 @@ async function harness(opts: {
   const mod = await import('../src/core/run/best-of-n.js?m333=' + randomUUID());
   return {
     runBestOfN: mod.runBestOfN,
+    resolveBestOfNCount: mod.resolveBestOfNCount,
+    maxCandidates: mod.MAX_BEST_OF_N_CANDIDATES,
+    maxConcurrency: mod.MAX_BEST_OF_N_CONCURRENCY,
     setStatus,
     recordBestOfN,
     judgeProposal,
@@ -385,6 +391,61 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 // 1. Candidate specs
 // ---------------------------------------------------------------------------
+
+describe('M333 — fan-out containment', () => {
+  it('fails malformed counts closed and clamps valid counts to the hard maximum', async () => {
+    const sandbox = makeSandboxMock(0.1, 'limits');
+    const h = await harness({ cli: sandbox.fn, api: sandbox.fn });
+
+    expect(h.resolveBestOfNCount(undefined)).toBe(1);
+    expect(h.resolveBestOfNCount(Number.NaN)).toBe(1);
+    expect(h.resolveBestOfNCount(Number.POSITIVE_INFINITY)).toBe(1);
+    expect(h.resolveBestOfNCount(-10)).toBe(1);
+    expect(h.resolveBestOfNCount(3.9)).toBe(3);
+    expect(h.resolveBestOfNCount(h.maxCandidates + 1)).toBe(h.maxCandidates);
+    expect(h.resolveBestOfNCount(Number.MAX_SAFE_INTEGER)).toBe(h.maxCandidates);
+  });
+
+  it('caps oversized config and never exceeds the internal worker limit', async () => {
+    const base = makeSandboxMock(0.1, 'bounded');
+    let active = 0;
+    let maxActive = 0;
+    const boundedRunner = vi.fn(async (...args: Parameters<typeof base.fn>) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      try {
+        // Yield once so concurrently-started producers overlap deterministically.
+        await Promise.resolve();
+        return await base.fn(...args);
+      } finally {
+        active -= 1;
+      }
+    });
+    const h = await harness({ cli: boundedRunner, api: boundedRunner });
+    const cfg = makeConfig();
+    (cfg.foundry as Record<string, unknown>)['bestOfN'] = Number.MAX_SAFE_INTEGER;
+
+    const result = await h.runBestOfN(makeItem(), cfg);
+
+    expect(result.critique.n).toBe(h.maxCandidates);
+    expect(result.candidates).toHaveLength(h.maxCandidates);
+    expect(boundedRunner).toHaveBeenCalledTimes(h.maxCandidates);
+    expect(maxActive).toBeLessThanOrEqual(h.maxConcurrency);
+  });
+
+  it('fails a malformed direct override closed instead of falling back to config fan-out', async () => {
+    const sandbox = makeSandboxMock(0.1, 'direct');
+    const h = await harness({ cli: sandbox.fn, api: sandbox.fn });
+    const cfg = makeConfig();
+    (cfg.foundry as Record<string, unknown>)['bestOfN'] = h.maxCandidates;
+
+    const result = await h.runBestOfN(makeItem(), cfg, { n: Number.POSITIVE_INFINITY });
+
+    expect(result.critique.n).toBe(1);
+    expect(result.candidates).toHaveLength(1);
+    expect(sandbox.fn).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe('M333 — candidate specs', () => {
   it('observes signed cards per candidate with child identity and final engine/model', async () => {

@@ -1,6 +1,6 @@
 {
   "name": "@ashlr/hub",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "description": "Local-first command center for agentic engineers.",
   "publishConfig": {
     "access": "public",
@@ -34,7 +34,10 @@
     "bin",
     "scripts/run-verify-command.mjs",
     "schema",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "docs/MISSION-OS.md",
+    "docs/ELITE-AGENT-EFFICIENCY.md",
+    "docs/contracts/CONTRACT-MISSION-RECEIPT-V1.md"
   ],
   "bundledDependencies": [
     "@modelcontextprotocol/sdk",

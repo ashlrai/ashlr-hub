@@ -41,6 +41,17 @@ import {
   beginExecutionAuthority,
   finishExecutionAuthority,
 } from '../util/execution-lease.js';
+import {
+  MAX_BEST_OF_N_CONCURRENCY,
+  resolveBestOfNCount,
+} from './best-of-n-policy.js';
+
+export {
+  MAX_BEST_OF_N_CANDIDATE_SPECS_INSPECTED,
+  MAX_BEST_OF_N_CANDIDATES,
+  MAX_BEST_OF_N_CONCURRENCY,
+  resolveBestOfNCount,
+} from './best-of-n-policy.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -134,11 +145,35 @@ export interface BestOfNResult {
  * Default 1 = current behaviour (flag-off parity).
  */
 function readN(cfg: AshlrConfig, override?: number): number {
-  if (typeof override === 'number' && override >= 1) return Math.floor(override);
+  if (override !== undefined) return resolveBestOfNCount(override);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const fromCfg = (cfg.foundry as any)?.bestOfN;
-  if (typeof fromCfg === 'number' && fromCfg >= 1) return Math.floor(fromCfg);
-  return 1;
+  return resolveBestOfNCount(fromCfg);
+}
+
+/**
+ * Order-preserving bounded async map. Only `limit` workers are created, so an
+ * oversized input cannot eagerly construct an unbounded Promise fan-out.
+ */
+async function mapWithConcurrency<T, R>(
+  values: readonly T[],
+  limit: number,
+  worker: (value: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  if (values.length === 0) return [];
+  const results = new Array<R>(values.length);
+  let cursor = 0;
+  const workerCount = Math.min(values.length, Math.max(1, Math.floor(limit)));
+  const workers = Array.from({ length: workerCount }, async () => {
+    for (;;) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= values.length) return;
+      results[index] = await worker(values[index]!, index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 /**
@@ -581,8 +616,9 @@ async function runBestOfNInternal(
       },
     });
 
-  // ── 5. Generate N candidates in parallel ────────────────────────────────
-  const candidatePromises = Array.from({ length: n }, async (_, i): Promise<InternalCandidateResult> => {
+  // ── 5. Generate N candidates with bounded internal concurrency ──────────
+  const candidateIndexes = Array.from({ length: n }, (_, index) => index);
+  const generateCandidate = async (i: number): Promise<InternalCandidateResult> => {
     // Vary temperature and seed so candidates differ across calls.
     // We pass opts into the sandbox via model override naming conventions where
     // supported; the primary divergence comes from the engine's own stochasticity.
@@ -858,7 +894,7 @@ async function runBestOfNInternal(
         ...(ownedSandbox ? { sandbox: ownedSandbox } : {}),
       };
     }
-  });
+  };
 
   let rawCandidates: InternalCandidateResult[] = [];
   let scored: InternalCandidateResult[] = [];
@@ -968,7 +1004,11 @@ async function runBestOfNInternal(
   };
 
   try {
-    rawCandidates = await Promise.all(candidatePromises);
+    rawCandidates = await mapWithConcurrency(
+      candidateIndexes,
+      MAX_BEST_OF_N_CONCURRENCY,
+      generateCandidate,
+    );
 
     if (opts?.signal?.aborted) {
       scored = rawCandidates;
@@ -983,8 +1023,10 @@ async function runBestOfNInternal(
 
     // ── 7. Score each non-empty candidate via the critic ──────────────────
     const judgeClient = buildNullJudgeClient(); // fallback when no provider
-    scored = await Promise.all(
-      rawCandidates.map(async (c): Promise<InternalCandidateResult> => {
+    scored = await mapWithConcurrency(
+      rawCandidates,
+      MAX_BEST_OF_N_CONCURRENCY,
+      async (c): Promise<InternalCandidateResult> => {
         if (opts?.signal?.aborted) return c;
         if (!candidateHasProposalMaterial(c)) return c;
 
@@ -1056,7 +1098,7 @@ async function runBestOfNInternal(
             ? { proposalDisposition: { kind: 'verification-rejected' } as const }
             : {}),
         };
-      }),
+      },
     );
 
     if (opts?.signal?.aborted) {

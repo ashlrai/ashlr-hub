@@ -300,6 +300,35 @@ describe('M170 — best-of-N dispatch: bestOfN > 1 routes through runBestOfN', (
     expect((passedOpts.delegationScope as { runId?: string }).runId).toBe(passedOpts.attemptId);
   });
 
+  it('clamps an oversized daemon candidate count before invoking runBestOfN', async () => {
+    enrollRepo();
+    const cfg = makeFrontierCfg({
+      bestOfN: Number.MAX_SAFE_INTEGER,
+    } as unknown as Partial<AshlrConfig['foundry']>);
+
+    await tick(cfg, { dryRun: false });
+
+    expect(mockRunBestOfN).toHaveBeenCalledTimes(1);
+    expect(mockRunBestOfN.mock.calls[0]?.[2]).toMatchObject({ n: 8 });
+  });
+
+  it('inspects a bounded candidate-spec prefix and passes at most the launch count', async () => {
+    enrollRepo();
+    const candidateSpecs = Array.from({ length: 10_000 }, () => ({ engine: 'claude' }));
+    const cfg = makeFrontierCfg({
+      bestOfN: Number.MAX_SAFE_INTEGER,
+      bestOfNCandidates: candidateSpecs,
+    } as unknown as Partial<AshlrConfig['foundry']>);
+
+    await tick(cfg, { dryRun: false });
+
+    const opts = mockRunBestOfN.mock.calls[0]?.[2] as {
+      candidates?: Array<{ engine: string }>;
+    };
+    expect(opts.candidates).toHaveLength(8);
+    expect(opts.candidates).toEqual(Array.from({ length: 8 }, () => ({ engine: 'claude' })));
+  });
+
   it('tick completes successfully when runBestOfN returns a winner', async () => {
     enrollRepo();
     const cfg = makeFrontierCfg({ bestOfN: 2 } as unknown as Partial<AshlrConfig['foundry']>);
@@ -362,6 +391,19 @@ describe('M170 — best-of-N dispatch: bestOfN absent/1 → single-run path unch
     expect(mockRunBestOfN).not.toHaveBeenCalled();
     expect(mockRunGoal).toHaveBeenCalledTimes(1);
   });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, -2, 0.5])(
+    'fails malformed bestOfN=%s closed to the single-run path',
+    async (bestOfN) => {
+      enrollRepo();
+      const cfg = makeFrontierCfg({ bestOfN } as unknown as Partial<AshlrConfig['foundry']>);
+
+      await tick(cfg, { dryRun: false });
+
+      expect(mockRunBestOfN).not.toHaveBeenCalled();
+      expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('builtin backend never touches runBestOfN or runGoal (uses runSwarm)', async () => {
     const repo = fx.makeRepo();

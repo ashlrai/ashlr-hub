@@ -184,10 +184,16 @@ ashlr goals advance                      # execute the next milestone
 The strategist and vision commands let you define the high-level direction:
 
 ```sh
-ashlr vision show       # current end-state spec
-ashlr vision review     # run the Elon strategist → strategic briefing
-ashlr vision approve    # adopt the briefing → evolve spec + create goals
+ashlr vision show         # current end-state spec
+ashlr vision review       # strategist → persisted strategic briefing
+ashlr vision preview      # read-only exact targets, dependencies, and holds
+ashlr vision shadow       # authenticated receipt + zero-effect suggestion
+ashlr vision approve      # explicit planning adoption: evolve spec + goals
+ashlr vision reconcile    # create at most one dependency-ready goal
 ```
+
+See the [Mission OS operator guide](docs/MISSION-OS.md) for exact effects,
+receipt privacy, Cortex/Locus boundaries, JSON output, and troubleshooting.
 
 The fleet doesn't only fix rot — it can invent. The generative engine proposes bold, net-new features for a repo:
 
@@ -316,7 +322,7 @@ next actions point at work the daemon can select now instead of phantom backlog.
 | `ashlr loop [--watch] [--dry-run]` | Goal-aware conductor — one tick or continuous |
 | `ashlr goal "<objective>"` | Set a strategic goal; plan + dispatch milestones |
 | `ashlr goals list/show/plan/advance` | Manage goals + milestones |
-| `ashlr vision show/review/approve` | End-state spec + strategic briefing |
+| `ashlr vision show/review/preview/shadow/approve/reconcile` | Mission OS: strategy, bounded DAG preview, authenticated shadow evidence, and explicit goal adoption |
 | `ashlr inbox [show/approve/reject]` | Review and act on proposals |
 | `ashlr swarm "<goal>"` | Multi-agent sandboxed swarm (ad-hoc) |
 | `ashlr run "<goal>"` | Single agent run (ad-hoc) |
@@ -461,7 +467,10 @@ See [`docs/FOUNDRY-CONFIG.md`](docs/FOUNDRY-CONFIG.md) for the full foundry refe
 | **v5.1** (M320–M324) | Claude 5 Model Intelligence — Sonnet 5 workhorse routing, Fable 5 judge with Opus fallback, per-model ROI telemetry, cost-aware learned routing | Shipped |
 | **v6** (M331–M340) | Verification-First — verify-to-green repair loop, real-world outcome watcher, multi-model best-of-N, gateway shadow activation program, Models dashboard tab, SWE-bench regression gate | Shipped |
 
-Current npm release: **3.0.1** (3.1.0 tagged in-repo; publish follows the fleet's first autonomous merge).
+This release candidate was prepared against the public npm baseline **3.0.1**.
+A newer version is authoritative only after its protected tag workflow and the
+npm registry both confirm publication; repository or changelog state alone is
+not release evidence.
 
 ---
 
@@ -476,6 +485,8 @@ See [`docs/ECOSYSTEM-MAP.md`](docs/ECOSYSTEM-MAP.md) for the full capability map
 | Doc | What it covers |
 |-----|----------------|
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Module map, the autonomous loop, engine tiers, safety gates, the `~/.ashlr/` layout |
+| [`docs/MISSION-OS.md`](docs/MISSION-OS.md) | Mission DAG, receipts, shadow workflow, Cortex/Locus boundaries, privacy, and troubleshooting |
+| [`docs/ELITE-AGENT-EFFICIENCY.md`](docs/ELITE-AGENT-EFFICIENCY.md) | Current primary-source research translated into Hub efficiency priorities and measurable autonomy gates |
 | [`docs/ECOSYSTEM-MAP.md`](docs/ECOSYSTEM-MAP.md) | The 13-repo platform and composition bets |
 | [`docs/QUICKSTART.md`](docs/QUICKSTART.md) | Step-by-step first activation |
 | [`docs/FOUNDRY-CONFIG.md`](docs/FOUNDRY-CONFIG.md) | Full `cfg.foundry` reference — engines, tiers, confinement, auto-merge |
