@@ -554,6 +554,9 @@ describe('M454 pinned upstream routing challenge', () => {
       'scripts/run-verify-command.mjs',
       'schema',
       'CHANGELOG.md',
+      'docs/MISSION-OS.md',
+      'docs/ELITE-AGENT-EFFICIENCY.md',
+      'docs/contracts/CONTRACT-MISSION-RECEIPT-V1.md',
     ]);
     expect(JSON.stringify(packageManifest.exports ?? {})).not.toContain('m454');
     expect(packageManifest.files).not.toContain('test');
