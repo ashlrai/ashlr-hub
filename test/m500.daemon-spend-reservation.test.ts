@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   createDaemonSpendReservationLedger,
@@ -8,6 +11,18 @@ import {
 } from '../src/core/daemon/spend-reservation.js';
 
 describe('M500 synchronous daemon spend admission', () => {
+  it('keeps the reliability contract aligned with preventive admission semantics', () => {
+    const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+    const reliability = readFileSync(join(root, 'docs/RELIABILITY.md'), 'utf8');
+
+    expect(reliability).toMatch(/synchronously reserves each envelope before routing or provider work/);
+    expect(reliability).toMatch(/each explicit\s+Best-of-N child is refused when its price is unknown/);
+    expect(reliability).toMatch(/hard\s+output-token cap/);
+    expect(reliability).toMatch(/provider counters marked `usageKnown`/);
+    expect(reliability).toMatch(/not a guarantee about a provider's\s+eventual invoice/);
+    expect(reliability).not.toContain('(parallel - 1) × per-item');
+  });
+
   it('admits concurrent workers atomically and never launches refused workers', async () => {
     const ledger = createDaemonSpendReservationLedger(0.15);
     let releaseStart!: () => void;

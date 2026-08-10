@@ -26,9 +26,10 @@ vi.mock('../src/core/run/provider-client.js', () => ({
   getActiveClient: vi.fn(),
 }));
 
-vi.mock('../src/core/run/agent-loop.js', () => ({
-  runTask: vi.fn(),
-}));
+vi.mock('../src/core/run/agent-loop.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/run/agent-loop.js')>();
+  return { ...actual, runTask: vi.fn() };
+});
 
 vi.mock('../src/core/run/verify.js', () => ({
   verifyTaskStructured: vi.fn(),

@@ -6,10 +6,10 @@
 > the top-level `README.md`.
 
 This document is honest about limits: Ashlr is single-machine / single-process;
-a swarm has no hard wall-clock deadline yet; and the daily budget has a bounded
-(not zero) overshoot under concurrency. Before you trust the autonomous chain,
-watch the WHOLE thing run safely on a disposable repo with `ashlr demo` — it
-never touches your portfolio and auto-cleans.
+a swarm has no hard wall-clock deadline yet; and preventive daily-spend
+admission depends on the catalog and provider contract described below. Before
+you trust the autonomous chain, watch the WHOLE thing run safely on a disposable
+repo with `ashlr demo` — it never touches your portfolio and auto-cleans.
 
 ---
 
@@ -85,11 +85,12 @@ proven recovery path and a single command (where manual repair is needed).
   alive, or whose `createdAt` is younger than `staleMs`, is skipped. *(H2/H5.)*
   **Recovery command:** `ashlr sandbox gc` (manual sweep + disk reclaim).
 
-- **Budget exhaustion mid-tick.** When the daily cap is reached the tick
-  short-circuits and **skips** remaining work rather than overspending; per-task
-  budget reservation keeps `sum(authorized) ≤ pool`, and the daily reset is
-  exact. *(H3 budget stress.)* See the bounded-overshoot caveat under
-  **Honest limits**.
+- **Budget exhaustion mid-tick.** Before model work can launch, the tick
+  synchronously reserves USD headroom. Concurrent workers cannot collectively
+  admit envelopes above the remaining pool; undersized envelopes are skipped,
+  and Best-of-N children partition one already-admitted outer envelope. The
+  daily reset is exact. *(H3 and M500 budget stress.)* See the cost-model
+  boundary under **Honest limits**.
   **Recovery:** none needed — spend resumes within cap on the next day boundary.
 
 - **Concurrency flood.** The daemon's `bounded()` pool and the swarm
@@ -119,11 +120,26 @@ and **not** papered over.
   the shared queue leases and the M30 seam. Lease renewal and forced backend
   assignment remain tracked follow-ups for long-running frontier work.
 
-- **Budget overshoot is bounded, not zero.** Under `parallel > 1`, spend can
-  overshoot the remaining daily cap by up to `(parallel - 1) × per-item` before
-  the in-tick short-circuit fires (default `parallel = 2` ⇒ at most ~1 extra
-  item). The daily reset itself is exact. Keep `daemon.parallel` low if you want
-  the tightest bound. *(H3.)*
+- **Daily USD admission is preventive within a declared cost model.** The daemon
+  synchronously reserves each envelope before routing or provider work, so
+  parallel workers cannot collectively admit more than the remaining daily
+  headroom. Combined-token ceilings use the highest input/output price in the
+  authoritative model catalog. The final effective route and each explicit
+  Best-of-N child is refused when its price is unknown; admitted Best-of-N
+  children divide one outer envelope. Paid provider calls must express a hard
+  output-token cap, and a conservative prompt-input ceiling must fit before the
+  call. Only exact, finite, nonnegative provider counters marked `usageKnown`
+  release unused headroom; missing, invalid, or ambiguous usage keeps the full
+  claim charged.
+
+  This is an admission and accounting bound, not a guarantee about a provider's
+  eventual invoice. It assumes catalog prices are current and the provider
+  honors the requested output cap. Provider billing changes, non-token fees, or
+  a provider violating its request contract cannot be pre-bounded; any observed
+  overage is charged in full and does not reopen headroom. The synchronous ledger
+  is tick-local and single-process; the daemon singleton and durable spend guard
+  remain the crash/restart boundary. A positive remainder below the minimum
+  dispatch envelope can therefore produce zero launches. *(H3, M201, M500.)*
 
 - **No hard swarm wall-clock deadline yet.** A swarm is bounded by `maxSteps`
   (200) and its token budget, but **not** by elapsed time. Because of that,
