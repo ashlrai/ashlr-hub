@@ -49,6 +49,7 @@ export interface TrustedExecutablePin extends PathCustodyProof {
 interface PosixHierarchyOptions {
   leafKind: 'file' | 'directory';
   requireCurrentUserLeaf: boolean;
+  requireRootOwnership?: boolean;
   allowTrustedInstallGroupWrite?: boolean;
   allowedRoots?: readonly string[];
   untrustedRoots?: readonly string[];
@@ -67,7 +68,7 @@ function canonicalIfPresent(path: string): string {
   }
 }
 
-function macosAclSafe(path: string): boolean {
+function macosAclSafe(path: string, allowCurrentUserMutatingAcl = true): boolean {
   if (process.platform !== 'darwin') return true;
   const result = spawnSync('/bin/ls', ['-led', path], {
     encoding: 'utf8',
@@ -86,7 +87,8 @@ function macosAclSafe(path: string): boolean {
     const match = line.match(/^\s*\d+:\s+(.+?)\s+(allow|deny)\s+(.+)$/);
     if (!match) return false;
     const principal = match[1]!;
-    if (match[2] === 'deny' || principal === `user:${username}` || principal === 'user:root') continue;
+    if (match[2] === 'deny' || principal === 'user:root' ||
+        (allowCurrentUserMutatingAcl && principal === `user:${username}`)) continue;
     const rights = match[3]!.split(/[\s,]+/).filter(Boolean);
     if (rights.some((right) => MACOS_MUTATING_ACL_RIGHTS.has(right))) return false;
   }
@@ -165,15 +167,18 @@ function inspectPosixHierarchy(path: string, options: PosixHierarchyOptions): Pa
       if (stat.isSymbolicLink() || (leaf
         ? options.leafKind === 'file' ? !stat.isFile() : !stat.isDirectory()
         : !stat.isDirectory())) return null;
-      if (stat.uid !== 0n && stat.uid !== BigInt(process.getuid())) return null;
+      if (options.requireRootOwnership ? stat.uid !== 0n : stat.uid !== 0n && stat.uid !== BigInt(process.getuid())) {
+        return null;
+      }
       if (leaf && options.requireCurrentUserLeaf && stat.uid !== BigInt(process.getuid())) return null;
       const otherWritable = (stat.mode & 0o002n) !== 0n;
       const groupWritable = (stat.mode & 0o020n) !== 0n;
       const rootStickyDirectory = stat.isDirectory() && stat.uid === 0n && (stat.mode & 0o1000n) !== 0n;
       const trustedInstallGroup = options.allowTrustedInstallGroupWrite === true &&
         stat.uid === BigInt(process.getuid()) && macosInstallGroupSafe(stat.gid);
-      if ((otherWritable && !rootStickyDirectory) || (groupWritable && !trustedInstallGroup)) return null;
-      if (!macosAclSafe(cursor)) return null;
+      if ((otherWritable && (!rootStickyDirectory || options.requireRootOwnership === true)) ||
+          (groupWritable && !trustedInstallGroup)) return null;
+      if (!macosAclSafe(cursor, options.requireRootOwnership !== true)) return null;
       snapshot.push(snapshotStat(cursor, stat));
     }
     return {
@@ -223,6 +228,43 @@ function trustedExecutableRoots(): string[] {
   if (process.platform === 'darwin') return ['/usr', '/opt/homebrew'];
   if (process.platform === 'linux') return ['/usr', '/opt/homebrew', '/home/linuxbrew/.linuxbrew'];
   return [];
+}
+
+/** Platforms without an ACL-aware system custody proof deliberately fail closed. */
+export function trustedSystemGitCandidates(platform: NodeJS.Platform = process.platform): readonly string[] {
+  if (platform === 'darwin') return ['/usr/bin/git'];
+  return [];
+}
+
+function inspectTrustedSystemGitExecutable(
+  executable: string,
+  untrustedRoots: readonly string[],
+): TrustedExecutablePin | null {
+  if (process.platform === 'win32' || typeof process.getuid !== 'function' || !isAbsolute(executable)) return null;
+  try {
+    const canonical = realpathSync(resolve(executable));
+    const explicitlyAllowed = trustedSystemGitCandidates().some((candidate) => {
+      try {
+        return realpathSync(candidate) === canonical;
+      } catch {
+        return false;
+      }
+    });
+    if (!explicitlyAllowed) return null;
+    accessSync(canonical, fsConstants.X_OK);
+    const proof = inspectPosixHierarchy(canonical, {
+      leafKind: 'file',
+      requireCurrentUserLeaf: false,
+      requireRootOwnership: true,
+      untrustedRoots,
+    });
+    if (!proof) return null;
+    const leaf = lstatSync(canonical, { bigint: true });
+    if ((leaf.mode & 0o111n) === 0n) return null;
+    return { ...proof, executable: canonical };
+  } catch {
+    return null;
+  }
 }
 
 function inspectTrustedExecutable(
@@ -286,13 +328,8 @@ export function verifyTrustedGithubCli(
 }
 
 export function resolveTrustedGitCli(untrustedRoots: readonly string[] = []): TrustedExecutablePin | null {
-  for (const part of (process.env.PATH ?? '').split(delimiter)) {
-    if (!part || !isAbsolute(part)) continue;
-    const pin = inspectTrustedExecutable(
-      join(part, process.platform === 'win32' ? 'git.exe' : 'git'),
-      untrustedRoots,
-      true,
-    );
+  for (const executable of trustedSystemGitCandidates()) {
+    const pin = inspectTrustedSystemGitExecutable(executable, untrustedRoots);
     if (pin) return pin;
   }
   return null;
@@ -306,7 +343,7 @@ export function verifyTrustedGitCli(
       typeof pin.canonicalPath !== 'string' || typeof pin.digest !== 'string' ||
       pin.executable !== pin.canonicalPath || !isAbsolute(pin.executable) ||
       !/^[0-9a-f]{64}$/.test(pin.digest)) return false;
-  const observed = inspectTrustedExecutable(pin.executable, untrustedRoots, true);
+  const observed = inspectTrustedSystemGitExecutable(pin.executable, untrustedRoots);
   return observed !== null && observed.executable === pin.executable && observed.digest === pin.digest;
 }
 

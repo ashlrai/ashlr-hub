@@ -35,6 +35,7 @@ import {
 import type { BranchProtectionAttestation } from '../src/core/integrations/github.js';
 import {
   resolveTrustedGitCli,
+  trustedSystemGitCandidates,
   trustedGitEnvironment,
   trustedGithubEnvironment,
   verifyTrustedGitCli,
@@ -210,7 +211,7 @@ function directCheckRequest(overrides: Partial<CandidateCheckRunRequest> = {}): 
     check: CHECK,
     workflowAppId: WORKFLOW_APP_ID,
     attestationCheck: ATTESTATION_CHECK,
-    expectedAttestations: [{ appId: APP_ID, externalId: `ashlr-admission-v5:${'d'.repeat(64)}` }],
+    expectedAttestations: [{ appId: APP_ID, externalId: `ashlr-admission-v6:${'d'.repeat(64)}` }],
     trustedPolicyDigest: TRUSTED_POLICY.digest,
     evaluatorVersion: CANDIDATE_ADMISSION_EVALUATOR_VERSION,
     evaluatedAt: EVALUATED_AT,
@@ -433,17 +434,49 @@ describe('M489 hardened candidate repo admission preflight', () => {
     }
   });
 
-  it('rejects a candidate-owned symlink alias to the trusted Git inode', () => {
+  it('ignores a candidate-owned symlink alias to the trusted Git inode', () => {
     const fakeBin = join(fixture, 'bin');
     mkdirSync(fakeBin, { recursive: true });
     symlinkSync(TRUSTED_GIT_PIN.executable, join(fakeBin, 'git'));
     const priorPath = process.env['PATH'];
     process.env['PATH'] = fakeBin;
     try {
-      expect(resolveTrustedGitCli([fixture, join(fixture, 'node_modules')])).toBeNull();
+      expect(resolveTrustedGitCli([fixture, join(fixture, 'node_modules')])).toEqual(TRUSTED_GIT_PIN);
     } finally {
       if (priorPath === undefined) delete process.env['PATH']; else process.env['PATH'] = priorPath;
     }
+  });
+
+  it('fails closed on unsupported platforms and exposes only explicit system Git paths', () => {
+    expect(trustedSystemGitCandidates('darwin')).toEqual(['/usr/bin/git']);
+    expect(trustedSystemGitCandidates('linux')).toEqual([]);
+    expect(trustedSystemGitCandidates('win32')).toEqual([]);
+    expect(trustedSystemGitCandidates('aix')).toEqual([]);
+    expect(TRUSTED_GIT_PIN.executable).toBe(realpathSync('/usr/bin/git'));
+    const platform = vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    try {
+      expect(resolveTrustedGitCli([fixture])).toBeNull();
+    } finally {
+      platform.mockRestore();
+    }
+  });
+
+  it('rejects a same-UID Git swap-and-restore canary in every pathname state', () => {
+    const fakeBin = join(fixture, 'bin');
+    const fakeGit = join(fakeBin, 'git');
+    mkdirSync(fakeBin, { recursive: true });
+    writeFileSync(fakeGit, '#!/bin/sh\nexit 0\n', 'utf8');
+    chmodSync(fakeGit, 0o755);
+    const fakePin = { canonicalPath: fakeGit, executable: fakeGit, digest: 'a'.repeat(64) };
+
+    expect(verifyTrustedGitCli(fakePin, [fixture])).toBe(false);
+    renameSync(fakeGit, `${fakeGit}.saved`);
+    writeFileSync(fakeGit, '#!/bin/sh\nexit 99\n', 'utf8');
+    chmodSync(fakeGit, 0o755);
+    expect(verifyTrustedGitCli(fakePin, [fixture])).toBe(false);
+    rmSync(fakeGit);
+    renameSync(`${fakeGit}.saved`, fakeGit);
+    expect(verifyTrustedGitCli(fakePin, [fixture])).toBe(false);
   });
 
   it('rejects a replaced candidate Git pin before invocation', async () => {
@@ -570,7 +603,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
     const report = await inspectCandidateRepoAdmission(fixture, deps({ readCheckRun }));
 
     expect(report).toMatchObject({
-      schemaVersion: 6,
+      schemaVersion: 7,
       readOnly: true,
       authorityGranted: false,
       mutationPerformed: false,
@@ -618,6 +651,9 @@ describe('M489 hardened candidate repo admission preflight', () => {
         remoteStableAfterChecks: true,
         trustedPolicyStableAfterChecks: true,
         checkEvidenceStableAfterRecheck: true,
+        authorityEpochStable: true,
+        initialAuthorityEpochDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+        finalAuthorityEpochDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
         checkRun: {
           ready: true,
           externalIdMatched: true,
@@ -632,7 +668,8 @@ describe('M489 hardened candidate repo admission preflight', () => {
         filenameHeuristicsUsed: false,
       },
     });
-    expect(report.remotePr.expectedAttestationId).toMatch(/^ashlr-admission-v5:[0-9a-f]{64}$/);
+    expect(report.remotePr.expectedAttestationId).toMatch(/^ashlr-admission-v6:[0-9a-f]{64}$/);
+    expect(report.remotePr.finalAuthorityEpochDigest).toBe(report.remotePr.initialAuthorityEpochDigest);
     expect(report.remotePr.candidateTreeOid).toBe(git(['rev-parse', 'HEAD^{tree}']));
     expect(readCheckRun).toHaveBeenCalledWith(expect.objectContaining({
       nameWithOwner: 'ashlrai/candidate',
@@ -674,7 +711,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
     };
     const first = buildCandidateAdmissionAttestationId({ ...common, candidateTreeOid: 'b'.repeat(40) });
     const changedTree = buildCandidateAdmissionAttestationId({ ...common, candidateTreeOid: 'c'.repeat(40) });
-    expect(first).toMatch(/^ashlr-admission-v5:[0-9a-f]{64}$/);
+    expect(first).toMatch(/^ashlr-admission-v6:[0-9a-f]{64}$/);
     expect(changedTree).not.toBe(first);
   });
 
@@ -703,7 +740,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
     expect(readCandidateCheckRunEvidence(directCheckRequest({
       expectedAttestations: [{
         appId: WORKFLOW_APP_ID,
-        externalId: `ashlr-admission-v5:${'d'.repeat(64)}`,
+        externalId: `ashlr-admission-v6:${'d'.repeat(64)}`,
       }],
     }), () => null).detail).toMatch(/malformed/i);
 
@@ -863,7 +900,7 @@ describe('M489 hardened candidate repo admission preflight', () => {
     expect(report.remotePr.detail).toMatch(/candidate App is not in the trusted attestor set/i);
     expect(readCheckRun).toHaveBeenCalledWith(expect.objectContaining({
       workflowAppId: candidateApp,
-      expectedAttestations: [{ appId: APP_ID, externalId: expect.stringMatching(/^ashlr-admission-v5:/) }],
+      expectedAttestations: [{ appId: APP_ID, externalId: expect.stringMatching(/^ashlr-admission-v6:/) }],
     }));
 
     writeFileSync(join(fixture, 'ashlr.admission.json'), JSON.stringify({
@@ -1374,6 +1411,65 @@ describe('M489 hardened candidate repo admission preflight', () => {
       checkRun: { ready: true },
     });
     expect(report.remotePr.detail).toMatch(/operator signer policy identity or digest changed/i);
+  });
+
+  it('closes a remote-head mutation triggered inside final check recollection', async () => {
+    const original = git(['rev-parse', 'HEAD']);
+    let remote = original;
+    let checkReads = 0;
+    const readCheckRun = vi.fn((request: CandidateCheckRunRequest) => {
+      checkReads++;
+      if (checkReads === 2) remote = 'a'.repeat(40);
+      return readyCheck(request);
+    });
+    const readRemoteHead = vi.fn((nameWithOwner: string) => ({
+      available: true,
+      nameWithOwner,
+      defaultBranch: 'main',
+      head: remote,
+      detail: 'race-controlled remote head',
+    }));
+
+    const report = await inspectCandidateRepoAdmission(fixture, deps({ readCheckRun, readRemoteHead }));
+
+    expect(readCheckRun).toHaveBeenCalledTimes(2);
+    expect(readRemoteHead).toHaveBeenCalledTimes(2);
+    expect(report.remotePr).toMatchObject({
+      ready: false,
+      remoteStableAfterChecks: false,
+      authorityEpochStable: false,
+    });
+  });
+
+  it('closes an operator-policy mutation triggered inside final check recollection', async () => {
+    let policyInput: typeof TRUSTED_POLICY_INPUT = TRUSTED_POLICY_INPUT;
+    let policyProof = AUTHORITY_PROOF;
+    let checkReads = 0;
+    const readCheckRun = vi.fn((request: CandidateCheckRunRequest) => {
+      checkReads++;
+      if (checkReads === 2) {
+        policyInput = { ...TRUSTED_POLICY_INPUT, evidenceMaxAgeMs: 31 * 60_000 };
+        policyProof = 'a'.repeat(64);
+      }
+      return readyCheck(request);
+    });
+    const readTrustedPolicy = vi.fn(() => ({
+      state: 'verified' as const,
+      path: join(home, 'policy.json'),
+      value: policyInput,
+      proof: policyProof,
+      detail: 'race-controlled policy',
+    }));
+
+    const report = await inspectCandidateRepoAdmission(fixture, deps({ readCheckRun, readTrustedPolicy }));
+
+    expect(readCheckRun).toHaveBeenCalledTimes(2);
+    expect(readTrustedPolicy).toHaveBeenCalledTimes(2);
+    expect(report.remotePr).toMatchObject({
+      ready: false,
+      trustedPolicyStableAfterChecks: false,
+      authorityEpochStable: false,
+    });
   });
 
   it.each([

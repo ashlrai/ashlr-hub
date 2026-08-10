@@ -56,12 +56,12 @@ import {
   type TrustedExecutablePin,
 } from '../util/trusted-executable.js';
 
-export const CANDIDATE_REPO_ADMISSION_SCHEMA_VERSION = 6 as const;
+export const CANDIDATE_REPO_ADMISSION_SCHEMA_VERSION = 7 as const;
 export const CANDIDATE_ADMISSION_CONTRACT_FILE = 'ashlr.admission.json';
 export const CANDIDATE_VERIFY_CONTRACT_FILE = 'ashlr.verify.json';
 export const CANDIDATE_ADMISSION_AUTHORITY_FILE = 'candidate-admission-authority.json';
-export const CANDIDATE_ATTESTATION_DOMAIN = 'ashlr:candidate-admission-whole-head-attestation:v5';
-export const CANDIDATE_ADMISSION_EVALUATOR_VERSION = 'ashlr-candidate-admission-evaluator-v5';
+export const CANDIDATE_ATTESTATION_DOMAIN = 'ashlr:candidate-admission-whole-head-attestation:v6';
+export const CANDIDATE_ADMISSION_EVALUATOR_VERSION = 'ashlr-candidate-admission-evaluator-v6';
 
 const SELF_REPOSITORY = 'ashlrai/ashlr-hub';
 const SELF_PACKAGE_NAME = '@ashlr/hub';
@@ -237,6 +237,9 @@ export interface CandidateRemotePrEvidence {
   remoteStableAfterChecks: boolean;
   trustedPolicyStableAfterChecks: boolean;
   checkEvidenceStableAfterRecheck: boolean;
+  authorityEpochStable: boolean;
+  initialAuthorityEpochDigest: string | null;
+  finalAuthorityEpochDigest: string | null;
   checkRun: CandidateCheckRunEvidence;
   detail: string;
 }
@@ -362,6 +365,8 @@ export interface CandidateRepoAdmissionDeps {
   buildPolicyDigest: typeof buildCanonicalProtectedRemotePolicyDigestV1;
   /** Test-only race hook immediately before the final correlated evidence collection. */
   beforeFinalEvidenceRecheck?: () => void;
+  /** Test-only race hook after check recollection and before closing authority rereads. */
+  afterFinalEvidenceRecheck?: () => void;
 }
 
 interface GitTreeEntry {
@@ -1062,7 +1067,7 @@ export function readCandidateCheckRunEvidence(
       !Array.isArray(request.expectedAttestations) || request.expectedAttestations.length === 0 ||
       request.expectedAttestations.length > MAX_TRUSTED_APP_IDS ||
       request.expectedAttestations.some((item) => !APP_ID_RE.test(item.appId) ||
-        item.appId === request.workflowAppId || !/^ashlr-admission-v5:[0-9a-f]{64}$/.test(item.externalId)) ||
+        item.appId === request.workflowAppId || !/^ashlr-admission-v6:[0-9a-f]{64}$/.test(item.externalId)) ||
       new Set(request.expectedAttestations.map((item) => item.appId)).size !== request.expectedAttestations.length ||
       new Set(request.expectedAttestations.map((item) => item.externalId)).size !== request.expectedAttestations.length ||
       !SHA256_RE.test(request.trustedPolicyDigest) ||
@@ -1688,7 +1693,7 @@ export function buildCandidateAdmissionAttestationId(input: {
     input.profile,
     input.riskClassification,
   ])).digest('hex');
-  return `ashlr-admission-v5:${digest}`;
+  return `ashlr-admission-v6:${digest}`;
 }
 
 function emptyMutationProof(detail: string): CandidateMutationProof {
@@ -1772,6 +1777,9 @@ function emptyRemote(detail: string, candidateHead: string | null = null): Candi
     remoteStableAfterChecks: false,
     trustedPolicyStableAfterChecks: false,
     checkEvidenceStableAfterRecheck: false,
+    authorityEpochStable: false,
+    initialAuthorityEpochDigest: null,
+    finalAuthorityEpochDigest: null,
     checkRun: emptyCheckRun('check run was not inspected'),
     detail,
   };
@@ -1787,6 +1795,7 @@ function protectionAuthoritySnapshot(value: BranchProtectionAttestation): string
     available: value.available,
     baseHead: value.baseHead?.toLowerCase() ?? null,
     branch: value.branch,
+    branchProtection: value.branchProtection,
     defaultBranch: value.defaultBranch,
     nameWithOwner: value.nameWithOwner?.toLowerCase() ?? null,
     ok: value.ok,
@@ -1823,8 +1832,69 @@ function sameCandidateCheckAuthority(
   return beforeDigest !== null && beforeDigest === canonicalAuthorityDigest(after);
 }
 
+function localAuthoritySnapshot(value: LocalSnapshot | null): Record<string, unknown> | null {
+  if (!value) return null;
+  return {
+    available: value.available,
+    branch: value.branch,
+    configDigest: value.configDigest,
+    configReason: value.configReason,
+    controlsDigest: value.controlsDigest,
+    gitMetadataSafe: value.gitMetadataSafe,
+    head: value.head?.toLowerCase() ?? null,
+    headTreeOid: value.headTreeOid?.toLowerCase() ?? null,
+    indexDigest: value.indexDigest,
+    origin: value.origin?.nameWithOwner.toLowerCase() ?? null,
+    statusDigest: value.status ? createHash('sha256').update(value.status).digest('hex') : null,
+    trackedBytesComplete: value.trackedBytesComplete,
+    trackedBytesDigest: value.trackedBytesDigest,
+    trackedBytesMatchHead: value.trackedBytesMatchHead,
+    treeDigest: value.treeDigest,
+  };
+}
+
+function remoteHeadAuthoritySnapshot(value: CandidateRemoteHeadEvidence): Record<string, unknown> {
+  return {
+    available: value.available,
+    defaultBranch: value.defaultBranch,
+    head: value.head?.toLowerCase() ?? null,
+    nameWithOwner: value.nameWithOwner?.toLowerCase() ?? null,
+  };
+}
+
+function trustedPolicyAuthoritySnapshot(
+  authority: CandidateTrustedPolicyAuthorityRead,
+  policy: CandidateAdmissionTrustedPolicy | null,
+): Record<string, unknown> {
+  return {
+    path: authority.path,
+    policy,
+    proof: authority.proof,
+    state: authority.state,
+  };
+}
+
+function authorityEpochDigest(input: {
+  local: LocalSnapshot | null;
+  remoteHead: CandidateRemoteHeadEvidence;
+  protection: BranchProtectionAttestation;
+  trustedAuthority: CandidateTrustedPolicyAuthorityRead;
+  trustedPolicy: CandidateAdmissionTrustedPolicy | null;
+  checkRun: CandidateCheckRunEvidence;
+}): string | null {
+  return canonicalAuthorityDigest({
+    domain: 'ashlr:candidate-admission-authority-epoch:v1',
+    localRepo: localAuthoritySnapshot(input.local),
+    operatorPolicy: trustedPolicyAuthoritySnapshot(input.trustedAuthority, input.trustedPolicy),
+    protectionAndRulesets: protectionAuthoritySnapshot(input.protection),
+    remoteHeadAndDefaultBranch: remoteHeadAuthoritySnapshot(input.remoteHead),
+    workflowJobsChecksAttestationsAndPagination: input.checkRun,
+  });
+}
+
 async function inspectRemotePr(
   candidateRoot: string,
+  sourceSnapshot: LocalSnapshot | null,
   sourceHead: string | null,
   sourceTreeOid: string | null,
   remoteHead: CandidateRemoteHeadEvidence,
@@ -1835,7 +1905,7 @@ async function inspectRemotePr(
   trustedAuthority: CandidateTrustedPolicyAuthorityRead,
   trustedGithubCli: TrustedExecutablePin | null,
   evaluatedAt: string,
-  captureFinalLocalSnapshot: () => void,
+  captureFinalLocalSnapshot: () => LocalSnapshot | null,
   deps: CandidateRepoAdmissionDeps,
 ): Promise<CandidateRemotePrEvidence> {
   if (!origin || !remoteHead.available || !remoteHead.defaultBranch || !remoteHead.head || !sourceHead || !sourceTreeOid) {
@@ -1933,12 +2003,28 @@ async function inspectRemotePr(
       initialCheckRun = emptyCheckRun('initial correlated check evidence collection failed');
     }
   }
+  const initialAuthorityEpochDigest = authorityEpochDigest({
+    local: sourceSnapshot,
+    remoteHead,
+    protection: live,
+    trustedAuthority,
+    trustedPolicy,
+    checkRun: initialCheckRun,
+  });
+  let checkRun = emptyCheckRun('final correlated check evidence recheck failed');
+  try {
+    deps.beforeFinalEvidenceRecheck?.();
+    checkRun = checkRequest ? deps.readCheckRun(checkRequest) : initialCheckRun;
+    deps.afterFinalEvidenceRecheck?.();
+  } catch {
+    checkRun = emptyCheckRun('final correlated check evidence recheck failed');
+  }
+  const localAfterCheck = captureFinalLocalSnapshot();
   let remoteAfter: CandidateRemoteHeadEvidence;
   let liveAfter: BranchProtectionAttestation;
   let trustedAuthorityAfter: CandidateTrustedPolicyAuthorityRead;
   let trustedPolicyAfter: CandidateAdmissionTrustedPolicy | null = null;
   try {
-    captureFinalLocalSnapshot();
     remoteAfter = deps.readRemoteHead(origin, candidateRoot, trustedGithubCli);
     liveAfter = await deps.readProtection(tmpdir(), remoteHead.defaultBranch, {
       forceFresh: true,
@@ -1955,6 +2041,7 @@ async function inspectRemotePr(
     liveAfter = { ...live, available: false, ok: false, detail: 'post-check protection observation failed' };
     trustedAuthorityAfter = authorityFailure('unreadable', trustedAuthority.path, 'post-check operator authority observation failed');
   }
+  const localAfterClosure = captureFinalLocalSnapshot();
   const remoteStableAfterChecks = sameRemoteHead(remoteHead, remoteAfter) &&
     protectionAuthoritySnapshot(live) === protectionAuthoritySnapshot(liveAfter);
   const trustedPolicyStableAfterChecks = sameTrustedPolicyAuthority(
@@ -1963,22 +2050,31 @@ async function inspectRemotePr(
     trustedPolicy,
     trustedPolicyAfter,
   );
-  let checkRun = emptyCheckRun('final correlated check evidence recheck failed');
-  try {
-    deps.beforeFinalEvidenceRecheck?.();
-    checkRun = checkRequest ? deps.readCheckRun(checkRequest) : initialCheckRun;
-  } catch {
-    checkRun = emptyCheckRun('final correlated check evidence recheck failed');
-  }
   const checkEvidenceStableAfterRecheck = checkRequest !== null &&
     sameCandidateCheckAuthority(initialCheckRun, checkRun);
+  const localAfterCheckDigest = canonicalAuthorityDigest(localAuthoritySnapshot(localAfterCheck));
+  const localAfterClosureDigest = canonicalAuthorityDigest(localAuthoritySnapshot(localAfterClosure));
+  const localStableAcrossClosure = localAfterCheck !== null && localAfterClosure !== null &&
+    localAfterCheckDigest !== null &&
+    localAfterCheckDigest === localAfterClosureDigest;
+  const finalAuthorityEpochDigest = authorityEpochDigest({
+    local: localAfterClosure,
+    remoteHead: remoteAfter,
+    protection: liveAfter,
+    trustedAuthority: trustedAuthorityAfter,
+    trustedPolicy: trustedPolicyAfter,
+    checkRun,
+  });
+  const authorityEpochStable = initialAuthorityEpochDigest !== null &&
+    initialAuthorityEpochDigest === finalAuthorityEpochDigest && localStableAcrossClosure &&
+    remoteStableAfterChecks && trustedPolicyStableAfterChecks && checkEvidenceStableAfterRecheck;
   const expectedAttestationId = checkRun.appId
     ? expectedAttestations.find((item) => item.appId === checkRun.appId)?.externalId ?? null
     : expectedAttestations.length === 1 ? expectedAttestations[0]!.externalId : null;
   const ready = live.available && live.ok && live.protected && pullRequestRequired && identityBound &&
     sourceHead === remoteHead.head && bindingsExact && safeMinimum?.ok === true && policyDigest !== null &&
     attestorIndependent && checkRun.ready && checkEvidenceStableAfterRecheck &&
-    remoteStableAfterChecks && trustedPolicyStableAfterChecks;
+    remoteStableAfterChecks && trustedPolicyStableAfterChecks && authorityEpochStable;
   const detail = !live.available || !live.ok || !live.protected ? live.detail : !pullRequestRequired
     ? 'default branch protection does not require a pull request'
     : !identityBound ? 'branch protection identity/base does not match the exact live candidate source'
@@ -1993,6 +2089,7 @@ async function inspectRemotePr(
     : !checkRun.ready ? checkRun.detail
     : !remoteStableAfterChecks ? 'remote head or protected policy changed during check collection'
     : !trustedPolicyStableAfterChecks ? 'operator signer policy identity or digest changed during check collection'
+    : !authorityEpochStable ? 'complete local, remote, protection, policy, and correlated-check authority epoch did not close unchanged'
     : policyDigest === null ? 'protected-remote policy digest is unavailable'
     : 'fresh whole-HEAD snapshot, protected policy, Actions workflow attempt, and independent trusted-App attestation are bound and stable across collection';
   return {
@@ -2018,6 +2115,9 @@ async function inspectRemotePr(
     remoteStableAfterChecks,
     trustedPolicyStableAfterChecks,
     checkEvidenceStableAfterRecheck,
+    authorityEpochStable,
+    initialAuthorityEpochDigest,
+    finalAuthorityEpochDigest,
     checkRun,
     detail,
   };
@@ -2096,8 +2196,8 @@ export async function inspectCandidateRepoAdmission(
   if (pathReady && !trustedGitCli) {
     admissionBlockers.push(finding(
       'trusted-git-custody-unavailable',
-      'an absolute canonical Git executable with trusted installation hierarchy custody is unavailable',
-      'Install Git under a trusted system or package-manager root and remove candidate-controlled or symlinked PATH entries.',
+      'a root-owned system Git executable with attacker-nonwritable custody through the filesystem root is unavailable',
+      'Install Git at a supported system-owned path; user-owned Homebrew, npm, PATH, and candidate installations are refused.',
     ));
   }
   const trustedGithubCli = pathReady ? deps.resolveGithubCli([repo]) : null;
@@ -2134,12 +2234,15 @@ export async function inspectCandidateRepoAdmission(
   const selfTarget = before?.available ? inspectSelfTarget(repo, before.tree, origin, deps) : null;
   let after: LocalSnapshot | null = null;
   let finalLocalCaptured = false;
-  const captureFinalLocalSnapshot = (): void => {
-    after = pathReady ? snapshotLocal(repo, deps) : null;
+  const captureFinalLocalSnapshot = (): LocalSnapshot | null => {
+    const observed = pathReady ? snapshotLocal(repo, deps) : null;
+    if (!finalLocalCaptured) after = observed;
     finalLocalCaptured = true;
+    return observed;
   };
   const remotePr = await inspectRemotePr(
     repo,
+    before,
     before?.head ?? null,
     before?.headTreeOid ?? null,
     remoteHead,
