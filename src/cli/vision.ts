@@ -44,6 +44,26 @@ function red(s: string): string {
   return `\x1b[31m${s}\x1b[0m`;
 }
 
+function visionHoldReason(reason: string): string {
+  const labels: Record<string, string> = {
+    'goal-source-degraded': 'goal records could not be read safely',
+    'briefing-goal-cap': 'briefing goal limit reached',
+    'goal-focus-cap': 'active-goal limit reached',
+    'duplicate-existing-goal': 'this goal already exists',
+    'goal-id-collision': 'a goal with this stable identity already exists',
+    'target-not-enrolled': 'target repository is not enrolled',
+    'target-ambiguous': 'target repository name is ambiguous',
+    'target-invalid': 'target repository is invalid',
+    'dependency-blocked': 'an upstream mission node is not realized',
+    'human-gate-required': 'an authorized human decision is required',
+    'mission-graph-invalid': 'the mission dependency graph is invalid',
+    'mission-reconcile-cap': 'this bounded reconciliation reached its limit',
+    'goal-store-write-failed': 'the local goal record could not be persisted',
+    'adoption-failed': 'mission adoption could not be completed safely',
+  };
+  return labels[reason] ?? reason;
+}
+
 function printSpec(spec: EndStateSpec): void {
   console.log('');
   console.log(bold(`=== End-State Spec: ${spec.id} ===`) + dim(` v${spec.version} | updated ${spec.updatedAt} by ${spec.updatedBy}`));
@@ -111,6 +131,20 @@ function printBriefing(b: import('../core/vision/strategist.js').StrategicBriefi
       if (g.targetRepo !== undefined) {
         console.log(`       ${dim('target: ' + (g.targetRepo ?? 'ecosystem-wide (planning only)'))}`);
       }
+      if (g.key) console.log(`       ${dim('mission node: ' + g.key)}`);
+      if (g.dependsOn?.length) console.log(`       ${dim('depends on: ' + g.dependsOn.join(', '))}`);
+      if (g.deliverable) console.log(`       ${dim('deliverable: ' + g.deliverable)}`);
+      if (g.acceptanceEvidence?.length) {
+        console.log(`       ${dim('acceptance evidence: ' + g.acceptanceEvidence.join(' · '))}`);
+      }
+      if (g.outcome?.desiredOutcome) console.log(`       ${dim('outcome: ' + g.outcome.desiredOutcome)}`);
+      if (g.outcome?.successSignals.length) {
+        console.log(`       ${dim('success signals: ' + g.outcome.successSignals.join(' · '))}`);
+      }
+      if (g.outcome?.guardrails.length) {
+        console.log(`       ${dim('guardrails: ' + g.outcome.guardrails.join(' · '))}`);
+      }
+      if (g.humanGate) console.log(`       ${yellow('human gate required')}`);
     });
     console.log('');
   }
@@ -163,9 +197,14 @@ async function cmdReview(args: string[]): Promise<number> {
 
 async function cmdApprove(_args: string[]): Promise<number> {
   const cfg = loadConfig();
-  const { loadLatestBriefing, adoptBriefing } = await import('../core/vision/strategist.js');
+  const { readLatestBriefingDetailed, adoptBriefing } = await import('../core/vision/strategist.js');
 
-  const briefing = loadLatestBriefing();
+  const read = readLatestBriefingDetailed();
+  if (read.sourceState === 'degraded') {
+    console.error(`vision: briefing source is degraded (${read.reason}); no planning state was changed.`);
+    return 1;
+  }
+  const briefing = read.briefing;
   if (!briefing) {
     console.error('vision: no briefing found. Run `ashlr vision review` first.');
     return 1;
@@ -190,40 +229,102 @@ async function cmdApprove(_args: string[]): Promise<number> {
   if (failed.length > 0) {
     console.error(red(`Failed to persist ${failed.length} proposed goal(s):`));
     for (const outcome of failed) {
-      console.error(`  ${outcome.index + 1}. ${outcome.reason} ${dim(outcome.objective)}`);
+      console.error(`  ${outcome.index + 1}. ${visionHoldReason(outcome.reason)} ${dim(outcome.objective)}`);
     }
   }
   const skipped = result.outcomes.filter((outcome) => outcome.outcome === 'skipped');
   if (skipped.length > 0) {
     console.log(yellow(`Skipped ${skipped.length} proposed goal(s):`));
     for (const outcome of skipped) {
-      console.log(`  ${outcome.index + 1}. ${outcome.reason} ${dim(outcome.objective)}`);
+      console.log(`  ${outcome.index + 1}. ${visionHoldReason(outcome.reason)} ${dim(outcome.objective)}`);
     }
   }
   const degradedSource = skipped.some((outcome) => outcome.reason === 'goal-source-degraded');
   return result.failedCount > 0 || result.specOutcome === 'failed' || degradedSource ? 1 : 0;
 }
 
+async function cmdReconcile(_args: string[]): Promise<number> {
+  const cfg = loadConfig();
+  const [{ readLatestBriefingDetailed, adoptBriefing }, policy] = await Promise.all([
+    import('../core/vision/strategist.js'),
+    import('../core/sandbox/policy.js'),
+  ]);
+  const read = readLatestBriefingDetailed();
+  if (read.sourceState === 'degraded') {
+    console.error(`vision: briefing source is degraded (${read.reason}); no goal was created.`);
+    return 1;
+  }
+  const briefing = read.briefing;
+  if (!briefing) {
+    console.error('vision: no briefing found. Run `ashlr vision review` first.');
+    return 1;
+  }
+  const enrollment = policy.readEnrollmentRegistry();
+  if (enrollment.state === 'degraded') {
+    console.error(`vision: enrollment authority is degraded (${enrollment.reason}); no goal was created.`);
+    return 1;
+  }
+
+  console.log(dim(`Reconciling dependency-ready mission work from ${briefing.generatedAt}...`));
+  const result = await adoptBriefing(cfg, briefing, {
+    by: 'mason',
+    enrolledRepos: enrollment.repos,
+    goalsOnly: true,
+    maxCreatedGoals: 1,
+  });
+  if (result.createdCount > 0) {
+    console.log(green(`Materialized ${result.createdCount} dependency-ready goal: ${result.goalIds.join(', ')}`));
+  } else {
+    console.log(dim('No dependency-ready mission goal was materialized.'));
+  }
+  for (const outcome of result.outcomes.filter((entry) => entry.outcome !== 'created')) {
+    const marker = outcome.outcome === 'failed' ? red('FAILED') : yellow('HELD');
+    console.log(`  ${marker} ${outcome.objective}`);
+    console.log(`         ${dim(visionHoldReason(outcome.reason))}`);
+  }
+  console.log(dim('Planning-only reconciliation: no dispatch, proposal, merge, deployment, or publication authority changed.'));
+  const degraded = result.outcomes.some((outcome) =>
+    outcome.reason === 'goal-source-degraded' || outcome.outcome === 'failed',
+  ) || result.preview.missionGraph?.state === 'invalid';
+  return degraded ? 1 : 0;
+}
+
 async function cmdPreview(_args: string[]): Promise<number> {
   const cfg = loadConfig();
-  const [strategist, goals, focus, policy] = await Promise.all([
+  const [strategist, goals, completion, focus, policy] = await Promise.all([
     import('../core/vision/strategist.js'),
     import('../core/goals/store.js'),
+    import('../core/goals/completion.js'),
     import('../core/goals/focus.js'),
     import('../core/sandbox/policy.js'),
   ]);
-  const briefing = strategist.loadLatestBriefing();
+  const read = strategist.readLatestBriefingDetailed();
+  if (read.sourceState === 'degraded') {
+    console.error(`vision: briefing source is degraded (${read.reason}); preview unavailable.`);
+    return 1;
+  }
+  const briefing = read.briefing;
   if (!briefing) {
     console.error('vision: no briefing found. Run `ashlr vision review` first.');
     return 1;
   }
 
   const inventory = goals.listGoalsDetailed();
+  const enrollment = policy.readEnrollmentRegistry();
+  if (enrollment.state === 'degraded') {
+    console.error(`vision: enrollment authority is degraded (${enrollment.reason}); preview unavailable.`);
+    return 1;
+  }
+  const milestoneComplete = completion.createProposalMilestoneCompletionPredicate();
   const preview = strategist.previewBriefingAdoption(briefing, {
-    enrolledRepos: policy.listEnrolled(),
+    enrolledRepos: enrollment.repos,
     existingGoals: inventory.goals,
     goalSourceState: inventory.sourceState,
     activeThreshold: focus.goalFocusActiveThreshold(cfg),
+    goalRealized: (goal) => {
+      const required = goal.milestones.filter((milestone) => milestone.status !== 'skipped');
+      return required.length > 0 && required.every((milestone) => milestoneComplete(milestone, goal));
+    },
   });
   console.log(bold('Mission compiler preview'));
   console.log(
@@ -236,10 +337,29 @@ async function cmdPreview(_args: string[]): Promise<number> {
     const marker = entry.disposition === 'create' ? green('CREATE') : yellow('SKIP');
     const target = entry.project ?? entry.targetRepo ?? 'ecosystem-wide';
     console.log(`  ${marker} ${entry.objective}`);
-    console.log(`         ${dim(`${entry.reason} · ${target}`)}`);
+    console.log(`         ${dim(`${visionHoldReason(entry.reason)} · ${target}`)}`);
+    const proposed = briefing.proposedGoals[entry.index];
+    if (proposed?.key) {
+      const dependencies = proposed.dependsOn?.length ? ` · waits for ${proposed.dependsOn.join(', ')}` : '';
+      console.log(`         ${dim(`node ${proposed.key}${dependencies}`)}`);
+    }
+    if (proposed?.outcome?.desiredOutcome) {
+      console.log(`         ${dim(`outcome: ${proposed.outcome.desiredOutcome}`)}`);
+    }
+    if (proposed?.deliverable) console.log(`         ${dim(`deliverable: ${proposed.deliverable}`)}`);
+    if (proposed?.acceptanceEvidence?.length) {
+      console.log(`         ${dim(`acceptance evidence: ${proposed.acceptanceEvidence.join(' · ')}`)}`);
+    }
+    if (proposed?.outcome?.successSignals.length) {
+      console.log(`         ${dim(`success signals: ${proposed.outcome.successSignals.join(' · ')}`)}`);
+    }
+    if (proposed?.outcome?.guardrails.length) {
+      console.log(`         ${dim(`guardrails: ${proposed.outcome.guardrails.join(' · ')}`)}`);
+    }
+    if (proposed?.humanGate === true) console.log(`         ${yellow('human gate required')}`);
   }
   console.log(dim('Read-only preview: no spec, goal, repository, proposal, or authority was changed.'));
-  return 0;
+  return preview.goalSourceState === 'degraded' || preview.missionGraph?.state === 'invalid' ? 1 : 0;
 }
 
 async function cmdSet(args: string[]): Promise<number> {
@@ -288,6 +408,7 @@ Subcommands:
   review [--project P]   Run the Strategist agent — state, gap, recommendations, proposed goals.
   preview                Read-only compile: exact targets, dedupe, caps, and skip reasons.
   approve                Apply the latest briefing: evolve spec + create goals.
+  reconcile              Materialize at most one newly dependency-ready goal; planning-only.
   set --north-star "…"   Update the north star directly (Mason-owned edit).
   set --end-state "…"    Update the end state directly.
   set --id <specId>      Target a specific spec (default: ecosystem).
@@ -298,6 +419,7 @@ Examples:
   ashlr vision review --project my-repo
   ashlr vision preview
   ashlr vision approve
+  ashlr vision reconcile
   ashlr vision set --north-star "Build the world's best autonomous engineering fleet."
 `);
 }
@@ -323,6 +445,8 @@ export async function cmdVision(args: string[]): Promise<number> {
       return cmdPreview(rest);
     case 'approve':
       return cmdApprove(rest);
+    case 'reconcile':
+      return cmdReconcile(rest);
     case 'set':
       return cmdSet(rest);
     default:

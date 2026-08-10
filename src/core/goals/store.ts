@@ -19,16 +19,25 @@
 
 import {
   existsSync,
+  linkSync,
+  lstatSync,
   mkdirSync,
-  readdirSync,
+  opendirSync,
   readFileSync,
   renameSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { isAbsolute, join } from 'node:path';
-import type { AshlrConfig, Goal, GoalStatus, Milestone, MilestoneStatus } from '../types.js';
+import type {
+  AshlrConfig,
+  Goal,
+  GoalMissionBindingV1,
+  GoalStatus,
+  Milestone,
+  MilestoneStatus,
+} from '../types.js';
 import { goalsDir } from '../config.js';
 
 // Re-export so existing importers of `goalsDir` from the store keep working;
@@ -38,10 +47,15 @@ import { goalsDir } from '../config.js';
 export { goalsDir };
 
 // ---------------------------------------------------------------------------
-// Bounded list cap — never read more than this many goal files at once.
+// Bounded list caps — never inspect an unbounded directory or read more than
+// this many goal files at once. The entry cap counts every physical entry,
+// including unrelated files and temporary sidecars, so noise cannot bypass the
+// reader's source-completeness boundary.
 // ---------------------------------------------------------------------------
 
 const MAX_LIST = 200;
+const MAX_GOAL_DIRECTORY_ENTRIES = 512;
+const MAX_GOAL_FILE_BYTES = 256 * 1024;
 export const DEFAULT_STALE_GOAL_MILESTONE_MS = 6 * 60 * 60 * 1000;
 export const DEFAULT_STALE_GOAL_RECOVERY_LIMIT = 10;
 
@@ -221,6 +235,19 @@ function isNullableString(value: unknown): value is string | null {
   return value === null || typeof value === 'string';
 }
 
+const MISSION_BINDING_KEYS = new Set(['schemaVersion', 'graphDigest', 'missionKey', 'nodeKey']);
+const MISSION_BINDING_KEY_RE = /^[a-z0-9](?:[a-z0-9._-]{0,78}[a-z0-9])?$/;
+
+function isValidGoalMissionBinding(value: unknown): value is GoalMissionBindingV1 {
+  if (!isRecord(value)) return false;
+  const keys = Object.keys(value);
+  return keys.length === MISSION_BINDING_KEYS.size && keys.every((key) => MISSION_BINDING_KEYS.has(key)) &&
+    value['schemaVersion'] === 1 &&
+    typeof value['graphDigest'] === 'string' && /^[a-f0-9]{64}$/.test(value['graphDigest']) &&
+    typeof value['missionKey'] === 'string' && MISSION_BINDING_KEY_RE.test(value['missionKey']) &&
+    typeof value['nodeKey'] === 'string' && MISSION_BINDING_KEY_RE.test(value['nodeKey']);
+}
+
 function isValidMilestone(parsed: unknown): parsed is Milestone {
   if (!isRecord(parsed)) return false;
   const createdAt = parsed['createdAt'];
@@ -252,6 +279,7 @@ function isValidGoal(parsed: unknown): parsed is Goal {
     typeof parsed['id'] !== 'string' || !/^[\w.-]+$/.test(parsed['id']) ||
     typeof parsed['objective'] !== 'string' ||
     (parsed['owner'] !== undefined && typeof parsed['owner'] !== 'string') ||
+    (parsed['mission'] !== undefined && !isValidGoalMissionBinding(parsed['mission'])) ||
     !(project === null || (typeof project === 'string' && isAbsolute(project))) ||
     typeof parsed['status'] !== 'string' ||
     !GOAL_STATUSES.has(parsed['status'] as GoalStatus) ||
@@ -315,7 +343,12 @@ function sortMilestones(goal: Goal): void {
  */
 export function createGoal(
   objective: string,
-  opts?: { project?: string | null; now?: string; cfg?: Pick<AshlrConfig, 'user'> },
+  opts?: {
+    project?: string | null;
+    now?: string;
+    cfg?: Pick<AshlrConfig, 'user'>;
+    mission?: GoalMissionBindingV1;
+  },
 ): Goal {
   const now = nowIso(opts?.now);
   // M109: stamp owner from cfg.user when not already provided.
@@ -329,9 +362,65 @@ export function createGoal(
     createdAt: now,
     updatedAt: now,
     ...(owner !== undefined ? { owner } : {}),
+    ...(opts?.mission !== undefined ? { mission: structuredClone(opts.mission) } : {}),
   };
   saveGoal(goal, { now });
   return goal;
+}
+
+export type CreateGoalIfAbsentResult =
+  | { status: 'created'; goal: Goal }
+  | { status: 'exists' | 'failed'; goal: Goal };
+
+/**
+ * Atomically install a new goal without replacing an existing deterministic id.
+ * A unique private sidecar is hard-linked into place, so concurrent creators
+ * have exactly one winner and an existing goal is never truncated or reset.
+ */
+export function createGoalIfAbsent(
+  objective: string,
+  opts?: {
+    project?: string | null;
+    now?: string;
+    cfg?: Pick<AshlrConfig, 'user'>;
+    mission?: GoalMissionBindingV1;
+  },
+): CreateGoalIfAbsentResult {
+  const now = nowIso(opts?.now);
+  const owner = opts?.cfg?.user?.id ?? opts?.cfg?.user?.name;
+  const goal: Goal = {
+    id: generateGoalId(objective),
+    objective,
+    project: opts?.project ?? null,
+    status: 'planning',
+    milestones: [],
+    createdAt: now,
+    updatedAt: now,
+    ...(owner !== undefined ? { owner } : {}),
+    ...(opts?.mission !== undefined ? { mission: structuredClone(opts.mission) } : {}),
+  };
+  let tmp: string | null = null;
+  try {
+    if (goal.mission !== undefined && !isValidGoalMissionBinding(goal.mission)) {
+      return { status: 'failed', goal };
+    }
+    const dir = goalsDir();
+    ensureDir(dir);
+    const target = goalPath(dir, goal.id);
+    tmp = `${target}.create-${process.pid}-${randomBytes(8).toString('hex')}.tmp`;
+    writeFileSync(tmp, JSON.stringify(goal, null, 2), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    linkSync(tmp, target);
+    return { status: 'created', goal };
+  } catch (error) {
+    const code = typeof error === 'object' && error !== null && 'code' in error
+      ? String((error as { code?: unknown }).code ?? '')
+      : '';
+    return { status: code === 'EEXIST' ? 'exists' : 'failed', goal };
+  } finally {
+    if (tmp !== null) {
+      try { unlinkSync(tmp); } catch { /* best-effort cleanup */ }
+    }
+  }
 }
 
 /**
@@ -376,16 +465,41 @@ export function listGoalsDetailed(filter?: { status?: GoalStatus }): ListGoalsDe
   try {
     const dir = goalsDir();
     if (!existsSync(dir)) return emptyGoalRead('missing');
-    const allFiles = readdirSync(dir)
-      .filter((f) => f.endsWith('.json') && !f.endsWith('.tmp'));
-    const limitExceeded = allFiles.length > MAX_LIST;
-    const files = allFiles.slice(0, MAX_LIST);
+    const handle = opendirSync(dir);
+    const files: string[] = [];
+    let directoryEntries = 0;
+    let limitExceeded = false;
+    try {
+      for (;;) {
+        const entry = handle.readSync();
+        if (entry === null) break;
+        directoryEntries += 1;
+        if (directoryEntries > MAX_GOAL_DIRECTORY_ENTRIES) {
+          limitExceeded = true;
+          break;
+        }
+        if (!entry.name.endsWith('.json') || entry.name.endsWith('.tmp')) continue;
+        if (files.length >= MAX_LIST) {
+          limitExceeded = true;
+          break;
+        }
+        files.push(entry.name);
+      }
+    } finally {
+      try { handle.closeSync(); } catch { /* best-effort close */ }
+    }
     const candidates: Array<{ file: string; goal: Goal; identity: string }> = [];
     const identityCounts = new Map<string, number>();
     let unreadableFiles = 0;
     for (const f of files) {
       try {
-        const parsed: unknown = JSON.parse(readFileSync(join(dir, f), 'utf8'));
+        const file = join(dir, f);
+        const stat = lstatSync(file);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_GOAL_FILE_BYTES) {
+          unreadableFiles += 1;
+          continue;
+        }
+        const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
         if (isValidGoal(parsed)) {
           const identity = goalIdIdentity(parsed.id);
           candidates.push({ file: f, goal: parsed, identity });
@@ -455,6 +569,12 @@ export function saveGoal(
     goal.updatedAt = nowIso(opts?.now);
     sortMilestones(goal);
     const target = goalPath(dir, goal.id);
+    const existing = loadGoal(goal.id);
+    if (existing) {
+      const before = existing.mission === undefined ? null : JSON.stringify(existing.mission);
+      const after = goal.mission === undefined ? null : JSON.stringify(goal.mission);
+      if (before !== after) return false;
+    }
     const tmp = `${target}.tmp`;
     if (!stillAuthorized()) return false;
     writeFileSync(tmp, JSON.stringify(goal, null, 2), 'utf8');

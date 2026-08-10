@@ -41,7 +41,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { timingSafeEqual, randomBytes } from 'node:crypto';
-import { resolve as resolvePath, sep as pathSep } from 'node:path';
+import { basename, resolve as resolvePath, sep as pathSep } from 'node:path';
 import { realpathSync } from 'node:fs';
 
 /**
@@ -229,6 +229,267 @@ function withFreshDaemonObservation(
       pendingProposals,
     },
   };
+}
+
+type VisionMissionSourceState = 'missing' | 'healthy' | 'degraded';
+
+interface VisionMissionSourceStatus {
+  sourceState: VisionMissionSourceState;
+  sourcePresent: boolean;
+  complete: boolean;
+  reason: string;
+}
+
+function publicMissionRepo(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'string' || value.trim().length === 0) return null;
+  const normalized = value.trim().replace(/\\/g, '/');
+  return basename(normalized).slice(0, 128) || null;
+}
+
+function publicMissionText(value: unknown, max = 1_000): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  return normalized ? normalized.slice(0, max) : null;
+}
+
+function publicMissionTextList(value: unknown, maxItems = 8, maxText = 500): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    const text = publicMissionText(entry, maxText);
+    return text === null ? [] : [text];
+  }).slice(0, maxItems);
+}
+
+const PUBLIC_MISSION_GRAPH_STATUSES = new Set([
+  'blocked', 'ready', 'in-progress', 'awaiting-human', 'complete', 'failed',
+]);
+const PUBLIC_MISSION_NODE_STATUSES = new Set([
+  'blocked', 'ready', 'active', 'proposed', 'awaiting-human', 'complete', 'failed',
+]);
+
+function publicMissionGraph(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const graph = value as Record<string, unknown>;
+  if (graph['state'] !== 'valid' && graph['state'] !== 'invalid') return null;
+  const rawNodes = Array.isArray(graph['nodes']) ? graph['nodes'] : [];
+  const nodes = rawNodes.slice(0, 24).flatMap((rawNode) => {
+    if (typeof rawNode !== 'object' || rawNode === null || Array.isArray(rawNode)) return [];
+    const node = rawNode as Record<string, unknown>;
+    const key = publicMissionText(node['key'], 80);
+    const status = typeof node['status'] === 'string' && PUBLIC_MISSION_NODE_STATUSES.has(node['status'])
+      ? node['status']
+      : null;
+    if (key === null || status === null) return [];
+    return [{
+      key,
+      status,
+      blockedBy: publicMissionTextList(node['blockedBy'], 8, 80),
+    }];
+  });
+  const status = typeof graph['status'] === 'string' && PUBLIC_MISSION_GRAPH_STATUSES.has(graph['status'])
+    ? graph['status']
+    : null;
+  const digest = typeof graph['digest'] === 'string' && /^[a-f0-9]{64}$/.test(graph['digest'])
+    ? graph['digest']
+    : null;
+  return {
+    state: graph['state'],
+    digest,
+    issues: publicMissionTextList(graph['issues'], 12, 160),
+    ...(status === null ? {} : { status }),
+    nodes,
+  };
+}
+
+function publicMissionBriefing(briefing: Record<string, unknown>): Record<string, unknown> {
+  const rawGoals = Array.isArray(briefing['proposedGoals']) ? briefing['proposedGoals'] : [];
+  return {
+    generatedAt: publicMissionText(briefing['generatedAt'], 40),
+    project: publicMissionRepo(briefing['project']),
+    currentState: publicMissionText(briefing['currentState'], 4_000),
+    gapToVision: publicMissionText(briefing['gapToVision'], 4_000),
+    recommendedDirection: publicMissionTextList(briefing['recommendedDirection'], 8, 1_000),
+    newProblems: publicMissionTextList(briefing['newProblems'], 8, 1_000),
+    questionsForMason: publicMissionTextList(briefing['questionsForMason'], 8, 1_000),
+    proposedGoals: rawGoals.slice(0, 3).map((goal) => {
+      const entry = typeof goal === 'object' && goal !== null
+        ? goal as Record<string, unknown>
+        : {};
+      return {
+        key: publicMissionText(entry['key'], 80),
+        objective: publicMissionText(entry['objective'], 4_000),
+        rationale: publicMissionText(entry['rationale'], 4_000),
+        specPriority: publicMissionText(entry['specPriority'], 200),
+        targetRepo: publicMissionRepo(entry['targetRepo']),
+        dependsOn: publicMissionTextList(entry['dependsOn'], 8, 80),
+        deliverable: publicMissionText(entry['deliverable'], 1_000),
+        acceptanceEvidence: publicMissionTextList(entry['acceptanceEvidence'], 8, 500),
+        riskClass: entry['riskClass'] === 'low' || entry['riskClass'] === 'medium' || entry['riskClass'] === 'high'
+          ? entry['riskClass']
+          : null,
+        humanGate: typeof entry['humanGate'] === 'boolean' ? entry['humanGate'] : null,
+        outcome: typeof entry['outcome'] === 'object' && entry['outcome'] !== null && !Array.isArray(entry['outcome'])
+          ? {
+              desiredOutcome: publicMissionText((entry['outcome'] as Record<string, unknown>)['desiredOutcome'], 1_000),
+              successSignals: publicMissionTextList((entry['outcome'] as Record<string, unknown>)['successSignals'], 8, 500),
+              guardrails: publicMissionTextList((entry['outcome'] as Record<string, unknown>)['guardrails'], 8, 500),
+            }
+          : null,
+      };
+    }),
+  };
+}
+
+async function buildVisionMissionSnapshot(cfg: AshlrConfig): Promise<Record<string, unknown>> {
+  let briefing: Record<string, unknown> | null = null;
+  let briefingSource: VisionMissionSourceStatus;
+  let strategistModule: typeof import('../vision/strategist.js') | null = null;
+  try {
+    strategistModule = await import('../vision/strategist.js');
+    const read = strategistModule.readLatestBriefingDetailed();
+    briefing = read.briefing as unknown as Record<string, unknown> | null;
+    briefingSource = {
+      sourceState: read.sourceState,
+      sourcePresent: read.sourcePresent,
+      complete: read.complete,
+      reason: read.reason,
+    };
+  } catch {
+    briefingSource = {
+      sourceState: 'degraded', sourcePresent: true, complete: false,
+      reason: 'briefing-reader-unavailable',
+    };
+  }
+
+  if (briefing === null) {
+    return {
+      schemaVersion: 1,
+      state: briefingSource.sourceState,
+      authority: 'planning-only',
+      briefing: null,
+      preview: null,
+      sources: {
+        briefing: briefingSource,
+        goals: null,
+        enrollment: null,
+      },
+    };
+  }
+
+  try {
+    const [strategist, goals, completion, focus, policy] = await Promise.all([
+      strategistModule ?? import('../vision/strategist.js'),
+      import('../goals/store.js'),
+      import('../goals/completion.js'),
+      import('../goals/focus.js'),
+      import('../sandbox/policy.js'),
+    ]);
+    const inventory = goals.listGoalsDetailed();
+    const enrollment = policy.readEnrollmentRegistry();
+    if (enrollment.state === 'degraded') {
+      return {
+        schemaVersion: 1,
+        state: 'degraded',
+        authority: 'planning-only',
+        briefing: publicMissionBriefing(briefing),
+        preview: null,
+        sources: {
+          briefing: briefingSource,
+          goals: {
+            sourceState: inventory.sourceState,
+            sourcePresent: inventory.sourcePresent,
+            complete: inventory.complete,
+            scannedFiles: inventory.scannedFiles,
+            unreadableFiles: inventory.unreadableFiles,
+            limitExceeded: inventory.limitExceeded,
+          },
+          enrollment: {
+            sourceState: 'degraded', sourcePresent: true, complete: false,
+            reason: enrollment.reason,
+          },
+        },
+      };
+    }
+    const enrolledRepos = enrollment.repos;
+    const milestoneComplete = completion.createProposalMilestoneCompletionPredicate();
+    const preview = strategist.previewBriefingAdoption(
+      briefing as unknown as Parameters<typeof strategist.previewBriefingAdoption>[0],
+      {
+        enrolledRepos,
+        existingGoals: inventory.goals,
+        goalSourceState: inventory.sourceState,
+        activeThreshold: focus.goalFocusActiveThreshold(cfg),
+        goalRealized: (goal) => {
+          const required = goal.milestones.filter((milestone) => milestone.status !== 'skipped');
+          return required.length > 0 && required.every((milestone) => milestoneComplete(milestone, goal));
+        },
+      },
+    );
+    const goalSource = {
+      sourceState: inventory.sourceState,
+      sourcePresent: inventory.sourcePresent,
+      complete: inventory.complete,
+      scannedFiles: inventory.scannedFiles,
+      unreadableFiles: inventory.unreadableFiles,
+      limitExceeded: inventory.limitExceeded,
+    };
+    const state = briefingSource.sourceState === 'healthy' && inventory.sourceState !== 'degraded' &&
+      preview.missionGraph?.state !== 'invalid'
+      ? 'healthy'
+      : 'degraded';
+    return {
+      schemaVersion: 1,
+      state,
+      authority: 'planning-only',
+      briefing: publicMissionBriefing(briefing),
+      preview: {
+        briefingGeneratedAt: publicMissionText(preview.briefingGeneratedAt, 40),
+        goalSourceState: preview.goalSourceState,
+        activeThreshold: preview.activeThreshold,
+        openGoalCount: preview.openGoalCount,
+        availableSlots: preview.availableSlots,
+        proposedCount: preview.proposedCount,
+        createCount: preview.createCount,
+        skippedCount: preview.skippedCount,
+        entries: preview.entries.map((entry) => ({
+          index: entry.index,
+          objective: entry.objective,
+          targetRepo: publicMissionRepo(entry.targetRepo),
+          disposition: entry.disposition,
+          reason: entry.reason,
+        })),
+        ...(preview.missionGraph ? { missionGraph: publicMissionGraph(preview.missionGraph) } : {}),
+      },
+      sources: {
+        briefing: briefingSource,
+        goals: goalSource,
+        enrollment: {
+          sourceState: 'healthy',
+          sourcePresent: enrolledRepos.length > 0,
+          complete: true,
+          enrolledRepos: enrolledRepos.length,
+          reason: enrollment.reason,
+        },
+      },
+    };
+  } catch {
+    return {
+      schemaVersion: 1,
+      state: 'degraded',
+      authority: 'planning-only',
+      briefing: publicMissionBriefing(briefing),
+      preview: null,
+      sources: {
+        briefing: briefingSource,
+        goals: {
+          sourceState: 'degraded', sourcePresent: true, complete: false,
+          reason: 'mission-preview-unavailable',
+        },
+        enrollment: null,
+      },
+    };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -721,6 +982,15 @@ export async function handleApi(
     if (path === '/api/portfolio' && method === 'GET') {
       const snapshot = await buildCachedSnapshot(cfg);
       sendJson(res, 200, snapshot.portfolio ?? null);
+      return true;
+    }
+
+    // Read-only Mission Outcome Room. This compiles the latest persisted
+    // strategist briefing against current goal-focus and enrollment snapshots;
+    // it never runs the strategist, adopts a briefing, creates a goal, or grants
+    // execution authority.
+    if (path === '/api/vision/mission' && method === 'GET') {
+      sendJson(res, 200, await buildVisionMissionSnapshot(cfg));
       return true;
     }
 

@@ -39,8 +39,9 @@
  */
 
 import { homedir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { basename, isAbsolute, join } from 'node:path';
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, opendirSync, readFileSync, writeFileSync } from 'node:fs';
 import type { AshlrConfig, Goal } from '../types.js';
 import { defaultStrategistModel } from '../run/model-catalog.js';
 import { loadSpec, applyEvolution } from './spec.js';
@@ -50,6 +51,15 @@ import { computeQualityMetrics } from '../fleet/quality-metrics.js';
 import { engineInstalled, buildEngineCommand, spawnEngine } from '../run/engines.js';
 import { computeNorthStar, northStarSummary } from './north-star.js';
 import { ecosystemSummary } from '../ecosystem/map.js';
+import {
+  compileEcosystemMissionGraph,
+  projectEcosystemMissionGraph,
+  type EcosystemMissionGraphV1,
+  type MissionGraphCompileResult,
+  type MissionGraphProjection,
+  type MissionNodeObservation,
+  type MissionNodeProjectionStatus,
+} from './mission-graph.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -65,6 +75,26 @@ export interface ProposedGoal {
    * null = ecosystem-wide goal not scoped to a single tool.
    */
   targetRepo?: string | null;
+  /** Stable, briefing-local mission node key. Optional for legacy flat briefings. */
+  key?: string;
+  /** Upstream mission node keys that must be realized before this node is ready. */
+  dependsOn?: string[];
+  /** Concrete artifact or capability this node is expected to deliver. */
+  deliverable?: string;
+  /** Bounded evidence descriptions used to judge whether the deliverable is realized. */
+  acceptanceEvidence?: string[];
+  /** Closed planning risk class. This does not grant or relax execution authority. */
+  riskClass?: 'low' | 'medium' | 'high';
+  /** True when a human decision or separately authorized receipt is required. */
+  humanGate?: boolean;
+  /** Business outcome intent preserved through the mission compiler. */
+  outcome?: {
+    desiredOutcome: string;
+    successSignals: string[];
+    guardrails: string[];
+  };
+  /** Internal fail-closed marker for malformed model-originated mission metadata. */
+  missionMetadataInvalid?: boolean;
 }
 
 export interface StrategicBriefing {
@@ -97,7 +127,11 @@ export type BriefingGoalAdoptionSkipReason =
   | 'goal-id-collision'
   | 'target-not-enrolled'
   | 'target-ambiguous'
-  | 'target-invalid';
+  | 'target-invalid'
+  | 'dependency-blocked'
+  | 'human-gate-required'
+  | 'mission-graph-invalid'
+  | 'mission-reconcile-cap';
 
 export interface BriefingGoalAdoptionEntry {
   index: number;
@@ -106,6 +140,14 @@ export interface BriefingGoalAdoptionEntry {
   project: string | null;
   disposition: 'create' | 'skip';
   reason: 'ready' | BriefingGoalAdoptionSkipReason;
+  /** Graph identity retained for exact goal/evidence binding. */
+  missionKey?: string | null;
+  /** Graph node identity retained for exact goal/evidence binding. */
+  missionNodeKey?: string | null;
+  /** Canonical graph digest retained for exact goal/evidence binding. */
+  missionGraphDigest?: string | null;
+  /** Briefing-local dependency keys. Empty for roots and legacy flat goals. */
+  dependsOn?: string[];
 }
 
 export interface BriefingAdoptionPreview {
@@ -118,6 +160,20 @@ export interface BriefingAdoptionPreview {
   createCount: number;
   skippedCount: number;
   entries: BriefingGoalAdoptionEntry[];
+  /** Planning-only graph compilation summary. Absent for legacy flat briefings. */
+  missionGraph?: {
+    state: 'valid' | 'invalid';
+    digest: string | null;
+    issues: string[];
+    /** Read-only lifecycle projected from current goal evidence. */
+    status?: MissionGraphProjection['status'];
+    /** Bounded node lifecycle; this grants no planning or execution authority. */
+    nodes?: Array<{
+      key: string;
+      status: MissionNodeProjectionStatus;
+      blockedBy: string[];
+    }>;
+  };
 }
 
 export type BriefingGoalAdoptionOutcomeReason =
@@ -166,27 +222,156 @@ function writeBriefing(briefing: StrategicBriefing): void {
   } catch { /* best-effort */ }
 }
 
-/** Load the most recent briefing, or null. Never throws. */
-export function loadLatestBriefing(project?: string | null): StrategicBriefing | null {
+export interface LatestBriefingReadResult {
+  briefing: StrategicBriefing | null;
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  sourcePresent: boolean;
+  complete: boolean;
+  reason: string;
+  scannedEntries: number;
+  candidateFiles: number;
+  unreadableFiles: number;
+  limitExceeded: boolean;
+}
+
+const MAX_BRIEFING_DIRECTORY_ENTRIES = 512;
+const MAX_BRIEFING_FILES = 128;
+const MAX_BRIEFING_FILE_BYTES = 256 * 1024;
+
+function canonicalCompare(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === 'string');
+}
+
+function isPersistedStrategicBriefing(value: unknown): value is StrategicBriefing {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const generatedAt = record['generatedAt'];
+  const project = record['project'];
+  const proposedGoals = record['proposedGoals'];
+  const parsedGoals = parseProposedGoals(proposedGoals);
+  return typeof generatedAt === 'string' && Number.isFinite(Date.parse(generatedAt)) &&
+    (project === null || typeof project === 'string') &&
+    typeof record['currentState'] === 'string' &&
+    typeof record['gapToVision'] === 'string' &&
+    typeof record['proposedEvolution'] === 'object' && record['proposedEvolution'] !== null &&
+    !Array.isArray(record['proposedEvolution']) &&
+    isStringArray(record['recommendedDirection']) &&
+    isStringArray(record['newProblems']) &&
+    isStringArray(record['questionsForMason']) &&
+    Array.isArray(proposedGoals) &&
+    proposedGoals.length <= MAX_STRATEGIST_GOALS_PER_BRIEFING &&
+    parsedGoals.length === proposedGoals.length &&
+    parsedGoals.every((goal) => goal.missionMetadataInvalid !== true) &&
+    proposedGoals.every((goal) =>
+      typeof goal === 'object' && goal !== null && !Array.isArray(goal) &&
+      typeof (goal as Record<string, unknown>)['objective'] === 'string' &&
+      typeof (goal as Record<string, unknown>)['rationale'] === 'string' &&
+      (!Object.prototype.hasOwnProperty.call(goal, 'targetRepo') ||
+        (goal as Record<string, unknown>)['targetRepo'] === null ||
+        typeof (goal as Record<string, unknown>)['targetRepo'] === 'string')
+    );
+}
+
+/** Bounded, schema-aware briefing reader with explicit source quality. */
+export function readLatestBriefingDetailed(project?: string | null): LatestBriefingReadResult {
   try {
     const dir = briefingsDir();
-    if (!existsSync(dir)) return null;
-    const files = readdirSync(dir)
-      .filter((f: string) => f.endsWith('.json'))
-      .sort()
-      .reverse();
+    if (!existsSync(dir)) {
+      return {
+        briefing: null, sourceState: 'missing', sourcePresent: false, complete: true,
+        reason: 'briefing-directory-missing', scannedEntries: 0, candidateFiles: 0,
+        unreadableFiles: 0, limitExceeded: false,
+      };
+    }
+    const handle = opendirSync(dir);
+    const files: string[] = [];
+    let scannedEntries = 0;
+    let limitExceeded = false;
+    try {
+      for (;;) {
+        const entry = handle.readSync();
+        if (entry === null) break;
+        scannedEntries += 1;
+        if (scannedEntries > MAX_BRIEFING_DIRECTORY_ENTRIES) {
+          limitExceeded = true;
+          break;
+        }
+        if (entry.isFile() && entry.name.endsWith('.json')) files.push(entry.name);
+        if (files.length > MAX_BRIEFING_FILES) {
+          limitExceeded = true;
+          break;
+        }
+      }
+    } finally {
+      try { handle.closeSync(); } catch { /* best-effort close */ }
+    }
+    if (limitExceeded) {
+      return {
+        briefing: null, sourceState: 'degraded', sourcePresent: true, complete: false,
+        reason: 'briefing-record-limit-exceeded', scannedEntries,
+        candidateFiles: Math.min(files.length, MAX_BRIEFING_FILES), unreadableFiles: 0,
+        limitExceeded: true,
+      };
+    }
+    files.sort(canonicalCompare).reverse();
+    let unreadableFiles = 0;
     for (const f of files) {
       try {
-        const raw = readFileSync(join(dir, f), 'utf8');
-        const parsed = JSON.parse(raw) as StrategicBriefing;
+        const file = join(dir, f);
+        const stat = lstatSync(file);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_BRIEFING_FILE_BYTES) {
+          unreadableFiles += 1;
+          continue;
+        }
+        const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
+        if (!isPersistedStrategicBriefing(parsed)) {
+          unreadableFiles += 1;
+          continue;
+        }
         if (project !== undefined && parsed.project !== (project ?? null)) continue;
-        return parsed;
-      } catch { /* skip */ }
+        const complete = unreadableFiles === 0;
+        return {
+          briefing: parsed,
+          sourceState: complete ? 'healthy' : 'degraded',
+          sourcePresent: true,
+          complete,
+          reason: complete ? 'latest-briefing-readable' : 'newer-briefing-records-unreadable',
+          scannedEntries,
+          candidateFiles: files.length,
+          unreadableFiles,
+          limitExceeded: false,
+        };
+      } catch {
+        unreadableFiles += 1;
+      }
     }
-    return null;
+    return files.length === 0
+      ? {
+          briefing: null, sourceState: 'missing', sourcePresent: false, complete: true,
+          reason: 'no-briefing-records', scannedEntries, candidateFiles: 0,
+          unreadableFiles: 0, limitExceeded: false,
+        }
+      : {
+          briefing: null, sourceState: 'degraded', sourcePresent: true, complete: false,
+          reason: 'briefing-records-unreadable', scannedEntries, candidateFiles: files.length,
+          unreadableFiles, limitExceeded: false,
+        };
   } catch {
-    return null;
+    return {
+      briefing: null, sourceState: 'degraded', sourcePresent: true, complete: false,
+      reason: 'briefing-source-unavailable', scannedEntries: 0, candidateFiles: 0,
+      unreadableFiles: 0, limitExceeded: false,
+    };
   }
+}
+
+/** Load the most recent valid briefing, or null. Never throws. */
+export function loadLatestBriefing(project?: string | null): StrategicBriefing | null {
+  return readLatestBriefingDetailed(project).briefing;
 }
 
 // ---------------------------------------------------------------------------
@@ -283,7 +468,7 @@ THE BRIEFING STRUCTURE you must follow (in the JSON response):
 2. THE BOTTLENECK: (encode in gapToVision) The single root cause holding back the leverage metric across the WHOLE ecosystem. One bottleneck. Not three.
 3. THE MOVE: (encode as recommendedDirection[0]) The ONE highest-leverage action to take next. Specific enough that an engineering agent can execute it.
 4. KILL-LIST: (encode in recommendedDirection[1..2]) What to stop doing. What to prune. What is waste.
-5. proposedGoals: ≤3 goals, ruthlessly prioritised. Each MUST be tagged with a targetRepo (the tool it applies to) or null for ecosystem-wide. Goals must be SUBSTANTIVE per-tool features/improvements — not fleet-internal metrics.
+5. proposedGoals: ≤3 dependency-aware mission nodes, ruthlessly prioritised. Every engineering node MUST name one exact enrolled tool in targetRepo. Only a humanGate may use targetRepo:null. Use stable briefing-local keys and dependsOn to express cross-tool order. Every node must name its concrete deliverable, observable acceptance evidence, business outcome, success signals, and guardrails. Goals must be SUBSTANTIVE per-tool features/improvements — not fleet-internal metrics.
 6. proposedEvolution: Raise ambition if current spec is too timid. Include toolRoadmap with one entry per enrolled tool.
 
 You receive: fleet metrics, north-star leverage data, active goals, spec, per-repo state for EVERY enrolled tool, and accumulated strategy lessons.
@@ -311,12 +496,28 @@ You must respond ONLY with valid JSON in exactly this shape (no prose, no markdo
   "newProblems": ["<newly identified hard problem not yet in the spec>"],
   "questionsForMason": ["<genuine strategic fork requiring Mason's direction — not implementation details>"],
   "proposedGoals": [
-    {"objective": "<specific, executable per-tool goal>", "rationale": "<why this makes the tool genuinely great + increases ecosystem leverage>", "specPriority": "<priority title it serves>", "targetRepo": "<tool-name or null for ecosystem-wide>"}
+    {
+      "key": "<stable-lowercase-node-key>",
+      "objective": "<specific, executable per-tool goal>",
+      "rationale": "<why this makes the tool genuinely great + increases ecosystem leverage>",
+      "specPriority": "<priority title it serves>",
+      "targetRepo": "<exact-enrolled-tool-name; null only when humanGate is true>",
+      "dependsOn": ["<upstream-node-key>"],
+      "deliverable": "<specific artifact or capability delivered>",
+      "acceptanceEvidence": ["<observable evidence required before this node is realized>"],
+      "riskClass": "low|medium|high",
+      "humanGate": false,
+      "outcome": {
+        "desiredOutcome": "<what changes for Ashlr.ai or users>",
+        "successSignals": ["<measurable signal>"],
+        "guardrails": ["<constraint or non-goal that must remain true>"]
+      }
+    }
   ]
 }
 
 proposedEvolution may omit any key that should remain unchanged.
-proposedGoals MUST be ≤3. Fewer is better. Each must be a SUBSTANTIVE per-tool feature/improvement (not fleet-internal metrics). Tag each with targetRepo.
+proposedGoals MUST be ≤3. Fewer is better. Each must be a SUBSTANTIVE per-tool feature/improvement (not fleet-internal metrics). Tag every work node with an exact enrolled tool; targetRepo:null is reserved for humanGate nodes. Dependencies may refer only to keys in the same briefing. A humanGate records that human or external receipt authority is required; it never grants that authority.
 proposedEvolution.toolRoadmap should cover every enrolled tool you have data for.
 questionsForMason: only ask when a strategic fork GENUINELY requires Mason's judgment.`;
 
@@ -659,6 +860,62 @@ function parseStringArray(v: unknown): string[] {
   return v.filter((x): x is string => typeof x === 'string');
 }
 
+const MAX_MISSION_TEXT = 1_000;
+const MAX_MISSION_ITEMS = 8;
+const MISSION_KEY_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+function boundedMissionText(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  return trimmed.slice(0, MAX_MISSION_TEXT);
+}
+
+function boundedMissionItems(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .flatMap((entry) => {
+      const text = boundedMissionText(entry);
+      return text ? [text] : [];
+    })
+    .slice(0, MAX_MISSION_ITEMS);
+}
+
+const MISSION_METADATA_FIELDS = [
+  'key', 'dependsOn', 'deliverable', 'acceptanceEvidence', 'riskClass', 'humanGate', 'outcome',
+] as const;
+
+function validRawMissionText(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0 && value.trim().length <= MAX_MISSION_TEXT;
+}
+
+function validRawMissionItems(value: unknown, keyItems = false): value is string[] {
+  return Array.isArray(value) && value.length >= 1 && value.length <= MAX_MISSION_ITEMS &&
+    value.every((entry) => validRawMissionText(entry) && (!keyItems || MISSION_KEY_RE.test(entry.trim())));
+}
+
+function modelMissionMetadataInvalid(obj: Record<string, unknown>): boolean {
+  const hasMissionMetadata = MISSION_METADATA_FIELDS.some((field) =>
+    Object.prototype.hasOwnProperty.call(obj, field),
+  );
+  if (!hasMissionMetadata) return false;
+  const outcome = obj['outcome'];
+  const humanGate = obj['humanGate'];
+  const targetRepo = obj['targetRepo'];
+  return !validRawMissionText(obj['key']) || !MISSION_KEY_RE.test(obj['key'].trim()) ||
+    !Array.isArray(obj['dependsOn']) || obj['dependsOn'].length > MAX_MISSION_ITEMS ||
+    !obj['dependsOn'].every((entry) => validRawMissionText(entry) && MISSION_KEY_RE.test(entry.trim())) ||
+    !validRawMissionText(obj['deliverable']) ||
+    !validRawMissionItems(obj['acceptanceEvidence']) ||
+    (obj['riskClass'] !== 'low' && obj['riskClass'] !== 'medium' && obj['riskClass'] !== 'high') ||
+    typeof humanGate !== 'boolean' ||
+    (humanGate === true ? targetRepo !== null : !validRawMissionText(targetRepo)) ||
+    typeof outcome !== 'object' || outcome === null || Array.isArray(outcome) ||
+    !validRawMissionText((outcome as Record<string, unknown>)['desiredOutcome']) ||
+    !validRawMissionItems((outcome as Record<string, unknown>)['successSignals']) ||
+    !validRawMissionItems((outcome as Record<string, unknown>)['guardrails']);
+}
+
 function parseProposedGoals(v: unknown): ProposedGoal[] {
   if (!Array.isArray(v)) return [];
   const goals: ProposedGoal[] = [];
@@ -672,11 +929,42 @@ function parseProposedGoals(v: unknown): ProposedGoal[] {
       typeof rawTargetRepo === 'string' ? rawTargetRepo :
       rawTargetRepo === null ? null :
       undefined;
+    const rawKey = boundedMissionText(obj['key']);
+    const key = rawKey && MISSION_KEY_RE.test(rawKey) ? rawKey : undefined;
+    const dependsOn = boundedMissionItems(obj['dependsOn'])
+      .filter((dependency) => MISSION_KEY_RE.test(dependency));
+    const deliverable = boundedMissionText(obj['deliverable']);
+    const acceptanceEvidence = boundedMissionItems(obj['acceptanceEvidence']);
+    const rawRiskClass = obj['riskClass'];
+    const riskClass = rawRiskClass === 'low' || rawRiskClass === 'medium' || rawRiskClass === 'high'
+      ? rawRiskClass
+      : undefined;
+    const humanGate = typeof obj['humanGate'] === 'boolean' ? obj['humanGate'] : undefined;
+    const rawOutcome = typeof obj['outcome'] === 'object' && obj['outcome'] !== null
+      ? obj['outcome'] as Record<string, unknown>
+      : null;
+    const desiredOutcome = boundedMissionText(rawOutcome?.['desiredOutcome']);
+    const outcome = desiredOutcome
+      ? {
+          desiredOutcome,
+          successSignals: boundedMissionItems(rawOutcome?.['successSignals']),
+          guardrails: boundedMissionItems(rawOutcome?.['guardrails']),
+        }
+      : undefined;
+    const missionMetadataInvalid = modelMissionMetadataInvalid(obj);
     goals.push({
       objective,
       rationale: typeof obj['rationale'] === 'string' ? obj['rationale'] : '',
       specPriority: typeof obj['specPriority'] === 'string' ? obj['specPriority'] : undefined,
       targetRepo,
+      ...(key ? { key } : {}),
+      ...(dependsOn.length > 0 ? { dependsOn } : {}),
+      ...(deliverable ? { deliverable } : {}),
+      ...(acceptanceEvidence.length > 0 ? { acceptanceEvidence } : {}),
+      ...(riskClass ? { riskClass } : {}),
+      ...(humanGate !== undefined ? { humanGate } : {}),
+      ...(outcome ? { outcome } : {}),
+      ...(missionMetadataInvalid ? { missionMetadataInvalid: true } : {}),
     });
   }
   return goals;
@@ -909,6 +1197,8 @@ export interface BriefingAdoptionPreviewOptions {
   existingGoals: readonly Goal[];
   activeThreshold: number;
   goalSourceState?: 'missing' | 'healthy' | 'degraded';
+  /** Fail-closed realized-outcome reader supplied by the caller. */
+  goalRealized?: (goal: Goal) => boolean;
 }
 
 type TargetResolution =
@@ -920,6 +1210,106 @@ function goalObjective(pg: ProposedGoal): string {
   return pg.specPriority
     ? `[vision:${pg.specPriority}] ${pg.objective}`
     : pg.objective;
+}
+
+function briefingUsesMissionGraph(briefing: StrategicBriefing): boolean {
+  return briefing.proposedGoals.some((goal) =>
+    goal.missionMetadataInvalid === true ||
+    goal.key !== undefined ||
+    (goal.dependsOn?.length ?? 0) > 0 ||
+    goal.deliverable !== undefined ||
+    (goal.acceptanceEvidence?.length ?? 0) > 0 ||
+    goal.riskClass !== undefined ||
+    goal.humanGate !== undefined ||
+    goal.outcome !== undefined,
+  );
+}
+
+function briefingMissionKey(briefing: StrategicBriefing): string {
+  const identity = JSON.stringify({
+    generatedAt: briefing.generatedAt,
+    project: briefing.project,
+    proposedGoals: briefing.proposedGoals.map((goal) => ({
+      key: goal.key,
+      objective: goal.objective,
+      targetRepo: goal.targetRepo,
+      dependsOn: goal.dependsOn,
+    })),
+  });
+  return `vision-${createHash('sha256').update(identity).digest('hex').slice(0, 16)}`;
+}
+
+/** Compile additive strategist graph metadata without changing legacy flat briefings. */
+export function compileBriefingMissionGraph(
+  briefing: StrategicBriefing,
+  enrolledRepos: readonly string[],
+): MissionGraphCompileResult | null {
+  if (!briefingUsesMissionGraph(briefing)) return null;
+  if (briefing.proposedGoals.some((goal) => goal.missionMetadataInvalid === true)) {
+    return {
+      ok: false,
+      issues: [{
+        code: 'invalid-schema',
+        path: 'proposedGoals',
+        message: 'model-originated mission metadata is malformed or exceeds a bound',
+      }],
+    };
+  }
+  return compileEcosystemMissionGraph({
+    missionKey: briefingMissionKey(briefing),
+    title: (briefing.recommendedDirection[0] || 'Strategic mission').trim().slice(0, 200),
+    objective: (briefing.gapToVision || briefing.recommendedDirection[0] || 'Close the strategic gap.').trim().slice(0, 4_000),
+    createdAt: briefing.generatedAt,
+    nodes: briefing.proposedGoals.map((goal, index) => ({
+      kind: goal.humanGate === true ? 'human-gate' as const : 'work' as const,
+      key: goal.key ?? `goal-${index + 1}`,
+      title: (goal.deliverable || goal.objective).trim().slice(0, 200),
+      objective: goalObjective(goal),
+      targetRepo: goal.targetRepo === undefined ? briefing.project : goal.targetRepo,
+      dependsOn: goal.dependsOn ?? [],
+      acceptance: goal.acceptanceEvidence?.length
+        ? goal.acceptanceEvidence
+        : goal.outcome?.successSignals.length
+          ? goal.outcome.successSignals
+          : [goal.deliverable || goal.objective],
+      deliverable: goal.deliverable || goal.objective,
+      riskClass: goal.riskClass ?? 'medium',
+      outcomeContract: goal.outcome,
+    })),
+  }, enrolledRepos);
+}
+
+function missionNodeObservations(
+  graph: EcosystemMissionGraphV1,
+  briefing: StrategicBriefing,
+  goals: readonly Goal[],
+  goalRealized: (goal: Goal) => boolean,
+): MissionNodeObservation[] {
+  const proposedByKey = new Map(
+    briefing.proposedGoals.map((goal, index) => [goal.key ?? `goal-${index + 1}`, goal]),
+  );
+  const observations: MissionNodeObservation[] = [];
+  for (const node of graph.nodes) {
+    if (node.kind === 'human-gate') continue;
+    const proposed = proposedByKey.get(node.key);
+    if (!proposed) continue;
+    const objective = goalObjective(proposed);
+    const goal = goals.find((candidate) =>
+      candidate.objective === objective &&
+      candidate.project === node.repo &&
+      candidate.mission?.schemaVersion === 1 &&
+      candidate.mission.graphDigest === graph.graphDigest &&
+      candidate.mission.missionKey === graph.missionKey &&
+      candidate.mission.nodeKey === node.key,
+    );
+    if (!goal) continue;
+    let state: NonNullable<MissionNodeObservation['state']> = 'active';
+    if (goalRealized(goal)) state = 'realized';
+    else if (goal.milestones.some((milestone) => milestone.status === 'blocked')) state = 'failed';
+    else if (goal.milestones.some((milestone) => milestone.status === 'proposed')) state = 'proposed';
+    observations.push({ nodeKey: node.key, state });
+  }
+  return observations;
 }
 
 function normalizedGoalIdentity(objective: string, project: string | null): string {
@@ -996,6 +1386,21 @@ export function previewBriefingAdoption(
   const identities = new Set(
     opts.existingGoals.map((goal) => normalizedGoalIdentity(goal.objective, goal.project)),
   );
+  const graphResult = compileBriefingMissionGraph(briefing, enrolledRepos);
+  const graphProjection = graphResult?.ok
+    ? projectEcosystemMissionGraph(
+        graphResult.graph,
+        missionNodeObservations(
+          graphResult.graph,
+          briefing,
+          opts.existingGoals,
+          opts.goalRealized ?? (() => false),
+        ),
+      )
+    : null;
+  const graphStatusByKey = graphProjection?.ok
+    ? new Map(graphProjection.projection.nodes.map((node) => [node.key, node.status]))
+    : new Map<string, never>();
   const entries: BriefingGoalAdoptionEntry[] = [];
   let planned = 0;
 
@@ -1004,11 +1409,20 @@ export function previewBriefingAdoption(
     const objective = goalObjective(pg);
     const targetRepo = pg.targetRepo === undefined ? briefing.project : pg.targetRepo;
     const target = resolveBriefingGoalTarget(pg, briefing.project, enrolledRepos);
+    const missionNodeKey = graphResult === null ? null : (pg.key ?? `goal-${index + 1}`);
+    const missionKey = graphResult?.ok ? graphResult.graph.missionKey : null;
+    const missionGraphDigest = graphResult?.ok ? graphResult.graph.graphDigest : null;
     const base = {
       index,
       objective,
       targetRepo: targetRepo ?? null,
       project: target.project,
+      ...(missionNodeKey ? {
+        missionKey,
+        missionNodeKey,
+        missionGraphDigest,
+        dependsOn: [...(pg.dependsOn ?? [])],
+      } : {}),
     };
 
     // Dedupe and focus decisions require a complete goal inventory. A missing
@@ -1022,9 +1436,24 @@ export function previewBriefingAdoption(
       entries.push({ ...base, disposition: 'skip', reason: 'briefing-goal-cap' });
       continue;
     }
+    if (graphResult !== null && (!graphResult.ok || !graphProjection?.ok)) {
+      entries.push({ ...base, disposition: 'skip', reason: 'mission-graph-invalid' });
+      continue;
+    }
     if (target.reason !== 'ready') {
       entries.push({ ...base, disposition: 'skip', reason: target.reason });
       continue;
+    }
+    if (missionNodeKey) {
+      const graphStatus = graphStatusByKey.get(missionNodeKey);
+      if (graphStatus === 'awaiting-human') {
+        entries.push({ ...base, project: null, disposition: 'skip', reason: 'human-gate-required' });
+        continue;
+      }
+      if (graphStatus === 'blocked') {
+        entries.push({ ...base, disposition: 'skip', reason: 'dependency-blocked' });
+        continue;
+      }
     }
 
     if (claimedObjectives.has(objective)) {
@@ -1047,6 +1476,27 @@ export function previewBriefingAdoption(
     entries.push({ ...base, disposition: 'create', reason: 'ready' });
   }
 
+  const missionGraph = graphResult === null
+    ? undefined
+    : graphResult.ok && graphProjection?.ok
+      ? {
+          state: 'valid' as const,
+          digest: graphResult.graph.graphDigest,
+          issues: [],
+          status: graphProjection.projection.status,
+          nodes: graphProjection.projection.nodes.map((node) => ({
+            key: node.key,
+            status: node.status,
+            blockedBy: [...node.blockedBy],
+          })),
+        }
+      : {
+          state: 'invalid' as const,
+          digest: null,
+          issues: (graphResult.ok ? graphProjection?.issues ?? [] : graphResult.issues)
+            .slice(0, 12)
+            .map((entry) => `${entry.code}:${entry.path}`),
+        };
   return {
     briefingGeneratedAt: briefing.generatedAt,
     goalSourceState,
@@ -1057,6 +1507,7 @@ export function previewBriefingAdoption(
     createCount: planned,
     skippedCount: entries.length - planned,
     entries,
+    ...(missionGraph ? { missionGraph } : {}),
   };
 }
 
@@ -1080,6 +1531,11 @@ export async function adoptBriefing(
     existingGoals?: readonly Goal[];
     goalSourceState?: 'missing' | 'healthy' | 'degraded';
     activeThreshold?: number;
+    goalRealized?: (goal: Goal) => boolean;
+    /** Reconcile graph goals without re-applying spec evolution or ACE deltas. */
+    goalsOnly?: boolean;
+    /** Bound successful or attempted goal materializations in this call. */
+    maxCreatedGoals?: number;
   } = {},
 ): Promise<AdoptBriefingResult> {
   const by = opts.by ?? 'strategist';
@@ -1100,7 +1556,7 @@ export async function adoptBriefing(
   // Spec persistence is independent of the optional goal-adoption
   // infrastructure. A missing policy or goal store must never suppress an
   // otherwise valid spec evolution.
-  const hasEvolution = Object.keys(briefing.proposedEvolution).length > 0;
+  const hasEvolution = !opts.goalsOnly && Object.keys(briefing.proposedEvolution).length > 0;
   let specOutcome: AdoptBriefingResult['specOutcome'] = 'not-requested';
   if (hasEvolution) {
     try {
@@ -1123,7 +1579,7 @@ export async function adoptBriefing(
   // Preserve their established never-throw behavior even when goal adoption is
   // unavailable or fail-closed.
   const acePlaybook = (cfg.foundry as Record<string, unknown> | undefined)?.['acePlaybook'] === true;
-  if (acePlaybook) {
+  if (acePlaybook && !opts.goalsOnly) {
     try {
       for (const direction of briefing.recommendedDirection) {
         if (direction.trim()) addDelta('strategy', direction);
@@ -1151,24 +1607,44 @@ export async function adoptBriefing(
   }
 
   try {
-    const { createGoal, listGoalsDetailed, loadGoal } = await import('../goals/store.js');
+    const { createGoalIfAbsent, listGoalsDetailed } = await import('../goals/store.js');
     const { goalFocusActiveThreshold } = await import('../goals/focus.js');
-    const enrolledRepos = opts.enrolledRepos ?? (await import('../sandbox/policy.js')).listEnrolled();
+    const { createProposalMilestoneCompletionPredicate } = await import('../goals/completion.js');
+    let enrolledRepos: readonly string[];
+    if (opts.enrolledRepos !== undefined) {
+      enrolledRepos = opts.enrolledRepos;
+    } else {
+      const enrollment = (await import('../sandbox/policy.js')).readEnrollmentRegistry();
+      if (enrollment.state === 'degraded') throw new Error(`enrollment authority degraded: ${enrollment.reason}`);
+      enrolledRepos = enrollment.repos;
+    }
     const goalInventory = opts.existingGoals !== undefined
       ? {
           goals: opts.existingGoals,
           sourceState: opts.goalSourceState ?? 'healthy' as const,
         }
       : listGoalsDetailed();
+    const milestoneComplete = createProposalMilestoneCompletionPredicate();
+    const goalRealized = opts.goalRealized ?? ((goal: Goal): boolean => {
+      const required = goal.milestones.filter((milestone) => milestone.status !== 'skipped');
+      return required.length > 0 && required.every((milestone) => milestoneComplete(milestone, goal));
+    });
     const preview = previewBriefingAdoption(briefing, {
       enrolledRepos,
       existingGoals: goalInventory.goals,
       goalSourceState: goalInventory.sourceState,
       activeThreshold: opts.activeThreshold ?? goalFocusActiveThreshold(cfg),
+      goalRealized,
     });
 
     // Create goals only after an authoritative inventory and target preview.
     const outcomes: BriefingGoalAdoptionOutcome[] = [];
+    const maxCreatedGoals = opts.maxCreatedGoals === undefined
+      ? Number.POSITIVE_INFINITY
+      : Number.isSafeInteger(opts.maxCreatedGoals) && opts.maxCreatedGoals >= 0
+        ? opts.maxCreatedGoals
+        : 0;
+    let attemptedCreates = 0;
     for (const entry of preview.entries) {
       const base = {
         index: entry.index,
@@ -1184,21 +1660,28 @@ export async function adoptBriefing(
         });
         continue;
       }
+      if (attemptedCreates >= maxCreatedGoals) {
+        outcomes.push({ ...base, outcome: 'skipped', reason: 'mission-reconcile-cap' });
+        continue;
+      }
+      attemptedCreates += 1;
       try {
-        const goal = createGoal(entry.objective, {
+        const created = createGoalIfAbsent(entry.objective, {
           project: entry.project,
           cfg,
+          ...(entry.missionGraphDigest && entry.missionKey && entry.missionNodeKey ? {
+            mission: {
+              schemaVersion: 1,
+              graphDigest: entry.missionGraphDigest,
+              missionKey: entry.missionKey,
+              nodeKey: entry.missionNodeKey,
+            },
+          } : {}),
         });
-        const persisted = loadGoal(goal.id);
-        if (
-          persisted !== null &&
-          persisted.id === goal.id &&
-          persisted.objective === entry.objective &&
-          persisted.project === entry.project &&
-          persisted.createdAt === goal.createdAt &&
-          persisted.updatedAt === goal.updatedAt
-        ) {
-          outcomes.push({ ...base, outcome: 'created', reason: 'persisted', goalId: goal.id });
+        if (created.status === 'created') {
+          outcomes.push({ ...base, outcome: 'created', reason: 'persisted', goalId: created.goal.id });
+        } else if (created.status === 'exists') {
+          outcomes.push({ ...base, outcome: 'skipped', reason: 'goal-id-collision' });
         } else {
           outcomes.push({ ...base, outcome: 'failed', reason: 'goal-store-write-failed' });
         }
