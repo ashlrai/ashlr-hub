@@ -154,6 +154,22 @@
         }
       }
     },
+    "locus": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional Locus identity-plane firm mode for hub pre-mutate / CI session gates. DEFAULT ABSENT = off (monorepo-safe). Env LOCUS_ENFORCE wins over config when set.",
+      "properties": {
+        "enforce": {
+          "type": "string",
+          "enum": [
+            "off",
+            "warn",
+            "enforce"
+          ],
+          "description": "off: no probe; warn: log blockers allow dispatch; enforce: fail closed. Unset and absent config both mean off."
+        }
+      }
+    },
     "genome": {
       "type": "object",
       "additionalProperties": false,

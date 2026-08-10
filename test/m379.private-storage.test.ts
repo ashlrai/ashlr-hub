@@ -194,6 +194,59 @@ describe('M379 private-storage assurance', () => {
     })).toEqual({ ok: false, reason: 'untrusted-ancestor-owner' });
   });
 
+  it('retries only bounded adapter timeouts and reports the terminal infrastructure reason', () => {
+    const waits: Array<{ delayMs: number; reason: string }> = [];
+    let calls = 0;
+    _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+      waitForRetry: (delayMs, reason) => waits.push({ delayMs, reason }),
+    });
+    const timeout = Object.assign(new Error('bounded adapter timeout'), { code: 'ETIMEDOUT' });
+
+    expect(assurePrivateStoragePath(
+      'C:\\tmp\\private',
+      'directory',
+      'secure-created',
+      {
+        platform: 'win32',
+        systemRoot: 'C:\\Windows',
+        anchorPath: 'C:\\tmp',
+        timeoutMs: 60_000,
+        runner: (invocation) => {
+          calls += 1;
+          expect(invocation.timeoutMs).toBe(30_000);
+          return { status: null, error: timeout };
+        },
+      },
+    )).toEqual({ ok: false, reason: 'adapter-timeout' });
+    expect(calls).toBe(2);
+    expect(waits).toEqual([{ delayMs: 50, reason: 'adapter-timeout' }]);
+  });
+
+  it('does not retry an unclassified adapter process failure', () => {
+    const waits = vi.fn();
+    const runner = vi.fn<PrivateStorageRunner>(() => ({
+      status: null,
+      error: Object.assign(new Error('launch failed'), { code: 'ENOENT' }),
+    }));
+    _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+      waitForRetry: waits,
+    });
+
+    expect(assurePrivateStoragePath(
+      'C:\\tmp\\private',
+      'directory',
+      'secure-created',
+      {
+        platform: 'win32',
+        systemRoot: 'C:\\Windows',
+        anchorPath: 'C:\\tmp',
+        runner,
+      },
+    )).toEqual({ ok: false, reason: 'adapter-failed' });
+    expect(runner).toHaveBeenCalledOnce();
+    expect(waits).not.toHaveBeenCalled();
+  });
+
   it('backs off for authenticated transient ACL errors and returns the final stage silently', () => {
     const waits: Array<{ delayMs: number; reason: string }> = [];
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);

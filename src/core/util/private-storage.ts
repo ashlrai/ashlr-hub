@@ -7,6 +7,7 @@ const OPERATION = 'assure-private-path';
 const MAX_OUTPUT_BYTES = 4 * 1024;
 const DEFAULT_TIMEOUT_MS = 5_000;
 const DEFAULT_BATCH_TIMEOUT_MS = 15_000;
+const MAX_WINDOWS_SINGLE_PATH_TIMEOUT_MS = 30_000;
 const MAX_SINGLE_PATH_ADAPTER_ATTEMPTS = 2;
 const SINGLE_PATH_RETRY_BASE_DELAY_MS = 50;
 const SINGLE_PATH_RETRY_MAX_DELAY_MS = 200;
@@ -380,6 +381,12 @@ function waitForTransientAclRetry(
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
 }
 
+function processFailureReason(error: Error): 'adapter-timeout' | 'adapter-failed' {
+  return (error as NodeJS.ErrnoException).code === 'ETIMEDOUT'
+    ? 'adapter-timeout'
+    : 'adapter-failed';
+}
+
 function localWindowsPath(value: string | undefined, maxLength: number): string | null {
   if (!value || value.length > maxLength || [...value].some((char) => char.charCodeAt(0) < 32)) return null;
   try {
@@ -532,7 +539,7 @@ export function assurePrivateStoragePath(
   const executable = powershellPath(options.systemRoot ?? process.env.SystemRoot);
   if (!executable) return { ok: false, reason: 'powershell-unavailable' };
   const timeoutMs = typeof options.timeoutMs === 'number' && Number.isFinite(options.timeoutMs)
-    ? Math.max(100, Math.min(15_000, Math.floor(options.timeoutMs)))
+    ? Math.max(100, Math.min(MAX_WINDOWS_SINGLE_PATH_TIMEOUT_MS, Math.floor(options.timeoutMs)))
     : DEFAULT_TIMEOUT_MS;
   const nonce = randomBytes(16).toString('hex');
   const input = JSON.stringify({
@@ -564,8 +571,12 @@ export function assurePrivateStoragePath(
       });
       const result = runner(invocation);
       if (result.error) {
-        if (attempt + 1 < MAX_SINGLE_PATH_ADAPTER_ATTEMPTS) continue;
-        return { ok: false, reason: 'adapter-failed' };
+        const reason = processFailureReason(result.error);
+        if (reason === 'adapter-timeout' && attempt + 1 < MAX_SINGLE_PATH_ADAPTER_ATTEMPTS) {
+          waitForTransientAclRetry(attempt, reason, testControl);
+          continue;
+        }
+        return { ok: false, reason };
       }
       const stdout = Buffer.isBuffer(result.stdout)
         ? result.stdout.toString('utf8')

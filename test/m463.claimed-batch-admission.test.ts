@@ -99,9 +99,10 @@ describe('M463 Windows setup adapter resilience', () => {
     anchorPath: 'C:\\fixture',
   };
 
-  it('retries one adapter failure without retrying semantic ACL rejection', () => {
+  it('retries one adapter timeout without retrying semantic ACL rejection', () => {
+    const timeout = Object.assign(new Error('simulated timeout'), { code: 'ETIMEDOUT' });
     const transport = vi.fn<PrivateStorageRunner>()
-      .mockReturnValueOnce({ status: null, error: new Error('simulated timeout') })
+      .mockReturnValueOnce({ status: null, error: timeout })
       .mockImplementation((invocation) =>
         privateStorageResponse(invocation, 0, true, 'exact-private-dacl'));
     expect(assurePrivateStoragePath(

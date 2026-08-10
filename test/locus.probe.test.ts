@@ -23,6 +23,8 @@ import {
   scrubbedChildEnv,
   validateMintEnv,
   applyLocusSessionEnv,
+  parseLocusEnforceToken,
+  extractLocusConfigEnforce,
   resolveLocusEnforceMode,
   decidePreMutateGate,
   decideLocusSessionRun,
@@ -256,6 +258,92 @@ describe('pre-mutate gate decisions (LOCUS_ENFORCE)', () => {
     expect(resolveLocusEnforceMode({ LOCUS_ENFORCE: 'maybe' })).toBe('enforce');
   });
 
+  it('resolveLocusEnforceMode: env wins over config, then config, then off', () => {
+    // Both unset → monorepo-safe default off (never always-on)
+    expect(resolveLocusEnforceMode({}, null)).toBe('off');
+    expect(resolveLocusEnforceMode({}, undefined)).toBe('off');
+    expect(resolveLocusEnforceMode({}, {})).toBe('off');
+    expect(resolveLocusEnforceMode({}, { locus: {} })).toBe('off');
+
+    // Config alone
+    expect(resolveLocusEnforceMode({}, { enforce: 'warn' })).toBe('warn');
+    expect(resolveLocusEnforceMode({}, { locus: { enforce: 'enforce' } })).toBe(
+      'enforce',
+    );
+    expect(resolveLocusEnforceMode({}, { locus: { enforce: 'off' } })).toBe(
+      'off',
+    );
+    expect(resolveLocusEnforceMode({}, { locus: { enforce: 'warn' } })).toBe(
+      'warn',
+    );
+
+    // Full AshlrConfig-shaped object
+    expect(
+      resolveLocusEnforceMode({}, { version: 1, locus: { enforce: 'enforce' } } as never),
+    ).toBe('enforce');
+
+    // Env wins — including explicit off overriding firm config
+    expect(
+      resolveLocusEnforceMode(
+        { LOCUS_ENFORCE: 'off' },
+        { locus: { enforce: 'enforce' } },
+      ),
+    ).toBe('off');
+    expect(
+      resolveLocusEnforceMode(
+        { LOCUS_ENFORCE: '0' },
+        { locus: { enforce: 'enforce' } },
+      ),
+    ).toBe('off');
+    expect(
+      resolveLocusEnforceMode(
+        { LOCUS_ENFORCE: 'warn' },
+        { locus: { enforce: 'enforce' } },
+      ),
+    ).toBe('warn');
+    expect(
+      resolveLocusEnforceMode(
+        { LOCUS_ENFORCE: 'enforce' },
+        { locus: { enforce: 'off' } },
+      ),
+    ).toBe('enforce');
+    // Empty env string is set → off (wins over config)
+    expect(
+      resolveLocusEnforceMode(
+        { LOCUS_ENFORCE: '' },
+        { locus: { enforce: 'enforce' } },
+      ),
+    ).toBe('off');
+  });
+
+  it('parseLocusEnforceToken + extractLocusConfigEnforce helpers', () => {
+    expect(parseLocusEnforceToken(undefined)).toBe('off');
+    expect(parseLocusEnforceToken('WARN')).toBe('warn');
+    expect(parseLocusEnforceToken('block')).toBe('enforce');
+    expect(extractLocusConfigEnforce(null)).toBeUndefined();
+    expect(extractLocusConfigEnforce({ enforce: 'warn' })).toBe('warn');
+    expect(extractLocusConfigEnforce({ locus: { enforce: 'enforce' } })).toBe(
+      'enforce',
+    );
+    expect(extractLocusConfigEnforce({ locus: {} })).toBeUndefined();
+  });
+
+  it('decideLocusSessionRun consults config when env unset', () => {
+    expect(
+      decideLocusSessionRun({}, { locus: { enforce: 'enforce' } }),
+    ).toMatchObject({ kind: 'refuse', mode: 'enforce' });
+    expect(
+      decideLocusSessionRun({}, { locus: { enforce: 'warn' } }),
+    ).toMatchObject({ kind: 'warn', mode: 'warn' });
+    // Env off beats firm config
+    expect(
+      decideLocusSessionRun(
+        { LOCUS_ENFORCE: 'off' },
+        { locus: { enforce: 'enforce' } },
+      ),
+    ).toEqual({ kind: 'pass-through', mode: 'off' });
+  });
+
   it('mode=off always allows without surfacing blockers', () => {
     const d = decidePreMutateGate(blockedGate, 'off');
     expect(d.allow).toBe(true);
@@ -313,15 +401,23 @@ describe('pre-mutate gate decisions (LOCUS_ENFORCE)', () => {
   });
 
   it('assertLocusPreMutate mode=off never shells (allow without blockers)', () => {
-    const d = assertLocusPreMutate({ LOCUS_ENFORCE: 'off' });
+    // Explicit null config: hermetic (do not read ~/.ashlr).
+    const d = assertLocusPreMutate({ LOCUS_ENFORCE: 'off' }, null);
     expect(d.allow).toBe(true);
     expect(d.mode).toBe('off');
     expect(d.blockers).toEqual([]);
     expect(d.shouldWarn).toBe(false);
   });
 
+  it('assertLocusPreMutate uses config when env unset', () => {
+    const d = assertLocusPreMutate({}, { locus: { enforce: 'off' } });
+    expect(d.allow).toBe(true);
+    expect(d.mode).toBe('off');
+    expect(d.blockers).toEqual([]);
+  });
+
   it('applyLocusPreMutateGate mode=off allows without CLI probe', () => {
-    const d = applyLocusPreMutateGate({ LOCUS_ENFORCE: '0' });
+    const d = applyLocusPreMutateGate({ LOCUS_ENFORCE: '0' }, null);
     expect(d.allow).toBe(true);
     expect(d.mode).toBe('off');
   });
@@ -333,7 +429,7 @@ describe('pre-mutate gate decisions (LOCUS_ENFORCE)', () => {
     process.env.PATH = '/nonexistent-locus-bin-path';
     process.env.Path = '/nonexistent-locus-bin-path';
     try {
-      const d = applyLocusPreMutateGate({ LOCUS_ENFORCE: '1' });
+      const d = applyLocusPreMutateGate({ LOCUS_ENFORCE: '1' }, null);
       expect(d.mode).toBe('enforce');
       expect(d.allow).toBe(false);
       expect(d.blockers.length).toBeGreaterThan(0);
@@ -352,7 +448,7 @@ describe('pre-mutate gate decisions (LOCUS_ENFORCE)', () => {
     process.env.PATH = '/nonexistent-locus-bin-path';
     process.env.Path = '/nonexistent-locus-bin-path';
     try {
-      const d = applyLocusPreMutateGate({ LOCUS_ENFORCE: 'warn' });
+      const d = applyLocusPreMutateGate({ LOCUS_ENFORCE: 'warn' }, null);
       expect(d.mode).toBe('warn');
       expect(d.allow).toBe(true);
       expect(d.shouldWarn).toBe(true);
@@ -606,6 +702,232 @@ describe('applyLocusSessionEnv', () => {
     expect(target.GH_TOKEN).toBeUndefined();
   });
 });
+
+/**
+ * runTask CI session wiring: refuse maps to task.status (never throws);
+ * pass-through when enforce off; mint handle overlays process.env for the body.
+ */
+describe('runTask CI session isolation (LOCUS_CI_BINDING / LOCUS_ENFORCE)', () => {
+  const LOCUS_ENV_KEYS = [
+    'LOCUS_ENFORCE',
+    'LOCUS_CI_BINDING',
+    'LOCUS_BINDING',
+    'LOCUS_SESSION_ID',
+  ] as const;
+
+  function snapshotLocusEnv(): Record<string, string | undefined> {
+    const out: Record<string, string | undefined> = {};
+    for (const k of LOCUS_ENV_KEYS) out[k] = process.env[k];
+    return out;
+  }
+
+  function restoreLocusEnv(prev: Record<string, string | undefined>): void {
+    for (const k of LOCUS_ENV_KEYS) {
+      if (prev[k] === undefined) delete process.env[k];
+      else process.env[k] = prev[k];
+    }
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+    vi.doUnmock('../src/core/integrations/locus.js');
+  });
+
+  it('refuses as task.status=failed when LOCUS_ENFORCE without binding (never throws)', async () => {
+    const prev = snapshotLocusEnv();
+    try {
+      process.env.LOCUS_ENFORCE = '1';
+      delete process.env.LOCUS_CI_BINDING;
+      delete process.env.LOCUS_BINDING;
+      delete process.env.LOCUS_SESSION_ID;
+
+      const { runTask } = await import(
+        '../src/core/run/agent-loop.js?locus-session-refuse=' + randomUUID()
+      );
+      const task = {
+        id: 't-locus-refuse',
+        goal: 'should not run model',
+        deps: [] as string[],
+        status: 'pending' as const,
+      };
+      const chat = vi.fn(async () => ({
+        content: 'should not be called',
+        usage: { tokensIn: 1, tokensOut: 1 },
+      }));
+      const returned = await runTask(
+        task,
+        {
+          id: 'mock',
+          supportsTools: false,
+          chat,
+        },
+        {
+          budget: { maxTokens: 1000, maxSteps: 5, allowCloud: false },
+          usage: { tokensIn: 0, tokensOut: 0, steps: 0, estCostUsd: 0 },
+          onStep: () => {},
+        },
+      );
+      expect(returned).toBe(task);
+      expect(task.status).toBe('failed');
+      expect(task.error).toMatch(/LOCUS_CI_BINDING|LOCUS_BINDING|LOCUS_ENFORCE/);
+      expect(chat).not.toHaveBeenCalled();
+    } finally {
+      restoreLocusEnv(prev);
+    }
+  });
+
+  it('pass-through when enforce off and no binding (model runs)', async () => {
+    const prev = snapshotLocusEnv();
+    try {
+      delete process.env.LOCUS_ENFORCE;
+      delete process.env.LOCUS_CI_BINDING;
+      delete process.env.LOCUS_BINDING;
+      delete process.env.LOCUS_SESSION_ID;
+
+      const { runTask } = await import(
+        '../src/core/run/agent-loop.js?locus-session-passthrough=' + randomUUID()
+      );
+      const task = {
+        id: 't-locus-pass',
+        goal: '2+2?',
+        deps: [] as string[],
+        status: 'pending' as const,
+      };
+      const returned = await runTask(
+        task,
+        {
+          id: 'mock',
+          supportsTools: false,
+          chat: async () => ({
+            content: '4',
+            usage: { tokensIn: 2, tokensOut: 1 },
+          }),
+        },
+        {
+          budget: { maxTokens: 1000, maxSteps: 5, allowCloud: false },
+          usage: { tokensIn: 0, tokensOut: 0, steps: 0, estCostUsd: 0 },
+          onStep: () => {},
+        },
+      );
+      expect(returned.status).toBe('done');
+      expect(returned.result).toBe('4');
+    } finally {
+      restoreLocusEnv(prev);
+    }
+  });
+
+  it('overlays mint handle env on process.env for the task body only', async () => {
+    const prev = snapshotLocusEnv();
+    const seen: { sessionId?: string } = {};
+    try {
+      delete process.env.LOCUS_SESSION_ID;
+      vi.doMock('../src/core/integrations/locus.js', async (importOriginal) => {
+        const actual = await importOriginal<
+          typeof import('../src/core/integrations/locus.js')
+        >();
+        return {
+          ...actual,
+          runWithLocusSessionIfConfigured: async (
+            fn: (handle: {
+              sessionId: string;
+              binding: string;
+              env: NodeJS.ProcessEnv;
+            } | null) => Promise<unknown>,
+          ) =>
+            fn({
+              sessionId: 'sess-mint-test',
+              binding: 'ci-acme',
+              env: {
+                LOCUS_SESSION_ID: 'sess-mint-test',
+                LOCUS_BINDING: 'ci-acme',
+                LOCUS_HOME: '/tmp/locus-mint-test',
+              },
+            }),
+        };
+      });
+
+      const { runTask } = await import(
+        '../src/core/run/agent-loop.js?locus-session-mint=' + randomUUID()
+      );
+      const task = {
+        id: 't-locus-mint',
+        goal: 'observe env',
+        deps: [] as string[],
+        status: 'pending' as const,
+      };
+      await runTask(
+        task,
+        {
+          id: 'mock',
+          supportsTools: false,
+          chat: async () => {
+            seen.sessionId = process.env.LOCUS_SESSION_ID;
+            return {
+              content: 'ok',
+              usage: { tokensIn: 1, tokensOut: 1 },
+            };
+          },
+        },
+        {
+          budget: { maxTokens: 1000, maxSteps: 5, allowCloud: false },
+          usage: { tokensIn: 0, tokensOut: 0, steps: 0, estCostUsd: 0 },
+          onStep: () => {},
+        },
+      );
+      expect(task.status).toBe('done');
+      expect(seen.sessionId).toBe('sess-mint-test');
+      // Restored after body — must not leak mint session into ambient env.
+      expect(process.env.LOCUS_SESSION_ID).toBeUndefined();
+    } finally {
+      restoreLocusEnv(prev);
+    }
+  });
+
+  it('maps LocusMintError to task.status=failed without throwing', async () => {
+    const prev = snapshotLocusEnv();
+    try {
+      vi.doMock('../src/core/integrations/locus.js', async (importOriginal) => {
+        const actual = await importOriginal<
+          typeof import('../src/core/integrations/locus.js')
+        >();
+        return {
+          ...actual,
+          runWithLocusSessionIfConfigured: async () => {
+            throw new actual.LocusMintError('ci mint failed: simulated');
+          },
+        };
+      });
+
+      const { runTask } = await import(
+        '../src/core/run/agent-loop.js?locus-session-mint-err=' + randomUUID()
+      );
+      const task = {
+        id: 't-locus-mint-err',
+        goal: 'fail mint',
+        deps: [] as string[],
+        status: 'pending' as const,
+      };
+      const chat = vi.fn();
+      const returned = await runTask(
+        task,
+        { id: 'mock', supportsTools: false, chat },
+        {
+          budget: { maxTokens: 1000, maxSteps: 5, allowCloud: false },
+          usage: { tokensIn: 0, tokensOut: 0, steps: 0, estCostUsd: 0 },
+          onStep: () => {},
+        },
+      );
+      expect(returned).toBe(task);
+      expect(task.status).toBe('failed');
+      expect(task.error).toMatch(/ci mint failed/);
+      expect(chat).not.toHaveBeenCalled();
+    } finally {
+      restoreLocusEnv(prev);
+    }
+  });
+});
+
 
 describe('MCP merge helpers', () => {
 
