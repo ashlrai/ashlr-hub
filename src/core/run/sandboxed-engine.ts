@@ -35,6 +35,7 @@ import { localize, renderLocalization } from './localize.js';
 
 import type {
   AshlrConfig,
+  ChatMessage,
   DelegationScope,
   EngineId,
   EngineTier,
@@ -70,7 +71,10 @@ import {
   recordAgentDiagnostic,
 } from './agent-diagnostics.js';
 import { resolveEngineSpec } from './engine-registry.js';
-import { buildOpenAICompatibleClient } from './provider-client.js';
+import {
+  buildOpenAICompatibleClient,
+  serializeOpenAICompatibleWireRequest,
+} from './provider-client.js';
 import { runTask } from './agent-loop.js';
 import { adaptivePromptsEnabled } from './model-profile.js';
 import {
@@ -133,6 +137,10 @@ export interface SandboxedEngineResult {
   proposalOutcome?: RunProposalOutcome;
   /** Recovery evidence when process closure was not proven and cleanup was withheld. */
   sandboxRetention?: SandboxRetentionEvidence;
+  /** In-memory-only evidence used by the enclosing TITRR attempt. */
+  retryEvidence?: {
+    mutatingToolActions: number;
+  };
 }
 
 export interface SandboxRetentionEvidence {
@@ -662,6 +670,9 @@ function sandboxedProducerCausalMetadata(fields: {
 // M154: repo-map + localization context prefix (flag-gated)
 // ---------------------------------------------------------------------------
 
+export const LOCAL_API_MODEL_REPO_MAP_TOKEN_CAP = 1_200;
+const LOCAL_API_MODEL_PROMPT_TOKEN_CAP = 2_500;
+
 /**
  * Build a repo-map and/or localization context prefix for the given goal/repo.
  * Returns '' (empty string) when both flags are OFF — byte-identical to the
@@ -674,6 +685,7 @@ export function buildM154ContextPrefix(
   sourceRepo: string,
   cfg: AshlrConfig,
   hintedFiles?: string[],
+  opts?: { repoMapTokenBudget?: number },
 ): string {
   try {
     const repoMapOn = (cfg.foundry as Record<string, unknown> | undefined)?.['repoMap'] === true;
@@ -684,7 +696,11 @@ export function buildM154ContextPrefix(
 
     if (repoMapOn) {
       const map = buildRepoMap(sourceRepo);
-      const rendered = renderRepoMap(map);
+      const rendered = renderRepoMap(map, {
+        ...(opts?.repoMapTokenBudget !== undefined
+          ? { tokenBudget: opts.repoMapTokenBudget }
+          : {}),
+      });
       if (rendered) parts.push(rendered);
 
       if (localizeOn) {
@@ -2614,6 +2630,7 @@ export async function runApiModelSandboxed(
 
     // qwen2.5:72b confirms tool_calls — treat all local-coder models as tool-capable.
     const supportsTools = true;
+    const localApiModel = engine === 'local-coder';
 
     const client = buildOpenAICompatibleClient(
       baseUrl,
@@ -2622,6 +2639,7 @@ export async function runApiModelSandboxed(
       supportsTools,
       undefined,
       opts.signal,
+      localApiModel,
     );
 
     // Engineer tools scoped to the sandbox worktree — write/exec enabled so the
@@ -2644,12 +2662,18 @@ export async function runApiModelSandboxed(
 
     // M154: prepend repo-map + localization context to goal when flags are ON.
     // Flag-OFF → contextPrefix2 is '' → task.goal === goal (byte-identical).
-    const contextPrefix2 = buildM154ContextPrefix(goal, opts.sourceRepo, cfg, scopeHintFiles(delegationScope));
-    const goalWithContext2 = `${renderDelegationScopeForPrompt(delegationScope)}${contextPrefix2 ? contextPrefix2 + goal : goal}`;
+    const contextPrefix2 = buildM154ContextPrefix(
+      goal,
+      opts.sourceRepo,
+      cfg,
+      scopeHintFiles(delegationScope),
+      localApiModel ? { repoMapTokenBudget: LOCAL_API_MODEL_REPO_MAP_TOKEN_CAP } : undefined,
+    );
+    const apiUserPrefix = `${renderDelegationScopeForPrompt(delegationScope)}${contextPrefix2}`;
 
     const task: RunTask = {
       id: 't1',
-      goal: goalWithContext2,
+      goal: localApiModel ? goal : `${apiUserPrefix}${goal}`,
       deps: [],
       status: 'pending',
     };
@@ -2659,6 +2683,7 @@ export async function runApiModelSandboxed(
     // is undefined → runTask system prompt is byte-identical to pre-M264.
     let m264SystemPrefix: string | undefined;
     let m264ContextSummary: RunContextSummary | undefined;
+    let mutatingToolActions = 0;
     if (isLocalContextEnabled(engine, cfg) && delegationScope?.memoryMode !== 'none') {
       try {
         const bundle = await buildLocalContextBundle(goal, sb.worktreePath, cfg);
@@ -2686,6 +2711,49 @@ export async function runApiModelSandboxed(
         }
       },
       systemPrefix: m264SystemPrefix,
+      ...(localApiModel
+        ? {
+            initialPromptBudget: {
+              tokenCap: LOCAL_API_MODEL_PROMPT_TOKEN_CAP,
+              ...(apiUserPrefix ? { userPrefix: apiUserPrefix } : {}),
+              requestSizer: (messages: ChatMessage[], tools: unknown[] | undefined) => Math.max(
+                serializeOpenAICompatibleWireRequest({
+                  model,
+                  messages,
+                  stream: true,
+                  supportsTools,
+                  tools,
+                }).length,
+                serializeOpenAICompatibleWireRequest({
+                  model,
+                  messages,
+                  stream: false,
+                  supportsTools,
+                  tools,
+                }).length,
+              ),
+              onSummary: (summary: RunContextSummary) => {
+                m264ContextSummary = {
+                  ...m264ContextSummary,
+                  ...summary,
+                  prompt: summary.prompt,
+                  retrieval: {
+                    ...(m264ContextSummary?.retrieval ?? summary.retrieval ?? {
+                      source: 'local-context' as const,
+                      hitCount: 0,
+                    }),
+                    injectedChars: summary.retrieval?.injectedChars ?? 0,
+                  },
+                  compression: summary.compression,
+                };
+              },
+            },
+            continuationPolicy: { maxCorrectiveNudges: 1 as const },
+            onToolEffect: () => {
+              mutatingToolActions++;
+            },
+          }
+        : {}),
       // Direct API runs expose only reversible sandbox write tools. A fresh
       // generation lets a discarded sandbox be reconstructed; callers under a
       // durable run lease supply that exact lease generation instead.
@@ -2701,6 +2769,10 @@ export async function runApiModelSandboxed(
     setRunActionCount(actionCounts, 'toolSteps', steps.filter((step) => step.kind === 'tool').length);
     setRunActionCount(actionCounts, 'totalSteps', steps.length);
     const durationMs = Date.now() - runStartedAt;
+    const runTelemetry = {
+      durationMs,
+      ...(m264ContextSummary ? { contextSummary: m264ContextSummary } : {}),
+    };
     const isPartialResult =
       typeof task.result === 'string' &&
       (task.result.startsWith('[budget exceeded') || task.result.startsWith('[step cap reached'));
@@ -2734,6 +2806,7 @@ export async function runApiModelSandboxed(
             tasks: [task],
             steps,
             terminationReason: 'cancelled',
+            runEventSummary: runTelemetry,
           }),
           capturedOutcome,
           actionCounts,
@@ -2742,6 +2815,7 @@ export async function runApiModelSandboxed(
         ...(capturedProposalId ? { proposalId: capturedProposalId } : {}),
         ...(capturedCandidateProposalId ? { candidateProposalId: capturedCandidateProposalId } : {}),
         ...(capturedOutcome ? { proposalOutcome: capturedOutcome } : {}),
+        ...(localApiModel ? { retryEvidence: { mutatingToolActions } } : {}),
       };
     };
 
@@ -2829,6 +2903,7 @@ export async function runApiModelSandboxed(
             usage: finalUsage,
             tasks: [task],
             steps,
+            runEventSummary: runTelemetry,
           }),
           proposalOutcomeResult,
           actionCounts,
@@ -2837,6 +2912,7 @@ export async function runApiModelSandboxed(
         proposalId,
         candidateProposalId,
         proposalOutcome: proposalOutcomeResult,
+        ...(localApiModel ? { retryEvidence: { mutatingToolActions } } : {}),
       };
     }
 
@@ -2908,7 +2984,14 @@ export async function runApiModelSandboxed(
     });
     return {
       state: withProposalOutcome(
-        mk({ status: 'done', result: task.result ?? '', usage: finalUsage, tasks: [task], steps }),
+        mk({
+          status: 'done',
+          result: task.result ?? '',
+          usage: finalUsage,
+          tasks: [task],
+          steps,
+          runEventSummary: runTelemetry,
+        }),
         proposalOutcomeResult,
         actionCounts,
         m264ContextSummary,
@@ -2916,6 +2999,7 @@ export async function runApiModelSandboxed(
       proposalId,
       candidateProposalId,
       proposalOutcome: proposalOutcomeResult,
+      ...(localApiModel ? { retryEvidence: { mutatingToolActions } } : {}),
     };
   } finally {
     if (createdHere) {

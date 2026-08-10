@@ -21,6 +21,7 @@ import type {
   ChatMessage,
   ChatResult,
   ToolExecutor,
+  RunContextSummary,
 } from '../types.js';
 import { addUsage, overBudget, newUsage } from './budget.js';
 import { nullSink } from './streaming.js';
@@ -36,6 +37,247 @@ import {
 /** Maximum steps per task, regardless of budget (safety backstop). */
 const TASK_STEP_CAP = 20;
 const TASK_EFFECT_CAP = 64;
+export const LOCAL_API_MODEL_INITIAL_PROMPT_TOKEN_CAP = 2_500;
+
+type ToolFreeResponseClass = 'complete' | 'continuation-intent' | 'empty';
+
+/**
+ * Classify a tool-free assistant response without retaining or returning its
+ * text. The deliberately narrow patterns cover explicit promises to perform a
+ * next engineering action, not ordinary future-tense conclusions.
+ */
+export function classifyToolFreeResponse(content: string): ToolFreeResponseClass {
+  const trimmed = content.trim();
+  if (!trimmed) return 'empty';
+  const completionEvidence = /(?:\b(?:i|we)\s+(?:implemented|fixed|resolved|completed|updated|added|removed)\b|\b(?:implemented|fixed|resolved|completed|updated|added|removed)\s+(?:the|this|requested)\b|\btests?\s+(?:pass|passed|are\s+passing)\b)/i;
+  if (completionEvidence.test(trimmed)) return 'complete';
+  const futureAction = /^(?:(?:next|now)[,:]?\s+)?(?:i(?:'ll|\s+will|\s+need\s+to|\s+am\s+going\s+to)|let\s+me|we\s+need\s+to)\s+(?:inspect|read|check|look|search|open|edit|update|modify|run|test|verify|fix|implement|continue|proceed|investigate|review)\b[^\n]*[.!:]?$/i;
+  const paragraphs = trimmed.split(/\n\s*\n/u).map((paragraph) => paragraph.trim()).filter(Boolean);
+  return paragraphs.length > 0 && paragraphs.every((paragraph) => futureAction.test(paragraph))
+    ? 'continuation-intent'
+    : 'complete';
+}
+
+const OMITTED_CONTEXT_MARKER = '[optional context omitted]';
+const MINIMAL_LOCAL_SYSTEM_PROMPT =
+  'Complete the task directly. Use available tools when needed, then return a concise final result or explicit blocker.';
+
+function semanticUnits(value: string): string[] {
+  if (!value) return [];
+  const paragraphs = value.split(/\r?\n\s*\r?\n/u).map((part) => part.trim()).filter(Boolean);
+  if (paragraphs.length > 1) return paragraphs;
+  const lines = value.split(/\r?\n/u).map((part) => part.trim()).filter(Boolean);
+  if (lines.length > 1) return lines;
+  return Array.from(value.matchAll(/\S+(?:\s+|$)/gu), (match) => match[0]!.trimEnd()).filter(Boolean);
+}
+
+type RequestSizer = (messages: ChatMessage[], tools: unknown[] | undefined) => number;
+
+function serializedRequestChars(
+  messages: ChatMessage[],
+  tools?: unknown[],
+  requestSizer?: RequestSizer,
+): number {
+  try {
+    if (requestSizer) return requestSizer(messages, tools);
+    return JSON.stringify({
+      messages,
+      ...(tools && tools.length > 0 ? { tools, tool_choice: 'auto' } : {}),
+    }).length;
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+function appendWholeSections(
+  current: string,
+  value: string | undefined,
+  joiner: string,
+  fits: (candidate: string) => boolean,
+): { value: string; admittedChars: number; dropped: boolean } {
+  const units = semanticUnits(value ?? '');
+  if (units.length === 0) return { value: current, admittedChars: 0, dropped: false };
+  let result = current;
+  let admittedChars = 0;
+  let admitted = 0;
+  for (const unit of units) {
+    const candidate = result ? `${result}${joiner}${unit}` : unit;
+    if (!fits(candidate)) break;
+    result = candidate;
+    admittedChars += unit.length;
+    admitted++;
+  }
+  if (admitted < units.length) {
+    const candidate = result
+      ? `${result}${joiner}${OMITTED_CONTEXT_MARKER}`
+      : OMITTED_CONTEXT_MARKER;
+    if (fits(candidate)) result = candidate;
+  }
+  return { value: result, admittedChars, dropped: admitted < units.length };
+}
+
+function promptRatio(value: number, limit: number): number {
+  if (limit <= 0) return 0;
+  return Math.round(Math.max(0, Math.min(1, value / limit)) * 1_000) / 1_000;
+}
+
+function assembleBoundedInitialPrompt(input: {
+  baseSystem: string;
+  systemPrefix?: string;
+  userPrefix?: string;
+  goal: string;
+  tokenCap: number;
+  toolCount: number;
+  tools?: unknown[];
+  requestSizer?: RequestSizer;
+}): { ok: true; system: string; user: string; summary: RunContextSummary } | { ok: false; reason: string } {
+  const charCap = Math.max(256, Math.trunc(input.tokenCap) * 4);
+  const rawMessages: ChatMessage[] = [
+    { role: 'system', content: input.systemPrefix ? `${input.systemPrefix}\n\n${input.baseSystem}` : input.baseSystem },
+    { role: 'user', content: input.userPrefix ? `${input.userPrefix}${input.goal}` : input.goal },
+  ];
+  const inputChars = serializedRequestChars(rawMessages, input.tools, input.requestSizer);
+
+  let baseSystem = input.baseSystem;
+  const baseFits = (candidate: string): boolean => serializedRequestChars([
+    { role: 'system', content: candidate },
+    { role: 'user', content: input.goal },
+  ], input.tools, input.requestSizer) <= charCap;
+  if (!baseFits(baseSystem)) {
+    const compacted = appendWholeSections('', input.baseSystem, '\n\n', baseFits);
+    baseSystem = compacted.value;
+    if (compacted.admittedChars === 0 || !baseSystem || !baseFits(baseSystem)) {
+      baseSystem = MINIMAL_LOCAL_SYSTEM_PROMPT;
+    }
+  }
+  if (!baseFits(baseSystem)) {
+    return {
+      ok: false,
+      reason: `Local API-model objective and tool schemas exceed the ${input.tokenCap}-token request budget.`,
+    };
+  }
+
+  let systemPrefix = '';
+  const systemContext = appendWholeSections(
+    '',
+    input.systemPrefix,
+    '\n\n',
+    (candidate) => serializedRequestChars([
+      { role: 'system', content: `${candidate}\n\n${baseSystem}` },
+      { role: 'user', content: input.goal },
+    ], input.tools, input.requestSizer) <= charCap,
+  );
+  systemPrefix = systemContext.value;
+  const system = systemPrefix ? `${systemPrefix}\n\n${baseSystem}` : baseSystem;
+
+  let userPrefix = '';
+  const userContext = appendWholeSections(
+    '',
+    input.userPrefix,
+    '\n\n',
+    (candidate) => serializedRequestChars([
+      { role: 'system', content: system },
+      { role: 'user', content: `${candidate}\n\n${input.goal}` },
+    ], input.tools, input.requestSizer) <= charCap,
+  );
+  userPrefix = userContext.value;
+  const user = userPrefix ? `${userPrefix}\n\n${input.goal}` : input.goal;
+  const outputChars = serializedRequestChars([
+    { role: 'system', content: system },
+    { role: 'user', content: user },
+  ], input.tools, input.requestSizer);
+  const injectedChars = systemContext.admittedChars + userContext.admittedChars;
+  const layersIncluded: NonNullable<NonNullable<RunContextSummary['prompt']>['layersIncluded']> = ['base'];
+  if (input.toolCount > 0) layersIncluded.push('tool');
+  if (injectedChars > 0) layersIncluded.push('memory');
+
+  return {
+    ok: true,
+    system,
+    user,
+    summary: {
+      prompt: {
+        role: 'executor',
+        profileId: 'local-api-model-bounded-v1',
+        estimatedPromptTokens: Math.ceil(outputChars / 4),
+        promptCharCap: charCap,
+        assembledSystemChars: system.length,
+        promptBudgetRatio: promptRatio(outputChars, charCap),
+        layersIncluded,
+        toolCount: input.toolCount,
+      },
+      retrieval: {
+        source: 'local-context',
+        hitCount: 0,
+        injectedHitCount: 0,
+        injectedChars,
+      },
+      compression: {
+        source: 'prompt-budget',
+        strategy: 'drop-layer',
+        inputChars,
+        outputChars,
+        maxChars: charCap,
+        droppedChars: Math.max(0, inputChars - outputChars),
+        compressionRatio: inputChars > 0 ? promptRatio(outputChars, inputChars) : 1,
+        truncated: outputChars < inputChars,
+        ...((systemContext.dropped || userContext.dropped || baseSystem !== input.baseSystem)
+          ? { droppedLayers: ['optional-context'] }
+          : {}),
+      },
+    },
+  };
+}
+
+function boundedMessagesForRequest(
+  messages: ChatMessage[],
+  tools: unknown[] | undefined,
+  charCap: number,
+  requestSizer?: RequestSizer,
+): { ok: true; messages: ChatMessage[]; requestChars: number } | { ok: false; reason: string } {
+  const fullChars = serializedRequestChars(messages, tools, requestSizer);
+  if (fullChars <= charCap) return { ok: true, messages, requestChars: fullChars };
+  const mandatory = messages.slice(0, 2);
+  if (serializedRequestChars(mandatory, tools, requestSizer) > charCap) {
+    return { ok: false, reason: 'Local API-model immutable objective no longer fits the request budget.' };
+  }
+
+  const selected: ChatMessage[] = [];
+  for (let index = messages.length - 1; index >= 2; index--) {
+    const message = messages[index]!;
+    const candidate = [...mandatory, message, ...selected];
+    if (serializedRequestChars(candidate, tools, requestSizer) <= charCap) {
+      selected.unshift(message);
+      continue;
+    }
+    if (selected.length > 0) continue;
+
+    const units = semanticUnits(message.content);
+    let low = 0;
+    let high = units.length;
+    let best: ChatMessage | undefined;
+    while (low <= high) {
+      const midpoint = Math.floor((low + high) / 2);
+      const content = midpoint > 0
+        ? `${units.slice(0, midpoint).join('\n\n')}\n\n${OMITTED_CONTEXT_MARKER}`
+        : OMITTED_CONTEXT_MARKER;
+      const compacted = { ...message, content };
+      if (serializedRequestChars([...mandatory, compacted], tools, requestSizer) <= charCap) {
+        best = compacted;
+        low = midpoint + 1;
+      } else {
+        high = midpoint - 1;
+      }
+    }
+    if (!best && message.role === 'tool') {
+      return { ok: false, reason: 'Local API-model tool result cannot be represented inside the request budget.' };
+    }
+    if (best) selected.unshift(best);
+  }
+
+  const bounded = [...mandatory, ...selected];
+  return { ok: true, messages: bounded, requestChars: serializedRequestChars(bounded, tools, requestSizer) };
+}
 
 /** Completion handle returned after the caller atomically reserves a model step. */
 export interface ModelStepReservation {
@@ -110,6 +352,17 @@ export async function runTask(
      * to pre-M264 behavior. Never affects frontier engines.
      */
     systemPrefix?: string;
+    /** Local API-model-only hard cap and separately supplied context prefix. */
+    initialPromptBudget?: {
+      tokenCap: number;
+      userPrefix?: string;
+      requestSizer?: RequestSizer;
+      onSummary?: (summary: RunContextSummary) => void;
+    };
+    /** Opt-in terminal-response discipline for local API-model execution. */
+    continuationPolicy?: { maxCorrectiveNudges: 1 };
+    /** Metadata-only notification after a mutating tool effect is committed. */
+    onToolEffect?: (effect: { kind: 'mutating'; safety: Exclude<ToolSpec['safety'], 'read' | undefined> }) => void;
     /** Exact whole-run generation used to bind mutating tool evidence. */
     effectJournal?: { scopeId: string; generation: string };
   },
@@ -255,20 +508,49 @@ export async function runTask(
         : 'Do not request tools — respond with a final textual answer only.');
   }
 
-  // M264: prepend local-context bundle when provided.
-  // When systemPrefix is absent (default) this is a no-op — systemContent unchanged.
-  if (ctx.systemPrefix && ctx.systemPrefix.length > 0) {
+  let userContent = task.goal;
+  let initialPromptSummary: RunContextSummary | undefined;
+  if (ctx.initialPromptBudget) {
+    const bounded = assembleBoundedInitialPrompt({
+      baseSystem: systemContent,
+      systemPrefix: ctx.systemPrefix,
+      userPrefix: ctx.initialPromptBudget.userPrefix,
+      goal: task.goal,
+      tokenCap: ctx.initialPromptBudget.tokenCap,
+      toolCount: toolSpecs?.length ?? 0,
+      tools: toolSpecs,
+      requestSizer: ctx.initialPromptBudget.requestSizer,
+    });
+    if (!bounded.ok) {
+      task.status = 'failed';
+      task.error = bounded.reason;
+      task.usage = taskUsage;
+      return task;
+    }
+    systemContent = bounded.system;
+    userContent = bounded.user;
+    initialPromptSummary = bounded.summary;
+    try {
+      ctx.initialPromptBudget.onSummary?.(bounded.summary);
+    } catch {
+      // Telemetry callbacks never affect execution.
+    }
+  } else if (ctx.systemPrefix && ctx.systemPrefix.length > 0) {
+    // Non-local callers retain the pre-existing byte-identical assembly path.
     systemContent = ctx.systemPrefix + '\n\n' + systemContent;
   }
 
   // Build the initial message list.
   const messages: ChatMessage[] = [
     { role: 'system', content: systemContent },
-    { role: 'user', content: task.goal },
+    { role: 'user', content: userContent },
   ];
 
   task.status = 'running';
   let effectOrdinal = 0;
+  let toolFreeCorrections = 0;
+  let awaitingContinuationCorrection = false;
+  let maxSerializedRequestChars = initialPromptSummary?.compression?.outputChars ?? 0;
 
   try {
     // Main agent loop.
@@ -283,6 +565,12 @@ export async function runTask(
 
       // Per-task step cap (safety backstop independent of global budget).
       if (stepCount >= stepCap) {
+        if (ctx.continuationPolicy && awaitingContinuationCorrection) {
+          task.status = 'failed';
+          task.error = 'Model stopped at the step cap after stating continuation intent without completing the task.';
+          delete task.result;
+          break;
+        }
         const partial = lastAssistantContent(messages);
         if (partial) {
           task.status = 'done';
@@ -292,6 +580,40 @@ export async function runTask(
           task.error = `Step cap of ${stepCap} reached without producing a result.`;
         }
         break;
+      }
+
+      let requestMessages = messages;
+      if (ctx.initialPromptBudget) {
+        const charCap = Math.max(256, Math.trunc(ctx.initialPromptBudget.tokenCap) * 4);
+        const boundedRequest = boundedMessagesForRequest(
+          messages,
+          toolSpecs,
+          charCap,
+          ctx.initialPromptBudget.requestSizer,
+        );
+        if (!boundedRequest.ok) {
+          task.status = 'failed';
+          task.error = boundedRequest.reason;
+          delete task.result;
+          break;
+        }
+        requestMessages = boundedRequest.messages;
+        maxSerializedRequestChars = Math.max(maxSerializedRequestChars, boundedRequest.requestChars);
+        if (initialPromptSummary?.prompt) {
+          initialPromptSummary = {
+            ...initialPromptSummary,
+            prompt: {
+              ...initialPromptSummary.prompt,
+              estimatedPromptTokens: Math.ceil(maxSerializedRequestChars / 4),
+              promptBudgetRatio: promptRatio(maxSerializedRequestChars, charCap),
+            },
+          };
+          try {
+            ctx.initialPromptBudget.onSummary?.(initialPromptSummary);
+          } catch {
+            // Telemetry callbacks never affect execution.
+          }
+        }
       }
 
       // The authority callback is synchronous: parallel tasks cannot all pass a
@@ -323,7 +645,7 @@ export async function runTask(
         if (typeof client.chatStream === 'function') {
           // Stream mode: onDelta emits model-delta events for each token chunk.
           result = await client.chatStream(
-            messages,
+            requestMessages,
             toolSpecs,
             (chunk: string) => {
               if (!ctx.signal?.aborted && chunk.length > 0) {
@@ -334,7 +656,7 @@ export async function runTask(
           );
         } else {
           // Non-streaming fallback: emit the full content as a single delta.
-          result = await client.chat(messages, toolSpecs, ctx.signal);
+          result = await client.chat(requestMessages, toolSpecs, ctx.signal);
           if (!ctx.signal?.aborted && result.content.length > 0) {
             emitStream({ kind: 'model-delta', taskId: task.id, text: result.content });
           }
@@ -368,6 +690,20 @@ export async function runTask(
         tokensOut: result.usage.tokensOut,
       };
       accumulateUsage(stepUsageDelta);
+      if (stepCount === 1 && initialPromptSummary?.prompt) {
+        initialPromptSummary = {
+          ...initialPromptSummary,
+          prompt: {
+            ...initialPromptSummary.prompt,
+            providerPromptTokens: result.usage.tokensIn,
+          },
+        };
+        try {
+          ctx.initialPromptBudget?.onSummary?.(initialPromptSummary);
+        } catch {
+          // Telemetry callbacks never affect execution.
+        }
+      }
 
       // Emit model step.
       const modelSummary = result.content
@@ -389,8 +725,18 @@ export async function runTask(
         content: result.content,
       });
 
+      const responseClass = !ctx.continuationPolicy || (result.toolCalls && result.toolCalls.length > 0)
+        ? 'complete'
+        : classifyToolFreeResponse(result.content);
+
       // Post-step budget check.
       if (overBudget(ctx.usage, ctx.budget)) {
+        if (responseClass === 'continuation-intent') {
+          task.status = 'failed';
+          task.error = 'Model exhausted the budget after stating continuation intent without completing the task.';
+          delete task.result;
+          break;
+        }
         const partial = result.content || lastAssistantContent(messages);
         if (partial) {
           task.status = 'done';
@@ -480,6 +826,16 @@ export async function runTask(
               emitStep('tool', `${tc.name}: effect outcome uncertain`);
               break;
             }
+            if (effectful) {
+              try {
+                ctx.onToolEffect?.({
+                  kind: 'mutating',
+                  safety: safety as Exclude<ToolSpec['safety'], 'read' | undefined>,
+                });
+              } catch {
+                // Metadata callbacks never affect execution.
+              }
+            }
           } else {
             // No executor — report the tool as unavailable.
             toolResultContent = `Tool '${tc.name}' is not available in this context. Please proceed without it.`;
@@ -501,6 +857,7 @@ export async function runTask(
         if (cancelIfRequested() || task.status === 'failed') break;
 
         // Continue the loop to let the model react to tool results.
+        awaitingContinuationCorrection = false;
         continue;
       }
 
@@ -515,17 +872,47 @@ export async function runTask(
         continue;
       }
 
+      if (responseClass === 'continuation-intent') {
+        if (toolFreeCorrections >= ctx.continuationPolicy!.maxCorrectiveNudges) {
+          task.status = 'failed';
+          task.error = 'Model stated continuation intent twice without completing the task.';
+          delete task.result;
+          break;
+        }
+        toolFreeCorrections++;
+        awaitingContinuationCorrection = true;
+        messages.push({
+          role: 'user',
+          content: 'Complete the next action now. Use a tool if needed, or return a concise final result or explicit blocker; do not narrate an intended future action.',
+        });
+        continue;
+      }
+
       // No tool calls — this is a final answer.
       if (result.content && result.content.trim().length > 0) {
+        awaitingContinuationCorrection = false;
         task.status = 'done';
         task.result = result.content;
         break;
       }
 
-      // Empty content and no tool calls — nudge the model once more.
+      if (ctx.continuationPolicy && toolFreeCorrections >= ctx.continuationPolicy.maxCorrectiveNudges) {
+        task.status = 'failed';
+        task.error = 'Model returned an empty response twice without completing the task.';
+        delete task.result;
+        break;
+      }
+
+      // Empty content and no tool calls — one local-only corrective nudge.
+      if (ctx.continuationPolicy) {
+        toolFreeCorrections++;
+        awaitingContinuationCorrection = true;
+      }
       messages.push({
         role: 'user',
-        content: 'Please provide your answer.',
+        content: ctx.continuationPolicy
+          ? 'Return a concise final result or explicit blocker now; do not return an empty response.'
+          : 'Please provide your answer.',
       });
     }
   } catch (unexpectedErr) {

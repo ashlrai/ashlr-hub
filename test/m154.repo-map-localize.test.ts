@@ -26,7 +26,10 @@ import { createHash } from 'node:crypto';
 
 import { buildRepoMap, renderRepoMap } from '../src/core/run/repo-map.js';
 import { localize, renderLocalization } from '../src/core/run/localize.js';
-import { buildM154ContextPrefix } from '../src/core/run/sandboxed-engine.js';
+import {
+  buildM154ContextPrefix,
+  LOCAL_API_MODEL_REPO_MAP_TOKEN_CAP,
+} from '../src/core/run/sandboxed-engine.js';
 import type { AshlrConfig } from '../src/core/types.js';
 import type { RepoMap } from '../src/core/run/repo-map.js';
 
@@ -580,6 +583,25 @@ describe('M154 flag-gated wiring — sandboxed-engine context', () => {
 
     expect(prefix).toContain('<!-- repo-map (M154) -->');
     expect(prefix).toContain('<!-- localization (M154) -->');
+  });
+
+  it('local API-model callers can cap repo-map context at 1200 estimated tokens', () => {
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 180; i++) {
+      files[`src/module-${String(i).padStart(3, '0')}.ts`] =
+        `export function module${i}(input: string): string { return input; }\n`;
+    }
+    const dir = makeRepo(files);
+    const prefix = buildM154ContextPrefix(
+      'update module behavior',
+      dir,
+      config({ repoMap: true, localization: false }),
+      undefined,
+      { repoMapTokenBudget: LOCAL_API_MODEL_REPO_MAP_TOKEN_CAP },
+    );
+
+    expect(prefix).toContain('<!-- repo-map (M154) -->');
+    expect(prefix.length).toBeLessThanOrEqual(LOCAL_API_MODEL_REPO_MAP_TOKEN_CAP * 4 + 2);
   });
 });
 

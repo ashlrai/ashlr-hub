@@ -809,6 +809,32 @@ function toOpenAIMessages(
   });
 }
 
+export interface OpenAICompatibleWireRequest {
+  model: string;
+  messages: ChatMessage[];
+  stream: boolean;
+  supportsTools: boolean;
+  tools?: unknown[];
+  temperature?: number;
+}
+
+/** The single serializer used for both local request budgeting and HTTP emission. */
+export function serializeOpenAICompatibleWireRequest(
+  input: OpenAICompatibleWireRequest,
+): string {
+  const body: Record<string, unknown> = {
+    model: input.model,
+    messages: toOpenAIMessages(input.messages),
+    stream: input.stream,
+  };
+  if (input.temperature !== undefined) body['temperature'] = input.temperature;
+  if (input.supportsTools && input.tools && input.tools.length > 0) {
+    body['tools'] = input.tools;
+    body['tool_choice'] = 'auto';
+  }
+  return JSON.stringify(body);
+}
+
 /**
  * Build an OpenAI-compatible chat client that works with any provider speaking
  * the /v1/chat/completions protocol (LM Studio, NIM, Moonshot, OpenRouter, …).
@@ -825,8 +851,23 @@ export function buildOpenAICompatibleClient(
   supportsTools: boolean,
   temperature?: number,
   signal?: AbortSignal,
+  accountSerializedToolsInFallback = false,
 ): ProviderClient {
   const chatUrl = baseUrl.replace(/\/+$/, '') + '/chat/completions';
+
+  function fallbackInputTokens(messages: ChatMessage[], tools?: unknown[]): number {
+    if (!accountSerializedToolsInFallback) {
+      return estimateTokens(messages.map((message) => message.content).join(' '));
+    }
+    return estimateTokens(serializeOpenAICompatibleWireRequest({
+      model,
+      messages,
+      stream: false,
+      supportsTools,
+      tools,
+      temperature,
+    }));
+  }
 
   function buildHeaders(): Record<string, string> {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -841,20 +882,14 @@ export function buildOpenAICompatibleClient(
 
     async chat(messages: ChatMessage[], tools?: unknown[], callSignal?: AbortSignal): Promise<ChatResult> {
       const requestSignal = callSignal ?? signal;
-      const openaiMessages = toOpenAIMessages(messages);
-
-      const body: Record<string, unknown> = {
+      const body = serializeOpenAICompatibleWireRequest({
         model,
-        messages: openaiMessages,
+        messages,
         stream: false,
-      };
-
-      if (temperature !== undefined) body['temperature'] = temperature;
-
-      if (supportsTools && tools && tools.length > 0) {
-        body['tools'] = tools;
-        body['tool_choice'] = 'auto';
-      }
+        supportsTools,
+        tools,
+        temperature,
+      });
 
       let response: Response;
       let cleanupResponse = () => {};
@@ -862,7 +897,7 @@ export function buildOpenAICompatibleClient(
         const opened = await fetchWithTimeout(chatUrl, {
           method: 'POST',
           headers: buildHeaders(),
-          body: JSON.stringify(body),
+          body,
         }, FETCH_TIMEOUT_MS, requestSignal);
         response = opened.response;
         cleanupResponse = opened.cleanup;
@@ -910,7 +945,7 @@ export function buildOpenAICompatibleClient(
       const tokensIn =
         promptTokens > 0
           ? promptTokens
-          : estimateTokens(messages.map((m) => m.content).join(' '));
+          : fallbackInputTokens(messages, tools);
       const tokensOut =
         completionTokens > 0 ? completionTokens : estimateTokens(content);
 
@@ -942,20 +977,14 @@ export function buildOpenAICompatibleClient(
       // Attempt SSE streaming; fall back to chat() on any error.
       let cleanupStream = () => {};
       try {
-        const openaiMessages = toOpenAIMessages(messages);
-
-        const body: Record<string, unknown> = {
+        const body = serializeOpenAICompatibleWireRequest({
           model,
-          messages: openaiMessages,
+          messages,
           stream: true,
-        };
-
-        if (temperature !== undefined) body['temperature'] = temperature;
-
-        if (supportsTools && tools && tools.length > 0) {
-          body['tools'] = tools;
-          body['tool_choice'] = 'auto';
-        }
+          supportsTools,
+          tools,
+          temperature,
+        });
 
         let response: Response;
         let streamController: AbortController;
@@ -965,7 +994,7 @@ export function buildOpenAICompatibleClient(
             {
               method: 'POST',
               headers: buildHeaders(),
-              body: JSON.stringify(body),
+              body,
             },
             STREAM_TIMEOUT_MS,
             requestSignal,
@@ -1071,7 +1100,7 @@ export function buildOpenAICompatibleClient(
           reader.releaseLock();
         }
 
-        if (tokensIn === 0) tokensIn = estimateTokens(messages.map((m) => m.content).join(' '));
+        if (tokensIn === 0) tokensIn = fallbackInputTokens(messages, tools);
         if (tokensOut === 0) tokensOut = estimateTokens(accContent);
 
         let toolCalls =
