@@ -73,12 +73,46 @@ describe('release scripts', () => {
       encoding: 'utf8',
     });
     expect(body.trim().length).toBeGreaterThan(50);
+    const implicitBody = execFileSync('node', [join(REPO_ROOT, 'scripts/extract-changelog.mjs')], {
+      encoding: 'utf8',
+    });
+    expect(implicitBody).toBe(body);
 
     expect(() =>
-      execFileSync('node', [join(REPO_ROOT, 'scripts/extract-changelog.mjs'), '0.0.1-nope'], {
+      execFileSync('node', [join(REPO_ROOT, 'scripts/extract-changelog.mjs'), '0.0.1'], {
         encoding: 'utf8', stdio: 'pipe',
       }),
     ).toThrow();
+  });
+
+  it.each([
+    '3.2.0.*',
+    '3.2.0[abc]',
+    '3.2.0\\',
+    '3.2.0/../3.1.0',
+    '3.2.0\n## [3.1.0]',
+    '03.2.0',
+    '3.02.0',
+    '3.2.00',
+    'v3.2.0',
+    '3.2',
+    '3.2.0-beta.1',
+    '3.2.0+build',
+    '1'.repeat(65),
+    '',
+  ])('extract-changelog rejects noncanonical argv %j without regex interpretation', (version) => {
+    expect(() =>
+      execFileSync('node', [join(REPO_ROOT, 'scripts/extract-changelog.mjs'), version], {
+        encoding: 'utf8', stdio: 'pipe',
+      }),
+    ).toThrow();
+  });
+
+  it('extract-changelog never compiles release argv as a regular expression', () => {
+    const source = readFileSync(join(REPO_ROOT, 'scripts/extract-changelog.mjs'), 'utf8');
+    expect(source).not.toContain('new RegExp');
+    expect(source).toContain('canonicalVersionRe');
+    expect(source).toContain('line.startsWith(`${heading} — `)');
   });
 });
 
@@ -105,6 +139,7 @@ describe('release workflow', () => {
   }
   interface ReleaseWorkflow {
     on?: { push?: { tags?: string[] } };
+    permissions?: Record<string, string>;
     jobs?: Record<string, WorkflowJob>;
   }
   const parsed = parseYaml(workflow) as ReleaseWorkflow;
@@ -119,8 +154,10 @@ describe('release workflow', () => {
 
   it('is tag-triggered and reuses the exact native CI gate before publish', () => {
     expect(parsed.on?.push?.tags).toEqual(['v*']);
+    expect(parsed.permissions).toEqual({});
     expect(Object.keys(jobs)).toEqual(['verify', 'publish', 'release']);
     expect(verifyJob.uses).toBe('./.github/workflows/ci.yml');
+    expect(verifyJob.permissions).toEqual({ contents: 'read' });
     expect(ciWorkflow).toMatch(/(?:^|\n)\s{2}workflow_call:\s*(?:\n|$)/);
     expect(verifyJob['runs-on']).toBeUndefined();
     expect(verifyJob.steps).toBeUndefined();

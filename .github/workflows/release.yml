@@ -13,10 +13,14 @@ on:
   push:
     tags: ["v*"]
 
+permissions: {}
+
 jobs:
   verify:
     name: Verify (full native CI gate)
     uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
 
   publish:
     name: Publish to npm

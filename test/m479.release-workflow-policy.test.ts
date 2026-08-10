@@ -105,7 +105,11 @@ describe('M479 npm release workflow supply-chain admission', () => {
 
   it('preserves explicit tag activation, native CI, provenance, and version gates', () => {
     expect(workflowText).toContain('tags: ["v*"]');
-    expect(jobs.verify).toMatchObject({ uses: './.github/workflows/ci.yml' });
+    expect(workflow.permissions).toEqual({});
+    expect(jobs.verify).toMatchObject({
+      uses: './.github/workflows/ci.yml',
+      permissions: { contents: 'read' },
+    });
     expect(publish.needs).toBe('verify');
     expect(publish.permissions).toEqual({ contents: 'read', 'id-token': 'write' });
     expect(release.permissions).toEqual({ contents: 'write' });
