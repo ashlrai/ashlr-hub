@@ -79,6 +79,10 @@ import {
 } from '../util/execution-lease.js';
 import { assertMayMutate, killSwitchOn } from '../sandbox/policy.js';
 import {
+  applyLocusPreMutateGate,
+  formatPreMutateBlockers,
+} from '../integrations/locus.js';
+import {
   acquireOutwardMutationFence,
   ownsOutwardMutationFence,
   releaseOutwardMutationFence,
@@ -1549,6 +1553,21 @@ async function runSwarmInternal(
       propose: resumeSnapshot.resumeOptions?.propose ?? opts.propose,
       noCapture: resumeSnapshot.resumeOptions?.noCapture ?? opts.noCapture,
     };
+  }
+
+  // -------------------------------------------------------------------------
+  // Locus identity pre-mutate gate (opt-in via LOCUS_ENFORCE).
+  // Early refuse before sandbox/plan work. Default off; enforce fails closed.
+  // spawnEngine is also gated — this covers swarm entry + fleet tick paths.
+  // -------------------------------------------------------------------------
+  {
+    const locusGate = applyLocusPreMutateGate(process.env);
+    if (!locusGate.allow) {
+      const msg =
+        formatPreMutateBlockers(locusGate) ||
+        'locus pre-mutate enforce: blocked (no detail)';
+      return refuseFreshIdentity(msg);
+    }
   }
 
   // -------------------------------------------------------------------------

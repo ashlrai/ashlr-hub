@@ -19,12 +19,18 @@
  *   parseMcpConfigJson, mergeLocusIntoMcpConfig, locusServerSpec
  *
  * Shell-out: locusAvailable, locusAgentReport, ensureLocusReady, locusFleetGate,
- *   assertLocusPreMutate, withLocusSession, locusDoctorLine, registerLocusInMcpConfig
+ *   assertLocusPreMutate, applyLocusPreMutateGate, withLocusSession,
+ *   locusDoctorLine, registerLocusInMcpConfig
  *
  * Pre-mutate enforcement:
  *   LOCUS_ENFORCE=1|true|yes|enforce → fail closed when fleet gate blocks
  *   LOCUS_ENFORCE=warn|log           → log blockers, allow dispatch
  *   unset / 0 / off                  → no CLI probe (monorepo-safe default)
+ *
+ * Call sites (opt-in only — never always-on):
+ *   - spawnEngine (CLI engine dispatch)
+ *   - runSwarmInternal (fleet multi-task entry)
+ *   - runApiModelSandboxed (in-process producers that skip spawnEngine)
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
@@ -798,6 +804,41 @@ export function assertLocusPreMutate(
 export function formatPreMutateBlockers(decision: LocusPreMutateDecision): string {
   if (!decision.blockers.length) return "";
   return `locus pre-mutate ${decision.mode}: ${decision.blockers.join("; ")}`;
+}
+
+/**
+ * Shared call-site helper: probe (when LOCUS_ENFORCE is on), log warn/block to
+ * stderr, return the decision. Callers refuse when `!decision.allow`.
+ *
+ * Keeps spawnEngine / runSwarm / runApiModelSandboxed on one logging contract.
+ * Never throws. Never logs secrets.
+ */
+export function applyLocusPreMutateGate(
+  env?: NodeJS.ProcessEnv,
+): LocusPreMutateDecision {
+  const decision = assertLocusPreMutate(env);
+  if (!decision.allow) {
+    const msg =
+      formatPreMutateBlockers(decision) ||
+      "locus pre-mutate enforce: blocked (no detail)";
+    try {
+      process.stderr.write(`[ashlr] ${msg}\n`);
+    } catch {
+      // stderr may be closed in tests; ignore
+    }
+    return decision;
+  }
+  if (decision.shouldWarn) {
+    const msg = formatPreMutateBlockers(decision);
+    if (msg) {
+      try {
+        process.stderr.write(`[ashlr] ${msg}\n`);
+      } catch {
+        // ignore
+      }
+    }
+  }
+  return decision;
 }
 
 // ---------------------------------------------------------------------------

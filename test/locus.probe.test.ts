@@ -1,9 +1,12 @@
 /**
  * Pure-helper unit tests for src/core/integrations/locus.ts.
  * No real spawn — only parse/gate helpers (fail-closed contract).
+ * Site-wiring tests mock applyLocusPreMutateGate so LOCUS_ENFORCE is exercised
+ * without a real locus CLI (monorepo-safe).
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { randomUUID } from 'node:crypto';
 import {
   REQUIRED_SERVERS,
   parseStatusOneline,
@@ -22,6 +25,8 @@ import {
   resolveLocusEnforceMode,
   decidePreMutateGate,
   formatPreMutateBlockers,
+  applyLocusPreMutateGate,
+  assertLocusPreMutate,
   LocusMintError,
 } from '../src/core/integrations/locus.js';
 
@@ -303,6 +308,190 @@ describe('pre-mutate gate decisions (LOCUS_ENFORCE)', () => {
     expect(decision.blockers.some((b) => /unpinned|not ready|ready=false/.test(b))).toBe(
       true,
     );
+  });
+
+  it('assertLocusPreMutate mode=off never shells (allow without blockers)', () => {
+    const d = assertLocusPreMutate({ LOCUS_ENFORCE: 'off' });
+    expect(d.allow).toBe(true);
+    expect(d.mode).toBe('off');
+    expect(d.blockers).toEqual([]);
+    expect(d.shouldWarn).toBe(false);
+  });
+
+  it('applyLocusPreMutateGate mode=off allows without CLI probe', () => {
+    const d = applyLocusPreMutateGate({ LOCUS_ENFORCE: '0' });
+    expect(d.allow).toBe(true);
+    expect(d.mode).toBe('off');
+  });
+
+  it('applyLocusPreMutateGate mode=enforce fails closed when locus CLI missing', () => {
+    // locusAvailable() uses process.env.PATH (not the env arg) for `which`.
+    const prevPath = process.env.PATH;
+    const prevPathWin = process.env.Path;
+    process.env.PATH = '/nonexistent-locus-bin-path';
+    process.env.Path = '/nonexistent-locus-bin-path';
+    try {
+      const d = applyLocusPreMutateGate({ LOCUS_ENFORCE: '1' });
+      expect(d.mode).toBe('enforce');
+      expect(d.allow).toBe(false);
+      expect(d.blockers.length).toBeGreaterThan(0);
+      expect(formatPreMutateBlockers(d)).toMatch(/locus pre-mutate enforce/);
+    } finally {
+      if (prevPath === undefined) delete process.env.PATH;
+      else process.env.PATH = prevPath;
+      if (prevPathWin === undefined) delete process.env.Path;
+      else process.env.Path = prevPathWin;
+    }
+  });
+
+  it('applyLocusPreMutateGate mode=warn allows when locus CLI missing', () => {
+    const prevPath = process.env.PATH;
+    const prevPathWin = process.env.Path;
+    process.env.PATH = '/nonexistent-locus-bin-path';
+    process.env.Path = '/nonexistent-locus-bin-path';
+    try {
+      const d = applyLocusPreMutateGate({ LOCUS_ENFORCE: 'warn' });
+      expect(d.mode).toBe('warn');
+      expect(d.allow).toBe(true);
+      expect(d.shouldWarn).toBe(true);
+      expect(d.blockers.length).toBeGreaterThan(0);
+    } finally {
+      if (prevPath === undefined) delete process.env.PATH;
+      else process.env.PATH = prevPath;
+      if (prevPathWin === undefined) delete process.env.Path;
+      else process.env.Path = prevPathWin;
+    }
+  });
+});
+
+/**
+ * Call-site wiring: runApiModelSandboxed + runSwarm refuse under enforce.
+ * Mocks applyLocusPreMutateGate so we never depend on a real pin in CI.
+ */
+describe('pre-mutate gate call sites (LOCUS_ENFORCE)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+    vi.doUnmock('../src/core/integrations/locus.js');
+    vi.doUnmock('../src/core/fleet/agent-action-ledger.js');
+  });
+
+  it('runApiModelSandboxed refuses when enforce blocks (bypasses spawnEngine)', async () => {
+    vi.doMock('../src/core/integrations/locus.js', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('../src/core/integrations/locus.js')>();
+      return {
+        ...actual,
+        applyLocusPreMutateGate: () => ({
+          allow: false,
+          mode: 'enforce' as const,
+          blockers: ['pin unhealthy: unpinned (unpinned)'],
+          shouldWarn: false,
+          gateOk: false,
+          status_oneline: 'unpinned',
+        }),
+      };
+    });
+    // Avoid ledger FS writes when recording the failed action.
+    vi.doMock('../src/core/fleet/agent-action-ledger.js', async (importOriginal) => {
+      const actual = await importOriginal<
+        typeof import('../src/core/fleet/agent-action-ledger.js')
+      >();
+      return {
+        ...actual,
+        recordAgentAction: () => {},
+      };
+    });
+
+    const mod = await import(
+      '../src/core/run/sandboxed-engine.js?locus-gate=' + randomUUID()
+    );
+    const result = await mod.runApiModelSandboxed(
+      'local-coder',
+      'test goal',
+      {} as never,
+      { sourceRepo: '/tmp/fake-locus-gate' },
+    );
+    expect(result.state.status).toBe('failed');
+    expect(result.state.result).toMatch(/locus pre-mutate|unpinned/);
+    expect(result.proposalOutcome?.kind).toBe('engine-failed-no-diff');
+  });
+
+  it('runApiModelSandboxed proceeds past gate when mode=off (mock allow)', async () => {
+    vi.doMock('../src/core/integrations/locus.js', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('../src/core/integrations/locus.js')>();
+      return {
+        ...actual,
+        applyLocusPreMutateGate: () => ({
+          allow: true,
+          mode: 'off' as const,
+          blockers: [],
+          shouldWarn: false,
+        }),
+      };
+    });
+    vi.doMock('../src/core/sandbox/worktree.js', () => ({
+      createSandbox: () => {
+        throw new Error('no git repo here');
+      },
+      removeSandbox: () => {},
+      sandboxDiff: () => ({ files: 0, patch: '', insertions: 0, deletions: 0 }),
+    }));
+    vi.doMock('../src/core/fleet/agent-action-ledger.js', async (importOriginal) => {
+      const actual = await importOriginal<
+        typeof import('../src/core/fleet/agent-action-ledger.js')
+      >();
+      return { ...actual, recordAgentAction: () => {} };
+    });
+
+    const mod = await import(
+      '../src/core/run/sandboxed-engine.js?locus-gate-off=' + randomUUID()
+    );
+    const result = await mod.runApiModelSandboxed(
+      'local-coder',
+      'test goal',
+      {} as never,
+      { sourceRepo: '/tmp/fake-locus-gate-off' },
+    );
+    // Gate allowed; failure is sandbox (proves we did not refuse at locus).
+    expect(result.state.status).toBe('failed');
+    expect(result.state.result).toMatch(/sandbox unavailable/);
+    expect(result.state.result).not.toMatch(/locus pre-mutate/);
+    vi.doUnmock('../src/core/sandbox/worktree.js');
+  });
+
+  it('runSwarm refuses when enforce blocks before nested work', async () => {
+    vi.doMock('../src/core/integrations/locus.js', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('../src/core/integrations/locus.js')>();
+      return {
+        ...actual,
+        applyLocusPreMutateGate: () => ({
+          allow: false,
+          mode: 'enforce' as const,
+          blockers: ['pin unhealthy: unpinned (unpinned)'],
+          shouldWarn: false,
+        }),
+      };
+    });
+
+    // Keep swarm away from real planner/orchestrator: it should refuse at gate
+    // before setting ASHLR_IN_SWARM or planning.
+    const prevInSwarm = process.env['ASHLR_IN_SWARM'];
+    delete process.env['ASHLR_IN_SWARM'];
+    try {
+      const mod = await import('../src/core/swarm/runner.js?locus-gate=' + randomUUID());
+      const run = await mod.runSwarm(
+        { goal: 'locus gate test' },
+        {} as never,
+        { noCapture: true },
+        () => {},
+      );
+      expect(run.status).toBe('failed');
+      expect(run.result).toMatch(/locus pre-mutate|unpinned|Refused/);
+      expect(run.tasks).toEqual([]);
+    } finally {
+      if (prevInSwarm === undefined) delete process.env['ASHLR_IN_SWARM'];
+      else process.env['ASHLR_IN_SWARM'] = prevInSwarm;
+    }
   });
 });
 

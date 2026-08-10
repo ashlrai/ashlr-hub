@@ -58,6 +58,10 @@ import {
   summarizeDelegationScope,
 } from './delegation-scope.js';
 import { buildEngineCommand, spawnEngine } from './engines.js';
+import {
+  applyLocusPreMutateGate,
+  formatPreMutateBlockers,
+} from '../integrations/locus.js';
 import { iterateToGreen } from './verify-to-green.js';
 import type { TerminationReason } from './run-monitor.js';
 import {
@@ -2448,6 +2452,35 @@ export async function runApiModelSandboxed(
         actionCounts,
       ),
     };
+  }
+
+  // Locus identity pre-mutate gate (opt-in via LOCUS_ENFORCE).
+  // API-model producers never hit spawnEngine — fence here so LOCUS_ENFORCE
+  // covers in-process mutate paths. Default off; enforce fails closed.
+  {
+    const locusGate = applyLocusPreMutateGate(process.env);
+    if (!locusGate.allow) {
+      const msg =
+        formatPreMutateBlockers(locusGate) ||
+        'locus pre-mutate enforce: blocked (no detail)';
+      const outcome = proposalOutcome('engine-failed-no-diff', msg);
+      recordSandboxedRunAgentAction({
+        engine,
+        engineModel,
+        tier,
+        runId: id,
+        sourceRepo: opts.sourceRepo,
+        workItemId: opts.workItemId,
+        workSource: opts.workSource,
+        outcome,
+        status: 'failed',
+        actionCounts,
+      });
+      return {
+        state: withProposalOutcome(mk({ status: 'failed', result: msg }), outcome, actionCounts),
+        proposalOutcome: outcome,
+      };
+    }
   }
 
   const wt = await import('../sandbox/worktree.js');
