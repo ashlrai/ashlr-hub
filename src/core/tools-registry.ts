@@ -195,6 +195,14 @@ const TOOL_SPECS: ToolSpec[] = [
     parseVersion: extractSemver,
   },
 
+  // ── locus (identity plane CLI) ────────────────────────────────────────────
+  {
+    id: 'locus',
+    name: 'Locus (identity plane)',
+    binaries: ['locus'],
+    parseVersion: extractSemver,
+  },
+
   // ── ashlr-hub (this binary) ───────────────────────────────────────────────
   {
     id: 'ashlr-hub',
@@ -357,7 +365,7 @@ function probeTool(spec: ToolSpec): ToolInfo {
  * Detect installed ecosystem tools + versions via PATH lookup + --version or
  * filesystem presence for desktop app tools (e.g. ashlr-md .app bundle).
  * Fast and NEVER throws — a missing tool yields { installed:false, version:null,
- * path:null }. Detects: phantom, ashlr/ashlr-plugin, stack, pulse/pulse-agent,
+ * path:null }. Detects: phantom, locus, ashlr/ashlr-plugin, stack, pulse/pulse-agent,
  * ashlrcode, aw (ashlr-workbench), morphkit, binshield, ashlr-md (app), ashlr-hub.
  */
 export function getToolsRegistry(): ToolsRegistry {

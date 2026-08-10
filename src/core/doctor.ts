@@ -13,6 +13,7 @@ import type { AshlrConfig, DoctorCheck, DoctorCheckStatus, DoctorReport, McpRegi
 import { loadConfig } from './config.js';
 import { getPhantomStatus } from './phantom.js';
 import { getProviderRegistry } from './providers.js';
+import { locusAgentReport, locusAvailable } from './integrations/locus.js';
 // H7 — 5 NEW read-only probes share the SAME read-only readiness facets that
 // `ashlr preflight` uses, from the shared readiness module (single source of
 // truth; no drift). See docs/contracts/CONTRACT-H7.md (BUILD ITEM 2). These
@@ -486,6 +487,64 @@ function checkPhantom(): DoctorCheck {
       'Phantom secrets CLI',
       'warn',
       `Could not determine phantom status: ${String(err)}`,
+    );
+  }
+}
+
+/**
+ * Locus identity plane (agent report).
+ * id: 'locus'
+ *
+ * Fail closed for missing CLI / status=unsafe. Soft-warn when protected or
+ * unpinned (human must `locus enter` / `locus agent setup`). Pass only when
+ * ready + healthy oneline. Names/status only — never secret values.
+ */
+export function checkLocus(): DoctorCheck {
+  try {
+    if (!locusAvailable()) {
+      return check(
+        'locus',
+        'Locus identity plane',
+        'fail',
+        'locus not found on PATH',
+        'Install: cargo install --git https://github.com/ashlrai/locus --package locus-cli --locked  (or brew install ashlrai/tap/locus)',
+      );
+    }
+
+    const probe = locusAgentReport();
+    if (!probe.report) {
+      return check(
+        'locus',
+        'Locus identity plane',
+        'fail',
+        probe.error ?? 'locus agent report failed',
+        'locus agent setup --apply --client all',
+      );
+    }
+
+    const r = probe.report;
+    const oneline = r.status_oneline ?? 'unpinned';
+    const detail = `status=${r.status} pin=${oneline} ready=${r.ready}`;
+    const fix =
+      r.next_steps?.[0]
+      ?? 'locus enter <alias> && locus agent setup --apply --client all';
+
+    if (r.status === 'unsafe') {
+      return check('locus', 'Locus identity plane', 'fail', detail, fix);
+    }
+
+    if (r.status === 'ready' && probe.gateOk) {
+      return check('locus', 'Locus identity plane', 'pass', detail);
+    }
+
+    // protected / unpinned / incomplete setup
+    return check('locus', 'Locus identity plane', 'warn', detail, fix);
+  } catch (err) {
+    return check(
+      'locus',
+      'Locus identity plane',
+      'warn',
+      `Could not determine locus status: ${String(err)}`,
     );
   }
 }
@@ -1125,6 +1184,7 @@ export async function runDoctor(cfg: AshlrConfig): Promise<DoctorReport> {
   checks.push(checkConfig());
   checks.push(checkIndex());
   checks.push(checkPhantom());
+  checks.push(checkLocus());
   // Upgraded: also accepts discovery via discoverMcpServers (mcpRegistry)
   checks.push(checkMcpPlugin(mcpRegistry));
 

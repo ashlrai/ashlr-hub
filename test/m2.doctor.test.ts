@@ -1,12 +1,13 @@
 /**
  * Tests for src/core/doctor.ts (M2)
  *
- * Stubs providers.ts and phantom.ts so no real network or binary calls happen.
- * Asserts summary counts and specific failure conditions.
+ * Stubs providers.ts, phantom.ts, and integrations/locus.ts so no real
+ * network or binary calls happen. Asserts summary counts and failure conditions.
  */
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import type { AshlrConfig, ProviderRegistry, PhantomStatus } from '../src/core/types.js';
+import type { LocusProbeResult } from '../src/core/integrations/locus.js';
 import {
   mkdtempSync, mkdirSync, writeFileSync, rmSync,
 } from 'node:fs';
@@ -14,7 +15,7 @@ import { join, delimiter } from 'node:path';
 import { tmpdir } from 'node:os';
 
 // ---------------------------------------------------------------------------
-// Mock phantom.ts and providers.ts BEFORE importing doctor.
+// Mock phantom.ts, providers.ts, locus.ts BEFORE importing doctor.
 // ---------------------------------------------------------------------------
 
 function makePhantomStatus(overrides: Partial<PhantomStatus> = {}): PhantomStatus {
@@ -57,7 +58,60 @@ function makePhantomStatus(overrides: Partial<PhantomStatus> = {}): PhantomStatu
   };
 }
 
+function makeLocusProbe(overrides: Partial<LocusProbeResult> = {}): LocusProbeResult {
+  const available = overrides.available ?? true;
+  const gateOk = overrides.gateOk ?? true;
+  if (!available) {
+    return {
+      available: false,
+      report: null,
+      exitCode: 2,
+      error: overrides.error ?? 'locus CLI not found on PATH',
+      gateOk: false,
+    };
+  }
+  if (overrides.report === null) {
+    return {
+      available: true,
+      report: null,
+      exitCode: overrides.exitCode ?? 2,
+      error: overrides.error ?? 'empty agent report',
+      gateOk: false,
+    };
+  }
+  const report = overrides.report ?? {
+    version: '1',
+    ready: true,
+    status: 'ready' as const,
+    status_oneline: 'personal:personal',
+    home: '/tmp/locus',
+    pin: {
+      pinned: true,
+      alias: 'personal',
+      tenant: 'personal',
+      seal_ok: true,
+      expired: false,
+      frozen: false,
+    },
+    mcp_registered: { claude: true, cursor: false, codex: false },
+    doctor: {},
+    commands: { enter: 'locus enter', whoami: 'locus whoami' },
+    required_servers: ['locus', 'phantom'],
+    mcp_command: 'locus-mcp',
+    exit_code: 0,
+  };
+  return {
+    available: true,
+    report,
+    exitCode: overrides.exitCode ?? 0,
+    gateOk,
+    ...(overrides.error ? { error: overrides.error } : {}),
+  };
+}
+
 let _phantomStatus: PhantomStatus = makePhantomStatus();
+let _locusAvailable = true;
+let _locusProbe: LocusProbeResult = makeLocusProbe();
 
 let _providerRegistry: ProviderRegistry = {
   providers: [
@@ -116,6 +170,11 @@ vi.mock('../src/core/phantom.js', () => ({
   getPhantomStatus: () => _phantomStatus,
 }));
 
+vi.mock('../src/core/integrations/locus.js', () => ({
+  locusAvailable: () => _locusAvailable,
+  locusAgentReport: () => _locusProbe,
+}));
+
 vi.mock('../src/core/providers.js', () => ({
   probeEndpoint: vi.fn(),
   getProviderRegistry: async (_cfg: AshlrConfig) => _providerRegistry,
@@ -123,7 +182,7 @@ vi.mock('../src/core/providers.js', () => ({
 }));
 
 // Import doctor AFTER mocks are registered.
-import { runDoctor } from '../src/core/doctor.js';
+import { runDoctor, checkLocus } from '../src/core/doctor.js';
 import { assurePrivateStoragePath } from '../src/core/util/private-storage.js';
 
 // Doctor probes shell out even with provider and Phantom mocks. Windows CI can
@@ -250,6 +309,8 @@ beforeEach(() => {
 
   // Reset to healthy defaults before each test.
   _phantomStatus = makePhantomStatus();
+  _locusAvailable = true;
+  _locusProbe = makeLocusProbe();
 
   _providerRegistry = {
     providers: [
@@ -288,7 +349,7 @@ describe('runDoctor — report structure', () => {
     expect(report.checks.length).toBeGreaterThan(0);
   }, 15_000);
 
-  it('every check has id, label, status, detail fields', async () => {
+  it('every check has id, label, status, detail fields', { timeout: 15_000 }, async () => {
     const cfg = makeConfig(tmpHome);
     const report = await runDoctor(cfg);
     for (const check of report.checks) {
@@ -300,7 +361,7 @@ describe('runDoctor — report structure', () => {
     }
   });
 
-  it('summary counts match actual check statuses', async () => {
+  it('summary counts match actual check statuses', { timeout: 15_000 }, async () => {
     const cfg = makeConfig(tmpHome);
     const report = await runDoctor(cfg);
     const pass = report.checks.filter(c => c.status === 'pass').length;
@@ -423,6 +484,91 @@ describe('runDoctor — phantom installed but not initialized', () => {
     expect(phantomChecks.length).toBeGreaterThan(0);
     const hasProblem = phantomChecks.some(c => c.status === 'warn' || c.status === 'fail');
     expect(hasProblem).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Locus identity plane
+// ---------------------------------------------------------------------------
+
+describe('checkLocus / runDoctor — locus', () => {
+  it('passes when agent report is ready with healthy pin', () => {
+    _locusAvailable = true;
+    _locusProbe = makeLocusProbe({ gateOk: true });
+    const c = checkLocus();
+    expect(c.id).toBe('locus');
+    expect(c.status).toBe('pass');
+    expect(c.detail).toContain('status=ready');
+    expect(c.detail).toContain('pin=personal:personal');
+  });
+
+  it('fails when locus is not on PATH', () => {
+    _locusAvailable = false;
+    _locusProbe = makeLocusProbe({ available: false });
+    const c = checkLocus();
+    expect(c.status).toBe('fail');
+    expect(c.detail).toMatch(/not found on PATH/i);
+    expect(c.fix).toBeTruthy();
+  });
+
+  it('fails when agent status is unsafe', () => {
+    _locusAvailable = true;
+    _locusProbe = makeLocusProbe({
+      gateOk: false,
+      exitCode: 2,
+      report: {
+        version: '1',
+        ready: false,
+        status: 'unsafe',
+        status_oneline: 'invalid',
+        home: '/tmp/locus',
+        pin: null,
+        mcp_registered: { claude: false, cursor: false, codex: false },
+        doctor: {},
+        commands: { enter: 'locus enter', whoami: 'locus whoami' },
+        required_servers: ['locus', 'phantom'],
+        mcp_command: 'locus-mcp',
+        next_steps: ['locus doctor --json'],
+      },
+    });
+    const c = checkLocus();
+    expect(c.status).toBe('fail');
+    expect(c.detail).toContain('status=unsafe');
+    expect(c.fix).toBeTruthy();
+  });
+
+  it('warns when protected / unpinned', () => {
+    _locusAvailable = true;
+    _locusProbe = makeLocusProbe({
+      gateOk: false,
+      exitCode: 1,
+      report: {
+        version: '1',
+        ready: false,
+        status: 'protected',
+        status_oneline: 'unpinned',
+        home: '/tmp/locus',
+        pin: null,
+        mcp_registered: { claude: false, cursor: false, codex: false },
+        doctor: {},
+        commands: { enter: 'locus enter', whoami: 'locus whoami' },
+        required_servers: ['locus', 'phantom'],
+        mcp_command: 'locus-mcp',
+        next_steps: ['locus enter <alias>'],
+      },
+    });
+    const c = checkLocus();
+    expect(c.status).toBe('warn');
+    expect(c.detail).toContain('unpinned');
+    expect(c.fix).toMatch(/locus enter/i);
+  });
+
+  it('runDoctor includes a locus check', { timeout: 15_000 }, async () => {
+    const cfg = makeConfig(tmpHome);
+    const report = await runDoctor(cfg);
+    const locus = report.checks.find(c => c.id === 'locus');
+    expect(locus).toBeDefined();
+    expect(locus?.status).toBe('pass');
   });
 });
 

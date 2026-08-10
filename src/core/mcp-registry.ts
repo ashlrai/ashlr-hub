@@ -43,8 +43,8 @@ export function knownConfigPaths(): string[] {
  * Reads the known config paths (see knownConfigPaths), parses each
  * `mcpServers` object ({ <name>: { command, args, env? } }), and returns
  * deduped specs (dedupe by `name`; first occurrence wins, stable order).
- * Recognises the ashlr-plugin server (name "ashlr") and phantom
- * (name "phantom-secrets") when present.
+ * Recognises the ashlr-plugin server (name "ashlr"), phantom
+ * (name "phantom-secrets"), and Locus (name "locus") when present.
  *
  * Never throws: unreadable/malformed configs are skipped silently.
  * When producing ANY printed/displayed form, redact every env value to '<set>'
