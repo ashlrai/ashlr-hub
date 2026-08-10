@@ -6,15 +6,16 @@
  *
  * Starts a localhost-only HTTP server (127.0.0.1 ONLY, never 0.0.0.0) that
  * serves:
- *   (a) a JSON read-only API at /api/*
+ *   (a) a token-authenticated JSON read API at /api/*
  *   (b) a static single-page dashboard (assets bundled in the repo)
  *   (c) GET /api/events — Server-Sent Events live feed
  *
  * Security notes:
  *   - Bound exclusively to 127.0.0.1 (never externally reachable).
  *   - Host-header allowlist enforced in the server layer (anti DNS-rebinding).
- *   - Read-only by default; POST /api/run only when --allow-dispatch is set,
- *     protected by a per-session token printed at startup.
+ *   - Dashboard reads require a per-process token printed at startup.
+ *   - POST /api/run exists only when --allow-dispatch is set and requires an
+ *     independent raw mutation token; read tokens/cookies cannot mutate.
  *   - Ephemeral: Ctrl-C (SIGINT) triggers clean close() of listeners + SSE.
  *
  * Exit codes:
@@ -176,6 +177,8 @@ export async function cmdServe(args: string[]): Promise<number> {
       port: handle.port,
       allowDispatch,
     };
+    out.readToken = handle.readToken;
+    out.readTokenHeader = 'X-Ashlr-Token';
     if (allowDispatch) {
       out.token = handle.token;
       out.tokenHeader = 'X-Ashlr-Token';
@@ -189,16 +192,19 @@ export async function cmdServe(args: string[]): Promise<number> {
     console.log(`  ${dim('Bound to 127.0.0.1 only — not externally reachable.')}`);
     console.log('');
 
+    console.log(`  ${dim('Read token')}  ${bold(handle.readToken)}`);
+    console.log(`  ${dim('Read header:')} X-Ashlr-Token: ${handle.readToken}`);
+    console.log(`  ${dim('The browser exchanges it for a short-lived, read-only HttpOnly cookie.')}`);
+    console.log('');
+
     if (allowDispatch) {
       console.log(`  ${yellow('⚠')}  ${bold('Dispatch enabled')} (--allow-dispatch)`);
-      console.log(`  ${dim('Session token')}  ${bold(handle.token)}`);
-      console.log(`  ${dim('Required header:')} X-Ashlr-Token: ${handle.token}`);
-      console.log('');
-      console.log(`  ${dim('POST /api/run is live. Use the token above for all mutating requests.')}`);
-      console.log(`  ${dim('Never share this token or expose the server to other hosts.')}`);
+      console.log(`  ${dim('Mutation token')}  ${bold(handle.token)}`);
+      console.log(`  ${dim('Mutations require this separate token; the read token and cookie cannot mutate.')}`);
+      console.log(`  ${dim('Never share either token or expose the server to other hosts.')}`);
       console.log('');
     } else {
-      console.log(`  ${dim('Read-only mode. Pass --allow-dispatch to enable POST /api/run.')}`);
+      console.log(`  ${dim('Mutation routes are disabled. Pass --allow-dispatch to enable them.')}`);
       console.log('');
     }
 
@@ -262,16 +268,17 @@ function printUsage(): void {
   console.log('  ' + bold('Options:'));
   console.log(`    ${cyan('--port N')}            TCP port to bind on 127.0.0.1 (default ${DEFAULT_PORT})`);
   console.log(`    ${cyan('--open')}              Open the dashboard in your default browser after start`);
-  console.log(`    ${cyan('--allow-dispatch')}    Enable POST /api/run (guarded by a per-session token)`);
+  console.log(`    ${cyan('--allow-dispatch')}    Enable mutations (guarded by a separate raw mutation token)`);
   console.log(`    ${cyan('--json')}              Print startup info as JSON (machine-readable)`);
   console.log('');
   console.log('  ' + bold('Security:'));
   console.log(`    ${dim('• Binds 127.0.0.1 ONLY — never 0.0.0.0 / never externally reachable')}`);
   console.log(`    ${dim('• Host-header allowlist enforced (anti DNS-rebinding)')}`);
-  console.log(`    ${dim('• Read-only by default; POST /api/run requires --allow-dispatch + session token')}`);
+  console.log(`    ${dim('• Proprietary GET/SSE routes require X-Ashlr-Token or a short-lived read cookie')}`);
+  console.log(`    ${dim('• Mutations require --allow-dispatch + raw X-Ashlr-Token; cookies cannot mutate')}`);
   console.log(`    ${dim('• Ephemeral: Ctrl-C triggers clean shutdown (SSE pollers closed)')}`);
   console.log('');
-  console.log('  ' + bold('API routes (read-only):'));
+  console.log('  ' + bold('API routes (X-Ashlr-Token or browser read session):'));
   console.log(`    ${cyan('GET  /api/snapshot')}        Aggregated config + run/swarm/genome snapshot`);
   console.log(`    ${cyan('GET  /api/config/effective')} Read-only effective operator config`);
   console.log(`    ${cyan('GET  /api/runs')}            List past runs`);
