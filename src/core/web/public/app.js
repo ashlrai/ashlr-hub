@@ -4415,6 +4415,76 @@ function missionHoldReason(reason) {
   return labels[reason] ?? 'a policy check did not pass';
 }
 
+function missionShadowReason(reason) {
+  const labels = {
+    'receipt-missing': 'run `ashlr vision shadow` to record the first authenticated observation',
+    'receipt-source-degraded': 'the receipt ledger could not be read completely',
+    'receipt-binding-mismatch': 'the newest receipt no longer matches current source evidence',
+    'briefing-source-incomplete': 'the briefing source is incomplete',
+    'enrollment-source-incomplete': 'repository enrollment evidence is incomplete',
+    'goal-source-incomplete': 'goal evidence is incomplete',
+    'proposal-source-incomplete': 'proposal evidence is incomplete',
+    'preview-invalid': 'the current compiler preview could not be bound to every mission node',
+    'mission-graph-invalid': 'the mission graph is invalid',
+    'shadow-observer-unavailable': 'the read-only shadow observer is unavailable',
+    'briefing-missing': 'no mission briefing is available yet',
+    'dependency-blocked': 'an upstream mission node is not realized',
+    'human-gate-required': 'an authorized human decision is required',
+    'no-ready-node': 'no dependency-ready mission node is available',
+  };
+  return labels[reason] ?? missionHoldReason(reason);
+}
+
+function missionShadowStatusCopy(shadow) {
+  const allowedStates = new Set(['would-create', 'held', 'missing', 'withheld', 'unavailable']);
+  const stateName = typeof shadow?.state === 'string' && allowedStates.has(shadow.state)
+    ? shadow.state
+    : 'unavailable';
+  const decision = shadow?.decision && typeof shadow.decision === 'object' ? shadow.decision : null;
+  const nodeKey = typeof decision?.nodeKey === 'string' ? decision.nodeKey : null;
+  let title = 'Shadow suggestion unavailable';
+  let detail = missionShadowReason(shadow?.reason);
+  if (stateName === 'would-create' && nodeKey) {
+    title = `Would plan node ${nodeKey}`;
+    detail = 'Current policy selected one dependency-ready node from an existing verified receipt.';
+  } else if (stateName === 'held') {
+    title = 'Shadow suggestion held';
+  } else if (stateName === 'missing') {
+    title = 'No verified shadow receipt yet';
+  } else if (stateName === 'withheld') {
+    title = 'Shadow suggestion withheld';
+  }
+  const verified = stateName === 'would-create' || stateName === 'held';
+  const eyebrow = verified
+    ? 'Authenticated shadow · zero effect'
+    : 'Shadow observation · zero effect';
+  const evidence = verified
+    ? 'A matching authenticated receipt was verified against current complete sources.'
+    : stateName === 'missing'
+      ? 'No matching authenticated observation is available.'
+      : 'This unauthenticated local view never exposes private receipt identifiers, digests, or timestamps.';
+  return { stateName, title, detail, eyebrow, evidence };
+}
+
+function buildMissionShadowStatus(shadow) {
+  const copy = missionShadowStatusCopy(shadow);
+  return el('section', {
+    cls: `mission-shadow-status mission-shadow-status--${copy.stateName}`,
+    'aria-labelledby': 'mission-shadow-status-title',
+    role: 'status',
+    'aria-live': 'polite',
+  },
+  el('div', { cls: 'mission-shadow-status__copy' },
+    el('p', { cls: 'mission-shadow-status__eyebrow' }, copy.eyebrow),
+    el('h3', { id: 'mission-shadow-status-title' }, copy.title),
+    el('p', {}, copy.detail)
+  ),
+  el('div', { cls: 'mission-shadow-status__evidence' },
+    el('p', {}, copy.evidence),
+    el('p', {}, 'Observation only · no goal, agent, proposal, merge, release, deployment, policy, or budget state changed.')
+  ));
+}
+
 function missionGraphIssueLabel(issue) {
   const code = typeof issue === 'string' ? issue.split(':', 1)[0] : '';
   const labels = {
@@ -4518,6 +4588,7 @@ function buildMissionOutcomeRoom(mission) {
     ),
     el('p', { cls: 'mission-outcome__authority' }, authority)
   ));
+  room.appendChild(buildMissionShadowStatus(mission?.shadow));
 
   if (!mission?.briefing) {
     const isDegraded = sourceState === 'degraded';
