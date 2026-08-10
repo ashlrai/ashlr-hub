@@ -258,6 +258,17 @@ describe('release workflow', () => {
     expect(releaseDocs).toContain("process.versions.node.split(\".\")[0]");
     expect(releaseDocs).toContain('npm@11.19.0');
     expect(releaseDocs).toContain('git status --porcelain --untracked-files=all');
+    expect(releaseDocs).toContain('npm provenance attestation');
+    expect(releaseDocs).toContain('.github/workflows/release.yml');
+    expect(releaseDocs).toContain('the exact\n   tag commit');
+    expect(releaseDocs).toContain('Do not use **Re-run failed jobs**');
+    expect(releaseDocs).toContain('even when the seven-day handoff\n   artifact has not expired');
+    expect(releaseDocs).toContain('set -euo pipefail\n   version=3.2.0\n   release_tag="v${version}"');
+    expect(releaseDocs).toContain('git rev-list -n 1 "$release_tag"');
+    expect(releaseDocs).toContain('node scripts/extract-changelog.mjs "$version" > "$release_notes"');
+    expect(releaseDocs).toContain(
+      'gh release create "$release_tag" --verify-tag --title "$release_tag" --notes-file "$release_notes"',
+    );
     expect(releaseDocs).not.toContain('gh secret set NPM_TOKEN');
   });
 });

@@ -125,13 +125,34 @@ If npm publication itself failed or its result is ambiguous:
 
 1. Inspect the workflow log and query `npm view "@ashlr/hub@${version}"` until
    registry state is known; do not infer failure from a lost response.
-2. If the version exists, compare `dist.integrity` exactly as above and never
-   invoke publish again. Recover only the GitHub Release, manually if the
-   seven-day handoff has expired.
-3. If the version is absent, rerun publish only when the log proves the publish
+2. If the version exists, compare `dist.integrity` exactly as above, then inspect
+   its npm provenance attestation. It must identify `ashlrai/ashlr-hub`,
+   `.github/workflows/release.yml`, the expected GitHub Actions run, and the exact
+   tag commit. A matching package without matching provenance is a release
+   incident; never invoke publish again.
+3. If npm accepted the version but the `publish` job later concluded failed, the
+   dependent `release` job was skipped. Do not use **Re-run failed jobs** because
+   that would attempt `publish` again and stop at the immutable-version guard.
+   After the integrity and provenance checks above, create the GitHub Release
+   manually from a clean checkout of the exact tag and its exact extracted
+   changelog notes. This manual path applies even when the seven-day handoff
+   artifact has not expired:
+
+   ```bash
+   set -euo pipefail
+   version=3.2.0
+   release_tag="v${version}"
+   test "$(git rev-parse HEAD)" = "$(git rev-list -n 1 "$release_tag")"
+   release_notes="$(mktemp)"
+   trap 'rm -f "$release_notes"' EXIT
+   node scripts/extract-changelog.mjs "$version" > "$release_notes"
+   gh release create "$release_tag" --verify-tag --title "$release_tag" --notes-file "$release_notes"
+   ```
+
+4. If the version is absent, rerun publish only when the log proves the publish
    command did not begin or the registry definitively rejected it before any
    publication. Unknown transport state remains a stop condition.
-4. If the version exists with a different integrity, stop and treat it as a
+5. If the version exists with a different integrity, stop and treat it as a
    release incident. npm immutability means it cannot be overwritten.
 
 There is no token/OTP fallback and no recovery path that republishes an existing

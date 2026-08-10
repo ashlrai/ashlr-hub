@@ -14,6 +14,7 @@ import { describe, expect, it } from 'vitest';
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..');
 const workflowText = readFileSync(resolve(repoRoot, '.github/workflows/release.yml'), 'utf8');
+const releaseDocs = readFileSync(resolve(repoRoot, 'docs/RELEASING.md'), 'utf8');
 const workflow = parse(workflowText) as Record<string, unknown>;
 const jobs = workflow.jobs as Record<string, Record<string, unknown>>;
 const publish = jobs.publish;
@@ -119,5 +120,18 @@ describe('M479 npm release workflow supply-chain admission', () => {
     );
     expect(workflowText).toContain('npm publish --provenance --access public');
     expect(workflowText).toContain('gh release create "$tag"');
+  });
+
+  it('documents manual release recovery without retrying an accepted npm version', () => {
+    expect(releaseDocs).toContain('npm accepted the version but the `publish` job later concluded failed');
+    expect(releaseDocs).toContain('Do not use **Re-run failed jobs**');
+    expect(releaseDocs).toContain('After the integrity and provenance checks above');
+    expect(releaseDocs).toContain('clean checkout of the exact tag and its exact extracted');
+    expect(releaseDocs).toContain('even when the seven-day handoff\n   artifact has not expired');
+    expect(releaseDocs).toContain('set -euo pipefail\n   version=3.2.0\n   release_tag="v${version}"');
+    expect(releaseDocs).toContain('git rev-list -n 1 "$release_tag"');
+    expect(releaseDocs).toContain(
+      'gh release create "$release_tag" --verify-tag --title "$release_tag" --notes-file "$release_notes"',
+    );
   });
 });
