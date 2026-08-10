@@ -122,6 +122,8 @@ import {
   isRepo,
   getGitStatus,
   defaultBranch,
+  isSafeGitLsRemoteDestination,
+  isValidGitBranchName,
   resolveGitHubOriginAuthority,
   resolveGitHubOriginAuthorityDetails,
 } from '../git.js';
@@ -265,6 +267,20 @@ function gitTry(cwd: string, args: string[]): string | null {
   }
 }
 
+/** Run a Git read without altering stdout bytes needed by strict parsers. */
+function gitTryRaw(cwd: string, args: string[]): string | null {
+  try {
+    return execFileSync('git', args, {
+      cwd,
+      timeout: GIT_TIMEOUT,
+      stdio: 'pipe',
+      encoding: 'utf8',
+    });
+  } catch {
+    return null;
+  }
+}
+
 /** Resolve the commit that auto-merge treats as the current default-branch base. */
 function resolveDefaultBranchHead(repo: string, base: string): string | null {
   return (
@@ -276,12 +292,22 @@ function resolveDefaultBranchHead(repo: string, base: string): string | null {
 
 /** Resolve the protected remote branch head without fetching or mutating refs. */
 export function resolveRemoteBranchHead(repo: string, base: string, remote = 'origin'): string | null {
-  const out = gitTry(repo, ['ls-remote', '--heads', remote, base]);
-  if (!out) return null;
-  const first = out.split('\n').find((line) => line.trim().length > 0);
-  if (!first) return null;
-  const [sha] = first.trim().split(/\s+/);
-  return /^[0-9a-f]{40}$/i.test(sha ?? '') ? sha! : null;
+  if (!isValidGitBranchName(base) || !isSafeGitLsRemoteDestination(remote)) return null;
+  const exactRef = `refs/heads/${base}`;
+  const out = gitTryRaw(repo, ['ls-remote', '--heads', '--', remote, exactRef]);
+  if (out === null || out.includes('\r')) return null;
+
+  // One canonical row, optionally followed by one LF. The byte ceiling is the
+  // largest possible exact row for this already-bounded branch; it rejects
+  // multi-row, blank-padding, and oversized output before further parsing.
+  const maxBytes = 40 + 1 + Buffer.byteLength(exactRef, 'utf8') + 1;
+  if (Buffer.byteLength(out, 'utf8') > maxBytes) return null;
+  const row = out.endsWith('\n') ? out.slice(0, -1) : out;
+  if (!row || row.includes('\n') || row.length < 42 || row[40] !== '\t') return null;
+
+  const sha = row.slice(0, 40);
+  const ref = row.slice(41);
+  return /^[0-9a-f]{40}$/.test(sha) && ref === exactRef ? sha : null;
 }
 
 /** Remove only staging refs that still point at the commit this attempt created. */

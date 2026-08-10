@@ -30,6 +30,11 @@ export function assertSafeExecutionIdentity(value: string): string {
   return value;
 }
 
+/** Allocate one cryptographically strong, path-safe run identity. */
+export function createRunExecutionIdentity(): string {
+  return assertSafeExecutionIdentity(`run-${randomUUID()}`);
+}
+
 /**
  * Allocate an identity before any attempt work begins. The value contains only
  * cryptographic randomness, so no repo, prompt, goal, or work-item text leaks.

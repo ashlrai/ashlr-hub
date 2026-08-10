@@ -116,7 +116,10 @@ import {
   summarizeLocalContextBundle,
 } from './local-context.js';
 import { causalMetadata, runEventSummary, routeSnapshot } from '../learning/causal.js';
-import { assertSafeExecutionIdentity } from '../fleet/attempt-identity.js';
+import {
+  assertSafeExecutionIdentity,
+  createRunExecutionIdentity,
+} from '../fleet/attempt-identity.js';
 import { classifyDiff, isTrivialProposal } from '../../planning/triviality.js';
 import { isDiffDedupResult } from '../inbox/store.js';
 
@@ -1010,9 +1013,7 @@ export async function captureSandboxedProposal(
   const model = opts.model ?? cfg.foundry?.models?.[engine];
   const engineModel = `${engine}:${resolveConcreteModel(engine, cfg, model)}`;
   const tier = engineTierOf(engine, cfg);
-  const id = assertSafeExecutionIdentity(
-    opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-  );
+  const id = assertSafeExecutionIdentity(opts.runId ?? createRunExecutionIdentity());
   const sb = opts.existingWorktree;
   const now = new Date().toISOString();
   const producerStatus = opts.producerStatus ?? 'done';
@@ -1354,9 +1355,7 @@ export async function runEngineSandboxed(
   const model = opts.model ?? cfg.foundry?.models?.[engine];
   const engineModel = `${engine}:${resolveConcreteModel(engine, cfg, model)}`;
   const tier = engineTierOf(engine, cfg);
-  const id = assertSafeExecutionIdentity(
-    opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-  );
+  const id = assertSafeExecutionIdentity(opts.runId ?? createRunExecutionIdentity());
   const runCreatedAtIso = new Date().toISOString();
   const recordSandboxedRunAgentAction = opts.deferTerminalAction
     ? (_fields: Parameters<typeof writeSandboxedRunAgentAction>[0]) => {}
@@ -2382,9 +2381,7 @@ export async function runApiModelSandboxed(
   const model = modelFromCfg || (spec.api.defaultModel ?? '');
   const engineModel = `${engine}:${resolveConcreteModel(engine, cfg, model || undefined)}`;
   const tier = engineTierOf(engine, cfg);
-  const id = assertSafeExecutionIdentity(
-    opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-  );
+  const id = assertSafeExecutionIdentity(opts.runId ?? createRunExecutionIdentity());
   const runCreatedAtIso = new Date().toISOString();
   const recordSandboxedRunAgentAction = (
     fields: Parameters<typeof writeSandboxedRunAgentAction>[0],

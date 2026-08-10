@@ -24,6 +24,7 @@ import {
   buildContainedEnv,
 } from '../src/core/run/sandboxed-engine.js';
 import { buildEngineCommand } from '../src/core/run/engines.js';
+import { createRunExecutionIdentity } from '../src/core/fleet/attempt-identity.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -246,10 +247,14 @@ describe('M248 CLAUDE_SESSION_ID in fleet env', () => {
     expect(env.CLAUDE_SESSION_ID.startsWith('ashlr-fleet-')).toBe(true);
   });
 
-  it('session ID format matches the runId pattern (ashlr-fleet-run-<base36>-<random>)', () => {
-    const fixedRunId = 'run-lk4x2a-f9e3b1';
-    const sessionId = `ashlr-fleet-${fixedRunId}`;
-    expect(sessionId).toMatch(/^ashlr-fleet-run-[a-z0-9]+-[a-z0-9]+$/);
+  it('correlates the exact cryptographic run ID into the fleet session ID', () => {
+    const runId = createRunExecutionIdentity();
+    const sessionId = `ashlr-fleet-${runId}`;
+
+    expect(sessionId).toBe(`ashlr-fleet-${runId}`);
+    expect(sessionId).toMatch(
+      /^ashlr-fleet-run-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
   });
 
   it('CLAUDE_SESSION_ID is NOT stripped by CRED_ENV_DENY (ends in _ID, not _TOKEN etc.)', () => {

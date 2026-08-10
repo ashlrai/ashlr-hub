@@ -55,9 +55,18 @@ vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
   return {
     ...actual,
-    execFileSync: (...args: Parameters<typeof actual.execFileSync>) => (
-      args[0] === 'gh' ? ghExecMock(...args) : actual.execFileSync(...args)
-    ),
+    execFileSync: (...args: Parameters<typeof actual.execFileSync>) => {
+      if (args[0] === 'gh') return ghExecMock(...args);
+      const commandArgs = args[1];
+      if (args[0] === 'git' && Array.isArray(commandArgs)) {
+        return actual.execFileSync(
+          'git',
+          commandArgs.map((arg) => arg === 'https://github.com/ashlrai/fixture.git' ? bareRepo : arg),
+          args[2],
+        );
+      }
+      return actual.execFileSync(...args);
+    },
   };
 });
 
@@ -354,9 +363,9 @@ beforeEach(() => {
   originAuthorityMock.mockReset();
   originAuthorityMock.mockImplementation(() => ({
     nameWithOwner: 'ashlrai/fixture',
-    fetchUrls: [bareRepo],
-    pushUrls: [bareRepo],
-    pushUrl: bareRepo,
+    fetchUrls: ['https://github.com/ashlrai/fixture.git'],
+    pushUrls: ['https://github.com/ashlrai/fixture.git'],
+    pushUrl: 'https://github.com/ashlrai/fixture.git',
   }));
   branchProtectionMock.mockReset();
   branchProtectionMock.mockImplementation(async (_repo: string, branch = 'main') => ({
