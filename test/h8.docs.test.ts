@@ -64,12 +64,15 @@ describe('h8 docs — RELIABILITY.md + README activation runbook are accurate', 
   });
 
   // DOCS-ACCURATE (honest limits)
-  it('docs/RELIABILITY.md states the honest limits: single-process, budget overshoot bound, no swarm wall-clock deadline', () => {
+  it('docs/RELIABILITY.md states the honest limits: single-process, preventive spend admission, no swarm wall-clock deadline', () => {
     const txt = readFileSync(RELIABILITY, 'utf8').toLowerCase();
     // Single-process honesty (no multi-process coordination yet).
     expect(txt).toMatch(/single-process/);
-    // Budget overshoot is bounded but NOT zero — the doc must say so.
-    expect(txt).toMatch(/overshoot/);
+    // Spend is prevented before launch, while provider invoice drift remains an
+    // explicitly documented boundary outside the admission/accounting model.
+    expect(txt).toMatch(/daily usd admission is preventive/);
+    expect(txt).toMatch(/cannot collectively admit more than the remaining daily\s+headroom/);
+    expect(txt).toMatch(/not a guarantee about a provider's\s+eventual invoice/);
     // No hard swarm wall-clock deadline yet.
     expect(txt).toMatch(/wall-clock/);
   });
