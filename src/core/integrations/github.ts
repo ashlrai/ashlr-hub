@@ -14,6 +14,11 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import type { GithubStatus } from '../types.js';
+import {
+  trustedGithubEnvironment,
+  verifyTrustedGithubCli,
+  type TrustedExecutablePin,
+} from '../util/trusted-executable.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -203,6 +208,10 @@ export interface BranchProtectionAttestationOptions {
   forceFresh?: boolean;
   /** Canonical origin owner/repo. Prevents ambient GH_REPO from changing authority. */
   expectedNameWithOwner?: string;
+  /** Absolute, hierarchy-verified GitHub CLI pin for authority-sensitive callers. */
+  trustedGithubCli?: TrustedExecutablePin;
+  /** Candidate-controlled roots the pinned executable must remain outside. */
+  untrustedRoots?: string[];
 }
 
 export interface RequiredCheckBinding {
@@ -817,19 +826,28 @@ interface ExactBranchAuthority {
   classic: ExactClassicAuthority | null;
 }
 
+interface AttestationGhAuthority {
+  pin: TrustedExecutablePin;
+  untrustedRoots: readonly string[];
+}
+
 function runAttestationGh(
   cwd: string,
   args: string[],
   maxBuffer = MAX_ATTESTATION_BUFFER_BYTES,
+  authority?: AttestationGhAuthority,
 ): AttestationGhResult {
   try {
-    const res = spawnSync(GH_BIN, args, {
+    if (authority && !verifyTrustedGithubCli(authority.pin, authority.untrustedRoots)) {
+      return { kind: 'unavailable' };
+    }
+    const res = spawnSync(authority?.pin.executable ?? GH_BIN, args, {
       cwd,
       timeout: TIMEOUT_MS,
       maxBuffer: Math.max(1, Math.min(MAX_ATTESTATION_BUFFER_BYTES, Math.floor(maxBuffer))),
       stdio: 'pipe',
       encoding: 'utf8',
-      env: {
+      env: authority ? trustedGithubEnvironment() : {
         ...process.env,
         GH_HOST: 'github.com',
         GH_NO_UPDATE_NOTIFIER: '1',
@@ -837,6 +855,9 @@ function runAttestationGh(
         GH_PROMPT_DISABLED: '1',
       },
     });
+    if (authority && !verifyTrustedGithubCli(authority.pin, authority.untrustedRoots)) {
+      return { kind: 'unavailable' };
+    }
     if (res.error || res.status !== 0) {
       const stderr = typeof res.stderr === 'string' ? res.stderr : '';
       return /(?:HTTP\s+404|\b404\b|not found)/i.test(stderr)
@@ -1051,6 +1072,7 @@ function readExactBranchAuthority(
   cwd: string,
   nameWithOwner: string,
   branch: string,
+  authority?: AttestationGhAuthority,
 ): ExactBranchAuthority | null {
   const [owner, name, extra] = nameWithOwner.split('/');
   if (!owner || !name || extra !== undefined) return null;
@@ -1065,7 +1087,7 @@ function readExactBranchAuthority(
     `qualifiedName=refs/heads/${branch}`,
     '-f',
     `query=${EXACT_BRANCH_AUTHORITY_QUERY}`,
-  ]);
+  ], MAX_ATTESTATION_BUFFER_BYTES, authority);
   return result.kind === 'ok'
     ? parseExactBranchAuthority(safeJson(result.stdout), branch)
     : null;
@@ -1091,8 +1113,14 @@ function boundedOwnEnumerableKeys(
   return keys;
 }
 
-function attestationCacheKey(repo: string, branch?: string, expectedNameWithOwner?: string): string {
-  return `${repo}\0${branch ?? ''}\0${expectedNameWithOwner ?? ''}`;
+function attestationCacheKey(
+  repo: string,
+  branch?: string,
+  expectedNameWithOwner?: string,
+  authority?: AttestationGhAuthority,
+): string {
+  return `${repo}\0${branch ?? ''}\0${expectedNameWithOwner ?? ''}\0${authority?.pin.digest ?? ''}\0${
+    authority?.untrustedRoots.slice().sort().join('\0') ?? ''}`;
 }
 
 function cloneAttestation(value: BranchProtectionAttestation): BranchProtectionAttestation {
@@ -3046,6 +3074,7 @@ function readEffectiveRules(
   cwd: string,
   nameWithOwner: string,
   branch: string,
+  authority?: AttestationGhAuthority,
 ): unknown[] | null {
   const encodedBranch = branch.split('/').map(encodeURIComponent).join('/');
   const maxPages = Math.floor(MAX_EFFECTIVE_RULES / EFFECTIVE_RULES_PER_PAGE) + 1;
@@ -3055,7 +3084,7 @@ function readEffectiveRules(
       'api',
       `repos/${nameWithOwner}/rules/branches/${encodedBranch}` +
         `?per_page=${EFFECTIVE_RULES_PER_PAGE}&page=${page}`,
-    ]);
+    ], MAX_ATTESTATION_BUFFER_BYTES, authority);
     if (result.kind !== 'ok') return null;
     const parsed = safeJson(result.stdout);
     if (!Array.isArray(parsed) || parsed.length > EFFECTIVE_RULES_PER_PAGE ||
@@ -3343,6 +3372,7 @@ function readRulesetProtections(
   effectiveRules: ParsedEffectiveRule[],
   classic: CanonicalClassicProtection | null,
   expectedSnapshot?: CanonicalRulesetProtection[],
+  authority?: AttestationGhAuthority,
 ): CanonicalRulesetProtection[] | null {
   const grouped = new Map<string, ParsedEffectiveRule[]>();
   for (const effectiveRule of effectiveRules) {
@@ -3377,7 +3407,7 @@ function readRulesetProtections(
     const detailResult = runAttestationGh(cwd, [
       'api',
       `repos/${nameWithOwner}/rulesets/${first.rulesetId}?includes_parents=true`,
-    ], remainingWireBytes);
+    ], remainingWireBytes, authority);
     if (detailResult.kind !== 'ok') return null;
     if (detailResult.stdoutBytes > remainingWireBytes) return null;
     const ruleset = parseRulesetProtection(safeJson(detailResult.stdout), group);
@@ -3407,6 +3437,7 @@ function readBranchProtectionUncached(
   repo: string,
   requestedBranch?: string,
   expectedNameWithOwner?: string,
+  authority?: AttestationGhAuthority,
 ): BranchProtectionAttestation {
   const repoResult = runAttestationGh(repo, [
     'repo',
@@ -3414,7 +3445,7 @@ function readBranchProtectionUncached(
     ...(expectedNameWithOwner ? [expectedNameWithOwner] : []),
     '--json',
     'id,nameWithOwner,defaultBranchRef',
-  ]);
+  ], MAX_ATTESTATION_BUFFER_BYTES, authority);
   if (repoResult.kind !== 'ok') {
     return unavailableAttestation('GitHub repository identity is unavailable', requestedBranch ?? null);
   }
@@ -3436,7 +3467,7 @@ function readBranchProtectionUncached(
   const identity = { nameWithOwner, repositoryId, defaultBranch };
   if (!branch) return unavailableAttestation('GitHub branch name was invalid', null, identity);
 
-  const initialAuthority = readExactBranchAuthority(repo, nameWithOwner, branch);
+  const initialAuthority = readExactBranchAuthority(repo, nameWithOwner, branch, authority);
   if (!initialAuthority) {
     return unavailableAttestation('Exact GitHub branch authority is unavailable', branch, identity);
   }
@@ -3446,7 +3477,12 @@ function readBranchProtectionUncached(
     return unavailableAttestation('REST and GraphQL repository identity disagree', branch, identity);
   }
 
-  const branchResult = runAttestationGh(repo, ['api', apiPath(nameWithOwner, branch)]);
+  const branchResult = runAttestationGh(
+    repo,
+    ['api', apiPath(nameWithOwner, branch)],
+    MAX_ATTESTATION_BUFFER_BYTES,
+    authority,
+  );
   if (branchResult.kind !== 'ok') {
     return unavailableAttestation('GitHub branch head is unavailable', branch, identity);
   }
@@ -3470,7 +3506,7 @@ function readBranchProtectionUncached(
   const classic = runAttestationGh(repo, [
     'api',
     apiPath(nameWithOwner, branch, '/protection'),
-  ]);
+  ], MAX_ATTESTATION_BUFFER_BYTES, authority);
   if (classic.kind === 'unavailable') {
     return unavailableAttestation('Classic branch protection is unavailable', branch, boundIdentity);
   }
@@ -3493,7 +3529,7 @@ function readBranchProtectionUncached(
     return unavailableAttestation('REST and GraphQL classic protection disagree', branch, boundIdentity);
   }
 
-  const parsedRules = readEffectiveRules(repo, nameWithOwner, branch);
+  const parsedRules = readEffectiveRules(repo, nameWithOwner, branch, authority);
   if (!parsedRules) {
     return unavailableAttestation('Effective branch rules are unavailable or malformed', branch, boundIdentity);
   }
@@ -3506,13 +3542,15 @@ function readBranchProtectionUncached(
     nameWithOwner,
     effectiveRules,
     classicProtection,
+    undefined,
+    authority,
   );
   if (!rulesets) {
     return unavailableAttestation('Active ruleset policy is unavailable or malformed', branch, boundIdentity);
   }
   if (rulesets.length > 0) sources.push('ruleset');
 
-  const finalRulesValue = readEffectiveRules(repo, nameWithOwner, branch);
+  const finalRulesValue = readEffectiveRules(repo, nameWithOwner, branch, authority);
   const finalRules = finalRulesValue === null
     ? null
     : parseEffectiveRules(finalRulesValue, new Set(), new Set(), new Map());
@@ -3526,11 +3564,12 @@ function readBranchProtectionUncached(
     finalRules,
     classicProtection,
     rulesets,
+    authority,
   );
   if (!finalRulesets) {
     return unavailableAttestation('Active ruleset policy changed during observation', branch, boundIdentity);
   }
-  const finalAuthority = readExactBranchAuthority(repo, nameWithOwner, branch);
+  const finalAuthority = readExactBranchAuthority(repo, nameWithOwner, branch, authority);
   if (!finalAuthority || JSON.stringify(finalAuthority) !== JSON.stringify(initialAuthority)) {
     return unavailableAttestation('Exact GitHub branch authority changed during observation', branch, boundIdentity);
   }
@@ -3583,14 +3622,27 @@ export function readBranchProtectionAttestation(
       (options.forceFresh !== undefined && typeof options.forceFresh !== 'boolean') ||
       (options.expectedNameWithOwner !== undefined &&
         (typeof options.expectedNameWithOwner !== 'string' ||
-          !/^[^/\s]+\/[^/\s]+$/.test(options.expectedNameWithOwner)))) {
+          !/^[^/\s]+\/[^/\s]+$/.test(options.expectedNameWithOwner))) ||
+      (options.untrustedRoots !== undefined && (!Array.isArray(options.untrustedRoots) ||
+        options.untrustedRoots.length > 16 || options.untrustedRoots.some((root) =>
+          typeof root !== 'string' || root.length === 0 || root.length > 4_096))) ||
+      (options.trustedGithubCli === undefined && (options.untrustedRoots?.length ?? 0) > 0)) {
     return Promise.resolve(unavailableAttestation(
       'Branch-protection request was invalid',
       typeof branch === 'string' ? branch : null,
     ));
   }
   const expectedNameWithOwner = options.expectedNameWithOwner;
-  const key = attestationCacheKey(repo, branch, expectedNameWithOwner);
+  const authority = options.trustedGithubCli
+    ? { pin: options.trustedGithubCli, untrustedRoots: options.untrustedRoots ?? [] }
+    : undefined;
+  if (authority && !verifyTrustedGithubCli(authority.pin, authority.untrustedRoots)) {
+    return Promise.resolve(unavailableAttestation(
+      'Trusted GitHub executable custody is unavailable',
+      branch ?? null,
+    ));
+  }
+  const key = attestationCacheKey(repo, branch, expectedNameWithOwner, authority);
   const now = Date.now();
   if (options.forceFresh) branchProtectionCache.delete(key);
   if (!options.forceFresh) {
@@ -3606,7 +3658,7 @@ export function readBranchProtectionAttestation(
   if (existing && !options.forceFresh) return existing.then(cloneAttestation);
 
   const flight = Promise.resolve()
-    .then(() => readBranchProtectionUncached(repo, branch, expectedNameWithOwner))
+    .then(() => readBranchProtectionUncached(repo, branch, expectedNameWithOwner, authority))
     .catch(() => unavailableAttestation('Branch-protection refresh failed', branch ?? null));
   branchProtectionFlights.set(key, flight);
   return flight.then((value) => {

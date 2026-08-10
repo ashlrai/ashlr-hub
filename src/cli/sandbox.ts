@@ -9,6 +9,7 @@
  *   sandbox gc                  Reclaim STALE orphan sandboxes (crash leftovers).
  *
  *   enroll list                 List enrolled repos + kill switch state.
+ *   enroll preflight <repo>     Read-only candidate admission evidence.
  *   enroll add <repo>           Enroll a repo for autonomous work.
  *   enroll remove <repo>        Remove a repo from the enrollment registry.
  *   enroll kill on|off          Toggle the global kill switch.
@@ -411,6 +412,51 @@ export async function cmdEnroll(args: string[]): Promise<number> {
     return 0;
   }
 
+  if (sub === 'preflight') {
+    const json = args.includes('--json');
+    const unknownFlag = args.slice(1).find((arg) => arg.startsWith('--') && arg !== '--json');
+    const positional = args.slice(1).filter((arg) => !arg.startsWith('--'));
+    if (unknownFlag || positional.length !== 1) {
+      console.error(red('error: ') + (unknownFlag
+        ? `Unknown argument: ${unknownFlag}`
+        : 'Usage: ashlr enroll preflight <repo> [--json]'));
+      return 2;
+    }
+    const { inspectCandidateRepoAdmission } = await import(
+      '../core/portfolio/candidate-admission.js' as unknown as string
+    ) as typeof import('../core/portfolio/candidate-admission.js');
+    const report = await inspectCandidateRepoAdmission(positional[0]!);
+    if (json) {
+      console.log(JSON.stringify(report, null, 2));
+    } else {
+      const admission = report.admissionReady ? green('ready') : red('blocked');
+      const autonomy = report.judgeFreeEligible
+        ? green('evidence candidate')
+        : report.admissionReady ? yellow('proposal only') : red('blocked');
+      console.log('');
+      console.log(bold('  Candidate repo admission'));
+      console.log(`  Repo:       ${cyan(report.repo)}`);
+      console.log(`  Admission:  ${admission}`);
+      console.log(`  Autonomy:   ${autonomy}`);
+      console.log(`  Verifier:   ${report.verifier.detail}`);
+      console.log(`  Source:     ${report.source.detail}`);
+      console.log(`  Trust root: ${report.trustedPolicy.detail}`);
+      console.log(`  Remote PR:  ${report.remotePr.detail}`);
+      console.log(`  Risk:       ${report.risk.detail}`);
+      const findings = [...report.admissionBlockers, ...report.autonomyBlockers, ...report.warnings];
+      if (findings.length > 0) {
+        console.log('');
+        console.log(bold('  Findings'));
+        for (const item of findings) console.log(`    ${yellow('!')} ${item.id}: ${item.detail}`);
+      }
+      console.log('');
+      console.log(`  ${bold('Next:')} ${report.primaryAction}`);
+      console.log(dim('  READ-ONLY: no enrollment, mission materialization, runtime state, daemon, verification, or authority mutation occurred.'));
+      console.log('');
+    }
+    return report.admissionReady ? 0 : 1;
+  }
+
   if (sub === 'add') {
     const repo = args[1];
     if (!repo) {
@@ -491,6 +537,6 @@ export async function cmdEnroll(args: string[]): Promise<number> {
   }
 
   console.error(red('error: ') + `Unknown enroll subcommand: ${sub}`);
-  console.error(dim('Usage: ashlr enroll [list | add <repo> | remove <repo> | kill on|off]'));
+  console.error(dim('Usage: ashlr enroll [list | preflight <repo> [--json] | add <repo> | remove <repo> | kill on|off]'));
   return 2;
 }

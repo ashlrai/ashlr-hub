@@ -123,6 +123,97 @@ ashlr enroll add ~/path/to/my-project
 ashlr enroll list   # confirm enrollment
 ```
 
+Before enrollment, inspect a candidate without changing Ashlr or the repo:
+
+```bash
+ashlr enroll preflight ~/path/to/my-project --json
+```
+
+The report separates proposal-only admission from judge-free merge candidacy.
+It reads `ashlr.verify.json` from the immutable `HEAD` blob, requires identical
+regular-file worktree bytes, isolates every Git probe from repository helpers and
+hooks, and proves the index and inspected repository state did not change. It
+does not infer low risk from filenames.
+
+Judge-free candidacy additionally requires a regular immutable
+`ashlr.admission.json` such as:
+
+```json
+{
+  "schemaVersion": 2,
+  "riskClassification": "ordinary",
+  "judgeFreeEvidence": {
+    "profile": "merge",
+    "workflow": ".github/workflows/ashlr-admission.yml",
+    "check": "ashlr admission"
+  }
+}
+```
+
+The candidate cannot nominate its signer. An operator must separately pin
+dedicated, out-of-repository Ashlr attestor App IDs (not the shared GitHub Actions
+App) in the fixed authority file
+`~/.ashlr/control/candidate-admission-authority.json`:
+
+```json
+{
+  "schemaVersion": 2,
+  "trustedAppIds": ["42424242"],
+  "attestationCheck": "Ashlr admission attestation",
+  "evidenceMaxAgeMs": 1800000,
+  "evidenceFutureSkewMs": 60000
+}
+```
+
+The path is rooted in the OS account home (mutable `HOME` is ignored). The file
+must be owned by the operator and must be a non-symlink regular file
+with no group or other permissions (for example, mode `0600`). Every component
+from the filesystem root through the operator home and `.ashlr/control` must be
+symlink-free, owner/root-owned, free of group/other write access, and free of
+untrusted write ACLs. Ashlr opens the leaf without following links, enforces a
+64 KiB bound, and requires stable hierarchy, identity, metadata, and bytes
+across two descriptor reads. It repeats the complete custody read immediately
+before verdict; absent, malformed, replaced, over-permissive, or unstable
+policy fails closed.
+
+The declared check is the GitHub Actions job required by protected-branch policy
+and remains bound to that job's actual App identity. It is not the attestor.
+Every trusted attestor App ID must differ from the observed workflow App ID;
+the shared GitHub Actions App (`15368`) therefore cannot attest an Actions job.
+The dedicated App must be installed and operated outside the candidate repo,
+keep its private key or installation token unavailable to candidate workflows,
+and use its own Checks-write installation authority only to publish the named
+attestation check. Ashlr separately queries each operator-trusted App's exact-HEAD
+`attestationCheck` and requires the unique latest check to carry the report's v4
+`expectedAttestationId`.
+
+Workflow evidence is ordered by actual execution chronology (`run_started_at`,
+with creation/update timestamps used for validation and deterministic ordering),
+never by run number. Ashlr reads every API page twice with identical totals,
+identities, ordering, and bytes, enumerates every bounded attempt and job, then
+requires the complete exact-HEAD required-context/App check history to correlate
+exactly to those job check IDs. Evidence beyond the finite collection cap grants
+no authority. A newer pending, failed, cancelled, missing, ambiguous, or
+lower-number rerun supersedes an older success; an extra same-name check from
+another workflow fails closed. All timestamps must be present, ordered,
+non-future, and within the configured evidence age.
+
+The v4 statement is explicitly whole-snapshot evidence. It binds the exact
+commit and tree object, repository identity, protected base, workflow and latest
+attempt, workflow App, independent attestor App/check, both policy digests,
+evaluator version, verifier manifest digest, merge profile, and risk
+classification. Credentialed GitHub reads use an absolute canonical `gh`
+executable outside the candidate tree, with full hierarchy custody, argv-only
+invocation, and a scrubbed environment that ignores candidate-directed
+`PATH`, `HOME`, GitHub config, temp, and CA paths. Ashlr then re-reads the remote head,
+protected policy, and operator signer policy and requires exact equality with
+the first observations. Policy changes, source movement, or evidence expiry
+require a new trusted check. Sensitive, regulated,
+critical, self-target, missing, or unattested classifications remain
+proposal-only. The command never enrolls, materializes mission goals, executes
+verifier commands, writes runtime state, starts the daemon, or grants merge
+authority.
+
 ### 3. Dry run — see what would happen, spend nothing
 
 ```sh
@@ -317,6 +408,7 @@ next actions point at work the daemon can select now instead of phantom backlog.
 | `ashlr setup` | First-activation checks; currently nonzero because resident service mutation is restricted |
 | `ashlr onboard <repo>` | Enroll one repo with walkthrough + dry run |
 | `ashlr enroll add/remove/list` | Manage enrolled repos |
+| `ashlr enroll preflight <repo> [--json]` | Read-only candidate admission and autonomy blockers |
 | `ashlr enroll kill on/off` | Engage/clear the kill-switch |
 | `ashlr daemon start/stop/status` | Autonomous operator; proposal generation plus a separate default-off auto-merge maintenance pass |
 | `ashlr loop [--watch] [--dry-run]` | Goal-aware conductor — one tick or continuous |
