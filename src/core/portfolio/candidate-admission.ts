@@ -84,6 +84,7 @@ const GITHUB_COLLECTION_PAGE_SIZE = 100;
 const MAX_GITHUB_COLLECTION_ITEMS = 1_000;
 const MAX_WORKFLOW_ATTEMPTS = 1_000;
 const MAX_AUTHORITY_FILE_BYTES = 64 * 1024;
+const AUTHORITY_EPOCH_CLOSURE_ROUNDS = 2;
 const NULL_DEVICE = process.platform === 'win32' ? 'NUL' : '/dev/null';
 
 export type CandidateAdmissionVerdict = 'blocked' | 'proposal-only' | 'evidence-candidate';
@@ -2011,62 +2012,95 @@ async function inspectRemotePr(
     trustedPolicy,
     checkRun: initialCheckRun,
   });
-  let checkRun = emptyCheckRun('final correlated check evidence recheck failed');
+  interface ClosingAuthorityObservation {
+    digest: string | null;
+    localStable: boolean;
+    remoteHead: CandidateRemoteHeadEvidence;
+    protection: BranchProtectionAttestation;
+    trustedAuthority: CandidateTrustedPolicyAuthorityRead;
+    trustedPolicy: CandidateAdmissionTrustedPolicy | null;
+    checkRun: CandidateCheckRunEvidence;
+  }
+  const failedRemote = (): CandidateRemoteHeadEvidence => ({
+    available: false,
+    nameWithOwner: null,
+    defaultBranch: null,
+    head: null,
+    detail: 'closing remote observation failed',
+  });
+  const closingObservations: ClosingAuthorityObservation[] = [];
+  let closureHookFailed = false;
   try {
     deps.beforeFinalEvidenceRecheck?.();
-    checkRun = checkRequest ? deps.readCheckRun(checkRequest) : initialCheckRun;
-    deps.afterFinalEvidenceRecheck?.();
   } catch {
-    checkRun = emptyCheckRun('final correlated check evidence recheck failed');
+    closureHookFailed = true;
   }
-  const localAfterCheck = captureFinalLocalSnapshot();
-  let remoteAfter: CandidateRemoteHeadEvidence;
-  let liveAfter: BranchProtectionAttestation;
-  let trustedAuthorityAfter: CandidateTrustedPolicyAuthorityRead;
-  let trustedPolicyAfter: CandidateAdmissionTrustedPolicy | null = null;
-  try {
-    remoteAfter = deps.readRemoteHead(origin, candidateRoot, trustedGithubCli);
-    liveAfter = await deps.readProtection(tmpdir(), remoteHead.defaultBranch, {
-      forceFresh: true,
-      expectedNameWithOwner: origin,
-      trustedGithubCli,
-      untrustedRoots: [candidateRoot],
+  for (let round = 0; round < AUTHORITY_EPOCH_CLOSURE_ROUNDS; round += 1) {
+    const localBefore = captureFinalLocalSnapshot();
+    let closingRemote = failedRemote();
+    let closingProtection = { ...live, available: false, ok: false, detail: 'closing protection observation failed' };
+    let closingAuthority = authorityFailure('unreadable', trustedAuthority.path, 'closing operator authority observation failed');
+    let closingPolicy: CandidateAdmissionTrustedPolicy | null = null;
+    let closingCheck = emptyCheckRun('closing correlated check evidence collection failed');
+    try {
+      if (closureHookFailed) throw new Error('closing authority hook failed');
+      closingRemote = deps.readRemoteHead(origin, candidateRoot, trustedGithubCli);
+      closingProtection = await deps.readProtection(tmpdir(), remoteHead.defaultBranch, {
+        forceFresh: true,
+        expectedNameWithOwner: origin,
+        trustedGithubCli,
+        untrustedRoots: [candidateRoot],
+      });
+      closingAuthority = deps.readTrustedPolicy();
+      closingPolicy = closingAuthority.state === 'verified'
+        ? parseCandidateAdmissionTrustedPolicy(closingAuthority.value)
+        : null;
+      closingCheck = checkRequest ? deps.readCheckRun(checkRequest) : initialCheckRun;
+      if (round === 0) deps.afterFinalEvidenceRecheck?.();
+    } catch {
+      closingRemote = failedRemote();
+      closingProtection = { ...live, available: false, ok: false, detail: 'closing protection observation failed' };
+      closingAuthority = authorityFailure('unreadable', trustedAuthority.path, 'closing operator authority observation failed');
+      closingPolicy = null;
+      closingCheck = emptyCheckRun('closing correlated check evidence collection failed');
+    }
+    const localAfter = captureFinalLocalSnapshot();
+    const localBeforeDigest = canonicalAuthorityDigest(localAuthoritySnapshot(localBefore));
+    const localAfterDigest = canonicalAuthorityDigest(localAuthoritySnapshot(localAfter));
+    closingObservations.push({
+      digest: authorityEpochDigest({
+        local: localAfter,
+        remoteHead: closingRemote,
+        protection: closingProtection,
+        trustedAuthority: closingAuthority,
+        trustedPolicy: closingPolicy,
+        checkRun: closingCheck,
+      }),
+      localStable: localBeforeDigest !== null && localBeforeDigest === localAfterDigest,
+      remoteHead: closingRemote,
+      protection: closingProtection,
+      trustedAuthority: closingAuthority,
+      trustedPolicy: closingPolicy,
+      checkRun: closingCheck,
     });
-    trustedAuthorityAfter = deps.readTrustedPolicy();
-    trustedPolicyAfter = trustedAuthorityAfter.state === 'verified'
-      ? parseCandidateAdmissionTrustedPolicy(trustedAuthorityAfter.value)
-      : null;
-  } catch {
-    remoteAfter = { available: false, nameWithOwner: null, defaultBranch: null, head: null, detail: 'post-check remote observation failed' };
-    liveAfter = { ...live, available: false, ok: false, detail: 'post-check protection observation failed' };
-    trustedAuthorityAfter = authorityFailure('unreadable', trustedAuthority.path, 'post-check operator authority observation failed');
   }
-  const localAfterClosure = captureFinalLocalSnapshot();
-  const remoteStableAfterChecks = sameRemoteHead(remoteHead, remoteAfter) &&
-    protectionAuthoritySnapshot(live) === protectionAuthoritySnapshot(liveAfter);
-  const trustedPolicyStableAfterChecks = sameTrustedPolicyAuthority(
-    trustedAuthority,
-    trustedAuthorityAfter,
-    trustedPolicy,
-    trustedPolicyAfter,
-  );
-  const checkEvidenceStableAfterRecheck = checkRequest !== null &&
-    sameCandidateCheckAuthority(initialCheckRun, checkRun);
-  const localAfterCheckDigest = canonicalAuthorityDigest(localAuthoritySnapshot(localAfterCheck));
-  const localAfterClosureDigest = canonicalAuthorityDigest(localAuthoritySnapshot(localAfterClosure));
-  const localStableAcrossClosure = localAfterCheck !== null && localAfterClosure !== null &&
-    localAfterCheckDigest !== null &&
-    localAfterCheckDigest === localAfterClosureDigest;
-  const finalAuthorityEpochDigest = authorityEpochDigest({
-    local: localAfterClosure,
-    remoteHead: remoteAfter,
-    protection: liveAfter,
-    trustedAuthority: trustedAuthorityAfter,
-    trustedPolicy: trustedPolicyAfter,
-    checkRun,
-  });
-  const authorityEpochStable = initialAuthorityEpochDigest !== null &&
-    initialAuthorityEpochDigest === finalAuthorityEpochDigest && localStableAcrossClosure &&
+  const finalObservation = closingObservations.at(-1)!;
+  const checkRun = finalObservation.checkRun;
+  const remoteStableAfterChecks = closingObservations.every((observation) =>
+    sameRemoteHead(remoteHead, observation.remoteHead) &&
+    protectionAuthoritySnapshot(live) === protectionAuthoritySnapshot(observation.protection));
+  const trustedPolicyStableAfterChecks = closingObservations.every((observation) =>
+    sameTrustedPolicyAuthority(
+      trustedAuthority,
+      observation.trustedAuthority,
+      trustedPolicy,
+      observation.trustedPolicy,
+    ));
+  const checkEvidenceStableAfterRecheck = checkRequest !== null && closingObservations.every((observation) =>
+    sameCandidateCheckAuthority(initialCheckRun, observation.checkRun));
+  const finalAuthorityEpochDigest = finalObservation.digest;
+  const authorityEpochStable = initialAuthorityEpochDigest !== null && closingObservations.length === AUTHORITY_EPOCH_CLOSURE_ROUNDS &&
+    closingObservations.every((observation) => observation.localStable && observation.digest === initialAuthorityEpochDigest) &&
     remoteStableAfterChecks && trustedPolicyStableAfterChecks && checkEvidenceStableAfterRecheck;
   const expectedAttestationId = checkRun.appId
     ? expectedAttestations.find((item) => item.appId === checkRun.appId)?.externalId ?? null

@@ -205,19 +205,20 @@ The v6 statement is explicitly whole-snapshot evidence. It binds the exact
 commit and tree object, repository identity, protected base, workflow and latest
 attempt, workflow App, independent attestor App/check, both policy digests,
 evaluator version, verifier manifest digest, merge profile, and risk
-classification. Credentialed GitHub reads use an absolute canonical `gh`
-executable outside the candidate tree, with full hierarchy custody, argv-only
-invocation, and a scrubbed environment that ignores candidate-directed
-`PATH`, `HOME`, GitHub config, temp, and CA paths. Git itself is resolved only
-from explicit platform system paths. Its canonical executable and every parent
-through the filesystem root must be root-owned and attacker-nonwritable;
-user-owned Homebrew, npm, candidate, and inherited-`PATH` installations are
-refused, and unsupported platforms fail closed. Ashlr recollects every
+classification. Credentialed GitHub reads resolve `gh` only from explicit
+platform system paths. The canonical executable and every parent through the
+filesystem root must be root-owned and attacker-nonwritable; user-owned
+Homebrew, npm, candidate, and inherited-`PATH` installations are refused. Calls
+are argv-only with a scrubbed environment that ignores candidate-directed
+`PATH`, `HOME`, GitHub config, temp, and CA paths. Git uses the same explicit,
+root-owned system custody boundary, and unsupported platforms fail closed.
+Ashlr recollects every
 correlated workflow run, attempt job, required-context check, and trusted-App
 attestation across stable pagination and rerun chronology, then closes that
-collection with bracketed local snapshots plus fresh remote-head,
-protection/ruleset, and operator-policy reads. The complete local, remote,
-policy, and check authority epoch is canonically compared with the first epoch.
+collection with two complete rounds of bracketed local snapshots plus fresh
+remote-head, protection/ruleset, operator-policy, and correlated-check reads.
+Every complete local, remote, policy, and check authority epoch must canonically
+equal the first epoch; the evaluator never converges onto changed authority.
 Changed IDs, content, status, pages, or any newer pending, failed, or cancelled
 rerun fail closed. Policy changes, source movement, or evidence expiry require a
 new trusted check. Sensitive, regulated,

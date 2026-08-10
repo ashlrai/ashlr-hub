@@ -224,15 +224,16 @@ export function inspectOwnedAuthorityPath(path: string, anchorPath: string): Pat
   }
 }
 
-function trustedExecutableRoots(): string[] {
-  if (process.platform === 'darwin') return ['/usr', '/opt/homebrew'];
-  if (process.platform === 'linux') return ['/usr', '/opt/homebrew', '/home/linuxbrew/.linuxbrew'];
-  return [];
-}
-
 /** Platforms without an ACL-aware system custody proof deliberately fail closed. */
 export function trustedSystemGitCandidates(platform: NodeJS.Platform = process.platform): readonly string[] {
   if (platform === 'darwin') return ['/usr/bin/git'];
+  return [];
+}
+
+/** Only explicit system locations can provide GitHub authority evidence. */
+export function trustedSystemGithubCandidates(platform: NodeJS.Platform = process.platform): readonly string[] {
+  if (platform === 'darwin') return ['/usr/bin/gh', '/usr/local/bin/gh', '/opt/homebrew/bin/gh'];
+  if (platform === 'linux') return ['/usr/bin/gh', '/usr/local/bin/gh'];
   return [];
 }
 
@@ -267,34 +268,27 @@ function inspectTrustedSystemGitExecutable(
   }
 }
 
-function inspectTrustedExecutable(
+function inspectTrustedSystemGithubExecutable(
   executable: string,
   untrustedRoots: readonly string[],
-  requireCanonicalRequest = false,
 ): TrustedExecutablePin | null {
   if (process.platform === 'win32' || typeof process.getuid !== 'function') return null;
   try {
-    const requested = resolve(executable);
     if (!isAbsolute(executable)) return null;
-    const canonical = realpathSync(requested);
-    if (requireCanonicalRequest && canonical !== requested) {
-      const alias = lstatSync(requested, { bigint: true });
-      const aliasParent = inspectPosixHierarchy(dirname(requested), {
-        leafKind: 'directory',
-        requireCurrentUserLeaf: false,
-        allowTrustedInstallGroupWrite: true,
-        allowedRoots: trustedExecutableRoots(),
-        untrustedRoots,
-      });
-      if (!alias.isSymbolicLink() || !aliasParent ||
-          (alias.uid !== 0n && alias.uid !== BigInt(process.getuid())) || !macosAclSafe(requested)) return null;
-    }
+    const canonical = realpathSync(resolve(executable));
+    const explicitlyAllowed = trustedSystemGithubCandidates().some((candidate) => {
+      try {
+        return realpathSync(candidate) === canonical;
+      } catch {
+        return false;
+      }
+    });
+    if (!explicitlyAllowed) return null;
     accessSync(canonical, fsConstants.X_OK);
     const proof = inspectPosixHierarchy(canonical, {
       leafKind: 'file',
       requireCurrentUserLeaf: false,
-      allowTrustedInstallGroupWrite: true,
-      allowedRoots: trustedExecutableRoots(),
+      requireRootOwnership: true,
       untrustedRoots,
     });
     if (!proof) return null;
@@ -307,9 +301,8 @@ function inspectTrustedExecutable(
 }
 
 export function resolveTrustedGithubCli(untrustedRoots: readonly string[] = []): TrustedExecutablePin | null {
-  for (const part of (process.env.PATH ?? '').split(delimiter)) {
-    if (!part || !isAbsolute(part)) continue;
-    const pin = inspectTrustedExecutable(join(part, process.platform === 'win32' ? 'gh.exe' : 'gh'), untrustedRoots);
+  for (const executable of trustedSystemGithubCandidates()) {
+    const pin = inspectTrustedSystemGithubExecutable(executable, untrustedRoots);
     if (pin) return pin;
   }
   return null;
@@ -323,7 +316,7 @@ export function verifyTrustedGithubCli(
       typeof pin.canonicalPath !== 'string' || typeof pin.digest !== 'string' ||
       pin.executable !== pin.canonicalPath || !isAbsolute(pin.executable) ||
       !/^[0-9a-f]{64}$/.test(pin.digest)) return false;
-  const observed = inspectTrustedExecutable(pin.executable, untrustedRoots);
+  const observed = inspectTrustedSystemGithubExecutable(pin.executable, untrustedRoots);
   return observed !== null && observed.executable === pin.executable && observed.digest === pin.digest;
 }
 
