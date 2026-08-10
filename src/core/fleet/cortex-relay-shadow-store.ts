@@ -30,14 +30,43 @@ const RECEIPT_KEY_DOMAIN = 'ashlr:cortex-relay-shadow:receipt-key:v1';
 const SHA256_RE = /^[0-9a-f]{64}$/;
 const SHA256_TAGGED_RE = /^sha256:[0-9a-f]{64}$/;
 const HMAC_RE = /^hmac-sha256:[0-9a-f]{64}$/;
+const ASSIGNMENT_MAX_TTL_MS = 24 * 60 * 60_000;
+const WORKSTREAMS = new Set(['personal', 'company', 'govcon', 'commercial']);
 
 export type CortexRelayShadowRecordState = 'recorded' | 'duplicate' | 'conflict' | 'unavailable';
+
+export interface CortexRelayShadowClaimMetadataV1 {
+  schemaVersion: 1;
+  protocol: 'ashlr-cortex-relay-shadow-claim/v1';
+  mode: 'shadow';
+  evidenceClass: 'observation-only';
+  consumable: false;
+  authorityGranted: false;
+  executionAuthority: false;
+  proposalAuthority: false;
+  mergeAuthority: false;
+  deployAuthority: false;
+  accepted: false;
+  reason: 'claim-only';
+  assignmentId: string;
+  assignmentDigest: string;
+  assignmentIssuedAt: string;
+  assignmentExpiresAt: string;
+  runId: string;
+  workstream: NonNullable<CortexRelayShadowMetadata['workstream']>;
+  repository: string;
+  defaultBranch: string;
+  sourceCommit: string;
+  tenantRefDigest: string;
+  resultContract: NonNullable<CortexRelayShadowMetadata['resultContract']>;
+  effects: CortexRelayShadowMetadata['effects'];
+}
 
 export interface CortexRelayShadowReceiptV1 {
   schemaVersion: 1;
   protocol: typeof RECEIPT_PROTOCOL;
   recordId: string;
-  metadata: CortexRelayShadowMetadata;
+  metadata: CortexRelayShadowClaimMetadataV1;
   receiptDigest: string;
   signingKeyId: string;
   signatureAlgorithm: 'hmac-sha256';
@@ -86,13 +115,9 @@ function createOrPinPrivateChild(parent: string, name: string): string | null {
   }
 }
 
-function recordIdentity(metadata: CortexRelayShadowMetadata): string {
-  return metadata.assignmentId ?? metadata.inputDigest;
-}
-
-function recordId(metadata: CortexRelayShadowMetadata): string {
+function recordId(metadata: CortexRelayShadowClaimMetadataV1): string {
   return createHash('sha256')
-    .update(`${RECEIPT_KEY_DOMAIN}\0${recordIdentity(metadata)}`, 'utf8').digest('hex');
+    .update(`${RECEIPT_KEY_DOMAIN}\0${metadata.assignmentId}`, 'utf8').digest('hex');
 }
 
 function signingKey(provenanceKey: Buffer): Buffer {
@@ -104,7 +129,7 @@ function signingKeyId(key: Buffer): string {
 }
 
 function receiptBase(
-  metadata: CortexRelayShadowMetadata,
+  metadata: CortexRelayShadowClaimMetadataV1,
   id: string,
   keyId: string,
 ): Omit<CortexRelayShadowReceiptV1, 'receiptDigest' | 'signature'> {
@@ -132,9 +157,10 @@ function createReceipt(
   metadata: CortexRelayShadowMetadata,
   provenanceKey: Buffer,
 ): CortexRelayShadowReceiptV1 | null {
-  if (provenanceKey.length !== 32 || !validMetadata(metadata)) return null;
+  const claim = claimMetadata(metadata);
+  if (provenanceKey.length !== 32 || !claim) return null;
   const key = signingKey(provenanceKey);
-  const base = receiptBase(metadata, recordId(metadata), signingKeyId(key));
+  const base = receiptBase(claim, recordId(claim), signingKeyId(key));
   const receiptDigest = digestOf(base);
   return Object.freeze({ ...base, receiptDigest, signature: signatureOf(receiptDigest, key) });
 }
@@ -143,6 +169,12 @@ function exactKeys(value: Record<string, unknown>, expected: readonly string[]):
   const actual = Object.keys(value).sort();
   const wanted = [...expected].sort();
   return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]);
+}
+
+function canonicalIso(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
 }
 
 function validMetadata(metadata: CortexRelayShadowMetadata): boolean {
@@ -167,6 +199,97 @@ function validMetadata(metadata: CortexRelayShadowMetadata): boolean {
   }
 }
 
+function claimMetadata(metadata: CortexRelayShadowMetadata): CortexRelayShadowClaimMetadataV1 | null {
+  if (!validMetadata(metadata) || metadata.reason !== 'claim-only' ||
+      !metadata.assignmentId || metadata.assignmentId !== metadata.runId ||
+      !metadata.assignmentDigest || !SHA256_TAGGED_RE.test(metadata.assignmentDigest) ||
+      !metadata.assignmentIssuedAt || !metadata.assignmentExpiresAt ||
+      !metadata.workstream || !metadata.repository || !metadata.defaultBranch ||
+      !metadata.sourceCommit || !metadata.tenantRefDigest || !metadata.resultContract) return null;
+  return Object.freeze({
+    schemaVersion: 1,
+    protocol: 'ashlr-cortex-relay-shadow-claim/v1',
+    mode: 'shadow',
+    evidenceClass: 'observation-only',
+    consumable: false,
+    authorityGranted: false,
+    executionAuthority: false,
+    proposalAuthority: false,
+    mergeAuthority: false,
+    deployAuthority: false,
+    accepted: false,
+    reason: 'claim-only',
+    assignmentId: metadata.assignmentId,
+    assignmentDigest: metadata.assignmentDigest,
+    assignmentIssuedAt: metadata.assignmentIssuedAt,
+    assignmentExpiresAt: metadata.assignmentExpiresAt,
+    runId: metadata.runId,
+    workstream: metadata.workstream,
+    repository: metadata.repository,
+    defaultBranch: metadata.defaultBranch,
+    sourceCommit: metadata.sourceCommit,
+    tenantRefDigest: metadata.tenantRefDigest,
+    resultContract: Object.freeze({ ...metadata.resultContract }),
+    effects: Object.freeze({ ...metadata.effects }),
+  });
+}
+
+function validClaimMetadata(value: unknown): value is CortexRelayShadowClaimMetadataV1 {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const metadata = value as Record<string, unknown>;
+  if (!exactKeys(metadata, [
+    'schemaVersion', 'protocol', 'mode', 'evidenceClass', 'consumable',
+    'authorityGranted', 'executionAuthority', 'proposalAuthority', 'mergeAuthority',
+    'deployAuthority', 'accepted', 'reason', 'assignmentId', 'assignmentDigest', 'runId',
+    'assignmentIssuedAt', 'assignmentExpiresAt',
+    'workstream', 'repository', 'defaultBranch', 'sourceCommit', 'tenantRefDigest',
+    'resultContract', 'effects',
+  ]) || metadata.schemaVersion !== 1 ||
+      metadata.protocol !== 'ashlr-cortex-relay-shadow-claim/v1' || metadata.mode !== 'shadow' ||
+      metadata.evidenceClass !== 'observation-only' || metadata.consumable !== false ||
+      metadata.authorityGranted !== false || metadata.executionAuthority !== false ||
+      metadata.proposalAuthority !== false || metadata.mergeAuthority !== false ||
+      metadata.deployAuthority !== false || metadata.accepted !== false ||
+      metadata.reason !== 'claim-only' || typeof metadata.assignmentId !== 'string' ||
+      !/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,159}$/.test(metadata.assignmentId) ||
+      metadata.assignmentId !== metadata.runId || typeof metadata.assignmentDigest !== 'string' ||
+      !SHA256_TAGGED_RE.test(metadata.assignmentDigest) ||
+      !canonicalIso(metadata.assignmentIssuedAt) || !canonicalIso(metadata.assignmentExpiresAt) ||
+      Date.parse(metadata.assignmentExpiresAt) <= Date.parse(metadata.assignmentIssuedAt) ||
+      Date.parse(metadata.assignmentExpiresAt) - Date.parse(metadata.assignmentIssuedAt) >
+        ASSIGNMENT_MAX_TTL_MS || typeof metadata.workstream !== 'string' ||
+      !WORKSTREAMS.has(metadata.workstream) || typeof metadata.repository !== 'string' ||
+      !/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?\/[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/.test(
+        metadata.repository,
+      ) || typeof metadata.defaultBranch !== 'string' || metadata.defaultBranch.length < 1 ||
+      metadata.defaultBranch.length > 255 || typeof metadata.sourceCommit !== 'string' ||
+      !/^[0-9a-f]{40}$/.test(metadata.sourceCommit) || typeof metadata.tenantRefDigest !== 'string' ||
+      !SHA256_TAGGED_RE.test(metadata.tenantRefDigest)) return false;
+  const result = metadata.resultContract;
+  const effects = metadata.effects;
+  return typeof result === 'object' && result !== null && !Array.isArray(result) &&
+    exactKeys(result as Record<string, unknown>, [
+      'kind', 'requireDiff', 'requireProposal', 'requireVerification',
+      'maxChangedFiles', 'maxChangedLines', 'allowedFileCount',
+    ]) && (result as Record<string, unknown>).kind === 'verified-proposal' &&
+    (result as Record<string, unknown>).requireDiff === true &&
+    (result as Record<string, unknown>).requireProposal === true &&
+    (result as Record<string, unknown>).requireVerification === true &&
+    Number.isInteger((result as Record<string, unknown>).maxChangedFiles) &&
+    Number.isInteger((result as Record<string, unknown>).maxChangedLines) &&
+    Number.isInteger((result as Record<string, unknown>).allowedFileCount) &&
+    Number((result as Record<string, unknown>).maxChangedFiles) >= 1 &&
+    Number((result as Record<string, unknown>).maxChangedFiles) <= 500 &&
+    Number((result as Record<string, unknown>).maxChangedLines) >= 1 &&
+    Number((result as Record<string, unknown>).maxChangedLines) <= 100_000 &&
+    Number((result as Record<string, unknown>).allowedFileCount) >= 1 &&
+    Number((result as Record<string, unknown>).allowedFileCount) <= 250 &&
+    typeof effects === 'object' && effects !== null && !Array.isArray(effects) &&
+    exactKeys(effects as Record<string, unknown>, [
+      'agentsSpawned', 'proposalsCreated', 'repositoriesMutated', 'merges', 'deployments',
+    ]) && Object.values(effects as Record<string, unknown>).every((entry) => entry === 0);
+}
+
 function parseReceipt(value: unknown, provenanceKey: Buffer): CortexRelayShadowReceiptV1 | null {
   try {
     if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
@@ -179,8 +302,8 @@ function parseReceipt(value: unknown, provenanceKey: Buffer): CortexRelayShadowR
       typeof row.signingKeyId !== 'string' || !SHA256_RE.test(row.signingKeyId) ||
       row.signatureAlgorithm !== 'hmac-sha256' || typeof row.receiptDigest !== 'string' ||
       !SHA256_TAGGED_RE.test(row.receiptDigest) || typeof row.signature !== 'string' ||
-      !HMAC_RE.test(row.signature) || !validMetadata(row.metadata as CortexRelayShadowMetadata)) return null;
-    const metadata = row.metadata as CortexRelayShadowMetadata;
+      !HMAC_RE.test(row.signature) || !validClaimMetadata(row.metadata)) return null;
+    const metadata = row.metadata;
     const key = signingKey(provenanceKey);
     const base = receiptBase(metadata, row.recordId, row.signingKeyId);
     const expectedDigest = digestOf(base);
@@ -233,9 +356,7 @@ function recordWithKey(
   root: string | undefined,
   key: Buffer | null,
 ): CortexRelayShadowRecordResult {
-  if (!key || key.length !== 32 || !metadata.assignmentId ||
-      metadata.assignmentId !== metadata.runId || !metadata.assignmentDigest ||
-      !SHA256_TAGGED_RE.test(metadata.assignmentDigest)) {
+  if (!key || key.length !== 32 || !claimMetadata(metadata)) {
     return { state: 'unavailable', metadata };
   }
   try {
@@ -269,7 +390,7 @@ export interface ConsumeCortexRelayShadowResult {
   effectEligible: false;
 }
 
-/** Shadow-only consumer: observe, durably claim, and stop. No effect callback exists. */
+/** Shadow-only consumer: durably claim, then perform read-only observation. No effect callback exists. */
 export function consumeCortexRelayShadow(
   input: CortexRelayShadowInput,
 ): ConsumeCortexRelayShadowResult {
@@ -282,7 +403,7 @@ export function consumeCortexRelayShadow(
     };
   }
   const receipt = recordCortexRelayShadowOutcome(claim.metadata);
-  if (receipt.state !== 'recorded') {
+  if (receipt.state !== 'recorded' && receipt.state !== 'duplicate') {
     return {
       validation: { accepted: false, observed: false, metadata: claim.metadata },
       receipt,
@@ -304,6 +425,7 @@ export function _consumeCortexRelayShadowForTest(
     validation?: Partial<CortexRelayShadowDependencies>;
     root?: string;
     provenanceKey?: Buffer;
+    afterClaimRecorded?: () => void;
   } = {},
 ): ConsumeCortexRelayShadowResult {
   if (sentinel !== CORTEX_RELAY_SHADOW_TEST_CONTROL || process.env.VITEST !== 'true') {
@@ -325,13 +447,14 @@ export function _consumeCortexRelayShadowForTest(
     };
   }
   const receipt = recordWithKey(claim.metadata, options.root, options.provenanceKey ?? null);
-  if (receipt.state !== 'recorded') {
+  if (receipt.state !== 'recorded' && receipt.state !== 'duplicate') {
     return {
       validation: { accepted: false, observed: false, metadata: claim.metadata },
       receipt,
       effectEligible: false,
     };
   }
+  if (receipt.state === 'recorded') options.afterClaimRecorded?.();
   const validation = _validateCortexRelayShadowForTest(sentinel, input, dependencies);
   return {
     validation,

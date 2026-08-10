@@ -35,13 +35,17 @@ it may not reinterpret M499 receipts as execution or proposal authority.
 The integrated consumer has no effect callback. After signature and trusted
 policy validation, it writes one immutable `claim-only` receipt before Git or
 Locus observation and before any future effect could be introduced. Missing
-signer, duplicate, conflict, or publication failure stops the pipeline before
-those observations. Callers cannot redirect the production receipt root. The
+signer, conflict, or publication failure stops the pipeline before those
+observations. An authenticated duplicate can resume read-only observation but
+never an effect. Callers cannot redirect the production receipt root. The
 receipt uses the Hub provenance key through a
-domain-separated HMAC. Publication uses staged hard links plus file and
-directory `fsync`; exact duplicates replay, conflicting uses of one assignment
-identity fail closed, and corrupted records are unavailable. Receipts contain
-bounded metadata only, never raw
+domain-separated HMAC. Its deterministic claim projection commits the signed
+assignment digest, issue/expiry window, and bounded scope, but excludes fresh
+observation timestamps and outcome digests. Every retry still revalidates the
+signed issue/expiry window. Publication uses staged hard links plus file and directory `fsync`;
+exact duplicates can resume read-only observation after a crash, conflicting
+uses of one assignment identity fail closed, and corrupted records are
+unavailable. Receipts contain bounded metadata only, never raw
 objectives, paths, diffs, stdout, stderr, environment values, credentials, or
 Locus seals.
 

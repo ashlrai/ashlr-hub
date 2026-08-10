@@ -71,6 +71,8 @@ export interface CortexRelayShadowMetadata {
   inputDigest: string;
   assignmentId?: string;
   assignmentDigest?: string;
+  assignmentIssuedAt?: string;
+  assignmentExpiresAt?: string;
   runId?: string;
   workstream?: EngineeringAssignmentV1['workstream'];
   repository?: string;
@@ -266,6 +268,8 @@ function metadata(
     ...(assignment ? {
       assignmentId: assignment.assignmentId,
       assignmentDigest: assignment.assignmentDigest,
+      assignmentIssuedAt: assignment.issuedAt,
+      assignmentExpiresAt: assignment.expiresAt,
       runId: assignment.runId,
       workstream: assignment.workstream,
       repository: `${assignment.repo.owner}/${assignment.repo.name}`,

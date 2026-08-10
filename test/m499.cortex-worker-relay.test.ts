@@ -23,6 +23,7 @@ import {
   type EngineeringAssignmentV1,
 } from '../src/core/fleet/cortex-engineering-assignment.js';
 import {
+  _prepareCortexRelayShadowClaimForTest,
   _validateCortexRelayShadowForTest,
   CORTEX_RELAY_SHADOW_TEST_CONTROL,
   type CortexRelayShadowInput,
@@ -172,6 +173,16 @@ function dependencies(
 
 function input(value: unknown = assignment()) {
   return { assignment: value };
+}
+
+function claimMetadata(value: CortexRelayShadowInput = input(), now: Date = NOW) {
+  const claim = _prepareCortexRelayShadowClaimForTest(
+    CORTEX_RELAY_SHADOW_TEST_CONTROL,
+    value,
+    { now: () => now, loadPolicy: () => TRUST_POLICY },
+  );
+  if (!claim.ok) throw new Error(`claim preparation failed: ${claim.metadata.reason}`);
+  return claim.metadata;
 }
 
 function resign(value: Record<string, unknown>): Record<string, unknown> {
@@ -572,13 +583,12 @@ describe('M499 Locus V3 and metadata receipts', () => {
   it('persists only bounded metadata and deduplicates an assignment exactly once', () => {
     const root = mkdtempSync(join(tmpdir(), 'ashlr-m499-store-'));
     tempRoots.push(root);
-    const result = validateCortexRelayShadow(input(), dependencies());
-    expect(result.observed).toBe(true);
+    const metadata = claimMetadata();
     const first = _recordCortexRelayShadowOutcomeForTest(
-      CORTEX_RELAY_SHADOW_TEST_CONTROL, result.metadata, { root, provenanceKey: PROVENANCE_KEY },
+      CORTEX_RELAY_SHADOW_TEST_CONTROL, metadata, { root, provenanceKey: PROVENANCE_KEY },
     );
     const duplicate = _recordCortexRelayShadowOutcomeForTest(
-      CORTEX_RELAY_SHADOW_TEST_CONTROL, result.metadata, { root, provenanceKey: PROVENANCE_KEY },
+      CORTEX_RELAY_SHADOW_TEST_CONTROL, metadata, { root, provenanceKey: PROVENANCE_KEY },
     );
     expect(first.state).toBe('recorded');
     expect(duplicate.state).toBe('duplicate');
@@ -597,39 +607,50 @@ describe('M499 Locus V3 and metadata receipts', () => {
       signatureAlgorithm: 'hmac-sha256',
       metadata: {
         assignmentId: 'run_m499',
+        assignmentIssuedAt: '2026-08-10T12:00:00.000Z',
+        assignmentExpiresAt: '2026-08-10T13:00:00.000Z',
         repository: 'ashlrai/ashlr-hub',
         accepted: false,
         consumable: false,
+        authorityGranted: false,
+        executionAuthority: false,
+        proposalAuthority: false,
+        mergeAuthority: false,
+        deployAuthority: false,
+        reason: 'claim-only',
         effects: { agentsSpawned: 0, proposalsCreated: 0, repositoriesMutated: 0 },
       },
     });
+    expect(JSON.parse(persisted).metadata).not.toHaveProperty('observedAt');
+    expect(JSON.parse(persisted).metadata).not.toHaveProperty('outcomeDigest');
+    expect(JSON.parse(persisted).metadata).not.toHaveProperty('inputDigest');
   });
 
   it('treats a reused assignment id with a different digest as a conflict', () => {
     const root = mkdtempSync(join(tmpdir(), 'ashlr-m499-conflict-'));
     tempRoots.push(root);
-    const first = validateCortexRelayShadow(input(), dependencies());
+    const first = claimMetadata();
     const changed = assignment({
       mission: {
         objective: 'Different objective', successSignals: ['Tests pass'],
         guardrails: ['Do not merge'], allowedFiles: ['src/other.ts'],
       },
     });
-    const second = validateCortexRelayShadow(input(changed), dependencies());
+    const second = claimMetadata(input(changed));
     expect(_recordCortexRelayShadowOutcomeForTest(
-      CORTEX_RELAY_SHADOW_TEST_CONTROL, first.metadata, { root, provenanceKey: PROVENANCE_KEY },
+      CORTEX_RELAY_SHADOW_TEST_CONTROL, first, { root, provenanceKey: PROVENANCE_KEY },
     ).state).toBe('recorded');
     expect(_recordCortexRelayShadowOutcomeForTest(
-      CORTEX_RELAY_SHADOW_TEST_CONTROL, second.metadata, { root, provenanceKey: PROVENANCE_KEY },
+      CORTEX_RELAY_SHADOW_TEST_CONTROL, second, { root, provenanceKey: PROVENANCE_KEY },
     ).state).toBe('conflict');
   });
 
   it('refuses a corrupted prior receipt instead of trusting its idempotency state', () => {
     const root = mkdtempSync(join(tmpdir(), 'ashlr-m499-corrupt-'));
     tempRoots.push(root);
-    const result = validateCortexRelayShadow(input(), dependencies());
+    const metadata = claimMetadata();
     expect(_recordCortexRelayShadowOutcomeForTest(
-      CORTEX_RELAY_SHADOW_TEST_CONTROL, result.metadata, { root, provenanceKey: PROVENANCE_KEY },
+      CORTEX_RELAY_SHADOW_TEST_CONTROL, metadata, { root, provenanceKey: PROVENANCE_KEY },
     ).state).toBe('recorded');
     const dir = join(root, 'fleet', 'cortex-relay-shadow', 'records');
     const path = join(dir, readdirSync(dir)[0]!);
@@ -637,17 +658,18 @@ describe('M499 Locus V3 and metadata receipts', () => {
     const corrupted = { ...parsed, signature: `hmac-sha256:${'0'.repeat(64)}` };
     writeFileSync(path, `${JSON.stringify(corrupted)}\n`, { mode: 0o600 });
     expect(_recordCortexRelayShadowOutcomeForTest(
-      CORTEX_RELAY_SHADOW_TEST_CONTROL, result.metadata, { root, provenanceKey: PROVENANCE_KEY },
+      CORTEX_RELAY_SHADOW_TEST_CONTROL, metadata, { root, provenanceKey: PROVENANCE_KEY },
     ).state).toBe('unavailable');
   });
 
-  it('integrates validation and metadata persistence without an execution hook', () => {
+  it('replays the same signed assignment at a later valid wall clock without changing receipt material', () => {
     const root = mkdtempSync(join(tmpdir(), 'ashlr-m499-consume-'));
     tempRoots.push(root);
     const firstRepo = vi.fn(() => observation());
     const firstLocus = vi.fn(() => locusSummary());
     const first = _consumeCortexRelayShadowForTest(CORTEX_RELAY_SHADOW_TEST_CONTROL, input(), {
       validation: dependencies({
+        now: () => new Date('2026-08-10T12:01:00.000Z'),
         observeRepository: firstRepo,
         observeLocusAuthority: firstLocus,
       }),
@@ -658,6 +680,7 @@ describe('M499 Locus V3 and metadata receipts', () => {
     const duplicateLocus = vi.fn(() => locusSummary());
     const duplicate = _consumeCortexRelayShadowForTest(CORTEX_RELAY_SHADOW_TEST_CONTROL, input(), {
       validation: dependencies({
+        now: () => new Date('2026-08-10T12:09:00.000Z'),
         observeRepository: duplicateRepo,
         observeLocusAuthority: duplicateLocus,
       }),
@@ -668,17 +691,98 @@ describe('M499 Locus V3 and metadata receipts', () => {
     expect(first.receipt.state).toBe('recorded');
     expect(first.receipt.metadata.reason).toBe('claim-only');
     expect(first.receipt.metadata).not.toHaveProperty('locus');
+    expect(first.receipt.receipt?.metadata).not.toHaveProperty('observedAt');
     expect(firstRepo).toHaveBeenCalled();
     expect(firstLocus).toHaveBeenCalled();
-    expect(duplicate.validation.observed).toBe(false);
-    expect(duplicate.validation.metadata.reason).toBe('claim-only');
+    expect(duplicate.validation.observed).toBe(true);
+    expect(duplicate.validation.metadata.reason).toBe('observation-only');
     expect(duplicate.receipt.state).toBe('duplicate');
-    expect(duplicateRepo).not.toHaveBeenCalled();
-    expect(duplicateLocus).not.toHaveBeenCalled();
+    expect(duplicate.receipt.metadata.observedAt).not.toBe(first.receipt.metadata.observedAt);
+    expect(duplicate.receipt.receipt).toEqual(first.receipt.receipt);
+    expect(duplicateRepo).toHaveBeenCalled();
+    expect(duplicateLocus).toHaveBeenCalled();
     expect(first.validation.metadata.effects).toEqual({
       agentsSpawned: 0, proposalsCreated: 0, repositoriesMutated: 0, merges: 0, deployments: 0,
     });
     expect(first.effectEligible).toBe(false);
+    expect(duplicate.effectEligible).toBe(false);
+  });
+
+  it('recovers observation after a crash immediately following the durable claim', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ashlr-m499-crash-recovery-'));
+    tempRoots.push(root);
+    const beforeCrashRepo = vi.fn(() => observation());
+    const beforeCrashLocus = vi.fn(() => locusSummary());
+    expect(() => _consumeCortexRelayShadowForTest(CORTEX_RELAY_SHADOW_TEST_CONTROL, input(), {
+      validation: dependencies({
+        now: () => new Date('2026-08-10T12:02:00.000Z'),
+        observeRepository: beforeCrashRepo,
+        observeLocusAuthority: beforeCrashLocus,
+      }),
+      root,
+      provenanceKey: PROVENANCE_KEY,
+      afterClaimRecorded: () => { throw new Error('simulated crash after durable claim'); },
+    })).toThrow('simulated crash after durable claim');
+    expect(beforeCrashRepo).not.toHaveBeenCalled();
+    expect(beforeCrashLocus).not.toHaveBeenCalled();
+    expect(readdirSync(join(root, 'fleet', 'cortex-relay-shadow', 'records'))).toHaveLength(1);
+
+    const recoveredRepo = vi.fn(() => observation());
+    const recoveredLocus = vi.fn(() => locusSummary());
+    const recovered = _consumeCortexRelayShadowForTest(CORTEX_RELAY_SHADOW_TEST_CONTROL, input(), {
+      validation: dependencies({
+        now: () => new Date('2026-08-10T12:11:00.000Z'),
+        observeRepository: recoveredRepo,
+        observeLocusAuthority: recoveredLocus,
+      }),
+      root,
+      provenanceKey: PROVENANCE_KEY,
+    });
+    expect(recovered.receipt.state).toBe('duplicate');
+    expect(recovered.validation.observed).toBe(true);
+    expect(recovered.validation.metadata).toMatchObject({
+      accepted: false,
+      consumable: false,
+      authorityGranted: false,
+      executionAuthority: false,
+      proposalAuthority: false,
+      mergeAuthority: false,
+      deployAuthority: false,
+    });
+    expect(recoveredRepo).toHaveBeenCalled();
+    expect(recoveredLocus).toHaveBeenCalled();
+    expect(recovered.effectEligible).toBe(false);
+    expect(recovered).not.toHaveProperty('execute');
+    expect(recovered).not.toHaveProperty('delegationScope');
+  });
+
+  it('does not let an existing claim bypass the signed assignment expiry window', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ashlr-m499-expired-retry-'));
+    tempRoots.push(root);
+    const first = _consumeCortexRelayShadowForTest(CORTEX_RELAY_SHADOW_TEST_CONTROL, input(), {
+      validation: dependencies({ now: () => new Date('2026-08-10T12:05:00.000Z') }),
+      root,
+      provenanceKey: PROVENANCE_KEY,
+    });
+    expect(first.receipt.state).toBe('recorded');
+
+    const expiredRepo = vi.fn(() => observation());
+    const expiredLocus = vi.fn(() => locusSummary());
+    const expired = _consumeCortexRelayShadowForTest(CORTEX_RELAY_SHADOW_TEST_CONTROL, input(), {
+      validation: dependencies({
+        now: () => new Date('2026-08-10T13:00:00.000Z'),
+        observeRepository: expiredRepo,
+        observeLocusAuthority: expiredLocus,
+      }),
+      root,
+      provenanceKey: PROVENANCE_KEY,
+    });
+    expect(expired.receipt.state).toBe('unavailable');
+    expect(expired.validation.observed).toBe(false);
+    expect(expired.validation.metadata.reason).toBe('invalid-assignment');
+    expect(expiredRepo).not.toHaveBeenCalled();
+    expect(expiredLocus).not.toHaveBeenCalled();
+    expect(expired.effectEligible).toBe(false);
   });
 
   it('fails closed without an existing receipt signer and never exposes an effect hook', () => {
