@@ -71,6 +71,13 @@ vi.mock('../src/core/goals/store.js', () => ({
     createdGoals.push(goal);
     return goal;
   }),
+  createGoalIfAbsent: vi.fn((objective: string, opts?: { project?: string | null }) => {
+    const id = `goal-${createdGoals.length}`;
+    const now = new Date().toISOString();
+    const goal = { id, objective, project: opts?.project ?? null, status: 'planning' as const, milestones: [], createdAt: now, updatedAt: now };
+    createdGoals.push(goal);
+    return { status: 'created', goal };
+  }),
   listGoals: vi.fn(() => []),
   listGoalsDetailed: vi.fn(() => ({
     goals: [], sourceState: 'healthy', sourcePresent: true, complete: true,

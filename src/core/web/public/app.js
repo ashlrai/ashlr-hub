@@ -71,6 +71,7 @@ const state = {
   fleetActivityInterval: null, // M90: polling timer
   fleetActivityLoading: false,
   goals: null,              // M104: GET /api/goals goal list + progress
+  mission: null,            // Mission Outcome Room: planning-only briefing + compiler preview
   // M210: Fleet Dashboard
   fleetDashboard: null,             // latest DashboardSnapshot
   fleetDashboardInterval: null,     // auto-refresh timer
@@ -4239,12 +4240,25 @@ function renderFleet() {
 
 async function loadGoals() {
   showLoading('goals');
-  try {
-    state.goals = await apiFetch('/api/goals');
-    renderGoals();
-  } catch (err) {
-    showError('goals', err.message);
+  const [goalsResult, missionResult] = await Promise.allSettled([
+    apiFetch('/api/goals'),
+    apiFetch('/api/vision/mission'),
+  ]);
+  if (goalsResult.status === 'rejected') {
+    showError('goals', goalsResult.reason?.message ?? 'Goals are unavailable.');
+    return;
   }
+  state.goals = goalsResult.value;
+  state.mission = missionResult.status === 'fulfilled'
+    ? missionResult.value
+    : {
+        state: 'degraded',
+        authority: 'planning-only',
+        briefing: null,
+        preview: null,
+        sources: { briefing: { reason: 'mission-endpoint-unavailable' } },
+      };
+  renderGoals();
 }
 
 // Milestone status -> accent color (dark-theme safe)
@@ -4258,9 +4272,16 @@ const MILESTONE_COLOR = {
   skipped:     '#374151',   // dark-gray
 };
 
-function goalProgressBar(fractionDone) {
+function goalProgressBar(fractionDone, objective) {
   const pct = Math.round(Math.min(1, Math.max(0, fractionDone)) * 100);
-  const wrap = el('div', { cls: 'goal-progress-track' });
+  const wrap = el('div', {
+    cls: 'goal-progress-track',
+    role: 'progressbar',
+    'aria-label': `${objective || 'Goal'} completion`,
+    'aria-valuemin': '0',
+    'aria-valuemax': '100',
+    'aria-valuenow': String(pct),
+  });
   const fill = el('div', {
     cls: 'goal-progress-fill',
     style: `width:${pct}%`,
@@ -4283,7 +4304,7 @@ function buildGoalCard(g) {
   ));
 
   // Progress bar
-  card.appendChild(goalProgressBar(g.progress?.fractionDone ?? 0));
+  card.appendChild(goalProgressBar(g.progress?.fractionDone ?? 0, g.objective));
 
   // Milestone breakdown pills
   const milestones = Array.isArray(g.milestones) ? g.milestones : [];
@@ -4319,8 +4340,14 @@ function buildGoalCard(g) {
 
   // Milestone list (collapsible via details/summary)
   if (milestones.length > 0) {
-    const details = el('details', { cls: 'goal-milestones-details' });
-    details.appendChild(el('summary', { cls: 'goal-milestones-summary' },
+    const details = el('details', {
+      cls: 'goal-milestones-details',
+      'data-state-key': `goal-${g.id}-milestones`,
+    });
+    details.appendChild(el('summary', {
+      cls: 'goal-milestones-summary',
+      'data-focus-key': `goal-${g.id}-milestones`,
+    },
       `${milestones.length} milestone${milestones.length !== 1 ? 's' : ''}`
     ));
     const list = el('ol', { cls: 'goal-milestones-list' });
@@ -4351,10 +4378,214 @@ function buildGoalCard(g) {
   return card;
 }
 
+function missionTextList(title, values, emptyText) {
+  const items = Array.isArray(values) ? values.filter((value) => typeof value === 'string' && value.trim()) : [];
+  const region = el('div', { cls: 'mission-outcome__evidence' });
+  region.appendChild(el('h4', {}, title));
+  if (items.length === 0) {
+    region.appendChild(el('p', { cls: 'mission-outcome__muted' }, emptyText));
+    return region;
+  }
+  const list = el('ul', {});
+  for (const item of items) list.appendChild(el('li', {}, item));
+  region.appendChild(list);
+  return region;
+}
+
+function missionPreviewForIndex(mission, index) {
+  const entries = Array.isArray(mission?.preview?.entries) ? mission.preview.entries : [];
+  return entries.find((entry) => entry.index === index) ?? null;
+}
+
+function missionHoldReason(reason) {
+  const labels = {
+    'goal-source-degraded': 'goal records could not be read safely',
+    'briefing-goal-cap': 'briefing goal limit reached',
+    'goal-focus-cap': 'active-goal limit reached',
+    'duplicate-existing-goal': 'this goal already exists',
+    'goal-id-collision': 'a goal with this stable identity already exists',
+    'target-not-enrolled': 'target repository is not enrolled',
+    'target-ambiguous': 'target repository name is ambiguous',
+    'target-invalid': 'target repository is invalid',
+    'dependency-blocked': 'an upstream mission node is not realized',
+    'human-gate-required': 'an authorized human decision is required',
+    'mission-graph-invalid': 'the mission dependency graph is invalid',
+    'mission-reconcile-cap': 'this bounded reconciliation has reached its limit',
+  };
+  return labels[reason] ?? 'a policy check did not pass';
+}
+
+function missionGraphIssueLabel(issue) {
+  const code = typeof issue === 'string' ? issue.split(':', 1)[0] : '';
+  const labels = {
+    'cyclic-dependency': 'dependency cycle detected',
+    'missing-dependency': 'dependency target is missing',
+    'invalid-repository-target': 'repository target is invalid',
+    'repository-not-enrolled': 'repository target is not enrolled',
+    'repository-target-ambiguous': 'repository target is ambiguous',
+    'invalid-schema': 'mission metadata is malformed',
+  };
+  return labels[code] ?? 'mission validation failed';
+}
+
+function missionLifecycleLabel(status) {
+  const labels = {
+    blocked: 'Blocked by upstream outcome evidence',
+    ready: 'Ready for planning',
+    active: 'Goal is active',
+    proposed: 'Proposal evidence observed',
+    'awaiting-human': 'Awaiting an authorized human decision',
+    complete: 'Realized from verified goal evidence',
+    failed: 'Failure or blocked evidence observed',
+  };
+  return labels[status] ?? 'Lifecycle evidence unavailable';
+}
+
+function missionLifecycleForNode(mission, key) {
+  const nodes = Array.isArray(mission?.preview?.missionGraph?.nodes)
+    ? mission.preview.missionGraph.nodes
+    : [];
+  return nodes.find((node) => node?.key === key) ?? null;
+}
+
+function missionNode(goal, index, mission) {
+  const preview = missionPreviewForIndex(mission, index);
+  const disposition = preview?.disposition === 'create'
+    ? 'Compiler preview: ready to create'
+    : preview?.disposition === 'skip'
+      ? `Compiler preview: held — ${missionHoldReason(preview.reason)}`
+      : 'Compiler preview unavailable';
+  const dependencies = Array.isArray(goal?.dependsOn) && goal.dependsOn.length > 0
+    ? `Starts after ${goal.dependsOn.join(', ')}`
+    : 'Starting node · no upstream dependency';
+  const target = goal?.targetRepo ?? preview?.targetRepo ?? 'ecosystem-wide';
+  const outcome = goal?.outcome && typeof goal.outcome === 'object' ? goal.outcome : {};
+  const nodeKey = goal?.key ?? `goal-${index + 1}`;
+  const lifecycle = missionLifecycleForNode(mission, nodeKey);
+  const item = el('li', { cls: 'mission-outcome__node' });
+  item.appendChild(el('div', { cls: 'mission-outcome__node-meta' },
+    el('span', { cls: 'mission-outcome__node-key' }, goal?.key ?? `Node ${index + 1}`),
+    el('span', { cls: 'mission-outcome__disposition' }, disposition)
+  ));
+  item.appendChild(el('h3', {}, goal?.objective ?? 'Untitled mission node'));
+  if (lifecycle) {
+    const blockedBy = Array.isArray(lifecycle.blockedBy) && lifecycle.blockedBy.length > 0
+      ? ` · blocked by ${lifecycle.blockedBy.join(', ')}`
+      : '';
+    item.appendChild(el('p', { cls: 'mission-outcome__lifecycle' },
+      `Mission lifecycle: ${missionLifecycleLabel(lifecycle.status)}${blockedBy}`
+    ));
+  }
+  item.appendChild(el('p', { cls: 'mission-outcome__dependency' }, dependencies));
+  const humanGate = goal?.humanGate === true
+    ? 'Required before consequential action'
+    : goal?.humanGate === false
+      ? 'No mission-level gate declared; normal authority controls still apply'
+      : 'Not recorded in this legacy briefing';
+  item.appendChild(el('dl', { cls: 'mission-outcome__facts' },
+    el('dt', {}, 'Target'), el('dd', {}, target),
+    el('dt', {}, 'Risk'), el('dd', {}, goal?.riskClass ?? 'not classified'),
+    el('dt', {}, 'Human gate'), el('dd', {}, humanGate)
+  ));
+  item.appendChild(el('div', { cls: 'mission-outcome__deliverable' },
+    el('h4', {}, 'Deliverable'),
+    el('p', {}, goal?.deliverable ?? 'No concrete deliverable recorded.')
+  ));
+  item.appendChild(el('div', { cls: 'mission-outcome__desired' },
+    el('h4', {}, 'Outcome'),
+    el('p', {}, outcome.desiredOutcome ?? 'No outcome contract recorded.')
+  ));
+  const evidence = el('div', { cls: 'mission-outcome__evidence-grid' },
+    missionTextList('Success signals', outcome.successSignals, 'No success signals recorded.'),
+    missionTextList('Guardrails', outcome.guardrails, 'No guardrails recorded.'),
+    missionTextList('Acceptance evidence', goal?.acceptanceEvidence, 'No acceptance evidence recorded.')
+  );
+  item.appendChild(evidence);
+  return item;
+}
+
+function buildMissionOutcomeRoom(mission) {
+  const sourceState = mission?.state ?? 'missing';
+  const authority = mission?.authority === 'planning-only' ? 'Planning only · no execution authority' : 'Authority unavailable';
+  const room = el('section', {
+    cls: `mission-outcome-room mission-outcome-room--${sourceState}`,
+    'aria-labelledby': 'mission-outcome-title',
+  });
+  room.appendChild(el('header', { cls: 'mission-outcome__header' },
+    el('div', {},
+      el('p', { cls: 'mission-outcome__eyebrow' }, 'Mission contract · read-only'),
+      el('h2', { id: 'mission-outcome-title' }, 'Mission Outcome Room')
+    ),
+    el('p', { cls: 'mission-outcome__authority' }, authority)
+  ));
+
+  if (!mission?.briefing) {
+    const isDegraded = sourceState === 'degraded';
+    room.appendChild(el('div', { cls: 'mission-outcome__empty', role: 'status' },
+      el('h3', {}, isDegraded ? 'Mission briefing unavailable' : 'No strategic briefing on record'),
+      el('p', {}, isDegraded
+        ? 'The briefing or compiler preview could not be read. Existing goals remain visible below; this view does not infer a healthy plan.'
+        : 'Run ashlr vision review to produce a planning artifact. Nothing here can approve, create, or execute work.')
+    ));
+    return room;
+  }
+
+  const briefing = mission.briefing;
+  const direction = Array.isArray(briefing.recommendedDirection) && briefing.recommendedDirection.length > 0
+    ? briefing.recommendedDirection[0]
+    : 'Strategic direction has not been recorded.';
+  if (sourceState === 'degraded') {
+    const graphIssues = mission?.preview?.missionGraph?.state === 'invalid'
+      ? (mission.preview.missionGraph.issues ?? []).slice(0, 3).map(missionGraphIssueLabel)
+      : [];
+    room.appendChild(el('p', { cls: 'mission-outcome__source-warning', role: 'status' },
+      graphIssues.length > 0
+        ? `Mission graph invalid. All planning nodes are held: ${graphIssues.join('; ')}.`
+        : 'Source state: degraded. Treat this contract as incomplete until its briefing and compiler preview are readable.'
+    ));
+  }
+  room.appendChild(el('div', { cls: 'mission-outcome__framing' },
+    el('div', {}, el('h3', {}, 'Mission thesis'), el('p', {}, direction)),
+    el('div', {}, el('h3', {}, 'Current state'), el('p', {}, briefing.currentState ?? 'Not recorded.')),
+    el('div', {}, el('h3', {}, 'Gap to close'), el('p', {}, briefing.gapToVision ?? 'Not recorded.'))
+  ));
+
+  const goals = Array.isArray(briefing.proposedGoals) ? briefing.proposedGoals : [];
+  const nodes = el('section', { cls: 'mission-outcome__sequence', 'aria-labelledby': 'mission-sequence-title' });
+  nodes.appendChild(el('div', { cls: 'mission-outcome__section-heading' },
+    el('h3', { id: 'mission-sequence-title' }, 'Proposed mission sequence'),
+    el('p', {}, `${goals.length} planning node${goals.length === 1 ? '' : 's'} · compiler preview only`)
+  ));
+  if (goals.length > 0) {
+    const rail = el('ol', { cls: 'mission-outcome__rail' });
+    goals.forEach((goal, index) => rail.appendChild(missionNode(goal, index, mission)));
+    nodes.appendChild(rail);
+  } else {
+    nodes.appendChild(el('p', { cls: 'mission-outcome__muted' }, 'The briefing contains no proposed mission nodes. This is not presented as a healthy empty plan.'));
+  }
+  room.appendChild(nodes);
+
+  const questions = Array.isArray(briefing.questionsForMason)
+    ? briefing.questionsForMason.filter((question) => typeof question === 'string' && question.trim())
+    : [];
+  const questionRegion = el('section', { cls: 'mission-outcome__questions', 'aria-labelledby': 'mission-questions-title' });
+  questionRegion.appendChild(el('h3', { id: 'mission-questions-title' }, 'Questions for Mason'));
+  if (questions.length > 0) {
+    const list = el('ol', {});
+    for (const question of questions) list.appendChild(el('li', {}, question));
+    questionRegion.appendChild(list);
+  } else {
+    questionRegion.appendChild(el('p', { cls: 'mission-outcome__muted' }, 'No founder decisions are requested in this briefing.'));
+  }
+  room.appendChild(questionRegion);
+  return room;
+}
+
 function renderGoals() {
   if (state.activeView !== 'goals') return;
   const main = getMain();
   if (!main) return;
+  const viewState = captureMainViewState(main);
   main.innerHTML = '';
 
   const section = el('section', { cls: 'view-section' });
@@ -4364,6 +4595,7 @@ function renderGoals() {
     el('h1', { cls: 'view-title' }, 'Goals'),
     el('span', { cls: 'view-subtitle' }, `${goals.length} goal${goals.length !== 1 ? 's' : ''}`)
   ));
+  section.appendChild(buildMissionOutcomeRoom(state.mission));
 
   if (goals.length === 0) {
     section.appendChild(el('div', { cls: 'empty-state' },
@@ -4371,6 +4603,7 @@ function renderGoals() {
       el('p', { cls: 'hint' }, 'Use `ashlr goals add "your goal"` to create one.')
     ));
     main.appendChild(section);
+    restoreMainViewState(main, viewState);
     return;
   }
 
@@ -4380,6 +4613,7 @@ function renderGoals() {
   }
   section.appendChild(grid);
   main.appendChild(section);
+  restoreMainViewState(main, viewState);
 }
 
 /** Format a signed delta for the portfolio "today" block. null → em-dash. */

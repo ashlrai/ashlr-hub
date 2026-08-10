@@ -4964,6 +4964,14 @@ export type MilestoneStatus =
  */
 export type GoalStatus = 'planning' | 'active' | 'paused' | 'done' | 'archived';
 
+/** Immutable planning provenance for a goal materialized from a mission graph. */
+export interface GoalMissionBindingV1 {
+  schemaVersion: 1;
+  graphDigest: string;
+  missionKey: string;
+  nodeKey: string;
+}
+
 /**
  * M28: a single MILESTONE within a Goal. Each milestone is an ordered unit of
  * work that authors/links a versioned SpecArtifact and is advanced by a single
@@ -5019,6 +5027,8 @@ export interface Goal {
    * Carried in OTLP spans as `ashlr.fleet.owner` for pulse team attribution.
    */
   owner?: string;
+  /** Exact graph/node contract that created this goal; absent on legacy goals. */
+  mission?: GoalMissionBindingV1;
   /** The high-level objective text the goal was created from. */
   objective: string;
   /**

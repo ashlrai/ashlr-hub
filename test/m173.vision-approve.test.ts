@@ -69,6 +69,15 @@ vi.mock('../src/core/goals/store.js', () => ({
     if (persistGoalWrites) persistedGoals.set(id, goal);
     return goal;
   }),
+  createGoalIfAbsent: vi.fn((objective: string, opts?: { project?: string | null; mission?: unknown }) => {
+    const id = `goal-${createdGoals.length}`;
+    const goal = { ...makeMockGoal(id, objective, opts?.project), ...(opts?.mission ? { mission: opts.mission } : {}) };
+    createdGoals.push({ objective, project: opts?.project });
+    if (!persistGoalWrites) return { status: 'failed', goal };
+    if (persistedGoals.has(id)) return { status: 'exists', goal };
+    persistedGoals.set(id, goal as ReturnType<typeof makeMockGoal>);
+    return { status: 'created', goal };
+  }),
   listGoals: vi.fn(() => []),
   listGoalsDetailed: vi.fn(() => ({
     goals: [],
@@ -137,7 +146,13 @@ beforeEach(() => {
 // Late imports (after vi.mock declarations)
 // ---------------------------------------------------------------------------
 
-import { runStrategist, loadLatestBriefing, adoptBriefing } from '../src/core/vision/strategist.js';
+import {
+  runStrategist,
+  loadLatestBriefing,
+  readLatestBriefingDetailed,
+  adoptBriefing,
+  previewBriefingAdoption,
+} from '../src/core/vision/strategist.js';
 import type { StrategicBriefing } from '../src/core/vision/strategist.js';
 import type { AshlrConfig } from '../src/core/types.js';
 
@@ -333,7 +348,7 @@ describe('M173 — approve path (loadLatestBriefing + adoptBriefing)', () => {
 
     expect(code).toBe(1);
     expect(errors.join('\n')).toContain('Failed to persist 1 proposed goal(s)');
-    expect(errors.join('\n')).toContain('goal-store-write-failed');
+    expect(errors.join('\n')).toContain('the local goal record could not be persisted');
   });
 
   it('cmdVision preview compiles the briefing without creating goals', async () => {
@@ -349,6 +364,90 @@ describe('M173 — approve path (loadLatestBriefing + adoptBriefing)', () => {
 
     expect(code).toBe(0);
     expect(createdGoals).toHaveLength(0);
+  });
+
+  it('cmdVision preview and reconcile fail closed for an invalid mission graph', async () => {
+    const node = (key: string, dependsOn: string[]) => ({
+      key, objective: `Gate ${key}`, rationale: 'Human-owned decision.', targetRepo: null,
+      dependsOn, deliverable: `Decision ${key}`, acceptanceEvidence: ['Authorized receipt exists'],
+      riskClass: 'high' as const, humanGate: true,
+      outcome: { desiredOutcome: 'A safe decision', successSignals: ['Decision recorded'], guardrails: ['No inferred approval'] },
+    });
+    writeBriefingFile(makeBriefing({ proposedGoals: [node('one', ['two']), node('two', ['one'])] }));
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const { cmdVision } = await import('../src/cli/vision.js');
+    expect(await cmdVision(['preview'])).toBe(1);
+    expect(await cmdVision(['reconcile'])).toBe(1);
+    expect(createdGoals).toHaveLength(0);
+  });
+
+  it('cmdVision preview explains the complete outcome and evidence contract', async () => {
+    writeBriefingFile(makeBriefing({ proposedGoals: [{
+      key: 'release', objective: 'Authorize release', rationale: 'Human-owned.', targetRepo: null,
+      dependsOn: [], deliverable: 'Release decision receipt',
+      acceptanceEvidence: ['Authorized receipt is bound to the mission'], riskClass: 'high', humanGate: true,
+      outcome: {
+        desiredOutcome: 'A safe release decision',
+        successSignals: ['Decision is traceable'],
+        guardrails: ['No inferred approval'],
+      },
+    }] }));
+    const output: string[] = [];
+    vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => output.push(args.map(String).join(' ')));
+    const { cmdVision } = await import('../src/cli/vision.js');
+
+    expect(await cmdVision(['preview'])).toBe(0);
+    expect(output.join('\n')).toContain('deliverable: Release decision receipt');
+    expect(output.join('\n')).toContain('acceptance evidence: Authorized receipt is bound to the mission');
+    expect(output.join('\n')).toContain('success signals: Decision is traceable');
+    expect(output.join('\n')).toContain('guardrails: No inferred approval');
+    expect(output.join('\n')).toContain('human gate required');
+  });
+});
+
+describe('M173 — malformed model mission metadata', () => {
+  const validNode = {
+    key: 'root', objective: 'Build root', rationale: 'Needed.', targetRepo: 'hub', dependsOn: [],
+    deliverable: 'Root artifact', acceptanceEvidence: ['Root tests pass'], riskClass: 'low', humanGate: false,
+    outcome: { desiredOutcome: 'Users benefit', successSignals: ['Usage grows'], guardrails: ['No new authority'] },
+  };
+
+  it.each([
+    ['invalid dependency', { dependsOn: ['BAD KEY'] }],
+    ['too many dependencies', { dependsOn: Array.from({ length: 9 }, (_, index) => `node-${index}`) }],
+    ['string human gate', { humanGate: 'true' }],
+    ['invalid key', { key: 'Bad Key' }],
+    ['incomplete outcome', { outcome: { desiredOutcome: 'Users benefit', successSignals: [], guardrails: [] } }],
+  ])('marks %s as invalid instead of silently making a ready root', async (_label, override) => {
+    mockComplete.mockResolvedValueOnce(makeBriefingJson({ proposedGoals: [{ ...validNode, ...override }] }));
+    const parsed = await runStrategist(mockCfg);
+    expect(parsed.proposedGoals[0]?.missionMetadataInvalid).toBe(true);
+    const preview = previewBriefingAdoption(parsed, {
+      enrolledRepos: [path.join(tmpHome, 'hub')], existingGoals: [], activeThreshold: 4,
+    });
+    expect(preview.missionGraph?.state).toBe('invalid');
+    expect(preview.entries[0]?.reason).toBe('mission-graph-invalid');
+  });
+
+  it.each([
+    ['invalid dependency', { dependsOn: ['BAD KEY'] }],
+    ['too many dependencies', { dependsOn: Array.from({ length: 9 }, (_, index) => `node-${index}`) }],
+    ['string human gate', { humanGate: 'true' }],
+    ['incomplete outcome', { outcome: { desiredOutcome: 'Users benefit', successSignals: ['Usage grows'], guardrails: [] } }],
+  ])('rejects persisted mission metadata with %s', (_label, override) => {
+    const malformed = makeBriefing({
+      proposedGoals: [{ ...validNode, ...override }] as StrategicBriefing['proposedGoals'],
+    });
+    writeBriefingFile(malformed);
+
+    expect(readLatestBriefingDetailed()).toMatchObject({
+      briefing: null,
+      sourceState: 'degraded',
+      complete: false,
+      reason: 'briefing-records-unreadable',
+    });
   });
 });
 
@@ -377,6 +476,44 @@ describe('M173 — no briefing path', () => {
     fs.writeFileSync(path.join(dir, '2026-06-28T03-00-00-000Z.json'), 'NOT_VALID_JSON', 'utf8');
     const loaded = loadLatestBriefing();
     expect(loaded).toBeNull();
+  });
+
+  it('bounds total directory entries, including non-JSON files', () => {
+    const dir = path.join(tmpHome, '.ashlr', 'vision', 'briefings');
+    fs.mkdirSync(dir, { recursive: true });
+    for (let index = 0; index < 513; index++) fs.writeFileSync(path.join(dir, `noise-${index}.txt`), 'x');
+    expect(readLatestBriefingDetailed()).toMatchObject({
+      briefing: null, sourceState: 'degraded', complete: false,
+      reason: 'briefing-record-limit-exceeded', limitExceeded: true,
+    });
+  });
+
+  it.each([
+    ['schema-invalid', JSON.stringify({})],
+    ['oversized', 'x'.repeat(256 * 1024 + 1)],
+  ])('degrades rather than trusting a %s briefing record', (_kind, contents) => {
+    const dir = path.join(tmpHome, '.ashlr', 'vision', 'briefings');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, '2026-08-09.json'), contents);
+    expect(readLatestBriefingDetailed()).toMatchObject({
+      briefing: null, sourceState: 'degraded', complete: false,
+      reason: 'briefing-records-unreadable', unreadableFiles: 1,
+    });
+  });
+
+  it('reconcile refuses an older valid briefing when a newer record is corrupt', async () => {
+    writeBriefingFile(makeBriefing({
+      generatedAt: '2026-08-08T12:00:00.000Z',
+      proposedGoals: [{ objective: 'Do not materialize stale work', rationale: 'Stale authority.' }],
+    }));
+    const dir = path.join(tmpHome, '.ashlr', 'vision', 'briefings');
+    fs.writeFileSync(path.join(dir, '2026-08-09T12-00-00-000Z.json'), '{"partial":', 'utf8');
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const { cmdVision } = await import('../src/cli/vision.js');
+    expect(await cmdVision(['reconcile'])).toBe(1);
+    expect(createdGoals).toHaveLength(0);
   });
 
   it('cmdVision approve returns 1 when no briefing exists', async () => {

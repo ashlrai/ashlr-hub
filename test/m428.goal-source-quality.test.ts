@@ -6,6 +6,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -276,6 +277,61 @@ describe('M428 goal source semantic quality', () => {
     expect(records.filter(({ id }) => !includedIds.has(id))).toHaveLength(1);
     expect(listGoals()).toHaveLength(200);
   }, process.platform === 'win32' ? 15_000 : undefined);
+
+  it('counts non-goal noise and temporary sidecars toward the total directory-entry bound', () => {
+    const directory = goalsDirectory();
+    mkdirSync(directory, { recursive: true });
+    for (let index = 0; index < 513; index++) {
+      const suffix = index % 2 === 0 ? '.txt' : '.json.tmp';
+      writeFileSync(join(directory, `noise-${String(index).padStart(3, '0')}${suffix}`), 'noise', 'utf8');
+    }
+
+    expect(listGoalsDetailed()).toEqual({
+      goals: [],
+      sourceState: 'degraded',
+      sourcePresent: true,
+      complete: false,
+      scannedFiles: 0,
+      unreadableFiles: 0,
+      limitExceeded: true,
+    });
+  }, process.platform === 'win32' ? 15_000 : undefined);
+
+  it('degrades without reading an oversized goal record', () => {
+    writeGoalFile('goal-oversized', goal({
+      id: 'goal-oversized',
+      objective: 'x'.repeat(300 * 1024),
+      milestones: [],
+    }));
+
+    expect(listGoalsDetailed()).toMatchObject({
+      goals: [],
+      sourceState: 'degraded',
+      complete: false,
+      scannedFiles: 1,
+      unreadableFiles: 1,
+      limitExceeded: false,
+    });
+  });
+
+  it.skipIf(process.platform === 'win32')('degrades and refuses a symlinked goal record', () => {
+    const target = join(home, 'outside-goal.json');
+    mkdirSync(goalsDirectory(), { recursive: true });
+    writeFileSync(target, JSON.stringify(goal({
+      id: 'goal-linked',
+      milestones: [],
+    })), 'utf8');
+    symlinkSync(target, join(goalsDirectory(), 'goal-linked.json'));
+
+    expect(listGoalsDetailed()).toMatchObject({
+      goals: [],
+      sourceState: 'degraded',
+      complete: false,
+      scannedFiles: 1,
+      unreadableFiles: 1,
+      limitExceeded: false,
+    });
+  });
 });
 
 describe('M428 goal persistence authorization boundaries', () => {
