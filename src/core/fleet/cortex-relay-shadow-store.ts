@@ -1,48 +1,59 @@
-import { createHash } from 'node:crypto';
-import {
-  closeSync,
-  constants as fsConstants,
-  fchmodSync,
-  fstatSync,
-  fsyncSync,
-  lstatSync,
-  mkdirSync,
-  openSync,
-  readSync,
-  realpathSync,
-  writeSync,
-} from 'node:fs';
-import type { Stats } from 'node:fs';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { lstatSync, mkdirSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 
+import { loadExistingProvenanceKeyReadOnly } from '../foundry/provenance.js';
+import {
+  writeImmutablePrivateRecord,
+  type ImmutablePrivateRecordCodec,
+  type ImmutablePrivateRecordStoreConfig,
+} from '../util/immutable-private-record-store.js';
+import { fsyncDirectory } from '../util/durability.js';
 import { assurePrivateStoragePath } from '../util/private-storage.js';
 import {
   _validateCortexRelayShadowForTest,
+  _prepareCortexRelayShadowClaimForTest,
   CORTEX_RELAY_SHADOW_TEST_CONTROL,
-  validateCortexRelayShadow,
+  observeCortexRelayShadowAfterClaim,
+  prepareCortexRelayShadowClaim,
   type CortexRelayShadowDependencies,
   type CortexRelayShadowInput,
   type CortexRelayShadowMetadata,
   type CortexRelayShadowResult,
 } from './cortex-relay-shadow.js';
 
+const RECEIPT_PROTOCOL = 'ashlr-cortex-relay-shadow-receipt/v1' as const;
+const RECEIPT_DIGEST_DOMAIN = 'ashlr:cortex-relay-shadow:receipt:v1';
+const RECEIPT_SIGNATURE_DOMAIN = 'ashlr:cortex-relay-shadow:receipt-signature:v1';
+const RECEIPT_KEY_DOMAIN = 'ashlr:cortex-relay-shadow:receipt-key:v1';
+const SHA256_RE = /^[0-9a-f]{64}$/;
+const SHA256_TAGGED_RE = /^sha256:[0-9a-f]{64}$/;
+const HMAC_RE = /^hmac-sha256:[0-9a-f]{64}$/;
+
 export type CortexRelayShadowRecordState = 'recorded' | 'duplicate' | 'conflict' | 'unavailable';
+
+export interface CortexRelayShadowReceiptV1 {
+  schemaVersion: 1;
+  protocol: typeof RECEIPT_PROTOCOL;
+  recordId: string;
+  metadata: CortexRelayShadowMetadata;
+  receiptDigest: string;
+  signingKeyId: string;
+  signatureAlgorithm: 'hmac-sha256';
+  signature: string;
+}
 
 export interface CortexRelayShadowRecordResult {
   state: CortexRelayShadowRecordState;
   metadata: CortexRelayShadowMetadata;
+  receipt?: CortexRelayShadowReceiptV1;
 }
 
 function anchorPath(override?: string): string {
   const root = override ?? process.env.ASHLR_HOME ?? join(homedir(), '.ashlr');
   if (!isAbsolute(root) || resolve(root) !== root) throw new Error('unsafe ASHLR_HOME');
   return root;
-}
-
-function recordKey(metadata: CortexRelayShadowMetadata): string {
-  const identity = metadata.assignmentId ?? metadata.inputDigest;
-  return createHash('sha256').update(`ashlr:cortex-relay-shadow:key:v1\0${identity}`, 'utf8').digest('hex');
 }
 
 function safeDirectory(path: string, exact = false): boolean {
@@ -68,191 +79,274 @@ function createOrPinPrivateChild(parent: string, name: string): string | null {
       !assurePrivateStoragePath(path, 'directory', created ? 'secure-created' : 'inspect-existing', {
         anchorPath: parent,
       }).ok) return null;
+    if (created) fsyncDirectory(parent);
     return path;
   } catch {
     return null;
   }
 }
 
-function safeFile(path: string): boolean {
-  const stat = lstatSync(path);
-  return stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 &&
-    (process.platform === 'win32' ||
-      ((typeof process.getuid !== 'function' || stat.uid === process.getuid()) && (stat.mode & 0o077) === 0));
+function recordIdentity(metadata: CortexRelayShadowMetadata): string {
+  return metadata.assignmentId ?? metadata.inputDigest;
 }
 
-function sameFileIdentity(
-  left: Stats,
-  right: Stats,
-): boolean {
-  return left.dev === right.dev && left.ino === right.ino && left.size === right.size &&
-    left.nlink === right.nlink;
+function recordId(metadata: CortexRelayShadowMetadata): string {
+  return createHash('sha256')
+    .update(`${RECEIPT_KEY_DOMAIN}\0${recordIdentity(metadata)}`, 'utf8').digest('hex');
 }
 
-function parseStoredMetadata(text: string, expectedKey: string): CortexRelayShadowMetadata | null {
+function signingKey(provenanceKey: Buffer): Buffer {
+  return createHmac('sha256', provenanceKey).update(RECEIPT_KEY_DOMAIN, 'utf8').digest();
+}
+
+function signingKeyId(key: Buffer): string {
+  return createHash('sha256').update(key).digest('hex');
+}
+
+function receiptBase(
+  metadata: CortexRelayShadowMetadata,
+  id: string,
+  keyId: string,
+): Omit<CortexRelayShadowReceiptV1, 'receiptDigest' | 'signature'> {
+  return {
+    schemaVersion: 1,
+    protocol: RECEIPT_PROTOCOL,
+    recordId: id,
+    metadata,
+    signingKeyId: keyId,
+    signatureAlgorithm: 'hmac-sha256',
+  };
+}
+
+function digestOf(base: Omit<CortexRelayShadowReceiptV1, 'receiptDigest' | 'signature'>): string {
+  return `sha256:${createHash('sha256')
+    .update(`${RECEIPT_DIGEST_DOMAIN}\0${JSON.stringify(base)}`, 'utf8').digest('hex')}`;
+}
+
+function signatureOf(digest: string, key: Buffer): string {
+  return `hmac-sha256:${createHmac('sha256', key)
+    .update(`${RECEIPT_SIGNATURE_DOMAIN}\0${digest}`, 'utf8').digest('hex')}`;
+}
+
+function createReceipt(
+  metadata: CortexRelayShadowMetadata,
+  provenanceKey: Buffer,
+): CortexRelayShadowReceiptV1 | null {
+  if (provenanceKey.length !== 32 || !validMetadata(metadata)) return null;
+  const key = signingKey(provenanceKey);
+  const base = receiptBase(metadata, recordId(metadata), signingKeyId(key));
+  const receiptDigest = digestOf(base);
+  return Object.freeze({ ...base, receiptDigest, signature: signatureOf(receiptDigest, key) });
+}
+
+function exactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const wanted = [...expected].sort();
+  return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]);
+}
+
+function validMetadata(metadata: CortexRelayShadowMetadata): boolean {
   try {
-    if (!text.endsWith('\n') || text.slice(0, -1).includes('\n')) return null;
-    const value = JSON.parse(text) as unknown;
-    if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
-    const metadata = value as CortexRelayShadowMetadata;
     const { outcomeDigest, ...base } = metadata;
-    const expectedDigest = `sha256:${createHash('sha256')
-      .update(`ashlr:cortex-relay-shadow:outcome:v1\0${JSON.stringify(base)}`, 'utf8').digest('hex')}`;
-    if (metadata.schemaVersion !== 1 ||
-      metadata.protocol !== 'ashlr-cortex-relay-shadow-outcome/v1' ||
-      metadata.mode !== 'shadow' || metadata.executionAuthority !== false ||
-      metadata.proposalAuthority !== false || metadata.mergeAuthority !== false ||
-      metadata.deployAuthority !== false || typeof metadata.accepted !== 'boolean' ||
-      typeof metadata.reason !== 'string' || typeof metadata.observedAt !== 'string' ||
-      !Number.isFinite(Date.parse(metadata.observedAt)) ||
-      !/^sha256:[0-9a-f]{64}$/.test(metadata.inputDigest) ||
-      outcomeDigest !== expectedDigest || recordKey(metadata) !== expectedKey ||
-      JSON.stringify(metadata) !== text.slice(0, -1) ||
-      metadata.effects?.agentsSpawned !== 0 || metadata.effects.proposalsCreated !== 0 ||
-      metadata.effects.repositoriesMutated !== 0 || metadata.effects.merges !== 0 ||
-      metadata.effects.deployments !== 0) return null;
-    return metadata;
+    return metadata.schemaVersion === 1 &&
+      metadata.protocol === 'ashlr-cortex-relay-shadow-outcome/v1' &&
+      metadata.mode === 'shadow' && metadata.evidenceClass === 'observation-only' &&
+      metadata.consumable === false && metadata.authorityGranted === false &&
+      metadata.executionAuthority === false && metadata.proposalAuthority === false &&
+      metadata.mergeAuthority === false && metadata.deployAuthority === false &&
+      metadata.accepted === false && typeof metadata.reason === 'string' &&
+      typeof metadata.observedAt === 'string' && Number.isFinite(Date.parse(metadata.observedAt)) &&
+      SHA256_TAGGED_RE.test(metadata.inputDigest) &&
+      outcomeDigest === `sha256:${createHash('sha256')
+        .update(`ashlr:cortex-relay-shadow:outcome:v1\0${JSON.stringify(base)}`, 'utf8').digest('hex')}` &&
+      metadata.effects?.agentsSpawned === 0 && metadata.effects.proposalsCreated === 0 &&
+      metadata.effects.repositoriesMutated === 0 && metadata.effects.merges === 0 &&
+      metadata.effects.deployments === 0;
+  } catch {
+    return false;
+  }
+}
+
+function parseReceipt(value: unknown, provenanceKey: Buffer): CortexRelayShadowReceiptV1 | null {
+  try {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+    const row = value as Record<string, unknown>;
+    if (!exactKeys(row, [
+      'schemaVersion', 'protocol', 'recordId', 'metadata', 'receiptDigest',
+      'signingKeyId', 'signatureAlgorithm', 'signature',
+    ]) || row.schemaVersion !== 1 || row.protocol !== RECEIPT_PROTOCOL ||
+      typeof row.recordId !== 'string' || !SHA256_RE.test(row.recordId) ||
+      typeof row.signingKeyId !== 'string' || !SHA256_RE.test(row.signingKeyId) ||
+      row.signatureAlgorithm !== 'hmac-sha256' || typeof row.receiptDigest !== 'string' ||
+      !SHA256_TAGGED_RE.test(row.receiptDigest) || typeof row.signature !== 'string' ||
+      !HMAC_RE.test(row.signature) || !validMetadata(row.metadata as CortexRelayShadowMetadata)) return null;
+    const metadata = row.metadata as CortexRelayShadowMetadata;
+    const key = signingKey(provenanceKey);
+    const base = receiptBase(metadata, row.recordId, row.signingKeyId);
+    const expectedDigest = digestOf(base);
+    const expectedSignature = signatureOf(expectedDigest, key);
+    const actual = Buffer.from(row.signature.slice('hmac-sha256:'.length), 'hex');
+    const expected = Buffer.from(expectedSignature.slice('hmac-sha256:'.length), 'hex');
+    if (row.recordId !== recordId(metadata) || row.signingKeyId !== signingKeyId(key) ||
+      row.receiptDigest !== expectedDigest || actual.length !== expected.length ||
+      !timingSafeEqual(actual, expected)) return null;
+    return value as CortexRelayShadowReceiptV1;
   } catch {
     return null;
   }
 }
 
-function readExistingMetadata(
-  path: string,
-  expectedKey: string,
-  anchor: string,
-): { state: 'missing' | 'invalid' | 'ok'; metadata?: CortexRelayShadowMetadata } {
-  let fd: number | undefined;
+function codec(key: Buffer): ImmutablePrivateRecordCodec<CortexRelayShadowReceiptV1> {
+  return {
+    parse: (value) => parseReceipt(value, key),
+    serialize: (receipt) => `${JSON.stringify(receipt)}\n`,
+    recordId: (receipt) => receipt.recordId,
+    recordFileName: (receipt) => `${receipt.recordId}.json`,
+    isRecordFileName: (name) => /^[0-9a-f]{64}\.json$/.test(name),
+    stageToken: (receipt) => createHmac('sha256', signingKey(key))
+      .update(`${RECEIPT_SIGNATURE_DOMAIN}\0stage\0${receipt.receiptDigest}`, 'utf8').digest('hex'),
+    equivalent: (left, right) => JSON.stringify(left) === JSON.stringify(right),
+  };
+}
+
+function storeConfig(
+  fleet: string,
+  key: Buffer,
+): ImmutablePrivateRecordStoreConfig<CortexRelayShadowReceiptV1> {
+  return {
+    label: 'Cortex relay shadow receipts',
+    anchorPath: fleet,
+    rootPath: join(fleet, 'cortex-relay-shadow'),
+    lockFileName: '.cortex-relay-shadow.lock',
+    maxRecordBytes: 64 * 1024,
+    defaultMaxFiles: 10_000,
+    hardMaxFiles: 100_000,
+    defaultMaxBytes: 64 * 1024 * 1024,
+    hardMaxBytes: 512 * 1024 * 1024,
+    codecForWrite: () => codec(key),
+    codecForRead: () => codec(key),
+  };
+}
+
+function recordWithKey(
+  metadata: CortexRelayShadowMetadata,
+  root: string | undefined,
+  key: Buffer | null,
+): CortexRelayShadowRecordResult {
+  if (!key || key.length !== 32 || !metadata.assignmentId ||
+      metadata.assignmentId !== metadata.runId || !metadata.assignmentDigest ||
+      !SHA256_TAGGED_RE.test(metadata.assignmentDigest)) {
+    return { state: 'unavailable', metadata };
+  }
   try {
-    const before = lstatSync(path);
-    if (!safeFile(path) || before.size < 2 || before.size > 64 * 1024 ||
-      !assurePrivateStoragePath(path, 'file', 'inspect-existing', { anchorPath: anchor }).ok) {
-      return { state: 'invalid' };
-    }
-    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-    const opened = fstatSync(fd);
-    if (!opened.isFile() || opened.nlink !== 1 || !sameFileIdentity(before, opened)) {
-      return { state: 'invalid' };
-    }
-    const bytes = Buffer.alloc(opened.size);
-    let offset = 0;
-    while (offset < bytes.length) {
-      const read = readSync(fd, bytes, offset, bytes.length - offset, offset);
-      if (read <= 0) return { state: 'invalid' };
-      offset += read;
-    }
-    const after = fstatSync(fd);
-    const namedAfter = lstatSync(path);
-    if (!sameFileIdentity(opened, after) || !sameFileIdentity(opened, namedAfter) ||
-      !assurePrivateStoragePath(path, 'file', 'inspect-existing', { anchorPath: anchor }).ok) {
-      return { state: 'invalid' };
-    }
-    const text = bytes.toString('utf8');
-    if (!bytes.equals(Buffer.from(text, 'utf8'))) return { state: 'invalid' };
-    const metadata = parseStoredMetadata(text, expectedKey);
-    return metadata ? { state: 'ok', metadata } : { state: 'invalid' };
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'ENOENT'
-      ? { state: 'missing' }
-      : { state: 'invalid' };
-  } finally {
-    if (fd !== undefined) {
-      try { closeSync(fd); } catch { /* best effort */ }
-    }
+    const anchor = anchorPath(root);
+    if (!safeDirectory(anchor)) return { state: 'unavailable', metadata };
+    const fleet = createOrPinPrivateChild(anchor, 'fleet');
+    if (!fleet) return { state: 'unavailable', metadata };
+    const receipt = createReceipt(metadata, key);
+    if (!receipt) return { state: 'unavailable', metadata };
+    const result = writeImmutablePrivateRecord(storeConfig(fleet, key), receipt);
+    if (result === 'recorded') return { state: 'recorded', metadata, receipt };
+    if (result === 'replayed') return { state: 'duplicate', metadata, receipt };
+    if (result === 'conflicted') return { state: 'conflict', metadata };
+    return { state: 'unavailable', metadata };
+  } catch {
+    return { state: 'unavailable', metadata };
   }
 }
 
-function writeAll(fd: number, bytes: Buffer): void {
-  let offset = 0;
-  while (offset < bytes.length) {
-    const written = writeSync(fd, bytes, offset, bytes.length - offset);
-    if (written <= 0) throw new Error('shadow outcome write made no progress');
-    offset += written;
-  }
-}
-
-export function recordCortexRelayShadowOutcome(
+/** Durable authenticated claim. Missing existing provenance authority fails closed. */
+function recordCortexRelayShadowOutcome(
   metadata: CortexRelayShadowMetadata,
   options: { root?: string } = {},
 ): CortexRelayShadowRecordResult {
-  try {
-    const anchor = anchorPath(options.root);
-    if (!safeDirectory(anchor)) return { state: 'unavailable', metadata };
-    const fleet = createOrPinPrivateChild(anchor, 'fleet');
-    const dir = fleet ? createOrPinPrivateChild(fleet, 'cortex-relay-shadow') : null;
-    if (!dir) return { state: 'unavailable', metadata };
-    const key = recordKey(metadata);
-    const path = join(dir, `${key}.json`);
-    const existingRecord = readExistingMetadata(path, key, anchor);
-    if (existingRecord.state === 'invalid') return { state: 'unavailable', metadata };
-    if (existingRecord.state === 'ok') {
-      const existing = existingRecord.metadata!;
-      const sameAssignment = existing.assignmentDigest === metadata.assignmentDigest &&
-        existing.inputDigest === metadata.inputDigest;
-      return { state: sameAssignment ? 'duplicate' : 'conflict', metadata: existing };
-    }
-
-    let fd: number | undefined;
-    try {
-      fd = openSync(path, fsConstants.O_WRONLY | fsConstants.O_CREAT |
-        fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
-      fchmodSync(fd, 0o600);
-      const opened = fstatSync(fd);
-      if (!opened.isFile() || opened.nlink !== 1) throw new Error('unsafe shadow outcome file');
-      writeAll(fd, Buffer.from(`${JSON.stringify(metadata)}\n`, 'utf8'));
-      fsyncSync(fd);
-    } finally {
-      if (fd !== undefined) closeSync(fd);
-    }
-    if (!safeFile(path) ||
-      !assurePrivateStoragePath(path, 'file', 'secure-created', { anchorPath: anchor }).ok) {
-      return { state: 'unavailable', metadata };
-    }
-    return { state: 'recorded', metadata };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
-      return recordCortexRelayShadowOutcome(metadata, options);
-    }
-    return { state: 'unavailable', metadata };
-  }
+  return recordWithKey(metadata, options.root, loadExistingProvenanceKeyReadOnly());
 }
 
 export interface ConsumeCortexRelayShadowResult {
   validation: CortexRelayShadowResult;
   receipt: CortexRelayShadowRecordResult;
+  effectEligible: false;
 }
 
-/** The only integrated consumer in v1: validate, then persist metadata. It never executes work. */
+/** Shadow-only consumer: observe, durably claim, and stop. No effect callback exists. */
 export function consumeCortexRelayShadow(
   input: CortexRelayShadowInput,
-  options: { root?: string } = {},
 ): ConsumeCortexRelayShadowResult {
-  const validation = validateCortexRelayShadow(input);
+  const claim = prepareCortexRelayShadowClaim(input);
+  if (!claim.ok) {
+    return {
+      validation: { accepted: false, observed: false, metadata: claim.metadata },
+      receipt: { state: 'unavailable', metadata: claim.metadata },
+      effectEligible: false,
+    };
+  }
+  const receipt = recordCortexRelayShadowOutcome(claim.metadata);
+  if (receipt.state !== 'recorded') {
+    return {
+      validation: { accepted: false, observed: false, metadata: claim.metadata },
+      receipt,
+      effectEligible: false,
+    };
+  }
   return {
-    validation,
-    receipt: recordCortexRelayShadowOutcome(validation.metadata, { root: options.root }),
+    validation: observeCortexRelayShadowAfterClaim(input),
+    receipt,
+    effectEligible: false,
   };
 }
 
-/** Vitest-only integrated seam for fixed-effect validation and receipt tests. */
+/** Vitest-only integrated seam for deterministic trust and durability attacks. */
 export function _consumeCortexRelayShadowForTest(
   sentinel: symbol,
   input: CortexRelayShadowInput,
   options: {
     validation?: Partial<CortexRelayShadowDependencies>;
     root?: string;
+    provenanceKey?: Buffer;
   } = {},
 ): ConsumeCortexRelayShadowResult {
   if (sentinel !== CORTEX_RELAY_SHADOW_TEST_CONTROL || process.env.VITEST !== 'true') {
     throw new Error('invalid Cortex relay shadow test control');
   }
-  const validation = _validateCortexRelayShadowForTest(
+  const dependencies = options.validation ?? {};
+  const now = dependencies.now ?? (() => new Date());
+  const loadPolicy = dependencies.loadPolicy ?? (() => null);
+  const claim = _prepareCortexRelayShadowClaimForTest(
     sentinel,
     input,
-    options.validation ?? {},
+    { now, loadPolicy },
   );
+  if (!claim.ok) {
+    return {
+      validation: { accepted: false, observed: false, metadata: claim.metadata },
+      receipt: { state: 'unavailable', metadata: claim.metadata },
+      effectEligible: false,
+    };
+  }
+  const receipt = recordWithKey(claim.metadata, options.root, options.provenanceKey ?? null);
+  if (receipt.state !== 'recorded') {
+    return {
+      validation: { accepted: false, observed: false, metadata: claim.metadata },
+      receipt,
+      effectEligible: false,
+    };
+  }
+  const validation = _validateCortexRelayShadowForTest(sentinel, input, dependencies);
   return {
     validation,
-    receipt: recordCortexRelayShadowOutcome(validation.metadata, { root: options.root }),
+    receipt,
+    effectEligible: false,
   };
+}
+
+export function _recordCortexRelayShadowOutcomeForTest(
+  sentinel: symbol,
+  metadata: CortexRelayShadowMetadata,
+  options: { root: string; provenanceKey: Buffer },
+): CortexRelayShadowRecordResult {
+  if (sentinel !== CORTEX_RELAY_SHADOW_TEST_CONTROL || process.env.VITEST !== 'true') {
+    throw new Error('invalid Cortex relay shadow test control');
+  }
+  return recordWithKey(metadata, options.root, options.provenanceKey);
 }

@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
+import { generateKeyPairSync, sign } from 'node:crypto';
 import {
-  chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -15,6 +16,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   ENGINEERING_ASSIGNMENT_PROTOCOL,
+  ENGINEERING_ASSIGNMENT_SIGNATURE_DOMAIN,
   ENGINEERING_ASSIGNMENT_VERSION,
   engineeringAssignmentDigest,
   parseEngineeringAssignmentV1,
@@ -31,11 +33,19 @@ import {
 import {
   _consumeCortexRelayShadowForTest,
   consumeCortexRelayShadow,
-  recordCortexRelayShadowOutcome,
+  _recordCortexRelayShadowOutcomeForTest,
 } from '../src/core/fleet/cortex-relay-shadow-store.js';
 import {
+  inspectLocusV3ShadowAuthority,
   type LocusV3ShadowAuthoritySummary,
 } from '../src/core/integrations/locus.js';
+import type { CortexRelayTrustPolicy } from '../src/core/fleet/cortex-relay-trust.js';
+import { _parseCortexRelayTrustPolicyForTest } from '../src/core/fleet/cortex-relay-trust.js';
+import {
+  resolveTrustedConfiguredExecutable,
+  resolveTrustedSystemGit,
+  verifySystemExecutablePin,
+} from '../src/core/util/system-executable-custody.js';
 
 const NOW = new Date('2026-08-10T12:00:00.000Z');
 const SOURCE_COMMIT = '8133c090ef70d0bd4fa07e4d9098d82653079864';
@@ -43,8 +53,22 @@ const REPO = '/enrolled/ashlr-hub';
 const RAW_OBJECTIVE = 'RAW_OBJECTIVE_CANARY_M499 Authorization Bearer m499-secret-token-value';
 const RAW_PATH = 'src/RAW_FILE_CANARY_M499.ts';
 const EXECUTOR = 'a'.repeat(64);
+const PROVENANCE_KEY = Buffer.alloc(32, 0x49);
 const tempRoots: string[] = [];
 const ORIGINAL_LOCUS_BIN = process.env.LOCUS_BIN;
+const ORIGINAL_PATH = process.env.PATH;
+const { privateKey: CORTEX_PRIVATE_KEY, publicKey: CORTEX_PUBLIC_KEY } =
+  generateKeyPairSync('ed25519');
+const CORTEX_PUBLIC_PEM = CORTEX_PUBLIC_KEY.export({ format: 'pem', type: 'spki' }).toString();
+const TRUST_POLICY: CortexRelayTrustPolicy = Object.freeze({
+  schemaVersion: 1,
+  issuer: 'ashlr-cortex',
+  audience: 'ashlr-hub',
+  organizationRef: 'org_acme',
+  allowedWorkstreams: Object.freeze(['commercial']),
+  publicKeys: Object.freeze({ cortex_m499: CORTEX_PUBLIC_PEM }),
+  locusExecutable: '/usr/local/bin/locus',
+});
 
 function validateCortexRelayShadow(
   value: CortexRelayShadowInput,
@@ -58,12 +82,15 @@ function validateCortexRelayShadow(
 }
 
 function assignment(
-  patch: Partial<Omit<EngineeringAssignmentV1, 'assignmentDigest'>> = {},
+  patch: Partial<Omit<EngineeringAssignmentV1, 'assignmentDigest' | 'assignmentSignature'>> = {},
 ): EngineeringAssignmentV1 {
-  const unsigned: Omit<EngineeringAssignmentV1, 'assignmentDigest'> = {
+  const unsigned: Omit<EngineeringAssignmentV1, 'assignmentDigest' | 'assignmentSignature'> = {
     protocol: ENGINEERING_ASSIGNMENT_PROTOCOL,
     version: ENGINEERING_ASSIGNMENT_VERSION,
-    assignmentId: 'assignment_m499',
+    issuer: 'ashlr-cortex',
+    audience: 'ashlr-hub',
+    keyId: 'cortex_m499',
+    assignmentId: 'run_m499',
     runId: 'run_m499',
     issuedAt: NOW.toISOString(),
     expiresAt: '2026-08-10T13:00:00.000Z',
@@ -92,7 +119,13 @@ function assignment(
     authority: { effect: 'proposal-only', requiredTenantRef: 'org_acme' },
     ...patch,
   };
-  return { ...unsigned, assignmentDigest: engineeringAssignmentDigest(unsigned) };
+  const assignmentDigest = engineeringAssignmentDigest(unsigned);
+  const assignmentSignature = `ed25519:${sign(
+    null,
+    Buffer.from(`${ENGINEERING_ASSIGNMENT_SIGNATURE_DOMAIN}\0${assignmentDigest}`, 'utf8'),
+    CORTEX_PRIVATE_KEY,
+  ).toString('base64url')}`;
+  return { ...unsigned, assignmentDigest, assignmentSignature };
 }
 
 function locusSummary(
@@ -119,6 +152,7 @@ function observation(patch: Partial<CortexRelayRepositoryObservation> = {}): Cor
     sourceCommit: SOURCE_COMMIT,
     dev: 1,
     ino: 2,
+    authority: 'local-tracking-ref',
     ...patch,
   };
 }
@@ -128,6 +162,7 @@ function dependencies(
 ): CortexRelayShadowDependencies {
   return {
     now: () => NOW,
+    loadPolicy: () => TRUST_POLICY,
     listEnrolledRepos: () => [REPO],
     observeRepository: () => observation(),
     observeLocusAuthority: () => locusSummary(),
@@ -136,17 +171,22 @@ function dependencies(
 }
 
 function input(value: unknown = assignment()) {
-  return {
-    assignment: value,
-    policy: { organizationRef: 'org_acme', allowedWorkstreams: ['commercial'] as const },
-  };
+  return { assignment: value };
 }
 
 function resign(value: Record<string, unknown>): Record<string, unknown> {
-  const { assignmentDigest: _digest, ...unsigned } = value;
+  const { assignmentDigest: _digest, assignmentSignature: _signature, ...unsigned } = value;
+  const assignmentDigest = engineeringAssignmentDigest(
+    unsigned as Omit<EngineeringAssignmentV1, 'assignmentDigest' | 'assignmentSignature'>,
+  );
   return {
     ...unsigned,
-    assignmentDigest: engineeringAssignmentDigest(unsigned as Omit<EngineeringAssignmentV1, 'assignmentDigest'>),
+    assignmentDigest,
+    assignmentSignature: `ed25519:${sign(
+      null,
+      Buffer.from(`${ENGINEERING_ASSIGNMENT_SIGNATURE_DOMAIN}\0${assignmentDigest}`, 'utf8'),
+      CORTEX_PRIVATE_KEY,
+    ).toString('base64url')}`,
   };
 }
 
@@ -154,6 +194,8 @@ afterEach(() => {
   vi.restoreAllMocks();
   if (ORIGINAL_LOCUS_BIN === undefined) delete process.env.LOCUS_BIN;
   else process.env.LOCUS_BIN = ORIGINAL_LOCUS_BIN;
+  if (ORIGINAL_PATH === undefined) delete process.env.PATH;
+  else process.env.PATH = ORIGINAL_PATH;
   vi.resetModules();
   for (const root of tempRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
@@ -161,13 +203,60 @@ afterEach(() => {
 describe('M499 Cortex engineering assignment protocol', () => {
   it('is byte-compatible with the producer digest and freezes valid envelopes', () => {
     const value = assignment();
-    expect(value.assignmentDigest).toBe(
-      'sha256:8652894ca2af5ef47868a33fbebb3214cc8cb02874e60f0b4d1ef113d7563855',
-    );
-    const parsed = parseEngineeringAssignmentV1(value, { now: NOW });
+    expect(value.assignmentDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
+    const parsed = parseEngineeringAssignmentV1(value, { now: NOW, verifier: TRUST_POLICY });
     expect(parsed).toEqual(value);
     expect(Object.isFrozen(parsed)).toBe(true);
     expect(Object.isFrozen(parsed?.repo)).toBe(true);
+  });
+
+  it('binds issuer, audience, key id, replay identity, digest, and canonical Ed25519 bytes', () => {
+    const value = assignment();
+    const { assignmentDigest: _digest, assignmentSignature: _signature, ...unsigned } = value;
+    const reordered = {
+      ...unsigned,
+      repo: {
+        sourceCommit: unsigned.repo.sourceCommit,
+        defaultBranch: unsigned.repo.defaultBranch,
+        name: unsigned.repo.name,
+        owner: unsigned.repo.owner,
+      },
+      resultContract: {
+        maxChangedLines: unsigned.resultContract.maxChangedLines,
+        maxChangedFiles: unsigned.resultContract.maxChangedFiles,
+        requireVerification: true as const,
+        requireProposal: true as const,
+        requireDiff: true as const,
+        kind: 'verified-proposal' as const,
+      },
+    };
+    expect(engineeringAssignmentDigest(reordered)).toBe(value.assignmentDigest);
+    for (const policy of [
+      { ...TRUST_POLICY, issuer: 'other-cortex' },
+      { ...TRUST_POLICY, audience: 'other-hub' },
+      { ...TRUST_POLICY, publicKeys: { other_key: CORTEX_PUBLIC_PEM } },
+      { ...TRUST_POLICY, publicKeys: { cortex_m499: CORTEX_PRIVATE_KEY } },
+    ]) {
+      expect(parseEngineeringAssignmentV1(value, { now: NOW, verifier: policy })).toBeNull();
+    }
+
+    const replayMismatch = structuredClone(value) as unknown as Record<string, unknown>;
+    replayMismatch.assignmentId = 'assignment_m499';
+    expect(parseEngineeringAssignmentV1(resign(replayMismatch), {
+      now: NOW, verifier: TRUST_POLICY,
+    })).toBeNull();
+
+    const forgedDigest = { ...value, assignmentDigest: `sha256:${'0'.repeat(64)}` };
+    expect(parseEngineeringAssignmentV1(forgedDigest, { now: NOW, verifier: TRUST_POLICY })).toBeNull();
+
+    const encoded = value.assignmentSignature.slice('ed25519:'.length);
+    for (const suffix of 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_') {
+      if (suffix === encoded.at(-1)) continue;
+      const malleable = { ...value, assignmentSignature: `ed25519:${encoded.slice(0, -1)}${suffix}` };
+      expect(parseEngineeringAssignmentV1(malleable, {
+        now: NOW, verifier: TRUST_POLICY,
+      })).toBeNull();
+    }
   });
 
   it.each([
@@ -194,18 +283,27 @@ describe('M499 Cortex engineering assignment protocol', () => {
   it('rejects tampering, expiry, traversal, widened authority, and tenant mismatch', () => {
     const tampered = structuredClone(assignment()) as unknown as Record<string, unknown>;
     (tampered.repo as Record<string, unknown>).name = 'other';
-    expect(parseEngineeringAssignmentV1(tampered, { now: NOW })).toBeNull();
+    expect(parseEngineeringAssignmentV1(tampered, { now: NOW, verifier: TRUST_POLICY })).toBeNull();
 
     const traversal = structuredClone(assignment()) as unknown as Record<string, unknown>;
     (traversal.mission as Record<string, unknown>).allowedFiles = ['../outside'];
-    expect(parseEngineeringAssignmentV1(resign(traversal), { now: NOW })).toBeNull();
+    expect(parseEngineeringAssignmentV1(resign(traversal), { now: NOW, verifier: TRUST_POLICY })).toBeNull();
+
+    for (const bypass of ['{..,src}/secret', 'src/[.][.]/secret', 'src/%2e%2e/secret']) {
+      const encoded = structuredClone(assignment()) as unknown as Record<string, unknown>;
+      (encoded.mission as Record<string, unknown>).allowedFiles = [bypass];
+      expect(parseEngineeringAssignmentV1(resign(encoded), {
+        now: NOW, verifier: TRUST_POLICY,
+      })).toBeNull();
+    }
 
     const widened = structuredClone(assignment()) as unknown as Record<string, unknown>;
     (widened.authority as Record<string, unknown>).merge = true;
-    expect(parseEngineeringAssignmentV1(resign(widened), { now: NOW })).toBeNull();
+    expect(parseEngineeringAssignmentV1(resign(widened), { now: NOW, verifier: TRUST_POLICY })).toBeNull();
 
     expect(parseEngineeringAssignmentV1(assignment(), {
       now: new Date('2026-08-10T13:00:00.000Z'),
+      verifier: TRUST_POLICY,
     })).toBeNull();
     expect(validateCortexRelayShadow(input(), dependencies({
       observeLocusAuthority: () => null,
@@ -214,30 +312,57 @@ describe('M499 Cortex engineering assignment protocol', () => {
 });
 
 describe('M499 shadow admission', () => {
-  it('resolves only the enrolled owner/name and produces a proposal-only in-memory scope', () => {
+  it('accepts only an exact bounded Hub trust policy', () => {
+    expect(_parseCortexRelayTrustPolicyForTest(TRUST_POLICY)).toEqual(TRUST_POLICY);
+    for (const invalid of [
+      { ...TRUST_POLICY, extra: true },
+      { ...TRUST_POLICY, locusExecutable: 'locus' },
+      { ...TRUST_POLICY, allowedWorkstreams: ['commercial', 'commercial'] },
+      { ...TRUST_POLICY, publicKeys: {} },
+      { ...TRUST_POLICY, issuer: '../cortex' },
+    ]) {
+      expect(_parseCortexRelayTrustPolicyForTest(invalid)).toBeNull();
+    }
+  });
+
+  it('loads trust only from Hub policy and fails before observation when unavailable', () => {
+    const observe = vi.fn(() => observation());
+    const missing = validateCortexRelayShadow(input(), dependencies({
+      loadPolicy: () => null,
+      observeRepository: observe,
+    }));
+    expect(missing.metadata.reason).toBe('policy-unavailable');
+    expect(observe).not.toHaveBeenCalled();
+
+    const callerOverride = {
+      ...input(),
+      policy: {
+        issuer: 'attacker', audience: 'attacker', organizationRef: 'org_other',
+        publicKeys: {}, allowedWorkstreams: ['commercial'], locusExecutable: '/tmp/locus',
+      },
+    } as CortexRelayShadowInput;
+    const observed = validateCortexRelayShadow(callerOverride, dependencies());
+    expect(observed.observed).toBe(true);
+    expect(observed.metadata.tenantRefDigest).toBe(
+      'sha256:a6106492981cc123f51cff54ddf4b8098342f75175ccdfed298ef677153b5e2f',
+    );
+  });
+
+  it('resolves only the enrolled owner/name but remains observation-only and non-consumable', () => {
     const observe = vi.fn(() => observation());
     const result = validateCortexRelayShadow(input(), dependencies({ observeRepository: observe }));
-    expect(result.accepted, JSON.stringify(result.metadata)).toBe(true);
-    if (!result.accepted) throw new Error('expected accepted shadow admission');
+    expect(result.accepted).toBe(false);
+    expect(result.observed, JSON.stringify(result.metadata)).toBe(true);
+    if (!result.observed) throw new Error('expected completed shadow observation');
     expect(observe).toHaveBeenCalledTimes(3);
     expect(observe).toHaveBeenNthCalledWith(1, REPO);
     expect(observe).toHaveBeenNthCalledWith(2, REPO);
     expect(observe).toHaveBeenNthCalledWith(3, REPO);
     expect(result.repoPath).toBe(REPO);
-    expect(result.delegationScope).toMatchObject({
-      origin: 'cortex-relay-shadow',
-      sourceRepo: REPO,
-      executionRoot: REPO,
-      runId: 'run_m499',
-      taskId: 'assignment_m499',
-      memoryMode: 'repo-only',
-      allowedFiles: { include: [RAW_PATH], enforceWrites: true },
-      resultContract: {
-        kind: 'verified-proposal', requireDiff: true, requireProposal: true,
-        requireVerification: true, maxChangedFiles: 12, maxChangedLines: 800,
-      },
-    });
-    expect(result.metadata.accepted).toBe(true);
+    expect(result.metadata.reason).toBe('observation-only');
+    expect(result.metadata.accepted).toBe(false);
+    expect(result.metadata.consumable).toBe(false);
+    expect(result.metadata.authorityGranted).toBe(false);
     expect(result.metadata.executionAuthority).toBe(false);
   });
 
@@ -251,16 +376,14 @@ describe('M499 shadow admission', () => {
     ['stale-source', () => dependencies({
       observeRepository: () => observation({ sourceCommit: '1'.repeat(40) }),
     })],
-    ['organization-mismatch', () => dependencies()],
-    ['workstream-denied', () => dependencies()],
+    ['organization-mismatch', () => dependencies({
+      loadPolicy: () => ({ ...TRUST_POLICY, organizationRef: 'org_other' }),
+    })],
+    ['workstream-denied', () => dependencies({
+      loadPolicy: () => ({ ...TRUST_POLICY, allowedWorkstreams: ['company'] }),
+    })],
   ] as const)('fails closed for %s', (reason, makeDeps) => {
-    const base = input();
-    const hostile = reason === 'organization-mismatch'
-      ? { ...base, policy: { ...base.policy, organizationRef: 'org_other' } }
-      : reason === 'workstream-denied'
-        ? { ...base, policy: { ...base.policy, allowedWorkstreams: ['company'] as const } }
-        : base;
-    expect(validateCortexRelayShadow(hostile, makeDeps()).metadata.reason).toBe(reason);
+    expect(validateCortexRelayShadow(input(), makeDeps()).metadata.reason).toBe(reason);
   });
 
   it('rejects enrollment and repository identity races', () => {
@@ -362,7 +485,7 @@ describe('M499 shadow admission', () => {
     expect(result.metadata.accepted).toBe(false);
   });
 
-  it('preserves every producer-valid allowed file in the normalized scope', () => {
+  it('observes every producer-valid allowed file without materializing an execution scope', () => {
     const allowedFiles = Array.from({ length: 250 }, (_, index) => `src/file-${index}.ts`);
     const result = validateCortexRelayShadow(input(assignment({
       mission: {
@@ -370,8 +493,9 @@ describe('M499 shadow admission', () => {
         guardrails: ['Do not merge'], allowedFiles,
       },
     })), dependencies());
-    expect(result.accepted).toBe(true);
-    expect(result.accepted && result.delegationScope.allowedFiles?.include).toEqual(allowedFiles);
+    expect(result.observed).toBe(true);
+    expect(result.metadata.resultContract?.allowedFileCount).toBe(250);
+    expect(result).not.toHaveProperty('delegationScope');
   });
 
   it('uses the default read-only Git observer against an enrolled registry path', () => {
@@ -387,101 +511,78 @@ describe('M499 shadow admission', () => {
     execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/ashlrai/ashlr-hub.git'], { cwd: repo });
     execFileSync('git', ['update-ref', 'refs/remotes/origin/master', commit], { cwd: repo });
     execFileSync('git', ['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/master'], { cwd: repo });
+    const maliciousGit = join(root, 'git');
+    const maliciousMarker = join(root, 'path-git-executed');
+    writeFileSync(maliciousGit, `#!/bin/sh\n/usr/bin/touch ${JSON.stringify(maliciousMarker)}\n`, {
+      mode: 0o700,
+    });
+    process.env.PATH = `${root}:${ORIGINAL_PATH ?? ''}`;
     const result = validateCortexRelayShadow(input(assignment({
       repo: { owner: 'ashlrai', name: 'ashlr-hub', defaultBranch: 'master', sourceCommit: commit },
     })), {
       now: () => NOW,
+      loadPolicy: () => TRUST_POLICY,
       listEnrolledRepos: () => [repo],
       observeLocusAuthority: () => locusSummary(),
     });
-    expect(result.accepted, JSON.stringify(result.metadata)).toBe(true);
-    expect(result.accepted && result.repoPath).toBe(repo);
+    expect(result.observed, JSON.stringify(result.metadata)).toBe(true);
+    expect(result.observed && result.repoPath).toBe(repo);
+    expect(existsSync(maliciousMarker)).toBe(false);
   });
 });
 
 describe('M499 Locus V3 and metadata receipts', () => {
-  function locusAdapterFixture() {
+  it('pins only root-owned explicit executables and revalidates their custody epoch', () => {
+    const git = resolveTrustedSystemGit();
+    if (process.platform === 'darwin' || process.platform === 'linux') {
+      expect(git?.executable).toBe('/usr/bin/git');
+      expect(git && verifySystemExecutablePin(git, { git: true })).toBe(true);
+      expect(resolveTrustedConfiguredExecutable('/usr/bin/git')?.digest).toBe(git?.digest);
+    } else {
+      expect(git).toBeNull();
+    }
+  });
+
+  function untrustedLocusFixture() {
     const home = realpathSync.native(mkdtempSync(join(tmpdir(), 'ashlr-m499-locus-')));
     tempRoots.push(home);
-    mkdirSync(join(home, 'sessions'), { mode: 0o700 });
-    mkdirSync(join(home, 'workers'), { mode: 0o700 });
-    const workerHome = join(home, 'workers', 'ses_a11ce');
-    mkdirSync(workerHome, { mode: 0o700 });
-    const responsePath = join(home, 'whoami.json');
-    const binPath = join(home, 'locus-test-adapter');
-    writeFileSync(binPath, `#!/bin/sh\n/bin/cat ${JSON.stringify(responsePath)}\n`, { mode: 0o700 });
-    chmodSync(binPath, 0o700);
+    const marker = join(home, 'executed');
+    const binPath = join(home, 'locus');
+    writeFileSync(binPath, `#!/bin/sh\n/usr/bin/touch ${JSON.stringify(marker)}\n`, { mode: 0o700 });
     return {
-      binPath,
-      responsePath,
+      home, marker, binPath,
       source: {
-        PATH: '/usr/bin', HOME: '/ambient-home', LOCUS_HOME: home,
+        PATH: home, HOME: '/ambient-home', LOCUS_HOME: home,
         LOCUS_SESSION_ID: 'ses_a11ce', LOCUS_EXECUTOR_CAPABILITY: EXECUTOR,
         GITHUB_TOKEN: 'raw-token', AWS_SECRET_ACCESS_KEY: 'raw-aws',
         LOCUS_CONTROL_CAPABILITY: 'operator-control',
       },
-      whoami: {
-        session_id: 'ses_a11ce', binding_alias: 'hub-worker', binding_id: 'binding_m499',
-        tenant: 'org_acme', expires_at: '2026-08-10T12:30:00.000Z',
-        worker_home: workerHome, seal_ok: true, seal: 'opaque-seal', authority: 'delegated',
-        authority_anchor_ok: true, backing_type: 'ci',
-        backing_path: join(home, 'sessions', 'ci-a11ce.json'), frozen: false,
-      },
     };
   }
 
-  async function loadLocusInspector(fixture: ReturnType<typeof locusAdapterFixture>) {
+  it('rejects LOCUS_BIN, PATH, and same-UID configured executables before capability exposure', () => {
+    const fixture = untrustedLocusFixture();
     process.env.LOCUS_BIN = fixture.binPath;
-    writeFileSync(fixture.responsePath, JSON.stringify(fixture.whoami), { mode: 0o600 });
-    vi.resetModules();
-    return (await import('../src/core/integrations/locus.js')).inspectLocusV3ShadowAuthority;
-  }
-
-  it('authenticates delegated CI authority through the local V3 adapter only', async () => {
-    const fixture = locusAdapterFixture();
-    const inspect = await loadLocusInspector(fixture);
-    const valid = inspect({ requiredTenantRef: 'org_acme', now: NOW, source: fixture.source });
-    expect(valid?.summary).toMatchObject({ authority: 'delegated', backingType: 'ci' });
-    for (const patch of [
-      { authority: 'ambient' }, { backing_type: 'active' }, { frozen: true },
-      { seal_ok: false }, { authority_anchor_ok: false },
-      { expires_at: NOW.toISOString() }, { tenant: 'org_other' },
-      { backing_path: join(fixture.source.LOCUS_HOME, 'outside.json') },
-    ]) {
-      writeFileSync(fixture.responsePath, JSON.stringify({ ...fixture.whoami, ...patch }));
-      expect(inspect({ requiredTenantRef: 'org_acme', now: NOW, source: fixture.source })).toBeNull();
-    }
-    writeFileSync(fixture.responsePath, JSON.stringify(fixture.whoami));
-    expect(inspect({
-      requiredTenantRef: 'org_acme', now: NOW,
-      source: { ...fixture.source, LOCUS_EXECUTOR_CAPABILITY: '' },
+    expect(inspectLocusV3ShadowAuthority({
+      requiredTenantRef: 'org_acme', executable: fixture.binPath, now: NOW, source: fixture.source,
     })).toBeNull();
-  });
-
-  it('derives a scrubbed dormant child env from authenticated adapter state', async () => {
-    const fixture = locusAdapterFixture();
-    const inspect = await loadLocusInspector(fixture);
-    const evidence = inspect({ requiredTenantRef: 'org_acme', now: NOW, source: fixture.source });
-    expect(evidence?.childEnv).toMatchObject({
-      PATH: '/usr/bin', HOME: fixture.whoami.worker_home, LOCUS_SESSION_ID: 'ses_a11ce',
-      LOCUS_BINDING: 'hub-worker', LOCUS_TENANT: 'org_acme',
-      LOCUS_EXECUTOR_CAPABILITY: EXECUTOR,
-    });
-    expect(evidence?.childEnv).not.toHaveProperty('GITHUB_TOKEN');
-    expect(evidence?.childEnv).not.toHaveProperty('AWS_SECRET_ACCESS_KEY');
-    expect(evidence?.childEnv).not.toHaveProperty('LOCUS_CONTROL_CAPABILITY');
+    expect(existsSync(fixture.marker)).toBe(false);
   });
 
   it('persists only bounded metadata and deduplicates an assignment exactly once', () => {
     const root = mkdtempSync(join(tmpdir(), 'ashlr-m499-store-'));
     tempRoots.push(root);
     const result = validateCortexRelayShadow(input(), dependencies());
-    expect(result.accepted).toBe(true);
-    const first = recordCortexRelayShadowOutcome(result.metadata, { root });
-    const duplicate = recordCortexRelayShadowOutcome(result.metadata, { root });
+    expect(result.observed).toBe(true);
+    const first = _recordCortexRelayShadowOutcomeForTest(
+      CORTEX_RELAY_SHADOW_TEST_CONTROL, result.metadata, { root, provenanceKey: PROVENANCE_KEY },
+    );
+    const duplicate = _recordCortexRelayShadowOutcomeForTest(
+      CORTEX_RELAY_SHADOW_TEST_CONTROL, result.metadata, { root, provenanceKey: PROVENANCE_KEY },
+    );
     expect(first.state).toBe('recorded');
     expect(duplicate.state).toBe('duplicate');
-    const dir = join(root, 'fleet', 'cortex-relay-shadow');
+    const dir = join(root, 'fleet', 'cortex-relay-shadow', 'records');
     const files = readdirSync(dir);
     expect(files).toHaveLength(1);
     const persisted = readFileSync(join(dir, files[0]!), 'utf8');
@@ -492,10 +593,15 @@ describe('M499 Locus V3 and metadata receipts', () => {
     expect(persisted).not.toContain('org_acme');
     expect(persisted).not.toMatch(/stdout|stderr|environment|seal|token|objective/i);
     expect(JSON.parse(persisted)).toMatchObject({
-      assignmentId: 'assignment_m499',
-      repository: 'ashlrai/ashlr-hub',
-      accepted: true,
-      effects: { agentsSpawned: 0, proposalsCreated: 0, repositoriesMutated: 0 },
+      protocol: 'ashlr-cortex-relay-shadow-receipt/v1',
+      signatureAlgorithm: 'hmac-sha256',
+      metadata: {
+        assignmentId: 'run_m499',
+        repository: 'ashlrai/ashlr-hub',
+        accepted: false,
+        consumable: false,
+        effects: { agentsSpawned: 0, proposalsCreated: 0, repositoriesMutated: 0 },
+      },
     });
   });
 
@@ -510,38 +616,88 @@ describe('M499 Locus V3 and metadata receipts', () => {
       },
     });
     const second = validateCortexRelayShadow(input(changed), dependencies());
-    expect(recordCortexRelayShadowOutcome(first.metadata, { root }).state).toBe('recorded');
-    expect(recordCortexRelayShadowOutcome(second.metadata, { root }).state).toBe('conflict');
+    expect(_recordCortexRelayShadowOutcomeForTest(
+      CORTEX_RELAY_SHADOW_TEST_CONTROL, first.metadata, { root, provenanceKey: PROVENANCE_KEY },
+    ).state).toBe('recorded');
+    expect(_recordCortexRelayShadowOutcomeForTest(
+      CORTEX_RELAY_SHADOW_TEST_CONTROL, second.metadata, { root, provenanceKey: PROVENANCE_KEY },
+    ).state).toBe('conflict');
   });
 
   it('refuses a corrupted prior receipt instead of trusting its idempotency state', () => {
     const root = mkdtempSync(join(tmpdir(), 'ashlr-m499-corrupt-'));
     tempRoots.push(root);
     const result = validateCortexRelayShadow(input(), dependencies());
-    expect(recordCortexRelayShadowOutcome(result.metadata, { root }).state).toBe('recorded');
-    const dir = join(root, 'fleet', 'cortex-relay-shadow');
+    expect(_recordCortexRelayShadowOutcomeForTest(
+      CORTEX_RELAY_SHADOW_TEST_CONTROL, result.metadata, { root, provenanceKey: PROVENANCE_KEY },
+    ).state).toBe('recorded');
+    const dir = join(root, 'fleet', 'cortex-relay-shadow', 'records');
     const path = join(dir, readdirSync(dir)[0]!);
-    const corrupted = { ...JSON.parse(readFileSync(path, 'utf8')), outcomeDigest: `sha256:${'0'.repeat(64)}` };
+    const parsed = JSON.parse(readFileSync(path, 'utf8'));
+    const corrupted = { ...parsed, signature: `hmac-sha256:${'0'.repeat(64)}` };
     writeFileSync(path, `${JSON.stringify(corrupted)}\n`, { mode: 0o600 });
-    expect(recordCortexRelayShadowOutcome(result.metadata, { root }).state).toBe('unavailable');
+    expect(_recordCortexRelayShadowOutcomeForTest(
+      CORTEX_RELAY_SHADOW_TEST_CONTROL, result.metadata, { root, provenanceKey: PROVENANCE_KEY },
+    ).state).toBe('unavailable');
   });
 
   it('integrates validation and metadata persistence without an execution hook', () => {
     const root = mkdtempSync(join(tmpdir(), 'ashlr-m499-consume-'));
     tempRoots.push(root);
+    const firstRepo = vi.fn(() => observation());
+    const firstLocus = vi.fn(() => locusSummary());
     const first = _consumeCortexRelayShadowForTest(CORTEX_RELAY_SHADOW_TEST_CONTROL, input(), {
-      validation: dependencies(), root,
+      validation: dependencies({
+        observeRepository: firstRepo,
+        observeLocusAuthority: firstLocus,
+      }),
+      root,
+      provenanceKey: PROVENANCE_KEY,
     });
+    const duplicateRepo = vi.fn(() => observation());
+    const duplicateLocus = vi.fn(() => locusSummary());
     const duplicate = _consumeCortexRelayShadowForTest(CORTEX_RELAY_SHADOW_TEST_CONTROL, input(), {
-      validation: dependencies(), root,
+      validation: dependencies({
+        observeRepository: duplicateRepo,
+        observeLocusAuthority: duplicateLocus,
+      }),
+      root,
+      provenanceKey: PROVENANCE_KEY,
     });
-    expect(first.validation.accepted).toBe(true);
+    expect(first.validation.observed).toBe(true);
     expect(first.receipt.state).toBe('recorded');
-    expect(duplicate.validation.accepted).toBe(true);
+    expect(first.receipt.metadata.reason).toBe('claim-only');
+    expect(first.receipt.metadata).not.toHaveProperty('locus');
+    expect(firstRepo).toHaveBeenCalled();
+    expect(firstLocus).toHaveBeenCalled();
+    expect(duplicate.validation.observed).toBe(false);
+    expect(duplicate.validation.metadata.reason).toBe('claim-only');
     expect(duplicate.receipt.state).toBe('duplicate');
+    expect(duplicateRepo).not.toHaveBeenCalled();
+    expect(duplicateLocus).not.toHaveBeenCalled();
     expect(first.validation.metadata.effects).toEqual({
       agentsSpawned: 0, proposalsCreated: 0, repositoriesMutated: 0, merges: 0, deployments: 0,
     });
+    expect(first.effectEligible).toBe(false);
+  });
+
+  it('fails closed without an existing receipt signer and never exposes an effect hook', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ashlr-m499-no-signer-'));
+    tempRoots.push(root);
+    const observeRepository = vi.fn(() => observation());
+    const observeLocusAuthority = vi.fn(() => locusSummary());
+    const result = _consumeCortexRelayShadowForTest(
+      CORTEX_RELAY_SHADOW_TEST_CONTROL,
+      input(),
+      { validation: dependencies({ observeRepository, observeLocusAuthority }), root },
+    );
+    expect(result.validation.observed).toBe(false);
+    expect(result.receipt.state).toBe('unavailable');
+    expect(observeRepository).not.toHaveBeenCalled();
+    expect(observeLocusAuthority).not.toHaveBeenCalled();
+    expect(result.effectEligible).toBe(false);
+    expect(result).not.toHaveProperty('execute');
+    expect(result).not.toHaveProperty('delegationScope');
   });
 
   it('ignores caller-supplied verifier overrides on the production consumer', () => {
@@ -553,12 +709,14 @@ describe('M499 Locus V3 and metadata receipts', () => {
         sourceCommit: SOURCE_COMMIT,
       },
     });
-    const result = consumeCortexRelayShadow(input(unknown), {
+    const injectedObserver = vi.fn(() => observation({
+      nameWithOwner: 'ashlrai/relay-unknown-repository',
+    }));
+    const result = Reflect.apply(consumeCortexRelayShadow, undefined, [input(unknown), {
       root,
-      validation: dependencies({
-        observeRepository: () => observation({ nameWithOwner: 'ashlrai/relay-unknown-repository' }),
-      }),
-    } as { root: string });
+      validation: dependencies({ observeRepository: injectedObserver }),
+    }]);
     expect(result.validation.accepted).toBe(false);
+    expect(injectedObserver).not.toHaveBeenCalled();
   });
 });

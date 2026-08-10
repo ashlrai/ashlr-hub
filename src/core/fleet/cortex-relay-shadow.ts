@@ -3,24 +3,34 @@ import { createHash } from 'node:crypto';
 import { lstatSync, realpathSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 
-import { resolveGitHubOriginAuthorityDetails } from '../git.js';
 import {
   inspectLocusV3ShadowAuthority,
   type LocusV3ShadowAuthoritySummary,
 } from '../integrations/locus.js';
 import { listEnrolled } from '../sandbox/policy.js';
-import type { DelegationScope } from '../types.js';
+import {
+  resolveTrustedSystemGit,
+  trustedGitEnvironment,
+  verifySystemExecutablePin,
+  type SystemExecutablePin,
+} from '../util/system-executable-custody.js';
 import {
   parseEngineeringAssignmentV1,
   type EngineeringAssignmentV1,
 } from './cortex-engineering-assignment.js';
+import {
+  loadCortexRelayTrustPolicy,
+  type CortexRelayTrustPolicy,
+} from './cortex-relay-trust.js';
 
 const GIT_TIMEOUT_MS = 3_000;
 const SHA1_RE = /^[0-9a-f]{40}$/;
 
 export type CortexRelayShadowReason =
-  | 'eligible'
+  | 'observation-only'
+  | 'claim-only'
   | 'cancelled'
+  | 'policy-unavailable'
   | 'invalid-assignment'
   | 'organization-mismatch'
   | 'workstream-denied'
@@ -32,8 +42,7 @@ export type CortexRelayShadowReason =
   | 'remote-mismatch'
   | 'default-branch-mismatch'
   | 'stale-source'
-  | 'locus-authority-invalid'
-  | 'delegation-normalization-failed';
+  | 'locus-authority-invalid';
 
 export interface CortexRelayRepositoryObservation {
   repoPath: string;
@@ -42,12 +51,16 @@ export interface CortexRelayRepositoryObservation {
   sourceCommit: string;
   dev: number;
   ino: number;
+  authority: 'local-tracking-ref';
 }
 
 export interface CortexRelayShadowMetadata {
   schemaVersion: 1;
   protocol: 'ashlr-cortex-relay-shadow-outcome/v1';
   mode: 'shadow';
+  evidenceClass: 'observation-only';
+  consumable: false;
+  authorityGranted: false;
   executionAuthority: false;
   proposalAuthority: false;
   mergeAuthority: false;
@@ -86,29 +99,35 @@ export interface CortexRelayShadowMetadata {
 
 export type CortexRelayShadowResult =
   | {
-      accepted: true;
+      accepted: false;
+      observed: true;
       assignment: EngineeringAssignmentV1;
       repoPath: string;
-      delegationScope: DelegationScope;
       metadata: CortexRelayShadowMetadata;
     }
-  | { accepted: false; metadata: CortexRelayShadowMetadata };
+  | { accepted: false; observed: false; metadata: CortexRelayShadowMetadata };
+
+export type CortexRelayShadowClaim =
+  | {
+      ok: true;
+      assignment: EngineeringAssignmentV1;
+      metadata: CortexRelayShadowMetadata;
+    }
+  | { ok: false; metadata: CortexRelayShadowMetadata };
 
 export interface CortexRelayShadowInput {
   assignment: unknown;
-  policy: {
-    organizationRef: string;
-    allowedWorkstreams: readonly EngineeringAssignmentV1['workstream'][];
-  };
   signal?: AbortSignal;
 }
 
 export interface CortexRelayShadowDependencies {
   now: () => Date;
+  loadPolicy: () => CortexRelayTrustPolicy | null;
   listEnrolledRepos: () => string[];
   observeRepository: (repoPath: string) => CortexRelayRepositoryObservation | null;
   observeLocusAuthority: (
     requiredTenantRef: string,
+    executable: string,
     now: Date,
   ) => LocusV3ShadowAuthoritySummary | null;
   onPhase?: (phase: 'parsed' | 'repository-observed' | 'repository-revalidated' | 'locus-validated') => void;
@@ -138,28 +157,70 @@ function canonicalEnrollment(values: readonly string[]): string[] | null {
   return new Set(repos).size === repos.length ? repos : null;
 }
 
+function runTrustedGit(pin: SystemExecutablePin, repoPath: string, args: string[]): string | null {
+  try {
+    if (!verifySystemExecutablePin(pin, { git: true, untrustedRoots: [repoPath] })) return null;
+    const output = execFileSync(pin.executable, ['-C', repoPath, ...args], {
+      encoding: 'utf8', stdio: 'pipe', timeout: GIT_TIMEOUT_MS,
+      env: trustedGitEnvironment(pin), shell: false, windowsHide: true,
+    }).trim();
+    return verifySystemExecutablePin(pin, { git: true, untrustedRoots: [repoPath] })
+      ? output : null;
+  } catch {
+    return null;
+  }
+}
+
+function canonicalGitHubDestination(remote: string): string | null {
+  const match = remote.match(/^https:\/\/(?:[^/?#@]+@)?github\.com(?::443)?\/([^/?#]+)\/([^/?#]+)$/i) ??
+    remote.match(/^git@github\.com:([^/?#:]+)\/([^/?#]+)$/i) ??
+    remote.match(/^ssh:\/\/git@github\.com(?::22)?\/([^/?#]+)\/([^/?#]+)$/i);
+  if (!match?.[1] || !match[2]) return null;
+  const owner = match[1];
+  const repo = match[2].replace(/\.git$/i, '');
+  return /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/.test(owner) &&
+    /^[A-Za-z0-9_.-]+$/.test(repo) && repo !== '.' && repo !== '..'
+    ? `${owner.toLowerCase()}/${repo.toLowerCase()}` : null;
+}
+
+function originIdentity(pin: SystemExecutablePin, repoPath: string): string | null {
+  if (runTrustedGit(pin, repoPath, ['config', '--get-regexp', '^url\\..*\\.(insteadof|pushinsteadof)$'])) {
+    return null;
+  }
+  const fetch = runTrustedGit(pin, repoPath, ['remote', 'get-url', '--all', 'origin']);
+  const push = runTrustedGit(pin, repoPath, ['remote', 'get-url', '--push', '--all', 'origin']);
+  if (!fetch || !push) return null;
+  const destinations = new Set([...fetch.split(/\r?\n/), ...push.split(/\r?\n/)]
+    .map(canonicalGitHubDestination));
+  return destinations.size === 1 && !destinations.has(null)
+    ? [...destinations][0] ?? null : null;
+}
+
 function defaultObserveRepository(repoPath: string): CortexRelayRepositoryObservation | null {
   try {
     const stat = lstatSync(repoPath);
     if (!stat.isDirectory() || stat.isSymbolicLink() || realpathSync(repoPath) !== repoPath) return null;
-    const top = execFileSync('git', ['-C', repoPath, 'rev-parse', '--show-toplevel'], {
-      encoding: 'utf8', stdio: 'pipe', timeout: GIT_TIMEOUT_MS,
-    }).trim();
+    const pin = resolveTrustedSystemGit([repoPath]);
+    if (!pin) return null;
+    const top = runTrustedGit(pin, repoPath, ['rev-parse', '--show-toplevel']);
+    if (!top) return null;
     if (realpathSync(top) !== repoPath) return null;
-    const origin = resolveGitHubOriginAuthorityDetails(repoPath);
-    if (!origin) return null;
-    const remoteHead = execFileSync('git', [
-      '-C', repoPath, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD',
-    ], { encoding: 'utf8', stdio: 'pipe', timeout: GIT_TIMEOUT_MS }).trim();
+    const nameWithOwner = originIdentity(pin, repoPath);
+    if (!nameWithOwner) return null;
+    const remoteHead = runTrustedGit(pin, repoPath, [
+      'symbolic-ref', '--short', 'refs/remotes/origin/HEAD',
+    ]);
+    if (!remoteHead) return null;
     if (!remoteHead.startsWith('origin/') || remoteHead.length <= 7) return null;
     const defaultBranch = remoteHead.slice(7);
-    const sourceCommit = execFileSync('git', [
-      '-C', repoPath, 'rev-parse', '--verify', `refs/remotes/origin/${defaultBranch}^{commit}`,
-    ], { encoding: 'utf8', stdio: 'pipe', timeout: GIT_TIMEOUT_MS }).trim().toLowerCase();
+    const sourceCommit = runTrustedGit(pin, repoPath, [
+      'rev-parse', '--verify', `refs/remotes/origin/${defaultBranch}^{commit}`,
+    ])?.toLowerCase();
+    if (!sourceCommit) return null;
     if (!SHA1_RE.test(sourceCommit)) return null;
     return {
-      repoPath, nameWithOwner: origin.nameWithOwner, defaultBranch, sourceCommit,
-      dev: stat.dev, ino: stat.ino,
+      repoPath, nameWithOwner, defaultBranch, sourceCommit,
+      dev: stat.dev, ino: stat.ino, authority: 'local-tracking-ref',
     };
   } catch {
     return null;
@@ -175,28 +236,8 @@ function validObservation(
       observation.nameWithOwner,
     ) && typeof observation.defaultBranch === 'string' && observation.defaultBranch.length > 0 &&
     SHA1_RE.test(observation.sourceCommit) && Number.isSafeInteger(observation.dev) &&
-    observation.dev >= 0 && Number.isSafeInteger(observation.ino) && observation.ino >= 0;
-}
-
-function normalizedDelegationScope(
-  assignment: EngineeringAssignmentV1,
-  repoPath: string,
-): DelegationScope {
-  return Object.freeze({
-    schemaVersion: 1,
-    origin: 'cortex-relay-shadow',
-    sourceRepo: repoPath,
-    executionRoot: repoPath,
-    taskId: assignment.assignmentId,
-    runId: assignment.runId,
-    objective: assignment.mission.objective,
-    allowedFiles: Object.freeze({
-      include: Object.freeze([...assignment.mission.allowedFiles]) as unknown as string[],
-      enforceWrites: true,
-    }),
-    memoryMode: 'repo-only',
-    resultContract: Object.freeze({ ...assignment.resultContract }),
-  });
+    observation.dev >= 0 && Number.isSafeInteger(observation.ino) && observation.ino >= 0 &&
+    observation.authority === 'local-tracking-ref';
 }
 
 function metadata(
@@ -215,7 +256,10 @@ function metadata(
     proposalAuthority: false as const,
     mergeAuthority: false as const,
     deployAuthority: false as const,
-    accepted: reason === 'eligible',
+    evidenceClass: 'observation-only' as const,
+    consumable: false as const,
+    authorityGranted: false as const,
+    accepted: false,
     reason,
     observedAt: now.toISOString(),
     inputDigest: sha256('ashlr:cortex-relay-shadow:input:v1', input),
@@ -258,11 +302,53 @@ function rejected(
   observation?: CortexRelayRepositoryObservation,
   locus?: LocusV3ShadowAuthoritySummary,
 ): CortexRelayShadowResult {
-  return { accepted: false, metadata: metadata(reason, now, input, assignment, observation, locus) };
+  return { accepted: false, observed: false, metadata: metadata(reason, now, input, assignment, observation, locus) };
 }
 
-export function validateCortexRelayShadow(input: CortexRelayShadowInput): CortexRelayShadowResult {
+/** Internal shadow observation used only after the durable assignment claim succeeds. */
+export function observeCortexRelayShadowAfterClaim(
+  input: CortexRelayShadowInput,
+): CortexRelayShadowResult {
   return validateCortexRelayShadowInternal(input);
+}
+
+/** Parse authenticated assignment authority without repository or Locus observation. */
+export function prepareCortexRelayShadowClaim(input: CortexRelayShadowInput): CortexRelayShadowClaim {
+  return prepareCortexRelayShadowClaimInternal(input);
+}
+
+function prepareCortexRelayShadowClaimInternal(
+  input: CortexRelayShadowInput,
+  dependencies: Pick<CortexRelayShadowDependencies, 'now' | 'loadPolicy'> = {
+    now: () => new Date(),
+    loadPolicy: loadCortexRelayTrustPolicy,
+  },
+): CortexRelayShadowClaim {
+  const now = dependencies.now();
+  if (!Number.isFinite(now.getTime())) {
+    return { ok: false, metadata: metadata('invalid-assignment', new Date(0), input.assignment) };
+  }
+  if (input.signal?.aborted) {
+    return { ok: false, metadata: metadata('cancelled', now, input.assignment) };
+  }
+  const policy = dependencies.loadPolicy();
+  if (!policy) return { ok: false, metadata: metadata('policy-unavailable', now, input.assignment) };
+  const assignment = parseEngineeringAssignmentV1(input.assignment, { now, verifier: policy });
+  if (!assignment) return { ok: false, metadata: metadata('invalid-assignment', now, input.assignment) };
+  if (assignment.organizationRef !== policy.organizationRef) {
+    return {
+      ok: false,
+      metadata: metadata('organization-mismatch', now, input.assignment, assignment),
+    };
+  }
+  if (!policy.allowedWorkstreams.includes(assignment.workstream)) {
+    return { ok: false, metadata: metadata('workstream-denied', now, input.assignment, assignment) };
+  }
+  return {
+    ok: true,
+    assignment,
+    metadata: metadata('claim-only', now, input.assignment, assignment),
+  };
 }
 
 /** Vitest-only dependency seam; production callers cannot replace trust sources. */
@@ -277,29 +363,43 @@ export function _validateCortexRelayShadowForTest(
   return validateCortexRelayShadowInternal(input, dependencies);
 }
 
+export function _prepareCortexRelayShadowClaimForTest(
+  sentinel: symbol,
+  input: CortexRelayShadowInput,
+  dependencies: Pick<CortexRelayShadowDependencies, 'now' | 'loadPolicy'>,
+): CortexRelayShadowClaim {
+  if (sentinel !== CORTEX_RELAY_SHADOW_TEST_CONTROL || process.env.VITEST !== 'true') {
+    throw new Error('invalid Cortex relay shadow test control');
+  }
+  return prepareCortexRelayShadowClaimInternal(input, dependencies);
+}
+
 function validateCortexRelayShadowInternal(
   input: CortexRelayShadowInput,
   dependencies: Partial<CortexRelayShadowDependencies> = {},
 ): CortexRelayShadowResult {
   const deps: CortexRelayShadowDependencies = {
     now: () => new Date(),
+    loadPolicy: loadCortexRelayTrustPolicy,
     listEnrolledRepos: listEnrolled,
     observeRepository: defaultObserveRepository,
-    observeLocusAuthority: (requiredTenantRef, observedAt) =>
-      inspectLocusV3ShadowAuthority({ requiredTenantRef, now: observedAt })?.summary ?? null,
+    observeLocusAuthority: (requiredTenantRef, executable, observedAt) =>
+      inspectLocusV3ShadowAuthority({ requiredTenantRef, executable, now: observedAt })?.summary ?? null,
     ...dependencies,
   };
   const now = deps.now();
   if (!Number.isFinite(now.getTime())) return rejected('invalid-assignment', new Date(0), input.assignment);
   if (input.signal?.aborted) return rejected('cancelled', now, input.assignment);
-  const assignment = parseEngineeringAssignmentV1(input.assignment, { now });
+  const policy = deps.loadPolicy();
+  if (!policy) return rejected('policy-unavailable', now, input.assignment);
+  const assignment = parseEngineeringAssignmentV1(input.assignment, { now, verifier: policy });
   if (!assignment) return rejected('invalid-assignment', now, input.assignment);
   deps.onPhase?.('parsed');
   if (input.signal?.aborted) return rejected('cancelled', now, input.assignment, assignment);
-  if (assignment.organizationRef !== input.policy.organizationRef) {
+  if (assignment.organizationRef !== policy.organizationRef) {
     return rejected('organization-mismatch', now, input.assignment, assignment);
   }
-  if (!input.policy.allowedWorkstreams.includes(assignment.workstream)) {
+  if (!policy.allowedWorkstreams.includes(assignment.workstream)) {
     return rejected('workstream-denied', now, input.assignment, assignment);
   }
 
@@ -354,7 +454,11 @@ function validateCortexRelayShadowInternal(
     return rejected('repository-identity-changed', now, input.assignment, assignment, first);
   }
   const second = secondObservations.find((observed) => observed.repoPath === first.repoPath)!;
-  const locus = deps.observeLocusAuthority(assignment.authority.requiredTenantRef, now);
+  const locus = deps.observeLocusAuthority(
+    assignment.authority.requiredTenantRef,
+    policy.locusExecutable,
+    now,
+  );
   if (!locus) return rejected('locus-authority-invalid', now, input.assignment, assignment, second);
   deps.onPhase?.('locus-validated');
   if (input.signal?.aborted) {
@@ -383,11 +487,22 @@ function validateCortexRelayShadowInternal(
   }
   const third = thirdObservations.find((observed) => observed.repoPath === second.repoPath)!;
   const finalNow = deps.now();
-  const finalAssignment = parseEngineeringAssignmentV1(input.assignment, { now: finalNow });
+  const finalPolicy = deps.loadPolicy();
+  if (!finalPolicy || JSON.stringify(finalPolicy) !== JSON.stringify(policy)) {
+    return rejected('policy-unavailable', finalNow, input.assignment, assignment, third, locus);
+  }
+  const finalAssignment = parseEngineeringAssignmentV1(input.assignment, {
+    now: finalNow,
+    verifier: finalPolicy,
+  });
   if (!finalAssignment || finalAssignment.assignmentDigest !== assignment.assignmentDigest) {
     return rejected('invalid-assignment', finalNow, input.assignment, assignment, third, locus);
   }
-  const finalLocus = deps.observeLocusAuthority(finalAssignment.authority.requiredTenantRef, finalNow);
+  const finalLocus = deps.observeLocusAuthority(
+    finalAssignment.authority.requiredTenantRef,
+    finalPolicy.locusExecutable,
+    finalNow,
+  );
   if (!finalLocus || JSON.stringify(finalLocus) !== JSON.stringify(locus)) {
     return rejected('locus-authority-invalid', finalNow, input.assignment, assignment, third);
   }
@@ -395,22 +510,11 @@ function validateCortexRelayShadowInternal(
   if (input.signal?.aborted) {
     return rejected('cancelled', finalNow, input.assignment, assignment, third, finalLocus);
   }
-  const delegationScope = normalizedDelegationScope(assignment, third.repoPath);
-  if (delegationScope.origin !== 'cortex-relay-shadow' ||
-    delegationScope.sourceRepo !== third.repoPath || delegationScope.executionRoot !== third.repoPath ||
-    delegationScope.resultContract?.kind !== 'verified-proposal' ||
-    delegationScope.resultContract.requireDiff !== true ||
-    delegationScope.resultContract.requireProposal !== true ||
-    delegationScope.resultContract.requireVerification !== true ||
-    delegationScope.allowedFiles?.enforceWrites !== true ||
-    JSON.stringify(delegationScope.allowedFiles.include) !== JSON.stringify(assignment.mission.allowedFiles)) {
-    return rejected('delegation-normalization-failed', finalNow, input.assignment, assignment, third, finalLocus);
-  }
   return {
-    accepted: true,
+    accepted: false,
+    observed: true,
     assignment,
     repoPath: third.repoPath,
-    delegationScope,
-    metadata: metadata('eligible', finalNow, input.assignment, assignment, third, finalLocus),
+    metadata: metadata('observation-only', finalNow, input.assignment, assignment, third, finalLocus),
   };
 }

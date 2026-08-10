@@ -48,6 +48,11 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
+import {
+  resolveTrustedConfiguredExecutable,
+  verifySystemExecutablePin,
+} from '../util/system-executable-custody.js';
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -464,6 +469,8 @@ function locusShadowIdentifier(value: string): boolean {
 
 export interface InspectLocusV3ShadowAuthorityOptions {
   requiredTenantRef: string;
+  /** Exact Hub-trusted config value. LOCUS_BIN and PATH are never authority inputs. */
+  executable: string;
   now?: Date;
   source?: NodeJS.ProcessEnv;
 }
@@ -485,20 +492,29 @@ export function inspectLocusV3ShadowAuthority(
   const configuredHome = source.LOCUS_HOME ?? join(homedir(), '.locus');
   let home: string;
   try { home = realpathSync(configuredHome); } catch { return null; }
-  const commandEnv = scrubbedChildEnv(source, {
+  const pin = resolveTrustedConfiguredExecutable(options.executable, [home]);
+  if (!pin) return null;
+  const commandEnv: NodeJS.ProcessEnv = {
+    HOME: home,
+    PATH: dirname(pin.executable),
+    LC_ALL: 'C',
+    NO_COLOR: '1',
     LOCUS_HOME: home,
     LOCUS_SESSION_ID: sessionId,
     [LOCUS_EXECUTOR_CAPABILITY_ENV]: executor,
     LOCUS_NOTIFY: '0',
     LOCUS_QUIET: '1',
-  });
+  };
 
   let value: unknown;
   try {
-    const result = spawnSync(process.env.LOCUS_BIN ?? LOCUS_BIN, ['whoami', '--json'], {
+    if (!verifySystemExecutablePin(pin, { untrustedRoots: [home] })) return null;
+    const result = spawnSync(pin.executable, ['whoami', '--json'], {
       encoding: 'utf8', timeout: TIMEOUT_MS, env: commandEnv, maxBuffer: 1024 * 1024,
+      shell: false, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true,
     });
-    if (result.error || result.status !== 0) return null;
+    if (result.error || result.status !== 0 ||
+        !verifySystemExecutablePin(pin, { untrustedRoots: [home] })) return null;
     value = JSON.parse((result.stdout ?? '').trim()) as unknown;
   } catch { return null; }
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
