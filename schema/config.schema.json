@@ -157,7 +157,7 @@
     "locus": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Optional Locus identity-plane firm mode for hub pre-mutate / CI session gates. DEFAULT ABSENT = off (monorepo-safe). Env LOCUS_ENFORCE wins over config when set.",
+      "description": "Optional Locus identity-plane settings for hub pre-mutate / CI session gates. DEFAULT ABSENT = off (monorepo-safe). Env LOCUS_ENFORCE wins over config when set. Set firm=true for production fleets (profile → enforce when enforce is unset); never default firm to true in monorepo.",
       "properties": {
         "enforce": {
           "type": "string",
@@ -166,7 +166,11 @@
             "warn",
             "enforce"
           ],
-          "description": "off: no probe; warn: log blockers allow dispatch; enforce: fail closed. Unset and absent config both mean off."
+          "description": "off: no probe; warn: log blockers allow dispatch; enforce: fail closed. Unset and absent config both mean off. Explicit enforce beats firm profile."
+        },
+        "firm": {
+          "type": "boolean",
+          "description": "Firm profile for production fleets. When true and enforce is unset (and LOCUS_ENFORCE env is unset), resolveLocusEnforceMode returns enforce. Default false/absent — monorepo stays off. Env LOCUS_ENFORCE always wins (including LOCUS_ENFORCE=off). Set via: ashlr config set locus.firm true"
         }
       }
     },
