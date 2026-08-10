@@ -2,11 +2,12 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createHash, createHmac } from 'node:crypto';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   commitToolEffect,
   compactEffectJournal,
+  EFFECT_TERMINAL_COMPACTION_THRESHOLD,
   effectJournalCompactionSupported,
   effectJournalDirectory,
   hasUnresolvedToolEffects,
@@ -141,6 +142,80 @@ function fixtureBloom(values: string[]): string {
   return bloom.toString('base64');
 }
 
+function seedAuthenticatedLooseTerminalFixtures(count: number): void {
+  if (process.env['VITEST'] !== 'true') {
+    throw new Error('Effect-journal fixture seeding is restricted to Vitest');
+  }
+  if (
+    !Number.isSafeInteger(count) || count < 1 ||
+    count >= EFFECT_TERMINAL_COMPACTION_THRESHOLD
+  ) {
+    throw new RangeError('Effect-journal fixture seeding must remain below the production threshold');
+  }
+
+  const key = loadOrCreateKey();
+  fs.mkdirSync(effectJournalDirectory(), { recursive: true, mode: 0o700 });
+  for (let index = 0; index < count; index += 1) {
+    const label = `automatic-seeded-${index}`;
+    const scopeHash = fixtureHash(['ashlr:tool-effect:v1', 'scope', `retention-${label}`]);
+    const generationHash = fixtureHash(['ashlr:tool-effect:v1', 'generation', GENERATION]);
+    const taskHash = fixtureHash(['ashlr:tool-effect:v1', 'task', `task-${label}`]);
+    const toolCallHash = fixtureHash(['ashlr:tool-effect:v1', 'tool-call', `call-${label}`]);
+    const argumentDigest = createHash('sha256')
+      .update(JSON.stringify({ index }))
+      .digest('hex');
+    const effectId = fixtureHash([
+      'ashlr:tool-effect:v1', scopeHash, 'proposal_tool', argumentDigest,
+    ]);
+    const preparedAt = new Date(Date.UTC(2026, 6, 13, 5, 0, 0, index)).toISOString();
+    const preparedUnsigned = {
+      schemaVersion: 1,
+      effectId,
+      scopeHash,
+      generationHash,
+      taskHash,
+      ordinal: 1,
+      toolName: 'proposal_tool',
+      toolCallHash,
+      argumentDigest,
+      safety: 'proposal',
+      identityPolicy: 'scope-bound',
+      phase: 'prepared',
+      ownerHash: fixtureHash(['ashlr:tool-effect:v1', 'owner', `fixture-owner-${index}`]),
+      revision: 1,
+      preparedAt,
+    };
+    const prepared = {
+      ...preparedUnsigned,
+      attestation: fixtureHmac(key, 'ashlr:tool-effect-attestation:v1', preparedUnsigned),
+    };
+    const { phase: _phase, revision: _revision, ...preparedBase } = preparedUnsigned;
+    const terminalUnsigned = {
+      ...preparedBase,
+      phase: 'committed',
+      revision: 2,
+      committedAt: new Date(Date.UTC(2026, 6, 13, 5, 1, 0, index)).toISOString(),
+      outcomeDigest: createHash('sha256').update('done').digest('hex'),
+      preparedAttestation: prepared.attestation,
+    };
+    const terminal = {
+      ...terminalUnsigned,
+      attestation: fixtureHmac(key, 'ashlr:tool-effect-attestation:v1', terminalUnsigned),
+    };
+    const baseName = `${scopeHash}-${effectId}.json`;
+    fs.writeFileSync(
+      artifactPath(`.effect-v1-${baseName}`),
+      `${JSON.stringify(prepared)}\n`,
+      { mode: 0o600, flag: 'wx' },
+    );
+    fs.writeFileSync(
+      artifactPath(`.terminal-v1-${baseName}`),
+      `${JSON.stringify(terminal)}\n`,
+      { mode: 0o600, flag: 'wx' },
+    );
+  }
+}
+
 function writeSignedPackFixture(label: string): { effectId: string; names: string[] } {
   const key = loadOrCreateKey();
   const scopeHash = fixtureHash(['ashlr:tool-effect:v1', 'scope', `retention-${label}`]);
@@ -268,6 +343,7 @@ beforeEach(() => {
 
 afterEach(() => {
   _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
+  vi.unstubAllEnvs();
   semanticPrivateStorage?.reset();
   semanticPrivateStorage = undefined;
   fs.rmSync(home, { recursive: true, force: true });
@@ -280,6 +356,16 @@ afterEach(() => {
 });
 
 describe('effect terminal retention platform support', () => {
+  it('keeps the production automatic compaction threshold exactly 200', () => {
+    expect(EFFECT_TERMINAL_COMPACTION_THRESHOLD).toBe(200);
+  });
+
+  it('rejects authenticated fixture seeding outside Vitest', () => {
+    vi.stubEnv('VITEST', 'false');
+    expect(() => seedAuthenticatedLooseTerminalFixtures(1)).toThrow(/restricted to Vitest/);
+    expect(fs.existsSync(effectJournalDirectory())).toBe(false);
+  });
+
   it('reports compaction support only on POSIX', () => {
     expect(effectJournalCompactionSupported()).toBe(process.platform !== 'win32');
     if (process.platform === 'win32') {
@@ -744,11 +830,19 @@ describe.skipIf(process.platform === 'win32')('effect terminal retention on POSI
   });
 
   it('automatically compacts the bounded terminal batch at the real threshold', () => {
-    for (let index = 0; index < 200; index += 1) {
-      commit(effectInput(`automatic-${index}`, { index }));
-    }
+    seedAuthenticatedLooseTerminalFixtures(EFFECT_TERMINAL_COMPACTION_THRESHOLD - 1);
+    expect(artifacts('.effect-v1-'))
+      .toHaveLength(EFFECT_TERMINAL_COMPACTION_THRESHOLD - 1);
+    expect(artifacts('.terminal-v1-'))
+      .toHaveLength(EFFECT_TERMINAL_COMPACTION_THRESHOLD - 1);
+    expect(artifacts('.terminal-pack-v1-')).toHaveLength(0);
+    expect(artifacts('.terminal-pack-commit-v1-')).toHaveLength(0);
 
-    expect(artifacts('.effect-v1-')).toHaveLength(200);
+    commit(effectInput('automatic-threshold', {
+      index: EFFECT_TERMINAL_COMPACTION_THRESHOLD - 1,
+    }));
+
+    expect(artifacts('.effect-v1-')).toHaveLength(EFFECT_TERMINAL_COMPACTION_THRESHOLD);
     expect(artifacts('.terminal-v1-')).toHaveLength(0);
     expect(artifacts('.terminal-pack-v1-')).toHaveLength(1);
     expect(artifacts('.terminal-pack-commit-v1-')).toHaveLength(1);
@@ -757,8 +851,9 @@ describe.skipIf(process.platform === 'win32')('effect terminal retention on POSI
       invalidRecords: 0,
       limitExceeded: false,
     });
-    expect(readEffectJournal(1_000).records).toHaveLength(200);
-  }, 60_000);
+    expect(readEffectJournal(1_000).records)
+      .toHaveLength(EFFECT_TERMINAL_COMPACTION_THRESHOLD);
+  });
 
   it('stores no raw argument or outcome secrets in pack bytes', () => {
     const argumentSecret = 'm395-argument-secret-7fef7f';
