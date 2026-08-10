@@ -9,8 +9,8 @@ vi.mock('../src/core/daemon/service.js', () => ({
   uninstall: vi.fn(),
   ensureRunning: vi.fn(),
   serviceStatus: () => ({
-    registrationState: 'present',
-    installed: true,
+    registrationState: 'absent',
+    installed: false,
     running: false,
     runtimeState: 'stopped',
     platformSpec: 'launchd',
@@ -18,12 +18,10 @@ vi.mock('../src/core/daemon/service.js', () => ({
 }));
 
 import { cmdDaemon } from '../src/cli/daemon.js';
-import { canonicalizeDaemonActivationValue } from '../src/core/daemon/activation-permit.js';
 import * as service from '../src/core/daemon/service.js';
 import {
   daemonStatePath,
   daemonStateRecoveryMarkerPath,
-  freshDaemonState,
 } from '../src/core/daemon/state.js';
 
 const originalHome = process.env['HOME'];
@@ -158,7 +156,11 @@ describe('daemon recover-state production CLI filesystem wiring', () => {
       '--quarantine-receipt-sha256', quarantineReceipt.receiptDigest, '--json',
     ]);
     expect(resolutionPreview.code).toBe(0);
-    const resolutionPlan = resolutionPreview.value['plan'] as { planId: string; planDigest: string };
+    const resolutionPlan = resolutionPreview.value['plan'] as {
+      planId: string;
+      planDigest: string;
+      freshStateCanonicalBase64: string;
+    };
     const resolution = await captureJson([
       'resolve-state', '--execute', '--plan-id', resolutionPlan.planId,
       '--plan-sha256', resolutionPlan.planDigest, '--authorize', resolutionPlan.planDigest,
@@ -167,10 +169,9 @@ describe('daemon recover-state production CLI filesystem wiring', () => {
 
     expect(resolution.code).toBe(0);
     expect(resolution.value['ok']).toBe(true);
-    expect(fs.readFileSync(daemonStatePath())).toEqual(Buffer.from(
-      `${canonicalizeDaemonActivationValue(freshDaemonState())}\n`,
-      'utf8',
-    ));
+    expect(fs.readFileSync(daemonStatePath())).toEqual(
+      Buffer.from(resolutionPlan.freshStateCanonicalBase64, 'base64'),
+    );
     expect(fs.readFileSync(quarantinePath)).toEqual(bytes);
     expect(fs.lstatSync(quarantinePath).nlink).toBe(1);
     expect(fs.existsSync(daemonStateRecoveryMarkerPath())).toBe(false);

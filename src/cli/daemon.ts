@@ -829,8 +829,22 @@ async function cmdDaemonResolveState(flags: ResolveStateFlags): Promise<number> 
     console.error(col.red('error: ') + 'daemon state resolution module is unavailable. No state was changed.');
     return 1;
   }
+  const loadConfig = await importConfig(true, true);
+  if (!loadConfig) {
+    console.error(col.red('error: ') + 'strict daemon budget configuration is unavailable. No state was changed.');
+    return 1;
+  }
+  const configuredDailyBudgetUsd = (): number => {
+    const configured = loadConfig().daemon?.dailyBudgetUsd;
+    if (configured !== undefined &&
+      (typeof configured !== 'number' || !Number.isFinite(configured) || configured <= 0)) {
+      throw new Error('daemon.dailyBudgetUsd must be a finite positive number');
+    }
+    return configured ?? 1;
+  };
   const runtime = {
     serviceStatus: () => svcMod.serviceStatus({}),
+    dailyBudgetUsd: configuredDailyBudgetUsd,
   };
   const result = flags.mode === 'dry-run'
     ? recovery.previewDaemonStateResolution({

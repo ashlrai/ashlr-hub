@@ -37,8 +37,8 @@ let tmpHome: string;
 
 function inactiveService(overrides: Partial<ServiceStatusResult> = {}): ServiceStatusResult {
   return {
-    registrationState: 'present',
-    installed: true,
+    registrationState: 'absent',
+    installed: false,
     running: false,
     runtimeState: 'stopped',
     platformSpec: 'launchd',
@@ -65,6 +65,7 @@ function resolutionRuntime(
     now: () => NOW,
     randomId: () => RESOLUTION_PLAN_ID,
     serviceStatus: () => inactiveService(),
+    dailyBudgetUsd: () => 10,
     ...overrides,
   };
 }
@@ -73,7 +74,7 @@ function sha256(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
-function malformedState(): Buffer {
+function malformedState(overrides: Record<string, unknown> = {}): Buffer {
   return Buffer.from(`${JSON.stringify({
     running: false,
     pid: null,
@@ -88,27 +89,40 @@ function malformedState(): Buffer {
       budgetDay: '2026-08-10',
       unexpected: true,
     },
+    ...overrides,
   }, null, 2)}\n`);
 }
 
-function freshBytes(): Buffer {
-  return Buffer.from(`${canonicalizeDaemonActivationValue(freshDaemonState())}\n`, 'utf8');
+function resolvedState() {
+  return {
+    ...freshDaemonState(),
+    todayDate: '2026-08-10',
+    todaySpentUsd: 10,
+    spendGuardAccounting: {
+      budgetDay: '2026-08-10',
+      accountingId: RESOLUTION_PLAN_ID,
+      budgetExhausted: true,
+    },
+  };
 }
 
-function writeMalformedState(): Buffer {
-  const bytes = malformedState();
+function resolvedBytes(): Buffer {
+  return Buffer.from(`${canonicalizeDaemonActivationValue(resolvedState())}\n`, 'utf8');
+}
+
+function writeMalformedState(bytes = malformedState()): Buffer {
   fs.mkdirSync(path.dirname(daemonStatePath()), { recursive: true, mode: 0o700 });
   fs.chmodSync(path.dirname(daemonStatePath()), 0o700);
   fs.writeFileSync(daemonStatePath(), bytes, { mode: 0o600 });
   return bytes;
 }
 
-function seedQuarantine(): {
+function seedQuarantine(bytes = malformedState()): {
   bytes: Buffer;
   quarantinePath: string;
   receiptDigest: string;
 } {
-  const bytes = writeMalformedState();
+  writeMalformedState(bytes);
   const preview = previewDaemonStateQuarantine(sha256(bytes), quarantineRuntime());
   expect(preview).toMatchObject({ ok: true });
   if (!preview.ok) throw new Error(preview.detail);
@@ -126,11 +140,14 @@ function seedQuarantine(): {
   };
 }
 
-function previewResolution(receiptDigest: string): DaemonStateResolutionPlan {
+function previewResolution(
+  receiptDigest: string,
+  runtime = resolutionRuntime(),
+): DaemonStateResolutionPlan {
   const preview = previewDaemonStateResolution({
     quarantinePlanId: QUARANTINE_PLAN_ID,
     quarantineReceiptDigest: receiptDigest,
-  }, resolutionRuntime());
+  }, runtime);
   expect(preview).toMatchObject({ ok: true });
   if (!preview.ok) throw new Error(preview.detail);
   return preview.plan;
@@ -172,9 +189,10 @@ describe.runIf(process.platform !== 'win32')('daemon state resolution protocol',
       quarantineReceiptDigest: seeded.receiptDigest,
       sourceSha256: sha256(seeded.bytes),
       quarantineSha256: sha256(seeded.bytes),
-      freshStateSha256: sha256(freshBytes()),
-      freshStateSizeBytes: freshBytes().length,
+      freshStateSha256: sha256(resolvedBytes()),
+      freshStateSizeBytes: resolvedBytes().length,
       requiredServiceActivity: 'inactive',
+      requiredSupervisorRegistration: 'absent',
       authority: {
         dryRunFirst: true,
         repeatedAuthorizationRequired: true,
@@ -184,11 +202,100 @@ describe.runIf(process.platform !== 'win32')('daemon state resolution protocol',
         serviceMutationAllowed: false,
       },
     });
-    expect(Buffer.from(plan.freshStateCanonicalBase64, 'base64')).toEqual(freshBytes());
+    expect(Buffer.from(plan.freshStateCanonicalBase64, 'base64')).toEqual(resolvedBytes());
+    expect(JSON.parse(Buffer.from(plan.derivedAccountingCanonicalBase64, 'base64').toString('utf8'))).toMatchObject({
+      budgetDay: '2026-08-10',
+      configuredDailyBudgetUsd: 10,
+      sourceBudgetDay: '2026-08-10',
+      sourceSpentUsd: 8.5,
+      sourceAccounting: 'malformed',
+      disposition: 'same-day-exhausted',
+      resolvedSpentUsd: 10,
+      budgetExhausted: true,
+    });
+    expect(plan.derivedAccountingSha256).toBe(sha256(
+      Buffer.from(plan.derivedAccountingCanonicalBase64, 'base64'),
+    ));
     expect(fs.readFileSync(daemonStatePath())).toEqual(seeded.bytes);
     expect(fs.lstatSync(daemonStatePath()).ino).toBe(sourceBefore.ino);
     expect(fs.readFileSync(daemonStateRecoveryMarkerPath())).toEqual(markerBefore);
     expect(fs.existsSync(daemonStateResolutionIntentPath(plan.planId))).toBe(false);
+  });
+
+  it('preserves higher current-day spend and resets only a proven prior UTC day', () => {
+    const current = seedQuarantine(malformedState({
+      todaySpentUsd: 12.25,
+      itemsProcessed: -1,
+    }));
+    const currentPlan = previewResolution(current.receiptDigest);
+    expect(JSON.parse(Buffer.from(currentPlan.freshStateCanonicalBase64, 'base64').toString('utf8')))
+      .toMatchObject({ todayDate: '2026-08-10', todaySpentUsd: 12.25 });
+
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-state-resolution-prior-day-'));
+    fs.chmodSync(tmpHome, 0o700);
+    process.env['HOME'] = tmpHome;
+    process.env['USERPROFILE'] = tmpHome;
+    const prior = seedQuarantine(malformedState({
+      todayDate: '2026-08-09',
+      todaySpentUsd: 99,
+      pid: 'invalid',
+      spendGuardAccounting: undefined,
+    }));
+    const priorPlan = previewResolution(prior.receiptDigest);
+    expect(JSON.parse(Buffer.from(priorPlan.derivedAccountingCanonicalBase64, 'base64').toString('utf8')))
+      .toMatchObject({ disposition: 'prior-day-reset', sourceSpentUsd: 99, resolvedSpentUsd: 0 });
+    expect(JSON.parse(Buffer.from(priorPlan.freshStateCanonicalBase64, 'base64').toString('utf8')))
+      .toEqual({
+        itemsProcessed: 0,
+        lastTickAt: null,
+        pid: null,
+        running: false,
+        startedAt: null,
+        ticks: [],
+        todayDate: '2026-08-10',
+        todaySpentUsd: 0,
+      });
+  });
+
+  it('exhausts the configured day for malformed, future, or negative accounting authority', () => {
+    const attacks = [
+      { todayDate: 'not-a-day', todaySpentUsd: 2 },
+      { todayDate: '2026-08-11', todaySpentUsd: 2 },
+      { todayDate: '2026-08-10', todaySpentUsd: -1 },
+      { todayDate: '2026-08-09', todaySpentUsd: 2 },
+    ];
+    for (const [index, attack] of attacks.entries()) {
+      if (index > 0) {
+        fs.rmSync(tmpHome, { recursive: true, force: true });
+        tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-state-resolution-accounting-attack-'));
+        fs.chmodSync(tmpHome, 0o700);
+        process.env['HOME'] = tmpHome;
+        process.env['USERPROFILE'] = tmpHome;
+      }
+      const seeded = seedQuarantine(malformedState(attack));
+      const plan = previewResolution(seeded.receiptDigest);
+      expect(JSON.parse(Buffer.from(plan.derivedAccountingCanonicalBase64, 'base64').toString('utf8')))
+        .toMatchObject({ disposition: 'ambiguous-exhausted', resolvedSpentUsd: 10, budgetExhausted: true });
+      expect(JSON.parse(Buffer.from(plan.freshStateCanonicalBase64, 'base64').toString('utf8')))
+        .toMatchObject({
+          todayDate: '2026-08-10',
+          todaySpentUsd: 10,
+          spendGuardAccounting: { budgetExhausted: true },
+        });
+    }
+  });
+
+  it('refuses stale accounting derivations after a budget change or UTC rollover', () => {
+    const seeded = seedQuarantine();
+    const plan = previewResolution(seeded.receiptDigest);
+    expect(executeDaemonStateResolution(executeInput(plan), resolutionRuntime({ dailyBudgetUsd: () => 20 })))
+      .toMatchObject({ ok: false, reason: 'accounting-state-unknown' });
+    expect(executeDaemonStateResolution(executeInput(plan), resolutionRuntime({
+      now: () => new Date('2026-08-11T00:00:00.000Z'),
+    }))).toMatchObject({ ok: false, reason: 'accounting-state-unknown' });
+    expect(fs.existsSync(daemonStateResolutionIntentPath(plan.planId))).toBe(false);
+    expect(fs.readFileSync(daemonStatePath())).toEqual(seeded.bytes);
   });
 
   it('atomically replaces only daemon.json, preserves evidence, publishes a receipt, and retires the exact marker', () => {
@@ -202,7 +309,15 @@ describe.runIf(process.platform !== 'win32')('daemon state resolution protocol',
 
     expect(executed).toMatchObject({ ok: true, resumed: false });
     if (!executed.ok) return;
-    expect(fs.readFileSync(daemonStatePath())).toEqual(freshBytes());
+    expect(executed.receipt).toMatchObject({
+      derivedAccountingCanonicalBase64: plan.derivedAccountingCanonicalBase64,
+      derivedAccountingSha256: plan.derivedAccountingSha256,
+      derivedAccountingSizeBytes: plan.derivedAccountingSizeBytes,
+      supervisorObservationCanonicalBase64: plan.supervisorObservationCanonicalBase64,
+      supervisorObservationSha256: plan.supervisorObservationSha256,
+      supervisorObservationSizeBytes: plan.supervisorObservationSizeBytes,
+    });
+    expect(fs.readFileSync(daemonStatePath())).toEqual(resolvedBytes());
     expect(fs.lstatSync(daemonStatePath()).ino).not.toBe(evidenceInode);
     expect(fs.readFileSync(seeded.quarantinePath)).toEqual(seeded.bytes);
     expect(fs.lstatSync(seeded.quarantinePath).ino).toBe(evidenceInode);
@@ -211,7 +326,7 @@ describe.runIf(process.platform !== 'win32')('daemon state resolution protocol',
     expect(fs.existsSync(daemonStateRecoveryMarkerPath())).toBe(false);
     expect(fs.existsSync(executed.receiptPath)).toBe(true);
     expect(fs.existsSync(executed.retiredMarkerPath)).toBe(true);
-    expect(loadDaemonStateStrict()).toEqual({ ok: true, state: freshDaemonState(), fresh: false });
+    expect(loadDaemonStateStrict()).toEqual({ ok: true, state: resolvedState(), fresh: false });
     expect(readDaemonHealth()).toMatchObject({
       running: false,
       recoveryBlocked: false,
@@ -252,6 +367,68 @@ describe.runIf(process.platform !== 'win32')('daemon state resolution protocol',
     }))).toMatchObject({ ok: false, reason: 'service-state-unknown' });
     expect(fs.existsSync(daemonStateResolutionIntentPath(plan.planId))).toBe(false);
     expect(fs.readFileSync(daemonStatePath())).toEqual(seeded.bytes);
+  });
+
+  it('refuses stopped but registered launchd, systemd, and Windows supervisors', () => {
+    for (const platformSpec of ['launchd', 'systemd', 'schtasks'] as const) {
+      const seeded = seedQuarantine();
+      expect(previewDaemonStateResolution({
+        quarantinePlanId: QUARANTINE_PLAN_ID,
+        quarantineReceiptDigest: seeded.receiptDigest,
+      }, resolutionRuntime({
+        serviceStatus: () => inactiveService({
+          registrationState: 'present',
+          installed: true,
+          runtimeState: platformSpec === 'schtasks' ? 'ready' : 'stopped',
+          platformSpec,
+        }),
+      }))).toMatchObject({ ok: false, reason: 'supervisor-registered' });
+      fs.rmSync(tmpHome, { recursive: true, force: true });
+      tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-state-resolution-supervisor-'));
+      fs.chmodSync(tmpHome, 0o700);
+      process.env['HOME'] = tmpHome;
+      process.env['USERPROFILE'] = tmpHome;
+    }
+  });
+
+  it('blocks supervisor registration races between staged intent, retry, and final marker retirement', () => {
+    const seeded = seedQuarantine();
+    const plan = previewResolution(seeded.receiptDigest);
+    let registered = false;
+    const status = () => registered
+      ? inactiveService({ registrationState: 'present', installed: true, runtimeState: 'ready' })
+      : inactiveService();
+    const stagedRace = executeDaemonStateResolution(executeInput(plan), resolutionRuntime({
+      serviceStatus: status,
+      afterIntentStage: () => { registered = true; },
+    }));
+    expect(stagedRace).toMatchObject({ ok: false, reason: 'supervisor-registered' });
+    expect(fs.existsSync(daemonStateResolutionIntentPath(plan.planId))).toBe(false);
+    expect(executeDaemonStateResolution(executeInput(plan), resolutionRuntime({ serviceStatus: status })))
+      .toMatchObject({ ok: false, reason: 'supervisor-registered' });
+    registered = false;
+    expect(executeDaemonStateResolution(executeInput(plan), resolutionRuntime({ serviceStatus: status })))
+      .toMatchObject({ ok: true });
+
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-state-resolution-supervisor-final-'));
+    fs.chmodSync(tmpHome, 0o700);
+    process.env['HOME'] = tmpHome;
+    process.env['USERPROFILE'] = tmpHome;
+    const finalSeeded = seedQuarantine();
+    const finalPlan = previewResolution(finalSeeded.receiptDigest);
+    registered = false;
+    expect(executeDaemonStateResolution(executeInput(finalPlan), resolutionRuntime({
+      serviceStatus: status,
+      beforeMarkerRetirement: () => { registered = true; },
+    }))).toMatchObject({ ok: false, reason: 'supervisor-registered' });
+    expect(fs.existsSync(daemonStateRecoveryMarkerPath())).toBe(true);
+    expect(fs.existsSync(daemonStateResolutionReceiptPath(finalPlan.planId))).toBe(true);
+    expect(executeDaemonStateResolution(executeInput(finalPlan), resolutionRuntime({ serviceStatus: status })))
+      .toMatchObject({ ok: false, reason: 'supervisor-registered' });
+    registered = false;
+    expect(executeDaemonStateResolution(executeInput(finalPlan), resolutionRuntime({ serviceStatus: status })))
+      .toMatchObject({ ok: true, resumed: true });
   });
 
   it('refuses Windows execution before intent, state, receipt, or marker mutation', () => {
@@ -371,6 +548,79 @@ describe.runIf(process.platform !== 'win32')('daemon state resolution protocol',
     expect(fs.readFileSync(daemonStatePath())).toEqual(seeded.bytes);
   });
 
+  it('resumes a durably staged intent and recovers a torn final intent before effects', () => {
+    const seeded = seedQuarantine();
+    const plan = previewResolution(seeded.receiptDigest);
+    const staged = executeDaemonStateResolution(executeInput(plan), resolutionRuntime({
+      afterIntentStage: () => { throw new Error('crash after intent stage'); },
+    }));
+    expect(staged).toMatchObject({ ok: false, reason: 'resolution-intent-conflict' });
+    expect(fs.existsSync(daemonStateResolutionIntentPath(plan.planId))).toBe(false);
+    expect(executeDaemonStateResolution(executeInput(plan), resolutionRuntime()))
+      .toMatchObject({ ok: true, resumed: true });
+
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-state-resolution-torn-intent-'));
+    fs.chmodSync(tmpHome, 0o700);
+    process.env['HOME'] = tmpHome;
+    process.env['USERPROFILE'] = tmpHome;
+    const tornSeeded = seedQuarantine();
+    const tornPlan = previewResolution(tornSeeded.receiptDigest);
+    const intentPath = daemonStateResolutionIntentPath(tornPlan.planId);
+    fs.mkdirSync(path.dirname(intentPath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(intentPath, '{"schemaVersion":1', { mode: 0o600 });
+    expect(executeDaemonStateResolution(executeInput(tornPlan), resolutionRuntime()))
+      .toMatchObject({ ok: true });
+    expect(fs.readFileSync(tornSeeded.quarantinePath)).toEqual(tornSeeded.bytes);
+  });
+
+  it('preserves a valid conflicting intent instead of overwriting it', () => {
+    const seeded = seedQuarantine();
+    const firstPlanId = '33333333-3333-4333-8333-333333333333';
+    const secondPlanId = '44444444-4444-4444-8444-444444444444';
+    const first = previewResolution(seeded.receiptDigest, resolutionRuntime({ randomId: () => firstPlanId }));
+    const second = previewResolution(seeded.receiptDigest, resolutionRuntime({ randomId: () => secondPlanId }));
+    expect(executeDaemonStateResolution(executeInput(first), resolutionRuntime({
+      randomId: () => firstPlanId,
+      beforeStatePublish: () => { throw new Error('pause after first intent'); },
+    }))).toMatchObject({ ok: false, reason: 'state-publication-failed' });
+    const firstIntent = fs.readFileSync(daemonStateResolutionIntentPath(first.planId));
+    fs.writeFileSync(daemonStateResolutionIntentPath(second.planId), firstIntent, { mode: 0o600 });
+    expect(executeDaemonStateResolution(executeInput(second), resolutionRuntime({ randomId: () => secondPlanId })))
+      .toMatchObject({ ok: false, reason: 'resolution-intent-conflict' });
+    expect(fs.readFileSync(daemonStateResolutionIntentPath(second.planId))).toEqual(firstIntent);
+    expect(fs.readFileSync(daemonStatePath())).toEqual(seeded.bytes);
+  });
+
+  it('repairs a crash or short-written deterministic state temp but preserves complete conflicts', () => {
+    const seeded = seedQuarantine();
+    const plan = previewResolution(seeded.receiptDigest);
+    const stateTempPath = path.join(
+      path.dirname(daemonStatePath()),
+      `.${path.basename(daemonStatePath())}.resolution.${plan.planId}.${plan.freshStateSha256}.tmp`,
+    );
+    fs.writeFileSync(stateTempPath, Buffer.from(plan.freshStateCanonicalBase64, 'base64').subarray(0, 17), { mode: 0o600 });
+    expect(executeDaemonStateResolution(executeInput(plan), resolutionRuntime())).toMatchObject({ ok: true });
+
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-state-resolution-temp-conflict-'));
+    fs.chmodSync(tmpHome, 0o700);
+    process.env['HOME'] = tmpHome;
+    process.env['USERPROFILE'] = tmpHome;
+    const conflictSeeded = seedQuarantine();
+    const conflictPlan = previewResolution(conflictSeeded.receiptDigest);
+    const conflictPath = path.join(
+      path.dirname(daemonStatePath()),
+      `.${path.basename(daemonStatePath())}.resolution.${conflictPlan.planId}.${conflictPlan.freshStateSha256}.tmp`,
+    );
+    const conflict = Buffer.alloc(Buffer.from(conflictPlan.freshStateCanonicalBase64, 'base64').length, 0x78);
+    fs.writeFileSync(conflictPath, conflict, { mode: 0o600 });
+    expect(executeDaemonStateResolution(executeInput(conflictPlan), resolutionRuntime()))
+      .toMatchObject({ ok: false, reason: 'state-publication-failed' });
+    expect(fs.readFileSync(conflictPath)).toEqual(conflict);
+    expect(fs.readFileSync(daemonStatePath())).toEqual(conflictSeeded.bytes);
+  });
+
   it('resumes after crashes following state publication, receipt publication, and marker retirement staging', { timeout: 15_000 }, () => {
     const crashHooks: Array<Partial<DaemonStateResolutionRuntime>> = [
       { afterStatePublish: () => { throw new Error('crash after state'); } },
@@ -395,7 +645,7 @@ describe.runIf(process.platform !== 'win32')('daemon state resolution protocol',
 
       const resumed = executeDaemonStateResolution(executeInput(plan), resolutionRuntime());
       expect(resumed).toMatchObject({ ok: true, resumed: true });
-      expect(fs.readFileSync(daemonStatePath())).toEqual(freshBytes());
+      expect(fs.readFileSync(daemonStatePath())).toEqual(resolvedBytes());
       expect(fs.existsSync(daemonStateRecoveryMarkerPath())).toBe(false);
       expect(fs.existsSync(daemonStateResolutionRetiredMarkerPath(plan.planId))).toBe(true);
     }
@@ -414,7 +664,7 @@ describe.runIf(process.platform !== 'win32')('daemon state resolution protocol',
 
     expect(result).toMatchObject({ ok: false, reason: 'marker-retirement-failed' });
     expect(fs.readFileSync(daemonStateRecoveryMarkerPath())).toEqual(replacement);
-    expect(fs.readFileSync(daemonStatePath())).toEqual(freshBytes());
+    expect(fs.readFileSync(daemonStatePath())).toEqual(resolvedBytes());
     expect(fs.readFileSync(seeded.quarantinePath)).toEqual(seeded.bytes);
     expect(fs.existsSync(daemonStateResolutionReceiptPath(plan.planId))).toBe(true);
   });
@@ -452,7 +702,7 @@ describe.runIf(process.platform !== 'win32')('daemon state resolution protocol',
     fs.writeFileSync(daemonStateResolutionReceiptPath(plan.planId), '{"forged":true}\n', { mode: 0o600 });
     expect(executeDaemonStateResolution(executeInput(plan), resolutionRuntime()))
       .toMatchObject({ ok: false, reason: 'receipt-write-failed' });
-    expect(fs.readFileSync(daemonStatePath())).toEqual(freshBytes());
+    expect(fs.readFileSync(daemonStatePath())).toEqual(resolvedBytes());
     expect(fs.readFileSync(seeded.quarantinePath)).toEqual(seeded.bytes);
   });
 });

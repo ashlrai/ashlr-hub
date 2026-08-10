@@ -27,7 +27,6 @@ import {
   daemonStateIssueCodes,
   daemonStatePath,
   daemonStateRecoveryMarkerPath,
-  freshDaemonState,
   heartbeatDaemonLock,
   releaseDaemonLock,
   type DaemonStateDiagnosticCode,
@@ -46,6 +45,7 @@ import {
   loadExistingProvenanceKeyReadOnly,
   loadOrCreateKey,
 } from '../foundry/provenance.js';
+import type { DaemonState } from '../types.js';
 
 const SHA256_RE = /^[a-f0-9]{64}$/u;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -158,10 +158,17 @@ export interface DaemonStateResolutionPlan {
   quarantineSha256: string;
   quarantineSizeBytes: number;
   destinationPathSha256: string;
+  derivedAccountingCanonicalBase64: string;
+  derivedAccountingSha256: string;
+  derivedAccountingSizeBytes: number;
   freshStateCanonicalBase64: string;
   freshStateSha256: string;
   freshStateSizeBytes: number;
+  supervisorObservationCanonicalBase64: string;
+  supervisorObservationSha256: string;
+  supervisorObservationSizeBytes: number;
   requiredServiceActivity: 'inactive';
+  requiredSupervisorRegistration: 'absent';
   authority: {
     dryRunFirst: true;
     operatorAuthorizationRequired: true;
@@ -193,7 +200,9 @@ interface DaemonStateResolutionIntent {
   quarantineReceiptDigest: string;
   quarantineMarkerDigest: string;
   destinationPathSha256: string;
+  derivedAccountingSha256: string;
   freshStateSha256: string;
+  supervisorObservationSha256: string;
   operatorAuthorizationCount: 2;
   statePublicationAllowed: true;
   exactMarkerRetirementAllowed: true;
@@ -217,8 +226,14 @@ export interface DaemonStateResolutionReceipt {
   quarantineReceiptDigest: string;
   quarantineMarkerDigest: string;
   destinationPathSha256: string;
+  derivedAccountingCanonicalBase64: string;
+  derivedAccountingSha256: string;
+  derivedAccountingSizeBytes: number;
   freshStateSha256: string;
   freshStateSizeBytes: number;
+  supervisorObservationCanonicalBase64: string;
+  supervisorObservationSha256: string;
+  supervisorObservationSizeBytes: number;
   freshStateGeneration: SourceGeneration;
   quarantineFileName: string;
   quarantineSha256: string;
@@ -250,6 +265,8 @@ export type DaemonStateRecoveryRefusal =
   | 'unknown-or-nonrecoverable-issue-code'
   | 'service-active'
   | 'service-state-unknown'
+  | 'supervisor-registered'
+  | 'accounting-state-unknown'
   | 'unsafe-recovery-storage'
   | 'plan-write-failed'
   | 'invalid-plan-id'
@@ -341,7 +358,9 @@ export interface DaemonStateResolutionRuntime {
   randomId?: () => string;
   platform?: NodeJS.Platform;
   serviceStatus: () => ServiceStatusResult;
+  dailyBudgetUsd: () => number;
   beforeIntentPublish?: () => void;
+  afterIntentStage?: () => void;
   beforeStatePublish?: () => void;
   afterStatePublish?: () => void;
   beforeReceiptPublish?: () => void;
@@ -1893,8 +1912,181 @@ export function executeDaemonStateQuarantine(
   }
 }
 
-function canonicalFreshDaemonStateBytes(): Buffer {
-  return Buffer.from(`${canonicalizeDaemonActivationValue(freshDaemonState())}\n`, 'utf8');
+interface DerivedDaemonAccounting {
+  schemaVersion: 1;
+  kind: 'daemon-state-resolution-accounting';
+  budgetDay: string;
+  configuredDailyBudgetUsd: number;
+  sourceBudgetDay: string | null;
+  sourceSpentUsd: number | null;
+  sourceAccounting: 'absent' | 'valid' | 'malformed';
+  disposition: 'same-day-exhausted' | 'prior-day-reset' | 'ambiguous-exhausted';
+  resolvedSpentUsd: number;
+  budgetExhausted: boolean;
+}
+
+interface SupervisorObservation {
+  schemaVersion: 1;
+  kind: 'daemon-state-resolution-supervisor-observation';
+  platformSpec: 'launchd' | 'systemd' | 'schtasks';
+  registrationState: 'absent';
+  runtimeState: 'stopped';
+  installed: false;
+  running: false;
+  activationState: 'absent';
+  keepAliveOrRestartPolicy: 'absent';
+}
+
+function canonicalBytes(value: unknown): Buffer {
+  return Buffer.from(`${canonicalizeDaemonActivationValue(value)}\n`, 'utf8');
+}
+
+function canonicalBudgetDay(value: unknown): value is string {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false;
+  const date = new Date(`${value}T00:00:00.000Z`);
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
+function sourceAccountingDisposition(
+  row: Record<string, unknown>,
+  sourceBudgetDay: string | null,
+): DerivedDaemonAccounting['sourceAccounting'] {
+  const value = row['spendGuardAccounting'];
+  if (value === undefined) return 'absent';
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return 'malformed';
+  const accounting = value as Record<string, unknown>;
+  const keys = Object.keys(accounting).sort();
+  const allowed = accounting['budgetExhausted'] === undefined
+    ? ['accountingId', 'budgetDay']
+    : ['accountingId', 'budgetDay', 'budgetExhausted'];
+  return keys.length === allowed.length && keys.every((key, index) => key === allowed[index]) &&
+    sourceBudgetDay !== null && accounting['budgetDay'] === sourceBudgetDay &&
+    UUID_RE.test(String(accounting['accountingId'])) &&
+    (accounting['budgetExhausted'] === undefined || typeof accounting['budgetExhausted'] === 'boolean')
+    ? 'valid'
+    : 'malformed';
+}
+
+function deriveDaemonAccounting(
+  sourceBytes: Buffer,
+  planId: string,
+  observedNow: Date,
+  configuredDailyBudgetUsd: number,
+): { accounting: DerivedDaemonAccounting; accountingBytes: Buffer; stateBytes: Buffer } {
+  if (!Number.isFinite(configuredDailyBudgetUsd) || configuredDailyBudgetUsd <= 0) {
+    throw new Error('configured daemon daily budget is unavailable or invalid');
+  }
+  const budgetDay = observedNow.toISOString().slice(0, 10);
+  let sourceBudgetDay: string | null = null;
+  let sourceSpentUsd: number | null = null;
+  let sourceAccounting: DerivedDaemonAccounting['sourceAccounting'] = 'malformed';
+  try {
+    const decoded = JSON.parse(sourceBytes.toString('utf8')) as unknown;
+    if (typeof decoded === 'object' && decoded !== null && !Array.isArray(decoded)) {
+      const row = decoded as Record<string, unknown>;
+      sourceBudgetDay = canonicalBudgetDay(row['todayDate']) ? row['todayDate'] : null;
+      sourceSpentUsd = typeof row['todaySpentUsd'] === 'number' &&
+        Number.isFinite(row['todaySpentUsd']) && row['todaySpentUsd'] >= 0
+        ? row['todaySpentUsd']
+        : null;
+      sourceAccounting = sourceAccountingDisposition(row, sourceBudgetDay);
+    }
+  } catch {
+    // Ambiguous source authority is represented by an exhausted current day.
+  }
+
+  const provenPriorDay = sourceBudgetDay !== null && sourceBudgetDay < budgetDay &&
+    sourceSpentUsd !== null && sourceAccounting !== 'malformed';
+  const provenSameDay = sourceBudgetDay === budgetDay && sourceSpentUsd !== null;
+  const disposition: DerivedDaemonAccounting['disposition'] = provenSameDay
+    ? 'same-day-exhausted'
+    : provenPriorDay
+      ? 'prior-day-reset'
+      : 'ambiguous-exhausted';
+  const budgetExhausted = disposition !== 'prior-day-reset';
+  const resolvedSpentUsd = budgetExhausted
+    ? Math.max(sourceSpentUsd ?? 0, configuredDailyBudgetUsd)
+    : 0;
+  const accounting: DerivedDaemonAccounting = {
+    schemaVersion: 1,
+    kind: 'daemon-state-resolution-accounting',
+    budgetDay,
+    configuredDailyBudgetUsd,
+    sourceBudgetDay,
+    sourceSpentUsd,
+    sourceAccounting,
+    disposition,
+    resolvedSpentUsd,
+    budgetExhausted,
+  };
+  const state: DaemonState = {
+    running: false,
+    pid: null,
+    startedAt: null,
+    lastTickAt: null,
+    todayDate: budgetDay,
+    todaySpentUsd: resolvedSpentUsd,
+    itemsProcessed: 0,
+    ...(budgetExhausted ? {
+      spendGuardAccounting: {
+        budgetDay,
+        accountingId: planId,
+        budgetExhausted: true,
+      },
+    } : {}),
+    ticks: [],
+  };
+  return { accounting, accountingBytes: canonicalBytes(accounting), stateBytes: canonicalBytes(state) };
+}
+
+function observeAbsentSupervisor(runtime: DaemonStateResolutionRuntime): SupervisorObservation | DaemonStateRecoveryFailure {
+  let status: ServiceStatusResult;
+  try {
+    status = runtime.serviceStatus();
+  } catch (error) {
+    return { ok: false, reason: 'service-state-unknown', detail: error instanceof Error ? error.message : String(error) };
+  }
+  if (status.registrationState === 'unknown' || status.platformSpec === 'unknown' ||
+    status.runtimeState === undefined || status.runtimeState === 'unknown') {
+    return { ok: false, reason: 'service-state-unknown', detail: 'supervisor registration or runtime state is unknown' };
+  }
+  if (serviceActivity(status) !== 'inactive') {
+    return { ok: false, reason: 'service-active', detail: `service activity is ${serviceActivity(status)}` };
+  }
+  if (status.registrationState !== 'absent' || status.installed || status.runtimeState !== 'stopped') {
+    return {
+      ok: false,
+      reason: 'supervisor-registered',
+      detail: 'resident supervisor registration, activation, or restart authority is still present',
+    };
+  }
+  return {
+    schemaVersion: 1,
+    kind: 'daemon-state-resolution-supervisor-observation',
+    platformSpec: status.platformSpec,
+    registrationState: 'absent',
+    runtimeState: 'stopped',
+    installed: false,
+    running: false,
+    activationState: 'absent',
+    keepAliveOrRestartPolicy: 'absent',
+  };
+}
+
+function validSupervisorObservation(value: unknown): value is SupervisorObservation {
+  return canonicalizeDaemonActivationValue(value) === canonicalizeDaemonActivationValue({
+    schemaVersion: 1,
+    kind: 'daemon-state-resolution-supervisor-observation',
+    platformSpec: (value as Partial<SupervisorObservation> | null)?.platformSpec,
+    registrationState: 'absent',
+    runtimeState: 'stopped',
+    installed: false,
+    running: false,
+    activationState: 'absent',
+    keepAliveOrRestartPolicy: 'absent',
+  }) && ['launchd', 'systemd', 'schtasks'].includes(
+    String((value as Partial<SupervisorObservation> | null)?.platformSpec),
+  );
 }
 
 function resolutionPlanDigestPayload(
@@ -1940,16 +2132,94 @@ function resolutionReceiptSignaturePayload(
 }
 
 function canonicalFreshStateBinding(
+  planId: unknown,
+  accountingBase64: unknown,
+  accountingDigest: unknown,
+  accountingSize: unknown,
   base64: unknown,
   digest: unknown,
   size: unknown,
 ): boolean {
-  if (typeof base64 !== 'string' || typeof digest !== 'string' || !SHA256_RE.test(digest) ||
+  if (typeof planId !== 'string' || !UUID_RE.test(planId) ||
+    typeof accountingBase64 !== 'string' || typeof accountingDigest !== 'string' ||
+    !SHA256_RE.test(accountingDigest) || !Number.isSafeInteger(accountingSize) || Number(accountingSize) < 1 ||
+    typeof base64 !== 'string' || typeof digest !== 'string' || !SHA256_RE.test(digest) ||
     !Number.isSafeInteger(size) || Number(size) < 1) return false;
-  const expected = canonicalFreshDaemonStateBytes();
+  const accountingBytes = Buffer.from(accountingBase64, 'base64');
+  if (accountingBytes.toString('base64') !== accountingBase64 || Number(accountingSize) !== accountingBytes.length ||
+    !equalDigest(accountingDigest, sha256Bytes(accountingBytes))) return false;
+  let accounting: DerivedDaemonAccounting;
+  try {
+    accounting = JSON.parse(accountingBytes.toString('utf8')) as DerivedDaemonAccounting;
+  } catch {
+    return false;
+  }
+  const accountingKeys = [
+    'budgetDay', 'budgetExhausted', 'configuredDailyBudgetUsd', 'disposition', 'kind', 'resolvedSpentUsd',
+    'schemaVersion', 'sourceAccounting', 'sourceBudgetDay', 'sourceSpentUsd',
+  ].sort();
+  if (typeof accounting !== 'object' || accounting === null || Array.isArray(accounting) ||
+    Object.keys(accounting).sort().join('\0') !== accountingKeys.join('\0') || accounting.schemaVersion !== 1 ||
+    accounting.kind !== 'daemon-state-resolution-accounting' || !canonicalBudgetDay(accounting.budgetDay) ||
+    !Number.isFinite(accounting.configuredDailyBudgetUsd) || accounting.configuredDailyBudgetUsd <= 0 ||
+    !(accounting.sourceBudgetDay === null || canonicalBudgetDay(accounting.sourceBudgetDay)) ||
+    !(accounting.sourceSpentUsd === null ||
+      (Number.isFinite(accounting.sourceSpentUsd) && accounting.sourceSpentUsd >= 0)) ||
+    !['absent', 'valid', 'malformed'].includes(accounting.sourceAccounting) ||
+    !['same-day-exhausted', 'prior-day-reset', 'ambiguous-exhausted'].includes(accounting.disposition) ||
+    !Number.isFinite(accounting.resolvedSpentUsd) || accounting.resolvedSpentUsd < 0 ||
+    accounting.budgetExhausted !== (accounting.disposition !== 'prior-day-reset') ||
+    (accounting.budgetExhausted && accounting.resolvedSpentUsd < accounting.configuredDailyBudgetUsd) ||
+    (!accounting.budgetExhausted && accounting.resolvedSpentUsd !== 0) ||
+    !canonicalBytes(accounting).equals(accountingBytes)) return false;
+  const expectedState: DaemonState = {
+    running: false,
+    pid: null,
+    startedAt: null,
+    lastTickAt: null,
+    todayDate: accounting.budgetDay,
+    todaySpentUsd: accounting.resolvedSpentUsd,
+    itemsProcessed: 0,
+    ...(accounting.budgetExhausted ? {
+      spendGuardAccounting: {
+        budgetDay: accounting.budgetDay,
+        accountingId: planId,
+        budgetExhausted: true,
+      },
+    } : {}),
+    ticks: [],
+  };
+  const expected = canonicalBytes(expectedState);
   const decoded = Buffer.from(base64, 'base64');
   return decoded.toString('base64') === base64 && decoded.equals(expected) &&
     Number(size) === expected.length && equalDigest(digest, sha256Bytes(expected));
+}
+
+function canonicalSupervisorBinding(base64: unknown, digest: unknown, size: unknown): boolean {
+  if (typeof base64 !== 'string' || typeof digest !== 'string' || !SHA256_RE.test(digest) ||
+    !Number.isSafeInteger(size) || Number(size) < 1) return false;
+  const decoded = Buffer.from(base64, 'base64');
+  if (decoded.toString('base64') !== base64 || Number(size) !== decoded.length ||
+    !equalDigest(digest, sha256Bytes(decoded))) return false;
+  try {
+    const observation = JSON.parse(decoded.toString('utf8')) as unknown;
+    return validSupervisorObservation(observation) && canonicalBytes(observation).equals(decoded);
+  } catch {
+    return false;
+  }
+}
+
+function canonicalJsonBinding(base64: unknown, digest: unknown, size: unknown): boolean {
+  if (typeof base64 !== 'string' || typeof digest !== 'string' || !SHA256_RE.test(digest) ||
+    !Number.isSafeInteger(size) || Number(size) < 1) return false;
+  const decoded = Buffer.from(base64, 'base64');
+  if (decoded.toString('base64') !== base64 || Number(size) !== decoded.length ||
+    !equalDigest(digest, sha256Bytes(decoded))) return false;
+  try {
+    return canonicalBytes(JSON.parse(decoded.toString('utf8')) as unknown).equals(decoded);
+  } catch {
+    return false;
+  }
 }
 
 function resolutionAuthorityValid(value: unknown): boolean {
@@ -1972,13 +2242,15 @@ function parseResolutionPlan(value: unknown): DaemonStateResolutionPlan | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
   const row = value as Record<string, unknown>;
   const expected = [
-    'authority', 'createdAt', 'destinationPathSha256', 'expiresAt', 'freshStateCanonicalBase64',
+    'authority', 'createdAt', 'derivedAccountingCanonicalBase64', 'derivedAccountingSha256',
+    'derivedAccountingSizeBytes', 'destinationPathSha256', 'expiresAt', 'freshStateCanonicalBase64',
     'freshStateSha256', 'freshStateSizeBytes', 'kind', 'operation', 'planDigest', 'planId',
     'quarantineGeneration', 'quarantineMarkerDigest', 'quarantinePathSha256', 'quarantinePlanDigest',
     'quarantinePlanId', 'quarantineReceiptDigest', 'quarantineSha256', 'quarantineSigningKeyId',
-    'quarantineSizeBytes', 'requiredServiceActivity', 'schemaVersion', 'signature',
-    'signatureAlgorithm', 'signingKeyId', 'sourceGeneration', 'sourcePathSha256', 'sourceSha256',
-    'sourceSizeBytes',
+    'quarantineSizeBytes', 'requiredServiceActivity', 'requiredSupervisorRegistration', 'schemaVersion',
+    'signature', 'signatureAlgorithm', 'signingKeyId', 'sourceGeneration', 'sourcePathSha256',
+    'sourceSha256', 'sourceSizeBytes', 'supervisorObservationCanonicalBase64',
+    'supervisorObservationSha256', 'supervisorObservationSizeBytes',
   ].sort();
   const keys = Object.keys(row).sort();
   if (keys.length !== expected.length || !keys.every((key, index) => key === expected[index])) return null;
@@ -1997,8 +2269,14 @@ function parseResolutionPlan(value: unknown): DaemonStateResolutionPlan | null {
     !SHA256_RE.test(String(row['quarantineSha256'])) ||
     !Number.isSafeInteger(row['quarantineSizeBytes']) || Number(row['quarantineSizeBytes']) < 1 ||
     !SHA256_RE.test(String(row['destinationPathSha256'])) || row['requiredServiceActivity'] !== 'inactive' ||
+    row['requiredSupervisorRegistration'] !== 'absent' ||
     !canonicalFreshStateBinding(
-      row['freshStateCanonicalBase64'], row['freshStateSha256'], row['freshStateSizeBytes'],
+      row['planId'], row['derivedAccountingCanonicalBase64'], row['derivedAccountingSha256'],
+      row['derivedAccountingSizeBytes'], row['freshStateCanonicalBase64'], row['freshStateSha256'],
+      row['freshStateSizeBytes'],
+    ) || !canonicalSupervisorBinding(
+      row['supervisorObservationCanonicalBase64'], row['supervisorObservationSha256'],
+      row['supervisorObservationSizeBytes'],
     ) || !resolutionAuthorityValid(row['authority']) ||
     !SHA256_RE.test(String(row['planDigest'])) || !SHA256_RE.test(String(row['signingKeyId'])) ||
     row['signatureAlgorithm'] !== SIGNATURE_ALGORITHM || !SHA256_RE.test(String(row['signature']))) return null;
@@ -2017,11 +2295,11 @@ function parseResolutionIntent(value: unknown): DaemonStateResolutionIntent | nu
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
   const row = value as Record<string, unknown>;
   const expected = [
-    'authorizedAt', 'destinationPathSha256', 'exactMarkerRetirementAllowed', 'freshStateSha256',
+    'authorizedAt', 'derivedAccountingSha256', 'destinationPathSha256', 'exactMarkerRetirementAllowed', 'freshStateSha256',
     'intentDigest', 'kind', 'operation', 'operatorAuthorizationCount', 'planDigest', 'planId',
     'previousDigest', 'quarantineMarkerDigest', 'quarantineReceiptDigest', 'schemaVersion',
     'serviceMutationAllowed', 'signature', 'signatureAlgorithm', 'signingKeyId', 'sourceGeneration',
-    'sourceSha256', 'statePublicationAllowed',
+    'sourceSha256', 'statePublicationAllowed', 'supervisorObservationSha256',
   ].sort();
   const keys = Object.keys(row).sort();
   if (keys.length !== expected.length || !keys.every((key, index) => key === expected[index])) return null;
@@ -2034,7 +2312,9 @@ function parseResolutionIntent(value: unknown): DaemonStateResolutionIntent | nu
     !SHA256_RE.test(String(row['quarantineReceiptDigest'])) ||
     !SHA256_RE.test(String(row['quarantineMarkerDigest'])) ||
     !SHA256_RE.test(String(row['destinationPathSha256'])) ||
-    !SHA256_RE.test(String(row['freshStateSha256'])) || row['operatorAuthorizationCount'] !== 2 ||
+    !SHA256_RE.test(String(row['derivedAccountingSha256'])) ||
+    !SHA256_RE.test(String(row['freshStateSha256'])) ||
+    !SHA256_RE.test(String(row['supervisorObservationSha256'])) || row['operatorAuthorizationCount'] !== 2 ||
     row['statePublicationAllowed'] !== true || row['exactMarkerRetirementAllowed'] !== true ||
     row['serviceMutationAllowed'] !== false || !SHA256_RE.test(String(row['intentDigest'])) ||
     !SHA256_RE.test(String(row['signingKeyId'])) || row['signatureAlgorithm'] !== SIGNATURE_ALGORITHM ||
@@ -2054,7 +2334,8 @@ function parseResolutionReceipt(value: unknown): DaemonStateResolutionReceipt | 
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
   const row = value as Record<string, unknown>;
   const expected = [
-    'completedAt', 'destinationPathSha256', 'freshStateGeneration', 'freshStateSha256',
+    'completedAt', 'derivedAccountingCanonicalBase64', 'derivedAccountingSha256',
+    'derivedAccountingSizeBytes', 'destinationPathSha256', 'freshStateGeneration', 'freshStateSha256',
     'freshStateSizeBytes', 'kind', 'markerRetirementAuthorized', 'operation',
     'operatorAuthorizationCount', 'operatorIdentityAuthenticated', 'planDigest', 'planId',
     'previousDigest', 'quarantineEvidencePreserved', 'quarantineFileName', 'quarantineGeneration',
@@ -2062,6 +2343,7 @@ function parseResolutionReceipt(value: unknown): DaemonStateResolutionReceipt | 
     'quarantineSha256', 'quarantineSizeBytes', 'receiptDigest', 'schemaVersion',
     'serviceInstallPerformed', 'serviceMutationPerformed', 'serviceRestartPerformed',
     'serviceStartPerformed', 'signature', 'signatureAlgorithm', 'signingKeyId', 'sourcePathReplaced',
+    'supervisorObservationCanonicalBase64', 'supervisorObservationSha256', 'supervisorObservationSizeBytes',
   ].sort();
   const keys = Object.keys(row).sort();
   if (keys.length !== expected.length || !keys.every((key, index) => key === expected[index])) return null;
@@ -2073,13 +2355,21 @@ function parseResolutionReceipt(value: unknown): DaemonStateResolutionReceipt | 
     !UUID_RE.test(row['quarantinePlanId']) || !SHA256_RE.test(String(row['quarantinePlanDigest'])) ||
     !SHA256_RE.test(String(row['quarantineReceiptDigest'])) ||
     !SHA256_RE.test(String(row['quarantineMarkerDigest'])) ||
-    !SHA256_RE.test(String(row['destinationPathSha256'])) || !SHA256_RE.test(String(row['freshStateSha256'])) ||
+    !SHA256_RE.test(String(row['destinationPathSha256'])) ||
+    !canonicalJsonBinding(
+      row['derivedAccountingCanonicalBase64'], row['derivedAccountingSha256'],
+      row['derivedAccountingSizeBytes'],
+    ) || !SHA256_RE.test(String(row['freshStateSha256'])) ||
     !Number.isSafeInteger(row['freshStateSizeBytes']) || Number(row['freshStateSizeBytes']) < 1 ||
     !validGeneration(row['freshStateGeneration']) || typeof row['quarantineFileName'] !== 'string' ||
     basename(row['quarantineFileName']) !== row['quarantineFileName'] ||
     !SHA256_RE.test(String(row['quarantineSha256'])) ||
     !Number.isSafeInteger(row['quarantineSizeBytes']) || Number(row['quarantineSizeBytes']) < 1 ||
-    !validGeneration(row['quarantineGeneration']) || row['sourcePathReplaced'] !== true ||
+    !validGeneration(row['quarantineGeneration']) ||
+    !canonicalSupervisorBinding(
+      row['supervisorObservationCanonicalBase64'], row['supervisorObservationSha256'],
+      row['supervisorObservationSizeBytes'],
+    ) || row['sourcePathReplaced'] !== true ||
     row['quarantineEvidencePreserved'] !== true || row['markerRetirementAuthorized'] !== true ||
     row['operatorAuthorizationCount'] !== 2 || row['operatorIdentityAuthenticated'] !== false ||
     row['serviceMutationPerformed'] !== false || row['serviceStartPerformed'] !== false ||
@@ -2244,7 +2534,9 @@ function exactResolutionIntent(
     equalDigest(intent.quarantineReceiptDigest, plan.quarantineReceiptDigest) &&
     equalDigest(intent.quarantineMarkerDigest, plan.quarantineMarkerDigest) &&
     equalDigest(intent.destinationPathSha256, plan.destinationPathSha256) &&
+    equalDigest(intent.derivedAccountingSha256, plan.derivedAccountingSha256) &&
     equalDigest(intent.freshStateSha256, plan.freshStateSha256) &&
+    equalDigest(intent.supervisorObservationSha256, plan.supervisorObservationSha256) &&
     intent.signingKeyId === plan.signingKeyId;
 }
 
@@ -2259,10 +2551,97 @@ function exactResolutionReceipt(
     equalDigest(receipt.quarantineReceiptDigest, plan.quarantineReceiptDigest) &&
     equalDigest(receipt.quarantineMarkerDigest, plan.quarantineMarkerDigest) &&
     equalDigest(receipt.destinationPathSha256, plan.destinationPathSha256) &&
+    receipt.derivedAccountingCanonicalBase64 === plan.derivedAccountingCanonicalBase64 &&
+    equalDigest(receipt.derivedAccountingSha256, plan.derivedAccountingSha256) &&
+    receipt.derivedAccountingSizeBytes === plan.derivedAccountingSizeBytes &&
     equalDigest(receipt.freshStateSha256, plan.freshStateSha256) &&
     receipt.freshStateSizeBytes === plan.freshStateSizeBytes &&
+    receipt.supervisorObservationCanonicalBase64 === plan.supervisorObservationCanonicalBase64 &&
+    equalDigest(receipt.supervisorObservationSha256, plan.supervisorObservationSha256) &&
+    receipt.supervisorObservationSizeBytes === plan.supervisorObservationSizeBytes &&
     equalDigest(receipt.quarantineSha256, plan.quarantineSha256) &&
     receipt.quarantineSizeBytes === plan.quarantineSizeBytes && receipt.signingKeyId === plan.signingKeyId;
+}
+
+function resolutionAccountingRefusal(
+  plan: DaemonStateResolutionPlan,
+  chain: AuthenticatedQuarantineChain,
+  runtime: DaemonStateResolutionRuntime,
+): DaemonStateRecoveryFailure | null {
+  try {
+    const derived = deriveDaemonAccounting(
+      chain.evidence.bytes,
+      plan.planId,
+      runtime.now?.() ?? new Date(),
+      runtime.dailyBudgetUsd(),
+    );
+    if (!derived.accountingBytes.equals(Buffer.from(plan.derivedAccountingCanonicalBase64, 'base64')) ||
+      !equalDigest(sha256Bytes(derived.accountingBytes), plan.derivedAccountingSha256) ||
+      !derived.stateBytes.equals(Buffer.from(plan.freshStateCanonicalBase64, 'base64')) ||
+      !equalDigest(sha256Bytes(derived.stateBytes), plan.freshStateSha256)) {
+      return {
+        ok: false,
+        reason: 'accounting-state-unknown',
+        detail: 'budget day, configured budget, or quarantined accounting no longer matches the signed derivation',
+      };
+    }
+    return null;
+  } catch (error) {
+    return { ok: false, reason: 'accounting-state-unknown', detail: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function resolutionSupervisorRefusal(
+  plan: DaemonStateResolutionPlan,
+  runtime: DaemonStateResolutionRuntime,
+): DaemonStateRecoveryFailure | null {
+  const observed = observeAbsentSupervisor(runtime);
+  if ('ok' in observed) return observed;
+  const bytes = canonicalBytes(observed);
+  return bytes.equals(Buffer.from(plan.supervisorObservationCanonicalBase64, 'base64')) &&
+    equalDigest(sha256Bytes(bytes), plan.supervisorObservationSha256)
+    ? null
+    : {
+        ok: false,
+        reason: 'service-state-unknown',
+        detail: 'resident supervisor observation changed from the exact signed plan',
+      };
+}
+
+function resolutionPreconditionsRefusal(
+  plan: DaemonStateResolutionPlan,
+  chain: AuthenticatedQuarantineChain,
+  runtime: DaemonStateResolutionRuntime,
+): DaemonStateRecoveryFailure | null {
+  return resolutionSupervisorRefusal(plan, runtime) ?? resolutionAccountingRefusal(plan, chain, runtime);
+}
+
+function prepareResolutionIntentTemp(
+  intentPath: string,
+  plan: DaemonStateResolutionPlan,
+  intent: DaemonStateResolutionIntent,
+): { path: string; intent: DaemonStateResolutionIntent; reused: boolean } {
+  const prefix = `.${basename(intentPath)}.${plan.planId}.`;
+  let reusable: { path: string; intent: DaemonStateResolutionIntent; reused: true } | undefined;
+  ensurePrivateDirectory(dirname(intentPath));
+  for (const name of readdirSync(dirname(intentPath)).sort()) {
+    if (!name.startsWith(prefix) || !name.endsWith('.tmp')) continue;
+    const candidate = join(dirname(intentPath), name);
+    let parsed: DaemonStateResolutionIntent | null = null;
+    try {
+      parsed = parseResolutionIntent(readRecord(candidate));
+    } catch {
+      // A torn private stage has no authority and is retained as abandoned evidence.
+    }
+    if (parsed && exactResolutionIntent(parsed, plan)) {
+      if (!reusable) reusable = { path: candidate, intent: parsed, reused: true };
+      else retirePrivateRecord(candidate, 'resolution-intent-temp-duplicate', plan.planId);
+      continue;
+    }
+    if (parsed) throw new Error('valid conflicting resolution intent stage exists');
+    retirePrivateRecord(candidate, 'resolution-intent-temp', plan.planId);
+  }
+  return reusable ?? { path: writePrivateRecordTemp(intentPath, plan.planId, intent), intent, reused: false };
 }
 
 function resolutionStateTempPath(plan: DaemonStateResolutionPlan): string {
@@ -2276,6 +2655,15 @@ function prepareResolutionStateTemp(plan: DaemonStateResolutionPlan): string {
   const path = resolutionStateTempPath(plan);
   const expected = Buffer.from(plan.freshStateCanonicalBase64, 'base64');
   if (pathEntryExists(path)) {
+    const stat = lstatSync(path, { bigint: true });
+    if (safePrivateFile(stat) && stat.size >= 0n && stat.size < BigInt(expected.length)) {
+      retirePrivateRecord(path, 'resolution-state-temp-partial', plan.planId);
+      writeExclusiveBytes(path, expected);
+      const repaired = stableRead(path, false);
+      if (repaired.size !== expected.length || !equalDigest(repaired.sha256, plan.freshStateSha256) ||
+        !repaired.bytes.equals(expected)) throw new Error('repaired resolution state temp could not be authenticated');
+      return path;
+    }
     const existing = stableRead(path, false);
     if (existing.size !== expected.length || !equalDigest(existing.sha256, plan.freshStateSha256) ||
       !existing.bytes.equals(expected)) throw new Error('resolution state temp conflicts with the signed plan');
@@ -2342,8 +2730,9 @@ export function previewDaemonStateResolution(
       detail: 'quarantine receipt SHA-256 must be 64 lowercase hex characters',
     };
   }
-  const service = serviceRefusal(runtime);
-  if (service) return service;
+  const supervisor = observeAbsentSupervisor(runtime);
+  if ('ok' in supervisor) return supervisor;
+  const supervisorBytes = canonicalBytes(supervisor);
   const lock = acquireRecoveryLock();
   if (!lock) return { ok: false, reason: 'recovery-lock-unavailable', detail: 'recovery lock unavailable' };
   try {
@@ -2377,8 +2766,11 @@ export function previewDaemonStateResolution(
         detail: 'live daemon state and quarantine evidence are not the exact authenticated linked source inode',
       };
     }
-    const finalService = serviceRefusal(runtime);
-    if (finalService) return finalService;
+    const finalSupervisor = observeAbsentSupervisor(runtime);
+    if ('ok' in finalSupervisor) return finalSupervisor;
+    if (!canonicalBytes(finalSupervisor).equals(supervisorBytes)) {
+      return { ok: false, reason: 'service-state-unknown', detail: 'supervisor observation changed during preview' };
+    }
     if (!ownsLocalStoreLock(lock)) {
       return { ok: false, reason: 'recovery-lock-unavailable', detail: 'recovery lock ownership was lost' };
     }
@@ -2394,7 +2786,13 @@ export function previewDaemonStateResolution(
       return { ok: false, reason: 'plan-write-failed', detail: error instanceof Error ? error.message : String(error) };
     }
     const now = runtime.now?.() ?? new Date();
-    const freshBytes = canonicalFreshDaemonStateBytes();
+    let derived: ReturnType<typeof deriveDaemonAccounting>;
+    try {
+      derived = deriveDaemonAccounting(chain.evidence.bytes, planId, now, runtime.dailyBudgetUsd());
+    } catch (error) {
+      return { ok: false, reason: 'accounting-state-unknown', detail: error instanceof Error ? error.message : String(error) };
+    }
+    const freshBytes = derived.stateBytes;
     const sourcePathDigest = sha256Bytes(resolve(daemonStatePath()));
     const unsigned: Omit<DaemonStateResolutionPlan, 'planDigest' | 'signature'> = {
       schemaVersion: 1,
@@ -2417,10 +2815,17 @@ export function previewDaemonStateResolution(
       quarantineSha256: chain.evidence.sha256,
       quarantineSizeBytes: chain.evidence.size,
       destinationPathSha256: sourcePathDigest,
+      derivedAccountingCanonicalBase64: derived.accountingBytes.toString('base64'),
+      derivedAccountingSha256: sha256Bytes(derived.accountingBytes),
+      derivedAccountingSizeBytes: derived.accountingBytes.length,
       freshStateCanonicalBase64: freshBytes.toString('base64'),
       freshStateSha256: sha256Bytes(freshBytes),
       freshStateSizeBytes: freshBytes.length,
+      supervisorObservationCanonicalBase64: supervisorBytes.toString('base64'),
+      supervisorObservationSha256: sha256Bytes(supervisorBytes),
+      supervisorObservationSizeBytes: supervisorBytes.length,
       requiredServiceActivity: 'inactive',
+      requiredSupervisorRegistration: 'absent',
       authority: {
         dryRunFirst: true,
         operatorAuthorizationRequired: true,
@@ -2554,6 +2959,8 @@ export function executeDaemonStateResolution(
         detail: 'quarantine artifacts no longer match the signed resolution plan',
       };
     }
+    const initialPreconditions = resolutionPreconditionsRefusal(plan, chain, runtime);
+    if (initialPreconditions) return initialPreconditions;
     if (activeMarkerPresent && retiredMarkerPresent) {
       try {
         const active = stableRead(activeMarkerPath, false, [1n, 2n, 3n]);
@@ -2569,12 +2976,19 @@ export function executeDaemonStateResolution(
     }
 
     let intent: DaemonStateResolutionIntent | null = null;
+    let partialIntentPresent = false;
+    const intentPath = daemonStateResolutionIntentPath(plan.planId);
     try {
-      if (pathEntryExists(daemonStateResolutionIntentPath(plan.planId))) {
-        intent = parseResolutionIntent(readRecord(daemonStateResolutionIntentPath(plan.planId)));
-        if (!intent || !exactResolutionIntent(intent, plan)) {
+      if (pathEntryExists(intentPath)) {
+        try {
+          intent = parseResolutionIntent(readPublishedRecord(intentPath));
+        } catch {
+          partialIntentPresent = true;
+        }
+        if (intent && !exactResolutionIntent(intent, plan)) {
           return { ok: false, reason: 'resolution-intent-conflict', detail: 'resolution intent cannot be authenticated exactly' };
         }
+        if (!intent) partialIntentPresent = true;
       }
     } catch (error) {
       return { ok: false, reason: 'resolution-intent-conflict', detail: error instanceof Error ? error.message : String(error) };
@@ -2587,8 +3001,8 @@ export function executeDaemonStateResolution(
       }
     }
 
-    const serviceBeforeLock = serviceRefusal(runtime);
-    if (serviceBeforeLock) return serviceBeforeLock;
+    const preconditionsBeforeLock = resolutionPreconditionsRefusal(plan, chain, runtime);
+    if (preconditionsBeforeLock) return preconditionsBeforeLock;
     const daemonLockResult = acquireDaemonLock();
     if (!daemonLockResult.acquired) {
       return { ok: false, reason: 'daemon-lock-unavailable', detail: daemonLockResult.reason };
@@ -2596,7 +3010,22 @@ export function executeDaemonStateResolution(
     daemonLock = daemonLockResult.lock;
     let phase = resolutionStatePhase(plan, chain);
     if ('ok' in phase) return phase;
-    let resumed = intent !== null || phase.phase === 'fresh-published' || retiredMarkerPresent;
+    if (partialIntentPresent) {
+      if (phase.phase !== 'blocked-source' || !activeMarkerPresent || retiredMarkerPresent ||
+        pathEntryExists(daemonStateResolutionReceiptPath(plan.planId))) {
+        return {
+          ok: false,
+          reason: 'resolution-intent-conflict',
+          detail: 'partial resolution intent cannot be retired after any durable resolution effect',
+        };
+      }
+      try {
+        retirePrivateRecord(intentPath, 'partial-resolution-intent', plan.planId);
+      } catch (error) {
+        return { ok: false, reason: 'resolution-intent-conflict', detail: error instanceof Error ? error.message : String(error) };
+      }
+    }
+    let resumed = intent !== null || partialIntentPresent || phase.phase === 'fresh-published' || retiredMarkerPresent;
 
     if (!intent) {
       if (phase.phase !== 'blocked-source') {
@@ -2617,8 +3046,8 @@ export function executeDaemonStateResolution(
         'lock ownership was lost before resolution intent publication',
       );
       if (intentLocks) return intentLocks;
-      const intentService = serviceRefusal(runtime);
-      if (intentService) return intentService;
+      const intentPreconditions = resolutionPreconditionsRefusal(plan, chain, runtime);
+      if (intentPreconditions) return intentPreconditions;
       const intentTime = resolutionPlanTimeRefusal(plan, runtime);
       if (intentTime) return intentTime;
       const unsignedIntent: Omit<DaemonStateResolutionIntent, 'intentDigest' | 'signature'> = {
@@ -2634,7 +3063,9 @@ export function executeDaemonStateResolution(
         quarantineReceiptDigest: plan.quarantineReceiptDigest,
         quarantineMarkerDigest: plan.quarantineMarkerDigest,
         destinationPathSha256: plan.destinationPathSha256,
+        derivedAccountingSha256: plan.derivedAccountingSha256,
         freshStateSha256: plan.freshStateSha256,
+        supervisorObservationSha256: plan.supervisorObservationSha256,
         operatorAuthorizationCount: 2,
         statePublicationAllowed: true,
         exactMarkerRetirementAllowed: true,
@@ -2646,16 +3077,40 @@ export function executeDaemonStateResolution(
         ...unsignedIntent,
         intentDigest: domainDigest(RESOLUTION_INTENT_DOMAIN, unsignedIntent),
       };
-      intent = {
+      const proposedIntent: DaemonStateResolutionIntent = {
         ...unsignedSignedIntent,
         signature: keyedSignature(RESOLUTION_INTENT_DOMAIN, unsignedSignedIntent, signer),
       };
+      let intentTempPath: string;
       try {
-        writeExclusiveRecord(daemonStateResolutionIntentPath(plan.planId), intent);
-        const publishedIntent = parseResolutionIntent(readRecord(daemonStateResolutionIntentPath(plan.planId)));
+        const stagedIntent = prepareResolutionIntentTemp(intentPath, plan, proposedIntent);
+        intentTempPath = stagedIntent.path;
+        intent = stagedIntent.intent;
+        resumed ||= stagedIntent.reused;
+        runtime.afterIntentStage?.();
+      } catch (error) {
+        return { ok: false, reason: 'resolution-intent-conflict', detail: error instanceof Error ? error.message : String(error) };
+      }
+      const stagedIntentLocks = resolutionLocksRefusal(
+        recoveryLock,
+        daemonLock,
+        'lock ownership was lost before staged resolution intent publication',
+      );
+      if (stagedIntentLocks) return stagedIntentLocks;
+      const stagedIntentPreconditions = resolutionPreconditionsRefusal(plan, chain, runtime);
+      if (stagedIntentPreconditions) return stagedIntentPreconditions;
+      const stagedIntentPhase = resolutionStatePhase(plan, chain);
+      if ('ok' in stagedIntentPhase) return stagedIntentPhase;
+      if (stagedIntentPhase.phase !== 'blocked-source') {
+        return { ok: false, reason: 'resolution-state-conflict', detail: 'state changed before intent publication' };
+      }
+      try {
+        publishRecordNoClobber(intentTempPath, intentPath);
+        const publishedIntent = parseResolutionIntent(readPublishedRecord(intentPath));
         if (!publishedIntent || !equalDigest(publishedIntent.intentDigest, intent.intentDigest)) {
           throw new Error('published resolution intent cannot be authenticated exactly');
         }
+        intent = publishedIntent;
       } catch (error) {
         return { ok: false, reason: 'resolution-intent-conflict', detail: error instanceof Error ? error.message : String(error) };
       }
@@ -2682,8 +3137,8 @@ export function executeDaemonStateResolution(
         'lock ownership was lost before fresh state publication',
       );
       if (stateLocks) return stateLocks;
-      const stateService = serviceRefusal(runtime);
-      if (stateService) return stateService;
+      const statePreconditions = resolutionPreconditionsRefusal(plan, chain, runtime);
+      if (statePreconditions) return statePreconditions;
       if (!samePrivateDirectoryIdentity(dirname(daemonStatePath()), destinationParent) ||
         !samePrivateDirectoryIdentity(dirname(chain.quarantinePath), quarantineParent)) {
         return {
@@ -2760,8 +3215,8 @@ export function executeDaemonStateResolution(
         'lock ownership was lost before resolution receipt publication',
       );
       if (receiptLocks) return receiptLocks;
-      const receiptService = serviceRefusal(runtime);
-      if (receiptService) return receiptService;
+      const receiptPreconditions = resolutionPreconditionsRefusal(plan, chain, runtime);
+      if (receiptPreconditions) return receiptPreconditions;
       const receiptChain = readQuarantineChain(
         plan.quarantinePlanId,
         plan.quarantineReceiptDigest,
@@ -2787,8 +3242,14 @@ export function executeDaemonStateResolution(
         quarantineReceiptDigest: plan.quarantineReceiptDigest,
         quarantineMarkerDigest: plan.quarantineMarkerDigest,
         destinationPathSha256: plan.destinationPathSha256,
+        derivedAccountingCanonicalBase64: plan.derivedAccountingCanonicalBase64,
+        derivedAccountingSha256: plan.derivedAccountingSha256,
+        derivedAccountingSizeBytes: plan.derivedAccountingSizeBytes,
         freshStateSha256: plan.freshStateSha256,
         freshStateSizeBytes: plan.freshStateSizeBytes,
+        supervisorObservationCanonicalBase64: plan.supervisorObservationCanonicalBase64,
+        supervisorObservationSha256: plan.supervisorObservationSha256,
+        supervisorObservationSizeBytes: plan.supervisorObservationSizeBytes,
         freshStateGeneration: sourceGeneration(receiptPhase.state.stat),
         quarantineFileName: receiptChain.plan.quarantineFileName,
         quarantineSha256: receiptChain.evidence.sha256,
@@ -2827,8 +3288,8 @@ export function executeDaemonStateResolution(
         'lock ownership was lost before staged resolution receipt publication',
       );
       if (publishReceiptLocks) return publishReceiptLocks;
-      const publishReceiptService = serviceRefusal(runtime);
-      if (publishReceiptService) return publishReceiptService;
+      const publishReceiptPreconditions = resolutionPreconditionsRefusal(plan, chain, runtime);
+      if (publishReceiptPreconditions) return publishReceiptPreconditions;
       const publishReceiptChain = readQuarantineChain(
         plan.quarantinePlanId,
         plan.quarantineReceiptDigest,
@@ -2861,8 +3322,8 @@ export function executeDaemonStateResolution(
       'lock ownership was lost before marker retirement',
     );
     if (retirementLocks) return retirementLocks;
-    const retirementService = serviceRefusal(runtime);
-    if (retirementService) return retirementService;
+    const retirementPreconditions = resolutionPreconditionsRefusal(plan, chain, runtime);
+    if (retirementPreconditions) return retirementPreconditions;
     try {
       activeMarkerPresent = pathEntryExists(activeMarkerPath);
       retiredMarkerPresent = pathEntryExists(retiredMarkerPath);
@@ -2892,8 +3353,8 @@ export function executeDaemonStateResolution(
           'lock ownership was lost at marker retirement',
         );
         if (finalLocks) return finalLocks;
-        const finalService = serviceRefusal(runtime);
-        if (finalService) return finalService;
+        const finalPreconditions = resolutionPreconditionsRefusal(plan, chain, runtime);
+        if (finalPreconditions) return finalPreconditions;
         const finalActive = stableRead(activeMarkerPath, false, [1n, 2n, 3n]);
         const finalRetired = stableRead(retiredMarkerPath, false, [1n, 2n, 3n]);
         if (finalActive.stat.dev !== finalRetired.stat.dev || finalActive.stat.ino !== finalRetired.stat.ino ||

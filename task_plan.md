@@ -2862,9 +2862,12 @@ Complete the fail-closed recovery lifecycle after authenticated quarantine witho
 - [x] Confirm the malformed accounting object contains the undeclared key `unexpected` without reading or persisting values.
 - [x] Confirm quarantine preserves the source inode and publishes a signed startup-blocking marker.
 - [x] Define a separately authorized resolution plan bound to the quarantine receipt, marker, source inode, evidence digest, destination path, and fresh-state digest.
+- [x] Derive conservative current-day spend accounting from the exact quarantined bytes; preserve higher spend and exhaust same-day or ambiguous authority.
+- [x] Bind canonical derived-accounting bytes/digest and an exact absent-supervisor observation into the signed plan, intent chain, and receipt.
 - [x] Atomically replace only the live daemon-state pathname while preserving immutable quarantine evidence.
+- [x] Publish intent through a private fsynced stage and atomic no-clobber link; recover only provably partial intent/state stages while preserving valid conflicts.
 - [x] Retire the exact authenticated marker only after durable fresh-state publication and a signed resolution receipt.
-- [x] Prove retries, crashes, path races, lock loss, signer rotation, service uncertainty, and Windows behavior fail closed.
+- [x] Prove retries, short/torn writes, path races, budget/day drift, lock loss, signer rotation, supervisor registration, service uncertainty, and Windows behavior fail closed.
 - [x] Run focused recovery/CLI/health tests, typecheck, lint, build, local invariants, and diff checks.
 - [ ] Push a review branch, open a PR, and require the protected matrix before merge or activation.
 
@@ -2872,4 +2875,4 @@ Complete the fail-closed recovery lifecycle after authenticated quarantine witho
 This worktree is source-only. It grants no authority to execute quarantine or resolution, mutate live state bytes, install/start/restart the service, dispatch work, merge, or deploy.
 
 ### Status
-**Locally source-ready on exact protected parent `5995bcd3b097b945652074fdb6566d71322f43c8`.** The distinct dry-run/execute protocol, repeated argv authorization, atomic fresh-state publication, durable signed receipt, exact marker retirement, and crash/race refusal coverage are complete. Push, PR, protected CI, merge, deployed-artifact installation, live quarantine/resolution, and any separate service start remain pending and were not attempted.
+**Local remediation complete on exact blocked head `5e0300583fff0226b1bf2c0d419f1f6645d4f9b7`, whose protected parent is `8133c090ef70d0bd4fa07e4d9098d82653079864`.** The resulting remediation commit SHA is intentionally read from Git after commit and reported externally rather than embedded self-referentially. Full invariants, including H4, pass locally. Push, PR, protected CI, merge, deployed-artifact installation, live quarantine/resolution, and any separate service start remain pending and were not attempted.
