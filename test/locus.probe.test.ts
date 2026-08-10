@@ -17,6 +17,12 @@ import {
   mergeLocusIntoMcpConfig,
   locusServerSpec,
   missingAgentReportKeys,
+  scrubbedChildEnv,
+  validateMintEnv,
+  resolveLocusEnforceMode,
+  decidePreMutateGate,
+  formatPreMutateBlockers,
+  LocusMintError,
 } from '../src/core/integrations/locus.js';
 
 describe('REQUIRED_SERVERS', () => {
@@ -122,6 +128,181 @@ describe('parseAgentReportJson / fleet gate', () => {
     expect(blockers.some((b) => b.includes('not ready') || b.includes('status='))).toBe(true);
     expect(blockers.some((b) => b.includes('unhealthy') || b.includes('unpinned'))).toBe(true);
     expect(blockers.some((b) => b.includes('required_servers'))).toBe(true);
+  });
+
+  it('blocks credential migration incomplete doctor finding', () => {
+    const bad = {
+      ...sample,
+      doctor: {
+        findings: [{ code: 'credential_migration_incomplete', severity: 'error' }],
+      },
+    };
+    const blockers = blockersFromAgentReport(bad as never);
+    expect(blockers).toContain('credential migration reconciliation incomplete');
+    expect(evaluateFleetGate(bad as never).allowDispatch).toBe(false);
+  });
+});
+
+describe('scrubbedChildEnv', () => {
+  it('drops ambient credentials and keeps runtime basics', () => {
+    const parent = {
+      PATH: '/usr/bin',
+      HOME: '/home/u',
+      LANG: 'en_US.UTF-8',
+      LC_ALL: 'C',
+      AWS_PROFILE: 'personal',
+      GH_TOKEN: 'gho_secret',
+      SUPABASE_SERVICE_ROLE_KEY: 'srk',
+      VERCEL_TOKEN: 'v',
+      ANTHROPIC_API_KEY: 'sk-ant',
+      LOCUS_HOME: '/should/not/inherit',
+      CUSTOM: 'nope',
+    };
+    const clean = scrubbedChildEnv(parent, { LOCUS_SESSION_ID: 'sess-1' });
+    expect(clean.PATH).toBe('/usr/bin');
+    expect(clean.HOME).toBe('/home/u');
+    expect(clean.LANG).toBe('en_US.UTF-8');
+    expect(clean.LC_ALL).toBe('C');
+    expect(clean.LOCUS_SESSION_ID).toBe('sess-1');
+    expect(clean.AWS_PROFILE).toBeUndefined();
+    expect(clean.GH_TOKEN).toBeUndefined();
+    expect(clean.SUPABASE_SERVICE_ROLE_KEY).toBeUndefined();
+    expect(clean.VERCEL_TOKEN).toBeUndefined();
+    expect(clean.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(clean.LOCUS_HOME).toBeUndefined();
+    expect(clean.CUSTOM).toBeUndefined();
+  });
+
+  it('lets explicit overrides win over parent runtime keys', () => {
+    const clean = scrubbedChildEnv(
+      { PATH: '/old', HOME: '/old-home' },
+      { PATH: '/new' },
+    );
+    expect(clean.PATH).toBe('/new');
+    expect(clean.HOME).toBe('/old-home');
+  });
+});
+
+describe('validateMintEnv', () => {
+  it('accepts identity + scope keys with plain string values', () => {
+    const env = validateMintEnv({
+      LOCUS_SESSION_ID: 'abc',
+      LOCUS_BINDING: 'acme',
+      LOCUS_TENANT: 'acme-corp',
+      GH_CONFIG_DIR: '/tmp/gh',
+      SUPABASE_PROJECT_REF: 'xyz',
+      LOCUS_SUPABASE_PROJECT_REF: 'xyz',
+      LOCUS_GITHUB_ORGS: 'ashlrai',
+    });
+    expect(env.LOCUS_SESSION_ID).toBe('abc');
+    expect(env.SUPABASE_PROJECT_REF).toBe('xyz');
+  });
+
+  it('rejects non-objects, credential-ref values, and disallowed keys', () => {
+    expect(() => validateMintEnv(null)).toThrow(LocusMintError);
+    expect(() => validateMintEnv([])).toThrow(LocusMintError);
+    expect(() =>
+      validateMintEnv({ LOCUS_SESSION_ID: 'phm:NAME' }),
+    ).toThrow(/disallowed env metadata/);
+    expect(() =>
+      validateMintEnv({ LOCUS_SESSION_ID: 'env:FOO' }),
+    ).toThrow(/disallowed env metadata/);
+    expect(() =>
+      validateMintEnv({ AWS_SECRET_ACCESS_KEY: 'x' }),
+    ).toThrow(/disallowed env metadata/);
+    expect(() =>
+      validateMintEnv({ LOCUS_SESSION_ID: 1 as never }),
+    ).toThrow(/disallowed env metadata/);
+  });
+});
+
+describe('pre-mutate gate decisions (LOCUS_ENFORCE)', () => {
+  const blockedGate = {
+    allowDispatch: false,
+    blockers: ['pin unhealthy: unpinned (unpinned)'],
+    gateOk: false,
+    status: 'protected',
+    status_oneline: 'unpinned',
+    available: true,
+  };
+  const openGate = {
+    allowDispatch: true,
+    blockers: [] as string[],
+    gateOk: true,
+    status: 'ready',
+    status_oneline: 'acme:acme',
+    available: true,
+  };
+
+  it('resolveLocusEnforceMode maps env tokens', () => {
+    expect(resolveLocusEnforceMode({})).toBe('off');
+    expect(resolveLocusEnforceMode({ LOCUS_ENFORCE: '' })).toBe('off');
+    expect(resolveLocusEnforceMode({ LOCUS_ENFORCE: '0' })).toBe('off');
+    expect(resolveLocusEnforceMode({ LOCUS_ENFORCE: 'off' })).toBe('off');
+    expect(resolveLocusEnforceMode({ LOCUS_ENFORCE: 'warn' })).toBe('warn');
+    expect(resolveLocusEnforceMode({ LOCUS_ENFORCE: 'log' })).toBe('warn');
+    expect(resolveLocusEnforceMode({ LOCUS_ENFORCE: '1' })).toBe('enforce');
+    expect(resolveLocusEnforceMode({ LOCUS_ENFORCE: 'true' })).toBe('enforce');
+    expect(resolveLocusEnforceMode({ LOCUS_ENFORCE: 'yes' })).toBe('enforce');
+    expect(resolveLocusEnforceMode({ LOCUS_ENFORCE: 'enforce' })).toBe('enforce');
+    // Unknown → fail closed to enforce
+    expect(resolveLocusEnforceMode({ LOCUS_ENFORCE: 'maybe' })).toBe('enforce');
+  });
+
+  it('mode=off always allows without surfacing blockers', () => {
+    const d = decidePreMutateGate(blockedGate, 'off');
+    expect(d.allow).toBe(true);
+    expect(d.blockers).toEqual([]);
+    expect(d.shouldWarn).toBe(false);
+  });
+
+  it('mode=warn allows but surfaces unpinned blockers', () => {
+    const d = decidePreMutateGate(blockedGate, 'warn');
+    expect(d.allow).toBe(true);
+    expect(d.shouldWarn).toBe(true);
+    expect(d.blockers).toContain('pin unhealthy: unpinned (unpinned)');
+    expect(formatPreMutateBlockers(d)).toMatch(/unpinned/);
+  });
+
+  it('mode=enforce refuses unpinned / unhealthy gate', () => {
+    const d = decidePreMutateGate(blockedGate, 'enforce');
+    expect(d.allow).toBe(false);
+    expect(d.shouldWarn).toBe(false);
+    expect(d.blockers.length).toBeGreaterThan(0);
+    expect(d.status_oneline).toBe('unpinned');
+  });
+
+  it('mode=enforce allows healthy ready gate', () => {
+    const d = decidePreMutateGate(openGate, 'enforce');
+    expect(d.allow).toBe(true);
+    expect(d.blockers).toEqual([]);
+    expect(d.shouldWarn).toBe(false);
+  });
+
+  it('evaluateFleetGate + decidePreMutateGate refuse unpinned report under enforce', () => {
+    const unpinned = {
+      version: '1',
+      ready: false,
+      status: 'protected',
+      status_oneline: 'unpinned',
+      home: '/tmp',
+      pin: null,
+      mcp_registered: { claude: false, cursor: false, codex: false },
+      doctor: {},
+      commands: {},
+      required_servers: ['locus', 'phantom'],
+      mcp_command: 'locus-mcp',
+    };
+    const gate = evaluateFleetGate(unpinned as never);
+    expect(gate.allowDispatch).toBe(false);
+    const decision = decidePreMutateGate(
+      { ...gate, available: true },
+      'enforce',
+    );
+    expect(decision.allow).toBe(false);
+    expect(decision.blockers.some((b) => /unpinned|not ready|ready=false/.test(b))).toBe(
+      true,
+    );
   });
 });
 
