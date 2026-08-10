@@ -16,6 +16,7 @@
  *   9. FLAG-OFF — loop.ts uses runConductor when simpleConductor !== true.
  *  10. DRY-RUN — no dispatch, no write, tasksAttempted populated.
  *  11. MAX-TASKS-PER-CYCLE — at most 3 tasks dispatched per tick.
+ *  12. LOCUS CI SESSION — pass-through / refuse→errors / mint overlay / mint fail.
  *
  * SAFETY: HOME is overridden to a tmp dir. All I/O mocked. No real LLM calls.
  */
@@ -735,5 +736,183 @@ describe('M280 — max tasks per cycle', () => {
     await runSimpleConductor(makeConfig(), { once: true, dryRun: false, allowCloud: false });
 
     expect(mockRunEngineSandboxed).toHaveBeenCalledTimes(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 12. LOCUS CI SESSION ISOLATION (per-task mint around sandboxed dispatch)
+// ---------------------------------------------------------------------------
+describe('M280 — Locus CI session isolation', () => {
+  const LOCUS_ENV_KEYS = [
+    'LOCUS_ENFORCE',
+    'LOCUS_CI_BINDING',
+    'LOCUS_BINDING',
+    'LOCUS_SESSION_ID',
+  ] as const;
+
+  function snapshotLocusEnv(): Record<string, string | undefined> {
+    const out: Record<string, string | undefined> = {};
+    for (const k of LOCUS_ENV_KEYS) out[k] = process.env[k];
+    return out;
+  }
+
+  function restoreLocusEnv(prev: Record<string, string | undefined>): void {
+    for (const k of LOCUS_ENV_KEYS) {
+      if (prev[k] === undefined) delete process.env[k];
+      else process.env[k] = prev[k];
+    }
+  }
+
+  it('pass-through when enforce off and no binding (engine still runs)', async () => {
+    const prev = snapshotLocusEnv();
+    try {
+      delete process.env.LOCUS_ENFORCE;
+      delete process.env.LOCUS_CI_BINDING;
+      delete process.env.LOCUS_BINDING;
+      delete process.env.LOCUS_SESSION_ID;
+
+      writeTasks([baseTask({ id: 'task-locus-pass' })]);
+      const { runSimpleConductor } = await importConductor();
+      const result = await runSimpleConductor(makeConfig(), {
+        once: true,
+        dryRun: false,
+        allowCloud: false,
+      });
+
+      expect(result.tasksAttempted).toBe(1);
+      expect(result.proposalsFiled).toBe(1);
+      expect(result.errors).toHaveLength(0);
+      expect(mockRunEngineSandboxed).toHaveBeenCalledOnce();
+    } finally {
+      restoreLocusEnv(prev);
+    }
+  });
+
+  it('maps LOCUS_ENFORCE without binding to result.errors (never throws; no engine call)', async () => {
+    const prev = snapshotLocusEnv();
+    try {
+      process.env.LOCUS_ENFORCE = '1';
+      delete process.env.LOCUS_CI_BINDING;
+      delete process.env.LOCUS_BINDING;
+      delete process.env.LOCUS_SESSION_ID;
+
+      writeTasks([baseTask({ id: 'task-locus-refuse' })]);
+      const { runSimpleConductor } = await importConductor();
+      const result = await runSimpleConductor(makeConfig(), {
+        once: true,
+        dryRun: false,
+        allowCloud: false,
+      });
+
+      expect(result.tasksAttempted).toBe(1);
+      expect(result.proposalsFiled).toBe(0);
+      expect(result.errors.length).toBeGreaterThanOrEqual(1);
+      expect(result.errors[0].taskId).toBe('task-locus-refuse');
+      expect(result.errors[0].error).toMatch(/LOCUS_CI_BINDING|LOCUS_BINDING|LOCUS_ENFORCE/);
+      expect(mockRunEngineSandboxed).not.toHaveBeenCalled();
+      // Task claimed + settled failed (not done)
+      const written = readTasks();
+      expect(written[0].done).toBeFalsy();
+      expect(written[0].lastError).toMatch(/LOCUS_CI_BINDING|LOCUS_BINDING|LOCUS_ENFORCE/);
+    } finally {
+      restoreLocusEnv(prev);
+    }
+  });
+
+  it('overlays mint handle env on process.env for the sandboxed run only', async () => {
+    const prev = snapshotLocusEnv();
+    const seen: { sessionId?: string } = {};
+    try {
+      delete process.env.LOCUS_SESSION_ID;
+      vi.doMock('../src/core/integrations/locus.js', async (importOriginal) => {
+        const actual = await importOriginal<
+          typeof import('../src/core/integrations/locus.js')
+        >();
+        return {
+          ...actual,
+          runWithLocusSessionIfConfigured: async (
+            fn: (handle: {
+              sessionId: string;
+              binding: string;
+              env: NodeJS.ProcessEnv;
+            } | null) => Promise<unknown>,
+          ) =>
+            fn({
+              sessionId: 'sess-conductor-mint',
+              binding: 'ci-acme',
+              env: {
+                LOCUS_SESSION_ID: 'sess-conductor-mint',
+                LOCUS_BINDING: 'ci-acme',
+                LOCUS_HOME: '/tmp/locus-conductor-mint',
+              },
+            }),
+        };
+      });
+
+      mockRunEngineSandboxed.mockImplementation(async () => {
+        seen.sessionId = process.env.LOCUS_SESSION_ID;
+        return {
+          state: { id: 'run-locus-mint', status: 'done' },
+          proposalId: 'prop-abc',
+        };
+      });
+
+      writeTasks([baseTask({ id: 'task-locus-mint' })]);
+      const { runSimpleConductor } = await import(
+        '../src/core/simple-conductor.js?locus-session-mint=' + Date.now()
+      );
+      const result = await runSimpleConductor(makeConfig(), {
+        once: true,
+        dryRun: false,
+        allowCloud: false,
+      });
+
+      expect(result.tasksAttempted).toBe(1);
+      expect(result.proposalsFiled).toBe(1);
+      expect(result.errors).toHaveLength(0);
+      expect(seen.sessionId).toBe('sess-conductor-mint');
+      // Restored after sandboxed body — must not leak mint session into ambient env.
+      expect(process.env.LOCUS_SESSION_ID).toBeUndefined();
+    } finally {
+      restoreLocusEnv(prev);
+      vi.doUnmock('../src/core/integrations/locus.js');
+    }
+  });
+
+  it('maps LocusMintError to result.errors without throwing', async () => {
+    const prev = snapshotLocusEnv();
+    try {
+      vi.doMock('../src/core/integrations/locus.js', async (importOriginal) => {
+        const actual = await importOriginal<
+          typeof import('../src/core/integrations/locus.js')
+        >();
+        return {
+          ...actual,
+          runWithLocusSessionIfConfigured: async () => {
+            throw new actual.LocusMintError('ci mint failed: simulated conductor');
+          },
+        };
+      });
+
+      writeTasks([baseTask({ id: 'task-locus-mint-err' })]);
+      const { runSimpleConductor } = await import(
+        '../src/core/simple-conductor.js?locus-session-mint-err=' + Date.now()
+      );
+      const result = await runSimpleConductor(makeConfig(), {
+        once: true,
+        dryRun: false,
+        allowCloud: false,
+      });
+
+      expect(result.tasksAttempted).toBe(1);
+      expect(result.proposalsFiled).toBe(0);
+      expect(result.errors.length).toBeGreaterThanOrEqual(1);
+      expect(result.errors[0].taskId).toBe('task-locus-mint-err');
+      expect(result.errors[0].error).toMatch(/ci mint failed/);
+      expect(mockRunEngineSandboxed).not.toHaveBeenCalled();
+    } finally {
+      restoreLocusEnv(prev);
+      vi.doUnmock('../src/core/integrations/locus.js');
+    }
   });
 });
