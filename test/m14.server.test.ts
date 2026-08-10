@@ -80,7 +80,8 @@ vi.mock('../src/cli/run.js', () => ({
 // Import under test (after mocks)
 // ---------------------------------------------------------------------------
 
-import { startServer, assetsDir } from '../src/core/web/server.js';
+import { assetsDir } from '../src/core/web/server.js';
+import { readAuthHeaders, startServer } from './helpers/authenticated-web-server.js';
 
 // ---------------------------------------------------------------------------
 // Config fixture
@@ -130,7 +131,7 @@ function httpGet(
         port: Number(parsed.port),
         path: parsed.pathname + parsed.search,
         method: 'GET',
-        headers,
+        headers: { ...readAuthHeaders(Number(parsed.port)), ...headers },
       },
       (res) => {
         let data = '';
@@ -172,6 +173,7 @@ describe('startServer — handle shape', () => {
 
     expect(typeof handle.port).toBe('number');
     expect(typeof handle.token).toBe('string');
+    expect(typeof handle.readToken).toBe('string');
     expect(typeof handle.url).toBe('string');
     expect(typeof handle.close).toBe('function');
   });
@@ -191,6 +193,8 @@ describe('startServer — handle shape', () => {
     expect(handle.token.length).toBeGreaterThan(0);
     // Token should only contain hex characters (randomBytes hex)
     expect(handle.token).toMatch(/^[0-9a-f]+$/i);
+    expect(handle.readToken).toMatch(/^[0-9a-f]+$/i);
+    expect(handle.readToken).not.toBe(handle.token);
   });
 
   it('url is http://127.0.0.1:<port>', async () => {

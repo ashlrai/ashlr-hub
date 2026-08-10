@@ -233,8 +233,36 @@ Transports: `src/core/integrations/telegram.ts` and `src/core/integrations/imess
 | File | Responsibility |
 |------|---------------|
 | `api.ts` | REST API: `/api/fleet`, `/api/inbox`, `/api/runs`, `/api/swarms`, `/api/genome`, `/api/pulse`, `/api/goals`. |
-| `server.ts` | HTTP server bound to `127.0.0.1:7777` — localhost only, never externally reachable. |
+| `server.ts` | Loopback HTTP server plus separate read and mutation capabilities: read header/cookie for content, independent raw token for enabled actions. |
 | `control.ts` | Control endpoints: pause, resume, approve, reject. |
+
+Static assets and a content-free `GET /api/health` liveness projection are the
+only public surfaces. Every proprietary GET and SSE request is authenticated
+before route dispatch, so newly added API reads inherit the boundary by
+default. `POST /api/session` requires the per-process read token and creates a
+15-minute HttpOnly, SameSite=Strict ticket scoped to `GET /api/*`. Since a
+browser cookie is shared by every port on one host, the signed ticket contains
+a digest binding to a browser-generated 256-bit client proof stored in
+origin-scoped `sessionStorage`. Cookie-authenticated fetches must supply the
+exact bounded proof header. EventSource cannot set headers, so `/api/events`
+accepts exactly one `client` query value and rejects duplicate or unknown query
+parameters. That query value is not bearer authority: it works only with the
+matching HttpOnly ticket, contains no read or mutation token, and is protected
+from referrer disclosure by `Referrer-Policy: no-referrer`.
+
+The ticket is signed with the current read token, making restart/token rotation
+an immediate revocation mechanism. Mutations do not accept tickets or client
+proofs and retain their explicit enablement plus an independent raw-header
+token. The browser persists only the read token and non-authority client proof;
+mutation authority is prompted independently for every exact action and is
+discarded after that request rather than retained in JavaScript state.
+Ticket expiry does not revoke the raw read token: that per-process capability
+remains valid until server restart, and a tab retaining it can renew its ticket.
+
+The loopback server intentionally speaks HTTP, so its browser cookie cannot use
+the `Secure` attribute. No forwarded-protocol header is trusted and no CORS
+credential path is enabled; a future TLS/reverse-proxy mode must establish a
+trusted transport boundary before changing that behavior.
 
 ---
 
