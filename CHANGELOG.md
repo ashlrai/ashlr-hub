@@ -11,6 +11,8 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+## [3.2.0] — 2026-08-09 — Mission OS and bounded agent efficiency
+
 - **Best-of-N fan-out containment.** Configured and direct best-of-N candidate
   counts now fail closed for malformed values, clamp to a hard maximum of eight,
   and run producer and critic work through an order-preserving two-worker pool.
