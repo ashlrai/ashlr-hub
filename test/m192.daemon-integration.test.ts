@@ -348,43 +348,33 @@ function makeFlagCfg(flag: string, extra: Record<string, unknown> = {}): AshlrCo
 // Hook 1 — M185: ashlrcodeExecutor
 // ===========================================================================
 
-describe('M192 / M185 — ashlrcodeExecutor: flag ON → sandboxed runGoal', () => {
-  it('routes through sandboxed runGoal as ashlrcode when flag is ON + local-tier backend', async () => {
+describe('M192 / M185 — ashlrcodeExecutor spend admission', () => {
+  it('fails closed before ashlrcode when its spend price is not authoritative', async () => {
     enrollFrontierRepo();
     const result = await tick(makeAcCfg(), { dryRun: false });
 
     expect(result.reason).toBe('ok');
     expect(mockRunViaAshlrcode).not.toHaveBeenCalled();
-    expect(mockRunGoal).toHaveBeenCalledTimes(1);
-    const [, , opts] = mockRunGoal.mock.calls[0] as [unknown, unknown, Record<string, unknown>];
-    expect(opts).toMatchObject({
-      engine: 'ashlrcode',
-      sandboxEngine: true,
-      requireSandbox: true,
+    expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(result.dispatches?.[0]).toMatchObject({
+      backend: 'ashlrcode',
+      dispatched: false,
+      skipReason: 'budget-price-unknown',
     });
   });
 
-  it('preserves work item context on the sandboxed ashlrcode run', async () => {
+  it('preserves the work item identity on the refused executor dispatch', async () => {
     const repo = enrollFrontierRepo();
     const cfg = makeAcCfg();
 
-    await tick(cfg, { dryRun: false });
+    const result = await tick(cfg, { dryRun: false });
 
     expect(mockRunViaAshlrcode).not.toHaveBeenCalled();
-    const [goal, passedCfg, opts] = mockRunGoal.mock.calls[0] as [
-      string,
-      unknown,
-      Record<string, unknown>,
-    ];
-    expect(goal).toContain('M192 test item 0');
-    expect(passedCfg).toBe(cfg);
-    expect(opts).toMatchObject({
-      engine: 'ashlrcode',
-      cwd: repo.dir,
-      workItemId: `${repo.dir}:m192-item-0`,
-      workSource: 'todo',
-      sandboxEngine: true,
-      requireSandbox: true,
+    expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(result.dispatches?.[0]).toMatchObject({
+      itemId: `${repo.dir}:m192-item-0`,
+      backend: 'ashlrcode',
+      skipReason: 'budget-price-unknown',
     });
   });
 
@@ -434,7 +424,7 @@ describe('M192 / M185 — ashlrcodeExecutor: flag ON → sandboxed runGoal', () 
     expect(opts.engine).toBe('claude');
   });
 
-  it('legacy runViaAshlrcode failure is ignored because daemon no longer calls it', async () => {
+  it('never reaches either legacy or sandboxed executor while price is unknown', async () => {
     enrollFrontierRepo();
     mockRunViaAshlrcode.mockRejectedValue(new Error('ashlrcode exploded'));
 
@@ -442,9 +432,8 @@ describe('M192 / M185 — ashlrcodeExecutor: flag ON → sandboxed runGoal', () 
 
     expect(result.reason).toBe('ok');
     expect(mockRunViaAshlrcode).not.toHaveBeenCalled();
-    expect(mockRunGoal).toHaveBeenCalledTimes(1);
-    const [, , opts] = mockRunGoal.mock.calls[0] as [unknown, unknown, Record<string, unknown>];
-    expect(opts.engine).toBe('ashlrcode');
+    expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(result.dispatches?.[0]?.skipReason).toBe('budget-price-unknown');
     expect(typeof result.proposalsCreated).toBe('number');
   });
 

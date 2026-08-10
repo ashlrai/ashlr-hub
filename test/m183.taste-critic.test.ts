@@ -561,6 +561,31 @@ describe('M183 — best-of-N prefers highest taste when tasteCritic=true', () =>
     expect(tasteMock).toHaveBeenCalledTimes(2);
   });
 
+  it('governed fan-out can disable every paid taste call', async () => {
+    const sandboxMock = makeSandboxMock([0, 1, 2]);
+    const judgeMock = makeJudgeMock([8, 16, 12]);
+    const tasteMock = makeTasteMock([5, 5, 5]);
+
+    vi.doMock('../src/core/run/sandboxed-engine.js', () => makeSandboxModule(sandboxMock));
+    vi.doMock('../src/core/fleet/manager.js', () => ({
+      judgeProposal: judgeMock,
+      resolveFrontierJudgeClient: vi.fn(() => null),
+    }));
+    vi.doMock('../src/core/fleet/taste-critic.js', () => ({
+      scoreTaste: tasteMock,
+    }));
+
+    const { runBestOfN } = await import('../src/core/run/best-of-n.js?' + randomUUID());
+    const result = await runBestOfN(makeItem(), makeConfig({ tasteCritic: true }), {
+      n: 3,
+      disableTasteCritic: true,
+    });
+
+    expect(tasteMock).not.toHaveBeenCalled();
+    expect(result.candidates.every((candidate) => candidate.taste === undefined)).toBe(true);
+    expect(result.winner?.index).toBe(1);
+  });
+
   it('keeps proposal-id-only legacy sandbox results observational', async () => {
     const sandboxMock = makeProposalIdOnlySandboxMock();
     const judgeMock = makeJudgeMock([16]);

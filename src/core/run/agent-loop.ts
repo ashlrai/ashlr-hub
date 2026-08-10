@@ -53,6 +53,7 @@ const TASK_EFFECT_CAP = 64;
 
 /** Completion handle returned after the caller atomically reserves a model step. */
 export interface ModelStepReservation {
+  readonly maxOutputTokens: number;
   finalize(
     summary: string,
     usage?: { tokensIn: number; tokensOut: number },
@@ -63,7 +64,15 @@ export interface ModelStepReservation {
  * Synchronous authority for the run-wide model-step budget. Returning undefined
  * denies the call because no global step remains.
  */
-export type ReserveModelStep = () => ModelStepReservation | undefined;
+export type ReserveModelStep = (promptTokenCeiling: number) => ModelStepReservation | undefined;
+
+export function conservativePromptTokenCeiling(messages: ChatMessage[], tools?: unknown[]): number {
+  // A UTF-8 byte count is an upper bound for tokens produced from the serialized
+  // request content. The fixed/per-record allowance covers provider-added role
+  // separators and chat-template framing that is not present in our JSON value.
+  const serializedBytes = Buffer.byteLength(JSON.stringify({ messages, tools: tools ?? [] }), 'utf8');
+  return serializedBytes + 256 + (messages.length * 16) + ((tools?.length ?? 0) * 32);
+}
 
 /**
  * A tool executor passed through ctx. Each entry must have a callable `fn`.
@@ -374,7 +383,7 @@ async function runTaskBody(
       let reservation: ModelStepReservation | undefined;
       if (ctx.reserveModelStep) {
         try {
-          reservation = ctx.reserveModelStep();
+          reservation = ctx.reserveModelStep(conservativePromptTokenCeiling(messages, toolSpecs));
         } catch (err) {
           task.status = 'failed';
           task.error = `Could not reserve model step: ${String(err)}`;
@@ -406,10 +415,16 @@ async function runTaskBody(
               }
             },
             ctx.signal,
+            reservation ? { maxOutputTokens: reservation.maxOutputTokens } : undefined,
           );
         } else {
           // Non-streaming fallback: emit the full content as a single delta.
-          result = await client.chat(messages, toolSpecs, ctx.signal);
+          result = await client.chat(
+            messages,
+            toolSpecs,
+            ctx.signal,
+            reservation ? { maxOutputTokens: reservation.maxOutputTokens } : undefined,
+          );
           if (!ctx.signal?.aborted && result.content.length > 0) {
             emitStream({ kind: 'model-delta', taskId: task.id, text: result.content });
           }
@@ -426,7 +441,11 @@ async function runTaskBody(
           steps: 1,
         };
         if (reservation) {
-          finalizeReservation(reservation, summary, reportedUsage);
+          finalizeReservation(
+            reservation,
+            summary,
+            usageAuthorityReportedBy(err) ? reportedUsage : undefined,
+          );
         } else {
           emitStep('model', summary, stepUsage);
         }
@@ -451,7 +470,11 @@ async function runTaskBody(
           ? `tool calls: ${result.toolCalls.map((tc) => tc.name).join(', ')}`
           : '(empty response)';
       if (reservation) {
-        finalizeReservation(reservation, modelSummary, result.usage);
+        finalizeReservation(
+          reservation,
+          modelSummary,
+          result.usageKnown === true ? result.usage : undefined,
+        );
       } else {
         emitStep('model', modelSummary, { ...newUsage(), ...stepUsageDelta, steps: 1 });
       }
@@ -659,4 +682,9 @@ function usageReportedBy(err: unknown): { tokensIn: number; tokensOut: number } 
     return undefined;
   }
   return { tokensIn, tokensOut };
+}
+
+function usageAuthorityReportedBy(value: unknown): boolean {
+  return typeof value === 'object' && value !== null
+    && (value as { usageKnown?: unknown }).usageKnown === true;
 }

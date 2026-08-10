@@ -55,7 +55,7 @@ function mockClient(responses: ChatResult[], opts: { supportsTools?: boolean } =
 
 /** A simple ChatResult with only text content. */
 function textResult(content: string, tokensIn = 10, tokensOut = 5): ChatResult {
-  return { content, usage: { tokensIn, tokensOut } };
+  return { content, usage: { tokensIn, tokensOut }, usageKnown: true };
 }
 
 /** A ChatResult carrying a single tool call. */
@@ -64,6 +64,7 @@ function toolCallResult(toolName: string, args: unknown, id = 'tc-1'): ChatResul
     content: '',
     toolCalls: [{ id, name: toolName, arguments: args }],
     usage: { tokensIn: 20, tokensOut: 10 },
+    usageKnown: true,
   };
 }
 
@@ -249,6 +250,80 @@ describe('runTask — tool call then final text', () => {
 // ---------------------------------------------------------------------------
 
 describe('runTask — budget abort', () => {
+  it('refuses an oversized prompt before any provider work', async () => {
+    const client = mockClient([textResult('must not run')]);
+    const task = makeTask({ goal: 'x'.repeat(2_000) });
+    const { onStep } = collectSteps();
+    const reserveModelStep = vi.fn((promptTokenCeiling: number) =>
+      promptTokenCeiling < 100
+        ? { maxOutputTokens: 1, finalize: vi.fn() }
+        : undefined);
+
+    await runTask(task, client, {
+      budget: makeBudget(),
+      usage: newUsage(),
+      onStep,
+      reserveModelStep,
+    });
+
+    expect(reserveModelStep).toHaveBeenCalledOnce();
+    expect(reserveModelStep.mock.calls[0]?.[0]).toBeGreaterThan(100);
+    expect(client.chat).not.toHaveBeenCalled();
+    expect(task.status).toBe('failed');
+  });
+
+  it('forwards the reserved output ceiling to the provider call', async () => {
+    const client = mockClient([textResult('bounded', 12, 7)]);
+    const task = makeTask();
+    const { onStep } = collectSteps();
+    const finalize = vi.fn();
+
+    await runTask(task, client, {
+      budget: makeBudget(),
+      usage: newUsage(),
+      onStep,
+      reserveModelStep: () => ({ maxOutputTokens: 7, finalize }),
+    });
+
+    expect(client.chat).toHaveBeenCalledOnce();
+    expect((client.chat as ReturnType<typeof vi.fn>).mock.calls[0]?.[3]).toEqual({
+      maxOutputTokens: 7,
+    });
+    expect(finalize).toHaveBeenCalledWith(expect.any(String), { tokensIn: 12, tokensOut: 7 });
+  });
+
+  it('charges an ambiguous failed call before any later retry can reserve', async () => {
+    const chat = vi.fn().mockRejectedValue(new Error('transport unknown'));
+    const client: ProviderClient = { id: 'ambiguous', supportsTools: false, chat };
+    const task = makeTask();
+    const { onStep } = collectSteps();
+    let remaining: number | undefined;
+    const reserveModelStep = vi.fn((promptTokenCeiling: number) => {
+      remaining ??= promptTokenCeiling + 50;
+      if (promptTokenCeiling >= remaining) return undefined;
+      const maxOutputTokens = remaining - promptTokenCeiling;
+      return {
+        maxOutputTokens,
+        finalize: (_summary: string, usage?: { tokensIn: number; tokensOut: number }) => {
+          remaining -= usage
+            ? usage.tokensIn + usage.tokensOut
+            : promptTokenCeiling + maxOutputTokens;
+        },
+      };
+    });
+
+    await runTask(task, client, {
+      budget: makeBudget(),
+      usage: newUsage(),
+      onStep,
+      reserveModelStep,
+    });
+
+    expect(chat).toHaveBeenCalledOnce();
+    expect(remaining).toBe(0);
+    expect(reserveModelStep(1)).toBeUndefined();
+  });
+
   it('stops when token budget is exceeded; does not throw', async () => {
     // Each call consumes 100+50 tokens. Budget is 50 tokens → over after first call.
     const responses = Array.from({ length: 10 }, (_, i) =>

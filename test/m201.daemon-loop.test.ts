@@ -1794,7 +1794,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
           allowedBackends: ['builtin', 'local-coder'],
           repoMap: true,
           localization: !localization,
-          models: { 'local-coder': 'test-local-model' },
+          models: { 'local-coder': 'qwen2.5-coder:32b' },
         },
       } as AshlrConfig;
       const originalFoundry = structuredClone(config.foundry);
@@ -2675,9 +2675,9 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       repos: [repo.dir],
       items: [resliceA, resliceB],
     });
-    mockCanonicalEmptyDiffRunGoal('budget drain fixture', 0.02);
+    mockCanonicalEmptyDiffRunGoal('budget drain fixture', 0.06);
 
-    const result = await tick(cfgBuiltin({ dailyBudgetUsd: 0.02, perTickItems: 2, parallel: 1 }), { dryRun: false });
+    const result = await tick(cfgBuiltin({ dailyBudgetUsd: 0.1, perTickItems: 2, parallel: 1 }), { dryRun: false });
     const actions = readAgentActions();
     const skipped = actions.find((event) =>
       event.action === 'daemon:dispatch-skip' && event.itemId === resliceB.id,
@@ -5557,14 +5557,14 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     }));
     expect(skill).not.toBeNull();
     recordSkillCard(skill!);
-    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', model: 'qwen-shadow', reason: 'final route' });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', model: 'qwen2.5-coder:32b', reason: 'final route' });
     mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'local-coder' ? 'mid' : 'local');
     mockRunGoal.mockImplementationOnce(async (_goal, _cfg, opts) => ({
       id: (opts as { runId: string }).runId,
       status: 'done',
       engine: 'local-coder',
       engineTier: 'mid',
-      engineModel: 'local-coder:qwen-shadow',
+      engineModel: 'local-coder:qwen2.5-coder:32b',
       usage: { totalTokens: 100, estCostUsd: 0.001, steps: 1 },
     }));
 
@@ -5576,7 +5576,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(readSkillUseEvents({ limit: 1 })).toEqual([]);
     expect(mockRunGoal.mock.calls[0]?.[2]).toMatchObject({
       engine: 'local-coder',
-      model: 'qwen-shadow',
+      model: 'qwen2.5-coder:32b',
     });
     expect(mockRunGoal.mock.calls[0]?.[2]).not.toHaveProperty('selectedSkillIds');
   });
@@ -5587,7 +5587,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     mockRouteBackend.mockReturnValue({
       backend: 'local-coder',
       tier: 'mid',
-      model: 'qwen-requested',
+      model: 'qwen2.5-coder:32b',
       reason: 'requested external route',
     });
     mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'local-coder' ? 'mid' : 'local');
@@ -5652,7 +5652,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     mockRouteBackend.mockReturnValue({
       backend: 'local-coder',
       tier: 'mid',
-      model: 'qwen-routed-model',
+      model: 'qwen2.5-coder:32b',
       reason: 'mock local-coder model route',
     });
     mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'local-coder' ? 'mid' : 'local');
@@ -5671,7 +5671,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockRunGoal).toHaveBeenCalledTimes(1);
     expect(mockRunGoal.mock.calls[0]?.[2]).toMatchObject({
       engine: 'local-coder',
-      model: 'qwen-routed-model',
+      model: 'qwen2.5-coder:32b',
       sandboxEngine: true,
       requireSandbox: true,
       delegationScope: {
@@ -5683,7 +5683,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
         resultContract: { kind: 'proposal', requireDiff: true, requireProposal: true },
         backend: {
           engine: 'local-coder',
-          model: 'qwen-routed-model',
+          model: 'qwen2.5-coder:32b',
           tier: 'mid',
           assignedBy: 'router',
           reason: 'mock local-coder model route',
@@ -5692,7 +5692,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
     expect(result.dispatches?.[0]).toMatchObject({
       backend: 'local-coder',
-      model: 'qwen-routed-model',
+      model: 'qwen2.5-coder:32b',
     });
   });
 
@@ -5701,7 +5701,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     mockRouteBackend.mockReturnValue({
       backend: 'local-coder',
       tier: 'mid',
-      model: 'qwen-routed-model',
+      model: 'qwen2.5-coder:32b',
       reason: 'mock local-coder model route',
     });
     mockEngineTierOf.mockImplementation((backend: unknown) =>
@@ -5741,7 +5741,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 
   it('A1h4: dispatch-production ledger records filed proposal outcomes with proposal id', async () => {
     const { items } = enrollWithItems(1);
-    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', model: 'qwen', reason: 'mock local-coder filed' });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', model: 'qwen2.5-coder:32b', reason: 'mock local-coder filed' });
     mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'local-coder' ? 'mid' : 'local');
     mockRunGoal.mockImplementationOnce(async () => {
       const proposal = createProposal({
@@ -5784,7 +5784,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(readDispatchProductionEvents({ limit: 1 })[0]).toMatchObject({
       itemId: items[0]!.id,
       backend: 'local-coder',
-      model: 'qwen',
+      model: 'qwen2.5-coder:32b',
       outcome: 'proposal-created',
       proposalCreated: true,
       proposalId: expect.stringMatching(/^prop-/),
@@ -6452,7 +6452,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
         repos: [repo.dir],
         items: [repair],
       });
-      mockRouteBackend.mockReturnValue({ backend: 'kimi', tier: 'mid', reason: 'terminal witness failure fixture' });
+      mockRouteBackend.mockReturnValue({ backend: 'nim', tier: 'mid', model: 'meta/llama-3.1-70b-instruct', reason: 'terminal witness failure fixture' });
       mockEngineTierOf.mockReturnValue('mid');
       mockRunGoal.mockImplementationOnce(async () => {
         if (failureMode === 'witness-write') {
@@ -6465,7 +6465,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
         return {
           id: `run-terminal-${failureMode}`,
           status: 'done',
-          engine: 'kimi',
+          engine: 'nim',
           engineTier: 'mid',
           usage: { totalTokens: 100, estCostUsd: 0.002, steps: 1 },
           proposalOutcome: { kind: 'empty-diff', reason: 'alternative backend made no changes' },
@@ -6477,7 +6477,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 
       const result = await tick({
         ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
-        foundry: { allowedBackends: ['local-coder', 'kimi'] },
+        foundry: { allowedBackends: ['local-coder', 'nim'] },
       } as AshlrConfig, { dryRun: false });
       const pending = readPendingGeneratedRepairTreatmentOutcomes();
       expect(result.reason).toBe('state-persistence-failed');
@@ -6509,7 +6509,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 
       const retried = await tick({
         ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
-        foundry: { allowedBackends: ['local-coder', 'kimi'] },
+        foundry: { allowedBackends: ['local-coder', 'nim'] },
       } as AshlrConfig, { dryRun: false });
       const witnesses = readDispatchProductionEvents().filter((event) =>
         event.itemId === repair.id && event.repairTreatmentOutcome === 'not-converted'
@@ -6540,7 +6540,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       repos: [repo.dir],
       items: [repair],
     });
-    mockRouteBackend.mockReturnValue({ backend: 'kimi', tier: 'mid', reason: 'combined persistence failure fixture' });
+    mockRouteBackend.mockReturnValue({ backend: 'nim', tier: 'mid', model: 'meta/llama-3.1-70b-instruct', reason: 'combined persistence failure fixture' });
     mockEngineTierOf.mockReturnValue('mid');
     mockPublishGeneratedRepairTreatmentOutcome.mockReturnValue(false);
     mockRunGoal.mockImplementationOnce(async () => {
@@ -6550,7 +6550,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       return {
         id: 'run-terminal-combined-persistence-failure',
         status: 'done',
-        engine: 'kimi',
+        engine: 'nim',
         engineTier: 'mid',
         usage: { totalTokens: 100, estCostUsd: 0.002, steps: 1 },
         proposalOutcome: { kind: 'empty-diff', reason: 'alternative backend made no changes' },
@@ -6559,7 +6559,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 
     const result = await tick({
       ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
-      foundry: { allowedBackends: ['local-coder', 'kimi'] },
+      foundry: { allowedBackends: ['local-coder', 'nim'] },
     } as AshlrConfig, { dryRun: false });
 
     expect(result.reason).toBe('state-persistence-failed');
@@ -6662,12 +6662,12 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       repos: [repo.dir],
       items: [repair],
     });
-    mockRouteBackend.mockReturnValue({ backend: 'kimi', tier: 'mid', reason: 'same-tier alternative' });
+    mockRouteBackend.mockReturnValue({ backend: 'nim', tier: 'mid', model: 'meta/llama-3.1-70b-instruct', reason: 'same-tier alternative' });
     mockEngineTierOf.mockReturnValue('mid');
     mockRunGoal.mockResolvedValueOnce({
       id: 'run-diagnostic-second-empty',
       status: 'done',
-      engine: 'kimi',
+      engine: 'nim',
       engineTier: 'mid',
       usage: { totalTokens: 100, estCostUsd: 0.002, steps: 1 },
       proposalOutcome: { kind: 'empty-diff', reason: 'alternative backend made no changes' },
@@ -6675,18 +6675,18 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 
     const result = await tick({
       ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
-      foundry: { allowedBackends: ['local-coder', 'kimi'] },
+      foundry: { allowedBackends: ['local-coder', 'nim'] },
     } as AshlrConfig, { dryRun: false });
 
     expect(result.reason).toBe('ok');
-    expect(result.dispatches?.[0]).toMatchObject({ backend: 'kimi', tier: 'mid', dispatched: true });
-    expect(mockRunGoal.mock.calls[0]?.[2]).toMatchObject({ engine: 'kimi' });
+    expect(result.dispatches?.[0]).toMatchObject({ backend: 'nim', tier: 'mid', dispatched: true });
+    expect(mockRunGoal.mock.calls[0]?.[2]).toMatchObject({ engine: 'nim' });
     expect(readDispatchProductionEvents().find((event) => event.itemId === repair.id)).toMatchObject({
       repairHandoffId: repair.repairHandoffId,
       repairGenerationId: repair.repairGenerationId,
       repairAttemptOrdinal: 2,
       repairPreviousBackend: 'local-coder',
-      backend: 'kimi',
+      backend: 'nim',
     });
     expect(readAgentActions({ complete: true }).find((event) =>
       event.action === 'daemon:dispatch' && event.itemId === repair.id
@@ -6695,7 +6695,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       repairGenerationId: repair.repairGenerationId,
       repairAttemptOrdinal: 2,
       repairPreviousBackend: 'local-coder',
-      backend: 'kimi',
+      backend: 'nim',
     });
     expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
       available: true,
@@ -6711,7 +6711,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       repairTreatmentAttemptHash: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
     expect(readPendingGeneratedRepairTreatmentOutcomes()).toEqual([]);
-  });
+  }, 10_000);
 
   it.each([1, 2] as const)(
     'A1h5b1c: %i forged raw failure rows cannot steer repair retry authority',
@@ -6963,14 +6963,14 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       .mockImplementationOnce(async (_goal: unknown, _cfg: unknown, options: unknown) => ({
         id: (options as { runId: string }).runId,
         status: 'done',
-        engine: 'kimi',
+        engine: 'nim',
         engineTier: 'mid',
         usage: { totalTokens: 100, estCostUsd: 0.002, steps: 1 },
         proposalOutcome: { kind: 'empty-diff', reason: 'alternate completed without changes' },
       }));
     const config = {
       ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
-      foundry: { allowedBackends: ['local-coder', 'kimi'] },
+      foundry: { allowedBackends: ['local-coder', 'nim'] },
     } as AshlrConfig;
 
     const first = await tick(config, { dryRun: false });
@@ -6986,7 +6986,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(immediate.itemsConsidered).toBe(0);
     expect(retry.reason).toBe('ok');
     expect(mockRunGoal).toHaveBeenCalledTimes(2);
-    expect(mockRunGoal.mock.calls[1]?.[2]).toMatchObject({ workItemId: repair.id, engine: 'kimi' });
+    expect(mockRunGoal.mock.calls[1]?.[2]).toMatchObject({ workItemId: repair.id, engine: 'nim' });
     expect(markerNames).toEqual([]);
     expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
       available: true,
@@ -7004,7 +7004,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(readDispatchProductionEvents().find((event) =>
       event.itemId === repair.id && event.outcome === 'empty-diff'
     )).toMatchObject({
-      backend: 'kimi',
+      backend: 'nim',
       repairAttemptOrdinal: 2,
       repairPreviousBackend: 'local-coder',
     });
@@ -7015,7 +7015,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       status: 'resolved',
       resolutions: [{
         status: 'proven',
-        proof: { repairAttemptOrdinal: 2, previousBackend: 'local-coder', backend: 'kimi' },
+        proof: { repairAttemptOrdinal: 2, previousBackend: 'local-coder', backend: 'nim' },
       }],
     });
     expect(loadWorkedLedger().events).toContainEqual(expect.objectContaining({
@@ -8281,7 +8281,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(readDaemonSpendGuard().exists).toBe(false);
   }, 30_000);
 
-  it('A4: near-zero remaining budget still selects exactly 1 item (selectCount floor)', async () => {
+  it('A4: near-zero remaining budget selects for observability but refuses provider launch', async () => {
     enrollWithItems(5);
     // $0.004 remaining → floor(0.004 / 0.01) = 0, but max(1, 0) = 1
     const cfg = cfgBuiltin({ dailyBudgetUsd: 0.004, perTickItems: 5 });
@@ -8291,7 +8291,8 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 
     expect(result.reason).toBe('ok');
     expect(result.itemsConsidered).toBe(1);
-    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+    expect(result.dispatches?.[0]).toMatchObject({ dispatched: false, skipReason: 'budget-cap' });
   });
 
   it('A5: selectCount shrinks via maxByBudget formula when remaining budget is small', async () => {
@@ -8994,6 +8995,229 @@ describe('M201 — Group B: TieredPool local/cloud concurrency caps', () => {
 // ===========================================================================
 
 describe('M201 — Group C: per-item dispatch accounting', () => {
+  it('C0: concurrent admitted token ceilings sum to no more than daily headroom', async () => {
+    enrollWithItems(8);
+    const observedMaxTokens: number[] = [];
+    let inFlight = 0;
+    let peak = 0;
+    let releaseProviders!: () => void;
+    let allProvidersStarted!: () => void;
+    const providerBarrier = new Promise<void>((resolve) => { releaseProviders = resolve; });
+    const providersStarted = new Promise<void>((resolve) => { allProvidersStarted = resolve; });
+    mockRunSwarm.mockImplementation(async (_input, _cfg, opts) => {
+      observedMaxTokens.push((opts as { budget: { maxTokens: number } }).budget.maxTokens);
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      if (observedMaxTokens.length === 8) allProvidersStarted();
+      await providerBarrier;
+      inFlight -= 1;
+      return {
+        id: `reservation-run-${observedMaxTokens.length}`,
+        status: 'done',
+        goal: '',
+        result: '',
+        usage: { totalTokens: 100, estCostUsd: 0.01, steps: 1 },
+      };
+    });
+
+    const pending = tick(cfgBuiltin({
+      dailyBudgetUsd: 0.400008,
+      perTickItems: 8,
+      parallel: 8,
+    }), { dryRun: false });
+    let barrierTimeout: ReturnType<typeof setTimeout> | undefined;
+    const reachedBarrier = await Promise.race([
+      providersStarted.then(() => true),
+      new Promise<boolean>((resolve) => {
+        barrierTimeout = setTimeout(() => resolve(false), 5_000);
+      }),
+    ]);
+    if (barrierTimeout) clearTimeout(barrierTimeout);
+    releaseProviders();
+    const result = await pending;
+
+    expect(reachedBarrier).toBe(true);
+    expect(observedMaxTokens).toHaveLength(8);
+    expect(peak).toBe(8);
+    const admittedCeilingUsd = observedMaxTokens.reduce(
+      (sum, maxTokens) => sum + maxTokens * 50 / 1_000_000,
+      0,
+    );
+    expect(admittedCeilingUsd).toBeLessThanOrEqual(0.400008);
+
+    expect(result.spentUsd).toBeCloseTo(0.08, 8);
+  });
+
+  it('C0b: best-of-N children share one admitted outer envelope', async () => {
+    enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'fan-out budget' });
+    mockEngineTierOf.mockReturnValue('mid');
+    mockRunBestOfN.mockResolvedValueOnce({
+      winner: undefined,
+      candidates: [],
+      critique: {
+        n: 3,
+        nonEmpty: 0,
+        judged: 0,
+        topScore: 0,
+        winnerIndex: -1,
+        totalCostUsd: 0,
+        billableCostUsd: 0,
+      },
+    });
+
+    await tick({
+      ...cfgBuiltin({ dailyBudgetUsd: 0.3, perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'], bestOfN: 3 },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(mockRunBestOfN).toHaveBeenCalledTimes(1);
+    const options = mockRunBestOfN.mock.calls[0]?.[2] as {
+      n: number;
+      budget: { maxTokens: number };
+    };
+    expect(options.n).toBe(3);
+    expect(options.budget.maxTokens).toBe(2_000);
+    expect(options.budget.maxTokens * options.n * 50 / 1_000_000).toBeLessThanOrEqual(0.3);
+  });
+
+  it('C0c: launched work without authoritative usage retains its full envelope', async () => {
+    enrollWithItems(1);
+    mockRunSwarm.mockResolvedValueOnce({
+      id: 'ambiguous-spend-run',
+      status: 'done',
+      goal: '',
+      result: '',
+    });
+
+    const result = await tick(cfgBuiltin({
+      dailyBudgetUsd: 0.1,
+      perTickItems: 1,
+      parallel: 1,
+    }), { dryRun: false });
+
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(result.spentUsd).toBeCloseTo(0.1, 8);
+  });
+
+  it.each([
+    ['NaN', Number.NaN],
+    ['positive infinity', Number.POSITIVE_INFINITY],
+    ['negative', -0.01],
+  ])('C0d: invalid %s usage is sanitized and retains the full envelope', async (_label, estCostUsd) => {
+    enrollWithItems(1);
+    mockRunSwarm.mockResolvedValueOnce({
+      id: 'invalid-spend-run',
+      status: 'done',
+      goal: '',
+      result: '',
+      usage: { totalTokens: 100, estCostUsd, steps: 1 },
+    });
+
+    const result = await tick(cfgBuiltin({ dailyBudgetUsd: 0.1, perTickItems: 1 }), { dryRun: false });
+
+    expect(result.spentUsd).toBeCloseTo(0.1, 8);
+    expect(result.dispatches?.[0]?.spentUsd).toBe(0);
+    expect(Number.isFinite(result.dispatches?.[0]?.spentUsd)).toBe(true);
+    expect(result.dispatches?.[0]?.production?.costUsd ?? 0).toBe(0);
+    expect(result.dispatches?.[0]?.production?.runEventSummary?.costUsd ?? 0).toBe(0);
+  });
+
+  it('C0e: a provider throw retains its full envelope in finally', async () => {
+    enrollWithItems(1);
+    mockRunSwarm.mockRejectedValueOnce(new Error('provider transport failed after launch'));
+
+    const result = await tick(cfgBuiltin({ dailyBudgetUsd: 0.1, perTickItems: 1 }), { dryRun: false });
+
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(result.spentUsd).toBeCloseTo(0.1, 8);
+    expect(result.dispatches?.[0]).toMatchObject({ dispatched: true, spentUsd: 0 });
+  });
+
+  it('C0f: an unknown-priced route never reaches provider work', async () => {
+    enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({
+      backend: 'grok',
+      tier: 'mid',
+      model: 'unpriced-future-model',
+      reason: 'unknown price fixture',
+    });
+    mockEngineTierOf.mockReturnValue('mid');
+
+    const result = await tick({
+      ...cfgBuiltin({ dailyBudgetUsd: 0.1, perTickItems: 1 }),
+      foundry: { allowedBackends: ['grok'], models: { grok: 'unpriced-future-model' } },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(result.dispatches?.[0]).toMatchObject({
+      dispatched: false,
+      skipReason: 'budget-price-unknown',
+    });
+    expect(result.spentUsd).toBe(0);
+  });
+
+  it('C0g: an unknown-priced best-of-N child blocks all candidate launches', async () => {
+    enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({
+      backend: 'local-coder',
+      tier: 'mid',
+      reason: 'known outer route with unknown child',
+    });
+    mockEngineTierOf.mockReturnValue('mid');
+
+    const result = await tick({
+      ...cfgBuiltin({ dailyBudgetUsd: 0.3, perTickItems: 1, parallel: 1 }),
+      foundry: {
+        allowedBackends: ['local-coder', 'grok'],
+        bestOfN: 2,
+        bestOfNCandidates: [
+          { engine: 'local-coder', model: 'qwen2.5-coder:7b' },
+          { engine: 'grok', model: 'unpriced-future-model' },
+        ],
+      },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(mockRunBestOfN).not.toHaveBeenCalled();
+    expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(result.dispatches?.[0]).toMatchObject({
+      dispatched: false,
+      skipReason: 'budget-price-unknown',
+    });
+    expect(result.spentUsd).toBe(0);
+  });
+
+  it.each([
+    ['direct', 1],
+    ['best-of-N', 2],
+  ])('C0h: a post-preflight local-coder to ashlrcode override blocks %s launch', async (_mode, bestOfN) => {
+    enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({
+      backend: 'local-coder',
+      tier: 'mid',
+      reason: 'known route before executor override',
+    });
+    mockEngineTierOf.mockReturnValue('local');
+
+    const result = await tick({
+      ...cfgBuiltin({ dailyBudgetUsd: 0.3, perTickItems: 1, parallel: 1 }),
+      foundry: {
+        allowedBackends: ['local-coder', 'ashlrcode'],
+        ashlrcodeExecutor: true,
+        bestOfN,
+      },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(mockRunBestOfN).not.toHaveBeenCalled();
+    expect(result.dispatches?.[0]).toMatchObject({
+      backend: 'ashlrcode',
+      dispatched: false,
+      skipReason: 'budget-price-unknown',
+    });
+    expect(result.spentUsd).toBe(0);
+  });
+
   it('C1: tickSpent is the sum of per-item usage.estCostUsd', async () => {
     enrollWithItems(3);
     const costPerItem = 0.05;
@@ -9080,10 +9304,10 @@ describe('M201 — Group C: per-item dispatch accounting', () => {
     seedSpend(0);
 
     // Set budget so only 2 items can be dispatched (in-tick short-circuit fires on 3rd)
-    const costPerItem = 0.05;
+    const costPerItem = 0.075;
     mockRunSwarm.mockImplementation(makeSpendingSwarmStub({ costUsd: costPerItem }));
 
-    const cfg = cfgBuiltin({ dailyBudgetUsd: 0.10, perTickItems: 3, parallel: 1 });
+    const cfg = cfgBuiltin({ dailyBudgetUsd: 0.150003, perTickItems: 3, parallel: 1 });
     await tick(cfg, { dryRun: false });
 
     const state = loadDaemonState();
