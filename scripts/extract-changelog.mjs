@@ -17,15 +17,28 @@ const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
 const changelog = readFileSync(join(root, 'CHANGELOG.md'), 'utf8');
 
 const version = process.argv[2] ?? pkg.version;
-const headingRe = new RegExp(`^## \\[${version.replace(/\./g, '\\.')}\\][^\\n]*$`, 'm');
-const match = headingRe.exec(changelog);
-if (!match) {
+const canonicalVersionRe = /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/;
+if (typeof version !== 'string' || version.length > 64 || !canonicalVersionRe.test(version)) {
+  console.error('extract-changelog: version must be canonical X.Y.Z SemVer');
+  process.exit(1);
+}
+
+// Match the already-validated version as literal text. A release heading may
+// be bare or use the repository's exact em-dash metadata separator; no argv
+// bytes are ever compiled as a regular expression.
+const heading = `## [${version}]`;
+const lines = changelog.split('\n');
+const matchingHeadings = lines.flatMap((line, index) =>
+  line === heading || line.startsWith(`${heading} — `) ? [index] : []
+);
+if (matchingHeadings.length !== 1) {
   console.error(`extract-changelog: no "## [${version}]" section in CHANGELOG.md`);
   process.exit(1);
 }
-const start = match.index + match[0].length;
-const next = changelog.slice(start).search(/^## \[/m);
-const body = (next === -1 ? changelog.slice(start) : changelog.slice(start, start + next)).trim();
+const start = matchingHeadings[0] + 1;
+const nextOffset = lines.slice(start).findIndex((line) => line.startsWith('## ['));
+const end = nextOffset === -1 ? lines.length : start + nextOffset;
+const body = lines.slice(start, end).join('\n').trim();
 if (!body) {
   console.error(`extract-changelog: "## [${version}]" section is empty`);
   process.exit(1);

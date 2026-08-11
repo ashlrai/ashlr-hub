@@ -14,19 +14,25 @@ import { describe, expect, it } from 'vitest';
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..');
 const workflowText = readFileSync(resolve(repoRoot, '.github/workflows/release.yml'), 'utf8');
+const releaseDocs = readFileSync(resolve(repoRoot, 'docs/RELEASING.md'), 'utf8');
 const workflow = parse(workflowText) as Record<string, unknown>;
 const jobs = workflow.jobs as Record<string, Record<string, unknown>>;
 const publish = jobs.publish;
 const steps = publish.steps as Array<Record<string, unknown>>;
+const release = jobs.release;
+const releaseSteps = release.steps as Array<Record<string, unknown>>;
 const checkout = steps[0]!;
 const admission = steps[1]!;
-const actionRefs = steps.flatMap((step) => (typeof step.uses === 'string' ? [step.uses] : []));
+const actionRefs = [...steps, ...releaseSteps]
+  .flatMap((step) => (typeof step.uses === 'string' ? [step.uses] : []));
 
 describe('M479 npm release workflow supply-chain admission', () => {
   it('pins every third-party action to a reviewed immutable commit', () => {
     expect(actionRefs).toEqual([
       'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
       'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020',
+      'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
+      'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c',
     ]);
 
     for (const ref of actionRefs) {
@@ -40,6 +46,12 @@ describe('M479 npm release workflow supply-chain admission', () => {
     );
     expect(workflowText).toContain(
       'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0',
+    );
+    expect(workflowText).toContain(
+      'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1',
+    );
+    expect(workflowText).toContain(
+      'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1',
     );
   });
 
@@ -74,31 +86,52 @@ describe('M479 npm release workflow supply-chain admission', () => {
     expect(run.match(/\bexit 1\b/g)).toHaveLength(3);
   });
 
-  it('runs admission before dependency install and every release side effect', () => {
+  it('runs admission before dependency install and npm publish, then releases in a dependent job', () => {
     const admissionIndex = steps.indexOf(admission);
     const installIndex = steps.findIndex((step) => step.run === 'npm ci');
     const publishIndex = steps.findIndex((step) =>
       String(step.run ?? '').includes('npm publish --provenance'),
     );
-    const releaseIndex = steps.findIndex((step) =>
+    const releaseIndex = releaseSteps.findIndex((step) =>
       String(step.run ?? '').includes('gh release create'),
     );
 
     expect(admissionIndex).toBe(1);
     expect(installIndex).toBeGreaterThan(admissionIndex);
     expect(publishIndex).toBeGreaterThan(installIndex);
-    expect(releaseIndex).toBeGreaterThan(publishIndex);
+    expect(release.needs).toBe('publish');
+    expect(releaseIndex).toBeGreaterThan(-1);
     expect(String(admission.run)).not.toMatch(/npm publish|gh release create|NPM_TOKEN/);
   });
 
   it('preserves explicit tag activation, native CI, provenance, and version gates', () => {
     expect(workflowText).toContain('tags: ["v*"]');
-    expect(jobs.verify).toMatchObject({ uses: './.github/workflows/ci.yml' });
+    expect(workflow.permissions).toEqual({});
+    expect(jobs.verify).toMatchObject({
+      uses: './.github/workflows/ci.yml',
+      permissions: { contents: 'read' },
+    });
     expect(publish.needs).toBe('verify');
-    expect(publish.permissions).toEqual({ contents: 'write', 'id-token': 'write' });
+    expect(publish.permissions).toEqual({ contents: 'read', 'id-token': 'write' });
+    expect(release.permissions).toEqual({ contents: 'write' });
     expect(workflowText).toContain('node scripts/check-version.mjs');
-    expect(workflowText).toContain('node scripts/extract-changelog.mjs > release-notes.md');
+    expect(workflowText).toContain(
+      'node scripts/extract-changelog.mjs > "$RUNNER_TEMP/release-notes.md"',
+    );
     expect(workflowText).toContain('npm publish --provenance --access public');
-    expect(workflowText).toContain('gh release create "$GITHUB_REF_NAME"');
+    expect(workflowText).toContain('gh release create "$tag"');
+  });
+
+  it('documents manual release recovery without retrying an accepted npm version', () => {
+    expect(releaseDocs).toContain('npm accepted the version but the `publish` job later concluded failed');
+    expect(releaseDocs).toContain('Do not use **Re-run failed jobs**');
+    expect(releaseDocs).toContain('After the integrity and provenance checks above');
+    expect(releaseDocs).toContain('clean checkout of the exact tag and its exact extracted');
+    expect(releaseDocs).toContain('even when the seven-day handoff\n   artifact has not expired');
+    expect(releaseDocs).toContain('set -euo pipefail\n   version=3.2.0\n   release_tag="v${version}"');
+    expect(releaseDocs).toContain('git rev-list -n 1 "$release_tag"');
+    expect(releaseDocs).toContain(
+      'gh release create "$release_tag" --verify-tag --title "$release_tag" --notes-file "$release_notes"',
+    );
   });
 });
