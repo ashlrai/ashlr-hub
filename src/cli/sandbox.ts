@@ -29,6 +29,10 @@ import type {
   EnrollmentRegistrySnapshot,
   PolicyMutationResult,
 } from '../core/sandbox/policy.js';
+import {
+  argsRequestLocusFirm,
+  maybeOfferLocusFirm,
+} from './locus-firm-offer.js';
 
 // ---------------------------------------------------------------------------
 // ANSI helpers (non-TTY safe)
@@ -412,14 +416,24 @@ export async function cmdEnroll(args: string[]): Promise<number> {
   }
 
   if (sub === 'add') {
-    const repo = args[1];
+    // Positional repo is first non-flag after sub; boolean flags may appear anywhere.
+    const repo = args.slice(1).find((a) => !a.startsWith('--'));
     if (!repo) {
-      console.error(red('error: ') + 'Usage: ashlr enroll add <repo>');
+      console.error(red('error: ') + 'Usage: ashlr enroll add <repo> [--locus-firm] [--yes]');
       return 2;
     }
     const policy = await loadPolicy();
     if (!policy) { moduleNotBuilt('enroll add'); return 1; }
     try {
+      // First-repo gate for firm soft-offer (before enroll mutates the registry).
+      // Degraded/empty registry → treat as zero enrolled so firm can still be offered.
+      let beforeCount = 0;
+      try {
+        const registry = policy.readEnrollmentRegistry();
+        if (registry.state === 'ready') beforeCount = registry.repos.length;
+      } catch {
+        beforeCount = 0;
+      }
       const result = policy.enroll(repo);
       // Older test doubles returned void; real policy mutators return a result.
       const failure = result === undefined ? null : policyMutationFailure(result, 'Enrollment');
@@ -428,6 +442,18 @@ export async function cmdEnroll(args: string[]): Promise<number> {
         return 1;
       }
       console.log(green('✓') + ` Enrolled: ${cyan(repo)}`);
+
+      // Soft-offer Locus firm on FIRST successful enrollment only. Never forces
+      // on CI/tests: non-TTY / --yes requires --locus-firm or ASHLR_LOCUS_FIRM=1.
+      if (beforeCount === 0) {
+        const yes = args.includes('--yes') || !process.stdin.isTTY;
+        await maybeOfferLocusFirm({
+          yes,
+          locusFirmFlag: argsRequestLocusFirm(args),
+          context: 'enroll-first',
+          isInteractive: Boolean(process.stdin.isTTY) && !args.includes('--yes'),
+        });
+      }
       return 0;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
