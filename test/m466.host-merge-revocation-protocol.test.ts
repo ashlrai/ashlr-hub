@@ -367,7 +367,12 @@ describe('M466 durable host merge cancellation and revocation protocol foundatio
     const [loser] = attempts.filter(({ result }) => result.status !== 'applied');
     expect(loser).toBeDefined();
     if (loser.result.status === 'degraded') {
-      expect(loser.result).toMatchObject({ reason: 'state-lock-contended' });
+      // The competing lock's create/release also changes the authority
+      // directory snapshot, so the stable reader may fail closed first.
+      expect([
+        'state-lock-contended',
+        'state-read-changed-during-read',
+      ]).toContain(loser.result.reason);
       expect(transitionHostMergeRevocation({
         ...common,
         action: loser.action,
