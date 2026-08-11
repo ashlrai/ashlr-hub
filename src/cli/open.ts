@@ -34,6 +34,7 @@ interface WindowsSystemLaunchers {
 
 interface FireOptions {
   cwd?: string;
+  windowsVerbatimArguments?: true;
 }
 
 /**
@@ -60,6 +61,9 @@ function fire(
     try {
       const child = spawn(cmd, [...args], {
         ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+        ...(options.windowsVerbatimArguments === true
+          ? { windowsVerbatimArguments: true }
+          : {}),
         detached: true,
         shell: false,
         stdio: 'ignore',
@@ -282,11 +286,16 @@ export function openInTerminal(path: string): Promise<boolean> {
     // PATH-resolved. Without native package/signature discovery it is not a
     // trustworthy executable boundary, so use only the canonical system cmd.
     // A direct detached cmd with ignored stdio can immediately exit. Use the
-    // trusted outer cmd only to execute a fixed `start` command. The only
-    // derived value in command text is the already-canonical System32 cmd path;
-    // the user-controlled target exists solely in spawn's structural cwd.
+    // trusted outer cmd only to execute a fixed `start` command. Node must pass
+    // the explicitly outer-quoted command verbatim: that is the exact shape
+    // proven by hosted Windows parser acceptance. The only derived value in
+    // command text is the already-canonical System32 cmd path; the
+    // user-controlled target exists solely in spawn's structural cwd.
     const startCommand = `start "" "${launchers.cmd}" /d /k`;
-    return fire(launchers.cmd, ['/d', '/v:off', '/s', '/c', startCommand], { cwd });
+    return fire(launchers.cmd, ['/d', '/v:off', '/s', '/c', `"${startCommand}"`], {
+      cwd,
+      windowsVerbatimArguments: true,
+    });
   }
   return fire('x-terminal-emulator', ['--working-directory', abs]);
 }

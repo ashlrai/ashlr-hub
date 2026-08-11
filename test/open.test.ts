@@ -222,8 +222,14 @@ describe('Windows launcher command shapes', () => {
     expect(dispatched).toBe(true);
     expect(launcherMocks.spawn).toHaveBeenCalledWith(
       'C:\\Windows\\System32\\cmd.exe',
-      ['/d', '/v:off', '/s', '/c', 'start "" "C:\\Windows\\System32\\cmd.exe" /d /k'],
-      { cwd: target, detached: true, shell: false, stdio: 'ignore' },
+      ['/d', '/v:off', '/s', '/c', '"start "" "C:\\Windows\\System32\\cmd.exe" /d /k"'],
+      {
+        cwd: target,
+        detached: true,
+        shell: false,
+        stdio: 'ignore',
+        windowsVerbatimArguments: true,
+      },
     );
     const [, args, options] = launcherMocks.spawn.mock.calls[0] ?? [];
     expect(args).not.toContain(target);
@@ -243,9 +249,56 @@ describe('Windows launcher command shapes', () => {
     expect(dispatched).toBe(true);
     expect(launcherMocks.spawn).toHaveBeenCalledWith(
       'C:\\Windows\\System32\\cmd.exe',
-      ['/d', '/v:off', '/s', '/c', 'start "" "C:\\Windows\\System32\\cmd.exe" /d /k'],
-      { cwd: 'C:\\repo', detached: true, shell: false, stdio: 'ignore' },
+      ['/d', '/v:off', '/s', '/c', '"start "" "C:\\Windows\\System32\\cmd.exe" /d /k"'],
+      {
+        cwd: 'C:\\repo',
+        detached: true,
+        shell: false,
+        stdio: 'ignore',
+        windowsVerbatimArguments: true,
+      },
     );
+  });
+
+  it.each([
+    'C:\\repo\\%COMSPEC%',
+    'C:\\repo\\!PATH!',
+    'C:\\repo\\(whoami)',
+    'C:\\repo\\caret ^ ampersand &',
+  ])('keeps hostile-looking terminal cwd data out of fixed cmd text: %s', async (target) => {
+    installWindowsFs({ [target]: 'directory' });
+
+    const dispatched = await withPlatform('win32', () =>
+      withSystemRoot('C:\\Windows', () => openInTerminal(target)));
+
+    expect(dispatched).toBe(true);
+    expect(launcherMocks.spawn).toHaveBeenCalledWith(
+      'C:\\Windows\\System32\\cmd.exe',
+      ['/d', '/v:off', '/s', '/c', '"start "" "C:\\Windows\\System32\\cmd.exe" /d /k"'],
+      {
+        cwd: target,
+        detached: true,
+        shell: false,
+        stdio: 'ignore',
+        windowsVerbatimArguments: true,
+      },
+    );
+    const [, args] = launcherMocks.spawn.mock.calls[0] ?? [];
+    expect(JSON.stringify(args)).not.toContain(target);
+  });
+
+  it.each([
+    'C:\\repo\\quote"injection',
+    'C:\\repo\\pipe|injection',
+    'C:\\repo\\angle<injection',
+  ])('rejects terminal cwd data that cannot cross the Windows argv boundary: %s', async (target) => {
+    installWindowsFs({ [target]: 'directory' });
+
+    const dispatched = await withPlatform('win32', () =>
+      withSystemRoot('C:\\Windows', () => openInTerminal(target)));
+
+    expect(dispatched).toBe(false);
+    expect(launcherMocks.spawn).not.toHaveBeenCalled();
   });
 
   it.each([
