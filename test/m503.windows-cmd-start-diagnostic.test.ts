@@ -29,6 +29,9 @@ const EXECUTION_LIMIT_MS = 4_000;
 const TERMINATION_LIMIT_MS = 2_000;
 const MATRIX_LIMIT_MS = 35_000;
 const CLOCK_SKEW_MS = 2_000;
+const CWD_REMOVAL_LIMIT_MS = 750;
+const CWD_REMOVAL_RETRY_DELAY_MS = 50;
+const JSON_RECORD_LIMIT_BYTES = 16 * 1024;
 
 interface ProcessSample {
   pid: number;
@@ -82,9 +85,26 @@ interface VariantReport {
   retentionQueryErrors: string[];
   cwdRemovalAttempted: boolean;
   cwdRemoved: boolean;
+  cwdCleanupState:
+    "not_attempted" | "removed" | "ebusy_after_exact_process_clear" | "failed";
+  cwdCleanupAttempts: number;
+  cwdCleanupError?: string;
   cleanupError?: string;
   finishedAt?: string;
   durationMs?: number;
+}
+
+interface CwdCleanupResult {
+  attempts: number;
+  error?: unknown;
+  removed: boolean;
+  state: VariantReport["cwdCleanupState"];
+}
+
+interface MatrixSummary<TReport> {
+  failure?: string;
+  matrixDurationMs: number;
+  reports: TReport[];
 }
 
 const variants: VariantDefinition[] = [
@@ -129,6 +149,46 @@ function message(error: unknown): string {
   return error instanceof Error
     ? `${error.name}: ${error.message}`
     : String(error);
+}
+
+function boundedJson(
+  value: unknown,
+  fallback: Record<string, unknown>,
+): string {
+  const encoded = JSON.stringify(value);
+  const encodedBytes = Buffer.byteLength(encoded);
+  if (encodedBytes <= JSON_RECORD_LIMIT_BYTES) return encoded;
+  return JSON.stringify({
+    ...fallback,
+    originalBytes: encodedBytes,
+    truncated: true,
+  });
+}
+
+function emitDiagnosticRecord(
+  label: string,
+  value: unknown,
+  fallback: Record<string, unknown>,
+  logger: (label: string, json: string) => void = console.info,
+): void {
+  logger(label, boundedJson(value, fallback));
+}
+
+function preservePrimaryFailure(
+  primaryFailure: unknown,
+  cleanupFailure: unknown,
+): unknown {
+  if (primaryFailure !== undefined) {
+    if (primaryFailure instanceof Error && cleanupFailure !== undefined) {
+      Object.defineProperty(primaryFailure, "cleanupError", {
+        configurable: true,
+        enumerable: false,
+        value: cleanupFailure,
+      });
+    }
+    return primaryFailure;
+  }
+  return cleanupFailure;
 }
 
 function delay(ms: number): Promise<void> {
@@ -320,7 +380,7 @@ async function cleanupProcesses(options: {
   powershell: string;
   report: VariantReport;
   startedAtMs: number;
-}): Promise<void> {
+}): Promise<boolean> {
   const { child, cmd, id, matrixDeadlineMs, powershell, report, startedAtMs } =
     options;
   const terminationDeadline = Math.min(
@@ -397,6 +457,102 @@ async function cleanupProcesses(options: {
       "could not verify a still-open outer cmd process for exact-PID cleanup",
     );
   }
+  return report.retentionQueryErrors.length === 0;
+}
+
+async function removeVariantCwd(options: {
+  cwd: string;
+  exactProcessClear: boolean;
+  matrixDeadlineMs: number;
+  delayFn?: (ms: number) => Promise<void>;
+  existsFn?: (path: string) => boolean;
+  nowFn?: () => number;
+  removeFn?: (path: string) => void;
+}): Promise<CwdCleanupResult> {
+  const {
+    cwd,
+    exactProcessClear,
+    matrixDeadlineMs,
+    delayFn = delay,
+    existsFn = existsSync,
+    nowFn = Date.now,
+    removeFn = (path) =>
+      rmSync(path, {
+        recursive: true,
+        force: true,
+        maxRetries: 0,
+      }),
+  } = options;
+  const removalDeadline = Math.min(
+    nowFn() + CWD_REMOVAL_LIMIT_MS,
+    matrixDeadlineMs,
+  );
+  let attempts = 0;
+  let lastError: unknown;
+
+  do {
+    attempts += 1;
+    try {
+      removeFn(cwd);
+      if (!existsFn(cwd)) {
+        return { attempts, removed: true, state: "removed" };
+      }
+      lastError = new Error("diagnostic cwd still exists after removal");
+    } catch (error) {
+      lastError = error;
+      if ((error as NodeJS.ErrnoException).code !== "EBUSY") break;
+    }
+    const remainingMs = removalDeadline - nowFn();
+    if (remainingMs <= 0) break;
+    await delayFn(Math.min(CWD_REMOVAL_RETRY_DELAY_MS, remainingMs));
+  } while (nowFn() < removalDeadline);
+
+  const retainedEbusy =
+    (lastError as NodeJS.ErrnoException | undefined)?.code === "EBUSY";
+  return {
+    attempts,
+    error: lastError,
+    removed: false,
+    state:
+      retainedEbusy && exactProcessClear
+        ? "ebusy_after_exact_process_clear"
+        : "failed",
+  };
+}
+
+async function executeDiagnosticMatrix<TDefinition, TReport>(options: {
+  definitions: readonly TDefinition[];
+  emit: (kind: "variant" | "summary", value: unknown) => void;
+  run: (
+    definition: TDefinition,
+    publish: (report: TReport) => void,
+  ) => Promise<void>;
+  validate: (reports: TReport[], matrixDurationMs: number) => void;
+}): Promise<void> {
+  const { definitions, emit, run, validate } = options;
+  const matrixStartedAtMs = Date.now();
+  const reports: TReport[] = [];
+  let matrixFailure: unknown;
+
+  try {
+    for (const definition of definitions) {
+      await run(definition, (report) => {
+        reports.push(report);
+        emit("variant", report);
+      });
+    }
+    validate(reports, Date.now() - matrixStartedAtMs);
+  } catch (error) {
+    matrixFailure = error;
+    throw error;
+  } finally {
+    const summary: MatrixSummary<TReport> = {
+      matrixDurationMs: Date.now() - matrixStartedAtMs,
+      reports,
+    };
+    if (matrixFailure !== undefined) summary.failure = message(matrixFailure);
+    emit("summary", summary);
+  }
 }
 
 async function runVariant(
@@ -404,7 +560,8 @@ async function runVariant(
   cmd: string,
   powershell: string,
   matrixDeadlineMs: number,
-): Promise<VariantReport> {
+  publishObservation: (report: VariantReport) => void,
+): Promise<void> {
   const id = randomUUID();
   const cwd = realpathSync.native(
     mkdtempSync(join(tmpdir(), `ashlr-m503-${id}-`)),
@@ -431,12 +588,15 @@ async function runVariant(
     retentionQueryErrors: [],
     cwdRemovalAttempted: false,
     cwdRemoved: false,
+    cwdCleanupState: "not_attempted",
+    cwdCleanupAttempts: 0,
   };
   const stdout = createCappedCapture();
   const stderr = createCappedCapture();
   let child: ChildProcess | undefined;
   let primaryFailure: unknown;
   let cleanupFailure: unknown;
+  let exactProcessClear = false;
 
   try {
     try {
@@ -505,7 +665,7 @@ async function runVariant(
     report.stderrTruncated = stderr.truncated();
 
     try {
-      await cleanupProcesses({
+      exactProcessClear = await cleanupProcesses({
         child,
         cmd,
         id,
@@ -518,42 +678,47 @@ async function runVariant(
       cleanupFailure = error;
     }
 
+    if (cleanupFailure !== undefined)
+      report.cleanupError = message(cleanupFailure);
+    // Publish the UUID/name mapping and all process evidence before touching
+    // the cwd. A Windows directory-release race cannot erase argv evidence.
+    publishObservation(report);
+
     report.cwdRemovalAttempted = true;
-    try {
-      rmSync(cwd, {
-        recursive: true,
-        force: true,
-        maxRetries: 5,
-        retryDelay: 25,
-      });
-      report.cwdRemoved = !existsSync(cwd);
-      if (!report.cwdRemoved && cleanupFailure === undefined) {
-        cleanupFailure = new Error(
-          "diagnostic cwd still exists after bounded removal",
-        );
-      }
-    } catch (error) {
-      report.cwdRemoved = false;
-      if (cleanupFailure === undefined) cleanupFailure = error;
-    }
+    const cwdCleanup = await removeVariantCwd({
+      cwd,
+      exactProcessClear,
+      matrixDeadlineMs,
+    });
+    report.cwdCleanupAttempts = cwdCleanup.attempts;
+    report.cwdCleanupState = cwdCleanup.state;
+    report.cwdRemoved = cwdCleanup.removed;
+    if (cwdCleanup.error !== undefined)
+      report.cwdCleanupError = message(cwdCleanup.error);
+    if (cwdCleanup.state === "failed" && cleanupFailure === undefined)
+      cleanupFailure = cwdCleanup.error;
     if (cleanupFailure !== undefined)
       report.cleanupError = message(cleanupFailure);
     report.finishedAt = new Date().toISOString();
     report.durationMs = Date.now() - startedAtMs;
+    emitDiagnosticRecord(
+      "[M503 cmd/start cleanup]",
+      {
+        cleanupError: report.cleanupError,
+        cwdCleanupAttempts: report.cwdCleanupAttempts,
+        cwdCleanupError: report.cwdCleanupError,
+        cwdCleanupState: report.cwdCleanupState,
+        cwdRemoved: report.cwdRemoved,
+        id: report.id,
+        name: report.name,
+        retainedAfterCleanup: report.retainedAfterCleanup,
+      },
+      { id: report.id, name: report.name, record: "cleanup" },
+    );
   }
 
-  if (primaryFailure !== undefined) {
-    if (primaryFailure instanceof Error && cleanupFailure !== undefined) {
-      Object.defineProperty(primaryFailure, "cleanupError", {
-        configurable: true,
-        enumerable: false,
-        value: cleanupFailure,
-      });
-    }
-    throw primaryFailure;
-  }
-  if (cleanupFailure !== undefined) throw cleanupFailure;
-  return report;
+  const failure = preservePrimaryFailure(primaryFailure, cleanupFailure);
+  if (failure !== undefined) throw failure;
 }
 
 suite("bounded Windows cmd.exe/START diagnostic matrix", () => {
@@ -573,42 +738,165 @@ suite("bounded Windows cmd.exe/START diagnostic matrix", () => {
           "powershell.exe",
         ),
       );
-      const reports: VariantReport[] = [];
-
-      for (const definition of variants) {
-        reports.push(
-          await runVariant(definition, cmd, powershell, matrixDeadlineMs),
-        );
-      }
-
-      const matrixDurationMs = Date.now() - matrixStartedAtMs;
-      console.info(
-        "[M503 cmd/start diagnostic]",
-        JSON.stringify({ matrixDurationMs, reports }),
-      );
-      expect(reports.map((report) => report.name)).toEqual([
-        "direct child",
-        "outer /s",
-        "current",
-        "current without /s",
-        "Node-canonical explicit outer quotes",
-      ]);
-      expect(new Set(reports.map((report) => report.id)).size).toBe(5);
-      expect(new Set(reports.map((report) => report.cwd)).size).toBe(5);
-      expect(
-        reports.every(
-          (report) => report.cwdRemovalAttempted && report.cwdRemoved,
-        ),
-      ).toBe(true);
-      expect(
-        reports.every(
-          (report) =>
-            Buffer.byteLength(report.stdout) <= OUTPUT_LIMIT_BYTES &&
-            Buffer.byteLength(report.stderr) <= OUTPUT_LIMIT_BYTES,
-        ),
-      ).toBe(true);
-      expect(matrixDurationMs).toBeLessThanOrEqual(MATRIX_LIMIT_MS);
+      await executeDiagnosticMatrix<VariantDefinition, VariantReport>({
+        definitions: variants,
+        emit(kind, value) {
+          const report = value as Partial<VariantReport>;
+          const summary = value as Partial<MatrixSummary<VariantReport>>;
+          emitDiagnosticRecord(
+            kind === "variant"
+              ? "[M503 cmd/start variant]"
+              : "[M503 cmd/start diagnostic]",
+            value,
+            kind === "variant"
+              ? {
+                  closeObserved: report.closeAt !== undefined,
+                  exitObserved: report.exitAt !== undefined,
+                  id: report.id,
+                  name: report.name,
+                  record: "variant",
+                  retainedAfterCleanup: report.retainedAfterCleanup?.length,
+                  sentinelObserved: report.sentinelObserved,
+                }
+              : {
+                  failure: summary.failure,
+                  matrixDurationMs: summary.matrixDurationMs,
+                  record: "summary",
+                  reports: summary.reports?.map((entry) => ({
+                    cwdCleanupState: entry.cwdCleanupState,
+                    id: entry.id,
+                    name: entry.name,
+                    retainedAfterCleanup: entry.retainedAfterCleanup.length,
+                    sentinelObserved: entry.sentinelObserved,
+                  })),
+                },
+          );
+        },
+        async run(definition, publish) {
+          await runVariant(
+            definition,
+            cmd,
+            powershell,
+            matrixDeadlineMs,
+            publish,
+          );
+        },
+        validate(reports, matrixDurationMs) {
+          expect(reports.map((report) => report.name)).toEqual([
+            "direct child",
+            "outer /s",
+            "current",
+            "current without /s",
+            "Node-canonical explicit outer quotes",
+          ]);
+          expect(new Set(reports.map((report) => report.id)).size).toBe(5);
+          expect(new Set(reports.map((report) => report.cwd)).size).toBe(5);
+          expect(
+            reports.every(
+              (report) =>
+                report.cwdRemovalAttempted &&
+                (report.cwdRemoved ||
+                  report.cwdCleanupState === "ebusy_after_exact_process_clear"),
+            ),
+          ).toBe(true);
+          expect(
+            reports.every((report) => report.retainedAfterCleanup.length === 0),
+          ).toBe(true);
+          expect(
+            reports.every(
+              (report) =>
+                Buffer.byteLength(report.stdout) <= OUTPUT_LIMIT_BYTES &&
+                Buffer.byteLength(report.stderr) <= OUTPUT_LIMIT_BYTES,
+            ),
+          ).toBe(true);
+          expect(matrixDurationMs).toBeLessThanOrEqual(MATRIX_LIMIT_MS);
+        },
+      });
     },
     MATRIX_LIMIT_MS,
   );
+});
+
+describe("M503 diagnostic harness regressions", () => {
+  it("emits partial variant evidence and a final summary before rethrowing cleanup failure", async () => {
+    const cleanupFailure = new Error("cleanup failed");
+    const emitted: Array<{ kind: string; value: unknown }> = [];
+
+    await expect(
+      executeDiagnosticMatrix<string, { id: string; name: string }>({
+        definitions: ["first", "second", "unreached"],
+        emit: (kind, value) => emitted.push({ kind, value }),
+        async run(definition, publish) {
+          publish({ id: `uuid-${definition}`, name: definition });
+          if (definition === "second") throw cleanupFailure;
+        },
+        validate: () => {
+          throw new Error("validation must not run after cleanup failure");
+        },
+      }),
+    ).rejects.toBe(cleanupFailure);
+
+    expect(emitted.map(({ kind }) => kind)).toEqual([
+      "variant",
+      "variant",
+      "summary",
+    ]);
+    expect(emitted[0]?.value).toEqual({ id: "uuid-first", name: "first" });
+    expect(emitted[1]?.value).toEqual({ id: "uuid-second", name: "second" });
+    expect(emitted[2]?.value).toMatchObject({
+      failure: "Error: cleanup failed",
+      reports: [
+        { id: "uuid-first", name: "first" },
+        { id: "uuid-second", name: "second" },
+      ],
+    });
+  });
+
+  it("classifies bounded EBUSY as nonfatal only after exact process-clear evidence", async () => {
+    const ebusy = Object.assign(new Error("resource busy"), { code: "EBUSY" });
+    let now = 0;
+    const removeFn = (): never => {
+      throw ebusy;
+    };
+    const delayFn = async (ms: number): Promise<void> => {
+      now += ms;
+    };
+    const common = {
+      cwd: "diagnostic-cwd",
+      delayFn,
+      existsFn: () => true,
+      matrixDeadlineMs: 1_000,
+      nowFn: () => now,
+      removeFn,
+    };
+
+    const exact = await removeVariantCwd({
+      ...common,
+      exactProcessClear: true,
+    });
+    now = 0;
+    const unproven = await removeVariantCwd({
+      ...common,
+      exactProcessClear: false,
+    });
+
+    expect(exact).toMatchObject({
+      removed: false,
+      state: "ebusy_after_exact_process_clear",
+    });
+    expect(unproven).toMatchObject({ removed: false, state: "failed" });
+    expect(exact.attempts).toBeGreaterThan(1);
+    expect(unproven.attempts).toBe(exact.attempts);
+  });
+
+  it("preserves the primary variant failure while retaining cleanup evidence", () => {
+    const primary = new Error("variant observation failed");
+    const cleanup = new Error("cleanup failed");
+
+    expect(preservePrimaryFailure(primary, cleanup)).toBe(primary);
+    expect((primary as Error & { cleanupError?: unknown }).cleanupError).toBe(
+      cleanup,
+    );
+    expect(preservePrimaryFailure(undefined, cleanup)).toBe(cleanup);
+  });
 });
