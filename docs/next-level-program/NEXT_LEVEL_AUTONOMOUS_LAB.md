@@ -314,9 +314,12 @@ shadow trials, and explicit human policy promotion.
 
 ### 0–30 days
 
-- finish the protected 3.2 release and prove installed runtime identity;
-- close the Stage 0A authority gap, then ship First Outcome Mode without
+- recover a green protected baseline; any early 3.2 publication/install proof is
+  diagnostic only and cannot satisfy resident evidence after later source work;
+- close the Stage 0A authority gap, then ship one-shot First Outcome Mode without
   resident-service authority;
+- only after final Stage 0A source, repeat exact-head release, install, activation,
+  and resident identity gates for the resident claim;
 - prune or explicitly defer stale goals and draft PR inventory;
 - run ten genuine tasks in one product and one repository cohort;
 - target at least five accepted PRs and three seven-day-stable outcomes;
