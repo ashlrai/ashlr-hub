@@ -26,8 +26,14 @@ const onWindows = process.platform === "win32";
 const suite = describe.runIf(onWindows);
 const OUTPUT_LIMIT_BYTES = 4 * 1024;
 const EXECUTION_LIMIT_MS = 4_000;
-const TERMINATION_LIMIT_MS = 2_000;
-const MATRIX_LIMIT_MS = 35_000;
+// The first hosted evidence run showed every PowerShell/CIM observer exceeding
+// 1.3 seconds. Two seconds is the smallest practical next observation bound;
+// 750ms remains for exact-PID termination inside the 2.75-second cleanup bound.
+const RETENTION_QUERY_LIMIT_MS = 2_000;
+const TERMINATION_LIMIT_MS = 2_750;
+// Five variants × (4s observe + 2.75s terminate + 0.75s cwd cleanup) = 37.5s.
+// The 40-second matrix ceiling leaves 2.5s for fixed setup/reporting overhead.
+const MATRIX_LIMIT_MS = 40_000;
 const CLOCK_SKEW_MS = 2_000;
 const CWD_REMOVAL_LIMIT_MS = 750;
 const CWD_REMOVAL_RETRY_DELAY_MS = 50;
@@ -105,6 +111,10 @@ interface MatrixSummary<TReport> {
   failure?: string;
   matrixDurationMs: number;
   reports: TReport[];
+}
+
+interface MatrixVariantOutcome {
+  primaryFailure?: unknown;
 }
 
 const variants: VariantDefinition[] = [
@@ -387,9 +397,13 @@ async function cleanupProcesses(options: {
     Date.now() + TERMINATION_LIMIT_MS,
     matrixDeadlineMs,
   );
-  const queryBudget = Math.max(
-    250,
-    Math.min(1_300, terminationDeadline - Date.now()),
+  const terminationRemainingMs = terminationDeadline - Date.now();
+  if (terminationRemainingMs <= 0) {
+    throw new Error("matrix deadline expired before exact retention query");
+  }
+  const queryBudget = Math.min(
+    RETENTION_QUERY_LIMIT_MS,
+    terminationRemainingMs,
   );
   let rows: ProcessSample[] = [];
   try {
@@ -452,12 +466,10 @@ async function cleanupProcesses(options: {
       `${report.retainedAfterCleanup.length} UUID process(es) remained after bounded cleanup`,
     );
   }
-  if (!childClosed(child) && report.retentionQueryErrors.length > 0) {
-    throw new Error(
-      "could not verify a still-open outer cmd process for exact-PID cleanup",
-    );
+  if (report.retentionQueryErrors.length > 0) {
+    throw new Error("could not establish exact UUID process-retention state");
   }
-  return report.retentionQueryErrors.length === 0;
+  return true;
 }
 
 async function removeVariantCwd(options: {
@@ -521,33 +533,64 @@ async function removeVariantCwd(options: {
 }
 
 async function executeDiagnosticMatrix<TDefinition, TReport>(options: {
+  deadlineMs?: number;
   definitions: readonly TDefinition[];
   emit: (kind: "variant" | "summary", value: unknown) => void;
+  nowFn?: () => number;
   run: (
     definition: TDefinition,
     publish: (report: TReport) => void,
-  ) => Promise<void>;
+  ) => Promise<MatrixVariantOutcome>;
   validate: (reports: TReport[], matrixDurationMs: number) => void;
 }): Promise<void> {
-  const { definitions, emit, run, validate } = options;
-  const matrixStartedAtMs = Date.now();
+  const {
+    deadlineMs,
+    definitions,
+    emit,
+    nowFn = Date.now,
+    run,
+    validate,
+  } = options;
+  const matrixStartedAtMs = nowFn();
   const reports: TReport[] = [];
+  let firstPrimaryFailure: unknown;
   let matrixFailure: unknown;
 
   try {
-    for (const definition of definitions) {
-      await run(definition, (report) => {
+    for (const [index, definition] of definitions.entries()) {
+      if (deadlineMs !== undefined && nowFn() >= deadlineMs) {
+        throw new Error(
+          `diagnostic matrix deadline exhausted before variant ${index + 1}`,
+        );
+      }
+      const outcome = await run(definition, (report) => {
         reports.push(report);
         emit("variant", report);
       });
+      if (
+        firstPrimaryFailure === undefined &&
+        outcome.primaryFailure !== undefined
+      ) {
+        firstPrimaryFailure = outcome.primaryFailure;
+      }
     }
-    validate(reports, Date.now() - matrixStartedAtMs);
+    let validationFailure: unknown;
+    try {
+      validate(reports, nowFn() - matrixStartedAtMs);
+    } catch (error) {
+      validationFailure = error;
+    }
+    const completedFailure = preservePrimaryFailure(
+      firstPrimaryFailure,
+      validationFailure,
+    );
+    if (completedFailure !== undefined) throw completedFailure;
   } catch (error) {
     matrixFailure = error;
     throw error;
   } finally {
     const summary: MatrixSummary<TReport> = {
-      matrixDurationMs: Date.now() - matrixStartedAtMs,
+      matrixDurationMs: nowFn() - matrixStartedAtMs,
       reports,
     };
     if (matrixFailure !== undefined) summary.failure = message(matrixFailure);
@@ -561,7 +604,7 @@ async function runVariant(
   powershell: string,
   matrixDeadlineMs: number,
   publishObservation: (report: VariantReport) => void,
-): Promise<void> {
+): Promise<MatrixVariantOutcome> {
   const id = randomUUID();
   const cwd = realpathSync.native(
     mkdtempSync(join(tmpdir(), `ashlr-m503-${id}-`)),
@@ -595,7 +638,8 @@ async function runVariant(
   const stderr = createCappedCapture();
   let child: ChildProcess | undefined;
   let primaryFailure: unknown;
-  let cleanupFailure: unknown;
+  let retentionFailure: unknown;
+  let cwdCleanupFailure: unknown;
   let exactProcessClear = false;
 
   try {
@@ -675,11 +719,11 @@ async function runVariant(
         startedAtMs,
       });
     } catch (error) {
-      cleanupFailure = error;
+      retentionFailure = error;
     }
 
-    if (cleanupFailure !== undefined)
-      report.cleanupError = message(cleanupFailure);
+    if (retentionFailure !== undefined)
+      report.cleanupError = message(retentionFailure);
     // Publish the UUID/name mapping and all process evidence before touching
     // the cwd. A Windows directory-release race cannot erase argv evidence.
     publishObservation(report);
@@ -695,10 +739,10 @@ async function runVariant(
     report.cwdRemoved = cwdCleanup.removed;
     if (cwdCleanup.error !== undefined)
       report.cwdCleanupError = message(cwdCleanup.error);
-    if (cwdCleanup.state === "failed" && cleanupFailure === undefined)
-      cleanupFailure = cwdCleanup.error;
-    if (cleanupFailure !== undefined)
-      report.cleanupError = message(cleanupFailure);
+    if (cwdCleanup.state === "failed") cwdCleanupFailure = cwdCleanup.error;
+    const reportedCleanupFailure = retentionFailure ?? cwdCleanupFailure;
+    if (reportedCleanupFailure !== undefined)
+      report.cleanupError = message(reportedCleanupFailure);
     report.finishedAt = new Date().toISOString();
     report.durationMs = Date.now() - startedAtMs;
     emitDiagnosticRecord(
@@ -717,8 +761,14 @@ async function runVariant(
     );
   }
 
-  const failure = preservePrimaryFailure(primaryFailure, cleanupFailure);
-  if (failure !== undefined) throw failure;
+  if (retentionFailure !== undefined) {
+    // Unknown or retained UUID process state is a hard stop. The first primary
+    // variant error remains authoritative, with the retention failure attached.
+    throw preservePrimaryFailure(primaryFailure, retentionFailure);
+  }
+  return {
+    primaryFailure: preservePrimaryFailure(primaryFailure, cwdCleanupFailure),
+  };
 }
 
 suite("bounded Windows cmd.exe/START diagnostic matrix", () => {
@@ -739,6 +789,7 @@ suite("bounded Windows cmd.exe/START diagnostic matrix", () => {
         ),
       );
       await executeDiagnosticMatrix<VariantDefinition, VariantReport>({
+        deadlineMs: matrixDeadlineMs,
         definitions: variants,
         emit(kind, value) {
           const report = value as Partial<VariantReport>;
@@ -773,7 +824,7 @@ suite("bounded Windows cmd.exe/START diagnostic matrix", () => {
           );
         },
         async run(definition, publish) {
-          await runVariant(
+          return runVariant(
             definition,
             cmd,
             powershell,
@@ -818,23 +869,24 @@ suite("bounded Windows cmd.exe/START diagnostic matrix", () => {
 });
 
 describe("M503 diagnostic harness regressions", () => {
-  it("emits partial variant evidence and a final summary before rethrowing cleanup failure", async () => {
-    const cleanupFailure = new Error("cleanup failed");
+  it("continues after a safely cleared variant failure and rethrows it after the full matrix", async () => {
+    const firstFailure = new Error("first variant failed");
     const emitted: Array<{ kind: string; value: unknown }> = [];
+    let validated = false;
 
     await expect(
       executeDiagnosticMatrix<string, { id: string; name: string }>({
-        definitions: ["first", "second", "unreached"],
+        definitions: ["first", "second"],
         emit: (kind, value) => emitted.push({ kind, value }),
         async run(definition, publish) {
           publish({ id: `uuid-${definition}`, name: definition });
-          if (definition === "second") throw cleanupFailure;
+          return definition === "first" ? { primaryFailure: firstFailure } : {};
         },
         validate: () => {
-          throw new Error("validation must not run after cleanup failure");
+          validated = true;
         },
       }),
-    ).rejects.toBe(cleanupFailure);
+    ).rejects.toBe(firstFailure);
 
     expect(emitted.map(({ kind }) => kind)).toEqual([
       "variant",
@@ -844,11 +896,102 @@ describe("M503 diagnostic harness regressions", () => {
     expect(emitted[0]?.value).toEqual({ id: "uuid-first", name: "first" });
     expect(emitted[1]?.value).toEqual({ id: "uuid-second", name: "second" });
     expect(emitted[2]?.value).toMatchObject({
-      failure: "Error: cleanup failed",
+      failure: "Error: first variant failed",
       reports: [
         { id: "uuid-first", name: "first" },
         { id: "uuid-second", name: "second" },
       ],
+    });
+    expect(validated).toBe(true);
+  });
+
+  it("stops immediately when exact process retention cannot be established", async () => {
+    const retentionUnknown = new Error("retention unknown");
+    const emitted: Array<{ kind: string; value: unknown }> = [];
+    const attempted: string[] = [];
+
+    await expect(
+      executeDiagnosticMatrix<string, { id: string; name: string }>({
+        definitions: ["first", "unsafe", "unreached"],
+        emit: (kind, value) => emitted.push({ kind, value }),
+        async run(definition, publish) {
+          attempted.push(definition);
+          publish({ id: `uuid-${definition}`, name: definition });
+          if (definition === "unsafe") throw retentionUnknown;
+          return {};
+        },
+        validate: () => {
+          throw new Error("validation must not run after unsafe retention");
+        },
+      }),
+    ).rejects.toBe(retentionUnknown);
+
+    expect(attempted).toEqual(["first", "unsafe"]);
+    expect(emitted.map(({ kind }) => kind)).toEqual([
+      "variant",
+      "variant",
+      "summary",
+    ]);
+    expect(emitted.at(-1)?.value).toMatchObject({
+      failure: "Error: retention unknown",
+      reports: [
+        { id: "uuid-first", name: "first" },
+        { id: "uuid-unsafe", name: "unsafe" },
+      ],
+    });
+  });
+
+  it("keeps the first safely cleared primary failure after later failures", async () => {
+    const firstFailure = new Error("first failure");
+    const secondFailure = new Error("second failure");
+    const attempted: string[] = [];
+
+    await expect(
+      executeDiagnosticMatrix<string, { id: string; name: string }>({
+        definitions: ["first", "second", "third"],
+        emit: () => undefined,
+        async run(definition, publish) {
+          attempted.push(definition);
+          publish({ id: `uuid-${definition}`, name: definition });
+          if (definition === "first") return { primaryFailure: firstFailure };
+          if (definition === "second") return { primaryFailure: secondFailure };
+          return {};
+        },
+        validate: () => undefined,
+      }),
+    ).rejects.toBe(firstFailure);
+
+    expect(attempted).toEqual(["first", "second", "third"]);
+  });
+
+  it("stops before starting a variant after the total matrix deadline", async () => {
+    const emitted: Array<{ kind: string; value: unknown }> = [];
+    const attempted: string[] = [];
+    let now = 0;
+
+    await expect(
+      executeDiagnosticMatrix<string, { id: string; name: string }>({
+        deadlineMs: 10,
+        definitions: ["first", "past-deadline"],
+        emit: (kind, value) => emitted.push({ kind, value }),
+        nowFn: () => now,
+        async run(definition, publish) {
+          attempted.push(definition);
+          publish({ id: `uuid-${definition}`, name: definition });
+          now = 10;
+          return {};
+        },
+        validate: () => {
+          throw new Error("validation must not run after deadline exhaustion");
+        },
+      }),
+    ).rejects.toThrow("diagnostic matrix deadline exhausted before variant 2");
+
+    expect(attempted).toEqual(["first"]);
+    expect(emitted.map(({ kind }) => kind)).toEqual(["variant", "summary"]);
+    expect(emitted.at(-1)?.value).toMatchObject({
+      matrixDurationMs: 10,
+      reports: [{ id: "uuid-first", name: "first" }],
     });
   });
 

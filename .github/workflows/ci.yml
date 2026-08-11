@@ -166,10 +166,10 @@ jobs:
       - name: Diagnose Windows CMD and START argv (M503, bounded)
         if: ${{ !cancelled() && matrix.label == 'windows, portability 1/3' }}
         # Evidence gathering only: five fixed noninteractive variants execute
-        # sequentially once, with a 35-second matrix bound and exact-PID cleanup.
+        # sequentially once, with a 40-second matrix bound and exact-PID cleanup.
         # Manual GUI acceptance remains a separate promotion gate.
         env:
-          ASHLR_VITEST_TEST_TIMEOUT_MS: "35000"
+          ASHLR_VITEST_TEST_TIMEOUT_MS: "40000"
         run: npm run test:ci -- --no-file-parallelism test/m503.windows-cmd-start-diagnostic.test.ts
 
       - name: Test native ACL enrollment fences (hermetic)

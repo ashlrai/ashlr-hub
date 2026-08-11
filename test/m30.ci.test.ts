@@ -548,7 +548,7 @@ describe('M30 CI workflow', () => {
     expect(cmdStartDiagnosticStep).toContain(
       "if: ${{ !cancelled() && matrix.label == 'windows, portability 1/3' }}",
     );
-    expect(cmdStartDiagnosticStep).toContain('ASHLR_VITEST_TEST_TIMEOUT_MS: "35000"');
+    expect(cmdStartDiagnosticStep).toContain('ASHLR_VITEST_TEST_TIMEOUT_MS: "40000"');
     expect(cmdStartDiagnosticStep).toContain(
       'npm run test:ci -- --no-file-parallelism test/m503.windows-cmd-start-diagnostic.test.ts',
     );
@@ -556,8 +556,10 @@ describe('M30 CI workflow', () => {
       .toHaveLength(1);
     expect(windowsCmdStartDiagnostic).toContain('const suite = describe.runIf(onWindows)');
     expect(windowsCmdStartDiagnostic).toContain('const EXECUTION_LIMIT_MS = 4_000');
-    expect(windowsCmdStartDiagnostic).toContain('const TERMINATION_LIMIT_MS = 2_000');
-    expect(windowsCmdStartDiagnostic).toContain('const MATRIX_LIMIT_MS = 35_000');
+    expect(windowsCmdStartDiagnostic).toContain('const RETENTION_QUERY_LIMIT_MS = 2_000');
+    expect(windowsCmdStartDiagnostic).toContain('const TERMINATION_LIMIT_MS = 2_750');
+    expect(windowsCmdStartDiagnostic).toContain('const MATRIX_LIMIT_MS = 40_000');
+    expect(windowsCmdStartDiagnostic).toContain('const CWD_REMOVAL_LIMIT_MS = 750');
     expect(windowsCmdStartDiagnostic).toContain('const OUTPUT_LIMIT_BYTES = 4 * 1024');
     expect(windowsCmdStartDiagnostic).toContain('name: "Node-canonical explicit outer quotes"');
     expect(windowsCmdStartDiagnostic).toContain('windowsVerbatimArguments: true');
