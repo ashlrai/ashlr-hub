@@ -170,13 +170,14 @@ vi.mock('../src/core/phantom.js', () => ({
   getPhantomStatus: () => _phantomStatus,
 }));
 
-vi.mock('../src/core/integrations/locus.js', () => ({
-  locusAvailable: () => _locusAvailable,
-  locusAgentReport: () => _locusProbe,
-  // Soft watch heartbeat under LOCUS_ENFORCE=warn — hermetic default off.
-  resolveLocusEnforceMode: () => 'off' as const,
-  locusSoftWatchHeartbeat: () => null,
-}));
+vi.mock('../src/core/integrations/locus.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/integrations/locus.js')>();
+  return {
+    ...actual,
+    locusAvailable: () => _locusAvailable,
+    locusAgentReport: () => _locusProbe,
+  };
+});
 
 vi.mock('../src/core/providers.js', () => ({
   probeEndpoint: vi.fn(),
@@ -185,7 +186,7 @@ vi.mock('../src/core/providers.js', () => ({
 }));
 
 // Import doctor AFTER mocks are registered.
-import { runDoctor, checkLocus } from '../src/core/doctor.js';
+import { runDoctor, checkLocus, checkLocusFirm } from '../src/core/doctor.js';
 import { assurePrivateStoragePath } from '../src/core/util/private-storage.js';
 
 // Doctor probes shell out even with provider and Phantom mocks. Windows CI can
@@ -572,6 +573,73 @@ describe('checkLocus / runDoctor — locus', () => {
     const locus = report.checks.find(c => c.id === 'locus');
     expect(locus).toBeDefined();
     expect(locus?.status).toBe('pass');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Locus firm profile soft-warn (production fleets; monorepo default off)
+// ---------------------------------------------------------------------------
+
+describe('checkLocusFirm / runDoctor — locus-firm', () => {
+  function writeEnrollment(count: number): void {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    mkdirSync(ashlrDir, { recursive: true });
+    // Registry schema: exactly { repos: string[] } of absolute paths (no extra keys).
+    const repos = Array.from({ length: count }, (_, i) => join(tmpHome, `repo-${i}`));
+    writeFileSync(
+      join(ashlrDir, 'enrollment.json'),
+      `${JSON.stringify({ repos })}\n`,
+      { mode: 0o600 },
+    );
+  }
+
+  it('passes quietly when no repos are enrolled (monorepo-safe default)', () => {
+    _locusAvailable = true;
+    writeEnrollment(0);
+    const c = checkLocusFirm(makeConfig(tmpHome));
+    expect(c.id).toBe('locus-firm');
+    expect(c.status).toBe('pass');
+    expect(c.detail).toMatch(/no enrolled repos|monorepo/i);
+  });
+
+  it('soft-warns when enrolled>0, locus available, and firm false', () => {
+    _locusAvailable = true;
+    writeEnrollment(1);
+    const c = checkLocusFirm(makeConfig(tmpHome));
+    expect(c.status).toBe('warn');
+    expect(c.detail).toMatch(/consider locus\.firm for production/i);
+    expect(c.fix).toMatch(/locus\.firm/i);
+  });
+
+  it('passes when firm is true with enrolled repos', () => {
+    _locusAvailable = true;
+    writeEnrollment(2);
+    const cfg = makeConfig(tmpHome);
+    cfg.locus = { firm: true };
+    const c = checkLocusFirm(cfg);
+    expect(c.status).toBe('pass');
+    expect(c.detail).toMatch(/locus\.firm=true/);
+  });
+
+  it('does not warn when locus is unavailable (even if enrolled)', () => {
+    _locusAvailable = false;
+    writeEnrollment(1);
+    const c = checkLocusFirm(makeConfig(tmpHome));
+    expect(c.status).toBe('pass');
+    expect(c.detail).toMatch(/not installed|N\/A/i);
+  });
+
+  it('runDoctor includes locus-firm and soft-warns under production conditions', {
+    timeout: 15_000,
+  }, async () => {
+    _locusAvailable = true;
+    writeEnrollment(1);
+    const cfg = makeConfig(tmpHome);
+    const report = await runDoctor(cfg);
+    const firm = report.checks.find(c => c.id === 'locus-firm');
+    expect(firm).toBeDefined();
+    expect(firm?.status).toBe('warn');
+    expect(firm?.detail).toMatch(/consider locus\.firm for production/i);
   });
 });
 

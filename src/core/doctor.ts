@@ -14,10 +14,9 @@ import { loadConfig } from './config.js';
 import { getPhantomStatus } from './phantom.js';
 import { getProviderRegistry } from './providers.js';
 import {
+  extractLocusConfigFirm,
   locusAgentReport,
   locusAvailable,
-  locusSoftWatchHeartbeat,
-  resolveLocusEnforceMode,
 } from './integrations/locus.js';
 // H7 — 5 NEW read-only probes share the SAME read-only readiness facets that
 // `ashlr preflight` uses, from the shared readiness module (single source of
@@ -529,28 +528,10 @@ export function checkLocus(): DoctorCheck {
 
     const r = probe.report;
     const oneline = r.status_oneline ?? 'unpinned';
-    let detail = `status=${r.status} pin=${oneline} ready=${r.ready}`;
+    const detail = `status=${r.status} pin=${oneline} ready=${r.ready}`;
     const fix =
       r.next_steps?.[0]
       ?? 'locus enter <alias> && locus agent setup --apply --client all';
-
-    // Soft watch heartbeat under LOCUS_ENFORCE=warn only — annotate, never escalate.
-    if (resolveLocusEnforceMode() === 'warn') {
-      try {
-        const soft = locusSoftWatchHeartbeat(process.env, 'warn');
-        if (soft?.heartbeat) {
-          detail +=
-            `; watch session_ok=${soft.heartbeat.session_ok}` +
-            ` doctor=${soft.heartbeat.doctor_verdict}` +
-            ` safe_next=${soft.heartbeat.safe_next}` +
-            (soft.heartbeat.frozen ? ' FROZEN' : '');
-        } else if (soft?.error) {
-          detail += `; watch soft: ${soft.error}`;
-        }
-      } catch {
-        // Soft only — ignore probe failures.
-      }
-    }
 
     if (r.status === 'unsafe') {
       return check('locus', 'Locus identity plane', 'fail', detail, fix);
@@ -568,6 +549,72 @@ export function checkLocus(): DoctorCheck {
       'Locus identity plane',
       'warn',
       `Could not determine locus status: ${String(err)}`,
+    );
+  }
+}
+
+/**
+ * Production fleet firm profile (opt-in; monorepo default remains off).
+ * id: 'locus-firm'
+ *
+ * Soft-warns when enrolled repos > 0, locus CLI is available, and
+ * `config.locus.firm` is not true — recommend firm for production fleets.
+ * Never fails (non-blocking). Fresh empty installs and firm=true pass quietly.
+ * See docs/LOCUS-FIRM-FLEET.md.
+ */
+export function checkLocusFirm(cfg: AshlrConfig): DoctorCheck {
+  const label = 'Locus firm profile';
+  try {
+    if (!locusAvailable()) {
+      return check(
+        'locus-firm',
+        label,
+        'pass',
+        'locus not installed — firm profile N/A (monorepo-safe default off)',
+      );
+    }
+
+    const enrollment = readEnrollmentState();
+    if ('degraded' in enrollment) {
+      return check(
+        'locus-firm',
+        label,
+        'pass',
+        'enrollment registry degraded — firm check skipped',
+      );
+    }
+
+    if (enrollment.count === 0) {
+      return check(
+        'locus-firm',
+        label,
+        'pass',
+        'no enrolled repos — firm optional (monorepo-safe default off)',
+      );
+    }
+
+    if (extractLocusConfigFirm(cfg)) {
+      return check(
+        'locus-firm',
+        label,
+        'pass',
+        `locus.firm=true (${enrollment.count} enrolled repo(s); production fleet profile)`,
+      );
+    }
+
+    return check(
+      'locus-firm',
+      label,
+      'warn',
+      'consider locus.firm for production',
+      'ashlr config set locus.firm true  # then LOCUS_CI_BINDING for CI; env LOCUS_ENFORCE still wins — see docs/LOCUS-FIRM-FLEET.md',
+    );
+  } catch (err) {
+    return check(
+      'locus-firm',
+      label,
+      'pass',
+      `Could not evaluate firm profile: ${String(err)}`,
     );
   }
 }
@@ -1208,6 +1255,7 @@ export async function runDoctor(cfg: AshlrConfig): Promise<DoctorReport> {
   checks.push(checkIndex());
   checks.push(checkPhantom());
   checks.push(checkLocus());
+  checks.push(checkLocusFirm(cfg));
   // Upgraded: also accepts discovery via discoverMcpServers (mcpRegistry)
   checks.push(checkMcpPlugin(mcpRegistry));
 

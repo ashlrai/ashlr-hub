@@ -54,14 +54,13 @@ import { discoverMcpServers } from './mcp-registry.js';
 import type { PhantomStatus } from './types.js';
 import { assurePrivateStoragePath } from './util/private-storage.js';
 import {
+  extractLocusConfigFirm,
   locusAvailable,
   locusAgentReport,
   locusStatusOneline,
-  locusSoftWatchHeartbeat,
   resolveLocusEnforceMode,
   type LocusAgentReport,
   type LocusProbeResult,
-  type LocusWatchHeartbeat,
 } from './integrations/locus.js';
 
 // ---------------------------------------------------------------------------
@@ -71,10 +70,10 @@ import {
 /** Severity of a single readiness finding. */
 export type ReadinessSeverity = 'blocker' | 'warning' | 'info';
 
-/** One readiness finding (model/enrollment/kill/daemon/writeable/sandbox/git/phantom/locus). */
+/** One readiness finding (model/enrollment/kill/daemon/writeable/sandbox/git/phantom/locus/locus-firm). */
 export interface ReadinessFinding {
   /** Stable facet id, e.g. 'model' | 'enrollment' | 'kill-switch' | 'daemon' |
-   *  'ashlr-writeable' | 'sandbox' | 'git' | 'phantom' | 'locus'. */
+   *  'ashlr-writeable' | 'sandbox' | 'git' | 'phantom' | 'locus' | 'locus-firm'. */
   id: string;
   /** Severity. 'blocker' forces ready=false; 'warning'/'info' do not. */
   severity: ReadinessSeverity;
@@ -127,18 +126,6 @@ export interface ReadinessLocusSnapshot {
     cursor: boolean;
     codex: boolean;
   } | null;
-  /**
-   * Soft `locus watch --once` fleet heartbeat (only populated under
-   * LOCUS_ENFORCE=warn). Never a readiness blocker by itself.
-   */
-  watch?: {
-    sessionOk: boolean;
-    pinned: boolean;
-    frozen: boolean;
-    whoami: string | null;
-    doctorVerdict: string;
-    safeNext: string;
-  };
   error?: string;
 }
 
@@ -616,20 +603,6 @@ function locusSnapshotFromReport(probe: LocusProbeResult): ReadinessLocusSnapsho
   };
 }
 
-/** Map a watch tick into the values-free readiness snapshot slice. */
-function watchSnapshotFromHeartbeat(
-  hb: LocusWatchHeartbeat,
-): NonNullable<ReadinessLocusSnapshot['watch']> {
-  return {
-    sessionOk: hb.session_ok === true,
-    pinned: hb.pinned === true,
-    frozen: hb.frozen === true,
-    whoami: typeof hb.whoami === 'string' && hb.whoami ? hb.whoami : null,
-    doctorVerdict: hb.doctor_verdict || 'unknown',
-    safeNext: hb.safe_next || 'unknown',
-  };
-}
-
 /** Install/setup fix for the Locus identity plane (no secrets). */
 const LOCUS_INSTALL_FIX =
   'Install: cargo install --git https://github.com/ashlrai/locus --package locus-cli --locked  (or brew install ashlrai/tap/locus)';
@@ -652,6 +625,7 @@ const LOCUS_PIN_FIX =
  *  - sandbox health via readSandboxHealth (high orphan count => WARNING)
  *  - git present (absent => BLOCKER); phantom present (absent => WARNING)
  *  - locus present (absent => WARNING; LOCUS_ENFORCE=enforce escalates to BLOCKER)
+ *  - locus.firm soft-warn when enrolled>0, locus available, firm false (WARNING only)
  *
  * `ready` is true iff blockers.length === 0. Never throws.
  *
@@ -711,9 +685,13 @@ export async function buildReadiness(cfg: AshlrConfig): Promise<ReadinessReport>
   }
 
   // -- enrollment state (degraded blocks; valid empty remains informational) --
+  // Captured for the locus-firm soft-warn after the locus facet evaluates.
+  let enrollmentCount = 0;
+  let enrollmentDegraded = false;
   {
     const enrollment = readEnrollmentState();
     if ('degraded' in enrollment) {
+      enrollmentDegraded = true;
       blockers.push({
         id: 'enrollment',
         severity: 'blocker',
@@ -728,6 +706,7 @@ export async function buildReadiness(cfg: AshlrConfig): Promise<ReadinessReport>
         fix: 'Run `ashlr onboard` to safely enroll your first repo.',
       });
     } else {
+      enrollmentCount = enrollment.count;
       info.push({
         id: 'enrollment',
         severity: 'info',
@@ -895,60 +874,11 @@ export async function buildReadiness(cfg: AshlrConfig): Promise<ReadinessReport>
     }
     // Prefer WARNING when absent/unhealthy (like phantom). Only LOCUS_ENFORCE=enforce
     // escalates identity-plane gaps to a hard blocker for first activation.
-    const locusMode = resolveLocusEnforceMode();
-    const enforce = locusMode === 'enforce';
+    const enforce = resolveLocusEnforceMode() === 'enforce';
     const pushSoftOrHard = (finding: ReadinessFinding): void => {
       if (finding.severity === 'blocker') blockers.push(finding);
       else warnings.push(finding);
     };
-
-    // Soft fleet heartbeat under LOCUS_ENFORCE=warn only — never a blocker.
-    if (locus?.available && locusMode === 'warn') {
-      try {
-        const soft = locusSoftWatchHeartbeat(process.env, 'warn');
-        if (soft?.heartbeat) {
-          locus = {
-            ...locus,
-            watch: watchSnapshotFromHeartbeat(soft.heartbeat),
-          };
-          if (!soft.ok) {
-            warnings.push({
-              id: 'locus-watch',
-              severity: 'warning',
-              detail:
-                `locus watch heartbeat soft: session_ok=false ` +
-                `pin=${soft.heartbeat.whoami ?? (soft.heartbeat.pinned ? 'pinned' : 'unpinned')} ` +
-                `doctor=${soft.heartbeat.doctor_verdict} safe_next=${soft.heartbeat.safe_next}` +
-                (soft.heartbeat.frozen ? ' FROZEN' : ''),
-              fix: LOCUS_PIN_FIX,
-            });
-          } else {
-            info.push({
-              id: 'locus-watch',
-              severity: 'info',
-              detail:
-                `locus watch heartbeat soft: session_ok=true ` +
-                `pin=${soft.heartbeat.whoami ?? 'pinned'} doctor=${soft.heartbeat.doctor_verdict}`,
-            });
-          }
-        } else if (soft && !soft.available) {
-          warnings.push({
-            id: 'locus-watch',
-            severity: 'warning',
-            detail: 'locus watch heartbeat soft: CLI unavailable',
-            fix: LOCUS_INSTALL_FIX,
-          });
-        } else if (soft?.error) {
-          warnings.push({
-            id: 'locus-watch',
-            severity: 'warning',
-            detail: `locus watch heartbeat soft: ${soft.error}`,
-          });
-        }
-      } catch {
-        // Soft probe must never fail readiness construction.
-      }
-    }
 
     if (!locus?.available) {
       pushSoftOrHard({
@@ -975,6 +905,33 @@ export async function buildReadiness(cfg: AshlrConfig): Promise<ReadinessReport>
         detail,
         fix: LOCUS_PIN_FIX,
       });
+    }
+  }
+
+  // -- locus.firm soft-warn (production fleets; monorepo default remains off) --
+  // Conditions: enrolled>0, locus available, firm false → non-blocking warning.
+  // Never a blocker. Degraded/empty enrollment and firm=true stay quiet.
+  {
+    try {
+      const locusOk = locus?.available === true;
+      const firm = extractLocusConfigFirm(cfg);
+      if (!enrollmentDegraded && enrollmentCount > 0 && locusOk && !firm) {
+        warnings.push({
+          id: 'locus-firm',
+          severity: 'warning',
+          detail: 'consider locus.firm for production',
+          fix:
+            'ashlr config set locus.firm true  # then LOCUS_CI_BINDING for CI; env LOCUS_ENFORCE still wins — see docs/LOCUS-FIRM-FLEET.md',
+        });
+      } else if (!enrollmentDegraded && enrollmentCount > 0 && locusOk && firm) {
+        info.push({
+          id: 'locus-firm',
+          severity: 'info',
+          detail: `locus.firm=true (${enrollmentCount} enrolled repo(s); production fleet profile)`,
+        });
+      }
+    } catch {
+      // firm facet is advisory only — never fail readiness on evaluation error
     }
   }
 
