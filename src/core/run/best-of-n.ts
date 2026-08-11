@@ -26,6 +26,7 @@ import type {
   WorkSource,
   EngineId,
   RunProposalOutcome,
+  RunBudget,
   RunState,
   SkillCard,
   DelegationScope,
@@ -559,6 +560,10 @@ async function runBestOfNInternal(
     workSource?: WorkSource;
     engine?: EngineId;
     model?: string | null;
+    /** Per-candidate producer budget supplied by the outer reservation owner. */
+    budget?: Partial<RunBudget>;
+    /** Disable paid taste scoring when the caller has not reserved judge spend. */
+    disableTasteCritic?: boolean;
     delegationScope?: DelegationScope;
     /** Opaque outer dispatch identity used to derive stable candidate run ids. */
     attemptId?: OuterAttemptIdentity;
@@ -619,7 +624,7 @@ async function runBestOfNInternal(
 
   // ── 3b. Resolve taste critic (M183 — flag-gated) ───────────────────────
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const tasteCriticEnabled = !!(cfg.foundry as any)?.tasteCritic;
+  const tasteCriticEnabled = opts?.disableTasteCritic !== true && !!(cfg.foundry as any)?.tasteCritic;
   type ScoreTasteFn = typeof import('../fleet/taste-critic.js').scoreTaste;
   let scoreTaste: ScoreTasteFn | undefined;
   if (tasteCriticEnabled) {
@@ -790,6 +795,7 @@ async function runBestOfNInternal(
         sourceRepo,
         executionRoot: sourceRepo,
         objective: item.title,
+        ...(opts?.budget ? { budget: opts.budget } : {}),
         backend: {
           engine: cEngine,
           model: requestedModel,
@@ -818,6 +824,7 @@ async function runBestOfNInternal(
         const result = await runSandboxed(cEngine as import('../types.js').EngineId, goal, cfg, {
           ...(typeof requestedModel === 'string' ? { model: requestedModel } : {}),
           sourceRepo,
+          ...(opts?.budget ? { budget: opts.budget } : {}),
           propose: false,
           existingWorktree: sb,
           runId,
@@ -865,6 +872,7 @@ async function runBestOfNInternal(
         const draft = await captureSandboxedProposal(cEngine, goal, cfg, {
           sourceRepo,
           existingWorktree: sb,
+          ...(opts?.budget ? { budget: opts.budget } : {}),
           draftOnly: true,
           ...(typeof requestedModel === 'string' ? { model: requestedModel } : {}),
           runId,
@@ -905,6 +913,7 @@ async function runBestOfNInternal(
       const result = await runSandboxed(cEngine as import('../types.js').EngineId, goal, cfg, {
         ...(typeof requestedModel === 'string' ? { model: requestedModel } : {}),
         sourceRepo,
+        ...(opts?.budget ? { budget: opts.budget } : {}),
         propose: true,
         runId,
         workItemId: opts?.workItemId ?? item.id,

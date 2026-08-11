@@ -91,6 +91,10 @@ import {
 } from './state.js';
 import type { DaemonLock, SaveDaemonStateResult } from './state.js';
 import {
+  createDaemonSpendReservationLedger,
+  daemonRouteUsdPerMillionTokenCeiling,
+} from './spend-reservation.js';
+import {
   acquireLocalStoreLock,
   releaseLocalStoreLock,
   type LocalStoreLock,
@@ -4514,7 +4518,10 @@ export async function tick(
   //    The real budget controls remain: (a) perTickItems cap, (b) remaining
   //    daily USD budget, (c) the swarm's own internal token budget.
   // -------------------------------------------------------------------------
-  const MIN_PER_ITEM_USD = 0.01; // floor on a per-item slice for selection math
+  // Preserve the existing selection heuristic for observability and fairness.
+  // The reservation ledger below independently enforces the stricter minimum
+  // launch envelope before any provider or model work can begin.
+  const MIN_PER_ITEM_USD = 0.01;
   const productionVelocity = resolveProductionVelocityProfile(routingCfg);
   let selectionResourceSnapshot: Awaited<ReturnType<typeof getResourceSnapshot>> | null = null;
   let availableSlotsForSelection: number | null = null;
@@ -5290,25 +5297,16 @@ export async function tick(
   //     proposal is applied LATER only by an explicit human inbox approve.
   // -------------------------------------------------------------------------
 
-  // Shared, mutable in-tick spend tally. Read+incremented by each concurrent
-  // task so later dispatches can short-circuit once cumulative realized spend
-  // reaches the remaining daily headroom (the USD daily cap is otherwise only
-  // enforced BETWEEN ticks — this keeps a single tick from overshooting it).
+  // Realized or conservatively charged spend for completed dispatches. Active
+  // concurrent work is governed separately by the synchronous reservation
+  // ledger so multiple workers cannot admit against the same headroom.
   let tickSpent = 0;
   // M48: per-backend dispatch tally for this tick (observability only).
   const backendDispatch: Record<string, number> = {};
 
   // Per-item USD budget slice: divide remaining budget evenly across items.
   const perItemUsdSlice = remainingBudget / Math.max(1, workedSet.length);
-
-  // Convert USD slice to a rough token count for the swarm budget.
-  // Using a conservative $15/M-output estimate as the binding constraint.
-  // This is best-effort estimation — the daemon's HARD cap is the USD daily budget.
-  const usdPerMTokenOut = 15.0;
-  const perItemMaxTokens = Math.max(
-    1000,
-    Math.floor((perItemUsdSlice / usdPerMTokenOut) * 1_000_000),
-  );
+  const spendReservations = createDaemonSpendReservationLedger(remainingBudget);
 
   // Count proposals by the ACTUAL change in the inbox's PENDING count across the
   // whole batch — NOT by inferring from swarmRun.status==='done'. A swarm that
@@ -5426,16 +5424,19 @@ export async function tick(
       // Re-check kill switch before each item dispatch.
       if (stopRequested()) return stopRequestedOutcome(item, attemptId);
       if (leaseController.signal.aborted) return queueLeaseLostOutcome(item, attemptId);
-      // In-tick budget short-circuit: if cumulative realized spend has already
-      // reached the remaining daily headroom, do NOT dispatch further items.
-      if (tickSpent >= remainingBudget) {
+      // Synchronous admission occurs before any routing/model/provider await.
+      // Concurrent workers therefore cannot all observe the same headroom.
+      const spendReservation = spendReservations.tryReserve(attemptId, perItemUsdSlice);
+      if (!spendReservation) {
         return {
           item,
           spentUsd: 0,
           dispatched: false,
           dispatch: dispatchTrace(item, {
             assignedBy: 'preflight',
-            reason: `in-tick budget cap reached ($${tickSpent.toFixed(4)} >= $${remainingBudget.toFixed(4)})`,
+            reason:
+              `in-tick budget reservation unavailable ` +
+              `(requested=$${perItemUsdSlice.toFixed(4)}, available=$${spendReservations.availableUsd.toFixed(4)})`,
             dispatched: false,
             runId: attemptId,
             trajectoryId: `run:${attemptId}`,
@@ -5443,6 +5444,12 @@ export async function tick(
           }),
         };
       }
+
+      let swarmSpent = 0;
+      let dispatched = false;
+      let spendKnown = false;
+
+      const executeReservedDispatch = async (): Promise<ItemOutcome> => {
       if (!isRejectedCaptureRecoveryAuthorized(item)) {
         return {
           item,
@@ -5459,8 +5466,6 @@ export async function tick(
         };
       }
 
-      let swarmSpent = 0;
-      let dispatched = false;
       let backend: EngineId | undefined;
       let backendTier: EngineTier | null = null;
       let assignmentReason = 'not routed';
@@ -5745,7 +5750,7 @@ export async function tick(
           if (intelRaw !== undefined && intelRaw !== null) {
             const forecast = buildForecast('7d', routingCfg);
             const goal = buildItemGoal(item);
-            const est = await estimateRun(goal, { maxTokens: perItemMaxTokens }, routingCfg);
+            const est = await estimateRun(goal, { maxTokens: spendReservation.maxTokens }, routingCfg);
             const recommended = await recommendRoute(item, routingCfg, { estimate: est });
             // Only override when the recommend result doesn't escalate a local decision.
             if (routed.tier !== 'local' || recommended.tier === 'local') {
@@ -5900,6 +5905,29 @@ export async function tick(
           };
         }
       }
+      const spendPriceModel = selectedModel
+        ?? configuredModelForBackend(backend, routingCfg)
+        ?? resolveEngineSpec(backend, routingCfg)?.defaultModel
+        ?? resolveEngineSpec(backend, routingCfg)?.api?.defaultModel
+        ?? null;
+      if (daemonRouteUsdPerMillionTokenCeiling(backend, spendPriceModel) === null) {
+        return {
+          item,
+          spentUsd: 0,
+          dispatched: false,
+          dispatch: dispatchTrace(item, {
+            backend,
+            tier: backendTier,
+            model: selectedModel,
+            assignedBy: 'preflight',
+            reason: `catalog-authoritative spend price unavailable for ${backend}`,
+            dispatched: false,
+            runId: attemptId,
+            trajectoryId: `run:${attemptId}`,
+            skipReason: 'budget-price-unknown',
+          }),
+        };
+      }
       if (isTrustedGeneratedRepairItem(item) &&
         !reserveGeneratedRepairExecution(item, attemptId, backend, backendTier)) {
         return {
@@ -5921,7 +5949,7 @@ export async function tick(
       }
       const goal = buildItemGoal(item);
       const dispatchCfg = dispatchConfigForItem(item, routingCfg);
-      const itemBudget = { maxTokens: perItemMaxTokens, maxSteps: 100, allowCloud: false };
+      const itemBudget = { maxTokens: spendReservation.maxTokens, maxSteps: 100, allowCloud: false };
       const workItemGenerationId = generatedRepairGenerationId(item) ?? undefined;
       const delegationScope = scopeFromWorkItem(item, {
         runId: attemptId,
@@ -5975,9 +6003,10 @@ export async function tick(
         dispatched = true;
         backendDispatch[backend!] = (backendDispatch[backend!] ?? 0) + 1;
         const swarmRun = await launch.value;
+        const reportedSpend = swarmRun.usage?.estCostUsd;
+        spendKnown = typeof reportedSpend === 'number' && Number.isFinite(reportedSpend) && reportedSpend >= 0;
+        swarmSpent = spendKnown ? reportedSpend : 0;
         if (!stillOwnsTick()) {
-          swarmSpent = swarmRun.usage?.estCostUsd ?? 0;
-          tickSpent += swarmSpent;
           return {
             item,
             spentUsd: swarmSpent,
@@ -6040,13 +6069,13 @@ export async function tick(
               : undefined,
           tokensIn: swarmRun.usage?.tokensIn,
           tokensOut: swarmRun.usage?.tokensOut,
-          costUsd: swarmRun.usage?.estCostUsd,
+          costUsd: swarmSpent,
         });
         dispatchProduction = swarmCancelled
           ? cancelledDispatchProduction(
               swarmRun.id,
               'swarm cancelled by owner',
-              swarmRun.usage?.estCostUsd ?? 0,
+              swarmSpent,
               swarmRunSummary,
             )
           : swarmFailed
@@ -6055,7 +6084,7 @@ export async function tick(
                 producer: 'swarm',
                 status: swarmRun.status === 'failed' ? 'failed' : 'aborted',
                 result: swarmRun.result,
-                costUsd: swarmRun.usage?.estCostUsd ?? 0,
+                costUsd: swarmSpent,
                 summary: swarmRunSummary,
               })
           : dispatchProductionFromProposalOutcome(
@@ -6065,9 +6094,6 @@ export async function tick(
               { proposalRequired: effectiveSwarmOutcome?.kind !== 'proposal-disabled' },
             );
         dispatchSkipReason = noProposalProductionReason(dispatchProduction);
-
-        swarmSpent = swarmRun.usage?.estCostUsd ?? 0;
-        tickSpent += swarmSpent;
 
         audit({
           action: dispatchProduction?.outcome === 'proposal-created'
@@ -6103,6 +6129,32 @@ export async function tick(
           assignedBy = 'ashlrcode-executor';
           assignmentReason = `${assignmentReason}; ashlrcodeExecutor sandboxed ${previousBackend} via ashlrcode`;
         }
+        // Executor policy may replace the already-priced route above. Re-run
+        // admission on the final effective engine/model before shadowing or any
+        // direct/best-of-N producer can observe launch authority.
+        const effectiveSpendPriceModel = selectedModel
+          ?? configuredModelForBackend(backend, routingCfg)
+          ?? resolveEngineSpec(backend, routingCfg)?.defaultModel
+          ?? resolveEngineSpec(backend, routingCfg)?.api?.defaultModel
+          ?? null;
+        if (daemonRouteUsdPerMillionTokenCeiling(backend, effectiveSpendPriceModel) === null) {
+          return {
+            item,
+            spentUsd: 0,
+            dispatched: false,
+            dispatch: dispatchTrace(item, {
+              backend,
+              tier: backendTier,
+              model: selectedModel,
+              assignedBy: 'preflight',
+              reason: `catalog-authoritative spend price unavailable for ${backend}`,
+              dispatched: false,
+              runId: attemptId,
+              trajectoryId: `run:${attemptId}`,
+              skipReason: 'budget-price-unknown',
+            }),
+          };
+        }
         // M334: shadow the about-to-dispatch legacy decision (observe-only).
         await shadowGateway({
           backend: String(backend ?? 'builtin'),
@@ -6133,6 +6185,27 @@ export async function tick(
           bestOfN > 1 &&
           !isTrustedGeneratedRepairItem(item) &&
           (typeof _bonMinScore !== 'number' || (item.score ?? 0) >= _bonMinScore);
+        const bestOfNSpendEnvelope = fanOut
+          ? spendReservations.childEnvelope(spendReservation, bestOfN)
+          : null;
+        if (fanOut && !bestOfNSpendEnvelope) {
+          return {
+            item,
+            spentUsd: 0,
+            dispatched: false,
+            dispatch: dispatchTrace(item, {
+              backend,
+              tier: backendTier,
+              model: selectedModel,
+              assignedBy: 'preflight',
+              reason: `best-of-${bestOfN} child budget is below the minimum dispatch envelope`,
+              dispatched: false,
+              runId: attemptId,
+              trajectoryId: `run:${attemptId}`,
+              skipReason: 'budget-cap',
+            }),
+          };
+        }
         let _bonCandidates: ReadonlyArray<{ engine: string; model?: string | null }> | undefined;
         if (fanOut && Array.isArray(_bonRawCandidates)) {
           const accepted: Array<{ engine: string; model?: string | null }> = [];
@@ -6156,8 +6229,35 @@ export async function tick(
           }
           if (accepted.length > 0) _bonCandidates = Object.freeze(accepted);
         }
-        let bonBillable: number | null = null;
-
+        if (fanOut && _bonCandidates) {
+          const unpricedCandidate = _bonCandidates.find((candidate) => {
+            const spec = resolveEngineSpec(candidate.engine as EngineId, routingCfg);
+            const effectiveModel = candidate.model
+              ?? configuredModelForBackend(candidate.engine as EngineId, routingCfg)
+              ?? spec?.defaultModel
+              ?? spec?.api?.defaultModel
+              ?? null;
+            return daemonRouteUsdPerMillionTokenCeiling(candidate.engine, effectiveModel) === null;
+          });
+          if (unpricedCandidate) {
+            return {
+              item,
+              spentUsd: 0,
+              dispatched: false,
+              dispatch: dispatchTrace(item, {
+                backend,
+                tier: backendTier,
+                model: selectedModel,
+                assignedBy: 'preflight',
+                reason: `catalog-authoritative spend price unavailable for best-of-N candidate ${unpricedCandidate.engine}`,
+                dispatched: false,
+                runId: attemptId,
+                trajectoryId: `run:${attemptId}`,
+                skipReason: 'budget-price-unknown',
+              }),
+            };
+          }
+        }
         let runState: Awaited<ReturnType<typeof runGoal>>;
         if (fanOut) {
           // Route through runBestOfN; use its winner's underlying runState.
@@ -6178,6 +6278,15 @@ export async function tick(
             }
             return runBestOfN(item, routingCfg, {
               n: bestOfN, engine: backend, model: selectedModel,
+              budget: {
+                maxTokens: bestOfNSpendEnvelope!.maxTokensPerChild,
+                maxSteps: itemBudget.maxSteps,
+                allowCloud: itemBudget.allowCloud,
+              },
+              // Taste scoring can make one additional frontier call per
+              // candidate and does not expose authoritative usage. The daemon
+              // has reserved generation only, so paid taste work is disabled.
+              disableTasteCritic: true,
               ...(_bonCandidates ? { candidates: _bonCandidates as never } : {}),
               workItemId: item.id, workItemGenerationId, workSource: item.source,
               delegationScope, attemptId, shadowSkillCards, shadowSkillSelectedAt,
@@ -6188,10 +6297,10 @@ export async function tick(
           dispatched = true;
           backendDispatch[backend!] = (backendDispatch[backend!] ?? 0) + 1;
           const bonResult = await launch.value;
-          bonBillable = bonResult.critique.billableCostUsd ?? 0;
+          const reportedSpend = bonResult.critique.billableCostUsd;
+          spendKnown = typeof reportedSpend === 'number' && Number.isFinite(reportedSpend) && reportedSpend >= 0;
+          swarmSpent = spendKnown ? reportedSpend : 0;
           if (!stillOwnsTick()) {
-            swarmSpent = bonBillable;
-            tickSpent += swarmSpent;
             return {
               item,
               spentUsd: swarmSpent,
@@ -6214,8 +6323,6 @@ export async function tick(
           if (!bonResult.winner) {
             // All candidates were empty/failing — still count what the fan-out
             // actually spent (M333: the pre-M333 $0 under-reported real spend).
-            swarmSpent = bonBillable;
-            tickSpent += swarmSpent;
             const authoritativeProduction = bestOfNAuthoritativeNoWinnerProduction(
               bonResult,
               bestOfN,
@@ -6285,9 +6392,13 @@ export async function tick(
           dispatched = true;
           backendDispatch[backend!] = (backendDispatch[backend!] ?? 0) + 1;
           runState = await launch.value;
+          const subscriptionRun = isSubscriptionEngine(backend ?? 'builtin');
+          const reportedSpend = runState.usage?.estCostUsd;
+          spendKnown = subscriptionRun || (
+            typeof reportedSpend === 'number' && Number.isFinite(reportedSpend) && reportedSpend >= 0
+          );
+          swarmSpent = subscriptionRun ? 0 : spendKnown ? reportedSpend! : 0;
           if (!stillOwnsTick()) {
-            swarmSpent = isSubscriptionEngine(backend ?? 'builtin') ? 0 : (runState.usage?.estCostUsd ?? 0);
-            tickSpent += swarmSpent;
             return {
               item,
               spentUsd: swarmSpent,
@@ -6391,13 +6502,13 @@ export async function tick(
           proposalId: directCancelled ? undefined : directOutcome?.proposalId,
           tokensIn: runState.usage?.tokensIn,
           tokensOut: runState.usage?.tokensOut,
-          costUsd: runState.usage?.estCostUsd,
+          costUsd: swarmSpent,
         });
         dispatchProduction = directCancelled
           ? cancelledDispatchProduction(
               runState.id,
               directCancellationReason,
-              runState.usage?.estCostUsd ?? 0,
+              swarmSpent,
               directRunSummary,
               runState.evidenceOutcome,
             )
@@ -6407,7 +6518,7 @@ export async function tick(
                 producer: 'run',
                 status: runState.status === 'failed' ? 'failed' : 'aborted',
                 result: runState.result,
-                costUsd: runState.usage?.estCostUsd ?? 0,
+                costUsd: swarmSpent,
                 summary: directRunSummary,
                 evidenceOutcome: runState.evidenceOutcome,
               })
@@ -6424,20 +6535,9 @@ export async function tick(
         }
         dispatchSkipReason = noProposalProductionReason(dispatchProduction);
 
-        // M80: subscription-tier runs are not dollar-billed — count $0 toward
-        // dailyBudgetUsd so they don't exhaust the daily cap. The subscription-
-        // window guard (subscriptionAllows above) governs their pacing instead.
-        // API-model / builtin paths are unaffected (their isSubscriptionEngine is false).
-        // M333: a fan-out counts EVERY candidate's billable spend (subscription
-        // rule applied per-candidate inside runBestOfN); single dispatch keeps
-        // the M80 winner-path accounting byte-identically.
-        swarmSpent = bonBillable !== null
-          ? bonBillable
-          : isSubscriptionEngine(backend ?? 'builtin')
-            ? 0
-            : (runState.usage?.estCostUsd ?? 0);
-        tickSpent += swarmSpent;
-
+        // swarmSpent was sanitized immediately after the producer settled.
+        // Never re-read raw usage here: NaN/Infinity/negative values are
+        // ambiguous and must retain the full reservation in the outer finally.
         if (!stillOwnsTick()) {
           return {
             item,
@@ -6527,7 +6627,7 @@ export async function tick(
         const anomalyK = typeof intelCfg2.anomalyK === 'number' && intelCfg2.anomalyK > 0
           ? intelCfg2.anomalyK : 4;
         const goal2 = buildItemGoal(item);
-        const est2 = await estimateRun(goal2, { maxTokens: perItemMaxTokens }, routingCfg).catch((err) => { console.warn('[ashlr] daemon:tick estimateRun failed:', (err as Error)?.message ?? err); return null; });
+        const est2 = await estimateRun(goal2, { maxTokens: spendReservation.maxTokens }, routingCfg).catch((err) => { console.warn('[ashlr] daemon:tick estimateRun failed:', (err as Error)?.message ?? err); return null; });
         const p50 = est2?.estCostUsd.median ?? 0;
         if (p50 > 0 && swarmSpent > anomalyK * p50 && !stopRequested()) {
           audit({
@@ -6559,7 +6659,22 @@ export async function tick(
       }
     }
 
-	    return { item, spentUsd: swarmSpent, dispatched, dispatch };
+      return { item, spentUsd: swarmSpent, dispatched, dispatch };
+      };
+
+      try {
+        return await executeReservedDispatch();
+      } finally {
+        // A launched producer without authoritative usage is ambiguous: retain
+        // its full ceiling. Only known spend or a proven no-launch can refund.
+        const reconciledSpend = spendKnown
+          ? swarmSpent
+          : dispatched
+            ? null
+            : 0;
+        spendReservations.reconcile(spendReservation, reconciledSpend);
+        tickSpent = spendReservations.chargedUsd;
+      }
     }, // end run:
     });
   });  // end tasks.map

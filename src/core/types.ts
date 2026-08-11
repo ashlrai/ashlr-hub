@@ -2064,6 +2064,12 @@ export interface ChatResult {
   toolCalls?: { id: string; name: string; arguments: unknown }[];
   /** Token accounting for this call. */
   usage: { tokensIn: number; tokensOut: number };
+  /**
+   * True only when `usage` came from exact finite nonnegative provider
+   * counters. False/absent usage may be estimated and cannot release a
+   * governed token or spend reservation.
+   */
+  usageKnown?: boolean;
 }
 
 /**
@@ -2089,7 +2095,12 @@ export interface ProviderClient {
   /** Whether the underlying model/provider supports tool calls. */
   supportsTools: boolean;
   /** Send a chat exchange (optionally with tool specs) and get a result. */
-  chat(messages: ChatMessage[], tools?: unknown[], signal?: AbortSignal): Promise<ChatResult>;
+  chat(
+    messages: ChatMessage[],
+    tools?: unknown[],
+    signal?: AbortSignal,
+    limits?: ModelCallLimits,
+  ): Promise<ChatResult>;
   /**
    * Streaming chat (M11): invoke `onDelta(textChunk)` for each incremental
    * content token, resolving to the SAME ChatResult shape as `chat()`
@@ -2106,7 +2117,13 @@ export interface ProviderClient {
     tools: unknown[] | undefined,
     onDelta: (t: string) => void,
     signal?: AbortSignal,
+    limits?: ModelCallLimits,
   ): Promise<ChatResult>;
+}
+
+/** Hard request-level generation limits understood by paid provider adapters. */
+export interface ModelCallLimits {
+  readonly maxOutputTokens: number;
 }
 
 // ---------------------------------------------------------------------------

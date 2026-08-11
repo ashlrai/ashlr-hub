@@ -473,6 +473,7 @@ describe('M142 — daemon routing alignment', () => {
       n: 1,
       engine: 'codex' as import('../src/core/types.js').EngineId,
       model: 'gpt-5-codex',
+      budget: { maxTokens: 2_000, maxSteps: 25, allowCloud: false },
       workItemId: 'work-42',
       workSource: 'issue',
     });
@@ -485,6 +486,7 @@ describe('M142 — daemon routing alignment', () => {
       expect.any(Object),
       expect.objectContaining({
         model: 'gpt-5-codex',
+        budget: { maxTokens: 2_000, maxSteps: 25, allowCloud: false },
         propose: true,
         sourceRepo: MOCK_REPO,
         workItemId: 'work-42',
@@ -510,6 +512,7 @@ describe('M142 — daemon routing alignment', () => {
       n: 1,
       engine: 'local-coder' as import('../src/core/types.js').EngineId,
       model: 'qwen2.5-coder:32b',
+      budget: { maxTokens: 2_000, maxSteps: 25, allowCloud: false },
       workItemId: 'work-43',
       workSource: 'goal',
     });
@@ -522,11 +525,58 @@ describe('M142 — daemon routing alignment', () => {
       expect.any(Object),
       expect.objectContaining({
         model: 'qwen2.5-coder:32b',
+        budget: { maxTokens: 2_000, maxSteps: 25, allowCloud: false },
         propose: true,
         sourceRepo: MOCK_REPO,
         workItemId: 'work-43',
         workSource: 'goal',
       }),
+    );
+  });
+
+  it('forwards one candidate budget through generation and draft capture', async () => {
+    const generationMock = vi.fn(async (_engine, _goal, _cfg, runOpts: Record<string, unknown>) => ({
+      state: {
+        id: String(runOpts['runId']),
+        status: 'done' as const,
+        result: '',
+        usage: { totalTokens: 100, estCostUsd: 0.001, steps: 1 },
+      },
+    }));
+    const captureMock = vi.fn(async (_engine, _goal, _cfg, runOpts: Record<string, unknown>) => ({
+      state: { id: String(runOpts['runId']), status: 'done' as const, result: '' },
+    }));
+    vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
+      runApiModelSandboxed: generationMock,
+      runEngineSandboxed: generationMock,
+      captureSandboxedProposal: captureMock,
+    }));
+    vi.doMock('../src/core/sandbox/worktree.js', () => ({
+      createSandbox: vi.fn(() => ({ id: 'budget-capture-sandbox', path: MOCK_REPO, repo: MOCK_REPO })),
+      removeSandbox: vi.fn(),
+    }));
+    vi.doMock('../src/core/fleet/manager.js', () => ({ judgeProposal: vi.fn() }));
+
+    const budget = { maxTokens: 2_000, maxSteps: 25, allowCloud: false };
+    const { runBestOfN } = await import('../src/core/run/best-of-n.js?budgetcapture=' + randomUUID());
+    await runBestOfN(makeItem(), makeConfig(1), {
+      n: 1,
+      engine: 'local-coder' as import('../src/core/types.js').EngineId,
+      model: 'qwen2.5-coder:32b',
+      budget,
+    });
+
+    expect(generationMock).toHaveBeenCalledWith(
+      'local-coder',
+      expect.any(String),
+      expect.any(Object),
+      expect.objectContaining({ budget, propose: false }),
+    );
+    expect(captureMock).toHaveBeenCalledWith(
+      'local-coder',
+      expect.any(String),
+      expect.any(Object),
+      expect.objectContaining({ budget, draftOnly: true }),
     );
   });
 
