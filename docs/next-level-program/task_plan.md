@@ -10,7 +10,10 @@ Define and begin the highest-leverage, evidence-backed program that turns Ashlr 
 - [x] Phase 2: Map current product, research, architecture, security, and production gaps
 - [x] Phase 3: Select the first product slice and define its safe prerequisite — **First Outcome Mode** selected; unattended implementation stopped at an independent security NO-GO
 - [x] Phase 4: Independently review, validate, and preserve the strategic program as a local draft; defer a GitHub PR to avoid adding to the existing draft inventory
-- [ ] Phase 5: Convert the agreed 30/90/180-day sequence into an execution backlog with owners, dependencies, exact files/tests, and evidence gates
+- [x] Phase 5: Convert the agreed 30/90/180-day sequence into an execution backlog with owners, dependencies, exact files/tests, and evidence gates
+- [x] Phase 6: Implement the smallest independently landable Stage 0A authority slice after Explore and adversarial design GO
+- [x] Phase 7: Run focused, adjacent, architectural, type, lint, build, and independent security-review gates
+- [x] Phase 8: Preserve the reviewed result without adding release, installation, service, credential, or runtime authority
 
 ## Key Questions
 
@@ -33,11 +36,22 @@ Define and begin the highest-leverage, evidence-backed program that turns Ashlr 
 - Do not implement a general `--until-proposal` loop on the current execution boundary. First close exact run/proposal correlation, immutable human-only review policy, cross-process lane identity, atomic budget reservations, continuous kill/un-enrollment cancellation, and mandatory sealed confinement.
 - Preserve the existing all-or-nothing resident setup boundary. Any future non-service onboarding path must be separately named and explicitly authorized; it must never be a caller-controlled bypass in `setupWizard`.
 - Keep the strategic program draft-only. It does not authorize First Outcome implementation until the concrete credential and egress boundary receives an independent review.
+- Treat the installed 3.1.0 stopped runtime, protected source master, package publication, service activation, and future First Outcome evidence as separate gates.
+- Start implementation with 0A-0 exact supervised proposal correlation. It removes a race using existing durable authority, enables no unattended mode, and has no effect authority.
+- Separate immediate supervised concierge conversion, one-shot sealed First Outcome, and resident First Outcome. Release/install/service evidence is required only for the resident claim and must be regenerated after the final source change.
+- Use the dispatch-production reason-classification objective as internal operability dogfood only. A customer-value claim requires a bounded objective copied from an explicit design-partner or repository-owner request.
+- Reuse the existing signed evidence pack, outcome records, and post-merge stability infrastructure before adding any receipt schema or ledger.
+- Treat decision receipts as evidence only. Any Ashlr effect on a human-only proposal requires a separately authenticated, one-use human approval capability validated at the sink.
 
 ## Errors Encountered
 
 - Initial worktree creation command used the not-yet-created worktree as its process cwd and failed with `No such file or directory`; reran from the primary checkout successfully.
+- The planning skill catalog path includes a nested package directory; the first direct `SKILL.md` read missed it, then the exact entrypoint was located with `rg --files` and read completely before execution work.
+- The first focused M84 run could not load `vitest` because the isolated worktree had no dependency installation. No test executed; install the exact lockfile closure with `npm ci`, then rerun the same gates.
+- A source-inspection shell command contained an unmatched quote while checking the direct work-item ID. It made no changes; subsequent inspection used literal-safe `sed` and `rg` arguments.
+- A shell glob for optional Prettier configuration matched no files under zsh and exited before inspection. It made no changes. Bare Prettier also normalized TypeScript to double quotes, inflating the diff; rerun it with the repository's existing single-quote style before review.
+- A second source-inspection command embedded a backtick pattern inside a quoted shell string and exited with an unmatched-quote error. It made no changes; inspect the lifecycle blocks and search patterns in separate literal-safe commands.
 
 ## Status
 
-**Phase 5 pending** - The strategic program passed independent product, research, systems, and security review and is preserved locally. Product code was intentionally not changed after the authority audit returned NO-GO. The next authorized step is to convert the agreed sequence into a dependency-ordered execution backlog; no GitHub PR, release, installation, or runtime authority is implied.
+**Completed locally** - 0A-0 now reconciles returned and durable terminal run truth, reads the complete all-status proposal source, requires one exact same-run row, and validates its signed pending authority. A real temp-store test proves no-generation signing/reload/tamper refusal. The CLI states only the authority it proves. The execution backlog separates concierge dogfood, sealed one-shot autonomy, and resident autonomy; names exact authority/evidence gates; and reuses existing signed outcome infrastructure. Focused/adjacent tests, typecheck, scoped/full lint, build, formatting, and diff checks are green, with independent security, architecture, founder, and minimality reviews at GO. No `--until-proposal`, unattended CLI, Ashlr-owned human effect, release, installation, credential, service, or runtime authority is included. Entire is installed but not configured for this worktree, so no checkpoint was created.

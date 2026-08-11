@@ -18,10 +18,12 @@
  * the already-gated goals flow.
  */
 
+import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { makeColors } from './ui.js';
-import type { AshlrConfig, RunBudget, WorkItem } from '../core/types.js';
+import type { AshlrConfig, Proposal, RunBudget, RunOptions, RunState, WorkItem } from '../core/types.js';
+import type { ListProposalsDetailedOptions, ProposalsReadResult } from '../core/inbox/store.js';
 
 interface ParsedGoalArgs {
   objective: string;
@@ -30,6 +32,39 @@ interface ParsedGoalArgs {
   planOnly: boolean;
   direct: boolean;
   help: boolean;
+}
+
+type DirectProposalBlocker =
+  | 'proposal-authority-invalid'
+  | 'proposal-identity-mismatch'
+  | 'proposal-outcome-not-filed'
+  | 'proposal-read-failed'
+  | 'proposal-run-ambiguous'
+  | 'proposal-source-degraded'
+  | 'run-ledger-mismatch'
+  | 'run-ledger-unavailable'
+  | 'run-not-done'
+  | 'run-summary-mismatch';
+
+function exactFiledProposalId(state: RunState, requireTrajectory: boolean): string | null {
+  if (state.status !== 'done') return null;
+  if (requireTrajectory && state.trajectoryId !== `run:${state.id}`) return null;
+  const outcome = state.proposalOutcome;
+  if (
+    outcome?.kind !== 'filed' ||
+    outcome.isPartial === true ||
+    typeof outcome.proposalId !== 'string' ||
+    outcome.proposalId.length === 0
+  ) return null;
+  const summary = state.runEventSummary;
+  if (
+    summary?.runId !== state.id ||
+    summary.status !== 'done' ||
+    summary.outcome !== 'proposal-created' ||
+    summary.proposalCreated !== true ||
+    summary.proposalId !== outcome.proposalId
+  ) return null;
+  return outcome.proposalId;
 }
 
 function parseArgs(args: string[]): ParsedGoalArgs {
@@ -95,40 +130,45 @@ async function runDirect(
   // backends (loop.ts:467): runGoal(..., { engine, sandboxEngine:true,
   // requireSandbox:true, cwd, budget, tools:true, noMemory:false }).
   // runGoal -> runEngineSandboxed -> worktree diff -> PENDING inbox proposal.
-  // The proposal is correlated post-run via listProposals (origin:'agent', repo).
-  let runGoal: (
-    goal: string,
-    cfg: AshlrConfig,
-    opts: {
-      engine: string;
-      sandboxEngine: boolean;
-      requireSandbox: boolean;
-      cwd: string;
-      budget: RunBudget;
-      tools: boolean;
-      noMemory: boolean;
-    },
-  ) => Promise<{ id: string; status: string }>;
+  // The proposal is correlated only through the exact run outcome and a
+  // complete durable inbox snapshot. Repository recency is never authority.
+  let runGoal: (goal: string, cfg: AshlrConfig, opts: RunOptions) => Promise<RunState>;
   let routeBackend: (item: WorkItem, cfg: AshlrConfig) => { backend: string };
-  let listProposals: (filter: { status: string }) => Array<{
-    id: string;
-    origin: string;
-    repo: string | null;
-  }>;
+  let loadRun: (id: string) => RunState | null;
+  let listProposalsDetailed: (filter?: ListProposalsDetailedOptions) => ProposalsReadResult;
+  let isAuthoritativeDurablePendingProposal: (
+    proposal: Proposal | null | undefined,
+    expected: {
+      id: string;
+      repo: string;
+      origin: Proposal['origin'];
+      kind: Proposal['kind'];
+      runId: string;
+      trajectoryId: string;
+      workItemId: string;
+      workItemGenerationId?: string;
+      isPartial: boolean;
+    },
+    cfg?: Pick<AshlrConfig, 'foundry'>,
+  ) => proposal is Proposal;
   let loadConfig: () => AshlrConfig;
   let assertMayMutate: (repo: string) => void;
 
   try {
-    const [orchestrator, router, inbox, config, policy] = await Promise.all([
+    const [orchestrator, router, inbox, pendingAuthority, config, policy] = await Promise.all([
       import('../core/run/orchestrator.js'),
       import('../core/fleet/router.js'),
       import('../core/inbox/store.js'),
+      import('../core/inbox/pending-authority.js'),
       import('../core/config.js'),
       import('../core/sandbox/policy.js'),
     ]);
     runGoal = orchestrator.runGoal as typeof runGoal;
+    loadRun = orchestrator.loadRun as typeof loadRun;
     routeBackend = router.routeBackend as typeof routeBackend;
-    listProposals = inbox.listProposals as typeof listProposals;
+    listProposalsDetailed = inbox.listProposalsDetailed as typeof listProposalsDetailed;
+    isAuthoritativeDurablePendingProposal =
+      pendingAuthority.isAuthoritativeDurablePendingProposal as typeof isAuthoritativeDurablePendingProposal;
     loadConfig = config.loadConfig as typeof loadConfig;
     assertMayMutate = policy.assertMayMutate as typeof assertMayMutate;
   } catch {
@@ -154,7 +194,7 @@ async function runDirect(
   // routeBackend returns 'codex' or 'claude' when one is allowed+installed;
   // falls back to 'builtin' when neither is available.
   const syntheticItem: WorkItem = {
-    id: `direct-${Date.now().toString(36)}`,
+    id: `direct-${randomUUID()}`,
     repo,
     title: objective.slice(0, 80),
     detail: objective,
@@ -167,15 +207,7 @@ async function runDirect(
   };
   const { backend } = routeBackend(syntheticItem, cfg);
 
-  // Snapshot PENDING count before the run so we can detect newly-filed proposals.
-  let pendingBefore: Array<{ id: string; origin: string; repo: string | null }> = [];
-  try {
-    pendingBefore = listProposals({ status: 'pending' });
-  } catch {
-    pendingBefore = [];
-  }
-
-  let runState: { id: string; status: string };
+  let runState: RunState;
   try {
     // SANDBOXED + PROPOSAL-ONLY — same invariant as the daemon's frontier dispatch.
     // sandboxEngine:true routes through runEngineSandboxed (worktree -> agent ->
@@ -189,6 +221,7 @@ async function runDirect(
       budget,
       tools: true,
       noMemory: false,
+      workItemId: syntheticItem.id,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -196,32 +229,87 @@ async function runDirect(
     return 1;
   }
 
-  // Correlate the PENDING proposal filed by runEngineSandboxed — origin:'agent',
-  // repo matches our target. Filter to proposals that didn't exist before the run.
+  // The producer's exact filed outcome is the only candidate identity. Reload a
+  // complete durable snapshot, reject multiple rows for the same run, and prove
+  // the signed pending authority envelope before reporting success.
   let proposalId: string | null = null;
-  try {
-    const beforeIds = new Set(pendingBefore.map((p) => p.id));
-    const candidates = listProposals({ status: 'pending' }).filter(
-      (p) => !beforeIds.has(p.id) && p.origin === 'agent' && p.repo === correlationRepo,
-    );
-    proposalId = candidates[0]?.id ?? null;
-  } catch {
-    /* best-effort read */
+  let blocker: DirectProposalBlocker = 'proposal-authority-invalid';
+  const returnedProposalId = exactFiledProposalId(runState, false);
+  if (runState.status !== 'done') blocker = 'run-not-done';
+  else if (
+    runState.proposalOutcome?.kind !== 'filed' ||
+    runState.proposalOutcome.isPartial === true ||
+    typeof runState.proposalOutcome.proposalId !== 'string'
+  ) blocker = 'proposal-outcome-not-filed';
+  else if (!returnedProposalId) blocker = 'run-summary-mismatch';
+  else {
+    const durableRun = loadRun(runState.id);
+    const durableProposalId = durableRun ? exactFiledProposalId(durableRun, true) : null;
+    if (!durableRun) blocker = 'run-ledger-unavailable';
+    else if (
+      !durableProposalId ||
+      durableProposalId !== returnedProposalId ||
+      durableRun.status !== runState.status
+    ) blocker = 'run-ledger-mismatch';
+    else {
+      try {
+        const read = listProposalsDetailed({ requireComplete: true });
+        if (
+          read.sourceState !== 'healthy' ||
+          read.sourcePresent !== true ||
+          read.complete !== true ||
+          read.invalidFiles !== 0 ||
+          read.unreadableFiles !== 0
+        ) blocker = 'proposal-source-degraded';
+        else {
+          // Count every lifecycle state, origin, and kind carrying this run id.
+          // A second row would make this run-to-proposal identity ambiguous even
+          // if the expected pending patch also exists.
+          const runProposals = read.proposals.filter((proposal) => proposal.runId === runState.id);
+          if (runProposals.length !== 1) blocker = 'proposal-run-ambiguous';
+          else {
+            const exact = runProposals[0];
+            if (exact?.id !== returnedProposalId) blocker = 'proposal-identity-mismatch';
+            else if (!isAuthoritativeDurablePendingProposal(
+              exact,
+              {
+                id: returnedProposalId,
+                repo: correlationRepo,
+                origin: 'agent',
+                kind: 'patch',
+                runId: runState.id,
+                trajectoryId: `run:${runState.id}`,
+                workItemId: syntheticItem.id,
+                workItemGenerationId: undefined,
+                isPartial: false,
+              },
+              cfg,
+            )) blocker = 'proposal-authority-invalid';
+            else {
+              proposalId = exact.id;
+            }
+          }
+        }
+      } catch {
+        blocker = 'proposal-read-failed';
+      }
+    }
   }
 
   if (proposalId) {
     console.log('');
     console.log(col.green('  ✓ ') + col.bold('proposal filed') + col.dim(` (${backend} run ${runState.id}, ${runState.status})`));
     console.log('');
-    console.log('  A ' + col.bold('PENDING') + ' inbox proposal was produced — nothing was applied.');
+    console.log('  An authoritative ' + col.bold('PENDING') + ' inbox proposal was correlated.');
     console.log(`  proposal: ${col.cyan(proposalId)}`);
     console.log('');
-    console.log(col.dim('  review with `ashlr inbox`. No real working tree was mutated, pushed, or deployed.'));
+    console.log(col.dim('  supervised path: `goal --direct` did not invoke inbox apply or merge.'));
+    console.log(col.dim('  review with `ashlr inbox`; source Git, remotes, and services are not independently attested unchanged.'));
     return 0;
   } else {
     process.stderr.write(
       col.yellow('! ') +
-        `direct run completed (${backend} run ${runState.id}, status ${runState.status}) but produced no PENDING proposal.\n`,
+        `direct run completed (${backend} run ${runState.id}, status ${runState.status}) but produced no authoritative PENDING proposal [${blocker}].\n`,
     );
     process.stderr.write(col.dim('  Inspect `ashlr inbox` or check the engine output for details.\n'));
     return 1;
