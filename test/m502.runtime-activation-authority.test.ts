@@ -8,6 +8,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -535,6 +536,24 @@ describe('M502 runtime activation authority', () => {
       blockers: [{ code: 'signed-manifest-expired' }],
     });
     assertNoMutationAuthority(expiredDuringObservation);
+
+    const packageTarballPath = candidate.request.packageTarballPath;
+    const displacedTarballPath = `${packageTarballPath}.displaced`;
+    thawTree(candidate.request.bundleRoot);
+    renameSync(packageTarballPath, displacedTarballPath);
+    writeFileSync(packageTarballPath, 'substituted-package-bytes\n', { mode: 0o400 });
+    rmSync(displacedTarballPath);
+    freezeTree(candidate.request.bundleRoot);
+    const replacedArtifact = preflightRuntimeActivationAuthority({
+      homePath: home,
+      nowMs: Date.parse('2026-08-10T12:00:00.000Z'),
+      requestPath,
+    });
+    expect(replacedArtifact.blockers).toContainEqual({
+      code: 'candidate-artifact-invalid',
+      detail: 'package tarball or service descriptor digest mismatch',
+    });
+    assertNoMutationAuthority(replacedArtifact);
   });
 
   it('verifies operator custody and signature before refusing absent immutable bundles', () => {
@@ -763,6 +782,27 @@ describe('M502 runtime activation authority', () => {
     chmodSync(nested, 0o700);
     chmodSync(root, 0o500);
     expect(() => runtimeActivationAuthorityInternals.hashStableArtifact(artifact, root)).toThrow('custody');
+  });
+
+  it.skipIf(process.platform === 'win32')('rejects symlinked artifact and ancestor path substitutions', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-activation-bundle-')));
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-activation-outside-')));
+    roots.push(root, outside);
+    const artifact = join(root, 'release.tgz');
+    const artifactAlias = join(root, 'release-alias.tgz');
+    const outsideArtifact = join(outside, 'release.tgz');
+    const swappedAncestor = join(root, 'swapped');
+    writeFileSync(artifact, 'release-bytes', { mode: 0o400 });
+    writeFileSync(outsideArtifact, 'outside-bytes', { mode: 0o400 });
+    symlinkSync(artifact, artifactAlias);
+    symlinkSync(outside, swappedAncestor);
+    chmodSync(root, 0o500);
+    chmodSync(outside, 0o500);
+
+    expect(() => runtimeActivationAuthorityInternals.hashStableArtifact(artifactAlias, root)).toThrow();
+    expect(() =>
+      runtimeActivationAuthorityInternals.hashStableArtifact(join(swappedAncestor, 'release.tgz'), root),
+    ).toThrow('custody');
   });
 
   it('keeps candidate and rollback identity in the signature boundary', () => {
