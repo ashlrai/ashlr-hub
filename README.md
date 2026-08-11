@@ -494,10 +494,17 @@ ashlr config set locus.enforce warn
 
 # Local override without editing config
 LOCUS_ENFORCE=off ashlr run …
+
+# During first activation: soft-offer when locus CLI is present (TTY confirm).
+# Non-interactive / CI never forces firm — opt in explicitly:
+ashlr onboard --yes --locus-firm
+# or: ASHLR_LOCUS_FIRM=1 ashlr enroll add ~/code/my-repo --yes
 ```
 
 Resolution: env → `locus.enforce` → `locus.firm === true` → off. See
-`src/core/integrations/locus.ts` (`resolveLocusEnforceMode`).
+`src/core/integrations/locus.ts` (`resolveLocusEnforceMode`). Default remains
+**off** (monorepo-safe); onboard/enroll only write firm on confirm or explicit
+`--locus-firm` / `ASHLR_LOCUS_FIRM=1`.
 
 ---
 

@@ -39,6 +39,11 @@ import { sweepRepoSandboxesDetailed } from '../core/sandbox/worktree.js';
 import { makeColors, isTty } from './ui.js';
 import type { AshlrConfig, WorkItem } from '../core/types.js';
 import { stackInstalled, stackStatus, stackProjectConfigured } from '../core/integrations/stack.js';
+import {
+  argsRequestLocusFirm,
+  maybeOfferLocusFirm,
+  _firmOfferInternals,
+} from './locus-firm-offer.js';
 
 const { bold, dim, red, green, yellow, cyan } = makeColors(isTty());
 
@@ -69,6 +74,9 @@ export async function promptConfirm(question: string): Promise<boolean> {
  * so a unit test can override `confirm` without a live TTY (a direct
  * module-internal call to the exported `promptConfirm` cannot be spied across
  * the ESM boundary). Production always uses the real `promptConfirm`.
+ *
+ * Firm-profile soft-offer reuses the same confirm seam (via
+ * `_firmOfferInternals` at call time) so a single spy covers enroll + firm.
  */
 export const _internals: { confirm: (question: string) => Promise<boolean> } = {
   confirm: promptConfirm,
@@ -368,10 +376,15 @@ export function buildStackStep(repo?: string): string[] {
 /**
  * `ashlr onboard` — guided first-activation walkthrough.
  *   - `--rollback <repo> [--kill]` routes to rollback().
- *   - else: preflight → (TTY) confirm + enroll ONE repo → dry-run PLAN →
- *     point at `ashlr inbox` → offer rollback.
+ *   - else: preflight → (TTY) confirm + enroll ONE repo → soft-offer
+ *     locus.firm (if locus CLI present) → dry-run PLAN → point at
+ *     `ashlr inbox` → offer rollback.
  *   - `--yes` OR non-TTY: print the numbered steps WITHOUT prompting/enrolling.
+ *     Firm is set only when `--locus-firm` or `ASHLR_LOCUS_FIRM=1` (never default).
  * Returns 0 on success, non-zero when preflight blocks.
+ *
+ * Mutating steps (inward only): enroll (H6-audited) + optional config.locus.firm
+ * write. NEVER applies/approves a proposal, NEVER pushes/PRs/deploys.
  */
 export async function cmdOnboard(args: string[]): Promise<number> {
   const cfg = loadConfig();
@@ -392,8 +405,10 @@ export async function cmdOnboard(args: string[]): Promise<number> {
 
   // ── yesMode = non-interactive guidance (NO prompt, NO enroll) ──────────────
   const yesMode = args.includes('--yes') || !process.stdin.isTTY;
+  const locusFirmFlag = argsRequestLocusFirm(args);
 
-  // Candidate repo: first positional arg, else cwd.
+  // Candidate repo: first positional arg that is not a known flag value, else cwd.
+  // Flags: --yes, --rollback, --kill, --locus-firm (boolean; no value).
   const repoArg = args.find((a) => !a.startsWith('--'));
   const candidate = resolve(repoArg ?? process.cwd());
 
@@ -404,10 +419,22 @@ export async function cmdOnboard(args: string[]): Promise<number> {
     return 1;
   }
 
+  // Share enroll confirm seam with firm soft-offer (single spy in tests).
+  _firmOfferInternals.confirm = _internals.confirm;
+
   // Non-interactive: print the numbered steps and STOP — never enroll, never
   // dry-run on the user's behalf. The human runs the explicit gates.
+  // Exception: explicit firm opt-in (--locus-firm / ASHLR_LOCUS_FIRM) may write
+  // config.locus.firm without enrolling (production fleet bootstrap).
   if (yesMode) {
     printSteps(repoArg ?? candidate);
+    // Soft firm offer — skip unless explicit flag/env (CI-safe default off).
+    await maybeOfferLocusFirm({
+      yes: true,
+      locusFirmFlag,
+      context: 'onboard',
+      isInteractive: false,
+    });
     // M71: advisory stack section — best-effort, never blocks.
     for (const line of buildStackStep(candidate)) {
       console.log(line);
@@ -442,7 +469,7 @@ export async function cmdOnboard(args: string[]): Promise<number> {
     console.log('');
     return 0;
   }
-  const enrollment = enroll(candidate); // idempotent; the ONLY mutating call in the whole flow
+  const enrollment = enroll(candidate); // idempotent; H6-audited enrollment gate
   if (enrollment !== undefined && (!enrollment.ok || !enrollment.quiesced)) {
     console.log('');
     console.log(`  ${red('x')} enrollment failed: ${enrollment.reason}`);
@@ -455,6 +482,16 @@ export async function cmdOnboard(args: string[]): Promise<number> {
     `  ${green('✓')} enrolled ${dim(candidate)} ${dim(`(${before.length} → ${after.length} repo(s))`)}`,
   );
   console.log('');
+
+  // ── Step 2b: Soft-offer Locus firm (optional config write; never forced) ───
+  // Offered after first successful enroll in the guided path. Declining leaves
+  // monorepo-safe default (firm off). Explicit --locus-firm skips the prompt.
+  await maybeOfferLocusFirm({
+    yes: false,
+    locusFirmFlag,
+    context: 'onboard',
+    isInteractive: true,
+  });
 
   // ── Step 3: Dry-run PLAN (READ-ONLY — NO proposal, $0 spend) ───────────────
   const plan = await renderDryRunPlan(cfg);
