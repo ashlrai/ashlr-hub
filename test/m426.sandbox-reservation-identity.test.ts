@@ -804,6 +804,8 @@ describe('M426 sandbox reservation and path identity', () => {
     });
   }
 
+  // This exercises real process-tree termination; loaded Windows runners can
+  // need longer than the file-wide deadline to reap a descendant.
   it('joins a hanging Git descendant tree before sandbox creation returns', () => {
     const source = fx.makeRepo();
     const marker = join(fx.home, 'hanging-git-descendant.json');
@@ -823,7 +825,7 @@ describe('M426 sandbox reservation and path identity', () => {
     expect(() => process.kill(observation.descendantPid, 0)).toThrow();
     expect(observeRepository(source)).toEqual(sourceBefore);
     expect(listSandboxes()).toEqual([]);
-  });
+  }, process.platform === 'win32' ? 30_000 : 15_000);
 
   it('does not authorize a new physical repository after an ancestor alias is retargeted', () => {
     const original = fx.makeRepo({ prefix: 'ashlr-m426-original-' });
