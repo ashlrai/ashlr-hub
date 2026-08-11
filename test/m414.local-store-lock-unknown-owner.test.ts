@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
@@ -82,6 +83,18 @@ async function killHolder(child: ChildProcess): Promise<void> {
   await exited;
 }
 
+async function waitForObservedContention(lockPath: string) {
+  // Windows verifies owner identity through a bounded PowerShell probe. A
+  // timed-out observation must remain unavailable; retry until proof exists.
+  const deadline = performance.now() + CHILD_TIMEOUT_MS;
+  let outcome = acquireLocalStoreLockWithOutcome(lockPath, 50);
+  while (outcome.state === 'unavailable' && performance.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    outcome = acquireLocalStoreLockWithOutcome(lockPath, 50);
+  }
+  return outcome;
+}
+
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m414-local-lock-'));
 });
@@ -129,7 +142,7 @@ describe('local store lock unknown-owner recovery', () => {
     const holder = spawnLockHolder(lockPath);
     await holder.ready;
 
-    expect(acquireLocalStoreLockWithOutcome(lockPath, 50)).toEqual({
+    expect(await waitForObservedContention(lockPath)).toEqual({
       state: 'contended',
       lock: null,
     });
