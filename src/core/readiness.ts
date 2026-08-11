@@ -57,9 +57,11 @@ import {
   locusAvailable,
   locusAgentReport,
   locusStatusOneline,
+  locusSoftWatchHeartbeat,
   resolveLocusEnforceMode,
   type LocusAgentReport,
   type LocusProbeResult,
+  type LocusWatchHeartbeat,
 } from './integrations/locus.js';
 
 // ---------------------------------------------------------------------------
@@ -125,6 +127,18 @@ export interface ReadinessLocusSnapshot {
     cursor: boolean;
     codex: boolean;
   } | null;
+  /**
+   * Soft `locus watch --once` fleet heartbeat (only populated under
+   * LOCUS_ENFORCE=warn). Never a readiness blocker by itself.
+   */
+  watch?: {
+    sessionOk: boolean;
+    pinned: boolean;
+    frozen: boolean;
+    whoami: string | null;
+    doctorVerdict: string;
+    safeNext: string;
+  };
   error?: string;
 }
 
@@ -602,6 +616,20 @@ function locusSnapshotFromReport(probe: LocusProbeResult): ReadinessLocusSnapsho
   };
 }
 
+/** Map a watch tick into the values-free readiness snapshot slice. */
+function watchSnapshotFromHeartbeat(
+  hb: LocusWatchHeartbeat,
+): NonNullable<ReadinessLocusSnapshot['watch']> {
+  return {
+    sessionOk: hb.session_ok === true,
+    pinned: hb.pinned === true,
+    frozen: hb.frozen === true,
+    whoami: typeof hb.whoami === 'string' && hb.whoami ? hb.whoami : null,
+    doctorVerdict: hb.doctor_verdict || 'unknown',
+    safeNext: hb.safe_next || 'unknown',
+  };
+}
+
 /** Install/setup fix for the Locus identity plane (no secrets). */
 const LOCUS_INSTALL_FIX =
   'Install: cargo install --git https://github.com/ashlrai/locus --package locus-cli --locked  (or brew install ashlrai/tap/locus)';
@@ -867,11 +895,60 @@ export async function buildReadiness(cfg: AshlrConfig): Promise<ReadinessReport>
     }
     // Prefer WARNING when absent/unhealthy (like phantom). Only LOCUS_ENFORCE=enforce
     // escalates identity-plane gaps to a hard blocker for first activation.
-    const enforce = resolveLocusEnforceMode() === 'enforce';
+    const locusMode = resolveLocusEnforceMode();
+    const enforce = locusMode === 'enforce';
     const pushSoftOrHard = (finding: ReadinessFinding): void => {
       if (finding.severity === 'blocker') blockers.push(finding);
       else warnings.push(finding);
     };
+
+    // Soft fleet heartbeat under LOCUS_ENFORCE=warn only — never a blocker.
+    if (locus?.available && locusMode === 'warn') {
+      try {
+        const soft = locusSoftWatchHeartbeat(process.env, 'warn');
+        if (soft?.heartbeat) {
+          locus = {
+            ...locus,
+            watch: watchSnapshotFromHeartbeat(soft.heartbeat),
+          };
+          if (!soft.ok) {
+            warnings.push({
+              id: 'locus-watch',
+              severity: 'warning',
+              detail:
+                `locus watch heartbeat soft: session_ok=false ` +
+                `pin=${soft.heartbeat.whoami ?? (soft.heartbeat.pinned ? 'pinned' : 'unpinned')} ` +
+                `doctor=${soft.heartbeat.doctor_verdict} safe_next=${soft.heartbeat.safe_next}` +
+                (soft.heartbeat.frozen ? ' FROZEN' : ''),
+              fix: LOCUS_PIN_FIX,
+            });
+          } else {
+            info.push({
+              id: 'locus-watch',
+              severity: 'info',
+              detail:
+                `locus watch heartbeat soft: session_ok=true ` +
+                `pin=${soft.heartbeat.whoami ?? 'pinned'} doctor=${soft.heartbeat.doctor_verdict}`,
+            });
+          }
+        } else if (soft && !soft.available) {
+          warnings.push({
+            id: 'locus-watch',
+            severity: 'warning',
+            detail: 'locus watch heartbeat soft: CLI unavailable',
+            fix: LOCUS_INSTALL_FIX,
+          });
+        } else if (soft?.error) {
+          warnings.push({
+            id: 'locus-watch',
+            severity: 'warning',
+            detail: `locus watch heartbeat soft: ${soft.error}`,
+          });
+        }
+      } catch {
+        // Soft probe must never fail readiness construction.
+      }
+    }
 
     if (!locus?.available) {
       pushSoftOrHard({

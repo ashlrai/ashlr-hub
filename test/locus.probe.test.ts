@@ -15,6 +15,8 @@ import {
   parseRequiredServers,
   hasRequiredServers,
   parseAgentReportJson,
+  parseWatchHeartbeat,
+  parseSessionVerificationPack,
   evaluateFleetGate,
   blockersFromAgentReport,
   mergeLocusIntoMcpConfig,
@@ -150,6 +152,160 @@ describe('parseAgentReportJson / fleet gate', () => {
     const blockers = blockersFromAgentReport(bad as never);
     expect(blockers).toContain('credential migration reconciliation incomplete');
     expect(evaluateFleetGate(bad as never).allowDispatch).toBe(false);
+  });
+});
+
+describe('parseWatchHeartbeat (fleet heartbeat pure)', () => {
+  it('parses modern kind=watch NDJSON tick', () => {
+    const raw = JSON.stringify({
+      kind: 'watch',
+      session_ok: true,
+      whoami: 'acme',
+      doctor_verdict: 'SAFE',
+      safe_next: 'ready',
+      pinned: true,
+      frozen: false,
+    });
+    const hb = parseWatchHeartbeat(raw);
+    expect(hb.kind).toBe('watch');
+    expect(hb.session_ok).toBe(true);
+    expect(hb.whoami).toBe('acme');
+    expect(hb.doctor_verdict).toBe('SAFE');
+    expect(hb.safe_next).toBe('ready');
+    expect(hb.pinned).toBe(true);
+    expect(hb.frozen).toBe(false);
+    expect(hb.source).toBe('watch');
+  });
+
+  it('parses unpinned / not-ok watch ticks', () => {
+    const hb = parseWatchHeartbeat({
+      kind: 'watch',
+      session_ok: false,
+      doctor_verdict: 'WARN',
+      safe_next: 'enter',
+      pinned: false,
+      frozen: false,
+    });
+    expect(hb.session_ok).toBe(false);
+    expect(hb.pinned).toBe(false);
+    expect(hb.safe_next).toBe('enter');
+    expect(hb.whoami).toBeNull();
+  });
+
+  it('accepts nested safe_next object and last NDJSON line', () => {
+    const lines = [
+      '{"kind":"watch","session_ok":false,"doctor_verdict":"WARN","safe_next":"enter","pinned":false,"frozen":false}',
+      JSON.stringify({
+        kind: 'watch',
+        session_ok: true,
+        whoami: 'personal',
+        doctor_verdict: 'SAFE',
+        safe_next: { action: 'ready', ready: true },
+        pinned: true,
+        frozen: false,
+      }),
+    ].join('\n');
+    const hb = parseWatchHeartbeat(lines);
+    expect(hb.session_ok).toBe(true);
+    expect(hb.whoami).toBe('personal');
+    expect(hb.safe_next).toBe('ready');
+  });
+
+  it('maps legacy runtime drift objects (pre-kind=watch CLI)', () => {
+    const legacy = {
+      pinned: true,
+      seal_ok: true,
+      binding_present: true,
+      binding_id_match: true,
+      tenant_match: true,
+      providers_match: true,
+      frozen: false,
+      expired: false,
+      session_id: 'ses_abc',
+      binding_alias: 'personal',
+      issues: [] as string[],
+      ok: true,
+    };
+    const hb = parseWatchHeartbeat(legacy);
+    expect(hb.kind).toBe('watch');
+    expect(hb.source).toBe('legacy-runtime');
+    expect(hb.session_ok).toBe(true);
+    expect(hb.whoami).toBe('personal');
+    expect(hb.pinned).toBe(true);
+    expect(hb.frozen).toBe(false);
+    expect(hb.doctor_verdict).toBe('SAFE');
+    expect(hb.safe_next).toBe('ready');
+  });
+
+  it('maps legacy unpinned ticks to session_ok=false', () => {
+    const hb = parseWatchHeartbeat({
+      pinned: false,
+      seal_ok: false,
+      binding_present: false,
+      frozen: false,
+      providers: [],
+      issues: ['not_pinned'],
+      ok: false,
+    });
+    expect(hb.session_ok).toBe(false);
+    expect(hb.pinned).toBe(false);
+    expect(hb.safe_next).toBe('enter');
+    expect(hb.source).toBe('legacy-runtime');
+  });
+
+  it('fails closed on empty / non-object / unrecognized shapes', () => {
+    expect(() => parseWatchHeartbeat('')).toThrow(/empty/);
+    expect(() => parseWatchHeartbeat('[]')).toThrow(/not an object/);
+    expect(() => parseWatchHeartbeat('null')).toThrow(/not an object/);
+    expect(() => parseWatchHeartbeat('{ "foo": 1 }')).toThrow(/unrecognized/);
+  });
+
+  it('never treats whoami as a secret carrier — alias string only', () => {
+    const hb = parseWatchHeartbeat({
+      kind: 'watch',
+      session_ok: true,
+      whoami: 'acme',
+      doctor_verdict: 'SAFE',
+      safe_next: 'ready',
+      pinned: true,
+      frozen: false,
+      // stray secret-shaped keys must not be required / promoted
+      token: 'should-be-ignored',
+      credential: 'phm:NAME',
+    });
+    expect(hb.whoami).toBe('acme');
+    expect(JSON.stringify(hb)).not.toMatch(/phm:|token|credential/);
+  });
+});
+
+describe('parseSessionVerificationPack (pure)', () => {
+  it('parses session pack and coerces session_ok', () => {
+    const pack = parseSessionVerificationPack(
+      JSON.stringify({
+        kind: 'session',
+        version: '0.2.0',
+        whoami: { binding_alias: 'acme', tenant: 'acme-corp', seal_ok: true },
+        doctor: { ok: true, verdict: 'SAFE', findings: [] },
+        safe_next: { action: 'ready', ready: true, message: 'ok' },
+        session_ok: true,
+      }),
+    );
+    expect(pack.kind).toBe('session');
+    expect(pack.version).toBe('0.2.0');
+    expect(pack.session_ok).toBe(true);
+    expect(pack.safe_next?.action).toBe('ready');
+  });
+
+  it('fails closed on empty / non-object', () => {
+    expect(() => parseSessionVerificationPack('')).toThrow(/empty/);
+    expect(() => parseSessionVerificationPack('[]')).toThrow(/not an object/);
+  });
+
+  it('coerces missing session_ok to false', () => {
+    const pack = parseSessionVerificationPack(
+      JSON.stringify({ kind: 'session', version: '1' }),
+    );
+    expect(pack.session_ok).toBe(false);
   });
 });
 
