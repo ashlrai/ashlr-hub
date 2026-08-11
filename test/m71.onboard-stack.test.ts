@@ -52,6 +52,7 @@ vi.mock('../src/core/daemon/loop.js', () => ({ tick: tickSpy }));
 
 // Imported AFTER vi.mock declarations so the module sees the mocked versions.
 import { buildStackStep, cmdOnboard, _internals } from '../src/cli/onboard.js';
+import { _firmOfferInternals } from '../src/cli/locus-firm-offer.js';
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -79,6 +80,8 @@ beforeEach(() => {
   logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
   // Default confirm: decline (non-interactive guard).
   _internals.confirm = vi.fn(async () => false);
+  // Hermetic firm offer (no PATH-dependent second prompt).
+  _firmOfferInternals.locusAvailable = () => false;
   // Default readiness: ready.
   readinessSpy.mockResolvedValue(readyReport());
   // Reset stack spies to "not installed" defaults.

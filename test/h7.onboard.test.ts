@@ -52,6 +52,7 @@ vi.mock('../src/core/daemon/loop.js', () => ({ tick: tickSpy }));
 vi.mock('../src/core/readiness.js', () => ({ buildReadiness: readinessSpy }));
 
 import { cmdOnboard, renderDryRunPlan, _internals } from '../src/cli/onboard.js';
+import { _firmOfferInternals } from '../src/cli/locus-firm-offer.js';
 import { listEnrolled } from '../src/core/sandbox/policy.js';
 import * as inboxStore from '../src/core/inbox/store.js';
 
@@ -98,6 +99,9 @@ beforeEach(() => {
   // Override the confirm seam (replaced per-test). Default: decline.
   confirmSpy = vi.fn(async () => false);
   _internals.confirm = confirmSpy;
+  // Hermetic firm offer: absent locus → no second confirm (keeps call counts stable).
+  // Dedicated firm-onboard tests mock locusAvailable true.
+  _firmOfferInternals.locusAvailable = () => false;
   // Spies that MUST never fire — onboard never approves/applies/creates.
   setStatusSpy = vi.spyOn(inboxStore, 'setStatus');
   createProposalSpy = vi.spyOn(inboxStore, 'createProposal');
