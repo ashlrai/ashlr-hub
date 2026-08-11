@@ -65,12 +65,17 @@ async function withReadinessMocks<T>(
   vi.doMock('../src/core/mcp-registry.js', () => ({
     discoverMcpServers: () => ({ servers: [] }),
   }));
-  vi.doMock('../src/core/integrations/locus.js', () => ({
-    locusAvailable: () => locus.available,
-    locusAgentReport: () => locus.probe,
-    locusStatusOneline: () => locus.oneline,
-    resolveLocusEnforceMode: () => locus.enforce,
-  }));
+  vi.doMock('../src/core/integrations/locus.js', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('../src/core/integrations/locus.js')>();
+    return {
+      ...actual,
+      locusAvailable: () => locus.available,
+      locusAgentReport: () => locus.probe,
+      locusStatusOneline: () => locus.oneline,
+      resolveLocusEnforceMode: () => locus.enforce,
+      // extractLocusConfigFirm stays real (pure cfg read)
+    };
+  });
 
   try {
     const mod = await import('../src/core/readiness.js');
@@ -288,5 +293,99 @@ describe('readiness Locus identity-plane snapshot', () => {
     expect(report.locus?.gateOk).toBe(false);
     const warning = report.warnings.find((f) => f.id === 'locus');
     expect(warning?.detail).toContain('report failed');
+  });
+
+  it('soft-warns locus-firm when enrolled>0, locus available, and firm false', async () => {
+    const report = await withReadinessMocks(
+      {
+        available: true,
+        probe: readyProbe(),
+        oneline: 'personal:personal',
+        enforce: 'off',
+      },
+      async (buildReadiness, fx) => {
+        const repo = fx.makeRepo();
+        repo.enroll();
+        return buildReadiness(makeCfg({}));
+      },
+    ) as {
+      warnings: Array<{ id: string; severity: string; detail: string; fix?: string }>;
+      blockers: Array<{ id: string }>;
+      ready: boolean;
+    };
+
+    const warning = report.warnings.find((f) => f.id === 'locus-firm');
+    expect(warning?.severity).toBe('warning');
+    expect(warning?.detail).toMatch(/consider locus\.firm for production/i);
+    expect(warning?.fix).toMatch(/locus\.firm/i);
+    expect(report.blockers.find((f) => f.id === 'locus-firm')).toBeUndefined();
+    expect(report.ready).toBe(true);
+  });
+
+  it('does not soft-warn locus-firm when firm is true', async () => {
+    const report = await withReadinessMocks(
+      {
+        available: true,
+        probe: readyProbe(),
+        oneline: 'personal:personal',
+        enforce: 'off',
+      },
+      async (buildReadiness, fx) => {
+        const repo = fx.makeRepo();
+        repo.enroll();
+        return buildReadiness(makeCfg({ locus: { firm: true } }));
+      },
+    ) as {
+      warnings: Array<{ id: string }>;
+      info: Array<{ id: string; detail: string }>;
+      ready: boolean;
+    };
+
+    expect(report.warnings.find((f) => f.id === 'locus-firm')).toBeUndefined();
+    const info = report.info.find((f) => f.id === 'locus-firm');
+    expect(info?.detail).toMatch(/locus\.firm=true/);
+    expect(report.ready).toBe(true);
+  });
+
+  it('does not soft-warn locus-firm when nothing is enrolled', async () => {
+    const report = await withReadinessMocks(
+      {
+        available: true,
+        probe: readyProbe(),
+        oneline: 'personal:personal',
+        enforce: 'off',
+      },
+      async (buildReadiness) => buildReadiness(makeCfg({})),
+    ) as {
+      warnings: Array<{ id: string }>;
+    };
+
+    expect(report.warnings.find((f) => f.id === 'locus-firm')).toBeUndefined();
+  });
+
+  it('does not soft-warn locus-firm when locus is unavailable', async () => {
+    const report = await withReadinessMocks(
+      {
+        available: false,
+        probe: {
+          available: false,
+          report: null,
+          exitCode: 2,
+          error: 'locus CLI not found on PATH',
+          gateOk: false,
+        },
+        oneline: 'unpinned',
+        enforce: 'off',
+      },
+      async (buildReadiness, fx) => {
+        const repo = fx.makeRepo();
+        repo.enroll();
+        return buildReadiness(makeCfg({}));
+      },
+    ) as {
+      warnings: Array<{ id: string }>;
+    };
+
+    expect(report.warnings.find((f) => f.id === 'locus-firm')).toBeUndefined();
   });
 });

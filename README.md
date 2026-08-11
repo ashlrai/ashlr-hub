@@ -492,6 +492,9 @@ ashlr config set locus.firm true
 # Soft roll-out / explicit mode (beats firm when set)
 ashlr config set locus.enforce warn
 
+# CI jobs under firm: mint an isolated pin (required when mode is enforce)
+export LOCUS_CI_BINDING=acme-ci
+
 # Local override without editing config
 LOCUS_ENFORCE=off ashlr run …
 
@@ -506,6 +509,10 @@ Resolution: env → `locus.enforce` → `locus.firm === true` → off. See
 **off** (monorepo-safe); onboard/enroll only write firm on confirm or explicit
 `--locus-firm` / `ASHLR_LOCUS_FIRM=1`.
 
+**Production fleet checklist** (install Locus, firm, CI binding, doctor soft
+warn): [`docs/LOCUS-FIRM-FLEET.md`](docs/LOCUS-FIRM-FLEET.md). When repos are
+enrolled, Locus is on PATH, and `locus.firm` is still false, `ashlr doctor` /
+preflight soft-warns *consider locus.firm for production* (non-blocking).
 ---
 
 ## Version history
@@ -544,6 +551,7 @@ See [`docs/ECOSYSTEM-MAP.md`](docs/ECOSYSTEM-MAP.md) for the full capability map
 | [`docs/ELITE-AGENT-EFFICIENCY.md`](docs/ELITE-AGENT-EFFICIENCY.md) | Current primary-source research translated into Hub efficiency priorities and measurable autonomy gates |
 | [`docs/ECOSYSTEM-MAP.md`](docs/ECOSYSTEM-MAP.md) | The 13-repo platform and composition bets |
 | [`docs/QUICKSTART.md`](docs/QUICKSTART.md) | Step-by-step first activation |
+| [`docs/LOCUS-FIRM-FLEET.md`](docs/LOCUS-FIRM-FLEET.md) | Production fleet checklist — `locus.firm`, `LOCUS_ENFORCE`, `LOCUS_CI_BINDING` (default off) |
 | [`docs/FOUNDRY-CONFIG.md`](docs/FOUNDRY-CONFIG.md) | Full `cfg.foundry` reference — engines, tiers, confinement, auto-merge |
 | [`docs/RELIABILITY.md`](docs/RELIABILITY.md) | Fault-tolerance and degradation guarantees |
 | [`docs/SPEC-V4-FOUNDRY.md`](docs/SPEC-V4-FOUNDRY.md) · [`docs/SPEC-V5-OPEN-FLEET.md`](docs/SPEC-V5-OPEN-FLEET.md) · [`docs/SPEC-V6-VERIFICATION.md`](docs/SPEC-V6-VERIFICATION.md) | The design specs behind each version series (incl. the full safety-invariant set) |
