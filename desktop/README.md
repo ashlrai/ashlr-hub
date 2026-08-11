@@ -2,7 +2,9 @@
 
 A Tauri v2 desktop app that wraps the Ashlr Mission Control web UI in a native window, manages the daemon lifecycle, and adds a system tray icon.
 
-Targets: macOS (.dmg) · Windows (.msi / .exe) · Linux (.deb).
+Published targets: macOS (`.dmg`) · Windows (`.msi` / `.exe`).
+Linux desktop builds and installers are quarantined; the Linux CLI and web
+dashboard remain supported.
 Installed size: ~10–15 MB (Rust WebView runtime + bundled ashlr binary).
 
 ---
@@ -17,7 +19,7 @@ Download the latest installer from GitHub Releases:
 |----------|------|---------|
 | macOS | `.dmg` | Open the DMG, drag Ashlr to Applications |
 | Windows | `.msi` or `.exe` | Run the installer |
-| Linux | `.deb` | `sudo dpkg -i ashlr_*.deb` |
+| Linux | Not published | Use the supported [npm/CLI quickstart](../docs/QUICKSTART.md) |
 
 ### First-launch security prompts (unsigned builds)
 
@@ -26,8 +28,6 @@ Current releases are unsigned. You will see a one-time OS warning:
 **macOS — Gatekeeper:** Right-click (or Control-click) `Ashlr.app` and choose **Open**, then click Open again in the dialog. You only need to do this once.
 
 **Windows — SmartScreen:** Click **More info → Run anyway**.
-
-**Linux:** No warning.
 
 ---
 
@@ -70,6 +70,18 @@ Then relaunch the app.
 ---
 
 ## Build from source
+
+> **Linux desktop quarantine:** every fresh Tauri dev, debug, release, and
+> direct Cargo source build targeting Linux fails in `src-tauri/build.rs` before
+> `tauri_build::build()`. Tauri v2 currently resolves GTK3 and vulnerable
+> `glib 0.18.5` (`GHSA-wrw7-89jp-8q8g` / `RUSTSEC-2024-0429`). This does not
+> block the root `ashlr` CLI, Bun sidecar, or web dashboard on Linux.
+> Default Tauri configuration also disables Linux bundling and runs a
+> fail-closed pre-bundle policy, covering the official workflow and ordinary
+> `cargo tauri build`, `--debug`, and direct `--bundles` paths. A hostile
+> `--config` override combined with an already-built/staged executable is
+> outside source-build enforcement; never treat artifacts from a custom config
+> or a non-fresh build tree as admitted release output.
 
 ### Prerequisites
 
@@ -119,7 +131,6 @@ cargo tauri build
 Bundles are written to `src-tauri/target/release/bundle/`:
 - macOS: `*.app` + `*.dmg`
 - Windows: `*.msi` + NSIS `*.exe`
-- Linux: `*.deb`
 
 Debug build (keeps console window on Windows):
 ```sh
@@ -128,7 +139,20 @@ cargo tauri build --debug
 
 ### CI / automated releases
 
-Pushing a `desktop-v*` tag triggers `.github/workflows/release-desktop.yml`, which builds all three platforms in a matrix and uploads installers to a GitHub Release draft.
+Pushing a `desktop-v*` tag triggers `.github/workflows/release-desktop.yml`,
+which builds only macOS and Windows installers and uploads them to a GitHub
+Release draft. The release body records Linux as not published.
+
+Linux desktop release can be re-enabled only after either migration to Tauri v3
+with GTK4, or adoption of another supported dependency chain that resolves
+`glib >=0.20`. That change must also pass full native build, install, launch,
+sidecar, signing/updater, and release acceptance on macOS, Windows, and Linux,
+with an independent security review. Removing the workflow row alone is not an
+override: the Rust build guard, default Linux bundle policy, and pre-bundle
+policy must be retired in the same reviewed change. Release acceptance applies
+only to the official workflow, default Tauri configuration, and fresh builds;
+a hostile `--config` with a staged executable is outside source-build
+enforcement.
 
 Code-signing is optional. Set `APPLE_CERTIFICATE` / `APPLE_ID` / `APPLE_TEAM_ID` secrets for notarized macOS builds, and `WINDOWS_CERTIFICATE` for Authenticode-signed Windows builds. Without these secrets, the workflow produces functional unsigned builds.
 
@@ -195,7 +219,7 @@ The updater plugin is **build-safe without a signing key**:
 - Adding `tauri-plugin-updater` to `Cargo.toml` and registering it in `main.rs` compiles cleanly with no secrets.
 - The `pubkey` placeholder in `tauri.conf.json` is a plain string — Tauri's JSON Schema for `plugins.*` uses `additionalProperties: true`, so no schema validation fails.
 - Signature verification only happens at runtime, not at `cargo tauri build` time.
-- When `TAURI_SIGNING_PRIVATE_KEY` is absent from CI, `tauri-action` simply skips producing `.sig` files and `latest.json` — the build still succeeds and produces a fully functional (unsigned) installer.
+- When `TAURI_SIGNING_PRIVATE_KEY` is absent from CI, `tauri-action` simply skips producing `.sig` files and `latest.json` — supported macOS and Windows builds still produce functional unsigned installers.
 
 ---
 
