@@ -24,6 +24,10 @@ const windowsLauncherTest = readFileSync(
   resolve(repoRoot, 'test/m503.windows-open-launcher.test.ts'),
   'utf8',
 );
+const windowsCmdStartDiagnostic = readFileSync(
+  resolve(repoRoot, 'test/m503.windows-cmd-start-diagnostic.test.ts'),
+  'utf8',
+);
 const pkg = JSON.parse(
   readFileSync(resolve(repoRoot, 'package.json'), 'utf8'),
 ) as { engines?: { node?: string }; scripts?: Record<string, string> };
@@ -447,6 +451,7 @@ describe('M30 CI workflow', () => {
       ...expectedWindowsPartitions.flat(),
       ...expectedMacosFiles,
       'test/m503.windows-open-launcher.test.ts',
+      'test/m503.windows-cmd-start-diagnostic.test.ts',
       ...nativeAliasFiles,
       ...nativeAclEnrollmentFiles,
       ...nativePathIdentityFiles,
@@ -535,6 +540,28 @@ describe('M30 CI workflow', () => {
       .toHaveLength(1);
     expect(windowsLauncherTest).toContain("const suite = describe.runIf(onWindows)");
     expect(windowsLauncherTest).toContain('Manual GUI');
+    expect(windowsLauncherTest).not.toContain('vi.importActual');
+    const cmdStartDiagnosticStep = ciYml.match(
+      /^ {6}- name: Diagnose Windows CMD and START argv \(M503, bounded\)[\s\S]*?(?=^ {6}- name: |^ {6}#)/m,
+    )?.[0] ?? '';
+    expect(cmdStartDiagnosticStep).not.toBe('');
+    expect(cmdStartDiagnosticStep).toContain(
+      "if: ${{ !cancelled() && matrix.label == 'windows, portability 1/3' }}",
+    );
+    expect(cmdStartDiagnosticStep).toContain('ASHLR_VITEST_TEST_TIMEOUT_MS: "35000"');
+    expect(cmdStartDiagnosticStep).toContain(
+      'npm run test:ci -- --no-file-parallelism test/m503.windows-cmd-start-diagnostic.test.ts',
+    );
+    expect(ciYml.match(/test\/m503\.windows-cmd-start-diagnostic\.test\.ts/g))
+      .toHaveLength(1);
+    expect(windowsCmdStartDiagnostic).toContain('const suite = describe.runIf(onWindows)');
+    expect(windowsCmdStartDiagnostic).toContain('const EXECUTION_LIMIT_MS = 4_000');
+    expect(windowsCmdStartDiagnostic).toContain('const TERMINATION_LIMIT_MS = 2_000');
+    expect(windowsCmdStartDiagnostic).toContain('const MATRIX_LIMIT_MS = 35_000');
+    expect(windowsCmdStartDiagnostic).toContain('const OUTPUT_LIMIT_BYTES = 4 * 1024');
+    expect(windowsCmdStartDiagnostic).toContain('name: "Node-canonical explicit outer quotes"');
+    expect(windowsCmdStartDiagnostic).toContain('windowsVerbatimArguments: true');
+    expect(windowsCmdStartDiagnostic).not.toMatch(/taskkill|Stop-Process|pkill|killall/i);
     expect(ciYml).toContain(
       "if: matrix.os == 'macos-latest' || matrix.label == 'windows, portability 2/3'",
     );
