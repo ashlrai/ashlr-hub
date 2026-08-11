@@ -521,7 +521,7 @@ describe('M30 CI workflow', () => {
     expect(ciYml).toContain('npm run test:ci -- ${{ matrix.test_args }}');
     expect(ciYml).toContain('Test Windows launcher authority (M503, hermetic)');
     expect(ciYml).toContain(
-      "if: matrix.os == 'windows-latest' && startsWith(matrix.label, 'windows, portability')",
+      "if: ${{ !cancelled() && matrix.os == 'windows-latest' && startsWith(matrix.label, 'windows, portability') }}",
     );
     const launcherAuthorityRows = nativeMatrixRows.filter(({ label, os }) =>
       os === 'windows-latest' && label.startsWith('windows, portability'),

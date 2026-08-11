@@ -10,7 +10,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join, win32 } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -101,20 +101,47 @@ suite('real Windows launcher resolution', () => {
     expect(launcherMocks.spawn).not.toHaveBeenCalled();
   });
 
-  it('probes the real cmd/start argv parser without opening an interactive window', () => {
+  it('probes the real cmd/start argv parser without opening an interactive window', async () => {
     const systemRoot = realpathSync.native(process.env['SystemRoot'] ?? '');
     const expectedCmd = realpathSync.native(join(systemRoot, 'System32', 'cmd.exe'));
-    // `/c` executes the bounded built-in and then exits by contract. This
-    // avoids the hosted-runner hang observed when the `/b` child ran `exit`.
-    const probe = `start "" /b /wait "${expectedCmd}" /d /c ver`;
+    const sentinelName = 'm503-parser-sentinel.txt';
+    const sentinelPath = join(fixtureDir, sentinelName);
+    const sentinelContent = 'ashlr-m503-parser-ok';
+    rmSync(sentinelPath, { force: true });
+
+    // Keep the production parser boundary (`start "" "<canonical cmd>" /d`)
+    // while replacing its persistent `/k` child with a bounded `/c` command.
+    // `/wait` is deliberately absent: hosted cmd.exe can retain the nested
+    // console lifecycle indefinitely. The fixed relative sentinel proves the
+    // nested child actually parsed and ran; no fixture path enters command text.
+    const probe = `start "" /b "${expectedCmd}" /d /c "echo ${sentinelContent}>${sentinelName}"`;
 
     const result = spawnSync(
       expectedCmd,
       ['/d', '/v:off', '/s', '/c', probe],
-      { cwd: realpathSync.native(fixtureDir), shell: false, windowsHide: true, timeout: 10_000 },
+      {
+        cwd: realpathSync.native(fixtureDir),
+        shell: false,
+        stdio: 'ignore',
+        windowsHide: true,
+        timeout: 10_000,
+      },
     );
 
     expect(result.error).toBeUndefined();
     expect(result.status).toBe(0);
+
+    const deadline = Date.now() + 5_000;
+    let observedContent = '';
+    while (observedContent !== sentinelContent && Date.now() < deadline) {
+      try {
+        observedContent = readFileSync(sentinelPath, 'utf8').trim();
+      } catch {
+        observedContent = '';
+      }
+      if (observedContent === sentinelContent) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    expect(observedContent).toBe(sentinelContent);
   });
 });

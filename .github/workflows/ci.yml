@@ -157,10 +157,11 @@ jobs:
         run: npm run test:ci -- ${{ matrix.test_args }}
 
       - name: Test Windows launcher authority (M503, hermetic)
-        if: matrix.os == 'windows-latest' && startsWith(matrix.label, 'windows, portability')
+        if: ${{ !cancelled() && matrix.os == 'windows-latest' && startsWith(matrix.label, 'windows, portability') }}
         # M503 mocks graphical spawn and uses only a bounded, noninteractive
-        # cmd/start parser probe. Every required Windows portability check runs
-        # the same four assertions; non-Windows jobs have no launcher authority.
+        # cmd/start parser probe. Run even if the main shard failed so every
+        # required Windows portability check records the same four assertions.
+        # Non-Windows jobs have no launcher authority.
         run: npm run test:ci -- test/m503.windows-open-launcher.test.ts
 
       - name: Test native ACL enrollment fences (hermetic)
