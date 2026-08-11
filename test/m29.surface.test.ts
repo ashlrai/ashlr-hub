@@ -306,7 +306,7 @@ vi.mock('../src/core/daemon/state.js', () => ({
   loadDaemonState: vi.fn(() => ({ running: false })),
 }));
 
-import { startServer } from '../src/core/web/server.js';
+import { readAuthHeaders, startServer } from './helpers/authenticated-web-server.js';
 
 function makeConfig(): AshlrConfig {
   return {
@@ -341,7 +341,7 @@ function request(
         port: Number(parsed.port),
         path: parsed.pathname + parsed.search,
         method,
-        headers: { Host: `127.0.0.1:${port}`, ...headers },
+        headers: { Host: `127.0.0.1:${port}`, ...readAuthHeaders(port), ...headers },
       },
       (res) => {
         let data = '';

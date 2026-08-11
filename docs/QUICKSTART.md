@@ -109,7 +109,41 @@ Opens the web dashboard at **http://127.0.0.1:7777** (bound to localhost only �
 ashlr serve --open    # also opens the browser automatically
 ```
 
+Copy the read token printed at startup into the **Read token** control. All
+proprietary JSON reads and the live event stream are authenticated even on
+loopback. The raw token stays in the current tab's `sessionStorage`; the server
+mints a 15-minute, read-only, HttpOnly, SameSite=Strict cookie for EventSource.
+Since cookies are host-scoped rather than port-scoped, the ticket is also bound
+to a browser-generated 256-bit client proof kept in origin-scoped
+`sessionStorage`. EventSource places only that proof—not the read or mutation
+token—in its same-origin query. The proof has no authority without the matching
+signed HttpOnly ticket, and responses set `Referrer-Policy: no-referrer`.
+Neither the cookie nor its proof can authorize a mutation. Restarting the
+server rotates the read token and invalidates every prior read session.
+The 15-minute expiry applies only to the cookie ticket. The per-process raw
+read token remains valid until server restart, and the current tab renews its
+ticket while that token remains in `sessionStorage`.
+
+For a headless read, supply the startup token directly:
+
+```sh
+curl -H "X-Ashlr-Token: $ASHLR_DASHBOARD_READ_TOKEN" \
+  http://127.0.0.1:7777/api/fleet
+```
+
+Only static assets and `GET /api/health` with the bounded `{ "ok": true }`
+projection are public. Because the server intentionally uses plain HTTP on
+loopback, the cookie is not marked `Secure`; Ashlr does not trust
+`X-Forwarded-Proto` and has no reverse-proxy/TLS mode.
+
+`--allow-dispatch` prints a separate mutation token. The read token and read
+cookie are never accepted by mutation routes. The browser requests the
+mutation token anew for every enabled action, uses it only for that request,
+and does not retain it in JavaScript state; ordinary dashboard reading never
+grants mutation authority.
+
 The dashboard shows:
+
 - **Fleet status** — daemon running/idle, today's spend, queue depth, pending proposals
 - **Runs & Swarms** — history of all agent runs with per-task detail
 - **Inbox** — pending proposals waiting for approval
