@@ -198,6 +198,10 @@ describe('daemon help is read-only', () => {
     { args: ['stop', '-h'], usage: 'Usage: ashlr daemon stop' },
     { args: ['status', '--help'], usage: 'Usage: ashlr daemon status' },
     { args: ['status', '-h'], usage: 'Usage: ashlr daemon status' },
+    { args: ['activation-preflight', '--help'], usage: 'Usage: ashlr daemon activation-preflight' },
+    { args: ['activation-preflight', '-h'], usage: 'Usage: ashlr daemon activation-preflight' },
+    { args: ['activate', '--help'], usage: 'Usage: ashlr daemon activate' },
+    { args: ['activate', '-h'], usage: 'Usage: ashlr daemon activate' },
     { args: ['recover-state', '--help'], usage: 'Usage: ashlr daemon recover-state' },
     { args: ['recover-state', '-h'], usage: 'Usage: ashlr daemon recover-state' },
     { args: ['resolve-state', '--help'], usage: 'Usage: ashlr daemon resolve-state' },
@@ -240,6 +244,8 @@ describe('daemon unknown flags fail before effects', () => {
     ['start', '--unknown'],
     ['stop', '--unknown'],
     ['status', '--unknown'],
+    ['activation-preflight', '--unknown'],
+    ['activate', '--unknown'],
     ['install', '--unknown'],
     ['uninstall', '--unknown'],
     ['service-status', '--unknown'],
@@ -254,6 +260,38 @@ describe('daemon unknown flags fail before effects', () => {
 });
 
 describe('daemon valid flags remain supported', () => {
+  it.skipIf(process.platform !== 'darwin')('keeps explicit activation read-only when HOME is poisoned', async () => {
+    const result = await capture([
+      'activate',
+      '--request',
+      '/definitely/not-read/activation-plan.json',
+      '--authorize',
+      'a'.repeat(64),
+      '--confirm',
+      'a'.repeat(64),
+      '--json',
+    ]);
+
+    expect(result.code).toBe(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      activated: false,
+      phase: 'blocked',
+      reason: 'runtime activation HOME does not match the operating-system account home',
+      rollbackRestored: false,
+    });
+    expect(result.stderr).toBe('');
+    expect(moduleLoads).toMatchObject({
+      config: 0,
+      loop: 0,
+      state: 0,
+      inbox: 0,
+      service: 0,
+      serviceConfig: 0,
+    });
+    for (const effect of Object.values(effects)) expect(effect).not.toHaveBeenCalled();
+    expect(fs.readdirSync(tmpHome)).toEqual([]);
+  });
+
   it('preserves status --json', async () => {
     const result = await capture(['status', '--json']);
 

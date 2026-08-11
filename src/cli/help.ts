@@ -312,6 +312,8 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'daemon start --once --drain diagnostic-reslices --limit 3', desc: 'Target one guarded capped tick at queued no-diff diagnostic reslices.', topic: 'autonomy' },
   { cmd: 'daemon stop',                  desc: 'Halt the daemon: set kill switch + clear running state.', topic: 'autonomy' },
   { cmd: 'daemon status',                desc: "Daemon roll-up: running?, today's spend vs cap, pending proposals.", topic: 'autonomy' },
+  { cmd: 'daemon activation-preflight --request <path> [--json]', desc: 'Read-only verification of operator-custodied signed candidate and rollback artifacts; grants no service authority.', topic: 'safety' },
+  { cmd: 'daemon activate --request <path> --authorize <digest> --confirm <digest> [--json]', desc: 'Read-only validation of one exact signed, expiring macOS plan; resident mutation is unavailable.', topic: 'safety' },
   { cmd: 'daemon service-status',        desc: 'Read-only OS service state; remains available during the resident-mutation restriction.', topic: 'autonomy' },
   { cmd: 'daemon uninstall',             desc: 'Remove an existing OS service; remains available during the resident-mutation restriction.', topic: 'autonomy' },
   { cmd: 'daemon install',               desc: 'Temporarily unavailable: install/reinstall/repair/restart authority is withheld.', topic: 'autonomy' },
