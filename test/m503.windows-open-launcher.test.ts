@@ -10,10 +10,12 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join, win32 } from 'node:path';
 import { tmpdir } from 'node:os';
-import { spawnSync } from 'node:child_process';
+import { performance } from 'node:perf_hooks';
+import type { ChildProcess } from 'node:child_process';
 
 const launcherMocks = vi.hoisted(() => ({
   once: vi.fn(),
@@ -102,12 +104,16 @@ suite('real Windows launcher resolution', () => {
   });
 
   it('probes the real cmd/start argv parser without opening an interactive window', async () => {
+    const { spawn: actualSpawn } = await vi.importActual<typeof import('node:child_process')>('node:child_process');
     const systemRoot = realpathSync.native(process.env['SystemRoot'] ?? '');
     const expectedCmd = realpathSync.native(join(systemRoot, 'System32', 'cmd.exe'));
+    const probeDir = mkdtempSync(join(tmpdir(), 'ashlr-m503-parser-'));
     const sentinelName = 'm503-parser-sentinel.txt';
-    const sentinelPath = join(fixtureDir, sentinelName);
-    const sentinelContent = 'ashlr-m503-parser-ok';
-    rmSync(sentinelPath, { force: true });
+    const sentinelPath = join(probeDir, sentinelName);
+    const sentinelContent = `ashlr-m503-parser-${randomUUID()}`;
+    const expectedSentinelContent = `${sentinelContent}\r\n`;
+    let outerProcess: ChildProcess | undefined;
+    let spawnError: Error | undefined;
 
     // Keep the production parser boundary (`start "" "<canonical cmd>" /d`)
     // while replacing its persistent `/k` child with a bounded `/c` command.
@@ -116,32 +122,45 @@ suite('real Windows launcher resolution', () => {
     // nested child actually parsed and ran; no fixture path enters command text.
     const probe = `start "" /b "${expectedCmd}" /d /c "echo ${sentinelContent}>${sentinelName}"`;
 
-    const result = spawnSync(
-      expectedCmd,
-      ['/d', '/v:off', '/s', '/c', probe],
-      {
-        cwd: realpathSync.native(fixtureDir),
+    try {
+      outerProcess = actualSpawn(expectedCmd, ['/d', '/v:off', '/s', '/c', probe], {
+        cwd: realpathSync.native(probeDir),
         shell: false,
         stdio: 'ignore',
         windowsHide: true,
-        timeout: 10_000,
-      },
-    );
+        detached: false,
+      });
+      outerProcess.once('error', (error) => {
+        spawnError = error;
+      });
 
-    expect(result.error).toBeUndefined();
-    expect(result.status).toBe(0);
-
-    const deadline = Date.now() + 5_000;
-    let observedContent = '';
-    while (observedContent !== sentinelContent && Date.now() < deadline) {
-      try {
-        observedContent = readFileSync(sentinelPath, 'utf8').trim();
-      } catch {
-        observedContent = '';
+      const deadline = performance.now() + 5_000;
+      let observedContent = '';
+      while (observedContent !== expectedSentinelContent && performance.now() < deadline) {
+        try {
+          observedContent = readFileSync(sentinelPath, 'utf8');
+        } catch {
+          observedContent = '';
+        }
+        if (observedContent === expectedSentinelContent || spawnError) break;
+        const remainingMs = deadline - performance.now();
+        if (remainingMs <= 0) break;
+        await new Promise((resolve) => setTimeout(resolve, Math.min(25, remainingMs)));
       }
-      if (observedContent === sentinelContent) break;
-      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      expect(spawnError).toBeUndefined();
+      expect(observedContent).toBe(expectedSentinelContent);
+    } finally {
+      if (outerProcess?.exitCode === null && outerProcess.signalCode === null) {
+        outerProcess.kill();
+        outerProcess.unref();
+      }
+      rmSync(probeDir, {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 25,
+      });
     }
-    expect(observedContent).toBe(sentinelContent);
   });
 });
