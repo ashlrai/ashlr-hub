@@ -104,7 +104,9 @@ suite('real Windows launcher resolution', () => {
   it('probes the real cmd/start argv parser without opening an interactive window', () => {
     const systemRoot = realpathSync.native(process.env['SystemRoot'] ?? '');
     const expectedCmd = realpathSync.native(join(systemRoot, 'System32', 'cmd.exe'));
-    const probe = `start "" /b /wait "${expectedCmd}" /d /c exit 0`;
+    // `/c` executes the bounded built-in and then exits by contract. This
+    // avoids the hosted-runner hang observed when the `/b` child ran `exit`.
+    const probe = `start "" /b /wait "${expectedCmd}" /d /c ver`;
 
     const result = spawnSync(
       expectedCmd,
