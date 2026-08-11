@@ -13,7 +13,12 @@ import type { AshlrConfig, DoctorCheck, DoctorCheckStatus, DoctorReport, McpRegi
 import { loadConfig } from './config.js';
 import { getPhantomStatus } from './phantom.js';
 import { getProviderRegistry } from './providers.js';
-import { locusAgentReport, locusAvailable } from './integrations/locus.js';
+import {
+  locusAgentReport,
+  locusAvailable,
+  locusSoftWatchHeartbeat,
+  resolveLocusEnforceMode,
+} from './integrations/locus.js';
 // H7 — 5 NEW read-only probes share the SAME read-only readiness facets that
 // `ashlr preflight` uses, from the shared readiness module (single source of
 // truth; no drift). See docs/contracts/CONTRACT-H7.md (BUILD ITEM 2). These
@@ -524,10 +529,28 @@ export function checkLocus(): DoctorCheck {
 
     const r = probe.report;
     const oneline = r.status_oneline ?? 'unpinned';
-    const detail = `status=${r.status} pin=${oneline} ready=${r.ready}`;
+    let detail = `status=${r.status} pin=${oneline} ready=${r.ready}`;
     const fix =
       r.next_steps?.[0]
       ?? 'locus enter <alias> && locus agent setup --apply --client all';
+
+    // Soft watch heartbeat under LOCUS_ENFORCE=warn only — annotate, never escalate.
+    if (resolveLocusEnforceMode() === 'warn') {
+      try {
+        const soft = locusSoftWatchHeartbeat(process.env, 'warn');
+        if (soft?.heartbeat) {
+          detail +=
+            `; watch session_ok=${soft.heartbeat.session_ok}` +
+            ` doctor=${soft.heartbeat.doctor_verdict}` +
+            ` safe_next=${soft.heartbeat.safe_next}` +
+            (soft.heartbeat.frozen ? ' FROZEN' : '');
+        } else if (soft?.error) {
+          detail += `; watch soft: ${soft.error}`;
+        }
+      } catch {
+        // Soft only — ignore probe failures.
+      }
+    }
 
     if (r.status === 'unsafe') {
       return check('locus', 'Locus identity plane', 'fail', detail, fix);
