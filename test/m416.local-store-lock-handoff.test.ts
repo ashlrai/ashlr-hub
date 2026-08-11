@@ -449,7 +449,10 @@ describe('local store lock installation handoff', () => {
     faults.rejectAssurance = (target, kind, mode) =>
       target.includes('.reclaim.owner.') && kind === 'file' && mode === 'secure-created';
 
-    expect(acquireLocalStoreLock(lockPath, 0, { exactPrivateStorage: true })).toBeNull();
+    expect(acquireLocalStoreLock(lockPath, 0, {
+      anchorPath: tmpDir,
+      exactPrivateStorage: true,
+    })).toBeNull();
 
     const retained = fs.lstatSync(lockPath);
     expect({ dev: retained.dev, ino: retained.ino }).toEqual({ dev: stale.dev, ino: stale.ino });
