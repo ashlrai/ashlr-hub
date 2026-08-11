@@ -591,12 +591,32 @@ function contained(anchor: string, candidate: string, allowEqual = false): boole
   );
 }
 
-function verifyImmutableBundlePath(bundleRootPath: string, targetPath: string, kind: 'directory' | 'file'): void {
+interface ImmutableBundlePathSnapshot {
+  path: string;
+  stat: BigIntStats;
+}
+
+function immutableBundleFile(stat: BigIntStats): boolean {
+  return (
+    stat.isFile() &&
+    !stat.isSymbolicLink() &&
+    stat.nlink === 1n &&
+    ownedByCurrentUser(stat) &&
+    (process.platform === 'win32' || (stat.mode & 0o222n) === 0n)
+  );
+}
+
+function snapshotImmutableBundlePath(
+  bundleRootPath: string,
+  targetPath: string,
+  kind: 'directory' | 'file',
+): ImmutableBundlePathSnapshot[] {
   const root = resolve(bundleRootPath);
   const target = resolve(targetPath);
   if (!contained(root, target, kind === 'directory')) {
     throw new Error('artifact path escapes immutable bundle root');
   }
+  const snapshots: ImmutableBundlePathSnapshot[] = [];
   const directoryTarget = kind === 'file' ? dirname(target) : target;
   const components = relative(root, directoryTarget).split(sep).filter(Boolean);
   let current = root;
@@ -612,6 +632,7 @@ function verifyImmutableBundlePath(bundleRootPath: string, targetPath: string, k
     ) {
       throw new Error('immutable bundle directory custody is invalid');
     }
+    snapshots.push({ path: current, stat });
     if (process.platform === 'win32') {
       const assurance = assurePrivateStoragePath(current, 'directory', 'inspect-owned', { anchorPath: root });
       if (!assurance.ok) throw new Error('immutable bundle directory ACL is invalid');
@@ -619,21 +640,33 @@ function verifyImmutableBundlePath(bundleRootPath: string, targetPath: string, k
   }
   if (kind === 'file') {
     const stat = lstatSync(target, { bigint: true });
-    if (
-      !stat.isFile() ||
-      stat.isSymbolicLink() ||
-      stat.nlink !== 1n ||
-      !ownedByCurrentUser(stat) ||
-      (process.platform !== 'win32' && (stat.mode & 0o222n) !== 0n) ||
-      realpathSync(target) !== target
-    ) {
+    if (!immutableBundleFile(stat) || realpathSync(target) !== target) {
       throw new Error('immutable bundle file custody is invalid');
     }
+    snapshots.push({ path: target, stat });
     if (process.platform === 'win32') {
       const assurance = assurePrivateStoragePath(target, 'file', 'inspect-owned', { anchorPath: root });
       if (!assurance.ok) throw new Error('immutable bundle file ACL is invalid');
     }
   }
+  return snapshots;
+}
+
+function verifyImmutableBundlePath(bundleRootPath: string, targetPath: string, kind: 'directory' | 'file'): void {
+  snapshotImmutableBundlePath(bundleRootPath, targetPath, kind);
+}
+
+function sameBundlePathSnapshots(
+  before: readonly ImmutableBundlePathSnapshot[],
+  after: readonly ImmutableBundlePathSnapshot[],
+): boolean {
+  return (
+    before.length === after.length &&
+    before.every((entry, index) => {
+      const current = after[index];
+      return current !== undefined && current.path === entry.path && sameSnapshot(entry.stat, current.stat);
+    })
+  );
 }
 
 function runtimeActivationRootPath(homePath = homedir()): string {
@@ -879,17 +912,29 @@ function verifyActivationManifest(parsed: ParsedActivationManifest, trust: Loade
 function hashStableArtifact(path: string, rootPath: string): string {
   const root = resolve(rootPath);
   const target = resolve(path);
-  verifyImmutableBundlePath(root, target, 'file');
-  const rootBefore = lstatSync(root, { bigint: true });
-  const fileBefore = lstatSync(target, { bigint: true });
-  if (fileBefore.size < 1n || fileBefore.size > BigInt(MAX_HASH_ARTIFACT_BYTES)) {
-    throw new Error('artifact size is invalid');
-  }
+  if (!contained(root, target)) throw new Error('artifact path escapes immutable bundle root');
+  const directoriesBefore = snapshotImmutableBundlePath(root, dirname(target), 'directory');
   const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
-  const fd = openSync(target, fsConstants.O_RDONLY | noFollow);
+  const nonBlock = typeof fsConstants.O_NONBLOCK === 'number' ? fsConstants.O_NONBLOCK : 0;
+  // Do not inspect the target path before opening it. The descriptor is the
+  // authority; its identity is matched to the immutable path immediately
+  // after open and again after the bounded read.
+  const fd = openSync(target, fsConstants.O_RDONLY | noFollow | nonBlock);
   try {
     const openedBefore = fstatSync(fd, { bigint: true });
-    if (!sameSnapshot(fileBefore, openedBefore)) throw new Error('artifact changed before read');
+    if (!immutableBundleFile(openedBefore)) throw new Error('immutable bundle file custody is invalid');
+    if (openedBefore.size < 1n || openedBefore.size > BigInt(MAX_HASH_ARTIFACT_BYTES)) {
+      throw new Error('artifact size is invalid');
+    }
+    const pathBefore = snapshotImmutableBundlePath(root, target, 'file');
+    const fileBefore = pathBefore.at(-1);
+    if (
+      fileBefore?.path !== target ||
+      !sameSnapshot(fileBefore.stat, openedBefore) ||
+      !sameBundlePathSnapshots(directoriesBefore, pathBefore.slice(0, -1))
+    ) {
+      throw new Error('artifact changed before read');
+    }
     const hash = createHash('sha256');
     const chunk = Buffer.allocUnsafe(64 * 1024);
     let offset = 0;
@@ -901,14 +946,13 @@ function hashStableArtifact(path: string, rootPath: string): string {
     }
     if (readSync(fd, chunk, 0, 1, offset) !== 0) throw new Error('artifact grew during read');
     const openedAfter = fstatSync(fd, { bigint: true });
-    const fileAfter = lstatSync(target, { bigint: true });
-    const rootAfter = lstatSync(root, { bigint: true });
+    const pathAfter = snapshotImmutableBundlePath(root, target, 'file');
+    const fileAfter = pathAfter.at(-1);
     if (
       !sameSnapshot(openedBefore, openedAfter) ||
-      !sameSnapshot(openedAfter, fileAfter) ||
-      !sameSnapshot(rootBefore, rootAfter) ||
-      realpathSync(root) !== root ||
-      realpathSync(target) !== target
+      fileAfter?.path !== target ||
+      !sameSnapshot(openedAfter, fileAfter.stat) ||
+      !sameBundlePathSnapshots(pathBefore, pathAfter)
     ) {
       throw new Error('artifact changed during read');
     }
