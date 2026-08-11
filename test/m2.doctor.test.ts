@@ -173,6 +173,9 @@ vi.mock('../src/core/phantom.js', () => ({
 vi.mock('../src/core/integrations/locus.js', () => ({
   locusAvailable: () => _locusAvailable,
   locusAgentReport: () => _locusProbe,
+  // Soft watch heartbeat under LOCUS_ENFORCE=warn — hermetic default off.
+  resolveLocusEnforceMode: () => 'off' as const,
+  locusSoftWatchHeartbeat: () => null,
 }));
 
 vi.mock('../src/core/providers.js', () => ({

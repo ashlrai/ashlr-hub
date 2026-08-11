@@ -16,15 +16,22 @@
  * Pure (unit-testable) exports — no spawn / no FS:
  *   parseStatusOneline, isStatusOnelineHealthy, canMutate,
  *   parseRequiredServers, hasRequiredServers, parseAgentReportJson,
+ *   parseWatchHeartbeat, parseSessionVerificationPack,
  *   blockersFromAgentReport, evaluateFleetGate, decidePreMutateGate,
  *   parseLocusEnforceToken, resolveLocusEnforceMode, extractLocusConfigEnforce,
  *   extractLocusConfigFirm, decideLocusSessionRun,
  *   scrubbedChildEnv, validateMintEnv, applyLocusSessionEnv, parseMcpConfigJson,
  *   mergeLocusIntoMcpConfig, locusServerSpec
  *
- * Shell-out / FS: locusAvailable, locusAgentReport, ensureLocusReady, locusFleetGate,
+ * Shell-out / FS: locusAvailable, locusAgentReport, locusVerifySession,
+ *   locusWatchOnce, ensureLocusReady, locusFleetGate,
  *   assertLocusPreMutate, applyLocusPreMutateGate, withLocusSession,
  *   runWithLocusSessionIfConfigured, locusDoctorLine, registerLocusInMcpConfig
+ *
+ * Fleet heartbeat (session pack / watch tick — never secrets):
+ *   locus verify session --json  → full doctor + whoami + safe_next pack
+ *   locus watch --once --json    → compact NDJSON tick (kind=watch)
+ *   Soft only under LOCUS_ENFORCE=warn (readiness/doctor) — never hard-blocks alone.
  *
  * Pre-mutate enforcement (opt-in — never always-on):
  *   Resolution order for mode (see resolveLocusEnforceMode):
@@ -142,6 +149,75 @@ export interface LocusProbeResult {
   error?: string;
   /** true when status is ready and oneline is not unpinned/frozen/invalid */
   gateOk: boolean;
+}
+
+/**
+ * Compact NDJSON tick from `locus watch --once --json` (hub fleet heartbeat).
+ * Aliases / verdicts only — never secrets.
+ * @see locus docs/verification-plane.md
+ */
+export interface LocusWatchHeartbeat {
+  /** Stable stream tag (`watch`). Legacy runtime ticks may omit this. */
+  kind: "watch";
+  /** True when doctor ok and safe_next.ready (same gate as session pack). */
+  session_ok: boolean;
+  /** Active binding alias when whoami is available. */
+  whoami?: string | null;
+  /** Doctor verdict: SAFE | WARN | UNSAFE (or unknown for legacy). */
+  doctor_verdict: string;
+  /** Machine-readable safe_next action (ready | enter | re_pin | …). */
+  safe_next: string;
+  /** Whether a pin is currently present. */
+  pinned: boolean;
+  /** Runtime frozen (binding drift under live session). */
+  frozen: boolean;
+  /**
+   * Source shape that was parsed.
+   * - `watch`: modern `kind=watch` tick
+   * - `legacy-runtime`: older drift object (`ok` / `binding_alias` / …)
+   */
+  source?: "watch" | "legacy-runtime";
+}
+
+/** Result of `locusWatchOnce` (never throws). */
+export interface LocusWatchProbeResult {
+  available: boolean;
+  heartbeat: LocusWatchHeartbeat | null;
+  exitCode: number;
+  error?: string;
+  /** True when heartbeat.session_ok. */
+  ok: boolean;
+}
+
+/**
+ * Values-free subset of `locus verify session --json` for hub heartbeats.
+ * Nested doctor/whoami objects are kept as opaque records (names/verdicts only
+ * when consumed) — never secret values.
+ */
+export interface LocusSessionVerificationPack {
+  kind: "session";
+  version: string;
+  whoami?: Record<string, unknown> | null;
+  doctor?: Record<string, unknown> | null;
+  safe_next?: {
+    action?: string;
+    ready?: boolean;
+    message?: string;
+    command?: string;
+    [key: string]: unknown;
+  } | null;
+  session_ok: boolean;
+  [key: string]: unknown;
+}
+
+/** Result of `locusVerifySession` (never throws). */
+export interface LocusSessionVerifyResult {
+  available: boolean;
+  pack: LocusSessionVerificationPack | null;
+  exitCode: number;
+  error?: string;
+  /** True when pack.session_ok. */
+  sessionOk: boolean;
 }
 
 /** Parsed form of `locus status --oneline`. */
@@ -602,6 +678,166 @@ export function parseAgentReportJson(raw: string): LocusAgentReport {
     throw new Error("agent report root is not an object");
   }
   return v as LocusAgentReport;
+}
+
+/**
+ * Parse `locus verify session --json` pack. Throws on invalid JSON / non-object.
+ * Does not deep-validate doctor/whoami — hub only needs session_ok + shape.
+ */
+export function parseSessionVerificationPack(
+  raw: string,
+): LocusSessionVerificationPack {
+  const text = (raw ?? "").trim();
+  if (!text) {
+    throw new Error("empty session verification JSON");
+  }
+  const v = JSON.parse(text) as unknown;
+  if (v === null || typeof v !== "object" || Array.isArray(v)) {
+    throw new Error("session verification root is not an object");
+  }
+  const obj = v as Record<string, unknown>;
+  const sessionOk =
+    obj.session_ok === true ||
+    obj.session_ok === "true" ||
+    obj.session_ok === 1;
+  return {
+    ...(obj as LocusSessionVerificationPack),
+    kind: "session",
+    version: typeof obj.version === "string" ? obj.version : "",
+    session_ok: sessionOk,
+  };
+}
+
+/**
+ * Pure: parse a `locus watch --once --json` NDJSON tick into a heartbeat.
+ *
+ * Accepts:
+ *   1. Modern pack: `{ kind:"watch", session_ok, whoami?, doctor_verdict, safe_next, pinned, frozen }`
+ *   2. Legacy runtime drift: `{ ok, pinned, frozen, binding_alias?, seal_ok?, issues? }`
+ *      (installed locus 0.2.0 and earlier) — mapped to the same hub shape.
+ *
+ * Never throws for unknown fields. Throws only on empty / invalid JSON /
+ * non-object root (fail closed — caller treats as probe error).
+ *
+ * Secrets: never expected; whoami is alias-only.
+ */
+export function parseWatchHeartbeat(
+  raw: string | Record<string, unknown>,
+): LocusWatchHeartbeat {
+  let obj: Record<string, unknown>;
+  if (typeof raw === "string") {
+    const text = raw.trim();
+    if (!text) {
+      throw new Error("empty watch heartbeat JSON");
+    }
+    // NDJSON may be multi-line continuous stream; take the last non-empty line.
+    const line =
+      text
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .pop() ?? text;
+    const v = JSON.parse(line) as unknown;
+    if (v === null || typeof v !== "object" || Array.isArray(v)) {
+      throw new Error("watch heartbeat root is not an object");
+    }
+    obj = v as Record<string, unknown>;
+  } else if (raw !== null && typeof raw === "object" && !Array.isArray(raw)) {
+    obj = raw;
+  } else {
+    throw new Error("watch heartbeat root is not an object");
+  }
+
+  const kindRaw =
+    typeof obj.kind === "string" ? obj.kind.trim().toLowerCase() : "";
+
+  // Modern kind=watch (or session pack re-used as tick via session_ok fields)
+  if (
+    kindRaw === "watch" ||
+    ("session_ok" in obj &&
+      ("doctor_verdict" in obj || "safe_next" in obj || kindRaw === "watch"))
+  ) {
+    const sessionOk = coerceBool(obj.session_ok);
+    const whoami = coerceOptionalString(obj.whoami);
+    const doctorVerdict =
+      coerceOptionalString(obj.doctor_verdict) ??
+      coerceOptionalString(obj.doctorVerdict) ??
+      "unknown";
+    const safeNext =
+      coerceSafeNextAction(obj.safe_next) ??
+      coerceSafeNextAction(obj.safeNext) ??
+      "unknown";
+    const pinned =
+      coerceBool(obj.pinned) ||
+      (whoami != null && whoami.length > 0);
+    const frozen = coerceBool(obj.frozen);
+    return {
+      kind: "watch",
+      session_ok: sessionOk,
+      whoami: whoami ?? null,
+      doctor_verdict: doctorVerdict,
+      safe_next: safeNext,
+      pinned,
+      frozen,
+      source: "watch",
+    };
+  }
+
+  // Legacy runtime drift object (pre-session-pack watch)
+  if (
+    "ok" in obj ||
+    "binding_alias" in obj ||
+    "binding_present" in obj ||
+    "seal_ok" in obj
+  ) {
+    const ok = coerceBool(obj.ok);
+    const pinned = coerceBool(obj.pinned) || coerceBool(obj.binding_present);
+    const frozen = coerceBool(obj.frozen);
+    const whoami =
+      coerceOptionalString(obj.binding_alias) ??
+      coerceOptionalString(obj.whoami) ??
+      null;
+    const issues = Array.isArray(obj.issues)
+      ? obj.issues.filter((i): i is string => typeof i === "string")
+      : [];
+    const safeNext = pinned
+      ? ok
+        ? "ready"
+        : issues[0] ?? "re_pin"
+      : "enter";
+    return {
+      kind: "watch",
+      session_ok: ok && pinned && !frozen,
+      whoami,
+      doctor_verdict: ok && pinned && !frozen ? "SAFE" : frozen ? "UNSAFE" : "WARN",
+      safe_next: safeNext,
+      pinned,
+      frozen,
+      source: "legacy-runtime",
+    };
+  }
+
+  throw new Error("unrecognized watch heartbeat shape");
+}
+
+function coerceBool(v: unknown): boolean {
+  if (v === true || v === 1 || v === "1" || v === "true") return true;
+  return false;
+}
+
+function coerceOptionalString(v: unknown): string | undefined {
+  if (typeof v === "string" && v.trim()) return v.trim();
+  return undefined;
+}
+
+/** Accept string action or nested `{ action }` safe_next object. */
+function coerceSafeNextAction(v: unknown): string | undefined {
+  if (typeof v === "string" && v.trim()) return v.trim();
+  if (v !== null && typeof v === "object" && !Array.isArray(v)) {
+    const action = (v as { action?: unknown }).action;
+    if (typeof action === "string" && action.trim()) return action.trim();
+  }
+  return undefined;
 }
 
 /**
@@ -1267,6 +1503,139 @@ export function locusStatusOneline(env?: NodeJS.ProcessEnv): string {
   } catch {
     return "unpinned";
   }
+}
+
+/**
+ * Run `locus verify session --json` — full doctor + whoami + safe_next pack.
+ * Preferred when hub needs structured session health (not just a compact tick).
+ * Never throws. Never surfaces secret values (CLI contract).
+ *
+ * Note: CLI exits nonzero when `session_ok` is false but still emits JSON —
+ * we parse stdout regardless of exit code.
+ */
+export function locusVerifySession(
+  env?: NodeJS.ProcessEnv,
+): LocusSessionVerifyResult {
+  if (!locusAvailable()) {
+    return {
+      available: false,
+      pack: null,
+      exitCode: 2,
+      error: "locus CLI not found on PATH",
+      sessionOk: false,
+    };
+  }
+  try {
+    const r = spawnSync(LOCUS_BIN, ["verify", "session", "--json"], {
+      encoding: "utf8",
+      timeout: TIMEOUT_MS,
+      env: locusEnv(env),
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    const exitCode = typeof r.status === "number" ? r.status : 2;
+    const stdout = (r.stdout ?? "").trim();
+    if (!stdout) {
+      return {
+        available: true,
+        pack: null,
+        exitCode,
+        error: r.stderr?.trim() || "empty verify session output",
+        sessionOk: false,
+      };
+    }
+    const pack = parseSessionVerificationPack(stdout);
+    return {
+      available: true,
+      pack,
+      exitCode,
+      sessionOk: pack.session_ok === true,
+    };
+  } catch (e) {
+    return {
+      available: true,
+      pack: null,
+      exitCode: 2,
+      error: e instanceof Error ? e.message : String(e),
+      sessionOk: false,
+    };
+  }
+}
+
+/**
+ * Run `locus watch --once --json` — single compact fleet heartbeat tick.
+ * Prefer for continuous/periodic hub heartbeats; use
+ * {@link locusVerifySession} when full doctor/whoami objects are needed.
+ * Never throws. Never surfaces secret values.
+ */
+export function locusWatchOnce(env?: NodeJS.ProcessEnv): LocusWatchProbeResult {
+  if (!locusAvailable()) {
+    return {
+      available: false,
+      heartbeat: null,
+      exitCode: 2,
+      error: "locus CLI not found on PATH",
+      ok: false,
+    };
+  }
+  try {
+    const r = spawnSync(LOCUS_BIN, ["watch", "--once", "--json"], {
+      encoding: "utf8",
+      timeout: TIMEOUT_MS,
+      env: locusEnv(env),
+      maxBuffer: 1024 * 1024,
+    });
+    const exitCode = typeof r.status === "number" ? r.status : 2;
+    const stdout = (r.stdout ?? "").trim();
+    if (!stdout) {
+      return {
+        available: true,
+        heartbeat: null,
+        exitCode,
+        error: r.stderr?.trim() || "empty watch output",
+        ok: false,
+      };
+    }
+    const heartbeat = parseWatchHeartbeat(stdout);
+    return {
+      available: true,
+      heartbeat,
+      exitCode,
+      ok: heartbeat.session_ok === true,
+    };
+  } catch (e) {
+    return {
+      available: true,
+      heartbeat: null,
+      exitCode: 2,
+      error: e instanceof Error ? e.message : String(e),
+      ok: false,
+    };
+  }
+}
+
+/**
+ * Soft fleet-heartbeat probe for doctor/readiness under LOCUS_ENFORCE=warn.
+ *
+ * - mode=off / enforce: no shell-out from this helper (monorepo-safe default;
+ *   enforce already has hard pre-mutate / readiness paths)
+ * - mode=warn: runs `locus watch --once --json` for a soft annotation only
+ * - Never throws; never hard-blocks by itself
+ *
+ * Pass `mode` explicitly in tests to stay hermetic (skips ~/.ashlr).
+ */
+export function locusSoftWatchHeartbeat(
+  env?: NodeJS.ProcessEnv,
+  mode?: LocusEnforceMode,
+): LocusWatchProbeResult | null {
+  const resolved =
+    mode !== undefined
+      ? mode
+      : resolveLocusEnforceMode(env, readLocusConfigFromAshlr());
+  // Soft roll-out only — never a second hard gate.
+  if (resolved !== "warn") {
+    return null;
+  }
+  return locusWatchOnce(env);
 }
 
 /**
