@@ -9708,6 +9708,89 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
     expect(mockRunGoal).not.toHaveBeenCalled();
   });
 
+  it('E3g1: any invalid explicit candidate refuses the whole race instead of falling back', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: makeItems(repo.dir, 1),
+    });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'shadow config test' });
+    mockEngineTierOf.mockReturnValue('mid');
+    const digest = `sha256:${'a'.repeat(64)}`;
+
+    await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: {
+        allowedBackends: ['local-coder', 'claude'],
+        bestOfN: 3,
+        bestOfNCandidates: [
+          {
+            engine: 'local-coder',
+            model: 'nemotron-shadow:exact',
+            shadow: { enabled: true, artifactDigest: digest },
+          },
+          { engine: 'claude', model: 'claude-sonnet-5' },
+          {
+            engine: 'local-coder',
+            model: 'refused-false-enable',
+            shadow: { enabled: false, artifactDigest: digest },
+          },
+          {
+            engine: 'claude',
+            model: 'refused-non-local-shadow',
+            shadow: { enabled: true, artifactDigest: digest },
+          },
+          {
+            engine: 'local-coder',
+            model: 'refused-unknown-key',
+            shadow: { enabled: true, artifactDigest: digest },
+            unknown: true,
+          },
+        ],
+      },
+    } as unknown as AshlrConfig, { dryRun: false });
+
+    expect(mockRunBestOfN).toHaveBeenCalledTimes(1);
+    expect(mockRunBestOfN.mock.calls[0]?.[2]).toMatchObject({
+      candidateConfigRefusal: 'explicit bestOfNCandidates refused',
+    });
+    expect(mockRunBestOfN.mock.calls[0]?.[2]).not.toHaveProperty('candidates');
+    expect(mockRunGoal).not.toHaveBeenCalled();
+  });
+
+  it('E3g2: a Proxy trap in explicit candidates fails closed without escaping tick', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: makeItems(repo.dir, 1),
+    });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'proxy config test' });
+    mockEngineTierOf.mockReturnValue('mid');
+    const trappedCandidate = new Proxy({}, {
+      ownKeys: () => { throw new Error('trap'); },
+    });
+
+    await expect(tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: {
+        allowedBackends: ['local-coder'],
+        bestOfN: 2,
+        bestOfNCandidates: [trappedCandidate, { engine: 'local-coder' }],
+      },
+    } as unknown as AshlrConfig, { dryRun: false })).resolves.toBeDefined();
+
+    expect(mockRunBestOfN).toHaveBeenCalledTimes(1);
+    expect(mockRunBestOfN.mock.calls[0]?.[2]).toMatchObject({
+      candidateConfigRefusal: 'explicit bestOfNCandidates refused',
+    });
+    expect(mockRunBestOfN.mock.calls[0]?.[2]).not.toHaveProperty('candidates');
+    expect(mockRunGoal).not.toHaveBeenCalled();
+  });
+
   it('E3h: Pulse command sync settles before shutdown releases daemon ownership', async () => {
     const repo = fx.makeRepo();
     repo.enroll();

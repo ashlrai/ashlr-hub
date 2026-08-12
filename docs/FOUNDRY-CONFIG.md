@@ -263,6 +263,70 @@ available — it is, since M331).
 - Per-candidate records land in `~/.ashlr/best-of-n/` (win rates feed the
   dashboard Models tab).
 
+#### Digest-pinned local shadow candidate (Nemotron Phase 0)
+
+Phase 0 can observe an already-installed Ollama model without granting it any
+proposal authority. The feature is **off by default**: a candidate is a shadow
+only when the exact nested object below is present and `enabled` is literally
+`true`. `local-coder` must also be present in `foundry.allowedBackends`; an
+explicit candidate using a disallowed backend refuses the entire configured
+race rather than falling back to a default proposal-capable candidate.
+
+```json
+"bestOfN": 2,
+"allowedBackends": ["codex", "local-coder"],
+"bestOfNCandidates": [
+  { "engine": "codex" },
+  {
+    "engine": "local-coder",
+    "model": "<exact-ollama-model-name>",
+    "shadow": {
+      "enabled": true,
+      "artifactDigest": "sha256:<64-lowercase-hex-characters>"
+    }
+  }
+]
+```
+
+Before model contact, Ashlr performs one bounded, redirect-refusing `GET
+/api/tags` against the exact `OLLAMA_BASE_URL`. Set it to a numeric HTTP
+loopback such as `http://127.0.0.1:11434/v1`; DNS hostnames including
+`localhost` are refused. The name must match exactly, and the installed
+artifact's full SHA-256 digest must equal the configured pin. A mismatch,
+malformed response, timeout, non-loopback URL, or missing model refuses the
+candidate. Ashlr does not pull or install a model and does not start the Ollama
+server. Shadow inference may cause an already-running Ollama server to load the
+configured artifact.
+
+Even after a successful preflight the shadow candidate is observation-only: it
+may be generated, tested, judged, and recorded as bounded artifact metadata,
+but it is excluded from winner selection and durable proposal capture. It
+therefore acquires no proposal, branch-apply, or main-merge authority. Candidate
+execution uses an isolated scratch worktree branch; normal cleanup removes it,
+while cleanup failure may retain it as bounded diagnostic evidence. If the
+isolated-worktree or draft-only capture primitive is unavailable, Ashlr refuses
+the shadow before provider contact rather than using the legacy immediate-file
+compatibility path. Keep at least one non-shadow candidate if this run should be
+able to file a winner.
+
+The verified endpoint and model are copied into a one-run immutable transport
+binding; mutable environment changes cannot redirect inference. Shadow requests
+refuse redirects and have tighter time, request/response-byte, step, and token ceilings.
+After inference Ashlr re-reads the same numeric-loopback inventory and discards
+all candidate material if the exact digest changed. The ledger records bounded,
+secret-scrubbed artifact identity plus counterfactual participation, judged,
+test-pass, score, and would-have-won metrics. Shadows are excluded from the
+production best-of-N participation and win-rate denominators.
+
+Rows containing shadow telemetry use the strict best-of-N ledger v2 schema.
+The current reader migrates exact legacy and v1 rows while validating v2 rows;
+older binaries do not understand v2, so do not downgrade while v2 rows remain
+in the active ledger (archive them separately first if a rollback is required).
+
+Phase 0 retains the existing local-coder runtime profile and its 32K exercised
+context ceiling. Model-card context claims (including 1M-token claims) are not
+Ashlr runtime guarantees until separately exercised and receipted.
+
 ---
 
 ### `outcomeWatcher` (M332)

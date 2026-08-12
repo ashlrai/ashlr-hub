@@ -6128,33 +6128,91 @@ export async function tick(
         // subscription-aware) replaces the winner-only spend accounting.
         const _bonCfg = routingCfg.foundry as Record<string, unknown> | undefined;
         const _bonMinScore = _bonCfg?.['bestOfNMinItemScore'];
-        const _bonRawCandidates = _bonCfg?.['bestOfNCandidates'];
         const fanOut =
           bestOfN > 1 &&
           !isTrustedGeneratedRepairItem(item) &&
           (typeof _bonMinScore !== 'number' || (item.score ?? 0) >= _bonMinScore);
-        let _bonCandidates: ReadonlyArray<{ engine: string; model?: string | null }> | undefined;
-        if (fanOut && Array.isArray(_bonRawCandidates)) {
-          const accepted: Array<{ engine: string; model?: string | null }> = [];
-          const allowed = new Set((routingCfg.foundry?.allowedBackends ?? []) as string[]);
-          const inspected = Math.min(
-            _bonRawCandidates.length,
-            MAX_BEST_OF_N_CANDIDATE_SPECS_INSPECTED,
-          );
-          for (let index = 0; index < inspected && accepted.length < bestOfN; index += 1) {
-            const candidate = _bonRawCandidates[index];
-            if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
-            const engineProperty = Object.getOwnPropertyDescriptor(candidate, 'engine');
-            const modelProperty = Object.getOwnPropertyDescriptor(candidate, 'model');
-            const engine = engineProperty?.value;
-            const model = modelProperty?.value;
-            if (!engineProperty?.enumerable || typeof engine !== 'string' || !allowed.has(engine)) continue;
-            if (modelProperty !== undefined &&
-              (!modelProperty.enumerable ||
-                (typeof model !== 'string' && model !== null && model !== undefined))) continue;
-            accepted.push(modelProperty === undefined ? { engine } : { engine, model });
+        let _bonCandidates: ReadonlyArray<{
+          engine: string;
+          model?: string | null;
+          shadow?: { enabled: true; artifactDigest: string };
+        }> | undefined;
+        let _bonCandidateConfigRefusal: string | undefined;
+        if (fanOut && _bonCfg) {
+          try {
+            const configured = Object.getOwnPropertyDescriptor(_bonCfg, 'bestOfNCandidates');
+            if (configured !== undefined) {
+              if (!configured.enumerable || !('value' in configured) || !Array.isArray(configured.value)) {
+                throw new Error('explicit bestOfNCandidates must be a plain array value');
+              }
+              const rawCandidates = configured.value as unknown[];
+              const length = rawCandidates.length;
+              if (length < 1) throw new Error('explicit bestOfNCandidates is empty');
+              const inspected = Math.min(length, MAX_BEST_OF_N_CANDIDATE_SPECS_INSPECTED);
+              const accepted: Array<{
+                engine: string;
+                model?: string | null;
+                shadow?: { enabled: true; artifactDigest: string };
+              }> = [];
+              const allowed = new Set((routingCfg.foundry?.allowedBackends ?? []) as string[]);
+              for (let index = 0; index < inspected; index += 1) {
+                const slot = Object.getOwnPropertyDescriptor(rawCandidates, String(index));
+                const candidate = slot?.value;
+                if (!slot?.enumerable || !candidate || typeof candidate !== 'object' ||
+                  Array.isArray(candidate)) throw new Error(`candidate ${index} is not plain data`);
+                const keys = Object.keys(candidate);
+                if (keys.some((key) => key !== 'engine' && key !== 'model' && key !== 'shadow')) {
+                  throw new Error(`candidate ${index} has unknown fields`);
+                }
+                const engineProperty = Object.getOwnPropertyDescriptor(candidate, 'engine');
+                const modelProperty = Object.getOwnPropertyDescriptor(candidate, 'model');
+                const shadowProperty = Object.getOwnPropertyDescriptor(candidate, 'shadow');
+                const engine = engineProperty?.value;
+                const model = modelProperty?.value;
+                if (!engineProperty?.enumerable || typeof engine !== 'string' || !allowed.has(engine)) {
+                  throw new Error(`candidate ${index} engine is invalid or disallowed`);
+                }
+                if (modelProperty !== undefined && (!modelProperty.enumerable || !('value' in modelProperty) ||
+                  (typeof model !== 'string' && model !== null))) {
+                  throw new Error(`candidate ${index} model is invalid`);
+                }
+                let shadow: { enabled: true; artifactDigest: string } | undefined;
+                if (shadowProperty !== undefined) {
+                  const rawShadow = shadowProperty.value;
+                  if (!shadowProperty.enumerable || !('value' in shadowProperty) || !rawShadow ||
+                    typeof rawShadow !== 'object' || Array.isArray(rawShadow) ||
+                    engine !== 'local-coder' || typeof model !== 'string' ||
+                    model.length === 0 || model.length > 256) {
+                    throw new Error(`candidate ${index} shadow config is invalid`);
+                  }
+                  const shadowKeys = Object.keys(rawShadow);
+                  const enabledProperty = Object.getOwnPropertyDescriptor(rawShadow, 'enabled');
+                  const digestProperty = Object.getOwnPropertyDescriptor(rawShadow, 'artifactDigest');
+                  const digest = digestProperty?.value;
+                  if (shadowKeys.length !== 2 || !shadowKeys.includes('enabled') ||
+                    !shadowKeys.includes('artifactDigest') || !enabledProperty?.enumerable ||
+                    !('value' in enabledProperty) || enabledProperty.value !== true ||
+                    !digestProperty?.enumerable || !('value' in digestProperty) ||
+                    typeof digest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(digest)) {
+                    throw new Error(`candidate ${index} shadow config is invalid`);
+                  }
+                  shadow = { enabled: true, artifactDigest: digest };
+                }
+                if (accepted.length < bestOfN) {
+                  accepted.push({
+                    engine,
+                    ...(modelProperty === undefined ? {} : { model }),
+                    ...(shadow ? { shadow } : {}),
+                  });
+                }
+              }
+              if (accepted.length === 0) throw new Error('explicit bestOfNCandidates accepted no entries');
+              _bonCandidates = Object.freeze(accepted);
+            }
+          } catch {
+            _bonCandidates = undefined;
+            _bonCandidateConfigRefusal = 'explicit bestOfNCandidates refused';
           }
-          if (accepted.length > 0) _bonCandidates = Object.freeze(accepted);
         }
         let bonBillable: number | null = null;
 
@@ -6179,6 +6237,7 @@ export async function tick(
             return runBestOfN(item, routingCfg, {
               n: bestOfN, engine: backend, model: selectedModel,
               ...(_bonCandidates ? { candidates: _bonCandidates as never } : {}),
+              ...(_bonCandidateConfigRefusal ? { candidateConfigRefusal: _bonCandidateConfigRefusal } : {}),
               workItemId: item.id, workItemGenerationId, workSource: item.source,
               delegationScope, attemptId, shadowSkillCards, shadowSkillSelectedAt,
               signal: dispatchSignal,

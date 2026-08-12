@@ -48,11 +48,31 @@ const RECORD_KEYS = new Set([
   'winnerIndex', 'winnerProposalId', 'totalCostUsd', 'candidates',
 ]);
 const LEGACY_RECORD_KEYS = new Set([...RECORD_KEYS].filter((key) => key !== 'schemaVersion'));
-const CANDIDATE_KEYS = new Set([
+const V1_CANDIDATE_KEYS = new Set([
   'index', 'runId', 'engine', 'model', 'score', 'testsPassed', 'costUsd',
   'latencyMs', 'error', 'proposalOutcome', 'proposalOutcomeReason',
   'producerStatus', 'isPartial', 'selectionWon', 'fullProposalWon', 'proposalId', 'won',
 ]);
+const V2_CANDIDATE_KEYS = new Set([
+  ...V1_CANDIDATE_KEYS,
+  'shadow', 'shadowIdentityStatus', 'artifactDigest', 'artifactName',
+  'artifactSizeBytes', 'artifactDetails',
+  'shadowParticipated', 'shadowJudged', 'shadowTestPassed', 'shadowScore',
+  'shadowWouldHaveWon',
+]);
+
+const ARTIFACT_DETAIL_KEYS = new Set([
+  'parent_model', 'format', 'family', 'families', 'parameter_size', 'quantization_level',
+]);
+
+export interface BestOfNArtifactDetails {
+  parent_model?: string;
+  format?: string;
+  family?: string;
+  families?: string[];
+  parameter_size?: string;
+  quantization_level?: string;
+}
 
 export interface BestOfNCandidateRecord {
   index: number;
@@ -63,6 +83,17 @@ export interface BestOfNCandidateRecord {
   testsPassed?: boolean;
   costUsd?: number;
   latencyMs?: number;
+  shadow?: true;
+  shadowIdentityStatus?: 'verified' | 'refused';
+  artifactDigest?: string;
+  artifactName?: string;
+  artifactSizeBytes?: number;
+  artifactDetails?: BestOfNArtifactDetails;
+  shadowParticipated?: boolean;
+  shadowJudged?: boolean;
+  shadowTestPassed?: boolean;
+  shadowScore?: number;
+  shadowWouldHaveWon?: boolean;
   error?: string;
   proposalOutcome?: string;
   proposalOutcomeReason?: string;
@@ -81,7 +112,7 @@ export interface BestOfNCandidateRecord {
 
 export interface BestOfNRecord {
   /** Added during persistence; optional here for compatibility with producers. */
-  schemaVersion?: 1;
+  schemaVersion?: 1 | 2;
   ts: string;
   attemptId?: string;
   workItemId?: string;
@@ -267,10 +298,38 @@ function canonicalTimestamp(value: unknown): string | undefined {
   return canonical === value ? canonical : undefined;
 }
 
-function sanitizeCandidate(value: unknown, persisted: boolean): BestOfNCandidateRecord | undefined {
+function sanitizeArtifactDetails(value: unknown): BestOfNArtifactDetails | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const raw = value as Record<string, unknown>;
-  if (persisted && !exactKeys(raw, CANDIDATE_KEYS)) return undefined;
+  if (!exactKeys(raw, ARTIFACT_DETAIL_KEYS)) return undefined;
+  const details: BestOfNArtifactDetails = {};
+  for (const key of ['parent_model', 'format', 'family', 'parameter_size', 'quantization_level'] as const) {
+    if (raw[key] === undefined) continue;
+    const field = raw[key];
+    if (typeof field !== 'string' || field.length > 256) return undefined;
+    const scrubbed = scrubSecrets(field);
+    if (scrubbed !== field) return undefined;
+    details[key] = field;
+  }
+  if (raw['families'] !== undefined) {
+    if (!Array.isArray(raw['families']) || raw['families'].length > 16) return undefined;
+    const families = raw['families'].map((family) =>
+      typeof family === 'string' && family.length <= 256 && scrubSecrets(family) === family
+        ? family
+        : undefined);
+    if (families.some((family) => family === undefined)) return undefined;
+    details.families = families as string[];
+  }
+  return details;
+}
+
+function sanitizeCandidate(
+  value: unknown,
+  persistedKeys?: ReadonlySet<string>,
+): BestOfNCandidateRecord | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  if (persistedKeys && !exactKeys(raw, persistedKeys)) return undefined;
   const index = Number.isInteger(raw['index']) && Number(raw['index']) >= 0 && Number(raw['index']) < MAX_CANDIDATES
     ? Number(raw['index'])
     : undefined;
@@ -289,6 +348,22 @@ function sanitizeCandidate(value: unknown, persisted: boolean): BestOfNCandidate
   const error = boundedText(raw['error'], 500);
   const proposalOutcome = boundedText(raw['proposalOutcome'], 80);
   const proposalOutcomeReason = boundedText(raw['proposalOutcomeReason'], 500);
+  const shadowIdentityStatus = raw['shadowIdentityStatus'] === 'verified' ||
+    raw['shadowIdentityStatus'] === 'refused' ? raw['shadowIdentityStatus'] : undefined;
+  // A digest is itself non-secret identity metadata and must remain byte-exact;
+  // the generic secret scrubber intentionally redacts long hex strings.
+  const artifactDigest = typeof raw['artifactDigest'] === 'string' &&
+    /^sha256:[0-9a-f]{64}$/.test(raw['artifactDigest']) ? raw['artifactDigest'] : undefined;
+  const artifactName = typeof raw['artifactName'] === 'string' &&
+    raw['artifactName'].length > 0 && raw['artifactName'].length <= 256 &&
+    scrubSecrets(raw['artifactName']) === raw['artifactName']
+    ? raw['artifactName']
+    : undefined;
+  const artifactSizeBytes = boundedNumber(raw['artifactSizeBytes'], 0, Number.MAX_SAFE_INTEGER);
+  const artifactDetails = raw['artifactDetails'] === undefined
+    ? undefined
+    : sanitizeArtifactDetails(raw['artifactDetails']);
+  const shadowScore = boundedNumber(raw['shadowScore'], -MAX_SCORE, MAX_SCORE);
   const producerStatus = raw['producerStatus'] === 'running' || raw['producerStatus'] === 'done' ||
     raw['producerStatus'] === 'failed' || raw['producerStatus'] === 'aborted'
     ? raw['producerStatus']
@@ -304,6 +379,36 @@ function sanitizeCandidate(value: unknown, persisted: boolean): BestOfNCandidate
   if (raw['isPartial'] !== undefined && typeof raw['isPartial'] !== 'boolean') return undefined;
   if (raw['selectionWon'] !== undefined && typeof raw['selectionWon'] !== 'boolean') return undefined;
   if (raw['fullProposalWon'] !== undefined && typeof raw['fullProposalWon'] !== 'boolean') return undefined;
+  if (raw['shadow'] !== undefined && raw['shadow'] !== true) return undefined;
+  if (raw['shadowIdentityStatus'] !== undefined && shadowIdentityStatus === undefined) return undefined;
+  if (raw['artifactDigest'] !== undefined && artifactDigest === undefined) return undefined;
+  if (raw['artifactName'] !== undefined && artifactName === undefined) return undefined;
+  if (raw['artifactSizeBytes'] !== undefined && artifactSizeBytes === undefined) return undefined;
+  if (raw['artifactDetails'] !== undefined && artifactDetails === undefined) return undefined;
+  if (raw['shadowParticipated'] !== undefined && typeof raw['shadowParticipated'] !== 'boolean') return undefined;
+  if (raw['shadowJudged'] !== undefined && typeof raw['shadowJudged'] !== 'boolean') return undefined;
+  if (raw['shadowTestPassed'] !== undefined && typeof raw['shadowTestPassed'] !== 'boolean') return undefined;
+  if (raw['shadowScore'] !== undefined && shadowScore === undefined) return undefined;
+  if (raw['shadowWouldHaveWon'] !== undefined && typeof raw['shadowWouldHaveWon'] !== 'boolean') return undefined;
+
+  const hasArtifactIdentity = artifactDigest !== undefined || artifactName !== undefined ||
+    artifactSizeBytes !== undefined || artifactDetails !== undefined;
+  if (raw['shadow'] === true) {
+    if (!shadowIdentityStatus || typeof raw['shadowParticipated'] !== 'boolean' ||
+      typeof raw['shadowJudged'] !== 'boolean' || shadowScore === undefined ||
+      typeof raw['shadowWouldHaveWon'] !== 'boolean') return undefined;
+    if (raw['shadowTestPassed'] !== undefined && raw['testsPassed'] !== raw['shadowTestPassed']) return undefined;
+    if (shadowScore !== score) return undefined;
+    if (raw['won'] === true || raw['selectionWon'] === true || raw['fullProposalWon'] === true ||
+      proposalId !== null) return undefined;
+    if (shadowIdentityStatus === 'verified' &&
+      (!artifactDigest || !artifactName || artifactSizeBytes === undefined || !artifactDetails)) return undefined;
+    if (hasArtifactIdentity &&
+      (!artifactDigest || !artifactName || artifactSizeBytes === undefined || !artifactDetails)) return undefined;
+  } else if (shadowIdentityStatus !== undefined || hasArtifactIdentity ||
+    raw['shadowParticipated'] !== undefined || raw['shadowJudged'] !== undefined ||
+    raw['shadowTestPassed'] !== undefined || raw['shadowScore'] !== undefined ||
+    raw['shadowWouldHaveWon'] !== undefined) return undefined;
 
   const hasCurrentOutcome = raw['isPartial'] !== undefined || raw['selectionWon'] !== undefined ||
     raw['fullProposalWon'] !== undefined || raw['producerStatus'] !== undefined;
@@ -329,6 +434,21 @@ function sanitizeCandidate(value: unknown, persisted: boolean): BestOfNCandidate
     ...(typeof raw['testsPassed'] === 'boolean' ? { testsPassed: raw['testsPassed'] } : {}),
     ...(costUsd !== undefined ? { costUsd } : {}),
     ...(latencyMs !== undefined ? { latencyMs } : {}),
+    ...(raw['shadow'] === true ? { shadow: true as const } : {}),
+    ...(shadowIdentityStatus ? { shadowIdentityStatus } : {}),
+    ...(artifactDigest ? { artifactDigest } : {}),
+    ...(artifactName ? { artifactName } : {}),
+    ...(artifactSizeBytes !== undefined ? { artifactSizeBytes } : {}),
+    ...(artifactDetails ? { artifactDetails } : {}),
+    ...(typeof raw['shadowParticipated'] === 'boolean'
+      ? { shadowParticipated: raw['shadowParticipated'] }
+      : {}),
+    ...(typeof raw['shadowJudged'] === 'boolean' ? { shadowJudged: raw['shadowJudged'] } : {}),
+    ...(typeof raw['shadowTestPassed'] === 'boolean' ? { shadowTestPassed: raw['shadowTestPassed'] } : {}),
+    ...(shadowScore !== undefined ? { shadowScore } : {}),
+    ...(typeof raw['shadowWouldHaveWon'] === 'boolean'
+      ? { shadowWouldHaveWon: raw['shadowWouldHaveWon'] }
+      : {}),
     ...(error ? { error } : {}),
     ...(proposalOutcome ? { proposalOutcome } : {}),
     ...(proposalOutcomeReason ? { proposalOutcomeReason } : {}),
@@ -344,12 +464,17 @@ function sanitizeCandidate(value: unknown, persisted: boolean): BestOfNCandidate
 function reconstructRecord(value: unknown, persisted: boolean): BestOfNRecord | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const raw = value as Record<string, unknown>;
+  let persistedVersion: 1 | 2 | undefined;
   if (persisted) {
-    const current = raw['schemaVersion'] === 1 && exactKeys(raw, RECORD_KEYS);
+    const current = raw['schemaVersion'] === 2 && exactKeys(raw, RECORD_KEYS);
+    const v1 = raw['schemaVersion'] === 1 && exactKeys(raw, RECORD_KEYS);
     const legacy = raw['schemaVersion'] === undefined && exactKeys(raw, LEGACY_RECORD_KEYS);
-    if (!current && !legacy) return undefined;
+    if (!current && !v1 && !legacy) return undefined;
+    persistedVersion = current ? 2 : 1;
   }
-  if (raw['schemaVersion'] !== undefined && raw['schemaVersion'] !== 1) return undefined;
+  if (raw['schemaVersion'] !== undefined && raw['schemaVersion'] !== 1 && raw['schemaVersion'] !== 2) {
+    return undefined;
+  }
   const ts = canonicalTimestamp(raw['ts']);
   const attemptId = boundedText(raw['attemptId'], 160);
   const workItemId = boundedText(raw['workItemId'], 240);
@@ -372,7 +497,11 @@ function reconstructRecord(value: unknown, persisted: boolean): BestOfNRecord | 
   if (raw['attemptId'] !== undefined && attemptId === undefined) return undefined;
   if (raw['workItemId'] !== undefined && workItemId === undefined) return undefined;
 
-  const candidates = raw['candidates'].map((candidate) => sanitizeCandidate(candidate, persisted));
+  const persistedCandidateKeys = persistedVersion === 2
+    ? V2_CANDIDATE_KEYS
+    : persistedVersion === 1 ? V1_CANDIDATE_KEYS : undefined;
+  const candidates = raw['candidates'].map((candidate) =>
+    sanitizeCandidate(candidate, persistedCandidateKeys));
   if (candidates.some((candidate) => candidate === undefined)) return undefined;
   const completeCandidates = candidates as BestOfNCandidateRecord[];
   const indexes = new Set(completeCandidates.map((candidate) => candidate.index));
@@ -386,7 +515,7 @@ function reconstructRecord(value: unknown, persisted: boolean): BestOfNRecord | 
       winner.proposalId !== winnerProposalId) return undefined;
   }
   return {
-    schemaVersion: 1,
+    schemaVersion: persistedVersion ?? (raw['schemaVersion'] === 1 ? 1 : 2),
     ts,
     ...(attemptId ? { attemptId } : {}),
     ...(workItemId ? { workItemId } : {}),

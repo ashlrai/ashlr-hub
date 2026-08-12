@@ -108,7 +108,7 @@ describe('M370 bounded best-of-N ledger', () => {
     const path = join(bestOfNDir(), '2026-07-11.jsonl');
     const raw = readFileSync(path, 'utf8');
     expect(raw).not.toContain(secret);
-    expect(JSON.parse(raw)).toMatchObject({ schemaVersion: 1, ts: '2026-07-11T12:00:00.000Z' });
+    expect(JSON.parse(raw)).toMatchObject({ schemaVersion: 2, ts: '2026-07-11T12:00:00.000Z' });
     expect(readBestOfNRecordsDetailed()).toMatchObject({ sourceState: 'healthy', complete: true });
     if (process.platform !== 'win32') {
       expect(statSync(bestOfNDir()).mode & 0o777).toBe(0o700);
@@ -198,6 +198,140 @@ describe('M370 bounded best-of-N ledger', () => {
     ]);
   });
 
+  it('round-trips bounded shadow identity metadata and refuses a shadow winner row', () => {
+    const digest = `sha256:${'a'.repeat(64)}`;
+    const shadowCandidate = {
+      index: 0,
+      runId: 'run-shadow',
+      engine: 'local-coder',
+      model: 'nemotron-shadow:exact',
+      score: 20,
+      producerStatus: 'done' as const,
+      isPartial: false,
+      selectionWon: false,
+      fullProposalWon: false,
+      proposalId: null,
+      won: false,
+      shadow: true as const,
+      shadowIdentityStatus: 'verified' as const,
+      shadowParticipated: true as const,
+      shadowJudged: true,
+      shadowTestPassed: true,
+      shadowScore: 20,
+      shadowWouldHaveWon: true,
+      testsPassed: true,
+      artifactDigest: digest,
+      artifactName: 'nemotron-shadow:exact',
+      artifactSizeBytes: 24_000_000_000,
+      artifactDetails: {
+        parent_model: '',
+        format: 'gguf',
+        family: 'nemotron',
+        families: ['nemotron'],
+        parameter_size: '30B',
+        quantization_level: 'Q4_K_M',
+      },
+    };
+    recordBestOfN(record({
+      n: 1,
+      winnerIndex: -1,
+      winnerProposalId: null,
+      candidates: [shadowCandidate],
+    }));
+
+    expect(readBestOfNRecords()).toEqual([
+      expect.objectContaining({
+        winnerIndex: -1,
+        candidates: [expect.objectContaining({
+          shadow: true,
+          shadowIdentityStatus: 'verified',
+          shadowParticipated: true,
+          shadowJudged: true,
+          shadowTestPassed: true,
+          shadowScore: 20,
+          shadowWouldHaveWon: true,
+          artifactDigest: digest,
+          artifactName: 'nemotron-shadow:exact',
+          artifactSizeBytes: 24_000_000_000,
+          artifactDetails: expect.objectContaining({
+            parent_model: '',
+            quantization_level: 'Q4_K_M',
+          }),
+          proposalId: null,
+          won: false,
+        })],
+      }),
+    ]);
+
+    recordBestOfN(record({
+      n: 1,
+      winnerIndex: 0,
+      winnerProposalId: 'proposal-shadow',
+      candidates: [{
+        ...shadowCandidate,
+        selectionWon: true,
+        fullProposalWon: true,
+        proposalOutcome: 'filed',
+        proposalId: 'proposal-shadow',
+        won: true,
+      }],
+    }));
+    expect(readBestOfNRecords()).toHaveLength(1);
+
+    recordBestOfN(record({
+      n: 1,
+      winnerIndex: -1,
+      winnerProposalId: null,
+      candidates: [{
+        ...shadowCandidate,
+        artifactName: 'github_pat_1234567890abcdefghijklmnop',
+      }],
+    }));
+    expect(readBestOfNRecords()).toHaveLength(1);
+  });
+
+  it('round-trips a strict pre-contact shadow refusal without claiming participation', () => {
+    recordBestOfN(record({
+      n: 1,
+      winnerIndex: -1,
+      winnerProposalId: null,
+      totalCostUsd: 0,
+      candidates: [{
+        index: 0,
+        runId: 'run-refused-shadow',
+        engine: 'local-coder',
+        model: 'nemotron-shadow:exact',
+        score: 0,
+        producerStatus: 'failed',
+        isPartial: false,
+        selectionWon: false,
+        fullProposalWon: false,
+        proposalId: null,
+        won: false,
+        shadow: true,
+        shadowIdentityStatus: 'refused',
+        shadowParticipated: false,
+        shadowJudged: false,
+        shadowScore: 0,
+        shadowWouldHaveWon: false,
+        error: 'cancelled',
+      }],
+    }));
+
+    expect(readBestOfNRecords()).toEqual([
+      expect.objectContaining({
+        schemaVersion: 2,
+        candidates: [expect.objectContaining({
+          shadowIdentityStatus: 'refused',
+          shadowParticipated: false,
+          shadowJudged: false,
+          shadowScore: 0,
+          shadowWouldHaveWon: false,
+        })],
+      }),
+    ]);
+  });
+
   it('rejects malformed records and inconsistent candidates before creating storage', () => {
     const malformed: BestOfNRecord[] = [
       record({ ts: '2026-07-11 12:00:00Z' }),
@@ -277,7 +411,7 @@ describe('M370 bounded best-of-N ledger', () => {
     writeFileSync(join(dir, '2026-07-11.jsonl'), [
       JSON.stringify(valid),
       '{bad-json',
-      JSON.stringify({ ...valid, schemaVersion: 2 }),
+      JSON.stringify({ ...valid, schemaVersion: 3 }),
       JSON.stringify({ ...valid, arbitrary: 'not-allowed' }),
       JSON.stringify({ ...valid, candidates: [{ ...valid.candidates[0], index: 1 }, valid.candidates[1]] }),
       JSON.stringify({ ...valid, ts: '2026-07-12T00:00:00.000Z' }),
@@ -351,7 +485,7 @@ describe('M370 bounded best-of-N ledger', () => {
     writeFileSync(path, '{"partial":', { encoding: 'utf8', flag: 'a' });
     recordBestOfN(record({ ts: '2026-07-11T12:01:00.000Z', attemptId: 'second' }));
 
-    expect(readFileSync(path, 'utf8')).toContain('{"partial":\n{"schemaVersion":1');
+    expect(readFileSync(path, 'utf8')).toContain('{"partial":\n{"schemaVersion":2');
     expect(readBestOfNRecordsDetailed()).toMatchObject({
       records: [
         expect.objectContaining({ attemptId: 'second' }),
