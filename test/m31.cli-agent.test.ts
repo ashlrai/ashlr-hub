@@ -34,10 +34,11 @@ describe('AGENT_COMMANDS — the CLI-first agent contract', () => {
     }
   });
 
-  it('marks inbox approval as human-gate', () => {
+  it('marks unavailable inbox approval as read-only guidance', () => {
     const approve = AGENT_COMMANDS.find((c) => c.usage.includes('approve'));
     expect(approve).toBeTruthy();
-    expect(approve!.safety).toBe('human-gate');
+    expect(approve!.safety).toBe('read');
+    expect(approve!.description).toMatch(/unavailable|refus/i);
   });
 });
 

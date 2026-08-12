@@ -209,10 +209,10 @@ describe('M30 InboxStore seam', () => {
     expect(store.pendingCount()).toBe(1);
 
     store.setStatus(created.id, 'approved');
-    expect(store.load(created.id)?.status).toBe('approved');
-    expect(store.pendingCount()).toBe(0);
+    expect(store.load(created.id)?.status).toBe('pending');
+    expect(store.pendingCount()).toBe(1);
 
-    const pending = store.list({ status: 'approved' });
+    const pending = store.list({ status: 'pending' });
     expect(pending.some((p) => p.id === created.id)).toBe(true);
 
     expect(fs.existsSync(path.join(tmpHome, '.ashlr', 'inbox'))).toBe(true);

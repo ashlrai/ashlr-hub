@@ -24,6 +24,20 @@
 
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 
+// Legacy mechanics fixture: M505 owns policy-authority coverage; this suite
+// exercises dormant verdict-feedback mechanics behind that gate.
+vi.mock('../src/core/inbox/review-policy.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/inbox/review-policy.js')>();
+  return {
+    ...actual,
+    evaluateProposalEffectPolicy: () => ({
+      allowed: true,
+      effectClass: 'outward-effect' as const,
+      code: 'policy-not-required' as const,
+    }),
+  };
+});
+
 vi.mock('../src/core/daemon/activation-permit.js', () => ({
   consumeDaemonActivationPermit: () => ({
     authorized: true,

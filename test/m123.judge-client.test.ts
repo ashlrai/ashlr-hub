@@ -87,15 +87,16 @@ describe('getProviderRegistry with sparse config', () => {
 //    cannot self-review through the direct Ollama path.
 // ---------------------------------------------------------------------------
 
-describe('runManager independent-review failure', () => {
-  it('leaves a local proposal in review when the independent provider is unavailable', async () => {
+describe('runManager effect-policy prefilter', () => {
+  it('withholds a local proposal before resolving an independent provider', async () => {
     // M282: reset the module registry so manager.js is re-imported with fresh
     // static bindings for engineInstalled. Without this, a prior import in the
     // same file (or a parallel test) caches manager.js with the real
     // engineInstalled — which returns true on this machine (claude CLI installed)
     // — causing resolveJudgeClient to pick the Claude path instead of local-72b.
     vi.resetModules();
-    // Force engineInstalled to return false so no frontier CLI reviewer is available.
+    // If policy ordering regresses, these provider seams remain unavailable;
+    // the expected path must stop before consulting either one.
     vi.doMock('../src/core/run/engines.js', async (importOriginal) => {
       const orig = await importOriginal<typeof import('../src/core/run/engines.js')>();
       return {
@@ -156,14 +157,10 @@ describe('runManager independent-review failure', () => {
     const report = await runManager(SPARSE_CFG, { limit: 1 });
 
     expect(report).toBeDefined();
-    expect(report.judgeEngine).toBe('unavailable');
-    // No same-family fallback: unreviewed work remains non-mergeable.
-    expect(report.verdicts).toHaveLength(1);
-    expect(report.verdicts[0]).toMatchObject({
-      verdict: 'review',
-      rationale: 'no judge available — defaulting to review',
-      wouldMerge: false,
-    });
+    expect(report.judgeEngine).toBe('not-invoked');
+    // The policy gate runs before provider resolution or model spend.
+    expect(report.effectPolicyWithheld).toBe(1);
+    expect(report.verdicts).toHaveLength(0);
 
     vi.doUnmock('../src/core/run/engines.js');
     vi.doUnmock('../src/core/run/provider-client.js');

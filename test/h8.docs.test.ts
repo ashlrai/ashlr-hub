@@ -75,7 +75,7 @@ describe('h8 docs — RELIABILITY.md + README activation runbook are accurate', 
   });
 
   // DOCS-ACCURATE (runbook)
-  it('README activation runbook documents preflight → enroll one → dry-run → daemon → inbox approve → rollback and marks activation as the human gate', () => {
+  it('README documents the activation sequence and marks inbox decisions unavailable', () => {
     const txt = readFileSync(README, 'utf8');
     const lower = txt.toLowerCase();
     // The runbook's ordered levers all appear.
@@ -85,10 +85,9 @@ describe('h8 docs — RELIABILITY.md + README activation runbook are accurate', 
     expect(txt).toMatch(/\bdaemon\b/);
     expect(txt).toMatch(/inbox approve/);
     expect(lower).toMatch(/rollback/);
-    // Activation is explicitly framed as the HUMAN GATE.
-    expect(lower).toMatch(/human gate/);
-    // The ordering is real: preflight is documented before inbox approve.
-    expect(txt.indexOf('preflight')).toBeLessThan(txt.indexOf('inbox approve'));
+    // Proposal decisions remain unavailable until a separate capability exists.
+    expect(lower).toMatch(/authenticated.*capability.*unavailable|authenticated.*capability.*installed/);
+    expect(txt).toMatch(/inbox approve <id>\s+# refuses/);
   });
 
   // DOCS-ACCURATE (v2.1 surface)

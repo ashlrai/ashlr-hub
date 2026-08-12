@@ -18,6 +18,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { AshlrConfig } from '../src/core/types.js';
 
+// Legacy mechanics fixture: M505 owns policy-authority coverage; this suite
+// exercises dormant auto-merge mutation-fence mechanics behind that gate.
+vi.mock('../src/core/inbox/review-policy.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/inbox/review-policy.js')>();
+  return {
+    ...actual,
+    evaluateProposalEffectPolicy: () => ({
+      allowed: true,
+      effectClass: 'outward-effect' as const,
+      code: 'policy-not-required' as const,
+    }),
+  };
+});
+
 const policyTestHooks = vi.hoisted(() => ({
   afterKillPrecheck: null as null | ((repo: string) => void),
 }));

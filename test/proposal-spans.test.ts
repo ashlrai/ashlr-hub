@@ -53,6 +53,20 @@ vi.mock('../src/core/sandbox/audit.js', () => ({
   audit: vi.fn(),
 }));
 
+// Legacy lifecycle telemetry fixture: M505 owns policy refusal coverage. This
+// suite verifies the dormant post-admission span mapping only.
+vi.mock('../src/core/inbox/review-policy.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/inbox/review-policy.js')>();
+  return {
+    ...actual,
+    evaluateProposalEffectPolicy: () => ({
+      allowed: true,
+      effectClass: 'outward-effect' as const,
+      code: 'policy-not-required' as const,
+    }),
+  };
+});
+
 import { emitFleetEvent } from '../src/core/integrations/pulse-sync.js';
 import {
   createProposal,

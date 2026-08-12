@@ -431,16 +431,17 @@ describe('proposal dedup authority', () => {
     expect(listProposals({ status: 'pending' })).toHaveLength(2);
   });
 
-  it('never returns a synthetic dedup rejection for a manual proposal', () => {
+  it('fails closed instead of returning a synthetic dedup rejection for a manual proposal on a degraded source', () => {
     const first = createProposal(proposalInput(repoA));
     writeFileSync(join(inboxDir(), 'invalid.json'), '{not-json\n', { encoding: 'utf8', mode: 0o600 });
     const manual = createProposal(proposalInput(repoA, { origin: 'manual' }));
 
     expect(first.status).toBe('pending');
-    expect(manual.status).toBe('pending');
+    expect(manual.status).toBe('failed');
+    expect(manual.creationFailureCode).toBe('admission-source-incomplete');
     expect(manual.id).not.toBe(first.id);
     expect(isDiffDedupResult(manual)).toBe(false);
-    expect(loadProposal(manual.id)?.status).toBe('pending');
+    expect(loadProposal(manual.id)).toBeNull();
   });
 
   it.runIf(process.platform !== 'win32')(

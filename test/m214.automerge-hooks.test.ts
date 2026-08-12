@@ -20,6 +20,20 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 
+// Legacy mechanics fixture: M505 owns policy-authority coverage; this suite
+// exercises the dormant downstream pipeline behind that gate.
+vi.mock('../src/core/inbox/review-policy.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/inbox/review-policy.js')>();
+  return {
+    ...actual,
+    evaluateProposalEffectPolicy: () => ({
+      allowed: true,
+      effectClass: 'outward-effect' as const,
+      code: 'policy-not-required' as const,
+    }),
+  };
+});
+
 // ---------------------------------------------------------------------------
 // Hermetic HOME
 // ---------------------------------------------------------------------------
@@ -63,7 +77,21 @@ vi.mock('../src/core/inbox/store.js', () => ({
     sourceState: 'healthy',
     complete: true,
   }),
+  loadProposal: (id: string) =>
+    (mockListProposals() as Array<{ id: string }>).find((candidate) => candidate.id === id),
   replayRealizedMergeFanout: vi.fn(() => true),
+}));
+
+vi.mock('../src/core/inbox/proposal-mutation-lock.js', () => ({
+  acquireProposalMutationLock: (id: string) => ({ key: id, token: Symbol(id) }),
+  ownsProposalMutationLock: () => true,
+  releaseProposalMutationLock: () => {},
+}));
+
+vi.mock('../src/core/sandbox/mutation-fence.js', () => ({
+  acquireOutwardMutationFence: () => ({ path: 'm214-test-fence' }),
+  ownsOutwardMutationFence: () => true,
+  releaseOutwardMutationFence: () => {},
 }));
 
 const mockKillSwitchOn = vi.fn(() => false);

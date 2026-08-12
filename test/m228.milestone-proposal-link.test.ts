@@ -19,6 +19,20 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Goal, Milestone, Proposal, SwarmRun } from '../src/core/types.js';
 
+// Legacy mechanics fixture: M505 owns policy-authority coverage; this suite
+// exercises dormant milestone-linkage mechanics behind that gate.
+vi.mock('../src/core/inbox/review-policy.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/inbox/review-policy.js')>();
+  return {
+    ...actual,
+    evaluateProposalEffectPolicy: () => ({
+      allowed: true,
+      effectClass: 'outward-effect' as const,
+      code: 'policy-not-required' as const,
+    }),
+  };
+});
+
 // ---------------------------------------------------------------------------
 // Mocks for inbox/store.ts dependencies — declared BEFORE any module imports.
 // ---------------------------------------------------------------------------
@@ -53,6 +67,13 @@ vi.mock('../src/core/fleet/judge-trace.js', () => ({ linkOutcome: vi.fn() }));
 vi.mock('../src/core/run/diff-safety.js', () => ({
   isDestructiveDiff: vi.fn(() => ({ destructive: false })),
 }));
+vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  return {
+    ...actual,
+    assurePrivateStoragePath: () => ({ ok: true, reason: 'test-private-storage' }),
+  };
+});
 afterAll(() => fs.rmSync(fakeHome, { recursive: true, force: true }));
 
 // ---------------------------------------------------------------------------
@@ -194,6 +215,7 @@ function makeSwarmRun(overrides: Partial<SwarmRun> = {}): SwarmRun {
 
 function stubExistingProposal(proposal: Proposal): void {
   fs.rmSync(fakeHome, { recursive: true, force: true });
+  fs.mkdirSync(REPO, { recursive: true });
   const dir = path.join(fakeHome, '.ashlr', 'inbox');
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(dir, `${proposal.id}.json`), `${JSON.stringify(proposal)}\n`, { mode: 0o600 });

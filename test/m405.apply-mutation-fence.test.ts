@@ -1,6 +1,20 @@
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// Legacy mechanics fixture: M505 owns policy-authority coverage; this suite
+// exercises dormant apply mutation-fence mechanics behind that gate.
+vi.mock('../src/core/inbox/review-policy.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/inbox/review-policy.js')>();
+  return {
+    ...actual,
+    evaluateProposalEffectPolicy: () => ({
+      allowed: true,
+      effectClass: 'outward-effect' as const,
+      code: 'policy-not-required' as const,
+    }),
+  };
+});
 
 import { applyProposal } from '../src/core/inbox/apply.js';
 import { createProposal, loadProposal, setStatus } from '../src/core/inbox/store.js';

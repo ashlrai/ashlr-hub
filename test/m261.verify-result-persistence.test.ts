@@ -40,6 +40,32 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
 
+// Legacy mechanics fixture: M505 owns policy-authority coverage; this suite
+// exercises the dormant downstream pipeline behind that gate.
+vi.mock('../src/core/inbox/review-policy.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/inbox/review-policy.js')>();
+  return {
+    ...actual,
+    evaluateProposalEffectPolicy: () => ({
+      allowed: true,
+      effectClass: 'outward-effect' as const,
+      code: 'policy-not-required' as const,
+    }),
+  };
+});
+
+vi.mock('../src/core/inbox/proposal-mutation-lock.js', () => ({
+  acquireProposalMutationLock: (id: string) => ({ key: id, token: Symbol(id) }),
+  ownsProposalMutationLock: () => true,
+  releaseProposalMutationLock: () => {},
+}));
+
+vi.mock('../src/core/sandbox/mutation-fence.js', () => ({
+  acquireOutwardMutationFence: () => ({ path: 'm261-test-fence' }),
+  ownsOutwardMutationFence: () => true,
+  releaseOutwardMutationFence: () => {},
+}));
+
 // ---------------------------------------------------------------------------
 // HOME isolation
 // ---------------------------------------------------------------------------

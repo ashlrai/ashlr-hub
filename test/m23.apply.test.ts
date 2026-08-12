@@ -49,6 +49,20 @@ vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
   };
 });
 
+// Legacy mechanics fixture: M505 owns the live effect-policy boundary. These
+// cases exercise the dormant apply pipeline after that boundary admits work.
+vi.mock('../src/core/inbox/review-policy.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/inbox/review-policy.js')>();
+  return {
+    ...actual,
+    evaluateProposalEffectPolicy: () => ({
+      allowed: true,
+      effectClass: 'outward-effect' as const,
+      code: 'policy-not-required' as const,
+    }),
+  };
+});
+
 // ---------------------------------------------------------------------------
 // HOME isolation — must happen before any module import resolves homedir()
 // ---------------------------------------------------------------------------

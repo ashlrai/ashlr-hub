@@ -48,6 +48,20 @@ import { join } from 'node:path';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
 import type { AutoMergeResult } from '../src/core/inbox/merge.js';
 
+// Legacy mechanics fixture: M505 owns policy-authority coverage; this suite
+// exercises the dormant downstream pipeline behind that gate.
+vi.mock('../src/core/inbox/review-policy.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/inbox/review-policy.js')>();
+  return {
+    ...actual,
+    evaluateProposalEffectPolicy: () => ({
+      allowed: true,
+      effectClass: 'outward-effect' as const,
+      code: 'policy-not-required' as const,
+    }),
+  };
+});
+
 // ---------------------------------------------------------------------------
 // HOME isolation
 // ---------------------------------------------------------------------------
@@ -96,10 +110,24 @@ vi.mock('../src/core/inbox/store.js', async (importOriginal) => {
       sourceState: 'healthy',
       complete: true,
     }),
+    loadProposal: (id: string) =>
+      (mockListProposals() as Proposal[]).find((proposal) => proposal.id === id),
     setStatus: (...args: unknown[]) => mockSetStatus(...args),
     updateProposalField: (...args: unknown[]) => mockUpdateProposalField(...args),
   };
 });
+
+vi.mock('../src/core/inbox/proposal-mutation-lock.js', () => ({
+  acquireProposalMutationLock: (id: string) => ({ key: id, token: Symbol(id) }),
+  ownsProposalMutationLock: () => true,
+  releaseProposalMutationLock: () => {},
+}));
+
+vi.mock('../src/core/sandbox/mutation-fence.js', () => ({
+  acquireOutwardMutationFence: () => ({ path: 'm274-test-fence' }),
+  ownsOutwardMutationFence: () => true,
+  releaseOutwardMutationFence: () => {},
+}));
 
 const mockAutoMergeProposal = vi.fn();
 vi.mock('../src/core/inbox/merge.js', () => ({

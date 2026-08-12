@@ -119,14 +119,15 @@ describe('buildProposalMarkdown (pure builder)', () => {
     expect(md).toContain(p.repo!);
   });
 
-  it('includes approve/reject action hints for pending proposals', async () => {
+  it('marks pending proposals review-only while authenticated decisions are unavailable', async () => {
     expect.hasAssertions();
     const { buildProposalMarkdown } = await import('../src/cli/inbox.js');
     const p = makeProposal({ status: 'pending' });
     const md = buildProposalMarkdown(p);
 
-    expect(md).toContain('ashlr inbox approve');
-    expect(md).toContain('ashlr inbox reject');
+    expect(md).toContain('Authenticated proposal decisions are not installed');
+    expect(md).not.toContain('ashlr inbox approve');
+    expect(md).not.toContain('ashlr inbox reject');
   });
 
   it('does not include action hints for non-pending proposals', async () => {

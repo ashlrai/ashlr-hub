@@ -7,6 +7,20 @@ import type { AshlrConfig, Proposal } from '../src/core/types.js';
 import type { AutoMergeResult, VerifyProposalResult } from '../src/core/inbox/merge.js';
 import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
 
+// Legacy mechanics fixture: M505 owns policy-authority coverage; this suite
+// exercises dormant verify-before-judge mechanics behind that gate.
+vi.mock('../src/core/inbox/review-policy.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/inbox/review-policy.js')>();
+  return {
+    ...actual,
+    evaluateProposalEffectPolicy: () => ({
+      allowed: true,
+      effectClass: 'outward-effect' as const,
+      code: 'policy-not-required' as const,
+    }),
+  };
+});
+
 const docDiff = [
   'diff --git a/README.md b/README.md',
   'index 1111111..2222222 100644',
@@ -58,6 +72,8 @@ vi.mock('../src/core/inbox/store.js', async (importOriginal) => {
       sourceState: 'healthy',
       complete: true,
     }),
+    loadProposal: (id: string) =>
+      (mockListProposals() as Proposal[]).find((proposal) => proposal.id === id) ?? null,
     updateProposalField: (...args: unknown[]) => mockUpdateProposalField(...args),
     setStatus: (...args: unknown[]) => mockSetStatus(...args),
   };

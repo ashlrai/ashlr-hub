@@ -31,6 +31,20 @@ import * as path from 'node:path';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
 import type { AutoMergeResult } from '../src/core/inbox/merge.js';
 
+// Legacy mechanics fixture: M505 owns policy-authority coverage; this suite
+// exercises dormant starvation-prevention mechanics behind that gate.
+vi.mock('../src/core/inbox/review-policy.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/inbox/review-policy.js')>();
+  return {
+    ...actual,
+    evaluateProposalEffectPolicy: () => ({
+      allowed: true,
+      effectClass: 'outward-effect' as const,
+      code: 'policy-not-required' as const,
+    }),
+  };
+});
+
 // ---------------------------------------------------------------------------
 // HOME isolation
 // ---------------------------------------------------------------------------
@@ -57,11 +71,15 @@ vi.mock('../src/core/inbox/store.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/inbox/store.js')>();
   return {
     ...actual,
-    listProposalsDetailed: (...args: unknown[]) => ({
-      proposals: mockListProposals(...args),
-      sourceState: 'healthy',
-      complete: true,
-    }),
+    listProposalsDetailed: (...args: unknown[]) => {
+      pendingProposals = mockListProposals(...args) as Proposal[];
+      return {
+        proposals: pendingProposals,
+        sourceState: 'healthy',
+        complete: true,
+      };
+    },
+    loadProposal: (id: string) => pendingProposals.find((proposal) => proposal.id === id) ?? null,
     setStatus: (...args: unknown[]) => mockSetStatus(...args),
     updateProposalField: (...args: unknown[]) => mockUpdateProposalField(...args),
   };
