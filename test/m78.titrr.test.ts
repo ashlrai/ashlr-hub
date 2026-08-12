@@ -151,6 +151,7 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
   let runVCMockFn: ReturnType<typeof vi.fn>;
   let createSandboxMockFn: ReturnType<typeof vi.fn>;
   let removeSandboxMockFn: ReturnType<typeof vi.fn>;
+  let engineInstalledMockFn: ReturnType<typeof vi.fn>;
   let tmpHome: string;
   let previousHome: string | undefined;
 
@@ -182,6 +183,7 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
       branch: 'scratch/mock',
     }));
     removeSandboxMockFn = vi.fn();
+    engineInstalledMockFn = vi.fn(() => true);
 
     vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
       runEngineSandboxed: engineMockFn,
@@ -227,7 +229,7 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
     // TITRR loop under test (it then reports "No tasks completed successfully").
     vi.doMock('../src/core/run/engines.js', async (importOriginal) => {
       const actual = await importOriginal<typeof import('../src/core/run/engines.js')>();
-      return { ...actual, engineInstalled: vi.fn(() => true) };
+      return { ...actual, engineInstalled: engineInstalledMockFn };
     });
 
     // Reset module registry so next import() picks up the doMock stubs.
@@ -854,6 +856,74 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
     expect(captureMockFn).not.toHaveBeenCalled();
     expect(removeSandboxMockFn).not.toHaveBeenCalled();
     expect(state.status).toBe('failed');
+  });
+
+  it('required sandbox creation failure refuses before any fallback producer runs', async () => {
+    createSandboxMockFn.mockImplementationOnce(() => { throw new Error('shared sandbox unavailable'); });
+
+    const runGoal = await loadRunGoal();
+    const state = await runGoal('fix a bug', sandboxCfg(), {
+      engine: 'claude',
+      sandboxEngine: true,
+      requireSandbox: true,
+      budget: { maxTokens: 1_000_000, maxSteps: 100 },
+      tools: false,
+    });
+
+    expect(engineMockFn).not.toHaveBeenCalled();
+    expect(captureMockFn).not.toHaveBeenCalled();
+    expect(state).toMatchObject({
+      status: 'failed',
+      proposalOutcome: { kind: 'sandbox-unavailable' },
+    });
+  });
+
+  it('required sandbox refuses builtin selection before execution', async () => {
+    const runGoal = await loadRunGoal();
+    const state = await runGoal('fix a bug', sandboxCfg(), {
+      engine: 'builtin',
+      requireSandbox: true,
+      budget: { maxTokens: 20, maxSteps: 2, allowCloud: true },
+    });
+
+    expect(engineMockFn).not.toHaveBeenCalled();
+    expect(createSandboxMockFn).not.toHaveBeenCalled();
+    expect(state).toMatchObject({
+      status: 'failed',
+      budget: { allowCloud: true },
+      proposalOutcome: { kind: 'sandbox-unavailable' },
+    });
+    expect(state.runEventSummary?.runId).toBe(state.id);
+  });
+
+  it('required sandbox refuses when the requested engine disappears', async () => {
+    engineInstalledMockFn.mockReturnValue(false);
+
+    const runGoal = await loadRunGoal();
+    const state = await runGoal('fix a bug', sandboxCfg(), {
+      engine: 'claude',
+      sandboxEngine: true,
+      requireSandbox: true,
+    });
+
+    expect(engineMockFn).not.toHaveBeenCalled();
+    expect(createSandboxMockFn).not.toHaveBeenCalled();
+    expect(state.proposalOutcome).toMatchObject({ kind: 'sandbox-unavailable' });
+    expect(state.runEventSummary?.runId).toBe(state.id);
+  });
+
+  it('required sandbox refuses an invalid cwd instead of running in process.cwd()', async () => {
+    const runGoal = await loadRunGoal();
+    const state = await runGoal('fix a bug', sandboxCfg(), {
+      engine: 'claude',
+      sandboxEngine: true,
+      requireSandbox: true,
+      cwd: path.join(os.tmpdir(), 'ashlr-m78-does-not-exist'),
+    });
+
+    expect(engineMockFn).not.toHaveBeenCalled();
+    expect(createSandboxMockFn).not.toHaveBeenCalled();
+    expect(state.proposalOutcome).toMatchObject({ kind: 'sandbox-unavailable' });
   });
 
   it.each([
