@@ -683,7 +683,7 @@ export interface AshlrConfig {
      * unchanged: a winning mid/local candidate keeps its tier tag and can
      * never gain merge authority.
      */
-    bestOfNCandidates?: Array<{ engine: EngineId; model?: string | null }>;
+    bestOfNCandidates?: BestOfNCandidateSpec[];
     /**
      * M333: fan out only for work items whose score ≥ this threshold; below
      * it, single dispatch. Absent ⇒ every item fans out when bestOfN > 1
@@ -2484,6 +2484,22 @@ export type EngineId =
   | 'nim'
   | 'opencode'
   | 'grok'; // M298: xAI Grok — OpenAI-compatible, tier mid (promotable to frontier via cfg.foundry.grok)
+
+/**
+ * Explicitly enabled, digest-pinned observation-only local candidate.
+ * Absence is the default-off state. Runtime validation additionally requires
+ * engine `local-coder`, an exact model name, and a canonical full sha256 pin.
+ */
+export interface BestOfNShadowCandidateConfig {
+  enabled: true;
+  artifactDigest: string;
+}
+
+export interface BestOfNCandidateSpec {
+  engine: EngineId;
+  model?: string | null;
+  shadow?: BestOfNShadowCandidateConfig;
+}
 
 /**
  * M45: trust tier of the backend that produced work. 'frontier' = a

@@ -11,6 +11,7 @@ import type { AshlrConfig, ChatMessage, ChatResult, ProviderClient } from '../ty
 import { getProviderRegistry } from '../providers.js';
 import { resolveProviderKey } from '../integrations/secrets.js';
 import { resolveModelProfile, adaptivePromptsEnabled } from './model-profile.js';
+import { scrubSecrets } from '../util/scrub.js';
 
 // ---------------------------------------------------------------------------
 // Known cloud provider identifiers
@@ -172,6 +173,38 @@ function pickModel(models: string[], explicit?: string): string {
 // calls → degraded local fallback plans. Local calls still return fast, so the
 // higher ceiling only lets slow frontier calls finish (env override below).
 const FETCH_TIMEOUT_MS = Number(process.env.ASHLR_FETCH_TIMEOUT_MS) || 300_000;
+const MAX_ERROR_RESPONSE_BYTES = 1024 * 1024;
+const MAX_ERROR_TEXT_CHARS = 2_000;
+
+async function readBoundedResponseText(response: Response, maxBytes: number): Promise<string> {
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > maxBytes) return '[response body exceeded byte limit]';
+  if (!response.body) return '';
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      bytes += next.value.byteLength;
+      if (bytes > maxBytes) {
+        await reader.cancel();
+        return '[response body exceeded byte limit]';
+      }
+      chunks.push(next.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const joined = new Uint8Array(bytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(joined);
+}
 
 /** Open a bounded request; the caller owns cleanup through response body consumption. */
 async function fetchWithTimeout(
@@ -404,11 +437,13 @@ function buildOllamaClient(
         if (!response.ok) {
           let errText = '';
           try {
-            errText = await response.text();
+            errText = await readBoundedResponseText(response, MAX_ERROR_RESPONSE_BYTES);
           } catch {
             throwIfAborted(requestSignal);
           }
-          throw new Error(`Ollama HTTP ${response.status}: ${errText}`);
+          throw new Error(
+            `Ollama HTTP ${response.status}: ${scrubSecrets(errText).slice(0, MAX_ERROR_TEXT_CHARS)}`,
+          );
         }
 
         try {
@@ -495,8 +530,10 @@ function buildOllamaClient(
         }
 
         if (!response.ok) {
-          const errText = await response.text().catch(() => '');
-          throw new Error(`Ollama stream HTTP ${response.status}: ${errText}`);
+          const errText = await readBoundedResponseText(response, MAX_ERROR_RESPONSE_BYTES).catch(() => '');
+          throw new Error(
+            `Ollama stream HTTP ${response.status}: ${scrubSecrets(errText).slice(0, MAX_ERROR_TEXT_CHARS)}`,
+          );
         }
 
         if (!response.body) {
@@ -825,6 +862,14 @@ export function buildOpenAICompatibleClient(
   supportsTools: boolean,
   temperature?: number,
   signal?: AbortSignal,
+  transport?: {
+    redirect?: 'follow' | 'error' | 'manual';
+    timeoutMs?: number;
+    maxRequestBytes?: number;
+    maxResponseBytes?: number;
+    maxOutputTokens?: number;
+    onRequestStart?: () => void;
+  },
 ): ProviderClient {
   const chatUrl = baseUrl.replace(/\/+$/, '') + '/chat/completions';
 
@@ -850,20 +895,29 @@ export function buildOpenAICompatibleClient(
       };
 
       if (temperature !== undefined) body['temperature'] = temperature;
+      if (transport?.maxOutputTokens !== undefined) body['max_tokens'] = transport.maxOutputTokens;
 
       if (supportsTools && tools && tools.length > 0) {
         body['tools'] = tools;
         body['tool_choice'] = 'auto';
       }
 
+      const requestBody = JSON.stringify(body);
+      if (transport?.maxRequestBytes !== undefined &&
+        new TextEncoder().encode(requestBody).byteLength > transport.maxRequestBytes) {
+        throw new Error('OpenAI-compat request exceeds byte limit');
+      }
+
       let response: Response;
       let cleanupResponse = () => {};
       try {
+        transport?.onRequestStart?.();
         const opened = await fetchWithTimeout(chatUrl, {
           method: 'POST',
           headers: buildHeaders(),
-          body: JSON.stringify(body),
-        }, FETCH_TIMEOUT_MS, requestSignal);
+          body: requestBody,
+          ...(transport?.redirect ? { redirect: transport.redirect } : {}),
+        }, transport?.timeoutMs ?? FETCH_TIMEOUT_MS, requestSignal);
         response = opened.response;
         cleanupResponse = opened.cleanup;
       } catch (err: unknown) {
@@ -876,17 +930,56 @@ export function buildOpenAICompatibleClient(
         if (!response.ok) {
           let errText = '';
           try {
-            errText = await response.text();
+            errText = await readBoundedResponseText(
+              response,
+              Math.min(transport?.maxResponseBytes ?? MAX_ERROR_RESPONSE_BYTES, MAX_ERROR_RESPONSE_BYTES),
+            );
           } catch {
             throwIfAborted(requestSignal);
           }
-          throw new Error(`OpenAI-compat HTTP ${response.status}: ${errText}`);
+          const safeError = scrubSecrets(errText).slice(0, MAX_ERROR_TEXT_CHARS);
+          throw new Error(`OpenAI-compat HTTP ${response.status}: ${safeError}`);
         }
 
         try {
-          data = (await response.json()) as unknown;
-        } catch {
+          if (transport?.maxResponseBytes !== undefined) {
+            const declaredLength = Number(response.headers.get('content-length'));
+            if (Number.isFinite(declaredLength) && declaredLength > transport.maxResponseBytes) {
+              throw new Error('OpenAI-compat response exceeds byte limit');
+            }
+            if (!response.body) throw new Error('OpenAI-compat returned empty response');
+            const reader = response.body.getReader();
+            const chunks: Uint8Array[] = [];
+            let bytes = 0;
+            try {
+              while (true) {
+                const next = await reader.read();
+                if (next.done) break;
+                bytes += next.value.byteLength;
+                if (bytes > transport.maxResponseBytes) {
+                  await reader.cancel();
+                  throw new Error('OpenAI-compat response exceeds byte limit');
+                }
+                chunks.push(next.value);
+              }
+            } finally {
+              reader.releaseLock();
+            }
+            const joined = new Uint8Array(bytes);
+            let offset = 0;
+            for (const chunk of chunks) {
+              joined.set(chunk, offset);
+              offset += chunk.byteLength;
+            }
+            data = JSON.parse(new TextDecoder().decode(joined)) as unknown;
+          } else {
+            data = (await response.json()) as unknown;
+          }
+        } catch (error) {
           throwIfAborted(requestSignal);
+          if (error instanceof Error && error.message === 'OpenAI-compat response exceeds byte limit') {
+            throw error;
+          }
           throw new Error('OpenAI-compat returned non-JSON response');
         }
       } finally {
@@ -939,6 +1032,15 @@ export function buildOpenAICompatibleClient(
       callSignal?: AbortSignal,
     ): Promise<ChatResult> {
       const requestSignal = callSignal ?? signal;
+      // A transport-bound client is an authority boundary, not a streaming
+      // preference. Reuse chat() so redirects, request/response/output caps,
+      // timeout, and provider-contact accounting cannot diverge in the path
+      // that runTask prefers. A single final delta preserves the stream API.
+      if (transport) {
+        const result = await this.chat(messages, tools, requestSignal);
+        if (result.content) onDelta(result.content);
+        return result;
+      }
       // Attempt SSE streaming; fall back to chat() on any error.
       let cleanupStream = () => {};
       try {
@@ -980,8 +1082,12 @@ export function buildOpenAICompatibleClient(
         }
 
         if (!response.ok) {
-          const errText = await response.text().catch(() => '');
-          throw new Error(`OpenAI-compat stream HTTP ${response.status}: ${errText}`);
+          const errText = await readBoundedResponseText(response, MAX_ERROR_RESPONSE_BYTES).catch(() => '');
+          throw new Error(
+            `OpenAI-compat stream HTTP ${response.status}: ${
+              scrubSecrets(errText).slice(0, MAX_ERROR_TEXT_CHARS)
+            }`,
+          );
         }
 
         if (!response.body) {

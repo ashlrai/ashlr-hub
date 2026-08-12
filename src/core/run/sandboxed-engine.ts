@@ -107,6 +107,7 @@ import type { CacheEntry } from '../fabric/cache/store.js';
 // M195: resolve api-model keys (e.g. NVIDIA_NIM_API_KEY) via the engine-auth
 // mechanism — phantom vault first, then process.env. Never logs the value.
 import { resolveProviderKey } from '../integrations/secrets.js';
+import { normalizeNumericLoopbackOllamaBaseUrl } from './ollama-identity.js';
 // M264: elite context injection for local api-model engines (local-coder, local-agent).
 // Frontier engines (claude, codex) are never modified. Flag-off → no-op.
 import {
@@ -133,6 +134,8 @@ export interface SandboxedEngineResult {
   proposalOutcome?: RunProposalOutcome;
   /** Recovery evidence when process closure was not proven and cleanup was withheld. */
   sandboxRetention?: SandboxRetentionEvidence;
+  /** True only after the provider transport began opening a request. */
+  providerContacted?: boolean;
 }
 
 export interface SandboxRetentionEvidence {
@@ -170,6 +173,18 @@ export interface RunEngineSandboxedOptions {
   effectGeneration?: string;
   /** Internal TITRR handoff: caller emits the one authoritative terminal action. */
   deferTerminalAction?: boolean;
+  /**
+   * Internal immutable transport binding for a digest-verified local shadow.
+   * The api-model runner validates this again and never consults mutable env.
+   */
+  localShadowBinding?: {
+    baseUrl: string;
+    model: string;
+    requestTimeoutMs: number;
+    maxRequestBytes: number;
+    maxResponseBytes: number;
+    maxOutputTokens: number;
+  };
 }
 
 export interface CaptureSandboxedProposalOptions {
@@ -2599,14 +2614,30 @@ export async function runApiModelSandboxed(
   let proposalId: string | undefined;
   let candidateProposalId: string | undefined;
   let proposalOutcomeResult: RunProposalOutcome | undefined;
+  let providerContacted = false;
   const runStartedAt = Date.now();
 
   try {
-    // Build baseUrl — honour env override, then spec default, then Ollama fallback.
+    // A verified local shadow supplies an immutable numeric-loopback binding.
+    // Ordinary callers preserve the historical env/default resolution path.
+    const shadowBinding = opts.localShadowBinding;
+    if (shadowBinding && (
+      engine !== 'local-coder' || shadowBinding.model !== model ||
+      normalizeNumericLoopbackOllamaBaseUrl(shadowBinding.baseUrl) !== shadowBinding.baseUrl ||
+      !Number.isInteger(shadowBinding.requestTimeoutMs) || shadowBinding.requestTimeoutMs < 1 ||
+      shadowBinding.requestTimeoutMs > 120_000 ||
+      !Number.isInteger(shadowBinding.maxRequestBytes) || shadowBinding.maxRequestBytes < 1 ||
+      shadowBinding.maxRequestBytes > 1024 * 1024 ||
+      !Number.isInteger(shadowBinding.maxResponseBytes) || shadowBinding.maxResponseBytes < 1 ||
+      shadowBinding.maxResponseBytes > 1024 * 1024 ||
+      !Number.isInteger(shadowBinding.maxOutputTokens) || shadowBinding.maxOutputTokens < 1 ||
+      shadowBinding.maxOutputTokens > 8_192
+    )) throw new Error('invalid immutable local shadow transport binding');
     const baseUrlEnv = spec.api.baseUrlEnv;
-    const baseUrl = (baseUrlEnv && process.env[baseUrlEnv]?.trim()) ||
-      spec.api.defaultBaseUrl ||
-      'http://localhost:11434/v1';
+    const baseUrl = shadowBinding?.baseUrl ??
+      ((baseUrlEnv && process.env[baseUrlEnv]?.trim()) ||
+        spec.api.defaultBaseUrl ||
+        'http://localhost:11434/v1');
     // M195: source the bearer key via the engine-auth mechanism (phantom vault
     // first, then process.env) so NVIDIA_NIM_API_KEY etc. work whether stored in
     // the phantom vault or the raw env. The VALUE is never logged or returned.
@@ -2622,6 +2653,16 @@ export async function runApiModelSandboxed(
       supportsTools,
       undefined,
       opts.signal,
+      shadowBinding
+        ? {
+            redirect: 'error',
+            timeoutMs: shadowBinding.requestTimeoutMs,
+            maxRequestBytes: shadowBinding.maxRequestBytes,
+            maxResponseBytes: shadowBinding.maxResponseBytes,
+            maxOutputTokens: shadowBinding.maxOutputTokens,
+            onRequestStart: () => { providerContacted = true; },
+          }
+        : undefined,
     );
 
     // Engineer tools scoped to the sandbox worktree — write/exec enabled so the
@@ -2742,6 +2783,7 @@ export async function runApiModelSandboxed(
         ...(capturedProposalId ? { proposalId: capturedProposalId } : {}),
         ...(capturedCandidateProposalId ? { candidateProposalId: capturedCandidateProposalId } : {}),
         ...(capturedOutcome ? { proposalOutcome: capturedOutcome } : {}),
+        ...(providerContacted ? { providerContacted: true } : {}),
       };
     };
 
@@ -2837,6 +2879,7 @@ export async function runApiModelSandboxed(
         proposalId,
         candidateProposalId,
         proposalOutcome: proposalOutcomeResult,
+        ...(providerContacted ? { providerContacted: true } : {}),
       };
     }
 
@@ -2916,6 +2959,7 @@ export async function runApiModelSandboxed(
       proposalId,
       candidateProposalId,
       proposalOutcome: proposalOutcomeResult,
+      ...(providerContacted ? { providerContacted: true } : {}),
     };
   } finally {
     if (createdHere) {

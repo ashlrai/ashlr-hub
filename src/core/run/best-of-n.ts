@@ -30,6 +30,7 @@ import type {
   SkillCard,
   DelegationScope,
   Sandbox,
+  BestOfNCandidateSpec,
 } from '../types.js';
 import type { ManagerVerdict } from '../fleet/manager.js';
 import type { TasteScore } from '../fleet/taste-critic.js';
@@ -56,9 +57,22 @@ import {
   runWithLocusSessionIfConfigured,
 } from '../integrations/locus.js';
 import {
+  MAX_BEST_OF_N_CANDIDATE_SPECS_INSPECTED,
   MAX_BEST_OF_N_CONCURRENCY,
   resolveBestOfNCount,
 } from './best-of-n-policy.js';
+import {
+  verifyOllamaModelIdentity,
+  normalizeNumericLoopbackOllamaBaseUrl,
+  type OllamaModelIdentity,
+} from './ollama-identity.js';
+
+const SHADOW_REQUEST_TIMEOUT_MS = 120_000;
+const SHADOW_REQUEST_MAX_BYTES = 1024 * 1024;
+const SHADOW_RESPONSE_MAX_BYTES = 1024 * 1024;
+const SHADOW_MAX_TOKENS = 32_768;
+const SHADOW_MAX_STEPS = 20;
+const SHADOW_MAX_OUTPUT_TOKENS = 8_192;
 
 export {
   MAX_BEST_OF_N_CANDIDATE_SPECS_INSPECTED,
@@ -103,6 +117,16 @@ export interface CandidateResult {
   costUsd?: number;
   /** M333: wall-clock generation latency for this candidate (ms). */
   latencyMs?: number;
+  /** Observation-only candidate: never eligible for final proposal capture. */
+  shadow?: boolean;
+  /** Result of the read-only, digest-pinned local artifact preflight. */
+  shadowIdentityStatus?: 'verified' | 'refused';
+  /** Bounded metadata returned by Ollama's local inventory endpoint. */
+  artifactIdentity?: OllamaModelIdentity;
+  /** Counterfactual pre-capture winner under the ordinary ranking policy. */
+  shadowWouldHaveWon?: boolean;
+  /** True only when the underlying provider request was actually opened. */
+  shadowParticipated?: boolean;
   /** Error from the sandbox run or judge, if any. */
   error?: string;
   /** Structured reason the sandbox run did or did not file a proposal. */
@@ -549,6 +573,103 @@ async function runBestOfNWithAuthority(
   }
 }
 
+type ParsedShadowConfig =
+  | { kind: 'off' }
+  | { kind: 'invalid' }
+  | { kind: 'on'; artifactDigest: string };
+
+function parseShadowConfig(spec: BestOfNCandidateSpec): ParsedShadowConfig {
+  const property = Object.getOwnPropertyDescriptor(spec, 'shadow');
+  if (property === undefined) return { kind: 'off' };
+  if (!property.enumerable || !('value' in property)) return { kind: 'invalid' };
+  const value = property.value;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { kind: 'invalid' };
+  const keys = Object.keys(value);
+  if (keys.length !== 2 || !keys.includes('enabled') || !keys.includes('artifactDigest')) {
+    return { kind: 'invalid' };
+  }
+  const enabled = Object.getOwnPropertyDescriptor(value, 'enabled');
+  const digest = Object.getOwnPropertyDescriptor(value, 'artifactDigest');
+  if (
+    !enabled?.enumerable || !('value' in enabled) || enabled.value !== true ||
+    !digest?.enumerable || !('value' in digest) ||
+    typeof digest.value !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(digest.value)
+  ) return { kind: 'invalid' };
+  return { kind: 'on', artifactDigest: digest.value };
+}
+
+interface RuntimeCandidateSpec extends BestOfNCandidateSpec {
+  invalidReason?: string;
+  invalidShadow?: true;
+}
+
+const ENGINE_IDS = new Set<EngineId>([
+  'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes',
+  'kimi', 'nim', 'opencode', 'grok',
+]);
+
+function materializeCandidateSpecs(
+  input: BestOfNCandidateSpec[] | undefined,
+  fallback: BestOfNCandidateSpec,
+): readonly RuntimeCandidateSpec[] {
+  if (!Array.isArray(input)) return Object.freeze([{ ...fallback }]);
+  const inputLength = input.length;
+  if (inputLength === 0) return Object.freeze([{ ...fallback }]);
+  const materialized: RuntimeCandidateSpec[] = [];
+  const inspected = Math.min(inputLength, MAX_BEST_OF_N_CANDIDATE_SPECS_INSPECTED);
+  for (let index = 0; index < inspected; index += 1) {
+    const slot = Object.getOwnPropertyDescriptor(input, String(index));
+    const value = slot?.value;
+    if (!slot?.enumerable || !value || typeof value !== 'object' || Array.isArray(value)) {
+      materialized.push({ ...fallback, invalidReason: 'candidate spec is not plain data' });
+      continue;
+    }
+    const keys = Object.keys(value);
+    const engineProperty = Object.getOwnPropertyDescriptor(value, 'engine');
+    const modelProperty = Object.getOwnPropertyDescriptor(value, 'model');
+    const shadowProperty = Object.getOwnPropertyDescriptor(value, 'shadow');
+    if (
+      keys.some((key) => key !== 'engine' && key !== 'model' && key !== 'shadow') ||
+      !engineProperty?.enumerable || !('value' in engineProperty) ||
+      typeof engineProperty.value !== 'string' || !ENGINE_IDS.has(engineProperty.value as EngineId) ||
+      (modelProperty !== undefined && (!modelProperty.enumerable || !('value' in modelProperty) ||
+        (typeof modelProperty.value !== 'string' && modelProperty.value !== null))) ||
+      (shadowProperty !== undefined && (!shadowProperty.enumerable || !('value' in shadowProperty)))
+    ) {
+      materialized.push({ ...fallback, invalidReason: 'candidate spec has invalid fields' });
+      continue;
+    }
+    let shadow: BestOfNCandidateSpec['shadow'];
+    if (shadowProperty) {
+      const rawShadow = shadowProperty.value;
+      if (!rawShadow || typeof rawShadow !== 'object' || Array.isArray(rawShadow)) {
+        materialized.push({ ...fallback, invalidReason: 'shadow candidate has invalid fields', invalidShadow: true });
+        continue;
+      }
+      const shadowKeys = Object.keys(rawShadow);
+      const enabled = Object.getOwnPropertyDescriptor(rawShadow, 'enabled');
+      const digest = Object.getOwnPropertyDescriptor(rawShadow, 'artifactDigest');
+      if (
+        shadowKeys.length !== 2 || !shadowKeys.includes('enabled') ||
+        !shadowKeys.includes('artifactDigest') || !enabled?.enumerable || !('value' in enabled) ||
+        enabled.value !== true || !digest?.enumerable || !('value' in digest) ||
+        typeof digest.value !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(digest.value)
+      ) {
+        materialized.push({ ...fallback, invalidReason: 'shadow candidate has invalid fields', invalidShadow: true });
+        continue;
+      }
+      shadow = Object.freeze({ enabled: true, artifactDigest: digest.value });
+    }
+    const candidate: RuntimeCandidateSpec = {
+      engine: engineProperty.value as EngineId,
+      ...(modelProperty ? { model: modelProperty.value as string | null } : {}),
+      ...(shadow ? { shadow } : {}),
+    };
+    materialized.push(Object.freeze(candidate));
+  }
+  return Object.freeze(materialized);
+}
+
 async function runBestOfNInternal(
   item: WorkItem,
   cfg: AshlrConfig,
@@ -575,7 +696,9 @@ async function runBestOfNInternal(
      * specs. Absent → single-engine stochastic resampling (M142/M170
      * byte-identical).
      */
-    candidates?: Array<{ engine: EngineId; model?: string | null }>;
+    candidates?: BestOfNCandidateSpec[];
+    /** Daemon-side fail-closed refusal for an explicit malformed candidate list. */
+    candidateConfigRefusal?: string;
   },
 ): Promise<BestOfNResult | { winner: undefined; candidates: CandidateResult[]; critique: BestOfNResult['critique'] }> {
   const n = readN(cfg, opts?.n);
@@ -657,10 +780,25 @@ async function runBestOfNInternal(
   })();
   // M333: multi-model candidate specs — absent → the single-engine
   // stochastic-resampling behavior, byte-identical to M142/M170.
-  const specs: Array<{ engine: EngineId; model?: string | null }> =
-    opts?.candidates && opts.candidates.length > 0
-      ? opts.candidates
-      : [{ engine: defaultEngine, model: opts?.model ?? null }];
+  let specs: readonly RuntimeCandidateSpec[];
+  if (opts?.candidateConfigRefusal) {
+    specs = Object.freeze([{
+      engine: defaultEngine,
+      model: opts?.model ?? null,
+      invalidReason: opts.candidateConfigRefusal,
+    }]);
+  } else try {
+    specs = materializeCandidateSpecs(
+      opts?.candidates,
+      { engine: defaultEngine, model: opts?.model ?? null },
+    );
+  } catch {
+    specs = Object.freeze([{
+      engine: defaultEngine,
+      model: opts?.model ?? null,
+      invalidReason: 'candidate specs could not be materialized',
+    }]);
+  }
   const runnerFor = (e: EngineId): typeof runEngineSandboxed => {
     const spec = resolveEngineSpec(e, cfg);
     return spec?.kind === 'api-model' ? runApiModelSandboxed : runEngineSandboxed;
@@ -712,7 +850,8 @@ async function runBestOfNInternal(
         error: err instanceof Error ? err.message : 'invalid attempt identity',
       };
     }
-    const base: InternalCandidateResult = {
+    const shadowConfig = parseShadowConfig(spec);
+    let base: InternalCandidateResult = {
       index: i,
       diff: '',
       score: 0,
@@ -721,15 +860,93 @@ async function runBestOfNInternal(
       runId,
       trajectoryId: `run:${runId}`,
       requestedModel,
+      ...(shadowConfig.kind !== 'off' || spec.invalidShadow
+        ? { shadow: true, shadowParticipated: false }
+        : {}),
     };
-    if (opts?.signal?.aborted) return { ...base, error: 'cancelled' };
+    if (opts?.signal?.aborted) {
+      return {
+        ...base,
+        ...(shadowConfig.kind === 'on' ? { shadowIdentityStatus: 'refused' as const } : {}),
+        error: 'cancelled',
+      };
+    }
+    const t0 = Date.now();
+    if (spec.invalidReason) {
+      return {
+        ...base,
+        ...(spec.invalidShadow ? { shadowIdentityStatus: 'refused' as const } : {}),
+        latencyMs: 0,
+        error: `candidate configuration refused: ${spec.invalidReason}`,
+      };
+    }
+    if (
+      shadowConfig.kind === 'invalid' ||
+      (shadowConfig.kind === 'on' && (
+        cEngine !== 'local-coder' || typeof spec.model !== 'string' ||
+        spec.model.length === 0 || spec.model.length > 256
+      ))
+    ) {
+      return {
+        ...base,
+        shadowIdentityStatus: 'refused',
+        latencyMs: Date.now() - t0,
+        error: 'shadow identity refused: invalid-config',
+      };
+    }
+    // The legacy compatibility path asks the runner to file immediately. A
+    // shadow must never enter that path: without both isolated-worktree and
+    // draft-only capture primitives, refuse before inventory or model contact.
+    if (shadowConfig.kind === 'on' && (!captureSandboxedProposal || !createSandbox)) {
+      return {
+        ...base,
+        shadowIdentityStatus: 'refused',
+        latencyMs: Date.now() - t0,
+        error: 'shadow execution refused: draft-capture unavailable',
+      };
+    }
+    let verifiedShadowBaseUrl: string | undefined;
+    if (shadowConfig.kind === 'on') {
+      const baseUrlEnv = engineSpec?.api?.baseUrlEnv;
+      const configuredBaseUrl = (baseUrlEnv && process.env[baseUrlEnv]?.trim()) ||
+        engineSpec?.api?.defaultBaseUrl || '';
+      const baseUrl = normalizeNumericLoopbackOllamaBaseUrl(configuredBaseUrl);
+      if (!baseUrl) {
+        return {
+          ...base,
+          shadowIdentityStatus: 'refused',
+          latencyMs: Date.now() - t0,
+          error: 'shadow identity refused: non-loopback-endpoint',
+        };
+      }
+      const verification = await verifyOllamaModelIdentity({
+        baseUrl,
+        model: spec.model!,
+        expectedDigest: shadowConfig.artifactDigest,
+        ...(opts?.signal ? { signal: opts.signal } : {}),
+      });
+      if (!verification.ok) {
+        return {
+          ...base,
+          shadowIdentityStatus: 'refused',
+          ...(verification.identity ? { artifactIdentity: verification.identity } : {}),
+          latencyMs: Date.now() - t0,
+          error: `shadow identity refused: ${verification.reason}`,
+        };
+      }
+      base = {
+        ...base,
+        shadowIdentityStatus: 'verified',
+        artifactIdentity: verification.identity,
+      };
+      verifiedShadowBaseUrl = baseUrl;
+    }
     const runSandboxed = runnerFor(cEngine);
 
     if (!runSandboxed) {
       return { ...base, error: missingRunnerMessageFor(cEngine) };
     }
 
-    const t0 = Date.now();
     let ownedSandbox: Sandbox | undefined;
     try {
       const observeExecutedCandidate = (state: RunState, proposalOutcome?: RunProposalOutcome): void => {
@@ -819,6 +1036,23 @@ async function runBestOfNInternal(
           ...(typeof requestedModel === 'string' ? { model: requestedModel } : {}),
           sourceRepo,
           propose: false,
+          ...(shadowConfig.kind === 'on'
+            ? {
+                localShadowBinding: {
+                  baseUrl: verifiedShadowBaseUrl!,
+                  model: spec.model!,
+                  requestTimeoutMs: SHADOW_REQUEST_TIMEOUT_MS,
+                  maxRequestBytes: SHADOW_REQUEST_MAX_BYTES,
+                  maxResponseBytes: SHADOW_RESPONSE_MAX_BYTES,
+                  maxOutputTokens: SHADOW_MAX_OUTPUT_TOKENS,
+                },
+                budget: {
+                  maxTokens: SHADOW_MAX_TOKENS,
+                  maxSteps: SHADOW_MAX_STEPS,
+                  allowCloud: false,
+                },
+              }
+            : {}),
           existingWorktree: sb,
           runId,
           workItemId: opts?.workItemId ?? item.id,
@@ -827,13 +1061,19 @@ async function runBestOfNInternal(
           ...(delegationScope ? { delegationScope } : {}),
           ...(opts?.signal ? { signal: opts.signal } : {}),
         });
+        if (shadowConfig.kind === 'on' && result.providerContacted === true) {
+          base = { ...base, shadowParticipated: true };
+        }
         const generationOutcome = result.proposalOutcome ?? result.state.proposalOutcome;
         observeExecutedCandidate(result.state, generationOutcome);
         if (result.sandboxRetention) {
           return {
             ...base,
+            ...(shadowConfig.kind === 'on' ? { shadowIdentityStatus: 'refused' as const } : {}),
             latencyMs: Date.now() - t0,
-            error: candidateErrorFromState(result.state, false, generationOutcome),
+            error: shadowConfig.kind === 'on'
+              ? 'shadow execution refused: post-inference identity not verified'
+              : candidateErrorFromState(result.state, false, generationOutcome),
             sandbox: sb,
             sandboxRetention: result.sandboxRetention,
             runId,
@@ -849,8 +1089,11 @@ async function runBestOfNInternal(
           const generationError = candidateErrorFromState(result.state, false, generationOutcome);
           return {
             ...base,
+            ...(shadowConfig.kind === 'on' ? { shadowIdentityStatus: 'refused' as const } : {}),
             latencyMs: Date.now() - t0,
-            error: generationError ?? 'cancelled',
+            error: shadowConfig.kind === 'on'
+              ? 'shadow execution refused: cancelled before post-inference identity verification'
+              : generationError ?? 'cancelled',
             sandbox: sb,
             runId,
             delegationScope,
@@ -860,6 +1103,32 @@ async function runBestOfNInternal(
               ? { costUsd: result.state.usage.estCostUsd }
               : {}),
           };
+        }
+
+        if (shadowConfig.kind === 'on') {
+          const postVerification = await verifyOllamaModelIdentity({
+            baseUrl: verifiedShadowBaseUrl!,
+            model: spec.model!,
+            expectedDigest: shadowConfig.artifactDigest,
+            ...(opts?.signal ? { signal: opts.signal } : {}),
+          });
+          if (!postVerification.ok) {
+            return {
+              ...base,
+              shadowIdentityStatus: 'refused',
+              ...(postVerification.identity ? { artifactIdentity: postVerification.identity } : {}),
+              latencyMs: Date.now() - t0,
+              error: `shadow identity refused after inference: ${postVerification.reason}`,
+              sandbox: sb,
+              runId,
+              delegationScope,
+              state: result.state,
+              ...(typeof result.state.usage?.estCostUsd === 'number'
+                ? { costUsd: result.state.usage.estCostUsd }
+                : {}),
+            };
+          }
+          base = { ...base, artifactIdentity: postVerification.identity };
         }
 
         const draft = await captureSandboxedProposal(cEngine, goal, cfg, {
@@ -955,8 +1224,13 @@ async function runBestOfNInternal(
     } catch (err) {
       return {
         ...base,
+        ...(shadowConfig.kind === 'on' ? { shadowIdentityStatus: 'refused' as const } : {}),
         latencyMs: Date.now() - t0,
-        error: err instanceof Error ? err.message : String(err),
+        error: shadowConfig.kind === 'on'
+          ? `shadow execution refused before post-inference identity verification: ${
+              err instanceof Error ? err.message : String(err)
+            }`
+          : err instanceof Error ? err.message : String(err),
         ...(ownedSandbox ? { sandbox: ownedSandbox } : {}),
       };
     }
@@ -1007,7 +1281,7 @@ async function runBestOfNInternal(
         candidates: candidates.map((c) => {
           const selectionWon = c.proposalId != null && c.proposalId === winnerPid;
           const isPartial = candidateHasPartialProposalMaterial(c);
-          const producerStatus = c.state?.status;
+          const producerStatus = c.state?.status ?? (c.error ? 'failed' as const : undefined);
           const fullProposalWon = selectionWon && !isPartial && producerStatus === 'done' &&
             c.proposalOutcome?.kind === 'filed';
           return {
@@ -1019,6 +1293,27 @@ async function runBestOfNInternal(
             ...(c.testsPassed !== undefined ? { testsPassed: c.testsPassed } : {}),
             ...(c.costUsd !== undefined ? { costUsd: c.costUsd } : {}),
             ...(c.latencyMs !== undefined ? { latencyMs: c.latencyMs } : {}),
+            ...(c.shadow === true ? { shadow: true as const } : {}),
+            ...(c.shadow === true
+              ? {
+                  shadowParticipated: c.shadowParticipated === true,
+                  shadowJudged: c.shadowIdentityStatus === 'verified' && c.verdict !== undefined,
+                  ...(c.shadowIdentityStatus === 'verified' && c.testsPassed !== undefined
+                    ? { shadowTestPassed: c.testsPassed }
+                    : {}),
+                  shadowScore: c.score,
+                  shadowWouldHaveWon: c.shadowWouldHaveWon === true,
+                }
+              : {}),
+            ...(c.shadowIdentityStatus ? { shadowIdentityStatus: c.shadowIdentityStatus } : {}),
+            ...(c.artifactIdentity
+              ? {
+                  artifactDigest: c.artifactIdentity.digest,
+                  artifactName: c.artifactIdentity.name,
+                  artifactSizeBytes: c.artifactIdentity.size,
+                  artifactDetails: c.artifactIdentity.details,
+                }
+              : {}),
             ...(c.error ? { error: c.error } : {}),
             ...(c.proposalOutcome
               ? {
@@ -1047,6 +1342,10 @@ async function runBestOfNInternal(
     candidates: CandidateResult[];
     critique: BestOfNResult['critique'];
   }> => {
+    candidates = candidates.map((candidate) => candidate.shadow === true &&
+      candidate.shadowWouldHaveWon === undefined
+      ? { ...candidate, shadowWouldHaveWon: false }
+      : candidate);
     const { totalCostUsd, billableCostUsd } = await costsFor(candidates);
     await recordCandidates(candidates, totalCostUsd);
     const actualReasons = summarizeNoProposalReasons(candidates);
@@ -1175,10 +1474,7 @@ async function runBestOfNInternal(
     // Prefer clean material over partial evidence. If every clean candidate is
     // absent or fails final capture, the strongest partial remains a truthful,
     // deterministic fallback instead of being discarded with its producer error.
-    const eligible = scored.filter((candidate) =>
-      candidateHasProposalMaterial(candidate) && candidate.testsPassed !== false,
-    );
-    eligible.sort((a, b) => {
+    const compareCandidates = (a: InternalCandidateResult, b: InternalCandidateResult): number => {
       const aClean = candidateHasPartialProposalMaterial(a) ? 0 : 1;
       const bClean = candidateHasPartialProposalMaterial(b) ? 0 : 1;
       if (bClean !== aClean) return bClean - aClean;
@@ -1198,7 +1494,19 @@ async function runBestOfNInternal(
 
       if (b.score !== a.score) return b.score - a.score;
       return a.index - b.index;
-    });
+    };
+    const counterfactualEligible = scored.filter((candidate) =>
+      candidateHasProposalMaterial(candidate) && candidate.testsPassed !== false,
+    ).sort(compareCandidates);
+    const counterfactualWinnerIndex = counterfactualEligible[0]?.index;
+    scored = scored.map((candidate) => candidate.shadow === true
+      ? { ...candidate, shadowWouldHaveWon: candidate.index === counterfactualWinnerIndex }
+      : candidate);
+    const eligible = scored.filter((candidate) =>
+      candidate.shadow !== true &&
+      candidateHasProposalMaterial(candidate) && candidate.testsPassed !== false,
+    );
+    eligible.sort(compareCandidates);
 
     let winner: InternalCandidateResult | undefined;
     for (const c of eligible) {
