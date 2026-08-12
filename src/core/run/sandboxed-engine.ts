@@ -2073,12 +2073,12 @@ export async function runEngineSandboxed(
                     pass: true,
                     reason: `verify-to-green: green after ${_v2gOut.iterations} repair iteration(s)`,
                   };
-                  console.log(`[M331] ${_gateResult.reason}`);
+                  process.stderr.write(`[M331] ${_gateResult.reason}\n`);
                 }
               }
             }
             if (!_gateResult.pass) {
-              console.log(`[M275] completeness gate blocked proposal: ${_gateResult.reason}`);
+              process.stderr.write(`[M275] completeness gate blocked proposal: ${_gateResult.reason}\n`);
               proposalOutcomeResult = proposalOutcome(
                 'completeness-gate',
                 `completeness gate blocked proposal: ${_gateResult.reason ?? 'blocked'}`,
