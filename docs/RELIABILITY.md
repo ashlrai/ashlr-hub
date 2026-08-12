@@ -20,7 +20,7 @@ structural ones are re-checked any time with `ashlr verify-safety` (5/5).
 
 | Guarantee | What it means | Proven by |
 |-----------|---------------|-----------|
-| **Proposal-only generation** | The daemon and `advance` emit pending proposals and import no `apply`/`push`/`createPr`/`deploy` primitive. Manual inbox apply and default-off auto-merge are separate authority paths, so proposal production alone cannot mutate a branch. | H1 chain harness + H4 proposal-only suite; the daemon grep-guard (`verify-safety` CHECK 3). |
+| **Proposal-only generation** | The daemon and `advance` emit pending proposals and import no `apply`/`push`/`createPr`/`deploy` primitive. In the current preview, manual decisions and auto-merge both refuse without a separately authenticated human-effect capability. | H1 chain harness + H4 proposal-only suite; the daemon grep-guard (`verify-safety` CHECK 3). |
 | **Sandboxed** | Autonomous code work happens only inside isolated git worktrees. Your real working tree, branch, index and `HEAD` are byte-identical across the entire chain. | H1 (REAL-TREE-UNCHANGED) + H4 sandbox-required + containment suites. |
 | **Enrollment-gated** | Only repos you explicitly `enroll` are ever touched. Default enrollment is `{repos:[]}` ⇒ nothing runs. `allowAnyRepo` is env-gated (no stray flag can bypass). | H4 enrollment suite + H5 `allowAnyRepo` env-gate. |
 | **Kill switch always wins** | `ashlr enroll kill on` (or `touch ~/.ashlr/KILL`) halts everything immediately; the kill check precedes the enrollment / `allowAnyRepo` gate and is unconditional. | H4 kill-switch suite; `verify-safety` CHECK 2 (kill precedes enroll). |
@@ -34,7 +34,7 @@ structural ones are re-checked any time with `ashlr verify-safety` (5/5).
 
 | Path | Default | Admission and effect |
 |------|---------|----------------------|
-| Manual proposal apply | Available, never silent | `ashlr inbox approve` requires confirmation, enrollment, and kill-switch clear, then applies to a dedicated local branch. |
+| Manual proposal apply | Unavailable in this preview | Review is read-only. `ashlr inbox approve` and `reject` refuse until an externally rooted, one-use human-effect capability is installed. |
 | Tier or verification auto-merge | Disabled | Requires explicit `foundry.autoMerge.enabled`, configured producer or judge authority, full verification, and risk/scope/provenance gates. Policy selects protected remote PR handoff or the bounded local fallback. |
 | Evidence auto-merge | Disabled | Replaces the judge with base- and diff-bound deterministic evidence. It additionally requires signed evidence/provenance, non-empty verification, and live protected-branch policy, and permits protected remote PR handoff only. Missing or stale evidence, local fallback, self-targets, partial captures, and build/CI/manifest changes are refused. |
 | Deployment | No daemon authority | Only explicit `ashlr ship --deploy <target> --confirm` runs a deploy command. A passing pre-ship gate does not imply deployment. |
@@ -166,5 +166,5 @@ Read-only ways to confirm the system is safe and see what it has done:
 
 `~/.ashlr/` — `config.json`, `enrollment.json`, `KILL`, `daemon.json`,
 `inbox/`, `sandboxes/`, `audit/`. The activation runbook (preflight → enroll one
-→ dry-run → daemon → inbox approve → rollback) and the full evidence table live
+→ dry-run → daemon → review-only inbox) and the full evidence table live
 in the top-level [`README.md`](../README.md).

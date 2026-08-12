@@ -678,7 +678,8 @@ export interface AshlrConfig {
      * M333: per-candidate engine/model specs for multi-model best-of-N —
      * e.g. [{engine:'claude', model:'claude-sonnet-5'}, {engine:'codex'},
      * {engine:'local-coder'}]. Candidate i runs on specs[i % specs.length].
-     * Entries not in allowedBackends are dropped at dispatch. Absent ⇒
+     * Invalid entries or entries outside allowedBackends refuse the entire
+     * explicit race before dispatch. Absent ⇒
      * single-engine stochastic resampling (M170 behavior). Trust is
      * unchanged: a winning mid/local candidate keeps its tier tag and can
      * never gain merge authority.
@@ -4345,6 +4346,7 @@ export type DaemonDispatchProductionOutcome =
   | 'sandbox-failed'
   | 'proposal-capture-error'
   | 'proposal-disabled'
+  | 'shadow-observation'
   | 'unknown';
 
 export interface DaemonDispatchProduction {

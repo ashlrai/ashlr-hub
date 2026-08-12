@@ -110,10 +110,12 @@ export function productionAttemptShapeFromSignals(
   const generatedRepairAttemptKind = generatedRepairAttemptKindFromSignals(signals);
   const produced = signals.proposalCreated === true || outcome === 'proposal-created';
   const cancelled = !produced && isCancellationSignal(signals);
+  const observationOnly = outcome === 'shadow-observation';
   const policyDisabled = !captureMissing && (outcome === 'proposal-disabled' || proposalDisabled > 0);
   const gateish = captureMissing || outcome === 'gate-blocked' || outcome === 'proposal-capture-error';
   const backendNoDiff =
     !cancelled &&
+    !observationOnly &&
     !policyDisabled &&
     !produced &&
     (outcome === 'empty-diff' || (diffFiles === 0 && !gateish));
@@ -127,7 +129,7 @@ export function productionAttemptShapeFromSignals(
   ) {
     shape.captureOrGateBlocked = 1;
   }
-  shape.repairAttempts = cancelled
+  shape.repairAttempts = cancelled || observationOnly
     ? 0
     : Math.max(verifyRepairAttempts, generatedRepairAttemptKind ? 1 : 0);
   return shape;
@@ -140,10 +142,11 @@ export function classifyProductionAttemptForLearning(
   const outcome = normalizeOutcome(signals.outcome);
   const produced = signals.proposalCreated === true || outcome === 'proposal-created';
   const cancelled = !produced && isCancellationSignal(signals);
+  const observationOnly = outcome === 'shadow-observation';
   const policySuppressed = !cancelled && attemptShape.policyDisabled > 0;
   const failed = isFailedOutcome(outcome);
   const blocked = isBlockedOutcome(outcome);
-  const diagnosticNoProposal = !cancelled && !produced && !policySuppressed && !failed && !blocked && (
+  const diagnosticNoProposal = !cancelled && !observationOnly && !produced && !policySuppressed && !failed && !blocked && (
     signals.proposalCreated === false ||
     outcome === 'no-proposal' ||
     outcome === 'empty-diff' ||

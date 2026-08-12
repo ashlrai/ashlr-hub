@@ -4535,6 +4535,113 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     },
   );
 
+  it('A1h2a6f: observation-only shadow refusal cannot relabel a production empty diff', async () => {
+    const { items } = enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'shadow fan-out' });
+    mockEngineTierOf.mockReturnValue('mid');
+    mockRunBestOfN.mockResolvedValueOnce({
+      winner: undefined,
+      candidates: [
+        {
+          index: 0,
+          engine: 'local-coder',
+          diff: '',
+          score: 0,
+          proposalOutcome: { kind: 'empty-diff', reason: 'baseline produced no file changes' },
+          error: 'empty-diff: baseline produced no file changes',
+          costUsd: 0.01,
+        },
+        {
+          index: 1,
+          engine: 'local-coder',
+          model: 'nemotron-shadow:exact',
+          diff: '',
+          score: 0,
+          shadow: true,
+          shadowParticipated: false,
+          shadowIdentityStatus: 'refused',
+          error: 'shadow identity refused: digest-mismatch',
+          costUsd: 0,
+        },
+      ],
+      critique: {
+        n: 2,
+        nonEmpty: 0,
+        judged: 0,
+        topScore: 0,
+        winnerIndex: -1,
+        totalCostUsd: 0.01,
+        billableCostUsd: 0.01,
+        noProposalReasons: [
+          { reason: 'empty-diff: baseline produced no file changes', count: 1 },
+          { reason: 'shadow identity refused: digest-mismatch', count: 1 },
+        ],
+      },
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'], bestOfN: 2 },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.dispatches?.[0]?.production).toMatchObject({
+      outcome: 'empty-diff',
+      reason: 'best-of-2: baseline produced no file changes',
+      runEventSummary: { status: 'done', outcome: 'empty-diff', costUsd: 0.01 },
+    });
+    expect(readDispatchProductionEvents({ limit: 1 })[0]).toMatchObject({
+      itemId: items[0]!.id,
+      outcome: 'empty-diff',
+      learningLabel: { learningKind: 'diagnostic-no-proposal', diagnosticAttempt: true },
+    });
+  });
+
+  it('A1h2a6g: an all-shadow race emits a non-learning unknown production observation', async () => {
+    const { items } = enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'shadow-only fan-out' });
+    mockEngineTierOf.mockReturnValue('mid');
+    mockRunBestOfN.mockResolvedValueOnce({
+      winner: undefined,
+      candidates: [0, 1].map((index) => ({
+        index,
+        engine: 'local-coder',
+        model: `nemotron-shadow:${index}`,
+        diff: '',
+        score: 0,
+        shadow: true,
+        shadowParticipated: false,
+        shadowIdentityStatus: 'refused' as const,
+        error: 'shadow identity refused: digest-mismatch',
+        costUsd: 0,
+      })),
+      critique: {
+        n: 2,
+        nonEmpty: 0,
+        judged: 0,
+        topScore: 0,
+        winnerIndex: -1,
+        totalCostUsd: 0,
+        billableCostUsd: 0,
+        noProposalReasons: [{ reason: 'shadow identity refused: digest-mismatch', count: 1 }],
+      },
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'], bestOfN: 2 },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.dispatches?.[0]?.production).toMatchObject({
+      outcome: 'shadow-observation',
+      reason: 'best-of-2: shadow-only observation produced no authoritative production outcome',
+    });
+    expect(readDispatchProductionEvents({ limit: 1 })[0]).toMatchObject({
+      itemId: items[0]!.id,
+      outcome: 'shadow-observation',
+      learningLabel: { learningKind: 'unknown', diagnosticAttempt: false },
+    });
+  });
+
   it.each([false, true])(
     'A1h2a6e2: same-class Best-of-N diagnostics use stable candidate identity (reversed=%s)',
     async (reversed) => {

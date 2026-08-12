@@ -245,8 +245,10 @@ available — it is, since M331).
 - `bestOfN` (default 1 = single dispatch) — formalized in M333 after being
   read via `as any` since M170.
 - `bestOfNCandidates` — candidate i runs on `specs[i % specs.length]` with
-  its own engine/model + runner kind. Entries not in `allowedBackends` are
-  dropped at dispatch. Absent → single-engine stochastic resampling.
+  its own engine/model + runner kind. Any invalid entry or entry outside
+  `allowedBackends` refuses the entire explicit race before provider contact;
+  it never falls back to implicit proposal-capable candidates. Absent →
+  single-engine stochastic resampling.
 - `bestOfNMinItemScore` — fan out only for items whose score clears the
   threshold; below it, single dispatch. Absent → every item fans out.
 - **No `bestOfNMaxCostUsd` knob** (deliberate): the daemon's per-item budget

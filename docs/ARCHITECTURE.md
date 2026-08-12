@@ -51,13 +51,13 @@ The high-level control flow, end to end:
 │     frontier → main (opt-in, CI green                           │
 │                + mergeAuthority + HMAC)                         │
 │            │                                                    │
-│  10. Approval Inbox  ─────────────────  ashlr inbox             │
+│  10. Proposal review inbox ───────────  ashlr inbox             │
 │      (human gate — nothing auto-applies  core/inbox/apply.ts    │
 │       by default)                                               │
 │            │                                                    │
 │  11. Comms Channel  ──────────────────  core/comms/             │
 │      (Telegram / iMessage —             core/integrations/      │
-│       approve-by-text, on top of gate)   telegram.ts            │
+│       review notices; decisions refuse)  telegram.ts            │
 │            │                                                    │
 │  12. Scorecard Feedback  ─────────────  core/fleet/feedback.ts  │
 │      (outcomes → learned router;         core/fleet/judge-      │
@@ -215,7 +215,7 @@ Every external agent CLI is treated as a black box. The containment layers:
 | `dispatch.ts` | `runCommsCycle`: send pending outbound, poll inbound replies, resolve approve/reject decisions. |
 | `handlers.ts` | Register handlers for inbound messages (approve, reject, pause, etc). |
 | `requests.ts` | Build and send oversight requests via the configured transport. |
-| `merge-requests.ts` | Post ship proposals for approve-by-text. |
+| `merge-requests.ts` | Post ship proposals for review; decision commands refuse in the current preview. |
 
 Transports: `src/core/integrations/telegram.ts` and `src/core/integrations/imessage.ts`.
 
@@ -314,12 +314,11 @@ External paths the hub reads but never writes:
 
 ### `ashlr inbox approve <id>` (human gate)
 
-1. `cmdInboxApprove` (`src/cli/inbox.ts`) reads the proposal.
-2. Prompts for confirmation (TTY required; `--yes` skips prompt but still checks TTY).
-3. `setStatus(proposal, 'approved')`.
-4. `applyProposal` (`core/inbox/apply.ts`) applies the diff to the live tree.
-5. If `mergeAuthority` is configured and the proposal carries matching frontier provenance with a valid HMAC + green CI: optionally merges to `main`.
-6. Exit 0.
+The current preview has no authenticated human-effect capability. Approve and
+reject commands refuse before prompting or mutation; verification, application,
+auto-merge, and deployment remain dormant. A future one-use capability must be
+externally rooted and revalidated under the final proposal mutation lock before
+these historical mechanics can run.
 
 ---
 
@@ -340,7 +339,7 @@ External paths the hub reads but never writes:
 |-----------|-------|-----------------|
 | M1–M7 | Foundation — index, MCP gateway, agent loop, observability, lifecycle, genome | `config`, `index-engine`, `mcp-gateway`, `run/orchestrator`, `observability/`, `lifecycle/`, `genome/` |
 | M8–M20 | Agentic platform — doctor, scaffold, telemetry, init, self-heal, plugin system | `doctor`, `lifecycle/scaffold`, `observability/telemetry-sink`, `plugins/` |
-| M21–M30 | Autonomous org — sandboxed swarms, Approval Inbox, enrollment, kill-switch | `swarm/`, `inbox/`, `sandbox/worktree` |
+| M21–M30 | Autonomous org — sandboxed swarms, proposal review inbox, enrollment, kill-switch | `swarm/`, `inbox/`, `sandbox/worktree` |
 | H1–H8 | Harden and prove — adversarial test suite, safety invariants | `test/h*.test.ts` |
 | M31–M33 | Agent-native — plugin system, Raycast, update channel | `plugins/`, `src/raycast/`, `cli/update.ts` |
 | M34–M44 | Team + Local Weapon — multi-machine inbox, adaptive prompts, verify→repair, eval | `integrations/`, `run/verify.ts`, `cli/eval.ts` |

@@ -14,18 +14,21 @@
 
 ashlr-hub is a single Node binary that runs an autonomous agent fleet against your enrolled repositories.
 
-The fleet scans your backlog, dispatches sandboxed agent swarms across multiple backends (local Ollama/LM Studio, Claude Code, Codex, any OpenAI-compatible API), and deposits proposed diffs into an **Approval Inbox**. By default, nothing touches a branch until you explicitly approve it. A separate, default-off auto-merge subsystem can be enabled only with explicit authority and fail-closed verification. The kill-switch is a single file.
+The fleet scans your backlog, dispatches sandboxed agent swarms across multiple backends (local Ollama/LM Studio, Claude Code, Codex, any OpenAI-compatible API), and deposits proposed diffs into a review inbox. The current source preview is proposal-only: approve, reject, verify, apply, auto-merge, and deploy all refuse until a separately authenticated human-effect capability is installed. The kill-switch is a single file.
 
 It is also a local unifying harness: one CLI and web dashboard that indexes your enrolled projects, aggregates all your MCP servers into a single gateway, tracks real spend, and provides `ashlr run` / `ashlr swarm` for ad-hoc work.
 
 ### Authority defaults
 
-First activation follows a strict order: run `ashlr preflight`, enroll a repo, and complete a dry-run before enabling real daemon generation. Only then review a generated proposal and use `ashlr inbox approve`; merge, deploy, and service-install authority remain separate and default off.
+First activation follows a strict order: run `ashlr preflight`, enroll a repo,
+and complete a dry-run before enabling real daemon generation. Generated
+proposals are review-only in this preview; approve, reject, merge, deploy, and
+service-install authority remain unavailable.
 
 | Path | Default | Required authority | Possible outward effect |
 |------|---------|--------------------|-------------------------|
 | Daemon generation | Enabled only when you run the daemon against enrolled repos | Enrollment, kill-switch clear, budget and sandbox gates | Pending proposal only; no apply, push, PR, deploy, or service mutation |
-| Inbox apply | Manual | Explicit `ashlr inbox approve`, confirmation, enrollment, kill-switch clear | Applies to a dedicated local branch; never silently edits the working tree |
+| Inbox apply | **Unavailable in this preview** | Requires a future externally rooted, one-use human-effect capability | No effect; approve and reject refuse before mutation |
 | Autonomous merge | **Off** | `foundry.autoMerge.enabled: true` plus the selected tier, judge-backed verification, or evidence authority gates | Local merge or protected remote PR, depending on policy; every refusal is fail-closed |
 | Judge-free evidence merge | **Off** | Base- and diff-bound deterministic verification, signed provenance/evidence, strict scope/risk policy, and live protected-branch checks | Protected remote PR handoff only; no local fallback, self-target merge, partial capture, or build/CI/manifest change |
 | Deploy | Never performed by the daemon | Explicit `ashlr ship --deploy <target> --confirm` after pre-ship checks | Runs the selected production deploy command |
@@ -48,8 +51,8 @@ End-State Spec (your vision)
           → Sandboxed swarm (throwaway worktree, push severed, diff-only capture)
             → Manager judge or deterministic evidence gate (policy-selected)
               → Merge authority gate (default off; protected PR required in evidence mode)
-                → Approval Inbox (default human gate)
-                  → Comms channel (Telegram/iMessage for approve-by-text)
+                → Proposal review inbox (read-only in this preview)
+                  → Comms channel (review notifications; decisions refuse)
                     → Scorecard feedback (outcomes feed learned routing)
 ```
 
@@ -57,13 +60,15 @@ End-State Spec (your vision)
 
 - The fleet works your backlog while you sleep.
 - You review proposals with `ashlr inbox`, not a chat window.
-- High-confidence work can optionally reach `main` without a manual approve, but only through an explicitly enabled authority mode and its deterministic gates. Evidence mode additionally requires a protected remote PR path. This is off by default.
+- High-confidence work has no path to `main` in this preview. Historical merge
+  modes remain dormant until a separately authenticated human-effect capability
+  is installed and their deterministic gates are reauthorized.
 - Adding a new backend (a NIM, a local Qwen, a different API) is one config entry, no code change.
 
 **Key properties:**
 
 - **Preflight-first activation.** `ashlr preflight` verifies daemon readiness, backend connectivity, and key configuration before you enroll any repos. Run it once before your first enroll.
-- **Proposal-only generation floor.** The daemon's generation path emits pending proposals and imports no apply, push, PR, or deploy primitive. Manual inbox approval and the separate default-off auto-merge subsystem are the only code-change authority paths.
+- **Proposal-only generation floor.** The daemon's generation path emits pending proposals and imports no apply, push, PR, or deploy primitive. In the current preview, human decisions and auto-merge both refuse until a separately authenticated human-effect capability is installed.
 - **Explicit merge authority.** In the default tier mode, local-model proposals stay proposals and allowlisted frontier producers can earn a gated path to `main`. Verification and evidence modes replace producer tier with stricter judge-backed or deterministic evidence authority. Every mode is default off and fail-closed.
 - **Sandboxed by construction.** Every external agent CLI runs in a throwaway git worktree with push credentials severed. Only the scrubbed diff escapes.
 - **OS-level confinement.** Optionally wraps each run with `sandbox-exec` (macOS) or `bwrap`/`firejail` (Linux) — read-jailed to the worktree, network egress blocked.
@@ -139,18 +144,24 @@ ashlr daemon start --once
 
 The fleet scans the backlog, dispatches sandboxed work, and deposits proposals into the inbox.
 
-### 5. Review proposals
+### 5. Review proposals (current source preview)
 
 ```sh
 ashlr inbox                # list pending proposals
 ashlr inbox show <id>      # inspect diff + metadata
-ashlr inbox approve <id>   # apply to branch — confirm-gated, never silent
-ashlr inbox reject <id>    # discard a pending proposal; applies nothing
+ashlr inbox approve <id>   # refuses: authenticated decision capability unavailable
+ashlr inbox reject <id>    # refuses: authenticated decision capability unavailable
 ```
 
-Changes applied through `ashlr inbox approve` land on a dedicated branch — never your working tree directly — so undoing one is ordinary git. Swarm-applied work has a first-class undo: `ashlr swarm rollback <id>` restores the repo to its pre-swarm git state (confirm-gated, never force-push).
+The current source preview is review-only: proposals can be inspected but cannot
+be approved, rejected, verified, applied, merged, or deployed through Ashlr.
+Those operations require a separately authenticated, one-use human capability
+that is not installed in this release candidate. Existing historical apply and
+rollback mechanics remain dormant behind that authority boundary.
 
-That is the default loop. Nothing touched a branch until step 5. The Approval Inbox is the **default human gate**; only an explicitly enabled auto-merge policy can bypass manual approval, and it must still clear its configured deterministic authority and verification gates.
+That is the current proposal-lab loop. Nothing in this preview authorizes a
+branch mutation. The inbox is a review surface, not an active decision gate,
+until an authenticated human-effect capability is installed.
 
 ### Open Mission Control (optional)
 
@@ -330,7 +341,7 @@ ashlr comms status
 ashlr comms send-test           # verify the channel is wired
 ashlr comms cycle               # send pending + poll replies
 ashlr comms digest              # build oversight snapshot + send summary
-ashlr comms ask-merges          # post pending ship proposals for approve-by-text
+ashlr comms ask-merges          # post pending proposals for review; decisions refuse
 ```
 
 Supports **Telegram** (recommended) and macOS iMessage. Configure in `cfg.comms`. The comms layer sits on top of all automated gates — replying to approve in Telegram resolves the human gate; it does not bypass verification or provenance.
@@ -543,7 +554,7 @@ preflight soft-warns *consider locus.firm for production* (non-blocking).
 | Series | Theme | Status |
 |--------|-------|--------|
 | **v1** (M1–M20) | Local command center — Desktop index, MCP gateway, agent orchestrator, genome | Shipped |
-| **v2** (M21–M30) | Autonomous org — sandboxed swarms, Approval Inbox, enrollment, kill-switch | Shipped |
+| **v2** (M21–M30) | Autonomous org — sandboxed swarms, proposal review inbox, enrollment, kill-switch | Shipped |
 | **v2.1** (H1–H8) | Harden and prove — adversarial test suite, safety invariants proven by tests | Shipped |
 | **v2.2** (M31–M33) | Agent-native — plugin system, Raycast, update channel | Shipped |
 | **v3** (M34–M44) | Team + Local Weapon — multi-machine inbox, adaptive prompts, verify→repair, eval | Shipped |

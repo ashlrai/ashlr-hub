@@ -2391,6 +2391,7 @@ function bestOfNAuthoritativeNoWinnerProduction(
     'gate-blocked': 400,
     'empty-diff': 300,
     'proposal-disabled': 200,
+    'shadow-observation': 50,
     cancelled: 0,
     unknown: 100,
   };
@@ -2411,7 +2412,11 @@ function bestOfNAuthoritativeNoWinnerProduction(
     candidateIndex: number;
   }>();
 
-  for (const candidate of result.candidates) {
+  const hasShadowCandidates = result.candidates.some((candidate) => candidate.shadow === true);
+  // Shadow candidates are observation-only. Their identity, transport, judging,
+  // or cleanup failures belong in the shadow ledger and cost accounting, never
+  // in production outcome classification or routing-learning inputs.
+  for (const candidate of result.candidates.filter((entry) => entry.shadow !== true)) {
     const classified = bestOfNCandidateProduction(candidate, authority);
     const candidateProduction = classified?.production;
     if (candidateProduction && classified) {
@@ -2437,7 +2442,10 @@ function bestOfNAuthoritativeNoWinnerProduction(
       addAuthority({ outcome: 'engine-failed', reason: error }, `error:${error}`);
     }
   }
-  for (const entry of result.critique.noProposalReasons ?? []) {
+  // The legacy critique is an aggregate without candidate identity. Once a
+  // shadow participates, it cannot be separated from production reasons, so
+  // authoritative classification must use only structured non-shadow rows.
+  for (const entry of hasShadowCandidates ? [] : (result.critique.noProposalReasons ?? [])) {
     const reason = entry.reason.trim();
     if (!reason || reason === 'selection cancelled' || reason === 'cancelled') continue;
     const structuredAuthority = structuredErrorAuthorities.get(normalizeBestOfNSignal(reason))?.production;
@@ -2483,6 +2491,13 @@ function bestOfNNoWinnerProduction(n: number): DaemonDispatchProduction {
   return {
     outcome: 'unknown',
     reason: `best-of-${n}: all candidates failed to produce a proposal`,
+  };
+}
+
+function bestOfNShadowOnlyProduction(n: number): DaemonDispatchProduction {
+  return {
+    outcome: 'shadow-observation',
+    reason: `best-of-${n}: shadow-only observation produced no authoritative production outcome`,
   };
 }
 
@@ -6284,9 +6299,13 @@ export async function tick(
             );
             const cancelled = authoritativeProduction === undefined &&
               (dispatchSignal.aborted === true || bestOfNWasCancelled(bonResult));
+            const shadowOnly = bonResult.candidates.length > 0 &&
+              bonResult.candidates.every((candidate) => candidate.shadow === true);
             const production = authoritativeProduction ?? (cancelled
               ? cancelledDispatchProduction(attemptId, `best-of-${bestOfN} selection cancelled by owner`, swarmSpent)
-              : bestOfNNoWinnerProduction(bestOfN));
+              : shadowOnly
+                ? bestOfNShadowOnlyProduction(bestOfN)
+                : bestOfNNoWinnerProduction(bestOfN));
             audit({
               action: 'daemon:no-proposal',
               repo: item.repo,
