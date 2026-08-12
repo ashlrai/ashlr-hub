@@ -315,6 +315,9 @@ function isCaptureMissingDispatchEvent(event: DispatchProductionEvent): boolean 
 }
 
 function hasCurrentAuthoritativeAttemptLabel(event: DispatchProductionEvent): boolean {
+  // Shadow-only observations are counterfactual telemetry. They did not make a
+  // production attempt and must never enter backend yield denominators.
+  if (event.outcome === 'shadow-observation') return false;
   const label = currentAuthoritativeDispatchProductionLearningLabel(event);
   if (!label) return false;
   if (event.routerPolicyVersion !== ROUTER_POLICY_VERSION) return false;

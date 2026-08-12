@@ -192,6 +192,81 @@ describe('M335 computeModelStats', () => {
     });
   });
 
+  it('reports shadow counterfactuals without contaminating production race denominators', () => {
+    seed();
+    bonRecords = [{
+      ts: ts(1), source: 'issue', repo: '/r', n: 2, winnerIndex: 0,
+      winnerProposalId: 'p1', totalCostUsd: 0.2,
+      candidates: [
+        { index: 0, engine: 'claude', model: 'claude-sonnet-5', score: 10, proposalId: 'p1', won: true },
+        {
+          index: 1,
+          engine: 'local-coder',
+          model: 'nemotron-shadow:exact',
+          score: 19,
+          proposalId: null,
+          won: false,
+          shadow: true,
+          shadowParticipated: true,
+          shadowJudged: true,
+          shadowTestPassed: true,
+          shadowScore: 19,
+          shadowWouldHaveWon: true,
+        },
+      ],
+    }];
+
+    const stats = computeModelStats('all');
+    const shadow = stats.find((s) => s.engineModel === 'local-coder:nemotron-shadow:exact');
+    expect(shadow).toBeDefined();
+    expect(shadow?.bestOfN).toEqual({
+      entered: 0,
+      selected: 0,
+      partialSelections: 0,
+      won: 0,
+      selectionRate: 0,
+      winRate: 0,
+    });
+    expect(shadow?.shadow).toEqual({
+      participated: 1,
+      judged: 1,
+      testPassed: 1,
+      scoreTotal: 19,
+      averageScore: 19,
+      wouldHaveWon: 1,
+      wouldHaveWonRate: 1,
+    });
+    expect(stats.find((s) => s.engineModel === 'claude:sonnet-5')?.bestOfN.entered).toBe(1);
+  });
+
+  it('keeps production best-of-N availability false for a shadow-only ledger', () => {
+    seed();
+    bonRecords = [{
+      ts: ts(1), source: 'issue', repo: '/r', n: 1, winnerIndex: -1,
+      winnerProposalId: null, totalCostUsd: 0,
+      candidates: [{
+        index: 0,
+        engine: 'local-coder',
+        model: 'nemotron-shadow:exact',
+        score: 0,
+        proposalId: null,
+        won: false,
+        shadow: true,
+        shadowParticipated: false,
+        shadowJudged: false,
+        shadowScore: 0,
+        shadowWouldHaveWon: false,
+      }],
+    }];
+
+    const shadow = computeModelStats('all').find(
+      (model) => model.engineModel === 'local-coder:nemotron-shadow:exact',
+    );
+    expect(shadow?.bestOfNAvailable).toBe(false);
+    expect(shadow?.bestOfN.entered).toBe(0);
+    expect(shadow?.shadow.participated).toBe(0);
+  });
+
   it('counts a current partial selection without fabricating a full proposal win', () => {
     seed();
     bonRecords = [{

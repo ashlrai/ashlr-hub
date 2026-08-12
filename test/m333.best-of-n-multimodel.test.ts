@@ -31,6 +31,7 @@ import { canonicalFilesystemPathIdentity } from '../src/core/sandbox/policy.js';
 const MOCK_REPO = '/tmp/fake-repo';
 const mockPersistedProposals = new Map<string, import('../src/core/types.js').Proposal>();
 const originalHome = process.env.HOME;
+const originalOllamaBaseUrl = process.env.OLLAMA_BASE_URL;
 let testHome: string;
 
 function stampPendingAuthority(
@@ -80,6 +81,7 @@ function proposalAuthorityFields(
 beforeEach(() => {
   testHome = mkdtempSync(join(tmpdir(), 'ashlr-best-of-n-m333-'));
   process.env.HOME = testHome;
+  process.env.OLLAMA_BASE_URL = 'http://127.0.0.1:11434/v1';
 });
 
 function makeItem() {
@@ -159,6 +161,7 @@ function makeSandboxMock(costUsd: number, label: string) {
         },
         proposalOutcome,
         ...(runOpts['propose'] === false ? {} : { proposalId: proposalOutcome.proposalId }),
+        ...(String(engine) === 'local-coder' ? { providerContacted: true } : {}),
       };
     },
   );
@@ -195,6 +198,7 @@ interface Harness {
   judgeProposal: ReturnType<typeof vi.fn>;
   filedProposals?: Map<string, import('../src/core/types.js').Proposal>;
   observeShadowSkills: ReturnType<typeof vi.fn>;
+  verifyOllamaModelIdentity: ReturnType<typeof vi.fn>;
 }
 
 async function harness(opts: {
@@ -205,6 +209,8 @@ async function harness(opts: {
   runTestsForProposal?: ReturnType<typeof vi.fn>;
   subscriptionEngines?: string[];
   draftMode?: boolean;
+  worktreeOnly?: boolean;
+  identityVerification?: Record<string, unknown>;
 }): Promise<Harness> {
   vi.resetModules();
   mockPersistedProposals.clear();
@@ -299,6 +305,20 @@ async function harness(opts: {
     runApiModelSandboxed: opts.api,
     ...(opts.draftMode ? { captureSandboxedProposal } : {}),
   }));
+  const verifyOllamaModelIdentity = vi.fn(async () => opts.identityVerification ?? ({
+    ok: true,
+    identity: {
+      name: 'nemotron-shadow:exact',
+      digest: `sha256:${'a'.repeat(64)}`,
+      size: 42,
+      details: { format: 'gguf', family: 'nemotron', quantization_level: 'Q4_K_M' },
+    },
+  }));
+  vi.doMock('../src/core/run/ollama-identity.js', () => ({
+    verifyOllamaModelIdentity,
+    normalizeNumericLoopbackOllamaBaseUrl: vi.fn((baseUrl: string) =>
+      baseUrl === 'http://127.0.0.1:11434/v1' ? baseUrl : undefined),
+  }));
   let sandboxN = 0;
   const createSandbox = vi.fn((sourceRepo: string) => {
     const id = `sb-${sandboxN++}`;
@@ -312,7 +332,7 @@ async function harness(opts: {
     };
   });
   const removeSandbox = vi.fn();
-  if (opts.draftMode) {
+  if (opts.draftMode || opts.worktreeOnly) {
     vi.doMock('../src/core/sandbox/worktree.js', () => ({
       createSandbox,
       removeSandbox,
@@ -369,7 +389,9 @@ async function harness(opts: {
     recordBestOfN,
     judgeProposal,
     observeShadowSkills,
-    ...(opts.draftMode ? { captureSandboxedProposal, createSandbox, removeSandbox, filedProposals } : {}),
+    verifyOllamaModelIdentity,
+    ...(opts.draftMode ? { captureSandboxedProposal } : {}),
+    ...(opts.draftMode || opts.worktreeOnly ? { createSandbox, removeSandbox, filedProposals } : {}),
   };
 }
 
@@ -382,9 +404,12 @@ afterEach(() => {
   vi.doUnmock('../src/core/fleet/best-of-n-ledger.js');
   vi.doUnmock('../src/core/fleet/subscription-usage.js');
   vi.doUnmock('../src/core/fleet/skill-shadow-observer.js');
+  vi.doUnmock('../src/core/run/ollama-identity.js');
   vi.resetModules();
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
+  if (originalOllamaBaseUrl === undefined) delete process.env.OLLAMA_BASE_URL;
+  else process.env.OLLAMA_BASE_URL = originalOllamaBaseUrl;
   rmSync(testHome, { recursive: true, force: true });
 });
 
@@ -610,6 +635,334 @@ describe('M333 — candidate specs', () => {
     });
     expect(cli.fn).toHaveBeenCalledTimes(2);
     expect(api.fn).toHaveBeenCalledTimes(2);
+  });
+
+  it('refuses a shadow identity mismatch before provider or sandbox contact', async () => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const api = makeSandboxMock(0.0, 'api');
+    const observedDigest = `sha256:${'b'.repeat(64)}`;
+    const h = await harness({
+      cli: cli.fn,
+      api: api.fn,
+      draftMode: true,
+      identityVerification: {
+        ok: false,
+        reason: 'digest-mismatch',
+        identity: {
+          name: 'nemotron-shadow:exact',
+          digest: observedDigest,
+          size: 42,
+          details: { format: 'gguf', family: 'nemotron', quantization_level: 'Q4_K_M' },
+        },
+      },
+    });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 1,
+      candidates: [{
+        engine: 'local-coder',
+        model: 'nemotron-shadow:exact',
+        shadow: { enabled: true, artifactDigest: `sha256:${'a'.repeat(64)}` },
+      }],
+    });
+
+    expect(result.winner).toBeUndefined();
+    expect(result.candidates[0]).toMatchObject({
+      shadow: true,
+      shadowIdentityStatus: 'refused',
+      error: 'shadow identity refused: digest-mismatch',
+      artifactIdentity: { digest: observedDigest, name: 'nemotron-shadow:exact', size: 42 },
+    });
+    expect(h.verifyOllamaModelIdentity).toHaveBeenCalledTimes(1);
+    expect(api.fn).not.toHaveBeenCalled();
+    expect(h.createSandbox).not.toHaveBeenCalled();
+    expect(h.captureSandboxedProposal).not.toHaveBeenCalled();
+    expect(h.recordBestOfN).toHaveBeenCalledWith(expect.objectContaining({
+      winnerIndex: -1,
+      winnerProposalId: null,
+      candidates: [expect.objectContaining({
+        shadow: true,
+        shadowIdentityStatus: 'refused',
+        shadowParticipated: false,
+        artifactDigest: observedDigest,
+        proposalId: null,
+        won: false,
+      })],
+    }));
+  });
+
+  it('refuses a shadow before provider contact when draft-only capture primitives are unavailable', async () => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const api = makeSandboxMock(0.0, 'api');
+    const h = await harness({ cli: cli.fn, api: api.fn, worktreeOnly: true });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 1,
+      candidates: [{
+        engine: 'local-coder',
+        model: 'nemotron-shadow:exact',
+        shadow: { enabled: true, artifactDigest: `sha256:${'a'.repeat(64)}` },
+      }],
+    });
+
+    expect(result.winner).toBeUndefined();
+    expect(result.candidates).toEqual([
+      expect.objectContaining({
+        shadow: true,
+        shadowIdentityStatus: 'refused',
+        shadowParticipated: false,
+        error: 'shadow execution refused: draft-capture unavailable',
+      }),
+    ]);
+    expect(h.verifyOllamaModelIdentity).not.toHaveBeenCalled();
+    expect(api.fn).not.toHaveBeenCalled();
+    expect(h.createSandbox).not.toHaveBeenCalled();
+    expect(h.recordBestOfN).toHaveBeenCalledWith(expect.objectContaining({
+      winnerIndex: -1,
+      winnerProposalId: null,
+      candidates: [expect.objectContaining({
+        shadow: true,
+        shadowIdentityStatus: 'refused',
+        proposalId: null,
+        selectionWon: false,
+        fullProposalWon: false,
+        won: false,
+      })],
+    }));
+  });
+
+  it('never final-captures a verified shadow even when it receives the highest score', async () => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const api = makeSandboxMock(0.0, 'api');
+    const h = await harness({
+      cli: cli.fn,
+      api: api.fn,
+      draftMode: true,
+      judgeScores: [1, 5],
+    });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 2,
+      candidates: [
+        { engine: 'claude', model: 'claude-sonnet-5' },
+        {
+          engine: 'local-coder',
+          model: 'nemotron-shadow:exact',
+          shadow: { enabled: true, artifactDigest: `sha256:${'a'.repeat(64)}` },
+        },
+      ],
+    });
+
+    expect(result.candidates[1]).toMatchObject({
+      shadow: true,
+      shadowIdentityStatus: 'verified',
+      score: 19,
+      shadowWouldHaveWon: true,
+    });
+    expect(result.winner).toMatchObject({ index: 0, engine: 'claude' });
+    expect(api.fn).toHaveBeenCalledTimes(1);
+    expect(api.options[0]?.['propose']).toBe(false);
+    expect(api.options[0]).toMatchObject({
+      localShadowBinding: {
+        baseUrl: 'http://127.0.0.1:11434/v1',
+        model: 'nemotron-shadow:exact',
+        requestTimeoutMs: 120_000,
+        maxRequestBytes: 1024 * 1024,
+        maxResponseBytes: 1024 * 1024,
+        maxOutputTokens: 8_192,
+      },
+      budget: { maxTokens: 32_768, maxSteps: 20, allowCloud: false },
+    });
+    const finalCaptures = h.captureSandboxedProposal!.mock.calls
+      .map((call) => call[3] as Record<string, unknown>)
+      .filter((options) => options['draftOnly'] !== true);
+    expect(finalCaptures).toHaveLength(1);
+    expect((finalCaptures[0]?.['existingWorktree'] as { id?: string })?.id).toBe('sb-0');
+    expect(h.filedProposals?.has('proposal-sb-1')).toBe(false);
+    expect(h.recordBestOfN).toHaveBeenCalledWith(expect.objectContaining({
+      winnerIndex: 0,
+      candidates: [
+        expect.objectContaining({ selectionWon: true, won: true }),
+        expect.objectContaining({
+          shadow: true,
+          shadowIdentityStatus: 'verified',
+          artifactDigest: `sha256:${'a'.repeat(64)}`,
+          shadowParticipated: true,
+          shadowJudged: true,
+          shadowTestPassed: true,
+          shadowScore: 19,
+          shadowWouldHaveWon: true,
+          selectionWon: false,
+          proposalId: null,
+          won: false,
+        }),
+      ],
+    }));
+  });
+
+  it('discards all shadow material when the post-inference digest recheck drifts', async () => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const api = makeSandboxMock(0.0, 'api');
+    const envMutatingApi = vi.fn(async (...args: Parameters<typeof api.fn>) => {
+      process.env.OLLAMA_BASE_URL = 'http://192.168.1.10:11434/v1';
+      return api.fn(...args);
+    });
+    const h = await harness({ cli: cli.fn, api: envMutatingApi, draftMode: true });
+    const expected = {
+      name: 'nemotron-shadow:exact',
+      digest: `sha256:${'a'.repeat(64)}`,
+      size: 42,
+      details: { format: 'gguf', family: 'nemotron', quantization_level: 'Q4_K_M' },
+    };
+    const drifted = { ...expected, digest: `sha256:${'b'.repeat(64)}` };
+    h.verifyOllamaModelIdentity
+      .mockResolvedValueOnce({ ok: true, identity: expected })
+      .mockResolvedValueOnce({ ok: false, reason: 'digest-mismatch', identity: drifted });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 1,
+      candidates: [{
+        engine: 'local-coder',
+        model: 'nemotron-shadow:exact',
+        shadow: { enabled: true, artifactDigest: expected.digest },
+      }],
+    });
+
+    expect(h.verifyOllamaModelIdentity).toHaveBeenCalledTimes(2);
+    expect(h.verifyOllamaModelIdentity.mock.calls.map((call) => call[0].baseUrl)).toEqual([
+      'http://127.0.0.1:11434/v1',
+      'http://127.0.0.1:11434/v1',
+    ]);
+    expect(envMutatingApi).toHaveBeenCalledTimes(1);
+    expect(h.captureSandboxedProposal).not.toHaveBeenCalled();
+    expect(result.winner).toBeUndefined();
+    expect(result.candidates[0]).toMatchObject({
+      diff: '',
+      shadowIdentityStatus: 'refused',
+      artifactIdentity: drifted,
+      shadowWouldHaveWon: false,
+      error: 'shadow identity refused after inference: digest-mismatch',
+    });
+    expect(h.recordBestOfN).toHaveBeenCalledWith(expect.objectContaining({
+      winnerIndex: -1,
+      candidates: [expect.objectContaining({
+        shadow: true,
+        shadowParticipated: true,
+        shadowJudged: false,
+        shadowScore: 0,
+        shadowWouldHaveWon: false,
+        artifactDigest: drifted.digest,
+        proposalId: null,
+        won: false,
+      })],
+    }));
+  });
+
+  it('materializes candidate data once without invoking accessors', async () => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const api = makeSandboxMock(0.0, 'api');
+    const h = await harness({ cli: cli.fn, api: api.fn });
+    const getter = vi.fn(() => 'nemotron-shadow:exact');
+    const hostile = { engine: 'local-coder' } as Record<string, unknown>;
+    Object.defineProperty(hostile, 'model', { enumerable: true, get: getter });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 1,
+      candidates: [hostile as never],
+    });
+
+    expect(getter).not.toHaveBeenCalled();
+    expect(api.fn).not.toHaveBeenCalled();
+    expect(result.winner).toBeUndefined();
+    expect(result.candidates[0]?.error).toContain('candidate configuration refused');
+  });
+
+  it('refuses the whole explicit race when one candidate is malformed', async () => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const api = makeSandboxMock(0.0, 'api');
+    const h = await harness({ cli: cli.fn, api: api.fn, draftMode: true });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 2,
+      candidates: [
+        { engine: 'claude', model: 'claude:sonnet' },
+        {
+          engine: 'local-coder',
+          model: 'nemotron-shadow:exact',
+          shadow: { enabled: true, artifactDigest: 'mutable-tag' },
+        } as never,
+      ],
+    });
+
+    expect(result.winner).toBeUndefined();
+    expect(result.candidates).toHaveLength(2);
+    expect(result.candidates.every((candidate) =>
+      candidate.error === 'candidate configuration refused: shadow candidate has invalid fields')).toBe(true);
+    expect(cli.fn).not.toHaveBeenCalled();
+    expect(api.fn).not.toHaveBeenCalled();
+    expect(h.createSandbox).not.toHaveBeenCalled();
+    expect(h.captureSandboxedProposal).not.toHaveBeenCalled();
+  });
+
+  it('honors daemon candidate refusal without default-spec provider fallback', async () => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const api = makeSandboxMock(0.0, 'api');
+    const h = await harness({ cli: cli.fn, api: api.fn, draftMode: true });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 2,
+      engine: 'local-coder',
+      candidateConfigRefusal: 'explicit bestOfNCandidates refused',
+    });
+
+    expect(result.winner).toBeUndefined();
+    expect(result.candidates).toHaveLength(2);
+    expect(result.candidates.every((candidate) =>
+      candidate.error === 'candidate configuration refused: explicit bestOfNCandidates refused')).toBe(true);
+    expect(cli.fn).not.toHaveBeenCalled();
+    expect(api.fn).not.toHaveBeenCalled();
+    expect(h.createSandbox).not.toHaveBeenCalled();
+    expect(h.captureSandboxedProposal).not.toHaveBeenCalled();
+  });
+
+  it('records a pre-identity cancelled shadow as refused and non-participating', async () => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const api = makeSandboxMock(0.0, 'api');
+    const h = await harness({ cli: cli.fn, api: api.fn, draftMode: true });
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 1,
+      signal: controller.signal,
+      candidates: [{
+        engine: 'local-coder',
+        model: 'nemotron-shadow:exact',
+        shadow: { enabled: true, artifactDigest: `sha256:${'a'.repeat(64)}` },
+      }],
+    });
+
+    expect(result.winner).toBeUndefined();
+    expect(result.candidates[0]).toMatchObject({
+      shadow: true,
+      shadowIdentityStatus: 'refused',
+      shadowWouldHaveWon: false,
+      error: 'cancelled',
+    });
+    expect(api.fn).not.toHaveBeenCalled();
+    expect(h.verifyOllamaModelIdentity).not.toHaveBeenCalled();
+    expect(h.recordBestOfN).toHaveBeenCalledWith(expect.objectContaining({
+      candidates: [expect.objectContaining({
+        shadow: true,
+        shadowIdentityStatus: 'refused',
+        shadowParticipated: false,
+        shadowJudged: false,
+        shadowScore: 0,
+        shadowWouldHaveWon: false,
+        proposalId: null,
+        won: false,
+      })],
+    }));
   });
 });
 

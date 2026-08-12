@@ -306,6 +306,21 @@ ashlr best-of-n --repo <path> --title "fix the timeout logic" -n 5
 
 Generates N candidate diffs for a backlog item, scores each with the Manager judge as a rubric-supervised critic, prefers candidates that pass the repo's own test suite, and files the winner as the proposal (losers are archived with provenance — one pending proposal per item). Since v3.1 candidates can race DIFFERENT models — e.g. Claude Sonnet 5 vs Codex vs a local coder — via `cfg.foundry.bestOfNCandidates`, with every candidate's spend counted against the budget and per-model win rates on the dashboard **Models** tab. Gate fan-out to high-value items with `bestOfNMinItemScore`. Configured via `cfg.foundry.bestOfN`.
 
+Nemotron Phase 0 supports an explicit, default-off `local-coder` shadow entry
+with a full SHA-256 artifact pin when `local-coder` is also explicitly listed
+in `foundry.allowedBackends`. Ashlr first verifies the already-installed
+model through a bounded numeric-loopback-only Ollama inventory read; it never
+pulls or installs a model and never starts the Ollama server. Shadow inference
+may cause an already-running Ollama server to load the configured artifact.
+Verified shadows may be evaluated and recorded, but are hard
+excluded from winner selection and durable proposal capture, so they acquire no
+proposal, branch-apply, or main-merge authority. Candidate isolation may create
+a temporary scratch worktree branch; normal cleanup removes it, while a cleanup
+failure can retain it as bounded diagnostic evidence. The current exercised
+local context ceiling remains 32K; Ashlr
+does not claim 1M-token operation from a model-card value alone. See
+`docs/FOUNDRY-CONFIG.md` for the exact shape and refusal rules.
+
 ---
 
 ## Comms channel

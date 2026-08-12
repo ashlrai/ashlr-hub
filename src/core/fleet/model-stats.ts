@@ -32,6 +32,16 @@ export interface ModelStats extends ModelRoi {
     selectionRate: number;
     winRate: number;
   };
+  /** Counterfactual observation-only metrics, excluded from production rates. */
+  shadow: {
+    participated: number;
+    judged: number;
+    testPassed: number;
+    scoreTotal: number;
+    averageScore: number | null;
+    wouldHaveWon: number;
+    wouldHaveWonRate: number;
+  };
   /** False means the zero-valued race metrics are intentionally withheld. */
   bestOfNAvailable: boolean;
 }
@@ -108,6 +118,15 @@ export function computeModelStatsDetailed(window: '7d' | '30d' | 'all'): ModelSt
             selectionRate: 0,
             winRate: 0,
           },
+          shadow: {
+            participated: 0,
+            judged: 0,
+            testPassed: 0,
+            scoreTotal: 0,
+            averageScore: null,
+            wouldHaveWon: 0,
+            wouldHaveWonRate: 0,
+          },
           bestOfNAvailable: false,
         };
         out.set(key, s);
@@ -151,12 +170,22 @@ export function computeModelStatsDetailed(window: '7d' | '30d' | 'all'): ModelSt
       });
       bestOfNSource = sourceQualityFromRecords(records);
       if (bestOfNSource.sourceState === 'healthy' && bestOfNSource.complete) {
+        let productionBestOfNObserved = false;
         for (const rec of records) {
           for (const c of rec.candidates) {
             if (!c.engine) continue;
             const tag = canonicalModelTag(c.engine, c.model ?? '');
             const key = tag ? `${c.engine}:${tag}` : c.engine;
             const s = ensure(key, c.engine, tag || '(default)');
+            if (c.shadow === true) {
+              s.shadow.participated += c.shadowParticipated === true ? 1 : 0;
+              s.shadow.judged += c.shadowJudged === true ? 1 : 0;
+              s.shadow.testPassed += c.shadowTestPassed === true ? 1 : 0;
+              s.shadow.scoreTotal += c.shadowScore ?? 0;
+              s.shadow.wouldHaveWon += c.shadowWouldHaveWon === true ? 1 : 0;
+              continue;
+            }
+            productionBestOfNObserved = true;
             s.bestOfN.entered++;
             const selected = c.selectionWon ?? c.won;
             // Historical rows predate structured partial/full truth. Preserve
@@ -168,9 +197,15 @@ export function computeModelStatsDetailed(window: '7d' | '30d' | 'all'): ModelSt
           }
         }
         for (const s of out.values()) {
-          s.bestOfNAvailable = true;
+          s.bestOfNAvailable = productionBestOfNObserved;
           s.bestOfN.selectionRate = s.bestOfN.entered > 0 ? s.bestOfN.selected / s.bestOfN.entered : 0;
           s.bestOfN.winRate = s.bestOfN.entered > 0 ? s.bestOfN.won / s.bestOfN.entered : 0;
+          s.shadow.averageScore = s.shadow.participated > 0
+            ? s.shadow.scoreTotal / s.shadow.participated
+            : null;
+          s.shadow.wouldHaveWonRate = s.shadow.participated > 0
+            ? s.shadow.wouldHaveWon / s.shadow.participated
+            : 0;
         }
       }
     } catch {

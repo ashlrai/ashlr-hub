@@ -1103,6 +1103,8 @@ function isEligibleContextRollupTerminal(event: AgentActionEvent): boolean {
     event.action === 'daemon:dispatch' &&
     event.learningSource === 'daemon-dispatch' &&
     event.learningLabel?.authoritative === true &&
+    event.learningLabel.learningKind !== 'unknown' &&
+    event.runEventSummary?.outcome !== 'shadow-observation' &&
     typeof event.runId === 'string' &&
     event.trajectoryId === `run:${event.runId}` &&
     event.runEventSummary?.runId === event.runId;
@@ -2208,7 +2210,9 @@ export function workedOutcomeFromDispatchProduction(
 ): 'diff' | 'empty' | undefined {
   if (!production) return undefined;
   if (production.runEventSummary?.status === 'aborted') return undefined;
-  if (production.outcome === 'proposal-disabled') return undefined;
+  if (production.outcome === 'proposal-disabled' || production.outcome === 'shadow-observation') {
+    return undefined;
+  }
   return production.outcome === 'proposal-created' ? 'diff' : 'empty';
 }
 
@@ -2391,6 +2395,7 @@ function bestOfNAuthoritativeNoWinnerProduction(
     'gate-blocked': 400,
     'empty-diff': 300,
     'proposal-disabled': 200,
+    'shadow-observation': 50,
     cancelled: 0,
     unknown: 100,
   };
@@ -2411,7 +2416,11 @@ function bestOfNAuthoritativeNoWinnerProduction(
     candidateIndex: number;
   }>();
 
-  for (const candidate of result.candidates) {
+  const hasShadowCandidates = result.candidates.some((candidate) => candidate.shadow === true);
+  // Shadow candidates are observation-only. Their identity, transport, judging,
+  // or cleanup failures belong in the shadow ledger and cost accounting, never
+  // in production outcome classification or routing-learning inputs.
+  for (const candidate of result.candidates.filter((entry) => entry.shadow !== true)) {
     const classified = bestOfNCandidateProduction(candidate, authority);
     const candidateProduction = classified?.production;
     if (candidateProduction && classified) {
@@ -2437,7 +2446,10 @@ function bestOfNAuthoritativeNoWinnerProduction(
       addAuthority({ outcome: 'engine-failed', reason: error }, `error:${error}`);
     }
   }
-  for (const entry of result.critique.noProposalReasons ?? []) {
+  // The legacy critique is an aggregate without candidate identity. Once a
+  // shadow participates, it cannot be separated from production reasons, so
+  // authoritative classification must use only structured non-shadow rows.
+  for (const entry of hasShadowCandidates ? [] : (result.critique.noProposalReasons ?? [])) {
     const reason = entry.reason.trim();
     if (!reason || reason === 'selection cancelled' || reason === 'cancelled') continue;
     const structuredAuthority = structuredErrorAuthorities.get(normalizeBestOfNSignal(reason))?.production;
@@ -2483,6 +2495,13 @@ function bestOfNNoWinnerProduction(n: number): DaemonDispatchProduction {
   return {
     outcome: 'unknown',
     reason: `best-of-${n}: all candidates failed to produce a proposal`,
+  };
+}
+
+function bestOfNShadowOnlyProduction(n: number): DaemonDispatchProduction {
+  return {
+    outcome: 'shadow-observation',
+    reason: `best-of-${n}: shadow-only observation produced no authoritative production outcome`,
   };
 }
 
@@ -6128,33 +6147,91 @@ export async function tick(
         // subscription-aware) replaces the winner-only spend accounting.
         const _bonCfg = routingCfg.foundry as Record<string, unknown> | undefined;
         const _bonMinScore = _bonCfg?.['bestOfNMinItemScore'];
-        const _bonRawCandidates = _bonCfg?.['bestOfNCandidates'];
         const fanOut =
           bestOfN > 1 &&
           !isTrustedGeneratedRepairItem(item) &&
           (typeof _bonMinScore !== 'number' || (item.score ?? 0) >= _bonMinScore);
-        let _bonCandidates: ReadonlyArray<{ engine: string; model?: string | null }> | undefined;
-        if (fanOut && Array.isArray(_bonRawCandidates)) {
-          const accepted: Array<{ engine: string; model?: string | null }> = [];
-          const allowed = new Set((routingCfg.foundry?.allowedBackends ?? []) as string[]);
-          const inspected = Math.min(
-            _bonRawCandidates.length,
-            MAX_BEST_OF_N_CANDIDATE_SPECS_INSPECTED,
-          );
-          for (let index = 0; index < inspected && accepted.length < bestOfN; index += 1) {
-            const candidate = _bonRawCandidates[index];
-            if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
-            const engineProperty = Object.getOwnPropertyDescriptor(candidate, 'engine');
-            const modelProperty = Object.getOwnPropertyDescriptor(candidate, 'model');
-            const engine = engineProperty?.value;
-            const model = modelProperty?.value;
-            if (!engineProperty?.enumerable || typeof engine !== 'string' || !allowed.has(engine)) continue;
-            if (modelProperty !== undefined &&
-              (!modelProperty.enumerable ||
-                (typeof model !== 'string' && model !== null && model !== undefined))) continue;
-            accepted.push(modelProperty === undefined ? { engine } : { engine, model });
+        let _bonCandidates: ReadonlyArray<{
+          engine: string;
+          model?: string | null;
+          shadow?: { enabled: true; artifactDigest: string };
+        }> | undefined;
+        let _bonCandidateConfigRefusal: string | undefined;
+        if (fanOut && _bonCfg) {
+          try {
+            const configured = Object.getOwnPropertyDescriptor(_bonCfg, 'bestOfNCandidates');
+            if (configured !== undefined) {
+              if (!configured.enumerable || !('value' in configured) || !Array.isArray(configured.value)) {
+                throw new Error('explicit bestOfNCandidates must be a plain array value');
+              }
+              const rawCandidates = configured.value as unknown[];
+              const length = rawCandidates.length;
+              if (length < 1) throw new Error('explicit bestOfNCandidates is empty');
+              const inspected = Math.min(length, MAX_BEST_OF_N_CANDIDATE_SPECS_INSPECTED);
+              const accepted: Array<{
+                engine: string;
+                model?: string | null;
+                shadow?: { enabled: true; artifactDigest: string };
+              }> = [];
+              const allowed = new Set((routingCfg.foundry?.allowedBackends ?? []) as string[]);
+              for (let index = 0; index < inspected; index += 1) {
+                const slot = Object.getOwnPropertyDescriptor(rawCandidates, String(index));
+                const candidate = slot?.value;
+                if (!slot?.enumerable || !candidate || typeof candidate !== 'object' ||
+                  Array.isArray(candidate)) throw new Error(`candidate ${index} is not plain data`);
+                const keys = Object.keys(candidate);
+                if (keys.some((key) => key !== 'engine' && key !== 'model' && key !== 'shadow')) {
+                  throw new Error(`candidate ${index} has unknown fields`);
+                }
+                const engineProperty = Object.getOwnPropertyDescriptor(candidate, 'engine');
+                const modelProperty = Object.getOwnPropertyDescriptor(candidate, 'model');
+                const shadowProperty = Object.getOwnPropertyDescriptor(candidate, 'shadow');
+                const engine = engineProperty?.value;
+                const model = modelProperty?.value;
+                if (!engineProperty?.enumerable || typeof engine !== 'string' || !allowed.has(engine)) {
+                  throw new Error(`candidate ${index} engine is invalid or disallowed`);
+                }
+                if (modelProperty !== undefined && (!modelProperty.enumerable || !('value' in modelProperty) ||
+                  (typeof model !== 'string' && model !== null))) {
+                  throw new Error(`candidate ${index} model is invalid`);
+                }
+                let shadow: { enabled: true; artifactDigest: string } | undefined;
+                if (shadowProperty !== undefined) {
+                  const rawShadow = shadowProperty.value;
+                  if (!shadowProperty.enumerable || !('value' in shadowProperty) || !rawShadow ||
+                    typeof rawShadow !== 'object' || Array.isArray(rawShadow) ||
+                    engine !== 'local-coder' || typeof model !== 'string' ||
+                    model.length === 0 || model.length > 256) {
+                    throw new Error(`candidate ${index} shadow config is invalid`);
+                  }
+                  const shadowKeys = Object.keys(rawShadow);
+                  const enabledProperty = Object.getOwnPropertyDescriptor(rawShadow, 'enabled');
+                  const digestProperty = Object.getOwnPropertyDescriptor(rawShadow, 'artifactDigest');
+                  const digest = digestProperty?.value;
+                  if (shadowKeys.length !== 2 || !shadowKeys.includes('enabled') ||
+                    !shadowKeys.includes('artifactDigest') || !enabledProperty?.enumerable ||
+                    !('value' in enabledProperty) || enabledProperty.value !== true ||
+                    !digestProperty?.enumerable || !('value' in digestProperty) ||
+                    typeof digest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(digest)) {
+                    throw new Error(`candidate ${index} shadow config is invalid`);
+                  }
+                  shadow = { enabled: true, artifactDigest: digest };
+                }
+                if (accepted.length < bestOfN) {
+                  accepted.push({
+                    engine,
+                    ...(modelProperty === undefined ? {} : { model }),
+                    ...(shadow ? { shadow } : {}),
+                  });
+                }
+              }
+              if (accepted.length === 0) throw new Error('explicit bestOfNCandidates accepted no entries');
+              _bonCandidates = Object.freeze(accepted);
+            }
+          } catch {
+            _bonCandidates = undefined;
+            _bonCandidateConfigRefusal = 'explicit bestOfNCandidates refused';
           }
-          if (accepted.length > 0) _bonCandidates = Object.freeze(accepted);
         }
         let bonBillable: number | null = null;
 
@@ -6179,6 +6256,7 @@ export async function tick(
             return runBestOfN(item, routingCfg, {
               n: bestOfN, engine: backend, model: selectedModel,
               ...(_bonCandidates ? { candidates: _bonCandidates as never } : {}),
+              ...(_bonCandidateConfigRefusal ? { candidateConfigRefusal: _bonCandidateConfigRefusal } : {}),
               workItemId: item.id, workItemGenerationId, workSource: item.source,
               delegationScope, attemptId, shadowSkillCards, shadowSkillSelectedAt,
               signal: dispatchSignal,
@@ -6225,9 +6303,13 @@ export async function tick(
             );
             const cancelled = authoritativeProduction === undefined &&
               (dispatchSignal.aborted === true || bestOfNWasCancelled(bonResult));
+            const shadowOnly = bonResult.candidates.length > 0 &&
+              bonResult.candidates.every((candidate) => candidate.shadow === true);
             const production = authoritativeProduction ?? (cancelled
               ? cancelledDispatchProduction(attemptId, `best-of-${bestOfN} selection cancelled by owner`, swarmSpent)
-              : bestOfNNoWinnerProduction(bestOfN));
+              : shadowOnly
+                ? bestOfNShadowOnlyProduction(bestOfN)
+                : bestOfNNoWinnerProduction(bestOfN));
             audit({
               action: 'daemon:no-proposal',
               repo: item.repo,
@@ -7000,6 +7082,14 @@ export async function tick(
           }
           if (production?.outcome === 'proposal-disabled' && !duplicateDiff) {
             if (!coordinator.settleClaim(outcome.value.item.id, machineId)) {
+              workedOutcomeFailedItemIds.add(outcome.value.item.id);
+            }
+            continue;
+          }
+          if (production?.outcome === 'shadow-observation') {
+            // A shadow-only observation spent no production authority and must
+            // neither mark the item worked nor create a retry cooldown.
+            if (sharedQueueMode && !coordinator.settleClaim(outcome.value.item.id, machineId)) {
               workedOutcomeFailedItemIds.add(outcome.value.item.id);
             }
             continue;
