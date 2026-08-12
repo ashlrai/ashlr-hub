@@ -12,8 +12,9 @@
  *   'append'   — append-only write under ~/.ashlr/ (genome hub); REFUSED on KILL.
  *   'proposal' — creates a PENDING inbox Proposal; REFUSED on KILL.
  *
- * There is deliberately NO approve/reject/apply tool: approval stays human-only
- * via `ashlr inbox`. `ashlr_ask` hardcodes allowCloud:false — agent sessions
+ * There is deliberately NO approve/reject/apply tool. This release exposes
+ * proposals for read-only review; no authenticated decision capability is
+ * installed. `ashlr_ask` hardcodes allowCloud:false — agent sessions
  * bring their own model; ashlr code never leaves the machine via this surface.
  *
  * Every call (ok / refused / error) is audited as 'mcp:native-call' with the
@@ -21,7 +22,7 @@
  * size-capped so a tool reply can never blow agent context or leak credentials.
  */
 
-import type { AshlrConfig, NativeToolDef, NativeToolSafety, ProposalStatus } from './types.js';
+import type { AshlrConfig, NativeToolDef, NativeToolSafety, Proposal, ProposalStatus } from './types.js';
 import { loadConfig } from './config.js';
 import { killSwitchOn } from './sandbox/policy.js';
 import { audit } from './sandbox/audit.js';
@@ -34,13 +35,19 @@ import { loadPreviousReport } from './quality/store.js';
 import { buildRollup } from './observability/rollup.js';
 import { buildSnapshot } from './dashboard.js';
 import { buildOrientation } from './orient.js';
-import { selectGenomeSync, selectInboxStore, selectBacklogSource } from './seams/index.js';
+import {
+  selectGenomeSync,
+  selectInboxStore,
+  selectBacklogSource,
+  type InboxStore,
+} from './seams/index.js';
 import { loadDaemonState } from './daemon/state.js';
 import { buildFleetDigest } from './fleet/digest.js';
 import { computeQualityMetrics } from './fleet/quality-metrics.js';
 import { buildOversightSnapshot, type OversightSnapshot } from './fleet/oversight-export.js';
 import { readDecisions } from './fleet/decisions-ledger.js';
 import { listProposals } from './inbox/store.js';
+import { verifyProposalEffectPolicy } from './inbox/review-policy.js';
 
 // M169: best-effort imports for new elite-state tools
 // Each is wrapped in a lazy async import inside the handler so module-level
@@ -62,6 +69,43 @@ const TRUNCATION_MARK = '\n…[ashlr: output truncated]…\n';
 
 /** Internal privilege tags that external MCP callers may not persist. */
 const RESERVED_LEARN_TAGS = new Set(['m243:skill']);
+
+function durableProposalToolResult(store: InboxStore, proposal: Proposal): Record<string, unknown> {
+  if (proposal.status === 'rejected' &&
+    proposal.decisionReason?.startsWith('diffHash dedup: duplicate of ')) {
+    return {
+      created: false,
+      deduplicated: true,
+      id: proposal.id,
+      status: proposal.status,
+      note: 'An existing authoritative pending proposal already covers this exact diff.',
+    };
+  }
+  const loaded = proposal.status === 'pending' ? store.load(proposal.id) : null;
+  const durablyFiled = loaded?.id === proposal.id && loaded.status === 'pending' &&
+    loaded.createdAt === proposal.createdAt &&
+    typeof loaded.effectPolicy?.attestation === 'string' &&
+    loaded.effectPolicy.attestation === proposal.effectPolicy?.attestation &&
+    verifyProposalEffectPolicy(loaded);
+  if (!durablyFiled) {
+    return {
+      created: false,
+      status: 'failed',
+      ...(proposal.creationFailureCode
+        ? { creationFailureCode: proposal.creationFailureCode }
+        : {}),
+      error: 'proposal was not durably filed',
+    };
+  }
+  return {
+    created: true,
+    id: proposal.id,
+    status: 'pending',
+    note:
+      'Pending read-only review. Authenticated human decision capability is not installed, ' +
+      'so no proposed effect can execute in this release.',
+  };
+}
 
 function externalLearnTags(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
@@ -399,8 +443,8 @@ const TOOLS: NativeToolImpl[] = [
   {
     name: 'ashlr_inbox_list',
     description:
-      'List inbox proposals (the human approval gate). Read-only — approval and ' +
-      'rejection are HUMAN-ONLY via the `ashlr inbox` CLI.',
+      'List inbox proposals for read-only review. Authenticated approval and ' +
+      'rejection capability is not installed in this release.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -441,9 +485,9 @@ const TOOLS: NativeToolImpl[] = [
   {
     name: 'ashlr_inbox_propose',
     description:
-      'Propose an outward action (patch / pr / note) into the approval inbox. The ' +
-      'proposal is created PENDING and applies ONLY after explicit human approval ' +
-      'via `ashlr inbox`. Nothing is executed by this call.',
+      'Propose an outward action (patch / pr / note) into the read-only review inbox. ' +
+      'Nothing is executed by this call; authenticated human decision capability is ' +
+      'not installed in this release.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -466,7 +510,8 @@ const TOOLS: NativeToolImpl[] = [
       if (kind !== 'patch' && kind !== 'pr' && kind !== 'note') {
         return { error: `invalid kind "${kind}" — agent proposals may be patch | pr | note` };
       }
-      const proposal = selectInboxStore(cfg).create({
+      const store = selectInboxStore(cfg);
+      const proposal = store.create({
         repo: typeof args['repo'] === 'string' ? args['repo'] : null,
         origin: 'agent',
         kind,
@@ -474,12 +519,7 @@ const TOOLS: NativeToolImpl[] = [
         summary: String(args['summary']),
         ...(typeof args['diff'] === 'string' ? { diff: args['diff'] } : {}),
       });
-      return {
-        created: true,
-        id: proposal.id,
-        status: proposal.status,
-        note: 'Pending human review — approve/reject via `ashlr inbox` (CLI).',
-      };
+      return durableProposalToolResult(store, proposal);
     },
   },
 
@@ -489,8 +529,8 @@ const TOOLS: NativeToolImpl[] = [
     description:
       'Propose a browser automation task (navigate to a URL and/or run instructions ' +
       'via the Claude-in-Chrome MCP server). Creates a PENDING browser-action proposal ' +
-      '— NEVER executes directly. The action runs ONLY after the user explicitly ' +
-      'approves via `ashlr inbox`. Requires a Claude-in-Chrome (or compatible) MCP ' +
+      '— NEVER executes directly. Authenticated decision capability is not installed. ' +
+      'Requires a Claude-in-Chrome (or compatible) MCP ' +
       'server to be configured; browser tasks are refused cleanly in headless / ' +
       'daemon contexts where no browser MCP is reachable. ' +
       'Requires the repo to be enrolled and the kill switch to be off.',
@@ -539,7 +579,8 @@ const TOOLS: NativeToolImpl[] = [
       }
 
       // Create a PENDING proposal — NEVER execute here.
-      const proposal = selectInboxStore(cfg).create({
+      const store = selectInboxStore(cfg);
+      const proposal = store.create({
         repo,
         origin: 'agent',
         kind: 'browser-action',
@@ -552,15 +593,7 @@ const TOOLS: NativeToolImpl[] = [
         },
       });
 
-      return {
-        created: true,
-        id: proposal.id,
-        status: 'pending',
-        note:
-          'Pending human approval — approve via `ashlr inbox` (CLI). ' +
-          'The browser task will NOT execute until you approve it. ' +
-          'A Claude-in-Chrome MCP server must be configured and reachable at apply time.',
-      };
+      return durableProposalToolResult(store, proposal);
     },
   },
 
@@ -841,7 +874,7 @@ const TOOLS: NativeToolImpl[] = [
     description:
       'Propose a desktop UI action (open a path in editor / Finder / terminal). ' +
       'Creates a PENDING desktop-action proposal — NEVER executes directly. ' +
-      'The action runs only after the user explicitly approves via `ashlr inbox`. ' +
+      'Authenticated decision capability is not installed in this release. ' +
       'Requires the repo to be enrolled and the kill switch to be off.',
     inputSchema: {
       type: 'object',
@@ -893,7 +926,8 @@ const TOOLS: NativeToolImpl[] = [
       }
 
       // Create a PENDING proposal — NEVER execute here.
-      const proposal = selectInboxStore(cfg).create({
+      const store = selectInboxStore(cfg);
+      const proposal = store.create({
         repo,
         origin: 'agent',
         kind: 'desktop-action',
@@ -905,12 +939,7 @@ const TOOLS: NativeToolImpl[] = [
         },
       });
 
-      return {
-        created: true,
-        id: proposal.id,
-        status: 'pending',
-        note: 'Pending human approval — approve via `ashlr inbox` (CLI). The action will NOT execute until you approve it.',
-      };
+      return durableProposalToolResult(store, proposal);
     },
   },
 ];

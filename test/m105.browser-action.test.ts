@@ -81,6 +81,21 @@ vi.mock('../src/core/config.js', () => ({
   loadConfig: () => ({ editor: 'vscode', inboxDir: undefined }),
 }));
 
+// Dormant-mechanics harness: V1 intentionally has no human capability. These
+// cases preserve the downstream browser adapter matrix without adding any
+// production bypass; M505 and adapter authority suites exercise the real gate.
+vi.mock('../src/core/inbox/review-policy.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/inbox/review-policy.js')>();
+  return {
+    ...actual,
+    evaluateProposalEffectPolicy: () => ({
+      allowed: true,
+      effectClass: 'outward-effect' as const,
+      code: 'policy-not-required' as const,
+    }),
+  };
+});
+
 // ---------------------------------------------------------------------------
 // Lazy imports — AFTER vi.mock hoists.
 // ---------------------------------------------------------------------------

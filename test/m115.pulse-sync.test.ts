@@ -239,6 +239,28 @@ describe('pulse-sync — command dispatch (cloud queues → local executes)', ()
     );
   });
 
+  it('approve_proposal reports failed when the signed effect policy refuses the transition', async () => {
+    queueCommands([cmd({ id: 'a-blocked', kind: 'approve_proposal', target: 'effectful-patch' })]);
+    vi.mocked(inbox.setStatus).mockReturnValueOnce(false);
+
+    const out = await pollAndApplyCommands(cfg);
+
+    expect(inbox.setStatus).toHaveBeenCalledWith(
+      'effectful-patch',
+      'approved',
+      expect.any(String),
+    );
+    expect(goals.createGoal).not.toHaveBeenCalled();
+    expect(policy.enroll).not.toHaveBeenCalled();
+    expect(out[0]).toMatchObject({ outcome: 'failed' });
+    expect(exporter.patchFleetCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      'a-blocked',
+      expect.objectContaining({ status: 'failed' }),
+      expect.anything(),
+    );
+  });
+
   it('reject_proposal → setStatus(rejected) (inbox/store) + PATCH done', async () => {
     queueCommands([cmd({ id: 'r1', kind: 'reject_proposal', payload: { proposalId: 'prop-99' } })]);
 

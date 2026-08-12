@@ -296,7 +296,7 @@ function printSteps(repoHint: string): void {
   console.log(`  ${cyan('1.')} ${bold('Preflight')}   ${dim('ashlr preflight')}                      ${dim('— read-only readiness check')}`);
   console.log(`  ${cyan('2.')} ${bold('Enroll ONE')}  ${dim(`ashlr sandbox enroll ${repoHint}`)}   ${dim('— the explicit enrollment gate')}`);
   console.log(`  ${cyan('3.')} ${bold('Dry-run')}     ${dim('ashlr daemon start --dry-run --once')}    ${dim('— preview the plan; NO proposal, $0')}`);
-  console.log(`  ${cyan('4.')} ${bold('Review')}      ${dim('ashlr inbox')}                          ${dim('— review + approve; NEVER auto-applied')}`);
+  console.log(`  ${cyan('4.')} ${bold('Review')}      ${dim('ashlr inbox')}                          ${dim('— read-only; decision capability not installed')}`);
   console.log(`  ${cyan('5.')} ${bold('Rollback')}    ${dim(`ashlr onboard --rollback ${repoHint}`)}  ${dim('— one-command undo')}`);
   console.log('');
   console.log(`  ${dim('Re-run interactively (a TTY, no --yes) to be guided through steps 1–3 automatically.')}`);
@@ -499,7 +499,7 @@ export async function cmdOnboard(args: string[]): Promise<number> {
 
   // ── Step 4: Point at the inbox (REVIEW ONLY — never auto-approve/apply) ─────
   console.log(
-    `  ${bold('Next:')} review what would run with ${cyan('ashlr inbox')} ${dim('— nothing is applied until YOU approve it there.')}`,
+    `  ${bold('Next:')} inspect proposed work with ${cyan('ashlr inbox')} ${dim('— review-only; authenticated decisions are not installed.')}`,
   );
   console.log('');
 

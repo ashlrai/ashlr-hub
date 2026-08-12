@@ -187,8 +187,8 @@ function bodyOverview(
     add(
       col.bold(col.yellow('  ⚠ Inbox: ')) +
       col.yellow(String(inboxPend)) +
-      col.yellow(inboxPend === 1 ? ' proposal awaiting approval' : ' proposals awaiting approval') +
-      col.dim('  (use `ashlr inbox approve <id>` to act)'),
+      col.yellow(inboxPend === 1 ? ' proposal awaiting review' : ' proposals awaiting review') +
+      col.dim('  (review-only; authenticated decision capability not installed)'),
     );
   }
 
@@ -440,7 +440,7 @@ function bodyMcp(
 }
 
 // ---------------------------------------------------------------------------
-// Tab: Inbox (M23 — read-only; approve via `ashlr inbox approve <id>`)
+// Tab: Inbox (M23 — read-only; authenticated decisions intentionally unavailable)
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -584,7 +584,7 @@ function bodyInbox(
   const blank = () => add('');
 
   blank();
-  add(col.bold(col.blue(' ◆ Inbox — Pending Approvals')));
+  add(col.bold(col.blue(' ◆ Inbox — Pending Review')));
   blank();
 
   const pending = snap.inbox?.pending ?? 0;
@@ -600,18 +600,17 @@ function bodyInbox(
   add(
     `   ${col.yellow(String(pending))} ` +
     col.yellow(pending === 1 ? 'proposal' : 'proposals') +
-    ' awaiting approval.',
+    ' awaiting review.',
   );
   blank();
 
-  // Instructions — approval is CLI-only, not from the TUI.
+  // Instructions — review-only until authenticated human authority is installed.
   add(col.bold('   To act on a proposal:'));
   add(col.dim('   ashlr inbox              — list pending proposals'));
   add(col.dim('   ashlr inbox show <id>    — view full diff'));
-  add(col.dim('   ashlr inbox approve <id> — approve and apply'));
-  add(col.dim('   ashlr inbox reject <id>  — reject and discard'));
+  add(col.dim('   inbox decisions unavailable — authenticated human capability is not installed'));
   blank();
-  add(col.dim('   Approval is CLI-only. Nothing applies automatically.'));
+  add(col.dim('   Nothing applies automatically; this release exposes review only.'));
 
   return padToRows(lines, bodyRows, cols);
 }

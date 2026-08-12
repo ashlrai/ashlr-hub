@@ -813,9 +813,25 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
 // 7. ORCHESTRATOR DISPATCH (mocked) — runGoal routes api-model to runApiModelSandboxed
 // ---------------------------------------------------------------------------
 describe('M117 — orchestrator dispatch for api-model engine (mocked)', () => {
+  let dispatchHome: string;
+  let previousHome: string | undefined;
+
+  beforeEach(() => {
+    previousHome = process.env['HOME'];
+    dispatchHome = mkdtempSync(join(tmpdir(), 'ashlr-m117-routing-'));
+    process.env['HOME'] = dispatchHome;
+  });
+
   afterEach(() => {
+    if (previousHome === undefined) delete process.env['HOME'];
+    else process.env['HOME'] = previousHome;
+    rmSync(dispatchHome, { recursive: true, force: true });
     vi.restoreAllMocks();
     vi.resetModules();
+    vi.doUnmock('../src/core/run/sandboxed-engine.js');
+    vi.doUnmock('../src/core/run/engines.js');
+    vi.doUnmock('../src/core/util/execution-lease.js');
+    vi.doUnmock('../src/core/util/private-storage.js');
   });
 
   it('runGoal with engine=local-coder routes to runApiModelSandboxed, not builtin', async () => {
@@ -854,6 +870,25 @@ describe('M117 — orchestrator dispatch for api-model engine (mocked)', () => {
         engineInstalled: (engine: string) => engine === 'local-coder' ? true : false,
       };
     });
+
+    // Legacy routing fixture: M391 owns execution-authority coverage; this case
+    // exercises only the dormant api-model dispatch branch behind that gate.
+    vi.doMock('../src/core/util/execution-lease.js', () => ({
+      acquireExecutionAuthority: () => ({
+        ok: true,
+        authority: { token: 'm117-routing-fixture' },
+      }),
+      beginExecutionAuthority: () => true,
+      finishExecutionAuthority: () => undefined,
+      abandonExecutionAuthority: () => undefined,
+    }));
+
+    // Storage-adapter hardening is covered separately; this routing fixture
+    // confines its synthetic run persistence to dispatchHome.
+    vi.doMock('../src/core/util/private-storage.js', async (importOriginal) => ({
+      ...await importOriginal<typeof import('../src/core/util/private-storage.js')>(),
+      assurePrivateStoragePath: () => ({ ok: true, reason: 'exact-private-dacl' }),
+    }));
 
     const { runGoal } = await import('../src/core/run/orchestrator.js?bust=' + randomUUID()) as
       typeof import('../src/core/run/orchestrator.js');

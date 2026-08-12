@@ -60,6 +60,21 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+// Legacy mechanics fixture: M505 owns policy-authority coverage; this suite
+// exercises the dormant multi-backend merge pipeline behind that gate.
+vi.mock('../src/core/inbox/review-policy.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/inbox/review-policy.js')>();
+  return {
+    ...actual,
+    evaluateProposalEffectPolicy: () => ({
+      allowed: true,
+      effectClass: 'outward-effect' as const,
+      code: 'policy-not-required' as const,
+    }),
+  };
+});
+
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -121,6 +136,8 @@ vi.mock('../src/core/inbox/store.js', () => ({
     sourcePresent: true,
     complete: true,
   }),
+  loadProposal: (id: string) =>
+    (mockListProposals() as Proposal[]).find((proposal) => proposal.id === id) ?? null,
   setStatus: vi.fn(() => true),
   updateProposalField: vi.fn(() => true),
 }));

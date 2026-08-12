@@ -115,6 +115,7 @@ import type {
   ProposalLocalMergeIntent,
 } from '../types.js';
 import { loadProposal, recordRealizedMerge, setStatus, updateProposalField } from './store.js';
+import { evaluateProposalEffectPolicy } from './review-policy.js';
 import { canonicalModelTag } from '../run/model-catalog.js';
 import { assertMayMutate, killSwitchOn } from '../sandbox/policy.js';
 import { audit } from '../sandbox/audit.js';
@@ -186,7 +187,11 @@ import {
 import { evaluateAutonomyPolicy } from '../autonomy/policy.js';
 import { buildRequiredVerificationManifest } from '../run/verification-manifest.js';
 import { causalMetadataFromProposal, evidenceOutcomeSummary } from '../learning/causal.js';
-import { acquireProposalMutationLock, releaseProposalMutationLock } from './proposal-mutation-lock.js';
+import {
+  acquireProposalMutationLock,
+  ownsProposalMutationLock,
+  releaseProposalMutationLock,
+} from './proposal-mutation-lock.js';
 import {
   acquireOutwardMutationFence,
   ownsOutwardMutationFence,
@@ -2437,8 +2442,15 @@ export async function verifyAndPersistProposal(
   let outwardFence: ReturnType<typeof acquireOutwardMutationFence> = null;
   try {
     let current = loadProposal(expected.id);
+    if (!ownsProposalMutationLock(expected.id, proposalLock)) {
+      return refused('proposal mutation lock ownership was lost');
+    }
     const initialConflict = verificationProposalConflict(expected, current);
     if (initialConflict) return refused(initialConflict);
+    const initialEffectPolicy = evaluateProposalEffectPolicy(current!, 'verify');
+    if (!initialEffectPolicy.allowed) {
+      return refused(`proposal effect policy refused verification: ${initialEffectPolicy.code}`);
+    }
 
     outwardFence = acquireOutwardMutationFence();
     if (!outwardFence || !ownsOutwardMutationFence(outwardFence)) {
@@ -2449,9 +2461,16 @@ export async function verifyAndPersistProposal(
 
     const verify = await verifyProposal(current!, cfg);
 
+    if (!ownsProposalMutationLock(expected.id, proposalLock)) {
+      return refused('proposal mutation lock ownership was lost', verify);
+    }
     current = loadProposal(expected.id);
     const finalConflict = verificationProposalConflict(expected, current);
     if (finalConflict) return refused(finalConflict, verify);
+    const finalEffectPolicy = evaluateProposalEffectPolicy(current!, 'verify');
+    if (!finalEffectPolicy.allowed) {
+      return refused(`proposal effect policy refused verification: ${finalEffectPolicy.code}`, verify);
+    }
     if (!ownsOutwardMutationFence(outwardFence)) {
       return refused('outward mutation fence was revoked', verify);
     }
@@ -2468,12 +2487,14 @@ export async function verifyAndPersistProposal(
       return {
         verify,
         persisted: false,
-        authorityLive: ownsOutwardMutationFence(outwardFence) && finalMutationAuthorityFailure(repo) === null,
+        authorityLive: ownsProposalMutationLock(expected.id, proposalLock) &&
+          ownsOutwardMutationFence(outwardFence) && finalMutationAuthorityFailure(repo) === null,
         reason: 'verification evidence could not be persisted',
       };
     }
 
-    const authorityLive = ownsOutwardMutationFence(outwardFence) &&
+    const authorityLive = ownsProposalMutationLock(expected.id, proposalLock) &&
+      ownsOutwardMutationFence(outwardFence) &&
       finalMutationAuthorityFailure(repo) === null;
     return {
       verify,
@@ -2861,6 +2882,13 @@ export async function autoMergeProposal(
     // ── Gate 2: proposal must exist, be a mergeable kind with a diff ─────────
     const proposal = loadProposal(id);
     if (!proposal) return refuse(`proposal not found: ${id}`);
+    const initialEffectPolicy = evaluateProposalEffectPolicy(proposal, 'auto-merge');
+    if (!initialEffectPolicy.allowed) {
+      return refuse(
+        `proposal effect policy refused auto-merge: ${initialEffectPolicy.code}`,
+        proposal.repo,
+      );
+    }
     if (proposal.status !== 'pending' && proposal.status !== 'approved') {
       return refuse(`proposal status '${proposal.status}' has no active merge authority`, proposal.repo);
     }
@@ -2916,6 +2944,10 @@ export async function autoMergeProposal(
       }
       if (current.status !== expectedProposalStatus) {
         return `proposal status changed during merge evaluation (${expectedProposalStatus} -> ${current.status})`;
+      }
+      const effectPolicy = evaluateProposalEffectPolicy(current, 'auto-merge');
+      if (!effectPolicy.allowed) {
+        return `proposal effect policy refused auto-merge: ${effectPolicy.code}`;
       }
       if (currentProposalDiffHash(current) !== expectedProposalDiffHash) {
         return 'proposal diff changed during merge evaluation';
@@ -3681,7 +3713,10 @@ export async function autoMergeProposal(
     const authorityFence = acquireProposalMutationLock(id);
     if (!authorityFence) return refuse('proposal mutation lock unavailable — refusing merge authority', repo);
     try {
-      const finalAuthorityConflict = (): string | null => finalMutationAuthorityFailure(repo);
+      const finalAuthorityConflict = (): string | null =>
+        ownsProposalMutationLock(id, authorityFence)
+          ? finalMutationAuthorityFailure(repo)
+          : 'proposal mutation lock ownership was lost';
       const fencedConflict = finalAuthorityConflict() ?? currentProposalConflict();
       if (fencedConflict) return refuse(fencedConflict, repo);
 
@@ -3703,6 +3738,13 @@ export async function autoMergeProposal(
       const liveProposal = loadProposal(id);
       if (!liveProposal || !signedEvidenceMatchesMutationProposal(persistedEvidence, liveProposal)) {
         return refuse('signed autonomy evidence no longer matches the live proposal — refusing mutation authority', repo);
+      }
+      const lockedEffectPolicy = evaluateProposalEffectPolicy(liveProposal, 'auto-merge');
+      if (!lockedEffectPolicy.allowed) {
+        return refuse(
+          `proposal effect policy refused auto-merge under mutation lock: ${lockedEffectPolicy.code}`,
+          repo,
+        );
       }
       if (persistedEvidence.target !== (toMain ? 'main' : 'branch') ||
         persistedEvidence.trustBasis !== trustBasis ||

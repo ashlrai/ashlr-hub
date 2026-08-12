@@ -54,7 +54,17 @@ function pct(n: number): string {
 async function renderReport(
   report: import('../core/fleet/manager.js').ManagerReport,
 ): Promise<void> {
-  const { metrics, verdicts, wins, concerns, recommendations, narrative, judgeEngine, window: win } = report;
+  const {
+    metrics,
+    verdicts,
+    wins,
+    concerns,
+    recommendations,
+    narrative,
+    judgeEngine,
+    window: win,
+  } = report;
+  const effectPolicyWithheld = report.effectPolicyWithheld ?? 0;
 
   console.log('');
   console.log(bold('  ashlr manager') + dim(` — fleet oversight scorecard (M120, window: ${win})`));
@@ -67,6 +77,7 @@ async function renderReport(
   console.log(`    merged:             ${metrics.merged}`);
   console.log(`    rejected:           ${metrics.rejected}`);
   console.log(`    pending:            ${metrics.pending}`);
+  console.log(`    policy-withheld:    ${effectPolicyWithheld}`);
   const arColor = metrics.acceptRate >= 0.5 ? green : metrics.acceptRate >= 0.25 ? yellow : red;
   console.log(`    accept rate:        ${arColor(pct(metrics.acceptRate))}`);
   console.log(`    trivial ratio:      ${pct(metrics.trivialRatio)}`);
@@ -75,7 +86,9 @@ async function renderReport(
 
   // Verdicts table
   if (verdicts.length === 0) {
-    console.log('  ' + dim('No proposals to judge.'));
+    console.log('  ' + dim(effectPolicyWithheld > 0
+      ? 'No proposals were sent to a judge; signed effect policy withheld the pending rows.'
+      : 'No proposals to judge.'));
   } else {
     console.log('  ' + bold(`Verdicts (${verdicts.length} proposal(s) judged)`));
     console.log('');
@@ -211,11 +224,17 @@ export async function cmdManager(args: string[]): Promise<number> {
   await renderReport(report);
 
   if (applyRejects) {
-    const rejected = report.verdicts.filter((v) => v.verdict === 'noise' || v.verdict === 'harmful');
+    const rejected = report.verdicts.filter((v) => v.inboxRejection === 'persisted');
+    const refused = report.verdicts.filter((v) => v.inboxRejection === 'refused');
     if (rejected.length > 0) {
       console.log(yellow(`  ${rejected.length} noise/harmful proposal(s) rejected in the inbox.`));
-      console.log('');
     }
+    if (refused.length > 0) {
+      console.log(yellow(
+        `  ${refused.length} machine rejection request(s) refused; proposals remain pending for human review.`,
+      ));
+    }
+    if (rejected.length > 0 || refused.length > 0) console.log('');
   }
 
   return 0;

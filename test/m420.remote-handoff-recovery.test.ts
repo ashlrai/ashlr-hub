@@ -75,6 +75,20 @@ vi.mock('../src/core/inbox/remote-handoff-attestation.js', () => ({
   viewPrWithReconciliation: (...args: unknown[]) => viewPrWithReconciliationMock(...args),
 }));
 
+// Legacy mechanics fixture: M505 owns policy-authority coverage; this suite
+// exercises the dormant recovery pipeline behind that gate.
+vi.mock('../src/core/inbox/review-policy.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/inbox/review-policy.js')>();
+  return {
+    ...actual,
+    evaluateProposalEffectPolicy: () => ({
+      allowed: true,
+      effectClass: 'outward-effect' as const,
+      code: 'policy-not-required' as const,
+    }),
+  };
+});
+
 let proposal: Proposal;
 let evidenceTarget: 'main' | 'branch';
 let evidenceTrustBasis: 'tier' | 'verification' | 'evidence';

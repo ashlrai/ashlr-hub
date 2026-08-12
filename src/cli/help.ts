@@ -130,7 +130,7 @@ export function agentDocsText(): string {
     '',
     'Safety classes: read = always safe · append = append-only under ~/.ashlr/ ·',
     'proposal = creates a PENDING inbox item (never applies) · human-gate = NEVER',
-    'run from an agent; the human approves via `ashlr inbox`.',
+    'run from an agent; authenticated decision capability is not installed.',
     '',
   ];
   for (const c of AGENT_COMMANDS) {
@@ -301,11 +301,11 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'backlog --repo <path>',        desc: 'Filter backlog to a specific enrolled repo.', topic: 'autonomy' },
   { cmd: 'backlog --limit <n>',          desc: 'Show only the top N items.', topic: 'autonomy' },
   { cmd: 'backlog --json',               desc: 'Emit raw JSON backlog.', topic: 'autonomy' },
-  { cmd: 'inbox',                        desc: 'Approval inbox: list pending proposals (the outward-action gate).', topic: 'autonomy' },
+  { cmd: 'inbox',                        desc: 'Read-only proposal review inbox; authenticated decisions are not installed in this release.', topic: 'autonomy' },
   { cmd: 'inbox show <id>',              desc: 'Full detail of a proposal incl. diff (read-only).', topic: 'autonomy' },
-  { cmd: 'inbox approve <id>',           desc: 'Confirm + apply an approved proposal (the ONLY outward path).', topic: 'autonomy' },
-  { cmd: 'inbox approve <id> --yes',     desc: 'Approve without interactive prompt (non-TTY safe).', topic: 'autonomy' },
-  { cmd: 'inbox reject <id>',            desc: 'Discard a pending proposal; applies nothing.', topic: 'autonomy' },
+  { cmd: 'inbox approve <id>',           desc: 'Unavailable: authenticated human decision capability is not installed.', topic: 'autonomy' },
+  { cmd: 'inbox approve <id> --yes',     desc: 'Unavailable; --yes is not a human authority capability.', topic: 'autonomy' },
+  { cmd: 'inbox reject <id>',            desc: 'Unavailable: authenticated human decision capability is not installed.', topic: 'autonomy' },
   { cmd: 'inbox --json',                 desc: 'Emit raw JSON for inbox list / show / approve result.', topic: 'autonomy' },
   { cmd: 'daemon start --once',          desc: 'Autonomous operator: one tick — propose-only, sandboxed, enrolled repos.', topic: 'autonomy' },
   { cmd: 'daemon start --once --dry-run', desc: 'Plan only: which backlog items WOULD be worked (no swarm/proposal).', topic: 'autonomy' },
@@ -336,7 +336,7 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'vision <show|review|preview|shadow|approve|reconcile|set>', desc: 'Mission OS: inspect strategy, preview a bounded DAG, record observation-only shadow evidence, or explicitly adopt planning state.', topic: 'autonomy' },
   { cmd: 'manager [--apply-rejects]',    desc: 'Frontier judge scorecard over pending proposals (shadow mode by default; never merges).', topic: 'autonomy' },
   { cmd: 'best-of-n [--repo --title -n]', desc: 'Generate N candidate diffs (multi-model), critic-select, file the winner as a proposal (M142/M333).', topic: 'autonomy' },
-  { cmd: 'comms <status|cycle|digest>',  desc: 'Operator comms channel (Telegram/iMessage): digests, approve-by-text.', topic: 'autonomy' },
+  { cmd: 'comms <status|cycle|digest>',  desc: 'Operator comms channel (Telegram/iMessage): read-only digests; decisions unavailable.', topic: 'autonomy' },
   { cmd: 'invent',                       desc: 'Generative backlog invention — propose novel high-value work items.', topic: 'autonomy' },
   { cmd: 'eval [--limit N]',             desc: 'Local-agent eval harness: adaptive prompts OFF vs ON, steps/done/tokens (M44).', topic: 'run' },
   { cmd: 'eval attention [--window 1d|7d|30d]', desc: 'Metadata-only fleet attention report: context pressure, retrieval, yield, routing, and traces.', topic: 'run' },
@@ -383,7 +383,7 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'tui [--once]',                 desc: 'Interactive terminal dashboard (alias: dash). --once renders one frame and exits.', topic: 'web' },
   { cmd: 'serve [--port N]',             desc: 'Start local web dashboard + JSON API on 127.0.0.1 (default port 7777).', topic: 'web' },
   { cmd: 'serve --open',                 desc: 'Start dashboard and open browser automatically.', topic: 'web' },
-  { cmd: 'serve --allow-dispatch',       desc: 'Enable guarded POST /api/run + web inbox approve/reject (prints session token).', topic: 'web' },
+  { cmd: 'serve --allow-dispatch',       desc: 'Enable guarded non-inbox dispatch routes; proposal decisions remain unavailable.', topic: 'web' },
 
   { cmd: 'new <name> [opts]',            desc: 'Scaffold a project from a template (next-app, node-cli, mcp-server, minimal).', topic: 'scaffold' },
   { cmd: 'ship [path] [opts]',           desc: 'Pre-ship gate (lint/test/build) + optional confirm-gated deploy.', topic: 'scaffold' },
@@ -419,7 +419,7 @@ const TOPIC_EXAMPLES: Partial<Record<HelpTopic, string[]>> = {
     'ashlr daemon start --once --dry-run                  # plan only',
     'ashlr daemon start --once --drain diagnostic-reslices --limit 3 # drain no-diff reslices',
     'ashlr fleet direction --json                         # resource-aware mode recommendation',
-    'ashlr inbox && ashlr inbox approve <id>',
+    'ashlr inbox && ashlr inbox show <id>',
   ],
 };
 

@@ -6,8 +6,8 @@
  *     file gutting (>60% removed), duplicate JSON keys, deleting package.json.
  *  2. isDestructiveDiff does NOT flag: 1-line version bump, normal small edit,
  *     additive change, legitimate file rename (add+remove same count).
- *  3. createProposal auto-rejects destructive proposals (status='rejected',
- *     decisionReason set, decisions-ledger entry recorded).
+ *  3. createProposal keeps destructive proposals pending with a bounded,
+ *     non-decisional safety annotation.
  *  4. Flag-off (diffSafety=false) → no auto-rejection.
  *  5. Never-throws on malformed / empty / null / undefined diffs.
  *
@@ -32,7 +32,10 @@ const { fakeHome } = vi.hoisted(() => ({
   fakeHome: `/tmp/ashlr-m158-${process.pid}`,
 }));
 
-vi.mock('node:os', () => ({ homedir: () => fakeHome }));
+vi.mock('node:os', async (importOriginal) => ({
+  ...await importOriginal<typeof import('node:os')>(),
+  homedir: () => fakeHome,
+}));
 afterAll(() => fs.rmSync(fakeHome, { recursive: true, force: true }));
 
 // Capture decisions-ledger calls
@@ -362,10 +365,10 @@ describe('M158 — isDestructiveDiff: never-throws on bad input', () => {
 });
 
 // ============================================================================
-// Suite 4: createProposal — auto-rejects destructive proposals at intake
+// Suite 4: createProposal — quarantines destructive proposals at intake
 // ============================================================================
 
-describe('M158 — createProposal: auto-rejects destructive diff at intake', () => {
+describe('M158 — createProposal: marks destructive diff for human review', () => {
   beforeEach(() => {
     fs.rmSync(fakeHome, { recursive: true, force: true });
     fs.mkdirSync(fakeHome, { recursive: true, mode: 0o700 });
@@ -373,38 +376,35 @@ describe('M158 — createProposal: auto-rejects destructive diff at intake', () 
     ledgerEntries.length = 0;
   });
 
-  it('sets status=rejected for a destructive diff (dep destruction)', () => {
+  it('keeps a destructive diff pending with a bounded annotation', () => {
     const proposal = createProposal(
       makeProposalInput({ diff: DEP_DESTRUCTION_DIFF }),
     );
-    expect(proposal.status).toBe('rejected');
-    expect(proposal.decisionReason).toMatch(/destructive diff auto-rejected/i);
-    expect(proposal.decisionReason).toMatch(/dep destruction/i);
+    expect(proposal.status).toBe('pending');
+    expect(proposal.safetyAnnotation).toBe('destructive-diff-review-required');
+    expect(proposal.decisionReason).toBeUndefined();
   });
 
-  it('sets decidedAt on auto-rejected proposals', () => {
+  it('does not claim a human decision time', () => {
     const proposal = createProposal(
       makeProposalInput({ diff: DEP_DESTRUCTION_DIFF }),
     );
-    expect(proposal.decidedAt).toBeDefined();
-    expect(typeof proposal.decidedAt).toBe('string');
+    expect(proposal.decidedAt).toBeUndefined();
   });
 
-  it('records a decisions-ledger entry for auto-rejected proposals', () => {
+  it('does not record a human decision ledger entry', () => {
     const proposal = createProposal(
       makeProposalInput({ diff: DEP_DESTRUCTION_DIFF }),
     );
     const entry = ledgerEntries.find((e) => e.proposalId === proposal.id);
-    expect(entry).toBeDefined();
-    expect(entry!.action).toBe('rejected');
-    expect(entry!.reason).toMatch(/destructive diff auto-rejected/i);
+    expect(entry).toBeUndefined();
   });
 
-  it('emits an audit entry with inbox:proposal-rejected action', () => {
+  it('emits an honest pending-safety-review audit entry', () => {
     createProposal(makeProposalInput({ diff: DEP_DESTRUCTION_DIFF }));
-    const auditEntry = auditCalls.find((c) => c.action === 'inbox:proposal-rejected');
+    const auditEntry = auditCalls.find((c) => c.action === 'inbox:proposal-created');
     expect(auditEntry).toBeDefined();
-    expect(auditEntry!.summary).toMatch(/auto-rejected.*diff-safety/i);
+    expect(auditEntry!.summary).toMatch(/pending safety review/i);
   });
 
   it('sets status=pending for a clean (non-destructive) diff', () => {
@@ -413,6 +413,7 @@ describe('M158 — createProposal: auto-rejects destructive diff at intake', () 
     );
     expect(proposal.status).toBe('pending');
     expect(proposal.decisionReason).toBeUndefined();
+    expect(proposal.safetyAnnotation).toBeUndefined();
   });
 
   it('sets status=pending for a proposal with no diff', () => {
@@ -429,20 +430,20 @@ describe('M158 — createProposal: auto-rejects destructive diff at intake', () 
     expect(proposal.decisionReason).toBeUndefined();
   });
 
-  it('auto-rejects wholesale file gutting at intake', () => {
+  it('marks wholesale file gutting for review', () => {
     const proposal = createProposal(
       makeProposalInput({ diff: makeWholesaleReplacementDiff(50) }),
     );
-    expect(proposal.status).toBe('rejected');
-    expect(proposal.decisionReason).toMatch(/destructive diff auto-rejected/i);
+    expect(proposal.status).toBe('pending');
+    expect(proposal.safetyAnnotation).toBe('destructive-diff-review-required');
   });
 
-  it('auto-rejects critical file deletion at intake', () => {
+  it('marks critical file deletion for review', () => {
     const proposal = createProposal(
       makeProposalInput({ diff: DELETE_PACKAGE_JSON_DIFF }),
     );
-    expect(proposal.status).toBe('rejected');
-    expect(proposal.decisionReason).toMatch(/destructive diff auto-rejected/i);
+    expect(proposal.status).toBe('pending');
+    expect(proposal.safetyAnnotation).toBe('destructive-diff-review-required');
   });
 
   it('does NOT reject a legitimate clean patch (small edit)', () => {

@@ -12,12 +12,13 @@
  * Hermetic: tmp HOME (h1-fixture), real ephemeral server on 127.0.0.1.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as http from 'node:http';
 
 import { makeFixture, makeCfg, type H1Fixture } from './helpers/h1-fixture.js';
 import { readAuthHeaders, startServer } from './helpers/authenticated-web-server.js';
 import { createProposal, loadProposal } from '../src/core/inbox/store.js';
+import * as applyModule from '../src/core/inbox/apply.js';
 import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
 import type { WebServerOptions } from '../src/core/types.js';
 
@@ -35,6 +36,7 @@ afterEach(async () => {
     try { await h.close(); } catch { /* ignore */ }
   }
   openHandles = [];
+  vi.restoreAllMocks();
   fx.cleanup();
 });
 
@@ -160,7 +162,7 @@ describe('token + content-type gates (dispatch on)', () => {
 });
 
 describe('reject + approve flows', () => {
-  it('reject persists rejected and applies nothing', async () => {
+  it('reject cannot impersonate a human decision even for a no-effect note', async () => {
     const id = makeNote();
     const h = await startServer(makeCfg(), makeOpts({ allowDispatch: true }));
     openHandles.push(h);
@@ -169,11 +171,11 @@ describe('reject + approve flows', () => {
       'POST', `${h.url}/api/inbox/${id}/reject`, h.port,
       { ...JSON_HEADERS, 'x-ashlr-token': h.token }, '{}',
     );
-    expect(res.statusCode).toBe(200);
-    expect(loadProposal(id)!.status).toBe('rejected');
+    expect(res.statusCode).toBe(403);
+    expect(loadProposal(id)!.status).toBe('pending');
   });
 
-  it('approve routes a note proposal through applyProposal', async () => {
+  it('approve cannot impersonate a human decision even for a no-effect note', async () => {
     const id = makeNote();
     const h = await startServer(makeCfg(), makeOpts({ allowDispatch: true }));
     openHandles.push(h);
@@ -183,12 +185,47 @@ describe('reject + approve flows', () => {
       { ...JSON_HEADERS, 'x-ashlr-token': h.token }, '{}',
     );
     const result = JSON.parse(res.body) as { ok: boolean; status: string };
-    expect(res.statusCode).toBe(200);
-    expect(result.ok).toBe(true);
-    expect(loadProposal(id)!.status).toBe('applied');
+    expect(res.statusCode).toBe(403);
+    expect(result.ok).toBeUndefined();
+    expect(loadProposal(id)!.status).toBe('pending');
   });
 
-  it('409 when the proposal is not pending', async () => {
+  it('refuses effectful patch approval before applyProposal', async () => {
+    const id = makeSecretPatch('effectful web approval');
+    const applySpy = vi.spyOn(applyModule, 'applyProposal');
+    const h = await startServer(makeCfg(), makeOpts({ allowDispatch: true }));
+    openHandles.push(h);
+
+    const res = await request(
+      'POST', `${h.url}/api/inbox/${id}/approve`, h.port,
+      { ...JSON_HEADERS, 'x-ashlr-token': h.token }, '{}',
+    );
+
+    expect(res.statusCode).toBe(403);
+    expect(JSON.parse(res.body)).toMatchObject({
+      error: 'proposal transition refused; no authenticated human capability was accepted; reload to confirm current state',
+    });
+    expect(loadProposal(id)!.status).toBe('pending');
+    expect(applySpy).not.toHaveBeenCalled();
+  });
+
+  it('refuses effectful patch rejection without recording a human decision', async () => {
+    const id = makeSecretPatch('effectful web rejection');
+    const applySpy = vi.spyOn(applyModule, 'applyProposal');
+    const h = await startServer(makeCfg(), makeOpts({ allowDispatch: true }));
+    openHandles.push(h);
+
+    const res = await request(
+      'POST', `${h.url}/api/inbox/${id}/reject`, h.port,
+      { ...JSON_HEADERS, 'x-ashlr-token': h.token }, '{}',
+    );
+
+    expect(res.statusCode).toBe(403);
+    expect(loadProposal(id)!.status).toBe('pending');
+    expect(applySpy).not.toHaveBeenCalled();
+  });
+
+  it('repeated unsigned decisions remain refused while the proposal stays pending', async () => {
     const id = makeNote();
     const h = await startServer(makeCfg(), makeOpts({ allowDispatch: true }));
     openHandles.push(h);
@@ -201,7 +238,8 @@ describe('reject + approve flows', () => {
       'POST', `${h.url}/api/inbox/${id}/approve`, h.port,
       { ...JSON_HEADERS, 'x-ashlr-token': h.token }, '{}',
     );
-    expect(again.statusCode).toBe(409);
+    expect(again.statusCode).toBe(403);
+    expect(loadProposal(id)?.status).toBe('pending');
   });
 });
 

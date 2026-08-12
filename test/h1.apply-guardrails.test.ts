@@ -18,7 +18,21 @@
  * REAL-TREE-UNCHANGED across every refusal, ISOLATED, DETERMINISTIC.
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+
+// Legacy mechanics fixture: M505 owns policy-authority coverage; this suite
+// exercises the dormant apply guardrails behind that gate.
+vi.mock('../src/core/inbox/review-policy.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/inbox/review-policy.js')>();
+  return {
+    ...actual,
+    evaluateProposalEffectPolicy: () => ({
+      allowed: true,
+      effectClass: 'outward-effect' as const,
+      code: 'policy-not-required' as const,
+    }),
+  };
+});
 
 import {
   makeFixture,

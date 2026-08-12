@@ -14,10 +14,10 @@
  *   - loadConfig            → vi.fn()
  *   - inbox/store           → real (tmp HOME isolation via process.env.HOME)
  *
- * Architecture invariant: index 0 (human tap) uses applyProposal (human path),
- * NOT autoMergeProposal (autonomous frontier-only path). A Telegram/iMessage tap
- * from the authenticated owner IS a human approval — the human IS the authority,
- * so it merges work of ANY tier (local/mid/frontier).
+ * Architecture invariant: a Telegram/iMessage answer records transport intent,
+ * not the separately authenticated one-use human capability required by a signed
+ * human-only effect policy. Effectful patches stay pending and never reach apply;
+ * no-effect notes preserve the existing resolution path.
  *
  * Test counts (16):
  *   postShipProposalsForApproval:
@@ -27,22 +27,22 @@
  *    4. posts nothing when no ship verdicts
  *    5. posts nothing when an outstanding manager-approval already exists
  *   handleManagerApproval:
- *    6. index 0 (Approve): calls setStatus approved + applyProposal (human-authorized path)
- *    7. index 0 apply succeeds → sendIMessage "✅ Merged"
- *    8. index 0 apply fails → sendIMessage "Approved but apply failed: <reason>"
- *    9. index 1 (Reject): setStatus rejected + sendIMessage "Rejected"
+ *    6. index 0 effectful patch: refuses before applyProposal
+ *    7. index 0 no-effect note apply succeeds → sendIMessage "✅ Merged"
+ *    8. index 0 no-effect note apply fails → bounded failure reply
+ *    9. index 1 effectful patch: refuses without recording human rejection
  *   10. index 2 (Show diff): sendIMessage scrubbed diff + re-posts approval question
  *   11. index 2 scrubs secrets from diff text
  *   12. index 2 truncates long diffs to MAX_DIFF_SMS chars
  *   13. index 0 with missing proposal → no-op, no throw
  *   14. handler never throws even when applyProposal rejects
- *   15. index 0 with a LOCAL-tier proposal → applyProposal called (no tier gate)
+ *   15. index 0 with a LOCAL-tier patch → refuses before applyProposal
  *   cmdComms ask-merges:
  *   16. ask-merges calls postShipProposalsForApproval + runCommsCycle, returns 0
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -139,8 +139,8 @@ vi.mock('../src/core/vision/strategist.js', () => ({
 
 import { postShipProposalsForApproval } from '../src/core/comms/merge-requests.js';
 import { registerCommsHandlers } from '../src/core/comms/handlers.js';
-import { postRequest, listRequests, markSent, resolveRequest } from '../src/core/comms/requests.js';
-import { createProposal, setStatus, loadProposal } from '../src/core/inbox/store.js';
+import { postRequest, listRequests, markSent } from '../src/core/comms/requests.js';
+import { createProposal, inboxDir, loadProposal } from '../src/core/inbox/store.js';
 import { cmdComms } from '../src/cli/comms.js';
 import type { AshlrConfig } from '../src/core/types.js';
 import type { ManagerReport, ManagerVerdict } from '../src/core/fleet/manager.js';
@@ -218,6 +218,16 @@ function makePendingProposal(title = 'Test proposal'): ReturnType<typeof createP
   });
 }
 
+function makePendingNote(title = 'Test note'): ReturnType<typeof createProposal> {
+  return createProposal({
+    repo: null,
+    origin: 'manual',
+    kind: 'note',
+    title,
+    summary: 'no-effect test note',
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Setup / teardown
 // ---------------------------------------------------------------------------
@@ -266,8 +276,12 @@ describe('postShipProposalsForApproval', () => {
   });
 
   it('[2] skips non-pending proposals (already applied)', async () => {
-    const p = makePendingProposal('Merged already');
-    setStatus(p.id, 'applied');
+    const p = makePendingNote('Merged already');
+    writeFileSync(
+      join(inboxDir(), `${p.id}.json`),
+      `${JSON.stringify({ ...p, status: 'applied', result: 'historical observation' })}\n`,
+      { mode: 0o600 },
+    );
     mockRunManager.mockResolvedValue(makeReport([makeVerdict(p.id, 'ship', 4)]));
 
     const result = await postShipProposalsForApproval(cfgEnabled());
@@ -354,33 +368,36 @@ describe('handleManagerApproval', () => {
     }
   }
 
-  it('[6] index 0 (Approve): calls setStatus approved + applyProposal (human-authorized path)', async () => {
-    const p = makePendingProposal('Human-approved proposal');
+  it('[6] index 0 refuses an effectful patch before applyProposal', async () => {
+    const p = makePendingProposal('Human-only patch');
     mockApplyProposal.mockResolvedValue({ ok: true, status: 'applied', detail: 'patch applied' });
 
     await invokeApprovalHandler(cfgEnabled(), 0, { proposalId: p.id });
 
-    // setStatus called — proposal is now approved (set before applyProposal)
-    const loaded = loadProposal(p.id);
-    expect(loaded?.status).toBe('approved');
-    // applyProposal called with confirmed:true — human-authorized path, no tier gate
-    expect(mockApplyProposal).toHaveBeenCalledWith(p.id, { confirmed: true });
+    expect(loadProposal(p.id)?.status).toBe('pending');
+    expect(mockApplyProposal).not.toHaveBeenCalled();
+    expect(mockSendIMessage).toHaveBeenCalledOnce();
+    const [text] = mockSendIMessage.mock.calls[0] as [string, unknown];
+    expect(text).toContain('Could not approve');
+    expect(text).toContain('no authenticated human capability was accepted');
   });
 
-  it('[7] index 0 apply succeeds → sendIMessage "✅ Merged"', async () => {
-    const p = makePendingProposal('Ships fine');
+  it('[7] index 0 cannot impersonate note approval', async () => {
+    const p = makePendingNote('Ships fine');
     mockApplyProposal.mockResolvedValue({ ok: true, status: 'applied', detail: 'patch applied' });
 
     await invokeApprovalHandler(cfgEnabled(), 0, { proposalId: p.id });
 
     expect(mockSendIMessage).toHaveBeenCalledOnce();
     const [text] = mockSendIMessage.mock.calls[0] as [string, unknown];
-    expect(text).toContain('✅ Merged');
+    expect(text).toContain('Could not approve');
     expect(text).toContain('Ships fine');
+    expect(mockApplyProposal).not.toHaveBeenCalled();
+    expect(loadProposal(p.id)?.status).toBe('pending');
   });
 
-  it('[8] index 0 apply fails → sendIMessage "Approved but apply failed: <reason>"', async () => {
-    const p = makePendingProposal('Apply failed');
+  it('[8] index 0 refuses before a no-effect note apply call', async () => {
+    const p = makePendingNote('Apply failed');
     mockApplyProposal.mockResolvedValue({
       ok: false,
       status: 'failed',
@@ -389,25 +406,38 @@ describe('handleManagerApproval', () => {
 
     await invokeApprovalHandler(cfgEnabled(), 0, { proposalId: p.id });
 
-    // Status was set to approved (human gate done before apply)
-    expect(loadProposal(p.id)?.status).toBe('approved');
+    expect(loadProposal(p.id)?.status).toBe('pending');
+    expect(mockApplyProposal).not.toHaveBeenCalled();
     expect(mockSendIMessage).toHaveBeenCalledOnce();
     const [text] = mockSendIMessage.mock.calls[0] as [string, unknown];
-    expect(text).toContain('Approved but apply failed');
-    expect(text).toContain('patch does not apply');
-    expect(text).toContain('needs manual review');
+    expect(text).toContain('Could not approve');
+    expect(text).toContain('human capability');
   });
 
-  it('[9] index 1 (Reject): setStatus rejected + sendIMessage "Rejected"', async () => {
+  it('[9] index 1 refuses effectful patch rejection without recording a human decision', async () => {
     const p = makePendingProposal('Rejected proposal');
 
     await invokeApprovalHandler(cfgEnabled(), 1, { proposalId: p.id });
 
-    expect(loadProposal(p.id)?.status).toBe('rejected');
+    expect(loadProposal(p.id)?.status).toBe('pending');
+    expect(mockApplyProposal).not.toHaveBeenCalled();
     expect(mockSendIMessage).toHaveBeenCalledOnce();
     const [text] = mockSendIMessage.mock.calls[0] as [string, unknown];
-    expect(text).toContain('Rejected');
+    expect(text).toContain('Could not reject');
     expect(text).toContain('Rejected proposal');
+  });
+
+  it('index 1 cannot impersonate note rejection', async () => {
+    const p = makePendingNote('Rejected note');
+
+    await invokeApprovalHandler(cfgEnabled(), 1, { proposalId: p.id });
+
+    expect(loadProposal(p.id)?.status).toBe('pending');
+    expect(mockApplyProposal).not.toHaveBeenCalled();
+    expect(mockSendIMessage).toHaveBeenCalledOnce();
+    const [text] = mockSendIMessage.mock.calls[0] as [string, unknown];
+    expect(text).toContain('Could not reject');
+    expect(text).toContain('Rejected note');
   });
 
   it('[10] index 2 (Show diff): sendIMessage scrubbed diff + re-posts approval question', async () => {
@@ -472,7 +502,7 @@ describe('handleManagerApproval', () => {
   });
 
   it('[14] handler never throws even when applyProposal rejects', async () => {
-    const p = makePendingProposal('Crash test');
+    const p = makePendingNote('Crash test');
     mockApplyProposal.mockRejectedValue(new Error('unexpected crash'));
 
     await expect(
@@ -480,9 +510,7 @@ describe('handleManagerApproval', () => {
     ).resolves.not.toThrow();
   });
 
-  it('[15] LOCAL-tier proposal is mergeable via human approve (no tier gate in applyProposal)', async () => {
-    // Create a proposal without any tier/trust field — this is "local" tier.
-    // The human tap must route to applyProposal, which has no tier gate.
+  it('[15] LOCAL-tier effectful patch is refused before applyProposal', async () => {
     const p = createProposal({
       repo: '/fake/repo',
       origin: 'agent',
@@ -491,17 +519,15 @@ describe('handleManagerApproval', () => {
       summary: 'Small local change',
       diff: `diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n`,
     });
-    // applyProposal succeeds — local tier, no frontier gate
     mockApplyProposal.mockResolvedValue({ ok: true, status: 'applied', detail: 'patch applied on branch ashlr/proposal/...' });
 
     await invokeApprovalHandler(cfgEnabled(), 0, { proposalId: p.id });
 
-    // applyProposal was called (not blocked by any tier check)
-    expect(mockApplyProposal).toHaveBeenCalledWith(p.id, { confirmed: true });
-    // Success message sent
+    expect(loadProposal(p.id)?.status).toBe('pending');
+    expect(mockApplyProposal).not.toHaveBeenCalled();
     expect(mockSendIMessage).toHaveBeenCalledOnce();
     const [text] = mockSendIMessage.mock.calls[0] as [string, unknown];
-    expect(text).toContain('✅ Merged');
+    expect(text).toContain('Could not approve');
     expect(text).toContain('Local tier work');
   });
 });

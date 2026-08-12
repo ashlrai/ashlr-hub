@@ -1,28 +1,26 @@
 /**
- * `ashlr inbox` — Approval Inbox CLI (M23).
+ * `ashlr inbox` — read-only proposal review CLI (M23/0A-1).
  *
- * The single human control plane for every proposed outward action. PENDING
- * proposals NEVER auto-apply. The ONLY path to applyProposal is the explicit
- * `inbox approve <id> [--yes]` subcommand, with a confirm gate.
+ * PENDING proposals NEVER auto-apply. Authenticated human decision capability
+ * is intentionally unavailable in this release; approve/reject refuse before
+ * prompting or applying.
  *
  * Subcommands:
  *   inbox                    List PENDING proposals + counts by status.
  *   inbox show <id>          Full detail of one proposal incl. diff (read-only).
- *   inbox approve <id>       Confirm gate, setStatus approved, then applyProposal.
- *   inbox approve <id> --yes Skip interactive prompt (requires TTY check; non-TTY
- *                            with no --yes refuses — no silent auto-approve).
- *   inbox reject <id>        Mark rejected; applies nothing.
+ *   inbox approve <id>       Unavailable until authenticated capability exists.
+ *   inbox reject <id>        Unavailable until authenticated capability exists.
  *
  * Flags:
- *   --yes    Skip interactive confirm prompt (approve only; non-TTY w/o --yes refuses).
+ *   --yes    Reserved for a future authenticated decision flow; grants no authority.
  *   --json   Emit raw JSON for list / show / approve result.
  *
- * Non-TTY: approve without --yes refuses (no auto-approve, ever).
- * READ-ONLY except for approve (which routes through the single applyProposal gate).
+ * This release is read-only. The dormant future flow remains fail-closed.
  */
 
 import { makeColors, pad } from './ui.js';
 import type { Proposal, ProposalStatus } from '../core/types.js';
+import { HUMAN_EFFECT_CAPABILITY_AVAILABLE } from '../core/inbox/review-policy.js';
 
 // ---------------------------------------------------------------------------
 // M70: ashlr-md render seam (lazy — degrades when ashlr-md not installed)
@@ -90,9 +88,8 @@ export function buildProposalMarkdown(p: Proposal): string {
 
   if (p.status === 'pending') {
     lines.push(``);
-    lines.push(`## Actions\n`);
-    lines.push(`- Approve: \`ashlr inbox approve ${p.id.slice(0, 12)}\``);
-    lines.push(`- Reject:  \`ashlr inbox reject ${p.id.slice(0, 12)}\``);
+    lines.push(`## Review mode\n`);
+    lines.push(`Authenticated proposal decisions are not installed in this release.`);
   }
 
   return lines.join('\n');
@@ -383,8 +380,7 @@ async function cmdInboxList(jsonMode: boolean): Promise<number> {
   printTable(pending, tty);
   printStatusCounts(all, tty);
   console.log(col.dim('  Use `ashlr inbox show <id>` for full detail.  Add --open to view in ashlr-md.'));
-  console.log(col.dim('  Use `ashlr inbox approve <id>` to approve and apply.'));
-  console.log(col.dim('  Use `ashlr inbox reject <id>` to discard.'));
+  console.log(col.dim('  Review only: authenticated approve/reject capability is not installed.'));
   console.log('');
 
   return 0;
@@ -496,8 +492,7 @@ async function cmdInboxShow(id: string, jsonMode: boolean, openMd: boolean): Pro
   }
 
   if (p.status === 'pending') {
-    console.log(col.dim('  Approve: ') + col.cyan(`ashlr inbox approve ${p.id.slice(0, 12)}`));
-    console.log(col.dim('  Reject:  ') + col.cyan(`ashlr inbox reject  ${p.id.slice(0, 12)}`));
+    console.log(col.dim('  Review only: authenticated approve/reject capability is not installed.'));
     console.log('');
   }
 
@@ -511,6 +506,13 @@ async function cmdInboxShow(id: string, jsonMode: boolean, openMd: boolean): Pro
 async function cmdInboxApprove(id: string, yes: boolean, jsonMode: boolean): Promise<number> {
   const tty = process.stdout.isTTY === true;
   const col = makeColors(tty);
+
+  if (!HUMAN_EFFECT_CAPABILITY_AVAILABLE) {
+    const msg = 'inbox decisions are review-only; authenticated human capability is not installed';
+    if (jsonMode) console.log(JSON.stringify({ ok: false, error: msg }));
+    else console.error(col.red('error: ') + msg);
+    return 1;
+  }
 
   // Guard: non-TTY without --yes refuses
   if (!tty && !yes) {
@@ -610,7 +612,18 @@ async function cmdInboxApprove(id: string, yes: boolean, jsonMode: boolean): Pro
   }
 
   // ── Transition status to approved ────────────────────────────────────────
-  _setStatus(p.id, 'approved');
+  // A confirmation or --yes flag proves UI intent only. The store remains the
+  // authority boundary and may refuse when the proposal requires a separately
+  // authenticated one-use human capability.
+  if (_setStatus(p.id, 'approved') === false) {
+    const msg = 'proposal transition refused; no authenticated human capability was accepted; reload to confirm current state';
+    if (jsonMode) {
+      console.log(JSON.stringify({ ok: false, error: msg, status: p.status }));
+    } else {
+      console.error(col.red('error: ') + msg);
+    }
+    return 1;
+  }
 
   // ── Load apply module and run ─────────────────────────────────────────────
   const applyOk = await loadApplyModule();
@@ -661,6 +674,13 @@ async function cmdInboxReject(id: string, jsonMode: boolean): Promise<number> {
   const tty = process.stdout.isTTY === true;
   const col = makeColors(tty);
 
+  if (!HUMAN_EFFECT_CAPABILITY_AVAILABLE) {
+    const msg = 'inbox decisions are review-only; authenticated human capability is not installed';
+    if (jsonMode) console.log(JSON.stringify({ ok: false, error: msg }));
+    else console.error(col.red('error: ') + msg);
+    return 1;
+  }
+
   if (!id) {
     console.error(col.red('error: ') + 'Usage: ashlr inbox reject <id>');
     return 2;
@@ -693,7 +713,7 @@ async function cmdInboxReject(id: string, jsonMode: boolean): Promise<number> {
   }
 
   if (_setStatus(p.id, 'rejected') === false) {
-    const msg = `Proposal ${p.id.slice(0, 12)} could not be rejected because recovery revocation is unavailable.`;
+    const msg = `Proposal ${p.id.slice(0, 12)} transition was refused; no authenticated human capability was accepted; reload to confirm current state.`;
     if (jsonMode) console.log(JSON.stringify({ ok: false, error: msg }));
     else console.error(col.red('error: ') + msg);
     return 1;

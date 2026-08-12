@@ -71,6 +71,7 @@ import { buildRollup } from '../observability/rollup.js';
 import { loadGenome } from '../genome/store.js';
 import { recall } from '../genome/recall.js';
 import { listProposals, loadProposal, setStatus } from '../inbox/store.js';
+import { HUMAN_EFFECT_CAPABILITY_AVAILABLE } from '../inbox/review-policy.js';
 import {
   readPublicDaemonObservation,
   type PublicDaemonObservation,
@@ -1238,6 +1239,8 @@ export async function handleApi(
       sendJson(res, 200, {
         pending: proposals.length,
         proposals,
+        humanEffectCapabilityAvailable: HUMAN_EFFECT_CAPABILITY_AVAILABLE,
+        reviewMode: 'read-only',
       });
       return true;
     }
@@ -1254,7 +1257,11 @@ export async function handleApi(
         sendJson(res, 404, { error: `proposal not found: ${id}` });
         return true;
       }
-      sendJson(res, 200, proposal);
+      sendJson(res, 200, {
+        ...proposal,
+        humanEffectCapabilityAvailable: HUMAN_EFFECT_CAPABILITY_AVAILABLE,
+        reviewMode: 'read-only',
+      });
       return true;
     }
 
@@ -1296,7 +1303,9 @@ export async function handleApi(
 
       if (action === 'reject') {
         if (!setStatus(id, 'rejected')) {
-          sendJson(res, 503, { error: 'proposal rejection unavailable; queued recovery could not be revoked' });
+          sendJson(res, 403, {
+            error: 'proposal transition refused; no authenticated human capability was accepted; reload to confirm current state',
+          });
           return true;
         }
         sendJson(res, 200, { ok: true, id, status: 'rejected' });
@@ -1305,7 +1314,12 @@ export async function handleApi(
 
       // approve → apply (the ONLY outward path; applyProposal owns its gates:
       // enrollment, kill switch, confirm — all still enforced inside).
-      setStatus(id, 'approved');
+      if (!setStatus(id, 'approved')) {
+        sendJson(res, 403, {
+          error: 'proposal transition refused; no authenticated human capability was accepted; reload to confirm current state',
+        });
+        return true;
+      }
       const { applyProposal } = await import('../inbox/apply.js');
       const result = await applyProposal(id, { confirmed: true });
       sendJson(res, result.ok ? 200 : 500, result);

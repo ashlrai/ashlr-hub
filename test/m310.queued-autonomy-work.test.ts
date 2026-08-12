@@ -22,14 +22,12 @@ import { scanQueuedAutonomyWork } from '../src/core/portfolio/scanners.js';
 import {
   captureGateRepairWorkItem,
   generatedRepairRootKey,
-  isRejectedCaptureRecoveryAuthorized,
   noDiffResliceWorkItem,
   proposalRepairWorkItem,
   queueProposalRepairWorkForPendingProposals,
   resolveDiagnosticResliceParents,
 } from '../src/core/fleet/proposal-repair-work.js';
 import { proposalRepairId } from '../src/core/fleet/proposal-repair-identity.js';
-import { decisionsDir } from '../src/core/fleet/decisions-ledger.js';
 import type { Proposal, WorkItem } from '../src/core/types.js';
 import {
   dispatchProductionDir,
@@ -732,7 +730,7 @@ describe('queued autonomy work scanner', () => {
     expect(found[0]!.detail).not.toContain('DO_NOT_COPY_DIFF');
   });
 
-  it('recovers a machine-rejected persistence mismatch from the durable store', async () => {
+  it('withholds machine-rejected mismatch recovery without human authority', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
     const input = partialProposal(repo.dir, {
@@ -748,17 +746,14 @@ describe('queued autonomy work scanner', () => {
       'rejected',
       PROPOSAL_PERSISTENCE_MISMATCH_RESULT,
       PROPOSAL_PERSISTENCE_MISMATCH_REASON,
-    )).toBe(true);
+    )).toBe(false);
     const proposal = loadProposal(created.id);
     expect(proposal).toMatchObject({
-      status: 'rejected',
-      result: PROPOSAL_PERSISTENCE_MISMATCH_RESULT,
-      decisionReason: PROPOSAL_PERSISTENCE_MISMATCH_REASON,
-      decidedAt: expect.any(String),
+      status: 'pending',
     });
-    // The proposal-local exact machine marker is atomic with rejection. A
-    // best-effort causal-ledger outage must not strand the captured diff.
-    rmSync(decisionsDir(), { recursive: true, force: true });
+    expect(proposal?.result).toBeUndefined();
+    expect(proposal?.decisionReason).toBeUndefined();
+    expect(proposal?.decidedAt).toBeUndefined();
 
     expect(queueProposalRepairWorkForPendingProposals(
       undefined,
@@ -768,9 +763,7 @@ describe('queued autonomy work scanner', () => {
       eligible: 1,
       queued: 1,
     });
-    const found = await scanQueuedAutonomyWork(repo.dir);
-    expect(found).toHaveLength(1);
-    expect(found[0]!.detail).not.toContain('DO_NOT_COPY_DIFF');
+    expect(await scanQueuedAutonomyWork(repo.dir)).toHaveLength(1);
   });
 
   it('persists physical proposal repo identity and rejects legacy alias authority', () => {
@@ -829,7 +822,7 @@ describe('queued autonomy work scanner', () => {
     expect(readRepairHandoffs().observations).toEqual([]);
   });
 
-  it('revokes queued mismatch recovery before a later human rejection succeeds', async () => {
+  it('withholds mismatch rejection while pending repair remains non-decisional', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
     mkdirSync(join(repo.dir, 'subdir'));
@@ -845,32 +838,22 @@ describe('queued autonomy work scanner', () => {
       'rejected',
       PROPOSAL_PERSISTENCE_MISMATCH_RESULT,
       PROPOSAL_PERSISTENCE_MISMATCH_REASON,
-    )).toBe(true);
+    )).toBe(false);
     const now = new Date(Date.parse(created.createdAt) + 60_000);
     expect(queueProposalRepairWorkForPendingProposals(undefined, now)).toMatchObject({
       scanned: 1,
       eligible: 1,
       queued: 1,
     });
-    const queued = await scanQueuedAutonomyWork(repo.dir);
-    expect(queued).toHaveLength(1);
-    expect(isRejectedCaptureRecoveryAuthorized(queued[0]!, now)).toBe(true);
-    expect(setStatus(created.id, 'rejected')).toBe(true);
+    expect(await scanQueuedAutonomyWork(repo.dir)).toHaveLength(1);
+    expect(setStatus(created.id, 'rejected')).toBe(false);
     const proposal = loadProposal(created.id);
-    expect(proposal).not.toBeNull();
+    expect(proposal).toMatchObject({ status: 'pending' });
     expect(proposal?.result).toBeUndefined();
     expect(proposal?.decisionReason).toBeUndefined();
-    expect(await scanQueuedAutonomyWork(repo.dir)).toEqual([]);
-
-    expect(queueProposalRepairWorkForPendingProposals(undefined, now)).toMatchObject({
-      scanned: 0,
-      eligible: 0,
-      queued: 0,
-    });
-    expect(await scanQueuedAutonomyWork(repo.dir)).toEqual([]);
   });
 
-  it('recovers a legacy mismatch only with one bound durable rejection decision', async () => {
+  it('withholds legacy mismatch recovery without a durable human decision', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
     const input = partialProposal(repo.dir, {
@@ -879,9 +862,9 @@ describe('queued autonomy work scanner', () => {
     });
     const { id: _id, status: _status, createdAt: _createdAt, ...proposalInput } = input;
     const created = createProposal(proposalInput);
-    expect(setStatus(created.id, 'rejected', PROPOSAL_PERSISTENCE_MISMATCH_RESULT)).toBe(true);
+    expect(setStatus(created.id, 'rejected', PROPOSAL_PERSISTENCE_MISMATCH_RESULT)).toBe(false);
     const proposal = loadProposal(created.id);
-    expect(proposal).not.toBeNull();
+    expect(proposal).toMatchObject({ status: 'pending' });
 
     expect(queueProposalRepairWorkForPendingProposals(
       undefined,
@@ -891,11 +874,11 @@ describe('queued autonomy work scanner', () => {
       created.id,
       'rejected',
       PROPOSAL_PERSISTENCE_MISMATCH_RESULT,
-    )).toBe(true);
+    )).toBe(false);
     expect(await scanQueuedAutonomyWork(repo.dir)).toHaveLength(1);
   });
 
-  it('makes human rejection authoritative when queue cleanup is unavailable', async () => {
+  it('withholds unauthenticated rejection when queue cleanup is unavailable', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
     const input = partialProposal(repo.dir, {
@@ -909,7 +892,7 @@ describe('queued autonomy work scanner', () => {
       'rejected',
       PROPOSAL_PERSISTENCE_MISMATCH_RESULT,
       PROPOSAL_PERSISTENCE_MISMATCH_REASON,
-    )).toBe(true);
+    )).toBe(false);
     expect(queueProposalRepairWorkForPendingProposals(
       undefined,
       new Date(Date.parse(created.createdAt) + 60_000),
@@ -917,18 +900,17 @@ describe('queued autonomy work scanner', () => {
     const queueLock = acquireLocalStoreLock(join(fx.ashlrDir, '.self-heal-queue.lock'));
     expect(queueLock).not.toBeNull();
     try {
-      expect(setStatus(created.id, 'rejected')).toBe(true);
+      expect(setStatus(created.id, 'rejected')).toBe(false);
     } finally {
       if (queueLock) releaseLocalStoreLock(queueLock);
     }
-    expect(loadProposal(created.id)).toMatchObject({ status: 'rejected' });
+    expect(loadProposal(created.id)).toMatchObject({ status: 'pending' });
     expect(loadProposal(created.id)?.decisionReason).toBeUndefined();
     const stale = await scanQueuedAutonomyWork(repo.dir);
     expect(stale).toHaveLength(1);
-    expect(isRejectedCaptureRecoveryAuthorized(stale[0]!)).toBe(false);
   });
 
-  it('revokes auto-drained recovery authority even when queue cleanup is unavailable', async () => {
+  it('withholds auto-drained recovery authority when queue cleanup is unavailable', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
     const input = partialProposal(repo.dir, {
@@ -944,24 +926,24 @@ describe('queued autonomy work scanner', () => {
       'rejected',
       'auto-drained capture',
       'auto-drained: permanent readiness blocker persisted for 3 pass(es): known verification failure',
-    )).toBe(true);
+    )).toBe(false);
     const now = new Date(Date.parse(created.createdAt) + 60_000);
     expect(queueProposalRepairWorkForPendingProposals(undefined, now)).toMatchObject({ queued: 1 });
 
     const queueLock = acquireLocalStoreLock(join(fx.ashlrDir, '.self-heal-queue.lock'));
     expect(queueLock).not.toBeNull();
     try {
-      expect(setStatus(created.id, 'rejected')).toBe(true);
+      expect(setStatus(created.id, 'rejected')).toBe(false);
     } finally {
       if (queueLock) releaseLocalStoreLock(queueLock);
     }
 
     const revoked = loadProposal(created.id);
+    expect(revoked?.status).toBe('pending');
     expect(revoked?.decisionReason).toBeUndefined();
-    expect(revoked?.stuckPassCount).toBeUndefined();
+    expect(revoked?.stuckPassCount).toBe(3);
     const stale = await scanQueuedAutonomyWork(repo.dir);
     expect(stale).toHaveLength(1);
-    expect(isRejectedCaptureRecoveryAuthorized(stale[0]!, now)).toBe(false);
   });
 
   it('uses one repair identity for canonical and noncanonical repo paths', () => {

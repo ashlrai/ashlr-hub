@@ -40,9 +40,17 @@ vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
   return {
     ...actual,
-    spawnSync: () => ({
-      pid: 0, output: [], stdout: '', stderr: '', status: 1, signal: null, error: undefined,
-    }),
+    spawnSync: (...args: Parameters<typeof actual.spawnSync>) => {
+      const executable = String(args[0]);
+      if (path.basename(executable) === 'gh') {
+        return {
+          pid: 0, output: [], stdout: '', stderr: '', status: 1, signal: null, error: undefined,
+        } as ReturnType<typeof actual.spawnSync>;
+      }
+      // Proposal signing now performs the real bounded, read-only private
+      // storage ACL probe. Do not replace that authority check with a mock.
+      return actual.spawnSync(...args);
+    },
     execFileSync: actual.execFileSync,
   };
 });
@@ -90,6 +98,16 @@ function makeInput(overrides?: Partial<Omit<Proposal, 'id' | 'status' | 'created
     summary: 'A test summary',
     ...overrides,
   };
+}
+
+function makeNoteInput(
+  overrides?: Partial<Omit<Proposal, 'id' | 'status' | 'createdAt'>>,
+) {
+  return makeInput({
+    repo: null,
+    kind: 'note',
+    ...overrides,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -267,26 +285,30 @@ describe('M23 gate — CLI inbox show NEVER calls applyProposal', () => {
 // ===========================================================================
 
 describe('M23 gate — CLI inbox reject sets rejected, NEVER calls applyProposal', () => {
-  it('`ashlr inbox reject <id>` sets status=rejected', async () => {
-    const p = createProposal(makeInput({ title: 'Reject me' }));
+  it('`ashlr inbox reject <id>` cannot impersonate rejection for a no-effect note', async () => {
+    const p = createProposal(makeNoteInput({ title: 'Reject me' }));
     applyProposalSpy.mockClear();
 
-    await cmdInbox(['reject', p.id]);
+    const code = await cmdInbox(['reject', p.id]);
 
+    expect(code).toBe(1);
     const loaded = loadProposal(p.id);
-    expect(loaded!.status).toBe('rejected');
+    expect(loaded!.status).toBe('pending');
   });
 
-  it('`ashlr inbox reject <id>` does NOT call applyProposal', async () => {
+  it('`ashlr inbox reject <id>` refuses an effectful patch and never calls applyProposal', async () => {
     const p = createProposal(makeInput({ title: 'No apply on reject' }));
     applyProposalSpy.mockClear();
 
-    await cmdInbox(['reject', p.id]);
+    const code = await cmdInbox(['reject', p.id]);
+
+    expect(code).toBe(1);
+    expect(loadProposal(p.id)?.status).toBe('pending');
     expect(applyProposalSpy).not.toHaveBeenCalled();
   });
 
   it('`ashlr inbox reject` on already-rejected id does NOT call applyProposal', async () => {
-    const p = createProposal(makeInput());
+    const p = createProposal(makeNoteInput());
     setStatus(p.id, 'rejected');
     applyProposalSpy.mockClear();
 
@@ -301,8 +323,7 @@ describe('M23 gate — CLI inbox reject sets rejected, NEVER calls applyProposal
 
 describe('M23 gate — non-TTY approve without --yes refuses', () => {
   it('does NOT call applyProposal without --yes in non-TTY context', async () => {
-    const p = createProposal(makeInput({ title: 'No-yes test' }));
-    setStatus(p.id, 'approved');
+    const p = createProposal(makeNoteInput({ title: 'No-yes test' }));
     applyProposalSpy.mockClear();
 
     // In a non-TTY context (CI/test) without --yes, approve must refuse.
@@ -315,16 +336,15 @@ describe('M23 gate — non-TTY approve without --yes refuses', () => {
   });
 
   it('non-TTY approve without --yes leaves status unchanged', async () => {
-    const p = createProposal(makeInput({ title: 'Unchanged status' }));
-    setStatus(p.id, 'approved');
+    const p = createProposal(makeNoteInput({ title: 'Unchanged status' }));
     applyProposalSpy.mockClear();
 
     await cmdInbox(['approve', p.id]);
 
-    // Status should still be 'approved' (not advanced to applied/failed)
+    // The unsigned caller cannot approve; the proposal remains pending.
     const loaded = loadProposal(p.id);
     // applyProposal was not called, so status is unchanged
-    expect(loaded!.status).toBe('approved');
+    expect(loaded!.status).toBe('pending');
     expect(applyProposalSpy).not.toHaveBeenCalled();
   });
 });
@@ -334,37 +354,26 @@ describe('M23 gate — non-TTY approve without --yes refuses', () => {
 // ===========================================================================
 
 describe('M23 gate — CLI approve + --yes is the ONLY apply trigger', () => {
-  it('`inbox approve <id> --yes` calls applyProposal with confirmed:true', async () => {
-    const p = createProposal(makeInput({ title: 'Approve me' }));
-    setStatus(p.id, 'approved');
+  it('`inbox approve <id> --yes` cannot impersonate approval for a no-effect note', async () => {
+    const p = createProposal(makeNoteInput({ title: 'Approve me' }));
     applyProposalSpy.mockClear();
 
-    await cmdInbox(['approve', p.id, '--yes']);
+    const code = await cmdInbox(['approve', p.id, '--yes']);
 
-    // applyProposal MUST have been called exactly once with confirmed:true
-    expect(applyProposalSpy).toHaveBeenCalledTimes(1);
-    expect(applyProposalSpy).toHaveBeenCalledWith(p.id, { confirmed: true });
+    expect(code).toBe(1);
+    expect(applyProposalSpy).not.toHaveBeenCalled();
+    expect(loadProposal(p.id)?.status).toBe('pending');
   });
 
-  it('`inbox approve <id> --yes` does not call applyProposal for a pending proposal', async () => {
-    // Even with --yes, if the proposal is pending, applyProposal may be called
-    // but it MUST refuse internally (tested in apply tests). Here we test
-    // that the CLI does call applyProposal — the gate is enforced inside applyProposal.
-    // This test confirms the CLI passes confirmed:true to applyProposal.
+  it('`inbox approve <id> --yes` refuses an effectful patch before applyProposal', async () => {
     const p = createProposal(makeInput({ title: 'Pending with --yes' }));
-    // Do NOT setStatus to approved — stays pending
     applyProposalSpy.mockClear();
 
-    // The CLI might call applyProposal even for pending — that's fine,
-    // the gate is inside applyProposal itself. What matters is that
-    // without --yes it does NOT call applyProposal.
-    await cmdInbox(['approve', p.id, '--yes']);
+    const code = await cmdInbox(['approve', p.id, '--yes']);
 
-    // If called, it was with confirmed:true
-    if (applyProposalSpy.mock.calls.length > 0) {
-      expect(applyProposalSpy).toHaveBeenCalledWith(p.id, { confirmed: true });
-    }
-    // If not called (CLI may pre-check status), that's also acceptable
+    expect(code).toBe(1);
+    expect(loadProposal(p.id)?.status).toBe('pending');
+    expect(applyProposalSpy).not.toHaveBeenCalled();
   });
 
   it('partial review evidence cannot be approved or routed to applyProposal', async () => {

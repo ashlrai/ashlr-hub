@@ -43,6 +43,7 @@ import { audit } from '../sandbox/audit.js';
 import { isRepo } from '../git.js';
 import { createPr } from '../integrations/github.js';
 import { openInEditor, openInFinder, openInTerminal } from '../../cli/open.js';
+import { evaluateProposalEffectPolicy } from './review-policy.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -304,6 +305,22 @@ export async function applyProposal(
     };
   }
 
+  // Human confirmation at this legacy entrypoint is not an authenticated,
+  // one-use human effect capability. Refuse every outward-effect proposal
+  // before acquiring global mutation authority or invoking an adapter.
+  const initialEffectPolicy = evaluateProposalEffectPolicy(proposal, 'apply');
+  if (!initialEffectPolicy.allowed) {
+    const detail = `proposal effect policy refused apply: ${initialEffectPolicy.code}`;
+    audit({
+      action: 'inbox:apply',
+      repo: proposal.repo,
+      sandboxId: id,
+      summary: `refused: ${detail}`,
+      result: 'refused',
+    });
+    return { ok: false, status: proposal.status, detail };
+  }
+
   // ── Gate 2: must be approved ─────────────────────────────────────────────
   if (proposal.status !== 'approved') {
     audit({
@@ -392,6 +409,22 @@ export async function applyProposal(
     }
     proposal = lockedProposal;
 
+    // The optimistic check above is only a cheap filter. Policy bytes and the
+    // classified action are re-read and revalidated while the lifecycle lock
+    // is held, immediately before any effect can begin.
+    const lockedEffectPolicy = evaluateProposalEffectPolicy(proposal, 'apply');
+    if (!lockedEffectPolicy.allowed) {
+      const detail = `proposal effect policy refused apply: ${lockedEffectPolicy.code}`;
+      audit({
+        action: 'inbox:apply',
+        repo: proposal.repo,
+        sandboxId: id,
+        summary: `refused after proposal revalidation: ${detail}`,
+        result: 'refused',
+      });
+      return { ok: false, status: proposal.status, detail };
+    }
+
     // Notes have no outward effect, but their lifecycle transition still needs
     // the proposal fence and an approved-state CAS so rejection cannot be lost.
     if (proposal.kind === 'note') {
@@ -456,6 +489,18 @@ export async function applyProposal(
         repo,
         sandboxId: id,
         summary: `refused by policy gate: ${detail}`,
+        result: 'refused',
+      });
+      return { ok: false, status: 'approved', detail };
+    }
+
+    if (!ownsProposalMutationLock(id, proposalFence)) {
+      const detail = 'proposal mutation fence ownership was lost before apply dispatch';
+      audit({
+        action: 'inbox:apply',
+        repo,
+        sandboxId: id,
+        summary: `refused: ${detail}`,
         result: 'refused',
       });
       return { ok: false, status: 'approved', detail };
@@ -729,8 +774,9 @@ export async function applyProposal(
 
     // Lock ownership is part of the evidence boundary. If ownership was lost,
     // the external outcome is unknown and must not be reported as successful.
-    if (!ownsOutwardMutationFence(outwardFence)) {
-      const detail = `${result.detail}; outward mutation fence ownership was lost, so outcome requires operator reconciliation`;
+    if (!ownsOutwardMutationFence(outwardFence) ||
+      !ownsProposalMutationLock(id, proposalFence)) {
+      const detail = `${result.detail}; mutation-fence ownership was lost, so outcome requires operator reconciliation`;
       audit({
         action: 'inbox:apply',
         repo,

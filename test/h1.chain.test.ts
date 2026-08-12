@@ -42,6 +42,20 @@ import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
+// Legacy mechanics fixture: M505 owns policy-authority coverage; this suite
+// exercises the dormant full chain behind that gate.
+vi.mock('../src/core/inbox/review-policy.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/inbox/review-policy.js')>();
+  return {
+    ...actual,
+    evaluateProposalEffectPolicy: () => ({
+      allowed: true,
+      effectClass: 'outward-effect' as const,
+      code: 'policy-not-required' as const,
+    }),
+  };
+});
+
 // ---------------------------------------------------------------------------
 // buildBacklog MOCKED so tick() has discoverable work regardless of which
 // scanners are enabled (M160 made scanDeps/scanLint/scanHygiene DEFAULT-OFF).
