@@ -207,7 +207,15 @@ Set a strategic objective and the fleet plans + executes milestones:
 ashlr goal "harden the inbox apply path"
 ashlr goals list                         # track progress
 ashlr goals advance                      # execute the next milestone
+
+# One owner-invoked, proposal-only attempt with a bounded machine-readable result.
+# Run only in a disposable OS account or VM, in an independently rooted clone
+# with no remotes, credential helpers, provider tokens, or shared Git common dir.
+ashlr goal "add one regression test" --project /tmp/ashlr-disposable/repo --direct --json
 ```
+
+`ashlr goal` rejects unknown, duplicate, missing-value, and conflicting options
+instead of silently ignoring them; this is an intentional fail-fast contract.
 
 The strategist and vision commands let you define the high-level direction:
 

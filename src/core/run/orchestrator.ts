@@ -1143,6 +1143,44 @@ function newCancelledRunState(
   };
 }
 
+function newSandboxUnavailableRunState(
+  goal: string,
+  opts: RunOptions,
+  engine = opts.engine ?? 'builtin',
+): RunState {
+  const now = new Date().toISOString();
+  const id = opts.runId ?? generateRunId();
+  const proposalOutcome: RunProposalOutcome = {
+    kind: 'sandbox-unavailable',
+    reason: 'required sandbox unavailable; fallback refused',
+  };
+  return {
+    id,
+    goal,
+    engine,
+    provider: 'none',
+    createdAt: now,
+    updatedAt: now,
+    budget: {
+      maxTokens: opts.budget?.maxTokens ?? DEFAULT_MAX_TOKENS,
+      maxSteps: opts.budget?.maxSteps ?? DEFAULT_MAX_STEPS,
+      allowCloud: opts.allowCloud ?? opts.budget?.allowCloud ?? false,
+    },
+    usage: newUsage(),
+    tasks: [],
+    steps: [],
+    status: 'failed',
+    result: proposalOutcome.reason,
+    proposalOutcome,
+    runEventSummary: {
+      runId: id,
+      status: 'failed',
+      outcome: 'sandbox-unavailable',
+      proposalCreated: false,
+    },
+  };
+}
+
 /**
  * Atomically persist a RunState to ~/.ashlr/runs/<id>.json (write-then-rename).
  * Existing records require generation authority from the exact loaded object.
@@ -2134,6 +2172,13 @@ async function runGoalInternal(
   // -- Engine selection --------------------------------------------------------
   const requestedEngine = opts.engine ?? 'builtin';
   let engine = requestedEngine;
+  // Resume is an existing builtin state transition with its own generation
+  // authority, not a request to start a new unsandboxed producer.
+  if (opts.requireSandbox === true && engine === 'builtin' && !opts.resumeId) {
+    const unavailable = newSandboxUnavailableRunState(goal, opts, engine);
+    saveRun(unavailable);
+    return unavailable;
+  }
   if (engine !== 'builtin') {
     // Determine if this is a known typed engine id or an arbitrary binary name.
     const isKnownEngineId = KNOWN_ENGINE_IDS.has(engine);
@@ -2145,6 +2190,11 @@ async function runGoalInternal(
       : isBinaryInstalled(engine);
 
     if (!installed) {
+      if (opts.requireSandbox === true) {
+        const unavailable = newSandboxUnavailableRunState(goal, opts, engine);
+        saveRun(unavailable);
+        return unavailable;
+      }
       process.stderr.write(
         `[ashlr run] engine "${engine}" not found on PATH — falling back to builtin\n`,
       );
@@ -2172,12 +2222,22 @@ async function runGoalInternal(
           ) {
             cwd = opts.cwd;
           } else {
+            if (opts.requireSandbox === true) {
+              const unavailable = newSandboxUnavailableRunState(goal, opts, engine);
+              saveRun(unavailable);
+              return unavailable;
+            }
             process.stderr.write(
               `[ashlr run] opts.cwd "${opts.cwd}" is not an existing absolute directory — using ${cwd}\n`,
             );
           }
         } catch {
-          // stat failed — keep the default cwd
+          if (opts.requireSandbox === true) {
+            const unavailable = newSandboxUnavailableRunState(goal, opts, engine);
+            saveRun(unavailable);
+            return unavailable;
+          }
+          // stat failed — keep the default cwd for legacy callers
         }
       }
 
@@ -2219,13 +2279,18 @@ async function runGoalInternal(
           try {
             titrrSandbox = wtMod.createSandbox(cwd);
           } catch {
-            // sandbox creation failed — fall through to builtin
+            // handled below
           }
 
           if (cancelled() && !titrrSandbox) {
             const cancelledState = newCancelledRunState(goal, opts, engine, 'external');
             saveRun(cancelledState);
             return cancelledState;
+          }
+          if (!titrrSandbox && opts.requireSandbox === true) {
+            const unavailable = newSandboxUnavailableRunState(goal, opts, engine);
+            saveRun(unavailable);
+            return unavailable;
           }
 
           if (titrrSandbox) {
@@ -2564,11 +2629,17 @@ async function runGoalInternal(
             }
           }
 
-          // sandbox creation failed or no result — fall through to builtin
+          // sandbox creation failed or no result. Explicitly required sandboxes
+          // already returned above; legacy callers retain the builtin fallback.
           engine = 'builtin';
         } else {
           // buildEngineCommand returned null for a non-api-model engine (builtin) —
-          // fall through to builtin path.
+          // fall through only for legacy callers that did not require a sandbox.
+          if (opts.requireSandbox === true) {
+            const unavailable = newSandboxUnavailableRunState(goal, opts, engine);
+            saveRun(unavailable);
+            return unavailable;
+          }
           engine = 'builtin';
         }
       } else {
@@ -2599,7 +2670,7 @@ async function runGoalInternal(
           try {
             titrrSandbox = wtMod.createSandbox(cwd);
           } catch {
-            // Sandbox creation failed — fall back to the original single-attempt path.
+            // handled below
           }
 
           if (cancelled() && !titrrSandbox) {
@@ -2609,6 +2680,11 @@ async function runGoalInternal(
           }
 
           if (!titrrSandbox) {
+            if (opts.requireSandbox === true) {
+              const unavailable = newSandboxUnavailableRunState(goal, opts, engine);
+              saveRun(unavailable);
+              return unavailable;
+            }
             const fallback = await runEngineSandboxed(engineId, goal, cfg, {
               sourceRepo: cwd,
               model: modelEnv,

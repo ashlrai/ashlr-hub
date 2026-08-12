@@ -55,3 +55,38 @@ Define and begin the highest-leverage, evidence-backed program that turns Ashlr 
 ## Status
 
 **Completed locally** - 0A-0 now reconciles returned and durable terminal run truth, reads the complete all-status proposal source, requires one exact same-run row, and validates its signed pending authority. A real temp-store test proves no-generation signing/reload/tamper refusal. The CLI states only the authority it proves. The execution backlog separates concierge dogfood, sealed one-shot autonomy, and resident autonomy; names exact authority/evidence gates; and reuses existing signed outcome infrastructure. Focused/adjacent tests, typecheck, scoped/full lint, build, formatting, and diff checks are green, with independent security, architecture, founder, and minimality reviews at GO. No `--until-proposal`, unattended CLI, Ashlr-owned human effect, release, installation, credential, service, or runtime authority is included. Entire is installed but not configured for this worktree, so no checkpoint was created.
+
+## 2026-08-12 - Autonomous Organization V1
+
+### Goal
+
+Turn the reviewed next-level program into the smallest code slice that makes direct proposal conversion machine-observable and fail-closed while preserving separate verification, human-decision, merge, release, deployment, credential, spend, and resident-runtime authority.
+
+### Phases
+
+- [x] Rehydrate exact source, installed runtime, queue, proposal, and worktree truth.
+- [x] Launch independent founder/product, CTO/architecture, and security/reliability audits.
+- [x] Select one coherent implementation slice from repository evidence and hostile review.
+- [x] Implement a strict direct-proposal JSON contract plus core `requireSandbox` refusal without model pulls, provider spend, credential creation, GitHub PR growth, or runtime activation.
+- [x] Run focused, adjacent, type, lint, build, diff, and independent-review gates.
+- [x] Commit and push the reviewed source branch after exact green gates; protected merge and activation remain separately gated.
+
+### Current evidence
+
+- Installed build remains 3.1.0 at revision `18a60269`; the daemon is stopped.
+- Fleet status reports 20 visible work items, zero eligible, zero pending proposals, zero applied proposals, 11 active goal lanes, and missing autonomy evidence packs.
+- Exact remote master remains `d9046fe5` with its required CI red; new PR creation would worsen an existing 60-PR inventory.
+- The 0A-0 supervised resolver, human-only effect-policy, and digest-bound Nemotron shadow slices exist on separate reviewed branches and must not be conflated with live autonomous outcome proof.
+- Independent security review rejected a proposed `--prove` mode because repository verification scripts inherit host authority and a persisted green result could increase later merge eligibility. The implementation therefore reports exact pending-proposal correlation only.
+- The direct JSON contract reports no token/cost values when provider telemetry is not authoritative, claims only wrapper-level non-invocation of inbox apply/merge, and explicitly denies proof of confinement, unchanged environment, verification, or unattended authority.
+- `requireSandbox:true` is now enforced by the execution core for new runs: builtin routing, disappearing engines, invalid working directories, and sandbox creation failures terminate with a durable `sandbox-unavailable` result instead of falling back.
+- This is conversion infrastructure, not evidence that conversion increased. A real owner-requested proposal, protected merge, exact CI result, and stable post-merge observation remain required before making an outcome claim.
+
+### Validation
+
+- Focused direct-authority and sandbox suites: 3 files, 129 tests passed.
+- TypeScript typecheck: passed.
+- Scoped ESLint and full quiet lint: passed with zero errors.
+- Production build: passed.
+- `git diff --check`: passed.
+- Three independent security/API/product reviewers: GO, no P0-P2 findings; both P3 recommendations were incorporated.

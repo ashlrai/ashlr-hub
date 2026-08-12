@@ -62,3 +62,13 @@
 - Kill and enrollment authority are checked before launch but not continuously enforced through child termination and proposal capture.
 - Required prerequisite: sealed execution capsule; exact run/proposal identity; human-only review policy; repo/objective/base lane; a durable atomic `FirstOutcomePermitV1`; continuous revocation; hostile-engine and concurrency tests. Hierarchical fleet reservations are the later Stage 1 generalization, not a First Outcome prerequisite.
 - Until those prerequisites land, a future alias may only provide a bounded derived result envelope with no replay, authority, ledger role, additional loop, or retry. Unattended external CLI execution remains categorically refused; API-model execution must cross only the reviewed local authenticated broker boundary.
+# 2026-08-12 Autonomous Organization V1
+
+- North-star loop: owner objective -> bounded execution -> exact durable proposal -> protected human realization -> exact CI -> seven-day stability -> measured learning.
+- Live bottleneck remains conversion and control-plane closure, not model availability: 20 visible/0 eligible, 672 readable historical proposals with 0 applied, 11 active lanes, stopped 3.1.0 runtime, and no signed autonomy evidence packs.
+- Use the existing reviewed 0A-0 correlation as the source baseline. Treat human-only effect policy and Nemotron shadow as independently reviewed stacked candidates until protected integration proves their combined semantics.
+- Do not pull Nemotron, create/fund provider credentials, run a live objective, start/install the resident daemon, open another PR, or claim production autonomy in this cycle.
+- Disk headroom is approximately 2.3 GiB; avoid dependency duplication and large generated/model artifacts.
+- The attempted `--prove` product slice was rejected after hostile review: the existing verifier executes enrolled repository scripts without mandatory OS confinement, inherits ambient process environment/network, mutates temporary Git worktree metadata, and can persist evidence that later merge logic consumes.
+- The implemented overlap is deliberately narrower: a strict one-document `goal --direct --json` result for exact durable proposal correlation, conservative unknown usage, and wrapper-scoped authority claims, plus core enforcement that `requireSandbox:true` cannot silently become builtin or use an invalid fallback working directory.
+- This improves conversion observability and closes known fail-open fallback paths; it does not itself increase verified merges, authorize unattended execution, seal external CLIs, or activate the resident fleet.

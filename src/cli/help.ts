@@ -332,6 +332,7 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'roadmap <run|resume|status>',  desc: 'Goal Loop: run a roadmap of milestone files, one FRESH agent process per milestone; resumable from state.json (LOCAL-FIRST; --allow-cloud for API engines).', topic: 'autonomy' },
   { cmd: 'setup',                        desc: 'Temporarily unavailable: refuses before config or wizard effects; use admitted one-shot workflows.', topic: 'core' },
   { cmd: 'goal "<objective>"',           desc: 'The conductor: objective → milestones → sandboxed, proposal-only run (M55).', topic: 'autonomy' },
+  { cmd: 'goal "<objective>" --direct',  desc: 'One owner-invoked proposal-only run with bounded --json output; no unattended authority or verification proof.', topic: 'autonomy' },
   { cmd: 'loop',                         desc: 'The conductor loop: run the proposal-first fleet over the portfolio (M55).', topic: 'autonomy' },
   { cmd: 'vision <show|review|preview|shadow|approve|reconcile|set>', desc: 'Mission OS: inspect strategy, preview a bounded DAG, record observation-only shadow evidence, or explicitly adopt planning state.', topic: 'autonomy' },
   { cmd: 'manager [--apply-rejects]',    desc: 'Frontier judge scorecard over pending proposals (shadow mode by default; never merges).', topic: 'autonomy' },

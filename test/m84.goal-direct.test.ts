@@ -95,6 +95,7 @@ function makeCfg(): AshlrConfig {
 function makeRunState(id = 'run-direct-1', proposalId = 'prop-direct-1') {
   return {
     id,
+    usage: { tokensIn: 120, tokensOut: 30, steps: 4, estCostUsd: 0.12 },
     status: 'done',
     trajectoryId: `run:${id}`,
     proposalOutcome: {
@@ -270,6 +271,102 @@ describe('cmdGoal --direct — invokes runGoal once with the verbatim objective'
     const opts = mockRunGoal.mock.calls[0]![2] as Record<string, unknown>;
     const budget = opts.budget as { allowCloud: boolean };
     expect(budget.allowCloud).toBe(true);
+  });
+
+  it('refuses builtin routing before runGoal instead of accepting a zero-yield fallback', async () => {
+    mockRouteBackend.mockReturnValue({ backend: 'builtin', tier: 'low', reason: 'no productive engine' });
+
+    const rc = await cmdGoal([
+      'ship exact run', '--project', '/tmp/enrolled-repo', '--direct', '--json',
+    ]);
+
+    expect(rc).toBe(1);
+    expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(JSON.parse(String((console.log as ReturnType<typeof vi.fn>).mock.calls[0]![0]))).toMatchObject({
+      ok: false,
+      terminalStage: 'admission',
+      blockerCode: 'productive-backend-unavailable',
+      backend: 'builtin',
+    });
+  });
+
+  it('emits one bounded machine-readable direct result without objective or path data', async () => {
+    const rc = await cmdGoal([
+      'secret objective text',
+      '--project', '/tmp/enrolled-repo',
+      '--direct',
+      '--json',
+    ]);
+
+    expect(rc).toBe(0);
+    const calls = (console.log as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls).toHaveLength(1);
+    const result = JSON.parse(String(calls[0]![0])) as Record<string, unknown>;
+    expect(result).toMatchObject({
+      schemaVersion: 1,
+      mode: 'direct-proposal',
+      ok: true,
+      terminalStage: 'proposal-correlation',
+      blockerCode: null,
+      backend: 'codex',
+      runId: 'run-direct-1',
+      proposalId: 'prop-direct-1',
+      usage: null,
+      usageObserved: false,
+      wrapperEffects: { inboxApplyInvoked: false, inboxMergeInvoked: false },
+      authority: {
+        wrapperController: 'proposal-only',
+        unattendedExecutionAuthorized: false,
+        verificationProven: false,
+        confinementAttested: false,
+        environmentUnchangedAttested: false,
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain('secret objective text');
+    expect(JSON.stringify(result)).not.toContain('/tmp/enrolled-repo');
+  });
+
+  it('returns a bounded JSON blocker without leaking proposal-store detail', async () => {
+    mockListProposalsDetailed.mockReturnValue({
+      ...healthyProposalRead(),
+      sourceState: 'degraded',
+      complete: false,
+      stopReasons: ['secret-store-detail'],
+      invalidFiles: 1,
+    });
+
+    const rc = await cmdGoal([
+      'ship exact run', '--project', '/tmp/enrolled-repo', '--direct', '--json',
+    ]);
+
+    expect(rc).toBe(1);
+    const output = String((console.log as ReturnType<typeof vi.fn>).mock.calls[0]![0]);
+    expect(JSON.parse(output)).toMatchObject({
+      ok: false,
+      terminalStage: 'proposal-correlation',
+      blockerCode: 'proposal-source-degraded',
+      proposalId: null,
+    });
+    expect(output).not.toContain('secret-store-detail');
+  });
+
+  it('returns one bounded JSON document when the durable run ledger throws', async () => {
+    mockLoadRun.mockImplementation(() => { throw new Error('secret-run-ledger-detail'); });
+
+    const rc = await cmdGoal([
+      'ship exact run', '--project', '/tmp/enrolled-repo', '--direct', '--json',
+    ]);
+
+    expect(rc).toBe(1);
+    const calls = (console.log as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls).toHaveLength(1);
+    const output = String(calls[0]![0]);
+    expect(JSON.parse(output)).toMatchObject({
+      ok: false,
+      terminalStage: 'proposal-correlation',
+      blockerCode: 'run-ledger-unavailable',
+    });
+    expect(output).not.toContain('secret-run-ledger-detail');
   });
 
   it('returns exit 0 only when the exact filed proposal has durable pending authority', async () => {
@@ -464,6 +561,27 @@ describe('cmdGoal --direct — invokes runGoal once with the verbatim objective'
     expect(output).toContain('[run-not-done]');
   });
 
+  it('preserves required sandbox failure as a dedicated JSON blocker', async () => {
+    mockRunGoal.mockResolvedValue({
+      ...makeRunState(),
+      status: 'failed',
+      proposalOutcome: {
+        kind: 'sandbox-unavailable',
+        reason: 'required sandbox unavailable; fallback refused',
+      },
+    });
+
+    const rc = await cmdGoal([
+      'ship exact run', '--project', '/tmp/enrolled-repo', '--direct', '--json',
+    ]);
+
+    expect(rc).toBe(1);
+    expect(JSON.parse(String((console.log as ReturnType<typeof vi.fn>).mock.calls[0]![0]))).toMatchObject({
+      blockerCode: 'sandbox-unavailable',
+      proposalId: null,
+    });
+  });
+
   it.each([
     ['wrong status', { status: 'aborted' }],
     ['wrong outcome', { outcome: 'gate-blocked' }],
@@ -574,6 +692,62 @@ describe('cmdGoal --direct — requires --project', () => {
   });
 });
 
+describe('cmdGoal --direct — strict agent-facing options', () => {
+  it.each([
+    ['unknown option', ['ship', '--project', '/tmp/enrolled-repo', '--direct', '--proove']],
+    ['missing project value', ['ship', '--project', '--direct']],
+    ['duplicate direct', ['ship', '--project', '/tmp/enrolled-repo', '--direct', '--direct']],
+    ['conflicting modes', ['ship', '--project', '/tmp/enrolled-repo', '--direct', '--plan-only']],
+    ['json without direct', ['ship', '--project', '/tmp/enrolled-repo', '--json']],
+  ])('returns usage error for %s', async (_case, args) => {
+    expect(await cmdGoal(args)).toBe(2);
+    expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(mockCmdGoals).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['invalid arguments', ['ship', '--direct', '--json', '--project', '/tmp/enrolled-repo', '--wat'], 'invalid-arguments'],
+    ['missing objective', ['--direct', '--json', '--project', '/tmp/enrolled-repo'], 'objective-required'],
+    ['missing project', ['ship', '--direct', '--json'], 'project-required'],
+  ])('emits the same complete JSON schema for %s', async (_case, args, blockerCode) => {
+    const rc = await cmdGoal(args);
+
+    expect(rc).toBe(2);
+    const calls = (console.log as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls).toHaveLength(1);
+    const result = JSON.parse(String(calls[0]![0])) as Record<string, unknown>;
+    expect(Object.keys(result).sort()).toEqual([
+      'authority', 'backend', 'blockerCode', 'mode', 'ok', 'proposalId', 'runId',
+      'schemaVersion', 'terminalStage', 'usage', 'usageObserved', 'wrapperEffects',
+    ]);
+    expect(result).toMatchObject({
+      schemaVersion: 1,
+      mode: 'direct-proposal',
+      ok: false,
+      terminalStage: 'usage',
+      blockerCode,
+      usage: null,
+      usageObserved: false,
+    });
+  });
+
+  it('emits a bounded JSON admission result when config or routing throws', async () => {
+    mockLoadConfig.mockImplementation(() => { throw new Error('secret-config-detail'); });
+
+    const rc = await cmdGoal([
+      'ship', '--project', '/tmp/enrolled-repo', '--direct', '--json',
+    ]);
+
+    expect(rc).toBe(1);
+    const output = String((console.log as ReturnType<typeof vi.fn>).mock.calls[0]![0]);
+    expect(JSON.parse(output)).toMatchObject({
+      terminalStage: 'admission',
+      blockerCode: 'routing-unavailable',
+    });
+    expect(output).not.toContain('secret-config-detail');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Default path (no --direct): milestone planning still runs.
 // ---------------------------------------------------------------------------
@@ -639,6 +813,8 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const GOAL_SRC = readFileSync(pathResolve(HERE, '../src/cli/goal.ts'), 'utf8');
+const ORCHESTRATOR_SRC = readFileSync(pathResolve(HERE, '../src/core/run/orchestrator.ts'), 'utf8');
+const SANDBOX_ENGINE_SRC = readFileSync(pathResolve(HERE, '../src/core/run/sandboxed-engine.ts'), 'utf8');
 
 const OUTWARD_PRIMITIVES: RegExp[] = [
   /applyProposal/,
@@ -672,5 +848,10 @@ describe('goal.ts source-level safety guard (M84)', () => {
     // runSwarm is the builtin path that hard-forces engine:'builtin' and
     // produces 0-diff proposals. --direct must NOT use it.
     expect(GOAL_SRC).not.toMatch(/\brunSwarm\s*\(/);
+  });
+
+  it('the direct core path reserves stdout for the one JSON document', () => {
+    expect(ORCHESTRATOR_SRC).not.toMatch(/console\.log\s*\(/);
+    expect(SANDBOX_ENGINE_SRC).not.toMatch(/console\.log\s*\(/);
   });
 });
