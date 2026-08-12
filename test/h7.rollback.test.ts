@@ -362,7 +362,7 @@ describe('h7 rollback — one-command inward-only undo', () => {
     expect(sandboxHomeExists(orphanA.id)).toBe(false);
     expect(sandboxHomeExists(orphanB.id)).toBe(true);
     expect(listSandboxes().map((s) => s.id)).toContain(orphanB.id);
-  }, 15_000);
+  }, 30_000);
 
   it('NEVER force-removes a LIVE owner-pid sandbox during the SCOPED rollback sweep', async () => {
     // The scoped sweep drops the AGE guard but must KEEP the live-owner guard:

@@ -30,6 +30,8 @@ let home: string;
 const expectedHeadOid = 'b'.repeat(40);
 
 beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime('2026-07-12T04:01:00.000Z');
   home = mkdtempSync(join(tmpdir(), 'ashlr-m380-'));
   process.env.ASHLR_HOME = join(home, '.ashlr');
   Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' });
@@ -47,6 +49,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   if (platformDescriptor) Object.defineProperty(process, 'platform', platformDescriptor);
   if (priorHome === undefined) delete process.env.ASHLR_HOME;
   else process.env.ASHLR_HOME = priorHome;
