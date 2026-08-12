@@ -39,4 +39,4 @@ Integrate the reviewed Ashlr autonomy stack into protected `master`, publish/ins
 
 ## Status
 
-**Phase 4 in progress** — the integration candidate is composed and independently reviewed. The maximum safe publication is a draft proposal-lab PR. Protected merge, package publication, installation, and resident activation remain blocked on exact-head hosted checks, a complete serial invariant run, and an externally authenticated human-effect capability.
+**Phase 4 in progress** — the integration candidate is composed and independently reviewed. The maximum safe publication is a draft proposal-lab PR. The serial invariant run is complete; protected merge, package publication, installation, and resident activation remain blocked on exact-head hosted checks and an externally authenticated human-effect capability.

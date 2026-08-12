@@ -1491,6 +1491,34 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
     expect(rec.reason).not.toContain('recent proposal yield');
   });
 
+  it('shadow-only observations do not enter backend yield learning', async () => {
+    const cfg = withInstalledFrontierEngines(withIntelligence({
+      allowedBackends: ['builtin', 'claude', 'codex'],
+      minProposalYieldRate: 0.9,
+    }));
+    const item = makeItem({ source: 'security', effort: 5, score: 10 });
+    const base = routeBackend(item, cfg);
+    const alternate = base.backend === 'claude' ? 'codex' : 'claude';
+    const rec = await recommendRoute(item, cfg, {
+      estimate: makeEstimate(0.001, 10),
+      prior: { frontierSuccessRate: 0.9, frontierSampleSize: 10 },
+      dispatchProductionEvents: [
+        ...Array.from({ length: 3 }, () => makeDispatchProductionEvent({
+          backend: base.backend,
+          outcome: 'shadow-observation',
+          reason: 'shadow-only observation produced no authoritative production outcome',
+        })),
+        ...comparativeCandidateEvents(alternate),
+      ],
+    });
+
+    expect(base.tier).toBe('frontier');
+    expect(rec.backend).toBe(base.backend);
+    expect(rec.tier).toBe(base.tier);
+    expect(rec.reason).not.toContain('recent proposal yield');
+    expect(rec.reason).not.toContain('same-tier reroute');
+  });
+
   it('action-count-only proposal-disabled rows do not poison backend yield learning', async () => {
     const cfg = withInstalledFrontierEngines(withIntelligence({
       allowedBackends: ['builtin', 'claude', 'codex'],

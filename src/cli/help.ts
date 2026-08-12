@@ -100,14 +100,14 @@ export const AGENT_COMMANDS: AgentCommandDoc[] = [
   },
   {
     usage: 'ashlr inbox --json',
-    description: 'List proposals in the approval inbox. LISTING ONLY for agents — approve/reject is human-only.',
+    description: 'List proposals in the review inbox. Approve/reject are unavailable in this preview.',
     safety: 'read',
     jsonShape: 'Proposal[]',
   },
   {
     usage: 'ashlr inbox approve|reject <id>',
-    description: 'HUMAN-ONLY: the single gate through which every outward action passes. Agents must never run this.',
-    safety: 'human-gate',
+    description: 'UNAVAILABLE: refuses until an authenticated one-use human-effect capability is installed.',
+    safety: 'read',
     jsonShape: 'ApplyResult',
   },
   {

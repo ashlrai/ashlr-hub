@@ -14,7 +14,7 @@
 
 ashlr-hub is a single Node binary that runs an autonomous agent fleet against your enrolled repositories.
 
-The fleet scans your backlog, dispatches sandboxed agent swarms across multiple backends (local Ollama/LM Studio, Claude Code, Codex, any OpenAI-compatible API), and deposits proposed diffs into a review inbox. The current source preview is proposal-only: approve, reject, verify, apply, auto-merge, and deploy all refuse until a separately authenticated human-effect capability is installed. The kill-switch is a single file.
+The fleet scans your backlog, dispatches sandboxed agent swarms across multiple backends (local Ollama/LM Studio, Claude Code, Codex, any OpenAI-compatible API), and deposits proposed diffs into a review inbox. The current source preview is proposal-only: inbox approve, reject, verify, apply, auto-merge, and proposal-driven deploy all refuse until a separately authenticated human-effect capability is installed. The separately invoked, confirmation-gated `ashlr ship --deploy` operator command retains its existing authority. The kill-switch is a single file.
 
 It is also a local unifying harness: one CLI and web dashboard that indexes your enrolled projects, aggregates all your MCP servers into a single gateway, tracks real spend, and provides `ashlr run` / `ashlr swarm` for ad-hoc work.
 
@@ -22,8 +22,8 @@ It is also a local unifying harness: one CLI and web dashboard that indexes your
 
 First activation follows a strict order: run `ashlr preflight`, enroll a repo,
 and complete a dry-run before enabling real daemon generation. Generated
-proposals are review-only in this preview; approve, reject, merge, deploy, and
-service-install authority remain unavailable.
+proposals are review-only in this preview; approve, reject, merge,
+proposal-driven deploy, and service-install authority remain unavailable.
 
 | Path | Default | Required authority | Possible outward effect |
 |------|---------|--------------------|-------------------------|
@@ -69,7 +69,9 @@ End-State Spec (your vision)
 
 - **Preflight-first activation.** `ashlr preflight` verifies daemon readiness, backend connectivity, and key configuration before you enroll any repos. Run it once before your first enroll.
 - **Proposal-only generation floor.** The daemon's generation path emits pending proposals and imports no apply, push, PR, or deploy primitive. In the current preview, human decisions and auto-merge both refuse until a separately authenticated human-effect capability is installed.
-- **Explicit merge authority.** In the default tier mode, local-model proposals stay proposals and allowlisted frontier producers can earn a gated path to `main`. Verification and evidence modes replace producer tier with stricter judge-backed or deterministic evidence authority. Every mode is default off and fail-closed.
+- **Merge authority unavailable in this preview.** Historical tier,
+  verification, and evidence modes remain dormant until a separately
+  authenticated human-effect capability is installed.
 - **Sandboxed by construction.** Every external agent CLI runs in a throwaway git worktree with push credentials severed. Only the scrubbed diff escapes.
 - **OS-level confinement.** Optionally wraps each run with `sandbox-exec` (macOS) or `bwrap`/`firejail` (Linux) — read-jailed to the worktree, network egress blocked.
 - **Kill-switch.** `touch ~/.ashlr/KILL` — all mutating operations refuse immediately, across every backend and repo.
@@ -344,7 +346,9 @@ ashlr comms digest              # build oversight snapshot + send summary
 ashlr comms ask-merges          # post pending proposals for review; decisions refuse
 ```
 
-Supports **Telegram** (recommended) and macOS iMessage. Configure in `cfg.comms`. The comms layer sits on top of all automated gates — replying to approve in Telegram resolves the human gate; it does not bypass verification or provenance.
+Supports **Telegram** (recommended) and macOS iMessage. Configure in `cfg.comms`.
+The current preview sends review notifications only; decision replies refuse
+until an authenticated human-effect capability is installed.
 
 ---
 
@@ -385,7 +389,7 @@ next actions point at work the daemon can select now instead of phantom backlog.
 | `ashlr goal "<objective>"` | Set a strategic goal; plan + dispatch milestones |
 | `ashlr goals list/show/plan/advance` | Manage goals + milestones |
 | `ashlr vision show/review/preview/shadow/approve/reconcile` | Mission OS: strategy, bounded DAG preview, authenticated shadow evidence, and explicit goal adoption |
-| `ashlr inbox [show/approve/reject]` | Review and act on proposals |
+| `ashlr inbox [show/approve/reject]` | Review proposals; approve/reject currently refuse |
 | `ashlr swarm "<goal>"` | Multi-agent sandboxed swarm (ad-hoc) |
 | `ashlr run "<goal>"` | Single agent run (ad-hoc) |
 | `ashlr fleet status/watch/pause/resume` | Fleet control plane |

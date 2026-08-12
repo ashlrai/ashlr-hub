@@ -1103,6 +1103,8 @@ function isEligibleContextRollupTerminal(event: AgentActionEvent): boolean {
     event.action === 'daemon:dispatch' &&
     event.learningSource === 'daemon-dispatch' &&
     event.learningLabel?.authoritative === true &&
+    event.learningLabel.learningKind !== 'unknown' &&
+    event.runEventSummary?.outcome !== 'shadow-observation' &&
     typeof event.runId === 'string' &&
     event.trajectoryId === `run:${event.runId}` &&
     event.runEventSummary?.runId === event.runId;
@@ -2208,7 +2210,9 @@ export function workedOutcomeFromDispatchProduction(
 ): 'diff' | 'empty' | undefined {
   if (!production) return undefined;
   if (production.runEventSummary?.status === 'aborted') return undefined;
-  if (production.outcome === 'proposal-disabled') return undefined;
+  if (production.outcome === 'proposal-disabled' || production.outcome === 'shadow-observation') {
+    return undefined;
+  }
   return production.outcome === 'proposal-created' ? 'diff' : 'empty';
 }
 
@@ -7078,6 +7082,14 @@ export async function tick(
           }
           if (production?.outcome === 'proposal-disabled' && !duplicateDiff) {
             if (!coordinator.settleClaim(outcome.value.item.id, machineId)) {
+              workedOutcomeFailedItemIds.add(outcome.value.item.id);
+            }
+            continue;
+          }
+          if (production?.outcome === 'shadow-observation') {
+            // A shadow-only observation spent no production authority and must
+            // neither mark the item worked nor create a retry cooldown.
+            if (sharedQueueMode && !coordinator.settleClaim(outcome.value.item.id, machineId)) {
               workedOutcomeFailedItemIds.add(outcome.value.item.id);
             }
             continue;

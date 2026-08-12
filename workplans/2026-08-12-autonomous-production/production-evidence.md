@@ -13,6 +13,8 @@ review-only proposal-lab PR.
 - Local focused authority/model suites: 234/234 passed.
 - Shadow production-isolation regressions: passed.
 - Full M201 daemon loop: 245/245 passed.
+- Combined learned-router + daemon-loop follow-up: 316/316 passed after
+  shadow worked-ledger, retry, and context-rollup isolation.
 - Full invariants: 449 passed / 5 expected skips.
 - Previously contended invariant subset: 76/76 passed serially.
 - Typecheck, build, quiet full lint, package dry-run, and diff check: passed.

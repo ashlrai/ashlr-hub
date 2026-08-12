@@ -380,6 +380,7 @@ vi.mock('../src/core/daemon/cutoff-checkpoint-scheduler.js', () => ({
 import {
   tick,
   runDaemon,
+  recordContextRollupAfterTick,
   recoverDaemonSpendGuardOnStartup,
   saveResidentDaemonState,
   stopDaemon,
@@ -1430,7 +1431,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockRunSwarm).not.toHaveBeenCalled();
   }, 15_000);
 
-  it('A0: dispatch production maps proposal-created to diff, no-proposal outcomes to empty, and proposal-disabled to neutral', () => {
+  it('A0: dispatch production maps proposal-created to diff, no-proposal outcomes to empty, and non-authoritative outcomes to neutral', () => {
     expect(workedOutcomeFromDispatchProduction(undefined)).toBeUndefined();
     expect(workedOutcomeFromDispatchProduction({
       outcome: 'proposal-created',
@@ -1451,6 +1452,10 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(workedOutcomeFromDispatchProduction({
       outcome: 'proposal-disabled',
       runId: 'run-proposal-disabled',
+    })).toBeUndefined();
+    expect(workedOutcomeFromDispatchProduction({
+      outcome: 'shadow-observation',
+      runId: 'run-shadow-observation',
     })).toBeUndefined();
   });
 
@@ -4640,6 +4645,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       outcome: 'shadow-observation',
       learningLabel: { learningKind: 'unknown', diagnosticAttempt: false },
     });
+    expect(loadWorkedLedger().events.filter((event) => event.itemId === items[0]!.id)).toEqual([]);
   });
 
   it.each([false, true])(
@@ -9413,6 +9419,62 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
 
     expect(state.ticks.at(-1)?.reason).toBe('ok');
     expect(readAgentActions().filter((event) => event.action === 'daemon:context-rollup')).toHaveLength(1);
+  });
+
+  it('E1c1: shadow-only observations cannot satisfy context-rollup terminal authority', () => {
+    const now = new Date();
+    const record = vi.fn(() => true);
+    const result = recordContextRollupAfterTick(
+      { reason: 'ok' } as DaemonTick,
+      { dryRun: false },
+      {
+        ...cfgBuiltin({ perTickItems: 1 }),
+        daemon: { contextRollup: { enabled: true, cadenceHours: 24, minTerminalTrajectories: 25 } },
+      },
+      {
+        now: () => now,
+        read: () => Array.from({ length: 25 }, (_, index): AgentActionEvent => {
+          const runId = `shadow-rollup-${index}`;
+          return {
+            schemaVersion: 1,
+            ts: new Date(now.getTime() - index * 1_000).toISOString(),
+            actor: 'daemon',
+            kind: 'dispatch',
+            outcome: 'unknown',
+            action: 'daemon:dispatch',
+            summary: 'shadow observation',
+            runId,
+            trajectoryId: `run:${runId}`,
+            learningSource: 'daemon-dispatch',
+            runEventSummary: {
+              runId,
+              status: 'done',
+              outcome: 'shadow-observation',
+              proposalCreated: false,
+            },
+            learningLabel: {
+              schemaVersion: 1,
+              classifierVersion: 'attempt-shape-v2',
+              authoritative: true,
+              learningKind: 'unknown',
+              policySuppressed: false,
+              diagnosticNoProposal: false,
+              diagnosticAttempt: false,
+              attemptShape: {
+                backendNoDiff: 0,
+                captureOrGateBlocked: 0,
+                repairAttempts: 0,
+                policyDisabled: 0,
+              },
+            },
+          };
+        }),
+        record,
+      },
+    );
+
+    expect(result.disposition).toBe('noop');
+    expect(record).not.toHaveBeenCalled();
   });
 
   it('E2: runDaemon loop with maxCycles=2 runs exactly 2 ticks and stops', async () => {

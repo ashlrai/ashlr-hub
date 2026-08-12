@@ -21,7 +21,9 @@
   authoritative daemon production classification. The integration now excludes
   every shadow row and its aggregate critique from production classification;
   all-shadow races emit `shadow-observation`, which is withheld from production
-  learning while preserving shadow ledger and cost telemetry.
+  learning while preserving shadow ledger and cost telemetry. Follow-up review
+  also closed worked-ledger cooldown and context-rollup paths; full M53 + M201
+  validation passes 316/316.
 
 ## Non-Negotiable Evidence Gates
 
