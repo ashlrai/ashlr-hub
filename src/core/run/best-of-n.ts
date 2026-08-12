@@ -799,6 +799,19 @@ async function runBestOfNInternal(
       invalidReason: 'candidate specs could not be materialized',
     }]);
   }
+  const invalidSpec = specs.find((spec) => spec.invalidReason !== undefined);
+  if (invalidSpec) {
+    // An explicit candidate list is one authority-bearing configuration unit.
+    // Never let a valid sibling run when another entry was malformed: doing so
+    // could turn an intended shadow-only race into an ordinary proposal-capable
+    // execution. Collapse the entire list to a refusal before fan-out.
+    specs = Object.freeze([{
+      engine: defaultEngine,
+      model: opts?.model ?? null,
+      invalidReason: invalidSpec.invalidReason,
+      ...(invalidSpec.invalidShadow ? { invalidShadow: true as const } : {}),
+    }]);
+  }
   const runnerFor = (e: EngineId): typeof runEngineSandboxed => {
     const spec = resolveEngineSpec(e, cfg);
     return spec?.kind === 'api-model' ? runApiModelSandboxed : runEngineSandboxed;

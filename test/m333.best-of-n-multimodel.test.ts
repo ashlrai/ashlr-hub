@@ -877,6 +877,33 @@ describe('M333 — candidate specs', () => {
     expect(result.candidates[0]?.error).toContain('candidate configuration refused');
   });
 
+  it('refuses the whole explicit race when one candidate is malformed', async () => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const api = makeSandboxMock(0.0, 'api');
+    const h = await harness({ cli: cli.fn, api: api.fn, draftMode: true });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 2,
+      candidates: [
+        { engine: 'claude', model: 'claude:sonnet' },
+        {
+          engine: 'local-coder',
+          model: 'nemotron-shadow:exact',
+          shadow: { enabled: true, artifactDigest: 'mutable-tag' },
+        } as never,
+      ],
+    });
+
+    expect(result.winner).toBeUndefined();
+    expect(result.candidates).toHaveLength(2);
+    expect(result.candidates.every((candidate) =>
+      candidate.error === 'candidate configuration refused: shadow candidate has invalid fields')).toBe(true);
+    expect(cli.fn).not.toHaveBeenCalled();
+    expect(api.fn).not.toHaveBeenCalled();
+    expect(h.createSandbox).not.toHaveBeenCalled();
+    expect(h.captureSandboxedProposal).not.toHaveBeenCalled();
+  });
+
   it('honors daemon candidate refusal without default-spec provider fallback', async () => {
     const cli = makeSandboxMock(0.1, 'cli');
     const api = makeSandboxMock(0.0, 'api');
