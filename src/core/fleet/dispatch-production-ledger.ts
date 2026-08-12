@@ -153,7 +153,7 @@ const WORK_SOURCES = new Set<WorkItem['source']>([
 ]);
 const DISPATCH_PRODUCTION_OUTCOMES = new Set<DaemonDispatchProductionOutcome>([
   'proposal-created', 'cancelled', 'empty-diff', 'gate-blocked', 'engine-failed',
-  'sandbox-failed', 'proposal-capture-error', 'proposal-disabled', 'unknown',
+  'sandbox-failed', 'proposal-capture-error', 'proposal-disabled', 'shadow-observation', 'unknown',
 ]);
 const DISPATCH_PRODUCTION_BASES = new Set<DispatchProductionBasis>([
   'run-proposal-outcome', 'pending-proposal-delta', 'best-of-n-summary',

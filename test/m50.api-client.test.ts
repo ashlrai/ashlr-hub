@@ -587,16 +587,13 @@ describe('buildOpenAICompatibleClient — caller cancellation', () => {
     const bodyStarted = new Promise<void>((resolve) => { markBodyStarted = resolve; });
     vi.stubGlobal('fetch', vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
       requestSignal = init?.signal ?? undefined;
-      return Promise.resolve({
-        ok: false,
-        status: 503,
-        text: () => {
+      const body = new ReadableStream<Uint8Array>({
+        start(stream) {
           markBodyStarted();
-          return new Promise((_resolve, reject) => {
-            requestSignal?.addEventListener('abort', () => reject(requestSignal?.reason), { once: true });
-          });
+          requestSignal?.addEventListener('abort', () => stream.error(requestSignal?.reason), { once: true });
         },
-      } as unknown as Response);
+      });
+      return Promise.resolve(new Response(body, { status: 503 }));
     }));
     const client = buildOpenAICompatibleClient(
       'https://api.example.com/v1',

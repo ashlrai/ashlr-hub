@@ -365,6 +365,7 @@ vi.mock('../src/core/daemon/cutoff-checkpoint-scheduler.js', () => ({
 import {
   tick,
   runDaemon,
+  recordContextRollupAfterTick,
   recoverDaemonSpendGuardOnStartup,
   saveResidentDaemonState,
   stopDaemon,
@@ -1415,7 +1416,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockRunSwarm).not.toHaveBeenCalled();
   }, 15_000);
 
-  it('A0: dispatch production maps proposal-created to diff, no-proposal outcomes to empty, and proposal-disabled to neutral', () => {
+  it('A0: dispatch production maps proposal-created to diff, no-proposal outcomes to empty, and non-authoritative outcomes to neutral', () => {
     expect(workedOutcomeFromDispatchProduction(undefined)).toBeUndefined();
     expect(workedOutcomeFromDispatchProduction({
       outcome: 'proposal-created',
@@ -1436,6 +1437,10 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(workedOutcomeFromDispatchProduction({
       outcome: 'proposal-disabled',
       runId: 'run-proposal-disabled',
+    })).toBeUndefined();
+    expect(workedOutcomeFromDispatchProduction({
+      outcome: 'shadow-observation',
+      runId: 'run-shadow-observation',
     })).toBeUndefined();
   });
 
@@ -4519,6 +4524,114 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       });
     },
   );
+
+  it('A1h2a6f: observation-only shadow refusal cannot relabel a production empty diff', async () => {
+    const { items } = enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'shadow fan-out' });
+    mockEngineTierOf.mockReturnValue('mid');
+    mockRunBestOfN.mockResolvedValueOnce({
+      winner: undefined,
+      candidates: [
+        {
+          index: 0,
+          engine: 'local-coder',
+          diff: '',
+          score: 0,
+          proposalOutcome: { kind: 'empty-diff', reason: 'baseline produced no file changes' },
+          error: 'empty-diff: baseline produced no file changes',
+          costUsd: 0.01,
+        },
+        {
+          index: 1,
+          engine: 'local-coder',
+          model: 'nemotron-shadow:exact',
+          diff: '',
+          score: 0,
+          shadow: true,
+          shadowParticipated: false,
+          shadowIdentityStatus: 'refused',
+          error: 'shadow identity refused: digest-mismatch',
+          costUsd: 0,
+        },
+      ],
+      critique: {
+        n: 2,
+        nonEmpty: 0,
+        judged: 0,
+        topScore: 0,
+        winnerIndex: -1,
+        totalCostUsd: 0.01,
+        billableCostUsd: 0.01,
+        noProposalReasons: [
+          { reason: 'empty-diff: baseline produced no file changes', count: 1 },
+          { reason: 'shadow identity refused: digest-mismatch', count: 1 },
+        ],
+      },
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'], bestOfN: 2 },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.dispatches?.[0]?.production).toMatchObject({
+      outcome: 'empty-diff',
+      reason: 'best-of-2: baseline produced no file changes',
+      runEventSummary: { status: 'done', outcome: 'empty-diff', costUsd: 0.01 },
+    });
+    expect(readDispatchProductionEvents({ limit: 1 })[0]).toMatchObject({
+      itemId: items[0]!.id,
+      outcome: 'empty-diff',
+      learningLabel: { learningKind: 'diagnostic-no-proposal', diagnosticAttempt: true },
+    });
+  });
+
+  it('A1h2a6g: an all-shadow race emits a non-learning unknown production observation', async () => {
+    const { items } = enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'shadow-only fan-out' });
+    mockEngineTierOf.mockReturnValue('mid');
+    mockRunBestOfN.mockResolvedValueOnce({
+      winner: undefined,
+      candidates: [0, 1].map((index) => ({
+        index,
+        engine: 'local-coder',
+        model: `nemotron-shadow:${index}`,
+        diff: '',
+        score: 0,
+        shadow: true,
+        shadowParticipated: false,
+        shadowIdentityStatus: 'refused' as const,
+        error: 'shadow identity refused: digest-mismatch',
+        costUsd: 0,
+      })),
+      critique: {
+        n: 2,
+        nonEmpty: 0,
+        judged: 0,
+        topScore: 0,
+        winnerIndex: -1,
+        totalCostUsd: 0,
+        billableCostUsd: 0,
+        noProposalReasons: [{ reason: 'shadow identity refused: digest-mismatch', count: 1 }],
+      },
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'], bestOfN: 2 },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.dispatches?.[0]?.production).toMatchObject({
+      outcome: 'shadow-observation',
+      reason: 'best-of-2: shadow-only observation produced no authoritative production outcome',
+    });
+    expect(readDispatchProductionEvents({ limit: 1 })[0]).toMatchObject({
+      itemId: items[0]!.id,
+      outcome: 'shadow-observation',
+      learningLabel: { learningKind: 'unknown', diagnosticAttempt: false },
+    });
+    expect(loadWorkedLedger().events.filter((event) => event.itemId === items[0]!.id)).toEqual([]);
+  });
 
   it.each([false, true])(
     'A1h2a6e2: same-class Best-of-N diagnostics use stable candidate identity (reversed=%s)',
@@ -9293,6 +9406,62 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
     expect(readAgentActions().filter((event) => event.action === 'daemon:context-rollup')).toHaveLength(1);
   });
 
+  it('E1c1: shadow-only observations cannot satisfy context-rollup terminal authority', () => {
+    const now = new Date();
+    const record = vi.fn(() => true);
+    const result = recordContextRollupAfterTick(
+      { reason: 'ok' } as DaemonTick,
+      { dryRun: false },
+      {
+        ...cfgBuiltin({ perTickItems: 1 }),
+        daemon: { contextRollup: { enabled: true, cadenceHours: 24, minTerminalTrajectories: 25 } },
+      },
+      {
+        now: () => now,
+        read: () => Array.from({ length: 25 }, (_, index): AgentActionEvent => {
+          const runId = `shadow-rollup-${index}`;
+          return {
+            schemaVersion: 1,
+            ts: new Date(now.getTime() - index * 1_000).toISOString(),
+            actor: 'daemon',
+            kind: 'dispatch',
+            outcome: 'unknown',
+            action: 'daemon:dispatch',
+            summary: 'shadow observation',
+            runId,
+            trajectoryId: `run:${runId}`,
+            learningSource: 'daemon-dispatch',
+            runEventSummary: {
+              runId,
+              status: 'done',
+              outcome: 'shadow-observation',
+              proposalCreated: false,
+            },
+            learningLabel: {
+              schemaVersion: 1,
+              classifierVersion: 'attempt-shape-v2',
+              authoritative: true,
+              learningKind: 'unknown',
+              policySuppressed: false,
+              diagnosticNoProposal: false,
+              diagnosticAttempt: false,
+              attemptShape: {
+                backendNoDiff: 0,
+                captureOrGateBlocked: 0,
+                repairAttempts: 0,
+                policyDisabled: 0,
+              },
+            },
+          };
+        }),
+        record,
+      },
+    );
+
+    expect(result.disposition).toBe('noop');
+    expect(record).not.toHaveBeenCalled();
+  });
+
   it('E2: runDaemon loop with maxCycles=2 runs exactly 2 ticks and stops', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
@@ -9705,6 +9874,89 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
 
     expect(mockRunBestOfN).toHaveBeenCalledTimes(1);
     expect(mockRunBestOfN.mock.calls[0]?.[2]).toMatchObject({ signal: shutdown.signal });
+    expect(mockRunGoal).not.toHaveBeenCalled();
+  });
+
+  it('E3g1: any invalid explicit candidate refuses the whole race instead of falling back', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: makeItems(repo.dir, 1),
+    });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'shadow config test' });
+    mockEngineTierOf.mockReturnValue('mid');
+    const digest = `sha256:${'a'.repeat(64)}`;
+
+    await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: {
+        allowedBackends: ['local-coder', 'claude'],
+        bestOfN: 3,
+        bestOfNCandidates: [
+          {
+            engine: 'local-coder',
+            model: 'nemotron-shadow:exact',
+            shadow: { enabled: true, artifactDigest: digest },
+          },
+          { engine: 'claude', model: 'claude-sonnet-5' },
+          {
+            engine: 'local-coder',
+            model: 'refused-false-enable',
+            shadow: { enabled: false, artifactDigest: digest },
+          },
+          {
+            engine: 'claude',
+            model: 'refused-non-local-shadow',
+            shadow: { enabled: true, artifactDigest: digest },
+          },
+          {
+            engine: 'local-coder',
+            model: 'refused-unknown-key',
+            shadow: { enabled: true, artifactDigest: digest },
+            unknown: true,
+          },
+        ],
+      },
+    } as unknown as AshlrConfig, { dryRun: false });
+
+    expect(mockRunBestOfN).toHaveBeenCalledTimes(1);
+    expect(mockRunBestOfN.mock.calls[0]?.[2]).toMatchObject({
+      candidateConfigRefusal: 'explicit bestOfNCandidates refused',
+    });
+    expect(mockRunBestOfN.mock.calls[0]?.[2]).not.toHaveProperty('candidates');
+    expect(mockRunGoal).not.toHaveBeenCalled();
+  });
+
+  it('E3g2: a Proxy trap in explicit candidates fails closed without escaping tick', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: makeItems(repo.dir, 1),
+    });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'proxy config test' });
+    mockEngineTierOf.mockReturnValue('mid');
+    const trappedCandidate = new Proxy({}, {
+      ownKeys: () => { throw new Error('trap'); },
+    });
+
+    await expect(tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: {
+        allowedBackends: ['local-coder'],
+        bestOfN: 2,
+        bestOfNCandidates: [trappedCandidate, { engine: 'local-coder' }],
+      },
+    } as unknown as AshlrConfig, { dryRun: false })).resolves.toBeDefined();
+
+    expect(mockRunBestOfN).toHaveBeenCalledTimes(1);
+    expect(mockRunBestOfN.mock.calls[0]?.[2]).toMatchObject({
+      candidateConfigRefusal: 'explicit bestOfNCandidates refused',
+    });
+    expect(mockRunBestOfN.mock.calls[0]?.[2]).not.toHaveProperty('candidates');
     expect(mockRunGoal).not.toHaveBeenCalled();
   });
 
