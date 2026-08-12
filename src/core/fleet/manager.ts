@@ -41,6 +41,7 @@ import {
   reviewModelFamily,
   type ReviewModelFamily,
 } from './reviewer-independence.js';
+import { evaluateProposalEffectPolicy } from '../inbox/review-policy.js';
 
 // ---------------------------------------------------------------------------
 // Public types (defined here — not in types.ts per file ownership rules)
@@ -70,6 +71,8 @@ export interface ManagerVerdict {
   wouldMerge: boolean;
   /** Opaque metadata-only observations; never judge or merge authority. */
   semanticEvents?: AgentSemanticEventV1[];
+  /** Truthful outcome of the optional machine rejection request. */
+  inboxRejection?: 'persisted' | 'refused';
 }
 
 export function managerSemanticEvents(
@@ -168,6 +171,8 @@ export interface ManagerReport {
   narrative: string;
   /** Model id used as the judge (e.g. 'claude-opus-4-5' or 'local'). */
   judgeEngine: string;
+  /** Pending rows withheld before any judge/provider work by effect policy. */
+  effectPolicyWithheld?: number;
 }
 
 /** Truncate diff to ~6KB for the judge prompt. */
@@ -1211,14 +1216,22 @@ function writeReport(report: ManagerReport): void {
 // Narrative + recommendations
 // ---------------------------------------------------------------------------
 
-function buildNarrative(metrics: QualityMetrics, verdicts: ManagerVerdict[]): string {
+function buildNarrative(
+  metrics: QualityMetrics,
+  verdicts: ManagerVerdict[],
+  effectPolicyWithheld: number,
+): string {
   const total = verdicts.length;
   const ships = verdicts.filter((v) => v.verdict === 'ship').length;
   const noises = verdicts.filter((v) => v.verdict === 'noise').length;
   const harmful = verdicts.filter((v) => v.verdict === 'harmful').length;
   const reviews = total - ships - noises - harmful;
 
+  const withheld = effectPolicyWithheld > 0
+    ? `${effectPolicyWithheld} pending proposal(s) were withheld before provider work by the effect-policy gate. `
+    : '';
   return (
+    withheld +
     `Fleet judged ${total} proposal(s) in the ${metrics.window} window. ` +
     `${ships} ready to ship, ${reviews} need review, ${noises} noise, ${harmful} harmful. ` +
     'Positive post-merge learning credit is unavailable pending authenticated release. ' +
@@ -1226,8 +1239,18 @@ function buildNarrative(metrics: QualityMetrics, verdicts: ManagerVerdict[]): st
   );
 }
 
-function buildRecommendations(metrics: QualityMetrics, verdicts: ManagerVerdict[]): string[] {
+function buildRecommendations(
+  metrics: QualityMetrics,
+  verdicts: ManagerVerdict[],
+  effectPolicyWithheld: number,
+): string[] {
   const recs: string[] = [];
+
+  if (effectPolicyWithheld > 0) {
+    recs.push(
+      `${effectPolicyWithheld} pending proposal(s) require a separately authenticated human capability before decision or effect.`,
+    );
+  }
 
   if (metrics.emptyRate > 0.3) {
     recs.push('High empty-diff rate — check engine prompts; many proposals lack a diff.');
@@ -1247,7 +1270,7 @@ function buildRecommendations(metrics: QualityMetrics, verdicts: ManagerVerdict[
     recs.push(`${harmfulCount} harmful proposal(s) flagged — audit engine outputs and tighten confinement.`);
   }
 
-  if (recs.length === 0) {
+  if (recs.length === 0 && effectPolicyWithheld === 0) {
     recs.push('Fleet health looks nominal — no urgent tuning needed.');
   }
   return recs;
@@ -1310,6 +1333,7 @@ export async function runManager(
     recommendations: ['runManager failed to initialize — check provider configuration.'],
     narrative: 'Manager could not run due to an initialization error.',
     judgeEngine,
+    effectPolicyWithheld: 0,
   });
 
   try {
@@ -1378,8 +1402,13 @@ export async function runManager(
 
     // ── Judge each proposal ────────────────────────────────────────────────
     const verdicts: ManagerVerdict[] = [];
+    let effectPolicyWithheld = 0;
 
     for (const proposal of proposals) {
+      if (!evaluateProposalEffectPolicy(proposal, 'manager-judge').allowed) {
+        effectPolicyWithheld++;
+        continue;
+      }
       let verdict: ManagerVerdict;
       const judgeClient = await resolveIndependentReviewer(proposal);
       let activeJudgeEngine = judgeClient?.model ?? 'unavailable';
@@ -1474,14 +1503,14 @@ export async function runManager(
       if (applyRejects && (verdict.verdict === 'noise' || verdict.verdict === 'harmful')) {
         try {
           const { setStatus } = await import('../inbox/store.js');
-          setStatus(
+          verdict.inboxRejection = setStatus(
             proposal.id,
             'rejected',
             undefined,
             judgeDecisionReasonCode(verdict.verdict, false),
-          );
+          ) ? 'persisted' : 'refused';
         } catch {
-          // Best-effort — never throws.
+          verdict.inboxRejection = 'refused';
         }
       }
     }
@@ -1497,13 +1526,15 @@ export async function runManager(
       });
 
     const concerns = buildConcerns(verdicts);
-    const recommendations = buildRecommendations(metrics, verdicts);
-    const narrative = buildNarrative(metrics, verdicts);
+    const recommendations = buildRecommendations(metrics, verdicts, effectPolicyWithheld);
+    const narrative = buildNarrative(metrics, verdicts, effectPolicyWithheld);
 
     if (judgeEnginesUsed.size > 1) {
       judgeEngine = `mixed:${[...judgeEnginesUsed].sort().join(',')}`;
     } else if (judgeEnginesUsed.size === 1) {
       judgeEngine = [...judgeEnginesUsed][0]!;
+    } else if (effectPolicyWithheld > 0) {
+      judgeEngine = 'not-invoked';
     }
 
     const report: ManagerReport = {
@@ -1516,6 +1547,7 @@ export async function runManager(
       recommendations,
       narrative,
       judgeEngine,
+      effectPolicyWithheld,
     };
 
     writeReport(report);

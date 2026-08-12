@@ -32,6 +32,7 @@
 import type { AshlrConfig, Proposal } from '../types.js';
 import {
   listProposalsDetailed,
+  loadProposal,
   replayRealizedMergeFanout,
   setStatus,
   updateProposalField,
@@ -81,6 +82,7 @@ import {
   releaseProposalMutationLock,
   type ProposalMutationLock,
 } from '../inbox/proposal-mutation-lock.js';
+import { evaluateProposalEffectPolicy } from '../inbox/review-policy.js';
 
 const MAX_REALIZED_MERGE_FANOUT_REPLAYS_PER_PASS = 16;
 let realizedMergeFanoutReplayCursor: string | null = null;
@@ -141,21 +143,38 @@ async function runAuthorizedFrontierJudge(
   cfg: AshlrConfig,
   judgeClient: { complete: (system: string, user: string) => Promise<string>; model: string },
 ): Promise<AuthorizedJudgeResult> {
-  const repo = proposal.repo;
   const refused = (): AuthorizedJudgeResult => ({
     requested: false,
     verdict: null,
     decisionPersisted: false,
     authorityLive: false,
   });
-  if (!repo) return refused();
+  const proposalLock = acquireProposalMutationLock(proposal.id);
+  if (!proposalLock || !ownsProposalMutationLock(proposal.id, proposalLock)) {
+    releaseProposalMutationLock(proposalLock);
+    return refused();
+  }
+  const lockedProposal = loadProposal(proposal.id);
+  if (!lockedProposal?.repo ||
+    !evaluateProposalEffectPolicy(lockedProposal, 'judge').allowed) {
+    releaseProposalMutationLock(proposalLock);
+    return refused();
+  }
+  const repo = lockedProposal.repo;
+  const lockedPolicyAttestation = lockedProposal.effectPolicy?.attestation;
   const fence = acquireOutwardMutationFence();
   if (!fence || !ownsOutwardMutationFence(fence)) {
     releaseOutwardMutationFence(fence);
+    releaseProposalMutationLock(proposalLock);
     return refused();
   }
-  const authorized = (): boolean => ownsOutwardMutationFence(fence) &&
-    !killSwitchOn() && isEnrolled(repo);
+  const authorized = (): boolean => {
+    if (!ownsProposalMutationLock(proposal.id, proposalLock) ||
+      !ownsOutwardMutationFence(fence) || killSwitchOn() || !isEnrolled(repo)) return false;
+    const current = loadProposal(proposal.id);
+    return Boolean(current && current.effectPolicy?.attestation === lockedPolicyAttestation &&
+      evaluateProposalEffectPolicy(current, 'judge').allowed);
+  };
   let requested = false;
   let verdict: ManagerVerdict | null = null;
   let decisionPersisted = false;
@@ -163,7 +182,7 @@ async function runAuthorizedFrontierJudge(
     if (!authorized()) return refused();
     requested = true;
     try {
-      verdict = await judgeProposal(proposal, cfg, judgeClient);
+      verdict = await judgeProposal(lockedProposal, cfg, judgeClient);
     } catch {
       verdict = null;
     }
@@ -179,14 +198,14 @@ async function runAuthorizedFrontierJudge(
         const judgeEngine = judgeClient.model;
         let judgeAttestation: string | undefined;
         const ts = new Date().toISOString();
-        const reviewerIndependent = evaluateReviewerIndependence(proposal, judgeEngine).independent;
+        const reviewerIndependent = evaluateReviewerIndependence(lockedProposal, judgeEngine).independent;
         if (isFrontierJudge(judgeEngine) && reviewerIndependent) {
           try {
             judgeAttestation = signJudgeAttestation({
-              proposalId: proposal.id,
+              proposalId: lockedProposal.id,
               judgeEngine,
               verdict: 'ship',
-              diffHash: hashDiff(proposal.diff ?? ''),
+              diffHash: hashDiff(lockedProposal.diff ?? ''),
               issuedAt: ts,
               mergeIntent: 'would-merge',
             });
@@ -197,8 +216,8 @@ async function runAuthorizedFrontierJudge(
         if (authorized()) {
           recordDecision({
             ts,
-            proposalId: proposal.id,
-            ...causalMetadataFromProposal(proposal, {
+            proposalId: lockedProposal.id,
+            ...causalMetadataFromProposal(lockedProposal, {
               ts,
               learningSource: 'decision-ledger',
               labelBasis: 'judge-verdict',
@@ -225,10 +244,10 @@ async function runAuthorizedFrontierJudge(
       try {
         await emitJudgeVerdict(
           cfg,
-          proposal.id,
+          lockedProposal.id,
           verdict?.verdict ?? 'null',
           repo,
-          proposal.engineTier,
+          lockedProposal.engineTier,
           { authority: fence },
         );
       } catch { /* best-effort observation */ }
@@ -236,6 +255,7 @@ async function runAuthorizedFrontierJudge(
     return { requested, verdict, decisionPersisted, authorityLive: authorized() };
   } finally {
     releaseOutwardMutationFence(fence);
+    releaseProposalMutationLock(proposalLock);
   }
 }
 
@@ -296,49 +316,65 @@ function runAuthorizedPostJudgePersistence(
     releaseProposalMutationLock(proposalLock);
     return refused();
   }
-  const authorized = (): boolean => ownsOutwardMutationFence(fence) &&
+  const authorized = (): boolean => ownsProposalMutationLock(proposal.id, proposalLock) &&
+    ownsOutwardMutationFence(fence) &&
     !killSwitchOn() && isEnrolled(repo);
   try {
     if (!authorized()) return refused();
+    const lockedProposal = loadProposal(proposal.id);
+    const lockedPolicyAttestation = lockedProposal?.effectPolicy?.attestation;
+    if (!lockedProposal || lockedProposal.repo !== repo ||
+      lockedPolicyAttestation !== proposal.effectPolicy?.attestation ||
+      !evaluateProposalEffectPolicy(lockedProposal, 'post-judge-persistence').allowed) {
+      return refused();
+    }
+    const policyAuthorized = (): boolean => {
+      if (!authorized()) return false;
+      const current = loadProposal(proposal.id);
+      return Boolean(current && current.repo === repo &&
+        current.effectPolicy?.attestation === lockedPolicyAttestation &&
+        evaluateProposalEffectPolicy(current, 'post-judge-persistence').allowed);
+    };
+    if (!policyAuthorized()) return refused();
     const mergeable = verdict?.verdict === 'ship' && verdict.wouldMerge === true;
     if (!mergeable) {
       try {
         learnFromRejection(
-          proposal.id,
+          lockedProposal.id,
           '',
           verdict?.verdict ?? 'review',
           '',
           cfg,
         );
       } catch { /* best-effort learning */ }
-      if (!authorized()) {
+      if (!policyAuthorized()) {
         return { entered: true, persisted: false, authorityLive: false, archived: false };
       }
-      const newCount = ((proposal as unknown as Record<string, unknown>)['judgeNonShipCount'] as number ?? 0) + 1;
+      const newCount = ((lockedProposal as unknown as Record<string, unknown>)['judgeNonShipCount'] as number ?? 0) + 1;
       const archived = newCount >= autoArchiveAfterRejects;
       const persisted = archived
         ? writeProposalStatus(
-            proposal,
+            lockedProposal,
             `auto-archived: judge returned non-mergeable verdict ${newCount} time(s) (threshold: ${autoArchiveAfterRejects})`,
             { proposalLock, outwardFence: fence },
           )
         : writeProposalField(
-            proposal,
+            lockedProposal,
             { judgeNonShipCount: newCount },
             { proposalLock, outwardFence: fence },
           );
-      return { entered: true, persisted, authorityLive: authorized(), archived: persisted && archived };
+      return { entered: true, persisted, authorityLive: policyAuthorized(), archived: persisted && archived };
     }
 
-    const existingCount = (proposal as unknown as Record<string, unknown>)['judgeNonShipCount'] as number | undefined;
+    const existingCount = (lockedProposal as unknown as Record<string, unknown>)['judgeNonShipCount'] as number | undefined;
     const persisted = existingCount !== undefined && existingCount > 0
       ? writeProposalField(
-          proposal,
+          lockedProposal,
           { judgeNonShipCount: 0 },
           { proposalLock, outwardFence: fence },
         )
       : true;
-    return { entered: true, persisted, authorityLive: authorized(), archived: false };
+    return { entered: true, persisted, authorityLive: policyAuthorized(), archived: false };
   } finally {
     releaseOutwardMutationFence(fence);
     releaseProposalMutationLock(proposalLock);
@@ -544,7 +580,12 @@ function runAuthorizedProposalWrite(
     ownsProposalMutationLock(proposal.id, proposalLock) &&
     ownsOutwardMutationFence(outwardFence) &&
     !killSwitchOn() &&
-    isEnrolled(repo);
+    isEnrolled(repo) && (() => {
+      const current = loadProposal(proposal.id);
+      return Boolean(current && current.repo === repo &&
+        current.effectPolicy?.attestation === proposal.effectPolicy?.attestation &&
+        evaluateProposalEffectPolicy(current, 'proposal-write').allowed);
+    })();
 
   try {
     // Recheck at entry and again at the write boundary. The second check closes
@@ -756,6 +797,30 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
   // for an already-authenticated merge receipt.
   if (cfg.foundry?.autoMerge?.enabled !== true) return out;
 
+  // Refuse effect-ineligible rows before TTL cleanup, verification, a judge
+  // call, or any retry. Automated maintenance must not convert a human-only
+  // policy into an approve/reject decision or spend provider budget on it.
+  const effectEligiblePending: Proposal[] = [];
+  for (const proposal of pending) {
+    const policy = evaluateProposalEffectPolicy(proposal, 'auto-merge-pass');
+    if (policy.allowed) {
+      effectEligiblePending.push(proposal);
+      continue;
+    }
+    const reason = `proposal effect policy refused auto-merge pass: ${policy.code}`;
+    out.skipped.push({ proposalId: proposal.id, check: 'effect-policy', reason });
+    out.results.push({ ok: false, merged: false, branched: false, reason });
+  }
+  pending = effectEligiblePending;
+  recovered = recovered.filter((proposal) => {
+    const policy = evaluateProposalEffectPolicy(proposal, 'remote-retry');
+    if (policy.allowed) return true;
+    const reason = `proposal effect policy refused remote retry: ${policy.code}`;
+    out.skipped.push({ proposalId: proposal.id, check: 'effect-policy', reason });
+    out.results.push({ ok: false, merged: false, branched: false, reason });
+    return false;
+  });
+
   // M259: resolve drain config from foundry (all additive — only add reject paths).
   const foundry = cfg.foundry as Record<string, unknown> | undefined;
 
@@ -804,6 +869,10 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
     if (queues === null) return out;
     pending = queues.pending;
     recovered = queues.recovered;
+    pending = pending.filter((proposal) =>
+      evaluateProposalEffectPolicy(proposal, 'auto-merge-pass').allowed);
+    recovered = recovered.filter((proposal) =>
+      evaluateProposalEffectPolicy(proposal, 'remote-retry').allowed);
   }
 
   // M263: sort oldest-first before the judge loop so the stalest proposals

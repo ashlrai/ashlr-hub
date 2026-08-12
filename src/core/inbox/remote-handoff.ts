@@ -48,6 +48,7 @@ import {
   type OutwardMutationFence,
 } from '../sandbox/mutation-fence.js';
 import { isEnrolled, killSwitchOn } from '../sandbox/policy.js';
+import { evaluateProposalEffectPolicy } from './review-policy.js';
 
 export interface RemoteHandoffReconcileResult {
   checked: number;
@@ -261,7 +262,8 @@ function verifyBoundRemoteIntent(
 export function isApprovedRemoteHandoffRetryCandidate(proposal: Proposal): boolean {
   try {
     const handoff = proposal.remoteHandoff;
-    if (proposal.status !== 'approved' || !proposal.repo) return false;
+    if (proposal.status !== 'approved' || !proposal.repo ||
+      !evaluateProposalEffectPolicy(proposal, 'remote-retry').allowed) return false;
     if (!handoff) {
       const authority = proposal.localMergeIntent?.remoteAuthority;
       return Boolean(authority && verifyStandaloneRemoteIntent(proposal, 'pre-effect', true) &&
@@ -601,7 +603,16 @@ function reconcileOne(proposal: Proposal): RemoteHandoffReconcileResult {
       return result;
     }
 
-    if (completeInterruptedRecoveryTransition(current, current.remoteHandoff, mutationLock, outwardFence)) {
+    // Keep host observation available for exact already-realized merge
+    // reconciliation, but never use a human-only/missing/invalid policy to
+    // start or retry a remote effect or to synthesize a decision.
+    const effectPolicyAllowsProgression = evaluateProposalEffectPolicy(
+      current,
+      'remote-handoff',
+    ).allowed;
+
+    if (effectPolicyAllowsProgression &&
+      completeInterruptedRecoveryTransition(current, current.remoteHandoff, mutationLock, outwardFence)) {
       result.recovered = 1;
       return result;
     }
@@ -621,7 +632,7 @@ function reconcileOne(proposal: Proposal): RemoteHandoffReconcileResult {
 
     const hostRead = viewPrWithReconciliation(repo, selector, proposal.id, authoritativeHandoff);
     if (!hostRead) {
-      if (!authoritativeHandoff.prUrl) {
+      if (effectPolicyAllowsProgression && !authoritativeHandoff.prUrl) {
         const noPr = hostProvesNoPr(repo, authoritativeHandoff, authority);
         current = loadProposal(proposal.id);
         if (noPr === true && awaitingHostMerge(current) &&
@@ -664,6 +675,68 @@ function reconcileOne(proposal: Proposal): RemoteHandoffReconcileResult {
     if (!awaitingHostMerge(current) || !sameQueryIdentity(authoritativeHandoff, current.remoteHandoff) ||
       !outwardAuthorityStillValid(current, current.remoteHandoff, outwardFence)) {
       result.unknown++;
+      return result;
+    }
+
+    const lockedEffectPolicyAllowsProgression = evaluateProposalEffectPolicy(
+      current,
+      'remote-handoff',
+    ).allowed;
+    if (!lockedEffectPolicyAllowsProgression) {
+      // This exception is observation-only: a complete, exact, independently
+      // attested host merge may be recorded after it already happened. Open,
+      // closed, missing, mismatched, or uncertain host state cannot advance,
+      // reject, recover, or retry the proposal.
+      if (!mergedAt || !mergeCommitOid || !reconciliation || !current.remoteHandoff.authority) {
+        result.unknown++;
+        return result;
+      }
+      // Do not bind a previously unknown PR URL under denied policy. The
+      // receipt writer requires the URL to have been durably bound before this
+      // pass; otherwise the observation remains unknown for an operator.
+      const observedHandoff = current.remoteHandoff.prUrl ? current.remoteHandoff : null;
+      if (!observedHandoff || hasConflictingIdentity(observedHandoff, pr) ||
+        !hasStrongIdentity(observedHandoff, pr)) {
+        result.unknown++;
+        return result;
+      }
+      const detail = `remote PR merged at ${mergedAt}: ${pr.url}`;
+      const remoteHandoff = mergeHandoff(observedHandoff, {
+        state: 'merged',
+        prUrl: pr.url,
+        mergedAt,
+        mergeCommitOid,
+        reconciliation,
+        detail,
+      });
+      const reloaded = loadProposal(proposal.id);
+      if (!awaitingHostMerge(reloaded) ||
+        evaluateProposalEffectPolicy(reloaded, 'remote-handoff').allowed ||
+        !reloaded.repo || !sameQueryIdentity(current.remoteHandoff, reloaded.remoteHandoff) ||
+        !outwardAuthorityStillValid(reloaded, reloaded.remoteHandoff, outwardFence) ||
+        !verifyRemoteHandoffReconciliation(proposal.id, reloaded.repo, remoteHandoff) ||
+        !recordRealizedMerge(proposal.id, {
+          schemaVersion: 1,
+          source: 'github-host',
+          provider: 'github',
+          prUrl: remoteHandoff.prUrl!,
+          branch: remoteHandoff.branch!,
+          base: remoteHandoff.base!,
+          expectedHeadOid: remoteHandoff.expectedHeadOid!,
+          mergeCommitOid: remoteHandoff.mergeCommitOid!,
+          mergedAt: remoteHandoff.mergedAt!,
+          reconciliation: remoteHandoff.reconciliation!,
+        }, mutationLock, () => {
+          const latest = loadProposal(proposal.id);
+          return awaitingHostMerge(latest) &&
+            !evaluateProposalEffectPolicy(latest, 'remote-handoff').allowed &&
+            sameQueryIdentity(reloaded.remoteHandoff, latest.remoteHandoff) &&
+            outwardAuthorityStillValid(latest, latest.remoteHandoff, outwardFence);
+        })) {
+        result.unknown++;
+        return result;
+      }
+      result.merged++;
       return result;
     }
 

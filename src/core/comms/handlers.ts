@@ -116,16 +116,21 @@ async function handleManagerApproval(req: CommsRequest, cfg: AshlrConfig): Promi
   if (typeof proposalId !== 'string' || !proposalId) return;
 
   if (idx === 0) {
-    // Approve & merge — a Telegram/iMessage tap from the authenticated owner
-    // IS a human approval. Use applyProposal (the human-authorized path), NOT
-    // autoMergeProposal (which is the autonomous frontier-only path). This lets
-    // local and mid-tier work merge when Mason explicitly approves via text.
+    // A Telegram/iMessage resolution is an observation of transport intent,
+    // not the separately authenticated one-use human capability required by a
+    // signed human-only proposal. The store is the final decision boundary.
     try {
       const { setStatus, loadProposal } = await import('../inbox/store.js');
       const proposal = loadProposal(proposalId);
       if (!proposal) return; // already gone — no-op
 
-      setStatus(proposalId, 'approved', 'mason:telegram');
+      if (!setStatus(proposalId, 'approved', 'mason:telegram')) {
+        await sendReply(
+          `Could not approve "${proposal.title}"; no authenticated human capability was accepted; reload to confirm current state`,
+          cfg,
+        );
+        return;
+      }
 
       const { applyProposal } = await import('../inbox/apply.js');
       const result = await applyProposal(proposalId, { confirmed: true });
@@ -154,7 +159,10 @@ async function handleManagerApproval(req: CommsRequest, cfg: AshlrConfig): Promi
       if (setStatus(proposalId, 'rejected', 'mason:telegram') !== false) {
         await sendReply(`Rejected "${proposal.title}"`, cfg);
       } else {
-        await sendReply(`Could not reject "${proposal.title}" because recovery revocation is unavailable`, cfg);
+        await sendReply(
+          `Could not reject "${proposal.title}"; no authenticated human capability was accepted; reload to confirm current state`,
+          cfg,
+        );
       }
     } catch {
       // Best-effort.
@@ -196,15 +204,17 @@ async function handleManagerApproval(req: CommsRequest, cfg: AshlrConfig): Promi
   // M212 quick-actions — additive, Telegram only, no merge/push/destructive ops.
 
   if (idx === 3) {
-    // Prioritize — bump the proposal to the top of the pending queue by
-    // updating its priority field (direction only — does not merge or apply).
+    // Prioritize remains unavailable until the transport can present an
+    // authenticated human capability. Do not persist a forged Mason decision
+    // or claim the effect-policy gate will dispatch the row.
     try {
-      const { loadProposal, setStatus } = await import('../inbox/store.js');
+      const { loadProposal } = await import('../inbox/store.js');
       const proposal = loadProposal(proposalId);
       if (!proposal) return;
-      // Mark as prioritized via a status annotation; the daemon re-queues on next pass.
-      setStatus(proposalId, 'pending', 'mason:prioritized');
-      await sendReply(`Prioritized "${proposal.title}" — will be picked up next pass`, cfg);
+      await sendReply(
+        `Could not prioritize "${proposal.title}"; authenticated human capability is not installed`,
+        cfg,
+      );
     } catch {
       // Best-effort.
     }

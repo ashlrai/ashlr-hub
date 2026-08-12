@@ -50,6 +50,7 @@ const RUN_MANAGER_REVIEWER_MODEL = 'claude-sonnet-4-5';
 
 // Track setStatus calls for shadow-mode assertions
 const setStatusCalls: Array<[string, string, string | undefined, string | undefined]> = [];
+let effectPolicyDenied = false;
 
 vi.mock('../src/core/inbox/store.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/inbox/store.js')>();
@@ -67,6 +68,20 @@ vi.mock('../src/core/inbox/store.js', async (importOriginal) => {
       // Also call the real setStatus if a proposal file exists (for integration sub-tests)
       try { actual.setStatus(id, status as Proposal['status'], result, reason); } catch { /* no-op */ }
     },
+  };
+});
+
+// Dormant manager-judge mechanics harness. Real persisted-row effect-policy
+// prefiltering is exercised without this mock in M505.
+vi.mock('../src/core/inbox/review-policy.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/inbox/review-policy.js')>();
+  return {
+    ...actual,
+    evaluateProposalEffectPolicy: () => ({
+      allowed: !effectPolicyDenied,
+      effectClass: 'outward-effect' as const,
+      code: effectPolicyDenied ? 'policy-human-only' as const : 'policy-not-required' as const,
+    }),
   };
 });
 
@@ -103,6 +118,7 @@ vi.mock('../src/core/inbox/merge.js', async (importOriginal) => {
 beforeEach(() => {
   mockProposals.length = 0;
   setStatusCalls.length = 0;
+  effectPolicyDenied = false;
 });
 
 // ---------------------------------------------------------------------------
@@ -868,6 +884,23 @@ describe('m120 runManager — shadow mode', () => {
       expect.objectContaining({ provider: 'anthropic' }),
     );
   });
+
+  it('truthfully reports policy-withheld rows without invoking a judge', async () => {
+    effectPolicyDenied = true;
+    mockProposals.push(makeProposal({ id: 'prop-policy-withheld' }));
+    const { getActiveClient } = await import('../src/core/run/provider-client.js');
+
+    const { runManager } = await import('../src/core/fleet/manager.js');
+    const report = await runManager({} as never);
+
+    expect(report.verdicts).toEqual([]);
+    expect(report.effectPolicyWithheld).toBe(1);
+    expect(report.judgeEngine).toBe('not-invoked');
+    expect(report.narrative).toContain('withheld before provider work');
+    expect(report.recommendations.join('\n')).toContain('authenticated human capability');
+    expect(report.recommendations.join('\n')).not.toContain('health looks nominal');
+    expect(getActiveClient).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -896,7 +929,7 @@ describe('m120 runManager — applyRejects=true', () => {
     }
 
     const { runManager } = await import('../src/core/fleet/manager.js');
-    await runManager({} as never, { applyRejects: true });
+    const report = await runManager({} as never, { applyRejects: true });
 
     // setStatus should have been called for noise (indices 1, 4) and harmful (index 3)
     expect(setStatusCalls.length).toBe(3);
@@ -905,6 +938,8 @@ describe('m120 runManager — applyRejects=true', () => {
       expect(['judge-noise', 'judge-harmful']).toContain(reason);
       expect(reason).not.toContain('verdict:');
     }
+    expect(report.verdicts.filter((verdict) => verdict.inboxRejection === 'refused')).toHaveLength(3);
+    expect(report.verdicts.some((verdict) => verdict.inboxRejection === 'persisted')).toBe(false);
   });
 
   it('does NOT call setStatus for ship or review verdicts', async () => {

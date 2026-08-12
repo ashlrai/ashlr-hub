@@ -3803,6 +3803,36 @@ export type ProposalKind = 'patch' | 'pr' | 'deploy' | 'note' | 'desktop-action'
  */
 export type ProposalStatus = 'pending' | 'approved' | 'rejected' | 'awaiting-host-merge' | 'applied' | 'failed';
 
+/**
+ * Lifecycle-stable, host-authenticated policy for a proposal's effects.
+ *
+ * Version 1 deliberately grants no effect authority: an outward-effect row is
+ * human-only, while a note with no action payload is observational. The closed
+ * tuple binds immutable proposal identity/content and is verified independently
+ * of mutable lifecycle fields such as status, result, and review annotations.
+ */
+export interface ProposalEffectPolicyV1 {
+  schemaVersion: 1;
+  reviewPolicy: 'human-only';
+  effectClass: 'none' | 'outward-effect';
+  proposalId: string;
+  repo: string | null;
+  origin: 'backlog' | 'swarm' | 'manual' | 'agent';
+  kind: ProposalKind;
+  titleDigest: string;
+  summaryDigest: string;
+  diffDigest: string | null;
+  actionDigest: string;
+  workItemId: string | null;
+  workItemGenerationId: string | null;
+  runId: string | null;
+  trajectoryId: string | null;
+  createdAt: string;
+  algorithm: 'hmac-sha256';
+  keyId: string;
+  attestation: string;
+}
+
 export interface ProposalVerifyResult {
   passed: boolean;
   failed?: string[];
@@ -4023,6 +4053,8 @@ export interface Proposal {
   pendingAuthorityVersion?: 1;
   /** HMAC covering the complete immutable pending-proposal authority envelope. */
   pendingAuthoritySig?: string;
+  /** Signed, lifecycle-stable human review policy for this proposal's effects. */
+  effectPolicy?: ProposalEffectPolicyV1;
   /** Current lifecycle status. Created as 'pending'; NEVER auto-advances. */
   status: ProposalStatus;
   /** ISO timestamp the proposal was created. */
@@ -4031,6 +4063,15 @@ export interface Proposal {
   decidedAt?: string;
   /** Outcome detail recorded by applyProposal (branch name, PR url, error). */
   result?: string;
+  /** Non-persisted create refusal; machine-readable and never a human decision. */
+  creationFailureCode?:
+    | 'invalid-repository-identity'
+    | 'invalid-action-payload'
+    | 'effect-policy-unavailable'
+    | 'admission-source-incomplete'
+    | 'admission-capacity-unavailable'
+    | 'proposal-record-too-large'
+    | 'storage-authority-unavailable';
   /**
    * Metadata for remote host handoffs. A proposal with status
    * 'awaiting-host-merge' is not counted as landed until reconciliation proves
@@ -4057,6 +4098,8 @@ export interface Proposal {
    * M119: Human or manager-agent reason recorded at decide time.
    */
   decisionReason?: string;
+  /** Bounded non-decisional machine finding; never represents human review. */
+  safetyAnnotation?: 'destructive-diff-review-required';
   /**
    * M119: Risk classification for the change (set by manager or trust gate).
    */

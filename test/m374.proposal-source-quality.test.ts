@@ -233,8 +233,8 @@ describe('M374 bounded detailed proposal enumeration', () => {
       summary: oversizedSummary,
     });
     expect(written).toMatchObject({
-      status: 'rejected',
-      decisionReason: 'proposal persistence failed',
+      status: 'failed',
+      creationFailureCode: 'proposal-record-too-large',
     });
     expect(fs.existsSync(path.join(inboxDir(), `${written.id}.json`))).toBe(false);
 

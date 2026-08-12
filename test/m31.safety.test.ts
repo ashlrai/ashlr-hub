@@ -21,6 +21,10 @@ import { makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
 import { nativeToolDefs, callNativeTool } from '../src/core/mcp-native.js';
 import { hubStorePath } from '../src/core/genome/store.js';
 import { listProposals } from '../src/core/inbox/store.js';
+import {
+  acquireProposalStoreMutationLock,
+  releaseProposalStoreMutationLock,
+} from '../src/core/inbox/proposal-mutation-lock.js';
 
 let fx: H1Fixture;
 
@@ -87,6 +91,28 @@ describe('invariant 1 — no approval path', () => {
     });
     expect(r.isError).toBe(true);
     expect(listProposals()).toHaveLength(0);
+  });
+
+  it('never claims a proposal was created when durable store authority is unavailable', async () => {
+    const owner = acquireProposalStoreMutationLock(20);
+    expect(owner).not.toBeNull();
+    try {
+      const r = await callNativeTool('ashlr_inbox_propose', {
+        kind: 'note',
+        title: 'must not false-green',
+        summary: 'the store fence is intentionally held',
+      });
+      const parsed = JSON.parse(resultText(r)) as Record<string, unknown>;
+      expect(parsed).toMatchObject({
+        created: false,
+        status: 'failed',
+        creationFailureCode: 'storage-authority-unavailable',
+        error: 'proposal was not durably filed',
+      });
+      expect(listProposals()).toHaveLength(0);
+    } finally {
+      releaseProposalStoreMutationLock(owner);
+    }
   });
 });
 

@@ -151,7 +151,7 @@ function lockAcquisitionRequests(
   ];
 }
 
-function expectSetStatusPrivateStorageRequests(proposalId: string): void {
+function _expectSetStatusPrivateStorageRequests(proposalId: string): void {
   if (process.platform !== 'win32') return;
   const requests = semanticPrivateStorage?.requests ?? [];
   const root = path.join(tmpHome, '.ashlr');
@@ -1109,7 +1109,7 @@ describe('m119 decisions-ledger', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 3. store.setStatus hook — records ledger entry without breaking existing behavior
+// 3. store.setStatus hook — withholds decisions without human authority
 // ---------------------------------------------------------------------------
 
 describe('m119 store.setStatus ledger hook', () => {
@@ -1121,7 +1121,7 @@ describe('m119 store.setStatus ledger hook', () => {
     clearSemanticPrivateStorage();
   });
 
-  it('records a rejection in the ledger without changing proposal behavior', async () => {
+  it('withholds an unauthenticated rejection without recording decision authority', async () => {
     // We cannot easily test the full store in unit tests without a real inbox dir,
     // so we seed a proposal file directly and call setStatus.
     const inboxPath = path.join(tmpHome, '.ashlr', 'inbox');
@@ -1155,25 +1155,20 @@ describe('m119 store.setStatus ledger hook', () => {
       'rejected',
       undefined,
       'no diff',
-    )).toBe(true);
+    )).toBe(false);
 
-    // The proposal file should now have status === 'rejected'
+    // Human-only effect policy leaves the proposal pending and writes no decision.
     const raw = fs.readFileSync(path.join(inboxPath, 'prop-hook-test-001.json'), 'utf8');
     const updated = JSON.parse(raw) as { status: string; decisionReason?: string };
-    expect(updated.status).toBe('rejected');
-    expect(updated.decisionReason).toBe('no diff');
+    expect(updated.status).toBe('pending');
+    expect(updated.decisionReason).toBeUndefined();
 
-    // The ledger should have an entry
     const { readDecisions } = await import('../src/core/fleet/decisions-ledger.js');
     const entries = readDecisions({ proposalId: 'prop-hook-test-001' });
-    expect(entries.length).toBeGreaterThanOrEqual(1);
-    expect(entries[0]!.action).toBe('rejected');
-    expect(entries[0]!.model).toBe('codex:gpt-5.5');
-    expect(entries[0]!.reason).toBe('no diff');
-    expectSetStatusPrivateStorageRequests('prop-hook-test-001');
+    expect(entries).toEqual([]);
   });
 
-  it('setStatus without reason param behaves identically to before M119', async () => {
+  it('withholds an unauthenticated approval without a reason parameter', async () => {
     const inboxPath = path.join(tmpHome, '.ashlr', 'inbox');
     fs.mkdirSync(inboxPath, { recursive: true });
 
@@ -1194,14 +1189,12 @@ describe('m119 store.setStatus ledger hook', () => {
     );
 
     const storeModule = await import('../src/core/inbox/store.js');
-    expect(storeModule.setStatus('prop-hook-test-002', 'approved')).toBe(true);
+    expect(storeModule.setStatus('prop-hook-test-002', 'approved')).toBe(false);
 
     const raw = fs.readFileSync(path.join(inboxPath, 'prop-hook-test-002.json'), 'utf8');
     const updated = JSON.parse(raw) as { status: string; decisionReason?: string };
-    expect(updated.status).toBe('approved');
-    // reason was not passed — decisionReason should be absent
+    expect(updated.status).toBe('pending');
     expect(updated.decisionReason).toBeUndefined();
-    expectSetStatusPrivateStorageRequests('prop-hook-test-002');
   });
 });
 

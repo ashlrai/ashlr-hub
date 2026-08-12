@@ -2235,10 +2235,15 @@ function buildInboxRow(p) {
 function buildInboxDetail(p) {
   const snap = state.snapshot;
   const dispatchEnabled = snap ? snap.dispatchEnabled === true : false;
-  const canAct = dispatchEnabled;
+  const humanEffectCapabilityAvailable = p.humanEffectCapabilityAvailable === true;
+  const canAct = dispatchEnabled && humanEffectCapabilityAvailable;
 
   let disabledReason = '';
-  if (!dispatchEnabled) disabledReason = 'Start the server with --allow-dispatch to approve or reject.';
+  if (!humanEffectCapabilityAvailable) {
+    disabledReason = 'Review only — authenticated human decision capability is not installed.';
+  } else if (!dispatchEnabled) {
+    disabledReason = 'Start the server with --allow-dispatch to approve or reject.';
+  }
 
   const detail = el('div', { cls: 'inbox-detail' });
 
@@ -2346,8 +2351,8 @@ function buildInboxDetail(p) {
     } catch (err) {
       resultLine.textContent = `Error: ${err.message}`;
       resultLine.className = 'inbox-detail__result inbox-detail__result--err';
-      approveBtn.disabled = false;
-      rejectBtn.disabled = false;
+      approveBtn.disabled = !canAct;
+      rejectBtn.disabled = !canAct;
     }
     // Refresh inbox list after action
     state.inboxDetail = null;
@@ -2368,8 +2373,8 @@ function buildInboxDetail(p) {
     } catch (err) {
       resultLine.textContent = `Error: ${err.message}`;
       resultLine.className = 'inbox-detail__result inbox-detail__result--err';
-      approveBtn.disabled = false;
-      rejectBtn.disabled = false;
+      approveBtn.disabled = !canAct;
+      rejectBtn.disabled = !canAct;
     }
     state.inboxDetail = null;
     await loadInbox();

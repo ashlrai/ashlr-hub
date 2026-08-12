@@ -110,6 +110,20 @@ vi.mock('../src/core/inbox/store.js', async (importOriginal) => {
   };
 });
 
+// Legacy mechanics fixture: M505 owns policy-authority coverage; this suite
+// exercises the dormant remote-handoff pipeline behind that gate.
+vi.mock('../src/core/inbox/review-policy.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/inbox/review-policy.js')>();
+  return {
+    ...actual,
+    evaluateProposalEffectPolicy: () => ({
+      allowed: true,
+      effectClass: 'outward-effect' as const,
+      code: 'policy-not-required' as const,
+    }),
+  };
+});
+
 import { autoMergeProposal } from '../src/core/inbox/merge.js';
 import { evidencePath, readAutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
 import { reconcileRemoteHandoffs } from '../src/core/inbox/remote-handoff.js';

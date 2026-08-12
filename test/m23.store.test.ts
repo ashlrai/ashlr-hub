@@ -17,7 +17,7 @@
  *  - persisted file is valid JSON with correct Proposal shape
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -62,6 +62,20 @@ import {
 import { canonicalizeProposalDiff } from '../src/core/util/scrub.js';
 import { readAudit } from '../src/core/sandbox/audit.js';
 import type { Proposal } from '../src/core/types.js';
+
+// Dormant lifecycle-mechanics harness only. The real default-deny policy and
+// every public adapter are exercised without this mock in M505 and gate tests.
+vi.mock('../src/core/inbox/review-policy.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/inbox/review-policy.js')>();
+  return {
+    ...actual,
+    evaluateProposalEffectPolicy: () => ({
+      allowed: true,
+      effectClass: 'outward-effect' as const,
+      code: 'policy-not-required' as const,
+    }),
+  };
+});
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -325,8 +339,9 @@ describe('M23 createProposal — persistence + initial state', () => {
     }));
 
     expect(rejected).toMatchObject({
-      status: 'rejected',
-      decisionReason: 'invalid proposal repository identity',
+      status: 'failed',
+      creationFailureCode: 'invalid-repository-identity',
+      result: 'proposal-creation-refused:invalid-repository-identity',
       runEventSummary: {
         runId: 'run-persistence-failed',
         proposalCreated: false,
@@ -349,14 +364,14 @@ describe('M23 createProposal — persistence + initial state', () => {
       for (const rejected of [first, second]) {
         expect(rejected).toMatchObject({
           repo: null,
-          status: 'rejected',
-          decisionReason: 'invalid proposal repository identity',
+          status: 'failed',
+          creationFailureCode: 'invalid-repository-identity',
         });
         expect(fs.existsSync(path.join(inboxDir(), `${rejected.id}.json`))).toBe(false);
       }
     }
 
-    const audits = readAudit().filter((entry) => entry.action === 'inbox:proposal-rejected');
+    const audits = readAudit().filter((entry) => entry.action === 'inbox:proposal-persistence-refused');
     expect(audits).toHaveLength(4);
     expect(audits.every((entry) => entry.repo === null)).toBe(true);
     expect(JSON.stringify(audits)).not.toContain(secret);
@@ -916,4 +931,98 @@ describe('M23 pendingCount — count of pending proposals', () => {
   it('never throws (returns 0 on error)', () => {
     expect(() => pendingCount()).not.toThrow();
   });
+});
+
+describe('M23 live proposal admission backpressure', () => {
+  function seedValidRows(count: number, offset = 0, summary = 'capacity filler'): void {
+    fs.mkdirSync(inboxDir(), { recursive: true, mode: 0o700 });
+    for (let index = 0; index < count; index++) {
+      const id = `capacity-${String(index + offset).padStart(6, '0')}`;
+      fs.writeFileSync(path.join(inboxDir(), `${id}.json`), JSON.stringify({
+        id,
+        repo: path.join(fs.realpathSync.native(os.tmpdir()), 'test-repo'),
+        origin: 'manual',
+        kind: 'patch',
+        title: id,
+        summary,
+        status: 'pending',
+        createdAt: '2026-08-11T00:00:00.000Z',
+      }), { mode: 0o600 });
+    }
+  }
+
+  it('admits row 3072, refuses a unique row above the file cap, and dedups before capacity', () => {
+    const diff = safeDiff();
+    const diffHash = hashDiff(diff);
+    const engineModel = 'local-coder:capacity-test';
+    const engineTier = 'mid' as const;
+    const provenanceSig = signProvenance(engineModel, engineTier, diffHash);
+    const authority = {
+      origin: 'agent' as const,
+      workItemId: 'issue:capacity-dedup',
+      diff,
+      diffHash,
+      engineModel,
+      engineTier,
+      provenanceSig,
+    };
+    seedValidRows(3_071);
+    const first = createProposal(makeInput({
+      ...authority,
+      runId: 'run-capacity-owner',
+      trajectoryId: 'run:run-capacity-owner',
+      runEventSummary: {
+        runId: 'run-capacity-owner',
+        status: 'done',
+        outcome: 'filed',
+        proposalCreated: true,
+      },
+    }));
+    expect(first.status).toBe('pending');
+    expect(fs.readdirSync(inboxDir()).filter((file) => file.endsWith('.json'))).toHaveLength(3_072);
+
+    const duplicate = createProposal(makeInput({
+      ...authority,
+      runId: 'run-capacity-duplicate',
+      trajectoryId: 'run:run-capacity-duplicate',
+      runEventSummary: {
+        runId: 'run-capacity-duplicate',
+        status: 'done',
+        outcome: 'filed',
+        proposalCreated: true,
+      },
+    }));
+    expect(duplicate.id).toBe(first.id);
+    expect(duplicate.status).toBe('rejected');
+    expect(loadProposal(first.id)?.status).toBe('pending');
+
+    const unique = createProposal(makeInput({ title: 'unique above file cap' }));
+    expect(unique).toMatchObject({
+      status: 'failed',
+      creationFailureCode: 'admission-capacity-unavailable',
+    });
+    expect(unique.decidedAt).toBeUndefined();
+    expect(loadProposal(unique.id)).toBeNull();
+  }, 30_000);
+
+  it('refuses above the byte cap and refuses an incomplete admission source', () => {
+    const nearFourMiB = 'x'.repeat((4 * 1024 * 1024) - 4_096);
+    seedValidRows(13, 0, nearFourMiB);
+    const byteRefused = createProposal(makeInput({ title: 'above byte cap' }));
+    expect(byteRefused).toMatchObject({
+      status: 'failed',
+      creationFailureCode: 'admission-capacity-unavailable',
+    });
+    expect(loadProposal(byteRefused.id)).toBeNull();
+
+    fs.rmSync(inboxDir(), { recursive: true, force: true });
+    fs.mkdirSync(inboxDir(), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(inboxDir(), 'malformed.json'), '{', { mode: 0o600 });
+    const degraded = createProposal(makeInput({ title: 'degraded source' }));
+    expect(degraded).toMatchObject({
+      status: 'failed',
+      creationFailureCode: 'admission-source-incomplete',
+    });
+    expect(loadProposal(degraded.id)).toBeNull();
+  }, 30_000);
 });

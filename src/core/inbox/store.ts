@@ -106,10 +106,41 @@ import {
   PROPOSAL_PERSISTENCE_MISMATCH_REASON,
   PROPOSAL_PERSISTENCE_MISMATCH_RESULT,
 } from './persistence-mismatch.js';
+import {
+  evaluateProposalEffectPolicy,
+  materializeProposalActionForPolicy,
+  mintProposalEffectPolicy,
+  verifyProposalEffectPolicy,
+} from './review-policy.js';
 
 const MAX_REALIZED_MERGE_FUTURE_SKEW_MS = 60_000;
 const AUTHORITATIVE_PROPOSAL_MAX_FILE_BYTES = 4 * 1024 * 1024;
 const REALIZED_MERGE_FANOUT_VERSION = 3;
+
+function materializeExactDataPatch(
+  value: unknown,
+  allowedKeys: ReadonlySet<string>,
+): Record<string, unknown> | null {
+  try {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+    const keys = Reflect.ownKeys(value);
+    const output = Object.create(null) as Record<string, unknown>;
+    for (const key of keys) {
+      if (typeof key !== 'string' || !allowedKeys.has(key)) return null;
+      const descriptor = Reflect.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) return null;
+      Object.defineProperty(output, key, {
+        value: descriptor.value,
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      });
+    }
+    return output;
+  } catch {
+    return null;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Path helpers (re-resolved at call-time so tests can relocate HOME)
@@ -429,6 +460,9 @@ function persistProposal(
   ownerLock?: ProposalStoreMutationLock,
 ): void {
   const ownsStoreLock = ownsProposalStoreMutationLock(ownerLock);
+  if (ownerLock !== undefined && !ownsStoreLock) {
+    throw new Error('Supplied proposal store mutation lock is no longer owned');
+  }
   const storeLock = ownsStoreLock ? ownerLock! : acquireProposalStoreMutationLock();
   if (!storeLock) throw new Error('Proposal store mutation lock unavailable');
   let fd: number | undefined;
@@ -437,6 +471,8 @@ function persistProposal(
   let backup: string | undefined;
   let dir: string | undefined;
   let dest: string | undefined;
+  let installedSource: Stats | undefined;
+  let installedBytes: Buffer | undefined;
   let destinationInstalled = false;
   let committed = false;
   let directoryCreated = false;
@@ -511,6 +547,9 @@ function persistProposal(
       throw new Error('Proposal directory changed during write');
     }
     if (createOnly && existsSync(dest)) throw new Error('Proposal id collision');
+    if (!ownsProposalStoreMutationLock(storeLock)) {
+      throw new Error('Proposal store mutation lock ownership was lost before install');
+    }
     if (createOnly) {
       linkSync(tmp, dest);
       destinationInstalled = true;
@@ -522,6 +561,8 @@ function persistProposal(
       tmp = undefined;
     }
     const installed = lstatSync(dest);
+    installedSource = installed;
+    installedBytes = bytes;
     const directoryAfter = lstatSync(dir);
     if (!safeProposalFile(installed) || !sameProposalSource(written, installed) ||
       !safeProposalDirectory(directoryAfter) || !sameProposalSource(directoryBefore, directoryAfter)) {
@@ -537,16 +578,36 @@ function persistProposal(
     if (!safeProposalDirectory(directoryAfterSync) || !sameProposalSource(directoryBefore, directoryAfterSync)) {
       throw new Error('Proposal directory changed during durability sync');
     }
+    if (!ownsProposalStoreMutationLock(storeLock)) {
+      throw new Error('Proposal store mutation lock ownership was lost during install');
+    }
     committed = true;
   } catch (error) {
     if (destinationInstalled && !committed && dir && dest) {
       try {
-        if (backup && existsSync(backup)) {
-          renameSync(backup, dest);
-          backup = undefined;
+        // Rollback is itself a durable store mutation. Once the exact global
+        // capability is lost, a successor may already own the namespace and
+        // have replaced `dest`; a stale writer must never clobber or unlink
+        // that successor's bytes. Even while still owning the fence, only
+        // undo the exact inode/content installed by this invocation.
+        const mayRollback = ownsProposalStoreMutationLock(storeLock) &&
+          installedSource !== undefined && installedBytes !== undefined && existsSync(dest) &&
+          (() => {
+            const current = lstatSync(dest!);
+            if (!safeProposalFile(current) || !sameProposalSource(installedSource!, current)) {
+              return false;
+            }
+            const read = readProposalFileBounded(dest!, installedBytes!.length, installedBytes!.length);
+            return read.ok && read.text === installedBytes!.toString('utf8');
+          })();
+        if (mayRollback) {
+          if (backup && existsSync(backup)) {
+            renameSync(backup, dest);
+            backup = undefined;
+          }
+          else if (createOnly) unlinkSync(dest);
+          fsyncDirectory(dir);
         }
-        else if (createOnly && existsSync(dest)) unlinkSync(dest);
-        fsyncDirectory(dir);
       } catch {
         // The caller still receives failure; subsequent bounded reads remain
         // the authority for any uncertain installation state.
@@ -600,6 +661,8 @@ const DEFAULT_PROPOSAL_READ_MAX_FILE_BYTES = AUTHORITATIVE_PROPOSAL_MAX_FILE_BYT
 const HARD_PROPOSAL_READ_MAX_BYTES = 256 * 1024 * 1024;
 const HARD_PROPOSAL_READ_MAX_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_PROPOSAL_DIRECTORY_ENTRIES = 8_192;
+const LIVE_PROPOSAL_ADMISSION_MAX_FILES = 3_072;
+const LIVE_PROPOSAL_ADMISSION_MAX_BYTES = 48 * 1024 * 1024;
 
 type ProposalReadRacePoint = 'after-directory-scan' | 'after-file-read';
 
@@ -1022,7 +1085,7 @@ function isAuthoritativeProposalDuplicate(
  *  - `owner`     — cfg.user?.id ?? cfg.user?.name (M109; undefined when cfg absent)
  *
  * NEVER applies or mutates any repo.
- * Never throws. Persistence failure returns an explicit rejected result that
+ * Never throws. Persistence failure returns an explicit failed result that
  * cannot be mistaken for a filed proposal.
  */
 export function createProposal(
@@ -1031,12 +1094,18 @@ export function createProposal(
 ): Proposal {
   const canonicalRepo = p.repo === null ? null : canonicalProposalRepoIdentity(p.repo);
   const repoIdentityValid = p.repo === null || canonicalRepo !== null;
-  const input = sanitizeProposalForStore({
+  const materializedAction = materializeProposalActionForPolicy(p.action);
+  const rawInput = {
     ...p,
     // Invalid raw identity is never scrubbed into a different path or exposed
     // to persistence/audit. The rejected return is deliberately unscoped.
     repo: repoIdentityValid ? canonicalRepo : null,
-  });
+  };
+  if (materializedAction.ok) {
+    if (materializedAction.action === undefined) delete rawInput.action;
+    else rawInput.action = materializedAction.action;
+  }
+  const input = sanitizeProposalForStore(rawInput);
   // Proposal creation is not a post-merge credit release protocol. Normalize
   // the reserved authority label before any causal metadata is signed or saved.
   if (typeof input.labelBasis === 'string' &&
@@ -1048,20 +1117,23 @@ export function createProposal(
   delete input.realizedMerge;
   delete input.realizedMergeFanoutVersion;
   delete input.localMergeIntent;
+  delete input.remoteHandoff;
+  // Caller policy is untrusted input. Only this persistence boundary may mint
+  // the lifecycle-stable signed tuple from the finalized proposal bytes.
+  delete input.effectPolicy;
   // M109: stamp owner from cfg.user when not already set by the caller.
   const owner = input.owner ?? cfg?.user?.id ?? cfg?.user?.name;
 
-  // M158: destructive-diff guard — default ON (cfg.foundry?.diffSafety !== false).
-  // Applied before status is set so a destructive proposal never enters 'pending'.
+  // M158/0A-1: destructive-diff guard — default ON. A machine finding is not a
+  // human rejection: keep the row pending and attach only a bounded annotation.
   const diffSafetyEnabled = cfg?.foundry?.diffSafety !== false;
-  let initialStatus: Proposal['status'] = 'pending';
-  let diffSafetyRejectionReason: string | undefined;
+  const initialStatus: Proposal['status'] = 'pending';
+  let safetyAnnotation: Proposal['safetyAnnotation'];
   if (diffSafetyEnabled && input.diff) {
     try {
       const guard = isDestructiveDiff(input.diff);
       if (guard.destructive) {
-        initialStatus = 'rejected';
-        diffSafetyRejectionReason = `destructive diff auto-rejected: ${guard.reason ?? 'destructive pattern detected'}`;
+        safetyAnnotation = 'destructive-diff-review-required';
       }
     } catch {
       // Guard is best-effort — never disrupts proposal creation.
@@ -1092,9 +1164,7 @@ export function createProposal(
     id: proposalId,
     status: initialStatus,
     createdAt,
-    ...(diffSafetyRejectionReason !== undefined
-      ? { decisionReason: diffSafetyRejectionReason, decidedAt: new Date().toISOString() }
-      : {}),
+    ...(safetyAnnotation !== undefined ? { safetyAnnotation } : {}),
   };
   const proposal: Proposal = {
     ...baseProposal,
@@ -1130,11 +1200,38 @@ export function createProposal(
       proposal.pendingAuthoritySig = pendingAuthoritySig;
     }
   }
+  const effectPolicy = materializedAction.ok ? mintProposalEffectPolicy(proposal) : null;
+  if (effectPolicy) proposal.effectPolicy = effectPolicy;
 
   let persisted = false;
+  let creationFailureCode: NonNullable<Proposal['creationFailureCode']> = !repoIdentityValid
+    ? 'invalid-repository-identity'
+    : !materializedAction.ok
+      ? 'invalid-action-payload'
+      : !effectPolicy
+        ? 'effect-policy-unavailable'
+        : 'storage-authority-unavailable';
   const storeLock = repoIdentityValid ? acquireProposalStoreMutationLock() : null;
   if (storeLock) {
     try {
+      if (!effectPolicy || !verifyProposalEffectPolicy(proposal)) {
+        if (materializedAction.ok) creationFailureCode = 'effect-policy-unavailable';
+        throw new Error('Proposal effect policy could not be authenticated');
+      }
+      // Stay comfortably below the authoritative reader's hard namespace and
+      // default byte ceilings. Until the separate archive-aware observational
+      // history migration lands, backpressure is safer than silently dropping
+      // pending human-review work or degrading every complete reader.
+      const admission = listProposalsDetailed({
+        requireComplete: true,
+        maxFiles: HARD_PROPOSAL_READ_MAX_FILES,
+        maxBytes: HARD_PROPOSAL_READ_MAX_BYTES,
+        maxFileBytes: HARD_PROPOSAL_READ_MAX_FILE_BYTES,
+      });
+      if (!admission.complete || admission.sourceState === 'degraded') {
+        creationFailureCode = 'admission-source-incomplete';
+        throw new Error('Proposal live-store admission source is incomplete');
+      }
       // Dedup and installation share one namespace transaction so two
       // processes cannot both observe absence and file the same diff.
       // Manual control-plane input is never a dedup candidate and therefore
@@ -1144,18 +1241,9 @@ export function createProposal(
         ? canonicalProposalDiffHash(input)
         : null;
       if (inputHash !== null) {
-        const pendingSnapshot = listProposalsDetailed({
-          status: 'pending',
-          requireComplete: true,
-          maxFiles: HARD_PROPOSAL_READ_MAX_FILES,
-          maxBytes: HARD_PROPOSAL_READ_MAX_BYTES,
-          maxFileBytes: HARD_PROPOSAL_READ_MAX_FILE_BYTES,
-        });
-        if (!pendingSnapshot.complete || pendingSnapshot.sourceState === 'degraded') {
-          throw new Error('Proposal dedup source is incomplete');
-        }
-        const duplicate = pendingSnapshot.proposals.find(
-          (existing) => isAuthoritativeProposalDuplicate(existing, input, inputHash, cfg, createdAt),
+        const duplicate = admission.proposals.find(
+          (existing) => existing.status === 'pending' &&
+            isAuthoritativeProposalDuplicate(existing, input, inputHash, cfg, createdAt),
         );
         if (duplicate) {
           const dedupRunEventSummary = bindCreatedProposalRunSummary(
@@ -1183,6 +1271,16 @@ export function createProposal(
           };
         }
       }
+      const incomingBytes = Buffer.byteLength(JSON.stringify(proposal, null, 2) + '\n', 'utf8');
+      if (incomingBytes > AUTHORITATIVE_PROPOSAL_MAX_FILE_BYTES) {
+        creationFailureCode = 'proposal-record-too-large';
+        throw new Error('Proposal exceeds the readable store limit');
+      }
+      if (admission.filesDiscovered >= LIVE_PROPOSAL_ADMISSION_MAX_FILES ||
+        admission.bytesRead + incomingBytes > LIVE_PROPOSAL_ADMISSION_MAX_BYTES) {
+        creationFailureCode = 'admission-capacity-unavailable';
+        throw new Error('Proposal live-store admission capacity unavailable');
+      }
       persistProposal(proposal.id, proposal, true, storeLock);
       persisted = true;
     } catch {
@@ -1200,59 +1298,33 @@ export function createProposal(
     : {
         ...proposal,
         ...(failedRunEventSummary ? { runEventSummary: failedRunEventSummary } : {}),
-        status: 'rejected',
-        decisionReason: repoIdentityValid
-          ? 'proposal persistence failed'
-          : 'invalid proposal repository identity',
-        decidedAt: new Date().toISOString(),
+        status: 'failed',
+        result: `proposal-creation-refused:${creationFailureCode}`,
+        creationFailureCode,
       };
 
   audit({
-    action: !persisted || initialStatus === 'rejected' ? 'inbox:proposal-rejected' : 'inbox:proposal-created',
+    action: !persisted ? 'inbox:proposal-persistence-refused' : 'inbox:proposal-created',
     repo: repoIdentityValid ? proposal.repo ?? null : null,
     sandboxId: proposal.sandboxId ?? null,
     summary:
       !persisted
         ? repoIdentityValid
-          ? `proposal persistence failed: [${proposal.kind}] ${proposal.title} (id=${proposal.id})`
+          ? `proposal creation refused (${creationFailureCode}): [${proposal.kind}] ${proposal.title} (id=${proposal.id})`
           : `proposal repository identity refused: [${proposal.kind}] ${proposal.title} (id=${proposal.id})`
-        : initialStatus === 'rejected'
-        ? `proposal auto-rejected (diff-safety): [${proposal.kind}] ${proposal.title} (id=${proposal.id}) — ${diffSafetyRejectionReason}`
+        : safetyAnnotation !== undefined
+        ? `proposal created pending safety review: [${proposal.kind}] ${proposal.title} (id=${proposal.id})`
         : `proposal created: [${proposal.kind}] ${proposal.title} (id=${proposal.id})`,
     result: persisted ? 'ok' : 'refused',
   });
-
-  // M158: emit decisions-ledger entry for auto-rejected proposals.
-  if (persisted && initialStatus === 'rejected' && diffSafetyRejectionReason !== undefined) {
-    try {
-      const ts = new Date().toISOString();
-      recordDecision({
-        ts,
-        proposalId: proposal.id,
-        ...(proposal.workItemId ? { workItemId: proposal.workItemId } : {}),
-        ...(proposal.workSource ? { workSource: proposal.workSource } : {}),
-        ...(proposal.runId ? { runId: proposal.runId } : {}),
-        ...causalMetadataFromProposal(proposal, {
-          ts,
-          learningSource: 'decision-ledger',
-          labelBasis: 'proposal-status',
-        }),
-        action: 'rejected',
-        verdict: 'rejected',
-        reason: diffSafetyRejectionReason,
-      });
-    } catch {
-      // Ledger is best-effort.
-    }
-  }
 
   // Pulse Map: a proposal now exists. Outcome = its origin so the cloud can
   // distinguish backlog / swarm / manual / agent provenance. Best-effort.
   if (persisted) {
     emitProposalSpan(
-      initialStatus === 'rejected' ? 'decline' : 'proposal',
+      'proposal',
       proposal,
-      initialStatus === 'rejected' ? 'rejected' : proposal.origin,
+      proposal.origin,
       cfg,
     );
   }
@@ -1553,7 +1625,41 @@ export function setStatus(
     const existing = loadProposal(id);
     if (existing === null) return false;
     if (expectedCurrentStatus !== undefined && existing.status !== expectedCurrentStatus) return false;
+    const safeTransitionPatch = materializeExactDataPatch(
+      transitionPatch,
+      new Set(['remoteHandoff']),
+    );
+    if (!safeTransitionPatch) return false;
+    const transitionTouchesAuthority = Object.prototype.hasOwnProperty.call(
+      safeTransitionPatch,
+      'remoteHandoff',
+    );
 
+    if (status === existing.status) {
+      return result === undefined && reason === undefined && !transitionTouchesAuthority;
+    }
+
+    // 0A-1 central authority denial. No current caller (TTY, web token,
+    // comms adapter, manager, or autonomous loop) carries an authenticated
+    // human capability, so none may decide or advance an outward-effect row.
+    // Requiring the row to remain pending also prevents missing/unknown/tampered
+    // policy from being grandfathered through this generic mutation boundary.
+    if (status !== existing.status || transitionTouchesAuthority) {
+      const policy = evaluateProposalEffectPolicy(
+        existing,
+        transitionTouchesAuthority ? 'authority-field-update' : 'status-transition',
+      );
+      if (!policy.allowed) {
+        audit({
+          action: 'inbox:proposal-transition-refused',
+          repo: existing.repo ?? null,
+          sandboxId: existing.sandboxId ?? null,
+          summary: `proposal effect-policy transition refused: ${policy.code} (id=${id})`,
+          result: 'refused',
+        });
+        return false;
+      }
+    }
     // Partial captures are immutable review evidence. They may be rejected or
     // repaired, but no status transition may grant apply/merge authority.
     if (
@@ -1582,7 +1688,7 @@ export function setStatus(
       typeof existing.repo === 'string' && existing.repo.length > 0;
     const updated: Proposal = sanitizeProposalForStore({
       ...existing,
-      ...transitionPatch,
+      ...safeTransitionPatch,
       status,
       ...(result !== undefined ? { result } : {}),
       ...(revokeRejectedCaptureRecovery && result === undefined &&
@@ -1603,6 +1709,7 @@ export function setStatus(
     });
 
     try {
+      if (!ownsProposalMutationLock(id, mutationLock)) return false;
       persistProposal(id, updated);
       persisted = true;
     } catch {
@@ -1803,6 +1910,8 @@ export function recordRealizedMerge(
   let storeLock: ProposalStoreMutationLock | null = null;
   let persisted = false;
   try {
+    const mutationAuthorityLive = (): boolean =>
+      ownsProposalMutationLock(id, mutationLock) && stillAuthorized();
     const observedAt = evidence.source === 'local-default-branch'
       ? evidence.observedAt
       : evidence.reconciliation.observedAt;
@@ -1841,9 +1950,10 @@ export function recordRealizedMerge(
       }
       if (existing.status !== 'applied' || !matches) return false;
       if (identityOwnedByAnotherProposal(existing)) return false;
-      if (stillAuthorized() &&
-        fanoutRealizedMerge(existing, priorEvidence, stillAuthorized) && stillAuthorized()) {
+      if (mutationAuthorityLive() &&
+        fanoutRealizedMerge(existing, priorEvidence, mutationAuthorityLive) && mutationAuthorityLive()) {
         if (existing.realizedMergeFanoutVersion !== REALIZED_MERGE_FANOUT_VERSION) {
+          if (!ownsProposalMutationLock(id, mutationLock)) return false;
           persistProposal(id, {
             ...existing,
             realizedMergeFanoutVersion: REALIZED_MERGE_FANOUT_VERSION,
@@ -1910,6 +2020,7 @@ export function recordRealizedMerge(
     });
     if (!authenticatedRealizedMergeOf(updated)) return false;
     if (identityOwnedByAnotherProposal(updated)) return false;
+    if (!ownsProposalMutationLock(id, mutationLock)) return false;
     persistProposal(id, updated, false, storeLock);
     persisted = true;
 
@@ -1921,7 +2032,9 @@ export function recordRealizedMerge(
       result: 'ok',
     });
 
-    if (stillAuthorized() && fanoutRealizedMerge(updated, realizedMerge, stillAuthorized) && stillAuthorized()) {
+    if (mutationAuthorityLive() &&
+      fanoutRealizedMerge(updated, realizedMerge, mutationAuthorityLive) && mutationAuthorityLive()) {
+      if (!ownsProposalMutationLock(id, mutationLock)) return false;
       persistProposal(id, {
         ...updated,
         realizedMergeFanoutVersion: REALIZED_MERGE_FANOUT_VERSION,
@@ -1971,8 +2084,32 @@ export function updateProposalField(
   try {
     const existing = loadProposal(id);
     if (existing === null) return false;
-    const updated: Proposal = sanitizeProposalForStore({ ...existing, ...patch });
+    const allowedPatchKeys = new Set([
+      'judgeNonShipCount',
+      'verifyResult',
+      'stuckPassCount',
+      'remoteHandoff',
+      'localMergeIntent',
+    ]);
+    const safePatch = materializeExactDataPatch(patch, allowedPatchKeys);
+    if (!safePatch) return false;
+    const authorityPatch = Object.prototype.hasOwnProperty.call(safePatch, 'remoteHandoff') ||
+      Object.prototype.hasOwnProperty.call(safePatch, 'localMergeIntent') ||
+      Object.prototype.hasOwnProperty.call(safePatch, 'verifyResult');
+    if (authorityPatch &&
+      !evaluateProposalEffectPolicy(existing, 'authority-field-update').allowed) {
+      audit({
+        action: 'inbox:proposal-transition-refused',
+        repo: existing.repo ?? null,
+        sandboxId: existing.sandboxId ?? null,
+        summary: `proposal effect-policy authority-field update refused (id=${id})`,
+        result: 'refused',
+      });
+      return false;
+    }
+    const updated: Proposal = sanitizeProposalForStore({ ...existing, ...safePatch });
     try {
+      if (!ownsProposalMutationLock(id, mutationLock)) return false;
       persistProposal(id, updated);
       return true;
     } catch {

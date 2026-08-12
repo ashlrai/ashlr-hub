@@ -78,6 +78,9 @@ const mockSetStatus = vi.fn();
 const mockUpdateProposalField = vi.fn();
 vi.mock('../src/core/inbox/store.js', () => ({
   listProposalsDetailed: (...args: unknown[]) => mockListProposalsDetailed(...args),
+  // The policy sink re-reads the lock-held row; keep this existing in-memory
+  // mechanics fixture authoritative without introducing another policy path.
+  loadProposal: (id: string) => pendingProposals.find((proposal) => proposal.id === id) ?? null,
   replayRealizedMergeFanout: (...args: unknown[]) => mockReplayRealizedMergeFanout(...args),
   setStatus: (...args: unknown[]) => mockSetStatus(...args),
   updateProposalField: (...args: unknown[]) => mockUpdateProposalField(...args),
@@ -103,6 +106,20 @@ vi.mock('../src/core/fleet/skill-library.js', () => ({
 vi.mock('../src/core/fleet/self-improve.js', () => ({
   learnFromRejection: (...args: unknown[]) => mockLearnFromRejection(...args),
 }));
+
+// Legacy mechanics fixture: M505 owns policy-authority coverage; this suite
+// exercises the dormant auto-merge pipeline behind that gate.
+vi.mock('../src/core/inbox/review-policy.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/inbox/review-policy.js')>();
+  return {
+    ...actual,
+    evaluateProposalEffectPolicy: () => ({
+      allowed: true,
+      effectClass: 'outward-effect' as const,
+      code: 'policy-not-required' as const,
+    }),
+  };
+});
 
 // M172: mock the judge chain so these pre-M172 tests remain hermetic.
 // judgeProposal returns 'ship' by default so all frontier proposals still

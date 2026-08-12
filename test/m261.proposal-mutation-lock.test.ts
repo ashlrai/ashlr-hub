@@ -24,6 +24,8 @@ const faults = vi.hoisted(() => ({
   }>,
   failLstatOnceFor: undefined as string | undefined,
   rejectRootAssurance: false,
+  replaceInstalledProposalAfterLockLoss: false,
+  replacedProposalPath: undefined as string | undefined,
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -32,6 +34,21 @@ vi.mock('node:fs', async (importOriginal) => {
     ...actual,
     lstatSync(path: PathLike, ...args: unknown[]) {
       const target = String(path);
+      if (faults.replaceInstalledProposalAfterLockLoss && target.endsWith('.json')) {
+        faults.replaceInstalledProposalAfterLockLoss = false;
+        faults.replacedProposalPath = target;
+        const lockPath = join(process.env.HOME!, '.ashlr', '.proposal-store-locks', 'writer.lock');
+        actual.unlinkSync(lockPath);
+        actual.writeFileSync(lockPath, `${JSON.stringify({
+          pid: process.pid,
+          token: 'successor-token',
+          startRef: '0'.repeat(64),
+          startRefVerified: true,
+          startRefSource: 'self-clock-epoch-second',
+        })}\n`, { encoding: 'utf8', mode: 0o600 });
+        actual.unlinkSync(target);
+        actual.writeFileSync(target, '{"successor":true}\n', { encoding: 'utf8', mode: 0o600 });
+      }
       if (target === faults.failLstatOnceFor) {
         faults.failLstatOnceFor = undefined;
         throw Object.assign(new Error('injected transient lstat failure'), { code: 'EIO' });
@@ -76,6 +93,8 @@ beforeEach(() => {
   faults.assuranceCalls.length = 0;
   faults.failLstatOnceFor = undefined;
   faults.rejectRootAssurance = false;
+  faults.replaceInstalledProposalAfterLockLoss = false;
+  faults.replacedProposalPath = undefined;
   priorHome = process.env.HOME;
   home = mkdtempSync(join(tmpdir(), 'ashlr-proposal-lock-'));
   process.env.HOME = home;
@@ -85,6 +104,8 @@ afterEach(() => {
   faults.assuranceCalls.length = 0;
   faults.failLstatOnceFor = undefined;
   faults.rejectRootAssurance = false;
+  faults.replaceInstalledProposalAfterLockLoss = false;
+  faults.replacedProposalPath = undefined;
   if (priorHome === undefined) delete process.env.HOME;
   else process.env.HOME = priorHome;
   rmSync(home, { recursive: true, force: true });
@@ -249,8 +270,8 @@ describe('proposal mutation authority fence', () => {
       summary: 'must not bypass the global store fence',
     });
     expect(blockedProposal).toMatchObject({
-      status: 'rejected',
-      decisionReason: 'proposal persistence failed',
+      status: 'failed',
+      creationFailureCode: 'storage-authority-unavailable',
     });
     expect(listProposals()).toEqual([]);
 
@@ -263,6 +284,23 @@ describe('proposal mutation authority fence', () => {
       summary: 'persists after the exact owner releases the fence',
     });
     expect(listProposals()).toHaveLength(1);
+  });
+
+  it('never rolls back a successor after losing the global store capability during install', () => {
+    faults.replaceInstalledProposalAfterLockLoss = true;
+
+    const result = createProposal({
+      repo: home,
+      origin: 'manual',
+      kind: 'patch',
+      title: 'stale install owner',
+      summary: 'must not delete a successor installation',
+      diff: 'diff --git a/a.ts b/a.ts\n',
+    });
+
+    expect(result).toMatchObject({ status: 'failed' });
+    expect(faults.replacedProposalPath).toBeTypeOf('string');
+    expect(readFileSync(faults.replacedProposalPath!, 'utf8')).toBe('{"successor":true}\n');
   });
 
   it('retries a pending store release before successor acquisition', () => {
@@ -354,8 +392,8 @@ describe('proposal mutation authority fence', () => {
     });
 
     expect(oversized).toMatchObject({
-      status: 'rejected',
-      decisionReason: 'proposal persistence failed',
+      status: 'failed',
+      creationFailureCode: 'proposal-record-too-large',
     });
     expect(listProposals()).toEqual([]);
   });
