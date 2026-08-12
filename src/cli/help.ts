@@ -335,7 +335,7 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'goal "<objective>" --direct',  desc: 'One owner-invoked proposal-only run with bounded --json output; no unattended authority or verification proof.', topic: 'autonomy' },
   { cmd: 'loop',                         desc: 'The conductor loop: run the proposal-first fleet over the portfolio (M55).', topic: 'autonomy' },
   { cmd: 'vision <show|review|preview|shadow|approve|reconcile|set>', desc: 'Mission OS: inspect strategy, preview a bounded DAG, record observation-only shadow evidence, or explicitly adopt planning state.', topic: 'autonomy' },
-  { cmd: 'manager [--apply-rejects]',    desc: 'Frontier judge scorecard over pending proposals (shadow mode by default; never merges).', topic: 'autonomy' },
+  { cmd: 'manager [--apply-rejects]',    desc: 'Frontier judge scorecard; compatibility reject flag refuses and leaves proposals pending.', topic: 'autonomy' },
   { cmd: 'best-of-n [--repo --title -n]', desc: 'Generate N candidate diffs (multi-model), critic-select, file the winner as a proposal (M142/M333).', topic: 'autonomy' },
   { cmd: 'comms <status|cycle|digest>',  desc: 'Operator comms channel (Telegram/iMessage): read-only digests; decisions unavailable.', topic: 'autonomy' },
   { cmd: 'invent',                       desc: 'Generative backlog invention — propose novel high-value work items.', topic: 'autonomy' },

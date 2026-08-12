@@ -270,9 +270,10 @@ The kill-switch is checked before every mutating operation in every backend and 
 
 ## Backends and model tiers
 
-The table below describes the default `trustBasis: "tier"` policy. Opt-in
-verification and evidence modes replace producer-tier authority with their
-stronger admission contracts; they do not inherit these reach labels.
+The table below records the historical `trustBasis: "tier"` mechanics. Every
+branch/main reach label is dormant in this preview until an authenticated
+human-effect capability is installed. Opt-in verification and evidence modes
+remain unavailable for the same reason.
 
 | Tier | Examples | What it can reach |
 |------|----------|-------------------|
@@ -304,10 +305,10 @@ Every run and proposal carries HMAC-signed `{engineModel, engineTier}` provenanc
 ```sh
 ashlr manager                    # score pending proposals — shadow mode (never merges)
 ashlr manager --window 30d       # wider quality window
-ashlr manager --apply-rejects    # also reject noise/harmful proposals
+ashlr manager --apply-rejects    # compatibility flag; rejection is refused in this preview
 ```
 
-The Manager runs a frontier model over pending proposals and produces a quality scorecard (value / correctness / scope / alignment, plus win/concern/recommendation narrative). Since v3.1 the default judge is **Claude Fable 5** (Mythos-class) with an automatic per-call Opus 4.8 fallback — a judge pass never dies on model availability — and every judge call records its cost/tokens/latency to the decisions ledger. Shadow mode by default — it records verdicts to `~/.ashlr/manager/<ts>.json` but never merges or rejects anything unless you pass `--apply-rejects`.
+The Manager runs a frontier model over pending proposals and produces a quality scorecard (value / correctness / scope / alignment, plus win/concern/recommendation narrative). Since v3.1 the default judge is **Claude Fable 5** (Mythos-class) with an automatic per-call Opus 4.8 fallback — a judge pass never dies on model availability — and every judge call records its cost/tokens/latency to the decisions ledger. Shadow mode records verdicts to `~/.ashlr/manager/<ts>.json` but never merges or rejects anything. In this preview, `--apply-rejects` retains CLI compatibility and records a bounded refusal; proposals remain pending.
 
 ---
 

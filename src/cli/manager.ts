@@ -11,7 +11,7 @@
  * Flags:
  *   --window 7d|30d|all   Quality metrics window (default: 7d)
  *   --limit N             Max proposals to judge (default: 20, max: 100)
- *   --apply-rejects       Reject noise/harmful proposals in the inbox (default: false)
+ *   --apply-rejects       Compatibility flag; rejection is refused in this preview
  *   --json                Emit the full ManagerReport as JSON
  */
 
@@ -252,13 +252,13 @@ function printManagerHelp(): void {
   console.log('');
   console.log(`    --window 7d|30d|all   ${cyan('# quality metrics window (default: 7d)')}`);
   console.log(`    --limit N             ${cyan('# max proposals to judge (default: 20, max: 100)')}`);
-  console.log(`    --apply-rejects       ${cyan('# reject noise/harmful proposals in the inbox')}`);
+  console.log(`    --apply-rejects       ${cyan('# compatibility flag; rejection is refused in this preview')}`);
   console.log(`    --json                ${cyan('# emit full ManagerReport as JSON')}`);
   console.log('');
   console.log('  ' + bold('Shadow mode (default):'));
   console.log('    Records judgements in the decisions ledger and writes a report to');
   console.log('    ~/.ashlr/manager/<ts>.json but does NOT merge or reject anything.');
-  console.log('    Pass --apply-rejects to reject noise/harmful proposals only.');
+  console.log('    --apply-rejects records a refusal; proposals remain pending.');
   console.log('    NEVER auto-merges regardless of verdict.');
   console.log('');
 }
