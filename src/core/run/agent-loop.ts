@@ -46,6 +46,10 @@ import {
   LocusSessionConfigError,
   runWithLocusSessionIfConfigured,
 } from '../integrations/locus.js';
+import {
+  conservativeRequestTokenReservation,
+  supportsGovernedModelCalls,
+} from './model-call-authority.js';
 
 /** Maximum steps per task, regardless of budget (safety backstop). */
 const TASK_STEP_CAP = 20;
@@ -53,6 +57,7 @@ const TASK_EFFECT_CAP = 64;
 
 /** Completion handle returned after the caller atomically reserves a model step. */
 export interface ModelStepReservation {
+  readonly maxOutputTokens: number;
   finalize(
     summary: string,
     usage?: { tokensIn: number; tokensOut: number },
@@ -63,7 +68,7 @@ export interface ModelStepReservation {
  * Synchronous authority for the run-wide model-step budget. Returning undefined
  * denies the call because no global step remains.
  */
-export type ReserveModelStep = () => ModelStepReservation | undefined;
+export type ReserveModelStep = (promptTokenReservation: number) => ModelStepReservation | undefined;
 
 /**
  * A tool executor passed through ctx. Each entry must have a callable `fn`.
@@ -373,8 +378,15 @@ async function runTaskBody(
       // stale pre-check and overshoot the run-wide ceiling as a whole batch.
       let reservation: ModelStepReservation | undefined;
       if (ctx.reserveModelStep) {
+        if (!supportsGovernedModelCalls(client)) {
+          task.status = 'failed';
+          task.error = `Provider "${client.id}" does not declare enforced request limits and exact usage authority.`;
+          break;
+        }
         try {
-          reservation = ctx.reserveModelStep();
+          reservation = ctx.reserveModelStep(
+            conservativeRequestTokenReservation(messages, toolSpecs),
+          );
         } catch (err) {
           task.status = 'failed';
           task.error = `Could not reserve model step: ${String(err)}`;
@@ -406,10 +418,16 @@ async function runTaskBody(
               }
             },
             ctx.signal,
+            reservation ? { maxOutputTokens: reservation.maxOutputTokens } : undefined,
           );
         } else {
           // Non-streaming fallback: emit the full content as a single delta.
-          result = await client.chat(messages, toolSpecs, ctx.signal);
+          result = await client.chat(
+            messages,
+            toolSpecs,
+            ctx.signal,
+            reservation ? { maxOutputTokens: reservation.maxOutputTokens } : undefined,
+          );
           if (!ctx.signal?.aborted && result.content.length > 0) {
             emitStream({ kind: 'model-delta', taskId: task.id, text: result.content });
           }
@@ -426,7 +444,11 @@ async function runTaskBody(
           steps: 1,
         };
         if (reservation) {
-          finalizeReservation(reservation, summary, reportedUsage);
+          finalizeReservation(
+            reservation,
+            summary,
+            usageAuthorityReportedBy(err) ? reportedUsage : undefined,
+          );
         } else {
           emitStep('model', summary, stepUsage);
         }
@@ -451,7 +473,11 @@ async function runTaskBody(
           ? `tool calls: ${result.toolCalls.map((tc) => tc.name).join(', ')}`
           : '(empty response)';
       if (reservation) {
-        finalizeReservation(reservation, modelSummary, result.usage);
+        finalizeReservation(
+          reservation,
+          modelSummary,
+          result.usageKnown === true ? result.usage : undefined,
+        );
       } else {
         emitStep('model', modelSummary, { ...newUsage(), ...stepUsageDelta, steps: 1 });
       }
@@ -659,4 +685,9 @@ function usageReportedBy(err: unknown): { tokensIn: number; tokensOut: number } 
     return undefined;
   }
   return { tokensIn, tokensOut };
+}
+
+function usageAuthorityReportedBy(value: unknown): boolean {
+  return typeof value === 'object' && value !== null
+    && (value as { usageKnown?: unknown }).usageKnown === true;
 }

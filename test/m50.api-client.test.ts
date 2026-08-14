@@ -10,7 +10,10 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { buildOpenAICompatibleClient } from '../src/core/run/provider-client.js';
+import {
+  buildOllamaClient,
+  buildOpenAICompatibleClient,
+} from '../src/core/run/provider-client.js';
 import type { ChatMessage } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -190,6 +193,64 @@ describe('buildOpenAICompatibleClient — Authorization header', () => {
 describe('buildOpenAICompatibleClient — request body', () => {
   afterEach(() => { vi.unstubAllGlobals(); });
 
+  it('binds the authoritative output ceiling as max_tokens', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(mockJsonResponse(openAIResponse('bounded')));
+    vi.stubGlobal('fetch', fetchSpy);
+    const client = buildOpenAICompatibleClient(
+      'https://api.example.com/v1',
+      'key',
+      'model',
+      false,
+    );
+
+    await client.chat(makeMessages(), undefined, undefined, { maxOutputTokens: 123 });
+
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).toMatchObject({ stream: false, max_tokens: 123 });
+  });
+
+  it('marks estimated usage non-authoritative when counters are absent', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockJsonResponse({
+      choices: [{ message: { role: 'assistant', content: 'estimated only' } }],
+    })));
+    const client = buildOpenAICompatibleClient(
+      'https://api.example.com/v1',
+      'key',
+      'model',
+      false,
+    );
+
+    const result = await client.chat(
+      makeMessages(),
+      undefined,
+      undefined,
+      { maxOutputTokens: 123 },
+    );
+
+    expect(result.usage.tokensIn).toBeGreaterThan(0);
+    expect(result.usage.tokensOut).toBeGreaterThan(0);
+    expect(result.usageKnown).toBe(false);
+  });
+
+  it('rejects malformed output ceilings before provider work', async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    const client = buildOpenAICompatibleClient(
+      'https://api.example.com/v1',
+      'key',
+      'model',
+      false,
+    );
+
+    await expect(client.chat(
+      makeMessages(),
+      undefined,
+      undefined,
+      { maxOutputTokens: Number.POSITIVE_INFINITY },
+    )).rejects.toThrow('positive safe integer');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it('sends correct model in request body', async () => {
     const fetchSpy = vi.fn().mockResolvedValue(mockJsonResponse(openAIResponse('hi')));
     vi.stubGlobal('fetch', fetchSpy);
@@ -296,6 +357,77 @@ describe('buildOpenAICompatibleClient — request body', () => {
     const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
     const body = JSON.parse(init.body as string) as Record<string, unknown>;
     expect(body['temperature']).toBe(0.7);
+  });
+});
+
+describe('provider request ceilings', () => {
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('does not reset a governed stream ceiling through non-stream fallback', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+      text: async () => 'ambiguous stream failure',
+    } as unknown as Response);
+    vi.stubGlobal('fetch', fetchSpy);
+    const client = buildOpenAICompatibleClient(
+      'https://api.example.com/v1',
+      'key',
+      'model',
+      false,
+    );
+
+    await expect(client.chatStream!(
+      makeMessages(),
+      undefined,
+      () => {},
+      undefined,
+      { maxOutputTokens: 77 },
+    )).rejects.toThrow('503');
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      stream: true,
+      max_tokens: 77,
+      stream_options: { include_usage: true },
+    });
+  });
+
+  it('binds Ollama output generation with options.num_predict', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(mockJsonResponse({
+      message: { role: 'assistant', content: 'bounded' },
+      prompt_eval_count: 10,
+      eval_count: 5,
+    }));
+    vi.stubGlobal('fetch', fetchSpy);
+    const client = buildOllamaClient('http://localhost:11434', 'qwen-test', false);
+
+    await client.chat(makeMessages(), undefined, undefined, { maxOutputTokens: 91 });
+
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      stream: false,
+      options: { num_predict: 91 },
+    });
+  });
+
+  it('marks estimated Ollama usage non-authoritative when counters are absent', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockJsonResponse({
+      message: { role: 'assistant', content: 'estimated only' },
+    })));
+    const client = buildOllamaClient('http://localhost:11434', 'qwen-test', false);
+
+    const result = await client.chat(
+      makeMessages(),
+      undefined,
+      undefined,
+      { maxOutputTokens: 91 },
+    );
+
+    expect(result.usage.tokensIn).toBeGreaterThan(0);
+    expect(result.usage.tokensOut).toBeGreaterThan(0);
+    expect(result.usageKnown).toBe(false);
   });
 });
 

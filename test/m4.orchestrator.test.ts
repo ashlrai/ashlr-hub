@@ -84,6 +84,7 @@ function mockClient(responses: ChatResult[]): ProviderClient {
   return {
     id: 'mock',
     supportsTools: false,
+    authority: { requestLimits: 'enforced', usageAccounting: 'exact-provider-counters' },
     chat: vi.fn(async (_messages: ChatMessage[]): Promise<ChatResult> => {
       const r = responses[idx] ?? responses[responses.length - 1]!;
       idx++;
@@ -93,7 +94,7 @@ function mockClient(responses: ChatResult[]): ProviderClient {
 }
 
 function textResult(content: string, tokensIn = 10, tokensOut = 5): ChatResult {
-  return { content, usage: { tokensIn, tokensOut } };
+  return { content, usage: { tokensIn, tokensOut }, usageKnown: true };
 }
 
 /**
@@ -117,6 +118,7 @@ function _singleTaskPlan(id = 'task-1', goal = 'Do the thing'): ChatResult {
 // ---------------------------------------------------------------------------
 // Import under test (after helpers to avoid hoisting issues)
 // ---------------------------------------------------------------------------
+import { conservativeRequestTokenReservation } from '../src/core/run/model-call-authority.js';
 import {
   planGoal,
   runGoal,
@@ -410,6 +412,24 @@ describe('planGoal — DAG decomposition', () => {
     const ids = tasks.map(t => t.id);
     const unique = new Set(ids);
     expect(unique.size).toBe(ids.length);
+  });
+
+  it('refuses governed planning for an undeclared client without provider contact', async () => {
+    const chat = vi.fn();
+    const client: ProviderClient = { id: 'plugin-custom', supportsTools: false, chat };
+
+    const tasks = await planGoal(
+      'Governed planning',
+      client,
+      undefined,
+      undefined,
+      false,
+      undefined,
+      4_096,
+    );
+
+    expect(chat).not.toHaveBeenCalled();
+    expect(tasks).toEqual([{ id: 't1', goal: 'Governed planning', deps: [], status: 'pending' }]);
   });
 });
 
@@ -753,7 +773,7 @@ function scriptedOllama(planJson: string, opts: { tokIn?: number; tokOut?: numbe
   const tokIn = opts.tokIn ?? 10;
   const tokOut = opts.tokOut ?? 5;
   let chatCount = 0;
-  const fetchMock = vi.fn().mockImplementation((url: string) => {
+  const fetchMock = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
     const u = String(url);
     if (u.includes('11434/api/tags')) {
       return Promise.resolve({
@@ -765,11 +785,36 @@ function scriptedOllama(planJson: string, opts: { tokIn?: number; tokOut?: numbe
     if (u.includes('11434/api/chat')) {
       const isPlan = chatCount === 0;
       chatCount++;
+      const requestBody = JSON.parse(String(init?.body ?? '{}')) as { stream?: boolean };
+      const content = isPlan ? planJson : 'OK result.';
+      if (requestBody.stream === true) {
+        const chunk = new TextEncoder().encode(`${JSON.stringify({
+          message: { role: 'assistant', content },
+          done: true,
+          prompt_eval_count: tokIn,
+          eval_count: tokOut,
+        })}\n`);
+        let read = false;
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          body: {
+            getReader: () => ({
+              read: vi.fn(async () => {
+                if (read) return { done: true, value: undefined };
+                read = true;
+                return { done: false, value: chunk };
+              }),
+              releaseLock: () => {},
+            }),
+          },
+        });
+      }
       return Promise.resolve({
         ok: true,
         status: 200,
         json: async () => ({
-          message: { role: 'assistant', content: isPlan ? planJson : 'OK result.' },
+          message: { role: 'assistant', content },
           prompt_eval_count: tokIn,
           eval_count: tokOut,
         }),
@@ -808,6 +853,34 @@ describe('runGoal — deterministic usage accounting (single-writer)', () => {
     expect(state.usage.tokensIn).toBe(40);
     expect(state.usage.tokensOut).toBe(20);
     expect(state.usage.steps).toBe(4);
+  });
+
+  it('includes planning and synthesis prompts inside each combined pre-call claim', async () => {
+    const plan = JSON.stringify([{ id: 'a', goal: 'Task A', deps: [] }]);
+    const { fetchMock } = scriptedOllama(plan);
+    vi.stubGlobal('fetch', fetchMock);
+
+    const state = await runGoal('One governed task', makeConfig(), {
+      budget: { maxTokens: 1_000_000, maxSteps: 1000 },
+      parallel: 1,
+      tools: false,
+    });
+    createdRunIds.push(state.id);
+
+    const combinedCalls = fetchMock.mock.calls
+      .filter(([url]) => String(url).includes('/api/chat'))
+      .map(([, init]) => JSON.parse(String((init as RequestInit | undefined)?.body ?? '{}')) as {
+        messages: ChatMessage[];
+        stream: boolean;
+        options: { num_predict: number };
+      })
+      .filter((body) => body.stream === false);
+    expect(combinedCalls).toHaveLength(2);
+    for (const body of combinedCalls) {
+      expect(
+        conservativeRequestTokenReservation(body.messages, []) + body.options.num_predict,
+      ).toBe(4_096);
+    }
   });
 
   it('exact usage holds under parallel:2 (no reference divergence)', async () => {
@@ -860,8 +933,7 @@ describe('runGoal — deterministic usage accounting (single-writer)', () => {
     expect(state.steps.filter((step) => step.kind === 'model')).toHaveLength(1);
   });
 
-  it('tight budget with parallel:2 aborts; overshoot is bounded', async () => {
-    // Each chat costs 100 in / 100 out. maxTokens:50 → plan call alone exceeds it.
+  it('refuses an oversized planning prompt before any provider work', async () => {
     const plan = JSON.stringify([
       { id: 'a', goal: 'A', deps: [] },
       { id: 'b', goal: 'B', deps: [] },
@@ -877,17 +949,76 @@ describe('runGoal — deterministic usage accounting (single-writer)', () => {
     });
     createdRunIds.push(state.id);
 
-    expect(state.status).toBe('aborted');
-    // All tasks should be failed with the abort sentinel (none completed).
+    expect(state.status).toBe('failed');
     for (const t of state.tasks) {
       expect(t.status).toBe('failed');
-      expect(t.error).toBe('Aborted: run budget exceeded');
     }
-    // Hard-ceiling guarantee: at most ONE batch of `parallel` tasks ran past the
-    // ceiling before the between-batch check aborted, plus the single plan call.
-    // No unbounded overshoot. (plan=200 tok; up to 2 tasks × 200 = 400.)
-    const total = state.usage.tokensIn + state.usage.tokensOut;
-    expect(total).toBeLessThanOrEqual(200 /* plan */ + 2 * 200 /* one parallel batch */);
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/api/chat'))).toHaveLength(0);
+    expect(state.usage.tokensIn + state.usage.tokensOut).toBe(0);
+  });
+
+  it('retains an ambiguous provider claim and launches no fallback request', async () => {
+    const resumeId = uniqueRunId('ambiguous-provider-cap');
+    saveRun({
+      id: resumeId,
+      goal: 'Ambiguous provider bound',
+      engine: 'builtin',
+      provider: 'ollama',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      budget: { maxTokens: 50_000, maxSteps: 20, allowCloud: false },
+      usage: { tokensIn: 0, tokensOut: 0, steps: 0, estCostUsd: 0 },
+      tasks: [{ id: 'pending', goal: 'Do bounded paid work', deps: [], status: 'pending' }],
+      steps: [],
+      status: 'running',
+    });
+    const chatBodies: Array<{
+      messages: ChatMessage[];
+      stream: boolean;
+      options: { num_predict: number };
+    }> = [];
+    let persistedTokensAtContact: number | undefined;
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes('/api/tags')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ models: [{ name: 'llama3:8b' }] }),
+        });
+      }
+      if (u.includes('/api/chat')) {
+        chatBodies.push(JSON.parse(String(init?.body)) as typeof chatBodies[number]);
+        const persisted = loadRun(resumeId);
+        persistedTokensAtContact = persisted
+          ? persisted.usage.tokensIn + persisted.usage.tokensOut
+          : undefined;
+        return Promise.resolve({
+          ok: false,
+          status: 503,
+          text: async () => 'transport outcome unknown',
+        });
+      }
+      return Promise.reject(new Error(`unexpected url: ${u}`));
+    }));
+
+    const state = await runGoal('Ambiguous provider bound', makeConfig(), {
+      resumeId,
+      budget: { maxTokens: 50_000, maxSteps: 20 },
+      parallel: 1,
+      tools: false,
+    });
+
+    expect(chatBodies).toHaveLength(1);
+    expect(chatBodies[0]).toMatchObject({
+      stream: true,
+      options: { num_predict: 4_096 },
+    });
+    const promptReservation = conservativeRequestTokenReservation(chatBodies[0]!.messages, []);
+    expect(persistedTokensAtContact).toBe(promptReservation + 4_096);
+    expect(state.usage.tokensIn + state.usage.tokensOut).toBe(promptReservation + 4_096);
+    expect(state.usage.tokensIn + state.usage.tokensOut).toBeLessThanOrEqual(50_000);
+    expect(state.tasks[0]?.status).toBe('failed');
   });
 
   it('__onStep CLI hook fires at least once during a run', async () => {
@@ -1130,7 +1261,32 @@ describe('runGoal — resume edge cases', () => {
         return Promise.resolve({ ok: true, status: 200, json: async () => ({ models: [{ name: 'llama3:8b' }] }) });
       }
       if (u.includes('/api/chat')) {
-        chatBodies.push(String(init?.body ?? ''));
+        const rawBody = String(init?.body ?? '');
+        chatBodies.push(rawBody);
+        const requestBody = JSON.parse(rawBody) as { stream?: boolean };
+        if (requestBody.stream === true) {
+          const chunk = new TextEncoder().encode(`${JSON.stringify({
+            message: { role: 'assistant', content: 'next done' },
+            done: true,
+            prompt_eval_count: 10,
+            eval_count: 5,
+          })}\n`);
+          let read = false;
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            body: {
+              getReader: () => ({
+                read: vi.fn(async () => {
+                  if (read) return { done: true, value: undefined };
+                  read = true;
+                  return { done: false, value: chunk };
+                }),
+                releaseLock: () => {},
+              }),
+            },
+          });
+        }
         return Promise.resolve({
           ok: true,
           status: 200,

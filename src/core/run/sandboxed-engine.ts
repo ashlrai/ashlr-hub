@@ -71,7 +71,8 @@ import {
 } from './agent-diagnostics.js';
 import { resolveEngineSpec } from './engine-registry.js';
 import { buildOpenAICompatibleClient } from './provider-client.js';
-import { runTask } from './agent-loop.js';
+import { runTask, type ReserveModelStep } from './agent-loop.js';
+import { MAX_GOVERNED_OUTPUT_TOKENS } from './model-call-authority.js';
 import { adaptivePromptsEnabled } from './model-profile.js';
 import {
   buildEngineerToolSpecs,
@@ -2682,6 +2683,49 @@ export async function runApiModelSandboxed(
     };
     const usage: RunUsage = newUsage();
     const steps: RunState['steps'] = [];
+    const reserveModelStep: ReserveModelStep = (promptTokenReservation) => {
+      const remainingTokens = budget.maxTokens - usage.tokensIn - usage.tokensOut;
+      if (
+        opts.signal?.aborted === true ||
+        usage.steps >= budget.maxSteps ||
+        !Number.isSafeInteger(promptTokenReservation) ||
+        promptTokenReservation < 0 ||
+        promptTokenReservation >= remainingTokens
+      ) return undefined;
+
+      const maxOutputTokens = Math.min(
+        MAX_GOVERNED_OUTPUT_TOKENS,
+        remainingTokens - promptTokenReservation,
+      );
+      usage.tokensIn += promptTokenReservation;
+      usage.tokensOut += maxOutputTokens;
+      usage.steps += 1;
+
+      let finalized = false;
+      return {
+        maxOutputTokens,
+        finalize(summary, reportedUsage) {
+          if (finalized) return;
+          finalized = true;
+          const usageIsExact = reportedUsage !== undefined
+            && Number.isSafeInteger(reportedUsage.tokensIn) && reportedUsage.tokensIn >= 0
+            && Number.isSafeInteger(reportedUsage.tokensOut) && reportedUsage.tokensOut >= 0;
+          const tokensIn = usageIsExact ? reportedUsage.tokensIn : promptTokenReservation;
+          const tokensOut = usageIsExact ? reportedUsage.tokensOut : maxOutputTokens;
+          if (usageIsExact) {
+            usage.tokensIn += tokensIn - promptTokenReservation;
+            usage.tokensOut += tokensOut - maxOutputTokens;
+          }
+          steps.push({
+            ts: new Date().toISOString(),
+            taskId: 't1',
+            kind: 'model',
+            summary,
+            usage: { tokensIn, tokensOut, steps: 1, estCostUsd: 0 },
+          });
+        },
+      };
+    };
 
     // M154: prepend repo-map + localization context to goal when flags are ON.
     // Flag-OFF → contextPrefix2 is '' → task.goal === goal (byte-identical).
@@ -2716,6 +2760,7 @@ export async function runApiModelSandboxed(
       budget,
       usage,
       adaptivePrompts: adaptivePromptsEnabled(cfg),
+      reserveModelStep,
       onStep: (step) => {
         steps.push(step);
         if (step.usage) {

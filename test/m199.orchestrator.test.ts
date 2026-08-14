@@ -258,6 +258,7 @@ function makeClient(id = 'ollama', chatResult: { content: string; usage: { token
     id,
     model: 'llama3',
     supportsTools: false,
+    authority: { requestLimits: 'enforced' as const, usageAccounting: 'exact-provider-counters' as const },
     chat: vi.fn(async () => chatResult),
   };
 }
@@ -823,10 +824,18 @@ describe('M199 runGoal — cancellation accounting and verification guards', () 
     const planJson = '[{"id":"t1","goal":"task one","deps":[]}]';
     const client = makeClient('claude');
     vi.mocked(client.chat)
-      .mockResolvedValueOnce({ content: planJson, usage: { tokensIn: 10, tokensOut: 5 } })
+      .mockResolvedValueOnce({
+        content: planJson,
+        usage: { tokensIn: 10, tokensOut: 5 },
+        usageKnown: true,
+      })
       .mockImplementationOnce(async () => {
         controller.abort();
-        return { content: 'completed synthesis', usage: { tokensIn: 1_000, tokensOut: 500 } };
+        return {
+          content: 'completed synthesis',
+          usage: { tokensIn: 1_000, tokensOut: 500 },
+          usageKnown: true,
+        };
       });
     vi.mocked(getActiveClient).mockResolvedValue(client as any);
     vi.mocked(runTask).mockImplementationOnce(async (task: any) => {

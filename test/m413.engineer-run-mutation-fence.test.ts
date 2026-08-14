@@ -238,6 +238,7 @@ describe('M413 engineer run mutation fence', () => {
       id: 'mock-provider',
       model: 'mock-model',
       supportsTools: true,
+      authority: { requestLimits: 'enforced' as const, usageAccounting: 'exact-provider-counters' as const },
       chat: vi.fn()
         .mockResolvedValueOnce({
           content: '[{"id":"t1","goal":"remain blocked","deps":[]}]',

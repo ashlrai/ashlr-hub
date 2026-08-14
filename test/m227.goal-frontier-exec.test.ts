@@ -169,9 +169,12 @@ function makeOpts(over: Partial<RunOptions> & Record<string, unknown> = {}): Run
 function makeStubClient(id = 'stub') {
   return {
     id,
+    supportsTools: false,
+    authority: { requestLimits: 'enforced' as const, usageAccounting: 'exact-provider-counters' as const },
     chat: vi.fn(async () => ({
       content: JSON.stringify([{ id: 't1', goal: 'do the thing', deps: [] }]),
       usage: { tokensIn: 10, tokensOut: 20 },
+      usageKnown: true,
     })),
     complete: vi.fn(async () => ({ content: 'done', usage: { tokensIn: 5, tokensOut: 5 } })),
   };

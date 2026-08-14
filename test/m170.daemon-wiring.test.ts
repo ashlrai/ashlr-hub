@@ -271,13 +271,23 @@ describe('M170 — best-of-N dispatch: bestOfN > 1 routes through runBestOfN', (
     const [passedItem, passedCfg, passedOpts] = mockRunBestOfN.mock.calls[0] as [
       { id: string; repo: string; source: string; title: string },
       unknown,
-      { n: number; engine: string; model?: string | null; workItemId: string; workSource: string; attemptId: string; delegationScope?: unknown },
+      {
+        n: number;
+        engine: string;
+        model?: string | null;
+        budget: { maxTokens: number; maxSteps: number; allowCloud: boolean };
+        workItemId: string;
+        workSource: string;
+        attemptId: string;
+        delegationScope?: unknown;
+      },
     ];
     expect(typeof passedItem).toBe('object');
     expect(passedCfg).toBe(cfg);
     expect(passedOpts).toMatchObject({
       n: 5,
       engine: 'claude',
+      budget: { maxTokens: expect.any(Number), maxSteps: 100, allowCloud: false },
       workItemId: passedItem.id,
       workSource: passedItem.source,
       delegationScope: {
@@ -297,7 +307,12 @@ describe('M170 — best-of-N dispatch: bestOfN > 1 routes through runBestOfN', (
       },
     });
     expect(passedOpts.attemptId).toMatch(/^attempt-[0-9a-f-]{36}$/);
-    expect((passedOpts.delegationScope as { runId?: string }).runId).toBe(passedOpts.attemptId);
+    const scope = passedOpts.delegationScope as {
+      runId?: string;
+      budget?: { maxTokens: number; maxSteps: number; allowCloud: boolean };
+    };
+    expect(scope.runId).toBe(passedOpts.attemptId);
+    expect(passedOpts.budget).toEqual(scope.budget);
   });
 
   it('clamps an oversized daemon candidate count before invoking runBestOfN', async () => {
