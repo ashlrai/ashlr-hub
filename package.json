@@ -70,6 +70,7 @@
     "prepack": "npm run build",
     "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs && node scripts/build-release-dependency-inventory.mjs && node scripts/build-identity.mjs",
     "build:binary": "node scripts/build-sea.mjs",
+    "release:canary": "node scripts/run-signed-release-canary.mjs",
     "dev": "tsx src/cli/index.ts",
     "test": "vitest run",
     "test:serial": "vitest run --no-file-parallelism",
