@@ -154,6 +154,13 @@ interface DirectJsonResult {
   backend: string | null;
   runId: string | null;
   proposalId: string | null;
+  nextAction: {
+    kind: 'operator-protected-pr-submit';
+    argv: ['ashlr', 'inbox', 'submit', string];
+    callerConfirmationRequired: true;
+    authenticatedHumanReceipt: false;
+    mergesMain: false;
+  } | null;
   usage: null;
   usageObserved: false;
   wrapperEffects: {
@@ -181,6 +188,15 @@ function directJsonResult(
     backend: input.backend,
     runId: input.runId,
     proposalId: input.proposalId,
+    nextAction: input.proposalId
+      ? {
+          kind: 'operator-protected-pr-submit',
+          argv: ['ashlr', 'inbox', 'submit', input.proposalId],
+          callerConfirmationRequired: true,
+          authenticatedHumanReceipt: false,
+          mergesMain: false,
+        }
+      : null,
     usage: null,
     usageObserved: false,
     wrapperEffects: {
@@ -483,7 +499,9 @@ async function runDirect(
     console.log(`  proposal: ${col.cyan(proposalId)}`);
     console.log('');
     console.log(col.dim('  owner-invoked path: the `goal --direct` wrapper did not invoke inbox apply or merge.'));
-    console.log(col.dim('  review with `ashlr inbox`; source Git, remotes, and services are not independently attested unchanged.'));
+    console.log(col.dim(`  review:  ashlr inbox show ${proposalId}`));
+    console.log(col.dim(`  submit:  ashlr inbox submit ${proposalId}  # caller-confirmed verify + protected PR; never merges main`));
+    console.log(col.dim('  source Git, remotes, and services are not independently attested unchanged until submit revalidates them.'));
     return 0;
   } else {
     if (json) {

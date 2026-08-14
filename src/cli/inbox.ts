@@ -11,14 +11,17 @@
  *   inbox approve <id>       Confirm gate, setStatus approved, then applyProposal.
  *   inbox approve <id> --yes Skip interactive prompt (requires TTY check; non-TTY
  *                            with no --yes refuses — no silent auto-approve).
+ *   inbox submit <id>        Confirm, freshly verify, and open one protected PR.
+ *                            Never merges the default branch or calls a model.
  *   inbox reject <id>        Mark rejected; applies nothing.
  *
  * Flags:
  *   --yes    Skip interactive confirm prompt (approve only; non-TTY w/o --yes refuses).
- *   --json   Emit raw JSON for list / show / approve result.
+ *   --json   Emit JSON for list / show / approve / submit / automerge results.
  *
  * Non-TTY: approve without --yes refuses (no auto-approve, ever).
- * READ-ONLY except for approve (which routes through the single applyProposal gate).
+ * READ-ONLY except for approve and submit. Submit routes through the existing
+ * signed protected-remote handoff transaction and cannot select local main.
  */
 
 import { makeColors, pad } from './ui.js';
@@ -107,8 +110,21 @@ type LoadProposalFn   = (id: string) => Proposal | null;
 type SetStatusFn      = (id: string, status: ProposalStatus, result?: string) => boolean | void;
 type PendingCountFn   = () => number;
 type ApplyProposalFn  = (id: string, opts: { confirmed: boolean }) => Promise<import('../core/types.js').ApplyResult>;
-type AutoMergeResult  = { ok: boolean; merged: boolean; handoff?: boolean; reason: string; prUrl?: string };
+type AutoMergeResult  = {
+  ok: boolean;
+  merged: boolean;
+  handoff?: boolean;
+  observedExisting?: boolean;
+  verificationFresh?: boolean;
+  reason: string;
+  prUrl?: string;
+};
 type AutoMergeFn      = (id: string, cfg: import('../core/types.js').AshlrConfig) => Promise<AutoMergeResult>;
+type SubmitProtectedPrFn = (
+  id: string,
+  cfg: import('../core/types.js').AshlrConfig,
+  opts: { confirmed: boolean },
+) => Promise<AutoMergeResult>;
 
 let _listProposals:  ListProposalsFn  | null | undefined;
 let _loadProposal:   LoadProposalFn   | null | undefined;
@@ -116,6 +132,7 @@ let _setStatus:      SetStatusFn      | null | undefined;
 let _pendingCount:   PendingCountFn   | null | undefined;
 let _applyProposal:  ApplyProposalFn  | null | undefined;
 let _autoMerge:      AutoMergeFn      | null | undefined;
+let _submitProtectedPr: SubmitProtectedPrFn | null | undefined;
 
 async function loadStoreModule(): Promise<boolean> {
   if (_listProposals === undefined) {
@@ -159,13 +176,16 @@ async function loadMergeModule(): Promise<boolean> {
     try {
       const mod = await import('../core/inbox/merge.js') as {
         autoMergeProposal: AutoMergeFn;
+        submitVerifiedProtectedPr: SubmitProtectedPrFn;
       };
       _autoMerge = mod.autoMergeProposal;
+      _submitProtectedPr = mod.submitVerifiedProtectedPr;
     } catch {
       _autoMerge = null;
+      _submitProtectedPr = null;
     }
   }
-  return _autoMerge !== null;
+  return _autoMerge !== null && _submitProtectedPr !== null;
 }
 
 // ---------------------------------------------------------------------------
@@ -497,11 +517,139 @@ async function cmdInboxShow(id: string, jsonMode: boolean, openMd: boolean): Pro
 
   if (p.status === 'pending') {
     console.log(col.dim('  Approve: ') + col.cyan(`ashlr inbox approve ${p.id.slice(0, 12)}`));
+    console.log(col.dim('  Submit:  ') + col.cyan(`ashlr inbox submit  ${p.id.slice(0, 12)}`) +
+      col.dim('  (caller-confirmed verify + protected PR; never merges main)'));
     console.log(col.dim('  Reject:  ') + col.cyan(`ashlr inbox reject  ${p.id.slice(0, 12)}`));
     console.log('');
   }
 
   return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: submit <id> [--yes]
+// ---------------------------------------------------------------------------
+
+async function cmdInboxSubmit(id: string, yes: boolean, jsonMode: boolean): Promise<number> {
+  const tty = process.stdout.isTTY === true;
+  const col = makeColors(tty);
+
+  if (!tty && !yes) {
+    const msg = 'non-TTY: inbox submit requires --yes to prevent silent protected-PR submission';
+    if (jsonMode) console.log(JSON.stringify({ ok: false, error: msg }));
+    else console.error(col.red('error: ') + msg);
+    return 2;
+  }
+  if (!id) {
+    const msg = 'Usage: ashlr inbox submit <id> [--yes] [--json]';
+    if (jsonMode) console.log(JSON.stringify({ ok: false, error: msg }));
+    else console.error(col.red('error: ') + msg);
+    return 2;
+  }
+
+  const storeOk = await loadStoreModule();
+  if (!storeOk || !_loadProposal || !_listProposals) {
+    const msg = 'inbox proposal store is unavailable.';
+    if (jsonMode) console.log(JSON.stringify({ ok: false, error: msg }));
+    else console.error(col.red('error: ') + msg);
+    return 1;
+  }
+  const proposal = resolveProposal(id);
+  if (!proposal) {
+    const msg = `Proposal not found: ${id}`;
+    if (jsonMode) console.log(JSON.stringify({ ok: false, error: msg }));
+    else console.error(col.red('error: ') + msg);
+    return 1;
+  }
+  if (proposal.status !== 'pending' && proposal.status !== 'awaiting-host-merge') {
+    const msg = `Proposal ${proposal.id.slice(0, 12)} is ${proposal.status}; submit requires pending or an existing authenticated host handoff.`;
+    if (jsonMode) console.log(JSON.stringify({ ok: false, error: msg, status: proposal.status }));
+    else console.error(col.yellow('warning: ') + msg);
+    return 1;
+  }
+  if (proposal.isPartial === true) {
+    const msg = `Proposal ${proposal.id.slice(0, 12)} is partial review evidence and cannot be submitted.`;
+    if (jsonMode) console.log(JSON.stringify({ ok: false, error: msg, status: proposal.status }));
+    else console.error(col.yellow('warning: ') + msg);
+    return 1;
+  }
+
+  const observingExisting = proposal.status === 'awaiting-host-merge';
+  if (!jsonMode) {
+    console.log('');
+    console.log(col.bold(observingExisting
+      ? '  Observe existing protected PR handoff:'
+      : '  Prepare protected PR handoff:'));
+    console.log('    ' + col.bold('ID:     ') + col.dim(proposal.id.slice(0, 12)));
+    console.log('    ' + col.bold('Title:  ') + proposal.title);
+    console.log('    ' + col.bold('Repo:   ') + col.dim(shortRepo(proposal.repo)));
+    console.log('');
+    console.log('  ' + col.yellow(observingExisting
+      ? 'This rechecks the current base, origin, exact PR identity, and live protection. It does not reverify or create another PR.'
+      : 'This runs fresh verification, pushes one staging branch, and opens a protected PR. It never merges main.'));
+    console.log('  ' + col.dim(
+      '--yes records caller intent; it is not an authenticated human identity or durable approval receipt.',
+    ));
+    console.log('');
+  }
+  if (!yes) {
+    const confirmed = await promptConfirmAsync(observingExisting
+      ? '  Observe this existing protected PR handoff against current host state?'
+      : '  Verify and submit this proposal for protected host review?');
+    if (!confirmed) {
+      if (jsonMode) console.log(JSON.stringify({ ok: false, error: 'aborted by user' }));
+      else console.log(col.dim(observingExisting
+        ? '  Aborted — existing handoff was not re-observed.'
+        : '  Aborted — proposal remains pending.'));
+      return 0;
+    }
+  }
+
+  const mergeOk = await loadMergeModule();
+  if (!mergeOk || !_submitProtectedPr) {
+    const msg = 'protected PR handoff module is unavailable.';
+    if (jsonMode) console.log(JSON.stringify({ ok: false, error: msg }));
+    else console.error(col.red('error: ') + msg);
+    return 1;
+  }
+
+  let cfg: import('../core/types.js').AshlrConfig;
+  try {
+    const { loadConfig } = await import('../core/config.js') as {
+      loadConfig: () => import('../core/types.js').AshlrConfig;
+    };
+    cfg = loadConfig();
+  } catch {
+    const msg = 'could not load config (src/core/config.ts).';
+    if (jsonMode) console.log(JSON.stringify({ ok: false, error: msg }));
+    else console.error(col.red('error: ') + msg);
+    return 1;
+  }
+
+  if (!jsonMode) process.stdout.write(col.dim(observingExisting
+    ? '  Rechecking existing protected PR handoff…'
+    : '  Verifying and preparing protected PR handoff…') + (tty ? '\r' : '\n'));
+  const result = await _submitProtectedPr(proposal.id, cfg, { confirmed: true });
+  if (tty && !jsonMode) process.stdout.write('\x1b[2K\r');
+
+  if (jsonMode) {
+    console.log(JSON.stringify(result, null, 2));
+    return result.ok && result.handoff === true && result.merged === false ? 0 : 1;
+  }
+  if (result.ok && result.handoff === true && result.merged === false) {
+    console.log(col.green(result.observedExisting
+      ? '  ✓ Existing protected PR observed: '
+      : '  ✓ Protected PR handed off: ') + result.reason);
+    if (result.prUrl) console.log(col.dim('    PR: ') + result.prUrl);
+    console.log('');
+    return 0;
+  }
+  console.error(col.yellow(result.handoff === true
+    ? '  ✗ Protected PR handoff is uncertain; a PR exists or may exist: '
+    : '  ✗ PR not submitted: ') + result.reason);
+  if (result.prUrl) console.log(col.dim('    PR: ') + result.prUrl);
+  console.log('');
+  return 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -835,7 +983,7 @@ function resolveProposal(idOrPrefix: string): Proposal | null {
 // ---------------------------------------------------------------------------
 
 /**
- * `ashlr inbox [show|approve|reject] [id] [--yes] [--json]`
+ * `ashlr inbox [show|approve|submit|reject] [id] [--yes] [--json]`
  *
  * Returns a process exit code (0 = success, non-zero = error/usage).
  */
@@ -862,7 +1010,7 @@ export async function cmdInbox(args: string[]): Promise<number> {
       openMd = true;
     } else if (a?.startsWith('-')) {
       console.error(col.red('error: ') + `Unknown flag: ${a}`);
-      console.error(col.dim('Usage: ashlr inbox [show|approve|reject|automerge] [<id>] [--yes] [--json] [--open]'));
+      console.error(col.dim('Usage: ashlr inbox [show|approve|submit|reject|automerge] [<id>] [--yes] [--json] [--open]'));
       return 2;
     } else {
       positionals.push(a);
@@ -871,7 +1019,7 @@ export async function cmdInbox(args: string[]): Promise<number> {
 
   if (positionals.length > 0) {
     const first = positionals[0];
-    if (first === 'show' || first === 'approve' || first === 'reject' || first === 'automerge') {
+    if (first === 'show' || first === 'approve' || first === 'submit' || first === 'reject' || first === 'automerge') {
       subcmd    = first;
       targetId  = positionals[1] ?? '';
     } else {
@@ -888,13 +1036,15 @@ export async function cmdInbox(args: string[]): Promise<number> {
       return cmdInboxShow(targetId, jsonMode, openMd);
     case 'approve':
       return cmdInboxApprove(targetId, yes, jsonMode);
+    case 'submit':
+      return cmdInboxSubmit(targetId, yes, jsonMode);
     case 'reject':
       return cmdInboxReject(targetId, jsonMode);
     case 'automerge':
       return cmdInboxAutoMerge(targetId, jsonMode);
     default:
       console.error(col.red('error: ') + `Unknown inbox subcommand: ${subcmd}`);
-      console.error(col.dim('Usage: ashlr inbox [show|approve|reject|automerge] [<id>] [--yes] [--json] [--open]'));
+      console.error(col.dim('Usage: ashlr inbox [show|approve|submit|reject|automerge] [<id>] [--yes] [--json] [--open]'));
       return 2;
   }
 }

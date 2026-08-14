@@ -106,6 +106,7 @@ import type {
   AshlrConfig,
   AutoMergeTrustBasis,
   DecisionEntry,
+  EngineId,
   JudgeDecisionReasonCode,
   EngineTier,
   Proposal,
@@ -193,6 +194,7 @@ import {
   releaseOutwardMutationFence,
 } from '../sandbox/mutation-fence.js';
 import {
+  isAuthenticatedAwaitingRemoteHandoff,
   isApprovedRemoteHandoffRetryCandidate,
   remoteAuthorityBinding,
   remoteAuthorityMatchesRepo,
@@ -1133,6 +1135,12 @@ function prUrlMatchesAuthority(url: string | undefined, nameWithOwner: string): 
   const match = url.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/([1-9]\d*)$/i);
   return Boolean(match?.[1] && match[2] &&
     `${match[1]}/${match[2]}`.toLowerCase() === nameWithOwner.toLowerCase());
+}
+
+function normalizedGitCommitOid(value: unknown): string | null {
+  return typeof value === 'string' && /^[0-9a-f]{40}$/i.test(value)
+    ? value.toLowerCase()
+    : null;
 }
 
 export async function evaluateLiveProtectedRemoteAuthority(
@@ -2501,10 +2509,21 @@ export interface AutoMergeResult {
   merged: boolean;
   /** M56: true when a MID-tier proposal was applied to a BRANCH/PR (not main). */
   branched?: boolean;
-  /** True when a remote PR was opened and the host is responsible for final merge. */
+  /** True when a remote PR exists and the host is responsible for final merge. */
   handoff?: boolean;
+  /** True when this call only re-observed an already-persisted handoff. */
+  observedExisting?: boolean;
+  /** True only when verification ran and was persisted during this invocation. */
+  verificationFresh?: boolean;
   reason: string;
   prUrl?: string;
+}
+
+interface AutoMergeInvocationOptions {
+  /** Bind persisted verification to the actual caller without changing gate behavior. */
+  verificationSource?: ProposalVerifyResult['source'];
+  /** Treat any post-create protected-remote drift as an unsuccessful uncertain outcome. */
+  requireConfirmedProtectedHandoff?: boolean;
 }
 
 /** Repair the narrow crash window between a proven local merge and its receipt. */
@@ -2821,6 +2840,7 @@ function mergeLocally(
 export async function autoMergeProposal(
   id: string,
   cfg: AshlrConfig,
+  invocation: AutoMergeInvocationOptions = {},
 ): Promise<AutoMergeResult> {
   const refuse = (reason: string, repo: string | null = null): AutoMergeResult => {
     audit({
@@ -2996,7 +3016,11 @@ export async function autoMergeProposal(
         hasCurrentVerificationBinding(proposal);
       const shouldVerify = trustBasis === 'evidence' || !verificationBoundToCurrentProposal;
       if (shouldVerify) {
-        const transaction = await verifyAndPersistProposal(proposal, cfg, 'auto-merge');
+        const transaction = await verifyAndPersistProposal(
+          proposal,
+          cfg,
+          invocation.verificationSource ?? 'auto-merge',
+        );
         const preVerify = transaction.verify;
         if (!transaction.persisted || !transaction.verifyResult) {
           return refuse(
@@ -3150,7 +3174,11 @@ export async function autoMergeProposal(
     } else if (trustBasis === 'verification' && hasVerifiedDiffBinding(proposal)) {
       verify = verifyResultFromStored(proposal.verifyResult);
     } else {
-      const transaction = await verifyAndPersistProposal(proposal, cfg, 'auto-merge');
+      const transaction = await verifyAndPersistProposal(
+        proposal,
+        cfg,
+        invocation.verificationSource ?? 'auto-merge',
+      );
       verify = transaction.verify;
       if (!transaction.persisted || !transaction.verifyResult) {
         return refuse(`${transaction.reason} — refusing merge authority`, repo);
@@ -4101,20 +4129,27 @@ export async function autoMergeProposal(
         const latestRemoteHead = resolveRemoteBranchHead(repo, branch, githubOrigin.pushUrl);
         const remoteHeadMatches = latestRemoteHead === stagedHead;
         let mergeNote = toMain ? 'PR opened' : 'PR opened for review (mid-tier — never merged to main)';
+        let finalProtectedHandoffConfirmed = false;
         if (toMain) {
           const latestProtection = await evaluateLiveProtectedRemoteAuthority(repo, base, boundBaseHead, cfg);
           const originStable = githubOriginAuthorityMatches(repo, githubOrigin) &&
             remoteAuthorityMatchesRepo(repo, boundRemoteAuthority);
+          const normalizedBoundBase = normalizedGitCommitOid(boundBaseHead);
+          const baseOidMatches = normalizedBoundBase !== null &&
+            normalizedGitCommitOid(observedPr?.baseRefOid) === normalizedBoundBase;
           if (!remoteHeadMatches) {
             mergeNote = 'PR opened; remote PR head mismatch; host auto-merge refused because the remote PR head changed';
           } else if (!prIdentityConfirmed) {
             mergeNote = 'PR opened; host auto-merge refused because post-create PR identity was not confirmed';
+          } else if (!baseOidMatches) {
+            mergeNote = 'PR opened; host auto-merge refused because the PR base OID changed';
           } else if (!latestProtection.authorized || remoteProtectionEvidence === undefined ||
             latestProtection.evidence.policyHash !== remoteProtectionEvidence.policyHash) {
             mergeNote = 'PR opened; host auto-merge refused because live protection changed';
           } else if (!originStable) {
             mergeNote = 'PR opened; host auto-merge refused because canonical GitHub origin changed';
           } else {
+            finalProtectedHandoffConfirmed = true;
             mergeNote = 'PR opened; host auto-merge is disabled until durable revocation is available';
           }
         }
@@ -4127,12 +4162,18 @@ export async function autoMergeProposal(
             ...(url ? { prUrl: url } : {}),
           } satisfies AutoMergeResult;
         }
+        const strictHandoffUncertain = toMain &&
+          invocation.requireConfirmedProtectedHandoff === true &&
+          !finalProtectedHandoffConfirmed;
         return {
-          ok: true,
+          ok: !strictHandoffUncertain,
           merged: false,
           handoff: true,
+          ...(invocation.verificationSource === 'manual' ? { verificationFresh: true } : {}),
           ...(!toMain ? { branched: true } : {}),
-          reason: durableReason,
+          reason: strictHandoffUncertain
+            ? `${durableReason}; final protected handoff confirmation is uncertain and requires reconciliation`
+            : durableReason,
           ...(url ? { prUrl: url } : {}),
         } satisfies AutoMergeResult;
       });
@@ -4355,4 +4396,240 @@ export async function autoMergeProposal(
     // Belt-and-suspenders: the orchestrator must never throw out.
     return refuse(`unexpected error: ${err instanceof Error ? err.message : String(err)}`);
   }
+}
+
+const OPERATOR_PROTECTED_PR_ENGINES = new Set<EngineId>([
+  'builtin',
+  'local-coder',
+  'ashlrcode',
+  'aw',
+  'claude',
+  'codex',
+  'hermes',
+  'kimi',
+  'nim',
+  'opencode',
+  'grok',
+]);
+
+function exactOperatorSubmissionAuthority(
+  proposal: Proposal,
+): { engine: EngineId; model: string } | null {
+  const engineModel = proposal.engineModel;
+  if (proposal.engineTier !== 'frontier' || !engineModel || engineModel.endsWith(':default')) {
+    return null;
+  }
+  const separator = engineModel.indexOf(':');
+  if (separator <= 0 || separator === engineModel.length - 1) return null;
+  const engine = engineModel.slice(0, separator) as EngineId;
+  const model = engineModel.slice(separator + 1);
+  return OPERATOR_PROTECTED_PR_ENGINES.has(engine) && model.trim().length > 0
+    ? { engine, model }
+    : null;
+}
+
+function operatorProtectedPrConfig(
+  proposal: Proposal,
+  cfg: AshlrConfig,
+): AshlrConfig | null {
+  const authority = exactOperatorSubmissionAuthority(proposal);
+  if (!authority) return null;
+  const configuredProtection = cfg.foundry?.autoMerge?.protectedRemote;
+  const configuredRisk = cfg.foundry?.autoMerge?.maxRisk;
+  const configuredFiles = cfg.foundry?.autoMerge?.maxAutomergeFiles;
+  const configuredLines = cfg.foundry?.autoMerge?.maxAutomergeLines;
+  const rawChecks: unknown = configuredProtection?.requiredChecks;
+  const checksAreSafe = Array.isArray(rawChecks) && rawChecks.every((entry) =>
+    typeof entry === 'string' ||
+    (isObjectRecord(entry) && typeof entry['context'] === 'string' &&
+      (typeof entry['appId'] === 'string' || typeof entry['appId'] === 'number')));
+  const protectedRemote = configuredProtection
+    ? {
+        branchProtection: configuredProtection.branchProtection === true,
+        requiredChecks: checksAreSafe
+          ? rawChecks.map((entry) => typeof entry === 'string'
+              ? entry
+              : { context: String(entry['context']), appId: entry['appId'] as string | number })
+          : [],
+      }
+    : undefined;
+  return {
+    ...cfg,
+    foundry: {
+      ...cfg.foundry,
+      // This exact producer is the only tier authority for this invocation.
+      mergeAuthority: [authority],
+      // Deliberately construct an exact allowlist. No ambient or future
+      // autoMerge toggle is inherited into this caller-authorized operation.
+      autoMerge: {
+        enabled: true,
+        trustBasis: 'tier',
+        // Preserve tighter known policy, cap broader/invalid ambient values.
+        maxRisk: configuredRisk === 'low' ? 'low' : 'medium',
+        maxAutomergeFiles: typeof configuredFiles === 'number' &&
+          Number.isInteger(configuredFiles) && configuredFiles > 0
+          ? Math.min(configuredFiles, 4)
+          : 4,
+        maxAutomergeLines: typeof configuredLines === 'number' &&
+          Number.isInteger(configuredLines) && configuredLines > 0
+          ? Math.min(configuredLines, 150)
+          : 150,
+        managerGate: false,
+        allowSelfMerge: true,
+        pushToRemote: true,
+        midToBranch: false,
+        allowWithoutVerification: false,
+        ...(protectedRemote ? { protectedRemote } : {}),
+      },
+    },
+  };
+}
+
+/**
+ * Caller-authorized delivery of one signed frontier proposal to a protected
+ * GitHub pull request. `confirmed` records invocation intent; it is not an
+ * authenticated human identity or durable approval receipt. Initial submission
+ * always runs fresh verification and forces the existing remote-only protected
+ * handoff path. It cannot select the local-main fallback and disables the
+ * optional manager gate so this operation never contacts a model/provider.
+ */
+export async function submitVerifiedProtectedPr(
+  id: string,
+  cfg: AshlrConfig,
+  opts: { confirmed: boolean },
+): Promise<AutoMergeResult> {
+  const refuse = (reason: string, repo: string | null = null): AutoMergeResult => {
+    audit({
+      action: 'inbox:submit-protected-pr',
+      repo,
+      sandboxId: id,
+      summary: `refused: ${reason}`,
+      result: 'refused',
+    });
+    return { ok: false, merged: false, reason };
+  };
+
+  if (opts.confirmed !== true) {
+    return refuse('protected PR submission requires explicit caller confirmation');
+  }
+
+  const proposal = loadProposal(id);
+  if (!proposal) return refuse(`proposal not found: ${id}`);
+
+  const submissionCfg = operatorProtectedPrConfig(proposal, cfg);
+  if (!submissionCfg) {
+    return refuse(
+      'protected PR submission requires signed frontier provenance with one concrete engine model',
+      proposal.repo,
+    );
+  }
+
+  // Replays never claim a new submission or fresh verification. They only
+  // report a distinct observation after re-checking every live binding needed
+  // to prove the exact already-created PR is still a safe open handoff.
+  if (proposal.status === 'awaiting-host-merge') {
+    const handoff = proposal.remoteHandoff;
+    const intent = proposal.localMergeIntent;
+    if (!proposal.repo || !handoff?.prUrl || !handoff.authority || !intent ||
+      !isAuthenticatedAwaitingRemoteHandoff(proposal)) {
+      return refuse('existing host handoff is not authenticated; reconcile it before retrying', proposal.repo);
+    }
+    if (!hasCurrentVerificationBinding(proposal) ||
+      proposal.verifyResult.baseBranch !== intent.base ||
+      proposal.verifyResult.baseHead.toLowerCase() !== intent.baseBeforeOid.toLowerCase()) {
+      return refuse('existing host handoff base or diff binding is stale; reconcile it before retrying', proposal.repo);
+    }
+    const liveProtection = await evaluateLiveProtectedRemoteAuthority(
+      proposal.repo,
+      intent.base,
+      intent.baseBeforeOid,
+      submissionCfg,
+    );
+    const evidencePack = readAutonomyEvidencePack(id);
+    const sealedProtection = evidencePack?.version === 3
+      ? evidencePack.gates.remoteProtection
+      : undefined;
+    if (!liveProtection.authorized || !sealedProtection ||
+      sealedProtection.policyHash !== liveProtection.evidence.policyHash) {
+      return refuse(
+        `existing host handoff protection is stale or unavailable: ${
+          liveProtection.authorized ? 'sealed policy binding mismatch' : liveProtection.reason
+        }`,
+        proposal.repo,
+      );
+    }
+    const livePr = viewPr(proposal.repo, handoff.prUrl, { repo: handoff.authority.nameWithOwner });
+    const normalizedIntentBase = normalizedGitCommitOid(intent.baseBeforeOid);
+    const liveOpen = normalizedIntentBase !== null && livePr?.state?.toUpperCase() === 'OPEN' &&
+      livePr.url === handoff.prUrl &&
+      livePr.headRefName === handoff.branch &&
+      livePr.baseRefName === handoff.base &&
+      livePr.headRefOid?.toLowerCase() === handoff.expectedHeadOid?.toLowerCase() &&
+      normalizedGitCommitOid(livePr.baseRefOid) === normalizedIntentBase;
+    if (!liveOpen || !remoteAuthorityMatchesRepo(proposal.repo, handoff.authority)) {
+      return refuse('existing host handoff is not confirmed OPEN; reconcile it before retrying', proposal.repo);
+    }
+    audit({
+      action: 'inbox:submit-protected-pr',
+      repo: proposal.repo,
+      sandboxId: id,
+      summary: `existing protected PR observed OPEN under current base and protection: ${handoff.prUrl}`,
+      result: 'ok',
+    });
+    return {
+      ok: true,
+      merged: false,
+      handoff: true,
+      observedExisting: true,
+      verificationFresh: false,
+      reason: 'existing protected PR observed under current base, origin, identity, and protection; no verification or PR creation was performed',
+      prUrl: handoff.prUrl,
+    };
+  }
+
+  if (proposal.status !== 'pending') {
+    return refuse(
+      `proposal status '${proposal.status}' is not pending or an authenticated host handoff`,
+      proposal.repo,
+    );
+  }
+  if (proposal.isPartial === true) {
+    return refuse('partial proposals are review evidence and cannot be submitted', proposal.repo);
+  }
+  if ((proposal.kind !== 'patch' && proposal.kind !== 'pr') || !proposal.diff?.trim()) {
+    return refuse('protected PR submission requires a patch or PR proposal with a diff', proposal.repo);
+  }
+
+  const result = await autoMergeProposal(id, submissionCfg, {
+    verificationSource: 'manual',
+    requireConfirmedProtectedHandoff: true,
+  });
+  if (result.merged) {
+    // Structurally unreachable because pushToRemote=true and the protected
+    // remote is required before staging. Keep the return truthful if a future
+    // refactor violates that invariant.
+    audit({
+      action: 'inbox:submit-protected-pr',
+      repo: proposal.repo,
+      sandboxId: id,
+      summary: `protected PR invariant violated: default branch was merged (${result.reason})`,
+      result: 'error',
+    });
+    return {
+      ok: false,
+      merged: true,
+      reason: `protected PR invariant violated: default branch was merged (${result.reason})`,
+      ...(result.prUrl ? { prUrl: result.prUrl } : {}),
+    };
+  }
+  audit({
+    action: 'inbox:submit-protected-pr',
+    repo: proposal.repo,
+    sandboxId: id,
+    summary: result.ok
+      ? `protected PR handoff confirmed: ${result.prUrl ?? 'canonical URL unavailable'}`
+      : `protected PR handoff not completed: ${result.reason}`,
+    result: result.ok ? 'ok' : 'error',
+  });
+  return result;
 }

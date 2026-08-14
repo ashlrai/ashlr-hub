@@ -81,14 +81,24 @@ vi.mock('../src/core/integrations/github.js', async (importOriginal) => {
     createPr: (...args: unknown[]) => createPrMock(...args),
     viewPr: (...args: unknown[]) => {
       const result = viewPrMock(...args) as Record<string, unknown> | null | undefined;
-      if (!result || typeof result.headRefName !== 'string' || typeof result.headRefOid === 'string') return result;
+      if (!result) return result;
       try {
-        const headRefOid = execFileSync(
-          'git',
-          ['-C', String(args[0]), 'rev-parse', '--verify', `refs/heads/${result.headRefName}`],
-          { stdio: 'pipe', encoding: 'utf8' },
-        ).trim();
-        return { ...result, headRefOid };
+        const enriched = { ...result };
+        if (typeof result.headRefName === 'string' && typeof result.headRefOid !== 'string') {
+          enriched.headRefOid = execFileSync(
+            'git',
+            ['-C', String(args[0]), 'rev-parse', '--verify', `refs/heads/${result.headRefName}`],
+            { stdio: 'pipe', encoding: 'utf8' },
+          ).trim();
+        }
+        if (typeof result.baseRefName === 'string' && typeof result.baseRefOid !== 'string') {
+          enriched.baseRefOid = execFileSync(
+            'git',
+            ['-C', String(args[0]), 'rev-parse', '--verify', `refs/heads/${result.baseRefName}`],
+            { stdio: 'pipe', encoding: 'utf8' },
+          ).trim();
+        }
+        return enriched;
       } catch {
         return result;
       }

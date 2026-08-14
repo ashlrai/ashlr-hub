@@ -17,6 +17,7 @@ const {
   createPrMock,
   evidencePersistHookMock,
   hostAutoMergeMock,
+  managerCallMock,
   originAuthorityMock,
   stagingPushHookMock,
   viewPrMock,
@@ -25,6 +26,7 @@ const {
   createPrMock: vi.fn(),
   evidencePersistHookMock: vi.fn(),
   hostAutoMergeMock: vi.fn(),
+  managerCallMock: vi.fn(),
   originAuthorityMock: vi.fn(),
   stagingPushHookMock: vi.fn(),
   viewPrMock: vi.fn(),
@@ -83,7 +85,22 @@ vi.mock('../src/core/integrations/github.js', async (importOriginal) => {
   };
 });
 
-import { autoMergeProposal } from '../src/core/inbox/merge.js';
+vi.mock('../src/core/fleet/manager.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/fleet/manager.js')>();
+  return {
+    ...actual,
+    resolveFrontierJudgeClient: (...args: Parameters<typeof actual.resolveFrontierJudgeClient>) => {
+      managerCallMock('resolveFrontierJudgeClient');
+      return actual.resolveFrontierJudgeClient(...args);
+    },
+    judgeProposal: (...args: Parameters<typeof actual.judgeProposal>) => {
+      managerCallMock('judgeProposal');
+      return actual.judgeProposal(...args);
+    },
+  };
+});
+
+import { autoMergeProposal, submitVerifiedProtectedPr } from '../src/core/inbox/merge.js';
 import {
   readAutonomyEvidencePack,
   sealAutonomyEvidencePackV3,
@@ -254,7 +271,7 @@ function protectionAttestation(branch = 'main', ruleId = 'BPR_fixture') {
   };
 }
 
-function makeProposal(tier: EngineTier, filename: string): Proposal {
+function makeProposal(tier: EngineTier, filename: string, approve = true): Proposal {
   const diff = diffFor(filename);
   const diffHash = hashDiff(diff);
   const engineModel = tier === 'frontier' ? 'codex:gpt-5.5' : 'hermes:hermes-3-llama-3.1-70b';
@@ -270,7 +287,7 @@ function makeProposal(tier: EngineTier, filename: string): Proposal {
     engineModel,
     engineTier: tier,
   });
-  expect(setStatus(proposal.id, 'approved')).toBe(true);
+  if (approve) expect(setStatus(proposal.id, 'approved')).toBe(true);
   return proposal;
 }
 
@@ -341,6 +358,7 @@ beforeEach(() => {
   stagingPushHookMock.mockReset();
   evidencePersistHookMock.mockReset();
   hostAutoMergeMock.mockReset();
+  managerCallMock.mockReset();
   originAuthorityMock.mockReset();
   originAuthorityMock.mockReturnValue({
     nameWithOwner: 'ashlrai/fixture',
@@ -356,12 +374,13 @@ beforeEach(() => {
   createPrMock.mockReset();
   createPrMock.mockImplementation(async (_repo: string, input: { head: string; base?: string }) => {
     const url = 'https://github.com/ashlrai/fixture/pull/419';
-    viewPrMock.mockReturnValueOnce({
+    viewPrMock.mockReturnValue({
       url,
       state: 'OPEN',
       headRefName: input.head,
       headRefOid: git(tmpRepo, ['rev-parse', `refs/heads/${input.head}`]),
       baseRefName: input.base ?? 'main',
+      baseRefOid: git(tmpRepo, ['rev-parse', input.base ?? 'main']),
     });
     return { ok: true, url, detail: 'PR created' };
   });
@@ -387,6 +406,221 @@ afterEach(() => {
 });
 
 describe('M419 remote handoff intent', { timeout: 60_000 }, () => {
+  it('operator submit without caller confirmation performs no verification or outward effect', async () => {
+    const proposal = makeProposal('frontier', 'docs/human-submit-unconfirmed.md', false);
+
+    const result = await submitVerifiedProtectedPr(proposal.id, config(), { confirmed: false });
+
+    expect(result).toMatchObject({ ok: false, merged: false });
+    expect(result.reason).toMatch(/explicit caller confirmation/i);
+    expect(stagingPushHookMock).not.toHaveBeenCalled();
+    expect(createPrMock).not.toHaveBeenCalled();
+    expect(hostAutoMergeMock).not.toHaveBeenCalled();
+    expect(managerCallMock).not.toHaveBeenCalled();
+    expect(loadProposal(proposal.id)?.status).toBe('pending');
+    expect(loadProposal(proposal.id)?.verifyResult).toBeUndefined();
+  });
+
+  it('operator submit refuses non-frontier producers before verification or outward effect', async () => {
+    const proposal = makeProposal('mid', 'docs/human-submit-mid.md', false);
+
+    const result = await submitVerifiedProtectedPr(proposal.id, config(), { confirmed: true });
+
+    expect(result).toMatchObject({ ok: false, merged: false });
+    expect(result.reason).toMatch(/signed frontier provenance/i);
+    expect(stagingPushHookMock).not.toHaveBeenCalled();
+    expect(createPrMock).not.toHaveBeenCalled();
+    expect(loadProposal(proposal.id)?.status).toBe('pending');
+    expect(loadProposal(proposal.id)?.verifyResult).toBeUndefined();
+  });
+
+  it('operator submit forces one verified protected PR and never mutates main or requests host auto-merge', async () => {
+    const proposal = makeProposal('frontier', 'docs/human-submit.md', false);
+    const localMainBefore = git(tmpRepo, ['rev-parse', 'main']);
+    const remoteMainBefore = git(tmpRepo, ['ls-remote', bareRepo, 'refs/heads/main']).split(/\s+/)[0];
+    const ambient = config();
+    ambient.foundry!.mergeAuthority = [];
+    ambient.foundry!.autoMerge = {
+      ...ambient.foundry!.autoMerge!,
+      enabled: false,
+      pushToRemote: false,
+      managerGate: true,
+      allowSelfMerge: false,
+      allowWithoutVerification: true,
+      // Future/unknown ambient toggles must not widen the explicit handoff.
+      hostAutoMerge: true,
+    } as typeof ambient.foundry.autoMerge;
+
+    const first = await submitVerifiedProtectedPr(proposal.id, ambient, { confirmed: true });
+    const second = await submitVerifiedProtectedPr(proposal.id, ambient, { confirmed: true });
+
+    expect(first).toMatchObject({ ok: true, merged: false, handoff: true });
+    expect(first).toMatchObject({ verificationFresh: true });
+    expect(second).toMatchObject({
+      ok: true,
+      merged: false,
+      handoff: true,
+      observedExisting: true,
+      verificationFresh: false,
+      prUrl: first.prUrl,
+    });
+    expect(createPrMock).toHaveBeenCalledTimes(1);
+    expect(stagingPushHookMock).toHaveBeenCalledTimes(1);
+    expect(hostAutoMergeMock).not.toHaveBeenCalled();
+    expect(managerCallMock).not.toHaveBeenCalled();
+    expect(git(tmpRepo, ['rev-parse', 'main'])).toBe(localMainBefore);
+    expect(git(tmpRepo, ['ls-remote', bareRepo, 'refs/heads/main']).split(/\s+/)[0]).toBe(remoteMainBefore);
+    expect(loadProposal(proposal.id)).toMatchObject({
+      status: 'awaiting-host-merge',
+      verifyResult: {
+        passed: true,
+        source: 'manual',
+        baseBranch: 'main',
+        baseHead: localMainBefore,
+        diffHash: proposal.diffHash,
+      },
+    });
+  });
+
+  it('operator submit refuses an unprotected remote before staging, push, or PR creation', async () => {
+    const proposal = makeProposal('frontier', 'docs/human-submit-unprotected.md', false);
+    branchProtectionMock.mockResolvedValueOnce({
+      ok: false,
+      available: true,
+      protected: false,
+      branchProtection: false,
+      detail: 'fixture remote is unprotected',
+    });
+
+    const result = await submitVerifiedProtectedPr(proposal.id, config(), { confirmed: true });
+
+    expect(result).toMatchObject({ ok: false, merged: false });
+    expect(result.reason).toMatch(/protected remote handoff denied/i);
+    expect(stagingPushHookMock).not.toHaveBeenCalled();
+    expect(createPrMock).not.toHaveBeenCalled();
+    expect(hostAutoMergeMock).not.toHaveBeenCalled();
+    expect(loadProposal(proposal.id)?.status).toBe('pending');
+  });
+
+  it.each(['remote-head', 'pr-base-oid', 'missing-pr-base-oid', 'origin', 'protection'] as const)(
+    'returns an uncertain unsuccessful result when %s is missing or drifts after PR creation',
+    async (drift) => {
+      const proposal = makeProposal('frontier', `docs/post-create-${drift}.md`, false);
+      createPrMock.mockImplementationOnce(async (_repo: string, input: { head: string; base?: string }) => {
+        const url = 'https://github.com/ashlrai/fixture/pull/419';
+        const base = input.base ?? 'main';
+        const expectedHead = git(tmpRepo, ['rev-parse', `refs/heads/${input.head}`]);
+        if (drift === 'remote-head') {
+          git(bareRepo, ['update-ref', `refs/heads/${input.head}`, git(tmpRepo, ['rev-parse', base])]);
+        }
+        if (drift === 'origin') {
+          originAuthorityMock.mockReturnValue({
+            nameWithOwner: 'ashlrai/other',
+            fetchUrls: [bareRepo],
+            pushUrls: [bareRepo],
+            pushUrl: bareRepo,
+          });
+        }
+        if (drift === 'protection') {
+          branchProtectionMock.mockResolvedValue({
+            ok: false,
+            available: true,
+            protected: false,
+            branchProtection: false,
+            detail: 'fixture protection drifted after create',
+          });
+        }
+        viewPrMock.mockReturnValue({
+          url,
+          state: 'OPEN',
+          headRefName: input.head,
+          headRefOid: drift === 'remote-head' ? git(tmpRepo, ['rev-parse', base]) : expectedHead,
+          baseRefName: base,
+          ...(drift === 'missing-pr-base-oid'
+            ? {}
+            : {
+                baseRefOid: drift === 'pr-base-oid'
+                  ? 'f'.repeat(40)
+                  : git(tmpRepo, ['rev-parse', base]),
+              }),
+        });
+        return { ok: true, url, detail: 'PR created before fixture drift' };
+      });
+
+      const result = await submitVerifiedProtectedPr(proposal.id, config(), { confirmed: true });
+
+      expect(result).toMatchObject({ ok: false, merged: false, handoff: true, verificationFresh: true });
+      expect(result.reason).toMatch(/uncertain|requires reconciliation/i);
+      expect(createPrMock).toHaveBeenCalledTimes(1);
+      expect(hostAutoMergeMock).not.toHaveBeenCalled();
+      expect(loadProposal(proposal.id)?.status).toBe('awaiting-host-merge');
+    },
+  );
+
+  it.each(['base', 'pr-base-oid', 'missing-pr-base-oid', 'origin', 'protection'] as const)(
+    'replay refuses stale %s evidence and never creates another PR',
+    async (drift) => {
+      const proposal = makeProposal('frontier', `docs/replay-${drift}.md`, false);
+      const first = await submitVerifiedProtectedPr(proposal.id, config(), { confirmed: true });
+      expect(first).toMatchObject({ ok: true, handoff: true, verificationFresh: true });
+
+      if (drift === 'base') {
+        fs.writeFileSync(path.join(tmpRepo, 'base-drift.txt'), 'drift\n', 'utf8');
+        git(tmpRepo, ['add', 'base-drift.txt']);
+        git(tmpRepo, ['commit', '-m', 'advance base after handoff']);
+      } else if (drift === 'pr-base-oid') {
+        const current = viewPrMock();
+        viewPrMock.mockReturnValue({ ...current, baseRefOid: 'e'.repeat(40) });
+      } else if (drift === 'missing-pr-base-oid') {
+        const current = viewPrMock() as Record<string, unknown>;
+        const { baseRefOid: _baseRefOid, ...withoutBaseOid } = current;
+        viewPrMock.mockReturnValue(withoutBaseOid);
+      } else if (drift === 'origin') {
+        originAuthorityMock.mockReturnValue({
+          nameWithOwner: 'ashlrai/other',
+          fetchUrls: [bareRepo],
+          pushUrls: [bareRepo],
+          pushUrl: bareRepo,
+        });
+      } else {
+        branchProtectionMock.mockResolvedValue({
+          ok: false,
+          available: true,
+          protected: false,
+          branchProtection: false,
+          detail: 'fixture protection unavailable on replay',
+        });
+      }
+
+      const replay = await submitVerifiedProtectedPr(proposal.id, config(), { confirmed: true });
+
+      expect(replay).toMatchObject({ ok: false, merged: false });
+      expect(replay.observedExisting).not.toBe(true);
+      expect(createPrMock).toHaveBeenCalledTimes(1);
+      expect(stagingPushHookMock).toHaveBeenCalledTimes(1);
+      expect(hostAutoMergeMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it('generic verification mode still requires independent review evidence when managerGate is false', async () => {
+    const proposal = makeProposal('frontier', 'docs/generic-independent-review.md');
+    const generic = config();
+    generic.foundry!.autoMerge = {
+      ...generic.foundry!.autoMerge!,
+      trustBasis: 'verification',
+      managerGate: false,
+    };
+
+    const result = await autoMergeProposal(proposal.id, generic);
+
+    expect(result).toMatchObject({ ok: false, merged: false });
+    expect(result.reason).toMatch(/decision|verification gate|judge/i);
+    expect(stagingPushHookMock).not.toHaveBeenCalled();
+    expect(createPrMock).not.toHaveBeenCalled();
+    expect(hostAutoMergeMock).not.toHaveBeenCalled();
+    expect(managerCallMock).not.toHaveBeenCalled();
+  });
+
   it('persists authenticated to-main intent before staging push', async () => {
     const proposal = makeProposal('frontier', 'docs/frontier-intent.md');
     stagingPushHookMock.mockImplementationOnce(() => expectDurableIntentAtPush(proposal));

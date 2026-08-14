@@ -26,6 +26,7 @@ First activation follows a strict order: run `ashlr preflight`, enroll a repo, a
 |------|---------|--------------------|-------------------------|
 | Daemon generation | Enabled only when you run the daemon against enrolled repos | Enrollment, kill-switch clear, budget and sandbox gates | Pending proposal only; no apply, push, PR, deploy, or service mutation |
 | Inbox apply | Manual | Explicit `ashlr inbox approve`, confirmation, enrollment, kill-switch clear | Applies to a dedicated local branch; never silently edits the working tree |
+| Protected PR submit | Operator-invoked | Explicit `ashlr inbox submit`, caller confirmation, signed frontier provenance, fresh verification, and live protected-remote evidence | Opens one review PR; never merges `main` or contacts a model. `--yes` is caller intent, not an authenticated human receipt. |
 | Autonomous merge | **Off** | `foundry.autoMerge.enabled: true` plus the selected tier, judge-backed verification, or evidence authority gates | Local merge or protected remote PR, depending on policy; every refusal is fail-closed |
 | Judge-free evidence merge | **Off** | Base- and diff-bound deterministic verification, signed provenance/evidence, strict scope/risk policy, and live protected-branch checks | Protected remote PR handoff only; no local fallback, self-target merge, partial capture, or build/CI/manifest change |
 | Deploy | Never performed by the daemon | Explicit `ashlr ship --deploy <target> --confirm` after pre-ship checks | Runs the selected production deploy command |
@@ -145,6 +146,7 @@ The fleet scans the backlog, dispatches sandboxed work, and deposits proposals i
 ashlr inbox                # list pending proposals
 ashlr inbox show <id>      # inspect diff + metadata
 ashlr inbox approve <id>   # apply to branch — confirm-gated, never silent
+ashlr inbox submit <id>    # fresh verify + protected review PR — never merges main
 ashlr inbox reject <id>    # discard a pending proposal; applies nothing
 ```
 
