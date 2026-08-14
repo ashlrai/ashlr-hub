@@ -311,6 +311,13 @@ describe('cmdGoal --direct — invokes runGoal once with the verbatim objective'
       backend: 'codex',
       runId: 'run-direct-1',
       proposalId: 'prop-direct-1',
+      nextAction: {
+        kind: 'operator-protected-pr-submit',
+        argv: ['ashlr', 'inbox', 'submit', 'prop-direct-1'],
+        callerConfirmationRequired: true,
+        authenticatedHumanReceipt: false,
+        mergesMain: false,
+      },
       usage: null,
       usageObserved: false,
       wrapperEffects: { inboxApplyInvoked: false, inboxMergeInvoked: false },
@@ -385,6 +392,8 @@ describe('cmdGoal --direct — invokes runGoal once with the verbatim objective'
     expect(rc).toBe(0);
     expect(output).toContain('PENDING');
     expect(output).toContain('did not invoke inbox apply or merge');
+    expect(output).toContain('ashlr inbox submit prop-direct-1');
+    expect(output).toContain('never merges main');
     expect(output).toContain('not independently attested unchanged');
     expect(output).not.toContain('No real working tree was mutated');
   });
@@ -717,7 +726,7 @@ describe('cmdGoal --direct — strict agent-facing options', () => {
     expect(calls).toHaveLength(1);
     const result = JSON.parse(String(calls[0]![0])) as Record<string, unknown>;
     expect(Object.keys(result).sort()).toEqual([
-      'authority', 'backend', 'blockerCode', 'mode', 'ok', 'proposalId', 'runId',
+      'authority', 'backend', 'blockerCode', 'mode', 'nextAction', 'ok', 'proposalId', 'runId',
       'schemaVersion', 'terminalStage', 'usage', 'usageObserved', 'wrapperEffects',
     ]);
     expect(result).toMatchObject({
@@ -726,6 +735,7 @@ describe('cmdGoal --direct — strict agent-facing options', () => {
       ok: false,
       terminalStage: 'usage',
       blockerCode,
+      nextAction: null,
       usage: null,
       usageObserved: false,
     });

@@ -277,6 +277,31 @@ export function isApprovedRemoteHandoffRetryCandidate(proposal: Proposal): boole
   }
 }
 
+/**
+ * Read-only proof that an awaiting handoff is the exact authenticated PR
+ * created by Ashlr's sealed remote-only transaction. Callers may use this to
+ * make explicit human submission idempotent, but must still read host state
+ * before claiming that the PR remains open.
+ */
+export function isAuthenticatedAwaitingRemoteHandoff(proposal: Proposal): boolean {
+  try {
+    const handoff = proposal.remoteHandoff;
+    return Boolean(
+      proposal.status === 'awaiting-host-merge' &&
+      proposal.repo &&
+      handoff?.provider === 'github' &&
+      handoff.state === 'awaiting-host-merge' &&
+      handoff.prUrl &&
+      handoff.authority &&
+      prUrlMatchesAuthority(handoff.prUrl, handoff.authority.nameWithOwner) &&
+      remoteAuthorityMatchesRepo(proposal.repo, handoff.authority) &&
+      verifyBoundRemoteIntent(proposal, handoff, intentPhase(handoff), true)
+    );
+  } catch {
+    return false;
+  }
+}
+
 function prUrlMatchesAuthority(url: string | undefined, nameWithOwner: string): boolean {
   if (!url) return false;
   const match = url.match(/^https:\/\/github\.com\/([^/?#\s]+)\/([^/?#\s]+)\/pull\/([1-9]\d*)$/i);
