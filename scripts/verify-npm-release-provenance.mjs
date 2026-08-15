@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 
-import { lstatSync, readFileSync } from 'node:fs';
+import * as nodeFs from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 
 const MAX_AUDIT_BYTES = 32 * 1024 * 1024;
 const SHA_RE = /^[0-9a-f]{40}$/;
 const POSITIVE_INTEGER_RE = /^[1-9][0-9]*$/;
+const READ_CHUNK_BYTES = 64 * 1024;
 
 function requireString(value, label) {
   if (typeof value !== 'string' || value.length === 0) {
@@ -104,12 +105,57 @@ export function verifyNpmReleaseProvenance({
   return true;
 }
 
-function readBoundedJson(path) {
-  const stat = lstatSync(path);
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 2 || stat.size > MAX_AUDIT_BYTES) {
-    throw new Error('npm audit result must be a bounded regular file');
+function sameSnapshot(left, right) {
+  return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode &&
+    left.nlink === right.nlink && left.size === right.size && left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs;
+}
+
+function safeAuditFile(stat) {
+  return stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1n &&
+    stat.size >= 2n && stat.size <= BigInt(MAX_AUDIT_BYTES);
+}
+
+export function readBoundedJson(path, fs = nodeFs) {
+  const noFollow = typeof fs.constants.O_NOFOLLOW === 'number' ? fs.constants.O_NOFOLLOW : 0;
+  const nonBlock = typeof fs.constants.O_NONBLOCK === 'number' ? fs.constants.O_NONBLOCK : 0;
+  let descriptor;
+  try {
+    descriptor = fs.openSync(path, fs.constants.O_RDONLY | noFollow | nonBlock);
+    const openedBefore = fs.fstatSync(descriptor, { bigint: true });
+    const pathBefore = fs.lstatSync(path, { bigint: true });
+    if (!safeAuditFile(openedBefore) || !safeAuditFile(pathBefore) ||
+        !sameSnapshot(openedBefore, pathBefore)) {
+      throw new Error('npm audit result must be a bounded single-link regular file');
+    }
+
+    const expectedBytes = Number(openedBefore.size);
+    const chunks = [];
+    let bytesRead = 0;
+    while (bytesRead < expectedBytes) {
+      const length = Math.min(READ_CHUNK_BYTES, expectedBytes - bytesRead);
+      const chunk = Buffer.allocUnsafe(length);
+      const count = fs.readSync(descriptor, chunk, 0, length, bytesRead);
+      if (count <= 0) throw new Error('npm audit result changed during read');
+      chunks.push(count === length ? chunk : chunk.subarray(0, count));
+      bytesRead += count;
+    }
+
+    const growthProbe = Buffer.allocUnsafe(1);
+    if (fs.readSync(descriptor, growthProbe, 0, 1, expectedBytes) !== 0) {
+      throw new Error('npm audit result grew during read');
+    }
+
+    const openedAfter = fs.fstatSync(descriptor, { bigint: true });
+    const pathAfter = fs.lstatSync(path, { bigint: true });
+    if (bytesRead !== expectedBytes || !safeAuditFile(openedAfter) || !safeAuditFile(pathAfter) ||
+        !sameSnapshot(openedBefore, openedAfter) || !sameSnapshot(openedAfter, pathAfter)) {
+      throw new Error('npm audit result changed during read');
+    }
+    return JSON.parse(Buffer.concat(chunks, bytesRead).toString('utf8'));
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
   }
-  return JSON.parse(readFileSync(path, 'utf8'));
 }
 
 const invoked = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : '';

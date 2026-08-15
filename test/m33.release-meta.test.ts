@@ -7,12 +7,26 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import * as nodeFs from 'node:fs';
+import {
+  appendFileSync,
+  existsSync,
+  linkSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
-import { verifyNpmReleaseProvenance } from '../scripts/verify-npm-release-provenance.mjs';
+import {
+  readBoundedJson,
+  verifyNpmReleaseProvenance,
+} from '../scripts/verify-npm-release-provenance.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const pkg = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')) as Record<string, unknown>;
@@ -539,5 +553,83 @@ describe('exact npm release provenance', () => {
       audit: audit({}, identityOverrides),
       ...release,
     })).toThrow();
+  });
+
+  it('reads only a stable descriptor-bound audit snapshot', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ashlr-audit-read-'));
+    try {
+      const auditPath = join(root, 'audit.json');
+      writeFileSync(auditPath, '{"verified":[]}\n');
+      expect(readBoundedJson(auditPath)).toEqual({ verified: [] });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')('rejects symbolic and hard-linked audit inputs', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ashlr-audit-links-'));
+    try {
+      const source = join(root, 'source.json');
+      const symbolic = join(root, 'symbolic.json');
+      const hard = join(root, 'hard.json');
+      writeFileSync(source, '{"verified":[]}\n');
+      symlinkSync(source, symbolic);
+      linkSync(source, hard);
+
+      expect(() => readBoundedJson(symbolic)).toThrow();
+      expect(() => readBoundedJson(hard)).toThrow(/single-link/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a path swap after opening the audit descriptor', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ashlr-audit-swap-'));
+    try {
+      const auditPath = join(root, 'audit.json');
+      const replacement = join(root, 'replacement.json');
+      const displaced = join(root, 'displaced.json');
+      writeFileSync(auditPath, '{"verified":[]}\n');
+      writeFileSync(replacement, '{"invalid":[]}\n');
+      let swapped = false;
+      const fs = {
+        ...nodeFs,
+        readSync(...args: Parameters<typeof nodeFs.readSync>) {
+          if (!swapped) {
+            swapped = true;
+            renameSync(auditPath, displaced);
+            renameSync(replacement, auditPath);
+          }
+          return nodeFs.readSync(...args);
+        },
+      };
+
+      expect(() => readBoundedJson(auditPath, fs)).toThrow(/changed during read/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects audit growth while reading', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ashlr-audit-growth-'));
+    try {
+      const auditPath = join(root, 'audit.json');
+      writeFileSync(auditPath, '{"verified":[]}\n');
+      let grown = false;
+      const fs = {
+        ...nodeFs,
+        readSync(...args: Parameters<typeof nodeFs.readSync>) {
+          if (!grown) {
+            grown = true;
+            appendFileSync(auditPath, '{}');
+          }
+          return nodeFs.readSync(...args);
+        },
+      };
+
+      expect(() => readBoundedJson(auditPath, fs)).toThrow(/grew during read/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
