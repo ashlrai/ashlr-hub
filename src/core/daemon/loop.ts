@@ -51,6 +51,7 @@ import type {
   EngineTier,
   EvidenceOutcomeSummary,
   Proposal,
+  RunState,
   RunEventSummary,
   RunProposalOutcome,
   SkillCard,
@@ -109,6 +110,7 @@ import { nullSink } from '../run/streaming.js';
 import { createOuterAttemptIdentity } from '../fleet/attempt-identity.js';
 import { runSwarm } from '../swarm/runner.js';
 import { runGoal } from '../run/orchestrator.js';
+import { engineInstalled } from '../run/engines.js';
 import { scopeFromWorkItem } from '../run/delegation-scope.js';
 import {
   generatedRepairCandidateAllowed,
@@ -129,6 +131,7 @@ import {
   concurrentAssignedRouteReason,
   planConcurrentDispatch,
   runConcurrentDispatch,
+  slotsForBackendState,
 } from '../fabric/concurrent-dispatch.js'; // M255/M256
 import { getResourceSnapshot } from '../fabric/resource-monitor.js'; // M255
 import { estimateRun } from '../observability/estimate.js';
@@ -435,6 +438,116 @@ function effectiveGeneratedRepairCandidateAllowed(
 ): boolean {
   return generatedRepairCandidateAllowed(item, backend, cfg) &&
     effectiveGeneratedRepairExecutionBackendAllowed(item, backend, cfg);
+}
+
+const ZERO_STEP_FAILOVER_OUTCOMES = new Set([
+  'engine-command-missing',
+  'engine-unsupported',
+]);
+
+function explicitFiniteZero(record: unknown, key: string): boolean {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) return false;
+  const value = (record as Record<string, unknown>)[key];
+  return typeof value === 'number' && Number.isFinite(value) && value === 0;
+}
+
+function zeroStepBackendFailure(run: RunState): boolean {
+  if (run.status !== 'failed') return false;
+  const summary = run.runEventSummary;
+  const counts = summary?.actionCounts;
+  if (!summary || !counts) return false;
+  if (![
+    'spawnAttempts',
+    'modelSteps',
+    'toolSteps',
+    'totalSteps',
+    'diffFiles',
+    'diffLines',
+  ].every((key) => explicitFiniteZero(counts, key))) return false;
+  if (!['tokensIn', 'tokensOut', 'steps', 'estCostUsd']
+    .every((key) => explicitFiniteZero(run.usage, key))) return false;
+  if (!['diffFiles', 'diffLines', 'tokensIn', 'tokensOut', 'costUsd']
+    .every((key) => explicitFiniteZero(summary, key))) return false;
+  const outcome = run.proposalOutcome;
+  if (
+    !outcome ||
+    !ZERO_STEP_FAILOVER_OUTCOMES.has(outcome.kind) ||
+    summary.outcome !== outcome.kind ||
+    outcome.isPartial !== undefined ||
+    outcome.proposalId !== undefined ||
+    outcome.files !== undefined ||
+    outcome.insertions !== undefined ||
+    outcome.deletions !== undefined
+  ) return false;
+  return summary.proposalCreated === false && summary.proposalId === undefined;
+}
+
+type BackendAdmissionFailure = 'not-installed' | 'quota' | 'subscription';
+type BackendAdmission =
+  | { allowed: true }
+  | { allowed: false; reason: BackendAdmissionFailure; detail: string };
+
+function subscriptionMaxPercent(cfg: AshlrConfig): number {
+  const raw = (cfg.foundry as Record<string, unknown> | undefined)?.['subscriptionMaxPercent'];
+  return typeof raw === 'number' && Number.isFinite(raw)
+    ? Math.min(100, Math.max(1, raw))
+    : 90;
+}
+
+function backendDispatchAdmission(
+  backend: EngineId,
+  cfg: AshlrConfig,
+  opts: { requireInstalled?: boolean } = {},
+): BackendAdmission {
+  if (opts.requireInstalled === true && !engineInstalled(backend, cfg)) {
+    return { allowed: false, reason: 'not-installed', detail: `${backend} is not installed` };
+  }
+  if (backend !== 'builtin' && !withinLimit(backend, cfg)) {
+    return { allowed: false, reason: 'quota', detail: `${backend} rolling quota is exhausted` };
+  }
+  if (isSubscriptionEngine(backend)) {
+    const subscription = subscriptionAllows(backend, {
+      maxPercent: subscriptionMaxPercent(cfg),
+      cfg,
+    });
+    if (!subscription.allowed) {
+      return { allowed: false, reason: 'subscription', detail: subscription.reason };
+    }
+  }
+  return { allowed: true };
+}
+
+async function openSameTierFailoverBackend(
+  item: WorkItem,
+  failedBackend: EngineId,
+  failedTier: EngineTier | null,
+  cfg: AshlrConfig,
+  maxSlotsPerBackend: number,
+  capacityAvailable: (backend: EngineId) => boolean,
+): Promise<EngineId | null> {
+  if (failedBackend === 'builtin' || failedTier === null || isTrustedGeneratedRepairItem(item)) {
+    return null;
+  }
+  const snapshot = await getResourceSnapshot(cfg).catch(() => null);
+  if (!snapshot) return null;
+  const snapshotAt = Date.parse(snapshot.generatedAt);
+  if (
+    !Number.isFinite(snapshotAt) ||
+    snapshotAt > Date.now() ||
+    Date.now() - snapshotAt > RESOURCE_SNAPSHOT_MAX_AGE_MS
+  ) return null;
+  for (const candidate of cfg.foundry?.allowedBackends ?? []) {
+    if (candidate === failedBackend || candidate === 'builtin') continue;
+    const state = snapshot.backends.find((entry) => entry.backend === candidate);
+    if (!state || state.availability !== 'open') continue;
+    if (slotsForBackendState(state, maxSlotsPerBackend) <= 0) continue;
+    if (!capacityAvailable(candidate)) continue;
+    if (!backendDispatchAdmission(candidate, cfg, { requireInstalled: true }).allowed) continue;
+    if (engineTierOf(candidate, cfg) !== failedTier) continue;
+    if (!effectiveGeneratedRepairCandidateAllowed(item, candidate, cfg)) continue;
+    return candidate;
+  }
+  return null;
 }
 
 function generatedRepairAlternateBackend(
@@ -3050,6 +3163,7 @@ function recordDispatchStartAgentAction(
     assignedBy: string;
     reason: string;
     mode: 'swarm' | 'single' | 'best-of-n';
+    trajectoryId?: string;
   },
 ): void {
   const rs = routeSnapshot({
@@ -3066,7 +3180,7 @@ function recordDispatchStartAgentAction(
     costUsd: 0,
   });
   const causal = causalMetadata({
-    trajectoryId: `run:${fields.runId}`,
+    trajectoryId: fields.trajectoryId ?? `run:${fields.runId}`,
     itemId: item.id,
     runId: fields.runId,
     routeSnapshot: rs,
@@ -3095,6 +3209,68 @@ function recordDispatchStartAgentAction(
     reason: fields.reason,
     tags: ['dispatch-start', fields.mode, item.source],
     counts: { selected: 1, dispatched: 1 },
+  });
+}
+
+function recordZeroStepFailoverAgentAction(
+  item: WorkItem,
+  fields: {
+    ts: string;
+    machineId: string;
+    run: RunState;
+    trajectoryId: string;
+    backend: EngineId;
+    tier: EngineTier | null;
+    model?: string | null;
+    nextBackend: EngineId;
+  },
+): void {
+  const summary = runEventSummary({
+    ...(fields.run.runEventSummary ?? {}),
+    runId: fields.run.id,
+    status: 'failed',
+    outcome: 'engine-failed',
+    proposalCreated: false,
+    tokensIn: fields.run.usage.tokensIn,
+    tokensOut: fields.run.usage.tokensOut,
+    costUsd: fields.run.usage.estCostUsd,
+  });
+  const rs = routeSnapshot({
+    backend: fields.backend,
+    tier: fields.tier,
+    model: fields.model,
+    assignedBy: 'zero-step-failover',
+    reason: 'zero-step backend failure',
+  });
+  recordAgentAction({
+    schemaVersion: 1,
+    ts: fields.ts,
+    machineId: fields.machineId,
+    actor: 'daemon',
+    kind: 'dispatch',
+    outcome: 'failed',
+    action: 'daemon:dispatch-zero-step-failover',
+    summary: `${fields.backend} zero-step failure; retrying with ${fields.nextBackend}`,
+    repo: item.repo,
+    itemId: item.id,
+    source: item.source,
+    runId: fields.run.id,
+    trajectoryId: fields.trajectoryId,
+    ...(rs ? { routeSnapshot: rs } : {}),
+    ...(summary ? { runEventSummary: summary } : {}),
+    learningSource: 'agent-action',
+    labelBasis: 'dispatch-outcome',
+    backend: fields.backend,
+    tier: fields.tier,
+    ...(fields.model !== undefined ? { model: fields.model } : {}),
+    reason: 'engine-failed',
+    tags: ['dispatch-start', 'metadata-only'],
+    counts: {
+      spawnAttempts: summary?.actionCounts?.spawnAttempts ?? 0,
+      diffFiles: summary?.diffFiles ?? 0,
+      diffLines: summary?.diffLines ?? 0,
+      proposalCreated: 0,
+    },
   });
 }
 
@@ -3252,6 +3428,48 @@ class TieredPool {
   finish(tier: 'local' | 'cloud'): void {
     if (tier === 'local') this._localInFlight = Math.max(0, this._localInFlight - 1);
     else this._cloudInFlight = Math.max(0, this._cloudInFlight - 1);
+  }
+}
+
+interface BackendCapacityReservation {
+  backend: EngineId;
+  released: boolean;
+}
+
+/** Tracks the concrete in-flight slots admitted by one concurrent dispatch plan. */
+class BackendCapacityReservations {
+  private readonly active = new Map<EngineId, number>();
+
+  constructor(private readonly caps: ReadonlyMap<EngineId, number>) {}
+
+  canReserve(backend: EngineId): boolean {
+    return (this.active.get(backend) ?? 0) < (this.caps.get(backend) ?? 0);
+  }
+
+  reserve(backend: EngineId): BackendCapacityReservation | null {
+    if (!this.canReserve(backend)) return null;
+    this.active.set(backend, (this.active.get(backend) ?? 0) + 1);
+    return { backend, released: false };
+  }
+
+  transfer(reservation: BackendCapacityReservation, nextBackend: EngineId): boolean {
+    if (reservation.released || !this.canReserve(nextBackend)) return false;
+    this.active.set(
+      reservation.backend,
+      Math.max(0, (this.active.get(reservation.backend) ?? 0) - 1),
+    );
+    this.active.set(nextBackend, (this.active.get(nextBackend) ?? 0) + 1);
+    reservation.backend = nextBackend;
+    return true;
+  }
+
+  release(reservation: BackendCapacityReservation | undefined): void {
+    if (!reservation || reservation.released) return;
+    reservation.released = true;
+    this.active.set(
+      reservation.backend,
+      Math.max(0, (this.active.get(reservation.backend) ?? 0) - 1),
+    );
   }
 }
 
@@ -5023,12 +5241,17 @@ export async function tick(
       );
     }
   }
-  const workedSet = coordinator.claimItemsByLane(
+  const claimedWork = coordinator.claimItemsByLaneWithGenerations(
     claimLanes,
     selectCount,
     machineId,
     claimCooldownPolicies,
   );
+  const workedSet = claimedWork.map((claimed) => claimed.item);
+  const claimGenerationByItemId = new Map(
+    claimedWork.map((claimed) => [claimed.item.id, claimed.claim] as const),
+  );
+  const expectedClaimGenerations = claimedWork.map((claimed) => claimed.claim);
   selected = workedSet;
   const drainSelectedItems = drainMode
     ? workedSet.filter((item) => isDrainCandidate(item, drainMode))
@@ -5051,8 +5274,9 @@ export async function tick(
   const selectionBlockers = summarizeSelectionBlockers(selectionTelemetryItems);
   if (!stillOwnsTick()) {
     try {
-      const claimedIds = workedSet.map((item) => item.id);
-      if (claimedIds.length > 0) coordinator.release(claimedIds, machineId);
+      if (expectedClaimGenerations.length > 0) {
+        coordinator.releaseClaimGenerations(expectedClaimGenerations, machineId);
+      }
     } catch {
       // Exact shared claims expire safely if best-effort shutdown release fails.
     }
@@ -5123,8 +5347,9 @@ export async function tick(
       return ownershipLostTick({ ts: now, itemsConsidered: workedSet.length, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });
     }
     try {
-      const claimedIds = workedSet.map((i) => i.id);
-      if (claimedIds.length > 0) coordinator.release(claimedIds, machineId);
+      if (expectedClaimGenerations.length > 0) {
+        coordinator.releaseClaimGenerations(expectedClaimGenerations, machineId);
+      }
     } catch (err) {
       console.warn('[ashlr] daemon:tick dry-run coordinator release failed:', (err as Error)?.message ?? err);
     }
@@ -5241,17 +5466,25 @@ export async function tick(
     return true;
   };
   try {
-  const initiallyRenewed = startLeaseRenewer();
-  const expectedClaimIds = new Set(workedSetIds);
-  const renewedClaimIds = new Set(initiallyRenewed);
+  startLeaseRenewer();
+  const initiallyFenced = coordinator.fenceClaimGenerations(expectedClaimGenerations, machineId);
+  const expectedClaimIds = new Map(
+    expectedClaimGenerations.map((claim) => [claim.itemId, claim.generationId]),
+  );
+  const renewedClaimIds = new Map(
+    initiallyFenced.map((claim) => [claim.itemId, claim.generationId]),
+  );
   const exactInitialFence =
     expectedClaimIds.size === workedSetIds.length &&
-    renewedClaimIds.size === initiallyRenewed.length &&
+    renewedClaimIds.size === initiallyFenced.length &&
     expectedClaimIds.size === renewedClaimIds.size &&
-    [...expectedClaimIds].every((itemId) => renewedClaimIds.has(itemId));
+    [...expectedClaimIds].every(([itemId, generationId]) =>
+      renewedClaimIds.get(itemId) === generationId);
   if (workedSetIds.length > 0 && !exactInitialFence) {
     stopLeaseRenewer();
-    try { coordinator.release(workedSetIds, machineId); } catch { /* exact release is best effort */ }
+    try {
+      coordinator.releaseClaimGenerations(expectedClaimGenerations, machineId);
+    } catch { /* exact release is best effort */ }
     return persistenceRefusal('tick refused: exact shared queue claim authority unavailable after selection');
   }
 
@@ -5266,7 +5499,9 @@ export async function tick(
 
   if (!stillOwnsTick()) {
     stopLeaseRenewer();
-    try { coordinator.release(workedSetIds, machineId); } catch { /* exact release is best effort */ }
+    try {
+      coordinator.releaseClaimGenerations(expectedClaimGenerations, machineId);
+    } catch { /* exact release is best effort */ }
     return ownershipLostTick({ ts: now, itemsConsidered: workedSet.length, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });
   }
 
@@ -5281,7 +5516,9 @@ export async function tick(
   if (!spendGuard.ok) {
     stopLeaseRenewer();
     try {
-      if (workedSetIds.length > 0) coordinator.release(workedSetIds, machineId);
+      if (expectedClaimGenerations.length > 0) {
+        coordinator.releaseClaimGenerations(expectedClaimGenerations, machineId);
+      }
     } catch (err) {
       console.warn('[ashlr] daemon:tick coordinator release after spend-guard failure failed:', (err as Error)?.message ?? err);
     }
@@ -5377,6 +5614,11 @@ export async function tick(
   });
 
   const attemptIds = new Map(workedSet.map((item) => [item.id, createOuterAttemptIdentity()] as const));
+  const concurrentMaxSlotsPerBackend: number =
+    typeof (routingCfg.foundry?.fabric as Record<string, unknown> | undefined)?.['maxSlotsPerBackend'] === 'number'
+      ? Math.max(1, (routingCfg.foundry!.fabric as Record<string, unknown>)['maxSlotsPerBackend'] as number)
+      : 3;
+  let backendCapacityReservations: BackendCapacityReservations | null = null;
   class QueueClaimAuthorityError extends Error {
     constructor(itemId: string) {
       super(`shared queue claim authority unavailable for ${itemId}`);
@@ -5425,14 +5667,27 @@ export async function tick(
       skipReason: 'queue-lease-lost',
     }),
   });
-  const tasks: Array<{ tier: 'local' | 'cloud'; run: (assignedBackend?: EngineId, assignedReason?: string, assignedModel?: string | null) => Promise<ItemOutcome> }> = workedSet.map((item, _taskIdx) => {
+  const tasks: Array<{
+    tier: 'local' | 'cloud';
+    run: (
+      assignedBackend?: EngineId,
+      assignedReason?: string,
+      assignedModel?: string | null,
+      capacityReservation?: BackendCapacityReservation,
+    ) => Promise<ItemOutcome>;
+  }> = workedSet.map((item, _taskIdx) => {
     const attemptId = attemptIds.get(item.id)!;
     const leaseController = leaseAbortControllers.get(item.id)!;
     const dispatchSignal = opts.signal
       ? AbortSignal.any([opts.signal, leaseController.signal])
       : leaseController.signal;
+    const expectedClaim = claimGenerationByItemId.get(item.id);
     const beginQueueExecution = (): void => {
-      if (dispatchSignal.aborted || !coordinator.beginExecution(item.id, machineId)) {
+      if (
+        dispatchSignal.aborted ||
+        !expectedClaim ||
+        !coordinator.beginClaimGenerationExecution(expectedClaim, machineId)
+      ) {
         if (!leaseController.signal.aborted) {
           leaseController.abort(new Error(`shared queue claim authority lost for ${item.id}`));
         }
@@ -5441,7 +5696,12 @@ export async function tick(
     };
     return ({
     tier: itemTiers[_taskIdx] ?? 'local',
-    run: async (assignedBackend?: EngineId, assignedReason?: string, assignedModel?: string | null): Promise<ItemOutcome> => {
+    run: async (
+      assignedBackend?: EngineId,
+      assignedReason?: string,
+      assignedModel?: string | null,
+      capacityReservation?: BackendCapacityReservation,
+    ): Promise<ItemOutcome> => {
       // Re-check kill switch before each item dispatch.
       if (stopRequested()) return stopRequestedOutcome(item, attemptId);
       if (leaseController.signal.aborted) return queueLeaseLostOutcome(item, attemptId);
@@ -5487,6 +5747,7 @@ export async function tick(
       let selectedModel: string | null | undefined;
       let dispatch: DaemonDispatchTrace | undefined;
       let runTrajectoryId = `run:${attemptId}`;
+      let activeAttemptId = attemptId;
 
       // M334 stage 1: observe-only gateway shadow. Runs the M247 gateway
       // BESIDE the live legacy decision and records the comparison — THE
@@ -5697,7 +5958,8 @@ export async function tick(
         selectedModel = routed.model;
         assignmentReason = routed.reason;
         assignedBy = 'router';
-        if (backend !== 'builtin' && !withinLimit(backend, routingCfg)) {
+        const initialAdmission = backendDispatchAdmission(backend, routingCfg);
+        if (!initialAdmission.allowed && initialAdmission.reason === 'quota') {
           assignmentReason = `${assignmentReason}; quota fallback to builtin`;
           assignedBy = 'quota-fallback';
           backend = 'builtin';
@@ -5709,49 +5971,38 @@ export async function tick(
         // KNOWN subscription window is at or above the cap (default 90%). Reads
         // cfg.foundry.subscriptionMaxPercent defensively with a fallback default.
         // allowed:true when usage is unknown (claude) or under the cap.
-        if (isSubscriptionEngine(backend)) {
-          // Read maxPercent from liveCfg.foundry defensively — no types.ts change.
-          // Clamp to [1,100]: a negative or zero value would disable the throttle
-          // (anything is "under 0%"), and >100 could never fire (nothing is ">100%").
-          const rawPct = (liveCfg.foundry as Record<string, unknown> | undefined
-            )?.['subscriptionMaxPercent'];
-          const maxPct: number = typeof rawPct === 'number'
-            ? Math.min(100, Math.max(1, rawPct))
-            : 90;
-          const subCheck = subscriptionAllows(backend, { maxPercent: maxPct });
-          if (!subCheck.allowed) {
-            // M334: shadow the BLOCKED legacy decision — a gateway that would
-            // have dispatched here is the safety-relevant divergence class.
-            await shadowGateway({
-              backend: String(backend),
-              tier: backendTier === null ? null : String(backendTier),
-              model: selectedModel ?? null,
+        if (!initialAdmission.allowed && initialAdmission.reason === 'subscription') {
+          // M334: shadow the BLOCKED legacy decision — a gateway that would
+          // have dispatched here is the safety-relevant divergence class.
+          await shadowGateway({
+            backend: String(backend),
+            tier: backendTier === null ? null : String(backendTier),
+            model: selectedModel ?? null,
+            dispatched: false,
+          });
+          audit({
+            action: 'daemon:tick',
+            repo: item.repo,
+            sandboxId: null,
+            summary: `throttled: ${backend} subscription window — ${initialAdmission.detail}`,
+            result: 'ok',
+          });
+          return {
+            item,
+            spentUsd: 0,
+            dispatched: false,
+            dispatch: dispatchTrace(item, {
+              backend,
+              tier: engineTierOf(backend, routingCfg),
+              model: selectedModel,
+              assignedBy: 'subscription-throttle',
+              reason: `throttled: ${backend} subscription window — ${initialAdmission.detail}`,
               dispatched: false,
-            });
-            audit({
-              action: 'daemon:tick',
-              repo: item.repo,
-              sandboxId: null,
-              summary: `throttled: ${backend} subscription window — ${subCheck.reason}`,
-              result: 'ok',
-            });
-            return {
-              item,
-              spentUsd: 0,
-              dispatched: false,
-              dispatch: dispatchTrace(item, {
-                backend,
-                tier: engineTierOf(backend, routingCfg),
-                model: selectedModel,
-                assignedBy: 'subscription-throttle',
-                reason: `throttled: ${backend} subscription window — ${subCheck.reason}`,
-                dispatched: false,
-                runId: attemptId,
-                trajectoryId: `run:${attemptId}`,
-                skipReason: 'subscription-throttle',
-              }),
-            };
-          }
+              runId: attemptId,
+              trajectoryId: `run:${attemptId}`,
+              skipReason: 'subscription-throttle',
+            }),
+          };
         }
 
         // M53: learned-router recommend + budget cascade (flag-off: no-op when
@@ -5829,12 +6080,14 @@ export async function tick(
         selectedModel = configuredModelForBackend(backend, routingCfg);
       }
       backendTier = engineTierOf(backend, routingCfg);
-      if (backend !== 'builtin' && !withinLimit(backend, routingCfg)) {
+      let finalAdmission = backendDispatchAdmission(backend, routingCfg);
+      if (!finalAdmission.allowed && finalAdmission.reason === 'quota') {
         assignmentReason = `${assignmentReason}; final quota fallback to builtin`;
         assignedBy = 'quota-fallback';
         backend = 'builtin';
         backendTier = engineTierOf(backend, routingCfg);
         selectedModel = null;
+        finalAdmission = backendDispatchAdmission(backend, routingCfg);
       }
       if (isTrustedGeneratedRepairItem(item)) {
         let retryPolicy = effectiveGeneratedRepairRetryPolicy(item);
@@ -5886,19 +6139,14 @@ export async function tick(
           };
         }
       }
-      if (isSubscriptionEngine(backend)) {
-        const rawPct = (routingCfg.foundry as Record<string, unknown> | undefined
-          )?.['subscriptionMaxPercent'];
-        const maxPct: number = typeof rawPct === 'number'
-          ? Math.min(100, Math.max(1, rawPct))
-          : 90;
-        const subCheck = subscriptionAllows(backend, { maxPercent: maxPct });
-        if (!subCheck.allowed) {
+      finalAdmission = backendDispatchAdmission(backend, routingCfg);
+      if (!finalAdmission.allowed) {
+        if (finalAdmission.reason === 'subscription') {
           audit({
             action: 'daemon:tick',
             repo: item.repo,
             sandboxId: null,
-            summary: `throttled: ${backend} subscription window — ${subCheck.reason}`,
+            summary: `throttled: ${backend} subscription window — ${finalAdmission.detail}`,
             result: 'ok',
           });
           return {
@@ -5910,7 +6158,7 @@ export async function tick(
               tier: backendTier,
               model: selectedModel,
               assignedBy: 'subscription-throttle',
-              reason: `throttled: ${backend} subscription window — ${subCheck.reason}`,
+              reason: `throttled: ${backend} subscription window — ${finalAdmission.detail}`,
               dispatched: false,
               runId: attemptId,
               trajectoryId: `run:${attemptId}`,
@@ -5918,6 +6166,22 @@ export async function tick(
             }),
           };
         }
+        return {
+          item,
+          spentUsd: 0,
+          dispatched: false,
+          dispatch: dispatchTrace(item, {
+            backend,
+            tier: backendTier,
+            model: selectedModel,
+            assignedBy: 'backend-admission',
+            reason: finalAdmission.detail,
+            dispatched: false,
+            runId: attemptId,
+            trajectoryId: `run:${attemptId}`,
+            skipReason: 'backend-admission-denied',
+          }),
+        };
       }
       if (isTrustedGeneratedRepairItem(item) &&
         !reserveGeneratedRepairExecution(item, attemptId, backend, backendTier)) {
@@ -6390,6 +6654,104 @@ export async function tick(
               }),
             };
           }
+          if (zeroStepBackendFailure(runState) && !stopRequested() && tickSpent < remainingBudget) {
+            const failedBackend = backend!;
+            const failedTier = backendTier;
+            const failedModel = selectedModel;
+            const alternate = await openSameTierFailoverBackend(
+              item,
+              failedBackend,
+              failedTier,
+              routingCfg,
+              concurrentMaxSlotsPerBackend,
+              (candidate) => backendCapacityReservations === null ||
+                (capacityReservation !== undefined &&
+                  backendCapacityReservations.canReserve(candidate)),
+            );
+            if (
+              alternate !== null &&
+              !stopRequested() &&
+              !dispatchSignal.aborted &&
+              tickSpent < remainingBudget &&
+              backendDispatchAdmission(alternate, routingCfg, { requireInstalled: true }).allowed
+            ) {
+              const retryRunId = createOuterAttemptIdentity();
+              const retryTier = engineTierOf(alternate, routingCfg);
+              const retryModel = configuredModelForBackend(alternate, routingCfg);
+              const retryReason = `${assignmentReason}; zero-step same-tier failover from ${failedBackend}`;
+              const retryScope = scopeFromWorkItem(item, {
+                runId: retryRunId,
+                budget: itemBudget,
+                backend: {
+                  engine: alternate,
+                  model: retryModel,
+                  tier: retryTier,
+                  assignedBy: 'zero-step-failover',
+                  reason: retryReason,
+                },
+              });
+              const capacityTransferred = backendCapacityReservations === null ||
+                (capacityReservation !== undefined &&
+                  backendCapacityReservations.transfer(capacityReservation, alternate));
+              const exactRetryClaim = capacityTransferred &&
+                expectedClaim !== undefined &&
+                stillOwnsTick() &&
+                !stopRequested() &&
+                !dispatchSignal.aborted &&
+                tickSpent < remainingBudget &&
+                coordinator.fenceExecutingClaimGeneration(expectedClaim, machineId);
+              if (!exactRetryClaim) {
+                backendCapacityReservations?.release(capacityReservation);
+              } else {
+              recordZeroStepFailoverAgentAction(item, {
+                ts: new Date().toISOString(),
+                machineId,
+                run: runState,
+                trajectoryId: runTrajectoryId,
+                backend: failedBackend,
+                tier: failedTier,
+                model: failedModel,
+                nextBackend: alternate,
+              });
+              activeAttemptId = retryRunId;
+              recordDispatchStartAgentAction(item, {
+                ts: new Date().toISOString(),
+                machineId,
+                runId: retryRunId,
+                trajectoryId: runTrajectoryId,
+                backend: alternate,
+                tier: retryTier,
+                model: retryModel,
+                assignedBy: 'zero-step-failover',
+                reason: retryReason,
+                mode: 'single',
+              });
+              backend = alternate;
+              backendTier = retryTier;
+              selectedModel = retryModel;
+              assignedBy = 'zero-step-failover';
+              assignmentReason = retryReason;
+              backendDispatch[alternate] = (backendDispatch[alternate] ?? 0) + 1;
+              recordUse(alternate);
+              runState = await runGoal(goal, dispatchCfg, {
+                engine: alternate,
+                sandboxEngine: true,
+                requireSandbox: true,
+                cwd: item.repo,
+                budget: itemBudget,
+                tools: true,
+                noMemory: false,
+                runId: retryRunId,
+                ...(retryModel ? { model: retryModel } : {}),
+                workItemId: item.id,
+                workItemGenerationId,
+                workSource: item.source,
+                delegationScope: retryScope,
+                signal: dispatchSignal,
+              });
+              }
+            }
+          }
           const runActionCounts = runState.runEventSummary?.actionCounts;
           const runExecuted = runState.status === 'done' || [
             runActionCounts?.spawnAttempts,
@@ -6566,8 +6928,8 @@ export async function tick(
 		        reason: assignmentReason,
 		        dispatched,
 		        spentUsd: swarmSpent,
-		        runId: attemptId,
-		        trajectoryId: `run:${attemptId}`,
+		        runId: activeAttemptId,
+		        trajectoryId: runTrajectoryId,
 		        skipReason: errorReason,
 		        production: {
 		          outcome: 'engine-failed',
@@ -6682,12 +7044,7 @@ export async function tick(
       backends: [{ backend: 'builtin' as const, availability: 'open' as const, usedPct: null, cap: null, capUnit: null, capWindow: null, resetsAt: null, costPerMTokenOut: 0, p50LatencyMs: null, snapshotAt: new Date().toISOString(), reason: 'snapshot-failed', backoffUntilMs: null }],
     })));
 
-    const maxSlotsPerBackend: number =
-      typeof (routingCfg.foundry?.fabric as Record<string, unknown> | undefined)?.['maxSlotsPerBackend'] === 'number'
-        ? Math.max(1, (routingCfg.foundry!.fabric as Record<string, unknown>)['maxSlotsPerBackend'] as number)
-        : 3;
-
-    const concurrentCfg = { maxSlotsPerBackend };
+    const concurrentCfg = { maxSlotsPerBackend: concurrentMaxSlotsPerBackend };
 
     // planConcurrentDispatch: pure, uses gateway routing hints for suitability.
     // Build routing hints in parallel via gateway.decide, then call the pure planner.
@@ -6722,6 +7079,7 @@ export async function tick(
       (item, backend) => effectiveGeneratedRepairCandidateAllowed(item, backend, routingCfg),
       (backend) => engineTierOf(backend, routingCfg),
     );
+    backendCapacityReservations = new BackendCapacityReservations(concurrentPlan.slotsMap);
     const dispatchManifestEvent = buildDispatchManifestEvent({
       ts: now,
       machineId,
@@ -6755,6 +7113,22 @@ export async function tick(
         // already capture tickSpent/state/liveCfg via closure.
         const taskEntry = tasks.find((_t, idx) => workedSet[idx]?.id === item.id);
         if (taskEntry) {
+          const capacityReservation = backendCapacityReservations?.reserve(_backend);
+          if (!capacityReservation) {
+            return {
+              item,
+              spentUsd: 0,
+              dispatched: false,
+              dispatch: dispatchTrace(item, {
+                backend: _backend,
+                tier: engineTierOf(_backend, routingCfg),
+                assignedBy: 'concurrent-capacity',
+                reason: 'concurrent backend capacity reservation unavailable',
+                dispatched: false,
+                skipReason: 'capacity-unavailable',
+              }),
+            } satisfies ItemOutcome;
+          }
           const hintedBackend = routeHints.get(item.id);
           const baseReason = routeReasons.get(item.id);
           const assignedReason = concurrentAssignedRouteReason({
@@ -6765,7 +7139,16 @@ export async function tick(
             candidateAllowed: effectiveGeneratedRepairCandidateAllowed(item, _backend, routingCfg),
           });
           const assignedModel = hintedBackend === _backend ? routeModels.get(item.id) : undefined;
-          return taskEntry.run(_backend, assignedReason, assignedModel);
+          try {
+            return await taskEntry.run(
+              _backend,
+              assignedReason,
+              assignedModel,
+              capacityReservation,
+            );
+          } finally {
+            backendCapacityReservations?.release(capacityReservation);
+          }
         }
 	        // Fallback: build a minimal no-op outcome (item not in tasks — shouldn't happen).
 	        return {

@@ -121,6 +121,10 @@ type PendingCountFn = () => number;
 type LoadConfigFn = () => AshlrConfig;
 type GuardHealthDiagnosis = import('../core/daemon/guard-health.js').GuardHealthDiagnosis;
 type DiagnoseGuardHealthFn = () => GuardHealthDiagnosis;
+type ProductionActivationReadinessV1 =
+  import('../core/daemon/production-activation-readiness.js').ProductionActivationReadinessV1;
+type InspectProductionActivationReadinessFn =
+  typeof import('../core/daemon/production-activation-readiness.js')['inspectProductionActivationReadinessV1'];
 
 async function importLoop(): Promise<{
   runDaemon: RunDaemonFn;
@@ -188,6 +192,110 @@ async function importGuardHealth(): Promise<DiagnoseGuardHealthFn | null> {
   } catch {
     return null;
   }
+}
+
+async function importProductionActivationReadiness(): Promise<
+  InspectProductionActivationReadinessFn | null
+> {
+  try {
+    const mod = await import('../core/daemon/production-activation-readiness.js');
+    return mod.inspectProductionActivationReadinessV1;
+  } catch {
+    return null;
+  }
+}
+
+function deepFreezeProductionReadiness<T>(value: T, seen = new Set<object>()): T {
+  if (value === null || typeof value !== 'object' || seen.has(value)) return value;
+  seen.add(value);
+  for (const entry of Object.values(value as Record<string, unknown>)) {
+    deepFreezeProductionReadiness(entry, seen);
+  }
+  return Object.freeze(value);
+}
+
+function unavailableProductionActivationReadiness(): ProductionActivationReadinessV1 {
+  const blocker = {
+    code: 'production-authority-chain-absent' as const,
+    source: 'activation' as const,
+    detail: 'production activation readiness inspection is unavailable',
+  };
+  return deepFreezeProductionReadiness({
+    schemaVersion: 1,
+    authority: 'observation-only',
+    verdict: 'blocked',
+    topBlocker: blocker,
+    blockers: [blocker],
+    authorityFlags: {
+      admissionPermitted: false,
+      activationPermitted: false,
+      deployPermitted: false,
+      installPermitted: false,
+      launchPermitted: false,
+      lifecycleMutationPermitted: false,
+      releaseSettlementPermitted: false,
+      rollbackPermitted: false,
+      startPermitted: false,
+    },
+    sourceQuality: {
+      sourceState: 'degraded',
+      complete: false,
+      reasons: ['production-authority-chain-absent'],
+    },
+    observations: {
+      artifactPackaging: {
+        sourceState: 'missing',
+        complete: false,
+        state: 'unavailable',
+        packageManifest: 'missing',
+        dependencyInventory: 'missing',
+        installedDependencyTree: 'missing',
+        inventoryDigest: null,
+        installedTreeSha256: null,
+        packageCount: null,
+        packageName: null,
+        packageVersion: null,
+        expectation: {
+          schemaVersion: 2,
+          packageManifestPath: 'package.json',
+          dependencyInventoryPath: 'dist/release-dependency-inventory.json',
+          installedDependencyRootPath: 'node_modules',
+          installedByteCoverage: 'inventory-v2-package-manifest-bound-root-unsealed',
+        },
+        reasonCode: 'artifact-root-unavailable',
+      },
+      releaseManifest: {
+        sourceState: 'missing', complete: false, reasonCode: 'manifest-unavailable',
+        state: 'unavailable', manifestDigest: null,
+      },
+      releaseEvidence: {
+        sourceState: 'missing', complete: false, reasonCode: 'release-evidence-unavailable',
+        state: 'unavailable', keyId: null,
+      },
+      launchAdmission: {
+        sourceState: 'missing', complete: false, reasonCode: 'launch-admission-unavailable',
+        state: 'unavailable', blockerCodes: [],
+      },
+      residentService: {
+        sourceState: 'missing', complete: false, reasonCode: 'diagnostic-unavailable',
+        state: 'unavailable', findingCodes: [],
+      },
+      activationPermit: {
+        sourceState: 'missing',
+        complete: false,
+        state: 'inspection-unavailable',
+        trustRootCount: 0,
+        reasonCode: 'permit-inspection-isolated',
+      },
+      releaseTip: {
+        sourceState: 'missing',
+        complete: false,
+        state: 'unavailable',
+        stopReasons: [],
+        reasonCode: 'tip-unavailable',
+      },
+    },
+  });
 }
 
 async function importServiceConfig(): Promise<
@@ -710,11 +818,14 @@ async function cmdDaemonStatus(jsonMode: boolean): Promise<number> {
 
   // Resolve the configured daily cap for display (best-effort).
   let dailyCap: number | undefined;
-  const loadConfig = await importConfig();
+  let config: AshlrConfig | undefined;
+  const loadConfig = await importConfig(true, true);
   if (loadConfig) {
     try {
-      dailyCap = loadConfig().daemon?.dailyBudgetUsd;
+      config = loadConfig();
+      dailyCap = config.daemon?.dailyBudgetUsd;
     } catch {
+      config = undefined;
       dailyCap = undefined;
     }
   }
@@ -747,6 +858,16 @@ async function cmdDaemonStatus(jsonMode: boolean): Promise<number> {
     }
   }
 
+  let productionActivationReadiness = unavailableProductionActivationReadiness();
+  const inspectProductionActivationReadiness = await importProductionActivationReadiness();
+  if (inspectProductionActivationReadiness) {
+    try {
+      productionActivationReadiness = inspectProductionActivationReadiness();
+    } catch {
+      productionActivationReadiness = unavailableProductionActivationReadiness();
+    }
+  }
+
   if (jsonMode) {
     console.log(
       JSON.stringify(
@@ -762,6 +883,7 @@ async function cmdDaemonStatus(jsonMode: boolean): Promise<number> {
           pendingProposals: pending,
           stateSource,
           guardHealth,
+          productionActivationReadiness,
         },
         null,
         2,

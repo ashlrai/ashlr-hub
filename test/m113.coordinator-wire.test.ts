@@ -605,8 +605,8 @@ describe('SharedWorkQueueCoordinator two-machine disjoint', () => {
 
   it('refuses and releases the whole batch when the initial fence is partial', async () => {
     const sharedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m113-shared-partial-fence-'));
-    const fenceSpy = vi.spyOn(SharedWorkQueueCoordinator.prototype, 'fence')
-      .mockImplementation((itemIds) => itemIds.slice(0, 1));
+    const fenceSpy = vi.spyOn(SharedWorkQueueCoordinator.prototype, 'fenceClaimGenerations')
+      .mockImplementation((claims) => claims.slice(0, 1));
     try {
       const cfg = makeCfg({
         daemon: { dailyBudgetUsd: 10, perTickItems: 2, parallel: 2, intervalMs: 100 },
@@ -727,7 +727,7 @@ describe('SharedWorkQueueCoordinator two-machine disjoint', () => {
 
   it('does not consume frontier quota when the pre-launch queue fence refuses execution', async () => {
     const sharedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m113-shared-quota-'));
-    const beginSpy = vi.spyOn(SharedWorkQueueCoordinator.prototype, 'beginExecution')
+    const beginSpy = vi.spyOn(SharedWorkQueueCoordinator.prototype, 'beginClaimGenerationExecution')
       .mockReturnValue(false);
     try {
       const cfg = makeCfg({
