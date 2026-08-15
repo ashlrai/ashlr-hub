@@ -18,15 +18,26 @@ const releaseDocs = readFileSync(resolve(repoRoot, 'docs/RELEASING.md'), 'utf8')
 const workflow = parse(workflowText) as Record<string, unknown>;
 const jobs = workflow.jobs as Record<string, Record<string, unknown>>;
 const releaseCanary = jobs.release_canary;
-const releaseCanarySteps = releaseCanary.steps as Array<Record<string, unknown>>;
+const prepare = jobs.prepare;
 const publish = jobs.publish;
-const steps = publish.steps as Array<Record<string, unknown>>;
+const verifyPublish = jobs.verify_publish;
 const release = jobs.release;
-const releaseSteps = release.steps as Array<Record<string, unknown>>;
-const checkout = steps[0]!;
-const admission = steps[1]!;
-const actionRefs = [...releaseCanarySteps, ...steps, ...releaseSteps]
-  .flatMap((step) => (typeof step.uses === 'string' ? [step.uses] : []));
+const jobSteps = (job: Record<string, unknown>): Array<Record<string, unknown>> =>
+  job.steps as Array<Record<string, unknown>>;
+const releaseCanarySteps = jobSteps(releaseCanary);
+const prepareSteps = jobSteps(prepare);
+const publishSteps = jobSteps(publish);
+const verifyPublishSteps = jobSteps(verifyPublish);
+const releaseSteps = jobSteps(release);
+const checkout = prepareSteps[0]!;
+const admission = prepareSteps[1]!;
+const actionRefs = [
+  ...releaseCanarySteps,
+  ...prepareSteps,
+  ...publishSteps,
+  ...verifyPublishSteps,
+  ...releaseSteps,
+].flatMap((step) => (typeof step.uses === 'string' ? [step.uses] : []));
 
 describe('M479 npm release workflow supply-chain admission', () => {
   it('pins every third-party action to a reviewed immutable commit', () => {
@@ -37,6 +48,12 @@ describe('M479 npm release workflow supply-chain admission', () => {
       'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
       'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020',
       'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
+      'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
+      'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020',
+      'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c',
+      'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
+      'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020',
+      'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c',
       'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c',
     ]);
 
@@ -60,7 +77,7 @@ describe('M479 npm release workflow supply-chain admission', () => {
     );
   });
 
-  it('checks out the immutable event SHA without retaining write credentials', () => {
+  it('checks out the immutable event SHA only before the OIDC boundary', () => {
     expect(checkout).toEqual({
       name: 'Checkout the immutable tag target',
       uses: 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
@@ -70,6 +87,8 @@ describe('M479 npm release workflow supply-chain admission', () => {
         ref: '${{ github.sha }}',
       },
     });
+    expect(publishSteps.some((step) => String(step.uses ?? '').startsWith('actions/checkout@')))
+      .toBe(false);
   });
 
   it('fails closed unless the exact event commit is in protected master history', () => {
@@ -90,22 +109,31 @@ describe('M479 npm release workflow supply-chain admission', () => {
     expect(run.match(/\bexit 1\b/g)).toHaveLength(3);
   });
 
-  it('runs admission before dependency install and npm publish, then releases in a dependent job', () => {
-    const admissionIndex = steps.indexOf(admission);
-    const installIndex = steps.findIndex((step) => step.run === 'npm ci');
-    const publishIndex = steps.findIndex((step) =>
-      String(step.run ?? '').includes('npm publish "$RUNNER_TEMP/$filename"'),
-    );
+  it('prepares before the minimal publish effect and verifies before GitHub release', () => {
+    const installIndex = prepareSteps.findIndex((step) => step.run === 'npm ci');
+    const packIndex = prepareSteps.findIndex((step) =>
+      String(step.run ?? '').includes('npm pack --json --ignore-scripts'));
+    const artifactIndex = prepareSteps.findIndex((step) =>
+      step.name === 'Upload bounded npm candidate handoff');
+    const preparedVerifyIndex = publishSteps.findIndex((step) =>
+      step.name === 'Verify bounded prepared candidate without executing it');
+    const liveAdmissionIndex = publishSteps.findIndex((step) =>
+      step.name === 'Admit exact candidate channel state immediately before publish');
+    const publishIndex = publishSteps.findIndex((step) =>
+      String(step.run ?? '').includes('npm publish "$TARBALL"'));
     const releaseIndex = releaseSteps.findIndex((step) =>
-      String(step.run ?? '').includes('gh release create'),
-    );
+      String(step.run ?? '').includes('gh release create'));
 
-    expect(admissionIndex).toBe(1);
-    expect(installIndex).toBeGreaterThan(admissionIndex);
-    expect(publishIndex).toBeGreaterThan(installIndex);
-    expect(release.needs).toBe('publish');
+    expect(prepareSteps.indexOf(admission)).toBe(1);
+    expect(installIndex).toBeGreaterThan(prepareSteps.indexOf(admission));
+    expect(packIndex).toBeGreaterThan(installIndex);
+    expect(artifactIndex).toBeGreaterThan(packIndex);
+    expect(preparedVerifyIndex).toBeGreaterThan(-1);
+    expect(liveAdmissionIndex).toBe(preparedVerifyIndex + 1);
+    expect(publishIndex).toBe(liveAdmissionIndex + 1);
+    expect(verifyPublish.needs).toEqual(['prepare', 'publish']);
+    expect(release.needs).toEqual(['prepare', 'verify_publish']);
     expect(releaseIndex).toBeGreaterThan(-1);
-    expect(String(admission.run)).not.toMatch(/npm publish|gh release create|NPM_TOKEN/);
   });
 
   it('preserves explicit tag activation, native CI, provenance, and version gates', () => {
@@ -120,8 +148,17 @@ describe('M479 npm release workflow supply-chain admission', () => {
       permissions: { contents: 'read' },
     });
     expect(releaseCanary.needs).toBe('verify');
-    expect(publish.needs).toEqual(['verify', 'release_canary']);
+    expect(prepare.needs).toEqual(['verify', 'release_canary']);
+    expect(prepare.permissions).toEqual({ contents: 'read' });
+    expect(prepare).not.toHaveProperty('environment');
+    expect(publish.needs).toBe('prepare');
+    expect(publish['timeout-minutes']).toBe(15);
     expect(publish.permissions).toEqual({ contents: 'read', 'id-token': 'write' });
+    expect(publish.outputs).toMatchObject({
+      publication_run_attempt: '${{ steps.admission.outputs.publication_run_attempt }}',
+    });
+    expect(verifyPublish.permissions).toEqual({ contents: 'read' });
+    expect(verifyPublish).not.toHaveProperty('environment');
     expect(release.permissions).toEqual({ contents: 'write' });
     expect(workflowText).toContain('node scripts/check-version.mjs');
     expect(workflowText).toContain(
@@ -132,9 +169,8 @@ describe('M479 npm release workflow supply-chain admission', () => {
       RELEASE_DIST_TAG: 'candidate',
       BASELINE_LATEST_VERSION: '3.0.1',
     });
-    expect(workflowText).toContain('npm publish "$RUNNER_TEMP/$filename"');
+    expect(workflowText).toContain('npm publish "$TARBALL"');
     expect(workflowText).toContain('--tag "$RELEASE_DIST_TAG"');
-    expect(workflowText).toContain('npm audit signatures');
     expect(workflowText).toContain('npm audit signatures --json --include-attestations');
     expect(workflowText).toContain('verify-npm-release-provenance.mjs');
     expect(workflowText).toContain('if ! version_status="$(curl');
@@ -149,19 +185,31 @@ describe('M479 npm release workflow supply-chain admission', () => {
     expect(workflowText).toContain('.dirty == false');
     expect(workflowText).toContain('.object.type == "commit"');
     expect(workflowText).toContain('.object.sha == $sha');
+    expect(workflowText).toContain(
+      'PUBLICATION_RUN_ATTEMPT: ${{ needs.publish.outputs.publication_run_attempt }}',
+    );
+    expect(workflowText).toContain('"$PUBLICATION_RUN_ATTEMPT"');
+    expect(workflowText).toContain('count > 10000');
+    expect(workflowText).toContain('total > 67108864');
+    expect(workflowText).toContain('maximum > 8388608');
+    expect(workflowText).toContain(
+      'gzip --decompress --stdout -- "$tarball" | head -c 134217729',
+    );
+    expect(workflowText).toContain('cmp --silent "$expected_members" "$actual_members"');
+    expect(workflowText).toContain(
+      '["package/\\(.path)", (.mode | tostring), (.size | tostring)] | @tsv',
+    );
+    expect(workflowText).toContain('head -c 1048577');
+    expect(workflowText).toContain('head -c 8193');
     expect(workflowText).toContain('npm-dist-tags-before.json');
     expect(workflowText).toContain('npm-dist-tags-after.json');
     expect(workflowText).toContain('gh release create "$tag"');
+    const releaseRun = releaseSteps.map((step) => String(step.run ?? '')).join('\n');
+    expect(releaseRun.indexOf('"repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}"'))
+      .toBeLessThan(releaseRun.indexOf('gh release create "$tag"'));
+    expect(releaseRun.indexOf('compare/${GITHUB_SHA}...${tag}'))
+      .toBeGreaterThan(releaseRun.indexOf('gh release create "$tag"'));
     expect(workflowText).toContain('--prerelease --latest=false');
-
-    const candidateAdmissionIndex = steps.findIndex((step) =>
-      step.name === 'Admit exact candidate channel state immediately before publish');
-    const handoffIndex = steps.findIndex((step) =>
-      step.name === 'Upload bounded GitHub release handoff');
-    const publishEffectIndex = steps.findIndex((step) =>
-      step.name === 'Publish to npm (provenance)');
-    expect(candidateAdmissionIndex).toBe(handoffIndex + 1);
-    expect(publishEffectIndex).toBe(candidateAdmissionIndex + 1);
   });
 
   it('documents manual release recovery without retrying an accepted npm version', () => {
