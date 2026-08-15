@@ -7,6 +7,7 @@ license = "MIT"
 repository = "https://github.com/your-org/ashlr-hub"
 edition = "2021"
 rust-version = "1.77"
+build = "build.rs"
 
 # Suppress Tauri's default binary name so we can use our own.
 [[bin]]

@@ -8,6 +8,7 @@
     "beforeDevCommand": "",
     "devUrl": "http://127.0.0.1:7777",
     "beforeBuildCommand": "",
+    "beforeBundleCommand": "node scripts/assert-desktop-bundle-policy.mjs",
     "frontendDist": "../dist-placeholder"
   },
 

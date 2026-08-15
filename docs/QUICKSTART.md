@@ -16,9 +16,20 @@ Verify:
 ashlr --version
 ```
 
-> Alternatively, download the desktop app (no Node.js required) from
-> [GitHub Releases](https://github.com/ashlrai/ashlr-hub/releases) — it bundles
-> the binary and runs setup automatically on first launch.
+> No public desktop release or installer is currently available. Install through
+> npm/CLI as shown above; the web dashboard is included in that runtime.
+> Linux remains supported through npm/CLI and the web dashboard.
+> Linux desktop artifacts are quarantined for `GHSA-wrw7-89jp-8q8g` /
+> `RUSTSEC-2024-0429`.
+> Enforcement covers fresh source builds, the default Tauri configuration, and
+> the official release workflow. Repository workflow 301689703 must remain
+> externally `disabled_manually`; its configured output is draft-only. Ruleset
+> 20660876 protects `refs/tags/desktop-v*` with a Mason-only bypass, but tag
+> protection is necessary, not sufficient: a tag can select a historical commit
+> whose workflow predates this quarantine.
+> A hostile `--config` combined with an
+> already-built/staged executable is outside source-build enforcement and must
+> never be treated as admitted release output.
 
 ---
 

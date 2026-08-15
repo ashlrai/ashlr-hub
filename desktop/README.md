@@ -2,32 +2,34 @@
 
 A Tauri v2 desktop app that wraps the Ashlr Mission Control web UI in a native window, manages the daemon lifecycle, and adds a system tray icon.
 
-Targets: macOS (.dmg) · Windows (.msi / .exe) · Linux (.deb).
+Public desktop releases and installers: none. The desktop release workflow is
+externally disabled during the Linux quarantine, and any future workflow output
+is draft-only. The Linux CLI and web dashboard remain supported.
 Installed size: ~10–15 MB (Rust WebView runtime + bundled ashlr binary).
 
 ---
 
 ## Install
 
-Download the latest installer from GitHub Releases:
+There is no public desktop installer today. Use the supported
+[npm/CLI quickstart](../docs/QUICKSTART.md). The formats below describe only
+future draft artifacts after the quarantine exit review; they are not downloads
+or an installation channel.
 
-**https://github.com/ashlrai/ashlr-hub/releases**
-
-| Platform | File | Install |
-|----------|------|---------|
-| macOS | `.dmg` | Open the DMG, drag Ashlr to Applications |
-| Windows | `.msi` or `.exe` | Run the installer |
-| Linux | `.deb` | `sudo dpkg -i ashlr_*.deb` |
+| Platform | Draft artifact policy |
+|----------|-----------------------|
+| macOS | `.dmg` draft only |
+| Windows | `.msi` / `.exe` draft only |
+| Linux | Not produced while quarantined |
 
 ### First-launch security prompts (unsigned builds)
 
-Current releases are unsigned. You will see a one-time OS warning:
+If a future reviewed desktop draft is promoted without platform signing, users
+will see a one-time OS warning:
 
 **macOS — Gatekeeper:** Right-click (or Control-click) `Ashlr.app` and choose **Open**, then click Open again in the dialog. You only need to do this once.
 
 **Windows — SmartScreen:** Click **More info → Run anyway**.
-
-**Linux:** No warning.
 
 ---
 
@@ -70,6 +72,18 @@ Then relaunch the app.
 ---
 
 ## Build from source
+
+> **Linux desktop quarantine:** every fresh Tauri dev, debug, release, and
+> direct Cargo source build targeting Linux fails in `src-tauri/build.rs` before
+> `tauri_build::build()`. Tauri v2 currently resolves GTK3 and vulnerable
+> `glib 0.18.5` (`GHSA-wrw7-89jp-8q8g` / `RUSTSEC-2024-0429`). This does not
+> block the root `ashlr` CLI, Bun sidecar, or web dashboard on Linux.
+> Default Tauri configuration also disables Linux bundling and runs a
+> fail-closed pre-bundle policy, covering the official workflow and ordinary
+> `cargo tauri build`, `--debug`, and direct `--bundles` paths. A hostile
+> `--config` override combined with an already-built/staged executable is
+> outside source-build enforcement; never treat artifacts from a custom config
+> or a non-fresh build tree as admitted release output.
 
 ### Prerequisites
 
@@ -119,7 +133,6 @@ cargo tauri build
 Bundles are written to `src-tauri/target/release/bundle/`:
 - macOS: `*.app` + `*.dmg`
 - Windows: `*.msi` + NSIS `*.exe`
-- Linux: `*.deb`
 
 Debug build (keeps console window on Windows):
 ```sh
@@ -128,9 +141,30 @@ cargo tauri build --debug
 
 ### CI / automated releases
 
-Pushing a `desktop-v*` tag triggers `.github/workflows/release-desktop.yml`, which builds all three platforms in a matrix and uploads installers to a GitHub Release draft.
+Repository workflow 301689703 must remain externally `disabled_manually` while
+the quarantine is active. Its retained source definition accepts only
+`desktop-v*` tag pushes, builds only macOS and Windows, records Linux as not
+published, and sets `releaseDraft: true`; workflow output is draft-only and is
+not a public installer. Ruleset 20660876 protects `refs/tags/desktop-v*` with a
+Mason-only bypass. Tag protection is necessary but not sufficient because a
+tag can select a historical commit whose workflow predates this quarantine.
 
-Code-signing is optional. Set `APPLE_CERTIFICATE` / `APPLE_ID` / `APPLE_TEAM_ID` secrets for notarized macOS builds, and `WINDOWS_CERTIFICATE` for Authenticode-signed Windows builds. Without these secrets, the workflow produces functional unsigned builds.
+Linux desktop release can be re-enabled only after either migration to Tauri v3
+with GTK4, or adoption of another supported dependency chain that resolves
+`glib >=0.20`. That change must also pass full native build, install, launch,
+sidecar, signing/updater, and release acceptance on macOS, Windows, and Linux,
+with an independent security review. Removing the workflow row alone is not an
+override: the Rust build guard, default Linux bundle policy, and pre-bundle
+policy must be retired in the same reviewed change. Release acceptance applies
+only to the official workflow, default Tauri configuration, and fresh builds;
+a hostile `--config` with a staged executable is outside source-build
+enforcement.
+
+After the quarantine exit review and external re-enablement, code-signing may be
+configured with `APPLE_CERTIFICATE` / `APPLE_ID` / `APPLE_TEAM_ID` for notarized
+macOS drafts and `WINDOWS_CERTIFICATE` for Authenticode-signed Windows drafts.
+Unsigned workflow output must remain a private draft and is never a current
+download claim.
 
 ---
 
@@ -173,14 +207,19 @@ Go to **Settings → Secrets and variables → Actions** and add:
 | `TAURI_SIGNING_PRIVATE_KEY` | The private key output from `tauri signer generate` |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | The password you entered (or leave empty if none) |
 
-**4. Push a release tag**
+**4. After quarantine clearance, push a release tag**
+
+Do not perform this step while workflow 301689703 is externally disabled for
+the quarantine.
 
 ```sh
 git tag desktop-v1.0.0
 git push origin desktop-v1.0.0
 ```
 
-The CI workflow will now produce `.sig` signature files and a `latest.json` manifest alongside each installer, which the running app uses to detect and verify new releases.
+After the quarantine is cleared and the workflow is explicitly re-enabled, CI
+can produce `.sig` signature files and a `latest.json` manifest alongside each
+draft installer. Promotion requires separate release acceptance.
 
 ### How it works at runtime
 
@@ -195,7 +234,9 @@ The updater plugin is **build-safe without a signing key**:
 - Adding `tauri-plugin-updater` to `Cargo.toml` and registering it in `main.rs` compiles cleanly with no secrets.
 - The `pubkey` placeholder in `tauri.conf.json` is a plain string — Tauri's JSON Schema for `plugins.*` uses `additionalProperties: true`, so no schema validation fails.
 - Signature verification only happens at runtime, not at `cargo tauri build` time.
-- When `TAURI_SIGNING_PRIVATE_KEY` is absent from CI, `tauri-action` simply skips producing `.sig` files and `latest.json` — the build still succeeds and produces a fully functional (unsigned) installer.
+- When `TAURI_SIGNING_PRIVATE_KEY` is absent from CI, `tauri-action` skips
+  `.sig` files and `latest.json`; any resulting unsigned macOS or Windows
+  artifacts remain draft-only and are not a supported public installer.
 
 ---
 
