@@ -18,6 +18,10 @@ on:
 
 permissions: {}
 
+concurrency:
+  group: npm-candidate-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   RELEASE_VERSION: "3.2.0"
   RELEASE_DIST_TAG: candidate
@@ -128,32 +132,6 @@ jobs:
               exit 1
               ;;
           esac
-      - name: Admit exact candidate channel state
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          package_version="$(node -p "require('./package.json').version")"
-          if [[ "$package_version" != "$RELEASE_VERSION" || "$GITHUB_REF_NAME" != "v${RELEASE_VERSION}" ]]; then
-            echo "This release lane is pinned to v${RELEASE_VERSION}." >&2
-            exit 1
-          fi
-          packument="$RUNNER_TEMP/npm-packument-before.json"
-          curl --fail --silent --show-error --location \
-            --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 \
-            --retry 2 --retry-all-errors \
-            --output "$packument" \
-            "https://registry.npmjs.org/@ashlr%2Fhub"
-          jq -e \
-            --arg latest "$BASELINE_LATEST_VERSION" \
-            --arg candidate "$RELEASE_DIST_TAG" \
-            --arg version "$RELEASE_VERSION" \
-            '.name == "@ashlr/hub" and
-             .["dist-tags"].latest == $latest and
-             (.["dist-tags"][$candidate] == null) and
-             (.versions[$version] == null)' \
-            "$packument" >/dev/null
-          jq -cS '.["dist-tags"]' "$packument" > "$RUNNER_TEMP/npm-dist-tags-before.json"
       - name: Build exact candidate tarball
         shell: bash
         run: |
@@ -185,6 +163,32 @@ jobs:
           compression-level: 9
           overwrite: true
           include-hidden-files: false
+      - name: Admit exact candidate channel state immediately before publish
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          package_version="$(node -p "require('./package.json').version")"
+          if [[ "$package_version" != "$RELEASE_VERSION" || "$GITHUB_REF_NAME" != "v${RELEASE_VERSION}" ]]; then
+            echo "This release lane is pinned to v${RELEASE_VERSION}." >&2
+            exit 1
+          fi
+          packument="$RUNNER_TEMP/npm-packument-before.json"
+          curl --fail --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 \
+            --retry 2 --retry-all-errors \
+            --output "$packument" \
+            "https://registry.npmjs.org/@ashlr%2Fhub"
+          jq -e \
+            --arg latest "$BASELINE_LATEST_VERSION" \
+            --arg candidate "$RELEASE_DIST_TAG" \
+            --arg version "$RELEASE_VERSION" \
+            '.name == "@ashlr/hub" and
+             .["dist-tags"].latest == $latest and
+             (.["dist-tags"][$candidate] == null) and
+             (.versions[$version] == null)' \
+            "$packument" >/dev/null
+          jq -cS '.["dist-tags"]' "$packument" > "$RUNNER_TEMP/npm-dist-tags-before.json"
       - name: Publish to npm (provenance)
         shell: bash
         run: |
@@ -206,14 +210,18 @@ jobs:
           packument="$RUNNER_TEMP/npm-packument-after.json"
           observed=false
           for attempt in {1..12}; do
-            version_status="$(curl --silent --show-error --location \
+            if ! version_status="$(curl --silent --show-error --location \
               --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 \
               --output "$version_metadata" --write-out '%{http_code}' \
-              "https://registry.npmjs.org/@ashlr%2Fhub/${RELEASE_VERSION}")"
-            packument_status="$(curl --silent --show-error --location \
+              "https://registry.npmjs.org/@ashlr%2Fhub/${RELEASE_VERSION}")"; then
+              version_status=000
+            fi
+            if ! packument_status="$(curl --silent --show-error --location \
               --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 \
               --output "$packument" --write-out '%{http_code}' \
-              "https://registry.npmjs.org/@ashlr%2Fhub")"
+              "https://registry.npmjs.org/@ashlr%2Fhub")"; then
+              packument_status=000
+            fi
             if [[ "$version_status" == "200" && "$packument_status" == "200" ]] &&
               jq -e \
                 --arg version "$RELEASE_VERSION" \
@@ -251,7 +259,19 @@ jobs:
             "@ashlr/hub@${RELEASE_VERSION}"
           installed_version="$(node -p "require('./node_modules/@ashlr/hub/package.json').version")"
           test "$installed_version" = "$RELEASE_VERSION"
-          npm audit signatures
+          npm audit signatures --json --include-attestations \
+            > "$RUNNER_TEMP/npm-signature-audit.json"
+          node "$GITHUB_WORKSPACE/scripts/verify-npm-release-provenance.mjs" \
+            "$RUNNER_TEMP/npm-signature-audit.json" \
+            "@ashlr/hub" \
+            "$RELEASE_VERSION" \
+            "$expected_integrity" \
+            "https://github.com/ashlrai/ashlr-hub" \
+            ".github/workflows/release.yml" \
+            "$GITHUB_REF" \
+            "$GITHUB_SHA" \
+            "$GITHUB_RUN_ID" \
+            "$GITHUB_RUN_ATTEMPT"
 
   release:
     name: Create GitHub release

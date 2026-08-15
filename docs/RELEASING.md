@@ -69,6 +69,12 @@ verify `npm trust list @ashlr/hub` exactly matches the repository, workflow,
 environment, and `npm publish` permission documented above. No earlier release
 run proves that binding.
 
+The workflow serializes runs for the exact release ref and performs the registry
+admission immediately before `npm publish`. npm dist-tags do not offer a
+compare-and-swap operation, so this shrinks but cannot eliminate a race with an
+independent npm maintainer mutating tags outside GitHub Actions. Any unexpected
+post-publication tag state is an incident and blocks the GitHub prerelease.
+
 1. Confirm `version` in `package.json` is exactly `3.2.0`.
 2. Make sure `CHANGELOG.md` has a `## [3.2.0]` section — the release FAILS
    without one (`scripts/extract-changelog.mjs` enforces changelog discipline;
@@ -86,12 +92,16 @@ run proves that binding.
    - **publish** — wait for explicit `npm-release` approval → verify
      protected-master ancestry → install the pinned npm 11 trusted-publishing
      client → `scripts/check-version.mjs` (tag must equal `package.json` version)
-     → upload one digest-verified, 64 KiB-max public changelog artifact from
-     runner-temporary storage (the package checkout stays clean) →
-     re-check exact registry state → build one exact tarball →
+     → build one exact tarball → upload one digest-verified, 64 KiB-max
+     public changelog artifact from runner-temporary storage (the package
+     checkout stays clean) → re-check exact registry state immediately before
+     publication →
      OIDC-authenticated `npm publish <tarball> --ignore-scripts --provenance
      --access public --tag candidate` → require its exact SRI and npm provenance
      metadata → verify registry signatures/attestations with pinned npm 11 →
+     decode the verified SLSA statement and bind its package purl/SHA-512,
+     repository, workflow path, tag ref, Git commit, push event, GitHub-hosted
+     builder, workflow run, and run attempt to the exact release execution →
      prove every pre-existing dist-tag and `latest=3.0.1` stayed unchanged;
    - **release** — only after npm publish succeeds, download and verify that
      bounded artifact, then create or exactly verify a GitHub prerelease with
@@ -122,6 +132,10 @@ that npm contains the intended tag artifact from a clean checkout of that tag:
 ```bash
 version=3.2.0
 git switch --detach "v${version}"
+tag_checkout="$(pwd)"
+expected_revision="$(git rev-parse HEAD)"
+: "${EXPECTED_RUN_ID:?set to the accepted GitHub Actions release run id}"
+: "${EXPECTED_RUN_ATTEMPT:?set to its accepted run attempt}"
 test "$(node -p 'process.versions.node.split(".")[0]')" = "24"
 npm install --global npm@11.19.0 --ignore-scripts --no-audit --no-fund
 test "$(npm --version)" = "11.19.0"
@@ -142,7 +156,12 @@ npm install --ignore-scripts --no-audit --no-fund --save-exact \
   "@ashlr/hub@${version}"
 installed_version="$(node -p "require('./node_modules/@ashlr/hub/package.json').version")"
 test "$installed_version" = "$version"
-npm audit signatures
+npm audit signatures --json --include-attestations > npm-signature-audit.json
+node "$tag_checkout/scripts/verify-npm-release-provenance.mjs" \
+  npm-signature-audit.json \
+  "@ashlr/hub" "$version" "$expected_integrity" \
+  "https://github.com/ashlrai/ashlr-hub" ".github/workflows/release.yml" \
+  "refs/tags/v${version}" "$expected_revision" "$EXPECTED_RUN_ID" "$EXPECTED_RUN_ATTEMPT"
 ```
 
 Then use GitHub's **Re-run failed jobs** control, or the equivalent command:

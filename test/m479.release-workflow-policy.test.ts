@@ -107,6 +107,10 @@ describe('M479 npm release workflow supply-chain admission', () => {
   it('preserves explicit tag activation, native CI, provenance, and version gates', () => {
     expect(workflowText).toContain('tags: ["v*"]');
     expect(workflow.permissions).toEqual({});
+    expect(workflow.concurrency).toEqual({
+      group: 'npm-candidate-${{ github.ref }}',
+      'cancel-in-progress': false,
+    });
     expect(jobs.verify).toMatchObject({
       uses: './.github/workflows/ci.yml',
       permissions: { contents: 'read' },
@@ -126,6 +130,10 @@ describe('M479 npm release workflow supply-chain admission', () => {
     expect(workflowText).toContain('npm publish "$RUNNER_TEMP/$filename"');
     expect(workflowText).toContain('--tag "$RELEASE_DIST_TAG"');
     expect(workflowText).toContain('npm audit signatures');
+    expect(workflowText).toContain('npm audit signatures --json --include-attestations');
+    expect(workflowText).toContain('verify-npm-release-provenance.mjs');
+    expect(workflowText).toContain('if ! version_status="$(curl');
+    expect(workflowText).toContain('if ! packument_status="$(curl');
     expect(workflowText).toContain(
       'npm install --ignore-scripts --no-audit --no-fund --save-exact',
     );
@@ -135,6 +143,15 @@ describe('M479 npm release workflow supply-chain admission', () => {
     expect(workflowText).toContain('npm-dist-tags-after.json');
     expect(workflowText).toContain('gh release create "$tag"');
     expect(workflowText).toContain('--prerelease --latest=false');
+
+    const candidateAdmissionIndex = steps.findIndex((step) =>
+      step.name === 'Admit exact candidate channel state immediately before publish');
+    const handoffIndex = steps.findIndex((step) =>
+      step.name === 'Upload bounded GitHub release handoff');
+    const publishEffectIndex = steps.findIndex((step) =>
+      step.name === 'Publish to npm (provenance)');
+    expect(candidateAdmissionIndex).toBe(handoffIndex + 1);
+    expect(publishEffectIndex).toBe(candidateAdmissionIndex + 1);
   });
 
   it('documents manual release recovery without retrying an accepted npm version', () => {

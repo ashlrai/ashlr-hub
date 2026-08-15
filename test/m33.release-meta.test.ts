@@ -7,10 +7,12 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
+import { verifyNpmReleaseProvenance } from '../scripts/verify-npm-release-provenance.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const pkg = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')) as Record<string, unknown>;
@@ -139,6 +141,7 @@ describe('release workflow', () => {
   }
   interface ReleaseWorkflow {
     on?: { push?: { tags?: string[] } };
+    concurrency?: { group?: string; 'cancel-in-progress'?: boolean };
     env?: Record<string, string>;
     permissions?: Record<string, string>;
     jobs?: Record<string, WorkflowJob>;
@@ -159,6 +162,10 @@ describe('release workflow', () => {
       RELEASE_VERSION: '3.2.0',
       RELEASE_DIST_TAG: 'candidate',
       BASELINE_LATEST_VERSION: '3.0.1',
+    });
+    expect(parsed.concurrency).toEqual({
+      group: 'npm-candidate-${{ github.ref }}',
+      'cancel-in-progress': false,
     });
     expect(parsed.permissions).toEqual({});
     expect(Object.keys(jobs)).toEqual(['verify', 'publish', 'release']);
@@ -223,6 +230,21 @@ describe('release workflow', () => {
       'require(\'./node_modules/@ashlr/hub/package.json\').version',
     );
     expect(postPublish?.run).toContain('test "$installed_version" = "$RELEASE_VERSION"');
+    expect(postPublish?.run).toContain('npm audit signatures --json --include-attestations');
+    expect(postPublish?.run).toContain('verify-npm-release-provenance.mjs');
+    expect(postPublish?.run).toContain('if ! version_status="$(curl');
+    expect(postPublish?.run).toContain('if ! packument_status="$(curl');
+    expect(postPublish?.run).toContain('version_status=000');
+    expect(postPublish?.run).toContain('packument_status=000');
+
+    const candidateAdmissionIndex = steps(publishJob).findIndex((step) =>
+      step.name === 'Admit exact candidate channel state immediately before publish');
+    const handoffIndex = steps(publishJob).findIndex((step) =>
+      step.name === 'Upload bounded GitHub release handoff');
+    const publishIndex = steps(publishJob).findIndex((step) =>
+      step.name === 'Publish to npm (provenance)');
+    expect(candidateAdmissionIndex).toBe(handoffIndex + 1);
+    expect(publishIndex).toBe(candidateAdmissionIndex + 1);
 
     const structuredWorkflow = JSON.stringify(parsed);
     expect(structuredWorkflow).not.toMatch(/NODE_AUTH_TOKEN|NPM_TOKEN|secrets\.NPM_TOKEN/);
@@ -306,6 +328,171 @@ describe('release workflow', () => {
     );
     expect(releaseDocs).not.toContain('npm install --package-lock-only');
     expect(releaseDocs).toContain('Promotion is a separate explicit');
+    expect(releaseDocs).toContain('npm dist-tags do not offer a\ncompare-and-swap operation');
     expect(releaseDocs).not.toContain('gh secret set NPM_TOKEN');
+  });
+
+  it.skipIf(process.platform === 'win32')('retries post-publish transport failures under set -e', () => {
+    const postPublish = steps(publishJob).find((step) =>
+      step.name === 'Verify immutable candidate and preserved dist-tags');
+    const run = postPublish?.run ?? '';
+    const start = run.indexOf('expected_integrity=');
+    const end = run.indexOf('if [[ "$observed" != "true" ]]');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+
+    const root = mkdtempSync(join(tmpdir(), 'ashlr-release-retry-'));
+    try {
+      const integrity = `sha512-${Buffer.alloc(64, 7).toString('base64')}`;
+      writeFileSync(join(root, 'npm-pack-integrity.txt'), `${integrity}\n`);
+      writeFileSync(join(root, 'npm-dist-tags-before.json'), '{"latest":"3.0.1"}\n');
+      writeFileSync(join(root, 'version.json'), JSON.stringify({
+        name: '@ashlr/hub',
+        version: '3.2.0',
+        dist: {
+          integrity,
+          attestations: {
+            provenance: { predicateType: 'https://slsa.dev/provenance/v1' },
+            url: 'https://registry.npmjs.org/-/npm/v1/attestations/@ashlr%2Fhub@3.2.0',
+          },
+        },
+      }));
+      writeFileSync(join(root, 'packument.json'), JSON.stringify({
+        'dist-tags': { latest: '3.0.1', candidate: '3.2.0' },
+      }));
+      writeFileSync(join(root, 'curl-count'), '0\n');
+
+      const retryBlock = run.slice(start, end).replace('sleep 5', 'sleep 0');
+      const script = `
+        set -euo pipefail
+        curl() {
+          local output='' previous='' url='' count
+          for argument in "$@"; do
+            if [[ "$previous" == '--output' ]]; then output="$argument"; fi
+            previous="$argument"
+            url="$argument"
+          done
+          count="$(<"$RUNNER_TEMP/curl-count")"
+          count=$((count + 1))
+          printf '%s\\n' "$count" > "$RUNNER_TEMP/curl-count"
+          if (( count <= 2 )); then return 7; fi
+          if [[ "$url" == */3.2.0 ]]; then
+            cp "$VERSION_FIXTURE" "$output"
+          else
+            cp "$PACKUMENT_FIXTURE" "$output"
+          fi
+          printf '200'
+        }
+        ${retryBlock}
+        test "$observed" = true
+        test "$(<"$RUNNER_TEMP/curl-count")" = 4
+      `;
+      execFileSync('/bin/bash', ['-c', script], {
+        env: {
+          ...process.env,
+          RUNNER_TEMP: root,
+          RELEASE_VERSION: '3.2.0',
+          RELEASE_DIST_TAG: 'candidate',
+          BASELINE_LATEST_VERSION: '3.0.1',
+          VERSION_FIXTURE: join(root, 'version.json'),
+          PACKUMENT_FIXTURE: join(root, 'packument.json'),
+        },
+        stdio: 'pipe',
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('exact npm release provenance', () => {
+  const digest = 'ab'.repeat(64);
+  const integrity = `sha512-${Buffer.from(digest, 'hex').toString('base64')}`;
+  const release = {
+    packageName: '@ashlr/hub',
+    version: '3.2.0',
+    integrity,
+    repository: 'https://github.com/ashlrai/ashlr-hub',
+    workflowPath: '.github/workflows/release.yml',
+    ref: 'refs/tags/v3.2.0',
+    revision: '1'.repeat(40),
+    runId: '31870000000',
+    runAttempt: '1',
+  };
+
+  function audit(
+    overrides: Record<string, unknown> = {},
+    identityOverrides: Partial<typeof release> = {},
+  ) {
+    const identity = { ...release, ...identityOverrides };
+    const statement = {
+      _type: 'https://in-toto.io/Statement/v1',
+      subject: [{ name: 'pkg:npm/%40ashlr/hub@3.2.0', digest: { sha512: digest } }],
+      predicateType: 'https://slsa.dev/provenance/v1',
+      predicate: {
+        buildDefinition: {
+          buildType: 'https://slsa-framework.github.io/github-actions-buildtypes/workflow/v1',
+          externalParameters: { workflow: {
+            ref: identity.ref, repository: identity.repository, path: identity.workflowPath,
+          } },
+          internalParameters: { github: { event_name: 'push' } },
+          resolvedDependencies: [{
+            uri: `git+${identity.repository}@${identity.ref}`,
+            digest: { gitCommit: identity.revision },
+          }],
+        },
+        runDetails: {
+          builder: { id: 'https://github.com/actions/runner/github-hosted' },
+          metadata: {
+            invocationId:
+              `${identity.repository}/actions/runs/${identity.runId}/attempts/${identity.runAttempt}`,
+          },
+        },
+      },
+      ...overrides,
+    };
+    return {
+      invalid: [],
+      missing: [],
+      verified: [{
+        name: release.packageName,
+        version: release.version,
+        location: `node_modules/${release.packageName}`,
+        attestationBundles: [{
+          predicateType: 'https://slsa.dev/provenance/v1',
+          bundle: { dsseEnvelope: {
+            payloadType: 'application/vnd.in-toto+json',
+            payload: Buffer.from(JSON.stringify(statement)).toString('base64'),
+          } },
+        }],
+      }],
+    };
+  }
+
+  it('accepts the exact package, workflow, tag, revision, builder, and run', () => {
+    expect(verifyNpmReleaseProvenance({ audit: audit(), ...release })).toBe(true);
+  });
+
+  it.each([
+    ['wrong subject digest', { subject: [{
+      name: 'pkg:npm/%40ashlr/hub@3.2.0', digest: { sha512: 'cd'.repeat(64) },
+    }] }],
+    ['wrong statement type', { _type: 'https://in-toto.io/Statement/v0.1' }],
+  ])('rejects %s', (_label, overrides) => {
+    expect(() => verifyNpmReleaseProvenance({ audit: audit(overrides), ...release })).toThrow();
+  });
+
+  it.each([
+    ['repository', { repository: 'https://github.com/attacker/fork' }],
+    ['workflow path', { workflowPath: '.github/workflows/other.yml' }],
+    ['tag ref', { ref: 'refs/tags/v3.2.0-forged' }],
+    ['Git revision', { revision: '2'.repeat(40) }],
+    ['workflow run', { runId: '31870000001' }],
+    ['workflow run attempt', { runAttempt: '2' }],
+  ])('rejects a coherently wrong %s identity', (_label, identityOverrides) => {
+    expect(() => verifyNpmReleaseProvenance({
+      audit: audit({}, identityOverrides),
+      ...release,
+    })).toThrow();
   });
 });
