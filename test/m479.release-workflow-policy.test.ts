@@ -90,7 +90,7 @@ describe('M479 npm release workflow supply-chain admission', () => {
     const admissionIndex = steps.indexOf(admission);
     const installIndex = steps.findIndex((step) => step.run === 'npm ci');
     const publishIndex = steps.findIndex((step) =>
-      String(step.run ?? '').includes('npm publish --provenance'),
+      String(step.run ?? '').includes('npm publish "$RUNNER_TEMP/$filename"'),
     );
     const releaseIndex = releaseSteps.findIndex((step) =>
       String(step.run ?? '').includes('gh release create'),
@@ -118,8 +118,18 @@ describe('M479 npm release workflow supply-chain admission', () => {
     expect(workflowText).toContain(
       'node scripts/extract-changelog.mjs > "$RUNNER_TEMP/release-notes.md"',
     );
-    expect(workflowText).toContain('npm publish --provenance --access public');
+    expect(workflow.env).toEqual({
+      RELEASE_VERSION: '3.2.0',
+      RELEASE_DIST_TAG: 'candidate',
+      BASELINE_LATEST_VERSION: '3.0.1',
+    });
+    expect(workflowText).toContain('npm publish "$RUNNER_TEMP/$filename"');
+    expect(workflowText).toContain('--tag "$RELEASE_DIST_TAG"');
+    expect(workflowText).toContain('npm audit signatures');
+    expect(workflowText).toContain('npm-dist-tags-before.json');
+    expect(workflowText).toContain('npm-dist-tags-after.json');
     expect(workflowText).toContain('gh release create "$tag"');
+    expect(workflowText).toContain('--prerelease --latest=false');
   });
 
   it('documents manual release recovery without retrying an accepted npm version', () => {
@@ -131,7 +141,9 @@ describe('M479 npm release workflow supply-chain admission', () => {
     expect(releaseDocs).toContain('set -euo pipefail\n   version=3.2.0\n   release_tag="v${version}"');
     expect(releaseDocs).toContain('git rev-list -n 1 "$release_tag"');
     expect(releaseDocs).toContain(
-      'gh release create "$release_tag" --verify-tag --title "$release_tag" --notes-file "$release_notes"',
+      'gh release create "$release_tag" --verify-tag --title "$release_tag"',
     );
+    expect(releaseDocs).toContain('--notes-file "$release_notes" --prerelease --latest=false');
+    expect(releaseDocs).toContain('Promotion is a separate explicit');
   });
 });

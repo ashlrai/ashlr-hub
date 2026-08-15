@@ -1,7 +1,10 @@
 # Releasing @ashlr/hub
 
-Releases are tag-triggered and fully gated. Nothing reaches npm without an
-explicit human action (pushing a `v*` tag) plus a green full-CI verify job.
+Releases are tag-triggered and fully gated. The current lane is deliberately
+pinned to the 3.2.0 candidate: nothing reaches npm without an explicit human
+action (pushing `v3.2.0`), approval of the `npm-release` environment, and a green
+full-CI verify job. It publishes only under npm dist-tag `candidate` and creates
+a GitHub prerelease; it cannot move npm or GitHub `latest`.
 
 ## One-time setup
 
@@ -58,16 +61,24 @@ verified.
 
 ## Release procedure
 
-1. Update `version` in `package.json` (e.g. `2.2.0`).
-2. Make sure `CHANGELOG.md` has a `## [2.2.0]` section — the release FAILS
+The current workflow is a one-version candidate lane. It requires npm `latest`
+to equal `3.0.1`, requires npm `candidate` and version `3.2.0` to be absent, and
+fails closed if any of those registry preconditions change. Before authorizing
+the tag, an authenticated npm maintainer must run the pinned npm 11 client and
+verify `npm trust list @ashlr/hub` exactly matches the repository, workflow,
+environment, and `npm publish` permission documented above. No earlier release
+run proves that binding.
+
+1. Confirm `version` in `package.json` is exactly `3.2.0`.
+2. Make sure `CHANGELOG.md` has a `## [3.2.0]` section — the release FAILS
    without one (`scripts/extract-changelog.mjs` enforces changelog discipline;
    its body becomes the GitHub release notes).
 3. Confirm protected `master` is at the intended release SHA and its required
    checks are green. Commit, then create and push only the exact release tag:
 
    ```bash
-   git tag v2.2.0
-   git push origin v2.2.0
+   git tag v3.2.0
+   git push origin v3.2.0
    ```
 
 4. `.github/workflows/release.yml` then:
@@ -77,10 +88,22 @@ verified.
      client → `scripts/check-version.mjs` (tag must equal `package.json` version)
      → upload one digest-verified, 64 KiB-max public changelog artifact from
      runner-temporary storage (the package checkout stays clean) →
-     OIDC-authenticated `npm publish --provenance --access public`;
+     re-check exact registry state → build one exact tarball →
+     OIDC-authenticated `npm publish <tarball> --ignore-scripts --provenance
+     --access public --tag candidate` → require its exact SRI and npm provenance
+     metadata → verify registry signatures/attestations with pinned npm 11 →
+     prove every pre-existing dist-tag and `latest=3.0.1` stayed unchanged;
    - **release** — only after npm publish succeeds, download and verify that
-     bounded artifact, then create or exactly verify the GitHub Release. This
-     job has no npm tooling, token, OIDC permission, or publish command.
+     bounded artifact, then create or exactly verify a GitHub prerelease with
+     `--latest=false`. This job has no npm tooling, token, OIDC permission, or
+     publish command.
+
+Publication is candidate availability, not production promotion. Do not move
+npm `latest`, install the candidate into the active release pointer, or enable a
+resident service until provenance, isolated installation, independently pinned
+rollback, and live acceptance all pass. Promotion is a separate explicit
+maintainer action requiring fresh 2FA; it is intentionally absent from this
+workflow.
 
 If npm trusted publishing is missing or its repository/workflow binding is
 wrong, publication fails closed with an authentication error. Do not fall back
@@ -108,6 +131,16 @@ test -z "$(git status --porcelain --untracked-files=all)"
 expected_integrity="$(npm pack --dry-run --json --ignore-scripts | jq -r '.[0].integrity')"
 published_integrity="$(npm view "@ashlr/hub@${version}" dist.integrity)"
 test -n "$expected_integrity" && test "$expected_integrity" = "$published_integrity"
+test "$(npm view '@ashlr/hub' dist-tags.latest)" = "3.0.1"
+test "$(npm view '@ashlr/hub' dist-tags.candidate)" = "$version"
+
+verification_root="$(mktemp -d)"
+trap 'rm -rf "$verification_root"' EXIT
+cd "$verification_root"
+npm init --yes >/dev/null
+npm install --package-lock-only --ignore-scripts --no-audit --no-fund \
+  "@ashlr/hub@${version}"
+npm audit signatures
 ```
 
 Then use GitHub's **Re-run failed jobs** control, or the equivalent command:
@@ -146,7 +179,8 @@ If npm publication itself failed or its result is ambiguous:
    release_notes="$(mktemp)"
    trap 'rm -f "$release_notes"' EXIT
    node scripts/extract-changelog.mjs "$version" > "$release_notes"
-   gh release create "$release_tag" --verify-tag --title "$release_tag" --notes-file "$release_notes"
+   gh release create "$release_tag" --verify-tag --title "$release_tag" \
+     --notes-file "$release_notes" --prerelease --latest=false
    ```
 
 4. If the version is absent, rerun publish only when the log proves the publish
@@ -157,6 +191,11 @@ If npm publication itself failed or its result is ambiguous:
 
 There is no token/OTP fallback and no recovery path that republishes an existing
 version.
+
+If any post-publication integrity, provenance, signature, candidate-tag, or
+preserved-dist-tag check fails, treat the immutable 3.2.0 version as a release
+incident. Do not create the GitHub prerelease, do not install it, and do not
+promote it to `latest`.
 
 ## Local dry-run
 

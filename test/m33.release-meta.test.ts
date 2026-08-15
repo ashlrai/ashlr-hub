@@ -139,6 +139,7 @@ describe('release workflow', () => {
   }
   interface ReleaseWorkflow {
     on?: { push?: { tags?: string[] } };
+    env?: Record<string, string>;
     permissions?: Record<string, string>;
     jobs?: Record<string, WorkflowJob>;
   }
@@ -154,6 +155,11 @@ describe('release workflow', () => {
 
   it('is tag-triggered and reuses the exact native CI gate before publish', () => {
     expect(parsed.on?.push?.tags).toEqual(['v*']);
+    expect(parsed.env).toEqual({
+      RELEASE_VERSION: '3.2.0',
+      RELEASE_DIST_TAG: 'candidate',
+      BASELINE_LATEST_VERSION: '3.0.1',
+    });
     expect(parsed.permissions).toEqual({});
     expect(Object.keys(jobs)).toEqual(['verify', 'publish', 'release']);
     expect(verifyJob.uses).toBe('./.github/workflows/ci.yml');
@@ -194,8 +200,21 @@ describe('release workflow', () => {
     expect(publishRun).toContain('scripts/extract-changelog.mjs');
     expect(publishRun).toContain('> "$RUNNER_TEMP/release-notes.md"');
     expect(publishRun).not.toMatch(/>\s*release-notes\.md/);
-    expect(publishRun.match(/npm publish --provenance --access public/g)).toHaveLength(1);
-    expect(steps(publishJob).at(-1)?.run?.trim()).toBe('npm publish --provenance --access public');
+    expect(publishRun.match(/npm publish "\$RUNNER_TEMP\/\$filename"/g)).toHaveLength(1);
+    expect(publishRun).toContain('--ignore-scripts');
+    expect(publishRun).toContain('--provenance');
+    expect(publishRun).toContain('--access public');
+    expect(publishRun).toContain('--tag "$RELEASE_DIST_TAG"');
+    expect(publishRun).toContain('npm pack --json --ignore-scripts');
+    expect(publishRun).not.toMatch(/npm publish --provenance --access public(?:\s|$)/);
+
+    const postPublish = steps(publishJob).at(-1);
+    expect(postPublish?.name).toBe('Verify immutable candidate and preserved dist-tags');
+    expect(postPublish?.run).toContain('.dist.integrity == $integrity');
+    expect(postPublish?.run).toContain('https://slsa.dev/provenance/v1');
+    expect(postPublish?.run).toContain('npm audit signatures');
+    expect(postPublish?.run).toContain('npm-dist-tags-before.json');
+    expect(postPublish?.run).toContain('npm-dist-tags-after.json');
 
     const structuredWorkflow = JSON.stringify(parsed);
     expect(structuredWorkflow).not.toMatch(/NODE_AUTH_TOKEN|NPM_TOKEN|secrets\.NPM_TOKEN/);
@@ -236,7 +255,9 @@ describe('release workflow', () => {
     expect(releaseRun).toContain('entry_count');
     expect(releaseRun).toContain('notes_bytes');
     expect(releaseRun).toContain('gh release create "$tag" --verify-tag');
+    expect(releaseRun).toContain('--prerelease --latest=false');
     expect(releaseRun).toContain("'.tagName == $tag and .name == $tag");
+    expect(releaseRun).toContain('.isPrerelease == true');
     expect(releaseRun).toContain("jq -rj '.body'");
     expect(releaseRun).not.toContain("--jq '.body'");
     expect(releaseRun).toContain('compare/${GITHUB_SHA}...${tag}');
@@ -267,8 +288,12 @@ describe('release workflow', () => {
     expect(releaseDocs).toContain('git rev-list -n 1 "$release_tag"');
     expect(releaseDocs).toContain('node scripts/extract-changelog.mjs "$version" > "$release_notes"');
     expect(releaseDocs).toContain(
-      'gh release create "$release_tag" --verify-tag --title "$release_tag" --notes-file "$release_notes"',
+      'gh release create "$release_tag" --verify-tag --title "$release_tag"',
     );
+    expect(releaseDocs).toContain('--notes-file "$release_notes" --prerelease --latest=false');
+    expect(releaseDocs).toMatch(/npm `latest`\s+to equal `3\.0\.1`/);
+    expect(releaseDocs).toContain('npm audit signatures');
+    expect(releaseDocs).toContain('Promotion is a separate explicit');
     expect(releaseDocs).not.toContain('gh secret set NPM_TOKEN');
   });
 });

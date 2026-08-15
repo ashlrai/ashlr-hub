@@ -1,4 +1,4 @@
-# release.yml — tag-triggered npm publish + recoverable GitHub release (M33).
+# release.yml — tag-triggered npm candidate publish + recoverable prerelease (M33).
 #
 # Trigger: pushing a tag `v<X.Y.Z>`. Nothing publishes without that explicit
 # human action, and the verify job reuses the exact native CI matrix first.
@@ -6,6 +6,9 @@
 # npm trusted-publisher setup is required for @ashlr/hub and must bind this
 # public repository, release.yml, and the npm-release environment. No
 # long-lived npm write token is used.
+#
+# This workflow is intentionally pinned to the 3.2.0 candidate. It cannot move
+# npm `latest`; promotion is a separate maintainer action after acceptance.
 
 name: Release
 
@@ -14,6 +17,11 @@ on:
     tags: ["v*"]
 
 permissions: {}
+
+env:
+  RELEASE_VERSION: "3.2.0"
+  RELEASE_DIST_TAG: candidate
+  BASELINE_LATEST_VERSION: "3.0.1"
 
 jobs:
   verify:
@@ -120,6 +128,53 @@ jobs:
               exit 1
               ;;
           esac
+      - name: Admit exact candidate channel state
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          package_version="$(node -p "require('./package.json').version")"
+          if [[ "$package_version" != "$RELEASE_VERSION" || "$GITHUB_REF_NAME" != "v${RELEASE_VERSION}" ]]; then
+            echo "This release lane is pinned to v${RELEASE_VERSION}." >&2
+            exit 1
+          fi
+          packument="$RUNNER_TEMP/npm-packument-before.json"
+          curl --fail --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 \
+            --retry 2 --retry-all-errors \
+            --output "$packument" \
+            "https://registry.npmjs.org/@ashlr%2Fhub"
+          jq -e \
+            --arg latest "$BASELINE_LATEST_VERSION" \
+            --arg candidate "$RELEASE_DIST_TAG" \
+            --arg version "$RELEASE_VERSION" \
+            '.name == "@ashlr/hub" and
+             .["dist-tags"].latest == $latest and
+             (.["dist-tags"][$candidate] == null) and
+             (.versions[$version] == null)' \
+            "$packument" >/dev/null
+          jq -cS '.["dist-tags"]' "$packument" > "$RUNNER_TEMP/npm-dist-tags-before.json"
+      - name: Build exact candidate tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          npm run prepublishOnly
+          npm pack --json --ignore-scripts --pack-destination "$RUNNER_TEMP" \
+            > "$RUNNER_TEMP/npm-pack.json"
+          jq -e \
+            --arg version "$RELEASE_VERSION" \
+            'length == 1 and
+             .[0].name == "@ashlr/hub" and
+             .[0].version == $version and
+             (.[0].filename | type == "string" and test("^[A-Za-z0-9._-]+[.]tgz$")) and
+             (.[0].integrity | type == "string" and test("^sha512-[A-Za-z0-9+/]+={0,2}$"))' \
+            "$RUNNER_TEMP/npm-pack.json" >/dev/null
+          filename="$(jq -er '.[0].filename' "$RUNNER_TEMP/npm-pack.json")"
+          tarball="$RUNNER_TEMP/$filename"
+          test -f "$tarball"
+          test ! -L "$tarball"
+          jq -er '.[0].integrity' "$RUNNER_TEMP/npm-pack.json" > "$RUNNER_TEMP/npm-pack-integrity.txt"
       - name: Upload bounded GitHub release handoff
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -131,7 +186,70 @@ jobs:
           overwrite: true
           include-hidden-files: false
       - name: Publish to npm (provenance)
-        run: npm publish --provenance --access public
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          filename="$(jq -er '.[0].filename' "$RUNNER_TEMP/npm-pack.json")"
+          npm publish "$RUNNER_TEMP/$filename" \
+            --ignore-scripts \
+            --provenance \
+            --access public \
+            --tag "$RELEASE_DIST_TAG"
+      - name: Verify immutable candidate and preserved dist-tags
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          expected_integrity="$(cat "$RUNNER_TEMP/npm-pack-integrity.txt")"
+          version_metadata="$RUNNER_TEMP/npm-version-after.json"
+          packument="$RUNNER_TEMP/npm-packument-after.json"
+          observed=false
+          for attempt in {1..12}; do
+            version_status="$(curl --silent --show-error --location \
+              --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 \
+              --output "$version_metadata" --write-out '%{http_code}' \
+              "https://registry.npmjs.org/@ashlr%2Fhub/${RELEASE_VERSION}")"
+            packument_status="$(curl --silent --show-error --location \
+              --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 \
+              --output "$packument" --write-out '%{http_code}' \
+              "https://registry.npmjs.org/@ashlr%2Fhub")"
+            if [[ "$version_status" == "200" && "$packument_status" == "200" ]] &&
+              jq -e \
+                --arg version "$RELEASE_VERSION" \
+                --arg integrity "$expected_integrity" \
+                '.name == "@ashlr/hub" and
+                 .version == $version and
+                 .dist.integrity == $integrity and
+                 .dist.attestations.provenance.predicateType == "https://slsa.dev/provenance/v1" and
+                 (.dist.attestations.url | type == "string" and startswith("https://registry.npmjs.org/-/npm/v1/attestations/"))' \
+                "$version_metadata" >/dev/null &&
+              jq -e \
+                --arg latest "$BASELINE_LATEST_VERSION" \
+                --arg candidate "$RELEASE_DIST_TAG" \
+                --arg version "$RELEASE_VERSION" \
+                '.["dist-tags"].latest == $latest and .["dist-tags"][$candidate] == $version' \
+                "$packument" >/dev/null; then
+              observed=true
+              break
+            fi
+            sleep 5
+          done
+          if [[ "$observed" != "true" ]]; then
+            echo "Exact npm candidate publication could not be verified." >&2
+            exit 1
+          fi
+          jq -cS --arg candidate "$RELEASE_DIST_TAG" \
+            '.["dist-tags"] | del(.[$candidate])' "$packument" > "$RUNNER_TEMP/npm-dist-tags-after.json"
+          cmp --silent "$RUNNER_TEMP/npm-dist-tags-before.json" "$RUNNER_TEMP/npm-dist-tags-after.json"
+
+          verification_root="$RUNNER_TEMP/npm-signature-verification"
+          mkdir "$verification_root"
+          cd "$verification_root"
+          npm init --yes >/dev/null
+          npm install --package-lock-only --ignore-scripts --no-audit --no-fund \
+            "@ashlr/hub@${RELEASE_VERSION}"
+          npm audit signatures
 
   release:
     name: Create GitHub release
@@ -184,12 +302,13 @@ jobs:
             exit 1
           fi
           if [[ "$probe_status" == "404" ]]; then
-            gh release create "$tag" --verify-tag --title "$tag" --notes-file "$notes"
+            gh release create "$tag" --verify-tag --title "$tag" --notes-file "$notes" \
+              --prerelease --latest=false
           fi
 
           metadata="$(gh release view "$tag" --json tagName,name,isDraft,isPrerelease)"
           jq -e --arg tag "$tag" \
-            '.tagName == $tag and .name == $tag and .isDraft == false and .isPrerelease == false' \
+            '.tagName == $tag and .name == $tag and .isDraft == false and .isPrerelease == true' \
             <<<"$metadata" >/dev/null
           gh release view "$tag" --json body |
             jq -rj '.body' > "$RUNNER_TEMP/existing-release-notes.md"
