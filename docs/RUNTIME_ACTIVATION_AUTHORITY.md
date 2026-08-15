@@ -108,6 +108,23 @@ paths retain their existing mutation denials. The separate legacy `update`
 workflow retains its own guards and is not an activation authority; `--check`
 remains read-only.
 
+## Dormant activation-bound handoff observation
+
+The packaged runtime also contains the dormant
+[`CONTRACT-M515`](./contracts/CONTRACT-M515.md) proof-child observer. Given an
+exact M502 admission digest, it retains the admitted candidate package,
+dependency, launcher, and interpreter descriptors through one canonical
+EOF-framed acknowledgement, repeats M502 observation after the ACK, and proves
+the finite proof process group is dead before success. It persists only a
+metadata-only cooperative replay claim.
+
+M515 has no CLI, daemon, service, setup, or activation-transaction consumer. It
+does not execute `bin/ashlr`, the daemon argv, or the launchd descriptor; it
+does not call launchd or contact a provider/model. Every lifecycle, dispatch,
+effect, rollback, and activation permission remains false. Its host-local claim
+is not an external monotonic replay authority and its receipt is not resident
+runtime acknowledgement.
+
 Full resident production activation requires a future native launchd v2
 transaction. At minimum, that consumer must add exact candidate staging and
 Git/tag/build/tarball-to-runtime provenance, signed prior

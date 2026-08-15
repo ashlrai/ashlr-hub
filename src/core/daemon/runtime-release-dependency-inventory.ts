@@ -493,6 +493,7 @@ function rootPackageIsPortable(
     'docs/ELITE-AGENT-EFFICIENCY.md',
     'docs/MISSION-OS.md',
     'docs/RUNTIME_ACTIVATION_AUTHORITY.md',
+    'docs/contracts/CONTRACT-M515.md',
     'docs/contracts/CONTRACT-MISSION-RECEIPT-V1.md',
     'schema',
     'scripts/run-verify-command.mjs',

@@ -557,6 +557,7 @@ describe('M454 pinned upstream routing challenge', () => {
       'docs/MISSION-OS.md',
       'docs/ELITE-AGENT-EFFICIENCY.md',
       'docs/RUNTIME_ACTIVATION_AUTHORITY.md',
+      'docs/contracts/CONTRACT-M515.md',
       'docs/contracts/CONTRACT-MISSION-RECEIPT-V1.md',
     ]);
     expect(JSON.stringify(packageManifest.exports ?? {})).not.toContain('m454');
