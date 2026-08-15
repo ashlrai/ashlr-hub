@@ -191,6 +191,10 @@ describe('M468 desktop release workflow supply-chain policy', () => {
     expect(workflow).toContain('tagName: ${{ github.ref_name }}');
     expect(workflow).toContain('releaseName: "Ashlr Desktop ${{ github.ref_name }}"');
     expect(workflow).not.toContain('github.ref_name ||');
+    expect(workflow).toContain('workflow 301689703 must remain externally');
+    expect(workflow).toContain('disabled_manually');
+    expect(workflow).toContain('Tag protection for `refs/tags/desktop-v*` is necessary but not sufficient');
+    expect(workflow).toContain('historical commit whose workflow predates');
     expect(buildJob.strategy?.['fail-fast']).toBe(false);
     expect(Object.keys(parsedWorkflow.jobs ?? {})).toEqual(['build']);
     expect(buildMatrix).toEqual([
@@ -224,10 +228,11 @@ describe('M468 desktop release workflow supply-chain policy', () => {
     for (const doc of [desktopReadme, quickstart, desktopPointer]) {
       expect(doc).toContain('GHSA-wrw7-89jp-8q8g');
       expect(doc).toContain('RUSTSEC-2024-0429');
-      expect(doc).toMatch(/Linux[^\n]*(?:quarantined|quarantine)|Linux desktop[^\n]*(?:quarantined|quarantine)/i);
+      expect(doc).toMatch(/Linux/i);
+      expect(doc).toMatch(/quarantin/i);
     }
 
-    expect(desktopReadme).toContain('Linux | Not published');
+    expect(desktopReadme).toContain('Linux | Not produced while quarantined');
     expect(desktopReadme).not.toContain('Linux | `.deb`');
     expect(desktopReadme).not.toContain('builds all three platforms');
     expect(desktopReadme).toContain('Tauri v3');
@@ -237,20 +242,28 @@ describe('M468 desktop release workflow supply-chain policy', () => {
     expect(desktopReadme).toContain('independent security review');
     expect(desktopReadme).toContain('hostile `--config`');
     expect(desktopReadme).toContain('official workflow, default Tauri configuration, and fresh builds');
-    expect(desktopReadme).toContain('Manual\ndispatch is disabled');
-    expect(desktopReadme).toContain('historical branch\nor commit');
+    expect(desktopReadme).toContain('Public desktop releases and installers: none');
+    expect(desktopReadme).toContain('workflow 301689703 must remain externally `disabled_manually`');
+    expect(desktopReadme).toContain('workflow output is draft-only');
+    expect(desktopReadme).toContain('Tag protection is necessary but not sufficient');
+    expect(desktopReadme).toContain('historical commit whose workflow predates');
+    expect(desktopReadme).not.toContain('Download the latest installer');
 
-    expect(quickstart).toContain('Linux remains supported\n> through npm/CLI and the web dashboard');
+    expect(quickstart).toContain('Linux remains supported through npm/CLI and the web dashboard');
     expect(quickstart).toContain('hostile `--config`');
     expect(quickstart).toContain('fresh source builds');
-    expect(quickstart).toContain('tag-push-only official release workflow');
-    expect(quickstart).toContain('Manual dispatch is disabled');
+    expect(quickstart).toContain('No public desktop release or installer is currently available');
+    expect(quickstart).toContain('workflow 301689703 must remain\n> externally `disabled_manually`');
+    expect(quickstart).toContain('configured output is draft-only');
+    expect(quickstart).toContain('protection is necessary, not sufficient');
     expect(desktopPointer).toContain('The root Linux CLI, Bun sidecar,\nand web dashboard remain supported');
     expect(desktopPointer).toContain('Tauri v3/GTK4');
     expect(desktopPointer).toContain('glib >=0.20');
     expect(desktopPointer).toContain('hostile `--config`');
     expect(desktopPointer).toContain('fresh source builds');
-    expect(desktopPointer).toContain('only `desktop-v*` tag-push events');
-    expect(desktopPointer).toContain('Manual dispatch is disabled');
+    expect(desktopPointer).toContain('No public desktop release or installer is currently available');
+    expect(desktopPointer).toContain('workflow 301689703 must remain\nexternally `disabled_manually`');
+    expect(desktopPointer).toContain('configured output is draft-only');
+    expect(desktopPointer).toContain('protection is necessary but not sufficient');
   });
 });

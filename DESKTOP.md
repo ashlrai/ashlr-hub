@@ -5,7 +5,9 @@ the Ashlr Mission Control web UI.
 
 See `desktop/README.md` for full setup, build, and open-item details.
 
-Published desktop installers are currently limited to macOS and Windows.
+No public desktop release or installer is currently available. The supported
+installation path is the npm/CLI quickstart; the web dashboard remains
+available through that runtime.
 Fresh Linux Tauri source builds are quarantined and fail closed in
 `desktop/src-tauri/build.rs` because the Tauri v2 / GTK3 dependency chain
 resolves vulnerable `glib 0.18.5`
@@ -21,9 +23,12 @@ The quarantine is enforced for fresh source builds, the default Tauri
 configuration, and the official release workflow. A hostile `--config`
 override combined with an already-built/staged executable is outside
 source-build enforcement and must never be treated as admitted release output.
-While the quarantine is active, the official desktop release workflow admits
-only `desktop-v*` tag-push events. Manual dispatch is disabled so a historical
-branch or commit cannot create or append desktop release artifacts.
+While the quarantine is active, repository workflow 301689703 must remain
+externally `disabled_manually`. Its source trigger admits only `desktop-v*` tag
+pushes and its configured output is draft-only, but neither property authorizes
+execution. Ruleset 20660876 protects `refs/tags/desktop-v*` with a Mason-only
+bypass; that protection is necessary but not sufficient because a tag can
+select a historical commit whose workflow predates the quarantine.
 
 Quick start (requires Rust + `cargo install tauri-cli`):
 
