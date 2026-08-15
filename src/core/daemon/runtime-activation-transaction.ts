@@ -13,13 +13,19 @@ import { readStableRegularFile } from '../util/stable-file-read.js';
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const MAX_DESCRIPTOR_BYTES = 256 * 1_024;
 const CONSUMER_UNAVAILABLE = 'runtime-activation-consumer-unavailable' as const;
+const SAFE_LAUNCHD_PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
 
 export interface RuntimeActivationResult {
+  admissionDigest: string | null;
   activationId: string | null;
   activated: false;
   candidateRevision: string | null;
   phase: 'blocked';
   planDigest: string | null;
+  canonicalRequestSha256: string | null;
+  trustRootCanonicalSha256: string | null;
+  candidateLaunchReceiptSha256: string | null;
+  rollbackLaunchReceiptSha256: string | null;
   reason: string;
   rollbackRestored: false;
 }
@@ -27,17 +33,27 @@ export interface RuntimeActivationResult {
 function blocked(
   reason: string,
   plan?: {
+    admissionDigest: string;
     activationId: string;
     candidateRevision: string;
     planDigest: string;
+    canonicalRequestSha256: string;
+    trustRootCanonicalSha256: string;
+    candidateLaunchReceiptSha256: string;
+    rollbackLaunchReceiptSha256: string;
   },
 ): RuntimeActivationResult {
   return {
+    admissionDigest: plan?.admissionDigest ?? null,
     activationId: plan?.activationId ?? null,
     activated: false,
     candidateRevision: plan?.candidateRevision ?? null,
     phase: 'blocked',
     planDigest: plan?.planDigest ?? null,
+    canonicalRequestSha256: plan?.canonicalRequestSha256 ?? null,
+    trustRootCanonicalSha256: plan?.trustRootCanonicalSha256 ?? null,
+    candidateLaunchReceiptSha256: plan?.candidateLaunchReceiptSha256 ?? null,
+    rollbackLaunchReceiptSha256: plan?.rollbackLaunchReceiptSha256 ?? null,
     reason,
     rollbackRestored: false,
   };
@@ -113,6 +129,8 @@ function parseDescriptorBytes(descriptor: string): Record<string, unknown> {
 
 function validateClosedDescriptor(
   request: RuntimeActivationPreflightRequestV1,
+  bundle: RuntimeActivationPreflightRequestV1['candidate'],
+  binding: RuntimeActivationPreflightRequestV1['signedManifest']['payload']['candidate'],
   descriptor: string,
 ): void {
   const payload = request.signedManifest.payload;
@@ -147,16 +165,16 @@ function validateClosedDescriptor(
     throw new Error('candidate launchd descriptor KeepAlive contract is invalid');
   }
   const argumentsValue = parsed['ProgramArguments'];
-  const expectedArguments = [request.candidate.executablePath, ...request.candidate.argv];
+  const expectedArguments = [bundle.executablePath, ...bundle.argv];
   if (
     !Array.isArray(argumentsValue)
     || argumentsValue.some((entry) => typeof entry !== 'string')
     || JSON.stringify(argumentsValue) !== JSON.stringify(expectedArguments)
-    || request.candidate.executablePath !== request.candidate.declaredInterpreterPath
-    || request.candidate.argv[0] !== join(request.candidate.packageRoot, 'bin', 'ashlr')
-    || request.candidate.argv[1] !== 'daemon'
-    || request.candidate.argv[2] !== 'start'
-    || request.candidate.argv.some((argument) => ['--once', '--dry-run', '--drain'].includes(argument))
+    || bundle.executablePath !== bundle.declaredInterpreterPath
+    || bundle.argv[0] !== join(bundle.packageRoot, 'bin', 'ashlr')
+    || bundle.argv[1] !== 'daemon'
+    || bundle.argv[2] !== 'start'
+    || bundle.argv.some((argument) => ['--once', '--dry-run', '--drain'].includes(argument))
   ) {
     throw new Error('candidate launchd descriptor invocation contract is invalid');
   }
@@ -165,19 +183,14 @@ function validateClosedDescriptor(
   const expectedEnvironment = {
     ASHLR_ACTIVATION_CONFIG_SHA256: payload.execution.configSha256,
     ASHLR_ACTIVATION_ID: payload.planId,
-    ASHLR_ACTIVATION_MANIFEST_DIGEST: payload.candidate.manifestDigest,
-    ASHLR_ACTIVATION_RELEASE_REVISION: payload.candidate.expectedRevision,
-    ASHLR_ACTIVATION_RELEASE_TREE_SHA256: payload.candidate.runtimeTreeSha256,
+    ASHLR_ACTIVATION_MANIFEST_DIGEST: binding.manifestDigest,
+    ASHLR_ACTIVATION_RELEASE_REVISION: binding.expectedRevision,
+    ASHLR_ACTIVATION_RELEASE_TREE_SHA256: binding.runtimeTreeSha256,
     HOME: payload.execution.homePath,
   };
-  const allowed = [...Object.keys(expectedEnvironment), 'PATH'].sort();
   if (
-    !exactKeys(environment, allowed)
-    || typeof environment['PATH'] !== 'string'
-    || environment['PATH'].length < 1
-    || environment['PATH'].length > 16_384
-    || environment['PATH'].includes('\0')
-    || environment['PATH'].includes('\n')
+    !exactKeys(environment, [...Object.keys(expectedEnvironment), 'PATH'].sort())
+    || environment['PATH'] !== SAFE_LAUNCHD_PATH
   ) {
     throw new Error('candidate launchd descriptor environment is not exact and bounded');
   }
@@ -191,6 +204,7 @@ function validateClosedDescriptor(
 function validateMutationDisabledPlan(
   request: RuntimeActivationPreflightRequestV1,
   homePath: string,
+  descriptors: { candidate: string; rollback: string },
 ): void {
   const payload = request.signedManifest.payload;
   if (
@@ -222,18 +236,14 @@ function validateMutationDisabledPlan(
   )) {
     throw new Error('signed activation configuration binding mismatch');
   }
-  const descriptorRead = readStableRegularFile(request.candidate.serviceDescriptorPath, {
-    anchorPath: request.candidate.bundleRoot,
-    maxFileBytes: MAX_DESCRIPTOR_BYTES,
-    remainingBytes: MAX_DESCRIPTOR_BYTES,
-  });
-  if (!descriptorRead.ok || !sameDigest(
-    sha256(descriptorRead.text),
-    payload.candidate.serviceDescriptorSha256,
-  )) {
+  if (!sameDigest(sha256(descriptors.candidate), payload.candidate.serviceDescriptorSha256)) {
     throw new Error('candidate launchd descriptor binding mismatch');
   }
-  validateClosedDescriptor(request, descriptorRead.text);
+  if (!sameDigest(sha256(descriptors.rollback), payload.rollback.serviceDescriptorSha256)) {
+    throw new Error('rollback launchd descriptor binding mismatch');
+  }
+  validateClosedDescriptor(request, request.candidate, payload.candidate, descriptors.candidate);
+  validateClosedDescriptor(request, request.rollback, payload.rollback, descriptors.rollback);
 }
 
 function sha256(value: string | Buffer): string {
@@ -257,27 +267,44 @@ export function activateRuntimeRelease(input: {
   const account = accountBoundHome();
   if (!account.ok) return blocked(account.reason);
 
+  return activateRuntimeReleaseForHome(input, account.homePath);
+}
+
+function activateRuntimeReleaseForHome(
+  input: { authorize: string; confirm: string; requestPath: string },
+  homePath: string,
+): RuntimeActivationResult {
+
   let observed: ReturnType<typeof observeRuntimeActivationExecutionPlan>;
   try {
     observed = observeRuntimeActivationExecutionPlan({
       requestPath: input.requestPath,
-      homePath: account.homePath,
+      homePath,
     });
   } catch (error) {
     return blocked(error instanceof Error ? error.message : String(error));
   }
   const planDigest = observed.preflight.plan.planDigest!;
+  const admissionDigest = observed.preflight.plan.admissionDigest!;
   const payload = observed.request.signedManifest.payload;
   const plan = {
+    admissionDigest,
     activationId: payload.planId,
     candidateRevision: payload.candidate.expectedRevision,
     planDigest,
+    canonicalRequestSha256: observed.canonicalRequestSha256,
+    trustRootCanonicalSha256: observed.trustRootCanonicalSha256,
+    candidateLaunchReceiptSha256: observed.candidateLaunchReceiptSha256,
+    rollbackLaunchReceiptSha256: observed.rollbackLaunchReceiptSha256,
   };
-  if (!sameDigest(input.authorize, planDigest) || !sameDigest(input.confirm, planDigest)) {
-    return blocked('runtime activation requires two exact plan-digest confirmations', plan);
+  if (!sameDigest(input.authorize, admissionDigest) || !sameDigest(input.confirm, admissionDigest)) {
+    return blocked('runtime activation requires two exact admission-digest confirmations', plan);
   }
   try {
-    validateMutationDisabledPlan(observed.request, account.homePath);
+    validateMutationDisabledPlan(observed.request, homePath, {
+      candidate: observed.candidateServiceDescriptor,
+      rollback: observed.rollbackServiceDescriptor,
+    });
   } catch (error) {
     return blocked(error instanceof Error ? error.message : String(error), plan);
   }
@@ -290,4 +317,5 @@ export const runtimeActivationTransactionInternals = {
   parseDescriptorBytes,
   validateClosedDescriptor,
   validateMutationDisabledPlan,
+  testOnlyActivateRuntimeReleaseForHome: activateRuntimeReleaseForHome,
 };

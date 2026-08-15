@@ -77,7 +77,7 @@ const DAEMON_USAGE: Record<DaemonSubcommand, string> = {
   'activation-preflight':
     'Usage: ashlr daemon activation-preflight --request <absolute-canonical-plan-path> [--json]',
   activate:
-    'Usage: ashlr daemon activate --request <absolute-canonical-plan-path> --authorize <plan-sha256> --confirm <plan-sha256> [--json]',
+    'Usage: ashlr daemon activate --request <absolute-canonical-plan-path> --authorize <admission-sha256> --confirm <admission-sha256> [--json]',
   'recover-state':
     'Usage: ashlr daemon recover-state --dry-run --expected-sha256 <sha256> [--json]\n' +
     '   or: ashlr daemon recover-state --execute --plan-id <uuid> --plan-sha256 <sha256> --authorize <plan-sha256> [--json]',
@@ -854,15 +854,20 @@ async function cmdDaemonActivationPreflight(
     console.log('');
     console.log(col.bold('  runtime activation authority preflight'));
     console.log('  ' + col.bold('evidence:      ') +
-      (result.evidenceReady ? col.green('ready') : col.red('blocked')));
+      (result.preflightPassed ? col.green('passed (no authority)') : col.red('blocked')));
     console.log('  ' + col.bold('activation:    ') + col.yellow('withheld'));
     console.log('  ' + col.bold('plan id:       ') + col.dim(result.plan.planId ?? 'unavailable'));
     console.log('  ' + col.bold('plan SHA-256:  ') + col.dim(result.plan.planDigest ?? 'unavailable'));
+    console.log('  ' + col.bold('admission SHA: ') + col.dim(result.plan.admissionDigest ?? 'unavailable'));
     console.log('  ' + col.bold('policy epoch:  ') + col.dim(result.plan.policyEpoch === null
       ? 'unavailable'
       : String(result.plan.policyEpoch)));
-    console.log('  ' + col.bold('candidate:     ') + col.dim(result.releases.candidateRevision ?? 'unavailable'));
-    console.log('  ' + col.bold('rollback:      ') + col.dim(result.releases.rollbackRevision ?? 'unavailable'));
+    console.log('  ' + col.bold('candidate:     ') + col.dim(
+      result.releases.candidate.signedDeclarations.expectedRevision ?? 'unavailable',
+    ));
+    console.log('  ' + col.bold('rollback:      ') + col.dim(
+      result.releases.rollback.signedDeclarations.expectedRevision ?? 'unavailable',
+    ));
     for (const blocker of result.blockers) {
       console.log('  ' + col.red(blocker.code) + col.dim(` - ${blocker.detail}`));
     }
@@ -871,7 +876,7 @@ async function cmdDaemonActivationPreflight(
     console.log(col.dim(`  Remaining authority: ${result.authorityBlockers.join(', ')}`));
     console.log('');
   }
-  return result.evidenceReady ? 0 : 1;
+  return result.preflightPassed ? 0 : 1;
 }
 
 async function cmdDaemonActivate(flags: ActivationFlags): Promise<number> {
@@ -897,6 +902,9 @@ async function cmdDaemonActivate(flags: ActivationFlags): Promise<number> {
     console.log('  ' + col.bold('activation:   ') + col.dim(result.activationId ?? 'unavailable'));
     console.log('  ' + col.bold('candidate:    ') + col.dim(result.candidateRevision ?? 'unavailable'));
     console.log('  ' + col.bold('plan SHA-256: ') + col.dim(result.planDigest ?? 'unavailable'));
+    console.log('  ' + col.bold('admission SHA:') + ' ' + col.dim(result.admissionDigest ?? 'unavailable'));
+    console.log('  ' + col.bold('request SHA:  ') + col.dim(result.canonicalRequestSha256 ?? 'unavailable'));
+    console.log('  ' + col.bold('trust SHA:    ') + col.dim(result.trustRootCanonicalSha256 ?? 'unavailable'));
     console.log('  ' + col.bold('mutation:     ') + col.dim('not performed'));
     console.log('  ' + col.dim(result.reason));
     console.log('');

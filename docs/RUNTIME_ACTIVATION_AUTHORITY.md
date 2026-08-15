@@ -21,16 +21,20 @@ Every directory below the operator home must be a real, current-user-owned
 hard links, permissive modes, owner drift, ACL uncertainty, noncanonical JSON,
 and read-time identity changes fail closed.
 
-The trust-root file contains public Ed25519 keys only through the existing
-Runtime Release Evidence Trust Root V2 schema. It also fixes the minimum policy
-epoch and the closed activation-mode set. Private keys and credentials never
-belong in this directory, the repository, logs, or preflight output.
+The trust-root file contains two exact, disjoint public-key sets: dedicated
+activation-authority Ed25519 keys under the
+`ashlr:runtime-activation-authority-key:v1` domain, and release-evidence keys
+through the existing Runtime Release Evidence Trust Root V2 schema. A key ID
+cannot occur in both sets. The root also fixes the minimum policy epoch and the
+closed activation-mode set. Private keys and credentials never belong in this
+directory, the repository, logs, or preflight output.
 
 ## Signed activation manifest
 
 The canonical Ed25519-signed manifest binds both candidate and rollback to:
 
-- exact Git revision and tree declarations;
+- exact revision, Git-tree, release-tag, build-binding, and packaging
+  declarations;
 - unsigned release-manifest digest and signed evidence envelope identities;
 - package tarball SHA-256;
 - dependency inventory and immutable runtime-tree identities;
@@ -40,7 +44,8 @@ The canonical Ed25519-signed manifest binds both candidate and rollback to:
 - policy epoch, activation mode, issuance, expiry, and unique plan ID; and
 - a distinct independently packaged rollback release.
 
-The preflight composes M440 manifest verification, M441 signature verification,
+The preflight verifies the activation signature only with the distinct
+activation-authority key set. It composes M440 manifest verification, M441 release-evidence signature verification,
 M442 closed-byte launch revalidation, and M488 candidate/rollback pair
 verification. Tarballs and service descriptors are independently hashed from
 immutable, single-link files. Artifact paths must be absolute and canonical,
@@ -49,9 +54,14 @@ current-user-owned, non-writable, and free of symlink substitution; native ACL
 checks apply on Windows. Candidate and rollback must have distinct bundle paths,
 revisions, trees, manifests, tarballs, and runtime-tree identities.
 The signed plan also binds operation, platform, exact HOME, configuration,
-package version and tag, build, the prior plist and unloaded state, the release
-root and `current` pointer. The validity window is checked both before and after all artifact
-observations so a plan expiring mid-preflight cannot become ready.
+package version and tag declarations, build declaration, the prior plist and
+unloaded-state declarations, the release root and `current` pointer. The
+machine-readable result keeps these under `signedDeclarations`, separate from
+the bytes actually re-read under `observedEvidence`. In particular, this
+preflight does not prove Git object provenance, tag publication, build
+provenance, independent packaging, or tarball-to-runtime-tree equivalence. The
+validity window is checked before and after artifact observations, and the
+operator trust root is re-read and compared before admission completes.
 
 ## CLI
 
@@ -61,25 +71,34 @@ ashlr daemon activation-preflight \
   --json
 ```
 
-The command is read-only. `evidenceReady:true` means the signed inputs passed
-the observation contract; it does not mean activation is permitted. Every
-result keeps install, launch, start, deploy, rollback, and activation false.
+The command is read-only. `preflightPassed:true` means the signed declarations
+and directly observed byte identities passed this limited admission contract;
+it does not mean activation is permitted or production-ready. Every result
+keeps install, launch, start, deploy, rollback, and activation false. The
+domain-separated `admissionDigest` binds the canonical request, canonical
+operator trust root, signed plan, and time-independent candidate and rollback
+observation identities.
 
 ## Explicit activation
 
 ```bash
 ashlr daemon activate \
   --request ~/.ashlr/control/activation/plans/<plan-id>.json \
-  --authorize <plan-sha256> \
-  --confirm <plan-sha256>
+  --authorize <admission-sha256> \
+  --confirm <admission-sha256>
 ```
 
 The command derives HOME from the operating-system account database, rejects a
 mismatched `HOME` environment value, uses the actual host platform, requires
-two exact copies of the admitted plan digest, revalidates the signed
-candidate/rollback/configuration bindings, and parses already-read plist bytes
-through `plutil` stdin against a closed execution schema. It then returns the
-stable refusal `runtime-activation-consumer-unavailable`.
+two exact copies of the admitted admission digest, repeats complete request,
+trust-root, candidate, and rollback observation, and returns only the final
+verified request. It revalidates the signed candidate, rollback, and
+configuration bindings, and parses both already-captured plist byte strings
+through `plutil` stdin against a closed execution schema with fixed
+`PATH=/usr/bin:/bin:/usr/sbin:/sbin`. Raw launch-receipt digests are returned as
+diagnostic evidence but excluded from the stable admission digest because their
+completion timestamps change between observations. The command then returns
+the stable refusal `runtime-activation-consumer-unavailable`.
 
 It does not stage a release, invoke `launchctl`, change a plist or service,
 write an acknowledgement/replay/journal/dispatch record, or move `current`.
@@ -91,9 +110,9 @@ remains read-only.
 
 Full resident production activation requires a future native launchd v2
 transaction. At minimum, that consumer must add exact candidate staging and
-provenance, signed prior version/revision/plist/package plus loaded-and-disabled
-state observed from the native manager, an activation-specific signing root,
-trusted monotonic time, external monotonic compare-and-swap replay consumption,
+Git/tag/build/tarball-to-runtime provenance, signed prior
+version/revision/plist/package plus loaded-and-disabled state observed from the
+native manager, trusted monotonic time, external monotonic compare-and-swap replay consumption,
 a lifecycle lock and signed exact-keyed fsynced journal, live launchd
 PID/start/executable/runtime acknowledgement, separate release-bound dispatch
 authorization, pointer CAS, crash recovery at every phase, and settled-state
@@ -101,8 +120,10 @@ revalidation. It must restore the exact signed prior resident without auto-start
 Until those properties have implementation and adversarial evidence, this
 command is not resident-production-ready.
 
-The machine-readable preflight exposes each of these absent properties under
-`nativeAuthority`, where every field remains `false`. Signed manifest fields
+The machine-readable preflight exposes these absent properties under
+`nativeAuthority`. Only the separately scoped activation signing root can be
+true after trust-root validation; every mutation/runtime authority field remains
+false. Signed manifest fields
 such as `prior.serviceLoaded` and `prior.plistSha256` are declarations only;
 neither the preflight nor `activate` observes launchd or proves the current
 pointer, live PID, executable, acknowledgement, or rollback execution.

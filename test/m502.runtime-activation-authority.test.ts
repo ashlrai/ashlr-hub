@@ -20,7 +20,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   RUNTIME_ACTIVATION_AUTHORITY_TRUST_ROOT_DOMAIN_V1,
+  RUNTIME_ACTIVATION_AUTHORITY_KEY_DOMAIN_V1,
   RUNTIME_ACTIVATION_REQUEST_DOMAIN_V1,
+  observeRuntimeActivationExecutionPlan,
   preflightRuntimeActivationAuthority,
   runtimeActivationAuthorityInternals,
   runtimeActivationBuildBindingSha256,
@@ -30,6 +32,7 @@ import {
   signRuntimeActivationManifest,
   type RuntimeActivationArtifactBindingV1,
   type RuntimeActivationAuthorityTrustRootV1,
+  type RuntimeActivationAuthorityKeyV1,
   type RuntimeActivationBundleRequestV1,
   type RuntimeActivationManifestPayloadV1,
   type RuntimeActivationPreflightRequestV1,
@@ -93,10 +96,25 @@ function revision(character: string): string {
   return character.repeat(40);
 }
 
+function activationTrustKey(
+  publicKey: KeyObject,
+  validFrom = '2026-08-10T11:00:00.000Z',
+  validUntil = '2026-08-10T13:00:00.000Z',
+): RuntimeActivationAuthorityKeyV1 {
+  return {
+    algorithm: 'ed25519',
+    domain: RUNTIME_ACTIVATION_AUTHORITY_KEY_DOMAIN_V1,
+    keyId: runtimeReleaseEvidenceKeyId(publicKey)!,
+    publicKeySpki: publicKey.export({ format: 'der', type: 'spki' }).toString('base64url'),
+    validFrom,
+    validUntil,
+  };
+}
+
 function binding(seed: number, keyId: string): RuntimeActivationArtifactBindingV1 {
   const chars = '123456789abcdef';
   const at = (offset: number): string => chars[(seed + offset) % chars.length]!;
-  const buildInputs: Omit<RuntimeActivationArtifactBindingV1, 'buildSha256'> = {
+  const buildInputs: Omit<RuntimeActivationArtifactBindingV1, 'declarationBindingSha256'> = {
     dependencyInventoryDigest: digest(at(0)),
     envelopeCanonicalSha256: digest(at(1)),
     envelopeSha256: digest(at(2)),
@@ -117,7 +135,7 @@ function binding(seed: number, keyId: string): RuntimeActivationArtifactBindingV
     serviceInvocationDigest: digest(at(13)),
   };
   return {
-    buildSha256: runtimeActivationBuildBindingSha256(buildInputs),
+    declarationBindingSha256: runtimeActivationBuildBindingSha256(buildInputs),
     ...buildInputs,
   };
 }
@@ -305,7 +323,7 @@ function completeBundle(input: {
   }
   const parsed = parseUnsignedRuntimeReleaseManifest(built.canonicalJson);
   if (!parsed.ok) throw new Error(parsed.reason);
-  const buildInputs: Omit<RuntimeActivationArtifactBindingV1, 'buildSha256'> = {
+  const buildInputs: Omit<RuntimeActivationArtifactBindingV1, 'declarationBindingSha256'> = {
     dependencyInventoryDigest: parsed.manifest.dependencyInventory.inventoryDigest,
     envelopeCanonicalSha256,
     envelopeSha256: sha256(signed.canonicalJson),
@@ -327,7 +345,7 @@ function completeBundle(input: {
   };
   return {
     binding: {
-      buildSha256: runtimeActivationBuildBindingSha256(buildInputs),
+      declarationBindingSha256: runtimeActivationBuildBindingSha256(buildInputs),
       ...buildInputs,
     },
     manifestDigest: parsed.manifest.manifestDigest,
@@ -359,10 +377,11 @@ function fixture(options: { minimumPolicyEpoch?: number; policyEpoch?: number } 
   mkdirSync(paths.plansPath, { mode: 0o700 });
   const now = Date.parse('2026-08-10T12:00:00.000Z');
   const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  const releaseKeys = generateKeyPairSync('ed25519');
   const evidence = buildRuntimeReleaseEvidenceTrustRoot({
     keys: [
       {
-        publicKey,
+        publicKey: releaseKeys.publicKey,
         validFrom: '2026-08-10T11:00:00.000Z',
         validUntil: '2026-08-10T13:00:00.000Z',
       },
@@ -370,6 +389,7 @@ function fixture(options: { minimumPolicyEpoch?: number; policyEpoch?: number } 
   });
   if (!evidence.ok) throw new Error(evidence.reason);
   const trustRoot: RuntimeActivationAuthorityTrustRootV1 = {
+    activationKeys: [activationTrustKey(publicKey)],
     assurance: 'operator-custodied-public-trust-root',
     domain: RUNTIME_ACTIVATION_AUTHORITY_TRUST_ROOT_DOMAIN_V1,
     evidenceTrustRoot: JSON.parse(evidence.canonicalJson) as RuntimeActivationAuthorityTrustRootV1['evidenceTrustRoot'],
@@ -379,7 +399,7 @@ function fixture(options: { minimumPolicyEpoch?: number; policyEpoch?: number } 
   };
   writeFileSync(paths.trustRootPath, runtimeActivationTrustRootCanonicalJson(trustRoot), { mode: 0o600 });
   chmodSync(paths.trustRootPath, 0o600);
-  const keyId = runtimeReleaseEvidenceKeyId(publicKey)!;
+  const keyId = runtimeReleaseEvidenceKeyId(releaseKeys.publicKey)!;
   const payload: RuntimeActivationManifestPayloadV1 = {
     activationMode: 'resident-canary',
     candidate: binding(1, keyId),
@@ -415,6 +435,167 @@ function fixture(options: { minimumPolicyEpoch?: number; policyEpoch?: number } 
   };
 }
 
+function activationPlist(
+  request: RuntimeActivationPreflightRequestV1,
+  role: 'candidate' | 'rollback' = 'candidate',
+): string {
+  const payload = request.signedManifest.payload;
+  const binding = payload[role];
+  const bundle = request[role];
+  const env = {
+    ASHLR_ACTIVATION_CONFIG_SHA256: payload.execution.configSha256,
+    ASHLR_ACTIVATION_ID: payload.planId,
+    ASHLR_ACTIVATION_MANIFEST_DIGEST: binding.manifestDigest,
+    ASHLR_ACTIVATION_RELEASE_REVISION: binding.expectedRevision,
+    ASHLR_ACTIVATION_RELEASE_TREE_SHA256: binding.runtimeTreeSha256,
+    HOME: payload.execution.homePath,
+    PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
+  };
+  const argumentsXml = [bundle.executablePath, ...bundle.argv]
+    .map((argument) => `<string>${argument}</string>`)
+    .join('');
+  const environmentXml = Object.entries(env)
+    .map(([key, value]) => `<key>${key}</key><string>${value}</string>`)
+    .join('');
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>EnvironmentVariables</key><dict>${environmentXml}</dict>
+<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+<key>Label</key><string>ai.ashlr.daemon</string>
+<key>ProcessType</key><string>Background</string>
+<key>ProgramArguments</key><array>${argumentsXml}</array>
+<key>RunAtLoad</key><true/>
+<key>StandardErrorPath</key><string>${join(payload.execution.homePath, '.ashlr', 'daemon.launchd.err.log')}</string>
+<key>StandardOutPath</key><string>${join(payload.execution.homePath, '.ashlr', 'daemon.launchd.out.log')}</string>
+<key>ThrottleInterval</key><integer>10</integer>
+</dict></plist>
+`;
+}
+
+interface CompleteActivationFixture {
+  home: string;
+  now: number;
+  request: RuntimeActivationPreflightRequestV1;
+  requestPath: string;
+  trustRootPath: string;
+}
+
+function completeActivationFixture(): CompleteActivationFixture {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-activation-complete-')));
+  roots.push(home);
+  chmodSync(home, 0o700);
+  const paths = runtimeActivationAuthorityPaths(home);
+  mkdirSync(join(home, '.ashlr'), { mode: 0o700 });
+  mkdirSync(join(home, '.ashlr', 'control'), { mode: 0o700 });
+  mkdirSync(paths.rootPath, { mode: 0o700 });
+  mkdirSync(paths.plansPath, { mode: 0o700 });
+  const releasesRoot = join(home, '.local', 'share', 'ashlr', 'releases');
+  mkdirSync(releasesRoot, { recursive: true });
+  const releaseKeys = generateKeyPairSync('ed25519');
+  const activationKeys = generateKeyPairSync('ed25519');
+  const evidence = buildRuntimeReleaseEvidenceTrustRoot({
+    keys: [{
+      publicKey: releaseKeys.publicKey,
+      validFrom: '2026-08-10T11:00:00.000Z',
+      validUntil: '2026-08-10T13:00:00.000Z',
+    }],
+  });
+  if (!evidence.ok) throw new Error(evidence.reason);
+  const trustRoot: RuntimeActivationAuthorityTrustRootV1 = {
+    activationKeys: [activationTrustKey(activationKeys.publicKey)],
+    assurance: 'operator-custodied-public-trust-root',
+    domain: RUNTIME_ACTIVATION_AUTHORITY_TRUST_ROOT_DOMAIN_V1,
+    evidenceTrustRoot: JSON.parse(evidence.canonicalJson) as RuntimeActivationAuthorityTrustRootV1['evidenceTrustRoot'],
+    minimumPolicyEpoch: 7,
+    permittedActivationModes: ['resident-canary'],
+    schemaVersion: 1,
+  };
+  writeFileSync(paths.trustRootPath, runtimeActivationTrustRootCanonicalJson(trustRoot), { mode: 0o600 });
+  const releaseKeyId = runtimeReleaseEvidenceKeyId(releaseKeys.publicKey)!;
+  const rollbackRevision = revision('b');
+  const candidateRevision = revision('a');
+  const rollback = completeBundle({
+    parent: releasesRoot,
+    directoryName: rollbackRevision,
+    role: 'rollback',
+    revision: rollbackRevision,
+    tree: revision('c'),
+    marker: 'rollback',
+    privateKey: releaseKeys.privateKey,
+    keyId: releaseKeyId,
+    evidenceTrustRoot: evidence.canonicalJson,
+    rollbackTargetDigest: null,
+  });
+  const candidate = completeBundle({
+    parent: releasesRoot,
+    directoryName: candidateRevision,
+    role: 'candidate',
+    revision: candidateRevision,
+    tree: revision('d'),
+    marker: 'candidate',
+    privateKey: releaseKeys.privateKey,
+    keyId: releaseKeyId,
+    evidenceTrustRoot: evidence.canonicalJson,
+    rollbackTargetDigest: rollback.manifestDigest,
+  });
+  const config = '{}\n';
+  const configPath = join(home, '.ashlr', 'config.json');
+  writeFileSync(configPath, config, { mode: 0o600 });
+  const payload: RuntimeActivationManifestPayloadV1 = {
+    activationMode: 'resident-canary',
+    candidate: candidate.binding,
+    execution: {
+      ...execution(home),
+      configSha256: sha256(config),
+      prior: {
+        currentRevision: rollbackRevision,
+        plistSha256: digest('f'),
+        serviceLoaded: false,
+      },
+    },
+    expiresAt: '2026-08-10T12:10:00.000Z',
+    issuedAt: '2026-08-10T11:55:00.000Z',
+    planId: '123e4567-e89b-42d3-a456-426614174000',
+    policyEpoch: 7,
+    rollback: rollback.binding,
+  };
+  let signed = signRuntimeActivationManifest(payload, activationKeys.privateKey);
+  const request: RuntimeActivationPreflightRequestV1 = {
+    candidate: candidate.request,
+    domain: RUNTIME_ACTIVATION_REQUEST_DOMAIN_V1,
+    rollback: rollback.request,
+    schemaVersion: 1,
+    signedManifest: signed.manifest,
+  };
+  for (const role of ['candidate', 'rollback'] as const) {
+    const bundle = request[role];
+    chmodSync(bundle.bundleRoot, 0o700);
+    chmodSync(bundle.serviceDescriptorPath, 0o600);
+    const descriptor = activationPlist(request, role);
+    writeFileSync(bundle.serviceDescriptorPath, descriptor, { mode: 0o444 });
+    chmodSync(bundle.serviceDescriptorPath, 0o444);
+    payload[role].serviceDescriptorSha256 = sha256(descriptor);
+    const {
+      declarationBindingSha256: _declarationBindingSha256,
+      ...declarationInputs
+    } = payload[role];
+    payload[role].declarationBindingSha256 = runtimeActivationBuildBindingSha256(declarationInputs);
+    chmodSync(bundle.bundleRoot, 0o555);
+  }
+  signed = signRuntimeActivationManifest(payload, activationKeys.privateKey);
+  request.signedManifest = signed.manifest;
+  const requestPath = join(paths.plansPath, `${payload.planId}.json`);
+  writeFileSync(requestPath, runtimeActivationRequestCanonicalJson(request), { mode: 0o600 });
+  return {
+    home,
+    now: Date.parse('2026-08-10T12:00:00.000Z'),
+    request,
+    requestPath,
+    trustRootPath: paths.trustRootPath,
+  };
+}
+
 function assertNoMutationAuthority(result: ReturnType<typeof preflightRuntimeActivationAuthority>): void {
   expect(result).toMatchObject({
     activationPermitted: false,
@@ -428,7 +609,7 @@ function assertNoMutationAuthority(result: ReturnType<typeof preflightRuntimeAct
 }
 
 describe('M502 runtime activation authority', () => {
-  it('returns evidence-ready only for a fully bound candidate and independent rollback pair', () => {
+  it('returns preflight-passed-no-authority only for a fully bound candidate and rollback byte pair', () => {
     vi.useFakeTimers();
     vi.setSystemTime('2026-08-10T12:00:00.000Z');
     const home = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-activation-complete-')));
@@ -439,11 +620,12 @@ describe('M502 runtime activation authority', () => {
     mkdirSync(join(home, '.ashlr', 'control'), { mode: 0o700 });
     mkdirSync(paths.rootPath, { mode: 0o700 });
     mkdirSync(paths.plansPath, { mode: 0o700 });
-    const keys = generateKeyPairSync('ed25519');
+    const releaseKeys = generateKeyPairSync('ed25519');
+    const activationKeys = generateKeyPairSync('ed25519');
     const evidence = buildRuntimeReleaseEvidenceTrustRoot({
       keys: [
         {
-          publicKey: keys.publicKey,
+          publicKey: releaseKeys.publicKey,
           validFrom: '2026-08-10T11:00:00.000Z',
           validUntil: '2026-08-10T13:00:00.000Z',
         },
@@ -451,6 +633,7 @@ describe('M502 runtime activation authority', () => {
     });
     if (!evidence.ok) throw new Error(evidence.reason);
     const trustRoot: RuntimeActivationAuthorityTrustRootV1 = {
+      activationKeys: [activationTrustKey(activationKeys.publicKey)],
       assurance: 'operator-custodied-public-trust-root',
       domain: RUNTIME_ACTIVATION_AUTHORITY_TRUST_ROOT_DOMAIN_V1,
       evidenceTrustRoot: JSON.parse(
@@ -461,14 +644,14 @@ describe('M502 runtime activation authority', () => {
       schemaVersion: 1,
     };
     writeFileSync(paths.trustRootPath, runtimeActivationTrustRootCanonicalJson(trustRoot), { mode: 0o600 });
-    const keyId = runtimeReleaseEvidenceKeyId(keys.publicKey)!;
+    const keyId = runtimeReleaseEvidenceKeyId(releaseKeys.publicKey)!;
     const rollback = completeBundle({
       parent: home,
       role: 'rollback',
       revision: revision('b'),
       tree: revision('c'),
       marker: 'rollback',
-      privateKey: keys.privateKey,
+      privateKey: releaseKeys.privateKey,
       keyId,
       evidenceTrustRoot: evidence.canonicalJson,
       rollbackTargetDigest: null,
@@ -479,7 +662,7 @@ describe('M502 runtime activation authority', () => {
       revision: revision('a'),
       tree: revision('d'),
       marker: 'candidate',
-      privateKey: keys.privateKey,
+      privateKey: releaseKeys.privateKey,
       keyId,
       evidenceTrustRoot: evidence.canonicalJson,
       rollbackTargetDigest: rollback.manifestDigest,
@@ -494,7 +677,7 @@ describe('M502 runtime activation authority', () => {
       policyEpoch: 7,
       rollback: rollback.binding,
     };
-    const signed = signRuntimeActivationManifest(payload, keys.privateKey);
+    const signed = signRuntimeActivationManifest(payload, activationKeys.privateKey);
     const request: RuntimeActivationPreflightRequestV1 = {
       candidate: candidate.request,
       domain: RUNTIME_ACTIVATION_REQUEST_DOMAIN_V1,
@@ -512,11 +695,32 @@ describe('M502 runtime activation authority', () => {
       requestPath,
     });
     expect(result).toMatchObject({
-      verdict: 'evidence-ready',
-      evidenceReady: true,
+      verdict: 'preflight-passed-no-authority',
+      preflightPassed: true,
       blockers: [],
       trust: { operatorCustodyVerified: true, signatureVerified: true },
-      releases: { pairVerified: true },
+      releases: {
+        pair: {
+          observedByteEvidencePairVerified: true,
+          gitObjectProvenanceVerified: false,
+          releaseTagPublicationVerified: false,
+          buildProvenanceVerified: false,
+          independentPackagingVerified: false,
+          tarballToRuntimeTreeBindingVerified: false,
+        },
+      },
+      nativeAuthority: { activationSigningRootIndependent: true },
+    });
+    expect(result.plan.admissionDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(result.releases.candidate.signedDeclarations).toMatchObject({
+      expectedTree: revision('d'),
+      releaseTag: 'v3.2.0',
+      independentlyPackaged: true,
+    });
+    expect(result.releases.candidate.observedEvidence).toMatchObject({
+      packageTarballSha256: candidate.binding.packageTarballSha256,
+      runtimeTreeSha256: candidate.binding.runtimeTreeSha256,
+      serviceDescriptorSha256: candidate.binding.serviceDescriptorSha256,
     });
     assertNoMutationAuthority(result);
 
@@ -528,7 +732,7 @@ describe('M502 runtime activation authority', () => {
     });
     expect(expiredDuringObservation).toMatchObject({
       verdict: 'blocked',
-      evidenceReady: false,
+      preflightPassed: false,
       blockers: [{ code: 'signed-manifest-expired' }],
     });
     assertNoMutationAuthority(expiredDuringObservation);
@@ -550,6 +754,80 @@ describe('M502 runtime activation authority', () => {
       detail: 'package tarball or service descriptor digest mismatch',
     });
     assertNoMutationAuthority(replacedArtifact);
+  });
+
+  it('returns the exact final verified request and stable admission bindings', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime('2026-08-10T12:00:00.000Z');
+    const f = completeActivationFixture();
+    const observed = observeRuntimeActivationExecutionPlan({
+      homePath: f.home,
+      nowMs: f.now,
+      requestPath: f.requestPath,
+    });
+    expect(observed.request).toEqual(f.request);
+    expect(observed.canonicalRequestSha256).toBe(
+      sha256(runtimeActivationRequestCanonicalJson(f.request)),
+    );
+    expect(observed.trustRootCanonicalSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(observed.candidateLaunchReceiptSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(observed.rollbackLaunchReceiptSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(observed.preflight.plan.admissionDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(observed.preflight.plan.admissionDigest).not.toBe(observed.preflight.plan.planDigest);
+  });
+
+  it('rejects a valid outer-request path swap between verified snapshots', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime('2026-08-10T12:00:00.000Z');
+    const f = completeActivationFixture();
+    const candidate = f.request.candidate;
+    chmodSync(candidate.bundleRoot, 0o700);
+    const alternatePolicy = join(candidate.bundleRoot, 'policy-alternate.json');
+    writeFileSync(alternatePolicy, readFileSync(candidate.policyPath), { mode: 0o444 });
+    chmodSync(candidate.bundleRoot, 0o555);
+    expect(() => observeRuntimeActivationExecutionPlan({
+      homePath: f.home,
+      nowMs: f.now,
+      requestPath: f.requestPath,
+      testOnlyAfterFirstSnapshot: () => {
+        const changed = structuredClone(f.request);
+        changed.candidate.policyPath = alternatePolicy;
+        writeFileSync(f.requestPath, runtimeActivationRequestCanonicalJson(changed), { mode: 0o600 });
+      },
+    })).toThrow('runtime activation request changed during execution admission');
+  });
+
+  it('rejects operator trust-root rotation during one preflight scan', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime('2026-08-10T12:00:00.000Z');
+    const f = completeActivationFixture();
+    let clockReads = 0;
+    const result = preflightRuntimeActivationAuthority({
+      clock: () => {
+        clockReads += 1;
+        if (clockReads === 2) {
+          const current = JSON.parse(readFileSync(f.trustRootPath, 'utf8')) as RuntimeActivationAuthorityTrustRootV1;
+          const extra = generateKeyPairSync('ed25519');
+          current.activationKeys.push(activationTrustKey(extra.publicKey));
+          writeFileSync(
+            f.trustRootPath,
+            runtimeActivationTrustRootCanonicalJson(current),
+            { mode: 0o600 },
+          );
+        }
+        return f.now;
+      },
+      homePath: f.home,
+      requestPath: f.requestPath,
+    });
+    expect(result).toMatchObject({
+      verdict: 'blocked',
+      preflightPassed: false,
+    });
+    expect(result.blockers).toContainEqual({
+      code: 'operator-trust-root-changed',
+      detail: 'operator trust root changed during activation preflight',
+    });
   });
 
   it('verifies operator custody and signature before refusing absent immutable bundles', () => {
@@ -575,7 +853,6 @@ describe('M502 runtime activation authority', () => {
     ]);
     expect(result.authorityBlockers).toContain('durable-replay-consumption-required');
     expect(result.authorityBlockers).toEqual(expect.arrayContaining([
-      'independent-activation-signing-root-required',
       'trusted-monotonic-time-required',
       'external-monotonic-cas-required',
       'native-prior-state-attestation-required',
@@ -587,7 +864,7 @@ describe('M502 runtime activation authority', () => {
       'exact-rollback-revalidation-required',
     ]));
     expect(result.nativeAuthority).toEqual({
-      activationSigningRootIndependent: false,
+      activationSigningRootIndependent: true,
       trustedMonotonicTime: false,
       externalMonotonicCas: false,
       nativePriorStateObserved: false,
@@ -616,6 +893,38 @@ describe('M502 runtime activation authority', () => {
       expect.arrayContaining([expect.objectContaining({ code: 'signed-manifest-invalid' })]),
     );
     assertNoMutationAuthority(result);
+  });
+
+  it('rejects activation keys that overlap the release-evidence key set', () => {
+    const f = fixture();
+    const evidence = f.trustRoot.evidenceTrustRoot as {
+      keys: Array<{ keyId: string; publicKeySpki: string; validFrom: string; validUntil: string }>;
+    };
+    const releaseKey = evidence.keys[0]!;
+    f.trustRoot.activationKeys = [{
+      algorithm: 'ed25519',
+      domain: RUNTIME_ACTIVATION_AUTHORITY_KEY_DOMAIN_V1,
+      keyId: releaseKey.keyId,
+      publicKeySpki: releaseKey.publicKeySpki,
+      validFrom: releaseKey.validFrom,
+      validUntil: releaseKey.validUntil,
+    }];
+    writeFileSync(
+      runtimeActivationAuthorityPaths(f.home).trustRootPath,
+      runtimeActivationTrustRootCanonicalJson(f.trustRoot),
+      { mode: 0o600 },
+    );
+    const result = preflightRuntimeActivationAuthority({
+      homePath: f.home,
+      nowMs: f.now,
+      requestPath: f.requestPath,
+    });
+    expect(result).toMatchObject({
+      verdict: 'blocked',
+      preflightPassed: false,
+      blockers: [{ code: 'operator-trust-root-unavailable' }],
+      nativeAuthority: { activationSigningRootIndependent: false },
+    });
   });
 
   it('rejects expired and not-yet-valid manifests before artifact observation', () => {
@@ -794,8 +1103,13 @@ describe('M502 runtime activation authority', () => {
     const signed = signRuntimeActivationManifest(f.payload, f.privateKey);
     const mutated = structuredClone(signed.manifest);
     mutated.payload.rollback.expectedTree = revision('0');
-    const { buildSha256: _buildSha256, ...buildInputs } = mutated.payload.rollback;
-    mutated.payload.rollback.buildSha256 = runtimeActivationBuildBindingSha256(buildInputs);
+    const {
+      declarationBindingSha256: _declarationBindingSha256,
+      ...declarationInputs
+    } = mutated.payload.rollback;
+    mutated.payload.rollback.declarationBindingSha256 = runtimeActivationBuildBindingSha256(
+      declarationInputs,
+    );
     f.request.signedManifest = mutated;
     writeFileSync(f.requestPath, runtimeActivationRequestCanonicalJson(f.request), { mode: 0o600 });
     const result = preflightRuntimeActivationAuthority({
@@ -809,43 +1123,53 @@ describe('M502 runtime activation authority', () => {
 });
 
 describe('M504 mutation-disabled macOS activation consumer', () => {
-  function activationPlist(request: RuntimeActivationPreflightRequestV1): string {
-    const payload = request.signedManifest.payload;
-    const env = {
-      ASHLR_ACTIVATION_CONFIG_SHA256: payload.execution.configSha256,
-      ASHLR_ACTIVATION_ID: payload.planId,
-      ASHLR_ACTIVATION_MANIFEST_DIGEST: payload.candidate.manifestDigest,
-      ASHLR_ACTIVATION_RELEASE_REVISION: payload.candidate.expectedRevision,
-      ASHLR_ACTIVATION_RELEASE_TREE_SHA256: payload.candidate.runtimeTreeSha256,
-      HOME: payload.execution.homePath,
-      PATH: '/usr/bin:/bin',
-    };
-    const argumentsXml = [request.candidate.executablePath, ...request.candidate.argv]
-      .map((argument) => `<string>${argument}</string>`)
-      .join('');
-    const environmentXml = Object.entries(env)
-      .map(([key, value]) => `<key>${key}</key><string>${value}</string>`)
-      .join('');
-    return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>EnvironmentVariables</key><dict>${environmentXml}</dict>
-<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
-<key>Label</key><string>ai.ashlr.daemon</string>
-<key>ProcessType</key><string>Background</string>
-<key>ProgramArguments</key><array>${argumentsXml}</array>
-<key>RunAtLoad</key><true/>
-<key>StandardErrorPath</key><string>${join(payload.execution.homePath, '.ashlr', 'daemon.launchd.err.log')}</string>
-<key>StandardOutPath</key><string>${join(payload.execution.homePath, '.ashlr', 'daemon.launchd.out.log')}</string>
-<key>ThrottleInterval</key><integer>10</integer>
-</dict></plist>
-`;
-  }
+  it.skipIf(process.platform !== 'darwin')(
+    'takes a complete valid signed plan through exact admission to consumer-unavailable',
+    () => {
+      vi.useFakeTimers();
+      vi.setSystemTime('2026-08-10T12:00:00.000Z');
+      const f = completeActivationFixture();
+      const preflight = preflightRuntimeActivationAuthority({
+        homePath: f.home,
+        nowMs: f.now,
+        requestPath: f.requestPath,
+      });
+      expect(preflight).toMatchObject({
+        verdict: 'preflight-passed-no-authority',
+        preflightPassed: true,
+      });
+      const admissionDigest = preflight.plan.admissionDigest!;
+      const result = runtimeActivationTransactionInternals.testOnlyActivateRuntimeReleaseForHome({
+        authorize: admissionDigest,
+        confirm: admissionDigest,
+        requestPath: f.requestPath,
+      }, f.home);
+      expect(result).toMatchObject({
+        activated: false,
+        phase: 'blocked',
+        reason: 'runtime-activation-consumer-unavailable',
+        admissionDigest,
+        planDigest: preflight.plan.planDigest,
+        rollbackRestored: false,
+      });
+      expect(result.canonicalRequestSha256).toBe(
+        sha256(runtimeActivationRequestCanonicalJson(f.request)),
+      );
+      expect(result.trustRootCanonicalSha256).toMatch(/^[a-f0-9]{64}$/);
+      expect(result.candidateLaunchReceiptSha256).toMatch(/^[a-f0-9]{64}$/);
+      expect(result.rollbackLaunchReceiptSha256).toMatch(/^[a-f0-9]{64}$/);
+    },
+  );
 
   it.skipIf(process.platform !== 'darwin')('accepts only the exact closed launchd descriptor schema', () => {
     const f = fixture();
     const valid = activationPlist(f.request);
-    expect(() => runtimeActivationTransactionInternals.validateClosedDescriptor(f.request, valid)).not.toThrow();
+    expect(() => runtimeActivationTransactionInternals.validateClosedDescriptor(
+      f.request,
+      f.request.candidate,
+      f.request.signedManifest.payload.candidate,
+      valid,
+    )).not.toThrow();
 
     const poisoned = [
       valid.replace('<key>Label</key>', '<key>Program</key><string>/tmp/evil</string><key>Label</key>'),
@@ -860,7 +1184,12 @@ describe('M504 mutation-disabled macOS activation consumer', () => {
       ),
     ];
     for (const descriptor of poisoned) {
-      expect(() => runtimeActivationTransactionInternals.validateClosedDescriptor(f.request, descriptor)).toThrow();
+      expect(() => runtimeActivationTransactionInternals.validateClosedDescriptor(
+        f.request,
+        f.request.candidate,
+        f.request.signedManifest.payload.candidate,
+        descriptor,
+      )).toThrow();
     }
   });
 
@@ -874,7 +1203,12 @@ describe('M504 mutation-disabled macOS activation consumer', () => {
       mode: 0o600,
     });
     expect(runtimeActivationTransactionInternals.parseDescriptorBytes(captured)['Label']).toBe('ai.ashlr.daemon');
-    expect(() => runtimeActivationTransactionInternals.validateClosedDescriptor(f.request, captured)).not.toThrow();
+    expect(() => runtimeActivationTransactionInternals.validateClosedDescriptor(
+      f.request,
+      f.request.candidate,
+      f.request.signedManifest.payload.candidate,
+      captured,
+    )).not.toThrow();
   });
 
   it.skipIf(process.platform !== 'darwin')('rejects a poisoned HOME before reading the request', () => {
@@ -927,7 +1261,11 @@ describe('M504 mutation-disabled macOS activation consumer', () => {
     payload.execution.prior.serviceLoaded = false;
     poison(f.request);
 
-    expect(() => runtimeActivationTransactionInternals.validateMutationDisabledPlan(f.request, f.home)).toThrow(
+    expect(() => runtimeActivationTransactionInternals.validateMutationDisabledPlan(
+      f.request,
+      f.home,
+      { candidate: '', rollback: '' },
+    )).toThrow(
       'exact declared stopped prior release and plist',
     );
   });

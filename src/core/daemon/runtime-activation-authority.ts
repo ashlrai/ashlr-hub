@@ -39,6 +39,8 @@ import { readStableRegularFile } from '../util/stable-file-read.js';
 
 export const RUNTIME_ACTIVATION_AUTHORITY_TRUST_ROOT_DOMAIN_V1 =
   'ashlr:runtime-activation-authority-trust-root:v1' as const;
+export const RUNTIME_ACTIVATION_AUTHORITY_KEY_DOMAIN_V1 =
+  'ashlr:runtime-activation-authority-key:v1' as const;
 export const RUNTIME_ACTIVATION_MANIFEST_DOMAIN_V1 = 'ashlr:runtime-activation-manifest:v1' as const;
 export const RUNTIME_ACTIVATION_REQUEST_DOMAIN_V1 = 'ashlr:runtime-activation-preflight-request:v1' as const;
 export const RUNTIME_ACTIVATION_AUTHORITY_SCHEMA_VERSION = 1 as const;
@@ -48,6 +50,8 @@ const SIGNATURE_INPUT_DOMAIN = 'ashlr:runtime-activation-manifest-signature:v1\0
 const PLAN_DIGEST_DOMAIN = 'ashlr:runtime-activation-plan-digest:v1\0';
 const REPLAY_KEY_DOMAIN = 'ashlr:runtime-activation-replay-key:v1\0';
 const BUILD_BINDING_DOMAIN = 'ashlr:runtime-activation-build-binding:v1\0';
+const OBSERVATION_IDENTITY_DOMAIN = 'ashlr:runtime-activation-observation-identity:v1\0';
+const ADMISSION_DIGEST_DOMAIN = 'ashlr:runtime-activation-admission-digest:v1\0';
 const MAX_TRUST_ROOT_BYTES = 64 * 1_024;
 const MAX_REQUEST_BYTES = 256 * 1_024;
 const MAX_TEXT_ARTIFACT_BYTES = 2 * 1024 * 1024;
@@ -65,6 +69,7 @@ type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string
 export type RuntimeActivationModeV1 = 'resident-canary';
 
 export interface RuntimeActivationAuthorityTrustRootV1 {
+  activationKeys: RuntimeActivationAuthorityKeyV1[];
   assurance: 'operator-custodied-public-trust-root';
   domain: typeof RUNTIME_ACTIVATION_AUTHORITY_TRUST_ROOT_DOMAIN_V1;
   evidenceTrustRoot: JsonValue;
@@ -73,8 +78,17 @@ export interface RuntimeActivationAuthorityTrustRootV1 {
   schemaVersion: 1;
 }
 
+export interface RuntimeActivationAuthorityKeyV1 {
+  algorithm: 'ed25519';
+  domain: typeof RUNTIME_ACTIVATION_AUTHORITY_KEY_DOMAIN_V1;
+  keyId: string;
+  publicKeySpki: string;
+  validFrom: string;
+  validUntil: string;
+}
+
 export interface RuntimeActivationArtifactBindingV1 {
-  buildSha256: string;
+  declarationBindingSha256: string;
   dependencyInventoryDigest: string;
   envelopeCanonicalSha256: string;
   envelopeSha256: string;
@@ -96,7 +110,7 @@ export interface RuntimeActivationArtifactBindingV1 {
 }
 
 export function runtimeActivationBuildBindingSha256(
-  binding: Omit<RuntimeActivationArtifactBindingV1, 'buildSha256'>,
+  binding: Omit<RuntimeActivationArtifactBindingV1, 'declarationBindingSha256'>,
 ): string {
   return domainSha256(BUILD_BINDING_DOMAIN, canonicalizeDaemonActivationValue(binding));
 }
@@ -164,6 +178,7 @@ export interface RuntimeActivationPreflightRequestV1 {
 export type RuntimeActivationPreflightBlockerCode =
   | 'operator-trust-root-unavailable'
   | 'operator-trust-root-invalid'
+  | 'operator-trust-root-changed'
   | 'request-unavailable'
   | 'request-invalid'
   | 'signed-manifest-invalid'
@@ -180,11 +195,28 @@ export interface RuntimeActivationPreflightBlocker {
   detail: string;
 }
 
+export type RuntimeActivationAuthorityBlocker =
+  | 'explicit-activation-command-required'
+  | 'two-exact-digest-confirmations-required'
+  | 'independent-activation-signing-root-required'
+  | 'trusted-monotonic-time-required'
+  | 'durable-replay-consumption-required'
+  | 'external-monotonic-cas-required'
+  | 'macos-platform-required'
+  | 'protected-postmerge-evidence-required'
+  | 'native-prior-state-attestation-required'
+  | 'signed-fsynced-lifecycle-journal-required'
+  | 'launchd-runtime-ack-required'
+  | 'release-bound-dispatch-permit-required'
+  | 'atomic-current-pointer-cas-required'
+  | 'crash-recovery-required'
+  | 'exact-rollback-revalidation-required';
+
 export interface RuntimeActivationAuthorityPreflightResult {
   schemaVersion: 1;
   authority: 'read-only-preflight';
-  verdict: 'blocked' | 'evidence-ready';
-  evidenceReady: boolean;
+  verdict: 'blocked' | 'preflight-passed-no-authority';
+  preflightPassed: boolean;
   activationPermitted: false;
   deployPermitted: false;
   installPermitted: false;
@@ -193,6 +225,7 @@ export interface RuntimeActivationAuthorityPreflightResult {
   startPermitted: false;
   executionPerformed: false;
   plan: {
+    admissionDigest: string | null;
     planId: string | null;
     planDigest: string | null;
     replayKey: string | null;
@@ -207,32 +240,22 @@ export interface RuntimeActivationAuthorityPreflightResult {
     trustRootCanonicalSha256: string | null;
   };
   releases: {
-    candidateRevision: string | null;
-    candidateTree: string | null;
-    rollbackRevision: string | null;
-    rollbackTree: string | null;
-    pairVerified: boolean;
+    candidate: RuntimeActivationReleaseEvidence;
+    rollback: RuntimeActivationReleaseEvidence;
+    pair: {
+      signedDeclarationsDistinct: boolean;
+      observedByteEvidencePairVerified: boolean;
+      gitObjectProvenanceVerified: false;
+      releaseTagPublicationVerified: false;
+      buildProvenanceVerified: false;
+      independentPackagingVerified: false;
+      tarballToRuntimeTreeBindingVerified: false;
+    };
   };
   blockers: RuntimeActivationPreflightBlocker[];
-  authorityBlockers: readonly [
-    'explicit-activation-command-required',
-    'two-exact-digest-confirmations-required',
-    'independent-activation-signing-root-required',
-    'trusted-monotonic-time-required',
-    'durable-replay-consumption-required',
-    'external-monotonic-cas-required',
-    'macos-platform-required',
-    'protected-postmerge-evidence-required',
-    'native-prior-state-attestation-required',
-    'signed-fsynced-lifecycle-journal-required',
-    'launchd-runtime-ack-required',
-    'release-bound-dispatch-permit-required',
-    'atomic-current-pointer-cas-required',
-    'crash-recovery-required',
-    'exact-rollback-revalidation-required',
-  ];
+  authorityBlockers: RuntimeActivationAuthorityBlocker[];
   nativeAuthority: {
-    activationSigningRootIndependent: false;
+    activationSigningRootIndependent: boolean;
     trustedMonotonicTime: false;
     externalMonotonicCas: false;
     nativePriorStateObserved: false;
@@ -242,6 +265,25 @@ export interface RuntimeActivationAuthorityPreflightResult {
     currentPointerCasVerified: false;
     crashRecoveryVerified: false;
     rollbackExecutionVerified: false;
+  };
+}
+
+export interface RuntimeActivationReleaseEvidence {
+  signedDeclarations: {
+    expectedRevision: string | null;
+    expectedTree: string | null;
+    releaseTag: string | null;
+    declarationBindingSha256: string | null;
+    independentlyPackaged: true | null;
+  };
+  observedEvidence: {
+    envelopeCanonicalSha256: string | null;
+    manifestDigest: string | null;
+    packageTarballSha256: string | null;
+    runtimeTreeSha256: string | null;
+    serviceDescriptorSha256: string | null;
+    launchReceiptSha256: string | null;
+    stableObservationIdentitySha256: string | null;
   };
 }
 
@@ -340,7 +382,7 @@ function validateArtifactBinding(value: unknown): RuntimeActivationArtifactBindi
   if (
     !isRecord(value) ||
     !exactKeys(value, [
-      'buildSha256',
+      'declarationBindingSha256',
       'dependencyInventoryDigest',
       'envelopeCanonicalSha256',
       'envelopeSha256',
@@ -363,7 +405,7 @@ function validateArtifactBinding(value: unknown): RuntimeActivationArtifactBindi
   )
     throw new Error('activation artifact binding has invalid keys');
   for (const key of [
-    'buildSha256',
+    'declarationBindingSha256',
     'dependencyInventoryDigest',
     'envelopeCanonicalSha256',
     'envelopeSha256',
@@ -397,9 +439,12 @@ function validateArtifactBinding(value: unknown): RuntimeActivationArtifactBindi
     throw new Error('activation artifact identity is invalid');
   }
   const binding = value as unknown as RuntimeActivationArtifactBindingV1;
-  const { buildSha256: _buildSha256, ...buildInputs } = binding;
-  if (!equalDigest(binding.buildSha256, runtimeActivationBuildBindingSha256(buildInputs))) {
-    throw new Error('activation artifact build binding is invalid');
+  const { declarationBindingSha256: _declarationBindingSha256, ...declarationInputs } = binding;
+  if (!equalDigest(
+    binding.declarationBindingSha256,
+    runtimeActivationBuildBindingSha256(declarationInputs),
+  )) {
+    throw new Error('activation artifact declaration binding is invalid');
   }
   return binding;
 }
@@ -741,6 +786,7 @@ function loadOperatorTrustRoot(homePath: string): LoadedTrustRoot {
   if (
     !isRecord(parsed) ||
     !exactKeys(parsed, [
+      'activationKeys',
       'assurance',
       'domain',
       'evidenceTrustRoot',
@@ -751,6 +797,9 @@ function loadOperatorTrustRoot(homePath: string): LoadedTrustRoot {
     parsed['assurance'] !== 'operator-custodied-public-trust-root' ||
     parsed['domain'] !== RUNTIME_ACTIVATION_AUTHORITY_TRUST_ROOT_DOMAIN_V1 ||
     parsed['schemaVersion'] !== 1 ||
+    !Array.isArray(parsed['activationKeys']) ||
+    parsed['activationKeys'].length < 1 ||
+    parsed['activationKeys'].length > 8 ||
     !isPositiveSafeInteger(parsed['minimumPolicyEpoch']) ||
     !Array.isArray(parsed['permittedActivationModes']) ||
     parsed['permittedActivationModes'].length !== 1 ||
@@ -761,6 +810,48 @@ function loadOperatorTrustRoot(homePath: string): LoadedTrustRoot {
   const evidenceCanonicalJson = canonicalJson(parsed['evidenceTrustRoot']);
   const evidence = parseRuntimeReleaseEvidenceTrustRoot(evidenceCanonicalJson);
   if (!evidence.ok) throw new Error(`operator evidence trust root is invalid: ${evidence.reason}`);
+  const activationKeyIds = new Set<string>();
+  for (const value of parsed['activationKeys']) {
+    if (
+      !isRecord(value) ||
+      !exactKeys(value, [
+        'algorithm',
+        'domain',
+        'keyId',
+        'publicKeySpki',
+        'validFrom',
+        'validUntil',
+      ]) ||
+      value['algorithm'] !== 'ed25519' ||
+      value['domain'] !== RUNTIME_ACTIVATION_AUTHORITY_KEY_DOMAIN_V1 ||
+      typeof value['keyId'] !== 'string' ||
+      !KEY_ID_RE.test(value['keyId']) ||
+      !validTimestamp(value['validFrom']) ||
+      !validTimestamp(value['validUntil']) ||
+      Date.parse(value['validUntil']) <= Date.parse(value['validFrom'])
+    ) {
+      throw new Error('activation signing key schema is invalid');
+    }
+    const der = decodeBase64url(value['publicKeySpki']);
+    if (!der) throw new Error('activation signing key material is invalid');
+    let publicKey: KeyObject;
+    try {
+      publicKey = createPublicKey({ key: der, format: 'der', type: 'spki' });
+    } catch {
+      throw new Error('activation signing key material is invalid');
+    }
+    if (
+      publicKey.asymmetricKeyType !== 'ed25519' ||
+      runtimeReleaseEvidenceKeyId(publicKey) !== value['keyId'] ||
+      activationKeyIds.has(value['keyId'])
+    ) {
+      throw new Error('activation signing key identity is invalid');
+    }
+    activationKeyIds.add(value['keyId']);
+  }
+  if (evidence.trustRoot.keys.some((key) => activationKeyIds.has(key.keyId))) {
+    throw new Error('activation and release evidence signing keys must be distinct');
+  }
   const canonical = canonicalJson(parsed);
   return {
     root: parsed as unknown as RuntimeActivationAuthorityTrustRootV1,
@@ -891,9 +982,7 @@ function verifyActivationManifest(parsed: ParsedActivationManifest, trust: Loade
   const issuedAtMs = Date.parse(manifest.payload.issuedAt);
   const expiresAtMs = Date.parse(manifest.payload.expiresAt);
   if (nowMs < issuedAtMs || nowMs >= expiresAtMs) throw new Error('activation manifest is expired or not yet valid');
-  const evidence = parseRuntimeReleaseEvidenceTrustRoot(trust.evidenceTrustRootCanonicalJson);
-  if (!evidence.ok) throw new Error('operator evidence trust root is invalid');
-  const key = evidence.trustRoot.keys.find((entry) => entry.keyId === manifest.keyId);
+  const key = trust.root.activationKeys.find((entry) => entry.keyId === manifest.keyId);
   if (!key || nowMs < Date.parse(key.validFrom) || nowMs >= Date.parse(key.validUntil)) {
     throw new Error('activation signing key is unavailable or outside validity');
   }
@@ -910,7 +999,11 @@ function verifyActivationManifest(parsed: ParsedActivationManifest, trust: Loade
   }
 }
 
-function hashStableArtifact(path: string, rootPath: string): string {
+function readStableArtifact(
+  path: string,
+  rootPath: string,
+  captureMaxBytes = 0,
+): { sha256: string; bytes: Buffer | null } {
   const root = resolve(rootPath);
   const target = resolve(path);
   if (!contained(root, target)) throw new Error('artifact path escapes immutable bundle root');
@@ -937,12 +1030,16 @@ function hashStableArtifact(path: string, rootPath: string): string {
       throw new Error('artifact changed before read');
     }
     const hash = createHash('sha256');
+    const captured = captureMaxBytes > 0 && openedBefore.size <= BigInt(captureMaxBytes)
+      ? Buffer.alloc(Number(openedBefore.size))
+      : null;
     const chunk = Buffer.allocUnsafe(64 * 1024);
     let offset = 0;
     while (offset < Number(openedBefore.size)) {
       const count = readSync(fd, chunk, 0, Math.min(chunk.length, Number(openedBefore.size) - offset), offset);
       if (count <= 0) throw new Error('artifact changed during read');
       hash.update(chunk.subarray(0, count));
+      if (captured) chunk.copy(captured, offset, 0, count);
       offset += count;
     }
     if (readSync(fd, chunk, 0, 1, offset) !== 0) throw new Error('artifact grew during read');
@@ -957,10 +1054,14 @@ function hashStableArtifact(path: string, rootPath: string): string {
     ) {
       throw new Error('artifact changed during read');
     }
-    return hash.digest('hex');
+    return { sha256: hash.digest('hex'), bytes: captured };
   } finally {
     closeSync(fd);
   }
+}
+
+function hashStableArtifact(path: string, rootPath: string): string {
+  return readStableArtifact(path, rootPath).sha256;
 }
 
 function readBundleText(path: string, bundleRoot: string): string {
@@ -976,8 +1077,15 @@ function readBundleText(path: string, bundleRoot: string): string {
 
 interface ObservedBundle {
   envelope: string;
+  envelopeCanonicalSha256: string;
   manifest: string;
+  manifestDigest: string;
   launchReceiptSha256: string;
+  packageTarballSha256: string;
+  runtimeTreeSha256: string;
+  serviceDescriptor: string;
+  serviceDescriptorSha256: string;
+  stableObservationIdentitySha256: string;
 }
 
 function observeBundle(
@@ -994,9 +1102,17 @@ function observeBundle(
   const manifest = readBundleText(request.manifestPath, bundleRoot);
   const envelope = readBundleText(request.envelopePath, bundleRoot);
   const policy = readBundleText(request.policyPath, bundleRoot);
+  const serviceDescriptorArtifact = readStableArtifact(
+    request.serviceDescriptorPath,
+    bundleRoot,
+    MAX_TEXT_ARTIFACT_BYTES,
+  );
+  if (!serviceDescriptorArtifact.bytes) throw new Error('service descriptor exceeds capture limit');
+  const serviceDescriptor = serviceDescriptorArtifact.bytes.toString('utf8');
+  const packageTarballSha256 = hashStableArtifact(request.packageTarballPath, bundleRoot);
   if (
-    !equalDigest(hashStableArtifact(request.packageTarballPath, bundleRoot), binding.packageTarballSha256) ||
-    !equalDigest(hashStableArtifact(request.serviceDescriptorPath, bundleRoot), binding.serviceDescriptorSha256)
+    !equalDigest(packageTarballSha256, binding.packageTarballSha256) ||
+    !equalDigest(serviceDescriptorArtifact.sha256, binding.serviceDescriptorSha256)
   ) {
     throw new Error('package tarball or service descriptor digest mismatch');
   }
@@ -1045,10 +1161,32 @@ function observeBundle(
     trustRoot: trust.evidenceTrustRootCanonicalJson,
   } satisfies RuntimeReleaseLaunchObservationOptions);
   if (!observed.ok) throw new Error(`release launch observation failed: ${observed.reason}`);
+  const stableObservationIdentitySha256 = domainSha256(
+    OBSERVATION_IDENTITY_DOMAIN,
+    canonicalizeDaemonActivationValue({
+      envelopeCanonicalSha256: observed.receipt.release.envelopeCanonicalSha256,
+      expectedRevision: observed.receipt.expectedRevision,
+      interpreterRootSha256: observed.receipt.roots.interpreterRootSha256,
+      manifestDigest: observed.receipt.release.manifestDigest,
+      packageTarballSha256,
+      policyId: observed.receipt.policy.policyId,
+      runtimeTreeSha256: observed.receipt.stagedTreeIdentity,
+      serviceDescriptorSha256: serviceDescriptorArtifact.sha256,
+      serviceInvocationDigest: observed.receipt.invocation.serviceInvocationDigest,
+      trustRootCanonicalSha256: observed.receipt.release.trustRootCanonicalSha256,
+    }),
+  );
   return {
     envelope,
+    envelopeCanonicalSha256: observed.receipt.release.envelopeCanonicalSha256,
     manifest,
+    manifestDigest: observed.receipt.release.manifestDigest,
     launchReceiptSha256: sha256(observed.canonicalJson),
+    packageTarballSha256,
+    runtimeTreeSha256: observed.receipt.stagedTreeIdentity,
+    serviceDescriptor,
+    serviceDescriptorSha256: serviceDescriptorArtifact.sha256,
+    stableObservationIdentitySha256,
   };
 }
 
@@ -1057,7 +1195,7 @@ function emptyResult(blockers: RuntimeActivationPreflightBlocker[]): RuntimeActi
     schemaVersion: 1,
     authority: 'read-only-preflight',
     verdict: 'blocked',
-    evidenceReady: false,
+    preflightPassed: false,
     activationPermitted: false,
     deployPermitted: false,
     installPermitted: false,
@@ -1066,6 +1204,7 @@ function emptyResult(blockers: RuntimeActivationPreflightBlocker[]): RuntimeActi
     startPermitted: false,
     executionPerformed: false,
     plan: {
+      admissionDigest: null,
       planId: null,
       planDigest: null,
       replayKey: null,
@@ -1080,11 +1219,17 @@ function emptyResult(blockers: RuntimeActivationPreflightBlocker[]): RuntimeActi
       trustRootCanonicalSha256: null,
     },
     releases: {
-      candidateRevision: null,
-      candidateTree: null,
-      rollbackRevision: null,
-      rollbackTree: null,
-      pairVerified: false,
+      candidate: emptyReleaseEvidence(),
+      rollback: emptyReleaseEvidence(),
+      pair: {
+        signedDeclarationsDistinct: false,
+        observedByteEvidencePairVerified: false,
+        gitObjectProvenanceVerified: false,
+        releaseTagPublicationVerified: false,
+        buildProvenanceVerified: false,
+        independentPackagingVerified: false,
+        tarballToRuntimeTreeBindingVerified: false,
+      },
     },
     blockers,
     authorityBlockers: [
@@ -1119,6 +1264,27 @@ function emptyResult(blockers: RuntimeActivationPreflightBlocker[]): RuntimeActi
   };
 }
 
+function emptyReleaseEvidence(): RuntimeActivationReleaseEvidence {
+  return {
+    signedDeclarations: {
+      expectedRevision: null,
+      expectedTree: null,
+      releaseTag: null,
+      declarationBindingSha256: null,
+      independentlyPackaged: null,
+    },
+    observedEvidence: {
+      envelopeCanonicalSha256: null,
+      manifestDigest: null,
+      packageTarballSha256: null,
+      runtimeTreeSha256: null,
+      serviceDescriptorSha256: null,
+      launchReceiptSha256: null,
+      stableObservationIdentitySha256: null,
+    },
+  };
+}
+
 function activationManifestBlocker(error: unknown): RuntimeActivationPreflightBlocker {
   const detail = error instanceof Error ? error.message : 'signed activation manifest is invalid';
   const code: RuntimeActivationPreflightBlockerCode = detail.includes('expired')
@@ -1131,35 +1297,95 @@ function activationManifestBlocker(error: unknown): RuntimeActivationPreflightBl
   return { code, detail };
 }
 
-export function preflightRuntimeActivationAuthority(input: {
+interface RuntimeActivationPreflightInput {
   requestPath: string;
   homePath?: string;
   nowMs?: number;
   clock?: () => number;
-}): RuntimeActivationAuthorityPreflightResult {
+}
+
+interface RuntimeActivationPreflightSnapshot {
+  result: RuntimeActivationAuthorityPreflightResult;
+  request: RuntimeActivationPreflightRequestV1 | null;
+  canonicalRequestSha256: string | null;
+  trustRootCanonicalSha256: string | null;
+  candidate: ObservedBundle | null;
+  rollback: ObservedBundle | null;
+}
+
+function observedReleaseEvidence(
+  binding: RuntimeActivationArtifactBindingV1,
+  observed: ObservedBundle | null,
+): RuntimeActivationReleaseEvidence {
+  return {
+    signedDeclarations: {
+      expectedRevision: binding.expectedRevision,
+      expectedTree: binding.expectedTree,
+      releaseTag: binding.releaseTag,
+      declarationBindingSha256: binding.declarationBindingSha256,
+      independentlyPackaged: binding.independentlyPackaged,
+    },
+    observedEvidence: {
+      envelopeCanonicalSha256: observed?.envelopeCanonicalSha256 ?? null,
+      manifestDigest: observed?.manifestDigest ?? null,
+      packageTarballSha256: observed?.packageTarballSha256 ?? null,
+      runtimeTreeSha256: observed?.runtimeTreeSha256 ?? null,
+      serviceDescriptorSha256: observed?.serviceDescriptorSha256 ?? null,
+      launchReceiptSha256: observed?.launchReceiptSha256 ?? null,
+      stableObservationIdentitySha256: observed?.stableObservationIdentitySha256 ?? null,
+    },
+  };
+}
+
+function activationAdmissionDigest(input: {
+  canonicalRequestSha256: string;
+  trustRootCanonicalSha256: string;
+  planDigest: string;
+  candidateObservationIdentitySha256: string;
+  rollbackObservationIdentitySha256: string;
+}): string {
+  return domainSha256(
+    ADMISSION_DIGEST_DOMAIN,
+    canonicalizeDaemonActivationValue(input),
+  );
+}
+
+function preflightRuntimeActivationAuthoritySnapshot(
+  input: RuntimeActivationPreflightInput,
+): RuntimeActivationPreflightSnapshot {
   const blockers: RuntimeActivationPreflightBlocker[] = [];
   const clock = input.clock ?? (() => input.nowMs ?? Date.now());
   let homePath: string;
   try {
     homePath = realpathSync(resolve(input.homePath ?? homedir()));
   } catch {
-    return emptyResult([
-      {
+    return {
+      result: emptyResult([{
         code: 'operator-trust-root-unavailable',
         detail: 'operator home is unavailable',
-      },
-    ]);
+      }]),
+      request: null,
+      canonicalRequestSha256: null,
+      trustRootCanonicalSha256: null,
+      candidate: null,
+      rollback: null,
+    };
   }
   let trust: LoadedTrustRoot;
   try {
     trust = loadOperatorTrustRoot(homePath);
   } catch (error) {
-    return emptyResult([
-      {
+    return {
+      result: emptyResult([{
         code: 'operator-trust-root-unavailable',
         detail: error instanceof Error ? error.message : 'operator trust root is unavailable',
-      },
-    ]);
+      }]),
+      request: null,
+      canonicalRequestSha256: null,
+      trustRootCanonicalSha256: null,
+      candidate: null,
+      rollback: null,
+    };
   }
   let read: ReadRequestResult;
   try {
@@ -1173,7 +1399,18 @@ export function preflightRuntimeActivationAuthority(input: {
     ]);
     result.trust.operatorCustodyVerified = true;
     result.trust.trustRootCanonicalSha256 = trust.canonicalSha256;
-    return result;
+    result.nativeAuthority.activationSigningRootIndependent = true;
+    result.authorityBlockers = result.authorityBlockers.filter(
+      (blocker) => blocker !== 'independent-activation-signing-root-required',
+    );
+    return {
+      result,
+      request: null,
+      canonicalRequestSha256: null,
+      trustRootCanonicalSha256: trust.canonicalSha256,
+      candidate: null,
+      rollback: null,
+    };
   }
   const parsed = parseSignedRuntimeActivationManifest(canonicalJson(read.request.signedManifest));
   const payload = parsed.manifest.payload;
@@ -1254,12 +1491,37 @@ export function preflightRuntimeActivationAuthority(input: {
       blockers.push(activationManifestBlocker(error));
     }
   }
-  const evidenceReady = blockers.length === 0 && pairVerified;
-  return {
+  try {
+    const currentTrust = loadOperatorTrustRoot(homePath);
+    if (!equalDigest(currentTrust.canonicalSha256, trust.canonicalSha256)) {
+      blockers.push({
+        code: 'operator-trust-root-changed',
+        detail: 'operator trust root changed during activation preflight',
+      });
+    }
+  } catch (error) {
+    blockers.push({
+      code: 'operator-trust-root-changed',
+      detail: error instanceof Error ? error.message : 'operator trust root changed during activation preflight',
+    });
+  }
+  const canonicalRequestSha256 = sha256(runtimeActivationRequestCanonicalJson(read.request));
+  const admissionDigest = candidate && rollback
+    ? activationAdmissionDigest({
+      canonicalRequestSha256,
+      trustRootCanonicalSha256: trust.canonicalSha256,
+      planDigest: parsed.planDigest,
+      candidateObservationIdentitySha256: candidate.stableObservationIdentitySha256,
+      rollbackObservationIdentitySha256: rollback.stableObservationIdentitySha256,
+    })
+    : null;
+  const preflightPassed = blockers.length === 0 && pairVerified && admissionDigest !== null;
+  const result: RuntimeActivationAuthorityPreflightResult = {
     ...emptyResult(blockers),
-    verdict: evidenceReady ? 'evidence-ready' : 'blocked',
-    evidenceReady,
+    verdict: preflightPassed ? 'preflight-passed-no-authority' : 'blocked',
+    preflightPassed,
     plan: {
+      admissionDigest,
       planId: payload.planId,
       planDigest: parsed.planDigest,
       replayKey: parsed.replayKey,
@@ -1282,18 +1544,42 @@ export function preflightRuntimeActivationAuthority(input: {
       trustRootCanonicalSha256: trust.canonicalSha256,
     },
     releases: {
-      candidateRevision: payload.candidate.expectedRevision,
-      candidateTree: payload.candidate.expectedTree,
-      rollbackRevision: payload.rollback.expectedRevision,
-      rollbackTree: payload.rollback.expectedTree,
-      pairVerified,
+      candidate: observedReleaseEvidence(payload.candidate, candidate),
+      rollback: observedReleaseEvidence(payload.rollback, rollback),
+      pair: {
+        signedDeclarationsDistinct: distinct,
+        observedByteEvidencePairVerified: pairVerified,
+        gitObjectProvenanceVerified: false,
+        releaseTagPublicationVerified: false,
+        buildProvenanceVerified: false,
+        independentPackagingVerified: false,
+        tarballToRuntimeTreeBindingVerified: false,
+      },
     },
   };
+  result.nativeAuthority.activationSigningRootIndependent = true;
+  result.authorityBlockers = result.authorityBlockers.filter(
+    (blocker) => blocker !== 'independent-activation-signing-root-required',
+  );
+  return {
+    result,
+    request: structuredClone(read.request),
+    canonicalRequestSha256,
+    trustRootCanonicalSha256: trust.canonicalSha256,
+    candidate,
+    rollback,
+  };
+}
+
+export function preflightRuntimeActivationAuthority(
+  input: RuntimeActivationPreflightInput,
+): RuntimeActivationAuthorityPreflightResult {
+  return preflightRuntimeActivationAuthoritySnapshot(input).result;
 }
 
 /**
  * Re-observe the private request around a complete preflight and return only an
- * exact, unchanged, evidence-ready plan. Mutation consumers must still apply
+ * exact, unchanged, preflight-passed plan. Mutation consumers must still apply
  * their own platform, host, replay, and transactional authority checks.
  */
 export function observeRuntimeActivationExecutionPlan(input: {
@@ -1301,31 +1587,50 @@ export function observeRuntimeActivationExecutionPlan(input: {
   homePath?: string;
   nowMs?: number;
   clock?: () => number;
+  /** Test-only race injection; production callers never pass this hook. */
+  testOnlyAfterFirstSnapshot?: () => void;
 }): {
   preflight: RuntimeActivationAuthorityPreflightResult;
   request: RuntimeActivationPreflightRequestV1;
   canonicalRequestSha256: string;
+  trustRootCanonicalSha256: string;
+  candidateLaunchReceiptSha256: string;
+  rollbackLaunchReceiptSha256: string;
+  candidateServiceDescriptor: string;
+  rollbackServiceDescriptor: string;
 } {
-  const first = preflightRuntimeActivationAuthority(input);
-  if (!first.evidenceReady || !first.plan.planDigest) {
-    throw new Error(`runtime activation evidence is blocked: ${first.blockers.map((entry) => entry.code).join(', ')}`);
+  const first = preflightRuntimeActivationAuthoritySnapshot(input);
+  if (!first.result.preflightPassed || !first.result.plan.admissionDigest) {
+    throw new Error(
+      `runtime activation preflight is blocked: ${first.result.blockers.map((entry) => entry.code).join(', ')}`,
+    );
   }
-  const homePath = realpathSync(resolve(input.homePath ?? homedir()));
-  const observed = readRequest(input.requestPath, homePath);
-  const canonicalRequest = runtimeActivationRequestCanonicalJson(observed.request);
-  const parsed = parseSignedRuntimeActivationManifest(canonicalJson(observed.request.signedManifest));
-  const second = preflightRuntimeActivationAuthority(input);
+  input.testOnlyAfterFirstSnapshot?.();
+  const final = preflightRuntimeActivationAuthoritySnapshot(input);
   if (
-    !second.evidenceReady ||
-    second.plan.planDigest !== first.plan.planDigest ||
-    parsed.planDigest !== first.plan.planDigest
+    !final.result.preflightPassed ||
+    !final.request ||
+    !final.canonicalRequestSha256 ||
+    !final.trustRootCanonicalSha256 ||
+    !final.candidate ||
+    !final.rollback ||
+    final.result.plan.admissionDigest !== first.result.plan.admissionDigest ||
+    final.canonicalRequestSha256 !== first.canonicalRequestSha256 ||
+    final.trustRootCanonicalSha256 !== first.trustRootCanonicalSha256 ||
+    final.candidate.stableObservationIdentitySha256 !== first.candidate?.stableObservationIdentitySha256 ||
+    final.rollback.stableObservationIdentitySha256 !== first.rollback?.stableObservationIdentitySha256
   ) {
     throw new Error('runtime activation request changed during execution admission');
   }
   return {
-    preflight: second,
-    request: structuredClone(observed.request),
-    canonicalRequestSha256: sha256(canonicalRequest),
+    preflight: final.result,
+    request: structuredClone(final.request),
+    canonicalRequestSha256: final.canonicalRequestSha256,
+    trustRootCanonicalSha256: final.trustRootCanonicalSha256,
+    candidateLaunchReceiptSha256: final.candidate.launchReceiptSha256,
+    rollbackLaunchReceiptSha256: final.rollback.launchReceiptSha256,
+    candidateServiceDescriptor: final.candidate.serviceDescriptor,
+    rollbackServiceDescriptor: final.rollback.serviceDescriptor,
   };
 }
 
