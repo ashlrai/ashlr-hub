@@ -42,6 +42,9 @@ import {
   runtimeActivationTransactionInternals,
 } from '../src/core/daemon/runtime-activation-transaction.js';
 import {
+  observeRuntimeActivationLaunchHandoffForVerificationOnly,
+} from '../src/core/daemon/runtime-activation-launch-handoff.js';
+import {
   buildRuntimeReleaseEvidenceTrustRoot,
   runtimeReleaseEvidenceKeyId,
   signRuntimeReleaseEvidenceEnvelope,
@@ -221,6 +224,7 @@ function completeBundle(input: {
   evidenceTrustRoot: string;
   rollbackTargetDigest: string | null;
   directoryName?: string;
+  executableInterpreter?: boolean;
 }): CompleteBundle {
   const bundleRoot = join(input.parent, input.directoryName ?? `${input.role}-bundle`);
   const packageRoot = join(bundleRoot, input.revision);
@@ -264,7 +268,14 @@ function completeBundle(input: {
   if (!inventory.ok) throw new Error(inventory.reason);
   writeText(join(packageRoot, ...RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH.split('/')), inventory.canonicalJson);
   const interpreterPath = join(bundleRoot, 'node');
-  writeText(interpreterPath, `fixture node ${input.marker}\n`, 0o755);
+  const quotedNode = `'${process.execPath.replaceAll("'", "'\\''")}'`;
+  writeText(
+    interpreterPath,
+    input.executableInterpreter
+      ? `#!/bin/sh\nexec ${quotedNode} "$@"\n`
+      : `fixture node ${input.marker}\n`,
+    0o755,
+  );
   const built = buildUnsignedRuntimeReleaseManifest({
     declaredInterpreterPath: interpreterPath,
     declaredInterpreterVersion: 'v24.0.0',
@@ -481,7 +492,7 @@ interface CompleteActivationFixture {
   trustRootPath: string;
 }
 
-function completeActivationFixture(): CompleteActivationFixture {
+function completeActivationFixture(executableCandidate = false): CompleteActivationFixture {
   const home = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-activation-complete-')));
   roots.push(home);
   chmodSync(home, 0o700);
@@ -538,6 +549,7 @@ function completeActivationFixture(): CompleteActivationFixture {
     keyId: releaseKeyId,
     evidenceTrustRoot: evidence.canonicalJson,
     rollbackTargetDigest: rollback.manifestDigest,
+    executableInterpreter: executableCandidate,
   });
   const config = '{}\n';
   const configPath = join(home, '.ashlr', 'config.json');
@@ -774,6 +786,39 @@ describe('M502 runtime activation authority', () => {
     expect(observed.rollbackLaunchReceiptSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(observed.preflight.plan.admissionDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(observed.preflight.plan.admissionDigest).not.toBe(observed.preflight.plan.planDigest);
+  });
+
+  it('feeds a genuine exact M502 admission through the dormant bounded handoff', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime('2026-08-10T12:00:00.000Z');
+    const f = completeActivationFixture(true);
+    const admitted = observeRuntimeActivationExecutionPlan({
+      homePath: f.home,
+      nowMs: f.now,
+      requestPath: f.requestPath,
+    });
+    const result = await observeRuntimeActivationLaunchHandoffForVerificationOnly(
+      {
+        expectedAdmissionDigest: admitted.preflight.plan.admissionDigest!,
+        requestPath: f.requestPath,
+      },
+      {
+        homePath: f.home,
+        nowMs: f.now,
+        platform: 'darwin',
+      },
+    );
+    if (!result.ok) {
+      throw new Error(result.reason);
+    }
+    expect(result.receipt.bindings.admissionDigest).toBe(admitted.preflight.plan.admissionDigest);
+    expect(result.receipt.proofChild).toMatchObject({
+      acknowledged: true,
+      directChildCloseObserved: true,
+      processGroupDeathObserved: true,
+      terminated: true,
+    });
+    expect(Object.values(result.authority).every((value) => value === false)).toBe(true);
   });
 
   it('rejects a valid outer-request path swap between verified snapshots', () => {
@@ -1280,9 +1325,13 @@ describe('M504 mutation-disabled macOS activation consumer', () => {
     expect(source).toContain('userInfo().homedir');
     expect(source).not.toMatch(/activateRuntimeRelease\([^)]*(homePath|platform|effects|clock)/s);
     expect(source).not.toContain('export function acknowledgeRuntimeActivationBootstrap');
+    expect(source).not.toContain('runtime-activation-launch-handoff');
     expect(source).not.toMatch(/\b(?:writeFile|rename|symlink|unlink|mkdir|launchctl)\w*\b/);
     expect(readFileSync(join(process.cwd(), 'src/cli/daemon.ts'), 'utf8')).not.toContain(
       'acknowledgeRuntimeActivationBootstrap',
+    );
+    expect(readFileSync(join(process.cwd(), 'src/cli/daemon.ts'), 'utf8')).not.toContain(
+      'runtime-activation-launch-handoff',
     );
     expect(runtimeActivationTransactionInternals.CONSUMER_UNAVAILABLE).toBe(
       'runtime-activation-consumer-unavailable',
