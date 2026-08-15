@@ -121,6 +121,7 @@ interface ProofChildAcknowledgementV1 {
 
 export interface RuntimeActivationLaunchHandoffVerificationHooks {
   afterAcknowledgement?: () => void;
+  afterDescriptorOpened?: (label: DescriptorLabel) => void;
   afterDescriptorsPinned?: () => void;
   afterInitialObservation?: () => void;
   afterProofChildSpawn?: (pid: number) => void;
@@ -363,17 +364,11 @@ function pinDescriptor(
   label: DescriptorLabel,
   path: string,
   kind: PinnedDescriptor['kind'],
+  hooks: RuntimeActivationLaunchHandoffVerificationHooks | undefined,
 ): PinnedDescriptor {
   const canonical = resolve(path);
-  if (!isAbsolute(path) || realpathSync(canonical) !== canonical) {
+  if (!isAbsolute(path) || canonical !== path) {
     throw new Error(`runtime activation handoff ${label} path is not canonical`);
-  }
-  const before = lstatSync(canonical, { bigint: true });
-  if (before.isSymbolicLink() || (kind === 'file' ? !before.isFile() : !before.isDirectory())) {
-    throw new Error(`runtime activation handoff ${label} has the wrong type`);
-  }
-  if (kind === 'file' && before.nlink !== 1n) {
-    throw new Error(`runtime activation handoff ${label} has multiple hard links`);
   }
   const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
   const directory = kind === 'directory' && typeof fsConstants.O_DIRECTORY === 'number'
@@ -382,8 +377,21 @@ function pinDescriptor(
   const fd = openSync(canonical, fsConstants.O_RDONLY | noFollow | directory);
   try {
     const opened = fstatSync(fd, { bigint: true });
-    if ((kind === 'file' ? !opened.isFile() : !opened.isDirectory()) ||
-      canonicalJson(descriptorIdentity(before)) !== canonicalJson(descriptorIdentity(opened))) {
+    hooks?.afterDescriptorOpened?.(label);
+    const named = lstatSync(canonical, { bigint: true });
+    if (named.isSymbolicLink() ||
+      (kind === 'file'
+        ? !opened.isFile() || !named.isFile()
+        : !opened.isDirectory() || !named.isDirectory())) {
+      throw new Error(`runtime activation handoff ${label} has the wrong type`);
+    }
+    if (kind === 'file' && (opened.nlink !== 1n || named.nlink !== 1n)) {
+      throw new Error(`runtime activation handoff ${label} has multiple hard links`);
+    }
+    if (realpathSync(canonical) !== canonical) {
+      throw new Error(`runtime activation handoff ${label} path is not canonical`);
+    }
+    if (!sameDescriptorIdentity(descriptorIdentity(opened), descriptorIdentity(named))) {
       throw new Error(`runtime activation handoff ${label} changed before descriptor pin`);
     }
     return { fd, identity: descriptorIdentity(opened), kind, label, path: canonical };
@@ -395,14 +403,17 @@ function pinDescriptor(
 
 type RuntimeActivationExecutionPlan = ReturnType<typeof observeRuntimeActivationExecutionPlan>;
 
-function pinLaunchDescriptors(plan: RuntimeActivationExecutionPlan): PinnedDescriptor[] {
+function pinLaunchDescriptors(
+  plan: RuntimeActivationExecutionPlan,
+  hooks: RuntimeActivationLaunchHandoffVerificationHooks | undefined,
+): PinnedDescriptor[] {
   const candidate = plan.request.candidate;
   const pinned: PinnedDescriptor[] = [];
   try {
-    pinned.push(pinDescriptor('packageRoot', candidate.packageRoot, 'directory'));
-    pinned.push(pinDescriptor('dependencyRoot', candidate.dependencyRoot, 'directory'));
-    pinned.push(pinDescriptor('launcher', candidate.argv[0]!, 'file'));
-    pinned.push(pinDescriptor('interpreter', candidate.declaredInterpreterPath, 'file'));
+    pinned.push(pinDescriptor('packageRoot', candidate.packageRoot, 'directory', hooks));
+    pinned.push(pinDescriptor('dependencyRoot', candidate.dependencyRoot, 'directory', hooks));
+    pinned.push(pinDescriptor('launcher', candidate.argv[0]!, 'file', hooks));
+    pinned.push(pinDescriptor('interpreter', candidate.declaredInterpreterPath, 'file', hooks));
     return pinned;
   } catch (error) {
     closePinned(pinned);
@@ -938,7 +949,7 @@ async function observeRuntimeActivationLaunchHandoffInternal(
   try {
     const initial = observeExactActivationPlan(options, homePath, hooks);
     hooks?.afterInitialObservation?.();
-    descriptors = pinLaunchDescriptors(initial);
+    descriptors = pinLaunchDescriptors(initial, hooks);
     hooks?.afterDescriptorsPinned?.();
     const pinned = observeExactActivationPlan(options, homePath, hooks);
     const bindings = observationBindings(pinned);

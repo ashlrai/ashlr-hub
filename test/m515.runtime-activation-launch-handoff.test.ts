@@ -8,6 +8,7 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -294,6 +295,48 @@ describe('M515 activation-bound launch handoff', () => {
       claimDisposition: 'not-attempted',
       reason: 'runtime activation handoff named identity changed before claim',
     });
+  });
+
+  it('rejects a symlinked launcher before recording a claim or spawning a child', async () => {
+    const f = fixture();
+    installObservation(f.plan);
+    const prior = `${f.launcher}.prior`;
+    renameSync(f.launcher, prior);
+    symlinkSync(prior, f.launcher);
+    const spawned = vi.fn();
+    const result = await observeRuntimeActivationLaunchHandoffForVerificationOnly(
+      f.options,
+      { ...verificationHooks(f.home), afterProofChildSpawn: spawned },
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      claimDisposition: 'not-attempted',
+    });
+    expect(spawned).not.toHaveBeenCalled();
+    expect(existsSync(join(f.activationRoot, 'handoff-claims-v1'))).toBe(false);
+  });
+
+  it('rejects a named launcher swap after open before recording a claim', async () => {
+    const f = fixture();
+    installObservation(f.plan);
+    const prior = `${f.launcher}.prior`;
+    const result = await observeRuntimeActivationLaunchHandoffForVerificationOnly(
+      f.options,
+      {
+        ...verificationHooks(f.home),
+        afterDescriptorOpened: (label) => {
+          if (label !== 'launcher') return;
+          renameSync(f.launcher, prior);
+          write(f.launcher, '#!/bin/sh\nexit 92\n', 0o500);
+        },
+      },
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      claimDisposition: 'not-attempted',
+      reason: 'runtime activation handoff launcher changed before descriptor pin',
+    });
+    expect(existsSync(join(f.activationRoot, 'handoff-claims-v1'))).toBe(false);
   });
 
   it.each([
