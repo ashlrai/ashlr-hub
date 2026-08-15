@@ -55,19 +55,19 @@ describe('M479 npm release workflow supply-chain admission', () => {
     );
   });
 
-  it('checks out the exact tag target without retaining write credentials', () => {
+  it('checks out the immutable event SHA without retaining write credentials', () => {
     expect(checkout).toEqual({
       name: 'Checkout the immutable tag target',
       uses: 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
       with: {
         'fetch-depth': 0,
         'persist-credentials': false,
-        ref: '${{ github.ref }}',
+        ref: '${{ github.sha }}',
       },
     });
   });
 
-  it('fails closed unless the peeled tag commit is in protected master history', () => {
+  it('fails closed unless the exact event commit is in protected master history', () => {
     expect(admission.name).toBe('Admit only commits from protected master history');
     expect(admission.shell).toBe('bash');
     expect(admission.env).toEqual({ GH_TOKEN: '${{ github.token }}' });
@@ -75,13 +75,12 @@ describe('M479 npm release workflow supply-chain admission', () => {
 
     const run = String(admission.run);
     expect(run).toContain('set -euo pipefail');
-    expect(run).toContain('git rev-parse --verify "${GITHUB_REF}^{commit}"');
     expect(run).toContain('git rev-parse --verify "HEAD^{commit}"');
-    expect(run).toContain('[[ "$tag_commit" != "$head_commit" ]]');
+    expect(run).toContain('"$head_commit" != "$GITHUB_SHA"');
     expect(run).toContain('gh api --fail "repos/${GITHUB_REPOSITORY}/branches/master"');
     expect(run).toContain("jq -r '.protected // false'");
     expect(run).toContain("jq -r '.commit.sha // empty'");
-    expect(run).toContain('"repos/${GITHUB_REPOSITORY}/compare/${tag_commit}...${master_commit}"');
+    expect(run).toContain('"repos/${GITHUB_REPOSITORY}/compare/${GITHUB_SHA}...${master_commit}"');
     expect(run).toContain('[[ "$comparison" != "ahead" && "$comparison" != "identical" ]]');
     expect(run.match(/\bexit 1\b/g)).toHaveLength(3);
   });
@@ -139,6 +138,11 @@ describe('M479 npm release workflow supply-chain admission', () => {
     );
     expect(workflowText).not.toContain('npm install --package-lock-only');
     expect(workflowText).toContain('test "$installed_version" = "$RELEASE_VERSION"');
+    expect(workflowText).toContain('dist/build-identity.json');
+    expect(workflowText).toContain('.revision == $revision');
+    expect(workflowText).toContain('.dirty == false');
+    expect(workflowText).toContain('.object.type == "commit"');
+    expect(workflowText).toContain('.object.sha == $sha');
     expect(workflowText).toContain('npm-dist-tags-before.json');
     expect(workflowText).toContain('npm-dist-tags-after.json');
     expect(workflowText).toContain('gh release create "$tag"');

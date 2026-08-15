@@ -191,7 +191,7 @@ describe('release workflow', () => {
     expect(checkout?.with).toMatchObject({
       'fetch-depth': 0,
       'persist-credentials': false,
-      ref: '${{ github.ref }}',
+      ref: '${{ github.sha }}',
     });
     const setupNode = action(publishJob, 'actions/setup-node@');
     expect(setupNode?.uses).toBe('actions/setup-node@820762786026740c76f36085b0efc47a31fe5020');
@@ -213,6 +213,10 @@ describe('release workflow', () => {
     expect(publishRun).toContain('--access public');
     expect(publishRun).toContain('--tag "$RELEASE_DIST_TAG"');
     expect(publishRun).toContain('npm pack --json --ignore-scripts');
+    expect(publishRun).toContain('dist/build-identity.json');
+    expect(publishRun).toContain('.revision == $revision');
+    expect(publishRun).toContain('.dirty == false');
+    expect(publishRun).toContain('test -z "$(git status --porcelain --untracked-files=normal)"');
     expect(publishRun).not.toMatch(/npm publish --provenance --access public(?:\s|$)/);
 
     const postPublish = steps(publishJob).at(-1);
@@ -245,6 +249,10 @@ describe('release workflow', () => {
       step.name === 'Publish to npm (provenance)');
     expect(candidateAdmissionIndex).toBe(handoffIndex + 1);
     expect(publishIndex).toBe(candidateAdmissionIndex + 1);
+    const candidateAdmission = steps(publishJob)[candidateAdmissionIndex];
+    expect(candidateAdmission?.env).toEqual({ GH_TOKEN: '${{ github.token }}' });
+    expect(candidateAdmission?.run).toContain('.object.type == "commit"');
+    expect(candidateAdmission?.run).toContain('.object.sha == $sha');
 
     const structuredWorkflow = JSON.stringify(parsed);
     expect(structuredWorkflow).not.toMatch(/NODE_AUTH_TOKEN|NPM_TOKEN|secrets\.NPM_TOKEN/);
@@ -403,6 +411,43 @@ describe('release workflow', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a rewritten or annotated remote tag immediately before publish',
+    () => {
+      const admission = steps(publishJob).find((step) =>
+        step.name === 'Admit exact candidate channel state immediately before publish');
+      const run = admission?.run ?? '';
+      const start = run.indexOf('tag_ref_json=');
+      expect(start).toBeGreaterThan(-1);
+      const remoteTagGate = run.slice(start);
+      const eventSha = '1'.repeat(40);
+      const script = `
+        set -euo pipefail
+        gh() {
+          printf '{"ref":"%s","object":{"type":"%s","sha":"%s"}}\\n' \\
+            "$GITHUB_REF" "$MOCK_TAG_TYPE" "$MOCK_TAG_SHA"
+        }
+        ${remoteTagGate}
+      `;
+      const execute = (tagSha: string, tagType: string) => execFileSync('/bin/bash', ['-c', script], {
+        env: {
+          ...process.env,
+          GITHUB_REPOSITORY: 'ashlrai/ashlr-hub',
+          GITHUB_REF: 'refs/tags/v3.2.0',
+          GITHUB_REF_NAME: 'v3.2.0',
+          GITHUB_SHA: eventSha,
+          MOCK_TAG_SHA: tagSha,
+          MOCK_TAG_TYPE: tagType,
+        },
+        stdio: 'pipe',
+      });
+
+      expect(() => execute(eventSha, 'commit')).not.toThrow();
+      expect(() => execute('2'.repeat(40), 'commit')).toThrow();
+      expect(() => execute(eventSha, 'tag')).toThrow();
+    },
+  );
 });
 
 describe('exact npm release provenance', () => {

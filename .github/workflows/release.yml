@@ -48,7 +48,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: ${{ github.ref }}
+          ref: ${{ github.sha }}
       - name: Admit only commits from protected master history
         shell: bash
         env:
@@ -56,10 +56,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          tag_commit="$(git rev-parse --verify "${GITHUB_REF}^{commit}")"
           head_commit="$(git rev-parse --verify "HEAD^{commit}")"
-          if [[ "$tag_commit" != "$head_commit" ]]; then
-            echo "Release tag target does not match the checked-out commit." >&2
+          if [[ "$GITHUB_REF_TYPE" != "tag" || ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ||
+                "$head_commit" != "$GITHUB_SHA" ]]; then
+            echo "Release checkout does not match the exact tag event commit." >&2
             exit 1
           fi
 
@@ -72,7 +72,7 @@ jobs:
           fi
 
           comparison="$(gh api --fail \
-            "repos/${GITHUB_REPOSITORY}/compare/${tag_commit}...${master_commit}" \
+            "repos/${GITHUB_REPOSITORY}/compare/${GITHUB_SHA}...${master_commit}" \
             --jq '.status')"
           if [[ "$comparison" != "ahead" && "$comparison" != "identical" ]]; then
             echo "Release tag target is not in protected master history." >&2
@@ -138,6 +138,16 @@ jobs:
           set -euo pipefail
 
           npm run prepublishOnly
+          jq -e \
+            --arg version "$RELEASE_VERSION" \
+            --arg revision "$GITHUB_SHA" \
+            '.schemaVersion == 1 and
+             .packageVersion == $version and
+             .revision == $revision and
+             .dirty == false and
+             .provenance == "git"' \
+            dist/build-identity.json >/dev/null
+          test -z "$(git status --porcelain --untracked-files=normal)"
           npm pack --json --ignore-scripts --pack-destination "$RUNNER_TEMP" \
             > "$RUNNER_TEMP/npm-pack.json"
           jq -e \
@@ -165,6 +175,8 @@ jobs:
           include-hidden-files: false
       - name: Admit exact candidate channel state immediately before publish
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
@@ -189,6 +201,14 @@ jobs:
              (.versions[$version] == null)' \
             "$packument" >/dev/null
           jq -cS '.["dist-tags"]' "$packument" > "$RUNNER_TEMP/npm-dist-tags-before.json"
+
+          tag_ref_json="$(gh api --fail \
+            "repos/${GITHUB_REPOSITORY}/git/ref/tags/${GITHUB_REF_NAME}")"
+          jq -e \
+            --arg ref "$GITHUB_REF" \
+            --arg sha "$GITHUB_SHA" \
+            '.ref == $ref and .object.type == "commit" and .object.sha == $sha' \
+            <<<"$tag_ref_json" >/dev/null
       - name: Publish to npm (provenance)
         shell: bash
         run: |

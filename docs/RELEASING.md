@@ -74,13 +74,17 @@ admission immediately before `npm publish`. npm dist-tags do not offer a
 compare-and-swap operation, so this shrinks but cannot eliminate a race with an
 independent npm maintainer mutating tags outside GitHub Actions. Any unexpected
 post-publication tag state is an incident and blocks the GitHub prerelease.
+The release policy accepts only a lightweight tag whose current GitHub ref still
+resolves directly to the event commit; annotated tags, tag rewrites, and deleted
+tags fail closed.
 
 1. Confirm `version` in `package.json` is exactly `3.2.0`.
 2. Make sure `CHANGELOG.md` has a `## [3.2.0]` section — the release FAILS
    without one (`scripts/extract-changelog.mjs` enforces changelog discipline;
    its body becomes the GitHub release notes).
 3. Confirm protected `master` is at the intended release SHA and its required
-   checks are green. Commit, then create and push only the exact release tag:
+   checks are green. Commit, then create and push only the exact lightweight
+   release tag (do not force, move, delete, or recreate it):
 
    ```bash
    git tag v3.2.0
@@ -90,11 +94,14 @@ post-publication tag state is an incident and blocks the GitHub prerelease.
 4. `.github/workflows/release.yml` then:
    - **verify** — full CI gate (typecheck / lint / build / test);
    - **publish** — wait for explicit `npm-release` approval → verify
-     protected-master ancestry → install the pinned npm 11 trusted-publishing
+     the exact immutable event SHA is in protected-master history → install the
+     pinned npm 11 trusted-publishing
      client → `scripts/check-version.mjs` (tag must equal `package.json` version)
-     → build one exact tarball → upload one digest-verified, 64 KiB-max
+     → require the build identity to name that SHA and a clean checkout →
+     build one exact tarball → upload one digest-verified, 64 KiB-max
      public changelog artifact from runner-temporary storage (the package
-     checkout stays clean) → re-check exact registry state immediately before
+     checkout stays clean) → re-check exact registry state and require the live
+     lightweight GitHub tag still resolves to the event SHA immediately before
      publication →
      OIDC-authenticated `npm publish <tarball> --ignore-scripts --provenance
      --access public --tag candidate` → require its exact SRI and npm provenance
