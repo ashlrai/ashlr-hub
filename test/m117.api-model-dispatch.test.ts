@@ -260,15 +260,23 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     }));
 
     vi.doMock('../src/core/run/agent-loop.js', () => ({
-      runTask: async (task: { status: string; result?: string }, _client: unknown, ctx: { tools?: unknown[]; adaptivePrompts?: boolean; onStep?: (step: unknown) => void }) => {
+      runTask: async (
+        task: { status: string; result?: string },
+        _client: unknown,
+        ctx: {
+          tools?: unknown[];
+          adaptivePrompts?: boolean;
+          reserveModelStep?: (promptTokenReservation: number) => {
+            maxOutputTokens: number;
+            finalize(summary: string, usage?: { tokensIn: number; tokensOut: number }): void;
+          } | undefined;
+        },
+      ) => {
         capturedTaskArgs.push(ctx);
-        ctx.onStep?.({
-          ts: new Date().toISOString(),
-          taskId: 't1',
-          kind: 'model',
-          summary: 'changed hello.ts',
-          usage: { tokensIn: 11, tokensOut: 7, steps: 1, estCostUsd: 0 },
-        });
+        const reservation = ctx.reserveModelStep?.(500);
+        if (!reservation) throw new Error('expected api-model token reservation');
+        expect(reservation.maxOutputTokens).toBe(4_096);
+        reservation.finalize('changed hello.ts', { tokensIn: 11, tokensOut: 7 });
         task.status = 'done';
         task.result = 'Made the change.';
         return task;
@@ -323,10 +331,15 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     expect(capturedClientArgs[2]).toBe('qwen2.5:72b-instruct-q4_K_M');
 
     // runTask called with engineer tools
-    const taskContext = capturedTaskArgs[0] as { tools?: unknown[]; adaptivePrompts?: boolean };
+    const taskContext = capturedTaskArgs[0] as {
+      tools?: unknown[];
+      adaptivePrompts?: boolean;
+      reserveModelStep?: unknown;
+    };
     expect(Array.isArray(taskContext.tools)).toBe(true);
     expect(taskContext.tools!.length).toBeGreaterThan(0);
     expect(taskContext.adaptivePrompts).toBe(true);
+    expect(taskContext.reserveModelStep).toEqual(expect.any(Function));
 
     // Proposal filed with correct fields
     expect(capturedGateArgs.length).toBe(1);
@@ -854,6 +867,27 @@ describe('M117 — orchestrator dispatch for api-model engine (mocked)', () => {
         engineInstalled: (engine: string) => engine === 'local-coder' ? true : false,
       };
     });
+
+    // This test owns routing only; isolate it from the process-global durable
+    // execution lease exercised by the dedicated lifecycle-authority suite.
+    vi.doMock('../src/core/util/execution-lease.js', async (importOriginal) => ({
+      ...await importOriginal<typeof import('../src/core/util/execution-lease.js')>(),
+      acquireExecutionAuthority: () => ({ ok: true, authority: {} }),
+      beginExecutionAuthority: () => true,
+      finishExecutionAuthority: () => {},
+      abandonExecutionAuthority: () => {},
+    }));
+
+    vi.doMock('../src/core/util/case-folded-ownership.js', async (importOriginal) => ({
+      ...await importOriginal<typeof import('../src/core/util/case-folded-ownership.js')>(),
+      acquireCaseFoldedOwnership: () => null,
+      completeCaseFoldedOwnership: () => {},
+    }));
+
+    vi.doMock('../src/core/util/private-file-write.js', async (importOriginal) => ({
+      ...await importOriginal<typeof import('../src/core/util/private-file-write.js')>(),
+      writePrivateFileAtomically: () => {},
+    }));
 
     const { runGoal } = await import('../src/core/run/orchestrator.js?bust=' + randomUUID()) as
       typeof import('../src/core/run/orchestrator.js');

@@ -6255,6 +6255,7 @@ export async function tick(
             }
             return runBestOfN(item, routingCfg, {
               n: bestOfN, engine: backend, model: selectedModel,
+              budget: itemBudget,
               ...(_bonCandidates ? { candidates: _bonCandidates as never } : {}),
               ...(_bonCandidateConfigRefusal ? { candidateConfigRefusal: _bonCandidateConfigRefusal } : {}),
               workItemId: item.id, workItemGenerationId, workSource: item.source,

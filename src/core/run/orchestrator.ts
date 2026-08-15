@@ -85,7 +85,15 @@ import type {
 import { getActiveClient } from './provider-client.js';
 import { addUsage, newUsage, overBudget, estCostUsd } from './budget.js';
 import { runTask } from './agent-loop.js';
-import type { ModelStepReservation, ReserveModelStep } from './agent-loop.js';
+import {
+  type ModelStepReservation,
+  type ReserveModelStep,
+} from './agent-loop.js';
+import {
+  conservativeRequestTokenReservation,
+  MAX_GOVERNED_OUTPUT_TOKENS,
+  supportsGovernedModelCalls,
+} from './model-call-authority.js';
 import { withToolEnv } from '../env-bridge.js';
 import { buildEngineCommand, engineInstalled, spawnEngine } from './engines.js';
 import { resolveEngineSpec } from './engine-registry.js';
@@ -1661,10 +1669,11 @@ function hasCycle(tasks: RunTask[]): boolean {
 export async function planGoal(
   goal: string,
   client: ProviderClient,
-  onUsage?: (usage: { tokensIn: number; tokensOut: number }) => void,
+  onUsage?: (usage: { tokensIn: number; tokensOut: number; usageKnown?: boolean }) => void,
   memoryContext?: string,
   adaptive?: boolean,
   signal?: AbortSignal,
+  maxCombinedTokens?: number,
 ): Promise<RunTask[]> {
   // M41: adaptive path budgets the memory block via the prompt suite; the legacy
   // path keeps the original prepend behavior byte-for-byte.
@@ -1683,13 +1692,37 @@ export async function planGoal(
     { role: 'system', content: systemContent },
     { role: 'user', content: goal },
   ];
+  const promptReservation = conservativeRequestTokenReservation(messages, []);
+  if (maxCombinedTokens !== undefined && !supportsGovernedModelCalls(client)) {
+    if (onUsage) onUsage({ tokensIn: 0, tokensOut: 0, usageKnown: true });
+    process.stderr.write(
+      `[ashlr run] planning provider lacks governed model-call authority — using single-task fallback\n`,
+    );
+    return [{ id: 't1', goal, deps: [], status: 'pending' }];
+  }
+  const maxOutputTokens = maxCombinedTokens === undefined
+    ? undefined
+    : maxCombinedTokens - promptReservation;
+  if (maxOutputTokens !== undefined && maxOutputTokens < 1) {
+    if (onUsage) onUsage({ tokensIn: 0, tokensOut: 0, usageKnown: true });
+    return [{ id: 't1', goal, deps: [], status: 'pending' }];
+  }
 
   let result: import('../types.js').ChatResult;
   try {
-    result = await client.chat(messages, undefined, signal);
+    result = await client.chat(
+      messages,
+      undefined,
+      signal,
+      maxOutputTokens === undefined ? undefined : { maxOutputTokens },
+    );
   } catch (err) {
     const reportedUsage = reportedModelUsage(err);
-    if (reportedUsage && onUsage) onUsage(reportedUsage);
+    if (reportedUsage && onUsage) onUsage({
+      ...reportedUsage,
+      usageKnown: typeof err === 'object' && err !== null
+        && (err as { usageKnown?: unknown }).usageKnown === true,
+    });
     const msg = err instanceof Error ? err.message : String(err);
     process.stderr.write(`[ashlr run] planning call failed: ${msg} — using single-task fallback\n`);
     return [{ id: 't1', goal, deps: [], status: 'pending' }];
@@ -1698,7 +1731,11 @@ export async function planGoal(
   // Report planning-call usage so the orchestrator can charge it to the budget
   // and the cost summary. Best-effort: a failed plan call (handled above)
   // reports nothing.
-  if (onUsage) onUsage({ tokensIn: result.usage.tokensIn, tokensOut: result.usage.tokensOut });
+  if (onUsage) onUsage({
+    tokensIn: result.usage.tokensIn,
+    tokensOut: result.usage.tokensOut,
+    usageKnown: result.usageKnown === true,
+  });
 
   const parsed = parseTaskList(result.content);
   if (!parsed) {
@@ -1727,9 +1764,11 @@ async function synthesize(
   tasks: RunTask[],
   client: ProviderClient,
   signal?: AbortSignal,
+  maxCombinedTokens?: number,
 ): Promise<{
   content: string;
   usage: { tokensIn: number; tokensOut: number };
+  usageKnown: boolean;
   failed?: boolean;
 }> {
   const doneTasks = tasks.filter((t) => t.status === 'done' && t.result);
@@ -1737,6 +1776,7 @@ async function synthesize(
     return {
       content: 'No tasks completed successfully — no result to synthesize.',
       usage: { tokensIn: 0, tokensOut: 0 },
+      usageKnown: true,
     };
   }
 
@@ -1751,18 +1791,49 @@ async function synthesize(
       content: `Goal: ${goal}\n\nTask results:\n\n${taskSummary}\n\nPlease synthesize a final answer.`,
     },
   ];
+  const promptReservation = conservativeRequestTokenReservation(messages, []);
+  if (maxCombinedTokens !== undefined && !supportsGovernedModelCalls(client)) {
+    return {
+      content: doneTasks.map((t) => `[${t.id}] ${t.result ?? ''}`).join('\n'),
+      usage: { tokensIn: 0, tokensOut: 0 },
+      usageKnown: true,
+      failed: true,
+    };
+  }
+  const maxOutputTokens = maxCombinedTokens === undefined
+    ? undefined
+    : maxCombinedTokens - promptReservation;
+  if (maxOutputTokens !== undefined && maxOutputTokens < 1) {
+    return {
+      content: doneTasks.map((t) => `[${t.id}] ${t.result ?? ''}`).join('\n'),
+      usage: { tokensIn: 0, tokensOut: 0 },
+      usageKnown: true,
+      failed: true,
+    };
+  }
 
   try {
-    const res = await client.chat(messages, undefined, signal);
-    return { content: res.content, usage: res.usage };
+    const res = await client.chat(
+      messages,
+      undefined,
+      signal,
+      maxOutputTokens === undefined ? undefined : { maxOutputTokens },
+    );
+    return { content: res.content, usage: res.usage, usageKnown: res.usageKnown === true };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     // Best-effort fallback: concatenate task results
     const fallback = doneTasks.map((t) => `[${t.id}] ${t.result ?? ''}`).join('\n');
     process.stderr.write(`[ashlr run] synthesis call failed: ${msg} — using concatenated fallback\n`);
+    const reportedUsage = reportedModelUsage(err);
+    const usageKnown = reportedUsage !== undefined
+      && typeof err === 'object'
+      && err !== null
+      && (err as { usageKnown?: unknown }).usageKnown === true;
     return {
       content: fallback,
-      usage: reportedModelUsage(err) ?? { tokensIn: 0, tokensOut: 0 },
+      usage: reportedUsage ?? { tokensIn: 0, tokensOut: 0 },
+      usageKnown,
       failed: true,
     };
   }
@@ -3188,22 +3259,48 @@ async function runGoalInternal(
     kind: Extract<RunStep['kind'], 'plan' | 'model' | 'synthesize'>,
     summary: string,
     providerForCost: string,
+    promptTokenReservation: number,
   ): ModelStepReservation | undefined => {
+    const remainingTokens = budget.maxTokens
+      - state.usage.tokensIn
+      - state.usage.tokensOut;
     if (
       cancelled() ||
       state.usage.steps >= budget.maxSteps ||
-      state.usage.tokensIn + state.usage.tokensOut >= budget.maxTokens
+      !Number.isSafeInteger(promptTokenReservation) ||
+      promptTokenReservation < 0 ||
+      promptTokenReservation >= remainingTokens
     ) {
       return undefined;
     }
+
+    const maxOutputTokens = Math.min(
+      MAX_GOVERNED_OUTPUT_TOKENS,
+      remainingTokens - promptTokenReservation,
+    );
+    const claimedCost = estCostUsd(
+      providerForCost,
+      promptTokenReservation,
+      maxOutputTokens,
+    );
 
     const step: RunStep = {
       ts: new Date().toISOString(),
       taskId,
       kind,
       summary,
-      usage: { ...newUsage(), steps: 1 },
+      usage: {
+        tokensIn: promptTokenReservation,
+        tokensOut: maxOutputTokens,
+        steps: 1,
+        estCostUsd: 0,
+      },
     };
+    // Persist the whole claim before provider contact. Parallel callers see it
+    // synchronously, and a crash/restart cannot reopen ambiguous authority.
+    state.usage.tokensIn += promptTokenReservation;
+    state.usage.tokensOut += maxOutputTokens;
+    state.usage.estCostUsd += claimedCost;
     state.usage.steps += 1;
     state.steps.push(step);
     state.updatedAt = step.ts;
@@ -3211,14 +3308,22 @@ async function runGoalInternal(
 
     let finalized = false;
     return {
+      maxOutputTokens,
       finalize(finalSummary, usage) {
         if (finalized) return;
         finalized = true;
-        const tokensIn = usage?.tokensIn ?? 0;
-        const tokensOut = usage?.tokensOut ?? 0;
-        state.usage.tokensIn += tokensIn;
-        state.usage.tokensOut += tokensOut;
-        state.usage.estCostUsd += estCostUsd(providerForCost, tokensIn, tokensOut);
+        const authoritativeUsage = usage !== undefined
+          && Number.isSafeInteger(usage.tokensIn) && usage.tokensIn >= 0
+          && Number.isSafeInteger(usage.tokensOut) && usage.tokensOut >= 0;
+        // Unknown transport/provider accounting retains the whole claim. This
+        // prevents a retry from resetting authority after ambiguous spend.
+        const tokensIn = authoritativeUsage ? usage.tokensIn : promptTokenReservation;
+        const tokensOut = authoritativeUsage ? usage.tokensOut : maxOutputTokens;
+        if (authoritativeUsage) {
+          state.usage.tokensIn += tokensIn - promptTokenReservation;
+          state.usage.tokensOut += tokensOut - maxOutputTokens;
+          state.usage.estCostUsd += estCostUsd(providerForCost, tokensIn, tokensOut) - claimedCost;
+        }
         step.summary = finalSummary;
         step.usage = { tokensIn, tokensOut, steps: 1, estCostUsd: 0 };
         state.updatedAt = new Date().toISOString();
@@ -3229,28 +3334,51 @@ async function runGoalInternal(
   };
 
   const taskStepAuthority = (taskId: string, providerForCost: string): ReserveModelStep =>
-    () => reserveRunModelStep(taskId, 'model', 'Model call reserved.', providerForCost);
+    (promptTokenReservation) => reserveRunModelStep(
+      taskId,
+      'model',
+      'Model call reserved.',
+      providerForCost,
+      promptTokenReservation,
+    );
 
   const verificationClient = (base: ProviderClient, taskId: string): ProviderClient => ({
     id: base.id,
     supportsTools: base.supportsTools,
     ...(base.model ? { model: base.model } : {}),
+    ...(base.authority ? { authority: base.authority } : {}),
     chat: async (messages, chatTools, signal) => {
+      if (!supportsGovernedModelCalls(base)) {
+        throw new Error(`Provider "${base.id}" does not support governed model calls.`);
+      }
+      const promptReservation = conservativeRequestTokenReservation(messages, chatTools ?? []);
       const reservation = reserveRunModelStep(
         taskId,
         'model',
         'Verification model call reserved.',
         base.id,
+        promptReservation,
       );
       if (!reservation) throw new Error('Run step budget exhausted before model verification.');
       try {
-        const result = await base.chat(messages, chatTools, signal ?? opts.signal);
-        reservation.finalize('Verification model call complete.', result.usage);
+        const result = await base.chat(
+          messages,
+          chatTools,
+          signal ?? opts.signal,
+          { maxOutputTokens: reservation.maxOutputTokens },
+        );
+        reservation.finalize(
+          'Verification model call complete.',
+          result.usageKnown === true ? result.usage : undefined,
+        );
         return result;
       } catch (err) {
         reservation.finalize(
           cancelled() ? 'Verification model call attempted and cancelled.' : 'Verification model call failed.',
-          reportedModelUsage(err),
+          typeof err === 'object' && err !== null
+            && (err as { usageKnown?: unknown }).usageKnown === true
+            ? reportedModelUsage(err)
+            : undefined,
         );
         throw err;
       }
@@ -3531,11 +3659,15 @@ async function runGoalInternal(
 
   // -- Plan (unless resuming with existing tasks) ------------------------------
   if (state.tasks.length === 0) {
+    // Planning owns one combined claim: reserve 4,096 total with a zero outer
+    // prompt component, then planGoal subtracts its conservative prompt reservation
+    // before binding the remainder as the provider output cap.
     const planReservation = reserveRunModelStep(
       '__plan__',
       'plan',
       'Planning model call reserved.',
       client.id,
+      0,
     );
     if (!planReservation) {
       aborted = true;
@@ -3543,23 +3675,26 @@ async function runGoalInternal(
     } else {
       let planTokensIn = 0;
       let planTokensOut = 0;
+      let planUsageKnown = false;
       const tasks = await planGoal(
         goal,
         client,
         (u) => {
           planTokensIn = u.tokensIn;
           planTokensOut = u.tokensOut;
+          planUsageKnown = u.usageKnown === true;
         },
         memoryContext || undefined,
         adaptivePrompts,
         opts.signal,
+        planReservation.maxOutputTokens,
       );
       state.tasks = tasks;
       planReservation.finalize(
         cancelled()
           ? 'Planning model call attempted and cancelled.'
           : `Planned ${tasks.length} task(s): ${tasks.map((t) => t.id).join(', ')}`,
-        { tokensIn: planTokensIn, tokensOut: planTokensOut },
+        planUsageKnown ? { tokensIn: planTokensIn, tokensOut: planTokensOut } : undefined,
       );
       if (cancelled()) {
         aborted = true;
@@ -4138,12 +4273,15 @@ async function runGoalInternal(
   // -- Synthesize final answer -------------------------------------------------
   const doneTasks = state.tasks.filter((t) => t.status === 'done' && t.result);
   let synthResult: string;
+  // Synthesis uses the same combined-claim invariant as planning: its inner
+  // helper subtracts the prompt reservation from this claim before contact.
   const synthReservation = doneTasks.length > 0
     ? reserveRunModelStep(
         '__synthesize__',
         'synthesize',
         'Synthesis model call reserved.',
         client.id,
+        0,
       )
     : undefined;
   if (!synthReservation) {
@@ -4157,7 +4295,13 @@ async function runGoalInternal(
       );
     }
   } else {
-    const synth = await synthesize(goal, state.tasks, client, opts.signal);
+    const synth = await synthesize(
+      goal,
+      state.tasks,
+      client,
+      opts.signal,
+      synthReservation.maxOutputTokens,
+    );
     synthResult = synth.content;
     synthReservation.finalize(
       synth.failed
@@ -4165,7 +4309,7 @@ async function runGoalInternal(
           ? 'Synthesis model call attempted and cancelled.'
           : 'Synthesis model call failed; used concatenated fallback.'
         : 'Synthesis complete',
-      synth.usage,
+      synth.usageKnown ? synth.usage : undefined,
     );
   }
 

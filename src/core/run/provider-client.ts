@@ -7,11 +7,18 @@
  * degrades to plain chat when unsupported.
  */
 
-import type { AshlrConfig, ChatMessage, ChatResult, ProviderClient } from '../types.js';
+import type {
+  AshlrConfig,
+  ChatMessage,
+  ChatResult,
+  ModelCallLimits,
+  ProviderClient,
+} from '../types.js';
 import { getProviderRegistry } from '../providers.js';
 import { resolveProviderKey } from '../integrations/secrets.js';
 import { resolveModelProfile, adaptivePromptsEnabled } from './model-profile.js';
 import { scrubSecrets } from '../util/scrub.js';
+import { ENFORCED_PROVIDER_AUTHORITY } from './model-call-authority.js';
 
 // ---------------------------------------------------------------------------
 // Known cloud provider identifiers
@@ -69,6 +76,29 @@ const CLOUD_PROVIDER_BASE_URL_ENV: Record<string, string> = {
   kimi: 'MOONSHOT_BASE_URL',
   hermes_api: 'HERMES_API_BASE_URL',
 };
+
+function hardOutputTokenLimit(
+  limits: ModelCallLimits | undefined,
+  configuredLimit?: number,
+): number | undefined {
+  const requested = limits?.maxOutputTokens;
+  if (requested !== undefined && (!Number.isSafeInteger(requested) || requested < 1)) {
+    throw new RangeError('maxOutputTokens must be a positive safe integer');
+  }
+  if (configuredLimit !== undefined &&
+    (!Number.isSafeInteger(configuredLimit) || configuredLimit < 1)) {
+    throw new RangeError('configured maxOutputTokens must be a positive safe integer');
+  }
+  if (requested === undefined) return configuredLimit;
+  if (configuredLimit === undefined) return requested;
+  return Math.min(requested, configuredLimit);
+}
+
+function authoritativeTokenCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : undefined;
+}
 
 // Default models for OpenAI-compatible cloud providers.
 const CLOUD_PROVIDER_DEFAULT_MODEL: Record<string, string> = {
@@ -384,7 +414,7 @@ function toOllamaMessages(
 // Streaming timeout is longer — the first token may take a few seconds.
 const STREAM_TIMEOUT_MS = 60_000; // 60s for streaming requests
 
-function buildOllamaClient(
+export function buildOllamaClient(
   baseUrl: string,
   model: string,
   supportsTools: boolean,
@@ -397,9 +427,16 @@ function buildOllamaClient(
     id: 'ollama',
     model,
     supportsTools,
+    authority: ENFORCED_PROVIDER_AUTHORITY,
 
-    async chat(messages: ChatMessage[], tools?: unknown[], callSignal?: AbortSignal): Promise<ChatResult> {
+    async chat(
+      messages: ChatMessage[],
+      tools?: unknown[],
+      callSignal?: AbortSignal,
+      limits?: ModelCallLimits,
+    ): Promise<ChatResult> {
       const requestSignal = callSignal ?? signal;
+      const maxOutputTokens = hardOutputTokenLimit(limits);
       // Map ChatMessage roles to Ollama format
       // Ollama uses role: 'system'|'user'|'assistant'|'tool'
       const ollamaMessages = toOllamaMessages(messages);
@@ -410,7 +447,10 @@ function buildOllamaClient(
         stream: false,
       };
 
-      if (temperature !== undefined) body['options'] = { temperature };
+      if (temperature !== undefined || maxOutputTokens !== undefined) body['options'] = {
+        ...(temperature !== undefined ? { temperature } : {}),
+        ...(maxOutputTokens !== undefined ? { num_predict: maxOutputTokens } : {}),
+      };
 
       // Only send tools if supported and tools are provided
       if (supportsTools && tools && tools.length > 0) {
@@ -462,14 +502,15 @@ function buildOllamaClient(
         typeof message['content'] === 'string' ? message['content'] : '';
 
       // Parse usage from response
-      const promptEval = typeof d['prompt_eval_count'] === 'number' ? d['prompt_eval_count'] : 0;
-      const evalCount = typeof d['eval_count'] === 'number' ? d['eval_count'] : 0;
+      const promptEval = authoritativeTokenCount(d['prompt_eval_count']);
+      const evalCount = authoritativeTokenCount(d['eval_count']);
+      const usageKnown = promptEval !== undefined && evalCount !== undefined;
 
       const tokensIn =
-        promptEval > 0
+        promptEval !== undefined
           ? promptEval
           : estimateTokens(messages.map((m) => m.content).join(' '));
-      const tokensOut = evalCount > 0 ? evalCount : estimateTokens(content);
+      const tokensOut = evalCount !== undefined ? evalCount : estimateTokens(content);
 
       const toolCalls = parseOllamaToolCalls(message);
 
@@ -477,6 +518,7 @@ function buildOllamaClient(
         content,
         toolCalls,
         usage: { tokensIn, tokensOut },
+        usageKnown,
       };
     },
 
@@ -485,8 +527,10 @@ function buildOllamaClient(
       tools: unknown[] | undefined,
       onDelta: (t: string) => void,
       callSignal?: AbortSignal,
+      limits?: ModelCallLimits,
     ): Promise<ChatResult> {
       const requestSignal = callSignal ?? signal;
+      const maxOutputTokens = hardOutputTokenLimit(limits);
       // Attempt streaming; fall back to chat() on any error.
       let cleanupStream = () => {};
       try {
@@ -498,7 +542,10 @@ function buildOllamaClient(
           stream: true,
         };
 
-        if (temperature !== undefined) body['options'] = { temperature };
+        if (temperature !== undefined || maxOutputTokens !== undefined) body['options'] = {
+          ...(temperature !== undefined ? { temperature } : {}),
+          ...(maxOutputTokens !== undefined ? { num_predict: maxOutputTokens } : {}),
+        };
 
         if (supportsTools && tools && tools.length > 0) {
           body['tools'] = tools;
@@ -545,8 +592,8 @@ function buildOllamaClient(
         // from the final done=true line.
         let accContent = '';
         let finalMessage: Record<string, unknown> = {};
-        let tokensIn = 0;
-        let tokensOut = 0;
+        let exactTokensIn: number | undefined;
+        let exactTokensOut: number | undefined;
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
@@ -593,18 +640,8 @@ function buildOllamaClient(
               if (chunk['done'] === true) {
                 finalMessage = chunkMsg;
 
-                const promptEval =
-                  typeof chunk['prompt_eval_count'] === 'number'
-                    ? chunk['prompt_eval_count']
-                    : 0;
-                const evalCount =
-                  typeof chunk['eval_count'] === 'number' ? chunk['eval_count'] : 0;
-
-                tokensIn =
-                  promptEval > 0
-                    ? promptEval
-                    : estimateTokens(messages.map((m) => m.content).join(' '));
-                tokensOut = evalCount > 0 ? evalCount : estimateTokens(accContent);
+                exactTokensIn = authoritativeTokenCount(chunk['prompt_eval_count']);
+                exactTokensOut = authoritativeTokenCount(chunk['eval_count']);
               }
             }
           }
@@ -612,13 +649,10 @@ function buildOllamaClient(
           reader.releaseLock();
         }
 
-        // Estimate usage if we never saw a done line
-        if (tokensIn === 0) {
-          tokensIn = estimateTokens(messages.map((m) => m.content).join(' '));
-        }
-        if (tokensOut === 0) {
-          tokensOut = estimateTokens(accContent);
-        }
+        const usageKnown = exactTokensIn !== undefined && exactTokensOut !== undefined;
+        const tokensIn = exactTokensIn
+          ?? estimateTokens(messages.map((m) => m.content).join(' '));
+        const tokensOut = exactTokensOut ?? estimateTokens(accContent);
 
         const toolCalls = parseOllamaToolCalls(finalMessage);
 
@@ -626,12 +660,14 @@ function buildOllamaClient(
           content: accContent,
           toolCalls,
           usage: { tokensIn, tokensOut },
+          usageKnown,
         };
-      } catch {
+      } catch (err) {
         cleanupStream();
         if (requestSignal?.aborted) throw abortReason(requestSignal);
+        if (maxOutputTokens !== undefined) throw err;
         // Streaming failed — fall back to non-streaming chat() and emit as one delta.
-        const result = await this.chat(messages, tools, requestSignal);
+        const result = await this.chat(messages, tools, requestSignal, limits);
         if (result.content) {
           onDelta(result.content);
         }
@@ -883,9 +919,16 @@ export function buildOpenAICompatibleClient(
     id: 'openai-compat',
     model,
     supportsTools,
+    authority: ENFORCED_PROVIDER_AUTHORITY,
 
-    async chat(messages: ChatMessage[], tools?: unknown[], callSignal?: AbortSignal): Promise<ChatResult> {
+    async chat(
+      messages: ChatMessage[],
+      tools?: unknown[],
+      callSignal?: AbortSignal,
+      limits?: ModelCallLimits,
+    ): Promise<ChatResult> {
       const requestSignal = callSignal ?? signal;
+      const maxOutputTokens = hardOutputTokenLimit(limits, transport?.maxOutputTokens);
       const openaiMessages = toOpenAIMessages(messages);
 
       const body: Record<string, unknown> = {
@@ -895,7 +938,7 @@ export function buildOpenAICompatibleClient(
       };
 
       if (temperature !== undefined) body['temperature'] = temperature;
-      if (transport?.maxOutputTokens !== undefined) body['max_tokens'] = transport.maxOutputTokens;
+      if (maxOutputTokens !== undefined) body['max_tokens'] = maxOutputTokens;
 
       if (supportsTools && tools && tools.length > 0) {
         body['tools'] = tools;
@@ -995,17 +1038,16 @@ export function buildOpenAICompatibleClient(
 
       // Parse usage
       const usageRaw = (d['usage'] ?? {}) as Record<string, unknown>;
-      const promptTokens =
-        typeof usageRaw['prompt_tokens'] === 'number' ? usageRaw['prompt_tokens'] : 0;
-      const completionTokens =
-        typeof usageRaw['completion_tokens'] === 'number' ? usageRaw['completion_tokens'] : 0;
+      const promptTokens = authoritativeTokenCount(usageRaw['prompt_tokens']);
+      const completionTokens = authoritativeTokenCount(usageRaw['completion_tokens']);
+      const usageKnown = promptTokens !== undefined && completionTokens !== undefined;
 
       const tokensIn =
-        promptTokens > 0
+        promptTokens !== undefined
           ? promptTokens
           : estimateTokens(messages.map((m) => m.content).join(' '));
       const tokensOut =
-        completionTokens > 0 ? completionTokens : estimateTokens(content);
+        completionTokens !== undefined ? completionTokens : estimateTokens(content);
 
       // M118: content-embedded fallback — only fires when no structured tool_calls.
       let toolCalls = parseOpenAIToolCalls(message);
@@ -1022,6 +1064,7 @@ export function buildOpenAICompatibleClient(
         content: finalContent,
         toolCalls,
         usage: { tokensIn, tokensOut },
+        usageKnown,
       };
     },
 
@@ -1030,14 +1073,16 @@ export function buildOpenAICompatibleClient(
       tools: unknown[] | undefined,
       onDelta: (t: string) => void,
       callSignal?: AbortSignal,
+      limits?: ModelCallLimits,
     ): Promise<ChatResult> {
       const requestSignal = callSignal ?? signal;
+      const maxOutputTokens = hardOutputTokenLimit(limits, transport?.maxOutputTokens);
       // A transport-bound client is an authority boundary, not a streaming
       // preference. Reuse chat() so redirects, request/response/output caps,
       // timeout, and provider-contact accounting cannot diverge in the path
       // that runTask prefers. A single final delta preserves the stream API.
       if (transport) {
-        const result = await this.chat(messages, tools, requestSignal);
+        const result = await this.chat(messages, tools, requestSignal, limits);
         if (result.content) onDelta(result.content);
         return result;
       }
@@ -1053,6 +1098,10 @@ export function buildOpenAICompatibleClient(
         };
 
         if (temperature !== undefined) body['temperature'] = temperature;
+        if (maxOutputTokens !== undefined) {
+          body['max_tokens'] = maxOutputTokens;
+          body['stream_options'] = { include_usage: true };
+        }
 
         if (supportsTools && tools && tools.length > 0) {
           body['tools'] = tools;
@@ -1099,8 +1148,8 @@ export function buildOpenAICompatibleClient(
           number,
           { id: string; name: string; argsStr: string }
         > = {};
-        let tokensIn = 0;
-        let tokensOut = 0;
+        let exactTokensIn: number | undefined;
+        let exactTokensOut: number | undefined;
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
@@ -1136,12 +1185,12 @@ export function buildOpenAICompatibleClient(
 
               const usageRaw = chunk['usage'] as Record<string, unknown> | undefined;
               if (usageRaw) {
-                const pt =
-                  typeof usageRaw['prompt_tokens'] === 'number' ? usageRaw['prompt_tokens'] : 0;
-                const ct =
-                  typeof usageRaw['completion_tokens'] === 'number' ? usageRaw['completion_tokens'] : 0;
-                if (pt > 0) tokensIn = pt;
-                if (ct > 0) tokensOut = ct;
+                const pt = authoritativeTokenCount(usageRaw['prompt_tokens']);
+                const ct = authoritativeTokenCount(usageRaw['completion_tokens']);
+                if (pt !== undefined && ct !== undefined) {
+                  exactTokensIn = pt;
+                  exactTokensOut = ct;
+                }
               }
 
               const choices = Array.isArray(chunk['choices']) ? chunk['choices'] : [];
@@ -1177,8 +1226,10 @@ export function buildOpenAICompatibleClient(
           reader.releaseLock();
         }
 
-        if (tokensIn === 0) tokensIn = estimateTokens(messages.map((m) => m.content).join(' '));
-        if (tokensOut === 0) tokensOut = estimateTokens(accContent);
+        const usageKnown = exactTokensIn !== undefined && exactTokensOut !== undefined;
+        const tokensIn = exactTokensIn
+          ?? estimateTokens(messages.map((m) => m.content).join(' '));
+        const tokensOut = exactTokensOut ?? estimateTokens(accContent);
 
         let toolCalls =
           Object.keys(toolCallFragments).length > 0
@@ -1206,11 +1257,17 @@ export function buildOpenAICompatibleClient(
           }
         }
 
-        return { content: streamContent, toolCalls, usage: { tokensIn, tokensOut } };
-      } catch {
+        return {
+          content: streamContent,
+          toolCalls,
+          usage: { tokensIn, tokensOut },
+          usageKnown,
+        };
+      } catch (err) {
         cleanupStream();
         if (requestSignal?.aborted) throw abortReason(requestSignal);
-        const result = await this.chat(messages, tools, requestSignal);
+        if (maxOutputTokens !== undefined) throw err;
+        const result = await this.chat(messages, tools, requestSignal, limits);
         if (result.content) onDelta(result.content);
         return result;
       } finally {

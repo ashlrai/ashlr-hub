@@ -26,6 +26,7 @@ import type {
   WorkSource,
   EngineId,
   RunProposalOutcome,
+  RunBudget,
   RunState,
   SkillCard,
   DelegationScope,
@@ -187,6 +188,41 @@ function readN(cfg: AshlrConfig, override?: number): number {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const fromCfg = (cfg.foundry as any)?.bestOfN;
   return resolveBestOfNCount(fromCfg);
+}
+
+function partitionFanOutBudget(
+  budget: Partial<RunBudget> | undefined,
+  n: number,
+): Partial<RunBudget> | undefined {
+  if (!budget) return undefined;
+  return {
+    ...(budget.maxTokens !== undefined
+      ? {
+          maxTokens: Number.isSafeInteger(budget.maxTokens) && budget.maxTokens >= 0
+            ? Math.floor(budget.maxTokens / n)
+            : 0,
+        }
+      : {}),
+    ...(budget.maxSteps !== undefined
+      ? {
+          maxSteps: Number.isSafeInteger(budget.maxSteps) && budget.maxSteps >= 0
+            ? Math.floor(budget.maxSteps / n)
+            : 0,
+        }
+      : {}),
+    ...(budget.allowCloud !== undefined ? { allowCloud: budget.allowCloud } : {}),
+  };
+}
+
+function constrainCandidateBudget(
+  budget: Partial<RunBudget> | undefined,
+  cap: RunBudget,
+): Partial<RunBudget> {
+  return {
+    maxTokens: Math.min(budget?.maxTokens ?? cap.maxTokens, cap.maxTokens),
+    maxSteps: Math.min(budget?.maxSteps ?? cap.maxSteps, cap.maxSteps),
+    allowCloud: budget?.allowCloud ?? cap.allowCloud,
+  };
 }
 
 /**
@@ -680,6 +716,14 @@ async function runBestOfNInternal(
     workSource?: WorkSource;
     engine?: EngineId;
     model?: string | null;
+    /**
+     * Aggregate producer budget partitioned across candidates. In-process API
+     * models enforce it preventively; external CLI engines receive it as an
+     * advisory runner budget and remain outside this token-authority claim.
+     */
+    budget?: Partial<RunBudget>;
+    /** Disable paid taste scoring when no separate judge authority exists. */
+    disableTasteCritic?: boolean;
     delegationScope?: DelegationScope;
     /** Opaque outer dispatch identity used to derive stable candidate run ids. */
     attemptId?: OuterAttemptIdentity;
@@ -741,8 +785,10 @@ async function runBestOfNInternal(
   }
 
   // ── 3b. Resolve taste critic (M183 — flag-gated) ───────────────────────
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const tasteCriticEnabled = !!(cfg.foundry as any)?.tasteCritic;
+  const tasteCriticConfigured = (cfg.foundry as { tasteCritic?: unknown } | undefined)?.tasteCritic;
+  const tasteCriticEnabled = opts?.disableTasteCritic !== true
+    && opts?.budget === undefined
+    && !!tasteCriticConfigured;
   type ScoreTasteFn = typeof import('../fleet/taste-critic.js').scoreTaste;
   let scoreTaste: ScoreTasteFn | undefined;
   if (tasteCriticEnabled) {
@@ -835,6 +881,7 @@ async function runBestOfNInternal(
 
   // ── 5. Generate N candidates with bounded internal concurrency ──────────
   const candidateIndexes = Array.from({ length: n }, (_, index) => index);
+  const candidateBudget = partitionFanOutBudget(opts?.budget, n);
   const generateCandidate = async (i: number): Promise<InternalCandidateResult> => {
     // Vary temperature and seed so candidates differ across calls.
     // We pass opts into the sandbox via model override naming conventions where
@@ -1028,6 +1075,13 @@ async function runBestOfNInternal(
         },
         resultContract: { kind: 'proposal', requireDiff: true, requireProposal: false },
       });
+      const effectiveCandidateBudget = shadowConfig.kind === 'on'
+        ? constrainCandidateBudget(candidateBudget, {
+            maxTokens: SHADOW_MAX_TOKENS,
+            maxSteps: SHADOW_MAX_STEPS,
+            allowCloud: false,
+          })
+        : candidateBudget;
 
       if (captureSandboxedProposal && createSandbox) {
         let sb: Sandbox;
@@ -1048,6 +1102,7 @@ async function runBestOfNInternal(
         const result = await runSandboxed(cEngine as import('../types.js').EngineId, goal, cfg, {
           ...(typeof requestedModel === 'string' ? { model: requestedModel } : {}),
           sourceRepo,
+          ...(effectiveCandidateBudget ? { budget: effectiveCandidateBudget } : {}),
           propose: false,
           ...(shadowConfig.kind === 'on'
             ? {
@@ -1058,11 +1113,6 @@ async function runBestOfNInternal(
                   maxRequestBytes: SHADOW_REQUEST_MAX_BYTES,
                   maxResponseBytes: SHADOW_RESPONSE_MAX_BYTES,
                   maxOutputTokens: SHADOW_MAX_OUTPUT_TOKENS,
-                },
-                budget: {
-                  maxTokens: SHADOW_MAX_TOKENS,
-                  maxSteps: SHADOW_MAX_STEPS,
-                  allowCloud: false,
                 },
               }
             : {}),
@@ -1147,6 +1197,7 @@ async function runBestOfNInternal(
         const draft = await captureSandboxedProposal(cEngine, goal, cfg, {
           sourceRepo,
           existingWorktree: sb,
+          ...(effectiveCandidateBudget ? { budget: effectiveCandidateBudget } : {}),
           draftOnly: true,
           ...(typeof requestedModel === 'string' ? { model: requestedModel } : {}),
           runId,
@@ -1187,6 +1238,7 @@ async function runBestOfNInternal(
       const result = await runSandboxed(cEngine as import('../types.js').EngineId, goal, cfg, {
         ...(typeof requestedModel === 'string' ? { model: requestedModel } : {}),
         sourceRepo,
+        ...(effectiveCandidateBudget ? { budget: effectiveCandidateBudget } : {}),
         propose: true,
         runId,
         workItemId: opts?.workItemId ?? item.id,
@@ -1567,6 +1619,7 @@ async function runBestOfNInternal(
         filed = await captureSandboxedProposal(cEngine, goal, cfg, {
           sourceRepo,
           existingWorktree: c.sandbox,
+          ...(candidateBudget ? { budget: candidateBudget } : {}),
           ...(typeof c.requestedModel === 'string' ? { model: c.requestedModel } : {}),
           runId: c.runId,
           workItemId: opts?.workItemId ?? item.id,

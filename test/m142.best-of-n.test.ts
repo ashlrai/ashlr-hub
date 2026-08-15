@@ -456,6 +456,57 @@ describe('M142 — cfg.foundry.bestOfN flag', () => {
 describe('M142 — daemon routing alignment', () => {
   afterEach(() => { vi.resetModules(); });
 
+  it('partitions one aggregate producer ceiling across the whole fan-out', async () => {
+    const sandboxMock = makeSandboxMock({ withProposalAt: [0, 1, 2] });
+    vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
+      runApiModelSandboxed: sandboxMock,
+      runEngineSandboxed: sandboxMock,
+    }));
+    vi.doMock('../src/core/fleet/manager.js', () => ({
+      judgeProposal: makeJudgeMock([10, 9, 8]),
+    }));
+
+    const { runBestOfN } = await import('../src/core/run/best-of-n.js?aggregatebudget=' + randomUUID());
+    await runBestOfN(makeItem(), makeConfig(3), {
+      n: 3,
+      budget: { maxTokens: 3_001, maxSteps: 31, allowCloud: false },
+    });
+
+    expect(sandboxMock).toHaveBeenCalledTimes(3);
+    const budgets = sandboxMock.mock.calls.map((call) =>
+      (call[3] as { budget?: { maxTokens?: number; maxSteps?: number } }).budget);
+    expect(budgets).toEqual(Array.from({ length: 3 }, () => ({
+      maxTokens: 1_000,
+      maxSteps: 10,
+      allowCloud: false,
+    })));
+    expect(budgets.reduce((sum, budget) => sum + (budget?.maxTokens ?? 0), 0)).toBeLessThanOrEqual(3_001);
+    expect(budgets.reduce((sum, budget) => sum + (budget?.maxSteps ?? 0), 0)).toBeLessThanOrEqual(31);
+  });
+
+  it('does not spend a separate taste-critic call under a producer-only aggregate budget', async () => {
+    const sandboxMock = makeSandboxMock({ withProposalAt: [0] });
+    const scoreTaste = vi.fn();
+    vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
+      runApiModelSandboxed: sandboxMock,
+      runEngineSandboxed: sandboxMock,
+    }));
+    vi.doMock('../src/core/fleet/manager.js', () => ({
+      judgeProposal: makeJudgeMock([10]),
+    }));
+    vi.doMock('../src/core/fleet/taste-critic.js', () => ({ scoreTaste }));
+    const cfg = makeConfig(1);
+    (cfg.foundry as { tasteCritic?: boolean }).tasteCritic = true;
+
+    const { runBestOfN } = await import('../src/core/run/best-of-n.js?budgetnotaste=' + randomUUID());
+    await runBestOfN(makeItem(), cfg, {
+      n: 1,
+      budget: { maxTokens: 2_000, maxSteps: 20, allowCloud: false },
+    });
+
+    expect(scoreTaste).not.toHaveBeenCalled();
+  });
+
   it('routes codex cli-agent candidates through runEngineSandboxed and preserves proposal metadata', async () => {
     const apiSandboxMock = makeSandboxMock({ withProposalAt: [0] });
     const engineSandboxMock = makeSandboxMock({ withProposalAt: [0] });
