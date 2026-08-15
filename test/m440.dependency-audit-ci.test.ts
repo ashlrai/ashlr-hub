@@ -14,6 +14,10 @@ const workflowText = readFileSync(
   'utf8',
 );
 const dependabotText = readFileSync(resolve(repoRoot, '.github/dependabot.yml'), 'utf8');
+const dependencySecurityPolicy = readFileSync(
+  resolve(repoRoot, 'docs/DEPENDENCY-SECURITY.md'),
+  'utf8',
+);
 const workflow = parse(workflowText) as Record<string, unknown>;
 const dependabot = parse(dependabotText) as Record<string, unknown>;
 const events = workflow.on as Record<string, Record<string, unknown> | null>;
@@ -29,9 +33,28 @@ const authorityPaths = [
   'src/raycast/package-lock.json',
   'src/raycast/npm-shrinkwrap.json',
   'src/raycast/.npmrc',
+  'desktop/src-tauri/Cargo.toml',
+  'desktop/src-tauri/Cargo.lock',
+  'docs/DEPENDENCY-SECURITY.md',
   '.github/dependabot.yml',
   '.github/workflows/dependency-audit.yml',
 ];
+
+const cargoAuditInstallCommand = `set -euo pipefail
+archive="\${RUNNER_TEMP}/cargo-audit.tgz"
+extract_dir="\${RUNNER_TEMP}/cargo-audit-extract"
+bin_dir="\${RUNNER_TEMP}/cargo-audit-bin"
+url="https://github.com/rustsec/rustsec/releases/download/cargo-audit/v\${CARGO_AUDIT_VERSION}/cargo-audit-\${CARGO_AUDIT_TARGET}-v\${CARGO_AUDIT_VERSION}.tgz"
+curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \\
+  --retry 3 --retry-all-errors --output "\${archive}" "\${url}"
+echo "\${CARGO_AUDIT_SHA256}  \${archive}" | sha256sum --check --strict
+mkdir --parents "\${extract_dir}" "\${bin_dir}"
+tar --extract --gzip --file "\${archive}" --directory "\${extract_dir}" \\
+  --strip-components=1
+install --mode 0755 "\${extract_dir}/cargo-audit" "\${bin_dir}/cargo-audit"
+echo "\${bin_dir}" >> "\${GITHUB_PATH}"
+"\${bin_dir}/cargo-audit" --version
+`;
 
 describe('M440 dependency audit CI', () => {
   it('matches the complete closed workflow authority document', () => {
@@ -52,8 +75,14 @@ describe('M440 dependency audit CI', () => {
         audit: {
           name: 'Dependency audit (root + Raycast)',
           'runs-on': 'ubuntu-latest',
-          'timeout-minutes': 15,
-          env: { NPM_CONFIG_REGISTRY: 'https://registry.npmjs.org' },
+          'timeout-minutes': 20,
+          env: {
+            NPM_CONFIG_REGISTRY: 'https://registry.npmjs.org',
+            CARGO_AUDIT_VERSION: '0.22.2',
+            CARGO_AUDIT_TARGET: 'x86_64-unknown-linux-gnu',
+            CARGO_AUDIT_SHA256:
+              'ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39',
+          },
           steps: [
             {
               name: 'Checkout',
@@ -67,6 +96,11 @@ describe('M440 dependency audit CI', () => {
               name: 'Set up Node.js 22',
               uses: 'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020',
               with: { 'node-version': '22' },
+            },
+            {
+              name: 'Install pinned cargo-audit',
+              shell: 'bash',
+              run: cargoAuditInstallCommand,
             },
             {
               name: 'Verify root dependency graph installs',
@@ -95,6 +129,10 @@ describe('M440 dependency audit CI', () => {
               'working-directory': 'src/raycast',
               run: 'npm audit --package-lock-only --ignore-scripts --omit=dev --audit-level=low',
             },
+            {
+              name: 'Audit desktop Cargo dependencies',
+              run: 'cargo-audit audit --file desktop/src-tauri/Cargo.lock --ignore RUSTSEC-2024-0429',
+            },
           ],
         },
       },
@@ -117,13 +155,24 @@ describe('M440 dependency audit CI', () => {
       'cancel-in-progress': "${{ github.event_name == 'pull_request' }}",
     });
     expect(audit['runs-on']).toBe('ubuntu-latest');
-    expect(audit['timeout-minutes']).toBe(15);
-    expect(audit.env).toEqual({ NPM_CONFIG_REGISTRY: 'https://registry.npmjs.org' });
+    expect(audit['timeout-minutes']).toBe(20);
+    expect(audit.env).toEqual({
+      NPM_CONFIG_REGISTRY: 'https://registry.npmjs.org',
+      CARGO_AUDIT_VERSION: '0.22.2',
+      CARGO_AUDIT_TARGET: 'x86_64-unknown-linux-gnu',
+      CARGO_AUDIT_SHA256:
+        'ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39',
+    });
     expect(audit.permissions).toBeUndefined();
   });
 
+  it('preserves the exact protected required-check context while extending its audit', () => {
+    expect(Object.keys(workflow.jobs as Record<string, unknown>)).toEqual(['audit']);
+    expect(audit.name).toBe('Dependency audit (root + Raycast)');
+  });
+
   it('uses only approved actions with bounded checkout authority', () => {
-    expect(steps).toHaveLength(8);
+    expect(steps).toHaveLength(10);
     expect(steps.filter((step) => step.uses).map((step) => step.uses)).toEqual([
       'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
       'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020',
@@ -142,7 +191,7 @@ describe('M440 dependency audit CI', () => {
   });
 
   it('fail-closes on clean installs before auditing full and production lockfile graphs', () => {
-    expect(steps.slice(2).map(({ run, ['working-directory']: cwd }) => ({ run, cwd }))).toEqual([
+    expect(steps.slice(3, 9).map(({ run, ['working-directory']: cwd }) => ({ run, cwd }))).toEqual([
       {
         run: 'npm ci --ignore-scripts --no-audit --no-fund --force=false --legacy-peer-deps=false --strict-peer-deps',
         cwd: undefined,
@@ -174,7 +223,7 @@ describe('M440 dependency audit CI', () => {
       .filter(({ run }) => run.startsWith('npm ci'))
       .map(({ index }) => index);
     const firstAuditIndex = steps.findIndex((step) => String(step.run ?? '').startsWith('npm audit'));
-    expect(installIndexes).toEqual([2, 3]);
+    expect(installIndexes).toEqual([3, 4]);
     expect(Math.max(...installIndexes)).toBeLessThan(firstAuditIndex);
     for (const index of installIndexes) {
       const command = String(steps[index]?.run ?? '');
@@ -185,6 +234,25 @@ describe('M440 dependency audit CI', () => {
     expect(steps[1]?.with).not.toHaveProperty('cache');
   });
 
+  it('pins RustSec tooling and fails on every vulnerability except the open GLib quarantine', () => {
+    expect(steps[2]).toEqual({
+      name: 'Install pinned cargo-audit',
+      shell: 'bash',
+      run: cargoAuditInstallCommand,
+    });
+    expect(cargoAuditInstallCommand).toContain('--proto \'=https\' --tlsv1.2');
+    expect(cargoAuditInstallCommand).toContain('sha256sum --check --strict');
+    expect(cargoAuditInstallCommand).not.toMatch(/cargo install|latest|stable/);
+
+    expect(steps[9]).toEqual({
+      name: 'Audit desktop Cargo dependencies',
+      run: 'cargo-audit audit --file desktop/src-tauri/Cargo.lock --ignore RUSTSEC-2024-0429',
+    });
+    expect(String(steps[9]?.run).match(/--ignore\s+RUSTSEC-/g)).toHaveLength(1);
+    expect(String(steps[9]?.run)).not.toMatch(/continue|allow|deny warnings/i);
+    expect(steps.some((step) => step['continue-on-error'] === true)).toBe(false);
+  });
+
   it('cannot publish, deploy, mutate settings, or consume secrets', () => {
     const runCommands = steps.flatMap((step) => (typeof step.run === 'string' ? [step.run] : []));
     expect(runCommands.join('\n')).not.toMatch(/\b(npm publish|deploy|release|dependabot)\b/i);
@@ -192,7 +260,13 @@ describe('M440 dependency audit CI', () => {
     expect(workflow).not.toHaveProperty('on.pull_request_target');
   });
 
-  it('covers both npm manifests with bounded grouped Dependabot updates', () => {
+  it('covers both npm manifests and desktop Cargo with bounded reviewed cooldowns', () => {
+    const cooldown = {
+      'default-days': 5,
+      'semver-major-days': 30,
+      'semver-minor-days': 7,
+      'semver-patch-days': 3,
+    };
     const commonUpdate = {
       'package-ecosystem': 'npm',
       schedule: {
@@ -202,6 +276,7 @@ describe('M440 dependency audit CI', () => {
         timezone: 'America/New_York',
       },
       'open-pull-requests-limit': 5,
+      cooldown,
       groups: {
         'production-dependencies': { 'dependency-type': 'production' },
         'development-dependencies': { 'dependency-type': 'development' },
@@ -213,9 +288,29 @@ describe('M440 dependency audit CI', () => {
       updates: [
         { ...commonUpdate, directory: '/' },
         { ...commonUpdate, directory: '/src/raycast' },
+        {
+          'package-ecosystem': 'cargo',
+          directory: '/desktop/src-tauri',
+          schedule: {
+            interval: 'weekly',
+            day: 'monday',
+            time: '09:17',
+            timezone: 'America/New_York',
+          },
+          'open-pull-requests-limit': 3,
+          cooldown,
+        },
       ],
     });
     expect(dependabotText).not.toMatch(/password|token|secret|credential/i);
     expect(dependabotText).not.toMatch(/registries:|insecure-external-code-execution/i);
+    expect(dependabotText).not.toMatch(/^\s+(?:ignore|exclude):/m);
+    expect(dependencySecurityPolicy).toContain(
+      'GitHub applies `cooldown` only to version updates',
+    );
+    expect(dependencySecurityPolicy).toMatch(
+      /Security advisories need no override because they already bypass\s+the cooldown\./,
+    );
+    expect(dependencySecurityPolicy).toMatch(/Wildcard exclusions are\s+not permitted\./);
   });
 });

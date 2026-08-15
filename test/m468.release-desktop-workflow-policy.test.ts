@@ -6,7 +6,7 @@
  * release job's GitHub token at the minimum authority its upload step needs.
  */
 
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -20,6 +20,20 @@ const workflow = readFileSync(
 );
 const buildScript = readFileSync(join(REPO_ROOT, 'desktop/src-tauri/build.rs'), 'utf8');
 const cargoManifest = readFileSync(join(REPO_ROOT, 'desktop/src-tauri/Cargo.toml'), 'utf8');
+const cargoLock = readFileSync(join(REPO_ROOT, 'desktop/src-tauri/Cargo.lock'), 'utf8');
+const dependencySecurityPolicy = readFileSync(
+  join(REPO_ROOT, 'docs/DEPENDENCY-SECURITY.md'),
+  'utf8',
+);
+const cargoConfigText = [
+  join(REPO_ROOT, '.cargo/config'),
+  join(REPO_ROOT, '.cargo/config.toml'),
+  join(REPO_ROOT, 'desktop/src-tauri/.cargo/config'),
+  join(REPO_ROOT, 'desktop/src-tauri/.cargo/config.toml'),
+]
+  .filter((path) => existsSync(path))
+  .map((path) => readFileSync(path, 'utf8'))
+  .join('\n');
 const tauriConfig = JSON.parse(
   readFileSync(join(REPO_ROOT, 'desktop/src-tauri/tauri.conf.json'), 'utf8'),
 ) as { build?: { beforeBundleCommand?: string }; bundle?: { active?: boolean } };
@@ -180,6 +194,47 @@ describe('M468 desktop release workflow supply-chain policy', () => {
     });
     expect(linuxTargetPolicy.status).toBe(1);
     expect(linuxTargetPolicy.stderr).toContain('ASHLR_LINUX_DESKTOP_BUNDLE_QUARANTINED');
+  });
+
+  it('keeps the quarantined GLib advisory registry-visible instead of creating false closure', () => {
+    const glibPackages = [
+      ...cargoLock.matchAll(
+        /\[\[package\]\]\nname = "glib"\n([\s\S]*?)(?=\n\[\[package\]\]|$)/g,
+      ),
+    ];
+    expect(glibPackages).toHaveLength(1);
+    expect(glibPackages[0]?.[1]).toContain('version = "0.18.5"');
+    expect(glibPackages[0]?.[1]).toContain(
+      'source = "registry+https://github.com/rust-lang/crates.io-index"',
+    );
+    expect(glibPackages[0]?.[1]).toContain(
+      'checksum = "233daaf6e83ae6a12a52055f568f9d7cf4671dabb78ff9560ab6da230ce00ee5"',
+    );
+
+    expect(cargoManifest).not.toMatch(/^\s*\[(?:patch|replace)(?:\.|\])/m);
+    expect(cargoConfigText).not.toMatch(/replace-with|vendored-sources|^\s*directory\s*=/m);
+    expect(dependencySecurityPolicy).toContain('A path, git, or vendored replacement for GLib');
+    expect(dependencySecurityPolicy).toContain('could create a false clean result');
+    expect(dependencySecurityPolicy).toContain('Dependabot alert 32 must remain open');
+  });
+
+  it('removes both quick-xml highs with the smallest registry lock update', () => {
+    const plistPackage = cargoLock.match(
+      /\[\[package\]\]\nname = "plist"\n([\s\S]*?)(?=\n\[\[package\]\]|$)/,
+    )?.[1];
+    const quickXmlPackage = cargoLock.match(
+      /\[\[package\]\]\nname = "quick-xml"\n([\s\S]*?)(?=\n\[\[package\]\]|$)/,
+    )?.[1];
+
+    expect(plistPackage).toContain('version = "1.10.0"');
+    expect(plistPackage).toContain(
+      'source = "registry+https://github.com/rust-lang/crates.io-index"',
+    );
+    expect(quickXmlPackage).toContain('version = "0.41.0"');
+    expect(quickXmlPackage).toContain(
+      'source = "registry+https://github.com/rust-lang/crates.io-index"',
+    );
+    expect(cargoLock).not.toContain('version = "0.39.4"');
   });
 
   it('publishes only independently admitted macOS and Windows matrix artifacts', () => {
