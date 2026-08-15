@@ -95,8 +95,9 @@ tags fail closed.
 4. `.github/workflows/release.yml` then:
    - **verify** — full CI gate (typecheck / lint / build / test);
    - **release_canary** — on a disposable GitHub-hosted runner, check out the
-     exact event SHA without retained Git credentials, install root dependencies
-     with lifecycle scripts disabled, and run the existing signed release canary
+     exact event SHA without retained Git credentials, install exact Node
+     24.19.0 and npm 11.19.0, record the hosted Git/tar/sha256sum identities,
+     install root dependencies with lifecycle scripts disabled, and run the existing signed release canary
      against that candidate plus its distinct immediate first parent. The job
      verifies the self-authenticated receipt's exact candidate/rollback identity
      and strict `NO_AUTHORITY` schema, binds the stored receipt bytes to SHA-256,
@@ -130,6 +131,8 @@ The signed canary is a required fail-closed reproducibility and rollback
 observation, not independent release authority. The GitHub-hosted runner retains
 network access and workflow infrastructure, and both the canary implementation
 and its receipt verifier are pinned by the same workflow commit being evaluated.
+A recorded hosted-tool identity is evidence about that run, not an immutable
+toolchain guarantee; only Node and npm are version-pinned by this workflow.
 A compromise of that protected source could therefore affect producer and
 verifier together. Its ephemeral signature proves receipt self-consistency only;
 it does not replace protected review, npm trusted-publisher identity, environment

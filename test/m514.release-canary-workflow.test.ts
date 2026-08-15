@@ -64,8 +64,16 @@ describe('release workflow signed canary gate', () => {
     });
     expect(step('Set up Node.js 24')).toMatchObject({
       uses: 'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020',
-      with: { 'node-version': '24', 'package-manager-cache': false },
+      with: { 'node-version': '24.19.0', 'package-manager-cache': false },
     });
+    expect(step('Install pinned canary npm CLI')?.run)
+      .toBe('npm install --global npm@11.19.0 --ignore-scripts --no-audit --no-fund');
+    const toolchain = String(step('Bind canary toolchain identity')?.run ?? '');
+    expect(toolchain).toContain('[[ "$node_version" == "v24.19.0" ]]');
+    expect(toolchain).toContain('[[ "$npm_version" == "11.19.0" ]]');
+    expect(toolchain).toContain("git --version");
+    expect(toolchain).toContain('tar_output="$(tar --version)"');
+    expect(toolchain).toContain('sha256sum_output="$(sha256sum --version)"');
     expect(step('Install dependencies without lifecycle scripts')?.run)
       .toBe('npm ci --ignore-scripts --no-audit --no-fund');
 
@@ -101,6 +109,7 @@ describe('release workflow signed canary gate', () => {
     expect(summary).toContain('Signed release canary (NO_AUTHORITY)');
     expect(summary).toContain('Receipt SHA-256');
     expect(summary).toContain('Artifact SHA-256');
+    expect(summary).toContain('Toolchain:');
 
     const serialized = JSON.stringify(canary);
     expect(serialized).not.toMatch(/npm publish|npm-release|id-token|secrets\.|github\.token/);
@@ -108,6 +117,7 @@ describe('release workflow signed canary gate', () => {
     expect(releaseDocs).toContain('same workflow commit being evaluated');
     expect(releaseDocs).toContain('signature proves receipt self-consistency only');
     expect(releaseDocs).toContain('not independent release authority');
+    expect(releaseDocs).toContain('recorded hosted-tool identity is evidence about that run');
   });
 
   it.skipIf(process.platform === 'win32')(
