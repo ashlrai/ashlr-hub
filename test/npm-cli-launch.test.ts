@@ -29,6 +29,7 @@ import {
   assurePrivateStoragePath,
   PRIVATE_STORAGE_TEST_CONTROL,
 } from '../src/core/util/private-storage.js';
+import { canSymlink } from './helpers/platform.js';
 
 const tempDirs: string[] = [];
 
@@ -211,6 +212,31 @@ describe('shell-free npm CLI launch', () => {
       },
     })).toThrow('npm runtime closure changed during execution');
     expect(existsSync(replacementMarker)).toBe(false);
+  });
+
+  it.runIf(canSymlink())('keeps install-generated npm runtime bin links outside the trusted closure', () => {
+    const fixtureRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-npm-runtime-link-')));
+    tempDirs.push(fixtureRoot);
+    const fakeNode = join(fixtureRoot, 'bin', 'node');
+    const npmRoot = join(fixtureRoot, 'lib', 'node_modules', 'npm');
+    const trustedCli = join(npmRoot, 'bin', 'npm-cli.js');
+    const packageJson = join(npmRoot, 'package.json');
+    const arborist = join(npmRoot, 'node_modules', '@npmcli', 'arborist', 'bin', 'index.js');
+    const runtimeLink = join(npmRoot, 'node_modules', '.bin', 'arborist');
+    write(fakeNode, 'fixture node identity\n');
+    write(trustedCli, "process.stdout.write('must not run');\n");
+    write(packageJson, '{"name":"npm","version":"11.19.0"}\n');
+    write(arborist, "process.stdout.write('arborist');\n");
+    mkdirSync(dirname(runtimeLink), { recursive: true });
+    symlinkSync('../@npmcli/arborist/bin/index.js', runtimeLink);
+
+    expect(() => runTrustedNpmCli([], {
+      environment: { npm_execpath: trustedCli },
+    }, {
+      command: process.execPath,
+      execPath: fakeNode,
+      platform: 'linux',
+    })).toThrow('npm runtime closure contains a symbolic link');
   });
 
   it('isolates execution from an npm runtime ABA even when the original bytes are restored', () => {

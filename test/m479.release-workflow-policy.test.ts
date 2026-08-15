@@ -110,9 +110,12 @@ describe('M479 npm release workflow supply-chain admission', () => {
   });
 
   it('prepares before the minimal publish effect and verifies before GitHub release', () => {
-    const installIndex = prepareSteps.findIndex((step) => step.run === 'npm ci');
+    const installIndex = prepareSteps.findIndex((step) =>
+      step.run === 'node "$ASHLR_RELEASE_NPM_CLI" ci');
     const packIndex = prepareSteps.findIndex((step) =>
-      String(step.run ?? '').includes('npm pack --json --ignore-scripts'));
+      String(step.run ?? '').includes(
+        'node "$ASHLR_RELEASE_NPM_CLI" pack --json --ignore-scripts',
+      ));
     const artifactIndex = prepareSteps.findIndex((step) =>
       step.name === 'Upload bounded npm candidate handoff');
     const preparedVerifyIndex = publishSteps.findIndex((step) =>
@@ -210,6 +213,38 @@ describe('M479 npm release workflow supply-chain admission', () => {
     expect(releaseRun.indexOf('compare/${GITHUB_SHA}...${tag}'))
       .toBeGreaterThan(releaseRun.indexOf('gh release create "$tag"'));
     expect(workflowText).toContain('--prerelease --latest=false');
+  });
+
+  it('normalizes every pinned npm runtime without weakening the closure scanner', () => {
+    const allSteps = [
+      ...releaseCanarySteps,
+      ...prepareSteps,
+      ...publishSteps,
+      ...verifyPublishSteps,
+    ];
+    const installers = allSteps.filter((step) =>
+      String(step.name ?? '').startsWith('Install pinned symlink-free'));
+    expect(installers).toHaveLength(2);
+    for (const installer of installers) {
+      const run = String(installer.run ?? '');
+      expect(run).toContain('--global npm@11.19.0');
+      expect(run).toContain('--bin-links=false');
+      expect(run).toContain("realpathSync(process.execPath)");
+      expect(run).toContain('npm_shim="$toolchain_bin/npm"');
+      expect(run).toContain('npm_shim_target="../lib/node_modules/npm/bin/npm-cli.js"');
+      expect(run).toContain('test "$(readlink "$npm_shim")" = "$npm_shim_target"');
+      expect(run).toContain('[[ -e "$npm_shim" || -L "$npm_shim" ]]');
+      expect(run).toContain('test -f "$npm_cli" && test ! -L "$npm_cli"');
+      expect(run).toContain('find "$npm_root" -type l -print -quit');
+      expect(run).toContain('ln -s "$npm_shim_target" "$npm_shim"');
+      expect(run).toContain('test "$(realpath "$npm_shim")" = "$npm_cli"');
+      expect(run).toContain('test "$(npm --version)" = "11.19.0"');
+      expect(run).toContain('ASHLR_RELEASE_NPM_CLI=%s');
+      expect(run).not.toMatch(/\brm\b|unlink|ln\s+-(?:f|sf|fs)|--bin-links=true/u);
+    }
+    expect(workflowText).toContain(
+      'node "$ASHLR_RELEASE_NPM_CLI" --silent run release:canary',
+    );
   });
 
   it('documents manual release recovery without retrying an accepted npm version', () => {

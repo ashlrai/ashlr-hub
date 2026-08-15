@@ -96,7 +96,8 @@ tags fail closed.
    - **verify** — full CI gate (typecheck / lint / build / test);
    - **release_canary** — on a disposable GitHub-hosted runner, check out the
      exact event SHA without retained Git credentials, install exact Node
-     24.19.0 and npm 11.19.0, record the hosted Git/tar/sha256sum identities,
+     24.19.0 and a symlink-free npm 11.19.0 runtime, invoke its canonical CLI
+     directly, record the hosted Git/tar/sha256sum identities,
      install root dependencies with lifecycle scripts disabled, and run the existing signed release canary
      against that candidate plus its distinct immediate first parent. The job
      verifies the self-authenticated receipt's exact candidate/rollback identity
@@ -196,26 +197,44 @@ expected_revision="$(git rev-parse HEAD)"
 : "${EXPECTED_RUN_ID:?set to the accepted GitHub Actions release run id}"
 : "${EXPECTED_RUN_ATTEMPT:?set to its accepted run attempt}"
 test "$(node -p 'process.versions.node.split(".")[0]')" = "24"
-npm install --global npm@11.19.0 --ignore-scripts --no-audit --no-fund
+node_bin="$(node -p "require('node:fs').realpathSync(process.execPath)")"
+toolchain_bin="$(dirname "$node_bin")"
+npm_shim="$toolchain_bin/npm"
+npm_shim_target="../lib/node_modules/npm/bin/npm-cli.js"
+test -L "$npm_shim"
+test "$(readlink "$npm_shim")" = "$npm_shim_target"
+npm install --global npm@11.19.0 --ignore-scripts --no-audit --no-fund --bin-links=false
+npm_cli="$(node -p "const p=require('node:path'); p.resolve(process.argv[1],process.argv[2])" "$toolchain_bin" "$npm_shim_target")"
+npm_root="$(dirname "$(dirname "$npm_cli")")"
+test ! -e "$npm_shim" && test ! -L "$npm_shim"
+test -f "$npm_cli" && test ! -L "$npm_cli"
+test "$(realpath "$npm_cli")" = "$npm_cli"
+test "$(node -p "require('node:fs').lstatSync(process.argv[1]).nlink" "$npm_cli")" = "1"
+test "$(node "$npm_cli" --version)" = "11.19.0"
+test -z "$(find "$npm_root" -type l -print -quit)"
+ln -s "$npm_shim_target" "$npm_shim"
+test -L "$npm_shim"
+test "$(readlink "$npm_shim")" = "$npm_shim_target"
+test "$(realpath "$npm_shim")" = "$npm_cli"
 test "$(npm --version)" = "11.19.0"
-npm ci
-npm run build
+node "$npm_cli" ci
+node "$npm_cli" run build
 test -z "$(git status --porcelain --untracked-files=all)"
-expected_integrity="$(npm pack --dry-run --json --ignore-scripts | jq -r '.[0].integrity')"
-published_integrity="$(npm view "@ashlr/hub@${version}" dist.integrity)"
+expected_integrity="$(node "$npm_cli" pack --dry-run --json --ignore-scripts | jq -r '.[0].integrity')"
+published_integrity="$(node "$npm_cli" view "@ashlr/hub@${version}" dist.integrity)"
 test -n "$expected_integrity" && test "$expected_integrity" = "$published_integrity"
-test "$(npm view '@ashlr/hub' dist-tags.latest)" = "3.0.1"
-test "$(npm view '@ashlr/hub' dist-tags.candidate)" = "$version"
+test "$(node "$npm_cli" view '@ashlr/hub' dist-tags.latest)" = "3.0.1"
+test "$(node "$npm_cli" view '@ashlr/hub' dist-tags.candidate)" = "$version"
 
 verification_root="$(mktemp -d)"
 trap 'rm -rf "$verification_root"' EXIT
 cd "$verification_root"
-npm init --yes >/dev/null
-npm install --ignore-scripts --no-audit --no-fund --save-exact \
+node "$npm_cli" init --yes >/dev/null
+node "$npm_cli" install --ignore-scripts --no-audit --no-fund --save-exact \
   "@ashlr/hub@${version}"
 installed_version="$(node -p "require('./node_modules/@ashlr/hub/package.json').version")"
 test "$installed_version" = "$version"
-npm audit signatures --json --include-attestations > npm-signature-audit.json
+node "$npm_cli" audit signatures --json --include-attestations > npm-signature-audit.json
 node "$tag_checkout/scripts/verify-npm-release-provenance.mjs" \
   npm-signature-audit.json \
   "@ashlr/hub" "$version" "$expected_integrity" \

@@ -220,12 +220,14 @@ describe('release workflow', () => {
       ref: '${{ github.sha }}',
     });
     const prepareRun = runText(prepareJob);
-    expect(prepareRun).toContain('npm ci');
-    expect(prepareRun).toContain('npm run build');
+    expect(prepareRun).toContain('node "$ASHLR_RELEASE_NPM_CLI" ci');
+    expect(prepareRun).toContain('node "$ASHLR_RELEASE_NPM_CLI" run build');
     expect(prepareRun).toContain('scripts/check-version.mjs');
     expect(prepareRun).toContain('scripts/extract-changelog.mjs');
-    expect(prepareRun).toContain('npm run prepublishOnly');
-    expect(prepareRun).toContain('npm pack --json --ignore-scripts');
+    expect(prepareRun).toContain('node "$ASHLR_RELEASE_NPM_CLI" run prepublishOnly');
+    expect(prepareRun).toContain(
+      'node "$ASHLR_RELEASE_NPM_CLI" pack --json --ignore-scripts',
+    );
     expect(prepareRun).toContain('dist/build-identity.json');
     expect(prepareRun).toContain('.revision == $revision');
     expect(prepareRun).toContain('.dirty == false');
@@ -256,7 +258,9 @@ describe('release workflow', () => {
     expect(publishRun).toContain('--access public');
     expect(publishRun).toContain('--tag "$RELEASE_DIST_TAG"');
     expect(publishRun).not.toMatch(/npm publish --provenance --access public(?:\s|$)/);
-    expect(publishRun).not.toMatch(/npm ci|npm run|npm pack|node scripts\//);
+    expect(publishRun).not.toMatch(
+      /(?:npm|node "\$ASHLR_RELEASE_NPM_CLI") (?:ci|run|pack)\b|node scripts\//,
+    );
 
     expect(verifyPublishJob.environment).toBeUndefined();
     expect(verifyPublishJob.permissions).toEqual({ contents: 'read' });
@@ -407,9 +411,9 @@ describe('release workflow', () => {
     );
     expect(releaseDocs).toContain('--notes-file "$release_notes" --prerelease --latest=false');
     expect(releaseDocs).toMatch(/npm `latest`\s+to equal `3\.0\.1`/);
-    expect(releaseDocs).toContain('npm audit signatures');
+    expect(releaseDocs).toContain('node "$npm_cli" audit signatures');
     expect(releaseDocs).toContain(
-      'npm install --ignore-scripts --no-audit --no-fund --save-exact',
+      'node "$npm_cli" install --ignore-scripts --no-audit --no-fund --save-exact',
     );
     expect(releaseDocs).not.toContain('npm install --package-lock-only');
     expect(releaseDocs).toContain('Promotion is a separate explicit');
