@@ -9,6 +9,11 @@ updates:
       time: "09:17"
       timezone: America/New_York
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 5
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
     groups:
       production-dependencies:
         dependency-type: production
@@ -23,8 +28,27 @@ updates:
       time: "09:17"
       timezone: America/New_York
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 5
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
     groups:
       production-dependencies:
         dependency-type: production
       development-dependencies:
         dependency-type: development
+
+  - package-ecosystem: cargo
+    directory: /desktop/src-tauri
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:17"
+      timezone: America/New_York
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 5
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3

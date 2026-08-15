@@ -12,6 +12,9 @@ on:
       - "src/raycast/package-lock.json"
       - "src/raycast/npm-shrinkwrap.json"
       - "src/raycast/.npmrc"
+      - "desktop/src-tauri/Cargo.toml"
+      - "desktop/src-tauri/Cargo.lock"
+      - "docs/DEPENDENCY-SECURITY.md"
       - ".github/dependabot.yml"
       - ".github/workflows/dependency-audit.yml"
   pull_request:
@@ -31,9 +34,12 @@ jobs:
   audit:
     name: Dependency audit (root + Raycast)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+      CARGO_AUDIT_VERSION: "0.22.2"
+      CARGO_AUDIT_TARGET: x86_64-unknown-linux-gnu
+      CARGO_AUDIT_SHA256: ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -45,6 +51,24 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
+
+      - name: Install pinned cargo-audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/cargo-audit.tgz"
+          extract_dir="${RUNNER_TEMP}/cargo-audit-extract"
+          bin_dir="${RUNNER_TEMP}/cargo-audit-bin"
+          url="https://github.com/rustsec/rustsec/releases/download/cargo-audit/v${CARGO_AUDIT_VERSION}/cargo-audit-${CARGO_AUDIT_TARGET}-v${CARGO_AUDIT_VERSION}.tgz"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            --retry 3 --retry-all-errors --output "${archive}" "${url}"
+          echo "${CARGO_AUDIT_SHA256}  ${archive}" | sha256sum --check --strict
+          mkdir --parents "${extract_dir}" "${bin_dir}"
+          tar --extract --gzip --file "${archive}" --directory "${extract_dir}" \
+            --strip-components=1
+          install --mode 0755 "${extract_dir}/cargo-audit" "${bin_dir}/cargo-audit"
+          echo "${bin_dir}" >> "${GITHUB_PATH}"
+          "${bin_dir}/cargo-audit" --version
 
       - name: Verify root dependency graph installs
         run: npm ci --ignore-scripts --no-audit --no-fund --force=false --legacy-peer-deps=false --strict-peer-deps
@@ -66,3 +90,8 @@ jobs:
       - name: Audit Raycast production dependencies
         working-directory: src/raycast
         run: npm audit --package-lock-only --ignore-scripts --omit=dev --audit-level=low
+
+      # The only exception is the still-open, externally contained Linux GLib
+      # advisory. New RustSec vulnerabilities continue to fail this job.
+      - name: Audit desktop Cargo dependencies
+        run: cargo-audit audit --file desktop/src-tauri/Cargo.lock --ignore RUSTSEC-2024-0429
