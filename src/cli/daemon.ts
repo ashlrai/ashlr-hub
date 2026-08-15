@@ -36,6 +36,8 @@ type DaemonSubcommand =
   | 'start'
   | 'stop'
   | 'status'
+  | 'activation-preflight'
+  | 'activate'
   | 'recover-state'
   | 'resolve-state'
   | 'install'
@@ -46,6 +48,8 @@ const DAEMON_SUBCOMMANDS = new Set<DaemonSubcommand>([
   'start',
   'stop',
   'status',
+  'activation-preflight',
+  'activate',
   'recover-state',
   'resolve-state',
   'install',
@@ -70,6 +74,10 @@ const DAEMON_USAGE: Record<DaemonSubcommand, string> = {
     'Usage: ashlr daemon start [--once] [--dry-run] [--drain diagnostic-reslices] [--limit <n>] [--budget <usd>] [--interval <ms>] [--parallel <n>]',
   stop: 'Usage: ashlr daemon stop',
   status: 'Usage: ashlr daemon status [--json]',
+  'activation-preflight':
+    'Usage: ashlr daemon activation-preflight --request <absolute-canonical-plan-path> [--json]',
+  activate:
+    'Usage: ashlr daemon activate --request <absolute-canonical-plan-path> --authorize <admission-sha256> --confirm <admission-sha256> [--json]',
   'recover-state':
     'Usage: ashlr daemon recover-state --dry-run --expected-sha256 <sha256> [--json]\n' +
     '   or: ashlr daemon recover-state --execute --plan-id <uuid> --plan-sha256 <sha256> --authorize <plan-sha256> [--json]',
@@ -87,6 +95,8 @@ Subcommands:
   start           Run the proposal-only daemon
   stop            Request an orderly daemon shutdown
   status          Show daemon state [--json]
+  activation-preflight  Verify operator-custodied signed release and rollback evidence (read-only)
+  activate        Validate one exact signed macOS plan; resident mutation remains unavailable
   recover-state   Preview or explicitly execute one exact state quarantine
   resolve-state   Preview or explicitly resolve one exact quarantine
   install         Temporarily unavailable (resident service mutation restricted)
@@ -252,6 +262,16 @@ interface ResolveStateFlags {
   json: boolean;
 }
 
+interface ActivationPreflightFlags {
+  requestPath?: string;
+  json: boolean;
+}
+
+interface ActivationFlags extends ActivationPreflightFlags {
+  authorize?: string;
+  confirm?: string;
+}
+
 /** Parse a numeric flag value; returns undefined when missing/invalid. */
 function parseNum(v: string | undefined): number | undefined {
   if (v === undefined) return undefined;
@@ -407,6 +427,67 @@ function parseResolveStateFlags(args: string[]): { flags: ResolveStateFlags; err
     if (flags.quarantinePlanId || flags.quarantineReceiptSha256) {
       return { flags, err: '--execute is bound by the persisted plan and does not accept quarantine receipt flags' };
     }
+  }
+  return { flags };
+}
+
+function parseActivationPreflightFlags(
+  args: string[],
+): { flags: ActivationPreflightFlags; err?: string } {
+  const flags: ActivationPreflightFlags = { json: false };
+  const seen = new Set<string>();
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === '--json') {
+      if (seen.has(arg)) return { flags, err: '--json must appear at most once' };
+      seen.add(arg);
+      flags.json = true;
+      continue;
+    }
+    if (arg === '--request') {
+      if (seen.has(arg)) return { flags, err: '--request must appear exactly once' };
+      seen.add(arg);
+      const value = args[i + 1];
+      if (!value || value.startsWith('-')) return { flags, err: '--request requires a value' };
+      flags.requestPath = value;
+      i += 1;
+      continue;
+    }
+    return {
+      flags,
+      err: arg?.startsWith('-') ? `Unknown flag: ${arg}` : `Unexpected argument: ${arg}`,
+    };
+  }
+  if (!flags.requestPath) return { flags, err: 'activation-preflight requires --request' };
+  return { flags };
+}
+
+function parseActivationFlags(args: string[]): { flags: ActivationFlags; err?: string } {
+  const flags: ActivationFlags = { json: false };
+  const seen = new Set<string>();
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === '--json') {
+      if (seen.has(arg)) return { flags, err: '--json must appear at most once' };
+      seen.add(arg);
+      flags.json = true;
+      continue;
+    }
+    if (arg === '--request' || arg === '--authorize' || arg === '--confirm') {
+      if (seen.has(arg)) return { flags, err: `${arg} must appear exactly once` };
+      seen.add(arg);
+      const value = args[i + 1];
+      if (!value || value.startsWith('-')) return { flags, err: `${arg} requires a value` };
+      if (arg === '--request') flags.requestPath = value;
+      else if (arg === '--authorize') flags.authorize = value;
+      else flags.confirm = value;
+      i += 1;
+      continue;
+    }
+    return { flags, err: arg?.startsWith('-') ? `Unknown flag: ${arg}` : `Unexpected argument: ${arg}` };
+  }
+  if (!flags.requestPath || !flags.authorize || !flags.confirm) {
+    return { flags, err: 'activate requires --request, --authorize, and --confirm exactly once' };
   }
   return { flags };
 }
@@ -747,6 +828,88 @@ async function cmdDaemonStatus(jsonMode: boolean): Promise<number> {
     console.log('');
   }
   return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: activation-preflight (strictly read-only artifact authority)
+// ---------------------------------------------------------------------------
+
+async function cmdDaemonActivationPreflight(
+  flags: ActivationPreflightFlags,
+): Promise<number> {
+  const col = makeColors(process.stdout.isTTY === true);
+  let authority: typeof import('../core/daemon/runtime-activation-authority.js');
+  try {
+    authority = await import('../core/daemon/runtime-activation-authority.js');
+  } catch {
+    console.error(col.red('error: ') + 'runtime activation authority preflight is unavailable. No state was changed.');
+    return 1;
+  }
+  const result = authority.preflightRuntimeActivationAuthority({
+    requestPath: flags.requestPath!,
+  });
+  if (flags.json) {
+    console.log(JSON.stringify(result, null, 2));
+  } else {
+    console.log('');
+    console.log(col.bold('  runtime activation authority preflight'));
+    console.log('  ' + col.bold('evidence:      ') +
+      (result.preflightPassed ? col.green('passed (no authority)') : col.red('blocked')));
+    console.log('  ' + col.bold('activation:    ') + col.yellow('withheld'));
+    console.log('  ' + col.bold('plan id:       ') + col.dim(result.plan.planId ?? 'unavailable'));
+    console.log('  ' + col.bold('plan SHA-256:  ') + col.dim(result.plan.planDigest ?? 'unavailable'));
+    console.log('  ' + col.bold('admission SHA: ') + col.dim(result.plan.admissionDigest ?? 'unavailable'));
+    console.log('  ' + col.bold('policy epoch:  ') + col.dim(result.plan.policyEpoch === null
+      ? 'unavailable'
+      : String(result.plan.policyEpoch)));
+    console.log('  ' + col.bold('candidate:     ') + col.dim(
+      result.releases.candidate.signedDeclarations.expectedRevision ?? 'unavailable',
+    ));
+    console.log('  ' + col.bold('rollback:      ') + col.dim(
+      result.releases.rollback.signedDeclarations.expectedRevision ?? 'unavailable',
+    ));
+    for (const blocker of result.blockers) {
+      console.log('  ' + col.red(blocker.code) + col.dim(` - ${blocker.detail}`));
+    }
+    console.log('');
+    console.log(col.yellow('  No install, launch, start, deploy, rollback, or daemon-state mutation was performed.'));
+    console.log(col.dim(`  Remaining authority: ${result.authorityBlockers.join(', ')}`));
+    console.log('');
+  }
+  return result.preflightPassed ? 0 : 1;
+}
+
+async function cmdDaemonActivate(flags: ActivationFlags): Promise<number> {
+  const col = makeColors(process.stdout.isTTY === true);
+  let transaction: typeof import('../core/daemon/runtime-activation-transaction.js');
+  try {
+    transaction = await import('../core/daemon/runtime-activation-transaction.js');
+  } catch {
+    console.error(col.red('error: ') + 'runtime activation admission is unavailable. No state was changed.');
+    return 1;
+  }
+  const result = await transaction.activateRuntimeRelease({
+    authorize: flags.authorize!,
+    confirm: flags.confirm!,
+    requestPath: flags.requestPath!,
+  });
+  if (flags.json) {
+    console.log(JSON.stringify(result, null, 2));
+  } else {
+    console.log('');
+    console.log(col.bold('  runtime activation admission (read-only)'));
+    console.log('  ' + col.bold('result:       ') + (result.activated ? col.green('activated') : col.red(result.phase)));
+    console.log('  ' + col.bold('activation:   ') + col.dim(result.activationId ?? 'unavailable'));
+    console.log('  ' + col.bold('candidate:    ') + col.dim(result.candidateRevision ?? 'unavailable'));
+    console.log('  ' + col.bold('plan SHA-256: ') + col.dim(result.planDigest ?? 'unavailable'));
+    console.log('  ' + col.bold('admission SHA:') + ' ' + col.dim(result.admissionDigest ?? 'unavailable'));
+    console.log('  ' + col.bold('request SHA:  ') + col.dim(result.canonicalRequestSha256 ?? 'unavailable'));
+    console.log('  ' + col.bold('trust SHA:    ') + col.dim(result.trustRootCanonicalSha256 ?? 'unavailable'));
+    console.log('  ' + col.bold('mutation:     ') + col.dim('not performed'));
+    console.log('  ' + col.dim(result.reason));
+    console.log('');
+  }
+  return result.activated ? 0 : 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -1108,12 +1271,22 @@ export async function cmdDaemon(args: string[]): Promise<number> {
   }
 
   let startFlags: StartFlags | undefined;
+  let activationPreflightFlags: ActivationPreflightFlags | undefined;
+  let activationFlags: ActivationFlags | undefined;
   let recoverStateFlags: RecoverStateFlags | undefined;
   let resolveStateFlags: ResolveStateFlags | undefined;
   let validationError: string | undefined;
   if (sub === 'start') {
     const parsed = parseStartFlags(rest);
     startFlags = parsed.flags;
+    validationError = parsed.err;
+  } else if (sub === 'activation-preflight') {
+    const parsed = parseActivationPreflightFlags(rest);
+    activationPreflightFlags = parsed.flags;
+    validationError = parsed.err;
+  } else if (sub === 'activate') {
+    const parsed = parseActivationFlags(rest);
+    activationFlags = parsed.flags;
     validationError = parsed.err;
   } else if (sub === 'recover-state') {
     const parsed = parseRecoverStateFlags(rest);
@@ -1140,6 +1313,10 @@ export async function cmdDaemon(args: string[]): Promise<number> {
       return cmdDaemonStop();
     case 'status':
       return cmdDaemonStatus(rest.includes('--json'));
+    case 'activation-preflight':
+      return cmdDaemonActivationPreflight(activationPreflightFlags!);
+    case 'activate':
+      return cmdDaemonActivate(activationFlags!);
     case 'recover-state':
       return cmdDaemonRecoverState(recoverStateFlags!);
     case 'resolve-state':
