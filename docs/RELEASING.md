@@ -170,6 +170,98 @@ The CI pack-smoke step installs the tarball into a clean directory and
 exercises both the `ashlr` bin and the `@ashlr/hub/types` + `/core` entry
 points, so a broken exports map can never ship.
 
+### Signed observation-only canary
+
+Before authorizing a release, an exact commit can be inspected through the
+same dependency-inventory, runtime-manifest, signed-envelope, and release-pair
+APIs used by the runtime release controls:
+
+```bash
+npm --silent run release:canary -- \
+  --candidate "$(git rev-parse HEAD)" \
+  --expected-revision "$(git rev-parse HEAD)" \
+  --trusted-protected-source
+```
+
+An optional rollback commit must be a distinct ancestor of the candidate:
+
+```bash
+npm --silent run release:canary -- \
+  --candidate "$(git rev-parse HEAD)" \
+  --expected-revision "$(git rev-parse HEAD)" \
+  --rollback "$(git rev-parse HEAD^)" \
+  --trusted-protected-source
+```
+
+This command has **no OS sandbox**. The acknowledgement flag does not establish
+trust; it records the caller's assertion that every selected commit is trusted,
+protected source. Run it only in a disposable VM or disposable OS account with
+no production credentials, services, data, network authority, or active Ashlr
+runtime. Candidate-controlled build and CLI code executes, so environment and
+external effects are explicitly **unattested**. A temporary prefix and stripped
+environment variables reduce accidental exposure but are not confinement.
+
+Each of the two observations starts with its own Git archive, extraction,
+recursive no-symlink/no-special-file check, npm cache, dependency install,
+build, pack, production-only offline script-free artifact install, export
+smoke, and CLI smoke. It verifies the generated dependency inventory and full
+installed runtime tree, builds a runtime manifest bound to the caller-selected
+exact commit and Node interpreter, and requires the independently produced
+observations to match byte-for-byte. Archive builds truthfully retain
+`build-identity.json` provenance as `unavailable`; they never manufacture a
+`github-actions` identity. Extraction is supported only on Darwin with checked
+bsdtar or Linux with checked GNU tar and fails closed elsewhere.
+
+The release evidence is signed and immediately verified with a fresh Ed25519
+key held only in process memory. Its envelope expires after 10 minutes and its
+key declaration after 15 minutes. The final redacted receipt is also
+canonically signed and includes its ephemeral SPKI public key, signature, key
+digest, and signed-input digest. Those bundled values establish signature
+**self-consistency only**: an attacker who can replace the receipt can also
+generate another key and re-sign it. The verifier therefore returns false
+unless the caller supplies an expected receipt digest or SPKI-key digest. The
+caller must obtain that pin through an independent trusted channel; the
+verifier cannot determine where a supplied value came from. The bundled public
+key has no external identity, trust anchor, provenance, or authority. The
+temporary tree is removed before the receipt is emitted. Private-key bytes,
+paths, raw command output, credentials, source, manifests, and evidence
+envelopes are not returned.
+
+To retain and independently check the self-authenticated integrity wrapper:
+
+```bash
+receipt_path="$(mktemp)"
+npm --silent run release:canary -- \
+  --candidate "$(git rev-parse HEAD)" \
+  --expected-revision "$(git rev-parse HEAD)" \
+  --trusted-protected-source > "$receipt_path"
+# A trusted producer now transmits the matching pin over a separate channel.
+: "${EXPECTED_CANARY_RECEIPT_SHA256:?set from an independent trusted channel}"
+node --input-type=module -e '
+  import { readFileSync } from "node:fs";
+  import { verifySelfAuthenticatedCanaryReceipt } from "./scripts/run-signed-release-canary.mjs";
+  const bundle = JSON.parse(readFileSync(process.argv[1], "utf8"));
+  const expected = { signedCanonicalReceiptSha256: process.argv[2] };
+  if (!verifySelfAuthenticatedCanaryReceipt(bundle, expected)) process.exit(1);
+' "$receipt_path" "$EXPECTED_CANARY_RECEIPT_SHA256"
+rm -f "$receipt_path"
+```
+
+Successful verification against an independently obtained pin establishes only
+that the receipt matches that pin and its signature. Verification using values
+copied from the same bundle would establish only self-consistency and is
+not distinguishable by the helper, so it provides no tamper resistance.
+Neither result establishes who ran the command, whether the selected source
+was protected, whether effects were contained, or whether any release or
+runtime action is authorized.
+
+This canary is evidence, not authorization. It grants **zero** permission to
+publish, tag, install an active runtime, launch, deploy, start a service,
+activate, or roll back. Even a verified candidate/rollback pair remains
+`observation-only`; the normal protected CI, npm trusted-publisher approval,
+release tag, provenance, runtime installation, launch, and production
+acceptance gates remain separate and mandatory.
+
 ## Install channels
 
 - **git checkout** (contributors): `ashlr update` = `git pull --ff-only` + rebuild.
