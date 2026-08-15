@@ -34,10 +34,159 @@ jobs:
     permissions:
       contents: read
 
+  release_canary:
+    name: Signed release canary (NO_AUTHORITY)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: verify
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout the immutable event commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Bind candidate and distinct first-parent rollback
+        id: revisions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          candidate="$(git rev-parse --verify "HEAD^{commit}")"
+          rollback="$(git rev-parse --verify "${GITHUB_SHA}^1")"
+          read -r observed_candidate first_parent remaining_parents \
+            <<<"$(git rev-list --parents --max-count=1 "$GITHUB_SHA")"
+          if [[ ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ||
+                "$candidate" != "$GITHUB_SHA" ||
+                ! "$rollback" =~ ^[0-9a-f]{40}$ ||
+                "$rollback" == "$GITHUB_SHA" ||
+                "$observed_candidate" != "$GITHUB_SHA" ||
+                "$first_parent" != "$rollback" ]]; then
+            echo "Candidate and first-parent rollback identity could not be established." >&2
+            exit 1
+          fi
+          git merge-base --is-ancestor "$rollback" "$GITHUB_SHA"
+          printf 'rollback=%s\n' "$rollback" >> "$GITHUB_OUTPUT"
+      - name: Set up Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.19.0"
+          package-manager-cache: false
+      - name: Install pinned canary npm CLI
+        run: npm install --global npm@11.19.0 --ignore-scripts --no-audit --no-fund
+      - name: Bind canary toolchain identity
+        id: canary_toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          node_version="$(node --version)"
+          npm_version="$(npm --version)"
+          git_version="$(git --version)"
+          tar_output="$(tar --version)"
+          sha256sum_output="$(sha256sum --version)"
+          tar_version="${tar_output%%$'\n'*}"
+          sha256sum_version="${sha256sum_output%%$'\n'*}"
+          [[ "$node_version" == "v24.19.0" ]]
+          [[ "$npm_version" == "11.19.0" ]]
+          printf 'node=%s\n' "$node_version" >> "$GITHUB_OUTPUT"
+          printf 'npm=%s\n' "$npm_version" >> "$GITHUB_OUTPUT"
+          printf 'git=%s\n' "$git_version" >> "$GITHUB_OUTPUT"
+          printf 'tar=%s\n' "$tar_version" >> "$GITHUB_OUTPUT"
+          printf 'sha256sum=%s\n' "$sha256sum_version" >> "$GITHUB_OUTPUT"
+      - name: Install dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Run and verify bounded NO_AUTHORITY receipt
+        id: canary
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+
+          evidence_root="$(mktemp -d "$RUNNER_TEMP/signed-release-canary.XXXXXX")"
+          driver_home="$evidence_root/home"
+          mkdir "$driver_home"
+          : > "$evidence_root/npmrc"
+          receipt="$evidence_root/receipt.json"
+          digest_file="$evidence_root/receipt.sha256"
+          env -i \
+            CI=true \
+            HOME="$driver_home" \
+            LANG="${LANG:-C.UTF-8}" \
+            NPM_CONFIG_USERCONFIG="$evidence_root/npmrc" \
+            PATH="$PATH" \
+            npm --silent run release:canary -- \
+            --candidate "$GITHUB_SHA" \
+            --expected-revision "$GITHUB_SHA" \
+            --rollback "${{ steps.revisions.outputs.rollback }}" \
+            --trusted-protected-source |
+            tee "$receipt" |
+            env -i PATH="$PATH" node scripts/verify-signed-release-canary-receipt.mjs \
+              "$GITHUB_SHA" "${{ steps.revisions.outputs.rollback }}" > "$digest_file"
+
+          test -f "$receipt" && test ! -L "$receipt"
+          test -f "$digest_file" && test ! -L "$digest_file"
+          test "$(stat --format='%h' "$receipt")" = "1"
+          test "$(stat --format='%h' "$digest_file")" = "1"
+          receipt_bytes="$(wc -c < "$receipt")"
+          digest_bytes="$(wc -c < "$digest_file")"
+          if (( receipt_bytes < 2 || receipt_bytes > 1048576 || digest_bytes != 65 )); then
+            echo "Signed release canary evidence is out of bounds." >&2
+            exit 1
+          fi
+          receipt_sha256="$(tr -d '\n' < "$digest_file")"
+          observed_sha256="$(sha256sum "$receipt" | cut -d ' ' -f 1)"
+          if [[ ! "$receipt_sha256" =~ ^[0-9a-f]{64}$ ||
+                "$observed_sha256" != "$receipt_sha256" ]]; then
+            echo "Signed release canary receipt digest does not match stored bytes." >&2
+            exit 1
+          fi
+          printf 'receipt=%s\n' "$receipt" >> "$GITHUB_OUTPUT"
+          printf 'digest=%s\n' "$digest_file" >> "$GITHUB_OUTPUT"
+          printf 'receipt_sha256=%s\n' "$receipt_sha256" >> "$GITHUB_OUTPUT"
+      - name: Upload bounded signed canary evidence
+        id: canary_artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: signed-release-canary-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.canary.outputs.receipt }}
+            ${{ steps.canary.outputs.digest }}
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 9
+          overwrite: false
+          include-hidden-files: false
+      - name: Summarize observation-only canary evidence
+        shell: bash
+        env:
+          ARTIFACT_SHA256: ${{ steps.canary_artifact.outputs.artifact-digest }}
+          GIT_VERSION: ${{ steps.canary_toolchain.outputs.git }}
+          NODE_VERSION: ${{ steps.canary_toolchain.outputs.node }}
+          NPM_VERSION: ${{ steps.canary_toolchain.outputs.npm }}
+          RECEIPT_SHA256: ${{ steps.canary.outputs.receipt_sha256 }}
+          ROLLBACK_SHA: ${{ steps.revisions.outputs.rollback }}
+          SHA256SUM_VERSION: ${{ steps.canary_toolchain.outputs.sha256sum }}
+          TAR_VERSION: ${{ steps.canary_toolchain.outputs.tar }}
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          {
+            echo "## Signed release canary (NO_AUTHORITY)"
+            echo "- Candidate: \`$GITHUB_SHA\`"
+            echo "- First-parent rollback: \`$ROLLBACK_SHA\`"
+            echo "- Receipt SHA-256: \`$RECEIPT_SHA256\`"
+            echo "- Artifact SHA-256: \`$ARTIFACT_SHA256\`"
+            echo "- Toolchain: \`$NODE_VERSION\`, npm \`$NPM_VERSION\`, \`$GIT_VERSION\`, \`$TAR_VERSION\`, \`$SHA256SUM_VERSION\`"
+            echo "- Authority: all release, install, launch, rollback, and activation permissions remain false"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   publish:
     name: Publish to npm
     runs-on: ubuntu-latest
-    needs: verify
+    needs: [verify, release_canary]
     environment: npm-release
     permissions:
       contents: read

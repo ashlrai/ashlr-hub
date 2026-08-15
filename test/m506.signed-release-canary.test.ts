@@ -26,6 +26,10 @@ import {
   SIGNED_RELEASE_CANARY_RECEIPT_SIGNATURE_DOMAIN,
   verifySelfAuthenticatedCanaryReceipt,
 } from '../scripts/run-signed-release-canary.mjs';
+import {
+  verifyReleaseCanaryReceiptBundle,
+  verifyReleaseCanaryReceiptBytes,
+} from '../scripts/verify-signed-release-canary-receipt.mjs';
 import { evaluateRuntimeReleaseCanaryRollbackEvidence } from '../src/core/daemon/runtime-release-canary-rollback-evidence.js';
 import {
   buildRuntimeReleaseEvidenceTrustRoot,
@@ -318,6 +322,31 @@ describe('signed release canary command', () => {
     const pins = externalPins(bundle);
     expect(verifySelfAuthenticatedCanaryReceipt(bundle)).toBe(false);
     expect(verifySelfAuthenticatedCanaryReceipt(bundle, pins)).toBe(true);
+    expect(verifyReleaseCanaryReceiptBundle(bundle, {
+      candidateRevision: CANDIDATE_REVISION,
+      rollbackRevision: ROLLBACK_REVISION,
+    })).toBe(true);
+    const emittedBytes = Buffer.from(`${JSON.stringify(bundle, null, 2)}\n`);
+    expect(verifyReleaseCanaryReceiptBytes(emittedBytes, {
+      candidateRevision: CANDIDATE_REVISION,
+      rollbackRevision: ROLLBACK_REVISION,
+    })).toBe(sha256(emittedBytes));
+    expect(() => verifyReleaseCanaryReceiptBytes(Buffer.alloc(0), {
+      candidateRevision: CANDIDATE_REVISION,
+      rollbackRevision: ROLLBACK_REVISION,
+    })).toThrow('empty or out of bounds');
+    expect(() => verifyReleaseCanaryReceiptBytes(Buffer.alloc(1024 * 1024 + 1), {
+      candidateRevision: CANDIDATE_REVISION,
+      rollbackRevision: ROLLBACK_REVISION,
+    })).toThrow('empty or out of bounds');
+    expect(() => verifyReleaseCanaryReceiptBundle(bundle, {
+      candidateRevision: 'c'.repeat(40),
+      rollbackRevision: ROLLBACK_REVISION,
+    })).toThrow('NO_AUTHORITY release-pair contract');
+    expect(() => verifyReleaseCanaryReceiptBundle(bundle, {
+      candidateRevision: CANDIDATE_REVISION,
+      rollbackRevision: CANDIDATE_REVISION,
+    })).toThrow('must be distinct exact commit SHAs');
     expect(canonicalCanaryReceipt(bundle.receipt)).toContain('"environmentEffects":"unattested"');
     expect(JSON.stringify(bundle)).not.toContain('/private/');
     expect(parseUnsignedRuntimeReleaseManifest(candidateManifest.canonicalJson)).toMatchObject({ ok: true });
@@ -339,6 +368,10 @@ describe('signed release canary command', () => {
       mutate(attack);
       attackerResign(attack);
       expect(verifySelfAuthenticatedCanaryReceipt(attack, externalPins(attack))).toBe(false);
+      expect(() => verifyReleaseCanaryReceiptBundle(attack, {
+        candidateRevision: CANDIDATE_REVISION,
+        rollbackRevision: ROLLBACK_REVISION,
+      })).toThrow();
     }
   });
 

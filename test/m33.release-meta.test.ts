@@ -152,6 +152,7 @@ describe('release workflow', () => {
     outputs?: Record<string, string>;
     steps?: WorkflowStep[];
     'runs-on'?: string;
+    'timeout-minutes'?: number;
   }
   interface ReleaseWorkflow {
     on?: { push?: { tags?: string[] } };
@@ -163,6 +164,7 @@ describe('release workflow', () => {
   const parsed = parseYaml(workflow) as ReleaseWorkflow;
   const jobs = parsed.jobs ?? {};
   const verifyJob = jobs['verify'] ?? {};
+  const releaseCanaryJob = jobs['release_canary'] ?? {};
   const publishJob = jobs['publish'] ?? {};
   const releaseJob = jobs['release'] ?? {};
   const steps = (job: WorkflowJob): WorkflowStep[] => job.steps ?? [];
@@ -182,14 +184,15 @@ describe('release workflow', () => {
       'cancel-in-progress': false,
     });
     expect(parsed.permissions).toEqual({});
-    expect(Object.keys(jobs)).toEqual(['verify', 'publish', 'release']);
+    expect(Object.keys(jobs)).toEqual(['verify', 'release_canary', 'publish', 'release']);
     expect(verifyJob.uses).toBe('./.github/workflows/ci.yml');
     expect(verifyJob.permissions).toEqual({ contents: 'read' });
     expect(ciWorkflow).toMatch(/(?:^|\n)\s{2}workflow_call:\s*(?:\n|$)/);
     expect(verifyJob['runs-on']).toBeUndefined();
     expect(verifyJob.steps).toBeUndefined();
     expect(verifyJob.environment).toBeUndefined();
-    expect(publishJob.needs).toBe('verify');
+    expect(releaseCanaryJob.needs).toBe('verify');
+    expect(publishJob.needs).toEqual(['verify', 'release_canary']);
     expect(releaseJob.needs).toBe('publish');
     expect(ciWorkflow).not.toMatch(/\$\{\{\s*secrets\./);
     expect(ciWorkflow).not.toMatch(/^\s+environment:/m);
