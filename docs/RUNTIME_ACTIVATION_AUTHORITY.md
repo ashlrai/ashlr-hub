@@ -92,21 +92,20 @@ remains read-only.
 Full resident production activation requires a future native launchd v2
 transaction. At minimum, that consumer must add exact candidate staging and
 provenance, signed prior version/revision/plist/package plus loaded-and-disabled
-state, a lifecycle lock and signed exact-keyed fsynced journal, live launchd
+state observed from the native manager, an activation-specific signing root,
+trusted monotonic time, external monotonic compare-and-swap replay consumption,
+a lifecycle lock and signed exact-keyed fsynced journal, live launchd
 PID/start/executable/runtime acknowledgement, separate release-bound dispatch
 authorization, pointer CAS, crash recovery at every phase, and settled-state
-revalidation. It must restore an exact stopped 3.1 resident without auto-start.
+revalidation. It must restore the exact signed prior resident without auto-start.
 Until those properties have implementation and adversarial evidence, this
 command is not resident-production-ready.
 
-## Durable plan evidence
-
-`writeRuntimeActivationPlanEvidence()` exposes the shared immutable private
-record-store protocol for a caller-supplied isolated anchor. It publishes one
-deterministic, metadata-only plan record with no-clobber, fsync, replay, and
-conflict semantics. The CLI does not call the writer and no production path is
-defaulted. This record is observation evidence, not replay consumption or
-service authority.
+The machine-readable preflight exposes each of these absent properties under
+`nativeAuthority`, where every field remains `false`. Signed manifest fields
+such as `prior.serviceLoaded` and `prior.plistSha256` are declarations only;
+neither the preflight nor `activate` observes launchd or proves the current
+pointer, live PID, executable, acknowledgement, or rollback execution.
 
 ## Authority boundary
 

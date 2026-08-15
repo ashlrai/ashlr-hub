@@ -208,10 +208,8 @@ function validateMutationDisabledPlan(
     payload.execution.prior.currentRevision !== payload.rollback.expectedRevision
     || payload.execution.prior.plistSha256 === null
     || payload.execution.prior.serviceLoaded !== false
-    || payload.rollback.packageVersion !== '3.1.0'
-    || payload.rollback.releaseTag !== 'v3.1.0'
   ) {
-    throw new Error('signed activation rollback must bind the exact stopped 3.1 release and prior plist');
+    throw new Error('signed activation rollback must bind the exact declared stopped prior release and plist');
   }
   const config = readStableRegularFile(payload.execution.configPath, {
     anchorPath: homePath,

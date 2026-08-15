@@ -36,19 +36,11 @@ import { parseUnsignedRuntimeReleaseManifest } from './runtime-release-manifest.
 import { evaluateRuntimeReleaseCanaryRollbackEvidence } from './runtime-release-canary-rollback-evidence.js';
 import { assurePrivateStoragePath } from '../util/private-storage.js';
 import { readStableRegularFile } from '../util/stable-file-read.js';
-import {
-  readImmutablePrivateRecordPoint,
-  writeImmutablePrivateRecord,
-  type ImmutablePrivateRecordCodec,
-  type ImmutablePrivateRecordPointReadResult,
-  type ImmutablePrivateRecordWriteDisposition,
-} from '../util/immutable-private-record-store.js';
 
 export const RUNTIME_ACTIVATION_AUTHORITY_TRUST_ROOT_DOMAIN_V1 =
   'ashlr:runtime-activation-authority-trust-root:v1' as const;
 export const RUNTIME_ACTIVATION_MANIFEST_DOMAIN_V1 = 'ashlr:runtime-activation-manifest:v1' as const;
 export const RUNTIME_ACTIVATION_REQUEST_DOMAIN_V1 = 'ashlr:runtime-activation-preflight-request:v1' as const;
-export const RUNTIME_ACTIVATION_PLAN_EVIDENCE_DOMAIN_V1 = 'ashlr:runtime-activation-plan-evidence:v1' as const;
 export const RUNTIME_ACTIVATION_AUTHORITY_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_ACTIVATION_AUTHORITY_MAX_LIFETIME_MS = 15 * 60 * 1_000;
 
@@ -169,19 +161,6 @@ export interface RuntimeActivationPreflightRequestV1 {
   schemaVersion: 1;
 }
 
-export interface RuntimeActivationPlanEvidenceV1 {
-  activationMode: RuntimeActivationModeV1;
-  authority: 'observation-only';
-  domain: typeof RUNTIME_ACTIVATION_PLAN_EVIDENCE_DOMAIN_V1;
-  executionPermitted: false;
-  planDigest: string;
-  planId: string;
-  policyEpoch: number;
-  replayKey: string;
-  schemaVersion: 1;
-  trustRootCanonicalSha256: string;
-}
-
 export type RuntimeActivationPreflightBlockerCode =
   | 'operator-trust-root-unavailable'
   | 'operator-trust-root-invalid'
@@ -238,10 +217,32 @@ export interface RuntimeActivationAuthorityPreflightResult {
   authorityBlockers: readonly [
     'explicit-activation-command-required',
     'two-exact-digest-confirmations-required',
+    'independent-activation-signing-root-required',
+    'trusted-monotonic-time-required',
     'durable-replay-consumption-required',
+    'external-monotonic-cas-required',
     'macos-platform-required',
     'protected-postmerge-evidence-required',
+    'native-prior-state-attestation-required',
+    'signed-fsynced-lifecycle-journal-required',
+    'launchd-runtime-ack-required',
+    'release-bound-dispatch-permit-required',
+    'atomic-current-pointer-cas-required',
+    'crash-recovery-required',
+    'exact-rollback-revalidation-required',
   ];
+  nativeAuthority: {
+    activationSigningRootIndependent: false;
+    trustedMonotonicTime: false;
+    externalMonotonicCas: false;
+    nativePriorStateObserved: false;
+    lifecycleJournalDurable: false;
+    launchdRuntimeAcknowledged: false;
+    dispatchAuthorizationBound: false;
+    currentPointerCasVerified: false;
+    crashRecoveryVerified: false;
+    rollbackExecutionVerified: false;
+  };
 }
 
 interface LoadedTrustRoot {
@@ -1089,10 +1090,32 @@ function emptyResult(blockers: RuntimeActivationPreflightBlocker[]): RuntimeActi
     authorityBlockers: [
       'explicit-activation-command-required',
       'two-exact-digest-confirmations-required',
+      'independent-activation-signing-root-required',
+      'trusted-monotonic-time-required',
       'durable-replay-consumption-required',
+      'external-monotonic-cas-required',
       'macos-platform-required',
       'protected-postmerge-evidence-required',
+      'native-prior-state-attestation-required',
+      'signed-fsynced-lifecycle-journal-required',
+      'launchd-runtime-ack-required',
+      'release-bound-dispatch-permit-required',
+      'atomic-current-pointer-cas-required',
+      'crash-recovery-required',
+      'exact-rollback-revalidation-required',
     ],
+    nativeAuthority: {
+      activationSigningRootIndependent: false,
+      trustedMonotonicTime: false,
+      externalMonotonicCas: false,
+      nativePriorStateObserved: false,
+      lifecycleJournalDurable: false,
+      launchdRuntimeAcknowledged: false,
+      dispatchAuthorizationBound: false,
+      currentPointerCasVerified: false,
+      crashRecoveryVerified: false,
+      rollbackExecutionVerified: false,
+    },
   };
 }
 
@@ -1318,128 +1341,6 @@ export function runtimeActivationRequestCanonicalJson(input: RuntimeActivationPr
   const parsed = parseCanonicalJson(canonical, MAX_REQUEST_BYTES);
   if (!isRecord(parsed)) throw new Error('runtime activation request is invalid');
   return canonical;
-}
-
-export function runtimeActivationPlanEvidence(
-  signedManifest: SignedRuntimeActivationManifestV1,
-  trustRootCanonicalSha256: string,
-): RuntimeActivationPlanEvidenceV1 {
-  if (!SHA256_RE.test(trustRootCanonicalSha256)) throw new Error('trust root digest is invalid');
-  const parsed = parseSignedRuntimeActivationManifest(canonicalJson(signedManifest));
-  return {
-    activationMode: parsed.manifest.payload.activationMode,
-    authority: 'observation-only',
-    domain: RUNTIME_ACTIVATION_PLAN_EVIDENCE_DOMAIN_V1,
-    executionPermitted: false,
-    planDigest: parsed.planDigest,
-    planId: parsed.manifest.payload.planId,
-    policyEpoch: parsed.manifest.payload.policyEpoch,
-    replayKey: parsed.replayKey,
-    schemaVersion: 1,
-    trustRootCanonicalSha256,
-  };
-}
-
-export function runtimeActivationPlanEvidenceCanonicalJson(input: RuntimeActivationPlanEvidenceV1): string {
-  if (
-    !UUID_RE.test(input.planId) ||
-    !SHA256_RE.test(input.planDigest) ||
-    !SHA256_RE.test(input.replayKey) ||
-    !SHA256_RE.test(input.trustRootCanonicalSha256) ||
-    !isPositiveSafeInteger(input.policyEpoch) ||
-    input.activationMode !== 'resident-canary' ||
-    input.authority !== 'observation-only' ||
-    input.executionPermitted !== false ||
-    input.domain !== RUNTIME_ACTIVATION_PLAN_EVIDENCE_DOMAIN_V1 ||
-    input.schemaVersion !== 1
-  ) {
-    throw new Error('runtime activation plan evidence is invalid');
-  }
-  return canonicalJson(input);
-}
-
-function parseRuntimeActivationPlanEvidence(value: unknown): RuntimeActivationPlanEvidenceV1 | null {
-  if (
-    !isRecord(value) ||
-    !exactKeys(value, [
-      'activationMode',
-      'authority',
-      'domain',
-      'executionPermitted',
-      'planDigest',
-      'planId',
-      'policyEpoch',
-      'replayKey',
-      'schemaVersion',
-      'trustRootCanonicalSha256',
-    ])
-  )
-    return null;
-  try {
-    const evidence = value as unknown as RuntimeActivationPlanEvidenceV1;
-    runtimeActivationPlanEvidenceCanonicalJson(evidence);
-    return evidence;
-  } catch {
-    return null;
-  }
-}
-
-function runtimeActivationPlanEvidenceCodec(): ImmutablePrivateRecordCodec<RuntimeActivationPlanEvidenceV1> {
-  return {
-    parse: parseRuntimeActivationPlanEvidence,
-    serialize: runtimeActivationPlanEvidenceCanonicalJson,
-    recordId: (record) => record.planId,
-    recordFileName: (record) => `${record.planId}.json`,
-    isRecordFileName: (fileName) => fileName.endsWith('.json') && UUID_RE.test(fileName.slice(0, -'.json'.length)),
-    stageToken: (record) => record.replayKey,
-    equivalent: (left, right) =>
-      runtimeActivationPlanEvidenceCanonicalJson(left) === runtimeActivationPlanEvidenceCanonicalJson(right),
-  };
-}
-
-function runtimeActivationPlanEvidenceStore(input: { anchorPath: string; storeRoot: string }) {
-  return {
-    label: 'runtime activation plan evidence',
-    anchorPath: input.anchorPath,
-    rootPath: input.storeRoot,
-    lockFileName: '.runtime-activation-plan-evidence.lock',
-    maxRecordBytes: 4 * 1_024,
-    defaultMaxFiles: 1_024,
-    hardMaxFiles: 10_000,
-    defaultMaxBytes: 4 * 1024 * 1_024,
-    hardMaxBytes: 40 * 1024 * 1_024,
-    codecForWrite: runtimeActivationPlanEvidenceCodec,
-    codecForRead: runtimeActivationPlanEvidenceCodec,
-  };
-}
-
-/**
- * Persist deterministic observation evidence without granting activation or
- * consuming the replay key. Callers must supply an isolated private anchor;
- * the read-only CLI never invokes this writer or defaults it into ~/.ashlr.
- */
-export function writeRuntimeActivationPlanEvidence(
-  evidence: RuntimeActivationPlanEvidenceV1,
-  storage: { anchorPath: string; storeRoot: string },
-): ImmutablePrivateRecordWriteDisposition {
-  return writeImmutablePrivateRecord(runtimeActivationPlanEvidenceStore(storage), evidence);
-}
-
-export function readRuntimeActivationPlanEvidence(
-  planId: string,
-  storage: { anchorPath: string; storeRoot: string },
-): ImmutablePrivateRecordPointReadResult<RuntimeActivationPlanEvidenceV1> {
-  if (!UUID_RE.test(planId)) {
-    return {
-      record: null,
-      sourceState: 'degraded',
-      sourcePresent: false,
-      exactReadComplete: false,
-      stopReasons: ['invalid-options'],
-      bytesRead: 0,
-    };
-  }
-  return readImmutablePrivateRecordPoint(runtimeActivationPlanEvidenceStore(storage), planId, `${planId}.json`);
 }
 
 export const runtimeActivationAuthorityInternals = {

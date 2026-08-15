@@ -25,13 +25,9 @@ import {
   runtimeActivationAuthorityInternals,
   runtimeActivationBuildBindingSha256,
   runtimeActivationAuthorityPaths,
-  runtimeActivationPlanEvidence,
-  runtimeActivationPlanEvidenceCanonicalJson,
   runtimeActivationRequestCanonicalJson,
   runtimeActivationTrustRootCanonicalJson,
-  readRuntimeActivationPlanEvidence,
   signRuntimeActivationManifest,
-  writeRuntimeActivationPlanEvidence,
   type RuntimeActivationArtifactBindingV1,
   type RuntimeActivationAuthorityTrustRootV1,
   type RuntimeActivationBundleRequestV1,
@@ -578,6 +574,30 @@ describe('M502 runtime activation authority', () => {
       'rollback-artifact-invalid',
     ]);
     expect(result.authorityBlockers).toContain('durable-replay-consumption-required');
+    expect(result.authorityBlockers).toEqual(expect.arrayContaining([
+      'independent-activation-signing-root-required',
+      'trusted-monotonic-time-required',
+      'external-monotonic-cas-required',
+      'native-prior-state-attestation-required',
+      'signed-fsynced-lifecycle-journal-required',
+      'launchd-runtime-ack-required',
+      'release-bound-dispatch-permit-required',
+      'atomic-current-pointer-cas-required',
+      'crash-recovery-required',
+      'exact-rollback-revalidation-required',
+    ]));
+    expect(result.nativeAuthority).toEqual({
+      activationSigningRootIndependent: false,
+      trustedMonotonicTime: false,
+      externalMonotonicCas: false,
+      nativePriorStateObserved: false,
+      lifecycleJournalDurable: false,
+      launchdRuntimeAcknowledged: false,
+      dispatchAuthorizationBound: false,
+      currentPointerCasVerified: false,
+      crashRecoveryVerified: false,
+      rollbackExecutionVerified: false,
+    });
     assertNoMutationAuthority(result);
   });
 
@@ -710,42 +730,6 @@ describe('M502 runtime activation authority', () => {
     });
     expect(result.blockers[0]).toMatchObject({ code: 'request-unavailable' });
     assertNoMutationAuthority(result);
-  });
-
-  it('derives deterministic observation-only replay evidence from signed bytes', () => {
-    const f = fixture();
-    const first = runtimeActivationPlanEvidence(f.request.signedManifest, digest('a'));
-    const second = runtimeActivationPlanEvidence(f.request.signedManifest, digest('a'));
-    expect(second).toEqual(first);
-    expect(first).toMatchObject({
-      authority: 'observation-only',
-      executionPermitted: false,
-      planId: f.payload.planId,
-      policyEpoch: 7,
-    });
-    expect(runtimeActivationPlanEvidenceCanonicalJson(first)).toBe(runtimeActivationPlanEvidenceCanonicalJson(second));
-  });
-
-  it('publishes deterministic plan evidence with durable no-clobber semantics', () => {
-    const f = fixture();
-    const anchor = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-activation-evidence-')));
-    roots.push(anchor);
-    chmodSync(anchor, 0o700);
-    const storage = {
-      anchorPath: anchor,
-      storeRoot: join(anchor, 'plan-evidence'),
-    };
-    const evidence = runtimeActivationPlanEvidence(f.request.signedManifest, digest('a'));
-    expect(writeRuntimeActivationPlanEvidence(evidence, storage)).toBe('recorded');
-    expect(writeRuntimeActivationPlanEvidence(evidence, storage)).toBe('replayed');
-    expect(readRuntimeActivationPlanEvidence(evidence.planId, storage)).toMatchObject({
-      sourceState: 'healthy',
-      exactReadComplete: true,
-      record: evidence,
-    });
-    const conflict = { ...evidence, trustRootCanonicalSha256: digest('b') };
-    expect(writeRuntimeActivationPlanEvidence(conflict, storage)).toBe('conflicted');
-    expect(readRuntimeActivationPlanEvidence(evidence.planId, storage).record).toEqual(evidence);
   });
 
   it('hashes only immutable, single-link artifacts inside the pinned bundle root', () => {
@@ -933,18 +917,6 @@ describe('M504 mutation-disabled macOS activation consumer', () => {
         request.signedManifest.payload.execution.prior.serviceLoaded = true;
       },
     },
-    {
-      name: 'rollback version substitution',
-      poison: (request: RuntimeActivationPreflightRequestV1) => {
-        request.signedManifest.payload.rollback.packageVersion = '3.2.0';
-      },
-    },
-    {
-      name: 'rollback tag substitution',
-      poison: (request: RuntimeActivationPreflightRequestV1) => {
-        request.signedManifest.payload.rollback.releaseTag = 'v3.2.0';
-      },
-    },
   ])('rejects $name before configuration or service observation', ({ poison }) => {
     const f = fixture();
     const payload = f.request.signedManifest.payload;
@@ -953,12 +925,10 @@ describe('M504 mutation-disabled macOS activation consumer', () => {
     payload.execution.prior.currentRevision = payload.rollback.expectedRevision;
     payload.execution.prior.plistSha256 = digest('f');
     payload.execution.prior.serviceLoaded = false;
-    payload.rollback.packageVersion = '3.1.0';
-    payload.rollback.releaseTag = 'v3.1.0';
     poison(f.request);
 
     expect(() => runtimeActivationTransactionInternals.validateMutationDisabledPlan(f.request, f.home)).toThrow(
-      'exact stopped 3.1 release and prior plist',
+      'exact declared stopped prior release and plist',
     );
   });
 

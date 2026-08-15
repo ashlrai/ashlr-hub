@@ -40,7 +40,7 @@ const SUBCOMMANDS: Record<string, string[]> = {
   enroll: ['add', 'remove', 'list', 'kill'],
   backlog: ['refresh'],
   inbox: ['show', 'approve', 'reject'],
-  daemon: ['start', 'stop', 'status', 'activation-preflight', 'activate', 'recover-state', 'resolve-state', 'install', 'uninstall', 'service-status'],
+  daemon: ['start', 'stop', 'status', 'activation-preflight', 'activate'],
   fleet: [
     'status', 'watch', 'direction', 'init', 'pause', 'resume', 'doctor',
     'automerge-canary', 'evidence', 'scorecard', 'oversight',
