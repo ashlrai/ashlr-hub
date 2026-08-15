@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -18,6 +19,10 @@ import {
   type FleetEvidenceDiagnosisQuality,
   type FleetEvidenceSource,
 } from '../src/core/fleet/evidence-doctor.js';
+import {
+  readDispatchProductionYieldDetailed,
+  type DispatchProductionInvalidReasonCount,
+} from '../src/core/fleet/dispatch-production-ledger.js';
 import { cmdFleet } from '../src/cli/fleet.js';
 
 let home: string;
@@ -119,6 +124,79 @@ describe('M371 read-only fleet evidence doctor', () => {
     });
   });
 
+  it('emits only bounded stable aggregate dispatch reasons in deep mode', () => {
+    const invalidReasonCounts: DispatchProductionInvalidReasonCount[] = [
+      { reason: 'normalization-failed', count: 1 },
+      { reason: 'json-invalid', count: 2 },
+    ];
+    const reader = () => ({
+      ...quality({ sourceState: 'degraded', complete: false, invalidRows: 4 }),
+      invalidReasonCounts,
+    });
+    const diagnosed = diagnoseFleetEvidence('dispatch-production', {
+      deep: true, deps: { readers: { 'dispatch-production': reader } },
+    });
+    expect(diagnosed.diagnostics).toEqual({
+      authority: 'observation-only',
+      bounded: true,
+      invalidReasonCounts: [
+        { reason: 'json-invalid', count: 2 },
+        { reason: 'normalization-failed', count: 1 },
+      ],
+      attributedInvalidRows: 3,
+      withheldInvalidRows: 1,
+    });
+    expect(JSON.stringify(diagnosed)).not.toMatch(/path|content|repo|title|command|prompt/i);
+  });
+
+  it('withholds unknown, duplicate, or contradictory dispatch diagnostics', () => {
+    const unsafe = [
+      { reason: 'private-path:/tmp/secret', count: 1 },
+      { reason: 'json-invalid', count: 1 },
+    ] as unknown as DispatchProductionInvalidReasonCount[];
+    const reader = () => ({
+      ...quality({ sourceState: 'degraded', complete: false, invalidRows: 2 }),
+      invalidReasonCounts: unsafe,
+    });
+    const diagnosed = diagnoseFleetEvidence('dispatch-production', {
+      deep: true, deps: { readers: { 'dispatch-production': reader } },
+    });
+    expect(diagnosed.diagnostics).toEqual({
+      authority: 'observation-only', bounded: true, invalidReasonCounts: [],
+      attributedInvalidRows: 0, withheldInvalidRows: 2,
+    });
+    expect(JSON.stringify(diagnosed)).not.toContain('private-path');
+
+    for (const invalidReasonCounts of [
+      [{ reason: 'json-invalid', count: 1 }, { reason: 'json-invalid', count: 1 }],
+      [{ reason: 'json-invalid', count: 3 }],
+    ] as unknown as DispatchProductionInvalidReasonCount[][]) {
+      const withheld = diagnoseFleetEvidence('dispatch-production', {
+        deep: true,
+        deps: { readers: { 'dispatch-production': () => ({
+          ...quality({ sourceState: 'degraded', complete: false, invalidRows: 2 }), invalidReasonCounts,
+        }) } },
+      });
+      expect(withheld.diagnostics?.invalidReasonCounts).toEqual([]);
+      expect(withheld.diagnostics?.withheldInvalidRows).toBe(2);
+    }
+  });
+
+  it('withholds unattributed invalid rows and preserves degraded unreadable truth', () => {
+    const reader = () => quality({
+      sourceState: 'degraded', complete: false, invalidRows: 3, unreadableFiles: 1,
+      stopReasons: ['io-error'],
+    });
+    const diagnosed = diagnoseFleetEvidence('dispatch-production', {
+      deep: true, deps: { readers: { 'dispatch-production': reader } },
+    });
+    expect(diagnosed).toMatchObject({
+      state: 'manual-inspection-required', attempts: 2, mutable: false,
+      quality: { sourceState: 'degraded', complete: false, unreadableFiles: 1 },
+      diagnostics: { invalidReasonCounts: [], attributedInvalidRows: 0, withheldInvalidRows: 3 },
+    });
+  });
+
   it('leaves malformed persisted bytes unchanged during real diagnosis', () => {
     const dir = join(process.env.ASHLR_HOME!, 'best-of-n');
     mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -132,6 +210,53 @@ describe('M371 read-only fleet evidence doctor', () => {
     });
     expect(readFileSync(file)).toEqual(before);
     expect(existsSync(join(dir, '.best-of-n.lock'))).toBe(false);
+  });
+
+  it('classifies real malformed dispatch rows without exposing or changing them', () => {
+    const dir = join(process.env.ASHLR_HOME!, 'dispatch-production');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const file = join(dir, '2026-08-15.jsonl');
+    const malformed = '{private malformed row\n{}\n';
+    writeFileSync(file, malformed, { mode: 0o600 });
+    const before = readFileSync(file);
+
+    const first = diagnoseFleetEvidence('dispatch-production', { deep: true });
+    const second = diagnoseFleetEvidence('dispatch-production', { deep: true });
+    expect(first).toMatchObject({
+      state: 'manual-inspection-required', mutable: false,
+      quality: { sourceState: 'degraded', complete: false, invalidRows: 2 },
+      diagnostics: {
+        authority: 'observation-only', bounded: true,
+        invalidReasonCounts: [
+          { reason: 'json-invalid', count: 1 },
+          { reason: 'schema-invalid', count: 1 },
+        ],
+        attributedInvalidRows: 2,
+        withheldInvalidRows: 0,
+      },
+    });
+    expect(JSON.stringify(first)).toBe(JSON.stringify(second));
+    expect(JSON.stringify(first)).not.toContain('private malformed row');
+    expect(readFileSync(file)).toEqual(before);
+    expect(existsSync(join(dir, '.dispatch-production.lock'))).toBe(false);
+  });
+
+  it('does not create receipt locks or leak reason counts into ordinary yield quality', () => {
+    const dir = join(process.env.ASHLR_HOME!, 'dispatch-production');
+    const receipts = join(dir, 'repair-treatment-outcomes');
+    mkdirSync(receipts, { recursive: true, mode: 0o700 });
+    const receipt = `${'a'.repeat(64)}-${'b'.repeat(64)}.json`;
+    writeFileSync(join(receipts, receipt), '{}\n', { mode: 0o600 });
+    const before = lstatSync(receipts);
+
+    const diagnosed = diagnoseFleetEvidence('dispatch-production', { deep: true });
+    const after = lstatSync(receipts);
+    expect(diagnosed.diagnostics?.invalidReasonCounts).toContainEqual({ reason: 'receipt-invalid', count: 1 });
+    expect(existsSync(join(receipts, '.receipts.lock'))).toBe(false);
+    expect([after.ino, after.mtimeMs, after.ctimeMs]).toEqual([before.ino, before.mtimeMs, before.ctimeMs]);
+
+    const ordinary = readDispatchProductionYieldDetailed({ windowMs: 60_000 });
+    expect(ordinary.sourceQuality).not.toHaveProperty('invalidReasonCounts');
   });
 
   it('leaves malformed autonomy packs and storage unchanged during deep diagnosis', () => {
