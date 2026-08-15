@@ -105,27 +105,55 @@ tags fail closed.
      SHAs plus the all-false authority posture to the job summary. It has only
      `contents: read`; it has no `npm-release` environment, OIDC permission,
      publishing token, install pointer, or service authority;
-   - **publish** — wait for explicit `npm-release` approval → verify
-     the exact immutable event SHA is in protected-master history → install the
-     pinned npm 11 trusted-publishing
-     client → `scripts/check-version.mjs` (tag must equal `package.json` version)
-     → require the build identity to name that SHA and a clean checkout →
-     build one exact tarball → upload one digest-verified, 64 KiB-max
-     public changelog artifact from runner-temporary storage (the package
-     checkout stays clean) → re-check exact registry state and require the live
-     lightweight GitHub tag still resolves to the event SHA immediately before
-     publication →
-     OIDC-authenticated `npm publish <tarball> --ignore-scripts --provenance
-     --access public --tag candidate` → require its exact SRI and npm provenance
-     metadata → verify registry signatures/attestations with pinned npm 11 →
-     decode the verified SLSA statement and bind its package purl/SHA-512,
-     repository, workflow path, tag ref, Git commit, push event, GitHub-hosted
-     builder, workflow run, and run attempt to the exact release execution →
-     prove every pre-existing dist-tag and `latest=3.0.1` stayed unchanged;
-   - **release** — only after npm publish succeeds, download and verify that
-     bounded artifact, then create or exactly verify a GitHub prerelease with
-     `--latest=false`. This job has no npm tooling, token, OIDC permission, or
-     publish command.
+   - **prepare** — without an environment or OIDC permission, check out the
+     exact event SHA, verify protected-master ancestry, run `npm ci`, build,
+     `scripts/check-version.mjs`, and `prepublishOnly`, require a clean exact-SHA
+     build identity, and create one npm tarball. It binds the tarball, npm pack
+     report, and bounded public changelog bytes into a canonical SHA-256/SRI
+     manifest, then uploads attempt-unique, non-overwriting candidate and
+     release-note artifacts and exports the exact created names for every
+     downstream job. Failed-job-only reruns therefore reuse the successful
+     prepare attempt's artifacts instead of recomputing names from the new run
+     attempt. Candidate-controlled lifecycle and repository code execute only
+     in this unprivileged job;
+   - **publish** — after explicit `npm-release` approval, run for at most 15
+     minutes, install only the pinned
+     npm trusted-publishing client and download the prepared artifact. It does
+     not check out the repository, install candidate dependencies, build, pack,
+     extract runnable files, or invoke candidate scripts. Fixed inline workflow
+     commands require exactly three bounded regular files, bind the manifest to
+     the upstream SHA-256, recompute tarball SHA-256/SRI, validate the npm pack
+     report, bound the complete gzip expansion before tar parsing, and require
+     an exact canonical match of every normalized regular member's path,
+     0644/0755 mode, and size while enforcing entry-count, expanded-size, and
+     per-member caps. It streams only bounded package/build identity bytes
+     without executing them, rejects any package-level registry override,
+     re-establishes protected-master history, exact registry absence and
+     `latest=3.0.1`, and requires the live lightweight tag to resolve to the event
+     SHA immediately before the single OIDC-authenticated `npm publish
+     <tarball> --ignore-scripts --provenance --access public --tag candidate`.
+     It exports the exact successful publication attempt before that effect so
+     a failed-job-only rerun cannot substitute its newer verifier attempt;
+   - **verify_publish** — without the `npm-release` environment or OIDC, wait
+     for registry propagation, require the exact SRI and provenance metadata,
+     verify registry signatures/attestations with pinned npm 11, decode the
+     verified SLSA statement and bind its package purl/SHA-512, repository,
+     workflow path, tag ref, Git commit, push event, GitHub-hosted builder,
+     workflow run, and run attempt to the exact release execution, and prove
+     every pre-existing dist-tag and `latest=3.0.1` stayed unchanged;
+   - **release** — only after `verify_publish` succeeds, download and verify the
+     manifest-bound public notes artifact, recheck the live lightweight tag
+     against the event SHA immediately before creation, then creates or exactly
+     verifies a GitHub prerelease with `--latest=false`. This job has no npm
+     tooling, token, OIDC permission, or publish command.
+
+The prepare artifact is a same-workflow handoff, not an independently reproduced
+build or separate release authority. A compromised candidate can influence the
+bytes prepared for publication, but it cannot request the npm OIDC credential in
+that job. The reviewed publisher publishes only the exact manifest-bound bytes;
+it never executes the candidate. Independent reproduction, protected review,
+registry provenance, isolated installation, rollback, and live acceptance remain
+separate gates.
 
 The signed canary is a required fail-closed reproducibility and rollback
 observation, not independent release authority. The GitHub-hosted runner retains
@@ -156,8 +184,9 @@ An npm package version is immutable. Never rerun the whole workflow, rerun the
 `publish` job, or run `npm publish` locally after the registry may have accepted
 that version.
 
-If **publish succeeded and only the GitHub `release` job failed**, first verify
-that npm contains the intended tag artifact from a clean checkout of that tag:
+If **publish succeeded and only `verify_publish` or the GitHub `release` job
+failed**, first verify that npm contains the intended tag artifact from a clean
+checkout of that tag:
 
 ```bash
 version=3.2.0
@@ -200,10 +229,13 @@ Then use GitHub's **Re-run failed jobs** control, or the equivalent command:
 gh run rerun RUN_ID --failed
 ```
 
-Because `publish` is already successful, this reruns only the separate
-`release` job and reuses the digest-bound handoff; it does not invoke npm. The
-release job also accepts an already-created GitHub Release only when its tag,
-title, body, release flags, and exact tag commit all match.
+Because `publish` is already successful, this reruns only unsuccessful
+downstream verification/release jobs, reuses the digest-bound handoff, and
+binds provenance to the successful publisher's exported run attempt rather
+than the newer verifier attempt; it does not invoke npm publication. The
+release job also accepts an already-created
+GitHub Release only when its tag, title, body, release flags, and exact tag
+commit all match.
 
 If npm publication itself failed or its result is ambiguous:
 

@@ -25,6 +25,7 @@ const workflow = parse(workflowText) as {
   }>;
 };
 const canary = workflow.jobs.release_canary!;
+const prepare = workflow.jobs.prepare!;
 const publish = workflow.jobs.publish!;
 const steps = canary.steps ?? [];
 const step = (name: string) => steps.find((entry) => entry.name === name);
@@ -51,7 +52,8 @@ describe('release workflow signed canary gate', () => {
       'timeout-minutes': 30,
     });
     expect(canary.environment).toBeUndefined();
-    expect(publish.needs).toEqual(['verify', 'release_canary']);
+    expect(prepare.needs).toEqual(['verify', 'release_canary']);
+    expect(publish.needs).toBe('prepare');
 
     expect(steps[0]).toEqual({
       name: 'Checkout the immutable event commit',

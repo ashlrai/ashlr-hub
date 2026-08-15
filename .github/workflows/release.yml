@@ -183,14 +183,17 @@ jobs:
             echo "- Authority: all release, install, launch, rollback, and activation permissions remain false"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  publish:
-    name: Publish to npm
+  prepare:
+    name: Prepare immutable npm candidate (NO_PUBLISH_AUTHORITY)
     runs-on: ubuntu-latest
     needs: [verify, release_canary]
-    environment: npm-release
+    timeout-minutes: 45
     permissions:
       contents: read
-      id-token: write   # npm trusted publishing + provenance
+    outputs:
+      candidate_artifact_name: ${{ steps.artifact_names.outputs.candidate_artifact_name }}
+      manifest_sha256: ${{ steps.candidate.outputs.manifest_sha256 }}
+      release_artifact_name: ${{ steps.artifact_names.outputs.release_artifact_name }}
     steps:
       - name: Checkout the immutable tag target
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -230,14 +233,11 @@ jobs:
       - name: Set up Node.js 24
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "24"
-          registry-url: "https://registry.npmjs.org"
+          node-version: "24.19.0"
           package-manager-cache: false
-      # npm trusted publishing requires npm >=11.5.1. Pin the release client
-      # so a hosted image's bundled npm version cannot silently change auth.
-      - name: Install pinned trusted-publishing npm CLI
+      - name: Install pinned preparation npm CLI
         run: npm install --global npm@11.19.0 --ignore-scripts --no-audit --no-fund
-      - name: Verify trusted-publishing npm CLI
+      - name: Verify preparation npm CLI
         run: test "$(npm --version)" = "11.19.0"
       - run: npm ci
       - run: npm run build
@@ -281,10 +281,12 @@ jobs:
               exit 1
               ;;
           esac
-      - name: Build exact candidate tarball
+      - name: Build and bind exact candidate tarball
+        id: candidate
         shell: bash
         run: |
           set -euo pipefail
+          umask 077
 
           npm run prepublishOnly
           jq -e \
@@ -297,43 +299,384 @@ jobs:
              .provenance == "git"' \
             dist/build-identity.json >/dev/null
           test -z "$(git status --porcelain --untracked-files=normal)"
-          npm pack --json --ignore-scripts --pack-destination "$RUNNER_TEMP" \
-            > "$RUNNER_TEMP/npm-pack.json"
+          evidence_root="$(mktemp -d "$RUNNER_TEMP/npm-release-candidate.XXXXXX")"
+          pack_report="$evidence_root/npm-pack.json"
+          npm pack --json --ignore-scripts --pack-destination "$evidence_root" \
+            > "$pack_report"
           jq -e \
             --arg version "$RELEASE_VERSION" \
             'length == 1 and
              .[0].name == "@ashlr/hub" and
              .[0].version == $version and
              (.[0].filename | type == "string" and test("^[A-Za-z0-9._-]+[.]tgz$")) and
-             (.[0].integrity | type == "string" and test("^sha512-[A-Za-z0-9+/]+={0,2}$"))' \
-            "$RUNNER_TEMP/npm-pack.json" >/dev/null
-          filename="$(jq -er '.[0].filename' "$RUNNER_TEMP/npm-pack.json")"
-          tarball="$RUNNER_TEMP/$filename"
+             (.[0].integrity | type == "string" and test("^sha512-[A-Za-z0-9+/]+={0,2}$")) and
+             (.[0].unpackedSize | type == "number" and . >= 1 and . <= 67108864) and
+             (.[0].files | type == "array" and length >= 1 and length <= 10000 and
+               (map(.path) | length == (unique | length)) and
+               all(.[].path | split("/");
+                 length >= 1 and all(.[]; length >= 1 and . != "." and . != "..")) and
+               all(.[]; (.path | type == "string" and length >= 1 and length <= 1024 and
+                   (startswith("/") | not) and test("^[A-Za-z0-9._/@+,(){} \\[\\]-]+$")) and
+                 (.size | type == "number" and . == floor and . >= 0 and . <= 8388608) and
+                 (.mode | type == "number" and (. == 420 or . == 493))))' \
+            "$pack_report" >/dev/null
+          filename="$(jq -er '.[0].filename' "$pack_report")"
+          tarball="$evidence_root/$filename"
           test -f "$tarball"
           test ! -L "$tarball"
-          jq -er '.[0].integrity' "$RUNNER_TEMP/npm-pack.json" > "$RUNNER_TEMP/npm-pack-integrity.txt"
+          test "$(stat --format='%h' "$tarball")" = "1"
+          test "$(stat --format='%h' "$pack_report")" = "1"
+
+          cp "$RUNNER_TEMP/release-notes.md" "$evidence_root/release-notes.md"
+          notes="$evidence_root/release-notes.md"
+          test -f "$notes" && test ! -L "$notes"
+          test "$(stat --format='%h' "$notes")" = "1"
+
+          tarball_bytes="$(wc -c < "$tarball")"
+          pack_bytes="$(wc -c < "$pack_report")"
+          notes_bytes="$(wc -c < "$notes")"
+          if (( tarball_bytes < 1 || tarball_bytes > 52428800 ||
+                pack_bytes < 2 || pack_bytes > 1048576 ||
+                notes_bytes < 1 || notes_bytes > 65536 )); then
+            echo "Prepared release evidence is out of bounds." >&2
+            exit 1
+          fi
+
+          tarball_sha256="$(sha256sum "$tarball" | cut -d ' ' -f 1)"
+          pack_sha256="$(sha256sum "$pack_report" | cut -d ' ' -f 1)"
+          notes_sha256="$(sha256sum "$notes" | cut -d ' ' -f 1)"
+          integrity="$(jq -er '.[0].integrity' "$pack_report")"
+          entry_count="$(jq -er '.[0].files | length' "$pack_report")"
+          max_entry_bytes="$(jq -er '.[0].files | map(.size) | max' "$pack_report")"
+          unpacked_bytes="$(jq -er '.[0].unpackedSize' "$pack_report")"
+          manifest="$evidence_root/publish-manifest.json"
+          jq -cnS \
+            --arg packageName "@ashlr/hub" \
+            --arg version "$RELEASE_VERSION" \
+            --arg commit "$GITHUB_SHA" \
+            --arg ref "$GITHUB_REF" \
+            --arg tag "$GITHUB_REF_NAME" \
+            --arg distTag "$RELEASE_DIST_TAG" \
+            --arg baselineLatestVersion "$BASELINE_LATEST_VERSION" \
+            --arg tarballName "$filename" \
+            --arg tarballSha256 "$tarball_sha256" \
+            --arg integrity "$integrity" \
+            --arg packSha256 "$pack_sha256" \
+            --arg notesSha256 "$notes_sha256" \
+            --argjson tarballBytes "$tarball_bytes" \
+            --argjson entryCount "$entry_count" \
+            --argjson maxEntryBytes "$max_entry_bytes" \
+            --argjson unpackedBytes "$unpacked_bytes" \
+            --argjson packBytes "$pack_bytes" \
+            --argjson notesBytes "$notes_bytes" \
+            '{schemaVersion: 1,
+              package: {name: $packageName, version: $version},
+              release: {commit: $commit, ref: $ref, tag: $tag,
+                distTag: $distTag, baselineLatestVersion: $baselineLatestVersion},
+              files: {
+                tarball: {name: $tarballName, bytes: $tarballBytes,
+                  entryCount: $entryCount, maxEntryBytes: $maxEntryBytes,
+                  unpackedBytes: $unpackedBytes, sha256: $tarballSha256,
+                  integrity: $integrity},
+                packReport: {name: "npm-pack.json", bytes: $packBytes,
+                  sha256: $packSha256},
+                releaseNotes: {name: "release-notes.md", bytes: $notesBytes,
+                  sha256: $notesSha256}
+              }}' > "$manifest"
+          test -f "$manifest" && test ! -L "$manifest"
+          test "$(stat --format='%h' "$manifest")" = "1"
+          manifest_bytes="$(wc -c < "$manifest")"
+          if (( manifest_bytes < 2 || manifest_bytes > 8192 )); then
+            echo "Prepared release manifest is out of bounds." >&2
+            exit 1
+          fi
+          manifest_sha256="$(sha256sum "$manifest" | cut -d ' ' -f 1)"
+          printf 'root=%s\n' "$evidence_root" >> "$GITHUB_OUTPUT"
+          printf 'tarball=%s\n' "$tarball" >> "$GITHUB_OUTPUT"
+          printf 'pack_report=%s\n' "$pack_report" >> "$GITHUB_OUTPUT"
+          printf 'manifest=%s\n' "$manifest" >> "$GITHUB_OUTPUT"
+          printf 'notes=%s\n' "$notes" >> "$GITHUB_OUTPUT"
+          printf 'manifest_sha256=%s\n' "$manifest_sha256" >> "$GITHUB_OUTPUT"
+      - name: Bind attempt-specific artifact names
+        id: artifact_names
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$GITHUB_RUN_ID" =~ ^[0-9]+$ || ! "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]; then
+            echo "Workflow run identity is invalid." >&2
+            exit 1
+          fi
+          printf 'candidate_artifact_name=npm-publish-candidate-%s-%s\n' \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+          printf 'release_artifact_name=npm-release-handoff-%s-%s\n' \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+      - name: Upload bounded npm candidate handoff
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.artifact_names.outputs.candidate_artifact_name }}
+          path: |
+            ${{ steps.candidate.outputs.tarball }}
+            ${{ steps.candidate.outputs.pack_report }}
+            ${{ steps.candidate.outputs.manifest }}
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
       - name: Upload bounded GitHub release handoff
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: npm-release-handoff-${{ github.run_id }}
-          path: ${{ runner.temp }}/release-notes.md
+          name: ${{ steps.artifact_names.outputs.release_artifact_name }}
+          path: |
+            ${{ steps.candidate.outputs.notes }}
+            ${{ steps.candidate.outputs.manifest }}
           if-no-files-found: error
           retention-days: 7
           compression-level: 9
-          overwrite: true
+          overwrite: false
           include-hidden-files: false
+
+  publish:
+    name: Publish prepared candidate to npm
+    runs-on: ubuntu-latest
+    needs: prepare
+    timeout-minutes: 15
+    environment: npm-release
+    permissions:
+      contents: read
+      id-token: write   # npm trusted publishing + provenance
+    outputs:
+      dist_tags_before_b64: ${{ steps.admission.outputs.dist_tags_before_b64 }}
+      publication_run_attempt: ${{ steps.admission.outputs.publication_run_attempt }}
+    steps:
+      - name: Set up pinned trusted-publishing Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.19.0"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+      - name: Install pinned trusted-publishing npm CLI
+        run: npm install --global npm@11.19.0 --ignore-scripts --no-audit --no-fund
+      - name: Verify trusted-publishing npm CLI
+        run: test "$(npm --version)" = "11.19.0"
+      - name: Download prepared npm candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.prepare.outputs.candidate_artifact_name }}
+          path: prepared-candidate
+          digest-mismatch: error
+      - name: Verify bounded prepared candidate without executing it
+        id: prepared
+        shell: bash
+        env:
+          EXPECTED_MANIFEST_SHA256: ${{ needs.prepare.outputs.manifest_sha256 }}
+        run: |
+          set -euo pipefail
+
+          root="prepared-candidate"
+          manifest="$root/publish-manifest.json"
+          entry_count="$(find "$root" -mindepth 1 -maxdepth 1 | wc -l)"
+          file_count="$(find "$root" -mindepth 1 -maxdepth 1 -type f | wc -l)"
+          if [[ "$entry_count" != "3" || "$file_count" != "3" ||
+                ! "$EXPECTED_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "Prepared npm candidate has an invalid top-level shape." >&2
+            exit 1
+          fi
+          for path in "$root"/*; do
+            test -f "$path" && test ! -L "$path"
+            test "$(stat --format='%h' "$path")" = "1"
+          done
+          manifest_bytes="$(wc -c < "$manifest")"
+          observed_manifest_sha256="$(sha256sum "$manifest" | cut -d ' ' -f 1)"
+          if (( manifest_bytes < 2 || manifest_bytes > 8192 )) ||
+             [[ "$observed_manifest_sha256" != "$EXPECTED_MANIFEST_SHA256" ]]; then
+            echo "Prepared npm candidate manifest is out of bounds or has changed." >&2
+            exit 1
+          fi
+          jq -e \
+            --arg version "$RELEASE_VERSION" \
+            --arg commit "$GITHUB_SHA" \
+            --arg ref "$GITHUB_REF" \
+            --arg tag "$GITHUB_REF_NAME" \
+            --arg distTag "$RELEASE_DIST_TAG" \
+            --arg baseline "$BASELINE_LATEST_VERSION" \
+            'keys == ["files", "package", "release", "schemaVersion"] and
+             .schemaVersion == 1 and
+             (.package | keys == ["name", "version"]) and
+             .package.name == "@ashlr/hub" and .package.version == $version and
+             (.release | keys == ["baselineLatestVersion", "commit", "distTag", "ref", "tag"]) and
+             .release.commit == $commit and .release.ref == $ref and
+             .release.tag == $tag and .release.distTag == $distTag and
+             .release.baselineLatestVersion == $baseline and
+             (.files | keys == ["packReport", "releaseNotes", "tarball"]) and
+             (.files.tarball | keys == ["bytes", "entryCount", "integrity", "maxEntryBytes", "name", "sha256", "unpackedBytes"]) and
+             (.files.packReport | keys == ["bytes", "name", "sha256"]) and
+             (.files.releaseNotes | keys == ["bytes", "name", "sha256"]) and
+             .files.tarball.name == "ashlr-hub-3.2.0.tgz" and
+             .files.packReport.name == "npm-pack.json" and
+             .files.releaseNotes.name == "release-notes.md" and
+             (.files.tarball.bytes | type == "number" and . >= 1 and . <= 52428800) and
+             (.files.tarball.entryCount | type == "number" and . >= 1 and . <= 10000) and
+             (.files.tarball.maxEntryBytes | type == "number" and . >= 0 and . <= 8388608) and
+             (.files.tarball.unpackedBytes | type == "number" and . >= 1 and . <= 67108864) and
+             (.files.packReport.bytes | type == "number" and . >= 2 and . <= 1048576) and
+             (.files.releaseNotes.bytes | type == "number" and . >= 1 and . <= 65536) and
+             (.files.tarball.sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+             (.files.packReport.sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+             (.files.releaseNotes.sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+             (.files.tarball.integrity | type == "string" and test("^sha512-[A-Za-z0-9+/]+={0,2}$"))' \
+            "$manifest" >/dev/null
+
+          tarball_name="$(jq -er '.files.tarball.name' "$manifest")"
+          pack_name="$(jq -er '.files.packReport.name' "$manifest")"
+          tarball="$root/$tarball_name"
+          pack_report="$root/$pack_name"
+          test -f "$tarball" && test -f "$pack_report"
+          test "$(wc -c < "$tarball")" = "$(jq -er '.files.tarball.bytes' "$manifest")"
+          test "$(wc -c < "$pack_report")" = "$(jq -er '.files.packReport.bytes' "$manifest")"
+          test "$(sha256sum "$tarball" | cut -d ' ' -f 1)" = "$(jq -er '.files.tarball.sha256' "$manifest")"
+          test "$(sha256sum "$pack_report" | cut -d ' ' -f 1)" = "$(jq -er '.files.packReport.sha256' "$manifest")"
+          computed_integrity="sha512-$(openssl dgst -sha512 -binary "$tarball" | base64 -w 0)"
+          expected_integrity="$(jq -er '.files.tarball.integrity' "$manifest")"
+          test "$computed_integrity" = "$expected_integrity"
+          jq -e \
+            --arg version "$RELEASE_VERSION" \
+            --arg filename "$tarball_name" \
+            --arg integrity "$expected_integrity" \
+            --argjson bytes "$(wc -c < "$tarball")" \
+            --argjson unpackedBytes "$(jq -er '.files.tarball.unpackedBytes' "$manifest")" \
+            --argjson entryCount "$(jq -er '.files.tarball.entryCount' "$manifest")" \
+            --argjson maxEntryBytes "$(jq -er '.files.tarball.maxEntryBytes' "$manifest")" \
+            'length == 1 and .[0].name == "@ashlr/hub" and
+             .[0].version == $version and .[0].filename == $filename and
+             .[0].integrity == $integrity and .[0].size == $bytes and
+             .[0].unpackedSize == $unpackedBytes and
+             (.files | length) == $entryCount and
+             (.files | map(.size) | max) == $maxEntryBytes and
+             (.[0].files | type == "array" and length >= 1 and length <= 10000 and
+               (map(.path) | length == (unique | length)) and
+               all(.[].path | split("/");
+                 length >= 1 and all(.[]; length >= 1 and . != "." and . != "..")) and
+               all(.[]; (.path | type == "string" and length >= 1 and length <= 1024 and
+                   (startswith("/") | not) and test("^[A-Za-z0-9._/@+,(){} \\[\\]-]+$")) and
+                 (.size | type == "number" and . == floor and . >= 0 and . <= 8388608) and
+                 (.mode | type == "number" and (. == 420 or . == 493))))' \
+            "$pack_report" >/dev/null
+
+          archive="$RUNNER_TEMP/prepared-package.tar"
+          if ! gzip --decompress --stdout -- "$tarball" | head -c 134217729 > "$archive"; then
+            echo "Prepared package gzip could not be completely inflated within its bound." >&2
+            exit 1
+          fi
+          archive_bytes="$(wc -c < "$archive")"
+          if (( archive_bytes < 1024 || archive_bytes > 134217728 )); then
+            echo "Prepared package tar archive exceeds its global byte bound." >&2
+            exit 1
+          fi
+          test -f "$archive" && test ! -L "$archive"
+          test "$(stat --format='%h' "$archive")" = "1"
+
+          expected_members="$RUNNER_TEMP/expected-package-members.tsv"
+          actual_paths="$RUNNER_TEMP/actual-package-paths.txt"
+          actual_metadata="$RUNNER_TEMP/actual-package-metadata.tsv"
+          actual_unsorted="$RUNNER_TEMP/actual-package-members.unsorted.tsv"
+          actual_members="$RUNNER_TEMP/actual-package-members.tsv"
+          jq -er '.[0].files[] |
+            ["package/\(.path)", (.mode | tostring), (.size | tostring)] | @tsv' \
+            "$pack_report" | LC_ALL=C sort > "$expected_members"
+          TAR_OPTIONS= LC_ALL=C tar --list --file="$archive" \
+            --absolute-names --quoting-style=escape > "$actual_paths"
+          TAR_OPTIONS= LC_ALL=C tar --list --verbose --file="$archive" \
+            --absolute-names --numeric-owner --full-time --quoting-style=escape | \
+            awk '
+              BEGIN { count = 0 }
+              $1 !~ /^-[r-][w-][x-][r-][w-][x-][r-][w-][x-]$/ ||
+                $3 !~ /^[0-9]+$/ { exit 2 }
+              {
+                count += 1
+                mode = 0
+                for (i = 2; i <= 10; i += 1) {
+                  mode *= 2
+                  if (substr($1, i, 1) != "-") mode += 1
+                }
+                if (count > 10000 || $3 > 8388608) exit 3
+                print mode "\t" $3
+              }
+              END { if (count < 1) exit 4 }
+            ' > "$actual_metadata"
+          test "$(wc -l < "$actual_paths")" = "$(wc -l < "$actual_metadata")"
+          paste "$actual_paths" "$actual_metadata" > "$actual_unsorted"
+          awk -F '\t' 'NF != 3 || $1 !~ /^package\// ||
+            $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ { exit 1 }' "$actual_unsorted"
+          LC_ALL=C sort "$actual_unsorted" > "$actual_members"
+          cmp --silent "$expected_members" "$actual_members"
+
+          archive_stats="$(awk -F '\t' '
+            BEGIN { count = 0; total = 0; maximum = 0 }
+            {
+              count += 1
+              total += $3
+              if ($3 > maximum) maximum = $3
+              if (count > 10000 || total > 67108864 || maximum > 8388608) exit 1
+            }
+            END { if (count < 1) exit 2; print count, total, maximum }
+          ' "$actual_members")"
+          read -r archive_entry_count archive_unpacked_bytes archive_max_entry_bytes \
+            <<<"$archive_stats"
+          test "$archive_entry_count" = "$(jq -er '.files.tarball.entryCount' "$manifest")"
+          test "$archive_unpacked_bytes" = "$(jq -er '.files.tarball.unpackedBytes' "$manifest")"
+          test "$archive_max_entry_bytes" = "$(jq -er '.files.tarball.maxEntryBytes' "$manifest")"
+
+          embedded_package="$RUNNER_TEMP/prepared-package.json"
+          embedded_identity="$RUNNER_TEMP/prepared-build-identity.json"
+          TAR_OPTIONS= tar -xOf "$archive" package/package.json | head -c 1048577 > "$embedded_package"
+          TAR_OPTIONS= tar -xOf "$archive" package/dist/build-identity.json | head -c 8193 > "$embedded_identity"
+          package_bytes="$(wc -c < "$embedded_package")"
+          identity_bytes="$(wc -c < "$embedded_identity")"
+          if (( package_bytes < 2 || package_bytes > 1048576 ||
+                identity_bytes < 2 || identity_bytes > 8192 )); then
+            echo "Selected package metadata exceeds its streamed byte bound." >&2
+            exit 1
+          fi
+          jq -e --arg version "$RELEASE_VERSION" \
+            '.name == "@ashlr/hub" and .version == $version and
+             .publishConfig == {access: "public", provenance: true} and
+             .repository == {type: "git", url: "git+https://github.com/ashlrai/ashlr-hub.git"}' \
+            "$embedded_package" >/dev/null
+          jq -e --arg version "$RELEASE_VERSION" --arg revision "$GITHUB_SHA" \
+            '.schemaVersion == 1 and .packageVersion == $version and
+             .revision == $revision and .dirty == false and .provenance == "git"' \
+            "$embedded_identity" >/dev/null
+          printf 'tarball=%s\n' "$tarball" >> "$GITHUB_OUTPUT"
       - name: Admit exact candidate channel state immediately before publish
+        id: admission
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
-          package_version="$(node -p "require('./package.json').version")"
-          if [[ "$package_version" != "$RELEASE_VERSION" || "$GITHUB_REF_NAME" != "v${RELEASE_VERSION}" ]]; then
+          if [[ "$GITHUB_REF_TYPE" != "tag" || ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ||
+                "$GITHUB_REF_NAME" != "v${RELEASE_VERSION}" ]]; then
             echo "This release lane is pinned to v${RELEASE_VERSION}." >&2
             exit 1
           fi
+
+          branch_json="$(gh api --fail "repos/${GITHUB_REPOSITORY}/branches/master")"
+          master_protected="$(jq -r '.protected // false' <<<"$branch_json")"
+          master_commit="$(jq -r '.commit.sha // empty' <<<"$branch_json")"
+          if [[ "$master_protected" != "true" || ! "$master_commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Protected master authority could not be established." >&2
+            exit 1
+          fi
+          comparison="$(gh api --fail \
+            "repos/${GITHUB_REPOSITORY}/compare/${GITHUB_SHA}...${master_commit}" \
+            --jq '.status')"
+          if [[ "$comparison" != "ahead" && "$comparison" != "identical" ]]; then
+            echo "Release tag target is not in protected master history." >&2
+            exit 1
+          fi
+
           packument="$RUNNER_TEMP/npm-packument-before.json"
           curl --fail --silent --show-error --location \
             --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 \
@@ -350,6 +693,12 @@ jobs:
              (.versions[$version] == null)' \
             "$packument" >/dev/null
           jq -cS '.["dist-tags"]' "$packument" > "$RUNNER_TEMP/npm-dist-tags-before.json"
+          dist_tags_before_b64="$(base64 -w 0 "$RUNNER_TEMP/npm-dist-tags-before.json")"
+          if (( ${#dist_tags_before_b64} < 4 || ${#dist_tags_before_b64} > 8192 )); then
+            echo "Pre-publication dist-tags evidence is out of bounds." >&2
+            exit 1
+          fi
+          printf 'dist_tags_before_b64=%s\n' "$dist_tags_before_b64" >> "$GITHUB_OUTPUT"
 
           tag_ref_json="$(gh api --fail \
             "repos/${GITHUB_REPOSITORY}/git/ref/tags/${GITHUB_REF_NAME}")"
@@ -358,23 +707,74 @@ jobs:
             --arg sha "$GITHUB_SHA" \
             '.ref == $ref and .object.type == "commit" and .object.sha == $sha' \
             <<<"$tag_ref_json" >/dev/null
+          if [[ ! "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Publication run attempt is invalid." >&2
+            exit 1
+          fi
+          printf 'publication_run_attempt=%s\n' "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
       - name: Publish to npm (provenance)
         shell: bash
+        env:
+          TARBALL: ${{ steps.prepared.outputs.tarball }}
         run: |
           set -euo pipefail
 
-          filename="$(jq -er '.[0].filename' "$RUNNER_TEMP/npm-pack.json")"
-          npm publish "$RUNNER_TEMP/$filename" \
+          npm publish "$TARBALL" \
             --ignore-scripts \
             --provenance \
             --access public \
+            --registry https://registry.npmjs.org \
             --tag "$RELEASE_DIST_TAG"
+
+  verify_publish:
+    name: Verify npm candidate publication (NO_PUBLISH_AUTHORITY)
+    runs-on: ubuntu-latest
+    needs: [prepare, publish]
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout exact provenance verifier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Set up pinned verification Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.19.0"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+      - name: Install pinned verification npm CLI
+        run: npm install --global npm@11.19.0 --ignore-scripts --no-audit --no-fund
+      - name: Verify verification npm CLI
+        run: test "$(npm --version)" = "11.19.0"
+      - name: Download prepared npm candidate evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.prepare.outputs.candidate_artifact_name }}
+          path: prepared-candidate
+          digest-mismatch: error
       - name: Verify immutable candidate and preserved dist-tags
         shell: bash
+        env:
+          DIST_TAGS_BEFORE_B64: ${{ needs.publish.outputs.dist_tags_before_b64 }}
+          EXPECTED_MANIFEST_SHA256: ${{ needs.prepare.outputs.manifest_sha256 }}
+          PUBLICATION_RUN_ATTEMPT: ${{ needs.publish.outputs.publication_run_attempt }}
         run: |
           set -euo pipefail
 
-          expected_integrity="$(cat "$RUNNER_TEMP/npm-pack-integrity.txt")"
+          manifest="prepared-candidate/publish-manifest.json"
+          if [[ ! "$EXPECTED_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ||
+                "$(sha256sum "$manifest" | cut -d ' ' -f 1)" != "$EXPECTED_MANIFEST_SHA256" ||
+                ${#DIST_TAGS_BEFORE_B64} -lt 4 || ${#DIST_TAGS_BEFORE_B64} -gt 8192 ]]; then
+            echo "Publication verification evidence is missing or invalid." >&2
+            exit 1
+          fi
+          expected_integrity="$(jq -er '.files.tarball.integrity' "$manifest")"
+          printf '%s' "$DIST_TAGS_BEFORE_B64" | base64 --decode > "$RUNNER_TEMP/npm-dist-tags-before.json"
+          jq -e --arg latest "$BASELINE_LATEST_VERSION" \
+            '.latest == $latest' "$RUNNER_TEMP/npm-dist-tags-before.json" >/dev/null
           version_metadata="$RUNNER_TEMP/npm-version-after.json"
           packument="$RUNNER_TEMP/npm-packument-after.json"
           observed=false
@@ -440,12 +840,12 @@ jobs:
             "$GITHUB_REF" \
             "$GITHUB_SHA" \
             "$GITHUB_RUN_ID" \
-            "$GITHUB_RUN_ATTEMPT"
+            "$PUBLICATION_RUN_ATTEMPT"
 
   release:
     name: Create GitHub release
     runs-on: ubuntu-latest
-    needs: publish
+    needs: [prepare, verify_publish]
     permissions:
       contents: write
     env:
@@ -454,23 +854,50 @@ jobs:
       - name: Download bounded GitHub release handoff
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: npm-release-handoff-${{ github.run_id }}
+          name: ${{ needs.prepare.outputs.release_artifact_name }}
           path: release-handoff
           digest-mismatch: error
       - name: Verify exact release handoff
         shell: bash
+        env:
+          EXPECTED_MANIFEST_SHA256: ${{ needs.prepare.outputs.manifest_sha256 }}
         run: |
           set -euo pipefail
 
           notes="release-handoff/release-notes.md"
-          test -f "$notes"
-          test ! -L "$notes"
+          manifest="release-handoff/publish-manifest.json"
           entry_count="$(find release-handoff -mindepth 1 -maxdepth 1 | wc -l)"
+          file_count="$(find release-handoff -mindepth 1 -maxdepth 1 -type f | wc -l)"
+          if [[ "$entry_count" != "2" || "$file_count" != "2" ||
+                ! "$EXPECTED_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "GitHub release handoff has an invalid top-level shape." >&2
+            exit 1
+          fi
+          for path in "$notes" "$manifest"; do
+            test -f "$path" && test ! -L "$path"
+            test "$(stat --format='%h' "$path")" = "1"
+          done
           notes_bytes="$(wc -c < "$notes")"
-          if [[ "$entry_count" != "1" || "$notes_bytes" -lt 1 || "$notes_bytes" -gt 65536 ]]; then
+          manifest_bytes="$(wc -c < "$manifest")"
+          if [[ "$notes_bytes" -lt 1 || "$notes_bytes" -gt 65536 ||
+                "$manifest_bytes" -lt 2 || "$manifest_bytes" -gt 8192 ||
+                "$(sha256sum "$manifest" | cut -d ' ' -f 1)" != "$EXPECTED_MANIFEST_SHA256" ]]; then
             echo "GitHub release handoff is incomplete or out of bounds." >&2
             exit 1
           fi
+          jq -e \
+            --arg version "$RELEASE_VERSION" \
+            --arg commit "$GITHUB_SHA" \
+            --arg ref "$GITHUB_REF" \
+            --arg tag "$GITHUB_REF_NAME" \
+            --argjson bytes "$notes_bytes" \
+            --arg sha256 "$(sha256sum "$notes" | cut -d ' ' -f 1)" \
+            '.schemaVersion == 1 and .package.name == "@ashlr/hub" and
+             .package.version == $version and .release.commit == $commit and
+             .release.ref == $ref and .release.tag == $tag and
+             .files.releaseNotes.name == "release-notes.md" and
+             .files.releaseNotes.bytes == $bytes and
+             .files.releaseNotes.sha256 == $sha256' "$manifest" >/dev/null
       - name: Create or verify the exact GitHub release
         shell: bash
         env:
@@ -493,6 +920,13 @@ jobs:
             exit 1
           fi
           if [[ "$probe_status" == "404" ]]; then
+            live_tag="$(gh api --fail \
+              "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}")"
+            jq -e \
+              --arg ref "refs/tags/${tag}" \
+              --arg sha "$GITHUB_SHA" \
+              '.ref == $ref and .object.type == "commit" and .object.sha == $sha' \
+              <<<"$live_tag" >/dev/null
             gh release create "$tag" --verify-tag --title "$tag" --notes-file "$notes" \
               --prerelease --latest=false
           fi
