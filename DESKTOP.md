@@ -21,6 +21,9 @@ The quarantine is enforced for fresh source builds, the default Tauri
 configuration, and the official release workflow. A hostile `--config`
 override combined with an already-built/staged executable is outside
 source-build enforcement and must never be treated as admitted release output.
+While the quarantine is active, the official desktop release workflow admits
+only `desktop-v*` tag-push events. Manual dispatch is disabled so a historical
+branch or commit cannot create or append desktop release artifacts.
 
 Quick start (requires Rust + `cargo install tauri-cli`):
 

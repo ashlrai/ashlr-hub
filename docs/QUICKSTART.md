@@ -23,7 +23,9 @@ ashlr --version
 > through npm/CLI and the web dashboard; Linux desktop artifacts are quarantined
 > for `GHSA-wrw7-89jp-8q8g` / `RUSTSEC-2024-0429`.
 > Enforcement covers fresh source builds, the default Tauri configuration, and
-> the official release workflow. A hostile `--config` combined with an
+> the tag-push-only official release workflow. Manual dispatch is disabled so
+> historical refs cannot create or append desktop release artifacts.
+> A hostile `--config` combined with an
 > already-built/staged executable is outside source-build enforcement and must
 > never be treated as admitted release output.
 

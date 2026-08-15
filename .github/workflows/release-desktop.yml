@@ -1,6 +1,8 @@
 # release-desktop.yml — tag-triggered desktop installer builds (Tauri v2).
 #
-# Trigger: pushing a tag `desktop-v<X.Y.Z>`, or manual workflow_dispatch.
+# Trigger: pushing a tag `desktop-v<X.Y.Z>` only. Manual dispatch is disabled
+# while the Linux desktop quarantine is active so a historical ref cannot
+# create or append desktop release artifacts.
 #
 # Release matrix:
 #   macos-latest      → .dmg  (arm64 native; universal via --target universal-apple-darwin)
@@ -39,12 +41,6 @@ on:
   push:
     tags:
       - "desktop-v*"
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag to release (e.g. desktop-v0.1.0). Used only for naming."
-        required: false
-        default: "desktop-v0.0.0-dev"
 
 concurrency:
   group: release-desktop-${{ github.ref }}
@@ -222,11 +218,11 @@ jobs:
         with:
           projectPath: desktop
           tauriScript: tauri
-          # Tag from the push event, or the manual dispatch input.
-          tagName: ${{ github.ref_name || inputs.tag }}
-          releaseName: "Ashlr Desktop ${{ github.ref_name || inputs.tag }}"
+          # The workflow admits only desktop-v* tag-push events.
+          tagName: ${{ github.ref_name }}
+          releaseName: "Ashlr Desktop ${{ github.ref_name }}"
           releaseBody: |
-            ## Ashlr Desktop ${{ github.ref_name || inputs.tag }}
+            ## Ashlr Desktop ${{ github.ref_name }}
 
             ### Downloads
             | Platform | File | Notes |

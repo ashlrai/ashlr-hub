@@ -141,7 +141,9 @@ cargo tauri build --debug
 
 Pushing a `desktop-v*` tag triggers `.github/workflows/release-desktop.yml`,
 which builds only macOS and Windows installers and uploads them to a GitHub
-Release draft. The release body records Linux as not published.
+Release draft. The release body records Linux as not published. Manual
+dispatch is disabled while the quarantine is active, so a historical branch
+or commit cannot create or append desktop release artifacts.
 
 Linux desktop release can be re-enabled only after either migration to Tauri v3
 with GTK4, or adoption of another supported dependency chain that resolves

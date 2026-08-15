@@ -55,7 +55,16 @@ interface BuildJob {
   steps?: WorkflowStep[];
 }
 
-const parsedWorkflow = parse(workflow) as { jobs?: Record<string, BuildJob> };
+interface ReleaseWorkflow {
+  on?: {
+    push?: { tags?: string[]; branches?: string[] };
+    workflow_dispatch?: unknown;
+  };
+  jobs?: Record<string, BuildJob>;
+}
+
+const parsedWorkflow = parse(workflow) as ReleaseWorkflow;
+const releaseTriggers = parsedWorkflow.on ?? {};
 const buildJob = parsedWorkflow.jobs?.build ?? {};
 const buildMatrix = buildJob.strategy?.matrix?.include ?? [];
 const buildSteps = buildJob.steps ?? [];
@@ -174,8 +183,14 @@ describe('M468 desktop release workflow supply-chain policy', () => {
   });
 
   it('publishes only independently admitted macOS and Windows matrix artifacts', () => {
-    expect(workflow).toContain('- "desktop-v*"');
-    expect(workflow).toContain('workflow_dispatch:');
+    expect(releaseTriggers).toEqual({ push: { tags: ['desktop-v*'] } });
+    expect(releaseTriggers.push?.branches).toBeUndefined();
+    expect(releaseTriggers.workflow_dispatch).toBeUndefined();
+    expect(workflow).not.toContain('workflow_dispatch:');
+    expect(workflow).not.toContain('inputs.tag');
+    expect(workflow).toContain('tagName: ${{ github.ref_name }}');
+    expect(workflow).toContain('releaseName: "Ashlr Desktop ${{ github.ref_name }}"');
+    expect(workflow).not.toContain('github.ref_name ||');
     expect(buildJob.strategy?.['fail-fast']).toBe(false);
     expect(Object.keys(parsedWorkflow.jobs ?? {})).toEqual(['build']);
     expect(buildMatrix).toEqual([
@@ -222,14 +237,20 @@ describe('M468 desktop release workflow supply-chain policy', () => {
     expect(desktopReadme).toContain('independent security review');
     expect(desktopReadme).toContain('hostile `--config`');
     expect(desktopReadme).toContain('official workflow, default Tauri configuration, and fresh builds');
+    expect(desktopReadme).toContain('Manual\ndispatch is disabled');
+    expect(desktopReadme).toContain('historical branch\nor commit');
 
     expect(quickstart).toContain('Linux remains supported\n> through npm/CLI and the web dashboard');
     expect(quickstart).toContain('hostile `--config`');
     expect(quickstart).toContain('fresh source builds');
+    expect(quickstart).toContain('tag-push-only official release workflow');
+    expect(quickstart).toContain('Manual dispatch is disabled');
     expect(desktopPointer).toContain('The root Linux CLI, Bun sidecar,\nand web dashboard remain supported');
     expect(desktopPointer).toContain('Tauri v3/GTK4');
     expect(desktopPointer).toContain('glib >=0.20');
     expect(desktopPointer).toContain('hostile `--config`');
     expect(desktopPointer).toContain('fresh source builds');
+    expect(desktopPointer).toContain('only `desktop-v*` tag-push events');
+    expect(desktopPointer).toContain('Manual dispatch is disabled');
   });
 });
