@@ -259,6 +259,8 @@ export interface ReadDispatchProductionEventsOptions {
   maxBytes?: number;
   /** Aggregate physical rows examined, including blank and invalid rows. */
   maxRows?: number;
+  /** Inspect without creating a receipt lock or changing storage metadata. */
+  inspectionOnly?: boolean;
 }
 
 export interface DispatchProductionParentIdentity {
@@ -440,6 +442,26 @@ export interface DispatchProductionSourceQuality {
 
 export interface DispatchProductionEventsReadResult extends DispatchProductionSourceQuality {
   events: DispatchProductionEvent[];
+  /** Bounded aggregate diagnostics only; never includes row values or file paths. */
+  invalidReasonCounts?: DispatchProductionInvalidReasonCount[];
+}
+
+export const DISPATCH_PRODUCTION_INVALID_REASON_CODES = [
+  'row-too-large',
+  'json-invalid',
+  'schema-invalid',
+  'envelope-mismatch',
+  'timestamp-invalid',
+  'normalization-failed',
+  'receipt-invalid',
+] as const;
+
+export type DispatchProductionInvalidReasonCode =
+  typeof DISPATCH_PRODUCTION_INVALID_REASON_CODES[number];
+
+export interface DispatchProductionInvalidReasonCount {
+  reason: DispatchProductionInvalidReasonCode;
+  count: number;
 }
 
 export interface DispatchProductionYieldReadResult {
@@ -4628,8 +4650,20 @@ function emptyDispatchProductionRead(
     rowsScanned: 0,
     invalidRows: 0,
     unreadableFiles: 0,
+    invalidReasonCounts: [],
     ...overrides,
   };
+}
+
+function recordDispatchProductionInvalidReason(
+  result: DispatchProductionEventsReadResult,
+  reason: DispatchProductionInvalidReasonCode,
+): void {
+  result.invalidRows++;
+  const counts = result.invalidReasonCounts ??= [];
+  const existing = counts.find((entry) => entry.reason === reason);
+  if (existing) existing.count++;
+  else counts.push({ reason, count: 1 });
 }
 
 function sameFile(left: ReturnType<typeof fstatSync>, right: ReturnType<typeof fstatSync>): boolean {
@@ -7009,19 +7043,21 @@ function mergeTreatmentOutcomeReceipts(
   result.events = result.events.filter((event) => event.basis !== 'repair-lifecycle-outcome');
   const dir = treatmentOutcomeReceiptDir();
   if (!existsSync(dir)) return;
-  const lock = acquireLocalStoreLock(treatmentReceiptLockPath(), 250);
-  if (!lock) {
+  const lock = opts.inspectionOnly ? undefined : acquireLocalStoreLock(treatmentReceiptLockPath(), 250);
+  if (!opts.inspectionOnly && !lock) {
     result.sourceState = 'degraded';
     result.complete = false;
     result.unreadableFiles++;
     pushStopReason(result.stopReasons, 'io-error');
     return;
   }
+  let directorySnapshot: ReturnType<typeof lstatSync> | undefined;
   const entries: string[] = [];
   try {
     const dirStat = lstatSync(dir);
     if (!safeDispatchProductionDirectory(dirStat) ||
       (process.platform !== 'win32' && (dirStat.mode & 0o077) !== 0)) throw new Error('unsafe receipt directory');
+    directorySnapshot = dirStat;
     inspectExactReceiptAuthorityDirectory(dir);
     const handle = opendirSync(dir);
     try {
@@ -7039,7 +7075,7 @@ function mergeTreatmentOutcomeReceipts(
     result.complete = false;
     result.unreadableFiles++;
     pushStopReason(result.stopReasons, 'io-error');
-    releaseLocalStoreLock(lock);
+    if (lock) releaseLocalStoreLock(lock);
     return;
   }
   let retention: TreatmentReceiptRetentionState | null = null;
@@ -7069,7 +7105,7 @@ function mergeTreatmentOutcomeReceipts(
     result.unreadableFiles++;
     pushStopReason(result.stopReasons, 'io-error');
     result.sourceState = 'degraded';
-    releaseLocalStoreLock(lock);
+    if (lock) releaseLocalStoreLock(lock);
     return;
   }
   const receipts = new Map<string, DispatchProductionEvent>();
@@ -7126,7 +7162,7 @@ function mergeTreatmentOutcomeReceipts(
       if (opts.sinceMs !== undefined && eventMs < opts.sinceMs) continue;
       receipts.set(name, withLearningLabelOrigin(event, event.learningLabel, event));
     } catch {
-      result.invalidRows++;
+      recordDispatchProductionInvalidReason(result, 'receipt-invalid');
       result.complete = false;
     }
   }
@@ -7145,7 +7181,21 @@ function mergeTreatmentOutcomeReceipts(
     }
   }
   if (!result.complete || result.invalidRows > 0 || result.unreadableFiles > 0) result.sourceState = 'degraded';
-  releaseLocalStoreLock(lock);
+  if (opts.inspectionOnly && directorySnapshot) {
+    try {
+      const directoryAfter = lstatSync(dir);
+      if (!safeDispatchProductionDirectory(directoryAfter) ||
+        !sameFile(directorySnapshot, directoryAfter) ||
+        directorySnapshot.mtimeMs !== directoryAfter.mtimeMs ||
+        directorySnapshot.ctimeMs !== directoryAfter.ctimeMs) throw new Error('receipt directory changed');
+    } catch {
+      result.sourceState = 'degraded';
+      result.complete = false;
+      result.unreadableFiles++;
+      pushStopReason(result.stopReasons, 'io-error');
+    }
+  }
+  if (lock) releaseLocalStoreLock(lock);
 }
 
 export function readDispatchProductionEventsDetailed(
@@ -7263,24 +7313,30 @@ export function readDispatchProductionEventsDetailed(
       result.rowsScanned++;
       if (!line.trim()) continue;
       if (Buffer.byteLength(line, 'utf8') > MAX_READ_ROW_BYTES) {
-        result.invalidRows++;
+        recordDispatchProductionInvalidReason(result, 'row-too-large');
+        continue;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        recordDispatchProductionInvalidReason(result, 'json-invalid');
+        continue;
+      }
+      if (!isDispatchProductionEvent(parsed)) {
+        recordDispatchProductionInvalidReason(result, 'schema-invalid');
+        continue;
+      }
+      if (!dispatchProductionSuppliedEnvelopeSemanticsAgree(parsed)) {
+        recordDispatchProductionInvalidReason(result, 'envelope-mismatch');
+        continue;
+      }
+      const eventMs = Date.parse(parsed.ts);
+      if (!Number.isFinite(eventMs)) {
+        recordDispatchProductionInvalidReason(result, 'timestamp-invalid');
         continue;
       }
       try {
-        const parsed: unknown = JSON.parse(line);
-        if (!isDispatchProductionEvent(parsed)) {
-          result.invalidRows++;
-          continue;
-        }
-        if (!dispatchProductionSuppliedEnvelopeSemanticsAgree(parsed)) {
-          result.invalidRows++;
-          continue;
-        }
-        const eventMs = Date.parse(parsed.ts);
-        if (!Number.isFinite(eventMs)) {
-          result.invalidRows++;
-          continue;
-        }
         if (opts.sinceMs !== undefined && eventMs < opts.sinceMs) continue;
         if (result.events.length >= cap) {
           pushStopReason(result.stopReasons, 'event-limit');
@@ -7294,7 +7350,7 @@ export function readDispatchProductionEventsDetailed(
           preserveMissingCausalAuthority: true,
         }), parsed.learningLabel, parsed));
       } catch {
-        result.invalidRows++;
+        recordDispatchProductionInvalidReason(result, 'normalization-failed');
       }
     }
   }
@@ -8238,7 +8294,7 @@ export function readDispatchProductionYieldDetailed(opts?: {
         limitPerDimension: opts?.limitPerDimension,
       })
     : undefined;
-  const { events: _events, ...baseSourceQuality } = read;
+  const { events: _events, invalidReasonCounts: _invalidReasonCounts, ...baseSourceQuality } = read;
   const sourceQuality: DispatchProductionSourceQuality = identityDegraded
     ? {
         ...baseSourceQuality,

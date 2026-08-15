@@ -3,6 +3,10 @@ import { readBestOfNRecordsDetailed } from './best-of-n-ledger.js';
 import { readDecisionsDetailed } from './decisions-ledger.js';
 import { readDispatchManifestEventsDetailed } from './dispatch-manifest.js';
 import { readDispatchProductionEventsDetailed } from './dispatch-production-ledger.js';
+import {
+  DISPATCH_PRODUCTION_INVALID_REASON_CODES,
+  type DispatchProductionInvalidReasonCount,
+} from './dispatch-production-ledger.js';
 import { readJudgeTracesDetailed } from './judge-trace.js';
 import { readAutonomyEvidencePacksDetailed } from '../autonomy/evidence-pack.js';
 
@@ -44,10 +48,21 @@ export interface FleetEvidenceDiagnosis {
   attempts: 1 | 2;
   mutable: false;
   quality: FleetEvidenceDiagnosisQuality;
+  diagnostics?: {
+    authority: 'observation-only';
+    bounded: true;
+    invalidReasonCounts: DispatchProductionInvalidReasonCount[];
+    attributedInvalidRows: number;
+    withheldInvalidRows: number;
+  };
   detail: string;
 }
 
-type EvidenceReader = (deep: boolean) => FleetEvidenceDiagnosisQuality;
+interface EvidenceReaderResult extends FleetEvidenceDiagnosisQuality {
+  invalidReasonCounts?: DispatchProductionInvalidReasonCount[];
+}
+
+type EvidenceReader = (deep: boolean) => EvidenceReaderResult;
 
 export interface FleetEvidenceDoctorDeps {
   readers?: Partial<Record<FleetEvidenceSource, EvidenceReader>>;
@@ -93,11 +108,19 @@ function autonomyPacksQuality(deep: boolean): FleetEvidenceDiagnosisQuality {
   };
 }
 
+function dispatchProductionQuality(deep: boolean): EvidenceReaderResult {
+  const value = readDispatchProductionEventsDetailed({ ...(deep ? DEEP : {}), inspectionOnly: true });
+  return {
+    ...qualityOf(value),
+    invalidReasonCounts: value.invalidReasonCounts,
+  };
+}
+
 const DEFAULT_READERS: Record<FleetEvidenceSource, EvidenceReader> = {
   decisions: (deep) => qualityOf(readDecisionsDetailed(deep ? DEEP : {})),
   'judge-traces': (deep) => qualityOf(readJudgeTracesDetailed(deep ? DEEP : {})),
   'agent-actions': (deep) => qualityOf(readAgentActionsDetailed({ ...(deep ? DEEP : {}), inspectionOnly: true })),
-  'dispatch-production': (deep) => qualityOf(readDispatchProductionEventsDetailed(deep ? DEEP : {})),
+  'dispatch-production': dispatchProductionQuality,
   'dispatch-manifests': (deep) => qualityOf(readDispatchManifestEventsDetailed({
     ...(deep ? DEEP : {}), inspectionOnly: true,
   })),
@@ -106,6 +129,49 @@ const DEFAULT_READERS: Record<FleetEvidenceSource, EvidenceReader> = {
   })),
   'autonomy-packs': autonomyPacksQuality,
 };
+
+function dispatchDiagnostics(
+  source: FleetEvidenceSource,
+  deep: boolean,
+  value: EvidenceReaderResult,
+): FleetEvidenceDiagnosis['diagnostics'] | undefined {
+  if (source !== 'dispatch-production' || !deep) return undefined;
+  const invalidRows = Number.isSafeInteger(value.invalidRows) && value.invalidRows > 0
+    ? value.invalidRows
+    : 0;
+  const allowed = new Set<string>(DISPATCH_PRODUCTION_INVALID_REASON_CODES);
+  const rows = value.invalidReasonCounts;
+  if (!Array.isArray(rows)) {
+    return {
+      authority: 'observation-only', bounded: true, invalidReasonCounts: [],
+      attributedInvalidRows: 0, withheldInvalidRows: invalidRows,
+    };
+  }
+  const byReason = new Map<string, number>();
+  for (const row of rows) {
+    if (!row || !allowed.has(row.reason) || !Number.isSafeInteger(row.count) || row.count <= 0 ||
+      byReason.has(row.reason)) {
+      return {
+        authority: 'observation-only', bounded: true, invalidReasonCounts: [],
+        attributedInvalidRows: 0, withheldInvalidRows: invalidRows,
+      };
+    }
+    byReason.set(row.reason, row.count);
+  }
+  const invalidReasonCounts = DISPATCH_PRODUCTION_INVALID_REASON_CODES
+    .flatMap((reason) => byReason.has(reason) ? [{ reason, count: byReason.get(reason)! }] : []);
+  const attributedInvalidRows = invalidReasonCounts.reduce((sum, row) => sum + row.count, 0);
+  if (attributedInvalidRows > invalidRows) {
+    return {
+      authority: 'observation-only', bounded: true, invalidReasonCounts: [],
+      attributedInvalidRows: 0, withheldInvalidRows: invalidRows,
+    };
+  }
+  return {
+    authority: 'observation-only', bounded: true, invalidReasonCounts,
+    attributedInvalidRows, withheldInvalidRows: invalidRows - attributedInvalidRows,
+  };
+}
 
 function diagnosisState(quality: FleetEvidenceDiagnosisQuality): FleetEvidenceDiagnosisState {
   if (quality.sourceState === 'missing') return 'cold-start';
@@ -139,14 +205,18 @@ export function diagnoseFleetEvidence(
 ): FleetEvidenceDiagnosis {
   const deep = opts.deep === true;
   const reader = opts.deps?.readers?.[source] ?? DEFAULT_READERS[source];
-  let quality = reader(deep);
+  let read = reader(deep);
+  let quality = qualityOf(read);
+  let diagnostics = dispatchDiagnostics(source, deep, read);
   let state = diagnosisState(quality);
   let attempts: 1 | 2 = 1;
   if (state === 'manual-inspection-required' && quality.stopReasons.includes('io-error')) {
     attempts = 2;
     const retried = reader(deep);
     const retryState = diagnosisState(retried);
-    quality = retried;
+    read = retried;
+    quality = qualityOf(retried);
+    diagnostics = dispatchDiagnostics(source, deep, read);
     state = retryState === 'healthy' ? 'transient-retry-recovered' : retryState;
   }
   return {
@@ -157,6 +227,7 @@ export function diagnoseFleetEvidence(
     attempts,
     mutable: false,
     quality,
+    ...(diagnostics ? { diagnostics } : {}),
     detail: diagnosisDetail(state, quality),
   };
 }
