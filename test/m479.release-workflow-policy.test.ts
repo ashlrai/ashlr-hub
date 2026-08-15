@@ -17,18 +17,23 @@ const workflowText = readFileSync(resolve(repoRoot, '.github/workflows/release.y
 const releaseDocs = readFileSync(resolve(repoRoot, 'docs/RELEASING.md'), 'utf8');
 const workflow = parse(workflowText) as Record<string, unknown>;
 const jobs = workflow.jobs as Record<string, Record<string, unknown>>;
+const releaseCanary = jobs.release_canary;
+const releaseCanarySteps = releaseCanary.steps as Array<Record<string, unknown>>;
 const publish = jobs.publish;
 const steps = publish.steps as Array<Record<string, unknown>>;
 const release = jobs.release;
 const releaseSteps = release.steps as Array<Record<string, unknown>>;
 const checkout = steps[0]!;
 const admission = steps[1]!;
-const actionRefs = [...steps, ...releaseSteps]
+const actionRefs = [...releaseCanarySteps, ...steps, ...releaseSteps]
   .flatMap((step) => (typeof step.uses === 'string' ? [step.uses] : []));
 
 describe('M479 npm release workflow supply-chain admission', () => {
   it('pins every third-party action to a reviewed immutable commit', () => {
     expect(actionRefs).toEqual([
+      'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
+      'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020',
+      'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
       'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
       'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020',
       'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
@@ -114,7 +119,8 @@ describe('M479 npm release workflow supply-chain admission', () => {
       uses: './.github/workflows/ci.yml',
       permissions: { contents: 'read' },
     });
-    expect(publish.needs).toBe('verify');
+    expect(releaseCanary.needs).toBe('verify');
+    expect(publish.needs).toEqual(['verify', 'release_canary']);
     expect(publish.permissions).toEqual({ contents: 'read', 'id-token': 'write' });
     expect(release.permissions).toEqual({ contents: 'write' });
     expect(workflowText).toContain('node scripts/check-version.mjs');

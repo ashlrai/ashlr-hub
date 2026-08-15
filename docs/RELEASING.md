@@ -3,8 +3,9 @@
 Releases are tag-triggered and fully gated. The current lane is deliberately
 pinned to the 3.2.0 candidate: nothing reaches npm without an explicit human
 action (pushing `v3.2.0`), approval of the `npm-release` environment, and a green
-full-CI verify job. It publishes only under npm dist-tag `candidate` and creates
-a GitHub prerelease; it cannot move npm or GitHub `latest`.
+full-CI verify job plus the signed release-canary gate. It publishes only under
+npm dist-tag `candidate` and creates a GitHub prerelease; it cannot move npm or
+GitHub `latest`.
 
 ## One-time setup
 
@@ -93,6 +94,16 @@ tags fail closed.
 
 4. `.github/workflows/release.yml` then:
    - **verify** — full CI gate (typecheck / lint / build / test);
+   - **release_canary** — on a disposable GitHub-hosted runner, check out the
+     exact event SHA without retained Git credentials, install root dependencies
+     with lifecycle scripts disabled, and run the existing signed release canary
+     against that candidate plus its distinct immediate first parent. The job
+     verifies the self-authenticated receipt's exact candidate/rollback identity
+     and strict `NO_AUTHORITY` schema, binds the stored receipt bytes to SHA-256,
+     uploads only the bounded receipt and digest for seven days, and writes only
+     SHAs plus the all-false authority posture to the job summary. It has only
+     `contents: read`; it has no `npm-release` environment, OIDC permission,
+     publishing token, install pointer, or service authority;
    - **publish** — wait for explicit `npm-release` approval → verify
      the exact immutable event SHA is in protected-master history → install the
      pinned npm 11 trusted-publishing
@@ -114,6 +125,15 @@ tags fail closed.
      bounded artifact, then create or exactly verify a GitHub prerelease with
      `--latest=false`. This job has no npm tooling, token, OIDC permission, or
      publish command.
+
+The signed canary is a required fail-closed reproducibility and rollback
+observation, not independent release authority. The GitHub-hosted runner retains
+network access and workflow infrastructure, and both the canary implementation
+and its receipt verifier are pinned by the same workflow commit being evaluated.
+A compromise of that protected source could therefore affect producer and
+verifier together. Its ephemeral signature proves receipt self-consistency only;
+it does not replace protected review, npm trusted-publisher identity, environment
+approval, registry provenance, independently pinned rollback, or live acceptance.
 
 Publication is candidate availability, not production promotion. Do not move
 npm `latest`, install the candidate into the active release pointer, or enable a
