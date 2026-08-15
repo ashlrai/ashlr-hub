@@ -247,8 +247,10 @@ jobs:
           mkdir "$verification_root"
           cd "$verification_root"
           npm init --yes >/dev/null
-          npm install --package-lock-only --ignore-scripts --no-audit --no-fund \
+          npm install --ignore-scripts --no-audit --no-fund --save-exact \
             "@ashlr/hub@${RELEASE_VERSION}"
+          installed_version="$(node -p "require('./node_modules/@ashlr/hub/package.json').version")"
+          test "$installed_version" = "$RELEASE_VERSION"
           npm audit signatures
 
   release:

@@ -215,6 +215,14 @@ describe('release workflow', () => {
     expect(postPublish?.run).toContain('npm audit signatures');
     expect(postPublish?.run).toContain('npm-dist-tags-before.json');
     expect(postPublish?.run).toContain('npm-dist-tags-after.json');
+    expect(postPublish?.run).toContain(
+      'npm install --ignore-scripts --no-audit --no-fund --save-exact',
+    );
+    expect(postPublish?.run).not.toContain('--package-lock-only');
+    expect(postPublish?.run).toContain(
+      'require(\'./node_modules/@ashlr/hub/package.json\').version',
+    );
+    expect(postPublish?.run).toContain('test "$installed_version" = "$RELEASE_VERSION"');
 
     const structuredWorkflow = JSON.stringify(parsed);
     expect(structuredWorkflow).not.toMatch(/NODE_AUTH_TOKEN|NPM_TOKEN|secrets\.NPM_TOKEN/);
@@ -293,6 +301,10 @@ describe('release workflow', () => {
     expect(releaseDocs).toContain('--notes-file "$release_notes" --prerelease --latest=false');
     expect(releaseDocs).toMatch(/npm `latest`\s+to equal `3\.0\.1`/);
     expect(releaseDocs).toContain('npm audit signatures');
+    expect(releaseDocs).toContain(
+      'npm install --ignore-scripts --no-audit --no-fund --save-exact',
+    );
+    expect(releaseDocs).not.toContain('npm install --package-lock-only');
     expect(releaseDocs).toContain('Promotion is a separate explicit');
     expect(releaseDocs).not.toContain('gh secret set NPM_TOKEN');
   });

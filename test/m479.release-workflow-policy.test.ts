@@ -126,6 +126,11 @@ describe('M479 npm release workflow supply-chain admission', () => {
     expect(workflowText).toContain('npm publish "$RUNNER_TEMP/$filename"');
     expect(workflowText).toContain('--tag "$RELEASE_DIST_TAG"');
     expect(workflowText).toContain('npm audit signatures');
+    expect(workflowText).toContain(
+      'npm install --ignore-scripts --no-audit --no-fund --save-exact',
+    );
+    expect(workflowText).not.toContain('npm install --package-lock-only');
+    expect(workflowText).toContain('test "$installed_version" = "$RELEASE_VERSION"');
     expect(workflowText).toContain('npm-dist-tags-before.json');
     expect(workflowText).toContain('npm-dist-tags-after.json');
     expect(workflowText).toContain('gh release create "$tag"');
@@ -145,5 +150,6 @@ describe('M479 npm release workflow supply-chain admission', () => {
     );
     expect(releaseDocs).toContain('--notes-file "$release_notes" --prerelease --latest=false');
     expect(releaseDocs).toContain('Promotion is a separate explicit');
+    expect(releaseDocs).not.toContain('npm install --package-lock-only');
   });
 });

@@ -138,8 +138,10 @@ verification_root="$(mktemp -d)"
 trap 'rm -rf "$verification_root"' EXIT
 cd "$verification_root"
 npm init --yes >/dev/null
-npm install --package-lock-only --ignore-scripts --no-audit --no-fund \
+npm install --ignore-scripts --no-audit --no-fund --save-exact \
   "@ashlr/hub@${version}"
+installed_version="$(node -p "require('./node_modules/@ashlr/hub/package.json').version")"
+test "$installed_version" = "$version"
 npm audit signatures
 ```
 
