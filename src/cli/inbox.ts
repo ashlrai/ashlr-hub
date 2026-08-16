@@ -25,6 +25,7 @@
  */
 
 import { makeColors, pad } from './ui.js';
+import { parsePositiveInt } from './args.js';
 import type { Proposal, ProposalStatus } from '../core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -366,7 +367,24 @@ async function promptConfirmAsync(question: string): Promise<boolean> {
 // Subcommand: list (default)
 // ---------------------------------------------------------------------------
 
-async function cmdInboxList(jsonMode: boolean): Promise<number> {
+const INBOX_STATUS_FILTERS = new Set<ProposalStatus | 'all'>([
+  'pending', 'approved', 'rejected', 'awaiting-host-merge', 'applied', 'failed', 'all',
+]);
+
+/** Options accepted by `ashlr inbox [list]` — see cmdInbox's flag parsing. */
+export interface InboxListOptions {
+  /** Explicit --status filter. Omitted → default (pending, unless --since narrows to history). */
+  status?: ProposalStatus | 'all';
+  /** Epoch-ms lower bound from --since (records with createdAt < this are dropped). */
+  sinceMs?: number;
+  /** The raw --since value, echoed back in --json output for traceability. */
+  sinceRaw?: string;
+  /** --limit N, applied AFTER filtering (newest-N-matching, mirrors `ashlr audit`). */
+  limit?: number;
+  json: boolean;
+}
+
+async function cmdInboxList(opts: InboxListOptions): Promise<number> {
   const tty = process.stdout.isTTY === true;
   const col = makeColors(tty);
 
@@ -376,35 +394,86 @@ async function cmdInboxList(jsonMode: boolean): Promise<number> {
     return 1;
   }
 
-  const all      = _listProposals();
-  const pending  = _listProposals({ status: 'pending' });
+  const all = _listProposals();
 
-  if (jsonMode) {
-    console.log(JSON.stringify({ proposals: pending, counts: buildCounts(all) }, null, 2));
+  // Default (no --status/--since given): preserve the original pending-only view
+  // exactly, for backward compatibility. Any explicit filter switches into the
+  // "history" view — the operator affordance this flag set exists to provide.
+  const filtering = opts.status !== undefined || opts.sinceMs !== undefined;
+  const effectiveStatus: ProposalStatus | 'all' =
+    opts.status ?? (opts.sinceMs !== undefined ? 'all' : 'pending');
+
+  let matched = effectiveStatus === 'all' ? all : all.filter((p) => p.status === effectiveStatus);
+  if (opts.sinceMs !== undefined) {
+    const floor = opts.sinceMs;
+    matched = matched.filter((p) => {
+      const t = Date.parse(p.createdAt);
+      return !isNaN(t) && t >= floor;
+    });
+  }
+  const shown = opts.limit !== undefined ? matched.slice(0, opts.limit) : matched;
+
+  if (opts.json) {
+    console.log(JSON.stringify({
+      proposals: shown,
+      counts: buildCounts(all),
+      filters: {
+        status: effectiveStatus,
+        since: opts.sinceRaw ?? null,
+        limit: opts.limit ?? null,
+      },
+    }, null, 2));
     return 0;
   }
 
-  const pendingN = pending.length;
   console.log('');
-  console.log(
-    col.bold('  ashlr inbox') +
-    col.dim(` — ${pendingN} pending proposal${pendingN !== 1 ? 's' : ''}` +
-      `  ·  ${all.length} total`),
-  );
 
-  if (pendingN === 0) {
+  if (!filtering) {
+    const pendingN = shown.length;
+    console.log(
+      col.bold('  ashlr inbox') +
+      col.dim(` — ${pendingN} pending proposal${pendingN !== 1 ? 's' : ''}` +
+        `  ·  ${all.length} total`),
+    );
+
+    if (pendingN === 0) {
+      printStatusCounts(all, tty);
+      console.log(col.dim('  No pending proposals.'));
+      console.log(col.dim('  Proposals are created here by the autonomous org (M24+) or `ashlr backlog`.'));
+      console.log(col.dim('  See history: `ashlr inbox --status <status>` or `--since <date>` (e.g. --status rejected).'));
+      console.log('');
+      return 0;
+    }
+
+    printTable(shown, tty);
     printStatusCounts(all, tty);
-    console.log(col.dim('  No pending proposals.'));
-    console.log(col.dim('  Proposals are created here by the autonomous org (M24+) or `ashlr backlog`.'));
+    console.log(col.dim('  Use `ashlr inbox show <id>` for full detail.  Add --open to view in ashlr-md.'));
+    console.log(col.dim('  Use `ashlr inbox approve <id>` to approve and apply.'));
+    console.log(col.dim('  Use `ashlr inbox reject <id>` to discard.'));
+    console.log(col.dim('  See history: `ashlr inbox --status <status>` or `--since <date>`.'));
     console.log('');
     return 0;
   }
 
-  printTable(pending, tty);
-  printStatusCounts(all, tty);
-  console.log(col.dim('  Use `ashlr inbox show <id>` for full detail.  Add --open to view in ashlr-md.'));
-  console.log(col.dim('  Use `ashlr inbox approve <id>` to approve and apply.'));
-  console.log(col.dim('  Use `ashlr inbox reject <id>` to discard.'));
+  // ── Filtered / history view ────────────────────────────────────────────
+  const filterDesc = [
+    `status=${effectiveStatus}`,
+    opts.sinceRaw ? `since=${opts.sinceRaw}` : undefined,
+    opts.limit !== undefined ? `limit=${opts.limit}` : undefined,
+  ].filter(Boolean).join(', ');
+  console.log(
+    col.bold('  ashlr inbox') +
+    col.dim(` — ${shown.length} matching (${filterDesc})  ·  ${all.length} total`),
+  );
+
+  if (shown.length === 0) {
+    console.log(col.dim('  No proposals match the given filters.'));
+    console.log('');
+    return 0;
+  }
+
+  printTable(shown, tty);
+  console.log(col.dim('  Use `ashlr inbox show <id>` for full detail.'));
   console.log('');
 
   return 0;
@@ -982,14 +1051,42 @@ function resolveProposal(idOrPrefix: string): Proposal | null {
 // Public entry point
 // ---------------------------------------------------------------------------
 
+const INBOX_USAGE: Record<'list' | 'show' | 'approve' | 'reject' | 'automerge', string> = {
+  list: 'Usage: ashlr inbox [list] [--status <pending|approved|rejected|awaiting-host-merge|applied|failed|all>]\n' +
+    '                    [--since <ISO|YYYY-MM-DD>] [--limit N] [--json]',
+  show: 'Usage: ashlr inbox show <id> [--open] [--json]',
+  approve: 'Usage: ashlr inbox approve <id> [--yes] [--json]',
+  reject: 'Usage: ashlr inbox reject <id> [--json]',
+  automerge: 'Usage: ashlr inbox automerge <id> [--json]',
+};
+
+const INBOX_TOP_LEVEL_USAGE = `Usage: ashlr inbox [subcommand] [flags]
+
+Subcommands:
+  (none) / list   List proposals. Default: pending only. --status/--since for history.
+  show <id>       Full detail of one proposal incl. diff (read-only)
+  approve <id>    Confirm gate, then apply (the ONLY outward path)
+  submit <id>     Submit the proposal upstream
+  reject <id>     Mark rejected; applies nothing
+  automerge <id>  Attempt a gated autonomous merge (M47)
+
+Flags:
+  --status <s>    Filter by status (list only); "all" for every status
+  --since <when>  Filter to proposals created on/after this ISO/YYYY-MM-DD date (list only)
+  --limit N       Cap to the newest N matching proposals (list only)
+  --yes           Skip interactive confirm (approve only)
+  --open, --md    Open in the ashlr-md viewer (show only)
+  --json          Emit raw JSON
+
+Run \`ashlr inbox <subcommand> --help\` for subcommand usage.`;
+
 /**
- * `ashlr inbox [show|approve|submit|reject] [id] [--yes] [--json]`
+ * `ashlr inbox [show|approve|submit|reject|automerge] [id] [--yes] [--json] [--status] [--since] [--limit]`
  *
  * Returns a process exit code (0 = success, non-zero = error/usage).
  */
 export async function cmdInbox(args: string[]): Promise<number> {
-  const tty = process.stdout.isTTY === true;
-  const col = makeColors(tty);
+  const col = makeColors(process.stdout.isTTY === true);
 
   // ── Parse args ─────────────────────────────────────────────────────────
   let subcmd = 'list';
@@ -997,6 +1094,11 @@ export async function cmdInbox(args: string[]): Promise<number> {
   let yes = false;
   let jsonMode = false;
   let openMd = false;
+  let wantsHelp = false;
+  let statusFilter: ProposalStatus | 'all' | undefined;
+  let sinceMs: number | undefined;
+  let sinceRaw: string | undefined;
+  let limit: number | undefined;
   const positionals: string[] = [];
 
   for (let i = 0; i < args.length; i++) {
@@ -1005,12 +1107,38 @@ export async function cmdInbox(args: string[]): Promise<number> {
       yes = true;
     } else if (a === '--json') {
       jsonMode = true;
+    } else if (a === '--help' || a === '-h') {
+      wantsHelp = true;
     } else if (a === '--open' || a === '--md') {
       // M70: open proposal in ashlr-md viewer (show subcommand only)
       openMd = true;
+    } else if (a === '--status') {
+      const v = args[++i];
+      if (!v || !INBOX_STATUS_FILTERS.has(v as ProposalStatus | 'all')) {
+        console.error(col.red('error: ') +
+          `--status requires one of: pending, approved, rejected, awaiting-host-merge, applied, failed, all; got: ${v ?? '(missing)'}`);
+        return 2;
+      }
+      statusFilter = v as ProposalStatus | 'all';
+    } else if (a === '--since') {
+      const v = args[++i];
+      const ms = v !== undefined ? Date.parse(v) : NaN;
+      if (v === undefined || isNaN(ms)) {
+        console.error(col.red('error: ') + `--since requires an ISO timestamp or YYYY-MM-DD, got: ${v ?? '(missing)'}`);
+        return 2;
+      }
+      sinceMs = ms;
+      sinceRaw = v;
+    } else if (a === '--limit') {
+      const parsed = parsePositiveInt('limit', args[++i]);
+      if ('error' in parsed) {
+        console.error(col.red('error: ') + parsed.error);
+        return 2;
+      }
+      limit = parsed.n;
     } else if (a?.startsWith('-')) {
       console.error(col.red('error: ') + `Unknown flag: ${a}`);
-      console.error(col.dim('Usage: ashlr inbox [show|approve|submit|reject|automerge] [<id>] [--yes] [--json] [--open]'));
+      console.error(col.dim(INBOX_USAGE.list));
       return 2;
     } else {
       positionals.push(a);
@@ -1019,7 +1147,8 @@ export async function cmdInbox(args: string[]): Promise<number> {
 
   if (positionals.length > 0) {
     const first = positionals[0];
-    if (first === 'show' || first === 'approve' || first === 'submit' || first === 'reject' || first === 'automerge') {
+    if (first === 'show' || first === 'approve' || first === 'submit' || first === 'reject' ||
+      first === 'automerge' || first === 'list') {
       subcmd    = first;
       targetId  = positionals[1] ?? '';
     } else {
@@ -1029,9 +1158,16 @@ export async function cmdInbox(args: string[]): Promise<number> {
     }
   }
 
+  if (wantsHelp) {
+    console.log(subcmd === 'list' && positionals[0] !== 'list'
+      ? INBOX_TOP_LEVEL_USAGE
+      : INBOX_USAGE[subcmd as keyof typeof INBOX_USAGE]);
+    return 0;
+  }
+
   switch (subcmd) {
     case 'list':
-      return cmdInboxList(jsonMode);
+      return cmdInboxList({ status: statusFilter, sinceMs, sinceRaw, limit, json: jsonMode });
     case 'show':
       return cmdInboxShow(targetId, jsonMode, openMd);
     case 'approve':
@@ -1044,7 +1180,7 @@ export async function cmdInbox(args: string[]): Promise<number> {
       return cmdInboxAutoMerge(targetId, jsonMode);
     default:
       console.error(col.red('error: ') + `Unknown inbox subcommand: ${subcmd}`);
-      console.error(col.dim('Usage: ashlr inbox [show|approve|submit|reject|automerge] [<id>] [--yes] [--json] [--open]'));
+      console.error(col.dim(INBOX_TOP_LEVEL_USAGE));
       return 2;
   }
 }

@@ -1,5 +1,17 @@
 # Ashlr v3 — Team Command Center (end-state spec)
 
+> **Status: NOT BUILT.** This spec's gate was opened 2026-06-12 (a goal was
+> registered) but milestones M34–M40 have zero implementation: no
+> `test/m34.*` through `test/m40.*` exist, `hub/v1` (the entire API surface
+> in §7 below) does not appear anywhere in `src/`, and neither does
+> `ASHLR_API_URL`. What exists today is the M30 local-only seam layer,
+> deliberately gated to throw rather than silently no-op:
+> `src/core/seams/identity.ts:45` (`CloudIdentityProvider` throws
+> `cloudGatedError`) and `src/core/seams/daemon-coordinator.ts:79`
+> (`CloudDaemonCoordinator` — every method throws first). Do not read
+> "gate opened" elsewhere in the docs (e.g. `docs/ROADMAP.md`) as "shipped."
+> See `docs/MILESTONE-INDEX.md` §3.
+>
 > The v1/v2 end-state specs lived at `~/.ashlr/docs/` — single-founder,
 > machine-local. v3 is a **team** spec, so it lives in the repo, travels
 > through git, and is reviewed like everything else. This document opens the

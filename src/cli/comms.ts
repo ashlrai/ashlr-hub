@@ -468,7 +468,28 @@ async function cmdAsk(text: string, options: string[]): Promise<number> {
 // Entry point
 // ---------------------------------------------------------------------------
 
+function printCommsHelp(): void {
+  console.log('');
+  console.log('  ashlr comms — bidirectional operator channel (Telegram/iMessage)');
+  console.log('');
+  console.log('  Usage: ashlr comms <status|send-test|cycle|ask|digest|ask-vision|ask-merges|setup-telegram>');
+  console.log('');
+  console.log('    status                       config + pending/outstanding + watermark');
+  console.log('    send-test                    post + send a test report to verify the channel');
+  console.log('    cycle                        run one send-pending + poll-replies pass');
+  console.log('    ask "<text>" -o a -o b       post a question with numbered options');
+  console.log('    digest                       build oversight snapshot + send summary');
+  console.log('    ask-vision                   run strategist + post an elon-vision question');
+  console.log('    ask-merges                   post ship proposals for approval + run cycle');
+  console.log('    setup-telegram               print Telegram setup steps + discover chat id');
+  console.log('');
+}
+
 export async function cmdComms(args: string[]): Promise<number> {
+  if (args.includes('--help') || args.includes('-h')) {
+    printCommsHelp();
+    return 0;
+  }
   const { sub, text, options } = parseArgs(args);
 
   switch (sub) {

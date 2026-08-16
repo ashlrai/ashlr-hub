@@ -1,6 +1,13 @@
 # SPEC-DATA-ACQUISITION — Total Data Visibility for the God-View Resource Control Plane
 
-**Status:** Design spec — implementation starts at M262  
+**Status:** Design spec — **none of M262–M276 shipped under these numbers.**
+Every milestone number this spec assigns in §6 (M262–M264, M270, M271, M273,
+M274, M275) was later reused for unrelated shipped work; M265–M269, M272, and
+M276 remain simply unbuilt. `DataLayerSnapshot`, `queryDataLayer()`,
+`history.ts`/`appendDataPoint()`, `cap-forecast.ts`, cost-to-green routing,
+`anomaly.ts`, `getFabricContext()`, and `rate-limit-store.ts` are all absent
+from `src/` and `test/` as of this pass. See `docs/MILESTONE-INDEX.md` §2–§3
+for the full collision detail before reusing any number in this range.  
 **Branch:** feat/v4-foundry → master  
 **Relates to:** SPEC-RESOURCE-CONTROL-PLANE.md, SPEC-INFERENCE-FABRIC.md, SPEC-V4-FOUNDRY.md
 

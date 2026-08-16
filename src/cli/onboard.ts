@@ -386,7 +386,29 @@ export function buildStackStep(repo?: string): string[] {
  * Mutating steps (inward only): enroll (H6-audited) + optional config.locus.firm
  * write. NEVER applies/approves a proposal, NEVER pushes/PRs/deploys.
  */
+function printOnboardHelp(): void {
+  console.log('');
+  console.log(bold('  ashlr onboard') + dim(' — guided first safe activation (never auto-applies)'));
+  console.log('');
+  console.log(dim('Usage: ashlr onboard [--locus-firm] [--yes]'));
+  console.log(dim('   or: ashlr onboard --rollback <repo> [--kill]'));
+  console.log('');
+  console.log(`    ${cyan('ashlr onboard')}                    preflight → enroll ONE repo → dry-run PLAN → \`ashlr inbox\``);
+  console.log(`    ${cyan('ashlr onboard --yes')}              non-TTY safe: print the numbered steps, enroll nothing`);
+  console.log(`    ${cyan('ashlr onboard --locus-firm')}       soft-offer Locus firm without an interactive prompt`);
+  console.log(`    ${cyan('ashlr onboard --rollback <repo>')}  undo: unenroll + sweep orphan sandboxes for <repo>`);
+  console.log(`    ${cyan('ashlr onboard --rollback <repo> --kill')}  also engage the global kill switch`);
+  console.log('');
+  console.log(dim('  NEVER applies/approves a proposal, NEVER pushes/PRs/deploys, NEVER runs a live daemon.'));
+  console.log('');
+}
+
 export async function cmdOnboard(args: string[]): Promise<number> {
+  if (args.includes('--help') || args.includes('-h')) {
+    printOnboardHelp();
+    return 0;
+  }
+
   const cfg = loadConfig();
 
   // ── Rollback route ────────────────────────────────────────────────────────

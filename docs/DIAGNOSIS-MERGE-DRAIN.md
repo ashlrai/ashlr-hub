@@ -4,6 +4,14 @@
 **Branch:** feat/v4-foundry  
 **Status:** Read-only diagnosis. No code changed.
 
+> **Historical snapshot — values below are stale.** This diagnosis is a
+> dated point-in-time read of the config at the time (`judgePerPass: 5`).
+> M259 (drain-backlog work, see `docs/MILESTONE-INDEX.md` §2) raised the
+> code default to **8** (`src/core/types.ts:1075`, `src/core/fleet/automerge-pass.ts:762-766`
+> — "default 8 (raised from 5 to drain backlog faster — M259)"). Fix 6 below
+> was subsequently acted on; do not treat `judgePerPass: 5` as the current
+> default anywhere else in the docs.
+
 ---
 
 ## Summary: Four Compounding Blockers

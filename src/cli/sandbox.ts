@@ -227,7 +227,24 @@ function printSandboxList(sandboxes: Sandbox[]): void {
   }
 }
 
+function printSandboxHelp(): void {
+  console.log('');
+  console.log(bold('  ashlr sandbox') + dim(' — M21 safety-foundation sandbox inspection'));
+  console.log('');
+  console.log(dim('Usage: ashlr sandbox [list | diff <id> | cleanup <id> | gc]'));
+  console.log('');
+  console.log(`    ${cyan('ashlr sandbox list')}          list active git-worktree sandboxes`);
+  console.log(`    ${cyan('ashlr sandbox diff <id>')}     show diff of a sandbox vs its base HEAD`);
+  console.log(`    ${cyan('ashlr sandbox cleanup <id>')}  remove a sandbox worktree and scratch branch`);
+  console.log(`    ${cyan('ashlr sandbox gc')}            reclaim STALE orphan sandboxes (crash leftovers)`);
+  console.log('');
+}
+
 export async function cmdSandbox(args: string[]): Promise<number> {
+  if (args.includes('--help') || args.includes('-h')) {
+    printSandboxHelp();
+    return 0;
+  }
   const sub = args[0];
 
   if (!sub || sub === 'list') {
@@ -391,8 +408,37 @@ export type EnrollmentListResponse =
       killSwitchOn: boolean;
     };
 
+const ENROLL_USAGE: Record<'list' | 'add' | 'remove' | 'kill', string> = {
+  list:   'Usage: ashlr enroll list [--json]',
+  add:    'Usage: ashlr enroll add <repo> [--locus-firm] [--yes]',
+  remove: 'Usage: ashlr enroll remove <repo>',
+  kill:   'Usage: ashlr enroll kill on|off',
+};
+
+function printEnrollHelp(sub?: string): void {
+  console.log('');
+  console.log(bold('  ashlr enroll') + dim(' — enrollment registry for autonomous work'));
+  console.log('');
+  if (sub && sub in ENROLL_USAGE) {
+    console.log(dim(ENROLL_USAGE[sub as keyof typeof ENROLL_USAGE]));
+  } else {
+    console.log(dim('Usage: ashlr enroll [list | add <repo> | remove <repo> | kill on|off]'));
+    console.log('');
+    console.log(`    ${cyan('ashlr enroll list')}            list enrolled repos + kill switch state`);
+    console.log(`    ${cyan('ashlr enroll add <repo>')}      enroll a repo for autonomous work`);
+    console.log(`    ${cyan('ashlr enroll remove <repo>')}   remove a repo from the enrollment registry`);
+    console.log(`    ${cyan('ashlr enroll kill on|off')}     toggle the global autonomous kill switch`);
+  }
+  console.log('');
+}
+
 export async function cmdEnroll(args: string[]): Promise<number> {
   const sub = args[0];
+
+  if (args.includes('--help') || args.includes('-h') || sub === 'help') {
+    printEnrollHelp(sub === '--help' || sub === '-h' || sub === 'help' ? undefined : sub);
+    return 0;
+  }
 
   if (!sub || sub === 'list') {
     const policy = await loadPolicy();

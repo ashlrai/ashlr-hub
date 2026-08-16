@@ -11,6 +11,95 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### M464–M503 — daemon durability, post-merge verification pipeline, Mission OS extensions
+
+Forty milestones landed on `master` with no CHANGELOG entry; this backfills
+them by theme. Full per-milestone detail, file:line citations, and the four
+that warrant a standalone contract are indexed in
+[`docs/MILESTONE-INDEX.md`](docs/MILESTONE-INDEX.md) §5. Gaps M474, M483,
+M489, M499, M500 have no corresponding test file or milestone.
+
+- **Daemon crash-safety and recovery (M486, M487, M490, M501, M488, M476).**
+  Daemon accounting writes now cross an fsync power-loss barrier (temp write +
+  fsync, rename, directory fsync) before being reported durable (M486). A new
+  authorized quarantine flow hard-links crash-suspect daemon state into
+  immutable evidence with a signed receipt and a 10-minute plan expiry (M487),
+  and a paired resolution flow consumes that receipt to produce fresh state
+  that conservatively carries forward same-day spend accounting when it can
+  be verified (never silently resets a daily budget to zero), refusing while
+  service activity or execution retries are in flight (M501). Both are wired into the CLI as explicit, authorization-gated
+  subcommands (`recover-state` / `resolve-state`, M490). Runtime-release
+  canary/rollback pairs get an observation-only signature and digest check
+  with no deployment authority (M488). Release-tip observations are recorded
+  in an immutable, HMAC-sealed, no-clobber sequence ledger — not a
+  transparency log or release authority (M476).
+
+- **Detached post-merge verification pipeline (M465, M466, M467, M468, M472,
+  M478, M482).** Auto-merge canary promotion readiness is evaluated
+  observation-only against verification coverage, release evidence, and
+  post-merge cohorts — it never grants activation (M465). Diff scope for
+  auto-merge is measured with fail-closed rejection of symlinks, gitlinks,
+  and malformed patch headers, alongside a durable prepared→armed→revoked
+  host-merge cancellation state machine (M466). Post-merge verification
+  cohorts are recorded as signed, immutable, metadata-only records —
+  explicitly excluding prompts, diffs, and command output — and can neither
+  authorize merge nor rollback (M467). A runner checks out one exact commit
+  into a scratch worktree, runs the repo's own verification profile, and
+  records only bounded pass/fail metadata before cleanup (M468), scheduled by
+  an observation-only orchestrator that emits at most one work ticket per
+  invocation (M472). Root verification contracts are detected read-only from
+  each repo's own manifests (`package.json`, `tsconfig.json`,
+  `vitest.config.ts`, …) without ever spawning a package manager (M478).
+  Release artifacts get a dependency-inventory + manifest-integrity contract
+  with hard size caps (M482).
+
+- **Proposal funnel + capture identity (M464, M469, M470, M471, M473,
+  M475).** Agent work lifecycle transitions are now recorded as a
+  metadata-only, cryptographically-chained audit trail with a closed
+  vocabulary of phases/transitions/triggers — no raw prompts, diffs, or file
+  paths (M464). Proposal-funnel metrics (attempts, capture errors, policy
+  suppressions, gate blocks) are scrubbed before aggregation and withheld on
+  unstable snapshots rather than guessed (M469). Proposal capture now binds a
+  durable candidate identity from sandboxed execution (M470), settled through
+  a transactional claim/settle/reconcile task store with compare-and-swap
+  leases (M471). A new verifier-execution-authority layer admits signed,
+  data-only capsule statements against caller-pinned trust policies (M473),
+  gated by a separate crypto-only policy-approval observation that itself
+  signs, persists, or executes nothing (M475).
+
+- **Mission OS extensions (M485, M491, M492, M493, M494, M495, M496, M497,
+  M502).** The mission compiler reconciles goals from briefings — respecting
+  dependencies, active-goal caps, and human gates, rejecting cycles — behind
+  a read-only operator briefing UI (M485). Ecosystem-wide mission graphs
+  compile deterministically into one cycle-checked, digested structure bounded
+  to 24 nodes (M491), projected through a fail-closed, mutation-free "outcome
+  room" view (M492). Mission state can now be captured into a signed,
+  durable observation receipt carrying no execution authority (M493), and a
+  shadow reconciler suggests — but never creates — up to 16 candidate goals
+  per preview, verified against that receipt (M494). External ecosystem
+  inputs (Cortex mission candidates, Locus identity evidence) get bounded,
+  fail-closed-on-expiry validation schemas that import no authority (M495).
+  Mission observations are captured only from authenticated, realized-merge
+  proposals (M496), and both the read-only shadow observer (M502) and its
+  CLI entry point (`vision shadow`, M497) prove the whole planning loop can
+  run end-to-end with zero effect.
+
+- **Supply-chain and dashboard hardening (M477, M480, M481, M479, M498,
+  M503, M484).** Public JSON payloads are scrubbed of secret-shaped strings
+  and home-directory paths and de-recursed before they reach the dashboard or
+  API (M477). The dashboard's mobile shell keeps navigation in one
+  horizontally-scrollable row (M480). Every action in every CI workflow is
+  now pinned to a reviewed immutable commit (M481), and the npm release
+  workflow additionally validates the release tag's target commit is in
+  protected `master` history before `npm publish --provenance` runs (M479).
+  Best-of-N's `-n` CLI flag is validated before config or model loading —
+  rejecting non-integers, floats, zero, negative, and unsafe-integer values
+  with exit code 2 (M498). The dashboard gained a read-only auth mode that
+  permits SSE and reads but blocks all mutating endpoints (M503). PR stack
+  topology (linearity, dependency correctness, convergence declarations) is
+  now shadow-observed read-only against GitHub with no mutation capability
+  (M484).
+
 ## [3.2.6] — 2026-08-16 — Canonical publisher-path recovery
 
 - For candidate evaluators upgrading from public npm `latest` 3.0.1, this

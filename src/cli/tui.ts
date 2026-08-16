@@ -42,7 +42,22 @@ async function tryLoadRunTui(): Promise<RunTuiFn | null> {
  * @param args  Remaining argv after the command token (e.g. ['--once']).
  * @returns     Exit code: 0 on success, 1 on error.
  */
+function printTuiHelp(): void {
+  console.log('');
+  console.log('  ashlr tui — interactive terminal dashboard (alias: ashlr dash)');
+  console.log('');
+  console.log('  Usage: ashlr tui [--once]');
+  console.log('');
+  console.log('    ashlr tui          launch the interactive dashboard (Ctrl-C to quit)');
+  console.log('    ashlr tui --once   render one frame to stdout and exit (scripting/test path)');
+  console.log('');
+}
+
 export async function cmdTui(args: string[]): Promise<number> {
+  if (args.includes('--help') || args.includes('-h')) {
+    printTuiHelp();
+    return 0;
+  }
   const once = args.includes('--once');
 
   const runTui = await tryLoadRunTui();

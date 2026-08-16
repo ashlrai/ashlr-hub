@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -141,6 +141,25 @@ function expectNoEffectModulesOrCalls(): void {
   }
   expect(fs.readdirSync(tmpHome)).toEqual([]);
 }
+
+beforeAll(async () => {
+  // Warm the static ESM import graph once, before any per-test module-load
+  // counting begins.
+  //
+  // `assertResidentServiceInstallAuthorized` (used by the `install`
+  // subcommand) is imported statically at the top of src/cli/daemon.ts, and
+  // it statically imports service-install-authority.js -> activation-permit.js
+  // -> guard-health.js (guard-health-healthy is one of the authority
+  // preconditions). Static ES module imports are linked and executed the
+  // FIRST time anything in this worker imports daemon.js, regardless of
+  // which subcommand is actually requested — including `--help`. That one-
+  // time link cost is not undone by vi.resetModules() (it clears vitest's
+  // mock/import registry for subsequent dynamic imports, not an
+  // already-linked static graph). Importing daemon.js here, before the real
+  // tests' `moduleLoads` counters start getting asserted on, absorbs that
+  // unavoidable one-time cost so every real test sees a clean count.
+  await import('../src/cli/daemon.js');
+});
 
 beforeEach(async () => {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-daemon-cli-safety-'));
@@ -469,6 +488,16 @@ describe('daemon install authority boundary', () => {
     expect(effects.install).not.toHaveBeenCalled();
     expect(effects.ensureRunning).not.toHaveBeenCalled();
     expect(effects.serviceStatus).not.toHaveBeenCalled();
-    expect(fs.readdirSync(tmpHome)).toEqual([]);
+    // The refused authority check itself is audited (M21 append-only audit
+    // trail — every daemon-activation:install-check is logged, granted or
+    // denied). That is the ONLY footprint a refusal may leave: no config,
+    // no daemon state, no service/control files. Assert the shape precisely
+    // rather than allowing an empty-HOME check to silently accept a future
+    // regression that starts touching real state.
+    expect(fs.readdirSync(tmpHome)).toEqual(['.ashlr']);
+    expect(fs.readdirSync(path.join(tmpHome, '.ashlr'))).toEqual(['audit']);
+    const auditFiles = fs.readdirSync(path.join(tmpHome, '.ashlr', 'audit'));
+    expect(auditFiles).toHaveLength(1);
+    expect(auditFiles[0]).toMatch(/^\d{4}-\d{2}-\d{2}\.jsonl$/);
   });
 });
