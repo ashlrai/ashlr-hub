@@ -49,7 +49,7 @@ const SUBCOMMANDS: Record<string, string[]> = {
   knowledge: ['build', 'impact', 'graph'],
   reflect: ['playbooks', 'propose'],
   health: ['propose'],
-  goals: ['add', 'plan', 'advance', 'status', 'recover-stale'],
+  goals: ['add', 'plan', 'advance', 'status', 'recover-stale', 'repair-timestamps'],
   seams: ['status'],
   completions: ['zsh', 'bash'],
   plugins: ['init', 'list', 'info', 'enable', 'disable'],
