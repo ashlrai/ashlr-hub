@@ -2,6 +2,8 @@ import {
   createHash,
   createPrivateKey,
   createPublicKey,
+  generateKeyPairSync,
+  randomBytes,
   sign,
   verify,
   type KeyObject,
@@ -20,6 +22,7 @@ import {
   readdirSync,
   readSync,
   realpathSync,
+  renameSync,
   unlinkSync,
   writeSync,
   type BigIntStats,
@@ -32,14 +35,47 @@ import {
   acquireLocalStoreLock,
   releaseLocalStoreLock,
 } from '../fleet/local-store-lock.js';
+import { audit } from '../sandbox/audit.js';
 import { killSwitchOn, readEnrollmentRegistry } from '../sandbox/policy.js';
 import type { AshlrConfig } from '../types.js';
 import { fsyncDirectory } from '../util/durability.js';
 import { assurePrivateStoragePath } from '../util/private-storage.js';
 import { diagnoseGuardHealth } from './guard-health.js';
 
+/**
+ * M461 → M470 daemon activation authority.
+ *
+ * The default for anyone who has not explicitly run `ashlr activation init`
+ * is EXACTLY today's behavior: every guard denies, with the same reasons as
+ * before. Authority only exists once an operator:
+ *
+ *   1. Runs `ashlr activation init` — generates an Ed25519 keypair on this
+ *      machine (private key never leaves it) and registers the public half
+ *      as a trust root in ~/.ashlr/activation/trust-roots.json (0600, dir
+ *      0700, owned by the operator's uid — checked on every read).
+ *   2. Runs `ashlr activation grant <scope...>` — signs and mints either a
+ *      single-use activation PERMIT (scopes: once, resident) consumed by
+ *      `daemon start`, or a standing, expiring GRANT (scopes: conductor,
+ *      install, automerge, repair, deploy) checked on every call to the
+ *      corresponding guard.
+ *
+ * Both permits and grants are Ed25519-signed, scoped, expiring, and
+ * independently revocable (`ashlr activation revoke`). Every init / grant /
+ * revoke / consume / denial writes an audit row via ../sandbox/audit.js so
+ * an operator can answer "who activated this fleet, when, with what scope."
+ *
+ * File loading fails CLOSED on every ambiguity: missing, unreadable, wrong
+ * permissions, wrong owner, symlinked, malformed, or non-canonically
+ * encoded trust-root/grant/permit files are all treated as "no authority" —
+ * never as "trust everything." Windows is denied outright: node:fs chmod()
+ * on Windows does not restrict per-user read access on NTFS (it only
+ * toggles the read-only attribute), so the "reject world/group-readable
+ * private files" invariant this module depends on cannot be enforced there.
+ */
+
 const POLICY_VERSION = 'm461-proposal-once-v1';
 const SIGNING_DOMAIN = 'ashlr:daemon-activation-permit:m461:v1\0';
+const GRANT_SIGNING_DOMAIN = 'ashlr:daemon-activation-grant:v1\0';
 const MAX_PERMIT_BYTES = 32 * 1024;
 const MAX_VALIDITY_MS = 120_000;
 const MAX_FUTURE_SKEW_MS = 30_000;
@@ -49,16 +85,63 @@ const PRIVATE_FILE_MODE = 0o600;
 const DIGEST_RE = /^[a-f0-9]{64}$/u;
 const ID_RE = /^[a-f0-9]{32}$/u;
 const KEY_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
+const MAX_TRUST_STORE_BYTES = 256 * 1024;
+const MAX_GRANTS_BYTES = 512 * 1024;
+const MAX_LABEL_LENGTH = 200;
+/** Hard cap on any standing grant's validity window (30 days). */
+export const MAX_STANDING_GRANT_VALIDITY_MS = 30 * 24 * 60 * 60 * 1000;
+/** Default TTL `ashlr activation grant` uses when --ttl is not given (24h). */
+export const DEFAULT_STANDING_GRANT_VALIDITY_MS = 24 * 60 * 60 * 1000;
 
 const capabilityBrand: unique symbol = Symbol('ashlr.daemon-activation-capability');
 
+/** Every independently grantable scope key, in canonical order. Used by the CLI to validate `grant`/status output. */
+export const DAEMON_ACTIVATION_SCOPE_KEYS = [
+  'once',
+  'resident',
+  'conductor',
+  'automerge',
+  'repair',
+  'deploy',
+  'install',
+  'proposalOnly',
+] as const;
+const SCOPE_KEYS = DAEMON_ACTIVATION_SCOPE_KEYS;
+
+export type DaemonActivationScopeKey = typeof SCOPE_KEYS[number];
+
+/** A real, independently grantable capability set. Unknown fields are rejected. */
+export type DaemonActivationGrantScope = { [K in DaemonActivationScopeKey]: boolean };
+
+/** All-false scope — the base every CLI `grant` invocation flips bits on top of. */
+export const EMPTY_DAEMON_ACTIVATION_SCOPE: DaemonActivationGrantScope = Object.freeze({
+  once: false,
+  resident: false,
+  conductor: false,
+  automerge: false,
+  repair: false,
+  deploy: false,
+  install: false,
+  proposalOnly: false,
+});
+
+/** Preserves pre-M470 test/caller behavior when `buildDaemonActivationPermitPayload` omits `scope`. */
+const LEGACY_ONCE_PROPOSAL_SCOPE: DaemonActivationGrantScope = Object.freeze({
+  ...EMPTY_DAEMON_ACTIVATION_SCOPE,
+  once: true,
+  proposalOnly: true,
+});
+
 /**
  * Runtime authority is nominal and process-local. Objects that merely match
- * this public shape are rejected by isDaemonActivationCapability().
+ * this public shape are rejected by isDaemonActivationCapability(). `scope`
+ * is readable without consuming the capability — only isDaemonActivationCapability()
+ * consumes the single-use claim.
  */
 export interface DaemonActivationCapability {
   readonly kind: 'proposal-once';
   readonly permitId: string;
+  readonly scope: DaemonActivationGrantScope;
   readonly [capabilityBrand]: true;
 }
 
@@ -87,17 +170,38 @@ export interface DaemonActivationReadiness {
   sourceState: 'healthy' | 'degraded';
   state: 'ready' | 'blocked' | 'degraded';
   commandEligible: boolean;
-  requestedShape: 'proposal-once';
+  requestedShape: 'proposal-once' | 'resident';
   trustRootCount: number;
-  residentAuthorized: false;
-  installAuthorized: false;
-  repairAuthorized: false;
+  residentAuthorized: boolean;
+  installAuthorized: boolean;
+  repairAuthorized: boolean;
   reason: string;
 }
 
 export interface DaemonActivationTrustRoot {
   keyId: string;
   publicKeyPem: string;
+}
+
+/** Full operator-owned trust-root record, incl. mutable local revocation state. */
+export interface DaemonActivationTrustRootRecord extends DaemonActivationTrustRoot {
+  createdAt: string;
+  /** Mutable, operator-set, NOT part of any signature. Non-null = revoked, immediately. */
+  revokedAt: string | null;
+  label: string;
+}
+
+/** A signed, expiring, independently revocable standing capability grant. */
+export interface DaemonActivationGrantRecord {
+  schemaVersion: 1;
+  grantId: string;
+  keyId: string;
+  issuedAt: string;
+  expiresAt: string;
+  scope: DaemonActivationGrantScope;
+  signature: string;
+  /** Mutable, operator-set, NOT part of the signature. Non-null = revoked, immediately. */
+  revokedAt: string | null;
 }
 
 export interface DaemonActivationFileBinding {
@@ -125,20 +229,7 @@ export interface DaemonActivationPermitPayload {
   keyId: string;
   issuedAt: string;
   expiresAt: string;
-  scope: {
-    action: 'daemon-proposal-once';
-    once: true;
-    dryRun: false;
-    resident: false;
-    drain: false;
-    drainLimit: null;
-    proposalOnly: true;
-    automerge: false;
-    repair: false;
-    deploy: false;
-    install: false;
-    selfTarget: false;
-  };
+  scope: DaemonActivationGrantScope;
   bindings: {
     configDigest: string;
     buildIdentity: BuildIdentity;
@@ -175,23 +266,17 @@ export interface DaemonActivationPermitTestInspectionOptions {
   platform?: NodeJS.Platform;
 }
 
-/**
- * Provisioning a production trust root requires a reviewed source change.
- * No environment variable, config field, CLI argument, or writable trust file
- * can add authority at runtime.
- */
-export const DAEMON_ACTIVATION_TRUST_ROOTS:
-readonly Readonly<DaemonActivationTrustRoot>[] = Object.freeze([]);
-
 const validCapabilities = new WeakMap<object, () => boolean>();
 
 function mintCapability(
   permitId: string,
+  scope: DaemonActivationGrantScope,
   validateAtClaim: () => boolean,
 ): DaemonActivationCapability {
   const capability = Object.freeze({
     kind: 'proposal-once' as const,
     permitId,
+    scope: Object.freeze({ ...scope }),
     [capabilityBrand]: true as const,
   });
   validCapabilities.set(capability, validateAtClaim);
@@ -213,15 +298,6 @@ export function isDaemonActivationCapability(
   } catch {
     return false;
   }
-}
-
-/**
- * Goal and simple conductors have broader authority than M461's one-item
- * proposal profile. They remain dormant until a separately reviewed permit
- * contract exists for those entry points.
- */
-export function liveConductorActivationAuthorized(): boolean {
-  return false;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -333,33 +409,9 @@ function validFileBinding(value: unknown): value is DaemonActivationFileBinding 
     && DIGEST_RE.test(String(value['sha256']));
 }
 
-function validScope(value: unknown): value is DaemonActivationPermitPayload['scope'] {
-  if (!isRecord(value) || !hasExactKeys(value, [
-    'action',
-    'once',
-    'dryRun',
-    'resident',
-    'drain',
-    'drainLimit',
-    'proposalOnly',
-    'automerge',
-    'repair',
-    'deploy',
-    'install',
-    'selfTarget',
-  ])) return false;
-  return value['action'] === 'daemon-proposal-once'
-    && value['once'] === true
-    && value['dryRun'] === false
-    && value['resident'] === false
-    && value['drain'] === false
-    && value['drainLimit'] === null
-    && value['proposalOnly'] === true
-    && value['automerge'] === false
-    && value['repair'] === false
-    && value['deploy'] === false
-    && value['install'] === false
-    && value['selfTarget'] === false;
+function validScope(value: unknown): value is DaemonActivationGrantScope {
+  if (!isRecord(value) || !hasExactKeys(value, SCOPE_KEYS)) return false;
+  return SCOPE_KEYS.every((key) => typeof value[key] === 'boolean');
 }
 
 function validBindings(value: unknown): value is DaemonActivationPermitPayload['bindings'] {
@@ -529,8 +581,11 @@ export function buildDaemonActivationPermitPayload(input: {
   keyId: string;
   issuedAt: string;
   expiresAt: string;
+  /** Defaults to the legacy {once, proposalOnly} grant when omitted. */
+  scope?: DaemonActivationGrantScope;
   context: DaemonActivationRuntimeContext;
 }): DaemonActivationPermitPayload {
+  const scope = input.scope ?? LEGACY_ONCE_PROPOSAL_SCOPE;
   const payload: DaemonActivationPermitPayload = {
     schemaVersion: 1,
     policyVersion: POLICY_VERSION,
@@ -539,20 +594,7 @@ export function buildDaemonActivationPermitPayload(input: {
     keyId: input.keyId,
     issuedAt: input.issuedAt,
     expiresAt: input.expiresAt,
-    scope: {
-      action: 'daemon-proposal-once',
-      once: true,
-      dryRun: false,
-      resident: false,
-      drain: false,
-      drainLimit: null,
-      proposalOnly: true,
-      automerge: false,
-      repair: false,
-      deploy: false,
-      install: false,
-      selfTarget: false,
-    },
+    scope: { ...scope },
     bindings: {
       configDigest: input.context.configDigest,
       buildIdentity: { ...input.context.buildIdentity },
@@ -586,6 +628,13 @@ function safeOwnedFile(stat: BigIntStats): boolean {
     || stat.uid === BigInt(process.getuid());
   const privateMode = process.platform === 'win32' || (stat.mode & 0o077n) === 0n;
   return stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1n && owned && privateMode;
+}
+
+function safeOwnedDirectory(stat: BigIntStats): boolean {
+  const owned = process.platform === 'win32' || typeof process.getuid !== 'function'
+    || stat.uid === BigInt(process.getuid());
+  const privateMode = process.platform === 'win32' || (stat.mode & 0o077n) === 0n;
+  return stat.isDirectory() && !stat.isSymbolicLink() && owned && privateMode;
 }
 
 function sameFileSnapshot(left: BigIntStats, right: BigIntStats): boolean {
@@ -876,25 +925,34 @@ function daemonActivationNonceReceiptPath(nonceDigest: string): string {
   );
 }
 
-function activationReadiness(
-  state: DaemonActivationReadiness['state'],
-  reason: string,
-  trustRootCount: number,
-): DaemonActivationReadiness {
-  return {
-    schemaVersion: 1,
-    policyVersion: POLICY_VERSION,
-    authority: 'observation-only',
-    sourceState: state === 'degraded' ? 'degraded' : 'healthy',
-    state,
-    commandEligible: state === 'ready',
-    requestedShape: 'proposal-once',
-    trustRootCount,
-    residentAuthorized: false,
-    installAuthorized: false,
-    repairAuthorized: false,
-    reason,
-  };
+// ---------------------------------------------------------------------------
+// Operator authority store — trust roots + standing grants.
+//
+// Root of trust is OS-level file ownership/permissions on the operator's own
+// machine (mirrors the one-shot permit's existing safety model), not a
+// central registry. Every store read fails CLOSED to "no authority" on any
+// ambiguity: missing file, unreadable, wrong owner, wrong permissions,
+// symlinked path, malformed JSON, non-canonical encoding, or duplicate ids.
+// ---------------------------------------------------------------------------
+
+export function daemonActivationDirPath(): string {
+  return join(homedir(), '.ashlr', 'activation');
+}
+
+export function daemonActivationTrustRootsPath(): string {
+  return join(daemonActivationDirPath(), 'trust-roots.json');
+}
+
+export function daemonActivationGrantsPath(): string {
+  return join(daemonActivationDirPath(), 'grants.json');
+}
+
+export function daemonActivationOperatorKeyPath(): string {
+  return join(daemonActivationDirPath(), 'operator-private-key.pem');
+}
+
+function daemonActivationStoreLockPath(): string {
+  return join(daemonActivationDirPath(), 'activation-store.lock');
 }
 
 function pathEntryPresent(path: string): boolean {
@@ -907,40 +965,773 @@ function pathEntryPresent(path: string): boolean {
   }
 }
 
+/** Safe, non-consuming read of a canonical-JSON-array operator store file. */
+function safeReadOwnedJsonArray(
+  path: string,
+  anchorPath: string,
+  maxBytes: number,
+): { ok: true; value: unknown[] } | { ok: false; reason: string } {
+  if (process.platform === 'win32') {
+    return { ok: false, reason: 'activation-permit-v1-unsupported-on-windows' };
+  }
+  let dirStat: BigIntStats;
+  try {
+    dirStat = lstatSync(dirname(path), { bigint: true });
+  } catch (error) {
+    return { ok: false, reason: (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'stat-failed' };
+  }
+  if (!safeOwnedDirectory(dirStat)) return { ok: false, reason: 'unsafe-directory' };
+  const dirAssurance = assurePrivateStoragePath(dirname(path), 'directory', 'inspect-owned', { anchorPath });
+  if (!dirAssurance.ok) return { ok: false, reason: `unsafe-directory:${dirAssurance.reason}` };
+
+  const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+  let named: BigIntStats;
+  try {
+    named = lstatSync(path, { bigint: true });
+  } catch (error) {
+    return { ok: false, reason: (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'stat-failed' };
+  }
+  if (!safeOwnedFile(named) || named.size <= 0n || named.size > BigInt(maxBytes)) {
+    return { ok: false, reason: 'unsafe-file' };
+  }
+  let fd: number;
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | noFollow);
+  } catch {
+    return { ok: false, reason: 'open-failed' };
+  }
+  try {
+    const opened = fstatSync(fd, { bigint: true });
+    if (!safeOwnedFile(opened) || !sameFileSnapshot(named, opened)) {
+      return { ok: false, reason: 'unsafe-file' };
+    }
+    const size = Number(opened.size);
+    const bytes = Buffer.alloc(size);
+    let offset = 0;
+    while (offset < size) {
+      const count = readSync(fd, bytes, offset, size - offset, offset);
+      if (count <= 0) return { ok: false, reason: 'short-read' };
+      offset += count;
+    }
+    const after = fstatSync(fd, { bigint: true });
+    if (!sameFileSnapshot(opened, after)) return { ok: false, reason: 'changed-during-read' };
+    const text = bytes.toString('utf8');
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return { ok: false, reason: 'invalid-json' };
+    }
+    if (`${canonicalizeDaemonActivationValue(parsed)}\n` !== text) {
+      return { ok: false, reason: 'noncanonical-encoding' };
+    }
+    if (!Array.isArray(parsed)) return { ok: false, reason: 'not-an-array' };
+    const fileAssurance = assurePrivateStoragePath(path, 'file', 'inspect-owned', { anchorPath });
+    if (!fileAssurance.ok) return { ok: false, reason: `unsafe-file:${fileAssurance.reason}` };
+    return { ok: true, value: parsed };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Atomically replace a canonical-JSON-array operator store file (temp write + rename). */
+function writeCanonicalJsonArrayFileAtomic(
+  path: string,
+  value: readonly unknown[],
+  anchorPath: string,
+): void {
+  assurePrivateDirectory(dirname(path), anchorPath);
+  const tmpPath = `${path}.tmp-${randomBytes(8).toString('hex')}`;
+  const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+  let fd: number | undefined;
+  try {
+    fd = openSync(
+      tmpPath,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollow,
+      PRIVATE_FILE_MODE,
+    );
+    const initial = fstatSync(fd, { bigint: true });
+    if (!safeOwnedFile(initial) || initial.size !== 0n) throw new Error('unsafe-activation-store-temp-file');
+    fchmodSync(fd, PRIVATE_FILE_MODE);
+    const bytes = Buffer.from(`${canonicalizeDaemonActivationValue(value)}\n`, 'utf8');
+    writeAll(fd, bytes);
+    fsyncSync(fd);
+    const written = fstatSync(fd, { bigint: true });
+    if (!safeOwnedFile(written) || written.size !== BigInt(bytes.length)) {
+      throw new Error('activation-store-temp-file-changed-during-write');
+    }
+    closeSync(fd);
+    fd = undefined;
+    renameSync(tmpPath, path);
+    const assurance = assurePrivateStoragePath(path, 'file', 'secure-created', { anchorPath });
+    if (!assurance.ok) throw new Error(`unsafe-activation-store-path:${assurance.reason}`);
+    fsyncDirectory(dirname(path));
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* best-effort */ }
+    }
+    try {
+      if (existsSync(tmpPath)) unlinkSync(tmpPath);
+    } catch { /* best-effort cleanup */ }
+  }
+}
+
+function withActivationStoreLock<T>(fn: () => T): T {
+  const home = resolve(homedir());
+  // Two single-level creates: ~/.ashlr may not exist yet on a machine where
+  // `activation init` is the very first ashlr command ever run.
+  assurePrivateDirectory(join(homedir(), '.ashlr'), home);
+  assurePrivateDirectory(daemonActivationDirPath(), home);
+  const lock = acquireLocalStoreLock(daemonActivationStoreLockPath(), LOCK_WAIT_MS, {
+    anchorPath: home,
+    exactPrivateStorage: true,
+  });
+  if (!lock) throw new Error('activation-store-lock-unavailable');
+  let result: T;
+  try {
+    result = fn();
+  } catch (error) {
+    releaseLocalStoreLock(lock);
+    throw error;
+  }
+  if (!releaseLocalStoreLock(lock)) throw new Error('activation-store-lock-release-failed');
+  return result;
+}
+
+function readOperatorPrivateKeyPem(): string {
+  const path = daemonActivationOperatorKeyPath();
+  const home = resolve(homedir());
+  const named = lstatSync(path, { bigint: true });
+  if (!safeOwnedFile(named) || named.size <= 0n || named.size > BigInt(MAX_PERMIT_BYTES)) {
+    throw new Error('unsafe-operator-key-file');
+  }
+  const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+  const fd = openSync(path, fsConstants.O_RDONLY | noFollow);
+  try {
+    const opened = fstatSync(fd, { bigint: true });
+    if (!safeOwnedFile(opened) || !sameFileSnapshot(named, opened)) {
+      throw new Error('operator-key-changed-during-open');
+    }
+    const size = Number(opened.size);
+    const bytes = Buffer.alloc(size);
+    let offset = 0;
+    while (offset < size) {
+      const count = readSync(fd, bytes, offset, size - offset, offset);
+      if (count <= 0) throw new Error('short-operator-key-read');
+      offset += count;
+    }
+    const after = fstatSync(fd, { bigint: true });
+    if (!sameFileSnapshot(opened, after)) throw new Error('operator-key-changed-during-read');
+    const assurance = assurePrivateStoragePath(path, 'file', 'inspect-owned', { anchorPath: home });
+    if (!assurance.ok) throw new Error(`unsafe-operator-key-path:${assurance.reason}`);
+    return bytes.toString('utf8');
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function validTrustRootRecord(value: unknown): value is DaemonActivationTrustRootRecord {
+  if (!isRecord(value) || !hasExactKeys(value, ['keyId', 'publicKeyPem', 'createdAt', 'revokedAt', 'label'])) {
+    return false;
+  }
+  if (typeof value['keyId'] !== 'string' || !KEY_ID_RE.test(value['keyId'])) return false;
+  if (typeof value['publicKeyPem'] !== 'string') return false;
+  try {
+    const key = createPublicKey(value['publicKeyPem']);
+    if (key.asymmetricKeyType !== 'ed25519') return false;
+  } catch {
+    return false;
+  }
+  if (!validIsoTimestamp(value['createdAt'])) return false;
+  if (value['revokedAt'] !== null && !validIsoTimestamp(value['revokedAt'])) return false;
+  if (typeof value['label'] !== 'string' || value['label'].length > MAX_LABEL_LENGTH) return false;
+  return true;
+}
+
+function loadTrustRootStore():
+  { ok: true; records: readonly DaemonActivationTrustRootRecord[] } | { ok: false; reason: string } {
+  const read = safeReadOwnedJsonArray(daemonActivationTrustRootsPath(), resolve(homedir()), MAX_TRUST_STORE_BYTES);
+  if (!read.ok) {
+    if (read.reason === 'missing') return { ok: true, records: [] };
+    return { ok: false, reason: read.reason };
+  }
+  const records: DaemonActivationTrustRootRecord[] = [];
+  const seen = new Set<string>();
+  for (const entry of read.value) {
+    if (!validTrustRootRecord(entry) || seen.has(entry.keyId)) {
+      return { ok: false, reason: 'invalid-trust-root-store' };
+    }
+    seen.add(entry.keyId);
+    records.push(entry);
+  }
+  return { ok: true, records };
+}
+
+/**
+ * The ONLY source of production trust roots: an operator-owned, protected
+ * file the operator populates via `ashlr activation init`. Missing, unsafe,
+ * or malformed → []  — identical denial to before this file loading existed.
+ */
+export function loadDaemonActivationTrustRoots(): readonly DaemonActivationTrustRoot[] {
+  const loaded = loadTrustRootStore();
+  if (!loaded.ok) return [];
+  return loaded.records
+    .filter((record) => record.revokedAt === null)
+    .map((record) => ({ keyId: record.keyId, publicKeyPem: record.publicKeyPem }));
+}
+
+/** Full trust-root status (incl. revoked history) for `ashlr activation status`. */
+export function daemonActivationTrustRootStatus():
+  { ok: true; records: readonly DaemonActivationTrustRootRecord[] } | { ok: false; reason: string } {
+  return loadTrustRootStore();
+}
+
+function activeTrustRootKeyMap(): Map<string, KeyObject> | null {
+  const loaded = loadTrustRootStore();
+  if (!loaded.ok) return null;
+  const active = loaded.records
+    .filter((record) => record.revokedAt === null)
+    .map((record) => ({ keyId: record.keyId, publicKeyPem: record.publicKeyPem }));
+  return trustRootMap(active);
+}
+
+function validGrantRecord(value: unknown): value is DaemonActivationGrantRecord {
+  if (!isRecord(value) || !hasExactKeys(value, [
+    'schemaVersion', 'grantId', 'keyId', 'issuedAt', 'expiresAt', 'scope', 'signature', 'revokedAt',
+  ])) return false;
+  if (value['schemaVersion'] !== 1) return false;
+  if (typeof value['grantId'] !== 'string' || !ID_RE.test(value['grantId'])) return false;
+  if (typeof value['keyId'] !== 'string' || !KEY_ID_RE.test(value['keyId'])) return false;
+  if (!validIsoTimestamp(value['issuedAt']) || !validIsoTimestamp(value['expiresAt'])) return false;
+  if (!validScope(value['scope'])) return false;
+  if (typeof value['signature'] !== 'string') return false;
+  try {
+    const sig = Buffer.from(value['signature'], 'base64');
+    if (sig.length !== 64 || sig.toString('base64') !== value['signature']) return false;
+  } catch {
+    return false;
+  }
+  if (value['revokedAt'] !== null && !validIsoTimestamp(value['revokedAt'])) return false;
+  return true;
+}
+
+function loadGrantStore():
+  { ok: true; records: readonly DaemonActivationGrantRecord[] } | { ok: false; reason: string } {
+  const read = safeReadOwnedJsonArray(daemonActivationGrantsPath(), resolve(homedir()), MAX_GRANTS_BYTES);
+  if (!read.ok) {
+    if (read.reason === 'missing') return { ok: true, records: [] };
+    return { ok: false, reason: read.reason };
+  }
+  const records: DaemonActivationGrantRecord[] = [];
+  const seen = new Set<string>();
+  for (const entry of read.value) {
+    if (!validGrantRecord(entry) || seen.has(entry.grantId)) {
+      return { ok: false, reason: 'invalid-grant-store' };
+    }
+    seen.add(entry.grantId);
+    records.push(entry);
+  }
+  return { ok: true, records };
+}
+
+/** Full standing-grant status (incl. revoked/expired history) for `ashlr activation status`. */
+export function daemonActivationGrantStatus():
+  { ok: true; records: readonly DaemonActivationGrantRecord[] } | { ok: false; reason: string } {
+  return loadGrantStore();
+}
+
+function grantSigningCore(
+  record: Pick<DaemonActivationGrantRecord, 'schemaVersion' | 'grantId' | 'keyId' | 'issuedAt' | 'expiresAt' | 'scope'>,
+): Pick<DaemonActivationGrantRecord, 'schemaVersion' | 'grantId' | 'keyId' | 'issuedAt' | 'expiresAt' | 'scope'> {
+  return {
+    schemaVersion: record.schemaVersion,
+    grantId: record.grantId,
+    keyId: record.keyId,
+    issuedAt: record.issuedAt,
+    expiresAt: record.expiresAt,
+    scope: record.scope,
+  };
+}
+
+function grantSigningBytes(
+  core: Pick<DaemonActivationGrantRecord, 'schemaVersion' | 'grantId' | 'keyId' | 'issuedAt' | 'expiresAt' | 'scope'>,
+): Buffer {
+  return Buffer.from(`${GRANT_SIGNING_DOMAIN}${canonicalizeDaemonActivationValue(core)}`, 'utf8');
+}
+
+export function signDaemonActivationGrant(input: {
+  grantId: string;
+  keyId: string;
+  issuedAt: string;
+  expiresAt: string;
+  scope: DaemonActivationGrantScope;
+  privateKey: string | KeyObject;
+}): DaemonActivationGrantRecord {
+  const core = grantSigningCore({
+    schemaVersion: 1,
+    grantId: input.grantId,
+    keyId: input.keyId,
+    issuedAt: input.issuedAt,
+    expiresAt: input.expiresAt,
+    scope: { ...input.scope },
+  });
+  const key = typeof input.privateKey === 'string' ? createPrivateKey(input.privateKey) : input.privateKey;
+  if (key.type !== 'private' || key.asymmetricKeyType !== 'ed25519') {
+    throw new Error('daemon activation grants require an Ed25519 private key');
+  }
+  const signature = sign(null, grantSigningBytes(core), key).toString('base64');
+  const record: DaemonActivationGrantRecord = { ...core, signature, revokedAt: null };
+  if (!validGrantRecord(record)) throw new Error('invalid daemon activation grant record');
+  return record;
+}
+
+function auditActivationEvent(action: string, summary: string, result: 'ok' | 'refused' | 'error'): void {
+  audit({ action, repo: null, sandboxId: null, summary, result });
+}
+
+/**
+ * Checks whether ANY non-revoked, non-expired, validly-signed standing grant
+ * (from a non-revoked trust root) currently grants `scopeKey`. Unlike the
+ * one-shot permit, standing grants are NOT bound to exact executable/
+ * entrypoint/release-tree hashes — they must remain valid across routine
+ * rebuilds within their expiry window. They ARE bound to kill-switch-off,
+ * guard-health-healthy, and a non-revoked trust root, and always expire.
+ */
+export function daemonActivationScopeGranted(
+  scopeKey: DaemonActivationScopeKey,
+): { granted: boolean; reason: string } {
+  if (process.platform === 'win32') {
+    return { granted: false, reason: 'activation-permit-v1-unsupported-on-windows' };
+  }
+  if (killSwitchOn()) return { granted: false, reason: 'kill-switch-is-on' };
+  let guardHealthy: boolean;
+  try {
+    guardHealthy = !diagnoseGuardHealth().blocked;
+  } catch {
+    return { granted: false, reason: 'guard-health-check-failed' };
+  }
+  if (!guardHealthy) return { granted: false, reason: 'guard-health-degraded' };
+  const trusted = activeTrustRootKeyMap();
+  if (!trusted || trusted.size === 0) return { granted: false, reason: 'no-trusted-activation-roots' };
+  const grants = loadGrantStore();
+  if (!grants.ok) return { granted: false, reason: `activation-grant-store-${grants.reason}` };
+  const nowMs = Date.now();
+  for (const record of grants.records) {
+    if (record.revokedAt !== null) continue;
+    if (record.scope[scopeKey] !== true) continue;
+    const publicKey = trusted.get(record.keyId);
+    if (!publicKey) continue;
+    if (Date.parse(record.expiresAt) <= nowMs) continue;
+    let signature: Buffer;
+    try {
+      signature = Buffer.from(record.signature, 'base64');
+    } catch {
+      continue;
+    }
+    if (!verify(null, grantSigningBytes(grantSigningCore(record)), publicKey, signature)) continue;
+    return { granted: true, reason: `granted-by-${record.grantId}` };
+  }
+  return { granted: false, reason: 'no-matching-standing-grant' };
+}
+
+/**
+ * The goal and simple conductors consult this every cycle. Real, gated,
+ * revocable authority: granted only after `ashlr activation init` +
+ * `ashlr activation grant conductor`. Default (no grant) is denied, exactly
+ * as before this mechanism existed. Every check is audited.
+ */
+export function liveConductorActivationAuthorized(): boolean {
+  const check = daemonActivationScopeGranted('conductor');
+  auditActivationEvent(
+    'daemon-activation:conductor-check',
+    `conductor activation ${check.granted ? 'authorized' : 'denied'}: ${check.reason}`,
+    check.granted ? 'ok' : 'refused',
+  );
+  return check.granted;
+}
+
+// ---------------------------------------------------------------------------
+// Operator authority mutation — init / grant / revoke. Called from
+// `src/cli/activation.ts`; kept here so all signing/writing stays alongside
+// the verification it must satisfy.
+// ---------------------------------------------------------------------------
+
+export function generateDaemonActivationOperatorKeypair(): { privateKeyPem: string; publicKeyPem: string } {
+  const pair = generateKeyPairSync('ed25519');
+  return {
+    privateKeyPem: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+    publicKeyPem: pair.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+  };
+}
+
+function sanitizeKeyId(candidate: string): string {
+  const cleaned = candidate.replace(/[^A-Za-z0-9._-]/gu, '-').slice(0, 55);
+  const seeded = cleaned.length > 0 && /^[A-Za-z0-9]/u.test(cleaned) ? cleaned : `k${cleaned}`;
+  return seeded.slice(0, 63) || 'operator';
+}
+
+/**
+ * Generates an Ed25519 keypair on THIS machine (private key never leaves it,
+ * written 0600 under an 0700 directory) and registers the public half as a
+ * new active trust root. Refuses to silently clobber an existing active
+ * root or key file unless `force` is set (key rotation: the new root is
+ * ADDED, not swapped in place, so grants signed by an older still-active
+ * root keep working until explicitly revoked).
+ */
+export function daemonActivationInit(input: { label?: string; force?: boolean }):
+  | { ok: true; keyId: string; publicKeyPem: string; rotated: boolean }
+  | { ok: false; reason: string } {
+  if (process.platform === 'win32') {
+    return { ok: false, reason: 'activation-permit-v1-unsupported-on-windows' };
+  }
+  return withActivationStoreLock(():
+    | { ok: true; keyId: string; publicKeyPem: string; rotated: boolean }
+    | { ok: false; reason: string } => {
+    const existing = loadTrustRootStore();
+    if (!existing.ok) return { ok: false, reason: existing.reason };
+    const activeCount = existing.records.filter((record) => record.revokedAt === null).length;
+    if (activeCount > 0 && input.force !== true) {
+      return { ok: false, reason: 'trust-root-already-initialized' };
+    }
+    const keyPath = daemonActivationOperatorKeyPath();
+    if (pathEntryPresent(keyPath) && input.force !== true) {
+      return { ok: false, reason: 'operator-key-file-already-exists' };
+    }
+    const { privateKeyPem, publicKeyPem } = generateDaemonActivationOperatorKeypair();
+    const keyId = sanitizeKeyId(`${hostname()}-${randomBytes(4).toString('hex')}`);
+    const now = new Date().toISOString();
+    const record: DaemonActivationTrustRootRecord = {
+      keyId,
+      publicKeyPem,
+      createdAt: now,
+      revokedAt: null,
+      label: (input.label ?? '').slice(0, MAX_LABEL_LENGTH),
+    };
+    const home = resolve(homedir());
+    assurePrivateDirectory(daemonActivationDirPath(), home);
+    const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+    let fd: number | undefined;
+    try {
+      if (pathEntryPresent(keyPath)) unlinkSync(keyPath);
+      fd = openSync(keyPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollow, PRIVATE_FILE_MODE);
+      const initial = fstatSync(fd, { bigint: true });
+      if (!safeOwnedFile(initial) || initial.size !== 0n) throw new Error('unsafe-operator-key-file');
+      fchmodSync(fd, PRIVATE_FILE_MODE);
+      writeAll(fd, Buffer.from(privateKeyPem, 'utf8'));
+      fsyncSync(fd);
+      closeSync(fd);
+      fd = undefined;
+      const keyAssurance = assurePrivateStoragePath(keyPath, 'file', 'secure-created', { anchorPath: home });
+      if (!keyAssurance.ok) throw new Error(`unsafe-operator-key-path:${keyAssurance.reason}`);
+      fsyncDirectory(dirname(keyPath));
+    } catch (error) {
+      return { ok: false, reason: (error as Error).message || 'operator-key-write-failed' };
+    } finally {
+      if (fd !== undefined) {
+        try { closeSync(fd); } catch { /* best-effort */ }
+      }
+    }
+    writeCanonicalJsonArrayFileAtomic(daemonActivationTrustRootsPath(), [...existing.records, record], home);
+    auditActivationEvent(
+      'daemon-activation:init',
+      `trust root registered: keyId=${keyId} label=${JSON.stringify(record.label)} rotated=${activeCount > 0}`,
+      'ok',
+    );
+    return { ok: true, keyId, publicKeyPem, rotated: activeCount > 0 };
+  });
+}
+
+export function daemonActivationRevokeTrustRoot(keyId: string): { ok: true } | { ok: false; reason: string } {
+  if (!KEY_ID_RE.test(keyId)) return { ok: false, reason: 'invalid-key-id' };
+  return withActivationStoreLock((): { ok: true } | { ok: false; reason: string } => {
+    const existing = loadTrustRootStore();
+    if (!existing.ok) return { ok: false, reason: existing.reason };
+    const index = existing.records.findIndex((record) => record.keyId === keyId);
+    if (index === -1) return { ok: false, reason: 'trust-root-not-found' };
+    if (existing.records[index]!.revokedAt !== null) {
+      auditActivationEvent('daemon-activation:revoke-root', `trust root already revoked: keyId=${keyId}`, 'ok');
+      return { ok: true };
+    }
+    const revokedAt = new Date().toISOString();
+    const updated = existing.records.map((record, i) => (i === index ? { ...record, revokedAt } : record));
+    writeCanonicalJsonArrayFileAtomic(daemonActivationTrustRootsPath(), updated, resolve(homedir()));
+    auditActivationEvent('daemon-activation:revoke-root', `trust root revoked: keyId=${keyId}`, 'ok');
+    return { ok: true };
+  });
+}
+
+export function daemonActivationRevokeGrant(grantId: string): { ok: true } | { ok: false; reason: string } {
+  if (!ID_RE.test(grantId)) return { ok: false, reason: 'invalid-grant-id' };
+  return withActivationStoreLock((): { ok: true } | { ok: false; reason: string } => {
+    const existing = loadGrantStore();
+    if (!existing.ok) return { ok: false, reason: existing.reason };
+    const index = existing.records.findIndex((record) => record.grantId === grantId);
+    if (index === -1) return { ok: false, reason: 'grant-not-found' };
+    if (existing.records[index]!.revokedAt !== null) {
+      auditActivationEvent('daemon-activation:revoke-grant', `standing grant already revoked: grantId=${grantId}`, 'ok');
+      return { ok: true };
+    }
+    const revokedAt = new Date().toISOString();
+    const updated = existing.records.map((record, i) => (i === index ? { ...record, revokedAt } : record));
+    writeCanonicalJsonArrayFileAtomic(daemonActivationGrantsPath(), updated, resolve(homedir()));
+    auditActivationEvent('daemon-activation:revoke-grant', `standing grant revoked: grantId=${grantId}`, 'ok');
+    return { ok: true };
+  });
+}
+
+/** Mints a signed, expiring standing grant (conductor/automerge/repair/deploy/install/proposalOnly). */
+export function daemonActivationMintStandingGrant(input: { scope: DaemonActivationGrantScope; ttlMs: number }):
+  | { ok: true; record: DaemonActivationGrantRecord }
+  | { ok: false; reason: string } {
+  if (process.platform === 'win32') {
+    return { ok: false, reason: 'activation-permit-v1-unsupported-on-windows' };
+  }
+  if (!Number.isFinite(input.ttlMs) || input.ttlMs <= 0 || input.ttlMs > MAX_STANDING_GRANT_VALIDITY_MS) {
+    return { ok: false, reason: 'invalid-grant-ttl' };
+  }
+  if (!validScope(input.scope)) return { ok: false, reason: 'invalid-grant-scope' };
+  return withActivationStoreLock((): { ok: true; record: DaemonActivationGrantRecord } | { ok: false; reason: string } => {
+    const trustStore = loadTrustRootStore();
+    if (!trustStore.ok) return { ok: false, reason: trustStore.reason };
+    const active = trustStore.records.filter((record) => record.revokedAt === null);
+    if (active.length === 0) return { ok: false, reason: 'no-trusted-activation-roots' };
+    if (active.length > 1) return { ok: false, reason: 'ambiguous-signing-key-run-activation-status' };
+    const root = active[0]!;
+    let privateKeyPem: string;
+    try {
+      privateKeyPem = readOperatorPrivateKeyPem();
+    } catch (error) {
+      return { ok: false, reason: (error as Error).message || 'operator-key-unreadable' };
+    }
+    const existingGrants = loadGrantStore();
+    if (!existingGrants.ok) return { ok: false, reason: existingGrants.reason };
+    const now = Date.now();
+    const record = signDaemonActivationGrant({
+      grantId: randomBytes(16).toString('hex'),
+      keyId: root.keyId,
+      issuedAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + input.ttlMs).toISOString(),
+      scope: input.scope,
+      privateKey: privateKeyPem,
+    });
+    writeCanonicalJsonArrayFileAtomic(daemonActivationGrantsPath(), [...existingGrants.records, record], resolve(homedir()));
+    auditActivationEvent(
+      'daemon-activation:grant',
+      `standing grant minted: grantId=${record.grantId} keyId=${root.keyId} `
+      + `scope=${canonicalizeDaemonActivationValue(record.scope)} expiresAt=${record.expiresAt}`,
+      'ok',
+    );
+    return { ok: true, record };
+  });
+}
+
+/**
+ * Mints and pins a single-use activation permit (once/resident scopes) to
+ * daemonActivationPermitPath(), ready for `ashlr daemon start` to consume.
+ * Signs against THIS exact machine's current build (executable/entrypoint/
+ * release-tree hashes) — an operator runs this locally, immediately before
+ * starting the daemon it authorizes.
+ */
+export function daemonActivationMintOneShotPermit(input: { cfg: AshlrConfig; scope: DaemonActivationGrantScope }):
+  | { ok: true; permitId: string; permitPath: string; expiresAt: string }
+  | { ok: false; reason: string } {
+  if (process.platform === 'win32') {
+    return { ok: false, reason: 'activation-permit-v1-unsupported-on-windows' };
+  }
+  if (!validScope(input.scope)) return { ok: false, reason: 'invalid-grant-scope' };
+  return withActivationStoreLock(():
+    | { ok: true; permitId: string; permitPath: string; expiresAt: string }
+    | { ok: false; reason: string } => {
+    const trustStore = loadTrustRootStore();
+    if (!trustStore.ok) return { ok: false, reason: trustStore.reason };
+    const active = trustStore.records.filter((record) => record.revokedAt === null);
+    if (active.length === 0) return { ok: false, reason: 'no-trusted-activation-roots' };
+    if (active.length > 1) return { ok: false, reason: 'ambiguous-signing-key-run-activation-status' };
+    const root = active[0]!;
+    let privateKeyPem: string;
+    try {
+      privateKeyPem = readOperatorPrivateKeyPem();
+    } catch (error) {
+      return { ok: false, reason: (error as Error).message || 'operator-key-unreadable' };
+    }
+    let configSnapshot: AshlrConfig;
+    try {
+      configSnapshot = strictConfigSnapshot(input.cfg);
+    } catch {
+      return { ok: false, reason: 'activation-config-not-strict-json' };
+    }
+    // Cheap, context-independent check first: no point collecting a full
+    // runtime context (file hashing, release-tree walk) if there is already
+    // a pending permit occupying the single fixed path.
+    const permitPath = daemonActivationPermitPath();
+    if (pathEntryPresent(permitPath)) return { ok: false, reason: 'activation-permit-already-pending' };
+    let context: DaemonActivationRuntimeContext;
+    try {
+      context = collectRuntimeContext(configSnapshot);
+    } catch (error) {
+      return { ok: false, reason: `runtime-context-unavailable:${(error as Error).message}` };
+    }
+    if (!context.killSwitchOff) return { ok: false, reason: 'kill-switch-is-on' };
+    if (!context.guardHealthHealthy) return { ok: false, reason: 'guard-health-degraded' };
+    if (!validBuildIdentity(context.buildIdentity)) {
+      // Most commonly: a `git` provenance build with a dirty working tree
+      // (dist/ was built from uncommitted changes). Fail closed — a permit
+      // bound to an untrusted build identity would never verify anyway.
+      return { ok: false, reason: 'runtime-build-identity-untrusted' };
+    }
+    const now = Date.now();
+    const permitId = randomBytes(16).toString('hex');
+    let payload: DaemonActivationPermitPayload;
+    let envelope: DaemonActivationPermitEnvelope;
+    try {
+      payload = buildDaemonActivationPermitPayload({
+        permitId,
+        nonce: randomBytes(32).toString('hex'),
+        keyId: root.keyId,
+        issuedAt: new Date(now).toISOString(),
+        expiresAt: new Date(now + MAX_VALIDITY_MS).toISOString(),
+        scope: input.scope,
+        context,
+      });
+      envelope = signDaemonActivationPermit(payload, privateKeyPem);
+    } catch (error) {
+      return { ok: false, reason: (error as Error).message || 'activation-permit-build-failed' };
+    }
+    const home = resolve(homedir());
+    assurePrivateDirectory(dirname(permitPath), home);
+    const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+    let fd: number | undefined;
+    try {
+      fd = openSync(permitPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollow, PRIVATE_FILE_MODE);
+      const initial = fstatSync(fd, { bigint: true });
+      if (!safeOwnedFile(initial) || initial.size !== 0n) throw new Error('unsafe-activation-permit-file');
+      fchmodSync(fd, PRIVATE_FILE_MODE);
+      const bytes = Buffer.from(`${canonicalizeDaemonActivationValue(envelope)}\n`, 'utf8');
+      writeAll(fd, bytes);
+      fsyncSync(fd);
+      closeSync(fd);
+      fd = undefined;
+      const assurance = assurePrivateStoragePath(permitPath, 'file', 'secure-created', { anchorPath: home });
+      if (!assurance.ok) throw new Error(`unsafe-activation-permit-path:${assurance.reason}`);
+      fsyncDirectory(dirname(permitPath));
+    } catch (error) {
+      return { ok: false, reason: (error as Error).message || 'activation-permit-write-failed' };
+    } finally {
+      if (fd !== undefined) {
+        try { closeSync(fd); } catch { /* best-effort */ }
+      }
+    }
+    auditActivationEvent(
+      'daemon-activation:grant',
+      `one-shot permit minted: permitId=${permitId} keyId=${root.keyId} `
+      + `scope=${canonicalizeDaemonActivationValue(input.scope)} expiresAt=${payload.expiresAt}`,
+      'ok',
+    );
+    return { ok: true, permitId, permitPath, expiresAt: payload.expiresAt };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// One-shot permit inspection / consumption — `ashlr daemon start` [--once].
+// ---------------------------------------------------------------------------
+
+function activationReadiness(
+  state: DaemonActivationReadiness['state'],
+  reason: string,
+  trustRootCount: number,
+  extra?: {
+    requestedShape?: DaemonActivationReadiness['requestedShape'];
+    residentAuthorized?: boolean;
+    installAuthorized?: boolean;
+    repairAuthorized?: boolean;
+  },
+): DaemonActivationReadiness {
+  return {
+    schemaVersion: 1,
+    policyVersion: POLICY_VERSION,
+    authority: 'observation-only',
+    sourceState: state === 'degraded' ? 'degraded' : 'healthy',
+    state,
+    commandEligible: state === 'ready',
+    requestedShape: extra?.requestedShape ?? 'proposal-once',
+    trustRootCount,
+    residentAuthorized: extra?.residentAuthorized ?? false,
+    installAuthorized: extra?.installAuthorized ?? false,
+    repairAuthorized: extra?.repairAuthorized ?? false,
+    reason,
+  };
+}
+
+/** Maps the internal scope-key shape to the DaemonActivationReadiness label. */
+function requestedShapeLabel(shape: 'once' | 'resident'): DaemonActivationReadiness['requestedShape'] {
+  return shape === 'once' ? 'proposal-once' : 'resident';
+}
+
+/**
+ * What activation shape (if any) `opts` is structurally eligible to have
+ * authorized at all — independent of whether any permit/trust root exists.
+ * `null` means "denied before ever reading a permit," matching the pre-M470
+ * behavior for drain modes and any dry-run other than {once:true,dryRun:true}.
+ */
+function requestedActivationShape(opts: DaemonActivationOptions): 'once' | 'resident' | null {
+  if (opts.drain !== undefined || opts.drainLimit !== undefined) return null;
+  if (opts.dryRun === true) return null;
+  if (opts.once === true) return 'once';
+  if (opts.once === false) return 'resident';
+  return null;
+}
+
+function needsPermit(opts: DaemonActivationOptions): boolean {
+  return !(opts.once === true && opts.dryRun === true);
+}
+
 function inspectPinnedActivationPermit(
   pinned: PinnedPermitFile,
   permitPath: string,
   cfg: AshlrConfig,
   trustRoots: readonly DaemonActivationTrustRoot[],
   suppliedContext: DaemonActivationRuntimeContext | undefined,
+  requestedShape: 'once' | 'resident',
+  standingAuth: { install: boolean; repair: boolean },
 ): DaemonActivationReadiness {
+  const shapeLabel = requestedShapeLabel(requestedShape);
+  const extraBase = { requestedShape: shapeLabel, installAuthorized: standingAuth.install, repairAuthorized: standingAuth.repair };
   let envelope: unknown;
   try {
     envelope = JSON.parse(pinned.text) as unknown;
   } catch {
-    return activationReadiness('degraded', 'invalid-permit-json', trustRoots.length);
+    return activationReadiness('degraded', 'invalid-permit-json', trustRoots.length, extraBase);
   }
   if (`${canonicalizeDaemonActivationValue(envelope)}\n` !== pinned.text) {
-    return activationReadiness('degraded', 'noncanonical-permit-encoding', trustRoots.length);
+    return activationReadiness('degraded', 'noncanonical-permit-encoding', trustRoots.length, extraBase);
   }
   const parsed = parseEnvelope(envelope);
   if (!parsed) {
-    return activationReadiness('degraded', 'invalid-permit-schema', trustRoots.length);
+    return activationReadiness('degraded', 'invalid-permit-schema', trustRoots.length, extraBase);
   }
 
   let configSnapshot: AshlrConfig;
   try {
     configSnapshot = strictConfigSnapshot(cfg);
   } catch {
-    return activationReadiness('degraded', 'activation-config-not-strict-json', trustRoots.length);
+    return activationReadiness('degraded', 'activation-config-not-strict-json', trustRoots.length, extraBase);
   }
   const context = suppliedContext ?? collectRuntimeContext(configSnapshot);
   if (context.configDigest !== daemonActivationConfigDigest(configSnapshot)) {
-    return activationReadiness('blocked', 'runtime-config-digest-mismatch', trustRoots.length);
+    return activationReadiness('blocked', 'runtime-config-digest-mismatch', trustRoots.length, extraBase);
   }
   const verification = verifyDaemonActivationPermit(parsed, context, trustRoots);
   if (!verification.ok || !verification.permitId) {
-    return activationReadiness('blocked', verification.reason, trustRoots.length);
+    return activationReadiness('blocked', verification.reason, trustRoots.length, extraBase);
+  }
+  const residentAuthorized = parsed.payload.scope.resident === true;
+  if (parsed.payload.scope[requestedShape] !== true) {
+    return activationReadiness(
+      'blocked',
+      'activation-permit-scope-does-not-grant-requested-shape',
+      trustRoots.length,
+      { ...extraBase, residentAuthorized },
+    );
   }
 
   const nonceDigest = sha256(parsed.payload.nonce);
@@ -948,16 +1739,17 @@ function inspectPinnedActivationPermit(
     pathEntryPresent(daemonActivationReceiptPath(verification.permitId))
     || pathEntryPresent(daemonActivationNonceReceiptPath(nonceDigest))
   ) {
-    return activationReadiness('blocked', 'activation-permit-already-consumed', trustRoots.length);
+    return activationReadiness('blocked', 'activation-permit-already-consumed', trustRoots.length, { ...extraBase, residentAuthorized });
   }
 
   const openedAfterInspection = fstatSync(pinned.fd, { bigint: true });
   const namedAfterInspection = lstatSync(permitPath, { bigint: true });
   if (!sameFileSnapshot(pinned.stat, openedAfterInspection)
     || !sameFileSnapshot(openedAfterInspection, namedAfterInspection)) {
-    return activationReadiness('degraded', 'activation-permit-changed-during-inspection', trustRoots.length);
+    return activationReadiness('degraded', 'activation-permit-changed-during-inspection', trustRoots.length, { ...extraBase, residentAuthorized });
   }
-  return activationReadiness('ready', 'valid-proposal-once-permit', trustRoots.length);
+  const readyReason = requestedShape === 'once' ? 'valid-proposal-once-permit' : 'valid-resident-permit';
+  return activationReadiness('ready', readyReason, trustRoots.length, { ...extraBase, residentAuthorized });
 }
 
 function inspectWithAuthority(
@@ -967,28 +1759,41 @@ function inspectWithAuthority(
   suppliedContext: DaemonActivationRuntimeContext | undefined,
   platform: NodeJS.Platform = process.platform,
 ): DaemonActivationReadiness {
+  const standingAuth = {
+    install: daemonActivationScopeGranted('install').granted,
+    repair: daemonActivationScopeGranted('repair').granted,
+  };
   if (!needsPermit(opts)) {
     return activationReadiness(
       'ready',
       'dry-run-once-does-not-require-activation-permit',
       trustRoots.length,
+      { installAuthorized: standingAuth.install, repairAuthorized: standingAuth.repair },
     );
   }
-  if (!supportedProposalOnceShape(opts)) {
+  const requestedShape = requestedActivationShape(opts);
+  if (!requestedShape) {
     return activationReadiness(
       'blocked',
       'activation-permit-cannot-authorize-requested-start-shape',
       trustRoots.length,
+      { installAuthorized: standingAuth.install, repairAuthorized: standingAuth.repair },
     );
   }
+  const shapeLabel = requestedShapeLabel(requestedShape);
   if (trustRoots.length === 0) {
-    return activationReadiness('blocked', 'no-trusted-activation-roots', 0);
+    return activationReadiness('blocked', 'no-trusted-activation-roots', 0, {
+      requestedShape: shapeLabel,
+      installAuthorized: standingAuth.install,
+      repairAuthorized: standingAuth.repair,
+    });
   }
   if (platform === 'win32') {
     return activationReadiness(
       'blocked',
       'activation-permit-v1-unsupported-on-windows',
       trustRoots.length,
+      { requestedShape: shapeLabel, installAuthorized: standingAuth.install, repairAuthorized: standingAuth.repair },
     );
   }
 
@@ -1003,6 +1808,8 @@ function inspectWithAuthority(
       cfg,
       trustRoots,
       suppliedContext,
+      requestedShape,
+      standingAuth,
     );
   } catch (error) {
     result = activationReadiness(
@@ -1011,6 +1818,7 @@ function inspectWithAuthority(
         ? 'activation-permit-missing'
         : 'activation-permit-inspection-failed',
       trustRoots.length,
+      { requestedShape: shapeLabel, installAuthorized: standingAuth.install, repairAuthorized: standingAuth.repair },
     );
   }
   if (pinned) {
@@ -1021,21 +1829,11 @@ function inspectWithAuthority(
         'degraded',
         'activation-permit-close-failed',
         trustRoots.length,
+        { requestedShape: shapeLabel, installAuthorized: standingAuth.install, repairAuthorized: standingAuth.repair },
       );
     }
   }
   return result;
-}
-
-function needsPermit(opts: DaemonActivationOptions): boolean {
-  return !(opts.once === true && opts.dryRun === true);
-}
-
-function supportedProposalOnceShape(opts: DaemonActivationOptions): boolean {
-  return opts.once === true
-    && opts.dryRun !== true
-    && opts.drain === undefined
-    && opts.drainLimit === undefined;
 }
 
 function consumeWithAuthority(
@@ -1053,7 +1851,8 @@ function consumeWithAuthority(
       reason: 'dry-run-once-does-not-require-activation-permit',
     };
   }
-  if (!supportedProposalOnceShape(opts)) {
+  const requestedShape = requestedActivationShape(opts);
+  if (!requestedShape) {
     return {
       authorized: false,
       required: true,
@@ -1122,6 +1921,15 @@ function consumeWithAuthority(
     const parsed = parseEnvelope(envelope);
     if (!parsed) {
       result = { authorized: false, required: true, reason: 'invalid-permit-schema' };
+      return result;
+    }
+    if (parsed.payload.scope[requestedShape] !== true) {
+      result = {
+        authorized: false,
+        required: true,
+        reason: 'activation-permit-scope-does-not-grant-requested-shape',
+        permitId: verification.permitId,
+      };
       return result;
     }
 
@@ -1211,12 +2019,12 @@ function consumeWithAuthority(
     result = {
       authorized: true,
       required: true,
-      reason: 'proposal-once-activation-authorized',
+      reason: requestedShape === 'once' ? 'proposal-once-activation-authorized' : 'resident-activation-authorized',
       permitId: verification.permitId,
       receiptPath,
       ...(mayMintCapability
         ? {
-            capability: mintCapability(verification.permitId, () => {
+            capability: mintCapability(verification.permitId, parsed.payload.scope, () => {
               const claimContext = collectRuntimeContext(configSnapshot);
               return verifyDaemonActivationPermit(
                 parsed,
@@ -1256,21 +2064,33 @@ function consumeWithAuthority(
 }
 
 /**
- * Runtime entrypoint. Its immutable repository-owned roots are the only path
- * that can mint an in-process activation capability.
+ * Runtime entrypoint. Trust roots come ONLY from the operator-owned store
+ * (see loadDaemonActivationTrustRoots); an npm consumer who never runs
+ * `ashlr activation init` sees the store as empty and gets today's exact
+ * denial. Every consume attempt — authorized or refused — is audited.
  */
 export function consumeDaemonActivationPermit(
   cfg: AshlrConfig,
   opts: DaemonActivationOptions,
 ): DaemonActivationPermitResult {
-  return consumeWithAuthority(
+  const result = consumeWithAuthority(
     cfg,
     opts,
-    DAEMON_ACTIVATION_TRUST_ROOTS,
+    loadDaemonActivationTrustRoots(),
     undefined,
     undefined,
     true,
   );
+  // The dry-run-once bypass (`required: false`) never touches a permit or
+  // any authority state — it is not a consume attempt, so nothing is audited.
+  if (result.required) {
+    auditActivationEvent(
+      'daemon-activation:consume',
+      `daemon activation consume ${result.authorized ? 'authorized' : 'refused'}: ${result.reason}`,
+      result.authorized ? 'ok' : 'refused',
+    );
+  }
+  return result;
 }
 
 /**
@@ -1284,7 +2104,7 @@ export function inspectDaemonActivationPermit(
   return inspectWithAuthority(
     cfg,
     opts,
-    DAEMON_ACTIVATION_TRUST_ROOTS,
+    loadDaemonActivationTrustRoots(),
     undefined,
   );
 }

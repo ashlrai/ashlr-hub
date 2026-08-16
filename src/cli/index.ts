@@ -35,6 +35,7 @@
  *   vercel <ls|logs>           Read Vercel deployments / latest logs (read-only via vercel CLI).
  *   wire [claude|codex|cursor|all]  Wire ashlr MCP gateway into editor config(s).
  *   notify test                Send a test ping to the configured webhook (no-op if unconfigured).
+ *   activation [init|status|grant|revoke]  Operator authority for the autonomous fleet (denied by default).
  *   help                       Show this help.
  *
  * Exit codes: 0 success, 1 error/not-found, 2 bad usage.
@@ -448,6 +449,14 @@ const loadDaemonCmd = lazyCmd(
   () => import('./daemon.js'),
   (m) => m.cmdDaemon as Cmd,
   'daemon command requires src/cli/daemon.ts (M24 module not yet built).',
+);
+
+// ─── M470 daemon activation authority: `ashlr activation` ───────────────────
+
+const loadActivationCmd = lazyCmd(
+  () => import('./activation.js'),
+  (m) => m.cmdActivation as Cmd,
+  'activation command requires src/cli/activation.ts (M470 module not yet built).',
 );
 
 // ─── M25 command loaders ────────────────────────────────────────────
@@ -1879,6 +1888,14 @@ async function main(): Promise<void> {
       case 'daemon': {
         const cmdDaemon = await loadDaemonCmd();
         process.exitCode = await cmdDaemon(rest);
+        break;
+      }
+
+      case 'activation': {
+        // M470: operator authority for the autonomous fleet — denied by
+        // default; `activation init` + `activation grant` opt in explicitly.
+        const cmdActivation = await loadActivationCmd();
+        process.exitCode = await cmdActivation(rest);
         break;
       }
 
