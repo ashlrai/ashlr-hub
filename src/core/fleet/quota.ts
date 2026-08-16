@@ -372,22 +372,14 @@ function parseStrictQuota(
 function readBoundQuotaFile(authority: QuotaDirectoryAuthority): BoundQuotaFile | null {
   if (!stableQuotaDirectory(authority)) return null;
   const path = fleetQuotaReservationPath();
-  let named: BigIntStats;
-  try {
-    named = lstatSync(path, { bigint: true });
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'ENOENT' && stableQuotaDirectory(authority)
-      ? { found: false }
-      : null;
-  }
-  if (!safeQuotaFile(named) || named.size > BigInt(MAX_AUTHORITY_LEDGER_BYTES) ||
-    !assurePrivateStoragePath(path, 'file', 'inspect-existing', { anchorPath: homedir() }).ok) return null;
   let fd: number | undefined;
   try {
     fd = openSync(path, fsConstants.O_RDONLY | O_NOFOLLOW);
     const opened = fstatSync(fd, { bigint: true });
-    if (!safeQuotaFile(opened) || !sameIdentity(named, opened) ||
-      opened.size > BigInt(MAX_AUTHORITY_LEDGER_BYTES)) return null;
+    if (!safeQuotaFile(opened) || opened.size > BigInt(MAX_AUTHORITY_LEDGER_BYTES) ||
+      !assurePrivateStoragePath(path, 'file', 'inspect-existing', { anchorPath: homedir() }).ok) return null;
+    const named = lstatSync(path, { bigint: true });
+    if (!safeQuotaFile(named) || !sameIdentity(opened, named)) return null;
     const bytes = Buffer.alloc(Number(opened.size));
     let offset = 0;
     while (offset < bytes.length) {
@@ -410,8 +402,11 @@ function readBoundQuotaFile(authority: QuotaDirectoryAuthority): BoundQuotaFile 
       mtimeNs: openedAfter.mtimeNs,
       ctimeNs: openedAfter.ctimeNs,
     };
-  } catch {
-    return null;
+  } catch (error) {
+    return fd === undefined && (error as NodeJS.ErrnoException).code === 'ENOENT' &&
+      stableQuotaDirectory(authority)
+      ? { found: false }
+      : null;
   } finally {
     if (fd !== undefined) { try { closeSync(fd); } catch { /* best effort */ } }
   }
@@ -420,22 +415,14 @@ function readBoundQuotaFile(authority: QuotaDirectoryAuthority): BoundQuotaFile 
 function readBoundLegacyQuotaFile(authority: QuotaDirectoryAuthority): BoundQuotaFile | null {
   if (!stableLegacyQuotaDirectory(authority)) return null;
   const path = fleetQuotaPath();
-  let named: BigIntStats;
-  try {
-    named = lstatSync(path, { bigint: true });
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'ENOENT' && stableLegacyQuotaDirectory(authority)
-      ? { found: false }
-      : null;
-  }
-  if (!safeLegacyQuotaFile(named) || named.size > BigInt(MAX_LEDGER_BYTES) ||
-    !assurePrivateStoragePath(path, 'file', 'inspect-owned', { anchorPath: homedir() }).ok) return null;
   let fd: number | undefined;
   try {
     fd = openSync(path, fsConstants.O_RDONLY | O_NOFOLLOW);
     const opened = fstatSync(fd, { bigint: true });
-    if (!safeLegacyQuotaFile(opened) || !sameIdentity(named, opened) ||
-      opened.size > BigInt(MAX_LEDGER_BYTES)) return null;
+    if (!safeLegacyQuotaFile(opened) || opened.size > BigInt(MAX_LEDGER_BYTES) ||
+      !assurePrivateStoragePath(path, 'file', 'inspect-owned', { anchorPath: homedir() }).ok) return null;
+    const named = lstatSync(path, { bigint: true });
+    if (!safeLegacyQuotaFile(named) || !sameIdentity(opened, named)) return null;
     const bytes = Buffer.alloc(Number(opened.size));
     let offset = 0;
     while (offset < bytes.length) {
@@ -458,8 +445,11 @@ function readBoundLegacyQuotaFile(authority: QuotaDirectoryAuthority): BoundQuot
       mtimeNs: openedAfter.mtimeNs,
       ctimeNs: openedAfter.ctimeNs,
     };
-  } catch {
-    return null;
+  } catch (error) {
+    return fd === undefined && (error as NodeJS.ErrnoException).code === 'ENOENT' &&
+      stableLegacyQuotaDirectory(authority)
+      ? { found: false }
+      : null;
   } finally {
     if (fd !== undefined) { try { closeSync(fd); } catch { /* best effort */ } }
   }
