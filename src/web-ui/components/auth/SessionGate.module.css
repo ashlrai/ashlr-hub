@@ -1,0 +1,105 @@
+.wrap {
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-6);
+  background: var(--bg-canvas);
+}
+
+.card {
+  width: min(480px, 100%);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+  padding: var(--space-8);
+}
+
+.badge {
+  font-size: 28px;
+  margin-bottom: var(--space-4);
+}
+
+.heading {
+  font-size: var(--text-2xl-size);
+  line-height: var(--text-2xl-line);
+  font-weight: var(--font-weight-semibold);
+  margin-bottom: var(--space-3);
+}
+
+.body {
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  color: var(--text-secondary);
+  margin-bottom: var(--space-3);
+}
+
+.code {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm-size);
+  background: var(--bg-code);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  margin-bottom: var(--space-3);
+  overflow-x: auto;
+}
+
+.example {
+  font-family: var(--font-mono);
+  background: var(--bg-code);
+  padding: 1px 4px;
+  border-radius: var(--radius-xs);
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-5);
+}
+
+.label {
+  font-size: var(--text-sm-size);
+  font-weight: var(--font-weight-medium);
+}
+
+.input {
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-default);
+  background: var(--bg-input);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm-size);
+}
+
+.input:focus-visible {
+  border-color: var(--border-focus);
+  box-shadow: var(--shadow-focus-ring);
+}
+
+.error {
+  color: var(--status-danger-fg);
+  font-size: var(--text-sm-size);
+}
+
+.submit {
+  margin-top: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  background: var(--accent-500);
+  color: var(--text-on-accent);
+  border-radius: var(--radius-md);
+  font-weight: var(--font-weight-medium);
+  text-align: center;
+  transition: background var(--duration-fast) var(--ease-standard);
+}
+
+.submit:hover:not(:disabled) {
+  background: var(--accent-600);
+}
+
+.submit:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
