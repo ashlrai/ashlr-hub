@@ -209,7 +209,28 @@ function formatAuditEntry(entry: AuditEntry): string {
 // cmdAudit — the command entry point
 // ---------------------------------------------------------------------------
 
+function printAuditHelp(): void {
+  console.log('');
+  console.log(bold('  ashlr audit') + dim(' — READ-ONLY audit-trail viewer (tails ~/.ashlr/audit/*.jsonl)'));
+  console.log('');
+  console.log(dim(
+    'Usage: ashlr audit [N | --limit N] [--json] [--action <verb>] ' +
+      '[--result ok|refused|error] [--since <ISO|YYYY-MM-DD>]',
+  ));
+  console.log('');
+  console.log(`    ${dim('N')}                       positional shorthand for --limit N`);
+  console.log(`    ${dim('--action <verb>')}         filter by action; bare verb matches verb:*`);
+  console.log(`    ${dim('--result <ok|refused|error>')}  filter by outcome`);
+  console.log(`    ${dim('--since <ISO|YYYY-MM-DD>')}     drop records older than this`);
+  console.log(`    ${dim('--json')}                  emit the records as a JSON array`);
+  console.log('');
+}
+
 export async function cmdAudit(args: string[]): Promise<number> {
+  if (args.includes('--help') || args.includes('-h')) {
+    printAuditHelp();
+    return 0;
+  }
   const parsed = parseArgs(args);
   if ('error' in parsed) {
     console.error(red('error: ') + parsed.error);

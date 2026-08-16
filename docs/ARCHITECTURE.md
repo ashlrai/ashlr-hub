@@ -336,6 +336,10 @@ External paths the hub reads but never writes:
 
 ## Milestone → module mapping (v1–v5)
 
+This is a batched, series-level view. For an ID-by-ID lookup (including
+milestone numbers that were spec'd for one thing and shipped as another),
+see [`docs/MILESTONE-INDEX.md`](MILESTONE-INDEX.md).
+
 | Milestones | Theme | Primary modules |
 |-----------|-------|-----------------|
 | M1–M7 | Foundation — index, MCP gateway, agent loop, observability, lifecycle, genome | `config`, `index-engine`, `mcp-gateway`, `run/orchestrator`, `observability/`, `lifecycle/`, `genome/` |
@@ -343,7 +347,8 @@ External paths the hub reads but never writes:
 | M21–M30 | Autonomous org — sandboxed swarms, Approval Inbox, enrollment, kill-switch | `swarm/`, `inbox/`, `sandbox/worktree` |
 | H1–H8 | Harden and prove — adversarial test suite, safety invariants | `test/h*.test.ts` |
 | M31–M33 | Agent-native — plugin system, Raycast, update channel | `plugins/`, `src/raycast/`, `cli/update.ts` |
-| M34–M44 | Team + Local Weapon — multi-machine inbox, adaptive prompts, verify→repair, eval | `integrations/`, `run/verify.ts`, `cli/eval.ts` |
+| M34–M40 | Team Command Center — **spec'd, NOT built.** No `test/m34.*`–`test/m40.*` exist; `hub/v1`/`ASHLR_API_URL` absent from `src/`. See `docs/SPEC-V3-TEAM.md` status banner and `docs/MILESTONE-INDEX.md` §3. | `seams/identity.ts`, `seams/daemon-coordinator.ts` (gated stubs only) |
+| M41–M44 | Local Weapon — adaptive prompts, sandboxed engineer tool surface, verify→repair, eval | `integrations/`, `run/verify.ts`, `cli/eval.ts` |
 | M45–M49 | Foundry — sandboxed engines, router, tiered-trust gate, HMAC provenance, fleet supervisor | `run/sandboxed-engine`, `fleet/router`, `inbox/merge`, `foundry/provenance`, `daemon/loop` |
 | M50–M55 | Open Fleet — engine registry, tri-tier trust, OS confinement, fleet intelligence, self-improving, conductor | `run/engine-registry`, `sandbox/confine`, `run/learned-router`, `goals/conductor`, `cli/loop`, `cli/goal` |
 | M140+ | Verification-First — test-iterate loop, judge traces, best-of-N, SWE-bench harness | `run/best-of-n`, `fleet/judge-trace`, `fleet/judge-calibration`, `core/eval/` |

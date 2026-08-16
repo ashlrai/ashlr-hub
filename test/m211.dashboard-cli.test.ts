@@ -1440,6 +1440,13 @@ describe('installServeAgent', () => {
     expect(fs.readFileSync(outside, 'utf8')).toBe('keep');
   });
 
+  // 20 sequential REAL fs writes (plist + rollback rotation) via
+  // installLaunchdPlistTransaction, each doing real filesystem I/O — bound by
+  // actual disk/CPU contention under full-suite parallel load, occasionally
+  // exceeding the 5s default. Raised rather than skip-guarded on purpose,
+  // matching the h3.concurrency-cap.test.ts convention (also m398/m501 20s,
+  // m355 120s): the real-I/O loop is the whole point of the retention proof,
+  // and skipping it would be a vacuous green.
   it('removes superseded rollback entries while retaining the five newest snapshots', async () => {
     const { installLaunchdPlistTransaction } = await import('../src/core/daemon/launchd-plist-transaction.js');
     const pp = path.join(tmpHome, 'Library', 'LaunchAgents', 'bounded-rollbacks.plist');
@@ -1471,7 +1478,7 @@ describe('installServeAgent', () => {
       'current-18',
       'current-19',
     ]);
-  });
+  }, 20_000);
 });
 
 describe('servePlistNeedsUpgrade', () => {

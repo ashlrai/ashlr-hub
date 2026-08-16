@@ -136,10 +136,28 @@ export interface DemoInternalOptions {
  * @param args CLI args (`--no-cleanup`, `--json`).
  * @param internal @internal test-only injection seam (never passed by the CLI).
  */
+function printDemoHelp(): void {
+  console.log('');
+  console.log(bold('  ashlr demo') + dim(' — watch the FULL autonomous chain on a DISPOSABLE tmp repo'));
+  console.log('');
+  console.log(dim('Usage: ashlr demo [--no-cleanup] [--json]'));
+  console.log('');
+  console.log(`    ${cyan('ashlr demo')}              narrate each step (isolate → enroll → backlog → tick → inbox → cleanup)`);
+  console.log(`    ${cyan('ashlr demo --no-cleanup')} keep the tmp dir (still under os.tmpdir()) for inspection`);
+  console.log(`    ${cyan('ashlr demo --json')}       emit a structured step transcript instead of narration`);
+  console.log('');
+  console.log(dim('  Isolated tmp ~/.ashlr; proposal-only; auto-cleans. NEVER touches your real portfolio.'));
+  console.log('');
+}
+
 export async function cmdDemo(
   args: string[],
   internal?: DemoInternalOptions,
 ): Promise<number> {
+  if (args.includes('--help') || args.includes('-h')) {
+    printDemoHelp();
+    return 0;
+  }
   const noCleanup = args.includes('--no-cleanup');
   const asJson = args.includes('--json');
 

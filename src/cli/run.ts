@@ -250,7 +250,7 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
   if (!result.goal && !result.resumeId) {
     result.usageError =
       'Usage: ashlr run "<goal>" [--budget N] [--max-steps N] [--parallel N]\n' +
-      '              [--engine builtin|ashlrcode|aw|claude] [--allow-cloud] [--no-tools]\n' +
+      '              [--engine builtin|ashlrcode|aw|claude|codex] [--allow-cloud] [--no-tools]\n' +
       '              [--resume <id>] [--json] [--no-memory] [--stream|--no-stream] [--verify-model] [--no-capture]\n' +
       '       ashlr run show <id>';
   }

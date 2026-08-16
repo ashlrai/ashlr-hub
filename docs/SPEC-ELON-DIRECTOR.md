@@ -1,6 +1,15 @@
 # SPEC: Elon Director — Autonomous Strategic Reasoning Layer (M257+)
 
-**Status:** Design — not yet implemented  
+**Status:** M257 (the core director reasoning cycle) **shipped** —
+`src/core/comms/director.ts` (`runDirectorCycle` at line 378,
+`runDirectorDryRun` at line 448), `director-context.ts`, `director-prompt.ts`,
+`src/cli/director.ts`, wired into `src/core/daemon/loop.ts`, proven by
+`test/m257.director.test.ts`. **M258, M259, M260, M261 as specced below did
+NOT ship under these numbers** — each number was silently reused for
+unrelated work (M258/M259/M260 — see `docs/MILESTONE-INDEX.md` §2 for the
+collision detail) or remains genuinely unbuilt (M261 Director Memory —
+`directorMemory` is absent from `src/`, confirmed by grep). Do not read past
+milestone numbers in this doc as delivered without checking the index.  
 **Branch target:** `feat/v5-open-fleet` (after M250–M256 resource control plane + cache)  
 **Author:** Architecture session 2026-06-29  
 **Driver:** Give the Elon agent a brain. Today it reacts (digests, notifications,
@@ -519,6 +528,10 @@ trail entry, CLI `ashlr director status`.
 
 ### M258 — Director Acts (goal direction)
 
+> **Not built under this number.** M258 shipped as an unrelated
+> ephemeral-path sandbox goal guard (`test/m258.sandbox-goal-guard.test.ts`).
+> This spec's "Director Acts" feature is unbuilt. See `docs/MILESTONE-INDEX.md` §2.
+
 After M257 proves the reasoning quality, enable goal mutations:
 - Director can `createGoal()` when it identifies a gap against NORTH-STAR
 - Director can update goal priority/notes
@@ -529,6 +542,12 @@ where Mason does not override the recommendation).
 
 ### M259 — Backend Hint Integration
 
+> **Not built under this number.** M259 shipped as automerge drain-backlog
+> config (`judgePerPass`, dedup, queue-drain —
+> `test/m259.diff-dedup-producer-credit.test.ts`,
+> `test/m259.queue-drain.test.ts`). This spec's "Backend Hint Integration"
+> feature is unbuilt. See `docs/MILESTONE-INDEX.md` §2.
+
 Director's `BackendHint` is fed to the gateway as a per-cycle advisory:
 - `cfg.foundry.fabric.backendHint` field (ephemeral, not persisted)
 - Gateway's resource-aware demotion step (M250/M252) reads hint as tiebreaker
@@ -537,6 +556,11 @@ Director's `BackendHint` is fed to the gateway as a per-cycle advisory:
 **Gate:** M258 shipped. Resource-aware demotion (M250) shipped.
 
 ### M260 — Director Dashboard Panel
+
+> **Not built under this number.** M260 shipped as a frontier model alias
+> resolution fix (`:default` tag —
+> `test/m260.resolve-concrete-model.test.ts`). This spec's "Director
+> Dashboard Panel" feature is unbuilt. See `docs/MILESTONE-INDEX.md` §2.
 
 Add a "Director" section to Mission Control (web dashboard):
 - Current posture badge (full / preserve / local-only / degraded)
@@ -548,6 +572,14 @@ Add a "Director" section to Mission Control (web dashboard):
 **Gate:** M259 shipped.
 
 ### M261 — Director Memory (inter-cycle continuity)
+
+> **Confirmed still unbuilt** (not a collision this time — the number M261
+> was reused twice by unrelated shipped work: verify-result persistence and
+> proposal-mutation locking, `test/m261.verify-result-persistence.test.ts` /
+> `test/m261.proposal-mutation-lock.test.ts` — but the "Director Memory"
+> feature described below genuinely has not shipped under any number.
+> `directorMemory` does not appear anywhere in `src/`.) See
+> `docs/MILESTONE-INDEX.md` §2.
 
 Director reads its own recent decisions from the `'directed'` ledger entries to
 avoid recommending the same move it made last cycle. Enables multi-cycle reasoning

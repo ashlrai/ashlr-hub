@@ -8,11 +8,25 @@ this milestone.
 
 ## Problem
 
-M444 produces deterministic quarantine evidence, and M446/M449 bind an exact
+M444 produces deterministic quarantine evidence, and M446 binds an exact
 Git-object capture. A later exposure verifier must not accept a caller-built
 M444-shaped object: a caller could fabricate section, count, or routing fields.
 M451 therefore authenticates exact canonical M444 report bytes under a
 repository-owned verifier trust policy.
+
+> **Dangling reference note:** the original text here and below referenced
+> "M446/M449" and "M449 custody reread" as if M449 were an existing sibling
+> capture milestone alongside M446. No `CONTRACT-M449.md`, and no `src/` or
+> `test/` code for M449, exist anywhere in this repo — the number was never
+> assigned to shipped or specced work (see `docs/MILESTONE-INDEX.md`). The
+> custody-statement-verification milestone that actually shipped adjacent to
+> M446 is **M447** (`docs/contracts` has no `CONTRACT-M447.md` either, but
+> `test/m447.external-skill-custody-attestation.test.ts` and
+> `src/core/fleet/external-skill-custody-attestation.ts` exist — see
+> CHANGELOG 3.2.0 "External custody statement verification preview (M447)").
+> Treat every "M449" mention below
+> as a forward reference to a milestone that was never built under that
+> number, not as a dependency on shipped work.
 
 ## Internal Verification Boundary
 
@@ -73,9 +87,11 @@ Authenticated results still return:
 ```
 
 Exact replay is idempotent, not one-use. Online revocation, transparency,
-independent-principal custody, a production signer, exact M449 custody reread,
-sealed context projection, hostile-content isolation, model exposure, and
-outcome attestation remain mandatory later boundaries.
+independent-principal custody, a production signer, exact custody reread
+(referred to as "M449" in earlier drafts of this contract — see the dangling
+reference note above; no such milestone was built), sealed context
+projection, hostile-content isolation, model exposure, and outcome
+attestation remain mandatory later boundaries.
 
 ## Privacy
 

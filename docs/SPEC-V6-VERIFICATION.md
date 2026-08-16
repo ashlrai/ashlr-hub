@@ -63,8 +63,11 @@ local at zero quality cost — and a model upgrade: **qwen2.5-coder:32b → qwen
 ## The horizon (V6.x — self-improvement, fed by M141)
 - **ACE delta-curated playbooks** for the strategist spec + judge rubric — append/curate
   deltas instead of rewriting whole memory each loop (kills "context collapse").
-- **DSPy 3.3 + GEPA/SIMBA** optimizing the judge + strategist prompts against accept/reject
-  outcomes (~35× fewer rollouts than RL).
+- **DSPy 3.3 + GEPA** optimizing the judge + strategist prompts against accept/reject
+  outcomes (~35× fewer rollouts than RL). **GEPA shipped** (M150,
+  `src/core/fleet/prompt-optimizer.ts` — "reflection-based prompt evolution"). **SIMBA was
+  not pursued** — no `SIMBA` reference exists anywhere in `src/` or `docs/`; drop it from
+  future planning unless someone explicitly revives it.
 - **EDV — separate-verifier-before-memory-write:** never let the judge's own accepted
   trajectory feed back as ground truth; a separate local verifier confirms before the
   re-ranker updates (closes the "self-confirmation trap").
@@ -75,7 +78,11 @@ local at zero quality cost — and a model upgrade: **qwen2.5-coder:32b → qwen
   local base (DeepSeek-R1-Distill / Qwen3) using the M141 traces + test-pass signal —
   a frontier-quality judge that runs free, locally.
 - **DBOS durable suspend/resume** of in-flight ticks — crash-safe long-running work
-  (the one primitive every 2026 orchestration framework converged on).
+  (the one primitive every 2026 orchestration framework converged on). **Still unbuilt** —
+  no `DBOS` reference exists in `src/`. Note the daemon does have narrower crash-safety
+  primitives that partially address the same class of problem without DBOS itself: M486
+  (fsync durability barriers for daemon accounting) and M487/M501 (state quarantine +
+  resolution) — see `docs/contracts/CONTRACT-M486.md`, `CONTRACT-M487.md`, `CONTRACT-M501.md`.
 - **Localization + repo-map** (Agentless/LocAgent graph-guided + tree-sitter PageRank)
   feeding a **cheap-first cascade gated on build/test** before any frontier escalation
   (45–85% cost cut at ~95% quality); escalation-rate tracked as a first-class metric.
