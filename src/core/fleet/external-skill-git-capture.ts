@@ -65,6 +65,13 @@ const MAX_SOURCE_CONFIG_BYTES = 64 * 1024;
 const MAX_SOURCE_HEAD_BYTES = 4 * 1024;
 const MAX_SOURCE_PACKED_REFS_BYTES = 8 * 1024 * 1024;
 const MAX_CAPTURE_MS = 30_000;
+// A git subprocess spawn+exec realistically needs at least this much wall
+// time to complete even for a tiny object. Below this floor the invocation
+// is doomed before it starts; treat it as budget exhaustion (capture-limit)
+// rather than attempting it and reporting the resulting failure as
+// source-unavailable, which misleadingly implies the repository itself is
+// broken rather than that our own time budget ran out.
+const MIN_INVOKE_BUDGET_MS = 250;
 const MAX_BUNDLE_BYTES = 24 * 1024 * 1024;
 const FULL_OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const DIGEST = /^[0-9a-f]{64}$/;
@@ -818,7 +825,9 @@ export function captureExternalSkillGitObject(
   const invoke = (args: readonly string[], maxOutputBytes: number): Buffer => {
     requireDeadline();
     const remaining = Math.floor(deadline - now());
-    if (remaining < 1 || invocations >= MAX_GIT_INVOCATIONS) throw new CaptureFailure('capture-limit');
+    if (remaining < MIN_INVOKE_BUDGET_MS || invocations >= MAX_GIT_INVOCATIONS) {
+      throw new CaptureFailure('capture-limit');
+    }
     invocations += 1;
     const executableBefore = lstatSync(gitExecutable, { bigint: true });
     if (!sameExecutableIdentity(executableIdentity, executableBefore)) {

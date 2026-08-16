@@ -95,7 +95,7 @@ import {
   supportsGovernedModelCalls,
 } from './model-call-authority.js';
 import { withToolEnv } from '../env-bridge.js';
-import { buildEngineCommand, engineInstalled, spawnEngine } from './engines.js';
+import { buildEngineCommand, engineInstalled, spawnEngine, DEFAULT_ENGINE_BACKSTOP_MS } from './engines.js';
 import { resolveEngineSpec } from './engine-registry.js';
 import { nullSink } from './streaming.js';
 import type { StreamSink } from './streaming.js';
@@ -1306,6 +1306,46 @@ function generateRunId(): string {
  *  - Never throws — any error returns '' so the run proceeds unchanged.
  *  - Local-only: embeddings via local Ollama only, never cloud.
  */
+/**
+ * M505: Build the anti-playbook block — lessons distilled from judge rejections
+ * by fleet/self-improve.ts.
+ *
+ * `curateAntiPlaybooks` existed with zero call sites, so lessons the fleet wrote
+ * were never read back. This is the read side: it runs in ADDITION to the
+ * playbook/raw-recall block above rather than instead of it, because a lesson
+ * about what previously failed is worth injecting even when a positive playbook
+ * was already synthesized.
+ *
+ * Best-effort and bounded — curateAntiPlaybooks caps output at
+ * ANTI_PLAYBOOK_INJECT_CAP chars and drops entries older than its staleness
+ * window. Never throws; an absent genome or module yields ''.
+ */
+async function buildAntiPlaybookBlock(cfg: AshlrConfig): Promise<string> {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const storeMod = await import('../genome/store.js') as any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const improveMod = await import('../fleet/self-improve.js') as any;
+    if (
+      typeof storeMod.loadGenome !== 'function' ||
+      typeof improveMod.curateAntiPlaybooks !== 'function'
+    ) return '';
+
+    const curated = improveMod.curateAntiPlaybooks(storeMod.loadGenome(cfg));
+    if (!Array.isArray(curated) || curated.length === 0) return '';
+
+    const lines: string[] = ['Lessons from previously rejected work (avoid repeating these):'];
+    for (const entry of curated) {
+      const body = String(entry?.text ?? '').replace(/\s+/g, ' ').trim();
+      if (!body) continue;
+      lines.push(`- ${entry.title ?? 'lesson'}: ${body}`);
+    }
+    return lines.length > 1 ? lines.join('\n') : '';
+  } catch {
+    return '';
+  }
+}
+
 async function buildMemoryBlock(goal: string, cfg: AshlrConfig): Promise<string> {
   try {
     // Dynamic import: tolerates the module being absent (pre-M7 build).
@@ -3084,7 +3124,11 @@ async function runGoalInternal(
 
         // spawnEngine: applies withToolEnv(cfg) + phantom-exec when enabled.
         // M236: now async (streaming spawn + stall monitor).
+        // Explicit timeoutMs so this call site doesn't silently fall back to
+        // spawnEngine's runaway-cost backstop default; matches the
+        // cfg.foundry?.timeoutMs override pattern used by sandboxed-engine.ts.
         const engineResult = await spawnEngine(cmd, cfg, {
+          timeoutMs: cfg.foundry?.timeoutMs ?? DEFAULT_ENGINE_BACKSTOP_MS,
           ...(opts.signal ? { signal: opts.signal } : {}),
         });
 
@@ -3651,6 +3695,17 @@ async function runGoalInternal(
           `[ashlr run] genome: injecting ${memoryContext.length} chars of memory context\n`,
         );
       }
+    }
+
+    // M505: append anti-playbook lessons regardless of which branch above ran.
+    const antiPlaybook = await buildAntiPlaybookBlock(cfg);
+    if (antiPlaybook.length > 0) {
+      memoryContext = memoryContext.length > 0
+        ? `${memoryContext}\n\n${antiPlaybook}`
+        : antiPlaybook;
+      process.stderr.write(
+        `[ashlr run] genome: injecting ${antiPlaybook.length} chars of anti-playbook lessons\n`,
+      );
     }
   }
 

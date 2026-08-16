@@ -221,6 +221,30 @@ async function runAuthorizedFrontierJudge(
       }
     }
 
+    // A judgeFailure verdict (parse or network) is a synthetic fallback, not
+    // a real judgment — record it distinctly (judgeReasonCode
+    // 'judge-parse-failure' / 'judge-network-failure') so it's visible in the
+    // ledger and never conflated with a genuine 'judge-review' outcome.
+    if (verdict?.judgeFailure && authorized()) {
+      try {
+        const failureTs = new Date().toISOString();
+        recordDecision({
+          ts: failureTs,
+          proposalId: proposal.id,
+          ...causalMetadataFromProposal(proposal, {
+            ts: failureTs,
+            learningSource: 'decision-ledger',
+            labelBasis: 'judge-verdict',
+          }),
+          action: 'judged',
+          engine: judgeClient.model,
+          model: judgeClient.model,
+          verdict: verdict.verdict,
+          detail: verdict.judgeFailure === 'parse' ? 'judge-parse-failure' : 'judge-network-failure',
+        });
+      } catch { /* best-effort — never disrupts the pass */ }
+    }
+
     if (authorized()) {
       try {
         await emitJudgeVerdict(
@@ -302,6 +326,15 @@ function runAuthorizedPostJudgePersistence(
     if (!authorized()) return refused();
     const mergeable = verdict?.verdict === 'ship' && verdict.wouldMerge === true;
     if (!mergeable) {
+      // A judgeFailure fallback (parse/network error) is NOT a considered
+      // judgment — it must not teach the anti-playbook, count toward
+      // judgeNonShipCount, or contribute to auto-archive. Doing so would let
+      // pure parser/infra flakiness drain and archive a proposal that a real
+      // judge never actually looked at. Leave the proposal exactly as-is so
+      // the next pass gets a genuine judge attempt.
+      if (verdict?.judgeFailure) {
+        return { entered: true, persisted: true, authorityLive: authorized(), archived: false };
+      }
       try {
         learnFromRejection(
           proposal.id,

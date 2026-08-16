@@ -177,16 +177,28 @@ function sanitizeDecisionEntry(entry: DecisionEntry, remintSemanticOccurrence = 
     ...(optionalScrubbedText(entry.engine) !== undefined ? { engine: optionalScrubbedText(entry.engine) } : {}),
     ...(optionalScrubbedText(entry.model) !== undefined ? { model: optionalScrubbedText(entry.model) } : {}),
     ...(optionalScrubbedText(verdict) !== undefined ? { verdict: optionalScrubbedText(verdict) } : {}),
-    ...(judged ? {
-      judgeDecisionMetadataVersion: remintSemanticOccurrence || entry.judgeDecisionMetadataVersion === 2
-        ? 2 as const
-        : 1 as const,
-      judgeReasonCode: judgeDecisionReasonCode(verdict, detail === 'would-merge'),
-      judgeRationaleState: remintSemanticOccurrence || entry.judgeDecisionMetadataVersion === 2
-        ? 'not-persisted' as const
-        : 'legacy-redacted' as const,
-      ...(detail === 'would-merge' ? { detail: 'would-merge' } : {}),
-    } : {
+    ...(judged ? (() => {
+      // A judge-parse-failure / judge-network-failure detail sentinel marks a
+      // synthetic fallback verdict (judgeProposal() never got a real verdict
+      // from the model). It must produce a distinct judgeReasonCode — never
+      // the same 'judge-review' code a genuine considered review gets — so
+      // operators and downstream learning (self-improve, auto-archive) can
+      // tell a parser/infra failure apart from an actual judgment instead of
+      // it silently masquerading as one.
+      const failureKind: 'parse' | 'network' | undefined =
+        detail === 'judge-parse-failure' ? 'parse' :
+        detail === 'judge-network-failure' ? 'network' : undefined;
+      return {
+        judgeDecisionMetadataVersion: remintSemanticOccurrence || entry.judgeDecisionMetadataVersion === 2
+          ? 2 as const
+          : 1 as const,
+        judgeReasonCode: judgeDecisionReasonCode(verdict, detail === 'would-merge', failureKind),
+        judgeRationaleState: remintSemanticOccurrence || entry.judgeDecisionMetadataVersion === 2
+          ? 'not-persisted' as const
+          : 'legacy-redacted' as const,
+        ...(detail === 'would-merge' || failureKind ? { detail } : {}),
+      };
+    })() : {
       ...(optionalScrubbedText(entry.reason) !== undefined ? { reason: optionalScrubbedText(entry.reason) } : {}),
       ...(optionalScrubbedText(detail) !== undefined ? { detail: optionalScrubbedText(detail) } : {}),
     }),
@@ -544,15 +556,28 @@ export function readDecisionsDetailed(opts: ReadDecisionsOptions = {}): Decision
                 continue;
               }
               if (judged && judgeMetadataVersion === 2) {
+                // 'judge-parse-failure' / 'judge-network-failure' are the same
+                // kind of finite, non-secret detail sentinel as 'would-merge'
+                // — they mark a synthetic fallback verdict (see manager.ts
+                // judgeProposal) rather than a real judgment. Mirror the
+                // write-time allowlist in sanitizeDecisionEntry exactly, or a
+                // legitimately-written row gets misclassified as tampered
+                // and silently dropped here.
+                const readFailureKind: 'parse' | 'network' | undefined =
+                  obj['detail'] === 'judge-parse-failure' ? 'parse' :
+                  obj['detail'] === 'judge-network-failure' ? 'network' : undefined;
+                const allowedDetail = obj['detail'] === undefined ||
+                  obj['detail'] === 'would-merge' ||
+                  readFailureKind !== undefined;
                 const expectedCode = judgeDecisionReasonCode(
-                  obj['verdict'], obj['detail'] === 'would-merge',
+                  obj['verdict'], obj['detail'] === 'would-merge', readFailureKind,
                 );
                 if (
                   !isJudgeDecisionVerdict(obj['verdict']) ||
                   obj['judgeRationaleState'] !== 'not-persisted' ||
                   !isJudgeDecisionReasonCode(obj['judgeReasonCode']) ||
                   obj['judgeReasonCode'] !== expectedCode ||
-                  (obj['detail'] !== undefined && obj['detail'] !== 'would-merge') ||
+                  !allowedDetail ||
                   Object.hasOwn(obj, 'reason') ||
                   Object.hasOwn(obj, 'rationale') ||
                   Object.hasOwn(obj, 'fullReasoning') ||

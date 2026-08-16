@@ -21,6 +21,8 @@ const GUIDANCE_SENTINEL =
   'If on inspection this is NOT actionable as a code change';
 const FOCUSED_SENTINEL = 'Make the smallest focused change';
 const NOOP_SENTINEL = 'make NO changes and stop';
+const NO_WHOLESALE_REWRITE_SENTINEL = 'Do not delete, regenerate, or wholesale-rewrite a file';
+const NO_PARTIAL_FILING_SENTINEL = 'produce NO diff and stop';
 
 // ---------------------------------------------------------------------------
 // Factory helpers
@@ -65,6 +67,29 @@ describe('buildItemGoal', () => {
     it('contains the "make NO changes and stop" escape hatch', () => {
       const goal = buildItemGoal(makeItem({}));
       expect(goal).toContain(NOOP_SENTINEL);
+    });
+  });
+
+  // M507: completion contract — added after real inbox data showed engines
+  // repeatedly (a) wholesale-rewriting files (e.g. deleting all of package.json
+  // to bump one version, judged 'harmful' every time) and (b) filing
+  // '[partial]' diffs that fail verification after burning the whole budget.
+  describe('completion contract (M507)', () => {
+    it('warns against wholesale file rewrites for narrow tasks', () => {
+      const goal = buildItemGoal(makeItem({}));
+      expect(goal).toContain(NO_WHOLESALE_REWRITE_SENTINEL);
+    });
+
+    it('instructs the engine to produce no diff rather than file a partial/unverified one', () => {
+      const goal = buildItemGoal(makeItem({}));
+      expect(goal).toContain(NO_PARTIAL_FILING_SENTINEL);
+    });
+
+    it('mentions tests, typecheck, and lint as the verification bar', () => {
+      const goal = buildItemGoal(makeItem({}));
+      expect(goal).toContain('tests');
+      expect(goal).toContain('typecheck');
+      expect(goal).toContain('lint');
     });
   });
 
