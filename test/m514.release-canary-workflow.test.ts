@@ -99,6 +99,7 @@ describe('release workflow signed canary gate', () => {
       .toBe('node "$ASHLR_RELEASE_NPM_CLI" ci --ignore-scripts --no-audit --no-fund');
 
     const run = String(step('Run and verify bounded NO_AUTHORITY receipt')?.run ?? '');
+    expect(run).toContain('umask 077');
     expect(run).toContain('env -i');
     expect(run).toContain('node "$ASHLR_RELEASE_NPM_CLI" --silent run release:canary');
     expect(run).toContain('--candidate "$GITHUB_SHA"');

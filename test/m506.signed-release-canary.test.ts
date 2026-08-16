@@ -21,10 +21,12 @@ import {
   createSignedObservationReceipt,
   NO_AUTHORITY,
   parseCanaryArgs,
+  releaseArchiveArguments,
   SIGNED_RELEASE_CANARY_ENVELOPE_LIFETIME_MS,
   SIGNED_RELEASE_CANARY_KEY_LIFETIME_MS,
   SIGNED_RELEASE_CANARY_RECEIPT_SIGNATURE_DOMAIN,
   verifySelfAuthenticatedCanaryReceipt,
+  withReleasePipelineUmask,
 } from '../scripts/run-signed-release-canary.mjs';
 import {
   verifyReleaseCanaryReceiptBundle,
@@ -188,6 +190,66 @@ afterEach(() => {
 });
 
 describe('signed release canary command', () => {
+  it('binds immutable archive headers to npm-portable source modes', () => {
+    expect(releaseArchiveArguments('/private/source.tar', CANDIDATE_REVISION)).toEqual([
+      '-c',
+      'tar.umask=0022',
+      'archive',
+      '--format=tar',
+      '--output=/private/source.tar',
+      CANDIDATE_REVISION,
+    ]);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'normalizes a restrictive caller umask for the private release pipeline and always restores it',
+    () => {
+      const program = `
+        import { statSync, writeFileSync } from 'node:fs';
+        import { withReleasePipelineUmask } from ${JSON.stringify(
+          new URL('../scripts/run-signed-release-canary.mjs', import.meta.url).href,
+        )};
+        const target = process.argv[1];
+        process.umask(0o077);
+        const observedInside = await withReleasePipelineUmask(async () => {
+          await Promise.resolve();
+          writeFileSync(target, 'fixture');
+          return process.umask();
+        });
+        let restoredAfterSuccess = process.umask();
+        try {
+          await withReleasePipelineUmask(async () => {
+            await Promise.resolve();
+            throw new Error('fixture failure');
+          });
+        } catch {}
+        const restoredAfterFailure = process.umask();
+        process.stdout.write(JSON.stringify({
+          mode: statSync(target).mode & 0o777,
+          rootMode: statSync(process.argv[2]).mode & 0o777,
+          observedInside,
+          restoredAfterSuccess,
+          restoredAfterFailure,
+        }));
+      `;
+      const root = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-canary-umask-test-')));
+      tempDirs.push(root);
+      const result = spawnSync(
+        process.execPath,
+        ['--input-type=module', '--eval', program, join(root, 'file'), root],
+        { encoding: 'utf8' },
+      );
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({
+        mode: 0o644,
+        rootMode: 0o700,
+        observedInside: 0o022,
+        restoredAfterSuccess: 0o077,
+        restoredAfterFailure: 0o077,
+      });
+    },
+  );
+
   it('rejects ambiguous revisions and mutation-shaped arguments', () => {
     expect(parseCanaryArgs([
       '--candidate', CANDIDATE_REVISION,

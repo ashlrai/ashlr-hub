@@ -345,9 +345,23 @@ function resolveRevision(repoRoot, ref, environment) {
   return result;
 }
 
+export async function withReleasePipelineUmask(runPipeline) {
+  if (typeof runPipeline !== 'function') fail('release pipeline is required');
+  const priorUmask = process.umask(0o022);
+  try {
+    return await runPipeline();
+  } finally {
+    process.umask(priorUmask);
+  }
+}
+
+export function releaseArchiveArguments(archive, revision) {
+  return ['-c', 'tar.umask=0022', 'archive', '--format=tar', `--output=${archive}`, revision];
+}
+
 function extractRevision(repoRoot, revision, sourceRoot, tempRoot, environment, tarBinary) {
   const archive = join(tempRoot, `${revision}-${sha256(sourceRoot).slice(0, 16)}.tar`);
-  run('git', ['archive', '--format=tar', `--output=${archive}`, revision], {
+  run('git', releaseArchiveArguments(archive, revision), {
     cwd: repoRoot,
     env: environment,
     label: 'archive immutable release source',
@@ -963,33 +977,38 @@ export async function runSignedReleaseCanary(options, baseEnv = process.env) {
   chmodSync(tempRoot, 0o700);
   let receipt;
   try {
-    let rollback = null;
-    if (rollbackRevision !== null) {
-      rollback = await prepareRelease({
+    // The caller deliberately uses a private umask. Keep the root private, but
+    // normalize the complete archive/install/build/pack pipeline so tar, npm,
+    // and generated build output retain canonical 0644/0755 package modes.
+    receipt = await withReleasePipelineUmask(async () => {
+      let rollback = null;
+      if (rollbackRevision !== null) {
+        rollback = await prepareRelease({
+          baseEnv,
+          npmCli,
+          repoRoot,
+          revision: rollbackRevision,
+          role: 'rollback',
+          rollbackTargetDigest: null,
+          tarBinary,
+          tempRoot,
+        });
+        rollback.revision = rollbackRevision;
+      }
+      const candidate = await prepareRelease({
         baseEnv,
         npmCli,
         repoRoot,
-        revision: rollbackRevision,
-        role: 'rollback',
-        rollbackTargetDigest: null,
+        revision: candidateRevision,
+        role: 'candidate',
+        rollbackTargetDigest: rollback?.primary.manifestDigest ?? null,
         tarBinary,
         tempRoot,
       });
-      rollback.revision = rollbackRevision;
-    }
-    const candidate = await prepareRelease({
-      baseEnv,
-      npmCli,
-      repoRoot,
-      revision: candidateRevision,
-      role: 'candidate',
-      rollbackTargetDigest: rollback?.primary.manifestDigest ?? null,
-      tarBinary,
-      tempRoot,
+      candidate.revision = candidateRevision;
+      const api = await loadEvidenceApi(candidate.primary.apiRoot);
+      return createSignedObservationReceipt({ candidate, rollback }, api);
     });
-    candidate.revision = candidateRevision;
-    const api = await loadEvidenceApi(candidate.primary.apiRoot);
-    receipt = createSignedObservationReceipt({ candidate, rollback }, api);
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }
