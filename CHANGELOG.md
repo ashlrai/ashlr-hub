@@ -11,6 +11,31 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+## [3.2.1] — 2026-08-15 — Verified candidate release recovery
+
+- For candidate evaluators upgrading from public npm `latest` 3.0.1, this is
+  the first package containing the unreleased 3.1.0 and 3.2.0 series. Their
+  detailed notes remain in this repository's 3.1.0 and 3.2.0 changelog sections.
+- Supersedes the unpublished `v3.2.0` release attempt, carries forward the 3.2.0
+  release notes, and packages the protected-master changes that landed after
+  that tag was prepared.
+- Adds fail-closed daemon-state quarantine and recovery, stronger Locus fleet
+  enrollment/session evidence, authenticated dashboard health boundaries, and
+  bounded dispatch-production diagnostics.
+- Adds preventive model-call token reservations, verified protected-PR handoff,
+  signed no-authority release canaries, candidate-only trusted publication, and
+  dormant native activation/handoff proofs. Resident activation, automatic
+  production effects, and npm `latest` promotion remain unavailable.
+- Updates dependency integrity enforcement and keeps the vulnerable Linux
+  desktop release surface quarantined; the supported npm CLI and web surfaces
+  remain cross-platform.
+- Normalizes the pinned npm 11.19.0 toolchain used by the signed release canary
+  and immutable candidate preparation so its runtime closure remains strictly
+  symlink-free without weakening the dependency-inventory verifier.
+- The protected `v3.2.0` tag remains immutable at its original commit. That run
+  stopped at the signed no-authority canary before preparation, npm publication,
+  or GitHub Release creation; no 3.2.0 package was published.
+
 ## [3.2.0] — 2026-08-09 — Mission OS and bounded agent efficiency
 
 - **Best-of-N fan-out containment.** Configured and direct best-of-N candidate
