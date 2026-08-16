@@ -252,6 +252,14 @@ export interface DaemonActivationPermitVerification {
   reason: string;
   permitId?: string;
   payloadDigest?: string;
+  /**
+   * Populated only when reason === 'permit-runtime-binding-mismatch': the
+   * top-level binding field names (of DaemonActivationPermitPayload.bindings)
+   * whose signed value differs from the current runtime value. A fail-closed
+   * gate that can't say WHICH binding differed is very hard to operate — this
+   * turns the single opaque reason code into an actionable diagnostic.
+   */
+  mismatchedBindings?: readonly string[];
 }
 
 export interface DaemonActivationPermitTestConsumerOptions {
@@ -504,6 +512,17 @@ function equalCanonical(left: unknown, right: unknown): boolean {
   return canonicalizeDaemonActivationValue(left) === canonicalizeDaemonActivationValue(right);
 }
 
+type BindingKey = keyof DaemonActivationPermitPayload['bindings'];
+
+/** Which top-level binding fields differ, field by field — never a single opaque yes/no. */
+function bindingFieldMismatches(
+  actual: DaemonActivationPermitPayload['bindings'],
+  expected: DaemonActivationPermitPayload['bindings'],
+): BindingKey[] {
+  const keys = Object.keys(expected) as BindingKey[];
+  return keys.filter((key) => !equalCanonical(actual[key], expected[key]));
+}
+
 export function verifyDaemonActivationPermit(
   value: unknown,
   context: DaemonActivationRuntimeContext,
@@ -552,7 +571,11 @@ export function verifyDaemonActivationPermit(
     guardHealth: 'healthy',
   };
   if (!equalCanonical(envelope.payload.bindings, expectedBindings)) {
-    return { ok: false, reason: 'permit-runtime-binding-mismatch' };
+    return {
+      ok: false,
+      reason: 'permit-runtime-binding-mismatch',
+      mismatchedBindings: bindingFieldMismatches(envelope.payload.bindings, expectedBindings),
+    };
   }
 
   const publicKey = trusted.get(envelope.payload.keyId);
@@ -862,7 +885,26 @@ export function daemonActivationReleaseTreeBinding(
   return hashStableReleaseTree(entrypointPath);
 }
 
-function currentAuthorityStateDigest(): string {
+/**
+ * Fingerprints "this authority store instance" — the ~/.ashlr directory a
+ * permit is bound to — so a permit can't be replayed against a different
+ * store (e.g. copied to another machine, or after a full delete+recreate).
+ *
+ * Deliberately uses dev+ino, NOT mtime. ~/.ashlr's own mtime changes every
+ * time a direct child is created or removed — and ordinary `daemon start`
+ * does exactly that before it ever reaches this check: acquireDaemonLock()
+ * (src/core/daemon/state.ts) creates ~/.ashlr/daemon.lock via
+ * `writeFileSync(..., {flag:'wx'})`, a brand-new direct child of ~/.ashlr.
+ * Binding to mtime meant every freshly minted permit was invalidated by the
+ * daemon's own startup lock-file creation, 100% reproducibly, before it
+ * could ever be consumed — a self-inflicted permit-runtime-binding-mismatch,
+ * not a real "different store" signal. dev+ino uniquely and STABLY identify
+ * the directory's inode: they survive ordinary child churn (locks, control
+ * files, receipts) and change only if ~/.ashlr is deleted and recreated (or
+ * moved to a different filesystem) — exactly the case this binding exists
+ * to catch.
+ */
+export function daemonActivationAuthorityStateDigest(): string {
   const home = realpathSync(resolve(homedir()));
   const ashlrHome = realpathSync(join(home, '.ashlr'));
   const state = lstatSync(ashlrHome, { bigint: true });
@@ -881,7 +923,6 @@ function currentAuthorityStateDigest(): string {
       path: ashlrHome,
       dev: state.dev.toString(),
       ino: state.ino.toString(),
-      mtimeNs: state.mtimeNs.toString(),
     },
     enrollment: [...enrollment.repos].sort(),
   }));
@@ -898,7 +939,7 @@ function collectRuntimeContext(cfg: AshlrConfig): DaemonActivationRuntimeContext
     executable: hashStableFile(process.execPath),
     entrypoint: hashStableFile(entrypoint),
     releaseTree: daemonActivationReleaseTreeBinding(entrypoint),
-    authorityStateDigest: currentAuthorityStateDigest(),
+    authorityStateDigest: daemonActivationAuthorityStateDigest(),
     killSwitchOff: !killSwitchOn(),
     guardHealthHealthy: !guard.blocked,
   };
@@ -1683,6 +1724,85 @@ function requestedActivationShape(opts: DaemonActivationOptions): 'once' | 'resi
 
 function needsPermit(opts: DaemonActivationOptions): boolean {
   return !(opts.once === true && opts.dryRun === true);
+}
+
+export interface DaemonActivationPendingPermitBindingDiagnosis {
+  ok: boolean;
+  reason: string;
+  /** Field name -> {signed at mint time, computed right now}. Only present for mismatched fields. */
+  mismatches?: Record<string, { signed: unknown; current: unknown }>;
+}
+
+/**
+ * Read-only diagnostic (never authorizes, never consumes) for `ashlr
+ * activation status`: peeks the pending one-shot permit, recomputes the
+ * current runtime context, and reports exactly which binding field(s)
+ * differ and what the two values were. `permit-runtime-binding-mismatch`
+ * alone can't tell an operator what to fix — this can.
+ */
+export function daemonActivationDiagnosePendingPermitBindings(
+  cfg: AshlrConfig,
+): DaemonActivationPendingPermitBindingDiagnosis {
+  const permitPath = daemonActivationPermitPath();
+  if (process.platform === 'win32') {
+    return { ok: false, reason: 'activation-permit-v1-unsupported-on-windows' };
+  }
+  let pinned: PinnedPermitFile;
+  try {
+    pinned = openPinnedPermit(permitPath, resolve(homedir()));
+  } catch (error) {
+    return {
+      ok: false,
+      reason: (error as NodeJS.ErrnoException).code === 'ENOENT'
+        ? 'activation-permit-missing'
+        : 'activation-permit-inspection-failed',
+    };
+  }
+  try {
+    let envelope: unknown;
+    try {
+      envelope = JSON.parse(pinned.text) as unknown;
+    } catch {
+      return { ok: false, reason: 'invalid-permit-json' };
+    }
+    const parsed = parseEnvelope(envelope);
+    if (!parsed) return { ok: false, reason: 'invalid-permit-schema' };
+
+    let configSnapshot: AshlrConfig;
+    try {
+      configSnapshot = strictConfigSnapshot(cfg);
+    } catch {
+      return { ok: false, reason: 'activation-config-not-strict-json' };
+    }
+    let context: DaemonActivationRuntimeContext;
+    try {
+      context = collectRuntimeContext(configSnapshot);
+    } catch (error) {
+      return { ok: false, reason: `runtime-context-unavailable:${(error as Error).message}` };
+    }
+    if (!context.killSwitchOff) return { ok: false, reason: 'kill-switch-is-on' };
+    if (!context.guardHealthHealthy) return { ok: false, reason: 'guard-health-degraded' };
+
+    const expectedBindings: DaemonActivationPermitPayload['bindings'] = {
+      configDigest: context.configDigest,
+      buildIdentity: context.buildIdentity,
+      executable: context.executable,
+      entrypoint: context.entrypoint,
+      releaseTree: context.releaseTree,
+      authorityStateDigest: context.authorityStateDigest,
+      killSwitch: 'off',
+      guardHealth: 'healthy',
+    };
+    const mismatchedKeys = bindingFieldMismatches(parsed.payload.bindings, expectedBindings);
+    if (mismatchedKeys.length === 0) return { ok: true, reason: 'bindings-match' };
+    const mismatches: Record<string, { signed: unknown; current: unknown }> = {};
+    for (const key of mismatchedKeys) {
+      mismatches[key] = { signed: parsed.payload.bindings[key], current: expectedBindings[key] };
+    }
+    return { ok: false, reason: 'permit-runtime-binding-mismatch', mismatches };
+  } finally {
+    try { closeSync(pinned.fd); } catch { /* diagnostic-only; best-effort close */ }
+  }
 }
 
 function inspectPinnedActivationPermit(

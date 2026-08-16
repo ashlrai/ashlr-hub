@@ -1,0 +1,72 @@
+.strip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--status-running-solid);
+  border-radius: var(--radius-md);
+  background: var(--status-running-bg);
+}
+
+.label {
+  flex: 0 0 auto;
+  font-size: var(--text-xs-size);
+  font-weight: var(--font-weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--status-running-fg);
+}
+
+.list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.watchBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-full);
+  border: 1px solid var(--status-running-solid);
+  background: var(--bg-surface);
+  color: var(--status-running-fg);
+  font-size: var(--text-xs-size);
+  cursor: pointer;
+}
+
+.watchBtn:hover {
+  background: var(--bg-hover);
+}
+
+.pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--status-running-solid);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse {
+    animation: none;
+  }
+}
+
+.dialogWidth {
+  width: min(680px, calc(100vw - var(--space-8)));
+}

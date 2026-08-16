@@ -20,22 +20,25 @@
  * changes here once the legacy app is retired and server.ts gains a real
  * SPA catch-all.
  */
-import { Navigate, Route, Routes, useParams } from 'react-router-dom';
+import { Navigate, Route, Routes } from 'react-router-dom';
 import { Shell } from '../components/layout/Shell.js';
 import { PlaceholderView } from '../routes/PlaceholderView.js';
 import { FleetDashboardView } from '../routes/fleet-dashboard/FleetDashboardView.js';
+import { JournalView } from '../routes/journal/JournalView.js';
+import { PulseView } from '../routes/intelligence/pulse/PulseView.js';
+import { GenomeView } from '../routes/intelligence/genome/GenomeView.js';
+import { ProductionView } from '../routes/intelligence/production/ProductionView.js';
+import { PortfolioView } from '../routes/portfolio/PortfolioView.js';
+import { RunsView } from '../routes/work/runs/RunsView.js';
+import { RunDetailView } from '../routes/work/runs/RunDetailView.js';
+import { SwarmsView } from '../routes/work/swarms/SwarmsView.js';
+import { SwarmDetailView } from '../routes/work/swarms/SwarmDetailView.js';
+import { DaemonView } from '../routes/control/daemon/DaemonView.js';
+import { FleetView } from '../routes/control/fleet/FleetView.js';
+import { SecurityView } from '../routes/control/security/SecurityView.js';
+import { GoalsView } from '../routes/goals/GoalsView.js';
+import { InboxView } from '../routes/inbox/InboxView.js';
 import { NAV_GROUPS, ALL_NAV_LEAVES } from './nav-config.js';
-
-function ResourceDetailPlaceholder({ kind }: { kind: string }) {
-  const params = useParams();
-  const id = Object.values(params)[0] ?? '(unknown)';
-  return (
-    <PlaceholderView
-      title={`${kind} ${id}`}
-      description={`Deep link resolved correctly for ${kind.toLowerCase()} id "${id}". The detail view itself isn't built yet.`}
-    />
-  );
-}
 
 export function AppRoutes() {
   return (
@@ -52,8 +55,21 @@ export function AppRoutes() {
           ),
         )}
         <Route path="/overview" element={<FleetDashboardView />} />
-        <Route path="/work/runs/:id" element={<ResourceDetailPlaceholder kind="Run" />} />
-        <Route path="/work/swarms/:id" element={<ResourceDetailPlaceholder kind="Swarm" />} />
+        <Route path="/journal" element={<JournalView />} />
+        <Route path="/intelligence/pulse" element={<PulseView />} />
+        <Route path="/intelligence/genome" element={<GenomeView />} />
+        <Route path="/intelligence/production" element={<ProductionView />} />
+        <Route path="/portfolio" element={<PortfolioView />} />
+        <Route path="/work/runs" element={<RunsView />} />
+        <Route path="/work/runs/:id" element={<RunDetailView />} />
+        <Route path="/work/swarms" element={<SwarmsView />} />
+        <Route path="/work/swarms/:id" element={<SwarmDetailView />} />
+        <Route path="/control/daemon" element={<DaemonView />} />
+        <Route path="/control/fleet" element={<FleetView />} />
+        <Route path="/control/security" element={<SecurityView />} />
+        <Route path="/goals" element={<GoalsView />} />
+        <Route path="/inbox" element={<InboxView />} />
+        <Route path="/inbox/:id" element={<InboxView />} />
         <Route path="*" element={<Navigate to="/overview" replace />} />
       </Route>
     </Routes>

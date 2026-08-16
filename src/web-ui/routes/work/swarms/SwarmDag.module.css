@@ -1,0 +1,110 @@
+.svg {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+.phaseLabel {
+  font-size: 10px;
+  fill: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.edge {
+  stroke: var(--border-subtle);
+  stroke-width: 1.5;
+}
+
+.arrowHead {
+  fill: var(--border-subtle);
+}
+
+.nodeLink {
+  cursor: pointer;
+}
+.nodeLink:focus-visible .nodeRect {
+  outline: 2px solid var(--accent-600);
+  outline-offset: 2px;
+}
+
+.nodeId {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  fill: var(--text-primary);
+}
+
+.nodeGoal {
+  font-size: 10px;
+  fill: var(--text-secondary);
+}
+
+/* Tone classes — mirror StatusBadge's tone -> token mapping exactly (same
+   --status-*-solid / --status-*-bg vars) so a DAG node and a StatusBadge for
+   the same status string are always the same color. */
+.neutral .nodeRect {
+  stroke: var(--status-neutral-solid);
+  fill: var(--status-neutral-bg);
+}
+.neutral .statusDot {
+  fill: var(--status-neutral-solid);
+}
+
+.info .nodeRect {
+  stroke: var(--status-info-solid);
+  fill: var(--status-info-bg);
+}
+.info .statusDot {
+  fill: var(--status-info-solid);
+}
+
+.running .nodeRect {
+  stroke: var(--status-running-solid);
+  fill: var(--status-running-bg);
+}
+.running .statusDot {
+  fill: var(--status-running-solid);
+}
+
+.success .nodeRect {
+  stroke: var(--status-success-solid);
+  fill: var(--status-success-bg);
+}
+.success .statusDot {
+  fill: var(--status-success-solid);
+}
+
+.warning .nodeRect {
+  stroke: var(--status-warning-solid);
+  fill: var(--status-warning-bg);
+}
+.warning .statusDot {
+  fill: var(--status-warning-solid);
+}
+
+.danger .nodeRect {
+  stroke: var(--status-danger-solid);
+  fill: var(--status-danger-bg);
+}
+.danger .statusDot {
+  fill: var(--status-danger-solid);
+}
+
+.unknown .nodeRect {
+  stroke: var(--status-unknown-solid);
+  fill: var(--status-unknown-bg);
+}
+.unknown .statusDot {
+  fill: var(--status-unknown-solid);
+}
+
+.nodeRect {
+  stroke-width: 1.5;
+}
+
+.empty {
+  color: var(--text-tertiary);
+  font-size: var(--text-sm-size);
+  text-align: center;
+  padding: var(--space-6) 0;
+}

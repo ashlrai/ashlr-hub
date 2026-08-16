@@ -36,6 +36,7 @@ import {
   DEFAULT_STANDING_GRANT_VALIDITY_MS,
   EMPTY_DAEMON_ACTIVATION_SCOPE,
   MAX_STANDING_GRANT_VALIDITY_MS,
+  daemonActivationDiagnosePendingPermitBindings,
   daemonActivationDirPath,
   daemonActivationGrantStatus,
   daemonActivationInit,
@@ -213,6 +214,11 @@ async function cmdActivationStatus(args: string[]): Promise<number> {
   }
   const onceReadiness = cfg ? inspectDaemonActivationPermit(cfg, { once: true, dryRun: false }) : null;
   const residentReadiness = cfg ? inspectDaemonActivationPermit(cfg, { once: false, dryRun: false }) : null;
+  const bindingMismatch = onceReadiness?.reason === 'permit-runtime-binding-mismatch'
+    || residentReadiness?.reason === 'permit-runtime-binding-mismatch';
+  const bindingDiagnosis = cfg && bindingMismatch
+    ? daemonActivationDiagnosePendingPermitBindings(cfg)
+    : null;
 
   const nowMs = Date.now();
   const grantSummaries = grants.ok
@@ -242,6 +248,7 @@ async function cmdActivationStatus(args: string[]): Promise<number> {
       pendingOneShotPermitPath: daemonActivationPermitPath(),
       onceEligibility: onceReadiness,
       residentEligibility: residentReadiness,
+      bindingMismatchDiagnosis: bindingDiagnosis,
     }, null, 2));
     return 0;
   }
@@ -289,8 +296,30 @@ async function cmdActivationStatus(args: string[]): Promise<number> {
   if (residentReadiness) {
     console.log(`    resident:     ${residentReadiness.state === 'ready' ? col.green('ready') : col.dim(residentReadiness.state)}  (${residentReadiness.reason})`);
   }
+  if (bindingDiagnosis) {
+    console.log('');
+    if (bindingDiagnosis.ok || !bindingDiagnosis.mismatches) {
+      console.log(col.dim(`    binding diagnosis: ${bindingDiagnosis.reason}`));
+    } else {
+      console.log(col.yellow('    binding mismatch — field(s) that differ between the signed permit and right now:'));
+      for (const [field, { signed, current }] of Object.entries(bindingDiagnosis.mismatches)) {
+        console.log(`      ${col.bold(field)}:`);
+        console.log(`        signed:  ${formatBindingValue(signed)}`);
+        console.log(`        current: ${formatBindingValue(current)}`);
+      }
+    }
+  }
   console.log('');
   return 0;
+}
+
+function formatBindingValue(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if ('sha256' in (value as Record<string, unknown>)) {
+    const binding = value as { path: string; sha256: string };
+    return `${binding.path}  sha256:${binding.sha256}`;
+  }
+  return JSON.stringify(value);
 }
 
 // ---------------------------------------------------------------------------

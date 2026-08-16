@@ -1,0 +1,60 @@
+/**
+ * components/charts/chart-tokens.css — chart-only aliases over the existing
+ * design tokens (design/tokens.css, off-limits to this work — read, never
+ * edited). Every value below is `var(--existing-token)`, never a hardcoded
+ * hex: light/dark theming is inherited automatically from tokens.css and can
+ * never drift out of sync with the rest of the app.
+ *
+ * Categorical order (identity — fixed, never cycled, never reassigned by
+ * rank; see dataviz skill's color-formula.md) was chosen by running the
+ * skill's `validate_palette.js` six-checks validator against every ordering
+ * of the app's existing categorical-ish hues: `--phase-1..6` (already
+ * documented in DESIGN.md as "categorical, distinct from status colors")
+ * plus `--status-success-solid` / `--status-danger-solid`. `--phase-6`
+ * (slate/gray, chroma ~0.04) was dropped from the identity rotation — it
+ * already reads as gray in this design system, which is exactly the right
+ * color for the "Other"/overflow bucket, not a 7th identity.
+ *
+ * Result of the search (scripts/find_palette_order in scratch, not
+ * committed): order [violet, green, pink, teal, red, blue, orange] clears
+ * the normal-vision floor comfortably (worst adjacent ΔE 32.2 light / 31.2
+ * dark, target 15) in both modes. It does NOT clear the CVD (protan/deutan)
+ * adjacent floor (worst ΔE 3.7 light / 5.0 dark, target 6-8) — these are the
+ * product's actual existing tokens, tuned for UI legibility rather than a
+ * CVD-optimized chart ramp, and no reordering of them can fix a per-hue
+ * chroma/CVD property. Per the skill's own rule, a sub-floor CVD result is
+ * legal ONLY with mandatory secondary encoding — every chart built on these
+ * tokens (Legend.tsx, BarChart/LineChart) always ships direct/legend labels
+ * and a table-view twin, never color alone, specifically because of this
+ * gap. If a dedicated CVD-safe chart ramp is ever added to tokens.css, swap
+ * the aliases below — nothing else in components/charts/ hardcodes a hue.
+ */
+:root {
+  --chart-series-1: var(--phase-2); /* violet */
+  --chart-series-2: var(--status-success-solid); /* green */
+  --chart-series-3: var(--phase-3); /* pink */
+  --chart-series-4: var(--phase-5); /* teal */
+  --chart-series-5: var(--status-danger-solid); /* red */
+  --chart-series-6: var(--phase-1); /* blue */
+  --chart-series-7: var(--phase-4); /* orange */
+
+  /* Overflow "Other" bucket — never part of the identity rotation above. */
+  --chart-neutral: var(--status-neutral-solid);
+
+  /* Sequential (magnitude): one hue, reusing the app's existing accent ramp. */
+  --chart-sequential: var(--accent-500);
+  --chart-sequential-soft: var(--accent-300);
+
+  /* Diverging pair: warm/cool poles + neutral gray midpoint, from existing
+     tokens (accent reads "up/normal", danger reads "down/bad"). */
+  --chart-diverging-pos: var(--accent-500);
+  --chart-diverging-neg: var(--status-danger-solid);
+  --chart-diverging-mid: var(--border-strong);
+
+  /* Chart chrome — hairline grid/axis, one step off the surface. */
+  --chart-grid: var(--border-subtle);
+  --chart-axis: var(--border-strong);
+  --chart-surface: var(--bg-surface);
+  --chart-tooltip-bg: var(--bg-surface-raised);
+  --chart-tooltip-border: var(--border-default);
+}

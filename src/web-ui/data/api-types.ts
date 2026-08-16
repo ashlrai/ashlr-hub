@@ -20,10 +20,79 @@ export type {
   DashboardSnapshot,
   ProductionSummary,
   IntelligenceSummary,
+  RunState,
+  RunTask,
+  RunStep,
+  SwarmRun,
+  SwarmPlan,
+  SwarmTaskRun,
+  SwarmTaskSpec,
+  ActivityRollup,
+  ProjectActivity,
+  DailyUsage,
+  ModelUsage,
+  BudgetAlert,
+  GenomeEntry,
+  RecallHit,
+  PortfolioSummary,
+  PortfolioHealthSummary,
+  PortfolioGoalInFlight,
+  PortfolioBacklogItem,
+  PortfolioCost,
+  PortfolioEffectiveness,
+  PortfolioTodayDelta,
 } from '../../core/types.js';
 
-export type { ControlSnapshot } from '../../core/web/control.js';
+/**
+ * M335: per-model economics behind /api/models (GET returns
+ * `{ window, models, bestOfNSource }`, i.e. ModelStatsReadResult plus the
+ * echoed window). `bestOfNSource` is a real `{sourceState, complete, ...}`
+ * shape — structurally compatible with SourceQuality below — so best-of-N
+ * win-rate figures should be wrapped in <Epistemic quality={bestOfNSource}/>
+ * when it isn't 'healthy'+complete.
+ */
+export type { ModelStats, ModelStatsReadResult, ModelStatsSourceQuality } from '../../core/fleet/model-stats.js';
+
+export type {
+  ControlSnapshot,
+  ControlDaemon,
+  ControlSecurity,
+  ControlSecurityFinding,
+  ControlLogEntry,
+  FleetActivitySnapshot,
+  FleetMergeEvent,
+  FleetTickEntry,
+} from '../../core/web/control.js';
 export type { VisibilitySnapshot } from '../../core/web/visibility.js';
+/**
+ * Proposal + decisions-ledger types for the inbox (proposal review) view.
+ * `DecisionEntry`/`JudgeDecisionReasonCode` back the evidence panel — a
+ * judge-parse-failure/judge-network-failure reason code is an infra
+ * failure, NOT a considered judgment, and must render distinctly from a
+ * real `judge-review` verdict (see routes/inbox/).
+ */
+export type {
+  Proposal,
+  ProposalStatus,
+  ProposalKind,
+  ProposalVerifyResult,
+  DecisionEntry,
+  JudgeDecisionReasonCode,
+} from '../../core/types.js';
+export type { PublicDaemonObservation, DaemonSourceQuality } from '../../core/daemon/public-observation.js';
+
+/**
+ * Journal / notification centre additions (M416): `FleetStatus.nextActions`
+ * (priority-tagged next steps) and `.autonomousShipReadiness`
+ * (verdict/topBlocker) are the SAME operator-attention data the legacy
+ * public/app.js's "Needs you" / "Autonomous now" split reads
+ * (buildOperatorBriefingModel, app.js:7438-7494) — reused here rather than
+ * inventing a parallel priority scheme, per the brief's instruction to
+ * ground notification priority in what the fleet already computes. Both
+ * arrive already populated on `ControlSnapshot.fleet` from GET /api/control.
+ */
+export type { FleetStatus, FleetNextAction, FleetNextActionCommand, FleetAutonomousShipReadinessStatus } from '../../core/fleet/status.js';
+export type { AgentWorkspaceRecentAction } from '../../core/fleet/agent-action-ledger.js';
 
 /**
  * Structural shape shared by every "we might not actually know this"

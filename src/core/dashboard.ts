@@ -966,11 +966,15 @@ export async function buildSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshot
   // This feeds Fleet Dashboard with the same read-only queue/backend/merge
   // status as /api/fleet, including shared queue lease health when enabled.
   let fleet: DashboardSnapshot['fleet'] | undefined;
+  let fleetFreshness: DashboardSnapshot['fleetFreshness'] | undefined;
   try {
-    const { buildFleetStatus } = await import('./fleet/status.js');
-    fleet = await buildFleetStatus(cfg);
+    const { getCachedFleetStatus } = await import('./web/fleet-status-cache.js');
+    const cached = await getCachedFleetStatus(cfg);
+    fleet = cached.status;
+    fleetFreshness = { stale: cached.stale, ageMs: cached.ageMs };
   } catch {
     fleet = undefined;
+    fleetFreshness = undefined;
   }
   const daemonObservation = readPublicDaemonObservation(fleet?.daemon);
 
@@ -1073,6 +1077,7 @@ export async function buildSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshot
       pendingProposals: inboxPending,
     },
     ...(fleet !== undefined ? { fleet } : {}),
+    ...(fleetFreshness !== undefined ? { fleetFreshness } : {}),
     // M29: OPTIONAL portfolio section — omitted entirely when the roll-up
     // could not be built, so existing producers/tests (which never set it)
     // stay valid and `portfolio === undefined` reads as "not populated".

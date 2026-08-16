@@ -5,6 +5,8 @@
  */
 import { useEffect, useState } from 'react';
 import { useMutationHold } from '../../data/hooks.js';
+import { NotificationBell } from '../notifications/NotificationBell.js';
+import { NotificationCenter } from '../notifications/NotificationCenter.js';
 import styles from './Topbar.module.css';
 
 type ThemePreference = 'system' | 'light' | 'dark';
@@ -50,6 +52,7 @@ export function Topbar({ onOpenPalette }: { onOpenPalette: () => void }) {
         <kbd className={styles.kbd}>⌘K</kbd>
       </button>
       <div className={styles.actions}>
+        <NotificationBell />
         {mutation.hasHold ? (
           <button type="button" className={styles.lockBtn} onClick={mutation.clear} title="Lock actions now">
             🔓 Unlocked
@@ -63,6 +66,7 @@ export function Topbar({ onOpenPalette }: { onOpenPalette: () => void }) {
           {theme === 'system' ? '🖥️' : theme === 'light' ? '☀️' : '🌙'}
         </button>
       </div>
+      <NotificationCenter />
     </header>
   );
 }

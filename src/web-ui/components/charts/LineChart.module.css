@@ -1,0 +1,102 @@
+.svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.gridline {
+  stroke: var(--chart-grid);
+  stroke-width: 1;
+}
+
+.axis {
+  stroke: var(--chart-axis);
+  stroke-width: 1;
+}
+
+.axisLabel {
+  font-size: 10px;
+  fill: var(--text-tertiary);
+  font-family: var(--font-ui);
+}
+
+.line {
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.area {
+  opacity: 0.1;
+  stroke: none;
+}
+
+.marker {
+  stroke: var(--chart-surface);
+  stroke-width: 2;
+}
+
+.endLabel {
+  font-size: 10px;
+  font-family: var(--font-ui);
+  font-weight: var(--font-weight-medium);
+}
+
+.crosshairLine {
+  stroke: var(--chart-axis);
+  stroke-width: 1;
+  pointer-events: none;
+}
+
+.overlay {
+  fill: transparent;
+  cursor: crosshair;
+}
+
+.wrap {
+  position: relative;
+}
+
+.tooltip {
+  position: absolute;
+  pointer-events: none;
+  background: var(--chart-tooltip-bg);
+  border: 1px solid var(--chart-tooltip-border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+  padding: var(--space-2);
+  font-size: var(--text-xs-size);
+  color: var(--text-primary);
+  white-space: nowrap;
+  z-index: var(--z-dropdown);
+  transform: translate(-50%, -100%);
+  margin-top: -10px;
+}
+
+.tooltipDate {
+  color: var(--text-tertiary);
+  margin-bottom: var(--space-1);
+}
+
+.tooltipRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.tooltipKey {
+  width: 12px;
+  height: 2px;
+  flex: none;
+}
+
+.tooltipValue {
+  font-weight: var(--font-weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+
+.tooltipGap {
+  color: var(--text-tertiary);
+  font-style: italic;
+}

@@ -2989,6 +2989,15 @@ export interface DashboardSnapshot {
    */
   fleet?: import('./fleet/status.js').FleetStatus;
   /**
+   * Perf: OPTIONAL freshness marker for `fleet`. `buildFleetStatus` is now
+   * served from a shared cache (see web/fleet-status-cache.ts) so concurrent
+   * requests never trigger duplicate full recomputes. `stale: true` means
+   * `fleet` is the last good value (still honestly reported, never silently
+   * presented as current) while a background refresh is in flight; `ageMs`
+   * is how old it is. Absent when the fleet section itself is absent.
+   */
+  fleetFreshness?: { stale: boolean; ageMs: number };
+  /**
    * M29: OPTIONAL org-level portfolio roll-up. ABSENT on existing producers /
    * tests (so they stay valid); populated by buildSnapshot when the v2 sources
    * are present. READ-ONLY aggregation over already-local state — health (M27,

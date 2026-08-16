@@ -13,10 +13,17 @@ describe('nav-config', () => {
     }
   });
 
-  it('exactly one leaf is marked implemented (the Fleet Dashboard reference view)', () => {
+  it('the Fleet Dashboard reference view stays marked implemented', () => {
+    // Was "exactly one leaf is implemented" back when Fleet Dashboard was the
+    // foundation's only built view. Multiple view agents now build against
+    // this same config in parallel, each flipping their own leaf(s) to
+    // `implemented: true` as they land — a fixed count here would just be a
+    // race between agents' PRs. The invariant that still matters: the
+    // reference view never regresses back to a placeholder, and at least one
+    // leaf is implemented (the config isn't accidentally fully unbuilt).
     const implemented = ALL_NAV_LEAVES.filter((l) => l.implemented);
-    expect(implemented).toHaveLength(1);
-    expect(implemented[0]?.path).toBe('/overview');
+    expect(implemented.length).toBeGreaterThan(0);
+    expect(implemented.some((l) => l.path === '/overview')).toBe(true);
   });
 
   it('every group has at least one leaf', () => {

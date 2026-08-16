@@ -13,7 +13,7 @@
  */
 import { apiPost } from './client.js';
 import { getMutationToken, touchMutationHold } from './auth-store.js';
-import { invalidate } from './cache.js';
+import { invalidate, invalidatePrefix } from './cache.js';
 
 class MissingMutationTokenError extends Error {
   constructor() {
@@ -34,24 +34,32 @@ export async function pauseFleet(): Promise<void> {
   await post('/api/fleet/pause', {});
   invalidate('dashboard-snapshot');
   invalidate('control-snapshot');
+  invalidate('fleet');
+  invalidate('fleet-activity');
 }
 
 export async function resumeFleet(): Promise<void> {
   await post('/api/fleet/resume', {});
   invalidate('dashboard-snapshot');
   invalidate('control-snapshot');
+  invalidate('fleet');
+  invalidate('fleet-activity');
 }
 
 export async function approveProposal(id: string): Promise<void> {
   await post(`/api/inbox/${encodeURIComponent(id)}/approve`, {});
   invalidate('inbox');
   invalidate('dashboard-snapshot');
+  invalidate(`proposal-detail-${id}`);
+  invalidatePrefix('inbox-list:');
 }
 
 export async function rejectProposal(id: string): Promise<void> {
   await post(`/api/inbox/${encodeURIComponent(id)}/reject`, {});
   invalidate('inbox');
   invalidate('dashboard-snapshot');
+  invalidate(`proposal-detail-${id}`);
+  invalidatePrefix('inbox-list:');
 }
 
 export interface OpenTargetRequest {

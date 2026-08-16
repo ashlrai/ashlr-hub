@@ -39,49 +39,114 @@ export const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
+    id: 'journal',
+    label: 'Journal',
+    leaves: [
+      {
+        path: '/journal',
+        label: 'Work Journal',
+        description:
+          'Chronological, filterable, scrubable record of runs, merges, judge verdicts, and daemon ticks — with live streaming into any in-progress run.',
+        implemented: true,
+      },
+    ],
+  },
+  {
     id: 'work',
     label: 'Work',
     leaves: [
-      { path: '/work/runs', label: 'Runs', description: 'Dispatched goal runs and their token burn.' },
-      { path: '/work/swarms', label: 'Swarms', description: 'Multi-task DAG runs with live burndown.' },
+      {
+        path: '/work/runs',
+        label: 'Runs',
+        description: 'Dispatched goal runs and their token burn.',
+        implemented: true,
+      },
+      {
+        path: '/work/swarms',
+        label: 'Swarms',
+        description: 'Multi-task DAG runs with live burndown.',
+        implemented: true,
+      },
     ],
   },
   {
     id: 'inbox',
     label: 'Inbox',
     leaves: [
-      { path: '/inbox', label: 'Proposals', description: 'Pending proposals awaiting approve/reject.' },
+      {
+        path: '/inbox',
+        label: 'Proposals',
+        description: 'Review, filter, and approve/reject proposals — including history (rejected/approved).',
+        implemented: true,
+      },
     ],
   },
   {
     id: 'control',
     label: 'Control',
     leaves: [
-      { path: '/control/daemon', label: 'Daemon', description: 'Autonomous operator state, spend, and direction mode.' },
-      { path: '/control/fleet', label: 'Fleet', description: 'Queue depth, lease health, and the kill switch.' },
-      { path: '/control/security', label: 'Security', description: 'Supply-chain / binshield findings from the cached backlog.' },
+      {
+        path: '/control/daemon',
+        label: 'Daemon',
+        description: 'Autonomous operator state, spend, and direction mode.',
+        implemented: true,
+      },
+      {
+        path: '/control/fleet',
+        label: 'Fleet',
+        description: 'Queue depth, lease health, and the kill switch.',
+        implemented: true,
+      },
+      {
+        path: '/control/security',
+        label: 'Security',
+        description: 'Supply-chain / binshield findings from the cached backlog.',
+        implemented: true,
+      },
     ],
   },
   {
     id: 'intelligence',
     label: 'Intelligence',
     leaves: [
-      { path: '/intelligence/pulse', label: 'Pulse', description: 'Activity rollups over the dashboard window.' },
-      { path: '/intelligence/genome', label: 'Genome', description: 'Cross-repo knowledge search and recall.' },
-      { path: '/intelligence/production', label: 'Production', description: 'Ships-per-day, judge verdicts, auto-merges.' },
+      {
+        path: '/intelligence/pulse',
+        label: 'Pulse',
+        description: 'Activity rollups over the dashboard window.',
+        implemented: true,
+      },
+      {
+        path: '/intelligence/genome',
+        label: 'Genome',
+        description: 'Cross-repo knowledge search and recall.',
+        implemented: true,
+      },
+      {
+        path: '/intelligence/production',
+        label: 'Production',
+        description: 'Ships-per-day, judge verdicts, auto-merges.',
+        implemented: true,
+      },
     ],
   },
   {
     id: 'portfolio',
     label: 'Portfolio',
     leaves: [
-      { path: '/portfolio', label: 'Portfolio', description: 'Org-level roll-up across enrolled repos.' },
+      {
+        path: '/portfolio',
+        label: 'Portfolio',
+        description: 'Org-level roll-up across enrolled repos.',
+        implemented: true,
+      },
     ],
   },
   {
     id: 'goals',
     label: 'Goals',
-    leaves: [{ path: '/goals', label: 'Goals', description: 'Active goals and milestone progress.' }],
+    leaves: [
+      { path: '/goals', label: 'Goals', description: 'Active goals and milestone progress.', implemented: true },
+    ],
   },
 ];
 

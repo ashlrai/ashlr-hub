@@ -12,7 +12,7 @@
  * never polls MORE often than the server already pushes.
  */
 import { getReadClientProof, getAuthSnapshot, subscribeAuth } from './auth-store.js';
-import { invalidate } from './cache.js';
+import { invalidate, invalidatePrefix } from './cache.js';
 
 export const SSE_EVENT_NAMES = [
   'runs',
@@ -31,10 +31,19 @@ const EVENT_TO_CACHE_KEYS: Record<SseEventName, string[]> = {
   runs: ['runs'],
   swarms: ['swarms'],
   inbox: ['inbox'],
-  daemon: ['daemon'],
-  'daemon-observation': ['daemon'],
-  'fleet-activity-ping': ['fleet-activity'],
-  'fleet-activity-observation': ['fleet-activity'],
+  // 'daemon' was previously mapped but nothing subscribed to a 'daemon'-keyed
+  // query (control/daemon didn't exist yet) — now daemonObservationQuery
+  // (data/queries.ts) does. Also refreshing 'control-snapshot' here so
+  // /control/daemon and /control/security (both read off controlSnapshotQuery)
+  // stay live on the same daemon-tick cadence instead of only on page load.
+  daemon: ['daemon', 'control-snapshot'],
+  'daemon-observation': ['daemon', 'control-snapshot'],
+  // fleet-activity pings are the closest live signal fleet state changed;
+  // 'fleet' (fleetStatusQuery, /control/fleet's queue depth + lease health)
+  // has no dedicated SSE event of its own, so it rides these instead of only
+  // refreshing on mount.
+  'fleet-activity-ping': ['fleet-activity', 'fleet'],
+  'fleet-activity-observation': ['fleet-activity', 'fleet'],
   snapshot: ['dashboard-snapshot'],
 };
 
@@ -93,6 +102,15 @@ function connect(): void {
         payload = undefined;
       }
       for (const key of EVENT_TO_CACHE_KEYS[name]) invalidate(key);
+      if (name === 'inbox') {
+        // Parameterized inbox queries (one cache key per filter combo / per
+        // proposal id) aren't in EVENT_TO_CACHE_KEYS's static map — sweep
+        // both prefixes so the list (any filter) and any open detail view
+        // (proposalDetailQuery, data/queries.ts) live-update on the same
+        // 'inbox' event as the unfiltered badge.
+        invalidatePrefix('inbox-list:');
+        invalidatePrefix('proposal-detail-');
+      }
       const listeners = rawListeners.get(name);
       if (listeners) for (const l of listeners) l(payload);
     });

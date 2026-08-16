@@ -1,0 +1,60 @@
+.detailBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  background: var(--bg-canvas);
+  border-radius: var(--radius-md);
+}
+
+.grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  margin: 0;
+  font-size: var(--text-xs-size);
+}
+
+.grid dt {
+  color: var(--text-tertiary);
+}
+
+.grid dd {
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+.rationale {
+  margin: 0;
+  font-size: var(--text-sm-size);
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+.diffDetails {
+  font-size: var(--text-xs-size);
+}
+
+.diffDetails summary {
+  cursor: pointer;
+  color: var(--text-link);
+}
+
+.diff {
+  max-height: 320px;
+  overflow: auto;
+  margin: var(--space-2) 0 0;
+  padding: var(--space-2);
+  background: var(--bg-code);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.error {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: var(--text-sm-size);
+}

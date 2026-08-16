@@ -1,0 +1,103 @@
+.row {
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.row:last-child {
+  border-bottom: none;
+}
+
+.summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  cursor: pointer;
+  list-style: none;
+}
+
+.summary::-webkit-details-marker {
+  display: none;
+}
+
+.summary:hover {
+  background: var(--bg-hover);
+}
+
+.summary:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: -2px;
+}
+
+.sourceTag {
+  flex: 0 0 auto;
+  width: 68px;
+  font-size: 10px;
+  font-weight: var(--font-weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-tertiary);
+}
+
+.sourceTag[data-source='run'] {
+  color: var(--status-running-fg);
+}
+
+.sourceTag[data-source='merge'] {
+  color: var(--status-success-fg);
+}
+
+.sourceTag[data-source='proposal'] {
+  color: var(--status-info-fg);
+}
+
+.when {
+  flex: 0 0 auto;
+  width: 108px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  color: var(--text-tertiary);
+}
+
+.repo {
+  flex: 0 0 auto;
+  font-size: var(--text-xs-size);
+  color: var(--text-tertiary);
+  background: var(--bg-hover);
+  border-radius: var(--radius-xs);
+  padding: 1px var(--space-2);
+}
+
+.title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm-size);
+  color: var(--text-primary);
+}
+
+.expandHint {
+  flex: 0 0 auto;
+  font-size: var(--text-xs-size);
+  color: var(--text-disabled);
+}
+
+.body {
+  padding: 0 var(--space-3) var(--space-3) calc(68px + var(--space-3) + 108px + var(--space-3));
+}
+
+.detailText {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-sm-size);
+  color: var(--text-secondary);
+}
+
+@media (max-width: 860px) {
+  .summary {
+    flex-wrap: wrap;
+  }
+  .body {
+    padding: 0 var(--space-3) var(--space-3);
+  }
+}

@@ -117,6 +117,16 @@ export function invalidate(key: string): void {
   void runQuery(key, e.fetcher);
 }
 
+/** Re-run the fetcher for every cached key starting with `prefix`. For
+ * parameterized resources (per-filter inbox list queries, per-id inbox
+ * detail queries) the exact live key isn't known ahead of time — used by
+ * sse.ts and data/mutations.ts so those views live-update too. */
+export function invalidatePrefix(prefix: string): void {
+  for (const key of store.keys()) {
+    if (key.startsWith(prefix)) invalidate(key);
+  }
+}
+
 /** Drop a key entirely (rare — e.g. on logout, so stale data never leaks
  * into the next session's first paint). */
 export function evict(key: string): void {

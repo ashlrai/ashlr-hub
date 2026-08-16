@@ -1,0 +1,85 @@
+.drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  left: auto;
+  margin: 0;
+  width: min(420px, 100vw);
+  max-height: 100vh;
+  height: 100vh;
+  border-radius: 0;
+  animation: none;
+  display: flex;
+  flex-direction: column;
+}
+
+.titleRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+}
+
+.closeBtn {
+  background: none;
+  border: none;
+  font-size: var(--text-xl-size);
+  line-height: 1;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  padding: var(--space-1);
+}
+
+.closeBtn:hover {
+  color: var(--text-primary);
+}
+
+.header {
+  display: flex;
+  margin-bottom: var(--space-3);
+}
+
+.desktopToggle {
+  font-size: var(--text-xs-size);
+  color: var(--text-secondary);
+  background: var(--bg-hover);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  padding: var(--space-1) var(--space-3);
+  cursor: pointer;
+}
+
+.desktopToggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.clear {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-6) var(--space-2);
+  text-align: center;
+  color: var(--text-secondary);
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  overflow-y: auto;
+  flex: 1 1 auto;
+}
+
+.journalLink {
+  display: block;
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+  font-size: var(--text-xs-size);
+  color: var(--text-link);
+  text-align: center;
+}

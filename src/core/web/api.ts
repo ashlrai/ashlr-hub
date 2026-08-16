@@ -62,7 +62,7 @@ function canonForCompare(p: string): string {
   return out.toLowerCase();
 }
 
-import type { AshlrConfig, DaemonState } from '../types.js';
+import type { AshlrConfig, DaemonState, ProposalStatus } from '../types.js';
 import { buildSnapshot, type DashboardSnapshotWithSourceQuality } from '../dashboard.js';
 import { loadEffectiveConfigSnapshot } from '../effective-config.js';
 import { listRuns, loadRun, runGoal } from '../run/orchestrator.js';
@@ -78,6 +78,7 @@ import {
 import { serviceStatus } from '../daemon/service.js';
 import { daemonServiceInstallOptions } from '../daemon/service-config.js';
 import { buildFleetStatus, readFleetDaemonStatus } from '../fleet/status.js';
+import { getCachedFleetStatus, primeFleetStatusCache } from './fleet-status-cache.js';
 // M61: Mission Control aggregator.
 import { buildControlSnapshot } from './control.js';
 // M90: Fleet-Activity panel.
@@ -1231,13 +1232,78 @@ export async function handleApi(
       return true;
     }
 
+    // Valid `?status=` values for GET /api/inbox — mirrors INBOX_STATUS_FILTERS
+    // in src/cli/inbox.ts exactly. `?limit=` beyond the default is capped at
+    // INBOX_LIST_HARD_MAX_LIMIT regardless of what the caller asks for.
+    const INBOX_STATUS_QUERY_VALUES = new Set<string>([
+      'pending', 'approved', 'rejected', 'awaiting-host-merge', 'applied', 'failed', 'all',
+    ]);
+    const INBOX_LIST_DEFAULT_LIMIT = 200;
+    const INBOX_LIST_HARD_MAX_LIMIT = 1000;
+
     // ── GET /api/inbox ───────────────────────────────────────────────────────
-    // M23: read-only pending-proposals view. listProposals never throws.
+    // M23: read-only proposals view. Defaults to pending-only, byte-identical
+    // to the original response, unless an explicit status/since/limit opts
+    // into the "history" view — mirrors `ashlr inbox --status/--since/--limit`
+    // (src/cli/inbox.ts) so the web surface can finally browse rejected/
+    // approved/etc, not just pending. listProposals never throws; every param
+    // is validated against a fixed set / parsed strictly, and the history
+    // response is capped (INBOX_LIST_DEFAULT_LIMIT / hard max) so opting into
+    // filtering can never hand the browser an unbounded JSON payload.
     if (path === '/api/inbox' && method === 'GET') {
-      const proposals = listProposals({ status: 'pending' });
+      const statusParam = getQueryParam(req.url ?? '/', 'status');
+      const sinceParam = getQueryParam(req.url ?? '/', 'since');
+      const limitParam = getQueryParam(req.url ?? '/', 'limit');
+
+      if (statusParam !== undefined && !INBOX_STATUS_QUERY_VALUES.has(statusParam)) {
+        sendJson(res, 400, {
+          error: `status must be one of: ${[...INBOX_STATUS_QUERY_VALUES].join(', ')}; got: ${statusParam}`,
+        });
+        return true;
+      }
+      let sinceMs: number | undefined;
+      if (sinceParam !== undefined) {
+        const parsed = Date.parse(sinceParam);
+        if (Number.isNaN(parsed)) {
+          sendJson(res, 400, { error: `since must be an ISO timestamp or YYYY-MM-DD, got: ${sinceParam}` });
+          return true;
+        }
+        sinceMs = parsed;
+      }
+      let limit: number | undefined;
+      if (limitParam !== undefined) {
+        const n = /^[0-9]+$/.test(limitParam) ? Number.parseInt(limitParam, 10) : NaN;
+        if (!Number.isFinite(n) || n <= 0) {
+          sendJson(res, 400, { error: `limit must be a positive integer, got: ${limitParam}` });
+          return true;
+        }
+        limit = Math.min(n, INBOX_LIST_HARD_MAX_LIMIT);
+      }
+
+      // No query params at all -> the exact original call/shape (pending
+      // only, unbounded). Any explicit status/since/limit opts into history.
+      const filtering = statusParam !== undefined || sinceMs !== undefined || limit !== undefined;
+      const effectiveStatus: ProposalStatus | 'all' =
+        (statusParam as ProposalStatus | 'all' | undefined) ?? (sinceMs !== undefined ? 'all' : 'pending');
+
+      const all = listProposals(); // newest-first; same full-directory read the pending-only call already did.
+      let matched = effectiveStatus === 'all' ? all : all.filter((p) => p.status === effectiveStatus);
+      if (sinceMs !== undefined) {
+        const floor = sinceMs;
+        matched = matched.filter((p) => {
+          const t = Date.parse(p.createdAt);
+          return !Number.isNaN(t) && t >= floor;
+        });
+      }
+
+      const shown = filtering ? matched.slice(0, limit ?? INBOX_LIST_DEFAULT_LIMIT) : matched;
+
       sendJson(res, 200, {
-        pending: proposals.length,
-        proposals,
+        pending: filtering ? all.filter((p) => p.status === 'pending').length : shown.length,
+        total: all.length,
+        proposals: shown,
+        truncated: matched.length > shown.length,
+        filters: { status: effectiveStatus, since: sinceParam ?? null, limit: limit ?? null },
       });
       return true;
     }
@@ -1254,7 +1320,38 @@ export async function handleApi(
         sendJson(res, 404, { error: `proposal not found: ${id}` });
         return true;
       }
-      sendJson(res, 200, proposal);
+
+      // Join the decisions ledger (read-only, additive) so the operator can
+      // see the judge's actual verdict/reasonCode for this proposal — a
+      // judge-parse-failure/judge-network-failure is an infra failure, NOT a
+      // considered judgment, and the ledger is the only place that
+      // distinction lives (Proposal itself never carries judgeReasonCode).
+      // Never invents a verdict: when the ledger read is degraded or no
+      // decision row matches this id, sourceQuality says exactly that so the
+      // UI's Epistemic primitive renders "unknown" instead of guessing.
+      let decisionEvidence: {
+        sourceQuality: { sourceState: 'healthy' | 'degraded' | 'missing'; complete: boolean; reason?: string };
+        decisions: unknown[];
+      };
+      try {
+        const { readDecisionsDetailed } = await import('../fleet/decisions-ledger.js');
+        const read = readDecisionsDetailed({ proposalId: id, limit: 25 });
+        decisionEvidence = {
+          sourceQuality: {
+            sourceState: read.sourceState,
+            complete: read.complete,
+            ...(read.stopReasons.length > 0 ? { reason: read.stopReasons.join(', ') } : {}),
+          },
+          decisions: read.decisions,
+        };
+      } catch {
+        decisionEvidence = {
+          sourceQuality: { sourceState: 'degraded', complete: false, reason: 'ledger read failed' },
+          decisions: [],
+        };
+      }
+
+      sendJson(res, 200, { ...proposal, decisionEvidence });
       return true;
     }
 
@@ -1381,6 +1478,10 @@ export async function handleApi(
         const retryable = !unsafeStorage && !mutation.quiesced && (mutation.ok ||
           /fence unavailable|has not quiesced|outward mutation.*active|\bbusy\b/i.test(mutation.reason));
         const fleet = await buildFleetStatus(cfg);
+        // Prime the shared cache with this freshly-computed value so a
+        // GET /api/fleet right after this mutation observes it immediately
+        // instead of a pre-mutation cached value (see fleet-status-cache.ts).
+        primeFleetStatusCache(cfg, fleet);
         sendJson(res, retryable ? 409 : 500, {
           ok: false,
           action: paused ? 'pause' : 'resume',
@@ -1396,6 +1497,8 @@ export async function handleApi(
         return true;
       }
       const fleet = await buildFleetStatus(cfg);
+      // See comment above — keep the shared cache in sync with the mutation.
+      primeFleetStatusCache(cfg, fleet);
       const service = serviceStatus(daemonServiceInstallOptions(cfg));
       sendJson(res, 200, {
         ok: true,
@@ -1413,8 +1516,8 @@ export async function handleApi(
     // proposals + merges + paused state). buildFleetStatus never throws; same
     // no-auth read class as /api/daemon and /api/pulse.
     if (path === '/api/fleet' && method === 'GET') {
-      const fleet = await buildFleetStatus(cfg);
-      sendJson(res, 200, fleet);
+      const cached = await getCachedFleetStatus(cfg);
+      sendJson(res, 200, { ...cached.status, fleetFreshness: { stale: cached.stale, ageMs: cached.ageMs } });
       return true;
     }
 

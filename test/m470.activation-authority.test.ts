@@ -28,8 +28,11 @@ import {
   EMPTY_DAEMON_ACTIVATION_SCOPE,
   buildDaemonActivationPermitPayload,
   canonicalizeDaemonActivationValue,
+  consumeDaemonActivationPermit,
   consumeDaemonActivationPermitForVerification,
+  daemonActivationAuthorityStateDigest,
   daemonActivationConfigDigest,
+  daemonActivationDiagnosePendingPermitBindings,
   daemonActivationDirPath,
   daemonActivationGrantStatus,
   daemonActivationGrantsPath,
@@ -46,11 +49,14 @@ import {
   liveConductorActivationAuthorized,
   loadDaemonActivationTrustRoots,
   signDaemonActivationPermit,
+  verifyDaemonActivationPermit,
   type DaemonActivationGrantScope,
   type DaemonActivationPermitEnvelope,
   type DaemonActivationRuntimeContext,
   type DaemonActivationTrustRoot,
 } from '../src/core/daemon/activation-permit.js';
+import { readBuildIdentity } from '../src/core/build-identity.js';
+import { acquireDaemonLock, daemonLockPath } from '../src/core/daemon/state.js';
 import { assertResidentServiceInstallAuthorized } from '../src/core/daemon/service-install-authority.js';
 import { setKill } from '../src/core/sandbox/policy.js';
 import { auditDir } from '../src/core/sandbox/audit.js';
@@ -472,4 +478,124 @@ describe('M470 activation authority — one-shot permit scope matching (injected
       { trustRoots: [key.root], context: runtime },
     ).authorized).toBe(false);
   });
+});
+
+describe('M470 regression — permit-runtime-binding-mismatch on every daemon start', () => {
+  // Root cause: authorityStateDigest included ~/.ashlr's own directory mtime.
+  // acquireDaemonLock() (src/core/daemon/state.ts) creates ~/.ashlr/daemon.lock
+  // — a brand-new direct child of ~/.ashlr — BEFORE runDaemon() ever calls
+  // consumeDaemonActivationPermit(). Creating that file bumps ~/.ashlr's own
+  // mtime, so every permit's signed authorityStateDigest (computed at mint
+  // time, before any lock existed) was guaranteed to mismatch the recomputed
+  // one at consume time (computed after the daemon's own lock acquisition) —
+  // 100% reproducibly, unrelated to git/dist/node_modules state.
+
+  it('daemonActivationAuthorityStateDigest is stable across ~/.ashlr child churn (e.g. a lock file appearing)', () => {
+    const home = isolateHome();
+    mkdirSync(join(home, '.ashlr'), { recursive: true, mode: 0o700 });
+
+    const before = daemonActivationAuthorityStateDigest();
+
+    // Exactly what acquireDaemonLock()'s writeNewLock() does: O_CREAT|O_EXCL
+    // a brand-new direct child of ~/.ashlr.
+    writeFileSync(join(home, '.ashlr', 'daemon.lock'), 'probe', { flag: 'wx' });
+    const afterCreate = daemonActivationAuthorityStateDigest();
+    expect(afterCreate).toBe(before);
+
+    // And the reclaim path (unlink + recreate on a stale lock) churns it too.
+    rmSync(join(home, '.ashlr', 'daemon.lock'));
+    writeFileSync(join(home, '.ashlr', 'daemon.lock'), 'probe-2', { flag: 'wx' });
+    const afterReclaim = daemonActivationAuthorityStateDigest();
+    expect(afterReclaim).toBe(before);
+  });
+
+  it('verifyDaemonActivationPermit reports exactly which binding field(s) differ, not just an opaque yes/no', () => {
+    const cfg = config('diagnose-mismatch');
+    const runtime = runtimeContext(cfg);
+    const key = testKeypair();
+    const payload = buildDaemonActivationPermitPayload({
+      permitId: '7'.repeat(32),
+      nonce: '8'.repeat(64),
+      keyId: key.root.keyId,
+      issuedAt: new Date(runtime.nowMs - 1_000).toISOString(),
+      expiresAt: new Date(runtime.nowMs + 60_000).toISOString(),
+      scope: scope({ once: true, proposalOnly: true }),
+      context: runtime,
+    });
+    const envelope = signDaemonActivationPermit(payload, key.privateKey);
+
+    // Only `entrypoint` differs at consume time — everything else matches.
+    const driftedEntrypoint = {
+      ...runtime,
+      entrypoint: { ...runtime.entrypoint, sha256: digest('drifted-entrypoint') },
+    };
+    const onlyEntrypoint = verifyDaemonActivationPermit(envelope, driftedEntrypoint, [key.root]);
+    expect(onlyEntrypoint.reason).toBe('permit-runtime-binding-mismatch');
+    expect(onlyEntrypoint.mismatchedBindings).toEqual(['entrypoint']);
+
+    // Two fields differ — both, and only both, are reported.
+    const twoFieldsDrifted = {
+      ...runtime,
+      entrypoint: { ...runtime.entrypoint, sha256: digest('drifted-entrypoint') },
+      authorityStateDigest: digest('drifted-authority-state'),
+    };
+    const twoMismatches = verifyDaemonActivationPermit(envelope, twoFieldsDrifted, [key.root]);
+    expect(twoMismatches.reason).toBe('permit-runtime-binding-mismatch');
+    expect([...twoMismatches.mismatchedBindings!].sort()).toEqual(['authorityStateDigest', 'entrypoint']);
+
+    // A fully matching context reports no mismatch at all.
+    const matching = verifyDaemonActivationPermit(envelope, runtime, [key.root]);
+    expect(matching.ok).toBe(true);
+    expect(matching.mismatchedBindings).toBeUndefined();
+  });
+
+  // Faithful end-to-end reproduction of the operator's exact report: mint a
+  // real permit, then acquire the REAL daemon lock (exactly what runDaemon()
+  // does before it ever calls consumeDaemonActivationPermit), then consume.
+  // This exercises the actual collectRuntimeContext() → file-hashing →
+  // release-tree-walk path, so it only runs against a clean, built tree
+  // (same precondition `daemon start` itself has); it is the test that would
+  // have caught this exact regression.
+  const buildIsCleanAndTrusted = (() => {
+    try {
+      return readBuildIdentity().dirty === false;
+    } catch {
+      return false;
+    }
+  })();
+
+  it.skipIf(!buildIsCleanAndTrusted)(
+    'mints and consumes a once permit end-to-end after the real daemon lock has churned ~/.ashlr',
+    () => {
+      const home = isolateHome();
+      mkdirSync(join(home, '.ashlr'), { recursive: true, mode: 0o700 });
+      expect(daemonActivationInit({}).ok).toBe(true);
+
+      const mint = daemonActivationMintOneShotPermit({
+        cfg: config('e2e-mint-consume'),
+        scope: scope({ once: true, proposalOnly: true }),
+      });
+      expect(mint).toMatchObject({ ok: true });
+      if (!mint.ok) return;
+      expect(existsSync(mint.permitPath)).toBe(true);
+
+      // Exactly what runDaemon() does before it ever reaches
+      // consumeDaemonActivationPermit(): acquire the daemon singleton lock,
+      // which creates ~/.ashlr/daemon.lock, a brand-new direct child of
+      // ~/.ashlr.
+      const lock = acquireDaemonLock();
+      expect(lock.acquired).toBe(true);
+      expect(existsSync(daemonLockPath())).toBe(true);
+
+      const diagnosis = daemonActivationDiagnosePendingPermitBindings(config('e2e-mint-consume'));
+      expect(diagnosis).toMatchObject({ ok: true, reason: 'bindings-match' });
+
+      const result = consumeDaemonActivationPermit(config('e2e-mint-consume'), { once: true, dryRun: false });
+      expect(result).toMatchObject({
+        authorized: true,
+        reason: 'proposal-once-activation-authorized',
+      });
+      expect(existsSync(mint.permitPath)).toBe(false);
+    },
+  );
 });

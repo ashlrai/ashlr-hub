@@ -7,6 +7,7 @@
  */
 import { ALL_NAV_LEAVES } from '../../app/nav-config.js';
 import { pauseFleet, resumeFleet } from '../../data/mutations.js';
+import { openPanel as openNotificationPanel } from '../notifications/notification-store.js';
 
 export interface Command {
   id: string;
@@ -48,6 +49,16 @@ const actionCommands: Command[] = [
     requiresMutationToken: true,
     run: async () => {
       await resumeFleet();
+    },
+  },
+  {
+    id: 'action:open-notifications',
+    title: 'Open notification centre',
+    subtitle: 'What needs you right now, ranked by severity',
+    group: 'Actions',
+    keywords: ['alerts', 'attention', 'bell', 'needs you'],
+    run: () => {
+      openNotificationPanel();
     },
   },
 ];
