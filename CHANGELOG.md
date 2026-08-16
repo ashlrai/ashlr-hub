@@ -11,6 +11,33 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+## [3.2.6] — 2026-08-16 — Canonical publisher-path recovery
+
+- For candidate evaluators upgrading from public npm `latest` 3.0.1, this
+  remains the first package containing the unreleased 3.1.0 through 3.2.5
+  series. Their detailed product, security, and authority notes remain in the
+  corresponding changelog sections below.
+- Carries forward the complete 3.2.5 candidate payload and adds only the
+  publisher package-spec repair: the prepared artifact root is canonicalized
+  and constrained to the job workspace, its manifest-selected tarball is
+  exported as a canonical absolute filesystem path, and the sole privileged
+  publish step revalidates that exact regular, non-symlink, single-link file
+  before passing it to npm. A Linux regression executes the exact publisher
+  shell against a fake npm binary and proves relative paths cannot reach npm.
+- Keeps the artifact hashes, SRI, archive inventory, protected-master and tag
+  admission, sole OIDC job, trusted-publisher environment approval,
+  candidate-only dist-tag, provenance verification, preserved npm `latest`,
+  and GitHub prerelease gates unchanged. Resident activation and automatic
+  production effects remain unavailable.
+- The protected `v3.2.5` tag remains immutable at
+  `dd5d5f8fa25cbebd395a31971cf1e8d78c0195db`. Release run `31934899656`,
+  attempt 1, passed all nine native verification jobs, the signed no-authority
+  canary, unprivileged prepare, and privileged registry admission. After the
+  exact npm-release deployment was approved, npm interpreted the unprefixed
+  relative tarball operand as GitHub shorthand and its SSH lookup failed before
+  a registry publication request. Publication verification and GitHub Release
+  creation were skipped, and no 3.2.5 package was published.
+
 ## [3.2.5] — 2026-08-16 — Pack-report root recovery
 
 - For candidate evaluators upgrading from public npm `latest` 3.0.1, this

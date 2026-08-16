@@ -1,8 +1,8 @@
 # Releasing @ashlr/hub
 
 Releases are tag-triggered and fully gated. The current lane is deliberately
-pinned to the 3.2.5 candidate: nothing reaches npm without an explicit human
-action (pushing `v3.2.5`), approval of the `npm-release` environment, and a green
+pinned to the 3.2.6 candidate: nothing reaches npm without an explicit human
+action (pushing `v3.2.6`), approval of the `npm-release` environment, and a green
 full-CI verify job plus the signed release-canary gate. It publishes only under
 npm dist-tag `candidate` and creates a GitHub prerelease; it cannot move npm or
 GitHub `latest`.
@@ -63,7 +63,7 @@ verified.
 ## Release procedure
 
 The current workflow is a one-version candidate lane. It requires npm `latest`
-to equal `3.0.1`, requires npm `candidate` and version `3.2.5` to be absent, and
+to equal `3.0.1`, requires npm `candidate` and version `3.2.6` to be absent, and
 fails closed if any of those registry preconditions change. Before authorizing
 the tag, an authenticated npm maintainer must run the pinned npm 11 client and
 verify `npm trust list @ashlr/hub` exactly matches the repository, workflow,
@@ -79,8 +79,8 @@ The release policy accepts only a lightweight tag whose current GitHub ref still
 resolves directly to the event commit; annotated tags, tag rewrites, and deleted
 tags fail closed.
 
-1. Confirm `version` in `package.json` is exactly `3.2.5`.
-2. Make sure `CHANGELOG.md` has a `## [3.2.5]` section — the release FAILS
+1. Confirm `version` in `package.json` is exactly `3.2.6`.
+2. Make sure `CHANGELOG.md` has a `## [3.2.6]` section — the release FAILS
    without one (`scripts/extract-changelog.mjs` enforces changelog discipline;
    its body becomes the GitHub release notes).
 3. Confirm protected `master` is at the intended release SHA and its required
@@ -88,8 +88,8 @@ tags fail closed.
    release tag (do not force, move, delete, or recreate it):
 
    ```bash
-   git tag v3.2.5
-   git push origin v3.2.5
+   git tag v3.2.6
+   git push origin v3.2.6
    ```
 
 4. `.github/workflows/release.yml` then:
@@ -228,15 +228,16 @@ interpreted the unprefixed relative tarball path as GitHub shorthand and its SSH
 lookup failed. Publication verification and GitHub Release creation were
 skipped; no 3.2.5 package was published. Do not rerun run `31934899656`; never
 move, delete, or recreate its tag, or reuse version 3.2.5. The reviewed
-canonical-path repair must merge first; a separate 3.2.6 metadata merge is the
-only successor lane.
+canonical-path repair merged separately at protected commit
+`b5554ed4881a02e7665a8ebc54f219f09a367d5d`; version 3.2.6 is the only
+successor lane.
 
 If **publish succeeded and only `verify_publish` or the GitHub `release` job
 failed**, first verify that npm contains the intended tag artifact from a clean
 checkout of that tag:
 
 ```bash
-version=3.2.5
+version=3.2.6
 git switch --detach "v${version}"
 tag_checkout="$(pwd)"
 expected_revision="$(git rev-parse HEAD)"
@@ -321,7 +322,7 @@ If npm publication itself failed or its result is ambiguous:
 
    ```bash
    set -euo pipefail
-   version=3.2.5
+   version=3.2.6
    release_tag="v${version}"
    test "$(git rev-parse HEAD)" = "$(git rev-list -n 1 "$release_tag")"
    release_notes="$(mktemp)"
@@ -341,7 +342,7 @@ There is no token/OTP fallback and no recovery path that republishes an existing
 version.
 
 If any post-publication integrity, provenance, signature, candidate-tag, or
-preserved-dist-tag check fails, treat the immutable 3.2.5 version as a release
+preserved-dist-tag check fails, treat the immutable 3.2.6 version as a release
 incident. Do not create the GitHub prerelease, do not install it, and do not
 promote it to `latest`.
 
