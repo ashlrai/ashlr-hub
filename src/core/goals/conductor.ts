@@ -238,8 +238,8 @@ export async function runConductor(
  *
  * This does not enable the general conductor. It has no resident/watch shape,
  * no cloud option, no retry, and no daemon fallback. Production remains dormant
- * while either its immutable trust roots or final durable quota authority are
- * unavailable.
+ * because the immutable conductor trust-root set is intentionally empty; this
+ * source path alone grants no activation authority.
  */
 export async function runAuthorizedConductorOnce(
   cfg: AshlrConfig,
@@ -301,17 +301,25 @@ export async function runAuthorizedConductorOnce(
   if (!activationModule.isGoalConductorActivationCapability(activation.capability, target)) {
     return refuse('goal-conductor-capability-invalid-or-consumed');
   }
+  if (!activation.permitId) return refuse('goal-conductor-activation-permit-id-missing');
 
   // This is intentionally the final pre-provider boundary, after the one-shot
-  // capability's action-time runtime revalidation. It is a hard refusal until
-  // actual durable reservations can be carried to every provider contact made
-  // by advanceGoal/runSwarm.
+  // capability's action-time runtime revalidation. All thirteen possible
+  // contacts are reserved atomically here, then a non-serializable claim seam
+  // is carried to the exact planner/orchestrator inference sites.
+  const executionConfig = activation.configSnapshot ?? cfg;
   const { reserveGoalConductorProviderQuota } = await import('./conductor-quota.js');
-  const quota = reserveGoalConductorProviderQuota();
+  const quota = reserveGoalConductorProviderQuota(executionConfig, {
+    permitId: activation.permitId,
+    goalId: target.goalId,
+    milestoneId: target.milestoneId,
+    goalDigest: target.goalDigest,
+    projectPath: target.projectPath,
+  });
   if (!quota.launchAuthorized) return refuse(quota.reason);
 
   try {
-    const result = await advanceGoalCycle(goal.id, activation.configSnapshot ?? cfg, {
+    const result = await advanceGoalCycle(goal.id, executionConfig, {
       maxRetries: 0,
       allowCloud: false,
       allowAnyRepo: false,
@@ -322,6 +330,7 @@ export async function runAuthorizedConductorOnce(
       },
       expectedGoalDigest: target.goalDigest,
       expectedMilestoneId: target.milestoneId,
+      providerQuota: quota.providerQuota,
     });
     summary.goalsAdvanced = 1;
     summary.milestonesAdvanced = 1;

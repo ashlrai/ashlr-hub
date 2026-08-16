@@ -126,6 +126,7 @@ import {
   loadRun,
   listRuns,
 } from '../src/core/run/orchestrator.js';
+import { GoalConductorQuotaRefusal } from '../src/core/goals/conductor-quota.js';
 import type { RunState, RunOptions, RunStep } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -467,6 +468,107 @@ describe('runGoal — execution and dependency ordering', () => {
     ];
     return mockClient(responses);
   }
+
+  it('propagates a typed signed-ticket refusal before provider inference with no fallback', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes('11434/api/tags')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ models: [{ name: 'llama3:8b' }] }),
+        });
+      }
+      return Promise.reject(new Error(`unexpected provider inference: ${String(url)}`));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const runId = uniqueRunId('signed-ticket-refusal');
+    const providerQuota = {
+      attemptId: `goal-attempt-${'4'.repeat(64)}`,
+      claimNext: vi.fn(() => {
+        throw new GoalConductorQuotaRefusal('goal-conductor-provider-ticket-cap-exhausted');
+      }),
+    };
+
+    await expect(runGoal('signed work', makeConfig(), {
+      runId,
+      engine: 'builtin',
+      allowCloud: false,
+      tools: false,
+      noMemory: true,
+      noCapture: true,
+      providerQuota,
+      budget: { maxTokens: 50_000, maxSteps: 12, allowCloud: false },
+    })).rejects.toMatchObject({
+      name: 'GoalConductorQuotaRefusal',
+      message: 'goal-conductor-provider-ticket-cap-exhausted',
+    });
+    expect(providerQuota.claimNext).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/api/chat'))).toBe(false);
+  });
+
+  it('refuses a cloud route before touching provider authority', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const providerQuota = {
+      attemptId: `goal-attempt-${'3'.repeat(64)}`,
+      claimNext: vi.fn(() => 'opaque-ticket'),
+    };
+
+    await expect(runGoal('invalid signed route', makeConfig(), {
+      engine: 'builtin',
+      allowCloud: true,
+      providerQuota,
+    })).rejects.toMatchObject({
+      name: 'GoalConductorQuotaRefusal',
+      message: 'goal-conductor-provider-route-not-builtin-local',
+    });
+    expect(providerQuota.claimNext).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('clones signed config with browser and visual grounding disabled without upload', async () => {
+    const { fetchMock, chatCalls } = scriptedOllama(
+      JSON.stringify([{ id: 'task-a', goal: 'Make the bounded change', deps: [] }]),
+      { tokIn: 10, tokOut: 10 },
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const cfg = {
+      ...makeConfig(),
+      foundry: {
+        limits: { builtin: { window: '1h', max: 100 } },
+        browserVerify: true,
+        visualGrounding: {
+          enabled: true,
+          provider: 'generic-openai-vision' as const,
+          endpoint: 'https://visual.example/v1/chat/completions',
+          query: 'find the submit button',
+          allowRemoteEndpoint: true,
+        },
+      },
+    };
+    const providerQuota = {
+      attemptId: `goal-attempt-${'2'.repeat(64)}`,
+      claimNext: vi.fn(() => 'opaque-ticket'),
+    };
+    const runId = uniqueRunId('signed-no-visual');
+
+    const state = await runGoal('signed visual-safe work', cfg, {
+      runId,
+      engine: 'builtin',
+      allowCloud: false,
+      tools: false,
+      cwd: path.join(process.cwd()),
+      providerQuota,
+      budget: { maxTokens: 50_000, maxSteps: 12, allowCloud: false },
+    });
+
+    expect(state.status).toBe('done');
+    expect(providerQuota.claimNext).toHaveBeenCalledTimes(chatCalls());
+    expect(chatCalls()).toBeLessThanOrEqual(12);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('visual.example'))).toBe(false);
+    expect(cfg.foundry.browserVerify).toBe(true);
+    expect(cfg.foundry.visualGrounding.enabled).toBe(true);
+  });
 
   it('runGoal completes with status done', async () => {
     // Mock fetch to prevent real Ollama probing

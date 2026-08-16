@@ -14,6 +14,10 @@ const mockClaimCapability = vi.fn();
 const mockReserveQuota = vi.fn();
 const mockLoadConfig = vi.fn();
 const mockRunSimpleConductor = vi.fn();
+const quotaSession = {
+  attemptId: `goal-attempt-${'9'.repeat(64)}`,
+  claimNext: vi.fn(() => 'opaque-ticket'),
+};
 
 vi.mock('../src/core/config.js', () => ({
   loadConfigReadOnlyStrict: (...args: unknown[]) => mockLoadConfig(...args),
@@ -82,7 +86,13 @@ beforeEach(() => {
     capability: { opaque: true }, configSnapshot: { signed: true },
   });
   mockClaimCapability.mockReturnValue(true);
-  mockReserveQuota.mockReturnValue({ launchAuthorized: true, reason: 'reserved' });
+  quotaSession.claimNext.mockClear();
+  mockReserveQuota.mockReturnValue({
+    launchAuthorized: true,
+    reason: 'goal-conductor-provider-quota-reserved',
+    attemptId: quotaSession.attemptId,
+    providerQuota: quotaSession,
+  });
   mockAdvanceGoalCycle.mockResolvedValue({
     runs: [{ id: 'swarm-one' }], goalDone: false, milestoneDone: true, proposalsFiled: 1,
   });
@@ -134,6 +144,16 @@ describe('M516 explicit signed one-shot conductor', () => {
     });
     expect(mockConsumePermit).toHaveBeenCalledTimes(1);
     expect(mockClaimCapability).toHaveBeenCalledTimes(1);
+    expect(mockReserveQuota).toHaveBeenCalledWith(
+      { signed: true },
+      {
+        permitId: '1'.repeat(32),
+        goalId: goal.id,
+        milestoneId: milestone.id,
+        goalDigest: 'a'.repeat(64),
+        projectPath: '/tmp/enrolled-project',
+      },
+    );
     expect(mockAdvanceGoalCycle).not.toHaveBeenCalled();
   });
 
@@ -169,6 +189,7 @@ describe('M516 explicit signed one-shot conductor', () => {
         allowAnyRepo: false,
         expectedGoalDigest: 'a'.repeat(64),
         expectedMilestoneId: milestone.id,
+        providerQuota: quotaSession,
         budget: { maxTokens: 50_000, maxSteps: 12, allowCloud: false },
       }),
     );

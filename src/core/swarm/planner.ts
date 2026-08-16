@@ -13,8 +13,23 @@
  *  - IDs are stable slugs: scaffold-1, build-1..N, integrate-1, verify-1, review-1.
  */
 
-import type { SwarmPlan, SwarmTaskSpec, SwarmPhaseName, AshlrConfig } from '../types.js';
+import type {
+  SwarmPlan,
+  SwarmTaskSpec,
+  SwarmPhaseName,
+  AshlrConfig,
+  ProviderInferenceQuotaSession,
+} from '../types.js';
 import { getActiveClient } from '../run/provider-client.js';
+import {
+  GoalConductorQuotaRefusal,
+  isGoalConductorQuotaRefusal,
+} from '../goals/conductor-quota.js';
+import {
+  conservativeRequestTokenReservation,
+  MAX_GOVERNED_OUTPUT_TOKENS,
+  supportsGovernedModelCalls,
+} from '../run/model-call-authority.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -344,6 +359,8 @@ export async function planSwarm(
   input: { goal: string; specBody?: string },
   cfg: AshlrConfig,
   signal?: AbortSignal,
+  providerQuota?: ProviderInferenceQuotaSession,
+  signedTokenBudget?: number,
 ): Promise<SwarmPlan> {
   const { goal, specBody } = input;
 
@@ -353,22 +370,60 @@ export async function planSwarm(
   const userPrompt = specBody
     ? `Goal: ${goal}\n\nSpec:\n${specBody.slice(0, 8000)}` // guard against enormous spec bodies
     : `Goal: ${goal}`;
+  const messages = [
+    { role: 'system' as const, content: PLANNING_SYSTEM },
+    { role: 'user' as const, content: userPrompt },
+  ];
 
   // Attempt a single LOCAL-first model call
   let rawOutput: string;
   let usage: SwarmPlan['usage'];
   try {
+    let signedLimits: { maxOutputTokens: number } | undefined;
+    let signedPromptReservation: number | undefined;
+    if (providerQuota) {
+      if (!Number.isSafeInteger(signedTokenBudget) || (signedTokenBudget ?? 0) < 1) {
+        throw new GoalConductorQuotaRefusal('goal-conductor-signed-planner-budget-invalid');
+      }
+      signedPromptReservation = conservativeRequestTokenReservation(messages, []);
+      const remaining = (signedTokenBudget as number) - signedPromptReservation;
+      if (remaining < 1) {
+        throw new GoalConductorQuotaRefusal('goal-conductor-signed-planner-budget-exhausted');
+      }
+      signedLimits = {
+        maxOutputTokens: Math.min(MAX_GOVERNED_OUTPUT_TOKENS, remaining),
+      };
+    }
     const client = await getActiveClient(cfg, { allowCloud: false });
     if (signal?.aborted) throw abortReason(signal);
-    const result = await client.chat([
-      { role: 'system', content: PLANNING_SYSTEM },
-      { role: 'user', content: userPrompt },
-    ], undefined, signal);
+    if (providerQuota && !supportsGovernedModelCalls(client)) {
+      throw new GoalConductorQuotaRefusal('goal-conductor-signed-planner-provider-ungoverned');
+    }
+    // The signed path consumes one of its pre-reserved tickets at the final
+    // synchronous boundary before inference. Ordinary swarms omit the session.
+    providerQuota?.claimNext();
+    const result = signedLimits
+      ? await client.chat(messages, undefined, signal, signedLimits)
+      : await client.chat(messages, undefined, signal);
+    if (signedLimits && signedPromptReservation !== undefined) {
+      const exactUsage = result.usageKnown === true &&
+        Number.isSafeInteger(result.usage.tokensIn) && result.usage.tokensIn >= 0 &&
+        Number.isSafeInteger(result.usage.tokensOut) && result.usage.tokensOut >= 0 &&
+        result.usage.tokensIn <= signedPromptReservation &&
+        result.usage.tokensOut <= signedLimits.maxOutputTokens;
+      if (!exactUsage) {
+        throw new GoalConductorQuotaRefusal('goal-conductor-signed-planner-usage-invalid');
+      }
+    }
     rawOutput = result.content;
     usage = plannerUsage(result.usage);
     if (signal?.aborted) throw abortReason(signal);
   } catch (err) {
     if (signal?.aborted) throw abortReason(signal);
+    if (isGoalConductorQuotaRefusal(err)) throw err;
+    if (providerQuota) {
+      throw new GoalConductorQuotaRefusal('goal-conductor-signed-planner-provider-failed');
+    }
     const msg = err instanceof Error ? err.message : String(err);
     process.stderr.write(`[ashlr swarm] planner model call failed: ${msg} — using default plan\n`);
     return defaultPlan(goal);
@@ -381,11 +436,17 @@ export async function planSwarm(
       return withUsage(plan, usage);
     }
   } catch (parseErr) {
+    if (providerQuota) {
+      throw new GoalConductorQuotaRefusal('goal-conductor-signed-planner-output-invalid');
+    }
     const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
     process.stderr.write(`[ashlr swarm] planner parse error: ${msg} — using default plan\n`);
   }
 
   // Fall back to default
+  if (providerQuota) {
+    throw new GoalConductorQuotaRefusal('goal-conductor-signed-planner-output-invalid');
+  }
   process.stderr.write(
     `[ashlr swarm] planner could not extract a valid plan from model output — using default plan\n`,
   );
