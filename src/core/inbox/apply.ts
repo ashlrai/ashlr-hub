@@ -172,9 +172,12 @@ async function applyPatch(
   try {
     patchFile = writeTmpFile(diff);
 
-    // Apply the diff inside the isolated worktree.
+    // Apply the diff inside the isolated worktree. --3way falls back to a
+    // three-way merge (using the blob shas git diff already embeds) when the
+    // diff's base has drifted from HEAD without the edit itself conflicting —
+    // it still fails closed on a real textual conflict.
     try {
-      gitRun(tmpWorktreeDir, ['apply', '--index', patchFile]);
+      gitRun(tmpWorktreeDir, ['apply', '--3way', '--index', patchFile]);
     } catch (err) {
       applyErr = `git apply failed: ${err instanceof Error ? err.message : String(err)}`;
     }

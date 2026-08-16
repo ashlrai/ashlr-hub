@@ -646,6 +646,43 @@ describe('M86 REFUSE — self-target safety harness', () => {
     expect(loadProposal(p.id)!.status).toBe('approved');
   });
 
+  it('[11b] self-target: parity tolerates ONE transient suite failure (retry) instead of permanently refusing', async () => {
+    initRepo(tmpRepo);
+    attachOrigin(tmpRepo, 'main');
+    git(tmpRepo, ['checkout', '-b', 'work']);
+    enroll(tmpRepo);
+
+    // A marker-file trick simulates a transient/flaky failure: the FIRST
+    // invocation of `npm test` fails, the SECOND (and every one after)
+    // succeeds — modeling a one-off contention blip (lock timing, a
+    // momentarily busy resource) rather than a genuinely broken invariant.
+    // Merge-pipeline reliability: this must NOT permanently refuse the way a
+    // deterministically-red suite should.
+    const markerPath = path.join(tmpRepo, '.flaky-marker');
+    const pkg = {
+      name: '@ashlr/hub',
+      version: '1.0.0',
+      scripts: {
+        test: `node -e 'const fs=require("fs");if(fs.existsSync(${JSON.stringify(markerPath)})){process.exit(0)}else{fs.writeFileSync(${JSON.stringify(markerPath)},"1");process.exit(1)}'`,
+      },
+    };
+    fs.writeFileSync(path.join(tmpRepo, 'package.json'), JSON.stringify(pkg), 'utf8');
+    git(tmpRepo, ['add', 'package.json']);
+    git(tmpRepo, ['commit', '-m', 'self-target flaky suite']);
+    git(tmpRepo, ['push', 'origin', 'main']);
+
+    const diff = addFileDiff('docs/self-flaky.md', 'self doc');
+    const p = frontierPatch(diff);
+    const r = await autoMergeProposal(
+      p.id,
+      frontierCfg({ allowWithoutVerification: true, allowSelfMerge: true }),
+    );
+
+    expect(r.ok).toBe(true);
+    expect(r.merged).toBe(true);
+    expect(loadProposal(p.id)!.status).toBe('applied');
+  });
+
   it('[12] self-target: parity with flag-on runner throws → treated as failing suite → refuse', async () => {
     // selfEvalParity contract: a runner that throws counts as a failing suite.
     // We simulate this by having two package.json scripts: one passes flag-off

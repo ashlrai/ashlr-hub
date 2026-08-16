@@ -93,6 +93,47 @@ describe('M305 evaluateAutoMergeReadinessPreflight', () => {
     expect(r.ready).toBe(false);
     expect(r.reason).toMatch(/known verification failure/);
     expect(r.reason).toMatch(/vitest/);
+    // No failureCategory (legacy/unclassified record) → still treated as a
+    // real failure, permanent by default. Regression guard: a genuine code
+    // failure must keep accruing toward stuckPassCount/auto-archive.
+    expect(r.permanent).not.toBe(false);
+  });
+
+  it('blocks a code-category verification failure as permanent (real failure, not infra)', () => {
+    const r = evaluateAutoMergeReadinessPreflight(
+      proposal({ verifyResult: { passed: false, failed: ['typecheck'], failureCategory: 'code' } }),
+      cfg({ trustBasis: 'verification' }),
+    );
+    expect(r.ready).toBe(false);
+    expect(r.permanent).not.toBe(false);
+    expect(r.advisories).toEqual([]);
+  });
+
+  it('does NOT treat a verifier-unavailable failure as permanent (must not auto-archive on a missing tool)', () => {
+    const r = evaluateAutoMergeReadinessPreflight(
+      proposal({
+        verifyResult: {
+          passed: false,
+          failed: ["required verify 'typecheck' failed (exit 127): tsc --noEmit"],
+          failureCategory: 'tool',
+        },
+      }),
+      cfg({ trustBasis: 'verification' }),
+    );
+    expect(r.ready).toBe(false); // fail-closed: still never merges
+    expect(r.permanent).toBe(false); // but must not accrue toward auto-archive
+    expect(r.advisories.join(' ')).toMatch(/verifier-unavailable/);
+  });
+
+  it('does NOT treat a timeout/infra verification failure as permanent either', () => {
+    for (const failureCategory of ['timeout', 'infra'] as const) {
+      const r = evaluateAutoMergeReadinessPreflight(
+        proposal({ verifyResult: { passed: false, failed: ['test'], failureCategory } }),
+        cfg({ trustBasis: 'verification' }),
+      );
+      expect(r.ready).toBe(false);
+      expect(r.permanent).toBe(false);
+    }
   });
 
   it('fails closed on an unknown trust basis instead of downgrading to tier authority', () => {

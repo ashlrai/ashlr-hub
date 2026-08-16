@@ -651,7 +651,11 @@ describe('M466 durable host merge cancellation and revocation protocol foundatio
       state: 'degraded',
       reason: 'store-entry-limit-exceeded',
     });
-  });
+  // Writes 4,097 real files synchronously to exercise the store bound; the
+  // global 5s default is tight for that much real disk I/O under a loaded
+  // parallel suite (passes well under 5s in isolation). Same convention as
+  // m398/m501: vi.setConfig({ testTimeout: 20_000 }).
+  }, 20_000);
 
   it('fails closed when the local signing key generation changes', () => {
     const exactIdentity = identity();

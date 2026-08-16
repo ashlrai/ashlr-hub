@@ -983,7 +983,16 @@ describe('M47 remote merge safety', () => {
     const source = fs.readFileSync(path.resolve('src/core/inbox/merge.ts'), 'utf8');
     expect(source).not.toContain('--admin');
     expect(source).not.toContain("'--auto'");
-    expect(source).toContain('host auto-merge is disabled until durable revocation is available');
+    // M-hostmerge: the host merge hop is real now, but it must still never be
+    // an unconditional/privileged bypass — it stays behind a separate opt-in
+    // flag, the durable prepare/arm/revoke/consume authority (never the raw
+    // `true` literal it guards against), and a live kill-switch check
+    // immediately before the irreversible gh pr merge call.
+    expect(source).toContain("from '../autonomy/host-merge-revocation-protocol.js'");
+    expect(source).toContain("hostAutoMergeEnabled = autoMergeConfigValue(cfg, 'hostAutoMerge') === true");
+    expect(source).not.toContain('hostAutoMergeEnabled = true');
+    expect(source).toContain('const preMergeState = readHostMergeRevocationState(identity)');
+    expect(source).toContain("preMergeState.state !== 'healthy' || preMergeState.record.phase !== 'armed'");
   });
 
   it('evidence mode refuses local main-merge fallback before mutation', () => {

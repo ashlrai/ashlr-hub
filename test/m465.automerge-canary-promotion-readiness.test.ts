@@ -117,8 +117,8 @@ describe('M465 auto-merge canary promotion readiness', () => {
       scopeCaps: {
         maxFiles: 4,
         maxLines: 150,
-        policyMaxFiles: 10,
-        policyMaxLines: 300,
+        policyMaxFiles: 40,
+        policyMaxLines: 3000,
         source: 'explicit',
         scopePolicyDigest: scopeDigest(4, 150),
       },
@@ -240,8 +240,8 @@ describe('M465 auto-merge canary promotion readiness', () => {
       scopeCaps: {
         maxFiles: null,
         maxLines: null,
-        policyMaxFiles: 10,
-        policyMaxLines: 300,
+        policyMaxFiles: 40,
+        policyMaxLines: 3000,
         source: 'invalid',
       },
     });
