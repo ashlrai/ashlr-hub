@@ -1,4 +1,14 @@
-import { readFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -6,6 +16,7 @@ import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
 
 interface Step {
+  env?: Record<string, string>;
   name?: string;
   uses?: string;
   run?: string;
@@ -101,6 +112,9 @@ function releaseAuthorityViolations(candidate: Workflow): string[] {
   }
   const publishDownload = publishSteps.find((step) =>
     step.uses?.startsWith('actions/download-artifact@'));
+  const preparedStep = publishSteps.find((step) =>
+    step.name === 'Verify bounded prepared candidate without executing it');
+  const publishStep = publishSteps.find((step) => step.name === 'Publish to npm (provenance)');
   const verifyDownload = (verifyPublish.steps ?? []).find((step) =>
     step.uses?.startsWith('actions/download-artifact@'));
   const releaseDownload = (release.steps ?? []).find((step) =>
@@ -114,7 +128,16 @@ function releaseAuthorityViolations(candidate: Workflow): string[] {
   )) {
     violations.push('downstream jobs do not consume prepare-owned artifact identity');
   }
+  if (!preparedStep?.run?.includes(
+    "printf 'tarball=%s\\n' \"$tarball\" >> \"$GITHUB_OUTPUT\"",
+  ) || publishStep?.env?.TARBALL !== '${{ steps.prepared.outputs.tarball }}') {
+    violations.push('publisher does not consume the verifier canonical tarball output');
+  }
   if (!publishRuns.includes('EXPECTED_MANIFEST_SHA256') ||
+      !publishRuns.includes('workspace_root="$(realpath --canonicalize-existing -- .)"') ||
+      !publishRuns.includes('test -d "$root" && test ! -L "$root"') ||
+      !publishRuns.includes('root="$(realpath --canonicalize-existing -- "$root")"') ||
+      !publishRuns.includes('[[ "$root" != "$workspace_root/prepared-candidate" ]]') ||
       !publishRuns.includes('sha256sum "$manifest"') ||
       !publishRuns.includes('computed_integrity="sha512-$(openssl dgst -sha512 -binary "$tarball"') ||
       !publishRuns.includes('TAR_OPTIONS= tar -xOf "$archive" package/dist/build-identity.json') ||
@@ -133,7 +156,13 @@ function releaseAuthorityViolations(candidate: Workflow): string[] {
       !publishRuns.includes('total > 67108864') ||
       !publishRuns.includes('maximum > 8388608') ||
       !publishRuns.includes('head -c 1048577') ||
-      !publishRuns.includes('head -c 8193')) {
+      !publishRuns.includes('head -c 8193') ||
+      !publishRuns.includes('[[ "$TARBALL" != /* ]]') ||
+      !publishRuns.includes('test -f "$TARBALL" && test ! -L "$TARBALL"') ||
+      !publishRuns.includes('test "$(stat --format=\'%h\' "$TARBALL")" = "1"') ||
+      !publishRuns.includes(
+        'test "$TARBALL" = "$(realpath --canonicalize-existing -- "$TARBALL")"',
+      )) {
     violations.push('publish does not bind and inspect the prepared bytes');
   }
 
@@ -250,6 +279,32 @@ describe('release publish authority split', () => {
         '(.[0].files | map(.size) | max)',
         '(.files | map(.size) | max)',
       );
+    }],
+    ['prepared root loses canonical workspace containment', (mutated: Workflow) => {
+      const verify = mutated.jobs.publish!.steps!.find((step) =>
+        step.name === 'Verify bounded prepared candidate without executing it')!;
+      verify.run = verify.run!.replace(
+        'root="$(realpath --canonicalize-existing -- "$root")"',
+        'root="$root"',
+      );
+    }],
+    ['publisher accepts an ambiguous relative package spec', (mutated: Workflow) => {
+      const publish = mutated.jobs.publish!.steps!.find((step) =>
+        step.name === 'Publish to npm (provenance)')!;
+      publish.run = publish.run!.replace('[[ "$TARBALL" != /* ]]', 'false');
+    }],
+    ['prepared verifier emits a relative tarball basename', (mutated: Workflow) => {
+      const verify = mutated.jobs.publish!.steps!.find((step) =>
+        step.name === 'Verify bounded prepared candidate without executing it')!;
+      verify.run = verify.run!.replace(
+        "printf 'tarball=%s\\n' \"$tarball\" >> \"$GITHUB_OUTPUT\"",
+        "printf 'tarball=%s\\n' \"$tarball_name\" >> \"$GITHUB_OUTPUT\"",
+      );
+    }],
+    ['publisher ignores the verifier tarball output', (mutated: Workflow) => {
+      const publish = mutated.jobs.publish!.steps!.find((step) =>
+        step.name === 'Publish to npm (provenance)')!;
+      publish.env!.TARBALL = 'prepared-candidate/candidate.tgz';
     }],
     ['pack path normalization removed', (mutated: Workflow) => {
       const verify = mutated.jobs.publish!.steps!.find((step) =>
@@ -385,6 +440,70 @@ describe('release publish authority split', () => {
       const broken = evaluate(filter.replaceAll('.[0].files', '.files'));
       expect(broken.status).not.toBe(0);
       expect(broken.stderr).toContain('Cannot index array with string "files"');
+    },
+  );
+
+  it.runIf(process.platform === 'linux')(
+    'allows only a canonical absolute tarball to reach npm publish',
+    () => {
+      const publish = workflow.jobs.publish!.steps!.find((step) =>
+        step.name === 'Publish to npm (provenance)')!;
+      const root = mkdtempSync(join(tmpdir(), 'ashlr-m515-publish-path-'));
+      try {
+        const candidateDir = join(root, 'prepared-candidate');
+        const tarball = join(candidateDir, 'candidate.tgz');
+        const stubDir = join(root, 'bin');
+        const npmStub = join(stubDir, 'npm');
+        const argsLog = join(root, 'npm-args.bin');
+        mkdirSync(candidateDir, { mode: 0o700 });
+        mkdirSync(stubDir, { mode: 0o700 });
+        writeFileSync(tarball, 'candidate', { mode: 0o600 });
+        writeFileSync(
+          npmStub,
+          '#!/bin/bash\nset -euo pipefail\nprintf \'%s\\0\' "$@" > "$NPM_ARGS_LOG"\n',
+          { mode: 0o700 },
+        );
+        chmodSync(npmStub, 0o700);
+
+        const execute = (tarballPath: string) => spawnSync(
+          '/bin/bash',
+          ['--noprofile', '--norc', '-c', publish.run!],
+          {
+            cwd: root,
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              NPM_ARGS_LOG: argsLog,
+              PATH: `${stubDir}:${process.env.PATH ?? ''}`,
+              RELEASE_DIST_TAG: 'candidate',
+              TARBALL: tarballPath,
+            },
+          },
+        );
+
+        const relative = execute('prepared-candidate/candidate.tgz');
+        expect(relative.status).toBe(1);
+        expect(relative.stderr).toContain('path is not absolute');
+        expect(existsSync(argsLog)).toBe(false);
+
+        const absoluteTarball = realpathSync(tarball);
+        const absolute = execute(absoluteTarball);
+        expect(absolute.status, absolute.stderr).toBe(0);
+        expect(readFileSync(argsLog, 'utf8').split('\0').filter(Boolean)).toEqual([
+          'publish',
+          absoluteTarball,
+          '--ignore-scripts',
+          '--provenance',
+          '--access',
+          'public',
+          '--registry',
+          'https://registry.npmjs.org',
+          '--tag',
+          'candidate',
+        ]);
+      } finally {
+        rmSync(root, { force: true, recursive: true });
+      }
     },
   );
 

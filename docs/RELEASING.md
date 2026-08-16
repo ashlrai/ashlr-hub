@@ -219,8 +219,17 @@ verifier because two pack-report aggregate predicates addressed npm's
 one-element JSON array as an object. Registry admission and `npm publish` never
 ran; publication verification and GitHub Release creation were skipped; no
 3.2.4 package was published. Never move, delete, recreate, or reuse any failed
-tag or version. The protected 3.2.5 candidate is the only successor lane after
-the reviewed pack-report-root repair.
+tag or version. The protected lightweight tag `v3.2.5` likewise remains at
+`dd5d5f8fa25cbebd395a31971cf1e8d78c0195db`. Its 2026-08-16 workflow run
+`31934899656`, attempt 1, passed all nine native verification jobs, the signed
+no-authority canary, unprivileged prepare, and privileged registry admission.
+The single publish command then stopped before its registry request because npm
+interpreted the unprefixed relative tarball path as GitHub shorthand and its SSH
+lookup failed. Publication verification and GitHub Release creation were
+skipped; no 3.2.5 package was published. Do not rerun run `31934899656`; never
+move, delete, or recreate its tag, or reuse version 3.2.5. The reviewed
+canonical-path repair must merge first; a separate 3.2.6 metadata merge is the
+only successor lane.
 
 If **publish succeeded and only `verify_publish` or the GitHub `release` job
 failed**, first verify that npm contains the intended tag artifact from a clean

@@ -528,7 +528,14 @@ jobs:
         run: |
           set -euo pipefail
 
+          workspace_root="$(realpath --canonicalize-existing -- .)"
           root="prepared-candidate"
+          test -d "$root" && test ! -L "$root"
+          root="$(realpath --canonicalize-existing -- "$root")"
+          if [[ "$root" != "$workspace_root/prepared-candidate" ]]; then
+            echo "Prepared npm candidate root escaped the job workspace." >&2
+            exit 1
+          fi
           manifest="$root/publish-manifest.json"
           entry_count="$(find "$root" -mindepth 1 -maxdepth 1 | wc -l)"
           file_count="$(find "$root" -mindepth 1 -maxdepth 1 -type f | wc -l)"
@@ -587,6 +594,7 @@ jobs:
           tarball="$root/$tarball_name"
           pack_report="$root/$pack_name"
           test -f "$tarball" && test -f "$pack_report"
+          test "$tarball" = "$(realpath --canonicalize-existing -- "$tarball")"
           test "$(wc -c < "$tarball")" = "$(jq -er '.files.tarball.bytes' "$manifest")"
           test "$(wc -c < "$pack_report")" = "$(jq -er '.files.packReport.bytes' "$manifest")"
           test "$(sha256sum "$tarball" | cut -d ' ' -f 1)" = "$(jq -er '.files.tarball.sha256' "$manifest")"
@@ -774,6 +782,13 @@ jobs:
         run: |
           set -euo pipefail
 
+          if [[ "$TARBALL" != /* ]]; then
+            echo "Prepared npm candidate path is not absolute." >&2
+            exit 1
+          fi
+          test -f "$TARBALL" && test ! -L "$TARBALL"
+          test "$(stat --format='%h' "$TARBALL")" = "1"
+          test "$TARBALL" = "$(realpath --canonicalize-existing -- "$TARBALL")"
           npm publish "$TARBALL" \
             --ignore-scripts \
             --provenance \
