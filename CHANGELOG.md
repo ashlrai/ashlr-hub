@@ -11,6 +11,25 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+## [3.2.2] — 2026-08-15 — Portable signed-canary recovery
+
+- For candidate evaluators upgrading from public npm `latest` 3.0.1, this
+  remains the first package containing the unreleased 3.1.0, 3.2.0, and 3.2.1
+  series. Their detailed product and authority notes remain in the corresponding
+  changelog sections below.
+- Carries forward the complete 3.2.1 candidate payload and adds only the
+  signed-canary archive-mode repair: Git archive headers are bound to portable
+  0644/0755 modes, while the private 0700 observation pipeline temporarily uses
+  umask 022 and always restores its caller's restrictive umask.
+- Keeps the strict dependency-inventory verifier and all `NO_AUTHORITY` release
+  boundaries unchanged. Resident activation, automatic production effects, and
+  npm `latest` promotion remain unavailable.
+- The protected `v3.2.1` tag remains immutable at its original commit. Release
+  run `31920010042` passed all nine native verification jobs, then stopped at
+  the signed no-authority canary because npm pack reported non-portable modes;
+  preparation, npm publication, verification, and GitHub Release creation never
+  ran, and no 3.2.1 package was published.
+
 ## [3.2.1] — 2026-08-15 — Verified candidate release recovery
 
 - For candidate evaluators upgrading from public npm `latest` 3.0.1, this is
