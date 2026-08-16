@@ -11,6 +11,30 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+## [3.2.4] — 2026-08-16 — Bounded release-prepare recovery
+
+- For candidate evaluators upgrading from public npm `latest` 3.0.1, this
+  remains the first package containing the unreleased 3.1.0 through 3.2.3
+  series. Their detailed product, security, and authority notes remain in the
+  corresponding changelog sections below.
+- Carries forward the complete 3.2.3 candidate payload and adds only the
+  release-prepare policy repair: the exact-tag reusable verification gate's
+  exhaustive three-shard suite is consumed as authoritative test evidence, and
+  the redundant unsharded prepare-time suite invocation is removed. The
+  package-level `prepublishOnly` guard remains intact for direct source-tree
+  publication attempts.
+- Keeps the explicit Node 24 build, exact build identity and clean-tree checks,
+  strict script-disabled pack and artifact binding, signed-canary
+  `NO_AUTHORITY`, npm-release approval, candidate-only publication, and npm
+  `latest` baseline unchanged. Resident activation and automatic production
+  effects remain unavailable.
+- The protected `v3.2.3` tag remains immutable at its original commit. Release
+  run `31926786319` passed all nine native verification jobs and the signed
+  no-authority canary, then the unprivileged prepare job's duplicate unsharded
+  test pass reached its bounded runtime cap before packing, artifact upload, or
+  any deployment request. npm publication, publication verification, and
+  GitHub Release creation were skipped, and no 3.2.3 package was published.
+
 ## [3.2.3] — 2026-08-16 — GitHub API admission compatibility recovery
 
 - For candidate evaluators upgrading from public npm `latest` 3.0.1, this
