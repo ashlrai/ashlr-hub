@@ -74,15 +74,44 @@ jobs:
         with:
           node-version: "24.19.0"
           package-manager-cache: false
-      - name: Install pinned canary npm CLI
-        run: npm install --global npm@11.19.0 --ignore-scripts --no-audit --no-fund
+      - name: Install pinned symlink-free canary npm CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          node_bin="$(node -p "require('node:fs').realpathSync(process.execPath)")"
+          toolchain_bin="$(dirname "$node_bin")"
+          npm_shim="$toolchain_bin/npm"
+          npm_shim_target="../lib/node_modules/npm/bin/npm-cli.js"
+          test -L "$npm_shim"
+          test "$(readlink "$npm_shim")" = "$npm_shim_target"
+          npm install --global npm@11.19.0 --ignore-scripts --no-audit --no-fund --bin-links=false
+          npm_cli="$(node -p "const p=require('node:path'); p.resolve(process.argv[1],process.argv[2])" "$toolchain_bin" "$npm_shim_target")"
+          npm_root="$(dirname "$(dirname "$npm_cli")")"
+          if [[ -e "$npm_shim" || -L "$npm_shim" ]]; then
+            echo "Pinned npm installation did not remove the prior launcher." >&2
+            exit 1
+          fi
+          test -f "$npm_cli" && test ! -L "$npm_cli"
+          test "$(realpath "$npm_cli")" = "$npm_cli"
+          test "$(stat --format='%h' "$npm_cli")" = "1"
+          test "$(node "$npm_cli" --version)" = "11.19.0"
+          if find "$npm_root" -type l -print -quit | grep -q .; then
+            echo "Pinned npm runtime unexpectedly contains a symbolic link." >&2
+            exit 1
+          fi
+          ln -s "$npm_shim_target" "$npm_shim"
+          test -L "$npm_shim"
+          test "$(readlink "$npm_shim")" = "$npm_shim_target"
+          test "$(realpath "$npm_shim")" = "$npm_cli"
+          test "$(npm --version)" = "11.19.0"
+          printf 'ASHLR_RELEASE_NPM_CLI=%s\n' "$npm_cli" >> "$GITHUB_ENV"
       - name: Bind canary toolchain identity
         id: canary_toolchain
         shell: bash
         run: |
           set -euo pipefail
           node_version="$(node --version)"
-          npm_version="$(npm --version)"
+          npm_version="$(node "$ASHLR_RELEASE_NPM_CLI" --version)"
           git_version="$(git --version)"
           tar_output="$(tar --version)"
           sha256sum_output="$(sha256sum --version)"
@@ -96,7 +125,7 @@ jobs:
           printf 'tar=%s\n' "$tar_version" >> "$GITHUB_OUTPUT"
           printf 'sha256sum=%s\n' "$sha256sum_version" >> "$GITHUB_OUTPUT"
       - name: Install dependencies without lifecycle scripts
-        run: npm ci --ignore-scripts --no-audit --no-fund
+        run: node "$ASHLR_RELEASE_NPM_CLI" ci --ignore-scripts --no-audit --no-fund
       - name: Run and verify bounded NO_AUTHORITY receipt
         id: canary
         shell: bash
@@ -116,7 +145,7 @@ jobs:
             LANG="${LANG:-C.UTF-8}" \
             NPM_CONFIG_USERCONFIG="$evidence_root/npmrc" \
             PATH="$PATH" \
-            npm --silent run release:canary -- \
+            node "$ASHLR_RELEASE_NPM_CLI" --silent run release:canary -- \
             --candidate "$GITHUB_SHA" \
             --expected-revision "$GITHUB_SHA" \
             --rollback "${{ steps.revisions.outputs.rollback }}" \
@@ -235,12 +264,39 @@ jobs:
         with:
           node-version: "24.19.0"
           package-manager-cache: false
-      - name: Install pinned preparation npm CLI
-        run: npm install --global npm@11.19.0 --ignore-scripts --no-audit --no-fund
-      - name: Verify preparation npm CLI
-        run: test "$(npm --version)" = "11.19.0"
-      - run: npm ci
-      - run: npm run build
+      - name: Install pinned symlink-free preparation npm CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          node_bin="$(node -p "require('node:fs').realpathSync(process.execPath)")"
+          toolchain_bin="$(dirname "$node_bin")"
+          npm_shim="$toolchain_bin/npm"
+          npm_shim_target="../lib/node_modules/npm/bin/npm-cli.js"
+          test -L "$npm_shim"
+          test "$(readlink "$npm_shim")" = "$npm_shim_target"
+          npm install --global npm@11.19.0 --ignore-scripts --no-audit --no-fund --bin-links=false
+          npm_cli="$(node -p "const p=require('node:path'); p.resolve(process.argv[1],process.argv[2])" "$toolchain_bin" "$npm_shim_target")"
+          npm_root="$(dirname "$(dirname "$npm_cli")")"
+          if [[ -e "$npm_shim" || -L "$npm_shim" ]]; then
+            echo "Pinned npm installation did not remove the prior launcher." >&2
+            exit 1
+          fi
+          test -f "$npm_cli" && test ! -L "$npm_cli"
+          test "$(realpath "$npm_cli")" = "$npm_cli"
+          test "$(stat --format='%h' "$npm_cli")" = "1"
+          test "$(node "$npm_cli" --version)" = "11.19.0"
+          if find "$npm_root" -type l -print -quit | grep -q .; then
+            echo "Pinned npm runtime unexpectedly contains a symbolic link." >&2
+            exit 1
+          fi
+          ln -s "$npm_shim_target" "$npm_shim"
+          test -L "$npm_shim"
+          test "$(readlink "$npm_shim")" = "$npm_shim_target"
+          test "$(realpath "$npm_shim")" = "$npm_cli"
+          test "$(npm --version)" = "11.19.0"
+          printf 'ASHLR_RELEASE_NPM_CLI=%s\n' "$npm_cli" >> "$GITHUB_ENV"
+      - run: node "$ASHLR_RELEASE_NPM_CLI" ci
+      - run: node "$ASHLR_RELEASE_NPM_CLI" run build
       - name: Tag must match package.json version
         run: node scripts/check-version.mjs
       - name: Extract release notes from CHANGELOG.md
@@ -288,7 +344,7 @@ jobs:
           set -euo pipefail
           umask 077
 
-          npm run prepublishOnly
+          node "$ASHLR_RELEASE_NPM_CLI" run prepublishOnly
           jq -e \
             --arg version "$RELEASE_VERSION" \
             --arg revision "$GITHUB_SHA" \
@@ -301,7 +357,7 @@ jobs:
           test -z "$(git status --porcelain --untracked-files=normal)"
           evidence_root="$(mktemp -d "$RUNNER_TEMP/npm-release-candidate.XXXXXX")"
           pack_report="$evidence_root/npm-pack.json"
-          npm pack --json --ignore-scripts --pack-destination "$evidence_root" \
+          node "$ASHLR_RELEASE_NPM_CLI" pack --json --ignore-scripts --pack-destination "$evidence_root" \
             > "$pack_report"
           jq -e \
             --arg version "$RELEASE_VERSION" \

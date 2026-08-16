@@ -68,19 +68,39 @@ describe('release workflow signed canary gate', () => {
       uses: 'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020',
       with: { 'node-version': '24.19.0', 'package-manager-cache': false },
     });
-    expect(step('Install pinned canary npm CLI')?.run)
-      .toBe('npm install --global npm@11.19.0 --ignore-scripts --no-audit --no-fund');
+    const installNpm = String(step('Install pinned symlink-free canary npm CLI')?.run ?? '');
+    expect(installNpm).toContain(
+      'npm install --global npm@11.19.0 --ignore-scripts --no-audit --no-fund --bin-links=false',
+    );
+    expect(installNpm).toContain("realpathSync(process.execPath)");
+    expect(installNpm).toContain('npm_shim="$toolchain_bin/npm"');
+    expect(installNpm).toContain(
+      'npm_shim_target="../lib/node_modules/npm/bin/npm-cli.js"',
+    );
+    expect(installNpm).toContain('test "$(readlink "$npm_shim")" = "$npm_shim_target"');
+    expect(installNpm).toContain('[[ -e "$npm_shim" || -L "$npm_shim" ]]');
+    expect(installNpm).toContain('test -f "$npm_cli" && test ! -L "$npm_cli"');
+    expect(installNpm).toContain('test "$(realpath "$npm_cli")" = "$npm_cli"');
+    expect(installNpm).toContain('test "$(stat --format=\'%h\' "$npm_cli")" = "1"');
+    expect(installNpm).toContain('find "$npm_root" -type l -print -quit');
+    expect(installNpm).toContain('ln -s "$npm_shim_target" "$npm_shim"');
+    expect(installNpm).toContain('test "$(realpath "$npm_shim")" = "$npm_cli"');
+    expect(installNpm).toContain('test "$(npm --version)" = "11.19.0"');
+    expect(installNpm).toContain('ASHLR_RELEASE_NPM_CLI=%s');
+    expect(installNpm).not.toMatch(/\brm\b|unlink|ln\s+-(?:f|sf|fs)|--bin-links=true/u);
     const toolchain = String(step('Bind canary toolchain identity')?.run ?? '');
+    expect(toolchain).toContain('node "$ASHLR_RELEASE_NPM_CLI" --version');
     expect(toolchain).toContain('[[ "$node_version" == "v24.19.0" ]]');
     expect(toolchain).toContain('[[ "$npm_version" == "11.19.0" ]]');
     expect(toolchain).toContain("git --version");
     expect(toolchain).toContain('tar_output="$(tar --version)"');
     expect(toolchain).toContain('sha256sum_output="$(sha256sum --version)"');
     expect(step('Install dependencies without lifecycle scripts')?.run)
-      .toBe('npm ci --ignore-scripts --no-audit --no-fund');
+      .toBe('node "$ASHLR_RELEASE_NPM_CLI" ci --ignore-scripts --no-audit --no-fund');
 
     const run = String(step('Run and verify bounded NO_AUTHORITY receipt')?.run ?? '');
     expect(run).toContain('env -i');
+    expect(run).toContain('node "$ASHLR_RELEASE_NPM_CLI" --silent run release:canary');
     expect(run).toContain('--candidate "$GITHUB_SHA"');
     expect(run).toContain('--expected-revision "$GITHUB_SHA"');
     expect(run).toContain('--rollback "${{ steps.revisions.outputs.rollback }}"');

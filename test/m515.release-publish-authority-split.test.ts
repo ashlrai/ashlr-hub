@@ -66,7 +66,7 @@ function releaseAuthorityViolations(candidate: Workflow): string[] {
     violations.push('publish checks out candidate repository code');
   }
   const publishRuns = publishSteps.map((step) => step.run ?? '').join('\n');
-  if (/\bnpm\s+(?:ci|run|pack)\b|\bnode\s+(?:\.\/)?scripts\/|prepublishOnly|GITHUB_WORKSPACE/.test(
+  if (/(?:\bnpm|\bnode\s+"\$ASHLR_RELEASE_NPM_CLI")\s+(?:ci|run|pack)\b|\bnode\s+(?:\.\/)?scripts\/|prepublishOnly|GITHUB_WORKSPACE/.test(
     publishRuns,
   )) {
     violations.push('publish builds, packs, or runs candidate repository code');
@@ -171,10 +171,12 @@ describe('release publish authority split', () => {
 
     const prepareRuns = (workflow.jobs.prepare?.steps ?? [])
       .map((step) => step.run ?? '').join('\n');
-    expect(prepareRuns).toContain('npm ci');
-    expect(prepareRuns).toContain('npm run build');
-    expect(prepareRuns).toContain('npm run prepublishOnly');
-    expect(prepareRuns).toContain('npm pack --json --ignore-scripts');
+    expect(prepareRuns).toContain('node "$ASHLR_RELEASE_NPM_CLI" ci');
+    expect(prepareRuns).toContain('node "$ASHLR_RELEASE_NPM_CLI" run build');
+    expect(prepareRuns).toContain('node "$ASHLR_RELEASE_NPM_CLI" run prepublishOnly');
+    expect(prepareRuns).toContain(
+      'node "$ASHLR_RELEASE_NPM_CLI" pack --json --ignore-scripts',
+    );
 
     expect(workflow.jobs.publish).toMatchObject({
       needs: 'prepare',
