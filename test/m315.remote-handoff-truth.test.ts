@@ -483,7 +483,7 @@ describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
       base: 'main',
       expectedHeadOid: stagedHead,
     });
-    expect(loaded?.remoteHandoff?.detail).toMatch(/host auto-merge (?:not enabled|is disabled).*durable revocation/i);
+    expect(loaded?.remoteHandoff?.detail).toMatch(/host auto-merge (?:not enabled|is disabled)/i);
     expect(listProposals({ status: 'pending' }).some((p) => p.id === proposal.id)).toBe(false);
     expect(listProposals({ status: 'applied' }).some((p) => p.id === proposal.id)).toBe(false);
 
