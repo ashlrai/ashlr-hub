@@ -11,6 +11,26 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+## [3.2.3] — 2026-08-16 — GitHub API admission compatibility recovery
+
+- For candidate evaluators upgrading from public npm `latest` 3.0.1, this
+  remains the first package containing the unreleased 3.1.0 through 3.2.2
+  series. Their detailed product and authority notes remain in the corresponding
+  changelog sections below.
+- Carries forward the complete 3.2.2 candidate payload and adds only the release
+  admission compatibility repair: seven unsupported `gh api --fail` flags are
+  removed while shell-fatal API failures and all protected-branch, ancestry,
+  tag-identity, and response-schema checks remain fail-closed.
+- Keeps signed-canary `NO_AUTHORITY`, explicit environment approval, candidate-
+  only publication, and the npm `latest` baseline unchanged. Resident activation
+  and automatic production effects remain unavailable.
+- The protected `v3.2.2` tag remains immutable at its original commit. Release
+  run `31923285323` passed all nine native verification jobs and the signed
+  no-authority canary, then stopped at the first unprivileged prepare admission
+  because the runner rejected the unsupported flag. Dependency installation,
+  build, packing, npm publication, verification, and GitHub Release creation did
+  not run, and no 3.2.2 package was published.
+
 ## [3.2.2] — 2026-08-15 — Portable signed-canary recovery
 
 - For candidate evaluators upgrading from public npm `latest` 3.0.1, this
