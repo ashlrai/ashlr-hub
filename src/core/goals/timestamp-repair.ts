@@ -180,21 +180,27 @@ function stableRegularFile(stat: BigIntStats): boolean {
 function readStableFile(path: string, maximumBytes: number): Buffer {
   let fd: number | undefined;
   try {
-    const before = lstatSync(path, { bigint: true });
-    if (!stableRegularFile(before) || before.size < 1n || before.size > BigInt(maximumBytes)) {
-      throw new Error(`unsafe or oversized file: ${path}`);
+    if (typeof fsConstants.O_NOFOLLOW !== 'number') {
+      throw new Error('goal timestamp repair requires O_NOFOLLOW file custody');
     }
-    const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
-    fd = openSync(path, fsConstants.O_RDONLY | noFollow);
+    const noFollow = fsConstants.O_NOFOLLOW;
+    try {
+      fd = openSync(path, fsConstants.O_RDONLY | noFollow);
+    } catch (error) {
+      throw new Error(`unsafe or unavailable file: ${path}`, { cause: error });
+    }
     const openedBefore = fstatSync(fd, { bigint: true });
-    if (
-      !stableRegularFile(openedBefore) || !sameIdentity(before, openedBefore) ||
-      openedBefore.size < 1n || openedBefore.size > BigInt(maximumBytes) ||
-      openedBefore.size !== before.size || openedBefore.mtimeNs !== before.mtimeNs ||
-      openedBefore.ctimeNs !== before.ctimeNs
-    ) {
-      throw new Error(`file changed while opening: ${path}`);
+    if (!stableRegularFile(openedBefore) || openedBefore.size < 1n ||
+      openedBefore.size > BigInt(maximumBytes)) {
+      throw new Error(`unsafe or oversized opened file: ${path}`);
     }
+    assureDarwinSourcePath(path, 'file');
+    const namedBefore = lstatSync(path, { bigint: true });
+    if (!stableRegularFile(namedBefore) || !sameIdentity(openedBefore, namedBefore) ||
+      namedBefore.size < 1n || namedBefore.size > BigInt(maximumBytes) ||
+      namedBefore.size !== openedBefore.size || namedBefore.mtimeNs !== openedBefore.mtimeNs ||
+      namedBefore.ctimeNs !== openedBefore.ctimeNs) throw new Error(`file changed while opening: ${path}`);
+
     const raw = Buffer.alloc(Number(openedBefore.size));
     let offset = 0;
     while (offset < raw.length) {
@@ -202,16 +208,25 @@ function readStableFile(path: string, maximumBytes: number): Buffer {
       if (bytesRead <= 0) throw new Error(`short read: ${path}`);
       offset += bytesRead;
     }
+    const growthProbe = Buffer.allocUnsafe(1);
+    const grew = readSync(fd, growthProbe, 0, 1, raw.length) !== 0;
     const openedAfter = fstatSync(fd, { bigint: true });
     const namedAfter = lstatSync(path, { bigint: true });
+    assureDarwinSourcePath(path, 'file');
+    const namedAssured = lstatSync(path, { bigint: true });
     if (
-      !stableRegularFile(openedAfter) || !stableRegularFile(namedAfter) ||
-      !sameIdentity(before, openedAfter) || !sameIdentity(before, namedAfter) ||
+      grew || !stableRegularFile(openedAfter) || !stableRegularFile(namedAfter) ||
+      !stableRegularFile(namedAssured) ||
+      !sameIdentity(openedBefore, openedAfter) || !sameIdentity(openedBefore, namedAfter) ||
+      !sameIdentity(openedBefore, namedAssured) ||
       openedAfter.size < 1n || openedAfter.size > BigInt(maximumBytes) ||
       namedAfter.size < 1n || namedAfter.size > BigInt(maximumBytes) ||
-      openedAfter.size !== BigInt(raw.length) || namedAfter.size !== BigInt(raw.length) ||
-      openedAfter.mtimeNs !== before.mtimeNs || namedAfter.mtimeNs !== before.mtimeNs ||
-      openedAfter.ctimeNs !== before.ctimeNs || namedAfter.ctimeNs !== before.ctimeNs
+      namedAssured.size < 1n || namedAssured.size > BigInt(maximumBytes) ||
+      openedAfter.size !== openedBefore.size || namedAfter.size !== openedBefore.size ||
+      namedAssured.size !== openedBefore.size || openedAfter.size !== BigInt(raw.length) ||
+      openedAfter.mtimeNs !== openedBefore.mtimeNs || namedAfter.mtimeNs !== openedBefore.mtimeNs ||
+      namedAssured.mtimeNs !== openedBefore.mtimeNs || openedAfter.ctimeNs !== openedBefore.ctimeNs ||
+      namedAfter.ctimeNs !== openedBefore.ctimeNs || namedAssured.ctimeNs !== openedBefore.ctimeNs
     ) throw new Error(`file changed while reading: ${path}`);
     return raw;
   } finally {
@@ -342,9 +357,7 @@ function canonicalGoalAfterRepair(goal: Goal, updatedAt: string): Goal {
 }
 
 function readStableGoal(path: string, fileName: string): StableGoalFile {
-  assureDarwinSourcePath(path, 'file');
   const raw = readStableFile(path, MAX_GOAL_FILE_BYTES);
-  assureDarwinSourcePath(path, 'file');
   const text = raw.toString('utf8');
   if (!raw.equals(Buffer.from(text, 'utf8'))) throw new Error(`goal file is not valid UTF-8: ${fileName}`);
   let parsed: unknown;

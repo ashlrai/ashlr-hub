@@ -10,12 +10,31 @@ const fault = vi.hoisted(() => ({
   membershipTrigger: null as string | null,
   membershipTarget: null as string | null,
   membershipTriggered: false,
+  namedSwapPath: null as string | null,
+  namedSwapReplacement: null as string | null,
+  namedSwapTriggered: false,
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return {
     ...actual,
+    openSync: (
+      target: import('node:fs').PathLike,
+      flags: string | number,
+      mode?: import('node:fs').Mode,
+    ): number => {
+      const descriptor = mode === undefined
+        ? actual.openSync(target, flags)
+        : actual.openSync(target, flags, mode);
+      if (!fault.namedSwapTriggered && fault.namedSwapPath && fault.namedSwapReplacement &&
+        String(target) === fault.namedSwapPath) {
+        fault.namedSwapTriggered = true;
+        actual.renameSync(fault.namedSwapPath, `${fault.namedSwapPath}.opened`);
+        actual.renameSync(fault.namedSwapReplacement, fault.namedSwapPath);
+      }
+      return descriptor;
+    },
     linkSync: (existingPath: import('node:fs').PathLike, newPath: import('node:fs').PathLike): void => {
       if (fault.mode === 'publish' && String(newPath).includes('.timestamp-repair-artifacts/records/')) {
         throw Object.assign(new Error('simulated repair artifact publish failure'), { code: 'EIO' });
@@ -112,6 +131,9 @@ beforeEach(() => {
   fault.membershipTrigger = null;
   fault.membershipTarget = null;
   fault.membershipTriggered = false;
+  fault.namedSwapPath = null;
+  fault.namedSwapReplacement = null;
+  fault.namedSwapTriggered = false;
 });
 
 afterEach(() => {
@@ -124,11 +146,26 @@ afterEach(() => {
   fault.membershipTrigger = null;
   fault.membershipTarget = null;
   fault.membershipTriggered = false;
+  fault.namedSwapPath = null;
+  fault.namedSwapReplacement = null;
+  fault.namedSwapTriggered = false;
   process.env.HOME = originalHome;
   fs.rmSync(tmpHome, { recursive: true, force: true });
 });
 
 describe('M518 immutable artifact fault recovery', () => {
+  it('rejects a named goal replacement immediately after descriptor open', () => {
+    writeStaleGoal();
+    const target = path.join(goalDirectory(), 'fault-goal.json');
+    const replacement = path.join(tmpHome, 'replacement-goal.json');
+    fs.writeFileSync(replacement, fs.readFileSync(target), { mode: 0o600 });
+    fault.namedSwapPath = target;
+    fault.namedSwapReplacement = replacement;
+
+    expect(() => dryRunGoalTimestampRepair()).toThrow(/file changed while opening/i);
+    expect(fault.namedSwapTriggered).toBe(true);
+  });
+
   it('rejects an initially absent ancestry component replaced by a symlink before read', () => {
     const redirected = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m518-race-target-'));
     fault.raceParent = path.join(tmpHome, '.ashlr');
