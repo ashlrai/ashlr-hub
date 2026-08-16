@@ -31,6 +31,7 @@ const mockRunSwarm = vi.fn();
 const mockAssertMayMutate = vi.fn();
 const mockLoadGoal = vi.fn();
 const mockUpdateMilestoneStatus = vi.fn();
+const mockClaimGoalMilestoneIfCurrent = vi.fn();
 const mockListProposals = vi.fn();
 const mockLoadProposal = vi.fn();
 
@@ -45,6 +46,7 @@ vi.mock('../src/core/sandbox/policy.js', () => ({
 vi.mock('../src/core/goals/store.js', () => ({
   loadGoal: (...args: unknown[]) => mockLoadGoal(...args),
   updateMilestoneStatus: (...args: unknown[]) => mockUpdateMilestoneStatus(...args),
+  claimGoalMilestoneIfCurrent: (...args: unknown[]) => mockClaimGoalMilestoneIfCurrent(...args),
 }));
 
 vi.mock('../src/core/inbox/store.js', () => ({
@@ -151,6 +153,7 @@ beforeEach(() => {
   mockAssertMayMutate.mockReset();
   mockLoadGoal.mockReset();
   mockUpdateMilestoneStatus.mockReset();
+  mockClaimGoalMilestoneIfCurrent.mockReset();
   mockListProposals.mockReset();
   mockLoadProposal.mockReset();
 
@@ -160,6 +163,11 @@ beforeEach(() => {
   mockUpdateMilestoneStatus.mockImplementation(() => makeGoal({
     milestones: [makeMilestone({ status: 'in-progress' })],
   }));
+  mockClaimGoalMilestoneIfCurrent.mockReturnValue({
+    claimed: true,
+    reason: 'claimed',
+    goal: makeGoal({ milestones: [makeMilestone({ status: 'in-progress' })] }),
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -248,6 +256,38 @@ describe('advanceGoal — SANDBOXED + PROPOSAL-ONLY', () => {
     expect(opts.sandbox).toBe(true);
     expect(opts.requireSandbox).toBe(true);
     expect(opts.propose).toBe(true);
+  });
+
+  it('threads signed quota authority with the opaque attempt run id and no capture', async () => {
+    mockLoadGoal.mockReturnValue(makeGoal());
+    mockAssertMayMutate.mockImplementation(() => {});
+    mockRunSwarm.mockResolvedValue(makeSwarmRun({ status: 'failed' }));
+    const providerQuota = {
+      attemptId: `goal-attempt-${'7'.repeat(64)}`,
+      claimNext: vi.fn(() => 'opaque-ticket'),
+    };
+
+    await advanceGoal('g1', makeCfg(), {
+      expectedGoalDigest: 'a'.repeat(64),
+      expectedMilestoneId: 'g1-m0',
+      providerQuota,
+      allowCloud: false,
+    });
+
+    expect(mockClaimGoalMilestoneIfCurrent).toHaveBeenCalledWith({
+      goalId: 'g1',
+      milestoneId: 'g1-m0',
+      expectedGoalDigest: 'a'.repeat(64),
+    });
+    expect(mockRunSwarm.mock.calls[0]?.[2]).toEqual(expect.objectContaining({
+      runId: providerQuota.attemptId,
+      providerQuota,
+      noCapture: true,
+      allowCloud: false,
+      sandbox: true,
+      requireSandbox: true,
+      propose: true,
+    }));
   });
 
   it('links swarmId + the PENDING proposalId and sets milestone "proposed" on success', async () => {

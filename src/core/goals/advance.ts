@@ -601,6 +601,11 @@ export async function advanceGoal(
           budget,
           allowCloud: opts?.allowCloud ?? false,
           project: repo,
+          ...(opts?.providerQuota ? {
+            runId: opts.providerQuota.attemptId,
+            providerQuota: opts.providerQuota,
+            noCapture: true,
+          } : {}),
         },
         sink ?? (() => {}),
       );

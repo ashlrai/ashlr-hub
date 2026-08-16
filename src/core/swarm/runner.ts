@@ -67,6 +67,7 @@ import { scrubSecrets as scrubSensitiveText } from '../util/scrub.js';
 import { mergeDelegationScope, summarizeDelegationScope } from '../run/delegation-scope.js';
 import { assertSafeExecutionIdentity } from '../fleet/attempt-identity.js';
 import { runEventSummary } from '../learning/causal.js';
+import { isGoalConductorQuotaRefusal } from '../goals/conductor-quota.js';
 import {
   PROPOSAL_PERSISTENCE_MISMATCH_REASON,
   PROPOSAL_PERSISTENCE_MISMATCH_RESULT,
@@ -660,6 +661,11 @@ async function executeTask(
       // subprocess. That single assignment is the load-bearing guard; this task
       // sets nothing per-call.
       noMemory: false,
+      ...(opts.providerQuota ? {
+        noMemory: true,
+        noCapture: true,
+        providerQuota: opts.providerQuota,
+      } : {}),
       ...(opts.signal ? { signal: opts.signal } : {}),
       ...(taskDelegationScope ? { delegationScope: taskDelegationScope } : {}),
     });
@@ -680,6 +686,7 @@ async function executeTask(
       taskRun.error = `Task ended with status: ${taskResult.status}`;
     }
   } catch (err) {
+    if (isGoalConductorQuotaRefusal(err)) throw err;
     if (opts.signal?.aborted) {
       taskRun.status = 'cancelled';
       taskRun.error = 'Cancelled by the swarm owner.';
@@ -1940,7 +1947,13 @@ async function runSwarmInternal(
       // if needed. The planner accepts undefined specBody and works goal-only.
       const specBody: string | undefined = undefined;
 
-      const plan = await planSwarm({ goal: input.goal, specBody }, cfg, opts.signal);
+      const plan = await planSwarm(
+        { goal: input.goal, specBody },
+        cfg,
+        opts.signal,
+        opts.providerQuota,
+        opts.providerQuota ? run.budget.maxTokens : undefined,
+      );
       if (plan.usage !== undefined) {
         run.usage = addUsage(run.usage, plan.usage);
       }
@@ -1976,7 +1989,9 @@ async function runSwarmInternal(
         return run;
       }
       run.status = 'failed';
-      run.result = `Planning failed: ${err instanceof Error ? err.message : String(err)}`;
+      run.result = isGoalConductorQuotaRefusal(err)
+        ? `Swarm refused: ${err.message}. No unreserved provider inference was attempted.`
+        : `Planning failed: ${err instanceof Error ? err.message : String(err)}`;
       maybePersist(run);
       emitLog(sink, run.result);
       // M21: clean up sandbox even on planning failure (no diff to capture yet).
@@ -2114,7 +2129,9 @@ async function runSwarmInternal(
   } catch (err) {
     // Unexpected error in the phase loop — surface cleanly.
     run.status = 'failed';
-    run.result = `Swarm failed: ${err instanceof Error ? err.message : String(err)}`;
+    run.result = isGoalConductorQuotaRefusal(err)
+      ? `Swarm refused: ${err.message}. No unreserved provider inference was attempted.`
+      : `Swarm failed: ${err instanceof Error ? err.message : String(err)}`;
     persist(run);
     emitLog(sink, run.result);
     // M21: capture diff of any partial work, then remove sandbox.
@@ -2210,6 +2227,25 @@ export async function runSwarm(
     emitLog(sink, refused.result ?? 'Swarm execution authority unavailable.');
     return refused;
   };
+
+  if (opts.providerQuota) {
+    const signedBudget = opts.budget;
+    const invalidSignedShape =
+      opts.allowCloud === true || signedBudget?.allowCloud === true ||
+      opts.background === true || opts.dryRun === true || opts.approved === true ||
+      opts.resumeId !== undefined || opts.runId !== opts.providerQuota.attemptId ||
+      !Number.isSafeInteger(signedBudget?.maxSteps) ||
+      (signedBudget?.maxSteps ?? 0) < 1 || (signedBudget?.maxSteps ?? 0) > 12 ||
+      !Number.isSafeInteger(signedBudget?.maxTokens) ||
+      (signedBudget?.maxTokens ?? 0) < 1 || (signedBudget?.maxTokens ?? 0) > 50_000;
+    if (invalidSignedShape) {
+      return refuseAuthority(
+        opts.providerQuota.attemptId,
+        'signed provider quota requires a fresh foreground builtin run with the bounded one-shot budget',
+      );
+    }
+    opts = { ...opts, allowCloud: false, noCapture: true };
+  }
 
   let persistenceFailed = false;
   const execute = async (): Promise<SwarmRun> => {

@@ -456,6 +456,78 @@ describe('runSwarm — owner cancellation', () => {
   });
 });
 
+describe('runSwarm — signed provider quota authority', () => {
+  it('threads one non-serializable session to planning and nested builtin runs', async () => {
+    const providerQuota = {
+      attemptId: `goal-attempt-${'6'.repeat(64)}`,
+      claimNext: vi.fn(() => 'opaque-ticket'),
+    };
+    mockPlanSwarm.mockResolvedValueOnce(minimalPlan('signed quota threading'));
+
+    const result = await runSwarm(
+      { goal: 'signed quota threading' },
+      makeConfig(),
+      {
+        runId: providerQuota.attemptId,
+        providerQuota,
+        noCapture: true,
+        allowCloud: false,
+        budget: { maxTokens: 50_000, maxSteps: 12, allowCloud: false },
+        parallel: 1,
+      },
+      nullSink,
+    );
+
+    expect(result.id).toBe(providerQuota.attemptId);
+    expect(mockPlanSwarm).toHaveBeenCalledWith(
+      { goal: 'signed quota threading', specBody: undefined },
+      expect.anything(),
+      undefined,
+      providerQuota,
+      50_000,
+    );
+    expect(mockRunGoal).toHaveBeenCalled();
+    for (const call of mockRunGoal.mock.calls) {
+      expect(call[2]).toEqual(expect.objectContaining({
+        engine: 'builtin',
+        allowCloud: false,
+        noMemory: true,
+        noCapture: true,
+        providerQuota,
+      }));
+    }
+  });
+
+  it('turns a typed nested quota refusal into a terminal swarm failure with no later task', async () => {
+    const { GoalConductorQuotaRefusal } = await import('../src/core/goals/conductor-quota.js');
+    const providerQuota = {
+      attemptId: `goal-attempt-${'5'.repeat(64)}`,
+      claimNext: vi.fn(() => 'opaque-ticket'),
+    };
+    mockPlanSwarm.mockResolvedValueOnce(minimalPlan('quota exhausted'));
+    mockRunGoal.mockRejectedValueOnce(
+      new GoalConductorQuotaRefusal('goal-conductor-provider-ticket-cap-exhausted'),
+    );
+
+    const result = await runSwarm(
+      { goal: 'quota exhausted' },
+      makeConfig(),
+      {
+        runId: providerQuota.attemptId,
+        providerQuota,
+        noCapture: true,
+        allowCloud: false,
+        budget: { maxTokens: 50_000, maxSteps: 12, allowCloud: false },
+      },
+      nullSink,
+    );
+
+    expect(result.status).toBe('failed');
+    expect(result.result).toMatch(/refused.*ticket-cap-exhausted.*no unreserved provider inference/i);
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // --dry-run — plan without executing
 // ---------------------------------------------------------------------------
