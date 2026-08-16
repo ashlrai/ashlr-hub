@@ -118,7 +118,13 @@ import {
   type GeneratedRepairRouteFeasibility,
   type GeneratedRepairRouteReason,
 } from '../fleet/router.js';
-import { withinLimit, recordUse } from '../fleet/quota.js';
+import {
+  recordUse,
+  reserveFleetQuotaUse,
+  reserveFleetQuotaUses,
+  withinLimit,
+  type FleetQuotaReservationResult,
+} from '../fleet/quota.js';
 import { engineTierOf } from '../run/sandboxed-engine.js';
 import { resolveEngineSpec } from '../run/engine-registry.js';
 import { subscriptionAllows, isSubscriptionEngine } from '../fleet/subscription-usage.js'; // M80
@@ -278,6 +284,11 @@ import {
 import { writePrivateFileAtomically } from '../util/private-file-write.js';
 import { readStableRegularFile } from '../util/stable-file-read.js';
 import { fsyncDirectory } from '../util/durability.js';
+
+type FleetQuotaReservationRefusal = Extract<
+  FleetQuotaReservationResult,
+  { launchAuthorized: false }
+>;
 
 const GENERATED_REPAIR_RESERVATION_SCHEMA_VERSION = 1;
 const GENERATED_REPAIR_RESERVATION_MAX_BYTES = 2_048;
@@ -2228,6 +2239,8 @@ function noProposalProductionReason(production: DaemonDispatchProduction | undef
 }
 
 function noProposalOutcomeFromReason(reason: string): DaemonDispatchProductionOutcome {
+  if (/\bquota-reservation-refused\b/i.test(reason)) return 'gate-blocked';
+  if (/\b(provider-dispatch|candidate configuration refused)\b/i.test(reason)) return 'gate-blocked';
   if (/\bempty[- ]diff\b/i.test(reason)) return 'empty-diff';
   if (/\b(trivial-proposal|trivial|completeness-gate|gate-blocked|gate)\b/i.test(reason)) return 'gate-blocked';
   if (/\b(sandbox-unavailable|sandbox)\b/i.test(reason)) return 'sandbox-failed';
@@ -2270,6 +2283,25 @@ function bestOfNCandidateProduction(
     ...(metadata?.diffFiles !== undefined ? { diffFiles: metadata.diffFiles } : {}),
     ...(metadata?.diffLines !== undefined ? { diffLines: metadata.diffLines } : {}),
   };
+
+  if (candidate.quotaReservation && !candidate.quotaReservation.launchAuthorized) {
+    return {
+      production: {
+        outcome: 'gate-blocked',
+        reason: `quota reservation refused: ${candidate.quotaReservation.kind}`,
+        ...diff,
+      },
+    };
+  }
+  if (candidate.providerDispatchAttempted === false && candidate.error) {
+    return {
+      production: {
+        outcome: noProposalOutcomeFromReason(candidate.error),
+        reason: candidate.error,
+        ...diff,
+      },
+    };
+  }
 
   switch (candidate.proposalDisposition?.kind) {
     case 'verification-rejected':
@@ -2441,6 +2473,8 @@ function bestOfNAuthoritativeNoWinnerProduction(
     if (
       error &&
       error !== 'cancelled' &&
+      candidate.providerDispatchAttempted !== false &&
+      candidate.quotaReservation?.launchAuthorized !== false &&
       !candidateErrorDuplicatesProposalOutcome(error, candidate.proposalOutcome)
     ) {
       addAuthority({ outcome: 'engine-failed', reason: error }, `error:${error}`);
@@ -5425,6 +5459,38 @@ export async function tick(
       skipReason: 'queue-lease-lost',
     }),
   });
+  const quotaRefusalOutcome = (
+    item: WorkItem,
+    attemptId: string,
+    backend: EngineId,
+    quota: FleetQuotaReservationRefusal,
+  ): ItemOutcome => {
+    const evidence = [
+      typeof quota.used === 'number' ? `used=${quota.used}` : null,
+      typeof quota.limit === 'number' ? `limit=${quota.limit}` : null,
+      quota.reservationConsumed === true ? 'reservation-consumed=true' : null,
+    ].filter((value): value is string => value !== null).join(', ');
+    const detail = evidence ? `${quota.kind} (${evidence})` : quota.kind;
+    return {
+      item,
+      spentUsd: 0,
+      dispatched: false,
+      dispatch: dispatchTrace(item, {
+        backend,
+        tier: engineTierOf(backend, routingCfg),
+        assignedBy: 'quota-reservation',
+        reason: `provider dispatch refused by durable quota authority: ${detail}`,
+        dispatched: false,
+        runId: attemptId,
+        trajectoryId: `run:${attemptId}`,
+        skipReason: `quota-${quota.kind}`,
+        production: {
+          outcome: 'gate-blocked',
+          reason: `quota reservation refused: ${detail}`,
+        },
+      }),
+    };
+  };
   const tasks: Array<{ tier: 'local' | 'cloud'; run: (assignedBackend?: EngineId, assignedReason?: string, assignedModel?: string | null) => Promise<ItemOutcome> }> = workedSet.map((item, _taskIdx) => {
     const attemptId = attemptIds.get(item.id)!;
     const leaseController = leaseAbortControllers.get(item.id)!;
@@ -6234,6 +6300,8 @@ export async function tick(
           }
         }
         let bonBillable: number | null = null;
+        let bonLaunchMarked = false;
+        let bonDispatchStarted = false;
 
         let runState: Awaited<ReturnType<typeof runGoal>>;
         if (fanOut) {
@@ -6244,15 +6312,6 @@ export async function tick(
           const launch = beginRejectedCaptureRecoveryDispatch(item, () => {
             if (!stillOwnsTick()) throw new Error('daemon lock ownership lost before best-of-n launch');
             beginQueueExecution();
-            recordUse(backend!);
-            recordDispatchStartAgentAction(item, {
-              ts: new Date().toISOString(), machineId, runId: attemptId, backend: backend!,
-              tier: backendTier, model: selectedModel, assignedBy, reason: assignmentReason, mode: 'best-of-n',
-            });
-            if (!stillOwnsTick()) throw new Error('daemon lock ownership lost before best-of-n producer start');
-            if (!markGeneratedRepairExecutionLaunched(item)) {
-              throw new Error('generated repair launch reservation could not be persisted');
-            }
             return runBestOfN(item, routingCfg, {
               n: bestOfN, engine: backend, model: selectedModel,
               budget: itemBudget,
@@ -6261,12 +6320,40 @@ export async function tick(
               workItemId: item.id, workItemGenerationId, workSource: item.source,
               delegationScope, attemptId, shadowSkillCards, shadowSkillSelectedAt,
               signal: dispatchSignal,
+              reserveQuotaUses: (requests) => reserveFleetQuotaUses(requests, routingCfg),
+              providerDispatchStillAuthorized: () =>
+                stillOwnsTick() && !stopRequested() && !dispatchSignal.aborted,
+              beforeCandidateProviderDispatch: () => {
+                if (!stillOwnsTick() || stopRequested() || dispatchSignal.aborted) return false;
+                if (!bonLaunchMarked) {
+                  if (!markGeneratedRepairExecutionLaunched(item)) return false;
+                  bonLaunchMarked = true;
+                }
+                return stillOwnsTick() && !stopRequested() && !dispatchSignal.aborted;
+              },
+              onProviderDispatchStarted: (candidateBackend) => {
+                if (!bonDispatchStarted) {
+                  recordDispatchStartAgentAction(item, {
+                    ts: new Date().toISOString(), machineId, runId: attemptId, backend: backend!,
+                    tier: backendTier, model: selectedModel, assignedBy,
+                    reason: assignmentReason, mode: 'best-of-n',
+                  });
+                  bonDispatchStarted = true;
+                }
+                recordUse(candidateBackend);
+              },
             });
           });
           if (!launch.authorized) return authorityUnavailableOutcome(item, attemptId);
-          dispatched = true;
-          backendDispatch[backend!] = (backendDispatch[backend!] ?? 0) + 1;
           const bonResult = await launch.value;
+          const attemptedCandidates = bonResult.candidates.filter(
+            (candidate) => candidate.providerDispatchAttempted === true,
+          );
+          dispatched = attemptedCandidates.length > 0;
+          for (const candidate of attemptedCandidates) {
+            const candidateBackend = candidate.engine ?? backend!;
+            backendDispatch[candidateBackend] = (backendDispatch[candidateBackend] ?? 0) + 1;
+          }
           bonBillable = bonResult.critique.billableCostUsd ?? 0;
           if (!stillOwnsTick()) {
             swarmSpent = bonBillable;
@@ -6274,14 +6361,14 @@ export async function tick(
             return {
               item,
               spentUsd: swarmSpent,
-              dispatched: true,
+              dispatched,
               dispatch: dispatchTrace(item, {
                 backend,
                 tier: backendTier,
                 model: selectedModel,
                 assignedBy,
                 reason: assignmentReason,
-                dispatched: true,
+                dispatched,
                 spentUsd: swarmSpent,
                 runId: attemptId,
                 trajectoryId: `run:${attemptId}`,
@@ -6311,6 +6398,17 @@ export async function tick(
               : shadowOnly
                 ? bestOfNShadowOnlyProduction(bestOfN)
                 : bestOfNNoWinnerProduction(bestOfN));
+            const quotaRefusal = bonResult.candidates.find(
+              (candidate) => candidate.quotaReservation && !candidate.quotaReservation.launchAuthorized,
+            )?.quotaReservation;
+            if (!dispatched && quotaRefusal?.launchAuthorized === false) {
+              return quotaRefusalOutcome(
+                item,
+                attemptId,
+                quotaRefusal.backend ?? backend!,
+                quotaRefusal,
+              );
+            }
             audit({
               action: 'daemon:no-proposal',
               repo: item.repo,
@@ -6321,14 +6419,14 @@ export async function tick(
             return {
               item,
               spentUsd: swarmSpent,
-              dispatched: true,
+              dispatched,
               dispatch: dispatchTrace(item, {
                 backend,
                 tier: backendTier,
                 model: selectedModel,
                 assignedBy,
                 reason: `${assignmentReason}; best-of-${bestOfN}: all candidates empty`,
-                dispatched: true,
+                dispatched,
                 spentUsd: swarmSpent,
                 runId: attemptId,
                 trajectoryId: `run:${attemptId}`,
@@ -6347,7 +6445,10 @@ export async function tick(
           const launch = beginRejectedCaptureRecoveryDispatch(item, () => {
             if (!stillOwnsTick()) throw new Error('daemon lock ownership lost before direct launch');
             beginQueueExecution();
-            recordUse(backend!);
+            const quota = reserveFleetQuotaUse(backend!, routingCfg, attemptId);
+            if (!quota.launchAuthorized) {
+              return { kind: 'quota-refused' as const, quota };
+            }
             recordDispatchStartAgentAction(item, {
               ts: new Date().toISOString(), machineId, runId: attemptId, backend: backend!,
               tier: backendTier, model: selectedModel, assignedBy, reason: assignmentReason, mode: 'single',
@@ -6356,18 +6457,23 @@ export async function tick(
             if (!markGeneratedRepairExecutionLaunched(item)) {
               throw new Error('generated repair launch reservation could not be persisted');
             }
-            return runGoal(goal, dispatchCfg, {
+            const run = runGoal(goal, dispatchCfg, {
               engine: backend, sandboxEngine: true, requireSandbox: true, cwd: item.repo,
               budget: itemBudget, tools: true, noMemory: false, runId: attemptId,
               ...(selectedModel ? { model: selectedModel } : {}),
               workItemId: item.id, workItemGenerationId, workSource: item.source, delegationScope,
               signal: dispatchSignal,
             });
+            recordUse(backend!);
+            return { kind: 'started' as const, run };
           });
           if (!launch.authorized) return authorityUnavailableOutcome(item, attemptId);
+          if (launch.value.kind === 'quota-refused') {
+            return quotaRefusalOutcome(item, attemptId, backend!, launch.value.quota);
+          }
           dispatched = true;
           backendDispatch[backend!] = (backendDispatch[backend!] ?? 0) + 1;
-          runState = await launch.value;
+          runState = await launch.value.run;
           if (!stillOwnsTick()) {
             swarmSpent = isSubscriptionEngine(backend ?? 'builtin') ? 0 : (runState.usage?.estCostUsd ?? 0);
             tickSpent += swarmSpent;

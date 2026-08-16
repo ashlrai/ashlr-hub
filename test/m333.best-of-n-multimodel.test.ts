@@ -473,6 +473,135 @@ describe('M333 — fan-out containment', () => {
 });
 
 describe('M333 — candidate specs', () => {
+  it('atomically reserves actual candidate engines and refuses every runner when quota denies', async () => {
+    const cli = makeSandboxMock(0.1, 'quota-cli');
+    const api = makeSandboxMock(0.0, 'quota-api');
+    const h = await harness({ cli: cli.fn, api: api.fn });
+    const attemptId = 'attempt-22222222-2222-4222-8222-222222222222' as const;
+    const reserveQuotaUses = vi.fn(() => ({
+      kind: 'exhausted' as const,
+      launchAuthorized: false as const,
+      backend: 'claude' as const,
+      used: 1,
+      limit: 1,
+    }));
+    const beforeProviderDispatch = vi.fn(() => true);
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 2,
+      attemptId,
+      candidates: [
+        { engine: 'claude' as never, model: 'claude-sonnet-5' },
+        { engine: 'local-coder' as never, model: 'qwen3-coder-next' },
+      ],
+      reserveQuotaUses,
+      beforeProviderDispatch,
+    });
+
+    expect(reserveQuotaUses).toHaveBeenCalledOnce();
+    expect(reserveQuotaUses).toHaveBeenCalledWith([
+      { backend: 'claude', dispatchId: deriveCandidateAttemptIdentity(attemptId, 0) },
+      { backend: 'local-coder', dispatchId: deriveCandidateAttemptIdentity(attemptId, 1) },
+    ]);
+    expect(beforeProviderDispatch).not.toHaveBeenCalled();
+    expect(cli.fn).not.toHaveBeenCalled();
+    expect(api.fn).not.toHaveBeenCalled();
+    expect(result.winner).toBeUndefined();
+    expect(result.candidates).toHaveLength(2);
+    expect(result.candidates.every((candidate) =>
+      candidate.providerDispatchAttempted === false &&
+      candidate.quotaReservation?.launchAuthorized === false &&
+      candidate.error === 'quota-reservation-refused:exhausted')).toBe(true);
+  });
+
+  it('runs the final per-candidate fence after durable quota admission and adjacent to runners', async () => {
+    const order: string[] = [];
+    const cliBase = makeSandboxMock(0.1, 'quota-order-cli');
+    const apiBase = makeSandboxMock(0.0, 'quota-order-api');
+    const cli = vi.fn(async (...args: Parameters<typeof cliBase.fn>) => {
+      order.push('runner');
+      return cliBase.fn(...args);
+    });
+    const api = vi.fn(async (...args: Parameters<typeof apiBase.fn>) => {
+      order.push('runner');
+      return apiBase.fn(...args);
+    });
+    const h = await harness({ cli, api });
+    const reserveQuotaUses = vi.fn((requests: Array<{ backend: 'claude' | 'local-coder' }>) => {
+      order.push('reserve');
+      return {
+        kind: 'reserved' as const,
+        launchAuthorized: true as const,
+        reservations: requests.map(({ backend }) => ({
+          backend,
+          status: 'reserved' as const,
+          used: 1,
+          limit: 4,
+        })),
+      };
+    });
+    const beforeProviderDispatch = vi.fn(() => {
+      order.push('preflight');
+      return true;
+    });
+    const providerDispatchStillAuthorized = vi.fn(() => {
+      order.push('still-authorized');
+      return true;
+    });
+    const beforeCandidateProviderDispatch = vi.fn(() => {
+      order.push('candidate-admit');
+      return true;
+    });
+    const onProviderDispatchStarted = vi.fn(() => {
+      order.push('started');
+    });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 2,
+      candidates: [
+        { engine: 'claude' as never },
+        { engine: 'local-coder' as never },
+      ],
+      reserveQuotaUses,
+      beforeProviderDispatch,
+      providerDispatchStillAuthorized,
+      beforeCandidateProviderDispatch,
+      onProviderDispatchStarted,
+    });
+
+    expect(order.slice(0, 2)).toEqual(['reserve', 'preflight']);
+    expect(order.slice(2)).toEqual([
+      'still-authorized', 'candidate-admit', 'still-authorized', 'runner', 'started',
+      'still-authorized', 'candidate-admit', 'still-authorized', 'runner', 'started',
+    ]);
+    expect(beforeProviderDispatch).toHaveBeenCalledOnce();
+    expect(beforeCandidateProviderDispatch).toHaveBeenCalledTimes(2);
+    expect(onProviderDispatchStarted).toHaveBeenCalledTimes(2);
+    expect(result.candidates.every((candidate) =>
+      candidate.providerDispatchAttempted === true &&
+      candidate.quotaReservation?.launchAuthorized === true)).toBe(true);
+  });
+
+  it('fails malformed quota authority closed before provider contact', async () => {
+    const cli = makeSandboxMock(0.1, 'quota-malformed-cli');
+    const api = makeSandboxMock(0.0, 'quota-malformed-api');
+    const h = await harness({ cli: cli.fn, api: api.fn });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 2,
+      candidates: [
+        { engine: 'claude' as never },
+        { engine: 'local-coder' as never },
+      ],
+      reserveQuotaUses: (() => ({ kind: 'reserved', launchAuthorized: true })) as never,
+    });
+
+    expect(cli.fn).not.toHaveBeenCalled();
+    expect(api.fn).not.toHaveBeenCalled();
+    expect(result.candidates.every((candidate) =>
+      candidate.error === 'quota-reservation-refused:invalid')).toBe(true);
+  });
+
   it('observes signed cards per candidate with child identity and final engine/model', async () => {
     const cli = makeSandboxMock(0.1, 'cli');
     const api = makeSandboxMock(0.1, 'api');
@@ -689,6 +818,63 @@ describe('M333 — candidate specs', () => {
         won: false,
       })],
     }));
+  });
+
+  it('refuses quota before a shadow inventory request or provider runner', async () => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const api = makeSandboxMock(0.0, 'api');
+    const h = await harness({ cli: cli.fn, api: api.fn, draftMode: true });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 1,
+      candidates: [{
+        engine: 'local-coder',
+        model: 'nemotron-shadow:exact',
+        shadow: { enabled: true, artifactDigest: `sha256:${'a'.repeat(64)}` },
+      }],
+      reserveQuotaUses: () => ({
+        kind: 'exhausted', launchAuthorized: false, backend: 'local-coder', used: 1, limit: 1,
+      }),
+    });
+
+    expect(result.winner).toBeUndefined();
+    expect(result.candidates[0]).toMatchObject({
+      providerDispatchAttempted: false,
+      error: 'quota-reservation-refused:exhausted',
+    });
+    expect(h.verifyOllamaModelIdentity).not.toHaveBeenCalled();
+    expect(h.createSandbox).not.toHaveBeenCalled();
+    expect(api.fn).not.toHaveBeenCalled();
+  });
+
+  it('does not start post-inference shadow verification after final authority is lost', async () => {
+    let authorized = true;
+    const cli = makeSandboxMock(0.1, 'cli');
+    const apiBase = makeSandboxMock(0.0, 'api');
+    const api = vi.fn(async (...args: Parameters<typeof apiBase.fn>) => {
+      const result = await apiBase.fn(...args);
+      authorized = false;
+      return result;
+    });
+    const h = await harness({ cli: cli.fn, api, draftMode: true });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 1,
+      candidates: [{
+        engine: 'local-coder',
+        model: 'nemotron-shadow:exact',
+        shadow: { enabled: true, artifactDigest: `sha256:${'a'.repeat(64)}` },
+      }],
+      providerDispatchStillAuthorized: () => authorized,
+    });
+
+    expect(api).toHaveBeenCalledOnce();
+    expect(h.verifyOllamaModelIdentity).toHaveBeenCalledOnce();
+    expect(result.candidates[0]).toMatchObject({
+      providerDispatchAttempted: true,
+      shadowIdentityStatus: 'refused',
+      error: 'shadow identity refused: final authority lost before post-inference verification',
+    });
   });
 
   it('refuses a shadow before provider contact when draft-only capture primitives are unavailable', async () => {
@@ -919,6 +1105,8 @@ describe('M333 — candidate specs', () => {
     expect(result.candidates).toHaveLength(2);
     expect(result.candidates.every((candidate) =>
       candidate.error === 'candidate configuration refused: explicit bestOfNCandidates refused')).toBe(true);
+    expect(result.candidates.every((candidate) =>
+      candidate.providerDispatchAttempted === false)).toBe(true);
     expect(cli.fn).not.toHaveBeenCalled();
     expect(api.fn).not.toHaveBeenCalled();
     expect(h.createSandbox).not.toHaveBeenCalled();

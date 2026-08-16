@@ -774,11 +774,11 @@ describe('M200 [B] quota — evalQuota three-level thresholds for nim', () => {
     expect(_evalQuota('nim' as never, cfg)).toBe('over');
   });
 
-  it('[B-Q8] nim cap=0 (nonsensical) → ok (disabled/unlimited per quota.ts contract)', () => {
+  it('[B-Q8] nim cap=0 (nonsensical) → over because launch authority is invalid', () => {
     writeQuota(nimEvents(1));
 
     const cfg = nimLimitCfg(0, '1h');
-    expect(_evalQuota('nim' as never, cfg)).toBe('ok');
+    expect(_evalQuota('nim' as never, cfg)).toBe('over');
   });
 });
 

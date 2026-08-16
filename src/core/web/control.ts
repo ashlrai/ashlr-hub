@@ -30,7 +30,7 @@ import {
   type DaemonSourceQuality,
   type PublicDaemonObservation,
 } from '../daemon/public-observation.js';
-import { usesInWindow, evalQuota, windowToMs } from '../fleet/quota.js';
+import { usesInWindow, evalFleetQuotaAuthority, windowToMs } from '../fleet/quota.js';
 import { resolveUsageWindows, type UsageWindow, type ProviderLimitEntry } from '../observability/limits.js';
 import { loadBacklog } from '../portfolio/backlog.js';
 import { readCodexRateLimits } from '../observability/codex-source.js';
@@ -365,8 +365,11 @@ function buildLimits(cfg: AshlrConfig): ControlLimit[] {
     for (const [backend, limit] of Object.entries(rawLimits)) {
       if (!limit) continue;
       const windowMs = windowToMs(limit.window);
+      // `used` remains actual provider-attempt telemetry for compatibility;
+      // standing comes from the fail-closed reservation authority and can be
+      // over even when a conservatively consumed slot never reached a provider.
       const used = usesInWindow(backend as never, windowMs);
-      const standing = evalQuota(backend as never, cfg);
+      const standing = evalFleetQuotaAuthority(backend as never, cfg);
       result.push({ backend, window: limit.window, max: limit.max, used, standing });
     }
     return result;

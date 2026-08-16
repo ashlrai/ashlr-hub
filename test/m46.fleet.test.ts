@@ -14,7 +14,18 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -22,12 +33,24 @@ import type { AshlrConfig, EngineId, WorkItem, WorkSource } from '../src/core/ty
 import { routeBackend } from '../src/core/fleet/router.js';
 import {
   fleetQuotaPath,
+  fleetQuotaReservationPath,
+  fleetQuotaReservationLockPath,
+  evalFleetQuotaAuthority,
+  inspectFleetQuotaAuthority,
   loadFleetQuota,
   recordUse,
+  reserveFleetQuotaUse,
+  reserveFleetQuotaUses,
+  setFleetQuotaTestHooksForTests,
   usesInWindow,
+  windowToMs,
   withinLimit,
   evalQuota,
 } from '../src/core/fleet/quota.js';
+import {
+  acquireLocalStoreLock,
+  releaseLocalStoreLock,
+} from '../src/core/fleet/local-store-lock.js';
 import { engineInstalled } from '../src/core/run/engines.js';
 import { engineTierOf } from '../src/core/run/sandboxed-engine.js';
 
@@ -53,6 +76,12 @@ function baseConfig(): AshlrConfig {
 
 function withFoundry(foundry: NonNullable<AshlrConfig['foundry']>): AshlrConfig {
   return { ...baseConfig(), foundry };
+}
+
+function loadReservationLedger(): { events: Array<Record<string, unknown>> } {
+  return JSON.parse(readFileSync(fleetQuotaReservationPath(), 'utf8')) as {
+    events: Array<Record<string, unknown>>;
+  };
 }
 
 let _seq = 0;
@@ -373,6 +402,7 @@ describe('fleet quota ledger', () => {
   });
 
   afterEach(() => {
+    setFleetQuotaTestHooksForTests(undefined);
     if (prevHome === undefined) delete process.env.HOME;
     else process.env.HOME = prevHome;
     if (prevUserProfile === undefined) delete process.env.USERPROFILE;
@@ -453,6 +483,25 @@ describe('fleet quota ledger', () => {
     expect(withinLimit('claude', cfg3, now)).toBe(true);
   });
 
+  it('withinLimit honors consumed slots but leaves invalid authority to the final refusal gate', () => {
+    const cfg = withFoundry({
+      allowedBackends: ['claude'],
+      limits: { claude: { window: '1h', max: 1 } },
+    });
+    expect(reserveFleetQuotaUse('claude', cfg, 'routing-authority-slot')).toMatchObject({
+      kind: 'reserved', launchAuthorized: true,
+    });
+    expect(loadFleetQuota().events).toHaveLength(0);
+    expect(withinLimit('claude', cfg)).toBe(false);
+
+    const invalid = withFoundry({
+      allowedBackends: ['claude'],
+      limits: { claude: { window: '2h', max: 1 } },
+    });
+    expect(inspectFleetQuotaAuthority('claude', invalid)).toBe('invalid');
+    expect(withinLimit('claude', invalid)).toBe(true);
+  });
+
   it('evalQuota reports ok / warn / over (three levels)', () => {
     const now = Date.now();
     const mk = (max: number) =>
@@ -497,5 +546,446 @@ describe('fleet quota ledger', () => {
     expect(typeof q.events[0]!.ts).toBe('string');
     // No leftover tmp file after an atomic rename.
     expect(existsSync(fleetQuotaPath() + '.tmp')).toBe(false);
+  });
+
+  it('durably reserves configured quota and makes retries idempotent', () => {
+    const cfg = withFoundry({
+      allowedBackends: ['builtin', 'claude'],
+      limits: { claude: { window: '1h', max: 2 } },
+    });
+    expect(reserveFleetQuotaUse('claude', cfg, 'dispatch-sensitive-1')).toEqual({
+      kind: 'reserved',
+      launchAuthorized: true,
+      reservations: [{ backend: 'claude', status: 'reserved', used: 1, limit: 2 }],
+    });
+    expect(reserveFleetQuotaUse('claude', cfg, 'dispatch-sensitive-1')).toEqual({
+      kind: 'duplicate',
+      launchAuthorized: false,
+      backend: 'claude',
+    });
+    expect(reserveFleetQuotaUse('claude', cfg, 'dispatch-sensitive-2')).toEqual({
+      kind: 'reserved',
+      launchAuthorized: true,
+      reservations: [{ backend: 'claude', status: 'reserved', used: 2, limit: 2 }],
+    });
+    expect(reserveFleetQuotaUse('claude', cfg, 'dispatch-sensitive-3')).toEqual({
+      kind: 'exhausted',
+      launchAuthorized: false,
+      backend: 'claude',
+      used: 2,
+      limit: 2,
+    });
+
+    const raw = readFileSync(fleetQuotaReservationPath(), 'utf8');
+    expect(raw).not.toContain('dispatch-sensitive');
+    expect(loadReservationLedger().events).toHaveLength(2);
+    expect(loadReservationLedger().events.every((event) =>
+      typeof event.reservationIdHash === 'string' && /^[a-f0-9]{64}$/.test(event.reservationIdHash))).toBe(true);
+    if (process.platform !== 'win32') {
+      expect(statSync(fleetQuotaReservationPath()).mode & 0o777).toBe(0o600);
+      expect(statSync(join(tmpHome, '.ashlr', 'fleet')).mode & 0o777).toBe(0o700);
+    }
+    expect(readdirSync(join(tmpHome, '.ashlr', 'fleet')).some((name) => name.endsWith('.tmp'))).toBe(false);
+  });
+
+  it('reports exhausted reserved authority even before actual-attempt telemetry exists', () => {
+    const cfg = withFoundry({
+      allowedBackends: ['claude'],
+      limits: { claude: { window: '1h', max: 1 } },
+    });
+    expect(reserveFleetQuotaUse('claude', cfg, 'reserved-no-attempt').launchAuthorized).toBe(true);
+    expect(loadFleetQuota().events).toEqual([]);
+    expect(evalFleetQuotaAuthority('claude', cfg)).toBe('over');
+    expect(reserveFleetQuotaUse('claude', cfg, 'next-attempt')).toMatchObject({
+      kind: 'exhausted', launchAuthorized: false, used: 1, limit: 1,
+    });
+  });
+
+  it('fails closed for configured limits when the ledger is corrupt', () => {
+    const dir = join(tmpHome, '.ashlr', 'fleet');
+    mkdirSync(dir, { recursive: true });
+    const corrupt = '{ not trustworthy quota state';
+    writeFileSync(fleetQuotaReservationPath(), corrupt, 'utf8');
+    if (process.platform !== 'win32') chmodSync(fleetQuotaReservationPath(), 0o600);
+    const cfg = withFoundry({
+      allowedBackends: ['builtin', 'codex'],
+      limits: { codex: { window: '1h', max: 5 } },
+    });
+
+    expect(reserveFleetQuotaUse('codex', cfg, 'dispatch-corrupt')).toEqual({
+      kind: 'unavailable',
+      launchAuthorized: false,
+    });
+    expect(inspectFleetQuotaAuthority('codex', cfg)).toBe('unavailable');
+    expect(readFileSync(fleetQuotaReservationPath(), 'utf8')).toBe(corrupt);
+  });
+
+  it('fails closed on reservation lock contention', () => {
+    const held = acquireLocalStoreLock(fleetQuotaReservationLockPath(), 0, {
+      anchorPath: tmpHome,
+      exactPrivateStorage: true,
+    });
+    expect(held).not.toBeNull();
+    try {
+      const cfg = withFoundry({
+        allowedBackends: ['builtin', 'claude'],
+        limits: { claude: { window: '1h', max: 5 } },
+      });
+      expect(reserveFleetQuotaUse('claude', cfg, 'dispatch-contended', { lockWaitMs: 0 })).toEqual({
+        kind: 'unavailable',
+        launchAuthorized: false,
+      });
+      expect(existsSync(fleetQuotaReservationPath())).toBe(false);
+    } finally {
+      expect(releaseLocalStoreLock(held)).toBe(true);
+    }
+  });
+
+  it.runIf(process.platform !== 'win32')('reports a symlinked authority directory unavailable before file creation', () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const target = join(tmpHome, 'attacker-fleet');
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(target, { recursive: true });
+    symlinkSync(target, join(ashlrDir, 'fleet'), 'dir');
+    const cfg = withFoundry({
+      allowedBackends: ['claude'],
+      limits: { claude: { window: '1h', max: 1 } },
+    });
+
+    expect(inspectFleetQuotaAuthority('claude', cfg)).toBe('unavailable');
+    expect(evalFleetQuotaAuthority('claude', cfg)).toBe('over');
+    expect(reserveFleetQuotaUse('claude', cfg, 'symlinked-authority')).toEqual({
+      kind: 'unavailable', launchAuthorized: false,
+    });
+  });
+
+  it('keeps absent limits unlimited without consulting damaged storage', () => {
+    const dir = join(tmpHome, '.ashlr', 'fleet');
+    mkdirSync(dir, { recursive: true });
+    const corrupt = '{ damaged but irrelevant for an unlimited backend';
+    writeFileSync(fleetQuotaReservationPath(), corrupt, 'utf8');
+    const cfg = withFoundry({ allowedBackends: ['builtin', 'claude'] });
+
+    expect(reserveFleetQuotaUse('claude', cfg, 'dispatch-unlimited')).toEqual({
+      kind: 'unlimited',
+      launchAuthorized: true,
+      reservations: [{ backend: 'claude', status: 'unlimited', used: 0, limit: null }],
+    });
+    expect(readFileSync(fleetQuotaReservationPath(), 'utf8')).toBe(corrupt);
+  });
+
+  it('supports the documented 5h window and reserves a mixed batch atomically', () => {
+    expect(windowToMs('5h')).toBe(5 * 60 * 60_000);
+    const cfg = withFoundry({
+      allowedBackends: ['claude', 'codex'],
+      limits: {
+        claude: { window: '5h', max: 2 },
+        codex: { window: '1h', max: 1 },
+      },
+    });
+    expect(reserveFleetQuotaUses([
+      { backend: 'claude', dispatchId: 'batch-claude-1' },
+      { backend: 'codex', dispatchId: 'batch-codex-1' },
+    ], cfg)).toEqual({
+      kind: 'reserved',
+      launchAuthorized: true,
+      reservations: [
+        { backend: 'claude', status: 'reserved', used: 1, limit: 2 },
+        { backend: 'codex', status: 'reserved', used: 1, limit: 1 },
+      ],
+    });
+    const before = readFileSync(fleetQuotaReservationPath(), 'utf8');
+    expect(reserveFleetQuotaUses([
+      { backend: 'claude', dispatchId: 'batch-claude-2' },
+      { backend: 'codex', dispatchId: 'batch-codex-2' },
+    ], cfg)).toEqual({
+      kind: 'exhausted',
+      launchAuthorized: false,
+      backend: 'codex',
+      used: 1,
+      limit: 1,
+    });
+    expect(readFileSync(fleetQuotaReservationPath(), 'utf8')).toBe(before);
+  });
+
+  it('rejects unknown configured windows without creating authority state', () => {
+    const cfg = withFoundry({
+      allowedBackends: ['claude'],
+      limits: { claude: { window: '2h', max: 2 } },
+    });
+    expect(reserveFleetQuotaUse('claude', cfg, 'unknown-window')).toEqual({
+      kind: 'invalid',
+      launchAuthorized: false,
+      backend: 'claude',
+    });
+    expect(inspectFleetQuotaAuthority('claude', cfg)).toBe('invalid');
+    expect(existsSync(fleetQuotaReservationPath())).toBe(false);
+  });
+
+  it('returns invalid rather than throwing for adversarial request or config getters', () => {
+    const throwingRequest = Object.defineProperty({}, 'backend', {
+      enumerable: true,
+      get: () => { throw new Error('request getter'); },
+    });
+    expect(() => reserveFleetQuotaUses(
+      [throwingRequest as never],
+      withFoundry({ allowedBackends: ['claude'] }),
+    )).not.toThrow();
+    expect(reserveFleetQuotaUses(
+      [throwingRequest as never],
+      withFoundry({ allowedBackends: ['claude'] }),
+    )).toEqual({ kind: 'invalid', launchAuthorized: false });
+
+    const throwingConfig = Object.defineProperty({ version: 1 }, 'foundry', {
+      enumerable: true,
+      get: () => { throw new Error('config getter'); },
+    }) as AshlrConfig;
+    expect(reserveFleetQuotaUse('claude', throwingConfig, 'getter-config')).toEqual({
+      kind: 'invalid', launchAuthorized: false,
+    });
+  });
+
+  it('binds a persisted dispatch identity to exactly one backend', () => {
+    const cfg = withFoundry({
+      allowedBackends: ['claude', 'codex'],
+      limits: {
+        claude: { window: '1h', max: 2 },
+        codex: { window: '1h', max: 2 },
+      },
+    });
+    expect(reserveFleetQuotaUse('claude', cfg, 'global-dispatch-id').launchAuthorized).toBe(true);
+    expect(reserveFleetQuotaUse('codex', cfg, 'global-dispatch-id')).toEqual({
+      kind: 'conflict',
+      launchAuthorized: false,
+      backend: 'codex',
+    });
+    expect(loadReservationLedger().events).toHaveLength(1);
+  });
+
+  it('migrates active legacy telemetry into private authority state on first reservation', () => {
+    const dir = join(tmpHome, '.ashlr', 'fleet');
+    mkdirSync(dir, { recursive: true });
+    if (process.platform !== 'win32') chmodSync(dir, 0o755);
+    writeFileSync(fleetQuotaPath(), JSON.stringify({
+      events: [{ backend: 'claude', ts: new Date().toISOString() }],
+    }) + '\n', 'utf8');
+    if (process.platform !== 'win32') chmodSync(fleetQuotaPath(), 0o644);
+    const cfg = withFoundry({
+      allowedBackends: ['claude'],
+      limits: { claude: { window: '1h', max: 3 } },
+    });
+    expect(reserveFleetQuotaUse('claude', cfg, 'legacy-followup')).toMatchObject({
+      kind: 'reserved',
+      launchAuthorized: true,
+      reservations: [{ backend: 'claude', status: 'reserved', used: 2, limit: 3 }],
+    });
+    expect(loadFleetQuota().events).toHaveLength(1);
+    expect(loadReservationLedger().events).toHaveLength(2);
+    if (process.platform !== 'win32') {
+      expect(statSync(fleetQuotaPath()).mode & 0o777).toBe(0o644);
+      expect(statSync(fleetQuotaReservationPath()).mode & 0o777).toBe(0o600);
+    }
+  });
+
+  it('counts active legacy telemetry before first authority publication', () => {
+    const now = Date.parse('2026-08-16T12:00:00.000Z');
+    const dir = join(tmpHome, '.ashlr', 'fleet');
+    mkdirSync(dir, { recursive: true });
+    if (process.platform !== 'win32') chmodSync(dir, 0o755);
+    writeFileSync(fleetQuotaPath(), `${JSON.stringify({
+      events: [{ backend: 'claude', ts: new Date(now - 1_000).toISOString() }],
+    })}\n`, 'utf8');
+    if (process.platform !== 'win32') chmodSync(fleetQuotaPath(), 0o644);
+    setFleetQuotaTestHooksForTests({ now: () => now });
+    const cfg = withFoundry({
+      allowedBackends: ['claude'],
+      limits: { claude: { window: '1h', max: 1 } },
+    });
+
+    expect(inspectFleetQuotaAuthority('claude', cfg)).toBe('healthy');
+    expect(evalFleetQuotaAuthority('claude', cfg)).toBe('over');
+    expect(reserveFleetQuotaUse('claude', cfg, 'legacy-cap-reached')).toEqual({
+      kind: 'exhausted', launchAuthorized: false, backend: 'claude', used: 1, limit: 1,
+    });
+    expect(existsSync(fleetQuotaReservationPath())).toBe(false);
+  });
+
+  it('fails closed when legacy telemetry is corrupt before authority bootstrap', () => {
+    const dir = join(tmpHome, '.ashlr', 'fleet');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(fleetQuotaPath(), '{ corrupt legacy telemetry', 'utf8');
+    if (process.platform !== 'win32') chmodSync(fleetQuotaPath(), 0o644);
+    const cfg = withFoundry({
+      allowedBackends: ['codex'],
+      limits: { codex: { window: '1h', max: 2 } },
+    });
+
+    expect(inspectFleetQuotaAuthority('codex', cfg)).toBe('unavailable');
+    expect(evalFleetQuotaAuthority('codex', cfg)).toBe('over');
+    expect(reserveFleetQuotaUse('codex', cfg, 'legacy-corrupt')).toEqual({
+      kind: 'unavailable', launchAuthorized: false,
+    });
+    expect(existsSync(fleetQuotaReservationPath())).toBe(false);
+  });
+
+  it.runIf(process.platform !== 'win32')('rejects writable or symlinked legacy telemetry during bootstrap', () => {
+    const dir = join(tmpHome, '.ashlr', 'fleet');
+    mkdirSync(dir, { recursive: true });
+    const cfg = withFoundry({
+      allowedBackends: ['claude'],
+      limits: { claude: { window: '1h', max: 2 } },
+    });
+    writeFileSync(fleetQuotaPath(), `${JSON.stringify({ events: [] })}\n`, 'utf8');
+    chmodSync(fleetQuotaPath(), 0o666);
+    expect(inspectFleetQuotaAuthority('claude', cfg)).toBe('unavailable');
+    expect(evalFleetQuotaAuthority('claude', cfg)).toBe('over');
+    expect(reserveFleetQuotaUse('claude', cfg, 'writable-legacy')).toEqual({
+      kind: 'unavailable', launchAuthorized: false,
+    });
+
+    rmSync(fleetQuotaPath());
+    const target = join(tmpHome, 'legacy-target.json');
+    writeFileSync(target, `${JSON.stringify({ events: [] })}\n`, 'utf8');
+    symlinkSync(target, fleetQuotaPath());
+    expect(inspectFleetQuotaAuthority('claude', cfg)).toBe('unavailable');
+    expect(reserveFleetQuotaUse('claude', cfg, 'symlinked-legacy')).toEqual({
+      kind: 'unavailable', launchAuthorized: false,
+    });
+    expect(existsSync(fleetQuotaReservationPath())).toBe(false);
+  });
+
+  it('retains legacy usage when a limit is enabled after an unrelated authority publish', () => {
+    const now = Date.parse('2026-08-16T12:00:00.000Z');
+    const dir = join(tmpHome, '.ashlr', 'fleet');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(fleetQuotaPath(), `${JSON.stringify({
+      events: [{ backend: 'claude', ts: new Date(now - 30_000).toISOString() }],
+    })}\n`, 'utf8');
+    if (process.platform !== 'win32') chmodSync(fleetQuotaPath(), 0o644);
+    setFleetQuotaTestHooksForTests({ now: () => now });
+
+    const codexOnly = withFoundry({
+      allowedBackends: ['claude', 'codex'],
+      limits: { codex: { window: '1h', max: 2 } },
+    });
+    expect(reserveFleetQuotaUse('codex', codexOnly, 'codex-bootstrap')).toMatchObject({
+      kind: 'reserved', launchAuthorized: true,
+    });
+    expect(loadReservationLedger().events).toHaveLength(2);
+
+    const claudeEnabled = withFoundry({
+      allowedBackends: ['claude', 'codex'],
+      limits: { claude: { window: '1h', max: 1 } },
+    });
+    expect(evalFleetQuotaAuthority('claude', claudeEnabled)).toBe('over');
+    expect(reserveFleetQuotaUse('claude', claudeEnabled, 'claude-after-enable')).toEqual({
+      kind: 'exhausted', launchAuthorized: false, backend: 'claude', used: 1, limit: 1,
+    });
+  });
+
+  it('retains active history when a configured window widens', () => {
+    const now = Date.parse('2026-08-16T12:00:00.000Z');
+    const dir = join(tmpHome, '.ashlr', 'fleet');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(fleetQuotaPath(), `${JSON.stringify({
+      events: [{ backend: 'claude', ts: new Date(now - 2 * 60 * 60_000).toISOString() }],
+    })}\n`, 'utf8');
+    if (process.platform !== 'win32') chmodSync(fleetQuotaPath(), 0o644);
+    setFleetQuotaTestHooksForTests({ now: () => now });
+
+    const narrow = withFoundry({
+      allowedBackends: ['claude'],
+      limits: { claude: { window: '1h', max: 2 } },
+    });
+    expect(reserveFleetQuotaUse('claude', narrow, 'narrow-window')).toMatchObject({
+      kind: 'reserved', launchAuthorized: true,
+      reservations: [{ backend: 'claude', used: 1, limit: 2 }],
+    });
+    expect(loadReservationLedger().events).toHaveLength(2);
+
+    const widened = withFoundry({
+      allowedBackends: ['claude'],
+      limits: { claude: { window: '5h', max: 2 } },
+    });
+    expect(evalFleetQuotaAuthority('claude', widened)).toBe('over');
+    expect(reserveFleetQuotaUse('claude', widened, 'wide-window')).toEqual({
+      kind: 'exhausted', launchAuthorized: false, backend: 'claude', used: 2, limit: 2,
+    });
+  });
+
+  it('compacts receipts outside the maximum supported window before enforcing capacity', () => {
+    const now = Date.parse('2026-08-16T12:00:00.000Z');
+    const dir = join(tmpHome, '.ashlr', 'fleet');
+    mkdirSync(dir, { recursive: true });
+    if (process.platform !== 'win32') chmodSync(dir, 0o700);
+    writeFileSync(fleetQuotaReservationPath(), `${JSON.stringify({
+      events: Array.from({ length: 2_000 }, (_, index) => ({
+        backend: 'claude',
+        ts: new Date(now - 31 * 24 * 60 * 60_000 - index).toISOString(),
+      })),
+    })}\n`, 'utf8');
+    if (process.platform !== 'win32') chmodSync(fleetQuotaReservationPath(), 0o600);
+    setFleetQuotaTestHooksForTests({ now: () => now });
+    const cfg = withFoundry({
+      allowedBackends: ['claude'],
+      limits: { claude: { window: '1h', max: 2 } },
+    });
+
+    expect(reserveFleetQuotaUse('claude', cfg, 'after-expiry')).toEqual({
+      kind: 'reserved',
+      launchAuthorized: true,
+      reservations: [{ backend: 'claude', status: 'reserved', used: 1, limit: 2 }],
+    });
+    expect(loadReservationLedger().events).toHaveLength(1);
+  });
+
+  it('appends safely at the exact 2,000-per-backend authority bound', () => {
+    const now = Date.parse('2026-08-16T12:00:00.000Z');
+    const backends: EngineId[] = [
+      'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex',
+      'hermes', 'kimi', 'nim', 'opencode', 'grok',
+    ];
+    const dir = join(tmpHome, '.ashlr', 'fleet');
+    mkdirSync(dir, { recursive: true });
+    if (process.platform !== 'win32') chmodSync(dir, 0o700);
+    writeFileSync(fleetQuotaReservationPath(), `${JSON.stringify({
+      events: backends.flatMap((backend) => Array.from({ length: 2_000 }, (_, index) => ({
+        backend,
+        ts: new Date(now - 2 * 60 * 60_000 - index).toISOString(),
+      }))),
+    })}\n`, 'utf8');
+    if (process.platform !== 'win32') chmodSync(fleetQuotaReservationPath(), 0o600);
+    setFleetQuotaTestHooksForTests({ now: () => now });
+    const cfg = withFoundry({
+      allowedBackends: ['claude'],
+      limits: { claude: { window: '1h', max: 2 } },
+    });
+
+    expect(reserveFleetQuotaUse('claude', cfg, 'exact-global-bound')).toMatchObject({
+      kind: 'reserved', launchAuthorized: true,
+      reservations: [{ backend: 'claude', used: 1, limit: 2 }],
+    });
+    const events = loadReservationLedger().events;
+    expect(events).toHaveLength(22_000);
+    expect(events.filter((event) => event['backend'] === 'claude')).toHaveLength(2_000);
+  });
+
+  it('withholds launch when lock release fails after durable publication', () => {
+    setFleetQuotaTestHooksForTests({
+      releaseLock: (lock) => {
+        expect(releaseLocalStoreLock(lock)).toBe(true);
+        return false;
+      },
+    });
+    const cfg = withFoundry({
+      allowedBackends: ['claude'],
+      limits: { claude: { window: '1h', max: 2 } },
+    });
+    expect(reserveFleetQuotaUse('claude', cfg, 'release-failure')).toEqual({
+      kind: 'unavailable',
+      launchAuthorized: false,
+      reservationConsumed: true,
+    });
+    expect(loadReservationLedger().events).toHaveLength(1);
   });
 });

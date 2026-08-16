@@ -176,8 +176,46 @@ vi.mock('../src/core/fabric/concurrent-dispatch.js', async (importOriginal) => {
 });
 
 const mockRunBestOfN = vi.fn();
+let simulateBestOfNProviderStart = true;
 vi.mock('../src/core/run/best-of-n.js', () => ({
-  runBestOfN: (...args: unknown[]) => mockRunBestOfN(...args),
+  runBestOfN: async (...args: unknown[]) => {
+    const options = (args[2] ?? {}) as {
+      attemptId?: string;
+      engine?: EngineId;
+      candidates?: Array<{ engine?: EngineId }>;
+      candidateConfigRefusal?: string;
+      providerDispatchStillAuthorized?: () => boolean;
+      beforeCandidateProviderDispatch?: (backend: EngineId, runId: string) => boolean;
+      onProviderDispatchStarted?: (backend: EngineId, runId: string) => void;
+    };
+    const backend = options.candidates?.[0]?.engine ?? options.engine ?? 'local-coder';
+    const candidateRunId = `${options.attemptId ?? 'attempt'}:candidate:0`;
+    const authorized = simulateBestOfNProviderStart && !options.candidateConfigRefusal &&
+      options.providerDispatchStillAuthorized?.() !== false &&
+      options.beforeCandidateProviderDispatch?.(
+        backend,
+        candidateRunId,
+      ) !== false;
+    if (authorized) options.onProviderDispatchStarted?.(backend, candidateRunId);
+    const result = await mockRunBestOfN(...args) as {
+      candidates?: Array<Record<string, unknown>>;
+      winner?: Record<string, unknown>;
+      [key: string]: unknown;
+    };
+    if (authorized && Array.isArray(result?.candidates)) {
+      const candidates = result.candidates.length > 0
+        ? result.candidates
+        : result.winner ? [result.winner] : [];
+      return {
+        ...result,
+        candidates: candidates.map((candidate) => ({
+          ...candidate,
+          providerDispatchAttempted: candidate['providerDispatchAttempted'] ?? true,
+        })),
+      };
+    }
+    return result;
+  },
 }));
 
 const mockRunPulseSync = vi.fn();
@@ -265,6 +303,8 @@ vi.mock('../src/core/fleet/router.js', () => ({
 vi.mock('../src/core/fleet/quota.js', () => ({
   withinLimit: () => true,
   recordUse: () => undefined,
+  reserveFleetQuotaUse: () => ({ kind: 'unlimited', launchAuthorized: true, reservations: [] }),
+  reserveFleetQuotaUses: () => ({ kind: 'unlimited', launchAuthorized: true, reservations: [] }),
 }));
 
 vi.mock('../src/core/fleet/subscription-usage.js', () => ({
@@ -485,6 +525,7 @@ beforeEach(() => {
   mockRunConcurrentDispatch.mockReset();
   mockGetResourceSnapshot.mockReset();
   mockRunBestOfN.mockReset();
+  simulateBestOfNProviderStart = true;
   mockRunPulseSync.mockReset();
   mockRunSelfHealCycle.mockReset();
   mockRunSelfHealCycleForRepos.mockReset();
@@ -4156,6 +4197,48 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
         diagnosticNoProposal: false,
       },
     });
+  });
+
+  it('A1h2a2b: zero-runner Best-of-N refusal is not persisted as dispatched work', async () => {
+    const { items } = enrollWithItems(1);
+    simulateBestOfNProviderStart = false;
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'final fence refusal' });
+    mockEngineTierOf.mockReturnValue('mid');
+    mockRunBestOfN.mockResolvedValueOnce({
+      winner: undefined,
+      candidates: [{
+        index: 0,
+        engine: 'local-coder',
+        diff: '',
+        score: 0,
+        providerDispatchAttempted: false,
+        error: 'provider-dispatch-final-fence-refused',
+      }],
+      critique: {
+        n: 2,
+        nonEmpty: 0,
+        judged: 0,
+        topScore: 0,
+        winnerIndex: -1,
+        totalCostUsd: 0,
+        billableCostUsd: 0,
+        noProposalReasons: [{ reason: 'provider-dispatch-final-fence-refused', count: 1 }],
+      },
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'], bestOfN: 2 },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.dispatches?.[0]).toMatchObject({
+      itemId: items[0]!.id,
+      dispatched: false,
+      spentUsd: 0,
+    });
+    expect(loadWorkedLedger().events.filter((event) => event.itemId === items[0]!.id)).toEqual([]);
+    expect(readDispatchProductionEvents({ limit: 1 })).toEqual([]);
+    expect(readAgentActions().find((event) => event.action === 'daemon:dispatch-start')).toBeUndefined();
   });
 
   it('A1h2a3: an aborted swarm hard-budget result remains an engine failure', async () => {
@@ -9887,9 +9970,31 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
     });
     mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'shadow config test' });
     mockEngineTierOf.mockReturnValue('mid');
+    mockRunBestOfN.mockResolvedValueOnce({
+      winner: undefined,
+      candidates: [{
+        index: 0,
+        engine: 'local-coder',
+        diff: '',
+        score: 0,
+        providerDispatchAttempted: false,
+        error: 'candidate configuration refused: explicit bestOfNCandidates refused',
+      }],
+      critique: {
+        n: 3,
+        nonEmpty: 0,
+        judged: 0,
+        topScore: 0,
+        winnerIndex: -1,
+        noProposalReasons: [{
+          reason: 'candidate configuration refused: explicit bestOfNCandidates refused',
+          count: 1,
+        }],
+      },
+    });
     const digest = `sha256:${'a'.repeat(64)}`;
 
-    await tick({
+    const result = await tick({
       ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
       foundry: {
         allowedBackends: ['local-coder', 'claude'],
@@ -9927,6 +10032,16 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
     });
     expect(mockRunBestOfN.mock.calls[0]?.[2]).not.toHaveProperty('candidates');
     expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(result.dispatches?.[0]).toMatchObject({
+      dispatched: false,
+      production: {
+        outcome: 'gate-blocked',
+        reason: 'best-of-3: candidate configuration refused: explicit bestOfNCandidates refused',
+      },
+    });
+    expect(readAgentActions().find((event) => event.action === 'daemon:dispatch-start')).toBeUndefined();
+    expect(readDispatchProductionEvents({ limit: 1 })).toEqual([]);
+    expect(loadWorkedLedger().events).toEqual([]);
   });
 
   it('E3g2: a Proxy trap in explicit candidates fails closed without escaping tick', async () => {
