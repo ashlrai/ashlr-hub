@@ -60,6 +60,22 @@ function makeSnapshot(): DashboardSnapshot {
       { name: 'ashlr', ok: true, tools: 8 },
     ],
     genome: { entries: 10, projects: 3 },
+    fleet: {
+      generatedAt: new Date().toISOString(),
+      daemon: {
+        running: false,
+        sourceQuality: { sourceState: 'healthy', complete: true, reason: 'healthy' },
+        lastTickAt: null,
+        todaySpentUsd: 0,
+      },
+      backends: [],
+      queue: { backlogItems: 1 },
+      proposals: { pending: 0, frontierPending: 0, applied: 0 },
+      merges: { recent: 0 },
+      autonomyControlMode: 'proposal-only',
+      killed: false,
+      killSwitch: { state: 'unknown', sourceState: 'degraded', reason: 'unavailable' },
+    } as unknown as NonNullable<DashboardSnapshot['fleet']>,
   };
 }
 
@@ -197,6 +213,18 @@ describe('runTui({ once: true }) — calls buildSnapshot', () => {
 });
 
 describe('runTui({ once: true }) — rendered frame content', () => {
+  it.skipIf(moduleUnavailable)('renders the exception-first Operator briefing without executing commands', async () => {
+    await runTui!(makeConfig(), { once: true });
+    // eslint-disable-next-line no-control-regex
+    const output = capturedOutput().replace(/\x1b\[[0-9;]*m/g, '');
+    expect(output).toContain('Operator briefing');
+    expect(output).toContain('Needs you: Inspect fleet state');
+    expect(output).toContain('[read-only] ashlr fleet status --json');
+    expect(output).toContain('Autonomous now:');
+    expect(output).toContain('Last proof:');
+    expect(output.indexOf('Operator briefing')).toBeLessThan(output.indexOf('Repos'));
+  });
+
   it.skipIf(moduleUnavailable)('frame contains the overview tab or some tab name', async () => {
     await runTui!(makeConfig(), { once: true });
     // eslint-disable-next-line no-control-regex

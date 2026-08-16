@@ -50,7 +50,69 @@ const DEFAULT_STATE = {
   selected: 0,
   cols: 120,
   rows: 30,
+  nowMs: Date.parse('2026-06-08T10:00:10.000Z'),
 };
+
+function makeOperatorFleet(overrides: Record<string, unknown> = {}): NonNullable<DashboardSnapshot['fleet']> {
+  return {
+    generatedAt: '2026-06-08T10:00:00.000Z',
+    daemon: {
+      running: true,
+      sourceQuality: { sourceState: 'healthy', complete: true, reason: 'healthy' },
+      lastTickAt: '2026-06-08T10:00:00.000Z',
+      todaySpentUsd: 0.25,
+    },
+    queue: { backlogItems: 2, activeWork: { itemCount: 1 } },
+    proposals: { pending: 0, frontierPending: 0, applied: 0 },
+    merges: {
+      recent: 0,
+      sourceQuality: {
+        sourceState: 'healthy', sourcePresent: true, complete: true, stopReasons: [],
+        filesDiscovered: 1, filesRead: 1, invalidFiles: 0, unreadableFiles: 0,
+      },
+    },
+    backends: [],
+    autonomyControlMode: 'proposal-only',
+    killed: false,
+    killSwitch: { state: 'inactive', sourceState: 'healthy', reason: 'missing' },
+    autonomousShipReadiness: {
+      verdict: 'ready',
+      confidence: 'high',
+      freshness: {
+        generatedAt: '2026-06-08T10:00:00.000Z', overall: 'fresh', freshestAt: null,
+        stalestAt: null, maxAgeMs: 0, staleSources: 0, unknownSources: 0,
+      },
+      topBlocker: null,
+      primaryAction: null,
+      sources: [],
+      sourceSummary: { healthy: 1, degraded: 0, blocked: 0, unavailable: 0, unknown: 0 },
+    },
+    missionBrief: {
+      generatedAt: '2026-06-08T10:00:00.000Z',
+      directive: 'Continue bounded work',
+      confidence: 'high',
+      operatingMode: 'autonomous',
+      blocker: null,
+      action: null,
+      whyNow: 'All observed sources are healthy.',
+      evidence: {
+        readinessVerdict: 'ready', effectivenessPhase: 'idle', bottleneck: 'none',
+        queueBacklogItems: 2, eligibleBacklogItems: 2, pendingProposals: 0,
+        preflightReady: 2, guardBlocked: false,
+      },
+    },
+    dispatchProduction: {
+      windowHours: 24, attempts: 1, events: 1, proposalsCreated: 1, noProposal: 0,
+      spentUsd: 0.1, outcomes: {}, topReasons: [], byBackend: [], bySource: [],
+      byRepo: [], byBackendModel: [], byBackendSource: [],
+    },
+    dispatchProductionSource: {
+      sourceState: 'healthy', sourcePresent: true, complete: true, stopReasons: [],
+      filesRead: 1, bytesRead: 1, rowsScanned: 1, invalidRows: 0, unreadableFiles: 0,
+    },
+    ...overrides,
+  } as unknown as NonNullable<DashboardSnapshot['fleet']>;
+}
 
 // ---------------------------------------------------------------------------
 // Helper: split a frame into non-empty lines for per-line assertions
@@ -236,6 +298,232 @@ describe('renderFrame — overview tab', () => {
     const snap = makeSnapshot({ activity: { sessions: 9, tokens: 1000, estCostUsd: 0.5, commits: 4 } });
     const frame = stripAnsi(renderFrame(snap, overviewState));
     expect(frame).toContain('9');
+  });
+});
+
+describe('renderFrame — exception-first Operator briefing', () => {
+  const overviewState = { ...DEFAULT_STATE, tab: 'overview' as TuiTab };
+
+  it('fails closed to a read-only inspection when fleet evidence is absent', () => {
+    const frame = stripAnsi(renderFrame(makeSnapshot(), overviewState));
+    expect(frame).toContain('Operator briefing');
+    expect(frame).toContain('Needs you: Inspect fleet state');
+    expect(frame).toContain('[read-only] ashlr fleet status --json');
+    expect(frame).toContain('Autonomous now: Daemon state unknown · mode unknown · active work unknown · spend unknown');
+    expect(frame).toContain('Acted activity unknown → Proved Proof withheld · sources incomplete');
+    expect(frame).not.toContain('0 active');
+    expect(frame).toContain('Last proof: Observed');
+    expect(frame).toContain('Proof withheld · sources incomplete');
+    expect(frame.indexOf('Operator briefing')).toBeLessThan(frame.indexOf('Repos'));
+  });
+
+  it('shows a clear state only for fresh, known, non-blocked authority', () => {
+    const snap = makeSnapshot({ fleet: makeOperatorFleet() });
+    const frame = stripAnsi(renderFrame(snap, overviewState));
+    expect(frame).toContain('Needs you: No operator action · fresh evidence within authority');
+    expect(frame).toContain('No command · display only');
+    expect(frame).toContain('Autonomous now: Daemon running · autonomous · 1 active · $0.25 today');
+    expect(frame).toContain('Proved 1 proposal produced');
+    expect(frame).not.toContain('ashlr fleet status --json');
+  });
+
+  it('surfaces one human-owned action with its visible safety label', () => {
+    const action = {
+      id: 'repair-service',
+      priority: 'critical' as const,
+      label: 'Repair daemon service',
+      detail: 'Repair the resident service.',
+      commands: [{
+        label: 'Repair service', argv: ['ashlr', 'daemon', 'install'],
+        shell: 'ashlr daemon install', safety: 'control-plane' as const,
+      }],
+    };
+    const fleet = makeOperatorFleet({
+      nextActions: [action],
+      autonomousShipReadiness: {
+        ...makeOperatorFleet().autonomousShipReadiness,
+        primaryAction: action,
+      },
+    });
+    const frame = stripAnsi(renderFrame(makeSnapshot({ fleet }), overviewState));
+    expect(frame).toContain('Needs you: Repair daemon service');
+    expect(frame).toContain('[control-plane] ashlr daemon install');
+    expect(frame).not.toContain('ashlr fleet status --json');
+  });
+
+  it('keeps medium read-only work autonomous but escalates high read-only work', () => {
+    const readOnly = {
+      id: 'inspect-backlog', priority: 'medium' as const, label: 'Inspect backlog', detail: 'Inspect it.',
+      commands: [{
+        label: 'Inspect', argv: ['ashlr', 'fleet', 'status', '--json'],
+        shell: 'ashlr fleet status --json', safety: 'read-only' as const,
+      }],
+    };
+    const autonomousFrame = stripAnsi(renderFrame(
+      makeSnapshot({ fleet: makeOperatorFleet({ nextActions: [readOnly] }) }),
+      overviewState,
+    ));
+    expect(autonomousFrame).toContain('Needs you: No operator action');
+    expect(autonomousFrame).not.toContain('ashlr fleet status --json');
+
+    const humanFrame = stripAnsi(renderFrame(
+      makeSnapshot({
+        fleet: makeOperatorFleet({ nextActions: [{ ...readOnly, priority: 'high' as const }] }),
+      }),
+      overviewState,
+    ));
+    expect(humanFrame).toContain('Needs you: Inspect backlog');
+    expect(humanFrame).toContain('[read-only] ashlr fleet status --json');
+  });
+
+  it('shows the consequential command when a mixed action requires a person', () => {
+    const action = {
+      id: 'recover-lane', priority: 'medium' as const, label: 'Recover stale lane', detail: 'Recover it.',
+      commands: [
+        {
+          label: 'Inspect', argv: ['ashlr', 'fleet', 'status', '--json'],
+          shell: 'ashlr fleet status --json', safety: 'read-only' as const,
+        },
+        {
+          label: 'Stop daemon', argv: ['ashlr', 'daemon', 'stop'],
+          shell: 'ashlr daemon stop', safety: 'control-plane' as const,
+        },
+      ],
+    };
+    const frame = stripAnsi(renderFrame(
+      makeSnapshot({ fleet: makeOperatorFleet({ nextActions: [action] }) }),
+      overviewState,
+    ));
+    expect(frame).toContain('Needs you: Recover stale lane');
+    expect(frame).toContain('[control-plane] ashlr daemon stop +1');
+    expect(frame).not.toContain('[read-only] ashlr fleet status --json');
+  });
+
+  it('does not promote autonomous-dispatch-only work into Needs you', () => {
+    const action = {
+      id: 'start-daemon', priority: 'critical' as const, label: 'Start daemon', detail: 'Start it.',
+      commands: [{
+        label: 'Start', argv: ['ashlr', 'daemon', 'start'], shell: 'ashlr daemon start',
+        safety: 'autonomous-dispatch' as const,
+      }],
+    };
+    const fleet = makeOperatorFleet({ nextActions: [action] });
+    const frame = stripAnsi(renderFrame(makeSnapshot({ fleet }), overviewState));
+    expect(frame).toContain('Needs you: No operator action · fresh evidence within authority');
+    expect(frame).not.toContain('ashlr daemon start');
+  });
+
+  it('requires inspection for stale snapshots, unknown kill authority, or degraded daemon authority', () => {
+    const stale = stripAnsi(renderFrame(
+      makeSnapshot({ fleet: makeOperatorFleet() }),
+      { ...overviewState, nowMs: Date.parse('2026-06-08T10:01:00.001Z') },
+    ));
+    expect(stale).toContain('Needs you: Inspect fleet state');
+    expect(stale).toContain('Autonomous now: Daemon state unknown · mode unknown · active work unknown · spend unknown');
+    expect(stale).toContain('Acted activity unknown → Proved Proof withheld · sources incomplete');
+    expect(stale).not.toContain('Daemon running');
+    expect(stale).not.toContain('$0.25 today');
+    expect(stale).not.toContain('1 proposal produced');
+
+    const unknownKill = makeOperatorFleet({ killSwitch: undefined });
+    expect(stripAnsi(renderFrame(makeSnapshot({ fleet: unknownKill }), overviewState)))
+      .toContain('Needs you: Inspect fleet state');
+
+    const degradedDaemon = makeOperatorFleet({
+      daemon: {
+        ...makeOperatorFleet().daemon,
+        sourceQuality: { sourceState: 'degraded', complete: false, reason: 'unavailable' },
+      },
+    });
+    expect(stripAnsi(renderFrame(makeSnapshot({ fleet: degradedDaemon }), overviewState)))
+      .toContain('Needs you: Inspect fleet state');
+  });
+
+  it('treats an inactive kill state from a degraded source as unknown authority', () => {
+    const fleet = makeOperatorFleet({
+      killSwitch: { state: 'inactive', sourceState: 'degraded', reason: 'unavailable' },
+    });
+    const frame = stripAnsi(renderFrame(makeSnapshot({ fleet }), overviewState));
+    expect(frame).toContain('Needs you: Inspect fleet state');
+    expect(frame).not.toContain('Needs you: No operator action');
+  });
+
+  it('fails closed when observation time is omitted or the snapshot is too far in the future', () => {
+    const snap = makeSnapshot({ fleet: makeOperatorFleet() });
+    const omitted = stripAnsi(renderFrame(snap, {
+      tab: 'overview', selected: 0, cols: 120, rows: 30,
+    }));
+    expect(omitted).toContain('Needs you: Inspect fleet state');
+    expect(omitted).toContain('Autonomous now: Daemon state unknown · mode unknown · active work unknown · spend unknown');
+    expect(omitted).toContain('Proved Proof withheld · sources incomplete');
+    expect(omitted).not.toContain('1 proposal produced');
+
+    const future = stripAnsi(renderFrame(snap, {
+      ...overviewState,
+      nowMs: Date.parse('2026-06-08T09:59:54.999Z'),
+    }));
+    expect(future).toContain('Needs you: Inspect fleet state');
+  });
+
+  it('withholds proof unless merge or dispatch sources are healthy and complete', () => {
+    const fleet = makeOperatorFleet({
+      merges: { recent: 7, sourceQuality: { sourceState: 'degraded', complete: false } },
+      dispatchProductionSource: { sourceState: 'degraded', complete: false },
+    });
+    const frame = stripAnsi(renderFrame(makeSnapshot({ fleet }), overviewState));
+    expect(frame).toContain('Proof withheld · sources incomplete');
+    expect(frame).not.toContain('7 landed merges');
+  });
+
+  it('shows landed merge proof only from a healthy complete merge source', () => {
+    const fleet = makeOperatorFleet({
+      merges: { recent: 2, sourceQuality: makeOperatorFleet().merges.sourceQuality },
+    });
+    const frame = stripAnsi(renderFrame(makeSnapshot({ fleet }), overviewState));
+    expect(frame).toContain('Proved 2 landed merges');
+  });
+
+  it('does not attribute tick-only proposal telemetry to a healthy empty durable source', () => {
+    const fleet = makeOperatorFleet({
+      dispatchProduction: undefined,
+      proposalProduction: { dispatched: 4, proposalsCreated: 3 },
+      dispatchProductionSource: {
+        sourceState: 'healthy', sourcePresent: true, complete: true, stopReasons: [],
+        filesRead: 0, bytesRead: 0, rowsScanned: 0, invalidRows: 0, unreadableFiles: 0,
+      },
+    });
+    const frame = stripAnsi(renderFrame(makeSnapshot({ fleet }), overviewState));
+    expect(frame).toContain('Acted 4 dispatches');
+    expect(frame).toContain('Proved No recent landed proof');
+    expect(frame).not.toContain('3 proposals produced');
+  });
+
+  it('keeps the safety command and complete proof chain visible at 40x12', () => {
+    const action = {
+      id: 'recover-lane', priority: 'medium' as const, label: 'Recover lane', detail: 'Recover it.',
+      commands: [
+        {
+          label: 'Inspect', argv: ['ashlr', 'fleet', 'status', '--json'],
+          shell: 'ashlr fleet status --json', safety: 'read-only' as const,
+        },
+        {
+          label: 'Stop', argv: ['ashlr', 'daemon', 'stop'],
+          shell: 'ashlr daemon stop', safety: 'control-plane' as const,
+        },
+      ],
+    };
+    const fleet = makeOperatorFleet({ nextActions: [action] });
+    const frame = stripAnsi(renderFrame(
+      makeSnapshot({ fleet }),
+      { ...overviewState, cols: 40, rows: 12 },
+    ));
+    expect(frame).toContain('Needs you:');
+    expect(frame).toContain('[control-plane] ashlr daemon stop');
+    expect(frame).toContain('[control-plane] ashlr daemon stop +1');
+    expect(frame).toContain('Autonomous now:');
+    expect(frame).toContain('Last proof: Observed');
+    expect(frame).toContain('Decided autonomous');
+    expect(frame).toContain('Acted 1 dispatch · Proved 1 proposal');
   });
 });
 
