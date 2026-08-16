@@ -25,8 +25,8 @@
  */
 
 import { appendHubEntry } from '../genome/store.js';
-import { recordDecision } from './decisions-ledger.js';
-import type { AshlrConfig, GenomeEntry } from '../types.js';
+import { readDecisions, readDecisionsDetailed, recordDecision } from './decisions-ledger.js';
+import type { AshlrConfig, DecisionEntry, GenomeEntry } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -142,6 +142,127 @@ export function learnFromRejection(
     } as Parameters<typeof recordDecision>[0]);
   } catch {
     // Ledger write is best-effort observability only.
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Public: sweepRejectionLearning — auto-merge-independent reachability
+// ---------------------------------------------------------------------------
+
+/**
+ * Bound on judged-decision candidates inspected per sweep pass.
+ */
+const MAX_REJECTION_SWEEP_CANDIDATES = 200;
+
+export interface RejectionLearningSweepResult {
+  /** Distinct proposals with a rejection-shaped judge verdict inspected. */
+  scanned: number;
+  /** Proposals for which learnFromRejection actually wrote a lesson. */
+  written: number;
+  /** Proposals inspected but skipped (already written, or a transient error). */
+  skipped: number;
+  /** False when the decisions source was incomplete/degraded, or the
+   *  candidate cap was hit — a hint the pass should be retried. */
+  sourceComplete: boolean;
+}
+
+/**
+ * Sweep the decisions ledger for judged rejection verdicts (review | noise |
+ * harmful) and call learnFromRejection() for each one that hasn't already
+ * produced a genome lesson.
+ *
+ * learnFromRejection's ONLY prior caller was automerge-pass.ts, reached
+ * exclusively from inside the auto-merge pass (cfg.foundry.autoMerge.enabled
+ * === true). With auto-merge off — the default — a judge verdict could still
+ * be recorded (manual `ashlr judge`, a shadow/observe-only judge pass, etc.)
+ * but the fleet never learned from it. This sweep reads the SAME
+ * decisions-ledger 'judged' rows regardless of what produced them, so a
+ * rejected or failed run teaches the fleet whether or not auto-merge is on.
+ *
+ * Idempotent: a proposalId that already has a 'self-improve:written'
+ * telemetry row is skipped. Bounded, fail-open-on-nothing-to-do,
+ * fail-closed-on-source-degradation (sourceComplete:false signals "retry
+ * later", never treated as "nothing to learn"). Never throws.
+ */
+export function sweepRejectionLearning(
+  cfg: AshlrConfig,
+  opts: { sinceMs?: number; listDecisions?: () => DecisionEntry[] } = {},
+): RejectionLearningSweepResult {
+  const result: RejectionLearningSweepResult = {
+    scanned: 0, written: 0, skipped: 0, sourceComplete: true,
+  };
+  try {
+    const foundry = cfg.foundry as Record<string, unknown> | undefined;
+    if (foundry?.['selfImprove'] === false) return result;
+
+    let decisions: DecisionEntry[];
+    if (typeof opts.listDecisions === 'function') {
+      try {
+        decisions = opts.listDecisions();
+      } catch {
+        decisions = [];
+      }
+    } else {
+      const read = readDecisionsDetailed({
+        requireComplete: true,
+        ...(opts.sinceMs !== undefined ? { sinceMs: opts.sinceMs } : {}),
+      });
+      if (!read.complete || read.sourceState === 'degraded') {
+        result.sourceComplete = false;
+        return result;
+      }
+      decisions = read.decisions;
+    }
+
+    // Newest judged verdict per proposalId — mirrors the isNewerDecision
+    // pattern used elsewhere (feedback.ts, quality-metrics.ts). The compare
+    // must run over EVERY judged verdict (not just rejection-shaped ones):
+    // if a proposal's latest verdict is 'ship', a stale earlier
+    // noise/harmful/review verdict must not be taught as a lesson — it was
+    // superseded.
+    const latestJudged = new Map<string, DecisionEntry>();
+    for (const entry of decisions) {
+      if (entry.action !== 'judged') continue;
+      const existing = latestJudged.get(entry.proposalId);
+      if (!existing || Date.parse(entry.ts) > Date.parse(existing.ts)) {
+        latestJudged.set(entry.proposalId, entry);
+      }
+    }
+    const latestRejection = new Map<string, DecisionEntry>();
+    for (const [proposalId, entry] of latestJudged) {
+      const verdict = (entry.verdict ?? '').toLowerCase();
+      if (isRejection(verdict)) latestRejection.set(proposalId, entry);
+    }
+
+    let inspected = 0;
+    for (const [proposalId, entry] of latestRejection) {
+      if (inspected >= MAX_REJECTION_SWEEP_CANDIDATES) {
+        result.sourceComplete = false;
+        break;
+      }
+      inspected++;
+      result.scanned++;
+      try {
+        const existing = readDecisions({ proposalId, requireComplete: true });
+        const existingQuality = (existing as typeof existing & {
+          sourceQuality?: { sourceState?: string; complete?: boolean };
+        }).sourceQuality;
+        if (existingQuality && (existingQuality.sourceState === 'degraded' || existingQuality.complete === false)) {
+          result.skipped++;
+          result.sourceComplete = false;
+          continue;
+        }
+        if (existing.some((row) => row.action === 'self-improve:written')) continue;
+
+        learnFromRejection(proposalId, '', entry.verdict ?? 'review', '', cfg);
+        result.written++;
+      } catch {
+        result.skipped++;
+      }
+    }
+    return result;
+  } catch {
+    return result;
   }
 }
 
