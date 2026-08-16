@@ -7,7 +7,7 @@
 # public repository, release.yml, and the npm-release environment. No
 # long-lived npm write token is used.
 #
-# This workflow is intentionally pinned to the 3.2.2 candidate. It cannot move
+# This workflow is intentionally pinned to the 3.2.3 candidate. It cannot move
 # npm `latest`; promotion is a separate maintainer action after acceptance.
 
 name: Release
@@ -23,7 +23,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  RELEASE_VERSION: "3.2.2"
+  RELEASE_VERSION: "3.2.3"
   RELEASE_DIST_TAG: candidate
   BASELINE_LATEST_VERSION: "3.0.1"
 
@@ -568,7 +568,7 @@ jobs:
              (.files.tarball | keys == ["bytes", "entryCount", "integrity", "maxEntryBytes", "name", "sha256", "unpackedBytes"]) and
              (.files.packReport | keys == ["bytes", "name", "sha256"]) and
              (.files.releaseNotes | keys == ["bytes", "name", "sha256"]) and
-             .files.tarball.name == "ashlr-hub-3.2.2.tgz" and
+             .files.tarball.name == "ashlr-hub-3.2.3.tgz" and
              .files.packReport.name == "npm-pack.json" and
              .files.releaseNotes.name == "release-notes.md" and
              (.files.tarball.bytes | type == "number" and . >= 1 and . <= 52428800) and
