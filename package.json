@@ -1,6 +1,6 @@
 {
   "name": "@ashlr/hub",
-  "version": "3.2.5",
+  "version": "3.2.6",
   "description": "Local-first command center for agentic engineers.",
   "publishConfig": {
     "access": "public",
