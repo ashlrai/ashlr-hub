@@ -606,8 +606,8 @@ jobs:
              .[0].version == $version and .[0].filename == $filename and
              .[0].integrity == $integrity and .[0].size == $bytes and
              .[0].unpackedSize == $unpackedBytes and
-             (.files | length) == $entryCount and
-             (.files | map(.size) | max) == $maxEntryBytes and
+             (.[0].files | length) == $entryCount and
+             (.[0].files | map(.size) | max) == $maxEntryBytes and
              (.[0].files | type == "array" and length >= 1 and length <= 10000 and
                (map(.path) | length == (unique | length)) and
                all(.[].path | split("/");

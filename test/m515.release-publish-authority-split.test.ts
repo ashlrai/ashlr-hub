@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
@@ -20,6 +21,7 @@ interface Job {
 }
 
 interface Workflow {
+  env?: Record<string, string>;
   jobs: Record<string, Job>;
 }
 
@@ -119,6 +121,8 @@ function releaseAuthorityViolations(candidate: Workflow): string[] {
       !publishRuns.includes('gzip --decompress --stdout -- "$tarball" | head -c 134217729') ||
       !publishRuns.includes('archive_bytes > 134217728') ||
       !publishRuns.includes('cmp --silent "$expected_members" "$actual_members"') ||
+      !publishRuns.includes('(.[0].files | length) == $entryCount') ||
+      !publishRuns.includes('(.[0].files | map(.size) | max) == $maxEntryBytes') ||
       !publishRuns.includes('["package/\\(.path)", (.mode | tostring), (.size | tostring)] | @tsv') ||
       !publishRuns.includes('(map(.path) | length == (unique | length))') ||
       !publishRuns.includes('all(.[].path | split("/")') ||
@@ -234,6 +238,19 @@ describe('release publish authority split', () => {
         'true',
       );
     }],
+    ['npm pack file count loses its singleton-array scope', (mutated: Workflow) => {
+      const verify = mutated.jobs.publish!.steps!.find((step) =>
+        step.name === 'Verify bounded prepared candidate without executing it')!;
+      verify.run = verify.run!.replace('(.[0].files | length)', '(.files | length)');
+    }],
+    ['npm pack maximum size loses its singleton-array scope', (mutated: Workflow) => {
+      const verify = mutated.jobs.publish!.steps!.find((step) =>
+        step.name === 'Verify bounded prepared candidate without executing it')!;
+      verify.run = verify.run!.replace(
+        '(.[0].files | map(.size) | max)',
+        '(.files | map(.size) | max)',
+      );
+    }],
     ['pack path normalization removed', (mutated: Workflow) => {
       const verify = mutated.jobs.publish!.steps!.find((step) =>
         step.name === 'Verify bounded prepared candidate without executing it')!;
@@ -323,6 +340,53 @@ describe('release publish authority split', () => {
       ['package/dist/cli.js', 511, 200],
     ]));
   });
+
+  it.runIf(process.platform !== 'win32')(
+    'evaluates the publisher predicate against a real npm pack array root',
+    () => {
+      const verify = workflow.jobs.publish!.steps!.find((step) =>
+        step.name === 'Verify bounded prepared candidate without executing it')!;
+      const filterMatch = verify.run?.match(
+        /--argjson maxEntryBytes[^\n]*\\\n\s*'([\s\S]*?)'\s*\\\n\s*"\$pack_report"/u,
+      );
+      expect(filterMatch?.[1]).toBeTruthy();
+      const filter = filterMatch![1]!;
+      const releaseVersion = workflow.env?.RELEASE_VERSION;
+      expect(releaseVersion).toMatch(/^\d+\.\d+\.\d+$/u);
+      const tarballName = `ashlr-hub-${releaseVersion}.tgz`;
+      const report = [{
+        name: '@ashlr/hub',
+        version: releaseVersion,
+        filename: tarballName,
+        integrity: 'sha512-Y2FuZGlkYXRl',
+        size: 123,
+        unpackedSize: 100,
+        files: [{ path: 'package.json', size: 100, mode: 420 }],
+      }];
+      const jqArgs = [
+        '-e',
+        '--arg', 'version', releaseVersion!,
+        '--arg', 'filename', tarballName,
+        '--arg', 'integrity', 'sha512-Y2FuZGlkYXRl',
+        '--argjson', 'bytes', '123',
+        '--argjson', 'unpackedBytes', '100',
+        '--argjson', 'entryCount', '1',
+        '--argjson', 'maxEntryBytes', '100',
+      ];
+      const evaluate = (predicate: string) => spawnSync('jq', [...jqArgs, predicate], {
+        encoding: 'utf8',
+        input: JSON.stringify(report),
+      });
+
+      const accepted = evaluate(filter);
+      expect(accepted.error).toBeUndefined();
+      expect(accepted.status, accepted.stderr).toBe(0);
+
+      const broken = evaluate(filter.replaceAll('.[0].files', '.files'));
+      expect(broken.status).not.toBe(0);
+      expect(broken.stderr).toContain('Cannot index array with string "files"');
+    },
+  );
 
   it('documents the remaining same-workflow artifact trust boundary', () => {
     const docs = readFileSync(join(repoRoot, 'docs/RELEASING.md'), 'utf8');

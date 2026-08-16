@@ -210,8 +210,17 @@ then stopped in unprivileged prepare when the duplicate unsharded test pass hit
 its bounded runtime cap before packing or artifact upload. No deployment
 approval was requested, and npm publish, publication verification, and GitHub
 Release creation were skipped; no 3.2.3 package was published. Never move,
-delete, recreate, or reuse any failed tag or version. The protected 3.2.4
-candidate is the only successor lane after the reviewed prepare repair.
+delete, recreate, or reuse any failed tag or version. The protected lightweight
+tag `v3.2.4` likewise remains at its original commit. Its 2026-08-16 workflow
+run `31931284428` passed all nine native verification jobs, the signed
+no-authority canary, and unprivileged prepare. After the exact npm-release
+deployment was approved, the privileged job stopped in its fail-closed artifact
+verifier because two pack-report aggregate predicates addressed npm's
+one-element JSON array as an object. Registry admission and `npm publish` never
+ran; publication verification and GitHub Release creation were skipped; no
+3.2.4 package was published. Never move, delete, recreate, or reuse any failed
+tag or version. No successor tag may be created until a separate 3.2.5 metadata
+merge follows the reviewed pack-report-root repair.
 
 If **publish succeeded and only `verify_publish` or the GitHub `release` job
 failed**, first verify that npm contains the intended tag artifact from a clean
