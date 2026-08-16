@@ -97,11 +97,19 @@ vi.mock('../src/core/git.js', () => ({
   resolveGitHubOriginAuthorityDetails: () => null,
 }));
 
-vi.mock('node:child_process', () => ({
-  execFileSync: (...a: unknown[]) => mockExecFileSync(...a),
-  execSync: vi.fn(() => Buffer.from('')),
-  spawnSync: vi.fn(() => ({ status: 0, stdout: Buffer.from(''), stderr: Buffer.from('') })),
-}));
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    execFileSync: (...a: unknown[]) => mockExecFileSync(...a),
+    execSync: vi.fn(() => Buffer.from('')),
+    // Real spawnSync must still be reachable: merge.ts's proposal-mutation
+    // lock does a real `/bin/ls -lde` ACL-safety check on darwin, and a
+    // blanket stub here makes it fail closed with "lock unavailable" —
+    // unrelated to anything this suite actually verifies.
+    spawnSync: actual.spawnSync,
+  };
+});
 
 vi.mock('../src/core/run/verify-commands.js', () => ({
   detectVerifyCommands: (...a: unknown[]) => mockDetectVerifyCommands(...a),

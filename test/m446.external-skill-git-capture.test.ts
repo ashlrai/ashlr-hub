@@ -18,7 +18,12 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
+
+// AST-scans the whole src/ tree for a forbidden import path into the
+// observation-only capture module; that scan alone takes ~20s on this
+// machine, well past the 5s default.
+vi.setConfig({ testTimeout: 45_000, hookTimeout: 45_000 });
 import ts from 'typescript';
 
 import { auditExternalSkillPack } from '../src/core/fleet/external-skill-audit.js';
@@ -849,7 +854,11 @@ describe.runIf(process.platform !== 'win32')('M446 external skill Git-object cap
     }, { storageRoot, storageAnchor: storageRoot });
 
     expect(result).toMatchObject({ state: 'withheld', reason: 'capture-limit' });
-  }, 20_000);
+    // The capture path legitimately spends up to MAX_CAPTURE_MS (30s in
+    // src/core/fleet/external-skill-git-capture.ts) making real git
+    // subprocess calls before its internal deadline trips; give the test
+    // itself real headroom above that.
+  }, 45_000);
 
   it('preserves executable mode as metadata while never executing blob bytes', () => {
     const repository = initializeRawRepository();

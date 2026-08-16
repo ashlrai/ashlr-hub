@@ -2,8 +2,14 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ServiceStatusResult } from '../src/core/daemon/service.js';
+
+// Each case does real fsync'd crypto/ACL-signed state writes across staged
+// intent/receipt/marker files; several individually run within a couple
+// hundred ms of the 5s default even in isolation, and comfortably over it
+// under normal test-suite load.
+vi.setConfig({ testTimeout: 20_000 });
 import {
   daemonStateResolutionIntentPath,
   daemonStateResolutionReceiptPath,
@@ -681,7 +687,7 @@ describe.runIf(process.platform !== 'win32')('daemon state resolution protocol',
     expect(fs.readFileSync(daemonStatePath())).toEqual(conflictSeeded.bytes);
   });
 
-  it('resumes after crashes following state publication, receipt publication, and marker retirement staging', { timeout: 15_000 }, () => {
+  it('resumes after crashes following state publication, receipt publication, and marker retirement staging', { timeout: 30_000 }, () => {
     const crashHooks: Array<Partial<DaemonStateResolutionRuntime>> = [
       { afterStatePublish: () => { throw new Error('crash after state'); } },
       { afterReceiptStage: () => { throw new Error('crash after receipt staging'); } },

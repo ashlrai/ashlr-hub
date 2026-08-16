@@ -5,6 +5,10 @@ import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+// AST-scans the whole src/ tree for runtime import boundaries; that scan
+// alone takes ~18s on this machine, well past the 5s default.
+vi.setConfig({ testTimeout: 45_000 });
+
 const auditOverride = vi.hoisted(() => ({ value: null as unknown }));
 
 vi.mock('../src/core/fleet/external-skill-audit-receipt.js', async (importOriginal) => {

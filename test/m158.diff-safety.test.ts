@@ -32,7 +32,10 @@ const { fakeHome } = vi.hoisted(() => ({
   fakeHome: `/tmp/ashlr-m158-${process.pid}`,
 }));
 
-vi.mock('node:os', () => ({ homedir: () => fakeHome }));
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  return { ...actual, homedir: () => fakeHome };
+});
 afterAll(() => fs.rmSync(fakeHome, { recursive: true, force: true }));
 
 // Capture decisions-ledger calls

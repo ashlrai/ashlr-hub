@@ -13,6 +13,11 @@ import {
 } from '../src/core/inbox/store.js';
 import type { Proposal } from '../src/core/types.js';
 
+// The hard-cap test writes thousands of proposal files to real disk. Under
+// full-suite parallel load that filesystem work can individually exceed the
+// 5s default, causing spurious timeouts unrelated to the cap logic itself.
+vi.setConfig({ testTimeout: 20_000, hookTimeout: 20_000 });
+
 const originalHome = process.env.HOME;
 const REPO = path.join(fs.realpathSync.native(os.tmpdir()), 'ashlr-m374-repo');
 let home: string;

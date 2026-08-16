@@ -197,7 +197,7 @@
     "plugins": {
       "type": "object",
       "additionalProperties": false,
-      "description": "M33 plugin-system configuration. Default empty \u2014 enabled:[] means no plugins load.",
+      "description": "M33 plugin-system configuration. Default empty — enabled:[] means no plugins load.",
       "properties": {
         "enabled": {
           "type": "array",
@@ -232,8 +232,803 @@
     },
     "foundry": {
       "type": "object",
-      "description": "v4/v5 autonomous-fleet configuration (M45+). Full key reference: docs/FOUNDRY-CONFIG.md. Deep validation is runtime: unknown keys surface as effective-config warnings (M340).",
-      "additionalProperties": true
+      "description": "v4/v5 autonomous-fleet configuration (M45+). Full key reference: docs/FOUNDRY-CONFIG.md. Declared exhaustively from AshlrConfig['foundry'] in src/core/types.ts (M340b). additionalProperties stays true: KNOWN_FOUNDRY_KEYS in src/core/effective-config.ts is the authoritative typo/unknown-key detector at config-load time (an accompanying human-readable warning, not a hard validation failure) and currently recognizes several keys this schema does not yet model 1:1 (e.g. acePlaybook, localization, redTeam, feedbackEnabled, stallIdleMs, strategistModel, managerJudgeModel, managerJudgeEngine, inventPerCycle, blastRadius) plus operator-extension keys consumed by tooling outside this package. This schema is documentation/editor metadata only; it is not loaded or enforced by any code path in src/.",
+      "additionalProperties": true,
+      "properties": {
+        "allowedBackends": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Backends the fleet may use. Absent means ['builtin'] only."
+        },
+        "autonomyControlLoop": {
+          "type": "boolean",
+          "description": "M308: executable autonomy control loop gating daemon dispatch. Default true when foundry is present."
+        },
+        "repairHandoffV2Write": {
+          "type": "boolean",
+          "description": "Reader-first migration gate for objective-scoped repair handoff schema v2. Default false."
+        },
+        "repairHandoffV2Activation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "activatedAt"
+          ],
+          "description": "CLI-issued identity for the current v2 writer activation epoch.",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "Fresh UUID minted when the writer transitions disabled to enabled."
+            },
+            "activatedAt": {
+              "type": "string",
+              "description": "Canonical ISO timestamp recorded with the activation identity."
+            }
+          }
+        },
+        "models": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Per-backend preferred model id, keyed by EngineId."
+        },
+        "claude5": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "M320: Claude 5 generation rollout (Sonnet 5 workhorse + Fable 5 judge/strategist). Absent means enabled.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Master switch. Default true."
+            },
+            "fable": {
+              "type": "boolean",
+              "description": "Use Fable 5 as default judge/strategist with fallback to opus-4-8. Default true."
+            }
+          }
+        },
+        "modelGranularRouting": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "M323: model-granular cost-aware learned routing. DEFAULT OFF.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Master switch. Default false."
+            },
+            "minShipRate": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "description": "Minimum learned ship-rate for the cost-aware pick. Default 0.6."
+            }
+          }
+        },
+        "bestOfN": {
+          "type": "number",
+          "description": "M170/M333: best-of-N candidate generation count. Default 1 (single dispatch)."
+        },
+        "bestOfNCandidates": {
+          "type": "array",
+          "description": "M333: per-candidate engine/model specs for multi-model best-of-N.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "engine"
+            ],
+            "properties": {
+              "engine": {
+                "type": "string"
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        "bestOfNMinItemScore": {
+          "type": "number",
+          "description": "M333: fan out only for work items whose score >= this threshold."
+        },
+        "outcomeWatcher": {
+          "type": "boolean",
+          "description": "M332: observation-only revert/follow-up watcher. DEFAULT ON; false disables."
+        },
+        "verifyToGreen": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "M331: verify-to-green bounded engine repair loop before filing a proposal. DEFAULT OFF.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Master switch. Default false."
+            },
+            "maxIterations": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5,
+              "description": "Max repair iterations. Default 3."
+            },
+            "perRunTimeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Per repair-run timeout in ms. Default 180000."
+            },
+            "failureTailBytes": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Verification-failure tail bytes fed back to the engine. Default 8192."
+            }
+          }
+        },
+        "sandboxExternal": {
+          "type": "boolean",
+          "description": "Run external engines inside a sandbox with diff capture. Default true when foundry is set."
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Hard wall-clock per external run (ms). Default 20 minutes."
+        },
+        "completenessGate": {
+          "type": "boolean",
+          "description": "M275: completeness + self-verify gate before filing a proposal. DEFAULT true."
+        },
+        "mergeAuthority": {
+          "type": "array",
+          "description": "Allowlist for the merge-authority gate: a proposal may auto-apply to main only if its {engine,model} matches an entry here.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "engine",
+              "model"
+            ],
+            "properties": {
+              "engine": {
+                "type": "string"
+              },
+              "model": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "limits": {
+          "type": "object",
+          "description": "M46: per-backend rate limits for subscription backends, keyed by EngineId. Absent means unlimited.",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "window",
+              "max"
+            ],
+            "properties": {
+              "window": {
+                "type": "string",
+                "description": "Rolling window label, e.g. '1m'|'5m'|'1h'|'1d'."
+              },
+              "max": {
+                "type": "integer",
+                "description": "Max dispatches per rolling window."
+              }
+            }
+          }
+        },
+        "engines": {
+          "type": "object",
+          "description": "M50 (v5): declarative engine roster (EngineSpec per key). Overrides/extends BUILTIN_ENGINE_REGISTRY. Absent means exactly the builtin roster. See EngineSpec in src/core/types.ts.",
+          "additionalProperties": true
+        },
+        "nim": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "M195: NVIDIA NIM backend config (OpenAI-compatible cloud inference). Entirely opt-in.",
+          "properties": {
+            "baseUrl": {
+              "type": "string",
+              "description": "Default 'https://integrate.api.nvidia.com/v1'."
+            },
+            "model": {
+              "type": "string",
+              "description": "Default 'moonshotai/kimi-k2.6'."
+            },
+            "apiKeyEnv": {
+              "type": "string",
+              "description": "Env var NAME holding the bearer API key. Default 'NVIDIA_NIM_API_KEY'."
+            },
+            "tier": {
+              "type": "string",
+              "enum": [
+                "local",
+                "mid",
+                "frontier"
+              ],
+              "description": "Trust tier for routing. Default 'frontier'."
+            },
+            "maxConcurrent": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "costPerMTokenOut": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        },
+        "kimi": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Kimi/Moonshot resource hints (engine normally defined via foundry.engines.kimi).",
+          "properties": {
+            "maxConcurrent": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "costPerMTokenOut": {
+              "type": "number",
+              "minimum": 0
+            },
+            "tier": {
+              "type": "string",
+              "enum": [
+                "local",
+                "mid",
+                "frontier"
+              ],
+              "description": "M270: promotes the kimi engine spec's tier (engine-registry.ts applyKimiConfig)."
+            }
+          }
+        },
+        "fleetMcp": {
+          "type": "boolean",
+          "description": "M248: guarantee fleet sandboxed engines inherit ashlr-plugin MCP tools. DEFAULT true."
+        },
+        "minItemValue": {
+          "type": "number",
+          "description": "M124: backlog value filter floor. Default 2."
+        },
+        "scanTodos": {
+          "type": "boolean",
+          "description": "M136: TODO/FIXME marker scanner toggle. DEFAULT false."
+        },
+        "scanDeps": {
+          "type": "boolean",
+          "description": "M160: dependency-bump/npm-audit scanner toggle. DEFAULT false."
+        },
+        "scanDependencyBumps": {
+          "type": "boolean",
+          "description": "M271: mechanical npm-outdated package bump scanner toggle. DEFAULT false. Requires scanDeps=true."
+        },
+        "scanLint": {
+          "type": "boolean",
+          "description": "M160: lint-error scanner toggle. DEFAULT false."
+        },
+        "scanHygiene": {
+          "type": "boolean",
+          "description": "M160: repo-hygiene (README/LICENSE/CONTRIBUTING) scanner toggle. DEFAULT false."
+        },
+        "goalPlanning": {
+          "type": "boolean",
+          "description": "M222: goal to milestones auto-planning. DEFAULT true."
+        },
+        "goalFocusMode": {
+          "type": "boolean",
+          "description": "Defer new planning-goal expansion / generative invention while active goals have pending milestones. DEFAULT true."
+        },
+        "goalFocusActiveThreshold": {
+          "type": "number",
+          "description": "Active actionable-goal threshold for goalFocusMode. Default 4."
+        },
+        "browserVerify": {
+          "type": "boolean",
+          "description": "M167: headless browser verification of web-app renders after a diff. DEFAULT false (opt-in)."
+        },
+        "visualGrounding": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Pluggable visual grounding layer for screenshot/document perception. DEFAULT false.",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "provider": {
+              "type": "string",
+              "enum": [
+                "locateanything-http",
+                "generic-openai-vision"
+              ]
+            },
+            "endpoint": {
+              "type": "string"
+            },
+            "model": {
+              "type": "string"
+            },
+            "query": {
+              "type": "string"
+            },
+            "apiKeyEnv": {
+              "type": "string"
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "maxImageBytes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "licenseAccepted": {
+              "type": "boolean"
+            },
+            "allowRemoteEndpoint": {
+              "type": "boolean"
+            }
+          }
+        },
+        "usePhantom": {
+          "type": "boolean",
+          "description": "M168: opt-in phantom-secret injection for fleet verification/integration tasks. DEFAULT false."
+        },
+        "diffSafety": {
+          "type": "boolean",
+          "description": "M158: destructive-diff pre-judge guard. DEFAULT true."
+        },
+        "tasteCritic": {
+          "type": "boolean",
+          "description": "M183: frontier TASTE critic for best-of-N selection. DEFAULT false."
+        },
+        "routingPolicy": {
+          "type": "string",
+          "enum": [
+            "balanced",
+            "cost",
+            "quality"
+          ],
+          "description": "M128: intelligent model-granular routing policy. Absent means 'balanced'."
+        },
+        "learnedRouting": {
+          "type": "boolean",
+          "description": "M240: bias engine/model selection using historical judge outcomes. DEFAULT true."
+        },
+        "modelRacing": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled"
+          ],
+          "description": "M166: model-racing + distillation dataset. DEFAULT DISABLED.",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "localEngine": {
+              "type": "string",
+              "description": "Defaults to 'local-coder'."
+            },
+            "frontierEngine": {
+              "type": "string",
+              "description": "Defaults to 'claude'."
+            }
+          }
+        },
+        "intelligence": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "M53: fleet-intelligence tuning (learned routing / budget recovery / anomaly holds). Absent means off.",
+          "properties": {
+            "anomalyK": {
+              "type": "number",
+              "description": "Default 4."
+            },
+            "minFrontierSuccessRate": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "description": "Default 0.5."
+            },
+            "minProposalYieldRate": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "description": "Default 0.2."
+            },
+            "dispatchYieldWindowHours": {
+              "type": "number",
+              "description": "Default 24."
+            }
+          }
+        },
+        "pulseEmit": {
+          "type": "boolean",
+          "description": "M214: emit GenAI-OTel spans to Pulse OTLP ingest. DEFAULT false."
+        },
+        "skillLibrary": {
+          "type": "boolean",
+          "description": "M243: skill-library write-back for realized merge proposals. DEFAULT true."
+        },
+        "judgePerPass": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "M259: max frontier-judge calls per runAutoMergePass tick. Default 8."
+        },
+        "autoArchiveAfterRejects": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "M259: auto-archive proposals after K consecutive non-ship verdicts. Default 3."
+        },
+        "proposalTtlDays": {
+          "type": "number",
+          "minimum": 0,
+          "description": "M259: TTL for pending proposals in days. Default 7. Set 0 to disable."
+        },
+        "simpleConductor": {
+          "type": "boolean",
+          "description": "M280: use the flat-task dispatch loop instead of the goal-conductor. DEFAULT false."
+        },
+        "resourceAwareDispatch": {
+          "type": "boolean",
+          "description": "M300: check resource snapshot before dispatch and reroute to a fallback engine when exhausted. DEFAULT true."
+        },
+        "dispatchRetries": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "M297: bounded retry count for transient external-agent aborts. Default 2."
+        },
+        "killSwitch": {
+          "type": "boolean",
+          "description": "Test/operator kill flag for sandboxed dispatch, more restrictive than the global ~/.ashlr/KILL switch only."
+        },
+        "engineFallbackOrder": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "M300: fallback engine preference order when the primary engine is exhausted. Default ['codex','kimi','nim','local-coder']."
+        },
+        "autoMerge": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled"
+          ],
+          "description": "M47: tiered-trust auto-merge to main. DEFAULT DISABLED.",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "trustBasis": {
+              "type": "string",
+              "enum": [
+                "tier",
+                "verification",
+                "evidence"
+              ],
+              "description": "M153: authority model for Gate 4. Default 'tier'."
+            },
+            "maxRisk": {
+              "type": "string",
+              "enum": [
+                "low",
+                "medium",
+                "high"
+              ],
+              "description": "Default 'low'."
+            },
+            "managerGate": {
+              "type": "boolean",
+              "description": "Optional pass-level manager quality gate. Default false."
+            },
+            "allowSelfMerge": {
+              "type": "boolean",
+              "description": "Default false."
+            },
+            "maxAutomergeFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 40,
+              "description": "Default 4, hard maximum 40 (MAX_AUTOMERGE_POLICY_FILES in src/core/foundry/automerge-scope-policy.ts — keep in sync)."
+            },
+            "maxAutomergeLines": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 3000,
+              "description": "Default 150, hard maximum 3000 (MAX_AUTOMERGE_POLICY_LINES in src/core/foundry/automerge-scope-policy.ts — keep in sync)."
+            },
+            "pushToRemote": {
+              "type": "boolean",
+              "description": "Also merge/push on the remote (gh pr merge). Default false."
+            },
+            "protectedRemote": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "branchProtection",
+                "requiredChecks"
+              ],
+              "properties": {
+                "branchProtection": {
+                  "type": "boolean"
+                },
+                "requiredChecks": {
+                  "type": "array",
+                  "items": {}
+                }
+              }
+            },
+            "midToBranch": {
+              "type": "boolean",
+              "description": "M56 (v5): permit mid-tier proposals to auto-apply to a branch/PR, never main. Default false."
+            },
+            "allowWithoutVerification": {
+              "type": "boolean",
+              "description": "Permit auto-merge when no verification commands are detected. Default false (fail-closed)."
+            },
+            "verifyBeforeJudgePerPass": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Max verification-before-judge runs per auto-merge pass. Default judgePerPass."
+            }
+          }
+        },
+        "generative": {
+          "type": "boolean",
+          "description": "M181: generative engine ('rip mode') — invent bold net-new features. DEFAULT false (opt-in)."
+        },
+        "confinement": {
+          "type": "object",
+          "description": "M52: per-engine OS-level confinement profiles, keyed by EngineId or '*' for a fleet-wide default. Absent means v4 env-only containment.",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "os"
+                ],
+                "description": "Default 'off'."
+              },
+              "readAllowed": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "networkEgress": {
+                "type": "boolean",
+                "description": "Default false."
+              },
+              "onUnsupported": {
+                "type": "string",
+                "enum": [
+                  "fallback",
+                  "fail"
+                ],
+                "description": "Default 'fallback'."
+              }
+            }
+          }
+        },
+        "fabric": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "M247/SPEC-INFERENCE-FABRIC: InferenceGateway config. DEFAULT ABSENT means byte-identical to pre-M247.",
+          "properties": {
+            "gateway": {
+              "type": "boolean",
+              "description": "Enable the InferenceGateway. Default false."
+            },
+            "gatewayShadow": {
+              "type": "boolean",
+              "description": "M334: observe-only shadow mode beside legacy routing. Default false."
+            },
+            "cacheShadow": {
+              "type": "boolean",
+              "description": "M249: RunCache shadow measurement mode. Default false."
+            },
+            "cache": {
+              "type": "boolean",
+              "description": "M250: live cache short-circuit (not yet implemented). Default false."
+            },
+            "resourceAware": {
+              "type": "boolean",
+              "description": "M250: resource-aware backend demoting. Requires gateway=true. Default false."
+            },
+            "concurrentDispatch": {
+              "type": "boolean",
+              "description": "M255: dispatch across all backends with headroom in parallel. Requires gateway=true. Default false."
+            },
+            "maxSlotsPerBackend": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "M255: max concurrent slots per backend. Default 3."
+            },
+            "workhorseDispatch": {
+              "type": "boolean",
+              "description": "M256: spread local-mid bulk items across workhorse backends. Requires concurrentDispatch=true. Default false."
+            }
+          }
+        },
+        "productionVelocity": {
+          "description": "Production velocity profile. DEFAULT OFF. Boolean shorthand or an explicit resource-control profile object.",
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "profile": {
+                  "type": "string",
+                  "enum": [
+                    "off",
+                    "resource-control"
+                  ]
+                },
+                "fillQueueToSlots": {
+                  "type": "boolean"
+                },
+                "stalePendingTtlHours": {
+                  "type": "number"
+                },
+                "maxSlotsPerBackend": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "localMaxConcurrent": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "nimMaxConcurrent": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "kimiMaxConcurrent": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          ]
+        },
+        "claudeResource": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "M250 Resource Control Plane: Claude subscription-window resource caps.",
+          "properties": {
+            "fiveHourMessageCap": {
+              "type": "number"
+            },
+            "fiveHourTokenCap": {
+              "type": "number"
+            },
+            "weeklyTokenBudget": {
+              "type": "number"
+            },
+            "weeklyCostBudgetUsd": {
+              "type": "number"
+            },
+            "weeklyMessageCap": {
+              "type": "number"
+            },
+            "window": {
+              "type": "string",
+              "description": "Default '7d'."
+            },
+            "protectPct": {
+              "type": "number",
+              "description": "Default 85."
+            }
+          }
+        },
+        "resourceOverrides": {
+          "type": "object",
+          "description": "Operator resource overrides for known external capacity events (e.g. vendor weekly lockout), keyed by engine/backend id. Expired overrides are ignored automatically.",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "availability": {
+                "type": "string",
+                "enum": [
+                  "open",
+                  "near",
+                  "throttled",
+                  "exhausted",
+                  "unreachable",
+                  "unknown"
+                ]
+              },
+              "until": {
+                "type": [
+                  "string",
+                  "number"
+                ]
+              },
+              "resetsAt": {
+                "type": "number"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "usedPct": {
+                "type": "number"
+              },
+              "cap": {
+                "type": "number"
+              },
+              "capUnit": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "messages",
+                  "tokens",
+                  "requests",
+                  "concurrent",
+                  null
+                ]
+              },
+              "capWindow": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "local": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "M250 Resource Control Plane: local/Ollama concurrency config.",
+          "properties": {
+            "maxConcurrent": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Default 1."
+            },
+            "baseUrl": {
+              "type": "string",
+              "description": "Default 'http://localhost:11434'."
+            }
+          }
+        },
+        "edvVerify": {
+          "type": "boolean",
+          "description": "M151: opt-in EDV (independent/external) verification signal folded into backlog item scoring. DEFAULT false."
+        },
+        "ashlrcodeExecutor": {
+          "type": "boolean",
+          "description": "M185: gate for the `ashlrcode` (ac) autonomous executor path. DEFAULT false."
+        },
+        "specContract": {
+          "type": "boolean",
+          "description": "Spec-contract acceptance-criteria checking gate. DEFAULT false (disabled)."
+        },
+        "repoMap": {
+          "type": "boolean",
+          "description": "Inject a lightweight repo map into sandboxed-engine prompts. DEFAULT false."
+        },
+        "proposalRepair": {
+          "type": "boolean",
+          "description": "Repair-treatment maintenance pass toggle. DEFAULT true (opt-out via false). NOT YET present in KNOWN_FOUNDRY_KEYS (src/core/effective-config.ts) as of this pass."
+        }
+      }
     },
     "daemon": {
       "type": "object",
@@ -242,12 +1037,12 @@
     },
     "user": {
       "type": "object",
-      "description": "Fleet owner identity (M109) \u2014 attribution on pulse spans and team surfaces.",
+      "description": "Fleet owner identity (M109) — attribution on pulse spans and team surfaces.",
       "additionalProperties": true
     },
     "notify": {
       "type": "object",
-      "description": "Outward notification targets (M18) \u2014 opt-in webhook for run/swarm completion summaries.",
+      "description": "Outward notification targets (M18) — opt-in webhook for run/swarm completion summaries.",
       "additionalProperties": true
     },
     "comms": {

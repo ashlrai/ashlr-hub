@@ -25,6 +25,13 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+// Tests 1 and 2 drive a REAL `scanTodos` flood with real rg/grep across real
+// temp repos, so their runtime is bound by actual filesystem I/O and exceeds the
+// 5s default under any concurrent load. Raised rather than skip-guarded on
+// purpose: the flood is the whole point of the proof, and skipping it would be a
+// vacuous green. Matches the convention in m398/m501 (20s) and m355 (120s).
+vi.setConfig({ testTimeout: 30_000 });
+
 vi.mock('../src/core/daemon/activation-permit.js', () => ({
   consumeDaemonActivationPermit: () => ({
     authorized: true,

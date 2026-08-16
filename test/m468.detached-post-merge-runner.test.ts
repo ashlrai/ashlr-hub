@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   chmodSync,
   existsSync,
@@ -26,6 +26,13 @@ import {
 import { buildFleetStatus } from '../src/core/fleet/status.js';
 import { formatFleetStatus } from '../src/cli/fleet.js';
 import type { AshlrConfig } from '../src/core/types.js';
+
+// Verifier-timeout tests spawn real git subprocesses and wait out an actual
+// process timeout before asserting the runner's recovery behavior. Under
+// full-suite parallel load that real wall-clock + subprocess work can
+// individually exceed the 5s default, causing spurious timeouts unrelated
+// to the runner logic itself.
+vi.setConfig({ testTimeout: 20_000, hookTimeout: 20_000 });
 
 let home: string;
 let previousHome: string | undefined;

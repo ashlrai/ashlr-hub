@@ -14,7 +14,19 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+// These cases run REAL `npm pack` + `npm install` into temp dirs, so their
+// runtime is bound by actual package-manager and filesystem work and exceeds
+// 30s whenever the machine is loaded.
+//
+// This raises only the VITEST test timeout. It does NOT relax the release
+// script's own internal deadlines (MAX_NPM_RUNTIME_SCAN_MS /
+// MAX_NPM_SNAPSHOT_CLEANUP_MS in scripts/build-release-dependency-inventory.mjs)
+// — those are supply-chain integrity controls and still enforce themselves
+// inside the run. A test-harness timeout firing first only hides whether that
+// control passed; it never makes it pass.
+vi.setConfig({ testTimeout: 180_000, hookTimeout: 180_000 });
 import {
   resolveNpmCliLaunch,
   runTrustedNpmCli,
@@ -163,7 +175,7 @@ afterEach(() => {
   }
 });
 
-describe('release artifact contract v1', { timeout: 30_000 }, () => {
+describe('release artifact contract v1', () => {
   it('uses a shell-free Node launch rooted in the active Node toolchain', () => {
     const launch = resolveNpmCliLaunch();
     expect(launch.command).toBe(process.execPath);
@@ -251,7 +263,7 @@ describe('release artifact contract v1', { timeout: 30_000 }, () => {
         schemaVersion: 2,
       },
     });
-  }, 30_000);
+  });
 
   it('rejects dependency byte tampering and missing or extra files and packages', () => {
     const tampered = fixture();
@@ -751,7 +763,6 @@ describe('release artifact contract v1', { timeout: 30_000 }, () => {
       if (built.ok) return;
       expect(built.reason).toMatch(/platform-variant|install lifecycle|native install variance/u);
     },
-    10_000,
   );
 
   it('revalidates injected install lifecycle metadata during the second complete scan', () => {

@@ -41,9 +41,10 @@ const { fakeHome } = vi.hoisted(() => ({
   fakeHome: `/tmp/ashlr-m228-${process.pid}`,
 }));
 
-vi.mock('node:os', () => ({
-  homedir: () => fakeHome,
-}));
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  return { ...actual, homedir: () => fakeHome };
+});
 
 // Audit, fleet telemetry, decisions ledger — no-ops for this test.
 vi.mock('../src/core/sandbox/audit.js', () => ({ audit: vi.fn() }));

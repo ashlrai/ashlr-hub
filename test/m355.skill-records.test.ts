@@ -523,6 +523,8 @@ describe('M355 skill records', () => {
     expect(selection.selectedSkillIds).toEqual([]);
   });
 
+  // Writes/reads enough skill-card rows to push a daily partition past 4 MiB;
+  // genuinely takes tens of seconds of real disk I/O, well past the 5s default.
   it('complete card reads preserve lifecycle rows beyond a 4 MiB daily partition tail', () => {
     const signed = (overrides: Partial<SkillCard>): SkillCard => {
       const result = attestSkillCard(sanitizeSkillCard(card({
@@ -586,7 +588,7 @@ describe('M355 skill records', () => {
       title: 'Repair a large partition workflow',
       tags: ['large-partition'],
     }).selectedSkillIds).not.toContain('skill.large-partition-lifecycle');
-  });
+  }, 120_000);
 
   it('fails closed when any complete lifecycle partition is unreadable', () => {
     recordSkillCard(card({ skillId: 'skill.partial-history', ts: '2026-07-09T12:00:00.000Z' }));

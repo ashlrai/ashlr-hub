@@ -3,7 +3,11 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+// AST-scans the whole src/ tree for runtime import boundaries; that scan
+// alone takes ~19s on this machine, well past the 5s default.
+vi.setConfig({ testTimeout: 45_000 });
 import ts from 'typescript';
 
 import {

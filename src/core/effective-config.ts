@@ -318,6 +318,13 @@ const KNOWN_FOUNDRY_KEYS: ReadonlySet<string> = new Set([
   'learnedRouting', 'limits', 'local', 'localContext', 'localModel',
   'managerJudgeEngine', 'managerJudgeModel', 'mergeAuthority', 'minItemValue',
   'modelGranularRouting', 'modelRacing', 'models', 'nim', 'ollamaBaseUrl',
+  // M340b: four typed foundry fields the M340a sweep missed. All four are
+  // declared in types.ts (repairHandoffV2Write:614, repairHandoffV2Activation:616,
+  // productionVelocity:1298, proposalRepair:1431) and three of them are set in
+  // real operator configs, so their absence here produced false-positive
+  // "unrecognized foundry key" warnings on valid configuration.
+  'productionVelocity', 'proposalRepair',
+  'repairHandoffV2Activation', 'repairHandoffV2Write',
   'outcomeWatcher', 'proposalTtlDays', 'pulseEmit', 'regressionSentinel',
   'repoMap', 'resourceAwareDispatch', 'resourceOverrides', 'routingPolicy',
   'sandboxExternal', 'scanDependencyBumps', 'scanDeps', 'scanHygiene',
