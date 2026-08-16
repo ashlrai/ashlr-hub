@@ -502,6 +502,77 @@ function deepMerge<T extends object>(base: T, override: Partial<T>): T {
 }
 
 // ---------------------------------------------------------------------------
+// M340b: config-load-time foundry key check
+// ---------------------------------------------------------------------------
+// schema/config.schema.json declares `foundry` with additionalProperties:true
+// (many real foundry keys are read via untyped `(cfg.foundry as
+// Record<string, unknown>)?.['x']` casts and are not — or not yet — modeled
+// in AshlrConfig['foundry']), so the JSON schema alone cannot catch a typo'd
+// key. A separate on-demand check already exists (KNOWN_FOUNDRY_KEYS in
+// src/core/effective-config.ts, surfaced via `ashlr config effective` / the
+// web API), but it only runs when explicitly invoked — a typo is silent on
+// every ordinary `loadConfig()` call otherwise. This mirrors that check at
+// actual config-load time so it fires on every CLI invocation, not just the
+// on-demand snapshot.
+//
+// This list is the UNION of AshlrConfig['foundry'] (src/core/types.ts) and
+// KNOWN_FOUNDRY_KEYS (src/core/effective-config.ts) as of M340b, plus four
+// keys confirmed live-read (productionVelocity, proposalRepair,
+// repairHandoffV2Write, repairHandoffV2Activation) that were missing from
+// effective-config.ts's list and would otherwise false-positive there. The
+// two lists are intentionally NOT unified into one shared export yet — doing
+// so touches src/core/effective-config.ts, owned by a different pass at the
+// time this list was written. Regenerate this file's list, and reconcile
+// against effective-config.ts's KNOWN_FOUNDRY_KEYS, with:
+//   grep -rhoE "foundry\??\.[a-zA-Z]+|foundry[^;]{0,60}\[['\"][a-zA-Z]+['\"]\]" src/
+const KNOWN_FOUNDRY_KEYS: ReadonlySet<string> = new Set([
+  'acePlaybook', 'allowedBackends', 'antiClog', 'ashlrcodeExecutor',
+  'askBorderlineReview', 'autoArchiveAfterRejects', 'autoMerge',
+  'autonomyControlLoop', 'bestOfN', 'bestOfNCandidates', 'bestOfNMinItemScore',
+  'blastRadius', 'browserVerify', 'cascade', 'claude5', 'claudeResource',
+  'completenessGate', 'confinement', 'counterfactual', 'counterfactualSampleCap',
+  'diffSafety', 'dispatchRetries', 'edvUnverifiedWeight', 'edvVerify',
+  'engineFallbackOrder', 'engines', 'eventBus', 'fabric', 'feedbackEnabled',
+  'fleetMcp', 'generative', 'goalFocusActiveThreshold', 'goalFocusMode',
+  'goalPlanning', 'grok', 'intelligence', 'inventPerCycle', 'judgeAllowedBackends',
+  'judgePerPass', 'killSwitch', 'kimi', 'learnedRouting', 'limits', 'local',
+  'localContext', 'localModel', 'localization', 'managerJudgeEngine',
+  'managerJudgeModel', 'mergeAuthority', 'minItemValue', 'modelGranularRouting',
+  'modelRacing', 'models', 'nim', 'ollamaBaseUrl', 'outcomeWatcher',
+  'productionVelocity', 'proposalRepair', 'proposalTtlDays', 'pulseEmit',
+  'redTeam', 'regressionSentinel', 'repairHandoffV2Activation',
+  'repairHandoffV2Write', 'repoMap', 'resourceAwareDispatch',
+  'resourceOverrides', 'routingPolicy', 'sandboxExternal',
+  'scanDependencyBumps', 'scanDeps', 'scanHygiene', 'scanLint', 'scanTodos',
+  'selfHeal', 'selfImprove', 'simpleConductor', 'skillLibrary', 'specContract',
+  'stallIdleMs', 'strategistModel', 'subscriptionMaxPercent', 'tasteCritic',
+  'timeoutMs', 'usePhantom', 'verifyToGreen', 'visualGrounding',
+]);
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * Non-fatal typo guard: warn (never throw) when the raw persisted config's
+ * `foundry` block has a key this version does not recognize. A silently-off
+ * capability (a typo'd flag that just never triggers) is the worst failure
+ * mode for a fleet whose whole job is autonomous operation — this makes the
+ * typo visible on every load instead of only when `ashlr config effective`
+ * is explicitly run.
+ */
+function warnUnknownFoundryKeys(parsed: Record<string, unknown>, configPath: string): void {
+  const foundry = parsed['foundry'];
+  if (!isPlainObject(foundry)) return;
+  const unknown = Object.keys(foundry).filter((k) => !KNOWN_FOUNDRY_KEYS.has(k)).sort();
+  if (unknown.length === 0) return;
+  console.warn(
+    `[ashlr] Warning: ${configPath} has foundry key(s) not recognized by this ashlr version ` +
+    `(typo, removed, or consumed by an external tool?): ${unknown.join(', ')}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // loadConfig()
 // ---------------------------------------------------------------------------
 
@@ -534,6 +605,8 @@ function readConfigOrDefaults(configPath: string): AshlrConfig {
     return defaultConfig();
   }
 
+  warnUnknownFoundryKeys(parsed as Record<string, unknown>, configPath);
+
   // Deep-merge the user's persisted config over the defaults so newly-added
   // fields always have a value even on older config files.
   return deepMerge(defaultConfig(), parsed as Partial<AshlrConfig>);
@@ -563,6 +636,8 @@ function readConfigStrict(configPath: string): AshlrConfig {
       `[ashlr] Refusing autonomous activation: config at ${configPath} must contain a JSON object.`,
     );
   }
+
+  warnUnknownFoundryKeys(parsed as Record<string, unknown>, configPath);
 
   return deepMerge(defaultConfig(), parsed as Partial<AshlrConfig>);
 }

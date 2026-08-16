@@ -115,7 +115,18 @@ describe('M117 — engineInstalled Node-http probe', () => {
       const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
       return {
         ...actual,
-        spawnSync: (cmd: string, args?: string[], _opts?: object) => {
+        // Scope the stub to the engine PROBE commands only. A blanket
+        // spawnSync stub also swallows the real `/bin/ls -lde` ACL check inside
+        // private-storage.ts, which makes acquireExecutionAuthority() fail with
+        // 'adapter-failed' — surfacing much later as a confusing "execution
+        // authority unavailable" error in an unrelated test in this file, since
+        // doMock registrations outlive the test that declared them.
+        spawnSync: (cmd: string, args?: string[], opts?: object) => {
+          if (cmd !== process.execPath && cmd !== 'curl') {
+            return (actual.spawnSync as unknown as (
+              c: string, a?: string[], o?: object,
+            ) => ReturnType<typeof actual.spawnSync>)(cmd, args, opts);
+          }
           calls.push([cmd, args ?? []]);
           return { status: 0, stdout: '', stderr: '', pid: 1, output: [] };
         },
@@ -138,7 +149,16 @@ describe('M117 — engineInstalled Node-http probe', () => {
       const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
       return {
         ...actual,
-        spawnSync: () => ({ status: 1, stdout: '', stderr: '', pid: 1, output: [] }),
+        // Scoped to the probe commands for the same reason as above — a blanket
+        // status:1 stub breaks the real private-storage ACL check.
+        spawnSync: (cmd: string, args?: string[], opts?: object) => {
+          if (cmd !== process.execPath && cmd !== 'curl') {
+            return (actual.spawnSync as unknown as (
+              c: string, a?: string[], o?: object,
+            ) => ReturnType<typeof actual.spawnSync>)(cmd, args, opts);
+          }
+          return { status: 1, stdout: '', stderr: '', pid: 1, output: [] };
+        },
       };
     });
 

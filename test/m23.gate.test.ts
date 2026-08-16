@@ -40,9 +40,17 @@ vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
   return {
     ...actual,
-    spawnSync: () => ({
-      pid: 0, output: [], stdout: '', stderr: '', status: 1, signal: null, error: undefined,
-    }),
+    // Only fake out `gh` invocations — the store's internal ACL-safety checks
+    // (e.g. `/bin/ls -lde` in private-storage.ts) must still hit the real
+    // spawnSync or proposal persistence silently fails closed.
+    spawnSync: (command: string, ...rest: unknown[]) => {
+      if (typeof command === 'string' && /(^|\/)gh$/.test(command)) {
+        return {
+          pid: 0, output: [], stdout: '', stderr: '', status: 1, signal: null, error: undefined,
+        };
+      }
+      return (actual.spawnSync as (...args: unknown[]) => unknown)(command, ...rest);
+    },
     execFileSync: actual.execFileSync,
   };
 });

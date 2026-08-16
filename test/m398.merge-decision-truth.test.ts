@@ -8,6 +8,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+// Each test shells out to a real git repo (execFileSync) to build fixture
+// commits/proposals. Under full-suite parallel load those subprocess calls
+// can individually take longer than the 5s default, causing spurious
+// timeouts unrelated to the merge-decision assertions themselves.
+vi.setConfig({ testTimeout: 20_000 });
+
 const mocks = vi.hoisted(() => ({
   judgeProposal: vi.fn(),
   getActiveClient: vi.fn(),

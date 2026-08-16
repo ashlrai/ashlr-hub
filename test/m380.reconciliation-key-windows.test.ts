@@ -28,6 +28,11 @@ const priorHome = process.env.ASHLR_HOME;
 const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
 let home: string;
 const expectedHeadOid = 'b'.repeat(40);
+// Relative to "now" (not a fixed calendar date) so the reconciliation
+// attestation's MAX_REMOTE_HANDOFF_RECONCILIATION_LAG_MS (30 days) window
+// never lapses just because real time passed since this test was written.
+const mergedAtIso = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+const createdAtIso = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -39,7 +44,7 @@ beforeEach(() => {
   mocks.viewPr.mockReset();
   mocks.viewPr.mockReturnValue({
     state: 'MERGED',
-    mergedAt: '2026-07-12T04:00:00.000Z',
+    mergedAt: mergedAtIso,
     mergeCommitOid: 'a'.repeat(40),
     url: 'https://github.com/ashlrai/hub/pull/7',
     headRefName: 'ashlr/change',
@@ -60,7 +65,7 @@ function handoff(): ProposalRemoteHandoff {
   return {
     provider: 'github', state: 'awaiting-host-merge',
     prUrl: 'https://github.com/ashlrai/hub/pull/7',
-    branch: 'ashlr/change', base: 'main', createdAt: '2026-07-12T03:00:00.000Z',
+    branch: 'ashlr/change', base: 'main', createdAt: createdAtIso,
     expectedHeadOid,
   };
 }
