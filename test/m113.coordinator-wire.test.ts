@@ -761,20 +761,53 @@ describe('SharedWorkQueueCoordinator two-machine disjoint', () => {
     }
   });
 
+  it('fails closed before direct provider contact when configured quota authority is invalid', async () => {
+    const cfg = makeCfg({
+      daemon: { dailyBudgetUsd: 10, perTickItems: 1, parallel: 1, intervalMs: 100 },
+      foundry: {
+        allowedBackends: ['claude'],
+        // The observational router retains its historical fallback for unknown
+        // windows. The final effect-boundary reservation must reject this
+        // configuration instead of turning that advisory fallback into launch
+        // authority.
+        limits: { claude: { window: '2h', max: 1 } },
+      },
+    });
+    mockLoadConfig.mockReturnValue(cfg);
+    routeResult = { backend: 'claude', tier: 'frontier', reason: 'frontier test' };
+    backlogItems = [makeItem('quota-invalid-1', tmpRepo, { score: 3 })];
+
+    enroll(tmpRepo);
+    const result = await tick(cfg, { dryRun: false });
+
+    expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+    expect(result.dispatches?.[0]).toMatchObject({
+      backend: 'claude',
+      assignedBy: 'quota-reservation',
+      dispatched: false,
+      skipReason: 'quota-invalid',
+      production: { outcome: 'gate-blocked' },
+    });
+    expect(loadFleetQuota().events).toEqual([]);
+  });
+
   it('keeps pre-effect ordering explicit in builtin, direct, and Best-of-N launch branches', () => {
     const source = fs.readFileSync(path.resolve('src/core/daemon/loop.ts'), 'utf8');
     const builtin = source.slice(source.indexOf("if (backend === 'builtin')"), source.indexOf("if (backend === 'builtin')") + 3_000);
     const bestOfN = source.slice(source.indexOf('if (fanOut)'), source.indexOf('if (fanOut)') + 3_000);
-    const direct = source.slice(source.indexOf('} else {', source.indexOf('if (fanOut)')), source.indexOf('} else {', source.indexOf('if (fanOut)')) + 2_500);
+    const direct = source.slice(source.indexOf('} else {', source.indexOf('if (fanOut)')), source.indexOf('} else {', source.indexOf('if (fanOut)')) + 4_000);
 
     expect(builtin.indexOf('beginQueueExecution()')).toBeLessThan(builtin.indexOf('recordDispatchStartAgentAction'));
     expect(builtin.indexOf('recordDispatchStartAgentAction')).toBeLessThan(builtin.indexOf('return runSwarm('));
-    for (const branch of [bestOfN, direct]) {
-      expect(branch.indexOf('beginQueueExecution()')).toBeLessThan(branch.indexOf('recordUse(backend!)'));
-      expect(branch.indexOf('recordUse(backend!)')).toBeLessThan(branch.indexOf('recordDispatchStartAgentAction'));
-    }
-    expect(bestOfN.indexOf('recordDispatchStartAgentAction')).toBeLessThan(bestOfN.indexOf('return runBestOfN('));
-    expect(direct.indexOf('recordDispatchStartAgentAction')).toBeLessThan(direct.indexOf('return runGoal('));
+    expect(bestOfN.indexOf('beginQueueExecution()')).toBeLessThan(bestOfN.indexOf('return runBestOfN('));
+    expect(bestOfN).toContain('reserveQuotaUses:');
+    expect(bestOfN).toContain('beforeCandidateProviderDispatch:');
+    expect(bestOfN.indexOf('reserveQuotaUses:')).toBeLessThan(bestOfN.indexOf('beforeCandidateProviderDispatch:'));
+    expect(direct.indexOf('beginQueueExecution()')).toBeLessThan(direct.indexOf('reserveFleetQuotaUse('));
+    expect(direct.indexOf('reserveFleetQuotaUse(')).toBeLessThan(direct.indexOf('recordDispatchStartAgentAction'));
+    expect(direct.indexOf('recordDispatchStartAgentAction')).toBeLessThan(direct.indexOf('const run = runGoal('));
+    expect(direct.indexOf('const run = runGoal(')).toBeLessThan(direct.indexOf('recordUse(backend!)'));
   });
 
   it('machines A and B claim disjoint items from the same backlog', () => {

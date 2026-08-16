@@ -67,6 +67,10 @@ import {
   normalizeNumericLoopbackOllamaBaseUrl,
   type OllamaModelIdentity,
 } from './ollama-identity.js';
+import type {
+  FleetQuotaReservationRequest,
+  FleetQuotaReservationResult,
+} from '../fleet/quota.js';
 
 const SHADOW_REQUEST_TIMEOUT_MS = 120_000;
 const SHADOW_REQUEST_MAX_BYTES = 1024 * 1024;
@@ -130,6 +134,10 @@ export interface CandidateResult {
   shadowParticipated?: boolean;
   /** Error from the sandbox run or judge, if any. */
   error?: string;
+  /** Durable batch reservation that governed this logical producer dispatch. */
+  quotaReservation?: FleetQuotaReservationResult;
+  /** True only when the sandboxed producer runner was actually invoked. */
+  providerDispatchAttempted?: boolean;
   /** Structured reason the sandbox run did or did not file a proposal. */
   proposalOutcome?: RunProposalOutcome;
   /** Bounded final-capture classification consumed by the daemon. */
@@ -743,6 +751,21 @@ async function runBestOfNInternal(
     candidates?: BestOfNCandidateSpec[];
     /** Daemon-side fail-closed refusal for an explicit malformed candidate list. */
     candidateConfigRefusal?: string;
+    /**
+     * Final fleet-only quota authority. When supplied, every runnable candidate
+     * is admitted as one atomic batch before any producer runner is invoked.
+     */
+    reserveQuotaUses?: (
+      requests: readonly FleetQuotaReservationRequest[],
+    ) => FleetQuotaReservationResult;
+    /** Final daemon ownership/telemetry fence, after quota admission. */
+    beforeProviderDispatch?: () => boolean;
+    /** Rechecked immediately before every provider or provider-inventory call. */
+    providerDispatchStillAuthorized?: () => boolean;
+    /** Final per-candidate authority/telemetry handoff immediately before the runner. */
+    beforeCandidateProviderDispatch?: (backend: EngineId, runId: string) => boolean;
+    /** Best-effort observation after the sandboxed runner has been invoked. */
+    onProviderDispatchStarted?: (backend: EngineId, runId: string) => void;
   },
 ): Promise<BestOfNResult | { winner: undefined; candidates: CandidateResult[]; critique: BestOfNResult['critique'] }> {
   const n = readN(cfg, opts?.n);
@@ -867,6 +890,80 @@ async function runBestOfNInternal(
       ? 'api-model sandbox runner unavailable'
       : 'cli-agent sandbox runner unavailable';
 
+  type CandidatePlan = {
+    index: number;
+    spec: RuntimeCandidateSpec;
+    runId?: string;
+    runIdError?: string;
+  };
+  const candidatePlans: CandidatePlan[] = Array.from({ length: n }, (_, index) => {
+    const spec = specs[index % specs.length]!;
+    try {
+      return {
+        index,
+        spec,
+        runId: opts?.attemptId
+          ? deriveCandidateAttemptIdentity(opts.attemptId, index)
+          : `best-of-n-${index}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+      };
+    } catch (error) {
+      return {
+        index,
+        spec,
+        runIdError: error instanceof Error ? error.message : 'invalid attempt identity',
+      };
+    }
+  });
+
+  let quotaReservation: FleetQuotaReservationResult | undefined;
+  let providerDispatchPreflightRefusal: string | undefined;
+  let reservableCount = 0;
+  if (opts?.reserveQuotaUses) {
+    const reservable = candidatePlans.filter((plan) =>
+      plan.runId !== undefined && plan.spec.invalidReason === undefined && !!runnerFor(plan.spec.engine));
+    reservableCount = reservable.length;
+    if (reservable.length > 0) {
+      try {
+        const requests = reservable.map((plan) => ({
+          backend: plan.spec.engine,
+          dispatchId: plan.runId!,
+        }));
+        const observed = opts.reserveQuotaUses(requests);
+        const validAuthorized = observed && typeof observed === 'object' &&
+          observed.launchAuthorized === true &&
+          (observed.kind === 'reserved' || observed.kind === 'unlimited') &&
+          Array.isArray(observed.reservations) && observed.reservations.length === requests.length &&
+          observed.reservations.every((receipt, index) =>
+            receipt?.backend === requests[index]?.backend &&
+            (receipt.status === 'reserved' || receipt.status === 'unlimited') &&
+            Number.isSafeInteger(receipt.used) && receipt.used >= 0 &&
+            (receipt.limit === null || (Number.isSafeInteger(receipt.limit) && receipt.limit > 0)));
+        const validRefusal = observed && typeof observed === 'object' &&
+          observed.launchAuthorized === false && [
+            'invalid', 'duplicate', 'conflict', 'exhausted', 'unavailable', 'capacity',
+          ].includes(observed.kind);
+        quotaReservation = validAuthorized || validRefusal
+          ? observed
+          : { kind: 'invalid', launchAuthorized: false };
+        if (quotaReservation.launchAuthorized && !validAuthorized) {
+          quotaReservation = { kind: 'invalid', launchAuthorized: false };
+        }
+      } catch {
+        quotaReservation = { kind: 'unavailable', launchAuthorized: false };
+      }
+    }
+  }
+  if (reservableCount > 0 && (!quotaReservation || quotaReservation.launchAuthorized) &&
+    opts?.beforeProviderDispatch) {
+    try {
+      if (opts.beforeProviderDispatch() !== true) {
+        providerDispatchPreflightRefusal = 'provider-dispatch-preflight-refused';
+      }
+    } catch {
+      providerDispatchPreflightRefusal = 'provider-dispatch-preflight-unavailable';
+    }
+  }
+
   const sourceRepo = item.repo ?? process.cwd();
   const parentDelegationScope =
     opts?.delegationScope ??
@@ -880,13 +977,13 @@ async function runBestOfNInternal(
     });
 
   // ── 5. Generate N candidates with bounded internal concurrency ──────────
-  const candidateIndexes = Array.from({ length: n }, (_, index) => index);
   const candidateBudget = partitionFanOutBudget(opts?.budget, n);
-  const generateCandidate = async (i: number): Promise<InternalCandidateResult> => {
+  const generateCandidate = async (plan: CandidatePlan): Promise<InternalCandidateResult> => {
+    const i = plan.index;
     // Vary temperature and seed so candidates differ across calls.
     // We pass opts into the sandbox via model override naming conventions where
     // supported; the primary divergence comes from the engine's own stochasticity.
-    const spec = specs[i % specs.length]!;
+    const spec = plan.spec;
     const cEngine = spec.engine;
     const requestedModel = spec.model ?? null;
     const engineSpec = resolveEngineSpec(cEngine, cfg);
@@ -895,21 +992,18 @@ async function runBestOfNInternal(
       ?? engineSpec?.defaultModel
       ?? engineSpec?.api?.defaultModel
       ?? 'default';
-    let runId: string;
-    try {
-      runId = opts?.attemptId
-        ? deriveCandidateAttemptIdentity(opts.attemptId, i)
-        : `best-of-n-${i}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-    } catch (err) {
+    if (!plan.runId) {
       return {
         index: i,
         diff: '',
         score: 0,
         engine: cEngine,
         model: cModel,
-        error: err instanceof Error ? err.message : 'invalid attempt identity',
+        providerDispatchAttempted: false,
+        error: plan.runIdError ?? 'invalid attempt identity',
       };
     }
+    const runId = plan.runId;
     const shadowConfig = parseShadowConfig(spec);
     let base: InternalCandidateResult = {
       index: i,
@@ -920,6 +1014,7 @@ async function runBestOfNInternal(
       runId,
       trajectoryId: `run:${runId}`,
       requestedModel,
+      providerDispatchAttempted: false,
       ...(shadowConfig.kind !== 'off' || spec.invalidShadow
         ? { shadow: true, shadowParticipated: false }
         : {}),
@@ -965,6 +1060,56 @@ async function runBestOfNInternal(
         error: 'shadow execution refused: draft-capture unavailable',
       };
     }
+    const runSandboxed = runnerFor(cEngine);
+    if (!runSandboxed) {
+      return { ...base, error: missingRunnerMessageFor(cEngine) };
+    }
+    if (quotaReservation && !quotaReservation.launchAuthorized) {
+      return {
+        ...base,
+        quotaReservation,
+        providerDispatchAttempted: false,
+        error: `quota-reservation-refused:${quotaReservation.kind}`,
+      };
+    }
+    if (quotaReservation) {
+      base = { ...base, quotaReservation, providerDispatchAttempted: false };
+    }
+    if (providerDispatchPreflightRefusal) {
+      return {
+        ...base,
+        providerDispatchAttempted: false,
+        error: providerDispatchPreflightRefusal,
+      };
+    }
+    const providerStillAuthorized = (): boolean => {
+      if (opts?.signal?.aborted) return false;
+      if (!opts?.providerDispatchStillAuthorized) return true;
+      try {
+        return opts.providerDispatchStillAuthorized() === true;
+      } catch {
+        return false;
+      }
+    };
+    const providerFenceRefusal = (): InternalCandidateResult => ({
+      ...base,
+      providerDispatchAttempted: false,
+      error: 'provider-dispatch-final-fence-refused',
+    });
+    const admitProviderDispatchAttempt = (): boolean => {
+      if (!providerStillAuthorized()) return false;
+      if (opts?.beforeCandidateProviderDispatch) {
+        try {
+          if (opts.beforeCandidateProviderDispatch(cEngine, runId) !== true) return false;
+        } catch {
+          return false;
+        }
+      }
+      // Close the synchronous callback/telemetry gap before runner invocation.
+      if (!providerStillAuthorized()) return false;
+      base = { ...base, providerDispatchAttempted: true };
+      return true;
+    };
     let verifiedShadowBaseUrl: string | undefined;
     if (shadowConfig.kind === 'on') {
       const baseUrlEnv = engineSpec?.api?.baseUrlEnv;
@@ -979,6 +1124,7 @@ async function runBestOfNInternal(
           error: 'shadow identity refused: non-loopback-endpoint',
         };
       }
+      if (!providerStillAuthorized()) return providerFenceRefusal();
       const verification = await verifyOllamaModelIdentity({
         baseUrl,
         model: spec.model!,
@@ -1000,11 +1146,6 @@ async function runBestOfNInternal(
         artifactIdentity: verification.identity,
       };
       verifiedShadowBaseUrl = baseUrl;
-    }
-    const runSandboxed = runnerFor(cEngine);
-
-    if (!runSandboxed) {
-      return { ...base, error: missingRunnerMessageFor(cEngine) };
     }
 
     let ownedSandbox: Sandbox | undefined;
@@ -1099,7 +1240,8 @@ async function runBestOfNInternal(
           };
         }
 
-        const result = await runSandboxed(cEngine as import('../types.js').EngineId, goal, cfg, {
+        if (!admitProviderDispatchAttempt()) return providerFenceRefusal();
+        const pendingResult = runSandboxed(cEngine as import('../types.js').EngineId, goal, cfg, {
           ...(typeof requestedModel === 'string' ? { model: requestedModel } : {}),
           sourceRepo,
           ...(effectiveCandidateBudget ? { budget: effectiveCandidateBudget } : {}),
@@ -1124,6 +1266,8 @@ async function runBestOfNInternal(
           ...(delegationScope ? { delegationScope } : {}),
           ...(opts?.signal ? { signal: opts.signal } : {}),
         });
+        try { opts?.onProviderDispatchStarted?.(cEngine, runId); } catch { /* telemetry only */ }
+        const result = await pendingResult;
         if (shadowConfig.kind === 'on' && result.providerContacted === true) {
           base = { ...base, shadowParticipated: true };
         }
@@ -1169,6 +1313,18 @@ async function runBestOfNInternal(
         }
 
         if (shadowConfig.kind === 'on') {
+          if (!providerStillAuthorized()) {
+            return {
+              ...base,
+              shadowIdentityStatus: 'refused',
+              latencyMs: Date.now() - t0,
+              error: 'shadow identity refused: final authority lost before post-inference verification',
+              sandbox: sb,
+              runId,
+              delegationScope,
+              state: result.state,
+            };
+          }
           const postVerification = await verifyOllamaModelIdentity({
             baseUrl: verifiedShadowBaseUrl!,
             model: spec.model!,
@@ -1235,7 +1391,8 @@ async function runBestOfNInternal(
         };
       }
 
-      const result = await runSandboxed(cEngine as import('../types.js').EngineId, goal, cfg, {
+      if (!admitProviderDispatchAttempt()) return providerFenceRefusal();
+      const pendingResult = runSandboxed(cEngine as import('../types.js').EngineId, goal, cfg, {
         ...(typeof requestedModel === 'string' ? { model: requestedModel } : {}),
         sourceRepo,
         ...(effectiveCandidateBudget ? { budget: effectiveCandidateBudget } : {}),
@@ -1247,6 +1404,8 @@ async function runBestOfNInternal(
         ...(delegationScope ? { delegationScope } : {}),
         ...(opts?.signal ? { signal: opts.signal } : {}),
       });
+      try { opts?.onProviderDispatchStarted?.(cEngine, runId); } catch { /* telemetry only */ }
+      const result = await pendingResult;
       const proposalOutcome = result.proposalOutcome ?? result.state.proposalOutcome;
       observeExecutedCandidate(result.state, proposalOutcome);
       if (opts?.signal?.aborted) {
@@ -1435,7 +1594,7 @@ async function runBestOfNInternal(
 
   try {
     rawCandidates = await mapWithConcurrency(
-      candidateIndexes,
+      candidatePlans,
       MAX_BEST_OF_N_CONCURRENCY,
       generateCandidate,
     );

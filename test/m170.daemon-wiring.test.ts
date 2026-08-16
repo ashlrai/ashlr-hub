@@ -103,20 +103,42 @@ beforeEach(() => {
   });
 
   // Default runBestOfN mock: returns a winner.
-  mockRunBestOfN.mockResolvedValue({
-    winner: {
+  mockRunBestOfN.mockImplementation(async (_item, _cfg, opts) => {
+    const callbacks = opts as {
+      attemptId?: string;
+      providerDispatchStillAuthorized?: () => boolean;
+      beforeCandidateProviderDispatch?: (backend: 'claude', runId: string) => boolean;
+      onProviderDispatchStarted?: (backend: 'claude', runId: string) => void;
+    };
+    expect(callbacks.providerDispatchStillAuthorized?.()).toBe(true);
+    const candidateRunId =
+      `${callbacks.attemptId ?? 'attempt'}:candidate:0`;
+    expect(callbacks.beforeCandidateProviderDispatch?.(
+      'claude',
+      candidateRunId,
+    )).toBe(true);
+    callbacks.onProviderDispatchStarted?.('claude', candidateRunId);
+    const winner = {
       index: 0,
       diff: 'diff --git a/x.ts b/x.ts\n',
       proposalId: `mock-bon-proposal-${Date.now()}`,
       score: 10,
+      engine: 'claude',
+      providerDispatchAttempted: true,
       state: {
         id: `mock-bon-run-${Date.now()}`,
         status: 'done',
         usage: { totalTokens: 200, estCostUsd: 0.002, steps: 2 },
       },
-    },
-    candidates: [],
-    critique: { n: 3, nonEmpty: 1, judged: 1, topScore: 10, winnerIndex: 0 },
+    };
+    return {
+      winner,
+      candidates: [winner],
+      critique: {
+        n: 3, nonEmpty: 1, judged: 1, topScore: 10, winnerIndex: 0,
+        totalCostUsd: 0.002, billableCostUsd: 0,
+      },
+    };
   });
 
   // Default buildBacklog: provides one item that routes to the frontier backend
@@ -184,6 +206,8 @@ vi.mock('../src/core/fleet/router.js', () => ({
 vi.mock('../src/core/fleet/quota.js', () => ({
   withinLimit: () => true,
   recordUse: () => undefined,
+  reserveFleetQuotaUse: () => ({ kind: 'unlimited', launchAuthorized: true, reservations: [] }),
+  reserveFleetQuotaUses: () => ({ kind: 'unlimited', launchAuthorized: true, reservations: [] }),
 }));
 
 // And subscription check — always allowed.
@@ -634,10 +658,7 @@ describe('M170 — error resilience: neither hook breaks the tick', () => {
       trajectoryId: expect.stringMatching(/^run:attempt-[0-9a-f-]{36}$/),
       production: { outcome: 'engine-failed' },
     });
-    expect(readAgentActions().find((event) => event.action === 'daemon:dispatch-start')).toMatchObject({
-      runId: result.dispatches?.[0]?.runId,
-      outcome: 'started',
-    });
+    expect(readAgentActions().find((event) => event.action === 'daemon:dispatch-start')).toBeUndefined();
   });
 
   it('h-series invariant: tick still returns a valid DaemonTick on any hook error', async () => {

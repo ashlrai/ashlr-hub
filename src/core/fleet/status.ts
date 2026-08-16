@@ -2536,12 +2536,13 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     let dispatchesRecent = 0;
     let quota: FleetBackendStatus['quota'] = 'unlimited';
     try {
-      const { usesInWindow, evalQuota } = await import('./quota.js');
-      // Prefer the quota ledger (authoritative for rate-limit accounting).
+      const { usesInWindow, evalFleetQuotaAuthority } = await import('./quota.js');
+      // quota.json is actual-attempt telemetry; quota-reservations.json is the
+      // separate fail-closed launch authority. Never report a healthy quota
+      // when strict authority state/config would refuse provider contact.
       dispatchesRecent = usesInWindow(backend, RECENT_WINDOW_MS);
       // Quota standing: 'unlimited' when no limit is configured for this backend.
-      const limit = cfg.foundry?.limits?.[backend];
-      quota = limit ? evalQuota(backend, cfg) : 'unlimited';
+      quota = evalFleetQuotaAuthority(backend, cfg);
     } catch {
       // Ledger unavailable — fall back to summing recent tick.backends counts.
       try {
@@ -2549,7 +2550,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       } catch {
         dispatchesRecent = 0;
       }
-      quota = 'unlimited';
+      quota = cfg.foundry?.limits?.[backend] ? 'over' : 'unlimited';
     }
     backends.push({ backend, dispatchesRecent, quota });
   }

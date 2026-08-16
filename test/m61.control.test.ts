@@ -348,6 +348,20 @@ describe('limits section (M61)', () => {
     expect(snap.limits[0].used).toBe(2);
     expect(snap.limits[0].standing).toBe('over');
   });
+
+  it('reports authority exhaustion even before attempt telemetry is recorded', async () => {
+    const cfg = withFoundry({
+      allowedBackends: ['claude'],
+      limits: { claude: { window: '1h', max: 1 } },
+    });
+    const { reserveFleetQuotaUse } = await import('../src/core/fleet/quota.js');
+    expect(reserveFleetQuotaUse('claude', cfg, 'control-reserved-slot')).toMatchObject({
+      kind: 'reserved', launchAuthorized: true,
+    });
+
+    const snap = await buildControlSnapshot(cfg);
+    expect(snap.limits[0]).toMatchObject({ used: 0, standing: 'over' });
+  });
 });
 
 // ---------------------------------------------------------------------------

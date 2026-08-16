@@ -32,7 +32,11 @@ import { buildProposalFunnelObservability } from '../src/core/fleet/proposal-fun
 import { buildFleetLaneLocks } from '../src/core/fleet/lane-lock.js';
 import { buildContextEfficiencyStatus } from '../src/core/fleet/context-efficiency.js';
 import { ROUTER_POLICY_VERSION } from '../src/core/learning/causal.js';
-import { recordUse } from '../src/core/fleet/quota.js';
+import {
+  fleetQuotaReservationPath,
+  recordUse,
+  reserveFleetQuotaUse,
+} from '../src/core/fleet/quota.js';
 import { setKill } from '../src/core/sandbox/policy.js';
 import { SharedStore } from '../src/core/fleet/shared-store.js';
 import { buildAutonomyEvidencePack, persistAutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
@@ -6944,6 +6948,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
 
     // 2 uses against a max of 2 => at/over the cap => 'over'.
+    expect(reserveFleetQuotaUse(backend, cfg, 'status-attempt-1').launchAuthorized).toBe(true);
+    expect(reserveFleetQuotaUse(backend, cfg, 'status-attempt-2').launchAuthorized).toBe(true);
     recordUse(backend);
     recordUse(backend);
 
@@ -6951,6 +6957,22 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const claude = s.backends.find((b) => b.backend === backend)!;
     expect(claude.dispatchesRecent).toBe(2);
     expect(claude.quota).toBe('over');
+  });
+
+  it('never reports quota healthy when strict reservation authority is corrupt', async () => {
+    const backend: EngineId = 'claude';
+    const cfg = withFoundry({
+      allowedBackends: [backend],
+      limits: { [backend]: { window: '1h', max: 5 } },
+    });
+    const authorityPath = fleetQuotaReservationPath();
+    mkdirSync(dirname(authorityPath), { recursive: true });
+    if (process.platform !== 'win32') chmodSync(dirname(authorityPath), 0o700);
+    writeFileSync(authorityPath, '{ corrupt authority', 'utf8');
+    if (process.platform !== 'win32') chmodSync(authorityPath, 0o600);
+
+    const status = await buildFleetStatus(cfg);
+    expect(status.backends.find((entry) => entry.backend === backend)?.quota).toBe('over');
   });
 
   it('reports killed:true when the kill switch is set', async () => {
