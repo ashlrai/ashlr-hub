@@ -3,6 +3,7 @@
 // owns its own lint config and is excluded here.
 import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
+import reactHooks from 'eslint-plugin-react-hooks';
 
 export default tseslint.config(
   // Global ignores must be in their own config object with no other keys.
@@ -96,6 +97,54 @@ export default tseslint.config(
         console: 'readonly',
         Buffer: 'readonly',
       },
+    },
+  },
+  {
+    // src/web-ui/** — the React operator console. Browser code (not Node),
+    // TSX, and it owns its own hooks-correctness lint (the rest of the repo
+    // has no React so eslint-plugin-react-hooks isn't registered globally).
+    // See src/web-ui/tsconfig.json for the matching TS-side isolation.
+    files: ['src/web-ui/**/*.ts', 'src/web-ui/**/*.tsx'],
+    plugins: { 'react-hooks': reactHooks },
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'module',
+      globals: {
+        window: 'readonly',
+        document: 'readonly',
+        console: 'readonly',
+        fetch: 'readonly',
+        Response: 'readonly',
+        Request: 'readonly',
+        RequestInit: 'readonly',
+        RequestInfo: 'readonly',
+        EventSource: 'readonly',
+        AbortController: 'readonly',
+        AbortSignal: 'readonly',
+        URL: 'readonly',
+        URLSearchParams: 'readonly',
+        crypto: 'readonly',
+        localStorage: 'readonly',
+        sessionStorage: 'readonly',
+        setTimeout: 'readonly',
+        clearTimeout: 'readonly',
+        setInterval: 'readonly',
+        clearInterval: 'readonly',
+        requestAnimationFrame: 'readonly',
+        cancelAnimationFrame: 'readonly',
+        KeyboardEvent: 'readonly',
+        MouseEvent: 'readonly',
+        Element: 'readonly',
+        HTMLElement: 'readonly',
+        HTMLInputElement: 'readonly',
+        HTMLDetailsElement: 'readonly',
+        CSS: 'readonly',
+      },
+    },
+    rules: {
+      'react-hooks/rules-of-hooks': 'error',
+      'react-hooks/exhaustive-deps': 'warn',
+      '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
     },
   },
   {

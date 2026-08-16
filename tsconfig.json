@@ -19,5 +19,5 @@
     "sourceMap": true
   },
   "include": ["src"],
-  "exclude": ["node_modules", "dist", "src/raycast"]
+  "exclude": ["node_modules", "dist", "src/raycast", "src/web-ui"]
 }

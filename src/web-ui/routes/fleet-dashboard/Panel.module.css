@@ -1,0 +1,42 @@
+/* Shared panel chrome — imported (via composes) by each fleet-dashboard
+   sub-panel so they read as one system instead of five ad-hoc cards. */
+.panel {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  overflow: hidden;
+}
+
+.panelHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+  cursor: pointer;
+  list-style: none;
+}
+
+.panelHeader::-webkit-details-marker {
+  display: none;
+}
+
+.panelTitle {
+  font-size: var(--text-sm-size);
+  font-weight: var(--font-weight-semibold);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.panelBody {
+  padding: var(--space-4);
+}
+
+.emptyState {
+  color: var(--text-tertiary);
+  font-size: var(--text-sm-size);
+  padding: var(--space-4) 0;
+  text-align: center;
+}

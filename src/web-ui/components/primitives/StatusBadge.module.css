@@ -1,0 +1,99 @@
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-full);
+  font-size: var(--text-xs-size);
+  font-weight: var(--font-weight-medium);
+  line-height: var(--text-xs-line);
+  white-space: nowrap;
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+}
+
+.neutral {
+  background: var(--status-neutral-bg);
+  color: var(--status-neutral-fg);
+}
+.neutral .dot {
+  background: var(--status-neutral-solid);
+}
+
+.info {
+  background: var(--status-info-bg);
+  color: var(--status-info-fg);
+}
+.info .dot {
+  background: var(--status-info-solid);
+}
+
+.running {
+  background: var(--status-running-bg);
+  color: var(--status-running-fg);
+}
+.running .dot {
+  background: var(--status-running-solid);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+.success {
+  background: var(--status-success-bg);
+  color: var(--status-success-fg);
+}
+.success .dot {
+  background: var(--status-success-solid);
+}
+
+.warning {
+  background: var(--status-warning-bg);
+  color: var(--status-warning-fg);
+}
+.warning .dot {
+  background: var(--status-warning-solid);
+}
+
+.danger {
+  background: var(--status-danger-bg);
+  color: var(--status-danger-fg);
+}
+.danger .dot {
+  background: var(--status-danger-solid);
+}
+
+.unknown {
+  background: var(--status-unknown-bg);
+  color: var(--status-unknown-fg);
+  font-style: italic;
+}
+.unknown .dot {
+  background: var(--status-unknown-solid);
+}
+
+.phaseDot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .running .dot {
+    animation: none;
+  }
+}
