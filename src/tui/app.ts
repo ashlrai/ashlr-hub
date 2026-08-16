@@ -130,7 +130,7 @@ async function renderOnce(cfg: AshlrConfig): Promise<number> {
   try {
     const snap = await safeSnapshot(cfg);
     const { cols, rows } = terminalSize();
-    const state: RenderState = { tab: 'overview', selected: 0, cols, rows };
+    const state: RenderState = { tab: 'overview', selected: 0, cols, rows, nowMs: Date.now() };
     const frame = renderFrame(snap, state);
     process.stdout.write(frame + '\n');
     return 0;
@@ -205,7 +205,7 @@ async function runInteractive(cfg: AshlrConfig): Promise<number> {
   function paint(): void {
     clampSelection();
     const { cols, rows } = terminalSize();
-    const state: RenderState = { tab, selected, cols, rows };
+    const state: RenderState = { tab, selected, cols, rows, nowMs: Date.now() };
     const frame = renderFrame(snap, state);
     if (frame === lastFrame) return; // skip redundant repaints
     lastFrame = frame;

@@ -12,6 +12,7 @@
  */
 
 import type { DashboardSnapshot, TuiTab } from '../core/types.js';
+import type { FleetNextAction, FleetStatus } from '../core/fleet/status.js';
 import { C, stripAnsi, pad, makeColors } from '../cli/ui.js';
 
 // ---------------------------------------------------------------------------
@@ -23,6 +24,8 @@ export interface RenderState {
   selected: number;
   cols: number;
   rows: number;
+  /** Observation time for freshness checks. Omission fails closed as stale evidence. */
+  nowMs?: number;
 }
 
 export function renderFrame(snap: DashboardSnapshot, state: RenderState): string {
@@ -41,7 +44,7 @@ export function renderFrame(snap: DashboardSnapshot, state: RenderState): string
   const headerRows = lines.length;
   const footerRows = 1;
   const bodyRows = Math.max(0, rows - headerRows - footerRows);
-  lines.push(...buildBody(snap, tab, selected, cols, bodyRows, col));
+  lines.push(...buildBody(snap, tab, selected, cols, bodyRows, col, state.nowMs));
 
   // 3. Footer (key hints)
   lines.push(buildFooter(cols, col));
@@ -112,9 +115,10 @@ function buildBody(
   cols: number,
   bodyRows: number,
   col: ReturnType<typeof makeColors>,
+  nowMs?: number,
 ): string[] {
   switch (tab) {
-    case 'overview': return bodyOverview(snap, cols, bodyRows, col);
+    case 'overview': return bodyOverview(snap, cols, bodyRows, col, nowMs);
     case 'runs':     return bodyRuns(snap, selected, cols, bodyRows, col);
     case 'swarms':   return bodySwarms(snap, selected, cols, bodyRows, col);
     case 'pulse':    return bodyPulse(snap, cols, bodyRows, col);
@@ -129,16 +133,214 @@ function buildBody(
 // Tab: Overview
 // ---------------------------------------------------------------------------
 
+const OPERATOR_SNAPSHOT_MAX_AGE_MS = 30_000;
+const OPERATOR_SNAPSHOT_MAX_FUTURE_SKEW_MS = 5_000;
+
+interface OperatorBriefingModel {
+  needsYou: FleetNextAction[];
+  clearEligible: boolean;
+  autonomousNow: string;
+  proof: {
+    observed: string;
+    decided: string;
+    acted: string;
+    proved: string;
+  };
+}
+
+function operatorActionNeedsHuman(action: FleetNextAction): boolean {
+  const commands = action.commands ?? [];
+  if (commands.some(command =>
+    command.safety === 'manual' ||
+    command.safety === 'control-plane'
+  )) return true;
+  if (commands.length > 0 && commands.every(command => command.safety === 'autonomous-dispatch')) {
+    return false;
+  }
+  return action.priority === 'critical' || action.priority === 'high';
+}
+
+function operatorInspectionAction(
+  snapshotFresh: boolean,
+  readiness: FleetStatus['autonomousShipReadiness'] | null,
+  killState: 'active' | 'inactive' | 'unknown',
+  daemonKnown: boolean,
+): FleetNextAction {
+  let detail = 'Inspect the current Fleet Status before relying on autonomous operation.';
+  if (!snapshotFresh || readiness?.freshness.overall !== 'fresh') {
+    detail = 'Operator evidence is stale or incomplete. Inspect fresh Fleet Status evidence.';
+  } else if (!daemonKnown) {
+    detail = 'Daemon authority is degraded or unavailable. Inspect Fleet Status before relying on it.';
+  } else if (killState !== 'inactive') {
+    detail = killState === 'active'
+      ? 'The fleet kill switch is engaged. Inspect state before deciding whether to clear it.'
+      : 'Kill-switch authority is unknown. Inspect state before relying on autonomous operation.';
+  } else if (!readiness || readiness.verdict === 'unknown') {
+    detail = 'Autonomous readiness is unknown. Inspect its evidence before relying on the fleet.';
+  } else if (readiness.verdict === 'blocked') {
+    detail = readiness.topBlocker?.detail ?? 'Autonomous readiness is blocked. Inspect the top blocker.';
+  }
+  return {
+    id: 'inspect-operator-evidence',
+    priority: killState === 'unknown' || !readiness || readiness.verdict === 'unknown'
+      ? 'critical'
+      : 'high',
+    label: 'Inspect fleet state',
+    detail,
+    commands: [{
+      label: 'Inspect Fleet Status',
+      argv: ['ashlr', 'fleet', 'status', '--json'],
+      shell: 'ashlr fleet status --json',
+      safety: 'read-only',
+      note: 'Inspection only. This command is displayed and never executed by the TUI.',
+    }],
+  };
+}
+
+function sourceHealthy(source: { sourceState?: string; complete?: boolean } | null | undefined): boolean {
+  return source?.sourceState === 'healthy' && source.complete === true;
+}
+
+function buildOperatorBriefing(
+  snap: DashboardSnapshot,
+  nowMs?: number,
+): OperatorBriefingModel {
+  const fleet = snap.fleet ?? null;
+  const readiness = fleet?.autonomousShipReadiness ?? null;
+  const brief = fleet?.missionBrief ?? null;
+  const generatedAtMs = Date.parse(snap.generatedAt);
+  const observedNow = typeof nowMs === 'number' && Number.isFinite(nowMs) ? nowMs : Number.NaN;
+  const snapshotFresh = Number.isFinite(generatedAtMs) && Number.isFinite(observedNow) &&
+    generatedAtMs <= observedNow + OPERATOR_SNAPSHOT_MAX_FUTURE_SKEW_MS &&
+    observedNow - generatedAtMs <= OPERATOR_SNAPSHOT_MAX_AGE_MS;
+  const killState = fleet?.killSwitch?.sourceState === 'healthy'
+    ? fleet.killSwitch.state
+    : (fleet?.killed === true ? 'active' : 'unknown');
+  const daemonKnown = snapshotFresh && fleet?.daemon.sourceQuality?.sourceState === 'healthy' &&
+    fleet.daemon.sourceQuality.complete === true;
+  const actions = Array.isArray(fleet?.nextActions) ? fleet.nextActions : [];
+  const primary = readiness?.primaryAction ?? brief?.action ?? actions[0] ?? null;
+  const ordered = [primary, ...actions]
+    .filter((action): action is FleetNextAction => action !== null)
+    .filter((action, index, all) => all.findIndex(candidate => candidate.id === action.id) === index);
+  const humanActions = ordered.filter(operatorActionNeedsHuman);
+  const readinessClear = readiness !== null &&
+    readiness.verdict !== 'unknown' && readiness.verdict !== 'blocked' &&
+    readiness.freshness.overall === 'fresh';
+  const evidenceReliable = snapshotFresh && daemonKnown && killState === 'inactive' && readinessClear;
+  const clearEligible = evidenceReliable && humanActions.length === 0;
+  const needsYou = clearEligible
+    ? []
+    : (evidenceReliable
+      ? humanActions
+      : [operatorInspectionAction(snapshotFresh, readiness, killState, daemonKnown), ...humanActions])
+        .filter((action, index, all) => all.findIndex(candidate => candidate.id === action.id) === index)
+        .slice(0, 3);
+
+  const daemonState = !daemonKnown
+    ? 'Daemon state unknown'
+    : fleet?.daemon.running === true ? 'Daemon running' : 'Daemon stopped';
+  const activeWork = snapshotFresh && fleet?.queue !== undefined
+    ? fleet.queue.activeWork?.itemCount ?? fleet.queue.shared?.activeClaims ?? 0
+    : null;
+  const spend = !daemonKnown || fleet?.daemon.todaySpentUsd == null
+    ? 'spend unknown'
+    : `$${fleet.daemon.todaySpentUsd.toFixed(2)} today`;
+  const mode = snapshotFresh
+    ? brief?.operatingMode ?? fleet?.autonomyEffectiveness?.phase ?? 'mode unknown'
+    : 'mode unknown';
+
+  const mergeHealthy = snapshotFresh && sourceHealthy(fleet?.merges.sourceQuality);
+  const dispatchHealthy = snapshotFresh && sourceHealthy(fleet?.dispatchProductionSource);
+  const recentMerges = fleet?.merges.recent ?? 0;
+  const proposalsCreated = fleet?.dispatchProduction?.proposalsCreated ?? 0;
+  const dispatches = fleet?.dispatchProduction?.attempts ??
+    fleet?.proposalProduction?.dispatched ?? 0;
+  let proved = 'No recent landed proof';
+  if (mergeHealthy && recentMerges > 0) {
+    proved = `${recentMerges} landed merge${recentMerges === 1 ? '' : 's'}`;
+  } else if (dispatchHealthy && proposalsCreated > 0) {
+    proved = `${proposalsCreated} proposal${proposalsCreated === 1 ? '' : 's'} produced`;
+  } else if (!mergeHealthy && !dispatchHealthy) {
+    proved = 'Proof withheld · sources incomplete';
+  }
+
+  return {
+    needsYou,
+    clearEligible,
+    autonomousNow: `${daemonState} · ${mode} · ${activeWork === null ? 'active work unknown' : `${activeWork} active`} · ${spend}`,
+    proof: {
+      observed: Number.isFinite(generatedAtMs) ? formatClock(snap.generatedAt) : 'unknown',
+      decided: mode,
+      acted: !snapshotFresh || activeWork === null
+        ? 'activity unknown'
+        : dispatches > 0
+        ? `${dispatches} dispatch${dispatches === 1 ? '' : 'es'}`
+        : `${activeWork} active`,
+      proved,
+    },
+  };
+}
+
+function operatorBriefingLines(
+  snap: DashboardSnapshot,
+  cols: number,
+  col: ReturnType<typeof makeColors>,
+  nowMs?: number,
+): string[] {
+  const model = buildOperatorBriefing(snap, nowMs);
+  const action = model.needsYou[0] ?? null;
+  const commands = action?.commands ?? [];
+  const command = commands.find(candidate =>
+    candidate.safety === 'manual' || candidate.safety === 'control-plane'
+  ) ?? commands[0] ?? null;
+  const hiddenCommands = command ? Math.max(0, commands.length - 1) : 0;
+  const actionText = model.clearEligible
+    ? col.green('No operator action · fresh evidence within authority')
+    : col.yellow(`${action?.label ?? 'Inspect fleet state'}${model.needsYou.length > 1 ? ` (+${model.needsYou.length - 1})` : ''}`);
+  const lines = [
+    fitLine(col.bold(col.blue(' ◆ Operator briefing')), cols),
+    fitLine(`   ${col.bold('Needs you:')} ${actionText}`, cols),
+  ];
+  if (command) {
+    lines.push(fitLine(
+      `   ${col.dim(`[${command.safety}]`)} ${command.shell}${hiddenCommands > 0 ? ` +${hiddenCommands}` : ''}`,
+      cols,
+    ));
+  } else {
+    lines.push(fitLine(`   ${col.dim('No command · display only')}`, cols));
+  }
+  lines.push(fitLine(`   ${col.bold('Autonomous now:')} ${model.autonomousNow}`, cols));
+  if (cols < 64) {
+    const compactProved = model.proof.proved.startsWith('Proof withheld')
+      ? 'withheld'
+      : model.proof.proved;
+    lines.push(
+      fitLine(`   ${col.bold('Last proof:')} Observed ${model.proof.observed}`, cols),
+      fitLine(`   Decided ${model.proof.decided}`, cols),
+      fitLine(`   Acted ${model.proof.acted} · Proved ${compactProved}`, cols),
+    );
+  } else {
+    lines.push(
+      fitLine(`   ${col.bold('Last proof:')} Observed ${model.proof.observed} → Decided ${model.proof.decided}`, cols),
+      fitLine(`   Acted ${model.proof.acted} → Proved ${model.proof.proved}`, cols),
+    );
+  }
+  return lines;
+}
+
 function bodyOverview(
   snap: DashboardSnapshot,
   cols: number,
   bodyRows: number,
   col: ReturnType<typeof makeColors>,
+  nowMs?: number,
 ): string[] {
   const lines: string[] = [];
   const add = (s: string) => lines.push(fitLine(s, cols));
   const blank = () => add('');
 
+  lines.push(...operatorBriefingLines(snap, cols, col, nowMs));
   blank();
 
   // ── Repos ─────────────────────────────────────────────────────────────────
