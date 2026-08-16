@@ -306,8 +306,10 @@ function isValidMilestone(parsed: unknown): parsed is Milestone {
   );
 }
 
-/** Full persisted-record guard so parseable corruption cannot look authoritative. */
-function isValidGoal(parsed: unknown): parsed is Goal {
+function isValidGoalRecordWithOptions(
+  parsed: unknown,
+  allowTopLevelUpdatedAtRegression: boolean,
+): parsed is Goal {
   if (!isRecord(parsed)) return false;
   const project = parsed['project'];
   const createdAt = parsed['createdAt'];
@@ -324,7 +326,7 @@ function isValidGoal(parsed: unknown): parsed is Goal {
     !Array.isArray(milestones) ||
     !isValidTimestamp(createdAt) ||
     !isValidTimestamp(updatedAt) ||
-    !timestampsAreOrdered(createdAt, updatedAt)
+    (!allowTopLevelUpdatedAtRegression && !timestampsAreOrdered(createdAt, updatedAt))
   ) return false;
 
   const milestoneIds = new Set<string>();
@@ -336,6 +338,20 @@ function isValidGoal(parsed: unknown): parsed is Goal {
     milestoneOrders.add(milestone.order);
   }
   return true;
+}
+
+/** Full persisted-record guard so parseable corruption cannot look authoritative. */
+export function isValidGoalRecord(parsed: unknown): parsed is Goal {
+  return isValidGoalRecordWithOptions(parsed, false);
+}
+
+/**
+ * Repair-only admission guard. It relaxes exactly one legacy defect: a valid
+ * top-level `updatedAt` may precede the goal's valid `createdAt`. Every other
+ * goal, mission, project, status, id, and milestone invariant remains strict.
+ */
+export function isValidGoalRecordForTimestampRepair(parsed: unknown): parsed is Goal {
+  return isValidGoalRecordWithOptions(parsed, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -483,7 +499,7 @@ export function loadGoal(id: string): Goal | null {
     const file = goalPath(goalsDir(), id);
     if (!existsSync(file)) return null;
     const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
-    if (!isValidGoal(parsed) || !goalIdsMatch(parsed.id, id)) return null;
+    if (!isValidGoalRecord(parsed) || !goalIdsMatch(parsed.id, id)) return null;
     sortMilestones(parsed);
     return parsed;
   } catch {
@@ -551,7 +567,7 @@ export function listGoalsDetailed(filter?: { status?: GoalStatus }): ListGoalsDe
           continue;
         }
         const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
-        if (isValidGoal(parsed)) {
+        if (isValidGoalRecord(parsed)) {
           const identity = goalIdIdentity(parsed.id);
           candidates.push({ file: f, goal: parsed, identity });
           identityCounts.set(identity, (identityCounts.get(identity) ?? 0) + 1);
