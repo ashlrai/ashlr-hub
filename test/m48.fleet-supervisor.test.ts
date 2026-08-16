@@ -18,8 +18,8 @@
  *      tick has no `merged` field.
  *   2. FRONTIER (router → 'claude'): tick calls runGoal with engine:'claude' +
  *      sandboxEngine:true; does NOT call runSwarm; tick.backends.claude >= 1.
- *   3. QUOTA FALLBACK: router → 'claude' but cfg.foundry.limits.claude.max=0 ⇒
- *      withinLimit is false ⇒ tick falls back to runSwarm (builtin), not runGoal.
+ *   3. QUOTA FALLBACK: router → 'claude' but a valid max=1 authority slot is
+ *      already reserved ⇒ tick falls back to runSwarm (builtin), not runGoal.
  *   4. AUTO-MERGE PASS: runAutoMergePass mocked to {merged:2} ⇒ tick.merged===2
  *      and it was called with cfg; {merged:0} ⇒ tick has no `merged` field.
  *   5. KILL-SWITCH: halts the tick (reason:'kill-switch', no dispatch).
@@ -97,6 +97,7 @@ vi.mock('../src/core/portfolio/backlog.js', () => ({
 // ---------------------------------------------------------------------------
 
 import { tick } from '../src/core/daemon/loop.js';
+import { reserveFleetQuotaUse } from '../src/core/fleet/quota.js';
 import { enroll, unenroll, setKill } from '../src/core/sandbox/policy.js';
 import { createProposal } from '../src/core/inbox/store.js';
 
@@ -331,7 +332,7 @@ describe('M48 tick — FRONTIER routing (claude)', () => {
 });
 
 // ===========================================================================
-// 3. QUOTA FALLBACK — router → 'claude' but limit max=0 ⇒ fall back to builtin
+// 3. QUOTA FALLBACK — router → 'claude' but its valid cap is exhausted ⇒ builtin
 // ===========================================================================
 
 describe('M48 tick — QUOTA FALLBACK (frontier over rate cap → builtin)', () => {
@@ -342,10 +343,13 @@ describe('M48 tick — QUOTA FALLBACK (frontier over rate cap → builtin)', () 
   });
 
   it('falls back to runSwarm (builtin) when claude is over its rate cap', async () => {
-    // A max:0 cap means withinLimit('claude', cfg) is false for every dispatch.
     const cfg = makeCfg({
-      foundry: { limits: { claude: { window: '1h', max: 0 } } },
+      foundry: { limits: { claude: { window: '1h', max: 1 } } },
     } as Partial<AshlrConfig>);
+    expect(reserveFleetQuotaUse('claude', cfg, 'm48-exhaust-claude-1')).toMatchObject({
+      kind: 'reserved',
+      launchAuthorized: true,
+    });
 
     await tick(cfg, { dryRun: false });
 
@@ -356,8 +360,12 @@ describe('M48 tick — QUOTA FALLBACK (frontier over rate cap → builtin)', () 
 
   it('records the dispatch under builtin (not claude) when over cap', async () => {
     const cfg = makeCfg({
-      foundry: { limits: { claude: { window: '1h', max: 0 } } },
+      foundry: { limits: { claude: { window: '1h', max: 1 } } },
     } as Partial<AshlrConfig>);
+    expect(reserveFleetQuotaUse('claude', cfg, 'm48-exhaust-claude-2')).toMatchObject({
+      kind: 'reserved',
+      launchAuthorized: true,
+    });
 
     const result = await tick(cfg, { dryRun: false });
     expect(result.backends?.['builtin']).toBeGreaterThanOrEqual(1);

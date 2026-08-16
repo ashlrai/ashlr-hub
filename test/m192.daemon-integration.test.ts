@@ -149,6 +149,8 @@ vi.mock('../src/core/fleet/router.js', () => ({
 vi.mock('../src/core/fleet/quota.js', () => ({
   withinLimit: () => true,
   recordUse: () => undefined,
+  reserveFleetQuotaUse: () => ({ kind: 'unlimited', launchAuthorized: true, reservations: [] }),
+  reserveFleetQuotaUses: () => ({ kind: 'unlimited', launchAuthorized: true, reservations: [] }),
 }));
 
 vi.mock('../src/core/fleet/subscription-usage.js', () => ({
