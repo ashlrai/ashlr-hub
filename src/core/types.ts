@@ -5179,6 +5179,13 @@ export interface AdvanceOptions {
    * enrollment at swarm start regardless.
    */
   allowAnyRepo?: boolean;
+  /**
+   * Optional fail-closed CAS binding used only by the signed one-shot goal
+   * conductor. When either field is present, both are required and the exact
+   * goal generation is atomically claimed before provider execution.
+   */
+  expectedGoalDigest?: string;
+  expectedMilestoneId?: string;
 }
 
 /**

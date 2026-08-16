@@ -39,6 +39,10 @@ import type {
   MilestoneStatus,
 } from '../types.js';
 import { goalsDir } from '../config.js';
+import {
+  acquireLocalStoreLock,
+  releaseLocalStoreLock,
+} from '../fleet/local-store-lock.js';
 
 // Re-export so existing importers of `goalsDir` from the store keep working;
 // the canonical definition now lives in config.ts (single source of truth for
@@ -56,6 +60,7 @@ export { goalsDir };
 const MAX_LIST = 200;
 const MAX_GOAL_DIRECTORY_ENTRIES = 512;
 const MAX_GOAL_FILE_BYTES = 256 * 1024;
+const GOAL_LOCK_WAIT_MS = 2_000;
 export const DEFAULT_STALE_GOAL_MILESTONE_MS = 6 * 60 * 60 * 1000;
 export const DEFAULT_STALE_GOAL_RECOVERY_LIMIT = 10;
 
@@ -102,6 +107,12 @@ export interface UpdateMilestoneStatusOptions extends GoalPersistenceOptions {
   specId?: string | null;
 }
 
+export interface ClaimGoalMilestoneResult {
+  claimed: boolean;
+  reason: string;
+  goal?: Goal;
+}
+
 // ---------------------------------------------------------------------------
 // Injectable clock (test determinism)
 // ---------------------------------------------------------------------------
@@ -113,6 +124,33 @@ export interface UpdateMilestoneStatusOptions extends GoalPersistenceOptions {
 /** Current ISO timestamp, or the explicit override when provided (test seam). */
 function nowIso(now?: string): string {
   return now ?? new Date().toISOString();
+}
+
+function canonicalGoalValue(value: unknown): string {
+  if (value === null) return 'null';
+  if (typeof value === 'string' || typeof value === 'boolean') return JSON.stringify(value);
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new Error('goal snapshot contains a non-finite number');
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalGoalValue).join(',')}]`;
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().flatMap((key) => {
+      const entry = record[key];
+      return entry === undefined ? [] : [`${JSON.stringify(key)}:${canonicalGoalValue(entry)}`];
+    }).join(',')}}`;
+  }
+  throw new Error('goal snapshot contains an unsupported value');
+}
+
+/** Stable digest used by signed one-shot conductor target bindings. */
+export function goalSnapshotDigest(goal: Goal): string {
+  return createHash('sha256').update(canonicalGoalValue(goal), 'utf8').digest('hex');
+}
+
+function goalLockPath(goalId: string): string {
+  return join(goalsDir(), `.${createHash('sha256').update(goalId).digest('hex')}.lock`);
 }
 
 function parseTimeMs(value: string | undefined): number | null {
@@ -338,8 +376,9 @@ function sortMilestones(goal: Goal): void {
  * M109: stamps `owner` from cfg.user?.id ?? cfg.user?.name when cfg is
  * provided (undefined otherwise — backward-compatible).
  *
- * NEVER runs a swarm, authors a spec, or emits an outward action. Best-effort
- * persistence (returns the in-memory Goal even if the write fails).
+ * NEVER runs a swarm, authors a spec, or emits an outward action. A duplicate
+ * deterministic id returns the actual persisted goal; a new-record write
+ * failure throws so callers cannot report an object that was never created.
  */
 export function createGoal(
   objective: string,
@@ -364,8 +403,10 @@ export function createGoal(
     ...(owner !== undefined ? { owner } : {}),
     ...(opts?.mission !== undefined ? { mission: structuredClone(opts.mission) } : {}),
   };
-  saveGoal(goal, { now });
-  return goal;
+  if (saveGoalWithMode(goal, { now }, () => true, true)) return goal;
+  const existing = loadGoal(goal.id);
+  if (existing) return existing;
+  throw new Error(`goal creation persistence failed: ${goal.id}`);
 }
 
 export type CreateGoalIfAbsentResult =
@@ -400,12 +441,15 @@ export function createGoalIfAbsent(
     ...(opts?.mission !== undefined ? { mission: structuredClone(opts.mission) } : {}),
   };
   let tmp: string | null = null;
+  let lock: ReturnType<typeof acquireLocalStoreLock> = null;
   try {
     if (goal.mission !== undefined && !isValidGoalMissionBinding(goal.mission)) {
       return { status: 'failed', goal };
     }
     const dir = goalsDir();
     ensureDir(dir);
+    lock = acquireLocalStoreLock(goalLockPath(goal.id), GOAL_LOCK_WAIT_MS);
+    if (!lock) return { status: 'failed', goal };
     const target = goalPath(dir, goal.id);
     tmp = `${target}.create-${process.pid}-${randomBytes(8).toString('hex')}.tmp`;
     writeFileSync(tmp, JSON.stringify(goal, null, 2), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
@@ -415,11 +459,18 @@ export function createGoalIfAbsent(
     const code = typeof error === 'object' && error !== null && 'code' in error
       ? String((error as { code?: unknown }).code ?? '')
       : '';
-    return { status: code === 'EEXIST' ? 'exists' : 'failed', goal };
+    if (code === 'EEXIST') {
+      const existing = loadGoal(goal.id);
+      return existing
+        ? { status: 'exists', goal: existing }
+        : { status: 'failed', goal };
+    }
+    return { status: 'failed', goal };
   } finally {
     if (tmp !== null) {
       try { unlinkSync(tmp); } catch { /* best-effort cleanup */ }
     }
+    if (lock) releaseLocalStoreLock(lock);
   }
 }
 
@@ -558,23 +609,36 @@ export function listGoals(filter?: { status?: GoalStatus }): Goal[] {
  * Persist a Goal record atomically (tmp-write + rename). Bumps updatedAt.
  * Best-effort; returns false on revocation or I/O failure and never throws.
  */
-export function saveGoal(
+function saveGoalUnlocked(
   goal: Goal,
   opts?: GoalPersistenceOptions,
   stillAuthorized: () => boolean = opts?.stillAuthorized ?? (() => true),
+  allowCreate = false,
 ): boolean {
   try {
     const dir = goalsDir();
     ensureDir(dir);
-    goal.updatedAt = nowIso(opts?.now);
-    sortMilestones(goal);
     const target = goalPath(dir, goal.id);
     const existing = loadGoal(goal.id);
+    // Update-mode writes must never recreate an object that disappeared after
+    // the caller read it. Creation is a separate, explicit path used only by
+    // createGoal; createGoalIfAbsent has its own link-based atomic install.
+    if (allowCreate ? existing !== null : existing === null) return false;
     if (existing) {
+      // updatedAt is the store generation. Every writer acquires this goal's
+      // lock and compares the generation it originally read before replacing
+      // the file, preventing a stale read-modify-write from overwriting a
+      // signed claim after it waits for the lock.
+      if (existing.updatedAt !== goal.updatedAt) return false;
       const before = existing.mission === undefined ? null : JSON.stringify(existing.mission);
       const after = goal.mission === undefined ? null : JSON.stringify(goal.mission);
       if (before !== after) return false;
     }
+    const requestedStamp = nowIso(opts?.now);
+    goal.updatedAt = existing && requestedStamp <= existing.updatedAt
+      ? new Date(Date.parse(existing.updatedAt) + 1).toISOString()
+      : requestedStamp;
+    sortMilestones(goal);
     const tmp = `${target}.tmp`;
     if (!stillAuthorized()) return false;
     writeFileSync(tmp, JSON.stringify(goal, null, 2), 'utf8');
@@ -587,13 +651,103 @@ export function saveGoal(
   }
 }
 
+function saveGoalWithMode(
+  goal: Goal,
+  opts?: GoalPersistenceOptions,
+  stillAuthorized: () => boolean = opts?.stillAuthorized ?? (() => true),
+  allowCreate = false,
+): boolean {
+  try {
+    ensureDir(goalsDir());
+    const lock = acquireLocalStoreLock(goalLockPath(goal.id), GOAL_LOCK_WAIT_MS);
+    if (!lock) return false;
+    let saved = false;
+    try {
+      saved = saveGoalUnlocked(goal, opts, stillAuthorized, allowCreate);
+    } finally {
+      if (!releaseLocalStoreLock(lock)) saved = false;
+    }
+    return saved;
+  } catch {
+    return false;
+  }
+}
+
+export function saveGoal(
+  goal: Goal,
+  opts?: GoalPersistenceOptions,
+  stillAuthorized: () => boolean = opts?.stillAuthorized ?? (() => true),
+): boolean {
+  return saveGoalWithMode(goal, opts, stillAuthorized, false);
+}
+
+/**
+ * Atomically claim the exact signed goal generation and milestone for one
+ * conductor attempt. All ordinary saveGoal writers share this per-goal lock,
+ * so drift cannot slip between digest validation and the in-progress write.
+ */
+export function claimGoalMilestoneIfCurrent(input: {
+  goalId: string;
+  milestoneId: string;
+  expectedGoalDigest: string;
+  now?: string;
+  stillAuthorized?: () => boolean;
+}): ClaimGoalMilestoneResult {
+  try {
+    ensureDir(goalsDir());
+    const lock = acquireLocalStoreLock(goalLockPath(input.goalId), GOAL_LOCK_WAIT_MS);
+    if (!lock) return { claimed: false, reason: 'goal-lock-unavailable' };
+    let result: ClaimGoalMilestoneResult = { claimed: false, reason: 'goal-claim-failed' };
+    try {
+      const goal = loadGoal(input.goalId);
+      if (!goal) result = { claimed: false, reason: 'goal-not-found' };
+      else if (goalSnapshotDigest(goal) !== input.expectedGoalDigest) {
+        result = { claimed: false, reason: 'goal-snapshot-drifted' };
+      } else if (goal.status !== 'active') {
+        result = { claimed: false, reason: 'goal-not-active' };
+      } else {
+        const milestone = goal.milestones.find((entry) => entry.id === input.milestoneId);
+        if (!milestone || milestone.status !== 'pending') {
+          result = { claimed: false, reason: 'goal-milestone-not-current' };
+        } else if (input.stillAuthorized && !input.stillAuthorized()) {
+          result = { claimed: false, reason: 'goal-claim-authority-revoked' };
+        } else {
+          const stamped = nowIso(input.now);
+          milestone.status = 'in-progress';
+          milestone.updatedAt = stamped;
+          goal.status = rollGoalStatus(goal);
+          const saved = saveGoalUnlocked(goal, { now: stamped }, input.stillAuthorized);
+          result = saved
+            ? { claimed: true, reason: 'goal-milestone-claimed', goal }
+            : { claimed: false, reason: 'goal-claim-persistence-failed' };
+        }
+      }
+    } finally {
+      if (!releaseLocalStoreLock(lock)) {
+        result = { claimed: false, reason: 'goal-lock-release-failed' };
+      }
+    }
+    return result;
+  } catch {
+    return { claimed: false, reason: 'goal-claim-failed' };
+  }
+}
+
 /**
  * Delete a Goal record by id. Idempotent — deleting an absent goal is a no-op.
  * Pure FS under ~/.ashlr/goals; never touches a user repo. Never throws.
  */
 export function deleteGoal(id: string): void {
   try {
-    unlinkSync(goalPath(goalsDir(), id));
+    const target = goalPath(goalsDir(), id);
+    if (!existsSync(target)) return;
+    const lock = acquireLocalStoreLock(goalLockPath(id), GOAL_LOCK_WAIT_MS);
+    if (!lock) return;
+    try {
+      unlinkSync(target);
+    } finally {
+      releaseLocalStoreLock(lock);
+    }
   } catch {
     /* idempotent no-op */
   }
@@ -637,8 +791,7 @@ export function addMilestone(
     updatedAt: now,
   });
   goal.status = rollGoalStatus(goal);
-  saveGoal(goal, { now });
-  return goal;
+  return saveGoal(goal, { now }) ? goal : null;
 }
 
 /**
@@ -687,8 +840,7 @@ export function clearMilestones(goalId: string, opts?: { now?: string }): Goal |
   if (!goal) return null;
   goal.milestones = [];
   goal.status = rollGoalStatus(goal);
-  saveGoal(goal, { now: opts?.now });
-  return goal;
+  return saveGoal(goal, { now: opts?.now }) ? goal : null;
 }
 
 /**
@@ -716,8 +868,7 @@ export function reorderMilestones(
     m.order = i;
   });
   goal.milestones = reordered;
-  saveGoal(goal, { now: opts?.now });
-  return goal;
+  return saveGoal(goal, { now: opts?.now }) ? goal : null;
 }
 
 /**
@@ -742,8 +893,7 @@ export function pauseMilestone(
   } else {
     goal.status = 'paused';
   }
-  saveGoal(goal, { now });
-  return goal;
+  return saveGoal(goal, { now }) ? goal : null;
 }
 
 /**
@@ -775,8 +925,7 @@ export function resumeMilestone(
     if (goal.status === 'paused') goal.status = 'planning';
     goal.status = rollGoalStatus(goal);
   }
-  saveGoal(goal, { now });
-  return goal;
+  return saveGoal(goal, { now }) ? goal : null;
 }
 
 /**
@@ -868,6 +1017,5 @@ export function skipMilestone(
   m.status = 'skipped';
   m.updatedAt = now;
   goal.status = rollGoalStatus(goal);
-  saveGoal(goal, { now });
-  return goal;
+  return saveGoal(goal, { now }) ? goal : null;
 }

@@ -27,7 +27,8 @@ const USAGE =
   '  Flags:\n' +
   '    --watch / --continuous   Run continuously (Ctrl-C to stop)\n' +
   '    --dry-run                Show what WOULD advance; create no proposals\n' +
-  '    --allow-cloud            Allow cloud engines for planning and execution';
+  '    --allow-cloud            Allow cloud engines for planning and execution\n' +
+  '    --goal <id>              Signed one-shot target (no watch/cloud/fallback)';
 
 export async function cmdLoop(args: string[]): Promise<number> {
   const tty = process.stdout.isTTY === true;
@@ -41,6 +42,24 @@ export async function cmdLoop(args: string[]): Promise<number> {
   const dryRun = args.includes('--dry-run');
   const allowCloud = args.includes('--allow-cloud');
   const once = !watch; // default: one tick — never silently hang the terminal.
+  const goalFlags = args.flatMap((arg, index) => arg === '--goal' ? [index] : []);
+  if (goalFlags.length > 1) {
+    console.error(col.red('error: ') + 'loop accepts exactly one --goal value.');
+    return 2;
+  }
+  const goalIndex = goalFlags[0];
+  const explicitGoalId = goalIndex === undefined ? undefined : args[goalIndex + 1];
+  if (goalIndex !== undefined && (!explicitGoalId || explicitGoalId.startsWith('-'))) {
+    console.error(col.red('error: ') + '--goal requires an explicit goal id.');
+    return 2;
+  }
+  if (explicitGoalId && (watch || dryRun || allowCloud)) {
+    console.error(
+      col.red('error: ') +
+      'signed one-shot --goal refuses --watch/--continuous, --dry-run, and --allow-cloud.',
+    );
+    return 2;
+  }
 
   const { loadConfigReadOnlyStrict } = await import('../core/config.js');
   let cfg;
@@ -118,7 +137,9 @@ export async function cmdLoop(args: string[]): Promise<number> {
   // use the flat task-dispatch loop (reads ~/.ashlr/tasks.json, dispatches via
   // runEngineSandboxed, runs runAutoMergePass). Flag off ⇒ byte-identical old
   // path (runConductor). Default is OFF — old path is preserved until proven.
-  if (cfg.foundry?.simpleConductor === true) {
+  // An explicit --goal is a distinct signed protocol and must never be routed
+  // into the legacy simple-conductor dispatch path by repository configuration.
+  if (!explicitGoalId && cfg.foundry?.simpleConductor === true) {
     const { runSimpleConductor } = await import('../core/simple-conductor.js');
     const sc = await runSimpleConductor(cfg, { once, dryRun, allowCloud });
 
@@ -151,8 +172,10 @@ export async function cmdLoop(args: string[]): Promise<number> {
   // Run the goal-aware conductor. Goals are advanced first; backlog daemon is
   // the fallback when no active goals exist. The conductor respects the
   // kill-switch + daily budget and dispatches only sandboxed, proposal-only work.
-  const { runConductor } = await import('../core/goals/conductor.js');
-  const summary = await runConductor(cfg, { once, dryRun, allowCloud });
+  const { runAuthorizedConductorOnce, runConductor } = await import('../core/goals/conductor.js');
+  const summary = explicitGoalId
+    ? await runAuthorizedConductorOnce(cfg, { goalId: explicitGoalId })
+    : await runConductor(cfg, { once, dryRun, allowCloud });
 
   console.log('');
 
@@ -160,7 +183,7 @@ export async function cmdLoop(args: string[]): Promise<number> {
   if (summary.activationRefused) {
     console.error(
       col.red('  live conductor refused') +
-      col.dim(' — M461 authorizes only one-item proposal daemon runs.'),
+      col.dim(` — ${summary.activationRefusalReason ?? 'M461 authorizes only one-item proposal daemon runs.'}`),
     );
     return 1;
   } else if (summary.killSwitchTripped) {

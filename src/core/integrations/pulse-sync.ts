@@ -57,7 +57,7 @@ import {
   type FleetSpanInput,
 } from './pulse-exporter.js';
 import { parseRepoDeps } from './dep-parser.js';
-import { createGoal } from '../goals/store.js';
+import { createGoalIfAbsent } from '../goals/store.js';
 import { setStatus, loadProposal } from '../inbox/store.js';
 import {
   acquireProposalMutationLock,
@@ -374,10 +374,19 @@ function applyNonProposalCommand(
           typeof cmd.payload['project'] === 'string' && cmd.payload['project'].length > 0
             ? cmd.payload['project']
             : null;
-        // createGoal only PLANS (status 'planning'); the daemon's proposal-only
+        // Goal creation only PLANS (status 'planning'); the daemon's proposal-only
         // swarm advances it later behind enrollment + kill-switch. No outward action.
-        const goal = createGoal(objective, { project, cfg: { user: cfg.user } });
-        return { ...base, outcome: 'done', detail: `goal ${goal.id} created (planning)` };
+        const creation = createGoalIfAbsent(objective, { project, cfg: { user: cfg.user } });
+        if (creation.status === 'failed') {
+          return { ...base, outcome: 'failed', detail: 'assign_goal: persistence failed' };
+        }
+        return {
+          ...base,
+          outcome: 'done',
+          detail: creation.status === 'created'
+            ? `goal ${creation.goal.id} created (planning)`
+            : `goal ${creation.goal.id} already exists`,
+        };
       }
 
       case 'enroll_repo': {

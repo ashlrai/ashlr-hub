@@ -59,7 +59,10 @@ import type {
 
 // ─── Lazy imports (graceful degradation if M28 core not yet built) ───────────
 
-type CreateGoalFn = (objective: string, opts?: { project?: string | null }) => Goal;
+type CreateGoalIfAbsentFn = (
+  objective: string,
+  opts?: { project?: string | null },
+) => { status: 'created' | 'exists' | 'failed'; goal: Goal };
 type LoadGoalFn = (id: string) => Goal | null;
 type ListGoalsFn = () => Goal[];
 type AddMilestoneFn = (
@@ -114,7 +117,7 @@ type ProgressOfFn = (goal: Goal) => GoalProgress;
 type IsEnrolledFn = (repo: string) => boolean;
 
 interface GoalsCore {
-  createGoal: CreateGoalFn;
+  createGoalIfAbsent: CreateGoalIfAbsentFn;
   loadGoal: LoadGoalFn;
   listGoals: ListGoalsFn;
   addMilestone: AddMilestoneFn;
@@ -147,7 +150,7 @@ async function importCore(): Promise<GoalsCore | null> {
         import('../core/config.js'),
       ]);
       _core = {
-        createGoal: store.createGoal as CreateGoalFn,
+        createGoalIfAbsent: store.createGoalIfAbsent as CreateGoalIfAbsentFn,
         loadGoal: store.loadGoal as LoadGoalFn,
         listGoals: store.listGoals as ListGoalsFn,
         addMilestone: store.addMilestone as AddMilestoneFn,
@@ -453,11 +456,20 @@ export async function cmdGoals(args: string[]): Promise<number> {
         project = abs;
       }
 
-      const goal = core.createGoal(objective.trim(), { project });
+      const creation = core.createGoalIfAbsent(objective.trim(), { project });
+      if (creation.status === 'failed') {
+        process.stderr.write(red('error: ') + 'goal creation persistence failed.\n');
+        return 1;
+      }
+      const goal = creation.goal;
       if (parsed.json) {
         out(JSON.stringify(goal, null, 2));
       } else {
-        out(green('✓ ') + bold('created goal ') + cyan(goal.id));
+        out(
+          creation.status === 'created'
+            ? green('✓ ') + bold('created goal ') + cyan(goal.id)
+            : yellow('! ') + bold('goal already exists ') + cyan(goal.id),
+        );
         out(`  objective: ${goal.objective}`);
         out(`  project:   ${goal.project ?? gray('(none — planning only; cannot advance)')}`);
         out('');
@@ -566,7 +578,13 @@ export async function cmdGoals(args: string[]): Promise<number> {
       }
       if (goal.milestones.length > 0 && parsed.replace) {
         // --replace: clear the existing plan so we re-plan from a clean slate.
-        core.clearMilestones(goal.id);
+        const cleared = core.clearMilestones(goal.id);
+        if (!cleared) {
+          process.stderr.write(
+            red('error: ') + 'existing plan could not be cleared; concurrent steering won.\n',
+          );
+          return 1;
+        }
       }
 
       // DETERMINISTIC by default; --allow-cloud opens the local-first chain.

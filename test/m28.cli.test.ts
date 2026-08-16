@@ -23,6 +23,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -504,6 +505,31 @@ describe('cmdGoals — plan idempotency (M28 regression)', () => {
     expect(after.milestones.length).toBeLessThan(first.milestones.length);
     // Orders restart from 0 (no 0..n + n+1.. corruption).
     expect(after.milestones.map((m: { order: number }) => m.order)).toEqual([0, 1]);
+  });
+
+  it('--replace refuses before planning/provider contact when the clear cannot persist', async () => {
+    enroll(tmpRepo);
+    captureIO();
+    await cmdGoals(['add', 'replace must persist first', '--project', tmpRepo]);
+    const id = extractGoalId();
+    await cmdGoals(['plan', id, '--json']);
+    mockGetActiveClient.mockClear();
+
+    const lockPath = path.join(
+      goalsDirPath(),
+      `.${createHash('sha256').update(id).digest('hex')}.lock`,
+    );
+    fs.mkdirSync(lockPath);
+    try {
+      stdout = '';
+      stderr = '';
+      const code = await cmdGoals(['plan', id, '--replace', '--allow-cloud']);
+      expect(code).toBe(1);
+      expect(stderr).toMatch(/could not be cleared|concurrent steering/i);
+      expect(mockGetActiveClient).not.toHaveBeenCalled();
+    } finally {
+      fs.rmdirSync(lockPath);
+    }
   });
 });
 

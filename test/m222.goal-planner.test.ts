@@ -55,6 +55,7 @@ vi.mock('../src/core/goals/store.js', async (importOriginal) => {
     ...actual,
     saveGoal: vi.fn((goal: import('../src/core/types.js').Goal) => {
       _savedGoals.set(goal.id, structuredClone(goal));
+      return true;
     }),
     loadGoal: vi.fn((id: string) => {
       return _savedGoals.get(id) ?? null;
@@ -88,7 +89,7 @@ vi.mock('../src/core/sandbox/policy.js', () => ({
 import { expandGoalToMilestones, clearGoalPlannerCache } from '../src/core/strategy/goal-planner.js';
 import { scanGoals } from '../src/core/portfolio/scanners.js';
 import type { Goal, AshlrConfig } from '../src/core/types.js';
-import { listGoals } from '../src/core/goals/store.js';
+import { listGoals, loadGoal, saveGoal } from '../src/core/goals/store.js';
 
 // ============================================================================
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -226,6 +227,21 @@ describe('M222 — expandGoalToMilestones: basic expansion', () => {
 // ============================================================================
 
 describe('M222 — expandGoalToMilestones: resilience', () => {
+  it('does not report or return an expansion when CAS persistence is refused', async () => {
+    const goal = makeActiveGoalNoMilestones('goal-cas-refused', 'Preserve concurrent steering');
+    _savedGoals.set(goal.id, structuredClone(goal));
+    vi.mocked(loadGoal)
+      .mockImplementationOnce(() => structuredClone(goal))
+      .mockImplementationOnce(() => structuredClone(goal));
+    vi.mocked(saveGoal).mockReturnValueOnce(false);
+
+    const result = await expandGoalToMilestones(goal, makeCfg(), tmpDir);
+
+    expect(result.milestones).toEqual([]);
+    expect(result.status).toBe('active');
+    expect(_savedGoals.get(goal.id)?.milestones).toEqual([]);
+  });
+
   it('returns original goal unchanged when strategist throws', async () => {
     _completeImpl = vi.fn(async () => { throw new Error('network error'); });
     const goal = makeActiveGoalNoMilestones('goal-err', 'Fix the data pipeline');
