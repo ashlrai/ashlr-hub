@@ -344,7 +344,6 @@ jobs:
           set -euo pipefail
           umask 077
 
-          node "$ASHLR_RELEASE_NPM_CLI" run prepublishOnly
           jq -e \
             --arg version "$RELEASE_VERSION" \
             --arg revision "$GITHUB_SHA" \

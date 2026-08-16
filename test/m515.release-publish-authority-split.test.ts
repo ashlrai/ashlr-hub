@@ -173,7 +173,9 @@ describe('release publish authority split', () => {
       .map((step) => step.run ?? '').join('\n');
     expect(prepareRuns).toContain('node "$ASHLR_RELEASE_NPM_CLI" ci');
     expect(prepareRuns).toContain('node "$ASHLR_RELEASE_NPM_CLI" run build');
-    expect(prepareRuns).toContain('node "$ASHLR_RELEASE_NPM_CLI" run prepublishOnly');
+    expect(prepareRuns).not.toContain('prepublishOnly');
+    expect(prepareRuns).not.toContain('test:ci');
+    expect(workflow.jobs.prepare?.needs).toEqual(['verify', 'release_canary']);
     expect(prepareRuns).toContain(
       'node "$ASHLR_RELEASE_NPM_CLI" pack --json --ignore-scripts',
     );

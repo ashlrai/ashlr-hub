@@ -107,10 +107,14 @@ tags fail closed.
      `contents: read`; it has no `npm-release` environment, OIDC permission,
      publishing token, install pointer, or service authority;
    - **prepare** — without an environment or OIDC permission, check out the
-     exact event SHA, verify protected-master ancestry, run `npm ci`, build,
-     `scripts/check-version.mjs`, and `prepublishOnly`, require a clean exact-SHA
-     build identity, and create one npm tarball. It binds the tarball, npm pack
-     report, and bounded public changelog bytes into a canonical SHA-256/SRI
+     exact event SHA, verify protected-master ancestry, consume the successful
+     exact-SHA verify and signed-canary gates, run `npm ci`, build, and
+     `scripts/check-version.mjs`, require a clean exact-SHA build identity, and
+     create one npm tarball with `prepack` and `postpack` disabled and no root
+     `prepare` lifecycle defined. It does not rerun
+     the full suite serially inside the private evidence umask; the required
+     verify matrix already runs that suite in bounded shards. It binds the
+     tarball, npm pack report, and bounded public changelog bytes into a canonical SHA-256/SRI
      manifest, then uploads attempt-unique, non-overwriting candidate and
      release-note artifacts and exports the exact created names for every
      downstream job. Failed-job-only reruns therefore reuse the successful
@@ -199,8 +203,16 @@ passed all nine native verification jobs and the signed no-authority canary,
 then stopped at the first unprivileged prepare admission because the runner
 rejected an unsupported `gh api --fail` flag. Dependency installation, build,
 packing, npm publication, verification, and GitHub Release creation did not run,
-and no 3.2.2 package was published. Never move, delete, recreate, or reuse any
-failed tag or version; `v3.2.3` is the only recovery lane.
+and no 3.2.2 package was published. The protected lightweight tag `v3.2.3`
+also remains at its original commit. Its 2026-08-16 workflow run `31926786319`
+passed all nine native verification jobs and the signed no-authority canary,
+then stopped in unprivileged prepare when the duplicate unsharded test pass hit
+its bounded runtime cap before packing or artifact upload. No deployment
+approval was requested, and npm publish, publication verification, and GitHub
+Release creation were skipped; no 3.2.3 package was published. Never move,
+delete, recreate, or reuse any failed tag or version. No successor tag may be
+created until a separate 3.2.4 metadata merge follows the reviewed prepare
+repair.
 
 If **publish succeeded and only `verify_publish` or the GitHub `release` job
 failed**, first verify that npm contains the intended tag artifact from a clean
