@@ -11,6 +11,30 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+## [3.2.5] — 2026-08-16 — Pack-report root recovery
+
+- For candidate evaluators upgrading from public npm `latest` 3.0.1, this
+  remains the first package containing the unreleased 3.1.0 through 3.2.4
+  series. Their detailed product, security, and authority notes remain in the
+  corresponding changelog sections below.
+- Carries forward the complete 3.2.4 candidate payload and adds only the
+  publisher artifact-verifier repair: the two pack-report aggregate predicates
+  now address npm's required one-element JSON array through `.[0].files`, and a
+  regression executes the extracted predicate against that real report shape.
+- Keeps strict script-disabled preparation, exact build and artifact identity,
+  signed-canary `NO_AUTHORITY`, explicit npm-release approval, candidate-only
+  publication, preserved npm `latest`, provenance verification, and GitHub
+  prerelease gates unchanged. Resident activation and automatic production
+  effects remain unavailable.
+- The protected `v3.2.4` tag remains immutable at
+  `f29c116a7eab20bbf20bb77dbebebecbea2ba337`. Release run `31931284428`
+  passed all nine native verification jobs, the signed no-authority canary, and
+  unprivileged prepare. After the exact npm-release deployment was approved,
+  the privileged artifact verifier failed because two aggregate predicates
+  addressed npm's one-element pack-report array as an object. Registry
+  admission and `npm publish` never ran; publication verification and GitHub
+  Release creation were skipped, and no 3.2.4 package was published.
+
 ## [3.2.4] — 2026-08-16 — Bounded release-prepare recovery
 
 - For candidate evaluators upgrading from public npm `latest` 3.0.1, this
