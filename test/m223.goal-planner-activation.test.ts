@@ -65,6 +65,7 @@ vi.mock('../src/core/goals/store.js', async (importOriginal) => {
     ...actual,
     saveGoal: vi.fn((goal: import('../src/core/types.js').Goal) => {
       _savedGoals.set(goal.id, structuredClone(goal));
+      return true;
     }),
     loadGoal: vi.fn((id: string) => {
       return _savedGoals.get(id) ?? null;

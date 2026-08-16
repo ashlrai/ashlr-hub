@@ -524,7 +524,15 @@ describe('M102 — conductor: goals-first dispatch with daemon fallback', () => 
     });
     mockRunSwarm.mockResolvedValue(makeSwarmRun('s-cap', 'done'));
     mockListProposals.mockReturnValue([]);
-    mockUpdateMilestoneStatus.mockReturnValue(null);
+    mockUpdateMilestoneStatus.mockImplementation((id: string, milestoneId: string, status: string) => {
+      const source = goals.find((entry) => entry.id === id);
+      if (!source) return null;
+      return {
+        ...source,
+        milestones: source.milestones.map((entry) =>
+          entry.id === milestoneId ? { ...entry, status } : entry),
+      };
+    });
 
     const summary = await runConductor(makeCfg(), {
       once: true,
@@ -581,7 +589,14 @@ describe('M102 — conductor: goals-first dispatch with daemon fallback', () => 
       { id: 'pok', origin: 'swarm', repo: '/tmp/test-repo', status: 'pending',
         summary: 'swarm=sok' },
     ]);
-    mockUpdateMilestoneStatus.mockReturnValue(null);
+    mockUpdateMilestoneStatus.mockImplementation((id: string, milestoneId: string, status: string) => {
+      const source = id === g1.id ? g1 : g2;
+      return {
+        ...source,
+        milestones: source.milestones.map((entry) =>
+          entry.id === milestoneId ? { ...entry, status } : entry),
+      };
+    });
 
     const summary = await runConductor(makeCfg(), { once: true, dryRun: false });
 

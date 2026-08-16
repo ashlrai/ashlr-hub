@@ -1322,3 +1322,502 @@ export function consumeDaemonActivationPermitForVerification(
     false,
   );
 }
+
+// ---------------------------------------------------------------------------
+// Dormant signed one-shot goal-conductor authority.
+//
+// This is deliberately a separate protocol from M461. A daemon permit can
+// never authorize a goal advance, and a conductor permit can never authorize a
+// daemon tick. Production roots remain empty; only verification tests inject a
+// root. A reviewed source change is therefore still required before live use.
+// ---------------------------------------------------------------------------
+
+const GOAL_CONDUCTOR_POLICY_VERSION = 'goal-conductor-proposal-once-v1';
+const GOAL_CONDUCTOR_SIGNING_DOMAIN = 'ashlr:goal-conductor-activation-permit:v1\0';
+export const GOAL_CONDUCTOR_ONCE_MAX_TOKENS = 50_000;
+export const GOAL_CONDUCTOR_ONCE_MAX_STEPS = 12;
+
+const goalConductorCapabilityBrand: unique symbol = Symbol(
+  'ashlr.goal-conductor-activation-capability',
+);
+
+export interface GoalConductorActivationTarget {
+  goalId: string;
+  milestoneId: string;
+  goalDigest: string;
+  projectPath: string;
+}
+
+export interface GoalConductorActivationContext extends DaemonActivationRuntimeContext {
+  target: GoalConductorActivationTarget;
+}
+
+export interface GoalConductorActivationPermitPayload {
+  schemaVersion: 1;
+  policyVersion: typeof GOAL_CONDUCTOR_POLICY_VERSION;
+  permitId: string;
+  nonce: string;
+  keyId: string;
+  issuedAt: string;
+  expiresAt: string;
+  scope: {
+    action: 'goal-conductor-proposal-once';
+    once: true;
+    dryRun: false;
+    resident: false;
+    maxGoals: 1;
+    maxMilestones: 1;
+    maxRetries: 0;
+    allowCloud: false;
+    allowAnyRepo: false;
+    daemonFallback: false;
+    proposalOnly: true;
+    automerge: false;
+    repair: false;
+    deploy: false;
+    install: false;
+    selfTarget: false;
+    maxTokens: typeof GOAL_CONDUCTOR_ONCE_MAX_TOKENS;
+    maxSteps: typeof GOAL_CONDUCTOR_ONCE_MAX_STEPS;
+  };
+  bindings: DaemonActivationPermitPayload['bindings'] & {
+    target: GoalConductorActivationTarget;
+  };
+}
+
+export interface GoalConductorActivationPermitEnvelope {
+  payload: GoalConductorActivationPermitPayload;
+  signature: string;
+}
+
+export interface GoalConductorActivationCapability {
+  readonly kind: 'goal-conductor-proposal-once';
+  readonly permitId: string;
+  readonly target: Readonly<GoalConductorActivationTarget>;
+  readonly [goalConductorCapabilityBrand]: true;
+}
+
+export interface GoalConductorActivationPermitResult {
+  authorized: boolean;
+  reason: string;
+  permitId?: string;
+  receiptPath?: string;
+  capability?: GoalConductorActivationCapability;
+  configSnapshot?: AshlrConfig;
+}
+
+export interface GoalConductorActivationTestConsumerOptions {
+  trustRoots: readonly DaemonActivationTrustRoot[];
+  context: GoalConductorActivationContext;
+  afterReceiptPersisted?: () => void;
+}
+
+/** Immutable repository-owned roots. Intentionally empty in production. */
+export const GOAL_CONDUCTOR_ACTIVATION_TRUST_ROOTS:
+readonly Readonly<DaemonActivationTrustRoot>[] = Object.freeze([]);
+
+const validGoalConductorCapabilities = new WeakMap<object, () => boolean>();
+
+function validGoalConductorTarget(value: unknown): value is GoalConductorActivationTarget {
+  return isRecord(value)
+    && hasExactKeys(value, ['goalId', 'milestoneId', 'goalDigest', 'projectPath'])
+    && typeof value['goalId'] === 'string'
+    && value['goalId'].length > 0
+    && value['goalId'].length <= 256
+    && typeof value['milestoneId'] === 'string'
+    && value['milestoneId'].length > 0
+    && value['milestoneId'].length <= 320
+    && DIGEST_RE.test(String(value['goalDigest']))
+    && typeof value['projectPath'] === 'string'
+    && isAbsolute(value['projectPath']);
+}
+
+function validGoalConductorScope(
+  value: unknown,
+): value is GoalConductorActivationPermitPayload['scope'] {
+  if (!isRecord(value) || !hasExactKeys(value, [
+    'action', 'once', 'dryRun', 'resident', 'maxGoals', 'maxMilestones',
+    'maxRetries', 'allowCloud', 'allowAnyRepo', 'daemonFallback',
+    'proposalOnly', 'automerge', 'repair', 'deploy', 'install', 'selfTarget',
+    'maxTokens', 'maxSteps',
+  ])) return false;
+  return value['action'] === 'goal-conductor-proposal-once'
+    && value['once'] === true
+    && value['dryRun'] === false
+    && value['resident'] === false
+    && value['maxGoals'] === 1
+    && value['maxMilestones'] === 1
+    && value['maxRetries'] === 0
+    && value['allowCloud'] === false
+    && value['allowAnyRepo'] === false
+    && value['daemonFallback'] === false
+    && value['proposalOnly'] === true
+    && value['automerge'] === false
+    && value['repair'] === false
+    && value['deploy'] === false
+    && value['install'] === false
+    && value['selfTarget'] === false
+    && value['maxTokens'] === GOAL_CONDUCTOR_ONCE_MAX_TOKENS
+    && value['maxSteps'] === GOAL_CONDUCTOR_ONCE_MAX_STEPS;
+}
+
+function parseGoalConductorPayload(value: unknown): GoalConductorActivationPermitPayload | null {
+  if (!isRecord(value) || !hasExactKeys(value, [
+    'schemaVersion', 'policyVersion', 'permitId', 'nonce', 'keyId',
+    'issuedAt', 'expiresAt', 'scope', 'bindings',
+  ])) return null;
+  if (value['schemaVersion'] !== 1
+    || value['policyVersion'] !== GOAL_CONDUCTOR_POLICY_VERSION
+    || typeof value['permitId'] !== 'string'
+    || !ID_RE.test(value['permitId'])
+    || typeof value['nonce'] !== 'string'
+    || !DIGEST_RE.test(value['nonce'])
+    || typeof value['keyId'] !== 'string'
+    || !KEY_ID_RE.test(value['keyId'])
+    || !validIsoTimestamp(value['issuedAt'])
+    || !validIsoTimestamp(value['expiresAt'])
+    || !validGoalConductorScope(value['scope'])
+    || !isRecord(value['bindings'])
+    || !hasExactKeys(value['bindings'], [
+      'configDigest', 'buildIdentity', 'executable', 'entrypoint', 'releaseTree',
+      'authorityStateDigest', 'killSwitch', 'guardHealth', 'target',
+    ])
+    || !validBindings({
+      configDigest: value['bindings']['configDigest'],
+      buildIdentity: value['bindings']['buildIdentity'],
+      executable: value['bindings']['executable'],
+      entrypoint: value['bindings']['entrypoint'],
+      releaseTree: value['bindings']['releaseTree'],
+      authorityStateDigest: value['bindings']['authorityStateDigest'],
+      killSwitch: value['bindings']['killSwitch'],
+      guardHealth: value['bindings']['guardHealth'],
+    })
+    || !validGoalConductorTarget(value['bindings']['target'])) return null;
+  return value as unknown as GoalConductorActivationPermitPayload;
+}
+
+function parseGoalConductorEnvelope(value: unknown): GoalConductorActivationPermitEnvelope | null {
+  if (!isRecord(value) || !hasExactKeys(value, ['payload', 'signature'])) return null;
+  const payload = parseGoalConductorPayload(value['payload']);
+  if (!payload || typeof value['signature'] !== 'string') return null;
+  const bytes = Buffer.from(value['signature'], 'base64');
+  if (bytes.length !== 64 || bytes.toString('base64') !== value['signature']) return null;
+  return { payload, signature: value['signature'] };
+}
+
+function goalConductorSigningBytes(payload: GoalConductorActivationPermitPayload): Buffer {
+  return Buffer.from(
+    `${GOAL_CONDUCTOR_SIGNING_DOMAIN}${canonicalizeDaemonActivationValue(payload)}`,
+    'utf8',
+  );
+}
+
+export function buildGoalConductorActivationPermitPayload(input: {
+  permitId: string;
+  nonce: string;
+  keyId: string;
+  issuedAt: string;
+  expiresAt: string;
+  context: GoalConductorActivationContext;
+}): GoalConductorActivationPermitPayload {
+  const payload: GoalConductorActivationPermitPayload = {
+    schemaVersion: 1,
+    policyVersion: GOAL_CONDUCTOR_POLICY_VERSION,
+    permitId: input.permitId,
+    nonce: input.nonce,
+    keyId: input.keyId,
+    issuedAt: input.issuedAt,
+    expiresAt: input.expiresAt,
+    scope: {
+      action: 'goal-conductor-proposal-once', once: true, dryRun: false,
+      resident: false, maxGoals: 1, maxMilestones: 1, maxRetries: 0,
+      allowCloud: false, allowAnyRepo: false, daemonFallback: false,
+      proposalOnly: true, automerge: false, repair: false, deploy: false,
+      install: false, selfTarget: false,
+      maxTokens: GOAL_CONDUCTOR_ONCE_MAX_TOKENS,
+      maxSteps: GOAL_CONDUCTOR_ONCE_MAX_STEPS,
+    },
+    bindings: {
+      configDigest: input.context.configDigest,
+      buildIdentity: { ...input.context.buildIdentity },
+      executable: { ...input.context.executable },
+      entrypoint: { ...input.context.entrypoint },
+      releaseTree: { ...input.context.releaseTree },
+      authorityStateDigest: input.context.authorityStateDigest,
+      killSwitch: 'off', guardHealth: 'healthy',
+      target: { ...input.context.target },
+    },
+  };
+  if (!parseGoalConductorPayload(payload)) throw new Error('invalid goal conductor permit payload input');
+  return payload;
+}
+
+export function signGoalConductorActivationPermit(
+  payload: GoalConductorActivationPermitPayload,
+  privateKey: string | KeyObject,
+): GoalConductorActivationPermitEnvelope {
+  if (!parseGoalConductorPayload(payload)) throw new Error('invalid goal conductor permit payload');
+  const key = typeof privateKey === 'string' ? createPrivateKey(privateKey) : privateKey;
+  if (key.type !== 'private' || key.asymmetricKeyType !== 'ed25519') {
+    throw new Error('goal conductor activation permits require an Ed25519 private key');
+  }
+  return { payload, signature: sign(null, goalConductorSigningBytes(payload), key).toString('base64') };
+}
+
+export function verifyGoalConductorActivationPermit(
+  value: unknown,
+  context: GoalConductorActivationContext,
+  roots: readonly DaemonActivationTrustRoot[],
+): DaemonActivationPermitVerification {
+  if (roots.length === 0) return { ok: false, reason: 'no-trusted-goal-conductor-activation-roots' };
+  const envelope = parseGoalConductorEnvelope(value);
+  if (!envelope) return { ok: false, reason: 'invalid-goal-conductor-permit-schema' };
+  if (!Number.isSafeInteger(context.nowMs) || context.nowMs < 0
+    || !validGoalConductorTarget(context.target)
+    || !context.killSwitchOff || !context.guardHealthHealthy
+    || !validBuildIdentity(context.buildIdentity)
+    || !validFileBinding(context.executable)
+    || !validFileBinding(context.entrypoint)
+    || !validFileBinding(context.releaseTree)
+    || !DIGEST_RE.test(context.configDigest)
+    || !DIGEST_RE.test(context.authorityStateDigest)) {
+    return { ok: false, reason: 'invalid-runtime-goal-conductor-context' };
+  }
+  const issuedAt = Date.parse(envelope.payload.issuedAt);
+  const expiresAt = Date.parse(envelope.payload.expiresAt);
+  if (expiresAt <= issuedAt || expiresAt - issuedAt > MAX_VALIDITY_MS) {
+    return { ok: false, reason: 'invalid-goal-conductor-permit-validity-window' };
+  }
+  if (issuedAt > context.nowMs + MAX_FUTURE_SKEW_MS) return { ok: false, reason: 'permit-issued-too-far-in-future' };
+  if (expiresAt <= context.nowMs) return { ok: false, reason: 'permit-expired' };
+  const expectedBindings = {
+    configDigest: context.configDigest,
+    buildIdentity: context.buildIdentity,
+    executable: context.executable,
+    entrypoint: context.entrypoint,
+    releaseTree: context.releaseTree,
+    authorityStateDigest: context.authorityStateDigest,
+    killSwitch: 'off', guardHealth: 'healthy', target: context.target,
+  };
+  if (!equalCanonical(envelope.payload.bindings, expectedBindings)) {
+    return { ok: false, reason: 'goal-conductor-permit-runtime-binding-mismatch' };
+  }
+  const trusted = trustRootMap(roots);
+  const publicKey = trusted?.get(envelope.payload.keyId);
+  if (!publicKey) return { ok: false, reason: trusted ? 'permit-key-not-trusted' : 'invalid-trust-root-set' };
+  if (!verify(null, goalConductorSigningBytes(envelope.payload), publicKey, Buffer.from(envelope.signature, 'base64'))) {
+    return { ok: false, reason: 'invalid-permit-signature' };
+  }
+  return {
+    ok: true,
+    reason: 'valid-goal-conductor-proposal-once-permit',
+    permitId: envelope.payload.permitId,
+    payloadDigest: sha256(canonicalizeDaemonActivationValue(envelope.payload)),
+  };
+}
+
+export function goalConductorActivationPermitPath(): string {
+  return join(homedir(), '.ashlr', 'control', 'goal-conductor-activation-permit.json');
+}
+
+export function goalConductorActivationReceiptPath(permitId: string): string {
+  if (!ID_RE.test(permitId)) throw new Error('invalid goal conductor activation permit id');
+  return join(homedir(), '.ashlr', 'control', 'activation-receipts', 'goal-conductor', `${permitId}.json`);
+}
+
+function goalConductorActivationNonceReceiptPath(nonceDigest: string): string {
+  if (!DIGEST_RE.test(nonceDigest)) throw new Error('invalid goal conductor nonce digest');
+  return join(
+    homedir(), '.ashlr', 'control', 'activation-receipts', 'goal-conductor',
+    'by-nonce', `${nonceDigest}.json`,
+  );
+}
+
+function mintGoalConductorCapability(
+  permitId: string,
+  target: GoalConductorActivationTarget,
+  validateAtClaim: () => boolean,
+): GoalConductorActivationCapability {
+  const capability = Object.freeze({
+    kind: 'goal-conductor-proposal-once' as const,
+    permitId,
+    target: Object.freeze({ ...target }),
+    [goalConductorCapabilityBrand]: true as const,
+  });
+  validGoalConductorCapabilities.set(capability, validateAtClaim);
+  return capability;
+}
+
+export function isGoalConductorActivationCapability(
+  value: unknown,
+  target: GoalConductorActivationTarget,
+): value is GoalConductorActivationCapability {
+  if (typeof value !== 'object' || value === null) return false;
+  const validate = validGoalConductorCapabilities.get(value);
+  if (!validate) return false;
+  validGoalConductorCapabilities.delete(value);
+  const capability = value as GoalConductorActivationCapability;
+  try {
+    return equalCanonical(capability.target, target) && validate();
+  } catch {
+    return false;
+  }
+}
+
+function consumeGoalConductorWithAuthority(
+  cfg: AshlrConfig,
+  target: GoalConductorActivationTarget,
+  roots: readonly DaemonActivationTrustRoot[],
+  suppliedContext?: GoalConductorActivationContext,
+  afterReceiptPersisted?: () => void,
+  mayMintCapability = false,
+): GoalConductorActivationPermitResult {
+  if (roots.length === 0) return { authorized: false, reason: 'no-trusted-goal-conductor-activation-roots' };
+  if (process.platform === 'win32') return { authorized: false, reason: 'goal-conductor-activation-v1-unsupported-on-windows' };
+  let configSnapshot: AshlrConfig;
+  try { configSnapshot = strictConfigSnapshot(cfg); } catch {
+    return { authorized: false, reason: 'activation-config-not-strict-json' };
+  }
+  const home = resolve(homedir());
+  const permitPath = goalConductorActivationPermitPath();
+  const lock = acquireLocalStoreLock(`${permitPath}.lock`, LOCK_WAIT_MS, {
+    anchorPath: home, exactPrivateStorage: true,
+  });
+  if (!lock) return { authorized: false, reason: 'goal-conductor-permit-lock-unavailable' };
+  let pinned: PinnedPermitFile | undefined;
+  let result: GoalConductorActivationPermitResult = {
+    authorized: false, reason: 'goal-conductor-permit-consumption-failed',
+  };
+  try {
+    pinned = openPinnedPermit(permitPath, home);
+    const envelope = JSON.parse(pinned.text) as unknown;
+    if (`${canonicalizeDaemonActivationValue(envelope)}\n` !== pinned.text) {
+      result = { authorized: false, reason: 'noncanonical-goal-conductor-permit-encoding' };
+      return result;
+    }
+    const parsed = parseGoalConductorEnvelope(envelope);
+    if (!parsed) {
+      result = { authorized: false, reason: 'invalid-goal-conductor-permit-schema' };
+      return result;
+    }
+    const context = suppliedContext ?? { ...collectRuntimeContext(configSnapshot), target };
+    if (context.configDigest !== daemonActivationConfigDigest(configSnapshot)) {
+      result = { authorized: false, reason: 'runtime-config-digest-mismatch' };
+      return result;
+    }
+    if (!equalCanonical(context.target, target)) {
+      result = { authorized: false, reason: 'goal-conductor-target-context-mismatch' };
+      return result;
+    }
+    const checked = verifyGoalConductorActivationPermit(parsed, context, roots);
+    if (!checked.ok || !checked.permitId || !checked.payloadDigest) {
+      result = { authorized: false, reason: checked.reason };
+      return result;
+    }
+    const receiptPath = goalConductorActivationReceiptPath(checked.permitId);
+    assurePrivateDirectory(dirname(dirname(receiptPath)), home);
+    assurePrivateDirectory(dirname(receiptPath), home);
+    const nonceDigest = sha256(parsed.payload.nonce);
+    const nonceReceiptPath = goalConductorActivationNonceReceiptPath(nonceDigest);
+    assurePrivateDirectory(dirname(nonceReceiptPath), home);
+    const receipt = {
+      schemaVersion: 1,
+      state: 'consumed-before-permit-unlink',
+      action: 'goal-conductor-proposal-once',
+      permitId: checked.permitId,
+      keyId: parsed.payload.keyId,
+      payloadDigest: checked.payloadDigest,
+      configDigest: context.configDigest,
+      goalId: target.goalId,
+      milestoneId: target.milestoneId,
+      goalDigest: target.goalDigest,
+      consumedAt: new Date(context.nowMs).toISOString(),
+    };
+    try {
+      persistReceipt(nonceReceiptPath, { ...receipt, index: 'nonce', nonceDigest }, home);
+      persistReceipt(receiptPath, receipt, home);
+    } catch (error) {
+      result = {
+        authorized: false,
+        reason: (error as NodeJS.ErrnoException).code === 'EEXIST'
+          ? 'goal-conductor-permit-already-consumed'
+          : 'goal-conductor-receipt-persistence-failed',
+        permitId: checked.permitId,
+        receiptPath,
+      };
+      return result;
+    }
+    try { afterReceiptPersisted?.(); } catch {
+      result = {
+        authorized: false, reason: 'goal-conductor-activation-interrupted-after-durable-receipt',
+        permitId: checked.permitId, receiptPath,
+      };
+      return result;
+    }
+    const opened = fstatSync(pinned.fd, { bigint: true });
+    const named = lstatSync(permitPath, { bigint: true });
+    if (!sameFileSnapshot(pinned.stat, opened) || !sameFileSnapshot(opened, named)) {
+      result = {
+        authorized: false, reason: 'goal-conductor-permit-changed-before-unlink',
+        permitId: checked.permitId, receiptPath,
+      };
+      return result;
+    }
+    unlinkSync(permitPath);
+    fsyncDirectory(dirname(permitPath));
+    result = {
+      authorized: true,
+      reason: 'goal-conductor-proposal-once-activation-authorized',
+      permitId: checked.permitId,
+      receiptPath,
+      ...(mayMintCapability ? {
+        capability: mintGoalConductorCapability(checked.permitId, target, () => {
+          const claimContext = { ...collectRuntimeContext(configSnapshot), target };
+          return verifyGoalConductorActivationPermit(parsed, claimContext, roots).ok;
+        }),
+        configSnapshot,
+      } : {}),
+    };
+    return result;
+  } catch (error) {
+    result = {
+      authorized: false,
+      reason: (error as NodeJS.ErrnoException).code === 'ENOENT'
+        ? 'goal-conductor-activation-permit-missing'
+        : 'goal-conductor-permit-consumption-failed',
+    };
+    return result;
+  } finally {
+    if (pinned) {
+      try { closeSync(pinned.fd); } catch {
+        result.authorized = false;
+        result.reason = 'goal-conductor-permit-close-failed';
+        delete result.capability;
+      }
+    }
+    if (!releaseLocalStoreLock(lock)) {
+      result.authorized = false;
+      result.reason = 'goal-conductor-permit-lock-release-failed';
+      delete result.capability;
+    }
+  }
+}
+
+export function consumeGoalConductorActivationPermit(
+  cfg: AshlrConfig,
+  target: GoalConductorActivationTarget,
+): GoalConductorActivationPermitResult {
+  return consumeGoalConductorWithAuthority(
+    cfg, target, GOAL_CONDUCTOR_ACTIVATION_TRUST_ROOTS, undefined, undefined, true,
+  );
+}
+
+export function consumeGoalConductorActivationPermitForVerification(
+  cfg: AshlrConfig,
+  target: GoalConductorActivationTarget,
+  options: GoalConductorActivationTestConsumerOptions,
+): GoalConductorActivationPermitResult {
+  return consumeGoalConductorWithAuthority(
+    cfg, target, options.trustRoots, options.context, options.afterReceiptPersisted, false,
+  );
+}

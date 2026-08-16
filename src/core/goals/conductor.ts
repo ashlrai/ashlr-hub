@@ -44,12 +44,28 @@ export interface ConductorCycleSummary {
   killSwitchTripped: boolean;
   /** True when live conductor authority is intentionally unavailable. */
   activationRefused?: boolean;
+  /** Structured fail-closed reason for a dormant/invalid one-shot request. */
+  activationRefusalReason?: string;
+  /** Metadata-only identifier of the durably consumed one-shot permit. */
+  activationPermitId?: string;
   /**
    * Per-goal activity for rich UI display: [{goalId, objective, fractionDone,
    * milestoneTitle, proposalFiled}]. Only populated for goals where work was
    * actually attempted (not dry-run skips with no milestone).
    */
   goalActivity: GoalActivity[];
+}
+
+function emptyConductorSummary(): ConductorCycleSummary {
+  return {
+    goalsAdvanced: 0,
+    milestonesAdvanced: 0,
+    proposalsFiled: 0,
+    goalsDone: 0,
+    daemonFallback: false,
+    killSwitchTripped: false,
+    goalActivity: [],
+  };
 }
 
 /** One goal's contribution to a conductor cycle. */
@@ -92,15 +108,7 @@ export async function runConductor(
     maxGoalsPerCycle?: number;
   } & Pick<AdvanceOptions, 'budget' | 'allowCloud' | 'allowAnyRepo'>,
 ): Promise<ConductorCycleSummary> {
-  const summary: ConductorCycleSummary = {
-    goalsAdvanced: 0,
-    milestonesAdvanced: 0,
-    proposalsFiled: 0,
-    goalsDone: 0,
-    daemonFallback: false,
-    killSwitchTripped: false,
-    goalActivity: [],
-  };
+  const summary = emptyConductorSummary();
 
   if (!opts.dryRun) {
     const { liveConductorActivationAuthorized } = await import('../daemon/activation-permit.js');
@@ -223,4 +231,114 @@ export async function runConductor(
   }
 
   return summary;
+}
+
+/**
+ * Execute one explicitly targeted, signed goal milestone.
+ *
+ * This does not enable the general conductor. It has no resident/watch shape,
+ * no cloud option, no retry, and no daemon fallback. Production remains dormant
+ * while either its immutable trust roots or final durable quota authority are
+ * unavailable.
+ */
+export async function runAuthorizedConductorOnce(
+  cfg: AshlrConfig,
+  request: { goalId: string },
+): Promise<ConductorCycleSummary> {
+  const summary = emptyConductorSummary();
+  const refuse = (reason: string): ConductorCycleSummary => {
+    summary.activationRefused = true;
+    summary.activationRefusalReason = reason;
+    return summary;
+  };
+  if (!request.goalId) return refuse('goal-conductor-explicit-goal-required');
+
+  const { killSwitchOn, listEnrolled } = await import('../sandbox/policy.js');
+  if (killSwitchOn()) {
+    summary.killSwitchTripped = true;
+    return summary;
+  }
+  const {
+    goalSnapshotDigest,
+    listGoalsDetailed,
+    loadGoal,
+  } = await import('./store.js');
+  const { nextActionableMilestone, advanceGoalCycle, progressOf } = await import('./advance.js');
+  const source = listGoalsDetailed({ status: 'active' });
+  if (source.sourceState === 'degraded' || !source.complete) {
+    return refuse('goal-conductor-goal-source-degraded');
+  }
+  const goal = source.goals.find((entry) => entry.id === request.goalId);
+  if (!goal) return refuse('goal-conductor-target-not-active');
+  if (!goal.project) return refuse('goal-conductor-target-project-missing');
+  const enrolled = listEnrolled();
+  if (!enrolled.includes(goal.project)) return refuse('goal-conductor-target-project-not-enrolled');
+  const milestone = nextActionableMilestone(goal);
+  if (!milestone) return refuse('goal-conductor-target-has-no-actionable-milestone');
+  const target = {
+    goalId: goal.id,
+    milestoneId: milestone.id,
+    goalDigest: goalSnapshotDigest(goal),
+    projectPath: goal.project,
+  };
+
+  const activationModule = await import('../daemon/activation-permit.js');
+  const activation = activationModule.consumeGoalConductorActivationPermit(cfg, target);
+  if (!activation.authorized || !activation.capability) return refuse(activation.reason);
+  summary.activationPermitId = activation.permitId;
+
+  // Reopen after durable receipt creation. Any steering between preflight and
+  // consumption burns the permit and makes zero provider contacts.
+  const current = loadGoal(goal.id);
+  if (!current || goalSnapshotDigest(current) !== target.goalDigest) {
+    return refuse('goal-conductor-target-drifted-after-consumption');
+  }
+  const currentMilestone = nextActionableMilestone(current);
+  if (!currentMilestone || currentMilestone.id !== target.milestoneId) {
+    return refuse('goal-conductor-milestone-drifted-after-consumption');
+  }
+
+  if (!activationModule.isGoalConductorActivationCapability(activation.capability, target)) {
+    return refuse('goal-conductor-capability-invalid-or-consumed');
+  }
+
+  // This is intentionally the final pre-provider boundary, after the one-shot
+  // capability's action-time runtime revalidation. It is a hard refusal until
+  // actual durable reservations can be carried to every provider contact made
+  // by advanceGoal/runSwarm.
+  const { reserveGoalConductorProviderQuota } = await import('./conductor-quota.js');
+  const quota = reserveGoalConductorProviderQuota();
+  if (!quota.launchAuthorized) return refuse(quota.reason);
+
+  try {
+    const result = await advanceGoalCycle(goal.id, activation.configSnapshot ?? cfg, {
+      maxRetries: 0,
+      allowCloud: false,
+      allowAnyRepo: false,
+      budget: {
+        maxTokens: activationModule.GOAL_CONDUCTOR_ONCE_MAX_TOKENS,
+        maxSteps: activationModule.GOAL_CONDUCTOR_ONCE_MAX_STEPS,
+        allowCloud: false,
+      },
+      expectedGoalDigest: target.goalDigest,
+      expectedMilestoneId: target.milestoneId,
+    });
+    summary.goalsAdvanced = 1;
+    summary.milestonesAdvanced = 1;
+    summary.proposalsFiled = result.proposalsFiled;
+    summary.goalsDone = result.goalDone ? 1 : 0;
+    const refreshed = loadGoal(goal.id);
+    const progress = refreshed ? progressOf(refreshed) : { fractionDone: 0 };
+    summary.goalActivity.push({
+      goalId: goal.id,
+      objective: goal.objective,
+      fractionDone: progress.fractionDone,
+      milestoneTitle: milestone.title,
+      proposalFiled: result.proposalsFiled > 0,
+      goalCompleted: result.goalDone,
+    });
+    return summary;
+  } catch (error) {
+    return refuse(`goal-conductor-advance-failed:${error instanceof Error ? error.message : String(error)}`);
+  }
 }

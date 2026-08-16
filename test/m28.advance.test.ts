@@ -157,7 +157,9 @@ beforeEach(() => {
   // Sensible defaults; individual tests override.
   mockListProposals.mockReturnValue([]);
   mockLoadProposal.mockReturnValue(null);
-  mockUpdateMilestoneStatus.mockImplementation(() => null);
+  mockUpdateMilestoneStatus.mockImplementation(() => makeGoal({
+    milestones: [makeMilestone({ status: 'in-progress' })],
+  }));
 });
 
 // ---------------------------------------------------------------------------
@@ -304,6 +306,18 @@ describe('advanceGoal — SANDBOXED + PROPOSAL-ONLY', () => {
 });
 
 describe('advanceGoal — ENROLLMENT-SCOPED (HARD-ERROR before any swarm)', () => {
+  it('HARD-ERRORS with zero provider contact when the in-progress CAS transition is refused', async () => {
+    mockLoadGoal.mockReturnValue(makeGoal());
+    mockAssertMayMutate.mockImplementation(() => { /* enrolled, allowed */ });
+    mockUpdateMilestoneStatus.mockReturnValue(null);
+
+    await expect(advanceGoal('g1', makeCfg(), {
+      allowCloud: true,
+      allowAnyRepo: true,
+    })).rejects.toThrow(/in-progress transition refused/);
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
   it('HARD-ERRORS and does NOT call runSwarm when the repo is not enrolled', async () => {
     mockLoadGoal.mockReturnValue(makeGoal());
     mockAssertMayMutate.mockImplementation(() => {

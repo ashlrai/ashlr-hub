@@ -114,6 +114,22 @@ describe('M28 goals store — CRUD', () => {
     const a = store.createGoal('Same objective text', { now: T0 });
     const b = store.createGoal('Same objective text', { now: T1 });
     expect(a.id).toBe(b.id); // slug + content hash — stable
+    expect(b).toEqual(a); // duplicate creation returns persisted truth, not a fresh phantom
+    expect(store.loadGoal(a.id)).toEqual(a);
+  });
+
+  it('createGoalIfAbsent returns the persisted winner on a deterministic-id collision', () => {
+    const first = store.createGoalIfAbsent('Persisted winner', {
+      project: '/abs/original', now: T0,
+    });
+    const duplicate = store.createGoalIfAbsent('Persisted winner', {
+      project: '/abs/loser', now: T1,
+    });
+
+    expect(first.status).toBe('created');
+    expect(duplicate.status).toBe('exists');
+    expect(duplicate.goal).toEqual(first.goal);
+    expect(duplicate.goal.project).toBe('/abs/original');
   });
 
   it('createGoal carries a provided (already-enrolled) project path', () => {

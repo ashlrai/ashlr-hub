@@ -239,6 +239,7 @@ export async function expandGoalToMilestones(
     // Reload fresh from store (avoid stomping concurrent writes)
     const fresh = loadGoal(goal.id) ?? goal;
     if (fresh.milestones.length > 0) return fresh; // someone else expanded it
+    const preExpansion = structuredClone(fresh);
 
     // Append milestones via direct mutation + saveGoal (mirrors addMilestone pattern
     // but batches all milestones in one atomic write)
@@ -260,7 +261,12 @@ export async function expandGoalToMilestones(
 
     // Re-roll status: has milestones → 'active'
     fresh.status = 'active';
-    saveGoal(fresh, { now });
+    if (!saveGoal(fresh, { now })) {
+      plannerLog('warn', 'goal expansion persistence refused — concurrent steering won', {
+        goalId: fresh.id,
+      });
+      return loadGoal(goal.id) ?? preExpansion;
+    }
     plannerLog('info', 'goal expanded', {
       goalId: fresh.id,
       milestonesProduced: fresh.milestones.length,
