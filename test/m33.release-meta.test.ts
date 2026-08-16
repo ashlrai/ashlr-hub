@@ -47,6 +47,7 @@ describe('package.json publish shape', () => {
     const scripts = pkg['scripts'] as Record<string, string>;
     expect(scripts['prepublishOnly']).toContain('typecheck');
     expect(scripts['prepublishOnly']).toContain('test');
+    expect(scripts['prepare']).toBeUndefined();
     expect(scripts['prepack']).toContain('build');
   });
 
@@ -192,6 +193,29 @@ describe('release workflow', () => {
     expect(verifyJob.uses).toBe('./.github/workflows/ci.yml');
     expect(verifyJob.permissions).toEqual({ contents: 'read' });
     expect(ciWorkflow).toMatch(/(?:^|\n)\s{2}workflow_call:\s*(?:\n|$)/);
+    const parsedCi = parseYaml(ciWorkflow) as {
+      jobs?: {
+        ci?: {
+          strategy?: { matrix?: { include?: Array<Record<string, unknown>> } };
+          steps?: Array<{ name?: string; run?: string }>;
+        };
+      };
+    };
+    const ciJob = parsedCi.jobs?.ci;
+    const exhaustiveUbuntu = (ciJob?.strategy?.matrix?.include ?? [])
+      .filter((entry) => entry['os'] === 'ubuntu-latest')
+      .map((entry) => ({ label: entry['label'], test_args: entry['test_args'] }));
+    expect(exhaustiveUbuntu).toEqual([
+      { label: 'ubuntu, authority 1/3', test_args: '--shard=1/3' },
+      { label: 'ubuntu, authority 2/3', test_args: '--shard=2/3' },
+      { label: 'ubuntu, authority 3/3', test_args: '--shard=3/3' },
+    ]);
+    const ciSteps = ciJob?.steps ?? [];
+    expect(ciSteps.find((step) => step.name === 'Typecheck')?.run).toBe('npm run typecheck');
+    expect(ciSteps.find((step) => step.name === 'Lint')?.run).toBe('npm run lint');
+    expect(ciSteps.find((step) => step.name === 'Build')?.run).toBe('npm run build');
+    expect(ciSteps.find((step) => step.name === 'Test (hermetic)')?.run)
+      .toBe('npm run test:ci -- ${{ matrix.test_args }}');
     expect(verifyJob['runs-on']).toBeUndefined();
     expect(verifyJob.steps).toBeUndefined();
     expect(verifyJob.environment).toBeUndefined();
@@ -224,7 +248,8 @@ describe('release workflow', () => {
     expect(prepareRun).toContain('node "$ASHLR_RELEASE_NPM_CLI" run build');
     expect(prepareRun).toContain('scripts/check-version.mjs');
     expect(prepareRun).toContain('scripts/extract-changelog.mjs');
-    expect(prepareRun).toContain('node "$ASHLR_RELEASE_NPM_CLI" run prepublishOnly');
+    expect(prepareRun).not.toContain('prepublishOnly');
+    expect(prepareRun).not.toContain('test:ci');
     expect(prepareRun).toContain(
       'node "$ASHLR_RELEASE_NPM_CLI" pack --json --ignore-scripts',
     );

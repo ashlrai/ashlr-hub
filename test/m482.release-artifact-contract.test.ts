@@ -164,6 +164,33 @@ afterEach(() => {
 });
 
 describe('release artifact contract v1', { timeout: 30_000 }, () => {
+  it.each(['prepack', 'postpack'] as const)(
+    'packs with %s disabled when no prepare lifecycle is defined',
+    (lifecycle) => {
+      const packageRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-script-free-pack-')));
+      const packDestination = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-script-free-output-')));
+      tempDirs.push(packageRoot, packDestination);
+      write(join(packageRoot, 'package.json'), `${JSON.stringify({
+        name: '@fixture/script-free-release',
+        version: '1.0.0',
+        files: ['index.js'],
+        scripts: {
+          [lifecycle]: 'node -e "process.exit(91)"',
+        },
+      }, null, 2)}\n`);
+      write(join(packageRoot, 'index.js'), 'export const packed = true;\n');
+
+      const packed = runNpm(
+        ['pack', '--ignore-scripts', '--json', '--pack-destination', packDestination],
+        packageRoot,
+      );
+      expect(packed.status, packed.stderr).toBe(0);
+      const report = JSON.parse(packed.stdout) as Array<{ filename: string }>;
+      expect(report).toHaveLength(1);
+      expect(report[0]?.filename).toMatch(/\.tgz$/u);
+    },
+  );
+
   it('uses a shell-free Node launch rooted in the active Node toolchain', () => {
     const launch = resolveNpmCliLaunch();
     expect(launch.command).toBe(process.execPath);

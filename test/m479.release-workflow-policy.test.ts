@@ -126,8 +126,15 @@ describe('M479 npm release workflow supply-chain admission', () => {
   );
 
   it('prepares before the minimal publish effect and verifies before GitHub release', () => {
+    expect(prepare.needs).toEqual(['verify', 'release_canary']);
+    const prepareRuns = prepareSteps.map((step) => String(step.run ?? '')).join('\n');
+    expect(prepareRuns).toContain('node "$ASHLR_RELEASE_NPM_CLI" run build');
+    expect(prepareRuns).not.toContain('prepublishOnly');
+    expect(prepareRuns).not.toContain('test:ci');
     const installIndex = prepareSteps.findIndex((step) =>
       step.run === 'node "$ASHLR_RELEASE_NPM_CLI" ci');
+    const buildIndex = prepareSteps.findIndex((step) =>
+      step.run === 'node "$ASHLR_RELEASE_NPM_CLI" run build');
     const packIndex = prepareSteps.findIndex((step) =>
       String(step.run ?? '').includes(
         'node "$ASHLR_RELEASE_NPM_CLI" pack --json --ignore-scripts',
@@ -145,7 +152,8 @@ describe('M479 npm release workflow supply-chain admission', () => {
 
     expect(prepareSteps.indexOf(admission)).toBe(1);
     expect(installIndex).toBeGreaterThan(prepareSteps.indexOf(admission));
-    expect(packIndex).toBeGreaterThan(installIndex);
+    expect(buildIndex).toBeGreaterThan(installIndex);
+    expect(packIndex).toBeGreaterThan(buildIndex);
     expect(artifactIndex).toBeGreaterThan(packIndex);
     expect(preparedVerifyIndex).toBeGreaterThan(-1);
     expect(liveAdmissionIndex).toBe(preparedVerifyIndex + 1);
