@@ -1,8 +1,8 @@
 # Releasing @ashlr/hub
 
 Releases are tag-triggered and fully gated. The current lane is deliberately
-pinned to the 3.2.0 candidate: nothing reaches npm without an explicit human
-action (pushing `v3.2.0`), approval of the `npm-release` environment, and a green
+pinned to the 3.2.1 candidate: nothing reaches npm without an explicit human
+action (pushing `v3.2.1`), approval of the `npm-release` environment, and a green
 full-CI verify job plus the signed release-canary gate. It publishes only under
 npm dist-tag `candidate` and creates a GitHub prerelease; it cannot move npm or
 GitHub `latest`.
@@ -63,7 +63,7 @@ verified.
 ## Release procedure
 
 The current workflow is a one-version candidate lane. It requires npm `latest`
-to equal `3.0.1`, requires npm `candidate` and version `3.2.0` to be absent, and
+to equal `3.0.1`, requires npm `candidate` and version `3.2.1` to be absent, and
 fails closed if any of those registry preconditions change. Before authorizing
 the tag, an authenticated npm maintainer must run the pinned npm 11 client and
 verify `npm trust list @ashlr/hub` exactly matches the repository, workflow,
@@ -79,8 +79,8 @@ The release policy accepts only a lightweight tag whose current GitHub ref still
 resolves directly to the event commit; annotated tags, tag rewrites, and deleted
 tags fail closed.
 
-1. Confirm `version` in `package.json` is exactly `3.2.0`.
-2. Make sure `CHANGELOG.md` has a `## [3.2.0]` section — the release FAILS
+1. Confirm `version` in `package.json` is exactly `3.2.1`.
+2. Make sure `CHANGELOG.md` has a `## [3.2.1]` section — the release FAILS
    without one (`scripts/extract-changelog.mjs` enforces changelog discipline;
    its body becomes the GitHub release notes).
 3. Confirm protected `master` is at the intended release SHA and its required
@@ -88,8 +88,8 @@ tags fail closed.
    release tag (do not force, move, delete, or recreate it):
 
    ```bash
-   git tag v3.2.0
-   git push origin v3.2.0
+   git tag v3.2.1
+   git push origin v3.2.1
    ```
 
 4. `.github/workflows/release.yml` then:
@@ -185,12 +185,17 @@ An npm package version is immutable. Never rerun the whole workflow, rerun the
 `publish` job, or run `npm publish` locally after the registry may have accepted
 that version.
 
+The protected lightweight tag `v3.2.0` remains at its original commit. Its
+2026-08-15 workflow run stopped at the signed no-authority canary before the
+prepare, npm publish, verification, and GitHub Release jobs. Never move, delete,
+recreate, or reuse that tag or version; `v3.2.1` is the only recovery lane.
+
 If **publish succeeded and only `verify_publish` or the GitHub `release` job
 failed**, first verify that npm contains the intended tag artifact from a clean
 checkout of that tag:
 
 ```bash
-version=3.2.0
+version=3.2.1
 git switch --detach "v${version}"
 tag_checkout="$(pwd)"
 expected_revision="$(git rev-parse HEAD)"
@@ -275,7 +280,7 @@ If npm publication itself failed or its result is ambiguous:
 
    ```bash
    set -euo pipefail
-   version=3.2.0
+   version=3.2.1
    release_tag="v${version}"
    test "$(git rev-parse HEAD)" = "$(git rev-list -n 1 "$release_tag")"
    release_notes="$(mktemp)"
@@ -295,7 +300,7 @@ There is no token/OTP fallback and no recovery path that republishes an existing
 version.
 
 If any post-publication integrity, provenance, signature, candidate-tag, or
-preserved-dist-tag check fails, treat the immutable 3.2.0 version as a release
+preserved-dist-tag check fails, treat the immutable 3.2.1 version as a release
 incident. Do not create the GitHub prerelease, do not install it, and do not
 promote it to `latest`.
 
