@@ -244,7 +244,7 @@ jobs:
             exit 1
           fi
 
-          branch_json="$(gh api --fail "repos/${GITHUB_REPOSITORY}/branches/master")"
+          branch_json="$(gh api "repos/${GITHUB_REPOSITORY}/branches/master")"
           master_protected="$(jq -r '.protected // false' <<<"$branch_json")"
           master_commit="$(jq -r '.commit.sha // empty' <<<"$branch_json")"
           if [[ "$master_protected" != "true" || ! "$master_commit" =~ ^[0-9a-f]{40}$ ]]; then
@@ -252,7 +252,7 @@ jobs:
             exit 1
           fi
 
-          comparison="$(gh api --fail \
+          comparison="$(gh api \
             "repos/${GITHUB_REPOSITORY}/compare/${GITHUB_SHA}...${master_commit}" \
             --jq '.status')"
           if [[ "$comparison" != "ahead" && "$comparison" != "identical" ]]; then
@@ -718,14 +718,14 @@ jobs:
             exit 1
           fi
 
-          branch_json="$(gh api --fail "repos/${GITHUB_REPOSITORY}/branches/master")"
+          branch_json="$(gh api "repos/${GITHUB_REPOSITORY}/branches/master")"
           master_protected="$(jq -r '.protected // false' <<<"$branch_json")"
           master_commit="$(jq -r '.commit.sha // empty' <<<"$branch_json")"
           if [[ "$master_protected" != "true" || ! "$master_commit" =~ ^[0-9a-f]{40}$ ]]; then
             echo "Protected master authority could not be established." >&2
             exit 1
           fi
-          comparison="$(gh api --fail \
+          comparison="$(gh api \
             "repos/${GITHUB_REPOSITORY}/compare/${GITHUB_SHA}...${master_commit}" \
             --jq '.status')"
           if [[ "$comparison" != "ahead" && "$comparison" != "identical" ]]; then
@@ -756,7 +756,7 @@ jobs:
           fi
           printf 'dist_tags_before_b64=%s\n' "$dist_tags_before_b64" >> "$GITHUB_OUTPUT"
 
-          tag_ref_json="$(gh api --fail \
+          tag_ref_json="$(gh api \
             "repos/${GITHUB_REPOSITORY}/git/ref/tags/${GITHUB_REF_NAME}")"
           jq -e \
             --arg ref "$GITHUB_REF" \
@@ -976,7 +976,7 @@ jobs:
             exit 1
           fi
           if [[ "$probe_status" == "404" ]]; then
-            live_tag="$(gh api --fail \
+            live_tag="$(gh api \
               "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}")"
             jq -e \
               --arg ref "refs/tags/${tag}" \
@@ -994,7 +994,7 @@ jobs:
           gh release view "$tag" --json body |
             jq -rj '.body' > "$RUNNER_TEMP/existing-release-notes.md"
           cmp --silent "$notes" "$RUNNER_TEMP/existing-release-notes.md"
-          comparison="$(gh api --fail \
+          comparison="$(gh api \
             "repos/${GITHUB_REPOSITORY}/compare/${GITHUB_SHA}...${tag}" \
             --jq '.status')"
           if [[ "$comparison" != "identical" ]]; then

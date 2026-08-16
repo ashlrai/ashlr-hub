@@ -5,6 +5,7 @@
  * publishing. The workflow itself remains dormant until an explicit tag push.
  */
 
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -101,13 +102,28 @@ describe('M479 npm release workflow supply-chain admission', () => {
     expect(run).toContain('set -euo pipefail');
     expect(run).toContain('git rev-parse --verify "HEAD^{commit}"');
     expect(run).toContain('"$head_commit" != "$GITHUB_SHA"');
-    expect(run).toContain('gh api --fail "repos/${GITHUB_REPOSITORY}/branches/master"');
+    expect(run).toContain('gh api "repos/${GITHUB_REPOSITORY}/branches/master"');
+    expect(workflowText).not.toMatch(/\bgh api\s+--fail\b/u);
     expect(run).toContain("jq -r '.protected // false'");
     expect(run).toContain("jq -r '.commit.sha // empty'");
     expect(run).toContain('"repos/${GITHUB_REPOSITORY}/compare/${GITHUB_SHA}...${master_commit}"');
     expect(run).toContain('[[ "$comparison" != "ahead" && "$comparison" != "identical" ]]');
     expect(run.match(/\bexit 1\b/g)).toHaveLength(3);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'keeps command-substitution API failures fatal under the workflow shell contract',
+    () => {
+      const result = spawnSync('/bin/bash', ['--noprofile', '--norc', '-c', `
+        set -euo pipefail
+        gh() { return 17; }
+        branch_json="$(gh api repos/example/project/branches/master)"
+        printf 'unsafe:%s\\n' "$branch_json"
+      `], { encoding: 'utf8' });
+      expect(result.status).toBe(17);
+      expect(result.stdout).toBe('');
+    },
+  );
 
   it('prepares before the minimal publish effect and verifies before GitHub release', () => {
     const installIndex = prepareSteps.findIndex((step) =>
