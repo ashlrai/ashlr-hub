@@ -95,6 +95,12 @@
   width: 100%;
   border-collapse: collapse;
   font-size: var(--text-sm-size);
+  /* Fixed layout + explicit widths on every column except Title: Title is
+     the column operators actually need to read (a proposal's title is
+     often a full sentence), so it gets whatever space is left over instead
+     of splitting evenly with Repo/Kind/Age/Status/Why the way auto layout
+     did. See DESIGN.md's known-defect note on this view. */
+  table-layout: fixed;
 }
 
 .table th {
@@ -113,7 +119,27 @@
 }
 
 .checkboxCol {
-  width: 28px;
+  width: 32px;
+}
+
+.repoCol {
+  width: 15%;
+}
+
+.kindCol {
+  width: 9%;
+}
+
+.ageCol {
+  width: 7%;
+}
+
+.statusCol {
+  width: 13%;
+}
+
+.whyCol {
+  width: 18%;
 }
 
 .row {
@@ -131,8 +157,13 @@
 }
 
 .titleLink {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
   color: var(--text-primary);
   font-weight: var(--font-weight-medium);
+  line-height: var(--text-sm-line);
 }
 .titleLink:hover {
   color: var(--accent-600);
@@ -142,7 +173,6 @@
   color: var(--text-secondary);
   font-family: var(--font-mono);
   font-size: var(--text-xs-size);
-  max-width: 160px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -156,7 +186,6 @@
 .why {
   color: var(--text-tertiary);
   font-size: var(--text-xs-size);
-  max-width: 240px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

@@ -41,15 +41,24 @@ export function RunsPanel({ runs }: { runs: DashboardSnapshot['runs'] }) {
             <thead>
               <tr>
                 <th scope="col">Goal</th>
-                <th scope="col">Status</th>
-                <th scope="col">Tokens</th>
+                <th scope="col" className={styles.statusCol}>
+                  Status
+                </th>
+                <th scope="col" className={styles.tokensCol}>
+                  Tokens
+                </th>
               </tr>
             </thead>
             <tbody>
               {runs.map((run) => (
                 <tr key={run.id}>
                   <td>
-                    <a href={`#/work/runs/${run.id}`} data-focus-key={`run-${run.id}`} className={styles.goalLink}>
+                    <a
+                      href={`#/work/runs/${run.id}`}
+                      data-focus-key={`run-${run.id}`}
+                      className={styles.goalLink}
+                      title={run.goal}
+                    >
                       {run.goal}
                     </a>
                   </td>

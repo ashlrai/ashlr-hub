@@ -64,9 +64,14 @@ export function SwarmDetailView() {
 
   const swarm = query.data;
   const done = swarm.tasks.filter((t) => t.status === 'done').length;
-  const total = Math.max(swarm.plan.tasks.length, swarm.tasks.length);
+  // Guard against historical swarm records with no `plan` at all (see the
+  // matching comment in SwarmsView.tsx) — mergeSwarmTasks below already
+  // handles `plan` being undefined via `plan?.tasks ?? []`.
+  const total = Math.max(swarm.plan?.tasks.length ?? 0, swarm.tasks.length);
   const pct = total > 0 ? Math.round((done / total) * 100) : 0;
   const dagNodes = mergeSwarmTasks(swarm.plan, swarm.tasks);
+  // Same historical records that predate `plan` also predate `usage`.
+  const usage = swarm.usage ?? { tokensIn: 0, tokensOut: 0, estCostUsd: 0 };
 
   return (
     <div ref={containerRef} className={styles.view}>
@@ -94,12 +99,12 @@ export function SwarmDetailView() {
         <div>
           <dt>Tokens in / out</dt>
           <dd className={styles.numeric}>
-            {swarm.usage.tokensIn.toLocaleString()} / {swarm.usage.tokensOut.toLocaleString()}
+            {usage.tokensIn.toLocaleString()} / {usage.tokensOut.toLocaleString()}
           </dd>
         </div>
         <div>
           <dt>Est cost</dt>
-          <dd className={styles.numeric}>${swarm.usage.estCostUsd.toFixed(4)}</dd>
+          <dd className={styles.numeric}>${usage.estCostUsd.toFixed(4)}</dd>
         </div>
         <div>
           <dt>Parallelism</dt>

@@ -38,7 +38,11 @@
 
 .layout {
   display: grid;
-  grid-template-columns: minmax(420px, 1fr) minmax(480px, 1.4fr);
+  /* The list is the primary surface (a 7-column table); the detail pane is
+     often an empty placeholder until a row is selected, so it no longer
+     out-weighs the list by default (was 1fr : 1.4fr, list side losing to an
+     empty pane — see DESIGN.md's known-defect note on this view). */
+  grid-template-columns: minmax(520px, 1.3fr) minmax(420px, 1fr);
   gap: var(--space-4);
   align-items: start;
   min-width: 0;

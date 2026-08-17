@@ -10,6 +10,7 @@ import { Outlet, useLocation } from 'react-router-dom';
 import { Sidebar } from './Sidebar.js';
 import { Topbar } from './Topbar.js';
 import { CommandPalette, useCommandPaletteShortcut } from '../command-palette/CommandPalette.js';
+import { RouteErrorBoundary } from '../primitives/RouteErrorBoundary.js';
 import { useScrollRestore } from '../../hooks/useScrollRestore.js';
 import styles from './Shell.module.css';
 
@@ -27,7 +28,9 @@ export function Shell() {
       <div className={styles.body}>
         <Topbar onOpenPalette={() => setPaletteOpen(true)} />
         <main ref={mainRef} className={styles.main} id="main-content" tabIndex={-1}>
-          <Outlet />
+          <RouteErrorBoundary resetKey={location.pathname}>
+            <Outlet />
+          </RouteErrorBoundary>
         </main>
       </div>
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />

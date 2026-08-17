@@ -231,29 +231,33 @@ export function RunsView() {
             <thead>
               <tr>
                 <th scope="col">Goal</th>
-                <th scope="col">
+                <th scope="col" className={styles.statusCol}>
                   <button type="button" className={styles.sortHeader} onClick={() => toggleSort('status')}>
                     Status{sortIndicator('status')}
                   </button>
                 </th>
-                <th scope="col">Engine</th>
-                <th scope="col">Provider</th>
-                <th scope="col">
+                <th scope="col" className={styles.engineCol}>
+                  Engine
+                </th>
+                <th scope="col" className={styles.providerCol}>
+                  Provider
+                </th>
+                <th scope="col" className={styles.tokensCol}>
                   <button type="button" className={styles.sortHeader} onClick={() => toggleSort('tokens')}>
                     Tokens in/out{sortIndicator('tokens')}
                   </button>
                 </th>
-                <th scope="col">
+                <th scope="col" className={styles.costCol}>
                   <button type="button" className={styles.sortHeader} onClick={() => toggleSort('estCostUsd')}>
                     Est cost{sortIndicator('estCostUsd')}
                   </button>
                 </th>
-                <th scope="col">
+                <th scope="col" className={styles.stepsCol}>
                   <button type="button" className={styles.sortHeader} onClick={() => toggleSort('steps')}>
                     Steps{sortIndicator('steps')}
                   </button>
                 </th>
-                <th scope="col">
+                <th scope="col" className={styles.createdCol}>
                   <button type="button" className={styles.sortHeader} onClick={() => toggleSort('createdAt')}>
                     Created{sortIndicator('createdAt')}
                   </button>
@@ -263,8 +267,13 @@ export function RunsView() {
             <tbody>
               {filtered.map((run) => (
                 <tr key={run.id}>
-                  <td className={styles.goalCell}>
-                    <Link to={`/work/runs/${run.id}`} data-focus-key={`run-${run.id}`} className={styles.goalLink}>
+                  <td>
+                    <Link
+                      to={`/work/runs/${run.id}`}
+                      data-focus-key={`run-${run.id}`}
+                      className={styles.goalLink}
+                      title={run.goal}
+                    >
                       {run.goal}
                     </Link>
                   </td>

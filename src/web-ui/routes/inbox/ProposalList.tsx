@@ -245,11 +245,21 @@ export function ProposalList({ selectedId, onDispatchDisabled }: { selectedId: s
             <tr>
               <th scope="col" className={styles.checkboxCol} />
               <th scope="col">Title</th>
-              <th scope="col">Repo</th>
-              <th scope="col">Kind</th>
-              <th scope="col">Age</th>
-              <th scope="col">Status</th>
-              <th scope="col">Why</th>
+              <th scope="col" className={styles.repoCol}>
+                Repo
+              </th>
+              <th scope="col" className={styles.kindCol}>
+                Kind
+              </th>
+              <th scope="col" className={styles.ageCol}>
+                Age
+              </th>
+              <th scope="col" className={styles.statusCol}>
+                Status
+              </th>
+              <th scope="col" className={styles.whyCol}>
+                Why
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -277,7 +287,7 @@ export function ProposalList({ selectedId, onDispatchDisabled }: { selectedId: s
                   />
                 </td>
                 <td>
-                  <Link to={`/inbox/${encodeURIComponent(p.id)}`} className={styles.titleLink}>
+                  <Link to={`/inbox/${encodeURIComponent(p.id)}`} className={styles.titleLink} title={p.title}>
                     {p.title}
                   </Link>
                 </td>

@@ -2,6 +2,7 @@
   width: 100%;
   border-collapse: collapse;
   font-size: var(--text-sm-size);
+  table-layout: fixed;
 }
 
 .table th {
@@ -23,8 +24,21 @@
   border-bottom: none;
 }
 
+.statusCol {
+  width: 92px;
+}
+
+.tokensCol {
+  width: 96px;
+}
+
 .goalLink {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
   color: var(--text-primary);
+  line-height: var(--text-sm-line);
 }
 .goalLink:hover {
   color: var(--accent-600);
@@ -33,4 +47,5 @@
 .tokens {
   font-variant-numeric: tabular-nums;
   color: var(--text-secondary);
+  white-space: nowrap;
 }

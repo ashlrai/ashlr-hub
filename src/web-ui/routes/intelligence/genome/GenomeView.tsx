@@ -9,6 +9,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { genomeQuery, isRecallHit } from '../../../data/queries.js';
 import { useQuery } from '../../../data/hooks.js';
 import { RefreshIndicator } from '../../../components/primitives/RefreshIndicator.js';
+import { SkeletonRow } from '../../../components/primitives/Skeleton.js';
 import { ChartContainer, BarChart, chartFormat, type CategoricalDatum } from '../../../components/charts/index.js';
 import type { GenomeEntry, RecallHit } from '../../../data/api-types.js';
 import styles from './GenomeView.module.css';
@@ -108,7 +109,12 @@ export function GenomeView() {
       ) : null}
 
       {resourceQuery.status === 'loading' ? (
-        <p className={styles.empty}>Loading genome…</p>
+        <div className={styles.skeletons} aria-hidden="true">
+          <SkeletonRow />
+          <SkeletonRow />
+          <SkeletonRow />
+          <SkeletonRow />
+        </div>
       ) : resourceQuery.status === 'error' ? (
         <div className={styles.error} role="alert">
           {resourceQuery.error?.message ?? 'Failed to load genome data.'}

@@ -95,6 +95,29 @@
   width: 100%;
   border-collapse: collapse;
   font-size: var(--text-sm-size);
+  table-layout: fixed;
+}
+
+.statusCol {
+  width: 9%;
+}
+.engineCol {
+  width: 8%;
+}
+.providerCol {
+  width: 9%;
+}
+.tokensCol {
+  width: 12%;
+}
+.costCol {
+  width: 8%;
+}
+.stepsCol {
+  width: 7%;
+}
+.createdCol {
+  width: 12%;
 }
 
 .table th {
@@ -134,12 +157,13 @@
   outline-offset: 2px;
 }
 
-.goalCell {
-  max-width: 28rem;
-}
-
 .goalLink {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
   color: var(--text-primary);
+  line-height: var(--text-sm-line);
 }
 .goalLink:hover {
   color: var(--accent-600);

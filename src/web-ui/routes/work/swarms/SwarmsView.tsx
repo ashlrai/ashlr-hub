@@ -24,10 +24,20 @@ function swarmTasksDone(sw: SwarmRun): number {
   return sw.tasks.filter((t) => t.status === 'done').length;
 }
 function swarmTasksTotal(sw: SwarmRun): number {
-  return Math.max(sw.plan.tasks.length, sw.tasks.length);
+  // Some historical swarm records (e.g. very early smoke-test runs) predate
+  // the `plan` field and have no plan at all — guard against that rather
+  // than crashing the whole list (2 of 80 real records on this machine hit
+  // this path).
+  return Math.max(sw.plan?.tasks.length ?? 0, sw.tasks.length);
+}
+// Same historical records that predate `plan` (see swarmTasksTotal above)
+// also predate `usage` — default to zeroed usage rather than crashing.
+function swarmUsage(sw: SwarmRun): { tokensIn: number; tokensOut: number; estCostUsd: number } {
+  return sw.usage ?? { tokensIn: 0, tokensOut: 0, estCostUsd: 0 };
 }
 function swarmTokens(sw: SwarmRun): number {
-  return sw.usage.tokensIn + sw.usage.tokensOut;
+  const u = swarmUsage(sw);
+  return u.tokensIn + u.tokensOut;
 }
 
 function formatDate(iso: string): string {
@@ -77,7 +87,7 @@ export function SwarmsView() {
           cmp = swarmTokens(a) - swarmTokens(b);
           break;
         case 'estCostUsd':
-          cmp = a.usage.estCostUsd - b.usage.estCostUsd;
+          cmp = swarmUsage(a).estCostUsd - swarmUsage(b).estCostUsd;
           break;
       }
       return sortDir === 'asc' ? cmp : -cmp;
@@ -168,9 +178,15 @@ export function SwarmsView() {
               const done = swarmTasksDone(sw);
               const total = swarmTasksTotal(sw);
               const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+              const usage = swarmUsage(sw);
               return (
                 <li key={sw.id} className={styles.item}>
-                  <Link to={`/work/swarms/${sw.id}`} data-focus-key={`swarm-${sw.id}`} className={styles.goalLink}>
+                  <Link
+                    to={`/work/swarms/${sw.id}`}
+                    data-focus-key={`swarm-${sw.id}`}
+                    className={styles.goalLink}
+                    title={sw.goal}
+                  >
                     <span className={styles.goalText}>{sw.goal}</span>
                     <StatusBadge status={sw.status} />
                   </Link>
@@ -183,9 +199,9 @@ export function SwarmsView() {
                     </span>
                   </div>
                   <span className={styles.numeric}>
-                    {sw.usage.tokensIn.toLocaleString()}/{sw.usage.tokensOut.toLocaleString()}
+                    {usage.tokensIn.toLocaleString()}/{usage.tokensOut.toLocaleString()}
                   </span>
-                  <span className={styles.numeric}>${sw.usage.estCostUsd.toFixed(4)}</span>
+                  <span className={styles.numeric}>${usage.estCostUsd.toFixed(4)}</span>
                   <span className={styles.date}>{formatDate(sw.createdAt)}</span>
                 </li>
               );
