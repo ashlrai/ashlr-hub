@@ -45,9 +45,11 @@ import {
   daemonActivationScopeGranted,
   daemonActivationTrustRootStatus,
   daemonActivationTrustRootsPath,
+  inspectDaemonActivationPermit,
   inspectDaemonActivationPermitForVerification,
   liveConductorActivationAuthorized,
   loadDaemonActivationTrustRoots,
+  signDaemonActivationGrant,
   signDaemonActivationPermit,
   verifyDaemonActivationPermit,
   type DaemonActivationGrantScope,
@@ -363,6 +365,194 @@ describe('M470 activation authority — standing grants (conductor/install/autom
     expect(latestAuditSummaries('daemon-activation:grant').length).toBeGreaterThan(0);
     expect(latestAuditSummaries('daemon-activation:conductor-check').some((s) => s.startsWith('ok:'))).toBe(true);
     expect(latestAuditSummaries('daemon-activation:install-check').some((s) => s.startsWith('refused:'))).toBe(true);
+  });
+});
+
+describe('M470 activation authority — standing residentStanding grant (unattended resident restart)', () => {
+  it('denies resident with no residentStanding grant, falling back to the (also absent) one-shot permit', () => {
+    isolateHome();
+    daemonActivationInit({});
+    const result = consumeDaemonActivationPermit(config('no-grant'), { once: false, dryRun: false });
+    expect(result.authorized).toBe(false);
+    expect(result.scope).toBeUndefined();
+    expect(result.grantId).toBeUndefined();
+    expect(latestAuditSummaries('daemon-activation:resident-standing-check').some((s) => s.startsWith('refused:'))).toBe(true);
+  });
+
+  it('authorizes resident via a valid standing residentStanding grant, touching no one-shot permit', () => {
+    isolateHome();
+    daemonActivationInit({});
+    const minted = daemonActivationMintStandingGrant({
+      scope: scope({ residentStanding: true, automerge: true }),
+      ttlMs: 60_000,
+    });
+    expect(minted.ok).toBe(true);
+    if (!minted.ok) return;
+
+    const result = consumeDaemonActivationPermit(config('standing-resident'), { once: false, dryRun: false });
+    expect(result.authorized).toBe(true);
+    expect(result.grantId).toBe(minted.record.grantId);
+    expect(result.scope).toEqual(minted.record.scope);
+    expect(result.capability).toBeUndefined();
+    expect(existsSync(daemonActivationPermitPath())).toBe(false);
+    expect(latestAuditSummaries('daemon-activation:consume').some((s) =>
+      s === `ok:daemon activation consume authorized: resident-standing-activation-authorized:${minted.record.grantId}`,
+    )).toBe(true);
+  });
+
+  it('denies once the standing residentStanding grant expires', async () => {
+    isolateHome();
+    daemonActivationInit({});
+    daemonActivationMintStandingGrant({ scope: scope({ residentStanding: true }), ttlMs: 400 });
+    expect(consumeDaemonActivationPermit(config('expiring'), { once: false, dryRun: false }).authorized).toBe(true);
+
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    const result = consumeDaemonActivationPermit(config('expiring'), { once: false, dryRun: false });
+    expect(result.authorized).toBe(false);
+    expect(result.scope).toBeUndefined();
+  });
+
+  it('denies immediately once the standing residentStanding grant is revoked', () => {
+    isolateHome();
+    daemonActivationInit({});
+    const minted = daemonActivationMintStandingGrant({ scope: scope({ residentStanding: true }), ttlMs: 60_000 });
+    expect(minted.ok).toBe(true);
+    if (!minted.ok) return;
+    expect(consumeDaemonActivationPermit(config('revoke-test'), { once: false, dryRun: false }).authorized).toBe(true);
+
+    expect(daemonActivationRevokeGrant(minted.record.grantId)).toEqual({ ok: true });
+    const result = consumeDaemonActivationPermit(config('revoke-test'), { once: false, dryRun: false });
+    expect(result.authorized).toBe(false);
+    expect(result.scope).toBeUndefined();
+  });
+
+  it('denies resident regardless of a valid residentStanding grant while the kill switch is on', () => {
+    isolateHome();
+    daemonActivationInit({});
+    daemonActivationMintStandingGrant({ scope: scope({ residentStanding: true }), ttlMs: 60_000 });
+    expect(daemonActivationScopeGranted('residentStanding')).toMatchObject({ granted: true });
+
+    setKill(true);
+    expect(daemonActivationScopeGranted('residentStanding')).toMatchObject({ granted: false, reason: 'kill-switch-is-on' });
+    const result = consumeDaemonActivationPermit(config('kill-switch'), { once: false, dryRun: false });
+    expect(result.authorized).toBe(false);
+    setKill(false);
+  });
+
+  it('never authorizes --once, no matter how broad the residentStanding grant scope is', () => {
+    isolateHome();
+    daemonActivationInit({});
+    daemonActivationMintStandingGrant({
+      scope: scope({ residentStanding: true, automerge: true, repair: true, deploy: true }),
+      ttlMs: 60_000,
+    });
+
+    const result = consumeDaemonActivationPermit(config('once-unaffected'), { once: true, dryRun: false });
+    expect(result.authorized).toBe(false);
+    expect(result.scope).toBeUndefined();
+  });
+
+  it('backward compat: a standing grant signed BEFORE residentStanding existed still loads, still authorizes its original scopes, and correctly denies residentStanding', () => {
+    // Reproduces exactly what happened on a real, already-in-use machine:
+    // a conductor+install grant minted before this change existed, then the
+    // binary upgrades and `DAEMON_ACTIVATION_SCOPE_KEYS` gains
+    // `residentStanding`. hasExactKeys-based validation would make
+    // loadGrantStore() reject this ENTIRE record — and loadGrantStore fails
+    // the WHOLE STORE on any one invalid record, so a strict check here
+    // would silently deny every OTHER still-valid grant too, not just the
+    // new capability.
+    isolateHome();
+    const home = process.env['HOME']!;
+    const key = testKeypair();
+    const nowIso = new Date().toISOString();
+
+    mkdirSync(daemonActivationDirPath(), { recursive: true, mode: 0o700 });
+    const trustRoot = {
+      keyId: key.root.keyId,
+      publicKeyPem: key.root.publicKeyPem,
+      createdAt: nowIso,
+      revokedAt: null,
+      label: 'pre-upgrade-operator',
+    };
+    writeFileSync(
+      daemonActivationTrustRootsPath(),
+      `${canonicalizeDaemonActivationValue([trustRoot])}\n`,
+      { mode: 0o600 },
+    );
+
+    // The OLD-shape scope: exactly the 8 keys that existed before
+    // `residentStanding` was added — not built via `scope()`/spreading
+    // EMPTY_DAEMON_ACTIVATION_SCOPE, on purpose, to faithfully reproduce
+    // what an older binary actually signed onto disk.
+    const oldScope = {
+      once: false,
+      resident: false,
+      conductor: true,
+      automerge: false,
+      repair: false,
+      deploy: false,
+      install: true,
+      proposalOnly: false,
+    } as unknown as DaemonActivationGrantScope;
+    const oldRecord = signDaemonActivationGrant({
+      grantId: 'a'.repeat(32),
+      keyId: key.root.keyId,
+      issuedAt: nowIso,
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      scope: oldScope,
+      privateKey: key.privateKey,
+    });
+    writeFileSync(
+      daemonActivationGrantsPath(),
+      `${canonicalizeDaemonActivationValue([oldRecord])}\n`,
+      { mode: 0o600 },
+    );
+    chmodSync(home, 0o700);
+
+    expect(daemonActivationGrantStatus()).toMatchObject({ ok: true });
+    expect(daemonActivationScopeGranted('conductor')).toMatchObject({ granted: true });
+    expect(daemonActivationScopeGranted('install')).toMatchObject({ granted: true });
+    // Missing (not merely false) on the old record — must read as denied,
+    // never as silently trusted.
+    expect(daemonActivationScopeGranted('residentStanding')).toMatchObject({ granted: false });
+    expect(consumeDaemonActivationPermit(config('pre-upgrade'), { once: false, dryRun: false }).authorized)
+      .toBe(false);
+  });
+
+  it('status reports resident readiness cleanly via a standing grant even when a stale/unreadable one-shot permit file is present', () => {
+    isolateHome();
+    daemonActivationInit({});
+    const cfg = config('stale-permit-status');
+
+    // A stale, empty (0-byte) one-shot permit file — the same category of
+    // "corrupt pending permit" that used to make `ashlr activation status`
+    // show `resident: degraded (activation-permit-inspection-failed)` no
+    // matter what else was granted.
+    const permitPath = daemonActivationPermitPath();
+    mkdirSync(dirname(permitPath), { recursive: true, mode: 0o700 });
+    writeFileSync(permitPath, '', { mode: 0o600 });
+
+    const withoutStanding = inspectDaemonActivationPermit(cfg, { once: false, dryRun: false });
+    expect(withoutStanding).toMatchObject({
+      state: 'degraded',
+      reason: 'activation-permit-inspection-failed',
+      residentStandingAuthorized: false,
+    });
+
+    daemonActivationMintStandingGrant({ scope: scope({ residentStanding: true }), ttlMs: 60_000 });
+
+    const withStanding = inspectDaemonActivationPermit(cfg, { once: false, dryRun: false });
+    expect(withStanding).toMatchObject({
+      state: 'ready',
+      commandEligible: true,
+      reason: 'ready-via-standing-resident-grant',
+      residentAuthorized: true,
+      residentStandingAuthorized: true,
+    });
+
+    // The stale one-shot permit is left completely alone — the standing-grant
+    // path never opens, reads, or unlinks it.
+    expect(existsSync(permitPath)).toBe(true);
   });
 });
 

@@ -102,6 +102,7 @@ import {
 } from './activity.js';
 import {
   consumeDaemonActivationPermit,
+  daemonActivationScopeGranted,
   isDaemonActivationCapability,
   type DaemonActivationCapability,
   type DaemonActivationGrantScope,
@@ -1073,6 +1074,7 @@ type BestOfNRunResult = Awaited<ReturnType<typeof runBestOfN>>;
 const LEGACY_PROPOSAL_ONLY_SCOPE: DaemonActivationGrantScope = Object.freeze({
   once: true,
   resident: false,
+  residentStanding: false,
   conductor: false,
   automerge: false,
   repair: false,
@@ -3528,6 +3530,34 @@ export async function tick(
       spentUsd: 0,
       reason: 'activation-refused',
     };
+  }
+  // A standing `residentStanding` grant is NOT single-use, unlike the
+  // one-shot WeakMap capability that forces `preVerifiedScope` to be trusted
+  // for the run's whole lifetime (see the TickOptions.activationScope doc).
+  // That means it CAN be safely re-checked on every tick with no consumption
+  // side effect — so a resident daemon that started off a standing grant
+  // gets a real "stop the next tick" guarantee from `ashlr activation
+  // revoke --grant <id>`, not just "blocks the next `daemon start`." This is
+  // strictly stronger than what the one-shot capability path can offer; it
+  // cannot interrupt a tick already in flight.
+  if (!opts.dryRun && preVerifiedScope?.residentStanding === true) {
+    const stillGranted = daemonActivationScopeGranted('residentStanding');
+    if (!stillGranted.granted) {
+      persistAudit({
+        action: 'daemon:activation-refused',
+        repo: null,
+        sandboxId: null,
+        summary: `live tick refused: resident standing grant no longer authorized: ${stillGranted.reason}`,
+        result: 'refused',
+      });
+      return {
+        ts: now,
+        itemsConsidered: 0,
+        proposalsCreated: 0,
+        spentUsd: 0,
+        reason: 'activation-refused',
+      };
+    }
   }
   // M470: proposal-only is derived from the GRANTED scope rather than from "an
   // activation exists at all" — the previous form forced every authorized tick
@@ -8109,10 +8139,16 @@ export async function runDaemon(
   // call, so verifying per-tick would authorize only the first resident tick
   // and refuse all subsequent ones. Entering the loop is the authorized act;
   // each tick then reads the scope as plain data.
+  //
+  // `activation.scope` is the standing-`residentStanding`-grant path
+  // (consumeDaemonActivationPermit tried it first): no WeakMap capability
+  // exists for it at all, since standing grants aren't single-use — tick()
+  // re-checks it live every cycle instead (see its `residentStanding` guard).
   const runActivationScope: DaemonActivationGrantScope | undefined =
-    !opts.dryRun && activation.capability && isDaemonActivationCapability(activation.capability)
+    activation.scope
+    ?? (!opts.dryRun && activation.capability && isDaemonActivationCapability(activation.capability)
       ? activation.capability.scope
-      : undefined;
+      : undefined);
 
   // -------------------------------------------------------------------------
   // Mark daemon as running.
@@ -8216,11 +8252,19 @@ export async function runDaemon(
     summary:
       `daemon started: once=${opts.once}, dryRun=${opts.dryRun}, budget=$${dcfg.dailyBudgetUsd}, ` +
       `intervalMs=${dcfg.intervalMs}${opts.drain ? `, drain=${opts.drain}` : ''}` +
-      `${opts.drainLimit ? `, drainLimit=${opts.drainLimit}` : ''}`,
+      `${opts.drainLimit ? `, drainLimit=${opts.drainLimit}` : ''}` +
+      `${activation.grantId ? `, activatedByStandingGrant=${activation.grantId}` : ''}`,
     result: 'ok',
   });
 
-  if (!opts.dryRun && !activation.capability) {
+  // `!activation.scope` preserves this exactly as it behaved before the
+  // standing-grant path existed: a live (non-dry-run) authorized start always
+  // has EITHER `activation.capability` (one-shot path) OR `activation.scope`
+  // (standing-grant path) set, so this was — and remains — unreachable on any
+  // real authorized run. Written this way rather than changed so the
+  // standing-grant path doesn't silently start exercising a branch nothing
+  // has exercised live before.
+  if (!opts.dryRun && !activation.capability && !activation.scope) {
     reconcilePreparedGeneratedRepairReservations();
   }
 

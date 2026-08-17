@@ -55,14 +55,36 @@ import { diagnoseGuardHealth } from './guard-health.js';
  *      0700, owned by the operator's uid — checked on every read).
  *   2. Runs `ashlr activation grant <scope...>` — signs and mints either a
  *      single-use activation PERMIT (scopes: once, resident) consumed by
- *      `daemon start`, or a standing, expiring GRANT (scopes: conductor,
- *      install, automerge, repair, deploy) checked on every call to the
- *      corresponding guard.
+ *      `daemon start`, or a standing, expiring GRANT (scopes: residentStanding,
+ *      conductor, install, automerge, repair, deploy) checked on every call to
+ *      the corresponding guard.
+ *
+ * `resident` is grantable BOTH ways, and both forms remain live:
+ *   - one-shot `resident` permit: fixed 2-minute window, requires a human to
+ *     run `grant` immediately before `daemon start`. Unusable after a reboot
+ *     with nobody present.
+ *   - standing `residentStanding` grant: up to the normal 30-day cap, checked
+ *     at resident-daemon startup instead of requiring a fresh permit — this is
+ *     what lets a launchd/systemd/Task-Scheduler-triggered restart authorize
+ *     itself with no human in the loop. `daemon start` (resident mode) tries
+ *     the standing grant first and falls back to the one-shot permit path
+ *     unchanged, so an operator who never grants `residentStanding` sees
+ *     EXACTLY today's one-shot-only behavior.
  *
  * Both permits and grants are Ed25519-signed, scoped, expiring, and
  * independently revocable (`ashlr activation revoke`). Every init / grant /
  * revoke / consume / denial writes an audit row via ../sandbox/audit.js so
  * an operator can answer "who activated this fleet, when, with what scope."
+ *
+ * Revocation of a standing grant is file-based: it stops the NEXT
+ * authorization check, immediately. For `residentStanding` specifically it is
+ * stronger than that — because standing grants are not single-use (unlike the
+ * one-shot capability, which a resident loop must consume exactly once, see
+ * `tick()`'s `activationScope` handling in ../loop.ts), a resident daemon that
+ * started off a standing grant re-checks it on every tick and stops at the
+ * next one if the grant is revoked, expired, or its trust root is revoked —
+ * not just at the next `daemon start`. It cannot interrupt a tick already in
+ * flight.
  *
  * File loading fails CLOSED on every ambiguity: missing, unreadable, wrong
  * permissions, wrong owner, symlinked, malformed, or non-canonically
@@ -99,6 +121,7 @@ const capabilityBrand: unique symbol = Symbol('ashlr.daemon-activation-capabilit
 export const DAEMON_ACTIVATION_SCOPE_KEYS = [
   'once',
   'resident',
+  'residentStanding',
   'conductor',
   'automerge',
   'repair',
@@ -117,6 +140,7 @@ export type DaemonActivationGrantScope = { [K in DaemonActivationScopeKey]: bool
 export const EMPTY_DAEMON_ACTIVATION_SCOPE: DaemonActivationGrantScope = Object.freeze({
   once: false,
   resident: false,
+  residentStanding: false,
   conductor: false,
   automerge: false,
   repair: false,
@@ -161,6 +185,16 @@ export interface DaemonActivationPermitResult {
   receiptPath?: string;
   capability?: DaemonActivationCapability;
   configSnapshot?: AshlrConfig;
+  /**
+   * Present only when authorized via a standing `residentStanding` grant
+   * rather than a one-shot permit. Standing grants are not single-use, so
+   * this scope is handed to the caller directly — there is no WeakMap
+   * capability to consume, and none of `isDaemonActivationCapability`'s
+   * one-shot semantics apply to it.
+   */
+  scope?: DaemonActivationGrantScope;
+  /** Present only when `scope` is, so callers can re-check liveness per use. */
+  grantId?: string;
 }
 
 export interface DaemonActivationReadiness {
@@ -173,6 +207,8 @@ export interface DaemonActivationReadiness {
   requestedShape: 'proposal-once' | 'resident';
   trustRootCount: number;
   residentAuthorized: boolean;
+  /** Whether a currently valid standing `residentStanding` grant exists, independent of any pending one-shot permit. */
+  residentStandingAuthorized: boolean;
   installAuthorized: boolean;
   repairAuthorized: boolean;
   reason: string;
@@ -420,6 +456,38 @@ function validFileBinding(value: unknown): value is DaemonActivationFileBinding 
 function validScope(value: unknown): value is DaemonActivationGrantScope {
   if (!isRecord(value) || !hasExactKeys(value, SCOPE_KEYS)) return false;
   return SCOPE_KEYS.every((key) => typeof value[key] === 'boolean');
+}
+
+/**
+ * Loading a STANDING GRANT record from disk needs a more forgiving check
+ * than minting a new one: `validScope` requires every currently-defined
+ * scope key to be present, but a standing grant can live for up to 30 days
+ * — long enough to span an `npm`/build upgrade that adds a new key to
+ * `DAEMON_ACTIVATION_SCOPE_KEYS` (exactly what `residentStanding` is). A
+ * strict exact-key check on LOAD would make `hasExactKeys` reject that one
+ * older-format record — and `loadGrantStore()` fails the WHOLE store, not
+ * just that record, on any single invalid one, which would silently deny
+ * every OTHER still-valid standing grant (conductor/install/etc.) too.
+ *
+ * This accepts any subset of the current scope keys (no unrecognized keys,
+ * every present key boolean) and leaves absent keys simply absent. Every
+ * read site treats `record.scope[key] !== true` / falsy the same way
+ * `undefined` would, so an old record's missing new-generation keys read as
+ * "not granted" — never widened, never silently trusted. Signature
+ * verification is unaffected: `grantSigningBytes` canonicalizes whatever
+ * `scope` object the record actually contains, i.e. exactly what was
+ * originally signed, not a backfilled/padded version — so an old record's
+ * signature still verifies against its original (smaller) scope shape.
+ */
+function validStoredScope(value: unknown): value is DaemonActivationGrantScope {
+  if (!isRecord(value)) return false;
+  for (const key of Object.keys(value)) {
+    if (!(SCOPE_KEYS as readonly string[]).includes(key)) return false;
+  }
+  for (const key of SCOPE_KEYS) {
+    if (key in value && typeof value[key] !== 'boolean') return false;
+  }
+  return true;
 }
 
 function validBindings(value: unknown): value is DaemonActivationPermitPayload['bindings'] {
@@ -1244,7 +1312,9 @@ function validGrantRecord(value: unknown): value is DaemonActivationGrantRecord 
   if (typeof value['grantId'] !== 'string' || !ID_RE.test(value['grantId'])) return false;
   if (typeof value['keyId'] !== 'string' || !KEY_ID_RE.test(value['keyId'])) return false;
   if (!validIsoTimestamp(value['issuedAt']) || !validIsoTimestamp(value['expiresAt'])) return false;
-  if (!validScope(value['scope'])) return false;
+  // validStoredScope (not validScope): a persisted STANDING grant may
+  // predate a newly-added scope key by up to 30 days — see its doc comment.
+  if (!validStoredScope(value['scope'])) return false;
   if (typeof value['signature'] !== 'string') return false;
   try {
     const sig = Buffer.from(value['signature'], 'base64');
@@ -1338,9 +1408,16 @@ function auditActivationEvent(action: string, summary: string, result: 'ok' | 'r
  * rebuilds within their expiry window. They ARE bound to kill-switch-off,
  * guard-health-healthy, and a non-revoked trust root, and always expire.
  */
-export function daemonActivationScopeGranted(
+/**
+ * Shared core of `daemonActivationScopeGranted`. Returns the matched grant
+ * RECORD (not just a boolean) so callers that need to act on it — currently
+ * only the resident-standing startup path — can read its scope and grantId
+ * without a second, redundant store read. Same checks, same order, as the
+ * pre-refactor inline body of `daemonActivationScopeGranted`.
+ */
+function findGrantedRecord(
   scopeKey: DaemonActivationScopeKey,
-): { granted: boolean; reason: string } {
+): { granted: true; record: DaemonActivationGrantRecord } | { granted: false; reason: string } {
   if (process.platform === 'win32') {
     return { granted: false, reason: 'activation-permit-v1-unsupported-on-windows' };
   }
@@ -1370,9 +1447,18 @@ export function daemonActivationScopeGranted(
       continue;
     }
     if (!verify(null, grantSigningBytes(grantSigningCore(record)), publicKey, signature)) continue;
-    return { granted: true, reason: `granted-by-${record.grantId}` };
+    return { granted: true, record };
   }
   return { granted: false, reason: 'no-matching-standing-grant' };
+}
+
+export function daemonActivationScopeGranted(
+  scopeKey: DaemonActivationScopeKey,
+): { granted: boolean; reason: string } {
+  const found = findGrantedRecord(scopeKey);
+  return found.granted
+    ? { granted: true, reason: `granted-by-${found.record.grantId}` }
+    : { granted: false, reason: found.reason };
 }
 
 /**
@@ -1683,6 +1769,7 @@ function activationReadiness(
   extra?: {
     requestedShape?: DaemonActivationReadiness['requestedShape'];
     residentAuthorized?: boolean;
+    residentStandingAuthorized?: boolean;
     installAuthorized?: boolean;
     repairAuthorized?: boolean;
   },
@@ -1697,6 +1784,7 @@ function activationReadiness(
     requestedShape: extra?.requestedShape ?? 'proposal-once',
     trustRootCount,
     residentAuthorized: extra?.residentAuthorized ?? false,
+    residentStandingAuthorized: extra?.residentStandingAuthorized ?? false,
     installAuthorized: extra?.installAuthorized ?? false,
     repairAuthorized: extra?.repairAuthorized ?? false,
     reason,
@@ -1812,10 +1900,15 @@ function inspectPinnedActivationPermit(
   trustRoots: readonly DaemonActivationTrustRoot[],
   suppliedContext: DaemonActivationRuntimeContext | undefined,
   requestedShape: 'once' | 'resident',
-  standingAuth: { install: boolean; repair: boolean },
+  standingAuth: { install: boolean; repair: boolean; residentStanding: boolean },
 ): DaemonActivationReadiness {
   const shapeLabel = requestedShapeLabel(requestedShape);
-  const extraBase = { requestedShape: shapeLabel, installAuthorized: standingAuth.install, repairAuthorized: standingAuth.repair };
+  const extraBase = {
+    requestedShape: shapeLabel,
+    installAuthorized: standingAuth.install,
+    repairAuthorized: standingAuth.repair,
+    residentStandingAuthorized: standingAuth.residentStanding,
+  };
   let envelope: unknown;
   try {
     envelope = JSON.parse(pinned.text) as unknown;
@@ -1882,13 +1975,19 @@ function inspectWithAuthority(
   const standingAuth = {
     install: daemonActivationScopeGranted('install').granted,
     repair: daemonActivationScopeGranted('repair').granted,
+    residentStanding: daemonActivationScopeGranted('residentStanding').granted,
+  };
+  const standingAuthorizedFields = {
+    installAuthorized: standingAuth.install,
+    repairAuthorized: standingAuth.repair,
+    residentStandingAuthorized: standingAuth.residentStanding,
   };
   if (!needsPermit(opts)) {
     return activationReadiness(
       'ready',
       'dry-run-once-does-not-require-activation-permit',
       trustRoots.length,
-      { installAuthorized: standingAuth.install, repairAuthorized: standingAuth.repair },
+      standingAuthorizedFields,
     );
   }
   const requestedShape = requestedActivationShape(opts);
@@ -1897,15 +1996,14 @@ function inspectWithAuthority(
       'blocked',
       'activation-permit-cannot-authorize-requested-start-shape',
       trustRoots.length,
-      { installAuthorized: standingAuth.install, repairAuthorized: standingAuth.repair },
+      standingAuthorizedFields,
     );
   }
   const shapeLabel = requestedShapeLabel(requestedShape);
   if (trustRoots.length === 0) {
     return activationReadiness('blocked', 'no-trusted-activation-roots', 0, {
       requestedShape: shapeLabel,
-      installAuthorized: standingAuth.install,
-      repairAuthorized: standingAuth.repair,
+      ...standingAuthorizedFields,
     });
   }
   if (platform === 'win32') {
@@ -1913,7 +2011,23 @@ function inspectWithAuthority(
       'blocked',
       'activation-permit-v1-unsupported-on-windows',
       trustRoots.length,
-      { requestedShape: shapeLabel, installAuthorized: standingAuth.install, repairAuthorized: standingAuth.repair },
+      { requestedShape: shapeLabel, ...standingAuthorizedFields },
+    );
+  }
+  // A valid standing `residentStanding` grant means `daemon start` (resident)
+  // would succeed RIGHT NOW without ever touching the one-shot permit file —
+  // report that directly instead of inspecting a possibly-stale/unreadable
+  // one-shot permit that resident no longer depends on. This is the fix for
+  // status previously showing `resident: degraded
+  // (activation-permit-inspection-failed)` when a stale one-shot permit file
+  // was lying around: that inspection is simply skipped once a standing grant
+  // covers it.
+  if (requestedShape === 'resident' && standingAuth.residentStanding) {
+    return activationReadiness(
+      'ready',
+      'ready-via-standing-resident-grant',
+      trustRoots.length,
+      { requestedShape: shapeLabel, residentAuthorized: true, ...standingAuthorizedFields },
     );
   }
 
@@ -2193,6 +2307,42 @@ export function consumeDaemonActivationPermit(
   cfg: AshlrConfig,
   opts: DaemonActivationOptions,
 ): DaemonActivationPermitResult {
+  // A resident start tries the standing `residentStanding` grant FIRST. This
+  // is what makes an unattended, launchd/systemd/Task-Scheduler-triggered
+  // restart after reboot possible: there is nobody present to mint a fresh
+  // one-shot permit, but a still-valid, still-signed, non-revoked standing
+  // grant needs no human in the loop. It goes through every check
+  // `daemonActivationScopeGranted` does (platform, kill switch, guard health,
+  // trust root, expiry, revocation, signature) — deliberately NOT the
+  // one-shot permit's build-identity binding, matching every other standing
+  // grant (conductor/install/automerge/repair/deploy), because a standing
+  // grant must keep working across routine rebuilds within its expiry
+  // window. If no standing grant matches, this falls through to the
+  // one-shot permit path unchanged — an operator who has only ever granted
+  // the one-shot form (or nothing) sees EXACTLY today's behavior.
+  if (requestedActivationShape(opts) === 'resident') {
+    const standing = findGrantedRecord('residentStanding');
+    if (standing.granted) {
+      const result: DaemonActivationPermitResult = {
+        authorized: true,
+        required: true,
+        reason: `resident-standing-activation-authorized:${standing.record.grantId}`,
+        scope: standing.record.scope,
+        grantId: standing.record.grantId,
+      };
+      auditActivationEvent(
+        'daemon-activation:consume',
+        `daemon activation consume authorized: ${result.reason}`,
+        'ok',
+      );
+      return result;
+    }
+    auditActivationEvent(
+      'daemon-activation:resident-standing-check',
+      `resident standing grant unavailable (${standing.reason}); falling back to one-shot permit`,
+      'refused',
+    );
+  }
   const result = consumeWithAuthority(
     cfg,
     opts,

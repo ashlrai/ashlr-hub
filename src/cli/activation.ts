@@ -17,10 +17,15 @@
  *       currently authorized, right now, and why.
  *   activation grant <scope...> [--ttl <duration>] [--yes] [--json]
  *       Mint a scoped, signed, expiring authorization. `once`/`resident`
- *       mint a single-use permit for `ashlr daemon start`; any of
- *       `conductor`/`automerge`/`repair`/`deploy`/`install`/`proposalOnly`
- *       mint a standing grant checked on every use until it expires or is
- *       revoked.
+ *       mint a single-use permit for `ashlr daemon start`, good for a fixed
+ *       2-minute window; any of `residentStanding`/`conductor`/`automerge`/
+ *       `repair`/`deploy`/`install`/`proposalOnly` mint a standing grant
+ *       checked on every use until it expires (30d cap) or is revoked.
+ *       `residentStanding` is what lets a resident daemon started by
+ *       launchd/systemd/Task Scheduler after a reboot authorize itself with
+ *       no operator present — grant it once, ahead of time, alongside
+ *       whichever of `automerge`/`repair`/`deploy` the resident loop should
+ *       also carry for its whole run.
  *   activation revoke --root <keyId> | --grant <grantId> [--yes] [--json]
  *       Immediately invalidate a trust root or a standing grant.
  *
