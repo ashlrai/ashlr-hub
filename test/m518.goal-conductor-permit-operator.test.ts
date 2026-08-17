@@ -10,6 +10,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { createHash, generateKeyPairSync } from 'node:crypto';
@@ -412,6 +413,85 @@ describe.skipIf(process.platform === 'win32')('M518 offline mint, inspection, an
       nowMs: NOW,
     })).toMatchObject({ ok: false, state: 'degraded' });
     expect(observed).toEqual([]);
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
+  it('accepts an owned group-writable HOME anchor above exact-private custody', () => {
+    const state = fixture();
+    const matching = keyFixture();
+    const { outputPath: requestPath, result } = buildRequest(state, matching.root);
+    chmodSync(state.home, 0o770);
+    writeGoalConductorOperatorArtifact(requestPath, result.value!);
+    const keyPath = join(state.keyDir, 'group-custody.pk8');
+    writeFileSync(keyPath, matching.privateDer, { mode: 0o600 });
+    chmodSync(keyPath, 0o600);
+    expect(mintGoalConductorPermitOffline({
+      requestPath,
+      privateKeyPath: keyPath,
+      outputPath: join(state.outputDir, 'permit.json'),
+      nowMs: NOW,
+    })).toMatchObject({ ok: true, state: 'ready' });
+  });
+
+  it('rejects world-writable and symlinked custody above an exact-private parent', () => {
+    const state = fixture();
+    const matching = keyFixture();
+    const { result } = buildRequest(state, matching.root);
+    const unsafeAncestor = join(state.home, 'unsafe-ancestor');
+    const unsafeParent = join(unsafeAncestor, 'transfer');
+    mkdirSync(unsafeAncestor, { mode: 0o700 });
+    mkdirSync(unsafeParent, { mode: 0o700 });
+    chmodSync(unsafeAncestor, 0o777);
+    chmodSync(unsafeParent, 0o700);
+    const unsafePath = join(unsafeParent, 'request.json');
+    expect(() => writeGoalConductorOperatorArtifact(unsafePath, result.value))
+      .toThrow('unsafe-custody-ancestor');
+    expect(existsSync(unsafePath)).toBe(false);
+
+    chmodSync(unsafeAncestor, 0o700);
+    const realAncestor = join(state.home, 'real-ancestor');
+    const realParent = join(realAncestor, 'transfer');
+    const linkedAncestor = join(state.home, 'linked-ancestor');
+    mkdirSync(realParent, { recursive: true, mode: 0o700 });
+    chmodSync(realAncestor, 0o700);
+    chmodSync(realParent, 0o700);
+    symlinkSync(realAncestor, linkedAncestor, 'dir');
+    const linkedPath = join(linkedAncestor, 'transfer', 'request.json');
+    expect(() => writeGoalConductorOperatorArtifact(linkedPath, result.value)).toThrow();
+    expect(existsSync(linkedPath)).toBe(false);
+  });
+
+  it('rejects a foreign-owned custody parent after descriptor open', () => {
+    const state = fixture();
+    const matching = keyFixture();
+    const { outputPath: requestPath, result } = buildRequest(state, matching.root);
+    writeGoalConductorOperatorArtifact(requestPath, result.value!);
+    const keyPath = join(state.keyDir, 'foreign-parent.pk8');
+    writeFileSync(keyPath, matching.privateDer, { mode: 0o600 });
+    chmodSync(keyPath, 0o600);
+    const actualUid = process.getuid!();
+    let restoreUid: (() => void) | undefined;
+    _setGoalConductorPermitOperatorTestControlForTest(
+      GOAL_CONDUCTOR_PERMIT_OPERATOR_TEST_CONTROL,
+      {
+        pinnedFileAfterOpen: ({ path }) => {
+          if (path !== keyPath) return;
+          const uidSpy = vi.spyOn(process, 'getuid').mockReturnValue(actualUid + 1);
+          restoreUid = () => uidSpy.mockRestore();
+        },
+      },
+    );
+    const outputPath = join(state.outputDir, 'permit.json');
+    try {
+      expect(mintGoalConductorPermitOffline({
+        requestPath,
+        privateKeyPath: keyPath,
+        outputPath,
+        nowMs: NOW,
+      })).toMatchObject({ ok: false, state: 'degraded' });
+    } finally {
+      restoreUid?.();
+    }
     expect(existsSync(outputPath)).toBe(false);
   });
 

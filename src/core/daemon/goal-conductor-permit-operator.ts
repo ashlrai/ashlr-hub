@@ -303,24 +303,62 @@ function externalExistingArtifactReason(
     : null;
 }
 
-function inspectCustodyAncestors(path: string): void {
+function processGroupIds(): Set<bigint> {
+  const groups = new Set<bigint>();
+  if (typeof process.getgid === 'function') groups.add(BigInt(process.getgid()));
+  if (typeof process.getgroups === 'function') {
+    for (const gid of process.getgroups()) groups.add(BigInt(gid));
+  }
+  return groups;
+}
+
+function custodyAnchorForPath(path: string): string {
+  const parent = dirname(path);
+  const home = canonicalHome();
+  return home && nestedWithin(home, parent) ? home : parent;
+}
+
+function inspectCustodyAncestors(path: string, expectedAnchor?: string): string {
   if (process.platform === 'win32') {
     throw new Error('goal-conductor-permit-operator-unsupported-on-windows');
   }
-  let cursor = dirname(path);
+  const immediateParent = dirname(path);
+  const anchor = expectedAnchor ?? custodyAnchorForPath(path);
+  if (!isAbsolute(anchor) || resolve(anchor) !== anchor || !nestedWithin(anchor, immediateParent)) {
+    throw new Error('unsafe-custody-anchor');
+  }
+  const currentUid = typeof process.getuid === 'function' ? BigInt(process.getuid()) : null;
+  const allowedGroups = processGroupIds();
+  let cursor = immediateParent;
   for (;;) {
     const stat = lstatSync(cursor, { bigint: true });
     if (!stat.isDirectory() || stat.isSymbolicLink() || stat.nlink < 1n) {
       throw new Error('unsafe-custody-ancestor');
     }
-    const ownerAllowed = typeof process.getuid !== 'function'
-      || stat.uid === BigInt(process.getuid())
-      || stat.uid === 0n;
-    if (!ownerAllowed || (stat.mode & 0o022n) !== 0n || realpathSync(cursor) !== cursor) {
+    const ownerAllowed = currentUid === null || stat.uid === currentUid || stat.uid === 0n;
+    const worldWritable = (stat.mode & 0o002n) !== 0n;
+    const groupWritable = (stat.mode & 0o020n) !== 0n;
+    const trustedGroupWrite = groupWritable && currentUid !== null
+      && stat.uid === currentUid && allowedGroups.has(stat.gid);
+    if (!ownerAllowed || worldWritable || (groupWritable && !trustedGroupWrite)
+      || realpathSync(cursor) !== cursor) {
       throw new Error('unsafe-custody-ancestor');
     }
+    if (cursor === immediateParent) {
+      if (!ownedByCurrent(stat) || (stat.mode & 0o777n) !== BigInt(PRIVATE_DIRECTORY_MODE)) {
+        throw new Error('unsafe-custody-parent');
+      }
+      const assurance = assurePrivateStoragePath(
+        immediateParent,
+        'directory',
+        'inspect-owned',
+        { anchorPath: anchor },
+      );
+      if (!assurance.ok) throw new Error('unsafe-custody-parent-acl');
+    }
+    if (cursor === anchor) return anchor;
     const parent = dirname(cursor);
-    if (parent === cursor) break;
+    if (parent === cursor) throw new Error('unsafe-custody-anchor');
     cursor = parent;
   }
 }
@@ -347,9 +385,9 @@ function readPinnedPrivateFile(path: string, maxBytes = MAX_OPERATOR_FILE_BYTES)
       }
       const control = testControl();
       control?.pinnedFileAfterOpen?.({ path });
-      inspectCustodyAncestors(path);
+      const custodyAnchor = inspectCustodyAncestors(path);
       const assuranceBefore = assurePrivateStoragePath(path, 'file', 'inspect-owned', {
-        anchorPath: resolve(sep),
+        anchorPath: custodyAnchor,
       });
       if (!assuranceBefore.ok) throw new Error('private-file-acl-unsafe');
       if (realpathSync(path) !== path) throw new Error('private-file-path-not-canonical');
@@ -386,9 +424,9 @@ function readPinnedPrivateFile(path: string, maxBytes = MAX_OPERATOR_FILE_BYTES)
       if (!sameSnapshot(openedBefore, openedAfter) || !sameSnapshot(openedAfter, namedAfter)) {
         throw new Error('private-file-changed-during-read');
       }
-      inspectCustodyAncestors(path);
+      inspectCustodyAncestors(path, custodyAnchor);
       const assuranceAfter = assurePrivateStoragePath(path, 'file', 'inspect-owned', {
-        anchorPath: resolve(sep),
+        anchorPath: custodyAnchor,
       });
       if (!assuranceAfter.ok) throw new Error('private-file-acl-unsafe');
       if (realpathSync(path) !== path) throw new Error('private-file-path-not-canonical');
@@ -822,8 +860,8 @@ export function writeGoalConductorOperatorArtifact(path: string, value: unknown)
   if (!artifactContext) throw new Error('operator-output-artifact-invalid');
   const pathReason = externalArtifactPathReason(path, artifactContext);
   if (pathReason) throw new Error(pathReason);
-  inspectCustodyAncestors(path);
-  writeExclusivePrivate(path, `${canonicalizeDaemonActivationValue(value)}\n`, resolve(sep));
+  const custodyAnchor = inspectCustodyAncestors(path);
+  writeExclusivePrivate(path, `${canonicalizeDaemonActivationValue(value)}\n`, custodyAnchor);
 }
 
 function contextFromEnvelope(
