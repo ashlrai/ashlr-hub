@@ -258,29 +258,19 @@ export async function runAuthorizedConductorOnce(
     summary.killSwitchTripped = true;
     return summary;
   }
-  const {
-    goalSnapshotDigest,
-    listGoalsDetailed,
-    loadGoal,
-  } = await import('./store.js');
+  const { goalSnapshotDigest, listGoalsDetailed, loadGoal } = await import('./store.js');
   const { nextActionableMilestone, advanceGoalCycle, progressOf } = await import('./advance.js');
-  const source = listGoalsDetailed({ status: 'active' });
-  if (source.sourceState === 'degraded' || !source.complete) {
-    return refuse('goal-conductor-goal-source-degraded');
+  const { resolveGoalConductorTarget } = await import('./conductor-target.js');
+  const resolution = resolveGoalConductorTarget(request.goalId, {
+    listGoalsDetailed,
+    listEnrolled,
+    nextActionableMilestone,
+    goalSnapshotDigest,
+  });
+  if (!resolution.ok || !resolution.target || !resolution.goal || !resolution.milestone) {
+    return refuse(resolution.reason);
   }
-  const goal = source.goals.find((entry) => entry.id === request.goalId);
-  if (!goal) return refuse('goal-conductor-target-not-active');
-  if (!goal.project) return refuse('goal-conductor-target-project-missing');
-  const enrolled = listEnrolled();
-  if (!enrolled.includes(goal.project)) return refuse('goal-conductor-target-project-not-enrolled');
-  const milestone = nextActionableMilestone(goal);
-  if (!milestone) return refuse('goal-conductor-target-has-no-actionable-milestone');
-  const target = {
-    goalId: goal.id,
-    milestoneId: milestone.id,
-    goalDigest: goalSnapshotDigest(goal),
-    projectPath: goal.project,
-  };
+  const { target, goal, milestone } = resolution;
 
   const activationModule = await import('../daemon/activation-permit.js');
   const activation = activationModule.consumeGoalConductorActivationPermit(cfg, target);

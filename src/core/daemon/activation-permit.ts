@@ -1408,7 +1408,7 @@ export interface GoalConductorActivationPermitResult {
 
 export interface GoalConductorActivationTestConsumerOptions {
   trustRoots: readonly DaemonActivationTrustRoot[];
-  context: GoalConductorActivationContext;
+  context?: GoalConductorActivationContext;
   afterReceiptPersisted?: () => void;
 }
 
@@ -1496,7 +1496,9 @@ function parseGoalConductorPayload(value: unknown): GoalConductorActivationPermi
   return value as unknown as GoalConductorActivationPermitPayload;
 }
 
-function parseGoalConductorEnvelope(value: unknown): GoalConductorActivationPermitEnvelope | null {
+export function parseGoalConductorActivationPermitEnvelope(
+  value: unknown,
+): GoalConductorActivationPermitEnvelope | null {
   if (!isRecord(value) || !hasExactKeys(value, ['payload', 'signature'])) return null;
   const payload = parseGoalConductorPayload(value['payload']);
   if (!payload || typeof value['signature'] !== 'string') return null;
@@ -1570,7 +1572,7 @@ export function verifyGoalConductorActivationPermit(
   roots: readonly DaemonActivationTrustRoot[],
 ): DaemonActivationPermitVerification {
   if (roots.length === 0) return { ok: false, reason: 'no-trusted-goal-conductor-activation-roots' };
-  const envelope = parseGoalConductorEnvelope(value);
+  const envelope = parseGoalConductorActivationPermitEnvelope(value);
   if (!envelope) return { ok: false, reason: 'invalid-goal-conductor-permit-schema' };
   if (!Number.isSafeInteger(context.nowMs) || context.nowMs < 0
     || !validGoalConductorTarget(context.target)
@@ -1617,7 +1619,10 @@ export function verifyGoalConductorActivationPermit(
 }
 
 export function goalConductorActivationPermitPath(): string {
-  return join(homedir(), '.ashlr', 'control', 'goal-conductor-activation-permit.json');
+  return join(
+    homedir(), '.ashlr', 'control', 'goal-conductor-permit-publication',
+    'records', 'goal-conductor-activation-permit.json',
+  );
 }
 
 export function goalConductorActivationReceiptPath(permitId: string): string {
@@ -1625,12 +1630,23 @@ export function goalConductorActivationReceiptPath(permitId: string): string {
   return join(homedir(), '.ashlr', 'control', 'activation-receipts', 'goal-conductor', `${permitId}.json`);
 }
 
-function goalConductorActivationNonceReceiptPath(nonceDigest: string): string {
+export function goalConductorActivationNonceReceiptPath(nonceDigest: string): string {
   if (!DIGEST_RE.test(nonceDigest)) throw new Error('invalid goal conductor nonce digest');
   return join(
     homedir(), '.ashlr', 'control', 'activation-receipts', 'goal-conductor',
     'by-nonce', `${nonceDigest}.json`,
   );
+}
+
+/** Collect the same read-only runtime binding used at permit consumption. */
+export function collectGoalConductorActivationContext(
+  cfg: AshlrConfig,
+  target: GoalConductorActivationTarget,
+): GoalConductorActivationContext {
+  if (!validGoalConductorTarget(target)) {
+    throw new Error('invalid goal conductor target');
+  }
+  return { ...collectRuntimeContext(strictConfigSnapshot(cfg)), target: { ...target } };
 }
 
 function mintGoalConductorCapability(
@@ -1695,7 +1711,7 @@ function consumeGoalConductorWithAuthority(
       result = { authorized: false, reason: 'noncanonical-goal-conductor-permit-encoding' };
       return result;
     }
-    const parsed = parseGoalConductorEnvelope(envelope);
+    const parsed = parseGoalConductorActivationPermitEnvelope(envelope);
     if (!parsed) {
       result = { authorized: false, reason: 'invalid-goal-conductor-permit-schema' };
       return result;
