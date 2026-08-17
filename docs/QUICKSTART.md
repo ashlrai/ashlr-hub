@@ -40,9 +40,17 @@ ashlr init
 ```
 
 `ashlr init` creates local configuration and reports readiness without creating
-a resident OS service. In the current release, `ashlr setup` refuses before
-reading or changing setup state because resident install/reinstall/repair/restart
-authority is withheld. Use `ashlr daemon start --once` for admitted work.
+a resident OS service. By default, `ashlr setup` refuses before reading or
+changing setup state because resident install/reinstall/repair/restart
+authority is withheld — this is still true out of the box. Use `ashlr daemon
+start --once` for admitted work without it.
+
+Resident authority is no longer permanently withheld, though: an operator can
+explicitly grant it via `ashlr activation init` + `ashlr activation grant`.
+That is a separate, deliberate setup step covered in
+[`docs/RUNTIME-FLEET-ACTIVATION.md`](RUNTIME-FLEET-ACTIVATION.md), not part of
+this quickstart — most users should stick to `daemon start --once` below
+until they specifically want an unattended, reboot-surviving fleet.
 
 Initialization reports these steps:
 

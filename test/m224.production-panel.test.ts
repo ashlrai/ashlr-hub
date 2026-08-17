@@ -18,6 +18,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { AshlrConfig, DashboardSnapshot, ProductionSummary } from '../src/core/types.js';
+import type { DashboardProductionSummary as DashboardProductionSummaryLike } from '../src/core/dashboard.js';
 
 // ---------------------------------------------------------------------------
 // Config fixture
@@ -134,6 +135,48 @@ function makeTrace(overrides: {
   };
 }
 
+/** A healthy readJudgeTracesDetailed()-shaped result wrapping the given traces. */
+function makeTraceRead(traces: ReturnType<typeof makeTrace>[]) {
+  return {
+    traces,
+    sourceState: 'healthy' as const, sourcePresent: true, complete: true, stopReasons: [] as string[],
+    filesRead: traces.length > 0 ? 1 : 0, bytesRead: 0, rowsScanned: traces.length, invalidRows: 0, unreadableFiles: 0,
+  };
+}
+
+/**
+ * A minimal valid 'judged' DecisionEntry — the shape recordDecision() writes
+ * for every judge call, including judgeProposal()'s parse/network fallbacks
+ * (see manager.ts judgeProposal() and automerge-pass.ts). judgeReasonCode is
+ * the field judgeFailures24h keys off of.
+ */
+function makeJudgedDecision(overrides: {
+  judgeReasonCode?: 'judge-parse-failure' | 'judge-network-failure' | 'judge-review' | 'judge-ship-would-merge';
+  action?: string;
+  ts?: string;
+}) {
+  return {
+    ts: overrides.ts ?? TWELVE_HOURS_AGO,
+    proposalId: `prop-test-${Math.random().toString(36).slice(2)}`,
+    action: overrides.action ?? 'judged',
+    engine: 'claude-sonnet-4-5',
+    model: 'claude-sonnet-4-5',
+    verdict: 'review',
+    judgeDecisionMetadataVersion: 2 as const,
+    judgeReasonCode: overrides.judgeReasonCode ?? 'judge-review',
+    judgeRationaleState: 'not-persisted' as const,
+  };
+}
+
+/** A healthy readDecisionsDetailed()-shaped result wrapping the given decisions. */
+function makeDecisionRead(decisions: ReturnType<typeof makeJudgedDecision>[]) {
+  return {
+    decisions,
+    sourceState: 'healthy' as const, sourcePresent: true, complete: true, stopReasons: [] as string[],
+    filesRead: decisions.length > 0 ? 1 : 0, bytesRead: 0, rowsScanned: decisions.length, invalidRows: 0, unreadableFiles: 0,
+  };
+}
+
 /** A minimal valid Goal + progress shape. */
 function makeGoal(id: string, objective: string) {
   return {
@@ -159,6 +202,15 @@ function makeProgress(done: number, total: number) {
     skipped: 0,
     blocked: 0,
     inProgress: 0,
+  };
+}
+
+/** A healthy listGoalsDetailed()-shaped result wrapping the given goals. */
+function makeGoalRead(goals: ReturnType<typeof makeGoal>[]) {
+  return {
+    goals,
+    sourceState: 'healthy' as const, sourcePresent: true, complete: true,
+    scannedFiles: goals.length, unreadableFiles: 0, limitExceeded: false,
   };
 }
 
@@ -196,11 +248,30 @@ vi.mock('../src/core/inbox/store.js', () => {
 // fleet/judge-trace: production only
 vi.mock('../src/core/fleet/judge-trace.js', () => ({
   readJudgeTraces: vi.fn(() => []),
+  readJudgeTracesDetailed: vi.fn(() => ({
+    traces: [] as unknown[],
+    sourceState: 'healthy', sourcePresent: true, complete: true, stopReasons: [],
+    filesRead: 0, bytesRead: 0, rowsScanned: 0, invalidRows: 0, unreadableFiles: 0,
+  })),
+}));
+
+// fleet/decisions-ledger: production only (judgeFailures24h)
+vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
+  readDecisionsDetailed: vi.fn(() => ({
+    decisions: [] as unknown[],
+    sourceState: 'healthy', sourcePresent: true, complete: true, stopReasons: [],
+    filesRead: 0, bytesRead: 0, rowsScanned: 0, invalidRows: 0, unreadableFiles: 0,
+  })),
 }));
 
 // goals sources: production only
 vi.mock('../src/core/goals/store.js', () => ({
   listGoals: vi.fn(() => []),
+  listGoalsDetailed: vi.fn(() => ({
+    goals: [] as unknown[],
+    sourceState: 'healthy', sourcePresent: true, complete: true,
+    scannedFiles: 0, unreadableFiles: 0, limitExceeded: false,
+  })),
 }));
 vi.mock('../src/core/goals/advance.js', () => ({
   progressOf: vi.fn(() => makeProgress(0, 0)),
@@ -230,8 +301,9 @@ beforeEach(async () => {
   const { loadDaemonState } = await import('../src/core/daemon/state.js');
   const { getFrontierUsageSync } = await import('../src/core/usage/frontier-usage.js');
   const { pendingCount, listProposals } = await import('../src/core/inbox/store.js');
-  const { readJudgeTraces } = await import('../src/core/fleet/judge-trace.js');
-  const { listGoals } = await import('../src/core/goals/store.js');
+  const { readJudgeTraces, readJudgeTracesDetailed } = await import('../src/core/fleet/judge-trace.js');
+  const { readDecisionsDetailed } = await import('../src/core/fleet/decisions-ledger.js');
+  const { listGoals, listGoalsDetailed } = await import('../src/core/goals/store.js');
   const { progressOf, nextActionableMilestone } = await import('../src/core/goals/advance.js');
 
   vi.mocked(loadIndex).mockReturnValue(FIXTURE_INDEX);
@@ -246,7 +318,10 @@ beforeEach(async () => {
   vi.mocked(pendingCount).mockReturnValue(0);
   vi.mocked(listProposals).mockReturnValue([]);
   vi.mocked(readJudgeTraces).mockReturnValue([]);
+  vi.mocked(readJudgeTracesDetailed).mockReturnValue(makeTraceRead([]));
+  vi.mocked(readDecisionsDetailed).mockReturnValue(makeDecisionRead([]));
   vi.mocked(listGoals).mockReturnValue([]);
+  vi.mocked(listGoalsDetailed).mockReturnValue(makeGoalRead([]));
   vi.mocked(progressOf).mockReturnValue(makeProgress(0, 0));
   vi.mocked(nextActionableMilestone).mockReturnValue(null);
 });
@@ -412,14 +487,14 @@ describe('M224 autoMergesToday', () => {
 
 describe('M224 judgeVerdicts24h', () => {
   it('counts verdicts within 24h by type', async () => {
-    const { readJudgeTraces } = await import('../src/core/fleet/judge-trace.js');
-    vi.mocked(readJudgeTraces).mockReturnValue([
+    const { readJudgeTracesDetailed } = await import('../src/core/fleet/judge-trace.js');
+    vi.mocked(readJudgeTracesDetailed).mockReturnValue(makeTraceRead([
       makeTrace({ verdict: 'ship',    ts: TWELVE_HOURS_AGO }),
       makeTrace({ verdict: 'ship',    ts: TWELVE_HOURS_AGO }),
       makeTrace({ verdict: 'review',  ts: TWELVE_HOURS_AGO }),
       makeTrace({ verdict: 'noise',   ts: TWELVE_HOURS_AGO }),
       makeTrace({ verdict: 'harmful', ts: TWELVE_HOURS_AGO }),
-    ] as ReturnType<typeof makeTrace>[]);
+    ] as ReturnType<typeof makeTrace>[]));
 
     const snap = await buildSnapshot(makeConfig());
     const j = snap.production!.judgeVerdicts24h;
@@ -440,13 +515,13 @@ describe('M224 judgeVerdicts24h', () => {
     expect(j.total).toBe(0);
   });
 
-  it('readJudgeTraces is called with sinceMs for 24h window', async () => {
-    const { readJudgeTraces } = await import('../src/core/fleet/judge-trace.js');
+  it('readJudgeTracesDetailed is called with sinceMs for 24h window', async () => {
+    const { readJudgeTracesDetailed } = await import('../src/core/fleet/judge-trace.js');
     await buildSnapshot(makeConfig());
-    expect(vi.mocked(readJudgeTraces)).toHaveBeenCalledWith(
+    expect(vi.mocked(readJudgeTracesDetailed)).toHaveBeenCalledWith(
       expect.objectContaining({ sinceMs: expect.any(Number) })
     );
-    const callArg = vi.mocked(readJudgeTraces).mock.calls
+    const callArg = vi.mocked(readJudgeTracesDetailed).mock.calls
       .map((call) => call[0])
       .find((arg) => arg && typeof arg.sinceMs === 'number')!;
     const windowMs = Date.now() - (callArg.sinceMs ?? 0);
@@ -457,17 +532,134 @@ describe('M224 judgeVerdicts24h', () => {
 });
 
 // ---------------------------------------------------------------------------
+// 4b. Judge failures 24h (parse/network — sourced from the decisions ledger,
+// since a failed judge call never writes a judge-trace row; see manager.ts
+// judgeProposal()'s fallback('network')/fallback('parse') paths).
+// ---------------------------------------------------------------------------
+
+describe('M224 judgeFailures24h', () => {
+  it('counts parse and network failures separately from the decisions ledger', async () => {
+    const { readDecisionsDetailed } = await import('../src/core/fleet/decisions-ledger.js');
+    vi.mocked(readDecisionsDetailed).mockReturnValue(makeDecisionRead([
+      makeJudgedDecision({ judgeReasonCode: 'judge-parse-failure' }),
+      makeJudgedDecision({ judgeReasonCode: 'judge-parse-failure' }),
+      makeJudgedDecision({ judgeReasonCode: 'judge-network-failure' }),
+      // A real verdict must NOT be counted as a failure.
+      makeJudgedDecision({ judgeReasonCode: 'judge-review' }),
+      makeJudgedDecision({ judgeReasonCode: 'judge-ship-would-merge' }),
+    ]));
+
+    const snap = await buildSnapshot(makeConfig());
+    const f = snap.production!.judgeFailures24h;
+    expect(f.parse).toBe(2);
+    expect(f.network).toBe(1);
+    expect(f.total).toBe(3);
+  });
+
+  it('ignores non-judged decision actions', async () => {
+    const { readDecisionsDetailed } = await import('../src/core/fleet/decisions-ledger.js');
+    vi.mocked(readDecisionsDetailed).mockReturnValue(makeDecisionRead([
+      { ...makeJudgedDecision({ judgeReasonCode: 'judge-parse-failure' }), action: 'proposed' },
+    ] as ReturnType<typeof makeJudgedDecision>[]));
+
+    const snap = await buildSnapshot(makeConfig());
+    expect(snap.production!.judgeFailures24h).toEqual({ parse: 0, network: 0, total: 0 });
+  });
+
+  it('judgeFailures24h is all-zeros when the ledger has no failures', async () => {
+    const snap = await buildSnapshot(makeConfig());
+    expect(snap.production!.judgeFailures24h).toEqual({ parse: 0, network: 0, total: 0 });
+  });
+
+  it('readDecisionsDetailed is called with sinceMs for 24h window', async () => {
+    const { readDecisionsDetailed } = await import('../src/core/fleet/decisions-ledger.js');
+    await buildSnapshot(makeConfig());
+    expect(vi.mocked(readDecisionsDetailed)).toHaveBeenCalledWith(
+      expect.objectContaining({ sinceMs: expect.any(Number) })
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4c. Source quality — a degraded/incomplete read must render as UNKNOWN,
+// never as a confirmed zero. This is the exact failure mode Task 1/2 close:
+// an infrastructure failure (can't read the store) must stay distinguishable
+// from a considered "nothing happened" result.
+// ---------------------------------------------------------------------------
+
+describe('M224 source quality — degraded reads yield unknown, not zero', () => {
+  it('a degraded judge-trace read withholds judgeVerdicts24h and marks judgeTraceSourceQuality degraded', async () => {
+    const { readJudgeTracesDetailed } = await import('../src/core/fleet/judge-trace.js');
+    // Simulate a corrupt trace file: some rows scanned, some invalid, read stopped early.
+    vi.mocked(readJudgeTracesDetailed).mockReturnValue({
+      traces: [makeTrace({ verdict: 'ship' })] as unknown[],
+      sourceState: 'degraded', sourcePresent: true, complete: false,
+      stopReasons: ['io-error'], filesRead: 1, bytesRead: 512, rowsScanned: 4, invalidRows: 3, unreadableFiles: 0,
+    });
+
+    const production = (await buildSnapshot(makeConfig())).production as DashboardProductionSummaryLike;
+
+    // The counter must stay at its zeroed default — NOT the 1 ship verdict the
+    // (incomplete/untrustworthy) read happened to return.
+    expect(production.judgeVerdicts24h).toEqual({ ship: 0, review: 0, noise: 0, harmful: 0, total: 0 });
+    expect(production.judgeTraceSourceQuality.sourceState).toBe('degraded');
+    expect(production.judgeTraceSourceQuality.complete).toBe(false);
+  });
+
+  it('a degraded decisions-ledger read withholds judgeFailures24h and marks judgeFailureSourceQuality degraded', async () => {
+    const { readDecisionsDetailed } = await import('../src/core/fleet/decisions-ledger.js');
+    vi.mocked(readDecisionsDetailed).mockReturnValue({
+      decisions: [makeJudgedDecision({ judgeReasonCode: 'judge-parse-failure' })] as unknown[],
+      sourceState: 'degraded', sourcePresent: true, complete: false,
+      stopReasons: ['byte-limit'], filesRead: 1, bytesRead: 1024, rowsScanned: 2, invalidRows: 1, unreadableFiles: 0,
+    });
+
+    const production = (await buildSnapshot(makeConfig())).production as DashboardProductionSummaryLike;
+
+    expect(production.judgeFailures24h).toEqual({ parse: 0, network: 0, total: 0 });
+    expect(production.judgeFailureSourceQuality.sourceState).toBe('degraded');
+    expect(production.judgeFailureSourceQuality.complete).toBe(false);
+  });
+
+  it('a degraded goals read withholds activeGoals and marks activeGoalsSourceQuality degraded', async () => {
+    const { listGoalsDetailed } = await import('../src/core/goals/store.js');
+    vi.mocked(listGoalsDetailed).mockReturnValue({
+      goals: [makeGoal('goal-a', 'Should not surface')] as unknown[],
+      sourceState: 'degraded', sourcePresent: true, complete: false,
+      scannedFiles: 1, unreadableFiles: 1, limitExceeded: false,
+    });
+
+    const production = (await buildSnapshot(makeConfig())).production as DashboardProductionSummaryLike;
+
+    expect(production.activeGoals).toEqual([]);
+    expect(production.activeGoalsSourceQuality.sourceState).toBe('degraded');
+    expect(production.activeGoalsSourceQuality.complete).toBe(false);
+  });
+
+  it('a healthy empty read is distinguishable from a degraded read via sourceState (healthy vs degraded), not just a shared zero count', async () => {
+    // Default beforeEach mocks are healthy+empty for every source.
+    const production = (await buildSnapshot(makeConfig())).production as DashboardProductionSummaryLike;
+    expect(production.judgeVerdicts24h.total).toBe(0);
+    expect(production.judgeTraceSourceQuality.sourceState).toBe('healthy');
+    expect(production.judgeFailures24h.total).toBe(0);
+    expect(production.judgeFailureSourceQuality.sourceState).toBe('healthy');
+    expect(production.activeGoals).toEqual([]);
+    expect(production.activeGoalsSourceQuality.sourceState).toBe('healthy');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 5. Active goals + milestone counts
 // ---------------------------------------------------------------------------
 
 describe('M224 activeGoals', () => {
   it('surfaces active goals with milestone progress', async () => {
-    const { listGoals } = await import('../src/core/goals/store.js');
+    const { listGoalsDetailed } = await import('../src/core/goals/store.js');
     const { progressOf } = await import('../src/core/goals/advance.js');
 
     const goal1 = makeGoal('goal-a', 'Build M224 production panel');
     const goal2 = makeGoal('goal-b', 'Add fleet autonomy');
-    vi.mocked(listGoals).mockReturnValue([goal1, goal2] as ReturnType<typeof makeGoal>[]);
+    vi.mocked(listGoalsDetailed).mockReturnValue(makeGoalRead([goal1, goal2] as ReturnType<typeof makeGoal>[]));
     vi.mocked(progressOf).mockImplementation((g: typeof goal1) => {
       if (g.id === 'goal-a') return makeProgress(2, 5);
       return makeProgress(0, 3);
@@ -495,11 +687,11 @@ describe('M224 activeGoals', () => {
   });
 
   it('activeGoals is capped at 6', async () => {
-    const { listGoals } = await import('../src/core/goals/store.js');
+    const { listGoalsDetailed } = await import('../src/core/goals/store.js');
     const { progressOf } = await import('../src/core/goals/advance.js');
-    vi.mocked(listGoals).mockReturnValue(
+    vi.mocked(listGoalsDetailed).mockReturnValue(makeGoalRead(
       Array.from({ length: 10 }, (_, i) => makeGoal(`goal-${i}`, `Goal ${i}`)) as ReturnType<typeof makeGoal>[]
-    );
+    ));
     vi.mocked(progressOf).mockReturnValue(makeProgress(0, 2));
 
     const snap = await buildSnapshot(makeConfig());
@@ -598,36 +790,45 @@ describe('M224 graceful degradation', () => {
     expect(typeof snap.generatedAt).toBe('string');
   });
 
-  it('snapshot still resolves when readJudgeTraces throws', async () => {
-    const { readJudgeTraces } = await import('../src/core/fleet/judge-trace.js');
-    vi.mocked(readJudgeTraces).mockImplementation(() => { throw new Error('trace read error'); });
+  it('snapshot still resolves when readJudgeTracesDetailed throws', async () => {
+    const { readJudgeTracesDetailed } = await import('../src/core/fleet/judge-trace.js');
+    vi.mocked(readJudgeTracesDetailed).mockImplementation(() => { throw new Error('trace read error'); });
     const snap = await buildSnapshot(makeConfig());
     expect(snap).toBeDefined();
   });
 
-  it('snapshot still resolves when listGoals throws', async () => {
-    const { listGoals } = await import('../src/core/goals/store.js');
-    vi.mocked(listGoals).mockImplementation(() => { throw new Error('goals error'); });
+  it('snapshot still resolves when listGoalsDetailed throws', async () => {
+    const { listGoalsDetailed } = await import('../src/core/goals/store.js');
+    vi.mocked(listGoalsDetailed).mockImplementation(() => { throw new Error('goals error'); });
+    const snap = await buildSnapshot(makeConfig());
+    expect(snap).toBeDefined();
+  });
+
+  it('snapshot still resolves when readDecisionsDetailed throws', async () => {
+    const { readDecisionsDetailed } = await import('../src/core/fleet/decisions-ledger.js');
+    vi.mocked(readDecisionsDetailed).mockImplementation(() => { throw new Error('decisions error'); });
     const snap = await buildSnapshot(makeConfig());
     expect(snap).toBeDefined();
   });
 
   it('snapshot still resolves when all production sources throw', async () => {
     const { listProposals } = await import('../src/core/inbox/store.js');
-    const { readJudgeTraces } = await import('../src/core/fleet/judge-trace.js');
-    const { listGoals } = await import('../src/core/goals/store.js');
+    const { readJudgeTracesDetailed } = await import('../src/core/fleet/judge-trace.js');
+    const { readDecisionsDetailed } = await import('../src/core/fleet/decisions-ledger.js');
+    const { listGoalsDetailed } = await import('../src/core/goals/store.js');
     vi.mocked(listProposals).mockImplementation(() => { throw new Error('fail'); });
-    vi.mocked(readJudgeTraces).mockImplementation(() => { throw new Error('fail'); });
-    vi.mocked(listGoals).mockImplementation(() => { throw new Error('fail'); });
+    vi.mocked(readJudgeTracesDetailed).mockImplementation(() => { throw new Error('fail'); });
+    vi.mocked(readDecisionsDetailed).mockImplementation(() => { throw new Error('fail'); });
+    vi.mocked(listGoalsDetailed).mockImplementation(() => { throw new Error('fail'); });
     await expect(buildSnapshot(makeConfig())).resolves.toBeDefined();
   });
 
   it('production field is present even when sub-sources fail (outer wrapper resolves)', async () => {
     // Even if individual sub-sources throw, buildProduction degrades to zeros.
     const { listProposals } = await import('../src/core/inbox/store.js');
-    const { readJudgeTraces } = await import('../src/core/fleet/judge-trace.js');
+    const { readJudgeTracesDetailed } = await import('../src/core/fleet/judge-trace.js');
     vi.mocked(listProposals).mockImplementation(() => { throw new Error('fail'); });
-    vi.mocked(readJudgeTraces).mockImplementation(() => { throw new Error('fail'); });
+    vi.mocked(readJudgeTracesDetailed).mockImplementation(() => { throw new Error('fail'); });
     const snap = await buildSnapshot(makeConfig());
     // production may or may not be present depending on whether buildProduction itself throws,
     // but base snapshot fields must always be intact.
@@ -675,12 +876,14 @@ describe('M224 backward compatibility', () => {
       generatedAt: new Date().toISOString(),
       proposals24h: { pending: 0, applied: 0, rejected: 0, total: 0 },
       judgeVerdicts24h: { ship: 0, review: 0, noise: 0, harmful: 0, total: 0 },
+      judgeFailures24h: { parse: 0, network: 0, total: 0 },
       autoMergesToday: { count: 0, titles: [] },
       activeGoals: [],
       shipsPerDayTrend: [],
     };
     expect(prod.proposals24h.total).toBe(0);
     expect(prod.judgeVerdicts24h.total).toBe(0);
+    expect(prod.judgeFailures24h.total).toBe(0);
     expect(prod.autoMergesToday.count).toBe(0);
     expect(prod.activeGoals).toHaveLength(0);
     expect(prod.shipsPerDayTrend).toHaveLength(0);

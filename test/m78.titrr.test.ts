@@ -1098,7 +1098,7 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
     });
 
     const runGoal = await loadRunGoal();
-    await runGoal('fix a bug', sandboxCfg(), {
+    const state = await runGoal('fix a bug', sandboxCfg(), {
       engine: 'local-coder',
       sandboxEngine: true,
       budget: { maxTokens: 10, maxSteps: 100 },
@@ -1108,12 +1108,11 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
 
     expect(engineMockFn).toHaveBeenCalledTimes(1);
     expect(runVCMockFn).toHaveBeenCalledTimes(1);
-    expect(captureMockFn).toHaveBeenCalledTimes(1);
-    expect(captureMockFn.mock.calls[0]?.[3]).toMatchObject({
-      isPartial: true,
-      forceGateBlockReason: 'tests: still failing - budget exceeded after attempt 1',
-      usage: exhausted.usage,
-    });
+    // M-partial-fix: budget-ceiling exhaustion with tests still failing drops
+    // the run instead of filing an unverified partial proposal.
+    expect(captureMockFn).not.toHaveBeenCalled();
+    expect(state.result).toMatch(/TITRR.*still failing - budget exceeded after attempt 1.*dropped, no proposal filed/);
+    expect(state.proposalId).toBeUndefined();
     expect(removeSandboxMockFn).toHaveBeenCalledTimes(1);
   });
 
@@ -1662,32 +1661,12 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
     } as Parameters<typeof runGoal>[2] & { titrrMaxAttempts: number });
 
     expect(state.result).toMatch(/TITRR.*(budget exceeded|still failing)/);
+    expect(state.result).toMatch(/dropped, no proposal filed/);
     expect(engineMockFn.mock.calls.length).toBeLessThanOrEqual(3);
-    expect(captureMockFn).toHaveBeenCalledTimes(1);
-    const captureOpts = captureMockFn.mock.calls[0]?.[3] as Record<string, unknown>;
-    expect(captureOpts?.['existingWorktree']).toMatchObject({ id: 'mock-sb' });
-    expect(captureOpts?.['isPartial']).toBe(true);
-    expect(captureOpts?.['forceGateBlockReason']).toMatch(/budget exceeded after attempt 1/);
-    expect(captureOpts?.['sourceLabel']).toBe('TITRR');
-    expect(captureOpts?.['usage']).toMatchObject(usage);
-    expect(captureOpts?.['producerStatus']).toBe('done');
-    expect(captureOpts?.['actionCounts']).toMatchObject({
-      proposalCaptureAttempts: 0,
-      proposalDisabled: 1,
-      diffFiles: 7,
-      diffLines: 14,
-    });
-    expect(state.proposalOutcome?.kind).toBe('empty-diff');
-    expect(state.runEventSummary).toMatchObject({
-      outcome: 'empty-diff',
-      diffFiles: 0,
-      diffLines: 0,
-    });
-    expect(state.runEventSummary?.actionCounts).toMatchObject({
-      proposalCaptureAttempts: 1,
-      proposalDisabled: 0,
-      diffFiles: 0,
-      diffLines: 0,
-    });
+    // M-partial-fix: TITRR budget exhaustion drops the run instead of filing
+    // an unverified partial proposal — capture is never invoked, and the
+    // final state carries no inbox proposalId.
+    expect(captureMockFn).not.toHaveBeenCalled();
+    expect(state.proposalId).toBeUndefined();
   });
 });

@@ -9,24 +9,34 @@
   border-radius: var(--radius-md);
   border: 1px solid var(--border-subtle);
 }
-.item:focus-visible {
-  border-color: var(--border-focus);
-}
 
 .itemHeader {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: var(--space-2);
   margin-bottom: var(--space-2);
+  color: inherit;
+  text-decoration: none;
+}
+.itemHeader:hover .goal {
+  color: var(--accent-600);
+}
+.itemHeader > :not(.goal) {
+  flex-shrink: 0;
 }
 
+/* Two-line clamp — matches Runs, Inbox, SwarmsView, and this panel's own
+   RunsPanel sibling; full text stays reachable via the link's title
+   attribute and the swarm detail view. */
 .goal {
   flex: 1;
+  min-width: 0;
   font-size: var(--text-sm-size);
   font-weight: var(--font-weight-medium);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .burndown {

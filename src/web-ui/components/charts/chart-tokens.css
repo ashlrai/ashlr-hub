@@ -6,37 +6,51 @@
  * never drift out of sync with the rest of the app.
  *
  * Categorical order (identity — fixed, never cycled, never reassigned by
- * rank; see dataviz skill's color-formula.md) was chosen by running the
- * skill's `validate_palette.js` six-checks validator against every ordering
- * of the app's existing categorical-ish hues: `--phase-1..6` (already
- * documented in DESIGN.md as "categorical, distinct from status colors")
- * plus `--status-success-solid` / `--status-danger-solid`. `--phase-6`
- * (slate/gray, chroma ~0.04) was dropped from the identity rotation — it
- * already reads as gray in this design system, which is exactly the right
- * color for the "Other"/overflow bucket, not a 7th identity.
+ * rank; see dataviz skill's color-formula.md) was chosen by exhaustively
+ * running the skill's `validate_palette.js` six-checks validator against
+ * ALL 5,040 permutations of the app's existing categorical-ish hues:
+ * `--phase-1..6` (already documented in DESIGN.md as "categorical, distinct
+ * from status colors") plus `--status-success-solid` / `--status-danger-
+ * solid`. `--phase-6` (slate/gray, chroma ~0.04) was dropped from the
+ * identity rotation — it already reads as gray in this design system, which
+ * is exactly the right color for the "Other"/overflow bucket, not a 7th
+ * identity.
  *
- * Result of the search (scripts/find_palette_order in scratch, not
- * committed): order [violet, green, pink, teal, red, blue, orange] clears
- * the normal-vision floor comfortably (worst adjacent ΔE 32.2 light / 31.2
- * dark, target 15) in both modes. It does NOT clear the CVD (protan/deutan)
- * adjacent floor (worst ΔE 3.7 light / 5.0 dark, target 6-8) — these are the
- * product's actual existing tokens, tuned for UI legibility rather than a
- * CVD-optimized chart ramp, and no reordering of them can fix a per-hue
- * chroma/CVD property. Per the skill's own rule, a sub-floor CVD result is
- * legal ONLY with mandatory secondary encoding — every chart built on these
- * tokens (Legend.tsx, BarChart/LineChart) always ships direct/legend labels
- * and a table-view twin, never color alone, specifically because of this
- * gap. If a dedicated CVD-safe chart ramp is ever added to tokens.css, swap
- * the aliases below — nothing else in components/charts/ hardcodes a hue.
+ * A prior pass shipped order [violet, green, pink, teal, red, blue, orange]:
+ * it cleared the normal-vision floor (ΔE 32.2 light / 31.2 dark, target 15)
+ * but NOT the CVD (protan/deutan) adjacent floor (worst ΔE 3.7 light / 5.0
+ * dark, target 6-8 floor / 8.0 target) — the worst adjacent pair in that
+ * order was teal↔pink, a near-metamer under deutan simulation. The exhaustive
+ * permutation search (same 7 hexes, no new colors) found
+ * [green, violet, teal, red, blue, orange, pink] moves teal and pink apart
+ * and clears the CVD floor outright: worst adjacent ΔE 13.8 light / 14.5
+ * dark — comfortably past the 8.0 target, not just the 6-8 floor — while
+ * keeping the normal-vision floor just as strong (20.8 light / 18.7 dark).
+ * So: this WAS a fixable-by-reordering problem, not a fundamental one — the
+ * tokens are fine, the original assignment just put two CVD-adjacent hues
+ * next to each other. (Search script + full report kept in scratch, not
+ * committed — reproducible by permuting the same 7 hex values through
+ * validate_palette.js.)
+ *
+ * Mandatory secondary encoding (direct/legend labels + table-view twin,
+ * never color alone) stays in place regardless — that's a categorical-chart
+ * rule independent of how well any one ordering scores, not a CVD-floor
+ * workaround. One separate, pre-existing, order-independent finding from the
+ * same validator run: 5 of these 7 hues sit outside the dark-mode OKLCH
+ * lightness band (0.48-0.67) — a property of the individual dark-mode token
+ * values (tuned for on-dark UI legibility, not chart-ramp lightness), not
+ * something any reordering can change. Flagging it here since it surfaced
+ * during this audit; out of scope for the CVD-floor fix and not a new
+ * regression — every ordering of these 7 dark hexes has it.
  */
 :root {
-  --chart-series-1: var(--phase-2); /* violet */
-  --chart-series-2: var(--status-success-solid); /* green */
-  --chart-series-3: var(--phase-3); /* pink */
-  --chart-series-4: var(--phase-5); /* teal */
-  --chart-series-5: var(--status-danger-solid); /* red */
-  --chart-series-6: var(--phase-1); /* blue */
-  --chart-series-7: var(--phase-4); /* orange */
+  --chart-series-1: var(--status-success-solid); /* green */
+  --chart-series-2: var(--phase-2); /* violet */
+  --chart-series-3: var(--phase-5); /* teal */
+  --chart-series-4: var(--status-danger-solid); /* red */
+  --chart-series-5: var(--phase-1); /* blue */
+  --chart-series-6: var(--phase-4); /* orange */
+  --chart-series-7: var(--phase-3); /* pink */
 
   /* Overflow "Other" bucket — never part of the identity rotation above. */
   --chart-neutral: var(--status-neutral-solid);

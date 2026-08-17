@@ -3,7 +3,9 @@
  * Every function returns a `var(--chart-*)` reference into chart-tokens.css
  * (never a literal hex) so theming is automatic and colors can never drift
  * out of sync between light and dark. See chart-tokens.css's header comment
- * for the palette-selection rationale and its known CVD-floor deviation.
+ * for the palette-selection rationale — an exhaustive permutation search
+ * clears the CVD adjacent floor (worst ΔE 13.8 light / 14.5 dark, target
+ * 8.0) without changing which hues are used, only their series order.
  */
 
 const SERIES_SLOTS = 7;

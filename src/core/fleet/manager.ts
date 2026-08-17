@@ -1214,11 +1214,6 @@ export function resolveFrontierJudgeClient(
     return (reviewerFamily === 'claude' || reviewerFamily === 'openai') &&
       evaluateReviewerIndependence(opts.producerModel, resolved.model).independent;
   };
-  const configuredEngine = (cfg.foundry as Record<string, unknown> | undefined)?.['managerJudgeEngine'];
-  if (configuredEngine !== undefined && configuredEngine !== 'auto') {
-    const configured = resolve(cfg);
-    return eligible(configured) ? configured : null;
-  }
 
   const withEngine = (engine: 'claude' | 'codex'): AshlrConfig => ({
     ...cfg,
@@ -1228,6 +1223,23 @@ export function resolveFrontierJudgeClient(
     } as AshlrConfig['foundry'],
   });
   const producerFamily = producerModelFamily(opts.producerModel);
+  // `cfg` always goes first — this is where an explicit cfg.foundry.managerJudgeEngine
+  // (or 'auto') is actually honoured, via resolveJudgeClient reading it internally.
+  // The opposite-family candidate(s) are the fallback when that first try isn't
+  // independent of the producer.
+  //
+  // Previously an EXPLICIT managerJudgeEngine short-circuited straight to null
+  // when it wasn't independent, instead of falling through to this same search.
+  // That silently and PERMANENTLY starved independence-required judging for an
+  // entire producer family whenever the operator's configured judge engine
+  // matched it (e.g. managerJudgeEngine='codex' can never judge codex-produced
+  // proposals) — those proposals never receive a 'judged' ledger entry, so
+  // Gate 4b criterion 1 / Gate 7 (src/core/inbox/merge.ts) could never find
+  // one and the proposal sat pending forever. Falling through here does NOT
+  // weaken the independence bar (`eligible` above is unchanged, still
+  // required) — it only widens which engine may be tried to satisfy it when
+  // the operator's specific pick cannot, exactly mirroring what 'auto' already
+  // did.
   const candidates = producerFamily === 'claude'
     ? [cfg, withEngine('codex')]
     : producerFamily === 'openai'

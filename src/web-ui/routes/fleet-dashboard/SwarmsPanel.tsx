@@ -22,12 +22,17 @@ export function SwarmsPanel({ swarms }: { swarms: DashboardSnapshot['swarms'] })
             {swarms.map((swarm, i) => {
               const pct = swarm.tasksTotal > 0 ? Math.round((swarm.tasksDone / swarm.tasksTotal) * 100) : 0;
               return (
-                <li key={swarm.id} className={styles.item} data-focus-key={`swarm-${swarm.id}`} tabIndex={0}>
-                  <div className={styles.itemHeader}>
+                <li key={swarm.id} className={styles.item}>
+                  <a
+                    href={`#/work/swarms/${swarm.id}`}
+                    data-focus-key={`swarm-${swarm.id}`}
+                    className={styles.itemHeader}
+                    title={swarm.goal}
+                  >
                     {swarm.phase ? <PhaseDot index={i} /> : null}
                     <span className={styles.goal}>{swarm.goal}</span>
                     <StatusBadge status={swarm.status} />
-                  </div>
+                  </a>
                   <div className={styles.burndown}>
                     <div className={styles.burndownTrack}>
                       <div className={styles.burndownFill} style={{ width: `${pct}%` }} />

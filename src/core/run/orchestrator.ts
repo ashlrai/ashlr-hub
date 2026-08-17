@@ -2019,10 +2019,15 @@ const KNOWN_ENGINE_IDS: ReadonlySet<string> = new Set(['builtin', 'ashlrcode', '
 // ---------------------------------------------------------------------------
 
 /**
- * Default maximum TITRR loop attempts (conservative: 1 initial + 1 repair).
+ * Default maximum TITRR loop attempts (1 initial + repairs).
+ * M-partial-fix: raised from 2 (1 initial + 1 repair) to 4. Live evidence
+ * (attempt-62a5d8ea-e029-47aa-8f09-ad29c1f03f31, 2026-08-17) showed a run
+ * exhausting titrrMax=2 after only 196s / 2 model steps against a budget of
+ * 100 steps / 3.33M tokens / 2h wall-clock — the attempt cap, not time or
+ * token budget, was what cut the loop off before it could actually converge.
  * Callers may override via opts.titrrMaxAttempts.
  */
-export const TITRR_MAX_ATTEMPTS = 2;
+export const TITRR_MAX_ATTEMPTS = 4;
 
 /** Hard wall-clock per test run inside the TITRR loop (60 s). */
 const TITRR_TEST_TIMEOUT_MS = 60_000;
@@ -2662,72 +2667,34 @@ async function runGoalInternal(
                   break;
                 }
 
+                // Tests failed. Drop rather than file an unverified diff — a proposal
+                // that fails TITRR verification can never clear the merge gate and
+                // only clogs the inbox (M507 / M-partial-fix, 2026-08-17). The run
+                // record still notes the TITRR outcome via state.result; no inbox
+                // proposal is created.
                 if (isLastAttempt) {
-                  const propR = await captureApiProposal(lastApiR.state, {
-                    sourceRepo: cwd,
-                    model: modelEnv,
-                    budget: opts.budget,
-                    runId: lastApiR.state.id,
-                    existingWorktree: titrrSandbox,
-                    workItemId: opts.workItemId,
-                    workItemGenerationId: opts.workItemGenerationId,
-                    workSource: opts.workSource,
-                    delegationScope,
-                    ...(opts.signal ? { signal: opts.signal } : {}),
-                    isPartial: true,
-                    forceGateBlockReason: `tests: still failing after ${titrrAttempt} attempt(s)`,
-                    sourceLabel: 'TITRR api-model',
-                    usage: lastApiR.state.usage,
-                    durationMs: runDurationMs(lastApiR.state),
-                    producerStatus: lastApiR.state.status,
-                    actionCounts: actionCountsForProposalCapture(lastApiR.state),
-                    contextSummary: lastApiR.state.runEventSummary?.contextSummary,
-                  });
+                  const annotation = `tests: still failing after ${titrrAttempt} attempt(s) - dropped, no proposal filed`;
                   lastApiR = {
                     ...lastApiR,
-                    proposalId: propR.proposalId,
-                    proposalOutcome: propR.proposalOutcome,
-                    state: withCapturedProposalMetadata(
-                      lastApiR.state,
-                      propR.proposalOutcome
-                        ? { ...propR.state, proposalOutcome: propR.proposalOutcome }
-                        : propR.state,
-                    ),
+                    state: {
+                      ...lastApiR.state,
+                      result: lastApiR.state.result
+                        ? `[TITRR: ${annotation}]\n${lastApiR.state.result}`
+                        : `[TITRR: ${annotation}]`,
+                    },
                   };
                   break;
                 }
                 if (overBudget(titrrUsage, titrrBudget)) {
-                  const forceGateBlockReason = `tests: still failing - budget exceeded after attempt ${titrrAttempt}`;
-                  const propR = await captureApiProposal(lastApiR.state, {
-                    sourceRepo: cwd,
-                    model: modelEnv,
-                    budget: opts.budget,
-                    runId: lastApiR.state.id,
-                    existingWorktree: titrrSandbox,
-                    workItemId: opts.workItemId,
-                    workItemGenerationId: opts.workItemGenerationId,
-                    workSource: opts.workSource,
-                    delegationScope,
-                    ...(opts.signal ? { signal: opts.signal } : {}),
-                    isPartial: true,
-                    forceGateBlockReason,
-                    sourceLabel: 'TITRR api-model',
-                    usage: lastApiR.state.usage,
-                    durationMs: runDurationMs(lastApiR.state),
-                    producerStatus: lastApiR.state.status,
-                    actionCounts: actionCountsForProposalCapture(lastApiR.state),
-                    contextSummary: lastApiR.state.runEventSummary?.contextSummary,
-                  });
+                  const annotation = `tests: still failing - budget exceeded after attempt ${titrrAttempt} - dropped, no proposal filed`;
                   lastApiR = {
                     ...lastApiR,
-                    proposalId: propR.proposalId,
-                    proposalOutcome: propR.proposalOutcome,
-                    state: withCapturedProposalMetadata(
-                      lastApiR.state,
-                      propR.proposalOutcome
-                        ? { ...propR.state, proposalOutcome: propR.proposalOutcome }
-                        : propR.state,
-                    ),
+                    state: {
+                      ...lastApiR.state,
+                      result: lastApiR.state.result
+                        ? `[TITRR: ${annotation}]\n${lastApiR.state.result}`
+                        : `[TITRR: ${annotation}]`,
+                    },
                   };
                   break;
                 }
@@ -3058,17 +3025,19 @@ async function runGoalInternal(
                 break;
               }
 
-              // Tests failed. If this was the last attempt, annotate and exit.
+              // Tests failed. If this was the last attempt, drop the run rather than
+              // filing an unverified diff — a proposal that fails TITRR verification
+              // can never clear the merge gate and only clogs the inbox (M507 /
+              // M-partial-fix, 2026-08-17). The run record still captures the TITRR
+              // outcome via titrrAnnotation below; no inbox proposal is created.
               if (isLastAttempt) {
-                titrrAnnotation = `tests: still failing after ${titrrAttempt} attempt(s)`;
-                await captureTitrrProposal({ isPartial: true, forceGateBlockReason: titrrAnnotation });
+                titrrAnnotation = `tests: still failing after ${titrrAttempt} attempt(s) - dropped, no proposal filed`;
                 break;
               }
 
-              // Budget check before re-invoking.
+              // Budget check before re-invoking. Same drop-not-file rule applies.
               if (overBudget(titrrUsage, titrrBudget)) {
-                titrrAnnotation = `tests: still failing — budget exceeded after attempt ${titrrAttempt}`;
-                await captureTitrrProposal({ isPartial: true, forceGateBlockReason: titrrAnnotation });
+                titrrAnnotation = `tests: still failing - budget exceeded after attempt ${titrrAttempt} - dropped, no proposal filed`;
                 break;
               }
 

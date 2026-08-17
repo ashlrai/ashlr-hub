@@ -1,5 +1,17 @@
 # Runtime Activation Authority V1
 
+> **Not to be confused with `ashlr activation` (`src/cli/activation.ts`,
+> M470).** This document covers `ashlr daemon activation-preflight` /
+> `ashlr daemon activate` — verifying a *release build* is safe to install.
+> It remains preflight-only; nothing below changed on 2026-08-16. The
+> similarly-named `ashlr activation` command is a different system entirely:
+> operator-granted standing authority (resident/install/automerge/deploy/
+> repair/etc.) that gates what the daemon is *allowed* to do once it's
+> running. See
+> [`docs/RUNTIME-FLEET-ACTIVATION.md`](RUNTIME-FLEET-ACTIVATION.md) for that
+> system and `docs/MILESTONE-INDEX.md` §2 for why M470 now names both an
+> unrelated shipped feature and that command.
+
 Ashlr exposes a signed, read-only resident activation admission contract. The
 preflight remains available on every platform. The explicit activation command
 performs additional macOS-only validation, but resident mutation is deliberately

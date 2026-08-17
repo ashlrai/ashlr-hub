@@ -657,3 +657,91 @@ describe('M300 [J2] auto + claude exhausted → codex judge fallback', () => {
     expect(client!.model).toMatch(/gpt-5/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// [J3] M521: explicit managerJudgeEngine that shares the producer's family
+// falls through to the opposite family instead of returning null forever.
+// ---------------------------------------------------------------------------
+
+describe('M521 [J3] explicit managerJudgeEngine same-family fallback', () => {
+  it('managerJudgeEngine=codex judging a codex-produced proposal falls back to claude', async () => {
+    // Both CLIs installed; claude has no resource-availability penalty.
+    const { peekBackendAvailability } = await import('../src/core/fabric/resource-monitor.js');
+    vi.mocked(peekBackendAvailability).mockReturnValue(null);
+
+    vi.mock('../src/core/run/engines.js', () => ({
+      engineInstalled: (engine: string) => engine === 'codex' || engine === 'claude',
+      buildEngineCommand: vi.fn(() => ({ bin: 'claude', argv: ['-p', 'test'] })),
+      spawnEngine: vi.fn(async () => ({ ok: true, output: 'claude output' })),
+    }));
+
+    const { resolveFrontierJudgeClient } = await import('../src/core/fleet/manager.js');
+
+    const cfg = {
+      version: 1,
+      roots: [],
+      editor: 'cursor',
+      staleDays: 30,
+      categories: {},
+      tidyRules: [],
+      keepers: [],
+      models: { lmstudio: '', ollama: '', providerChain: [] },
+      foundry: {
+        // The operator has explicitly forced codex as the manager judge
+        // engine (exactly like the live ~/.ashlr/config.json).
+        managerJudgeEngine: 'codex',
+        managerJudgeModel: 'gpt-5.5',
+        autoMerge: { enabled: false },
+      },
+    } as unknown as AshlrConfig;
+
+    // Before the M521 fix: a codex-produced proposal could NEVER be judged
+    // when managerJudgeEngine='codex', because the only candidate tried
+    // (codex judging codex) fails the independence check and the resolver
+    // returned null instead of trying the opposite family — permanently
+    // starving Gate 4b criterion 1 / Gate 7 for the entire codex-producer
+    // family. After the fix, it falls through to an independent claude judge.
+    const client = resolveFrontierJudgeClient(cfg, {
+      producerModel: 'codex:gpt-5.5',
+      requireIndependent: true,
+    });
+    expect(client).not.toBeNull();
+    expect(client!.model).toMatch(/claude/);
+  });
+
+  it('managerJudgeEngine=codex judging a claude-produced proposal still uses codex (preference honoured when independent)', async () => {
+    const { peekBackendAvailability } = await import('../src/core/fabric/resource-monitor.js');
+    vi.mocked(peekBackendAvailability).mockReturnValue(null);
+
+    vi.mock('../src/core/run/engines.js', () => ({
+      engineInstalled: (engine: string) => engine === 'codex' || engine === 'claude',
+      buildEngineCommand: vi.fn(() => ({ bin: 'codex', argv: ['exec', '--json', 'test'] })),
+      spawnEngine: vi.fn(async () => ({ ok: true, output: 'codex output' })),
+    }));
+
+    const { resolveFrontierJudgeClient } = await import('../src/core/fleet/manager.js');
+
+    const cfg = {
+      version: 1,
+      roots: [],
+      editor: 'cursor',
+      staleDays: 30,
+      categories: {},
+      tidyRules: [],
+      keepers: [],
+      models: { lmstudio: '', ollama: '', providerChain: [] },
+      foundry: {
+        managerJudgeEngine: 'codex',
+        managerJudgeModel: 'gpt-5.5',
+        autoMerge: { enabled: false },
+      },
+    } as unknown as AshlrConfig;
+
+    const client = resolveFrontierJudgeClient(cfg, {
+      producerModel: 'claude-sonnet-4-6',
+      requireIndependent: true,
+    });
+    expect(client).not.toBeNull();
+    expect(client!.model).toMatch(/gpt-5/);
+  });
+});

@@ -15,7 +15,7 @@
 }
 
 .axisLabel {
-  font-size: 10px;
+  font-size: var(--text-xs-size);
   fill: var(--text-tertiary);
   font-family: var(--font-ui);
 }
@@ -38,7 +38,7 @@
 }
 
 .endLabel {
-  font-size: 10px;
+  font-size: var(--text-xs-size);
   font-family: var(--font-ui);
   font-weight: var(--font-weight-medium);
 }

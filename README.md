@@ -573,10 +573,11 @@ See [`docs/ECOSYSTEM-MAP.md`](docs/ECOSYSTEM-MAP.md) for the full capability map
 | Doc | What it covers |
 |-----|----------------|
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Module map, the autonomous loop, engine tiers, safety gates, the `~/.ashlr/` layout |
-| [`docs/MILESTONE-INDEX.md`](docs/MILESTONE-INDEX.md) | Authoritative milestone ID → subject → status lookup (M2–M503), incl. confirmed spec-vs-shipped ID collisions |
+| [`docs/MILESTONE-INDEX.md`](docs/MILESTONE-INDEX.md) | Authoritative milestone ID → subject → status lookup (M2–M519), incl. confirmed ID collisions (spec-vs-shipped and shipped-vs-shipped) |
 | [`docs/MISSION-OS.md`](docs/MISSION-OS.md) | Mission DAG, receipts, shadow workflow, Cortex/Locus boundaries, privacy, and troubleshooting |
 | [`docs/ELITE-AGENT-EFFICIENCY.md`](docs/ELITE-AGENT-EFFICIENCY.md) | Current primary-source research translated into Hub efficiency priorities and measurable autonomy gates |
 | [`docs/RUNTIME_ACTIVATION_AUTHORITY.md`](docs/RUNTIME_ACTIVATION_AUTHORITY.md) | Signed read-only resident activation admission, explicit mutation refusal, and native launchd v2 requirements |
+| [`docs/RUNTIME-FLEET-ACTIVATION.md`](docs/RUNTIME-FLEET-ACTIVATION.md) | How to actually turn on an unattended, resident fleet — operator standing grants (`ashlr activation`) and the four gates that block it even after a grant |
 | [`docs/ECOSYSTEM-MAP.md`](docs/ECOSYSTEM-MAP.md) | The 13-repo platform and composition bets |
 | [`docs/QUICKSTART.md`](docs/QUICKSTART.md) | Step-by-step first activation |
 | [`docs/LOCUS-FIRM-FLEET.md`](docs/LOCUS-FIRM-FLEET.md) | Production fleet checklist — `locus.firm`, `LOCUS_ENFORCE`, `LOCUS_CI_BINDING` (default off) |

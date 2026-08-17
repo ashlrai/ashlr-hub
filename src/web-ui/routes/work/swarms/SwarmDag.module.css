@@ -5,7 +5,7 @@
 }
 
 .phaseLabel {
-  font-size: 10px;
+  font-size: var(--text-xs-size);
   fill: var(--text-tertiary);
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -30,12 +30,12 @@
 
 .nodeId {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--text-xs-size);
   fill: var(--text-primary);
 }
 
 .nodeGoal {
-  font-size: 10px;
+  font-size: var(--text-xs-size);
   fill: var(--text-secondary);
 }
 

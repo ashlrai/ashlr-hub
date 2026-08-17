@@ -11,6 +11,146 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### 2026-08-16 — Fleet activation unblocked, autonomous merge wired, learning loop closed
+
+Nine threads landed together: the daemon activation-authority system that had
+been unconditionally denying itself was replaced with a real granted-scope
+check, and the bug that made it self-invalidate every permit was fixed; the
+previously dead-code autonomous-merge revocation protocol got its first
+caller; the fleet's self-improvement loop went from recording zero lessons on
+rejection to recording them from every rejection; a test-isolation escape that
+had corrupted the operator's real `~/.ashlr/daemon.json` for 11 days was
+closed fail-closed; and a new React operator console shipped alongside the
+untouched legacy dashboard. Milestone-level detail and today's newly
+discovered ID collision are in
+[`docs/MILESTONE-INDEX.md`](docs/MILESTONE-INDEX.md); the mechanics of
+turning any of this on — including four non-obvious gates that block
+unattended activation even after a grant — are in
+[`docs/RUNTIME-FLEET-ACTIVATION.md`](docs/RUNTIME-FLEET-ACTIVATION.md).
+
+- **Daemon activation authority replaces its own denials (M470 — see
+  collision note below).** Five hard-coded refusals — `DAEMON_ACTIVATION_TRUST_ROOTS`
+  frozen empty, `liveConductorActivationAuthorized()` returning a literal
+  `false`, `assertResidentServiceInstallAuthorized()` throwing
+  unconditionally, and two more in the same family — are replaced by a real
+  check against an operator-owned trust-root store (`~/.ashlr/activation/`,
+  0700/0600, owner-checked, fail-closed on missing/malformed to the
+  *identical* prior denial) and Ed25519-signed, expiring, revocable standing
+  grants across nine scopes: `once`, `resident`, `residentStanding`,
+  `conductor`, `automerge`, `repair`, `deploy`, `install`, `proposalOnly`
+  (`src/core/daemon/activation-permit.ts:121-131`). `residentStanding` is
+  new — the scope that lets the daemon restart unattended; it is not implied
+  by `resident` and must be granted explicitly.
+
+  Root-cause bug fixed in the same change: `daemonActivationAuthorityStateDigest()`
+  folded `~/.ashlr`'s own directory mtime into the digest a permit is
+  checked against, but `daemon start`'s `acquireDaemonLock()`
+  (`src/core/daemon/state.ts`) creates `~/.ashlr/daemon.lock` — a new direct
+  child of `~/.ashlr` — *before* the permit is ever consumed, bumping that
+  same mtime. Every freshly minted permit self-invalidated, 100%
+  reproducibly, before it could be used — the fleet could never have
+  activated unattended even with a valid grant. Fixed to key the digest on
+  the directory's `dev`+`ino` instead, which survive ordinary child churn
+  (`src/core/daemon/activation-permit.ts:961-997`).
+
+  **ID collision introduced today:** `test/m470.activation-authority.test.ts`
+  reuses milestone number M470, which was already assigned to the
+  already-shipped "proposal capture candidate identity"
+  (`test/m470.proposal-capture-candidate-identity.test.ts`; see the M464–M503
+  entry below). Recorded as a new row in `docs/MILESTONE-INDEX.md` §2.
+
+- **Autonomous PR merge gets its first caller (M504, M505).** The durable
+  merge-revocation protocol (`src/core/autonomy/host-merge-revocation-protocol.ts`)
+  existed with zero callers before today; it is now invoked from
+  `attemptHostAutoMerge()` (`src/core/merge.ts:2845-2901`), gated behind
+  `foundry.autoMerge.hostAutoMerge`, which **defaults to `false`**
+  (`src/core/merge.ts:2795`; `test/m505.host-auto-merge.test.ts` pins the
+  default-off behavior). A `failureCategory`
+  (`'code' | 'tool' | 'timeout' | 'infra' | 'cancelled' | 'invalid-command'`,
+  `src/core/run/verify-commands.ts:86-92`) is now threaded through
+  verify-commands, verify, run-tests, merge, the detached post-merge
+  runner/verification, the regression sentinel, and self-heal — exit 127
+  (missing binary) now classifies as `'tool'`, not a broken diff. `git apply
+  --3way` is now used in both `verifyProposal` and `attemptHostAutoMerge`
+  (`src/core/merge.ts:2313, 2984`) so a stale base no longer reads as a real
+  conflict. The self-eval parity gate — previously a single flaky
+  invariant-test failure was a GLOBAL merge blocker — now retries up to
+  `SELF_EVAL_PARITY_RETRY_ATTEMPTS = 2` times with a 500ms delay before
+  failing (`src/core/merge.ts:265-267`).
+
+- **Learning loop closed; judge parse failures stop posing as verdicts.**
+  `hasReleasedPostMergeCredit()` (`src/core/fleet/post-merge-credit.ts:137-150`)
+  no longer hardcodes `false` — it verifies an HMAC-signed, timing-safe-compared
+  token — unblocking consumers across `learned-router.ts`,
+  `skill-attestation.ts`, `feedback.ts`, `quality-metrics.ts`,
+  `judge-trace.ts`, and `post-merge-credit.ts` itself. `learnFromRejection`
+  is no longer reachable only when auto-merge is on: a new
+  `sweepRejectionLearning()` (`src/core/fleet/self-improve.ts`) reads the
+  decisions ledger directly and learns from rejections regardless of the
+  auto-merge flag. (The commit message cites 672 rejections the fleet had
+  never learned from while auto-merge defaulted off; that figure is the
+  author's estimate, not a value stored or checked anywhere in `src/` or
+  `test/` — do not repeat it as a verified count.) `curateAntiPlaybooks()`
+  (`src/core/fleet/self-improve.ts:284-322`), previously unreferenced, now
+  has a caller in `src/core/fleet/orchestrator.ts:1338`. Separately, a July
+  refactor had given every real judge verdict a reason code but not the
+  parse-failure fallback — parse failures were structurally indistinguishable
+  from considered reviews and incremented `judgeNonShipCount`, pushing good
+  proposals toward auto-archive. Parse failures now get their own
+  `'judge-parse-failure'` reason code (`src/core/fleet/judge-decision-metadata.ts:20`)
+  and are excluded from `judgeNonShipCount` entirely
+  (`src/core/fleet/automerge-pass.ts:335-337`).
+
+- **Test isolation: HOME escape closed fail-closed.** On 2026-08-05 a vitest
+  run escaped HOME isolation and wrote the operator's real
+  `~/.ashlr/daemon.json`, leaving the daemon unstartable for 11 days. Cause:
+  `test/setup/home.ts` fell back to the real `os.homedir()` whenever
+  `process.env.HOME` was unset — fail-open. It now throws immediately if
+  `HOME` is unset or resolves to the real developer home
+  (`test/setup/home.ts:52-65`).
+
+- **Fleet-status cache correction.** `GET /api/fleet` no longer performs
+  API-side response recomposition (`src/core/web/api.ts`, pinned by
+  `test/build-identity.test.ts`) — a response-shape fix, landed today. The
+  shared TTL cache for `buildFleetStatus()`
+  (`src/core/web/fleet-status-cache.ts`: 5s TTL, stale-while-refresh to 60s,
+  in-flight dedup) landed with the new console earlier this week, not today.
+  **The "32.5s cold → 4.0s cold / 0ms warm" figures reported for this work do
+  not appear anywhere in the code, tests, or the cache module's own
+  documentation and could not be verified — do not repeat them.** The cache
+  module's comment instead cites a worse pre-fix baseline (`/api/snapshot`
+  2.4s idle → 69.4s under load; `/api/control` similarly degraded). Call-site
+  count is also imprecise across sources: the cache module's comment says
+  six, a test comment says seven, a source grep finds eleven — the true
+  count depends on what "independent call site" means and isn't settled.
+
+- **New operator console (`src/web-ui/`).** React 19 + Vite 6, served at
+  `/next/` alongside the untouched legacy vanilla-JS SPA at `/`
+  (`vite.config.web.ts:11-26`, `src/core/web/static.ts:87-88`). **16 views**
+  (not the 13 originally reported), a chart layer
+  (`src/web-ui/components/charts/`), a work journal
+  (`src/web-ui/routes/journal/`), live run streaming
+  (`src/web-ui/components/stream/`, `useRunStream.ts`), and a notification
+  centre (`src/web-ui/components/notifications/`). Backend changes were
+  minimal and additive — query-param filtering on `src/core/web/api.ts` for
+  the inbox history view — not a rewrite; `server.ts`/`static.ts` routing is
+  unchanged.
+
+- **Two activation designs now formally coexist; the guard protecting the
+  boundary between them was strengthened, not weakened.**
+  `conductor-permit` (`src/core/daemon/goal-conductor-permit-operator.ts`,
+  offline cold-custody, used by the goal conductor — M516–M518) and
+  `activation` (`src/core/daemon/activation-permit.ts`, on-machine standing
+  grants, M470 above) are separate modules with non-overlapping imports. The
+  test protecting this boundary used to check that a file
+  (`src/cli/activation.ts`) did not exist by name — a check that would have
+  broken the moment that file needed to exist for a legitimate, unrelated
+  reason. It now asserts the real invariant: the daemon activation CLI's
+  source text must not match any conductor-authority symbol name
+  (`test/m518.goal-conductor-permit-operator.test.ts:924-926`) — conductor
+  authority must be unreachable from the daemon surface, not merely absent
+  from a filename.
+
 ### M464–M503 — daemon durability, post-merge verification pipeline, Mission OS extensions
 
 Forty milestones landed on `master` with no CHANGELOG entry; this backfills

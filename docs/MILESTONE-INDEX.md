@@ -17,9 +17,10 @@ stale. If this index and a spec doc disagree, trust this index's cited
 `file:line`, or re-verify against the code yourself.
 
 **How this index was built:** every `test/mNNN.*.test.ts` file in the repo
-was enumerated (415 distinct milestone numbers), cross-referenced against
-`docs/contracts/` for existing binding contracts and against `docs/SPEC-*.md`
-for milestone numbers documented as planned. The M464–M503 range and every
+was enumerated (425 distinct milestone numbers as of 2026-08-16, up from 415
+the pass before), cross-referenced against `docs/contracts/` for existing
+binding contracts and against `docs/SPEC-*.md` for milestone numbers
+documented as planned. The M464–M503 range, the M504–M519 range, and every
 collision row below were hand-verified against source (see file:line
 citations); the full appendix (§4) is otherwise machine-generated from test
 filenames — treat its "subject" column as a filename-derived hint, not a
@@ -53,6 +54,19 @@ Re-verification confirmed 10 of the 11 as genuine collisions, found that
 **M264 is a collision between two competing spec docs** rather than a
 spec-vs-shipped mismatch, and surfaced **one additional collision the prior
 audit missed: M259**.
+
+**A thirteenth collision, of a new kind, was introduced on 2026-08-16
+itself:** M470 was already assigned (see §4) to "proposal capture candidate
+identity," shipped weeks earlier. Work landed today reused the same number
+for an unrelated feature — the daemon activation-authority rework — without
+checking this index first, which is exactly the failure mode this document
+exists to prevent. Unlike the M258–M275 rows below (spec'd-but-never-built vs
+shipped), this is **shipped vs. shipped**: both features are real and both
+are in `src/`.
+
+| ID | First subject | First evidence | Second subject (added 2026-08-16) | Second evidence |
+|----|----------------|-----------------|-------------------------------------|-------------------|
+| **M470** | Proposal capture candidate identity (durable proposal records from sandboxed execution) | `test/m470.proposal-capture-candidate-identity.test.ts` | Daemon activation authority (operator-owned trust roots, Ed25519 standing grants, replaces five hard-coded denials) | `test/m470.activation-authority.test.ts`, `src/core/daemon/activation-permit.ts:121-131` |
 
 | ID | Spec'd subject | Spec location | Shipped subject | Shipped evidence | Unbuilt feature currently sits where? |
 |----|----------------|---------------|------------------|-------------------|----------------------------------------|
@@ -114,7 +128,7 @@ are **not** in `src/`:
 
 ---
 
-## 4. Full milestone appendix (M2–M503)
+## 4. Full milestone appendix (M2–M519)
 
 Machine-generated from `test/mNNN.*.test.ts` filenames, one row per number
 that has at least one test file. "Shipped" here means "a test file with this
@@ -132,7 +146,7 @@ part of a batched CHANGELOG entry instead (see `docs/ARCHITECTURE.md`'s
 `CHANGELOG.md` for the prose description of each release).
 
 <details>
-<summary>Expand full M2–M503 table (415 rows)</summary>
+<summary>Expand full M2–M519 table (425 rows)</summary>
 
 | ID | Subject (filename-derived unless noted) | Status | Test evidence |
 |----|------------------------------------------|--------|----------------|
@@ -522,7 +536,7 @@ part of a batched CHANGELOG entry instead (see `docs/ARCHITECTURE.md`'s
 | M467 | Detached post-merge verification cohorts (signed, immutable, observation-only) | Shipped | `test/m467.*.test.ts` |
 | M468 | Detached post-merge runner + release-desktop workflow supply-chain policy + resident-service readiness diagnostics | Shipped | `test/m468.*.test.ts` |
 | M469 | Proposal funnel observability (attempt/capture/policy/gate metrics, scrubbed) | Shipped | `test/m469.*.test.ts` |
-| M470 | Proposal capture candidate identity (durable proposal records from sandboxed execution) | Shipped | `test/m470.*.test.ts` |
+| M470 | **Collision, see §2.** Proposal capture candidate identity (original); Daemon activation authority (added 2026-08-16, unrelated) | Shipped (both) | `test/m470.*.test.ts` (two files, two features) |
 | M471 | Simple-conductor transactional settlement (claim/settle/reconcile, CAS) | Shipped | `test/m471.*.test.ts` |
 | M472 | Detached post-merge orchestrator (observation-only scheduler) | Shipped | `test/m472.*.test.ts` |
 | M473 | Verifier execution authority (signed capsule admission, data-only) | Shipped | `test/m473.*.test.ts` |
@@ -551,6 +565,16 @@ part of a batched CHANGELOG entry instead (see `docs/ARCHITECTURE.md`'s
 | M501 | Daemon state resolution (post-quarantine fresh-state production) | Shipped | `test/m501.*.test.ts` |
 | M502 | Mission shadow observer (read-only zero-effect suggestion) | Shipped | `test/m502.*.test.ts` |
 | M503 | Dashboard read-only auth mode (SSE + reads permitted, mutation blocked) | Shipped | `test/m503.*.test.ts` |
+| M504 | Automerge scope ceiling; goal direct authority; Ollama identity (three unrelated test files, one number, see §6) | Shipped | `test/m504.*.test.ts` |
+| M505 | Host auto-merge (`hostAutoMerge` config flag, defaults off) | Shipped | `test/m505.host-auto-merge.test.ts` |
+| M506 | Host auto-merge E2E; signed release canary (two unrelated test files, one number) | Shipped | `test/m506.*.test.ts` |
+| M513 | Verified protected PR handoff | Shipped | `test/m513.*.test.ts` |
+| M514 | Release canary workflow | Shipped | `test/m514.*.test.ts` |
+| M515 | Release publish authority split; runtime activation launch handoff (two unrelated test files, one number) | Shipped | `test/m515.*.test.ts` |
+| M516 | Fleet-status cache; goal-conductor activation permit; goal-conductor CAS; goal-conductor one-shot (four test files, one number, see §6) | Shipped | `test/m516.*.test.ts` |
+| M517 | Goal-conductor quota bridge (provider quota tickets) | Shipped | `test/m517.*.test.ts` |
+| M518 | Goal-conductor permit operator (cold-custody conductor-permit CLI, incl. the reachability guard replacing the old filename-ban test); goal timestamp repair | Shipped | `test/m518.*.test.ts` |
+| M519 | Release candidate supersession | Shipped | `test/m519.*.test.ts` |
 </details>
 
 ---
@@ -564,6 +588,73 @@ M500 which have no test file) had zero references anywhere in `docs/`,
 milestones substantial enough to warrant a standalone contract
 (M486, M487, M493, M501).
 
+## 6. M504–M519 — dates checked with `git log --diff-filter=A`, not assumed
+
+**Not all of these landed 2026-08-16 — an earlier draft of this section
+claimed that and was wrong.** Per-file creation dates
+(`git log --diff-filter=A --format='%ad' -- <file>`), because assuming "next
+number after M503" means "landed today" is exactly the kind of unverified
+claim this index exists to prevent:
+
+| ID | Test file | Created |
+|----|-----------|---------|
+| M504 | `automerge-scope-ceiling` | **2026-08-16** |
+| M504 | `goal-direct-authority` | 2026-08-12 |
+| M504 | `ollama-identity` | 2026-08-12 |
+| M505 | `host-auto-merge` | **2026-08-16** |
+| M506 | `host-auto-merge-e2e` | **2026-08-16** |
+| M506 | `signed-release-canary` | 2026-08-14 |
+| M513 | `verified-protected-pr-handoff` | 2026-08-14 |
+| M514 | `release-canary-workflow` | 2026-08-15 |
+| M515 | `release-publish-authority-split` | 2026-08-15 |
+| M515 | `runtime-activation-launch-handoff` | pre-2026-08-14 (`CONTRACT-M515`) |
+| M516 | `fleet-status-cache` | **2026-08-16** |
+| M516 | `goal-conductor-activation-permit` / `-cas` / `-one-shot` | **2026-08-16** |
+| M517 | `goal-conductor-quota-bridge` | **2026-08-16** |
+| M518 | `goal-conductor-permit-operator` | **2026-08-16** |
+| M518 | `goal-timestamp-repair(-faults)` | **2026-08-16** |
+| M519 | `release-candidate-supersession` | **2026-08-16** |
+
+So: **M505, M517, M519, and the second (unrelated) half of M470 are wholly
+today's work.** M504, M506, M516, and M518 each mix a 2026-08-16 addition
+with pre-existing work from the same number. M513, M514, and M515 predate
+today entirely (2026-08-14/15) and were simply never added to this index
+before now — their presence here is a backlog fix, not new work.
+
+None of M504–M519 were previously documented anywhere in `docs/` or
+`CHANGELOG.md` (this appendix stopped at M503), so unlike M470 none of these
+collisions were *silently reused over an existing description* — they just
+were never checked against each other. M507–M512 are unused, not a gap in
+this doc.
+
+- **M504** — three unrelated features: automerge scope ceiling (today),
+  goal direct authority, and Ollama identity (both 2026-08-12).
+- **M505** — host auto-merge only. Not a collision.
+- **M506** — host auto-merge E2E (today) and signed release canary
+  (2026-08-14) — unrelated.
+- **M515** — release publish authority split (2026-08-15) and runtime
+  activation launch handoff (the `CONTRACT-M515` dormant proof-child
+  observer described in `docs/RUNTIME_ACTIVATION_AUTHORITY.md`'s "Dormant
+  activation-bound handoff observation" section, predating both) —
+  unrelated.
+- **M516** — fleet-status cache (today) and three goal-conductor pieces
+  (activation permit, CAS, one-shot; all today). The cache is unrelated to
+  the other three; the three goal-conductor pieces are plausibly one
+  feature split across test files rather than three separate collisions,
+  but that grouping was not independently re-verified against source —
+  treat it as a hint, not a confirmed claim.
+- **M518** — the conductor-permit-operator CLI (including the reachability
+  guard test described in the CHANGELOG's "Fleet activation unblocked"
+  entry) and goal-timestamp-repair — both today, unrelated to each other.
+
+Hand-verified against source (file:line citations exist in the CHANGELOG's
+2026-08-16 entry and in §2 above): M470 (both halves), M504
+(`automerge-scope-ceiling` half only), M505, M516 (`fleet-status-cache` half
+only), M518 (`goal-conductor-permit-operator` half only). Every other
+subject in this section — including all of M513/M514/M515 — is
+filename-derived only, matching the rest of §4's stated methodology;
+re-verify before citing as fact.
+
 ## Maintenance
 
 When you build the next milestone: **check this file before picking its
@@ -572,3 +663,8 @@ number.** If the number already appears in §4, either the ID is taken
 (say so in the CHANGELOG entry). Add the new row to §4 and, if the milestone
 is substantial (changes behavior, adds an authority boundary, or is
 independently testable), add a `docs/contracts/CONTRACT-Mxx.md`.
+
+M470 shipped two unrelated features on the same number *within one day* of
+each other because this exact check was skipped — this is not a hypothetical
+risk the doc is warning about, it is what happened today. Grep this file for
+your candidate number before writing the first line of a new test.

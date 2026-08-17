@@ -3086,6 +3086,28 @@ export interface ProductionSummary {
     harmful: number;
     total: number;
   };
+  /**
+   * Judge calls over the last 24h that produced NO real verdict — a parse
+   * failure (unparseable LLM response, even after the one-shot retry) or a
+   * network failure (the API call itself threw). judgeProposal() returns via
+   * its `fallback()` helper BEFORE recordJudgeTrace() runs on either path
+   * (see fleet/manager.ts), so these calls write no judge-trace row and are
+   * invisible to judgeVerdicts24h — without this field a failed judge call
+   * looks identical to a judge call that never happened.
+   *
+   * Sourced from the decisions ledger's distinct 'judge-parse-failure' /
+   * 'judge-network-failure' judgeReasonCode (fleet/judge-decision-metadata.ts),
+   * NOT from judge-trace — fallback verdicts are deliberately never written
+   * to judge-trace because their synthetic all-3 scores would corrupt
+   * judge-calibration.ts (darkCurrent/kappa/degradation-harness all read
+   * every trace unconditionally). The decisions ledger already records both
+   * failure kinds distinctly and separately from calibration's read path.
+   */
+  judgeFailures24h: {
+    parse: number;
+    network: number;
+    total: number;
+  };
   /** Auto-merges today: proposals that reached status 'applied' today. */
   autoMergesToday: {
     count: number;
