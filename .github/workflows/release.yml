@@ -7,7 +7,7 @@
 # public repository, release.yml, and the npm-release environment. No
 # long-lived npm write token is used.
 #
-# This workflow is intentionally pinned to the 3.2.6 candidate. It cannot move
+# This workflow is intentionally pinned to the 3.2.7 candidate. It cannot move
 # npm `latest`; promotion is a separate maintainer action after acceptance.
 
 name: Release
@@ -23,9 +23,12 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  RELEASE_VERSION: "3.2.6"
+  RELEASE_VERSION: "3.2.7"
   RELEASE_DIST_TAG: candidate
   BASELINE_LATEST_VERSION: "3.0.1"
+  PREVIOUS_CANDIDATE_VERSION: "3.2.6"
+  PREVIOUS_CANDIDATE_INTEGRITY: "sha512-b8O5Nxfb9IfYsmgSW80CAYW+3ZPlet8u7NALOfG8XGFnAAEWxvLtbLKer3psNg7rxkDrAt+rhUjzRzri72PFkA=="
+  PREVIOUS_CANDIDATE_TAG_SHA: "80d49d718d893d0cb02f85a62cd9d2691f4f39c3"
 
 jobs:
   verify:
@@ -574,7 +577,7 @@ jobs:
              (.files.tarball | keys == ["bytes", "entryCount", "integrity", "maxEntryBytes", "name", "sha256", "unpackedBytes"]) and
              (.files.packReport | keys == ["bytes", "name", "sha256"]) and
              (.files.releaseNotes | keys == ["bytes", "name", "sha256"]) and
-             .files.tarball.name == "ashlr-hub-3.2.6.tgz" and
+             .files.tarball.name == "ashlr-hub-3.2.7.tgz" and
              .files.packReport.name == "npm-pack.json" and
              .files.releaseNotes.name == "release-notes.md" and
              (.files.tarball.bytes | type == "number" and . >= 1 and . <= 52428800) and
@@ -750,9 +753,13 @@ jobs:
             --arg latest "$BASELINE_LATEST_VERSION" \
             --arg candidate "$RELEASE_DIST_TAG" \
             --arg version "$RELEASE_VERSION" \
+            --arg previousVersion "$PREVIOUS_CANDIDATE_VERSION" \
+            --arg previousIntegrity "$PREVIOUS_CANDIDATE_INTEGRITY" \
             '.name == "@ashlr/hub" and
              .["dist-tags"].latest == $latest and
-             (.["dist-tags"][$candidate] == null) and
+             .["dist-tags"][$candidate] == $previousVersion and
+             .versions[$previousVersion].version == $previousVersion and
+             .versions[$previousVersion].dist.integrity == $previousIntegrity and
              (.versions[$version] == null)' \
             "$packument" >/dev/null
           jq -cS '.["dist-tags"]' "$packument" > "$RUNNER_TEMP/npm-dist-tags-before.json"
@@ -770,6 +777,13 @@ jobs:
             --arg sha "$GITHUB_SHA" \
             '.ref == $ref and .object.type == "commit" and .object.sha == $sha' \
             <<<"$tag_ref_json" >/dev/null
+          previous_tag_ref_json="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${PREVIOUS_CANDIDATE_VERSION}")"
+          jq -e \
+            --arg ref "refs/tags/v${PREVIOUS_CANDIDATE_VERSION}" \
+            --arg sha "$PREVIOUS_CANDIDATE_TAG_SHA" \
+            '.ref == $ref and .object.type == "commit" and .object.sha == $sha' \
+            <<<"$previous_tag_ref_json" >/dev/null
           if [[ ! "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]; then
             echo "Publication run attempt is invalid." >&2
             exit 1
@@ -842,9 +856,14 @@ jobs:
             exit 1
           fi
           expected_integrity="$(jq -er '.files.tarball.integrity' "$manifest")"
-          printf '%s' "$DIST_TAGS_BEFORE_B64" | base64 --decode > "$RUNNER_TEMP/npm-dist-tags-before.json"
-          jq -e --arg latest "$BASELINE_LATEST_VERSION" \
-            '.latest == $latest' "$RUNNER_TEMP/npm-dist-tags-before.json" >/dev/null
+          printf '%s' "$DIST_TAGS_BEFORE_B64" | base64 --decode \
+            > "$RUNNER_TEMP/npm-dist-tags-before-raw.json"
+          jq -e \
+            --arg latest "$BASELINE_LATEST_VERSION" \
+            --arg candidate "$RELEASE_DIST_TAG" \
+            --arg previousVersion "$PREVIOUS_CANDIDATE_VERSION" \
+            '.latest == $latest and .[$candidate] == $previousVersion' \
+            "$RUNNER_TEMP/npm-dist-tags-before-raw.json" >/dev/null
           version_metadata="$RUNNER_TEMP/npm-version-after.json"
           packument="$RUNNER_TEMP/npm-packument-after.json"
           observed=false
@@ -875,7 +894,12 @@ jobs:
                 --arg latest "$BASELINE_LATEST_VERSION" \
                 --arg candidate "$RELEASE_DIST_TAG" \
                 --arg version "$RELEASE_VERSION" \
-                '.["dist-tags"].latest == $latest and .["dist-tags"][$candidate] == $version' \
+                --arg previousVersion "$PREVIOUS_CANDIDATE_VERSION" \
+                --arg previousIntegrity "$PREVIOUS_CANDIDATE_INTEGRITY" \
+                '.["dist-tags"].latest == $latest and
+                 .["dist-tags"][$candidate] == $version and
+                 .versions[$previousVersion].version == $previousVersion and
+                 .versions[$previousVersion].dist.integrity == $previousIntegrity' \
                 "$packument" >/dev/null; then
               observed=true
               break
@@ -887,7 +911,11 @@ jobs:
             exit 1
           fi
           jq -cS --arg candidate "$RELEASE_DIST_TAG" \
-            '.["dist-tags"] | del(.[$candidate])' "$packument" > "$RUNNER_TEMP/npm-dist-tags-after.json"
+            'del(.[$candidate])' "$RUNNER_TEMP/npm-dist-tags-before-raw.json" \
+            > "$RUNNER_TEMP/npm-dist-tags-before.json"
+          jq -cS --arg candidate "$RELEASE_DIST_TAG" \
+            '.["dist-tags"] | del(.[$candidate])' "$packument" \
+            > "$RUNNER_TEMP/npm-dist-tags-after.json"
           cmp --silent "$RUNNER_TEMP/npm-dist-tags-before.json" "$RUNNER_TEMP/npm-dist-tags-after.json"
 
           verification_root="$RUNNER_TEMP/npm-signature-verification"

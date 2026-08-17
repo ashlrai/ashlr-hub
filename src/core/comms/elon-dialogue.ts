@@ -216,11 +216,15 @@ async function executeAction(action: DialogueAction, cfg: AshlrConfig): Promise<
 
   if (action.type === 'create_goal' && action.objective) {
     try {
-      const { createGoal } = await import('../goals/store.js');
-      const goal = createGoal(action.objective, { cfg });
-      return `Goal created: ${goal.id}`;
+      const { createGoalIfAbsent } = await import('../goals/store.js');
+      const result = createGoalIfAbsent(action.objective, { cfg });
+      if (result.status === 'created') return `Goal created: ${result.goal.id}`;
+      if (result.status === 'exists') {
+        return `Action refused: goal already exists: ${result.goal.id}`;
+      }
+      return 'Action refused: goal creation persistence failed';
     } catch {
-      return null;
+      return 'Action refused: goal creation persistence failed';
     }
   }
 
@@ -234,7 +238,9 @@ async function executeAction(action: DialogueAction, cfg: AshlrConfig): Promise<
           ...goal,
           notes: action.newPriority,
         };
-        saveGoal(updated as typeof goal);
+        if (!saveGoal(updated as typeof goal)) {
+          return `Action refused: goal ${action.goalId} priority was not updated because its persisted generation changed or disappeared`;
+        }
         return `Goal ${action.goalId} priority updated`;
       }
     } catch {
@@ -387,11 +393,12 @@ export async function handleStrategicMessage(
       return scrubSecrets(raw.slice(0, 1000));
     }
 
-    const reply = typeof parsed.reply === 'string' ? parsed.reply : raw.slice(0, 1000);
+    let reply = typeof parsed.reply === 'string' ? parsed.reply : raw.slice(0, 1000);
 
     // Execute goal action if present
     if (parsed.action && parsed.action.type !== 'none') {
-      await executeAction(parsed.action, cfg);
+      const outcome = await executeAction(parsed.action, cfg);
+      if (outcome?.startsWith('Action refused:')) reply = `${reply}\n\n${outcome}`;
     }
 
     return scrubSecrets(reply);

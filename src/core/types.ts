@@ -2019,6 +2019,18 @@ export interface RunState {
   terminationReason?: 'idle-stall' | 'loop-stall' | 'no-diff-stall' | 'backstop-timeout' | 'cancelled' | 'clean-exit' | 'error-exit';
 }
 
+/**
+ * In-memory authority over an atomically pre-reserved provider-contact set.
+ *
+ * The function is intentionally non-serializable. A persisted run/swarm may
+ * retain the opaque attempt id for correlation, but can never reconstruct the
+ * right to consume another ticket after a restart or resume.
+ */
+export interface ProviderInferenceQuotaSession {
+  readonly attemptId: string;
+  claimNext(): string;
+}
+
 /** Options accepted by `runGoal` / the `ashlr run` CLI. */
 export interface RunOptions {
   /** Optional caller-owned cancellation signal for this run. */
@@ -2055,6 +2067,13 @@ export interface RunOptions {
   json?: boolean;
   /** Disable genome recall injection into the sub-agent system prompt (M7). */
   noMemory?: boolean;
+  /** Disable post-run genome capture. Required by signed one-shot execution. */
+  noCapture?: boolean;
+  /**
+   * Non-serializable, caller-owned authority for one pre-reserved provider
+   * inference ticket per governed model call. Ordinary/manual runs omit this.
+   */
+  providerQuota?: ProviderInferenceQuotaSession;
   /**
    * Enable the optional cheap MODEL verification check after each builtin task
    * (M11). Default false → heuristic-only verification (no extra model calls,
@@ -2893,6 +2912,14 @@ export interface SwarmOptions {
   dryRun?: boolean;
   /** Permit cloud providers for tasks (default false = local-first). */
   allowCloud?: boolean;
+  /** Disable post-swarm and nested-run genome capture. */
+  noCapture?: boolean;
+  /**
+   * Non-serializable, caller-owned authority shared by swarm planning and all
+   * nested builtin runs. It is deliberately excluded from persisted resume
+   * options, so signed one-shot authority can never be revived from disk.
+   */
+  providerQuota?: ProviderInferenceQuotaSession;
   /** Absolute target project directory the swarm operates in. */
   project?: string;
   /**
@@ -5249,6 +5276,19 @@ export interface AdvanceOptions {
    * enrollment at swarm start regardless.
    */
   allowAnyRepo?: boolean;
+  /**
+   * Optional fail-closed CAS binding used only by the signed one-shot goal
+   * conductor. When either field is present, both are required and the exact
+   * goal generation is atomically claimed before provider execution.
+   */
+  expectedGoalDigest?: string;
+  expectedMilestoneId?: string;
+  /**
+   * Signed one-shot provider authority. Its opaque attempt id becomes the
+   * swarm run id and its synchronous claim function is carried to every model
+   * call without ever being serialized.
+   */
+  providerQuota?: ProviderInferenceQuotaSession;
 }
 
 /**

@@ -22,6 +22,7 @@ const {
   mockBuildEngineCommand,
   mockSpawnEngine,
   mockCreateGoal,
+  mockCreateGoalIfAbsent,
   mockLoadGoal,
   mockSaveGoal,
   mockListGoals,
@@ -40,6 +41,13 @@ const {
     updatedAt: new Date().toISOString(),
     project: null,
   })),
+  mockCreateGoalIfAbsent: vi.fn().mockImplementation((objective: string) => ({
+    status: 'created',
+    goal: {
+      id: 'test-goal-abc123', objective, status: 'planning', milestones: [],
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), project: null,
+    },
+  })),
   mockLoadGoal: vi.fn().mockReturnValue(null),
   mockSaveGoal: vi.fn(),
   mockListGoals: vi.fn().mockReturnValue([]),
@@ -55,6 +63,7 @@ vi.mock('../src/core/run/engines.js', () => ({
 
 vi.mock('../src/core/goals/store.js', () => ({
   createGoal: mockCreateGoal,
+  createGoalIfAbsent: mockCreateGoalIfAbsent,
   loadGoal: mockLoadGoal,
   saveGoal: mockSaveGoal,
   listGoals: mockListGoals,
@@ -103,10 +112,18 @@ beforeEach(() => {
   mockEngineInstalled.mockReturnValue(false);
   mockListGoals.mockReturnValue([]);
   mockLoadLatestBriefing.mockReturnValue(null);
+  mockSaveGoal.mockReturnValue(true);
   mockSendTelegramMessage.mockResolvedValue({ ok: true });
   mockCreateGoal.mockImplementation((objective: string) => ({
     id: 'test-goal-abc123', objective, status: 'planning',
     milestones: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), project: null,
+  }));
+  mockCreateGoalIfAbsent.mockImplementation((objective: string) => ({
+    status: 'created',
+    goal: {
+      id: 'test-goal-abc123', objective, status: 'planning', milestones: [],
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), project: null,
+    },
   }));
 });
 
@@ -143,7 +160,7 @@ describe('M180 handleStrategicMessage unit', () => {
 
     await handleStrategicMessage('Focus on shipping the billing module', makeCfg() as never);
 
-    expect(mockCreateGoal).toHaveBeenCalledWith(
+    expect(mockCreateGoalIfAbsent).toHaveBeenCalledWith(
       'Ship billing module v1',
       expect.objectContaining({ cfg: expect.anything() }),
     );
@@ -182,9 +199,46 @@ describe('M180 handleStrategicMessage unit', () => {
 
     const reply = await handleStrategicMessage('Refactor the auth module', makeCfg() as never);
 
-    expect(mockCreateGoal).toHaveBeenCalled();
+    expect(mockCreateGoalIfAbsent).toHaveBeenCalled();
     expect(typeof reply).toBe('string');
     // handleStrategicMessage itself never sends — that's dispatch's job
     expect(mockSendTelegramMessage).not.toHaveBeenCalled();
+  });
+
+  it('reports a priority action refusal when CAS persistence fails', async () => {
+    mockLoadGoal.mockReturnValue({
+      id: 'goal-concurrent', objective: 'Preserve steering', status: 'active',
+      milestones: [], createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z', project: null,
+    });
+    mockSaveGoal.mockReturnValue(false);
+    mockFetchDialogue('I will update that priority.', {
+      type: 'update_goal_priority', goalId: 'goal-concurrent', newPriority: 'Critical',
+    });
+
+    const reply = await handleStrategicMessage('Make it critical', makeCfg() as never);
+
+    expect(mockSaveGoal).toHaveBeenCalledTimes(1);
+    expect(reply).toContain('Action refused:');
+    expect(reply).not.toContain('priority updated');
+  });
+
+  it('does not claim creation when the deterministic goal already exists', async () => {
+    mockCreateGoalIfAbsent.mockReturnValue({
+      status: 'exists',
+      goal: {
+        id: 'goal-existing', objective: 'Existing direction', status: 'active', milestones: [],
+        createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+        project: null,
+      },
+    });
+    mockFetchDialogue('I will create that goal.', {
+      type: 'create_goal', objective: 'Existing direction',
+    });
+
+    const reply = await handleStrategicMessage('Create the existing direction', makeCfg() as never);
+
+    expect(reply).toContain('Action refused: goal already exists: goal-existing');
+    expect(mockCreateGoal).not.toHaveBeenCalled();
   });
 });

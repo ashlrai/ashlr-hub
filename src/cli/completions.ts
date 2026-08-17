@@ -26,6 +26,7 @@ export const TOP_LEVEL_COMMANDS: string[] = [
   'enroll', 'backlog', 'inbox', 'daemon', 'worker', 'ask', 'knowledge', 'reflect',
   'health', 'goals', 'fleet', 'recovery', 'manager', 'vision', 'goal', 'loop',
   'roadmap', 'stack', 'ecosystem', 'digest', 'seams', 'verify-safety', 'preflight',
+  'conductor-permit',
   'onboard', 'demo', 'orient', 'docs', 'completions', 'plugins', 'x', 'comms',
   'director', 'best-of-n', 'invent', 'resources', 'usage', 'version', 'help',
   'skills', 'activation',
@@ -64,8 +65,9 @@ const SUBCOMMANDS: Record<string, string[]> = {
   health: ['propose'],
   goals: [
     'add', 'list', 'show', 'plan', 'advance', 'status', 'recover-stale',
-    'pause', 'resume', 'skip', 'reorder', 'delete',
+    'repair-timestamps', 'pause', 'resume', 'skip', 'reorder', 'delete',
   ],
+  'conductor-permit': ['request', 'mint', 'inspect', 'stage'],
   vision: ['show', 'review', 'preview', 'shadow', 'approve', 'reconcile', 'set'],
   eval: ['attention', 'swe-bench'],
   genome: ['recall', 'learn', 'teach', 'consolidate', 'export', 'playbook'],

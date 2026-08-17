@@ -279,6 +279,8 @@ beforeEach(() => {
   vi.resetAllMocks();
   // Re-wire mocks that resetAllMocks cleared
   vi.mocked(assertMayMutate).mockReturnValue(undefined);
+  vi.mocked(updateMilestoneStatus).mockImplementation((_goalId, _milestoneId, status) =>
+    makeGoal(tmpDir, [makeMilestone({ status })]));
 });
 
 afterEach(() => {

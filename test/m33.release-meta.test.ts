@@ -178,9 +178,13 @@ describe('release workflow', () => {
   it('is tag-triggered and reuses the exact native CI gate before publish', () => {
     expect(parsed.on?.push?.tags).toEqual(['v*']);
     expect(parsed.env).toEqual({
-      RELEASE_VERSION: '3.2.6',
+      RELEASE_VERSION: '3.2.7',
       RELEASE_DIST_TAG: 'candidate',
       BASELINE_LATEST_VERSION: '3.0.1',
+      PREVIOUS_CANDIDATE_VERSION: '3.2.6',
+      PREVIOUS_CANDIDATE_INTEGRITY:
+        'sha512-b8O5Nxfb9IfYsmgSW80CAYW+3ZPlet8u7NALOfG8XGFnAAEWxvLtbLKer3psNg7rxkDrAt+rhUjzRzri72PFkA==',
+      PREVIOUS_CANDIDATE_TAG_SHA: '80d49d718d893d0cb02f85a62cd9d2691f4f39c3',
     });
     expect(parsed.concurrency).toEqual({
       group: 'npm-candidate-${{ github.ref }}',
@@ -428,7 +432,7 @@ describe('release workflow', () => {
     expect(releaseDocs).toContain('the exact\n   tag commit');
     expect(releaseDocs).toContain('Do not use **Re-run failed jobs**');
     expect(releaseDocs).toContain('even when the seven-day handoff\n   artifact has not expired');
-    expect(releaseDocs).toContain('set -euo pipefail\n   version=3.2.6\n   release_tag="v${version}"');
+    expect(releaseDocs).toContain('set -euo pipefail\n   version=3.2.7\n   release_tag="v${version}"');
     expect(releaseDocs).toContain('git rev-list -n 1 "$release_tag"');
     expect(releaseDocs).toContain('node scripts/extract-changelog.mjs "$version" > "$release_notes"');
     expect(releaseDocs).toContain(
@@ -458,6 +462,7 @@ describe('release workflow', () => {
     const root = mkdtempSync(join(tmpdir(), 'ashlr-release-retry-'));
     try {
       const integrity = `sha512-${Buffer.alloc(64, 7).toString('base64')}`;
+      const previousIntegrity = `sha512-${Buffer.alloc(64, 8).toString('base64')}`;
       writeFileSync(join(root, 'npm-dist-tags-before.json'), '{"latest":"3.0.1"}\n');
       writeFileSync(join(root, 'version.json'), JSON.stringify({
         name: '@ashlr/hub',
@@ -472,6 +477,9 @@ describe('release workflow', () => {
       }));
       writeFileSync(join(root, 'packument.json'), JSON.stringify({
         'dist-tags': { latest: '3.0.1', candidate: '3.2.0' },
+        versions: {
+          '3.1.9': { version: '3.1.9', dist: { integrity: previousIntegrity } },
+        },
       }));
       writeFileSync(join(root, 'curl-count'), '0\n');
 
@@ -508,6 +516,8 @@ describe('release workflow', () => {
           RELEASE_VERSION: '3.2.0',
           RELEASE_DIST_TAG: 'candidate',
           BASELINE_LATEST_VERSION: '3.0.1',
+          PREVIOUS_CANDIDATE_VERSION: '3.1.9',
+          PREVIOUS_CANDIDATE_INTEGRITY: previousIntegrity,
           EXPECTED_INTEGRITY: integrity,
           VERSION_FIXTURE: join(root, 'version.json'),
           PACKUMENT_FIXTURE: join(root, 'packument.json'),
@@ -532,8 +542,13 @@ describe('release workflow', () => {
       const script = `
         set -euo pipefail
         gh() {
-          printf '{"ref":"%s","object":{"type":"%s","sha":"%s"}}\\n' \\
-            "$GITHUB_REF" "$MOCK_TAG_TYPE" "$MOCK_TAG_SHA"
+          if [[ "$*" == *"v\${PREVIOUS_CANDIDATE_VERSION}"* ]]; then
+            printf '{"ref":"refs/tags/v%s","object":{"type":"commit","sha":"%s"}}\\n' \\
+              "$PREVIOUS_CANDIDATE_VERSION" "$PREVIOUS_CANDIDATE_TAG_SHA"
+          else
+            printf '{"ref":"%s","object":{"type":"%s","sha":"%s"}}\\n' \\
+              "$GITHUB_REF" "$MOCK_TAG_TYPE" "$MOCK_TAG_SHA"
+          fi
         }
         ${remoteTagGate}
       `;
@@ -546,6 +561,8 @@ describe('release workflow', () => {
           GITHUB_SHA: eventSha,
           GITHUB_RUN_ATTEMPT: '1',
           GITHUB_OUTPUT: '/dev/null',
+          PREVIOUS_CANDIDATE_VERSION: '3.1.9',
+          PREVIOUS_CANDIDATE_TAG_SHA: '3'.repeat(40),
           MOCK_TAG_SHA: tagSha,
           MOCK_TAG_TYPE: tagType,
         },

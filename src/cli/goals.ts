@@ -16,6 +16,8 @@
  *   ashlr goals advance <id>                            # sandboxed, proposal-only run of the NEXT milestone
  *   ashlr goals status [--json]                         # tracking dashboard
  *   ashlr goals recover-stale [--dry-run] [--max <n>]    # reset stale in-progress lanes
+ *   ashlr goals repair-timestamps --dry-run --json
+ *   ashlr goals repair-timestamps --apply --plan-id <sha256> --json
  *   ashlr goals pause <id> [milestone]
  *   ashlr goals resume <id> [milestone]
  *   ashlr goals skip <id> <milestone>
@@ -59,7 +61,10 @@ import type {
 
 // ─── Lazy imports (graceful degradation if M28 core not yet built) ───────────
 
-type CreateGoalFn = (objective: string, opts?: { project?: string | null }) => Goal;
+type CreateGoalIfAbsentFn = (
+  objective: string,
+  opts?: { project?: string | null },
+) => { status: 'created' | 'exists' | 'failed'; goal: Goal };
 type LoadGoalFn = (id: string) => Goal | null;
 type ListGoalsFn = () => Goal[];
 type AddMilestoneFn = (
@@ -105,6 +110,23 @@ type RecoverStaleGoalLanesFn = (opts?: {
     ageMs: number;
   }[];
 };
+type DryRunGoalTimestampRepairFn = () => {
+  mode: 'dry-run';
+  planId: string;
+  scannedGoals: number;
+  repairableGoals: number;
+  entries: unknown[];
+};
+type ApplyGoalTimestampRepairFn = (planId: string) => {
+  mode: 'apply';
+  planId: string;
+  scannedGoals: number;
+  repairableGoals: number;
+  repairedGoals: number;
+  alreadyAppliedGoals: number;
+  receiptCount: number;
+  entries: unknown[];
+};
 type AdvanceGoalFn = (
   goalId: string,
   cfg: AshlrConfig,
@@ -114,7 +136,7 @@ type ProgressOfFn = (goal: Goal) => GoalProgress;
 type IsEnrolledFn = (repo: string) => boolean;
 
 interface GoalsCore {
-  createGoal: CreateGoalFn;
+  createGoalIfAbsent: CreateGoalIfAbsentFn;
   loadGoal: LoadGoalFn;
   listGoals: ListGoalsFn;
   addMilestone: AddMilestoneFn;
@@ -126,6 +148,8 @@ interface GoalsCore {
   clearMilestones: ClearMilestonesFn;
   deleteGoal: DeleteGoalFn;
   recoverStaleGoalLanes: RecoverStaleGoalLanesFn;
+  dryRunGoalTimestampRepair: DryRunGoalTimestampRepairFn;
+  applyGoalTimestampRepair: ApplyGoalTimestampRepairFn;
   decomposeGoal: DecomposeGoalFn;
   planMilestoneSpec: PlanMilestoneSpecFn;
   advanceGoal: AdvanceGoalFn;
@@ -139,15 +163,16 @@ let _core: GoalsCore | null | undefined = undefined;
 async function importCore(): Promise<GoalsCore | null> {
   if (_core === undefined) {
     try {
-      const [store, planner, advance, policy, config] = await Promise.all([
+      const [store, planner, advance, policy, config, timestampRepair] = await Promise.all([
         import('../core/goals/store.js'),
         import('../core/goals/planner.js'),
         import('../core/goals/advance.js'),
         import('../core/sandbox/policy.js'),
         import('../core/config.js'),
+        import('../core/goals/timestamp-repair.js'),
       ]);
       _core = {
-        createGoal: store.createGoal as CreateGoalFn,
+        createGoalIfAbsent: store.createGoalIfAbsent as CreateGoalIfAbsentFn,
         loadGoal: store.loadGoal as LoadGoalFn,
         listGoals: store.listGoals as ListGoalsFn,
         addMilestone: store.addMilestone as AddMilestoneFn,
@@ -159,6 +184,10 @@ async function importCore(): Promise<GoalsCore | null> {
         clearMilestones: store.clearMilestones as ClearMilestonesFn,
         deleteGoal: store.deleteGoal as DeleteGoalFn,
         recoverStaleGoalLanes: store.recoverStaleGoalLanes as RecoverStaleGoalLanesFn,
+        dryRunGoalTimestampRepair:
+          timestampRepair.dryRunGoalTimestampRepair as DryRunGoalTimestampRepairFn,
+        applyGoalTimestampRepair:
+          timestampRepair.applyGoalTimestampRepair as ApplyGoalTimestampRepairFn,
         decomposeGoal: planner.decomposeGoal as DecomposeGoalFn,
         planMilestoneSpec: planner.planMilestoneSpec as PlanMilestoneSpecFn,
         advanceGoal: advance.advanceGoal as AdvanceGoalFn,
@@ -183,6 +212,7 @@ type GoalsSub =
   | 'advance'
   | 'status'
   | 'recover-stale'
+  | 'repair-timestamps'
   | 'pause'
   | 'resume'
   | 'skip'
@@ -197,6 +227,7 @@ const SUBS: readonly GoalsSub[] = [
   'advance',
   'status',
   'recover-stale',
+  'repair-timestamps',
   'pause',
   'resume',
   'skip',
@@ -222,6 +253,10 @@ interface ParsedGoalsArgs {
   replace: boolean;
   /** --dry-run previews recover-stale without mutating goal records. */
   dryRun: boolean;
+  /** --apply executes an exact timestamp-repair plan. */
+  apply: boolean;
+  /** Exact deterministic repair plan identifier required by --apply. */
+  planId: string | undefined;
   help: boolean;
   error: string | undefined;
 }
@@ -238,6 +273,8 @@ function parseGoalsArgs(args: string[]): ParsedGoalsArgs {
     allowCloud: false,
     replace: false,
     dryRun: false,
+    apply: false,
+    planId: undefined,
     help: false,
     error: undefined,
   };
@@ -260,6 +297,17 @@ function parseGoalsArgs(args: string[]): ParsedGoalsArgs {
       parsed.replace = true;
     } else if (a === '--dry-run') {
       parsed.dryRun = true;
+    } else if (a === '--apply') {
+      parsed.apply = true;
+    } else if (a === '--plan-id') {
+      const val = args[++i];
+      if (val === undefined) {
+        parsed.error = '--plan-id requires a value';
+        return parsed;
+      }
+      parsed.planId = val;
+    } else if (a.startsWith('--plan-id=')) {
+      parsed.planId = a.slice('--plan-id='.length);
     } else if (a === '--project') {
       const val = args[++i];
       if (val === undefined) {
@@ -325,6 +373,8 @@ function printHelp(): void {
   out(`    ${cyan('ashlr goals advance <id>')}`);
   out(`    ${cyan('ashlr goals status')} [--json]`);
   out(`    ${cyan('ashlr goals recover-stale')} [--dry-run] [--max <n>] [--json]`);
+  out(`    ${cyan('ashlr goals repair-timestamps --dry-run')} [--json]`);
+  out(`    ${cyan('ashlr goals repair-timestamps --apply --plan-id <sha256>')} [--json]`);
   out(`    ${cyan('ashlr goals pause <id>')} [milestone]`);
   out(`    ${cyan('ashlr goals resume <id>')} [milestone]`);
   out(`    ${cyan('ashlr goals skip <id> <milestone>')}`);
@@ -338,6 +388,8 @@ function printHelp(): void {
     ['--allow-cloud', 'Allow a CLOUD model for optional plan refinement + spec authoring. Off by default.'],
     ['--replace', 'On `plan`, clear an already-planned goal’s milestones before re-planning.'],
     ['--dry-run', 'On `recover-stale`, preview eligible lanes without mutating goal records.'],
+    ['--apply', 'Apply an exact `repair-timestamps` plan (requires --plan-id).'],
+    ['--plan-id <id>', 'Exact SHA-256 plan identifier emitted by timestamp-repair dry-run.'],
     ['--json', 'Machine-readable output on read paths (list/show/status).'],
     ['--help', 'Show this help.'],
   ];
@@ -346,6 +398,7 @@ function printHelp(): void {
   }
   out('');
   out(dim('  Planning is deterministic + local-only by default (no model, zero network).'));
+  out(dim('  `repair-timestamps` v1 is custody-validated on Linux/macOS and refuses other platforms.'));
   out(dim('  `advance` is SANDBOXED + PROPOSAL-ONLY: it produces a PENDING inbox proposal'));
   out(dim('  a human reviews with `ashlr inbox`. Nothing auto-applies; no real working'));
   out(dim('  tree is ever mutated, pushed, or deployed.'));
@@ -404,6 +457,10 @@ export async function cmdGoals(args: string[]): Promise<number> {
     process.stderr.write('Run `ashlr goals --help` for usage.\n');
     return 2;
   }
+  if (parsed.sub !== 'repair-timestamps' && (parsed.apply || parsed.planId !== undefined)) {
+    process.stderr.write(red('error: ') + '--apply and --plan-id are only valid with repair-timestamps.\n');
+    return 2;
+  }
 
   const core = await importCore();
   if (!core) {
@@ -411,6 +468,51 @@ export async function cmdGoals(args: string[]): Promise<number> {
       red('error: ') + 'goals command requires the M28 core (src/core/goals/*).\n',
     );
     return 1;
+  }
+
+  if (parsed.sub === 'repair-timestamps') {
+    if (parsed.dryRun === parsed.apply) {
+      process.stderr.write(red('error: ') + 'repair-timestamps requires exactly one of --dry-run or --apply.\n');
+      return 2;
+    }
+    if (parsed.positionals.length > 0) {
+      process.stderr.write(red('error: ') + 'repair-timestamps accepts no positional arguments.\n');
+      return 2;
+    }
+    if (parsed.project !== undefined || parsed.max !== undefined || parsed.allowCloud || parsed.replace) {
+      process.stderr.write(red('error: ') + 'repair-timestamps accepts only its mode, --plan-id, and --json.\n');
+      return 2;
+    }
+    if (parsed.dryRun && parsed.planId !== undefined) {
+      process.stderr.write(red('error: ') + '--plan-id is only valid with --apply.\n');
+      return 2;
+    }
+    if (parsed.apply && parsed.planId === undefined) {
+      process.stderr.write(red('error: ') + '--apply requires --plan-id <sha256>.\n');
+      return 2;
+    }
+    try {
+      const result = parsed.dryRun
+        ? core.dryRunGoalTimestampRepair()
+        : core.applyGoalTimestampRepair(parsed.planId!);
+      if (parsed.json) out(JSON.stringify(result, null, 2));
+      else if (result.mode === 'dry-run') {
+        out(
+          yellow('! ') + `timestamp repair plan ${result.planId}: ` +
+          `${result.repairableGoals}/${result.scannedGoals} goal(s) require repair`,
+        );
+      } else {
+        out(
+          green('✓ ') + `timestamp repair ${result.planId}: ` +
+          `${result.repairedGoals} repaired, ${result.alreadyAppliedGoals} already applied`,
+        );
+      }
+      return 0;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      process.stderr.write(red('error: ') + `timestamp repair refused: ${message}\n`);
+      return 1;
+    }
   }
 
   const cfg = core.loadConfig();
@@ -453,11 +555,20 @@ export async function cmdGoals(args: string[]): Promise<number> {
         project = abs;
       }
 
-      const goal = core.createGoal(objective.trim(), { project });
+      const creation = core.createGoalIfAbsent(objective.trim(), { project });
+      if (creation.status === 'failed') {
+        process.stderr.write(red('error: ') + 'goal creation persistence failed.\n');
+        return 1;
+      }
+      const goal = creation.goal;
       if (parsed.json) {
         out(JSON.stringify(goal, null, 2));
       } else {
-        out(green('✓ ') + bold('created goal ') + cyan(goal.id));
+        out(
+          creation.status === 'created'
+            ? green('✓ ') + bold('created goal ') + cyan(goal.id)
+            : yellow('! ') + bold('goal already exists ') + cyan(goal.id),
+        );
         out(`  objective: ${goal.objective}`);
         out(`  project:   ${goal.project ?? gray('(none — planning only; cannot advance)')}`);
         out('');
@@ -566,7 +677,13 @@ export async function cmdGoals(args: string[]): Promise<number> {
       }
       if (goal.milestones.length > 0 && parsed.replace) {
         // --replace: clear the existing plan so we re-plan from a clean slate.
-        core.clearMilestones(goal.id);
+        const cleared = core.clearMilestones(goal.id);
+        if (!cleared) {
+          process.stderr.write(
+            red('error: ') + 'existing plan could not be cleared; concurrent steering won.\n',
+          );
+          return 1;
+        }
       }
 
       // DETERMINISTIC by default; --allow-cloud opens the local-first chain.

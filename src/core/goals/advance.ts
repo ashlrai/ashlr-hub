@@ -56,7 +56,12 @@ import { assertMayMutate } from '../sandbox/policy.js';
 import { runSwarm } from '../swarm/runner.js';
 import { loadSwarm } from '../swarm/store.js';
 import { loadProposal, listProposals } from '../inbox/store.js';
-import { loadGoal, updateMilestoneStatus, resumeMilestone } from './store.js';
+import {
+  claimGoalMilestoneIfCurrent,
+  loadGoal,
+  updateMilestoneStatus,
+  resumeMilestone,
+} from './store.js';
 import { proposalCompletesGoalMilestone } from './completion.js';
 // M270: dynamic frontier trio reads the resolved registry so kimi joins when configured.
 import { engineTierOf } from '../run/sandboxed-engine.js';
@@ -460,10 +465,10 @@ export async function advanceGoal(
   opts?: AdvanceOptions,
   sink?: (e: unknown) => void,
 ): Promise<SwarmRun> {
-  const goal = loadGoal(goalId);
+  let goal = loadGoal(goalId);
   if (!goal) throw new Error(`goal not found: ${goalId}`);
 
-  const milestone = nextActionableMilestone(goal);
+  let milestone = nextActionableMilestone(goal);
   if (!milestone) {
     throw new Error(`goal has no actionable milestone to advance: ${goalId}`);
   }
@@ -489,8 +494,30 @@ export async function advanceGoal(
     opts?.allowAnyRepo === true && process.env.ASHLR_TEST_ALLOW_ANY_REPO === '1';
   assertMayMutate(repo, allowAnyRepo ? { allowAnyRepo: true } : undefined);
 
-  // Mark in-progress so tracking reflects the active advance.
-  updateMilestoneStatus(goalId, milestone.id, 'in-progress');
+  // Mark in-progress so tracking reflects the active advance. The signed
+  // one-shot path uses an atomic generation claim; ordinary explicit goal
+  // advances retain the established update behavior.
+  if (opts?.expectedGoalDigest !== undefined || opts?.expectedMilestoneId !== undefined) {
+    if (!opts.expectedGoalDigest || !opts.expectedMilestoneId) {
+      throw new Error('signed goal claim requires both expected goal digest and milestone id');
+    }
+    const claim = claimGoalMilestoneIfCurrent({
+      goalId,
+      milestoneId: opts.expectedMilestoneId,
+      expectedGoalDigest: opts.expectedGoalDigest,
+    });
+    if (!claim.claimed || !claim.goal) {
+      throw new Error(`signed goal claim refused: ${claim.reason}`);
+    }
+    goal = claim.goal;
+    milestone = goal.milestones.find((entry) => entry.id === opts.expectedMilestoneId) ?? null;
+    if (!milestone) throw new Error('signed goal claim lost its milestone');
+  } else {
+    const transitioned = updateMilestoneStatus(goalId, milestone.id, 'in-progress');
+    if (!transitioned) {
+      throw new Error('goal milestone in-progress transition refused; concurrent steering won');
+    }
+  }
 
   const budget: RunBudget = {
     ...DEFAULT_ADVANCE_BUDGET,
@@ -574,6 +601,11 @@ export async function advanceGoal(
           budget,
           allowCloud: opts?.allowCloud ?? false,
           project: repo,
+          ...(opts?.providerQuota ? {
+            runId: opts.providerQuota.attemptId,
+            providerQuota: opts.providerQuota,
+            noCapture: true,
+          } : {}),
         },
         sink ?? (() => {}),
       );

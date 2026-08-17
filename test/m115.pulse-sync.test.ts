@@ -42,7 +42,9 @@ vi.mock('../src/core/integrations/pulse-exporter.js', () => ({
 }));
 
 vi.mock('../src/core/goals/store.js', () => ({
-  createGoal: vi.fn((objective: string) => ({ id: `goal-${objective.slice(0, 4)}`, objective })),
+  createGoalIfAbsent: vi.fn((objective: string) => ({
+    status: 'created', goal: { id: `goal-${objective.slice(0, 4)}`, objective },
+  })),
 }));
 
 vi.mock('../src/core/inbox/store.js', () => ({
@@ -187,7 +189,7 @@ describe('pulse-sync — env gate (no-op when unconfigured)', () => {
     expect(exporter.shipDepEdges).not.toHaveBeenCalled();
     expect(exporter.exportFleetEvents).not.toHaveBeenCalled();
     // No local executor runs either.
-    expect(goals.createGoal).not.toHaveBeenCalled();
+    expect(goals.createGoalIfAbsent).not.toHaveBeenCalled();
     expect(inbox.setStatus).not.toHaveBeenCalled();
     expect(policy.enroll).not.toHaveBeenCalled();
   });
@@ -205,8 +207,8 @@ describe('pulse-sync — command dispatch (cloud queues → local executes)', ()
 
     const out = await pollAndApplyCommands(cfg);
 
-    expect(goals.createGoal).toHaveBeenCalledTimes(1);
-    expect(goals.createGoal).toHaveBeenCalledWith('ship the map', expect.objectContaining({ project: '/repo/x' }));
+    expect(goals.createGoalIfAbsent).toHaveBeenCalledTimes(1);
+    expect(goals.createGoalIfAbsent).toHaveBeenCalledWith('ship the map', expect.objectContaining({ project: '/repo/x' }));
     expect(inbox.setStatus).not.toHaveBeenCalled();
     expect(policy.enroll).not.toHaveBeenCalled();
 
@@ -231,7 +233,7 @@ describe('pulse-sync — command dispatch (cloud queues → local executes)', ()
 
     expect(inbox.loadProposal).toHaveBeenCalledWith('prop-42');
     expect(inbox.setStatus).toHaveBeenCalledWith('prop-42', 'approved', expect.any(String));
-    expect(goals.createGoal).not.toHaveBeenCalled();
+    expect(goals.createGoalIfAbsent).not.toHaveBeenCalled();
     expect(policy.enroll).not.toHaveBeenCalled();
     expect(out[0]!.outcome).toBe('done');
     expect(exporter.patchFleetCommand).toHaveBeenCalledWith(
@@ -271,7 +273,7 @@ describe('pulse-sync — command dispatch (cloud queues → local executes)', ()
     expect(policy.enroll).toHaveBeenCalledWith('/repo/new', {
       borrowedFence: expect.objectContaining({ path: expect.any(String), token: expect.any(String) }),
     });
-    expect(goals.createGoal).not.toHaveBeenCalled();
+    expect(goals.createGoalIfAbsent).not.toHaveBeenCalled();
     expect(inbox.setStatus).not.toHaveBeenCalled();
     expect(out[0]!.outcome).toBe('done');
     expect(exporter.patchFleetCommand).toHaveBeenCalledWith(
@@ -373,7 +375,7 @@ describe('pulse-sync — command dispatch (cloud queues → local executes)', ()
 
     const out = await pollAndApplyCommands(cfg);
 
-    expect(goals.createGoal).toHaveBeenCalledTimes(1);
+    expect(goals.createGoalIfAbsent).toHaveBeenCalledTimes(1);
     expect(inbox.setStatus).toHaveBeenCalledTimes(2);
     expect(inbox.setStatus).toHaveBeenCalledWith('p-a', 'approved', expect.any(String));
     expect(inbox.setStatus).toHaveBeenCalledWith('p-r', 'rejected', expect.any(String));
@@ -413,7 +415,7 @@ describe('pulse-sync — cancellation fences', () => {
     expect(exporter.claimFleetCommand).not.toHaveBeenCalled();
     expect(exporter.patchFleetCommand).not.toHaveBeenCalled();
     expect(exporter.shipDepEdges).not.toHaveBeenCalled();
-    expect(goals.createGoal).not.toHaveBeenCalled();
+    expect(goals.createGoalIfAbsent).not.toHaveBeenCalled();
     expect(inbox.setStatus).not.toHaveBeenCalled();
     expect(policy.enroll).not.toHaveBeenCalled();
   });
@@ -438,7 +440,7 @@ describe('pulse-sync — cancellation fences', () => {
     expect(result.detail).toContain('aborted during command sync');
     expect(exporter.claimFleetCommand).toHaveBeenCalledTimes(1);
     expect(policy.enroll).not.toHaveBeenCalled();
-    expect(goals.createGoal).not.toHaveBeenCalled();
+    expect(goals.createGoalIfAbsent).not.toHaveBeenCalled();
     expect(exporter.patchFleetCommand).not.toHaveBeenCalled();
     expect(exporter.shipDepEdges).not.toHaveBeenCalled();
   });
@@ -458,7 +460,7 @@ describe('pulse-sync — cancellation fences', () => {
       expect.objectContaining({ id: 'applied', outcome: 'done' }),
     ]);
     expect(policy.enroll).toHaveBeenCalledTimes(1);
-    expect(goals.createGoal).not.toHaveBeenCalled();
+    expect(goals.createGoalIfAbsent).not.toHaveBeenCalled();
     expect(exporter.claimFleetCommand).toHaveBeenCalledTimes(1);
     expect(exporter.patchFleetCommand).not.toHaveBeenCalled();
     expect(exporter.shipDepEdges).not.toHaveBeenCalled();

@@ -172,6 +172,8 @@ beforeEach(() => {
   process.env['ASHLR_TEST_NO_SLEEP'] = '1'; // skip backoff delays
   _m229ResetRoundRobin();
   vi.resetAllMocks();
+  vi.mocked(updateMilestoneStatus).mockImplementation((_goalId, _milestoneId, status) =>
+    makeGoal(tmpDir, [makeMilestone({ status })]));
 });
 
 afterEach(() => {

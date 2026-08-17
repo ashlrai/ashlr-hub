@@ -193,6 +193,12 @@ const loadLoopCmd = lazyCmd(
   'loop command requires src/cli/loop.ts (M55 module not yet built).',
 );
 
+const loadConductorPermitCmd = lazyCmd(
+  () => import('./conductor-permit.js' as unknown as string),
+  (m) => m.cmdConductorPermit as Cmd,
+  'conductor-permit command requires src/cli/conductor-permit.ts.',
+);
+
 // ─── M86 the Goal Loop roadmap runner: `ashlr roadmap` ────────────────────────
 
 const loadRoadmapCmd = lazyCmd(
@@ -1947,6 +1953,12 @@ async function main(): Promise<void> {
         // M55: the conductor — run the proposal-first fleet over the portfolio.
         const cmdLoop = await loadLoopCmd();
         process.exitCode = await cmdLoop(rest);
+        break;
+      }
+
+      case 'conductor-permit': {
+        const cmdConductorPermit = await loadConductorPermitCmd();
+        process.exitCode = await cmdConductorPermit(rest);
         break;
       }
 

@@ -192,9 +192,13 @@ describe('M479 npm release workflow supply-chain admission', () => {
       'node scripts/extract-changelog.mjs > "$RUNNER_TEMP/release-notes.md"',
     );
     expect(workflow.env).toEqual({
-      RELEASE_VERSION: '3.2.6',
+      RELEASE_VERSION: '3.2.7',
       RELEASE_DIST_TAG: 'candidate',
       BASELINE_LATEST_VERSION: '3.0.1',
+      PREVIOUS_CANDIDATE_VERSION: '3.2.6',
+      PREVIOUS_CANDIDATE_INTEGRITY:
+        'sha512-b8O5Nxfb9IfYsmgSW80CAYW+3ZPlet8u7NALOfG8XGFnAAEWxvLtbLKer3psNg7rxkDrAt+rhUjzRzri72PFkA==',
+      PREVIOUS_CANDIDATE_TAG_SHA: '80d49d718d893d0cb02f85a62cd9d2691f4f39c3',
     });
     expect(workflowText).toContain('npm publish "$TARBALL"');
     expect(workflowText).toContain('--tag "$RELEASE_DIST_TAG"');
@@ -277,7 +281,7 @@ describe('M479 npm release workflow supply-chain admission', () => {
     expect(releaseDocs).toContain('After the integrity and provenance checks above');
     expect(releaseDocs).toContain('clean checkout of the exact tag and its exact extracted');
     expect(releaseDocs).toContain('even when the seven-day handoff\n   artifact has not expired');
-    expect(releaseDocs).toContain('set -euo pipefail\n   version=3.2.6\n   release_tag="v${version}"');
+    expect(releaseDocs).toContain('set -euo pipefail\n   version=3.2.7\n   release_tag="v${version}"');
     expect(releaseDocs).toContain('git rev-list -n 1 "$release_tag"');
     expect(releaseDocs).toContain(
       'gh release create "$release_tag" --verify-tag --title "$release_tag"',

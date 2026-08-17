@@ -156,6 +156,10 @@ import {
   finishExecutionAuthority,
 } from '../util/execution-lease.js';
 import { hasUnresolvedToolEffects } from '../util/effect-journal.js';
+import {
+  GoalConductorQuotaRefusal,
+  isGoalConductorQuotaRefusal,
+} from '../goals/conductor-quota.js';
 import type {
   CaptureSandboxedProposalOptions,
   SandboxedEngineResult,
@@ -2145,6 +2149,36 @@ export async function runGoal(
   cfg: AshlrConfig,
   opts: RunOptions,
 ): Promise<RunState> {
+  if (opts.providerQuota) {
+    if (opts.allowCloud === true || (opts.engine !== undefined && opts.engine !== 'builtin')) {
+      throw new GoalConductorQuotaRefusal('goal-conductor-provider-route-not-builtin-local');
+    }
+    if (opts.resumeId) {
+      throw new GoalConductorQuotaRefusal('goal-conductor-provider-quota-cannot-resume');
+    }
+    opts = {
+      ...opts,
+      engine: 'builtin',
+      allowCloud: false,
+      noMemory: true,
+      noCapture: true,
+    };
+    // Signed one-shot execution is text/code only. Clone the signed snapshot
+    // fail-closed so browser verification cannot spawn a browser and visual
+    // grounding cannot read or upload screenshots. Never mutate the caller's
+    // config object (it remains the signed/auditable input snapshot).
+    cfg = {
+      ...cfg,
+      foundry: {
+        ...cfg.foundry,
+        browserVerify: false,
+        visualGrounding: {
+          ...cfg.foundry?.visualGrounding,
+          enabled: false,
+        },
+      },
+    };
+  }
   if (opts.allowBash === true) {
     throw new Error('Sandboxed bash is unavailable until OS-enforced filesystem confinement is active');
   }
@@ -3298,6 +3332,11 @@ async function runGoalInternal(
     ? { scopeId: state.id, generation: effectGeneration }
     : undefined;
 
+  let providerQuotaRefusal: GoalConductorQuotaRefusal | null = null;
+  const throwIfProviderQuotaRefused = (): void => {
+    if (providerQuotaRefusal) throw providerQuotaRefusal;
+  };
+
   const reserveRunModelStep = (
     taskId: string,
     kind: Extract<RunStep['kind'], 'plan' | 'model' | 'synthesize'>,
@@ -3316,6 +3355,15 @@ async function runGoalInternal(
       promptTokenReservation >= remainingTokens
     ) {
       return undefined;
+    }
+
+    try {
+      opts.providerQuota?.claimNext();
+    } catch (error) {
+      providerQuotaRefusal = isGoalConductorQuotaRefusal(error)
+        ? error
+        : new GoalConductorQuotaRefusal('goal-conductor-provider-ticket-claim-failed');
+      throw providerQuotaRefusal;
     }
 
     const maxOutputTokens = Math.min(
@@ -3953,6 +4001,7 @@ async function runGoalInternal(
                     });
                     return;
                   } catch {
+                    throwIfProviderQuotaRefused();
                     // Fall through to original client below.
                   }
                 }
@@ -4004,6 +4053,8 @@ async function runGoalInternal(
                 });
               }
 
+              throwIfProviderQuotaRefused();
+
               // If runTask set status to failed, surface as a throw so withRetry
               // can decide whether to retry (only on retryable errors).
               if (task.status === 'failed') {
@@ -4027,6 +4078,8 @@ async function runGoalInternal(
               task.error = err instanceof Error ? err.message : String(err);
             }
           });
+
+          throwIfProviderQuotaRefused();
 
           // M15: On task failure, attempt ONE escalated routed retry.
           // Escalation is gated by: allowCloud AND escalate.onFailure AND !overBudget.
@@ -4086,6 +4139,7 @@ async function runGoalInternal(
                   task.error = err instanceof Error ? err.message : String(err);
                 }
               });
+              throwIfProviderQuotaRefused();
             }
             // If escalation could not reach cloud (still local / cloud client
             // unbuildable), leave task.status as 'failed' — no further action,
@@ -4114,6 +4168,7 @@ async function runGoalInternal(
               { ...state.usage },
               verifyOpts,
             );
+            throwIfProviderQuotaRefused();
             emit(sink, { kind: 'verify', taskId: task.id, text: verdict.reason, data: verdict });
 
             let repair = 0;
@@ -4161,6 +4216,7 @@ async function runGoalInternal(
                 ...(effectJournal ? { effectJournal } : {}),
                 ...(opts.signal ? { signal: opts.signal } : {}),
               });
+              throwIfProviderQuotaRefused();
               // Copy the execution outcome back onto the canonical task.
               task.status = repairTask.status;
               task.result = repairTask.result;
@@ -4176,6 +4232,7 @@ async function runGoalInternal(
                 { ...state.usage },
                 verifyOpts,
               );
+              throwIfProviderQuotaRefused();
               emit(sink, { kind: 'verify', taskId: task.id, text: verdict.reason, data: verdict });
             }
 
@@ -4265,6 +4322,7 @@ async function runGoalInternal(
             });
           }
         } catch (err) {
+          if (isGoalConductorQuotaRefusal(err)) throw err;
           // Defensive: runTask should handle its own errors, but catch any leak
           const msg = err instanceof Error ? err.message : String(err);
           task.status = 'failed';
