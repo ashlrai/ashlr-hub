@@ -28,7 +28,24 @@ const moduleLoads = vi.hoisted(() => ({
   guardHealth: 0,
   service: 0,
   serviceConfig: 0,
+  activationTransaction: 0,
 }));
+
+const activationControl = vi.hoisted(() => ({
+  result: null as null | Record<string, unknown>,
+}));
+
+vi.mock('../src/core/daemon/runtime-activation-transaction.js', async (importOriginal) => {
+  moduleLoads.activationTransaction++;
+  const original = await importOriginal<typeof import(
+    '../src/core/daemon/runtime-activation-transaction.js'
+  )>();
+  return {
+    ...original,
+    activateRuntimeRelease: async (input: Parameters<typeof original.activateRuntimeRelease>[0]) =>
+      activationControl.result ?? original.activateRuntimeRelease(input),
+  };
+});
 
 vi.mock('../src/core/config.js', () => {
   moduleLoads.config++;
@@ -135,6 +152,7 @@ function expectNoEffectModulesOrCalls(): void {
     guardHealth: 0,
     service: 0,
     serviceConfig: 0,
+    activationTransaction: 0,
   });
   for (const effect of Object.values(effects)) {
     expect(effect).not.toHaveBeenCalled();
@@ -151,6 +169,7 @@ beforeEach(async () => {
 
   vi.resetModules();
   vi.clearAllMocks();
+  activationControl.result = null;
   for (const key of Object.keys(moduleLoads) as Array<keyof typeof moduleLoads>) {
     moduleLoads[key] = 0;
   }
@@ -287,9 +306,154 @@ describe('daemon valid flags remain supported', () => {
       inbox: 0,
       service: 0,
       serviceConfig: 0,
+      activationTransaction: 1,
     });
     for (const effect of Object.values(effects)) expect(effect).not.toHaveBeenCalled();
     expect(fs.readdirSync(tmpHome)).toEqual([]);
+  });
+
+  it.each([
+    {
+      name: 'pre-journal refusal',
+      result: { activated: false, durableOutcome: 'none', recoveryJournalRetained: false },
+      message: 'refused before a transaction journal was retained',
+    },
+    {
+      name: 'retained recovery journal',
+      result: { activated: false, durableOutcome: 'none', recoveryJournalRetained: true },
+      message: 'authenticated recovery journal retained; reconciliation required',
+    },
+    {
+      name: 'restored prior state',
+      result: { activated: false, durableOutcome: 'restored-prior', recoveryJournalRetained: false },
+      message: 'exact prior stopped state restored; recovery journal removed',
+    },
+    {
+      name: 'receipt-settled candidate with removed journal',
+      result: { activated: true, durableOutcome: 'settled-candidate', recoveryJournalRetained: false },
+      message: 'durable receipt committed the candidate stopped release; recovery journal removed',
+    },
+  ])('reports the actual $name outcome', async ({ result, message }) => {
+    activationControl.result = {
+      admissionDigest: 'a'.repeat(64),
+      activationId: '123e4567-e89b-42d3-a456-426614174520',
+      candidateLaunchReceiptSha256: null,
+      candidateRevision: 'b'.repeat(40),
+      canonicalRequestSha256: null,
+      phase: result.activated ? 'activated-stopped' : 'blocked',
+      planDigest: 'c'.repeat(64),
+      reason: 'fixture outcome',
+      rollbackLaunchReceiptSha256: null,
+      rollbackRestored: result.durableOutcome === 'restored-prior',
+      serviceEnabledChanged: false,
+      serviceStarted: false,
+      trustRootCanonicalSha256: null,
+      ...result,
+    };
+    const observed = await capture([
+      'activate',
+      '--request',
+      '/absolute/fixture-plan.json',
+      '--authorize',
+      'a'.repeat(64),
+      '--confirm',
+      'a'.repeat(64),
+    ]);
+    expect(observed.stdout).toContain(message);
+    expect(observed.stdout).not.toContain(
+      message === 'refused before a transaction journal was retained'
+        ? 'authenticated recovery journal retained; reconciliation required'
+        : 'refused before a transaction journal was retained',
+    );
+    expect(observed.code).toBe(result.activated ? 0 : 1);
+  });
+
+  it('reports settled journal-B identity without inheriting concurrent plan-A evidence', async () => {
+    activationControl.result = {
+      admissionDigest: 'b'.repeat(64),
+      activationId: '223e4567-e89b-42d3-a456-426614174520',
+      activated: true,
+      candidateLaunchReceiptSha256: null,
+      candidateRevision: 'c'.repeat(40),
+      canonicalRequestSha256: null,
+      durableOutcome: 'settled-candidate',
+      phase: 'activated-stopped',
+      planDigest: 'd'.repeat(64),
+      reason: 'authenticated raced stopped-release receipt settled',
+      recoveryJournalRetained: false,
+      rollbackLaunchReceiptSha256: null,
+      rollbackRestored: false,
+      serviceEnabledChanged: false,
+      serviceStarted: false,
+      trustRootCanonicalSha256: null,
+    };
+    const observed = await capture([
+      'activate',
+      '--request',
+      '/absolute/concurrent-plan-a.json',
+      '--authorize',
+      'a'.repeat(64),
+      '--confirm',
+      'a'.repeat(64),
+      '--json',
+    ]);
+    expect(observed.code).toBe(0);
+    expect(JSON.parse(observed.stdout)).toMatchObject({
+      activationId: '223e4567-e89b-42d3-a456-426614174520',
+      candidateRevision: 'c'.repeat(40),
+      admissionDigest: 'b'.repeat(64),
+      planDigest: 'd'.repeat(64),
+      canonicalRequestSha256: null,
+      trustRootCanonicalSha256: null,
+      candidateLaunchReceiptSha256: null,
+      rollbackLaunchReceiptSha256: null,
+      activated: true,
+      durableOutcome: 'settled-candidate',
+    });
+  });
+
+  it('keeps all identity unknown for an unauthenticated retained journal-B race', async () => {
+    activationControl.result = {
+      admissionDigest: null,
+      activationId: null,
+      activated: false,
+      candidateLaunchReceiptSha256: null,
+      candidateRevision: null,
+      canonicalRequestSha256: null,
+      durableOutcome: 'none',
+      phase: 'blocked',
+      planDigest: null,
+      reason: 'runtime activation recovery journal authentication failed',
+      recoveryJournalRetained: true,
+      rollbackLaunchReceiptSha256: null,
+      rollbackRestored: false,
+      serviceEnabledChanged: false,
+      serviceStarted: false,
+      trustRootCanonicalSha256: null,
+    };
+    const observed = await capture([
+      'activate',
+      '--request',
+      '/absolute/concurrent-plan-a.json',
+      '--authorize',
+      'a'.repeat(64),
+      '--confirm',
+      'a'.repeat(64),
+      '--json',
+    ]);
+    expect(observed.code).toBe(1);
+    expect(JSON.parse(observed.stdout)).toMatchObject({
+      activationId: null,
+      candidateRevision: null,
+      admissionDigest: null,
+      planDigest: null,
+      canonicalRequestSha256: null,
+      trustRootCanonicalSha256: null,
+      candidateLaunchReceiptSha256: null,
+      rollbackLaunchReceiptSha256: null,
+      activated: false,
+      recoveryJournalRetained: true,
+    });
   });
 
   it('preserves status --json', async () => {
