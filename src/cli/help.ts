@@ -339,6 +339,7 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'goal "<objective>"',           desc: 'The conductor: objective → milestones → sandboxed, proposal-only run (M55).', topic: 'autonomy' },
   { cmd: 'goal "<objective>" --direct',  desc: 'One owner-invoked proposal-only run with bounded --json output; no unattended authority or verification proof.', topic: 'autonomy' },
   { cmd: 'loop',                         desc: 'The conductor loop: run the proposal-first fleet over the portfolio (M55).', topic: 'autonomy' },
+  { cmd: 'conductor-permit request|mint|inspect|stage', desc: 'Dormant signed one-shot goal-conductor permit operator; fail-closed while source trust roots are empty.', topic: 'autonomy' },
   { cmd: 'vision <show|review|preview|shadow|approve|reconcile|set>', desc: 'Mission OS: inspect strategy, preview a bounded DAG, record observation-only shadow evidence, or explicitly adopt planning state.', topic: 'autonomy' },
   { cmd: 'manager [--apply-rejects]',    desc: 'Frontier judge scorecard over pending proposals (shadow mode by default; never merges).', topic: 'autonomy' },
   { cmd: 'best-of-n [--repo --title -n]', desc: 'Generate N candidate diffs (multi-model), critic-select, file the winner as a proposal (M142/M333).', topic: 'autonomy' },

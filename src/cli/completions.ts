@@ -19,6 +19,7 @@ export const TOP_LEVEL_COMMANDS: string[] = [
   'gh', 'vercel', 'wire', 'notify', 'telemetry', 'sandbox', 'audit',
   'enroll', 'backlog', 'inbox', 'daemon', 'ask', 'knowledge', 'reflect',
   'health', 'goals', 'fleet', 'recovery', 'digest', 'seams', 'verify-safety', 'preflight',
+  'conductor-permit',
   'onboard', 'demo', 'orient', 'docs', 'completions', 'plugins', 'x', 'help',
   'skills',
 ];
@@ -50,6 +51,7 @@ const SUBCOMMANDS: Record<string, string[]> = {
   reflect: ['playbooks', 'propose'],
   health: ['propose'],
   goals: ['add', 'plan', 'advance', 'status', 'recover-stale', 'repair-timestamps'],
+  'conductor-permit': ['request', 'mint', 'inspect', 'stage'],
   seams: ['status'],
   completions: ['zsh', 'bash'],
   plugins: ['init', 'list', 'info', 'enable', 'disable'],
