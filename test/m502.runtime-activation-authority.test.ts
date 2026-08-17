@@ -1,4 +1,4 @@
-import { createHash, generateKeyPairSync, type KeyObject } from 'node:crypto';
+import { createHash, generateKeyPairSync, randomBytes, type KeyObject } from 'node:crypto';
 import {
   chmodSync,
   linkSync,
@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readlinkSync,
   readdirSync,
   realpathSync,
   renameSync,
@@ -17,6 +18,55 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+
+const stoppedRuntimeControl = vi.hoisted(() => ({
+  roots: [] as unknown[],
+  nowMs: Date.now(),
+  journalKey: null as Buffer | null,
+  returnedJournalKeys: [] as Buffer[],
+  service: { loaded: false as const, disabled: true },
+  maintenance: { ok: true, reason: 'quiescent', daemonRoots: 0, daemonDescendants: 0 },
+  fence: {} as object,
+  accountHome: null as string | null,
+}));
+
+vi.mock('node:os', async (importOriginal) => {
+  const original = await importOriginal<typeof import('node:os')>();
+  return {
+    ...original,
+    userInfo: () => {
+      const observed = original.userInfo();
+      return stoppedRuntimeControl.accountHome === null
+        ? observed
+        : { ...observed, homedir: stoppedRuntimeControl.accountHome };
+    },
+  };
+});
+
+vi.mock('../src/core/daemon/runtime-activation-stopped-runtime.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../src/core/daemon/runtime-activation-stopped-runtime.js')>();
+  return {
+    ...original,
+    runtimeActivationStoppedRuntime: Object.freeze({
+      get roots() { return stoppedRuntimeControl.roots; },
+      nowMs: () => stoppedRuntimeControl.nowMs,
+      journalKey: () => {
+        if (!stoppedRuntimeControl.journalKey) return null;
+        const owned = Buffer.from(stoppedRuntimeControl.journalKey);
+        stoppedRuntimeControl.returnedJournalKeys.push(owned);
+        return owned;
+      },
+      observeLaunchd: () => ({ ...stoppedRuntimeControl.service }),
+      observeMaintenance: () => ({ ...stoppedRuntimeControl.maintenance }),
+      acquireOutward: () => stoppedRuntimeControl.fence,
+      ownsOutward: (value: object | null) => value === stoppedRuntimeControl.fence,
+      releaseOutward: (value: object | null) => value === stoppedRuntimeControl.fence,
+      acquireLifecycle: () => stoppedRuntimeControl.fence,
+      ownsLifecycle: (value: object | null) => value === stoppedRuntimeControl.fence,
+      releaseLifecycle: (value: object | null) => value === stoppedRuntimeControl.fence,
+    }),
+  };
+});
 
 import {
   RUNTIME_ACTIVATION_AUTHORITY_TRUST_ROOT_DOMAIN_V1,
@@ -38,9 +88,19 @@ import {
   type RuntimeActivationPreflightRequestV1,
 } from '../src/core/daemon/runtime-activation-authority.js';
 import {
+  canonicalizeDaemonActivationValue,
+} from '../src/core/daemon/activation-permit.js';
+import {
   activateRuntimeRelease,
   runtimeActivationTransactionInternals,
 } from '../src/core/daemon/runtime-activation-transaction.js';
+import {
+  runtimeActivationStoppedConsumerInternals,
+  runtimeActivationStoppedConsumerKeyId,
+  signRuntimeActivationStoppedPermit,
+  type RuntimeActivationStoppedConsumerTrustRoot,
+  type RuntimeActivationStoppedPermitPayloadV1,
+} from '../src/core/daemon/runtime-activation-stopped-consumer.js';
 import {
   observeRuntimeActivationLaunchHandoffForVerificationOnly,
 } from '../src/core/daemon/runtime-activation-launch-handoff.js';
@@ -85,6 +145,10 @@ function thawTree(path: string): void {
 
 afterEach(() => {
   vi.useRealTimers();
+  stoppedRuntimeControl.roots = [];
+  stoppedRuntimeControl.journalKey = null;
+  stoppedRuntimeControl.returnedJournalKeys.length = 0;
+  stoppedRuntimeControl.accountHome = null;
   for (const root of roots.splice(0)) {
     thawTree(root);
     rmSync(root, { recursive: true, force: true });
@@ -225,7 +289,9 @@ function completeBundle(input: {
   rollbackTargetDigest: string | null;
   directoryName?: string;
   executableInterpreter?: boolean;
+  packageVersion?: string;
 }): CompleteBundle {
+  const packageVersion = input.packageVersion ?? '3.2.0';
   const bundleRoot = join(input.parent, input.directoryName ?? `${input.role}-bundle`);
   const packageRoot = join(bundleRoot, input.revision);
   mkdirSync(packageRoot, { recursive: true });
@@ -233,7 +299,7 @@ function completeBundle(input: {
     join(packageRoot, 'package.json'),
     `${JSON.stringify({
       name: '@ashlr/hub',
-      version: '3.2.0',
+      version: packageVersion,
       type: 'module',
       bin: { ashlr: 'bin/ashlr' },
       files: ['bin', 'dist', 'scripts/run-verify-command.mjs'],
@@ -245,12 +311,12 @@ function completeBundle(input: {
     join(packageRoot, 'package-lock.json'),
     `${JSON.stringify({
       name: '@ashlr/hub',
-      version: '3.2.0',
+      version: packageVersion,
       lockfileVersion: 3,
       packages: {
         '': {
           name: '@ashlr/hub',
-          version: '3.2.0',
+          version: packageVersion,
           bin: { ashlr: 'bin/ashlr' },
           dependencies: { example: '1.0.0' },
         },
@@ -347,10 +413,10 @@ function completeBundle(input: {
     interpreterSha256: parsed.manifest.interpreterDeclaration.observedArtifactSha256,
     manifestDigest: parsed.manifest.manifestDigest,
     packageTarballSha256: sha256(tarball),
-    packageVersion: '3.2.0',
+    packageVersion,
     policyId,
     runtimeTreeSha256: observed.receipt.stagedTreeIdentity,
-    releaseTag: 'v3.2.0',
+    releaseTag: `v${packageVersion}`,
     serviceDescriptorSha256: sha256(descriptor),
     serviceInvocationDigest: invocation,
   };
@@ -490,6 +556,9 @@ interface CompleteActivationFixture {
   request: RuntimeActivationPreflightRequestV1;
   requestPath: string;
   trustRootPath: string;
+  candidateRevision: string;
+  rollbackRevision: string;
+  priorPlist: string;
 }
 
 function completeActivationFixture(executableCandidate = false): CompleteActivationFixture {
@@ -498,9 +567,11 @@ function completeActivationFixture(executableCandidate = false): CompleteActivat
   chmodSync(home, 0o700);
   const paths = runtimeActivationAuthorityPaths(home);
   mkdirSync(join(home, '.ashlr'), { mode: 0o700 });
+  mkdirSync(join(home, '.ashlr', 'locks'), { mode: 0o700 });
   mkdirSync(join(home, '.ashlr', 'control'), { mode: 0o700 });
   mkdirSync(paths.rootPath, { mode: 0o700 });
   mkdirSync(paths.plansPath, { mode: 0o700 });
+  mkdirSync(join(paths.rootPath, 'consumer-permits'), { mode: 0o700 });
   const releasesRoot = join(home, '.local', 'share', 'ashlr', 'releases');
   mkdirSync(releasesRoot, { recursive: true });
   const releaseKeys = generateKeyPairSync('ed25519');
@@ -537,6 +608,7 @@ function completeActivationFixture(executableCandidate = false): CompleteActivat
     keyId: releaseKeyId,
     evidenceTrustRoot: evidence.canonicalJson,
     rollbackTargetDigest: null,
+    packageVersion: '3.2.7',
   });
   const candidate = completeBundle({
     parent: releasesRoot,
@@ -550,6 +622,7 @@ function completeActivationFixture(executableCandidate = false): CompleteActivat
     evidenceTrustRoot: evidence.canonicalJson,
     rollbackTargetDigest: rollback.manifestDigest,
     executableInterpreter: executableCandidate,
+    packageVersion: '3.2.7',
   });
   const config = '{}\n';
   const configPath = join(home, '.ashlr', 'config.json');
@@ -595,6 +668,12 @@ function completeActivationFixture(executableCandidate = false): CompleteActivat
     payload[role].declarationBindingSha256 = runtimeActivationBuildBindingSha256(declarationInputs);
     chmodSync(bundle.bundleRoot, 0o555);
   }
+  const priorPlist = activationPlist(request, 'rollback');
+  const launchAgentsPath = join(home, 'Library', 'LaunchAgents');
+  mkdirSync(launchAgentsPath, { recursive: true, mode: 0o700 });
+  writeFileSync(join(launchAgentsPath, 'ai.ashlr.daemon.plist'), priorPlist, { mode: 0o600 });
+  payload.execution.prior.plistSha256 = sha256(priorPlist);
+  symlinkSync(join('releases', rollbackRevision), payload.execution.currentPointerPath);
   signed = signRuntimeActivationManifest(payload, activationKeys.privateKey);
   request.signedManifest = signed.manifest;
   const requestPath = join(paths.plansPath, `${payload.planId}.json`);
@@ -605,6 +684,9 @@ function completeActivationFixture(executableCandidate = false): CompleteActivat
     request,
     requestPath,
     trustRootPath: paths.trustRootPath,
+    candidateRevision,
+    rollbackRevision,
+    priorPlist,
   };
 }
 
@@ -1167,10 +1249,10 @@ describe('M502 runtime activation authority', () => {
   });
 });
 
-describe('M504 mutation-disabled macOS activation consumer', () => {
+describe('M504 dormant stopped-release macOS activation consumer', () => {
   it.skipIf(process.platform !== 'darwin')(
-    'takes a complete valid signed plan through exact admission to consumer-unavailable',
-    () => {
+    'takes independently observed immutable 3.2.7 through permit-bound stopped selection',
+    async () => {
       vi.useFakeTimers();
       vi.setSystemTime('2026-08-10T12:00:00.000Z');
       const f = completeActivationFixture();
@@ -1184,19 +1266,93 @@ describe('M504 mutation-disabled macOS activation consumer', () => {
         preflightPassed: true,
       });
       const admissionDigest = preflight.plan.admissionDigest!;
-      const result = runtimeActivationTransactionInternals.testOnlyActivateRuntimeReleaseForHome({
-        authorize: admissionDigest,
-        confirm: admissionDigest,
-        requestPath: f.requestPath,
-      }, f.home);
+      const consumerKeys = generateKeyPairSync('ed25519');
+      const keyId = runtimeActivationStoppedConsumerKeyId(consumerKeys.publicKey);
+      const consumerRoot: RuntimeActivationStoppedConsumerTrustRoot = {
+        algorithm: 'ed25519',
+        keyId,
+        publicKeySpki: consumerKeys.publicKey.export({ format: 'der', type: 'spki' }).toString('base64url'),
+        validFrom: '2026-08-10T11:00:00.000Z',
+        validUntil: '2026-08-10T13:00:00.000Z',
+      };
+      const permit: RuntimeActivationStoppedPermitPayloadV1 = {
+        schemaVersion: 1,
+        protocol: 'runtime-activation-stopped-consumer-v1',
+        permitId: '223e4567-e89b-42d3-a456-426614174000',
+        keyId,
+        issuedAt: '2026-08-10T11:59:00.000Z',
+        expiresAt: '2026-08-10T12:01:00.000Z',
+        scope: {
+          action: 'select-verified-3.2.7-stopped-release',
+          maintenance: true,
+          killSwitch: 'healthy-engaged',
+          providerEffectsBlocked: true,
+          serviceLoaded: false,
+          serviceStart: false,
+          serviceEnable: false,
+          residentAcknowledgement: false,
+        },
+        bindings: {
+          activationId: f.request.signedManifest.payload.planId,
+          admissionDigest,
+          planDigest: preflight.plan.planDigest!,
+          canonicalRequestSha256: sha256(runtimeActivationRequestCanonicalJson(f.request)),
+          trustRootCanonicalSha256: preflight.trust.trustRootCanonicalSha256!,
+          candidateRevision: f.candidateRevision,
+          candidateVersion: '3.2.7',
+          rollbackRevision: f.rollbackRevision,
+          priorCurrentTarget: join('releases', f.rollbackRevision),
+          priorPlistSha256: sha256(f.priorPlist),
+          priorServiceDisabled: true,
+          priorServiceLoaded: false,
+        },
+      };
+      const permitPath = runtimeActivationStoppedConsumerInternals.permitPath(
+        f.home,
+        permit.bindings.activationId,
+      );
+      writeFileSync(
+        permitPath,
+        `${canonicalizeDaemonActivationValue(signRuntimeActivationStoppedPermit(permit, consumerKeys.privateKey))}\n`,
+        { mode: 0o600 },
+      );
+      stoppedRuntimeControl.roots = [consumerRoot];
+      stoppedRuntimeControl.nowMs = f.now;
+      stoppedRuntimeControl.journalKey = randomBytes(32);
+      stoppedRuntimeControl.service = { loaded: false, disabled: true };
+      stoppedRuntimeControl.maintenance = {
+        ok: true,
+        reason: 'healthy explicitly engaged kill switch and zero descendants',
+        daemonRoots: 0,
+        daemonDescendants: 0,
+      };
+      const originalHome = process.env['HOME'];
+      stoppedRuntimeControl.accountHome = f.home;
+      process.env['HOME'] = f.home;
+      let result: Awaited<ReturnType<typeof activateRuntimeRelease>>;
+      try {
+        result = await activateRuntimeRelease({
+          authorize: admissionDigest,
+          confirm: admissionDigest,
+          requestPath: f.requestPath,
+        });
+      } finally {
+        if (originalHome === undefined) delete process.env['HOME'];
+        else process.env['HOME'] = originalHome;
+      }
       expect(result).toMatchObject({
-        activated: false,
-        phase: 'blocked',
-        reason: 'runtime-activation-consumer-unavailable',
+        activated: true,
+        serviceStarted: false,
+        serviceEnabledChanged: false,
+        phase: 'activated-stopped',
         admissionDigest,
         planDigest: preflight.plan.planDigest,
         rollbackRestored: false,
       });
+      expect(readlinkSync(f.request.signedManifest.payload.execution.currentPointerPath, 'utf8'))
+        .toBe(join('releases', f.candidateRevision));
+      expect(readFileSync(join(f.home, 'Library', 'LaunchAgents', 'ai.ashlr.daemon.plist'), 'utf8'))
+        .toBe(activationPlist(f.request));
       expect(result.canonicalRequestSha256).toBe(
         sha256(runtimeActivationRequestCanonicalJson(f.request)),
       );
@@ -1256,11 +1412,11 @@ describe('M504 mutation-disabled macOS activation consumer', () => {
     )).not.toThrow();
   });
 
-  it.skipIf(process.platform !== 'darwin')('rejects a poisoned HOME before reading the request', () => {
+  it.skipIf(process.platform !== 'darwin')('rejects a poisoned HOME before reading the request', async () => {
     const originalHome = process.env['HOME'];
     process.env['HOME'] = '/tmp';
     try {
-      const result = activateRuntimeRelease({
+      const result = await activateRuntimeRelease({
         authorize: digest('a'),
         confirm: digest('a'),
         requestPath: '/definitely/not-read/activation-plan.json',
@@ -1315,27 +1471,55 @@ describe('M504 mutation-disabled macOS activation consumer', () => {
     );
   });
 
-  it('keeps production identity non-injectable and the admitted result explicitly unavailable', () => {
+  it('keeps production identity non-injectable and stopped authority dormant', () => {
     const source = readFileSync(
       join(process.cwd(), 'src/core/daemon/runtime-activation-transaction.ts'),
       'utf8',
     );
-    expect(source).toContain("const CONSUMER_UNAVAILABLE = 'runtime-activation-consumer-unavailable'");
+    const consumerSource = readFileSync(
+      join(process.cwd(), 'src/core/daemon/runtime-activation-stopped-consumer.ts'),
+      'utf8',
+    );
+    const runtimeSource = readFileSync(
+      join(process.cwd(), 'src/core/daemon/runtime-activation-stopped-runtime.ts'),
+      'utf8',
+    );
     expect(source).toContain("if (process.platform !== 'darwin')");
     expect(source).toContain('userInfo().homedir');
     expect(source).not.toMatch(/activateRuntimeRelease\([^)]*(homePath|platform|effects|clock)/s);
     expect(source).not.toContain('export function acknowledgeRuntimeActivationBootstrap');
     expect(source).not.toContain('runtime-activation-launch-handoff');
-    expect(source).not.toMatch(/\b(?:writeFile|rename|symlink|unlink|mkdir|launchctl)\w*\b/);
+    expect(consumerSource).toContain('RUNTIME_ACTIVATION_STOPPED_CONSUMER_TRUST_ROOTS');
+    expect(runtimeSource).toContain('Object.freeze([])');
+    expect(runtimeSource).toContain('runtimeActivationStoppedRuntime = Object.freeze({');
+    expect(consumerSource).toContain('serviceStarted: false');
+    expect(consumerSource).toContain('serviceEnabledChanged: false');
+    expect(consumerSource).not.toContain('export interface RuntimeActivationStoppedVerificationHooks');
+    expect(consumerSource).not.toContain('export function activateVerifiedStoppedRuntimeRelease');
+    expect(source).not.toContain('testOnlyActivateRuntimeReleaseForHome');
+    expect(consumerSource).not.toMatch(/(?:register|set|replace).*runtime.*(?:root|hook|effect)/iu);
+    expect(runtimeSource).not.toMatch(/(?:register|set|replace).*runtime.*(?:root|hook|effect)/iu);
+    expect(runtimeSource).not.toContain('checkpoint');
+    expect(`${source}\n${consumerSource}\n${runtimeSource}`).not.toMatch(/NODE_ENV|VITEST/u);
+    expect(consumerSource).not.toMatch(/launchdCommand\(\['(?:bootstrap|bootout|kickstart|enable|disable)'/u);
     expect(readFileSync(join(process.cwd(), 'src/cli/daemon.ts'), 'utf8')).not.toContain(
       'acknowledgeRuntimeActivationBootstrap',
     );
     expect(readFileSync(join(process.cwd(), 'src/cli/daemon.ts'), 'utf8')).not.toContain(
       'runtime-activation-launch-handoff',
     );
-    expect(runtimeActivationTransactionInternals.CONSUMER_UNAVAILABLE).toBe(
-      'runtime-activation-consumer-unavailable',
-    );
+  });
+
+  it('freezes the actual shipped runtime adapter and compiled roots against deep-import mutation', async () => {
+    const actual = await vi.importActual<typeof import(
+      '../src/core/daemon/runtime-activation-stopped-runtime.js'
+    )>('../src/core/daemon/runtime-activation-stopped-runtime.js');
+    expect(actual.RUNTIME_ACTIVATION_STOPPED_CONSUMER_TRUST_ROOTS).toEqual([]);
+    expect(Object.isFrozen(actual.RUNTIME_ACTIVATION_STOPPED_CONSUMER_TRUST_ROOTS)).toBe(true);
+    expect(Object.isFrozen(actual.runtimeActivationStoppedRuntime)).toBe(true);
+    expect(actual.runtimeActivationStoppedRuntime).not.toHaveProperty('checkpoint');
+    expect(Reflect.set(actual.runtimeActivationStoppedRuntime, 'roots', [{}])).toBe(false);
+    expect(actual.runtimeActivationStoppedRuntime.roots).toEqual([]);
   });
 });
 

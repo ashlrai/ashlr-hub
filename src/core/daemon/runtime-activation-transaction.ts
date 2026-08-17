@@ -12,41 +12,48 @@ import { readStableRegularFile } from '../util/stable-file-read.js';
 
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const MAX_DESCRIPTOR_BYTES = 256 * 1_024;
-const CONSUMER_UNAVAILABLE = 'runtime-activation-consumer-unavailable' as const;
 const SAFE_LAUNCHD_PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
 
 export interface RuntimeActivationResult {
   admissionDigest: string | null;
   activationId: string | null;
-  activated: false;
+  activated: boolean;
+  serviceStarted: false;
+  serviceEnabledChanged: false;
   candidateRevision: string | null;
-  phase: 'blocked';
+  phase: 'blocked' | 'activated-stopped';
   planDigest: string | null;
   canonicalRequestSha256: string | null;
   trustRootCanonicalSha256: string | null;
   candidateLaunchReceiptSha256: string | null;
   rollbackLaunchReceiptSha256: string | null;
   reason: string;
-  rollbackRestored: false;
+  rollbackRestored: boolean;
+  recoveryJournalRetained: boolean;
+  durableOutcome: 'none' | 'restored-prior' | 'settled-candidate';
+}
+
+interface RuntimeActivationPlanEvidence {
+  admissionDigest: string;
+  activationId: string;
+  candidateRevision: string;
+  planDigest: string;
+  canonicalRequestSha256: string;
+  trustRootCanonicalSha256: string;
+  candidateLaunchReceiptSha256: string;
+  rollbackLaunchReceiptSha256: string;
 }
 
 function blocked(
   reason: string,
-  plan?: {
-    admissionDigest: string;
-    activationId: string;
-    candidateRevision: string;
-    planDigest: string;
-    canonicalRequestSha256: string;
-    trustRootCanonicalSha256: string;
-    candidateLaunchReceiptSha256: string;
-    rollbackLaunchReceiptSha256: string;
-  },
+  plan?: RuntimeActivationPlanEvidence,
 ): RuntimeActivationResult {
   return {
     admissionDigest: plan?.admissionDigest ?? null,
     activationId: plan?.activationId ?? null,
     activated: false,
+    serviceStarted: false,
+    serviceEnabledChanged: false,
     candidateRevision: plan?.candidateRevision ?? null,
     phase: 'blocked',
     planDigest: plan?.planDigest ?? null,
@@ -56,6 +63,47 @@ function blocked(
     rollbackLaunchReceiptSha256: plan?.rollbackLaunchReceiptSha256 ?? null,
     reason,
     rollbackRestored: false,
+    recoveryJournalRetained: false,
+    durableOutcome: 'none',
+  };
+}
+
+function resultFromStopped(
+  plan: RuntimeActivationPlanEvidence,
+  stopped: {
+    admissionDigest: string | null;
+    activationId: string | null;
+    activated: boolean;
+    candidateRevision: string | null;
+    durableOutcome: RuntimeActivationResult['durableOutcome'];
+    phase: RuntimeActivationResult['phase'];
+    planDigest: string | null;
+    reason: string;
+    recoveryJournalObserved: boolean;
+    recoveryJournalRetained: boolean;
+    rollbackRestored: boolean;
+  },
+): RuntimeActivationResult {
+  // Retained reconciliation evidence is intentionally identity-unknown unless
+  // the stopped consumer supplied authenticated journal-bound identity.
+  const journalRecovery = stopped.recoveryJournalObserved || stopped.recoveryJournalRetained;
+  return {
+    admissionDigest: journalRecovery ? stopped.admissionDigest : stopped.admissionDigest ?? plan.admissionDigest,
+    activationId: journalRecovery ? stopped.activationId : stopped.activationId ?? plan.activationId,
+    activated: stopped.activated,
+    serviceStarted: false,
+    serviceEnabledChanged: false,
+    candidateRevision: journalRecovery ? stopped.candidateRevision : stopped.candidateRevision ?? plan.candidateRevision,
+    phase: stopped.phase,
+    planDigest: journalRecovery ? stopped.planDigest : stopped.planDigest ?? plan.planDigest,
+    canonicalRequestSha256: journalRecovery ? null : plan.canonicalRequestSha256,
+    trustRootCanonicalSha256: journalRecovery ? null : plan.trustRootCanonicalSha256,
+    candidateLaunchReceiptSha256: journalRecovery ? null : plan.candidateLaunchReceiptSha256,
+    rollbackLaunchReceiptSha256: journalRecovery ? null : plan.rollbackLaunchReceiptSha256,
+    reason: stopped.reason,
+    rollbackRestored: stopped.rollbackRestored,
+    recoveryJournalRetained: stopped.recoveryJournalRetained,
+    durableOutcome: stopped.durableOutcome,
   };
 }
 
@@ -251,29 +299,64 @@ function sha256(value: string | Buffer): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
+function sameStoppedAdmission(
+  left: ReturnType<typeof observeRuntimeActivationExecutionPlan>,
+  right: ReturnType<typeof observeRuntimeActivationExecutionPlan>,
+): boolean {
+  return sameDigest(left.preflight.plan.admissionDigest ?? '', right.preflight.plan.admissionDigest ?? '') &&
+    sameDigest(left.preflight.plan.planDigest ?? '', right.preflight.plan.planDigest ?? '') &&
+    sameDigest(left.canonicalRequestSha256, right.canonicalRequestSha256) &&
+    sameDigest(left.trustRootCanonicalSha256, right.trustRootCanonicalSha256) &&
+    left.candidateServiceDescriptor === right.candidateServiceDescriptor &&
+    left.rollbackServiceDescriptor === right.rollbackServiceDescriptor;
+}
+
 /**
- * Read-only admission for a future native launchd transaction.
+ * Production entrypoint for the dormant stopped-release transaction.
  *
- * This wrapper deliberately exposes no HOME/platform/clock/effect injection.
- * It derives identity from the operating-system account database, rejects a
- * poisoned HOME, validates the exact signed plan and already-read descriptor
- * bytes, and always withholds resident mutation.
+ * This wrapper exposes no HOME/platform/clock/effect injection. It derives
+ * identity from the operating-system account database, rejects a poisoned
+ * HOME, repeats exact signed-plan observation, and delegates only to M520. The
+ * compiled M520 trust roots are empty, and even a separately provisioned permit
+ * cannot start, enable, or acknowledge a resident service.
  */
-export function activateRuntimeRelease(input: {
+export async function activateRuntimeRelease(input: {
   authorize: string;
   confirm: string;
   requestPath: string;
-}): RuntimeActivationResult {
+}): Promise<RuntimeActivationResult> {
   const account = accountBoundHome();
   if (!account.ok) return blocked(account.reason);
 
   return activateRuntimeReleaseForHome(input, account.homePath);
 }
 
-function activateRuntimeReleaseForHome(
+async function activateRuntimeReleaseForHome(
   input: { authorize: string; confirm: string; requestPath: string },
   homePath: string,
-): RuntimeActivationResult {
+): Promise<RuntimeActivationResult> {
+  const stoppedConsumer = await import('./runtime-activation-stopped-consumer.js');
+  const recovery = stoppedConsumer.recoverStoppedRuntimeReleaseForTransaction(homePath);
+  if (recovery) {
+    return {
+      admissionDigest: recovery.admissionDigest,
+      activationId: recovery.activationId,
+      activated: recovery.activated,
+      serviceStarted: false,
+      serviceEnabledChanged: false,
+      candidateRevision: recovery.candidateRevision,
+      phase: recovery.phase,
+      planDigest: recovery.planDigest,
+      canonicalRequestSha256: null,
+      trustRootCanonicalSha256: null,
+      candidateLaunchReceiptSha256: null,
+      rollbackLaunchReceiptSha256: null,
+      reason: recovery.reason,
+      rollbackRestored: recovery.rollbackRestored,
+      recoveryJournalRetained: recovery.recoveryJournalRetained,
+      durableOutcome: recovery.durableOutcome,
+    };
+  }
 
   let observed: ReturnType<typeof observeRuntimeActivationExecutionPlan>;
   try {
@@ -308,14 +391,29 @@ function activateRuntimeReleaseForHome(
   } catch (error) {
     return blocked(error instanceof Error ? error.message : String(error), plan);
   }
-  return blocked(CONSUMER_UNAVAILABLE, plan);
+  const revalidateAdmission = (): boolean => {
+    try {
+      return sameStoppedAdmission(observed, observeRuntimeActivationExecutionPlan({
+        requestPath: input.requestPath,
+        homePath,
+      }));
+    } catch {
+      return false;
+    }
+  };
+  const stopped = stoppedConsumer.consumeStoppedRuntimeReleaseForTransaction(
+    observed,
+    homePath,
+    revalidateAdmission,
+  );
+  return resultFromStopped(plan, stopped);
 }
 
 export const runtimeActivationTransactionInternals = {
-  CONSUMER_UNAVAILABLE,
   accountBoundHome,
   parseDescriptorBytes,
+  resultFromStopped,
+  sameStoppedAdmission,
   validateClosedDescriptor,
   validateMutationDisabledPlan,
-  testOnlyActivateRuntimeReleaseForHome: activateRuntimeReleaseForHome,
 };
