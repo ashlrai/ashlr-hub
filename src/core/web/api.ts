@@ -1516,8 +1516,14 @@ export async function handleApi(
     // proposals + merges + paused state). buildFleetStatus never throws; same
     // no-auth read class as /api/daemon and /api/pulse.
     if (path === '/api/fleet' && method === 'GET') {
+      // M516: serve the cached FleetStatus VERBATIM. Freshness is deliberately
+      // NOT spread in here: test/build-identity.test.ts pins that this route
+      // performs no API-side recomposition, because a caller verifying
+      // buildIdentity must be able to trust that what it received is exactly
+      // what buildFleetStatus produced. Freshness is still reported on the
+      // snapshot and control payloads, where their builders attach it.
       const cached = await getCachedFleetStatus(cfg);
-      sendJson(res, 200, { ...cached.status, fleetFreshness: { stale: cached.stale, ageMs: cached.ageMs } });
+      sendJson(res, 200, cached.status);
       return true;
     }
 
