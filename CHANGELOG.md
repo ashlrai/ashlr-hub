@@ -11,6 +11,28 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+## [3.2.7] — 2026-08-16 — Immutable candidate supersession
+
+- Carries forward the immutable 3.2.6 candidate and all subsequently merged
+  protected-source improvements. npm `latest` remains 3.0.1; this release is a
+  candidate for isolated provenance and acceptance testing, not a production
+  promotion or resident-runtime activation.
+- Changes registry admission from first-candidate publication to an exact
+  successor transition. Immediately before the sole OIDC publish command, the
+  workflow requires `candidate=3.2.6`, `latest=3.0.1`, the published 3.2.6
+  integrity `sha512-b8O5Nxfb9IfYsmgSW80CAYW+3ZPlet8u7NALOfG8XGFnAAEWxvLtbLKer3psNg7rxkDrAt+rhUjzRzri72PFkA==`,
+  the unchanged lightweight `v3.2.6` tag at
+  `80d49d718d893d0cb02f85a62cd9d2691f4f39c3`, and absence of 3.2.7.
+- After publication, verification requires the new 3.2.7 SRI and provenance,
+  the old 3.2.6 version and integrity to remain intact, `candidate=3.2.7`, and
+  `latest=3.0.1`. It removes `candidate` from canonical before and after
+  dist-tag maps and requires every other tag to match exactly.
+- Preserves one script-disabled tarball publish, attempt-bound artifacts,
+  signed-canary `NO_AUTHORITY`, protected-master/tag admission, explicit
+  `npm-release` approval, provenance verification, and GitHub prerelease
+  gates. The workflow contains no dist-tag editing, unpublish, deprecate,
+  retagging, second publish, install-pointer, daemon, or activation effect.
+
 ## [3.2.6] — 2026-08-16 — Canonical publisher-path recovery
 
 - For candidate evaluators upgrading from public npm `latest` 3.0.1, this
