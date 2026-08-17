@@ -72,6 +72,7 @@ const TEST_CONTROL_STATE = Symbol.for('ashlr.goal-conductor-permit-operator.test
 interface PermitOperatorTestControl {
   observePrivateKeyBuffer?: (bytes: Buffer) => void;
   observePinnedFileBuffer?: (path: string, bytes: Buffer) => void;
+  pinnedFileAfterOpen?: (input: { path: string }) => void;
   pinnedFileRead?: (input: {
     path: string;
     offset: number;
@@ -324,20 +325,15 @@ function inspectCustodyAncestors(path: string): void {
   }
 }
 
+function safePinnedPrivateFile(stat: BigIntStats, maxBytes: number): boolean {
+  return stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1n
+    && ownedByCurrent(stat) && (stat.mode & 0o777n) === 0o600n
+    && stat.size > 0n && stat.size <= BigInt(maxBytes);
+}
+
 function readPinnedPrivateFile(path: string, maxBytes = MAX_OPERATOR_FILE_BYTES): Buffer {
-  if (!isAbsolute(path) || resolve(path) !== path || realpathSync(path) !== path) {
+  if (!isAbsolute(path) || resolve(path) !== path) {
     throw new Error('private-file-path-not-canonical');
-  }
-  inspectCustodyAncestors(path);
-  const assurance = assurePrivateStoragePath(path, 'file', 'inspect-owned', {
-    anchorPath: resolve(sep),
-  });
-  if (!assurance.ok) throw new Error('private-file-acl-unsafe');
-  const namedBefore = lstatSync(path, { bigint: true });
-  if (!namedBefore.isFile() || namedBefore.isSymbolicLink() || namedBefore.nlink !== 1n
-    || !ownedByCurrent(namedBefore) || (namedBefore.mode & 0o777n) !== 0o600n
-    || namedBefore.size <= 0n || namedBefore.size > BigInt(maxBytes)) {
-    throw new Error('private-file-custody-unsafe');
   }
   const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
   const fd = openSync(path, fsConstants.O_RDONLY | noFollow);
@@ -346,9 +342,23 @@ function readPinnedPrivateFile(path: string, maxBytes = MAX_OPERATOR_FILE_BYTES)
   try {
     try {
       const openedBefore = fstatSync(fd, { bigint: true });
-      if (!sameSnapshot(namedBefore, openedBefore)) throw new Error('private-file-changed-during-open');
-      bytes = Buffer.alloc(Number(openedBefore.size));
+      if (!safePinnedPrivateFile(openedBefore, maxBytes)) {
+        throw new Error('private-file-custody-unsafe');
+      }
       const control = testControl();
+      control?.pinnedFileAfterOpen?.({ path });
+      inspectCustodyAncestors(path);
+      const assuranceBefore = assurePrivateStoragePath(path, 'file', 'inspect-owned', {
+        anchorPath: resolve(sep),
+      });
+      if (!assuranceBefore.ok) throw new Error('private-file-acl-unsafe');
+      if (realpathSync(path) !== path) throw new Error('private-file-path-not-canonical');
+      const namedBefore = lstatSync(path, { bigint: true });
+      if (!safePinnedPrivateFile(namedBefore, maxBytes)
+        || !sameSnapshot(openedBefore, namedBefore)) {
+        throw new Error('private-file-changed-during-open');
+      }
+      bytes = Buffer.alloc(Number(openedBefore.size));
       control?.observePinnedFileBuffer?.(path, bytes);
       let offset = 0;
       while (offset < bytes.length) {
@@ -374,6 +384,20 @@ function readPinnedPrivateFile(path: string, maxBytes = MAX_OPERATOR_FILE_BYTES)
         ? control.pinnedFilePostLstat({ path, stat: () => lstatSync(path, { bigint: true }) })
         : lstatSync(path, { bigint: true });
       if (!sameSnapshot(openedBefore, openedAfter) || !sameSnapshot(openedAfter, namedAfter)) {
+        throw new Error('private-file-changed-during-read');
+      }
+      inspectCustodyAncestors(path);
+      const assuranceAfter = assurePrivateStoragePath(path, 'file', 'inspect-owned', {
+        anchorPath: resolve(sep),
+      });
+      if (!assuranceAfter.ok) throw new Error('private-file-acl-unsafe');
+      if (realpathSync(path) !== path) throw new Error('private-file-path-not-canonical');
+      const openedFinal = fstatSync(fd, { bigint: true });
+      const namedFinal = lstatSync(path, { bigint: true });
+      if (!safePinnedPrivateFile(openedFinal, maxBytes)
+        || !safePinnedPrivateFile(namedFinal, maxBytes)
+        || !sameSnapshot(openedBefore, openedFinal)
+        || !sameSnapshot(openedFinal, namedFinal)) {
         throw new Error('private-file-changed-during-read');
       }
     } finally {

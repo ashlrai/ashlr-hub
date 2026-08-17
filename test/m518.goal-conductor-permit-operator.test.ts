@@ -7,6 +7,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -353,6 +354,65 @@ describe.skipIf(process.platform === 'win32')('M518 offline mint, inspection, an
     writeFileSync(keyPath, 'not-pkcs8', { mode: 0o600 });
     expect(mintGoalConductorPermitOffline({ requestPath, privateKeyPath: keyPath, outputPath }).reason)
       .toBe('goal-conductor-private-key-invalid');
+  });
+
+  it('fails closed for missing and descriptor-unsafe pinned inputs without output', () => {
+    const state = fixture();
+    const matching = keyFixture();
+    const outputPath = join(state.outputDir, 'permit.json');
+    const keyPath = join(state.keyDir, 'key.pk8');
+    writeFileSync(keyPath, matching.privateDer, { mode: 0o600 });
+    chmodSync(keyPath, 0o600);
+    expect(mintGoalConductorPermitOffline({
+      requestPath: join(state.requestDir, 'missing.json'),
+      privateKeyPath: keyPath,
+      outputPath,
+    })).toMatchObject({ ok: false, state: 'degraded' });
+
+    const { outputPath: requestPath, result } = buildRequest(state, matching.root);
+    writeGoalConductorOperatorArtifact(requestPath, result.value!);
+    chmodSync(requestPath, 0o644);
+    expect(mintGoalConductorPermitOffline({ requestPath, privateKeyPath: keyPath, outputPath }))
+      .toMatchObject({ ok: false, state: 'degraded' });
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
+  it('rejects an open-to-named swap before reading or transferring key bytes', () => {
+    const state = fixture();
+    const matching = keyFixture();
+    const replacement = keyFixture();
+    const { outputPath: requestPath, result } = buildRequest(state, matching.root);
+    writeGoalConductorOperatorArtifact(requestPath, result.value!);
+    const keyPath = join(state.keyDir, 'key.pk8');
+    const displacedPath = join(state.keyDir, 'displaced.pk8');
+    const replacementPath = join(state.keyDir, 'replacement.pk8');
+    writeFileSync(keyPath, matching.privateDer, { mode: 0o600 });
+    writeFileSync(replacementPath, replacement.privateDer, { mode: 0o600 });
+    chmodSync(keyPath, 0o600);
+    chmodSync(replacementPath, 0o600);
+    const observed: Buffer[] = [];
+    _setGoalConductorPermitOperatorTestControlForTest(
+      GOAL_CONDUCTOR_PERMIT_OPERATOR_TEST_CONTROL,
+      {
+        pinnedFileAfterOpen: ({ path }) => {
+          if (path !== keyPath) return;
+          renameSync(keyPath, displacedPath);
+          renameSync(replacementPath, keyPath);
+        },
+        observePinnedFileBuffer: (path, bytes) => {
+          if (path === keyPath) observed.push(bytes);
+        },
+      },
+    );
+    const outputPath = join(state.outputDir, 'permit.json');
+    expect(mintGoalConductorPermitOffline({
+      requestPath,
+      privateKeyPath: keyPath,
+      outputPath,
+      nowMs: NOW,
+    })).toMatchObject({ ok: false, state: 'degraded' });
+    expect(observed).toEqual([]);
+    expect(existsSync(outputPath)).toBe(false);
   });
 
   it('inspect is read-only; stage is O_EXCL 0600 and returns only the exact loop target', () => {
