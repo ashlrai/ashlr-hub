@@ -18,6 +18,7 @@ import {
   clearMutationToken,
 } from './auth-store.js';
 import { onSseEvent, type SseEventName } from './sse.js';
+import { subscribeTheme, getTheme, setTheme, cycleTheme, type ThemePreference } from './theme-store.js';
 
 /**
  * Subscribe to a resource. Fetches on mount (and on `key` change), stays
@@ -83,4 +84,18 @@ export function useMutationHold(): MutationHold {
 /** Subscribe to a raw named SSE event for the lifetime of the component. */
 export function useSseEvent(name: SseEventName, onEvent: (payload: unknown) => void): void {
   useEffect(() => onSseEvent(name, onEvent), [name, onEvent]);
+}
+
+export interface ThemeControl {
+  theme: ThemePreference;
+  set: (next: ThemePreference) => void;
+  cycle: () => void;
+}
+
+/** Shared with Topbar's theme button and the command palette's "Toggle
+ * theme" action — both read/write data/theme-store.ts through this hook so
+ * neither can drift out of sync with the other. */
+export function useTheme(): ThemeControl {
+  const theme = useSyncExternalStore(subscribeTheme, getTheme, getTheme);
+  return { theme, set: setTheme, cycle: cycleTheme };
 }

@@ -25,6 +25,14 @@ import type {
 } from '../../data/api-types.js';
 import styles from './PortfolioView.module.css';
 
+function formatRelative(ts: number): string {
+  const seconds = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (seconds < 5) return 'just now';
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  return `${minutes}m ago`;
+}
+
 export function PortfolioView() {
   const query = useQuery(portfolioQuery);
   // Today-deltas are computed against a prior digest and live on the same
@@ -38,8 +46,9 @@ export function PortfolioView() {
     <div className={styles.view}>
       <header className={styles.header}>
         <h1 className={styles.title}>Portfolio</h1>
-        <div aria-live="polite">
+        <div className={styles.freshness} aria-live="polite">
           {query.status === 'refreshing' || snapshotQuery.status === 'refreshing' ? <RefreshIndicator /> : null}
+          {query.updatedAt ? <span className={styles.freshnessLabel}>Updated {formatRelative(query.updatedAt)}</span> : null}
         </div>
       </header>
 

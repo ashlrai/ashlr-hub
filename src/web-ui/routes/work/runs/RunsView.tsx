@@ -17,8 +17,8 @@
  * beyond that, so this view filters/sorts client-side over that window and
  * says so rather than implying it can reach further back.
  */
-import { useMemo, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 import { runsQuery } from '../../../data/queries.js';
 import { useQuery } from '../../../data/hooks.js';
 import { useScrollRestore } from '../../../hooks/useScrollRestore.js';
@@ -50,8 +50,16 @@ function formatDate(iso: string): string {
 export function RunsView() {
   const containerRef = useRef<HTMLDivElement>(null);
   useScrollRestore('/work/runs', containerRef);
+  const navigate = useNavigate();
 
   const runsResult = useQuery(runsQuery);
+
+  // Roving tabindex, same pattern as ProposalList's onListKeyDown — the audit
+  // finding this replaces: rows here were plain <tr>s with a single Link per
+  // row as the only focusable element, so a keyboard user tabbed through
+  // every row's link one at a time with no Arrow/Enter row navigation.
+  const [focusedIndex, setFocusedIndex] = useState(0);
+  const rowRefs = useRef<Map<string, HTMLTableRowElement>>(new Map());
 
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -121,6 +129,28 @@ export function RunsView() {
 
     return rows;
   }, [runs, statusFilter, engineFilter, providerFilter, sinceMs, search, sortKey, sortDir]);
+
+  useEffect(() => {
+    setFocusedIndex((i) => Math.min(i, Math.max(filtered.length - 1, 0)));
+  }, [filtered.length]);
+
+  function onTableKeyDown(e: React.KeyboardEvent) {
+    if (filtered.length === 0) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      const next = Math.min(focusedIndex + 1, filtered.length - 1);
+      setFocusedIndex(next);
+      rowRefs.current.get(filtered[next]!.id)?.focus();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      const next = Math.max(focusedIndex - 1, 0);
+      setFocusedIndex(next);
+      rowRefs.current.get(filtered[next]!.id)?.focus();
+    } else if (e.key === 'Enter') {
+      const row = filtered[focusedIndex];
+      if (row) navigate(`/work/runs/${row.id}`);
+    }
+  }
 
   function toggleSort(key: SortKey) {
     if (key === sortKey) {
@@ -227,7 +257,7 @@ export function RunsView() {
         <p className={styles.empty}>No runs match the current filters.</p>
       ) : (
         <div className={styles.tableWrap}>
-          <table className={styles.table}>
+          <table className={styles.table} onKeyDown={onTableKeyDown}>
             <thead>
               <tr>
                 <th scope="col">Goal</th>
@@ -265,14 +295,25 @@ export function RunsView() {
               </tr>
             </thead>
             <tbody>
-              {filtered.map((run) => (
-                <tr key={run.id}>
+              {filtered.map((run, i) => (
+                <tr
+                  key={run.id}
+                  ref={(el) => {
+                    if (el) rowRefs.current.set(run.id, el);
+                    else rowRefs.current.delete(run.id);
+                  }}
+                  tabIndex={i === focusedIndex ? 0 : -1}
+                  onFocus={() => setFocusedIndex(i)}
+                  aria-current={i === focusedIndex ? 'true' : undefined}
+                  className={styles.row}
+                >
                   <td>
                     <Link
                       to={`/work/runs/${run.id}`}
                       data-focus-key={`run-${run.id}`}
                       className={styles.goalLink}
                       title={run.goal}
+                      tabIndex={-1}
                     >
                       {run.goal}
                     </Link>

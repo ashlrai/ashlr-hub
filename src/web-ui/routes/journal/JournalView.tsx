@@ -12,6 +12,7 @@
  * JournalEntryRow via <EpistemicBadge/>).
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import { useQuery, useRefetch } from '../../data/hooks.js';
 import { controlLogsObservationQuery, fleetActivityQuery, runsQuery, inboxQuery } from '../../data/queries.js';
 import { RefreshIndicator } from '../../components/primitives/RefreshIndicator.js';
@@ -20,7 +21,16 @@ import { LiveNowStrip } from './LiveNowStrip.js';
 import { JournalFilters, ALL_JOURNAL_SOURCES } from './JournalFilters.js';
 import { JournalTimeline } from './JournalTimeline.js';
 import { JournalEntryRow } from './JournalEntryRow.js';
-import { buildJournalEntries, filterJournalEntries, type JournalSource } from './journal-model.js';
+import { buildJournalEntries, filterJournalEntries, startOfTodayMs, type JournalSource } from './journal-model.js';
+
+/** Command-palette "Open journal — today" navigates here with
+ * `state: { windowToday: true }` (react-router's location.state, not a new
+ * URL-param convention — this app is HashRouter'd with no useSearchParams
+ * usage anywhere else). Read once on mount as the initial filter; the
+ * operator can still change it from the normal filter bar afterward. */
+interface JournalNavState {
+  windowToday?: boolean;
+}
 import styles from './JournalView.module.css';
 
 /** control-logs-observation isn't SSE-invalidated (its key isn't in
@@ -37,6 +47,9 @@ function formatRelative(ts: number): string {
 }
 
 export function JournalView() {
+  const location = useLocation();
+  const openedToToday = (location.state as JournalNavState | null)?.windowToday === true;
+
   const logsQuery = useQuery(controlLogsObservationQuery);
   const activityQuery = useQuery(fleetActivityQuery);
   const runsListQuery = useQuery(runsQuery);
@@ -50,8 +63,8 @@ export function JournalView() {
 
   const [sources, setSources] = useState<Set<JournalSource>>(new Set(ALL_JOURNAL_SOURCES));
   const [query, setQuery] = useState('');
-  const [windowValue, setWindowValue] = useState('24h');
-  const [windowMs, setWindowMs] = useState<number | null>(24 * 60 * 60 * 1000);
+  const [windowValue, setWindowValue] = useState(openedToToday ? 'today' : '24h');
+  const [windowMs, setWindowMs] = useState<number | null>(openedToToday ? startOfTodayMs() : 24 * 60 * 60 * 1000);
 
   const entries = useMemo(
     () =>
