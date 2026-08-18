@@ -182,6 +182,22 @@ export type ObserveRuntimeReleaseImmutableStagedTreeResult =
   }
   | { ok: false; reason: string };
 
+export type ObserveRuntimeReleaseStagedTreeIdentityReadOnlyResult =
+  | {
+    ok: true;
+    authority: {
+      deployPermitted: false;
+      installPermitted: false;
+      launchPermitted: false;
+      rollbackPermitted: false;
+      startPermitted: false;
+    };
+    durability: 'not-observed';
+    roots: RuntimeReleaseImmutableStagedTreeReceiptV2['roots'];
+    stagedTreeIdentity: string;
+  }
+  | { ok: false; reason: string };
+
 export interface RuntimeReleaseLaunchObservationOptions
   extends RuntimeReleaseImmutableStagedTreeOptions {
   argv: string[];
@@ -390,6 +406,13 @@ function requireImmutable(stat: BigIntStats, label: string): void {
   if ((stat.mode & 0o222n) !== 0n) {
     throw new Error(`${label} is writable`);
   }
+  const getuid = process.getuid;
+  if (typeof getuid === 'function') {
+    const currentUid = BigInt(getuid.call(process));
+    if (stat.uid !== 0n && stat.uid !== currentUid) {
+      throw new Error(`${label} has an unsafe owner`);
+    }
+  }
 }
 
 function observationDeadline(): RuntimeReleaseObservationDeadline {
@@ -530,6 +553,13 @@ function snapshotDependencyBinLink(
   if (!before.isSymbolicLink() || !sameSnapshot(expectedSnapshot, before)) {
     throw new Error('runtime release dependency bin link changed before read');
   }
+  const getuid = process.getuid;
+  if (typeof getuid === 'function') {
+    const currentUid = BigInt(getuid.call(process));
+    if (before.uid !== 0n && before.uid !== currentUid) {
+      throw new Error('runtime release dependency bin link has an unsafe owner');
+    }
+  }
   const linkTarget = readlinkSync(linkPath, 'utf8');
   if (linkTarget.length === 0 || linkTarget.length > 4_096 || /[\0\r\n]/u.test(linkTarget) ||
     isAbsolute(linkTarget) || /^[A-Za-z]:[\\/]/u.test(linkTarget) || linkTarget.includes('\\')) {
@@ -590,6 +620,12 @@ function snapshotDependencyBinLink(
   const after = lstatSync(linkPath, { bigint: true });
   if (!sameSnapshot(before, after) || readlinkSync(linkPath, 'utf8') !== linkTarget) {
     throw new Error('runtime release dependency bin link changed during read');
+  }
+  if (typeof getuid === 'function') {
+    const currentUid = BigInt(getuid.call(process));
+    if (after.uid !== 0n && after.uid !== currentUid) {
+      throw new Error('runtime release dependency bin link has an unsafe owner');
+    }
   }
   return {
     content: { linkTarget, path: logicalPath, symlink: true },
@@ -813,6 +849,7 @@ function observeDirectoryTree(
 function observeStage(
   options: RuntimeReleaseImmutableStagedTreeOptions,
   deadline = observationDeadline(),
+  observeDurability = true,
 ): StageObservation {
   const internal = options as RuntimeReleaseImmutableStagedTreeOptions & {
     __testHooks?: RuntimeReleaseLaunchRevalidationTestHooks;
@@ -850,10 +887,12 @@ function observeStage(
     throw new Error('runtime release declared interpreter contains a symlink');
   }
 
-  fsyncStableDirectory(packageRoot);
-  requireBeforeDeadline(deadline, 'runtime release package root durability');
-  fsyncStableDirectory(dependencyRoot);
-  requireBeforeDeadline(deadline, 'runtime release dependency root durability');
+  if (observeDurability) {
+    fsyncStableDirectory(packageRoot);
+    requireBeforeDeadline(deadline, 'runtime release package root durability');
+    fsyncStableDirectory(dependencyRoot);
+    requireBeforeDeadline(deadline, 'runtime release dependency root durability');
+  }
   const manifest = parseUnsignedRuntimeReleaseManifest(options.manifest);
   if (!manifest.ok) throw new Error(manifest.reason);
   requireBeforeDeadline(deadline, 'runtime release manifest verification');
@@ -985,6 +1024,37 @@ export function observeRuntimeReleaseImmutableStagedTree(
       ok: true,
       canonicalJson: `${canonicalJson(receipt)}\n`,
       receipt,
+    };
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
+ * Reuse the exact staged-tree scanner for readiness without claiming or
+ * performing directory-durability observation.
+ */
+export function observeRuntimeReleaseStagedTreeIdentityReadOnly(
+  options: RuntimeReleaseImmutableStagedTreeOptions,
+): ObserveRuntimeReleaseStagedTreeIdentityReadOnlyResult {
+  try {
+    const observation = observeStage(options, observationDeadline(), false);
+    return {
+      ok: true,
+      authority: {
+        deployPermitted: false,
+        installPermitted: false,
+        launchPermitted: false,
+        rollbackPermitted: false,
+        startPermitted: false,
+      },
+      durability: 'not-observed',
+      roots: {
+        artifactRootSha256: observation.artifactRoot.rootSha256,
+        dependencyRootSha256: observation.dependencyRoot.rootSha256,
+        interpreterRootSha256: observation.interpreterRootSha256,
+      },
+      stagedTreeIdentity: observation.stagedTreeIdentity,
     };
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) };
