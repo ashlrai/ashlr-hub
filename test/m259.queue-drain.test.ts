@@ -24,6 +24,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
 import type { AutoMergeResult } from '../src/core/inbox/merge.js';
+import type { ManagerVerdict } from '../src/core/fleet/manager.js';
 import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
 
 // ---------------------------------------------------------------------------
@@ -169,9 +170,17 @@ function drainCfg(overrides?: Record<string, unknown>): AshlrConfig {
   } as AshlrConfig;
 }
 
+function consideredVerdict(verdict: ManagerVerdict): ManagerVerdict {
+  Object.defineProperty(verdict, 'considered', {
+    value: true,
+    enumerable: false,
+  });
+  return verdict;
+}
+
 /** Default non-ship verdict. */
-function reviewVerdict(proposalId: string) {
-  return {
+function reviewVerdict(proposalId: string): ManagerVerdict {
+  return consideredVerdict({
     proposalId,
     verdict: 'review' as const,
     value: 2,
@@ -180,12 +189,12 @@ function reviewVerdict(proposalId: string) {
     alignment: 2,
     rationale: 'needs review',
     wouldMerge: false,
-  };
+  });
 }
 
 /** Ship verdict. */
-function shipVerdict(proposalId: string) {
-  return {
+function shipVerdict(proposalId: string): ManagerVerdict {
+  return consideredVerdict({
     proposalId,
     verdict: 'ship' as const,
     value: 5,
@@ -194,7 +203,7 @@ function shipVerdict(proposalId: string) {
     alignment: 5,
     rationale: 'looks great',
     wouldMerge: true,
-  };
+  });
 }
 
 function expectAttestedShipDecision(proposalId: string): void {
@@ -378,16 +387,41 @@ describe('M259 auto-archive after K non-ship verdicts', () => {
       mockUpdateProposalField.mockClear();
       const p = makeProposal(`p-${v}`, { judgeNonShipCount: 2 });
       pendingProposals = [p];
-      mockJudgeProposal.mockResolvedValue({
+      mockJudgeProposal.mockResolvedValue(consideredVerdict({
         proposalId: `p-${v}`,
         verdict: v,
         value: 1, correctness: 1, scope: 1, alignment: 1,
         rationale: `${v} verdict`,
         wouldMerge: false,
-      });
+      }));
       const out = await runAutoMergePass(drainCfg());
       expect(out.autoArchived).toBe(1);
     }
+  });
+
+  it('does not count or archive an incomplete unmarked negative rubric', async () => {
+    const p = makeProposal('p-incomplete', { judgeNonShipCount: 2 });
+    pendingProposals = [p];
+    mockJudgeProposal.mockResolvedValue({
+      proposalId: p.id,
+      verdict: 'review',
+      wouldMerge: false,
+    });
+
+    const out = await runAutoMergePass(drainCfg());
+
+    expect(out.autoArchived).toBe(0);
+    expect(mockUpdateProposalField).not.toHaveBeenCalled();
+    expect(mockSetStatus).not.toHaveBeenCalledWith(
+      p.id,
+      'rejected',
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
   });
 });
 

@@ -101,6 +101,14 @@ import type { ManagerVerdict } from '../src/core/fleet/manager.js';
 const origHome = process.env.HOME;
 let tmpHome: string;
 
+function consideredVerdict(verdict: ManagerVerdict): ManagerVerdict {
+  Object.defineProperty(verdict, 'considered', {
+    value: true,
+    enumerable: false,
+  });
+  return verdict;
+}
+
 /** Fake client returned by resolveFrontierJudgeClient. */
 const FRONTIER_CLIENT = {
   model: 'claude-opus-4-8',
@@ -149,7 +157,7 @@ beforeEach(() => {
   // Default: frontier resolver returns the claude-opus-4-8 client.
   mockResolveFrontierJudgeClient.mockReturnValue(FRONTIER_CLIENT);
 
-  mockJudgeProposal.mockResolvedValue({
+  mockJudgeProposal.mockResolvedValue(consideredVerdict({
     proposalId: 'default',
     verdict: 'ship',
     value: 5,
@@ -158,7 +166,7 @@ beforeEach(() => {
     alignment: 5,
     rationale: 'frontier judge',
     wouldMerge: true,
-  } satisfies ManagerVerdict);
+  } satisfies ManagerVerdict));
 });
 
 afterEach(() => {
@@ -241,10 +249,10 @@ describe('M176 resolver wiring', () => {
     mockListProposals.mockReturnValue([p]);
     mockReadDecisions.mockReturnValue([]);
 
-    mockJudgeProposal.mockResolvedValueOnce({
+    mockJudgeProposal.mockResolvedValueOnce(consideredVerdict({
       proposalId: 'r3', verdict: 'ship', value: 5, correctness: 5,
       scope: 1, alignment: 5, rationale: 'ship', wouldMerge: true,
-    } satisfies ManagerVerdict);
+    } satisfies ManagerVerdict));
 
     const cfg = enabledCfg();
     await runAutoMergePass(cfg);
@@ -303,10 +311,10 @@ describe('M176 resolver wiring', () => {
     mockListProposals.mockReturnValue([p1, p2]);
     mockReadDecisions.mockReturnValue([]);
 
-    mockJudgeProposal.mockResolvedValue({
+    mockJudgeProposal.mockResolvedValue(consideredVerdict({
       proposalId: 'any', verdict: 'ship', value: 5, correctness: 5,
       scope: 1, alignment: 5, rationale: 'ship', wouldMerge: true,
-    } satisfies ManagerVerdict);
+    } satisfies ManagerVerdict));
 
     await runAutoMergePass(enabledCfg());
 
@@ -424,10 +432,10 @@ describe('M176 regression — ollama-only providerChain', () => {
     mockListProposals.mockReturnValue(proposals);
     mockReadDecisions.mockReturnValue([]);
 
-    mockJudgeProposal.mockResolvedValue({
+    mockJudgeProposal.mockResolvedValue(consideredVerdict({
       proposalId: 'any', verdict: 'ship', value: 5, correctness: 5,
       scope: 1, alignment: 5, rationale: 'ship', wouldMerge: true,
-    } satisfies ManagerVerdict);
+    } satisfies ManagerVerdict));
 
     // enabledCfg already sets providerChain: ['ollama']
     const r = await runAutoMergePass(enabledCfg());

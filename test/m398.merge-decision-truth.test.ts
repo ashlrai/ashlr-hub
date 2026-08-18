@@ -59,6 +59,7 @@ import {
 import { readDecisions } from '../src/core/fleet/decisions-ledger.js';
 import type { DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
 import { runAutoMergePass } from '../src/core/fleet/automerge-pass.js';
+import type { ManagerVerdict } from '../src/core/fleet/manager.js';
 import { judgeTracesDir, readJudgeTraces, recordJudgeTrace } from '../src/core/fleet/judge-trace.js';
 import { hashDiff, signLocalMergeIntent, signProvenance } from '../src/core/foundry/provenance.js';
 import {
@@ -95,6 +96,14 @@ let tmpRepo: string;
 
 const PRODUCER_MODEL = 'codex:gpt-5.5';
 const REVIEWER_MODEL = 'claude-opus-4-5';
+
+function consideredVerdict(verdict: ManagerVerdict): ManagerVerdict {
+  Object.defineProperty(verdict, 'considered', {
+    value: true,
+    enumerable: false,
+  });
+  return verdict;
+}
 
 function git(repo: string, args: string[]): string {
   return execFileSync('git', ['-C', repo, ...args], {
@@ -232,7 +241,7 @@ beforeEach(() => {
       complete: async () => '{}',
     };
   });
-  mocks.judgeProposal.mockImplementation(async (proposal: Proposal) => ({
+  mocks.judgeProposal.mockImplementation(async (proposal: Proposal) => consideredVerdict({
     proposalId: proposal.id,
     verdict: 'ship',
     value: 4,
