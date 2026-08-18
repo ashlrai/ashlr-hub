@@ -16,7 +16,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { readFileSync, statSync } from 'node:fs';
+import { closeSync, constants, fstatSync, openSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { resolve, join, sep, normalize, extname } from 'node:path';
 
 // ---------------------------------------------------------------------------
@@ -77,6 +77,7 @@ export function serveStatic(
   req: IncomingMessage,
   res: ServerResponse,
   dir: string,
+  beforeDescriptorOpen: (() => void) | undefined = undefined,
 ): boolean {
   try {
     const rootDir = resolve(dir);
@@ -85,7 +86,9 @@ export function serveStatic(
     if (pathname === null) return false;
 
     // "/" (or empty) -> index.html (SPA shell).
-    let rel = pathname === '/' ? '/index.html' : pathname;
+    let rel = pathname === '/' ? '/index.html'
+      : (pathname === '/next' || pathname === '/next/') ? '/next/index.html'
+      : pathname;
 
     // Reject null bytes anywhere in the relative path.
     if (rel.includes('\x00')) return false;
@@ -106,28 +109,35 @@ export function serveStatic(
       return false;
     }
 
-    // Stat — must be an existing regular file (never a directory).
-    let stat;
+    // Resolve symlinks before containment, then open without following a
+    // replacement final symlink. Identity revalidation binds the earlier
+    // path decision to the descriptor that is actually read.
+    let fd: number | undefined;
     try {
-      stat = statSync(candidate);
+      const realRoot = realpathSync(rootDir);
+      const realCandidate = realpathSync(candidate);
+      const realRootWithSep = realRoot.endsWith(sep) ? realRoot : realRoot + sep;
+      if (!realCandidate.startsWith(realRootWithSep)) return false;
+      const expected = statSync(realCandidate);
+      beforeDescriptorOpen?.();
+      fd = openSync(realCandidate, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      const opened = fstatSync(fd);
+      if (!opened.isFile() || opened.dev !== expected.dev || opened.ino !== expected.ino) return false;
+      const body = readFileSync(fd);
+      res.setHeader('Content-Type', contentTypeFor(candidate));
+      res.writeHead(200, {
+        'Content-Type': contentTypeFor(candidate),
+        'Content-Length': String(body.byteLength),
+        'Cache-Control': 'no-cache',
+        'X-Content-Type-Options': 'nosniff',
+      });
+      res.end(body);
+      return true;
     } catch {
       return false; // ENOENT and friends -> not found.
+    } finally {
+      if (fd !== undefined) try { closeSync(fd); } catch { /* best effort */ }
     }
-    if (!stat.isFile()) return false;
-
-    const body = readFileSync(candidate);
-
-    // Set Content-Type via setHeader (case-insensitive in real Node http) so
-    // downstream readers can look it up by the canonical lowercase name.
-    res.setHeader('Content-Type', contentTypeFor(candidate));
-    res.writeHead(200, {
-      'Content-Type': contentTypeFor(candidate),
-      'Content-Length': String(body.byteLength),
-      'Cache-Control': 'no-cache',
-      'X-Content-Type-Options': 'nosniff',
-    });
-    res.end(body);
-    return true;
   } catch {
     // NEVER throw — any unexpected error means "not served".
     return false;

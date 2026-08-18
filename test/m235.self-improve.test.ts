@@ -40,7 +40,7 @@ vi.mock('../src/core/genome/store.js', () => ({
   loadGenome: vi.fn(() => []),
   genomeHealth: vi.fn(() => ({})),
   genomeHubHealth: vi.fn(() => ({})),
-  hubStorePath: vi.fn(() => ''),
+  hubStorePath: vi.fn(() => `${process.env.HOME ?? ''}/.ashlr/genome/hub.jsonl`),
 }));
 
 const mockRecordDecision = vi.fn();
@@ -75,6 +75,7 @@ function makeCfg(overrides?: Partial<AshlrConfig>): AshlrConfig {
       intervalMs: 100,
       cooldownMs: 6 * 60 * 60 * 1000,
     },
+    foundry: { selfImprove: true } as unknown,
     ...overrides,
   } as AshlrConfig;
 }
@@ -86,7 +87,7 @@ function makeCfgWithSelfImprove(selfImprove: boolean): AshlrConfig {
   } as AshlrConfig;
 }
 
-/** Config with selfImprove absent entirely (should default ON). */
+/** Config with selfImprove absent entirely (must stay OFF). */
 function makeCfgNoSelfImproveFlag(): AshlrConfig {
   return {
     ...makeCfg(),
@@ -105,8 +106,23 @@ beforeEach(() => {
   mockAppendHubEntry.mockReset();
   mockRecordDecision.mockReset();
 
-  // Default: both stores succeed (return undefined / void)
-  mockAppendHubEntry.mockReturnValue(undefined);
+  // Default: append a real isolated JSONL row so durability acknowledgment is
+  // exercised while the store module itself remains mocked.
+  mockAppendHubEntry.mockImplementation(() => {
+    const hubPath = `${process.env.HOME ?? ''}/.ashlr/genome/hub.jsonl`;
+    fs.mkdirSync(path.dirname(hubPath), { recursive: true });
+    const entry = {
+      id: `mock-entry-${mockAppendHubEntry.mock.calls.length}`,
+      project: null,
+      source: 'hub' as const,
+      title: 'mock',
+      text: 'mock',
+      tags: [],
+      ts: new Date().toISOString(),
+    };
+    fs.appendFileSync(hubPath, `${JSON.stringify(entry)}\n`, 'utf8');
+    return entry;
+  });
   mockRecordDecision.mockReturnValue(undefined);
 });
 
@@ -174,8 +190,9 @@ describe('M235 deriveLesson — pure function', () => {
 
 describe('M235 learnFromRejection — writes anti-playbook for rejection verdicts', () => {
   it('calls appendHubEntry once for verdict "noise"', () => {
-    learnFromRejection('prop-001', 'Rename a variable', 'noise', 'too trivial', makeCfg());
+    const acknowledged = learnFromRejection('prop-001', 'Rename a variable', 'noise', 'too trivial', makeCfg());
 
+    expect(acknowledged).toBe(true);
     expect(mockAppendHubEntry).toHaveBeenCalledOnce();
     const [input] = mockAppendHubEntry.mock.calls[0] as [Record<string, unknown>];
     // Title must reference verdict
@@ -186,6 +203,7 @@ describe('M235 learnFromRejection — writes anti-playbook for rejection verdict
     expect(tags).toContain('verdict:noise');
     // hubOnly must be true (no project note dropped)
     expect(input['hubOnly']).toBe(true);
+    expect(input).not.toHaveProperty('requirePersistence');
     // text must contain the lesson
     expect(typeof input['text']).toBe('string');
     expect((input['text'] as string).length).toBeGreaterThan(10);
@@ -287,12 +305,12 @@ describe('M235 learnFromRejection — gate: cfg.foundry.selfImprove === false', 
     expect(mockRecordDecision).toHaveBeenCalledOnce();
   });
 
-  it('writes normally when selfImprove flag is absent (default ON)', () => {
+  it('is a no-op when selfImprove flag is absent (default OFF)', () => {
     const cfg = makeCfgNoSelfImproveFlag();
     learnFromRejection('prop-default', 'Rename X', 'noise', 'too trivial', cfg);
 
-    expect(mockAppendHubEntry).toHaveBeenCalledOnce();
-    expect(mockRecordDecision).toHaveBeenCalledOnce();
+    expect(mockAppendHubEntry).not.toHaveBeenCalled();
+    expect(mockRecordDecision).not.toHaveBeenCalled();
   });
 
   it('is a no-op even for each rejection verdict when selfImprove === false', () => {
@@ -317,9 +335,8 @@ describe('M235 learnFromRejection — never throws', () => {
       throw new Error('disk full');
     });
 
-    expect(() =>
-      learnFromRejection('prop-throw-1', 'Risky proposal', 'noise', 'low value', makeCfg()),
-    ).not.toThrow();
+    expect(learnFromRejection('prop-throw-1', 'Risky proposal', 'noise', 'low value', makeCfg())).toBe(false);
+    expect(mockRecordDecision).not.toHaveBeenCalled();
   });
 
   it('does not throw when recordDecision throws', () => {
@@ -350,8 +367,8 @@ describe('M235 learnFromRejection — never throws', () => {
     expect(() =>
       learnFromRejection('prop-no-foundry', 'Some proposal', 'noise', '', cfg),
     ).not.toThrow();
-    // Default ON: writes should have been attempted
-    expect(mockAppendHubEntry).toHaveBeenCalledOnce();
+    // Default OFF: no explicit authority means no write attempt.
+    expect(mockAppendHubEntry).not.toHaveBeenCalled();
   });
 
   it('does not throw when cfg.foundry throws during property access', () => {

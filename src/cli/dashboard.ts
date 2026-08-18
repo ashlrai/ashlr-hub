@@ -527,23 +527,24 @@ async function cmdDashboardOpen(
     );
     return 1;
   }
+  const consoleUrl = `${url.replace(/\/$/, '')}/next/`;
 
   if (json) {
-    console.log(JSON.stringify({ url, port: SERVE_PORT, label: PLIST_LABEL }));
+    console.log(JSON.stringify({ url, consoleUrl, port: SERVE_PORT, label: PLIST_LABEL }));
   } else {
     console.log('');
     console.log(col.bold('  ashlr dashboard') + col.dim(' — fleet web dashboard'));
     console.log('');
-    console.log(`  ${col.green('✓')} ${col.cyan(url)}`);
+    console.log(`  ${col.green('✓')} ${col.cyan(consoleUrl)}`);
     console.log(`  ${col.dim('Opening in your browser…')}`);
     console.log('');
   }
 
   try {
-    await openBrowserFn(url);
+    await openBrowserFn(consoleUrl);
   } catch {
     if (!json) {
-      console.error(col.dim(`  Could not open browser automatically. Navigate to ${url}`));
+      console.error(col.dim(`  Could not open browser automatically. Navigate to ${consoleUrl}`));
     }
   }
 

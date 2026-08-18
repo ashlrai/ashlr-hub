@@ -7,6 +7,12 @@ lookup across every milestone (including confirmed spec-vs-shipped
 collisions), see [`docs/MILESTONE-INDEX.md`](./MILESTONE-INDEX.md) — check it
 before citing a milestone number as evidence of what shipped.
 
+> **Historical/design context — not current runtime activation guidance.**
+> “Shipped” below means source and test delivery, not live runtime authority.
+> Current compiled daemon and conductor trust roots are empty: non-dry daemon
+> and resident loop execution is dormant, while owner-invoked `ashlr goal
+> "<objective>"` remains a live proposal-only plan-and-advance path.
+
 ## Design principles (constant across every milestone)
 
 1. **Local-first.** No network egress without explicit opt-in; local models by

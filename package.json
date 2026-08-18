@@ -69,7 +69,7 @@
     "node": ">=22.15.0"
   },
   "scripts": {
-    "prepublishOnly": "npm run typecheck && npm run lint && npm run test:ci",
+    "prepublishOnly": "npm run typecheck && npm run lint && npm run test:ci && npm run test:web",
     "prepack": "npm run build",
     "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs && vite build --config vite.config.web.ts && node scripts/build-release-dependency-inventory.mjs && node scripts/build-identity.mjs",
     "build:binary": "node scripts/build-sea.mjs",

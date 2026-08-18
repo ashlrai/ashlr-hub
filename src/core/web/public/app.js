@@ -207,7 +207,11 @@ async function establishReadSession(token) {
 }
 
 async function clearReadSession() {
-  await fetch(API_BASE + '/api/session', { method: 'DELETE' }).catch(() => {});
+  const clientProof = getReadClientProof();
+  await fetch(API_BASE + '/api/session', {
+    method: 'DELETE',
+    headers: { 'x-ashlr-read-client': clientProof },
+  }).catch(() => {});
 }
 
 function cancelReadSessionRefresh() {

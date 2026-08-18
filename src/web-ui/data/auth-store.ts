@@ -25,6 +25,8 @@
  * for the query cache.
  */
 
+import { evictAll } from './cache.js';
+
 const READ_CLIENT_STORAGE_KEY = 'ashlr.readClientProof.v1';
 const READ_CLIENT_RE = /^[a-f0-9]{64}$/;
 const MUTATION_HOLD_MS = 20 * 60 * 1000; // 20 minutes of inactivity clears the hold.
@@ -132,17 +134,25 @@ export async function establishReadSession(rawReadToken: string): Promise<void> 
 
 export async function clearReadSession(): Promise<void> {
   try {
-    await fetch('/api/session', { method: 'DELETE', credentials: 'same-origin' });
+    await fetch('/api/session', {
+      method: 'DELETE',
+      credentials: 'same-origin',
+      headers: { 'x-ashlr-read-client': clientProof },
+    });
   } catch {
     /* best-effort */
   }
-  setState({ phase: 'unauthenticated' });
+  clearMutationToken();
+  evictAll();
+  setState({ phase: 'unauthenticated', checked: true });
 }
 
 /** Called by data/client.ts whenever any authenticated GET comes back 401. */
 export function reportSessionExpired(): void {
   if (state.phase !== 'authenticated') return;
-  setState({ phase: 'unauthenticated' });
+  clearMutationToken();
+  evictAll();
+  setState({ phase: 'unauthenticated', checked: true });
 }
 
 export function markCheckComplete(authenticated: boolean): void {

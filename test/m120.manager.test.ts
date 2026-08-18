@@ -257,7 +257,7 @@ describe('m120 judgeProposal — score parsing', () => {
     expect(verdict.value).toBe(1);
   });
 
-  it('clamps scores to 1-5 range', async () => {
+  it('rejects out-of-range scores as an incomplete rubric', async () => {
     const { judgeProposal } = await import('../src/core/fleet/manager.js');
     const proposal = makeProposal();
     const client = mockClient({
@@ -270,10 +270,15 @@ describe('m120 judgeProposal — score parsing', () => {
     });
 
     const verdict = await judgeProposal(proposal, {} as never, client);
-    expect(verdict.value).toBe(5);
-    expect(verdict.correctness).toBe(1);
-    expect(verdict.scope).toBe(1);
-    expect(verdict.alignment).toBe(5);
+    expect(verdict).toMatchObject({
+      verdict: 'review',
+      value: 3,
+      correctness: 3,
+      scope: 3,
+      alignment: 3,
+      wouldMerge: false,
+      judgeFailure: 'parse',
+    });
   });
 
   it('treats unknown verdict strings as "review"', async () => {
@@ -304,7 +309,7 @@ describe('m120 judgeProposal — score parsing', () => {
     expect(verdict.semanticEvents).toBeUndefined();
   });
 
-  it('parses a complete reasoning-only ship verdict', async () => {
+  it('holds a reasoning-only ship verdict as an incomplete parse failure', async () => {
     const { judgeProposal } = await import('../src/core/fleet/manager.js');
     const proposal = makeProposal({ diff: makeDiff(1, 2) });
     const client = mockClientRaw(`<reasoning>
@@ -317,12 +322,10 @@ RATIONALE: Small correct fix with low blast radius.
 </reasoning>`);
 
     const verdict = await judgeProposal(proposal, {} as never, client);
-    expect(verdict.verdict).toBe('ship');
-    expect(verdict.value).toBe(4);
-    expect(verdict.correctness).toBe(5);
-    expect(verdict.scope).toBe(1);
-    expect(verdict.alignment).toBe(4);
-    expect(verdict.wouldMerge).toBe(true);
+    expect(verdict.verdict).toBe('review');
+    expect(verdict.wouldMerge).toBe(false);
+    expect(verdict.judgeFailure).toBe('parse');
+    expect(verdict.considered).toBeUndefined();
     expect(verdict.semanticEvents).toBeUndefined();
   });
 
@@ -340,9 +343,84 @@ RATIONALE: Valuable but correctness is too uncertain to ship.
 
     const verdict = await judgeProposal(proposal, {} as never, client);
     expect(verdict.verdict).toBe('review');
-    expect(verdict.correctness).toBe(2);
     expect(verdict.wouldMerge).toBe(false);
+    expect(verdict.judgeFailure).toBe('parse');
     expect(verdict.semanticEvents).toBeUndefined();
+  });
+
+  it('holds partial ship JSON and incomplete negative JSON as parse failures', async () => {
+    const { judgeProposal } = await import('../src/core/fleet/manager.js');
+    for (const raw of [
+      { verdict: 'ship', value: 5, correctness: 5, scope: 1, rationale: 'missing alignment' },
+      { verdict: 'harmful', value: 1, correctness: 5, scope: 2, rationale: 'missing alignment' },
+    ]) {
+      const verdict = await judgeProposal(makeProposal(), {} as never, mockClientRaw(JSON.stringify(raw)));
+      expect(verdict).toMatchObject({ verdict: 'review', wouldMerge: false, judgeFailure: 'parse' });
+      expect(verdict.considered).toBeUndefined();
+    }
+  });
+
+  it.each([
+    ['ship without rationale', { verdict: 'ship', value: 5, correctness: 5, scope: 1, alignment: 5 }],
+    ['ship with blank rationale', { verdict: 'ship', value: 5, correctness: 5, scope: 1, alignment: 5, rationale: '   ' }],
+    ['negative with non-string rationale', { verdict: 'harmful', value: 1, correctness: 5, scope: 2, alignment: 1, rationale: 42 }],
+  ])('holds %s as an incomplete parse failure', async (_label, raw) => {
+    const { judgeProposal } = await import('../src/core/fleet/manager.js');
+    const verdict = await judgeProposal(makeProposal(), {} as never, mockClientRaw(JSON.stringify(raw)));
+    expect(verdict).toMatchObject({ verdict: 'review', wouldMerge: false, judgeFailure: 'parse' });
+    expect(verdict.considered).toBeUndefined();
+  });
+
+  it('recovers an initially incomplete rubric with exactly one strict JSON retry', async () => {
+    const { judgeProposal } = await import('../src/core/fleet/manager.js');
+    const complete = vi.fn()
+      .mockResolvedValueOnce(JSON.stringify({
+        verdict: 'ship', value: 5, correctness: 5, scope: 1,
+        rationale: 'Missing alignment on the first attempt.',
+      }))
+      .mockResolvedValueOnce(JSON.stringify({
+        verdict: 'ship', value: 5, correctness: 5, scope: 1, alignment: 5,
+        rationale: 'Complete on strict retry.',
+      }));
+    const verdict = await judgeProposal(makeProposal({ diff: makeDiff(1, 1) }), {} as never, {
+      id: 'anthropic', model: RUN_MANAGER_REVIEWER_MODEL, complete,
+    });
+
+    expect(complete).toHaveBeenCalledTimes(2);
+    expect(verdict).toMatchObject({ verdict: 'ship', wouldMerge: true, considered: true });
+  });
+
+  it('retries a parseable incomplete rubric once, then refuses a repeated incomplete response', async () => {
+    const { judgeProposal } = await import('../src/core/fleet/manager.js');
+    const incomplete = JSON.stringify({
+      verdict: 'ship', value: 5, correctness: 5, scope: 1,
+      rationale: 'Still missing alignment.',
+    });
+    const complete = vi.fn().mockResolvedValue(incomplete);
+    const verdict = await judgeProposal(makeProposal(), {} as never, {
+      id: 'anthropic', model: RUN_MANAGER_REVIEWER_MODEL, complete,
+    });
+
+    expect(complete).toHaveBeenCalledTimes(2);
+    expect(verdict).toMatchObject({ verdict: 'review', wouldMerge: false, judgeFailure: 'parse' });
+    expect(verdict.considered).toBeUndefined();
+  });
+
+  it.each([
+    ['low value', { value: 2, correctness: 5 }],
+    ['low correctness', { value: 5, correctness: 3 }],
+  ])('rejects a contradictory ship rubric with %s', async (_label, scores) => {
+    const { judgeProposal } = await import('../src/core/fleet/manager.js');
+    const verdict = await judgeProposal(makeProposal(), {} as never, mockClientRaw(JSON.stringify({
+      verdict: 'ship',
+      value: scores.value,
+      correctness: scores.correctness,
+      scope: 1,
+      alignment: 5,
+      rationale: 'Contradictory ship fixture.',
+    })));
+    expect(verdict).toMatchObject({ verdict: 'review', wouldMerge: false, judgeFailure: 'parse' });
+    expect(verdict.considered).toBeUndefined();
   });
 
   it('parses verdict text from Codex-style JSONL message content', async () => {
@@ -374,6 +452,8 @@ RATIONALE: Useful and correct with minimal scope.
     expect(verdict.verdict).toBe('ship');
     expect(verdict.rationale).toBe('Useful and correct with minimal scope.');
     expect(verdict.wouldMerge).toBe(true);
+    expect(verdict.considered).toBe(true);
+    expect(JSON.stringify(verdict)).not.toContain('considered');
   });
 
   it('ignores score-shaped telemetry after a nested JSONL verdict', async () => {
@@ -491,13 +571,12 @@ RATIONALE: Useful and correct with minimal scope.
     expect(verdict.judgeFailure).toBeUndefined();
   });
 
-  it('recovers a verdict from a truncated response whose <reasoning> block is intact', async () => {
+  it('holds a truncated response even when its reasoning block is intact', async () => {
     const { judgeProposal } = await import('../src/core/fleet/manager.js');
     const proposal = makeProposal({ diff: makeDiff(1, 1) });
     // The trailing JSON got cut off by a token-limit truncation, but the
-    // reasoning block (which the prompt asks for FIRST) survived intact —
-    // this should be recoverable via the reasoning-prose fallback, not a
-    // parse failure.
+    // Reasoning remains diagnostic only; truncated structured evidence cannot
+    // become an operational judgment.
     const raw = `<reasoning>
 VALUE: 3 — Modest improvement.
 CORRECTNESS: 4 — Looks right.
@@ -510,8 +589,8 @@ RATIONALE: Fine change but not obviously worth merging yet.
     const verdict = await judgeProposal(proposal, {} as never, mockClientRaw(raw));
     expect(verdict.verdict).toBe('review');
     expect(verdict.value).toBe(3);
-    expect(verdict.correctness).toBe(4);
-    expect(verdict.judgeFailure).toBeUndefined();
+    expect(verdict.correctness).toBe(3);
+    expect(verdict.judgeFailure).toBe('parse');
   });
 });
 
@@ -1095,6 +1174,25 @@ describe('m120 runManager — applyRejects=true', () => {
     await runManager({} as never, { applyRejects: true });
 
     expect(setStatusCalls.length).toBe(0);
+  });
+
+  it('does not reject incomplete negative rubrics and records judge parse failure', async () => {
+    const { getActiveClient } = await import('../src/core/run/provider-client.js');
+    (getActiveClient as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockClientRaw(JSON.stringify({ verdict: 'harmful', value: 1, correctness: 5, scope: 2 })),
+    );
+    const proposal = makeProposal({ id: 'prop-incomplete-harmful' });
+    mockProposals.push(proposal);
+
+    const { runManager } = await import('../src/core/fleet/manager.js');
+    await runManager({} as never, { applyRejects: true });
+
+    expect(setStatusCalls).toHaveLength(0);
+    const { readDecisions } = await import('../src/core/fleet/decisions-ledger.js');
+    expect(readDecisions().find((entry) => entry.proposalId === proposal.id)).toMatchObject({
+      verdict: 'review',
+      judgeReasonCode: 'judge-parse-failure',
+    });
   });
 
   it('still does NOT merge anything in applyRejects mode', async () => {

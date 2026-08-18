@@ -4,6 +4,12 @@
 > invent-engine should ground their goals + ideas in THIS, not just incremental
 > internal plumbing. Set by Mason; pursued autonomously by the fleet.
 
+> **Aspirational design context — not current runtime activation guidance.**
+> This document defines the target state, not a claim that a resident fleet is
+> active. Current compiled daemon and conductor trust roots are empty, so
+> non-dry daemon and resident loop execution is dormant. Owner-invoked `ashlr
+> goal "<objective>"` remains a live proposal-only path.
+
 ## Vision
 
 An **autonomous engineering organization** that conceives, builds, ships, and

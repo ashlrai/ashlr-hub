@@ -11,7 +11,7 @@
  * does not, and should not, try to beat that; it just makes sure the UI
  * never polls MORE often than the server already pushes.
  */
-import { getReadClientProof, getAuthSnapshot, subscribeAuth } from './auth-store.js';
+import { getReadClientProof, getAuthSnapshot, reportSessionExpired, subscribeAuth } from './auth-store.js';
 import { invalidate, invalidatePrefix } from './cache.js';
 
 export const SSE_EVENT_NAMES = [
@@ -23,6 +23,7 @@ export const SSE_EVENT_NAMES = [
   'fleet-activity-ping',
   'fleet-activity-observation',
   'snapshot',
+  'session-expired',
 ] as const;
 export type SseEventName = (typeof SSE_EVENT_NAMES)[number];
 
@@ -45,6 +46,7 @@ const EVENT_TO_CACHE_KEYS: Record<SseEventName, string[]> = {
   'fleet-activity-ping': ['fleet-activity', 'fleet'],
   'fleet-activity-observation': ['fleet-activity', 'fleet'],
   snapshot: ['dashboard-snapshot'],
+  'session-expired': [],
 };
 
 type RawListener = (payload: unknown) => void;
@@ -111,6 +113,7 @@ function connect(): void {
         invalidatePrefix('inbox-list:');
         invalidatePrefix('proposal-detail-');
       }
+      if (name === 'session-expired') reportSessionExpired();
       const listeners = rawListeners.get(name);
       if (listeners) for (const l of listeners) l(payload);
     });

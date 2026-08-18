@@ -65,3 +65,13 @@
 .themeBtn:hover {
   background: var(--bg-hover);
 }
+
+@media (max-width: 480px) {
+  .topbar { gap: var(--space-2); padding: var(--space-2); }
+  .paletteTrigger { min-width: 0; width: auto; flex: 1; max-width: none; }
+  .kbd, .lockedIndicator { display: none; }
+  .actions { gap: var(--space-1); }
+  .lockBtn, .themeBtn { min-width: 44px; min-height: 44px; }
+}
+
+@media (prefers-reduced-motion: reduce) { .paletteTrigger { transition: none; } }

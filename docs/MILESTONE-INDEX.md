@@ -55,18 +55,15 @@ Re-verification confirmed 10 of the 11 as genuine collisions, found that
 spec-vs-shipped mismatch, and surfaced **one additional collision the prior
 audit missed: M259**.
 
-**A thirteenth collision, of a new kind, was introduced on 2026-08-16
-itself:** M470 was already assigned (see §4) to "proposal capture candidate
-identity," shipped weeks earlier. Work landed today reused the same number
-for an unrelated feature — the daemon activation-authority rework — without
-checking this index first, which is exactly the failure mode this document
-exists to prevent. Unlike the M258–M275 rows below (spec'd-but-never-built vs
-shipped), this is **shipped vs. shipped**: both features are real and both
-are in `src/`.
+**A thirteenth collision, of a new kind, was introduced on 2026-08-16:**
+M470 was already assigned (see §4) to "proposal capture candidate identity."
+An unrelated runtime-grant implementation reused the number, but its
+self-authorizing trust-root and standing-grant surface was removed during
+authority salvage. Production roots remain compiled empty.
 
 | ID | First subject | First evidence | Second subject (added 2026-08-16) | Second evidence |
 |----|----------------|-----------------|-------------------------------------|-------------------|
-| **M470** | Proposal capture candidate identity (durable proposal records from sandboxed execution) | `test/m470.proposal-capture-candidate-identity.test.ts` | Daemon activation authority (operator-owned trust roots, Ed25519 standing grants, replaces five hard-coded denials) | `test/m470.activation-authority.test.ts`, `src/core/daemon/activation-permit.ts:121-131` |
+| **M470** | Proposal capture candidate identity (durable proposal records from sandboxed execution) | `test/m470.proposal-capture-candidate-identity.test.ts` | Rejected runtime self-authorization experiment | Removed; production roots remain compiled empty |
 
 | ID | Spec'd subject | Spec location | Shipped subject | Shipped evidence | Unbuilt feature currently sits where? |
 |----|----------------|---------------|------------------|-------------------|----------------------------------------|
@@ -79,8 +76,8 @@ are in `src/`.
 | **M263** | ResourceMonitor reads live NIM/OpenAI-compat snapshots | `docs/SPEC-DATA-ACQUISITION.md:614-623` | Judge-drain starvation fix (oldest-first ordering) | `test/m263.drain-starvation.test.ts` | Not built |
 | **M264** | *Cross-spec collision, not spec-vs-shipped:* two docs both claim M264. `SPEC-DATA-ACQUISITION.md:625-634` claims it for "post-dispatch probe for the claude cli-agent path" (unbuilt). `SPEC-ELITE-ENGINE-UTILIZATION.md:295,553,598` claims it for "Elite Context Injection for local-coder" — and that one **did** ship. | both docs above | Elite Context Injection (`local-context.ts`) | `test/m264.local-context.test.ts` | The `SPEC-DATA-ACQUISITION.md` post-dispatch-probe half of M264 never shipped under this number |
 | **M270** | Anthropic historical usage via Admin API | `docs/SPEC-DATA-ACQUISITION.md:671-675` | "Frontier Ambition" — Kimi frontier-promotion config path | `test/m270.frontier-ambition.test.ts` | Not built |
-| **M271** | OpenAI historical usage via org-level key | `docs/SPEC-DATA-ACQUISITION.md:677-679` | Drain-stall fix — cheap archive path for non-ship pendings | `test/m271.drain-stall.test.ts` | Not built |
-| **M273** | Predictive cache pre-warming | `docs/SPEC-DATA-ACQUISITION.md:686-689` | Fleet-drain dead-zone fix (null judge client handling) | `test/m273.fleet-drain-dead-zone.test.ts` | Not built |
+| **M271** | OpenAI historical usage via org-level key | `docs/SPEC-DATA-ACQUISITION.md:677-679` | Capped-judge fail-closed handling; no archival without a fresh considered verdict | `test/m271.drain-stall.test.ts` | Not built |
+| **M273** | Predictive cache pre-warming | `docs/SPEC-DATA-ACQUISITION.md:686-689` | Judge-unavailable fail-closed handling; proposals stay pending | `test/m273.fleet-drain-dead-zone.test.ts` | Not built |
 | **M274** | `p50LatencyMs` wired from `history.jsonl` | `docs/SPEC-DATA-ACQUISITION.md:693-696` | Frontier judge reachability fix (`resolveJudgeClient`) | `test/m274.judge-reachable.test.ts` | Not built |
 | **M275** | NIM credit-depletion alert | `docs/SPEC-DATA-ACQUISITION.md:698-701` | Execution completeness gate (typecheck/test validation before merge) | `test/m275.completeness-gate.test.ts` | Not built |
 
@@ -536,7 +533,7 @@ part of a batched CHANGELOG entry instead (see `docs/ARCHITECTURE.md`'s
 | M467 | Detached post-merge verification cohorts (signed, immutable, observation-only) | Shipped | `test/m467.*.test.ts` |
 | M468 | Detached post-merge runner + release-desktop workflow supply-chain policy + resident-service readiness diagnostics | Shipped | `test/m468.*.test.ts` |
 | M469 | Proposal funnel observability (attempt/capture/policy/gate metrics, scrubbed) | Shipped | `test/m469.*.test.ts` |
-| M470 | **Collision, see §2.** Proposal capture candidate identity (original); Daemon activation authority (added 2026-08-16, unrelated) | Shipped (both) | `test/m470.*.test.ts` (two files, two features) |
+| M470 | **Collision, see §2.** Proposal capture candidate identity (original); rejected runtime self-authorization experiment | Original shipped; experiment removed | `test/m470.proposal-capture-candidate-identity.test.ts` |
 | M471 | Simple-conductor transactional settlement (claim/settle/reconcile, CAS) | Shipped | `test/m471.*.test.ts` |
 | M472 | Detached post-merge orchestrator (observation-only scheduler) | Shipped | `test/m472.*.test.ts` |
 | M473 | Verifier execution authority (signed capsule admission, data-only) | Shipped | `test/m473.*.test.ts` |
@@ -566,8 +563,8 @@ part of a batched CHANGELOG entry instead (see `docs/ARCHITECTURE.md`'s
 | M502 | Mission shadow observer (read-only zero-effect suggestion) | Shipped | `test/m502.*.test.ts` |
 | M503 | Dashboard read-only auth mode (SSE + reads permitted, mutation blocked) | Shipped | `test/m503.*.test.ts` |
 | M504 | Automerge scope ceiling; goal direct authority; Ollama identity (three unrelated test files, one number, see §6) | Shipped | `test/m504.*.test.ts` |
-| M505 | Host auto-merge (`hostAutoMerge` config flag, defaults off) | Shipped | `test/m505.host-auto-merge.test.ts` |
-| M506 | Host auto-merge E2E; signed release canary (two unrelated test files, one number) | Shipped | `test/m506.*.test.ts` |
+| M505 | Host auto-merge experiment | Removed; protected PR handoff remains terminal | No production effect or config |
+| M506 | Signed release canary; rejected host auto-merge E2E experiment | Canary shipped; host merge removed | `test/m506.signed-release-canary.test.ts` |
 | M513 | Verified protected PR handoff | Shipped | `test/m513.*.test.ts` |
 | M514 | Release canary workflow | Shipped | `test/m514.*.test.ts` |
 | M515 | Release publish authority split; runtime activation launch handoff (two unrelated test files, one number) | Shipped | `test/m515.*.test.ts` |
@@ -601,8 +598,8 @@ claim this index exists to prevent:
 | M504 | `automerge-scope-ceiling` | **2026-08-16** |
 | M504 | `goal-direct-authority` | 2026-08-12 |
 | M504 | `ollama-identity` | 2026-08-12 |
-| M505 | `host-auto-merge` | **2026-08-16** |
-| M506 | `host-auto-merge-e2e` | **2026-08-16** |
+| M505 | `host-auto-merge` (removed during authority salvage) | **2026-08-16** |
+| M506 | `host-auto-merge-e2e` (removed during authority salvage) | **2026-08-16** |
 | M506 | `signed-release-canary` | 2026-08-14 |
 | M513 | `verified-protected-pr-handoff` | 2026-08-14 |
 | M514 | `release-canary-workflow` | 2026-08-15 |
@@ -629,9 +626,9 @@ this doc.
 
 - **M504** — three unrelated features: automerge scope ceiling (today),
   goal direct authority, and Ollama identity (both 2026-08-12).
-- **M505** — host auto-merge only. Not a collision.
-- **M506** — host auto-merge E2E (today) and signed release canary
-  (2026-08-14) — unrelated.
+- **M505** — rejected host auto-merge experiment. Not production authority.
+- **M506** — signed release canary (2026-08-14); the unrelated host
+  auto-merge E2E experiment was removed during authority salvage.
 - **M515** — release publish authority split (2026-08-15) and runtime
   activation launch handoff (the `CONTRACT-M515` dormant proof-child
   observer described in `docs/RUNTIME_ACTIVATION_AUTHORITY.md`'s "Dormant
@@ -644,12 +641,11 @@ this doc.
   but that grouping was not independently re-verified against source —
   treat it as a hint, not a confirmed claim.
 - **M518** — the conductor-permit-operator CLI (including the reachability
-  guard test described in the CHANGELOG's "Fleet activation unblocked"
+  guard test described in the CHANGELOG's "Fail-closed runtime boundaries"
   entry) and goal-timestamp-repair — both today, unrelated to each other.
 
-Hand-verified against source (file:line citations exist in the CHANGELOG's
-2026-08-16 entry and in §2 above): M470 (both halves), M504
-(`automerge-scope-ceiling` half only), M505, M516 (`fleet-status-cache` half
+Hand-verified against source: M470's original proposal-capture half, M504
+(`automerge-scope-ceiling` half only), M516 (`fleet-status-cache` half
 only), M518 (`goal-conductor-permit-operator` half only). Every other
 subject in this section — including all of M513/M514/M515 — is
 filename-derived only, matching the rest of §4's stated methodology;
@@ -664,7 +660,6 @@ number.** If the number already appears in §4, either the ID is taken
 is substantial (changes behavior, adds an authority boundary, or is
 independently testable), add a `docs/contracts/CONTRACT-Mxx.md`.
 
-M470 shipped two unrelated features on the same number *within one day* of
-each other because this exact check was skipped — this is not a hypothetical
-risk the doc is warning about, it is what happened today. Grep this file for
-your candidate number before writing the first line of a new test.
+M470 was reused for an unrelated experiment within one day because this exact
+check was skipped. That experiment was later removed; the collision remains a
+useful warning. Grep this file before assigning a new milestone number.

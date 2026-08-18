@@ -1153,12 +1153,12 @@ export interface AshlrConfig {
       maxAutomergeFiles?: number;
       /** Max changed lines permitted in an auto-merge diff (default 150, hard maximum 300). */
       maxAutomergeLines?: number;
-      /** Also merge/push on the remote (gh pr merge) when applying (default false). */
+      /** Stage/push a reviewed branch and open a protected PR handoff; never merges the hosted PR (default false). */
       pushToRemote?: boolean;
       /**
        * Remote-main policy expectation. This configuration is never
        * authority by itself: live GitHub protection must match it immediately
-       * before evidence capture, remote handoff, PR creation, and host auto-merge.
+       * before evidence capture, remote handoff, and PR creation.
        */
       protectedRemote?: {
         /** Operator expects live branch protection; autonomous remote-main delivery requires true. */
@@ -3959,8 +3959,9 @@ export interface ProposalVerifyResult {
   detail?: string;
   /**
    * Present only when passed:false. Distinguishes WHY verification failed:
-   * 'code' (or absent, for pre-existing records) means the verifier ran and
-   * found a real problem with the diff. 'tool' means the verifier itself
+   * Only explicit 'code' means the verifier ran and found a real problem with
+   * the diff. An absent category is legacy/unknown and cannot authorize
+   * permanent rejection. 'tool' means the verifier itself
    * could not be executed (missing binary, exit 127, spawn ENOENT — a
    * verifier-unavailable outcome, not a judgment on the diff). 'timeout' and
    * 'infra' are likewise infrastructure signals, not code signals. Consumers

@@ -1,5 +1,11 @@
 # Ashlr Open Fleet (v5) — the Polyglot, Self-Improving, Conducted Fleet (end-state spec)
 
+> **Historical/design context — not current runtime activation guidance.** This
+> end-state spec records source intent and milestone delivery. Current compiled
+> daemon and conductor trust roots are empty: non-dry daemon and resident loop
+> execution is dormant, while owner-invoked `ashlr goal "<objective>"` remains
+> a live proposal-only path.
+
 > A sibling to `docs/SPEC-V4-FOUNDRY.md`. v4 made the fleet autonomous at scale
 > across three backends with authority gated by model-trust tier. **v5 makes the
 > fleet polyglot, self-improving, and conducted**: any number of backends behind

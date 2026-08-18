@@ -1,18 +1,14 @@
 /**
- * M271 drain-stall tests — cheap drain path for persistently non-ship pendings.
+ * M271 capped-judge fail-closed tests.
  *
  * SAFETY PROOF tests:
- *  - A pending proposal with judgeNonShipCount>=1 that is capped out of judging
- *    has stuckPassCount incremented WITHOUT a fresh judge call.
- *  - After K stuck passes (stuckPassCount reaches autoArchiveAfterRejects),
- *    the proposal is archived (status→rejected) without ever being re-judged.
+ *  - A capped proposal has no fresh considered judgment, so historical
+ *    judgeNonShipCount/stuckPassCount cannot mutate or archive it.
  *  - A proposal with judgeNonShipCount===0 (never judged non-ship) is NOT
- *    drained via the cheap path — it just gets judgeCapped normally.
+ *    mutated — it just gets judgeCapped normally.
  *  - A proposal that flips to a ship verdict on its next judge call merges
  *    instead of being archived (gate unchanged, no regression).
- *  - autoMergeProposal is never called for a drained proposal.
- *  - The merge gate (autoMergeProposal logic) is never reached for archives.
- *  - Drain uses setStatus('rejected') only — never hard-deletes.
+ *  - autoMergeProposal is never called for a capped proposal.
  *
  * HOME is overridden to a tmp dir so no real ~/.ashlr state is touched.
  * autoMergeProposal, listProposalsDetailed, setStatus, updateProposalField are MOCKED.
@@ -175,19 +171,7 @@ function shipVerdict(proposalId: string) {
     alignment: 5,
     rationale: 'looks good',
     wouldMerge: true,
-  };
-}
-
-function reviewVerdict(proposalId: string) {
-  return {
-    proposalId,
-    verdict: 'review' as const,
-    value: 2,
-    correctness: 2,
-    scope: 3,
-    alignment: 2,
-    rationale: 'needs review',
-    wouldMerge: false,
+    considered: true as const,
   };
 }
 
@@ -239,8 +223,8 @@ afterEach(() => {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe('M271 cheap drain path', () => {
-  it('increments stuckPassCount (no judge call) for capped proposals with judgeNonShipCount>=1', async () => {
+describe('M271 capped-judge fail-closed path', () => {
+  it('keeps capped proposals pending even when they have an old non-ship count', async () => {
     // judgePerPass=1 and there are 2 proposals — the second gets capped.
     // The second already has judgeNonShipCount=1 → should get stuckPassCount=1 via cheap drain.
     const p1 = makeProposal('p-judged', { judgeNonShipCount: 0 });
@@ -259,12 +243,11 @@ describe('M271 cheap drain path', () => {
     expect(result.judged).toBe(1);
     expect(result.judgeCapped).toBe(1);
 
-    // p2 was capped — but cheap drain incremented stuckPassCount to 1
+    // p2 was capped, so there is no fresh considered judgment and no mutation.
     const stuckCall = mockUpdateProposalField.mock.calls.find(
       (c) => c[0] === 'p-capped' && c[1]?.stuckPassCount !== undefined,
     );
-    expect(stuckCall).toBeDefined();
-    expect(stuckCall![1]).toEqual({ stuckPassCount: 1 });
+    expect(stuckCall).toBeUndefined();
 
     // p2 was NOT judged
     const judgeCallsForCapped = mockJudgeProposal.mock.calls.filter((c) =>
@@ -273,7 +256,7 @@ describe('M271 cheap drain path', () => {
     expect(judgeCallsForCapped).toHaveLength(0);
   });
 
-  it('archives (rejects) a capped proposal when stuckPassCount reaches autoArchiveAfterRejects', async () => {
+  it('does not archive a capped proposal at the historical stuck threshold', async () => {
     // stuckPassCount is already at 2; this pass pushes it to 3 → archive.
     const p1 = makeProposal('p-filler', { judgeNonShipCount: 0 });
     const pStuck = makeProposal('p-stuck', {
@@ -288,13 +271,12 @@ describe('M271 cheap drain path', () => {
 
     const result = await runAutoMergePass(cfg271({ judgePerPass: 1, autoArchiveAfterRejects: 3 }));
 
-    // p-stuck should be archived (setStatus called with 'rejected')
+    // No current judgment means the historical counters are report-only.
     const archiveCall = mockSetStatus.mock.calls.find(
       (c) => c[0] === 'p-stuck' && c[1] === 'rejected',
     );
-    expect(archiveCall).toBeDefined();
-    expect(archiveCall![3]).toMatch(/M271 drained/);
-    expect(result.autoArchived).toBeGreaterThanOrEqual(1);
+    expect(archiveCall).toBeUndefined();
+    expect(result.autoArchived).toBe(0);
 
     // p-stuck was NEVER judged
     const judgedCapped = mockJudgeProposal.mock.calls.filter((c) =>
@@ -359,7 +341,7 @@ describe('M271 cheap drain path', () => {
     expect(result.autoArchived).toBe(0);
   });
 
-  it('drain accumulates across simulated passes correctly (stuckPassCount 0→1→2→archive)', async () => {
+  it('never accumulates archive state across capped passes without a fresh judgment', async () => {
     // Simulate K=3 cheap passes by resetting the proposal between calls.
     // Pass 1: stuckPassCount 0 → 1
     // Pass 2: stuckPassCount 1 → 2
@@ -368,8 +350,8 @@ describe('M271 cheap drain path', () => {
     // judgePerPass=1 + a filler proposal ensures p-drain is always capped each pass.
     const baseCfg = cfg271({ judgePerPass: 1, autoArchiveAfterRejects: 3 });
 
-    let currentStuck = 0;
-    let archived = false;
+    const currentStuck = 0;
+    const archived = false;
 
     for (let pass = 1; pass <= 3; pass++) {
       vi.clearAllMocks(); // clear call history only — preserves async factory implementations
@@ -390,25 +372,11 @@ describe('M271 cheap drain path', () => {
 
       const result = await runAutoMergePass(baseCfg);
 
-      if (pass < 3) {
-        // Should increment stuckPassCount
-        const stuckCall = mockUpdateProposalField.mock.calls.find(
-          (c) => c[0] === 'p-drain' && c[1]?.stuckPassCount !== undefined,
-        );
-        expect(stuckCall).toBeDefined();
-        expect(stuckCall![1].stuckPassCount).toBe(currentStuck + 1);
-        currentStuck++;
-        expect(result.autoArchived).toBe(0);
-      } else {
-        // Pass 3: should archive
-        const archiveCall = mockSetStatus.mock.calls.find(
-          (c) => c[0] === 'p-drain' && c[1] === 'rejected',
-        );
-        expect(archiveCall).toBeDefined();
-        expect(archiveCall![3]).toMatch(/M271 drained/);
-        expect(result.autoArchived).toBeGreaterThanOrEqual(1);
-        archived = true;
-      }
+      const stuckCall = mockUpdateProposalField.mock.calls.find(
+        (c) => c[0] === 'p-drain' && c[1]?.stuckPassCount !== undefined,
+      );
+      expect(stuckCall).toBeUndefined();
+      expect(result.autoArchived).toBe(0);
 
       // p-drain was NEVER judged (capped behind filler) — filler may have been judged
       const judgeCallsForDrain = mockJudgeProposal.mock.calls.filter(
@@ -417,7 +385,7 @@ describe('M271 cheap drain path', () => {
       expect(judgeCallsForDrain).toHaveLength(0);
     }
 
-    expect(archived).toBe(true);
+    expect(archived).toBe(false);
   });
 
   it('gate is unchanged — a ship+autoMerge proposal still merges (no regression)', async () => {

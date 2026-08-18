@@ -1326,6 +1326,7 @@ function generateRunId(): string {
  */
 async function buildAntiPlaybookBlock(cfg: AshlrConfig): Promise<string> {
   try {
+    if ((cfg.foundry as Record<string, unknown> | undefined)?.['selfImprove'] !== true) return '';
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const storeMod = await import('../genome/store.js') as any;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

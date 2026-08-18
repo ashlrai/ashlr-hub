@@ -1,6 +1,8 @@
 # Ashlr Desktop
 
-A Tauri v2 desktop app that wraps the Ashlr Mission Control web UI in a native window, manages the daemon lifecycle, and adds a system tray icon.
+A source-only Tauri v2 desktop draft that wraps the Ashlr Mission Control web UI
+in a native window and defines a system tray integration. It is not a public or
+commissioned desktop product, and it does not activate the dormant daemon.
 
 Public desktop releases and installers: none. The desktop release workflow is
 externally disabled during the Linux quarantine, and any future workflow output
@@ -33,26 +35,32 @@ will see a one-time OS warning:
 
 ---
 
-## What the app does
+## What the draft source does
 
 - Bundles the `ashlr` CLI binary as a sidecar — no separate Node.js or npm install needed.
-- On first launch, runs `ashlr setup --yes` automatically (writes config, detects engines, installs the daemon). A "Setting up…" banner appears while this runs; the app continues even if setup partially fails.
+- On first launch, the draft invokes `ashlr setup --yes`, but the current CLI
+  refuses before config, discovery, enrollment, or service effects. The banner
+  is not evidence of completed setup.
 - Starts `ashlr serve` and waits for the server to be ready, then shows the Mission Control window at `http://127.0.0.1:7777`.
-- Closing the window hides it to the tray — the daemon keeps running. The only way to fully quit is via the tray menu.
+- Closing the draft window hides it to the tray while the local `ashlr serve`
+  sidecar remains open. No resident daemon is started; use the tray menu to quit
+  the draft process.
 
 ### Tray menu
 
 | Item | Action |
 |------|--------|
 | Open Dashboard | Show + focus the main window |
-| Start Daemon | Runs `ashlr daemon start` |
+| Start Daemon | Invokes `ashlr daemon start`, which currently refuses before effects because compiled daemon trust roots are empty |
 | Stop Daemon | Runs `ashlr daemon stop` |
 | Kill Switch: OFF/ON | Touches / removes `~/.ashlr/KILL`; label updates live |
 | Quit Ashlr | Kills the sidecar, exits the app |
 
-### Re-running setup
+### Re-running the draft setup attempt
 
-To force the first-run wizard to run again:
+For source-development testing only, removing the draft marker causes another
+setup attempt on relaunch. The current setup command still refuses before
+effects:
 
 ```sh
 rm ~/.ashlr/.desktop-initialized
@@ -257,14 +265,16 @@ desktop/
 └── package.json             # npm wrapper for cargo tauri commands
 ```
 
-### Sidecar lifecycle
+### Draft sidecar lifecycle
 
-1. On launch, checks for `~/.ashlr/.desktop-initialized`. If absent, runs `ashlr setup --yes` (first-run path).
+1. On launch, checks for `~/.ashlr/.desktop-initialized`. If absent, invokes
+   `ashlr setup --yes`; the current CLI refuses before config or service work.
 2. Spawns `ashlr serve` as the bundled sidecar.
 3. Polls `127.0.0.1:7777` via TCP every 250 ms (up to 30 s) until the server is ready.
 4. Shows the main window once the port is open.
 5. On **Quit**, kills the sidecar before `app.exit(0)`.
-6. The window close button hides the window (does not quit) — the daemon continues running.
+6. The window close button hides the window (does not quit); the local web
+   sidecar continues until **Quit**, but no resident daemon is activated.
 
 ---
 

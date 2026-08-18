@@ -50,6 +50,8 @@ beforeEach(() => {
   // Create a subdirectory with a file
   fs.mkdirSync(path.join(assetsDir, 'sub'));
   fs.writeFileSync(path.join(assetsDir, 'sub', 'page.html'), '<html>sub</html>');
+  fs.mkdirSync(path.join(assetsDir, 'next'));
+  fs.writeFileSync(path.join(assetsDir, 'next', 'index.html'), '<html><div id="root"></div></html>');
 
   // Create a SENSITIVE file OUTSIDE assetsDir (to target with traversal attempts)
   // We use a sibling tmp dir
@@ -158,6 +160,14 @@ function httpGet(url: string): Promise<{ statusCode: number; headers: Record<str
 // ---------------------------------------------------------------------------
 
 describe('serveStatic — index.html for "/"', () => {
+  it('serves the operator console shell for /next and /next/', () => {
+    for (const url of ['/next', '/next/']) {
+      const { req, res, mock } = makeMockReqRes(url);
+      expect(serveStatic(req, res, assetsDir)).toBe(true);
+      expect(Buffer.concat(mock.body).toString()).toContain('id="root"');
+    }
+  });
+
   it('serves index.html for path "/"', () => {
     const { req, res, mock } = makeMockReqRes('/');
     const handled = serveStatic(req, res, assetsDir);
@@ -282,6 +292,22 @@ describe('serveStatic — path traversal rejection (unit)', () => {
 // ---------------------------------------------------------------------------
 
 describe('serveStatic — never throws', () => {
+  it('fails closed when a checked file name is swapped before descriptor open', () => {
+    const safe = path.join(assetsDir, 'swap.txt');
+    const original = path.join(assetsDir, 'swap-original.txt');
+    const outside = path.join(os.tmpdir(), `ashlr-static-outside-${process.pid}.txt`);
+    fs.writeFileSync(safe, 'SAFE');
+    fs.writeFileSync(outside, 'SECRET');
+    const { req, res, mock } = makeMockReqRes('/swap.txt');
+    const served = serveStatic(req, res, assetsDir, () => {
+      fs.renameSync(safe, original);
+      fs.symlinkSync(outside, safe);
+    });
+    expect(served).toBe(false);
+    expect(Buffer.concat(mock.body).toString()).not.toContain('SECRET');
+    fs.rmSync(outside, { force: true });
+  });
+
   it('does not throw for a normal path', () => {
     const { req, res } = makeMockReqRes('/index.html');
     expect(() => serveStatic(req, res, assetsDir)).not.toThrow();

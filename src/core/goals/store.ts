@@ -18,14 +18,11 @@
  */
 
 import {
-  closeSync,
-  constants as fsConstants,
   existsSync,
-  fstatSync,
   linkSync,
+  lstatSync,
   mkdirSync,
   opendirSync,
-  openSync,
   readFileSync,
   renameSync,
   unlinkSync,
@@ -562,20 +559,14 @@ export function listGoalsDetailed(filter?: { status?: GoalStatus }): ListGoalsDe
     const identityCounts = new Map<string, number>();
     let unreadableFiles = 0;
     for (const f of files) {
-      // Open first, then validate the fd (owner/regular-file/size). A symlink
-      // at this path fails the O_NOFOLLOW open with ELOOP rather than being
-      // caught by a separate pre-open stat, so the check and the read always
-      // observe the same underlying file — no TOCTOU window between them.
-      let fd: number | undefined;
       try {
         const file = join(dir, f);
-        fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-        const stat = fstatSync(fd);
-        if (!stat.isFile() || stat.size > MAX_GOAL_FILE_BYTES) {
+        const stat = lstatSync(file);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_GOAL_FILE_BYTES) {
           unreadableFiles += 1;
           continue;
         }
-        const parsed: unknown = JSON.parse(readFileSync(fd, 'utf8'));
+        const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
         if (isValidGoalRecord(parsed)) {
           const identity = goalIdIdentity(parsed.id);
           candidates.push({ file: f, goal: parsed, identity });
@@ -585,10 +576,6 @@ export function listGoalsDetailed(filter?: { status?: GoalStatus }): ListGoalsDe
         }
       } catch {
         unreadableFiles += 1;
-      } finally {
-        if (fd !== undefined) {
-          try { closeSync(fd); } catch { /* best-effort close */ }
-        }
       }
     }
     const goals: Goal[] = [];

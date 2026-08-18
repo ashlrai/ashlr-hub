@@ -66,7 +66,7 @@ import { notifyFleetEvent } from '../comms/events.js';
 // M214: fleet→pulse OTLP emit (fire-and-forget, flag-gated cfg.foundry.pulseEmit, default OFF)
 import { emitMerge, emitJudgeVerdict } from '../integrations/fleet-pulse-emit.js';
 import { estCostUsd } from '../run/budget.js';
-// M235: recursive self-improvement write-back (fire-and-forget, gated cfg.foundry.selfImprove, default ON)
+// M235: recursive self-improvement write-back (fire-and-forget, explicit selfImprove:true only)
 import { learnFromRejection } from './self-improve.js';
 import { recordAgentAction } from './agent-action-ledger.js';
 import { causalMetadataFromProposal } from '../learning/causal.js';
@@ -174,7 +174,7 @@ async function runAuthorizedFrontierJudge(
       return { requested, verdict, decisionPersisted, authorityLive: false };
     }
 
-    if (verdict?.verdict === 'ship' && verdict.wouldMerge === true) {
+    if (verdict?.considered === true && verdict.verdict === 'ship' && verdict.wouldMerge === true) {
       try {
         const judgeEngine = judgeClient.model;
         let judgeAttestation: string | undefined;
@@ -225,7 +225,7 @@ async function runAuthorizedFrontierJudge(
     // a real judgment — record it distinctly (judgeReasonCode
     // 'judge-parse-failure' / 'judge-network-failure') so it's visible in the
     // ledger and never conflated with a genuine 'judge-review' outcome.
-    if (verdict?.judgeFailure && authorized()) {
+    if ((verdict?.judgeFailure || (verdict && verdict.considered !== true)) && authorized()) {
       try {
         const failureTs = new Date().toISOString();
         recordDecision({
@@ -239,8 +239,8 @@ async function runAuthorizedFrontierJudge(
           action: 'judged',
           engine: judgeClient.model,
           model: judgeClient.model,
-          verdict: verdict.verdict,
-          detail: verdict.judgeFailure === 'parse' ? 'judge-parse-failure' : 'judge-network-failure',
+          verdict: 'review',
+          detail: verdict.judgeFailure === 'network' ? 'judge-network-failure' : 'judge-parse-failure',
         });
       } catch { /* best-effort — never disrupts the pass */ }
     }
@@ -250,7 +250,7 @@ async function runAuthorizedFrontierJudge(
         await emitJudgeVerdict(
           cfg,
           proposal.id,
-          verdict?.verdict ?? 'null',
+          verdict && verdict.considered !== true ? 'review' : (verdict?.verdict ?? 'null'),
           repo,
           proposal.engineTier,
           { authority: fence },
@@ -324,7 +324,8 @@ function runAuthorizedPostJudgePersistence(
     !killSwitchOn() && isEnrolled(repo);
   try {
     if (!authorized()) return refused();
-    const mergeable = verdict?.verdict === 'ship' && verdict.wouldMerge === true;
+    const mergeable = verdict?.considered === true &&
+      verdict.verdict === 'ship' && verdict.wouldMerge === true;
     if (!mergeable) {
       // A judgeFailure fallback (parse/network error) is NOT a considered
       // judgment — it must not teach the anti-playbook, count toward
@@ -332,14 +333,16 @@ function runAuthorizedPostJudgePersistence(
       // pure parser/infra flakiness drain and archive a proposal that a real
       // judge never actually looked at. Leave the proposal exactly as-is so
       // the next pass gets a genuine judge attempt.
-      if (verdict?.judgeFailure) {
+      const consideredNegative = verdict?.considered === true &&
+        (verdict.verdict === 'review' || verdict.verdict === 'noise' || verdict.verdict === 'harmful');
+      if (verdict?.judgeFailure || !consideredNegative) {
         return { entered: true, persisted: true, authorityLive: authorized(), archived: false };
       }
       try {
         learnFromRejection(
           proposal.id,
           '',
-          verdict?.verdict ?? 'review',
+          verdict.verdict,
           '',
           cfg,
         );
@@ -640,10 +643,6 @@ function incrementStuckOrArchive(
     return true;
   });
   return persisted ? outcome : null;
-}
-
-function knownFailedVerificationDetail(p: Proposal): string {
-  return p.verifyResult?.failed?.filter(Boolean).join('; ') ?? '';
 }
 
 function referencesEphemeralAshlrPath(value: unknown): boolean {
@@ -966,21 +965,8 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
       const reason = `readiness preflight: ${readiness.reason ?? 'not ready'}${advisorySuffix}`;
       out.results.push({ ok: false, merged: false, branched: false, reason });
       out.skipped.push({ proposalId: p.id, check: 'readiness-preflight', reason });
-      if (readiness.permanent === true) {
-        const priorStuck = (p as unknown as Record<string, unknown>)['stuckPassCount'];
-        const nextStuck = (typeof priorStuck === 'number' && Number.isFinite(priorStuck) ? priorStuck : 0) + 1;
-        const failed = knownFailedVerificationDetail(readinessProposal);
-        const detail = readinessProposal.verifyResult?.passed === false && failed
-          ? `${readiness.reason ?? 'permanent readiness blocker'} (${failed})`
-          : (readiness.reason ?? 'permanent readiness blocker');
-        const drain = incrementStuckOrArchive(
-          p,
-          autoArchiveAfterRejects,
-          `auto-drained: permanent readiness blocker persisted for ${nextStuck} pass(es): ${detail}`,
-        );
-        if (drain === null) return out;
-        if (drain?.archived) out.autoArchived++;
-      }
+      // Cached/static readiness evidence is never fresh authenticated failure
+      // authority. It blocks progression but cannot accrue archive state.
       continue;
     }
 
@@ -1060,6 +1046,17 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
           const reason = `${verifyCheck}: verification failed: ${verify.detail}`;
           out.results.push({ ok: false, merged: false, branched: false, reason });
           out.skipped.push({ proposalId: p.id, check: verifyCheck, reason });
+          if (verify.failureCategory === 'code') {
+            const priorStuck = (p as unknown as Record<string, unknown>)['stuckPassCount'];
+            const nextStuck = (typeof priorStuck === 'number' && Number.isFinite(priorStuck) ? priorStuck : 0) + 1;
+            const drain = incrementStuckOrArchive(
+              p,
+              autoArchiveAfterRejects,
+              `auto-drained: fresh authenticated code verification failure persisted for ${nextStuck} pass(es): ${verify.detail}`,
+            );
+            if (drain === null) return out;
+            if (drain.archived) out.autoArchived++;
+          }
           continue;
         }
       }
@@ -1085,30 +1082,8 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
       // Check per-pass cap before spending a frontier judge call.
       if (out.judged >= judgePerPass) {
         out.judgeCapped++;
-        // M271: CHEAP DRAIN PATH — proposals already seen as non-ship (judgeNonShipCount>=1)
-        // but capped out of judging this pass accumulate a stuckPassCount WITHOUT spending
-        // a fresh judge call. When stuckPassCount reaches autoArchiveAfterRejects they are
-        // archived (status→rejected). This drains the queue over K cheap passes.
-        // SAFETY: NEVER archives a proposal that might receive a ship verdict next pass —
-        // only proposals that have already been judged non-ship at least once qualify.
-        // NEVER hard-deletes (status change only). NEVER weakens the merge gate.
-        try {
-          const priorNonShip = (p as unknown as Record<string, unknown>)['judgeNonShipCount'] as number | undefined;
-          if (typeof priorNonShip === 'number' && priorNonShip >= 1) {
-            const newStuck = ((p as unknown as Record<string, unknown>)['stuckPassCount'] as number ?? 0) + 1;
-            if (newStuck >= autoArchiveAfterRejects) {
-              if (!writeProposalStatus(
-                p,
-                `M271 drained: persistently non-ship/non-mergeable (stuck ${newStuck} pass(es), judgeNonShipCount=${priorNonShip})`,
-              )) return out;
-              out.autoArchived++;
-            } else {
-              if (!writeProposalField(p, { stuckPassCount: newStuck })) return out;
-            }
-          }
-        } catch {
-          return out;
-        }
+        // A cap is not a fresh judgment. Preserve the pending proposal without
+        // advancing machine-owned rejection or archive counters.
         continue; // Skip: backlog will be processed in subsequent pass ticks.
       }
 
@@ -1157,35 +1132,12 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
         // 'ship' with wouldMerge=false is non-mergeable and must not create
         // durable merge authority.
         // SAFETY: this ONLY adds a reject path — it can NEVER cause a merge.
-        if (!verdict || verdict.verdict !== 'ship' || verdict.wouldMerge !== true) continue;
+        if (!verdict || verdict.considered !== true ||
+          verdict.verdict !== 'ship' || verdict.wouldMerge !== true) continue;
         if (!judgeResult.decisionPersisted) continue;
 
       } else {
-        // No judge available → fail-closed: skip this proposal for merging.
-        // M273: when no judge client is available AND the proposal has already
-        // been seen as non-ship at least once (judgeNonShipCount>=1), apply the
-        // same M271-style cheap drain so the proposal doesn't idle forever.
-        // SAFETY: never accrues stuckPassCount for fresh (never-judged) proposals
-        // — only proposals that have already received ≥1 non-ship verdict.
-        // NEVER archives or merges a proposal that might receive a ship verdict
-        // if a judge becomes available — the stuckPassCount path is additive-only.
-        try {
-          const priorNonShip = (p as unknown as Record<string, unknown>)['judgeNonShipCount'] as number | undefined;
-          if (typeof priorNonShip === 'number' && priorNonShip >= 1) {
-            const newStuck = ((p as unknown as Record<string, unknown>)['stuckPassCount'] as number ?? 0) + 1;
-            if (newStuck >= autoArchiveAfterRejects) {
-              if (!writeProposalStatus(
-                p,
-                `M273 drained: judge unavailable, persistently non-ship (stuck ${newStuck} pass(es), judgeNonShipCount=${priorNonShip})`,
-              )) return out;
-              out.autoArchived++;
-            } else {
-              if (!writeProposalField(p, { stuckPassCount: newStuck })) return out;
-            }
-          }
-        } catch {
-          return out;
-        }
+        // Unavailable judge means no considered judgment. Keep pending.
         continue;
       }
     }

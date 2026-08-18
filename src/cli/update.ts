@@ -533,7 +533,9 @@ export async function cmdUpdate(args: string[]): Promise<number> {
         const message =
           `update blocked: ${residentEvidence} for ${residentService.platformSpec} and could be stranded `
           + `because ${reason}. No code was replaced. Existing services support status and uninstall only; `
-          + 'admitted one-shot workflows remain available.';
+          + 'compiled daemon and conductor trust roots are empty, so non-dry daemon/conductor execution '
+          + 'is dormant. Use owner-invoked `ashlr run`/`ashlr swarm`, or '
+          + '`ashlr daemon start --once --dry-run` for observation.';
         out(`  ${red('✗')}  ${bold('Update blocked by resident service restriction')}`, jsonMode);
         out(`  ${dim(message)}`, jsonMode);
         out('', jsonMode);

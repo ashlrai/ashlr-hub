@@ -1,5 +1,10 @@
 # CONTRACT-M55 — The `/goal` + `/loop` conductor
 
+> **Historical implementation contract — not current runtime activation
+> guidance.** `ashlr goal "<objective>"` remains a live owner-invoked,
+> proposal-only plan-and-advance path. The resident `ashlr loop` entrypoint is
+> dormant in production because compiled conductor trust roots are empty.
+
 **Pillar:** Ashlr v5 Open Fleet — one polished front door to the whole fleet, in
 the terminal and inside Claude Code.
 

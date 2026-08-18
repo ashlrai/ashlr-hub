@@ -1,5 +1,11 @@
 # CONTRACT-M24 — THE DAEMON (`ashlr daemon`)
 
+> **Historical implementation contract — not current runtime activation
+> guidance.** The current production build's compiled daemon and conductor
+> trust roots are empty. Non-dry daemon starts refuse before effects; operators
+> may use status, `ashlr daemon start --once --dry-run`, or owner-invoked
+> `ashlr run`/`ashlr swarm`. Test-only injected roots do not activate production.
+
 The autonomous operator that makes the org continuous. It pulls the highest-value
 backlog items for ENROLLED repos and dispatches SANDBOXED swarms whose output
 becomes PENDING PROPOSALS in the Approval Inbox. It is the most powerful piece —
@@ -195,10 +201,13 @@ and the web dashboard next to the inbox `pending` count.
 2. Create a TMP repo, `enroll` ONLY that repo.
 3. `ashlr daemon start --once --dry-run --budget 0.05` => plans, creates NO
    proposals (`pendingCount` unchanged).
-4. `ashlr daemon start --once --budget 0.05` => at most a tiny number of PENDING
-   proposals; verify `inbox` shows them PENDING (never applied).
-5. `ASHLR_IN_DAEMON=1 ashlr daemon start --once` => REFUSES.
-6. `ASHLR_IN_SWARM=1 ashlr daemon start --once` => REFUSES.
+4. `ashlr daemon start --once --budget 0.05` => REFUSES before dispatch because
+   the production compiled daemon trust roots are empty.
+5. In an isolated test harness with an injected test-only trust root, verify a
+   bounded tick creates only PENDING proposals. This is not an operator recipe
+   and does not activate the production binary.
+6. Negative test only: `ASHLR_IN_DAEMON=1 ashlr daemon start --once` and
+   `ASHLR_IN_SWARM=1 ashlr daemon start --once` both REFUSE.
 7. `ashlr daemon stop` => kill switch set; next tick is a `kill-switch` no-op.
 8. Grep-prove the daemon never references `applyProposal`, `git push`,
    `gh pr create`/`createPr`, or any deploy path.

@@ -151,6 +151,14 @@ import { hashDiff, signJudgeAttestation } from '../src/core/foundry/provenance.j
 const origHome = process.env.HOME;
 let tmpHome: string;
 
+function consideredVerdict(verdict: ManagerVerdict): ManagerVerdict {
+  Object.defineProperty(verdict, 'considered', {
+    value: true,
+    enumerable: false,
+  });
+  return verdict;
+}
+
 beforeEach(() => {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m172-'));
   process.env.HOME = tmpHome;
@@ -171,7 +179,7 @@ beforeEach(() => {
     model: 'claude-opus-4-8',
     complete: async () => '{"verdict":"ship","value":5,"correctness":5,"scope":1,"alignment":5,"rationale":"great"}',
   });
-  mockJudgeProposal.mockResolvedValue({
+  mockJudgeProposal.mockResolvedValue(consideredVerdict({
     proposalId: 'default',
     verdict: 'ship',
     value: 5,
@@ -180,7 +188,7 @@ beforeEach(() => {
     alignment: 5,
     rationale: 'mock ship',
     wouldMerge: true,
-  } satisfies ManagerVerdict);
+  } satisfies ManagerVerdict));
 });
 
 afterEach(() => {
@@ -252,10 +260,10 @@ describe('M172 judge-then-merge — basic flow', () => {
     mockListProposals.mockReturnValue([p]);
     mockReadDecisions.mockReturnValue([]); // no cached verdict
 
-    mockJudgeProposal.mockResolvedValueOnce({
+    mockJudgeProposal.mockResolvedValueOnce(consideredVerdict({
       proposalId: 'j1', verdict: 'ship', value: 5, correctness: 5,
       scope: 1, alignment: 5, rationale: 'ship', wouldMerge: true,
-    } satisfies ManagerVerdict);
+    } satisfies ManagerVerdict));
 
     const r = await runAutoMergePass(enabledCfg());
 
@@ -271,10 +279,10 @@ describe('M172 judge-then-merge — basic flow', () => {
     mockListProposals.mockReturnValue([p]);
     mockReadDecisions.mockReturnValue([]);
 
-    mockJudgeProposal.mockResolvedValueOnce({
+    mockJudgeProposal.mockResolvedValueOnce(consideredVerdict({
       proposalId: 'j1b', verdict: 'ship', value: 4, correctness: 4,
       scope: 1, alignment: 4, rationale: 'ship but do not merge', wouldMerge: false,
-    } satisfies ManagerVerdict);
+    } satisfies ManagerVerdict));
 
     const r = await runAutoMergePass(enabledCfg());
 
@@ -283,6 +291,29 @@ describe('M172 judge-then-merge — basic flow', () => {
     expect(mockRecordDecision).not.toHaveBeenCalledWith(expect.objectContaining({
       action: 'judged',
       verdict: 'ship',
+    }));
+    expect(r.judged).toBe(1);
+    expect(r.attempted).toBe(0);
+  });
+
+  it('[J1c] incomplete unmarked ship rubric → autoMergeProposal NOT called', async () => {
+    const p = makeProp('j1c');
+    mockListProposals.mockReturnValue([p]);
+    mockReadDecisions.mockReturnValue([]);
+    mockJudgeProposal.mockResolvedValueOnce({
+      proposalId: p.id,
+      verdict: 'ship',
+      wouldMerge: true,
+    });
+
+    const r = await runAutoMergePass(enabledCfg());
+
+    expect(mockJudgeProposal).toHaveBeenCalledOnce();
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+    expect(mockRecordDecision).toHaveBeenCalledWith(expect.objectContaining({
+      proposalId: p.id,
+      verdict: 'review',
+      detail: 'judge-parse-failure',
     }));
     expect(r.judged).toBe(1);
     expect(r.attempted).toBe(0);
@@ -327,10 +358,10 @@ describe('M172 judge-then-merge — basic flow', () => {
     mockListProposals.mockReturnValue([p]);
     mockReadDecisions.mockReturnValue([]);
 
-    mockJudgeProposal.mockResolvedValueOnce({
+    mockJudgeProposal.mockResolvedValueOnce(consideredVerdict({
       proposalId: 'j3', verdict: 'review', value: 3, correctness: 3,
       scope: 3, alignment: 3, rationale: 'needs review', wouldMerge: false,
-    } satisfies ManagerVerdict);
+    } satisfies ManagerVerdict));
 
     const r = await runAutoMergePass(enabledCfg());
 
@@ -346,10 +377,10 @@ describe('M172 judge-then-merge — basic flow', () => {
     mockListProposals.mockReturnValue([p]);
     mockReadDecisions.mockReturnValue([]);
 
-    mockJudgeProposal.mockResolvedValueOnce({
+    mockJudgeProposal.mockResolvedValueOnce(consideredVerdict({
       proposalId: 'j4', verdict: 'noise', value: 1, correctness: 1,
       scope: 1, alignment: 1, rationale: 'trivial', wouldMerge: false,
-    } satisfies ManagerVerdict);
+    } satisfies ManagerVerdict));
 
     const r = await runAutoMergePass(enabledCfg());
 
@@ -363,10 +394,10 @@ describe('M172 judge-then-merge — basic flow', () => {
     mockListProposals.mockReturnValue([p]);
     mockReadDecisions.mockReturnValue([]);
 
-    mockJudgeProposal.mockResolvedValueOnce({
+    mockJudgeProposal.mockResolvedValueOnce(consideredVerdict({
       proposalId: 'j5', verdict: 'harmful', value: 1, correctness: 1,
       scope: 5, alignment: 1, rationale: 'dangerous', wouldMerge: false,
-    } satisfies ManagerVerdict);
+    } satisfies ManagerVerdict));
 
     const r = await runAutoMergePass(enabledCfg());
 
@@ -387,10 +418,10 @@ describe('M172 bounds — judgePerPass cap', () => {
     mockReadDecisions.mockReturnValue([]); // all unjudged
 
     // All get 'ship' from judge (only first 2 should be called)
-    mockJudgeProposal.mockResolvedValue({
+    mockJudgeProposal.mockResolvedValue(consideredVerdict({
       proposalId: 'any', verdict: 'ship', value: 5, correctness: 5,
       scope: 1, alignment: 5, rationale: 'ship', wouldMerge: true,
-    } satisfies ManagerVerdict);
+    } satisfies ManagerVerdict));
 
     const r = await runAutoMergePass(enabledCfg({ judgePerPass: 2 }));
 
@@ -414,10 +445,10 @@ describe('M172 bounds — judgePerPass cap', () => {
       return [];
     });
 
-    mockJudgeProposal.mockResolvedValue({
+    mockJudgeProposal.mockResolvedValue(consideredVerdict({
       proposalId: 'any', verdict: 'ship', value: 5, correctness: 5,
       scope: 1, alignment: 5, rationale: 'ship', wouldMerge: true,
-    } satisfies ManagerVerdict);
+    } satisfies ManagerVerdict));
 
     // Cap = 2: p1 cached (free), p2 judged (cap -1), p3 judged (cap -1) → both judged
     const r = await runAutoMergePass(enabledCfg({ judgePerPass: 2 }));
@@ -434,10 +465,10 @@ describe('M172 bounds — judgePerPass cap', () => {
     mockListProposals.mockReturnValue(proposals);
     mockReadDecisions.mockReturnValue([]);
 
-    mockJudgeProposal.mockResolvedValue({
+    mockJudgeProposal.mockResolvedValue(consideredVerdict({
       proposalId: 'any', verdict: 'ship', value: 5, correctness: 5,
       scope: 1, alignment: 5, rationale: 'ship', wouldMerge: true,
-    } satisfies ManagerVerdict);
+    } satisfies ManagerVerdict));
 
     // No judgePerPass in cfg → default 8
     const r = await runAutoMergePass(enabledCfg()); // no judgePerPass set
@@ -461,10 +492,10 @@ describe('M172 never-throws', () => {
 
     mockJudgeProposal
       .mockRejectedValueOnce(new Error('LLM timeout'))  // p1 throws
-      .mockResolvedValueOnce({                           // p2 ships
+      .mockResolvedValueOnce(consideredVerdict({         // p2 ships
         proposalId: 'n1b', verdict: 'ship', value: 5, correctness: 5,
         scope: 1, alignment: 5, rationale: 'ship', wouldMerge: true,
-      } satisfies ManagerVerdict);
+      } satisfies ManagerVerdict));
 
     // Must not throw
     const r = await runAutoMergePass(enabledCfg());
@@ -567,10 +598,10 @@ describe('M172+M175 trust-basis-aware pre-filter', () => {
     mockListProposals.mockReturnValue([p]);
     mockReadDecisions.mockReturnValue([]);
 
-    mockJudgeProposal.mockResolvedValueOnce({
+    mockJudgeProposal.mockResolvedValueOnce(consideredVerdict({
       proposalId: 't1-local', verdict: 'ship', value: 5, correctness: 5,
       scope: 1, alignment: 5, rationale: 'ship', wouldMerge: true,
-    } satisfies ManagerVerdict);
+    } satisfies ManagerVerdict));
 
     const cfg = {
       foundry: {
@@ -593,10 +624,10 @@ describe('M172+M175 trust-basis-aware pre-filter', () => {
     mockListProposals.mockReturnValue([p]);
     mockReadDecisions.mockReturnValue([]);
 
-    mockJudgeProposal.mockResolvedValueOnce({
+    mockJudgeProposal.mockResolvedValueOnce(consideredVerdict({
       proposalId: 't2-mid', verdict: 'ship', value: 5, correctness: 5,
       scope: 1, alignment: 5, rationale: 'ship', wouldMerge: true,
-    } satisfies ManagerVerdict);
+    } satisfies ManagerVerdict));
 
     const cfg = {
       foundry: {
@@ -654,10 +685,10 @@ describe('M172+M175 trust-basis-aware pre-filter', () => {
     mockListProposals.mockReturnValue([p]);
     mockReadDecisions.mockReturnValue([]);
 
-    mockJudgeProposal.mockResolvedValueOnce({
+    mockJudgeProposal.mockResolvedValueOnce(consideredVerdict({
       proposalId: 't5-local', verdict: 'review', value: 3, correctness: 3,
       scope: 3, alignment: 3, rationale: 'needs review', wouldMerge: false,
-    } satisfies ManagerVerdict);
+    } satisfies ManagerVerdict));
 
     const cfg = {
       foundry: {
@@ -705,10 +736,10 @@ describe('M172 output counters', () => {
     mockListProposals.mockReturnValue(proposals);
     mockReadDecisions.mockReturnValue([]);
 
-    mockJudgeProposal.mockResolvedValue({
+    mockJudgeProposal.mockResolvedValue(consideredVerdict({
       proposalId: 'any', verdict: 'ship', value: 5, correctness: 5,
       scope: 1, alignment: 5, rationale: 'ship', wouldMerge: true,
-    } satisfies ManagerVerdict);
+    } satisfies ManagerVerdict));
 
     const r = await runAutoMergePass(enabledCfg());
 
@@ -719,10 +750,14 @@ describe('M172 output counters', () => {
     const p1 = makeProp('o2a');
     const p2 = makeProp('o2b');
     mockListProposals.mockReturnValue([p1, p2]);
-    mockReadDecisions.mockReturnValue([
-      recentShipEntry('o2a'),
-      recentShipEntry('o2b'),
+    const cachedEntries = new Map([
+      ['o2a', recentShipEntry('o2a')],
+      ['o2b', recentShipEntry('o2b')],
     ]);
+    mockReadDecisions.mockImplementation((opts?: { proposalId?: string }) => {
+      const entry = opts?.proposalId ? cachedEntries.get(opts.proposalId) : undefined;
+      return entry ? [entry] : [];
+    });
 
     // p1 merges, p2 branches
     mockAutoMergeProposal
@@ -731,6 +766,7 @@ describe('M172 output counters', () => {
 
     const r = await runAutoMergePass(enabledCfg());
 
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
     expect(r.attempted).toBe(2);
     expect(r.merged).toBe(1);
     expect(r.branched).toBe(1);

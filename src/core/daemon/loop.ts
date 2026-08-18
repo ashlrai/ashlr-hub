@@ -102,10 +102,8 @@ import {
 } from './activity.js';
 import {
   consumeDaemonActivationPermit,
-  daemonActivationScopeGranted,
   isDaemonActivationCapability,
   type DaemonActivationCapability,
-  type DaemonActivationGrantScope,
 } from './activation-permit.js';
 import { nullSink } from '../run/streaming.js';
 import { createOuterAttemptIdentity } from '../fleet/attempt-identity.js';
@@ -1062,42 +1060,9 @@ const MAX_DRAIN_SELECTED_IDS = 12;
 const MAX_DIAGNOSTIC_RESLICE_DRAIN_LIMIT = 50;
 type TickItemOutcome = { item: WorkItem; spentUsd: number; dispatched: boolean; dispatch?: DaemonDispatchTrace };
 type BestOfNRunResult = Awaited<ReturnType<typeof runBestOfN>>;
-/**
- * M470: the exact authority the pre-M470 boolean capability check conveyed.
- *
- * Declared here rather than imported from activation-permit.js on purpose:
- * several suites mock that module wholesale, and importing a *value* from it
- * would throw at module load under those mocks. The explicit type annotation
- * still makes tsc fail if `DaemonActivationGrantScope` ever gains a key, so
- * this cannot silently drift into granting more than it should.
- */
-const LEGACY_PROPOSAL_ONLY_SCOPE: DaemonActivationGrantScope = Object.freeze({
-  once: true,
-  resident: false,
-  residentStanding: false,
-  conductor: false,
-  automerge: false,
-  repair: false,
-  deploy: false,
-  install: false,
-  proposalOnly: true,
-});
-
 interface TickOptions {
   dryRun: boolean;
   activationCapability?: DaemonActivationCapability;
-  /**
-   * M470: an already-verified activation scope, for ticks that must NOT consume
-   * a capability.
-   *
-   * `isDaemonActivationCapability()` is single-use by design — it deletes the
-   * WeakMap entry on the first call. A resident loop calling it per tick would
-   * therefore authorize only its first tick and refuse every one after, so the
-   * resident caller verifies once at `runDaemon` entry and passes the resulting
-   * scope down instead. The one-shot path keeps passing `activationCapability`
-   * and keeps consuming it exactly once.
-   */
-  activationScope?: DaemonActivationGrantScope;
   drain?: DaemonDrainMode;
   drainLimit?: number;
   signal?: AbortSignal;
@@ -3498,23 +3463,8 @@ export async function tick(
   opts: TickOptions,
 ): Promise<DaemonTick> {
   const now = new Date().toISOString();
-  // A pre-verified scope (resident path) is accepted WITHOUT consuming, since
-  // runDaemon already consumed the capability once on entry. Otherwise fall back
-  // to consuming the capability here, which is the one-shot path.
-  const preVerifiedScope = !opts.dryRun ? opts.activationScope : undefined;
-  const consumedCapability =
-    !opts.dryRun && preVerifiedScope === undefined
-      ? isDaemonActivationCapability(opts.activationCapability)
-      : false;
-  // When the capability check passes but no scope object is readable (a caller
-  // or test that supplies only the claim), fall back to the legacy proposal-only
-  // scope — the exact authority the pre-M470 boolean check conveyed. Never widen.
-  const activationScope: DaemonActivationGrantScope | undefined =
-    preVerifiedScope
-      ?? (consumedCapability
-        ? (opts.activationCapability?.scope ?? LEGACY_PROPOSAL_ONLY_SCOPE)
-        : undefined);
-  const activationAccepted = !opts.dryRun && activationScope !== undefined;
+  const activationAccepted =
+    !opts.dryRun && isDaemonActivationCapability(opts.activationCapability);
   if (!opts.dryRun && !activationAccepted) {
     persistAudit({
       action: 'daemon:activation-refused',
@@ -3531,53 +3481,8 @@ export async function tick(
       reason: 'activation-refused',
     };
   }
-  // A standing `residentStanding` grant is NOT single-use, unlike the
-  // one-shot WeakMap capability that forces `preVerifiedScope` to be trusted
-  // for the run's whole lifetime (see the TickOptions.activationScope doc).
-  // That means it CAN be safely re-checked on every tick with no consumption
-  // side effect — so a resident daemon that started off a standing grant
-  // gets a real "stop the next tick" guarantee from `ashlr activation
-  // revoke --grant <id>`, not just "blocks the next `daemon start`." This is
-  // strictly stronger than what the one-shot capability path can offer; it
-  // cannot interrupt a tick already in flight.
-  if (!opts.dryRun && preVerifiedScope?.residentStanding === true) {
-    const stillGranted = daemonActivationScopeGranted('residentStanding');
-    if (!stillGranted.granted) {
-      persistAudit({
-        action: 'daemon:activation-refused',
-        repo: null,
-        sandboxId: null,
-        summary: `live tick refused: resident standing grant no longer authorized: ${stillGranted.reason}`,
-        result: 'refused',
-      });
-      return {
-        ts: now,
-        itemsConsidered: 0,
-        proposalsCreated: 0,
-        spentUsd: 0,
-        reason: 'activation-refused',
-      };
-    }
-  }
-  // M470: proposal-only is derived from the GRANTED scope rather than from "an
-  // activation exists at all" — the previous form forced every authorized tick
-  // to proposal-only, so an automerge/repair/deploy grant could never take
-  // effect.
-  //
-  // The `grantedScope` distinction matters: the pre-M470 condition was
-  // `opts.activationCapability !== undefined`, i.e. it keyed off a real permit
-  // object being supplied, NOT off the boolean claim. Callers that pass only a
-  // claim (and the legacy fallback above) must keep the old
-  // `proposalOnlyActivation === false` behavior, otherwise
-  // runAncillaryMaintenance — which early-returns on proposal-only — silently
-  // stops running self-heal, invent, and drain.
-  const grantedScope = preVerifiedScope ?? opts.activationCapability?.scope;
   const proposalOnlyActivation =
-    activationAccepted &&
-    grantedScope !== undefined &&
-    !grantedScope.automerge &&
-    !grantedScope.repair &&
-    !grantedScope.deploy;
+    activationAccepted && opts.activationCapability !== undefined;
   let ownershipLost = false;
   const stillOwnsTick = (): boolean => {
     if (!opts.ownerLock) return true;
@@ -4148,7 +4053,7 @@ export async function tick(
     // live tick — rejection learning sat behind `autoMerge.enabled`, post-merge
     // credit was a stubbed `false`, and reflection was a manual CLI command — so
     // the fleet observed every run and learned from none of them.
-    if (!stopRequested() && (liveCfg.foundry as Record<string, unknown>)?.['selfImprove'] !== false) {
+    if (!stopRequested() && (liveCfg.foundry as Record<string, unknown>)?.['selfImprove'] === true) {
       try {
         const { sweepRejectionLearning } = await import('../fleet/self-improve.js');
         sweepRejectionLearning(liveCfg);
@@ -4171,7 +4076,11 @@ export async function tick(
 
     // Low cadence, matching the counterfactual-replay pattern above: reflection
     // persists a snapshot and distills playbooks, and does not need every tick.
-    if (!stopRequested() && state.ticks.length % 20 === 0) {
+    if (
+      !stopRequested() &&
+      (liveCfg.foundry as Record<string, unknown>)?.['selfImprove'] === true &&
+      state.ticks.length % 20 === 0
+    ) {
       try {
         const { runReflectionCycle } = await import('../learn/reflect.js');
         await runReflectionCycle(liveCfg);
@@ -8134,22 +8043,6 @@ export async function runDaemon(
   const activationCfg = activation.configSnapshot ?? cfg;
   const dcfg = resolveCfg(activationCfg);
 
-  // M470: verify the capability EXACTLY ONCE, here, and carry the resulting
-  // scope into every tick. isDaemonActivationCapability() consumes on first
-  // call, so verifying per-tick would authorize only the first resident tick
-  // and refuse all subsequent ones. Entering the loop is the authorized act;
-  // each tick then reads the scope as plain data.
-  //
-  // `activation.scope` is the standing-`residentStanding`-grant path
-  // (consumeDaemonActivationPermit tried it first): no WeakMap capability
-  // exists for it at all, since standing grants aren't single-use — tick()
-  // re-checks it live every cycle instead (see its `residentStanding` guard).
-  const runActivationScope: DaemonActivationGrantScope | undefined =
-    activation.scope
-    ?? (!opts.dryRun && activation.capability && isDaemonActivationCapability(activation.capability)
-      ? activation.capability.scope
-      : undefined);
-
   // -------------------------------------------------------------------------
   // Mark daemon as running.
   // -------------------------------------------------------------------------
@@ -8252,19 +8145,11 @@ export async function runDaemon(
     summary:
       `daemon started: once=${opts.once}, dryRun=${opts.dryRun}, budget=$${dcfg.dailyBudgetUsd}, ` +
       `intervalMs=${dcfg.intervalMs}${opts.drain ? `, drain=${opts.drain}` : ''}` +
-      `${opts.drainLimit ? `, drainLimit=${opts.drainLimit}` : ''}` +
-      `${activation.grantId ? `, activatedByStandingGrant=${activation.grantId}` : ''}`,
+      `${opts.drainLimit ? `, drainLimit=${opts.drainLimit}` : ''}`,
     result: 'ok',
   });
 
-  // `!activation.scope` preserves this exactly as it behaved before the
-  // standing-grant path existed: a live (non-dry-run) authorized start always
-  // has EITHER `activation.capability` (one-shot path) OR `activation.scope`
-  // (standing-grant path) set, so this was — and remains — unreachable on any
-  // real authorized run. Written this way rather than changed so the
-  // standing-grant path doesn't silently start exercising a branch nothing
-  // has exercised live before.
-  if (!opts.dryRun && !activation.capability && !activation.scope) {
+  if (!opts.dryRun && !activation.capability) {
     reconcilePreparedGeneratedRepairReservations();
   }
 
@@ -8355,7 +8240,7 @@ export async function runDaemon(
         transitionActivity('tick');
         const tickResult = await tick(liveCfg, {
           dryRun: opts.dryRun,
-          ...(runActivationScope ? { activationScope: runActivationScope } : {}),
+          ...(activation.capability ? { activationCapability: activation.capability } : {}),
           ...(opts.drain ? { drain: opts.drain } : {}),
           ...(opts.drainLimit ? { drainLimit: opts.drainLimit } : {}),
           signal: shutdown.signal,
@@ -8408,10 +8293,6 @@ export async function runDaemon(
         transitionActivity('tick');
         const tickResult = await tick(liveCfg, {
           dryRun: opts.dryRun,
-          // M470: the resident loop previously passed NO activation at all, so
-          // every live resident tick was refused. It now carries the scope
-          // verified once at runDaemon entry.
-          ...(runActivationScope ? { activationScope: runActivationScope } : {}),
           ...(opts.drain ? { drain: opts.drain } : {}),
           ...(opts.drainLimit ? { drainLimit: opts.drainLimit } : {}),
           signal: shutdown.signal,

@@ -22,7 +22,8 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypt
 import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
 import type { AshlrConfig, WebServerOptions, WebServerHandle } from '../types.js';
-import { handleApi, drainSseConnections } from './api.js';
+import { handleApi, drainSseConnections, drainSseSession } from './api.js';
+import { ReadSessionRevocations } from './read-session-revocations.js';
 import { serveStatic } from './static.js';
 
 // ---------------------------------------------------------------------------
@@ -43,6 +44,7 @@ const MAX_READ_SESSION_BYTES = 256;
 const READ_CLIENT_HEADER = 'x-ashlr-read-client';
 const READ_CLIENT_QUERY = 'client';
 const READ_CLIENT_RE = /^[a-f0-9]{64}$/;
+const READ_SESSION_REVOCATION_CAPACITY = 64;
 
 function isAllowedHost(host: string | undefined): boolean {
   if (!host) return false;
@@ -82,7 +84,10 @@ function sendJson(
     'X-Content-Type-Options': 'nosniff',
     ...headers,
   });
-  res.end(JSON.stringify(body));
+  const publicBody = body && typeof body === 'object' && 'error' in body
+    ? { ...body, error: String((body as { error: unknown }).error).slice(0, 512) }
+    : body;
+  res.end(JSON.stringify(publicBody));
 }
 
 function clientBinding(clientProof: string): string {
@@ -100,17 +105,17 @@ function ticketPayload(expiresAtMs: number, nonce: string, binding: string): str
   ].join('.');
 }
 
-function signTicketPayload(payload: string, token: string): string {
-  return createHmac('sha256', token).update(payload, 'utf8').digest('base64url');
+function signTicketPayload(payload: string, signingKey: string): string {
+  return createHmac('sha256', signingKey).update(payload, 'utf8').digest('base64url');
 }
 
-function mintReadSession(token: string, clientProof: string, nowMs = Date.now()): string {
+function mintReadSession(signingKey: string, clientProof: string, nowMs = Date.now()): string {
   const payload = ticketPayload(
     nowMs + READ_SESSION_TTL_MS,
     randomBytes(16).toString('base64url'),
     clientBinding(clientProof),
   );
-  return `${payload}.${signTicketPayload(payload, token)}`;
+  return `${payload}.${signTicketPayload(payload, signingKey)}`;
 }
 
 function readClientHeader(req: IncomingMessage): string {
@@ -156,52 +161,65 @@ function readCookie(req: IncomingMessage, name: string): string {
   return found;
 }
 
-function validReadSession(
+interface ValidReadSession { id: string; expiresAt: number }
+
+function validateReadSession(
   req: IncomingMessage,
-  token: string,
+  signingKey: string,
   url: URL,
+  revocations: ReadSessionRevocations,
+  purpose: 'read' | 'logout' = 'read',
   nowMs = Date.now(),
-): boolean {
+): ValidReadSession | null {
   const ticket = readCookie(req, READ_SESSION_COOKIE);
-  if (!ticket) return false;
-  const clientProof = readSessionClientProof(req, url);
-  if (!clientProof) return false;
+  if (!ticket) return null;
+  const clientProof = purpose === 'logout' ? readClientHeader(req) : readSessionClientProof(req, url);
+  if (!clientProof) return null;
 
   const parts = ticket.split('.');
-  if (parts.length !== 7) return false;
+  if (parts.length !== 7) return null;
   const [version, method, pathPrefix, expiresRaw, nonce, binding, signature] = parts;
   if (
     version !== READ_SESSION_VERSION
     || method !== READ_SESSION_METHOD
     || pathPrefix !== READ_SESSION_PATH_PREFIX
-    || (req.method ?? 'GET').toUpperCase() !== method
-    || !url.pathname.startsWith(pathPrefix)
+    || (purpose === 'read' && (req.method ?? 'GET').toUpperCase() !== method)
+    || (purpose === 'read' && !url.pathname.startsWith(pathPrefix))
     || !/^\d{13}$/.test(expiresRaw ?? '')
     || !/^[A-Za-z0-9_-]{22}$/.test(nonce ?? '')
     || !/^[A-Za-z0-9_-]{43}$/.test(binding ?? '')
     || !/^[A-Za-z0-9_-]{43}$/.test(signature ?? '')
-  ) return false;
+  ) return null;
 
   const expiresAtMs = Number(expiresRaw);
   if (
     !Number.isSafeInteger(expiresAtMs)
     || expiresAtMs <= nowMs
     || expiresAtMs > nowMs + READ_SESSION_TTL_MS + READ_SESSION_FUTURE_SKEW_MS
-  ) return false;
+  ) return null;
 
-  if (!safeEqual(binding!, clientBinding(clientProof))) return false;
+  if (!safeEqual(binding!, clientBinding(clientProof))) return null;
 
   const payload = ticketPayload(expiresAtMs, nonce!, binding!);
-  return safeEqual(signature!, signTicketPayload(payload, token));
+  if (!safeEqual(signature!, signTicketPayload(payload, signingKey))) return null;
+  const session = {
+    id: createHash('sha256').update(ticket, 'utf8').digest('hex'),
+    expiresAt: expiresAtMs,
+  };
+  return revocations.isRevoked(session.id, nowMs) ? null : session;
 }
 
-function hasReadAuthority(
+type ReadAuthority = { kind: 'header' } | { kind: 'session'; session: ValidReadSession };
+function readAuthority(
   req: IncomingMessage,
   token: string,
+  signingKey: string,
   url: URL,
-): boolean {
-  return safeEqual(headerValue(req, 'x-ashlr-token'), token)
-    || validReadSession(req, token, url);
+  revocations: ReadSessionRevocations,
+): ReadAuthority | null {
+  if (safeEqual(headerValue(req, 'x-ashlr-token'), token)) return { kind: 'header' };
+  const session = validateReadSession(req, signingKey, url, revocations);
+  return session ? { kind: 'session', session } : null;
 }
 
 function sessionCookie(value: string, maxAgeSeconds: number): string {
@@ -249,11 +267,19 @@ export async function startServer(
   // while the mutation token is accepted only by handleApi mutation gates.
   const readToken = randomBytes(32).toString('hex');
   const token = randomBytes(32).toString('hex');
+  let readSessionSigningKey = randomBytes(32).toString('hex');
+  const readSessionRevocations = new ReadSessionRevocations(READ_SESSION_REVOCATION_CAPACITY);
 
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     // The EventSource client proof appears in its same-origin URL because the
     // browser API cannot set headers. Never allow it to escape in a Referer.
     res.setHeader('Referrer-Policy', 'no-referrer');
+    // Legacy index.html contains its stylesheet inline; scripts remain
+    // external-only. The new console uses external assets for both.
+    res.setHeader('Content-Security-Policy', "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'");
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
 
     // ── 1. Host-header allowlist (anti DNS-rebinding) ──────────────────────
     if (!isAllowedHost(req.headers.host)) {
@@ -269,6 +295,13 @@ export async function startServer(
     }
     const path = url.pathname;
     const method = (req.method ?? 'GET').toUpperCase();
+    const authority = readAuthority(
+      req,
+      readToken,
+      readSessionSigningKey,
+      url,
+      readSessionRevocations,
+    );
 
     // Exchange the raw operator token for a short-lived, read-only browser
     // session. The ticket is HMAC-bound to this server process and cannot be
@@ -283,13 +316,37 @@ export async function startServer(
           sendJson(res, 400, { error: 'invalid read client proof' });
           return;
         }
-        const ticket = mintReadSession(readToken, readClientHeader(req));
+        const ticket = mintReadSession(readSessionSigningKey, readClientHeader(req));
         sendJson(res, 204, undefined, {
           'Set-Cookie': sessionCookie(ticket, Math.floor(READ_SESSION_TTL_MS / 1000)),
         });
         return;
       }
       if (method === 'DELETE') {
+        const session = !url.search
+          ? validateReadSession(
+              req,
+              readSessionSigningKey,
+              url,
+              readSessionRevocations,
+              'logout',
+            )
+          : null;
+        if (!session) {
+          sendJson(res, 401, { code: 'SESSION_REQUIRED', error: 'valid read session required' });
+          return;
+        }
+        const revocation = readSessionRevocations.revoke(session);
+        if (revocation.rotateSigningKey) {
+          // Capacity exhaustion must never resurrect an evicted ticket. Rotate
+          // the independent signer synchronously and drain all old streams;
+          // the stable raw read token can still mint fresh tickets afterward.
+          readSessionSigningKey = randomBytes(32).toString('hex');
+          readSessionRevocations.clear();
+          drainSseConnections();
+        } else {
+          drainSseSession(session.id);
+        }
         sendJson(res, 204, undefined, {
           'Set-Cookie': sessionCookie('', 0),
         });
@@ -301,7 +358,7 @@ export async function startServer(
 
     // Public liveness is intentionally content-free and bounded. Operators
     // with read authority retain the richer persisted /api/health projection.
-    if (path === '/api/health' && method === 'GET' && !hasReadAuthority(req, readToken, url)) {
+    if (path === '/api/health' && method === 'GET' && !authority) {
       sendJson(res, 200, { ok: true });
       return;
     }
@@ -311,7 +368,7 @@ export async function startServer(
     if (
       method === 'GET'
       && (path === '/api' || path.startsWith('/api/'))
-      && !hasReadAuthority(req, readToken, url)
+      && !authority
     ) {
       sendJson(res, 401, { error: 'unauthorized: read session required' }, {
         Vary: 'Cookie, X-Ashlr-Token, X-Ashlr-Read-Client',
@@ -321,7 +378,11 @@ export async function startServer(
 
     // ── 2. API routes ──────────────────────────────────────────────────────
     // handleApi is async; wrap to catch errors without crashing the server.
-    handleApi(req, res, cfg, { token, allowDispatch: opts.allowDispatch })
+    handleApi(req, res, cfg, {
+      token,
+      allowDispatch: opts.allowDispatch,
+      readSession: authority?.kind === 'session' ? authority.session : undefined,
+    })
       .then((handled) => {
         if (handled) return;
 
@@ -335,10 +396,9 @@ export async function startServer(
       .catch(() => {
         // Never let an unhandled rejection crash the server.
         if (!res.headersSent) {
-          res.writeHead(500, { 'Content-Type': 'text/plain' });
-        }
-        if (!res.writableEnded) {
-          res.end('Internal server error');
+          sendJson(res, 500, { code: 'INTERNAL_ERROR', error: 'internal server error' });
+        } else if (!res.writableEnded) {
+          res.end();
         }
       });
   });
@@ -379,6 +439,7 @@ export async function startServer(
         // Drain all open SSE response streams registered by handleApi, then
         // close the HTTP server (stops accepting new connections).
         drainSseConnections();
+        readSessionRevocations.clear();
         if (typeof server.closeAllConnections === 'function') {
           server.closeAllConnections();
         }

@@ -3,15 +3,8 @@ import { createHash } from 'node:crypto';
 export const AUTOMERGE_SCOPE_POLICY_SCHEMA_VERSION = 1 as const;
 export const DEFAULT_AUTOMERGE_MAX_FILES = 4;
 export const DEFAULT_AUTOMERGE_MAX_LINES = 150;
-// Hard, non-overridable ceilings. Raised so a real feature-sized diff can
-// clear the scope cap when an operator explicitly configures it (Mason's
-// live config uses maxAutomergeFiles=40 / maxAutomergeLines=3000 — these
-// ceilings must be >= that for the config to take effect instead of failing
-// closed). Defaults above are UNCHANGED and stay conservative; only the
-// *ceiling* an explicit operator override may reach has moved. Values
-// outside [1, ceiling] remain invalid and fail closed exactly as before.
-export const MAX_AUTOMERGE_POLICY_FILES = 40;
-export const MAX_AUTOMERGE_POLICY_LINES = 3000;
+export const MAX_AUTOMERGE_POLICY_FILES = 10;
+export const MAX_AUTOMERGE_POLICY_LINES = 300;
 
 const SCOPE_POLICY_DOMAIN = 'ashlr:automerge-scope-policy:v1';
 

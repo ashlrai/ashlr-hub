@@ -1,4 +1,4 @@
-# Quickstart — zero to running fleet in 5 steps
+# Quickstart — zero to verified local observation in 5 steps
 
 Requires **Node.js 22.15+**. Works on macOS, Linux, and Windows.
 
@@ -40,17 +40,12 @@ ashlr init
 ```
 
 `ashlr init` creates local configuration and reports readiness without creating
-a resident OS service. By default, `ashlr setup` refuses before reading or
-changing setup state because resident install/reinstall/repair/restart
-authority is withheld — this is still true out of the box. Use `ashlr daemon
-start --once` for admitted work without it.
-
-Resident authority is no longer permanently withheld, though: an operator can
-explicitly grant it via `ashlr activation init` + `ashlr activation grant`.
-That is a separate, deliberate setup step covered in
-[`docs/RUNTIME-FLEET-ACTIVATION.md`](RUNTIME-FLEET-ACTIVATION.md), not part of
-this quickstart — most users should stick to `daemon start --once` below
-until they specifically want an unattended, reboot-surviving fleet.
+a resident OS service. In the current release, compiled daemon and conductor
+trust roots are empty, so live non-dry execution is dormant. `ashlr setup`
+refuses before reading or changing setup state because resident
+install/reinstall/repair/restart authority is withheld. Use
+`ashlr daemon start --once --dry-run`, status, and the local console for
+admitted observation.
 
 Initialization reports these steps:
 
@@ -63,8 +58,6 @@ Initialization reports these steps:
 | `genome` | Creates `~/.ashlr/genome/` for memory storage |
 | `phantom` | Checks Phantom Secrets status (optional) |
 | `doctor` | Runs final readiness checks |
-| `engines` | Checks each configured backend and prints auth guidance |
-| `enroll` | Auto-discovers repos under configured roots and offers enrollment |
 
 Steps marked `!` need manual follow-up (shown in the summary). Steps marked `✓`
 are complete. Initialization is idempotent and safe to re-run.
@@ -96,7 +89,10 @@ ashlr enroll remove ~/path/to/my-project
 
 ## Step 4 — Authenticate engines
 
-`ashlr setup` prints auth guidance for each backend. Here are the common ones:
+`ashlr setup` does not reach backend detection or auth guidance in this release;
+it refuses before config or wizard work while resident service authority is
+dormant. Authenticate an owner-invoked engine directly, then use the read-only
+doctor command below. Common engine guidance:
 
 | Engine | How to authenticate |
 |--------|-------------------|
@@ -128,20 +124,24 @@ Opens the web dashboard at **http://127.0.0.1:7777** (bound to localhost only �
 ashlr serve --open    # also opens the browser automatically
 ```
 
-Copy the read token printed at startup into the **Read token** control. All
-proprietary JSON reads and the live event stream are authenticated even on
-loopback. The raw token stays in the current tab's `sessionStorage`; the server
-mints a 15-minute, read-only, HttpOnly, SameSite=Strict cookie for EventSource.
+The new console is at `/next/`; `/` remains the separately labelled legacy
+dashboard. Copy the read token printed at startup into `/next/`'s **Read token**
+control. All proprietary JSON reads and the live event stream are authenticated
+even on loopback. The new console discards the raw read token immediately after
+the exchange; the server mints a 15-minute, read-only, HttpOnly,
+SameSite=Strict cookie for EventSource.
 Since cookies are host-scoped rather than port-scoped, the ticket is also bound
 to a browser-generated 256-bit client proof kept in origin-scoped
-`sessionStorage`. EventSource places only that proof—not the read or mutation
+`sessionStorage`. The cookie plus proof survives a `/next/` reload until the
+ticket expires. After expiry, re-enter the raw read token; `/next/` cannot renew
+silently because it does not retain that token. EventSource places only that proof—not the read or mutation
 token—in its same-origin query. The proof has no authority without the matching
 signed HttpOnly ticket, and responses set `Referrer-Policy: no-referrer`.
 Neither the cookie nor its proof can authorize a mutation. Restarting the
 server rotates the read token and invalidates every prior read session.
-The 15-minute expiry applies only to the cookie ticket. The per-process raw
-read token remains valid until server restart, and the current tab renews its
-ticket while that token remains in `sessionStorage`.
+The per-process raw read token remains valid until server restart, but `/next/`
+does not store it. The legacy dashboard at `/` separately retains its raw read
+token in tab `sessionStorage` to renew its cookie.
 
 For a headless read, supply the startup token directly:
 
@@ -156,10 +156,11 @@ loopback, the cookie is not marked `Secure`; Ashlr does not trust
 `X-Forwarded-Proto` and has no reverse-proxy/TLS mode.
 
 `--allow-dispatch` prints a separate mutation token. The read token and read
-cookie are never accepted by mutation routes. The browser requests the
-mutation token anew for every enabled action, uses it only for that request,
-and does not retain it in JavaScript state; ordinary dashboard reading never
-grants mutation authority.
+cookie are never accepted by mutation routes. `/next/` holds the mutation token
+only in module memory for a 20-minute idle window; it never writes it to
+`sessionStorage`, local storage, a cookie, or a URL, and **Lock** clears it
+immediately. The legacy dashboard at `/` prompts independently per mutation
+action. Ordinary dashboard reading never grants mutation authority.
 
 The dashboard shows:
 
@@ -173,23 +174,23 @@ The dashboard shows:
 
 ## Starting the fleet
 
-Once repos are enrolled and at least one engine is ready:
+Once repos are enrolled and at least one engine is ready, the current production
+build still admits only observation because its compiled runtime trust roots
+are empty:
 
 ```sh
 # Dry run — preview what would be worked, no proposals created, $0 spent
 ashlr daemon start --once --dry-run
 
-# One real tick — deposits proposals into the inbox
+# Live one-shot — currently refuses before dispatch or proposal creation
 ashlr daemon start --once
 
-# Foreground continuous loop (runs until stopped or daily budget is hit)
+# Foreground continuous loop — currently refuses before effects
 ashlr daemon start
 
 # Check status
 ashlr daemon status
 
-# Stop
-ashlr daemon stop
 ```
 
 Review proposals before anything touches a branch:
@@ -202,6 +203,10 @@ ashlr inbox show <id> # inspect a proposal
 Automatic merge is disabled by default. When explicitly enabled, only proposals
 that satisfy the configured evidence, scope, provenance, and remote-PR gates may
 merge; all others remain pending for inbox review.
+
+Dry-run, `ashlr daemon status`, and the local console are the verified current
+runtime paths. Test-only injected roots do not activate the shipped daemon,
+conductor, or resident service.
 
 ---
 
@@ -227,11 +232,10 @@ ashlr fleet resume
 
 | Task | Command |
 |------|---------|
-| Ad-hoc agent run against a spec | `ashlr run <specId>` |
-| Multi-agent swarm | `ashlr swarm <specId>` |
 | Interactive TUI | `ashlr tui` |
 | Doctor / health check | `ashlr doctor` |
-| Fleet control plane | `ashlr fleet status` · `ashlr fleet watch` |
-| Update ashlr | `ashlr update` |
+| Fleet status | `ashlr fleet status` |
+| Dry-run one daemon tick | `ashlr daemon start --once --dry-run` |
+| Local console | `ashlr serve` |
 
 Full command reference: `ashlr help` or the main [README](../README.md).

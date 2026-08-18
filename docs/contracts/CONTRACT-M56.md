@@ -19,10 +19,12 @@ path. Flag-off byte-identical: the frontier→main path is untouched.
   flag is on AND `mergeTargetForTier(engineTier) === 'branch'` (engineTier 'mid')
   AND engineModel is concrete (not ':default'). Never grants main authority.
 - `autoMergeProposal` now computes `target = mergeTargetForTier(engineTier)`:
-  - `main` (frontier) → `evaluateMergeAuthority` + squash-merge to main (UNCHANGED).
+  - `main` (frontier) → `evaluateMergeAuthority`; when remote handoff is enabled,
+    stage/push the reviewed branch, open a protection-checked PR, persist
+    `awaiting-host-merge`, and STOP. Hosted merge is outside this module.
   - `branch` (mid) → `evaluateBranchAuthority`; open a PR (or stage a branch when
-    no host) and STOP — `gh pr merge` is guarded by `toMain`, `mergeLocally` by
-    `toMain`. Marks the proposal `applied` (so the pass doesn't re-open a PR).
+    no host) and STOP. Marks the proposal `applied` (so the pass doesn't re-open
+    a PR).
   - `none` (local) → refused (proposal-only).
   Provenance (M47.1), risk≤maxRisk, and full verification (incl. the M54
   self-target guard) apply to BOTH paths.
@@ -35,12 +37,14 @@ path. Flag-off byte-identical: the frontier→main path is untouched.
 ## HARD RULES + verification (`test/m56.*`)
 
 1. **Mid never reaches main** — `evaluateBranchAuthority` only ever grants BRANCH;
-   the squash-merge + local-merge are guarded by `toMain` (frontier-only). → pure
-   gate tests + a structural source-guard on `autoMergeProposal`.
+   the protected remote path ends in a review handoff, and mid never receives
+   frontier main authority. → pure gate tests + a structural source-guard on
+   `autoMergeProposal`.
 2. **Default-off + separate flag** — mid is refused unless `midToBranch === true`;
    enabling `autoMerge.enabled` alone does not enable it. → `m56` gate test.
-3. **Frontier→main path byte-identical** — `target==='main'` runs exactly the
-   pre-M56 code. → m47 regression green.
+3. **Frontier gate remains separate** — `target==='main'` still requires the
+   frontier merge-authority gate; remote delivery remains a protected PR
+   handoff rather than hosted merge execution. → m47 regression green.
 4. **Same provenance/risk/verify/self-guard gates** — mid goes through the same
    Gates 4.5/5/6. → covered by the shared gate code + m47/m54 regression.
 
@@ -48,7 +52,7 @@ path. Flag-off byte-identical: the frontier→main path is untouched.
 
 - [ ] `types.ts`: `cfg.foundry.autoMerge.midToBranch`.
 - [ ] `inbox/merge.ts`: `evaluateBranchAuthority` + target-based branching in
-      `autoMergeProposal` (squash/local-merge guarded by `toMain`); `AutoMergeResult.branched`.
+      `autoMergeProposal`; `AutoMergeResult.branched`.
 - [ ] `fleet/automerge-pass.ts`: mid pre-filter + `branched` count.
 - [ ] Tests: `m56.branch-gate`.
 

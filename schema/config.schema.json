@@ -735,19 +735,19 @@
             },
             "maxAutomergeFiles": {
               "type": "integer",
-              "minimum": 0,
-              "maximum": 40,
-              "description": "Default 4, hard maximum 40 (MAX_AUTOMERGE_POLICY_FILES in src/core/foundry/automerge-scope-policy.ts — keep in sync)."
+              "minimum": 1,
+              "maximum": 10,
+              "description": "Default 4, hard maximum 10 (MAX_AUTOMERGE_POLICY_FILES in src/core/foundry/automerge-scope-policy.ts — keep in sync)."
             },
             "maxAutomergeLines": {
               "type": "integer",
-              "minimum": 0,
-              "maximum": 3000,
-              "description": "Default 150, hard maximum 3000 (MAX_AUTOMERGE_POLICY_LINES in src/core/foundry/automerge-scope-policy.ts — keep in sync)."
+              "minimum": 1,
+              "maximum": 300,
+              "description": "Default 150, hard maximum 300 (MAX_AUTOMERGE_POLICY_LINES in src/core/foundry/automerge-scope-policy.ts — keep in sync)."
             },
             "pushToRemote": {
               "type": "boolean",
-              "description": "Also merge/push on the remote (gh pr merge). Default false."
+              "description": "Stage/push a reviewed branch and open a protected PR handoff; never merges the hosted PR. Default false."
             },
             "protectedRemote": {
               "type": "object",

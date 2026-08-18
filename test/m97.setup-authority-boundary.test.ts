@@ -16,22 +16,6 @@ vi.mock('../src/core/onboard.js', () => ({
   setupWizard: effects.setupWizard,
 }));
 
-/**
- * A resident-authority refusal is now audited (M21 append-only audit trail —
- * every daemon-activation:install-check is logged, granted or denied). That
- * audit write is the ONLY footprint a refusal may leave: no config, no
- * onboarding/wizard state, no service/control files. Assert the shape
- * precisely rather than allowing a loose "some file exists" check to
- * silently accept a future regression that starts touching real state.
- */
-function expectOnlyAuditTrailWasWritten(home: string): void {
-  expect(readdirSync(home)).toEqual(['.ashlr']);
-  expect(readdirSync(join(home, '.ashlr'))).toEqual(['audit']);
-  const auditFiles = readdirSync(join(home, '.ashlr', 'audit'));
-  expect(auditFiles).toHaveLength(1);
-  expect(auditFiles[0]).toMatch(/^\d{4}-\d{2}-\d{2}\.jsonl$/);
-}
-
 let home: string;
 
 beforeEach(() => {
@@ -67,9 +51,11 @@ describe('cmdSetup resident authority boundary', () => {
       expect(effects.loadConfig).not.toHaveBeenCalled();
       expect(effects.setupWizard).not.toHaveBeenCalled();
       expect(stderr.join('\n')).toContain('setup refused before config or wizard work');
-      expect(stdout.join('\n')).toContain('ashlr daemon start --once');
+      expect(stdout.join('\n')).toContain('ashlr run "<goal>"');
+      expect(stdout.join('\n')).toContain('ashlr swarm "<goal>"');
+      expect(stdout.join('\n')).toContain('ashlr daemon start --once --dry-run');
       expect(stdout.join('\n')).not.toContain('setup complete');
-      expectOnlyAuditTrailWasWritten(home);
+      expect(readdirSync(home)).toEqual([]);
     },
   );
 
@@ -91,9 +77,13 @@ describe('cmdSetup resident authority boundary', () => {
     expect(code).toBe(1);
     expect(result.ready).toBe(false);
     expect(result.steps[0]?.detail).toContain('No setup state was inspected or changed');
-    expect(result.nextSteps).toEqual(['try: ashlr daemon start --once']);
+    expect(result.nextSteps).toEqual([
+      'try: ashlr run "<goal>"',
+      'try: ashlr swarm "<goal>"',
+      'try: ashlr daemon start --once --dry-run',
+    ]);
     expect(effects.loadConfig).not.toHaveBeenCalled();
     expect(effects.setupWizard).not.toHaveBeenCalled();
-    expectOnlyAuditTrailWasWritten(home);
+    expect(readdirSync(home)).toEqual([]);
   });
 });

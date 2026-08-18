@@ -99,15 +99,15 @@ import type { ProposalsReadResult } from '../inbox/store.js';
 // ---------------------------------------------------------------------------
 
 /** Active SSE cleanup functions, keyed by a random connection id. */
-const _sseCleanups = new Map<string, () => void>();
+const _sseCleanups = new Map<string, { cleanup: () => void; sessionId: string }>();
 
 /**
  * Register a cleanup callback for an SSE connection.
  * Returns the id so it can be deregistered on close.
  */
-function registerSse(cleanup: () => void): string {
+function registerSse(cleanup: () => void, sessionId: string): string {
   const id = randomBytes(8).toString('hex');
-  _sseCleanups.set(id, cleanup);
+  _sseCleanups.set(id, { cleanup, sessionId });
   return id;
 }
 
@@ -121,7 +121,7 @@ function deregisterSse(id: string): void {
  * Each cleanup clears the interval and ends the response.
  */
 export function drainSseConnections(): void {
-  for (const cleanup of _sseCleanups.values()) {
+  for (const { cleanup } of _sseCleanups.values()) {
     try {
       cleanup();
     } catch {
@@ -130,6 +130,15 @@ export function drainSseConnections(): void {
   }
   _sseCleanups.clear();
   sseHistoryProjection = null;
+}
+
+/** Revoke only streams authenticated by one exact browser session. */
+export function drainSseSession(sessionId: string): void {
+  for (const [id, entry] of _sseCleanups) {
+    if (entry.sessionId !== sessionId) continue;
+    try { entry.cleanup(); } catch { /* best effort */ }
+    _sseCleanups.delete(id);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -623,7 +632,10 @@ async function buildVisionMissionSnapshot(cfg: AshlrConfig): Promise<Record<stri
 /** Write a JSON response. Never throws. */
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   try {
-    const payload = JSON.stringify(sanitizePublicJson(body) ?? null);
+    const boundedBody = body && typeof body === 'object' && 'error' in body
+      ? { ...body, error: String((body as { error: unknown }).error).slice(0, 512) }
+      : body;
+    const payload = JSON.stringify(sanitizePublicJson(boundedBody) ?? null);
     res.writeHead(status, {
       'Content-Type': 'application/json',
       'Cache-Control': 'no-store',
@@ -644,7 +656,8 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 
 /** Write a 500 JSON error. Never throws. */
 function send500(res: ServerResponse, msg = 'internal error'): void {
-  sendJson(res, 500, { error: msg });
+  void msg; // retained at call sites for private diagnostics; never disclose it.
+  sendJson(res, 500, { code: 'INTERNAL_ERROR', error: 'internal server error' });
 }
 
 /**
@@ -822,12 +835,19 @@ function handleSseEvents(
   res: ServerResponse,
   cfg: AshlrConfig,
   allowDispatch: boolean,
+  readSession: { id: string; expiresAt: number },
 ): void {
   // Cap concurrent SSE connections to bound timer/socket growth.
   if (_sseCleanups.size >= SSE_MAX_CONNECTIONS) {
     sendJson(res, 503, { error: 'too many live connections' });
     return;
   }
+
+  // Install the response error listener before the first header/body write.
+  // The indirection observes the fully wired cleanup once registration is
+  // complete, while also preventing an early EventEmitter 'error' crash.
+  let cleanup: () => void = () => {};
+  if (typeof res.on === 'function') res.on('error', () => cleanup());
 
   // SSE headers — no buffering, keep-alive.
   res.writeHead(200, {
@@ -845,10 +865,24 @@ function handleSseEvents(
   }
 
   // Helper: send one NAMED SSE event so the client's per-name listeners fire.
+  let backpressured = false;
+  let backpressureTimer: ReturnType<typeof setTimeout> | undefined;
+  let cleaned = false;
   function sendNamed(event: string, payload: unknown): void {
+    if (cleaned || backpressured) return;
     try {
       const line = `event: ${event}\ndata: ${JSON.stringify(sanitizePublicJson(payload))}\n\n`;
-      res.write(line);
+      if (!res.write(line)) {
+        backpressured = true;
+        // Resolve cleanup when the timer fires; the initial snapshot can
+        // backpressure before the fully-wired cleanup closure is assigned.
+        backpressureTimer = setTimeout(() => cleanup(), 10_000);
+        res.once('drain', () => {
+          backpressured = false;
+          if (backpressureTimer) clearTimeout(backpressureTimer);
+          backpressureTimer = undefined;
+        });
+      }
     } catch {
       // Socket closed; cleanup will be triggered by 'close' event.
     }
@@ -860,7 +894,7 @@ function handleSseEvents(
 
   // Emit one full update (runs, swarms, inbox, daemon slices).
   async function emitUpdate(): Promise<void> {
-    if (updateInFlight) return;
+    if (updateInFlight || backpressured) return;
     updateInFlight = true;
     try {
       const history = cachedSseHistoryProjection();
@@ -888,7 +922,9 @@ function handleSseEvents(
       } catch {
         // Keep the event stream alive with explicit unavailable provenance.
       }
+      if (cleaned) return;
       const daemon = await readFreshDaemonObservation();
+      if (cleaned) return;
       sendNamed('daemon', legacyDaemonProjection(daemon));
       sendNamed('daemon-observation', daemon);
       // M90: fleet-activity liveness pulse — carry daemon tick count so the
@@ -935,8 +971,12 @@ function handleSseEvents(
   }, SSE_POLL_MS);
 
   // Cleanup: clear the interval and end the response.
-  const cleanup = (): void => {
+  cleanup = (): void => {
+    if (cleaned) return;
+    cleaned = true;
     clearInterval(intervalId);
+    if (backpressureTimer) clearTimeout(backpressureTimer);
+    if (expiryTimer) clearTimeout(expiryTimer);
     deregisterSse(sseId);
     try {
       res.end();
@@ -945,7 +985,13 @@ function handleSseEvents(
     }
   };
 
-  const sseId = registerSse(cleanup);
+  const sseId = registerSse(cleanup, readSession.id);
+
+  const expiryDelay = readSession.expiresAt - Date.now();
+  const expiryTimer = setTimeout(() => {
+    sendNamed('session-expired', { expired: true });
+    cleanup();
+  }, Math.max(0, expiryDelay));
 
   // Clear on client disconnect.
   req.on('close', cleanup);
@@ -1062,7 +1108,7 @@ export async function handleApi(
   req: IncomingMessage,
   res: ServerResponse,
   cfg: AshlrConfig,
-  ctx: { token: string; allowDispatch: boolean },
+  ctx: { token: string; allowDispatch: boolean; readSession?: { id: string; expiresAt: number } },
 ): Promise<boolean> {
   const path = reqPath(req);
 
@@ -1591,7 +1637,11 @@ export async function handleApi(
 
     // ── GET /api/events (SSE) ────────────────────────────────────────────────
     if (path === '/api/events' && method === 'GET') {
-      handleSseEvents(req, res, cfg, ctx.allowDispatch);
+      if (!ctx.readSession || ctx.readSession.expiresAt <= Date.now()) {
+        sendJson(res, 401, { code: 'SESSION_REQUIRED', error: 'valid read session required' });
+        return true;
+      }
+      handleSseEvents(req, res, cfg, ctx.allowDispatch, ctx.readSession);
       return true;
     }
 

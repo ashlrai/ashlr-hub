@@ -526,6 +526,17 @@ export async function runReflectionCycle(
 ): Promise<ReflectionCycleResult> {
   const report = buildReflection(cfg, opts);
 
+  // Periodic write-back is autonomous learning authority, not read-only
+  // diagnostics. Keep the computed report available to callers, but persist
+  // nothing unless the operator explicitly enabled self-improvement.
+  if ((cfg.foundry as Record<string, unknown> | undefined)?.['selfImprove'] !== true) {
+    return {
+      report,
+      reportPath: null,
+      playbooks: { playbooks: [], persisted: [], local: true, didPersist: false },
+    };
+  }
+
   let reportPath: string | null = null;
   try {
     reportPath = saveReport(report);

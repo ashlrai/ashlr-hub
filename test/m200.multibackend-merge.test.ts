@@ -231,6 +231,7 @@ beforeEach(() => {
     alignment: 5,
     rationale: 'mock ship',
     wouldMerge: true,
+    considered: true,
   } satisfies ManagerVerdict);
   // Quota ledger: ensure tmpHome/.ashlr/fleet/ exists clean (real quota.json path).
   fs.mkdirSync(path.join(tmpHome, '.ashlr', 'fleet'), { recursive: true });
@@ -355,6 +356,7 @@ function shipVerdict(id: string): ManagerVerdict {
     alignment: 5,
     rationale: 'ship',
     wouldMerge: true,
+    considered: true,
   };
 }
 

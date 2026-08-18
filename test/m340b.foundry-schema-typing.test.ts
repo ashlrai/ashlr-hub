@@ -121,8 +121,18 @@ describe('schema/config.schema.json — foundry block (M340b)', () => {
   it('pins autoMerge scope caps to the real enforced ceiling in automerge-scope-policy.ts', () => {
     const declared = foundrySchema(loadSchema())['properties'] as Record<string, any>;
     const autoMerge = declared.autoMerge.properties;
+    expect(autoMerge.maxAutomergeFiles.minimum).toBe(1);
+    expect(autoMerge.maxAutomergeLines.minimum).toBe(1);
     expect(autoMerge.maxAutomergeFiles.maximum).toBe(MAX_AUTOMERGE_POLICY_FILES);
     expect(autoMerge.maxAutomergeLines.maximum).toBe(MAX_AUTOMERGE_POLICY_LINES);
+  });
+
+  it('documents pushToRemote as protected PR handoff, never hosted merge authority', () => {
+    const declared = foundrySchema(loadSchema())['properties'] as Record<string, any>;
+    const description = String(declared.autoMerge.properties.pushToRemote.description);
+    expect(description).toMatch(/protected PR handoff/i);
+    expect(description).toMatch(/never merges the hosted PR/i);
+    expect(description).not.toMatch(/gh pr merge|host auto-merge/i);
   });
 });
 
@@ -225,17 +235,15 @@ describe('loadConfigReadOnly — foundry key typo warning', () => {
     warning.mockRestore();
   });
 
-  // Verbatim copy of the `foundry` block from the operator's real
-  // ~/.ashlr/config.json (M340b audit). Nothing sensitive lives under
-  // `foundry` (no tokens/keys — those live under top-level `comms`), so this
-  // is safe to inline. Frozen here as a regression fixture: if a future
+  // Representative release-policy `foundry` block. Frozen here as a
+  // regression fixture: if a future
   // rename lands in types.ts/effective-config.ts without updating the
   // KNOWN_FOUNDRY_KEYS lists, this test starts failing loudly.
   const LIVE_FOUNDRY_FIXTURE = {
     allowedBackends: ['builtin', 'local-coder', 'claude', 'codex', 'nim', 'kimi'],
     models: { 'local-coder': 'qwen3-coder:30b', codex: 'gpt-5.5', nim: 'moonshotai/kimi-k2.6' },
     autoMerge: {
-      enabled: false, maxRisk: 'medium', maxAutomergeFiles: 40, maxAutomergeLines: 3000,
+      enabled: false, maxRisk: 'medium', maxAutomergeFiles: 10, maxAutomergeLines: 300,
       managerGate: true, allowSelfMerge: false, pushToRemote: true, trustBasis: 'verification',
     },
     feedbackEnabled: true,
@@ -311,17 +319,7 @@ describe('loadConfigReadOnly — foundry key typo warning', () => {
     warning.mockRestore();
   });
 
-  it('LIVE_FOUNDRY_FIXTURE maxAutomergeFiles/Lines are WITHIN the real hard-enforced ceiling', () => {
-    // M340b originally pinned the INVERSE of this: the operator's live config
-    // requested 40 files / 3000 lines against a hard ceiling of 10 / 300, so
-    // resolveAutoMergeScopePolicy() failed CLOSED (ok:false) and auto-merge
-    // scope resolution was silently broken — configured but never respected.
-    //
-    // M504 raised MAX_AUTOMERGE_POLICY_FILES/LINES to 40 / 3000 so those
-    // configured values actually resolve. This assertion is deliberately kept
-    // (inverted rather than deleted) so that lowering the ceiling back below a
-    // real operator config re-breaks the build loudly instead of silently
-    // reverting auto-merge to fail-closed.
+  it('release-policy fixture maxAutomergeFiles/Lines stay within the strict hard ceiling', () => {
     expect(LIVE_FOUNDRY_FIXTURE.autoMerge.maxAutomergeFiles).toBeLessThanOrEqual(MAX_AUTOMERGE_POLICY_FILES);
     expect(LIVE_FOUNDRY_FIXTURE.autoMerge.maxAutomergeLines).toBeLessThanOrEqual(MAX_AUTOMERGE_POLICY_LINES);
   });

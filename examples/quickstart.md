@@ -1,8 +1,8 @@
 # Quickstart — end-to-end walk-through
 
-This guide takes you from a fresh clone to your first autonomous proposal in
-five steps. Every command here is copy-pasteable and has been verified against
-the real CLI.
+This guide takes you from a fresh clone to a dry-run preview and an optional
+owner-invoked proposal in five steps. It does not activate a resident or
+unattended fleet.
 
 ## Prerequisites
 
@@ -49,9 +49,9 @@ enrolling anything.
 ashlr doctor
 ```
 
-Key things it checks: config file present, Node version, optional tool
-availability (`phantom`, `claude`, `gh`, etc.). None of the optional tools are
-required to run the autonomous loop — they extend it.
+Key things it checks: config file present, Node version, and optional tool
+availability (`phantom`, `claude`, `gh`, etc.). The production conductor loop
+remains dormant independently because its compiled trust roots are empty.
 
 ---
 
@@ -79,7 +79,7 @@ enrolled repo):
 
 ```sh
 ashlr enroll kill on    # engage — everything stops
-ashlr enroll kill off   # disengage — resumes on next tick
+ashlr enroll kill off   # disengage — does not activate the dormant loop
 ```
 
 ---
@@ -93,18 +93,17 @@ proposals or touching any file. It prints what the fleet *would* do.
 ashlr loop --dry-run
 ```
 
-When you are ready to produce real proposals (they land in the Approval Inbox —
-nothing is applied until you approve):
+The production compiled conductor trust roots are empty, so non-dry `ashlr
+loop` and `ashlr loop --watch` refuse before producing proposals. To create a
+proposal through a live owner-invoked path, use one of:
 
 ```sh
-ashlr loop
+ashlr goal "<objective>"  # plan + advance one bounded proposal-only milestone
+ashlr run "<goal>"        # one owner-invoked run
+ashlr swarm "<goal>"      # one owner-invoked multi-agent run
 ```
 
-To run continuously, watching for changes:
-
-```sh
-ashlr loop --watch
-```
+These commands do not grant resident or unattended loop authority.
 
 ---
 
