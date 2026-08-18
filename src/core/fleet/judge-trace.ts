@@ -32,10 +32,11 @@ import {
 import { scrubSecrets } from '../util/scrub.js';
 import type { Proposal } from '../types.js';
 import { authenticatedRealizedMergeOf } from '../inbox/realized-merge.js';
-import {
-  POST_MERGE_CREDIT_RELEASE_LABEL,
-  hasReleasedPostMergeCredit,
-} from './post-merge-credit.js';
+import { hasReleasedPostMergeCredit } from './post-merge-credit.js';
+// Imported from the leaf module, NOT post-merge-credit.js, so cold-importing
+// judge-trace.js can never race the decisions-ledger.ts <-> post-merge-credit.ts
+// cycle. See post-merge-credit-label.ts's doc comment for the full story.
+import { POST_MERGE_CREDIT_RELEASE_LABEL } from './post-merge-credit-label.js';
 
 // ---------------------------------------------------------------------------
 // Types

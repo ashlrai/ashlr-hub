@@ -50,18 +50,17 @@ import type { Proposal, SkillCard } from '../types.js';
 import { readDecisions, recordDecision } from './decisions-ledger.js';
 import { postMergeObservationEventId, readPostMergeObservations } from './post-merge-observations.js';
 import { skillCardContentHash } from './skill-attestation.js';
+import { POST_MERGE_CREDIT_RELEASE_LABEL, isPostMergeCreditReleaseLabel } from './post-merge-credit-label.js';
 
 // ---------------------------------------------------------------------------
 // Structural constants
 // ---------------------------------------------------------------------------
 
 export const POST_MERGE_CREDIT_POLICY_VERSION = 'post-merge-credit-v1' as const;
-export const POST_MERGE_CREDIT_RELEASE_LABEL = 'post-merge-credit-release-v1' as const;
-
-/** Structural recognition only; this string is not release authority. */
-export function isPostMergeCreditReleaseLabel(labelBasis: unknown): boolean {
-  return labelBasis === POST_MERGE_CREDIT_RELEASE_LABEL;
-}
+// Re-exported from the leaf module (post-merge-credit-label.ts) rather than
+// declared here, to break the decisions-ledger.ts <-> post-merge-credit.ts
+// import cycle. See that module's doc comment for the full story.
+export { POST_MERGE_CREDIT_RELEASE_LABEL, isPostMergeCreditReleaseLabel };
 
 /**
  * Minimum wall-clock time since the realized merge before credit MAY be
