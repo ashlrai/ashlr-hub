@@ -1261,6 +1261,20 @@ export async function handleApi(
       return true;
     }
 
+    // ── GET /api/scorecard ────────────────────────────────────────────────────
+    // M356: fleet self-evaluation scorecard — velocity/quality/capability,
+    // computed strictly from evidence stores (proposal store + decisions
+    // ledger + persisted eval reports). Read-only, additive route mirroring
+    // the /api/models pattern above. ?window=7d|30d (default 7d).
+    if (path === '/api/scorecard' && method === 'GET') {
+      const rawWindow = getQueryParam(req.url ?? '', 'window');
+      const scWindow = rawWindow === '30d' ? '30d' : '7d';
+      const { computeFleetScorecard } = await import('../fleet/scorecard.js');
+      const scorecard = computeFleetScorecard(scWindow);
+      sendJson(res, 200, scorecard);
+      return true;
+    }
+
     // ── GET /api/genome ──────────────────────────────────────────────────────
     if (path === '/api/genome' && method === 'GET') {
       const q = getQueryParam(req.url ?? '', 'q');

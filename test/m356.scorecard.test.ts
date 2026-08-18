@@ -1,0 +1,698 @@
+/**
+ * m356.scorecard.test.ts — fleet self-evaluation scorecard tests.
+ *
+ * Covers:
+ *   1. computeFleetScorecard — proposals section (filed/complete/partial, windowed)
+ *   2. computeFleetScorecard — proposals section degrades to unknown (null), never 0
+ *   3. computeFleetScorecard — judge throughput + parse/network failure split
+ *   4. computeFleetScorecard — merges: only write-path-authenticated rows count
+ *      (FALSIFIES: a bare unsigned post-merge-credit literal is rejected at
+ *      the decisions-ledger write boundary; a forged signed-looking token
+ *      with an invalid MAC is written but never counted)
+ *   5. computeFleetScorecard — cost per authenticated merged change
+ *   6. computeFleetScorecard — dispatch→verdict latency (median/mean)
+ *   7. computeFleetScorecard — rejection-lesson count (self-improve:written)
+ *   8. computeFleetScorecard — per-engine/model splits
+ *   9. computeFleetScorecard — capability (eval) axis: unavailable vs observed
+ *  10. computeFleetScorecard — degraded decisions ledger → every decision-derived
+ *      section becomes unknown (null), never a fabricated 0
+ *  11. computeFleetScorecard — never throws
+ *  12. scorecard-history — append/read round trip, bounded read, malformed rows
+ *  13. snapshotScorecardIfDue — writes once, throttles, writes again after interval
+ *  14. readScorecardTrend — window filter
+ *  15. CLI `ashlr fleet scorecard --json` — selfEvaluation shape
+ *  16. API `GET /api/scorecard` — 200 JSON shape, window query param
+ *
+ * Hermetic: HOME relocated to tmp dir; listProposalsDetailed is mocked
+ * (mirrors m119 conventions); decisions ledger + eval reports are real
+ * fs reads/writes under the isolated HOME.
+ */
+
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import * as http from 'node:http';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { createHash, createHmac } from 'node:crypto';
+import type { AshlrConfig, Proposal, WebServerOptions } from '../src/core/types.js';
+import { startServer, readAuthHeaders } from './helpers/authenticated-web-server.js';
+
+// ---------------------------------------------------------------------------
+// HOME isolation
+// ---------------------------------------------------------------------------
+
+const origHome = process.env.HOME;
+let tmpHome: string;
+
+beforeEach(() => {
+  tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m356-home-'));
+  process.env.HOME = tmpHome;
+  delete process.env.ASHLR_HOME;
+});
+
+afterEach(() => {
+  fs.rmSync(tmpHome, { recursive: true, force: true });
+  process.env.HOME = origHome;
+  vi.restoreAllMocks();
+});
+
+// ---------------------------------------------------------------------------
+// Mock proposal store (mirrors m119.quality-metrics.test.ts conventions)
+// ---------------------------------------------------------------------------
+
+type MockProposal = Pick<Proposal, 'id' | 'repo' | 'status' | 'createdAt' | 'origin' | 'kind' | 'title' | 'summary'> & {
+  diff?: string;
+  isPartial?: boolean;
+};
+
+const mockProposals: MockProposal[] = [];
+let mockProposalSourceState: 'healthy' | 'degraded' | 'missing' = 'healthy';
+let mockProposalComplete = true;
+
+vi.mock('../src/core/inbox/store.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/inbox/store.js')>();
+  return {
+    ...actual,
+    listProposalsDetailed: () => ({
+      proposals: mockProposalComplete ? ([...mockProposals] as Proposal[]) : [],
+      sourceState: mockProposalSourceState,
+      sourcePresent: mockProposals.length > 0,
+      complete: mockProposalComplete,
+      stopReasons: mockProposalComplete ? [] : ['invalid-file'],
+      filesDiscovered: mockProposals.length,
+      filesRead: mockProposals.length,
+      bytesRead: 0,
+      invalidFiles: mockProposalComplete ? 0 : 1,
+      unreadableFiles: 0,
+    }),
+  };
+});
+
+beforeEach(() => {
+  mockProposals.length = 0;
+  mockProposalSourceState = 'healthy';
+  mockProposalComplete = true;
+});
+
+let _seq = 0;
+function pid(): string { return `p-m356-${_seq++}`; }
+
+function makeMockProposal(overrides: Partial<MockProposal> & { createdAt: string }): MockProposal {
+  return {
+    id: pid(),
+    repo: '/repos/alpha',
+    status: 'applied',
+    origin: 'backlog',
+    kind: 'patch',
+    title: 'test proposal',
+    summary: 'summary',
+    ...overrides,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Decision-ledger fixture helpers (real ledger, isolated HOME)
+// ---------------------------------------------------------------------------
+
+async function recordProposed(
+  proposalId: string,
+  ts: string,
+  opts: { engine?: string; model?: string; costUsd?: number; tokensIn?: number; tokensOut?: number } = {},
+): Promise<void> {
+  const { recordDecision } = await import('../src/core/fleet/decisions-ledger.js');
+  recordDecision({
+    ts,
+    proposalId,
+    action: 'proposed',
+    engine: opts.engine ?? 'claude',
+    model: opts.model ?? 'claude:sonnet-5',
+    ...(opts.costUsd !== undefined ? { costUsd: opts.costUsd } : {}),
+    ...(opts.tokensIn !== undefined ? { tokensIn: opts.tokensIn } : {}),
+    ...(opts.tokensOut !== undefined ? { tokensOut: opts.tokensOut } : {}),
+  });
+}
+
+async function recordJudged(
+  proposalId: string,
+  ts: string,
+  verdict: string,
+  detail?: 'judge-parse-failure' | 'judge-network-failure',
+): Promise<void> {
+  const { recordDecision } = await import('../src/core/fleet/decisions-ledger.js');
+  recordDecision({
+    ts,
+    proposalId,
+    action: 'judged',
+    verdict,
+    ...(detail ? { detail } : {}),
+  });
+}
+
+async function recordRealizedMerge(proposalId: string, ts: string): Promise<void> {
+  const { recordDecision } = await import('../src/core/fleet/decisions-ledger.js');
+  recordDecision({ ts, proposalId, action: 'merged', verdict: 'merged', labelBasis: 'realized-merge-v1' });
+}
+
+/** A genuinely HMAC-signed post-merge-credit release token, minted with the
+ *  same per-machine key post-merge-credit.ts uses (isolated to tmpHome). */
+async function mintReleasedCreditLabel(proposalId: string): Promise<string> {
+  const { loadOrCreateKey } = await import('../src/core/foundry/provenance.js');
+  const eventRef = createHash('sha256').update(proposalId).digest('hex').slice(0, 24);
+  const mac = createHmac('sha256', loadOrCreateKey())
+    .update(`ashlr:post-merge-credit-release:v1:${eventRef}`)
+    .digest('hex')
+    .slice(0, 24);
+  return `post-merge-credit-release-v1:${eventRef}:${mac}`;
+}
+
+async function recordReleasedMerge(proposalId: string, ts: string): Promise<void> {
+  const { recordDecision } = await import('../src/core/fleet/decisions-ledger.js');
+  const label = await mintReleasedCreditLabel(proposalId);
+  recordDecision({ ts, proposalId, action: 'merged', verdict: 'applied', labelBasis: label });
+}
+
+async function recordSelfImprove(proposalId: string, ts: string): Promise<void> {
+  const { recordDecision } = await import('../src/core/fleet/decisions-ledger.js');
+  recordDecision({ ts, proposalId, action: 'self-improve:written', detail: 'verdict=noise' });
+}
+
+function isoAgo(ms: number): string {
+  return new Date(Date.now() - ms).toISOString();
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// ---------------------------------------------------------------------------
+// 1-2. proposals section
+// ---------------------------------------------------------------------------
+
+describe('computeFleetScorecard — proposals section', () => {
+  it('counts filed/complete/partial within the window; excludes stale proposals', async () => {
+    mockProposals.push(
+      makeMockProposal({ createdAt: isoAgo(1 * DAY_MS), diff: '+x\n-y\n' }), // complete, in-window
+      makeMockProposal({ createdAt: isoAgo(2 * DAY_MS) }), // no diff → partial, in-window
+      makeMockProposal({ createdAt: isoAgo(2 * DAY_MS), diff: '+x\n', isPartial: true }), // partial (isPartial), in-window
+      makeMockProposal({ createdAt: isoAgo(10 * DAY_MS), diff: '+x\n' }), // outside 7d window
+    );
+
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    const sc = computeFleetScorecard('7d');
+    expect(sc.proposals.filed).toBe(3);
+    expect(sc.proposals.complete).toBe(1);
+    expect(sc.proposals.partial).toBe(2);
+    expect(sc.proposals.sourceQuality.sourceState).toBe('healthy');
+    expect(sc.proposals.sourceQuality.complete).toBe(true);
+  });
+
+  it('degrades to unknown (null), never a fabricated 0, when the proposal source is incomplete', async () => {
+    mockProposals.push(makeMockProposal({ createdAt: isoAgo(1 * DAY_MS), diff: '+x\n' }));
+    mockProposalComplete = false;
+    mockProposalSourceState = 'degraded';
+
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    const sc = computeFleetScorecard('7d');
+    expect(sc.proposals.filed).toBeNull();
+    expect(sc.proposals.complete).toBeNull();
+    expect(sc.proposals.partial).toBeNull();
+    expect(sc.proposals.sourceQuality.sourceState).toBe('degraded');
+    expect(sc.proposals.sourceQuality.complete).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3. judge section
+// ---------------------------------------------------------------------------
+
+describe('computeFleetScorecard — judge section', () => {
+  it('splits judge calls into verdicts vs parse/network failures', async () => {
+    await recordJudged(pid(), isoAgo(1 * DAY_MS), 'ship');
+    await recordJudged(pid(), isoAgo(1 * DAY_MS), 'noise');
+    await recordJudged(pid(), isoAgo(1 * DAY_MS), 'review', 'judge-parse-failure');
+    await recordJudged(pid(), isoAgo(1 * DAY_MS), 'review', 'judge-network-failure');
+
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    const sc = computeFleetScorecard('7d');
+    expect(sc.judge.calls).toBe(4);
+    expect(sc.judge.verdicts).toBe(2);
+    expect(sc.judge.failures).toEqual({ parse: 1, network: 1, total: 2 });
+    expect(sc.judge.failureRate).toBeCloseTo(0.5, 5);
+  });
+
+  it('reports failureRate null (not 0) when there are zero judge calls', async () => {
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    const sc = computeFleetScorecard('7d');
+    expect(sc.judge.calls).toBe(0);
+    expect(sc.judge.failureRate).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4. merges section — authenticated-only, with deliberate falsification
+// ---------------------------------------------------------------------------
+
+describe('computeFleetScorecard — merges section (evidence-only)', () => {
+  it('counts a write-path-authenticated realized merge', async () => {
+    const id = pid();
+    await recordRealizedMerge(id, isoAgo(1 * DAY_MS));
+
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    const sc = computeFleetScorecard('7d');
+    expect(sc.merges.realized).toBe(1);
+    expect(sc.merges.released).toBe(0);
+  });
+
+  it('counts a cryptographically authenticated released merge', async () => {
+    const id = pid();
+    await recordReleasedMerge(id, isoAgo(1 * DAY_MS));
+
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    const sc = computeFleetScorecard('7d');
+    expect(sc.merges.released).toBe(1);
+  });
+
+  it('FALSIFY: an unsigned bare post-merge-credit literal is rejected at the ledger write boundary — no row is ever persisted', async () => {
+    const { recordDecision, readDecisions } = await import('../src/core/fleet/decisions-ledger.js');
+    const id = pid();
+    recordDecision({
+      ts: isoAgo(1 * DAY_MS),
+      proposalId: id,
+      action: 'merged',
+      verdict: 'applied',
+      labelBasis: 'post-merge-credit-release-v1', // bare literal — no signature
+    });
+    const rows = readDecisions({ proposalId: id, requireComplete: true });
+    expect(rows.length).toBe(0); // decisions-ledger.ts's own guard silently drops it
+
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    const sc = computeFleetScorecard('7d');
+    expect(sc.merges.released).toBe(0);
+  });
+
+  it('FALSIFY: a forged signed-looking token with an invalid MAC is written but never counted as released', async () => {
+    const { recordDecision, readDecisions } = await import('../src/core/fleet/decisions-ledger.js');
+    const id = pid();
+    const forged = `post-merge-credit-release-v1:${'a'.repeat(24)}:${'b'.repeat(24)}`;
+    recordDecision({ ts: isoAgo(1 * DAY_MS), proposalId: id, action: 'merged', verdict: 'applied', labelBasis: forged });
+    const rows = readDecisions({ proposalId: id, requireComplete: true });
+    expect(rows.length).toBe(1); // the row IS written (well-formed shape)...
+
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    const sc = computeFleetScorecard('7d');
+    expect(sc.merges.released).toBe(0); // ...but never counted, because the MAC doesn't verify
+
+    // Also not counted as "realized" — wrong labelBasis entirely.
+    expect(sc.merges.realized).toBe(0);
+  });
+
+  it('FALSIFY: an arbitrary labelBasis string does not count as a realized merge', async () => {
+    const { recordDecision } = await import('../src/core/fleet/decisions-ledger.js');
+    const id = pid();
+    recordDecision({ ts: isoAgo(1 * DAY_MS), proposalId: id, action: 'merged', verdict: 'applied', labelBasis: 'proposal-status' });
+
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    const sc = computeFleetScorecard('7d');
+    expect(sc.merges.realized).toBe(0);
+    expect(sc.merges.released).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 5. cost section
+// ---------------------------------------------------------------------------
+
+describe('computeFleetScorecard — cost section', () => {
+  it('sums producer run usage joined to authenticated realized merges and divides by merge count', async () => {
+    const a = pid();
+    const b = pid();
+    await recordProposed(a, isoAgo(2 * DAY_MS), { costUsd: 0.5, tokensIn: 1000, tokensOut: 500 });
+    await recordRealizedMerge(a, isoAgo(1 * DAY_MS));
+    await recordProposed(b, isoAgo(2 * DAY_MS), { costUsd: 1.5, tokensIn: 3000, tokensOut: 1500 });
+    await recordRealizedMerge(b, isoAgo(1 * DAY_MS));
+
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    const sc = computeFleetScorecard('7d');
+    expect(sc.cost.mergedChanges).toBe(2);
+    expect(sc.cost.totalCostUsd).toBeCloseTo(2.0, 5);
+    expect(sc.cost.totalTokensIn).toBe(4000);
+    expect(sc.cost.totalTokensOut).toBe(2000);
+    expect(sc.cost.perMergedChangeUsd).toBeCloseTo(1.0, 5);
+  });
+
+  it('reports perMergedChangeUsd null (never divide-by-zero) when there are zero authenticated merges', async () => {
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    const sc = computeFleetScorecard('7d');
+    expect(sc.cost.mergedChanges).toBe(0);
+    expect(sc.cost.perMergedChangeUsd).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6. latency section
+// ---------------------------------------------------------------------------
+
+describe('computeFleetScorecard — latency section', () => {
+  it('computes dispatch→verdict median/mean from matched proposed/judged pairs', async () => {
+    const a = pid();
+    const b = pid();
+    const t0 = Date.now() - 2 * DAY_MS;
+    await recordProposed(a, new Date(t0).toISOString());
+    await recordJudged(a, new Date(t0 + 1000).toISOString(), 'ship');
+    await recordProposed(b, new Date(t0).toISOString());
+    await recordJudged(b, new Date(t0 + 3000).toISOString(), 'noise');
+
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    const sc = computeFleetScorecard('7d');
+    expect(sc.latency.sampleSize).toBe(2);
+    expect(sc.latency.dispatchToVerdictMsMedian).toBeCloseTo(2000, 0);
+    expect(sc.latency.dispatchToVerdictMsMean).toBeCloseTo(2000, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. learning section
+// ---------------------------------------------------------------------------
+
+describe('computeFleetScorecard — learning section', () => {
+  it('counts self-improve:written rows — the anti-playbook lesson writer telemetry', async () => {
+    await recordSelfImprove(pid(), isoAgo(1 * DAY_MS));
+    await recordSelfImprove(pid(), isoAgo(2 * DAY_MS));
+
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    const sc = computeFleetScorecard('7d');
+    expect(sc.learning.rejectionLessonsWritten).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 8. byEngine splits
+// ---------------------------------------------------------------------------
+
+describe('computeFleetScorecard — byEngine splits', () => {
+  it('buckets dispatches and authenticated merges per engine/model', async () => {
+    const a = pid();
+    const b = pid();
+    await recordProposed(a, isoAgo(2 * DAY_MS), { engine: 'claude', model: 'claude:sonnet-5', costUsd: 1.0 });
+    await recordRealizedMerge(a, isoAgo(1 * DAY_MS));
+    await recordProposed(b, isoAgo(2 * DAY_MS), { engine: 'codex', model: 'codex:gpt-5.5', costUsd: 2.0 });
+
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    const sc = computeFleetScorecard('7d');
+    const claude = sc.byEngine.find((e) => e.engine === 'claude');
+    const codex = sc.byEngine.find((e) => e.engine === 'codex');
+    expect(claude?.dispatches).toBe(1);
+    expect(claude?.realizedMerges).toBe(1);
+    expect(claude?.costPerRealizedMergeUsd).toBeCloseTo(1.0, 5);
+    expect(codex?.dispatches).toBe(1);
+    expect(codex?.realizedMerges).toBe(0);
+    expect(codex?.costPerRealizedMergeUsd).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 9. capability (eval) axis
+// ---------------------------------------------------------------------------
+
+describe('computeFleetScorecard — capability axis', () => {
+  it('reports unavailable with a clear reason when no eval report is persisted', async () => {
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    const sc = computeFleetScorecard('7d');
+    expect(sc.capability.state).toBe('unavailable');
+    expect(sc.capability.reason).toMatch(/dataset|engine/i);
+    expect(sc.capability.latest).toBeUndefined();
+  });
+
+  it('reports observed with the latest persisted report when one exists', async () => {
+    const { saveReport } = await import('../src/core/eval/swe-bench.js');
+    saveReport({
+      id: 'bench-test1', ts: new Date().toISOString(), engine: 'local-coder',
+      total: 2, resolved: 1, resolveRate: 0.5, perTask: [], byEngine: {},
+    });
+
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    const sc = computeFleetScorecard('7d');
+    expect(sc.capability.state).toBe('observed');
+    expect(sc.capability.latest?.id).toBe('bench-test1');
+    expect(sc.capability.latest?.resolveRate).toBeCloseTo(0.5, 5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 10. degraded decisions ledger — unknown, never a fabricated 0
+// ---------------------------------------------------------------------------
+
+describe('computeFleetScorecard — degraded decisions ledger', () => {
+  it('renders every decision-derived section unknown (null) on a torn ledger line, never a fabricated 0', async () => {
+    await recordRealizedMerge(pid(), isoAgo(1 * DAY_MS)); // would otherwise produce real, non-zero counts
+
+    const { decisionsDir } = await import('../src/core/fleet/decisions-ledger.js');
+    const dir = decisionsDir();
+    const file = path.join(dir, `${new Date().toISOString().slice(0, 10)}.jsonl`);
+    fs.appendFileSync(file, '{"torn":true'); // malformed trailing line, no newline
+
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    const sc = computeFleetScorecard('7d');
+    expect(sc.judge.calls).toBeNull();
+    expect(sc.merges.realized).toBeNull();
+    expect(sc.merges.released).toBeNull();
+    expect(sc.cost.perMergedChangeUsd).toBeNull();
+    expect(sc.latency.sampleSize).toBeNull();
+    expect(sc.learning.rejectionLessonsWritten).toBeNull();
+    expect(sc.byEngine).toEqual([]);
+    for (const sq of [
+      sc.judge.sourceQuality, sc.merges.sourceQuality, sc.cost.sourceQuality,
+      sc.latency.sourceQuality, sc.learning.sourceQuality,
+    ]) {
+      expect(sq.sourceState).toBe('degraded');
+      expect(sq.complete).toBe(false);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 11. never throws
+// ---------------------------------------------------------------------------
+
+describe('computeFleetScorecard — never throws', () => {
+  it('never throws even when the proposal mock throws', async () => {
+    mockProposalComplete = true;
+    mockProposals.push(makeMockProposal({ createdAt: isoAgo(1 * DAY_MS) }));
+    // Corrupt HOME so the decisions ledger read hits an io-error path too.
+    fs.rmSync(path.join(tmpHome, '.ashlr'), { recursive: true, force: true });
+    fs.writeFileSync(path.join(tmpHome, '.ashlr'), 'not-a-directory');
+
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    expect(() => computeFleetScorecard('30d')).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 12. scorecard-history — append/read round trip
+// ---------------------------------------------------------------------------
+
+describe('scorecard-history', () => {
+  it('round-trips appended snapshots, newest-first, bounded', async () => {
+    const { appendScorecardSnapshot, readScorecardHistory } = await import('../src/core/fleet/scorecard-history.js');
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    const sc7 = computeFleetScorecard('7d');
+    appendScorecardSnapshot({ ts: isoAgo(2 * DAY_MS), window: '7d', scorecard: sc7 });
+    appendScorecardSnapshot({ ts: isoAgo(1 * DAY_MS), window: '7d', scorecard: sc7 });
+
+    const read = readScorecardHistory({});
+    expect(read.sourceState).toBe('healthy');
+    expect(read.complete).toBe(true);
+    expect(read.records.length).toBe(2);
+    // newest first
+    expect(Date.parse(read.records[0]!.ts)).toBeGreaterThan(Date.parse(read.records[1]!.ts));
+  });
+
+  it('caps returned rows via limit', async () => {
+    const { appendScorecardSnapshot, readScorecardHistory } = await import('../src/core/fleet/scorecard-history.js');
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    const sc7 = computeFleetScorecard('7d');
+    for (let i = 0; i < 5; i++) {
+      appendScorecardSnapshot({ ts: isoAgo(i * DAY_MS), window: '7d', scorecard: sc7 });
+    }
+    const read = readScorecardHistory({ limit: 2 });
+    expect(read.records.length).toBe(2);
+  });
+
+  it('reports invalidRows and degrades sourceState on a malformed line', async () => {
+    const { scorecardHistoryDir } = await import('../src/core/fleet/scorecard-history.js');
+    const dir = scorecardHistoryDir();
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const month = new Date().toISOString().slice(0, 7);
+    fs.writeFileSync(path.join(dir, `${month}.jsonl`), 'not json at all\n');
+
+    const { readScorecardHistory } = await import('../src/core/fleet/scorecard-history.js');
+    const read = readScorecardHistory({});
+    expect(read.invalidRows).toBe(1);
+    expect(read.sourceState).toBe('degraded');
+    expect(read.complete).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 13. snapshotScorecardIfDue
+// ---------------------------------------------------------------------------
+
+describe('snapshotScorecardIfDue', () => {
+  it('writes on first call, throttles immediately after, writes again once the interval elapses', async () => {
+    const { snapshotScorecardIfDue } = await import('../src/core/fleet/scorecard.js');
+    const { readScorecardHistory } = await import('../src/core/fleet/scorecard-history.js');
+
+    const t0 = Date.now();
+    const first = snapshotScorecardIfDue({ nowMs: t0 });
+    expect(first.wrote).toBe(true);
+    const afterFirst = readScorecardHistory({});
+    expect(afterFirst.records.length).toBe(2); // one per window (7d + 30d)
+
+    const second = snapshotScorecardIfDue({ nowMs: t0 + 1000 }); // 1s later — throttled
+    expect(second.wrote).toBe(false);
+    const afterSecond = readScorecardHistory({});
+    expect(afterSecond.records.length).toBe(2);
+
+    const third = snapshotScorecardIfDue({ nowMs: t0 + 25 * 60 * 60 * 1000 }); // 25h later — due
+    expect(third.wrote).toBe(true);
+    const afterThird = readScorecardHistory({});
+    expect(afterThird.records.length).toBe(4);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 14. readScorecardTrend
+// ---------------------------------------------------------------------------
+
+describe('readScorecardTrend', () => {
+  it('filters trend points by window', async () => {
+    const { appendScorecardSnapshot } = await import('../src/core/fleet/scorecard-history.js');
+    const { computeFleetScorecard, readScorecardTrend } = await import('../src/core/fleet/scorecard.js');
+    const sc7 = computeFleetScorecard('7d');
+    const sc30 = computeFleetScorecard('30d');
+    appendScorecardSnapshot({ ts: isoAgo(1 * DAY_MS), window: '7d', scorecard: sc7 });
+    appendScorecardSnapshot({ ts: isoAgo(1 * DAY_MS), window: '30d', scorecard: sc30 });
+
+    const trend7 = readScorecardTrend('7d');
+    expect(trend7.points.length).toBe(1);
+    expect(trend7.points[0]!.window).toBe('7d');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 15. CLI shape
+// ---------------------------------------------------------------------------
+
+describe('ashlr fleet scorecard CLI', () => {
+  it('--json includes a selfEvaluation key with the FleetScorecard shape', async () => {
+    await recordRealizedMerge(pid(), isoAgo(1 * DAY_MS));
+    const { cmdFleet } = await import('../src/cli/fleet.js');
+    const writes: string[] = [];
+    const spy = vi.spyOn(process.stdout, 'write').mockImplementation((chunk: unknown) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    try {
+      const code = await cmdFleet(['scorecard', '--json']);
+      expect(code).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+    const parsed = JSON.parse(writes.join(''));
+    expect(parsed).toHaveProperty('selfEvaluation');
+    expect(parsed.selfEvaluation).toHaveProperty('window');
+    expect(parsed.selfEvaluation).toHaveProperty('proposals');
+    expect(parsed.selfEvaluation).toHaveProperty('judge');
+    expect(parsed.selfEvaluation).toHaveProperty('merges');
+    expect(parsed.selfEvaluation).toHaveProperty('cost');
+    expect(parsed.selfEvaluation).toHaveProperty('latency');
+    expect(parsed.selfEvaluation).toHaveProperty('learning');
+    expect(parsed.selfEvaluation).toHaveProperty('byEngine');
+    expect(parsed.selfEvaluation).toHaveProperty('capability');
+    expect(parsed.selfEvaluation.merges.realized).toBe(1);
+    // Legacy QualityMetrics fields remain present, unchanged, at the top level.
+    expect(parsed).toHaveProperty('proposalsCreated');
+  });
+
+  it('human-readable mode prints the self-evaluation section without throwing', async () => {
+    const { cmdFleet } = await import('../src/cli/fleet.js');
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+      logs.push(args.join(' '));
+    });
+    try {
+      const code = await cmdFleet(['scorecard']);
+      expect(code).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(logs.some((l) => l.includes('Self-evaluation'))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 16. API shape
+// ---------------------------------------------------------------------------
+
+function httpRequest(
+  method: string,
+  url: string,
+  headers: Record<string, string> = {},
+): Promise<{ statusCode: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const req = http.request(
+      { hostname: parsed.hostname, port: Number(parsed.port), path: parsed.pathname + parsed.search, method, headers },
+      (res) => {
+        let data = '';
+        res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+        res.on('end', () => resolve({ statusCode: res.statusCode ?? 0, body: data }));
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+function get(url: string, port: number) {
+  return httpRequest('GET', url, { Host: `127.0.0.1:${port}`, ...readAuthHeaders(port) });
+}
+
+function makeConfig(): AshlrConfig {
+  return {
+    version: 1,
+    roots: [],
+    editor: 'cursor',
+    staleDays: 30,
+    categories: {},
+    tidyRules: [],
+    keepers: [],
+    models: { lmstudio: 'http://localhost:1234', ollama: 'http://localhost:11434', providerChain: ['ollama'] },
+    telemetry: {},
+    tools: {},
+  } as unknown as AshlrConfig;
+}
+
+function makeOpts(overrides: Partial<WebServerOptions> = {}): WebServerOptions {
+  return { port: 0, open: false, allowDispatch: false, ...overrides };
+}
+
+describe('GET /api/scorecard', () => {
+  it('returns 200 JSON with the FleetScorecard shape and honors ?window=', async () => {
+    await recordRealizedMerge(pid(), isoAgo(1 * DAY_MS));
+    const handle = await startServer(makeConfig(), makeOpts());
+    try {
+      const res7 = await get(`http://127.0.0.1:${handle.port}/api/scorecard`, handle.port);
+      expect(res7.statusCode).toBe(200);
+      const body7 = JSON.parse(res7.body);
+      expect(body7.window).toBe('7d');
+      expect(body7.merges.realized).toBe(1);
+      expect(body7).toHaveProperty('proposals');
+      expect(body7).toHaveProperty('capability');
+
+      const res30 = await get(`http://127.0.0.1:${handle.port}/api/scorecard?window=30d`, handle.port);
+      const body30 = JSON.parse(res30.body);
+      expect(body30.window).toBe('30d');
+    } finally {
+      await handle.close();
+    }
+  });
+});
