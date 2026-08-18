@@ -191,6 +191,86 @@ wrong, publication fails closed with an authentication error. Do not fall back
 to a local token/OTP publish: that would bypass the workflow's full-CI,
 protected-history, and provenance gates.
 
+## Production promotion after acceptance (3.3.0)
+
+Promote `@ashlr/hub@3.3.0` to npm `latest` only after the `v3.3.0` release
+workflow and GitHub prerelease succeeded, registry provenance was verified,
+and an isolated, script-free install passed live acceptance against the exact
+candidate integrity. Keep the acceptance receipt and calculate its SHA-256;
+record `acceptance_observed_at` as the canonical UTC RFC3339 time when that
+acceptance completed.
+
+Before dispatching `.github/workflows/promote.yml`, a repository administrator
+must create the `npm-production-promotion` environment with all of these
+controls:
+
+- protected branches only, with no custom deployment branch policies;
+- at least one required reviewer distinct from the dispatcher;
+- prevent self-review enabled and `can_admins_bypass` set to `false`;
+- no environment secrets.
+
+Dispatch the workflow from protected `master` with the successful release run
+ID, exact candidate SRI, acceptance-receipt SHA-256, canonical
+`acceptance_observed_at`, and the explicit acceptance confirmation. The
+acceptance digest and timestamp are human attestations: the workflow does not
+retrieve the acceptance receipt, and neither value grants release, npm,
+installation, activation, provider, credential, or spend authority. The
+timestamp must not be in the future and must be no more than 24 hours old both
+when admission begins and when its receipt is created.
+
+The workflow is observation-only. It has no npm credentials, OIDC permission,
+or executable npm mutation command and cannot promote the package. Its only
+writes are a bounded GitHub receipt artifact and bounded job summary. Any rerun, expired
+acceptance, or drift in the source SHA, protected branch, release/tag identity,
+candidate integrity or dist-tags, provenance, environment protections, or
+accepted receipt invalidates the prior observation; repeat acceptance and
+admission against the new exact state.
+
+After a fresh successful admission receipt, an npm package owner must use a
+clean maintainer shell to revalidate the live registry and owner identity. Pin
+the npm client and registry explicitly; set the expected SRI from the accepted
+release receipt, not from the live query:
+
+```bash
+set -euo pipefail
+registry="https://registry.npmjs.org/"
+: "${EXPECTED_CANDIDATE_INTEGRITY:?set from the accepted release receipt}"
+promotion_root="$(mktemp -d)"
+trap 'rm -rf "$promotion_root"' EXIT
+
+npm install --global --prefix "$promotion_root" npm@11.19.0 \
+  --ignore-scripts --no-audit --no-fund --bin-links=false \
+  --registry="$registry"
+npm_cli="$promotion_root/lib/node_modules/npm/bin/npm-cli.js"
+test -f "$npm_cli" && test ! -L "$npm_cli"
+test "$(node "$npm_cli" --version)" = "11.19.0"
+
+export NPM_CONFIG_USERCONFIG="$promotion_root/npmrc"
+install -m 600 /dev/null "$NPM_CONFIG_USERCONFIG"
+node "$npm_cli" login --registry="$registry"
+npm_owner="$(node "$npm_cli" whoami --registry="$registry")"
+node "$npm_cli" owner ls @ashlr/hub --registry="$registry" \
+  | awk -v owner="$npm_owner" '$1 == owner { found = 1 } END { exit !found }'
+
+test "$(node "$npm_cli" view @ashlr/hub@3.3.0 dist.integrity \
+  --registry="$registry")" = "$EXPECTED_CANDIDATE_INTEGRITY"
+test "$(node "$npm_cli" view @ashlr/hub dist-tags.candidate \
+  --registry="$registry")" = "3.3.0"
+test "$(node "$npm_cli" view @ashlr/hub dist-tags.latest \
+  --registry="$registry")" = "3.0.1"
+
+node "$npm_cli" dist-tag add @ashlr/hub@3.3.0 latest \
+  --registry="$registry"
+test "$(node "$npm_cli" view @ashlr/hub dist-tags.latest \
+  --registry="$registry")" = "3.3.0"
+```
+
+Do not add `--otp` to the promotion command, place an OTP in shell history, or
+store it in GitHub. Enter the fresh OTP only at npm's interactive prompt. npm
+`latest` promotion changes public package discovery only; installing or
+activating a runtime, enabling a resident service, configuring providers or
+application credentials, and authorizing spend remain separate gates.
+
 ## Failure recovery: never republish an immutable npm version
 
 An npm package version is immutable. Never rerun the whole workflow, rerun the
