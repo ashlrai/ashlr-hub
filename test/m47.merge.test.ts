@@ -9,7 +9,8 @@
  *    assertMayMutate(repo) WITHOUT the allowAnyRepo opt, so the happy-path tests
  *    still enroll() the tmp repo explicitly (env var alone does not bypass).
  *  - No `gh` is ever invoked: every happy path is LOCAL (no github remote +
- *    pushToRemote unset), so createPr / gh pr merge are never reached.
+ *    pushToRemote unset), so protected PR creation is never reached. Hosted
+ *    merge execution is not implemented in this module.
  *
  * Covers: classifyRisk, evaluateMergeAuthority, defaultBranch, verifyProposal,
  * autoMergeProposal refusals + the local happy path.
@@ -979,20 +980,20 @@ describe('M47 autoMergeProposal — local happy path', () => {
 });
 
 describe('M47 remote merge safety', () => {
+  it('uses exact index application and never three-way patch synthesis', () => {
+    const source = fs.readFileSync(path.resolve('src/core/inbox/merge.ts'), 'utf8');
+    expect(source).toContain("gitRun(tmpDir, ['apply', '--index', patchFile])");
+    expect(source).not.toContain("['apply', '--3way'");
+  });
+
   it('does not delegate deferred merge or privileged bypass authority to GitHub', () => {
     const source = fs.readFileSync(path.resolve('src/core/inbox/merge.ts'), 'utf8');
     expect(source).not.toContain('--admin');
     expect(source).not.toContain("'--auto'");
-    // M-hostmerge: the host merge hop is real now, but it must still never be
-    // an unconditional/privileged bypass — it stays behind a separate opt-in
-    // flag, the durable prepare/arm/revoke/consume authority (never the raw
-    // `true` literal it guards against), and a live kill-switch check
-    // immediately before the irreversible gh pr merge call.
-    expect(source).toContain("from '../autonomy/host-merge-revocation-protocol.js'");
-    expect(source).toContain("hostAutoMergeEnabled = autoMergeConfigValue(cfg, 'hostAutoMerge') === true");
-    expect(source).not.toContain('hostAutoMergeEnabled = true');
-    expect(source).toContain('const preMergeState = readHostMergeRevocationState(identity)');
-    expect(source).toContain("preMergeState.state !== 'healthy' || preMergeState.record.phase !== 'armed'");
+    expect(source).toContain('host auto-merge is disabled until durable revocation is available');
+    expect(source).not.toContain('attemptHostAutoMerge');
+    expect(source).not.toContain('hostMergeGhPrMerge');
+    expect(source).not.toMatch(/["']pr["']\s*,\s*["']merge["']/);
   });
 
   it('evidence mode refuses local main-merge fallback before mutation', () => {

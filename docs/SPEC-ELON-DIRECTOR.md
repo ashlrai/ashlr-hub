@@ -9,7 +9,7 @@ NOT ship under these numbers** — each number was silently reused for
 unrelated work (M258/M259/M260 — see `docs/MILESTONE-INDEX.md` §2 for the
 collision detail) or remains genuinely unbuilt (M261 Director Memory —
 `directorMemory` is absent from `src/`, confirmed by grep). Do not read past
-milestone numbers in this doc as delivered without checking the index.  
+milestone numbers in this doc as delivered without checking the index.
 **Branch target:** `feat/v5-open-fleet` (after M250–M256 resource control plane + cache)  
 **Author:** Architecture session 2026-06-29  
 **Driver:** Give the Elon agent a brain. Today it reacts (digests, notifications,

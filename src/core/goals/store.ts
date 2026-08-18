@@ -19,14 +19,15 @@
 
 import {
   closeSync,
-  constants as fsConstants,
+  constants,
   existsSync,
   fstatSync,
   linkSync,
+  lstatSync,
   mkdirSync,
-  opendirSync,
   openSync,
-  readFileSync,
+  opendirSync,
+  readSync,
   renameSync,
   unlinkSync,
   writeFileSync,
@@ -500,8 +501,9 @@ export function createGoalIfAbsent(
 export function loadGoal(id: string): Goal | null {
   try {
     const file = goalPath(goalsDir(), id);
-    if (!existsSync(file)) return null;
-    const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
+    const raw = readBoundedGoalFile(file);
+    if (raw === null) return null;
+    const parsed: unknown = JSON.parse(raw);
     if (!isValidGoalRecord(parsed) || !goalIdsMatch(parsed.id, id)) return null;
     sortMilestones(parsed);
     return parsed;
@@ -524,6 +526,57 @@ function emptyGoalRead(
     limitExceeded: false,
     ...overrides,
   };
+}
+
+function sameFileIdentity(
+  left: { dev: number; ino: number },
+  right: { dev: number; ino: number },
+): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+/** Read one bounded goal snapshot through a held descriptor, never a checked path. */
+function readBoundedGoalFile(file: string): string | null {
+  let fd: number | undefined;
+  try {
+    const noFollow = typeof constants.O_NOFOLLOW === 'number' ? constants.O_NOFOLLOW : 0;
+    fd = openSync(file, constants.O_RDONLY | noFollow);
+    const openedBefore = fstatSync(fd);
+    const namedBefore = lstatSync(file);
+    if (!openedBefore.isFile() || namedBefore.isSymbolicLink() || !namedBefore.isFile() ||
+      !sameFileIdentity(openedBefore, namedBefore) ||
+      openedBefore.size > MAX_GOAL_FILE_BYTES) return null;
+
+    const expectedBytes = openedBefore.size;
+    const bytes = Buffer.alloc(expectedBytes);
+    let offset = 0;
+    while (offset < expectedBytes) {
+      const count = readSync(fd, bytes, offset, expectedBytes - offset, offset);
+      if (count <= 0) return null;
+      offset += count;
+    }
+    const growthProbe = Buffer.allocUnsafe(1);
+    if (readSync(fd, growthProbe, 0, 1, expectedBytes) !== 0) return null;
+
+    const openedAfter = fstatSync(fd);
+    const namedAfter = lstatSync(file);
+    if (!openedAfter.isFile() || namedAfter.isSymbolicLink() || !namedAfter.isFile() ||
+      !sameFileIdentity(openedBefore, openedAfter) ||
+      !sameFileIdentity(openedAfter, namedAfter) ||
+      openedBefore.size !== openedAfter.size ||
+      openedBefore.mtimeMs !== openedAfter.mtimeMs ||
+      openedBefore.ctimeMs !== openedAfter.ctimeMs ||
+      openedAfter.size !== namedAfter.size ||
+      openedAfter.mtimeMs !== namedAfter.mtimeMs ||
+      openedAfter.ctimeMs !== namedAfter.ctimeMs) return null;
+    return bytes.toString('utf8');
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* best-effort close */ }
+    }
+  }
 }
 
 /**
@@ -562,20 +615,14 @@ export function listGoalsDetailed(filter?: { status?: GoalStatus }): ListGoalsDe
     const identityCounts = new Map<string, number>();
     let unreadableFiles = 0;
     for (const f of files) {
-      // Open first, then validate the fd (owner/regular-file/size). A symlink
-      // at this path fails the O_NOFOLLOW open with ELOOP rather than being
-      // caught by a separate pre-open stat, so the check and the read always
-      // observe the same underlying file — no TOCTOU window between them.
-      let fd: number | undefined;
       try {
         const file = join(dir, f);
-        fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-        const stat = fstatSync(fd);
-        if (!stat.isFile() || stat.size > MAX_GOAL_FILE_BYTES) {
+        const raw = readBoundedGoalFile(file);
+        if (raw === null) {
           unreadableFiles += 1;
           continue;
         }
-        const parsed: unknown = JSON.parse(readFileSync(fd, 'utf8'));
+        const parsed: unknown = JSON.parse(raw);
         if (isValidGoalRecord(parsed)) {
           const identity = goalIdIdentity(parsed.id);
           candidates.push({ file: f, goal: parsed, identity });
@@ -585,10 +632,6 @@ export function listGoalsDetailed(filter?: { status?: GoalStatus }): ListGoalsDe
         }
       } catch {
         unreadableFiles += 1;
-      } finally {
-        if (fd !== undefined) {
-          try { closeSync(fd); } catch { /* best-effort close */ }
-        }
       }
     }
     const goals: Goal[] = [];

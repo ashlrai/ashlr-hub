@@ -1,6 +1,16 @@
 # Architecture
 
-ashlr-hub is a single Node binary (`@ashlr/hub`) that runs an autonomous agent fleet against enrolled git repositories. It is TypeScript/ESM, Node 22.15+, with zero runtime dependencies in `core/` and `cli/` except `@modelcontextprotocol/sdk` (MCP gateway only).
+ashlr-hub is a single Node binary (`@ashlr/hub`) containing an autonomous agent
+fleet architecture for enrolled git repositories. It is TypeScript/ESM, Node
+22.15+, with zero runtime dependencies in `core/` and `cli/` except
+`@modelcontextprotocol/sdk` (MCP gateway only).
+
+**Current production boundary:** compiled daemon and conductor trust roots are
+empty. Non-dry `ashlr loop` and daemon starts refuse before effects; only their
+dry-run/status surfaces are active. `ashlr goal "<objective>"` remains a live,
+owner-invoked, proposal-only plan-and-advance path, not resident authority. The
+source-flow diagrams below describe latent architecture, not an activation
+recipe.
 
 ---
 
@@ -65,7 +75,12 @@ The high-level control flow, end to end:
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-The `ashlr loop` command (`src/cli/loop.ts`) is the polished front door. It calls `runConductor` (`core/goals/conductor.ts`), which advances active goals first and falls back to `runDaemon` (`core/daemon/loop.ts`) when no goals are active. Both paths are proposal-only and kill-switch-gated.
+Once separately admitted, the `ashlr loop` source path
+(`src/cli/loop.ts`) calls `runConductor` (`core/goals/conductor.ts`), which
+advances active goals first and falls back to `runDaemon`
+(`core/daemon/loop.ts`) when no goals are active. Both paths are proposal-only
+and kill-switch-gated. The current production entrypoint refuses non-dry loop
+execution earlier because its compiled conductor trust roots are empty.
 
 ---
 
@@ -302,7 +317,11 @@ External paths the hub reads but never writes:
 
 ## How a command flows — two examples
 
-### `ashlr loop` (autonomous)
+### `ashlr loop` (latent source flow; production non-dry entrypoint dormant)
+
+The sequence below documents the admitted source architecture. It does not run
+in the current production build without a separately provisioned compiled trust
+root; `ashlr loop --dry-run` remains available.
 
 1. `bin/ashlr` → `dist/cli/index.js` → `cmdLoop` (`src/cli/loop.ts`)
 2. `buildFleetStatus` renders the M49 control-plane snapshot.

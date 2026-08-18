@@ -1,9 +1,11 @@
 /**
  * CLI handler for `ashlr setup` — M97 first-run setup wizard.
  *
- * Orchestrates: config → models → editors → symlink → genome → phantom →
- *   doctor → daemon-service → engines (readiness + auth guidance) →
- *   enroll (discover repos) → final readiness summary.
+ * The production command currently refuses before loading config or entering
+ * the wizard because resident service mutation authority is unavailable. The
+ * orchestration below remains unreachable until that boundary is provisioned.
+ * Separately, compiled daemon and conductor trust roots are empty, so setup
+ * cannot be described as admitting non-dry autonomous execution.
  *
  * Flags:
  *   --yes        Accept defaults / non-interactive (auto-enroll, skip confirmations).
@@ -23,7 +25,7 @@ import { loadConfig } from '../core/config.js';
 import { setupWizard } from '../core/onboard.js';
 import {
   assertResidentServiceInstallAuthorized,
-  RESIDENT_SERVICE_ONE_SHOT_GUIDANCE,
+  RESIDENT_SERVICE_DORMANT_RUNTIME_GUIDANCE,
 } from '../core/daemon/service-install-authority.js';
 import type { OnboardResult, OnboardStep } from '../core/types.js';
 import { pad, makeColors, isTty } from './ui.js';
@@ -121,17 +123,21 @@ export async function cmdSetup(args: string[]): Promise<number> {
       steps: [{
         name: 'daemon-service',
         status: 'manual',
-        detail: `setup refused before config or wizard work: ${reason}. ${RESIDENT_SERVICE_ONE_SHOT_GUIDANCE}`,
+        detail: `setup refused before config or wizard work: ${reason}. ${RESIDENT_SERVICE_DORMANT_RUNTIME_GUIDANCE}`,
       }],
       ready: false,
-      nextSteps: ['try: ashlr daemon start --once'],
+      nextSteps: [
+        'try: ashlr run "<goal>"',
+        'try: ashlr swarm "<goal>"',
+        'try: ashlr daemon start --once --dry-run',
+      ],
     };
     if (jsonMode) {
       process.stdout.write(JSON.stringify(result, null, 2) + '\n');
     } else {
       console.error(`  ${red('error:')} ${result.steps[0]?.detail}`);
       console.log(`  ${red('✗ setup incomplete')}  ${dim('daemon service changes restricted')}`);
-      console.log(`  ${green(result.nextSteps[0] ?? 'try: ashlr daemon start --once')}`);
+      for (const nextStep of result.nextSteps) console.log(`  ${green(nextStep)}`);
     }
     return 1;
   }

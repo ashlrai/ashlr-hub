@@ -169,7 +169,7 @@ vi.mock('../src/cli/run.js', () => ({
 // Import under test (after mocks)
 // ---------------------------------------------------------------------------
 
-import { readAuthHeaders, startServer } from './helpers/authenticated-web-server.js';
+import { readAuthHeaders, readSseAuth, startServer } from './helpers/authenticated-web-server.js';
 import { createProposal } from '../src/core/inbox/store.js';
 
 // ---------------------------------------------------------------------------
@@ -254,7 +254,8 @@ function post(url: string, port: number, headers: Record<string, string> = {}, b
   }, body);
 }
 
-function readSseChunk(url: string, port: number): Promise<string> {
+async function readSseChunk(url: string, handle: { port: number; readToken: string }): Promise<string> {
+  const sseAuth = await readSseAuth(handle);
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
     let settled = false;
@@ -262,9 +263,9 @@ function readSseChunk(url: string, port: number): Promise<string> {
       {
         hostname: parsed.hostname,
         port: Number(parsed.port),
-        path: parsed.pathname + parsed.search,
+        path: parsed.pathname + sseAuth.query,
         method: 'GET',
-        headers: { Host: `127.0.0.1:${port}`, ...readAuthHeaders(port) },
+        headers: { Host: `127.0.0.1:${handle.port}`, ...sseAuth.headers },
       },
       (res) => {
         let data = '';
@@ -674,6 +675,7 @@ describe('GET /api/events', () => {
   it('returns text/event-stream content-type', async () => {
     const h = await startServer(makeConfig(), makeOpts());
     openHandles.push(h);
+    const sseAuth = await readSseAuth(h);
 
     // Open an SSE connection and check headers before closing
     const result = await new Promise<{ statusCode: number; contentType: string }>((resolve, reject) => {
@@ -682,9 +684,9 @@ describe('GET /api/events', () => {
         {
           hostname: parsed.hostname,
           port: Number(parsed.port),
-          path: parsed.pathname,
+          path: parsed.pathname + sseAuth.query,
           method: 'GET',
-          headers: { Host: `127.0.0.1:${h.port}`, ...readAuthHeaders(h.port) },
+          headers: { Host: `127.0.0.1:${h.port}`, ...sseAuth.headers },
         },
         (res) => {
           resolve({
@@ -884,7 +886,7 @@ describe('handleApi — no secrets in any response', () => {
     expect(detailBody.diff ?? '').toContain('[REDACTED]');
     expect(detailBody.diff ?? '').toContain('~/docs/config.md');
 
-    const sse = await readSseChunk(`${h.url}/api/events`, h.port);
+    const sse = await readSseChunk(`${h.url}/api/events`, h);
     for (const secret of [API_SECRET_A, API_SECRET_B, API_SECRET_C]) {
       expect(sse).not.toContain(secret);
     }

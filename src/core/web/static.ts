@@ -16,7 +16,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { readFileSync, statSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, realpathSync } from 'node:fs';
 import { resolve, join, sep, normalize, extname } from 'node:path';
 
 // ---------------------------------------------------------------------------
@@ -77,6 +77,7 @@ export function serveStatic(
   req: IncomingMessage,
   res: ServerResponse,
   dir: string,
+  beforeDescriptorOpen: (() => void) | undefined = undefined,
 ): boolean {
   try {
     const rootDir = resolve(dir);
@@ -85,7 +86,9 @@ export function serveStatic(
     if (pathname === null) return false;
 
     // "/" (or empty) -> index.html (SPA shell).
-    let rel = pathname === '/' ? '/index.html' : pathname;
+    let rel = pathname === '/' ? '/index.html'
+      : (pathname === '/next' || pathname === '/next/') ? '/next/index.html'
+      : pathname;
 
     // Reject null bytes anywhere in the relative path.
     if (rel.includes('\x00')) return false;
@@ -106,28 +109,50 @@ export function serveStatic(
       return false;
     }
 
-    // Stat — must be an existing regular file (never a directory).
-    let stat;
+    // Open first without following a replacement final symlink. All named-path
+    // containment and identity checks happen after descriptor custody is held,
+    // so the bytes are never read through a separately checked pathname.
+    let fd: number | undefined;
     try {
-      stat = statSync(candidate);
+      const realRoot = realpathSync(rootDir);
+      beforeDescriptorOpen?.();
+      fd = openSync(candidate, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      const openedBefore = fstatSync(fd);
+      if (!openedBefore.isFile()) return false;
+      const realCandidate = realpathSync(candidate);
+      const realRootWithSep = realRoot.endsWith(sep) ? realRoot : realRoot + sep;
+      if (!realCandidate.startsWith(realRootWithSep)) return false;
+      const namedBefore = lstatSync(candidate);
+      if (namedBefore.isSymbolicLink() || !namedBefore.isFile() ||
+        openedBefore.dev !== namedBefore.dev || openedBefore.ino !== namedBefore.ino) return false;
+      const body = readFileSync(fd);
+      const openedAfter = fstatSync(fd);
+      const realCandidateAfter = realpathSync(candidate);
+      const namedAfter = lstatSync(candidate);
+      if (!openedAfter.isFile() || !realCandidateAfter.startsWith(realRootWithSep) ||
+        namedAfter.isSymbolicLink() || !namedAfter.isFile() ||
+        openedBefore.dev !== openedAfter.dev || openedBefore.ino !== openedAfter.ino ||
+        openedAfter.dev !== namedAfter.dev || openedAfter.ino !== namedAfter.ino ||
+        openedBefore.size !== openedAfter.size ||
+        openedBefore.mtimeMs !== openedAfter.mtimeMs ||
+        openedBefore.ctimeMs !== openedAfter.ctimeMs ||
+        openedAfter.size !== namedAfter.size ||
+        openedAfter.mtimeMs !== namedAfter.mtimeMs ||
+        openedAfter.ctimeMs !== namedAfter.ctimeMs) return false;
+      res.setHeader('Content-Type', contentTypeFor(candidate));
+      res.writeHead(200, {
+        'Content-Type': contentTypeFor(candidate),
+        'Content-Length': String(body.byteLength),
+        'Cache-Control': 'no-cache',
+        'X-Content-Type-Options': 'nosniff',
+      });
+      res.end(body);
+      return true;
     } catch {
       return false; // ENOENT and friends -> not found.
+    } finally {
+      if (fd !== undefined) try { closeSync(fd); } catch { /* best effort */ }
     }
-    if (!stat.isFile()) return false;
-
-    const body = readFileSync(candidate);
-
-    // Set Content-Type via setHeader (case-insensitive in real Node http) so
-    // downstream readers can look it up by the canonical lowercase name.
-    res.setHeader('Content-Type', contentTypeFor(candidate));
-    res.writeHead(200, {
-      'Content-Type': contentTypeFor(candidate),
-      'Content-Length': String(body.byteLength),
-      'Cache-Control': 'no-cache',
-      'X-Content-Type-Options': 'nosniff',
-    });
-    res.end(body);
-    return true;
   } catch {
     // NEVER throw — any unexpected error means "not served".
     return false;

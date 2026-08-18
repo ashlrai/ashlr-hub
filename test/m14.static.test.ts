@@ -37,9 +37,11 @@ import { serveStatic } from '../src/core/web/static.js';
 // ---------------------------------------------------------------------------
 
 let assetsDir: string;
+let outsideDir: string;
 
 beforeEach(() => {
   assetsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m14-static-'));
+  outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m14-static-outside-'));
 
   // Write known files
   fs.writeFileSync(path.join(assetsDir, 'index.html'), '<html><body>SPA</body></html>');
@@ -50,18 +52,16 @@ beforeEach(() => {
   // Create a subdirectory with a file
   fs.mkdirSync(path.join(assetsDir, 'sub'));
   fs.writeFileSync(path.join(assetsDir, 'sub', 'page.html'), '<html>sub</html>');
+  fs.mkdirSync(path.join(assetsDir, 'next'));
+  fs.writeFileSync(path.join(assetsDir, 'next', 'index.html'), '<html><div id="root"></div></html>');
 
-  // Create a SENSITIVE file OUTSIDE assetsDir (to target with traversal attempts)
-  // We use a sibling tmp dir
-  const sibling = path.join(os.tmpdir(), 'ashlr-m14-static-secret');
-  try {
-    fs.mkdirSync(sibling, { recursive: true });
-    fs.writeFileSync(path.join(sibling, 'secret.txt'), 'SUPER_SECRET_VALUE');
-  } catch { /* ignore if already exists */ }
+  // Create a SENSITIVE file in a separately randomized private directory.
+  fs.writeFileSync(path.join(outsideDir, 'secret.txt'), 'SUPER_SECRET_VALUE', { mode: 0o600 });
 });
 
 afterEach(() => {
   fs.rmSync(assetsDir, { recursive: true, force: true });
+  fs.rmSync(outsideDir, { recursive: true, force: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -158,6 +158,14 @@ function httpGet(url: string): Promise<{ statusCode: number; headers: Record<str
 // ---------------------------------------------------------------------------
 
 describe('serveStatic — index.html for "/"', () => {
+  it('serves the operator console shell for /next and /next/', () => {
+    for (const url of ['/next', '/next/']) {
+      const { req, res, mock } = makeMockReqRes(url);
+      expect(serveStatic(req, res, assetsDir)).toBe(true);
+      expect(Buffer.concat(mock.body).toString()).toContain('id="root"');
+    }
+  });
+
   it('serves index.html for path "/"', () => {
     const { req, res, mock } = makeMockReqRes('/');
     const handled = serveStatic(req, res, assetsDir);
@@ -282,6 +290,45 @@ describe('serveStatic — path traversal rejection (unit)', () => {
 // ---------------------------------------------------------------------------
 
 describe('serveStatic — never throws', () => {
+  it.skipIf(process.platform === 'win32')('rejects an in-root final symlink', () => {
+    fs.symlinkSync(path.join(assetsDir, 'app.js'), path.join(assetsDir, 'app-link.js'));
+    const { req, res, mock } = makeMockReqRes('/app-link.js');
+    expect(serveStatic(req, res, assetsDir)).toBe(false);
+    expect(Buffer.concat(mock.body)).toHaveLength(0);
+  });
+
+  it('fails closed when a checked file name is swapped before descriptor open', () => {
+    const safe = path.join(assetsDir, 'swap.txt');
+    const original = path.join(assetsDir, 'swap-original.txt');
+    const outside = path.join(outsideDir, 'swap.txt');
+    fs.writeFileSync(safe, 'SAFE');
+    fs.writeFileSync(outside, 'SECRET');
+    const { req, res, mock } = makeMockReqRes('/swap.txt');
+    const served = serveStatic(req, res, assetsDir, () => {
+      fs.renameSync(safe, original);
+      fs.symlinkSync(outside, safe);
+    });
+    expect(served).toBe(false);
+    expect(Buffer.concat(mock.body).toString()).not.toContain('SECRET');
+  });
+
+  it.skipIf(process.platform === 'win32')('fails closed when an ancestor directory is swapped before descriptor open', () => {
+    const nested = path.join(assetsDir, 'nested');
+    const original = path.join(assetsDir, 'nested-original');
+    const outsideNested = path.join(outsideDir, 'nested');
+    fs.mkdirSync(nested);
+    fs.mkdirSync(outsideNested);
+    fs.writeFileSync(path.join(nested, 'asset.txt'), 'SAFE');
+    fs.writeFileSync(path.join(outsideNested, 'asset.txt'), 'SECRET');
+    const { req, res, mock } = makeMockReqRes('/nested/asset.txt');
+    const served = serveStatic(req, res, assetsDir, () => {
+      fs.renameSync(nested, original);
+      fs.symlinkSync(outsideNested, nested);
+    });
+    expect(served).toBe(false);
+    expect(Buffer.concat(mock.body).toString()).not.toContain('SECRET');
+  });
+
   it('does not throw for a normal path', () => {
     const { req, res } = makeMockReqRes('/index.html');
     expect(() => serveStatic(req, res, assetsDir)).not.toThrow();
@@ -367,7 +414,7 @@ describe('serveStatic — integration via real HTTP server', () => {
     const attempts = [
       '/../../etc/passwd',
       '/%2e%2e%2fetc/passwd',
-      '/../../../tmp/ashlr-m14-static-secret/secret.txt',
+      `/../../../${path.relative(path.parse(outsideDir).root, path.join(outsideDir, 'secret.txt')).split(path.sep).join('/')}`,
     ];
     for (const attempt of attempts) {
       const res = await httpGet(`http://127.0.0.1:${port}${attempt}`);

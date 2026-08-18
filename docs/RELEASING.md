@@ -1,11 +1,18 @@
 # Releasing @ashlr/hub
 
-Releases are tag-triggered and fully gated. The current lane is deliberately
-pinned to the 3.3.0 candidate: nothing reaches npm without an explicit human
-action (pushing `v3.3.0`), approval of the `npm-release` environment, and a green
-full-CI verify job plus the signed release-canary gate. It publishes only under
-npm dist-tag `candidate` and creates a GitHub prerelease; it cannot move npm or
-GitHub `latest`.
+> **Emergency freeze:** the immutable 3.3.0 candidate was published from an
+> unsafe source tree and is quarantined. Preserve its package, provenance,
+> lightweight tag, and release for incident evidence. Leave `candidate` at
+> 3.3.0 only until the controlled 3.3.1 publication supersedes it, and
+> never move 3.3.0 to npm `latest`, reinstall it, activate it, rerun its publish
+> job, or reuse its version or tag. npm `latest` remains 3.0.1. The 3.3.0
+> procedure below is historical evidence and must not be executed. A separate
+> protected release-only change must prepare 3.3.1 from the safe
+> source-neutralization merge; 3.3.1 is the sole successor lane.
+
+The historical lane was tag-triggered and fully gated. It published only under
+npm dist-tag `candidate` and created a GitHub prerelease; it could not move npm
+or GitHub `latest`.
 
 ## One-time setup
 
@@ -60,7 +67,11 @@ tokens, and delete the unused `NPM_TOKEN` GitHub secret. Do not remove those
 fallback credentials before the trusted publisher has been configured and
 verified.
 
-## Release procedure
+## Historical 3.3.0 release procedure — frozen, do not execute
+
+This section records the already-completed 3.3.0 candidate lane for forensic
+review only. Do not run any command in it. The 3.3.1 release-only PR must
+replace this section with newly reviewed, exact 3.3.1 instructions.
 
 The current workflow is a one-version successor-candidate lane. It requires
 npm `latest` to equal `3.0.1`, `candidate` to equal `3.2.7`, immutable version 3.2.7
@@ -191,7 +202,11 @@ wrong, publication fails closed with an authentication error. Do not fall back
 to a local token/OTP publish: that would bypass the workflow's full-CI,
 protected-history, and provenance gates.
 
-## Failure recovery: never republish an immutable npm version
+## Historical failure recovery record — never republish an immutable npm version
+
+The 3.3.0 publication and GitHub prerelease are already complete. Preserve this
+section as incident evidence only; do not run its 3.3.0 recovery commands or
+rerun release run `32104836076`.
 
 An npm package version is immutable. Never rerun the whole workflow, rerun the
 `publish` job, or run `npm publish` locally after the registry may have accepted
@@ -249,8 +264,12 @@ was the next successor lane; it subsequently published the immutable public
 `sha512-Zep4krYD7uKqh2k+Z6w0sMyNDsLFjEtV1H8EqdM7yKTKCHSq79lJb7jGoH1qrfOXDBRTJTmG7bSDSPOBUFj+yA==`
 under npm `candidate`, while preserving `latest=3.0.1`. Its protected
 lightweight tag remains at `73931bdd31b3b4e4d905a30b5112e4cd712f7844`.
-Never move, delete, recreate, or reuse `v3.2.7` or version 3.2.7; version 3.3.0
-is the only current successor lane.
+Never move, delete, recreate, or reuse `v3.2.7` or version 3.2.7. The immutable
+3.3.0 candidate is quarantined and ineligible for npm `latest`; preserve its
+tag, release, package, and provenance unchanged. Leave `candidate` at 3.3.0
+only until the controlled 3.3.1 publication supersedes it. Version 3.3.1 is the
+sole successor lane and must be prepared only after this safe
+source-neutralization merge reaches protected `master`.
 
 If **publish succeeded and only `verify_publish` or the GitHub `release` job
 failed**, first verify that npm contains the intended tag artifact from a clean

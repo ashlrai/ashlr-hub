@@ -133,19 +133,29 @@ function checkpoint(pending: ScannerObservation[] = [present()]): ResolutionObse
   };
 }
 
+function freezeObserverDeadlineClock() {
+  const fixedWallClock = Date.now();
+  return vi.spyOn(Date, 'now').mockReturnValue(fixedWallClock);
+}
+
 describe('M367 bounded advisory resolution observer', () => {
   it('seeds a restart-safe pending-present checkpoint without minting a witness', () => {
-    const result = runResolutionObserver({
-      now: () => new Date('2026-07-11T11:01:00.000Z'),
-      deps: { loadBacklog: () => backlog('2026-07-11T10:59:00.000Z', [present()]) },
-    });
+    const wallClock = freezeObserverDeadlineClock();
+    try {
+      const result = runResolutionObserver({
+        now: () => new Date('2026-07-11T11:01:00.000Z'),
+        deps: { loadBacklog: () => backlog('2026-07-11T10:59:00.000Z', [present()]) },
+      });
 
-    expect(result).toMatchObject({ outcome: 'seeded', pendingObjectives: 1, recorded: 0 });
-    expect(readResolutionObserverCheckpoint()).toMatchObject({
-      sourceState: 'healthy',
-      checkpoint: { pending: [expect.objectContaining({ itemId: 'repo:test:merge-contract' })] },
-    });
-    expect(readResolutionWitnesses().sourceState).toBe('missing');
+      expect(result).toMatchObject({ outcome: 'seeded', pendingObjectives: 1, recorded: 0 });
+      expect(readResolutionObserverCheckpoint()).toMatchObject({
+        sourceState: 'healthy',
+        checkpoint: { pending: [expect.objectContaining({ itemId: 'repo:test:merge-contract' })] },
+      });
+      expect(readResolutionWitnesses().sourceState).toBe('missing');
+    } finally {
+      wallClock.mockRestore();
+    }
   });
 
   it('records an authenticated transition and advances only after the witness write', () => {
@@ -200,6 +210,7 @@ describe('M367 bounded advisory resolution observer', () => {
   });
 
   it('retains pending authority across unavailable or hashless current observations', () => {
+    const wallClock = freezeObserverDeadlineClock();
     const prior = checkpoint();
     let persisted: ResolutionObserverCheckpointV1 | undefined;
     const run = (observation: ScannerObservation) => runResolutionObserver({
@@ -211,86 +222,116 @@ describe('M367 bounded advisory resolution observer', () => {
       },
     });
 
-    expect(run(unavailable())).toMatchObject({ outcome: 'completed', pendingObjectives: 1, recorded: 0 });
-    expect(persisted?.pending).toHaveLength(1);
-    expect(run({ ...absent(), sourceBase: undefined })).toMatchObject({ pendingObjectives: 1, recorded: 0 });
-    expect(persisted?.pending).toHaveLength(1);
+    try {
+      expect(run(unavailable())).toMatchObject({ outcome: 'completed', pendingObjectives: 1, recorded: 0 });
+      expect(persisted?.pending).toHaveLength(1);
+      expect(run({ ...absent(), sourceBase: undefined })).toMatchObject({ pendingObjectives: 1, recorded: 0 });
+      expect(persisted?.pending).toHaveLength(1);
+    } finally {
+      wallClock.mockRestore();
+    }
   });
 
   it('retires incompatible requirements without claiming a resolution', () => {
+    const wallClock = freezeObserverDeadlineClock();
     const prior = checkpoint();
     let persisted: ResolutionObserverCheckpointV1 | undefined;
-    const result = runResolutionObserver({
-      now: () => new Date('2026-07-11T11:31:00.000Z'),
-      deps: {
-        loadBacklog: () => backlog('2026-07-11T11:29:00.000Z', [absent(undefined, 'changed')]),
-        readCheckpoint: () => ({ sourceState: 'healthy', checkpoint: prior }),
-        writeCheckpoint: (value) => { persisted = value; return true; },
-      },
-    });
+    try {
+      const result = runResolutionObserver({
+        now: () => new Date('2026-07-11T11:31:00.000Z'),
+        deps: {
+          loadBacklog: () => backlog('2026-07-11T11:29:00.000Z', [absent(undefined, 'changed')]),
+          readCheckpoint: () => ({ sourceState: 'healthy', checkpoint: prior }),
+          writeCheckpoint: (value) => { persisted = value; return true; },
+        },
+      });
 
-    expect(result).toMatchObject({ outcome: 'completed', transitionsMatched: 0, recorded: 0, pendingObjectives: 0 });
-    expect(persisted?.pending).toEqual([]);
+      expect(result).toMatchObject({ outcome: 'completed', transitionsMatched: 0, recorded: 0, pendingObjectives: 0 });
+      expect(persisted?.pending).toEqual([]);
+    } finally {
+      wallClock.mockRestore();
+    }
   });
 
   it('fails closed on degraded sources, cancellation, caps, and stale snapshots', () => {
+    const wallClock = freezeObserverDeadlineClock();
     const degraded = backlog('2026-07-11T11:29:00.000Z', [absent()]);
     degraded.observationSourceState = 'degraded';
     const controller = new AbortController();
     controller.abort();
 
-    expect(runResolutionObserver({ deps: { loadBacklog: () => degraded } })).toMatchObject({ outcome: 'source-unavailable' });
-    expect(runResolutionObserver({
-      signal: controller.signal,
-      deps: {
-        loadBacklog: () => backlog('2026-07-11T11:29:00.000Z', [absent()]),
-        readCheckpoint: () => ({ sourceState: 'healthy', checkpoint: checkpoint() }),
-      },
-    })).toMatchObject({ outcome: 'cancelled' });
-    const secondRepo = `${repo}-2`;
-    expect(runResolutionObserver({
-      maxRepos: 1,
-      deps: { loadBacklog: () => ({
-        ...backlog('2026-07-11T11:29:00.000Z', [absent(), { ...absent(), repo: secondRepo }]),
-        repos: [repo, secondRepo],
-      }) },
-    })).toMatchObject({ outcome: 'capacity-exceeded' });
-    expect(runResolutionObserver({
-      deps: {
-        loadBacklog: () => backlog('2026-07-11T10:58:00.000Z', [absent()]),
-        readCheckpoint: () => ({ sourceState: 'healthy', checkpoint: checkpoint() }),
-      },
-    })).toMatchObject({ outcome: 'stale' });
+    try {
+      expect(runResolutionObserver({ deps: { loadBacklog: () => degraded } })).toMatchObject({ outcome: 'source-unavailable' });
+      expect(runResolutionObserver({
+        signal: controller.signal,
+        deps: {
+          loadBacklog: () => backlog('2026-07-11T11:29:00.000Z', [absent()]),
+          readCheckpoint: () => ({ sourceState: 'healthy', checkpoint: checkpoint() }),
+        },
+      })).toMatchObject({ outcome: 'cancelled' });
+      const secondRepo = `${repo}-2`;
+      expect(runResolutionObserver({
+        maxRepos: 1,
+        deps: { loadBacklog: () => ({
+          ...backlog('2026-07-11T11:29:00.000Z', [absent(), { ...absent(), repo: secondRepo }]),
+          repos: [repo, secondRepo],
+        }) },
+      })).toMatchObject({ outcome: 'capacity-exceeded' });
+      expect(runResolutionObserver({
+        deps: {
+          loadBacklog: () => backlog('2026-07-11T10:58:00.000Z', [absent()]),
+          readCheckpoint: () => ({ sourceState: 'healthy', checkpoint: checkpoint() }),
+        },
+      })).toMatchObject({ outcome: 'stale' });
+    } finally {
+      wallClock.mockRestore();
+    }
   });
 
   it('refuses incomplete scanner coverage and non-monotonic current evidence', () => {
-    expect(runResolutionObserver({
-      deps: { loadBacklog: () => ({ ...backlog('2026-07-11T11:29:00.000Z', []), repos: [repo] }) },
-    })).toMatchObject({ outcome: 'source-unavailable' });
-    expect(runResolutionObserver({
-      deps: {
-        loadBacklog: () => backlog('2026-07-11T11:29:00.000Z', [absent('2026-07-11T10:59:59.000Z')]),
-        readCheckpoint: () => ({ sourceState: 'healthy', checkpoint: checkpoint() }),
-      },
-    })).toMatchObject({ outcome: 'source-unavailable', recorded: 0 });
+    const wallClock = freezeObserverDeadlineClock();
+    try {
+      expect(runResolutionObserver({
+        deps: { loadBacklog: () => ({ ...backlog('2026-07-11T11:29:00.000Z', []), repos: [repo] }) },
+      })).toMatchObject({ outcome: 'source-unavailable' });
+      expect(runResolutionObserver({
+        deps: {
+          loadBacklog: () => backlog('2026-07-11T11:29:00.000Z', [absent('2026-07-11T10:59:59.000Z')]),
+          readCheckpoint: () => ({ sourceState: 'healthy', checkpoint: checkpoint() }),
+        },
+      })).toMatchObject({ outcome: 'source-unavailable', recorded: 0 });
+    } finally {
+      wallClock.mockRestore();
+    }
   });
 
   it('suppresses overlapping schedules and shares the in-flight completion', async () => {
+    const wallClock = freezeObserverDeadlineClock();
     const deps = { loadBacklog: () => backlog('2026-07-11T10:59:00.000Z', [present()]) };
-    const first = scheduleResolutionObserver({ deps });
-    const second = scheduleResolutionObserver({ deps });
+    try {
+      const first = scheduleResolutionObserver({ deps });
+      const second = scheduleResolutionObserver({ deps });
 
-    expect(first.disposition).toBe('scheduled');
-    expect(second.disposition).toBe('overlap-suppressed');
-    expect(second.completion).toBe(first.completion);
-    await expect(first.completion).resolves.toMatchObject({ outcome: 'seeded' });
+      expect(first.disposition).toBe('scheduled');
+      expect(second.disposition).toBe('overlap-suppressed');
+      expect(second.completion).toBe(first.completion);
+      await expect(first.completion).resolves.toMatchObject({ outcome: 'seeded' });
+    } finally {
+      wallClock.mockRestore();
+    }
   });
 
   it('schedules only after a successful resident live tick', async () => {
-    const scheduled = scheduleResolutionObserver({
-      deps: { loadBacklog: () => backlog('2026-07-11T10:59:00.000Z', [present()]) },
-    });
-    await scheduled.completion;
+    const wallClock = freezeObserverDeadlineClock();
+    let scheduled!: ReturnType<typeof scheduleResolutionObserver>;
+    try {
+      scheduled = scheduleResolutionObserver({
+        deps: { loadBacklog: () => backlog('2026-07-11T10:59:00.000Z', [present()]) },
+      });
+      await scheduled.completion;
+    } finally {
+      wallClock.mockRestore();
+    }
     let calls = 0;
     const schedule = () => {
       calls += 1;

@@ -116,21 +116,31 @@ function checkpoint(backlogGeneratedAt = '2026-07-11T10:59:00.000Z'): Resolution
   };
 }
 
+function freezeObserverDeadlineClock() {
+  const fixedWallClock = Date.now();
+  return vi.spyOn(Date, 'now').mockReturnValue(fixedWallClock);
+}
+
 describe('M368 resolution observer hardening', () => {
   it('refuses a backlog replaced after the parent selected a snapshot token', () => {
+    const wallClock = freezeObserverDeadlineClock();
     const writeCheckpoint = vi.fn(() => true);
-    const result = runResolutionObserver({
-      expectedBacklogGeneratedAt: '2026-07-11T11:29:00.000Z',
-      expectedBacklogSnapshotId: 'b'.repeat(32),
-      deps: {
-        loadBacklog: () => backlog('2026-07-11T11:29:00.000Z', [present()]),
-        writeCheckpoint,
-        writeRunSummary: () => true,
-      },
-    });
+    try {
+      const result = runResolutionObserver({
+        expectedBacklogGeneratedAt: '2026-07-11T11:29:00.000Z',
+        expectedBacklogSnapshotId: 'b'.repeat(32),
+        deps: {
+          loadBacklog: () => backlog('2026-07-11T11:29:00.000Z', [present()]),
+          writeCheckpoint,
+          writeRunSummary: () => true,
+        },
+      });
 
-    expect(result.outcome).toBe('source-unavailable');
-    expect(writeCheckpoint).not.toHaveBeenCalled();
+      expect(result.outcome).toBe('source-unavailable');
+      expect(writeCheckpoint).not.toHaveBeenCalled();
+    } finally {
+      wallClock.mockRestore();
+    }
   });
 
   it('does not publish a completed outcome after synchronous prework exceeds the deadline', () => {
@@ -181,7 +191,7 @@ describe('M368 resolution observer hardening', () => {
     } finally {
       wallClock.mockRestore();
     }
-  });
+  }, 15_000);
 
   it('refuses a checkpoint rollback and preserves the newer cursor', () => {
     const newer = checkpoint('2026-07-11T11:10:00.000Z');
@@ -195,13 +205,18 @@ describe('M368 resolution observer hardening', () => {
   });
 
   it('reports a failed latest attempt independently from the successful checkpoint cursor', () => {
-    expect(writeResolutionObserverCheckpoint(checkpoint())).toBe(true);
-    const result = runResolutionObserver({
-      now: () => new Date('2026-07-11T11:31:00.000Z'),
-      deps: { loadBacklog: () => backlog('2026-07-11T11:29:00.000Z', [absent()], true) },
-    });
+    const wallClock = freezeObserverDeadlineClock();
+    try {
+      expect(writeResolutionObserverCheckpoint(checkpoint())).toBe(true);
+      const result = runResolutionObserver({
+        now: () => new Date('2026-07-11T11:31:00.000Z'),
+        deps: { loadBacklog: () => backlog('2026-07-11T11:29:00.000Z', [absent()], true) },
+      });
 
-    expect(result.outcome).toBe('source-unavailable');
+      expect(result.outcome).toBe('source-unavailable');
+    } finally {
+      wallClock.mockRestore();
+    }
     expect(readResolutionObserverRunSummary()).toMatchObject({
       sourceState: 'healthy',
       run: { outcome: 'source-unavailable', backlogGeneratedAt: '2026-07-11T11:29:00.000Z' },

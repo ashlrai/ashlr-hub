@@ -93,10 +93,8 @@ describe('M305 evaluateAutoMergeReadinessPreflight', () => {
     expect(r.ready).toBe(false);
     expect(r.reason).toMatch(/known verification failure/);
     expect(r.reason).toMatch(/vitest/);
-    // No failureCategory (legacy/unclassified record) → still treated as a
-    // real failure, permanent by default. Regression guard: a genuine code
-    // failure must keep accruing toward stuckPassCount/auto-archive.
-    expect(r.permanent).not.toBe(false);
+    // A legacy/unclassified record is not explicit code-failure authority.
+    expect(r.permanent).toBe(false);
   });
 
   it('blocks a code-category verification failure as permanent (real failure, not infra)', () => {
@@ -126,7 +124,7 @@ describe('M305 evaluateAutoMergeReadinessPreflight', () => {
   });
 
   it('does NOT treat a timeout/infra verification failure as permanent either', () => {
-    for (const failureCategory of ['timeout', 'infra'] as const) {
+    for (const failureCategory of ['tool', 'timeout', 'infra', 'cancelled', 'invalid-command'] as const) {
       const r = evaluateAutoMergeReadinessPreflight(
         proposal({ verifyResult: { passed: false, failed: ['test'], failureCategory } }),
         cfg({ trustBasis: 'verification' }),

@@ -18,7 +18,7 @@ describe('resident service release-truth documentation', () => {
       expect(text).toMatch(/temporar(?:ily|y).*unavailable/is);
       expect(text).toMatch(/install.*reinstall.*repair.*restart/is);
       expect(text).toMatch(/status.*uninstall/is);
-      expect(text).toMatch(/one-shot workflow/is);
+      expect(text).toMatch(/compiled daemon and conductor trust roots are empty/is);
     },
   );
 
@@ -39,11 +39,11 @@ describe('resident service release-truth documentation', () => {
     const quickstart = read('docs/QUICKSTART.md');
 
     expect(team).toContain('`ashlr setup`\nrefuses before reading or changing setup state');
-    expect(team).toContain('`ashlr daemon start --once`');
+    expect(team).toContain('`ashlr daemon start --once --dry-run`');
     expect(team).not.toContain('installed during `ashlr setup`');
     expect(quickstart).toContain('Automatic merge is disabled by default');
     expect(quickstart).toContain('evidence, scope, provenance, and remote-PR gates');
-    expect(quickstart).toContain('`ashlr setup` refuses before');
+    expect(quickstart).toMatch(/`ashlr setup`[\s\S]{0,180}refuses before/i);
     expect(quickstart).not.toContain('Installs the daemon as an OS service');
     expect(quickstart).not.toContain('Proposals are never applied automatically');
   });

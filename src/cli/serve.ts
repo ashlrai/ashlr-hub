@@ -172,8 +172,10 @@ export async function cmdServe(args: string[]): Promise<number> {
   // ── Output ────────────────────────────────────────────────────────────────
 
   if (json) {
+    const consoleUrl = `${handle.url}/next/`;
     const out: Record<string, unknown> = {
       url: handle.url,
+      consoleUrl,
       port: handle.port,
       allowDispatch,
     };
@@ -189,6 +191,7 @@ export async function cmdServe(args: string[]): Promise<number> {
     console.log(bold('  ashlr serve') + gray(' — local web dashboard'));
     console.log('');
     console.log(`  ${green('✓')} Listening on ${cyan(handle.url)}`);
+    console.log(`  ${green('✓')} Operator console ${cyan(`${handle.url}/next/`)}`);
     console.log(`  ${dim('Bound to 127.0.0.1 only — not externally reachable.')}`);
     console.log('');
 
@@ -215,15 +218,16 @@ export async function cmdServe(args: string[]): Promise<number> {
   // ── Open browser ──────────────────────────────────────────────────────────
 
   if (open) {
+    const consoleUrl = `${handle.url}/next/`;
     try {
-      await openBrowser(handle.url);
+      await openBrowser(consoleUrl);
       if (!json) {
-        console.error(dim(`  Opening ${handle.url} in your browser…`));
+        console.error(dim(`  Opening ${consoleUrl} in your browser…`));
       }
     } catch {
       // Non-fatal — user can navigate manually
       if (!json) {
-        console.error(dim(`  Could not open browser automatically. Navigate to ${handle.url}`));
+        console.error(dim(`  Could not open browser automatically. Navigate to ${consoleUrl}`));
       }
     }
   }

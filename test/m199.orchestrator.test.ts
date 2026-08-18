@@ -158,6 +158,18 @@ vi.mock('../src/core/knowledge/index.js', () => ({
   scrubSecrets: vi.fn((s: string) => s),
 }));
 
+const { mockLoadGenome, mockCurateAntiPlaybooks } = vi.hoisted(() => ({
+  mockLoadGenome: vi.fn(),
+  mockCurateAntiPlaybooks: vi.fn(),
+}));
+vi.mock('../src/core/genome/store.js', () => ({
+  loadGenome: (...args: unknown[]) => mockLoadGenome(...args),
+}));
+vi.mock('../src/core/genome/recall.js', () => ({ recall: vi.fn(async () => []) }));
+vi.mock('../src/core/fleet/self-improve.js', () => ({
+  curateAntiPlaybooks: (...args: unknown[]) => mockCurateAntiPlaybooks(...args),
+}));
+
 // Mock prompts — return deterministic strings.
 vi.mock('../src/core/run/prompts/roles.js', () => ({
   PLANNER_ROLE: 'MOCK_PLANNER_ROLE',
@@ -339,6 +351,8 @@ beforeEach(() => {
 
   // knowledge
   vi.mocked(scrubSecrets).mockImplementation((s: string) => s);
+  mockLoadGenome.mockReturnValue([]);
+  mockCurateAntiPlaybooks.mockReturnValue([]);
 
   // browser-verify defaults (not a web app, returns skipped)
   vi.mocked(isWebApp).mockReturnValue(false);
@@ -690,6 +704,62 @@ describe('M199 runGoal — happy path', () => {
     expect(state.id).toBe(runId);
     await expect(runGoal('duplicate', makeConfig(), makeOpts({ runId })))
       .rejects.toThrow(`Run "${runId}" already exists`);
+  });
+});
+
+describe('M505 anti-playbook prompt authority', () => {
+  it.each([
+    ['absent', undefined],
+    ['false', false],
+  ] as const)('does not inject anti-playbooks when selfImprove is %s', async (_label, selfImprove) => {
+    const client = makeClient('ollama', {
+      content: '[{"id":"t1","goal":"task","deps":[]}]',
+      usage: { tokensIn: 1, tokensOut: 1 },
+    });
+    vi.mocked(getActiveClient).mockResolvedValue(client as any);
+    vi.mocked(runTask).mockImplementation(async (task: any) => {
+      task.status = 'done';
+      task.result = 'done';
+    });
+    vi.mocked(verifyTaskStructured).mockResolvedValue({ ok: true, reason: 'pass' } as any);
+    const entry = {
+      title: 'AUTHORITY_CANARY', text: 'must not reach prompt', tags: ['m235:anti-playbook'],
+    };
+    mockLoadGenome.mockReturnValue([entry]);
+    mockCurateAntiPlaybooks.mockReturnValue([entry]);
+    const foundry = selfImprove === undefined ? {} : { selfImprove };
+
+    await runGoal('prompt authority', makeConfig({
+      foundry: foundry as AshlrConfig['foundry'],
+      genome: { injectOnRun: true, playbookOnRun: false },
+    }), makeOpts({ noMemory: false }));
+
+    expect(JSON.stringify(vi.mocked(client.chat).mock.calls)).not.toContain('AUTHORITY_CANARY');
+  });
+
+  it('injects the bounded anti-playbook block when selfImprove is explicitly true', async () => {
+    const client = makeClient('ollama', {
+      content: '[{"id":"t1","goal":"task","deps":[]}]',
+      usage: { tokensIn: 1, tokensOut: 1 },
+    });
+    vi.mocked(getActiveClient).mockResolvedValue(client as any);
+    vi.mocked(runTask).mockImplementation(async (task: any) => {
+      task.status = 'done';
+      task.result = 'done';
+    });
+    vi.mocked(verifyTaskStructured).mockResolvedValue({ ok: true, reason: 'pass' } as any);
+    const entry = {
+      title: 'AUTHORITY_CANARY', text: 'explicitly enabled lesson', tags: ['m235:anti-playbook'],
+    };
+    mockLoadGenome.mockReturnValue([entry]);
+    mockCurateAntiPlaybooks.mockReturnValue([entry]);
+
+    await runGoal('prompt authority', makeConfig({
+      foundry: { selfImprove: true } as AshlrConfig['foundry'],
+      genome: { injectOnRun: true, playbookOnRun: false },
+    }), makeOpts({ noMemory: false }));
+
+    expect(JSON.stringify(vi.mocked(client.chat).mock.calls)).toContain('AUTHORITY_CANARY');
   });
 });
 

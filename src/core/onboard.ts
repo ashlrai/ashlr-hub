@@ -25,7 +25,7 @@ import { runDoctor } from './doctor.js';
 import { serviceStatus, install } from './daemon/service.js';
 import {
   assertResidentServiceInstallAuthorized,
-  RESIDENT_SERVICE_ONE_SHOT_GUIDANCE,
+  RESIDENT_SERVICE_DORMANT_RUNTIME_GUIDANCE,
 } from './daemon/service-install-authority.js';
 import { serviceActivity } from './daemon/service-activity.js';
 import { fleetReadiness } from './fleet/engine-readiness.js';
@@ -685,6 +685,8 @@ export async function onboard(
  * original 7 steps so existing behavior is untouched.
  *
  * Same guarantees as onboard(): never throws, never hangs, never enters creds.
+ * Production refuses before these steps, and empty compiled daemon/conductor
+ * roots keep non-dry autonomous execution dormant independently of setup.
  */
 export async function setupWizard(
   cfg: AshlrConfig,
@@ -698,10 +700,14 @@ export async function setupWizard(
       steps: [step(
         'daemon-service',
         'manual',
-        `setup refused before onboarding: ${reason}. ${RESIDENT_SERVICE_ONE_SHOT_GUIDANCE}`,
+        `setup refused before onboarding: ${reason}. ${RESIDENT_SERVICE_DORMANT_RUNTIME_GUIDANCE}`,
       )],
       ready: false,
-      nextSteps: ['try: ashlr daemon start --once'],
+      nextSteps: [
+        'try: ashlr run "<goal>"',
+        'try: ashlr swarm "<goal>"',
+        'try: ashlr daemon start --once --dry-run',
+      ],
     };
   }
 

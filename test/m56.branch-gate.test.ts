@@ -88,29 +88,8 @@ describe('M56 — executor keeps merge-to-main frontier-only (structural source 
   });
 
   it('does not delegate deferred merge authority to the host without durable revocation', () => {
-    // The host merge hop is real now (M-hostmerge), but it must never be a
-    // naive unconditional `gh pr merge --auto` — it must stay behind (a) an
-    // explicit, separate opt-in flag, (b) the durable prepare/arm/revoke/
-    // consume authority (never the raw `true` literal it guards against),
-    // and (c) a live kill-switch check immediately before the irreversible
-    // call. This is the structural guard the task's own brief called for:
-    // "Do not just flip the literal to `true`."
     expect(merge).not.toMatch(/'pr', 'merge', '--auto'/);
-    expect(merge).toMatch(/from '\.\.\/autonomy\/host-merge-revocation-protocol\.js'/);
-    expect(merge).toMatch(/hostAutoMergeEnabled = autoMergeConfigValue\(cfg, 'hostAutoMerge'\) === true/);
-    expect(merge).not.toMatch(/hostAutoMergeEnabled = true/);
-    // Fresh, authenticated pre-merge read — never trust the earlier `armed`
-    // result in memory — immediately before the actual gh pr merge call.
-    expect(merge).toMatch(/const preMergeState = readHostMergeRevocationState\(identity\)/);
-    expect(merge).toMatch(/preMergeState\.state !== 'healthy' \|\| preMergeState\.record\.phase !== 'armed'/);
-    expect(merge).toMatch(/const attempt = hostMergeGhPrMerge\(/);
-    // The kill switch is re-checked at every stage, including immediately
-    // before the pre-merge revocation read (i.e. immediately before merging).
-    const preMergeSection = merge.slice(
-      merge.indexOf('Immediately before the irreversible act'),
-      merge.indexOf('const attempt = hostMergeGhPrMerge('),
-    );
-    expect(preMergeSection).toMatch(/if \(killSwitchOn\(\)\) \{/);
+    expect(merge).toMatch(/host auto-merge is disabled until durable revocation is available/);
   });
 
   it('the local merge-to-main is guarded by toMain (mid leaves a staged branch)', () => {

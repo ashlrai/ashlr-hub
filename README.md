@@ -1,6 +1,6 @@
 # ashlr-hub
 
-**An autonomous engineering fleet that builds, maintains, and improves your repos — proposal-first by default, sandboxed, and gated by explicit merge authority.**
+**A governed autonomous-engineering fleet architecture — proposal-first, sandboxed, and gated by explicit runtime and merge authority.**
 
 [![npm](https://img.shields.io/npm/v/@ashlr/hub.svg?logo=npm&label=%40ashlr%2Fhub&color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
 [![npm downloads](https://img.shields.io/npm/dm/@ashlr/hub.svg?color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
@@ -12,25 +12,25 @@
 
 ## What is this?
 
-ashlr-hub is a single Node binary that runs an autonomous agent fleet against your enrolled repositories.
+ashlr-hub is a single Node binary containing an autonomous agent fleet for enrolled repositories. In the current production build, compiled daemon and conductor trust roots are empty, so live non-dry fleet execution is deliberately dormant; verified dry-run, status, and local-console paths remain available.
 
-The fleet scans your backlog, dispatches sandboxed agent swarms across multiple backends (local Ollama/LM Studio, Claude Code, Codex, any OpenAI-compatible API), and deposits proposed diffs into an **Approval Inbox**. By default, nothing touches a branch until you explicitly approve it. A separate, default-off auto-merge subsystem can be enabled only with explicit authority and fail-closed verification. The kill-switch is a single file.
+When an independently provisioned runtime admits it, the fleet scans your backlog, dispatches sandboxed agent swarms across multiple backends (local Ollama/LM Studio, Claude Code, Codex, any OpenAI-compatible API), and deposits proposed diffs into an **Approval Inbox**. By default, nothing touches a branch until you explicitly approve it. A separate, default-off auto-merge subsystem can be enabled only with explicit authority and fail-closed verification. The kill-switch is a single file.
 
 It is also a local unifying harness: one CLI and web dashboard that indexes your enrolled projects, aggregates all your MCP servers into a single gateway, tracks real spend, and provides `ashlr run` / `ashlr swarm` for ad-hoc work.
 
 ### Authority defaults
 
-First activation follows a strict order: run `ashlr preflight`, enroll a repo, and complete a dry-run before enabling real daemon generation. Only then review a generated proposal and use `ashlr inbox approve`; merge, deploy, and service-install authority remain separate and default off.
+First activation currently stops at observation: run `ashlr preflight`, enroll a repo, and complete a dry-run. Empty compiled trust roots refuse live non-dry daemon and conductor effects, and resident service mutation has no production authority. Existing proposals can still be inspected, but no dry-run or readiness result widens runtime authority.
 
 | Path | Default | Required authority | Possible outward effect |
 |------|---------|--------------------|-------------------------|
-| Daemon generation | Enabled only when you run the daemon against enrolled repos | Enrollment, kill-switch clear, budget and sandbox gates | Pending proposal only; no apply, push, PR, deploy, or service mutation |
+| Daemon generation | **Dormant in production** | A separately provisioned compiled trust root; the shipped roots are empty | Dry-run/status only; live non-dry dispatch refuses before effects |
 | Inbox apply | Manual | Explicit `ashlr inbox approve`, confirmation, enrollment, kill-switch clear | Applies to a dedicated local branch; never silently edits the working tree |
 | Protected PR submit | Operator-invoked | Explicit `ashlr inbox submit`, caller confirmation, signed frontier provenance, fresh verification, and live protected-remote evidence | Opens one review PR; never merges `main` or contacts a model. `--yes` is caller intent, not an authenticated human receipt. |
 | Autonomous merge | **Off** | `foundry.autoMerge.enabled: true` plus the selected tier, judge-backed verification, or evidence authority gates | Local merge or protected remote PR, depending on policy; every refusal is fail-closed |
 | Judge-free evidence merge | **Off** | Base- and diff-bound deterministic verification, signed provenance/evidence, strict scope/risk policy, and live protected-branch checks | Protected remote PR handoff only; no local fallback, self-target merge, partial capture, or build/CI/manifest change |
 | Deploy | Never performed by the daemon | Explicit `ashlr ship --deploy <target> --confirm` after pre-ship checks | Runs the selected production deploy command |
-| OS service mutation | **Temporarily unavailable** | No production install/reinstall/repair/restart authority is currently issued | Existing services expose status and uninstall only; admitted one-shot workflows remain available |
+| OS service mutation | **Temporarily unavailable** | No production install/reinstall/repair/restart authority is currently issued | Existing services expose status and uninstall only; no live one-shot or resident start is admitted |
 
 No successful test, model verdict, or proposal record grants deployment or service-install authority. Those are separate operator commands.
 
@@ -38,7 +38,7 @@ No successful test, model verdict, or proposal record grants deployment or servi
 
 ## What makes it different
 
-Most AI coding tools are request-response: you ask, the model answers. ashlr-hub runs a **continuous autonomous loop**:
+Most AI coding tools are request-response: you ask, the model answers. Ashlr's source architecture defines a **continuous autonomous loop**, but the current production entrypoints keep its non-dry daemon and conductor effects dormant because their compiled trust roots are empty:
 
 ```
 End-State Spec (your vision)
@@ -54,7 +54,7 @@ End-State Spec (your vision)
                     → Scorecard feedback (outcomes feed learned routing)
 ```
 
-**What this unlocks:**
+**What this architecture unlocks once an independently provisioned runtime admits it:**
 
 - The fleet works your backlog while you sleep.
 - You review proposals with `ashlr inbox`, not a chat window.
@@ -99,13 +99,13 @@ cd ashlr-hub
 
 `install.sh` requires Node 22.15+ and is idempotent — safe to re-run after pulling updates.
 
-### 1. Run the setup wizard
+### 1. Confirm the setup boundary
 
 ```sh
-ashlr setup  # currently exits nonzero at the resident-service step
+ashlr setup  # currently refuses before config or wizard work
 ```
 
-Setup currently refuses before loading config or running the wizard while install/reinstall/repair/restart authority is withheld. It returns nonzero and leaves setup state untouched. Existing services support `ashlr daemon service-status` and `ashlr daemon uninstall`; admitted one-shot workflows such as `ashlr daemon start --once` remain available. Service status reports registration as `present`, `absent`, or `unknown`; only proven absence permits an in-place update.
+Setup currently refuses before loading config or running the wizard while install/reinstall/repair/restart authority is withheld. It returns nonzero and leaves setup state untouched. Existing services support `ashlr daemon service-status` and `ashlr daemon uninstall`; live one-shot and resident starts remain dormant because the production daemon trust roots are compiled empty. Service status reports registration as `present`, `absent`, or `unknown`; only proven absence permits an in-place update.
 
 ### 1a. Preflight check (optional but recommended)
 
@@ -113,7 +113,7 @@ Setup currently refuses before loading config or running the wizard while instal
 ashlr preflight
 ```
 
-Verifies daemon readiness, backend connectivity, and key configuration before you enroll any repos. Safe to skip — setup covers the same ground — but useful as a standalone health check after config changes.
+Verifies daemon readiness, backend connectivity, and key configuration before you enroll any repos. Run it directly: `ashlr setup` does not reach these checks in the current release because it refuses before config or wizard work.
 
 ### 2. Enroll a repo
 
@@ -132,13 +132,16 @@ ashlr daemon start --once --dry-run
 
 Prints what the fleet would work on. Creates no proposals, spends $0.
 
-### 4. Run one real tick
+### 4. Confirm the live boundary
 
 ```sh
 ashlr daemon start --once
 ```
 
-The fleet scans the backlog, dispatches sandboxed work, and deposits proposals into the inbox.
+The current production build refuses this non-dry command before dispatch or
+proposal creation because its compiled daemon trust roots are empty. Use
+`ashlr daemon status`, the dry-run above, and Mission Control for verified
+observation. A test-only injected trust root is not production activation.
 
 ### 5. Review proposals
 
@@ -161,21 +164,29 @@ ashlr serve           # web dashboard at http://127.0.0.1:7777 (localhost only)
 ashlr serve --open    # also opens the browser
 ```
 
-The dashboard shows fleet status, all runs and swarms, the inbox, rolling spend analytics, and shared memory.
+The dashboard shows fleet status, all runs and swarms, the inbox, rolling spend analytics, and shared memory. The new console is at `/next/`; `/` is the separately labelled legacy dashboard.
 
-`ashlr serve` prints a fresh read token on every start. Paste it into the
-dashboard's **Read token** control. The browser keeps the raw read token only in
-the current tab's `sessionStorage` and exchanges it for a 15-minute, read-only,
-HttpOnly cookie. Because browser cookies are shared across ports on the same
-host, that ticket is also bound to a random 256-bit, origin-scoped client proof.
-EventSource sends only that non-authority proof in its URL: it is useless
-without the matching signed HttpOnly ticket, and a `no-referrer` policy keeps it
-from leaving the dashboard. Static assets and the minimal `{ "ok": true }`
-liveness response remain public on loopback; every proprietary API read
-requires the read token or the ticket plus its matching client proof.
-The 15-minute limit applies to the cookie ticket, not the raw read token: while
-the current server process and tab remain active, the browser renews the ticket
-using the read token retained in that tab.
+`ashlr serve` prints a fresh read token on every start. In `/next/`, paste it
+into the **Read token** control once. The new console uses it only for the
+`POST /api/session` exchange and then discards the raw read token. A 15-minute,
+read-only HttpOnly cookie plus a random 256-bit client proof in
+`sessionStorage` survives a page reload until the signed ticket expires. After
+expiry, enter the raw read token again; `/next/` cannot silently renew because
+it does not retain that token. EventSource sends only the non-authority proof
+in its URL: it is useless without the matching signed HttpOnly ticket, and a
+`no-referrer` policy keeps it from leaving the dashboard.
+
+When `/next/` mutations are explicitly enabled, its separate mutation token is
+held only in module memory for a 20-minute idle window. It is never written to
+`sessionStorage`, local storage, a cookie, or a URL; **Lock** clears it
+immediately. The legacy dashboard at `/` has a different, separately labelled
+transport: it retains its raw read token in tab `sessionStorage` to renew the
+cookie, and prompts independently for mutation authority rather than using the
+new console's held-token contract.
+
+Static assets and the minimal `{ "ok": true }` liveness response remain public
+on loopback; every proprietary API read requires the read token or the ticket
+plus its matching client proof.
 
 Headless clients send the read token as a header:
 
@@ -186,16 +197,17 @@ curl -H "X-Ashlr-Token: $ASHLR_DASHBOARD_READ_TOKEN" \
 
 Read tokens and cookies cannot approve, dispatch, pause, resume, repair, or open
 local paths. When mutations are explicitly enabled, the server prints a second,
-independent mutation token. The browser asks for it anew for every exact action,
-uses it only for that request, and never retains it in JavaScript state,
-`sessionStorage`, a cookie, or a URL. Mutations accept only that token in
+independent mutation token. Both console contracts keep it out of persistent
+browser storage, cookies, and URLs. Mutations accept only that token in
 `X-Ashlr-Token`.
 
 ---
 
-## The autonomous loop
+## Resident loop and owner-invoked goals
 
-Once repos are enrolled, the higher-level entry point is the goal conductor:
+The source includes a resident goal conductor, but current production compiled
+conductor trust roots are empty. The loop dry-run is available; live non-dry
+loop commands below refuse before effects:
 
 ```sh
 ashlr loop               # one tick — advances active goals, then backlog fallback
@@ -203,7 +215,9 @@ ashlr loop --watch       # continuous (Ctrl-C to stop)
 ashlr loop --dry-run     # show what would advance, no proposals
 ```
 
-Set a strategic objective and the fleet plans + executes milestones:
+`ashlr goal "<objective>"` is different: it is a live, owner-invoked,
+proposal-only path that plans and advances one bounded milestone. It does not
+grant resident or unattended conductor authority:
 
 ```sh
 ashlr goal "harden the inbox apply path"
@@ -371,8 +385,8 @@ next actions point at work the daemon can select now instead of phantom backlog.
 | `ashlr onboard <repo>` | Enroll one repo with walkthrough + dry run |
 | `ashlr enroll add/remove/list` | Manage enrolled repos |
 | `ashlr enroll kill on/off` | Engage/clear the kill-switch |
-| `ashlr daemon start/stop/status` | Autonomous operator; proposal generation plus a separate default-off auto-merge maintenance pass |
-| `ashlr loop [--watch] [--dry-run]` | Goal-aware conductor — one tick or continuous |
+| `ashlr daemon start/stop/status` | Runtime operator; current production start refuses with empty compiled roots, while status remains observational |
+| `ashlr loop [--watch] [--dry-run]` | Goal-aware conductor; current production admits dry-run only |
 | `ashlr goal "<objective>"` | Set a strategic goal; plan + dispatch milestones |
 | `ashlr goals list/show/plan/advance` | Manage goals + milestones |
 | `ashlr vision show/review/preview/shadow/approve/reconcile` | Mission OS: strategy, bounded DAG preview, authenticated shadow evidence, and explicit goal adoption |
@@ -577,7 +591,6 @@ See [`docs/ECOSYSTEM-MAP.md`](docs/ECOSYSTEM-MAP.md) for the full capability map
 | [`docs/MISSION-OS.md`](docs/MISSION-OS.md) | Mission DAG, receipts, shadow workflow, Cortex/Locus boundaries, privacy, and troubleshooting |
 | [`docs/ELITE-AGENT-EFFICIENCY.md`](docs/ELITE-AGENT-EFFICIENCY.md) | Current primary-source research translated into Hub efficiency priorities and measurable autonomy gates |
 | [`docs/RUNTIME_ACTIVATION_AUTHORITY.md`](docs/RUNTIME_ACTIVATION_AUTHORITY.md) | Signed read-only resident activation admission, explicit mutation refusal, and native launchd v2 requirements |
-| [`docs/RUNTIME-FLEET-ACTIVATION.md`](docs/RUNTIME-FLEET-ACTIVATION.md) | How to actually turn on an unattended, resident fleet — operator standing grants (`ashlr activation`) and the four gates that block it even after a grant |
 | [`docs/ECOSYSTEM-MAP.md`](docs/ECOSYSTEM-MAP.md) | The 13-repo platform and composition bets |
 | [`docs/QUICKSTART.md`](docs/QUICKSTART.md) | Step-by-step first activation |
 | [`docs/LOCUS-FIRM-FLEET.md`](docs/LOCUS-FIRM-FLEET.md) | Production fleet checklist — `locus.firm`, `LOCUS_ENFORCE`, `LOCUS_CI_BINDING` (default off) |

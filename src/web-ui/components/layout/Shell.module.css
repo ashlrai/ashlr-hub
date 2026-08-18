@@ -34,3 +34,9 @@
   outline: none;
   box-shadow: none;
 }
+
+@media (max-width: 720px) {
+  .shell { flex-direction: column; }
+  .body { min-height: 0; }
+  .main { padding: var(--space-3); }
+}

@@ -323,6 +323,7 @@ describe('M428 goal source semantic quality', () => {
     })), 'utf8');
     symlinkSync(target, join(goalsDirectory(), 'goal-linked.json'));
 
+    expect(loadGoal('goal-linked')).toBeNull();
     expect(listGoalsDetailed()).toMatchObject({
       goals: [],
       sourceState: 'degraded',

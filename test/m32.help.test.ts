@@ -52,6 +52,13 @@ describe('HELP_ENTRIES — the command table', () => {
     expect(byCommand.get('daemon uninstall')).toContain('remains available');
     expect(byCommand.get('worker setup')).toContain('fail-closed');
     expect(byCommand.get('setup')).toContain('refuses before config or wizard effects');
+    expect(byCommand.get('setup')).toContain('compiled runtime roots are empty');
+    expect(byCommand.get('daemon start --once')).toContain('compiled daemon trust roots are empty');
+    expect(byCommand.get('daemon start --once --drain diagnostic-reslices --limit 3')).toContain('Dormant');
+    expect(byCommand.get('goal "<objective>"')).toContain('Live owner-invoked');
+    expect(byCommand.get('goal "<objective>"')).toContain('proposal-only advance');
+    expect(byCommand.get('goal "<objective>"')).not.toContain('Dormant');
+    expect(byCommand.get('loop')).toContain('compiled conductor trust roots are empty');
     expect(byCommand.get('update [--check] [--json]')).toContain('registration proven absent');
   });
 });

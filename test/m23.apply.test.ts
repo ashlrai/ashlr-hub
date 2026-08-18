@@ -539,6 +539,12 @@ describe('M23 applyProposal — patch: applies on NEW branch, never touches curr
     const loaded = loadProposal(p.id);
     expect(loaded!.status).toBe('failed');
   });
+
+  it('uses exact index application and never three-way patch synthesis', () => {
+    const source = fs.readFileSync(path.resolve('src/core/inbox/apply.ts'), 'utf8');
+    expect(source).toContain("gitRun(tmpWorktreeDir, ['apply', '--index', patchFile])");
+    expect(source).not.toContain("['apply', '--3way'");
+  });
 });
 
 // ===========================================================================

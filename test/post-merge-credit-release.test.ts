@@ -12,12 +12,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { DecisionEntry, Proposal, ProposalLocalMergeIntent, SkillCard } from '../src/core/types.js';
+import type { Proposal, ProposalLocalMergeIntent, SkillCard } from '../src/core/types.js';
 import {
   hashDiff,
   signLocalMergeIntent,
   signLocalRealizedMergeReceipt,
-  signSkillCardAttestation,
 } from '../src/core/foundry/provenance.js';
 import {
   MIN_POST_MERGE_OBSERVATION_WINDOW_MS,
@@ -29,7 +28,6 @@ import {
   sweepPostMergeCreditReleases,
 } from '../src/core/fleet/post-merge-credit.js';
 import { recordPostMergeObservation, postMergeObservationEventId } from '../src/core/fleet/post-merge-observations.js';
-import { skillCardContentHash } from '../src/core/fleet/skill-attestation.js';
 
 const FIXED_MS = 1_750_000_000_000;
 const FIXED_ISO = new Date(FIXED_MS).toISOString();
@@ -147,21 +145,9 @@ describe('hasReleasedPostMergeCredit', () => {
     expect(hasReleasedPostMergeCredit('post-merge-credit-release-v1:not-hex:not-hex')).toBe(false);
   });
 
-  it('rejects a well-formed but tampered token (flipped mac)', () => {
-    const proposal = makeMergedProposal({ id: 'tamper', mergedAt: mergedAtIso(MIN_POST_MERGE_OBSERVATION_WINDOW_MS + 1000) });
-    const eligibility = evaluatePostMergeCreditRelease(proposal, { nowMs: FIXED_MS });
-    expect(eligibility.eligible).toBe(true);
-    const label = eligibility.label!;
-    const [prefix, eventId, mac] = label.split(':');
-    const flipped = mac!.startsWith('0') ? `1${mac!.slice(1)}` : `0${mac!.slice(1)}`;
-    expect(hasReleasedPostMergeCredit(`${prefix}:${eventId}:${flipped}`)).toBe(false);
-  });
-
-  it('accepts a genuinely minted token', () => {
-    const proposal = makeMergedProposal({ id: 'good', mergedAt: mergedAtIso(MIN_POST_MERGE_OBSERVATION_WINDOW_MS + 1000) });
-    const eligibility = evaluatePostMergeCreditRelease(proposal, { nowMs: FIXED_MS });
-    expect(eligibility.eligible).toBe(true);
-    expect(hasReleasedPostMergeCredit(eligibility.label)).toBe(true);
+  it('keeps token-shaped historical values dormant while operational release is disabled', () => {
+    const token = `${POST_MERGE_CREDIT_RELEASE_LABEL}:${'a'.repeat(24)}:${'b'.repeat(24)}`;
+    expect(hasReleasedPostMergeCredit(token)).toBe(false);
   });
 });
 
@@ -182,15 +168,17 @@ describe('evaluatePostMergeCreditRelease', () => {
     expect(result).toMatchObject({ eligible: false, label: null, reason: 'observation-window-not-elapsed' });
   });
 
-  it('window elapsed, no observation ledger at all (missing) -> eligible', () => {
+  it('window elapsed with no adverse observation remains report-only', () => {
     const proposal = makeMergedProposal({
       id: 'clean-missing-ledger',
       mergedAt: mergedAtIso(MIN_POST_MERGE_OBSERVATION_WINDOW_MS + 1),
     });
     const result = evaluatePostMergeCreditRelease(proposal, { nowMs: FIXED_MS });
-    expect(result.eligible).toBe(true);
-    expect(typeof result.label).toBe('string');
-    expect(hasReleasedPostMergeCredit(result.label)).toBe(true);
+    expect(result).toMatchObject({
+      eligible: false,
+      label: null,
+      reason: 'report-only-no-positive-stability-witness',
+    });
   });
 
   it('window elapsed, an adverse observation exists for this exact merge event -> ineligible', () => {
@@ -225,7 +213,7 @@ describe('evaluatePostMergeCreditRelease', () => {
     }));
   });
 
-  it('window elapsed, adverse observation exists for a DIFFERENT merge event -> still eligible', () => {
+  it('an unrelated adverse observation does not create operational release authority', () => {
     const proposal = makeMergedProposal({
       id: 'unrelated-regression',
       mergedAt: mergedAtIso(MIN_POST_MERGE_OBSERVATION_WINDOW_MS + 1),
@@ -242,7 +230,11 @@ describe('evaluatePostMergeCreditRelease', () => {
       observedHead: '9'.repeat(40),
     });
     const result = evaluatePostMergeCreditRelease(proposal, { nowMs: FIXED_MS });
-    expect(result.eligible).toBe(true);
+    expect(result).toMatchObject({
+      eligible: false,
+      label: null,
+      reason: 'report-only-no-positive-stability-witness',
+    });
   });
 
   it('corrupt observation ledger (degraded read) -> ineligible, fail closed', () => {
@@ -282,54 +274,36 @@ describe('evaluatePostMergeCreditRelease', () => {
 // ---------------------------------------------------------------------------
 
 describe('sweepPostMergeCreditReleases', () => {
-  it('releases credit for eligible proposals and skips ineligible ones', () => {
+  it('scans eligible-looking proposals but records no operational release', () => {
     const eligible = makeMergedProposal({
       id: 'sweep-eligible',
       mergedAt: mergedAtIso(MIN_POST_MERGE_OBSERVATION_WINDOW_MS + 1),
     });
     const tooSoon = makeMergedProposal({ id: 'sweep-too-soon', mergedAt: FIXED_ISO, mergeCommitOid: 'd'.repeat(40) });
 
-    let recorded: DecisionEntry[] = [];
     const result = sweepPostMergeCreditReleases({
       nowMs: FIXED_MS,
       listProposals: () => [eligible, tooSoon],
     });
 
     expect(result.scanned).toBe(2);
-    expect(result.released).toBe(1);
-    expect(result.skipped).toBe(1);
+    expect(result.released).toBe(0);
+    expect(result.skipped).toBe(2);
 
-    // Verify the ledger actually recorded a valid, verifiable release.
     const decisionsDir = path.join(tmpHome, '.ashlr', 'decisions');
-    const today = new Date(FIXED_MS).toISOString().slice(0, 10);
-    const file = path.join(decisionsDir, `${today}.jsonl`);
-    recorded = fs.readFileSync(file, 'utf8')
-      .split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l) as DecisionEntry);
-    const releaseRow = recorded.find((r) => r.proposalId === 'sweep-eligible' && r.action === 'merged');
-    expect(releaseRow).toBeDefined();
-    expect(hasReleasedPostMergeCredit(releaseRow!.labelBasis)).toBe(true);
-    expect(recorded.some((r) => r.proposalId === 'sweep-too-soon' && r.action === 'merged')).toBe(false);
+    expect(fs.existsSync(decisionsDir)).toBe(false);
   });
 
-  it('is idempotent: a second sweep does not release credit twice', () => {
+  it('remains report-only across repeated sweeps', () => {
     const eligible = makeMergedProposal({
       id: 'sweep-once',
       mergedAt: mergedAtIso(MIN_POST_MERGE_OBSERVATION_WINDOW_MS + 1),
     });
     const first = sweepPostMergeCreditReleases({ nowMs: FIXED_MS, listProposals: () => [eligible] });
-    expect(first.released).toBe(1);
+    expect(first).toMatchObject({ released: 0, skipped: 1 });
 
     const second = sweepPostMergeCreditReleases({ nowMs: FIXED_MS, listProposals: () => [eligible] });
-    expect(second.released).toBe(0);
-
-    const decisionsDir = path.join(tmpHome, '.ashlr', 'decisions');
-    const today = new Date(FIXED_MS).toISOString().slice(0, 10);
-    const file = path.join(decisionsDir, `${today}.jsonl`);
-    const rows = fs.readFileSync(file, 'utf8')
-      .split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l) as DecisionEntry);
-    const releaseRows = rows.filter((r) => r.proposalId === 'sweep-once' && r.action === 'merged' &&
-      hasReleasedPostMergeCredit(r.labelBasis));
-    expect(releaseRows).toHaveLength(1);
+    expect(second).toMatchObject({ released: 0, skipped: 1 });
   });
 
   it('never releases credit for a proposal that regressed', () => {
@@ -384,26 +358,17 @@ describe('attestPostMergeCreditSkillCard', () => {
     expect(attestPostMergeCreditSkillCard(baseCard({}))).toBeNull();
   });
 
-  it('signs a card with a genuinely minted release token, and the signature verifies', () => {
+  it('does not sign a card from report-only post-merge evidence', () => {
     const proposal = makeMergedProposal({
       id: 'attest-ok',
       mergedAt: mergedAtIso(MIN_POST_MERGE_OBSERVATION_WINDOW_MS + 1),
     });
     const eligibility = evaluatePostMergeCreditRelease(proposal, { nowMs: FIXED_MS });
-    expect(eligibility.eligible).toBe(true);
-
-    const card = baseCard({ labelBasis: eligibility.label!, proposalId: 'attest-ok' });
-    const signed = attestPostMergeCreditSkillCard(card);
-    expect(signed).not.toBeNull();
-    expect(signed!.contentHash).toBe(skillCardContentHash(card));
-    const verified = signSkillCardAttestation({
-      contentHash: signed!.contentHash!,
-      skillId: signed!.skillId,
-      revision: signed!.revision,
-      proposalId: signed!.proposalId!,
-      diffHash: signed!.verification!.diffHash!,
-    });
-    expect(signed!.attestation).toBe(verified);
+    expect(eligibility).toMatchObject({ eligible: false, label: null });
+    expect(attestPostMergeCreditSkillCard(baseCard({
+      labelBasis: POST_MERGE_CREDIT_RELEASE_LABEL,
+      proposalId: 'attest-ok',
+    }))).toBeNull();
   });
 });
 

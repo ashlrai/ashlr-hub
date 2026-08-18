@@ -1,9 +1,10 @@
 /**
- * Positive post-merge learning authority — the release protocol.
+ * Post-merge learning evidence — report-only release protocol.
  *
  * A realized merge is an immutable operational fact, not proof that the
- * change remained beneficial. This module is the ONLY place allowed to mint
- * "post-merge credit release" authority, and it does so conservatively:
+ * change remained beneficial. This module is the only prospective release
+ * boundary, but it mints no operational authority while the observation source
+ * remains adverse-only:
  *
  *   1. The proposal must carry an AUTHENTICATED realized-merge witness
  *      (authenticatedRealizedMergeOf — binds to this exact proposal via a
@@ -21,20 +22,13 @@
  *      back healthy/complete (a degraded read fails closed — we never treat
  *      "couldn't check" as "checked clean").
  *
- * That ledger is adverse-only (it never records a positive "we checked, it's
- * clean" row), so eligibility here is inherently a "silence after a
- * conservative window" heuristic, not a positive confirmation. That is a
- * known, documented limitation — see sweepPostMergeCreditReleases' doc
- * comment — not an oversight.
+ * That ledger never records a positive "we checked, it's clean" row. Silence
+ * after a conservative window is diagnostic only, not positive confirmation;
+ * evaluation returns report-only and does not mint a label.
  *
- * MINTING: hasReleasedPostMergeCredit(labelBasis) verifies a self-describing,
- * HMAC-signed token — NOT bare string equality against
- * POST_MERGE_CREDIT_RELEASE_LABEL. This is deliberate: several downstream
- * consumers persist labelBasis-shaped fields on structures that are, at least
- * in tests and in caller-authored proposal/ledger data, fully attacker/
- * test-controlled. A bare literal is trivially replayable; only a value
- * carrying a valid local-key HMAC over the specific (repo, proposalId,
- * mergeCommit) event can pass. isPostMergeCreditReleaseLabel() remains
+ * HISTORICAL TOKEN SHAPE: the verifier remains fail-closed even for formerly
+ * valid HMAC-shaped values while operational release is disabled.
+ * isPostMergeCreditReleaseLabel() remains
  * "structural recognition only" — matching the bare literal — for the
  * existing defensive filters elsewhere that specifically reject the
  * unauthenticated literal (e.g. skill-records.ts, decisions-ledger.ts).
@@ -50,18 +44,24 @@ import type { Proposal, SkillCard } from '../types.js';
 import { readDecisions, recordDecision } from './decisions-ledger.js';
 import { postMergeObservationEventId, readPostMergeObservations } from './post-merge-observations.js';
 import { skillCardContentHash } from './skill-attestation.js';
+import { POST_MERGE_CREDIT_RELEASE_LABEL } from './post-merge-credit-label.js';
+
+export {
+  POST_MERGE_CREDIT_RELEASE_LABEL,
+  isPostMergeCreditReleaseLabel,
+} from './post-merge-credit-label.js';
 
 // ---------------------------------------------------------------------------
 // Structural constants
 // ---------------------------------------------------------------------------
 
 export const POST_MERGE_CREDIT_POLICY_VERSION = 'post-merge-credit-v1' as const;
-export const POST_MERGE_CREDIT_RELEASE_LABEL = 'post-merge-credit-release-v1' as const;
-
-/** Structural recognition only; this string is not release authority. */
-export function isPostMergeCreditReleaseLabel(labelBasis: unknown): boolean {
-  return labelBasis === POST_MERGE_CREDIT_RELEASE_LABEL;
-}
+/**
+ * Operational release remains disabled until a positive, complete stability
+ * witness exists. The current adverse-only ledger supports reporting, not
+ * authority to steer routing or promote reusable skills.
+ */
+const POST_MERGE_CREDIT_OPERATIONAL_RELEASE = false as const;
 
 /**
  * Minimum wall-clock time since the realized merge before credit MAY be
@@ -136,6 +136,7 @@ function equalHex(left: string, right: string): boolean {
  */
 export function hasReleasedPostMergeCredit(labelBasis: unknown): boolean {
   try {
+    if (!POST_MERGE_CREDIT_OPERATIONAL_RELEASE) return false;
     if (typeof labelBasis !== 'string') return false;
     const match = CREDIT_TOKEN_RE.exec(labelBasis);
     if (!match) return false;
@@ -160,6 +161,7 @@ export type PostMergeCreditEligibilityReason =
   | 'observation-window-not-elapsed'
   | 'observation-ledger-degraded'
   | 'adverse-outcome-observed'
+  | 'report-only-no-positive-stability-witness'
   | 'signing-unavailable'
   | 'error';
 
@@ -171,8 +173,9 @@ export interface PostMergeCreditEligibility {
 }
 
 /**
- * Determine whether `proposal` is eligible for post-merge credit release
- * RIGHT NOW, and mint the signed token when it is. Fail-closed on every
+ * Determine whether `proposal` has reportable post-merge evidence RIGHT NOW.
+ * Operational eligibility remains false until a positive stability witness
+ * exists. Fail-closed on every
  * ambiguous path (missing witness, unparseable timestamp, window not yet
  * elapsed, degraded/incomplete observation-ledger read, any adverse
  * observation for this exact merge event, signing failure). Never throws.
@@ -226,6 +229,17 @@ export function evaluatePostMergeCreditRelease(
       return { eligible: false, label: null, reason: 'adverse-outcome-observed' };
     }
 
+    // Silence in an adverse-only ledger is useful diagnostic evidence, but it
+    // is not positive proof that this exact merge was observed stable. Keep
+    // the entire release path report-only until such a witness exists.
+    if (!POST_MERGE_CREDIT_OPERATIONAL_RELEASE) {
+      return {
+        eligible: false,
+        label: null,
+        reason: 'report-only-no-positive-stability-witness',
+      };
+    }
+
     const eventRef = creditEventRef(eventId);
     const mac = computeCreditMac(eventRef);
     if (!mac) return { eligible: false, label: null, reason: 'signing-unavailable' };
@@ -263,23 +277,12 @@ export interface PostMergeCreditSweepResult {
 }
 
 /**
- * Sweep applied proposals for newly-eligible post-merge credit and record it
- * to the decisions ledger (a new 'merged' row with the signed labelBasis
- * token — decisions-ledger.ts's own newest-row-wins semantics let this
- * supersede the plain merge-fact row written at merge time). Idempotent: a
- * proposal that already carries a released decision row is left alone.
+ * Sweep applied proposals for post-merge diagnostics. No operational release
+ * row is recorded while positive stability witnesses are unavailable.
  *
- * KNOWN LIMITATION (by design, not a bug): the post-merge-observations ledger
- * only ever records ADVERSE outcomes. This sweep therefore releases credit on
- * "no adverse record after a conservative window", not on a positive
- * "actively confirmed clean" signal — there is no such positive signal
- * anywhere in the fleet today. If a repo's outcome-watcher coverage were
- * somehow disabled for a specific proposal's repo (not enrolled, or the local
- * clone was deleted), this sweep cannot detect that and would release credit
- * on elapsed time alone. The MIN_POST_MERGE_OBSERVATION_WINDOW_MS margin
- * exists specifically to bound that risk; closing it fully would require
- * outcome-watcher.ts (unowned here) to also persist a positive "swept clean"
- * marker per merge event.
+ * The post-merge-observations ledger only records adverse outcomes. Closing
+ * the release path requires a positive, complete "swept clean" witness bound
+ * to the exact merge event; elapsed time and silence are insufficient.
  *
  * SCALING NOTE: unlike outcome-watcher.ts, this sweep has no persistent
  * cursor — it re-scans applied proposals from the top of listProposalsDetailed

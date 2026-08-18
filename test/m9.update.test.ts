@@ -250,7 +250,10 @@ describe('cmdUpdate — installed service release gate', () => {
     expect(stdoutBuf).toContain('Update blocked by resident service restriction');
     expect(stdoutBuf).toContain('could be stranded');
     expect(stdoutBuf).toContain('No code was replaced');
-    expect(stdoutBuf).toContain('admitted one-shot workflows remain available');
+    expect(stdoutBuf).toContain('compiled daemon and conductor trust roots are empty');
+    expect(stdoutBuf).toContain('ashlr run`/`ashlr swarm');
+    expect(stdoutBuf).toContain('ashlr daemon start --once --dry-run');
+    expect(stdoutBuf).not.toContain('admitted one-shot workflows');
     expect(mockSpawnSync).not.toHaveBeenCalled();
     expect(mockExecFileSync).not.toHaveBeenCalled();
   });
