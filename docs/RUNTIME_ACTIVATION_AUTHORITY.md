@@ -1,22 +1,23 @@
-# Runtime Activation Authority V1
+# Runtime Activation Authority V1 and dormant stopped consumer
 
 > **Not to be confused with `ashlr activation` (`src/cli/activation.ts`,
 > M470).** This document covers `ashlr daemon activation-preflight` /
 > `ashlr daemon activate` — verifying a *release build* is safe to install.
-> It remains preflight-only; nothing below changed on 2026-08-16. The
-> similarly-named `ashlr activation` command is a different system entirely:
-> operator-granted standing authority (resident/install/automerge/deploy/
-> repair/etc.) that gates what the daemon is *allowed* to do once it's
-> running. See
+> It remains preflight-only. The similarly-named `ashlr activation` command
+> is a different system entirely: operator-granted standing authority
+> (resident/install/automerge/deploy/repair/etc.) that gates what the daemon
+> is *allowed* to do once it's running. See
 > [`docs/RUNTIME-FLEET-ACTIVATION.md`](RUNTIME-FLEET-ACTIVATION.md) for that
 > system and `docs/MILESTONE-INDEX.md` §2 for why M470 now names both an
 > unrelated shipped feature and that command.
 
-Ashlr exposes a signed, read-only resident activation admission contract. The
-preflight remains available on every platform. The explicit activation command
-performs additional macOS-only validation, but resident mutation is deliberately
-withheld in this release. Linux and Windows refuse before filesystem or service
-observation.
+Ashlr exposes a signed, read-only resident activation admission contract and a
+separate dormant macOS stopped-release consumer. The preflight remains
+available on every platform. Linux and Windows refuse before filesystem or
+service observation. The stopped consumer is source-complete but its compiled
+production trust-root array is intentionally empty, so production execution
+fails closed unless a separately reviewed source change provisions an operator
+public key.
 
 ## Operator trust root
 
@@ -109,16 +110,87 @@ configuration bindings, and parses both already-captured plist byte strings
 through `plutil` stdin against a closed execution schema with fixed
 `PATH=/usr/bin:/bin:/usr/sbin:/sbin`. Raw launch-receipt digests are returned as
 diagnostic evidence but excluded from the stable admission digest because their
-completion timestamps change between observations. The command then returns
-the stable refusal `runtime-activation-consumer-unavailable`.
+completion timestamps change between observations. The command then passes a
+plan only to the stopped consumer.
 
-It does not stage a release, invoke `launchctl`, change a plist or service,
-write an acknowledgement/replay/journal/dispatch record, or move `current`.
+The consumer accepts only an independently observed immutable candidate whose
+signed package version and tag are exactly `3.2.7` and `v3.2.7`. It requires a
+distinct canonical Ed25519 permit at
+`~/.ashlr/control/activation/consumer-permits/<plan-id>.json`. The permit lasts
+at most 120 seconds and binds the exact admission and plan digests, request and
+trust-root identities, candidate and rollback revisions, prior `current` raw
+target, prior plist digest, `loaded=false`, and the exact prior disabled bit.
+Runtime flags, environment variables, or plan bytes cannot add a trust root.
+
+Before any transaction record or release mutation, the consumer requires:
+
+- exact-private operator control custody and an already-existing read-only
+  provenance key for journal authentication;
+- a healthy, explicitly engaged KILL switch that blocks provider effects;
+- complete guard sources with no non-maintenance block;
+- strict daemon state `running=false,pid=null`, quiescent activity, and zero
+  daemon roots or PPID descendants from a bounded process observation;
+- `ASHLR_HOME`, when present, exactly equal to the operating-system account's
+  canonical `<home>/.ashlr` root, so activity, KILL, guard, and daemon-state
+  observations cannot be redirected to another tree;
+- the outward-mutation fence followed by the daemon service-lifecycle fence;
+- launchd observation proving the service is unloaded and the disabled bit
+  exactly matches the permit; and
+- the exact signed prior plist and cooperative current-pointer identity.
+
+The transaction durably claims the permit before effects and maintains an
+HMAC-authenticated, canonical, fsynced phase journal. It replaces only the
+already-stopped plist, verifies the disabled bit is unchanged, then performs a
+host-local cooperative pointer CAS from the exact old symlink inode and raw
+target to `releases/<candidate-revision>`. It revalidates maintenance, service,
+pointer, and plist state before and after the immutable receipt. A failure
+before settlement restores the exact prior pointer and plist while keeping the
+service unloaded and its disabled bit unchanged. Uncertain recovery retains the
+journal and reports reconciliation instead of claiming success.
+
+On a later invocation, authenticated recovery runs before current plan
+observation, permit lookup, permit expiry, or compiled-root availability. It
+still requires both fences, healthy maintenance, exact unloaded/disabled state,
+the HMAC-authenticated journal, and the matching immutable claim. An
+unreceipted journal restores the prior pointer and plist; an exact immutable
+receipt settles the candidate and removes the journal. Missing or degraded
+claim/receipt evidence retains the journal and fails closed. Recovery therefore
+does not mint new mutation authority and continues to work after the short-lived
+permit expires or its permit directory is removed.
+
+Every Buffer returned by the provenance-key loader is owned by the consumer and
+zeroed in its own `finally` path. A recovery result carries only authenticated
+journal-bound activation, candidate, admission, and plan identity; diagnostic
+request, trust-root, and launch-receipt identities remain unavailable. If a
+raced journal cannot be authenticated, every identity remains unavailable and
+the journal is retained. Once an exact immutable receipt and exact candidate
+state are observed, settlement is a committed `activated-stopped` success even
+if a later response step fails; it is never reported as a contradictory blocked
+activation.
+
+This slice does **not** start, bootstrap, boot out, kickstart, enable, disable,
+or acknowledge a service. It never auto-starts either candidate or rollback.
+Starting a resident and accepting its runtime acknowledgement require a
+separate release-bound operator permit and are outside this contract.
+
+The pointer operation is deliberately named a **host-local cooperative pointer
+CAS**. The lifecycle fences, exact inode/target comparison, atomic rename, and
+post-rename verification coordinate Ashlr participants, but they are not a
+kernel compare-exchange and do not exclude a hostile process running as the
+same UID. A reviewed native helper with old-inode comparison remains a separate
+prerequisite for stronger production authority. The local HMAC journal and
+immutable records likewise do not substitute for trusted monotonic time or an
+external monotonic replay/CAS service.
+
 There is no effect, platform, clock, or home injection seam in the production
-consumer. `daemon install`, setup, and the worker/dashboard/web service-repair
-paths retain their existing mutation denials. The separate legacy `update`
-workflow retains its own guards and is not an activation authority; `--check`
-remains read-only.
+entrypoint or consumer graph. The shipped runtime adapter and its empty root
+array are frozen; it exposes no registration, replacement, environment gate,
+or test-only mutation API. Tests substitute that module only through Vitest's
+test graph, outside `src` and outside the published package exports. The CLI
+imports the consumer lazily only after rejecting an account-HOME mismatch.
+`daemon install`, setup, and the worker/dashboard/web service-repair paths
+retain their existing mutation denials. The legacy `update` workflow retains
+its own guards and is not an activation authority; `--check` remains read-only.
 
 ## Dormant activation-bound handoff observation
 
@@ -137,25 +209,27 @@ effect, rollback, and activation permission remains false. Its host-local claim
 is not an external monotonic replay authority and its receipt is not resident
 runtime acknowledgement.
 
-Full resident production activation requires a future native launchd v2
+Full resident production activation still requires a future native launchd v2
 transaction. At minimum, that consumer must add exact candidate staging and
 Git/tag/build/tarball-to-runtime provenance, signed prior
 version/revision/plist/package plus loaded-and-disabled state observed from the
 native manager, trusted monotonic time, external monotonic compare-and-swap replay consumption,
 a lifecycle lock and signed exact-keyed fsynced journal, live launchd
 PID/start/executable/runtime acknowledgement, separate release-bound dispatch
-authorization, pointer CAS, crash recovery at every phase, and settled-state
+authorization, native pointer CAS, crash recovery at every resident-launch phase, and settled-state
 revalidation. It must restore the exact signed prior resident without auto-start.
 Until those properties have implementation and adversarial evidence, this
-command is not resident-production-ready.
+stopped selection must not be described as resident activation or production
+activation completion.
 
 The machine-readable preflight exposes these absent properties under
 `nativeAuthority`. Only the separately scoped activation signing root can be
 true after trust-root validation; every mutation/runtime authority field remains
-false. Signed manifest fields
-such as `prior.serviceLoaded` and `prior.plistSha256` are declarations only;
-neither the preflight nor `activate` observes launchd or proves the current
-pointer, live PID, executable, acknowledgement, or rollback execution.
+false. Signed manifest fields such as `prior.serviceLoaded` and
+`prior.plistSha256` are declarations in preflight. The dormant consumer
+separately observes only unloaded/disabled manager state and the cooperative
+pointer/plist transaction; it does not prove a live PID, executable, resident
+acknowledgement, or running rollback.
 
 ## Authority boundary
 

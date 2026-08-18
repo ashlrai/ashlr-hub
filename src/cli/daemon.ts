@@ -96,7 +96,7 @@ Subcommands:
   stop            Request an orderly daemon shutdown
   status          Show daemon state [--json]
   activation-preflight  Verify operator-custodied signed release and rollback evidence (read-only)
-  activate        Validate one exact signed macOS plan; resident mutation remains unavailable
+  activate        Permit-gated 3.2.7 selection while preserving the exact stopped service state
   recover-state   Preview or explicitly execute one exact state quarantine
   resolve-state   Preview or explicitly resolve one exact quarantine
   install         Temporarily unavailable (resident service mutation restricted)
@@ -897,7 +897,7 @@ async function cmdDaemonActivate(flags: ActivationFlags): Promise<number> {
     console.log(JSON.stringify(result, null, 2));
   } else {
     console.log('');
-    console.log(col.bold('  runtime activation admission (read-only)'));
+    console.log(col.bold('  runtime activation stopped-release transaction'));
     console.log('  ' + col.bold('result:       ') + (result.activated ? col.green('activated') : col.red(result.phase)));
     console.log('  ' + col.bold('activation:   ') + col.dim(result.activationId ?? 'unavailable'));
     console.log('  ' + col.bold('candidate:    ') + col.dim(result.candidateRevision ?? 'unavailable'));
@@ -905,7 +905,16 @@ async function cmdDaemonActivate(flags: ActivationFlags): Promise<number> {
     console.log('  ' + col.bold('admission SHA:') + ' ' + col.dim(result.admissionDigest ?? 'unavailable'));
     console.log('  ' + col.bold('request SHA:  ') + col.dim(result.canonicalRequestSha256 ?? 'unavailable'));
     console.log('  ' + col.bold('trust SHA:    ') + col.dim(result.trustRootCanonicalSha256 ?? 'unavailable'));
-    console.log('  ' + col.bold('mutation:     ') + col.dim('not performed'));
+    console.log('  ' + col.bold('service:      ') + col.dim('not started; enabled/disabled bit unchanged'));
+    console.log('  ' + col.bold('mutation:     ') + col.dim(
+      result.durableOutcome === 'settled-candidate'
+        ? 'durable receipt committed the candidate stopped release; recovery journal removed'
+        : result.durableOutcome === 'restored-prior'
+          ? 'exact prior stopped state restored; recovery journal removed'
+          : result.recoveryJournalRetained
+            ? 'authenticated recovery journal retained; reconciliation required'
+            : 'refused before a transaction journal was retained',
+    ));
     console.log('  ' + col.dim(result.reason));
     console.log('');
   }
