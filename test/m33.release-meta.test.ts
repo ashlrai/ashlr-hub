@@ -178,13 +178,14 @@ describe('release workflow', () => {
   it('is tag-triggered and reuses the exact native CI gate before publish', () => {
     expect(parsed.on?.push?.tags).toEqual(['v*']);
     expect(parsed.env).toEqual({
-      RELEASE_VERSION: '3.3.0',
+      RELEASE_VERSION: '3.3.1',
       RELEASE_DIST_TAG: 'candidate',
       BASELINE_LATEST_VERSION: '3.0.1',
-      PREVIOUS_CANDIDATE_VERSION: '3.2.7',
+      PREVIOUS_CANDIDATE_VERSION: '3.3.0',
       PREVIOUS_CANDIDATE_INTEGRITY:
-        'sha512-Zep4krYD7uKqh2k+Z6w0sMyNDsLFjEtV1H8EqdM7yKTKCHSq79lJb7jGoH1qrfOXDBRTJTmG7bSDSPOBUFj+yA==',
-      PREVIOUS_CANDIDATE_TAG_SHA: '73931bdd31b3b4e4d905a30b5112e4cd712f7844',
+        'sha512-mYVuJZyoXeSnnqivoLzyZggNgpJoWM8glTI7CW0oBfQ0RCHx0xueTrLwLTZBg5W+E4zPOJNbckptYeb5YsdOHw==',
+      PREVIOUS_CANDIDATE_TAG_SHA: 'd07f6a96eda664d865b9255f71c6f56e8cd9d7c7',
+      REQUIRED_ROLLBACK_REVISION: '31aa0467f66af1fe4c66d1664f65e6fd3e4ba61b',
     });
     expect(parsed.concurrency).toEqual({
       group: 'npm-candidate-${{ github.ref }}',
@@ -432,7 +433,7 @@ describe('release workflow', () => {
     expect(releaseDocs).toContain('the exact\n   tag commit');
     expect(releaseDocs).toContain('Do not use **Re-run failed jobs**');
     expect(releaseDocs).toContain('even when the seven-day handoff\n   artifact has not expired');
-    expect(releaseDocs).toContain('set -euo pipefail\n   version=3.3.0\n   release_tag="v${version}"');
+    expect(releaseDocs).toContain('set -euo pipefail\n   version=3.3.1\n   release_tag="v${version}"');
     expect(releaseDocs).toContain('git rev-list -n 1 "$release_tag"');
     expect(releaseDocs).toContain('node scripts/extract-changelog.mjs "$version" > "$release_notes"');
     expect(releaseDocs).toContain(

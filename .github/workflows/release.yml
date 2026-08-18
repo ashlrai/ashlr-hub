@@ -7,7 +7,7 @@
 # public repository, release.yml, and the npm-release environment. No
 # long-lived npm write token is used.
 #
-# This workflow is intentionally pinned to the 3.3.0 candidate. It cannot move
+# This workflow is intentionally pinned to the 3.3.1 candidate. It cannot move
 # npm `latest`; promotion is a separate maintainer action after acceptance.
 
 name: Release
@@ -23,12 +23,13 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  RELEASE_VERSION: "3.3.0"
+  RELEASE_VERSION: "3.3.1"
   RELEASE_DIST_TAG: candidate
   BASELINE_LATEST_VERSION: "3.0.1"
-  PREVIOUS_CANDIDATE_VERSION: "3.2.7"
-  PREVIOUS_CANDIDATE_INTEGRITY: "sha512-Zep4krYD7uKqh2k+Z6w0sMyNDsLFjEtV1H8EqdM7yKTKCHSq79lJb7jGoH1qrfOXDBRTJTmG7bSDSPOBUFj+yA=="
-  PREVIOUS_CANDIDATE_TAG_SHA: "73931bdd31b3b4e4d905a30b5112e4cd712f7844"
+  PREVIOUS_CANDIDATE_VERSION: "3.3.0"
+  PREVIOUS_CANDIDATE_INTEGRITY: "sha512-mYVuJZyoXeSnnqivoLzyZggNgpJoWM8glTI7CW0oBfQ0RCHx0xueTrLwLTZBg5W+E4zPOJNbckptYeb5YsdOHw=="
+  PREVIOUS_CANDIDATE_TAG_SHA: "d07f6a96eda664d865b9255f71c6f56e8cd9d7c7"
+  REQUIRED_ROLLBACK_REVISION: "31aa0467f66af1fe4c66d1664f65e6fd3e4ba61b"
 
 jobs:
   verify:
@@ -66,8 +67,10 @@ jobs:
                 ! "$rollback" =~ ^[0-9a-f]{40}$ ||
                 "$rollback" == "$GITHUB_SHA" ||
                 "$observed_candidate" != "$GITHUB_SHA" ||
-                "$first_parent" != "$rollback" ]]; then
-            echo "Candidate and first-parent rollback identity could not be established." >&2
+                "$first_parent" != "$rollback" ||
+                ! "$remaining_parents" =~ ^[0-9a-f]{40}$ ||
+                "$rollback" != "$REQUIRED_ROLLBACK_REVISION" ]]; then
+            echo "Candidate must be an exact two-parent merge with the required rollback first." >&2
             exit 1
           fi
           git merge-base --is-ancestor "$rollback" "$GITHUB_SHA"
@@ -577,7 +580,7 @@ jobs:
              (.files.tarball | keys == ["bytes", "entryCount", "integrity", "maxEntryBytes", "name", "sha256", "unpackedBytes"]) and
              (.files.packReport | keys == ["bytes", "name", "sha256"]) and
              (.files.releaseNotes | keys == ["bytes", "name", "sha256"]) and
-             .files.tarball.name == "ashlr-hub-3.3.0.tgz" and
+             .files.tarball.name == "ashlr-hub-3.3.1.tgz" and
              .files.packReport.name == "npm-pack.json" and
              .files.releaseNotes.name == "release-notes.md" and
              (.files.tarball.bytes | type == "number" and . >= 1 and . <= 52428800) and

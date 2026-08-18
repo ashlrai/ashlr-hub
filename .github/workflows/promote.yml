@@ -1,0 +1,314 @@
+# promote.yml — approval-gated, observation-only admission for npm `latest`.
+#
+# This workflow never authenticates to npm and cannot mutate a dist-tag. It
+# produces a bounded receipt for a maintainer who separately revalidates the
+# same state and performs the one interactive OTP-protected promotion effect.
+# It has bounded GitHub artifact and job-summary writes, so its authority claim
+# is deliberately limited to npm mutation authority.
+
+name: Admit npm production promotion
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_run_id:
+        description: Successful v3.3.1 Release workflow run ID
+        required: true
+        type: string
+      candidate_integrity:
+        description: Exact sha512 SRI accepted for @ashlr/hub@3.3.1
+        required: true
+        type: string
+      acceptance_attestation_sha256:
+        description: Operator-attested SHA-256 of the reviewed install-acceptance receipt
+        required: true
+        type: string
+      acceptance_observed_at:
+        description: Canonical UTC RFC3339 time when isolated acceptance completed
+        required: true
+        type: string
+      acceptance_confirmed:
+        description: Confirm candidate provenance and isolated acceptance passed
+        required: true
+        default: false
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: npm-production-promotion-admission
+  cancel-in-progress: false
+
+env:
+  PROMOTION_VERSION: "3.3.1"
+  PROMOTION_TAG: latest
+  REQUIRED_CANDIDATE_TAG: candidate
+  BASELINE_LATEST_VERSION: "3.0.1"
+  REQUIRED_ROLLBACK_REVISION: "31aa0467f66af1fe4c66d1664f65e6fd3e4ba61b"
+  QUARANTINED_VERSION: "3.3.0"
+  QUARANTINED_INTEGRITY: "sha512-mYVuJZyoXeSnnqivoLzyZggNgpJoWM8glTI7CW0oBfQ0RCHx0xueTrLwLTZBg5W+E4zPOJNbckptYeb5YsdOHw=="
+  QUARANTINED_TAG_SHA: "d07f6a96eda664d865b9255f71c6f56e8cd9d7c7"
+
+jobs:
+  admit:
+    name: Verify and receipt production-promotion admission (NO_NPM_MUTATION_AUTHORITY)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: npm-production-promotion
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Verify exact accepted candidate and protected release identity
+        id: admission
+        shell: bash
+        env:
+          ACCEPTANCE_CONFIRMED: ${{ inputs.acceptance_confirmed }}
+          ACCEPTANCE_ATTESTATION_SHA256: ${{ inputs.acceptance_attestation_sha256 }}
+          ACCEPTANCE_OBSERVED_AT: ${{ inputs.acceptance_observed_at }}
+          EXPECTED_CANDIDATE_INTEGRITY: ${{ inputs.candidate_integrity }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_RUN_ID: ${{ inputs.release_run_id }}
+        run: |
+          set -euo pipefail
+          umask 077
+
+          if [[ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ||
+                "$GITHUB_REF_TYPE" != "branch" ||
+                "$GITHUB_REF_NAME" != "master" ||
+                ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Promotion admission must run from the exact master revision." >&2
+            exit 1
+          fi
+          if [[ "$ACCEPTANCE_CONFIRMED" != "true" ||
+                ! "$ACCEPTANCE_ATTESTATION_SHA256" =~ ^[0-9a-f]{64}$ ||
+                ! "$RELEASE_RUN_ID" =~ ^[1-9][0-9]{5,19}$ ||
+                ! "$EXPECTED_CANDIDATE_INTEGRITY" =~ ^sha512-[A-Za-z0-9+/]{86}==$ ]]; then
+            echo "Exact release and acceptance evidence was not supplied." >&2
+            exit 1
+          fi
+          if [[ ! "$ACCEPTANCE_OBSERVED_AT" =~ ^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$ ]]; then
+            echo "Acceptance observation time must be canonical UTC RFC3339." >&2
+            exit 1
+          fi
+          acceptance_epoch="$(date --utc --date="$ACCEPTANCE_OBSERVED_AT" +%s)"
+          acceptance_canonical="$(date --utc --date="@$acceptance_epoch" +%Y-%m-%dT%H:%M:%SZ)"
+          admission_epoch="$(date --utc +%s)"
+          if [[ "$acceptance_canonical" != "$ACCEPTANCE_OBSERVED_AT" ]] ||
+             (( acceptance_epoch > admission_epoch ||
+                admission_epoch - acceptance_epoch > 86400 )); then
+            echo "Acceptance observation must be valid, not future, and at most 24 hours old." >&2
+            exit 1
+          fi
+
+          environment_json="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/environments/npm-production-promotion")"
+          jq -e --arg actor "$GITHUB_ACTOR" \
+            '.name == "npm-production-promotion" and
+             .can_admins_bypass == false and
+             .deployment_branch_policy.protected_branches == true and
+             .deployment_branch_policy.custom_branch_policies == false and
+             any(.protection_rules[]?;
+               .type == "required_reviewers" and
+               .prevent_self_review == true and
+               any(.reviewers[]?;
+                 .type == "User" and .reviewer.login != $actor))' \
+            <<<"$environment_json" >/dev/null
+
+          branch_json="$(gh api "repos/${GITHUB_REPOSITORY}/branches/master")"
+          jq -e --arg sha "$GITHUB_SHA" \
+            '.protected == true and .commit.sha == $sha' <<<"$branch_json" >/dev/null
+
+          tag="v${PROMOTION_VERSION}"
+          tag_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}")"
+          tag_sha="$(jq -r '.object.sha // empty' <<<"$tag_json")"
+          jq -e --arg ref "refs/tags/${tag}" \
+            --arg sha "$tag_sha" \
+            '.ref == $ref and .object.type == "commit" and .object.sha == $sha' \
+            <<<"$tag_json" >/dev/null
+          [[ "$tag_sha" =~ ^[0-9a-f]{40}$ ]]
+
+          tag_commit="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag_sha}")"
+          jq -e --arg rollback "$REQUIRED_ROLLBACK_REVISION" \
+            '(.parents | length) == 2 and .parents[0].sha == $rollback' \
+            <<<"$tag_commit" >/dev/null
+
+          quarantine_tag="v${QUARANTINED_VERSION}"
+          quarantine_tag_json="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/tags/${quarantine_tag}")"
+          jq -e --arg ref "refs/tags/${quarantine_tag}" \
+            --arg sha "$QUARANTINED_TAG_SHA" \
+            '.ref == $ref and .object.type == "commit" and .object.sha == $sha' \
+            <<<"$quarantine_tag_json" >/dev/null
+
+          comparison="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/compare/${tag_sha}...${GITHUB_SHA}" \
+            --jq '.status')"
+          if [[ "$comparison" != "ahead" && "$comparison" != "identical" ]]; then
+            echo "The candidate tag is not in current protected master history." >&2
+            exit 1
+          fi
+
+          release_run="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${RELEASE_RUN_ID}")"
+          jq -e --arg sha "$tag_sha" --arg tag "$tag" \
+            '.path == ".github/workflows/release.yml" and
+             .event == "push" and .head_branch == $tag and .head_sha == $sha and
+             .status == "completed" and .conclusion == "success" and
+             (.run_attempt | type == "number" and . >= 1)' \
+            <<<"$release_run" >/dev/null
+          release_run_attempt="$(jq -r '.run_attempt' <<<"$release_run")"
+
+          release_json="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}")"
+          jq -e --arg tag "$tag" \
+            '.tag_name == $tag and .draft == false and .prerelease == true' \
+            <<<"$release_json" >/dev/null
+
+          evidence_root="$(mktemp -d "$RUNNER_TEMP/npm-promotion-admission.XXXXXX")"
+          packument="$evidence_root/packument.json"
+          curl --fail --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --max-time 30 --retry 3 --retry-all-errors \
+            --max-filesize 8388608 \
+            --output "$packument" \
+            "https://registry.npmjs.org/@ashlr%2Fhub"
+          test -f "$packument" && test ! -L "$packument"
+          test "$(stat --format='%h' "$packument")" = "1"
+          packument_bytes="$(wc -c < "$packument")"
+          if (( packument_bytes < 2 || packument_bytes > 8388608 )); then
+            echo "Registry metadata is out of bounds." >&2
+            exit 1
+          fi
+
+          jq -e \
+            --arg version "$PROMOTION_VERSION" \
+            --arg integrity "$EXPECTED_CANDIDATE_INTEGRITY" \
+            --arg latest "$BASELINE_LATEST_VERSION" \
+            --arg candidate "$REQUIRED_CANDIDATE_TAG" \
+            --arg quarantinedVersion "$QUARANTINED_VERSION" \
+            --arg quarantinedIntegrity "$QUARANTINED_INTEGRITY" \
+            '.name == "@ashlr/hub" and
+             .["dist-tags"].latest == $latest and
+             .["dist-tags"][$candidate] == $version and
+             .versions[$version].version == $version and
+             .versions[$version].dist.integrity == $integrity and
+             (.versions[$version].dist.signatures | type == "array" and length > 0) and
+             .versions[$version].dist.attestations.provenance.predicateType ==
+               "https://slsa.dev/provenance/v1" and
+             .versions[$quarantinedVersion].version == $quarantinedVersion and
+             .versions[$quarantinedVersion].dist.integrity == $quarantinedIntegrity and
+             (.versions[$quarantinedVersion].dist.signatures | type == "array" and length > 0) and
+             .versions[$quarantinedVersion].dist.attestations.provenance.predicateType ==
+               "https://slsa.dev/provenance/v1" and
+             .versions[$latest].version == $latest' \
+            "$packument" >/dev/null
+
+          dist_tags="$(jq -cS '.["dist-tags"]' "$packument")"
+          receipt_epoch="$(date --utc +%s)"
+          if (( acceptance_epoch > receipt_epoch ||
+                receipt_epoch - acceptance_epoch > 86400 )); then
+            echo "Acceptance observation expired before receipt creation." >&2
+            exit 1
+          fi
+          admission_observed_at="$(date --utc --date="@$receipt_epoch" +%Y-%m-%dT%H:%M:%SZ)"
+          receipt="$evidence_root/promotion-admission.json"
+          receipt_digest="$evidence_root/promotion-admission.sha256"
+          jq -cnS \
+            --arg acceptanceAttestationSha256 "$ACCEPTANCE_ATTESTATION_SHA256" \
+            --arg acceptanceObservedAt "$ACCEPTANCE_OBSERVED_AT" \
+            --arg actor "$GITHUB_ACTOR" \
+            --arg admissionObservedAt "$admission_observed_at" \
+            --arg candidateIntegrity "$EXPECTED_CANDIDATE_INTEGRITY" \
+            --arg candidateTag "$REQUIRED_CANDIDATE_TAG" \
+            --arg promotionCommand "npm dist-tag add @ashlr/hub@3.3.1 latest" \
+            --arg promotionTag "$PROMOTION_TAG" \
+            --arg releaseRunAttempt "$release_run_attempt" \
+            --arg releaseRunId "$RELEASE_RUN_ID" \
+            --arg releaseTag "$tag" \
+            --arg releaseTagSha "$tag_sha" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg requiredRollbackRevision "$REQUIRED_ROLLBACK_REVISION" \
+            --arg quarantinedVersion "$QUARANTINED_VERSION" \
+            --arg quarantinedIntegrity "$QUARANTINED_INTEGRITY" \
+            --arg quarantinedTagSha "$QUARANTINED_TAG_SHA" \
+            --arg sourceSha "$GITHUB_SHA" \
+            --arg version "$PROMOTION_VERSION" \
+            --arg workflowRunAttempt "$GITHUB_RUN_ATTEMPT" \
+            --arg workflowRunId "$GITHUB_RUN_ID" \
+            --argjson distTags "$dist_tags" \
+            '{schemaVersion: 1,
+              admission: "passed",
+              package: "@ashlr/hub",
+              version: $version,
+              candidateIntegrity: $candidateIntegrity,
+              releaseTag: $releaseTag,
+              releaseTagSha: $releaseTagSha,
+              requiredRollbackRevision: $requiredRollbackRevision,
+              quarantinedVersion: $quarantinedVersion,
+              quarantinedIntegrity: $quarantinedIntegrity,
+              quarantinedTagSha: $quarantinedTagSha,
+              releaseRunId: $releaseRunId,
+              releaseRunAttempt: $releaseRunAttempt,
+              acceptanceAttestationSha256: $acceptanceAttestationSha256,
+              acceptanceObservedAt: $acceptanceObservedAt,
+              acceptanceMaximumAgeSeconds: 86400,
+              admissionObservedAt: $admissionObservedAt,
+              observedDistTags: $distTags,
+              requestedPromotionTag: $promotionTag,
+              promotionCommandTemplate: $promotionCommand,
+              repository: $repository,
+              sourceSha: $sourceSha,
+              actor: $actor,
+              workflowRunId: $workflowRunId,
+              workflowRunAttempt: $workflowRunAttempt,
+              environmentProtectionVerified: true,
+              npmCredentialsPresent: false,
+              oidcAuthority: false,
+              npmMutationAuthority: false,
+              promotionExecuted: false}' > "$receipt"
+          test -f "$receipt" && test ! -L "$receipt"
+          test "$(stat --format='%h' "$receipt")" = "1"
+          receipt_bytes="$(wc -c < "$receipt")"
+          if (( receipt_bytes < 2 || receipt_bytes > 16384 )); then
+            echo "Promotion admission receipt is out of bounds." >&2
+            exit 1
+          fi
+          sha256sum "$receipt" | cut -d ' ' -f 1 > "$receipt_digest"
+          test "$(wc -c < "$receipt_digest")" = "65"
+          printf 'receipt=%s\n' "$receipt" >> "$GITHUB_OUTPUT"
+          printf 'receipt_digest=%s\n' "$receipt_digest" >> "$GITHUB_OUTPUT"
+          printf 'receipt_sha256=%s\n' "$(tr -d '\n' < "$receipt_digest")" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Upload bounded no-npm-mutation-authority promotion receipt
+        id: receipt_artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-production-promotion-admission-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.admission.outputs.receipt }}
+            ${{ steps.admission.outputs.receipt_digest }}
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 9
+          overwrite: false
+          include-hidden-files: false
+
+      - name: Summarize separate interactive promotion boundary
+        shell: bash
+        env:
+          ARTIFACT_SHA256: ${{ steps.receipt_artifact.outputs.artifact-digest }}
+          RECEIPT_SHA256: ${{ steps.admission.outputs.receipt_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          {
+            echo "## npm production-promotion admission (NO_NPM_MUTATION_AUTHORITY)"
+            echo "- Candidate: \`@ashlr/hub@${PROMOTION_VERSION}\`"
+            echo "- Receipt SHA-256: \`${RECEIPT_SHA256}\`"
+            echo "- Artifact SHA-256: \`${ARTIFACT_SHA256}\`"
+            echo "- npm authority: no credential, OIDC token, dist-tag mutation, publish, install, or activation authority"
+            echo "- Bounded GitHub writes: admission receipt artifact and job summary only"
+            echo "- Next boundary: a maintainer must revalidate live state and enter a fresh OTP interactively"
+          } >> "$GITHUB_STEP_SUMMARY"
