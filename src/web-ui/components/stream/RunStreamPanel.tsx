@@ -10,8 +10,8 @@
  * /work/runs/:id detail view tomorrow) can mount `<RunStreamPanel runId=.../>`
  * directly — it owns its own data fetching, so the caller only needs an id.
  */
-import { useEffect, useRef } from 'react';
-import { useRunStream, RUN_STREAM_POLL_MS, type RunStreamPhase } from './useRunStream.js';
+import { useEffect, useRef, useState } from 'react';
+import { useRunStream, RUN_STREAM_POLL_MS, type RunStreamPhase, type RunStreamTransport } from './useRunStream.js';
 import { StatusBadge } from '../primitives/StatusBadge.js';
 import { SkeletonLine } from '../primitives/Skeleton.js';
 import type { RunStep } from '../../data/api-types.js';
@@ -42,7 +42,19 @@ function formatClock(iso: string): string {
   }
 }
 
-function PhaseBanner({ phase, lastChangedAt, error }: { phase: RunStreamPhase; lastChangedAt: number | null; error: Error | undefined }) {
+function PhaseBanner({
+  phase,
+  lastChangedAt,
+  stallAgeMs,
+  transport,
+  error,
+}: {
+  phase: RunStreamPhase;
+  lastChangedAt: number | null;
+  stallAgeMs: number | null;
+  transport: RunStreamTransport;
+  error: Error | undefined;
+}) {
   if (phase === 'connecting') {
     return (
       <div className={styles.banner} role="status">
@@ -68,12 +80,19 @@ function PhaseBanner({ phase, lastChangedAt, error }: { phase: RunStreamPhase; l
     );
   }
   if (phase === 'stalled') {
-    const secs = lastChangedAt ? Math.round((Date.now() - lastChangedAt) / 1000) : null;
+    // Prefer the server's own stall age (SSE path — data-driven, not a
+    // client guess); fall back to the client-computed gap on the polling path.
+    const secs =
+      stallAgeMs !== null
+        ? Math.round(stallAgeMs / 1000)
+        : lastChangedAt !== null
+          ? Math.round((Date.now() - lastChangedAt) / 1000)
+          : null;
     return (
       <div className={`${styles.banner} ${styles.bannerWarning}`} role="status" aria-live="polite">
         <span className={styles.bannerDot} data-tone="warning" aria-hidden="true" />
         No change observed{secs !== null ? ` in ${secs}s` : ''} — this run may be stalled, or is simply quiet between
-        steps. Still polling.
+        steps. Still {transport === 'sse' ? 'watching' : 'polling'}.
       </div>
     );
   }
@@ -81,15 +100,16 @@ function PhaseBanner({ phase, lastChangedAt, error }: { phase: RunStreamPhase; l
     return (
       <div className={styles.banner} role="status">
         <span className={styles.bannerDot} data-tone="live" aria-hidden="true" />
-        Live · polling every {RUN_STREAM_POLL_MS / 1000}s (server refresh floor ~1.5s — this cannot be faster than
-        that)
+        {transport === 'sse'
+          ? 'Live · streaming (server tail ~500ms)'
+          : `Live · polling every ${RUN_STREAM_POLL_MS / 1000}s (server refresh floor ~1.5s — this cannot be faster than that)`}
       </div>
     );
   }
   return (
     <div className={styles.banner} role="status">
       <span className={styles.bannerDot} data-tone="done" aria-hidden="true" />
-      Run finished — no longer polling.
+      Run finished — no longer {transport === 'sse' ? 'streaming' : 'polling'}.
     </div>
   );
 }
@@ -106,9 +126,13 @@ export function RunStreamPanelSkeleton() {
 
 export function RunStreamPanel({ runId }: { runId: string }) {
   const stream = useRunStream(runId);
-  const { phase, run, error, lastChangedAt } = stream;
+  const { phase, run, error, lastChangedAt, transport, stallAgeMs } = stream;
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
+  // Mirrors stickToBottomRef in React state purely so the "Follow" button can
+  // render reactively — the ref alone is enough to drive the scroll effect,
+  // but a ref mutation doesn't trigger a re-render.
+  const [following, setFollowing] = useState(true);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -120,7 +144,16 @@ export function RunStreamPanel({ runId }: { runId: string }) {
     const el = scrollRef.current;
     if (!el) return;
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    stickToBottomRef.current = distanceFromBottom < 48;
+    const pinned = distanceFromBottom < 48;
+    stickToBottomRef.current = pinned;
+    setFollowing(pinned);
+  }
+
+  function resumeFollowing() {
+    stickToBottomRef.current = true;
+    setFollowing(true);
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
   }
 
   if (!run && phase === 'connecting') return <RunStreamPanelSkeleton />;
@@ -162,37 +195,51 @@ export function RunStreamPanel({ runId }: { runId: string }) {
         ) : null}
       </header>
 
-      <PhaseBanner phase={phase} lastChangedAt={lastChangedAt} error={error} />
+      <PhaseBanner
+        phase={phase}
+        lastChangedAt={lastChangedAt}
+        stallAgeMs={stallAgeMs}
+        transport={transport}
+        error={error}
+      />
 
-      <div
-        ref={scrollRef}
-        className={styles.transcript}
-        onScroll={onScroll}
-        tabIndex={0}
-        role="log"
-        aria-label="Run step transcript"
-      >
-        {!run || run.steps.length === 0 ? (
-          <p className={styles.empty}>No steps recorded yet.</p>
-        ) : (
-          run.steps.map((step, i) => (
-            <div key={`${step.ts}-${i}`} className={styles.step} data-focus-key={`run-stream-step-${i}`}>
-              <span className={styles.stepKind} data-kind={step.kind}>
-                {STEP_KIND_LABEL[step.kind] ?? step.kind}
-              </span>
-              <span className={styles.stepTime} title={step.ts}>
-                {formatClock(step.ts)}
-              </span>
-              <span className={styles.stepTask}>{step.taskId}</span>
-              <span className={styles.stepSummary}>{step.summary}</span>
-              {step.usage ? (
-                <span className={styles.stepUsage}>
-                  {(step.usage.tokensIn + step.usage.tokensOut).toLocaleString()} tok
+      <div className={styles.transcriptWrap}>
+        <div
+          ref={scrollRef}
+          className={styles.transcript}
+          onScroll={onScroll}
+          tabIndex={0}
+          role="log"
+          aria-label="Run step transcript"
+          aria-live={following ? 'polite' : 'off'}
+        >
+          {!run || run.steps.length === 0 ? (
+            <p className={styles.empty}>No steps recorded yet.</p>
+          ) : (
+            run.steps.map((step, i) => (
+              <div key={`${step.ts}-${i}`} className={styles.step} data-focus-key={`run-stream-step-${i}`}>
+                <span className={styles.stepKind} data-kind={step.kind}>
+                  {STEP_KIND_LABEL[step.kind] ?? step.kind}
                 </span>
-              ) : null}
-            </div>
-          ))
-        )}
+                <span className={styles.stepTime} title={step.ts}>
+                  {formatClock(step.ts)}
+                </span>
+                <span className={styles.stepTask}>{step.taskId}</span>
+                <span className={styles.stepSummary}>{step.summary}</span>
+                {step.usage ? (
+                  <span className={styles.stepUsage}>
+                    {(step.usage.tokensIn + step.usage.tokensOut).toLocaleString()} tok
+                  </span>
+                ) : null}
+              </div>
+            ))
+          )}
+        </div>
+        {!following ? (
+          <button type="button" className={styles.followButton} onClick={resumeFollowing}>
+            ↓ Follow
+          </button>
+        ) : null}
       </div>
     </div>
   );
