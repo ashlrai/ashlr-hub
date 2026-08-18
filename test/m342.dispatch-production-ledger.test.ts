@@ -7,10 +7,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // This suite drives the real on-disk production ledger — 216 cases of genuine
 // fs work that take ~105s even running alone. Its afterEach teardown therefore
 // blows the 5s default hookTimeout whenever the machine is under parallel load,
-// while passing cleanly in isolation. Raised per the convention already used by
-// m398/m501 (20s), h3 (30s), m355 (120s), and m482 (180s). No assertion is
-// relaxed — only the harness budget for real I/O.
-vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
+// while passing cleanly in isolation. No assertion is relaxed — only the
+// harness budget for real I/O. Covered by the real-io lane's 60s default now
+// — see scripts/realio-lane-membership.mjs — so no per-file vi.setConfig is needed.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {

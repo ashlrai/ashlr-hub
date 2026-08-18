@@ -191,7 +191,7 @@ import { assurePrivateStoragePath } from '../src/core/util/private-storage.js';
 
 // Doctor probes shell out even with provider and Phantom mocks. Windows CI can
 // spend more than Vitest's 5s default in process startup across a single probe.
-vi.setConfig({ testTimeout: 15_000 });
+// Covered by the real-io lane's 60s default now — see scripts/realio-lane-membership.mjs.
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -353,7 +353,7 @@ describe('runDoctor — report structure', () => {
     expect(report.checks.length).toBeGreaterThan(0);
   }, 15_000);
 
-  it('every check has id, label, status, detail fields', { timeout: 15_000 }, async () => {
+  it('every check has id, label, status, detail fields', async () => {
     const cfg = makeConfig(tmpHome);
     const report = await runDoctor(cfg);
     for (const check of report.checks) {
@@ -365,7 +365,7 @@ describe('runDoctor — report structure', () => {
     }
   });
 
-  it('summary counts match actual check statuses', { timeout: 15_000 }, async () => {
+  it('summary counts match actual check statuses', async () => {
     const cfg = makeConfig(tmpHome);
     const report = await runDoctor(cfg);
     const pass = report.checks.filter(c => c.status === 'pass').length;
@@ -389,13 +389,13 @@ describe('runDoctor — report structure', () => {
 // ---------------------------------------------------------------------------
 
 describe('runDoctor — all healthy', () => {
-  it('has zero fail checks when everything is up', { timeout: 15_000 }, async () => {
+  it('has zero fail checks when everything is up', async () => {
     const cfg = makeConfig(tmpHome);
     const report = await runDoctor(cfg);
     expect(report.summary.fail).toBe(0);
   });
 
-  it('has at least one pass check when everything is up', { timeout: 15_000 }, async () => {
+  it('has at least one pass check when everything is up', async () => {
     const cfg = makeConfig(tmpHome);
     const report = await runDoctor(cfg);
     expect(report.summary.pass).toBeGreaterThan(0);
@@ -419,13 +419,13 @@ describe('runDoctor — no local provider up', () => {
   });
 
   // 30s: provider probes stack multiple 2s connection timeouts on slow CI runners.
-  it('produces at least one fail check when no provider is up', { timeout: 30_000 }, async () => {
+  it('produces at least one fail check when no provider is up', async () => {
     const cfg = makeConfig(tmpHome);
     const report = await runDoctor(cfg);
     expect(report.summary.fail).toBeGreaterThan(0);
   });
 
-  it('summary.fail is reflected correctly in summary counts', { timeout: 30_000 }, async () => {
+  it('summary.fail is reflected correctly in summary counts', async () => {
     const cfg = makeConfig(tmpHome);
     const report = await runDoctor(cfg);
     const failChecks = report.checks.filter(c => c.status === 'fail');
@@ -567,7 +567,7 @@ describe('checkLocus / runDoctor — locus', () => {
     expect(c.fix).toMatch(/locus enter/i);
   });
 
-  it('runDoctor includes a locus check', { timeout: 15_000 }, async () => {
+  it('runDoctor includes a locus check', async () => {
     const cfg = makeConfig(tmpHome);
     const report = await runDoctor(cfg);
     const locus = report.checks.find(c => c.id === 'locus');

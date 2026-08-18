@@ -405,7 +405,7 @@ afterEach(() => {
   }
 });
 
-describe('M419 remote handoff intent', { timeout: 60_000 }, () => {
+describe('M419 remote handoff intent', () => {
   it('operator submit without caller confirmation performs no verification or outward effect', async () => {
     const proposal = makeProposal('frontier', 'docs/human-submit-unconfirmed.md', false);
 

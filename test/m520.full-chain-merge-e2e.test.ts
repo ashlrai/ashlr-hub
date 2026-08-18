@@ -394,7 +394,7 @@ afterEach(() => {
   else process.env.ASHLR_TEST_ALLOW_ANY_REPO = originalAllowAnyRepo;
 });
 
-describe('M520 full-chain merge e2e (production-like verification config)', { timeout: 60_000 }, () => {
+describe('M520 full-chain merge e2e (production-like verification config)', () => {
   it('a non-frontier, non-self-target proposal clears every gate and reaches gh pr merge', async () => {
     const proposal = makeProposal('docs/m520-e2e.md');
     plantFrontierShipDecision(proposal.id, proposal.diff ?? '');

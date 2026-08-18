@@ -221,7 +221,7 @@ afterEach(async () => {
   }
 });
 
-describe('M405 applyProposal outward mutation fence', { timeout: 15_000 }, () => {
+describe('M405 applyProposal outward mutation fence', () => {
   it('refuses before Git or proposal mutation when another process holds the fence', async () => {
     repo.enroll();
     const proposal = createProposal({

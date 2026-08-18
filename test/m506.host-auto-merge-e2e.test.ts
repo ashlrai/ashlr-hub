@@ -320,7 +320,7 @@ afterEach(() => {
   else process.env.ASHLR_TEST_ALLOW_ANY_REPO = originalAllowAnyRepo;
 });
 
-describe('M506 host auto-merge end-to-end wiring', { timeout: 60_000 }, () => {
+describe('M506 host auto-merge end-to-end wiring', () => {
   it('reaches gh pr merge through the real autoMergeProposal call site when hostAutoMerge=true', async () => {
     const proposal = makeProposal('docs/m506-e2e.md');
 

@@ -35,7 +35,7 @@ import { enroll, isEnrolled } from '../src/core/sandbox/policy.js';
 import type { Sandbox } from '../src/core/types.js';
 import { makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
 
-vi.setConfig({ testTimeout: 15_000 });
+// Covered by the real-io lane's 60s default now — see scripts/realio-lane-membership.mjs.
 
 const privateStorageHarness = vi.hoisted(() => ({ useSemanticAdapter: false }));
 

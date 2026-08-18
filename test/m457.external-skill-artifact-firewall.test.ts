@@ -6,8 +6,8 @@ import { spawnSync } from 'node:child_process';
 import { describe, expect, it, vi } from 'vitest';
 
 // AST-scans the whole src/ tree for runtime import boundaries; that scan
-// alone takes ~19s on this machine, well past the 5s default.
-vi.setConfig({ testTimeout: 45_000 });
+// alone takes ~19s on this machine, well past the 5s default. Covered by
+// the real-io lane's 60s default now — see scripts/realio-lane-membership.mjs.
 import ts from 'typescript';
 
 import {

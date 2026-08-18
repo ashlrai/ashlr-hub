@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // commits/proposals. Under full-suite parallel load those subprocess calls
 // can individually take longer than the 5s default, causing spurious
 // timeouts unrelated to the merge-decision assertions themselves.
-vi.setConfig({ testTimeout: 20_000 });
+// Covered by the real-io lane's 60s default now — see scripts/realio-lane-membership.mjs.
 
 const mocks = vi.hoisted(() => ({
   judgeProposal: vi.fn(),

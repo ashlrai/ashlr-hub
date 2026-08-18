@@ -31,8 +31,8 @@ import type { AshlrConfig } from '../src/core/types.js';
 // process timeout before asserting the runner's recovery behavior. Under
 // full-suite parallel load that real wall-clock + subprocess work can
 // individually exceed the 5s default, causing spurious timeouts unrelated
-// to the runner logic itself.
-vi.setConfig({ testTimeout: 20_000, hookTimeout: 20_000 });
+// to the runner logic itself. Covered by the real-io lane's 60s default now
+// — see scripts/realio-lane-membership.mjs.
 
 let home: string;
 let previousHome: string | undefined;

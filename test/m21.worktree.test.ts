@@ -39,7 +39,7 @@ import { createHash } from 'node:crypto';
 import type { Sandbox } from '../src/core/types.js';
 
 // Windows CI can spend several seconds in each real git worktree subprocess.
-vi.setConfig({ testTimeout: 30_000 });
+// Covered by the real-io lane's 60s default now — see scripts/realio-lane-membership.mjs.
 
 // ---------------------------------------------------------------------------
 // HOME isolation
