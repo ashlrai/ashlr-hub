@@ -37,7 +37,7 @@ import {
   type CategoricalDatum,
   type TableColumn,
 } from '../../../components/charts/index.js';
-import type { ModelStats, ProductionSummary } from '../../../data/api-types.js';
+import type { ModelStats, DashboardProductionSummary } from '../../../data/api-types.js';
 import styles from './ProductionView.module.css';
 
 const WINDOWS: ModelStatsWindow[] = ['7d', '30d', 'all'];
@@ -51,7 +51,11 @@ export function ProductionView() {
   const snapshotQuery = useQuery(dashboardSnapshotQuery);
   const modelsResult = useQuery(modelsQuery(window));
 
-  const production = snapshotQuery.data?.production;
+  // DashboardSnapshot types `.production` as the base ProductionSummary
+  // (see the api-types.ts note on DashboardProductionSummary), but
+  // buildSnapshot() always returns the richer DashboardProductionSummary
+  // shape at runtime — this cast just recovers that at the type level.
+  const production = snapshotQuery.data?.production as DashboardProductionSummary | undefined;
 
   return (
     <div className={styles.view}>
@@ -107,7 +111,7 @@ export function ProductionView() {
   );
 }
 
-function ProductionSection({ production }: { production: ProductionSummary }) {
+function ProductionSection({ production }: { production: DashboardProductionSummary }) {
   const jv = production.judgeVerdicts24h;
   const judgeFailures = production.judgeFailures24h ?? { total: 0, parse: 0, network: 0 };
   const verdictBars: CategoricalDatum[] = [

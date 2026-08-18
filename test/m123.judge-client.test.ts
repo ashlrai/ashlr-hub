@@ -131,8 +131,8 @@ describe('runManager independent-review failure', () => {
     });
 
     // Mock inbox store
-    vi.doMock('../src/core/inbox/store.js', () => ({
-      listProposals: vi.fn().mockReturnValue([
+    vi.doMock('../src/core/inbox/store.js', () => {
+      const proposals = [
         {
           id: 'p-direct-1',
           title: 'Direct Ollama test proposal',
@@ -143,9 +143,24 @@ describe('runManager independent-review failure', () => {
           diff: '+const x = 1;\n',
           createdAt: new Date().toISOString(),
         },
-      ]),
-      setStatus: vi.fn(),
-    }));
+      ];
+      return {
+        listProposals: vi.fn().mockReturnValue(proposals),
+        listProposalsDetailed: vi.fn().mockReturnValue({
+          proposals,
+          sourceState: 'healthy',
+          sourcePresent: true,
+          complete: true,
+          stopReasons: [],
+          filesDiscovered: proposals.length,
+          filesRead: proposals.length,
+          bytesRead: 0,
+          invalidFiles: 0,
+          unreadableFiles: 0,
+        }),
+        setStatus: vi.fn(),
+      };
+    });
 
     // Mock decisions ledger
     vi.doMock('../src/core/fleet/decisions-ledger.js', () => ({

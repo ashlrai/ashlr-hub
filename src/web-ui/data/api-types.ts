@@ -54,6 +54,13 @@ export type {
  * when it isn't 'healthy'+complete.
  */
 export type { ModelStats, ModelStatsReadResult, ModelStatsSourceQuality } from '../../core/fleet/model-stats.js';
+// M331: DashboardSnapshot (above, from core/types.js) under-types `.production`
+// as the base ProductionSummary — the richer per-field source-quality shape
+// (judgeTraceSourceQuality / judgeFailureSourceQuality / activeGoalsSourceQuality)
+// only exists on dashboard.ts's DashboardProductionSummary, which is what
+// buildSnapshot()/GET /api/snapshot actually returns at runtime. Re-exported
+// here so routes can type the richer shape without hand-copying it.
+export type { DashboardProductionSummary } from '../../core/dashboard.js';
 
 export type {
   ControlSnapshot,

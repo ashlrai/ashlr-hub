@@ -204,6 +204,17 @@ function makeReport(verdicts: ManagerVerdict[]): ManagerReport {
     recommendations: ['Fleet nominal.'],
     narrative: 'All good.',
     judgeEngine: 'mock-judge',
+    proposalSourceQuality: {
+      sourceState: 'healthy',
+      sourcePresent: true,
+      complete: true,
+      stopReasons: [],
+      filesDiscovered: verdicts.length,
+      filesRead: verdicts.length,
+      bytesRead: 0,
+      invalidFiles: 0,
+      unreadableFiles: 0,
+    },
   };
 }
 
