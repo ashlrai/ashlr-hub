@@ -176,6 +176,14 @@ interface StreamWriteState {
 }
 const writeState = new Map<string, StreamWriteState>();
 
+/** Keyed on the RESOLVED run-streams directory, not a bare boolean/timestamp
+ *  — same reasoning as dirEnsuredPath above and writeState's per-path keys:
+ *  HOME can change within a process (every test in this suite does exactly
+ *  this), and a stale throttle from a PREVIOUS home must never suppress a
+ *  genuinely due sweep under a NEW home. A bare `let lastGcAt` would let one
+ *  process's forced/natural GC on home A silently skip GC on home B for up
+ *  to GC_INTERVAL_MS after a HOME swap. */
+let lastGcAtDir: string | undefined;
 let lastGcAt = 0;
 const GC_INTERVAL_MS = 10 * 60 * 1_000;
 
@@ -185,14 +193,17 @@ const GC_INTERVAL_MS = 10 * 60 * 1_000;
  * write GC (maintainPrivateStore), deliberately without its multi-process
  * locking — this data is disposable observability, not an audit trail, so a
  * best-effort single-process sweep is enough. Throttled to at most once per
- * GC_INTERVAL_MS per process so normal chunk writes stay cheap.
+ * GC_INTERVAL_MS per process (per resolved directory — see lastGcAtDir) so
+ * normal chunk writes stay cheap.
  */
 export function gcRunStreams(force = false): void {
   const now = Date.now();
-  if (!force && now - lastGcAt < GC_INTERVAL_MS) return;
+  const dirForThrottle = runStreamsDir();
+  if (!force && lastGcAtDir === dirForThrottle && now - lastGcAt < GC_INTERVAL_MS) return;
+  lastGcAtDir = dirForThrottle;
   lastGcAt = now;
   try {
-    const dir = runStreamsDir();
+    const dir = dirForThrottle;
     if (!fs.existsSync(dir)) return;
     for (const name of fs.readdirSync(dir)) {
       if (!name.endsWith('.log')) continue;
