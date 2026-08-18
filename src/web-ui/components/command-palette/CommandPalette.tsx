@@ -35,6 +35,8 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
   const [activeIndex, setActiveIndex] = useState(0);
   const [pendingCommand, setPendingCommand] = useState<Command | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
   const listId = useId();
   const navigate = useNavigate();
   const toast = useToast();
@@ -43,11 +45,30 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
 
   useEffect(() => {
     if (open) {
+      returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       setQuery('');
       setActiveIndex(0);
       // Portal content mounts after this effect; defer focus a tick.
       requestAnimationFrame(() => inputRef.current?.focus());
     }
+    return () => {
+      if (open) returnFocusRef.current?.focus();
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    function trapFocus(e: KeyboardEvent) {
+      if (e.key !== 'Tab') return;
+      const nodes = panelRef.current?.querySelectorAll<HTMLElement>('input, button, [href], [tabindex]:not([tabindex="-1"])');
+      if (!nodes?.length) return;
+      const first = nodes[0];
+      const last = nodes[nodes.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
+    }
+    document.addEventListener('keydown', trapFocus);
+    return () => document.removeEventListener('keydown', trapFocus);
   }, [open]);
 
   useEffect(() => {
@@ -92,13 +113,18 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
         open
         reason={`"${pendingCommand.title}" requires the dispatch token.`}
         onClose={() => setPendingCommand(null)}
+        onUnlocked={() => {
+          const command = pendingCommand;
+          setPendingCommand(null);
+          void execute(command);
+        }}
       />
     ) : null;
   }
 
   return createPortal(
     <div className={styles.backdrop} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className={styles.panel} role="dialog" aria-modal="true" aria-label="Command palette">
+      <div ref={panelRef} className={styles.panel} role="dialog" aria-modal="true" aria-label="Command palette">
         <input
           ref={inputRef}
           className={styles.input}

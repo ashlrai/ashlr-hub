@@ -4,7 +4,8 @@
  * GET /api/snapshot) + per-model ship rate / cost-per-merge / best-of-N wins
  * (GET /api/models?window=).
  *
- * Known, disclosed data gap (see the judge-verdict chart's caveat prop):
+ * Source-backed production truth: every persisted aggregate is rendered
+ * through its corresponding source-quality contract.
  * ProductionSummary.judgeVerdicts24h is built from JudgeTrace, whose
  * `verdict` field is strictly 'ship'|'review'|'noise'|'harmful' — a
  * judge-parse-failure/judge-network-failure (manager.ts's judgeProposal()
@@ -25,7 +26,7 @@ import { useState } from 'react';
 import { dashboardSnapshotQuery, modelsQuery, type ModelStatsWindow } from '../../../data/queries.js';
 import { useQuery } from '../../../data/hooks.js';
 import { RefreshIndicator } from '../../../components/primitives/RefreshIndicator.js';
-import { Epistemic } from '../../../components/primitives/Epistemic.js';
+import { Epistemic, isKnown } from '../../../components/primitives/Epistemic.js';
 import { SkeletonCardGrid } from '../../../components/primitives/Skeleton.js';
 import {
   ChartContainer,
@@ -108,6 +109,7 @@ export function ProductionView() {
 
 function ProductionSection({ production }: { production: ProductionSummary }) {
   const jv = production.judgeVerdicts24h;
+  const judgeFailures = production.judgeFailures24h ?? { total: 0, parse: 0, network: 0 };
   const verdictBars: CategoricalDatum[] = [
     { label: 'ship', value: jv.ship },
     { label: 'review', value: jv.review },
@@ -119,27 +121,30 @@ function ProductionSection({ production }: { production: ProductionSummary }) {
     value: d.count,
   }));
   const totalShipped = production.shipsPerDayTrend.reduce((sum, d) => sum + d.count, 0);
+  const proposalsKnown = isKnown(production.proposalSourceQuality);
+  const verdictsKnown = isKnown(production.judgeTraceSourceQuality);
 
   return (
     <>
       <div className={styles.kpiGrid}>
         <StatTile
           label="Proposals (24h)"
-          value={String(production.proposals24h.total)}
-          caption={`${production.proposals24h.pending} pending`}
+          value={<Epistemic quality={production.proposalSourceQuality} label="proposals">{String(production.proposals24h.total)}</Epistemic>}
+          caption={<Epistemic quality={production.proposalSourceQuality} label="pending proposals">{`${production.proposals24h.pending} pending`}</Epistemic>}
         />
-        <StatTile label="Auto-merges today" value={String(production.autoMergesToday.count)} />
-        <StatTile label="Judged (24h)" value={String(jv.total)} />
-        <StatTile label="Active goals" value={String(production.activeGoals.length)} />
+        <StatTile label="Auto-merges today" value={<Epistemic quality={production.proposalSourceQuality} label="auto-merges">{String(production.autoMergesToday.count)}</Epistemic>} />
+        <StatTile label="Judged (24h)" value={<Epistemic quality={production.judgeTraceSourceQuality} label="judge verdicts">{String(jv.total)}</Epistemic>} />
+        <StatTile label="Judge failures (24h)" value={<Epistemic quality={production.judgeFailureSourceQuality} label="judge failures">{String(judgeFailures.total)}</Epistemic>} caption={<Epistemic quality={production.judgeFailureSourceQuality}>{`${judgeFailures.parse} parse · ${judgeFailures.network} network`}</Epistemic>} />
+        <StatTile label="Active goals" value={<Epistemic quality={production.activeGoalsSourceQuality} label="active goals">{String(production.activeGoals.length)}</Epistemic>} />
       </div>
 
       <div className={styles.chartsGrid}>
         <ChartContainer
           title="Ships per day"
           description="last 7 days"
-          empty={shipTrend.length === 0}
+          empty={proposalsKnown && shipTrend.length === 0}
           emptyMessage="No ship history recorded yet."
-          table={
+          table={proposalsKnown ? (
             <TableView
               caption="Ships per day"
               rowKey={(r) => r.label}
@@ -149,28 +154,33 @@ function ProductionSection({ production }: { production: ProductionSummary }) {
                 { key: 'count', label: 'Ships', numeric: true, render: (r) => String(r.value ?? 0) },
               ]}
             />
-          }
+          ) : undefined}
         >
-          {totalShipped === 0 ? (
+          {!proposalsKnown ? (
+            <Epistemic quality={production.proposalSourceQuality} label="ship history">ship history</Epistemic>
+          ) : totalShipped === 0 ? (
             <p className={styles.notAvailable}>
               0 ships in the last 7 days — this is the real number, not a loading state.
             </p>
           ) : null}
-          <BarChart data={shipTrend} ariaLabel="Ships per day, last 7 days" formatValue={(v) => String(v)} />
+          {proposalsKnown ? <BarChart data={shipTrend} ariaLabel="Ships per day, last 7 days" formatValue={(v) => String(v)} /> : null}
         </ChartContainer>
 
         <ChartContainer
           title="Judge verdict breakdown"
           description="last 24h"
-          caveat="Backend gap (flagged separately): judge-parse-failure and judge-network-failure fallbacks currently record verdict='review' upstream (manager.ts's fail-closed default) and are not yet split out here — the 'review' count above may include infrastructure failures, not only genuine human-review holds. See this view's header comment."
-          empty={jv.total === 0}
+          empty={verdictsKnown && jv.total === 0}
           emptyMessage="No judge verdicts recorded in the last 24h."
         >
-          <BarChart data={verdictBars} ariaLabel="Judge verdict breakdown, last 24h" formatValue={(v) => String(v)} />
+          {verdictsKnown
+            ? <BarChart data={verdictBars} ariaLabel="Judge verdict breakdown, last 24h" formatValue={(v) => String(v)} />
+            : <Epistemic quality={production.judgeTraceSourceQuality} label="judge verdicts">judge verdicts</Epistemic>}
         </ChartContainer>
       </div>
 
-      {production.activeGoals.length > 0 ? (
+      {!isKnown(production.activeGoalsSourceQuality) ? (
+        <div className={styles.section}><h2 className={styles.sectionTitle}>Active goals</h2><Epistemic quality={production.activeGoalsSourceQuality} label="active goals">active goals</Epistemic></div>
+      ) : production.activeGoals.length > 0 ? (
         <div className={styles.section}>
           <h2 className={styles.sectionTitle}>Active goals</h2>
           <ul className={styles.goalsList}>
@@ -237,7 +247,7 @@ function ModelStatsSection({ result }: { result: { models: ModelStats[]; bestOfN
     <div className={styles.chartsGrid}>
       <ChartContainer
         title="Ship rate by model"
-        description="judged proposals only; 672 proposals / 0 merged historically means this can legitimately read 0%"
+        description="judged proposals in the selected window"
         empty={models.length === 0}
         emptyMessage="No dispatch history for this window."
         table={<TableView caption="Per-model economics" rowKey={engineModelLabel} rows={models} columns={columns} />}
