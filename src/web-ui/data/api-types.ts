@@ -17,8 +17,6 @@
  * not a bug in this file.
  */
 export type {
-  DashboardSnapshot,
-  ProductionSummary,
   IntelligenceSummary,
   RunState,
   RunTask,
@@ -42,6 +40,10 @@ export type {
   PortfolioEffectiveness,
   PortfolioTodayDelta,
 } from '../../core/types.js';
+export type {
+  DashboardSnapshotWithSourceQuality as DashboardSnapshot,
+  DashboardProductionSummary as ProductionSummary,
+} from '../../core/dashboard.js';
 
 /**
  * M335: per-model economics behind /api/models (GET returns

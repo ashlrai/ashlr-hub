@@ -19,11 +19,12 @@ const TOKEN_RE = /^[a-f0-9]{64}$/;
 export interface MutationTokenDialogProps {
   open: boolean;
   onClose: () => void;
+  onUnlocked?: () => void;
   /** Human context for why the token is being requested right now. */
   reason?: string;
 }
 
-export function MutationTokenDialog({ open, onClose, reason }: MutationTokenDialogProps) {
+export function MutationTokenDialog({ open, onClose, onUnlocked, reason }: MutationTokenDialogProps) {
   const { setToken } = useMutationHold();
   const [value, setValue] = useState('');
   const [reveal, setReveal] = useState(false);
@@ -43,6 +44,7 @@ export function MutationTokenDialog({ open, onClose, reason }: MutationTokenDial
     setValue('');
     setError(null);
     onClose();
+    onUnlocked?.();
   }
 
   return (

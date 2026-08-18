@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as http from 'node:http';
 import { createConnection } from 'node:net';
+import { createHash, createHmac } from 'node:crypto';
 
 import { makeCfg, makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
 import { startServer } from '../src/core/web/server.js';
@@ -110,6 +111,36 @@ function openSse(
   });
 }
 
+function persistentSse(
+  handle: WebServerHandle,
+  headers: http.OutgoingHttpHeaders,
+  path: string,
+): Promise<{ connected: Promise<void>; closed: Promise<string>; destroy(): void }> {
+  let resolveConnected!: () => void;
+  let resolveClosed!: (body: string) => void;
+  const connected = new Promise<void>((resolve) => { resolveConnected = resolve; });
+  const closed = new Promise<string>((resolve) => { resolveClosed = resolve; });
+  let body = '';
+  const req = http.request({ hostname: '127.0.0.1', port: handle.port, path, method: 'GET', headers: { Host: `127.0.0.1:${handle.port}`, ...headers } });
+  req.on('response', (res) => {
+    res.on('data', (chunk: Buffer) => {
+      body += chunk.toString('utf8');
+      if (body.includes(': connected')) resolveConnected();
+    });
+    res.on('end', () => resolveClosed(body));
+    res.on('close', () => resolveClosed(body));
+  });
+  req.end();
+  return Promise.resolve({ connected, closed, destroy: () => req.destroy() });
+}
+
+function shortLivedTicket(readToken: string, clientProof: string, expiresAt: number): string {
+  const nonce = 'n'.repeat(22);
+  const binding = createHash('sha256').update(clientProof).digest('base64url');
+  const payload = ['v1', 'GET', '/api/', String(expiresAt), nonce, binding].join('.');
+  return `${payload}.${createHmac('sha256', readToken).update(payload).digest('base64url')}`;
+}
+
 async function mintCookie(
   handle: WebServerHandle,
   clientProof = CLIENT_PROOF,
@@ -151,6 +182,9 @@ describe('loopback dashboard read authority', () => {
     expect(root.statusCode).toBe(200);
     expect(String(root.headers['content-type'])).toContain('text/html');
     expect(root.headers['referrer-policy']).toBe('no-referrer');
+    expect(root.headers['x-frame-options']).toBe('DENY');
+    expect(root.headers['content-security-policy']).toContain("frame-ancestors 'none'");
+    expect(root.headers['permissions-policy']).toContain('camera=()');
     expect(health.statusCode).toBe(200);
     expect(JSON.parse(health.body)).toEqual({ ok: true });
     expect(health.body.length).toBeLessThan(32);
@@ -326,7 +360,7 @@ describe('loopback dashboard read authority', () => {
     })).statusCode).toBe(401);
   });
 
-  it('supports authenticated SSE by header or cookie and rejects an unauthenticated stream', async () => {
+  it('requires an expiring browser session for SSE and rejects header-only or missing expiry', async () => {
     const handle = await server();
     const { cookie } = await mintCookie(handle);
     const headerSse = await openSse(handle, { 'x-ashlr-token': handle.readToken });
@@ -337,9 +371,8 @@ describe('loopback dashboard read authority', () => {
     );
     const missing = await openSse(handle);
 
-    expect(headerSse.statusCode).toBe(200);
+    expect(headerSse.statusCode).toBe(401);
     expect(cookieSse.statusCode).toBe(200);
-    expect(String(headerSse.headers['content-type'])).toContain('text/event-stream');
     expect(String(cookieSse.headers['content-type'])).toContain('text/event-stream');
     expect(missing.statusCode).toBe(401);
     expect(String(missing.headers['content-type'])).toContain('application/json');
@@ -399,17 +432,85 @@ describe('loopback dashboard read authority', () => {
     expect(bootstrap.headers['set-cookie']).toBeUndefined();
   });
 
-  it('clears tickets without authority and bounds unsupported session methods', async () => {
+  it('requires exact cookie and client proof to clear a session', async () => {
     const handle = await server();
-    const cleared = await request(handle, 'DELETE', '/api/session');
+    const minted = await mintCookie(handle);
+    const unauthenticated = await request(handle, 'DELETE', '/api/session');
+    const wrongProof = await request(handle, 'DELETE', '/api/session', {
+      Cookie: minted.cookie, 'x-ashlr-read-client': 'b'.repeat(64),
+    });
+    const cleared = await request(handle, 'DELETE', '/api/session', {
+      Cookie: minted.cookie, 'x-ashlr-read-client': CLIENT_PROOF,
+    });
     const unsupported = await request(handle, 'GET', '/api/session', {
       'x-ashlr-token': handle.readToken,
     });
+    expect(unauthenticated.statusCode).toBe(401);
+    expect(wrongProof.statusCode).toBe(401);
     expect(cleared.statusCode).toBe(204);
     expect(cleared.headers['set-cookie']?.[0]).toContain('Max-Age=0');
     expect(cleared.headers['cache-control']).toBe('no-store');
     expect(unsupported.statusCode).toBe(405);
     expect(unsupported.headers.allow).toBe('POST, DELETE');
+  });
+
+  it('closes an authorized SSE stream at its exact signed session expiry', async () => {
+    const handle = await server();
+    const expiresAt = Date.now() + 250;
+    const ticket = shortLivedTicket(handle.readToken, CLIENT_PROOF, expiresAt);
+    const stream = await persistentSse(handle, { Cookie: `ashlr_read_session=${ticket}` }, `/api/events?client=${CLIENT_PROOF}`);
+    await stream.connected;
+    const body = await Promise.race([
+      stream.closed,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('SSE did not close at expiry')), 2_000)),
+    ]);
+    expect(Date.now()).toBeGreaterThanOrEqual(expiresAt);
+    expect(body).toContain('event: session-expired');
+  });
+
+  it('rejects a session exactly at the expiry boundary', async () => {
+    const handle = await server();
+    const expiresAt = Date.now();
+    const ticket = shortLivedTicket(handle.readToken, CLIENT_PROOF, expiresAt);
+    const response = await request(handle, 'GET', `/api/events?client=${CLIENT_PROOF}`, {
+      Cookie: `ashlr_read_session=${ticket}`,
+    });
+    expect(response.statusCode).toBe(401);
+    expect(response.body).not.toContain(': connected');
+  });
+
+  it('revokes an already-open SSE stream when the session is deleted', async () => {
+    const handle = await server();
+    const minted = await mintCookie(handle);
+    const stream = await persistentSse(handle, { Cookie: minted.cookie }, `/api/events?client=${CLIENT_PROOF}`);
+    await stream.connected;
+    expect((await request(handle, 'DELETE', '/api/session', {
+      Cookie: minted.cookie, 'x-ashlr-read-client': CLIENT_PROOF,
+    })).statusCode).toBe(204);
+    await Promise.race([
+      stream.closed,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('SSE survived logout')), 2_000)),
+    ]);
+  });
+
+  it('logout revokes only the matching session and leaves a rival stream open', async () => {
+    const handle = await server();
+    const rivalProof = 'b'.repeat(64);
+    const first = await mintCookie(handle, CLIENT_PROOF);
+    const rival = await mintCookie(handle, rivalProof);
+    const firstStream = await persistentSse(handle, { Cookie: first.cookie }, `/api/events?client=${CLIENT_PROOF}`);
+    const rivalStream = await persistentSse(handle, { Cookie: rival.cookie }, `/api/events?client=${rivalProof}`);
+    await Promise.all([firstStream.connected, rivalStream.connected]);
+    expect((await request(handle, 'DELETE', '/api/session', {
+      Cookie: first.cookie, 'x-ashlr-read-client': CLIENT_PROOF,
+    })).statusCode).toBe(204);
+    await firstStream.closed;
+    const rivalState = await Promise.race([
+      rivalStream.closed.then(() => 'closed'),
+      new Promise<'open'>((resolve) => setTimeout(() => resolve('open'), 250)),
+    ]);
+    expect(rivalState).toBe('open');
+    rivalStream.destroy();
   });
 });
 

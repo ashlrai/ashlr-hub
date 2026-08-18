@@ -22,7 +22,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypt
 import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
 import type { AshlrConfig, WebServerOptions, WebServerHandle } from '../types.js';
-import { handleApi, drainSseConnections } from './api.js';
+import { handleApi, drainSseConnections, drainSseSession } from './api.js';
 import { serveStatic } from './static.js';
 
 // ---------------------------------------------------------------------------
@@ -82,7 +82,10 @@ function sendJson(
     'X-Content-Type-Options': 'nosniff',
     ...headers,
   });
-  res.end(JSON.stringify(body));
+  const publicBody = body && typeof body === 'object' && 'error' in body
+    ? { ...body, error: String((body as { error: unknown }).error).slice(0, 512) }
+    : body;
+  res.end(JSON.stringify(publicBody));
 }
 
 function clientBinding(clientProof: string): string {
@@ -156,52 +159,58 @@ function readCookie(req: IncomingMessage, name: string): string {
   return found;
 }
 
-function validReadSession(
+interface ValidReadSession { id: string; expiresAt: number }
+
+function validateReadSession(
   req: IncomingMessage,
   token: string,
   url: URL,
+  purpose: 'read' | 'logout' = 'read',
   nowMs = Date.now(),
-): boolean {
+): ValidReadSession | null {
   const ticket = readCookie(req, READ_SESSION_COOKIE);
-  if (!ticket) return false;
-  const clientProof = readSessionClientProof(req, url);
-  if (!clientProof) return false;
+  if (!ticket) return null;
+  const clientProof = purpose === 'logout' ? readClientHeader(req) : readSessionClientProof(req, url);
+  if (!clientProof) return null;
 
   const parts = ticket.split('.');
-  if (parts.length !== 7) return false;
+  if (parts.length !== 7) return null;
   const [version, method, pathPrefix, expiresRaw, nonce, binding, signature] = parts;
   if (
     version !== READ_SESSION_VERSION
     || method !== READ_SESSION_METHOD
     || pathPrefix !== READ_SESSION_PATH_PREFIX
-    || (req.method ?? 'GET').toUpperCase() !== method
-    || !url.pathname.startsWith(pathPrefix)
+    || (purpose === 'read' && (req.method ?? 'GET').toUpperCase() !== method)
+    || (purpose === 'read' && !url.pathname.startsWith(pathPrefix))
     || !/^\d{13}$/.test(expiresRaw ?? '')
     || !/^[A-Za-z0-9_-]{22}$/.test(nonce ?? '')
     || !/^[A-Za-z0-9_-]{43}$/.test(binding ?? '')
     || !/^[A-Za-z0-9_-]{43}$/.test(signature ?? '')
-  ) return false;
+  ) return null;
 
   const expiresAtMs = Number(expiresRaw);
   if (
     !Number.isSafeInteger(expiresAtMs)
     || expiresAtMs <= nowMs
     || expiresAtMs > nowMs + READ_SESSION_TTL_MS + READ_SESSION_FUTURE_SKEW_MS
-  ) return false;
+  ) return null;
 
-  if (!safeEqual(binding!, clientBinding(clientProof))) return false;
+  if (!safeEqual(binding!, clientBinding(clientProof))) return null;
 
   const payload = ticketPayload(expiresAtMs, nonce!, binding!);
-  return safeEqual(signature!, signTicketPayload(payload, token));
+  if (!safeEqual(signature!, signTicketPayload(payload, token))) return null;
+  return { id: createHash('sha256').update(ticket, 'utf8').digest('hex'), expiresAt: expiresAtMs };
 }
 
-function hasReadAuthority(
+type ReadAuthority = { kind: 'header' } | { kind: 'session'; session: ValidReadSession };
+function readAuthority(
   req: IncomingMessage,
   token: string,
   url: URL,
-): boolean {
-  return safeEqual(headerValue(req, 'x-ashlr-token'), token)
-    || validReadSession(req, token, url);
+): ReadAuthority | null {
+  if (safeEqual(headerValue(req, 'x-ashlr-token'), token)) return { kind: 'header' };
+  const session = validateReadSession(req, token, url);
+  return session ? { kind: 'session', session } : null;
 }
 
 function sessionCookie(value: string, maxAgeSeconds: number): string {
@@ -254,6 +263,12 @@ export async function startServer(
     // The EventSource client proof appears in its same-origin URL because the
     // browser API cannot set headers. Never allow it to escape in a Referer.
     res.setHeader('Referrer-Policy', 'no-referrer');
+    // Legacy index.html contains its stylesheet inline; scripts remain
+    // external-only. The new console uses external assets for both.
+    res.setHeader('Content-Security-Policy', "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'");
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
 
     // ── 1. Host-header allowlist (anti DNS-rebinding) ──────────────────────
     if (!isAllowedHost(req.headers.host)) {
@@ -269,6 +284,7 @@ export async function startServer(
     }
     const path = url.pathname;
     const method = (req.method ?? 'GET').toUpperCase();
+    const authority = readAuthority(req, readToken, url);
 
     // Exchange the raw operator token for a short-lived, read-only browser
     // session. The ticket is HMAC-bound to this server process and cannot be
@@ -290,6 +306,12 @@ export async function startServer(
         return;
       }
       if (method === 'DELETE') {
+        const session = !url.search ? validateReadSession(req, readToken, url, 'logout') : null;
+        if (!session) {
+          sendJson(res, 401, { code: 'SESSION_REQUIRED', error: 'valid read session required' });
+          return;
+        }
+        drainSseSession(session.id);
         sendJson(res, 204, undefined, {
           'Set-Cookie': sessionCookie('', 0),
         });
@@ -301,7 +323,7 @@ export async function startServer(
 
     // Public liveness is intentionally content-free and bounded. Operators
     // with read authority retain the richer persisted /api/health projection.
-    if (path === '/api/health' && method === 'GET' && !hasReadAuthority(req, readToken, url)) {
+    if (path === '/api/health' && method === 'GET' && !authority) {
       sendJson(res, 200, { ok: true });
       return;
     }
@@ -311,7 +333,7 @@ export async function startServer(
     if (
       method === 'GET'
       && (path === '/api' || path.startsWith('/api/'))
-      && !hasReadAuthority(req, readToken, url)
+      && !authority
     ) {
       sendJson(res, 401, { error: 'unauthorized: read session required' }, {
         Vary: 'Cookie, X-Ashlr-Token, X-Ashlr-Read-Client',
@@ -321,7 +343,11 @@ export async function startServer(
 
     // ── 2. API routes ──────────────────────────────────────────────────────
     // handleApi is async; wrap to catch errors without crashing the server.
-    handleApi(req, res, cfg, { token, allowDispatch: opts.allowDispatch })
+    handleApi(req, res, cfg, {
+      token,
+      allowDispatch: opts.allowDispatch,
+      readSession: authority?.kind === 'session' ? authority.session : undefined,
+    })
       .then((handled) => {
         if (handled) return;
 
@@ -335,10 +361,9 @@ export async function startServer(
       .catch(() => {
         // Never let an unhandled rejection crash the server.
         if (!res.headersSent) {
-          res.writeHead(500, { 'Content-Type': 'text/plain' });
-        }
-        if (!res.writableEnded) {
-          res.end('Internal server error');
+          sendJson(res, 500, { code: 'INTERNAL_ERROR', error: 'internal server error' });
+        } else if (!res.writableEnded) {
+          res.end();
         }
       });
   });

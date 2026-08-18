@@ -34,9 +34,10 @@ export function useQuery<T>(def: QueryDef<T>): QueryEntry<T> {
   );
 
   useEffect(() => {
-    const controller = new AbortController();
-    void runQuery(def.key, () => def.fetch(controller.signal));
-    return () => controller.abort();
+    // Cache refreshers outlive any one component. Binding the stored fetcher
+    // to this component's AbortSignal poisons later SSE invalidations after
+    // unmount, so the shared cache owns the request lifetime.
+    void runQuery(def.key, () => def.fetch());
     // Re-fetch only when the resource identity changes, not on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- def.fetch is re-created per render on purpose; only def.key identifies the resource.
   }, [def.key]);

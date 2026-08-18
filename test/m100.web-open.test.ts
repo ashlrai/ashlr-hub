@@ -274,6 +274,20 @@ describe('POST /api/open — security gates', () => {
 });
 
 describe('POST /api/open — happy paths', () => {
+  it('maps launcher internals to one stable bounded public error', async () => {
+    vi.mocked(openMod.openInEditor).mockImplementationOnce(() => {
+      throw new Error('SECRET /Users/operator/private-repo token=abc123');
+    });
+    const { req, res, captured } = makeFakeReqRes({
+      body: JSON.stringify({ repo: '/enrolled/repo-a', action: 'editor' }),
+    });
+    await handleApi(req, res, baseConfig(), ctx);
+    expect(captured.statusCode).toBe(500);
+    expect(parsedBody(captured)).toEqual({ code: 'INTERNAL_ERROR', error: 'internal server error' });
+    expect(captured.body).not.toContain('SECRET');
+    expect(captured.body.length).toBeLessThan(128);
+  });
+
   it('calls openInEditor and returns ok:true for action:editor on enrolled repo', async () => {
     const { req, res, captured } = makeFakeReqRes({
       body: JSON.stringify({ repo: '/enrolled/repo-a', action: 'editor' }),
