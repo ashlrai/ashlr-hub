@@ -8,20 +8,15 @@
  *   OR stuckPassCount — proposals idled forever.
  *
  * THE FIX (M273):
- *   When judgeClient===null AND the proposal already has judgeNonShipCount>=1
- *   (was seen as non-ship at least once before), apply M271-style stuckPassCount
- *   accrual so the proposal eventually archives. Fresh proposals (judgeNonShipCount=0)
- *   are NOT drained via the cheap path — they wait for a judge to become available
- *   (fail-safe: a proposal that might ship if a judge comes back is not pre-emptively
- *   archived). Ship-recovery is fully preserved: when judgeClient is non-null and
- *   returns 'ship', the proposal proceeds to the merge gate as before.
+ *   A missing judge is not a fresh considered judgment. Every proposal stays
+ *   pending without counter mutation, regardless of historical counts.
  *
  * Tests:
- *  1. With null judge client + judgeNonShipCount>=1: stuckPassCount increments (no judge call).
- *  2. With null judge client + judgeNonShipCount>=1: archives when stuckPassCount reaches K.
+ *  1. With null judge client + judgeNonShipCount>=1: no counter mutation.
+ *  2. Historical stuckPassCount cannot archive without a fresh judgment.
  *  3. With null judge client + judgeNonShipCount===0 (fresh): NOT drained (safe-stall).
  *  4. A pending-that-would-ship: when judge IS available and returns ship, still merges.
- *  5. Drain accumulates across passes: 0→1→2→archive.
+ *  5. Repeated unavailable passes remain mutation-free.
  *  6. judgeNonShipCount increments correctly in non-capped path when judge is available.
  *
  * HOME is overridden to a tmp dir so no real ~/.ashlr state is touched.
@@ -169,6 +164,7 @@ function shipVerdict(proposalId: string) {
     alignment: 5,
     rationale: 'looks good',
     wouldMerge: true,
+    considered: true as const,
   };
 }
 
@@ -214,8 +210,8 @@ afterEach(() => {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe('M273 fleet drain dead-zone', () => {
-  it('increments stuckPassCount (no judge call) when client is null and judgeNonShipCount>=1', async () => {
+describe('M273 judge-unavailable fail-closed path', () => {
+  it('keeps the proposal pending when the judge client is unavailable', async () => {
     // Dead-zone scenario: 1 pending proposal, judgePerPass=8 (never capped),
     // judge client is null, but proposal already has judgeNonShipCount=1 from a prior run.
     const p = makeProposal('p-deadzone', { judgeNonShipCount: 1, stuckPassCount: 0 });
@@ -227,12 +223,11 @@ describe('M273 fleet drain dead-zone', () => {
     // No judge call — client was null
     expect(mockJudgeProposal).not.toHaveBeenCalled();
 
-    // stuckPassCount should be incremented to 1
+    // No judge means no fresh considered negative and no archive mutation.
     const stuckCall = mockUpdateProposalField.mock.calls.find(
       (c) => c[0] === 'p-deadzone' && c[1]?.stuckPassCount !== undefined,
     );
-    expect(stuckCall).toBeDefined();
-    expect(stuckCall![1]).toEqual({ stuckPassCount: 1 });
+    expect(stuckCall).toBeUndefined();
 
     // Not archived yet (only 1 pass)
     expect(result.autoArchived).toBe(0);
@@ -242,7 +237,7 @@ describe('M273 fleet drain dead-zone', () => {
     expect(archiveCall).toBeUndefined();
   });
 
-  it('archives when stuckPassCount reaches autoArchiveAfterRejects (null-client drain)', async () => {
+  it('does not archive at the historical threshold when the judge is unavailable', async () => {
     // stuckPassCount already at 2 — this pass pushes it to 3 → archive
     const p = makeProposal('p-archive', { judgeNonShipCount: 1, stuckPassCount: 2 });
     mockListProposals.mockReturnValue([p]);
@@ -253,13 +248,12 @@ describe('M273 fleet drain dead-zone', () => {
     // No judge call
     expect(mockJudgeProposal).not.toHaveBeenCalled();
 
-    // Should be archived
+    // Historical counters cannot substitute for a fresh considered judgment.
     const archiveCall = mockSetStatus.mock.calls.find(
       (c) => c[0] === 'p-archive' && c[1] === 'rejected',
     );
-    expect(archiveCall).toBeDefined();
-    expect(archiveCall![3]).toMatch(/M273 drained/);
-    expect(result.autoArchived).toBeGreaterThanOrEqual(1);
+    expect(archiveCall).toBeUndefined();
+    expect(result.autoArchived).toBe(0);
 
     // Never reached autoMergeProposal
     const mergeCall = mockAutoMergeProposal.mock.calls.find((c) => c[0] === 'p-archive');
@@ -321,10 +315,10 @@ describe('M273 fleet drain dead-zone', () => {
     expect(result.merged).toBe(1);
   });
 
-  it('drain accumulates across passes (stuckPassCount 0→1→2→archive) with null client', async () => {
+  it('never accumulates archive state across passes with no judge client', async () => {
     const baseCfg = cfg273({ judgePerPass: 8, autoArchiveAfterRejects: 3 });
-    let currentStuck = 0;
-    let archived = false;
+    const currentStuck = 0;
+    const archived = false;
 
     for (let pass = 1; pass <= 3; pass++) {
       vi.clearAllMocks();
@@ -340,29 +334,17 @@ describe('M273 fleet drain dead-zone', () => {
 
       const result = await runAutoMergePass(baseCfg);
 
-      if (pass < 3) {
-        const stuckCall = mockUpdateProposalField.mock.calls.find(
-          (c) => c[0] === 'p-drain' && c[1]?.stuckPassCount !== undefined,
-        );
-        expect(stuckCall).toBeDefined();
-        expect(stuckCall![1].stuckPassCount).toBe(currentStuck + 1);
-        currentStuck++;
-        expect(result.autoArchived).toBe(0);
-      } else {
-        const archiveCall = mockSetStatus.mock.calls.find(
-          (c) => c[0] === 'p-drain' && c[1] === 'rejected',
-        );
-        expect(archiveCall).toBeDefined();
-        expect(archiveCall![3]).toMatch(/M273 drained/);
-        expect(result.autoArchived).toBeGreaterThanOrEqual(1);
-        archived = true;
-      }
+      const stuckCall = mockUpdateProposalField.mock.calls.find(
+        (c) => c[0] === 'p-drain' && c[1]?.stuckPassCount !== undefined,
+      );
+      expect(stuckCall).toBeUndefined();
+      expect(result.autoArchived).toBe(0);
 
       // Judge was never called (client is null)
       expect(mockJudgeProposal).not.toHaveBeenCalled();
     }
 
-    expect(archived).toBe(true);
+    expect(archived).toBe(false);
   });
 
   it('judgeNonShipCount increments correctly in non-capped path when judge is available', async () => {
@@ -373,6 +355,7 @@ describe('M273 fleet drain dead-zone', () => {
       proposalId: id, verdict: 'review' as const,
       value: 2, correctness: 2, scope: 3, alignment: 2,
       rationale: 'needs review', wouldMerge: false,
+      considered: true as const,
     });
 
     let currentCount = 0;

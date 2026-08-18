@@ -834,8 +834,8 @@ export function evaluateAutoMergeReadinessPreflight(
       // autoArchive. An infra-flavored failure must not permanently kill a
       // proposal whose only crime was that the verifier was momentarily
       // unavailable — it stays pending and is retried next pass.
-      const infraLike = category === 'tool' || category === 'timeout' || category === 'infra';
-      const advisories = infraLike
+      const explicitCodeFailure = category === 'code';
+      const advisories = !explicitCodeFailure
         ? [
             `verifier-unavailable: verification could not run to completion (${category}) — not counted toward auto-archive; will retry`,
           ]
@@ -845,7 +845,7 @@ export function evaluateAutoMergeReadinessPreflight(
           failed ? ` (${failed})` : ''
         }`,
         advisories,
-        !infraLike,
+        explicitCodeFailure,
       );
     }
 
@@ -2292,23 +2292,16 @@ export async function verifyProposal(
 
     // Apply the diff to the worktree ONLY AFTER capturing the base-derived
     // command list, then run those (immutable) commands against the patched tree.
-    // M??? (merge-pipeline reliability): --3way lets git fall back to a
-    // three-way merge (using the blob shas already embedded in `git diff`'s
-    // extended headers) when the diff's ORIGINAL base has since moved but the
-    // proposal's edits don't actually conflict with what changed. Plain
-    // `apply` fails on any context drift even for benign staleness; `--3way`
-    // only fails closed on a REAL textual conflict, which is the outcome we
-    // actually want to distinguish from "diff is corrupt". Safe: this
-    // worktree is always removed in the finally block below regardless of
-    // outcome, so a conflicted intermediate state is never observed.
+    // Apply exactly to the verified index. Context drift is a refusal, not
+    // authority to synthesize a three-way result that was never proposed.
     patchFile = writeTmpFile(diff);
     try {
-      gitRun(tmpDir, ['apply', '--3way', '--index', patchFile]);
+      gitRun(tmpDir, ['apply', '--index', patchFile]);
     } catch (err) {
       return {
         ok: false,
         ran: [],
-        detail: `git apply failed in verify worktree (3-way fallback also failed — likely a real conflict, not just a stale base): ${err instanceof Error ? err.message : String(err)}`,
+        detail: `git apply failed in verify worktree: ${err instanceof Error ? err.message : String(err)}`,
         baseBranch: base,
         baseHead,
       };
@@ -2686,12 +2679,7 @@ function buildMergeBranch(
     try {
       const applyAuthorityFailure = finalAuthority?.();
       if (applyAuthorityFailure) throw new Error(applyAuthorityFailure);
-      // --3way: see the matching comment in verifyProposal()'s apply site —
-      // same rationale, harmless here since expectedBaseHead (when supplied)
-      // already guarantees this worktree's base is byte-identical to what was
-      // verified, so 3-way and plain apply agree; it only helps callers that
-      // omit expectedBaseHead.
-      gitRun(tmpDir, ['apply', '--3way', '--index', patchFile]);
+      gitRun(tmpDir, ['apply', '--index', patchFile]);
       const commitAuthorityFailure = finalAuthority?.();
       if (commitAuthorityFailure) throw new Error(commitAuthorityFailure);
       // A retry of identical signed evidence must reconstruct the same commit
@@ -3502,7 +3490,7 @@ export async function autoMergeProposal(
           let inlineAttestation: string | undefined;
           const ts = new Date().toISOString();
           const inlineReviewerIndependence = evaluateReviewerIndependence(proposal, inlineJudgeEngine);
-          if (verdict.verdict === 'ship' && verdict.wouldMerge === true && isFrontierJudge(inlineJudgeEngine) &&
+          if (verdict.considered === true && verdict.verdict === 'ship' && verdict.wouldMerge === true && isFrontierJudge(inlineJudgeEngine) &&
             inlineReviewerIndependence.independent) {
             try {
               const { signJudgeAttestation: signAtt, hashDiff: hd } = await import('../foundry/provenance.js');
@@ -3530,15 +3518,15 @@ export async function autoMergeProposal(
             action: 'judged',
             engine: inlineJudgeEngine,
             model: inlineJudgeEngine,
-            verdict: verdict.verdict,
+            verdict: verdict.considered === true ? verdict.verdict : 'review',
             // M507: a judgeFailure verdict is a synthetic fail-closed fallback, not
             // a considered judgment. It must be distinguishable in the ledger from a
             // real 'review' — conflating them is what made ~22% of judge calls look
             // like deliberate rejections. Mirrors automerge-pass.ts:243 so BOTH judge
             // paths record the same way. `wouldMerge` is always false on a failure,
             // so this never displaces the 'would-merge' marker.
-            detail: verdict.judgeFailure
-              ? (verdict.judgeFailure === 'parse' ? 'judge-parse-failure' : 'judge-network-failure')
+            detail: verdict.judgeFailure || verdict.considered !== true
+              ? (verdict.judgeFailure === 'network' ? 'judge-network-failure' : 'judge-parse-failure')
               : (verdict.wouldMerge && inlineReviewerIndependence.independent ? 'would-merge' : ''),
             ...(verdict.semanticEvents ? { semanticEvents: verdict.semanticEvents } : {}),
             ...(inlineAttestation !== undefined ? { judgeAttestation: inlineAttestation } : {}),
@@ -3546,16 +3534,17 @@ export async function autoMergeProposal(
               ? { judgeAttestationIssuedAt: ts, judgeAttestationIntent: 'would-merge' as const }
               : {}),
           });
-          if (verdict.verdict === 'ship' && verdict.wouldMerge === true &&
+          if (verdict.considered === true && verdict.verdict === 'ship' && verdict.wouldMerge === true &&
             !inlineReviewerIndependence.independent) {
             return refuse(`manager quality gate: ${inlineReviewerIndependence.reason}`, repo);
           }
+          const consideredVerdict = verdict.considered === true;
           managerVerdict = {
-            verdict: verdict.verdict,
-            wouldMerge: verdict.wouldMerge,
+            verdict: consideredVerdict ? verdict.verdict : 'review',
+            wouldMerge: consideredVerdict ? verdict.wouldMerge : false,
             reasonCode: judgeDecisionReasonCode(
-              verdict.verdict,
-              verdict.wouldMerge && inlineReviewerIndependence.independent,
+              consideredVerdict ? verdict.verdict : 'review',
+              consideredVerdict && verdict.wouldMerge && inlineReviewerIndependence.independent,
             ),
           };
         } catch {

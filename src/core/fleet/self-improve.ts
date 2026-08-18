@@ -10,8 +10,8 @@
  *    policy file.
  *  - FIRE-AND-FORGET: learnFromRejection() never throws, never awaits
  *    anything on the critical path. All I/O is wrapped in try/catch.
- *  - GATED: every code path checks cfg.foundry?.selfImprove !== false
- *    (default ON). When the flag is explicitly false the function returns
+ *  - GATED: every code path checks cfg.foundry?.selfImprove === true
+ *    (default OFF). Unless the flag is explicitly true the function returns
  *    immediately — byte-identical to having no call at all.
  *  - ADDITIVE: the genome entry is informational grounding for future runs.
  *    It is NOT an execution directive; it does not alter the merge gate,
@@ -24,7 +24,8 @@
  *    action 'self-improve:written' for observability (no PII, no secrets).
  */
 
-import { appendHubEntry } from '../genome/store.js';
+import fs from 'node:fs';
+import { appendHubEntry, hubStorePath } from '../genome/store.js';
 import { readDecisions, readDecisionsDetailed, recordDecision } from './decisions-ledger.js';
 import type { AshlrConfig, DecisionEntry, GenomeEntry } from '../types.js';
 
@@ -42,6 +43,45 @@ export const ANTI_PLAYBOOK_INJECT_CAP = 800;
 /** Tag prefix for all genome entries written by this module. */
 const TAG = 'm235:anti-playbook';
 
+/** Maximum newly appended bytes inspected to acknowledge one lesson write. */
+const APPEND_ACK_MAX_BYTES = 1024 * 1024;
+
+function hubSizeBeforeAppend(): number | null {
+  const file = hubStorePath();
+  try {
+    return fs.statSync(file).size;
+  } catch {
+    return fs.existsSync(file) ? null : 0;
+  }
+}
+
+function appendedBytesContainEntry(entry: GenomeEntry, offset: number): boolean {
+  const file = hubStorePath();
+  let fd: number | undefined;
+  try {
+    const size = fs.statSync(file).size;
+    const growth = size - offset;
+    if (growth <= 0 || growth > APPEND_ACK_MAX_BYTES) return false;
+    const bytes = Buffer.alloc(growth);
+    fd = fs.openSync(file, 'r');
+    if (fs.readSync(fd, bytes, 0, growth, offset) !== growth) return false;
+    return bytes.toString('utf8').split('\n').some((line) => {
+      if (!line.trim()) return false;
+      try {
+        return (JSON.parse(line) as { id?: unknown }).id === entry.id;
+      } catch {
+        return false;
+      }
+    });
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* best-effort close */ }
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Verdict that triggers write-back (review | noise | harmful).
 // We never write back for 'ship' — that is the playbooks.ts path.
@@ -51,6 +91,13 @@ type RejectionVerdict = 'review' | 'noise' | 'harmful';
 
 function isRejection(v: string): v is RejectionVerdict {
   return v === 'review' || v === 'noise' || v === 'harmful';
+}
+
+function isConsideredRejection(entry: DecisionEntry): entry is DecisionEntry & { verdict: RejectionVerdict } {
+  const verdict = (entry.verdict ?? '').toLowerCase();
+  if (!isRejection(verdict)) return false;
+  const expectedReason = `judge-${verdict}`;
+  return entry.judgeReasonCode === expectedReason;
 }
 
 // ---------------------------------------------------------------------------
@@ -88,7 +135,7 @@ export function deriveLesson(
  *   2. A decisions-ledger entry for telemetry/observability.
  *
  * NEVER THROWS. NEVER BLOCKS (all I/O is synchronous JSONL append behind
- * try/catch). Gated on cfg.foundry?.selfImprove !== false.
+ * try/catch). Gated on cfg.foundry?.selfImprove === true.
  *
  * @param proposalId  The proposal id (for ledger correlation).
  * @param proposalTitle  Legacy compatibility input; deliberately discarded.
@@ -102,31 +149,36 @@ export function learnFromRejection(
   verdict: string,
   reasoning: string,
   cfg: AshlrConfig,
-): void {
-  // Gate: default ON; explicit false = no-op (byte-identical to no call).
+): boolean {
+  // Gate: default OFF; only explicit true authorizes durable learning.
   try {
     const foundry = cfg.foundry as Record<string, unknown> | undefined;
-    if (foundry?.['selfImprove'] === false) return;
+    if (foundry?.['selfImprove'] !== true) return false;
   } catch {
-    return;
+    return false;
   }
 
   // Only act on rejection verdicts.
-  if (!isRejection(verdict)) return;
+  if (!isRejection(verdict)) return false;
 
   // Derive and write the lesson.
   try {
+    const appendOffset = hubSizeBeforeAppend();
+    if (appendOffset === null) return false;
     const lesson = deriveLesson(verdict, reasoning, proposalTitle);
     const title = `Anti-playbook observation: ${verdict}`;
 
-    appendHubEntry({
+    const entry = appendHubEntry({
       title,
       text: lesson,
       tags: [TAG, `verdict:${verdict}`, `proposal:${proposalId.slice(0, 24)}`],
       hubOnly: true,
     });
+    if (!appendedBytesContainEntry(entry, appendOffset)) return false;
   } catch {
-    // appendHubEntry never throws by contract; guard defensively.
+    // No durable lesson means no success acknowledgment and no idempotency
+    // telemetry. The sweep may safely retry on a later pass.
+    return false;
   }
 
   // Telemetry: record to decisions ledger (action 'self-improve:written').
@@ -143,6 +195,7 @@ export function learnFromRejection(
   } catch {
     // Ledger write is best-effort observability only.
   }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -167,9 +220,9 @@ export interface RejectionLearningSweepResult {
 }
 
 /**
- * Sweep the decisions ledger for judged rejection verdicts (review | noise |
- * harmful) and call learnFromRejection() for each one that hasn't already
- * produced a genome lesson.
+ * Sweep the decisions ledger for considered judged rejection verdicts (review
+ * | noise | harmful with their matching judgeReasonCode) and call
+ * learnFromRejection() for each one that hasn't already produced a lesson.
  *
  * learnFromRejection's ONLY prior caller was automerge-pass.ts, reached
  * exclusively from inside the auto-merge pass (cfg.foundry.autoMerge.enabled
@@ -193,14 +246,15 @@ export function sweepRejectionLearning(
   };
   try {
     const foundry = cfg.foundry as Record<string, unknown> | undefined;
-    if (foundry?.['selfImprove'] === false) return result;
+    if (foundry?.['selfImprove'] !== true) return result;
 
     let decisions: DecisionEntry[];
     if (typeof opts.listDecisions === 'function') {
       try {
         decisions = opts.listDecisions();
       } catch {
-        decisions = [];
+        result.sourceComplete = false;
+        return result;
       }
     } else {
       const read = readDecisionsDetailed({
@@ -230,8 +284,7 @@ export function sweepRejectionLearning(
     }
     const latestRejection = new Map<string, DecisionEntry>();
     for (const [proposalId, entry] of latestJudged) {
-      const verdict = (entry.verdict ?? '').toLowerCase();
-      if (isRejection(verdict)) latestRejection.set(proposalId, entry);
+      if (isConsideredRejection(entry)) latestRejection.set(proposalId, entry);
     }
 
     let inspected = 0;
@@ -254,8 +307,11 @@ export function sweepRejectionLearning(
         }
         if (existing.some((row) => row.action === 'self-improve:written')) continue;
 
-        learnFromRejection(proposalId, '', entry.verdict ?? 'review', '', cfg);
-        result.written++;
+        if (learnFromRejection(proposalId, '', entry.verdict ?? 'review', '', cfg)) {
+          result.written++;
+        } else {
+          result.skipped++;
+        }
       } catch {
         result.skipped++;
       }

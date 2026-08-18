@@ -213,6 +213,7 @@ function shipVerdict(proposalId: string): ManagerVerdict {
     alignment: 4,
     rationale: 'small low-risk docs change',
     wouldMerge: true,
+    considered: true,
   };
 }
 

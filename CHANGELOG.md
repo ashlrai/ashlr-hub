@@ -53,32 +53,35 @@ it does not install, launch, start, or grant service authority.
   (`'code' | 'tool' | 'timeout' | 'infra' | 'cancelled' | 'invalid-command'`)
   through verify commands, detached verification, the regression sentinel,
   and self-heal, so a missing binary is classified as tooling rather than a
-  broken diff. Three-way apply is used for verification where supported, and
-  the self-eval parity gate retries one transient invariant failure before
-  refusing.
+  broken diff. Patch application is exact (`git apply --index`); context drift
+  refuses instead of synthesizing an unreviewed three-way result. The self-eval
+  parity gate retries one transient invariant failure before refusing.
 
-- **Learning loop closed; judge parse failures stop posing as verdicts.**
-  `hasReleasedPostMergeCredit()` (`src/core/fleet/post-merge-credit.ts:137-150`)
-  no longer hardcodes `false` — it verifies an HMAC-signed, timing-safe-compared
-  token — unblocking consumers across `learned-router.ts`,
-  `skill-attestation.ts`, `feedback.ts`, `quality-metrics.ts`,
-  `judge-trace.ts`, and `post-merge-credit.ts` itself. `learnFromRejection`
-  is no longer reachable only when auto-merge is on: a new
+- **Learning remains explicit and report-only where proof is incomplete.**
+  `hasReleasedPostMergeCredit()` remains operationally false: the current
+  adverse-only observation ledger cannot prove that an exact merge was
+  positively observed stable, so post-merge evaluation and sweeps are
+  report-only. Learned routing and reusable-skill promotion therefore remain
+  dormant. `learnFromRejection` is no longer reachable only when auto-merge is
+  on: a new
   `sweepRejectionLearning()` (`src/core/fleet/self-improve.ts`) reads the
-  decisions ledger directly and learns from rejections regardless of the
-  auto-merge flag. (The commit message cites 672 rejections the fleet had
+  decisions ledger directly, but writes, periodic reflection, and anti-playbook
+  prompt injection all require explicit `foundry.selfImprove: true`. (The
+  commit message cites 672 rejections the fleet had
   never learned from while auto-merge defaulted off; that figure is the
   author's estimate, not a value stored or checked anywhere in `src/` or
   `test/` — do not repeat it as a verified count.) `curateAntiPlaybooks()`
   (`src/core/fleet/self-improve.ts:284-322`), previously unreferenced, now
-  has a caller in `src/core/fleet/orchestrator.ts:1338`. Separately, a July
+  has a caller in `src/core/run/orchestrator.ts`. Separately, a July
   refactor had given every real judge verdict a reason code but not the
   parse-failure fallback — parse failures were structurally indistinguishable
   from considered reviews and incremented `judgeNonShipCount`, pushing good
   proposals toward auto-archive. Parse failures now get their own
   `'judge-parse-failure'` reason code (`src/core/fleet/judge-decision-metadata.ts:20`)
-  and are excluded from `judgeNonShipCount` entirely
-  (`src/core/fleet/automerge-pass.ts:335-337`).
+  and are excluded from `judgeNonShipCount` entirely. Unknown, incomplete,
+  cancelled, capped, and unavailable-judge outcomes stay pending. Only a fresh
+  complete considered negative, or a fresh verification explicitly classified
+  as `code`, may advance machine-owned rejection/archive state.
 
 - **Test isolation: HOME escape closed fail-closed.** On 2026-08-05 a vitest
   run escaped HOME isolation and wrote the operator's real

@@ -71,10 +71,23 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('sweepRejectionLearning', () => {
+  it('defaults off when selfImprove is absent', () => {
+    const cfg = makeCfg();
+    cfg.foundry = { allowedBackends: ['builtin'] } as NonNullable<AshlrConfig['foundry']>;
+    const result = sweepRejectionLearning(cfg, {
+      listDecisions: () => [
+        { ts: FIXED_ISO, proposalId: 'p-off', action: 'judged', verdict: 'noise', judgeReasonCode: 'judge-noise' } as DecisionEntry,
+      ],
+    });
+    expect(result).toMatchObject({ scanned: 0, written: 0, skipped: 0 });
+    expect(readHubEntries()).toHaveLength(0);
+    expect(readTelemetry()).toHaveLength(0);
+  });
+
   it('writes an anti-playbook lesson for a judged rejection with NO auto-merge involvement', () => {
     const cfg = makeCfg(); // no autoMerge block at all — the point of this fix
     const decisions: DecisionEntry[] = [
-      { ts: FIXED_ISO, proposalId: 'p1', action: 'judged', verdict: 'noise', engine: 'claude', model: 'opus' } as DecisionEntry,
+      { ts: FIXED_ISO, proposalId: 'p1', action: 'judged', verdict: 'noise', judgeReasonCode: 'judge-noise', engine: 'claude', model: 'opus' } as DecisionEntry,
     ];
     const result = sweepRejectionLearning(cfg, { listDecisions: () => decisions });
 
@@ -88,10 +101,27 @@ describe('sweepRejectionLearning', () => {
     expect(readTelemetry()).toHaveLength(1);
   });
 
+  it('increments written and emits idempotency telemetry only after the hub append succeeds', () => {
+    fs.mkdirSync(path.join(tmpHome, '.ashlr'), { recursive: true });
+    fs.writeFileSync(path.join(tmpHome, '.ashlr', 'genome'), 'blocks genome directory creation');
+    const result = sweepRejectionLearning(makeCfg(), {
+      listDecisions: () => [{
+        ts: FIXED_ISO,
+        proposalId: 'p-append-failure',
+        action: 'judged',
+        verdict: 'noise',
+        judgeReasonCode: 'judge-noise',
+      } as DecisionEntry],
+    });
+
+    expect(result).toMatchObject({ scanned: 1, written: 0, skipped: 1 });
+    expect(readTelemetry()).toHaveLength(0);
+  });
+
   it('is idempotent: a proposal already taught is not taught again', () => {
     const cfg = makeCfg();
     const decisions: DecisionEntry[] = [
-      { ts: FIXED_ISO, proposalId: 'p2', action: 'judged', verdict: 'harmful', engine: 'claude', model: 'opus' } as DecisionEntry,
+      { ts: FIXED_ISO, proposalId: 'p2', action: 'judged', verdict: 'harmful', judgeReasonCode: 'judge-harmful', engine: 'claude', model: 'opus' } as DecisionEntry,
     ];
     const first = sweepRejectionLearning(cfg, { listDecisions: () => decisions });
     expect(first.written).toBe(1);
@@ -109,7 +139,7 @@ describe('sweepRejectionLearning', () => {
       { ts: FIXED_ISO, proposalId: 'p3', action: 'judged', verdict: 'ship', engine: 'claude', model: 'opus' } as DecisionEntry,
       {
         ts: new Date(FIXED_MS - 60_000).toISOString(),
-        proposalId: 'p4', action: 'judged', verdict: 'noise', engine: 'claude', model: 'opus',
+        proposalId: 'p4', action: 'judged', verdict: 'noise', judgeReasonCode: 'judge-noise', engine: 'claude', model: 'opus',
       } as DecisionEntry,
       {
         ts: FIXED_ISO,
@@ -127,7 +157,7 @@ describe('sweepRejectionLearning', () => {
   it('flag-off (selfImprove:false) is a no-op, byte-identical to no call', () => {
     const cfg = makeCfg({ selfImprove: false });
     const decisions: DecisionEntry[] = [
-      { ts: FIXED_ISO, proposalId: 'p5', action: 'judged', verdict: 'harmful', engine: 'claude', model: 'opus' } as DecisionEntry,
+      { ts: FIXED_ISO, proposalId: 'p5', action: 'judged', verdict: 'harmful', judgeReasonCode: 'judge-harmful', engine: 'claude', model: 'opus' } as DecisionEntry,
     ];
     const result = sweepRejectionLearning(cfg, { listDecisions: () => decisions });
     expect(result).toMatchObject({ scanned: 0, written: 0, skipped: 0, sourceComplete: true });
@@ -139,14 +169,45 @@ describe('sweepRejectionLearning', () => {
     const result = sweepRejectionLearning(cfg, {
       listDecisions: () => { throw new Error('simulated corrupt ledger'); },
     });
-    // listDecisions throwing is swallowed to an empty list per the injectable
-    // seam's own try/catch — sourceComplete stays true (nothing to scan is a
-    // legitimate empty result here, not a source failure); the real
-    // degraded-source path is exercised via the real readDecisionsDetailed()
-    // call when no listDecisions is injected, covered by the constructor
-    // default in the sweep. This test locks the injectable-seam contract.
-    expect(result.scanned).toBe(0);
-    expect(result.written).toBe(0);
+    expect(result).toMatchObject({ scanned: 0, written: 0, sourceComplete: false });
+  });
+
+  it.each([
+    ['judge-parse-failure', 'judge-parse-failure'],
+    ['judge-network-failure', 'judge-network-failure'],
+    ['legacy/unclassified review', undefined],
+  ] as const)('does not persist negative learning for %s', (_label, judgeReasonCode) => {
+    const result = sweepRejectionLearning(makeCfg(), {
+      listDecisions: () => [{
+        ts: FIXED_ISO,
+        proposalId: 'p-failure',
+        action: 'judged',
+        verdict: 'review',
+        ...(judgeReasonCode ? { judgeReasonCode } : {}),
+      } as DecisionEntry],
+    });
+    expect(result).toMatchObject({ scanned: 0, written: 0 });
+    expect(readHubEntries()).toHaveLength(0);
+    expect(readTelemetry()).toHaveLength(0);
+  });
+
+  it.each([
+    ['harmful', undefined],
+    ['noise', 'judge-parse-failure'],
+    ['review', 'judge-harmful'],
+  ] as const)('does not teach incomplete negative output %s / %s', (verdict, judgeReasonCode) => {
+    const result = sweepRejectionLearning(makeCfg(), {
+      listDecisions: () => [{
+        ts: FIXED_ISO,
+        proposalId: 'p-incomplete-negative',
+        action: 'judged',
+        verdict,
+        ...(judgeReasonCode ? { judgeReasonCode } : {}),
+      } as DecisionEntry],
+    });
+    expect(result).toMatchObject({ scanned: 0, written: 0 });
+    expect(readHubEntries()).toHaveLength(0);
+    expect(readTelemetry()).toHaveLength(0);
   });
 });
 
@@ -155,6 +216,14 @@ describe('sweepRejectionLearning', () => {
 // ---------------------------------------------------------------------------
 
 describe('runReflectionCycle', () => {
+  it('returns diagnostics but persists nothing when selfImprove is not explicitly true', async () => {
+    const cfg = makeCfg({ selfImprove: false });
+    const result = await runReflectionCycle(cfg, {});
+    expect(result.report).toBeDefined();
+    expect(result.reportPath).toBeNull();
+    expect(result.playbooks.didPersist).toBe(false);
+  });
+
   it('computes a report, persists the snapshot, and distills+persists playbooks — all local, no network', async () => {
     const cfg = makeCfg();
     const result = await runReflectionCycle(cfg, {});

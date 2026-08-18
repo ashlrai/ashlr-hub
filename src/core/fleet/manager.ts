@@ -76,6 +76,12 @@ export interface ManagerVerdict {
    */
   judgeFailure?: 'parse' | 'network';
   /**
+   * Internal trust marker set only for a complete structured rubric with an
+   * explicit valid verdict. It is deliberately non-enumerable so manager CLI
+   * JSON remains backward-compatible.
+   */
+  considered?: true;
+  /**
    * Advisory: would this be safe to auto-merge?
    * True only when: verdict==='ship' AND the proposal fits the configured
    * auto-merge risk/scope bounds. NEVER true for noise/harmful. Never triggers
@@ -552,6 +558,21 @@ function parseJudgeResponse(raw: string): {
 
 const VALID_VERDICTS = new Set(['ship', 'review', 'noise', 'harmful']);
 
+function isCompleteStructuredRubric(
+  obj: Record<string, unknown> | null,
+  source: 'json' | 'reasoning' | 'none',
+): obj is JsonRecord {
+  if (!obj || source !== 'json') return false;
+  const verdict = ciString(obj, 'verdict')?.toLowerCase();
+  const rationale = ciString(obj, 'rationale');
+  if (!verdict || !VALID_VERDICTS.has(verdict) || !rationale?.trim()) return false;
+  const scores = ['value', 'correctness', 'scope', 'alignment'].map((field) => ciField(obj, field));
+  if (!scores.every((v) => typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 5)) {
+    return false;
+  }
+  return verdict !== 'ship' || ((scores[0] as number) >= 3 && (scores[1] as number) >= 4);
+}
+
 /** Normalise synonym verdicts a local model might emit. */
 function normaliseVerdict(raw: string): ManagerVerdict['verdict'] {
   const v = raw.toLowerCase().trim();
@@ -655,8 +676,9 @@ export async function judgeProposal(
   let obj = parsed.obj;
   let parseSource = parsed.source;
   fullReasoning = parsed.fullReasoning;
-  // ONE-SHOT RETRY: if parse failed, re-prompt the model asking for JSON only.
-  if (!obj) {
+  // ONE-SHOT RETRY: malformed, reasoning-only, incomplete, or semantically
+  // contradictory rubrics all get one strict JSON recovery attempt.
+  if (!isCompleteStructuredRubric(obj, parseSource)) {
     throwIfJudgeCancelled(options.signal);
     try {
       const retryPrompt = buildJudgePrompt(proposal, specCtx) + JUDGE_RETRY_SUFFIX;
@@ -683,7 +705,7 @@ export async function judgeProposal(
   };
   const rVerdictM = rprose.match(/VERDICT\s*[:=]\s*(ship|review|noise|harmful)\b/i);
 
-  if (!obj) return fallback('parse');
+  if (!isCompleteStructuredRubric(obj, parseSource)) return fallback('parse');
 
   const jsonVerdict = ciString(obj, 'verdict');
   const reasoningVerdict = rVerdictM?.[1]?.toLowerCase();
@@ -703,6 +725,9 @@ export async function judgeProposal(
       ? rationaleField.slice(0, 200)
       : 'no rationale provided';
 
+  // Only a complete JSON rubric is a considered judgment. Reasoning prose,
+  // score fragments, and partially structured JSON are useful diagnostics but
+  // must never become signing, rejection, archive, or learning authority.
   // wouldMerge is advisory only. The merge gate independently re-checks
   // verification, provenance, risk, scope, enrollment, policy, and kill switch.
   let wouldMerge = false;
@@ -748,16 +773,15 @@ export async function judgeProposal(
     rationale,
     wouldMerge,
   };
-  const completeStructuredRubric = parseSource === 'json' &&
-    !!jsonVerdict && VALID_VERDICTS.has(jsonVerdict.toLowerCase()) &&
-    ['value', 'correctness', 'scope', 'alignment'].every((field) => {
-      const v = ciField(obj!, field);
-      return typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 5;
-    });
-  const semanticEvents = completeStructuredRubric
-    ? safeManagerSemanticEvents(result, client.model)
-    : undefined;
-  return semanticEvents ? { ...result, semanticEvents } : result;
+  const semanticEvents = safeManagerSemanticEvents(result, client.model);
+  if (semanticEvents) result.semanticEvents = semanticEvents;
+  Object.defineProperty(result, 'considered', {
+    value: true,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -1508,7 +1532,7 @@ export async function runManager(
         activeJudgeEngine.startsWith('claude') || activeJudgeEngine.includes('claude') ||
         activeJudgeEngine.startsWith('gpt-5') || activeJudgeEngine.startsWith('codex-') || activeJudgeEngine === 'codex';
       const reviewerIndependent = evaluateReviewerIndependence(proposal, activeJudgeEngine).independent;
-      if (verdict.verdict === 'ship' && verdict.wouldMerge === true && isFrontierJudgeModel &&
+      if (verdict.considered === true && verdict.verdict === 'ship' && verdict.wouldMerge === true && isFrontierJudgeModel &&
         reviewerIndependent) {
         try {
           const diffHash = hashDiff(proposal.diff ?? '');
@@ -1547,13 +1571,13 @@ export async function runManager(
         ...(judgeStats?.costUsd !== undefined ? { costUsd: judgeStats.costUsd } : {}),
         ...(judgeStats?.tokensIn !== undefined ? { tokensIn: judgeStats.tokensIn } : {}),
         ...(judgeStats?.tokensOut !== undefined ? { tokensOut: judgeStats.tokensOut } : {}),
-        verdict: verdict.verdict,
+        verdict: verdict.considered === true ? verdict.verdict : 'review',
         ...(!judgeClient ? { reason: 'manager-judge-unavailable' } : {}),
         // A judgeFailure fallback is NOT a considered verdict — tag it with a
         // distinct, finite detail sentinel (never free text) so the ledger's
         // judgeReasonCode is 'judge-parse-failure' / 'judge-network-failure'
         // instead of silently indistinguishable from a real 'judge-review'.
-        detail: verdict.judgeFailure === 'parse'
+        detail: verdict.judgeFailure === 'parse' || verdict.considered !== true
           ? 'judge-parse-failure'
           : verdict.judgeFailure === 'network'
             ? 'judge-network-failure'
@@ -1566,7 +1590,8 @@ export async function runManager(
       });
 
       // applyRejects: only reject noise/harmful (never ship/review).
-      if (applyRejects && (verdict.verdict === 'noise' || verdict.verdict === 'harmful')) {
+      if (applyRejects && verdict.considered === true &&
+        (verdict.verdict === 'noise' || verdict.verdict === 'harmful')) {
         try {
           const { setStatus } = await import('../inbox/store.js');
           setStatus(

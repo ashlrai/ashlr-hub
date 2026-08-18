@@ -980,6 +980,12 @@ describe('M47 autoMergeProposal — local happy path', () => {
 });
 
 describe('M47 remote merge safety', () => {
+  it('uses exact index application and never three-way patch synthesis', () => {
+    const source = fs.readFileSync(path.resolve('src/core/inbox/merge.ts'), 'utf8');
+    expect(source).toContain("gitRun(tmpDir, ['apply', '--index', patchFile])");
+    expect(source).not.toContain("['apply', '--3way'");
+  });
+
   it('does not delegate deferred merge or privileged bypass authority to GitHub', () => {
     const source = fs.readFileSync(path.resolve('src/core/inbox/merge.ts'), 'utf8');
     expect(source).not.toContain('--admin');

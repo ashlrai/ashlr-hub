@@ -3959,8 +3959,9 @@ export interface ProposalVerifyResult {
   detail?: string;
   /**
    * Present only when passed:false. Distinguishes WHY verification failed:
-   * 'code' (or absent, for pre-existing records) means the verifier ran and
-   * found a real problem with the diff. 'tool' means the verifier itself
+   * Only explicit 'code' means the verifier ran and found a real problem with
+   * the diff. An absent category is legacy/unknown and cannot authorize
+   * permanent rejection. 'tool' means the verifier itself
    * could not be executed (missing binary, exit 127, spawn ENOENT — a
    * verifier-unavailable outcome, not a judgment on the diff). 'timeout' and
    * 'infra' are likewise infrastructure signals, not code signals. Consumers

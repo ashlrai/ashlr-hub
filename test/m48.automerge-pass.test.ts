@@ -303,6 +303,7 @@ beforeEach(() => {
     value: 5, correctness: 5, scope: 1, alignment: 5,
     rationale: 'mock ship — m48 compat',
     wouldMerge: true,
+    considered: true,
   });
   // M176: resolveFrontierJudgeClient default — returns a working frontier client.
   mockResolveFrontierJudgeClient.mockReturnValue({
@@ -505,6 +506,37 @@ describe('M48 runAutoMergePass — realized-merge fanout recovery', () => {
     expect(pauseResult).toMatchObject({ ok: false, quiesced: false });
     expect(out).toMatchObject({ attempted: 0, merged: 0 });
     expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['reasoning-only ship'],
+    ['partial structured ship'],
+  ])('treats %s as parse failure and never signs or progresses', async () => {
+    pendingProposals = [makeProposal('incomplete-ship', { engineTier: 'frontier' })];
+    mockJudgeProposal.mockResolvedValueOnce({
+      proposalId: 'incomplete-ship',
+      verdict: 'ship',
+      value: 5,
+      correctness: 5,
+      scope: 1,
+      alignment: 5,
+      wouldMerge: true,
+      rationale: 'incomplete mock deliberately lacks considered evidence',
+    });
+
+    await runAutoMergePass(managerGateCfg());
+
+    const judged = mockRecordDecision.mock.calls.find((call) => call[0]?.action === 'judged');
+    expect(judged?.[0]).toMatchObject({
+      proposalId: 'incomplete-ship',
+      verdict: 'review',
+      detail: 'judge-parse-failure',
+    });
+    expect(judged?.[0]?.judgeAttestation).toBeUndefined();
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+    expect(mockSetStatus).not.toHaveBeenCalled();
+    expect(mockUpdateProposalField).not.toHaveBeenCalled();
+    expect(mockLearnFromRejection).not.toHaveBeenCalled();
   });
 });
 
@@ -971,7 +1003,7 @@ describe('M48 runAutoMergePass — mutation progression', () => {
     expect(mockAutoMergeProposal).toHaveBeenCalledWith(proposal.id, expect.any(Object));
   });
 
-  it('keeps an exactly bound verification failure permanent', async () => {
+  it('keeps an exactly bound cached verification failure pending', async () => {
     const diff = 'diff --git a/x.ts b/x.ts\n';
     const proposal = makeProposal('current-verification-failure', {
       engineTier: 'frontier',
@@ -992,22 +1024,12 @@ describe('M48 runAutoMergePass — mutation progression', () => {
 
     const out = await runAutoMergePass(cfg);
 
-    expect(out).toMatchObject({ verifyBeforeJudgeRan: 0, autoArchived: 1, attempted: 0 });
+    expect(out).toMatchObject({ verifyBeforeJudgeRan: 0, autoArchived: 0, attempted: 0 });
     expect(mockVerifyAndPersistProposal).not.toHaveBeenCalled();
-    expect(mockUpdateProposalField).toHaveBeenCalledWith(
-      proposal.id,
-      { stuckPassCount: 1 },
-      expect.anything(),
+    expect(mockUpdateProposalField).not.toHaveBeenCalledWith(
+      proposal.id, expect.objectContaining({ stuckPassCount: expect.any(Number) }), expect.anything(),
     );
-    expect(mockSetStatus).toHaveBeenCalledWith(
-      proposal.id,
-      'rejected',
-      undefined,
-      expect.stringContaining('permanent readiness blocker'),
-      expect.anything(),
-      {},
-      'pending',
-    );
+    expect(mockSetStatus).not.toHaveBeenCalled();
   });
 
   it('always runs fresh fail-closed verification in evidence mode', async () => {
@@ -1130,6 +1152,7 @@ describe('M48 runAutoMergePass — frontier judge outward authority', () => {
     mockJudgeProposal.mockResolvedValueOnce({
       proposalId: 'non-ship-learning-held',
       verdict: 'review',
+      considered: true,
       wouldMerge: false,
       rationale: 'needs revision',
     });
@@ -1151,6 +1174,7 @@ describe('M48 runAutoMergePass — frontier judge outward authority', () => {
     mockJudgeProposal.mockResolvedValueOnce({
       proposalId: 'non-ship-field-held',
       verdict: 'review',
+      considered: true,
       wouldMerge: false,
       rationale: 'needs revision',
     });
@@ -1176,6 +1200,7 @@ describe('M48 runAutoMergePass — frontier judge outward authority', () => {
     mockJudgeProposal.mockResolvedValueOnce({
       proposalId: 'non-ship-status-held',
       verdict: 'review',
+      considered: true,
       wouldMerge: false,
       rationale: 'archive fixture',
     });
@@ -1200,6 +1225,37 @@ describe('M48 runAutoMergePass — frontier judge outward authority', () => {
       'pending',
     );
     expect(out.autoArchived).toBe(1);
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['parse fallback', { verdict: 'review', wouldMerge: false, judgeFailure: 'parse' }],
+    ['network fallback', { verdict: 'review', wouldMerge: false, judgeFailure: 'network' }],
+    ['unconsidered review', { verdict: 'review', wouldMerge: false }],
+  ] as const)('keeps %s pending without negative learning or archive state', async (_label, verdict) => {
+    pendingProposals = [makeProposal('unconsidered-negative', {
+      engineTier: 'frontier',
+      judgeNonShipCount: 2,
+      stuckPassCount: 2,
+    })];
+    mockJudgeProposal.mockResolvedValueOnce({
+      proposalId: 'unconsidered-negative',
+      value: 3,
+      correctness: 3,
+      scope: 3,
+      alignment: 3,
+      rationale: 'not a complete considered judgment',
+      ...verdict,
+    });
+    const cfg = managerGateCfg();
+    (cfg.foundry as Record<string, unknown>)['autoArchiveAfterRejects'] = 1;
+
+    const out = await runAutoMergePass(cfg);
+
+    expect(mockLearnFromRejection).not.toHaveBeenCalled();
+    expect(mockUpdateProposalField).not.toHaveBeenCalled();
+    expect(mockSetStatus).not.toHaveBeenCalled();
+    expect(out.autoArchived).toBe(0);
     expect(mockAutoMergeProposal).not.toHaveBeenCalled();
   });
 });

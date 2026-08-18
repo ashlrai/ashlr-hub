@@ -161,7 +161,7 @@ beforeEach(() => {
     model: 'claude-opus-4-8',
     complete: async () => '{"verdict":"ship"}',
   });
-  mockJudgeProposal.mockResolvedValue({ verdict: 'ship', wouldMerge: true, rationale: 'ship it' });
+  mockJudgeProposal.mockResolvedValue({ verdict: 'ship', wouldMerge: true, considered: true, rationale: 'ship it' });
   mockAutoMergeProposal.mockResolvedValue({ ok: true, merged: true } satisfies AutoMergeResult);
   mockVerifyProposal.mockResolvedValue({
     ok: true,
@@ -177,6 +177,7 @@ beforeEach(() => {
     const verifyResult = {
       passed: verify.ok,
       ...(verify.ok ? {} : { failed: [verify.detail] }),
+      ...(verify.failureCategory ? { failureCategory: verify.failureCategory } : {}),
       detail: verify.detail,
       ran: verify.ran,
       baseBranch: 'main',
@@ -347,7 +348,7 @@ describe('M307 verify-before-judge', () => {
     ]);
   });
 
-  it('increments stuckPassCount for known failed verification without judge or merge spend', async () => {
+  it('keeps a cached failed verification pending without judge or merge spend', async () => {
     mockListProposals.mockReturnValue([
       proposal({
         verifyResult: {
@@ -366,13 +367,13 @@ describe('M307 verify-before-judge', () => {
     expect(mockVerifyProposal).not.toHaveBeenCalled();
     expect(mockJudgeProposal).not.toHaveBeenCalled();
     expect(mockAutoMergeProposal).not.toHaveBeenCalled();
-    expect(mockUpdateProposalField).toHaveBeenCalledWith('m307-prop', { stuckPassCount: 1 }, expect.anything());
+    expect(mockUpdateProposalField).not.toHaveBeenCalled();
     expect(mockSetStatus).not.toHaveBeenCalled();
     expect(r.autoArchived).toBe(0);
     expect(r.results[0]?.reason).toMatch(/readiness preflight: known verification failure/);
   });
 
-  it('rejects known failed verification when the stuck threshold is reached', async () => {
+  it('does not reject a cached failed verification at the historical stuck threshold', async () => {
     mockListProposals.mockReturnValue([
       proposal({
         stuckPassCount: 2,
@@ -394,23 +395,12 @@ describe('M307 verify-before-judge', () => {
     expect(mockVerifyProposal).not.toHaveBeenCalled();
     expect(mockJudgeProposal).not.toHaveBeenCalled();
     expect(mockAutoMergeProposal).not.toHaveBeenCalled();
-    expect(mockSetStatus).toHaveBeenCalledWith(
-      'm307-prop',
-      'rejected',
-      undefined,
-      expect.stringMatching(/permanent readiness blocker persisted for 3 pass/),
-      expect.anything(),
-      {},
-      'pending',
-    );
-    expect(mockUpdateProposalField).toHaveBeenCalledWith('m307-prop', { stuckPassCount: 3 }, expect.anything());
-    expect(mockUpdateProposalField.mock.invocationCallOrder[0]!).toBeLessThan(
-      mockSetStatus.mock.invocationCallOrder[0]!,
-    );
-    expect(r.autoArchived).toBe(1);
+    expect(mockSetStatus).not.toHaveBeenCalled();
+    expect(mockUpdateProposalField).not.toHaveBeenCalled();
+    expect(r.autoArchived).toBe(0);
   });
 
-  it('increments stuckPassCount for high-risk permanent readiness blockers without judge or merge spend', async () => {
+  it('does not accrue archive state for static high-risk readiness blockers', async () => {
     mockListProposals.mockReturnValue([
       proposal({ diff: highRiskDiff }),
     ]);
@@ -420,7 +410,7 @@ describe('M307 verify-before-judge', () => {
     expect(mockVerifyProposal).not.toHaveBeenCalled();
     expect(mockJudgeProposal).not.toHaveBeenCalled();
     expect(mockAutoMergeProposal).not.toHaveBeenCalled();
-    expect(mockUpdateProposalField).toHaveBeenCalledWith('m307-prop', { stuckPassCount: 1 }, expect.anything());
+    expect(mockUpdateProposalField).not.toHaveBeenCalled();
     expect(mockSetStatus).not.toHaveBeenCalled();
     expect(r.autoArchived).toBe(0);
     expect(r.results[0]?.reason).toMatch(/risk class 'high' exceeds maxRisk 'low'/);
@@ -457,7 +447,7 @@ describe('M307 verify-before-judge', () => {
     });
   });
 
-  it('rejects high-risk permanent readiness blockers when the stuck threshold is reached', async () => {
+  it('does not reject static high-risk readiness blockers at the historical threshold', async () => {
     mockListProposals.mockReturnValue([
       proposal({
         diff: highRiskDiff,
@@ -472,16 +462,53 @@ describe('M307 verify-before-judge', () => {
     expect(mockVerifyProposal).not.toHaveBeenCalled();
     expect(mockJudgeProposal).not.toHaveBeenCalled();
     expect(mockAutoMergeProposal).not.toHaveBeenCalled();
-    expect(mockSetStatus).toHaveBeenCalledWith(
-      'm307-prop',
-      'rejected',
-      undefined,
-      expect.stringMatching(/permanent readiness blocker persisted for 3 pass.*risk class 'high'/),
-      expect.anything(),
-      {},
-      'pending',
+    expect(mockSetStatus).not.toHaveBeenCalled();
+    expect(mockUpdateProposalField).not.toHaveBeenCalled();
+    expect(r.autoArchived).toBe(0);
+  });
+
+  it('accrues archive state only for a fresh explicit code failure', async () => {
+    mockListProposals.mockReturnValue([proposal({ stuckPassCount: 2 })]);
+    mockVerifyProposal.mockResolvedValue({
+      ok: false,
+      ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+      detail: 'fresh test assertion failed',
+      failureCategory: 'code',
+    } satisfies VerifyProposalResult);
+    const config = cfg();
+    (config.foundry as Record<string, unknown>)['autoArchiveAfterRejects'] = 3;
+
+    const r = await runAutoMergePass(config);
+
+    expect(mockUpdateProposalField).toHaveBeenCalledWith(
+      'm307-prop', { stuckPassCount: 3 }, expect.anything(),
     );
-    expect(mockUpdateProposalField).toHaveBeenCalledWith('m307-prop', { stuckPassCount: 3 }, expect.anything());
+    expect(mockSetStatus).toHaveBeenCalledWith(
+      'm307-prop', 'rejected', undefined,
+      expect.stringContaining('fresh authenticated code verification failure'),
+      expect.anything(), {}, 'pending',
+    );
     expect(r.autoArchived).toBe(1);
   });
+
+  it.each(['tool', 'timeout', 'infra', 'cancelled', 'invalid-command', undefined] as const)(
+    'keeps a fresh %s verification failure pending',
+    async (failureCategory) => {
+      mockVerifyProposal.mockResolvedValue({
+        ok: false,
+        ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+        detail: 'verification did not establish a code failure',
+        ...(failureCategory ? { failureCategory } : {}),
+      } satisfies VerifyProposalResult);
+
+      const r = await runAutoMergePass(cfg());
+
+      expect(mockSetStatus).not.toHaveBeenCalled();
+      expect(mockUpdateProposalField).toHaveBeenCalledTimes(1);
+      expect(mockUpdateProposalField).not.toHaveBeenCalledWith(
+        'm307-prop', expect.objectContaining({ stuckPassCount: expect.any(Number) }), expect.anything(),
+      );
+      expect(r.autoArchived).toBe(0);
+    },
+  );
 });

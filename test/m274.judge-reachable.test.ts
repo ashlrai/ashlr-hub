@@ -211,6 +211,7 @@ function shipVerdict(proposalId: string) {
     alignment: 5,
     rationale: 'good change',
     wouldMerge: true,
+    considered: true as const,
   };
 }
 

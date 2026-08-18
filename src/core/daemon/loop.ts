@@ -4053,7 +4053,7 @@ export async function tick(
     // live tick — rejection learning sat behind `autoMerge.enabled`, post-merge
     // credit was a stubbed `false`, and reflection was a manual CLI command — so
     // the fleet observed every run and learned from none of them.
-    if (!stopRequested() && (liveCfg.foundry as Record<string, unknown>)?.['selfImprove'] !== false) {
+    if (!stopRequested() && (liveCfg.foundry as Record<string, unknown>)?.['selfImprove'] === true) {
       try {
         const { sweepRejectionLearning } = await import('../fleet/self-improve.js');
         sweepRejectionLearning(liveCfg);
@@ -4076,7 +4076,11 @@ export async function tick(
 
     // Low cadence, matching the counterfactual-replay pattern above: reflection
     // persists a snapshot and distills playbooks, and does not need every tick.
-    if (!stopRequested() && state.ticks.length % 20 === 0) {
+    if (
+      !stopRequested() &&
+      (liveCfg.foundry as Record<string, unknown>)?.['selfImprove'] === true &&
+      state.ticks.length % 20 === 0
+    ) {
       try {
         const { runReflectionCycle } = await import('../learn/reflect.js');
         await runReflectionCycle(liveCfg);
