@@ -102,8 +102,10 @@ import {
 } from './activity.js';
 import {
   consumeDaemonActivationPermit,
+  daemonActivationScopeGranted,
   isDaemonActivationCapability,
   type DaemonActivationCapability,
+  type DaemonActivationGrantScope,
 } from './activation-permit.js';
 import { nullSink } from '../run/streaming.js';
 import { createOuterAttemptIdentity } from '../fleet/attempt-identity.js';
@@ -223,9 +225,11 @@ import type { QueueClaimCooldownPolicy } from '../fleet/shared-store.js';
 // M220: verdict-feedback sweep — feed judge rejections back to the ledger so
 // re-clogging items (e.g. "CI is failing") are suppressed for the cooldown window.
 import {
+  DEFAULT_MAX_REJECTION_ATTEMPTS,
   GENERATED_REPAIR_DISPATCH_BLOCKED_COOLDOWN_MS,
   latestWorkedEventForKeys,
   recordOutcome as recordWorkedOutcome,
+  rejectionAttemptCount,
   sweepJudgedProposals,
   type WorkedEvent,
   type WorkedOutcome,
@@ -972,12 +976,32 @@ function generatedRepairShouldSkip(
 ): boolean {
   const latest = latestWorkedEventForKeys(workedEvents, policy.itemIds);
   if (!latest) return false;
+  // Attempt cap: cooldown alone only delays a retry — after enough windows
+  // elapse the same rejected item comes back forever. Once it has racked up
+  // DEFAULT_MAX_REJECTION_ATTEMPTS real judge rejections, park it instead of
+  // continuing to re-dispatch (see workItemAttemptCapExceeded/summarizeSelectionBlockers
+  // for the operator-visible counter).
+  if (workItemAttemptCapExceeded(workedEvents, policy)) return true;
   const override = policy.outcomeCooldownMs?.[latest.outcome];
   if (override !== undefined) {
     const eventMs = Date.parse(latest.ts);
     return !Number.isFinite(eventMs) || Date.now() - eventMs < override;
   }
   return workedEventIsCooling(latest, policy.cooldownMs);
+}
+
+/**
+ * True once a work item has racked up DEFAULT_MAX_REJECTION_ATTEMPTS real
+ * judge rejections (judged-review/judged-noise/judged-decline). Distinct
+ * from the time-based cooldown: cooldown expires and the item comes back;
+ * an exceeded attempt cap parks the item for good (until something resets
+ * its worked-event history, e.g. the item is meaningfully re-authored).
+ */
+function workItemAttemptCapExceeded(
+  workedEvents: readonly WorkedEvent[],
+  policy: QueueClaimCooldownPolicy,
+): boolean {
+  return rejectionAttemptCount(workedEvents, policy.itemIds) >= DEFAULT_MAX_REJECTION_ATTEMPTS;
 }
 const RESOURCE_SNAPSHOT_MAX_AGE_MS = 30_000;
 type DispatchPreflightState =
@@ -1038,9 +1062,42 @@ const MAX_DRAIN_SELECTED_IDS = 12;
 const MAX_DIAGNOSTIC_RESLICE_DRAIN_LIMIT = 50;
 type TickItemOutcome = { item: WorkItem; spentUsd: number; dispatched: boolean; dispatch?: DaemonDispatchTrace };
 type BestOfNRunResult = Awaited<ReturnType<typeof runBestOfN>>;
+/**
+ * M470: the exact authority the pre-M470 boolean capability check conveyed.
+ *
+ * Declared here rather than imported from activation-permit.js on purpose:
+ * several suites mock that module wholesale, and importing a *value* from it
+ * would throw at module load under those mocks. The explicit type annotation
+ * still makes tsc fail if `DaemonActivationGrantScope` ever gains a key, so
+ * this cannot silently drift into granting more than it should.
+ */
+const LEGACY_PROPOSAL_ONLY_SCOPE: DaemonActivationGrantScope = Object.freeze({
+  once: true,
+  resident: false,
+  residentStanding: false,
+  conductor: false,
+  automerge: false,
+  repair: false,
+  deploy: false,
+  install: false,
+  proposalOnly: true,
+});
+
 interface TickOptions {
   dryRun: boolean;
   activationCapability?: DaemonActivationCapability;
+  /**
+   * M470: an already-verified activation scope, for ticks that must NOT consume
+   * a capability.
+   *
+   * `isDaemonActivationCapability()` is single-use by design — it deletes the
+   * WeakMap entry on the first call. A resident loop calling it per tick would
+   * therefore authorize only its first tick and refuse every one after, so the
+   * resident caller verifies once at `runDaemon` entry and passes the resulting
+   * scope down instead. The one-shot path keeps passing `activationCapability`
+   * and keeps consuming it exactly once.
+   */
+  activationScope?: DaemonActivationGrantScope;
   drain?: DaemonDrainMode;
   drainLimit?: number;
   signal?: AbortSignal;
@@ -1940,6 +1997,8 @@ function recordQueueSelectionAgentAction(fields: {
   cooldownBlocked: number;
   routeBlocked: number;
   fastRepairCooldown: number;
+  /** Of cooldownBlocked, how many are parked for good (attempt cap exceeded) vs. still on a plain time-based cooldown. */
+  attemptCapBlocked: number;
   rawSelectCount: number;
   selectCount: number;
   selectedItems: WorkItem[];
@@ -1962,7 +2021,8 @@ function recordQueueSelectionAgentAction(fields: {
     summary:
       `${lane}: claimed ${fields.claimedItems.length}/${fields.selectedItems.length} ` +
       `from ${fields.eligibleItems}/${fields.backlogItems} eligible; ` +
-      `cooldown ${fields.cooldownBlocked}, pending ${fields.pendingBlocked}, route ${fields.routeBlocked}`,
+      `cooldown ${fields.cooldownBlocked}, pending ${fields.pendingBlocked}, route ${fields.routeBlocked}` +
+      (fields.attemptCapBlocked > 0 ? `, attempt-cap-parked ${fields.attemptCapBlocked}` : ''),
     reason: fields.dryRun ? 'dry-run' : fields.claimedItems.length > 0 ? 'selected' : 'no-claim',
     ...(first?.repo ? { repo: first.repo } : {}),
     ...(first?.id ? { itemId: boundedText(first.id, 120) } : {}),
@@ -1982,6 +2042,7 @@ function recordQueueSelectionAgentAction(fields: {
       cooldownBlocked: fields.cooldownBlocked,
       routeBlocked: fields.routeBlocked,
       fastRepairCooldown: fields.fastRepairCooldown,
+      attemptCapBlocked: fields.attemptCapBlocked,
       rawSelectCount: fields.rawSelectCount,
       selectCount: fields.selectCount,
       selected: fields.selectedItems.length,
@@ -3437,8 +3498,23 @@ export async function tick(
   opts: TickOptions,
 ): Promise<DaemonTick> {
   const now = new Date().toISOString();
-  const activationAccepted =
-    !opts.dryRun && isDaemonActivationCapability(opts.activationCapability);
+  // A pre-verified scope (resident path) is accepted WITHOUT consuming, since
+  // runDaemon already consumed the capability once on entry. Otherwise fall back
+  // to consuming the capability here, which is the one-shot path.
+  const preVerifiedScope = !opts.dryRun ? opts.activationScope : undefined;
+  const consumedCapability =
+    !opts.dryRun && preVerifiedScope === undefined
+      ? isDaemonActivationCapability(opts.activationCapability)
+      : false;
+  // When the capability check passes but no scope object is readable (a caller
+  // or test that supplies only the claim), fall back to the legacy proposal-only
+  // scope — the exact authority the pre-M470 boolean check conveyed. Never widen.
+  const activationScope: DaemonActivationGrantScope | undefined =
+    preVerifiedScope
+      ?? (consumedCapability
+        ? (opts.activationCapability?.scope ?? LEGACY_PROPOSAL_ONLY_SCOPE)
+        : undefined);
+  const activationAccepted = !opts.dryRun && activationScope !== undefined;
   if (!opts.dryRun && !activationAccepted) {
     persistAudit({
       action: 'daemon:activation-refused',
@@ -3455,8 +3531,53 @@ export async function tick(
       reason: 'activation-refused',
     };
   }
+  // A standing `residentStanding` grant is NOT single-use, unlike the
+  // one-shot WeakMap capability that forces `preVerifiedScope` to be trusted
+  // for the run's whole lifetime (see the TickOptions.activationScope doc).
+  // That means it CAN be safely re-checked on every tick with no consumption
+  // side effect — so a resident daemon that started off a standing grant
+  // gets a real "stop the next tick" guarantee from `ashlr activation
+  // revoke --grant <id>`, not just "blocks the next `daemon start`." This is
+  // strictly stronger than what the one-shot capability path can offer; it
+  // cannot interrupt a tick already in flight.
+  if (!opts.dryRun && preVerifiedScope?.residentStanding === true) {
+    const stillGranted = daemonActivationScopeGranted('residentStanding');
+    if (!stillGranted.granted) {
+      persistAudit({
+        action: 'daemon:activation-refused',
+        repo: null,
+        sandboxId: null,
+        summary: `live tick refused: resident standing grant no longer authorized: ${stillGranted.reason}`,
+        result: 'refused',
+      });
+      return {
+        ts: now,
+        itemsConsidered: 0,
+        proposalsCreated: 0,
+        spentUsd: 0,
+        reason: 'activation-refused',
+      };
+    }
+  }
+  // M470: proposal-only is derived from the GRANTED scope rather than from "an
+  // activation exists at all" — the previous form forced every authorized tick
+  // to proposal-only, so an automerge/repair/deploy grant could never take
+  // effect.
+  //
+  // The `grantedScope` distinction matters: the pre-M470 condition was
+  // `opts.activationCapability !== undefined`, i.e. it keyed off a real permit
+  // object being supplied, NOT off the boolean claim. Callers that pass only a
+  // claim (and the legacy fallback above) must keep the old
+  // `proposalOnlyActivation === false` behavior, otherwise
+  // runAncillaryMaintenance — which early-returns on proposal-only — silently
+  // stops running self-heal, invent, and drain.
+  const grantedScope = preVerifiedScope ?? opts.activationCapability?.scope;
   const proposalOnlyActivation =
-    activationAccepted && opts.activationCapability !== undefined;
+    activationAccepted &&
+    grantedScope !== undefined &&
+    !grantedScope.automerge &&
+    !grantedScope.repair &&
+    !grantedScope.deploy;
   let ownershipLost = false;
   const stillOwnsTick = (): boolean => {
     if (!opts.ownerLock) return true;
@@ -4020,6 +4141,42 @@ export async function tick(
         await scanRealWorldOutcomes(liveCfg, { enrolledRepos: enrolled });
       } catch (err) {
         console.warn('[ashlr] daemon:tick outcomeWatcher failed:', (err as Error)?.message ?? err);
+      }
+    }
+
+    // M505: Learning-loop sweeps. Each of these was previously unreachable in a
+    // live tick — rejection learning sat behind `autoMerge.enabled`, post-merge
+    // credit was a stubbed `false`, and reflection was a manual CLI command — so
+    // the fleet observed every run and learned from none of them.
+    if (!stopRequested() && (liveCfg.foundry as Record<string, unknown>)?.['selfImprove'] !== false) {
+      try {
+        const { sweepRejectionLearning } = await import('../fleet/self-improve.js');
+        sweepRejectionLearning(liveCfg);
+      } catch (err) {
+        console.warn('[ashlr] daemon:tick sweepRejectionLearning failed:', (err as Error)?.message ?? err);
+      }
+    }
+
+    // Credit is released only by the M505 protocol's own fail-closed checks
+    // (authenticated merge witness, 14-day quiet window, no adverse observation
+    // on the exact event, healthy ledger read). This call only drives the sweep.
+    if (!stopRequested()) {
+      try {
+        const { sweepPostMergeCreditReleases } = await import('../fleet/post-merge-credit.js');
+        sweepPostMergeCreditReleases();
+      } catch (err) {
+        console.warn('[ashlr] daemon:tick sweepPostMergeCreditReleases failed:', (err as Error)?.message ?? err);
+      }
+    }
+
+    // Low cadence, matching the counterfactual-replay pattern above: reflection
+    // persists a snapshot and distills playbooks, and does not need every tick.
+    if (!stopRequested() && state.ticks.length % 20 === 0) {
+      try {
+        const { runReflectionCycle } = await import('../learn/reflect.js');
+        await runReflectionCycle(liveCfg);
+      } catch (err) {
+        console.warn('[ashlr] daemon:tick runReflectionCycle failed:', (err as Error)?.message ?? err);
       }
     }
 
@@ -4869,11 +5026,18 @@ export async function tick(
     let cooldownBlocked = 0;
     let routeBlocked = 0;
     let fastRepairCooldown = 0;
+    let attemptCapBlocked = 0;
     for (const item of items) {
       const pending = pendingItemKeys.has(workItemCoverageKey(item));
       const itemPolicy = claimCooldownPolicies.get(item.id)!;
       const itemCooldownMs = cooldownMsForSelectionItem(selectionWorkedEvents, itemPolicy);
       const cooling = generatedRepairShouldSkip(selectionWorkedEvents, itemPolicy);
+      // Attempt-cap-parked items are already folded into `cooling` (they
+      // must never be dispatched), but they get their own counter so an
+      // operator can tell "will retry after cooldown" apart from "parked
+      // for good — rejected too many times" instead of it being silently
+      // indistinguishable in the tick summary.
+      if (cooling && workItemAttemptCapExceeded(selectionWorkedEvents, itemPolicy)) attemptCapBlocked++;
       if (pending) pendingBlocked++;
       if (cooling) cooldownBlocked++;
       const routeUnavailable = !pending && !cooling && !hasFeasibleClaimRoute(item);
@@ -4887,7 +5051,7 @@ export async function tick(
         fastRepairCooldown++;
       }
     }
-    return { eligibleItems, pendingBlocked, cooldownBlocked, routeBlocked, fastRepairCooldown };
+    return { eligibleItems, pendingBlocked, cooldownBlocked, routeBlocked, fastRepairCooldown, attemptCapBlocked };
   };
 
   const selectRoundRobinCandidates = (items: WorkItem[], count: number): WorkItem[] => {
@@ -5104,6 +5268,7 @@ export async function tick(
     cooldownBlocked: selectionBlockers.cooldownBlocked,
     routeBlocked: selectionBlockers.routeBlocked,
     fastRepairCooldown: selectionBlockers.fastRepairCooldown,
+    attemptCapBlocked: selectionBlockers.attemptCapBlocked,
     rawSelectCount: selectionTelemetryRawSelectCount,
     selectCount: selectionTelemetrySelectCount,
     selectedItems: selected,
@@ -7969,6 +8134,22 @@ export async function runDaemon(
   const activationCfg = activation.configSnapshot ?? cfg;
   const dcfg = resolveCfg(activationCfg);
 
+  // M470: verify the capability EXACTLY ONCE, here, and carry the resulting
+  // scope into every tick. isDaemonActivationCapability() consumes on first
+  // call, so verifying per-tick would authorize only the first resident tick
+  // and refuse all subsequent ones. Entering the loop is the authorized act;
+  // each tick then reads the scope as plain data.
+  //
+  // `activation.scope` is the standing-`residentStanding`-grant path
+  // (consumeDaemonActivationPermit tried it first): no WeakMap capability
+  // exists for it at all, since standing grants aren't single-use — tick()
+  // re-checks it live every cycle instead (see its `residentStanding` guard).
+  const runActivationScope: DaemonActivationGrantScope | undefined =
+    activation.scope
+    ?? (!opts.dryRun && activation.capability && isDaemonActivationCapability(activation.capability)
+      ? activation.capability.scope
+      : undefined);
+
   // -------------------------------------------------------------------------
   // Mark daemon as running.
   // -------------------------------------------------------------------------
@@ -8071,11 +8252,19 @@ export async function runDaemon(
     summary:
       `daemon started: once=${opts.once}, dryRun=${opts.dryRun}, budget=$${dcfg.dailyBudgetUsd}, ` +
       `intervalMs=${dcfg.intervalMs}${opts.drain ? `, drain=${opts.drain}` : ''}` +
-      `${opts.drainLimit ? `, drainLimit=${opts.drainLimit}` : ''}`,
+      `${opts.drainLimit ? `, drainLimit=${opts.drainLimit}` : ''}` +
+      `${activation.grantId ? `, activatedByStandingGrant=${activation.grantId}` : ''}`,
     result: 'ok',
   });
 
-  if (!opts.dryRun && !activation.capability) {
+  // `!activation.scope` preserves this exactly as it behaved before the
+  // standing-grant path existed: a live (non-dry-run) authorized start always
+  // has EITHER `activation.capability` (one-shot path) OR `activation.scope`
+  // (standing-grant path) set, so this was — and remains — unreachable on any
+  // real authorized run. Written this way rather than changed so the
+  // standing-grant path doesn't silently start exercising a branch nothing
+  // has exercised live before.
+  if (!opts.dryRun && !activation.capability && !activation.scope) {
     reconcilePreparedGeneratedRepairReservations();
   }
 
@@ -8166,7 +8355,7 @@ export async function runDaemon(
         transitionActivity('tick');
         const tickResult = await tick(liveCfg, {
           dryRun: opts.dryRun,
-          ...(activation.capability ? { activationCapability: activation.capability } : {}),
+          ...(runActivationScope ? { activationScope: runActivationScope } : {}),
           ...(opts.drain ? { drain: opts.drain } : {}),
           ...(opts.drainLimit ? { drainLimit: opts.drainLimit } : {}),
           signal: shutdown.signal,
@@ -8219,6 +8408,10 @@ export async function runDaemon(
         transitionActivity('tick');
         const tickResult = await tick(liveCfg, {
           dryRun: opts.dryRun,
+          // M470: the resident loop previously passed NO activation at all, so
+          // every live resident tick was refused. It now carries the scope
+          // verified once at runDaemon entry.
+          ...(runActivationScope ? { activationScope: runActivationScope } : {}),
           ...(opts.drain ? { drain: opts.drain } : {}),
           ...(opts.drainLimit ? { drainLimit: opts.drainLimit } : {}),
           signal: shutdown.signal,
@@ -8521,6 +8714,23 @@ export function buildItemGoal(item: WorkItem): string {
     '(e.g. a platform-gated or intentionally-skipped test, an issue requiring ' +
     'product decisions, or already done), make NO changes and stop — ' +
     'do not force an edit.',
+  );
+
+  // M507: completion contract — derived from real inbox data showing the two
+  // most common ways an otherwise-reasonable run still gets rejected: (1) the
+  // engine "fixes" a narrow task by deleting/regenerating an entire file (seen
+  // repeatedly on dependency bumps that wiped package.json instead of editing
+  // one version string — judged 'harmful' every time), and (2) a run hits its
+  // budget mid-task and files a half-finished '[partial]' diff that fails
+  // verification and is auto-drained after retries. Neither failure mode is
+  // fixed by a more lenient judge — both are avoidable at generation time.
+  parts.push(
+    'Do not delete, regenerate, or wholesale-rewrite a file to make this change — ' +
+    'edit only what the task requires. A diff that removes unrelated dependencies, ' +
+    'scripts, or content is treated as destructive and rejected outright, even when ' +
+    'the stated intent was minor. If you cannot produce a complete diff that passes ' +
+    'this repo’s tests, typecheck, and lint within the available budget, produce NO ' +
+    'diff and stop — a filed partial/unverified change is worse than no proposal.',
   );
 
   return parts.join('\n\n');

@@ -49,12 +49,8 @@ import { loadProposal } from '../inbox/store.js';
 import { hasRealizedMergeEvidence } from '../inbox/realized-merge.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { recordDecision } from './decisions-ledger.js';
-import {
-  POST_MERGE_CREDIT_RELEASE_LABEL,
-  hasReleasedPostMergeCredit,
-} from './post-merge-credit.js';
-import { attestSkillCard } from './skill-attestation.js';
-import { recordSkillCard, sanitizeSkillCard } from './skill-records.js';
+import { attestPostMergeCreditSkillCard, evaluatePostMergeCreditRelease } from './post-merge-credit.js';
+import { recordSkillCard, readSkillCards, sanitizeSkillCard } from './skill-records.js';
 import type { AshlrConfig, GenomeEntry, Proposal, SkillCard } from '../types.js';
 
 // ---------------------------------------------------------------------------
@@ -130,6 +126,8 @@ interface VerifiedSkillInput {
   evidence: SignedAutonomyEvidencePackV3;
   diffHash: string;
   commandKinds: string[];
+  /** Signed post-merge-credit release token — verified, not the bare literal. */
+  labelBasis: string;
 }
 
 function commandKindsFromVerification(proposal: Proposal): string[] {
@@ -173,7 +171,10 @@ function verifiedSkillInput(proposalId: string): VerifiedSkillInput | null {
     const proposal = loadProposal(proposalId);
     if (!proposal || proposal.id !== proposalId || proposal.status !== 'applied' ||
       !hasRealizedMergeEvidence(proposal)) return null;
-    if (!hasReleasedPostMergeCredit(proposal.labelBasis)) return null;
+    // Eligibility is computed fresh from the authenticated merge witness and
+    // the observation ledger — never trusted off a caller-set proposal field.
+    const eligibility = evaluatePostMergeCreditRelease(proposal);
+    if (!eligibility.eligible || !eligibility.label) return null;
     if (typeof proposal.diff !== 'string' || proposal.diff.length === 0) return null;
     if (!verifyProvenance(proposal).ok) return null;
 
@@ -209,14 +210,14 @@ function verifiedSkillInput(proposalId: string): VerifiedSkillInput | null {
     if (!proposal.engineTier) return null;
     if (routeHasSkillSelection(proposal.routeSnapshot) || routeHasSkillSelection(evidence.routeSnapshot)) return null;
 
-    return { proposal, evidence, diffHash: currentDiffHash, commandKinds };
+    return { proposal, evidence, diffHash: currentDiffHash, commandKinds, labelBasis: eligibility.label };
   } catch {
     return null;
   }
 }
 
 function skillCardFromVerified(input: VerifiedSkillInput, ts: string): SkillCard {
-  const { proposal, evidence, diffHash, commandKinds } = input;
+  const { proposal, evidence, diffHash, commandKinds, labelBasis } = input;
   const taskClass = deriveTaskClass(boundedMetadataText(proposal.title, 100, 'verified workflow'));
   const safeTitle = `Verified ${taskClass} workflow`;
   const safeSummary = boundedMetadataText(
@@ -233,9 +234,14 @@ function skillCardFromVerified(input: VerifiedSkillInput, ts: string): SkillCard
     summary: safeSummary,
     status: 'verified',
     source: 'verified-proposal',
+    // NOTE: SKILL_CREDIT_RELEASE_TAG is deliberately NOT added here.
+    // skill-records.ts's recordSkillCard() unconditionally refuses any card
+    // carrying that tag (a defense against unauthenticated release claims
+    // written before this protocol existed). Real release authority now
+    // lives entirely in `labelBasis` (a signed token, verified by
+    // hasReleasedPostMergeCredit), which recordSkillCard does not block.
     tags: [
       TAG,
-      SKILL_CREDIT_RELEASE_TAG,
       `engine:${proposal.engineTier}`,
       `proposal:${boundedMetadataText(proposal.id, 24, 'unknown')}`,
     ],
@@ -273,7 +279,7 @@ function skillCardFromVerified(input: VerifiedSkillInput, ts: string): SkillCard
       gateCount,
     },
     learningSource: 'verified-proposal',
-    labelBasis: POST_MERGE_CREDIT_RELEASE_LABEL,
+    labelBasis,
     ...(proposal.routerPolicyVersion ?? evidence.routerPolicyVersion
       ? { routerPolicyVersion: proposal.routerPolicyVersion ?? evidence.routerPolicyVersion }
       : {}),
@@ -327,6 +333,17 @@ export function learnFromApplied(proposal: Proposal, cfg: AshlrConfig): void {
     return;
   }
 
+  // Idempotency: post-merge credit only becomes eligible well after merge (see
+  // MIN_POST_MERGE_OBSERVATION_WINDOW_MS), so this is expected to be called
+  // repeatedly (a periodic sweep, not a one-shot at merge time). Never write a
+  // second card for a proposal that already has one.
+  try {
+    const corpus = readSkillCards({ complete: true });
+    if (corpus.some((card) => card.proposalId === proposal.id)) return;
+  } catch {
+    return;
+  }
+
   // Caller fields (including status, verification, route, and tier) are only a
   // lookup hint. Every authority-bearing field comes from the persisted state.
   let verified: VerifiedSkillInput | null;
@@ -339,7 +356,11 @@ export function learnFromApplied(proposal: Proposal, cfg: AshlrConfig): void {
 
   const authoritative = verified.proposal;
   const now = new Date().toISOString();
-  const structuredCard = attestSkillCard(sanitizeSkillCard(skillCardFromVerified(verified, now)));
+  // attestPostMergeCreditSkillCard (not the generic attestSkillCard) is the
+  // dedicated signing boundary for release-labeled cards — see
+  // post-merge-credit.ts's module doc for why the generic attester refuses
+  // them.
+  const structuredCard = attestPostMergeCreditSkillCard(sanitizeSkillCard(skillCardFromVerified(verified, now)));
   if (!structuredCard) return;
 
   // Preserve the legacy genome note for compatibility.
@@ -377,7 +398,7 @@ export function learnFromApplied(proposal: Proposal, cfg: AshlrConfig): void {
       proposalId: authoritative.id,
       action: 'skill-library:written' as Parameters<typeof recordDecision>[0]['action'],
       detail: `engine=${authoritative.engineTier}`,
-      labelBasis: POST_MERGE_CREDIT_RELEASE_LABEL,
+      labelBasis: structuredCard.labelBasis,
       repo: authoritative.repo ?? '',
       engine: authoritative.engineModel ?? '',
       model: '',
@@ -392,8 +413,27 @@ export function learnFromApplied(proposal: Proposal, cfg: AshlrConfig): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Skill injection remains disabled until a distinct post-merge release proof
- * and verifier exist. Tags and generic genome persistence are not authority.
+ * Genome hub entries are unsigned free text — appendHubEntry has no
+ * authentication, and (per test/m243.skill-library.test.ts's "release
+ * verifier unavailable" suite) a forged entry carrying tags ['m243:skill',
+ * 'credit:released-v1'] must not be trusted into future-agent prompts just
+ * because it carries the right tag. There is no way to cryptographically
+ * verify a GenomeEntry's authenticity — genome rows carry no attestation
+ * field at all, unlike SkillCard (contentHash + attestation).
+ *
+ * Real positive-credit skill recall is NOT this function's job: it already
+ * exists, and already works, via skill-retrieval.ts's
+ * selectVerifiedSkills()/inspectVerifiedSkillCorpus() — those read the
+ * cryptographically-signed SkillCard corpus (skill-records.ts) and verify
+ * each card's attestation (verifyAttestedSkillCard) plus
+ * hasReleasedPostMergeCredit(card.labelBasis) before ever surfacing it. That
+ * pathway is what lights up once evaluatePostMergeCreditRelease() /
+ * attestPostMergeCreditSkillCard() start minting real signed cards — no
+ * change to this function was needed or safe to make.
+ *
+ * curateSkills() therefore stays a closed stub, matching curateAntiPlaybooks'
+ * signature for API symmetry with self-improve.ts but never promoting
+ * unsigned genome text to injected grounding. Pure; never throws.
  */
 export function curateSkills(_entries: GenomeEntry[]): GenomeEntry[] {
   return [];

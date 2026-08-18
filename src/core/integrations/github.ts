@@ -148,6 +148,8 @@ export type PrAutoMergeRequestState =
 
 /** Detailed read-only PR status used to reconcile remote host handoffs. */
 export interface PrView {
+  /** GraphQL node id (`gh pr view --json id`). Absent on malformed/old responses. */
+  id?: string;
   number?: number;
   url?: string;
   state?: string;
@@ -616,7 +618,7 @@ export function viewPr(
     selector,
     ...(options.repo ? ['--repo', options.repo] : []),
     '--json',
-    'number,url,state,mergedAt,closed,closedAt,headRefName,headRefOid,baseRefName,baseRefOid,mergeCommit,autoMergeRequest',
+    'id,number,url,state,mergedAt,closed,closedAt,headRefName,headRefOid,baseRefName,baseRefOid,mergeCommit,autoMergeRequest',
   ]);
   if (raw !== null && raw.length > MAX_PR_VIEW_JSON_LENGTH) return null;
   const parsed = safeJson(raw);
@@ -630,6 +632,7 @@ export function viewPr(
   }
   const autoMergeRequest = parseAutoMergeRequestState(obj);
   return {
+    ...(typeof obj['id'] === 'string' && obj['id'].length > 0 ? { id: obj['id'] } : {}),
     ...(typeof obj['number'] === 'number' ? { number: obj['number'] } : {}),
     ...(typeof obj['url'] === 'string' ? { url: obj['url'] } : {}),
     ...(typeof obj['state'] === 'string' ? { state: obj['state'] } : {}),

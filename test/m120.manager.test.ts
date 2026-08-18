@@ -419,6 +419,99 @@ RATIONALE: Useful and correct with minimal scope.
     expect(verdict.value).toBe(3);
     expect(verdict.correctness).toBe(3);
     expect(verdict.wouldMerge).toBe(false);
+    // Not a real judgment — must be honestly tagged, never indistinguishable
+    // from a genuine 'review' verdict a model actually reasoned about.
+    expect(verdict.judgeFailure).toBe('parse');
+  });
+
+  // -------------------------------------------------------------------------
+  // Parser robustness — fenced/prose-wrapped/case-varying real responses.
+  // Forensic finding: ~22% of real judge calls (139 sampled from the
+  // operator's decisions ledger) hit the parse-failure fallback. These cases
+  // cover the concrete formats models actually emit that a naive
+  // JSON.parse(raw) would choke on.
+  // -------------------------------------------------------------------------
+
+  it('parses JSON wrapped in a ```json fenced code block', async () => {
+    const { judgeProposal } = await import('../src/core/fleet/manager.js');
+    const proposal = makeProposal({ diff: makeDiff(1, 1) });
+    const raw = '```json\n' + JSON.stringify({
+      value: 4, correctness: 5, scope: 1, alignment: 4,
+      verdict: 'ship', rationale: 'Fenced block.',
+    }) + '\n```';
+    const verdict = await judgeProposal(proposal, {} as never, mockClientRaw(raw));
+    expect(verdict.verdict).toBe('ship');
+    expect(verdict.rationale).toBe('Fenced block.');
+    expect(verdict.judgeFailure).toBeUndefined();
+  });
+
+  it('parses JSON preceded and followed by prose commentary', async () => {
+    const { judgeProposal } = await import('../src/core/fleet/manager.js');
+    const proposal = makeProposal({ diff: makeDiff(1, 1) });
+    const raw = 'Sure, here is my assessment of the proposal:\n\n' +
+      JSON.stringify({ value: 3, correctness: 4, scope: 2, alignment: 3, verdict: 'review', rationale: 'Needs a second look.' }) +
+      '\n\nLet me know if you would like more detail.';
+    const verdict = await judgeProposal(proposal, {} as never, mockClientRaw(raw));
+    expect(verdict.verdict).toBe('review');
+    expect(verdict.rationale).toBe('Needs a second look.');
+    expect(verdict.judgeFailure).toBeUndefined();
+  });
+
+  it('normalises a mixed-case verdict token (e.g. "Ship")', async () => {
+    const { judgeProposal } = await import('../src/core/fleet/manager.js');
+    const proposal = makeProposal({ diff: makeDiff(1, 1) });
+    const raw = JSON.stringify({ value: 4, correctness: 5, scope: 1, alignment: 4, verdict: 'Ship', rationale: 'Mixed-case verdict.' });
+    const verdict = await judgeProposal(proposal, {} as never, mockClientRaw(raw));
+    expect(verdict.verdict).toBe('ship');
+    expect(verdict.judgeFailure).toBeUndefined();
+  });
+
+  it('tolerates differently-cased JSON keys (e.g. "Value"/"VERDICT")', async () => {
+    const { judgeProposal } = await import('../src/core/fleet/manager.js');
+    const proposal = makeProposal({ diff: makeDiff(1, 1) });
+    // Real-world cause: some local/open-weight engines emit rubric fields
+    // with inconsistent casing. Exact-case obj['value'] lookups miss these
+    // entirely and clamp() silently defaults every score to 1.
+    const raw = '{"Value":4,"Correctness":5,"Scope":1,"Alignment":4,"VERDICT":"ship","Rationale":"Cased keys."}';
+    const verdict = await judgeProposal(proposal, {} as never, mockClientRaw(raw));
+    expect(verdict.verdict).toBe('ship');
+    expect(verdict.value).toBe(4);
+    expect(verdict.correctness).toBe(5);
+    expect(verdict.rationale).toBe('Cased keys.');
+    expect(verdict.judgeFailure).toBeUndefined();
+  });
+
+  it('tolerates a trailing comma before the closing brace', async () => {
+    const { judgeProposal } = await import('../src/core/fleet/manager.js');
+    const proposal = makeProposal({ diff: makeDiff(1, 1) });
+    const raw = '{"value":3,"correctness":4,"scope":2,"alignment":3,"verdict":"review","rationale":"Trailing comma.",}';
+    const verdict = await judgeProposal(proposal, {} as never, mockClientRaw(raw));
+    expect(verdict.verdict).toBe('review');
+    expect(verdict.rationale).toBe('Trailing comma.');
+    expect(verdict.judgeFailure).toBeUndefined();
+  });
+
+  it('recovers a verdict from a truncated response whose <reasoning> block is intact', async () => {
+    const { judgeProposal } = await import('../src/core/fleet/manager.js');
+    const proposal = makeProposal({ diff: makeDiff(1, 1) });
+    // The trailing JSON got cut off by a token-limit truncation, but the
+    // reasoning block (which the prompt asks for FIRST) survived intact —
+    // this should be recoverable via the reasoning-prose fallback, not a
+    // parse failure.
+    const raw = `<reasoning>
+VALUE: 3 — Modest improvement.
+CORRECTNESS: 4 — Looks right.
+SCOPE: 2 — Two files touched.
+ALIGNMENT: 3 — Reasonably aligned.
+VERDICT: review — Correct but not clearly high value.
+RATIONALE: Fine change but not obviously worth merging yet.
+</reasoning>
+{"value":3,"correctness":4,"sc`;
+    const verdict = await judgeProposal(proposal, {} as never, mockClientRaw(raw));
+    expect(verdict.verdict).toBe('review');
+    expect(verdict.value).toBe(3);
+    expect(verdict.correctness).toBe(4);
+    expect(verdict.judgeFailure).toBeUndefined();
   });
 });
 
@@ -594,7 +687,7 @@ describe('m120 judgeProposal — wouldMerge logic', () => {
 // ---------------------------------------------------------------------------
 
 describe('m120 judgeProposal — parse failure', () => {
-  it('defaults to verdict=review on unparseable response', async () => {
+  it('defaults to verdict=review on unparseable response, honestly tagged judgeFailure="parse"', async () => {
     const { judgeProposal } = await import('../src/core/fleet/manager.js');
     const proposal = makeProposal();
     const client = mockClientParseFail();
@@ -605,9 +698,14 @@ describe('m120 judgeProposal — parse failure', () => {
     expect(verdict.wouldMerge).toBe(false);
     expect(verdict.proposalId).toBe(proposal.id);
     expect(verdict.semanticEvents).toBeUndefined();
+    // The critical honesty requirement: a parse failure must be DISTINCT
+    // from — never indistinguishable from — a real considered 'review'.
+    expect(verdict.judgeFailure).toBe('parse');
+    expect(verdict.rationale).toMatch(/unparseable/i);
+    expect(verdict.rationale).not.toMatch(/^no rationale provided$/);
   });
 
-  it('defaults to verdict=review when client.complete() throws', async () => {
+  it('defaults to verdict=review when client.complete() throws, tagged judgeFailure="network" (distinct root cause from a parse failure)', async () => {
     const { judgeProposal } = await import('../src/core/fleet/manager.js');
     const proposal = makeProposal();
     const client = mockClientThrows();
@@ -617,6 +715,8 @@ describe('m120 judgeProposal — parse failure', () => {
     expect(verdict.verdict).toBe('review');
     expect(verdict.wouldMerge).toBe(false);
     expect(verdict.semanticEvents).toBeUndefined();
+    expect(verdict.judgeFailure).toBe('network');
+    expect(verdict.rationale).toMatch(/network|api/i);
   });
 
   it('parse-failure never produces noise or harmful verdict', async () => {
@@ -628,6 +728,82 @@ describe('m120 judgeProposal — parse failure', () => {
 
     expect(verdict.verdict).not.toBe('noise');
     expect(verdict.verdict).not.toBe('harmful');
+  });
+
+  it('a genuinely garbage response still refuses to merge AND is distinguishable from a real review', async () => {
+    const { judgeProposal } = await import('../src/core/fleet/manager.js');
+    const proposal = makeProposal();
+    // Pure noise: no JSON, no <reasoning> block, no VALUE/CORRECTNESS/VERDICT
+    // lines at all — the worst case the parser can be handed.
+    const client = mockClientRaw('asdkjfh 8y23r ()* &%^ garbage nonsense !!!\n\n###@@@');
+
+    const verdict = await judgeProposal(proposal, {} as never, client);
+
+    // Fail-closed: never ships, never auto-rejects.
+    expect(verdict.verdict).toBe('review');
+    expect(verdict.wouldMerge).toBe(false);
+    // Honest: this is NOT a considered judgment, and must say so distinctly
+    // rather than reading like a real 'review' verdict in the ledger.
+    expect(verdict.judgeFailure).toBe('parse');
+  });
+
+  it('the one-shot retry uses a stricter reprompt and can recover from an initially-garbage response', async () => {
+    const { judgeProposal } = await import('../src/core/fleet/manager.js');
+    const proposal = makeProposal({ diff: makeDiff(1, 1) });
+    let calls = 0;
+    const client = {
+      id: 'anthropic',
+      model: RUN_MANAGER_REVIEWER_MODEL,
+      complete: vi.fn().mockImplementation(async () => {
+        calls++;
+        if (calls === 1) return 'uh, let me think about this proposal for a bit...';
+        return JSON.stringify({ value: 4, correctness: 4, scope: 1, alignment: 4, verdict: 'ship', rationale: 'Recovered on retry.' });
+      }),
+    };
+
+    const verdict = await judgeProposal(proposal, {} as never, client);
+
+    expect(calls).toBe(2);
+    expect(verdict.verdict).toBe('ship');
+    expect(verdict.rationale).toBe('Recovered on retry.');
+    expect(verdict.judgeFailure).toBeUndefined();
+  });
+});
+
+describe('m120 judgeProposal — parse failure surfaced honestly in the decisions ledger', () => {
+  it('records judgeReasonCode="judge-parse-failure" (never "judge-review") for a parse failure', async () => {
+    const { getActiveClient } = await import('../src/core/run/provider-client.js');
+    (getActiveClient as ReturnType<typeof vi.fn>).mockResolvedValue(mockClientParseFail());
+
+    mockProposals.push(makeProposal({ id: SEMANTIC_PROPOSAL_A }));
+
+    const { runManager } = await import('../src/core/fleet/manager.js');
+    const report = await runManager({} as never, { window: '7d', applyRejects: false });
+
+    expect(report.verdicts[0]?.verdict).toBe('review');
+
+    const { readDecisions } = await import('../src/core/fleet/decisions-ledger.js');
+    const entries = readDecisions();
+    const entry = entries.find((e) => e.proposalId === SEMANTIC_PROPOSAL_A);
+    expect(entry).toBeDefined();
+    expect(entry?.verdict).toBe('review');
+    // The load-bearing assertion: parse failures must be a DIFFERENT
+    // judgeReasonCode than genuine reviews so they can never be
+    // double-counted or mistaken for real judgment in the ledger.
+    expect(entry?.judgeReasonCode).toBe('judge-parse-failure');
+    expect(entry?.judgeReasonCode).not.toBe('judge-review');
+  });
+
+  it('surfaces parse failures as a loud concern in the ManagerReport', async () => {
+    const { getActiveClient } = await import('../src/core/run/provider-client.js');
+    (getActiveClient as ReturnType<typeof vi.fn>).mockResolvedValue(mockClientParseFail());
+
+    mockProposals.push(makeProposal());
+
+    const { runManager } = await import('../src/core/fleet/manager.js');
+    const report = await runManager({} as never, { window: '7d', applyRejects: false });
+
+    expect(report.concerns.some((c) => /UNPARSEABLE/.test(c))).toBe(true);
   });
 });
 

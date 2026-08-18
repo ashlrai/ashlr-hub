@@ -497,3 +497,100 @@ describe('rollbackTo — safety: no git push --force, no branch deletion', () =>
     expect(branches.some(b => b === 'feature-branch')).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// rollbackTo — --force refused against the main checkout (2026-08-17 incident)
+//
+// A bare `git stash`/`git reset` against a PRIMARY checkout nearly destroyed
+// live operator work while agents were mid-edit. rollbackTo's own --force
+// path (`git reset --hard`) is the one place in this module that could do
+// the same thing if pointed at the wrong directory. These tests pin that it
+// refuses on the main checkout — dirty or clean — and only proceeds against
+// an isolated linked worktree (`git worktree add`), which is disposable by
+// construction.
+// ---------------------------------------------------------------------------
+
+describe('rollbackTo — --force refused against the main checkout', () => {
+  it('refuses (ok:false) with force:true against the main checkout when dirty', async () => {
+    const { snapshotProject, rollbackTo } = await getRollbackModule();
+    const repoDir = path.join(tmpDir, 'force-main-dirty');
+    fs.mkdirSync(repoDir);
+    makeGitRepo(repoDir);
+    const snap = snapshotProject(repoDir);
+    makeRepoDirty(repoDir);
+    const result = await rollbackTo(snap, { force: true });
+    expect(result.ok).toBe(false);
+    expect(result.detail).toMatch(/main checkout/i);
+  });
+
+  it('refuses (ok:false) with force:true against the main checkout when clean', async () => {
+    const { snapshotProject, rollbackTo } = await getRollbackModule();
+    const repoDir = path.join(tmpDir, 'force-main-clean');
+    fs.mkdirSync(repoDir);
+    makeGitRepo(repoDir);
+    const snap = snapshotProject(repoDir);
+    fs.writeFileSync(path.join(repoDir, 'advance.txt'), 'advance\n');
+    git(repoDir, ['add', '.']);
+    git(repoDir, ['commit', '-m', 'advance commit']);
+    const result = await rollbackTo(snap, { force: true });
+    expect(result.ok).toBe(false);
+    expect(result.detail).toMatch(/main checkout/i);
+  });
+
+  it('never runs `git reset --hard` against the main checkout: HEAD is untouched after refusal', async () => {
+    const { snapshotProject, rollbackTo } = await getRollbackModule();
+    const repoDir = path.join(tmpDir, 'force-main-untouched');
+    fs.mkdirSync(repoDir);
+    makeGitRepo(repoDir);
+    const snap = snapshotProject(repoDir);
+    fs.writeFileSync(path.join(repoDir, 'advance.txt'), 'advance\n');
+    git(repoDir, ['add', '.']);
+    git(repoDir, ['commit', '-m', 'advance commit']);
+    const headBefore = getHead(repoDir);
+    await rollbackTo(snap, { force: true });
+    const headAfter = getHead(repoDir);
+    // If the guard failed open, HEAD would have been force-reset back to snap.head.
+    expect(headAfter).toBe(headBefore);
+    expect(headAfter).not.toBe(snap.head);
+  });
+
+  it('never discards uncommitted dirty-tree edits on the main checkout after refusal', async () => {
+    const { snapshotProject, rollbackTo } = await getRollbackModule();
+    const repoDir = path.join(tmpDir, 'force-main-preserves-dirty');
+    fs.mkdirSync(repoDir);
+    makeGitRepo(repoDir);
+    const snap = snapshotProject(repoDir);
+    makeRepoDirty(repoDir);
+    await rollbackTo(snap, { force: true });
+    // The dirty file must still be there — a `reset --hard` would have wiped it.
+    expect(fs.existsSync(path.join(repoDir, 'dirty.txt'))).toBe(true);
+    expect(isDirty(repoDir)).toBe(true);
+  });
+
+  it('allows force:true against an isolated linked worktree (git worktree add)', async () => {
+    const { snapshotProject, rollbackTo } = await getRollbackModule();
+    const repoDir = path.join(tmpDir, 'force-worktree-main');
+    fs.mkdirSync(repoDir);
+    makeGitRepo(repoDir);
+
+    // Create a real isolated linked worktree off the main repo.
+    const worktreeDir = path.join(tmpDir, 'force-worktree-linked');
+    git(repoDir, ['worktree', 'add', '-b', 'ashlr-rollback-test-wt', worktreeDir, 'HEAD']);
+
+    const snap = snapshotProject(worktreeDir);
+    fs.writeFileSync(path.join(worktreeDir, 'advance.txt'), 'advance\n');
+    git(worktreeDir, ['add', '.']);
+    git(worktreeDir, ['commit', '-m', 'advance commit in worktree']);
+
+    const result = await rollbackTo(snap, { force: true });
+    expect(result.ok).toBe(true);
+    expect(result.detail).not.toMatch(/main checkout/i);
+    const headAfter = getHead(worktreeDir);
+    expect(headAfter).toBe(snap.head);
+
+    // The MAIN checkout itself must be completely unaffected by the worktree rollback.
+    expect(getHead(repoDir)).not.toBe(undefined);
+
+    git(repoDir, ['worktree', 'remove', '--force', worktreeDir]);
+  });
+});

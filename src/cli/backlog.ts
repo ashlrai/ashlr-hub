@@ -213,9 +213,29 @@ function printSummary(
  *
  * Returns process exit code (0 = success, 1 = error, 2 = usage error).
  */
+function printBacklogHelp(col: ReturnType<typeof makeColors>): void {
+  console.log('');
+  console.log(col.bold('  ashlr backlog') + col.dim(' — scored work queue across enrolled repos'));
+  console.log('');
+  console.log(col.dim('Usage: ashlr backlog [refresh] [--repo <path>] [--source <src>] [--limit <n>] [--json]'));
+  console.log('');
+  console.log(`    ${col.cyan('ashlr backlog')}                   top scored work items (read; loads/builds if missing)`);
+  console.log(`    ${col.cyan('ashlr backlog refresh')}           re-scan all enrolled repos and rebuild the backlog`);
+  console.log(`    ${col.cyan('ashlr backlog --repo <path>')}     filter to a specific enrolled repo`);
+  console.log(`    ${col.cyan('ashlr backlog --source <src>')}    filter by source: ${BACKLOG_SOURCE_FILTER_HELP}`);
+  console.log(`    ${col.cyan('ashlr backlog --limit <n>')}       show only the top N items`);
+  console.log(`    ${col.cyan('ashlr backlog --json')}            emit raw JSON`);
+  console.log('');
+}
+
 export async function cmdBacklog(args: string[]): Promise<number> {
   const tty = process.stdout.isTTY === true;
   const col = makeColors(tty);
+
+  if (args.includes('--help') || args.includes('-h')) {
+    printBacklogHelp(col);
+    return 0;
+  }
 
   // ── Parse arguments ──────────────────────────────────────────────────────
   let subcommand: 'list' | 'refresh' = 'list';

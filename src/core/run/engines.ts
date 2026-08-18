@@ -370,6 +370,15 @@ function cancelledEngineResult(
 }
 
 /**
+ * Default runaway-cost backstop for spawnEngine when a caller does not pass
+ * an explicit `timeoutMs`. Mirrors sandboxed-engine.ts's DEFAULT_TIMEOUT_MS —
+ * frontier agents (Claude/Codex) legitimately run for long periods, so this
+ * is a generous safety net, not a normal-path timeout. Stall detection
+ * (run-monitor.ts) is the real termination mechanism for unproductive runs.
+ */
+export const DEFAULT_ENGINE_BACKSTOP_MS = 2 * 60 * 60_000;
+
+/**
  * Spawn a resolved EngineCommand and capture its result.
  *
  * M236: converted from spawnSync + wall-clock kill to async streaming spawn +
@@ -896,7 +905,7 @@ async function spawnEngineInner(
     if (opts?.signal?.aborted) onAbort();
 
     // Backstop kill timer (runaway-cost safety net — fires only after timeoutMs).
-    const backstopMs = opts?.timeoutMs ?? 5 * 60 * 1000;
+    const backstopMs = opts?.timeoutMs ?? DEFAULT_ENGINE_BACKSTOP_MS;
     backstopTimer = setTimeout(() => requestTermination('backstop-timeout', false), backstopMs);
     unrefTimer(backstopTimer);
 

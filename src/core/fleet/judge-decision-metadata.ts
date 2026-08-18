@@ -17,6 +17,8 @@ const JUDGE_REASON_CODES = new Set<JudgeDecisionReasonCode>([
   'judge-noise',
   'judge-harmful',
   'judge-verdict-unrecognized',
+  'judge-parse-failure',
+  'judge-network-failure',
 ]);
 
 export function isJudgeDecisionReasonCode(value: unknown): value is JudgeDecisionReasonCode {
@@ -34,7 +36,16 @@ export function normalizeJudgeDecisionVerdict(value: unknown): JudgeDecisionVerd
 export function judgeDecisionReasonCode(
   verdict: unknown,
   wouldMerge: boolean,
+  /**
+   * Set when the underlying ManagerVerdict was a synthetic fallback (never a
+   * real judgment) rather than an actual verdict from the model. Takes
+   * priority over `verdict` so a parse/network failure can never be recorded
+   * with the same reason code as a genuine 'review' judgment.
+   */
+  failureKind?: 'parse' | 'network',
 ): JudgeDecisionReasonCode {
+  if (failureKind === 'parse') return 'judge-parse-failure';
+  if (failureKind === 'network') return 'judge-network-failure';
   if (verdict === 'ship') {
     return wouldMerge ? 'judge-ship-would-merge' : 'judge-ship-review-required';
   }

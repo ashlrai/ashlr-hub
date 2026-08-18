@@ -1,0 +1,228 @@
+/**
+ * design/global.css — reset, base typography, and system-wide interaction
+ * states (focus-visible, selection, scrollbars). Component-level styling
+ * lives next to each component as CSS Modules; this file only sets the
+ * baseline every component inherits.
+ */
+@import "./tokens.css";
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--text-base-size);
+  line-height: var(--text-base-line);
+  font-weight: var(--font-weight-regular);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+img,
+svg {
+  display: block;
+  max-width: 100%;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+a {
+  color: var(--text-link);
+}
+
+code,
+pre,
+kbd {
+  font-family: var(--font-mono);
+}
+
+ul,
+ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+p {
+  margin: 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * Focus-visible everywhere. Never suppress the browser default without
+ * replacing it — every interactive element gets this ring on keyboard focus
+ * and NOTHING on mouse focus (:focus-visible already does that split).
+ * ------------------------------------------------------------------------- */
+:focus {
+  outline: none;
+}
+
+:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus-ring);
+  border-radius: var(--radius-sm);
+}
+
+/* ---------------------------------------------------------------------------
+ * Selection + scrollbars
+ * ------------------------------------------------------------------------- */
+::selection {
+  background: var(--bg-selected);
+  color: var(--text-primary);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: var(--radius-full);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+/* ---------------------------------------------------------------------------
+ * Type scale utility classes — component CSS should reference the tokens
+ * directly, but these exist for quick text nodes in views.
+ * ------------------------------------------------------------------------- */
+.text-xs {
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+.text-sm {
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+}
+.text-base {
+  font-size: var(--text-base-size);
+  line-height: var(--text-base-line);
+}
+.text-md {
+  font-size: var(--text-md-size);
+  line-height: var(--text-md-line);
+}
+.text-lg {
+  font-size: var(--text-lg-size);
+  line-height: var(--text-lg-line);
+}
+.text-xl {
+  font-size: var(--text-xl-size);
+  line-height: var(--text-xl-line);
+  font-weight: var(--font-weight-semibold);
+}
+.text-2xl {
+  font-size: var(--text-2xl-size);
+  line-height: var(--text-2xl-line);
+  font-weight: var(--font-weight-semibold);
+}
+.text-3xl {
+  font-size: var(--text-3xl-size);
+  line-height: var(--text-3xl-line);
+  font-weight: var(--font-weight-bold);
+}
+
+.text-secondary {
+  color: var(--text-secondary);
+}
+.text-tertiary {
+  color: var(--text-tertiary);
+}
+.font-mono {
+  font-family: var(--font-mono);
+}
+
+/* ---------------------------------------------------------------------------
+ * line-clamp-2 — shared truncation for long free-text columns (proposal
+ * titles, run/swarm goals) that would otherwise wrap unbounded and blow out
+ * row height. Full text stays reachable via the element's `title` attribute
+ * and by opening the detail view. See DESIGN.md's "Layout and density" note.
+ * ------------------------------------------------------------------------- */
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * Skeleton shimmer — shared by every loading placeholder.
+ * ------------------------------------------------------------------------- */
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--bg-hover) 25%,
+    var(--bg-active) 37%,
+    var(--bg-hover) 63%
+  );
+  background-size: 400% 100%;
+  animation: skeleton-shimmer 1.4s ease infinite;
+  border-radius: var(--radius-sm);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton {
+    animation: none;
+  }
+}

@@ -1,0 +1,80 @@
+.figure {
+  margin: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  padding: var(--space-4);
+  /* Fixed heights must include the axis-label band — this container instead
+     grows with its content so a chart's x-axis labels never get clipped or
+     forced into a nested scroll (dataviz anti-patterns). */
+}
+
+.caption {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.title {
+  font-size: var(--text-sm-size);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-primary);
+}
+
+.description {
+  font-size: var(--text-xs-size);
+  color: var(--text-tertiary);
+}
+
+.plot {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.tableDisclosure {
+  margin-top: var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+  padding-top: var(--space-2);
+}
+
+.tableDisclosure > summary {
+  cursor: pointer;
+  font-size: var(--text-xs-size);
+  color: var(--text-secondary);
+  list-style: none;
+}
+
+.tableDisclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.tableDisclosure > summary::before {
+  content: '▸ ';
+}
+
+.tableDisclosure[open] > summary::before {
+  content: '▾ ';
+}
+
+.tableBody {
+  margin-top: var(--space-2);
+}
+
+.caveat {
+  margin: 0 0 var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--status-unknown-bg);
+  color: var(--status-unknown-fg);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-sm-line);
+}
+
+.empty {
+  color: var(--text-tertiary);
+  font-size: var(--text-sm-size);
+  padding: var(--space-6) 0;
+  text-align: center;
+}

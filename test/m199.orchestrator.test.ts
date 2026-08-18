@@ -90,6 +90,10 @@ vi.mock('../src/core/run/engines.js', () => ({
   engineInstalled: vi.fn(() => false),
   buildEngineCommand: vi.fn(() => null),
   spawnEngine: vi.fn(() => ({ ok: true, output: 'engine-output', usage: null })),
+  // Live bug fix: default backstop must match the documented 2h contract
+  // (engines.ts:378/651, sandboxed-engine.ts DEFAULT_TIMEOUT_MS), not the
+  // stray 5min fallback that used to live in spawnEngine.
+  DEFAULT_ENGINE_BACKSTOP_MS: 2 * 60 * 60_000,
 }));
 
 // Mock engine-registry.
@@ -214,6 +218,7 @@ import {
   engineInstalled,
   buildEngineCommand,
   spawnEngine,
+  DEFAULT_ENGINE_BACKSTOP_MS,
 } from '../src/core/run/engines.js';
 import { resolveEngineSpec } from '../src/core/run/engine-registry.js';
 import { resolveModelProfile, adaptivePromptsEnabled } from '../src/core/run/model-profile.js';
@@ -508,10 +513,13 @@ describe('M199 foldBrowserVerify — pure fold helper', () => {
 // ---------------------------------------------------------------------------
 
 describe('M199 TITRR_MAX_ATTEMPTS constant', () => {
-  it('is exported, is a positive number, equals 2', () => {
+  it('is exported, is a positive number, equals 4', () => {
     expect(typeof TITRR_MAX_ATTEMPTS).toBe('number');
     expect(TITRR_MAX_ATTEMPTS).toBeGreaterThan(0);
-    expect(TITRR_MAX_ATTEMPTS).toBe(2);
+    // Raised 2 -> 4 alongside the fix that stopped force-filing unverifiable
+    // [partial] proposals on TITRR exhaustion (see m78.titrr.test.ts). Two
+    // attempts meant "1 initial + 1 repair" — barely a refine loop at all.
+    expect(TITRR_MAX_ATTEMPTS).toBe(4);
   });
 });
 
@@ -720,6 +728,58 @@ describe('M199 runGoal — cancellation accounting and verification guards', () 
       },
     });
     expect(state.usage.estCostUsd).toBeCloseTo(0.0105);
+  });
+
+  it('raw (non-sandboxed) engine delegation passes an explicit timeoutMs — regression for the ' +
+    'live defect where this call site silently inherited spawnEngine\'s 5min fallback instead ' +
+    'of the documented 2h backstop contract', async () => {
+    vi.mocked(engineInstalled).mockReturnValue(true);
+    vi.mocked(buildEngineCommand).mockReturnValue({
+      bin: 'claude',
+      args: ['--print', 'goal'],
+      cwd: '/tmp',
+    } as any);
+    let capturedOpts: Record<string, unknown> | undefined;
+    vi.mocked(spawnEngine).mockImplementationOnce(async (_cmd, _cfg, opts) => {
+      capturedOpts = opts as Record<string, unknown> | undefined;
+      return { ok: true, output: 'engine output', usage: { tokensIn: 1, tokensOut: 1 } } as any;
+    });
+
+    await runGoal('goal', makeConfig(), makeOpts({ engine: 'claude' }));
+
+    expect(capturedOpts).toBeDefined();
+    expect(typeof capturedOpts!.timeoutMs).toBe('number');
+    // No cfg.foundry.timeoutMs override was supplied, so it must fall back to
+    // the documented 2h backstop — NOT be silently omitted (which used to
+    // make spawnEngine apply its own 5min default instead).
+    expect(capturedOpts!.timeoutMs).toBe(DEFAULT_ENGINE_BACKSTOP_MS);
+    expect(capturedOpts!.timeoutMs).toBe(2 * 60 * 60_000);
+  });
+
+  it('raw engine delegation honors cfg.foundry.timeoutMs when explicitly configured', async () => {
+    vi.mocked(engineInstalled).mockReturnValue(true);
+    vi.mocked(buildEngineCommand).mockReturnValue({
+      bin: 'claude',
+      args: ['--print', 'goal'],
+      cwd: '/tmp',
+    } as any);
+    let capturedOpts: Record<string, unknown> | undefined;
+    vi.mocked(spawnEngine).mockImplementationOnce(async (_cmd, _cfg, opts) => {
+      capturedOpts = opts as Record<string, unknown> | undefined;
+      return { ok: true, output: 'engine output', usage: { tokensIn: 1, tokensOut: 1 } } as any;
+    });
+
+    // sandboxExternal: false keeps this on the raw delegation path (the one
+    // this fix touches) instead of routing into sandboxed-engine.ts, which
+    // foundryWantsSandbox() would otherwise select by default once cfg.foundry
+    // is present.
+    await runGoal(
+      'goal',
+      makeConfig({ foundry: { timeoutMs: 42_000, sandboxExternal: false } } as any),
+      makeOpts({ engine: 'claude' }),
+    );
+
+    expect(capturedOpts!.timeoutMs).toBe(42_000);
   });
 
   it('does not start model verification after task execution cancels the run', async () => {

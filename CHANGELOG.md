@@ -11,6 +11,274 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+## [3.3.0] — 2026-08-17 — Fleet activation, autonomous merge, and the operator console
+
+### 2026-08-16 — Fleet activation unblocked, autonomous merge wired, learning loop closed
+
+Nine threads landed together: the daemon activation-authority system that had
+been unconditionally denying itself was replaced with a real granted-scope
+check, and the bug that made it self-invalidate every permit was fixed; the
+previously dead-code autonomous-merge revocation protocol got its first
+caller; the fleet's self-improvement loop went from recording zero lessons on
+rejection to recording them from every rejection; a test-isolation escape that
+had corrupted the operator's real `~/.ashlr/daemon.json` for 11 days was
+closed fail-closed; and a new React operator console shipped alongside the
+untouched legacy dashboard. Milestone-level detail and today's newly
+discovered ID collision are in
+[`docs/MILESTONE-INDEX.md`](docs/MILESTONE-INDEX.md); the mechanics of
+turning any of this on — including four non-obvious gates that block
+unattended activation even after a grant — are in
+[`docs/RUNTIME-FLEET-ACTIVATION.md`](docs/RUNTIME-FLEET-ACTIVATION.md).
+
+- **Daemon activation authority replaces its own denials (M470 — see
+  collision note below).** Five hard-coded refusals — `DAEMON_ACTIVATION_TRUST_ROOTS`
+  frozen empty, `liveConductorActivationAuthorized()` returning a literal
+  `false`, `assertResidentServiceInstallAuthorized()` throwing
+  unconditionally, and two more in the same family — are replaced by a real
+  check against an operator-owned trust-root store (`~/.ashlr/activation/`,
+  0700/0600, owner-checked, fail-closed on missing/malformed to the
+  *identical* prior denial) and Ed25519-signed, expiring, revocable standing
+  grants across nine scopes: `once`, `resident`, `residentStanding`,
+  `conductor`, `automerge`, `repair`, `deploy`, `install`, `proposalOnly`
+  (`src/core/daemon/activation-permit.ts:121-131`). `residentStanding` is
+  new — the scope that lets the daemon restart unattended; it is not implied
+  by `resident` and must be granted explicitly.
+
+  Root-cause bug fixed in the same change: `daemonActivationAuthorityStateDigest()`
+  folded `~/.ashlr`'s own directory mtime into the digest a permit is
+  checked against, but `daemon start`'s `acquireDaemonLock()`
+  (`src/core/daemon/state.ts`) creates `~/.ashlr/daemon.lock` — a new direct
+  child of `~/.ashlr` — *before* the permit is ever consumed, bumping that
+  same mtime. Every freshly minted permit self-invalidated, 100%
+  reproducibly, before it could be used — the fleet could never have
+  activated unattended even with a valid grant. Fixed to key the digest on
+  the directory's `dev`+`ino` instead, which survive ordinary child churn
+  (`src/core/daemon/activation-permit.ts:961-997`).
+
+  **ID collision introduced today:** `test/m470.activation-authority.test.ts`
+  reuses milestone number M470, which was already assigned to the
+  already-shipped "proposal capture candidate identity"
+  (`test/m470.proposal-capture-candidate-identity.test.ts`; see the M464–M503
+  entry below). Recorded as a new row in `docs/MILESTONE-INDEX.md` §2.
+
+- **Autonomous PR merge gets its first caller (M504, M505).** The durable
+  merge-revocation protocol (`src/core/autonomy/host-merge-revocation-protocol.ts`)
+  existed with zero callers before today; it is now invoked from
+  `attemptHostAutoMerge()` (`src/core/merge.ts:2845-2901`), gated behind
+  `foundry.autoMerge.hostAutoMerge`, which **defaults to `false`**
+  (`src/core/merge.ts:2795`; `test/m505.host-auto-merge.test.ts` pins the
+  default-off behavior). A `failureCategory`
+  (`'code' | 'tool' | 'timeout' | 'infra' | 'cancelled' | 'invalid-command'`,
+  `src/core/run/verify-commands.ts:86-92`) is now threaded through
+  verify-commands, verify, run-tests, merge, the detached post-merge
+  runner/verification, the regression sentinel, and self-heal — exit 127
+  (missing binary) now classifies as `'tool'`, not a broken diff. `git apply
+  --3way` is now used in both `verifyProposal` and `attemptHostAutoMerge`
+  (`src/core/merge.ts:2313, 2984`) so a stale base no longer reads as a real
+  conflict. The self-eval parity gate — previously a single flaky
+  invariant-test failure was a GLOBAL merge blocker — now retries up to
+  `SELF_EVAL_PARITY_RETRY_ATTEMPTS = 2` times with a 500ms delay before
+  failing (`src/core/merge.ts:265-267`).
+
+- **Learning loop closed; judge parse failures stop posing as verdicts.**
+  `hasReleasedPostMergeCredit()` (`src/core/fleet/post-merge-credit.ts:137-150`)
+  no longer hardcodes `false` — it verifies an HMAC-signed, timing-safe-compared
+  token — unblocking consumers across `learned-router.ts`,
+  `skill-attestation.ts`, `feedback.ts`, `quality-metrics.ts`,
+  `judge-trace.ts`, and `post-merge-credit.ts` itself. `learnFromRejection`
+  is no longer reachable only when auto-merge is on: a new
+  `sweepRejectionLearning()` (`src/core/fleet/self-improve.ts`) reads the
+  decisions ledger directly and learns from rejections regardless of the
+  auto-merge flag. (The commit message cites 672 rejections the fleet had
+  never learned from while auto-merge defaulted off; that figure is the
+  author's estimate, not a value stored or checked anywhere in `src/` or
+  `test/` — do not repeat it as a verified count.) `curateAntiPlaybooks()`
+  (`src/core/fleet/self-improve.ts:284-322`), previously unreferenced, now
+  has a caller in `src/core/fleet/orchestrator.ts:1338`. Separately, a July
+  refactor had given every real judge verdict a reason code but not the
+  parse-failure fallback — parse failures were structurally indistinguishable
+  from considered reviews and incremented `judgeNonShipCount`, pushing good
+  proposals toward auto-archive. Parse failures now get their own
+  `'judge-parse-failure'` reason code (`src/core/fleet/judge-decision-metadata.ts:20`)
+  and are excluded from `judgeNonShipCount` entirely
+  (`src/core/fleet/automerge-pass.ts:335-337`).
+
+- **Test isolation: HOME escape closed fail-closed.** On 2026-08-05 a vitest
+  run escaped HOME isolation and wrote the operator's real
+  `~/.ashlr/daemon.json`, leaving the daemon unstartable for 11 days. Cause:
+  `test/setup/home.ts` fell back to the real `os.homedir()` whenever
+  `process.env.HOME` was unset — fail-open. It now throws immediately if
+  `HOME` is unset or resolves to the real developer home
+  (`test/setup/home.ts:52-65`).
+
+- **Fleet-status cache correction.** `GET /api/fleet` no longer performs
+  API-side response recomposition (`src/core/web/api.ts`, pinned by
+  `test/build-identity.test.ts`) — a response-shape fix, landed today. The
+  shared TTL cache for `buildFleetStatus()`
+  (`src/core/web/fleet-status-cache.ts`: 5s TTL, stale-while-refresh to 60s,
+  in-flight dedup) landed with the new console earlier this week, not today.
+  **The "32.5s cold → 4.0s cold / 0ms warm" figures reported for this work do
+  not appear anywhere in the code, tests, or the cache module's own
+  documentation and could not be verified — do not repeat them.** The cache
+  module's comment instead cites a worse pre-fix baseline (`/api/snapshot`
+  2.4s idle → 69.4s under load; `/api/control` similarly degraded). Call-site
+  count is also imprecise across sources: the cache module's comment says
+  six, a test comment says seven, a source grep finds eleven — the true
+  count depends on what "independent call site" means and isn't settled.
+
+- **New operator console (`src/web-ui/`).** React 19 + Vite 6, served at
+  `/next/` alongside the untouched legacy vanilla-JS SPA at `/`
+  (`vite.config.web.ts:11-26`, `src/core/web/static.ts:87-88`). **16 views**
+  (not the 13 originally reported), a chart layer
+  (`src/web-ui/components/charts/`), a work journal
+  (`src/web-ui/routes/journal/`), live run streaming
+  (`src/web-ui/components/stream/`, `useRunStream.ts`), and a notification
+  centre (`src/web-ui/components/notifications/`). Backend changes were
+  minimal and additive — query-param filtering on `src/core/web/api.ts` for
+  the inbox history view — not a rewrite; `server.ts`/`static.ts` routing is
+  unchanged.
+
+- **Two activation designs now formally coexist; the guard protecting the
+  boundary between them was strengthened, not weakened.**
+  `conductor-permit` (`src/core/daemon/goal-conductor-permit-operator.ts`,
+  offline cold-custody, used by the goal conductor — M516–M518) and
+  `activation` (`src/core/daemon/activation-permit.ts`, on-machine standing
+  grants, M470 above) are separate modules with non-overlapping imports. The
+  test protecting this boundary used to check that a file
+  (`src/cli/activation.ts`) did not exist by name — a check that would have
+  broken the moment that file needed to exist for a legitimate, unrelated
+  reason. It now asserts the real invariant: the daemon activation CLI's
+  source text must not match any conductor-authority symbol name
+  (`test/m518.goal-conductor-permit-operator.test.ts:924-926`) — conductor
+  authority must be unreachable from the daemon surface, not merely absent
+  from a filename.
+
+### 2026-08-16 — Live-data web UI crash and TITRR proposal-quality fixes
+
+- **`/work/swarms` crashed on real fleet data; a route error boundary now
+  contains that class of bug.** `SwarmsView` and `SwarmDetailView` read
+  `sw.plan.tasks.length` and `sw.usage.tokensIn` unguarded; two of eighty real
+  swarm records (legacy smoke-test runs) carry neither field, so the view
+  threw, React unmounted the root, and the screen went blank with no recovery
+  short of a hard reload. Both reads are now guarded, and a new
+  `RouteErrorBoundary` (`src/web-ui/components/primitives/RouteErrorBoundary.tsx`)
+  wraps the route outlet so a failing view renders an inline error card with
+  retry while the sidebar, topbar, and command palette stay alive — the
+  durable fix; the optional chaining is the specific one.
+- **Crushed tables got their column widths back.** The inbox proposal table
+  had no fixed layout, so auto-layout divided space evenly across seven
+  columns and crushed `Title` to roughly one word per line. The same pattern
+  — traced to the Fleet Dashboard's Recent Runs panel, which `DESIGN.md`
+  names as the reference other views copy — also affected Runs' goal column,
+  where a single multi-paragraph prompt could balloon one row past the
+  viewport. All three (`src/web-ui/routes/inbox/ProposalList.tsx`,
+  `src/web-ui/routes/fleet-dashboard/RunsPanel.tsx`,
+  `src/web-ui/routes/work/runs/RunsView.tsx`) now use fixed layout with
+  explicit column widths and a shared two-line clamp utility. GenomeView's
+  plain "Loading…" text was also swapped for the SkeletonRow convention used
+  everywhere else, noticeable because that endpoint takes ~6s for 2014
+  entries.
+- **TITRR stopped filing proposals it already knew had failed verification.**
+  `TITRR_MAX_ATTEMPTS` was hardcoded to 2 ("1 initial + 1 repair"); on
+  exhausting it with tests still failing, the loop unconditionally filed the
+  diff anyway via `captureTitrrProposal({isPartial:true,
+  forceGateBlockReason})` — the root cause of `[partial]` proposals that
+  could never pass verification, and, per the fix commit's own estimate (not
+  a value stored or checked anywhere in `src/` or `test/` — do not repeat it
+  as a verified count), a large share of the 672 proposals the fleet had
+  never merged. `TITRR_MAX_ATTEMPTS` is raised to 4, and exhaustion now drops
+  with no proposal at all rather than filing an unverifiable one; the
+  annotation is kept on the run for audit but nothing reaches the inbox.
+
+### M464–M503 — daemon durability, post-merge verification pipeline, Mission OS extensions
+
+Forty milestones landed on `master` with no CHANGELOG entry; this backfills
+them by theme. Full per-milestone detail, file:line citations, and the four
+that warrant a standalone contract are indexed in
+[`docs/MILESTONE-INDEX.md`](docs/MILESTONE-INDEX.md) §5. Gaps M474, M483,
+M489, M499, M500 have no corresponding test file or milestone.
+
+- **Daemon crash-safety and recovery (M486, M487, M490, M501, M488, M476).**
+  Daemon accounting writes now cross an fsync power-loss barrier (temp write +
+  fsync, rename, directory fsync) before being reported durable (M486). A new
+  authorized quarantine flow hard-links crash-suspect daemon state into
+  immutable evidence with a signed receipt and a 10-minute plan expiry (M487),
+  and a paired resolution flow consumes that receipt to produce fresh state
+  that conservatively carries forward same-day spend accounting when it can
+  be verified (never silently resets a daily budget to zero), refusing while
+  service activity or execution retries are in flight (M501). Both are wired into the CLI as explicit, authorization-gated
+  subcommands (`recover-state` / `resolve-state`, M490). Runtime-release
+  canary/rollback pairs get an observation-only signature and digest check
+  with no deployment authority (M488). Release-tip observations are recorded
+  in an immutable, HMAC-sealed, no-clobber sequence ledger — not a
+  transparency log or release authority (M476).
+
+- **Detached post-merge verification pipeline (M465, M466, M467, M468, M472,
+  M478, M482).** Auto-merge canary promotion readiness is evaluated
+  observation-only against verification coverage, release evidence, and
+  post-merge cohorts — it never grants activation (M465). Diff scope for
+  auto-merge is measured with fail-closed rejection of symlinks, gitlinks,
+  and malformed patch headers, alongside a durable prepared→armed→revoked
+  host-merge cancellation state machine (M466). Post-merge verification
+  cohorts are recorded as signed, immutable, metadata-only records —
+  explicitly excluding prompts, diffs, and command output — and can neither
+  authorize merge nor rollback (M467). A runner checks out one exact commit
+  into a scratch worktree, runs the repo's own verification profile, and
+  records only bounded pass/fail metadata before cleanup (M468), scheduled by
+  an observation-only orchestrator that emits at most one work ticket per
+  invocation (M472). Root verification contracts are detected read-only from
+  each repo's own manifests (`package.json`, `tsconfig.json`,
+  `vitest.config.ts`, …) without ever spawning a package manager (M478).
+  Release artifacts get a dependency-inventory + manifest-integrity contract
+  with hard size caps (M482).
+
+- **Proposal funnel + capture identity (M464, M469, M470, M471, M473,
+  M475).** Agent work lifecycle transitions are now recorded as a
+  metadata-only, cryptographically-chained audit trail with a closed
+  vocabulary of phases/transitions/triggers — no raw prompts, diffs, or file
+  paths (M464). Proposal-funnel metrics (attempts, capture errors, policy
+  suppressions, gate blocks) are scrubbed before aggregation and withheld on
+  unstable snapshots rather than guessed (M469). Proposal capture now binds a
+  durable candidate identity from sandboxed execution (M470), settled through
+  a transactional claim/settle/reconcile task store with compare-and-swap
+  leases (M471). A new verifier-execution-authority layer admits signed,
+  data-only capsule statements against caller-pinned trust policies (M473),
+  gated by a separate crypto-only policy-approval observation that itself
+  signs, persists, or executes nothing (M475).
+
+- **Mission OS extensions (M485, M491, M492, M493, M494, M495, M496, M497,
+  M502).** The mission compiler reconciles goals from briefings — respecting
+  dependencies, active-goal caps, and human gates, rejecting cycles — behind
+  a read-only operator briefing UI (M485). Ecosystem-wide mission graphs
+  compile deterministically into one cycle-checked, digested structure bounded
+  to 24 nodes (M491), projected through a fail-closed, mutation-free "outcome
+  room" view (M492). Mission state can now be captured into a signed,
+  durable observation receipt carrying no execution authority (M493), and a
+  shadow reconciler suggests — but never creates — up to 16 candidate goals
+  per preview, verified against that receipt (M494). External ecosystem
+  inputs (Cortex mission candidates, Locus identity evidence) get bounded,
+  fail-closed-on-expiry validation schemas that import no authority (M495).
+  Mission observations are captured only from authenticated, realized-merge
+  proposals (M496), and both the read-only shadow observer (M502) and its
+  CLI entry point (`vision shadow`, M497) prove the whole planning loop can
+  run end-to-end with zero effect.
+
+- **Supply-chain and dashboard hardening (M477, M480, M481, M479, M498,
+  M503, M484).** Public JSON payloads are scrubbed of secret-shaped strings
+  and home-directory paths and de-recursed before they reach the dashboard or
+  API (M477). The dashboard's mobile shell keeps navigation in one
+  horizontally-scrollable row (M480). Every action in every CI workflow is
+  now pinned to a reviewed immutable commit (M481), and the npm release
+  workflow additionally validates the release tag's target commit is in
+  protected `master` history before `npm publish --provenance` runs (M479).
+  Best-of-N's `-n` CLI flag is validated before config or model loading —
+  rejecting non-integers, floats, zero, negative, and unsafe-integer values
+  with exit code 2 (M498). The dashboard gained a read-only auth mode that
+  permits SSE and reads but blocks all mutating endpoints (M503). PR stack
+  topology (linearity, dependency correctness, convergence declarations) is
+  now shadow-observed read-only against GitHub with no mutation capability
+  (M484).
+
 ## [3.2.7] — 2026-08-16 — Immutable candidate supersession
 
 - Carries forward the immutable 3.2.6 candidate and all subsequently merged

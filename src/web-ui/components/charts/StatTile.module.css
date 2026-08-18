@@ -1,0 +1,58 @@
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-4);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+}
+
+.label {
+  font-size: var(--text-xs-size);
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.value {
+  font-size: var(--text-2xl-size);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-primary);
+}
+
+.trendRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.delta {
+  font-size: var(--text-xs-size);
+  font-variant-numeric: tabular-nums;
+}
+
+.deltaGood {
+  color: var(--status-success-fg);
+}
+
+.deltaBad {
+  color: var(--status-danger-fg);
+}
+
+.deltaNeutral {
+  color: var(--text-tertiary);
+}
+
+.caption {
+  font-size: var(--text-xs-size);
+  color: var(--text-tertiary);
+}

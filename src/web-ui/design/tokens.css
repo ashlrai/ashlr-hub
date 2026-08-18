@@ -1,0 +1,407 @@
+/**
+ * design/tokens.css — the ONE source of truth for ashlr-hub's design system.
+ *
+ * Replaces three forked token sets that used to disagree (public/index.html,
+ * public/styles.css, and the STATUS_COLOR map hardcoded in app.js) — see
+ * ../DESIGN.md for the full rationale and the status-color semantics chosen
+ * here to resolve the running/done inversion between them.
+ *
+ * Pattern: the full LIGHT palette lives on bare :root. Dark mode redefines
+ * only what changes, twice — once for the OS-level signal
+ * (`@media (prefers-color-scheme: dark)`, guarded so an explicit light
+ * choice always wins) and once for an explicit in-app toggle
+ * (`:root[data-theme="dark"]`). No token is EVER defined only inside a
+ * media query or a [data-theme] block — every token has a real value on
+ * bare :root first. This is the rule every future view must keep following.
+ */
+
+:root {
+  color-scheme: light;
+
+  /* ---------------------------------------------------------------------
+   * Neutral scale — 12 steps, light-mode values. Used for backgrounds,
+   * borders, and text at decreasing/increasing lightness.
+   * ------------------------------------------------------------------- */
+  --gray-0: #ffffff;
+  --gray-50: #f8f9fb;
+  --gray-100: #f1f3f6;
+  --gray-200: #e4e7ec;
+  --gray-300: #d0d5dd;
+  --gray-400: #98a2b3;
+  --gray-500: #667085;
+  --gray-600: #475467;
+  --gray-700: #344054;
+  --gray-800: #1d2939;
+  --gray-900: #101828;
+  --gray-950: #0a0e17;
+
+  /* Accent — one accent for the whole system (links, primary actions, focus
+     ring, active nav, brand). Indigo-blue: distinct from every semantic
+     status color below so "this is clickable/primary" never collides with
+     "this is a status". */
+  --accent-50: #eef1ff;
+  --accent-100: #e0e4ff;
+  --accent-300: #a6b2ff;
+  --accent-500: #5b6ff2;
+  --accent-600: #4655d6;
+  --accent-700: #3642ad;
+  --accent-contrast: #ffffff;
+
+  /* ---------------------------------------------------------------------
+   * Semantic status color — ONE system, three uses (status / phase /
+   * intent). See DESIGN.md "Status-color semantics" for why `running` is
+   * amber and `done` is green.
+   * ------------------------------------------------------------------- */
+  --status-neutral-bg: #eef0f3;
+  --status-neutral-fg: #4b5566;
+  --status-neutral-solid: #8a94a6;
+
+  --status-info-bg: #e7edff;
+  --status-info-fg: #2f4bd6;
+  --status-info-solid: #3d5afe;
+
+  --status-running-bg: #fff3d6;
+  --status-running-fg: #92660a;
+  --status-running-solid: #e8a417;
+
+  --status-success-bg: #e2f6ea;
+  --status-success-fg: #17794f;
+  --status-success-solid: #22a866;
+
+  --status-warning-bg: #fff0e0;
+  --status-warning-fg: #a15200;
+  --status-warning-solid: #f2882e;
+
+  --status-danger-bg: #fde7e7;
+  --status-danger-fg: #b0261c;
+  --status-danger-solid: #e5473a;
+
+  /* Epistemic honesty: degraded/unknown data. Deliberately NOT gray
+     (would read as "resolved, uninteresting") and NOT red (not an error) —
+     violet reads as "we genuinely don't know", matching its use nowhere
+     else in the palette. */
+  --status-unknown-bg: #f1e9ff;
+  --status-unknown-fg: #6b3fc9;
+  --status-unknown-solid: #8b5cf6;
+
+  /* Phase palette — categorical, for swarm/goal-milestone phases. Distinct
+     hues from status so "phase 3 of 5" never reads as a health signal. */
+  --phase-1: #3d5afe;
+  --phase-2: #8b5cf6;
+  --phase-3: #ec4899;
+  --phase-4: #f2882e;
+  --phase-5: #14b8a6;
+  --phase-6: #64748b;
+
+  /* ---------------------------------------------------------------------
+   * Surface / text / border roles
+   * ------------------------------------------------------------------- */
+  --bg-canvas: var(--gray-50);
+  --bg-surface: var(--gray-0);
+  --bg-surface-raised: var(--gray-0);
+  --bg-overlay: rgba(16, 24, 40, 0.48);
+  --bg-input: var(--gray-0);
+  --bg-hover: var(--gray-100);
+  --bg-active: var(--gray-200);
+  --bg-selected: var(--accent-50);
+  --bg-code: var(--gray-100);
+
+  --text-primary: var(--gray-900);
+  --text-secondary: var(--gray-600);
+  --text-tertiary: var(--gray-500);
+  --text-disabled: var(--gray-400);
+  --text-on-accent: var(--accent-contrast);
+  --text-link: var(--accent-600);
+
+  --border-default: var(--gray-200);
+  --border-subtle: var(--gray-100);
+  --border-strong: var(--gray-300);
+  --border-focus: var(--accent-500);
+
+  /* ---------------------------------------------------------------------
+   * Type scale — no body text below 12px anywhere in the system.
+   * ------------------------------------------------------------------- */
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+
+  --text-xs-size: 12px;
+  --text-xs-line: 16px;
+  --text-sm-size: 13px;
+  --text-sm-line: 18px;
+  --text-base-size: 14px;
+  --text-base-line: 20px;
+  --text-md-size: 15px;
+  --text-md-line: 22px;
+  --text-lg-size: 17px;
+  --text-lg-line: 24px;
+  --text-xl-size: 20px;
+  --text-xl-line: 28px;
+  --text-2xl-size: 24px;
+  --text-2xl-line: 32px;
+  --text-3xl-size: 30px;
+  --text-3xl-line: 38px;
+
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+
+  /* ---------------------------------------------------------------------
+   * Spacing scale — 4px base unit.
+   * ------------------------------------------------------------------- */
+  --space-0: 0px;
+  --space-px: 1px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --space-20: 80px;
+  --space-24: 96px;
+
+  /* ---------------------------------------------------------------------
+   * Radius scale
+   * ------------------------------------------------------------------- */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-full: 9999px;
+
+  /* ---------------------------------------------------------------------
+   * Elevation — light mode uses real shadows over a near-white surface.
+   * ------------------------------------------------------------------- */
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --shadow-md: 0 2px 8px rgba(16, 24, 40, 0.08), 0 1px 2px rgba(16, 24, 40, 0.06);
+  --shadow-lg: 0 8px 24px rgba(16, 24, 40, 0.12), 0 2px 6px rgba(16, 24, 40, 0.06);
+  --shadow-xl: 0 16px 48px rgba(16, 24, 40, 0.18), 0 4px 12px rgba(16, 24, 40, 0.08);
+  --shadow-focus-ring: 0 0 0 2px var(--bg-surface), 0 0 0 4px var(--border-focus);
+
+  /* ---------------------------------------------------------------------
+   * Motion — respects prefers-reduced-motion at the bottom of this file.
+   * ------------------------------------------------------------------- */
+  --duration-instant: 80ms;
+  --duration-fast: 120ms;
+  --duration-base: 180ms;
+  --duration-slow: 280ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-decelerate: cubic-bezier(0, 0, 0, 1);
+  --ease-accelerate: cubic-bezier(0.3, 0, 1, 1);
+
+  /* z-index scale — named, not guessed per-component. */
+  --z-base: 0;
+  --z-sticky: 10;
+  --z-dropdown: 20;
+  --z-overlay: 30;
+  --z-dialog: 40;
+  --z-command-palette: 50;
+  --z-toast: 60;
+}
+
+/* ===========================================================================
+ * Dark mode — OS signal. Only what changes; every var above still applies
+ * unless redefined here. Guarded by :not([data-theme="light"]) so an
+ * explicit light choice always overrides the OS preference.
+ * ========================================================================= */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+
+    --gray-0: #0a0e17;
+    --gray-50: #10141f;
+    --gray-100: #161b28;
+    --gray-200: #1f2635;
+    --gray-300: #2c3446;
+    --gray-400: #4b5566;
+    --gray-500: #6b7688;
+    --gray-600: #939cad;
+    --gray-700: #b3bccb;
+    --gray-800: #d5dae3;
+    --gray-900: #eef1f6;
+    --gray-950: #ffffff;
+
+    --accent-50: #171b3a;
+    --accent-100: #232a5c;
+    --accent-300: #6d7cf5;
+    --accent-500: #7c8bff;
+    --accent-600: #97a3ff;
+    --accent-700: #b7c0ff;
+    --accent-contrast: #0a0e17;
+
+    --status-neutral-bg: #1c2130;
+    --status-neutral-fg: #aab3c5;
+    --status-neutral-solid: #8a94a6;
+
+    --status-info-bg: #16204a;
+    --status-info-fg: #93a7ff;
+    --status-info-solid: #5b7cff;
+
+    --status-running-bg: #3a2c0a;
+    --status-running-fg: #f2c353;
+    --status-running-solid: #e8a417;
+
+    --status-success-bg: #0f2f21;
+    --status-success-fg: #5fd6a0;
+    --status-success-solid: #2ec27e;
+
+    --status-warning-bg: #3a220a;
+    --status-warning-fg: #f5a259;
+    --status-warning-solid: #f2882e;
+
+    --status-danger-bg: #3a1414;
+    --status-danger-fg: #f28b83;
+    --status-danger-solid: #ef5a4c;
+
+    --status-unknown-bg: #241a3a;
+    --status-unknown-fg: #c4a6ff;
+    --status-unknown-solid: #a276ff;
+
+    --phase-1: #5b7cff;
+    --phase-2: #a276ff;
+    --phase-3: #f472b6;
+    --phase-4: #f2a35e;
+    --phase-5: #2dd4bf;
+    --phase-6: #94a3b8;
+
+    --bg-canvas: #0a0e17;
+    --bg-surface: #10141f;
+    --bg-surface-raised: #161b28;
+    --bg-overlay: rgba(4, 6, 12, 0.6);
+    --bg-input: #161b28;
+    --bg-hover: #1c2231;
+    --bg-active: #242c3f;
+    --bg-selected: #1a2040;
+    --bg-code: #161b28;
+
+    --text-primary: #eef1f6;
+    --text-secondary: #aab3c5;
+    --text-tertiary: #838da0;
+    --text-disabled: #4b5566;
+    --text-on-accent: #0a0e17;
+    --text-link: #97a3ff;
+
+    --border-default: #242c3f;
+    --border-subtle: #1a2030;
+    --border-strong: #333d54;
+    --border-focus: #7c8bff;
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.45), 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.55), 0 2px 6px rgba(0, 0, 0, 0.3);
+    --shadow-xl: 0 16px 48px rgba(0, 0, 0, 0.6), 0 4px 12px rgba(0, 0, 0, 0.35);
+    --shadow-focus-ring: 0 0 0 2px var(--bg-surface), 0 0 0 4px var(--border-focus);
+  }
+}
+
+/* ===========================================================================
+ * Dark mode — explicit in-app toggle. Same values as the media-query block
+ * above, kept in sync deliberately (see DESIGN.md) so the toggle wins over
+ * the OS signal in both directions.
+ * ========================================================================= */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --gray-0: #0a0e17;
+  --gray-50: #10141f;
+  --gray-100: #161b28;
+  --gray-200: #1f2635;
+  --gray-300: #2c3446;
+  --gray-400: #4b5566;
+  --gray-500: #6b7688;
+  --gray-600: #939cad;
+  --gray-700: #b3bccb;
+  --gray-800: #d5dae3;
+  --gray-900: #eef1f6;
+  --gray-950: #ffffff;
+
+  --accent-50: #171b3a;
+  --accent-100: #232a5c;
+  --accent-300: #6d7cf5;
+  --accent-500: #7c8bff;
+  --accent-600: #97a3ff;
+  --accent-700: #b7c0ff;
+  --accent-contrast: #0a0e17;
+
+  --status-neutral-bg: #1c2130;
+  --status-neutral-fg: #aab3c5;
+  --status-neutral-solid: #8a94a6;
+
+  --status-info-bg: #16204a;
+  --status-info-fg: #93a7ff;
+  --status-info-solid: #5b7cff;
+
+  --status-running-bg: #3a2c0a;
+  --status-running-fg: #f2c353;
+  --status-running-solid: #e8a417;
+
+  --status-success-bg: #0f2f21;
+  --status-success-fg: #5fd6a0;
+  --status-success-solid: #2ec27e;
+
+  --status-warning-bg: #3a220a;
+  --status-warning-fg: #f5a259;
+  --status-warning-solid: #f2882e;
+
+  --status-danger-bg: #3a1414;
+  --status-danger-fg: #f28b83;
+  --status-danger-solid: #ef5a4c;
+
+  --status-unknown-bg: #241a3a;
+  --status-unknown-fg: #c4a6ff;
+  --status-unknown-solid: #a276ff;
+
+  --phase-1: #5b7cff;
+  --phase-2: #a276ff;
+  --phase-3: #f472b6;
+  --phase-4: #f2a35e;
+  --phase-5: #2dd4bf;
+  --phase-6: #94a3b8;
+
+  --bg-canvas: #0a0e17;
+  --bg-surface: #10141f;
+  --bg-surface-raised: #161b28;
+  --bg-overlay: rgba(4, 6, 12, 0.6);
+  --bg-input: #161b28;
+  --bg-hover: #1c2231;
+  --bg-active: #242c3f;
+  --bg-selected: #1a2040;
+  --bg-code: #161b28;
+
+  --text-primary: #eef1f6;
+  --text-secondary: #aab3c5;
+  --text-tertiary: #838da0;
+  --text-disabled: #4b5566;
+  --text-on-accent: #0a0e17;
+  --text-link: #97a3ff;
+
+  --border-default: #242c3f;
+  --border-subtle: #1a2030;
+  --border-strong: #333d54;
+  --border-focus: #7c8bff;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.45), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.55), 0 2px 6px rgba(0, 0, 0, 0.3);
+  --shadow-xl: 0 16px 48px rgba(0, 0, 0, 0.6), 0 4px 12px rgba(0, 0, 0, 0.35);
+  --shadow-focus-ring: 0 0 0 2px var(--bg-surface), 0 0 0 4px var(--border-focus);
+}
+
+/* ===========================================================================
+ * Reduced motion — collapse every duration token to effectively-instant
+ * rather than disabling transitions per-component. Components only ever
+ * read var(--duration-*), so this one override covers the whole system.
+ * ========================================================================= */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-instant: 0.01ms;
+    --duration-fast: 0.01ms;
+    --duration-base: 0.01ms;
+    --duration-slow: 0.01ms;
+  }
+}

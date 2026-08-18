@@ -96,9 +96,11 @@ import { enroll, unenroll, setKill } from '../src/core/sandbox/policy.js';
 import { createProposal } from '../src/core/inbox/store.js';
 import {
   _setWorkedLedgerHooksForTest,
+  DEFAULT_MAX_REJECTION_ATTEMPTS,
   recordOutcome,
   replayWorkedOutcomeAfterDispatchReceipt,
   recentlyDeclined,
+  rejectionAttemptCount,
   loadWorkedLedger,
   loadWorkedLedgerDetailed,
   latestWorkedEventForKeys,
@@ -286,6 +288,38 @@ describe('M85 worked-ledger — pure unit', () => {
     expect(recordOutcome('item-abc', 'diff')).toBe(true);
     const l = loadWorkedLedger();
     expect(l.events.some(e => e.itemId === 'item-abc' && e.outcome === 'diff')).toBe(true);
+  });
+
+  describe('rejectionAttemptCount — attempt-cap building block', () => {
+    it('counts only rejection-shaped outcomes (judged-review/judged-noise/judged-decline), not empty/dispatch-blocked/diff', () => {
+      const events = [
+        { itemId: 'x', outcome: 'diff' as const, ts: '2026-01-01T00:00:00.000Z' },
+        { itemId: 'x', outcome: 'empty' as const, ts: '2026-01-01T00:00:01.000Z' },
+        { itemId: 'x', outcome: 'dispatch-blocked' as const, ts: '2026-01-01T00:00:02.000Z' },
+        { itemId: 'x', outcome: 'judged-review' as const, ts: '2026-01-01T00:00:03.000Z' },
+        { itemId: 'x', outcome: 'judged-noise' as const, ts: '2026-01-01T00:00:04.000Z' },
+        { itemId: 'x', outcome: 'judged-decline' as const, ts: '2026-01-01T00:00:05.000Z' },
+      ];
+      expect(rejectionAttemptCount(events, ['x'])).toBe(3);
+    });
+
+    it('sums across all provided identity keys (a work item can have more than one cooldown key)', () => {
+      const events = [
+        { itemId: 'a', outcome: 'judged-decline' as const, ts: '2026-01-01T00:00:00.000Z' },
+        { itemId: 'b', outcome: 'judged-decline' as const, ts: '2026-01-01T00:00:01.000Z' },
+        { itemId: 'c', outcome: 'judged-decline' as const, ts: '2026-01-01T00:00:02.000Z' },
+      ];
+      expect(rejectionAttemptCount(events, ['a', 'b'])).toBe(2);
+      expect(rejectionAttemptCount(events, ['c'])).toBe(1);
+      expect(rejectionAttemptCount(events, ['does-not-exist'])).toBe(0);
+    });
+
+    it('is monotonic and unaffected by event age (unlike time-based cooldown)', () => {
+      const veryOld = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString();
+      const events = Array.from({ length: DEFAULT_MAX_REJECTION_ATTEMPTS }, () =>
+        ({ itemId: 'ancient', outcome: 'judged-decline' as const, ts: veryOld }));
+      expect(rejectionAttemptCount(events, ['ancient'])).toBe(DEFAULT_MAX_REJECTION_ATTEMPTS);
+    });
   });
 
   it('idempotently replays a worked outcome only after an exact dispatch receipt', () => {
@@ -1100,6 +1134,75 @@ describe('M85 cooldown skip — recentlyDeclined items are skipped', () => {
     await tick(cfg, { dryRun: false });
 
     expect(dispatched.length).toBeGreaterThan(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // Attempt cap — a persistently-rejected item must stop being re-dispatched,
+  // not just cool down and come back forever. Real-world evidence: the same
+  // work item ("Add a one-line module doc-comment...") was re-filed 6+ times
+  // because cooldown alone only delays a retry.
+  // -------------------------------------------------------------------------
+
+  it('never dispatches an item again once it has DEFAULT_MAX_REJECTION_ATTEMPTS judge rejections, even long after every cooldown window has expired', async () => {
+    const cappedId = 'attempt-capped-item';
+    // Each rejection is 24h old — far outside any plausible cooldown window,
+    // so a plain time-based cooldown would have already expired. Only a
+    // dedicated attempt cap should still keep this item parked.
+    const oldTs = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    for (let i = 0; i < DEFAULT_MAX_REJECTION_ATTEMPTS; i++) {
+      recordOutcome(cappedId, i % 2 === 0 ? 'judged-decline' : 'judged-review', oldTs);
+    }
+    expect(rejectionAttemptCount(loadWorkedLedger().events, [cappedId])).toBe(DEFAULT_MAX_REJECTION_ATTEMPTS);
+
+    backlogItems = [makeItem(cappedId, tmpRepo, { score: 10 })];
+
+    const dispatched: string[] = [];
+    mockRunSwarm.mockImplementation(async (_input: unknown, _cfg: unknown, opts: unknown) => {
+      const o = opts as Record<string, unknown>;
+      void o;
+      const goalStr = (_input as Record<string, unknown>)?.['goal'] as string ?? '';
+      dispatched.push(goalStr);
+      createProposal({ repo: tmpRepo, origin: 'swarm', kind: 'patch', title: goalStr, summary: '', diff: 'diff\n' });
+      return { id: 'sw', status: 'done', goal: goalStr, result: '', usage: { estCostUsd: 0, totalTokens: 0, steps: 1 } };
+    });
+
+    const cfg = {
+      ...makeCfg(),
+      daemon: { dailyBudgetUsd: 10, perTickItems: 3, parallel: 3, intervalMs: 100, cooldownMs: 60 * 60 * 1000 },
+    } as unknown as AshlrConfig;
+    liveCfgOverride = cfg;
+
+    await tick(cfg, { dryRun: false });
+
+    expect(dispatched.some((g) => g.includes(cappedId))).toBe(false);
+  });
+
+  it('still dispatches an item with fewer than DEFAULT_MAX_REJECTION_ATTEMPTS old rejections (attempt cap not yet reached)', async () => {
+    const underCapId = 'under-cap-item';
+    const oldTs = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    for (let i = 0; i < DEFAULT_MAX_REJECTION_ATTEMPTS - 1; i++) {
+      recordOutcome(underCapId, 'judged-decline', oldTs);
+    }
+
+    backlogItems = [makeItem(underCapId, tmpRepo, { score: 5 })];
+
+    const dispatched: string[] = [];
+    mockRunSwarm.mockImplementation(async (_input: unknown, _cfg: unknown, _opts: unknown) => {
+      const goalStr = (_input as Record<string, unknown>)?.['goal'] as string ?? '';
+      dispatched.push(goalStr);
+      createProposal({ repo: tmpRepo, origin: 'swarm', kind: 'patch', title: goalStr, summary: '', diff: 'diff\n' });
+      return { id: 'sw', status: 'done', goal: goalStr, result: '', usage: { estCostUsd: 0, totalTokens: 0, steps: 1 } };
+    });
+
+    const cfg = {
+      ...makeCfg(),
+      daemon: { dailyBudgetUsd: 10, perTickItems: 3, parallel: 3, intervalMs: 100, cooldownMs: 60 * 60 * 1000 },
+    } as unknown as AshlrConfig;
+    liveCfgOverride = cfg;
+
+    await tick(cfg, { dryRun: false });
+
+    expect(dispatched.some((g) => g.includes(underCapId))).toBe(true);
   });
 });
 

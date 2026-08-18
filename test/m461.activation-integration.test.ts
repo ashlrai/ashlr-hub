@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -29,6 +29,18 @@ afterEach(() => {
   delete process.env['ASHLR_IN_SWARM'];
   rmSync(home, { recursive: true, force: true });
 });
+
+/**
+ * M470: liveConductorActivationAuthorized() now writes an audit row on every
+ * check (matching this repo's existing per-tick audit convention in
+ * daemon/loop.ts). That's the intended "who tried this, when" trail — this
+ * asserts no AUTHORITY OR SERVICE state was written, only (at most) the
+ * audit trail.
+ */
+function expectOnlyAuditTrailWritten(homeDir: string): void {
+  if (!existsSync(join(homeDir, '.ashlr'))) return;
+  expect(readdirSync(join(homeDir, '.ashlr'))).toEqual(['audit']);
+}
 
 describe('M461 core activation integration', () => {
   it('refuses a direct live tick before daemon state or dispatch mutation', async () => {
@@ -76,7 +88,7 @@ describe('M461 core activation integration', () => {
     expect(result.activationRefused).toBe(true);
     expect(result.goalsAdvanced).toBe(0);
     expect(result.proposalsFiled).toBe(0);
-    expect(existsSync(join(home, '.ashlr'))).toBe(false);
+    expectOnlyAuditTrailWritten(home);
   });
 
   it('keeps the automerging simple conductor dormant without separate authority', async () => {
@@ -88,6 +100,6 @@ describe('M461 core activation integration', () => {
     expect(result.activationRefused).toBe(true);
     expect(result.tasksAttempted).toBe(0);
     expect(result.merged).toBe(0);
-    expect(existsSync(join(home, '.ashlr'))).toBe(false);
+    expectOnlyAuditTrailWritten(home);
   });
 });

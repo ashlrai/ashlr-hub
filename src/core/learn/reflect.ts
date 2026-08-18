@@ -7,10 +7,9 @@
  * deltas vs the prior persisted snapshot.
  *
  * HARD SAFETY INVARIANTS (M26):
- *  1. READ-ONLY over history. Reads listSwarms() / genomeHubHealth /
- *     collectUsageEvents() ONLY — the HUB-ONLY genome reader (no portfolio
- *     disk scan). Writes nothing here (the CLI persists the snapshot via
- *     learn/store.ts under ~/.ashlr/learn/).
+ *  1. READ-ONLY over history. buildReflection() reads listSwarms() /
+ *     genomeHubHealth / collectUsageEvents() ONLY — the HUB-ONLY genome
+ *     reader (no portfolio disk scan) — and writes nothing itself.
  *  2. NO TUNING. This module never proposes or applies anything — pure metrics.
  *  3. LOCAL-FIRST / NO LLM. buildReflection is DETERMINISTIC and makes ZERO
  *     network connections. No getActiveClient, no fetch. Narrative generation
@@ -20,6 +19,17 @@
  *  5. NEVER THROWS. Degrades to a zeroed report on any failure.
  *
  * METADATA ONLY — never reads/retains secret values or raw code/payloads.
+ *
+ * WRITE-BACK ENTRYPOINT: buildReflection() itself stays pure/read-only per
+ * invariant #1 above. runReflectionCycle() (bottom of this file) is the
+ * separate, explicit periodic entrypoint that persists the computed snapshot
+ * (learn/store.ts's saveReport, under ~/.ashlr/learn/ only) and distills
+ * playbooks (playbooks.ts's distillAndPersist, genome hub only) — this is
+ * what closes the loop from a manual `ashlr reflect` CLI command into
+ * something the daemon tick can call on its own schedule. It is still
+ * LOCAL-FIRST/NO-LLM by default (distillAndPersist is called with
+ * narrative:false, so it never calls getActiveClient / makes a network call
+ * unless a future caller explicitly opts in).
  */
 
 import type {
@@ -35,7 +45,13 @@ import { listSwarms } from '../swarm/store.js';
 import { genomeHubHealth } from '../genome/store.js';
 import { collectUsageEvents } from '../observability/usage-source.js';
 import { isLocalProviderModel } from '../observability/rollup.js';
-import { loadPreviousReport } from './store.js';
+import { loadPreviousReport, saveReport } from './store.js';
+// Lazy dynamic import inside runReflectionCycle (not a static top-level
+// import) — playbooks.ts imports classifyGoal from THIS file, so a static
+// import here would be circular. Mirrors the existing lazy-import pattern
+// used elsewhere in this codebase to avoid circular deps at module load
+// (e.g. feedback.ts's dynamic import of inbox/store.js).
+import type { PlaybookResult } from './playbooks.js';
 
 // ---------------------------------------------------------------------------
 // Bounds
@@ -473,4 +489,61 @@ export function buildReflection(
     delta,
     genome,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Public: runReflectionCycle — periodic write-back entrypoint
+// ---------------------------------------------------------------------------
+
+export interface ReflectionCycleResult {
+  report: ReflectionReport;
+  /** Absolute path the snapshot was written to, or null on a save failure. */
+  reportPath: string | null;
+  playbooks: PlaybookResult;
+}
+
+/**
+ * Run one full reflection cycle: compute the report, persist the snapshot
+ * (so the NEXT cycle can compute a week-over-week delta against it), and
+ * distill+persist playbooks from recently-successful swarms.
+ *
+ * This was previously only reachable via the manual `ashlr reflect` /
+ * `ashlr reflect playbooks --persist` CLI commands — nothing in a completed
+ * run fed back into it automatically. This function is what a periodic
+ * daemon tick calls instead.
+ *
+ * Deterministic and LOCAL-FIRST by default: narrative:false means
+ * distillAndPersist never calls getActiveClient / makes a network
+ * connection. cfg/opts are threaded straight through to buildReflection and
+ * distillAndPersist — this function adds no additional history reads.
+ *
+ * Never throws. On any distillation/persistence failure this still returns
+ * the computed report (report generation is the part that must not be lost).
+ */
+export async function runReflectionCycle(
+  cfg: AshlrConfig,
+  opts: ReflectionOptions & { maxPlaybookRuns?: number } = {},
+): Promise<ReflectionCycleResult> {
+  const report = buildReflection(cfg, opts);
+
+  let reportPath: string | null = null;
+  try {
+    reportPath = saveReport(report);
+  } catch {
+    reportPath = null;
+  }
+
+  let playbooks: PlaybookResult = { playbooks: [], persisted: [], local: true, didPersist: false };
+  try {
+    const playbooksModule = await import('./playbooks.js');
+    playbooks = await playbooksModule.distillAndPersist(cfg, {
+      ...(opts.maxPlaybookRuns !== undefined ? { maxRuns: opts.maxPlaybookRuns } : {}),
+      narrative: false,
+      persist: true,
+    });
+  } catch {
+    // Keep the report even when playbook distillation fails.
+  }
+
+  return { report, reportPath, playbooks };
 }

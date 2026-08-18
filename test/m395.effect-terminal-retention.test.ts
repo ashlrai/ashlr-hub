@@ -759,7 +759,10 @@ describe.skipIf(process.platform === 'win32')('effect terminal retention on POSI
       limitExceeded: false,
     });
     expect(readEffectJournal(1_000).records).toHaveLength(200);
-  }, 60_000);
+  // 200 real prepare+commit cycles hitting the fs journal; 60s is tight under
+  // a loaded parallel suite even though it's comfortable in isolation (~60s
+  // observed for the whole 28-test file). Same convention as m355: 120_000.
+  }, 120_000);
 
   it('stores no raw argument or outcome secrets in pack bytes', () => {
     const argumentSecret = 'm395-argument-secret-7fef7f';

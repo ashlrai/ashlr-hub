@@ -1,0 +1,84 @@
+.view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-width: 1600px;
+}
+
+.header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.title {
+  font-size: var(--text-2xl-size);
+  line-height: var(--text-2xl-line);
+  font-weight: var(--font-weight-semibold);
+}
+
+.subtitle {
+  font-size: var(--text-sm-size);
+  color: var(--text-tertiary);
+}
+
+.dispatchBanner {
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--status-warning-bg);
+  color: var(--status-warning-fg);
+  font-size: var(--text-sm-size);
+}
+.dispatchBanner code {
+  font-family: var(--font-mono);
+  background: rgba(0, 0, 0, 0.08);
+  padding: 0 4px;
+  border-radius: var(--radius-xs);
+}
+
+.layout {
+  display: grid;
+  /* The list is the primary surface (a 7-column table); the detail pane is
+     often an empty placeholder until a row is selected, so it no longer
+     out-weighs the list by default (was 1fr : 1.4fr, list side losing to an
+     empty pane — see DESIGN.md's known-defect note on this view). */
+  grid-template-columns: minmax(520px, 1.3fr) minmax(420px, 1fr);
+  gap: var(--space-4);
+  align-items: start;
+  min-width: 0;
+}
+
+@media (max-width: 1100px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.listPane {
+  min-width: 0;
+}
+
+.detailPane {
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  padding: var(--space-4);
+}
+
+.emptyDetail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-16) var(--space-4);
+  text-align: center;
+  color: var(--text-tertiary);
+  font-size: var(--text-sm-size);
+}
+
+.hint {
+  font-size: var(--text-xs-size);
+  color: var(--text-disabled);
+}

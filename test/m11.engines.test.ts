@@ -132,7 +132,7 @@ function makeOwnedGroupKillMock() {
 }
 
 // Import after mocking so the module picks up the mock.
-const { buildEngineCommand, phantomWrap, spawnEngine, engineInstalled } =
+const { buildEngineCommand, phantomWrap, spawnEngine, engineInstalled, DEFAULT_ENGINE_BACKSTOP_MS } =
   await import('../src/core/run/engines.js');
 
 // ---------------------------------------------------------------------------
@@ -482,6 +482,47 @@ describe('spawnEngine — never throws on failure', () => {
     expect(vi.mocked(spawn)).not.toHaveBeenCalled();
   });
 
+  // ---------------------------------------------------------------------------
+  // Live defect regression: spawnEngine's runaway-cost backstop must default to
+  // the documented 2h contract (engines.ts comments at :378/:651,
+  // sandboxed-engine.ts DEFAULT_TIMEOUT_MS), not the stray 5min fallback that
+  // used to live at engines.ts:899. A caller that omits opts.timeoutMs (as
+  // orchestrator.ts used to) must NOT get its long-running delegation
+  // SIGKILLed with terminationReason 'backstop-timeout' after only 5 minutes.
+  // ---------------------------------------------------------------------------
+  it('DEFAULT_ENGINE_BACKSTOP_MS is exactly 2 hours', () => {
+    expect(DEFAULT_ENGINE_BACKSTOP_MS).toBe(2 * 60 * 60_000);
+  });
+
+  it('defaults the backstop timer to DEFAULT_ENGINE_BACKSTOP_MS (2h) when opts.timeoutMs is omitted', async () => {
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    const pending = spawnEngine({ bin: 'aw', args: ['auto', GOAL] }, makeConfig());
+
+    const backstopDelays = setTimeoutSpy.mock.calls
+      .map((call) => call[1])
+      .filter((delay) => typeof delay === 'number' && delay >= 60_000);
+    expect(backstopDelays).toContain(DEFAULT_ENGINE_BACKSTOP_MS);
+    // The old, buggy 5min default must NOT be what gets registered.
+    expect(backstopDelays).not.toContain(5 * 60 * 1000);
+
+    getSpawnControl().resolve(0, null, 'ok\n');
+    await expect(pending).resolves.toMatchObject({ ok: true });
+    setTimeoutSpy.mockRestore();
+  });
+
+  it('honors an explicit opts.timeoutMs instead of the 2h default', async () => {
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    const pending = spawnEngine({ bin: 'aw', args: ['auto', GOAL] }, makeConfig(), { timeoutMs: 42_000 });
+
+    const backstopDelays = setTimeoutSpy.mock.calls.map((call) => call[1]);
+    expect(backstopDelays).toContain(42_000);
+    expect(backstopDelays).not.toContain(DEFAULT_ENGINE_BACKSTOP_MS);
+
+    getSpawnControl().resolve(0, null, 'ok\n');
+    await expect(pending).resolves.toMatchObject({ ok: true });
+    setTimeoutSpy.mockRestore();
+  });
+
   it('spawns signal-owned POSIX runs in a detached process group only', async () => {
     const { spawn } = await import('node:child_process');
     const controller = new AbortController();
@@ -553,7 +594,9 @@ describe('spawnEngine — never throws on failure', () => {
       return setTimeoutSpy.mock.results[index]!.value as NodeJS.Timeout;
     };
     expect(timerForDelay(10_000).hasRef()).toBe(true);
-    expect(timerForDelay(5 * 60 * 1000).hasRef()).toBe(false);
+    // No explicit timeoutMs passed in this test → backstop timer uses the
+    // spawnEngine default (2h, DEFAULT_ENGINE_BACKSTOP_MS), not the old 5min.
+    expect(timerForDelay(2 * 60 * 60_000).hasRef()).toBe(false);
 
     const deadlineTimer = timerForDelay(10_000);
     const escalation = setTimeoutSpy.mock.calls.find((call) => call[1] === 10_000)![0];

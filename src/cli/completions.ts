@@ -11,17 +11,25 @@
 
 import { makeColors, isTty } from './ui.js';
 
-/** Top-level commands (kept in sync by test/m31.cli-agent.test.ts). */
+/**
+ * Top-level commands (kept in sync by test/m31.cli-agent.test.ts AND, since
+ * M-cli-audit, by a structural drift test — test/cli-registry-drift.test.ts —
+ * that parses the real dispatch switch in src/cli/index.ts and fails if this
+ * list (or HELP_ENTRIES) ever falls out of sync with it again).
+ */
 export const TOP_LEVEL_COMMANDS: string[] = [
   'index', 'go', 'status', 'ls', 'open', 'tidy', 'config', 'doctor', 'init',
-  'mcp', 'run', 'runs', 'pulse', 'new', 'ship', 'recall', 'learn', 'genome',
-  'update', 'spec', 'swarm', 'swarms', 'tui', 'dash', 'serve', 'models',
+  'setup', 'mcp', 'run', 'runs', 'eval', 'pulse', 'pulse-export', 'pulse-test',
+  'new', 'ship', 'recall', 'learn', 'genome',
+  'update', 'spec', 'swarm', 'swarms', 'tui', 'dash', 'dashboard', 'serve', 'models',
   'gh', 'vercel', 'wire', 'notify', 'telemetry', 'sandbox', 'audit',
-  'enroll', 'backlog', 'inbox', 'daemon', 'ask', 'knowledge', 'reflect',
-  'health', 'goals', 'fleet', 'recovery', 'digest', 'seams', 'verify-safety', 'preflight',
+  'enroll', 'backlog', 'inbox', 'daemon', 'worker', 'ask', 'knowledge', 'reflect',
+  'health', 'goals', 'fleet', 'recovery', 'manager', 'vision', 'goal', 'loop',
+  'roadmap', 'stack', 'ecosystem', 'digest', 'seams', 'verify-safety', 'preflight',
   'conductor-permit',
-  'onboard', 'demo', 'orient', 'docs', 'completions', 'plugins', 'x', 'help',
-  'skills',
+  'onboard', 'demo', 'orient', 'docs', 'completions', 'plugins', 'x', 'comms',
+  'director', 'best-of-n', 'invent', 'resources', 'usage', 'version', 'help',
+  'skills', 'activation',
 ];
 
 /** Subcommands per top-level command (first-position completion only). */
@@ -30,7 +38,7 @@ const SUBCOMMANDS: Record<string, string[]> = {
   mcp: ['list', 'doctor', 'install'],
   run: ['show'],
   spec: ['new', 'list', 'show', 'refine'],
-  swarm: ['show'],
+  swarm: ['show', 'verify', 'approve', 'rollback'],
   models: ['pull', 'start'],
   gh: ['pr', 'issue', 'ci'],
   vercel: ['ls', 'logs'],
@@ -40,22 +48,38 @@ const SUBCOMMANDS: Record<string, string[]> = {
   sandbox: ['list', 'diff', 'cleanup', 'gc'],
   enroll: ['add', 'remove', 'list', 'kill'],
   backlog: ['refresh'],
-  inbox: ['show', 'approve', 'reject'],
-  daemon: ['start', 'stop', 'status', 'activation-preflight', 'activate'],
+  inbox: ['show', 'approve', 'reject', 'automerge'],
+  daemon: [
+    'start', 'stop', 'status', 'activation-preflight', 'activate',
+    'recover-state', 'resolve-state', 'install', 'uninstall', 'service-status',
+  ],
+  worker: ['setup', 'status'],
   fleet: [
     'status', 'watch', 'direction', 'init', 'pause', 'resume', 'doctor',
     'automerge-canary', 'evidence', 'scorecard', 'oversight',
+    'judge-traces', 'judge-health', 'optimize-prompt',
   ],
   recovery: ['list', 'inspect', 'attest', 'abandon'],
   knowledge: ['build', 'impact', 'graph'],
   reflect: ['playbooks', 'propose'],
   health: ['propose'],
-  goals: ['add', 'plan', 'advance', 'status', 'recover-stale', 'repair-timestamps'],
+  goals: [
+    'add', 'list', 'show', 'plan', 'advance', 'status', 'recover-stale',
+    'repair-timestamps', 'pause', 'resume', 'skip', 'reorder', 'delete',
+  ],
   'conductor-permit': ['request', 'mint', 'inspect', 'stage'],
+  vision: ['show', 'review', 'preview', 'shadow', 'approve', 'reconcile', 'set'],
+  eval: ['attention', 'swe-bench'],
+  genome: ['recall', 'learn', 'teach', 'consolidate', 'export', 'playbook'],
+  comms: ['status', 'send-test', 'cycle', 'ask', 'digest', 'ask-vision', 'ask-merges', 'setup-telegram'],
+  stack: ['status', 'list', 'providers', 'recommend', 'scan', 'doctor', 'add', 'apply'],
+  ecosystem: ['doctor'],
+  roadmap: ['run', 'resume', 'status'],
   seams: ['status'],
   completions: ['zsh', 'bash'],
   plugins: ['init', 'list', 'info', 'enable', 'disable'],
   skills: ['audit'],
+  activation: ['init', 'status', 'grant', 'revoke'],
 };
 
 const FLEET_AUTOMERGE_CANARY_SUBCOMMANDS = [

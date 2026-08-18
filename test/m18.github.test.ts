@@ -690,7 +690,7 @@ describe('viewPr — read-only PR detail', () => {
       'view',
       'ashlr/proposal-42',
       '--json',
-      'number,url,state,mergedAt,closed,closedAt,headRefName,headRefOid,baseRefName,baseRefOid,mergeCommit,autoMergeRequest',
+      'id,number,url,state,mergedAt,closed,closedAt,headRefName,headRefOid,baseRefName,baseRefOid,mergeCommit,autoMergeRequest',
     ]);
   });
 
@@ -706,7 +706,7 @@ describe('viewPr — read-only PR detail', () => {
     expect(viewPr('/fake/cwd', 'ashlr/proposal-42', { repo: 'acme/my-repo' })).not.toBeNull();
     expect(calls[0]).toEqual([
       'pr', 'view', 'ashlr/proposal-42', '--repo', 'acme/my-repo', '--json',
-      'number,url,state,mergedAt,closed,closedAt,headRefName,headRefOid,baseRefName,baseRefOid,mergeCommit,autoMergeRequest',
+      'id,number,url,state,mergedAt,closed,closedAt,headRefName,headRefOid,baseRefName,baseRefOid,mergeCommit,autoMergeRequest',
     ]);
     expect(observedEnv?.['GH_HOST']).toBe('github.com');
     expect(viewPr('/fake/cwd', '42', { repo: '../other' })).toBeNull();

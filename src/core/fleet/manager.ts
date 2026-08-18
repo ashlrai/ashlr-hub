@@ -8,7 +8,10 @@
  * Key design rules:
  *   - Never throws (runManager wraps everything).
  *   - On LLM parse failure: default to verdict 'review' — never auto-reject on
- *     uncertainty.
+ *     uncertainty. This fallback is tagged verdict.judgeFailure ('parse' |
+ *     'network') so it is never mistaken for — or counted as — a real
+ *     considered judgment downstream (ledger judgeReasonCode, self-improve
+ *     rejection learning, judgeNonShipCount/auto-archive).
  *   - wouldMerge is advisory only (does not trigger any apply).
  *   - applyRejects=false (default): pure shadow — no setStatus calls.
  *   - applyRejects=true: setStatus(id,'rejected',...) only for noise/harmful.
@@ -61,6 +64,17 @@ export interface ManagerVerdict {
   alignment: number;
   /** One-line rationale from the judge. */
   rationale: string;
+  /**
+   * Set ONLY when this verdict is a synthetic fallback, not a real judgment:
+   * 'parse'   = the judge responded but its output could not be parsed as a
+   *             verdict (after a one-shot stricter reprompt retry).
+   * 'network' = the judge call itself failed (network/API/spawn error) —
+   *             no model response was ever obtained.
+   * verdict is always 'review' and wouldMerge is always false when this is
+   * set — never treat this as a considered judgment (e.g. for rejection
+   * learning, judgeNonShipCount, or auto-archive accounting).
+   */
+  judgeFailure?: 'parse' | 'network';
   /**
    * Advisory: would this be safe to auto-merge?
    * True only when: verdict==='ship' AND the proposal fits the configured
@@ -298,18 +312,50 @@ function isJsonRecord(value: unknown): value is JsonRecord {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+// Case-insensitive field lookup. Some models (notably local/open-weight
+// engines run through Ollama) emit rubric JSON with differently-cased keys
+// ("Value", "VERDICT", ...). Exact-case `obj['value']` lookups silently miss
+// those, clamp() defaults the score to 1, and a perfectly good response gets
+// treated as malformed. Forensic evidence (real judge transcripts) showed
+// this is a real, recurring failure mode, not a hypothetical one.
+function ciField(obj: JsonRecord, name: string): unknown {
+  if (Object.prototype.hasOwnProperty.call(obj, name)) return obj[name];
+  const lower = name.toLowerCase();
+  for (const k of Object.keys(obj)) {
+    if (k.toLowerCase() === lower) return obj[k];
+  }
+  return undefined;
+}
+
+function ciString(obj: JsonRecord, name: string): string | undefined {
+  const v = ciField(obj, name);
+  return typeof v === 'string' ? v : undefined;
+}
+
 function isVerdictJson(value: unknown): value is JsonRecord {
   if (!isJsonRecord(value)) return false;
-  if (Object.prototype.hasOwnProperty.call(value, 'verdict')) return true;
+  if (ciField(value, 'verdict') !== undefined) return true;
 
   // Single score-like fields appear in provider telemetry envelopes. Treat a
   // score-only object as verdict JSON only when it carries the complete rubric.
   return (
-    Object.prototype.hasOwnProperty.call(value, 'value') &&
-    Object.prototype.hasOwnProperty.call(value, 'correctness') &&
-    Object.prototype.hasOwnProperty.call(value, 'scope') &&
-    Object.prototype.hasOwnProperty.call(value, 'alignment')
+    ciField(value, 'value') !== undefined &&
+    ciField(value, 'correctness') !== undefined &&
+    ciField(value, 'scope') !== undefined &&
+    ciField(value, 'alignment') !== undefined
   );
+}
+
+// Tolerates the single most common LLM JSON defect — a trailing comma before
+// a closing brace/bracket — after a strict JSON.parse fails. Still throws on
+// anything else malformed; callers already handle that via try/catch.
+function parseJsonLenient(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    const cleaned = text.replace(/,(\s*[}\]])/g, '$1');
+    return JSON.parse(cleaned);
+  }
 }
 
 function addTextCandidate(candidates: string[], text: unknown): void {
@@ -400,7 +446,7 @@ function normaliseJudgeTextCandidates(raw: string): string[] {
 function extractJson(raw: string): Record<string, unknown> | null {
   // Try direct parse first.
   try {
-    const parsed = JSON.parse(raw.trim());
+    const parsed = parseJsonLenient(raw.trim());
     if (isVerdictJson(parsed)) return parsed;
   } catch { /* fall through */ }
 
@@ -408,7 +454,7 @@ function extractJson(raw: string): Record<string, unknown> | null {
   const fenceMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (fenceMatch?.[1]) {
     try {
-      const parsed = JSON.parse(fenceMatch[1].trim());
+      const parsed = parseJsonLenient(fenceMatch[1].trim());
       if (isVerdictJson(parsed)) return parsed;
     } catch { /* fall through */ }
   }
@@ -422,7 +468,7 @@ function extractJson(raw: string): Record<string, unknown> | null {
   const allBraceMatches = [...raw.matchAll(/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*/g)];
   for (let i = allBraceMatches.length - 1; i >= 0; i--) {
     try {
-      const parsed = JSON.parse(allBraceMatches[i]![0]);
+      const parsed = parseJsonLenient(allBraceMatches[i]![0]);
       if (isVerdictJson(parsed)) return parsed;
     } catch { /* keep scanning */ }
   }
@@ -438,7 +484,7 @@ function extractJson(raw: string): Record<string, unknown> | null {
     }
     if (end !== -1) {
       try {
-        const parsed = JSON.parse(raw.slice(start, end + 1));
+        const parsed = parseJsonLenient(raw.slice(start, end + 1));
         if (isVerdictJson(parsed)) return parsed;
       } catch { /* fall through */ }
     }
@@ -556,7 +602,13 @@ export async function judgeProposal(
   client: { complete: JudgeComplete; model?: string },
   options: JudgeProposalOptions = {},
 ): Promise<ManagerVerdict> {
-  const fallback = (): ManagerVerdict => {
+  // A fallback verdict is NEVER a real judgment — it is what gets returned
+  // when we couldn't get one. It stays fail-closed (verdict:'review',
+  // wouldMerge:false, never auto-rejects) but is tagged via `judgeFailure` so
+  // downstream consumers (ledger, self-improve, auto-archive counters) can
+  // tell it apart from an actual considered 'review' verdict instead of it
+  // silently masquerading as one.
+  const fallback = (kind: 'parse' | 'network' = 'parse'): ManagerVerdict => {
     const verdict: ManagerVerdict = {
       proposalId: proposal.id,
       verdict: 'review',
@@ -564,8 +616,11 @@ export async function judgeProposal(
       correctness: 3,
       scope: 3,
       alignment: 3,
-      rationale: 'parse failure — defaulting to review',
+      rationale: kind === 'network'
+        ? 'judge call failed (network/API error) — held for human review; NOT a considered judgment'
+        : 'judge response unparseable after retry — held for human review; NOT a considered judgment',
       wouldMerge: false,
+      judgeFailure: kind,
     };
     return verdict;
   };
@@ -593,7 +648,7 @@ export async function judgeProposal(
     );
   } catch {
     throwIfJudgeCancelled(options.signal);
-    return fallback();
+    return fallback('network');
   }
 
   const parsed = parseJudgeResponse(raw);
@@ -628,9 +683,9 @@ export async function judgeProposal(
   };
   const rVerdictM = rprose.match(/VERDICT\s*[:=]\s*(ship|review|noise|harmful)\b/i);
 
-  if (!obj) return fallback();
+  if (!obj) return fallback('parse');
 
-  const jsonVerdict = typeof obj['verdict'] === 'string' ? obj['verdict'] : undefined;
+  const jsonVerdict = ciString(obj, 'verdict');
   const reasoningVerdict = rVerdictM?.[1]?.toLowerCase();
   const verdict: ManagerVerdict['verdict'] = jsonVerdict
     ? (VALID_VERDICTS.has(jsonVerdict.toLowerCase())
@@ -638,13 +693,14 @@ export async function judgeProposal(
         : normaliseVerdict(jsonVerdict))
     : ((reasoningVerdict as ManagerVerdict['verdict'] | undefined) ?? 'review');
 
-  const value = clamp(obj['value'] ?? rNum('VALUE'), 1, 5);
-  const correctness = clamp(obj['correctness'] ?? rNum('CORRECTNESS'), 1, 5);
-  const scope = clamp(obj['scope'] ?? rNum('SCOPE'), 1, 5);
-  const alignment = clamp(obj['alignment'] ?? rNum('ALIGNMENT'), 1, 5);
+  const value = clamp(ciField(obj, 'value') ?? rNum('VALUE'), 1, 5);
+  const correctness = clamp(ciField(obj, 'correctness') ?? rNum('CORRECTNESS'), 1, 5);
+  const scope = clamp(ciField(obj, 'scope') ?? rNum('SCOPE'), 1, 5);
+  const alignment = clamp(ciField(obj, 'alignment') ?? rNum('ALIGNMENT'), 1, 5);
+  const rationaleField = ciString(obj, 'rationale');
   const rationale =
-    typeof obj['rationale'] === 'string' && obj['rationale'].length > 0
-      ? obj['rationale'].slice(0, 200)
+    rationaleField && rationaleField.length > 0
+      ? rationaleField.slice(0, 200)
       : 'no rationale provided';
 
   // wouldMerge is advisory only. The merge gate independently re-checks
@@ -693,10 +749,11 @@ export async function judgeProposal(
     wouldMerge,
   };
   const completeStructuredRubric = parseSource === 'json' &&
-    typeof obj['verdict'] === 'string' && VALID_VERDICTS.has(obj['verdict'].toLowerCase()) &&
-    ['value', 'correctness', 'scope', 'alignment'].every((field) =>
-      typeof obj![field] === 'number' && Number.isInteger(obj![field]) &&
-      Number(obj![field]) >= 1 && Number(obj![field]) <= 5);
+    !!jsonVerdict && VALID_VERDICTS.has(jsonVerdict.toLowerCase()) &&
+    ['value', 'correctness', 'scope', 'alignment'].every((field) => {
+      const v = ciField(obj!, field);
+      return typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 5;
+    });
   const semanticEvents = completeStructuredRubric
     ? safeManagerSemanticEvents(result, client.model)
     : undefined;
@@ -1157,11 +1214,6 @@ export function resolveFrontierJudgeClient(
     return (reviewerFamily === 'claude' || reviewerFamily === 'openai') &&
       evaluateReviewerIndependence(opts.producerModel, resolved.model).independent;
   };
-  const configuredEngine = (cfg.foundry as Record<string, unknown> | undefined)?.['managerJudgeEngine'];
-  if (configuredEngine !== undefined && configuredEngine !== 'auto') {
-    const configured = resolve(cfg);
-    return eligible(configured) ? configured : null;
-  }
 
   const withEngine = (engine: 'claude' | 'codex'): AshlrConfig => ({
     ...cfg,
@@ -1171,6 +1223,23 @@ export function resolveFrontierJudgeClient(
     } as AshlrConfig['foundry'],
   });
   const producerFamily = producerModelFamily(opts.producerModel);
+  // `cfg` always goes first — this is where an explicit cfg.foundry.managerJudgeEngine
+  // (or 'auto') is actually honoured, via resolveJudgeClient reading it internally.
+  // The opposite-family candidate(s) are the fallback when that first try isn't
+  // independent of the producer.
+  //
+  // Previously an EXPLICIT managerJudgeEngine short-circuited straight to null
+  // when it wasn't independent, instead of falling through to this same search.
+  // That silently and PERMANENTLY starved independence-required judging for an
+  // entire producer family whenever the operator's configured judge engine
+  // matched it (e.g. managerJudgeEngine='codex' can never judge codex-produced
+  // proposals) — those proposals never receive a 'judged' ledger entry, so
+  // Gate 4b criterion 1 / Gate 7 (src/core/inbox/merge.ts) could never find
+  // one and the proposal sat pending forever. Falling through here does NOT
+  // weaken the independence bar (`eligible` above is unchanged, still
+  // required) — it only widens which engine may be tried to satisfy it when
+  // the operator's specific pick cannot, exactly mirroring what 'auto' already
+  // did.
   const candidates = producerFamily === 'claude'
     ? [cfg, withEngine('codex')]
     : producerFamily === 'openai'
@@ -1269,6 +1338,24 @@ function buildConcerns(verdicts: ManagerVerdict[]): string[] {
   const lowValue = verdicts.filter((v) => v.value <= 2);
   if (lowValue.length > 0) {
     concerns.push(`${lowValue.length} proposal(s) scored value ≤2 — low return on inference spend.`);
+  }
+
+  // Judge failures are NOT considered verdicts — surface them loudly so they
+  // never get silently read as genuine 'review' judgments by an operator
+  // skimming the report.
+  const parseFailures = verdicts.filter((v) => v.judgeFailure === 'parse');
+  if (parseFailures.length > 0) {
+    concerns.push(
+      `${parseFailures.length} proposal(s) got an UNPARSEABLE judge response (not a real judgment, held for human review): ${
+        parseFailures.map((v) => v.proposalId).join(', ')}`,
+    );
+  }
+  const networkFailures = verdicts.filter((v) => v.judgeFailure === 'network');
+  if (networkFailures.length > 0) {
+    concerns.push(
+      `${networkFailures.length} proposal(s) hit a judge network/API error (not a real judgment, held for human review): ${
+        networkFailures.map((v) => v.proposalId).join(', ')}`,
+    );
   }
 
   return concerns;
@@ -1462,7 +1549,15 @@ export async function runManager(
         ...(judgeStats?.tokensOut !== undefined ? { tokensOut: judgeStats.tokensOut } : {}),
         verdict: verdict.verdict,
         ...(!judgeClient ? { reason: 'manager-judge-unavailable' } : {}),
-        detail: verdict.wouldMerge && reviewerIndependent ? 'would-merge' : '',
+        // A judgeFailure fallback is NOT a considered verdict — tag it with a
+        // distinct, finite detail sentinel (never free text) so the ledger's
+        // judgeReasonCode is 'judge-parse-failure' / 'judge-network-failure'
+        // instead of silently indistinguishable from a real 'judge-review'.
+        detail: verdict.judgeFailure === 'parse'
+          ? 'judge-parse-failure'
+          : verdict.judgeFailure === 'network'
+            ? 'judge-network-failure'
+            : (verdict.wouldMerge && reviewerIndependent ? 'would-merge' : ''),
         ...(verdict.semanticEvents ? { semanticEvents: verdict.semanticEvents } : {}),
         ...(judgeAttestation !== undefined ? { judgeAttestation } : {}),
         ...(judgeAttestation !== undefined

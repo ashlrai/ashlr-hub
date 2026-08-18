@@ -123,6 +123,34 @@ let _shouldEscalate: ShouldEscalateFn | null = null;
 let _snapshotProject: SnapshotFn | null = null;
 let _m17Loaded = false;
 
+/**
+ * True when gate.js (risk-scan/escalation) failed to load. Set once by
+ * loadM17() and never retried (mirrors the _m17Loaded singleton-cache
+ * semantics of the other lazy deps). runSwarm() checks this BEFORE any task
+ * executes and refuses to run rather than operate with zero risk assessment
+ * — see the preflight check near the M19 governance gate.
+ */
+let _gateLoadFailed = false;
+
+// ---------------------------------------------------------------------------
+// M17/M21 lazy-load observability — M197 structured-logging convention
+// (mirrors goal-planner.ts's plannerLog, itself modeled on manager.ts /
+// automerge-pass.ts). sign.js, gate.js, rollback.js, and sandbox/audit.js all
+// exist in this repo today: a throw here means a genuine build problem (bad
+// build, import cycle, partial dist) — NOT an absent module — so it must
+// never be a silent catch.
+// ---------------------------------------------------------------------------
+function runnerLog(level: 'warn' | 'error', msg: string, extra?: Record<string, unknown>): void {
+  const line = extra
+    ? `[ashlr] swarm/runner:${level} ${msg} ${JSON.stringify(extra)}`
+    : `[ashlr] swarm/runner:${level} ${msg}`;
+  if (level === 'error') {
+    console.error(line);
+  } else {
+    console.warn(line);
+  }
+}
+
 async function loadM17(): Promise<void> {
   if (_m17Loaded) return;
   _m17Loaded = true;
@@ -130,21 +158,50 @@ async function loadM17(): Promise<void> {
     const sign = await import('./sign.js') as { signOutput: SignFn; verifyOutput: VerifyFn };
     _signOutput = sign.signOutput;
     _verifyOutput = sign.verifyOutput;
-  } catch {
-    // sign.ts not built yet — signing/verification degrades to no-op
+  } catch (err) {
+    // sign.ts exists in the repo. Every call site already treats signing as
+    // best-effort (see the try/catch around _signOutput() — "absent
+    // signature means downstream verification skips this dep"), so a
+    // load failure degrades the same way, but LOUDLY: it must never vanish
+    // into a silent catch, since that's exactly how signing fails open.
+    runnerLog(
+      'error',
+      '[M17][SECURITY] output signing unavailable this run — task results will NOT be signed and downstream tamper verification will silently skip them',
+      { module: './sign.js', reason: err instanceof Error ? err.message : String(err) },
+    );
   }
   try {
     const gate = await import('./gate.js') as { riskScan: RiskScanFn; shouldEscalate: ShouldEscalateFn };
     _riskScan = gate.riskScan;
     _shouldEscalate = gate.shouldEscalate;
-  } catch {
-    // gate.ts not built yet — escalation degrades to no-op
+  } catch (err) {
+    // gate.ts exists in the repo. Unlike sign/rollback/audit (forensic or
+    // recovery aids), the risk-scan/escalation gate is the ONLY REAL-TIME
+    // PREVENTIVE control among the M17/M21 lazy deps — it's what stops risky
+    // autonomous output from proceeding unchecked. Losing it silently would
+    // mean every task result runs with zero risk assessment. FAIL CLOSED:
+    // flag it so runSwarm() refuses to start (see _gateLoadFailed) instead
+    // of degrading to no-op.
+    _gateLoadFailed = true;
+    runnerLog(
+      'error',
+      '[M17][SECURITY] risk-scan/escalation gate unavailable — swarm will refuse to run rather than execute with zero risk assessment',
+      { module: './gate.js', reason: err instanceof Error ? err.message : String(err) },
+    );
   }
   try {
     const rb = await import('./rollback.js') as { snapshotProject: SnapshotFn };
     _snapshotProject = rb.snapshotProject;
-  } catch {
-    // rollback.ts not built yet — snapshot degrades to no-op
+  } catch (err) {
+    // rollback.ts exists in the repo. Snapshot creation is already
+    // best-effort at its call site ("snapshot failure never blocks the
+    // swarm"), so a load failure degrades the same way — but loudly, so an
+    // operator can see the undo safety net is missing this run.
+    runnerLog(
+      'warn',
+      '[M17] rollback snapshot module unavailable this run — no pre-run git snapshot will be captured (no undo safety net)',
+      { module: './rollback.js', reason: err instanceof Error ? err.message : String(err) },
+    );
   }
 }
 
@@ -219,8 +276,16 @@ async function loadM21(): Promise<void> {
     const auSpec = '../sandbox/audit.js';
     const au = await import(/* @vite-ignore */ auSpec) as { audit: AuditFn };
     _audit = au.audit;
-  } catch {
-    // audit.ts not built yet — audit degrades to no-op
+  } catch (err) {
+    // audit.ts exists in the repo. Every call site already treats _audit?.()
+    // as optional + best-effort ("audit is best-effort"), so a load failure
+    // degrades the same way — but loudly, so an operator can see the audit
+    // trail is missing this run rather than assuming silence means clean.
+    runnerLog(
+      'warn',
+      '[M21] audit logging module unavailable this run — no audit trail will be written (sandbox create/cleanup, proposal capture, etc. will NOT be recorded)',
+      { module: '../sandbox/audit.js', reason: err instanceof Error ? err.message : String(err) },
+    );
   }
   try {
     // M24: the inbox proposal sink — used ONLY when opts.propose is set.
@@ -1709,6 +1774,45 @@ async function runSwarmInternal(
       if (!opts.dryRun) persist(blockedRun);
       return blockedRun;
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // M17 SECURITY: fail CLOSED when the risk-scan/escalation gate (gate.js)
+  // could not be loaded — see loadM17()/_gateLoadFailed. This is the ONE lazy
+  // dep of the four (sign/gate/rollback/audit) that gets a hard refusal
+  // rather than a loud degrade: it's the only real-time PREVENTIVE control —
+  // sign/rollback/audit are forensic or recovery aids whose absence is bad
+  // but doesn't let unreviewed risky output slip through. Matches the
+  // requireSandbox convention already in this file: refuse rather than run
+  // with the safety control silently missing.
+  // -------------------------------------------------------------------------
+  if (_gateLoadFailed) {
+    const now = new Date().toISOString();
+    const reason =
+      'the risk-scan/escalation gate (gate.js) failed to load, so task output ' +
+      'cannot be automatically screened for risk before it proceeds';
+    const gateBlockedRun: SwarmRun = {
+      id: opts.runId ?? makeId(),
+      goal: input.goal,
+      specId: input.specId ?? null,
+      project,
+      createdAt: now,
+      updatedAt: now,
+      budget,
+      usage: newUsage(),
+      parallel,
+      status: 'failed',
+      plan: { specId: input.specId ?? null, goal: input.goal, tasks: [] },
+      tasks: [],
+      result: `Refused: ${reason}. No tasks were executed; the working tree was NOT touched.`,
+      proposalOutcome: {
+        kind: 'engine-failed-no-diff',
+        reason,
+      },
+    };
+    emitLog(sink, gateBlockedRun.result ?? '');
+    if (!opts.dryRun) persist(gateBlockedRun);
+    return gateBlockedRun;
   }
 
   // -------------------------------------------------------------------------

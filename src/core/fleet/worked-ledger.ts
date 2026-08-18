@@ -60,6 +60,16 @@ export const DEFAULT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 export const GENERATED_REPAIR_DISPATCH_BLOCKED_COOLDOWN_MS = 5 * 60 * 1000;
 
 /**
+ * Cooldown alone only delays a retry — after enough cooldown windows elapse,
+ * a persistently-rejected work item comes back forever (backlog dedup only
+ * suppresses re-filing while a proposal is PENDING; once rejected it becomes
+ * eligible again next cycle). This bounds the total number of times the
+ * fleet will keep re-dispatching the same logical item after real judge
+ * rejections before parking it. See rejectionAttemptCount / isRejectionWorkedOutcome.
+ */
+export const DEFAULT_MAX_REJECTION_ATTEMPTS = 3;
+
+/**
  * The outcome of a single item run or judge verdict.
  *
  * - 'diff'            — run produced a real diff (work done).
@@ -976,6 +986,33 @@ export function workedEventIsCooling(
   if (!Number.isFinite(eventMs)) return false;
   const elapsedMs = (now ?? Date.now()) - eventMs;
   return elapsedMs >= 0 && elapsedMs < cooldownMs;
+}
+
+/**
+ * True for outcomes that represent an actual judge rejection of a proposal —
+ * as opposed to 'empty' (no diff produced) or 'dispatch-blocked' (an infra
+ * hiccup), neither of which is a considered rejection.
+ */
+export function isRejectionWorkedOutcome(outcome: WorkedOutcome): boolean {
+  return outcome === 'judged-review' || outcome === 'judged-noise' || outcome === 'judged-decline';
+}
+
+/**
+ * Count of past judge-rejection outcomes recorded for any of the given
+ * identity keys (a WorkItem's cooldown keys). Unlike workedEventIsCooling
+ * (which only looks at the MOST RECENT event within a time window), this is
+ * a monotonic all-time count used to bound total attempts per logical item.
+ */
+export function rejectionAttemptCount(
+  events: readonly WorkedEvent[],
+  itemIds: readonly string[],
+): number {
+  const keys = new Set(itemIds);
+  let count = 0;
+  for (const event of events) {
+    if (keys.has(event.itemId) && isRejectionWorkedOutcome(event.outcome)) count++;
+  }
+  return count;
 }
 
 // ---------------------------------------------------------------------------

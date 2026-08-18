@@ -1,0 +1,24 @@
+.wrap {
+  max-width: 560px;
+  padding: var(--space-12) 0;
+}
+
+.title {
+  font-size: var(--text-2xl-size);
+  line-height: var(--text-2xl-line);
+  font-weight: var(--font-weight-semibold);
+  margin-bottom: var(--space-3);
+}
+
+.description {
+  font-size: var(--text-base-size);
+  color: var(--text-secondary);
+  margin-bottom: var(--space-4);
+}
+
+.note {
+  font-size: var(--text-sm-size);
+  color: var(--text-tertiary);
+  border-left: 2px solid var(--border-strong);
+  padding-left: var(--space-3);
+}

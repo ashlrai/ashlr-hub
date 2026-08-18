@@ -1,0 +1,75 @@
+.svg {
+  display: block;
+  overflow: visible;
+}
+
+.bar {
+  transition: opacity var(--duration-fast) var(--ease-standard);
+}
+
+.bar:hover,
+.bar:focus-visible {
+  opacity: 0.82;
+}
+
+.baseline {
+  stroke: var(--chart-axis);
+  stroke-width: 1;
+}
+
+.gridline {
+  stroke: var(--chart-grid);
+  stroke-width: 1;
+}
+
+.axisLabel {
+  font-size: 10px;
+  fill: var(--text-tertiary);
+  font-family: var(--font-ui);
+}
+
+.valueLabel {
+  font-size: 10px;
+  fill: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-variant-numeric: tabular-nums;
+}
+
+.categoryLabel {
+  font-size: 10px;
+  fill: var(--text-secondary);
+  font-family: var(--font-ui);
+}
+
+.hitArea {
+  fill: transparent;
+  cursor: pointer;
+}
+
+.tooltip {
+  position: absolute;
+  pointer-events: none;
+  background: var(--chart-tooltip-bg);
+  border: 1px solid var(--chart-tooltip-border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--text-xs-size);
+  color: var(--text-primary);
+  white-space: nowrap;
+  z-index: var(--z-dropdown);
+}
+
+.tooltipValue {
+  font-weight: var(--font-weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+
+.tooltipLabel {
+  color: var(--text-tertiary);
+  margin-left: var(--space-1);
+}
+
+.wrap {
+  position: relative;
+}

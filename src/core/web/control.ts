@@ -18,11 +18,11 @@
 
 import type { AshlrConfig, DaemonTick } from '../types.js';
 import {
-  buildFleetStatus,
   resolveAutonomyControlMode,
   type FleetAutonomyControlMode,
   type FleetStatus,
 } from '../fleet/status.js';
+import { getCachedFleetStatus, type CachedFleetStatus } from './fleet-status-cache.js';
 import { getProviderRegistry } from '../providers.js';
 import { buildRollup, modelToProviderKey, LOCAL_PROVIDER_KEYS } from '../observability/rollup.js';
 import {
@@ -175,6 +175,13 @@ export interface ControlSnapshot {
   ts: string;
   models: ControlModels;
   fleet: FleetStatus;
+  /**
+   * Perf: freshness of `fleet` (shared buildFleetStatus cache, see
+   * web/fleet-status-cache.ts). `stale: true` means `fleet` is the last good
+   * cached value while a background refresh is in flight — reported
+   * honestly, never silently presented as current.
+   */
+  fleetFreshness: { stale: boolean; ageMs: number };
   daemon: ControlDaemon;
   daemonObservation: PublicDaemonObservation;
   usage: ControlUsage;
@@ -689,6 +696,13 @@ export interface FleetActivitySnapshot {
   /** Last N daemon ticks (newest-first, capped 20). */
   recentTicks: FleetTickEntry[];
   recentTicksSourceQuality: DaemonSourceQuality;
+  /**
+   * Perf: freshness of the underlying buildFleetStatus() read (shared cache,
+   * see web/fleet-status-cache.ts). `stale: true` means recentTicks came from
+   * the last good cached value while a background refresh is in flight —
+   * still honestly reported, never silently presented as current.
+   */
+  recentTicksFreshness: { stale: boolean; ageMs: number };
 }
 
 function degradedProposalSourceQuality(): ProposalSourceQuality {
@@ -839,8 +853,11 @@ export async function buildFleetActivity(cfg: AshlrConfig): Promise<FleetActivit
     complete: false,
     reason: 'unavailable',
   };
+  let recentTicksFreshness: { stale: boolean; ageMs: number } = { stale: false, ageMs: 0 };
   try {
-    const fleet = await buildFleetStatus(cfg);
+    const cachedFleet = await getCachedFleetStatus(cfg);
+    const fleet = cachedFleet.status;
+    recentTicksFreshness = { stale: cachedFleet.stale, ageMs: cachedFleet.ageMs };
     const observation = readPublicDaemonObservation(fleet.daemon);
     if (observation.ticks !== null) {
       const ticks = observation.ticks;
@@ -883,6 +900,7 @@ export async function buildFleetActivity(cfg: AshlrConfig): Promise<FleetActivit
     cooldownCount,
     recentTicks,
     recentTicksSourceQuality,
+    recentTicksFreshness,
   };
 }
 
@@ -897,46 +915,52 @@ export async function buildFleetActivity(cfg: AshlrConfig): Promise<FleetActivit
 export async function buildControlSnapshot(cfg: AshlrConfig): Promise<ControlSnapshot> {
   const ts = new Date().toISOString();
 
-  const [models, fleet] = await Promise.all([
+  const [models, cachedFleet] = await Promise.all([
     buildModels(cfg),
-    buildFleetStatus(cfg).catch((err): FleetStatus => {
+    getCachedFleetStatus(cfg).catch((err): CachedFleetStatus => {
       console.warn('[ashlr] control:buildControlSnapshot buildFleetStatus failed:', (err as Error)?.message ?? err);
       return {
-        generatedAt: ts,
-        daemon: {
-          running: false,
-          sourceQuality: {
+        stale: false,
+        ageMs: 0,
+        status: {
+          generatedAt: ts,
+          daemon: {
+            running: false,
+            sourceQuality: {
+              sourceState: 'degraded',
+              complete: false,
+              reason: 'unavailable',
+            },
+            lastTickAt: null,
+            todaySpentUsd: 0,
+          },
+          backends: [],
+          queue: { backlogItems: 0 },
+          proposals: { pending: 0, frontierPending: 0, applied: 0 },
+          merges: { recent: 0 },
+          autonomyControlMode: resolveAutonomyControlMode(cfg),
+          guardHealth: {
+            generatedAt: ts,
+            blocked: true,
+            blocks: [],
+            sourceQuality: {
+              sourceState: 'degraded',
+              complete: false,
+              reasons: ['fleet-status-unavailable'],
+            },
+          },
+          killed: true,
+          killSwitch: {
+            state: 'unknown',
             sourceState: 'degraded',
-            complete: false,
             reason: 'unavailable',
           },
-          lastTickAt: null,
-          todaySpentUsd: 0,
-        },
-        backends: [],
-        queue: { backlogItems: 0 },
-        proposals: { pending: 0, frontierPending: 0, applied: 0 },
-        merges: { recent: 0 },
-        autonomyControlMode: resolveAutonomyControlMode(cfg),
-        guardHealth: {
-          generatedAt: ts,
-          blocked: true,
-          blocks: [],
-          sourceQuality: {
-            sourceState: 'degraded',
-            complete: false,
-            reasons: ['fleet-status-unavailable'],
-          },
-        },
-        killed: true,
-        killSwitch: {
-          state: 'unknown',
-          sourceState: 'degraded',
-          reason: 'unavailable',
-        },
+        } satisfies FleetStatus,
       };
     }),
   ]);
+  const fleet = cachedFleet.status;
+  const fleetFreshness = { stale: cachedFleet.stale, ageMs: cachedFleet.ageMs };
 
   const daemonObservation = readPublicDaemonObservation(fleet.daemon);
   const daemon = buildDaemon(cfg, daemonObservation);
@@ -951,6 +975,7 @@ export async function buildControlSnapshot(cfg: AshlrConfig): Promise<ControlSna
     ts,
     models,
     fleet,
+    fleetFreshness,
     daemon,
     daemonObservation,
     usage,

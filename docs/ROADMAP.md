@@ -2,7 +2,10 @@
 
 The forward-looking companion to [CHANGELOG.md](../CHANGELOG.md) (what shipped)
 and [docs/contracts/](./contracts/) (the binding per-milestone specs). This
-file states direction; contracts state commitments.
+file states direction; contracts state commitments. For an ID-by-ID status
+lookup across every milestone (including confirmed spec-vs-shipped
+collisions), see [`docs/MILESTONE-INDEX.md`](./MILESTONE-INDEX.md) — check it
+before citing a milestone number as evidence of what shipped.
 
 ## Design principles (constant across every milestone)
 
@@ -72,7 +75,17 @@ file states direction; contracts state commitments.
   regression gate (exit 3 on a newly-broken task or resolve-rate drop —
   wire into CI/cron).
 
-## Near-term (v2.3 candidates — direction, not commitments)
+## Historical near-term list (stale — kept for reference only)
+
+> **This section is ~9 minor versions stale.** It was written when the repo
+> was pre-first-release and targeted "v2.3"; the package is now at
+> **3.2.0** (`package.json`) with v3 through v6.x shipped (see "Shipped"
+> above) and npm publication already the baseline for the 3.0.x line (see
+> README "Version history"). None of the five bullets below have been
+> re-verified against current `src/`; treat every one as a historical
+> artifact, not a current backlog. For what's actually next, check open
+> GitHub issues and `docs/MILESTONE-INDEX.md` for gaps. This section is kept
+> only so old links into it don't 404 — do not plan against it.
 
 - **First public release.** Tag `v2.2.0` → npm publish via the release
   pipeline; gather real-world install feedback (docs/RELEASING.md).
@@ -86,14 +99,22 @@ file states direction; contracts state commitments.
 - **Agent contract v2.** Versioned `--json` schemas surfaced in
   `docs --agent --json`; conformance tests that fail when a shape drifts.
 
-## v3 — Team Command Center (gate OPENED 2026-06-12)
+## v3 — Team Command Center (gate opened 2026-06-12, NOT YET BUILT)
 
-The team / multi-machine backbone is now specced and scheduled: see
+The team / multi-machine backbone is specced: see
 [`docs/SPEC-V3-TEAM.md`](./SPEC-V3-TEAM.md) — one team memory, one approval
 inbox (approve anywhere, owning machine applies), coordinated daemons, and
 team visibility, riding the existing api.ashlr.ai backend under `/hub/v1/*`.
-Milestones M34–M40, contracts-first, delivered via the registered ashlr goal.
-Everything stays local-first: cloud is sync, not dependency.
+Milestones M34–M40, contracts-first, registered as an ashlr goal 2026-06-12.
+
+**As of this pass, none of M34–M40 has shipped.** No `test/m34.*` through
+`test/m40.*` exist; `hub/v1` and `ASHLR_API_URL` are absent from `src/`. What
+exists today is the M30 local-only seam layer, deliberately gated to throw
+(`src/core/seams/identity.ts:45`, `src/core/seams/daemon-coordinator.ts:79`).
+"Gate opened" means a goal was registered and the spec was written — it does
+not mean the milestones were delivered. See `docs/MILESTONE-INDEX.md` §3 and
+the status banner at the top of `docs/SPEC-V3-TEAM.md`. Everything stays
+local-first: cloud is sync, not dependency.
 
 ## Gated future (explicitly NOT scheduled)
 - **Public SaaS / anything world-readable.** The team backbone is

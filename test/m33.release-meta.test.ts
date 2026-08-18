@@ -178,13 +178,13 @@ describe('release workflow', () => {
   it('is tag-triggered and reuses the exact native CI gate before publish', () => {
     expect(parsed.on?.push?.tags).toEqual(['v*']);
     expect(parsed.env).toEqual({
-      RELEASE_VERSION: '3.2.7',
+      RELEASE_VERSION: '3.3.0',
       RELEASE_DIST_TAG: 'candidate',
       BASELINE_LATEST_VERSION: '3.0.1',
-      PREVIOUS_CANDIDATE_VERSION: '3.2.6',
+      PREVIOUS_CANDIDATE_VERSION: '3.2.7',
       PREVIOUS_CANDIDATE_INTEGRITY:
-        'sha512-b8O5Nxfb9IfYsmgSW80CAYW+3ZPlet8u7NALOfG8XGFnAAEWxvLtbLKer3psNg7rxkDrAt+rhUjzRzri72PFkA==',
-      PREVIOUS_CANDIDATE_TAG_SHA: '80d49d718d893d0cb02f85a62cd9d2691f4f39c3',
+        'sha512-Zep4krYD7uKqh2k+Z6w0sMyNDsLFjEtV1H8EqdM7yKTKCHSq79lJb7jGoH1qrfOXDBRTJTmG7bSDSPOBUFj+yA==',
+      PREVIOUS_CANDIDATE_TAG_SHA: '73931bdd31b3b4e4d905a30b5112e4cd712f7844',
     });
     expect(parsed.concurrency).toEqual({
       group: 'npm-candidate-${{ github.ref }}',
@@ -432,7 +432,7 @@ describe('release workflow', () => {
     expect(releaseDocs).toContain('the exact\n   tag commit');
     expect(releaseDocs).toContain('Do not use **Re-run failed jobs**');
     expect(releaseDocs).toContain('even when the seven-day handoff\n   artifact has not expired');
-    expect(releaseDocs).toContain('set -euo pipefail\n   version=3.2.7\n   release_tag="v${version}"');
+    expect(releaseDocs).toContain('set -euo pipefail\n   version=3.3.0\n   release_tag="v${version}"');
     expect(releaseDocs).toContain('git rev-list -n 1 "$release_tag"');
     expect(releaseDocs).toContain('node scripts/extract-changelog.mjs "$version" > "$release_notes"');
     expect(releaseDocs).toContain(

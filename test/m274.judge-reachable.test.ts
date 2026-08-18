@@ -368,7 +368,16 @@ describe('M274 frontier judge reachability', () => {
     expect(client?.model).toMatch(/claude/i);
   });
 
-  it('[R13b] honors an explicit correlated reviewer by failing pending', () => {
+  it('[R13b] falls back to the opposite family when the explicit reviewer is correlated', () => {
+    // Semantics changed deliberately: the old behavior "honored" an explicit
+    // but producer-correlated pin by returning null — fail pending, forever.
+    // With managerJudgeEngine pinned to the fleet's dominant producer family,
+    // that meant the majority of real output could never receive an
+    // independent judge verdict at all, which was a structural cause of the
+    // 672-rejections/0-merges history. The pin now falls through to the
+    // opposite family (mirroring 'auto'), keeping the independence invariant
+    // intact — see [R14]: when NO cross-family reviewer is installed, the
+    // resolver still fails pending rather than accepting a correlated judge.
     const cfg = baseCfg({ managerJudgeEngine: 'claude' });
     mockEngineInstalled.mockImplementation((engine: string) => engine === 'claude' || engine === 'codex');
 
@@ -377,7 +386,9 @@ describe('M274 frontier judge reachability', () => {
       requireIndependent: true,
     });
 
-    expect(client).toBeNull();
+    expect(client).not.toBeNull();
+    // Must be the OPPOSITE family — never the producer's own.
+    expect(client!.model).not.toMatch(/claude/i);
   });
 
   it('[R14] fails pending when only a same-family frontier reviewer is installed', () => {

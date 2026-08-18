@@ -1,0 +1,29 @@
+.unknown {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--status-unknown-fg);
+  font-size: var(--text-sm-size);
+  font-style: italic;
+  cursor: help;
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--status-unknown-solid);
+  flex-shrink: 0;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-full);
+  background: var(--status-unknown-bg);
+  color: var(--status-unknown-fg);
+  font-size: var(--text-xs-size);
+  font-style: italic;
+  cursor: help;
+}

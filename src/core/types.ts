@@ -800,6 +800,15 @@ export interface AshlrConfig {
     kimi?: {
       maxConcurrent?: number;
       costPerMTokenOut?: number;
+      /**
+       * M270: high-level convenience override that promotes the 'kimi' engine
+       * spec's tier (engine-registry.ts:405 applyKimiConfig — e.g.
+       * `foundry.kimi = { tier: 'frontier' }` grants WORK-ASSIGNMENT frontier
+       * eligibility without touching the builtin registry). Previously read
+       * only via an untyped `(cfg?.foundry as Record<string, unknown>)?.['kimi']`
+       * cast; live in ~/.ashlr/config.json (tier: 'frontier') as of this audit.
+       */
+      tier?: EngineTier;
     };
     /**
      * M248: guarantee fleet sandboxed engines inherit ashlr-plugin MCP tools.
@@ -1380,6 +1389,47 @@ export interface AshlrConfig {
       /** Ollama base URL (default 'http://localhost:11434'). */
       baseUrl?: string;
     };
+    /**
+     * M151: opt-in EDV (independent/external) verification signal folded into
+     * backlog item scoring. DEFAULT false. Previously read only via an untyped
+     * `(cfg.foundry as Record<string, unknown>)?.['edvVerify']` cast in
+     * src/core/portfolio/backlog.ts — this only adds type safety/
+     * discoverability, no behavior change.
+     */
+    edvVerify?: boolean;
+    /**
+     * M185: gate for the `ashlrcode` (ac) autonomous executor path. DEFAULT
+     * false (opt-in). Previously read only via an untyped
+     * `(cfg.foundry as Record<string, unknown>)?.['ashlrcodeExecutor']` cast
+     * in src/core/run/ashlrcode-engine.ts.
+     */
+    ashlrcodeExecutor?: boolean;
+    /**
+     * Spec-contract acceptance-criteria checking gate. DEFAULT false
+     * (disabled — emptyDetail short-circuit). Previously read only via an
+     * untyped `(cfg?.foundry as Record<string, unknown>)?.['specContract']`
+     * cast in src/core/run/spec-contract.ts.
+     */
+    specContract?: boolean;
+    /**
+     * Inject a lightweight repo map into sandboxed-engine prompts. DEFAULT
+     * false. Previously read only via an untyped
+     * `(cfg.foundry as Record<string, unknown>)?.['repoMap']` cast in
+     * src/core/run/sandboxed-engine.ts (sibling to `localization`, which
+     * remains untyped/out of scope for this pass).
+     */
+    repoMap?: boolean;
+    /**
+     * Repair-treatment maintenance pass toggle. DEFAULT true (opt-out via
+     * false). Discovered live in ~/.ashlr/config.json during the M340b type
+     * audit — previously read only via untyped
+     * `(liveCfg.foundry as Record<string, unknown>)?.['proposalRepair']`
+     * casts in src/core/daemon/loop.ts (3 sites) and src/core/fleet/status.ts.
+     * NOT YET present in KNOWN_FOUNDRY_KEYS (src/core/effective-config.ts),
+     * so a live config setting it currently trips a false-positive "unknown
+     * foundry key" warning — flagged separately for that file's owner.
+     */
+    proposalRepair?: boolean;
   };
   /**
    * M24: optional autonomous-operator (daemon) tuning. When unset, the daemon
@@ -2966,6 +3016,15 @@ export interface DashboardSnapshot {
    */
   fleet?: import('./fleet/status.js').FleetStatus;
   /**
+   * Perf: OPTIONAL freshness marker for `fleet`. `buildFleetStatus` is now
+   * served from a shared cache (see web/fleet-status-cache.ts) so concurrent
+   * requests never trigger duplicate full recomputes. `stale: true` means
+   * `fleet` is the last good value (still honestly reported, never silently
+   * presented as current) while a background refresh is in flight; `ageMs`
+   * is how old it is. Absent when the fleet section itself is absent.
+   */
+  fleetFreshness?: { stale: boolean; ageMs: number };
+  /**
    * M29: OPTIONAL org-level portfolio roll-up. ABSENT on existing producers /
    * tests (so they stay valid); populated by buildSnapshot when the v2 sources
    * are present. READ-ONLY aggregation over already-local state — health (M27,
@@ -3025,6 +3084,28 @@ export interface ProductionSummary {
     review: number;
     noise: number;
     harmful: number;
+    total: number;
+  };
+  /**
+   * Judge calls over the last 24h that produced NO real verdict — a parse
+   * failure (unparseable LLM response, even after the one-shot retry) or a
+   * network failure (the API call itself threw). judgeProposal() returns via
+   * its `fallback()` helper BEFORE recordJudgeTrace() runs on either path
+   * (see fleet/manager.ts), so these calls write no judge-trace row and are
+   * invisible to judgeVerdicts24h — without this field a failed judge call
+   * looks identical to a judge call that never happened.
+   *
+   * Sourced from the decisions ledger's distinct 'judge-parse-failure' /
+   * 'judge-network-failure' judgeReasonCode (fleet/judge-decision-metadata.ts),
+   * NOT from judge-trace — fallback verdicts are deliberately never written
+   * to judge-trace because their synthetic all-3 scores would corrupt
+   * judge-calibration.ts (darkCurrent/kappa/degradation-harness all read
+   * every trace unconditionally). The decisions ledger already records both
+   * failure kinds distinctly and separately from calibration's read path.
+   */
+  judgeFailures24h: {
+    parse: number;
+    network: number;
     total: number;
   };
   /** Auto-merges today: proposals that reached status 'applied' today. */
@@ -3876,6 +3957,17 @@ export interface ProposalVerifyResult {
   passed: boolean;
   failed?: string[];
   detail?: string;
+  /**
+   * Present only when passed:false. Distinguishes WHY verification failed:
+   * 'code' (or absent, for pre-existing records) means the verifier ran and
+   * found a real problem with the diff. 'tool' means the verifier itself
+   * could not be executed (missing binary, exit 127, spawn ENOENT — a
+   * verifier-unavailable outcome, not a judgment on the diff). 'timeout' and
+   * 'infra' are likewise infrastructure signals, not code signals. Consumers
+   * that gate permanent rejection/auto-archival on verification failure MUST
+   * check this before treating a failure as fatal to the proposal.
+   */
+  failureCategory?: 'code' | 'tool' | 'timeout' | 'infra' | 'cancelled' | 'invalid-command';
   ran?: Array<{
     id?: string;
     kind: 'typecheck' | 'lint' | 'build' | 'test';
@@ -5575,7 +5667,11 @@ export type JudgeDecisionReasonCode =
   | 'judge-review'
   | 'judge-noise'
   | 'judge-harmful'
-  | 'judge-verdict-unrecognized';
+  | 'judge-verdict-unrecognized'
+  /** Judge responded but its output could not be parsed as a verdict (after retry). NOT a considered judgment. */
+  | 'judge-parse-failure'
+  /** The judge call itself failed (network/API/spawn error) — no model response was obtained. NOT a considered judgment. */
+  | 'judge-network-failure';
 
 export interface DecisionEntry {
   /** ISO timestamp. */

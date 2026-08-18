@@ -1,8 +1,8 @@
 # Releasing @ashlr/hub
 
 Releases are tag-triggered and fully gated. The current lane is deliberately
-pinned to the 3.2.7 candidate: nothing reaches npm without an explicit human
-action (pushing `v3.2.7`), approval of the `npm-release` environment, and a green
+pinned to the 3.3.0 candidate: nothing reaches npm without an explicit human
+action (pushing `v3.3.0`), approval of the `npm-release` environment, and a green
 full-CI verify job plus the signed release-canary gate. It publishes only under
 npm dist-tag `candidate` and creates a GitHub prerelease; it cannot move npm or
 GitHub `latest`.
@@ -63,17 +63,17 @@ verified.
 ## Release procedure
 
 The current workflow is a one-version successor-candidate lane. It requires
-npm `latest` to equal `3.0.1`, `candidate` to equal `3.2.6`, immutable version 3.2.6
+npm `latest` to equal `3.0.1`, `candidate` to equal `3.2.7`, immutable version 3.2.7
 to retain integrity
-`sha512-b8O5Nxfb9IfYsmgSW80CAYW+3ZPlet8u7NALOfG8XGFnAAEWxvLtbLKer3psNg7rxkDrAt+rhUjzRzri72PFkA==`,
-the lightweight `v3.2.6` tag to remain at
-`80d49d718d893d0cb02f85a62cd9d2691f4f39c3`, and version 3.2.7 to be absent.
+`sha512-Zep4krYD7uKqh2k+Z6w0sMyNDsLFjEtV1H8EqdM7yKTKCHSq79lJb7jGoH1qrfOXDBRTJTmG7bSDSPOBUFj+yA==`,
+the lightweight `v3.2.7` tag to remain at
+`73931bdd31b3b4e4d905a30b5112e4cd712f7844`, and version 3.3.0 to be absent.
 It fails closed if any precondition changes. Before authorizing the tag, an
 authenticated npm maintainer must run the pinned npm 11 client and
 verify `npm trust list @ashlr/hub` exactly matches the repository, workflow,
 environment, and `npm publish` permission documented above. The successful
-3.2.6 publication proves only that the binding worked for that exact attempt;
-it does not replace the action-time check for 3.2.7.
+3.2.7 publication proves only that the binding worked for that exact attempt;
+it does not replace the action-time check for 3.3.0.
 
 The workflow serializes runs for the exact release ref and performs the registry
 admission immediately before `npm publish`. npm dist-tags do not offer a
@@ -84,8 +84,8 @@ The release policy accepts only a lightweight tag whose current GitHub ref still
 resolves directly to the event commit; annotated tags, tag rewrites, and deleted
 tags fail closed.
 
-1. Confirm `version` in `package.json` is exactly `3.2.7`.
-2. Make sure `CHANGELOG.md` has a `## [3.2.7]` section — the release FAILS
+1. Confirm `version` in `package.json` is exactly `3.3.0`.
+2. Make sure `CHANGELOG.md` has a `## [3.3.0]` section — the release FAILS
    without one (`scripts/extract-changelog.mjs` enforces changelog discipline;
    its body becomes the GitHub release notes).
 3. Confirm protected `master` is at the intended release SHA and its required
@@ -93,8 +93,8 @@ tags fail closed.
    release tag (do not force, move, delete, or recreate it):
 
    ```bash
-   git tag v3.2.7
-   git push origin v3.2.7
+   git tag v3.3.0
+   git push origin v3.3.0
    ```
 
 4. `.github/workflows/release.yml` then:
@@ -139,8 +139,8 @@ tags fail closed.
      per-member caps. It streams only bounded package/build identity bytes
      without executing them, rejects any package-level registry override,
      re-establishes protected-master history, exact successor registry state,
-     `latest=3.0.1`, and the immutable `v3.2.6` tag identity, and requires the
-     live lightweight `v3.2.7` tag to resolve to the event SHA immediately
+     `latest=3.0.1`, and the immutable `v3.2.7` tag identity, and requires the
+     live lightweight `v3.3.0` tag to resolve to the event SHA immediately
      before the single OIDC-authenticated `npm publish
      <tarball> --ignore-scripts --provenance --access public --tag candidate`.
      It exports the exact successful publication attempt before that effect so
@@ -151,8 +151,8 @@ tags fail closed.
      verified SLSA statement and bind its package purl/SHA-512, repository,
      workflow path, tag ref, Git commit, push event, GitHub-hosted builder,
      workflow run, and run attempt to the exact release execution. It also
-     proves 3.2.6 retained its exact integrity, `candidate` moved only from
-     3.2.6 to 3.2.7, and every other pre-existing dist-tag including
+     proves 3.2.7 retained its exact integrity, `candidate` moved only from
+     3.2.7 to 3.3.0, and every other pre-existing dist-tag including
      `latest=3.0.1` stayed unchanged;
    - **release** — only after `verify_publish` succeeds, download and verify the
      manifest-bound public notes artifact, recheck the live lightweight tag
@@ -243,16 +243,22 @@ package with integrity
 `sha512-b8O5Nxfb9IfYsmgSW80CAYW+3ZPlet8u7NALOfG8XGFnAAEWxvLtbLKer3psNg7rxkDrAt+rhUjzRzri72PFkA==`
 under npm `candidate`, while preserving `latest=3.0.1`. Its protected
 lightweight tag remains at `80d49d718d893d0cb02f85a62cd9d2691f4f39c3`.
-Never move, delete, recreate, or reuse `v3.2.6` or version 3.2.6; version 3.2.7
+Never move, delete, recreate, or reuse `v3.2.6` or version 3.2.6. Version 3.2.7
+was the next successor lane; it subsequently published the immutable public
+3.2.7 package with integrity
+`sha512-Zep4krYD7uKqh2k+Z6w0sMyNDsLFjEtV1H8EqdM7yKTKCHSq79lJb7jGoH1qrfOXDBRTJTmG7bSDSPOBUFj+yA==`
+under npm `candidate`, while preserving `latest=3.0.1`. Its protected
+lightweight tag remains at `73931bdd31b3b4e4d905a30b5112e4cd712f7844`.
+Never move, delete, recreate, or reuse `v3.2.7` or version 3.2.7; version 3.3.0
 is the only current successor lane.
 
 If **publish succeeded and only `verify_publish` or the GitHub `release` job
 failed**, first verify that npm contains the intended tag artifact from a clean
 checkout of that tag:
 
-```bash
-version=3.2.7
-git switch --detach "v${version}"
+   ```bash
+   version=3.3.0
+   git switch --detach "v${version}"
 tag_checkout="$(pwd)"
 expected_revision="$(git rev-parse HEAD)"
 : "${EXPECTED_RUN_ID:?set to the accepted GitHub Actions release run id}"
@@ -336,7 +342,7 @@ If npm publication itself failed or its result is ambiguous:
 
    ```bash
    set -euo pipefail
-   version=3.2.7
+   version=3.3.0
    release_tag="v${version}"
    test "$(git rev-parse HEAD)" = "$(git rev-list -n 1 "$release_tag")"
    release_notes="$(mktemp)"
@@ -356,7 +362,7 @@ There is no token/OTP fallback and no recovery path that republishes an existing
 version.
 
 If any post-publication integrity, provenance, signature, candidate-tag, or
-preserved-dist-tag check fails, treat the immutable 3.2.7 version as a release
+preserved-dist-tag check fails, treat the immutable 3.3.0 version as a release
 incident. Do not create the GitHub prerelease, do not install it, and do not
 promote it to `latest`.
 

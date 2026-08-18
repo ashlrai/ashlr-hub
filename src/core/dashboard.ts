@@ -71,6 +71,8 @@ import type { FrontierUsage } from './usage/frontier-usage.js';
 import type { ProductionSummary, IntelligenceSummary } from './types.js';
 import type { ProposalSourceQuality, ProposalsReadResult } from './inbox/store.js';
 import type { DecisionSourceQuality, DecisionsReadResult } from './fleet/decisions-ledger.js';
+import type { JudgeTraceSourceQuality, JudgeTracesReadResult } from './fleet/judge-trace.js';
+import type { ListGoalsDetailedResult } from './goals/store.js';
 import type { RoutingLearningAuthority } from './run/learned-router.js';
 import { realizedMergeOf } from './inbox/realized-merge.js';
 
@@ -78,7 +80,16 @@ import { realizedMergeOf } from './inbox/realized-merge.js';
 export interface DashboardProductionSummary extends ProductionSummary {
   /** `degraded`/incomplete means proposal-backed zeroes are unknown. */
   proposalSourceQuality: ProposalSourceQuality;
+  /** `degraded`/incomplete means judgeVerdicts24h counts are unknown, not confirmed-zero. */
+  judgeTraceSourceQuality: JudgeTraceSourceQuality;
+  /** `degraded`/incomplete means judgeFailures24h counts are unknown, not confirmed-zero. */
+  judgeFailureSourceQuality: DecisionSourceQuality;
+  /** `degraded`/incomplete means activeGoals is unknown, not confirmed-empty. */
+  activeGoalsSourceQuality: GoalsSourceQuality;
 }
+
+/** Source-quality diagnostics for a goals-store read (mirrors ListGoalsDetailedResult minus the payload). */
+export type GoalsSourceQuality = Omit<ListGoalsDetailedResult, 'goals'>;
 
 export interface DashboardIntelligenceSummary extends IntelligenceSummary {
   /** Quality of the proposal join used to establish realized ships. */
@@ -191,6 +202,31 @@ function reconcileRoutingLearningAuthority(
 
 function decisionSourceOf(read: DecisionsReadResult): DecisionSourceQuality {
   const { decisions: _decisions, ...quality } = read;
+  return quality;
+}
+
+function degradedJudgeTraceSource(): JudgeTraceSourceQuality {
+  return {
+    sourceState: 'degraded', sourcePresent: false, complete: false,
+    stopReasons: ['io-error'], filesRead: 0, bytesRead: 0, rowsScanned: 0,
+    invalidRows: 0, unreadableFiles: 1,
+  };
+}
+
+function judgeTraceSourceOf(read: JudgeTracesReadResult): JudgeTraceSourceQuality {
+  const { traces: _traces, ...quality } = read;
+  return quality;
+}
+
+function degradedGoalsSource(): GoalsSourceQuality {
+  return {
+    sourceState: 'degraded', sourcePresent: false, complete: false,
+    scannedFiles: 0, unreadableFiles: 1, limitExceeded: false,
+  };
+}
+
+function goalsSourceOf(read: ListGoalsDetailedResult): GoalsSourceQuality {
+  const { goals: _goals, ...quality } = read;
   return quality;
 }
 
@@ -411,10 +447,14 @@ async function buildProduction(generatedAt: string): Promise<DashboardProduction
     generatedAt,
     proposals24h: { pending: 0, applied: 0, rejected: 0, total: 0 },
     judgeVerdicts24h: { ship: 0, review: 0, noise: 0, harmful: 0, total: 0 },
+    judgeFailures24h: { parse: 0, network: 0, total: 0 },
     autoMergesToday: { count: 0, titles: [] },
     activeGoals: [],
     shipsPerDayTrend: [],
     proposalSourceQuality: degradedProposalSource(),
+    judgeTraceSourceQuality: degradedJudgeTraceSource(),
+    judgeFailureSourceQuality: degradedDecisionSource(),
+    activeGoalsSourceQuality: degradedGoalsSource(),
   };
 
   let productionProposals: Proposal[] | null = null;
@@ -458,38 +498,81 @@ async function buildProduction(generatedAt: string): Promise<DashboardProduction
   }
 
   // ── Judge verdict counts over 24h ────────────────────────────────────────
+  // A degraded/incomplete trace read must never render as "zero verdicts" —
+  // that would be indistinguishable from a genuinely quiet judge. Track
+  // judgeTraceSourceQuality alongside the counts (mirrors proposalSourceQuality
+  // above) and withhold the counts (leave them at their zeroed default, which
+  // the quality field marks as unknown) unless the read is complete.
   try {
-    const { readJudgeTraces } = await import('./fleet/judge-trace.js');
-    const traces = readJudgeTraces({ sinceMs: since24h });
-    for (const t of traces) {
-      summary.judgeVerdicts24h.total++;
-      if (t.verdict === 'ship') summary.judgeVerdicts24h.ship++;
-      else if (t.verdict === 'review') summary.judgeVerdicts24h.review++;
-      else if (t.verdict === 'noise') summary.judgeVerdicts24h.noise++;
-      else if (t.verdict === 'harmful') summary.judgeVerdicts24h.harmful++;
+    const { readJudgeTracesDetailed } = await import('./fleet/judge-trace.js');
+    const traceRead = readJudgeTracesDetailed({ sinceMs: since24h });
+    summary.judgeTraceSourceQuality = judgeTraceSourceOf(traceRead);
+    if (traceRead.complete && traceRead.sourceState !== 'degraded') {
+      for (const t of traceRead.traces) {
+        summary.judgeVerdicts24h.total++;
+        if (t.verdict === 'ship') summary.judgeVerdicts24h.ship++;
+        else if (t.verdict === 'review') summary.judgeVerdicts24h.review++;
+        else if (t.verdict === 'noise') summary.judgeVerdicts24h.noise++;
+        else if (t.verdict === 'harmful') summary.judgeVerdicts24h.harmful++;
+      }
     }
   } catch {
-    // Degrade to zeros.
+    // Keep the explicit degraded default set above — counts stay unknown, not zero.
+  }
+
+  // ── Judge failure counts over 24h (parse/network) ────────────────────────
+  // judgeProposal() (fleet/manager.ts) returns via fallback('network') or
+  // fallback('parse') BEFORE recordJudgeTrace() runs on either path, so a
+  // failed judge call writes NO judge-trace row — it is absent from
+  // judgeVerdicts24h above, not folded into any bucket. The decisions ledger
+  // is the correct source: both the primary judge loop (manager.ts runManager)
+  // and the auto-merge fanout (automerge-pass.ts) always record a 'judged'
+  // decision with a distinct judgeReasonCode ('judge-parse-failure' /
+  // 'judge-network-failure') for these fallbacks, unconditionally.
+  try {
+    const { readDecisionsDetailed } = await import('./fleet/decisions-ledger.js');
+    const decisionRead = readDecisionsDetailed({ sinceMs: since24h });
+    summary.judgeFailureSourceQuality = decisionSourceOf(decisionRead);
+    if (decisionRead.complete && decisionRead.sourceState !== 'degraded') {
+      for (const d of decisionRead.decisions) {
+        if (d.action !== 'judged') continue;
+        if (d.judgeReasonCode === 'judge-parse-failure') {
+          summary.judgeFailures24h.parse++;
+          summary.judgeFailures24h.total++;
+        } else if (d.judgeReasonCode === 'judge-network-failure') {
+          summary.judgeFailures24h.network++;
+          summary.judgeFailures24h.total++;
+        }
+      }
+    }
+  } catch {
+    // Keep the explicit degraded default set above — counts stay unknown, not zero.
   }
 
   // ── Active goals + milestone counts ──────────────────────────────────────
+  // A degraded/incomplete goals read must never render as "no active goals" —
+  // withhold activeGoals (leave the [] default) unless the read is complete;
+  // activeGoalsSourceQuality marks whether that empty list is confirmed or unknown.
   try {
-    const { listGoals } = await import('./goals/store.js');
+    const { listGoalsDetailed } = await import('./goals/store.js');
     const { progressOf } = await import('./goals/advance.js');
-    const active = listGoals({ status: 'active' });
-    const goalRows: ProductionSummary['activeGoals'] = [];
-    for (const goal of active.slice(0, MAX_ACTIVE_GOALS)) {
-      const prog = progressOf(goal);
-      goalRows.push({
-        goalId: goal.id,
-        objective: goal.objective,
-        totalMilestones: prog.total,
-        doneMilestones: prog.done,
-      });
+    const goalRead = listGoalsDetailed({ status: 'active' });
+    summary.activeGoalsSourceQuality = goalsSourceOf(goalRead);
+    if (goalRead.complete && goalRead.sourceState !== 'degraded') {
+      const goalRows: ProductionSummary['activeGoals'] = [];
+      for (const goal of goalRead.goals.slice(0, MAX_ACTIVE_GOALS)) {
+        const prog = progressOf(goal);
+        goalRows.push({
+          goalId: goal.id,
+          objective: goal.objective,
+          totalMilestones: prog.total,
+          doneMilestones: prog.done,
+        });
+      }
+      summary.activeGoals = goalRows;
     }
-    summary.activeGoals = goalRows;
   } catch {
-    // Degrade to empty.
+    // Keep the explicit degraded default set above — activeGoals stays unknown, not empty.
   }
 
   // ── Ships-per-day trend (7 days, realized merges by calendar date) ─────────
@@ -966,11 +1049,15 @@ export async function buildSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshot
   // This feeds Fleet Dashboard with the same read-only queue/backend/merge
   // status as /api/fleet, including shared queue lease health when enabled.
   let fleet: DashboardSnapshot['fleet'] | undefined;
+  let fleetFreshness: DashboardSnapshot['fleetFreshness'] | undefined;
   try {
-    const { buildFleetStatus } = await import('./fleet/status.js');
-    fleet = await buildFleetStatus(cfg);
+    const { getCachedFleetStatus } = await import('./web/fleet-status-cache.js');
+    const cached = await getCachedFleetStatus(cfg);
+    fleet = cached.status;
+    fleetFreshness = { stale: cached.stale, ageMs: cached.ageMs };
   } catch {
     fleet = undefined;
+    fleetFreshness = undefined;
   }
   const daemonObservation = readPublicDaemonObservation(fleet?.daemon);
 
@@ -1073,6 +1160,7 @@ export async function buildSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshot
       pendingProposals: inboxPending,
     },
     ...(fleet !== undefined ? { fleet } : {}),
+    ...(fleetFreshness !== undefined ? { fleetFreshness } : {}),
     // M29: OPTIONAL portfolio section — omitted entirely when the roll-up
     // could not be built, so existing producers/tests (which never set it)
     // stay valid and `portfolio === undefined` reads as "not populated".

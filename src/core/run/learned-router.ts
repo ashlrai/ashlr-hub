@@ -1116,6 +1116,16 @@ export function inspectRoutingLearningAuthority(taskClass?: string): RoutingLear
         sourceState: decisions.sourceState,
         sourcePresent: decisions.sourcePresent,
         complete: decisions.complete,
+        // Verified NOT a bug (contra the original bug report): decisions-ledger
+        // rows carry no per-row cryptographic signature at all — a
+        // "structurally healthy file" is not "an authenticated row". Source
+        // health alone (mirroring assignments.authenticated below) would let
+        // an unsigned/replayable decisions ledger satisfy this gate, which is
+        // exactly what test/m240.learned-routing.test.ts's "Operational
+        // Learning Firewall V1 > keeps unsigned negative decisions visible
+        // diagnostically but neutral operationally" asserts must never
+        // happen. Left as a hardcoded false intentionally, pending a real
+        // per-row decision signature this module does not own.
         authenticated: false,
       },
       assignments: {
@@ -1141,11 +1151,26 @@ export function inspectRoutingLearningAuthority(taskClass?: string): RoutingLear
       blockers.add('assignment-identity-unavailable');
       blockers.add('assignment-propensity-unknown');
     }
+    // M-fleet-learning-loop: this used to unconditionally force
+    // state:'inactive', operationalSteering:false, samples.eligible:0 —
+    // discarding whatever evaluateRoutingLearningAuthority() actually
+    // computed above and replacing it with a permanent, silent "no". That
+    // is now the single source of truth instead of a redundant hardcoded
+    // override.
+    //
+    // In practice this still evaluates to inactive/false today: building a
+    // genuinely eligible RoutingLearningAuthoritySample[] requires joining
+    // PolicyAssignmentReceiptV1 rows (learning/policy-assignment-receipts.ts)
+    // to their originating DecisionEntry, but that receipt schema carries no
+    // proposalId/decisionId join key and hardcodes policyEligible /
+    // preExposureVerified / denominatorComplete as literal `false` — it is a
+    // deliberately observation-only, executionAuthority:false placeholder,
+    // not yet a real randomized-assignment system. `samples` is therefore
+    // still `[]` (honestly, not by fiat) until that schema — outside this
+    // module's ownership — gets a real join key and non-constant eligibility
+    // fields. See the fleet-learning-loop report for the full trace.
     return {
       ...authority,
-      state: 'inactive',
-      operationalSteering: false,
-      samples: { ...authority.samples, eligible: 0 },
       blockerCodes: [...blockers].sort(),
     };
   } catch {

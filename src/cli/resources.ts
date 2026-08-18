@@ -155,7 +155,23 @@ function printSnapshot(snapshot: import('../core/fabric/resource-monitor.js').Re
 // Public entry point
 // ---------------------------------------------------------------------------
 
+function printResourcesHelp(): void {
+  console.log('');
+  console.log(bold('  ashlr resources') + dim(' — per-backend resource control plane (read-only)'));
+  console.log('');
+  console.log('  Usage: ashlr resources [--json] [--watch]');
+  console.log('');
+  console.log(`    ${cyan('ashlr resources')}          ${dim('table view of availability/used%/cap/resets')}`);
+  console.log(`    ${cyan('ashlr resources --json')}   ${dim('raw JSON (ResourceSnapshot)')}`);
+  console.log(`    ${cyan('ashlr resources --watch')}  ${dim('refresh every 30s (Ctrl-C to stop)')}`);
+  console.log('');
+}
+
 export async function cmdResources(args: string[]): Promise<number> {
+  if (args.includes('--help') || args.includes('-h')) {
+    printResourcesHelp();
+    return 0;
+  }
   const jsonMode  = args.includes('--json');
   const watchMode = args.includes('--watch');
 
