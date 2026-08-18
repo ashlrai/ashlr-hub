@@ -558,6 +558,7 @@ describe('M454 pinned upstream routing challenge', () => {
       'docs/ELITE-AGENT-EFFICIENCY.md',
       'docs/RUNTIME_ACTIVATION_AUTHORITY.md',
       'docs/contracts/CONTRACT-M515.md',
+      'docs/contracts/CONTRACT-M521.md',
       'docs/contracts/CONTRACT-MISSION-RECEIPT-V1.md',
     ]);
     expect(JSON.stringify(packageManifest.exports ?? {})).not.toContain('m454');
@@ -579,6 +580,8 @@ describe('M454 pinned upstream routing challenge', () => {
       const archive = packed[0];
       const packedPaths = archive?.files.map((entry) => entry.path) ?? [];
       expect(packedPaths.length).toBeGreaterThan(0);
+      expect(packedPaths).toContain('docs/RUNTIME_ACTIVATION_AUTHORITY.md');
+      expect(packedPaths).toContain('docs/contracts/CONTRACT-M521.md');
       expect(packedPaths.filter((path) => /(?:m454|agent-skills|generate-m454)/u.test(path))).toEqual([]);
       const archivePath = join(packRoot, archive?.filename ?? '');
       expect(existsSync(archivePath)).toBe(true);
