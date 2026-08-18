@@ -189,6 +189,29 @@ describe('M235 deriveLesson — pure function', () => {
 // ===========================================================================
 
 describe('M235 learnFromRejection — writes anti-playbook for rejection verdicts', () => {
+  it.skipIf(process.platform === 'win32')('does not acknowledge a symlinked hub path', () => {
+    mockAppendHubEntry.mockImplementationOnce(() => {
+      const hubPath = `${process.env.HOME ?? ''}/.ashlr/genome/hub.jsonl`;
+      const targetPath = `${process.env.HOME ?? ''}/.ashlr/genome/hub-target.jsonl`;
+      fs.mkdirSync(path.dirname(hubPath), { recursive: true });
+      const entry = {
+        id: 'mock-symlink-entry',
+        project: null,
+        source: 'hub' as const,
+        title: 'mock',
+        text: 'mock',
+        tags: [],
+        ts: new Date().toISOString(),
+      };
+      fs.writeFileSync(targetPath, `${JSON.stringify(entry)}\n`, 'utf8');
+      fs.symlinkSync(targetPath, hubPath);
+      return entry;
+    });
+
+    expect(learnFromRejection('prop-symlink', 'Unsafe path', 'noise', '', makeCfg())).toBe(false);
+    expect(mockRecordDecision).not.toHaveBeenCalled();
+  });
+
   it('calls appendHubEntry once for verdict "noise"', () => {
     const acknowledged = learnFromRejection('prop-001', 'Rename a variable', 'noise', 'too trivial', makeCfg());
 

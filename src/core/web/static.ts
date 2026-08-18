@@ -16,7 +16,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { closeSync, constants, fstatSync, openSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, realpathSync } from 'node:fs';
 import { resolve, join, sep, normalize, extname } from 'node:path';
 
 // ---------------------------------------------------------------------------
@@ -109,21 +109,36 @@ export function serveStatic(
       return false;
     }
 
-    // Resolve symlinks before containment, then open without following a
-    // replacement final symlink. Identity revalidation binds the earlier
-    // path decision to the descriptor that is actually read.
+    // Open first without following a replacement final symlink. All named-path
+    // containment and identity checks happen after descriptor custody is held,
+    // so the bytes are never read through a separately checked pathname.
     let fd: number | undefined;
     try {
       const realRoot = realpathSync(rootDir);
+      beforeDescriptorOpen?.();
+      fd = openSync(candidate, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      const openedBefore = fstatSync(fd);
+      if (!openedBefore.isFile()) return false;
       const realCandidate = realpathSync(candidate);
       const realRootWithSep = realRoot.endsWith(sep) ? realRoot : realRoot + sep;
       if (!realCandidate.startsWith(realRootWithSep)) return false;
-      const expected = statSync(realCandidate);
-      beforeDescriptorOpen?.();
-      fd = openSync(realCandidate, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-      const opened = fstatSync(fd);
-      if (!opened.isFile() || opened.dev !== expected.dev || opened.ino !== expected.ino) return false;
+      const namedBefore = lstatSync(candidate);
+      if (namedBefore.isSymbolicLink() || !namedBefore.isFile() ||
+        openedBefore.dev !== namedBefore.dev || openedBefore.ino !== namedBefore.ino) return false;
       const body = readFileSync(fd);
+      const openedAfter = fstatSync(fd);
+      const realCandidateAfter = realpathSync(candidate);
+      const namedAfter = lstatSync(candidate);
+      if (!openedAfter.isFile() || !realCandidateAfter.startsWith(realRootWithSep) ||
+        namedAfter.isSymbolicLink() || !namedAfter.isFile() ||
+        openedBefore.dev !== openedAfter.dev || openedBefore.ino !== openedAfter.ino ||
+        openedAfter.dev !== namedAfter.dev || openedAfter.ino !== namedAfter.ino ||
+        openedBefore.size !== openedAfter.size ||
+        openedBefore.mtimeMs !== openedAfter.mtimeMs ||
+        openedBefore.ctimeMs !== openedAfter.ctimeMs ||
+        openedAfter.size !== namedAfter.size ||
+        openedAfter.mtimeMs !== namedAfter.mtimeMs ||
+        openedAfter.ctimeMs !== namedAfter.ctimeMs) return false;
       res.setHeader('Content-Type', contentTypeFor(candidate));
       res.writeHead(200, {
         'Content-Type': contentTypeFor(candidate),

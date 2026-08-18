@@ -59,12 +59,28 @@ function appendedBytesContainEntry(entry: GenomeEntry, offset: number): boolean 
   const file = hubStorePath();
   let fd: number | undefined;
   try {
-    const size = fs.statSync(file).size;
+    const noFollow = typeof fs.constants.O_NOFOLLOW === 'number' ? fs.constants.O_NOFOLLOW : 0;
+    fd = fs.openSync(file, fs.constants.O_RDONLY | noFollow);
+    const openedBefore = fs.fstatSync(fd);
+    const namedBefore = fs.lstatSync(file);
+    if (!openedBefore.isFile() || namedBefore.isSymbolicLink() || !namedBefore.isFile() ||
+      openedBefore.dev !== namedBefore.dev || openedBefore.ino !== namedBefore.ino) return false;
+    const size = openedBefore.size;
     const growth = size - offset;
     if (growth <= 0 || growth > APPEND_ACK_MAX_BYTES) return false;
     const bytes = Buffer.alloc(growth);
-    fd = fs.openSync(file, 'r');
     if (fs.readSync(fd, bytes, 0, growth, offset) !== growth) return false;
+    const openedAfter = fs.fstatSync(fd);
+    const namedAfter = fs.lstatSync(file);
+    if (!openedAfter.isFile() || namedAfter.isSymbolicLink() || !namedAfter.isFile() ||
+      openedBefore.dev !== openedAfter.dev || openedBefore.ino !== openedAfter.ino ||
+      openedAfter.dev !== namedAfter.dev || openedAfter.ino !== namedAfter.ino ||
+      openedBefore.size !== openedAfter.size ||
+      openedBefore.mtimeMs !== openedAfter.mtimeMs ||
+      openedBefore.ctimeMs !== openedAfter.ctimeMs ||
+      openedAfter.size !== namedAfter.size ||
+      openedAfter.mtimeMs !== namedAfter.mtimeMs ||
+      openedAfter.ctimeMs !== namedAfter.ctimeMs) return false;
     return bytes.toString('utf8').split('\n').some((line) => {
       if (!line.trim()) return false;
       try {
