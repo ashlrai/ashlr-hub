@@ -161,23 +161,33 @@ function baseCfg(overrides?: Record<string, unknown>): AshlrConfig {
 }
 
 function reviewVerdict(proposalId: string) {
-  return {
+  const verdict = {
     proposalId,
     verdict: 'review' as const,
     value: 2, correctness: 2, scope: 3, alignment: 2,
     rationale: 'needs review',
     wouldMerge: false,
   };
+  Object.defineProperty(verdict, 'considered', {
+    value: true,
+    enumerable: false,
+  });
+  return verdict;
 }
 
 function shipVerdict(proposalId: string) {
-  return {
+  const verdict = {
     proposalId,
     verdict: 'ship' as const,
     value: 5, correctness: 5, scope: 1, alignment: 5,
     rationale: 'looks good',
     wouldMerge: true,
   };
+  Object.defineProperty(verdict, 'considered', {
+    value: true,
+    enumerable: false,
+  });
+  return verdict;
 }
 
 function expectAttestedShipDecision(proposalId: string): void {
@@ -315,6 +325,34 @@ describe('M263 judgeNonShipCount increments correctly', () => {
       { judgeNonShipCount: 1 },
       expect.anything(),
     );
+  });
+
+  it('does not count or archive an incomplete review verdict', async () => {
+    const p = makeProposal('p-incomplete', { judgeNonShipCount: 2 });
+    pendingProposals = [p];
+    mockJudgeProposal.mockResolvedValue({
+      proposalId: 'p-incomplete',
+      verdict: 'review',
+      value: 2,
+      correctness: 2,
+      scope: 3,
+      alignment: 2,
+      rationale: 'missing internal completeness marker',
+      wouldMerge: false,
+    });
+
+    const out = await runAutoMergePass(baseCfg());
+
+    expect(out.autoArchived).toBe(0);
+    expect(mockSetStatus).not.toHaveBeenCalledWith(
+      'p-incomplete', 'rejected', expect.anything(), expect.anything(),
+    );
+    expect(mockUpdateProposalField).not.toHaveBeenCalledWith(
+      'p-incomplete',
+      expect.objectContaining({ judgeNonShipCount: expect.any(Number) }),
+      expect.anything(),
+    );
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
   });
 
   it('count=1 incremented to 2 (below K=3 threshold)', async () => {
