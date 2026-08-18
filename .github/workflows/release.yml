@@ -7,7 +7,7 @@
 # public repository, release.yml, and the npm-release environment. No
 # long-lived npm write token is used.
 #
-# This workflow is intentionally pinned to the 3.2.7 candidate. It cannot move
+# This workflow is intentionally pinned to the 3.3.0 candidate. It cannot move
 # npm `latest`; promotion is a separate maintainer action after acceptance.
 
 name: Release
@@ -23,12 +23,12 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  RELEASE_VERSION: "3.2.7"
+  RELEASE_VERSION: "3.3.0"
   RELEASE_DIST_TAG: candidate
   BASELINE_LATEST_VERSION: "3.0.1"
-  PREVIOUS_CANDIDATE_VERSION: "3.2.6"
-  PREVIOUS_CANDIDATE_INTEGRITY: "sha512-b8O5Nxfb9IfYsmgSW80CAYW+3ZPlet8u7NALOfG8XGFnAAEWxvLtbLKer3psNg7rxkDrAt+rhUjzRzri72PFkA=="
-  PREVIOUS_CANDIDATE_TAG_SHA: "80d49d718d893d0cb02f85a62cd9d2691f4f39c3"
+  PREVIOUS_CANDIDATE_VERSION: "3.2.7"
+  PREVIOUS_CANDIDATE_INTEGRITY: "sha512-Zep4krYD7uKqh2k+Z6w0sMyNDsLFjEtV1H8EqdM7yKTKCHSq79lJb7jGoH1qrfOXDBRTJTmG7bSDSPOBUFj+yA=="
+  PREVIOUS_CANDIDATE_TAG_SHA: "73931bdd31b3b4e4d905a30b5112e4cd712f7844"
 
 jobs:
   verify:
@@ -577,7 +577,7 @@ jobs:
              (.files.tarball | keys == ["bytes", "entryCount", "integrity", "maxEntryBytes", "name", "sha256", "unpackedBytes"]) and
              (.files.packReport | keys == ["bytes", "name", "sha256"]) and
              (.files.releaseNotes | keys == ["bytes", "name", "sha256"]) and
-             .files.tarball.name == "ashlr-hub-3.2.7.tgz" and
+             .files.tarball.name == "ashlr-hub-3.3.0.tgz" and
              .files.packReport.name == "npm-pack.json" and
              .files.releaseNotes.name == "release-notes.md" and
              (.files.tarball.bytes | type == "number" and . >= 1 and . <= 52428800) and

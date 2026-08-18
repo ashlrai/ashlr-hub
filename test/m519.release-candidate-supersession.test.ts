@@ -30,13 +30,13 @@ const verify = verifySteps.find((step) =>
   step.name === 'Verify immutable candidate and preserved dist-tags');
 
 const expectedEnv = {
-  RELEASE_VERSION: '3.2.7',
+  RELEASE_VERSION: '3.3.0',
   RELEASE_DIST_TAG: 'candidate',
   BASELINE_LATEST_VERSION: '3.0.1',
-  PREVIOUS_CANDIDATE_VERSION: '3.2.6',
+  PREVIOUS_CANDIDATE_VERSION: '3.2.7',
   PREVIOUS_CANDIDATE_INTEGRITY:
-    'sha512-b8O5Nxfb9IfYsmgSW80CAYW+3ZPlet8u7NALOfG8XGFnAAEWxvLtbLKer3psNg7rxkDrAt+rhUjzRzri72PFkA==',
-  PREVIOUS_CANDIDATE_TAG_SHA: '80d49d718d893d0cb02f85a62cd9d2691f4f39c3',
+    'sha512-Zep4krYD7uKqh2k+Z6w0sMyNDsLFjEtV1H8EqdM7yKTKCHSq79lJb7jGoH1qrfOXDBRTJTmG7bSDSPOBUFj+yA==',
+  PREVIOUS_CANDIDATE_TAG_SHA: '73931bdd31b3b4e4d905a30b5112e4cd712f7844',
 };
 
 function supersessionViolations(candidate: Workflow): string[] {
