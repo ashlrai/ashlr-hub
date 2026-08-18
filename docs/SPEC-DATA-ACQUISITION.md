@@ -7,7 +7,7 @@ M276 remain simply unbuilt. `DataLayerSnapshot`, `queryDataLayer()`,
 `history.ts`/`appendDataPoint()`, `cap-forecast.ts`, cost-to-green routing,
 `anomaly.ts`, `getFabricContext()`, and `rate-limit-store.ts` are all absent
 from `src/` and `test/` as of this pass. See `docs/MILESTONE-INDEX.md` §2–§3
-for the full collision detail before reusing any number in this range.  
+for the full collision detail before reusing any number in this range.
 **Branch:** feat/v4-foundry → master  
 **Relates to:** SPEC-RESOURCE-CONTROL-PLANE.md, SPEC-INFERENCE-FABRIC.md, SPEC-V4-FOUNDRY.md
 
