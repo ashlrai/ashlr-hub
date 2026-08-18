@@ -2521,7 +2521,6 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       requestedShape: 'proposal-once',
       trustRootCount: 0,
       residentAuthorized: false,
-      residentStandingAuthorized: false,
       installAuthorized: false,
       repairAuthorized: false,
       reason: 'activation-readiness-unavailable',

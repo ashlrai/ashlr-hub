@@ -1,16 +1,5 @@
 # Runtime Activation Authority V1 and dormant stopped consumer
 
-> **Not to be confused with `ashlr activation` (`src/cli/activation.ts`,
-> M470).** This document covers `ashlr daemon activation-preflight` /
-> `ashlr daemon activate` — verifying a *release build* is safe to install.
-> It remains preflight-only. The similarly-named `ashlr activation` command
-> is a different system entirely: operator-granted standing authority
-> (resident/install/automerge/deploy/repair/etc.) that gates what the daemon
-> is *allowed* to do once it's running. See
-> [`docs/RUNTIME-FLEET-ACTIVATION.md`](RUNTIME-FLEET-ACTIVATION.md) for that
-> system and `docs/MILESTONE-INDEX.md` §2 for why M470 now names both an
-> unrelated shipped feature and that command.
-
 Ashlr exposes a signed, read-only resident activation admission contract and a
 separate dormant macOS stopped-release consumer. The preflight remains
 available on every platform. Linux and Windows refuse before filesystem or

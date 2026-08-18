@@ -577,7 +577,6 @@ See [`docs/ECOSYSTEM-MAP.md`](docs/ECOSYSTEM-MAP.md) for the full capability map
 | [`docs/MISSION-OS.md`](docs/MISSION-OS.md) | Mission DAG, receipts, shadow workflow, Cortex/Locus boundaries, privacy, and troubleshooting |
 | [`docs/ELITE-AGENT-EFFICIENCY.md`](docs/ELITE-AGENT-EFFICIENCY.md) | Current primary-source research translated into Hub efficiency priorities and measurable autonomy gates |
 | [`docs/RUNTIME_ACTIVATION_AUTHORITY.md`](docs/RUNTIME_ACTIVATION_AUTHORITY.md) | Signed read-only resident activation admission, explicit mutation refusal, and native launchd v2 requirements |
-| [`docs/RUNTIME-FLEET-ACTIVATION.md`](docs/RUNTIME-FLEET-ACTIVATION.md) | How to actually turn on an unattended, resident fleet — operator standing grants (`ashlr activation`) and the four gates that block it even after a grant |
 | [`docs/ECOSYSTEM-MAP.md`](docs/ECOSYSTEM-MAP.md) | The 13-repo platform and composition bets |
 | [`docs/QUICKSTART.md`](docs/QUICKSTART.md) | Step-by-step first activation |
 | [`docs/LOCUS-FIRM-FLEET.md`](docs/LOCUS-FIRM-FLEET.md) | Production fleet checklist — `locus.firm`, `LOCUS_ENFORCE`, `LOCUS_CI_BINDING` (default off) |

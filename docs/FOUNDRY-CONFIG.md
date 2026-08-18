@@ -591,7 +591,7 @@ confident in the verification harness. Additional guards:
 |---------------------------|-----------|-----------------------------------------------------|
 | `trustBasis`              | `"tier"`  | Authority mode: `"tier"`, `"verification"`, or `"evidence"`. |
 | `maxRisk`                 | `"low"`   | Only `"low"` risk proposals auto-merge.             |
-| `pushToRemote`            | `false`   | Also run `gh pr merge` when applying.               |
+| `pushToRemote`            | `false`   | Stage/push a reviewed branch and open a protected PR handoff; never merge the hosted PR. |
 | `allowWithoutVerification`| `false`   | Fail-closed: refuse auto-merge with no tests found. |
 
 `trustBasis: "tier"` is the conservative default: only configured frontier

@@ -4,7 +4,6 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -155,19 +154,6 @@ afterEach(() => {
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
 });
 
-/**
- * M470: every consume attempt (authorized or refused) now writes one audit
- * row via ../sandbox/audit.js, which lazily creates ~/.ashlr/audit/ on first
- * write. That is the intended, minimal, append-only side effect the M470
- * audit-trail requirement asks for. This asserts no AUTHORITY OR SERVICE
- * state was written — only (at most) the audit trail — which is a strictly
- * more precise check than the old "nothing under ~/.ashlr at all".
- */
-function expectOnlyAuditTrailWritten(home: string): void {
-  if (!existsSync(join(home, '.ashlr'))) return;
-  expect(readdirSync(join(home, '.ashlr'))).toEqual(['audit']);
-}
-
 describe('M461 bounded daemon activation permit', () => {
   it('isolates activation files and exactly restores every home variable', () => {
     const home = isolateHome();
@@ -221,12 +207,11 @@ describe('M461 bounded daemon activation permit', () => {
       required: false,
       reason: 'dry-run-once-does-not-require-activation-permit',
     });
-    // The dry-run-once bypass is a total no-op (no permit was even eligible
-    // to be read) — nothing is audited for it, unlike a real consume attempt.
     expect(existsSync(join(home, '.ashlr'))).toBe(false);
   });
 
   it.each([
+    [{ once: false, dryRun: false }, 'resident'],
     [{ once: false, dryRun: true }, 'resident dry-run'],
     [{ once: true, dryRun: false, drain: true }, 'drain'],
     [{ once: true, dryRun: false, drainLimit: 1 }, 'drain limit'],
@@ -238,23 +223,6 @@ describe('M461 bounded daemon activation permit', () => {
     expect(result.required).toBe(true);
     expect(result.reason).toBe('activation-permit-cannot-authorize-requested-start-shape');
     expect(result.capability).toBeUndefined();
-  });
-
-  // M470: {once:false, dryRun:false} (a real resident start request) is now a
-  // structurally SUPPORTED shape — resident becomes authorizable once the
-  // `resident` scope is explicitly granted (see m470.activation-authority.test.ts).
-  // With the default empty trust-root store it still ends up denied — just via
-  // the real "no roots" path instead of the old blanket shape denial, which is
-  // the whole point of making resident real. Default behavior (denied) holds.
-  it('refuses resident authority with no trust roots via the real no-roots reason', () => {
-    isolateHome();
-    const result = consumeDaemonActivationPermit(config(), { once: false, dryRun: false });
-
-    expect(result).toEqual({
-      authorized: false,
-      required: true,
-      reason: 'no-trusted-activation-roots',
-    });
   });
 
   it('keeps production trust roots empty and rejects forged capabilities', () => {
@@ -277,12 +245,11 @@ describe('M461 bounded daemon activation permit', () => {
       requestedShape: 'proposal-once',
       trustRootCount: 0,
       residentAuthorized: false,
-      residentStandingAuthorized: false,
       installAuthorized: false,
       repairAuthorized: false,
       reason: 'no-trusted-activation-roots',
     });
-    expectOnlyAuditTrailWritten(process.env['HOME']!);
+    expect(existsSync(join(process.env['HOME']!, '.ashlr'))).toBe(false);
     expect(isDaemonActivationCapability(forged)).toBe(false);
     expect(isDaemonActivationCapability(Object.freeze(forged))).toBe(false);
   });
@@ -311,7 +278,6 @@ describe('M461 bounded daemon activation permit', () => {
       requestedShape: 'proposal-once',
       trustRootCount: 1,
       residentAuthorized: false,
-      residentStandingAuthorized: false,
       installAuthorized: false,
       repairAuthorized: false,
       reason: 'valid-proposal-once-permit',

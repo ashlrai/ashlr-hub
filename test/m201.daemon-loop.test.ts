@@ -105,7 +105,6 @@ vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
   };
 });
 
-const mockDaemonActivationScopeGranted = vi.fn(() => ({ granted: true, reason: 'test-granted' }));
 vi.mock('../src/core/daemon/activation-permit.js', () => ({
   consumeDaemonActivationPermit: () => ({
     authorized: true,
@@ -113,7 +112,6 @@ vi.mock('../src/core/daemon/activation-permit.js', () => ({
     reason: 'test-authorized',
   }),
   isDaemonActivationCapability: () => true,
-  daemonActivationScopeGranted: (...args: unknown[]) => mockDaemonActivationScopeGranted(...args),
 }));
 
 // ---------------------------------------------------------------------------
@@ -1457,47 +1455,6 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockBuildResourceStrategyReport).not.toHaveBeenCalled();
     expect(mockBuildBacklog).not.toHaveBeenCalled();
     expect(mockRunSwarm).not.toHaveBeenCalled();
-  }, 15_000);
-
-  // M470 standing resident grant: unlike the one-shot WeakMap capability
-  // (which a resident run must trust for its whole lifetime because
-  // isDaemonActivationCapability() consumes on first call), a scope sourced
-  // from a standing `residentStanding` grant is re-checked LIVE on every
-  // tick — see tick()'s `preVerifiedScope?.residentStanding` guard in
-  // src/core/daemon/loop.ts. That is what gives `ashlr activation revoke
-  // --grant <id>` a real "stops the next tick" guarantee for a resident
-  // daemon that started unattended off a standing grant, not merely "blocks
-  // the next `daemon start`."
-  const residentStandingScope = {
-    once: false,
-    resident: false,
-    residentStanding: true,
-    conductor: false,
-    automerge: false,
-    repair: false,
-    deploy: false,
-    install: false,
-    proposalOnly: false,
-  };
-
-  it('A0c: a resident tick sourced from a standing residentStanding grant refuses live when the grant is no longer authorized', async () => {
-    mockDaemonActivationScopeGranted.mockReturnValueOnce({ granted: false, reason: 'no-matching-standing-grant' });
-
-    const result = await tick(cfgBuiltin(), { dryRun: false, activationScope: residentStandingScope });
-
-    expect(result.reason).toBe('activation-refused');
-    expect(mockDaemonActivationScopeGranted).toHaveBeenCalledWith('residentStanding');
-    expect(mockBuildBacklog).not.toHaveBeenCalled();
-    expect(mockRunSwarm).not.toHaveBeenCalled();
-  }, 15_000);
-
-  it('A0d: a resident tick sourced from a standing residentStanding grant proceeds past the activation gate while the grant is still valid', async () => {
-    mockDaemonActivationScopeGranted.mockReturnValueOnce({ granted: true, reason: 'granted-by-test-grant' });
-
-    const result = await tick(cfgBuiltin(), { dryRun: false, activationScope: residentStandingScope });
-
-    expect(mockDaemonActivationScopeGranted).toHaveBeenCalledWith('residentStanding');
-    expect(result.reason).not.toBe('activation-refused');
   }, 15_000);
 
   it('A0: dispatch production maps proposal-created to diff, no-proposal outcomes to empty, and non-authoritative outcomes to neutral', () => {

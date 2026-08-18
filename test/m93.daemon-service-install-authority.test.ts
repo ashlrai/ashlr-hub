@@ -14,42 +14,15 @@ import * as service from '../src/core/daemon/service.js';
 const execFileSyncMock = childProcess.execFileSync as ReturnType<typeof vi.fn>;
 const spawnSyncMock = childProcess.spawnSync as ReturnType<typeof vi.fn>;
 let home: string;
-// M470: assertResidentServiceInstallAuthorized() now consults an operator-owned
-// authority store under the real os.homedir(). Isolate HOME/USERPROFILE for
-// every test in this file so "no authority granted" stays the actual default
-// under test, independent of whatever real trust roots/grants this machine's
-// operator may have registered via `ashlr activation init` / `grant install`.
-const originalHome = process.env['HOME'];
-const originalUserProfile = process.env['USERPROFILE'];
 
 beforeEach(() => {
   vi.clearAllMocks();
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-service-install-authority-'));
-  process.env['HOME'] = home;
-  process.env['USERPROFILE'] = home;
 });
 
 afterEach(() => {
-  if (originalHome === undefined) delete process.env['HOME'];
-  else process.env['HOME'] = originalHome;
-  if (originalUserProfile === undefined) delete process.env['USERPROFILE'];
-  else process.env['USERPROFILE'] = originalUserProfile;
   fs.rmSync(home, { recursive: true, force: true });
 });
-
-/**
- * M470: assertResidentServiceInstallAuthorized() now writes an audit row on
- * every denial (that's the whole point — an operator must be able to answer
- * "who tried this, when"). So a refusal legitimately creates ~/.ashlr/audit/.
- * This asserts NO service/config/daemon state was touched — only the audit
- * trail — which is a strictly more precise check than "nothing at all".
- */
-function expectOnlyAuditTrailWritten(homeDir: string): void {
-  const entries = fs.readdirSync(homeDir);
-  expect(entries.filter((e) => e !== '.ashlr')).toEqual([]);
-  if (!entries.includes('.ashlr')) return;
-  expect(fs.readdirSync(path.join(homeDir, '.ashlr'))).toEqual(['audit']);
-}
 
 describe('daemon service production install authority', () => {
   it.each([
@@ -70,7 +43,7 @@ describe('daemon service production install authority', () => {
       'resident service install/reinstall/repair/restart authority is unavailable',
     );
 
-    expectOnlyAuditTrailWritten(home);
+    expect(fs.readdirSync(home)).toEqual([]);
     expect(execFileSyncMock).not.toHaveBeenCalled();
     expect(spawnSyncMock).not.toHaveBeenCalled();
   });
@@ -88,11 +61,11 @@ describe('daemon service production install authority', () => {
         homeDir: home,
         nodePath: process.execPath,
         binPath: path.join(home, 'bin', 'ashlr'),
-      }      )).rejects.toThrow(
+      })).rejects.toThrow(
         'resident service install/reinstall/repair/restart authority is unavailable',
       );
 
-      expectOnlyAuditTrailWritten(home);
+      expect(fs.readdirSync(home)).toEqual([]);
       expect(execFileSyncMock).not.toHaveBeenCalled();
       expect(spawnSyncMock).not.toHaveBeenCalled();
     },

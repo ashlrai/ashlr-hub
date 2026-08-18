@@ -11,74 +11,51 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
-## [3.3.0] — 2026-08-17 — Fleet activation, autonomous merge, and the operator console
+## [3.3.0] — 2026-08-17 — Fleet safety, learning, and the operator console
 
-### 2026-08-16 — Fleet activation unblocked, autonomous merge wired, learning loop closed
+### 2026-08-16 — Fail-closed runtime boundaries, protected handoff, and a closed learning loop
 
-Nine threads landed together: the daemon activation-authority system that had
-been unconditionally denying itself was replaced with a real granted-scope
-check, and the bug that made it self-invalidate every permit was fixed; the
-previously dead-code autonomous-merge revocation protocol got its first
-caller; the fleet's self-improvement loop went from recording zero lessons on
-rejection to recording them from every rejection; a test-isolation escape that
-had corrupted the operator's real `~/.ashlr/daemon.json` for 11 days was
-closed fail-closed; and a new React operator console shipped alongside the
-untouched legacy dashboard. Milestone-level detail and today's newly
-discovered ID collision are in
-[`docs/MILESTONE-INDEX.md`](docs/MILESTONE-INDEX.md); the mechanics of
-turning any of this on — including four non-obvious gates that block
-unattended activation even after a grant — are in
-[`docs/RUNTIME-FLEET-ACTIVATION.md`](docs/RUNTIME-FLEET-ACTIVATION.md).
+Nine threads landed together, followed by an authority-salvage review. The
+resident daemon, goal/simple conductors, OS service installation, and host-side
+PR merge remain deliberately unavailable in production: daemon and conductor
+trust roots are compiled empty, service installation still denies
+unconditionally, and the protected PR handoff stops at
+`awaiting-host-merge` for a human or separately authorized system. No local
+`~/.ashlr` trust-root, private-key, standing-grant, or `hostAutoMerge`
+configuration can widen those boundaries.
 
-- **Daemon activation authority replaces its own denials (M470 — see
-  collision note below).** Five hard-coded refusals — `DAEMON_ACTIVATION_TRUST_ROOTS`
-  frozen empty, `liveConductorActivationAuthorized()` returning a literal
-  `false`, `assertResidentServiceInstallAuthorized()` throwing
-  unconditionally, and two more in the same family — are replaced by a real
-  check against an operator-owned trust-root store (`~/.ashlr/activation/`,
-  0700/0600, owner-checked, fail-closed on missing/malformed to the
-  *identical* prior denial) and Ed25519-signed, expiring, revocable standing
-  grants across nine scopes: `once`, `resident`, `residentStanding`,
-  `conductor`, `automerge`, `repair`, `deploy`, `install`, `proposalOnly`
-  (`src/core/daemon/activation-permit.ts:121-131`). `residentStanding` is
-  new — the scope that lets the daemon restart unattended; it is not implied
-  by `resident` and must be granted explicitly.
+The release does ship the new React operator console, rejection-learning and
+post-merge-credit improvements, verification failure classification, stricter
+test HOME isolation, and safer rollback behavior while preserving the legacy
+dashboard. Milestone history and the rejected authority experiments are
+recorded in
+[`docs/MILESTONE-INDEX.md`](docs/MILESTONE-INDEX.md). The bounded resident
+release-admission and stopped-runtime selector contract is documented in
+[`docs/RUNTIME_ACTIVATION_AUTHORITY.md`](docs/RUNTIME_ACTIVATION_AUTHORITY.md);
+it does not install, launch, start, or grant service authority.
 
-  Root-cause bug fixed in the same change: `daemonActivationAuthorityStateDigest()`
-  folded `~/.ashlr`'s own directory mtime into the digest a permit is
-  checked against, but `daemon start`'s `acquireDaemonLock()`
-  (`src/core/daemon/state.ts`) creates `~/.ashlr/daemon.lock` — a new direct
-  child of `~/.ashlr` — *before* the permit is ever consumed, bumping that
-  same mtime. Every freshly minted permit self-invalidated, 100%
-  reproducibly, before it could be used — the fleet could never have
-  activated unattended even with a valid grant. Fixed to key the digest on
-  the directory's `dev`+`ino` instead, which survive ordinary child churn
-  (`src/core/daemon/activation-permit.ts:961-997`).
+- **Runtime and service authority stay dormant and fail closed.**
+  `DAEMON_ACTIVATION_TRUST_ROOTS` and
+  `GOAL_CONDUCTOR_ACTIVATION_TRUST_ROOTS` remain immutable empty arrays,
+  `liveConductorActivationAuthorized()` returns `false`, and
+  `assertResidentServiceInstallAuthorized()` throws before mutation. The
+  rejected local activation CLI and its root/key/grant stores are not shipped.
+  One-shot verification helpers accept injected roots only in test/offline
+  custody paths; the production entrypoints cannot obtain authority from
+  config, environment variables, writable HOME files, or CLI input.
 
-  **ID collision introduced today:** `test/m470.activation-authority.test.ts`
-  reuses milestone number M470, which was already assigned to the
-  already-shipped "proposal capture candidate identity"
-  (`test/m470.proposal-capture-candidate-identity.test.ts`; see the M464–M503
-  entry below). Recorded as a new row in `docs/MILESTONE-INDEX.md` §2.
-
-- **Autonomous PR merge gets its first caller (M504, M505).** The durable
-  merge-revocation protocol (`src/core/autonomy/host-merge-revocation-protocol.ts`)
-  existed with zero callers before today; it is now invoked from
-  `attemptHostAutoMerge()` (`src/core/merge.ts:2845-2901`), gated behind
-  `foundry.autoMerge.hostAutoMerge`, which **defaults to `false`**
-  (`src/core/merge.ts:2795`; `test/m505.host-auto-merge.test.ts` pins the
-  default-off behavior). A `failureCategory`
-  (`'code' | 'tool' | 'timeout' | 'infra' | 'cancelled' | 'invalid-command'`,
-  `src/core/run/verify-commands.ts:86-92`) is now threaded through
-  verify-commands, verify, run-tests, merge, the detached post-merge
-  runner/verification, the regression sentinel, and self-heal — exit 127
-  (missing binary) now classifies as `'tool'`, not a broken diff. `git apply
-  --3way` is now used in both `verifyProposal` and `attemptHostAutoMerge`
-  (`src/core/merge.ts:2313, 2984`) so a stale base no longer reads as a real
-  conflict. The self-eval parity gate — previously a single flaky
-  invariant-test failure was a GLOBAL merge blocker — now retries up to
-  `SELF_EVAL_PARITY_RETRY_ATTEMPTS = 2` times with a 500ms delay before
-  failing (`src/core/merge.ts:265-267`).
+- **Protected PR handoff is the terminal autonomous merge action.**
+  `foundry.autoMerge.pushToRemote` stages and pushes a reviewed branch and
+  opens a protection-checked PR, then persists
+  `awaiting-host-merge`; it does not run `gh pr merge`. The dormant
+  host-merge revocation protocol remains uncoupled from production effects.
+  Verification now carries a `failureCategory`
+  (`'code' | 'tool' | 'timeout' | 'infra' | 'cancelled' | 'invalid-command'`)
+  through verify commands, detached verification, the regression sentinel,
+  and self-heal, so a missing binary is classified as tooling rather than a
+  broken diff. Three-way apply is used for verification where supported, and
+  the self-eval parity gate retries one transient invariant failure before
+  refusing.
 
 - **Learning loop closed; judge parse failures stop posing as verdicts.**
   `hasReleasedPostMergeCredit()` (`src/core/fleet/post-merge-credit.ts:137-150`)
@@ -137,21 +114,6 @@ unattended activation even after a grant — are in
   minimal and additive — query-param filtering on `src/core/web/api.ts` for
   the inbox history view — not a rewrite; `server.ts`/`static.ts` routing is
   unchanged.
-
-- **Two activation designs now formally coexist; the guard protecting the
-  boundary between them was strengthened, not weakened.**
-  `conductor-permit` (`src/core/daemon/goal-conductor-permit-operator.ts`,
-  offline cold-custody, used by the goal conductor — M516–M518) and
-  `activation` (`src/core/daemon/activation-permit.ts`, on-machine standing
-  grants, M470 above) are separate modules with non-overlapping imports. The
-  test protecting this boundary used to check that a file
-  (`src/cli/activation.ts`) did not exist by name — a check that would have
-  broken the moment that file needed to exist for a legitimate, unrelated
-  reason. It now asserts the real invariant: the daemon activation CLI's
-  source text must not match any conductor-authority symbol name
-  (`test/m518.goal-conductor-permit-operator.test.ts:924-926`) — conductor
-  authority must be unreachable from the daemon surface, not merely absent
-  from a filename.
 
 ### 2026-08-16 — Live-data web UI crash and TITRR proposal-quality fixes
 

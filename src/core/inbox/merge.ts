@@ -99,7 +99,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync, unlinkSync, symlinkSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 
 import type {
@@ -134,7 +134,6 @@ import {
   readBranchProtectionAttestation,
   viewPr,
   type CreatePrResult,
-  type PrView,
 } from '../integrations/github.js';
 import { scrubSecrets } from '../knowledge/index.js';
 import { isSelfTargetProposal, guardSafetyTests, selfEvalParityAsync } from '../fleet/self.js';
@@ -204,12 +203,6 @@ import {
   REMOTE_HANDOFF_RECOVERY_MARKER,
 } from './remote-handoff.js';
 import { findLocalRealizedMergeDescendant } from './realized-merge.js';
-import {
-  prepareHostMergeRevocation,
-  transitionHostMergeRevocation,
-  readHostMergeRevocationState,
-  type HostMergeRevocationIdentityV1,
-} from '../autonomy/host-merge-revocation-protocol.js';
 
 function auditAutoMergeCanaryFailure(repo: string, sandboxId: string): void {
   try {
@@ -2635,289 +2628,6 @@ function reconcileLocalMergeIntent(id: string, cfg: AshlrConfig): AutoMergeResul
   return { ok: true, merged: true, reason };
 }
 
-// ---------------------------------------------------------------------------
-// Host merge — the last hop of the remote handoff path: the actual
-// `gh pr merge`. Gated by durable per-authority revocation
-// (autonomy/host-merge-revocation-protocol.ts) on top of every existing
-// mechanical/judge/self-target gate already run above. Default DISABLED via
-// cfg.foundry.autoMerge.hostAutoMerge (separate opt-in from pushToRemote —
-// opening a PR and actually merging it are different trust levels).
-// ---------------------------------------------------------------------------
-
-/** Bounded lifetime of a single host-merge authority window (< the protocol's 15m cap). */
-export const HOST_MERGE_AUTHORITY_TTL_MS = 10 * 60 * 1000;
-
-/** Timeout for the `gh pr merge` invocation itself (network op). */
-const HOST_MERGE_TIMEOUT_MS = 30_000;
-
-/**
- * Placeholder kill-switch epoch. ~/.ashlr/KILL has no versioning of its own
- * today; this binds every host-merge authority to a fixed protocol
- * generation so the identity schema is forward-compatible if a real epoch
- * counter is added later. It is NOT a substitute for the direct
- * killSwitchOn() checks below — those remain the live, load-bearing gate.
- */
-export const HOST_MERGE_KILL_EPOCH_DIGEST = createHash('sha256')
-  .update('ashlr.host-merge-revocation.kill-epoch.v1', 'utf8')
-  .digest('hex');
-
-export function hostMergeOperationId(id: string, suffix: string): string | null {
-  const candidate = `${id}-${suffix}`;
-  return /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/.test(candidate) ? candidate : null;
-}
-
-/**
- * Digest binding the currently-configured auto-merge policy surface.
- * Changing any of these values between prepare and arm changes the
- * authority's identity (and therefore its authorityId), so a stale grant
- * prepared under an old policy can never silently carry forward under a
- * different one — transitionHostMergeRevocation would refuse it as
- * 'authority-missing' instead.
- */
-export function hostMergePolicyEpoch(input: {
-  maxRisk: RiskClass;
-  managerGateEnabled: boolean;
-  allowSelfMerge: boolean;
-  hostAutoMergeEnabled: boolean;
-  maxFiles: number;
-  maxLines: number;
-}): string {
-  return createHash('sha256').update(JSON.stringify(input), 'utf8').digest('hex');
-}
-
-export function buildHostMergeRevocationIdentity(input: {
-  nameWithOwner: string;
-  repositoryId: string;
-  base: string;
-  baseOid: string;
-  branch: string;
-  headOid: string;
-  pullRequestId: string;
-  pullRequestNumber: number;
-  evidencePackDigest: string;
-  verifierManifestDigest: string;
-  protectionPolicyDigest: string;
-  policyEpoch: string;
-  now: Date;
-}): HostMergeRevocationIdentityV1 {
-  return {
-    nameWithOwner: input.nameWithOwner,
-    repositoryId: input.repositoryId,
-    baseRef: input.base,
-    baseOid: input.baseOid,
-    headRef: input.branch,
-    headOid: input.headOid,
-    pullRequestId: input.pullRequestId,
-    pullRequestNumber: input.pullRequestNumber,
-    evidencePackDigest: input.evidencePackDigest,
-    verifierManifestDigest: input.verifierManifestDigest,
-    protectionPolicyDigest: input.protectionPolicyDigest,
-    killEpoch: HOST_MERGE_KILL_EPOCH_DIGEST,
-    policyEpoch: input.policyEpoch,
-    expiresAt: new Date(input.now.getTime() + HOST_MERGE_AUTHORITY_TTL_MS).toISOString(),
-  };
-}
-
-/** Run `gh pr merge` directly (never throws). */
-function hostMergeGhPrMerge(cwd: string, args: string[]): { ok: boolean; detail: string } {
-  try {
-    const stdout = execFileSync('gh', args, {
-      cwd,
-      timeout: HOST_MERGE_TIMEOUT_MS,
-      stdio: 'pipe',
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        GH_HOST: 'github.com',
-        GH_NO_UPDATE_NOTIFIER: '1',
-        NO_COLOR: '1',
-      },
-    });
-    return { ok: true, detail: (typeof stdout === 'string' ? stdout.trim() : '') || 'gh pr merge exited 0' };
-  } catch (err) {
-    const e = err as { stderr?: Buffer | string; message?: string };
-    const stderr = typeof e.stderr === 'string'
-      ? e.stderr
-      : e.stderr instanceof Buffer
-        ? e.stderr.toString('utf8')
-        : undefined;
-    return { ok: false, detail: (stderr || e.message || 'gh pr merge failed').trim().slice(0, 2000) };
-  }
-}
-
-export interface HostAutoMergeAttemptInput {
-  repo: string;
-  id: string;
-  cfg: AshlrConfig;
-  nameWithOwner: string;
-  repositoryId: string;
-  url: string;
-  base: string;
-  baseOid: string;
-  branch: string;
-  headOid: string;
-  observedPr: PrView | null;
-  evidencePackDigest: string;
-  verifierManifestDigest: string | null;
-  protectionPolicyDigest: string;
-  maxRisk: RiskClass;
-  managerGateEnabled: boolean;
-  allowSelfMerge: boolean;
-  maxFiles: number;
-  maxLines: number;
-  /** Test-only clock override. Production callers never pass this — real time is used. */
-  now?: Date;
-}
-
-/**
- * Attempt the last hop of the remote handoff: the actual `gh pr merge`.
- * Returns a human-readable mergeNote describing the outcome; NEVER throws.
- * Fails closed on every ambiguity (kill switch, unreadable/degraded/missing
- * revocation state, missing identity inputs). The proposal always ends up in
- * the existing awaiting-host-merge state regardless of this function's
- * outcome — the pre-existing reconcileRemoteHandoffs() sweep is the durable
- * source of truth for whatever actually happened on the host, whether we
- * merged it just now or a human merges it later.
- *
- * Exported (with its identity-building helpers) so tests can drive it
- * directly, and so a test can independently prepare/arm/revoke the EXACT
- * authority this function will look up (same identity, same clock) to
- * exercise durable revocation without needing to fabricate an entire
- * end-to-end autoMergeProposal() gate-chain pass.
- */
-export async function attemptHostAutoMerge(input: HostAutoMergeAttemptInput): Promise<string> {
-  const {
-    repo, id, cfg, nameWithOwner, repositoryId, url, base, baseOid, branch, headOid,
-    observedPr, evidencePackDigest, verifierManifestDigest, protectionPolicyDigest,
-    maxRisk, managerGateEnabled, allowSelfMerge, maxFiles, maxLines,
-  } = input;
-
-  const hostAutoMergeEnabled = autoMergeConfigValue(cfg, 'hostAutoMerge') === true;
-  if (!hostAutoMergeEnabled) {
-    return 'PR opened; host auto-merge is disabled (cfg.foundry.autoMerge.hostAutoMerge !== true)';
-  }
-  if (!verifierManifestDigest) {
-    return 'PR opened; host auto-merge refused because no required-verifier manifest digest is bound to this attempt';
-  }
-  if (killSwitchOn()) {
-    return 'PR opened; host auto-merge refused because the autonomy kill switch is ON';
-  }
-
-  // Re-derive PR identity fresh — never trust an object handed in from an
-  // earlier step of this same invocation. This is also what makes an
-  // interrupted host merge reconcilable: if a prior, crashed attempt already
-  // got the PR merged, we observe that here and never re-invoke gh pr merge.
-  const freshBeforeAttempt = viewPr(repo, url, { repo: nameWithOwner });
-  if (!freshBeforeAttempt) {
-    return 'PR opened; host auto-merge refused because the PR could not be freshly re-read before merging';
-  }
-  if (freshBeforeAttempt.state === 'MERGED' || Boolean(freshBeforeAttempt.mergedAt)) {
-    return 'PR opened; already merged on the host (observed before any merge attempt this pass)';
-  }
-  if (freshBeforeAttempt.state !== 'OPEN' ||
-    !freshBeforeAttempt.headRefOid || freshBeforeAttempt.headRefOid.toLowerCase() !== headOid.toLowerCase() ||
-    freshBeforeAttempt.baseRefName !== base) {
-    return `PR opened; host auto-merge refused because the live PR state changed (state=${freshBeforeAttempt.state ?? 'unknown'})`;
-  }
-  const pullRequestId = observedPr?.id ?? freshBeforeAttempt.id;
-  const pullRequestNumber = observedPr?.number ?? freshBeforeAttempt.number;
-  if (!pullRequestId || typeof pullRequestNumber !== 'number' || !Number.isSafeInteger(pullRequestNumber)) {
-    return 'PR opened; host auto-merge refused because the PR node id/number could not be resolved';
-  }
-
-  const policyEpoch = hostMergePolicyEpoch({
-    maxRisk, managerGateEnabled, allowSelfMerge, hostAutoMergeEnabled, maxFiles, maxLines,
-  });
-  const now = input.now ?? new Date();
-  const identity = buildHostMergeRevocationIdentity({
-    nameWithOwner, repositoryId, base, baseOid, branch, headOid,
-    pullRequestId, pullRequestNumber, evidencePackDigest, verifierManifestDigest,
-    protectionPolicyDigest, policyEpoch, now,
-  });
-
-  const prepareOpId = hostMergeOperationId(id, 'host-merge-prepare');
-  const armOpId = hostMergeOperationId(id, 'host-merge-arm');
-  const consumeOpId = hostMergeOperationId(id, 'host-merge-consume');
-  if (!prepareOpId || !armOpId || !consumeOpId) {
-    return 'PR opened; host auto-merge refused because a durable operation id could not be derived';
-  }
-
-  const prepared = prepareHostMergeRevocation({ identity, operationId: prepareOpId, now });
-  if (!('receipt' in prepared)) {
-    return `PR opened; host auto-merge refused: revocation prepare ${prepared.status} (${prepared.reason})`;
-  }
-  const armed = transitionHostMergeRevocation({
-    identity,
-    action: 'arm',
-    operationId: armOpId,
-    expectedSequence: prepared.receipt.sequence,
-    expectedReceiptDigest: prepared.receipt.receiptDigest,
-    now,
-  });
-  if (!('receipt' in armed)) {
-    return `PR opened; host auto-merge refused: revocation arm ${armed.status} (${armed.reason})`;
-  }
-
-  // Immediately before the irreversible act: re-check the kill switch AND do
-  // a FRESH authenticated read of the durable revocation store — never trust
-  // the in-memory `armed` result, since a concurrent revoker could have acted
-  // in between.
-  if (killSwitchOn()) {
-    const killRevokeOpId = hostMergeOperationId(id, 'host-merge-revoke-kill');
-    if (killRevokeOpId) {
-      // Best-effort durable revoke — gives the kill switch real teeth against
-      // this specific authority, even though we abort THIS invocation either way.
-      transitionHostMergeRevocation({
-        identity,
-        action: 'revoke',
-        operationId: killRevokeOpId,
-        expectedSequence: armed.receipt.sequence,
-        expectedReceiptDigest: armed.receipt.receiptDigest,
-        now,
-      });
-    }
-    return 'PR opened; host auto-merge refused because the autonomy kill switch is ON';
-  }
-  const preMergeState = readHostMergeRevocationState(identity);
-  if (preMergeState.state !== 'healthy' || preMergeState.record.phase !== 'armed') {
-    const detail = preMergeState.state === 'healthy'
-      ? `phase=${preMergeState.record.phase}`
-      : preMergeState.state === 'degraded'
-        ? preMergeState.reason
-        : 'authority missing';
-    return `PR opened; host auto-merge refused: revocation authority is not armed (${detail})`;
-  }
-
-  const mergeMethodCfg = autoMergeConfigValue(cfg, 'mergeMethod');
-  const methodFlag = mergeMethodCfg === 'merge' ? '--merge' : mergeMethodCfg === 'rebase' ? '--rebase' : '--squash';
-  const attempt = hostMergeGhPrMerge(repo, ['pr', 'merge', url, '--repo', nameWithOwner, methodFlag]);
-
-  const freshAfterAttempt = viewPr(repo, url, { repo: nameWithOwner });
-  const confirmedMerged = Boolean(freshAfterAttempt &&
-    (freshAfterAttempt.state === 'MERGED' || freshAfterAttempt.mergedAt) &&
-    freshAfterAttempt.headRefOid?.toLowerCase() === headOid.toLowerCase());
-
-  if (confirmedMerged) {
-    transitionHostMergeRevocation({
-      identity,
-      action: 'consume',
-      operationId: consumeOpId,
-      expectedSequence: armed.receipt.sequence,
-      expectedReceiptDigest: armed.receipt.receiptDigest,
-      now,
-    });
-    return `PR opened and merged via host auto-merge (gh pr merge)${attempt.ok ? '' : `; gh reported: ${attempt.detail}`}`;
-  }
-  // Not confirmed merged — leave the authority 'armed' (never consumed, never
-  // revoked) so a later retry via the existing remoteHandoff recovery path
-  // replays the SAME authority instead of minting a new one, and so
-  // reconcileRemoteHandoffs() remains the single source of truth if the host
-  // actually completes the merge after our read.
-  return attempt.ok
-    ? 'PR opened; host auto-merge invoked gh pr merge but the merge was not confirmed on re-read; will reconcile'
-    : `PR opened; host auto-merge refused: ${attempt.detail}`;
-}
-
 /** Build the staging branch holding the proposal's diff, off the default branch.
  *  Returns the branch name on success, or null + detail on failure. */
 function buildMergeBranch(
@@ -4536,36 +4246,12 @@ export async function autoMergeProposal(
             mergeNote = 'PR opened; host auto-merge refused because live protection changed';
           } else if (!originStable) {
             mergeNote = 'PR opened; host auto-merge refused because canonical GitHub origin changed';
-          } else if (!url) {
-            mergeNote = 'PR opened; host auto-merge refused because no canonical PR URL is available';
           } else {
-            // Reaching this branch means every protected-handoff precondition was
-            // confirmed (PR identity, base OID, live protection, canonical origin,
-            // canonical URL). Record that BEFORE attempting the host merge, so the
-            // strictHandoffUncertain reconciliation path below stays correct
-            // regardless of what the merge attempt itself returns.
-            finalProtectedHandoffConfirmed = true;
-            mergeNote = await attemptHostAutoMerge({
-              repo,
-              id,
-              cfg,
-              nameWithOwner: githubOrigin.nameWithOwner,
-              repositoryId: latestProtection.evidence.repositoryId,
-              url,
-              base,
-              baseOid: boundBaseHead,
-              branch,
-              headOid: stagedHead,
-              observedPr,
-              evidencePackDigest,
-              verifierManifestDigest: requiredVerifierManifest?.digest ?? null,
-              protectionPolicyDigest: latestProtection.evidence.policyHash,
-              maxRisk,
-              managerGateEnabled,
-              allowSelfMerge,
-              maxFiles: maxFilesForEvidence,
-              maxLines: maxLinesForEvidence,
-            });
+            // Protected PR handoff is the terminal autonomous action. A host
+            // merge requires separate authority and remains intentionally
+            // unavailable in this release.
+            finalProtectedHandoffConfirmed = Boolean(url);
+            mergeNote = 'PR opened; host auto-merge is disabled until durable revocation is available';
           }
         }
         const durableReason = `${mergeNote}${url ? `: ${url}` : ''} (remote handoff; awaiting host merge)`;
