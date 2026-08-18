@@ -15,11 +15,11 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const cmdFile = (n: string) => resolve(HERE, `../.claude/commands/${n}`);
 
 describe('M55 — slash-command files', () => {
-  for (const [file, cli] of [
-    ['goal.md', 'ashlr goal'],
-    ['loop.md', 'ashlr loop'],
+  for (const [file, cli, expectedInvocation] of [
+    ['goal.md', 'ashlr goal', 'ashlr goal $ARGUMENTS'],
+    ['loop.md', 'ashlr loop', 'ashlr loop --dry-run'],
   ] as const) {
-    it(`${file} exists with frontmatter and references \`${cli}\``, () => {
+    it(`${file} exists with frontmatter and references \`${cli}\` safely`, () => {
       const path = cmdFile(file);
       expect(existsSync(path), `${path} missing`).toBe(true);
       const src = readFileSync(path, 'utf8');
@@ -27,7 +27,13 @@ describe('M55 — slash-command files', () => {
       expect(src).toMatch(/description:/);
       expect(src).toMatch(/argument-hint:/);
       expect(src).toContain(cli);
-      expect(src).toContain('$ARGUMENTS');
+      expect(src).toContain(expectedInvocation);
+      if (file === 'goal.md') {
+        expect(src).toContain('$ARGUMENTS');
+      } else {
+        expect(src).not.toContain('$ARGUMENTS');
+        expect(src).toContain('must not pass through non-dry arguments');
+      }
     });
   }
 });

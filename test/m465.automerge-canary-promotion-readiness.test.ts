@@ -8,7 +8,11 @@ import {
   autoMergeCanaryConfigDigest,
   autoMergeCanaryPolicyDigest,
 } from '../src/core/fleet/automerge-canary-observer.js';
-import { resolveAutoMergeScopePolicy } from '../src/core/foundry/automerge-scope-policy.js';
+import {
+  MAX_AUTOMERGE_POLICY_FILES,
+  MAX_AUTOMERGE_POLICY_LINES,
+  resolveAutoMergeScopePolicy,
+} from '../src/core/foundry/automerge-scope-policy.js';
 import type { AshlrConfig } from '../src/core/types.js';
 
 const NOW = Date.parse('2026-07-29T02:00:00.000Z');
@@ -105,6 +109,7 @@ function readyInput(): AutoMergeCanaryPromotionReadinessInput {
 
 describe('M465 auto-merge canary promotion readiness', () => {
   it('reports complete evidence without ever granting activation authority', () => {
+    expect([MAX_AUTOMERGE_POLICY_FILES, MAX_AUTOMERGE_POLICY_LINES]).toEqual([10, 300]);
     const result = evaluateAutoMergeCanaryPromotionReadiness(readyInput());
 
     expect(result).toEqual({
@@ -117,8 +122,8 @@ describe('M465 auto-merge canary promotion readiness', () => {
       scopeCaps: {
         maxFiles: 4,
         maxLines: 150,
-        policyMaxFiles: 40,
-        policyMaxLines: 3000,
+        policyMaxFiles: MAX_AUTOMERGE_POLICY_FILES,
+        policyMaxLines: MAX_AUTOMERGE_POLICY_LINES,
         source: 'explicit',
         scopePolicyDigest: scopeDigest(4, 150),
       },
@@ -240,8 +245,8 @@ describe('M465 auto-merge canary promotion readiness', () => {
       scopeCaps: {
         maxFiles: null,
         maxLines: null,
-        policyMaxFiles: 40,
-        policyMaxLines: 3000,
+        policyMaxFiles: MAX_AUTOMERGE_POLICY_FILES,
+        policyMaxLines: MAX_AUTOMERGE_POLICY_LINES,
         source: 'invalid',
       },
     });
