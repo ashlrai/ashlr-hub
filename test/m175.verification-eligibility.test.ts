@@ -182,16 +182,7 @@ beforeEach(() => {
     complete: async () =>
       '{"verdict":"ship","value":5,"correctness":5,"scope":1,"alignment":5,"rationale":"ship"}',
   });
-  mockJudgeProposal.mockResolvedValue({
-    proposalId: 'default',
-    verdict: 'ship',
-    value: 5,
-    correctness: 5,
-    scope: 1,
-    alignment: 5,
-    rationale: 'mock ship',
-    wouldMerge: true,
-  } satisfies ManagerVerdict);
+  mockJudgeProposal.mockResolvedValue(shipVerdict('default'));
 });
 
 afterEach(() => {
@@ -235,7 +226,21 @@ function makeProp(id: string, tier: 'frontier' | 'mid' | 'local' = 'local'): Pro
 }
 
 function shipVerdict(id: string): ManagerVerdict {
-  return { proposalId: id, verdict: 'ship', value: 5, correctness: 5, scope: 1, alignment: 5, rationale: 'ship', wouldMerge: true };
+  const verdict: ManagerVerdict = {
+    proposalId: id,
+    verdict: 'ship',
+    value: 5,
+    correctness: 5,
+    scope: 1,
+    alignment: 5,
+    rationale: 'ship',
+    wouldMerge: true,
+  };
+  Object.defineProperty(verdict, 'considered', {
+    value: true,
+    enumerable: false,
+  });
+  return verdict;
 }
 
 // ===========================================================================
@@ -268,6 +273,29 @@ describe('M175 verification-mode eligibility — any tier is judged', () => {
     expect(r.judged).toBe(1);
     expect(mockAutoMergeProposal).toHaveBeenCalledWith('v2', expect.anything());
     expect(r.attempted).toBe(1);
+  });
+
+  it('holds an incomplete ship verdict for review instead of attempting merge', async () => {
+    const p = makeProp('v2-incomplete', 'local');
+    mockListProposals.mockReturnValue([p]);
+    mockJudgeProposal.mockResolvedValueOnce({
+      proposalId: 'v2-incomplete',
+      verdict: 'ship',
+      value: 5,
+      correctness: 5,
+      scope: 1,
+      alignment: 5,
+      rationale: 'ship',
+      wouldMerge: true,
+    } satisfies ManagerVerdict);
+
+    const r = await runAutoMergePass(verifyCfg());
+
+    expect(mockJudgeProposal).toHaveBeenCalledOnce();
+    expect(r.judged).toBe(1);
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+    expect(r.attempted).toBe(0);
+    expect(r.merged).toBe(0);
   });
 
   it('[V3] local proposal, verification mode, judge review → judged, NOT attempted', async () => {
