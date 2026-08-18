@@ -48,6 +48,7 @@ const semanticPrivateStorage = createSemanticPrivateStorageHarness({
 function assignment(overrides: Partial<PolicyAssignmentReceiptInput> = {}): PolicyAssignmentReceiptInput {
   return {
     reportedAssignedAt: '2026-07-25T12:00:00.000Z',
+    dispatchTrajectoryId: 'run:attempt-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
     repo: repoPath,
     workItemId: 'issue:secret-42',
     workSource: 'issue',
@@ -131,12 +132,15 @@ describe('M460 policy assignment receipts', () => {
       protocol: 'policy-assignment-receipt-v1',
       authority: 'observation-only',
       executionAuthority: false,
-      policyEligible: false,
+      // Two recorded actions → a real counterfactual; a pre-registered
+      // run:attempt-<uuid> trajectory id → provably minted before dispatch;
+      // a structurally-complete action set (guaranteed by construction).
+      policyEligible: true,
       causalIdentifiability: 'not-identifiable',
       assignmentEvidence: 'policy-reported',
       timingEvidence: 'policy-reported',
-      preExposureVerified: false,
-      denominatorComplete: false,
+      preExposureVerified: true,
+      denominatorComplete: true,
       reportedAssignmentMechanism: 'randomized-hmac',
       reportedRandomizationCommitment: 'c'.repeat(64),
       reportedProbabilityDenominator: 10,
@@ -413,9 +417,21 @@ describe('M460 policy assignment receipts', () => {
   });
 
   it('withholds a tampered source instead of projecting healthy zero', () => {
-    expect(recordPolicyAssignmentReceipt(assignment())).toBe('recorded');
+    // A single-action deterministic assignment is genuinely policyEligible:false
+    // (no recorded alternative) — forging it to true must still be rejected.
+    const singleAction = assignment({
+      reportedAssignmentMechanism: 'deterministic-policy',
+      reportedRandomizationCommitment: undefined,
+      reportedProbabilityDenominator: 1,
+      reportedEligibleActions: [
+        { actionId: 'local-coder', actionDefinitionDigest: LOCAL_ACTION, probabilityNumerator: 1 },
+      ],
+      reportedSelectedActionId: 'local-coder',
+    });
+    expect(recordPolicyAssignmentReceipt(singleAction)).toBe('recorded');
     const [receipt] = readPolicyAssignmentReceipts().receipts;
     expect(receipt).toBeDefined();
+    expect(receipt).toMatchObject({ policyEligible: false });
     const path = join(policyAssignmentReceiptRootPath(), `${receipt!.assignmentUnitId}.json`);
     const tampered = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
     tampered['policyEligible'] = true;

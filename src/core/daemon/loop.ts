@@ -219,11 +219,13 @@ import {
 import {
   causalMetadata,
   evidenceOutcomeSummary,
+  learningEpochFromTimestamp,
   ROUTER_POLICY_VERSION,
   routeSnapshot,
   runEventSummary,
 } from '../learning/causal.js';
 import { productionAttemptLearningLabelFromSignals } from '../learning/attempt-shape.js';
+import { mintRoutingAssignmentReceipt } from '../learning/routing-assignment-receipt.js';
 import { readSkillCards } from '../fleet/skill-records.js';
 import { observeShadowSkills } from '../fleet/skill-shadow-observer.js';
 // worked-ledger is used transitively via LocalWorkQueueCoordinator (selectWorkQueueCoordinator).
@@ -5778,6 +5780,11 @@ export async function tick(
       let selectedModel: string | null | undefined;
       let dispatch: DaemonDispatchTrace | undefined;
       let runTrajectoryId = `run:${attemptId}`;
+      // M-causal-routing: set only inside the M53 intelligence gate below, so
+      // the routing-assignment receipt is minted only for dispatches actually
+      // routed under the learned policy (a receipt with no learned decision
+      // behind it would have no counterfactual to speak of).
+      let learnedRoutingActive = false;
 
       // M334 stage 1: observe-only gateway shadow. Runs the M247 gateway
       // BESIDE the live legacy decision and records the comparison — THE
@@ -6053,6 +6060,7 @@ export async function tick(
         {
           const intelRaw = routingCfg.foundry?.intelligence;
           if (intelRaw !== undefined && intelRaw !== null) {
+            learnedRoutingActive = true;
             const forecast = buildForecast('7d', routingCfg);
             const goal = buildItemGoal(item);
             const est = await estimateRun(goal, { maxTokens: perItemMaxTokens }, routingCfg);
@@ -6228,6 +6236,30 @@ export async function tick(
             skipReason: 'repair-attempt-reservation-unavailable',
           }),
         };
+      }
+      // M-causal-routing: mint a policy-assignment receipt for this dispatch
+      // BEFORE the engine runs — before any outcome is known — so later
+      // credit assignment is causal rather than post-hoc. Best-effort: a mint
+      // failure is never allowed to block or alter dispatch.
+      if (learnedRoutingActive && backend !== undefined) {
+        try {
+          const finalBackend = backend;
+          const finalTier = backendTier ?? engineTierOf(finalBackend, routingCfg);
+          const configuredAllowed = Array.isArray(routingCfg.foundry?.allowedBackends)
+            ? routingCfg.foundry.allowedBackends
+            : [];
+          const candidateBackends = [...new Set([finalBackend, ...configuredAllowed, 'builtin' as EngineId])]
+            .filter((candidate) => engineTierOf(candidate, routingCfg) === finalTier);
+          mintRoutingAssignmentReceipt({
+            item,
+            dispatchTrajectoryId: runTrajectoryId,
+            policyVersion: ROUTER_POLICY_VERSION,
+            learningEpoch: learningEpochFromTimestamp(new Date().toISOString()),
+            contextStratum: `${item.source}:${finalTier}`,
+            selectedBackend: finalBackend,
+            candidateBackends,
+          });
+        } catch { /* best effort — never block dispatch on receipt minting */ }
       }
       const goal = buildItemGoal(item);
       const dispatchCfg = dispatchConfigForItem(item, routingCfg);
