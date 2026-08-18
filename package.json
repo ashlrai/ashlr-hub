@@ -83,10 +83,10 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
-    "eslint": "^9.0.0",
+    "@types/node": "^26.1.1",
+    "eslint": "^10.7.0",
     "tsx": "^4.0.0",
-    "typescript": "^5.5.0",
+    "typescript": "^7.0.2",
     "typescript-eslint": "^8.61.0",
     "vitest": "4.1.10",
     "yaml": "^2.8.1"
