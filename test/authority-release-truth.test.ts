@@ -2,12 +2,13 @@
  * Release-truth regressions for the fail-closed authority salvage.
  *
  * These checks preserve the immutable public 3.3.0 record while binding the
- * current Unreleased correction and documented configuration surface to the
+ * current 3.3.1 correction and documented configuration surface to the
  * production boundary: protected PR handoff is terminal, and rejected local
  * activation/host-merge authority is not shipped.
  */
 
 import { existsSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -26,11 +27,15 @@ function releaseBlock(version: string): string {
 }
 
 describe('emergency authority release truth', () => {
-  it('preserves the published 3.3.0 record and corrects current authority under Unreleased', () => {
+  it('preserves the published 3.3.0 record and binds the 3.3.1 correction', () => {
     const historical = releaseBlock('3.3.0');
-    const release = releaseBlock('Unreleased');
+    const release = releaseBlock('3.3.1');
+
+    expect(releaseBlock('Unreleased').trim()).toBe('## [Unreleased]');
 
     expect(historical).toContain('Fleet activation unblocked, autonomous merge wired, learning loop closed');
+    expect(createHash('sha256').update(historical).digest('hex'))
+      .toBe('1ddec34a674cc8dd88315091bccbbda699a02558942eb23c244f9626b57131eb');
 
     expect(release).toMatch(/fail-closed runtime boundaries/i);
     expect(release).toMatch(/compiled daemon and conductor trust roots are empty/i);
@@ -52,7 +57,7 @@ describe('emergency authority release truth', () => {
   });
 
   it('records the restored console and web security changes without an unchanged-backend claim', () => {
-    const release = releaseBlock('Unreleased');
+    const release = releaseBlock('3.3.1');
 
     expect(release).toMatch(/session-bound and expiry-bound\s+SSE/);
     expect(release).toContain('descriptor-bound static reads');
@@ -79,7 +84,7 @@ describe('emergency authority release truth', () => {
   });
 
   it('keeps setup, update, and help guidance on admitted owner or dry-run paths', () => {
-    const release = releaseBlock('Unreleased');
+    const release = releaseBlock('3.3.1');
     const readme = read('README.md');
     const quickstart = read('docs/QUICKSTART.md');
     const serviceAuthority = read('src/core/daemon/service-install-authority.ts');

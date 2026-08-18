@@ -11,7 +11,7 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
-### 2026-08-18 — Fail-closed runtime boundaries and emergency neutralization of the quarantined 3.3.0 candidate
+## [3.3.1] — 2026-08-18 — Fail-closed runtime boundaries and emergency neutralization of the quarantined 3.3.0 candidate
 
 - Restores the hostile-reviewed, fail-closed authority and web-security tree
   after an unsafe 3.3.0 candidate was merged and published concurrently. The
@@ -27,10 +27,10 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 - Restores the operator-console security boundary: session-bound and expiry-bound
   SSE with exact logout revocation, descriptor-bound static reads, strict
   CSP/security headers, and stable bounded public error responses.
-- This source-neutralization merge is intentionally not a release. A separate
-  protected release-only change must prepare immutable 3.3.1 from this safe
-  first parent; 3.3.1 is the sole successor eligible for candidate acceptance
-  and later explicit npm `latest` promotion.
+- The source-neutralization merge itself was intentionally not a release. This
+  protected release-only change prepares immutable 3.3.1 from that safe first
+  parent; 3.3.1 is the sole successor eligible for candidate acceptance and
+  later explicit npm `latest` promotion.
 
 ## [3.3.0] — 2026-08-17 — Fleet activation, autonomous merge, and the operator console
 

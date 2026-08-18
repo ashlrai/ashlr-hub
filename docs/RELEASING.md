@@ -6,12 +6,12 @@
 > 3.3.0 only until the controlled 3.3.1 publication supersedes it, and
 > never move 3.3.0 to npm `latest`, reinstall it, activate it, rerun its publish
 > job, or reuse its version or tag. npm `latest` remains 3.0.1. The 3.3.0
-> procedure below is historical evidence and must not be executed. A separate
-> protected release-only change must prepare 3.3.1 from the safe
+> procedure remains historical evidence and must not be executed. This
+> protected release-only change prepares 3.3.1 from the safe
 > source-neutralization merge; 3.3.1 is the sole successor lane.
 
-The historical lane was tag-triggered and fully gated. It published only under
-npm dist-tag `candidate` and created a GitHub prerelease; it could not move npm
+The controlled successor lane is tag-triggered and fully gated. It publishes only under
+npm dist-tag `candidate` and creates a GitHub prerelease; it cannot move npm
 or GitHub `latest`.
 
 ## One-time setup
@@ -67,24 +67,27 @@ tokens, and delete the unused `NPM_TOKEN` GitHub secret. Do not remove those
 fallback credentials before the trusted publisher has been configured and
 verified.
 
-## Historical 3.3.0 release procedure — frozen, do not execute
+## Controlled 3.3.1 successor release procedure
 
-This section records the already-completed 3.3.0 candidate lane for forensic
-review only. Do not run any command in it. The 3.3.1 release-only PR must
-replace this section with newly reviewed, exact 3.3.1 instructions.
+This section is the only authorized successor procedure. The immutable 3.3.0
+candidate remains quarantined evidence; superseding its `candidate` dist-tag
+does not rehabilitate, reinstall, activate, rewrite, or promote 3.3.0.
 
 The current workflow is a one-version successor-candidate lane. It requires
-npm `latest` to equal `3.0.1`, `candidate` to equal `3.2.7`, immutable version 3.2.7
+npm `latest` to equal `3.0.1`, `candidate` to equal `3.3.0`, immutable version 3.3.0
 to retain integrity
-`sha512-Zep4krYD7uKqh2k+Z6w0sMyNDsLFjEtV1H8EqdM7yKTKCHSq79lJb7jGoH1qrfOXDBRTJTmG7bSDSPOBUFj+yA==`,
-the lightweight `v3.2.7` tag to remain at
-`73931bdd31b3b4e4d905a30b5112e4cd712f7844`, and version 3.3.0 to be absent.
+`sha512-mYVuJZyoXeSnnqivoLzyZggNgpJoWM8glTI7CW0oBfQ0RCHx0xueTrLwLTZBg5W+E4zPOJNbckptYeb5YsdOHw==`,
+the lightweight `v3.3.0` tag to remain at
+`d07f6a96eda664d865b9255f71c6f56e8cd9d7c7`, and version 3.3.1 to be absent.
+The tagged 3.3.1 merge commit's first parent must be the exact safe
+source-neutralization merge
+`31aa0467f66af1fe4c66d1664f65e6fd3e4ba61b`.
 It fails closed if any precondition changes. Before authorizing the tag, an
 authenticated npm maintainer must run the pinned npm 11 client and
 verify `npm trust list @ashlr/hub` exactly matches the repository, workflow,
 environment, and `npm publish` permission documented above. The successful
-3.2.7 publication proves only that the binding worked for that exact attempt;
-it does not replace the action-time check for 3.3.0.
+3.3.0 publication proves only that the binding worked for that exact attempt;
+it does not replace the action-time check for 3.3.1.
 
 The workflow serializes runs for the exact release ref and performs the registry
 admission immediately before `npm publish`. npm dist-tags do not offer a
@@ -95,8 +98,8 @@ The release policy accepts only a lightweight tag whose current GitHub ref still
 resolves directly to the event commit; annotated tags, tag rewrites, and deleted
 tags fail closed.
 
-1. Confirm `version` in `package.json` is exactly `3.3.0`.
-2. Make sure `CHANGELOG.md` has a `## [3.3.0]` section — the release FAILS
+1. Confirm `version` in `package.json` is exactly `3.3.1`.
+2. Make sure `CHANGELOG.md` has a `## [3.3.1]` section — the release FAILS
    without one (`scripts/extract-changelog.mjs` enforces changelog discipline;
    its body becomes the GitHub release notes).
 3. Confirm protected `master` is at the intended release SHA and its required
@@ -104,8 +107,9 @@ tags fail closed.
    release tag (do not force, move, delete, or recreate it):
 
    ```bash
-   git tag v3.3.0
-   git push origin v3.3.0
+   test "$(git rev-parse HEAD^1)" = "31aa0467f66af1fe4c66d1664f65e6fd3e4ba61b"
+   git tag v3.3.1
+   git push origin v3.3.1
    ```
 
 4. `.github/workflows/release.yml` then:
@@ -150,8 +154,8 @@ tags fail closed.
      per-member caps. It streams only bounded package/build identity bytes
      without executing them, rejects any package-level registry override,
      re-establishes protected-master history, exact successor registry state,
-     `latest=3.0.1`, and the immutable `v3.2.7` tag identity, and requires the
-     live lightweight `v3.3.0` tag to resolve to the event SHA immediately
+     `latest=3.0.1`, and the immutable `v3.3.0` tag identity, and requires the
+     live lightweight `v3.3.1` tag to resolve to the event SHA immediately
      before the single OIDC-authenticated `npm publish
      <tarball> --ignore-scripts --provenance --access public --tag candidate`.
      It exports the exact successful publication attempt before that effect so
@@ -162,8 +166,8 @@ tags fail closed.
      verified SLSA statement and bind its package purl/SHA-512, repository,
      workflow path, tag ref, Git commit, push event, GitHub-hosted builder,
      workflow run, and run attempt to the exact release execution. It also
-     proves 3.2.7 retained its exact integrity, `candidate` moved only from
-     3.2.7 to 3.3.0, and every other pre-existing dist-tag including
+     proves 3.3.0 retained its exact integrity, `candidate` moved only from
+     3.3.0 to 3.3.1, and every other pre-existing dist-tag including
      `latest=3.0.1` stayed unchanged;
    - **release** — only after `verify_publish` succeeds, download and verify the
      manifest-bound public notes artifact, recheck the live lightweight tag
@@ -201,6 +205,93 @@ If npm trusted publishing is missing or its repository/workflow binding is
 wrong, publication fails closed with an authentication error. Do not fall back
 to a local token/OTP publish: that would bypass the workflow's full-CI,
 protected-history, and provenance gates.
+
+## Production promotion after 3.3.1 acceptance
+
+Promote `@ashlr/hub@3.3.1` to npm `latest` only after the `v3.3.1` release
+workflow and GitHub prerelease succeeded, registry provenance was verified,
+and an isolated, script-free install passed live acceptance against the exact
+candidate integrity. Keep the acceptance receipt and calculate its SHA-256;
+record `acceptance_observed_at` as the canonical UTC RFC3339 time when that
+acceptance completed. The quarantined 3.3.0 package must retain its exact SRI
+and lightweight tag throughout this process and remains ineligible for `latest`.
+
+Before dispatching `.github/workflows/promote.yml`, a repository administrator
+must create the `npm-production-promotion` environment with all of these
+controls:
+
+- protected branches only, with no custom deployment branch policies;
+- at least one required reviewer distinct from the dispatcher;
+- prevent self-review enabled and `can_admins_bypass` set to `false`;
+- no environment secrets.
+
+Dispatch the workflow from protected `master` with the successful release run
+ID, exact 3.3.1 candidate SRI, acceptance-receipt SHA-256, canonical
+`acceptance_observed_at`, and the explicit acceptance confirmation. The
+acceptance digest and timestamp are human attestations: the workflow does not
+retrieve the acceptance receipt, and neither value grants release, npm,
+installation, activation, provider, credential, or spend authority. The
+timestamp must not be in the future and must be no more than 24 hours old both
+when admission begins and when its receipt is created.
+
+The workflow is observation-only. It has no npm credentials, OIDC permission,
+or executable npm mutation command and cannot promote the package. Its only
+writes are a bounded GitHub receipt artifact and bounded job summary. Any
+rerun, expired acceptance, or drift in the source SHA, protected branch,
+release/tag identity, candidate integrity or dist-tags, quarantined 3.3.0
+integrity/tag identity, provenance, environment protections, or accepted
+receipt invalidates the prior observation; repeat acceptance and admission
+against the new exact state.
+
+After a fresh successful admission receipt, an npm package owner must use a
+clean maintainer shell to revalidate the live registry and owner identity. Pin
+the npm client and registry explicitly; set the expected 3.3.1 SRI from the
+accepted release receipt, not from the live query:
+
+```bash
+set -euo pipefail
+registry="https://registry.npmjs.org/"
+: "${EXPECTED_CANDIDATE_INTEGRITY:?set from the accepted 3.3.1 release receipt}"
+quarantined_integrity="sha512-mYVuJZyoXeSnnqivoLzyZggNgpJoWM8glTI7CW0oBfQ0RCHx0xueTrLwLTZBg5W+E4zPOJNbckptYeb5YsdOHw=="
+promotion_root="$(mktemp -d)"
+trap 'rm -rf "$promotion_root"' EXIT
+
+npm install --global --prefix "$promotion_root" npm@11.19.0 \
+  --ignore-scripts --no-audit --no-fund --bin-links=false \
+  --registry="$registry"
+npm_cli="$promotion_root/lib/node_modules/npm/bin/npm-cli.js"
+test -f "$npm_cli" && test ! -L "$npm_cli"
+test "$(node "$npm_cli" --version)" = "11.19.0"
+
+export NPM_CONFIG_USERCONFIG="$promotion_root/npmrc"
+install -m 600 /dev/null "$NPM_CONFIG_USERCONFIG"
+node "$npm_cli" login --registry="$registry"
+npm_owner="$(node "$npm_cli" whoami --registry="$registry")"
+node "$npm_cli" owner ls @ashlr/hub --registry="$registry" \
+  | awk -v owner="$npm_owner" '$1 == owner { found = 1 } END { exit !found }'
+
+test "$(node "$npm_cli" view @ashlr/hub@3.3.1 dist.integrity \
+  --registry="$registry")" = "$EXPECTED_CANDIDATE_INTEGRITY"
+test "$(node "$npm_cli" view @ashlr/hub@3.3.0 dist.integrity \
+  --registry="$registry")" = "$quarantined_integrity"
+test "$(node "$npm_cli" view @ashlr/hub dist-tags.candidate \
+  --registry="$registry")" = "3.3.1"
+test "$(node "$npm_cli" view @ashlr/hub dist-tags.latest \
+  --registry="$registry")" = "3.0.1"
+
+node "$npm_cli" dist-tag add @ashlr/hub@3.3.1 latest \
+  --registry="$registry"
+test "$(node "$npm_cli" view @ashlr/hub dist-tags.latest \
+  --registry="$registry")" = "3.3.1"
+test "$(node "$npm_cli" view @ashlr/hub@3.3.0 dist.integrity \
+  --registry="$registry")" = "$quarantined_integrity"
+```
+
+Do not add `--otp` to the promotion command, place an OTP in shell history, or
+store it in GitHub. Enter the fresh OTP only at npm's interactive prompt. npm
+`latest` promotion changes public package discovery only; installing or
+activating a runtime, enabling a resident service, configuring providers or
+application credentials, and authorizing spend remain separate gates.
 
 ## Historical failure recovery record — never republish an immutable npm version
 
@@ -276,7 +367,7 @@ failed**, first verify that npm contains the intended tag artifact from a clean
 checkout of that tag:
 
    ```bash
-   version=3.3.0
+   version=3.3.1
    git switch --detach "v${version}"
 tag_checkout="$(pwd)"
 expected_revision="$(git rev-parse HEAD)"
@@ -361,7 +452,7 @@ If npm publication itself failed or its result is ambiguous:
 
    ```bash
    set -euo pipefail
-   version=3.3.0
+   version=3.3.1
    release_tag="v${version}"
    test "$(git rev-parse HEAD)" = "$(git rev-list -n 1 "$release_tag")"
    release_notes="$(mktemp)"
@@ -381,7 +472,7 @@ There is no token/OTP fallback and no recovery path that republishes an existing
 version.
 
 If any post-publication integrity, provenance, signature, candidate-tag, or
-preserved-dist-tag check fails, treat the immutable 3.3.0 version as a release
+preserved-dist-tag check fails, treat the immutable 3.3.1 version as a release
 incident. Do not create the GitHub prerelease, do not install it, and do not
 promote it to `latest`.
 

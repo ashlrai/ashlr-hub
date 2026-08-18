@@ -15,6 +15,7 @@ const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const workflowText = readFileSync(join(repoRoot, '.github/workflows/release.yml'), 'utf8');
 const releaseDocs = readFileSync(join(repoRoot, 'docs/RELEASING.md'), 'utf8');
 const workflow = parse(workflowText) as {
+  env?: Record<string, string>;
   jobs: Record<string, {
     environment?: string;
     needs?: string | string[];
@@ -45,6 +46,8 @@ function commit(cwd: string, name: string, value: string): string {
 
 describe('release workflow signed canary gate', () => {
   it('keeps the disposable canary credential-minimized and gates publication', () => {
+    expect(workflow.env?.REQUIRED_ROLLBACK_REVISION)
+      .toBe('31aa0467f66af1fe4c66d1664f65e6fd3e4ba61b');
     expect(canary).toMatchObject({
       needs: 'verify',
       permissions: { contents: 'read' },
@@ -160,9 +163,25 @@ describe('release workflow signed canary gate', () => {
         const output = join(root, 'github-output');
         const selection = String(step('Bind candidate and distinct first-parent rollback')?.run ?? '');
 
+        expect(() => execFileSync('/bin/bash', ['-c', selection], {
+          cwd: root,
+          env: {
+            ...process.env,
+            GITHUB_OUTPUT: output,
+            GITHUB_SHA: candidate,
+            REQUIRED_ROLLBACK_REVISION: feature,
+          },
+          stdio: 'pipe',
+        })).toThrow();
+
         execFileSync('/bin/bash', ['-c', selection], {
           cwd: root,
-          env: { ...process.env, GITHUB_OUTPUT: output, GITHUB_SHA: candidate },
+          env: {
+            ...process.env,
+            GITHUB_OUTPUT: output,
+            GITHUB_SHA: candidate,
+            REQUIRED_ROLLBACK_REVISION: firstParent,
+          },
           stdio: 'pipe',
         });
 
@@ -185,11 +204,69 @@ describe('release workflow signed canary gate', () => {
 
       expect(() => execFileSync('/bin/bash', ['-c', selection], {
         cwd: root,
-        env: { ...process.env, GITHUB_OUTPUT: output, GITHUB_SHA: candidate },
+        env: {
+          ...process.env,
+          GITHUB_OUTPUT: output,
+          GITHUB_SHA: candidate,
+          REQUIRED_ROLLBACK_REVISION: candidate,
+        },
         stdio: 'pipe',
       })).toThrow();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'fails closed for one-parent and more-than-two-parent candidates',
+    () => {
+      const root = mkdtempSync(join(tmpdir(), 'ashlr-release-canary-parent-count-'));
+      try {
+        git(root, ['init', '-b', 'master']);
+        const rollback = commit(root, 'base.txt', 'base');
+        const oneParentCandidate = commit(root, 'child.txt', 'child');
+        const output = join(root, 'github-output');
+        const selection = String(step('Bind candidate and distinct first-parent rollback')?.run ?? '');
+
+        expect(() => execFileSync('/bin/bash', ['-c', selection], {
+          cwd: root,
+          env: {
+            ...process.env,
+            GITHUB_OUTPUT: output,
+            GITHUB_SHA: oneParentCandidate,
+            REQUIRED_ROLLBACK_REVISION: rollback,
+          },
+          stdio: 'pipe',
+        })).toThrow();
+
+        git(root, ['checkout', '-b', 'feature-one', rollback]);
+        const featureOne = commit(root, 'feature-one.txt', 'feature-one');
+        git(root, ['checkout', '-b', 'feature-two', rollback]);
+        const featureTwo = commit(root, 'feature-two.txt', 'feature-two');
+        const tree = git(root, ['rev-parse', 'HEAD^{tree}']);
+        const octopusCandidate = execFileSync('git', [
+          '-c', 'user.name=Canary Test',
+          '-c', 'user.email=canary@example.invalid',
+          'commit-tree', tree,
+          '-p', rollback,
+          '-p', featureOne,
+          '-p', featureTwo,
+          '-m', 'three-parent candidate',
+        ], { cwd: root, encoding: 'utf8' }).trim();
+
+        expect(() => execFileSync('/bin/bash', ['-c', selection], {
+          cwd: root,
+          env: {
+            ...process.env,
+            GITHUB_OUTPUT: output,
+            GITHUB_SHA: octopusCandidate,
+            REQUIRED_ROLLBACK_REVISION: rollback,
+          },
+          stdio: 'pipe',
+        })).toThrow();
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 });
