@@ -369,8 +369,10 @@ afterEach(() => {
 });
 
 afterAll(() => {
-  cleanupTrackedPaths({ deferTransientWindowsLocks: false, maxRetries: 15 });
-}, 30_000);
+  // Windows can retain or scan a just-exited hardlinked executable. Keep final
+  // cleanup strict, but allow its bounded rm retry window to outlast that lock.
+  cleanupTrackedPaths({ deferTransientWindowsLocks: false, maxRetries: 30 });
+}, 60_000);
 
 describe('M426 sandbox reservation and path identity', () => {
   it('publishes durable owner metadata before the Git worktree effect', () => {
