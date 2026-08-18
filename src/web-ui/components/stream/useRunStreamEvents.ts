@@ -32,6 +32,23 @@ export interface RunStreamChunk {
   text: string;
 }
 
+/**
+ * v333: a line from the run's durable stream file (streaming.ts's
+ * fileSink()) — live engine subprocess output / builtin model-delta text as
+ * it happened, not just a step boundary. No `index` (there's no stable array
+ * position the way RunStep has one — the server derives its seq from the
+ * stream file's line position instead, see run-stream.ts's
+ * emitNewOutputChunks). `taskId` is often absent: whole-goal engine
+ * delegation and sandboxed runs have no per-task concept.
+ */
+export interface RunStreamOutputChunk {
+  seq: number;
+  taskId: string | null;
+  kind: string;
+  ts: string;
+  text: string;
+}
+
 export interface RunStreamTaskStarted {
   seq: number;
   taskId: string;
@@ -50,6 +67,9 @@ export type SseTransportStatus = 'connecting' | 'open' | 'unavailable';
 export interface RunStreamEventsState {
   status: SseTransportStatus;
   chunks: RunStreamChunk[];
+  /** v333: live output-chunk frames tailed from the durable stream file —
+   * see RunStreamOutputChunk. Append-only for the life of this mount. */
+  outputChunks: RunStreamOutputChunk[];
   starts: RunStreamTaskStarted[];
   stall: { ageMs: number; at: number } | null;
   runDone: RunStreamDoneEvent | null;
@@ -61,6 +81,7 @@ export interface RunStreamEventsState {
 const INITIAL_STATE: RunStreamEventsState = {
   status: 'connecting',
   chunks: [],
+  outputChunks: [],
   starts: [],
   stall: null,
   runDone: null,
@@ -124,6 +145,12 @@ export function useRunStreamEvents(runId: string, enabled: boolean): RunStreamEv
 
     source.addEventListener('step-done', () => {
       setState((s) => ({ ...s, stall: null, version: s.version + 1 }));
+    });
+
+    source.addEventListener('output-chunk', (evt) => {
+      const data = parseEventData<RunStreamOutputChunk>(evt);
+      if (!data) return;
+      setState((s) => ({ ...s, outputChunks: [...s.outputChunks, data], version: s.version + 1 }));
     });
 
     source.addEventListener('stall', (evt) => {

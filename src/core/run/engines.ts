@@ -23,7 +23,7 @@ import * as http from 'node:http';
 import * as https from 'node:https';
 import { existsSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import type { AshlrConfig, EngineId, EngineCommand } from '../types.js';
+import type { AshlrConfig, EngineId, EngineCommand, RunStreamEvent } from '../types.js';
 import { withToolEnv } from '../env-bridge.js';
 import {
   applyLocusPreMutateGate,
@@ -56,6 +56,36 @@ export interface RunEvent {
   text?: string;
   /** Raw line that produced this event (for debugging). */
   rawLine?: string;
+}
+
+/**
+ * v333: map a per-line engine RunEvent (the caller's `onEvent`, delivered as
+ * stdout arrives — see spawnEngineInner's stdout data handler) to the shape a
+ * StreamSink observer wants, or null when there is nothing worth surfacing
+ * (e.g. an unnamed tool_call, an empty raw line). This is the ONE place both
+ * orchestrator.ts's whole-goal engine delegation and sandboxed-engine.ts's
+ * sandboxed engine invocation derive live-output text from, so a durable
+ * fileSink() (streaming.ts) — or the CLI's own StreamSink — gets the same
+ * mapping regardless of which caller wires it in.
+ */
+export function describeRunEventForStream(
+  ev: RunEvent,
+): { kind: RunStreamEvent['kind']; text: string; data?: unknown } | null {
+  switch (ev.kind) {
+    case 'text':
+    case 'raw':
+      return ev.text ? { kind: 'model-delta', text: ev.text } : null;
+    case 'tool_call':
+      return ev.toolName
+        ? { kind: 'tool-call', text: `tool: ${ev.toolName}`, data: { name: ev.toolName } }
+        : null;
+    case 'file_touched':
+      return ev.fileTouched ? { kind: 'log', text: `file touched: ${ev.fileTouched}` } : null;
+    case 'usage':
+      return ev.text ? { kind: 'log', text: ev.text } : null;
+    default:
+      return null;
+  }
 }
 
 // ---------------------------------------------------------------------------

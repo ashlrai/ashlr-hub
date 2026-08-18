@@ -22,7 +22,7 @@ import { useQuery, useRefetch } from '../../data/hooks.js';
 import { runDetailQuery } from '../../data/queries.js';
 import { ApiError } from '../../data/client.js';
 import type { RunState } from '../../data/api-types.js';
-import { useRunStreamEvents, type RunStreamChunk } from './useRunStreamEvents.js';
+import { useRunStreamEvents, type RunStreamChunk, type RunStreamOutputChunk } from './useRunStreamEvents.js';
 
 /** Client poll cadence. The server's own disk-poll floor (SSE_POLL_MS,
  * src/core/web/api.ts:138) is ~1.5s — polling faster than that cannot
@@ -57,6 +57,11 @@ export interface RunStreamState {
    * structured `run.steps` is still complete either way, this is purely the
    * append-only feed for a live output pane). */
   chunks: RunStreamChunk[];
+  /** v333: live engine/model text tailed from the durable stream file — see
+   * RunStreamOutputChunk. Empty on the polling fallback, same reasoning as
+   * `chunks`: the polling path has no SSE frames to carry it. This is the
+   * finer-than-step-boundary text the "live output pane" actually renders. */
+  outputChunks: RunStreamOutputChunk[];
   /** Age (ms) of the server's most recent stall notice, when SSE-driven. */
   stallAgeMs: number | null;
 }
@@ -157,6 +162,7 @@ export function useRunStream(runId: string): RunStreamState {
     },
     transport,
     chunks: events.chunks,
+    outputChunks: events.outputChunks,
     stallAgeMs: sseStallFresh ? events.stall!.ageMs : null,
   };
 }

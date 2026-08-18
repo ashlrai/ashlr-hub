@@ -57,7 +57,8 @@ import {
   scopeHintFiles,
   summarizeDelegationScope,
 } from './delegation-scope.js';
-import { buildEngineCommand, spawnEngine } from './engines.js';
+import { buildEngineCommand, spawnEngine, describeRunEventForStream } from './engines.js';
+import { fileSink, emitSinkEvent } from './streaming.js';
 import {
   applyLocusPreMutateGate,
   formatPreMutateBlockers,
@@ -1373,6 +1374,13 @@ export async function runEngineSandboxed(
   const id = assertSafeExecutionIdentity(
     opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
   );
+  // v333: sandboxed engine runs have no CLI terminal watching them and no
+  // caller-supplied StreamSink at all (this file never plumbed one) — but
+  // they are exactly the highest-value case for durable live output: a real
+  // external agent (claude/codex/etc.) running unattended in a worktree.
+  // Default-on, matching the same reasoning as orchestrator.ts's tee: this is
+  // local-only observability, not a call site to gate.
+  const streamSink = fileSink(id);
   const runCreatedAtIso = new Date().toISOString();
   const recordSandboxedRunAgentAction = opts.deferTerminalAction
     ? (_fields: Parameters<typeof writeSandboxedRunAgentAction>[0]) => {}
@@ -1729,6 +1737,12 @@ export async function runEngineSandboxed(
         timeoutMs: cfg.foundry?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         launcher: launcher ?? undefined,
         ...(opts.signal ? { signal: opts.signal } : {}),
+        // v333: forward per-line engine stdout into the durable file sink as
+        // it arrives — see the comment on `streamSink` above.
+        onEvent: (ev) => {
+          const described = describeRunEventForStream(ev);
+          if (described) emitSinkEvent(streamSink, described);
+        },
       });
       const invocationCount = 1 + (res.configRecoveryAttempts ?? 0);
       if (res.configRecoveryAttempts) {
