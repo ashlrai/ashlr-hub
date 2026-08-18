@@ -327,6 +327,8 @@ describe('M521 dormant resident-start protocol', () => {
     const ackFrame = runtimeActivationResidentStartAcknowledgementFrame(acknowledgement(envelope.payload));
     expect(parseRuntimeActivationResidentStartPermitFrame(permitFrame)).not.toBeNull();
     expect(parseRuntimeActivationResidentStartAcknowledgementFrame(ackFrame)).not.toBeNull();
+    expect(permitFrame.startsWith('{')).toBe(true);
+    expect(ackFrame.startsWith('{')).toBe(true);
 
     const invalidPermitFrames = [
       permitFrame.slice(0, -1),
@@ -334,7 +336,7 @@ describe('M521 dormant resident-start protocol', () => {
       `${permitFrame} `,
       `${permitFrame}${permitFrame}`,
       `\uFEFF${permitFrame}`,
-      permitFrame.replace('{', '{"payload":null,'),
+      `{"payload":null,${permitFrame.slice(1)}`,
       Buffer.from([0xff, 0x0a]),
       Buffer.alloc(64 * 1024 + 1, 0x20),
     ];
@@ -347,7 +349,7 @@ describe('M521 dormant resident-start protocol', () => {
       `${ackFrame}x`,
       `${ackFrame}${ackFrame}`,
       `\uFEFF${ackFrame}`,
-      ackFrame.replace('{', '{"authority":null,'),
+      `{"authority":null,${ackFrame.slice(1)}`,
       Buffer.from([0xc3, 0x28, 0x0a]),
       Buffer.alloc(64 * 1024 + 1, 0x20),
     ];
