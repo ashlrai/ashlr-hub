@@ -44,6 +44,22 @@ const READ_CLIENT_HEADER = 'x-ashlr-read-client';
 const READ_CLIENT_QUERY = 'client';
 const READ_CLIENT_RE = /^[a-f0-9]{64}$/;
 
+/**
+ * Paths where a browser EventSource connects directly (no custom headers
+ * possible) and therefore must be allowed to prove its session via the
+ * `?client=` query param instead of the `x-ashlr-read-client` header.
+ * Deliberately as loose on the id segment as src/core/web/run-stream.ts's
+ * own RUN_EVENTS_PATH_RE — this only decides eligibility for query-proof
+ * auth, not run-id safety; run-stream.ts's RUN_ID_RE is the actual gate
+ * before any fs path is built, and a malformed id here still ends up 400ed
+ * by that route once request auth clears this boundary.
+ */
+const SSE_RUN_EVENTS_PATH_RE = /^\/api\/run\/[^/]+\/events$/;
+
+function isSseQueryProofPath(pathname: string): boolean {
+  return pathname === '/api/events' || SSE_RUN_EVENTS_PATH_RE.test(pathname);
+}
+
 function isAllowedHost(host: string | undefined): boolean {
   if (!host) return false;
   return HOST_RE.test(host);
@@ -125,7 +141,7 @@ function readClientHeader(req: IncomingMessage): string {
  * HttpOnly ticket that contains its digest.
  */
 function readSessionClientProof(req: IncomingMessage, url: URL): string {
-  if (url.pathname === '/api/events') {
+  if (isSseQueryProofPath(url.pathname)) {
     if (headerValue(req, READ_CLIENT_HEADER)) return '';
     const entries = [...url.searchParams.entries()];
     if (entries.length !== 1 || entries[0]?.[0] !== READ_CLIENT_QUERY) return '';
