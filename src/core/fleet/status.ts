@@ -2862,9 +2862,15 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     invalidFiles: 0,
     unreadableFiles: 0,
   };
+  let proposalsSnapshotForLearning:
+    ReturnType<typeof import('../inbox/store.js')['listProposalsDetailed']> | undefined;
   try {
     const { listProposalsDetailed } = await import('../inbox/store.js');
     const read = listProposalsDetailed();
+    // Retained for the learning-authority inspection below: it must see the
+    // SAME proposals snapshot this status build projected, not issue its own
+    // mid-snapshot read (which tears the stability contract and doubles I/O).
+    proposalsSnapshotForLearning = read;
     proposalSourceQuality = {
       sourceState: read.sourceState,
       sourcePresent: read.sourcePresent,
@@ -3300,7 +3306,11 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   }
   try {
     const { inspectRoutingLearningAuthority } = await import('../run/learned-router.js');
-    status.routingLearningAuthority = inspectRoutingLearningAuthority();
+    status.routingLearningAuthority = inspectRoutingLearningAuthority(
+      undefined,
+      undefined,
+      { proposalsRead: proposalsSnapshotForLearning },
+    );
   } catch {
     status.routingLearningAuthority = {
       version: 1,
