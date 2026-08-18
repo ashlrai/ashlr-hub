@@ -16,7 +16,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as http from 'node:http';
 
 import { makeFixture, makeCfg, type H1Fixture } from './helpers/h1-fixture.js';
-import { readAuthHeaders, startServer } from './helpers/authenticated-web-server.js';
+import { readAuthHeaders, readSseAuth, startServer } from './helpers/authenticated-web-server.js';
 import { createProposal, loadProposal } from '../src/core/inbox/store.js';
 import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
 import type { WebServerOptions } from '../src/core/types.js';
@@ -277,14 +277,15 @@ describe('SSE inbox + daemon events', () => {
     makeNote('sse test');
     const h = await startServer(makeCfg(), makeOpts());
     openHandles.push(h);
+    const sseAuth = await readSseAuth(h);
 
     const frames = await new Promise<string>((resolve, reject) => {
       const req = http.get(
         {
           hostname: '127.0.0.1',
           port: h.port,
-          path: '/api/events',
-          headers: { Host: `127.0.0.1:${h.port}`, ...readAuthHeaders(h.port) },
+          path: `/api/events${sseAuth.query}`,
+          headers: { Host: `127.0.0.1:${h.port}`, ...sseAuth.headers },
         },
         (res) => {
           let data = '';
