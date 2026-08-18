@@ -843,6 +843,12 @@ function handleSseEvents(
     return;
   }
 
+  // Install the response error listener before the first header/body write.
+  // The indirection observes the fully wired cleanup once registration is
+  // complete, while also preventing an early EventEmitter 'error' crash.
+  let cleanup: () => void = () => {};
+  if (typeof res.on === 'function') res.on('error', () => cleanup());
+
   // SSE headers — no buffering, keep-alive.
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -861,9 +867,9 @@ function handleSseEvents(
   // Helper: send one NAMED SSE event so the client's per-name listeners fire.
   let backpressured = false;
   let backpressureTimer: ReturnType<typeof setTimeout> | undefined;
-  let cleanup: () => void = () => {};
+  let cleaned = false;
   function sendNamed(event: string, payload: unknown): void {
-    if (backpressured) return;
+    if (cleaned || backpressured) return;
     try {
       const line = `event: ${event}\ndata: ${JSON.stringify(sanitizePublicJson(payload))}\n\n`;
       if (!res.write(line)) {
@@ -916,7 +922,9 @@ function handleSseEvents(
       } catch {
         // Keep the event stream alive with explicit unavailable provenance.
       }
+      if (cleaned) return;
       const daemon = await readFreshDaemonObservation();
+      if (cleaned) return;
       sendNamed('daemon', legacyDaemonProjection(daemon));
       sendNamed('daemon-observation', daemon);
       // M90: fleet-activity liveness pulse — carry daemon tick count so the
@@ -963,7 +971,6 @@ function handleSseEvents(
   }, SSE_POLL_MS);
 
   // Cleanup: clear the interval and end the response.
-  let cleaned = false;
   cleanup = (): void => {
     if (cleaned) return;
     cleaned = true;

@@ -38,7 +38,11 @@ describe('exported setupWizard production authority boundary', () => {
 
     expect(result).toMatchObject({
       ready: false,
-      nextSteps: ['try: ashlr daemon start --once'],
+      nextSteps: [
+        'try: ashlr run "<goal>"',
+        'try: ashlr swarm "<goal>"',
+        'try: ashlr daemon start --once --dry-run',
+      ],
       steps: [{ name: 'daemon-service', status: 'manual' }],
     });
     expect(result.steps[0]?.detail).toContain('setup refused before onboarding');

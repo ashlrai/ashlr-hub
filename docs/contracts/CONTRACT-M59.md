@@ -1,5 +1,10 @@
 # CONTRACT-M59 — `ashlr fleet init` + typed intelligence + loop posture
 
+> **Historical implementation contract — not current runtime activation
+> guidance.** Its loop text describes the delivered source surface; the current
+> production loop remains dormant because compiled conductor trust roots are
+> empty. Owner-invoked `ashlr goal "<objective>"` remains live and proposal-only.
+
 **Pillar:** Ashlr v5 Open Fleet — adoption ergonomics + close the M53 loose end.
 
 **Mason's hard rule:** `fleet init` NEVER overwrites an existing `cfg.foundry`

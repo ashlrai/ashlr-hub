@@ -61,19 +61,26 @@ ashlr setup
 ```
 
 Resident service mutation is withheld in the current release, so `ashlr setup`
-refuses before reading or changing setup state and exits nonzero. Run admitted
-one-shot work with `ashlr daemon start --once`; existing services retain
+refuses before reading or changing setup state and exits nonzero. Run
+owner-invoked work with `ashlr run "<goal>"` or `ashlr swarm "<goal>"`. The
+compiled daemon and conductor trust roots are empty, so daemon use is limited
+to `ashlr daemon start --once --dry-run` and status; existing services retain
 status and uninstall support.
 
-Flags:
-- `--yes` — non-interactive, accept defaults, auto-enroll discovered repos
-- `--wire` — wire detected editors (backup-first)
-- `--json` — emit result as JSON (useful for scripting)
+Current flag behavior remains fail-closed: every mode refuses before the wizard,
+so `--yes` does not discover or enroll and `--wire` does not edit anything.
+`--json` changes only the refusal output format. The intended, currently
+unreachable wizard flags are:
+
+- `--yes` — would accept defaults non-interactively if authority is restored
+- `--wire` — would wire detected editors backup-first if authority is restored
+- `--json` — emits the current refusal result as JSON for scripting
 
 ### 3. Set user identity for pulse attribution
 
-`ashlr setup` does not accept a `--user` flag. Set identity directly in
-`~/.ashlr/config.json` after setup, or via `ashlr config set`:
+`ashlr setup` syntactically accepts `--user` and `--user-id`, but the current
+authority refusal occurs before either value is applied or persisted. Set
+identity directly in `~/.ashlr/config.json`, or via `ashlr config set`:
 
 ```bash
 ashlr config set user.id cofounder@example.com
@@ -102,9 +109,10 @@ activity — set this before connecting to pulse.
 ashlr enroll add /absolute/path/to/repo
 ```
 
-Or re-run `ashlr setup --yes` to auto-discover from configured roots. Each
-person enrolls only the repos on their machine. The fleet will not touch
-unenrolled repos.
+`ashlr setup --yes` currently refuses before discovery or enrollment because
+resident service authority is withheld. Enroll each intended repository
+explicitly with `ashlr enroll add`; each person enrolls only repos on their
+machine. The fleet will not touch unenrolled repos.
 
 ---
 
@@ -177,13 +185,13 @@ ashlr inbox
 ashlr daemon status
 
 # Check or add goals
-ashlr goal ls
-ashlr goal add "harden error handling in auth module"
+ashlr goals list
+ashlr goals add "harden error handling in auth module"
 
-# Run one fleet tick manually (proposal-only, no auto-apply)
-ashlr loop
+# Run one owner-invoked proposal path (not a resident or unattended loop)
+ashlr goal "harden error handling in auth module"
 
-# Open Mission Control UI (localhost:4242)
+# Open Mission Control UI (localhost:7777)
 ashlr serve
 ```
 
@@ -230,17 +238,21 @@ rm ~/.ashlr/KILL       # clear
 
 ## Daemon
 
-The fleet can run in the foreground or as a bounded one-shot process. Creating,
-repairing, reinstalling, or restarting a background OS service is withheld in
-the current release; an existing service may still be inspected or uninstalled.
+The compiled daemon and conductor trust roots are empty in the current
+production build. Live foreground, one-shot, and resident execution therefore
+refuses before effects. Creating, repairing, reinstalling, or restarting a
+background OS service is also withheld; an existing service may still be
+inspected or explicitly uninstalled.
 
 ```bash
-ashlr daemon start              # start (or restart) the loop
-ashlr daemon start --once       # run exactly one tick, then stop
-ashlr daemon start --dry-run    # tick without creating any proposals
+ashlr daemon start --once --dry-run  # preview a tick without proposals
 ashlr daemon stop               # stop + engage kill switch
 ashlr daemon status             # running?, last tick, spend, pending count
 ```
+
+For live owner-invoked proposal work, use `ashlr run "<goal>"`,
+`ashlr swarm "<goal>"`, or `ashlr goal "<objective>"`; none grants resident or
+unattended authority.
 
 The daemon is proposal-only. It can never apply a proposal, push to git, or
 touch the live working tree. All mutations flow through the inbox.
@@ -253,7 +265,7 @@ touch the live working tree. All mutations flow through the inbox.
 |---------|-------|-----|
 | Pulse not receiving spans | `ashlr pulse connect --status` | Verify `pulse.enabled true` + PAT set |
 | Fleet activity not attributed in pulse | pulse Fleet/Team view shows no owner | Set `cfg.user.id` on that machine |
-| Daemon not running | `ashlr daemon status` | `ashlr daemon start --once` |
+| Daemon not running | `ashlr daemon status` | Expected while compiled roots are empty; use `ashlr daemon start --once --dry-run` or owner-invoked `ashlr run`/`ashlr swarm` |
 | Kill switch engaged | `ashlr doctor` shows WARN | `ashlr enroll kill off` |
 | Repo not being worked | `ashlr enroll list` | `ashlr enroll add <path>` |
 | PAT rejected (401) | `ashlr pulse connect --test` | Re-run `ashlr pulse connect --token <fresh-pat>` |

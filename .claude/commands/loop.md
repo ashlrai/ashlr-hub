@@ -1,20 +1,20 @@
 ---
-description: Run the autonomous ashlr fleet over every enrolled repo — one tick or continuous, proposal-only (M55).
-argument-hint: [--watch] [--dry-run]
+description: Preview one dormant ashlr conductor tick; production compiled roots admit dry-run only.
+argument-hint: [--dry-run]
 ---
 
-Run the ashlr **fleet conductor**:
+Preview the ashlr **fleet conductor** without dispatching:
 
 ```bash
-ashlr loop $ARGUMENTS
+ashlr loop --dry-run
 ```
 
-`ashlr loop` renders the live control plane (per-backend throughput, queue depth,
-quota, merges-to-`main` today) and then runs the autonomous fleet over every
-enrolled repo: it discovers work, routes each item across the polyglot roster by
-trust tier, runs it **sandboxed**, and files **PENDING proposals** — nothing is
-applied by default. Default is a single tick; pass `--watch` for the continuous
-loop, `--dry-run` to plan without dispatching.
+The production compiled conductor trust roots are empty. Non-dry `ashlr loop`
+and `ashlr loop --watch` therefore refuse before dispatch or proposal creation;
+this slash command must not pass through non-dry arguments. The dry-run renders
+the control-plane snapshot and shows what an admitted tick would consider
+without starting a resident loop, dispatching work, or filing a proposal.
 
-It respects the kill-switch (`~/.ashlr/KILL`) and the daily budget. After it runs,
-report the fleet status and any proposals filed (review via `ashlr inbox`).
+After it runs, report the preview and current fleet status. Do not claim that a
+proposal was filed. For live owner-invoked proposal work, use `/goal` or the
+explicit `ashlr run`/`ashlr swarm` commands.

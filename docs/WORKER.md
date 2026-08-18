@@ -7,7 +7,8 @@ enrolling repos, registering a queue, or touching an OS service. Existing
 services support `ashlr daemon service-status` and `ashlr daemon uninstall`
 only. Status reports registration as `present`, `absent`, or `unknown`; a
 missing file is not treated as absence unless the native manager also proves no
-registration. Admitted one-shot workflows remain available.
+registration. Compiled daemon and conductor trust roots are empty, so non-dry
+daemon execution is dormant; owner-invoked proposal commands remain available.
 
 ## Quick start
 
@@ -18,8 +19,12 @@ npm i -g @ashlr/hub
 # 2. Inspect an existing service (read-only)
 ashlr daemon service-status
 
-# 3. Run admitted work without creating a resident service
-ashlr daemon start --once
+# 3. Preview a daemon tick (compiled daemon roots are empty)
+ashlr daemon start --once --dry-run
+
+# 4. Run owner-invoked proposal work without a resident service
+ashlr run "<goal>"
+ashlr swarm "<goal>"
 ```
 
 When resident authority is restored, worker setup is designed to:
@@ -204,17 +209,25 @@ machine with its own key and set `--user` to match the account email.
 ## Daemon management
 
 ```sh
-# Stop / start the background daemon
+# Inspect or stop an existing background daemon
+ashlr daemon service-status
+ashlr daemon status
 ashlr daemon stop
-ashlr daemon start
 
-# View daemon logs
+# Preview one dormant-runtime tick without effects
+ashlr daemon start --once --dry-run
+
+# View logs from an existing service
 tail -f ~/.ashlr/daemon.launchd.out.log
 tail -f ~/.ashlr/daemon.launchd.err.log
 
 # Uninstall the service
 ashlr daemon uninstall
 ```
+
+Production install/reinstall/repair/restart and non-dry daemon execution are
+dormant while the compiled daemon and conductor trust roots are empty. Use
+owner-invoked `ashlr run "<goal>"` or `ashlr swarm "<goal>"` for proposal work.
 
 ## Withheld provisioning flow (annotated)
 

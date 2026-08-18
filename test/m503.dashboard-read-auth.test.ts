@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as http from 'node:http';
 import { createConnection } from 'node:net';
-import { createHash, createHmac } from 'node:crypto';
 
 import { makeCfg, makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
 import { startServer } from '../src/core/web/server.js';
@@ -132,13 +131,6 @@ function persistentSse(
   });
   req.end();
   return Promise.resolve({ connected, closed, destroy: () => req.destroy() });
-}
-
-function shortLivedTicket(readToken: string, clientProof: string, expiresAt: number): string {
-  const nonce = 'n'.repeat(22);
-  const binding = createHash('sha256').update(clientProof).digest('base64url');
-  const payload = ['v1', 'GET', '/api/', String(expiresAt), nonce, binding].join('.');
-  return `${payload}.${createHmac('sha256', readToken).update(payload).digest('base64url')}`;
 }
 
 async function mintCookie(
@@ -455,25 +447,28 @@ describe('loopback dashboard read authority', () => {
   });
 
   it('closes an authorized SSE stream at its exact signed session expiry', async () => {
+    const mintedAt = Date.now();
+    const now = vi.spyOn(Date, 'now').mockReturnValue(mintedAt);
     const handle = await server();
-    const expiresAt = Date.now() + 250;
-    const ticket = shortLivedTicket(handle.readToken, CLIENT_PROOF, expiresAt);
-    const stream = await persistentSse(handle, { Cookie: `ashlr_read_session=${ticket}` }, `/api/events?client=${CLIENT_PROOF}`);
+    const minted = await mintCookie(handle);
+    now.mockReturnValue(mintedAt + (15 * 60 * 1000) - 250);
+    const stream = await persistentSse(handle, { Cookie: minted.cookie }, `/api/events?client=${CLIENT_PROOF}`);
     await stream.connected;
     const body = await Promise.race([
       stream.closed,
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error('SSE did not close at expiry')), 2_000)),
     ]);
-    expect(Date.now()).toBeGreaterThanOrEqual(expiresAt);
     expect(body).toContain('event: session-expired');
   });
 
   it('rejects a session exactly at the expiry boundary', async () => {
+    const mintedAt = Date.now();
+    const now = vi.spyOn(Date, 'now').mockReturnValue(mintedAt);
     const handle = await server();
-    const expiresAt = Date.now();
-    const ticket = shortLivedTicket(handle.readToken, CLIENT_PROOF, expiresAt);
+    const minted = await mintCookie(handle);
+    now.mockReturnValue(mintedAt + (15 * 60 * 1000));
     const response = await request(handle, 'GET', `/api/events?client=${CLIENT_PROOF}`, {
-      Cookie: `ashlr_read_session=${ticket}`,
+      Cookie: minted.cookie,
     });
     expect(response.statusCode).toBe(401);
     expect(response.body).not.toContain(': connected');
@@ -491,6 +486,13 @@ describe('loopback dashboard read authority', () => {
       stream.closed,
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error('SSE survived logout')), 2_000)),
     ]);
+    expect((await request(handle, 'GET', `/api/events?client=${CLIENT_PROOF}`, {
+      Cookie: minted.cookie,
+    })).statusCode).toBe(401);
+    expect((await request(handle, 'GET', '/api/config/effective', {
+      Cookie: minted.cookie,
+      'x-ashlr-read-client': CLIENT_PROOF,
+    })).statusCode).toBe(401);
   });
 
   it('logout revokes only the matching session and leaves a rival stream open', async () => {
@@ -510,7 +512,66 @@ describe('loopback dashboard read authority', () => {
       new Promise<'open'>((resolve) => setTimeout(() => resolve('open'), 250)),
     ]);
     expect(rivalState).toBe('open');
+    expect((await request(handle, 'GET', `/api/events?client=${CLIENT_PROOF}`, {
+      Cookie: first.cookie,
+    })).statusCode).toBe(401);
+    expect((await request(handle, 'GET', '/api/config/effective', {
+      Cookie: rival.cookie,
+      'x-ashlr-read-client': rivalProof,
+    })).statusCode).toBe(200);
     rivalStream.destroy();
+  });
+
+  it('rotates the ticket signer and drains old streams when the revocation cap is exhausted', async () => {
+    const handle = await server();
+    const sessions: Array<Awaited<ReturnType<typeof mintCookie>>> = [];
+    for (let i = 0; i < 66; i++) {
+      sessions.push(await mintCookie(handle, i.toString(16).padStart(64, '0')));
+    }
+
+    // Fill the bounded revocation registry without touching the two sessions
+    // used to prove the saturation response.
+    for (let i = 0; i < 64; i++) {
+      const current = sessions[i]!;
+      expect((await request(handle, 'DELETE', '/api/session', {
+        Cookie: current.cookie,
+        'x-ashlr-read-client': current.clientProof,
+      })).statusCode).toBe(204);
+    }
+
+    const overflow = sessions[64]!;
+    const rival = sessions[65]!;
+    const overflowStream = await persistentSse(
+      handle,
+      { Cookie: overflow.cookie },
+      `/api/events?client=${overflow.clientProof}`,
+    );
+    const rivalStream = await persistentSse(
+      handle,
+      { Cookie: rival.cookie },
+      `/api/events?client=${rival.clientProof}`,
+    );
+    await Promise.all([overflowStream.connected, rivalStream.connected]);
+
+    expect((await request(handle, 'DELETE', '/api/session', {
+      Cookie: overflow.cookie,
+      'x-ashlr-read-client': overflow.clientProof,
+    })).statusCode).toBe(204);
+    await Promise.all([overflowStream.closed, rivalStream.closed]);
+
+    // Rotation invalidates every ticket signed before saturation rather than
+    // silently evicting an exact logout. The stable raw read capability can
+    // immediately exchange for a new ticket under the fresh signer.
+    expect((await request(handle, 'GET', '/api/config/effective', {
+      Cookie: rival.cookie,
+      'x-ashlr-read-client': rival.clientProof,
+    })).statusCode).toBe(401);
+    const fresh = await mintCookie(handle, rival.clientProof);
+    expect(fresh.response.statusCode).toBe(204);
+    expect((await request(handle, 'GET', '/api/config/effective', {
+      Cookie: fresh.cookie,
+      'x-ashlr-read-client': fresh.clientProof,
+    })).statusCode).toBe(200);
   });
 });
 

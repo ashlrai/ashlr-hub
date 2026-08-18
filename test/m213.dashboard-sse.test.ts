@@ -236,14 +236,18 @@ function makeJsonRes() {
 // Import under test (after mocks are registered)
 // ---------------------------------------------------------------------------
 
-import { handleApi, drainSseConnections } from '../src/core/web/api.js';
+import { handleApi, drainSseConnections, drainSseSession } from '../src/core/web/api.js';
 import { buildSnapshot } from '../src/core/dashboard.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-const BASE_CTX = { token: 'test-token', allowDispatch: false } as const;
+const BASE_CTX = {
+  token: 'test-token',
+  allowDispatch: false,
+  readSession: { id: 'm213-session', expiresAt: Date.now() + (60 * 60 * 1000) },
+} as const;
 
 daemonStateMocks.loadDaemonStateStrict.mockReturnValue({
   ok: true,
@@ -260,12 +264,18 @@ daemonStateMocks.loadDaemonStateStrict.mockReturnValue({
  */
 async function openSseAndDrainInitial(
   cfg = makeConfig(),
-  ctx: { token: string; allowDispatch: boolean } = BASE_CTX,
+  ctx: { token: string; allowDispatch: boolean; readSession?: { id: string; expiresAt: number } } = BASE_CTX,
 ) {
   vi.useFakeTimers();
   const req = makeReq('/api/events');
   const res = makeSseRes();
-  await handleApi(req, res as unknown as ServerResponse, cfg as any, ctx);
+  await handleApi(req, res as unknown as ServerResponse, cfg as any, {
+    ...ctx,
+    readSession: ctx.readSession ?? {
+      id: 'm213-session',
+      expiresAt: Date.now() + (60 * 60 * 1000),
+    },
+  });
   // Flush the async microtask chain from the initial emitUpdate() call.
   // buildSnapshot is async, so its continuation lands in the microtask queue.
   // Pump the queue several times to let the full async chain resolve before
@@ -307,6 +317,54 @@ describe('M213 Dashboard SSE — /api/events', () => {
     const res = makeSseRes();
     const handled = await handleApi(req, res as unknown as ServerResponse, makeConfig() as any, BASE_CTX);
     expect(handled).toBe(true);
+  });
+
+  it('does not write a deferred snapshot after logout closes the exact session', async () => {
+    vi.useFakeTimers();
+    let resolveSnapshot!: (value: any) => void;
+    vi.mocked(buildSnapshot).mockImplementationOnce(() => new Promise((resolve) => {
+      resolveSnapshot = resolve;
+    }));
+    const req = makeReq('/api/events');
+    const res = makeSseRes();
+
+    await handleApi(req, res, makeConfig() as any, BASE_CTX);
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    drainSseSession(BASE_CTX.readSession.id);
+    const atLogout = res._chunks().join('');
+    expect(res._ended()).toBe(true);
+
+    resolveSnapshot({ generatedAt: new Date().toISOString() });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(res._chunks().join('')).toBe(atLogout);
+    expect(atLogout).not.toContain('event: snapshot');
+  });
+
+  it('does not write a deferred snapshot after exact session expiry', async () => {
+    vi.useFakeTimers();
+    let resolveSnapshot!: (value: any) => void;
+    vi.mocked(buildSnapshot).mockImplementationOnce(() => new Promise((resolve) => {
+      resolveSnapshot = resolve;
+    }));
+    const req = makeReq('/api/events');
+    const res = makeSseRes();
+    const expiringCtx = {
+      token: 'test-token',
+      allowDispatch: false,
+      readSession: { id: 'm213-expiring', expiresAt: Date.now() + 25 },
+    };
+
+    await handleApi(req, res, makeConfig() as any, expiringCtx);
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(25);
+    const atExpiry = res._chunks().join('');
+    expect(res._ended()).toBe(true);
+    expect(atExpiry).toContain('event: session-expired');
+
+    resolveSnapshot({ generatedAt: new Date().toISOString() });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(res._chunks().join('')).toBe(atExpiry);
+    expect(atExpiry).not.toContain('event: snapshot');
   });
 
   // ── 2. SSE response Content-Type ─────────────────────────────────────────

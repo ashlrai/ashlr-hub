@@ -44,4 +44,29 @@ describe('operator-console SSE backpressure', () => {
       fixture.cleanup();
     }
   });
+
+  it('cleans up immediately when the response emits an error', async () => {
+    const fixture: H1Fixture = makeFixture();
+    try {
+      const req = Object.assign(new EventEmitter(), {
+        url: '/api/events', method: 'GET', headers: {},
+      }) as IncomingMessage;
+      let ended = 0;
+      const res = Object.assign(new EventEmitter(), {
+        headersSent: false,
+        writeHead: vi.fn(),
+        write: vi.fn(() => true),
+        end() { ended += 1; },
+      }) as unknown as ServerResponse;
+
+      expect(await handleApi(req, res, makeCfg(), {
+        token: 'test', allowDispatch: false,
+        readSession: { id: 'response-error', expiresAt: Date.now() + 60_000 },
+      })).toBe(true);
+      res.emit('error', new Error('socket failed'));
+      expect(ended).toBe(1);
+    } finally {
+      fixture.cleanup();
+    }
+  });
 });

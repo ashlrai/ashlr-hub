@@ -1,5 +1,10 @@
 # CONTRACT-M54 — Self-improving fleet (the apex)
 
+> **Historical implementation contract — not current runtime activation
+> guidance.** This is a source-design acceptance record. Current compiled daemon
+> and conductor trust roots are empty, so resident and non-dry loop execution is
+> dormant; observation/reporting does not activate routing or positive credit.
+
 **Pillar:** Ashlr v5 Open Fleet — point the fleet at its OWN source so it builds
 and maintains ashlr-hub 24/7 — behind a harness that makes it impossible for the
 fleet to ever weaken its own safety guarantees.

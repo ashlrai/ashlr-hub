@@ -1,5 +1,10 @@
 # SPEC: Resource Control Plane (M250–M254)
 
+> **Historical/design context — not current runtime activation guidance.** This
+> living design describes source behavior. Current compiled daemon and conductor
+> trust roots are empty, so non-dry daemon and resident loop execution is
+> dormant; observation and report-only learning do not activate routing.
+
 **Status:** Implemented and maintained as living design/reference (M250+)
 **Branch target:** shipped on the Open Fleet line
 **Driver:** Fleet self-routes OFF claude when weekly subscription usage is high, preserving headroom for human sessions. Never routes blindly when a cheaper/more-available backend exists.

@@ -51,7 +51,9 @@ describe('cmdSetup resident authority boundary', () => {
       expect(effects.loadConfig).not.toHaveBeenCalled();
       expect(effects.setupWizard).not.toHaveBeenCalled();
       expect(stderr.join('\n')).toContain('setup refused before config or wizard work');
-      expect(stdout.join('\n')).toContain('ashlr daemon start --once');
+      expect(stdout.join('\n')).toContain('ashlr run "<goal>"');
+      expect(stdout.join('\n')).toContain('ashlr swarm "<goal>"');
+      expect(stdout.join('\n')).toContain('ashlr daemon start --once --dry-run');
       expect(stdout.join('\n')).not.toContain('setup complete');
       expect(readdirSync(home)).toEqual([]);
     },
@@ -75,7 +77,11 @@ describe('cmdSetup resident authority boundary', () => {
     expect(code).toBe(1);
     expect(result.ready).toBe(false);
     expect(result.steps[0]?.detail).toContain('No setup state was inspected or changed');
-    expect(result.nextSteps).toEqual(['try: ashlr daemon start --once']);
+    expect(result.nextSteps).toEqual([
+      'try: ashlr run "<goal>"',
+      'try: ashlr swarm "<goal>"',
+      'try: ashlr daemon start --once --dry-run',
+    ]);
     expect(effects.loadConfig).not.toHaveBeenCalled();
     expect(effects.setupWizard).not.toHaveBeenCalled();
     expect(readdirSync(home)).toEqual([]);

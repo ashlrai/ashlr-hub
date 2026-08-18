@@ -1,5 +1,10 @@
 # Ashlr Foundry (v4) — the Autonomous Engineering Fleet (end-state spec)
 
+> **Historical/design context — not current runtime activation guidance.** This
+> end-state spec records source intent and milestone delivery. Current compiled
+> daemon and conductor trust roots are empty, so non-dry daemon and resident
+> loop execution is dormant.
+
 > A sibling to `docs/SPEC-V3-TEAM.md` and `docs/SPEC-V3-LOCAL-WEAPON.md`. Those
 > made ashlr **plural across machines** and the **local tier strong**. This one
 > makes the whole thing **autonomous at fleet scale**: many agents, three

@@ -11,9 +11,9 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
-## [3.3.0] — 2026-08-17 — Fleet safety, learning, and the operator console
+## [3.3.0] — 2026-08-17 — Fleet safety, learning observations, and the operator console
 
-### 2026-08-16 — Fail-closed runtime boundaries, protected handoff, and a closed learning loop
+### 2026-08-16 — Fail-closed runtime boundaries, protected handoff, and report-only learning signals
 
 Nine threads landed together, followed by an authority-salvage review. The
 resident daemon, goal/simple conductors, OS service installation, and host-side
@@ -107,16 +107,17 @@ it does not install, launch, start, or grant service authority.
   count depends on what "independent call site" means and isn't settled.
 
 - **New operator console (`src/web-ui/`).** React 19 + Vite 6, served at
-  `/next/` alongside the untouched legacy vanilla-JS SPA at `/`
-  (`vite.config.web.ts:11-26`, `src/core/web/static.ts:87-88`). **16 views**
+  `/next/` alongside the separately retained legacy vanilla-JS SPA at `/`
+  (`vite.config.web.ts:11-26`, `src/core/web/static.ts`). **16 views**
   (not the 13 originally reported), a chart layer
   (`src/web-ui/components/charts/`), a work journal
   (`src/web-ui/routes/journal/`), live run streaming
   (`src/web-ui/components/stream/`, `useRunStream.ts`), and a notification
-  centre (`src/web-ui/components/notifications/`). Backend changes were
-  minimal and additive — query-param filtering on `src/core/web/api.ts` for
-  the inbox history view — not a rewrite; `server.ts`/`static.ts` routing is
-  unchanged.
+  centre (`src/web-ui/components/notifications/`). The backend now includes
+  explicit `/next/` discovery/routing, descriptor-bound static reads,
+  session-bound and expiry-bound SSE with exact logout revocation, stricter
+  CSP/security headers, bounded public error mapping, and inbox-history query
+  filtering across `server.ts`, `static.ts`, and `api.ts`.
 
 ### 2026-08-16 — Live-data web UI crash and TITRR proposal-quality fixes
 
@@ -432,8 +433,10 @@ M489, M499, M500 have no corresponding test file or milestone.
 - **Temporary resident-service authority restriction.** Production service
   install, reinstall, repair, restart, worker setup, and the service portion of
   first-run setup now fail closed at a shared deny-only boundary. Existing
-  services retain status and uninstall, and admitted one-shot workflows remain
-  available. Both git and npm update channels block before code replacement
+  services retain status and uninstall. Compiled daemon and conductor trust
+  roots are empty, so non-dry daemon/conductor execution remains dormant;
+  owner-invoked `ashlr run`/`ashlr swarm` and daemon dry-run remain available.
+  Both git and npm update channels block before code replacement
   for present, unknown, or running service state. Status now combines expected
   service-file and native-manager evidence into explicit `present`, `absent`, or
   `unknown` registration state; setup refusal occurs before all config/wizard
