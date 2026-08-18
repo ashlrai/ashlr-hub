@@ -413,3 +413,214 @@ describe('GET /api/run/:id/events — secret scrubbing', () => {
     expect(JSON.stringify(unscrubbed)).toContain(secret);
   });
 });
+
+// ---------------------------------------------------------------------------
+// v333: output-chunk — durable stream file interleaving + resume
+// ---------------------------------------------------------------------------
+
+/**
+ * Write JSONL lines directly to the run's stream file, mirroring exactly
+ * what streaming.ts's fileSink() would have written — this suite tests the
+ * SSE route's TAILING of that file, not fileSink() itself (covered in
+ * test/m11.stream-file-sink.test.ts).
+ */
+function writeStreamFileLines(runId: string, lines: Array<{ kind: string; text: string; taskId?: string }>): void {
+  const dir = path.join(tmpHome, '.ashlr', 'run-streams');
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const filePath = path.join(dir, `${runId}.log`);
+  const body = lines
+    .map((l) => JSON.stringify({ ts: new Date().toISOString(), kind: l.kind, ...(l.taskId ? { taskId: l.taskId } : {}), text: l.text }))
+    .join('\n') + (lines.length > 0 ? '\n' : '');
+  fs.appendFileSync(filePath, body, { mode: 0o600 });
+}
+
+describe('GET /api/run/:id/events — output-chunk (durable stream file)', () => {
+  it(
+    'interleaves output-chunk frames with step events, all under one monotonic id space',
+    async () => {
+      const h = await startServer(makeConfig(), makeOpts());
+      openHandles.push(h);
+      currentRun = runAt({ stepCount: 1, taskStatus: 'running' });
+      writeStreamFileLines('r1', [
+        { kind: 'model-delta', text: 'thinking about the goal' },
+        { kind: 'tool-call', text: 'tool: read_file', taskId: 't1' },
+      ]);
+
+      const collecting = collectSseFrames(
+        `${h.url}/api/run/r1/events`,
+        { Host: `127.0.0.1:${h.port}`, ...readAuthHeaders(h.port) },
+        (frames) => frames.some((f) => f.event === 'run-done'),
+      );
+
+      await new Promise((r) => setTimeout(r, 50));
+      writeStreamFileLines('r1', [{ kind: 'model-delta', text: 'more output after connect' }]);
+      currentRun = runAt({ stepCount: 1, status: 'done', taskStatus: 'done' });
+
+      const { statusCode, frames } = await collecting;
+      expect(statusCode).toBe(200);
+
+      const outputFrames = frames.filter((f) => f.event === 'output-chunk');
+      expect(outputFrames.length).toBeGreaterThanOrEqual(3);
+      const texts = outputFrames.map((f) => (f.data as { text: string }).text);
+      expect(texts).toContain('thinking about the goal');
+      expect(texts).toContain('tool: read_file');
+      expect(texts).toContain('more output after connect');
+
+      const toolCallFrame = outputFrames.find((f) => (f.data as { text: string }).text === 'tool: read_file');
+      expect((toolCallFrame!.data as { taskId: string | null }).taskId).toBe('t1');
+
+      // Step/task/run-done ids and output-chunk ids live in two disjoint,
+      // independently-monotonic ranges (see run-stream.ts's lastStepSeq /
+      // lastOutputSeq comment) — each is strictly increasing and dup-free
+      // WITHIN its own family; they are not required to interleave in
+      // numeric order on the wire (output-chunk ids, OUTPUT_SEQ_BASE=1e7+,
+      // are always numerically larger than any real step id).
+      const allIds = frames.filter((f) => f.id !== undefined).map((f) => Number(f.id));
+      const OUTPUT_SEQ_BASE = 10_000_000;
+      const stepIds = allIds.filter((n) => n < OUTPUT_SEQ_BASE);
+      const outputIds = allIds.filter((n) => n >= OUTPUT_SEQ_BASE);
+      for (const ids of [stepIds, outputIds]) {
+        const sorted = [...ids].sort((a, b) => a - b);
+        expect(ids).toEqual(sorted);
+        expect(new Set(ids).size).toBe(ids.length);
+      }
+      expect(names_(frames)).toContain('run-done');
+    },
+    10_000,
+  );
+
+  it(
+    'resumes via Last-Event-ID without re-sending already-seen output chunks',
+    async () => {
+      const h = await startServer(makeConfig(), makeOpts());
+      openHandles.push(h);
+      currentRun = runAt({ stepCount: 0, taskStatus: 'running' });
+      writeStreamFileLines('r1', [
+        { kind: 'model-delta', text: 'chunk one' },
+        { kind: 'model-delta', text: 'chunk two' },
+      ]);
+
+      const first = await collectSseFrames(
+        `${h.url}/api/run/r1/events`,
+        { Host: `127.0.0.1:${h.port}`, ...readAuthHeaders(h.port) },
+        (frames) => frames.filter((f) => f.event === 'output-chunk').length >= 2,
+      );
+      const seenIds = first.frames.filter((f) => f.id !== undefined).map((f) => Number(f.id));
+      const lastId = Math.max(...seenIds);
+
+      writeStreamFileLines('r1', [{ kind: 'model-delta', text: 'chunk three' }]);
+      currentRun = runAt({ stepCount: 0, status: 'done', taskStatus: 'done' });
+
+      const resumed = await collectSseFrames(
+        `${h.url}/api/run/r1/events`,
+        { Host: `127.0.0.1:${h.port}`, ...readAuthHeaders(h.port), 'Last-Event-ID': String(lastId) },
+        (frames) => frames.some((f) => f.event === 'run-done'),
+      );
+
+      const resumedOutputTexts = resumed.frames
+        .filter((f) => f.event === 'output-chunk')
+        .map((f) => (f.data as { text: string }).text);
+      // Output-chunk dedup works precisely here because lastId is itself an
+      // output-chunk id: only the genuinely-new chunk replays.
+      expect(resumedOutputTexts).toEqual(['chunk three']);
+      const resumedOutputIds = resumed.frames
+        .filter((f) => f.event === 'output-chunk' && f.id !== undefined)
+        .map((f) => Number(f.id));
+      for (const oid of resumedOutputIds) expect(oid).toBeGreaterThan(lastId);
+      // The step/task/run-done family, by contrast, replays from scratch on
+      // this reconnect (documented tradeoff in run-stream.ts: a single
+      // Last-Event-ID can only seed the ONE threshold whose range it falls
+      // in — lastId here is an output-space id, so the step family's
+      // threshold resets to -1 rather than risk suppressing it forever).
+      expect(names_(resumed.frames)).toContain('run-done');
+    },
+    10_000,
+  );
+
+  it('never sends the raw secret when the stream file itself is unscrubbed (defense-in-depth via sanitizePublicJson)', async () => {
+    const h = await startServer(makeConfig(), makeOpts());
+    openHandles.push(h);
+    const secret = 'sk-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    currentRun = runAt({ stepCount: 0, status: 'done', taskStatus: 'done' });
+    // Simulate a hypothetical bug where fileSink's own scrub was bypassed —
+    // this route's sanitizePublicJson() is the second, independent layer.
+    writeStreamFileLines('r1', [{ kind: 'model-delta', text: `leaked ${secret}` }]);
+
+    const { frames } = await collectSseFrames(
+      `${h.url}/api/run/r1/events`,
+      { Host: `127.0.0.1:${h.port}`, ...readAuthHeaders(h.port) },
+      (fr) => fr.some((f) => f.event === 'run-done'),
+    );
+
+    const serialized = JSON.stringify(frames);
+    expect(serialized).not.toContain(secret);
+  });
+
+  // DELIBERATELY inverted, same pattern as the step-summary sanity test
+  // above: proves this suite would fail if sanitizePublicJson were ever
+  // skipped for output-chunk payloads specifically.
+  it('sanity: an unscrubbed stream-file line WOULD contain the raw secret if read verbatim', () => {
+    const secret = 'sk-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    const line = JSON.stringify({ ts: new Date().toISOString(), kind: 'model-delta', text: `leaked ${secret}` });
+    expect(line).toContain(secret);
+  });
+});
+
+function names_(frames: Array<{ event: string }>): string[] {
+  return frames.map((f) => f.event);
+}
+
+// ---------------------------------------------------------------------------
+// v333: live integration — a real (fake) engine subprocess's stdout reaches
+// the SSE route via the real spawnEngine -> fileSink pipeline, no mocking of
+// child_process. `bin: process.execPath` runs plain node, never a real
+// delegated CLI agent — same pattern m11.engines.test.ts already uses for
+// its one real-process integration test.
+// ---------------------------------------------------------------------------
+
+describe('GET /api/run/:id/events — live engine output integration', () => {
+  it(
+    'a real subprocess writing to stdout is tailed through fileSink and arrives as output-chunk frames',
+    async () => {
+      const { spawnEngine, describeRunEventForStream } = await import('../src/core/run/engines.js');
+      const { fileSink, emitSinkEvent } = await import('../src/core/run/streaming.js');
+
+      const h = await startServer(makeConfig(), makeOpts());
+      openHandles.push(h);
+      currentRun = runAt({ stepCount: 0, taskStatus: 'running' });
+
+      const sink = fileSink('r1');
+      const script = [
+        "console.log('engine says hello');",
+        "console.log('engine is working');",
+      ].join('\n');
+
+      const enginePromise = spawnEngine(
+        { bin: process.execPath, args: ['-e', script] },
+        makeConfig(),
+        {
+          onEvent: (ev) => {
+            const described = describeRunEventForStream(ev);
+            if (described) emitSinkEvent(sink, described);
+          },
+        },
+      );
+
+      const collecting = collectSseFrames(
+        `${h.url}/api/run/r1/events`,
+        { Host: `127.0.0.1:${h.port}`, ...readAuthHeaders(h.port) },
+        (frames) => frames.filter((f) => f.event === 'output-chunk').length >= 2,
+        8_000,
+      );
+
+      await enginePromise;
+      currentRun = runAt({ stepCount: 0, status: 'done', taskStatus: 'done' });
+
+      const { frames } = await collecting;
+      const texts = frames.filter((f) => f.event === 'output-chunk').map((f) => (f.data as { text: string }).text);
+      expect(texts).toContain('engine says hello');
+      expect(texts).toContain('engine is working');
+    },
+    10_000,
+  );
+});

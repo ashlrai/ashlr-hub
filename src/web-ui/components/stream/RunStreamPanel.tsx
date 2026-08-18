@@ -126,7 +126,7 @@ export function RunStreamPanelSkeleton() {
 
 export function RunStreamPanel({ runId }: { runId: string }) {
   const stream = useRunStream(runId);
-  const { phase, run, error, lastChangedAt, transport, stallAgeMs } = stream;
+  const { phase, run, error, lastChangedAt, transport, stallAgeMs, outputChunks } = stream;
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   // Mirrors stickToBottomRef in React state purely so the "Follow" button can
@@ -134,11 +134,25 @@ export function RunStreamPanel({ runId }: { runId: string }) {
   // but a ref mutation doesn't trigger a re-render.
   const [following, setFollowing] = useState(true);
 
+  // v333: independent scroll/follow state for the live output pane — same
+  // append/pin/follow contract as the step transcript above, but it tracks
+  // its own scroll position since the two panes grow independently (an
+  // engine can emit many output chunks between step boundaries).
+  const outputScrollRef = useRef<HTMLDivElement>(null);
+  const outputStickToBottomRef = useRef(true);
+  const [outputFollowing, setOutputFollowing] = useState(true);
+
   useEffect(() => {
     const el = scrollRef.current;
     if (!el || !stickToBottomRef.current) return;
     el.scrollTop = el.scrollHeight;
   }, [run?.steps.length]);
+
+  useEffect(() => {
+    const el = outputScrollRef.current;
+    if (!el || !outputStickToBottomRef.current) return;
+    el.scrollTop = el.scrollHeight;
+  }, [outputChunks.length]);
 
   function onScroll() {
     const el = scrollRef.current;
@@ -149,10 +163,26 @@ export function RunStreamPanel({ runId }: { runId: string }) {
     setFollowing(pinned);
   }
 
+  function onOutputScroll() {
+    const el = outputScrollRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const pinned = distanceFromBottom < 48;
+    outputStickToBottomRef.current = pinned;
+    setOutputFollowing(pinned);
+  }
+
   function resumeFollowing() {
     stickToBottomRef.current = true;
     setFollowing(true);
     const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }
+
+  function resumeOutputFollowing() {
+    outputStickToBottomRef.current = true;
+    setOutputFollowing(true);
+    const el = outputScrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }
 
@@ -202,6 +232,38 @@ export function RunStreamPanel({ runId }: { runId: string }) {
         transport={transport}
         error={error}
       />
+
+      {outputChunks.length > 0 ? (
+        <div className={styles.transcriptWrap}>
+          <div
+            ref={outputScrollRef}
+            className={styles.transcript}
+            onScroll={onOutputScroll}
+            tabIndex={0}
+            role="log"
+            aria-label="Live engine output"
+            aria-live={outputFollowing ? 'polite' : 'off'}
+          >
+            {outputChunks.map((chunk, i) => (
+              <div key={`${chunk.ts}-${i}`} className={styles.step} data-focus-key={`run-output-chunk-${i}`}>
+                <span className={styles.stepKind} data-kind={chunk.kind}>
+                  {chunk.kind}
+                </span>
+                <span className={styles.stepTime} title={chunk.ts}>
+                  {formatClock(chunk.ts)}
+                </span>
+                <span className={styles.stepTask}>{chunk.taskId ?? ''}</span>
+                <span className={styles.stepSummary}>{chunk.text}</span>
+              </div>
+            ))}
+          </div>
+          {!outputFollowing ? (
+            <button type="button" className={styles.followButton} onClick={resumeOutputFollowing}>
+              ↓ Follow
+            </button>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className={styles.transcriptWrap}>
         <div

@@ -95,9 +95,9 @@ import {
   supportsGovernedModelCalls,
 } from './model-call-authority.js';
 import { withToolEnv } from '../env-bridge.js';
-import { buildEngineCommand, engineInstalled, spawnEngine, DEFAULT_ENGINE_BACKSTOP_MS } from './engines.js';
+import { buildEngineCommand, engineInstalled, spawnEngine, describeRunEventForStream, DEFAULT_ENGINE_BACKSTOP_MS } from './engines.js';
 import { resolveEngineSpec } from './engine-registry.js';
-import { nullSink } from './streaming.js';
+import { nullSink, fileSink, combineSinks } from './streaming.js';
 import type { StreamSink } from './streaming.js';
 import { withRetry } from './retry.js';
 import { verifyTaskStructured } from './verify.js';
@@ -2268,7 +2268,24 @@ async function runGoalInternal(
   // M11: read __sink (StreamSink) from opts. The CLI attaches it for live progress.
   // Falls back to nullSink() when absent (non-TTY, tests, --no-stream).
   const rawSink = (opts as RunOptions & { __sink?: StreamSink }).__sink;
-  const sink: StreamSink = typeof rawSink === 'function' ? rawSink : nullSink();
+  const callerSink: StreamSink = typeof rawSink === 'function' ? rawSink : nullSink();
+  // v333: tee EVERY run's sink to a durable, scrubbed, size-capped stream
+  // file — this is the single choke point, deliberately. Whatever the caller
+  // passed (nullSink() for daemon-dispatched/web-launched/swarm-task runs,
+  // makeCliSink() for `ashlr run`/`ashlr swarm`) still runs unchanged; the
+  // file additionally gets a durable copy so the per-run SSE route
+  // (src/core/web/run-stream.ts) can serve live output instead of only step
+  // boundaries. Default-on: this is local-only observability whose cost is a
+  // scrubbed file under ~/.ashlr/run-streams/, not a call site to gate.
+  // runId is guaranteed set by the caller (runGoal assigns it before ever
+  // reaching runGoalInternal — see runGoal's `opts = { ...opts, runId: id }`
+  // above); the `undefined` fallback only covers the opts.signal?.aborted
+  // early-return in runGoal that calls runGoalInternal before that
+  // assignment, where there is nothing worth persisting anyway.
+  const runStreamIdentity = opts.resumeId ?? opts.runId;
+  const sink: StreamSink = runStreamIdentity
+    ? combineSinks(callerSink, fileSink(runStreamIdentity))
+    : callerSink;
 
   // M11: opt-in model verification. Default OFF → the per-task verify step is
   // heuristic-only, charging NO extra model calls (preserves M4 deterministic
@@ -3134,6 +3151,16 @@ async function runGoalInternal(
         const engineResult = await spawnEngine(cmd, cfg, {
           timeoutMs: cfg.foundry?.timeoutMs ?? DEFAULT_ENGINE_BACKSTOP_MS,
           ...(opts.signal ? { signal: opts.signal } : {}),
+          // v333: forward per-line engine stdout (as it arrives, not just at
+          // completion) into `sink` — the ONLY thing previously fed into sink
+          // here was the two lifecycle emit() calls below (engine failed /
+          // engine completed). This closes the gap run-stream.ts's header
+          // comment documents: engine subprocess text now reaches the
+          // durable fileSink() teed into `sink` above, live.
+          onEvent: (ev) => {
+            const described = describeRunEventForStream(ev);
+            if (described) emit(sink, described);
+          },
         });
 
         // Preserve any usage parsed from partial engine output even when the

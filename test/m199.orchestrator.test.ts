@@ -121,9 +121,15 @@ vi.mock('../src/core/run/budget.js', async () => {
   return { ...real };
 });
 
-// Mock streaming — nullSink is a real no-op; allow override.
+// Mock streaming — nullSink is a real no-op; allow override. v333 added
+// fileSink()/combineSinks() (durable per-run stream persistence) — mocked
+// here as harmless no-ops since these orchestrator-focused tests don't
+// assert on stream-file contents (see test/m11.stream-file-sink.test.ts and
+// test/run-events-sse.test.ts for that).
 vi.mock('../src/core/run/streaming.js', () => ({
   nullSink: vi.fn(() => () => {}),
+  fileSink: vi.fn(() => () => {}),
+  combineSinks: vi.fn((...sinks: Array<(e: unknown) => void>) => sinks[0] ?? (() => {})),
 }));
 
 // Mock retry — call the fn once (no retry in tests).
