@@ -11,6 +11,8 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+## [3.3.0] — 2026-08-17 — Fleet activation, autonomous merge, and the operator console
+
 ### 2026-08-16 — Fleet activation unblocked, autonomous merge wired, learning loop closed
 
 Nine threads landed together: the daemon activation-authority system that had
@@ -150,6 +152,43 @@ unattended activation even after a grant — are in
   (`test/m518.goal-conductor-permit-operator.test.ts:924-926`) — conductor
   authority must be unreachable from the daemon surface, not merely absent
   from a filename.
+
+### 2026-08-16 — Live-data web UI crash and TITRR proposal-quality fixes
+
+- **`/work/swarms` crashed on real fleet data; a route error boundary now
+  contains that class of bug.** `SwarmsView` and `SwarmDetailView` read
+  `sw.plan.tasks.length` and `sw.usage.tokensIn` unguarded; two of eighty real
+  swarm records (legacy smoke-test runs) carry neither field, so the view
+  threw, React unmounted the root, and the screen went blank with no recovery
+  short of a hard reload. Both reads are now guarded, and a new
+  `RouteErrorBoundary` (`src/web-ui/components/primitives/RouteErrorBoundary.tsx`)
+  wraps the route outlet so a failing view renders an inline error card with
+  retry while the sidebar, topbar, and command palette stay alive — the
+  durable fix; the optional chaining is the specific one.
+- **Crushed tables got their column widths back.** The inbox proposal table
+  had no fixed layout, so auto-layout divided space evenly across seven
+  columns and crushed `Title` to roughly one word per line. The same pattern
+  — traced to the Fleet Dashboard's Recent Runs panel, which `DESIGN.md`
+  names as the reference other views copy — also affected Runs' goal column,
+  where a single multi-paragraph prompt could balloon one row past the
+  viewport. All three (`src/web-ui/routes/inbox/ProposalList.tsx`,
+  `src/web-ui/routes/fleet-dashboard/RunsPanel.tsx`,
+  `src/web-ui/routes/work/runs/RunsView.tsx`) now use fixed layout with
+  explicit column widths and a shared two-line clamp utility. GenomeView's
+  plain "Loading…" text was also swapped for the SkeletonRow convention used
+  everywhere else, noticeable because that endpoint takes ~6s for 2014
+  entries.
+- **TITRR stopped filing proposals it already knew had failed verification.**
+  `TITRR_MAX_ATTEMPTS` was hardcoded to 2 ("1 initial + 1 repair"); on
+  exhausting it with tests still failing, the loop unconditionally filed the
+  diff anyway via `captureTitrrProposal({isPartial:true,
+  forceGateBlockReason})` — the root cause of `[partial]` proposals that
+  could never pass verification, and, per the fix commit's own estimate (not
+  a value stored or checked anywhere in `src/` or `test/` — do not repeat it
+  as a verified count), a large share of the 672 proposals the fleet had
+  never merged. `TITRR_MAX_ATTEMPTS` is raised to 4, and exhaustion now drops
+  with no proposal at all rather than filing an unverifiable one; the
+  annotation is kept on the run for audit but nothing reaches the inbox.
 
 ### M464–M503 — daemon durability, post-merge verification pipeline, Mission OS extensions
 
