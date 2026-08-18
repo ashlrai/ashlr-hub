@@ -456,7 +456,7 @@ describe('M383 authenticated cutoff observation checkpoints', () => {
     expect(record(second)).toMatchObject({ recorded: 1, failed: 0 });
   });
 
-  it('recovers and replays at capacity but refuses a new 257th checkpoint', { timeout: 30_000 }, () => {
+  it('recovers and replays at capacity but refuses a new 257th checkpoint', () => {
     const values = Array.from({ length: 257 }, (_, index) =>
       snapshot(new Date(Date.UTC(2026, 6, 13, 0, index)).toISOString()));
     for (const value of values.slice(0, 255)) {
