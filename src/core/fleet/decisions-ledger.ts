@@ -33,6 +33,9 @@ import {
   sanitizeAgentSemanticEvents,
 } from '../learning/agent-semantic-events.js';
 import { scrubSecrets } from '../util/scrub.js';
+// Imported from the leaf module, NOT post-merge-credit.js, to avoid recreating
+// the decisions-ledger.ts <-> post-merge-credit.ts import cycle. See
+// post-merge-credit-label.ts's doc comment for the full story.
 import { POST_MERGE_CREDIT_RELEASE_LABEL } from './post-merge-credit-label.js';
 import {
   isJudgeDecisionReasonCode,

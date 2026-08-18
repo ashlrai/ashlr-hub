@@ -80,6 +80,7 @@ import {
   clearDaemonSpendGuard,
   DAEMON_SPEND_GUARD_ITEM_CAPACITY,
   daemonStatePath,
+  heartbeatDaemonLock,
   loadDaemonState,
   loadDaemonStateStrict,
   readDaemonLockOwner,
@@ -90,6 +91,12 @@ import {
   upgradeLegacyDaemonSpendGuard,
 } from './state.js';
 import type { DaemonLock, SaveDaemonStateResult } from './state.js';
+// Type-only: erased at compile time, so this does NOT eagerly load
+// self-improve.js/post-merge-credit.js at module init (those are still
+// reached only via the lazy `await import(...)` calls in
+// runAncillaryMaintenance, unaffected by these type imports).
+import type { RejectionLearningSweepResult } from '../fleet/self-improve.js';
+import type { PostMergeCreditSweepResult } from '../fleet/post-merge-credit.js';
 import {
   acquireLocalStoreLock,
   releaseLocalStoreLock,
@@ -1320,13 +1327,31 @@ function configuredModelForBackend(backend: EngineId, cfg: AshlrConfig): string 
   return typeof model === 'string' && model.trim() ? model : null;
 }
 
+/**
+ * Refresh the daemon lock's heartbeatAt on a fixed 30s cadence for the
+ * FULL lifetime of runDaemon() — set up once before entering the tick
+ * loop (once=true or once=false), so it keeps firing on Node's timer queue
+ * independent of what a single tick is doing, including a tick blocked on a
+ * long (e.g. 30-minute) engine run. guard-health.ts's 2-minute staleness
+ * threshold depends on this actually writing heartbeatAt; previously this
+ * interval only READ ownership (daemonLockOwned) and refreshed the activity
+ * file, so heartbeatDaemonLock() — the function that writes heartbeatAt —
+ * was never called from the resident loop at all, leaving it frozen at
+ * acquiredAt forever (M303/guard-health).
+ *
+ * Fail-closed: heartbeatDaemonLock() re-derives ownership itself (exact pid
+ * + token match) before writing, and returns false on ANY failure — lost
+ * ownership or a write I/O error alike. Either failure routes to
+ * onOwnershipLost() rather than being swallowed, matching the pre-existing
+ * fail-closed contract of this interval.
+ */
 function startDaemonLockHeartbeat(
   lock: DaemonLock,
   afterHeartbeat?: () => void,
   onOwnershipLost?: () => void,
 ): () => void {
   const interval = setInterval(() => {
-    if (daemonLockOwned(lock)) afterHeartbeat?.();
+    if (heartbeatDaemonLock(lock)) afterHeartbeat?.();
     else onOwnershipLost?.();
   }, 30_000);
   (interval as { unref?: () => void }).unref?.();
@@ -3696,6 +3721,11 @@ export async function tick(
   let ancillaryMaintenanceRan = false;
   let proposalRepairMaintenanceRan = false;
   let proposalRepairMaintenanceResult: ProposalRepairWorkResult | null = null;
+  // M505 learning-loop sweeps were previously fire-and-forget (result discarded
+  // by the caller) — surfaced here so "is the fleet actually learning" is
+  // observable from the tick audit row instead of requiring forensics.
+  let rejectionLearningSweepResult: RejectionLearningSweepResult | null = null;
+  let postMergeCreditSweepResult: PostMergeCreditSweepResult | null = null;
   let skipInventAfterSelfHealRefill = false;
   let producerMaintenanceBeforeSelection = false;
   let producerMaintenanceSkippedByCadence = false;
@@ -3927,6 +3957,22 @@ export async function tick(
             : {}),
         }
         : {}),
+      ...(rejectionLearningSweepResult
+        ? {
+          rejectionLearningScanned: rejectionLearningSweepResult.scanned,
+          rejectionLearningWritten: rejectionLearningSweepResult.written,
+          rejectionLearningSkipped: rejectionLearningSweepResult.skipped,
+          rejectionLearningSourceComplete: rejectionLearningSweepResult.sourceComplete,
+        }
+        : {}),
+      ...(postMergeCreditSweepResult
+        ? {
+          postMergeCreditScanned: postMergeCreditSweepResult.scanned,
+          postMergeCreditReleased: postMergeCreditSweepResult.released,
+          postMergeCreditSkipped: postMergeCreditSweepResult.skipped,
+          postMergeCreditSourceComplete: postMergeCreditSweepResult.sourceComplete,
+        }
+        : {}),
       ...(producerMaintenanceSkippedByCadence ? { skippedByCadence: true } : {}),
       ...(producerMaintenanceNextAfter ? { nextAfter: producerMaintenanceNextAfter } : {}),
       ...(ambiguousRepairReservationKeys.size > 0 ? {
@@ -4056,7 +4102,14 @@ export async function tick(
     if (!stopRequested() && (liveCfg.foundry as Record<string, unknown>)?.['selfImprove'] === true) {
       try {
         const { sweepRejectionLearning } = await import('../fleet/self-improve.js');
-        sweepRejectionLearning(liveCfg);
+        const result = sweepRejectionLearning(liveCfg);
+        rejectionLearningSweepResult = result;
+        if (result.scanned > 0 || result.written > 0) {
+          console.warn(
+            `[ashlr] daemon:tick sweepRejectionLearning: scanned=${result.scanned} ` +
+            `written=${result.written} skipped=${result.skipped} sourceComplete=${result.sourceComplete}`,
+          );
+        }
       } catch (err) {
         console.warn('[ashlr] daemon:tick sweepRejectionLearning failed:', (err as Error)?.message ?? err);
       }
@@ -4068,7 +4121,14 @@ export async function tick(
     if (!stopRequested()) {
       try {
         const { sweepPostMergeCreditReleases } = await import('../fleet/post-merge-credit.js');
-        sweepPostMergeCreditReleases();
+        const result = sweepPostMergeCreditReleases();
+        postMergeCreditSweepResult = result;
+        if (result.scanned > 0 || result.released > 0) {
+          console.warn(
+            `[ashlr] daemon:tick sweepPostMergeCreditReleases: scanned=${result.scanned} ` +
+            `released=${result.released} skipped=${result.skipped} sourceComplete=${result.sourceComplete}`,
+          );
+        }
       } catch (err) {
         console.warn('[ashlr] daemon:tick sweepPostMergeCreditReleases failed:', (err as Error)?.message ?? err);
       }

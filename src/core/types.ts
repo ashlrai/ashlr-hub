@@ -4629,6 +4629,16 @@ export interface DaemonTick {
     proposalRepairInboxAvailable?: boolean;
     diagnosticResliceParentsResolved?: number;
     diagnosticResliceParentsMissing?: number;
+    /** M505 learning-loop sweep observability: rejection-learning pass. */
+    rejectionLearningScanned?: number;
+    rejectionLearningWritten?: number;
+    rejectionLearningSkipped?: number;
+    rejectionLearningSourceComplete?: boolean;
+    /** M505 learning-loop sweep observability: post-merge-credit release pass. */
+    postMergeCreditScanned?: number;
+    postMergeCreditReleased?: number;
+    postMergeCreditSkipped?: number;
+    postMergeCreditSourceComplete?: boolean;
     skippedByCadence?: boolean;
     nextAfter?: string;
   };
