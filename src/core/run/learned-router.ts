@@ -1168,6 +1168,7 @@ function decisionJoinFor(
 export function inspectRoutingLearningAuthority(
   taskClass?: string,
   nowMs?: number,
+  opts?: { proposalsRead?: ReturnType<typeof listProposalsDetailed> },
 ): RoutingLearningAuthority {
   try {
     const now = nowMs ?? Date.now();
@@ -1187,7 +1188,7 @@ export function inspectRoutingLearningAuthority(
       if (bucket) bucket.push(entry);
       else decisionsByTrajectory.set(entry.trajectoryId, [entry]);
     }
-    const authorities = proposalAuthorities(now);
+    const authorities = proposalAuthorities(now, opts?.proposalsRead);
 
     const samples: RoutingLearningAuthoritySample[] = relevantAssignments.map((receipt) => {
       const selected = receipt.reportedEligibleActions.find(
@@ -1322,8 +1323,17 @@ interface ProposalAuthorities {
   realized: Map<string, RealizedProposalAuthority>;
 }
 
-function proposalAuthorities(nowMs: number): ProposalAuthorities | null {
-  const read = listProposalsDetailed({ requireComplete: true });
+function proposalAuthorities(
+  nowMs: number,
+  injectedRead?: ReturnType<typeof listProposalsDetailed>,
+): ProposalAuthorities | null {
+  // An injected read lets buildFleetStatus share the ONE proposals snapshot it
+  // already took, instead of this path issuing an independent read mid-snapshot.
+  // That matters twice over: an inner read tears the status snapshot-stability
+  // contract (read -> project -> re-read -> compare), and it doubles proposal
+  // store I/O on every status build. The completeness gate below applies to the
+  // injected read identically, so fail-closed semantics are unchanged.
+  const read = injectedRead ?? listProposalsDetailed({ requireComplete: true });
   if (!read.complete || read.sourceState !== 'healthy') return null;
   const producers = new Map<string, Proposal>();
   const realized = new Map<string, RealizedProposalAuthority>();
