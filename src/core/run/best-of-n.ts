@@ -1632,6 +1632,22 @@ async function runBestOfNInternal(
               ...(opts?.signal ? { signal: opts.signal } : {}),
             });
             score = scoreVerdict(verdict);
+            // Deliberately NOT recording verdict.judgeFailure to the decisions
+            // ledger here (unlike automerge-pass.ts / manager.ts / model-racing.ts).
+            // `judgeClient` above is unconditionally buildNullJudgeClient(),
+            // which always returns '' — judgeProposal's parseJudgeResponse('')
+            // therefore always yields obj:null and this call ALWAYS returns
+            // fallback('parse'), for every candidate, every run, regardless of
+            // real judge-infrastructure health (there is currently no path to
+            // inject a real LLM critic into this scorer). Recording that as a
+            // 'judge-parse-failure' decision would make the judgeFailures24h
+            // dashboard counter report a permanent, guaranteed 100% failure
+            // rate for every best-of-N attempt — actively misleading rather
+            // than closing an observability gap. This mirrors the same
+            // distinction manager.ts's own no-client fallback already makes
+            // (an absent/no-op judge is not a `judgeFailure`, only a real
+            // client's failed call is). If a real critic is ever wired into
+            // best-of-N's scoring path, this call site should be revisited.
           } catch {
             // Judge failure — candidate stays with score 0
           }

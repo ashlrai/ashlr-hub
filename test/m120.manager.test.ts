@@ -57,6 +57,21 @@ vi.mock('../src/core/inbox/store.js', async (importOriginal) => {
     ...actual,
     listProposals: (_filter?: { status?: string }) =>
       [...mockProposals] as Proposal[],
+    listProposalsDetailed: (_opts?: { status?: string }) => {
+      const proposals = [...mockProposals] as Proposal[];
+      return {
+        proposals,
+        sourceState: 'healthy' as const,
+        sourcePresent: true,
+        complete: true,
+        stopReasons: [],
+        filesDiscovered: proposals.length,
+        filesRead: proposals.length,
+        bytesRead: 0,
+        invalidFiles: 0,
+        unreadableFiles: 0,
+      };
+    },
     setStatus: (
       id: string,
       status: string,
@@ -898,6 +913,40 @@ describe('m120 runManager — shadow mode', () => {
     expect(Array.isArray(report.recommendations)).toBe(true);
     expect(typeof report.narrative).toBe('string');
     expect(typeof report.judgeEngine).toBe('string');
+    expect(report.proposalSourceQuality).toMatchObject({
+      sourceState: 'healthy',
+      complete: true,
+    });
+  });
+
+  it('marks proposalSourceQuality degraded (not empty) when the proposal store read fails', async () => {
+    const storeMod = await import('../src/core/inbox/store.js');
+    const spy = vi.spyOn(storeMod, 'listProposalsDetailed').mockImplementation(() => ({
+      proposals: [],
+      sourceState: 'degraded',
+      sourcePresent: true,
+      complete: false,
+      stopReasons: ['io-error'],
+      filesDiscovered: 0,
+      filesRead: 0,
+      bytesRead: 0,
+      invalidFiles: 0,
+      unreadableFiles: 1,
+    }));
+
+    const { runManager } = await import('../src/core/fleet/manager.js');
+    const report = await runManager({} as never, { window: '7d' });
+
+    expect(report.verdicts).toEqual([]);
+    expect(report.proposalSourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+    });
+    expect(
+      report.recommendations.some((r) => /degraded or incomplete/.test(r)),
+    ).toBe(true);
+
+    spy.mockRestore();
   });
 
   it('wins list contains only ship verdicts', async () => {

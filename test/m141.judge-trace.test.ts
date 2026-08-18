@@ -1172,13 +1172,26 @@ describe('m141 runManager — records judge trace per proposal', () => {
     const proposalId = pid();
     vi.doMock('../src/core/inbox/store.js', async (importOriginal) => {
       const actual = await importOriginal<typeof import('../src/core/inbox/store.js')>();
+      const proposals = [makeProposal({
+        id: proposalId,
+        engineModel: 'codex:gpt-5.5',
+        engineTier: 'frontier',
+      })];
       return {
         ...actual,
-        listProposals: vi.fn().mockReturnValue([makeProposal({
-          id: proposalId,
-          engineModel: 'codex:gpt-5.5',
-          engineTier: 'frontier',
-        })]),
+        listProposals: vi.fn().mockReturnValue(proposals),
+        listProposalsDetailed: vi.fn().mockReturnValue({
+          proposals,
+          sourceState: 'healthy',
+          sourcePresent: true,
+          complete: true,
+          stopReasons: [],
+          filesDiscovered: proposals.length,
+          filesRead: proposals.length,
+          bytesRead: 0,
+          invalidFiles: 0,
+          unreadableFiles: 0,
+        }),
         setStatus: vi.fn(),
       };
     });
@@ -1245,13 +1258,26 @@ describe('m141 runManager — records judge trace per proposal', () => {
     const ids = [pid(), pid(), pid()];
     vi.doMock('../src/core/inbox/store.js', async (importOriginal) => {
       const actual = await importOriginal<typeof import('../src/core/inbox/store.js')>();
+      const proposals = ids.map((id) => makeProposal({
+        id,
+        engineModel: 'codex:gpt-5.5',
+        engineTier: 'frontier',
+      }));
       return {
         ...actual,
-        listProposals: vi.fn().mockReturnValue(ids.map((id) => makeProposal({
-          id,
-          engineModel: 'codex:gpt-5.5',
-          engineTier: 'frontier',
-        }))),
+        listProposals: vi.fn().mockReturnValue(proposals),
+        listProposalsDetailed: vi.fn().mockReturnValue({
+          proposals,
+          sourceState: 'healthy',
+          sourcePresent: true,
+          complete: true,
+          stopReasons: [],
+          filesDiscovered: proposals.length,
+          filesRead: proposals.length,
+          bytesRead: 0,
+          invalidFiles: 0,
+          unreadableFiles: 0,
+        }),
         setStatus: vi.fn(),
       };
     });

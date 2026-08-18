@@ -4,28 +4,26 @@
  * GET /api/snapshot) + per-model ship rate / cost-per-merge / best-of-N wins
  * (GET /api/models?window=).
  *
- * Known, disclosed data gap (see the judge-verdict chart's caveat prop):
- * ProductionSummary.judgeVerdicts24h is built from JudgeTrace, whose
- * `verdict` field is strictly 'ship'|'review'|'noise'|'harmful' — a
- * judge-parse-failure/judge-network-failure (manager.ts's judgeProposal()
- * fallback, ~line 611-626) sets `verdict: 'review'` because that's the
- * fail-closed choice for the AUTO-REJECT gate, and nothing downstream of
- * that field currently re-splits it. The recent fix (commit 5db524aa) tags
- * the distinction correctly in the decisions ledger's `judgeReasonCode`
- * ('judge-parse-failure' / 'judge-network-failure', see
- * judge-decision-metadata.ts) for LEARNING purposes, but that tag isn't
- * propagated into JudgeTrace or ProductionSummary, the only judge-verdict
- * aggregate exposed via any GET route today. Per this build's scope
- * (src/core/dashboard.ts and src/core/web/api.ts are off-limits), this view
- * cannot re-derive the split client-side — so it discloses the gap instead
- * of pretending the 'review' bucket is clean. Flagged separately for a
- * backend follow-up (add parse/network counts to ProductionSummary).
+ * M331: previously-disclosed data gap NOW CLOSED. ProductionSummary.judgeVerdicts24h
+ * is still built from JudgeTrace, whose `verdict` field is strictly
+ * 'ship'|'review'|'noise'|'harmful' — a judge-parse-failure/judge-network-failure
+ * (manager.ts's judgeProposal() fallback) sets `verdict: 'review'` because
+ * that's the fail-closed choice for the AUTO-REJECT gate, and JudgeTrace
+ * itself still can't re-split it. But the backend now ALSO exposes
+ * `judgeFailures24h` (sourced from the decisions ledger's distinct
+ * `judgeReasonCode`, not JudgeTrace) plus `judgeTraceSourceQuality` /
+ * `judgeFailureSourceQuality` / `activeGoalsSourceQuality` on
+ * DashboardProductionSummary (dashboard.ts). Judge failures are rendered
+ * here as their own KPI tile — visually distinct from the verdict-breakdown
+ * chart, never folded into 'review' — and every source-quality-bearing
+ * number is wrapped in <Epistemic> so a degraded/incomplete backend read
+ * shows "unknown", never a false zero.
  */
 import { useState } from 'react';
 import { dashboardSnapshotQuery, modelsQuery, type ModelStatsWindow } from '../../../data/queries.js';
 import { useQuery } from '../../../data/hooks.js';
 import { RefreshIndicator } from '../../../components/primitives/RefreshIndicator.js';
-import { Epistemic } from '../../../components/primitives/Epistemic.js';
+import { Epistemic, isKnown } from '../../../components/primitives/Epistemic.js';
 import { SkeletonCardGrid } from '../../../components/primitives/Skeleton.js';
 import {
   ChartContainer,
@@ -36,7 +34,7 @@ import {
   type CategoricalDatum,
   type TableColumn,
 } from '../../../components/charts/index.js';
-import type { ModelStats, ProductionSummary } from '../../../data/api-types.js';
+import type { ModelStats, DashboardProductionSummary } from '../../../data/api-types.js';
 import styles from './ProductionView.module.css';
 
 const WINDOWS: ModelStatsWindow[] = ['7d', '30d', 'all'];
@@ -50,7 +48,11 @@ export function ProductionView() {
   const snapshotQuery = useQuery(dashboardSnapshotQuery);
   const modelsResult = useQuery(modelsQuery(window));
 
-  const production = snapshotQuery.data?.production;
+  // DashboardSnapshot types `.production` as the base ProductionSummary
+  // (see the api-types.ts note on DashboardProductionSummary), but
+  // buildSnapshot() always returns the richer DashboardProductionSummary
+  // shape at runtime — this cast just recovers that at the type level.
+  const production = snapshotQuery.data?.production as DashboardProductionSummary | undefined;
 
   return (
     <div className={styles.view}>
@@ -106,8 +108,9 @@ export function ProductionView() {
   );
 }
 
-function ProductionSection({ production }: { production: ProductionSummary }) {
+function ProductionSection({ production }: { production: DashboardProductionSummary }) {
   const jv = production.judgeVerdicts24h;
+  const jf = production.judgeFailures24h;
   const verdictBars: CategoricalDatum[] = [
     { label: 'ship', value: jv.ship },
     { label: 'review', value: jv.review },
@@ -120,6 +123,10 @@ function ProductionSection({ production }: { production: ProductionSummary }) {
   }));
   const totalShipped = production.shipsPerDayTrend.reduce((sum, d) => sum + d.count, 0);
 
+  const judgeTraceKnown = isKnown(production.judgeTraceSourceQuality as never);
+  const judgeFailureKnown = isKnown(production.judgeFailureSourceQuality as never);
+  const goalsKnown = isKnown(production.activeGoalsSourceQuality as never);
+
   return (
     <>
       <div className={styles.kpiGrid}>
@@ -129,8 +136,41 @@ function ProductionSection({ production }: { production: ProductionSummary }) {
           caption={`${production.proposals24h.pending} pending`}
         />
         <StatTile label="Auto-merges today" value={String(production.autoMergesToday.count)} />
-        <StatTile label="Judged (24h)" value={String(jv.total)} />
-        <StatTile label="Active goals" value={String(production.activeGoals.length)} />
+        <StatTile
+          label="Judged (24h)"
+          value={
+            <Epistemic quality={production.judgeTraceSourceQuality as never} label="judged (24h)">
+              {String(jv.total)}
+            </Epistemic>
+          }
+        />
+        <StatTile
+          label="Active goals"
+          value={
+            <Epistemic quality={production.activeGoalsSourceQuality as never} label="active goals">
+              {String(production.activeGoals.length)}
+            </Epistemic>
+          }
+        />
+        {/*
+         * Judge failures are infrastructure faults (parse/network), not
+         * judgments — kept as their own KPI tile rather than folded into the
+         * verdict breakdown below, so a spike here reads as "the judge is
+         * unreachable/misbehaving" and never as "proposals are being reviewed."
+         */}
+        <StatTile
+          label="Judge failures (24h)"
+          value={
+            <Epistemic quality={production.judgeFailureSourceQuality as never} label="judge failures (24h)">
+              {String(jf.total)}
+            </Epistemic>
+          }
+          caption={
+            judgeFailureKnown
+              ? `${jf.parse} parse · ${jf.network} network — infra faults, not judgments`
+              : 'source degraded — count unknown, not confirmed zero'
+          }
+        />
       </div>
 
       <div className={styles.chartsGrid}>
@@ -162,15 +202,28 @@ function ProductionSection({ production }: { production: ProductionSummary }) {
         <ChartContainer
           title="Judge verdict breakdown"
           description="last 24h"
-          caveat="Backend gap (flagged separately): judge-parse-failure and judge-network-failure fallbacks currently record verdict='review' upstream (manager.ts's fail-closed default) and are not yet split out here — the 'review' count above may include infrastructure failures, not only genuine human-review holds. See this view's header comment."
-          empty={jv.total === 0}
-          emptyMessage="No judge verdicts recorded in the last 24h."
+          caveat="A judge-parse-failure or judge-network-failure fallback records verdict='review' upstream (manager.ts's fail-closed default), so 'review' here may still include a small number of infrastructure faults alongside genuine human-review holds — but every failure is now counted precisely in the separate 'Judge failures (24h)' tile above, sourced from the decisions ledger rather than this chart's verdict trace."
+          empty={!judgeTraceKnown || jv.total === 0}
+          emptyMessage={
+            judgeTraceKnown
+              ? 'No judge verdicts recorded in the last 24h.'
+              : 'Judge-trace source is degraded or incomplete — counts unknown, not confirmed zero.'
+          }
         >
-          <BarChart data={verdictBars} ariaLabel="Judge verdict breakdown, last 24h" formatValue={(v) => String(v)} />
+          {judgeTraceKnown ? (
+            <BarChart data={verdictBars} ariaLabel="Judge verdict breakdown, last 24h" formatValue={(v) => String(v)} />
+          ) : null}
         </ChartContainer>
       </div>
 
-      {production.activeGoals.length > 0 ? (
+      {!goalsKnown ? (
+        <div className={styles.section}>
+          <h2 className={styles.sectionTitle}>Active goals</h2>
+          <Epistemic quality={production.activeGoalsSourceQuality as never} label="active goals">
+            {null}
+          </Epistemic>
+        </div>
+      ) : production.activeGoals.length > 0 ? (
         <div className={styles.section}>
           <h2 className={styles.sectionTitle}>Active goals</h2>
           <ul className={styles.goalsList}>

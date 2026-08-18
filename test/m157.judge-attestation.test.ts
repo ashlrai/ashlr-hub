@@ -89,12 +89,30 @@ vi.mock('../src/core/run/provider-client.js', () => ({
   getActiveClient: (...args: unknown[]) => mockGetActiveClient(...args),
 }));
 
-vi.mock('../src/core/inbox/store.js', () => ({
-  listProposals: vi.fn(() => []),
-  setStatus: vi.fn(),
-  loadProposal: vi.fn(),
-  createProposal: vi.fn(),
-}));
+vi.mock('../src/core/inbox/store.js', () => {
+  const listProposals = vi.fn(() => []);
+  return {
+    listProposals,
+    listProposalsDetailed: vi.fn((opts?: { status?: string }) => {
+      const proposals = listProposals(opts);
+      return {
+        proposals,
+        sourceState: 'healthy' as const,
+        sourcePresent: true,
+        complete: true,
+        stopReasons: [],
+        filesDiscovered: proposals.length,
+        filesRead: proposals.length,
+        bytesRead: 0,
+        invalidFiles: 0,
+        unreadableFiles: 0,
+      };
+    }),
+    setStatus: vi.fn(),
+    loadProposal: vi.fn(),
+    createProposal: vi.fn(),
+  };
+});
 
 // ---------------------------------------------------------------------------
 // Lazy imports — after mocks

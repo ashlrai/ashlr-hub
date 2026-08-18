@@ -17,6 +17,9 @@ const SNAPSHOT_ZERO_SHIP = {
     generatedAt: new Date().toISOString(),
     proposals24h: { pending: 5, applied: 0, rejected: 2, total: 7 },
     judgeVerdicts24h: { ship: 0, review: 4, noise: 1, harmful: 0, total: 5 },
+    // M331: judge-parse/network failures, sourced from the decisions ledger —
+    // distinct from judgeVerdicts24h (JudgeTrace), never folded into 'review'.
+    judgeFailures24h: { parse: 2, network: 1, total: 3 },
     autoMergesToday: { count: 0, titles: [] },
     activeGoals: [],
     // Honest zero: 0 ships across every day in the trend — the chart must
@@ -26,6 +29,34 @@ const SNAPSHOT_ZERO_SHIP = {
       { date: '2026-08-11', count: 0 },
       { date: '2026-08-12', count: 0 },
     ],
+    proposalSourceQuality: { sourceState: 'healthy', sourcePresent: true, complete: true, stopReasons: [], filesDiscovered: 7, filesRead: 7, bytesRead: 100, invalidFiles: 0, unreadableFiles: 0 },
+    judgeTraceSourceQuality: { sourceState: 'healthy', sourcePresent: true, complete: true, stopReasons: [], filesRead: 5, bytesRead: 100, rowsScanned: 5, invalidRows: 0, unreadableFiles: 0 },
+    judgeFailureSourceQuality: { sourceState: 'healthy', sourcePresent: true, complete: true, stopReasons: [], filesRead: 3, bytesRead: 90, rowsScanned: 3, invalidRows: 0, unreadableFiles: 0 },
+    activeGoalsSourceQuality: { sourceState: 'healthy', sourcePresent: true, complete: true },
+  },
+};
+
+const SNAPSHOT_DEGRADED_JUDGE_SOURCES = {
+  ...SNAPSHOT_ZERO_SHIP,
+  production: {
+    ...SNAPSHOT_ZERO_SHIP.production,
+    // A degraded/incomplete read must never be indistinguishable from
+    // "genuinely zero failures" — Epistemic should render "unknown" instead
+    // of the withheld (zeroed) count below.
+    judgeFailures24h: { parse: 0, network: 0, total: 0 },
+    judgeFailureSourceQuality: {
+      sourceState: 'degraded', sourcePresent: true, complete: false,
+      stopReasons: ['io-error'], filesRead: 0, bytesRead: 0, rowsScanned: 0,
+      invalidRows: 0, unreadableFiles: 1,
+    },
+    judgeVerdicts24h: { ship: 0, review: 0, noise: 0, harmful: 0, total: 0 },
+    judgeTraceSourceQuality: {
+      sourceState: 'degraded', sourcePresent: true, complete: false,
+      stopReasons: ['io-error'], filesRead: 0, bytesRead: 0, rowsScanned: 0,
+      invalidRows: 0, unreadableFiles: 1,
+    },
+    activeGoals: [],
+    activeGoalsSourceQuality: { sourceState: 'degraded', sourcePresent: true, complete: false },
   },
 };
 
@@ -67,10 +98,10 @@ const MODELS_RESULT = {
   },
 };
 
-function mockFetch() {
+function mockFetch(snapshot: unknown = SNAPSHOT_ZERO_SHIP) {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === 'string' ? input : input.toString();
-    if (url.startsWith('/api/snapshot')) return new Response(JSON.stringify(SNAPSHOT_ZERO_SHIP), { status: 200 });
+    if (url.startsWith('/api/snapshot')) return new Response(JSON.stringify(snapshot), { status: 200 });
     if (url.startsWith('/api/models')) return new Response(JSON.stringify(MODELS_RESULT), { status: 200 });
     return new Response('not found', { status: 404 });
   });
@@ -95,6 +126,23 @@ describe('ProductionView', () => {
     render(<ProductionView />);
     await waitFor(() => expect(screen.getByText('Judge verdict breakdown')).toBeInTheDocument());
     expect(screen.getByText(/judge-parse-failure/)).toBeInTheDocument();
+  });
+
+  it('renders judge failures as their own KPI tile, distinct from the verdict breakdown', async () => {
+    render(<ProductionView />);
+    await waitFor(() => expect(screen.getByText('Judge failures (24h)')).toBeInTheDocument());
+    // Real counts from judgeFailures24h (3 total: 2 parse, 1 network), not folded
+    // into the 'review' bucket of the verdict-breakdown chart.
+    expect(screen.getByText(/2 parse.*1 network/)).toBeInTheDocument();
+  });
+
+  it('shows "unknown" (not a false zero) for judge failures when the ledger read is degraded', async () => {
+    vi.stubGlobal('fetch', mockFetch(SNAPSHOT_DEGRADED_JUDGE_SOURCES));
+    render(<ProductionView />);
+    await waitFor(() => expect(screen.getByText('Judge failures (24h)')).toBeInTheDocument());
+    expect(screen.getAllByText('unknown').length).toBeGreaterThan(0);
+    // The withheld/zeroed count must never render as a bare "0" for this tile.
+    expect(screen.getByText('source degraded — count unknown, not confirmed zero')).toBeInTheDocument();
   });
 
   it('withholds best-of-N win rate behind Epistemic when bestOfNSource is degraded', async () => {

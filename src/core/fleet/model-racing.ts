@@ -23,7 +23,9 @@ import {
   readFileSync,
 } from 'node:fs';
 import type { AshlrConfig, WorkItem, Proposal } from '../types.js';
-import { judgeProposal } from './manager.js';
+import { judgeProposal, type ManagerVerdict } from './manager.js';
+import { recordDecision } from './decisions-ledger.js';
+import { causalMetadataFromProposal } from '../learning/causal.js';
 import { runApiModelSandboxed } from '../run/sandboxed-engine.js';
 import { scrubSecrets } from '../util/scrub.js';
 
@@ -175,6 +177,52 @@ function buildMinimalJudgeClient(): { complete: (system: string, user: string) =
   };
 }
 
+/**
+ * A parse/network judge failure is a synthetic fallback, not a real
+ * judgment (see judgeProposal's fallback() in manager.ts) — judgeProposal
+ * never throws for it, it just returns a ManagerVerdict tagged
+ * `judgeFailure`. Without recording it explicitly, that failure is
+ * invisible to BOTH judge-trace (already skipped on failure) and the
+ * decisions ledger, so the dashboard's judgeFailures24h counter can't see
+ * it. Mirrors the exact recording convention used by
+ * fleet/automerge-pass.ts:224-246 and fleet/manager.ts's runManager loop.
+ *
+ * Only recorded when the caller supplied a REAL judge client via
+ * opts.judgeClient. The default client (buildMinimalJudgeClient, used when
+ * no client is passed) always returns '' and therefore always trips the
+ * parse-failure fallback — that is a deliberate "no judge configured"
+ * no-op (the same case manager.ts's own no-client path treats as
+ * 'no judge available', NOT as a judgeFailure), not a real infrastructure
+ * fault. Recording it unconditionally would make judgeFailures24h report a
+ * permanent 100% failure rate for every unconfigured race instead of
+ * reflecting genuine judge-call health.
+ */
+function recordRaceJudgeFailure(
+  proposal: Proposal,
+  verdict: ManagerVerdict,
+  judgeClient: { complete: (system: string, user: string) => Promise<string>; model?: string },
+  judgeClientIsReal: boolean,
+): void {
+  if (!judgeClientIsReal || !verdict.judgeFailure) return;
+  try {
+    const ts = new Date().toISOString();
+    recordDecision({
+      ts,
+      proposalId: proposal.id,
+      ...causalMetadataFromProposal(proposal, {
+        ts,
+        learningSource: 'decision-ledger',
+        labelBasis: 'judge-verdict',
+      }),
+      action: 'judged',
+      engine: judgeClient.model ?? 'unknown',
+      model: judgeClient.model ?? 'unknown',
+      verdict: verdict.verdict,
+      detail: verdict.judgeFailure === 'parse' ? 'judge-parse-failure' : 'judge-network-failure',
+    });
+  } catch { /* best-effort — never disrupts the race */ }
+}
+
 /** Persist one race record. Never throws. */
 function persistRace(record: RaceRecord): void {
   try {
@@ -231,6 +279,7 @@ export async function raceTask(
   const frontierEngine = resolveFrontierEngine(cfg);
   const sourceRepo = opts?.sourceRepo ?? item.repo ?? process.cwd();
   const judgeClient = opts?.judgeClient ?? buildMinimalJudgeClient();
+  const judgeClientIsReal = opts?.judgeClient !== undefined;
 
   // ----- Run local -----
   let localProposalId: string | undefined;
@@ -252,6 +301,7 @@ export async function raceTask(
         const proposal = stubProposal(localProposalId, localDiff, item.id, item.title);
         const verdict = await judgeProposal(proposal, cfg, judgeClient);
         localScore = scoreVerdict(verdict);
+        recordRaceJudgeFailure(proposal, verdict, judgeClient, judgeClientIsReal);
       } catch {
         localScore = 0;
       }
@@ -280,6 +330,7 @@ export async function raceTask(
         const proposal = stubProposal(frontierProposalId, frontierDiff, item.id, item.title);
         const verdict = await judgeProposal(proposal, cfg, judgeClient);
         frontierScore = scoreVerdict(verdict);
+        recordRaceJudgeFailure(proposal, verdict, judgeClient, judgeClientIsReal);
       } catch {
         frontierScore = 0;
       }
