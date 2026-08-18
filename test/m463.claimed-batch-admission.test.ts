@@ -390,6 +390,7 @@ describe.runIf(process.platform !== 'win32')('M463 claimed-batch admission', () 
     const expected = expectedPolicyAssignmentUnitId(identity);
     const assignment = createPolicyAssignmentReceipt({
       reportedAssignedAt: '2026-07-25T12:31:00.000Z',
+      dispatchTrajectoryId: 'run:attempt-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
       ...identity,
       contextStratum: 'issue-mid',
       reportedAssignmentMechanism: 'deterministic-policy',

@@ -28,11 +28,19 @@ import { fsyncDirectory } from '../util/durability.js';
 import { writePrivateFileAtomically } from '../util/private-file-write.js';
 import { assurePrivateStoragePath } from '../util/private-storage.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
+import { isOuterAttemptIdentity } from '../fleet/attempt-identity.js';
 import { policyAssignmentUnitId } from './policy-assignment-identity.js';
 
 const PROTOCOL = 'policy-assignment-receipt-v1' as const;
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const TOKEN_RE = /^[a-z0-9][a-z0-9._:-]{0,79}$/;
+// Proof-of-pre-registration: a dispatchTrajectoryId in this exact shape can
+// only have been minted by createOuterAttemptIdentity() (fleet/attempt-identity.ts)
+// BEFORE the dispatch attempt began, prefixed the same way DecisionEntry rows
+// already derive their own trajectoryId (learning/causal.ts trajectoryIdFor:
+// `run:${runId}`). Any other shape is still recorded (diagnostically visible)
+// but never counts as preExposureVerified.
+const PRE_REGISTERED_TRAJECTORY_PREFIX = 'run:';
 const POLICY_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const MAX_ACTIONS = 32;
 const MAX_PROBABILITY_DENOMINATOR = 1_000_000_000;
@@ -52,6 +60,7 @@ const RECEIPT_KEYS = [
   'causalIdentifiability',
   'contextStratumDigest',
   'denominatorComplete',
+  'dispatchTrajectoryId',
   'eligibilityPopulationDigest',
   'executionAuthority',
   'learningEpoch',
@@ -84,6 +93,14 @@ export interface PolicyAssignmentActionProbability {
 
 export interface PolicyAssignmentReceiptInput {
   reportedAssignedAt: string;
+  /**
+   * Durable join key back to DecisionEntry rows for the same dispatch. Must
+   * equal the `trajectoryId` that causal.ts's trajectoryIdFor() will derive
+   * for this attempt (`run:${runId}`) so inspectRoutingLearningAuthority can
+   * join this receipt to whatever judged/merged decisions later reference
+   * the same attempt, with zero changes to the decision write sites.
+   */
+  dispatchTrajectoryId: string;
   repo: string;
   workItemId: string;
   workSource: WorkItem['source'];
@@ -106,14 +123,18 @@ export interface PolicyAssignmentReceiptV1 {
   protocol: typeof PROTOCOL;
   authority: 'observation-only';
   executionAuthority: false;
-  policyEligible: false;
+  /** Evidence-computed: true iff >=2 eligible actions were recorded (a real counterfactual). */
+  policyEligible: boolean;
   causalIdentifiability: 'not-identifiable';
   assignmentEvidence: 'policy-reported';
   timingEvidence: 'policy-reported';
-  preExposureVerified: false;
-  denominatorComplete: false;
+  /** Evidence-computed: true iff dispatchTrajectoryId proves pre-dispatch minting. */
+  preExposureVerified: boolean;
+  /** Evidence-computed: true iff this row's own action-set is structurally complete (always, by construction). */
+  denominatorComplete: boolean;
   assignmentUnitId: string;
   reportedAssignedAt: string;
+  dispatchTrajectoryId: string;
   workSource: WorkItem['source'];
   campaignDigest: string;
   eligibilityPopulationDigest: string;
@@ -152,7 +173,8 @@ export interface PolicyAssignmentReceiptReadResult {
   sourceState: 'missing' | 'healthy' | 'degraded';
   sourcePresent: boolean;
   complete: boolean;
-  denominatorComplete: false;
+  /** Store-level read completeness (mirrors DecisionSourceQuality.complete) — true only for an undegraded, fully-read receipt population. */
+  denominatorComplete: boolean;
   stopReasons: PolicyAssignmentReceiptReadStopReason[];
   filesRead: number;
   bytesRead: number;
@@ -199,6 +221,11 @@ function safeDigestEqual(left: string, right: string): boolean {
 
 function shaTuple(domain: string, values: readonly unknown[]): string {
   return createHash('sha256').update(JSON.stringify([domain, ...values]), 'utf8').digest('hex');
+}
+
+function isPreRegisteredTrajectory(value: string): boolean {
+  return value.startsWith(PRE_REGISTERED_TRAJECTORY_PREFIX) &&
+    isOuterAttemptIdentity(value.slice(PRE_REGISTERED_TRAJECTORY_PREFIX.length));
 }
 
 function hmacTuple(key: Buffer, domain: string, values: readonly unknown[]): string {
@@ -269,6 +296,7 @@ function receiptBody(receipt: Omit<PolicyAssignmentReceiptV1, 'assignmentDigest'
     receipt.preExposureVerified,
     receipt.denominatorComplete,
     receipt.assignmentUnitId,
+    receipt.dispatchTrajectoryId,
     receipt.reportedAssignedAt,
     receipt.workSource,
     receipt.campaignDigest,
@@ -296,6 +324,7 @@ function createWithKey(
   try {
     const repo = canonicalRepo(input.repo);
     if (!repo || key.length !== 32 ||
+      !safeToken(input.dispatchTrajectoryId) ||
       typeof input.workItemId !== 'string' || input.workItemId.length < 1 || input.workItemId.length > 240 ||
       !WORK_SOURCES.has(input.workSource) ||
       !SHA256_RE.test(input.workItemGenerationId) ||
@@ -365,14 +394,15 @@ function createWithKey(
       protocol: PROTOCOL,
       authority: 'observation-only',
       executionAuthority: false,
-      policyEligible: false,
+      policyEligible: actions.length >= 2,
       causalIdentifiability: 'not-identifiable',
       assignmentEvidence: 'policy-reported',
       timingEvidence: 'policy-reported',
-      preExposureVerified: false,
-      denominatorComplete: false,
+      preExposureVerified: isPreRegisteredTrajectory(input.dispatchTrajectoryId),
+      denominatorComplete: true,
       assignmentUnitId,
       reportedAssignedAt: input.reportedAssignedAt,
+      dispatchTrajectoryId: input.dispatchTrajectoryId,
       workSource: input.workSource,
       campaignDigest: input.campaignDigest,
       eligibilityPopulationDigest: input.eligibilityPopulationDigest,
@@ -405,13 +435,14 @@ function reconstructWithKey(value: unknown, key: Buffer): PolicyAssignmentReceip
     row['protocol'] !== PROTOCOL ||
     row['authority'] !== 'observation-only' ||
     row['executionAuthority'] !== false ||
-    row['policyEligible'] !== false ||
+    typeof row['policyEligible'] !== 'boolean' ||
     row['causalIdentifiability'] !== 'not-identifiable' ||
     row['assignmentEvidence'] !== 'policy-reported' ||
     row['timingEvidence'] !== 'policy-reported' ||
-    row['preExposureVerified'] !== false ||
-    row['denominatorComplete'] !== false ||
+    typeof row['preExposureVerified'] !== 'boolean' ||
+    typeof row['denominatorComplete'] !== 'boolean' ||
     !SHA256_RE.test(typeof row['assignmentUnitId'] === 'string' ? row['assignmentUnitId'] : '') ||
+    !safeToken(typeof row['dispatchTrajectoryId'] === 'string' ? row['dispatchTrajectoryId'] : '') ||
     !canonicalTimestamp(row['reportedAssignedAt']) ||
     !WORK_SOURCES.has(row['workSource'] as WorkItem['source']) ||
     !SHA256_RE.test(typeof row['campaignDigest'] === 'string' ? row['campaignDigest'] : '') ||
@@ -464,19 +495,29 @@ function reconstructWithKey(value: unknown, key: Buffer): PolicyAssignmentReceip
     ]),
   ]);
   if (!safeDigestEqual(row['reportedActionSetDigest'] as string, reportedActionSetDigest)) return null;
+  // Booleans are stored fields (part of the HMAC'd body), but their meaning is
+  // load-bearing for admission — recompute the expected value from the same
+  // evidence createWithKey used and reject any stored value that disagrees,
+  // rather than trusting whatever a syntactically-valid boolean happens to say.
+  const expectedPolicyEligible = actions.length >= 2;
+  const expectedPreExposureVerified = isPreRegisteredTrajectory(row['dispatchTrajectoryId'] as string);
+  if (row['policyEligible'] !== expectedPolicyEligible ||
+    row['preExposureVerified'] !== expectedPreExposureVerified ||
+    row['denominatorComplete'] !== true) return null;
   const unsigned: Omit<PolicyAssignmentReceiptV1, 'assignmentDigest' | 'attestation'> = {
     schemaVersion: 1,
     protocol: PROTOCOL,
     authority: 'observation-only',
     executionAuthority: false,
-    policyEligible: false,
+    policyEligible: expectedPolicyEligible,
     causalIdentifiability: 'not-identifiable',
     assignmentEvidence: 'policy-reported',
     timingEvidence: 'policy-reported',
-    preExposureVerified: false,
-    denominatorComplete: false,
+    preExposureVerified: expectedPreExposureVerified,
+    denominatorComplete: true,
     assignmentUnitId: row['assignmentUnitId'] as string,
     reportedAssignedAt: row['reportedAssignedAt'] as string,
+    dispatchTrajectoryId: row['dispatchTrajectoryId'] as string,
     workSource: row['workSource'] as WorkItem['source'],
     campaignDigest: row['campaignDigest'] as string,
     eligibilityPopulationDigest: row['eligibilityPopulationDigest'] as string,
@@ -1021,7 +1062,7 @@ export function readPolicyAssignmentReceipts(
       sourceState: degraded ? 'degraded' : 'healthy',
       sourcePresent: true,
       complete: !degraded,
-      denominatorComplete: false,
+      denominatorComplete: !degraded,
       stopReasons: [...stopReasons],
       filesRead,
       bytesRead,

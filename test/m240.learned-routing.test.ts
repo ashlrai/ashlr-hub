@@ -138,6 +138,9 @@ function writeDecisions(
     workItemId?: string;
     workSource?: string;
     runId?: string;
+    trajectoryId?: string;
+    routerPolicyVersion?: string;
+    learningEpoch?: string;
     engine?: string;
     model?: string;
     verdict?: string;
@@ -167,6 +170,9 @@ function writeDecisions(
         ...(e.workItemId !== undefined ? { workItemId: e.workItemId } : {}),
         ...(e.workSource !== undefined ? { workSource: e.workSource } : {}),
         ...(e.runId !== undefined ? { runId: e.runId } : {}),
+        ...(e.trajectoryId !== undefined ? { trajectoryId: e.trajectoryId } : {}),
+        ...(e.routerPolicyVersion !== undefined ? { routerPolicyVersion: e.routerPolicyVersion } : {}),
+        ...(e.learningEpoch !== undefined ? { learningEpoch: e.learningEpoch } : {}),
         action: e.action,
         ...(e.engine !== undefined ? { engine: e.engine } : {}),
         ...(e.model !== undefined ? { model: e.model } : {}),
@@ -193,6 +199,8 @@ import {
   buildOperationalEngineScores,
   engineScoreFor,
   evaluateRoutingLearningAuthority,
+  inspectRoutingLearningAuthority,
+  operationalEngineScoresForRouting,
   recommendRoute,
   sortEnginesByScore,
   LEARNED_ROUTING_MIN_SAMPLES,
@@ -202,6 +210,11 @@ import {
 import { routeTask, type RoutingContext } from '../src/core/run/router.js';
 import { routeBackend } from '../src/core/fleet/router.js';
 import { listRunsDetailed, saveRun } from '../src/core/run/orchestrator.js';
+import { loadOrCreateKey } from '../src/core/foundry/provenance.js';
+import {
+  recordPolicyAssignmentReceipt,
+  type PolicyAssignmentReceiptInput,
+} from '../src/core/learning/policy-assignment-receipts.js';
 import type { AshlrConfig, RunState, WorkItem } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -433,7 +446,11 @@ describe('Operational Learning Firewall V1', () => {
     expect(projection.authority).toMatchObject({
       state: 'inactive',
       operationalSteering: false,
-      samples: { observed: LEARNED_ROUTING_MIN_SAMPLES + 2, eligible: 0 },
+      // No policy-assignment receipts were minted for this scenario (only raw
+      // decisions), so the real receipt-side join observes zero candidates —
+      // the decisions above remain diagnostically visible via `observational`
+      // above, never promoted into an operational sample.
+      samples: { observed: 0, eligible: 0 },
     });
     expect(projection.authority.blockerCodes).toContain('decision-authenticity-unavailable');
 
@@ -475,6 +492,253 @@ describe('Operational Learning Firewall V1', () => {
     const routed = await recommendRoute(item, cfg);
     expect(routed).toMatchObject({ backend: expected.backend, tier: expected.tier });
     expect(routed.reason).not.toContain('frontier success rate');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M-causal-routing: the real receipt<->decision join closes the loop.
+// ---------------------------------------------------------------------------
+
+describe('Operational Learning Firewall V1 — real causal join', () => {
+  const taskClass = 'issue';
+  const policyVersion = 'router-causal-v1';
+  const learningEpoch = '2026-08-02T00:00:00.000Z'.slice(0, 10);
+  let repoDir: string;
+
+  beforeEach(() => {
+    loadOrCreateKey();
+    repoDir = fs.mkdtempSync(path.join(tmpHome, 'repo-'));
+  });
+
+  function trajectoryFor(index: number): string {
+    const hex = index.toString(16).padStart(12, '0');
+    return `run:attempt-bbbbbbbb-bbbb-4bbb-8bbb-${hex}`;
+  }
+
+  /** Mint a real, HMAC-authenticated PolicyAssignmentReceiptV1 at "routing time". */
+  function mintReceipt(index: number, overrides: Partial<PolicyAssignmentReceiptInput> = {}): void {
+    const input: PolicyAssignmentReceiptInput = {
+      reportedAssignedAt: '2026-08-02T00:00:00.000Z',
+      dispatchTrajectoryId: trajectoryFor(index),
+      repo: repoDir,
+      workItemId: `issue-${index}`,
+      workSource: taskClass as WorkItem['source'],
+      workItemGenerationId: 'a'.repeat(64),
+      objectiveHash: 'b'.repeat(64),
+      campaignDigest: 'c'.repeat(64),
+      eligibilityPopulationDigest: 'd'.repeat(64),
+      contextStratum: `${taskClass}:frontier`,
+      policyVersion,
+      learningEpoch,
+      reportedAssignmentMechanism: 'deterministic-policy',
+      reportedProbabilityDenominator: 1,
+      reportedEligibleActions: [
+        { actionId: 'claude', actionDefinitionDigest: '1'.repeat(64), probabilityNumerator: 1 },
+        { actionId: 'codex', actionDefinitionDigest: '2'.repeat(64), probabilityNumerator: 0 },
+      ],
+      reportedSelectedActionId: 'claude',
+      ...overrides,
+    };
+    expect(recordPolicyAssignmentReceipt(input)).toBe('recorded');
+  }
+
+  // writeDecisions() overwrites the whole day-file on every call, so a loop of
+  // per-index decideFor() calls must accumulate entries and flush once (each
+  // call is NOT additive the way recordPolicyAssignmentReceipt's store is).
+  type DecisionFixtureEntry = Parameters<typeof writeDecisions>[0][number];
+  let pendingDecisions: DecisionFixtureEntry[] = [];
+  const provenanceOverrides: Array<{ proposalId: string; provenanceValid: boolean }> = [];
+
+  /**
+   * Queue an authenticated decision for one dispatch attempt. Defaults to a
+   * claude 'ship'+'merged' pair (matching the receipts minted above); pass
+   * engine/model/verdict to build a second, independently-scored producer
+   * (e.g. a reject-only codex cohort) without needing real post-merge-credit
+   * MAC minting — negative credit only requires signed producer provenance,
+   * exactly the bar decisionAuthenticated already applies for judged rows.
+   */
+  function decideFor(index: number, overrides: {
+    trajectoryId?: string;
+    provenanceValid?: boolean;
+    engine?: string;
+    model?: string;
+    verdict?: string;
+    includeMerged?: boolean;
+  } = {}): void {
+    const proposalId = `test-repo:${taskClass}:sha${index}`;
+    const trajectoryId = overrides.trajectoryId ?? trajectoryFor(index);
+    const engine = overrides.engine ?? 'claude';
+    const model = overrides.model ?? 'sonnet-5';
+    const verdict = overrides.verdict ?? 'ship';
+    const includeMerged = overrides.includeMerged ?? (verdict === 'ship' || verdict === 'applied' || verdict === 'approved');
+    pendingDecisions.push({
+      proposalId,
+      action: 'judged',
+      workItemId: `issue-${index}`,
+      workSource: taskClass,
+      trajectoryId,
+      routerPolicyVersion: policyVersion,
+      learningEpoch,
+      engine,
+      model,
+      verdict,
+      ts: '2026-08-02T00:05:00.000Z',
+    });
+    if (includeMerged) {
+      pendingDecisions.push({
+        proposalId,
+        action: 'merged',
+        workSource: taskClass,
+        trajectoryId,
+        routerPolicyVersion: policyVersion,
+        learningEpoch,
+        verdict: 'applied',
+        labelBasis: 'post-merge-credit-release-v1',
+        ts: '2026-08-02T00:05:00.000Z',
+      });
+    }
+    if (overrides.provenanceValid === false) {
+      provenanceOverrides.push({ proposalId, provenanceValid: false });
+    }
+  }
+
+  /** Flush every queued decideFor() call into one writeDecisions() write. */
+  function flushDecisions(): void {
+    writeDecisions(pendingDecisions);
+    pendingDecisions = [];
+    for (const { proposalId, provenanceValid } of provenanceOverrides) {
+      const producer = realized.producers.get(proposalId);
+      if (producer) realized.producers.set(proposalId, { ...producer, provenanceValid });
+    }
+    provenanceOverrides.length = 0;
+  }
+
+  const now = Date.parse('2026-08-02T01:00:00.000Z');
+
+  it('closes the loop: N authenticated same-cohort samples admit operational steering and recommendRoute nudges away from a poor-history frontier engine', async () => {
+    for (let index = 0; index < LEARNED_ROUTING_MIN_SAMPLES; index += 1) {
+      mintReceipt(index);
+      decideFor(index);
+    }
+    // A second, receipt-less producer with real (signed-provenance) reject
+    // credit — buildEngineScores() is independent of receipts, so this proves
+    // the observational scorer differentiates once operationalSteering is on,
+    // without needing to mint a genuine post-merge-credit MAC label.
+    // +2 (not the bare floor) so a fraction-of-an-hour recency decay never
+    // lands the weighted total a hair under LEARNED_ROUTING_MIN_SAMPLES.
+    for (let index = 100; index < 100 + LEARNED_ROUTING_MIN_SAMPLES + 2; index += 1) {
+      decideFor(index, { engine: 'codex', model: 'gpt-5.5', verdict: 'harmful' });
+    }
+    flushDecisions();
+
+    const authority = inspectRoutingLearningAuthority(taskClass, now);
+    expect(authority).toMatchObject({
+      state: 'eligible',
+      operationalSteering: true,
+      samples: { observed: LEARNED_ROUTING_MIN_SAMPLES, eligible: LEARNED_ROUTING_MIN_SAMPLES },
+      blockerCodes: [],
+    });
+
+    // operationalEngineScoresForRouting() itself defaults to the real wall
+    // clock (correct in production); buildOperationalEngineScores() accepts
+    // the same injectable `now` this test already fixed everything else to,
+    // so the 90-day buildEngineScores() window doesn't exclude synthetic
+    // fixture timestamps decided against a fixed test clock.
+    const projection = buildOperationalEngineScores(taskClass, now);
+    expect(projection.authority.operationalSteering).toBe(true);
+    expect(projection.operational.size).toBeGreaterThan(0);
+    expect(projection.operational.get('codex:gpt-5.5')?.score).toBeLessThan(0.5);
+
+    // recommendRoute's frontier-success-rate nudge is gated on
+    // routingLearningAuthority.operationalSteering — seed a poor frontier
+    // RunState history and confirm it now actually fires (it stays inert
+    // whenever operationalSteering is false; see "never lets degraded run
+    // history downgrade an operational route" above and the negative twins
+    // below).
+    for (let index = 0; index < 3; index += 1) {
+      saveRun({
+        id: `causal-join-poor-run-${index}`,
+        goal: 'issue investigation',
+        engine: 'claude',
+        provider: 'anthropic',
+        engineTier: 'frontier',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        budget: { maxTokens: 1_000, maxSteps: 10, allowCloud: true },
+        usage: { tokensIn: 1, tokensOut: 1, steps: 1, estCostUsd: 0.01 },
+        tasks: [],
+        steps: [],
+        status: 'failed',
+      } as RunState);
+    }
+    const item = makeItem(taskClass, 5, 5);
+    const cfg = makeCfg({ intelligence: { minFrontierSuccessRate: 0.9 } });
+    const routed = await recommendRoute(item, cfg);
+    expect(routed.tier).not.toBe('frontier');
+    expect(routed.reason).toContain('frontier success rate');
+  });
+
+  it('negative: below the per-stratum sample floor stays neutral', () => {
+    for (let index = 0; index < LEARNED_ROUTING_MIN_SAMPLES - 1; index += 1) {
+      mintReceipt(index);
+      decideFor(index);
+    }
+    flushDecisions();
+    const authority = inspectRoutingLearningAuthority(taskClass, now);
+    expect(authority.operationalSteering).toBe(false);
+    expect(authority.blockerCodes).toContain('sample-floor-unmet');
+    expect(operationalEngineScoresForRouting(taskClass).size).toBe(0);
+  });
+
+  it('negative: receipts with no corroborating provenance-signed decision stay neutral', () => {
+    for (let index = 0; index < LEARNED_ROUTING_MIN_SAMPLES; index += 1) {
+      mintReceipt(index);
+      decideFor(index, { provenanceValid: false });
+    }
+    flushDecisions();
+    const authority = inspectRoutingLearningAuthority(taskClass, now);
+    expect(authority.operationalSteering).toBe(false);
+    expect(authority.blockerCodes).toContain('decision-authenticity-unavailable');
+  });
+
+  it('negative: authenticated decisions with no minted receipt stay neutral (receipt-missing)', () => {
+    for (let index = 0; index < LEARNED_ROUTING_MIN_SAMPLES; index += 1) {
+      decideFor(index);
+    }
+    flushDecisions();
+    const authority = inspectRoutingLearningAuthority(taskClass, now);
+    expect(authority.operationalSteering).toBe(false);
+    expect(authority.samples).toMatchObject({ observed: 0, eligible: 0 });
+  });
+
+  it('negative: a degraded receipt store stays neutral even with an otherwise-admissible cohort', () => {
+    for (let index = 0; index < LEARNED_ROUTING_MIN_SAMPLES; index += 1) {
+      mintReceipt(index);
+      decideFor(index);
+    }
+    flushDecisions();
+    // Poison the receipt directory with an unrecognized entry — the same
+    // "degraded source integrity" trigger m460 pins for the receipt reader.
+    const receiptsDir = path.join(tmpHome, '.ashlr', 'fleet', 'policy-assignment-receipts');
+    fs.writeFileSync(path.join(receiptsDir, 'uncommitted.stage'), 'partial', { mode: 0o600 });
+
+    const authority = inspectRoutingLearningAuthority(taskClass, now);
+    expect(authority.operationalSteering).toBe(false);
+    expect(authority.sourceQuality.assignments.sourceState).toBe('degraded');
+  });
+
+  it('negative (deliberate falsification): a receipt minted under a different dispatch trajectory cannot borrow another attempt\'s authenticated decision', () => {
+    for (let index = 0; index < LEARNED_ROUTING_MIN_SAMPLES; index += 1) {
+      // Mint the receipt under a trajectory that will NEVER be decided —
+      // simulating a forged/mismatched join instead of the real one.
+      mintReceipt(index, { dispatchTrajectoryId: trajectoryFor(1_000 + index) });
+      decideFor(index);
+    }
+    flushDecisions();
+    const authority = inspectRoutingLearningAuthority(taskClass, now);
+    expect(authority.operationalSteering).toBe(false);
+    expect(authority.blockerCodes).toContain('policy-cohort-mismatch');
+    expect(operationalEngineScoresForRouting(taskClass).size).toBe(0);
   });
 });
 

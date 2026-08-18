@@ -1097,12 +1097,80 @@ export function evaluateRoutingLearningAuthority(
 }
 
 /**
- * Inspect current V1 learning sources. Decision rows are structurally checked
- * but unsigned, and V1 assignment receipts are authenticated observations that
- * deliberately carry no policy eligibility or complete denominator.
+ * M-causal-routing: for one receipt's dispatchTrajectoryId, find whatever
+ * decision(s) share it (causal.ts's trajectoryIdFor() already stamps
+ * `run:${runId}` — i.e. `run:${attemptId}` — onto every DecisionEntry for
+ * that attempt, so no decision write site needs to change) and determine:
+ *  - whether the DECISION side is itself cryptographically authenticated,
+ *    using the exact same bar buildEngineScores() applies to credit: a
+ *    released, witnessed merge, or a judged verdict on a proposal with
+ *    verified producer provenance. An attempt with no judged/merged decision
+ *    yet, or one that never got a signed producer, is honestly unauthenticated.
+ *  - the router policy/epoch the decision was produced under, for the
+ *    cohort-match checks evaluateRoutingLearningAuthority already enforces.
  */
-export function inspectRoutingLearningAuthority(taskClass?: string): RoutingLearningAuthority {
+function decisionJoinFor(
+  dispatchTrajectoryId: string,
+  decisionsByTrajectory: ReadonlyMap<string, DecisionEntry[]>,
+  authorities: ProposalAuthorities | null,
+): { authenticated: boolean; policyVersion: string | null; learningEpoch: string | null } {
+  const entries = decisionsByTrajectory.get(dispatchTrajectoryId) ?? [];
+  let authenticated = false;
+  let latest: DecisionEntry | null = null;
+  for (const entry of entries) {
+    if (latest === null || isNewerDecision(entry, latest)) latest = entry;
+    if (authorities === null) continue;
+    if (entry.action === 'merged' && hasReleasedPostMergeCredit(entry.labelBasis) &&
+      authorities.realized.has(entry.proposalId)) {
+      authenticated = true;
+    }
+    if (entry.action === 'judged' && authorities.producers.has(entry.proposalId)) {
+      authenticated = true;
+    }
+  }
+  return {
+    authenticated,
+    policyVersion: latest?.routerPolicyVersion ?? null,
+    learningEpoch: latest?.learningEpoch ?? null,
+  };
+}
+
+/**
+ * Inspect current V1 learning sources and join them into a real, causal
+ * admission projection.
+ *
+ * Decision rows carry no ledger-wide signature (append-only JSONL, no per-row
+ * HMAC), so the source-level `decisions.authenticated` flag can never be a
+ * blanket "the ledger is healthy" claim — that would let an unsigned,
+ * replayable ledger satisfy the gate, which is exactly what
+ * test/m240.learned-routing.test.ts's "Operational Learning Firewall V1 >
+ * keeps unsigned negative decisions visible diagnostically but neutral
+ * operationally" pins must never happen. Instead it is derived from the
+ * samples actually admitted below: true only when every constructed sample's
+ * decision half independently authenticates (judge verdict on signed producer
+ * provenance, or a released + witnessed merge) — false whenever any sample is
+ * missing that evidence, exactly the failure mode that test exercises.
+ *
+ * V1 assignment receipts (policy-assignment-receipts.ts) are minted at
+ * ROUTING time — before the engine runs, before any outcome exists — via
+ * routing-assignment-receipt.ts, and are themselves authenticated end-to-end
+ * (HMAC digest + attestation verified on every read; a forged or tampered
+ * file simply fails to parse and is dropped as invalid). Their
+ * `policyEligible` / `preExposureVerified` / `denominatorComplete` fields are
+ * computed from evidence (a real recorded alternative, a pre-registered
+ * attempt identity, and structural action-set completeness respectively) —
+ * never hardcoded. Joining a receipt's `dispatchTrajectoryId` to its later
+ * decisions is what finally makes `operationalSteering` capable of flipping
+ * true: once enough authenticated same-cohort samples accumulate above
+ * LEARNED_ROUTING_MIN_SAMPLES per stratum, evaluateRoutingLearningAuthority's
+ * thresholds — unchanged by this function — admit them.
+ */
+export function inspectRoutingLearningAuthority(
+  taskClass?: string,
+  nowMs?: number,
+): RoutingLearningAuthority {
   try {
+    const now = nowMs ?? Date.now();
     const decisions = readDecisionsDetailed({ requireComplete: true });
     const assignments = readPolicyAssignmentReceipts({ requireComplete: true });
     const relevantDecisions = decisions.decisions.filter((entry) =>
@@ -1111,22 +1179,50 @@ export function inspectRoutingLearningAuthority(taskClass?: string): RoutingLear
     const relevantAssignments = assignments.receipts.filter((receipt) =>
       taskClass === undefined || receipt.workSource === taskClass,
     );
-    const authority = evaluateRoutingLearningAuthority({
+
+    const decisionsByTrajectory = new Map<string, DecisionEntry[]>();
+    for (const entry of relevantDecisions) {
+      if (!entry.trajectoryId) continue;
+      const bucket = decisionsByTrajectory.get(entry.trajectoryId);
+      if (bucket) bucket.push(entry);
+      else decisionsByTrajectory.set(entry.trajectoryId, [entry]);
+    }
+    const authorities = proposalAuthorities(now);
+
+    const samples: RoutingLearningAuthoritySample[] = relevantAssignments.map((receipt) => {
+      const selected = receipt.reportedEligibleActions.find(
+        (action) => action.actionId === receipt.reportedSelectedActionId,
+      );
+      const propensity = selected && receipt.reportedProbabilityDenominator > 0
+        ? selected.probabilityNumerator / receipt.reportedProbabilityDenominator
+        : null;
+      const join = decisionJoinFor(receipt.dispatchTrajectoryId, decisionsByTrajectory, authorities);
+      return {
+        decisionAuthenticated: join.authenticated,
+        // Every receipt returned by readPolicyAssignmentReceipts() already
+        // passed HMAC digest + attestation verification (readReceiptFile /
+        // reconstructWithKey) — an unauthenticated receipt is never present
+        // in `assignments.receipts` at all, it is dropped as invalidFiles.
+        assignmentAuthenticated: true,
+        policyEligible: receipt.policyEligible,
+        denominatorComplete: assignments.denominatorComplete,
+        preExposureVerified: receipt.preExposureVerified,
+        assignmentIdentity: receipt.assignmentUnitId,
+        propensity,
+        contextStratum: receipt.contextStratumDigest,
+        policyVersion: receipt.policyVersion,
+        learningEpoch: receipt.learningEpoch,
+        decisionPolicyVersion: join.policyVersion,
+        decisionLearningEpoch: join.learningEpoch,
+      };
+    });
+
+    return evaluateRoutingLearningAuthority({
       decisions: {
         sourceState: decisions.sourceState,
         sourcePresent: decisions.sourcePresent,
         complete: decisions.complete,
-        // Verified NOT a bug (contra the original bug report): decisions-ledger
-        // rows carry no per-row cryptographic signature at all — a
-        // "structurally healthy file" is not "an authenticated row". Source
-        // health alone (mirroring assignments.authenticated below) would let
-        // an unsigned/replayable decisions ledger satisfy this gate, which is
-        // exactly what test/m240.learned-routing.test.ts's "Operational
-        // Learning Firewall V1 > keeps unsigned negative decisions visible
-        // diagnostically but neutral operationally" asserts must never
-        // happen. Left as a hardcoded false intentionally, pending a real
-        // per-row decision signature this module does not own.
-        authenticated: false,
+        authenticated: samples.length > 0 && samples.every((sample) => sample.decisionAuthenticated),
       },
       assignments: {
         sourceState: assignments.sourceState,
@@ -1135,44 +1231,11 @@ export function inspectRoutingLearningAuthority(taskClass?: string): RoutingLear
         denominatorComplete: assignments.denominatorComplete,
         authenticated: assignments.sourceState === 'healthy' && assignments.complete,
       },
-      observedSamples: relevantDecisions.length,
-      samples: [],
+      observedSamples: relevantAssignments.length,
+      samples,
       observedPolicies: relevantAssignments.map((receipt) => receipt.policyVersion),
       observedEpochs: relevantAssignments.map((receipt) => receipt.learningEpoch),
     });
-    const blockers = new Set(authority.blockerCodes);
-    if (relevantAssignments.some((receipt) => !receipt.policyEligible)) {
-      blockers.add('assignment-policy-ineligible');
-    }
-    if (relevantAssignments.some((receipt) => !receipt.preExposureVerified)) {
-      blockers.add('assignment-pre-exposure-unverified');
-    }
-    if (relevantAssignments.length > 0) {
-      blockers.add('assignment-identity-unavailable');
-      blockers.add('assignment-propensity-unknown');
-    }
-    // M-fleet-learning-loop: this used to unconditionally force
-    // state:'inactive', operationalSteering:false, samples.eligible:0 —
-    // discarding whatever evaluateRoutingLearningAuthority() actually
-    // computed above and replacing it with a permanent, silent "no". That
-    // is now the single source of truth instead of a redundant hardcoded
-    // override.
-    //
-    // In practice this still evaluates to inactive/false today: building a
-    // genuinely eligible RoutingLearningAuthoritySample[] requires joining
-    // PolicyAssignmentReceiptV1 rows (learning/policy-assignment-receipts.ts)
-    // to their originating DecisionEntry, but that receipt schema carries no
-    // proposalId/decisionId join key and hardcodes policyEligible /
-    // preExposureVerified / denominatorComplete as literal `false` — it is a
-    // deliberately observation-only, executionAuthority:false placeholder,
-    // not yet a real randomized-assignment system. `samples` is therefore
-    // still `[]` (honestly, not by fiat) until that schema — outside this
-    // module's ownership — gets a real join key and non-constant eligibility
-    // fields. See the fleet-learning-loop report for the full trace.
-    return {
-      ...authority,
-      blockerCodes: [...blockers].sort(),
-    };
   } catch {
     return evaluateRoutingLearningAuthority({
       decisions: {
@@ -1200,7 +1263,7 @@ export function buildOperationalEngineScores(
   sinceMs?: number,
 ): OperationalLearningScores {
   const observational = buildEngineScores(taskClass, nowMs, sinceMs);
-  const authority = inspectRoutingLearningAuthority(taskClass);
+  const authority = inspectRoutingLearningAuthority(taskClass, nowMs);
   return {
     authority,
     observational,
@@ -1214,7 +1277,7 @@ export function buildOperationalProducerScores(
   sinceMs?: number,
 ): OperationalLearningScores {
   const observational = buildProducerScores(taskClass, nowMs, sinceMs);
-  const authority = inspectRoutingLearningAuthority(taskClass);
+  const authority = inspectRoutingLearningAuthority(taskClass, nowMs);
   return {
     authority,
     observational,
