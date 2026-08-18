@@ -156,6 +156,15 @@ jobs:
         # This is the canonical CI invocation documented in CONTRIBUTING.md.
         run: npm run test:ci -- ${{ matrix.test_args }}
 
+      - name: Test Windows launcher authority (M503, hermetic)
+        if: ${{ !cancelled() && matrix.os == 'windows-latest' && startsWith(matrix.label, 'windows, portability') }}
+        # M503 mocks graphical spawn and runs one bounded, noninteractive
+        # selected-shape parser acceptance. Run even if the main shard failed so
+        # every required Windows portability check records the same four
+        # assertions. Non-Windows jobs have no launcher authority. Manual GUI
+        # acceptance remains a separate promotion gate.
+        run: npm run test:ci -- test/m503.windows-open-launcher.test.ts
+
       - name: Test native ACL enrollment fences (hermetic)
         if: matrix.label == 'windows, portability overflow'
         # These files intentionally launch native Windows PowerShell ACL probes.

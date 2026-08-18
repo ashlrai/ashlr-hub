@@ -24,7 +24,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync, unlinkSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve, isAbsolute } from 'node:path';
+import { join, resolve, isAbsolute, relative, sep, win32 } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { ApplyResult, McpRegistry } from '../types.js';
 import { loadProposal, setStatus } from './store.js';
@@ -53,6 +53,26 @@ const PROPOSAL_BRANCH_PREFIX = 'ashlr/proposal/';
 
 /** Timeout for git operations (ms). */
 const GIT_TIMEOUT = 30_000;
+
+/** Native, boundary-aware containment for already-canonical absolute paths. */
+export function canonicalPathWithin(
+  root: string,
+  target: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  const onWindows = platform === 'win32';
+  const canonicalRoot = onWindows ? win32.normalize(root).toLowerCase() : root;
+  const canonicalTarget = onWindows ? win32.normalize(target).toLowerCase() : target;
+  const pathRelative = onWindows ? win32.relative : relative;
+  const pathIsAbsolute = onWindows ? win32.isAbsolute : isAbsolute;
+  const pathSeparator = onWindows ? win32.sep : sep;
+  const rel = pathRelative(canonicalRoot, canonicalTarget);
+  return rel === '' || (
+    rel !== '..' &&
+    !rel.startsWith(`..${pathSeparator}`) &&
+    !pathIsAbsolute(rel)
+  );
+}
 
 // ---------------------------------------------------------------------------
 // git helper — arg arrays, no shell
@@ -564,7 +584,7 @@ export async function applyProposal(
         const enrolled = listEnrolled();
         const withinEnrolled = enrolled.some((r) => {
           const realRepo = (() => { try { return realpathSync(r); } catch { return resolve(r); } })();
-          return realTarget === realRepo || realTarget.startsWith(realRepo + '/');
+          return canonicalPathWithin(realRepo, realTarget);
         });
         if (!withinEnrolled) {
           result = {
@@ -574,18 +594,27 @@ export async function applyProposal(
           break;
         }
 
-        // Execute the UI action (fire-and-forget; open.ts never throws).
+        // Dispatch the UI action and require an observed child spawn event;
+        // this never claims that the graphical handler ultimately opened.
         try {
+          let dispatched: boolean;
           if (desktopAction.type === 'open-editor') {
             // openInEditor needs a cfg object; load a minimal one.
             // We import loadConfig lazily to avoid coupling the apply path to
             // config.ts module-load-time HOME capture in tests.
             const { loadConfig } = await import('../config.js');
-            openInEditor(target, loadConfig());
+            dispatched = await openInEditor(target, loadConfig());
           } else if (desktopAction.type === 'open-finder') {
-            openInFinder(target);
+            dispatched = await openInFinder(target);
           } else {
-            openInTerminal(target);
+            dispatched = await openInTerminal(target);
+          }
+          if (!dispatched) {
+            result = {
+              ok: false,
+              detail: `desktop-action '${desktopAction.type}' refused: no safe launcher or canonical target is available`,
+            };
+            break;
           }
           result = { ok: true, detail: `desktop-action '${desktopAction.type}' dispatched for: ${target}` };
         } catch (err) {

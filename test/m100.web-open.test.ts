@@ -93,8 +93,10 @@ beforeEach(() => {
   prevUserProfile = process.env.USERPROFILE;
   process.env.HOME = tmpHome;
   process.env.USERPROFILE = tmpHome;
-  vi.mocked(openMod.openInEditor).mockClear();
-  vi.mocked(openMod.openInFinder).mockClear();
+  vi.mocked(openMod.openInEditor).mockReset();
+  vi.mocked(openMod.openInFinder).mockReset();
+  vi.mocked(openMod.openInEditor).mockResolvedValue(true);
+  vi.mocked(openMod.openInFinder).mockResolvedValue(true);
 });
 
 afterEach(() => {
@@ -301,6 +303,19 @@ describe('POST /api/open — happy paths', () => {
     expect(vi.mocked(openMod.openInFinder)).toHaveBeenCalledOnce();
     expect(vi.mocked(openMod.openInFinder)).toHaveBeenCalledWith(resolve('/enrolled/repo-b'));
     expect(vi.mocked(openMod.openInEditor)).not.toHaveBeenCalled();
+  });
+
+  it('returns 503 instead of claiming success when the launcher refuses', async () => {
+    vi.mocked(openMod.openInEditor).mockResolvedValueOnce(false);
+    const { req, res, captured } = makeFakeReqRes({
+      body: JSON.stringify({ repo: '/enrolled/repo-a', action: 'editor' }),
+    });
+
+    await handleApi(req, res, baseConfig(), ctx);
+
+    expect(captured.statusCode).toBe(503);
+    expect(parsedBody(captured)).toEqual({ error: 'desktop launcher unavailable' });
+    expect(vi.mocked(openMod.openInEditor)).toHaveBeenCalledOnce();
   });
 
   it('opens a file within the repo root when file param is provided', async () => {
