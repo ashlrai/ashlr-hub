@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildJournalEntries, filterJournalEntries, bucketByHour, type JournalEntry } from './journal-model.js';
+import { buildJournalEntries, filterJournalEntries, bucketByHour, startOfTodayMs, type JournalEntry } from './journal-model.js';
 
 describe('buildJournalEntries', () => {
   it('merges every source into one chronologically-sorted feed (newest first)', () => {
@@ -35,6 +35,17 @@ describe('buildJournalEntries', () => {
     expect(entries.find((e) => e.source === 'merge')?.drillIn).toEqual({ proposalId: 'p1' });
     expect(entries.find((e) => e.source === 'run')?.drillIn).toEqual({ runId: 'run1' });
   });
+
+  it('wires recentActionsSource through to agent-action rows, same as merge/daemon-tick rows, so a degraded read renders unknown instead of silently healthy', () => {
+    const degraded = { sourceState: 'degraded' as const, complete: false, reason: 'partial-read' };
+    const entries = buildJournalEntries({
+      fleetActivity: {
+        recentActions: [{ ts: new Date().toISOString(), actor: 'daemon', kind: 'merge', outcome: 'success', action: 'merge', summary: 's' }],
+        recentActionsSource: degraded,
+      } as never,
+    });
+    expect(entries.find((e) => e.source === 'agent-action')?.sourceQuality).toEqual(degraded);
+  });
 });
 
 describe('filterJournalEntries', () => {
@@ -57,6 +68,19 @@ describe('filterJournalEntries', () => {
   it('filters by time window', () => {
     const out = filterJournalEntries(base, { sources: new Set(['run', 'merge']), query: '', windowMs: 60 * 60 * 1000 });
     expect(out.map((e) => e.id)).toEqual(['1']);
+  });
+});
+
+describe('startOfTodayMs', () => {
+  it('returns ms since local midnight for a given instant', () => {
+    const now = new Date(2026, 0, 15, 9, 30, 0); // Jan 15 2026, 09:30:00 local
+    const expected = 9 * 60 * 60 * 1000 + 30 * 60 * 1000;
+    expect(startOfTodayMs(now)).toBe(expected);
+  });
+
+  it('returns 0 at exact local midnight', () => {
+    const midnight = new Date(2026, 0, 15, 0, 0, 0, 0);
+    expect(startOfTodayMs(midnight)).toBe(0);
   });
 });
 

@@ -23,7 +23,7 @@ export function LiveNowStrip() {
   return (
     <div className={styles.strip}>
       <span className={styles.label}>Live now</span>
-      <ul className={styles.list}>
+      <ul className={styles.list} aria-live="polite" aria-label="Currently running">
         {runningRuns.map((run) => (
           <li key={run.id}>
             <button type="button" className={styles.watchBtn} onClick={() => setWatchingRunId(run.id)}>

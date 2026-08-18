@@ -3,47 +3,14 @@
  * mutation-hold indicator (shows whether actions are unlocked right now,
  * and lets the operator lock early rather than waiting for idle timeout).
  */
-import { useEffect, useState } from 'react';
-import { useMutationHold } from '../../data/hooks.js';
+import { useMutationHold, useTheme } from '../../data/hooks.js';
 import { NotificationBell } from '../notifications/NotificationBell.js';
 import { NotificationCenter } from '../notifications/NotificationCenter.js';
 import styles from './Topbar.module.css';
 
-type ThemePreference = 'system' | 'light' | 'dark';
-const THEME_STORAGE_KEY = 'ashlr.theme.v1';
-
-function applyTheme(pref: ThemePreference) {
-  const root = document.documentElement;
-  if (pref === 'system') root.removeAttribute('data-theme');
-  else root.setAttribute('data-theme', pref);
-}
-
-function loadTheme(): ThemePreference {
-  try {
-    const v = localStorage.getItem(THEME_STORAGE_KEY);
-    if (v === 'light' || v === 'dark' || v === 'system') return v;
-  } catch {
-    /* ignore */
-  }
-  return 'system';
-}
-
 export function Topbar({ onOpenPalette }: { onOpenPalette: () => void }) {
-  const [theme, setTheme] = useState<ThemePreference>(loadTheme);
+  const { theme, cycle: cycleTheme } = useTheme();
   const mutation = useMutationHold();
-
-  useEffect(() => {
-    applyTheme(theme);
-    try {
-      localStorage.setItem(THEME_STORAGE_KEY, theme);
-    } catch {
-      /* best-effort */
-    }
-  }, [theme]);
-
-  function cycleTheme() {
-    setTheme((t) => (t === 'system' ? 'light' : t === 'light' ? 'dark' : 'system'));
-  }
 
   return (
     <header className={styles.topbar}>

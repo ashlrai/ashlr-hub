@@ -1,8 +1,10 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { InboxView } from './InboxView.js';
 import { evictAll } from '../../data/cache.js';
+import { clearMutationToken } from '../../data/auth-store.js';
 
 const REJECTED_PROPOSAL = {
   id: 'p_rejected',
@@ -19,6 +21,16 @@ const REJECTED_PROPOSAL = {
 const PENDING_PROPOSAL = {
   id: 'p_pending',
   title: 'Add retry to fetch wrapper',
+  kind: 'patch',
+  repo: '/repos/ashlr-hub',
+  origin: 'swarm',
+  status: 'pending',
+  createdAt: new Date().toISOString(),
+};
+
+const PENDING_PROPOSAL_2 = {
+  id: 'p_pending2',
+  title: 'Bump lockfile',
   kind: 'patch',
   repo: '/repos/ashlr-hub',
   origin: 'swarm',
@@ -60,6 +72,7 @@ describe('InboxView', () => {
   });
   afterEach(() => {
     vi.unstubAllGlobals();
+    clearMutationToken();
   });
 
   it('renders the proposal list with title, repo, kind, age, and status', async () => {
@@ -123,5 +136,79 @@ describe('InboxView', () => {
     renderAt('/inbox/p_rejected');
     await waitFor(() => expect(screen.getByText(/Judge parse failure/)).toBeInTheDocument());
     expect(screen.queryByText('Review')).not.toBeInTheDocument();
+  });
+
+  // Pins keyboard operability end to end for the inbox: ArrowDown moves the
+  // list's roving-tabindex focus, Enter opens the focused proposal's detail
+  // pane, and Approve is reachable purely by keyboard (Tab/focus + Enter)
+  // through the token dialog and the confirm dialog to the real mutation
+  // call — never bypassing either gate. Falsified by removing the
+  // `else if (e.key === 'Enter')` branch from ProposalList.tsx's
+  // onListKeyDown: the test failed because focus moved to the second row
+  // but Enter never navigated to its detail pane, confirming this exercises
+  // real keyboard navigation rather than always landing on the routed id by
+  // coincidence.
+  it('keyboard: list Arrow+Enter opens a proposal, and Approve reaches the mutation via Tab/Enter through token + confirm dialogs', async () => {
+    const user = userEvent.setup();
+    const approveCalls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const method = init?.method ?? 'GET';
+        if (method === 'POST' && url.includes('/approve')) {
+          approveCalls.push(url);
+          return new Response('{}', { status: 200 });
+        }
+        if (url.startsWith('/api/inbox/')) {
+          const id = decodeURIComponent(url.replace('/api/inbox/', '').split('?')[0]!);
+          const base = id === PENDING_PROPOSAL_2.id ? PENDING_PROPOSAL_2 : PENDING_PROPOSAL;
+          return new Response(
+            JSON.stringify({
+              ...base,
+              diff: '--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n',
+              decisionEvidence: { sourceQuality: { sourceState: 'healthy', complete: true }, decisions: [] },
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.startsWith('/api/inbox')) {
+          return new Response(JSON.stringify(listResponse([PENDING_PROPOSAL, PENDING_PROPOSAL_2])), { status: 200 });
+        }
+        return new Response('not found', { status: 404 });
+      }),
+    );
+
+    renderAt('/inbox');
+    await waitFor(() => expect(screen.getByText('Add retry to fetch wrapper')).toBeInTheDocument());
+    expect(screen.getByText('Bump lockfile')).toBeInTheDocument();
+
+    const rowA = screen.getByText('Add retry to fetch wrapper').closest('tr')!;
+    expect(rowA).toHaveAttribute('tabindex', '0');
+    rowA.focus();
+    fireEvent.keyDown(rowA, { key: 'ArrowDown' });
+
+    const rowB = screen.getByText('Bump lockfile').closest('tr')!;
+    await waitFor(() => expect(rowB).toHaveFocus());
+
+    fireEvent.keyDown(rowB, { key: 'Enter' });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument());
+
+    const approveBtn = screen.getByRole('button', { name: 'Approve' });
+    approveBtn.focus();
+    await user.keyboard('{Enter}');
+
+    const tokenInput = await screen.findByLabelText('Mutation token');
+    await user.type(tokenInput, 'a'.repeat(64));
+    const unlockBtn = screen.getByRole('button', { name: 'Unlock' });
+    unlockBtn.focus();
+    await user.keyboard('{Enter}');
+
+    const confirmBtn = await screen.findByRole('button', { name: 'Approve and apply' });
+    await waitFor(() => expect(confirmBtn).toHaveFocus());
+    await user.keyboard('{Enter}');
+
+    await waitFor(() => expect(approveCalls.length).toBe(1));
+    expect(approveCalls[0]).toContain(`/api/inbox/${PENDING_PROPOSAL_2.id}/approve`);
   });
 });

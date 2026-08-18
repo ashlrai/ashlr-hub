@@ -5,6 +5,7 @@
  * and swappable.
  */
 import type { JournalSource } from './journal-model.js';
+import { startOfTodayMs } from './journal-model.js';
 import styles from './JournalFilters.module.css';
 
 const SOURCE_OPTIONS: { value: JournalSource; label: string }[] = [
@@ -15,8 +16,13 @@ const SOURCE_OPTIONS: { value: JournalSource; label: string }[] = [
   { value: 'daemon-tick', label: 'Daemon ticks' },
 ];
 
-const WINDOW_OPTIONS: { value: string; label: string; ms: number | null }[] = [
+// 'today' is dynamic (since local midnight, not a fixed rolling window) so
+// it carries `dynamic: true` instead of a fixed `ms` — the select handler
+// below recomputes it at selection time via startOfTodayMs(). Same value the
+// command palette's "Open journal — today" action seeds JournalView with.
+const WINDOW_OPTIONS: { value: string; label: string; ms: number | null; dynamic?: boolean }[] = [
   { value: '1h', label: 'Last hour', ms: 60 * 60 * 1000 },
+  { value: 'today', label: 'Today', ms: null, dynamic: true },
   { value: '24h', label: 'Last 24h', ms: 24 * 60 * 60 * 1000 },
   { value: '7d', label: 'Last 7 days', ms: 7 * 24 * 60 * 60 * 1000 },
   { value: 'all', label: 'All available', ms: null },
@@ -62,7 +68,7 @@ export function JournalFilters({ sources, onSourcesChange, query, onQueryChange,
         value={windowValue}
         onChange={(e) => {
           const opt = WINDOW_OPTIONS.find((o) => o.value === e.target.value);
-          onWindowChange(e.target.value, opt?.ms ?? null);
+          onWindowChange(e.target.value, opt?.dynamic ? startOfTodayMs() : (opt?.ms ?? null));
         }}
         aria-label="Time window"
       >

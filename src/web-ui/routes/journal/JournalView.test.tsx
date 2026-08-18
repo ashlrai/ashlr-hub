@@ -1,7 +1,16 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import { JournalView } from './JournalView.js';
 import { evictAll } from '../../data/cache.js';
+
+function renderJournal() {
+  return render(
+    <MemoryRouter>
+      <JournalView />
+    </MemoryRouter>,
+  );
+}
 
 const now = new Date().toISOString();
 
@@ -44,7 +53,7 @@ describe('JournalView', () => {
   });
 
   it('merges daemon log, fleet activity, and run history into one filterable feed', async () => {
-    render(<JournalView />);
+    renderJournal();
 
     await waitFor(() => expect(screen.getByText('ship the feature')).toBeInTheDocument());
     expect(screen.getByText('Did the thing autonomously')).toBeInTheDocument();
@@ -52,7 +61,7 @@ describe('JournalView', () => {
   });
 
   it('filters entries by source via the checkbox group', async () => {
-    render(<JournalView />);
+    renderJournal();
     await waitFor(() => expect(screen.getByText('ship the feature')).toBeInTheDocument());
 
     fireEvent.click(screen.getByLabelText('Runs'));
@@ -62,7 +71,7 @@ describe('JournalView', () => {
   });
 
   it('filters entries by search text', async () => {
-    render(<JournalView />);
+    renderJournal();
     await waitFor(() => expect(screen.getByText('ship the feature')).toBeInTheDocument());
 
     fireEvent.change(screen.getByLabelText('Search the work journal'), { target: { value: 'nonexistent-xyz' } });
@@ -71,7 +80,7 @@ describe('JournalView', () => {
   });
 
   it('expanding a run row lazily loads its drill-in detail', async () => {
-    render(<JournalView />);
+    renderJournal();
     await waitFor(() => expect(screen.getByText('ship the feature')).toBeInTheDocument());
 
     fireEvent.click(screen.getByText('ship the feature'));

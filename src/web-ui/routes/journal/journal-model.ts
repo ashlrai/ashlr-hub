@@ -118,6 +118,13 @@ export function buildJournalEntries(input: JournalBuildInputs): JournalEntry[] {
       detail: action.summary,
       repo: action.repo,
       statusLabel: action.outcome,
+      // Every sibling block above wires its matching sourceQuality field
+      // through (recentMergesSourceQuality, recentTicksSourceQuality below) so
+      // a degraded read renders as genuinely unknown, not silently as healthy.
+      // This block previously omitted it even though the backend already
+      // populates recentActionsSource — fixed so agent-action rows don't
+      // conflate "empty" with "couldn't look" next to rows that don't.
+      sourceQuality: input.fleetActivity?.recentActionsSource,
       drillIn: action.proposalId ? { proposalId: action.proposalId } : action.runId ? { runId: action.runId } : undefined,
     });
   }
@@ -155,6 +162,16 @@ export interface JournalFilterState {
   sources: Set<JournalSource>;
   query: string;
   windowMs: number | null; // null = all available
+}
+
+/** Milliseconds since local midnight — used for the "today" quick-filter
+ * (JournalFilters.tsx) and for the command palette's "open journal, filtered
+ * to today" action, which needs the same number before the view even
+ * mounts. A pure function (no Date.now() smuggled in as a default) so both
+ * call sites and tests get the identical value for a given `now`. */
+export function startOfTodayMs(now: Date = new Date()): number {
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return now.getTime() - start.getTime();
 }
 
 export function filterJournalEntries(entries: JournalEntry[], filter: JournalFilterState): JournalEntry[] {
