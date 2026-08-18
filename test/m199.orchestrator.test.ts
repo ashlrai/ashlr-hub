@@ -513,10 +513,13 @@ describe('M199 foldBrowserVerify — pure fold helper', () => {
 // ---------------------------------------------------------------------------
 
 describe('M199 TITRR_MAX_ATTEMPTS constant', () => {
-  it('is exported, is a positive number, equals 2', () => {
+  it('is exported, is a positive number, equals 4', () => {
     expect(typeof TITRR_MAX_ATTEMPTS).toBe('number');
     expect(TITRR_MAX_ATTEMPTS).toBeGreaterThan(0);
-    expect(TITRR_MAX_ATTEMPTS).toBe(2);
+    // Raised 2 -> 4 alongside the fix that stopped force-filing unverifiable
+    // [partial] proposals on TITRR exhaustion (see m78.titrr.test.ts). Two
+    // attempts meant "1 initial + 1 repair" — barely a refine loop at all.
+    expect(TITRR_MAX_ATTEMPTS).toBe(4);
   });
 });
 

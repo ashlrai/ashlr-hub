@@ -336,12 +336,23 @@ describe('M242 — intelligence panel in buildSnapshot', () => {
       },
     } as never);
     const decisionsLedger = await import('../src/core/fleet/decisions-ledger.js');
-    vi.mocked(decisionsLedger.readDecisionsDetailed).mockReturnValueOnce({
+    // Two Onces, one per dashboard read: buildSnapshot now reads the decisions
+    // ledger twice (judgeFailures24h at dashboard.ts:534, then the intelligence
+    // read at :660). A single Once let the first consumer swallow the
+    // degradation and handed the intelligence panel a healthy default — the
+    // exact failure-indistinguishable-from-decision bug this suite exists to
+    // catch. A genuinely degraded ledger is degraded for every reader. (Not a
+    // sticky mockReturnValue: that survives clearAllMocks and leaks into the
+    // sibling tests that rely on the module factory default.)
+    const degradedDecisionsRead = {
       decisions: [],
       sourceState: 'degraded', sourcePresent: true, complete: false,
       stopReasons: ['io-error'], filesRead: 1, bytesRead: 64, rowsScanned: 0,
       invalidRows: 1, unreadableFiles: 0,
-    });
+    } as never;
+    vi.mocked(decisionsLedger.readDecisionsDetailed)
+      .mockReturnValueOnce(degradedDecisionsRead)
+      .mockReturnValueOnce(degradedDecisionsRead);
 
     const payload = JSON.parse(JSON.stringify(await snapshotWithIntelligence())) as {
       intelligence: {
