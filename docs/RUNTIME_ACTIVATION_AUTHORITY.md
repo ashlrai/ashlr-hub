@@ -211,6 +211,25 @@ Until those properties have implementation and adversarial evidence, this
 stopped selection must not be described as resident activation or production
 activation completion.
 
+## Dormant resident-start permit and exact-release ACK protocol
+
+[`CONTRACT-M521`](./contracts/CONTRACT-M521.md) defines the separately scoped,
+dynamic release-bound resident-start permit and canonical pre-dispatch ACK
+frame. The ACK repeats the exact admitted release/configuration identity and
+binds native-broker PID, process-start, audit-token, executable-vnode,
+code-identity, launchd-generation, and challenge observations. It is evidence,
+not authority: it cannot authenticate its own transport or source.
+
+M521 has no CLI or effect consumer. Its compiled resident-start trust roots are
+a frozen empty array, and its frozen production adapter always refuses with
+`native-hostile-process-cas-unavailable`. It does not inspect HOME, call
+launchd, spawn a process, start/install/enable a service, change `current`,
+accept an ACK, unblock dispatch, or contact a provider. A protected native
+broker with trusted monotonic replay/time, genuine old-inode conditional CAS,
+authenticated peer-bound ACK transport, lifecycle recovery, exact stopped
+rollback, and separate dispatch authorization remains the next reviewed
+boundary.
+
 The machine-readable preflight exposes these absent properties under
 `nativeAuthority`. Only the separately scoped activation signing root can be
 true after trust-root validation; every mutation/runtime authority field remains
