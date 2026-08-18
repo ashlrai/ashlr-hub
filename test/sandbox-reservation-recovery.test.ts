@@ -66,6 +66,9 @@ afterEach(() => {
 });
 
 describe('sandbox reservation recovery', () => {
+  // Native Git worktree and ACL inspection is deliberately real in these
+  // cases and can exceed 15 seconds on a loaded Windows runner. These budgets
+  // change only the test harness; production recovery deadlines stay intact.
   it('reclaims an aged crash-at-reservation home during the authority-held cap pre-sweep', () => {
     const repo = fx.makeRepo();
     repo.enroll();
@@ -84,7 +87,7 @@ describe('sandbox reservation recovery', () => {
     } finally {
       expect(removeSandbox(sandbox).status).toBe('complete');
     }
-  }, 15_000);
+  }, 45_000);
 
   it('reclaims canonical partial metadata that never reached a Git effect', () => {
     const id = 'partial-reservation';
@@ -172,7 +175,7 @@ describe('sandbox reservation recovery', () => {
       writeFileSync(metadataPath, canonicalMetadata, 'utf8');
       expect(removeSandbox(sandbox).status).toBe('complete');
     }
-  }, 15_000);
+  }, 45_000);
 
   it('bounds reservation cleanup to sixteen homes per sweep', () => {
     const ids = Array.from({ length: 17 }, (_, index) => `bounded-${String(index).padStart(2, '0')}`);
@@ -186,5 +189,5 @@ describe('sandbox reservation recovery', () => {
     const second = sweepOrphanSandboxesDetailed();
     expect(second.completed).toHaveLength(1);
     expect(sandboxInventory()).toMatchObject({ totalHomes: 0, malformedHomes: 0 });
-  }, 15_000);
+  }, 45_000);
 });
