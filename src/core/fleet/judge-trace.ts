@@ -32,10 +32,8 @@ import {
 import { scrubSecrets } from '../util/scrub.js';
 import type { Proposal } from '../types.js';
 import { authenticatedRealizedMergeOf } from '../inbox/realized-merge.js';
-import {
-  POST_MERGE_CREDIT_RELEASE_LABEL,
-  hasReleasedPostMergeCredit,
-} from './post-merge-credit.js';
+import { hasReleasedPostMergeCredit } from './post-merge-credit.js';
+import { POST_MERGE_CREDIT_RELEASE_LABEL } from './post-merge-credit-label.js';
 
 // ---------------------------------------------------------------------------
 // Types

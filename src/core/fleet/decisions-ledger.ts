@@ -33,7 +33,7 @@ import {
   sanitizeAgentSemanticEvents,
 } from '../learning/agent-semantic-events.js';
 import { scrubSecrets } from '../util/scrub.js';
-import { POST_MERGE_CREDIT_RELEASE_LABEL } from './post-merge-credit.js';
+import { POST_MERGE_CREDIT_RELEASE_LABEL } from './post-merge-credit-label.js';
 import {
   isJudgeDecisionReasonCode,
   isJudgeDecisionVerdict,

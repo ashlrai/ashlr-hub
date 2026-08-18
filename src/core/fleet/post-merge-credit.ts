@@ -44,24 +44,24 @@ import type { Proposal, SkillCard } from '../types.js';
 import { readDecisions, recordDecision } from './decisions-ledger.js';
 import { postMergeObservationEventId, readPostMergeObservations } from './post-merge-observations.js';
 import { skillCardContentHash } from './skill-attestation.js';
+import { POST_MERGE_CREDIT_RELEASE_LABEL } from './post-merge-credit-label.js';
+
+export {
+  POST_MERGE_CREDIT_RELEASE_LABEL,
+  isPostMergeCreditReleaseLabel,
+} from './post-merge-credit-label.js';
 
 // ---------------------------------------------------------------------------
 // Structural constants
 // ---------------------------------------------------------------------------
 
 export const POST_MERGE_CREDIT_POLICY_VERSION = 'post-merge-credit-v1' as const;
-export const POST_MERGE_CREDIT_RELEASE_LABEL = 'post-merge-credit-release-v1' as const;
 /**
  * Operational release remains disabled until a positive, complete stability
  * witness exists. The current adverse-only ledger supports reporting, not
  * authority to steer routing or promote reusable skills.
  */
 const POST_MERGE_CREDIT_OPERATIONAL_RELEASE = false as const;
-
-/** Structural recognition only; this string is not release authority. */
-export function isPostMergeCreditReleaseLabel(labelBasis: unknown): boolean {
-  return labelBasis === POST_MERGE_CREDIT_RELEASE_LABEL;
-}
 
 /**
  * Minimum wall-clock time since the realized merge before credit MAY be
