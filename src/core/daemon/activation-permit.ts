@@ -1093,25 +1093,19 @@ function safeReadOwnedJsonArray(
   const dirAssurance = assurePrivateStoragePath(dirname(path), 'directory', 'inspect-owned', { anchorPath });
   if (!dirAssurance.ok) return { ok: false, reason: `unsafe-directory:${dirAssurance.reason}` };
 
+  // Open first, then validate the fd — the check (owner/mode/regular-file/
+  // size) and the read below share one file description, so there is no
+  // window between "checked" and "used" for an attacker to swap the path.
   const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
-  let named: BigIntStats;
-  try {
-    named = lstatSync(path, { bigint: true });
-  } catch (error) {
-    return { ok: false, reason: (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'stat-failed' };
-  }
-  if (!safeOwnedFile(named) || named.size <= 0n || named.size > BigInt(maxBytes)) {
-    return { ok: false, reason: 'unsafe-file' };
-  }
   let fd: number;
   try {
     fd = openSync(path, fsConstants.O_RDONLY | noFollow);
-  } catch {
-    return { ok: false, reason: 'open-failed' };
+  } catch (error) {
+    return { ok: false, reason: (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'open-failed' };
   }
   try {
     const opened = fstatSync(fd, { bigint: true });
-    if (!safeOwnedFile(opened) || !sameFileSnapshot(named, opened)) {
+    if (!safeOwnedFile(opened) || opened.size <= 0n || opened.size > BigInt(maxBytes)) {
       return { ok: false, reason: 'unsafe-file' };
     }
     const size = Number(opened.size);
@@ -1210,16 +1204,15 @@ function withActivationStoreLock<T>(fn: () => T): T {
 function readOperatorPrivateKeyPem(): string {
   const path = daemonActivationOperatorKeyPath();
   const home = resolve(homedir());
-  const named = lstatSync(path, { bigint: true });
-  if (!safeOwnedFile(named) || named.size <= 0n || named.size > BigInt(MAX_PERMIT_BYTES)) {
-    throw new Error('unsafe-operator-key-file');
-  }
+  // Open first, then validate the fd. The owner/mode/size check and the read
+  // below run against the same file description, so the path cannot be
+  // swapped between "checked" and "used".
   const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
   const fd = openSync(path, fsConstants.O_RDONLY | noFollow);
   try {
     const opened = fstatSync(fd, { bigint: true });
-    if (!safeOwnedFile(opened) || !sameFileSnapshot(named, opened)) {
-      throw new Error('operator-key-changed-during-open');
+    if (!safeOwnedFile(opened) || opened.size <= 0n || opened.size > BigInt(MAX_PERMIT_BYTES)) {
+      throw new Error('unsafe-operator-key-file');
     }
     const size = Number(opened.size);
     const bytes = Buffer.alloc(size);
