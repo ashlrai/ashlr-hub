@@ -13,6 +13,12 @@
  *  - rollbackTo is the ONLY potentially-destructive operation in M17.
  *  - NEVER pushes to a remote, NEVER deletes branches.
  *  - NEVER force-resets without opts.force === true.
+ *  - NEVER force-resets the MAIN checkout of a repository (2026-08-17 incident:
+ *    a bare `git stash`/`reset` against a primary checkout nearly destroyed
+ *    live operator work). `--force` only proceeds when `project` is an
+ *    isolated linked worktree — detected via git's own --git-dir vs
+ *    --git-common-dir distinction, not by path heuristics. The main checkout
+ *    always fails closed on --force, regardless of dirty state.
  *  - Refuses (ok:false) on non-repo, or dirty tree without --force.
  *  - Never throws — all error paths return { ok: false, detail }.
  *  - Uses execFileSync with 10 s timeout and stdio:'pipe'.
@@ -20,6 +26,7 @@
 
 import { execFileSync } from 'node:child_process';
 import type { RollbackSnapshot } from '../types.js';
+import { canonicalFilesystemPathIdentity } from '../sandbox/policy.js';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -55,6 +62,30 @@ function isGitRepo(dir: string): boolean {
   // git rev-parse --git-dir exits 0 only inside a git repo.
   const result = git(dir, ['rev-parse', '--git-dir']);
   return result !== null;
+}
+
+/**
+ * Returns true when `dir` is the MAIN checkout of its repository, i.e. NOT an
+ * isolated linked worktree (a sandbox, or any `git worktree add` checkout).
+ *
+ * Git exposes this distinction natively: a linked worktree's --git-dir lives
+ * under <common-dir>/worktrees/<name>, while the main worktree's --git-dir
+ * *is* the common dir. So --git-dir === --git-common-dir iff `dir` is the
+ * main checkout. This needs no knowledge of ashlr's own sandbox layout and
+ * correctly covers every isolation mechanism that uses real git worktrees.
+ *
+ * Fails closed: any unresolved rev-parse (not a repo, git error, etc.) is
+ * treated as "this is the main checkout" — an unknown answer must never be
+ * read as "safe to force-reset".
+ */
+function isPrimaryCheckout(dir: string): boolean {
+  const gitDir = git(dir, ['rev-parse', '--path-format=absolute', '--git-dir']);
+  const commonDir = git(dir, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+  if (gitDir === null || commonDir === null) return true;
+  const gitDirId = canonicalFilesystemPathIdentity(gitDir);
+  const commonDirId = canonicalFilesystemPathIdentity(commonDir);
+  if (gitDirId === null || commonDirId === null) return true;
+  return gitDirId === commonDirId;
 }
 
 // ---------------------------------------------------------------------------
@@ -147,8 +178,13 @@ export function snapshotProject(project: string | null): RollbackSnapshot {
  *  - NEVER pushes to a remote.
  *  - NEVER deletes branches.
  *  - NEVER force-resets without opts.force === true.
+ *  - NEVER force-resets the main checkout — opts.force is refused outright
+ *    when snap.project is not an isolated linked worktree, before any dirty
+ *    check runs (an older-commit force-reset can also silently discard
+ *    COMMITTED work made after the snapshot; see isPrimaryCheckout above).
  *  - Refuses (returns { ok: false, detail }) without throwing when:
  *      • snap.isRepo is false (nothing to restore)
+ *      • opts.force is true and snap.project is the main checkout
  *      • the current working tree is dirty and opts.force is false
  *      • any git operation fails
  *  - With opts.force: uses `git reset --hard <head>` so local uncommitted
@@ -181,6 +217,25 @@ export async function rollbackTo(
   }
 
   const project = snap.project;
+
+  // --- Refuse --force against the main checkout, unconditionally ---
+  // This must run before the dirty-tree check: even a clean tree can lose
+  // committed work to `reset --hard`, and a dirty tree can lose live,
+  // uncommitted operator/agent edits with no recovery path at all.
+  if (opts.force && isPrimaryCheckout(project)) {
+    return {
+      ok: false,
+      detail:
+        'Rollback refused: --force would run `git reset --hard` against the ' +
+        'main checkout, not an isolated worktree. This can silently discard ' +
+        'live uncommitted work (yours or a concurrent agent\'s) and commits ' +
+        'made since the snapshot. Force-rollback is only permitted against an ' +
+        'isolated linked worktree (e.g. a sandbox created via `git worktree ' +
+        'add`). To roll back the main checkout, use the non-force path (`git ' +
+        'checkout`, which refuses to overwrite a dirty tree) or restore ' +
+        'manually with git after reviewing what would be discarded.',
+    };
+  }
 
   // --- Check current dirty state ---
   try {
