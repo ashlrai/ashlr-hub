@@ -89,10 +89,21 @@ import { diagnoseGuardHealth } from './guard-health.js';
  * File loading fails CLOSED on every ambiguity: missing, unreadable, wrong
  * permissions, wrong owner, symlinked, malformed, or non-canonically
  * encoded trust-root/grant/permit files are all treated as "no authority" —
- * never as "trust everything." Windows is denied outright: node:fs chmod()
- * on Windows does not restrict per-user read access on NTFS (it only
- * toggles the read-only attribute), so the "reject world/group-readable
- * private files" invariant this module depends on cannot be enforced there.
+ * never as "trust everything." This holds on Windows too: node:fs chmod()
+ * on Windows does not restrict per-user read access on NTFS (it only toggles
+ * the read-only attribute), so the "operator-only" invariant is instead
+ * enforced by ../util/private-storage.js's Windows adapter, which shells out
+ * to PowerShell to apply and verify an exact current-user+SYSTEM protected
+ * DACL (owner-only FullControl, inheritance disabled) and to reject reparse
+ * points on the target AND on every ancestor up to the ~/.ashlr anchor —
+ * the Windows analog of POSIX's 0600/0700 mode bits + O_NOFOLLOW, which have
+ * no direct Windows equivalent (chmod doesn't restrict NTFS readers, and
+ * Node's fs has no portable no-follow open flag on win32). Trust-root/grant/
+ * permit stores and the once/resident permit path are validated this way on
+ * both platforms; if the DACL adapter is unavailable or errors, every caller
+ * fails closed with a distinct `<store>:<adapter-reason>` code — never a
+ * silent pass. Goal-conductor proposal permits (`consumeGoalConductorWithAuthority`
+ * below) remain Windows-denied for now — out of scope for this pass.
  */
 
 const POLICY_VERSION = 'm461-proposal-once-v1';
@@ -307,7 +318,6 @@ export interface DaemonActivationPermitTestConsumerOptions {
 export interface DaemonActivationPermitTestInspectionOptions {
   trustRoots: readonly DaemonActivationTrustRoot[];
   context: DaemonActivationRuntimeContext;
-  platform?: NodeJS.Platform;
 }
 
 const validCapabilities = new WeakMap<object, () => boolean>();
@@ -1080,9 +1090,6 @@ function safeReadOwnedJsonArray(
   anchorPath: string,
   maxBytes: number,
 ): { ok: true; value: unknown[] } | { ok: false; reason: string } {
-  if (process.platform === 'win32') {
-    return { ok: false, reason: 'activation-permit-v1-unsupported-on-windows' };
-  }
   let dirStat: BigIntStats;
   try {
     dirStat = lstatSync(dirname(path), { bigint: true });
@@ -1411,9 +1418,6 @@ function auditActivationEvent(action: string, summary: string, result: 'ok' | 'r
 function findGrantedRecord(
   scopeKey: DaemonActivationScopeKey,
 ): { granted: true; record: DaemonActivationGrantRecord } | { granted: false; reason: string } {
-  if (process.platform === 'win32') {
-    return { granted: false, reason: 'activation-permit-v1-unsupported-on-windows' };
-  }
   if (killSwitchOn()) return { granted: false, reason: 'kill-switch-is-on' };
   let guardHealthy: boolean;
   try {
@@ -1501,9 +1505,6 @@ function sanitizeKeyId(candidate: string): string {
 export function daemonActivationInit(input: { label?: string; force?: boolean }):
   | { ok: true; keyId: string; publicKeyPem: string; rotated: boolean }
   | { ok: false; reason: string } {
-  if (process.platform === 'win32') {
-    return { ok: false, reason: 'activation-permit-v1-unsupported-on-windows' };
-  }
   return withActivationStoreLock(():
     | { ok: true; keyId: string; publicKeyPem: string; rotated: boolean }
     | { ok: false; reason: string } => {
@@ -1603,9 +1604,6 @@ export function daemonActivationRevokeGrant(grantId: string): { ok: true } | { o
 export function daemonActivationMintStandingGrant(input: { scope: DaemonActivationGrantScope; ttlMs: number }):
   | { ok: true; record: DaemonActivationGrantRecord }
   | { ok: false; reason: string } {
-  if (process.platform === 'win32') {
-    return { ok: false, reason: 'activation-permit-v1-unsupported-on-windows' };
-  }
   if (!Number.isFinite(input.ttlMs) || input.ttlMs <= 0 || input.ttlMs > MAX_STANDING_GRANT_VALIDITY_MS) {
     return { ok: false, reason: 'invalid-grant-ttl' };
   }
@@ -1655,9 +1653,6 @@ export function daemonActivationMintStandingGrant(input: { scope: DaemonActivati
 export function daemonActivationMintOneShotPermit(input: { cfg: AshlrConfig; scope: DaemonActivationGrantScope }):
   | { ok: true; permitId: string; permitPath: string; expiresAt: string }
   | { ok: false; reason: string } {
-  if (process.platform === 'win32') {
-    return { ok: false, reason: 'activation-permit-v1-unsupported-on-windows' };
-  }
   if (!validScope(input.scope)) return { ok: false, reason: 'invalid-grant-scope' };
   return withActivationStoreLock(():
     | { ok: true; permitId: string; permitPath: string; expiresAt: string }
@@ -1825,9 +1820,6 @@ export function daemonActivationDiagnosePendingPermitBindings(
   cfg: AshlrConfig,
 ): DaemonActivationPendingPermitBindingDiagnosis {
   const permitPath = daemonActivationPermitPath();
-  if (process.platform === 'win32') {
-    return { ok: false, reason: 'activation-permit-v1-unsupported-on-windows' };
-  }
   let pinned: PinnedPermitFile;
   try {
     pinned = openPinnedPermit(permitPath, resolve(homedir()));
@@ -1963,7 +1955,6 @@ function inspectWithAuthority(
   opts: DaemonActivationOptions,
   trustRoots: readonly DaemonActivationTrustRoot[],
   suppliedContext: DaemonActivationRuntimeContext | undefined,
-  platform: NodeJS.Platform = process.platform,
 ): DaemonActivationReadiness {
   const standingAuth = {
     install: daemonActivationScopeGranted('install').granted,
@@ -1998,14 +1989,6 @@ function inspectWithAuthority(
       requestedShape: shapeLabel,
       ...standingAuthorizedFields,
     });
-  }
-  if (platform === 'win32') {
-    return activationReadiness(
-      'blocked',
-      'activation-permit-v1-unsupported-on-windows',
-      trustRoots.length,
-      { requestedShape: shapeLabel, ...standingAuthorizedFields },
-    );
   }
   // A valid standing `residentStanding` grant means `daemon start` (resident)
   // would succeed RIGHT NOW without ever touching the one-shot permit file —
@@ -2088,13 +2071,6 @@ function consumeWithAuthority(
   }
   if (trustRoots.length === 0) {
     return { authorized: false, required: true, reason: 'no-trusted-activation-roots' };
-  }
-  if (process.platform === 'win32') {
-    return {
-      authorized: false,
-      required: true,
-      reason: 'activation-permit-v1-unsupported-on-windows',
-    };
   }
   let configSnapshot: AshlrConfig;
   try {
@@ -2383,7 +2359,6 @@ export function inspectDaemonActivationPermitForVerification(
     opts,
     options.trustRoots,
     options.context,
-    options.platform,
   );
 }
 

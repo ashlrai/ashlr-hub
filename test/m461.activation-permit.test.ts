@@ -14,6 +14,7 @@ import { dirname, join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { withPlatform } from './helpers/platform.js';
 import type { AshlrConfig } from '../src/core/types.js';
 import {
   buildDaemonActivationPermitPayload,
@@ -185,29 +186,37 @@ describe('M461 bounded daemon activation permit', () => {
     expect(process.env['ASHLR_HOME']).toBe(originalHomeEnvironment.ASHLR_HOME);
   });
 
-  it('refuses activation inspection on Windows even with an injected trust root', () => {
+  it('fails closed on Windows when the DACL adapter is unavailable, never grants readiness', () => {
     isolateHome();
     const cfg = config('windows');
     const key = keys();
-    const result = inspectDaemonActivationPermitForVerification(
+
+    // No injected-permit-file exists in this isolated home, so the pinned
+    // permit read never gets that far: `openPinnedPermit` calls
+    // `assurePrivateStoragePath` first, which — running for real under a
+    // `win32` platform override on a non-Windows test process with no
+    // PowerShell available — reports `powershell-unavailable` immediately.
+    // This is the genuine (un-pinned) Windows path now: it is no longer
+    // unconditionally denied, but it still fails CLOSED with a distinct
+    // adapter-failure reason, never a silent pass.
+    const result = withPlatform('win32', () => inspectDaemonActivationPermitForVerification(
       cfg,
       { once: true, dryRun: false },
       {
         trustRoots: [key.root],
         context: context(cfg),
-        platform: 'win32',
       },
-    );
+    ));
 
     expect(result).toMatchObject({
       authority: 'observation-only',
-      state: 'blocked',
+      state: 'degraded',
       commandEligible: false,
       trustRootCount: 1,
       residentAuthorized: false,
       installAuthorized: false,
       repairAuthorized: false,
-      reason: 'activation-permit-v1-unsupported-on-windows',
+      reason: 'activation-permit-inspection-failed',
     });
     expect(existsSync(daemonActivationPermitPath())).toBe(false);
   });
