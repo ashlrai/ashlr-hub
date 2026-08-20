@@ -2,7 +2,7 @@
  * m354.trajectory-records.test.ts — read-only route-to-outcome timelines.
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   listTrajectoryRecords,
   MIN_SKILL_OBSERVED_TRAJECTORIES,
@@ -40,6 +40,15 @@ const SEMANTIC_PROPOSAL_ID = 'prop-m354abc1-000001-dddddddddddddddddddddddd';
 const NO_PROPOSAL_ATTEMPT_ID = 'attempt-00000000-0000-4000-8000-000000000354';
 const NO_PROPOSAL_RUN_ID = 'run-no-proposal';
 const NO_PROPOSAL_TRAJECTORY_ID = `run:${NO_PROPOSAL_ATTEMPT_ID}`;
+const TEST_NOW_MS = Date.parse('2026-07-10T12:00:00.000Z');
+
+beforeEach(() => {
+  vi.spyOn(Date, 'now').mockReturnValue(TEST_NOW_MS);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 function dispatch(overrides: Partial<DispatchProductionEvent> = {}): DispatchProductionEvent {
   return {
