@@ -48,6 +48,7 @@ env:
   QUARANTINED_VERSION: "3.3.0"
   QUARANTINED_INTEGRITY: "sha512-mYVuJZyoXeSnnqivoLzyZggNgpJoWM8glTI7CW0oBfQ0RCHx0xueTrLwLTZBg5W+E4zPOJNbckptYeb5YsdOHw=="
   QUARANTINED_TAG_SHA: "d07f6a96eda664d865b9255f71c6f56e8cd9d7c7"
+  REQUIRED_PROMOTION_APPROVER: masonwyatt23
 
 jobs:
   admit:
@@ -103,16 +104,18 @@ jobs:
 
           environment_json="$(gh api \
             "repos/${GITHUB_REPOSITORY}/environments/npm-production-promotion")"
-          jq -e --arg actor "$GITHUB_ACTOR" \
-            '.name == "npm-production-promotion" and
+          jq -e --arg approver "$REQUIRED_PROMOTION_APPROVER" \
+            '([.protection_rules[]? |
+                select(.type == "required_reviewers")]) as $reviewerRules |
+             .name == "npm-production-promotion" and
              .can_admins_bypass == false and
              .deployment_branch_policy.protected_branches == true and
              .deployment_branch_policy.custom_branch_policies == false and
-             any(.protection_rules[]?;
-               .type == "required_reviewers" and
-               .prevent_self_review == true and
-               any(.reviewers[]?;
-                 .type == "User" and .reviewer.login != $actor))' \
+             ($reviewerRules | length) == 1 and
+             $reviewerRules[0].prevent_self_review == false and
+             ($reviewerRules[0].reviewers | type == "array" and length == 1) and
+             $reviewerRules[0].reviewers[0].type == "User" and
+             $reviewerRules[0].reviewers[0].reviewer.login == $approver' \
             <<<"$environment_json" >/dev/null
 
           branch_json="$(gh api "repos/${GITHUB_REPOSITORY}/branches/master")"
@@ -231,6 +234,7 @@ jobs:
             --arg quarantinedVersion "$QUARANTINED_VERSION" \
             --arg quarantinedIntegrity "$QUARANTINED_INTEGRITY" \
             --arg quarantinedTagSha "$QUARANTINED_TAG_SHA" \
+            --arg requiredPromotionApprover "$REQUIRED_PROMOTION_APPROVER" \
             --arg sourceSha "$GITHUB_SHA" \
             --arg version "$PROMOTION_VERSION" \
             --arg workflowRunAttempt "$GITHUB_RUN_ATTEMPT" \
@@ -247,6 +251,8 @@ jobs:
               quarantinedVersion: $quarantinedVersion,
               quarantinedIntegrity: $quarantinedIntegrity,
               quarantinedTagSha: $quarantinedTagSha,
+              requiredPromotionApprover: $requiredPromotionApprover,
+              approvalPolicy: "single-owner",
               releaseRunId: $releaseRunId,
               releaseRunAttempt: $releaseRunAttempt,
               acceptanceAttestationSha256: $acceptanceAttestationSha256,

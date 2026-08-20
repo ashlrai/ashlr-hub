@@ -221,9 +221,15 @@ must create the `npm-production-promotion` environment with all of these
 controls:
 
 - protected branches only, with no custom deployment branch policies;
-- at least one required reviewer distinct from the dispatcher;
-- prevent self-review enabled and `can_admins_bypass` set to `false`;
+- exactly one required `User` reviewer, `masonwyatt23`, with no group or
+  additional reviewer;
+- prevent self-review disabled so Mason may approve a dispatch they initiated;
+- `can_admins_bypass` set to `false`;
 - no environment secrets.
+
+This is an explicit single-owner production gate, not independent or
+two-person approval. Another maintainer or automation may dispatch the
+observation workflow, but only `masonwyatt23` can approve the protected job.
 
 Dispatch the workflow from protected `master` with the successful release run
 ID, exact 3.3.1 candidate SRI, acceptance-receipt SHA-256, canonical

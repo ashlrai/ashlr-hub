@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
 import { parse } from 'yaml';
@@ -118,8 +119,12 @@ function admissionViolations(text: string): string[] {
     '.name == "npm-production-promotion"',
     '.can_admins_bypass == false',
     '.deployment_branch_policy.protected_branches == true',
-    '.prevent_self_review == true',
-    '.reviewer.login != $actor',
+    '.deployment_branch_policy.custom_branch_policies == false',
+    '($reviewerRules | length) == 1',
+    '$reviewerRules[0].prevent_self_review == false',
+    '($reviewerRules[0].reviewers | type == "array" and length == 1)',
+    '$reviewerRules[0].reviewers[0].type == "User"',
+    '$reviewerRules[0].reviewers[0].reviewer.login == $approver',
     "'.protected == true and .commit.sha == $sha'",
     '.object.type == "commit" and .object.sha == $sha',
     '.parents[0].sha == $rollback',
@@ -136,10 +141,43 @@ function admissionViolations(text: string): string[] {
     'acceptanceObservedAt: $acceptanceObservedAt',
     'acceptanceMaximumAgeSeconds: 86400',
     'admissionObservedAt: $admissionObservedAt',
+    'requiredPromotionApprover: $requiredPromotionApprover',
+    'approvalPolicy: "single-owner"',
     'environmentProtectionVerified: true',
     'promotionExecuted: false',
   ];
   return required.filter((fragment) => !text.includes(fragment));
+}
+
+function promotionApproverViolations(source: string): string[] {
+  const parsed = parse(source) as Workflow;
+  const parsedAdmission = parsed.jobs?.admit?.steps?.find((step) =>
+    step.name === 'Verify exact accepted candidate and protected release identity');
+  const violations = admissionViolations(parsedAdmission?.run ?? '');
+  if (parsed.env?.REQUIRED_PROMOTION_APPROVER !== 'masonwyatt23') {
+    violations.push('required Mason approver');
+  }
+  return violations;
+}
+
+function environmentAdmissionQuery(text: string): string {
+  const command = 'jq -e --arg approver "$REQUIRED_PROMOTION_APPROVER"';
+  const commandOffset = text.indexOf(command);
+  const queryStart = text.indexOf("'", commandOffset + command.length);
+  const inputOffset = text.indexOf('<<<"$environment_json"', queryStart + 1);
+  const queryEnd = text.lastIndexOf("'", inputOffset);
+  if (commandOffset < 0 || queryStart < 0 || queryEnd < 0) return '';
+  return text.slice(queryStart + 1, queryEnd);
+}
+
+function environmentPolicyAccepted(environment: unknown): boolean {
+  const query = environmentAdmissionQuery(admission?.run ?? '');
+  if (!query) return false;
+  const result = spawnSync('jq', ['-e', '--arg', 'approver', 'masonwyatt23', query], {
+    input: JSON.stringify(environment),
+    encoding: 'utf8',
+  });
+  return result.status === 0;
 }
 
 function mutationAuthorityViolations(text: string): string[] {
@@ -278,6 +316,7 @@ describe('M522 — production-promotion admission has no npm mutation authority'
   });
 
   it('is a separate, manually dispatched, environment-approved observation lane', () => {
+    expect(promotionApproverViolations(promotionText)).toEqual([]);
     expect(Object.keys(workflow.on ?? {})).toEqual(['workflow_dispatch']);
     expect(workflow.permissions).toEqual({});
     expect(workflow.concurrency).toEqual({
@@ -293,6 +332,7 @@ describe('M522 — production-promotion admission has no npm mutation authority'
       QUARANTINED_VERSION: '3.3.0',
       QUARANTINED_INTEGRITY: EXPECTED_QUARANTINED_INTEGRITY,
       QUARANTINED_TAG_SHA: EXPECTED_QUARANTINED_TAG_SHA,
+      REQUIRED_PROMOTION_APPROVER: 'masonwyatt23',
     });
     expect(Object.keys(workflow.jobs ?? {})).toEqual(['admit']);
     expect(job.environment).toBe('npm-production-promotion');
@@ -301,7 +341,7 @@ describe('M522 — production-promotion admission has no npm mutation authority'
     expect(job['timeout-minutes']).toBe(10);
   });
 
-  it('requires explicit candidate, release-run, and independent acceptance evidence', () => {
+  it('requires explicit candidate, release-run, and acceptance evidence', () => {
     const inputs = workflow.on?.workflow_dispatch?.inputs ?? {};
     expect(Object.keys(inputs)).toEqual([
       'release_run_id',
@@ -372,7 +412,12 @@ describe('M522 — production-promotion admission has no npm mutation authority'
     ['acceptance freshness at admission', 'admission_epoch - acceptance_epoch > 86400'],
     ['future acceptance at receipt', 'acceptance_epoch > receipt_epoch'],
     ['acceptance freshness at receipt', 'receipt_epoch - acceptance_epoch > 86400'],
-    ['protected environment', '.prevent_self_review == true'],
+    ['custom branch policies disabled', '.deployment_branch_policy.custom_branch_policies == false'],
+    ['exactly one reviewer rule', '($reviewerRules | length) == 1'],
+    ['Mason self-approval policy', '$reviewerRules[0].prevent_self_review == false'],
+    ['exactly one reviewer', '($reviewerRules[0].reviewers | type == "array" and length == 1)'],
+    ['user reviewer type', '$reviewerRules[0].reviewers[0].type == "User"'],
+    ['Mason reviewer identity', '$reviewerRules[0].reviewers[0].reviewer.login == $approver'],
     ['administrator bypass disabled', '.can_admins_bypass == false'],
     ['protected master', "'.protected == true and .commit.sha == $sha'"],
     ['release workflow success', '.status == "completed" and .conclusion == "success"'],
@@ -392,6 +437,66 @@ describe('M522 — production-promotion admission has no npm mutation authority'
     expect(admission?.run).toContain(fragment);
     const mutated = (admission?.run ?? '').replace(fragment, '.can_admins_bypass == true');
     expect(admissionViolations(mutated)).toContain(fragment);
+  });
+
+  it('rejects a hostile policy that changes the sole required approver', () => {
+    const mutated = promotionText.replace(
+      'REQUIRED_PROMOTION_APPROVER: masonwyatt23',
+      'REQUIRED_PROMOTION_APPROVER: someone-else',
+    );
+    expect(mutated).not.toBe(promotionText);
+    expect(promotionApproverViolations(mutated)).toContain('required Mason approver');
+  });
+
+  it('executes the exact environment predicate and rejects duplicate reviewer rules', () => {
+    const masonRule = {
+      type: 'required_reviewers',
+      prevent_self_review: false,
+      reviewers: [{ type: 'User', reviewer: { login: 'masonwyatt23' } }],
+    };
+    const exactEnvironment = {
+      name: 'npm-production-promotion',
+      can_admins_bypass: false,
+      deployment_branch_policy: {
+        protected_branches: true,
+        custom_branch_policies: false,
+      },
+      protection_rules: [masonRule],
+    };
+    expect(environmentPolicyAccepted(exactEnvironment)).toBe(true);
+    expect(environmentPolicyAccepted({
+      ...exactEnvironment,
+      protection_rules: [
+        masonRule,
+        {
+          type: 'required_reviewers',
+          prevent_self_review: false,
+          reviewers: [{ type: 'User', reviewer: { login: 'someone-else' } }],
+        },
+      ],
+    })).toBe(false);
+  });
+
+  it.each([
+    [
+      'self-review prevention',
+      '$reviewerRules[0].prevent_self_review == false',
+      '$reviewerRules[0].prevent_self_review == true',
+    ],
+    [
+      'an additional reviewer',
+      '($reviewerRules[0].reviewers | type == "array" and length == 1)',
+      '($reviewerRules[0].reviewers | type == "array" and length >= 1)',
+    ],
+    [
+      'a group reviewer',
+      '$reviewerRules[0].reviewers[0].type == "User"',
+      '$reviewerRules[0].reviewers[0].type == "Team"',
+    ],
+  ])('rejects a hostile environment policy allowing %s', (_label, fragment, replacement) => {
+    expect(admission?.run).toContain(fragment);
+    const mutated = (admission?.run ?? '').replace(fragment, replacement);
+    expect(admissionViolations(mutated)).not.toEqual([]);
   });
 
   it.each([

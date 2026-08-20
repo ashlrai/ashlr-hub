@@ -14,10 +14,12 @@ describe('M522 — production-promotion operator boundary', () => {
   it('documents the protected observation-only admission without inventing authority', () => {
     expect(promotionSection).toContain('`npm-production-promotion` environment');
     expect(promotionSection).toContain('protected branches only');
-    expect(promotionSection).toContain('required reviewer distinct from the dispatcher');
-    expect(promotionSection).toContain('prevent self-review enabled');
+    expect(promotionSection).toContain('exactly one required `User` reviewer, `masonwyatt23`');
+    expect(promotionSection).toContain('prevent self-review disabled');
     expect(promotionSection).toContain('`can_admins_bypass` set to `false`');
     expect(promotionSection).toContain('no environment secrets');
+    expect(promotionSection).toContain('explicit single-owner production gate');
+    expect(promotionSection).toContain('only `masonwyatt23` can approve');
     expect(promotionSection).toContain('no more than 24 hours old');
     expect(promotionSection).toContain('human attestations');
     expect(promotionSection).toContain('The workflow is observation-only');
