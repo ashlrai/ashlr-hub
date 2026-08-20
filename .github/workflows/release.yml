@@ -7,7 +7,7 @@
 # public repository, release.yml, and the npm-release environment. No
 # long-lived npm write token is used.
 #
-# This workflow is intentionally pinned to the 3.3.1 candidate. It cannot move
+# This workflow is intentionally pinned to the 3.3.2 candidate. It cannot move
 # npm `latest`; promotion is a separate maintainer action after acceptance.
 
 name: Release
@@ -23,13 +23,16 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  RELEASE_VERSION: "3.3.1"
+  RELEASE_VERSION: "3.3.2"
   RELEASE_DIST_TAG: candidate
   BASELINE_LATEST_VERSION: "3.0.1"
   PREVIOUS_CANDIDATE_VERSION: "3.3.0"
   PREVIOUS_CANDIDATE_INTEGRITY: "sha512-mYVuJZyoXeSnnqivoLzyZggNgpJoWM8glTI7CW0oBfQ0RCHx0xueTrLwLTZBg5W+E4zPOJNbckptYeb5YsdOHw=="
   PREVIOUS_CANDIDATE_TAG_SHA: "d07f6a96eda664d865b9255f71c6f56e8cd9d7c7"
-  REQUIRED_ROLLBACK_REVISION: "31aa0467f66af1fe4c66d1664f65e6fd3e4ba61b"
+  FAILED_CANDIDATE_VERSION: "3.3.1"
+  FAILED_CANDIDATE_TAG_SHA: "f2c9353db35fbf12889bddafd8acc2b7ca5ae67c"
+  FAILED_CANDIDATE_RELEASE_RUN_ID: "32396250683"
+  REQUIRED_ROLLBACK_REVISION: "abd49a5049759e417d99089b88c628fd2364f79c"
 
 jobs:
   verify:
@@ -504,6 +507,7 @@ jobs:
     timeout-minutes: 15
     environment: npm-release
     permissions:
+      actions: read
       contents: read
       id-token: write   # npm trusted publishing + provenance
     outputs:
@@ -580,7 +584,7 @@ jobs:
              (.files.tarball | keys == ["bytes", "entryCount", "integrity", "maxEntryBytes", "name", "sha256", "unpackedBytes"]) and
              (.files.packReport | keys == ["bytes", "name", "sha256"]) and
              (.files.releaseNotes | keys == ["bytes", "name", "sha256"]) and
-             .files.tarball.name == "ashlr-hub-3.3.1.tgz" and
+             .files.tarball.name == "ashlr-hub-3.3.2.tgz" and
              .files.packReport.name == "npm-pack.json" and
              .files.releaseNotes.name == "release-notes.md" and
              (.files.tarball.bytes | type == "number" and . >= 1 and . <= 52428800) and
@@ -758,11 +762,13 @@ jobs:
             --arg version "$RELEASE_VERSION" \
             --arg previousVersion "$PREVIOUS_CANDIDATE_VERSION" \
             --arg previousIntegrity "$PREVIOUS_CANDIDATE_INTEGRITY" \
+            --arg failedVersion "$FAILED_CANDIDATE_VERSION" \
             '.name == "@ashlr/hub" and
              .["dist-tags"].latest == $latest and
              .["dist-tags"][$candidate] == $previousVersion and
              .versions[$previousVersion].version == $previousVersion and
              .versions[$previousVersion].dist.integrity == $previousIntegrity and
+             (.versions[$failedVersion] == null) and
              (.versions[$version] == null)' \
             "$packument" >/dev/null
           jq -cS '.["dist-tags"]' "$packument" > "$RUNNER_TEMP/npm-dist-tags-before.json"
@@ -787,6 +793,49 @@ jobs:
             --arg sha "$PREVIOUS_CANDIDATE_TAG_SHA" \
             '.ref == $ref and .object.type == "commit" and .object.sha == $sha' \
             <<<"$previous_tag_ref_json" >/dev/null
+          failed_tag_ref_json="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${FAILED_CANDIDATE_VERSION}")"
+          jq -e \
+            --arg ref "refs/tags/v${FAILED_CANDIDATE_VERSION}" \
+            --arg sha "$FAILED_CANDIDATE_TAG_SHA" \
+            '.ref == $ref and .object.type == "commit" and .object.sha == $sha' \
+            <<<"$failed_tag_ref_json" >/dev/null
+          failed_run_json="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${FAILED_CANDIDATE_RELEASE_RUN_ID}")"
+          jq -e \
+            --arg sha "$FAILED_CANDIDATE_TAG_SHA" \
+            --arg tag "v${FAILED_CANDIDATE_VERSION}" \
+            '.path == ".github/workflows/release.yml" and
+             .event == "push" and .head_branch == $tag and .head_sha == $sha and
+             .status == "completed" and .conclusion == "failure" and
+             .run_attempt == 1' \
+            <<<"$failed_run_json" >/dev/null
+          failed_jobs_json="$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${FAILED_CANDIDATE_RELEASE_RUN_ID}/jobs?filter=latest&per_page=100")"
+          jq -e \
+            '[.jobs[] | select(
+               .name == "Signed release canary (NO_AUTHORITY)" or
+               .name == "Prepare immutable npm candidate (NO_PUBLISH_AUTHORITY)" or
+               .name == "Publish prepared candidate to npm" or
+               .name == "Verify npm candidate publication (NO_PUBLISH_AUTHORITY)" or
+               .name == "Create GitHub release")] as $skipped |
+             ($skipped | length) == 5 and
+             ($skipped | map(.name) | unique | length) == 5 and
+             all($skipped[]; .status == "completed" and .conclusion == "skipped")' \
+            <<<"$failed_jobs_json" >/dev/null
+          set +e
+          failed_release_probe="$(gh api --include \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/v${FAILED_CANDIDATE_VERSION}" \
+            --jq '.id' 2>"$RUNNER_TEMP/failed-release-probe.err")"
+          failed_release_probe_rc=$?
+          set -e
+          failed_release_status="$(printf '%s\n' "$failed_release_probe" |
+            sed -n '1s#^HTTP/[0-9.]* \([0-9][0-9][0-9]\).*$#\1#p')"
+          if [[ "$failed_release_probe_rc" -eq 0 || "$failed_release_status" != "404" ]]; then
+            cat "$RUNNER_TEMP/failed-release-probe.err" >&2
+            echo "Failed 3.3.1 GitHub release is no longer absent." >&2
+            exit 1
+          fi
           if [[ ! "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]; then
             echo "Publication run attempt is invalid." >&2
             exit 1
@@ -899,10 +948,12 @@ jobs:
                 --arg version "$RELEASE_VERSION" \
                 --arg previousVersion "$PREVIOUS_CANDIDATE_VERSION" \
                 --arg previousIntegrity "$PREVIOUS_CANDIDATE_INTEGRITY" \
+                --arg failedVersion "$FAILED_CANDIDATE_VERSION" \
                 '.["dist-tags"].latest == $latest and
                  .["dist-tags"][$candidate] == $version and
                  .versions[$previousVersion].version == $previousVersion and
-                 .versions[$previousVersion].dist.integrity == $previousIntegrity' \
+                 .versions[$previousVersion].dist.integrity == $previousIntegrity and
+                 (.versions[$failedVersion] == null)' \
                 "$packument" >/dev/null; then
               observed=true
               break

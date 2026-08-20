@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
 import { parse } from 'yaml';
@@ -46,9 +47,12 @@ const admission = steps.find((step) =>
 const upload = steps.find((step) =>
   step.name === 'Upload bounded no-npm-mutation-authority promotion receipt');
 
-const EXPECTED_VERSION = '3.3.1';
+const EXPECTED_VERSION = '3.3.2';
 const EXPECTED_PREVIOUS_CANDIDATE_VERSION = '3.3.0';
-const EXPECTED_ROLLBACK_REVISION = '31aa0467f66af1fe4c66d1664f65e6fd3e4ba61b';
+const EXPECTED_FAILED_CANDIDATE_VERSION = '3.3.1';
+const EXPECTED_FAILED_CANDIDATE_TAG_SHA = 'f2c9353db35fbf12889bddafd8acc2b7ca5ae67c';
+const EXPECTED_FAILED_CANDIDATE_RELEASE_RUN_ID = '32396250683';
+const EXPECTED_ROLLBACK_REVISION = 'abd49a5049759e417d99089b88c628fd2364f79c';
 const EXPECTED_QUARANTINED_INTEGRITY =
   'sha512-mYVuJZyoXeSnnqivoLzyZggNgpJoWM8glTI7CW0oBfQ0RCHx0xueTrLwLTZBg5W+E4zPOJNbckptYeb5YsdOHw==';
 const EXPECTED_QUARANTINED_TAG_SHA = 'd07f6a96eda664d865b9255f71c6f56e8cd9d7c7';
@@ -93,6 +97,14 @@ function identityViolations(
       || release.env?.PREVIOUS_CANDIDATE_TAG_SHA !== EXPECTED_QUARANTINED_TAG_SHA) {
     violations.push('quarantined predecessor');
   }
+  if (promotion.env?.FAILED_CANDIDATE_VERSION !== EXPECTED_FAILED_CANDIDATE_VERSION
+      || release.env?.FAILED_CANDIDATE_VERSION !== EXPECTED_FAILED_CANDIDATE_VERSION
+      || promotion.env?.FAILED_CANDIDATE_TAG_SHA !== EXPECTED_FAILED_CANDIDATE_TAG_SHA
+      || release.env?.FAILED_CANDIDATE_TAG_SHA !== EXPECTED_FAILED_CANDIDATE_TAG_SHA
+      || promotion.env?.FAILED_CANDIDATE_RELEASE_RUN_ID !== EXPECTED_FAILED_CANDIDATE_RELEASE_RUN_ID
+      || release.env?.FAILED_CANDIDATE_RELEASE_RUN_ID !== EXPECTED_FAILED_CANDIDATE_RELEASE_RUN_ID) {
+    violations.push('failed candidate evidence');
+  }
   if (!promotionSource.includes('tag="v${PROMOTION_VERSION}"')
       || !releaseSource.includes('"$GITHUB_REF_NAME" != "v${RELEASE_VERSION}"')) {
     violations.push('release tag');
@@ -118,8 +130,12 @@ function admissionViolations(text: string): string[] {
     '.name == "npm-production-promotion"',
     '.can_admins_bypass == false',
     '.deployment_branch_policy.protected_branches == true',
-    '.prevent_self_review == true',
-    '.reviewer.login != $actor',
+    '.deployment_branch_policy.custom_branch_policies == false',
+    '($reviewerRules | length) == 1',
+    '$reviewerRules[0].prevent_self_review == false',
+    '($reviewerRules[0].reviewers | type == "array" and length == 1)',
+    '$reviewerRules[0].reviewers[0].type == "User"',
+    '$reviewerRules[0].reviewers[0].reviewer.login == $approver',
     "'.protected == true and .commit.sha == $sha'",
     '.object.type == "commit" and .object.sha == $sha',
     '.parents[0].sha == $rollback',
@@ -131,15 +147,63 @@ function admissionViolations(text: string): string[] {
     '.["dist-tags"][$candidate] == $version',
     '.versions[$version].dist.integrity == $integrity',
     '.versions[$quarantinedVersion].dist.integrity == $quarantinedIntegrity',
+    'git/ref/tags/${failed_tag}',
+    'actions/runs/${FAILED_CANDIDATE_RELEASE_RUN_ID}")',
+    'actions/runs/${FAILED_CANDIDATE_RELEASE_RUN_ID}/jobs?filter=latest&per_page=100',
+    '.status == "completed" and .conclusion == "failure"',
+    'all($skipped[]; .status == "completed" and .conclusion == "skipped")',
+    'releases/tags/${failed_tag}',
+    'failed_release_status" != "404"',
+    '(.versions[$failedVersion] == null)',
     'https://slsa.dev/provenance/v1',
     'npmMutationAuthority: false',
     'acceptanceObservedAt: $acceptanceObservedAt',
     'acceptanceMaximumAgeSeconds: 86400',
     'admissionObservedAt: $admissionObservedAt',
+    'requiredPromotionApprover: $requiredPromotionApprover',
+    'approvalPolicy: "single-owner"',
+    'failedCandidateVersion: $failedCandidateVersion',
+    'failedCandidateTagSha: $failedCandidateTagSha',
+    'failedCandidateReleaseRunId: $failedCandidateReleaseRunId',
+    'failedCandidateReleaseRunConclusion: "failure"',
+    'failedCandidateDownstreamJobsSkipped: true',
+    'failedCandidateNpmVersionAbsent: true',
+    'failedCandidateGitHubReleaseAbsent: true',
     'environmentProtectionVerified: true',
     'promotionExecuted: false',
   ];
   return required.filter((fragment) => !text.includes(fragment));
+}
+
+function promotionApproverViolations(source: string): string[] {
+  const parsed = parse(source) as Workflow;
+  const parsedAdmission = parsed.jobs?.admit?.steps?.find((step) =>
+    step.name === 'Verify exact accepted candidate and protected release identity');
+  const violations = admissionViolations(parsedAdmission?.run ?? '');
+  if (parsed.env?.REQUIRED_PROMOTION_APPROVER !== 'masonwyatt23') {
+    violations.push('required Mason approver');
+  }
+  return violations;
+}
+
+function environmentAdmissionQuery(text: string): string {
+  const command = 'jq -e --arg approver "$REQUIRED_PROMOTION_APPROVER"';
+  const commandOffset = text.indexOf(command);
+  const queryStart = text.indexOf("'", commandOffset + command.length);
+  const inputOffset = text.indexOf('<<<"$environment_json"', queryStart + 1);
+  const queryEnd = text.lastIndexOf("'", inputOffset);
+  if (commandOffset < 0 || queryStart < 0 || queryEnd < 0) return '';
+  return text.slice(queryStart + 1, queryEnd);
+}
+
+function environmentPolicyAccepted(environment: unknown): boolean {
+  const query = environmentAdmissionQuery(admission?.run ?? '');
+  if (!query) return false;
+  const result = spawnSync('jq', ['-e', '--arg', 'approver', 'masonwyatt23', query], {
+    input: JSON.stringify(environment),
+    encoding: 'utf8',
+  });
+  return result.status === 0;
 }
 
 function mutationAuthorityViolations(text: string): string[] {
@@ -180,7 +244,7 @@ function mutationAuthorityViolations(text: string): string[] {
 }
 
 describe('M522 — production-promotion admission has no npm mutation authority', () => {
-  it('binds the promotion, release workflow, and package to the exact 3.3.1 identity', () => {
+  it('binds the promotion, release workflow, and package to the exact 3.3.2 identity', () => {
     expect(identityViolations(promotionText, releaseText, packageText)).toEqual([]);
     expect([
       workflow.env?.PROMOTION_VERSION,
@@ -203,27 +267,27 @@ describe('M522 — production-promotion admission has no npm mutation authority'
     );
     expect(admission?.run).toContain('tag="v${PROMOTION_VERSION}"');
     expect(releaseText).toContain(`.files.tarball.name == "${EXPECTED_TARBALL}"`);
-    expect(EXPECTED_TAG).toBe('v3.3.1');
+    expect(EXPECTED_TAG).toBe('v3.3.2');
   });
 
   it.each([
     [
       'promotion workflow version',
-      promotionText.replace('PROMOTION_VERSION: "3.3.1"', 'PROMOTION_VERSION: "3.3.2"'),
+      promotionText.replace('PROMOTION_VERSION: "3.3.2"', 'PROMOTION_VERSION: "3.3.3"'),
       releaseText,
       packageText,
     ],
     [
       'release workflow version',
       promotionText,
-      releaseText.replace('RELEASE_VERSION: "3.3.1"', 'RELEASE_VERSION: "3.3.2"'),
+      releaseText.replace('RELEASE_VERSION: "3.3.2"', 'RELEASE_VERSION: "3.3.3"'),
       packageText,
     ],
     [
       'package version',
       promotionText,
       releaseText,
-      JSON.stringify({ ...packageMetadata, version: '3.3.2' }),
+      JSON.stringify({ ...packageMetadata, version: '3.3.3' }),
     ],
     [
       'candidate dist-tag',
@@ -262,6 +326,27 @@ describe('M522 — production-promotion admission has no npm mutation authority'
       packageText,
     ],
     [
+      'failed candidate version',
+      promotionText.replace(
+        'FAILED_CANDIDATE_VERSION: "3.3.1"',
+        'FAILED_CANDIDATE_VERSION: "3.3.0"',
+      ),
+      releaseText,
+      packageText,
+    ],
+    [
+      'failed candidate tag identity',
+      promotionText.replace(EXPECTED_FAILED_CANDIDATE_TAG_SHA, '4'.repeat(40)),
+      releaseText,
+      packageText,
+    ],
+    [
+      'failed candidate release run identity',
+      promotionText.replace(EXPECTED_FAILED_CANDIDATE_RELEASE_RUN_ID, '32396250684'),
+      releaseText,
+      packageText,
+    ],
+    [
       'exact release tag',
       promotionText.replace('tag="v${PROMOTION_VERSION}"', 'tag="release-${PROMOTION_VERSION}"'),
       releaseText,
@@ -270,7 +355,7 @@ describe('M522 — production-promotion admission has no npm mutation authority'
     [
       'exact release tarball',
       promotionText,
-      releaseText.replace('ashlr-hub-3.3.1.tgz', 'ashlr-hub-next.tgz'),
+      releaseText.replace('ashlr-hub-3.3.2.tgz', 'ashlr-hub-next.tgz'),
       packageText,
     ],
   ])('rejects hostile cross-release identity drift in %s', (_label, promotion, release, pkg) => {
@@ -278,6 +363,7 @@ describe('M522 — production-promotion admission has no npm mutation authority'
   });
 
   it('is a separate, manually dispatched, environment-approved observation lane', () => {
+    expect(promotionApproverViolations(promotionText)).toEqual([]);
     expect(Object.keys(workflow.on ?? {})).toEqual(['workflow_dispatch']);
     expect(workflow.permissions).toEqual({});
     expect(workflow.concurrency).toEqual({
@@ -285,7 +371,7 @@ describe('M522 — production-promotion admission has no npm mutation authority'
       'cancel-in-progress': false,
     });
     expect(workflow.env).toEqual({
-      PROMOTION_VERSION: '3.3.1',
+      PROMOTION_VERSION: '3.3.2',
       PROMOTION_TAG: 'latest',
       REQUIRED_CANDIDATE_TAG: 'candidate',
       BASELINE_LATEST_VERSION: '3.0.1',
@@ -293,6 +379,10 @@ describe('M522 — production-promotion admission has no npm mutation authority'
       QUARANTINED_VERSION: '3.3.0',
       QUARANTINED_INTEGRITY: EXPECTED_QUARANTINED_INTEGRITY,
       QUARANTINED_TAG_SHA: EXPECTED_QUARANTINED_TAG_SHA,
+      FAILED_CANDIDATE_VERSION: EXPECTED_FAILED_CANDIDATE_VERSION,
+      FAILED_CANDIDATE_TAG_SHA: EXPECTED_FAILED_CANDIDATE_TAG_SHA,
+      FAILED_CANDIDATE_RELEASE_RUN_ID: EXPECTED_FAILED_CANDIDATE_RELEASE_RUN_ID,
+      REQUIRED_PROMOTION_APPROVER: 'masonwyatt23',
     });
     expect(Object.keys(workflow.jobs ?? {})).toEqual(['admit']);
     expect(job.environment).toBe('npm-production-promotion');
@@ -301,7 +391,7 @@ describe('M522 — production-promotion admission has no npm mutation authority'
     expect(job['timeout-minutes']).toBe(10);
   });
 
-  it('requires explicit candidate, release-run, and independent acceptance evidence', () => {
+  it('requires explicit candidate, release-run, and acceptance evidence', () => {
     const inputs = workflow.on?.workflow_dispatch?.inputs ?? {};
     expect(Object.keys(inputs)).toEqual([
       'release_run_id',
@@ -353,7 +443,7 @@ describe('M522 — production-promotion admission has no npm mutation authority'
     });
     expect(admission?.run).toContain('receipt_bytes > 16384');
     expect(admission?.run).toContain('sha256sum "$receipt"');
-    expect(admission?.run).toContain('--arg promotionCommand "npm dist-tag add @ashlr/hub@3.3.1 latest"');
+    expect(admission?.run).toContain('--arg promotionCommand "npm dist-tag add @ashlr/hub@3.3.2 latest"');
     expect(admission?.run).toContain('npmCredentialsPresent: false');
     expect(admission?.run).toContain('oidcAuthority: false');
     expect(admission?.run).toContain('acceptanceObservedAt: $acceptanceObservedAt');
@@ -372,7 +462,12 @@ describe('M522 — production-promotion admission has no npm mutation authority'
     ['acceptance freshness at admission', 'admission_epoch - acceptance_epoch > 86400'],
     ['future acceptance at receipt', 'acceptance_epoch > receipt_epoch'],
     ['acceptance freshness at receipt', 'receipt_epoch - acceptance_epoch > 86400'],
-    ['protected environment', '.prevent_self_review == true'],
+    ['custom branch policies disabled', '.deployment_branch_policy.custom_branch_policies == false'],
+    ['exactly one reviewer rule', '($reviewerRules | length) == 1'],
+    ['Mason self-approval policy', '$reviewerRules[0].prevent_self_review == false'],
+    ['exactly one reviewer', '($reviewerRules[0].reviewers | type == "array" and length == 1)'],
+    ['user reviewer type', '$reviewerRules[0].reviewers[0].type == "User"'],
+    ['Mason reviewer identity', '$reviewerRules[0].reviewers[0].reviewer.login == $approver'],
     ['administrator bypass disabled', '.can_admins_bypass == false'],
     ['protected master', "'.protected == true and .commit.sha == $sha'"],
     ['release workflow success', '.status == "completed" and .conclusion == "success"'],
@@ -380,6 +475,11 @@ describe('M522 — production-promotion admission has no npm mutation authority'
     ['candidate integrity', '.versions[$version].dist.integrity == $integrity'],
     ['fixed safe first parent', '.parents[0].sha == $rollback'],
     ['quarantined candidate integrity', '.versions[$quarantinedVersion].dist.integrity == $quarantinedIntegrity'],
+    ['failed tag identity', 'git/ref/tags/${failed_tag}'],
+    ['failed release run identity', 'actions/runs/${FAILED_CANDIDATE_RELEASE_RUN_ID}")'],
+    ['failed release downstream skipped', 'all($skipped[]; .status == "completed" and .conclusion == "skipped")'],
+    ['failed npm version absence', '(.versions[$failedVersion] == null)'],
+    ['failed GitHub Release absence', 'failed_release_status" != "404"'],
     ['no npm mutation authority receipt', 'npmMutationAuthority: false'],
   ])('hostile mutation removing %s fails policy', (_label, fragment) => {
     expect(admission?.run).toContain(fragment);
@@ -394,17 +494,77 @@ describe('M522 — production-promotion admission has no npm mutation authority'
     expect(admissionViolations(mutated)).toContain(fragment);
   });
 
+  it('rejects a hostile policy that changes the sole required approver', () => {
+    const mutated = promotionText.replace(
+      'REQUIRED_PROMOTION_APPROVER: masonwyatt23',
+      'REQUIRED_PROMOTION_APPROVER: someone-else',
+    );
+    expect(mutated).not.toBe(promotionText);
+    expect(promotionApproverViolations(mutated)).toContain('required Mason approver');
+  });
+
+  it('executes the exact environment predicate and rejects duplicate reviewer rules', () => {
+    const masonRule = {
+      type: 'required_reviewers',
+      prevent_self_review: false,
+      reviewers: [{ type: 'User', reviewer: { login: 'masonwyatt23' } }],
+    };
+    const exactEnvironment = {
+      name: 'npm-production-promotion',
+      can_admins_bypass: false,
+      deployment_branch_policy: {
+        protected_branches: true,
+        custom_branch_policies: false,
+      },
+      protection_rules: [masonRule],
+    };
+    expect(environmentPolicyAccepted(exactEnvironment)).toBe(true);
+    expect(environmentPolicyAccepted({
+      ...exactEnvironment,
+      protection_rules: [
+        masonRule,
+        {
+          type: 'required_reviewers',
+          prevent_self_review: false,
+          reviewers: [{ type: 'User', reviewer: { login: 'someone-else' } }],
+        },
+      ],
+    })).toBe(false);
+  });
+
   it.each([
-    ['command prefix', '\ncommand npm dist-tag add @ashlr/hub@3.3.1 latest'],
-    ['env prefix', '\nenv npm dist-tag add @ashlr/hub@3.3.1 latest'],
-    ['env option separator', '\nenv -- npm dist-tag add @ashlr/hub@3.3.1 latest'],
-    ['absolute npm path', '\n/usr/bin/npm dist-tag add @ashlr/hub@3.3.1 latest'],
-    ['npm registry option', '\nnpm --registry https://registry.npmjs.org dist-tag add @ashlr/hub@3.3.1 latest'],
-    ['exec wrapper', '\nexec /usr/bin/npm dist-tag add @ashlr/hub@3.3.1 latest'],
-    ['npm executable variable', '\nnode "$PROMOTION_NPM_CLI" dist-tag add @ashlr/hub@3.3.1 latest'],
-    ['npm CLI path', '\nnode /opt/npm/lib/node_modules/npm/bin/npm-cli.js dist-tag add @ashlr/hub@3.3.1 latest'],
-    ['corepack npm wrapper', '\ncorepack npm dist-tag add @ashlr/hub@3.3.1 latest'],
-    ['npm line continuation', '\nnpm \\\n  dist-tag add @ashlr/hub@3.3.1 latest'],
+    [
+      'self-review prevention',
+      '$reviewerRules[0].prevent_self_review == false',
+      '$reviewerRules[0].prevent_self_review == true',
+    ],
+    [
+      'an additional reviewer',
+      '($reviewerRules[0].reviewers | type == "array" and length == 1)',
+      '($reviewerRules[0].reviewers | type == "array" and length >= 1)',
+    ],
+    [
+      'a group reviewer',
+      '$reviewerRules[0].reviewers[0].type == "User"',
+      '$reviewerRules[0].reviewers[0].type == "Team"',
+    ],
+  ])('rejects a hostile environment policy allowing %s', (_label, fragment, replacement) => {
+    expect(admission?.run).toContain(fragment);
+    const mutated = (admission?.run ?? '').replace(fragment, replacement);
+    expect(admissionViolations(mutated)).not.toEqual([]);
+  });
+
+  it.each([
+    ['command prefix', '\ncommand npm dist-tag add @ashlr/hub@3.3.2 latest'],
+    ['env prefix', '\nenv npm dist-tag add @ashlr/hub@3.3.2 latest'],
+    ['env option separator', '\nenv -- npm dist-tag add @ashlr/hub@3.3.2 latest'],
+    ['absolute npm path', '\n/usr/bin/npm dist-tag add @ashlr/hub@3.3.2 latest'],
+    ['npm registry option', '\nnpm --registry https://registry.npmjs.org dist-tag add @ashlr/hub@3.3.2 latest'],
+    ['exec wrapper', '\nexec /usr/bin/npm dist-tag add @ashlr/hub@3.3.2 latest'],
+    ['npm executable variable', '\nnode "$PROMOTION_NPM_CLI" dist-tag add @ashlr/hub@3.3.2 latest'],
+    ['npm CLI path', '\nnode /opt/npm/lib/node_modules/npm/bin/npm-cli.js dist-tag add @ashlr/hub@3.3.2 latest'],
+    ['corepack npm wrapper', '\ncorepack npm dist-tag add @ashlr/hub@3.3.2 latest'],
+    ['npm line continuation', '\nnpm \\\n  dist-tag add @ashlr/hub@3.3.2 latest'],
     ['curl write', '\ncurl --request PUT https://registry.npmjs.org/example'],
     ['curl implicit data write', '\n/usr/bin/curl --data payload https://registry.npmjs.org/example'],
     ['curl short data write', '\ncurl -d@payload.json https://registry.npmjs.org/example'],
@@ -415,17 +575,17 @@ describe('M522 — production-promotion admission has no npm mutation authority'
     ['GitHub API input write', '\ngh api repos/example/project --input payload.json'],
     ['GitHub API short field write', '\ngh api repos/example/project -f state=closed'],
     ['GitHub API long field write', '\ngh api repos/example/project --raw-field state=closed'],
-    ['shell command wrapper', "\nbash -c 'npm dist-tag add @ashlr/hub@3.3.1 latest'"],
-    ['function wrapper', '\npromote() { "$@"; }\npromote npm dist-tag add @ashlr/hub@3.3.1 latest'],
+    ['shell command wrapper', "\nbash -c 'npm dist-tag add @ashlr/hub@3.3.2 latest'"],
+    ['function wrapper', '\npromote() { "$@"; }\npromote npm dist-tag add @ashlr/hub@3.3.2 latest'],
   ])('detects hidden authority via %s', (_label, payload) => {
     expect(mutationAuthorityViolations(`${promotionText}${payload}`)).not.toEqual([]);
   });
 
   it('does not let executable text hide beside the redacted receipt command', () => {
-    const needle = '--arg promotionCommand "npm dist-tag add @ashlr/hub@3.3.1 latest"';
+    const needle = '--arg promotionCommand "npm dist-tag add @ashlr/hub@3.3.2 latest"';
     const mutated = promotionText.replace(
       needle,
-      `${needle}; npm dist-tag add @ashlr/hub@3.3.1 latest`,
+      `${needle}; npm dist-tag add @ashlr/hub@3.3.2 latest`,
     );
     expect(mutated).not.toBe(promotionText);
     expect(mutationAuthorityViolations(mutated)).toContain('npm executable command');

@@ -11,6 +11,23 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+## [3.3.2] — 2026-08-20 — Safe successor after the failed immutable 3.3.1 release attempt
+
+- Carries forward the reviewed fail-closed runtime and operator-console closure
+  prepared for 3.3.1, plus the deterministic trajectory-fixture clock repair
+  merged at protected revision
+  `abd49a5049759e417d99089b88c628fd2364f79c`. That exact protected revision is
+  the required first-parent rollback for the 3.3.2 release merge.
+- Preserves the failed lightweight `v3.3.1` tag at
+  `f2c9353db35fbf12889bddafd8acc2b7ca5ae67c` and its failed release workflow
+  run `32396250683`, attempt 1. npm version 3.3.1 and its GitHub Release remain
+  absent; the tag, version, run, and absence must never be rewritten, rerun,
+  published, or reused.
+- Keeps the immutable public 3.3.0 predecessor quarantined at its exact package
+  integrity and tag while preparing 3.3.2 as the sole candidate successor. npm
+  `latest` remains 3.0.1 until isolated acceptance and a separate observation-
+  only promotion admission approved solely by `masonwyatt23` both succeed.
+
 ## [3.3.1] — 2026-08-18 — Fail-closed runtime boundaries and emergency neutralization of the quarantined 3.3.0 candidate
 
 - Restores the hostile-reviewed, fail-closed authority and web-security tree
@@ -27,10 +44,14 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 - Restores the operator-console security boundary: session-bound and expiry-bound
   SSE with exact logout revocation, descriptor-bound static reads, strict
   CSP/security headers, and stable bounded public error responses.
-- The source-neutralization merge itself was intentionally not a release. This
-  protected release-only change prepares immutable 3.3.1 from that safe first
-  parent; 3.3.1 is the sole successor eligible for candidate acceptance and
-  later explicit npm `latest` promotion.
+- The source-neutralization merge itself was intentionally not a release. The
+  protected lightweight `v3.3.1` tag remains fixed at
+  `f2c9353db35fbf12889bddafd8acc2b7ca5ae67c`; release workflow run
+  `32396250683`, attempt 1, failed during native verification. Every downstream
+  release stage—the signed canary, prepare, npm publish, publication
+  verification, and GitHub Release—was skipped. npm version 3.3.1 and its
+  GitHub Release remain absent. The tag and reserved version must not be moved,
+  reused, published, or promoted; 3.3.2 is the sole successor lane.
 
 ## [3.3.0] — 2026-08-17 — Fleet activation, autonomous merge, and the operator console
 

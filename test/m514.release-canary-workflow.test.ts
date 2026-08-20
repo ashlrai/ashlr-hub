@@ -47,7 +47,7 @@ function commit(cwd: string, name: string, value: string): string {
 describe('release workflow signed canary gate', () => {
   it('keeps the disposable canary credential-minimized and gates publication', () => {
     expect(workflow.env?.REQUIRED_ROLLBACK_REVISION)
-      .toBe('31aa0467f66af1fe4c66d1664f65e6fd3e4ba61b');
+      .toBe('abd49a5049759e417d99089b88c628fd2364f79c');
     expect(canary).toMatchObject({
       needs: 'verify',
       permissions: { contents: 'read' },
