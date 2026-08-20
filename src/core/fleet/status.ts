@@ -2564,6 +2564,8 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   let backlogItems = 0;
   let visibleQueueItems: WorkItem[] = [];
   let actionableQueueItems: WorkItem[] = [];
+  let cachedBacklogAdmissionCandidates: WorkItem[] = [];
+  let queuedAutonomyAdmissionCandidates: WorkItem[] = [];
   let nextQueueItems: FleetQueueNextItem[] = [];
   let eligibleBacklogItems = 0;
   let cooldownItems = 0;
@@ -2658,6 +2660,8 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       ? queuedRead.sourceState === 'complete' ? 'empty' : 'unknown'
       : queuedRead.sourceState === 'complete' ? 'fresh' : 'unknown';
     const freshCachedItems = cachedFreshness === 'fresh' ? cachedItems : [];
+    cachedBacklogAdmissionCandidates = freshCachedItems;
+    queuedAutonomyAdmissionCandidates = actionableQueuedItems;
     actionableQueueItems = mergeVisibleQueueItems(
       [...freshCachedItems, ...actionableQueuedItems],
       enrolledRepos,
@@ -2923,6 +2927,42 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     repairTerminalItems = eligibility.repairTerminalItems;
     repairQuarantinedItems = eligibility.repairQuarantinedItems;
     generatedRepairRoutes = eligibility.generatedRepairRoutes;
+    const eligibleItemKeys = new Set(eligibility.eligibleItems.map((item) =>
+      `${resolve(item.repo)}\0${item.id}`));
+    const sourceEligibleCount = (items: WorkItem[]): number => items.filter((item) =>
+      eligibleItemKeys.has(`${resolve(item.repo)}\0${item.id}`)).length;
+    if (queueInventorySources) {
+      const cachedActionableItems = sourceEligibleCount(cachedBacklogAdmissionCandidates);
+      const queuedActionableItems = sourceEligibleCount(queuedAutonomyAdmissionCandidates);
+      queueInventorySources = {
+        cachedBacklog: {
+          ...queueInventorySources.cachedBacklog,
+          actionableItems: cachedActionableItems,
+          detail: queueInventorySources.cachedBacklog.sourceState === 'complete'
+            ? `${cachedActionableItems}/${queueInventorySources.cachedBacklog.visibleItems} persisted backlog item(s) are daemon-eligible`
+            : queueInventorySources.cachedBacklog.detail,
+        },
+        queuedAutonomy: {
+          ...queueInventorySources.queuedAutonomy,
+          actionableItems: queuedActionableItems,
+          detail: queueInventorySources.queuedAutonomy.sourceState === 'complete'
+            ? `${queuedActionableItems}/${queueInventorySources.queuedAutonomy.visibleItems} queued autonomy item(s) are daemon-eligible`
+            : queueInventorySources.queuedAutonomy.detail,
+        },
+      };
+    }
+    const lifecycleAdmissionUnavailable =
+      repairLifecycleUnavailableItems > 0 ||
+      generatedRepairRoutes?.byReason.some((entry) => entry.reason === 'inspection-unavailable') === true ||
+      (repairControlBlockedItems > 0 && repairHandoffSummary === undefined);
+    if (lifecycleAdmissionUnavailable && queueSourceStatus !== 'unavailable') {
+      queueSourceStatus = 'degraded';
+    }
+    queueSourceDetail =
+      `${visibleQueueItems.length} visible queue item(s); ${eligibility.eligibleItems.length} daemon-eligible ` +
+      `from fresh sources; cached backlog ${queueInventorySources?.cachedBacklog.freshness ?? 'unknown'}; ` +
+      `queued autonomy ${queueInventorySources?.queuedAutonomy.freshness ?? 'unknown'}` +
+      (lifecycleAdmissionUnavailable ? '; repair lifecycle admission unavailable' : '');
     eligibleOrdinaryItems = queueSourceStatus === 'unknown' || queueSourceStatus === 'unavailable'
       ? null
       : eligibility.eligibleItems.filter((item) => !item.tags.includes('proposal-repair')).length;
@@ -2943,6 +2983,22 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     cooldownItems = 0;
     pendingItems = 0;
     nextEligibleAt = null;
+    if (queueSourceStatus !== 'unavailable') queueSourceStatus = 'degraded';
+    queueSourceDetail = `${queueSourceDetail}; daemon queue admission projection unavailable`;
+    if (queueInventorySources) {
+      queueInventorySources = {
+        cachedBacklog: {
+          ...queueInventorySources.cachedBacklog,
+          actionableItems: 0,
+          detail: `${queueInventorySources.cachedBacklog.detail}; daemon admission unavailable`,
+        },
+        queuedAutonomy: {
+          ...queueInventorySources.queuedAutonomy,
+          actionableItems: 0,
+          detail: `${queueInventorySources.queuedAutonomy.detail}; daemon admission unavailable`,
+        },
+      };
+    }
   }
 
   // ── merges (authenticated realized proposal witnesses only) ───────────────
