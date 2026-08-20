@@ -27,6 +27,7 @@ import {
   evaluateMergeAuthority,
   evaluateEvidenceAutoMergePreflight,
   defaultBranch,
+  resolveRemoteBranchHead,
   verifyProposal,
   autoMergeProposal,
 } from '../src/core/inbox/merge.js';
@@ -40,14 +41,20 @@ import type { AshlrConfig, Proposal } from '../src/core/types.js';
 const mockIsWebApp = vi.hoisted(() => vi.fn<[string], boolean>(() => false));
 const mockVerifyInBrowser = vi.hoisted(() => vi.fn());
 const mockLocalCommitTreeHook = vi.hoisted(() => vi.fn());
+const mockGitExec = vi.hoisted(() => vi.fn());
+const mockLsRemote = vi.hoisted(() => ({ output: null as string | null }));
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
   return {
     ...actual,
     execFileSync: (...args: Parameters<typeof actual.execFileSync>) => {
-      const result = actual.execFileSync(...args);
+      if (args[0] === 'git') mockGitExec(args[1]);
       const commandArgs = Array.isArray(args[1]) ? args[1].map(String) : [];
+      if (args[0] === 'git' && commandArgs.includes('ls-remote') && mockLsRemote.output !== null) {
+        return mockLsRemote.output;
+      }
+      const result = actual.execFileSync(...args);
       if (args[0] === 'git' && commandArgs.includes('commit-tree')) mockLocalCommitTreeHook();
       return result;
     },
@@ -139,6 +146,8 @@ beforeEach(() => {
   mockIsWebApp.mockReturnValue(false);
   mockVerifyInBrowser.mockReset();
   mockLocalCommitTreeHook.mockReset();
+  mockGitExec.mockReset();
+  mockLsRemote.output = null;
   setKill(false);
 });
 
@@ -292,6 +301,73 @@ describe('M47 defaultBranch', () => {
 
   it('falls back to main on a non-repo path (never throws)', () => {
     expect(defaultBranch(path.join(os.tmpdir(), 'definitely-not-a-repo-xyz'))).toBe('main');
+  });
+});
+
+// ===========================================================================
+// resolveRemoteBranchHead — exact argv and pre-process validation
+// ===========================================================================
+
+describe('M47 resolveRemoteBranchHead', () => {
+  it('uses an option terminator and one exact fully-qualified branch ref', () => {
+    initRepo(tmpRepo, 'main');
+    const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m47-ls-remote-')) + '.git';
+    execFileSync('git', ['init', '--bare', '--initial-branch=main', bare], { stdio: 'pipe' });
+    git(tmpRepo, ['remote', 'add', 'origin', bare]);
+    git(tmpRepo, ['push', '-u', 'origin', 'main']);
+    const expected = git(tmpRepo, ['rev-parse', 'main']);
+    mockGitExec.mockReset();
+
+    expect(resolveRemoteBranchHead(tmpRepo, 'main')).toBe(expected);
+    expect(mockGitExec).toHaveBeenCalledTimes(1);
+    expect(mockGitExec).toHaveBeenCalledWith([
+      'ls-remote', '--heads', '--', 'origin', 'refs/heads/main',
+    ]);
+  });
+
+  it('accepts one canonical mocked row without a terminal newline', () => {
+    const sha = 'a'.repeat(40);
+    mockLsRemote.output = `${sha}\trefs/heads/main`;
+
+    expect(resolveRemoteBranchHead(tmpRepo, 'main')).toBe(sha);
+    expect(mockGitExec).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['carriage return', `${'a'.repeat(40)}\trefs/heads/main\r\n`],
+    ['blank output', ''],
+    ['blank row', '\n'],
+    ['multiple rows', `${'a'.repeat(40)}\trefs/heads/main\n${'b'.repeat(40)}\trefs/heads/other\n`],
+    ['duplicate rows', `${'a'.repeat(40)}\trefs/heads/main\n${'a'.repeat(40)}\trefs/heads/main\n`],
+    ['conflicting rows', `${'a'.repeat(40)}\trefs/heads/main\n${'b'.repeat(40)}\trefs/heads/main\n`],
+    ['symref marker', 'ref: refs/heads/main\tHEAD\n'],
+    ['peeled symref suffix', `${'a'.repeat(40)}\trefs/heads/main^{}\n`],
+    ['leading whitespace', ` ${'a'.repeat(40)}\trefs/heads/main\n`],
+    ['trailing whitespace', `${'a'.repeat(40)}\trefs/heads/main \n`],
+    ['spaces instead of tab', `${'a'.repeat(40)} refs/heads/main\n`],
+    ['extra field', `${'a'.repeat(40)}\trefs/heads/main\textra\n`],
+    ['ref prefix ambiguity', `${'a'.repeat(40)}\trefs/heads/mains\n`],
+    ['ref suffix ambiguity', `${'a'.repeat(40)}\trefs/heads/xmain\n`],
+    ['uppercase noncanonical oid', `${'A'.repeat(40)}\trefs/heads/main\n`],
+    ['two terminal newlines', `${'a'.repeat(40)}\trefs/heads/main\n\n`],
+    ['oversized output', `${'a'.repeat(40)}\trefs/heads/main${'x'.repeat(2_048)}`],
+  ])('rejects %s instead of selecting a plausible row', (_label, output) => {
+    mockLsRemote.output = output;
+
+    expect(resolveRemoteBranchHead(tmpRepo, 'main')).toBeNull();
+    expect(mockGitExec).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['main', '--upload-pack=touch /tmp/ashlr-owned'],
+    ['--upload-pack=touch', 'origin'],
+    ['main*', 'origin'],
+    ['main\nrefs/heads/other', 'origin'],
+  ])('refuses corrupt branch/remote input before launching Git', (branch, remote) => {
+    mockGitExec.mockReset();
+
+    expect(resolveRemoteBranchHead(tmpRepo, branch, remote)).toBeNull();
+    expect(mockGitExec).not.toHaveBeenCalled();
   });
 });
 

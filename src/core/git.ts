@@ -21,6 +21,7 @@ const GIT_TIMEOUT = 5_000; // ms
 
 const GITHUB_OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/;
 const GITHUB_REPO_RE = /^[A-Za-z0-9_.-]+$/;
+const GIT_REMOTE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 /**
  * Run a git command inside `cwd`. Returns trimmed stdout or null on error.
@@ -54,6 +55,29 @@ function canonicalGitHubDestination(remote: string): string | null {
     return null;
   }
   return `${owner.toLowerCase()}/${repo.toLowerCase()}`;
+}
+
+/** Validate an exact Git branch name without launching Git. */
+export function isValidGitBranchName(value: unknown): value is string {
+  const forbidden = '~^:?*[\\';
+  if (typeof value !== 'string' || !value || value === '@' || value.startsWith('-') ||
+    Buffer.byteLength(value, 'utf8') > 1_024 || [...value].some((char) => {
+      const code = char.codePointAt(0)!;
+      return code <= 32 || code === 127 || forbidden.includes(char);
+    }) || value.includes('..') || value.includes('@{') || value.startsWith('/') ||
+    value.endsWith('/') || value.endsWith('.')) return false;
+  return value.split('/').every((part) => Boolean(part) && !part.startsWith('.') && !part.endsWith('.lock'));
+}
+
+/**
+ * Accept only a bounded configured remote name or an already-supported GitHub
+ * transport. Option-like, rewritten, local-path, and malformed destinations
+ * are refused before they can reach `git ls-remote`.
+ */
+export function isSafeGitLsRemoteDestination(value: unknown): value is string {
+  if (typeof value !== 'string' || !value || value.startsWith('-') ||
+    Buffer.byteLength(value, 'utf8') > 2_048) return false;
+  return GIT_REMOTE_NAME_RE.test(value) || canonicalGitHubDestination(value) !== null;
 }
 
 function gitUrls(output: string | null): string[] | null {

@@ -13,6 +13,7 @@ import {
 } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { enrollmentPath } from '../sandbox/policy.js';
+import { isValidGitBranchName } from '../git.js';
 import { loadExistingProvenanceKey } from '../foundry/provenance.js';
 import type { EnrollmentSnapshotV2 } from './post-merge-population-v2.js';
 import {
@@ -76,17 +77,6 @@ function noControls(value: string): boolean {
 
 function compareExact(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
-}
-
-function validGitBranch(value: string): boolean {
-  const forbidden = '~^:?*[\\';
-  if (!value || value === '@' || Buffer.byteLength(value, 'utf8') > 1_024 ||
-    [...value].some((char) => {
-      const code = char.codePointAt(0)!;
-      return code <= 32 || code === 127 || forbidden.includes(char);
-    }) || value.includes('..') || value.includes('@{') || value.startsWith('/') ||
-    value.endsWith('/') || value.endsWith('.')) return false;
-  return value.split('/').every((part) => Boolean(part) && !part.startsWith('.') && !part.endsWith('.lock'));
 }
 
 function canonicalTimestamp(value: unknown): value is string {
@@ -181,7 +171,7 @@ export function strictDefaultBranch(repo: string, timeoutMs: number): string | n
     ], { encoding: 'utf8', stdio: 'pipe', timeout: timeoutMs }).trim();
     if (!output.startsWith('origin/') || output.length <= 'origin/'.length) return null;
     const branch = output.slice('origin/'.length);
-    return validGitBranch(branch) ? branch : null;
+    return isValidGitBranchName(branch) ? branch : null;
   } catch {
     try {
       const remotes = execFileSync('git', ['-C', repo, 'remote'], {
@@ -195,7 +185,7 @@ export function strictDefaultBranch(repo: string, timeoutMs: number): string | n
       const branch = execFileSync('git', ['-C', repo, 'symbolic-ref', '--short', 'HEAD'], {
         encoding: 'utf8', stdio: 'pipe', timeout: timeoutMs,
       }).trim();
-      return validGitBranch(branch) ? branch : null;
+      return isValidGitBranchName(branch) ? branch : null;
     } catch { return null; }
   }
 }
@@ -243,7 +233,7 @@ function branchSnapshot(
     try { branch = deps.resolveDefaultBranch(repo, Math.min(GIT_TIMEOUT_MS, remaining)); }
     catch { branch = null; }
     const identityAfter = deps.inspectRepository(repo);
-    if (!branch || !validGitBranch(branch) || !identityAfter ||
+    if (!branch || !isValidGitBranchName(branch) || !identityAfter ||
       JSON.stringify(identityBefore) !== JSON.stringify(identityAfter)) return null;
     branches.push({ repo, branch });
     identities.push(identityAfter);
@@ -341,7 +331,7 @@ export function verifyEnrollmentCutoffSnapshotV2(
     if (JSON.stringify(branches) !== JSON.stringify(snapshot.defaultBranches) ||
       branches.some((row, index) => Object.keys(row).length !== 2 ||
         !Object.hasOwn(row, 'repo') || !Object.hasOwn(row, 'branch') ||
-        row.repo !== repos[index] || !validGitBranch(row.branch))) return false;
+        row.repo !== repos[index] || !isValidGitBranchName(row.branch))) return false;
     if (!Array.isArray(snapshot.repositoryIdentities) ||
       snapshot.repositoryIdentities.length !== repos.length ||
       snapshot.repositoryIdentities.some((row, index) => Object.keys(row).length !== 5 ||
