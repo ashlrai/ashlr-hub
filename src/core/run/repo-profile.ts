@@ -332,7 +332,7 @@ function parseContractProfiles(raw: unknown, errors: string[], label: string): V
   return profiles.length > 0 ? [...new Set(profiles)] : undefined;
 }
 
-interface ParsedVerifyContract {
+export interface ParsedRepoVerifyContractDocument {
   mode: RepoVerifyContractMode;
   commands: VerifyCommand[];
   authorityFiles: string[];
@@ -431,16 +431,15 @@ function parseAuthorityFile(repoRoot: string, raw: unknown, errors: string[], la
   return normalized;
 }
 
-function parseVerifyContract(repoRoot: string): ParsedVerifyContract | null {
-  const path = join(repoRoot, VERIFY_CONTRACT_FILE);
-  if (!existsSync(path)) return null;
-
+export function parseRepoVerifyContractDocument(
+  repoRoot: string,
+  contents: string,
+): ParsedRepoVerifyContractDocument {
   const errors: string[] = [];
   let raw: unknown;
   try {
-    raw = JSON.parse(readFileSync(path, 'utf8'));
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    raw = JSON.parse(contents);
+  } catch {
     return {
       mode: 'augment-detected',
       commands: [],
@@ -450,7 +449,7 @@ function parseVerifyContract(repoRoot: string): ParsedVerifyContract | null {
         valid: false,
         commands: [],
         authorityFiles: [],
-        errors: [`invalid JSON: ${msg}`],
+        errors: ['invalid-json'],
       }),
     };
   }
@@ -580,6 +579,28 @@ function parseVerifyContract(repoRoot: string): ParsedVerifyContract | null {
       errors,
     }),
   };
+}
+
+function parseVerifyContract(repoRoot: string): ParsedRepoVerifyContractDocument | null {
+  const path = join(repoRoot, VERIFY_CONTRACT_FILE);
+  if (!existsSync(path)) return null;
+  try {
+    return parseRepoVerifyContractDocument(repoRoot, readFileSync(path, 'utf8'));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      mode: 'augment-detected',
+      commands: [],
+      authorityFiles: [],
+      summary: summarizeVerifyContract({
+        present: true,
+        valid: false,
+        commands: [],
+        authorityFiles: [],
+        errors: [`unreadable contract: ${msg}`],
+      }),
+    };
+  }
 }
 
 export function detectPackageManager(root: string): RepoPackageManager {

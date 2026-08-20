@@ -1,0 +1,434 @@
+import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import {
+  accessSync,
+  constants as fsConstants,
+  lstatSync,
+  readdirSync,
+  realpathSync,
+  type BigIntStats,
+} from 'node:fs';
+import { userInfo } from 'node:os';
+import {
+  delimiter,
+  dirname,
+  isAbsolute,
+  join,
+  parse,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
+
+import { assurePrivateStoragePath } from './private-storage.js';
+
+const MAX_ACL_OUTPUT_BYTES = 64 * 1024;
+const MACOS_MUTATING_ACL_RIGHTS = new Set([
+  'add_file',
+  'add_subdirectory',
+  'append',
+  'chown',
+  'delete',
+  'delete_child',
+  'directory_inherit',
+  'file_inherit',
+  'write',
+  'writeattr',
+  'writeextattr',
+  'writesecurity',
+]);
+
+export interface PathCustodyProof {
+  canonicalPath: string;
+  digest: string;
+}
+
+export interface TrustedExecutablePin extends PathCustodyProof {
+  executable: string;
+}
+
+interface PosixHierarchyOptions {
+  leafKind: 'file' | 'directory';
+  requireCurrentUserLeaf: boolean;
+  requireRootOwnership?: boolean;
+  allowTrustedInstallGroupWrite?: boolean;
+  allowedRoots?: readonly string[];
+  untrustedRoots?: readonly string[];
+}
+
+function contained(root: string, candidate: string): boolean {
+  const rel = relative(root, candidate);
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+function canonicalIfPresent(path: string): string {
+  try {
+    return realpathSync(resolve(path));
+  } catch {
+    return resolve(path);
+  }
+}
+
+function macosAclSafe(path: string, allowCurrentUserMutatingAcl = true): boolean {
+  if (process.platform !== 'darwin') return true;
+  const result = spawnSync('/bin/ls', ['-led', path], {
+    encoding: 'utf8',
+    env: { LC_ALL: 'C', NO_COLOR: '1' },
+    maxBuffer: MAX_ACL_OUTPUT_BYTES,
+    shell: false,
+    stdio: ['ignore', 'pipe', 'ignore'],
+    timeout: 2_000,
+    windowsHide: true,
+  });
+  if (result.error || result.status !== 0 || typeof result.stdout !== 'string' ||
+      Buffer.byteLength(result.stdout, 'utf8') > MAX_ACL_OUTPUT_BYTES) return false;
+  const lines = result.stdout.split(/\r?\n/);
+  const username = userInfo().username;
+  for (const line of lines.slice(1).filter((value) => value.trim().length > 0)) {
+    const match = line.match(/^\s*\d+:\s+(.+?)\s+(allow|deny)\s+(.+)$/);
+    if (!match) return false;
+    const principal = match[1]!;
+    if (match[2] === 'deny' || principal === 'user:root' ||
+        (allowCurrentUserMutatingAcl && principal === `user:${username}`)) continue;
+    const rights = match[3]!.split(/[\s,]+/).filter(Boolean);
+    if (rights.some((right) => MACOS_MUTATING_ACL_RIGHTS.has(right))) return false;
+  }
+  return true;
+}
+
+function macosInstallGroupSafe(gid: bigint): boolean {
+  if (process.platform !== 'darwin') return false;
+  const runDscl = (args: string[]): string | null => {
+    const result = spawnSync('/usr/bin/dscl', ['.', ...args], {
+      encoding: 'utf8',
+      env: { LC_ALL: 'C', NO_COLOR: '1' },
+      maxBuffer: MAX_ACL_OUTPUT_BYTES,
+      shell: false,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 2_000,
+      windowsHide: true,
+    });
+    return !result.error && result.status === 0 && typeof result.stdout === 'string' &&
+      Buffer.byteLength(result.stdout, 'utf8') <= MAX_ACL_OUTPUT_BYTES
+      ? result.stdout
+      : null;
+  };
+  const groupSearch = runDscl(['-search', '/Groups', 'PrimaryGroupID', gid.toString()]);
+  const groupName = groupSearch?.match(/^([^\s]+)\s+PrimaryGroupID/m)?.[1];
+  if (!groupName || !/^[A-Za-z0-9_.-]+$/.test(groupName)) return false;
+  const username = userInfo().username;
+  const groupRecord = runDscl(['-read', `/Groups/${groupName}`]);
+  const primaryUsers = runDscl(['-search', '/Users', 'PrimaryGroupID', gid.toString()]);
+  if (groupRecord === null || primaryUsers === null) return false;
+  const members = groupRecord.match(/^GroupMembership:\s*(.*)$/m)?.[1]?.trim().split(/\s+/).filter(Boolean) ?? [];
+  const primaryNames = primaryUsers.split(/\r?\n/)
+    .map((line) => line.match(/^([^\s]+)\s+PrimaryGroupID/)?.[1])
+    .filter((value): value is string => value !== undefined);
+  const nestedValues = groupRecord.match(/^NestedGroups:\s*(.*)$/m)?.[1]?.trim() ?? '';
+  const safe = [...members, ...primaryNames].every((member) => member === username || member === 'root') &&
+    nestedValues.length === 0;
+  return safe;
+}
+
+function snapshotStat(path: string, stat: BigIntStats): string[] {
+  return [
+    path,
+    stat.dev.toString(),
+    stat.ino.toString(),
+    stat.mode.toString(),
+    stat.uid.toString(),
+    stat.gid.toString(),
+    stat.nlink.toString(),
+    stat.size.toString(),
+    stat.mtimeNs.toString(),
+    stat.ctimeNs.toString(),
+  ];
+}
+
+function inspectPosixHierarchy(path: string, options: PosixHierarchyOptions): PathCustodyProof | null {
+  if (process.platform === 'win32' || typeof process.getuid !== 'function') return null;
+  try {
+    const absolute = resolve(path);
+    if (!isAbsolute(absolute) || realpathSync(absolute) !== absolute) return null;
+    const canonicalAllowedRoots = (options.allowedRoots ?? []).map(canonicalIfPresent);
+    if (canonicalAllowedRoots.length > 0 && !canonicalAllowedRoots.some((root) => contained(root, absolute))) {
+      return null;
+    }
+    const canonicalUntrustedRoots = (options.untrustedRoots ?? []).map(canonicalIfPresent);
+    if (canonicalUntrustedRoots.some((root) => contained(root, absolute))) return null;
+
+    const root = parse(absolute).root;
+    const segments = relative(root, absolute).split(sep).filter(Boolean);
+    const snapshot: string[][] = [];
+    let cursor = root;
+    for (let index = -1; index < segments.length; index += 1) {
+      if (index >= 0) cursor = join(cursor, segments[index]!);
+      const stat = lstatSync(cursor, { bigint: true });
+      const leaf = index === segments.length - 1;
+      if (stat.isSymbolicLink() || (leaf
+        ? options.leafKind === 'file' ? !stat.isFile() : !stat.isDirectory()
+        : !stat.isDirectory())) return null;
+      if (options.requireRootOwnership ? stat.uid !== 0n : stat.uid !== 0n && stat.uid !== BigInt(process.getuid())) {
+        return null;
+      }
+      if (leaf && options.requireCurrentUserLeaf && stat.uid !== BigInt(process.getuid())) return null;
+      const otherWritable = (stat.mode & 0o002n) !== 0n;
+      const groupWritable = (stat.mode & 0o020n) !== 0n;
+      const rootStickyDirectory = stat.isDirectory() && stat.uid === 0n && (stat.mode & 0o1000n) !== 0n;
+      const trustedInstallGroup = options.allowTrustedInstallGroupWrite === true &&
+        stat.uid === BigInt(process.getuid()) && macosInstallGroupSafe(stat.gid);
+      if ((otherWritable && (!rootStickyDirectory || options.requireRootOwnership === true)) ||
+          (groupWritable && !trustedInstallGroup)) return null;
+      if (!macosAclSafe(cursor, options.requireRootOwnership !== true)) return null;
+      snapshot.push(snapshotStat(cursor, stat));
+    }
+    return {
+      canonicalPath: absolute,
+      digest: createHash('sha256').update(JSON.stringify(snapshot)).digest('hex'),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function inspectOwnedAuthorityPath(path: string, anchorPath: string): PathCustodyProof | null {
+  const absolute = resolve(path);
+  const anchor = resolve(anchorPath);
+  if (!contained(anchor, absolute)) return null;
+  if (process.platform === 'win32') {
+    const assurance = assurePrivateStoragePath(absolute, 'file', 'inspect-owned', { anchorPath: anchor });
+    if (!assurance.ok) return null;
+    try {
+      const canonicalPath = realpathSync(absolute);
+      const stat = lstatSync(canonicalPath, { bigint: true });
+      if (!stat.isFile() || stat.isSymbolicLink()) return null;
+      return {
+        canonicalPath,
+        digest: createHash('sha256').update(JSON.stringify(snapshotStat(canonicalPath, stat))).digest('hex'),
+      };
+    } catch {
+      return null;
+    }
+  }
+  try {
+    const canonicalAnchor = realpathSync(anchor);
+    const canonicalPath = realpathSync(absolute);
+    if (canonicalAnchor !== anchor || canonicalPath !== absolute ||
+        relative(anchor, absolute) !== relative(canonicalAnchor, canonicalPath)) return null;
+    return inspectPosixHierarchy(canonicalPath, {
+      leafKind: 'file',
+      requireCurrentUserLeaf: true,
+      allowedRoots: [canonicalAnchor],
+    });
+  } catch {
+    return null;
+  }
+}
+
+/** Platforms without an ACL-aware system custody proof deliberately fail closed. */
+export function trustedSystemGitCandidates(platform: NodeJS.Platform = process.platform): readonly string[] {
+  if (platform === 'darwin') return ['/usr/bin/git'];
+  return [];
+}
+
+/** Only explicit system locations can provide GitHub authority evidence. */
+export function trustedSystemGithubCandidates(platform: NodeJS.Platform = process.platform): readonly string[] {
+  if (platform === 'darwin') return ['/usr/bin/gh', '/usr/local/bin/gh', '/opt/homebrew/bin/gh'];
+  if (platform === 'linux') return ['/usr/bin/gh', '/usr/local/bin/gh'];
+  return [];
+}
+
+/** A static, root-custodied empty directory is the only accepted gh config/home root. */
+export function trustedSystemGithubConfigCandidates(
+  platform: NodeJS.Platform = process.platform,
+): readonly string[] {
+  if (platform === 'darwin') return ['/private/var/empty'];
+  if (platform === 'linux') return ['/var/empty', '/usr/share/empty'];
+  return [];
+}
+
+export function resolveTrustedGithubConfigRoot(): PathCustodyProof | null {
+  for (const candidate of trustedSystemGithubConfigCandidates()) {
+    try {
+      const canonical = realpathSync(candidate);
+      if (canonical !== candidate || readdirSync(canonical).length !== 0) continue;
+      const proof = inspectPosixHierarchy(canonical, {
+        leafKind: 'directory',
+        requireCurrentUserLeaf: false,
+        requireRootOwnership: true,
+      });
+      if (proof) return proof;
+    } catch {
+      // Missing, non-empty, or insufficiently custodied roots fail closed.
+    }
+  }
+  return null;
+}
+
+function inspectTrustedSystemGitExecutable(
+  executable: string,
+  untrustedRoots: readonly string[],
+): TrustedExecutablePin | null {
+  if (process.platform === 'win32' || typeof process.getuid !== 'function' || !isAbsolute(executable)) return null;
+  try {
+    const canonical = realpathSync(resolve(executable));
+    const explicitlyAllowed = trustedSystemGitCandidates().some((candidate) => {
+      try {
+        return realpathSync(candidate) === canonical;
+      } catch {
+        return false;
+      }
+    });
+    if (!explicitlyAllowed) return null;
+    accessSync(canonical, fsConstants.X_OK);
+    const proof = inspectPosixHierarchy(canonical, {
+      leafKind: 'file',
+      requireCurrentUserLeaf: false,
+      requireRootOwnership: true,
+      untrustedRoots,
+    });
+    if (!proof) return null;
+    const leaf = lstatSync(canonical, { bigint: true });
+    if ((leaf.mode & 0o111n) === 0n) return null;
+    return { ...proof, executable: canonical };
+  } catch {
+    return null;
+  }
+}
+
+function inspectTrustedSystemGithubExecutable(
+  executable: string,
+  untrustedRoots: readonly string[],
+): TrustedExecutablePin | null {
+  if (process.platform === 'win32' || typeof process.getuid !== 'function') return null;
+  try {
+    if (!isAbsolute(executable)) return null;
+    const canonical = realpathSync(resolve(executable));
+    const explicitlyAllowed = trustedSystemGithubCandidates().some((candidate) => {
+      try {
+        return realpathSync(candidate) === canonical;
+      } catch {
+        return false;
+      }
+    });
+    if (!explicitlyAllowed) return null;
+    accessSync(canonical, fsConstants.X_OK);
+    const proof = inspectPosixHierarchy(canonical, {
+      leafKind: 'file',
+      requireCurrentUserLeaf: false,
+      requireRootOwnership: true,
+      untrustedRoots,
+    });
+    if (!proof) return null;
+    const leaf = lstatSync(canonical, { bigint: true });
+    if (leaf.nlink !== 1n || (leaf.mode & 0o111n) === 0n) return null;
+    return { ...proof, executable: canonical };
+  } catch {
+    return null;
+  }
+}
+
+export function resolveTrustedGithubCli(untrustedRoots: readonly string[] = []): TrustedExecutablePin | null {
+  for (const executable of trustedSystemGithubCandidates()) {
+    const pin = inspectTrustedSystemGithubExecutable(executable, untrustedRoots);
+    if (pin) return pin;
+  }
+  return null;
+}
+
+export function verifyTrustedGithubCli(
+  pin: TrustedExecutablePin,
+  untrustedRoots: readonly string[] = [],
+): boolean {
+  if (!pin || typeof pin !== 'object' || typeof pin.executable !== 'string' ||
+      typeof pin.canonicalPath !== 'string' || typeof pin.digest !== 'string' ||
+      pin.executable !== pin.canonicalPath || !isAbsolute(pin.executable) ||
+      !/^[0-9a-f]{64}$/.test(pin.digest)) return false;
+  const observed = inspectTrustedSystemGithubExecutable(pin.executable, untrustedRoots);
+  return observed !== null && observed.executable === pin.executable && observed.digest === pin.digest;
+}
+
+export function resolveTrustedGitCli(untrustedRoots: readonly string[] = []): TrustedExecutablePin | null {
+  for (const executable of trustedSystemGitCandidates()) {
+    const pin = inspectTrustedSystemGitExecutable(executable, untrustedRoots);
+    if (pin) return pin;
+  }
+  return null;
+}
+
+export function verifyTrustedGitCli(
+  pin: TrustedExecutablePin,
+  untrustedRoots: readonly string[] = [],
+): boolean {
+  if (!pin || typeof pin !== 'object' || typeof pin.executable !== 'string' ||
+      typeof pin.canonicalPath !== 'string' || typeof pin.digest !== 'string' ||
+      pin.executable !== pin.canonicalPath || !isAbsolute(pin.executable) ||
+      !/^[0-9a-f]{64}$/.test(pin.digest)) return false;
+  const observed = inspectTrustedSystemGitExecutable(pin.executable, untrustedRoots);
+  return observed !== null && observed.executable === pin.executable && observed.digest === pin.digest;
+}
+
+export function trustedGitEnvironment(pin: TrustedExecutablePin): NodeJS.ProcessEnv {
+  const account = userInfo();
+  const systemPath = process.platform === 'darwin'
+    ? ['/usr/bin', '/bin', '/usr/sbin', '/sbin']
+    : ['/usr/bin', '/bin'];
+  const path = [...new Set([dirname(pin.executable), ...systemPath])].join(delimiter);
+  const env: NodeJS.ProcessEnv = {
+    HOME: account.homedir,
+    USER: account.username,
+    PATH: path,
+  };
+  for (const key of ['SystemRoot', 'WINDIR']) {
+    if (process.env[key]) env[key] = process.env[key];
+  }
+  const nullDevice = process.platform === 'win32' ? 'NUL' : '/dev/null';
+  return {
+    ...env,
+    GIT_ATTR_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: nullDevice,
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_SYSTEM: nullDevice,
+    GIT_NO_LAZY_FETCH: '1',
+    GIT_NO_REPLACE_OBJECTS: '1',
+    GIT_OPTIONAL_LOCKS: '0',
+    GIT_PAGER: 'cat',
+    GIT_PROTOCOL_FROM_USER: '0',
+    GIT_TERMINAL_PROMPT: '0',
+    LC_ALL: 'C',
+    NO_COLOR: '1',
+    PAGER: 'cat',
+  };
+}
+
+/**
+ * Construct the whitelist-only gh environment after config-root custody has
+ * already been established. This helper grants no authority by itself.
+ */
+export function sanitizeGithubAuthorityEnvironment(
+  configRoot: string,
+  sourceEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const token = sourceEnv['GH_TOKEN'] ?? sourceEnv['GITHUB_TOKEN'];
+  const env: NodeJS.ProcessEnv = {
+    HOME: configRoot,
+    GH_CONFIG_DIR: configRoot,
+    XDG_CONFIG_HOME: configRoot,
+  };
+  if (token) env['GH_TOKEN'] = token;
+  return {
+    ...env,
+    GH_HOST: 'github.com',
+    GH_NO_UPDATE_NOTIFIER: '1',
+    GH_PAGER: 'cat',
+    GH_PROMPT_DISABLED: '1',
+    LC_ALL: 'C',
+    NO_COLOR: '1',
+  };
+}
+
+export function trustedGithubEnvironment(): NodeJS.ProcessEnv | null {
+  const configRoot = resolveTrustedGithubConfigRoot();
+  if (!configRoot) return null;
+  return sanitizeGithubAuthorityEnvironment(configRoot.canonicalPath);
+}
