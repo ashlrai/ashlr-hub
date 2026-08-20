@@ -12,11 +12,11 @@ on:
   workflow_dispatch:
     inputs:
       release_run_id:
-        description: Successful v3.3.1 Release workflow run ID
+        description: Successful v3.3.2 Release workflow run ID
         required: true
         type: string
       candidate_integrity:
-        description: Exact sha512 SRI accepted for @ashlr/hub@3.3.1
+        description: Exact sha512 SRI accepted for @ashlr/hub@3.3.2
         required: true
         type: string
       acceptance_attestation_sha256:
@@ -40,14 +40,18 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  PROMOTION_VERSION: "3.3.1"
+  PROMOTION_VERSION: "3.3.2"
   PROMOTION_TAG: latest
   REQUIRED_CANDIDATE_TAG: candidate
   BASELINE_LATEST_VERSION: "3.0.1"
-  REQUIRED_ROLLBACK_REVISION: "31aa0467f66af1fe4c66d1664f65e6fd3e4ba61b"
+  REQUIRED_ROLLBACK_REVISION: "abd49a5049759e417d99089b88c628fd2364f79c"
   QUARANTINED_VERSION: "3.3.0"
   QUARANTINED_INTEGRITY: "sha512-mYVuJZyoXeSnnqivoLzyZggNgpJoWM8glTI7CW0oBfQ0RCHx0xueTrLwLTZBg5W+E4zPOJNbckptYeb5YsdOHw=="
   QUARANTINED_TAG_SHA: "d07f6a96eda664d865b9255f71c6f56e8cd9d7c7"
+  FAILED_CANDIDATE_VERSION: "3.3.1"
+  FAILED_CANDIDATE_TAG_SHA: "f2c9353db35fbf12889bddafd8acc2b7ca5ae67c"
+  FAILED_CANDIDATE_RELEASE_RUN_ID: "32396250683"
+  REQUIRED_PROMOTION_APPROVER: masonwyatt23
 
 jobs:
   admit:
@@ -103,16 +107,18 @@ jobs:
 
           environment_json="$(gh api \
             "repos/${GITHUB_REPOSITORY}/environments/npm-production-promotion")"
-          jq -e --arg actor "$GITHUB_ACTOR" \
-            '.name == "npm-production-promotion" and
+          jq -e --arg approver "$REQUIRED_PROMOTION_APPROVER" \
+            '([.protection_rules[]? |
+                select(.type == "required_reviewers")]) as $reviewerRules |
+             .name == "npm-production-promotion" and
              .can_admins_bypass == false and
              .deployment_branch_policy.protected_branches == true and
              .deployment_branch_policy.custom_branch_policies == false and
-             any(.protection_rules[]?;
-               .type == "required_reviewers" and
-               .prevent_self_review == true and
-               any(.reviewers[]?;
-                 .type == "User" and .reviewer.login != $actor))' \
+             ($reviewerRules | length) == 1 and
+             $reviewerRules[0].prevent_self_review == false and
+             ($reviewerRules[0].reviewers | type == "array" and length == 1) and
+             $reviewerRules[0].reviewers[0].type == "User" and
+             $reviewerRules[0].reviewers[0].reviewer.login == $approver' \
             <<<"$environment_json" >/dev/null
 
           branch_json="$(gh api "repos/${GITHUB_REPOSITORY}/branches/master")"
@@ -140,6 +146,48 @@ jobs:
             --arg sha "$QUARANTINED_TAG_SHA" \
             '.ref == $ref and .object.type == "commit" and .object.sha == $sha' \
             <<<"$quarantine_tag_json" >/dev/null
+
+          failed_tag="v${FAILED_CANDIDATE_VERSION}"
+          failed_tag_json="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/tags/${failed_tag}")"
+          jq -e --arg ref "refs/tags/${failed_tag}" \
+            --arg sha "$FAILED_CANDIDATE_TAG_SHA" \
+            '.ref == $ref and .object.type == "commit" and .object.sha == $sha' \
+            <<<"$failed_tag_json" >/dev/null
+          failed_run_json="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${FAILED_CANDIDATE_RELEASE_RUN_ID}")"
+          jq -e --arg sha "$FAILED_CANDIDATE_TAG_SHA" --arg tag "$failed_tag" \
+            '.path == ".github/workflows/release.yml" and
+             .event == "push" and .head_branch == $tag and .head_sha == $sha and
+             .status == "completed" and .conclusion == "failure" and
+             .run_attempt == 1' \
+            <<<"$failed_run_json" >/dev/null
+          failed_jobs_json="$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${FAILED_CANDIDATE_RELEASE_RUN_ID}/jobs?filter=latest&per_page=100")"
+          jq -e \
+            '[.jobs[] | select(
+               .name == "Signed release canary (NO_AUTHORITY)" or
+               .name == "Prepare immutable npm candidate (NO_PUBLISH_AUTHORITY)" or
+               .name == "Publish prepared candidate to npm" or
+               .name == "Verify npm candidate publication (NO_PUBLISH_AUTHORITY)" or
+               .name == "Create GitHub release")] as $skipped |
+             ($skipped | length) == 5 and
+             ($skipped | map(.name) | unique | length) == 5 and
+             all($skipped[]; .status == "completed" and .conclusion == "skipped")' \
+            <<<"$failed_jobs_json" >/dev/null
+          set +e
+          failed_release_probe="$(gh api --include \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${failed_tag}" \
+            --jq '.id' 2>"$RUNNER_TEMP/failed-release-probe.err")"
+          failed_release_probe_rc=$?
+          set -e
+          failed_release_status="$(printf '%s\n' "$failed_release_probe" |
+            sed -n '1s#^HTTP/[0-9.]* \([0-9][0-9][0-9]\).*$#\1#p')"
+          if [[ "$failed_release_probe_rc" -eq 0 || "$failed_release_status" != "404" ]]; then
+            cat "$RUNNER_TEMP/failed-release-probe.err" >&2
+            echo "Failed 3.3.1 GitHub release is no longer absent." >&2
+            exit 1
+          fi
 
           comparison="$(gh api \
             "repos/${GITHUB_REPOSITORY}/compare/${tag_sha}...${GITHUB_SHA}" \
@@ -187,6 +235,7 @@ jobs:
             --arg candidate "$REQUIRED_CANDIDATE_TAG" \
             --arg quarantinedVersion "$QUARANTINED_VERSION" \
             --arg quarantinedIntegrity "$QUARANTINED_INTEGRITY" \
+            --arg failedVersion "$FAILED_CANDIDATE_VERSION" \
             '.name == "@ashlr/hub" and
              .["dist-tags"].latest == $latest and
              .["dist-tags"][$candidate] == $version and
@@ -200,6 +249,7 @@ jobs:
              (.versions[$quarantinedVersion].dist.signatures | type == "array" and length > 0) and
              .versions[$quarantinedVersion].dist.attestations.provenance.predicateType ==
                "https://slsa.dev/provenance/v1" and
+             (.versions[$failedVersion] == null) and
              .versions[$latest].version == $latest' \
             "$packument" >/dev/null
 
@@ -220,7 +270,7 @@ jobs:
             --arg admissionObservedAt "$admission_observed_at" \
             --arg candidateIntegrity "$EXPECTED_CANDIDATE_INTEGRITY" \
             --arg candidateTag "$REQUIRED_CANDIDATE_TAG" \
-            --arg promotionCommand "npm dist-tag add @ashlr/hub@3.3.1 latest" \
+            --arg promotionCommand "npm dist-tag add @ashlr/hub@3.3.2 latest" \
             --arg promotionTag "$PROMOTION_TAG" \
             --arg releaseRunAttempt "$release_run_attempt" \
             --arg releaseRunId "$RELEASE_RUN_ID" \
@@ -231,6 +281,10 @@ jobs:
             --arg quarantinedVersion "$QUARANTINED_VERSION" \
             --arg quarantinedIntegrity "$QUARANTINED_INTEGRITY" \
             --arg quarantinedTagSha "$QUARANTINED_TAG_SHA" \
+            --arg failedCandidateVersion "$FAILED_CANDIDATE_VERSION" \
+            --arg failedCandidateTagSha "$FAILED_CANDIDATE_TAG_SHA" \
+            --arg failedCandidateReleaseRunId "$FAILED_CANDIDATE_RELEASE_RUN_ID" \
+            --arg requiredPromotionApprover "$REQUIRED_PROMOTION_APPROVER" \
             --arg sourceSha "$GITHUB_SHA" \
             --arg version "$PROMOTION_VERSION" \
             --arg workflowRunAttempt "$GITHUB_RUN_ATTEMPT" \
@@ -247,6 +301,15 @@ jobs:
               quarantinedVersion: $quarantinedVersion,
               quarantinedIntegrity: $quarantinedIntegrity,
               quarantinedTagSha: $quarantinedTagSha,
+              failedCandidateVersion: $failedCandidateVersion,
+              failedCandidateTagSha: $failedCandidateTagSha,
+              failedCandidateReleaseRunId: $failedCandidateReleaseRunId,
+              failedCandidateReleaseRunConclusion: "failure",
+              failedCandidateDownstreamJobsSkipped: true,
+              failedCandidateNpmVersionAbsent: true,
+              failedCandidateGitHubReleaseAbsent: true,
+              requiredPromotionApprover: $requiredPromotionApprover,
+              approvalPolicy: "single-owner",
               releaseRunId: $releaseRunId,
               releaseRunAttempt: $releaseRunAttempt,
               acceptanceAttestationSha256: $acceptanceAttestationSha256,

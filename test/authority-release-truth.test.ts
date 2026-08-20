@@ -2,7 +2,7 @@
  * Release-truth regressions for the fail-closed authority salvage.
  *
  * These checks preserve the immutable public 3.3.0 record while binding the
- * current 3.3.1 correction and documented configuration surface to the
+ * current 3.3.2 successor and documented configuration surface to the
  * production boundary: protected PR handoff is terminal, and rejected local
  * activation/host-merge authority is not shipped.
  */
@@ -27,9 +27,10 @@ function releaseBlock(version: string): string {
 }
 
 describe('emergency authority release truth', () => {
-  it('preserves the published 3.3.0 record and binds the 3.3.1 correction', () => {
+  it('preserves the published 3.3.0 record and binds the 3.3.2 successor', () => {
     const historical = releaseBlock('3.3.0');
-    const release = releaseBlock('3.3.1');
+    const failed = releaseBlock('3.3.1');
+    const release = releaseBlock('3.3.2');
 
     expect(releaseBlock('Unreleased').trim()).toBe('## [Unreleased]');
 
@@ -37,12 +38,17 @@ describe('emergency authority release truth', () => {
     expect(createHash('sha256').update(historical).digest('hex'))
       .toBe('1ddec34a674cc8dd88315091bccbbda699a02558942eb23c244f9626b57131eb');
 
-    expect(release).toMatch(/fail-closed runtime boundaries/i);
-    expect(release).toMatch(/compiled daemon and conductor trust roots are empty/i);
-    expect(release).toMatch(/resident-start,[\s\S]{0,80}service-install,[\s\S]{0,80}host-merge[\s\S]{0,80}dormant/i);
-    expect(release).toMatch(/post-merge credit[\s\S]{0,50}report-only/i);
-    expect(release).toMatch(/3\.3\.0 must never move to npm `latest`/i);
-    expect(release).toMatch(/3\.3\.1 is the sole successor/i);
+    expect(failed).toMatch(/fail-closed runtime boundaries/i);
+    expect(failed).toMatch(/compiled daemon and conductor trust roots are empty/i);
+    expect(failed).toMatch(/resident-start,[\s\S]{0,80}service-install,[\s\S]{0,80}host-merge[\s\S]{0,80}dormant/i);
+    expect(failed).toMatch(/post-merge credit[\s\S]{0,50}report-only/i);
+    expect(failed).toMatch(/3\.3\.0 must never move to npm `latest`/i);
+    expect(release).toMatch(/failed immutable 3\.3\.1 release attempt/i);
+    expect(release).toContain('f2c9353db35fbf12889bddafd8acc2b7ca5ae67c');
+    expect(release).toContain('32396250683');
+    expect(release).toMatch(/npm version 3\.3\.1[\s\S]{0,80}GitHub Release remain\s+absent/i);
+    expect(release).toMatch(/3\.3\.2 as the sole candidate successor/i);
+    expect(release).toContain('abd49a5049759e417d99089b88c628fd2364f79c');
 
     for (const removedClaim of [
       'RUNTIME-FLEET-ACTIVATION.md',
@@ -52,7 +58,7 @@ describe('emergency authority release truth', () => {
       'test/m505.host-auto-merge.test.ts',
       'on-machine standing grants',
     ]) {
-      expect(release).not.toContain(removedClaim);
+      expect(`${failed}\n${release}`).not.toContain(removedClaim);
     }
   });
 
@@ -64,6 +70,21 @@ describe('emergency authority release truth', () => {
     expect(release).toContain('CSP/security headers');
     expect(release).not.toMatch(/backend changes were\s+minimal and additive/i);
     expect(release).not.toMatch(/server\.ts`?\/`?static\.ts`? routing is\s+unchanged/i);
+  });
+
+  it('records 3.3.1 as failed and ineligible while naming 3.3.2 as the sole successor', () => {
+    const failed = releaseBlock('3.3.1');
+
+    expect(failed).toContain('f2c9353db35fbf12889bddafd8acc2b7ca5ae67c');
+    expect(failed).toContain('32396250683');
+    expect(failed).toMatch(/failed during native verification/i);
+    expect(failed).toMatch(/signed canary,[\s\S]{0,100}prepare,[\s\S]{0,100}npm publish,[\s\S]{0,100}publication\s+verification,[\s\S]{0,100}GitHub Release[—\s]+was skipped/i);
+    expect(failed).toMatch(/npm version 3\.3\.1[\s\S]{0,80}GitHub Release remain absent/i);
+    expect(failed).toMatch(/tag and reserved version must not be moved,[\s\S]{0,80}reused,[\s\S]{0,80}published,[\s\S]{0,80}promoted/i);
+    expect(failed).toMatch(/3\.3\.2 is the sole successor lane/i);
+    expect(failed).not.toMatch(/prepares immutable 3\.3\.1/i);
+    expect(failed).not.toMatch(/3\.3\.1 is the sole successor/i);
+    expect(failed).not.toMatch(/3\.3\.1[^.\n]*eligible[^.\n]*npm `latest` promotion/i);
   });
 
   it('documents dormant production execution and the exact new-console auth lifecycle', () => {

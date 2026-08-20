@@ -30,14 +30,17 @@ const verify = verifySteps.find((step) =>
   step.name === 'Verify immutable candidate and preserved dist-tags');
 
 const expectedEnv = {
-  RELEASE_VERSION: '3.3.1',
+  RELEASE_VERSION: '3.3.2',
   RELEASE_DIST_TAG: 'candidate',
   BASELINE_LATEST_VERSION: '3.0.1',
   PREVIOUS_CANDIDATE_VERSION: '3.3.0',
   PREVIOUS_CANDIDATE_INTEGRITY:
     'sha512-mYVuJZyoXeSnnqivoLzyZggNgpJoWM8glTI7CW0oBfQ0RCHx0xueTrLwLTZBg5W+E4zPOJNbckptYeb5YsdOHw==',
   PREVIOUS_CANDIDATE_TAG_SHA: 'd07f6a96eda664d865b9255f71c6f56e8cd9d7c7',
-  REQUIRED_ROLLBACK_REVISION: '31aa0467f66af1fe4c66d1664f65e6fd3e4ba61b',
+  FAILED_CANDIDATE_VERSION: '3.3.1',
+  FAILED_CANDIDATE_TAG_SHA: 'f2c9353db35fbf12889bddafd8acc2b7ca5ae67c',
+  FAILED_CANDIDATE_RELEASE_RUN_ID: '32396250683',
+  REQUIRED_ROLLBACK_REVISION: 'abd49a5049759e417d99089b88c628fd2364f79c',
 };
 
 function supersessionViolations(candidate: Workflow): string[] {
@@ -64,8 +67,16 @@ function supersessionViolations(candidate: Workflow): string[] {
     '.["dist-tags"][$candidate] == $previousVersion',
     '.versions[$previousVersion].version == $previousVersion',
     '.versions[$previousVersion].dist.integrity == $previousIntegrity',
+    '(.versions[$failedVersion] == null)',
     '(.versions[$version] == null)',
     'git/ref/tags/v${PREVIOUS_CANDIDATE_VERSION}',
+    'git/ref/tags/v${FAILED_CANDIDATE_VERSION}',
+    'actions/runs/${FAILED_CANDIDATE_RELEASE_RUN_ID}")',
+    'actions/runs/${FAILED_CANDIDATE_RELEASE_RUN_ID}/jobs?filter=latest&per_page=100',
+    '.status == "completed" and .conclusion == "failure"',
+    'all($skipped[]; .status == "completed" and .conclusion == "skipped")',
+    'releases/tags/v${FAILED_CANDIDATE_VERSION}',
+    'failed_release_status" != "404"',
     '.object.type == "commit" and .object.sha == $sha',
   ]) {
     if (!admissionRun.includes(required)) violations.push(`missing admission: ${required}`);
@@ -74,6 +85,7 @@ function supersessionViolations(candidate: Workflow): string[] {
     '.latest == $latest and .[$candidate] == $previousVersion',
     '.["dist-tags"][$candidate] == $version',
     '.versions[$previousVersion].dist.integrity == $previousIntegrity',
+    '(.versions[$failedVersion] == null)',
     "'del(.[$candidate])' \"$RUNNER_TEMP/npm-dist-tags-before-raw.json\"",
     "'.[\"dist-tags\"] | del(.[$candidate])' \"$packument\"",
     'cmp --silent',
@@ -132,7 +144,12 @@ describe('M519 — immutable npm candidate supersession', () => {
     ['candidate predecessor', '.["dist-tags"][$candidate] == $previousVersion'],
     ['predecessor integrity', '.versions[$previousVersion].dist.integrity == $previousIntegrity'],
     ['new-version absence', '(.versions[$version] == null)'],
+    ['failed-version absence', '(.versions[$failedVersion] == null)'],
     ['lightweight predecessor tag', 'git/ref/tags/v${PREVIOUS_CANDIDATE_VERSION}'],
+    ['failed lightweight tag', 'git/ref/tags/v${FAILED_CANDIDATE_VERSION}'],
+    ['failed release run', 'actions/runs/${FAILED_CANDIDATE_RELEASE_RUN_ID}")'],
+    ['failed release skipped downstream', 'all($skipped[]; .status == "completed" and .conclusion == "skipped")'],
+    ['absent failed GitHub release', 'failed_release_status" != "404"'],
   ])('fails policy when %s admission is removed', (_label, fragment) => {
     const mutated = structuredClone(workflow);
     const step = mutated.jobs?.publish?.steps?.find((entry) => entry.name === admission?.name);
@@ -143,6 +160,7 @@ describe('M519 — immutable npm candidate supersession', () => {
 
   it.each([
     ['old-version postcondition', '.versions[$previousVersion].dist.integrity == $previousIntegrity'],
+    ['failed-version postcondition', '(.versions[$failedVersion] == null)'],
     ['before-map candidate deletion', "'del(.[$candidate])' \"$RUNNER_TEMP/npm-dist-tags-before-raw.json\""],
     ['after-map candidate deletion', "'.[\"dist-tags\"] | del(.[$candidate])' \"$packument\""],
   ])('fails policy when %s is removed', (_label, fragment) => {

@@ -178,14 +178,17 @@ describe('release workflow', () => {
   it('is tag-triggered and reuses the exact native CI gate before publish', () => {
     expect(parsed.on?.push?.tags).toEqual(['v*']);
     expect(parsed.env).toEqual({
-      RELEASE_VERSION: '3.3.1',
+      RELEASE_VERSION: '3.3.2',
       RELEASE_DIST_TAG: 'candidate',
       BASELINE_LATEST_VERSION: '3.0.1',
       PREVIOUS_CANDIDATE_VERSION: '3.3.0',
       PREVIOUS_CANDIDATE_INTEGRITY:
         'sha512-mYVuJZyoXeSnnqivoLzyZggNgpJoWM8glTI7CW0oBfQ0RCHx0xueTrLwLTZBg5W+E4zPOJNbckptYeb5YsdOHw==',
       PREVIOUS_CANDIDATE_TAG_SHA: 'd07f6a96eda664d865b9255f71c6f56e8cd9d7c7',
-      REQUIRED_ROLLBACK_REVISION: '31aa0467f66af1fe4c66d1664f65e6fd3e4ba61b',
+      FAILED_CANDIDATE_VERSION: '3.3.1',
+      FAILED_CANDIDATE_TAG_SHA: 'f2c9353db35fbf12889bddafd8acc2b7ca5ae67c',
+      FAILED_CANDIDATE_RELEASE_RUN_ID: '32396250683',
+      REQUIRED_ROLLBACK_REVISION: 'abd49a5049759e417d99089b88c628fd2364f79c',
     });
     expect(parsed.concurrency).toEqual({
       group: 'npm-candidate-${{ github.ref }}',
@@ -266,7 +269,9 @@ describe('release workflow', () => {
     expect(publishJob['runs-on']).toBe('ubuntu-latest');
     expect(publishJob['timeout-minutes']).toBe(15);
     expect(publishJob.environment).toBe('npm-release');
-    expect(publishJob.permissions).toEqual({ contents: 'read', 'id-token': 'write' });
+    expect(publishJob.permissions).toEqual({
+      actions: 'read', contents: 'read', 'id-token': 'write',
+    });
     expect(publishJob.outputs).toEqual({
       dist_tags_before_b64: '${{ steps.admission.outputs.dist_tags_before_b64 }}',
       publication_run_attempt: '${{ steps.admission.outputs.publication_run_attempt }}',
@@ -433,7 +438,7 @@ describe('release workflow', () => {
     expect(releaseDocs).toContain('the exact\n   tag commit');
     expect(releaseDocs).toContain('Do not use **Re-run failed jobs**');
     expect(releaseDocs).toContain('even when the seven-day handoff\n   artifact has not expired');
-    expect(releaseDocs).toContain('set -euo pipefail\n   version=3.3.1\n   release_tag="v${version}"');
+    expect(releaseDocs).toContain('set -euo pipefail\n   version=3.3.2\n   release_tag="v${version}"');
     expect(releaseDocs).toContain('git rev-list -n 1 "$release_tag"');
     expect(releaseDocs).toContain('node scripts/extract-changelog.mjs "$version" > "$release_notes"');
     expect(releaseDocs).toContain(
@@ -519,6 +524,7 @@ describe('release workflow', () => {
           BASELINE_LATEST_VERSION: '3.0.1',
           PREVIOUS_CANDIDATE_VERSION: '3.1.9',
           PREVIOUS_CANDIDATE_INTEGRITY: previousIntegrity,
+          FAILED_CANDIDATE_VERSION: '3.1.8',
           EXPECTED_INTEGRITY: integrity,
           VERSION_FIXTURE: join(root, 'version.json'),
           PACKUMENT_FIXTURE: join(root, 'packument.json'),
@@ -537,8 +543,10 @@ describe('release workflow', () => {
         step.name === 'Admit exact candidate channel state immediately before publish');
       const run = admission?.run ?? '';
       const start = run.indexOf('tag_ref_json=');
+      const end = run.indexOf('failed_tag_ref_json=', start);
       expect(start).toBeGreaterThan(-1);
-      const remoteTagGate = run.slice(start);
+      expect(end).toBeGreaterThan(start);
+      const remoteTagGate = run.slice(start, end);
       const eventSha = '1'.repeat(40);
       const script = `
         set -euo pipefail
