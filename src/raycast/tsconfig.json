@@ -1,8 +1,9 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "CommonJS",
+    "module": "Preserve",
     "lib": ["ES2022"],
+    "types": ["node"],
     "jsx": "react-jsx",
     "jsxImportSource": "react",
     "strict": true,
@@ -11,7 +12,7 @@
     "resolveJsonModule": true,
     "outDir": "dist",
     "rootDir": "src",
-    "moduleResolution": "node",
+    "moduleResolution": "Bundler",
     "allowSyntheticDefaultImports": true,
     "noEmitOnError": true
   },
