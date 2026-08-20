@@ -37,6 +37,13 @@ import type { AshlrConfig } from '../types.js';
 import { fsyncDirectory } from '../util/durability.js';
 import { assurePrivateStoragePath } from '../util/private-storage.js';
 import { diagnoseGuardHealth } from './guard-health.js';
+import {
+  DAEMON_ACTIVATION_TRUST_ROOTS,
+  type DaemonActivationTrustRoot,
+} from './activation-trust-roots.js';
+
+export { DAEMON_ACTIVATION_TRUST_ROOTS } from './activation-trust-roots.js';
+export type { DaemonActivationTrustRoot } from './activation-trust-roots.js';
 
 const POLICY_VERSION = 'm461-proposal-once-v1';
 const SIGNING_DOMAIN = 'ashlr:daemon-activation-permit:m461:v1\0';
@@ -93,11 +100,6 @@ export interface DaemonActivationReadiness {
   installAuthorized: false;
   repairAuthorized: false;
   reason: string;
-}
-
-export interface DaemonActivationTrustRoot {
-  keyId: string;
-  publicKeyPem: string;
 }
 
 export interface DaemonActivationFileBinding {
@@ -174,14 +176,6 @@ export interface DaemonActivationPermitTestInspectionOptions {
   context: DaemonActivationRuntimeContext;
   platform?: NodeJS.Platform;
 }
-
-/**
- * Provisioning a production trust root requires a reviewed source change.
- * No environment variable, config field, CLI argument, or writable trust file
- * can add authority at runtime.
- */
-export const DAEMON_ACTIVATION_TRUST_ROOTS:
-readonly Readonly<DaemonActivationTrustRoot>[] = Object.freeze([]);
 
 const validCapabilities = new WeakMap<object, () => boolean>();
 

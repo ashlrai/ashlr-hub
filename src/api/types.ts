@@ -142,6 +142,18 @@ export type {
 } from '../core/fleet/external-skill-maturity.js';
 
 export type {
+  InspectProductionActivationReadinessInputV1,
+  ProductionActivationReadinessBlockerCodeV1,
+  ProductionActivationReadinessBlockerV1,
+  ProductionActivationReadinessV1,
+  ProductionArtifactPackagingObservationV1,
+  ProductionReleaseTipObservationV1,
+  ProductionResidentServiceObservationV1,
+  ReleaseTipProjectionInputV1,
+  ResidentServiceDiagnosticProjectionInputV1,
+} from '../core/daemon/production-activation-readiness.js';
+
+export type {
   EvaluateSkillRetrievalCalibrationInputV1,
   SkillRetrievalCalibrationAuditBindingV1,
   SkillRetrievalCalibrationAuditEvidenceV1,
