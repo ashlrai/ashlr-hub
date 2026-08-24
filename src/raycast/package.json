@@ -83,9 +83,9 @@
     "@raycast/utils": "^1.16.0"
   },
   "devDependencies": {
-    "@raycast/eslint-config": "^1.0.8",
-    "@types/node": "^22.0.0",
-    "typescript": "^5.5.0"
+    "@raycast/eslint-config": "^2.2.0",
+    "@types/node": "^26.1.1",
+    "typescript": "^7.0.2"
   },
   "overrides": {
     "esbuild": "0.28.1",
