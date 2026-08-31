@@ -1188,9 +1188,17 @@ function evidenceEvent(evidence: OutcomeRecordEvidence, proposalId: string, tsFa
 }
 
 export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): TrajectoryRecord[] {
+  return listTrajectoryRecordsAt(opts, Date.now());
+}
+
+/** Reconstruct against one caller-owned clock sample so nested snapshots share a cutoff. */
+function listTrajectoryRecordsAt(
+  opts: TrajectoryRecordListOptions | undefined,
+  asOfMs: number,
+): TrajectoryRecord[] {
   const windowHours = opts?.windowHours && opts.windowHours > 0 ? opts.windowHours : DEFAULT_WINDOW_HOURS;
   const limit = opts?.limit && opts.limit > 0 ? Math.floor(opts.limit) : DEFAULT_LIMIT;
-  const sinceMs = Date.now() - windowHours * 60 * 60 * 1000;
+  const sinceMs = asOfMs - windowHours * 60 * 60 * 1000;
   const deps = opts?.deps ?? {};
 
   const dispatchReadOptions = {
@@ -1929,6 +1937,7 @@ function verificationStates(outcome: OutcomeRecord): Set<boolean> {
 export function listTrajectoryJoinQuality(
   opts: TrajectoryJoinQualityOptions = {},
 ): TrajectoryJoinQualityResult {
+  const asOfMs = Date.now();
   const windowHours = opts.windowHours && opts.windowHours > 0
     ? opts.windowHours
     : DEFAULT_WINDOW_HOURS;
@@ -1936,7 +1945,7 @@ export function listTrajectoryJoinQuality(
   const sampleLimit = opts.sampleLimit && opts.sampleLimit > 0
     ? Math.min(16, Math.floor(opts.sampleLimit))
     : 8;
-  const sinceMs = Date.now() - windowHours * 60 * 60 * 1000;
+  const sinceMs = asOfMs - windowHours * 60 * 60 * 1000;
   const deps = opts.deps ?? {};
 
   let dispatchRead: DispatchProductionEventsReadResult;
@@ -1973,10 +1982,13 @@ export function listTrajectoryJoinQuality(
 
   const dispatchQuality = (({ events: _events, ...quality }) => quality)(dispatchRead);
   const actionQuality = (({ events: _events, ...quality }) => quality)(actionRead);
+  const outcomesInWindow = outcomeRead.records.filter(
+    (outcome) => eventMs(outcome.lastActivityAt) >= sinceMs,
+  );
   const dispatches = attachReadQuality(dispatchRead.events, dispatchQuality);
-  const outcomes = attachReadQuality(outcomeRead.records, outcomeRead.sourceQuality);
+  const outcomes = attachReadQuality(outcomesInWindow, outcomeRead.sourceQuality);
   const actions = attachReadQuality(actionRead.events, actionQuality);
-  const records = listTrajectoryRecords({
+  const records = listTrajectoryRecordsAt({
     windowHours,
     limit,
     deps: {
@@ -1986,9 +1998,9 @@ export function listTrajectoryJoinQuality(
       readSkillUseEvents: () => [],
       ...(deps.loadProposal ? { loadProposal: deps.loadProposal } : {}),
     },
-  });
+  }, asOfMs);
 
-  const proposalIndex = indexAliases(outcomeRead.records, (outcome) => joinAliases({
+  const proposalIndex = indexAliases(outcomesInWindow, (outcome) => joinAliases({
     proposalId: outcome.proposal.id,
     runId: outcome.proposal.runId,
     trajectoryId: outcome.proposal.trajectoryId,
@@ -2013,7 +2025,7 @@ export function listTrajectoryJoinQuality(
 
   const proposalToVerification = emptyJoinEdge();
   const verifiedOutcomes: OutcomeRecord[] = [];
-  for (const outcome of outcomeRead.records) {
+  for (const outcome of outcomesInWindow) {
     const states = verificationStates(outcome);
     noteJoin(
       proposalToVerification,

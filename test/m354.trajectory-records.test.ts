@@ -2,7 +2,7 @@
  * m354.trajectory-records.test.ts — read-only route-to-outcome timelines.
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   listTrajectoryRecords,
   MIN_SKILL_OBSERVED_TRAJECTORIES,
@@ -40,6 +40,17 @@ const SEMANTIC_PROPOSAL_ID = 'prop-m354abc1-000001-dddddddddddddddddddddddd';
 const NO_PROPOSAL_ATTEMPT_ID = 'attempt-00000000-0000-4000-8000-000000000354';
 const NO_PROPOSAL_RUN_ID = 'run-no-proposal';
 const NO_PROPOSAL_TRAJECTORY_ID = `run:${NO_PROPOSAL_ATTEMPT_ID}`;
+
+beforeAll(() => {
+  // These fixtures exercise bounded windows around July 9. Freeze Date only so
+  // the suite does not expire as wall-clock time advances.
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime('2026-07-10T00:00:00.000Z');
+});
+
+afterAll(() => {
+  vi.useRealTimers();
+});
 
 function dispatch(overrides: Partial<DispatchProductionEvent> = {}): DispatchProductionEvent {
   return {
