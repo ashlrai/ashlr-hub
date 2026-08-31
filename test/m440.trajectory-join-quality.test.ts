@@ -2,7 +2,7 @@
  * m440.trajectory-join-quality.test.ts — bounded compositional join diagnostics.
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   listOutcomeRecords,
   listOutcomeRecordsDetailed,
@@ -34,6 +34,18 @@ const PROPOSAL_ID = 'prop-trajectory-join-quality';
 const RUN_ID = 'run-trajectory-join-quality';
 const TRAJECTORY_ID = 'trajectory-join-quality';
 const RAW_SECRET = 'RAW_PROMPT_DIFF_STDOUT_SECRET';
+const TEST_NOW = '2026-07-29T00:00:00.000Z';
+
+beforeAll(() => {
+  // Keep the 30-day join window anchored to the July 28 fixture chronology.
+  // Only Date is faked; no async scheduling behavior changes.
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(TEST_NOW);
+});
+
+afterAll(() => {
+  vi.useRealTimers();
+});
 
 function proposal(): Proposal {
   return {
@@ -357,6 +369,108 @@ describe('trajectory join quality', () => {
     for (const forbidden of ['prompt', 'diff', 'stdout', 'stderr', 'env', 'file contents']) {
       expect(diagnostics.toLowerCase()).not.toContain(forbidden);
     }
+  });
+
+  it('samples the clock once and includes a trajectory exactly on the cutoff', () => {
+    const outcomes = listOutcomeRecordsDetailed({ deps: outcomeDeps() });
+    expect(outcomes.records[0]?.lastActivityAt).toBe(TS5);
+    const exactAsOfMs = Date.parse(TS5) + 24 * 60 * 60 * 1000;
+    const now = vi.spyOn(Date, 'now')
+      .mockImplementationOnce(() => exactAsOfMs)
+      .mockImplementation(() => exactAsOfMs + 1);
+
+    try {
+      const result = listTrajectoryJoinQuality({
+        windowHours: 24,
+        deps: {
+          readDispatchProductionEventsDetailed: () => dispatchRead(),
+          listOutcomeRecordsDetailed: () => outcomes,
+          readAgentActionsDetailed: () => actionRead(),
+          loadProposal: () => proposal(),
+        },
+      });
+
+      expect(now).toHaveBeenCalledTimes(1);
+      expect(result.records).toContainEqual(expect.objectContaining({
+        proposalId: PROPOSAL_ID,
+        latestAt: TS5,
+      }));
+      expect(result.edges.proposalToVerification).toMatchObject({
+        denominator: 1,
+        joined: 1,
+        rate: 1,
+      });
+    } finally {
+      now.mockRestore();
+      vi.setSystemTime(TEST_NOW);
+    }
+  });
+
+  it('excludes historical outcomes from join indices and every outcome edge denominator', () => {
+    const outcomes = listOutcomeRecordsDetailed({ deps: outcomeDeps() });
+    const current = outcomes.records[0];
+    if (!current) throw new Error('expected current outcome fixture');
+    const historicalAt = '2026-06-01T00:00:00.000Z';
+    const historical = {
+      ...current,
+      lastActivityAt: historicalAt,
+      proposal: {
+        ...current.proposal,
+        id: 'prop-historical-outside-window',
+        createdAt: historicalAt,
+        decidedAt: historicalAt,
+        realizedMergeAt: historicalAt,
+        ...(current.proposal.verifyResult ? {
+          verifyResult: {
+            ...current.proposal.verifyResult,
+            verifiedAt: historicalAt,
+          },
+        } : {}),
+      },
+      decisions: current.decisions.map((decision) => ({
+        ...decision,
+        ts: historicalAt,
+      })),
+      evidencePacks: current.evidencePacks.map((evidence) => ({
+        ...evidence,
+        generatedAt: historicalAt,
+        verification: {
+          ...evidence.verification,
+          verifiedAt: historicalAt,
+        },
+      })),
+      postMergeObservations: current.postMergeObservations?.map((observation) => ({
+        ...observation,
+        observedAt: historicalAt,
+      })),
+    };
+    const withHistorical: OutcomeRecordsDetailedResult = {
+      ...outcomes,
+      records: [current, historical],
+    };
+
+    const result = listTrajectoryJoinQuality({
+      windowHours: 24,
+      deps: {
+        readDispatchProductionEventsDetailed: () => dispatchRead(),
+        listOutcomeRecordsDetailed: () => withHistorical,
+        readAgentActionsDetailed: () => actionRead(),
+        loadProposal: () => proposal(),
+      },
+    });
+
+    for (const edge of Object.values(result.edges)) {
+      expect(edge).toMatchObject({
+        denominator: 1,
+        joined: 1,
+        unjoined: 0,
+        conflicting: 0,
+        rate: 1,
+      });
+    }
+    expect(result.records.some(
+      (record) => record.proposalId === 'prop-historical-outside-window',
+    )).toBe(false);
   });
 
   it('keeps exact observed counts but withholds rates for degraded denominator sources', () => {
