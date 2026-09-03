@@ -468,7 +468,13 @@ describe('M45 runEngineSandboxed — absent/failing engine is contained', () => 
         });
 
         expect(result.proposalId).toBeDefined();
-        expect(loadProposal(result.proposalId!)?.workItemGenerationId).toBe(generation);
+        expect(result.state.id).toMatch(
+          /^run-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+        );
+        expect(loadProposal(result.proposalId!)).toMatchObject({
+          runId: result.state.id,
+          workItemGenerationId: generation,
+        });
         expect(listSandboxes()).toEqual([]);
       } finally {
         if (prevAllow === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;

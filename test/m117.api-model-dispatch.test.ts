@@ -365,6 +365,9 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     expect(capturedGateArgs.length).toBe(1);
     expect(capturedProposalArgs.length).toBe(1);
     const proposal = capturedProposalArgs[0] as Record<string, unknown>;
+    expect(result.state.id).toMatch(
+      /^run-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
     expect(proposal['engineModel']).toBe('local-coder:qwen2.5:72b-instruct-q4_K_M');
     expect(proposal['engineTier']).toBe('mid');
     expect(typeof proposal['diff']).toBe('string');

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   assertSafeExecutionIdentity,
   createOuterAttemptIdentity,
+  createRunExecutionIdentity,
   deriveCandidateAttemptIdentity,
   isCandidateAttemptIdentity,
   isOuterAttemptIdentity,
@@ -10,6 +11,19 @@ import {
 const outerAttemptIdentity = 'attempt-018f6d2e-7c50-4f15-8a2c-6efc97fb87a1';
 
 describe('attempt identity', () => {
+  it('creates distinct cryptographic run identities within the path-safe bound', () => {
+    const identities = Array.from({ length: 64 }, () => createRunExecutionIdentity());
+
+    expect(new Set(identities).size).toBe(identities.length);
+    for (const identity of identities) {
+      expect(identity).toMatch(
+        /^run-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
+      expect(assertSafeExecutionIdentity(identity)).toBe(identity);
+      expect(identity.length).toBe(40);
+    }
+  });
+
   it('creates opaque strong outer identities with a bounded durable format', () => {
     const first = createOuterAttemptIdentity();
     const second = createOuterAttemptIdentity();
