@@ -882,6 +882,46 @@ export function formatFleetStatus(s: FleetStatus): string {
   }
   lines.push('');
 
+  // Outcome assurance
+  const outcomeAssurance = s.outcomeAssurance;
+  lines.push('Outcome assurance:');
+  if (!outcomeAssurance) {
+    lines.push('  unavailable');
+  } else {
+    const cohort = outcomeAssurance.cohort;
+    const funnel = outcomeAssurance.funnel;
+    const outcomes = outcomeAssurance.outcomes;
+    lines.push(`  verdict:    ${outcomeAssurance.verdict} (observation-only)`);
+    lines.push(
+      `  cohort:     ${cohort.eligible}/${cohort.observed} eligible, ${cohort.excluded} excluded ` +
+        `(incomplete ${cohort.exclusions.incomplete}, degraded ${cohort.exclusions.degraded})`,
+    );
+    lines.push(
+      `  funnel:     dispatch ${funnel.dispatched}, proposal ${funnel.proposals}, ` +
+        `evidence ${funnel.evidence}, protected merge ${funnel.protectedMerges}, ` +
+        `post-merge ${funnel.postMergeObserved} ` +
+        `(stable ${funnel.stableWitnesses}, adverse ${funnel.adverseObservations})`,
+    );
+    lines.push(
+      `  conversion: proposal ${formatNullablePercent(funnel.proposalRate)}, ` +
+        `evidence ${formatNullablePercent(funnel.evidenceRate)}, ` +
+        `merge ${formatNullablePercent(funnel.mergeRate)}, ` +
+        `post-merge ${formatNullablePercent(funnel.postMergeCoverage)}`,
+    );
+    lines.push(
+      `  realized:   followed-up ${outcomes.followedUp}, reverted ${outcomes.reverted}, ` +
+        `regressed ${outcomes.regressed}, adverse ${formatNullablePercent(outcomes.adverseRate)}`,
+    );
+    if (outcomeAssurance.topGap) {
+      lines.push(
+        `  top gap:    ${outcomeAssurance.topGap.id} (${outcomeAssurance.topGap.count}): ` +
+          outcomeAssurance.topGap.detail,
+      );
+    }
+    lines.push(`  summary:    ${outcomeAssurance.summary}`);
+  }
+  lines.push('');
+
   // Merges
   lines.push(`Merges:    ${s.merges.recent} auto-merge(s) in last 24h`);
   lines.push('');

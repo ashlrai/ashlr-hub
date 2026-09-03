@@ -505,6 +505,74 @@ export interface FleetAutonomyEffectivenessStatus {
   };
 }
 
+export type FleetOutcomeAssuranceVerdict =
+  | 'supported'
+  | 'adverse-outcome'
+  | 'evidence-incomplete'
+  | 'insufficient-sample'
+  | 'withheld';
+
+export interface FleetOutcomeAssuranceStatus {
+  schemaVersion: 1;
+  authority: {
+    mode: 'observation-only';
+    readinessEligible: false;
+    learningEligible: false;
+  };
+  windowHours: number;
+  verdict: FleetOutcomeAssuranceVerdict;
+  summary: string;
+  thresholds: {
+    minimumEligibleTrajectories: number;
+    minimumProtectedMerges: number;
+    minimumPostMergeCoverage: number;
+    maximumAdverseRate: number;
+  };
+  cohort: {
+    observed: number;
+    eligible: number;
+    excluded: number;
+    exclusions: {
+      incomplete: number;
+      degraded: number;
+    };
+  };
+  funnel: {
+    dispatched: number;
+    proposals: number;
+    evidence: number;
+    protectedMerges: number;
+    postMergeObserved: number;
+    stableWitnesses: number;
+    adverseObservations: number;
+    proposalRate: number | null;
+    evidenceRate: number | null;
+    mergeRate: number | null;
+    postMergeCoverage: number | null;
+  };
+  outcomes: {
+    noProposal: number;
+    rejected: number;
+    failed: number;
+    pending: number;
+    handoff: number;
+    unknown: number;
+    followedUp: number;
+    reverted: number;
+    regressed: number;
+    adverse: number;
+    adverseRate: number | null;
+  };
+  topGap: {
+    id: 'source-withheld' | 'sample-floor' | 'proposal-coverage' | 'evidence-coverage' |
+      'merge-sample' | 'post-merge-denominator' | 'post-merge-coverage' |
+      'denominator-reconciliation' | 'outcome-reconciliation' |
+      'adverse-outcome' | 'excluded-population';
+    count: number;
+    detail: string;
+  } | null;
+}
+
 export type FleetAutonomousShipReadinessVerdict = 'ready' | 'blocked' | 'degraded' | 'idle' | 'unknown';
 export type FleetAutonomousShipReadinessConfidence = 'high' | 'medium' | 'low';
 export type FleetReadinessSourceStatus = 'healthy' | 'degraded' | 'blocked' | 'unavailable' | 'unknown';
@@ -1609,6 +1677,8 @@ export interface FleetStatus {
   laneLocks?: FleetLaneLocksStatus;
   /** Read-only explanation of whether the autonomous loop can merge right now. */
   autonomyEffectiveness?: FleetAutonomyEffectivenessStatus;
+  /** Observation-only proof of route-to-realized-outcome coverage. */
+  outcomeAssurance?: FleetOutcomeAssuranceStatus;
   /** Read-only Fleet OS verdict for whether autonomous shipping is ready now. */
   autonomousShipReadiness?: FleetAutonomousShipReadinessStatus;
   /** Single-command operating brief derived from readiness, effectiveness, and next actions. */
@@ -1655,7 +1725,7 @@ export interface FleetStatus {
   postMergeSource?: FleetReadinessEvidenceQuality;
   postMergeCohort?: {
     policyEligible: false;
-    denominatorComplete: false;
+    denominatorComplete: boolean;
     adverseObservations: number;
     stability: PostMergeStabilityCohortSummary;
   };
@@ -1701,6 +1771,9 @@ const RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
 /** Keep concurrently appended rows outside exact cross-source joins until settled. */
 const LEARNING_SNAPSHOT_SETTLE_MS = 2 * 60 * 1000;
 const QUEUE_SOURCE_FUTURE_SKEW_MS = 5 * 60 * 1000;
+const OUTCOME_ASSURANCE_MIN_ELIGIBLE = 10;
+const OUTCOME_ASSURANCE_MIN_MERGES = 3;
+const OUTCOME_ASSURANCE_MIN_POST_MERGE_COVERAGE = 0.95;
 
 function processExists(pid: number | null | undefined): boolean {
   if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return false;
@@ -4153,6 +4226,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     // strategy signal source is unavailable.
   }
 
+  status.outcomeAssurance = buildOutcomeAssurance(status);
   status.autonomyEffectiveness = buildAutonomyEffectiveness(status);
   status.nextActions = buildNextActions(status);
   status.autonomousShipReadiness = buildAutonomousShipReadiness(status, {
@@ -5024,6 +5098,218 @@ function dispatchYieldRecommendation(input: {
     return `Tighten context or reslice ${subject}; ${input.actionReason}.`;
   }
   return `Tighten context or reslice ${subject}; capture/gate blocking dominates the low-yield sample.`;
+}
+
+function outcomeAssuranceRate(count: number, denominator: number): number | null {
+  if (!Number.isFinite(count) || !Number.isFinite(denominator) ||
+      count < 0 || denominator <= 0 || count > denominator) return null;
+  return count / denominator;
+}
+
+/**
+ * Build a denominator-first, observation-only claim about autonomous outcomes.
+ * This projection can expose missing proof, but cannot grant merge or learning
+ * authority. It intentionally withholds exact metrics when joined sources are
+ * incomplete.
+ */
+export function buildOutcomeAssurance(status: FleetStatus): FleetOutcomeAssuranceStatus {
+  const trajectory = status.trajectoryLearning;
+  const availability = status.learningMetrics?.trajectoryLearning;
+  const postMerge = status.postMergeCohort;
+  const sourceAvailable = trajectory !== undefined &&
+    trajectory.terminalOutcomes !== undefined &&
+    status.postMergeSource?.sourceState === 'healthy' &&
+    status.postMergeSource.complete &&
+    postMerge !== undefined &&
+    availability?.state === 'available';
+  const windowHours = trajectory?.windowHours ?? RECENT_WINDOW_MS / (60 * 60 * 1000);
+  const authority = {
+    mode: 'observation-only' as const,
+    readinessEligible: false as const,
+    learningEligible: false as const,
+  };
+  const thresholds = {
+    minimumEligibleTrajectories: OUTCOME_ASSURANCE_MIN_ELIGIBLE,
+    minimumProtectedMerges: OUTCOME_ASSURANCE_MIN_MERGES,
+    minimumPostMergeCoverage: OUTCOME_ASSURANCE_MIN_POST_MERGE_COVERAGE,
+    maximumAdverseRate: 0,
+  };
+
+  if (!sourceAvailable) {
+    return {
+      schemaVersion: 1,
+      authority,
+      windowHours,
+      verdict: 'withheld',
+      summary: 'Outcome assurance is withheld until the joined trajectory and post-merge sources are complete.',
+      thresholds,
+      cohort: {
+        observed: 0,
+        eligible: 0,
+        excluded: 0,
+        exclusions: { incomplete: 0, degraded: 0 },
+      },
+      funnel: {
+        dispatched: 0,
+        proposals: 0,
+        evidence: 0,
+        protectedMerges: 0,
+        postMergeObserved: 0,
+        stableWitnesses: 0,
+        adverseObservations: 0,
+        proposalRate: null,
+        evidenceRate: null,
+        mergeRate: null,
+        postMergeCoverage: null,
+      },
+      outcomes: {
+        noProposal: 0,
+        rejected: 0,
+        failed: 0,
+        pending: 0,
+        handoff: 0,
+        unknown: 0,
+        followedUp: 0,
+        reverted: 0,
+        regressed: 0,
+        adverse: 0,
+        adverseRate: null,
+      },
+      topGap: {
+        id: 'source-withheld',
+        count: 1,
+        detail: availability?.reasons.join(', ') || 'joined outcome sources are unavailable',
+      },
+    };
+  }
+
+  const population = trajectory.population ?? {
+    observed: trajectory.trajectories,
+    learningEligible: trajectory.trajectories,
+    incomplete: 0,
+    degraded: 0,
+  };
+  const terminal = trajectory.terminalOutcomes!;
+  const realized = trajectory.realizedOutcomes ?? { 'followed-up': 0, reverted: 0, regressed: 0 };
+  const proposals = trajectory.coverage.proposal?.count ?? 0;
+  const evidence = trajectory.coverage.evidence?.count ?? 0;
+  const protectedMerges = terminal.merged;
+  const stableWitnesses = postMerge!.stability.releasedWitnesses;
+  const adverse = postMerge!.adverseObservations;
+  const postMergeObserved = stableWitnesses + adverse;
+  const excluded = population.incomplete + population.degraded;
+  const missingProposals = Math.max(0, population.learningEligible - proposals);
+  const missingEvidence = Math.max(0, proposals - evidence);
+  const missingPostMerge = Math.max(0, protectedMerges - postMergeObserved);
+  const excessPostMerge = Math.max(0, postMergeObserved - protectedMerges);
+  const denominatorMismatch = Math.max(
+    Math.abs(population.observed - (population.learningEligible + excluded)),
+    proposals - population.learningEligible,
+    evidence - proposals,
+    protectedMerges - population.learningEligible,
+  );
+  const adverseBreakdown = realized['followed-up'] + realized.reverted + realized.regressed;
+  const adverseMismatch = Math.abs(adverse - adverseBreakdown);
+  const mergeSampleGap = Math.max(0, OUTCOME_ASSURANCE_MIN_MERGES - protectedMerges);
+  const eligibleSampleGap = Math.max(0, OUTCOME_ASSURANCE_MIN_ELIGIBLE - population.learningEligible);
+  const postMergeCoverage = outcomeAssuranceRate(postMergeObserved, protectedMerges);
+  const adverseRate = outcomeAssuranceRate(adverse, postMergeObserved);
+
+  let verdict: FleetOutcomeAssuranceVerdict = 'supported';
+  let topGap: FleetOutcomeAssuranceStatus['topGap'] = null;
+  if (denominatorMismatch > 0) {
+    verdict = 'evidence-incomplete';
+    topGap = {
+      id: 'denominator-reconciliation',
+      count: denominatorMismatch,
+      detail: 'trajectory population or funnel counts do not reconcile',
+    };
+  } else if (!postMerge!.denominatorComplete) {
+    verdict = 'evidence-incomplete';
+    topGap = {
+      id: 'post-merge-denominator',
+      count: Math.max(1, protectedMerges - postMergeObserved),
+      detail: 'post-merge cohort denominator is incomplete',
+    };
+  } else if (excessPostMerge > 0 || adverseMismatch > 0) {
+    verdict = 'evidence-incomplete';
+    topGap = {
+      id: 'outcome-reconciliation',
+      count: Math.max(excessPostMerge, adverseMismatch),
+      detail: 'post-merge cohort does not reconcile with route or adverse-outcome records',
+    };
+  } else if (adverse > 0) {
+    verdict = 'adverse-outcome';
+    topGap = { id: 'adverse-outcome', count: adverse, detail: 'follow-up, revert, or regression outcomes observed' };
+  } else if (excluded > 0) {
+    verdict = 'evidence-incomplete';
+    topGap = { id: 'excluded-population', count: excluded, detail: 'observed trajectories excluded as incomplete or degraded' };
+  } else if (eligibleSampleGap > 0) {
+    verdict = 'insufficient-sample';
+    topGap = { id: 'sample-floor', count: eligibleSampleGap, detail: 'additional eligible trajectories required' };
+  } else if (missingProposals > 0) {
+    verdict = 'evidence-incomplete';
+    topGap = { id: 'proposal-coverage', count: missingProposals, detail: 'eligible trajectories lack a proposal' };
+  } else if (missingEvidence > 0) {
+    verdict = 'evidence-incomplete';
+    topGap = { id: 'evidence-coverage', count: missingEvidence, detail: 'proposals lack joined verification evidence' };
+  } else if (mergeSampleGap > 0) {
+    verdict = 'insufficient-sample';
+    topGap = { id: 'merge-sample', count: mergeSampleGap, detail: 'additional protected merges required' };
+  } else if (postMergeCoverage === null || postMergeCoverage < OUTCOME_ASSURANCE_MIN_POST_MERGE_COVERAGE) {
+    verdict = 'evidence-incomplete';
+    topGap = { id: 'post-merge-coverage', count: missingPostMerge, detail: 'protected merges lack realized-outcome observation' };
+  }
+
+  const summary = verdict === 'supported'
+    ? `${protectedMerges} protected merge(s) meet the outcome evidence contract with no adverse observations.`
+    : verdict === 'adverse-outcome'
+      ? `${adverse} adverse post-merge outcome(s) require containment before the autonomy claim can recover.`
+      : verdict === 'insufficient-sample'
+        ? `Outcome assurance needs more evidence: ${topGap?.detail ?? 'sample floor not met'}.`
+        : `Outcome assurance is incomplete: ${topGap?.detail ?? 'required evidence is missing'}.`;
+
+  return {
+    schemaVersion: 1,
+    authority,
+    windowHours,
+    verdict,
+    summary,
+    thresholds,
+    cohort: {
+      observed: population.observed,
+      eligible: population.learningEligible,
+      excluded,
+      exclusions: { incomplete: population.incomplete, degraded: population.degraded },
+    },
+    funnel: {
+      dispatched: population.learningEligible,
+      proposals,
+      evidence,
+      protectedMerges,
+      postMergeObserved,
+      stableWitnesses,
+      adverseObservations: adverse,
+      proposalRate: outcomeAssuranceRate(proposals, population.learningEligible),
+      evidenceRate: outcomeAssuranceRate(evidence, proposals),
+      mergeRate: outcomeAssuranceRate(protectedMerges, population.learningEligible),
+      postMergeCoverage,
+    },
+    outcomes: {
+      noProposal: terminal['no-proposal'],
+      rejected: terminal.rejected,
+      failed: terminal.failed,
+      pending: terminal.pending,
+      handoff: terminal.handoff,
+      unknown: terminal.unknown,
+      followedUp: realized['followed-up'],
+      reverted: realized.reverted,
+      regressed: realized.regressed,
+      adverse,
+      adverseRate,
+    },
+    topGap,
+  };
 }
 
 function buildAutonomyEffectiveness(status: FleetStatus): FleetAutonomyEffectivenessStatus {
