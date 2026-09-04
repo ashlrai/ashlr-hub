@@ -100,7 +100,7 @@ function fixture(
     version: '3.1.0',
     type: 'module',
     bin: { ashlr: 'bin/ashlr' },
-    files: ['bin', 'dist', 'scripts/run-verify-command.mjs'],
+    files: ['bin', 'dist', 'scripts/run-verify-command.mjs', 'scripts/scorecard-history-worker.mjs'],
     dependencies: { example: '1.0.0' },
     bundledDependencies: ['example'],
   })}\n`);
@@ -128,6 +128,7 @@ function fixture(
   write(join(packageRoot, 'dist', 'cli', 'index.js'), 'export const runtime = true;\n');
   write(join(packageRoot, 'dist', 'core', 'worker.js'), 'export const worker = true;\n');
   write(join(packageRoot, 'scripts', 'run-verify-command.mjs'), 'export const run = true;\n');
+  write(join(packageRoot, 'scripts', 'scorecard-history-worker.mjs'), 'export const worker = true;\n');
   const dependencyRoot = join(packageRoot, 'node_modules');
   write(
     join(dependencyRoot, 'example', 'package.json'),

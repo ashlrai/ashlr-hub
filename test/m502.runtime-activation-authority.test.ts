@@ -302,7 +302,7 @@ function completeBundle(input: {
       version: packageVersion,
       type: 'module',
       bin: { ashlr: 'bin/ashlr' },
-      files: ['bin', 'dist', 'scripts/run-verify-command.mjs'],
+      files: ['bin', 'dist', 'scripts/run-verify-command.mjs', 'scripts/scorecard-history-worker.mjs'],
       dependencies: { example: '1.0.0' },
       bundledDependencies: ['example'],
     })}\n`,
@@ -327,6 +327,7 @@ function completeBundle(input: {
   writeText(join(packageRoot, 'bin', 'ashlr'), '#!/usr/bin/env node\n', 0o755);
   writeText(join(packageRoot, 'dist', 'cli', 'index.js'), `export const marker = '${input.marker}';\n`);
   writeText(join(packageRoot, 'scripts', 'run-verify-command.mjs'), 'export const run = true;\n');
+  writeText(join(packageRoot, 'scripts', 'scorecard-history-worker.mjs'), 'export const worker = true;\n');
   const dependencyRoot = join(packageRoot, 'node_modules');
   writeText(join(dependencyRoot, 'example', 'package.json'), '{"name":"example","version":"1.0.0"}\n');
   writeText(join(dependencyRoot, 'example', 'index.js'), `export const marker = '${input.marker}';\n`);

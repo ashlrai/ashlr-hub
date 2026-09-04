@@ -70,7 +70,7 @@ function releaseManifest(
     version: '3.2.0',
     type: 'module',
     bin: { ashlr: 'bin/ashlr' },
-    files: ['bin', 'dist', 'scripts/run-verify-command.mjs'],
+    files: ['bin', 'dist', 'scripts/run-verify-command.mjs', 'scripts/scorecard-history-worker.mjs'],
     dependencies: { example: '1.0.0' },
     bundledDependencies: ['example'],
   })}\n`);
@@ -92,6 +92,7 @@ function releaseManifest(
   write(join(packageRoot, 'dist', 'api', 'index.js'), 'export const fixture = true;\n');
   write(join(packageRoot, 'dist', 'cli', 'index.js'), 'export const fixture = true;\n');
   write(join(packageRoot, 'scripts', 'run-verify-command.mjs'), 'export const fixture = true;\n');
+  write(join(packageRoot, 'scripts', 'scorecard-history-worker.mjs'), 'export const worker = true;\n');
   const dependencyRoot = join(packageRoot, 'node_modules');
   write(join(dependencyRoot, 'example', 'package.json'), '{"name":"example","version":"1.0.0"}\n');
   write(join(dependencyRoot, 'example', 'index.js'), 'export const fixture = true;\n');

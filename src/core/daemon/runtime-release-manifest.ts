@@ -52,11 +52,13 @@ const PACKAGE_MANIFEST_PATH = 'package.json';
 const LAUNCHER_PATH = 'bin/ashlr';
 const RUNTIME_ENTRY_PATH = 'dist/cli/index.js';
 const VERIFIER_RUNNER_PATH = 'scripts/run-verify-command.mjs';
+const SCORECARD_HISTORY_WORKER_PATH = 'scripts/scorecard-history-worker.mjs';
 const FIXED_ARTIFACT_PATHS = new Set([
   PACKAGE_MANIFEST_PATH,
   RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH,
   LAUNCHER_PATH,
   VERIFIER_RUNNER_PATH,
+  SCORECARD_HISTORY_WORKER_PATH,
 ]);
 
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
@@ -500,6 +502,7 @@ function discoverReleaseLayout(
     maxBytes: MAX_PACKAGE_MANIFEST_BYTES,
   }, observation);
   admitArtifact(packageRoot, VERIFIER_RUNNER_PATH, budget, paths, undefined, observation);
+  admitArtifact(packageRoot, SCORECARD_HISTORY_WORKER_PATH, budget, paths, undefined, observation);
 
   const visitRuntime = (relativeDirectory: string, depth: number): void => {
     requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest');
@@ -1013,6 +1016,7 @@ function validateManifestShape(value: unknown): UnsignedRuntimeReleaseManifest {
   artifactByPath(artifacts, LAUNCHER_PATH);
   artifactByPath(artifacts, RUNTIME_ENTRY_PATH);
   artifactByPath(artifacts, VERIFIER_RUNNER_PATH);
+  artifactByPath(artifacts, SCORECARD_HISTORY_WORKER_PATH);
   if (packageArtifact.sha256 !== packageValue['sha256'] ||
     dependencyInventoryArtifact.sha256 !== dependencyInventory['sha256']) {
     throw new Error('runtime release manifest identity hash does not match its artifact');
