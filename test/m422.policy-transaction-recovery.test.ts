@@ -13,6 +13,9 @@ const policyModuleUrl = new URL('../src/core/sandbox/policy.ts', import.meta.url
 // tests contend for CPU. Match the workflow's existing 30s per-test budget so
 // the harness does not kill a healthy recovery subprocess prematurely.
 const policyChildTimeoutMs = process.platform === 'win32' ? 30_000 : 8_000;
+// The suite deadline must outlive a child's own deadline so Vitest never
+// aborts recovery while spawnSync is still deciding whether the child hung.
+const policySuiteTimeoutMs = process.platform === 'win32' ? policyChildTimeoutMs + 5_000 : 15_000;
 const children = new Set<ChildProcess>();
 let home: string;
 let previousHome: string | undefined;
@@ -167,7 +170,7 @@ afterEach(async () => {
   rmSync(home, { recursive: true, force: true });
 });
 
-describe('M422 policy transaction recovery', { timeout: 15_000 }, () => {
+describe('M422 policy transaction recovery', { timeout: policySuiteTimeoutMs }, () => {
   it.each([
     ['zero-byte', Buffer.alloc(0)],
     ['truncated', Buffer.from('{"version":2,"state":"prepared"', 'utf8')],

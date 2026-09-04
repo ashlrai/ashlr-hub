@@ -120,7 +120,9 @@ async function exerciseTermIgnoringCodex(mode: AdversarialCodexMode): Promise<{
   const originalPath = process.env['PATH'];
   process.env['PATH'] = `${binDir}${path.delimiter}${originalPath ?? ''}`;
   setEditorConfigTestHooksForTests({
-    commandTimeoutMs: mode === 'timeout' ? 150 : 5_000,
+    // Keep the preliminary read on the production deadline. Only the mutating
+    // add command is forced into the short timeout exercised by this test.
+    commandTimeoutMs: args => args[1] === 'add' && mode === 'timeout' ? 150 : 15_000,
     commandTerminationGraceMs: 50,
   });
   const started = performance.now();

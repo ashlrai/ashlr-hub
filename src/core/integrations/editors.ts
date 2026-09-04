@@ -92,7 +92,7 @@ export interface WireEditorOptions {
 
 interface EditorConfigTestHooks {
   beforeJsonConfigPublish?: () => void;
-  commandTimeoutMs?: number;
+  commandTimeoutMs?: number | ((args: readonly string[]) => number);
   commandTerminationGraceMs?: number;
 }
 
@@ -387,9 +387,13 @@ async function defaultCommandRunner(
       }, editorConfigTestHooks?.commandTerminationGraceMs ?? COMMAND_TERMINATION_GRACE_MS);
     };
 
+    const configuredTimeout = editorConfigTestHooks?.commandTimeoutMs;
+    const commandTimeoutMs = typeof configuredTimeout === 'function'
+      ? configuredTimeout(args)
+      : configuredTimeout ?? COMMAND_TIMEOUT_MS;
     const timer = setTimeout(() => {
       terminate('command timed out after 15 seconds');
-    }, editorConfigTestHooks?.commandTimeoutMs ?? COMMAND_TIMEOUT_MS);
+    }, commandTimeoutMs);
     const capture = (current: string, chunk: Buffer): string | null => {
       if (Buffer.byteLength(current) + chunk.length > MAX_COMMAND_OUTPUT_BYTES) return null;
       return current + chunk.toString();
