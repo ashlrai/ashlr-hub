@@ -125,13 +125,14 @@ function inspectPrivateDirectory(path: string): Stats {
 }
 
 function ensurePrivateDirectory(path: string, create: boolean): Stats | undefined {
-  try {
-    return inspectPrivateDirectory(path);
-  } catch (error) {
-    if (!isMissing(error)) throw error;
-    if (!create) return undefined;
+  if (!create) {
+    try {
+      return inspectPrivateDirectory(path);
+    } catch (error) {
+      if (isMissing(error)) return undefined;
+      throw error;
+    }
   }
-
   inspectPrivateDirectory(dirname(path));
   try {
     mkdirSync(path, { mode: 0o700 });
