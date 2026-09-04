@@ -200,7 +200,14 @@ describe('loadConfigReadOnly — foundry key typo warning', () => {
     const cfgPath = useTmpHome(tmpHome);
     writeFileSync(cfgPath, JSON.stringify({
       version: 1,
-      foundry: { edvVerify: true, ashlrcodeExecutor: true, specContract: false, repoMap: true, proposalRepair: false },
+      foundry: {
+        edvVerify: true,
+        ashlrcodeExecutor: true,
+        specContract: false,
+        repoMap: true,
+        proposalRepair: false,
+        executionIdentityV1: { enabled: true, shadowOnly: true },
+      },
     }));
     const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
