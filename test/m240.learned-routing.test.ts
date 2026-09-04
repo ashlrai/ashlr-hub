@@ -47,6 +47,19 @@ vi.mock('../src/core/foundry/provenance.js', async (importOriginal) => {
   };
 });
 
+// This suite verifies learning and routing policy, not the binaries installed
+// on the machine running Vitest. Keep routeBackend's availability input
+// deterministic so a developer laptop with Claude/Codex and a clean CI runner
+// exercise the same policy path. Hard-constraint cases remain controlled by
+// allowedBackends and RoutingContext in the individual tests.
+vi.mock('../src/core/run/engines.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/core/run/engines.js')>();
+  return {
+    ...real,
+    engineInstalled: () => true,
+  };
+});
+
 vi.mock('../src/core/inbox/store.js', () => {
   const listProposals = () => {
     const ids = new Set([...realized.producers.keys(), ...realized.times.keys()]);
