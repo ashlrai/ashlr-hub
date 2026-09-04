@@ -19,17 +19,18 @@
  */
 
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   closeSync,
   constants as fsConstants,
-  existsSync,
   fstatSync,
   lstatSync,
   mkdirSync,
   openSync,
   opendirSync,
   readSync,
+  realpathSync,
+  type Stats,
   writeSync,
 } from 'node:fs';
 import type { FleetScorecard, ScorecardWindow } from './scorecard.js';
@@ -76,6 +77,7 @@ export interface ScorecardHistoryReadResult extends ScorecardHistorySourceQualit
 }
 
 interface ScorecardHistoryTestHooks {
+  afterDirectoryOpen?: (operation: 'append' | 'read', path: string) => void;
   afterFileOpen?: (operation: 'append' | 'read', path: string) => void;
   beforeAppendOpen?: (path: string) => void;
 }
@@ -105,11 +107,95 @@ function sameFile(left: ReturnType<typeof fstatSync>, right: ReturnType<typeof f
   return left.dev === right.dev && left.ino === right.ino;
 }
 
-function appendHistoryLine(path: string, line: string): void {
+interface ScorecardDirectoryGuard {
+  assertStable(): void;
+  close(): void;
+}
+
+function isMissing(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException).code === 'ENOENT';
+}
+
+function inspectPrivateDirectory(path: string): Stats {
+  const stat = lstatSync(path);
+  if (!isSafeDecisionAuthorityDirectory(stat)) {
+    throw new Error('scorecard history directory is not private');
+  }
+  return stat;
+}
+
+function ensurePrivateDirectory(path: string, create: boolean): Stats | undefined {
+  try {
+    return inspectPrivateDirectory(path);
+  } catch (error) {
+    if (!isMissing(error)) throw error;
+    if (!create) return undefined;
+  }
+
+  inspectPrivateDirectory(dirname(path));
+  try {
+    mkdirSync(path, { mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+  }
+  return inspectPrivateDirectory(path);
+}
+
+/** Pin the private state root and history directory across one operation. */
+function openScorecardDirectory(create: boolean): ScorecardDirectoryGuard | undefined {
+  const directoryPath = scorecardHistoryDir();
+  const rootPath = dirname(directoryPath);
+  const root = ensurePrivateDirectory(rootPath, create);
+  if (!root) return undefined;
+  const directory = ensurePrivateDirectory(directoryPath, create);
+  if (!directory) return undefined;
+  const rootSnapshot: Stats = root;
+  const directorySnapshot: Stats = directory;
+  const realRoot = realpathSync(rootPath);
+  const realDirectory = realpathSync(directoryPath);
+  if (dirname(realDirectory) !== realRoot) throw new Error('scorecard history escapes private root');
+
+  let fd: number | undefined;
+  if (process.platform !== 'win32') {
+    const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+    const directoryOnly = typeof fsConstants.O_DIRECTORY === 'number' ? fsConstants.O_DIRECTORY : 0;
+    fd = openSync(directoryPath, fsConstants.O_RDONLY | noFollow | directoryOnly);
+    const opened = fstatSync(fd);
+    if (!isSafeDecisionAuthorityDirectory(opened) || !sameFile(directorySnapshot, opened)) {
+      closeSync(fd);
+      fd = undefined;
+      throw new Error('scorecard history directory changed while opening');
+    }
+  }
+
+  let closed = false;
+  return {
+    assertStable: () => {
+      if (closed) throw new Error('scorecard history directory guard is closed');
+      const rootNow = inspectPrivateDirectory(rootPath);
+      const directoryNow = inspectPrivateDirectory(directoryPath);
+      const openedNow = fd === undefined ? directorySnapshot : fstatSync(fd);
+      if (!sameFile(rootSnapshot, rootNow) || !sameFile(directorySnapshot, directoryNow) ||
+        !sameFile(directorySnapshot, openedNow) || realpathSync(rootPath) !== realRoot ||
+        realpathSync(directoryPath) !== realDirectory) {
+        throw new Error('scorecard history directory identity changed');
+      }
+    },
+    close: () => {
+      if (closed) return;
+      closed = true;
+      if (fd !== undefined) closeSync(fd);
+    },
+  };
+}
+
+function appendHistoryLine(path: string, line: string, directory: ScorecardDirectoryGuard): void {
   let fd: number | undefined;
   try {
     const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+    directory.assertStable();
     scorecardHistoryTestHooks?.beforeAppendOpen?.(path);
+    directory.assertStable();
     fd = openSync(
       path,
       fsConstants.O_APPEND | fsConstants.O_RDWR | fsConstants.O_CREAT | noFollow,
@@ -133,6 +219,7 @@ function appendHistoryLine(path: string, line: string): void {
     if (!isSafeDecisionAuthorityFile(pathAfter) || !sameFile(opened, pathAfter)) {
       throw new Error('scorecard history path changed during append');
     }
+    directory.assertStable();
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
@@ -148,11 +235,18 @@ export function appendScorecardSnapshot(record: ScorecardSnapshotRecord): void {
     const ts = Number.isFinite(parsedTs) ? new Date(parsedTs).toISOString() : new Date().toISOString();
     const clean: ScorecardSnapshotRecord = { ts, window: record.window, scorecard: record.scorecard };
     const dir = scorecardHistoryDir();
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const directory = openScorecardDirectory(true);
+    if (!directory) return;
     const line = JSON.stringify(clean) + '\n';
-    if (Buffer.byteLength(line, 'utf8') > MAX_READ_ROW_BYTES) return;
-    const filePath = join(dir, `${ts.slice(0, 7)}.jsonl`);
-    appendHistoryLine(filePath, line);
+    try {
+      if (Buffer.byteLength(line, 'utf8') > MAX_READ_ROW_BYTES) return;
+      scorecardHistoryTestHooks?.afterDirectoryOpen?.('append', dir);
+      directory.assertStable();
+      const filePath = join(dir, `${ts.slice(0, 7)}.jsonl`);
+      appendHistoryLine(filePath, line, directory);
+    } finally {
+      directory.close();
+    }
   } catch {
     // Never throws — history is observability, not authority.
   }
@@ -197,9 +291,11 @@ function pushStop(
 function readHistoryFile(
   path: string,
   maxBytes: number,
+  directory: ScorecardDirectoryGuard,
 ): { ok: true; text: string; bytesRead: number } | { ok: false; reason: 'byte-limit' | 'io-error' } {
   let fd: number | undefined;
   try {
+    directory.assertStable();
     fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
     const before = fstatSync(fd);
     scorecardHistoryTestHooks?.afterFileOpen?.('read', path);
@@ -216,6 +312,7 @@ function readHistoryFile(
       !isSafeDecisionAuthorityFile(after) || !sameFile(before, after) || !sameFile(after, pathAfter) ||
       after.size !== before.size || bytesRead !== before.size
     ) return { ok: false, reason: 'io-error' };
+    directory.assertStable();
     return { ok: true, text: buffer.toString('utf8'), bytesRead };
   } catch {
     return { ok: false, reason: 'io-error' };
@@ -235,22 +332,16 @@ function isScorecardWindow(value: unknown): value is ScorecardWindow {
 export function readScorecardHistory(
   opts: { sinceMs?: number; limit?: number; maxFiles?: number; maxBytes?: number; maxRows?: number } = {},
 ): ScorecardHistoryReadResult {
+  let directory: ScorecardDirectoryGuard | undefined;
   try {
     const maxFiles = boundedOption(opts.maxFiles, DEFAULT_READ_MAX_FILES, HARD_READ_MAX_FILES);
     const maxBytes = boundedOption(opts.maxBytes, DEFAULT_READ_MAX_BYTES, HARD_READ_MAX_BYTES);
     const maxRows = boundedOption(opts.maxRows, DEFAULT_READ_MAX_ROWS, HARD_READ_MAX_ROWS);
     const dir = scorecardHistoryDir();
-    if (!existsSync(dir)) return emptyRead('missing');
-
-    let dirStat: ReturnType<typeof lstatSync>;
-    try {
-      dirStat = lstatSync(dir);
-      if (dirStat.isSymbolicLink() || !dirStat.isDirectory() || !isSafeDecisionAuthorityDirectory(dirStat)) {
-        return emptyRead('degraded', { complete: false, stopReasons: ['io-error'], unreadableFiles: 1 });
-      }
-    } catch {
-      return emptyRead('degraded', { complete: false, stopReasons: ['io-error'], unreadableFiles: 1 });
-    }
+    directory = openScorecardDirectory(false);
+    if (!directory) return emptyRead('missing');
+    scorecardHistoryTestHooks?.afterDirectoryOpen?.('read', dir);
+    directory.assertStable();
 
     let files: string[];
     try {
@@ -293,7 +384,7 @@ export function readScorecardHistory(
         result.complete = false;
         break;
       }
-      const loaded = readHistoryFile(join(dir, file), remaining);
+      const loaded = readHistoryFile(join(dir, file), remaining, directory);
       result.filesRead++;
       if (!loaded.ok) {
         if (loaded.reason === 'io-error') result.unreadableFiles++;
@@ -344,8 +435,11 @@ export function readScorecardHistory(
       result.complete = false;
       result.sourceState = 'degraded';
     }
+    directory.assertStable();
     return result;
   } catch {
     return emptyRead('degraded', { complete: false, stopReasons: ['io-error'], unreadableFiles: 1 });
+  } finally {
+    directory?.close();
   }
 }
