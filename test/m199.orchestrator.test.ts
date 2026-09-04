@@ -130,6 +130,8 @@ vi.mock('../src/core/run/streaming.js', () => ({
   nullSink: vi.fn(() => () => {}),
   fileSink: vi.fn(() => () => {}),
   combineSinks: vi.fn((...sinks: Array<(e: unknown) => void>) => sinks[0] ?? (() => {})),
+  endStreamSink: vi.fn(),
+  failStreamSink: vi.fn(),
 }));
 
 // Mock retry — call the fn once (no retry in tests).

@@ -97,7 +97,13 @@ import {
 import { withToolEnv } from '../env-bridge.js';
 import { buildEngineCommand, engineInstalled, spawnEngine, describeRunEventForStream, DEFAULT_ENGINE_BACKSTOP_MS } from './engines.js';
 import { resolveEngineSpec } from './engine-registry.js';
-import { nullSink, fileSink, combineSinks } from './streaming.js';
+import {
+  nullSink,
+  fileSink,
+  combineSinks,
+  endStreamSink,
+  failStreamSink,
+} from './streaming.js';
 import type { StreamSink } from './streaming.js';
 import { withRetry } from './retry.js';
 import { verifyTaskStructured } from './verify.js';
@@ -2287,6 +2293,8 @@ async function runGoalInternal(
     ? combineSinks(callerSink, fileSink(runStreamIdentity))
     : callerSink;
 
+  try {
+
   // M11: opt-in model verification. Default OFF → the per-task verify step is
   // heuristic-only, charging NO extra model calls (preserves M4 deterministic
   // usage accounting). When enabled, verifyTask may make one cheap model call
@@ -4471,8 +4479,14 @@ async function runGoalInternal(
   }
 
   return state;
+    } finally {
+      finalizeEngineer();
+    }
+  } catch (error) {
+    failStreamSink(sink, error);
+    throw error;
   } finally {
-    finalizeEngineer();
+    endStreamSink(sink);
   }
 }
 

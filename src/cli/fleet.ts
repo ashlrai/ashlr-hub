@@ -2211,7 +2211,10 @@ async function cmdFleetScorecard(args: string[]): Promise<number> {
         `failure rate ${fmtPct(sc.judge.failureRate)}` + sqTag(sc.judge.sourceQuality),
     );
     console.log(
-      `    merges:              realized=${fmt(sc.merges.realized)}  released=${fmt(sc.merges.released)}` +
+      `    merges:              realized=${fmt(sc.merges.realized)}  ` +
+        (sc.merges.releasedState === 'uncommissioned'
+          ? 'released=uncommissioned'
+          : `released=${fmt(sc.merges.released)}`) +
         sqTag(sc.merges.sourceQuality),
     );
     console.log(
@@ -2240,7 +2243,8 @@ async function cmdFleetScorecard(args: string[]): Promise<number> {
       for (const e of sc.byEngine.slice(0, 8)) {
         console.log(
           `      ${e.engine}:${e.model}  dispatches=${e.dispatches}  ` +
-            `realized=${e.realizedMerges}  released=${e.releasedMerges}  ` +
+            `realized=${e.realizedMerges}  ` +
+            `released=${sc.merges.releasedState === 'uncommissioned' ? 'uncommissioned' : fmt(e.releasedMerges)}  ` +
             `cost/merge=${fmtUsd(e.costPerRealizedMergeUsd)}`,
         );
       }

@@ -6,9 +6,8 @@
  *   2. computeFleetScorecard — proposals section degrades to unknown (null), never 0
  *   3. computeFleetScorecard — judge throughput + parse/network failure split
  *   4. computeFleetScorecard — merges: only write-path-authenticated rows count
- *      (FALSIFIES: a bare unsigned post-merge-credit literal is rejected at
- *      the decisions-ledger write boundary; a forged signed-looking token
- *      with an invalid MAC is written but never counted)
+ *      (FALSIFIES: a generic row and shape-only receipt earn no credit;
+ *      released post-merge credit is explicit uncommissioned state)
  *   5. computeFleetScorecard — cost per authenticated merged change
  *   6. computeFleetScorecard — dispatch→verdict latency (median/mean)
  *   7. computeFleetScorecard — rejection-lesson count (self-improve:written)
@@ -33,8 +32,16 @@ import * as http from 'node:http';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { createHash, createHmac } from 'node:crypto';
-import type { AshlrConfig, Proposal, WebServerOptions } from '../src/core/types.js';
+import type {
+  AshlrConfig,
+  Proposal,
+  ProposalLocalMergeIntent,
+  WebServerOptions,
+} from '../src/core/types.js';
+import {
+  signLocalMergeIntent,
+  signLocalRealizedMergeReceipt,
+} from '../src/core/foundry/provenance.js';
 import { startServer, readAuthHeaders } from './helpers/authenticated-web-server.js';
 
 // ---------------------------------------------------------------------------
@@ -60,12 +67,7 @@ afterEach(() => {
 // Mock proposal store (mirrors m119.quality-metrics.test.ts conventions)
 // ---------------------------------------------------------------------------
 
-type MockProposal = Pick<Proposal, 'id' | 'repo' | 'status' | 'createdAt' | 'origin' | 'kind' | 'title' | 'summary'> & {
-  diff?: string;
-  isPartial?: boolean;
-};
-
-const mockProposals: MockProposal[] = [];
+const mockProposals: Proposal[] = [];
 let mockProposalSourceState: 'healthy' | 'degraded' | 'missing' = 'healthy';
 let mockProposalComplete = true;
 
@@ -97,7 +99,7 @@ beforeEach(() => {
 let _seq = 0;
 function pid(): string { return `p-m356-${_seq++}`; }
 
-function makeMockProposal(overrides: Partial<MockProposal> & { createdAt: string }): MockProposal {
+function makeMockProposal(overrides: Partial<Proposal> & { createdAt: string }): Proposal {
   return {
     id: pid(),
     repo: '/repos/alpha',
@@ -108,6 +110,56 @@ function makeMockProposal(overrides: Partial<MockProposal> & { createdAt: string
     summary: 'summary',
     ...overrides,
   };
+}
+
+function makeAuthenticatedRealizedProposal(proposalId: string, observedAt: string): Proposal {
+  const repo = path.join(tmpHome, 'repos', proposalId);
+  fs.mkdirSync(repo, { recursive: true });
+  const diff = '--- a/file.ts\n+++ b/file.ts\n@@\n-old\n+new\n';
+  const diffHash = 'd'.repeat(64);
+  const proposal = makeMockProposal({
+    id: proposalId,
+    repo,
+    status: 'applied',
+    createdAt: observedAt,
+    diff,
+    diffHash,
+    verifyResult: {
+      passed: true,
+      baseHead: '1'.repeat(40),
+      diffHash,
+    },
+  });
+  const unsignedIntent: Omit<ProposalLocalMergeIntent, 'attestation'> = {
+    schemaVersion: 1,
+    branch: `ashlr/merge/${proposalId}`,
+    base: 'main',
+    baseBeforeOid: '1'.repeat(40),
+    proposalHeadOid: '2'.repeat(40),
+    diffHash,
+    evidencePackDigest: '4'.repeat(64),
+    authorizationId: '5'.repeat(32),
+    authorizedAt: observedAt,
+  };
+  const intentAttestation = signLocalMergeIntent(proposalId, repo, unsignedIntent);
+  proposal.localMergeIntent = { ...unsignedIntent, attestation: intentAttestation };
+  const unsignedRealized = {
+    schemaVersion: 1 as const,
+    source: 'local-default-branch' as const,
+    base: 'main',
+    baseBeforeOid: '1'.repeat(40),
+    proposalHeadOid: '2'.repeat(40),
+    mergeCommitOid: '3'.repeat(40),
+    observedAt,
+    proposalId,
+    diffHash,
+    intentAttestation,
+  };
+  proposal.realizedMerge = {
+    ...unsignedRealized,
+    attestation: signLocalRealizedMergeReceipt(proposalId, repo, unsignedRealized),
+  };
+  return proposal;
 }
 
 // ---------------------------------------------------------------------------
@@ -150,25 +202,8 @@ async function recordJudged(
 
 async function recordRealizedMerge(proposalId: string, ts: string): Promise<void> {
   const { recordDecision } = await import('../src/core/fleet/decisions-ledger.js');
+  mockProposals.push(makeAuthenticatedRealizedProposal(proposalId, ts));
   recordDecision({ ts, proposalId, action: 'merged', verdict: 'merged', labelBasis: 'realized-merge-v1' });
-}
-
-/** A genuinely HMAC-signed post-merge-credit release token, minted with the
- *  same per-machine key post-merge-credit.ts uses (isolated to tmpHome). */
-async function mintReleasedCreditLabel(proposalId: string): Promise<string> {
-  const { loadOrCreateKey } = await import('../src/core/foundry/provenance.js');
-  const eventRef = createHash('sha256').update(proposalId).digest('hex').slice(0, 24);
-  const mac = createHmac('sha256', loadOrCreateKey())
-    .update(`ashlr:post-merge-credit-release:v1:${eventRef}`)
-    .digest('hex')
-    .slice(0, 24);
-  return `post-merge-credit-release-v1:${eventRef}:${mac}`;
-}
-
-async function recordReleasedMerge(proposalId: string, ts: string): Promise<void> {
-  const { recordDecision } = await import('../src/core/fleet/decisions-ledger.js');
-  const label = await mintReleasedCreditLabel(proposalId);
-  recordDecision({ ts, proposalId, action: 'merged', verdict: 'applied', labelBasis: label });
 }
 
 async function recordSelfImprove(proposalId: string, ts: string): Promise<void> {
@@ -251,23 +286,109 @@ describe('computeFleetScorecard — judge section', () => {
 // ---------------------------------------------------------------------------
 
 describe('computeFleetScorecard — merges section (evidence-only)', () => {
-  it('counts a write-path-authenticated realized merge', async () => {
+  it('counts an authenticated realized proposal witness without trusting ledger fanout', async () => {
+    const id = pid();
+    mockProposals.push(makeAuthenticatedRealizedProposal(id, isoAgo(1 * DAY_MS)));
+
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    const sc = computeFleetScorecard('7d');
+    expect(sc.merges.realized).toBe(1);
+    expect(sc.merges.released).toBeNull();
+    expect(sc.merges.releasedState).toBe('uncommissioned');
+  });
+
+  it('reports released post-merge credit as uncommissioned while operational release is disabled', async () => {
     const id = pid();
     await recordRealizedMerge(id, isoAgo(1 * DAY_MS));
 
     const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
     const sc = computeFleetScorecard('7d');
-    expect(sc.merges.realized).toBe(1);
-    expect(sc.merges.released).toBe(0);
+    expect(sc.merges.released).toBeNull();
+    expect(sc.merges.releasedState).toBe('uncommissioned');
+    expect(sc.merges.releasedReason).toBe('operational-release-disabled');
   });
 
-  it('counts a cryptographically authenticated released merge', async () => {
+  it('FALSIFY: a generic realized-merge decision without its exact authenticated proposal earns no credit', async () => {
+    const { recordDecision } = await import('../src/core/fleet/decisions-ledger.js');
     const id = pid();
-    await recordReleasedMerge(id, isoAgo(1 * DAY_MS));
+    recordDecision({
+      ts: isoAgo(1 * DAY_MS),
+      proposalId: id,
+      action: 'merged',
+      verdict: 'merged',
+      labelBasis: 'realized-merge-v1',
+    });
 
     const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
     const sc = computeFleetScorecard('7d');
-    expect(sc.merges.released).toBe(1);
+    expect(sc.merges.realized).toBe(0);
+  });
+
+  it('FALSIFY: shape-only realized evidence without a valid receipt earns no credit', async () => {
+    const { recordDecision } = await import('../src/core/fleet/decisions-ledger.js');
+    const id = pid();
+    const proposal = makeAuthenticatedRealizedProposal(id, isoAgo(1 * DAY_MS));
+    if (proposal.realizedMerge?.source === 'local-default-branch') {
+      proposal.realizedMerge.attestation = '0'.repeat(64);
+    }
+    mockProposals.push(proposal);
+    recordDecision({
+      ts: isoAgo(1 * DAY_MS),
+      proposalId: id,
+      action: 'merged',
+      verdict: 'merged',
+      labelBasis: 'realized-merge-v1',
+    });
+
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    const sc = computeFleetScorecard('7d');
+    expect(sc.merges.realized).toBe(0);
+  });
+
+  it('FALSIFY: a fresh ledger row cannot replay an old authenticated merge into the window', async () => {
+    const { recordDecision } = await import('../src/core/fleet/decisions-ledger.js');
+    const id = pid();
+    const oldObservedAt = isoAgo(10 * DAY_MS);
+    mockProposals.push(makeAuthenticatedRealizedProposal(id, oldObservedAt));
+    recordDecision({
+      ts: isoAgo(1 * DAY_MS),
+      proposalId: id,
+      action: 'merged',
+      verdict: 'merged',
+      labelBasis: 'realized-merge-v1',
+    });
+
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    const sc = computeFleetScorecard('7d');
+    expect(sc.merges.realized).toBe(0);
+  });
+
+  it('FALSIFY: exact-timestamp generic rows cannot create or duplicate authenticated credit', async () => {
+    const { recordDecision } = await import('../src/core/fleet/decisions-ledger.js');
+    const id = pid();
+    const observedAt = isoAgo(1 * DAY_MS);
+    mockProposals.push(makeAuthenticatedRealizedProposal(id, observedAt));
+
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    expect(computeFleetScorecard('7d').merges.realized).toBe(1);
+
+    recordDecision({
+      ts: observedAt,
+      proposalId: id,
+      action: 'merged',
+      verdict: 'merged',
+      labelBasis: 'realized-merge-v1',
+    });
+    recordDecision({
+      ts: observedAt,
+      proposalId: id,
+      action: 'merged',
+      verdict: 'merged',
+      labelBasis: 'realized-merge-v1',
+    });
+
+    const sc = computeFleetScorecard('7d');
+    expect(sc.merges.realized).toBe(1);
   });
 
   it('FALSIFY: an unsigned bare post-merge-credit literal is rejected at the ledger write boundary — no row is ever persisted', async () => {
@@ -285,7 +406,8 @@ describe('computeFleetScorecard — merges section (evidence-only)', () => {
 
     const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
     const sc = computeFleetScorecard('7d');
-    expect(sc.merges.released).toBe(0);
+    expect(sc.merges.released).toBeNull();
+    expect(sc.merges.releasedState).toBe('uncommissioned');
   });
 
   it('FALSIFY: a forged signed-looking token with an invalid MAC is written but never counted as released', async () => {
@@ -298,7 +420,8 @@ describe('computeFleetScorecard — merges section (evidence-only)', () => {
 
     const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
     const sc = computeFleetScorecard('7d');
-    expect(sc.merges.released).toBe(0); // ...but never counted, because the MAC doesn't verify
+    expect(sc.merges.released).toBeNull();
+    expect(sc.merges.releasedState).toBe('uncommissioned');
 
     // Also not counted as "realized" — wrong labelBasis entirely.
     expect(sc.merges.realized).toBe(0);
@@ -312,7 +435,8 @@ describe('computeFleetScorecard — merges section (evidence-only)', () => {
     const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
     const sc = computeFleetScorecard('7d');
     expect(sc.merges.realized).toBe(0);
-    expect(sc.merges.released).toBe(0);
+    expect(sc.merges.released).toBeNull();
+    expect(sc.merges.releasedState).toBe('uncommissioned');
   });
 });
 
@@ -441,7 +565,7 @@ describe('computeFleetScorecard — capability axis', () => {
 // ---------------------------------------------------------------------------
 
 describe('computeFleetScorecard — degraded decisions ledger', () => {
-  it('renders every decision-derived section unknown (null) on a torn ledger line, never a fabricated 0', async () => {
+  it('keeps authenticated proposal truth while decision-derived attribution becomes unknown', async () => {
     await recordRealizedMerge(pid(), isoAgo(1 * DAY_MS)); // would otherwise produce real, non-zero counts
 
     const { decisionsDir } = await import('../src/core/fleet/decisions-ledger.js');
@@ -452,14 +576,15 @@ describe('computeFleetScorecard — degraded decisions ledger', () => {
     const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
     const sc = computeFleetScorecard('7d');
     expect(sc.judge.calls).toBeNull();
-    expect(sc.merges.realized).toBeNull();
+    expect(sc.merges.realized).toBe(1);
     expect(sc.merges.released).toBeNull();
+    expect(sc.merges.sourceQuality).toMatchObject({ sourceState: 'healthy', complete: true });
     expect(sc.cost.perMergedChangeUsd).toBeNull();
     expect(sc.latency.sampleSize).toBeNull();
     expect(sc.learning.rejectionLessonsWritten).toBeNull();
     expect(sc.byEngine).toEqual([]);
     for (const sq of [
-      sc.judge.sourceQuality, sc.merges.sourceQuality, sc.cost.sourceQuality,
+      sc.judge.sourceQuality, sc.cost.sourceQuality,
       sc.latency.sourceQuality, sc.learning.sourceQuality,
     ]) {
       expect(sq.sourceState).toBe('degraded');

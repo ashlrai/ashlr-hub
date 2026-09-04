@@ -604,7 +604,7 @@ describe('GET /api/run/:id/events — live engine output integration', () => {
     'a real subprocess writing to stdout is tailed through fileSink and arrives as output-chunk frames',
     async () => {
       const { spawnEngine, describeRunEventForStream } = await import('../src/core/run/engines.js');
-      const { fileSink, emitSinkEvent } = await import('../src/core/run/streaming.js');
+      const { fileSink, emitSinkEvent, endStreamSink } = await import('../src/core/run/streaming.js');
 
       const h = await startServer(makeConfig(), makeOpts());
       openHandles.push(h);
@@ -636,6 +636,7 @@ describe('GET /api/run/:id/events — live engine output integration', () => {
       );
 
       await enginePromise;
+      endStreamSink(sink);
       currentRun = runAt({ stepCount: 0, status: 'done', taskStatus: 'done' });
 
       const { frames } = await collecting;

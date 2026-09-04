@@ -58,7 +58,7 @@ import {
   summarizeDelegationScope,
 } from './delegation-scope.js';
 import { buildEngineCommand, spawnEngine, describeRunEventForStream } from './engines.js';
-import { fileSink, emitSinkEvent } from './streaming.js';
+import { fileSink, emitSinkEvent, endStreamSink, failStreamSink } from './streaming.js';
 import {
   applyLocusPreMutateGate,
   formatPreMutateBlockers,
@@ -2322,7 +2322,11 @@ export async function runEngineSandboxed(
       candidateProposalId,
       proposalOutcome: proposalOutcomeResult,
     };
+  } catch (error) {
+    failStreamSink(streamSink, error);
+    throw error;
   } finally {
+    endStreamSink(streamSink);
     if (!sandboxRetention) {
       try {
         rmSync(hooksDir, { recursive: true, force: true });

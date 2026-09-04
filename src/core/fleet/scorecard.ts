@@ -11,21 +11,18 @@
  * EVIDENCE-ONLY DISCIPLINE (non-negotiable; mirrors quality-metrics.ts and
  * post-merge-credit.ts, this codebase's existing authentication vocabulary):
  *
- *   - "merges" are counted ONLY from decisions-ledger rows that are themselves
- *     write-path-authenticated — never from proposal.status alone:
- *       - realized: action==='merged' && labelBasis==='realized-merge-v1'.
- *         inbox/store.ts's fanoutRealizedMerge() is the ONLY writer of this
- *         row, and every call site is gated behind authenticatedRealizedMergeOf()
- *         (an HMAC local-receipt or GitHub-host reconciliation check — see
- *         store.ts, calls at lines ~386/1830/1911/1950). This is an
- *         operational fact: write-path gated, not self-verifying on read.
- *       - released: action==='merged' && hasReleasedPostMergeCredit(labelBasis).
- *         hasReleasedPostMergeCredit() cryptographically verifies an HMAC-signed
- *         token (post-merge-credit.ts) — the strongest positive-credit signal
- *         in the fleet. A bare string, or any label that isn't a validly
- *         signed token, verifies false. This CANNOT be forged by writing a
- *         fabricated row through the generic recordDecision() API.
- *     Any other labelBasis (or none) counts for NOTHING in either bucket.
+ *   - "realized" merges are derived directly from complete proposals whose
+ *     persisted realized-merge witness passes authenticatedRealizedMergeOf()
+ *     on this read. The generic decisions ledger is never treated as merge
+ *     authority; its rows may attribute spend/producer metadata but cannot
+ *     create, duplicate, or replay realized credit.
+ *
+ *   - "released" merges require action==='merged' plus a label accepted by
+ *     hasReleasedPostMergeCredit(labelBasis).
+ *     hasReleasedPostMergeCredit() cryptographically verifies an HMAC-signed
+ *     token (post-merge-credit.ts). A bare or forged label verifies false.
+ *     While operational release is compile-time disabled, the scorecard
+ *     reports this channel as uncommissioned with a null count.
  *
  *   - Every section of FleetScorecard carries its own `sourceQuality`. When
  *     the read behind a section is incomplete or degraded, every count in
@@ -43,15 +40,19 @@
  */
 
 import { listProposalsDetailed } from '../inbox/store.js';
+import { authenticatedRealizedMergeOf } from '../inbox/realized-merge.js';
 import {
   readDecisions,
   readDecisionsDetailed,
   type DecisionsReadResult,
 } from './decisions-ledger.js';
-import { hasReleasedPostMergeCredit } from './post-merge-credit.js';
+import {
+  hasReleasedPostMergeCredit,
+  POST_MERGE_CREDIT_OPERATIONAL_RELEASE,
+} from './post-merge-credit.js';
 import { canonicalModelTag } from '../run/model-catalog.js';
 import { loadLastReport, type BenchReport } from '../eval/swe-bench.js';
-import type { DecisionEntry } from '../types.js';
+import type { DecisionEntry, Proposal } from '../types.js';
 import {
   appendScorecardSnapshot,
   readScorecardHistory,
@@ -127,10 +128,12 @@ export interface ScorecardJudge {
 
 export interface ScorecardMerges {
   sourceQuality: ScorecardSourceQuality;
-  /** Authenticated (write-path-gated) realized-merge decision rows in window. */
+  /** Decision rows correlated to exact authenticated realized-merge proposals. */
   realized: number | null;
-  /** Cryptographically authenticated (HMAC-verified) post-merge-credit releases in window. */
+  /** Released credit count, or null while the release protocol is uncommissioned. */
   released: number | null;
+  releasedState: 'commissioned' | 'uncommissioned';
+  releasedReason?: 'operational-release-disabled';
 }
 
 export interface ScorecardCost {
@@ -165,7 +168,7 @@ export interface ScorecardEngineSplit {
   model: string;
   dispatches: number;
   realizedMerges: number;
-  releasedMerges: number;
+  releasedMerges: number | null;
   costUsd: number;
   tokensIn: number;
   tokensOut: number;
@@ -202,11 +205,26 @@ export interface FleetScorecard {
 }
 
 // ---------------------------------------------------------------------------
-// Authenticated merge classification (ledger evidence only)
+// Authenticated merge classification
 // ---------------------------------------------------------------------------
 
-function isRealizedMergedDecision(entry: DecisionEntry): boolean {
-  return entry.action === 'merged' && entry.labelBasis === 'realized-merge-v1';
+function authenticatedRealizedIds(
+  proposalsById: ReadonlyMap<string, Proposal>,
+  sinceMs: number,
+): Set<string> {
+  const ids = new Set<string>();
+  const nowMs = Date.now();
+  for (const [proposalId, proposal] of proposalsById) {
+    if (proposal.id !== proposalId) continue;
+    const evidence = authenticatedRealizedMergeOf(proposal);
+    const observedAt = evidence?.source === 'local-default-branch'
+      ? evidence.observedAt
+      : evidence?.reconciliation.observedAt;
+    const witnessedMs = Date.parse(observedAt ?? '');
+    if (!Number.isFinite(witnessedMs) || witnessedMs < sinceMs || witnessedMs > nowMs) continue;
+    ids.add(proposalId);
+  }
+  return ids;
 }
 
 function isReleasedMergedDecision(entry: DecisionEntry): boolean {
@@ -226,26 +244,82 @@ function isNewer(candidate: DecisionEntry, existing: DecisionEntry | undefined):
 // Section builders
 // ---------------------------------------------------------------------------
 
-function buildProposalsSection(sinceMs: number): ScorecardProposals {
+interface ScorecardProposalEvidence {
+  section: ScorecardProposals;
+  proposalsById: Map<string, Proposal>;
+  sourceQuality: ScorecardSourceQuality;
+  ok: boolean;
+}
+
+function buildProposalsSection(sinceMs: number): ScorecardProposalEvidence {
   try {
     const read = listProposalsDetailed({ requireComplete: true });
     const sq = sqFromProposals(read);
     if (!read.complete || read.sourceState === 'degraded') {
-      return { sourceQuality: sq, filed: null, complete: null, partial: null };
+      return {
+        section: { sourceQuality: sq, filed: null, complete: null, partial: null },
+        proposalsById: new Map(),
+        sourceQuality: sq,
+        ok: false,
+      };
     }
     let filed = 0;
     let complete = 0;
+    const proposalsById = new Map<string, Proposal>();
     for (const p of read.proposals) {
+      proposalsById.set(p.id, p);
       const createdMs = Date.parse(p.createdAt);
       if (!Number.isFinite(createdMs) || createdMs < sinceMs) continue;
       filed++;
       const hasDiff = typeof p.diff === 'string' && p.diff.length > 0;
       if (hasDiff && p.isPartial !== true) complete++;
     }
-    return { sourceQuality: sq, filed, complete, partial: filed - complete };
+    return {
+      section: { sourceQuality: sq, filed, complete, partial: filed - complete },
+      proposalsById,
+      sourceQuality: sq,
+      ok: true,
+    };
   } catch {
-    return { sourceQuality: UNKNOWN_SQ, filed: null, complete: null, partial: null };
+    return {
+      section: { sourceQuality: UNKNOWN_SQ, filed: null, complete: null, partial: null },
+      proposalsById: new Map(),
+      sourceQuality: UNKNOWN_SQ,
+      ok: false,
+    };
   }
+}
+
+function combinedSourceQuality(
+  decisions: ScorecardSourceQuality,
+  proposals: ScorecardSourceQuality,
+): ScorecardSourceQuality {
+  const sourceState = decisions.sourceState === 'degraded' || proposals.sourceState === 'degraded'
+    ? 'degraded'
+    : decisions.sourceState === 'missing' || proposals.sourceState === 'missing'
+      ? 'missing'
+      : 'healthy';
+  return {
+    sourceState,
+    complete: decisions.complete && proposals.complete,
+    reasons: [
+      ...decisions.reasons.map((reason) => `decisions:${reason}`),
+      ...proposals.reasons.map((reason) => `proposals:${reason}`),
+    ],
+  };
+}
+
+function releasedMergeFields(released: number | null): Pick<
+  ScorecardMerges,
+  'released' | 'releasedState' | 'releasedReason'
+> {
+  return POST_MERGE_CREDIT_OPERATIONAL_RELEASE
+    ? { released, releasedState: 'commissioned' }
+    : {
+        released: null,
+        releasedState: 'uncommissioned',
+        releasedReason: 'operational-release-disabled',
+      };
 }
 
 function buildJudgeSection(decisions: readonly DecisionEntry[], sq: ScorecardSourceQuality, ok: boolean): ScorecardJudge {
@@ -279,33 +353,37 @@ function buildJudgeSection(decisions: readonly DecisionEntry[], sq: ScorecardSou
 
 function buildMergesSection(
   decisions: readonly DecisionEntry[],
+  proposalsById: ReadonlyMap<string, Proposal>,
   sq: ScorecardSourceQuality,
   ok: boolean,
+  sinceMs: number,
 ): { section: ScorecardMerges; realizedIds: Set<string>; releasedIds: Set<string> } {
   if (!ok) {
     return {
-      section: { sourceQuality: sq, realized: null, released: null },
+      section: { sourceQuality: sq, realized: null, ...releasedMergeFields(null) },
       realizedIds: new Set(),
       releasedIds: new Set(),
     };
   }
-  // Newest-row-wins per proposalId, mirroring decisions-ledger.ts / quality-metrics.ts convention.
-  const latestRealized = new Map<string, DecisionEntry>();
+  // Realized identity comes only from authenticated proposal witnesses. The
+  // unsigned decisions ledger cannot create or multiply this set.
+  const realizedIds = authenticatedRealizedIds(proposalsById, sinceMs);
   const latestReleased = new Map<string, DecisionEntry>();
   for (const d of decisions) {
-    if (isRealizedMergedDecision(d)) {
-      const existing = latestRealized.get(d.proposalId);
-      if (isNewer(d, existing)) latestRealized.set(d.proposalId, d);
-    }
-    if (isReleasedMergedDecision(d)) {
+    if (POST_MERGE_CREDIT_OPERATIONAL_RELEASE && isReleasedMergedDecision(d)) {
       const existing = latestReleased.get(d.proposalId);
       if (isNewer(d, existing)) latestReleased.set(d.proposalId, d);
     }
   }
-  const realizedIds = new Set(latestRealized.keys());
-  const releasedIds = new Set(latestReleased.keys());
+  const releasedIds = new Set(
+    [...latestReleased.keys()].filter((proposalId) => realizedIds.has(proposalId)),
+  );
   return {
-    section: { sourceQuality: sq, realized: realizedIds.size, released: releasedIds.size },
+    section: {
+      sourceQuality: sq,
+      realized: realizedIds.size,
+      ...releasedMergeFields(releasedIds.size),
+    },
     realizedIds,
     releasedIds,
   };
@@ -455,7 +533,11 @@ function buildEngineSplits(
     let entry = acc.get(k);
     if (!entry) {
       entry = {
-        engine, model, dispatches: 0, realizedMerges: 0, releasedMerges: 0,
+        engine,
+        model,
+        dispatches: 0,
+        realizedMerges: 0,
+        releasedMerges: POST_MERGE_CREDIT_OPERATIONAL_RELEASE ? 0 : null,
         costUsd: 0, tokensIn: 0, tokensOut: 0, costPerRealizedMergeUsd: null,
       };
       acc.set(k, entry);
@@ -483,7 +565,8 @@ function buildEngineSplits(
   for (const proposalId of releasedIds) {
     const producer = producerOf.get(proposalId);
     if (!producer) continue;
-    ensure(producer.engine, producer.model).releasedMerges++;
+    const entry = ensure(producer.engine, producer.model);
+    if (entry.releasedMerges !== null) entry.releasedMerges++;
   }
 
   for (const entry of acc.values()) {
@@ -542,7 +625,7 @@ export function computeFleetScorecard(window: ScorecardWindow): FleetScorecard {
   const nowMs = Date.now();
   const sinceMs = nowMs - windowMs(window);
 
-  const proposals = buildProposalsSection(sinceMs);
+  const proposalEvidence = buildProposalsSection(sinceMs);
 
   let decisionRead: DecisionsReadResult;
   try {
@@ -557,19 +640,32 @@ export function computeFleetScorecard(window: ScorecardWindow): FleetScorecard {
   const decisionsOk = decisionRead.complete && decisionRead.sourceState !== 'degraded';
   const decisionsSq = sqFromDecisions(decisionRead);
   const decisions = decisionRead.decisions;
+  const mergeSq = POST_MERGE_CREDIT_OPERATIONAL_RELEASE
+    ? combinedSourceQuality(decisionsSq, proposalEvidence.sourceQuality)
+    : proposalEvidence.sourceQuality;
+  const mergesOk = proposalEvidence.ok &&
+    (!POST_MERGE_CREDIT_OPERATIONAL_RELEASE || decisionsOk);
+  const attributionSq = combinedSourceQuality(decisionsSq, proposalEvidence.sourceQuality);
+  const attributionOk = decisionsOk && proposalEvidence.ok;
 
   const judge = buildJudgeSection(decisions, decisionsSq, decisionsOk);
-  const { section: merges, realizedIds, releasedIds } = buildMergesSection(decisions, decisionsSq, decisionsOk);
-  const { section: cost } = buildCostSection(realizedIds, decisionsSq, decisionsOk);
+  const { section: merges, realizedIds, releasedIds } = buildMergesSection(
+    decisions,
+    proposalEvidence.proposalsById,
+    mergeSq,
+    mergesOk,
+    sinceMs,
+  );
+  const { section: cost } = buildCostSection(realizedIds, attributionSq, attributionOk);
   const latency = buildLatencySection(decisions, decisionsSq, decisionsOk);
   const learning = buildLearningSection(decisions, decisionsSq, decisionsOk);
-  const byEngine = buildEngineSplits(decisions, realizedIds, releasedIds, decisionsOk);
+  const byEngine = buildEngineSplits(decisions, realizedIds, releasedIds, attributionOk);
   const capability = buildCapabilitySection();
 
   return {
     window,
     generatedAt,
-    proposals,
+    proposals: proposalEvidence.section,
     judge,
     merges,
     cost,
@@ -588,6 +684,7 @@ export interface ScorecardTrendPoint {
   ts: string;
   window: ScorecardWindow;
   merges: { realized: number | null; released: number | null };
+  releasedState: ScorecardMerges['releasedState'];
   costPerMergedChangeUsd: number | null;
   proposalsFiled: number | null;
   rejectionLessonsWritten: number | null;
@@ -603,6 +700,7 @@ function toTrendPoint(record: ScorecardSnapshotRecord): ScorecardTrendPoint {
     ts: record.ts,
     window: record.window,
     merges: { realized: record.scorecard.merges.realized, released: record.scorecard.merges.released },
+    releasedState: record.scorecard.merges.releasedState ?? 'uncommissioned',
     costPerMergedChangeUsd: record.scorecard.cost.perMergedChangeUsd,
     proposalsFiled: record.scorecard.proposals.filed,
     rejectionLessonsWritten: record.scorecard.learning.rejectionLessonsWritten,

@@ -32,8 +32,17 @@ import type { RunStreamEvent } from '../types.js';
 import { makeColors } from '../../cli/ui.js';
 import { scrubSecrets } from '../util/scrub.js';
 
-/** A sink that receives live run events. Never throws to the caller. */
-export type StreamSink = (e: RunStreamEvent) => void;
+/**
+ * A sink that receives live run events. Lifecycle methods are optional so
+ * existing render-only sinks remain simple callables, while buffered sinks can
+ * safely drain withheld text on every terminal path. No method may throw.
+ */
+export interface StreamSink {
+  (e: RunStreamEvent): void;
+  flush?: () => void;
+  end?: () => void;
+  error?: (error?: unknown) => void;
+}
 
 /** A no-op sink — used when streaming is disabled or in unit tests. */
 export function nullSink(): StreamSink {
@@ -54,6 +63,33 @@ export function emitSinkEvent(sink: StreamSink, event: Omit<RunStreamEvent, 'ts'
 }
 
 /**
+ * Release only output that a buffered sink has already classified as safe,
+ * without closing it. An undecidable look-behind remains buffered so a flush
+ * cannot turn one split secret into two independently harmless-looking writes.
+ * Never throws.
+ */
+export function flushStreamSink(sink: StreamSink): void {
+  try { sink.flush?.(); } catch { /* sinks never disrupt a run */ }
+}
+
+/** Drain buffered output and close the sink. Never throws. */
+export function endStreamSink(sink: StreamSink): void {
+  try {
+    if (sink.end) sink.end();
+    else sink.flush?.();
+  } catch { /* sinks never disrupt a run */ }
+}
+
+/** Drain buffered output on an exceptional terminal path. Never throws. */
+export function failStreamSink(sink: StreamSink, error?: unknown): void {
+  try {
+    if (sink.error) sink.error(error);
+    else if (sink.end) sink.end();
+    else sink.flush?.();
+  } catch { /* sinks never disrupt a run */ }
+}
+
+/**
  * Fan an event out to every sink in `sinks`. Each sink is invoked
  * independently inside its own try/catch (nullSink and makeCliSink already
  * never throw, but fileSink writes to disk — one sink's I/O failure must
@@ -64,7 +100,7 @@ export function combineSinks(...sinks: StreamSink[]): StreamSink {
   const live = sinks.filter((s): s is StreamSink => typeof s === 'function');
   if (live.length === 0) return nullSink();
   if (live.length === 1) return live[0]!;
-  return (e: RunStreamEvent): void => {
+  const combined = ((e: RunStreamEvent): void => {
     for (const s of live) {
       try {
         s(e);
@@ -72,7 +108,11 @@ export function combineSinks(...sinks: StreamSink[]): StreamSink {
         // One sink's failure must never suppress delivery to the others.
       }
     }
-  };
+  }) as StreamSink;
+  combined.flush = () => { for (const sink of live) flushStreamSink(sink); };
+  combined.end = () => { for (const sink of live) endStreamSink(sink); };
+  combined.error = (error?: unknown) => { for (const sink of live) failStreamSink(sink, error); };
+  return combined;
 }
 
 // ---------------------------------------------------------------------------
@@ -106,6 +146,15 @@ export const STREAM_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
  * is silently dropped for that runId (never grows past the cap). Exported so
  * the SSE route / tests can recognize it. */
 export const STREAM_TRUNCATION_MARKER = '[ashlr] output stream truncated — size cap reached; further output dropped';
+
+/**
+ * Maximum raw suffix withheld from disk while waiting for a secret pattern to
+ * become decidable across model-token boundaries. The current scrubber's
+ * longest minimum recognizable prefix is well below this bound; keeping the
+ * window small limits normal streaming latency while preventing per-chunk
+ * regex bypasses.
+ */
+export const STREAM_REDACTION_WINDOW_CHARS = 256;
 
 /** One JSONL record per persisted chunk. `text` has already been scrubbed. */
 export interface StoredStreamChunk {
@@ -265,53 +314,201 @@ function appendStreamLine(filePath: string, line: string): boolean {
  * scrubbed-at-rest file is the only acceptable design for something the SSE
  * route later serves back over HTTP.
  *
- * Cheap when idle (no timers, no fd kept open across calls); buffered only
- * in the sense that no fsync is ever issued — a plain append is enough for
- * observability, not a ledger. Skips events with no meaningful text (bare
- * lifecycle pings already live in RunStep — this file's job is the text a
- * step boundary can't carry). Never throws.
+ * Cheap when idle (no timers, no fd kept open across calls). A small bounded
+ * raw suffix stays in memory so secret patterns split across event/token
+ * boundaries are classified before any constituent bytes reach disk. A
+ * nonterminal flush releases only already-classified safe prefixes; end/error
+ * finalize the undecidable suffix. Once a secret introducer or complete match
+ * is observed, the sink fails closed for the rest of the run: it persists one
+ * redaction marker and drops subsequent text. This deliberately trades the
+ * remainder of a secret-bearing diagnostic stream for the guarantee that an
+ * arbitrarily long value cannot leak after its identifying prefix was removed.
+ * Skips events with no meaningful text. Never throws.
  */
 export function fileSink(runId: string): StreamSink {
   const filePath = runStreamFilePath(runId);
   if (!filePath) return nullSink();
 
-  return (e: RunStreamEvent): void => {
+  interface PendingChunk {
+    event: RunStreamEvent;
+    text: string;
+  }
+
+  const pending: PendingChunk[] = [];
+  let pendingChars = 0;
+  let ended = false;
+  let redactionLocked = false;
+
+  const writeRecord = (event: RunStreamEvent, text: string): boolean => {
     try {
-      const text = typeof e.text === 'string' ? e.text : '';
-      if (text.length === 0) return;
+      if (text.length === 0) return false;
 
       gcRunStreams();
-      if (!ensureRunStreamsDir()) return;
+      if (!ensureRunStreamsDir()) return false;
 
       const state = seedWriteState(filePath);
-      if (state.truncated) return;
+      if (state.truncated) return false;
 
       const record: StoredStreamChunk = {
-        ts: e.ts,
-        kind: e.kind,
-        ...(e.taskId ? { taskId: e.taskId } : {}),
-        text: scrubSecrets(text),
+        ts: event.ts,
+        kind: event.kind,
+        ...(event.taskId ? { taskId: event.taskId } : {}),
+        text,
       };
       const line = `${JSON.stringify(record)}\n`;
       const lineBytes = Buffer.byteLength(line, 'utf8');
 
       if (state.bytes + lineBytes > MAX_STREAM_FILE_BYTES) {
         state.truncated = true;
-        const marker: StoredStreamChunk = { ts: e.ts, kind: 'log', text: STREAM_TRUNCATION_MARKER };
+        const marker: StoredStreamChunk = { ts: event.ts, kind: 'log', text: STREAM_TRUNCATION_MARKER };
         const markerLine = `${JSON.stringify(marker)}\n`;
         if (appendStreamLine(filePath, markerLine)) {
           state.bytes += Buffer.byteLength(markerLine, 'utf8');
         }
-        return;
+        return false;
       }
 
       if (appendStreamLine(filePath, line)) {
         state.bytes += lineBytes;
+        return true;
       }
+      return false;
+    } catch {
+      return false;
+    }
+  };
+
+  const pendingText = (): string => pending.map((chunk) => chunk.text).join('');
+
+  /**
+   * Recognize a secret-bearing construct as soon as its identifying prefix is
+   * available. Some canonical scrubber patterns (URL credentials, key=value,
+   * PEM blocks) have unbounded values, so waiting for a complete regex match
+   * before releasing a fixed-size prefix would eventually cut the introducer
+   * away from its tail. False positives are intentionally fail-closed because
+   * this is a private observability stream, not the operator's live UI.
+   */
+  const containsSecretIntroducer = (text: string): boolean => {
+    try {
+      return /-----BEGIN[ A-Z]*PRIVATE KEY-----/i.test(text) ||
+        /\bsk-/i.test(text) ||
+        /\bgh[poursa]_/i.test(text) ||
+        /\bgithub_pat_/i.test(text) ||
+        /\b(?:Bearer|Token|Authorization)\s+/i.test(text) ||
+        /\b(?:api[_-]?key|api[_-]?token|secret|secret[_-]?key|token|password|passwd|pwd|auth|credential|client[_-]?secret|private[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|connection[_-]?string|conn[_-]?str|_?auth[_-]?token|ASHLR_[A-Z_]+)\s*[=:]/i.test(text) ||
+        /\bxox[baprs]-/i.test(text) ||
+        /\bAKIA[0-9A-Z]*/.test(text) ||
+        /\beyJ[A-Za-z0-9_-]*\./.test(text) ||
+        /\b(?:glpat-|hf_|npm_|AIza)/i.test(text) ||
+        /:\/\/[^:\s/@]+:/.test(text);
+    } catch {
+      return true;
+    }
+  };
+
+  const clearPending = (): void => {
+    pending.length = 0;
+    pendingChars = 0;
+  };
+
+  const pendingIsSensitive = (raw: string): boolean =>
+    containsSecretIntroducer(raw) || scrubSecrets(raw) !== raw;
+
+  const lockRedacted = (): void => {
+    const first = pending[0];
+    if (first) writeRecord(first.event, '[REDACTED]');
+    clearPending();
+    redactionLocked = true;
+  };
+
+  const dropPrefix = (count: number): void => {
+    let remaining = Math.max(0, count);
+    while (remaining > 0 && pending.length > 0) {
+      const first = pending[0]!;
+      if (first.text.length <= remaining) {
+        remaining -= first.text.length;
+        pendingChars -= first.text.length;
+        pending.shift();
+      } else {
+        first.text = first.text.slice(remaining);
+        pendingChars -= remaining;
+        remaining = 0;
+      }
+    }
+  };
+
+  const writeRawPrefix = (count: number): void => {
+    let remaining = Math.max(0, count);
+    while (remaining > 0 && pending.length > 0) {
+      const first = pending[0]!;
+      const take = Math.min(first.text.length, remaining);
+      const text = first.text.slice(0, take);
+      // Defense in depth: the combined pending text was already classified,
+      // but every actual disk write still traverses the canonical scrubber.
+      writeRecord(first.event, scrubSecrets(text));
+      dropPrefix(take);
+      remaining -= take;
+    }
+  };
+
+  const drainBoundedPrefix = (): void => {
+    if (pendingChars === 0) return;
+    const raw = pendingText();
+    if (pendingIsSensitive(raw)) {
+      // Never retain a raw suffix from a matched region: doing so severs the
+      // identifying prefix and makes a later flush see only harmless-looking
+      // secret tail bytes. Clear the entire pending region and suppress all
+      // continuation, which is bounded regardless of value length.
+      lockRedacted();
+      return;
+    }
+    if (pendingChars <= STREAM_REDACTION_WINDOW_CHARS) return;
+    const count = pendingChars - STREAM_REDACTION_WINDOW_CHARS;
+    writeRawPrefix(count);
+  };
+
+  const finalizePending = (): void => {
+    if (pendingChars === 0) return;
+    const raw = pendingText();
+    if (pendingIsSensitive(raw)) lockRedacted();
+    else writeRawPrefix(pendingChars);
+  };
+
+  const sink = ((e: RunStreamEvent): void => {
+    try {
+      if (ended) return;
+      const text = typeof e.text === 'string' ? e.text : '';
+      if (text.length === 0) return;
+      if (redactionLocked) return;
+
+      pending.push({ event: e, text });
+      pendingChars += text.length;
+      drainBoundedPrefix();
     } catch {
       // StreamSink contract: never throw to the caller.
     }
+  }) as StreamSink;
+
+  sink.flush = () => {
+    try {
+      // Deliberately retain the final undecidable window. `flush` is
+      // nonterminal and must not erase cross-chunk redaction state.
+      if (!ended && !redactionLocked) drainBoundedPrefix();
+    } catch { /* never throw */ }
   };
+  sink.end = () => {
+    try {
+      if (!ended && !redactionLocked) finalizePending();
+    } catch { /* never throw */ }
+    ended = true;
+  };
+  sink.error = () => {
+    try {
+      if (!ended && !redactionLocked) finalizePending();
+    } catch { /* never throw */ }
+    ended = true;
+  };
+  return sink;
 }
 
 /**

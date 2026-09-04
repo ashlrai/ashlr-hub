@@ -26,10 +26,14 @@ import {
   fileSink,
   combineSinks,
   emitSinkEvent,
+  flushStreamSink,
+  endStreamSink,
+  failStreamSink,
   gcRunStreams,
   runStreamFilePath,
   runStreamsDir,
   MAX_STREAM_FILE_BYTES,
+  STREAM_REDACTION_WINDOW_CHARS,
   STREAM_TRUNCATION_MARKER,
 } from '../src/core/run/streaming.js';
 
@@ -62,6 +66,12 @@ function readStreamFile(runId: string): string {
   }
 }
 
+function readStoredText(runId: string): string {
+  const raw = readStreamFile(runId).trim();
+  if (!raw) return '';
+  return raw.split('\n').map((line) => (JSON.parse(line) as { text: string }).text).join('');
+}
+
 // ---------------------------------------------------------------------------
 // runStreamFilePath — id grammar
 // ---------------------------------------------------------------------------
@@ -88,6 +98,7 @@ describe('fileSink — scrubs secrets before they touch disk', () => {
     const secret = 'sk-ant-api03-SUPERSECRETVALUE1234567890abcdef';
     const sink = fileSink('run-secret-1');
     sink(makeEvent({ text: `leaked key ${secret}` }));
+    endStreamSink(sink);
 
     const raw = readStreamFile('run-secret-1');
     expect(raw).not.toContain(secret);
@@ -97,6 +108,7 @@ describe('fileSink — scrubs secrets before they touch disk', () => {
   it('never persists a bearer token value', () => {
     const sink = fileSink('run-secret-2');
     sink(makeEvent({ text: 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345' }));
+    endStreamSink(sink);
 
     const raw = readStreamFile('run-secret-2');
     expect(raw).not.toContain('abcdefghijklmnopqrstuvwxyz012345');
@@ -106,6 +118,7 @@ describe('fileSink — scrubs secrets before they touch disk', () => {
     const sink = fileSink('run-jsonl-1');
     sink(makeEvent({ text: 'first chunk', taskId: 't1' }));
     sink(makeEvent({ text: 'second chunk' }));
+    endStreamSink(sink);
 
     const lines = readStreamFile('run-jsonl-1').trim().split('\n');
     expect(lines).toHaveLength(2);
@@ -126,6 +139,7 @@ describe('fileSink — scrubs secrets before they touch disk', () => {
   it('file is written with 0600 permissions, dir with 0700', () => {
     const sink = fileSink('run-perms-1');
     sink(makeEvent({ text: 'x' }));
+    endStreamSink(sink);
     const p = runStreamFilePath('run-perms-1')!;
     if (process.platform !== 'win32') {
       expect(fs.statSync(p).mode & 0o777).toBe(0o600);
@@ -143,6 +157,106 @@ describe('fileSink — scrubs secrets before they touch disk', () => {
     const sink = fileSink('../traversal');
     expect(() => sink(makeEvent({ text: 'x' }))).not.toThrow();
     expect(fs.existsSync(runStreamsDir())).toBe(false);
+  });
+
+  it('redacts representative secrets split at every chunk boundary', () => {
+    const secrets = [
+      'sk-ant-api03-SUPERSECRETVALUE1234567890abcdef',
+      'github_pat_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890',
+      'Authorization Bearer abcdefghijklmnopqrstuvwxyz012345',
+      'password=correct-horse-battery-staple',
+      ['xox', 'b-1234567890-abcdefghijklmnop'].join(''),
+      'AKIAIOSFODNN7EXAMPLE',
+      ['eyJhbGciOiJIUzI1NiJ9', 'eyJzdWIiOiIxMjM0NTY3ODkwIn0', 'signaturevalue'].join('.'),
+      ['gl', 'pat-abcdefghijklmnop123456'].join(''),
+      ['AI', 'zaSyD1234567890abcdefghijklmnopqrstuv'].join(''),
+      'https://operator:supersecretpassword@example.com/path',
+      'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmn0123456789+/',
+      '-----BEGIN PRIVATE KEY-----\nprivatekeymaterial\n-----END PRIVATE KEY-----',
+    ];
+
+    let sequence = 0;
+    for (const secret of secrets) {
+      for (let split = 0; split <= secret.length; split += 1) {
+        const runId = `run-split-${sequence++}`;
+        const sink = fileSink(runId);
+        sink(makeEvent({ text: secret.slice(0, split) }));
+        sink(makeEvent({ text: secret.slice(split) }));
+        endStreamSink(sink);
+        const stored = readStoredText(runId);
+        expect(stored, `${secret.slice(0, 20)}… split at ${split}`).not.toContain(secret);
+        expect(stored, `${secret.slice(0, 20)}… split at ${split}`).toContain('[REDACTED]');
+      }
+    }
+  });
+
+  it('keeps benign streaming responsive beyond the bounded look-behind', () => {
+    const sink = fileSink('run-responsive-1');
+    const text = 'ordinary output '.repeat(80);
+    sink(makeEvent({ text }));
+    const storedBeforeFlush = readStoredText('run-responsive-1');
+    expect(storedBeforeFlush.length).toBe(text.length - STREAM_REDACTION_WINDOW_CHARS);
+    expect(text.startsWith(storedBeforeFlush)).toBe(true);
+    endStreamSink(sink);
+    expect(readStoredText('run-responsive-1')).toBe(text);
+  });
+
+  it('never leaks the detached tail of a secret longer than the redaction window at any split', () => {
+    const secret = `password=${'Ab9_'.repeat(STREAM_REDACTION_WINDOW_CHARS)}`;
+    const properSuffix = secret.slice(-STREAM_REDACTION_WINDOW_CHARS);
+
+    for (let split = 0; split <= secret.length; split += 1) {
+      const runId = `run-long-split-${split}`;
+      const sink = fileSink(runId);
+      sink(makeEvent({ text: secret.slice(0, split) }));
+      sink(makeEvent({ text: secret.slice(split) }));
+      endStreamSink(sink);
+
+      const stored = readStoredText(runId);
+      expect(stored, `long key=value split at ${split}`).toContain('[REDACTED]');
+      expect(stored, `long key=value split at ${split}`).not.toContain(secret);
+      expect(stored, `detached tail split at ${split}`).not.toContain(properSuffix);
+    }
+  });
+
+  it('flush preserves undecidable look-behind without closing, while end finalizes it', () => {
+    const sink = fileSink('run-lifecycle-1');
+    sink(makeEvent({ text: 'first safe fragment' }));
+    expect(readStoredText('run-lifecycle-1')).toBe('');
+    flushStreamSink(sink);
+    expect(readStoredText('run-lifecycle-1')).toBe('');
+    sink(makeEvent({ text: ' second safe fragment' }));
+    endStreamSink(sink);
+    expect(readStoredText('run-lifecycle-1')).toBe('first safe fragment second safe fragment');
+    sink(makeEvent({ text: ' ignored after end' }));
+    expect(readStoredText('run-lifecycle-1')).not.toContain('ignored after end');
+  });
+
+  it('retains redaction state across nonterminal flush and empty lifecycle events', () => {
+    const secret = 'sk-abcdefghijklmnopqrstuvwxyz';
+    const sink = fileSink('run-lifecycle-boundary-1');
+    sink(makeEvent({ text: secret.slice(0, 3) }));
+    flushStreamSink(sink);
+    sink(makeEvent({ kind: 'log', text: undefined }));
+    sink(makeEvent({ text: secret.slice(3) }));
+    endStreamSink(sink);
+
+    const stored = readStoredText('run-lifecycle-boundary-1');
+    expect(stored).not.toContain(secret);
+    expect(stored).not.toContain(secret.slice(3));
+    expect(stored).toContain('[REDACTED]');
+  });
+
+  it('error drains a split secret safely and closes the sink', () => {
+    const secret = 'sk-abcdefghijklmnopqrstuvwxyz';
+    const sink = fileSink('run-lifecycle-error-1');
+    sink(makeEvent({ text: secret.slice(0, 8) }));
+    sink(makeEvent({ text: secret.slice(8) }));
+    failStreamSink(sink, new Error('engine failed'));
+    expect(readStoredText('run-lifecycle-error-1')).not.toContain(secret);
+    expect(readStoredText('run-lifecycle-error-1')).toContain('[REDACTED]');
+    sink(makeEvent({ text: ' ignored after error' }));
+    expect(readStoredText('run-lifecycle-error-1')).not.toContain('ignored after error');
   });
 });
 
@@ -176,6 +290,7 @@ describe('fileSink — size cap', () => {
   it('a run comfortably under the cap is never truncated', () => {
     const sink = fileSink('run-cap-2');
     for (let i = 0; i < 20; i++) sink(makeEvent({ text: `chunk ${i}` }));
+    endStreamSink(sink);
     const raw = readStreamFile('run-cap-2');
     expect(raw).not.toContain(STREAM_TRUNCATION_MARKER);
     expect(raw.trim().split('\n')).toHaveLength(20);
@@ -225,6 +340,7 @@ describe('combineSinks', () => {
     const rendered: RunStreamEvent[] = [];
     const combined = combineSinks((e) => rendered.push(e), fileSink('run-tee-1'));
     combined(makeEvent({ text: 'engine output line' }));
+    endStreamSink(combined);
 
     expect(rendered).toHaveLength(1);
     expect(readStreamFile('run-tee-1')).toContain('engine output line');
@@ -259,8 +375,12 @@ describe('gcRunStreams', () => {
   });
 
   it('deletes files older than the retention window, keeps fresh ones', () => {
-    fileSink('run-old-1')(makeEvent({ text: 'old' }));
-    fileSink('run-fresh-1')(makeEvent({ text: 'fresh' }));
+    const oldSink = fileSink('run-old-1');
+    oldSink(makeEvent({ text: 'old' }));
+    endStreamSink(oldSink);
+    const freshSink = fileSink('run-fresh-1');
+    freshSink(makeEvent({ text: 'fresh' }));
+    endStreamSink(freshSink);
 
     const oldPath = runStreamFilePath('run-old-1')!;
     const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
