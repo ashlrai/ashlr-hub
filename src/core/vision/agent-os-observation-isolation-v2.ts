@@ -1,5 +1,5 @@
 /**
- * Signed, replay-resistant observation records for a future local-container broker.
+ * Signed, mismatch-resistant observation records for a future local-container broker.
  *
  * These pure records bind pre-start and post-run claims to one request nonce,
  * container identity, immutable implementation/configuration digests, resource
@@ -10,6 +10,7 @@
 import { createHash } from 'node:crypto';
 
 import {
+  inspectAgentOsLocalContainerCreatePolicyV1,
   isAgentOsLocalContainerLimitsV1,
   type AgentOsLocalContainerLimitsV1,
 } from './agent-os-local-container-policy.js';
@@ -19,6 +20,8 @@ export const AGENT_OS_OBSERVATION_ISOLATION_PROTOCOL_V2 =
 export const AGENT_OS_OBSERVATION_ISOLATION_SIGNATURE_ALGORITHM_V2 = 'ed25519' as const;
 export const AGENT_OS_OBSERVATION_ISOLATION_MAX_ATTESTATION_LIFETIME_MS_V2 = 5 * 60_000;
 export const AGENT_OS_OBSERVATION_ISOLATION_MAX_FUTURE_SKEW_MS_V2 = 5_000;
+export const AGENT_OS_OBSERVATION_ISOLATION_MAX_DEADLINE_KILL_LAG_MS_V2 = 5_000;
+export const AGENT_OS_OBSERVATION_ISOLATION_MAX_CLEANUP_DURATION_MS_V2 = 10_000;
 
 const PREPARE_SIGNATURE_DOMAIN = 'ashlr:agent-os:observation-isolation:prepare-signature:v2\0';
 const PREPARE_DIGEST_DOMAIN = 'ashlr:agent-os:observation-isolation:prepare-digest:v2\0';
@@ -43,6 +46,7 @@ export const AGENT_OS_OBSERVATION_ISOLATION_NO_AUTHORITY_V2 = Object.freeze({
 export interface AgentOsObservationIsolationBindingsV2 {
   requestNonce: string;
   requestDigest: string;
+  deadlineAt: string;
   containerId: string;
   brokerDigest: string;
   engineDigest: string;
@@ -57,12 +61,21 @@ export interface AgentOsObservationIsolationPostRunEvidenceV2 {
   requestDigest: string;
   responseDigest: string;
   inspectDigest: string;
+  outputEvidenceDigest: string;
   exitEvidenceDigest: string;
+  deadlineKillEvidenceDigest: string;
   removalEvidenceDigest: string;
+  outputBytes: number;
+  outputTruncated: boolean;
+  outputLimitExceeded: boolean;
   exitCode: number;
   oomKilled: boolean;
   timedOut: boolean;
+  deadlineAt: string;
+  deadlineKillObserved: boolean;
+  killIssuedAt: string | null;
   finishedAt: string;
+  cleanupStartedAt: string;
   removalConfirmed: true;
   containerAbsentAfterRemoval: true;
   removedAt: string;
@@ -134,6 +147,7 @@ export type AgentOsObservationIsolationReasonV2 =
   | 'invalid-attestation'
   | 'invalid-expected-bindings'
   | 'binding-mismatch'
+  | 'policy-binding-mismatch'
   | 'post-run-evidence-mismatch'
   | 'attestation-future'
   | 'attestation-expired'
@@ -156,7 +170,13 @@ export interface AgentOsObservationIsolationInspectionV2 {
   signatureVerified: boolean;
   bindingsVerified: boolean;
   postRunEvidenceVerified: boolean;
+  policyBindingsVerified: boolean;
+  outputLimitEvidenceVerified: boolean;
+  deadlineKillEvidenceVerified: boolean;
+  cleanupTimingVerified: boolean;
   removalEvidencePresent: boolean;
+  replayConsumptionRequired: true;
+  replayConsumptionVerified: false;
   brokerTruthIndependentlyVerified: false;
   dockerEnforcementVerified: false;
   authority: 'observation-only';
@@ -175,13 +195,15 @@ const LIMIT_KEYS = [
   'cpuNanoCpus', 'maxDurationMs', 'maxOutputBytes', 'memoryBytes', 'memorySwapBytes', 'pidsLimit',
 ] as const;
 const BINDING_KEYS = [
-  'brokerDigest', 'containerId', 'createConfigDigest', 'engineDigest', 'imageDigest', 'limits',
-  'producerDigest', 'requestDigest', 'requestNonce', 'seccompDigest',
+  'brokerDigest', 'containerId', 'createConfigDigest', 'deadlineAt', 'engineDigest', 'imageDigest',
+  'limits', 'producerDigest', 'requestDigest', 'requestNonce', 'seccompDigest',
 ] as const;
 const POST_RUN_KEYS = [
-  'containerAbsentAfterRemoval', 'exitCode', 'exitEvidenceDigest', 'finishedAt', 'inspectDigest',
-  'oomKilled', 'removalConfirmed', 'removalEvidenceDigest', 'removedAt', 'requestDigest',
-  'responseDigest', 'timedOut',
+  'cleanupStartedAt', 'containerAbsentAfterRemoval', 'deadlineAt', 'deadlineKillEvidenceDigest',
+  'deadlineKillObserved',
+  'exitCode', 'exitEvidenceDigest', 'finishedAt', 'inspectDigest', 'killIssuedAt', 'oomKilled',
+  'outputBytes', 'outputEvidenceDigest', 'outputLimitExceeded', 'outputTruncated', 'removalConfirmed',
+  'removalEvidenceDigest', 'removedAt', 'requestDigest', 'responseDigest', 'timedOut',
 ] as const;
 const PREPARE_INPUT_KEYS = [...BINDING_KEYS, 'expiresAt', 'issuedAt'] as const;
 const PREPARE_UNSIGNED_KEYS = [
@@ -256,6 +278,39 @@ function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
   return value;
 }
 
+function plainDataGraph(value: unknown, seen = new Set<object>(), depth = 0): boolean {
+  if (value === null || typeof value === 'boolean' || typeof value === 'string' ||
+    typeof value === 'number') return typeof value !== 'number' || Number.isSafeInteger(value);
+  if (typeof value !== 'object' || depth > 16 || seen.size >= 256 || seen.has(value)) return false;
+  seen.add(value);
+  try {
+    const prototype = Object.getPrototypeOf(value);
+    if (Array.isArray(value)) {
+      if (prototype !== Array.prototype || value.length > 128) return false;
+    } else if (prototype !== Object.prototype && prototype !== null) return false;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    if (Reflect.ownKeys(value).some((key) => typeof key !== 'string')) return false;
+    for (const descriptor of Object.values(descriptors)) {
+      if (!Object.hasOwn(descriptor, 'value') || !plainDataGraph(descriptor.value, seen, depth + 1)) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function immutableDataSnapshot<T>(value: T): T | null {
+  try {
+    if (!plainDataGraph(value)) return null;
+    const snapshot = structuredClone(value);
+    return plainDataGraph(snapshot) ? deepFreeze(snapshot) : null;
+  } catch {
+    return null;
+  }
+}
+
 function owned<T>(value: T): T | null {
   try { return deepFreeze(JSON.parse(canonicalJson(value)) as T); } catch { return null; }
 }
@@ -290,7 +345,8 @@ function authority(value: Record<string, unknown>): boolean {
 function bindings(value: unknown): value is AgentOsObservationIsolationBindingsV2 {
   const row = record(value);
   if (!row || !exactKeys(row, BINDING_KEYS) || !requestNonce(row['requestNonce']) ||
-    !rawDigest(row['requestDigest']) || typeof row['containerId'] !== 'string' ||
+    !rawDigest(row['requestDigest']) || !timestamp(row['deadlineAt']) ||
+    typeof row['containerId'] !== 'string' ||
     !CONTAINER_ID_RE.test(row['containerId']) || !isAgentOsLocalContainerLimitsV1(row['limits'])) return false;
   return ['brokerDigest', 'engineDigest', 'imageDigest', 'producerDigest', 'seccompDigest',
     'createConfigDigest'].every((key) => rawDigest(row[key]));
@@ -309,13 +365,59 @@ function postRun(value: unknown): value is AgentOsObservationIsolationPostRunEvi
   const row = record(value);
   if (!row || !exactKeys(row, POST_RUN_KEYS) || !rawDigest(row['requestDigest']) ||
     !rawDigest(row['responseDigest']) || !rawDigest(row['inspectDigest']) ||
-    !rawDigest(row['exitEvidenceDigest']) || !rawDigest(row['removalEvidenceDigest']) ||
+    !rawDigest(row['outputEvidenceDigest']) || !rawDigest(row['exitEvidenceDigest']) ||
+    !rawDigest(row['deadlineKillEvidenceDigest']) || !rawDigest(row['removalEvidenceDigest']) ||
+    !Number.isSafeInteger(row['outputBytes']) || (row['outputBytes'] as number) < 0 ||
+    typeof row['outputTruncated'] !== 'boolean' || typeof row['outputLimitExceeded'] !== 'boolean' ||
     !Number.isSafeInteger(row['exitCode']) || (row['exitCode'] as number) < 0 ||
     (row['exitCode'] as number) > 255 || typeof row['oomKilled'] !== 'boolean' ||
-    typeof row['timedOut'] !== 'boolean' || !timestamp(row['finishedAt']) ||
+    typeof row['timedOut'] !== 'boolean' || !timestamp(row['deadlineAt']) ||
+    typeof row['deadlineKillObserved'] !== 'boolean' ||
+    (row['killIssuedAt'] !== null && !timestamp(row['killIssuedAt'])) ||
+    !timestamp(row['finishedAt']) || !timestamp(row['cleanupStartedAt']) ||
     row['removalConfirmed'] !== true || row['containerAbsentAfterRemoval'] !== true ||
     !timestamp(row['removedAt'])) return false;
-  return Date.parse(row['removedAt']) >= Date.parse(row['finishedAt']);
+  return Date.parse(row['cleanupStartedAt']) >= Date.parse(row['finishedAt']) &&
+    Date.parse(row['removedAt']) >= Date.parse(row['cleanupStartedAt']);
+}
+
+function postRunCoherent(
+  evidence: AgentOsObservationIsolationPostRunEvidenceV2,
+  expected: AgentOsObservationIsolationBindingsV2,
+): boolean {
+  if (evidence.requestDigest !== expected.requestDigest || evidence.deadlineAt !== expected.deadlineAt ||
+    evidence.outputBytes > expected.limits.maxOutputBytes ||
+    evidence.outputTruncated !== evidence.outputLimitExceeded ||
+    (evidence.outputLimitExceeded && evidence.outputBytes !== expected.limits.maxOutputBytes)) return false;
+  const deadline = Date.parse(expected.deadlineAt);
+  const finished = Date.parse(evidence.finishedAt);
+  if (evidence.timedOut) {
+    if (!evidence.deadlineKillObserved || evidence.killIssuedAt === null) return false;
+    const killed = Date.parse(evidence.killIssuedAt);
+    if (killed < deadline || killed - deadline >
+      AGENT_OS_OBSERVATION_ISOLATION_MAX_DEADLINE_KILL_LAG_MS_V2 || finished < killed ||
+      finished - killed > AGENT_OS_OBSERVATION_ISOLATION_MAX_DEADLINE_KILL_LAG_MS_V2) return false;
+  } else if (evidence.deadlineKillObserved || evidence.killIssuedAt !== null || finished > deadline) {
+    return false;
+  }
+  const cleanupStarted = Date.parse(evidence.cleanupStartedAt);
+  const removed = Date.parse(evidence.removedAt);
+  return removed - cleanupStarted <= AGENT_OS_OBSERVATION_ISOLATION_MAX_CLEANUP_DURATION_MS_V2;
+}
+
+function policyBindingsMatch(
+  expected: AgentOsObservationIsolationBindingsV2,
+  value: unknown,
+): boolean {
+  const inspection = inspectAgentOsLocalContainerCreatePolicyV1(value);
+  const policy = inspection.policy;
+  if (!policy || !inspection.createConfigDigest) return false;
+  const imageDigest = policy.image.slice(policy.image.indexOf('@sha256:') + '@sha256:'.length);
+  return expected.imageDigest === imageDigest &&
+    expected.seccompDigest === policy.seccompProfileDigest &&
+    expected.producerDigest === policy.producer.digest &&
+    expected.createConfigDigest === inspection.createConfigDigest &&
+    LIMIT_KEYS.every((key) => expected.limits[key] === policy.limits[key]);
 }
 
 function postRunEqual(
@@ -337,14 +439,34 @@ function validVerifier(value: unknown): value is AgentOsObservationIsolationVeri
     typeof verifier['verify'] === 'function');
 }
 
+function pinVerifier(value: unknown): AgentOsObservationIsolationVerifierV2 | null {
+  try {
+    if (value === null || typeof value !== 'object' || Array.isArray(value) ||
+      (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) return null;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    if (!exactKeys(descriptors, ['keyId', 'verify'])) return null;
+    const keyId = descriptors['keyId'];
+    const verify = descriptors['verify'];
+    if (!keyId || !verify || !Object.hasOwn(keyId, 'value') || !Object.hasOwn(verify, 'value') ||
+      !rawDigest(keyId.value) || typeof verify.value !== 'function') return null;
+    return Object.freeze({ keyId: keyId.value, verify: verify.value });
+  } catch {
+    return null;
+  }
+}
+
 function validPrepareInput(value: unknown): value is AgentOsObservationIsolationPrepareInputV2 {
   const row = record(value);
   if (!row || !exactKeys(row, PREPARE_INPUT_KEYS) || !timestamp(row['issuedAt']) ||
     !timestamp(row['expiresAt'])) return false;
   const selected = Object.fromEntries(BINDING_KEYS.map((key) => [key, row[key]]));
   const lifetime = Date.parse(row['expiresAt']) - Date.parse(row['issuedAt']);
-  return bindings(selected) && lifetime > 0 &&
-    lifetime <= AGENT_OS_OBSERVATION_ISOLATION_MAX_ATTESTATION_LIFETIME_MS_V2;
+  if (!bindings(selected)) return false;
+  const issued = Date.parse(row['issuedAt']);
+  const deadline = Date.parse(selected.deadlineAt);
+  return lifetime > 0 && lifetime <= AGENT_OS_OBSERVATION_ISOLATION_MAX_ATTESTATION_LIFETIME_MS_V2 &&
+    deadline > issued && deadline - issued <= selected.limits.maxDurationMs &&
+    deadline < Date.parse(row['expiresAt']);
 }
 
 function validFinalizeInput(value: unknown): value is AgentOsObservationIsolationFinalizeInputV2 {
@@ -353,7 +475,7 @@ function validFinalizeInput(value: unknown): value is AgentOsObservationIsolatio
     !timestamp(row['issuedAt']) || !timestamp(row['expiresAt']) || !postRun(row['postRun'])) return false;
   const selected = Object.fromEntries(BINDING_KEYS.map((key) => [key, row[key]]));
   const lifetime = Date.parse(row['expiresAt']) - Date.parse(row['issuedAt']);
-  return bindings(selected) && row['postRun'].requestDigest === row['requestDigest'] &&
+  return bindings(selected) && postRunCoherent(row['postRun'], selected) &&
     lifetime > 0 && lifetime <= AGENT_OS_OBSERVATION_ISOLATION_MAX_ATTESTATION_LIFETIME_MS_V2 &&
     Date.parse(row['postRun'].removedAt) <= Date.parse(row['issuedAt']);
 }
@@ -514,7 +636,13 @@ function withheld(
     signatureVerified: false,
     bindingsVerified: false,
     postRunEvidenceVerified: false,
+    policyBindingsVerified: false,
+    outputLimitEvidenceVerified: false,
+    deadlineKillEvidenceVerified: false,
+    cleanupTimingVerified: false,
     removalEvidencePresent: false,
+    replayConsumptionRequired: true,
+    replayConsumptionVerified: false,
     brokerTruthIndependentlyVerified: false,
     dockerEnforcementVerified: false,
     ...AGENT_OS_OBSERVATION_ISOLATION_NO_AUTHORITY_V2,
@@ -586,7 +714,13 @@ function verified(
     signatureVerified: true,
     bindingsVerified: true,
     postRunEvidenceVerified: phase === 'finalized',
+    policyBindingsVerified: true,
+    outputLimitEvidenceVerified: phase === 'finalized',
+    deadlineKillEvidenceVerified: phase === 'finalized',
+    cleanupTimingVerified: phase === 'finalized',
     removalEvidencePresent: phase === 'finalized',
+    replayConsumptionRequired: true,
+    replayConsumptionVerified: false,
     brokerTruthIndependentlyVerified: false,
     dockerEnforcementVerified: false,
     ...AGENT_OS_OBSERVATION_ISOLATION_NO_AUTHORITY_V2,
@@ -596,70 +730,97 @@ function verified(
 export function verifyAgentOsObservationIsolationPrepareAttestationV2(
   value: unknown,
   expectedBindings: unknown,
+  expectedPolicy: unknown,
   verifier: AgentOsObservationIsolationVerifierV2,
   nowMs: number,
 ): AgentOsObservationIsolationInspectionV2 {
-  if (!validPrepare(value)) return withheld('invalid-attestation', 'prepared');
-  if (!bindings(expectedBindings) || !Number.isSafeInteger(nowMs) || nowMs < 0) {
+  const snapshot = immutableDataSnapshot({ value, expectedBindings, expectedPolicy, nowMs });
+  if (!snapshot || !validPrepare(snapshot.value)) return withheld('invalid-attestation', 'prepared');
+  const attestation = snapshot.value;
+  const pinnedVerifier = pinVerifier(verifier);
+  if (!pinnedVerifier) return withheld('attestation-key-mismatch', 'prepared');
+  if (!bindings(snapshot.expectedBindings) || !Number.isSafeInteger(snapshot.nowMs) ||
+    snapshot.nowMs < 0) {
     return withheld('invalid-expected-bindings', 'prepared');
   }
-  if (!bindingsEqual(value, expectedBindings)) return withheld('binding-mismatch', 'prepared');
-  const timing = timeReason(value.issuedAt, value.expiresAt, nowMs);
+  if (!bindingsEqual(attestation, snapshot.expectedBindings)) {
+    return withheld('binding-mismatch', 'prepared');
+  }
+  if (!policyBindingsMatch(snapshot.expectedBindings, snapshot.expectedPolicy)) {
+    return withheld('policy-binding-mismatch', 'prepared');
+  }
+  const timing = timeReason(attestation.issuedAt, attestation.expiresAt, snapshot.nowMs);
   if (timing) return withheld(timing, 'prepared');
-  const row = value as unknown as Record<string, unknown>;
+  const row = attestation as unknown as Record<string, unknown>;
   const unsigned = Object.fromEntries(PREPARE_UNSIGNED_KEYS.map((key) => [key, row[key]])) as PrepareUnsigned;
-  const signatureState = verifySignature(unsigned, value.signature, verifier, 'prepared');
+  const signatureState = verifySignature(unsigned, attestation.signature, pinnedVerifier, 'prepared');
   if (signatureState !== 'verified') return withheld(signatureState, 'prepared');
-  return verified('prepared', value.attestationDigest, null);
+  return verified('prepared', attestation.attestationDigest, null);
 }
 
 export function verifyAgentOsObservationIsolationFinalizeAttestationV2(
   value: unknown,
   prepare: unknown,
   expectedBindings: unknown,
+  expectedPolicy: unknown,
   expectedPostRun: unknown,
   verifier: AgentOsObservationIsolationVerifierV2,
   nowMs: number,
 ): AgentOsObservationIsolationInspectionV2 {
-  if (!validFinalize(value)) return withheld('invalid-attestation', 'finalized');
-  if (!bindings(expectedBindings) || !postRun(expectedPostRun) ||
-    !Number.isSafeInteger(nowMs) || nowMs < 0) {
+  const snapshot = immutableDataSnapshot({
+    value, prepare, expectedBindings, expectedPolicy, expectedPostRun, nowMs,
+  });
+  if (!snapshot || !validFinalize(snapshot.value)) return withheld('invalid-attestation', 'finalized');
+  const attestation = snapshot.value;
+  const pinnedVerifier = pinVerifier(verifier);
+  if (!pinnedVerifier) {
+    return withheld('attestation-key-mismatch', 'finalized', attestation.prepareAttestationDigest);
+  }
+  if (!bindings(snapshot.expectedBindings) || !postRun(snapshot.expectedPostRun) ||
+    !Number.isSafeInteger(snapshot.nowMs) || snapshot.nowMs < 0) {
     return withheld('invalid-expected-bindings', 'finalized');
   }
-  if (!validPrepare(prepare)) {
-    return withheld('prepare-unverified', 'finalized', value.prepareAttestationDigest);
+  if (!validPrepare(snapshot.prepare)) {
+    return withheld('prepare-unverified', 'finalized', attestation.prepareAttestationDigest);
   }
+  const prepared = snapshot.prepare;
   const prepareInspection = verifyAgentOsObservationIsolationPrepareAttestationV2(
-    prepare,
-    expectedBindings,
-    verifier,
-    nowMs,
+    prepared,
+    snapshot.expectedBindings,
+    snapshot.expectedPolicy,
+    pinnedVerifier,
+    snapshot.nowMs,
   );
   if (prepareInspection.state !== 'verified') {
-    return withheld('prepare-unverified', 'finalized', value.prepareAttestationDigest);
+    return withheld('prepare-unverified', 'finalized', attestation.prepareAttestationDigest);
   }
-  if (value.prepareAttestationDigest !== prepare.attestationDigest) {
-    return withheld('prepare-link-mismatch', 'finalized', value.prepareAttestationDigest);
+  if (attestation.prepareAttestationDigest !== prepared.attestationDigest) {
+    return withheld('prepare-link-mismatch', 'finalized', attestation.prepareAttestationDigest);
   }
-  if (!bindingsEqual(value, expectedBindings)) {
-    return withheld('binding-mismatch', 'finalized', value.prepareAttestationDigest);
+  if (!bindingsEqual(attestation, snapshot.expectedBindings)) {
+    return withheld('binding-mismatch', 'finalized', attestation.prepareAttestationDigest);
   }
-  if (!postRunEqual(value.postRun, expectedPostRun)) {
-    return withheld('post-run-evidence-mismatch', 'finalized', value.prepareAttestationDigest);
+  if (!policyBindingsMatch(snapshot.expectedBindings, snapshot.expectedPolicy)) {
+    return withheld('policy-binding-mismatch', 'finalized', attestation.prepareAttestationDigest);
   }
-  const timing = timeReason(value.issuedAt, value.expiresAt, nowMs);
-  if (timing) return withheld(timing, 'finalized', value.prepareAttestationDigest);
-  if (Date.parse(value.issuedAt) < Date.parse(prepare.issuedAt) ||
-    Date.parse(value.issuedAt) > Date.parse(prepare.expiresAt) ||
-    Date.parse(value.postRun.finishedAt) < Date.parse(prepare.issuedAt) ||
-    Date.parse(value.postRun.finishedAt) - Date.parse(prepare.issuedAt) > value.limits.maxDurationMs) {
-    return withheld('phase-time-invalid', 'finalized', value.prepareAttestationDigest);
+  if (!postRunEqual(attestation.postRun, snapshot.expectedPostRun) ||
+    !postRunCoherent(snapshot.expectedPostRun, snapshot.expectedBindings)) {
+    return withheld('post-run-evidence-mismatch', 'finalized', attestation.prepareAttestationDigest);
   }
-  const row = value as unknown as Record<string, unknown>;
+  const timing = timeReason(attestation.issuedAt, attestation.expiresAt, snapshot.nowMs);
+  if (timing) return withheld(timing, 'finalized', attestation.prepareAttestationDigest);
+  if (Date.parse(attestation.issuedAt) < Date.parse(prepared.issuedAt) ||
+    Date.parse(attestation.issuedAt) > Date.parse(prepared.expiresAt) ||
+    Date.parse(attestation.postRun.finishedAt) < Date.parse(prepared.issuedAt) ||
+    Date.parse(attestation.postRun.finishedAt) - Date.parse(prepared.issuedAt) >
+      attestation.limits.maxDurationMs) {
+    return withheld('phase-time-invalid', 'finalized', attestation.prepareAttestationDigest);
+  }
+  const row = attestation as unknown as Record<string, unknown>;
   const unsigned = Object.fromEntries(FINALIZE_UNSIGNED_KEYS.map((key) => [key, row[key]])) as FinalizeUnsigned;
-  const signatureState = verifySignature(unsigned, value.signature, verifier, 'finalized');
+  const signatureState = verifySignature(unsigned, attestation.signature, pinnedVerifier, 'finalized');
   if (signatureState !== 'verified') {
-    return withheld(signatureState, 'finalized', value.prepareAttestationDigest);
+    return withheld(signatureState, 'finalized', attestation.prepareAttestationDigest);
   }
-  return verified('finalized', value.attestationDigest, value.prepareAttestationDigest);
+  return verified('finalized', attestation.attestationDigest, attestation.prepareAttestationDigest);
 }

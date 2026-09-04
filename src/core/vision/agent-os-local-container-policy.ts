@@ -14,16 +14,14 @@ export const AGENT_OS_LOCAL_CONTAINER_POLICY_V1 =
 export const AGENT_OS_LOCAL_CONTAINER_POLICY_DIGEST_DOMAIN_V1 =
   'ashlr:agent-os:local-container-create-policy:v1\0' as const;
 
-export const AGENT_OS_LOCAL_CONTAINER_MAX_COMMAND_ARGUMENTS_V1 = 64;
-export const AGENT_OS_LOCAL_CONTAINER_MAX_ARGUMENT_BYTES_V1 = 4_096;
 export const AGENT_OS_LOCAL_CONTAINER_MAX_DURATION_MS_V1 = 5 * 60_000;
 export const AGENT_OS_LOCAL_CONTAINER_MAX_OUTPUT_BYTES_V1 = 2 * 1024 * 1024;
+export const AGENT_OS_LOCAL_CONTAINER_NATIVE_PRODUCER_ENTRYPOINT_V1 =
+  '/opt/ashlr/bin/agent-os-observation-producer' as const;
 
 const RAW_SHA256_RE = /^[a-f0-9]{64}$/u;
 const IMAGE_REPOSITORY_RE = /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/u;
 const NUMERIC_USER_RE = /^(?:[1-9][0-9]{0,9}):(?:[1-9][0-9]{0,9})$/u;
-const SHELL_OR_RESOLVER_RE = /(?:^|\/)(?:ash|bash|busybox|dash|env|fish|node|nodejs|sh|zsh)$/iu;
-
 const NO_AUTHORITY = Object.freeze({
   authority: 'policy-description-only' as const,
   executionAuthority: false as const,
@@ -47,7 +45,8 @@ export interface AgentOsLocalContainerLimitsV1 {
 
 export interface AgentOsLocalContainerCreatePolicyInputV1 {
   image: string;
-  command: string[];
+  producerDigest: string;
+  allowedProducerDigests: string[];
   user: string;
   workingDir: string;
   seccompProfileDigest: string;
@@ -59,7 +58,12 @@ export interface AgentOsLocalContainerCreatePolicyV1 {
   protocol: typeof AGENT_OS_LOCAL_CONTAINER_POLICY_V1;
   engine: 'docker';
   image: string;
-  command: string[];
+  producer: {
+    entrypoint: typeof AGENT_OS_LOCAL_CONTAINER_NATIVE_PRODUCER_ENTRYPOINT_V1;
+    digest: string;
+    allowedDigests: string[];
+  };
+  command: [typeof AGENT_OS_LOCAL_CONTAINER_NATIVE_PRODUCER_ENTRYPOINT_V1, '--stdio'];
   user: string;
   workingDir: string;
   environment: [];
@@ -97,6 +101,7 @@ export type AgentOsLocalContainerPolicyReasonV1 =
   | 'invalid-input'
   | 'image-not-digest-pinned'
   | 'command-invalid'
+  | 'producer-not-allowlisted'
   | 'identity-invalid'
   | 'working-directory-invalid'
   | 'seccomp-profile-unbound'
@@ -135,10 +140,11 @@ export interface AgentOsLocalContainerPolicyInspectionV1 {
 }
 
 const INPUT_KEYS = [
-  'command', 'image', 'limits', 'seccompProfileDigest', 'user', 'workingDir',
+  'allowedProducerDigests', 'image', 'limits', 'producerDigest', 'seccompProfileDigest', 'user',
+  'workingDir',
 ] as const;
 const POLICY_KEYS = [
-  'capabilities', 'command', 'devices', 'engine', 'environment', 'image', 'limits',
+  'capabilities', 'command', 'devices', 'engine', 'environment', 'image', 'limits', 'producer',
   'logging', 'mounts', 'namespaces', 'noNewPrivileges', 'ports', 'privileged', 'protocol',
   'readonlyRootfs', 'restart', 'schemaVersion', 'seccompProfileDigest', 'user', 'workingDir',
 ] as const;
@@ -149,6 +155,7 @@ const NAMESPACE_KEYS = ['cgroup', 'ipc', 'network', 'pid', 'uts'] as const;
 const CAPABILITY_KEYS = ['add', 'drop'] as const;
 const RESTART_KEYS = ['maximumRetryCount', 'name'] as const;
 const LOGGING_KEYS = ['driver', 'options'] as const;
+const PRODUCER_KEYS = ['allowedDigests', 'digest', 'entrypoint'] as const;
 
 function record(value: unknown): Record<string, unknown> | null {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -196,7 +203,7 @@ export function isAgentOsLocalContainerLimitsV1(value: unknown): value is AgentO
     boundedInteger(limits['memoryBytes'], 16 * 1024 * 1024, 64 * 1024 * 1024 * 1024) &&
     boundedInteger(limits['memorySwapBytes'], 16 * 1024 * 1024, 64 * 1024 * 1024 * 1024) &&
     limits['memorySwapBytes'] === limits['memoryBytes'] &&
-    boundedInteger(limits['pidsLimit'], 1, 1_024) &&
+    limits['pidsLimit'] === 1 &&
     boundedInteger(limits['maxDurationMs'], 1, AGENT_OS_LOCAL_CONTAINER_MAX_DURATION_MS_V1) &&
     boundedInteger(limits['maxOutputBytes'], 1, AGENT_OS_LOCAL_CONTAINER_MAX_OUTPUT_BYTES_V1));
 }
@@ -219,12 +226,28 @@ function canonicalAbsolutePath(value: unknown, allowRoot: boolean): value is str
   return segments.every((segment) => segment.length > 0 && segment !== '.' && segment !== '..');
 }
 
-function validCommand(value: unknown): value is string[] {
-  if (!denseArray(value, AGENT_OS_LOCAL_CONTAINER_MAX_COMMAND_ARGUMENTS_V1) || value.length < 1) return false;
-  if (!canonicalAbsolutePath(value[0], false) || SHELL_OR_RESOLVER_RE.test(value[0])) return false;
-  return value.every((argument) => typeof argument === 'string' &&
-    Buffer.byteLength(argument, 'utf8') <= AGENT_OS_LOCAL_CONTAINER_MAX_ARGUMENT_BYTES_V1 &&
-    !argument.includes('\0') && !argument.includes('\n') && !argument.includes('\r'));
+function validCommand(value: unknown): value is AgentOsLocalContainerCreatePolicyV1['command'] {
+  return denseArray(value, 2) && value.length === 2 &&
+    value[0] === AGENT_OS_LOCAL_CONTAINER_NATIVE_PRODUCER_ENTRYPOINT_V1 && value[1] === '--stdio';
+}
+
+function validDigestAllowlist(value: unknown): value is string[] {
+  if (!denseArray(value, 16) || value.length < 1) return false;
+  let prior = '';
+  for (const entry of value) {
+    if (typeof entry !== 'string' || !RAW_SHA256_RE.test(entry) || entry <= prior) return false;
+    prior = entry;
+  }
+  return true;
+}
+
+function validProducer(value: unknown): value is AgentOsLocalContainerCreatePolicyV1['producer'] {
+  const producer = record(value);
+  return Boolean(producer && exactKeys(producer, PRODUCER_KEYS) &&
+    producer['entrypoint'] === AGENT_OS_LOCAL_CONTAINER_NATIVE_PRODUCER_ENTRYPOINT_V1 &&
+    typeof producer['digest'] === 'string' && RAW_SHA256_RE.test(producer['digest']) &&
+    validDigestAllowlist(producer['allowedDigests']) &&
+    producer['allowedDigests'].includes(producer['digest']));
 }
 
 function emptyArray(value: unknown): value is [] {
@@ -288,6 +311,7 @@ function policyReason(value: unknown): Exclude<AgentOsLocalContainerPolicyReason
   }
   if (!digestPinnedImage(policy['image'])) return 'image-not-digest-pinned';
   if (!validCommand(policy['command'])) return 'command-invalid';
+  if (!validProducer(policy['producer'])) return 'producer-not-allowlisted';
   if (typeof policy['user'] !== 'string' || !NUMERIC_USER_RE.test(policy['user'])) return 'identity-invalid';
   if (!canonicalAbsolutePath(policy['workingDir'], false)) return 'working-directory-invalid';
   if (!emptyArray(policy['environment'])) return 'environment-inheritance-forbidden';
@@ -353,7 +377,11 @@ export function buildAgentOsLocalContainerCreatePolicyV1(
   const row = record(input);
   if (!row || !exactKeys(row, INPUT_KEYS)) return withheld('invalid-input');
   if (!digestPinnedImage(row['image'])) return withheld('image-not-digest-pinned');
-  if (!validCommand(row['command'])) return withheld('command-invalid');
+  if (typeof row['producerDigest'] !== 'string' || !RAW_SHA256_RE.test(row['producerDigest']) ||
+    !validDigestAllowlist(row['allowedProducerDigests']) ||
+    !row['allowedProducerDigests'].includes(row['producerDigest'])) {
+    return withheld('producer-not-allowlisted');
+  }
   if (typeof row['user'] !== 'string' || !NUMERIC_USER_RE.test(row['user'])) {
     return withheld('identity-invalid');
   }
@@ -367,7 +395,12 @@ export function buildAgentOsLocalContainerCreatePolicyV1(
     protocol: AGENT_OS_LOCAL_CONTAINER_POLICY_V1,
     engine: 'docker',
     image: row['image'],
-    command: [...row['command'] as string[]],
+    producer: {
+      entrypoint: AGENT_OS_LOCAL_CONTAINER_NATIVE_PRODUCER_ENTRYPOINT_V1,
+      digest: row['producerDigest'],
+      allowedDigests: [...row['allowedProducerDigests'] as string[]],
+    },
+    command: [AGENT_OS_LOCAL_CONTAINER_NATIVE_PRODUCER_ENTRYPOINT_V1, '--stdio'],
     user: row['user'],
     workingDir: row['workingDir'],
     environment: [],
