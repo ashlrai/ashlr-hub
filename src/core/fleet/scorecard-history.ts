@@ -18,7 +18,8 @@
  *     naturally small for years of daily snapshots.
  *   - Successful appends fsync the file and fsync a newly-created partition's
  *     directory entry before the helper acknowledges success.
- *   - appendScorecardSnapshot() never throws.
+ *   - appendScorecardSnapshot() never throws and returns true only after the
+ *     durable helper acknowledgement and post-operation identity checks.
  *   - readScorecardHistory() skips malformed lines, never throws, and
  *     reports sourceQuality exactly like readDecisionsDetailed().
  */
@@ -263,31 +264,33 @@ function runScorecardWorker(
  * Append one scorecard snapshot record. Append-only, monthly-partitioned.
  * Never throws.
  */
-export function appendScorecardSnapshot(record: ScorecardSnapshotRecord): void {
+export function appendScorecardSnapshot(record: ScorecardSnapshotRecord): boolean {
   try {
     // Windows has no public Node primitive whose relative lookup is bound to a
     // directory handle. Observability is withheld instead of falling back to
     // the raceable absolute-path implementation.
-    if (process.platform === 'win32') return;
+    if (process.platform === 'win32') return false;
     const parsedTs = Date.parse(record.ts);
     const ts = Number.isFinite(parsedTs) ? new Date(parsedTs).toISOString() : new Date().toISOString();
     const clean: ScorecardSnapshotRecord = { ts, window: record.window, scorecard: record.scorecard };
     const directory = openScorecardRoot(true);
-    if (!directory) return;
+    if (!directory) return false;
     const line = JSON.stringify(clean) + '\n';
-    if (Buffer.byteLength(line, 'utf8') > MAX_READ_ROW_BYTES) return;
+    if (Buffer.byteLength(line, 'utf8') > MAX_READ_ROW_BYTES) return false;
     const result = runScorecardWorker(directory, {
       operation: 'append',
       fileName: `${ts.slice(0, 7)}.jsonl`,
       line,
     }, 1024 * 1024);
-    if (result === null || typeof result !== 'object' || (result as { ok?: unknown }).ok !== true) return;
+    if (result === null || typeof result !== 'object' || (result as { ok?: unknown }).ok !== true) return false;
     const identity = parseWorkerDirectoryIdentity((result as Record<string, unknown>)['directoryIdentity']);
-    if (!identity) return;
+    if (!identity) return false;
     directory.assertRootStable();
     directory.assertDirectoryStable(identity);
+    return true;
   } catch {
     // Never throws — history is observability, not authority.
+    return false;
   }
 }
 

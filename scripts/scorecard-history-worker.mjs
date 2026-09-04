@@ -92,19 +92,29 @@ function validatePinnedRoot(request) {
 
 function enterHistoryDirectory(request) {
   if (request.directoryName !== 'scorecard-history') fail('invalid scorecard history directory name');
-  let created = false;
+  let firstObserverOfMissingDirectory = false;
   let expected;
   try {
     expected = lstatSync(request.directoryName, { bigint: true });
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error;
     if (request.operation === 'read') return undefined;
-    mkdirSync(request.directoryName, { mode: 0o700 });
-    created = true;
+    firstObserverOfMissingDirectory = true;
+    try {
+      mkdirSync(request.directoryName, { mode: 0o700 });
+    } catch (mkdirError) {
+      // Another helper may win the same first-append race. EEXIST is not
+      // success by itself: the relative entry is inspected below and must be
+      // the same private directory that this process then acquires as cwd.
+      if (mkdirError?.code !== 'EEXIST') throw mkdirError;
+    }
     expected = lstatSync(request.directoryName, { bigint: true });
   }
   if (!safeDirectory(expected)) fail('unsafe scorecard history directory');
-  if (created) syncPinnedDirectory();
+  // Every helper that observed ENOENT syncs the pinned parent, including a
+  // helper that lost the mkdir race. This does not depend on the winner
+  // surviving long enough to provide the directory-entry durability barrier.
+  if (firstObserverOfMissingDirectory) syncPinnedDirectory();
   process.chdir(request.directoryName);
   const pinned = lstatSync('.', { bigint: true });
   if (!safeDirectory(pinned) || !sameIdentity(expected, pinned)) {

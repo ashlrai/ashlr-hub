@@ -803,19 +803,26 @@ const SNAPSHOT_MIN_INTERVAL_MS = 24 * 60 * 60 * 1000;
 export function snapshotScorecardIfDue(opts: { nowMs?: number } = {}): { wrote: boolean } {
   try {
     const nowMs = opts.nowMs ?? Date.now();
-    const last = readScorecardHistory({ limit: 1 });
-    if (last.records.length > 0) {
-      const lastMs = Date.parse(last.records[0]!.ts);
-      if (Number.isFinite(lastMs) && nowMs - lastMs < SNAPSHOT_MIN_INTERVAL_MS) {
-        return { wrote: false };
-      }
+    const last = readScorecardHistory({ limit: 2 });
+    if (last.stopReasons.includes('unsupported-platform')) return { wrote: false };
+    const recentWindows = new Set(
+      last.records
+        .filter((record) => {
+          const lastMs = Date.parse(record.ts);
+          return Number.isFinite(lastMs) && nowMs - lastMs < SNAPSHOT_MIN_INTERVAL_MS;
+        })
+        .map((record) => record.window),
+    );
+    if (recentWindows.has('7d') && recentWindows.has('30d')) {
+      return { wrote: false };
     }
     const ts = new Date(nowMs).toISOString();
+    let complete = true;
     for (const window of ['7d', '30d'] as const) {
       const scorecard = computeFleetScorecard(window);
-      appendScorecardSnapshot({ ts, window, scorecard });
+      complete = appendScorecardSnapshot({ ts, window, scorecard }) && complete;
     }
-    return { wrote: true };
+    return { wrote: complete };
   } catch {
     return { wrote: false };
   }

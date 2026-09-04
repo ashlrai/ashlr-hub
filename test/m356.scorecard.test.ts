@@ -32,6 +32,7 @@ import * as http from 'node:http';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { spawn } from 'node:child_process';
 import type {
   AshlrConfig,
   Proposal,
@@ -664,6 +665,49 @@ describe('computeFleetScorecard — never throws', () => {
 // ---------------------------------------------------------------------------
 
 describe.skipIf(process.platform === 'win32')('scorecard-history POSIX persistence', () => {
+  it('preserves every concurrent first append when helpers race to create the history directory', async () => {
+    const stateRoot = path.join(tmpHome, '.ashlr');
+    fs.mkdirSync(stateRoot, { mode: 0o700 });
+    const root = fs.lstatSync(stateRoot, { bigint: true });
+    const workerPath = path.join(process.cwd(), 'scripts', 'scorecard-history-worker.mjs');
+    const month = new Date().toISOString().slice(0, 7);
+    const writes = Array.from({ length: 32 }, (_, index) => new Promise<void>((resolve, reject) => {
+      const child = spawn(process.execPath, [workerPath], {
+        cwd: stateRoot,
+        shell: false,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      let stderr = '';
+      child.stderr.setEncoding('utf8');
+      child.stderr.on('data', (chunk: string) => { stderr += chunk; });
+      child.once('error', reject);
+      child.once('close', (code, signal) => {
+        if (code === 0 && signal === null) resolve();
+        else reject(new Error(`scorecard worker failed (${code ?? signal}): ${stderr}`));
+      });
+      child.stdin.end(JSON.stringify({
+        operation: 'append',
+        expectedRootDev: String(root.dev),
+        expectedRootIno: String(root.ino),
+        directoryName: 'scorecard-history',
+        fileName: `${month}.jsonl`,
+        line: `${JSON.stringify({
+          ts: new Date(Date.now() + index).toISOString(),
+          window: '7d',
+          scorecard: { writer: index },
+        })}\n`,
+      }));
+    }));
+
+    await Promise.all(writes);
+    const lines = fs.readFileSync(
+      path.join(stateRoot, 'scorecard-history', `${month}.jsonl`),
+      'utf8',
+    ).trim().split('\n');
+    expect(lines).toHaveLength(writes.length);
+    expect(new Set(lines.map((line) => JSON.parse(line).scorecard.writer)).size).toBe(writes.length);
+  });
+
   it('round-trips appended snapshots, newest-first, bounded', async () => {
     const { appendScorecardSnapshot, readScorecardHistory } = await import('../src/core/fleet/scorecard-history.js');
     const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
@@ -901,6 +945,27 @@ describe.skipIf(process.platform === 'win32')('scorecard-history POSIX persisten
       });
     },
   );
+
+  it('reports failed appends and does not let them create a false throttle receipt', async () => {
+    const { appendScorecardSnapshot } = await import('../src/core/fleet/scorecard-history.js');
+    const { computeFleetScorecard, snapshotScorecardIfDue } =
+      await import('../src/core/fleet/scorecard.js');
+    const nowMs = Date.now();
+    setScorecardHistoryTestHooksForTests({
+      operation: 'append',
+      workerFailure: 'nonzero',
+    });
+
+    expect(appendScorecardSnapshot({
+      ts: new Date(nowMs).toISOString(),
+      window: '7d',
+      scorecard: computeFleetScorecard('7d'),
+    })).toBe(false);
+    expect(snapshotScorecardIfDue({ nowMs })).toEqual({ wrote: false });
+
+    setScorecardHistoryTestHooksForTests(undefined);
+    expect(snapshotScorecardIfDue({ nowMs })).toEqual({ wrote: true });
+  });
 });
 
 it.skipIf(process.platform !== 'win32')(
@@ -922,6 +987,9 @@ it.skipIf(process.platform !== 'win32')(
       records: [],
       stopReasons: ['unsupported-platform'],
     });
+    const { snapshotScorecardIfDue } = await import('../src/core/fleet/scorecard.js');
+    expect(snapshotScorecardIfDue()).toEqual({ wrote: false });
+    expect(fs.existsSync(scorecardHistoryDir())).toBe(false);
   },
 );
 
