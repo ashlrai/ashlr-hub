@@ -63,6 +63,11 @@ export interface AgentOsDockerContainerCreateResultV1 {
   engineCreateRequestDigest: string;
 }
 
+export type AgentOsDockerContainerCreateAttemptV1 =
+  | { ok: true; value: AgentOsDockerContainerCreateResultV1 }
+  | { ok: false; reason: AgentOsDockerEngineClientReasonV1;
+    disposition: 'definite-no-effect' | 'ambiguous' };
+
 export interface AgentOsDockerContainerInspectionV1 {
   containerId: string;
   containerName: string;
@@ -333,7 +338,7 @@ function inspectEffectivePolicy(
     },
     host: {
       networkMode: host['NetworkMode'], pidMode: host['PidMode'], ipcMode: host['IpcMode'],
-      utsMode: host['UtsMode'], cgroupnsMode: host['CgroupnsMode'], privileged: host['Privileged'],
+      utsMode: host['UTSMode'], cgroupnsMode: host['CgroupnsMode'], privileged: host['Privileged'],
       capAdd: host['CapAdd'] ?? [], capDrop: host['CapDrop'], readonlyRootfs: host['ReadonlyRootfs'],
       securityOpt: host['SecurityOpt'], mounts: host['Mounts'] ?? [], binds: host['Binds'] ?? [],
       portBindings: host['PortBindings'] ?? {}, devices: host['Devices'] ?? [],
@@ -526,12 +531,12 @@ export class AgentOsDockerEngineClientV1 {
     containerName: string,
     policy: AgentOsLocalContainerCreatePolicyV1,
     seccompProfile: Uint8Array,
-  ): Promise<AgentOsDockerEngineResultV1<AgentOsDockerContainerCreateResultV1>> {
+  ): Promise<AgentOsDockerContainerCreateAttemptV1> {
     const inspected = inspectAgentOsLocalContainerCreatePolicyV1(policy);
     if (!CONTAINER_NAME_RE.test(containerName) || inspected.state !== 'admitted' ||
       !inspected.policy || agentOsLocalContainerCreatePolicyDigestV1(policy) !== inspected.createConfigDigest ||
       !seccompAdmitted(seccompProfile, policy.seccompProfileDigest)) {
-      return { ok: false, reason: 'invalid-input' };
+      return { ok: false, reason: 'invalid-input', disposition: 'definite-no-effect' };
     }
     const bodyValue = createRequestBody(inspected.policy, seccompProfile);
     const body = Buffer.from(JSON.stringify(bodyValue), 'utf8');
@@ -540,13 +545,18 @@ export class AgentOsDockerEngineClientV1 {
       `/v${this.#apiVersion}/containers/create?name=${encodeURIComponent(containerName)}`,
       body,
     );
-    if (!response.ok) return response;
-    if (response.value.statusCode === 409) return { ok: false, reason: 'container-conflict' };
-    if (response.value.statusCode !== 201) return { ok: false, reason: 'response-invalid' };
+    if (!response.ok) return { ...response, disposition: ['disabled', 'invalid-input', 'unsafe-socket']
+      .includes(response.reason) ? 'definite-no-effect' : 'ambiguous' };
+    if (response.value.statusCode !== 201) {
+      const definite = [400, 404, 409, 422].includes(response.value.statusCode);
+      return { ok: false, reason: response.value.statusCode === 409
+        ? 'container-conflict' : 'response-invalid', disposition: definite
+          ? 'definite-no-effect' : 'ambiguous' };
+    }
     const row = parseJsonRecord(response.value.body);
     if (!row || typeof row['Id'] !== 'string' || !CONTAINER_ID_RE.test(row['Id']) ||
       !(row['Warnings'] === null || (Array.isArray(row['Warnings']) && row['Warnings'].length === 0))) {
-      return { ok: false, reason: 'response-invalid' };
+      return { ok: false, reason: 'response-invalid', disposition: 'ambiguous' };
     }
     return { ok: true, value: Object.freeze({
       containerId: row['Id'],

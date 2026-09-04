@@ -32,7 +32,9 @@ fixed `/bin/ls` argv. Windows is unsupported for this store.
   allocation-ID ABA reuse. An exhausted safe-integer epoch refuses further
   transitions instead of overflowing the fence.
 - Expiry only changes `reserved` to `expired` and releases abstract slots. It
-  has no execution or cleanup authority.
+  has no execution or cleanup authority. Crash recovery can request expiry of
+  one exact allocation digest after its deadline; this avoids a global reclaim
+  receipt being misapplied to a different in-flight container lifecycle.
 - The ledger is bounded and fail-closed. A full identity or allocation history
   refuses new reservations rather than deleting replay protection.
 
@@ -62,6 +64,6 @@ observation-only and makes no same-user tamper-resistance claim.
 authenticated evidence rejection, atomic batching, slot conservation,
 idempotency, identity conflict, evidence drift, epoch/capability fences,
 verifier pinning, hostile batch shapes, rejected-request isolation,
-deterministic expiry, ABA tombstones, private modes, link/path/corruption
+deterministic global and exact-allocation expiry, ABA tombstones, private modes, link/path/corruption
 rejection, fixed-path process inspection, lock contention, replacement races,
 and ambiguous durability.

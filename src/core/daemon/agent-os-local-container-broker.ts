@@ -160,7 +160,7 @@ interface BrokerPorts {
   responseVerifier: AgentOsObservationSandboxFrameVerifierV1;
   isolationSigner: AgentOsObservationIsolationSignerV2;
   isolationVerifier: AgentOsObservationIsolationVerifierV2;
-  capacity: Pick<ExecutionCapacityLeaseStoreV1, 'acquire' | 'release'>;
+  capacity: Pick<ExecutionCapacityLeaseStoreV1, 'acquire' | 'release' | 'reclaimExpiredAllocation'>;
   journal: Pick<AgentOsLocalContainerBrokerJournalV1,
   'acquireLifecycleLock' | 'releaseLifecycleLock' | 'recoverStore' | 'readActive' | 'begin' | 'advance'>;
   engine: AgentOsLocalContainerBrokerEngineV1;
@@ -292,6 +292,7 @@ function capturePorts(dependencies: AgentOsLocalContainerBrokerDependenciesV1): 
   const enginePort = ownValue(dependencies, 'engine');
   const capacityAcquire = method(capacityStore, 'acquire');
   const capacityRelease = method(capacityStore, 'release');
+  const capacityReclaim = method(capacityStore, 'reclaimExpiredAllocation');
   const journalAcquire = method(journalStore, 'acquireLifecycleLock');
   const journalRelease = method(journalStore, 'releaseLifecycleLock');
   const journalRecover = method(journalStore, 'recoverStore');
@@ -302,7 +303,7 @@ function capturePorts(dependencies: AgentOsLocalContainerBrokerDependenciesV1): 
     'openAttachment', 'startContainer', 'waitContainer', 'killContainer', 'removeContainer',
     'confirmContainerAbsent'] as const;
   const engine = Object.fromEntries(engineMethods.map((name) => [name, method(enginePort, name)]));
-  if (!capacityAcquire || !capacityRelease || !journalAcquire || !journalRelease || !journalRecover ||
+  if (!capacityAcquire || !capacityRelease || !capacityReclaim || !journalAcquire || !journalRelease || !journalRecover ||
     !journalRead || !journalBegin || !journalAdvance || Object.values(engine).some((entry) => !entry)) return null;
   return Object.freeze({
     permitVerifier,
@@ -310,7 +311,8 @@ function capturePorts(dependencies: AgentOsLocalContainerBrokerDependenciesV1): 
     responseVerifier,
     isolationSigner,
     isolationVerifier,
-    capacity: { acquire: capacityAcquire, release: capacityRelease } as unknown as BrokerPorts['capacity'],
+    capacity: { acquire: capacityAcquire, release: capacityRelease,
+      reclaimExpiredAllocation: capacityReclaim } as unknown as BrokerPorts['capacity'],
     journal: {
       acquireLifecycleLock: journalAcquire, releaseLifecycleLock: journalRelease,
       recoverStore: journalRecover, readActive: journalRead, begin: journalBegin, advance: journalAdvance,
@@ -353,6 +355,15 @@ function outcomeFor(reason: AgentOsLocalContainerBrokerReasonV1): AgentOsLocalCo
   if (reason === 'cleanup-failed') return 'cleanup-failed';
   if (reason === 'capacity-release-failed') return 'capacity-release-failed';
   return 'request-withheld';
+}
+
+function capacityReclaimConfirmed(
+  value: ReturnType<ExecutionCapacityLeaseStoreV1['reclaimExpiredAllocation']>,
+  expectedAllocationDigest: string,
+): boolean {
+  return value.allocationDigest === expectedAllocationDigest &&
+    ((value.reason === 'reclaimed' && value.durable) ||
+      (value.reason === 'replayed' && value.disposition === 'replayed'));
 }
 
 function delay(ms: number): Promise<'timeout'> {
@@ -487,7 +498,11 @@ export class AgentOsLocalContainerBrokerV1 {
     try {
       if (ports.journal.recoverStore(locked.lock)) {
         const active = ports.journal.readActive(locked.lock);
-        if (active && active.length > 0) {
+        const activeNow = this.#clock().getTime();
+        const recoveryBlocksAdmission = active?.some((entry) => entry.runId === runId ||
+          Date.parse(entry.leaseExpiresAt) <= activeNow ||
+          (entry.containerId !== null && !['removed', 'finalized'].includes(entry.stage)));
+        if (recoveryBlocksAdmission) {
           finalResult = result('withheld', 'recovery-required', {
             requestDigest: request.requestDigest, permitDigest: permitInspection.permitDigest,
           });
@@ -598,6 +613,7 @@ export class AgentOsLocalContainerBrokerV1 {
       capacityEvidenceDigest: input.capacityEvidence.evidenceDigest,
       allocationDigest: lease.allocationDigest,
       leaseEpoch: 1,
+      leaseExpiresAt: lease.expiresAt,
       containerName,
       containerId: null,
       engineCreateRequestDigest: null,
@@ -619,9 +635,16 @@ export class AgentOsLocalContainerBrokerV1 {
       );
     }
     const created = await ports.engine.createContainer(containerName, policy, this.#seccompProfile);
-    if (!created.ok) return this.#reconcileAmbiguousCreate(
-      journal.record, lock, allocationId, lease.ownerCapability, containerName, base,
-    );
+    if (!created.ok) {
+      if (created.disposition === 'definite-no-effect') return this.#settleWithoutContainer(
+        'container-create-failed', journal.record, lock, allocationId, lease.ownerCapability, base,
+      );
+      const ambiguous = ports.journal.advance(runId, journal.record.recordDigest, 'create-ambiguous', {}, lock);
+      if (!ambiguous.ok) return result('unavailable', 'recovery-required', base);
+      return this.#reconcileAmbiguousCreate(
+        ambiguous.record, lock, allocationId, lease.ownerCapability, containerName, base,
+      );
+    }
     journal = ports.journal.advance(runId, journal.record.recordDigest, 'created', {
       containerId: created.value.containerId,
       engineCreateRequestDigest: created.value.engineCreateRequestDigest,
@@ -777,9 +800,8 @@ export class AgentOsLocalContainerBrokerV1 {
     const released = ports.capacity.release({ allocationId, ownerCapability, expectedLeaseEpoch: 1 });
     const capacityReleased = released.reason === 'released' && released.durable;
     const settled = ports.journal.advance(journal.runId, journal.recordDigest,
-      reason === 'cleanup-failed' ? 'unreconciled' : 'settled', {
-        outcome: reason === 'cleanup-failed' ? 'cleanup-failed'
-          : capacityReleased ? outcomeFor(reason) : 'capacity-release-failed',
+      capacityReleased ? 'settled' : 'capacity-pending', {
+        outcome: capacityReleased ? outcomeFor(reason) : null,
         leaseEpoch: released.leaseEpoch ?? 1,
       }, lock);
     const finalReason = !settled.ok ? 'journal-unavailable'
@@ -822,16 +844,16 @@ export class AgentOsLocalContainerBrokerV1 {
       policy: this.#policy!,
       seccompProfile: this.#seccompProfile,
     });
-    if (!inspected.ok) {
-      ports.journal.advance(recorded.record.runId, recorded.record.recordDigest, 'unreconciled', {
-        outcome: 'cleanup-failed',
+    if (!inspected.ok && inspected.reason === 'container-policy-mismatch') {
+      ports.journal.advance(recorded.record.runId, recorded.record.recordDigest, 'manual-hold', {
+        outcome: 'container-policy-mismatch',
       }, lock);
-      return result('unavailable', 'cleanup-failed', base);
+      return result('unavailable', 'container-policy-mismatch', base);
     }
     return this.#cleanupAfterCreate(
       'container-create-failed', null, null,
       allocationId, ownerCapability, resolved.value, containerName, null, null,
-      recorded.record, lock, base, inspected.value.running,
+      recorded.record, lock, base, inspected.ok && inspected.value.running,
     );
   }
 
@@ -895,9 +917,9 @@ export class AgentOsLocalContainerBrokerV1 {
     const removed = await ports.engine.removeContainer(containerId);
     const absent = removed.ok ? await ports.engine.confirmContainerAbsent(containerId) : removed;
     if (!removed.ok || !absent.ok) {
-      ports.journal.advance(journal.runId, journal.recordDigest, 'unreconciled', {
-        outcome: 'cleanup-failed',
-      }, lock);
+      if (journal.stage !== 'cleanup-pending') {
+        ports.journal.advance(journal.runId, journal.recordDigest, 'cleanup-pending', {}, lock);
+      }
       return result('unavailable', 'cleanup-failed', { ...base });
     }
     const removedAt = this.#clock().toISOString();
@@ -987,7 +1009,13 @@ export class AgentOsLocalContainerBrokerV1 {
     }
     const released = ports.capacity.release({ allocationId, ownerCapability, expectedLeaseEpoch: 1 });
     const capacityReleased = released.reason === 'released' && released.durable;
-    if (!capacityReleased) finalReason = 'capacity-release-failed';
+    if (!capacityReleased) return result('unavailable', 'capacity-release-failed', {
+      ...base,
+      prepareAttestation: prepare,
+      finalizeAttestation: finalized,
+      containerRemovalConfirmed: true,
+      capacityReleased: false,
+    });
     const settled = ports.journal.advance(journal.runId, journal.recordDigest, 'settled', {
       outcome: outcomeFor(finalReason),
       leaseEpoch: released.leaseEpoch ?? 1,
@@ -1035,13 +1063,50 @@ export class AgentOsLocalContainerBrokerV1 {
       }
       for (let current of active) {
         if (current.stage === 'finalized') {
+          if (this.#clock().getTime() < Date.parse(current.leaseExpiresAt)) {
+            unreconciled += 1;
+            stopReasons.push('capacity-lease-active');
+            continue;
+          }
+          const reclaimed = ports.capacity.reclaimExpiredAllocation({ expectedAllocationDigest: current.allocationDigest });
+          if (!capacityReclaimConfirmed(reclaimed, current.allocationDigest)) {
+            unreconciled += 1;
+            stopReasons.push('capacity-reclaim-failed');
+            continue;
+          }
           const settled = ports.journal.advance(current.runId, current.recordDigest, 'settled', {
             outcome: 'recovered-after-crash',
           }, locked.lock);
           if (settled.ok) recovered += 1; else { unreconciled += 1; stopReasons.push('journal-unavailable'); }
           continue;
         }
+        if (current.stage === 'capacity-pending') {
+          if (this.#clock().getTime() < Date.parse(current.leaseExpiresAt)) {
+            unreconciled += 1;
+            stopReasons.push('capacity-lease-active');
+            continue;
+          }
+          const reclaimed = ports.capacity.reclaimExpiredAllocation({ expectedAllocationDigest: current.allocationDigest });
+          const abandoned = capacityReclaimConfirmed(reclaimed, current.allocationDigest)
+            ? ports.journal.advance(current.runId, current.recordDigest, 'abandoned', {
+              outcome: 'recovered-after-crash',
+            }, locked.lock)
+            : { ok: false as const, reason: 'capacity-reclaim-failed', record: null };
+          if (abandoned.ok) recovered += 1; else { unreconciled += 1; stopReasons.push(abandoned.reason); }
+          continue;
+        }
         if (current.stage === 'removed') {
+          if (this.#clock().getTime() < Date.parse(current.leaseExpiresAt)) {
+            unreconciled += 1;
+            stopReasons.push('capacity-lease-active');
+            continue;
+          }
+          const reclaimed = ports.capacity.reclaimExpiredAllocation({ expectedAllocationDigest: current.allocationDigest });
+          if (!capacityReclaimConfirmed(reclaimed, current.allocationDigest)) {
+            unreconciled += 1;
+            stopReasons.push('capacity-reclaim-failed');
+            continue;
+          }
           const abandoned = ports.journal.advance(current.runId, current.recordDigest, 'abandoned', {
             outcome: 'recovered-after-crash',
           }, locked.lock);
@@ -1053,10 +1118,22 @@ export class AgentOsLocalContainerBrokerV1 {
         if (!containerId) {
           const resolved = await ports.engine.resolveContainerIdByName(current.containerName);
           if (!resolved.ok && resolved.reason === 'container-not-found') {
-            // Create may still be completing after a lost transport receipt.
-            // Preserve the active record and retry only cleanup on a later pass.
-            unreconciled += 1;
-            stopReasons.push('ambiguous-create-not-found');
+            if (this.#clock().getTime() < Date.parse(current.leaseExpiresAt)) {
+              unreconciled += 1;
+              stopReasons.push('ambiguous-create-not-found');
+              continue;
+            }
+            const reclaimed = ports.capacity.reclaimExpiredAllocation({ expectedAllocationDigest: current.allocationDigest });
+            if (!capacityReclaimConfirmed(reclaimed, current.allocationDigest)) {
+              unreconciled += 1;
+              stopReasons.push('capacity-reclaim-failed');
+              continue;
+            }
+            const abandoned = ports.journal.advance(current.runId, current.recordDigest, 'abandoned', {
+              outcome: 'container-create-failed',
+            }, locked.lock);
+            if (abandoned.ok) recovered += 1;
+            else { unreconciled += 1; stopReasons.push('journal-unavailable'); }
             continue;
           }
           if (!resolved.ok) { unreconciled += 1; stopReasons.push(resolved.reason); continue; }
@@ -1080,13 +1157,29 @@ export class AgentOsLocalContainerBrokerV1 {
             const removed = ports.journal.advance(current.runId, current.recordDigest, 'removed', {
               removalEvidenceDigest: removalDigest,
             }, locked.lock);
-            const abandoned = removed.ok ? ports.journal.advance(current.runId, removed.record.recordDigest,
-              'abandoned', { outcome: 'recovered-after-crash' }, locked.lock) : removed;
-            if (abandoned.ok) recovered += 1; else { unreconciled += 1; stopReasons.push('journal-unavailable'); }
-          } else {
-            ports.journal.advance(current.runId, current.recordDigest, 'unreconciled', {
-              outcome: 'cleanup-failed',
+            if (!removed.ok) { unreconciled += 1; stopReasons.push('journal-unavailable'); continue; }
+            if (this.#clock().getTime() < Date.parse(current.leaseExpiresAt)) {
+              unreconciled += 1;
+              stopReasons.push('capacity-lease-active');
+              continue;
+            }
+            const reclaimed = ports.capacity.reclaimExpiredAllocation({ expectedAllocationDigest: current.allocationDigest });
+            const abandoned = capacityReclaimConfirmed(reclaimed, current.allocationDigest)
+              ? ports.journal.advance(current.runId, removed.record.recordDigest, 'abandoned', {
+                outcome: 'recovered-after-crash',
+              }, locked.lock)
+              : { ok: false as const, reason: 'capacity-reclaim-failed', record: null };
+            if (abandoned.ok) recovered += 1; else { unreconciled += 1; stopReasons.push(abandoned.reason); }
+          } else if (inspected.reason === 'container-policy-mismatch') {
+            ports.journal.advance(current.runId, current.recordDigest, 'manual-hold', {
+              outcome: 'container-policy-mismatch',
             }, locked.lock);
+            unreconciled += 1;
+            stopReasons.push(inspected.reason);
+          } else {
+            if (current.stage !== 'cleanup-pending') {
+              ports.journal.advance(current.runId, current.recordDigest, 'cleanup-pending', {}, locked.lock);
+            }
             unreconciled += 1;
             stopReasons.push(inspected.reason);
           }
@@ -1099,9 +1192,9 @@ export class AgentOsLocalContainerBrokerV1 {
         const removed = await ports.engine.removeContainer(containerId);
         const absent = removed.ok ? await ports.engine.confirmContainerAbsent(containerId) : removed;
         if (!removed.ok || !absent.ok) {
-          ports.journal.advance(current.runId, current.recordDigest, 'unreconciled', {
-            outcome: 'cleanup-failed',
-          }, locked.lock);
+          if (current.stage !== 'cleanup-pending') {
+            ports.journal.advance(current.runId, current.recordDigest, 'cleanup-pending', {}, locked.lock);
+          }
           unreconciled += 1;
           stopReasons.push('cleanup-failed');
           continue;
@@ -1110,10 +1203,19 @@ export class AgentOsLocalContainerBrokerV1 {
         const removedRecord = ports.journal.advance(current.runId, current.recordDigest, 'removed', {
           removalEvidenceDigest: removalDigest,
         }, locked.lock);
-        const abandoned = removedRecord.ok ? ports.journal.advance(current.runId,
-          removedRecord.record.recordDigest, 'abandoned', { outcome: 'recovered-after-crash' }, locked.lock)
-          : removedRecord;
-        if (abandoned.ok) recovered += 1; else { unreconciled += 1; stopReasons.push('journal-unavailable'); }
+        if (!removedRecord.ok) { unreconciled += 1; stopReasons.push('journal-unavailable'); continue; }
+        if (this.#clock().getTime() < Date.parse(current.leaseExpiresAt)) {
+          unreconciled += 1;
+          stopReasons.push('capacity-lease-active');
+          continue;
+        }
+        const reclaimed = ports.capacity.reclaimExpiredAllocation({ expectedAllocationDigest: current.allocationDigest });
+        const abandoned = capacityReclaimConfirmed(reclaimed, current.allocationDigest)
+          ? ports.journal.advance(current.runId, removedRecord.record.recordDigest, 'abandoned', {
+            outcome: 'recovered-after-crash',
+          }, locked.lock)
+          : { ok: false as const, reason: 'capacity-reclaim-failed', record: null };
+        if (abandoned.ok) recovered += 1; else { unreconciled += 1; stopReasons.push(abandoned.reason); }
       }
     } catch {
       unreconciled += 1;

@@ -38,6 +38,13 @@ export type ImmutablePrivateRecordWriteDisposition =
   | 'invalid'
   | 'failed';
 
+export type ImmutablePrivateRecordRemoveDisposition =
+  | 'removed'
+  | 'replayed'
+  | 'withheld'
+  | 'invalid'
+  | 'failed';
+
 export type ImmutablePrivateRecordRecoveryDisposition =
   | 'clean'
   | 'recovered'
@@ -839,6 +846,61 @@ export function writeImmutablePrivateRecord<RecordType>(
     return persisted !== null && recordsEquivalent(codec, persisted, record)
       ? 'recorded'
       : 'failed';
+  } catch {
+    return 'failed';
+  } finally {
+    releaseLocalStoreLock(lock);
+  }
+}
+
+/**
+ * Removes only exact, codec-authenticated immutable records while an outer
+ * transaction fence remains held. This is intentionally narrow: callers must
+ * first durably publish replacement evidence (for example, a compacted chain
+ * summary) before invoking it.
+ */
+export function removeImmutablePrivateRecords<RecordType>(
+  config: ImmutablePrivateRecordStoreConfig<RecordType>,
+  records: readonly RecordType[],
+  options: { lockWaitMs?: number; guard: () => boolean },
+): ImmutablePrivateRecordRemoveDisposition {
+  const validated = validateConfig(config);
+  if (validated === null || !Array.isArray(records) || records.length < 1 ||
+    typeof options?.guard !== 'function') return 'invalid';
+  const lockWaitMs = options.lockWaitMs === undefined
+    ? MAX_LOCK_WAIT_MS
+    : Number.isFinite(options.lockWaitMs)
+      ? Math.max(0, Math.min(MAX_LOCK_WAIT_MS, Math.floor(options.lockWaitMs)))
+      : null;
+  if (lockWaitMs === null) return 'invalid';
+  let codec: ImmutablePrivateRecordCodec<RecordType> | null;
+  try { codec = config.codecForRead(); } catch { codec = null; }
+  if (codec === null) return 'failed';
+  let directories: StoreDirectories<RecordType>;
+  try { directories = loadDirectories(validated, false); } catch { return 'failed'; }
+  const lock = acquireLocalStoreLock(directories.lockPath, lockWaitMs, {
+    anchorPath: directories.anchorPath,
+    exactPrivateStorage: true,
+  });
+  if (lock === null) return 'failed';
+  let removed = 0;
+  try {
+    if (options.guard() !== true) return 'withheld';
+    const recovered = recoverStagingNamespaceConservatively(directories, codec);
+    if (!recovered.ok || options.guard() !== true) return 'failed';
+    for (const expected of records) {
+      const paths = recordPaths(directories, codec, expected);
+      if (paths === null) return 'invalid';
+      if (!existsSync(paths.target)) continue;
+      const identity = lstatSync(paths.target, { bigint: true });
+      const actual = readRecordFile(paths.target, codec, directories);
+      if (actual === null || !recordsEquivalent(codec, actual, expected) ||
+        options.guard() !== true) return 'failed';
+      if (!removeExactFile(paths.target, identity, directories)) return 'failed';
+      removed += 1;
+    }
+    verifyDirectories(directories);
+    return removed > 0 ? 'removed' : 'replayed';
   } catch {
     return 'failed';
   } finally {

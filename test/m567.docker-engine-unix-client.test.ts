@@ -53,6 +53,9 @@ interface Fixture {
   createdBody: Record<string, unknown> | null;
   removed: boolean;
   mismatchEnvironment: boolean;
+  utsModeDecoy: string | null;
+  createStatus: number;
+  createPayload: unknown;
   startedAt: string;
   finishedAt: string;
 }
@@ -87,6 +90,9 @@ async function fixture(): Promise<Fixture> {
     createdBody: null,
     removed: false,
     mismatchEnvironment: false,
+    utsModeDecoy: null,
+    createStatus: 201,
+    createPayload: { Id: CONTAINER_ID, Warnings: [] },
     startedAt: '2026-09-04T18:00:01.123456789Z',
     finishedAt: '2026-09-04T18:00:02.987654321Z',
   };
@@ -107,7 +113,7 @@ async function fixture(): Promise<Fixture> {
     }
     if (request.method === 'POST' && request.url?.startsWith(`${prefix}/containers/create?name=`)) {
       state.createdBody = JSON.parse(body.toString('utf8')) as Record<string, unknown>;
-      json(response, 201, { Id: CONTAINER_ID, Warnings: [] });
+      json(response, state.createStatus, state.createPayload);
       return;
     }
     if (request.method === 'GET' && request.url?.startsWith(`${prefix}/containers/`) &&
@@ -127,7 +133,9 @@ async function fixture(): Promise<Fixture> {
           Labels: created['Labels'], Healthcheck: created['Healthcheck'],
           NetworkDisabled: created['NetworkDisabled'], ExposedPorts: null,
         },
-        HostConfig: created['HostConfig'],
+        HostConfig: state.utsModeDecoy === null ? created['HostConfig'] : {
+          ...(created['HostConfig'] as Record<string, unknown>), UtsMode: state.utsModeDecoy,
+        },
         Mounts: [],
         NetworkSettings: { Networks: { none: {} } },
         State: {
@@ -176,6 +184,9 @@ async function fixture(): Promise<Fixture> {
       get: () => state.mismatchEnvironment,
       set: (next) => { state.mismatchEnvironment = next; },
     },
+    utsModeDecoy: { get: () => state.utsModeDecoy, set: (next) => { state.utsModeDecoy = next; } },
+    createStatus: { get: () => state.createStatus, set: (next) => { state.createStatus = next; } },
+    createPayload: { get: () => state.createPayload, set: (next) => { state.createPayload = next; } },
     startedAt: { get: () => state.startedAt, set: (next) => { state.startedAt = next; } },
     finishedAt: { get: () => state.finishedAt, set: (next) => { state.finishedAt = next; } },
   });
@@ -257,14 +268,23 @@ describe('M567 constrained Docker Engine Unix client', () => {
     expect(JSON.stringify(value.createdBody)).not.toContain('/var/run/docker.sock');
     expect(JSON.stringify(value.createdBody)).not.toContain('DOCKER_HOST');
     expect(JSON.stringify(value.createdBody)).not.toContain('SECRET=');
-    expect(await engine.inspectContainer({
+    const firstInspection = await engine.inspectContainer({
       containerId: CONTAINER_ID, containerName: name, policy: policy(), seccompProfile: SECCOMP,
-    })).toMatchObject({ ok: true, value: {
+    });
+    expect(firstInspection).toMatchObject({ ok: true, value: {
       effectivePolicyMatched: true,
       running: false,
       startedAt: '2026-09-04T18:00:01.123456789Z',
       finishedAt: '2026-09-04T18:00:02.987654321Z',
     } });
+    value.utsModeDecoy = 'host';
+    const decoyInspection = await engine.inspectContainer({
+      containerId: CONTAINER_ID, containerName: name, policy: policy(), seccompProfile: SECCOMP,
+    });
+    expect(decoyInspection).toMatchObject({ ok: true });
+    if (firstInspection.ok && decoyInspection.ok) {
+      expect(decoyInspection.value.inspectionDigest).toBe(firstInspection.value.inspectionDigest);
+    }
     value.startedAt = '0001-01-01T00:00:00Z';
     value.finishedAt = '0001-01-01T00:00:00.000000000Z';
     expect(await engine.inspectContainer({
@@ -304,6 +324,27 @@ describe('M567 constrained Docker Engine Unix client', () => {
     expect(Object.getOwnPropertyNames(Object.getPrototypeOf(engine))).not.toContain('request');
   });
 
+  it('classifies protocol create receipts by whether an effect can still exist', async () => {
+    const value = await fixture();
+    const engine = client(value);
+    const name = agentOsDockerContainerNameV1(Buffer.alloc(32, 0x42).toString('base64url'))!;
+    value.createStatus = 409;
+    value.createPayload = { message: 'conflict' };
+    expect(await engine.createContainer(name, policy(), SECCOMP)).toEqual({
+      ok: false, reason: 'container-conflict', disposition: 'definite-no-effect',
+    });
+    value.createStatus = 500;
+    value.createPayload = { message: 'unknown server failure' };
+    expect(await engine.createContainer(name, policy(), SECCOMP)).toEqual({
+      ok: false, reason: 'response-invalid', disposition: 'ambiguous',
+    });
+    value.createStatus = 201;
+    value.createPayload = { Id: 'malformed', Warnings: [] };
+    expect(await engine.createContainer(name, policy(), SECCOMP)).toEqual({
+      ok: false, reason: 'response-invalid', disposition: 'ambiguous',
+    });
+  });
+
   it('parses fragmented Docker multiplex frames and bounds stdout/stderr transport', async () => {
     const value = await fixture();
     const engine = client(value);
@@ -329,13 +370,13 @@ describe('M567 constrained Docker Engine Unix client', () => {
     const value = await fixture();
     const engine = client(value);
     expect(await engine.createContainer('not-ashlr', policy(), SECCOMP)).toEqual({
-      ok: false, reason: 'invalid-input',
+      ok: false, reason: 'invalid-input', disposition: 'definite-no-effect',
     });
     expect(await engine.createContainer(
       agentOsDockerContainerNameV1(Buffer.alloc(32, 0x33).toString('base64url'))!,
       policy(),
       Buffer.from('{}'),
-    )).toEqual({ ok: false, reason: 'invalid-input' });
+    )).toEqual({ ok: false, reason: 'invalid-input', disposition: 'definite-no-effect' });
     expect(await engine.startContainer('bad')).toEqual({ ok: false, reason: 'invalid-input' });
     expect(await engine.waitContainer(CONTAINER_ID, 0)).toEqual({ ok: false, reason: 'invalid-input' });
     expect(value.requests).toHaveLength(0);

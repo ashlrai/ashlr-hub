@@ -13,6 +13,7 @@ import { fsyncDirectory } from '../util/durability.js';
 import {
   initializeImmutablePrivateRecordStoreLayout,
   readImmutablePrivateRecords,
+  removeImmutablePrivateRecords,
   recoverImmutablePrivateRecordStore,
   writeImmutablePrivateRecord,
   type ImmutablePrivateRecordCodec,
@@ -25,8 +26,12 @@ export const AGENT_OS_LOCAL_CONTAINER_BROKER_JOURNAL_V1 =
 
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const MAX_RECORDS = 4_096;
+const MIN_RECORDS = 16;
+const MAX_RECORDS_PER_LIFECYCLE = 8;
 const MAX_RECORD_BYTES = 16 * 1024;
-const MAX_TOTAL_BYTES = MAX_RECORDS * MAX_RECORD_BYTES;
+// One-record overage is reserved for publishing a durable summary before the
+// old terminal chain is pruned.
+const MAX_TOTAL_BYTES = (MAX_RECORDS + 1) * MAX_RECORD_BYTES;
 const MAX_LOCK_WAIT_MS = 2_000;
 const RAW_DIGEST_RE = /^[a-f0-9]{64}$/u;
 const PREFIXED_DIGEST_RE = /^sha256:[a-f0-9]{64}$/u;
@@ -35,6 +40,7 @@ const CONTAINER_NAME_RE = /^ashlr-agent-os-[a-f0-9]{32}$/u;
 
 export type AgentOsLocalContainerBrokerJournalStageV1 =
   | 'lease-held'
+  | 'create-ambiguous'
   | 'created'
   | 'prepared'
   | 'started'
@@ -43,7 +49,10 @@ export type AgentOsLocalContainerBrokerJournalStageV1 =
   | 'finalized'
   | 'settled'
   | 'abandoned'
-  | 'unreconciled';
+  | 'cleanup-pending'
+  | 'capacity-pending'
+  | 'manual-hold'
+  | 'summary';
 
 export type AgentOsLocalContainerBrokerJournalOutcomeV1 =
   | 'succeeded'
@@ -72,6 +81,7 @@ export interface AgentOsLocalContainerBrokerJournalStateV1 {
   capacityEvidenceDigest: string;
   allocationDigest: string;
   leaseEpoch: number;
+  leaseExpiresAt: string;
   containerName: string;
   containerId: string | null;
   engineCreateRequestDigest: string | null;
@@ -118,6 +128,8 @@ export interface AgentOsLocalContainerBrokerJournalDependenciesV1 {
   enabled?: boolean;
   clock?: () => Date;
   lockWaitMs?: number;
+  /** Optional smaller bound for embedded stores and adversarial tests. */
+  maxRecords?: number;
 }
 
 export type AgentOsLocalContainerBrokerJournalMutationV1 =
@@ -127,7 +139,7 @@ export type AgentOsLocalContainerBrokerJournalMutationV1 =
 const STATE_KEYS = [
   'allocationDigest', 'brokerDigest', 'capacityEvidenceDigest', 'containerId', 'containerName',
   'createConfigDigest', 'engineCreateRequestDigest', 'engineDigest', 'executionIdentityDigest',
-  'finalAttestationDigest', 'finalInspectionDigest', 'imageDigest', 'leaseEpoch', 'outcome',
+  'finalAttestationDigest', 'finalInspectionDigest', 'imageDigest', 'leaseEpoch', 'leaseExpiresAt', 'outcome',
   'permitDigest', 'prepareAttestationDigest', 'producerDigest', 'removalEvidenceDigest',
   'prestartInspectionDigest', 'requestDigest', 'requestNonceDigest', 'runId', 'seccompDigest',
 ] as const;
@@ -136,8 +148,8 @@ const RECORD_KEYS = [
   'sequence', 'stage',
 ] as const;
 const STAGES: readonly AgentOsLocalContainerBrokerJournalStageV1[] = [
-  'lease-held', 'created', 'prepared', 'started', 'stopped', 'removed', 'finalized', 'settled',
-  'abandoned', 'unreconciled',
+  'lease-held', 'create-ambiguous', 'created', 'prepared', 'started', 'stopped', 'removed', 'finalized',
+  'settled', 'abandoned', 'cleanup-pending', 'capacity-pending', 'manual-hold', 'summary',
 ];
 const OUTCOMES: readonly AgentOsLocalContainerBrokerJournalOutcomeV1[] = [
   'succeeded', 'request-withheld', 'container-create-failed', 'container-policy-mismatch',
@@ -145,20 +157,25 @@ const OUTCOMES: readonly AgentOsLocalContainerBrokerJournalOutcomeV1[] = [
   'capacity-release-failed', 'recovered-after-crash',
 ];
 const TERMINAL = new Set<AgentOsLocalContainerBrokerJournalStageV1>([
-  'settled', 'abandoned', 'unreconciled',
+  'settled', 'abandoned', 'manual-hold', 'summary',
 ]);
 const TRANSITIONS: Readonly<Record<AgentOsLocalContainerBrokerJournalStageV1,
 readonly AgentOsLocalContainerBrokerJournalStageV1[]>> = Object.freeze({
-  'lease-held': ['created', 'settled', 'abandoned', 'unreconciled'],
-  created: ['prepared', 'removed', 'unreconciled'],
-  prepared: ['started', 'removed', 'unreconciled'],
-  started: ['stopped', 'removed', 'unreconciled'],
-  stopped: ['removed', 'unreconciled'],
+  'lease-held': ['create-ambiguous', 'created', 'settled', 'abandoned', 'cleanup-pending',
+    'capacity-pending', 'manual-hold'],
+  'create-ambiguous': ['created', 'abandoned', 'cleanup-pending', 'capacity-pending', 'manual-hold'],
+  created: ['prepared', 'removed', 'cleanup-pending', 'manual-hold'],
+  prepared: ['started', 'removed', 'cleanup-pending', 'manual-hold'],
+  started: ['stopped', 'removed', 'cleanup-pending', 'manual-hold'],
+  stopped: ['removed', 'cleanup-pending', 'manual-hold'],
+  'cleanup-pending': ['removed', 'manual-hold'],
+  'capacity-pending': ['abandoned'],
   removed: ['finalized', 'settled', 'abandoned'],
   finalized: ['settled'],
   settled: [],
   abandoned: [],
-  unreconciled: [],
+  'manual-hold': [],
+  summary: [],
 });
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -237,6 +254,7 @@ function validState(value: Record<string, unknown>): boolean {
     PREFIXED_DIGEST_RE.test(String(value['capacityEvidenceDigest'])) &&
     PREFIXED_DIGEST_RE.test(String(value['allocationDigest'])) &&
     Number.isSafeInteger(value['leaseEpoch']) && Number(value['leaseEpoch']) >= 1 &&
+    timestamp(value['leaseExpiresAt']) &&
     CONTAINER_NAME_RE.test(String(value['containerName'])) &&
     (value['containerId'] === null || CONTAINER_ID_RE.test(String(value['containerId']))) &&
     ['engineCreateRequestDigest', 'prestartInspectionDigest', 'finalInspectionDigest',
@@ -254,6 +272,7 @@ function stageStateValid(value: AgentOsLocalContainerBrokerJournalRecordV1): boo
   const finalized = removed && stopped && value.finalAttestationDigest !== null;
   switch (value.stage) {
     case 'lease-held': return !created && value.outcome === null;
+    case 'create-ambiguous': return !created && value.outcome === null;
     case 'created': return created;
     case 'prepared': return prepared;
     case 'started': return prepared;
@@ -262,7 +281,11 @@ function stageStateValid(value: AgentOsLocalContainerBrokerJournalRecordV1): boo
     case 'finalized': return finalized;
     case 'settled': return value.outcome !== null;
     case 'abandoned': return value.outcome !== null && (!created || removed);
-    case 'unreconciled': return value.outcome === 'cleanup-failed';
+    case 'cleanup-pending': return created && value.outcome === null;
+    case 'capacity-pending': return (!created || removed) && value.outcome === null;
+    case 'manual-hold': return value.outcome === 'cleanup-failed' ||
+      value.outcome === 'container-policy-mismatch';
+    case 'summary': return value.outcome !== null && value.previousRecordDigest !== null;
   }
 }
 
@@ -287,12 +310,17 @@ function codec(): ImmutablePrivateRecordCodec<AgentOsLocalContainerBrokerJournal
   return {
     parse: parseJournalRecord,
     serialize: (value) => `${canonicalJson(value)}\n`,
-    recordId: (value) => `${value.runId}.${String(value.sequence).padStart(4, '0')}`,
-    recordFileName: (value) => `${value.runId}.${String(value.sequence).padStart(4, '0')}.json`,
-    isRecordFileName: (value) => /^[a-f0-9]{64}\.[0-9]{4}\.json$/u.test(value),
+    recordId: (value) => value.stage === 'summary'
+      ? `${value.runId}.summary`
+      : `${value.runId}.${String(value.sequence).padStart(4, '0')}`,
+    recordFileName: (value) => value.stage === 'summary'
+      ? `${value.runId}.summary.json`
+      : `${value.runId}.${String(value.sequence).padStart(4, '0')}.json`,
+    isRecordFileName: (value) => /^[a-f0-9]{64}\.(?:[0-9]{4}|summary)\.json$/u.test(value),
     stageToken: (value) => value.recordDigest,
     equivalent: (left, right) => left.recordDigest === right.recordDigest,
-    compare: (left, right) => left.runId.localeCompare(right.runId) || left.sequence - right.sequence,
+    compare: (left, right) => left.runId.localeCompare(right.runId) ||
+      (left.stage === 'summary' ? 1 : right.stage === 'summary' ? -1 : left.sequence - right.sequence),
   };
 }
 
@@ -308,7 +336,7 @@ function sameBinding(left: AgentOsLocalContainerBrokerJournalRecordV1,
   right: AgentOsLocalContainerBrokerJournalRecordV1): boolean {
   return ['runId', 'requestNonceDigest', 'requestDigest', 'permitDigest', 'brokerDigest', 'engineDigest',
     'imageDigest', 'producerDigest', 'seccompDigest', 'createConfigDigest', 'executionIdentityDigest',
-    'capacityEvidenceDigest', 'allocationDigest', 'containerName'].every((key) =>
+      'capacityEvidenceDigest', 'allocationDigest', 'containerName', 'leaseExpiresAt'].every((key) =>
     left[key as keyof AgentOsLocalContainerBrokerJournalRecordV1] ===
       right[key as keyof AgentOsLocalContainerBrokerJournalRecordV1]);
 }
@@ -332,21 +360,39 @@ function validateChains(records: AgentOsLocalContainerBrokerJournalRecordV1[]): 
   latest: AgentOsLocalContainerBrokerJournalRecordV1[];
 } {
   const latest = new Map<string, AgentOsLocalContainerBrokerJournalRecordV1>();
-  for (const item of records) {
-    const previous = latest.get(item.runId);
-    if (!previous) {
-      if (item.sequence !== 1 || item.stage !== 'lease-held' || item.previousRecordDigest !== null) {
+  const grouped = new Map<string, AgentOsLocalContainerBrokerJournalRecordV1[]>();
+  for (const item of records) grouped.set(item.runId, [...(grouped.get(item.runId) ?? []), item]);
+  for (const [runId, group] of grouped) {
+    const summaries = group.filter((item) => item.stage === 'summary');
+    if (summaries.length > 1) return { ok: false, latest: [] };
+    if (summaries.length === 1) {
+      const summary = summaries[0]!;
+      if (summary.sequence !== 1 || summary.previousRecordDigest === null || summary.outcome === null) {
         return { ok: false, latest: [] };
       }
-    } else if (item.sequence !== previous.sequence + 1 ||
-      item.previousRecordDigest !== previous.recordDigest ||
-      !TRANSITIONS[previous.stage].includes(item.stage) || !sameBinding(previous, item) ||
-      Date.parse(item.recordedAt) < Date.parse(previous.recordedAt) ||
-      !monotonicState(previous, item)) {
-      return { ok: false, latest: [] };
+      const originalTerminal = group.filter((item) => item.stage !== 'summary').at(-1);
+      if (originalTerminal && TERMINAL.has(originalTerminal.stage) &&
+        originalTerminal.recordDigest !== summary.previousRecordDigest) return { ok: false, latest: [] };
+      latest.set(runId, summary);
+      continue;
     }
-    if (TERMINAL.has(item.stage) !== (item.outcome !== null)) return { ok: false, latest: [] };
-    latest.set(item.runId, item);
+    let previous: AgentOsLocalContainerBrokerJournalRecordV1 | undefined;
+    for (const item of group) {
+      if (!previous) {
+        if (item.sequence !== 1 || item.stage !== 'lease-held' || item.previousRecordDigest !== null) {
+          return { ok: false, latest: [] };
+        }
+      } else if (item.sequence !== previous.sequence + 1 ||
+        item.previousRecordDigest !== previous.recordDigest ||
+        !TRANSITIONS[previous.stage].includes(item.stage) || !sameBinding(previous, item) ||
+        Date.parse(item.recordedAt) < Date.parse(previous.recordedAt) ||
+        !monotonicState(previous, item)) {
+        return { ok: false, latest: [] };
+      }
+      if (TERMINAL.has(item.stage) !== (item.outcome !== null)) return { ok: false, latest: [] };
+      previous = item;
+    }
+    if (previous) latest.set(runId, previous);
   }
   return { ok: true, latest: [...latest.values()].sort((a, b) => a.runId.localeCompare(b.runId)) };
 }
@@ -362,6 +408,7 @@ export class AgentOsLocalContainerBrokerJournalV1 {
   readonly #lifecycleLockPath: string;
   readonly #clock: () => Date;
   readonly #lockWaitMs: number;
+  readonly #maxRecords: number;
   readonly #config: ImmutablePrivateRecordStoreConfig<AgentOsLocalContainerBrokerJournalRecordV1>;
 
   constructor(dependencies: AgentOsLocalContainerBrokerJournalDependenciesV1) {
@@ -373,14 +420,17 @@ export class AgentOsLocalContainerBrokerJournalV1 {
     this.#lockWaitMs = Number.isFinite(dependencies.lockWaitMs)
       ? Math.max(0, Math.min(MAX_LOCK_WAIT_MS, Math.floor(dependencies.lockWaitMs!)))
       : 250;
+    this.#maxRecords = Number.isSafeInteger(dependencies.maxRecords)
+      ? Math.max(MIN_RECORDS, Math.min(MAX_RECORDS, dependencies.maxRecords!))
+      : MAX_RECORDS;
     this.#config = {
       label: 'Agent OS local-container broker journal',
       anchorPath: this.#anchorPath,
       rootPath: this.#rootPath,
       lockFileName: '.journal.lock',
       maxRecordBytes: MAX_RECORD_BYTES,
-      defaultMaxFiles: MAX_RECORDS,
-      hardMaxFiles: MAX_RECORDS,
+      defaultMaxFiles: this.#maxRecords + 1,
+      hardMaxFiles: this.#maxRecords + 1,
       defaultMaxBytes: MAX_TOTAL_BYTES,
       hardMaxBytes: MAX_TOTAL_BYTES,
       codecForWrite: codec,
@@ -444,24 +494,60 @@ export class AgentOsLocalContainerBrokerJournalV1 {
   }
 
   #readComplete(): { ok: boolean; latest: AgentOsLocalContainerBrokerJournalRecordV1[];
+    records: AgentOsLocalContainerBrokerJournalRecordV1[];
     sourceState: 'missing' | 'healthy' | 'degraded'; recordCount: number; stopReasons: string[] } {
     const read = readImmutablePrivateRecords(this.#config, {
-      maxFiles: MAX_RECORDS,
+      maxFiles: this.#maxRecords + 1,
       maxBytes: MAX_TOTAL_BYTES,
       requireComplete: true,
     });
     if (!read.complete) return {
-      ok: false, latest: [], sourceState: read.sourceState, recordCount: read.filesRead,
+      ok: false, latest: [], records: [], sourceState: read.sourceState, recordCount: read.filesRead,
       stopReasons: [...read.stopReasons],
     };
     const chains = validateChains(read.records);
     return {
       ok: chains.ok,
       latest: chains.latest,
+      records: read.records,
       sourceState: read.sourceState,
       recordCount: read.records.length,
       stopReasons: chains.ok ? [] : ['journal-chain-invalid'],
     };
+  }
+
+  #compact(requiredFree: number, lock: LocalStoreLock): boolean {
+    for (;;) {
+      const read = this.#readComplete();
+      if (!read.ok) return false;
+      const summarizedRemainder = read.latest.find((item) => item.stage === 'summary' &&
+        read.records.some((record) => record.runId === item.runId && record.stage !== 'summary'));
+      if (summarizedRemainder) {
+        const removed = removeImmutablePrivateRecords(this.#config, read.records.filter((record) =>
+          record.runId === summarizedRemainder.runId && record.stage !== 'summary'), {
+          lockWaitMs: this.#lockWaitMs,
+          guard: () => this.#owns(lock),
+        });
+        if (!['removed', 'replayed'].includes(removed)) return false;
+        continue;
+      }
+      if (this.#maxRecords - read.recordCount >= requiredFree) return true;
+      const candidate = read.latest.find((item) => TERMINAL.has(item.stage) && item.stage !== 'summary' &&
+        read.records.filter((record) => record.runId === item.runId).length > 1);
+      if (!candidate) return false;
+      const chain = read.records.filter((record) => record.runId === candidate.runId &&
+        record.stage !== 'summary');
+      const finalState = Object.fromEntries(STATE_KEYS.map((key) => [key, candidate[key]])) as unknown as
+        AgentOsLocalContainerBrokerJournalStateV1;
+      const summarized = this.#write({ ...finalState, sequence: 1, stage: 'summary',
+        previousRecordDigest: candidate.recordDigest }, lock);
+      if (!summarized.ok) return false;
+      const removed = removeImmutablePrivateRecords(this.#config, chain, {
+        lockWaitMs: this.#lockWaitMs,
+        guard: () => this.#owns(lock),
+      });
+      if (!['removed', 'replayed'].includes(removed)) return false;
+    }
   }
 
   begin(
@@ -477,8 +563,16 @@ export class AgentOsLocalContainerBrokerJournalV1 {
       snapshot['finalAttestationDigest'] !== null || snapshot['removalEvidenceDigest'] !== null) {
       return { ok: false, reason: 'invalid-state', record: null };
     }
-    const read = this.#readComplete();
-    if (!read.ok || read.latest.some((item) => item.runId === state.runId) || read.recordCount >= MAX_RECORDS) {
+    let read = this.#readComplete();
+    const outstanding = read.ok ? read.latest.filter((item) => !TERMINAL.has(item.stage))
+      .reduce((total, item) => total + Math.max(0, MAX_RECORDS_PER_LIFECYCLE - item.sequence), 0) : 0;
+    if (read.ok && !read.latest.some((item) => item.runId === state.runId) &&
+      !this.#compact(outstanding + MAX_RECORDS_PER_LIFECYCLE, lock)) {
+      return { ok: false, reason: 'journal-unavailable', record: null };
+    }
+    read = this.#readComplete();
+    if (!read.ok || read.latest.some((item) => item.runId === state.runId) ||
+      read.recordCount + outstanding + MAX_RECORDS_PER_LIFECYCLE > this.#maxRecords) {
       return { ok: false, reason: read.ok ? 'run-conflict' : 'journal-unavailable', record: null };
     }
     return this.#write({ ...(snapshot as unknown as AgentOsLocalContainerBrokerJournalStateV1),
@@ -511,7 +605,7 @@ export class AgentOsLocalContainerBrokerJournalV1 {
     const read = this.#readComplete();
     const previous = read.latest.find((item) => item.runId === runId);
     if (!read.ok || !previous || previous.recordDigest !== expectedPreviousRecordDigest ||
-      !TRANSITIONS[previous.stage].includes(stage) || read.recordCount >= MAX_RECORDS) {
+      !TRANSITIONS[previous.stage].includes(stage) || read.recordCount >= this.#maxRecords) {
       return { ok: false, reason: read.ok ? 'stage-conflict' : 'journal-unavailable', record: null };
     }
     const state = Object.fromEntries(STATE_KEYS.map((key) => [key, previous[key]])) as unknown as
@@ -571,9 +665,10 @@ export class AgentOsLocalContainerBrokerJournalV1 {
 
   recoverStore(lock: LocalStoreLock): boolean {
     if (!this.#owns(lock)) return false;
-    return ['clean', 'recovered'].includes(recoverImmutablePrivateRecordStore(this.#config, {
+    const recovered = ['clean', 'recovered'].includes(recoverImmutablePrivateRecordStore(this.#config, {
       lockWaitMs: this.#lockWaitMs,
     }));
+    return recovered && this.#compact(0, lock);
   }
 
   inspect(): AgentOsLocalContainerBrokerJournalInspectionV1 {

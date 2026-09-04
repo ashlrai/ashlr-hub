@@ -316,6 +316,7 @@ interface Fixture {
   journalRoot: string;
   capacityStore: ExecutionCapacityLeaseStoreV1;
   journal: AgentOsLocalContainerBrokerJournalV1;
+  now: { value: number };
 }
 
 const fixtures: Fixture[] = [];
@@ -325,6 +326,7 @@ function fixture(enabled = true): Fixture {
   chmodSync(anchor, 0o700);
   const capacityRoot = join(anchor, 'capacity');
   const journalRoot = join(anchor, 'journal');
+  const now = { value: NOW };
   const capacityStore = new ExecutionCapacityLeaseStoreV1({
     anchorPath: anchor,
     rootPath: capacityRoot,
@@ -336,13 +338,13 @@ function fixture(enabled = true): Fixture {
         Buffer.from(authenticator, 'base64url'),
       ),
     },
-    clock: () => new Date(NOW),
+    clock: () => new Date(now.value),
     lockWaitMs: 0,
   });
   const journal = new AgentOsLocalContainerBrokerJournalV1({
-    anchorPath: anchor, rootPath: journalRoot, enabled, clock: () => new Date(NOW), lockWaitMs: 0,
+    anchorPath: anchor, rootPath: journalRoot, enabled, clock: () => new Date(now.value), lockWaitMs: 0,
   });
-  const value = { anchor, capacityRoot, journalRoot, capacityStore, journal };
+  const value = { anchor, capacityRoot, journalRoot, capacityStore, journal, now };
   fixtures.push(value);
   return value;
 }
@@ -380,7 +382,7 @@ function broker(
     capacityStore: value.capacityStore,
     journal: value.journal,
     engine: fake,
-    clock: () => new Date(NOW),
+    clock: () => new Date(value.now.value),
     ...overrides,
   });
 }
@@ -420,6 +422,7 @@ function beginActiveJournal(
       capacityEvidenceDigest: selectedEvidence.evidenceDigest,
       allocationDigest: prefixed('recovery-allocation'),
       leaseEpoch: 1,
+      leaseExpiresAt: new Date(NOW + 300_000).toISOString(),
       containerName: agentOsDockerContainerNameV1(selectedRequest.requestNonce)!,
       containerId: null,
       engineCreateRequestDigest: null,
@@ -718,6 +721,10 @@ describe('M567 default-off local-container broker', () => {
 
     fake.resolveContainerIdByName.mockResolvedValueOnce({ ok: true, value: CONTAINER_ID });
     expect(await selectedBroker.recover()).toMatchObject({
+      state: 'unavailable', recoveredRuns: 0, unreconciledRuns: 1,
+    });
+    value.now.value += 300_001;
+    expect(await selectedBroker.recover()).toMatchObject({
       state: 'recovered', recoveredRuns: 1, unreconciledRuns: 0,
     });
     expect(fake.resolveContainerIdByName).toHaveBeenCalledOnce();
@@ -730,7 +737,7 @@ describe('M567 default-off local-container broker', () => {
     const selectedRequest = request();
     const selectedEvidence = evidence();
     const fake = engine(selectedRequest);
-    fake.createContainer.mockResolvedValueOnce({ ok: false, reason: 'request-timed-out' });
+    fake.createContainer.mockResolvedValueOnce({ ok: false, reason: 'request-timed-out', disposition: 'ambiguous' });
     fake.resolveContainerIdByName.mockResolvedValueOnce({ ok: true, value: CONTAINER_ID });
 
     expect(await broker(value, fake).run({
@@ -753,7 +760,7 @@ describe('M567 default-off local-container broker', () => {
     const selectedRequest = request();
     const selectedEvidence = evidence();
     const fake = engine(selectedRequest);
-    fake.createContainer.mockResolvedValueOnce({ ok: false, reason: 'request-timed-out' });
+    fake.createContainer.mockResolvedValueOnce({ ok: false, reason: 'request-timed-out', disposition: 'ambiguous' });
     fake.resolveContainerIdByName.mockResolvedValueOnce({ ok: false, reason: 'request-failed' });
 
     expect(await broker(value, fake).run({
@@ -775,7 +782,7 @@ describe('M567 default-off local-container broker', () => {
     const selectedRequest = request();
     const selectedEvidence = evidence();
     const fake = engine(selectedRequest);
-    fake.createContainer.mockResolvedValueOnce({ ok: false, reason: 'request-timed-out' });
+    fake.createContainer.mockResolvedValueOnce({ ok: false, reason: 'request-timed-out', disposition: 'ambiguous' });
 
     expect(await broker(value, fake).run({
       request: selectedRequest,
@@ -795,6 +802,10 @@ describe('M567 default-off local-container broker', () => {
     expect(value.journal.inspect().activeRuns).toHaveLength(1);
 
     fake.resolveContainerIdByName.mockResolvedValueOnce({ ok: true, value: CONTAINER_ID });
+    expect(await broker(value, fake).recover()).toMatchObject({
+      state: 'unavailable', recoveredRuns: 0, unreconciledRuns: 1,
+    });
+    value.now.value += 300_001;
     expect(await broker(value, fake).recover()).toMatchObject({
       state: 'recovered', recoveredRuns: 1, unreconciledRuns: 0,
     });
@@ -817,8 +828,13 @@ describe('M567 default-off local-container broker', () => {
     fake.inspectContainer.mockResolvedValue({ ok: true, value: { ...prior.value, running: true } });
 
     expect(await broker(value, fake).recover()).toMatchObject({
-      state: 'recovered', recoveredRuns: 1, unreconciledRuns: 0,
+      state: 'unavailable', recoveredRuns: 0, unreconciledRuns: 1,
       executionAuthority: false, commissioningAuthority: false, productionAuthorized: false,
+    });
+    value.now.value += 300_001;
+    expect(await broker(value, fake).recover()).toMatchObject({
+      state: 'unavailable', recoveredRuns: 0, unreconciledRuns: 1,
+      stopReasons: ['capacity-reclaim-failed'],
     });
     expect(fake.killContainer).toHaveBeenCalledOnce();
     expect(fake.waitContainer).toHaveBeenCalledOnce();
@@ -826,7 +842,7 @@ describe('M567 default-off local-container broker', () => {
     expect(fake.confirmContainerAbsent).toHaveBeenCalledOnce();
     expect(fake.createContainer).not.toHaveBeenCalled();
     expect(fake.startContainer).not.toHaveBeenCalled();
-    expect(value.journal.inspect()).toMatchObject({ activeRuns: [], terminalRunCount: 1 });
+    expect(value.journal.inspect().activeRuns).toHaveLength(1);
   });
 
   it('settles a removal-confirmed crash record without a container endpoint call', async () => {
@@ -837,9 +853,14 @@ describe('M567 default-off local-container broker', () => {
     beginActiveJournal(value, selectedRequest, selectedEvidence, 'removed');
 
     expect(await broker(value, fake).recover()).toMatchObject({
-      state: 'recovered', recoveredRuns: 1, unreconciledRuns: 0,
+      state: 'unavailable', recoveredRuns: 0, unreconciledRuns: 1,
     });
-    expect(fake.inspectEngine).toHaveBeenCalledOnce();
+    value.now.value += 300_001;
+    expect(await broker(value, fake).recover()).toMatchObject({
+      state: 'unavailable', recoveredRuns: 0, unreconciledRuns: 1,
+      stopReasons: ['capacity-reclaim-failed'],
+    });
+    expect(fake.inspectEngine).toHaveBeenCalledTimes(2);
     expect(fake.inspectContainer).not.toHaveBeenCalled();
     expect(fake.resolveContainerIdByName).not.toHaveBeenCalled();
     expect(fake.killContainer).not.toHaveBeenCalled();
@@ -863,6 +884,81 @@ describe('M567 default-off local-container broker', () => {
     expect(fake.killContainer).not.toHaveBeenCalled();
     expect(fake.removeContainer).not.toHaveBeenCalled();
     expect(value.journal.inspect().activeRuns).toHaveLength(1);
+  });
+
+  it('settles a definite create failure without lookup and releases its lease', async () => {
+    const value = fixture();
+    const selectedRequest = request();
+    const selectedEvidence = evidence();
+    const fake = engine(selectedRequest);
+    fake.createContainer.mockResolvedValueOnce({
+      ok: false, reason: 'container-conflict', disposition: 'definite-no-effect',
+    });
+    expect(await broker(value, fake).run({
+      request: selectedRequest, permit: permit(selectedRequest, selectedEvidence),
+      capacityEvidence: selectedEvidence,
+    })).toMatchObject({
+      state: 'withheld', reason: 'container-create-failed', capacityReleased: true,
+      replayAdmissionConsumed: true,
+    });
+    expect(fake.resolveContainerIdByName).not.toHaveBeenCalled();
+    expect(value.journal.inspect()).toMatchObject({ activeRuns: [], terminalRunCount: 1 });
+    expect(value.capacityStore.inspect().leases[0]).toMatchObject({ state: 'released' });
+  });
+
+  it('expires a never-visible ambiguous create, reclaims capacity, and retains a nonce tombstone', async () => {
+    const value = fixture();
+    const selectedRequest = request();
+    const selectedEvidence = evidence();
+    const fake = engine(selectedRequest);
+    fake.createContainer.mockResolvedValueOnce({
+      ok: false, reason: 'request-timed-out', disposition: 'ambiguous',
+    });
+    expect(await broker(value, fake).run({
+      request: selectedRequest, permit: permit(selectedRequest, selectedEvidence),
+      capacityEvidence: selectedEvidence,
+    })).toMatchObject({ state: 'unavailable', reason: 'recovery-required' });
+
+    const unrelated = request({ requestNonce: raw('unrelated-nonce') });
+    expect(await broker(value, fake).run({
+      request: unrelated, permit: permit(unrelated, selectedEvidence), capacityEvidence: selectedEvidence,
+    })).toMatchObject({ state: 'withheld', reason: 'capacity-withheld' });
+
+    value.now.value += 300_001;
+    expect(await broker(value, fake).recover()).toMatchObject({
+      state: 'recovered', recoveredRuns: 1, unreconciledRuns: 0,
+    });
+    expect(fake.removeContainer).not.toHaveBeenCalled();
+    expect(value.capacityStore.inspect().leases[0]).toMatchObject({ state: 'expired' });
+    expect(value.journal.inspect()).toMatchObject({ activeRuns: [], terminalRunCount: 1 });
+    expect(await broker(value, fake).run({
+      request: selectedRequest, permit: permit(selectedRequest, selectedEvidence),
+      capacityEvidence: selectedEvidence,
+    })).toMatchObject({ state: 'withheld', reason: 'request-binding-mismatch' });
+  });
+
+  it('keeps transient cleanup failure retryable until removal and capacity reclamation complete', async () => {
+    const value = fixture();
+    const selectedRequest = request();
+    const selectedEvidence = evidence();
+    const fake = engine(selectedRequest);
+    fake.removeContainer.mockResolvedValueOnce({ ok: false, reason: 'request-failed' });
+    expect(await broker(value, fake).run({
+      request: selectedRequest, permit: permit(selectedRequest, selectedEvidence),
+      capacityEvidence: selectedEvidence,
+    })).toMatchObject({ state: 'unavailable', reason: 'cleanup-failed', capacityReleased: false });
+    expect(value.journal.inspect().activeRuns[0]).toMatchObject({ stage: 'cleanup-pending' });
+
+    expect(await broker(value, fake).recover()).toMatchObject({
+      state: 'unavailable', unreconciledRuns: 1, stopReasons: ['capacity-lease-active'],
+    });
+    expect(fake.removeContainer).toHaveBeenCalledTimes(2);
+    expect(value.journal.inspect().activeRuns[0]).toMatchObject({ stage: 'removed' });
+    value.now.value += 300_001;
+    expect(await broker(value, fake).recover()).toMatchObject({
+      state: 'recovered', recoveredRuns: 1, unreconciledRuns: 0,
+    });
+    expect(value.journal.inspect()).toMatchObject({ activeRuns: [], terminalRunCount: 1 });
   });
 
   it('has no shell, Docker CLI, daemon, CLI, configuration, or startup activation path', () => {

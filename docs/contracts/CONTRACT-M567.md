@@ -79,10 +79,14 @@ Container absence is confirmed before the capacity lease is released. Output is
 returned only after the signed response, producer digest, wait/final inspection,
 V2 finalize attestation, removal, lease release, and journal settlement all
 agree. Deadline or output overflow causes bounded kill/wait and cleanup. Any
-ambiguous create transport failure remains journaled and is never retried.
+create failure is classified as definite-no-effect or ambiguous. Definite
+failures settle without a name lookup; ambiguous attempts remain journaled and
+are never retried.
 A negative name lookup is not proof that an already-sent create cannot become
-visible later; the lease-held record remains active until cleanup-only recovery
-observes and removes the container.
+visible later. The record remains active through the durable lease horizon; once
+that horizon expires, another negative lookup plus durable capacity reclamation
+produces an exact terminal nonce tombstone. Other nonces are not globally
+blocked by an unrelated active ambiguity.
 
 `recover()` is cleanup-only. It first rechecks the pinned engine identity, then
 resolves a deterministic name if create may have occurred, kills a still-running
@@ -90,9 +94,10 @@ known container, removes it, confirms absence, and terminates the journal. It
 never creates, starts, attaches, writes a request, or reruns producer work.
 Because owner capabilities are intentionally not durable, a lease stranded by a
 process crash is released only by M566's deterministic expiry/reclaim path.
-Policy drift, engine drift, ambiguous inspection, failed removal, journal
-corruption, lock ambiguity, and durability failure remain unavailable or
-unreconciled for explicit inspection.
+Transient inspection or removal failures remain active `cleanup-pending` work
+and are retried by recovery. Only integrity/policy conflicts may become terminal
+`manual-hold` records. Engine drift, journal corruption, lock ambiguity, and
+durability failure remain unavailable for explicit inspection.
 
 ## Private journal and acceptance boundary
 
@@ -101,14 +106,20 @@ immutable private-record, exact-mode, stable-read, atomic rename/fsync, and loca
 lock primitives. Symlinks, hardlinks, unsafe modes, unexpected entries,
 replacement, malformed transitions, digest-chain corruption, and ambiguous
 durability fail closed. Public inspection is values-free and explicitly reports
-no same-user tamper resistance.
+no same-user tamper resistance. Admission reserves the worst-case eight-record
+lifecycle before `lease-held`. Near the bound, complete terminal chains are
+replaced by a durable one-record summary anchored to the terminal record digest;
+only after that publication are exact old records pruned, making interrupted
+compaction safely repeatable while retaining active chains and nonce tombstones.
 
 M567 tests cover pure permit verification, fake Unix-socket Engine translation,
 fragmented/bounded attach frames, unsafe socket aliases, private journal
 durability and corruption, default-off behavior, verifier pinning, exact
 admission, replay denial, removal-before-release, capacity-window refusal,
-oversized output cleanup, delayed ambiguous-create visibility, running-container
-cleanup, removal-confirmed settlement, and engine-drift refusal. Commissioning still
+oversized output cleanup, delayed and never-visible ambiguous creates, definite
+no-effect failures, retryable cleanup, near-cap settlement, interrupted
+compaction, UTS evidence binding, running-container cleanup, removal-confirmed
+settlement, and engine-drift refusal. Commissioning still
 requires a separately authorized image/seccomp/key installation, a pinned host
 configuration, live Docker acceptance tests, daemon integration, operational
 rollback, and an explicit activation decision.

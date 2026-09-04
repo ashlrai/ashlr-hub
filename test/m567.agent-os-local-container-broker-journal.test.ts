@@ -35,7 +35,7 @@ interface Fixture {
 
 const fixtures: Fixture[] = [];
 
-function fixture(enabled = true): Fixture {
+function fixture(enabled = true, maxRecords?: number): Fixture {
   const anchor = mkdtempSync(join(tmpdir(), 'ashlr-m567-journal-'));
   chmodSync(anchor, 0o700);
   const root = join(anchor, 'journal');
@@ -46,6 +46,7 @@ function fixture(enabled = true): Fixture {
     enabled,
     clock: () => new Date(now.value),
     lockWaitMs: 0,
+    maxRecords,
   });
   const result = { anchor, root, now, journal };
   fixtures.push(result);
@@ -69,6 +70,7 @@ AgentOsLocalContainerBrokerJournalStateV1 {
     capacityEvidenceDigest: prefixed('capacity-evidence'),
     allocationDigest: prefixed('allocation'),
     leaseEpoch: 1,
+    leaseExpiresAt: new Date(NOW + 300_000).toISOString(),
     containerName: `ashlr-agent-os-${raw('name').slice(0, 32)}`,
     containerId: null,
     engineCreateRequestDigest: null,
@@ -217,5 +219,74 @@ describe('M567 local-container broker journal', () => {
     expect(unsafe.journal.releaseLifecycleLock(unsafeLock.lock)).toBe(true);
     chmodSync(unsafe.root, 0o755);
     expect(unsafe.journal.acquireLifecycleLock()).toEqual({ state: 'unavailable', lock: null });
+  });
+
+  it('reserves a complete lifecycle at the cap and compacts terminal chains behind anchored summaries', () => {
+    const value = fixture(true, 16);
+    const acquired = value.journal.acquireLifecycleLock();
+    if (acquired.state !== 'acquired') throw new Error('fixture lock failed');
+    const terminal = (label: string): void => {
+      const selected = state({
+        runId: raw(`run-${label}`),
+        requestNonceDigest: raw(`nonce-${label}`),
+        containerName: `ashlr-agent-os-${raw(`name-${label}`).slice(0, 32)}`,
+      });
+      const begun = value.journal.begin(selected, acquired.lock);
+      expect(begun.ok).toBe(true);
+      if (!begun.ok) return;
+      value.now.value += 1;
+      expect(value.journal.advance(selected.runId, begun.record.recordDigest, 'settled', {
+        outcome: 'request-withheld', leaseEpoch: 2,
+      }, acquired.lock).ok).toBe(true);
+    };
+    for (let index = 0; index < 5; index += 1) terminal(String(index));
+
+    const selected = state({
+      runId: raw('near-cap-run'), requestNonceDigest: raw('near-cap-nonce'),
+      containerName: `ashlr-agent-os-${raw('near-cap-name').slice(0, 32)}`,
+    });
+    let current = value.journal.begin(selected, acquired.lock);
+    expect(current.ok).toBe(true);
+    if (!current.ok) return;
+    const advance = (stage: Parameters<typeof value.journal.advance>[2], updates = {}): void => {
+      value.now.value += 1;
+      const next = value.journal.advance(selected.runId, current.record.recordDigest, stage, updates, acquired.lock);
+      expect(next.ok).toBe(true);
+      if (next.ok) current = next;
+    };
+    advance('created', { containerId: raw('near-cap-container'), engineCreateRequestDigest: raw('near-cap-create') });
+    advance('prepared', { prestartInspectionDigest: raw('near-cap-inspect'),
+      prepareAttestationDigest: raw('near-cap-prepare') });
+    advance('started');
+    advance('stopped', { finalInspectionDigest: raw('near-cap-final-inspect') });
+    advance('removed', { removalEvidenceDigest: raw('near-cap-removal') });
+    advance('finalized', { finalAttestationDigest: raw('near-cap-finalize') });
+    advance('settled', { outcome: 'succeeded', leaseEpoch: 2 });
+    expect(value.journal.inspect()).toMatchObject({ complete: true, recordCount: 16, terminalRunCount: 6 });
+
+    const before = new Map(readdirSync(join(value.root, 'records')).map((file) =>
+      [file, readFileSync(join(value.root, 'records', file))]));
+    terminal('after-cap');
+    const files = readdirSync(join(value.root, 'records'));
+    const summary = files.find((file) => file.endsWith('.summary.json') && !before.has(file));
+    expect(summary).toBeDefined();
+    const summarizedRun = summary!.slice(0, 64);
+    const summaryRecord = JSON.parse(readFileSync(join(value.root, 'records', summary!), 'utf8')) as
+      AgentOsLocalContainerBrokerJournalRecordV1;
+    const priorDigests = [...before].filter(([file]) => file.startsWith(`${summarizedRun}.`))
+      .map(([, bytes]) => (JSON.parse(bytes.toString('utf8')) as AgentOsLocalContainerBrokerJournalRecordV1)
+        .recordDigest);
+    expect(priorDigests).toContain(summaryRecord.previousRecordDigest);
+    const removedOriginal = [...before].find(([file]) => file.startsWith(`${summarizedRun}.`) &&
+      !file.endsWith('.summary.json'));
+    if (removedOriginal && !files.includes(removedOriginal[0])) {
+      const restored = join(value.root, 'records', removedOriginal[0]);
+      writeFileSync(restored, removedOriginal[1], { mode: 0o600 });
+      chmodSync(restored, 0o600);
+      expect(value.journal.inspect()).toMatchObject({ sourceState: 'healthy', complete: true });
+      expect(value.journal.recoverStore(acquired.lock)).toBe(true);
+      expect(readdirSync(join(value.root, 'records'))).not.toContain(removedOriginal[0]);
+    }
+    expect(value.journal.releaseLifecycleLock(acquired.lock)).toBe(true);
   });
 });
