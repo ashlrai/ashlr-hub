@@ -12,6 +12,7 @@ on:
       - "src/raycast/package-lock.json"
       - "src/raycast/npm-shrinkwrap.json"
       - "src/raycast/.npmrc"
+      - "scripts/npm-audit-with-osv-fallback.sh"
       - "desktop/src-tauri/Cargo.toml"
       - "desktop/src-tauri/Cargo.lock"
       - "docs/DEPENDENCY-SECURITY.md"
@@ -38,6 +39,8 @@ jobs:
     env:
       NPM_CONFIG_REGISTRY: https://registry.npmjs.org
       NPM_VERSION: "11.6.0"
+      OSV_SCANNER_VERSION: "2.5.1"
+      OSV_SCANNER_SHA256: f9f25499a2c8cc367b3af45df2ea7eeca7fbccceab9c35079968f4b3652194be
       CARGO_AUDIT_VERSION: "0.22.2"
       CARGO_AUDIT_TARGET: x86_64-unknown-linux-gnu
       CARGO_AUDIT_SHA256: ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39
@@ -57,6 +60,21 @@ jobs:
         run: |
           npm install --global "npm@${NPM_VERSION}" --ignore-scripts --no-audit --no-fund
           test "$(npm --version)" = "${NPM_VERSION}"
+
+      - name: Install pinned OSV-Scanner
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="${RUNNER_TEMP}/osv-scanner-download"
+          bin_dir="${RUNNER_TEMP}/osv-scanner-bin"
+          url="https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            --retry 3 --retry-all-errors --output "${binary}" "${url}"
+          echo "${OSV_SCANNER_SHA256}  ${binary}" | sha256sum --check --strict
+          mkdir --parents "${bin_dir}"
+          install --mode 0755 "${binary}" "${bin_dir}/osv-scanner"
+          echo "${bin_dir}" >> "${GITHUB_PATH}"
+          "${bin_dir}/osv-scanner" --version
 
       - name: Install pinned cargo-audit
         shell: bash
@@ -84,66 +102,18 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund --force=false --legacy-peer-deps=false --strict-peer-deps
 
       - name: Audit root dependencies
-        run: |
-          set -euo pipefail
-          for attempt in 1 2 3; do
-            if timeout --signal=TERM --kill-after=5s 45s npm audit --ignore-scripts --audit-level=low --fetch-retries=0 --fetch-timeout=30000; then
-              exit 0
-            else
-              status=$?
-            fi
-            if [ "${attempt}" -eq 3 ]; then
-              exit "${status}"
-            fi
-            sleep "$((attempt * 5))"
-          done
+        run: bash scripts/npm-audit-with-osv-fallback.sh "root full graph" package-lock.json
 
       - name: Audit root production dependencies
-        run: |
-          set -euo pipefail
-          for attempt in 1 2 3; do
-            if timeout --signal=TERM --kill-after=5s 45s npm audit --ignore-scripts --omit=dev --audit-level=low --fetch-retries=0 --fetch-timeout=30000; then
-              exit 0
-            else
-              status=$?
-            fi
-            if [ "${attempt}" -eq 3 ]; then
-              exit "${status}"
-            fi
-            sleep "$((attempt * 5))"
-          done
+        run: bash scripts/npm-audit-with-osv-fallback.sh "root production graph" package-lock.json --omit=dev
 
       - name: Audit Raycast dependencies
         working-directory: src/raycast
-        run: |
-          set -euo pipefail
-          for attempt in 1 2 3; do
-            if timeout --signal=TERM --kill-after=5s 45s npm audit --ignore-scripts --audit-level=low --fetch-retries=0 --fetch-timeout=30000; then
-              exit 0
-            else
-              status=$?
-            fi
-            if [ "${attempt}" -eq 3 ]; then
-              exit "${status}"
-            fi
-            sleep "$((attempt * 5))"
-          done
+        run: bash ../../scripts/npm-audit-with-osv-fallback.sh "Raycast full graph" package-lock.json
 
       - name: Audit Raycast production dependencies
         working-directory: src/raycast
-        run: |
-          set -euo pipefail
-          for attempt in 1 2 3; do
-            if timeout --signal=TERM --kill-after=5s 45s npm audit --ignore-scripts --omit=dev --audit-level=low --fetch-retries=0 --fetch-timeout=30000; then
-              exit 0
-            else
-              status=$?
-            fi
-            if [ "${attempt}" -eq 3 ]; then
-              exit "${status}"
-            fi
-            sleep "$((attempt * 5))"
-          done
+        run: bash ../../scripts/npm-audit-with-osv-fallback.sh "Raycast production graph" package-lock.json --omit=dev
 
       # The only exception is the still-open, externally contained Linux GLib
       # advisory. New RustSec vulnerabilities continue to fail this job.
