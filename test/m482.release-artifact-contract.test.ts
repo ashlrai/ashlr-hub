@@ -75,7 +75,12 @@ function fixture(): ContractFixture {
     version: '1.2.3',
     type: 'module',
     bin: { ashlr: 'bin/ashlr' },
-    files: ['bin', 'dist', 'scripts/run-verify-command.mjs'],
+    files: [
+      'bin',
+      'dist',
+      'scripts/run-verify-command.mjs',
+      'scripts/scorecard-history-worker.mjs',
+    ],
     dependencies: { example: '1.0.0' },
     bundledDependencies: ['example'],
   }, null, 2)}\n`);
@@ -96,6 +101,7 @@ function fixture(): ContractFixture {
   write(join(packageRoot, 'bin', 'ashlr'), '#!/usr/bin/env node\n', 0o755);
   write(join(packageRoot, 'dist', 'cli', 'index.js'), 'export const runtime = true;\n');
   write(join(packageRoot, 'scripts', 'run-verify-command.mjs'), 'export const verify = true;\n');
+  write(join(packageRoot, 'scripts', 'scorecard-history-worker.mjs'), 'export const worker = true;\n');
   const dependencyRoot = join(packageRoot, 'node_modules');
   write(join(dependencyRoot, 'example', 'package.json'), `${JSON.stringify({
     name: 'example',
@@ -773,6 +779,7 @@ describe('release artifact contract v1', () => {
         'bin',
         'dist',
         'scripts/run-verify-command.mjs',
+        'scripts/scorecard-history-worker.mjs',
         'docs/contracts/CONTRACT-M521.md',
       ],
     })}\n`);

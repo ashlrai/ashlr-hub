@@ -663,7 +663,7 @@ describe('computeFleetScorecard — never throws', () => {
 // 12. scorecard-history — append/read round trip
 // ---------------------------------------------------------------------------
 
-describe('scorecard-history', () => {
+describe.skipIf(process.platform === 'win32')('scorecard-history POSIX persistence', () => {
   it('round-trips appended snapshots, newest-first, bounded', async () => {
     const { appendScorecardSnapshot, readScorecardHistory } = await import('../src/core/fleet/scorecard-history.js');
     const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
@@ -716,10 +716,11 @@ describe('scorecard-history', () => {
     const original = fs.readFileSync(historyPath, 'utf8');
     const replacement = '{"replacement":"must-survive"}\n';
     setScorecardHistoryTestHooksForTests({
-      afterFileOpen: (operation, openedPath) => {
-        if (operation !== 'append') return;
-        fs.renameSync(openedPath, displaced);
-        fs.writeFileSync(openedPath, replacement, { mode: 0o600 });
+      operation: 'append',
+      fileSwap: {
+        fileName: path.basename(historyPath),
+        displacedName: path.basename(displaced),
+        replacementContents: replacement,
       },
     });
 
@@ -741,7 +742,8 @@ describe('scorecard-history', () => {
       const external = '{"external":"must-survive"}\n';
       fs.writeFileSync(externalPath, external, { mode: 0o600 });
       setScorecardHistoryTestHooksForTests({
-        beforeAppendOpen: (pathToCreate) => fs.symlinkSync(externalPath, pathToCreate),
+        operation: 'append',
+        beforeAppendSymlinkTarget: externalPath,
       });
 
       appendScorecardSnapshot({ ts, window: '7d', scorecard: computeFleetScorecard('7d') });
@@ -773,21 +775,23 @@ describe('scorecard-history', () => {
     },
   );
 
-  it('does not append through a history directory replaced after it is pinned', async () => {
+  it('appends only through the POSIX-pinned cwd when the named parent is replaced', async () => {
     const { appendScorecardSnapshot, scorecardHistoryDir } =
       await import('../src/core/fleet/scorecard-history.js');
     const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
     const ts = new Date().toISOString();
     appendScorecardSnapshot({ ts, window: '7d', scorecard: computeFleetScorecard('7d') });
     const dir = scorecardHistoryDir();
-    const displaced = `${dir}.displaced`;
+    const displaced = `${dir}.displaced-scorecard-append0001`;
     const historyPath = path.join(dir, `${ts.slice(0, 7)}.jsonl`);
     const original = fs.readFileSync(historyPath, 'utf8');
+    const external = '{"external":"must-survive"}\n';
     setScorecardHistoryTestHooksForTests({
-      afterDirectoryOpen: (operation, openedDir) => {
-        if (operation !== 'append') return;
-        fs.renameSync(openedDir, displaced);
-        fs.mkdirSync(openedDir, { mode: 0o700 });
+      operation: 'append',
+      parentSwap: {
+        directoryPath: dir,
+        displacedPath: displaced,
+        replacementFiles: { [path.basename(historyPath)]: external },
       },
     });
 
@@ -797,8 +801,10 @@ describe('scorecard-history', () => {
       scorecard: computeFleetScorecard('7d'),
     });
 
-    expect(fs.readdirSync(dir)).toEqual([]);
-    expect(fs.readFileSync(path.join(displaced, path.basename(historyPath)), 'utf8')).toBe(original);
+    expect(fs.readFileSync(historyPath, 'utf8')).toBe(external);
+    const pinnedContents = fs.readFileSync(path.join(displaced, path.basename(historyPath)), 'utf8');
+    expect(pinnedContents.startsWith(original)).toBe(true);
+    expect(pinnedContents.trim().split('\n')).toHaveLength(2);
   });
 
   it('withholds history when the pathname is replaced after read descriptor open', async () => {
@@ -812,10 +818,11 @@ describe('scorecard-history', () => {
     const original = fs.readFileSync(historyPath, 'utf8');
     const replacement = '{"replacement":"must-survive"}\n';
     setScorecardHistoryTestHooksForTests({
-      afterFileOpen: (operation, openedPath) => {
-        if (operation !== 'read') return;
-        fs.renameSync(openedPath, displaced);
-        fs.writeFileSync(openedPath, replacement, { mode: 0o600 });
+      operation: 'read',
+      fileSwap: {
+        fileName: path.basename(historyPath),
+        displacedName: path.basename(displaced),
+        replacementContents: replacement,
       },
     });
 
@@ -828,21 +835,27 @@ describe('scorecard-history', () => {
     expect(fs.readFileSync(historyPath, 'utf8')).toBe(replacement);
   });
 
-  it('withholds history when its directory is replaced after being pinned', async () => {
+  it('enumerates and reads only through pinned cwd, then withholds if its named parent changed', async () => {
     const { appendScorecardSnapshot, readScorecardHistory, scorecardHistoryDir } =
       await import('../src/core/fleet/scorecard-history.js');
     const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
     const ts = new Date().toISOString();
     appendScorecardSnapshot({ ts, window: '7d', scorecard: computeFleetScorecard('7d') });
     const dir = scorecardHistoryDir();
-    const displaced = `${dir}.displaced`;
+    const displaced = `${dir}.displaced-scorecard-read00001`;
     const historyPath = path.join(dir, `${ts.slice(0, 7)}.jsonl`);
     const original = fs.readFileSync(historyPath, 'utf8');
+    const external = JSON.stringify({
+      ts: new Date(Date.now() + 10_000).toISOString(),
+      window: '7d',
+      scorecard: { external: 'must-not-return' },
+    }) + '\n';
     setScorecardHistoryTestHooksForTests({
-      afterDirectoryOpen: (operation, openedDir) => {
-        if (operation !== 'read') return;
-        fs.renameSync(openedDir, displaced);
-        fs.mkdirSync(openedDir, { mode: 0o700 });
+      operation: 'read',
+      parentSwap: {
+        directoryPath: dir,
+        displacedPath: displaced,
+        replacementFiles: { [path.basename(historyPath)]: external },
       },
     });
 
@@ -853,14 +866,70 @@ describe('scorecard-history', () => {
       unreadableFiles: 1,
     });
     expect(fs.readFileSync(path.join(displaced, path.basename(historyPath)), 'utf8')).toBe(original);
+    expect(fs.readFileSync(historyPath, 'utf8')).toBe(external);
   });
+
+  it.each([
+    ['nonzero', undefined, undefined],
+    ['malformed-output', undefined, undefined],
+    ['oversized-output', undefined, 1024 * 1024],
+    ['timeout', 10, undefined],
+  ] as const)(
+    'degrades and withholds on bounded worker failure: %s',
+    async (workerFailure, workerTimeoutMs, workerMaxBufferBytes) => {
+      const { appendScorecardSnapshot, readScorecardHistory } =
+        await import('../src/core/fleet/scorecard-history.js');
+      const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+      appendScorecardSnapshot({
+        ts: new Date().toISOString(),
+        window: '7d',
+        scorecard: computeFleetScorecard('7d'),
+      });
+      setScorecardHistoryTestHooksForTests({
+        operation: 'read',
+        workerFailure,
+        ...(workerTimeoutMs === undefined ? {} : { workerTimeoutMs }),
+        ...(workerMaxBufferBytes === undefined ? {} : { workerMaxBufferBytes }),
+      });
+
+      expect(readScorecardHistory({})).toMatchObject({
+        sourceState: 'degraded',
+        complete: false,
+        records: [],
+        stopReasons: ['io-error'],
+        unreadableFiles: 1,
+      });
+    },
+  );
 });
+
+it.skipIf(process.platform !== 'win32')(
+  'withholds scorecard persistence explicitly when handle-relative custody is unavailable',
+  async () => {
+    const { appendScorecardSnapshot, readScorecardHistory, scorecardHistoryDir } =
+      await import('../src/core/fleet/scorecard-history.js');
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    appendScorecardSnapshot({
+      ts: new Date().toISOString(),
+      window: '7d',
+      scorecard: computeFleetScorecard('7d'),
+    });
+    expect(fs.existsSync(scorecardHistoryDir())).toBe(false);
+    expect(readScorecardHistory({})).toMatchObject({
+      sourceState: 'degraded',
+      sourcePresent: false,
+      complete: false,
+      records: [],
+      stopReasons: ['unsupported-platform'],
+    });
+  },
+);
 
 // ---------------------------------------------------------------------------
 // 13. snapshotScorecardIfDue
 // ---------------------------------------------------------------------------
 
-describe('snapshotScorecardIfDue', () => {
+describe.skipIf(process.platform === 'win32')('snapshotScorecardIfDue', () => {
   it('writes on first call, throttles immediately after, writes again once the interval elapses', async () => {
     const { snapshotScorecardIfDue } = await import('../src/core/fleet/scorecard.js');
     const { readScorecardHistory } = await import('../src/core/fleet/scorecard-history.js');
@@ -887,7 +956,7 @@ describe('snapshotScorecardIfDue', () => {
 // 14. readScorecardTrend
 // ---------------------------------------------------------------------------
 
-describe('readScorecardTrend', () => {
+describe.skipIf(process.platform === 'win32')('readScorecardTrend', () => {
   it('filters trend points by window', async () => {
     const { appendScorecardSnapshot } = await import('../src/core/fleet/scorecard-history.js');
     const { computeFleetScorecard, readScorecardTrend } = await import('../src/core/fleet/scorecard.js');
