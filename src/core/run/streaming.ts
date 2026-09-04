@@ -31,6 +31,7 @@ import * as path from 'node:path';
 import type { AshlrConfig, RunStreamEvent } from '../types.js';
 import { makeColors } from '../../cli/ui.js';
 import { scrubSecrets } from '../util/scrub.js';
+import { assurePrivateStoragePath } from '../util/private-storage.js';
 import {
   acquireLocalStoreLock,
   releaseLocalStoreLock,
@@ -196,6 +197,7 @@ export interface RunOutputStreamClaim {
 
 const activeRunOutputStreamClaims = new WeakSet<RunOutputStreamClaim>();
 const runOutputStreamClaimLocks = new WeakMap<RunOutputStreamClaim, LocalStoreLock>();
+const windowsStreamFileAssurance = new Map<string, { dev: bigint; ino: bigint; at: number }>();
 
 function runOutputStreamLockPath(filePath: string): string {
   return `${filePath}.active.lock`;
@@ -215,18 +217,44 @@ export function runStreamFilePath(runId: string): string | undefined {
  * that needs creating under a NEW home. */
 let dirEnsuredPath: string | undefined;
 let dirEnsuredAt = 0;
+let dirEnsuredRootIdentity: { dev: bigint; ino: bigint } | undefined;
+let dirEnsuredIdentity: { dev: bigint; ino: bigint } | undefined;
 const DIR_RECHECK_MS = 60_000;
 
 function ensureRunStreamsDir(): boolean {
   const now = Date.now();
   const dir = runStreamsDir();
-  if (dirEnsuredPath === dir && now - dirEnsuredAt < DIR_RECHECK_MS) return true;
+  if (dirEnsuredPath === dir && now - dirEnsuredAt < DIR_RECHECK_MS &&
+    dirEnsuredRootIdentity && dirEnsuredIdentity) {
+    try {
+      const root = fs.lstatSync(runStreamsDirRoot(), { bigint: true });
+      const current = fs.lstatSync(dir, { bigint: true });
+      if (safePrivateStreamDirectory(root) && safePrivateStreamDirectory(current) &&
+        root.dev === dirEnsuredRootIdentity.dev && root.ino === dirEnsuredRootIdentity.ino &&
+        current.dev === dirEnsuredIdentity.dev && current.ino === dirEnsuredIdentity.ino) return true;
+    } catch {
+      // Fall through to full assurance.
+    }
+  }
   const ok = ensureRunStreamsDirUncached();
   if (ok) {
-    dirEnsuredPath = dir;
-    dirEnsuredAt = now;
+    try {
+      const root = fs.lstatSync(runStreamsDirRoot(), { bigint: true });
+      const current = fs.lstatSync(dir, { bigint: true });
+      dirEnsuredPath = dir;
+      dirEnsuredAt = now;
+      dirEnsuredRootIdentity = { dev: root.dev, ino: root.ino };
+      dirEnsuredIdentity = { dev: current.dev, ino: current.ino };
+    } catch {
+      dirEnsuredPath = undefined;
+      dirEnsuredRootIdentity = undefined;
+      dirEnsuredIdentity = undefined;
+      return false;
+    }
   } else {
     dirEnsuredPath = undefined;
+    dirEnsuredRootIdentity = undefined;
+    dirEnsuredIdentity = undefined;
   }
   return ok;
 }
@@ -235,11 +263,31 @@ function ensureRunStreamsDirUncached(): boolean {
   try {
     const root = runStreamsDirRoot();
     const dir = runStreamsDir();
-    for (const candidate of [root, dir]) {
-      if (!fs.existsSync(candidate)) fs.mkdirSync(candidate, { recursive: true, mode: 0o700 });
-      const stat = fs.lstatSync(candidate);
-      if (stat.isSymbolicLink() || !stat.isDirectory()) return false;
-      fs.chmodSync(candidate, 0o700);
+    for (const [candidate, anchor] of [[root, os.homedir()], [dir, root]] as const) {
+      let created = false;
+      try {
+        fs.mkdirSync(candidate, { mode: 0o700 });
+        created = true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      }
+      const initial = fs.lstatSync(candidate, { bigint: true });
+      if (initial.isSymbolicLink() || !initial.isDirectory()) return false;
+      // Windows chmod does not establish a protected DACL. Secure a fresh
+      // directory exactly once; never rewrite a permissive pre-existing ACL.
+      if (created || process.platform !== 'win32') fs.chmodSync(candidate, 0o700);
+      const before = fs.lstatSync(candidate, { bigint: true });
+      if (!before.isDirectory() || before.isSymbolicLink() ||
+        before.dev !== initial.dev || before.ino !== initial.ino) return false;
+      if (!assurePrivateStoragePath(
+        candidate,
+        'directory',
+        created ? 'secure-created' : 'inspect-existing',
+        { anchorPath: anchor },
+      ).ok) return false;
+      const after = fs.lstatSync(candidate, { bigint: true });
+      if (!after.isDirectory() || after.isSymbolicLink() ||
+        after.dev !== before.dev || after.ino !== before.ino) return false;
     }
     return true;
   } catch {
@@ -312,6 +360,7 @@ function pruneStreamFileUnderActivityLock(
       current.dev !== currentDir.dev) return false;
     fs.unlinkSync(filePath);
     writeState.delete(filePath);
+    windowsStreamFileAssurance.delete(filePath);
     return true;
   } catch {
     return false;
@@ -571,14 +620,53 @@ export function readRunStreamChunk(
   }
 }
 
-function bindStreamPath(fd: number, filePath: string): BoundStreamPath | undefined {
+function bindStreamPath(
+  fd: number,
+  filePath: string,
+  windowsMode: 'secure-created' | 'inspect-existing' = 'inspect-existing',
+): BoundStreamPath | undefined {
+  const before = {
+    file: fs.fstatSync(fd, { bigint: true }),
+    named: fs.lstatSync(filePath, { bigint: true }),
+    directory: fs.lstatSync(path.dirname(filePath), { bigint: true }),
+    root: fs.lstatSync(path.dirname(path.dirname(filePath)), { bigint: true }),
+  };
+  if (!safePrivateStreamFile(before.file) || !safePrivateStreamFile(before.named) ||
+    !sameStreamFile(before.file, before.named) || !safePrivateStreamDirectory(before.directory) ||
+    !safePrivateStreamDirectory(before.root)) return undefined;
+  let windowsAssuredAt: number | undefined;
+  if (process.platform === 'win32') {
+    const cached = windowsStreamFileAssurance.get(filePath);
+    const freshCachedIdentity = windowsMode === 'inspect-existing' && cached !== undefined &&
+      cached.dev === before.file.dev && cached.ino === before.file.ino &&
+      Date.now() - cached.at < DIR_RECHECK_MS;
+    if (freshCachedIdentity) {
+      windowsAssuredAt = cached.at;
+    } else {
+      if (!assurePrivateStoragePath(
+        filePath,
+        'file',
+        windowsMode,
+        { anchorPath: runStreamsDirRoot() },
+      ).ok) return undefined;
+      windowsAssuredAt = Date.now();
+    }
+  }
   const file = fs.fstatSync(fd, { bigint: true });
   const named = fs.lstatSync(filePath, { bigint: true });
   const directory = fs.lstatSync(path.dirname(filePath), { bigint: true });
   const root = fs.lstatSync(path.dirname(path.dirname(filePath)), { bigint: true });
   if (!safePrivateStreamFile(file) || !safePrivateStreamFile(named) ||
-    !sameStreamFile(file, named) || !safePrivateStreamDirectory(directory) ||
-    !safePrivateStreamDirectory(root)) return undefined;
+    !sameStreamFile(file, named) || !sameStreamFile(before.file, file) ||
+    !safePrivateStreamDirectory(directory) || !sameStreamFile(before.directory, directory) ||
+    !safePrivateStreamDirectory(root) || !sameStreamFile(before.root, root)) return undefined;
+  if (process.platform === 'win32') {
+    windowsStreamFileAssurance.set(filePath, {
+      dev: file.dev,
+      ino: file.ino,
+      at: windowsAssuredAt!,
+    });
+  }
   return { file, directory, root };
 }
 
@@ -617,7 +705,7 @@ export function claimRunOutputStream(runId: string): RunOutputStreamClaim | unde
     );
     created = true;
     fs.fchmodSync(fd, 0o600);
-    const bound = bindStreamPath(fd, filePath);
+    const bound = bindStreamPath(fd, filePath, 'secure-created');
     if (!bound) return undefined;
     fs.fsyncSync(fd);
     const claim = Object.freeze({
@@ -642,6 +730,7 @@ export function claimRunOutputStream(runId: string): RunOutputStreamClaim | unde
         const stat = fs.lstatSync(filePath, { bigint: true });
         const opened = fs.fstatSync(fd, { bigint: true });
         if (sameStreamFile(stat, opened)) fs.unlinkSync(filePath);
+        windowsStreamFileAssurance.delete(filePath);
       } catch { /* best-effort rollback; an empty orphan remains fail-closed */ }
     }
     if (fd !== undefined) {
@@ -664,6 +753,7 @@ export function releaseRunOutputStreamClaim(claim: RunOutputStreamClaim): void {
     if (!bound || !streamClaimMatchesReleased(claim, bound.file) || bound.file.size !== 0n) return;
     fs.unlinkSync(claim.filePath);
     writeState.delete(claim.filePath);
+    windowsStreamFileAssurance.delete(claim.filePath);
   } catch {
     // Best-effort rollback. Failure leaves an empty orphan that future claims
     // refuse; it never grants append authority.
@@ -716,26 +806,21 @@ function inspectStreamFileSize(filePath: string): number {
  * descriptor to the named inode before writing, because parent/path replacement
  * can happen independently of the final-component open flags.
  */
-function openStreamAppendFile(filePath: string): number {
+function openStreamAppendFile(filePath: string): { fd: number; created: boolean } {
   const noFollow = typeof fs.constants.O_NOFOLLOW === 'number' ? fs.constants.O_NOFOLLOW : 0;
   const existingFlags = fs.constants.O_APPEND | fs.constants.O_WRONLY | noFollow;
   try {
-    return fs.openSync(filePath, existingFlags);
+    return {
+      fd: fs.openSync(
+        filePath,
+        existingFlags | fs.constants.O_CREAT | fs.constants.O_EXCL,
+        0o600,
+      ),
+      created: true,
+    };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-  }
-
-  try {
-    return fs.openSync(
-      filePath,
-      existingFlags | fs.constants.O_CREAT | fs.constants.O_EXCL,
-      0o600,
-    );
-  } catch (error) {
-    // A cooperating writer may win creation after our ENOENT observation.
-    // Re-open without O_CREAT; every safety and identity check still applies.
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    return fs.openSync(filePath, existingFlags);
+    return { fd: fs.openSync(filePath, existingFlags), created: false };
   }
 }
 
@@ -745,6 +830,9 @@ function appendStreamLine(
   claim?: RunOutputStreamClaim,
 ): boolean {
   let fd: number | undefined;
+  let created = false;
+  let bytesWritten = 0;
+  let success = false;
   try {
     if (claim) {
       // Claimed paths are never recreated. If the exclusively-created inode
@@ -753,9 +841,10 @@ function appendStreamLine(
       const noFollow = typeof fs.constants.O_NOFOLLOW === 'number' ? fs.constants.O_NOFOLLOW : 0;
       fd = fs.openSync(filePath, fs.constants.O_APPEND | fs.constants.O_WRONLY | noFollow);
     } else {
-      fd = openStreamAppendFile(filePath);
+      ({ fd, created } = openStreamAppendFile(filePath));
+      if (created) fs.fchmodSync(fd, 0o600);
     }
-    const bound = bindStreamPath(fd, filePath);
+    const bound = bindStreamPath(fd, filePath, created ? 'secure-created' : 'inspect-existing');
     if (!bound || (claim && !streamClaimMatches(claim, claim.runId, filePath, bound.file))) return false;
 
     const bytes = Buffer.from(line, 'utf8');
@@ -764,16 +853,32 @@ function appendStreamLine(
       const written = fs.writeSync(fd, bytes, offset, bytes.length - offset);
       if (written <= 0) return false;
       offset += written;
+      bytesWritten += written;
     }
 
     const after = bindStreamPath(fd, filePath);
     if (!after || !sameStreamFile(bound.file, after.file) ||
       !sameStreamFile(bound.directory, after.directory) ||
       !sameStreamFile(bound.root, after.root)) return false;
+    success = true;
     return true;
   } catch {
     return false;
   } finally {
+    // A failed first-create before content mutation must not permanently
+    // poison the run id. Never unlink after any byte was written, and never
+    // unlink a pathname that no longer names our exact empty descriptor.
+    if (created && !success && bytesWritten === 0 && fd !== undefined) {
+      try {
+        const opened = fs.fstatSync(fd, { bigint: true });
+        const named = fs.lstatSync(filePath, { bigint: true });
+        if (opened.size === 0n && sameStreamFile(opened, named)) {
+          fs.unlinkSync(filePath);
+          writeState.delete(filePath);
+          windowsStreamFileAssurance.delete(filePath);
+        }
+      } catch { /* best-effort rollback; any survivor remains fail-closed */ }
+    }
     if (fd !== undefined) {
       try { fs.closeSync(fd); } catch { /* best-effort */ }
     }

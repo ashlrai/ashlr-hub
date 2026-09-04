@@ -57,12 +57,12 @@ function ownedByCurrentUser(stat) {
 
 function safeDirectory(stat) {
   return stat.isDirectory() && !stat.isSymbolicLink() && ownedByCurrentUser(stat) &&
-    (stat.mode & 0o022n) === 0n;
+    (stat.mode & 0o077n) === 0n;
 }
 
 function safeFile(stat) {
   return stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1n &&
-    ownedByCurrentUser(stat) && (stat.mode & 0o022n) === 0n;
+    ownedByCurrentUser(stat) && (stat.mode & 0o077n) === 0n;
 }
 
 function sameIdentity(left, right) {
@@ -136,11 +136,17 @@ function writeAll(fd, buffer) {
   }
 }
 
-function syncPinnedDirectory() {
+function syncPinnedDirectory(request) {
   const fd = openSync('.', constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try {
     const opened = fstatSync(fd, { bigint: true });
     if (!safeDirectory(opened)) throw new Error('unsafe scorecard history cwd');
+    if (request?.testAttack?.directorySyncFailure !== undefined) {
+      if (!testAttackAllowed() || request.testAttack.directorySyncFailure !== true) {
+        fail('invalid scorecard directory-sync test attack');
+      }
+      throw new Error('injected scorecard directory sync failure');
+    }
     fsyncSync(fd);
   } finally {
     closeSync(fd);
@@ -148,21 +154,11 @@ function syncPinnedDirectory() {
 }
 
 function openAppendFile(fileName) {
-  const existingFlags = constants.O_APPEND | constants.O_RDWR | constants.O_NOFOLLOW;
-  try {
-    return { fd: openSync(fileName, existingFlags), created: false };
-  } catch (error) {
-    if (error?.code !== 'ENOENT') throw error;
-  }
-  try {
-    return {
-      fd: openSync(fileName, existingFlags | constants.O_CREAT | constants.O_EXCL, 0o600),
-      created: true,
-    };
-  } catch (error) {
-    if (error?.code !== 'EEXIST') throw error;
-    return { fd: openSync(fileName, existingFlags), created: false };
-  }
+  return openSync(
+    fileName,
+    constants.O_APPEND | constants.O_RDWR | constants.O_NOFOLLOW | constants.O_CREAT,
+    0o600,
+  );
 }
 
 function testAttackAllowed() {
@@ -208,8 +204,8 @@ function applyBeforeAppendOpenAttackForTest(request) {
   symlinkSync(target, request.fileName);
 }
 
-function applyFileSwapForTest(request, fileName) {
-  const attack = request.testAttack?.fileSwap;
+function applyFileSwapForTest(request, fileName, field = 'fileSwap') {
+  const attack = request.testAttack?.[field];
   if (attack === undefined) return;
   if (!testAttackAllowed() || attack.fileName !== fileName ||
     !safeComponent(attack.fileName) ||
@@ -250,14 +246,22 @@ function runAppend(request, directoryIdentity) {
   applyParentSwapForTest(request);
   applyBeforeAppendOpenAttackForTest(request);
   let fd;
-  let created = false;
   try {
-    ({ fd, created } = openAppendFile(request.fileName));
+    fd = openAppendFile(request.fileName);
     const opened = fstatSync(fd, { bigint: true });
     applyFileSwapForTest(request, request.fileName);
     const named = lstatSync(request.fileName, { bigint: true });
     if (!safeFile(opened) || !safeFile(named) || !sameIdentity(opened, named)) {
       throw new Error('scorecard history is not a safe regular file');
+    }
+    // Establish the directory-entry durability barrier before mutating file
+    // contents. If this fails, the caller can retry without duplicating an
+    // append that was already made durable but reported as failed.
+    syncPinnedDirectory(request);
+    applyFileSwapForTest(request, request.fileName, 'afterDirectorySyncFileSwap');
+    const rebound = lstatSync(request.fileName, { bigint: true });
+    if (!safeFile(rebound) || !sameIdentity(opened, rebound)) {
+      throw new Error('scorecard history changed after directory sync');
     }
     if (opened.size > 0n) {
       const tail = Buffer.alloc(1);
@@ -276,7 +280,6 @@ function runAppend(request, directoryIdentity) {
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
-  if (created) syncPinnedDirectory();
   writeJson({ ok: true, directoryIdentity });
 }
 
@@ -307,15 +310,13 @@ function pushStop(result, reason) {
 function readRelativeFile(fileName, maxBytes, request) {
   let fd;
   try {
-    const namedBefore = lstatSync(fileName, { bigint: true });
-    if (!safeFile(namedBefore)) return { ok: false, reason: 'io-error' };
-    if (namedBefore.size > BigInt(maxBytes)) return { ok: false, reason: 'byte-limit' };
     fd = openSync(fileName, constants.O_RDONLY | constants.O_NOFOLLOW);
     const opened = fstatSync(fd, { bigint: true });
+    if (!safeFile(opened)) return { ok: false, reason: 'io-error' };
+    if (opened.size > BigInt(maxBytes)) return { ok: false, reason: 'byte-limit' };
     applyFileSwapForTest(request, fileName);
     const named = lstatSync(fileName, { bigint: true });
-    if (!safeFile(opened) || !safeFile(named) || !sameIdentity(namedBefore, opened) ||
-      !sameIdentity(opened, named) || opened.size > BigInt(maxBytes)) {
+    if (!safeFile(named) || !sameIdentity(opened, named)) {
       return { ok: false, reason: 'io-error' };
     }
     const size = Number(opened.size);

@@ -665,6 +665,24 @@ describe('computeFleetScorecard — never throws', () => {
 // ---------------------------------------------------------------------------
 
 describe.skipIf(process.platform === 'win32')('scorecard-history POSIX persistence', () => {
+  it('supports a conventional 0755 home while keeping managed storage exact-private', async () => {
+    fs.chmodSync(tmpHome, 0o755);
+    const { appendScorecardSnapshot, scorecardHistoryDir } =
+      await import('../src/core/fleet/scorecard-history.js');
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    const ts = new Date().toISOString();
+    expect(appendScorecardSnapshot({
+      ts,
+      window: '7d',
+      scorecard: computeFleetScorecard('7d'),
+    })).toBe(true);
+
+    const privateMode = (candidate: string) => fs.lstatSync(candidate).mode & 0o777;
+    expect(privateMode(path.join(tmpHome, '.ashlr'))).toBe(0o700);
+    expect(privateMode(scorecardHistoryDir())).toBe(0o700);
+    expect(privateMode(path.join(scorecardHistoryDir(), `${ts.slice(0, 7)}.jsonl`))).toBe(0o600);
+  });
+
   it('preserves every concurrent first append when helpers race to create the history directory', async () => {
     const stateRoot = path.join(tmpHome, '.ashlr');
     fs.mkdirSync(stateRoot, { mode: 0o700 });
@@ -739,7 +757,7 @@ describe.skipIf(process.platform === 'win32')('scorecard-history POSIX persisten
     const dir = scorecardHistoryDir();
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     const month = new Date().toISOString().slice(0, 7);
-    fs.writeFileSync(path.join(dir, `${month}.jsonl`), 'not json at all\n');
+    fs.writeFileSync(path.join(dir, `${month}.jsonl`), 'not json at all\n', { mode: 0o600 });
 
     const { readScorecardHistory } = await import('../src/core/fleet/scorecard-history.js');
     const read = readScorecardHistory({});
@@ -770,6 +788,34 @@ describe.skipIf(process.platform === 'win32')('scorecard-history POSIX persisten
 
     appendScorecardSnapshot({ ...record, ts: new Date(Date.now() + 1_000).toISOString() });
 
+    expect(fs.readFileSync(displaced, 'utf8')).toBe(original);
+    expect(fs.readFileSync(historyPath, 'utf8')).toBe(replacement);
+  });
+
+  it('does not mutate either inode when the history pathname is replaced after directory sync', async () => {
+    const { appendScorecardSnapshot, scorecardHistoryDir } =
+      await import('../src/core/fleet/scorecard-history.js');
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    const ts = new Date().toISOString();
+    const record = { ts, window: '7d' as const, scorecard: computeFleetScorecard('7d') };
+    expect(appendScorecardSnapshot(record)).toBe(true);
+    const historyPath = path.join(scorecardHistoryDir(), `${ts.slice(0, 7)}.jsonl`);
+    const displaced = `${historyPath}.after-sync-displaced`;
+    const original = fs.readFileSync(historyPath, 'utf8');
+    const replacement = '{"replacement":"must-survive"}\n';
+    setScorecardHistoryTestHooksForTests({
+      operation: 'append',
+      afterDirectorySyncFileSwap: {
+        fileName: path.basename(historyPath),
+        displacedName: path.basename(displaced),
+        replacementContents: replacement,
+      },
+    });
+
+    expect(appendScorecardSnapshot({
+      ...record,
+      ts: new Date(Date.now() + 1_000).toISOString(),
+    })).toBe(false);
     expect(fs.readFileSync(displaced, 'utf8')).toBe(original);
     expect(fs.readFileSync(historyPath, 'utf8')).toBe(replacement);
   });
@@ -965,6 +1011,66 @@ describe.skipIf(process.platform === 'win32')('scorecard-history POSIX persisten
 
     setScorecardHistoryTestHooksForTests(undefined);
     expect(snapshotScorecardIfDue({ nowMs })).toEqual({ wrote: true });
+  });
+
+  it('fails before append mutation when the directory durability barrier fails', async () => {
+    const { appendScorecardSnapshot, scorecardHistoryDir } =
+      await import('../src/core/fleet/scorecard-history.js');
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    const ts = new Date().toISOString();
+    const first = { ts, window: '7d' as const, scorecard: computeFleetScorecard('7d') };
+    expect(appendScorecardSnapshot(first)).toBe(true);
+    const historyPath = path.join(scorecardHistoryDir(), `${ts.slice(0, 7)}.jsonl`);
+    const before = fs.readFileSync(historyPath);
+    setScorecardHistoryTestHooksForTests({
+      operation: 'append',
+      directorySyncFailure: true,
+    });
+
+    expect(appendScorecardSnapshot({
+      ...first,
+      ts: new Date(Date.now() + 1_000).toISOString(),
+    })).toBe(false);
+    expect(fs.readFileSync(historyPath)).toEqual(before);
+  });
+
+  it('keeps a first-append directory-sync failure byte-empty and retries exactly once', async () => {
+    const { appendScorecardSnapshot, scorecardHistoryDir } =
+      await import('../src/core/fleet/scorecard-history.js');
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    const ts = new Date().toISOString();
+    const record = { ts, window: '7d' as const, scorecard: computeFleetScorecard('7d') };
+    setScorecardHistoryTestHooksForTests({ operation: 'append', directorySyncFailure: true });
+
+    expect(appendScorecardSnapshot(record)).toBe(false);
+    const historyPath = path.join(scorecardHistoryDir(), `${ts.slice(0, 7)}.jsonl`);
+    expect(fs.readFileSync(historyPath)).toHaveLength(0);
+
+    setScorecardHistoryTestHooksForTests(undefined);
+    expect(appendScorecardSnapshot(record)).toBe(true);
+    expect(fs.readFileSync(historyPath, 'utf8').trim().split('\n')).toHaveLength(1);
+  });
+
+  it('refuses group-readable scorecard directories and files', async () => {
+    const { appendScorecardSnapshot, scorecardHistoryDir } =
+      await import('../src/core/fleet/scorecard-history.js');
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    const ts = new Date().toISOString();
+    const record = { ts, window: '7d' as const, scorecard: computeFleetScorecard('7d') };
+    expect(appendScorecardSnapshot(record)).toBe(true);
+    const historyPath = path.join(scorecardHistoryDir(), `${ts.slice(0, 7)}.jsonl`);
+    const before = fs.readFileSync(historyPath);
+
+    fs.chmodSync(historyPath, 0o640);
+    expect(appendScorecardSnapshot({ ...record, ts: new Date(Date.now() + 1_000).toISOString() }))
+      .toBe(false);
+    expect(fs.readFileSync(historyPath)).toEqual(before);
+
+    fs.chmodSync(historyPath, 0o600);
+    fs.chmodSync(scorecardHistoryDir(), 0o750);
+    expect(appendScorecardSnapshot({ ...record, ts: new Date(Date.now() + 2_000).toISOString() }))
+      .toBe(false);
+    expect(fs.readFileSync(historyPath)).toEqual(before);
   });
 });
 

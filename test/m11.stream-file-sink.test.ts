@@ -17,8 +17,9 @@
  * One assertion is DELIBERATELY inverted (see "sanity" test) so this suite
  * doesn't pass vacuously if scrubbing were ever removed from fileSink.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { RunStreamEvent } from '../src/core/types.js';
@@ -50,6 +51,11 @@ import {
   acquireLocalStoreLock,
   releaseLocalStoreLock,
 } from '../src/core/fleet/local-store-lock.js';
+import {
+  assurePrivateStoragePath,
+  _setPrivateStorageTestControlForTest,
+  PRIVATE_STORAGE_TEST_CONTROL,
+} from '../src/core/util/private-storage.js';
 
 let tmpHome: string;
 let prevHome: string | undefined;
@@ -63,6 +69,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
+  _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
   setRunStreamGcBeforeCapacityUnlinkHookForTests(undefined);
   setRunStreamReadAfterOpenHookForTests(undefined);
   if (prevHome === undefined) delete process.env.HOME;
@@ -71,6 +79,161 @@ afterEach(() => {
 });
 
 describe('durable run-output policy', () => {
+  it.runIf(process.platform === 'win32')(
+    'rolls back an empty ordinary stream after DACL assurance failure and permits a clean retry',
+    () => {
+      const prime = claimRunOutputStream('windows-assurance-prime');
+      expect(prime).toBeDefined();
+      releaseRunOutputStreamClaim(prime!);
+      const runId = 'windows-assurance-retry';
+      const filePath = runStreamFilePath(runId)!;
+      _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+        runner(invocation) {
+          const request = JSON.parse(invocation.input) as {
+            nonce: string;
+            operation: string;
+            kind: string;
+            mode: string;
+          };
+          expect(request).toMatchObject({ kind: 'file', mode: 'secure-created' });
+          return {
+            status: 1,
+            stdout: JSON.stringify({
+              nonce: request.nonce,
+              operation: request.operation,
+              ok: false,
+              reason: 'dacl-not-protected',
+            }),
+          };
+        },
+      });
+      const failed = fileSink(runId);
+      // Exercise the truncation-marker first-create path so rollback must
+      // clear both the empty file and its in-memory truncated state.
+      failed(makeEvent({ text: 'x'.repeat(MAX_STREAM_FILE_BYTES) }));
+      endStreamSink(failed);
+      expect(fs.existsSync(filePath)).toBe(false);
+
+      _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
+      const retried = fileSink(runId);
+      retried(makeEvent({ text: 'clean retry' }));
+      endStreamSink(retried);
+      expect(readStoredText(runId)).toBe('clean retry');
+
+      let assuranceInvocations = 0;
+      const refuseAssurance = () => {
+        _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+          runner(invocation) {
+            assuranceInvocations += 1;
+            const request = JSON.parse(invocation.input) as { nonce: string; operation: string };
+            return {
+              status: 1,
+              stdout: JSON.stringify({
+                nonce: request.nonce,
+                operation: request.operation,
+                ok: false,
+                reason: 'dacl-not-protected',
+              }),
+            };
+          },
+        });
+      };
+      // Cache hits do not spawn the adapter and, critically, do not slide the
+      // original assurance timestamp forward.
+      refuseAssurance();
+      const cached = fileSink(runId);
+      cached(makeEvent({ text: ' cached' }));
+      endStreamSink(cached);
+      expect(assuranceInvocations).toBe(0);
+      _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
+
+      vi.useFakeTimers({ now: Date.now() + 61_000 });
+      // Refresh directory assurance separately so the next adapter call is
+      // specifically the now-expired file assurance.
+      const refresh = claimRunOutputStream('windows-assurance-refresh-dir');
+      expect(refresh).toBeDefined();
+      releaseRunOutputStreamClaim(refresh!);
+      const beforeExpiredWrite = readStoredText(runId);
+      refuseAssurance();
+      const expired = fileSink(runId);
+      expired(makeEvent({ text: ' must be refused after ttl' }));
+      endStreamSink(expired);
+      expect(assuranceInvocations).toBeGreaterThan(0);
+      _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
+      expect(readStoredText(runId)).toBe(beforeExpiredWrite);
+    },
+    45_000,
+  );
+
+  it.runIf(process.platform === 'win32')(
+    'establishes exact first-create DACLs and refuses a permissive pre-existing stream directory',
+    () => {
+      const firstClaim = claimRunOutputStream('windows-private-first-create');
+      expect(firstClaim).toBeDefined();
+      const root = path.dirname(runStreamsDir());
+      expect(assurePrivateStoragePath(root, 'directory', 'inspect-existing', {
+        anchorPath: tmpHome,
+      })).toMatchObject({ ok: true });
+      expect(assurePrivateStoragePath(runStreamsDir(), 'directory', 'inspect-existing', {
+        anchorPath: root,
+      })).toMatchObject({ ok: true });
+      expect(assurePrivateStoragePath(firstClaim!.filePath, 'file', 'inspect-existing', {
+        anchorPath: root,
+      })).toMatchObject({ ok: true });
+      releaseRunOutputStreamClaim(firstClaim!);
+
+      const ordinary = fileSink('windows-private-ordinary-create');
+      ordinary(makeEvent({ text: 'private ordinary stream' }));
+      endStreamSink(ordinary);
+      expect(assurePrivateStoragePath(
+        runStreamFilePath('windows-private-ordinary-create')!,
+        'file',
+        'inspect-existing',
+        { anchorPath: root },
+      )).toMatchObject({ ok: true });
+
+      const refusedHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-stream-refused-home-'));
+      process.env.HOME = refusedHome;
+      try {
+        const refusedRoot = path.join(refusedHome, '.ashlr');
+        const refusedDir = path.join(refusedRoot, 'run-streams');
+        fs.mkdirSync(refusedRoot, { mode: 0o700 });
+        expect(assurePrivateStoragePath(refusedRoot, 'directory', 'secure-created', {
+          anchorPath: refusedHome,
+        })).toMatchObject({ ok: true });
+        fs.mkdirSync(refusedDir, { mode: 0o700 });
+        const grant = spawnSync('icacls.exe', [refusedDir, '/grant', '*S-1-1-0:(OI)(CI)F'], {
+          windowsHide: true,
+          shell: false,
+          timeout: 5_000,
+          encoding: 'utf8',
+        });
+        expect(grant.status, grant.stderr).toBe(0);
+        const escaped = refusedDir.replaceAll("'", "''");
+        const readSddl = () => {
+          const result = spawnSync('powershell.exe', [
+            '-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+            `(Get-Acl -LiteralPath '${escaped}').Sddl`,
+          ], { windowsHide: true, shell: false, timeout: 5_000, encoding: 'utf8' });
+          expect(result.status, result.stderr).toBe(0);
+          return result.stdout.trim();
+        };
+        const beforeSddl = readSddl();
+
+        expect(claimRunOutputStream('windows-permissive-refused')).toBeUndefined();
+        expect(readSddl()).toBe(beforeSddl);
+        expect(fs.readdirSync(refusedDir)).toEqual([]);
+        expect(assurePrivateStoragePath(refusedDir, 'directory', 'inspect-existing', {
+          anchorPath: refusedRoot,
+        }).ok).toBe(false);
+      } finally {
+        process.env.HOME = tmpHome;
+        fs.rmSync(refusedHome, { recursive: true, force: true });
+      }
+    },
+    45_000,
+  );
+
   it('does not create a file when config is absent or explicitly false', () => {
     for (const [runId, cfg] of [
       ['default-off', {}],

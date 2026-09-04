@@ -90,7 +90,9 @@ interface ScorecardHistoryTestHooks {
   operation: 'append' | 'read';
   parentSwap?: ScorecardHistoryParentSwapTestAttack;
   fileSwap?: ScorecardHistoryFileSwapTestAttack;
+  afterDirectorySyncFileSwap?: ScorecardHistoryFileSwapTestAttack;
   beforeAppendSymlinkTarget?: string;
+  directorySyncFailure?: boolean;
   workerFailure?: 'malformed-output' | 'nonzero' | 'timeout' | 'oversized-output';
   workerTimeoutMs?: number;
   workerMaxBufferBytes?: number;
@@ -129,8 +131,18 @@ function inspectPrivateDirectory(path: string): BigIntStats {
   const stat = lstatSync(path, { bigint: true });
   const ownedByCurrentUser = typeof process.getuid !== 'function' || stat.uid === BigInt(process.getuid());
   if (!stat.isDirectory() || stat.isSymbolicLink() || !ownedByCurrentUser ||
-    (stat.mode & 0o022n) !== 0n) {
+    (stat.mode & 0o077n) !== 0n) {
     throw new Error('scorecard history directory is not private');
+  }
+  return stat;
+}
+
+function inspectTrustedDirectory(path: string): BigIntStats {
+  const stat = lstatSync(path, { bigint: true });
+  const ownedByCurrentUser = typeof process.getuid !== 'function' || stat.uid === BigInt(process.getuid());
+  if (!stat.isDirectory() || stat.isSymbolicLink() || !ownedByCurrentUser ||
+    (stat.mode & 0o022n) !== 0n) {
+    throw new Error('scorecard history parent directory is not trusted');
   }
   return stat;
 }
@@ -144,7 +156,10 @@ function ensurePrivateDirectory(path: string, create: boolean): BigIntStats | un
       throw error;
     }
   }
-  inspectPrivateDirectory(dirname(path));
+  // The managed directory itself must be private. Its enclosing user-owned
+  // anchor may be conventionally searchable (0755) but never group/world
+  // writable; requiring 0700 here would reject normal macOS home directories.
+  inspectTrustedDirectory(dirname(path));
   try {
     mkdirSync(path, { mode: 0o700 });
   } catch (error) {
@@ -240,9 +255,13 @@ function runScorecardWorker(
           testAttack: {
             ...(hooks.parentSwap ? { parentSwap: hooks.parentSwap } : {}),
             ...(hooks.fileSwap ? { fileSwap: hooks.fileSwap } : {}),
+            ...(hooks.afterDirectorySyncFileSwap
+              ? { afterDirectorySyncFileSwap: hooks.afterDirectorySyncFileSwap }
+              : {}),
             ...(hooks.beforeAppendSymlinkTarget
               ? { beforeAppendSymlinkTarget: hooks.beforeAppendSymlinkTarget }
               : {}),
+            ...(hooks.directorySyncFailure ? { directorySyncFailure: true } : {}),
             ...(hooks.workerFailure ? { workerFailure: hooks.workerFailure } : {}),
           },
         } : {}),
