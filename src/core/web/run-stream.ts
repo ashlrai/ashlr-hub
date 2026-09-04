@@ -487,6 +487,7 @@ export function handleRunEventsSse(
   // during that replay, before either handle exists.
   // eslint-disable-next-line prefer-const
   let intervalId: ReturnType<typeof setInterval> | undefined;
+  // eslint-disable-next-line prefer-const
   let expiryTimer: ReturnType<typeof setTimeout> | undefined;
   // eslint-disable-next-line prefer-const
   let sseId: string | undefined;
