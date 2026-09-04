@@ -492,7 +492,32 @@ describe('daemon valid flags remain supported', () => {
       ...serviceStatus,
       activity: 'inactive',
     });
+    expect(effects.loadConfigReadOnlyStrict).toHaveBeenCalledOnce();
+    expect(effects.serviceOptions).toHaveBeenCalledWith({
+      daemon: { dailyBudgetUsd: 5, intervalMs: 300_000, parallel: 1 },
+    });
     expect(effects.serviceStatus).toHaveBeenCalledOnce();
+    expect(effects.serviceStatus).toHaveBeenCalledWith({
+      budget: 5,
+      intervalMs: 300_000,
+      parallel: 1,
+    });
+  });
+
+  it('refuses to verify service status against defaults when configured arguments are unreadable', async () => {
+    effects.loadConfigReadOnlyStrict.mockImplementation(() => {
+      throw new Error('config is malformed');
+    });
+
+    const result = await capture(['service-status', '--json']);
+
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toContain(
+      'configured service arguments cannot be verified: config is malformed',
+    );
+    expect(effects.serviceOptions).not.toHaveBeenCalled();
+    expect(effects.serviceStatus).not.toHaveBeenCalled();
   });
 
   it('does not recommend the unavailable install command when no service is present', async () => {
