@@ -62,6 +62,77 @@ function codexEntry(command = 'ashlr', args = ['mcp']): RunnerResult {
   });
 }
 
+type AdversarialCodexMode = 'timeout' | 'stdout' | 'stderr';
+
+function installTermIgnoringCodex(root: string, mode: AdversarialCodexMode): {
+  binDir: string;
+  mutationPath: string;
+} {
+  const binDir = path.join(root, 'bin');
+  const executable = path.join(binDir, process.platform === 'win32' ? 'codex.cmd' : 'codex');
+  const mutationPath = path.join(root, 'late-mutation');
+  fs.mkdirSync(binDir);
+  fs.writeFileSync(path.join(root, 'mode'), mode, 'utf8');
+  const source = `#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+const { spawn } = require('node:child_process');
+
+if (process.argv.includes('get')) {
+  process.stderr.write("Error: No MCP server named '${ASHLR_HUB_MCP_SERVER}' found.\\n");
+  process.exit(1);
+}
+
+process.on('SIGTERM', () => {});
+const mutationPath = path.join(process.env.CODEX_HOME, 'late-mutation');
+const mutate = () => fs.writeFileSync(mutationPath, 'mutation after reported failure\\n');
+const helperSource = [
+  "const fs = require('node:fs');",
+  "process.on('SIGTERM', () => {});",
+  "setTimeout(() => fs.writeFileSync(" + JSON.stringify(mutationPath) + ", 'helper mutation after reported failure\\\\n'), 400);",
+  "if (process.send) process.send('ready');",
+  "setInterval(() => {}, 1000);",
+].join('\\n');
+const helper = spawn(process.execPath, ['-e', helperSource], {
+  stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+});
+helper.once('message', () => {
+  setTimeout(mutate, 400);
+  const mode = fs.readFileSync(path.join(process.env.CODEX_HOME, 'mode'), 'utf8');
+  if (mode === 'stdout' || mode === 'stderr') {
+    process[mode].write(Buffer.alloc(300 * 1024, 'x'));
+  }
+});
+setInterval(() => {}, 1000);
+`;
+  fs.writeFileSync(executable, source, { encoding: 'utf8', mode: 0o700 });
+  return { binDir, mutationPath };
+}
+
+async function exerciseTermIgnoringCodex(mode: AdversarialCodexMode): Promise<{
+  detail: string;
+  elapsedMs: number;
+  mutationPath: string;
+}> {
+  const root = tempRoot();
+  const configPath = path.join(root, 'config.toml');
+  const { binDir, mutationPath } = installTermIgnoringCodex(root, mode);
+  const originalPath = process.env['PATH'];
+  process.env['PATH'] = `${binDir}${path.delimiter}${originalPath ?? ''}`;
+  setEditorConfigTestHooksForTests({
+    commandTimeoutMs: mode === 'timeout' ? 150 : 5_000,
+    commandTerminationGraceMs: 50,
+  });
+  const started = performance.now();
+  try {
+    const wired = await wireEditor('codex', { configPath });
+    return { detail: wired.detail, elapsedMs: performance.now() - started, mutationPath };
+  } finally {
+    if (originalPath === undefined) delete process.env['PATH'];
+    else process.env['PATH'] = originalPath;
+  }
+}
+
 function sequenceRunner(
   responses: RunnerResult[],
   calls: CapturedCall[] = [],
@@ -470,6 +541,30 @@ describe('Codex official CLI registration', () => {
     expect(wired.detail).toContain('Codex CLI unavailable');
     expect(fs.existsSync(`${configPath}.bak`)).toBe(false);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'does not report timeout while a TERM-ignoring process tree can still mutate',
+    async () => {
+      const failed = await exerciseTermIgnoringCodex('timeout');
+
+      expect(failed.detail).toContain('codex mcp add failed: command timed out after 15 seconds');
+      expect(failed.elapsedMs).toBeLessThan(2_000);
+      await new Promise(resolve => setTimeout(resolve, 550));
+      expect(fs.existsSync(failed.mutationPath)).toBe(false);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32').each(['stdout', 'stderr'] as const)(
+    'does not report $0 overflow while a TERM-ignoring process tree can still mutate',
+    async (stream) => {
+      const failed = await exerciseTermIgnoringCodex(stream);
+
+      expect(failed.detail).toContain('codex mcp add failed: command output exceeded 256 KiB safety limit');
+      expect(failed.elapsedMs).toBeLessThan(2_000);
+      await new Promise(resolve => setTimeout(resolve, 550));
+      expect(fs.existsSync(failed.mutationPath)).toBe(false);
+    },
+  );
 
   it('requires configPath overrides to target config.toml', async () => {
     const runCommand = sequenceRunner([]);

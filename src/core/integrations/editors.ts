@@ -39,6 +39,8 @@ export type EditorTarget = 'claude' | 'codex' | 'cursor';
 export const ASHLR_HUB_MCP_SERVER = 'ashlr-hub';
 const MAX_COMMAND_OUTPUT_BYTES = 256 * 1024;
 const MAX_JSON_CONFIG_BYTES = 4 * 1024 * 1024;
+const COMMAND_TIMEOUT_MS = 15_000;
+const COMMAND_TERMINATION_GRACE_MS = 1_000;
 const PRIVATE_FILE_MODE = 0o600;
 
 const HOME = homedir();
@@ -90,11 +92,13 @@ export interface WireEditorOptions {
 
 interface EditorConfigTestHooks {
   beforeJsonConfigPublish?: () => void;
+  commandTimeoutMs?: number;
+  commandTerminationGraceMs?: number;
 }
 
 let editorConfigTestHooks: EditorConfigTestHooks | undefined;
 
-/** Test-only seam for deterministic replacement-race coverage. */
+/** Test-only seam for deterministic filesystem-race and subprocess coverage. */
 export function setEditorConfigTestHooksForTests(hooks?: EditorConfigTestHooks): void {
   if (process.env.NODE_ENV !== 'test') throw new Error('editor config hooks are test-only');
   editorConfigTestHooks = hooks;
@@ -338,48 +342,89 @@ async function defaultCommandRunner(
 ): Promise<CommandResult> {
   return await new Promise((resolve) => {
     const child = spawn(executable, args, {
+      detached: process.platform !== 'win32',
       env: options.env,
       stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
     });
     let stdout = '';
     let stderr = '';
     let settled = false;
+    let terminationResult: CommandResult | undefined;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
     const finish = (result: CommandResult) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (killTimer !== undefined) clearTimeout(killTimer);
       resolve(result);
     };
+
+    // A detached POSIX child leads a new process group, so signals cover any
+    // helpers it launches while mutating the registry. Node has no equivalent
+    // portable process-tree primitive on Windows; child.kill is the bounded
+    // direct-process fallback there.
+    const signalProcessTree = (signal: 'SIGTERM' | 'SIGKILL'): void => {
+      if (process.platform !== 'win32' && child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, signal);
+          return;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ESRCH') return;
+          // Fall through to the direct child when group signaling is denied or
+          // unavailable. The later close event still remains the settle gate.
+        }
+      }
+      try { child.kill(signal); } catch { /* close remains the proof of release */ }
+    };
+
+    const terminate = (launchError: string): void => {
+      if (terminationResult !== undefined) return;
+      terminationResult = { ok: false, code: null, stdout, stderr, launchError };
+      signalProcessTree('SIGTERM');
+      killTimer = setTimeout(() => {
+        signalProcessTree('SIGKILL');
+      }, editorConfigTestHooks?.commandTerminationGraceMs ?? COMMAND_TERMINATION_GRACE_MS);
+    };
+
     const timer = setTimeout(() => {
-      child.kill('SIGTERM');
-      finish({ ok: false, code: null, stdout, stderr, launchError: 'command timed out after 15 seconds' });
-    }, 15_000);
+      terminate('command timed out after 15 seconds');
+    }, editorConfigTestHooks?.commandTimeoutMs ?? COMMAND_TIMEOUT_MS);
     const capture = (current: string, chunk: Buffer): string | null => {
       if (Buffer.byteLength(current) + chunk.length > MAX_COMMAND_OUTPUT_BYTES) return null;
       return current + chunk.toString();
     };
     child.stdout.on('data', (chunk: Buffer) => {
+      if (terminationResult !== undefined) return;
       const next = capture(stdout, chunk);
       if (next === null) {
-        child.kill('SIGTERM');
-        finish({ ok: false, code: null, stdout, stderr, launchError: 'command output exceeded 256 KiB safety limit' });
+        terminate('command output exceeded 256 KiB safety limit');
       } else {
         stdout = next;
       }
     });
     child.stderr.on('data', (chunk: Buffer) => {
+      if (terminationResult !== undefined) return;
       const next = capture(stderr, chunk);
       if (next === null) {
-        child.kill('SIGTERM');
-        finish({ ok: false, code: null, stdout, stderr, launchError: 'command output exceeded 256 KiB safety limit' });
+        terminate('command output exceeded 256 KiB safety limit');
       } else {
         stderr = next;
       }
     });
     child.once('error', error => {
+      if (terminationResult !== undefined) return;
       finish({ ok: false, code: null, stdout, stderr, launchError: error.message });
     });
     child.once('close', code => {
+      if (terminationResult !== undefined) {
+        // The direct child may close while a same-group helper remains alive.
+        // A final hard group signal prevents a surviving helper from mutating
+        // config after this failure is reported.
+        signalProcessTree('SIGKILL');
+        finish(terminationResult);
+        return;
+      }
       finish({ ok: code === 0, code, stdout, stderr });
     });
   });
