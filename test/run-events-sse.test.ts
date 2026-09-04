@@ -78,7 +78,7 @@ function runAt(overrides: {
 // Server / auth harness (mirrors test/m14.api.test.ts)
 // ---------------------------------------------------------------------------
 
-import { readAuthHeaders, startServer } from './helpers/authenticated-web-server.js';
+import { readSseAuth, startServer } from './helpers/authenticated-web-server.js';
 
 function makeConfig(): AshlrConfig {
   return {
@@ -97,6 +97,17 @@ function makeConfig(): AshlrConfig {
 
 function makeOpts(overrides: Partial<WebServerOptions> = {}): WebServerOptions {
   return { port: 0, open: false, allowDispatch: false, ...overrides };
+}
+
+async function authenticatedSse(handle: { port: number; readToken: string }): Promise<{
+  query: string;
+  headers: Record<string, string>;
+}> {
+  const auth = await readSseAuth(handle);
+  return {
+    query: auth.query,
+    headers: { Host: `127.0.0.1:${handle.port}`, ...auth.headers },
+  };
 }
 
 function httpRequestHeadersOnly(
@@ -235,10 +246,11 @@ describe('GET /api/run/:id/events — auth', () => {
     const h = await startServer(makeConfig(), makeOpts());
     openHandles.push(h);
     currentRun = runAt({ stepCount: 0, status: 'done' });
+    const auth = await authenticatedSse(h);
 
     const res = await collectSseFrames(
-      `${h.url}/api/run/r1/events`,
-      { Host: `127.0.0.1:${h.port}`, ...readAuthHeaders(h.port) },
+      `${h.url}/api/run/r1/events${auth.query}`,
+      auth.headers,
       (frames) => frames.some((f) => f.event === 'run-done'),
     );
     expect(res.statusCode).toBe(200);
@@ -253,11 +265,12 @@ describe('GET /api/run/:id/events — validation', () => {
   it('400s an invalid run id before touching loadRun', async () => {
     const h = await startServer(makeConfig(), makeOpts());
     openHandles.push(h);
+    const auth = await authenticatedSse(h);
 
-    const res = await httpRequestHeadersOnly(`${h.url}/api/run/bad%20id!/events`, {
-      Host: `127.0.0.1:${h.port}`,
-      ...readAuthHeaders(h.port),
-    });
+    const res = await httpRequestHeadersOnly(
+      `${h.url}/api/run/bad%20id!/events${auth.query}`,
+      auth.headers,
+    );
     expect(res.statusCode).toBe(400);
     expect(loadRunMock).not.toHaveBeenCalled();
   });
@@ -266,11 +279,12 @@ describe('GET /api/run/:id/events — validation', () => {
     const h = await startServer(makeConfig(), makeOpts());
     openHandles.push(h);
     currentRun = null;
+    const auth = await authenticatedSse(h);
 
-    const res = await httpRequestHeadersOnly(`${h.url}/api/run/does-not-exist/events`, {
-      Host: `127.0.0.1:${h.port}`,
-      ...readAuthHeaders(h.port),
-    });
+    const res = await httpRequestHeadersOnly(
+      `${h.url}/api/run/does-not-exist/events${auth.query}`,
+      auth.headers,
+    );
     expect(res.statusCode).toBe(404);
   });
 });
@@ -286,10 +300,11 @@ describe('GET /api/run/:id/events — live sequence', () => {
       const h = await startServer(makeConfig(), makeOpts());
       openHandles.push(h);
       currentRun = runAt({ stepCount: 1, taskStatus: 'running' });
+      const auth = await authenticatedSse(h);
 
       const collecting = collectSseFrames(
-        `${h.url}/api/run/r1/events`,
-        { Host: `127.0.0.1:${h.port}`, ...readAuthHeaders(h.port) },
+        `${h.url}/api/run/r1/events${auth.query}`,
+        auth.headers,
         (frames) => frames.some((f) => f.event === 'run-done'),
       );
 
@@ -322,13 +337,14 @@ describe('GET /api/run/:id/events — live sequence', () => {
       const h = await startServer(makeConfig(), makeOpts());
       openHandles.push(h);
       currentRun = runAt({ stepCount: 2, taskStatus: 'running' });
+      const auth = await authenticatedSse(h);
 
       // Wait for BOTH steps' step-done frames — a single 'data' chunk isn't
       // guaranteed to carry every event a tick wrote, so stopping at the
       // first step-done risks disconnecting before step index 1 arrives.
       const first = await collectSseFrames(
-        `${h.url}/api/run/r1/events`,
-        { Host: `127.0.0.1:${h.port}`, ...readAuthHeaders(h.port) },
+        `${h.url}/api/run/r1/events${auth.query}`,
+        auth.headers,
         (frames) => frames.filter((f) => f.event === 'step-done').length >= 2,
       );
       const seenIds = first.frames.filter((f) => f.id !== undefined).map((f) => Number(f.id));
@@ -338,8 +354,8 @@ describe('GET /api/run/:id/events — live sequence', () => {
       currentRun = runAt({ stepCount: 2, status: 'done', taskStatus: 'done' });
 
       const resumed = await collectSseFrames(
-        `${h.url}/api/run/r1/events`,
-        { Host: `127.0.0.1:${h.port}`, ...readAuthHeaders(h.port), 'Last-Event-ID': String(lastId) },
+        `${h.url}/api/run/r1/events${auth.query}`,
+        { ...auth.headers, 'Last-Event-ID': String(lastId) },
         (frames) => frames.some((f) => f.event === 'run-done'),
       );
 
@@ -362,10 +378,11 @@ describe('GET /api/run/:id/events — live sequence', () => {
       // changing (a fresh Date.now() on every loadRun() call would never stall).
       const frozen = runAt({ stepCount: 1, taskStatus: 'running' });
       currentRun = frozen;
+      const auth = await authenticatedSse(h);
 
       const { frames } = await collectSseFrames(
-        `${h.url}/api/run/r1/events`,
-        { Host: `127.0.0.1:${h.port}`, ...readAuthHeaders(h.port) },
+        `${h.url}/api/run/r1/events${auth.query}`,
+        auth.headers,
         (fs_) => fs_.some((f) => f.event === 'stall'),
         12_000,
       );
@@ -389,10 +406,11 @@ describe('GET /api/run/:id/events — secret scrubbing', () => {
     openHandles.push(h);
     const secret = 'sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
     currentRun = runAt({ stepCount: 1, status: 'done', taskStatus: 'done', extraSummary: `leaked key ${secret}` });
+    const auth = await authenticatedSse(h);
 
     const { frames } = await collectSseFrames(
-      `${h.url}/api/run/r1/events`,
-      { Host: `127.0.0.1:${h.port}`, ...readAuthHeaders(h.port) },
+      `${h.url}/api/run/r1/events${auth.query}`,
+      auth.headers,
       (fr) => fr.some((f) => f.event === 'run-done'),
     );
 
@@ -445,10 +463,11 @@ describe('GET /api/run/:id/events — output-chunk (durable stream file)', () =>
         { kind: 'model-delta', text: 'thinking about the goal' },
         { kind: 'tool-call', text: 'tool: read_file', taskId: 't1' },
       ]);
+      const auth = await authenticatedSse(h);
 
       const collecting = collectSseFrames(
-        `${h.url}/api/run/r1/events`,
-        { Host: `127.0.0.1:${h.port}`, ...readAuthHeaders(h.port) },
+        `${h.url}/api/run/r1/events${auth.query}`,
+        auth.headers,
         (frames) => frames.some((f) => f.event === 'run-done'),
       );
 
@@ -499,10 +518,11 @@ describe('GET /api/run/:id/events — output-chunk (durable stream file)', () =>
         { kind: 'model-delta', text: 'chunk one' },
         { kind: 'model-delta', text: 'chunk two' },
       ]);
+      const auth = await authenticatedSse(h);
 
       const first = await collectSseFrames(
-        `${h.url}/api/run/r1/events`,
-        { Host: `127.0.0.1:${h.port}`, ...readAuthHeaders(h.port) },
+        `${h.url}/api/run/r1/events${auth.query}`,
+        auth.headers,
         (frames) => frames.filter((f) => f.event === 'output-chunk').length >= 2,
       );
       const seenIds = first.frames.filter((f) => f.id !== undefined).map((f) => Number(f.id));
@@ -512,8 +532,8 @@ describe('GET /api/run/:id/events — output-chunk (durable stream file)', () =>
       currentRun = runAt({ stepCount: 0, status: 'done', taskStatus: 'done' });
 
       const resumed = await collectSseFrames(
-        `${h.url}/api/run/r1/events`,
-        { Host: `127.0.0.1:${h.port}`, ...readAuthHeaders(h.port), 'Last-Event-ID': String(lastId) },
+        `${h.url}/api/run/r1/events${auth.query}`,
+        { ...auth.headers, 'Last-Event-ID': String(lastId) },
         (frames) => frames.some((f) => f.event === 'run-done'),
       );
 
@@ -545,10 +565,11 @@ describe('GET /api/run/:id/events — output-chunk (durable stream file)', () =>
     // Simulate a hypothetical bug where fileSink's own scrub was bypassed —
     // this route's sanitizePublicJson() is the second, independent layer.
     writeStreamFileLines('r1', [{ kind: 'model-delta', text: `leaked ${secret}` }]);
+    const auth = await authenticatedSse(h);
 
     const { frames } = await collectSseFrames(
-      `${h.url}/api/run/r1/events`,
-      { Host: `127.0.0.1:${h.port}`, ...readAuthHeaders(h.port) },
+      `${h.url}/api/run/r1/events${auth.query}`,
+      auth.headers,
       (fr) => fr.some((f) => f.event === 'run-done'),
     );
 
@@ -605,10 +626,11 @@ describe('GET /api/run/:id/events — live engine output integration', () => {
           },
         },
       );
+      const auth = await authenticatedSse(h);
 
       const collecting = collectSseFrames(
-        `${h.url}/api/run/r1/events`,
-        { Host: `127.0.0.1:${h.port}`, ...readAuthHeaders(h.port) },
+        `${h.url}/api/run/r1/events${auth.query}`,
+        auth.headers,
         (frames) => frames.filter((f) => f.event === 'output-chunk').length >= 2,
         8_000,
       );

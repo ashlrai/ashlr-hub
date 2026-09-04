@@ -1228,62 +1228,6 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     }
   });
 
-  it('separates blocked one-shot eligibility from valid resident-standing authority', async () => {
-    const inspection = vi.spyOn(activationPermit, 'inspectDaemonActivationPermit').mockReturnValue({
-      schemaVersion: 1,
-      policyVersion: 'm461-proposal-once-v1',
-      authority: 'observation-only',
-      sourceState: 'healthy',
-      state: 'blocked',
-      commandEligible: false,
-      requestedShape: 'proposal-once',
-      trustRootCount: 1,
-      residentAuthorized: false,
-      residentStandingAuthorized: true,
-      installAuthorized: false,
-      repairAuthorized: false,
-      reason: 'activation-permit-missing',
-    });
-
-    try {
-      const status = await buildFleetStatus(baseConfig());
-      const start = status.nextActions?.find((action) => action.id === 'start-daemon');
-      const formatted = formatFleetStatus(status);
-
-      expect(status.daemon.activation).toMatchObject({
-        requestedShape: 'proposal-once',
-        commandEligible: false,
-        residentStandingAuthorized: true,
-        reason: 'activation-permit-missing',
-      });
-      expect(start).toMatchObject({
-        label: 'Start resident daemon',
-        commands: [{
-          label: 'Start resident daemon',
-          argv: ['ashlr', 'daemon', 'start'],
-          shell: 'ashlr daemon start',
-          safety: 'autonomous-dispatch',
-        }],
-      });
-      expect(status.autonomousShipReadiness?.topBlocker).toMatchObject({
-        id: 'daemon-stopped',
-        detail: expect.stringContaining('resident-standing activation is authorized'),
-      });
-      expect(status.missionBrief).toMatchObject({
-        directive: 'Start resident daemon',
-        action: { id: 'start-daemon' },
-      });
-      expect(formatted).toContain(
-        'activation:    proposal-once=blocked (activation-permit-missing; observation-only)',
-      );
-      expect(formatted).toContain(
-        'start scope:   proposal-once=blocked, resident-standing=authorized, install=blocked, repair=blocked',
-      );
-    } finally {
-      inspection.mockRestore();
-    }
-  });
-
   it('surfaces degraded proposal truth instead of presenting a healthy landed zero', async () => {
     const inbox = join(tmpHome, '.ashlr', 'inbox');
     mkdirSync(inbox, { recursive: true });

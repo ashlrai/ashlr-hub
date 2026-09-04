@@ -90,6 +90,7 @@ export interface DaemonActivationReadiness {
   requestedShape: 'proposal-once';
   trustRootCount: number;
   residentAuthorized: false;
+  residentStandingAuthorized: boolean;
   installAuthorized: false;
   repairAuthorized: false;
   reason: string;
@@ -891,6 +892,7 @@ function activationReadiness(
     requestedShape: 'proposal-once',
     trustRootCount,
     residentAuthorized: false,
+    residentStandingAuthorized: false,
     installAuthorized: false,
     repairAuthorized: false,
     reason,
