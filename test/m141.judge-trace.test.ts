@@ -472,6 +472,8 @@ describe('scrubSecrets (shared util) — comprehensive redaction', () => {
     const text = `https://:${secret}@example.com/path`;
     expect(new URL(text).password).toBe(secret);
     expect(scrubSecrets(text)).toBe('https://:[REDACTED]@example.com/path');
+    expect(scrubSecrets('https://user:x@example.com/path'))
+      .toBe('https://user:[REDACTED]@example.com/path');
   });
 
   it('scrubs sk- API keys', async () => {

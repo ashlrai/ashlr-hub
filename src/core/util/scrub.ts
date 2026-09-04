@@ -77,7 +77,7 @@ export function scrubSecrets(text: string): string {
       .replace(/\bnpm_[A-Za-z0-9]{16,}\b/g, '[REDACTED]')
       .replace(/\bAIza[0-9A-Za-z_-]{35}\b/g, '[REDACTED]')
       // 10. URL passwords and long base64-ish blobs.
-      .replace(/(:\/\/[^:\s/@]*:)[^@\s]{8,}(@)/g, '$1[REDACTED]$2')
+      .replace(/(:\/\/[^:\s/@]*:)[^@\s]+(@)/g, '$1[REDACTED]$2')
       .replace(/(?<![/\w])[A-Za-z0-9+]{40,}={0,2}(?![/\w])/g, scrubLongBase64Like);
   } catch {
     // Never throws — return original text on unexpected error.
