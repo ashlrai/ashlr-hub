@@ -58,7 +58,7 @@ function foundrySchema(schema: Record<string, unknown>): Record<string, unknown>
 // since TS types erase) so a future property removed from the type without a
 // schema update fails this test.
 const EXPECTED_TYPE_KEYS = [
-  'allowedBackends', 'autonomyControlLoop', 'repairHandoffV2Write',
+  'executionIdentityV1', 'allowedBackends', 'autonomyControlLoop', 'repairHandoffV2Write',
   'repairHandoffV2Activation', 'models', 'claude5', 'modelGranularRouting',
   'bestOfN', 'bestOfNCandidates', 'bestOfNMinItemScore', 'outcomeWatcher',
   'verifyToGreen', 'sandboxExternal', 'timeoutMs', 'completenessGate',
