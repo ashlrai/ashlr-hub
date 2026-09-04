@@ -13,6 +13,7 @@ number.
 
 - [`CONTRACT-M566.md`](./CONTRACT-M566.md) — private, default-off execution-capacity reservation ledger.
 - [`CONTRACT-M567.md`](./CONTRACT-M567.md) — source-complete, default-off local Docker observation broker.
+- [`CONTRACT-M568.md`](./CONTRACT-M568.md) — version-general, authority-free stopped-selection broker permit.
 
 - `CONTRACT-M3.md` … `CONTRACT-M30.md` — v1 (M1–M20) + v2 (M21–M30, the Autonomous Engineering Organization).
 - `CONTRACT-H1.md` … — v2.1 "Harden & Prove" (end-to-end chain harness, crash recovery, concurrency/budget stress, …).
