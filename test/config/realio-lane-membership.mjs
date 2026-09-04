@@ -135,6 +135,30 @@ export const REAL_IO_TEST_FILES = [
   'test/m2.doctor.test.ts', // runs real environment/tool probes against git, npm, and fs — 0.9s slowest test in the quiet baseline
   'test/m93.daemon-service-crash-recovery.test.ts', // real daemon process crash/recovery (24.5s file total) — 1.7s slowest test in the quiet baseline
 
+  // --- Agent OS durable stores and runtime: real private filesystem layouts, fsync/link
+  // publication, process locks, crash-stage recovery, and large authenticated histories.
+  // The integrated M526-M564 run proved these suites serially. A full four-worker unit
+  // run then reproduced contention-only deadline failures in M557/M560/M562, while the
+  // same assertions remain green in their bounded lane. Keep the complete related
+  // filesystem family together so future changes do not reintroduce cross-suite load.
+  'test/m526.execution-identity-v1.test.ts', // real private locator store and permission checks
+  'test/m533.agent-os-snapshot-store.test.ts', // immutable snapshot records and crash recovery
+  'test/m536.agent-os-observer-attempt-store.test.ts', // durable attempt receipts and retries
+  'test/m537.daemon-tick-authority-capability.test.ts', // real daemon authority state fixtures
+  'test/m538.agent-os-source-bundle-store.test.ts', // authenticated source registry on disk
+  'test/m543.agent-os-observer-scheduler.test.ts', // real child lifecycle and durable tick fixtures
+  'test/m548.locus-workspace-identity-ledger.test.ts', // bounded private identity ledger
+  'test/m552.locus-privacy-provenance-admission.test.ts', // atomic capability-to-ledger admission
+  'test/m553.agent-os-epoch-store.test.ts', // immutable epoch artifacts and active pointer
+  'test/m556.agent-os-epoch-coordination.test.ts', // process lease and observation lock
+  'test/m557.agent-os-epoch-attempt-store.test.ts', // 1000-receipt authenticated history
+  'test/m557b.immutable-private-record-layout.test.ts', // exact-private layout recovery
+  'test/m560.agent-os-epoch-snapshot-store.test.ts', // snapshot history and reciprocal joins
+  'test/m561.agent-os-epoch-source-store.test.ts', // source renewal lineage and recovery
+  'test/m562.agent-os-epoch-runtime.test.ts', // end-to-end durable transaction and crash stages
+  'test/m563.agent-os-epoch-stage-recovery.test.ts', // ordered recovery over three ledgers
+  'test/m564.agent-os-epoch-trust-composition.test.ts', // composed trust reads over real stores
+
   // --- hermetic H-suite: every file spins up a real temp git repo + real fs by design.
   // Already forced fully serial via `npm run test:invariants` (--no-file-parallelism); folding
   // the whole family in here keeps that existing convention and this lane's membership in sync. ---
