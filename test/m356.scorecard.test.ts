@@ -730,7 +730,7 @@ describe('scorecard-history', () => {
   });
 
   it.skipIf(process.platform === 'win32')(
-    'does not follow a symlink that wins the exclusive-create race',
+    'does not follow a symlink installed immediately before the atomic append open',
     async () => {
       const { appendScorecardSnapshot, scorecardHistoryDir } =
         await import('../src/core/fleet/scorecard-history.js');
@@ -741,7 +741,7 @@ describe('scorecard-history', () => {
       const external = '{"external":"must-survive"}\n';
       fs.writeFileSync(externalPath, external, { mode: 0o600 });
       setScorecardHistoryTestHooksForTests({
-        beforeExclusiveCreate: (pathToCreate) => fs.symlinkSync(externalPath, pathToCreate),
+        beforeAppendOpen: (pathToCreate) => fs.symlinkSync(externalPath, pathToCreate),
       });
 
       appendScorecardSnapshot({ ts, window: '7d', scorecard: computeFleetScorecard('7d') });

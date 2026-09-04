@@ -77,7 +77,7 @@ export interface ScorecardHistoryReadResult extends ScorecardHistorySourceQualit
 
 interface ScorecardHistoryTestHooks {
   afterFileOpen?: (operation: 'append' | 'read', path: string) => void;
-  beforeExclusiveCreate?: (path: string) => void;
+  beforeAppendOpen?: (path: string) => void;
 }
 
 let scorecardHistoryTestHooks: ScorecardHistoryTestHooks | undefined;
@@ -108,19 +108,13 @@ function sameFile(left: ReturnType<typeof fstatSync>, right: ReturnType<typeof f
 function appendHistoryLine(path: string, line: string): void {
   let fd: number | undefined;
   try {
-    const openExistingFlags = fsConstants.O_APPEND | fsConstants.O_RDWR | fsConstants.O_NOFOLLOW;
-    try {
-      fd = openSync(path, openExistingFlags);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      try {
-        scorecardHistoryTestHooks?.beforeExclusiveCreate?.(path);
-        fd = openSync(path, openExistingFlags | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
-      } catch (createError) {
-        if ((createError as NodeJS.ErrnoException).code !== 'EEXIST') throw createError;
-        fd = openSync(path, openExistingFlags);
-      }
-    }
+    const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+    scorecardHistoryTestHooks?.beforeAppendOpen?.(path);
+    fd = openSync(
+      path,
+      fsConstants.O_APPEND | fsConstants.O_RDWR | fsConstants.O_CREAT | noFollow,
+      0o600,
+    );
     const opened = fstatSync(fd);
     scorecardHistoryTestHooks?.afterFileOpen?.('append', path);
     const pathBefore = lstatSync(path);
