@@ -40,6 +40,10 @@ const authorityPaths = [
   '.github/workflows/dependency-audit.yml',
 ];
 
+const npmInstallCommand = `npm install --global "npm@\${NPM_VERSION}" --ignore-scripts --no-audit --no-fund
+test "$(npm --version)" = "\${NPM_VERSION}"
+`;
+
 const cargoAuditInstallCommand = `set -euo pipefail
 archive="\${RUNNER_TEMP}/cargo-audit.tgz"
 extract_dir="\${RUNNER_TEMP}/cargo-audit-extract"
@@ -78,6 +82,7 @@ describe('M440 dependency audit CI', () => {
           'timeout-minutes': 20,
           env: {
             NPM_CONFIG_REGISTRY: 'https://registry.npmjs.org',
+            NPM_VERSION: '11.6.0',
             CARGO_AUDIT_VERSION: '0.22.2',
             CARGO_AUDIT_TARGET: 'x86_64-unknown-linux-gnu',
             CARGO_AUDIT_SHA256:
@@ -98,6 +103,10 @@ describe('M440 dependency audit CI', () => {
               with: { 'node-version': '22' },
             },
             {
+              name: 'Install pinned npm',
+              run: npmInstallCommand,
+            },
+            {
               name: 'Install pinned cargo-audit',
               shell: 'bash',
               run: cargoAuditInstallCommand,
@@ -113,21 +122,21 @@ describe('M440 dependency audit CI', () => {
             },
             {
               name: 'Audit root dependencies',
-              run: 'npm audit --package-lock-only --ignore-scripts --audit-level=low',
+              run: 'npm audit --ignore-scripts --audit-level=low',
             },
             {
               name: 'Audit root production dependencies',
-              run: 'npm audit --package-lock-only --ignore-scripts --omit=dev --audit-level=low',
+              run: 'npm audit --ignore-scripts --omit=dev --audit-level=low',
             },
             {
               name: 'Audit Raycast dependencies',
               'working-directory': 'src/raycast',
-              run: 'npm audit --package-lock-only --ignore-scripts --audit-level=low',
+              run: 'npm audit --ignore-scripts --audit-level=low',
             },
             {
               name: 'Audit Raycast production dependencies',
               'working-directory': 'src/raycast',
-              run: 'npm audit --package-lock-only --ignore-scripts --omit=dev --audit-level=low',
+              run: 'npm audit --ignore-scripts --omit=dev --audit-level=low',
             },
             {
               name: 'Audit desktop Cargo dependencies',
@@ -158,6 +167,7 @@ describe('M440 dependency audit CI', () => {
     expect(audit['timeout-minutes']).toBe(20);
     expect(audit.env).toEqual({
       NPM_CONFIG_REGISTRY: 'https://registry.npmjs.org',
+      NPM_VERSION: '11.6.0',
       CARGO_AUDIT_VERSION: '0.22.2',
       CARGO_AUDIT_TARGET: 'x86_64-unknown-linux-gnu',
       CARGO_AUDIT_SHA256:
@@ -172,7 +182,7 @@ describe('M440 dependency audit CI', () => {
   });
 
   it('uses only approved actions with bounded checkout authority', () => {
-    expect(steps).toHaveLength(10);
+    expect(steps).toHaveLength(11);
     expect(steps.filter((step) => step.uses).map((step) => step.uses)).toEqual([
       'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
       'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020',
@@ -190,8 +200,12 @@ describe('M440 dependency audit CI', () => {
     });
   });
 
-  it('fail-closes on clean installs before auditing full and production lockfile graphs', () => {
-    expect(steps.slice(3, 9).map(({ run, ['working-directory']: cwd }) => ({ run, cwd }))).toEqual([
+  it('pins npm and fail-closes on clean installs before auditing their full and production graphs', () => {
+    expect(steps[2]).toEqual({
+      name: 'Install pinned npm',
+      run: npmInstallCommand,
+    });
+    expect(steps.slice(4, 10).map(({ run, ['working-directory']: cwd }) => ({ run, cwd }))).toEqual([
       {
         run: 'npm ci --ignore-scripts --no-audit --no-fund --force=false --legacy-peer-deps=false --strict-peer-deps',
         cwd: undefined,
@@ -201,19 +215,19 @@ describe('M440 dependency audit CI', () => {
         cwd: 'src/raycast',
       },
       {
-        run: 'npm audit --package-lock-only --ignore-scripts --audit-level=low',
+        run: 'npm audit --ignore-scripts --audit-level=low',
         cwd: undefined,
       },
       {
-        run: 'npm audit --package-lock-only --ignore-scripts --omit=dev --audit-level=low',
+        run: 'npm audit --ignore-scripts --omit=dev --audit-level=low',
         cwd: undefined,
       },
       {
-        run: 'npm audit --package-lock-only --ignore-scripts --audit-level=low',
+        run: 'npm audit --ignore-scripts --audit-level=low',
         cwd: 'src/raycast',
       },
       {
-        run: 'npm audit --package-lock-only --ignore-scripts --omit=dev --audit-level=low',
+        run: 'npm audit --ignore-scripts --omit=dev --audit-level=low',
         cwd: 'src/raycast',
       },
     ]);
@@ -223,7 +237,7 @@ describe('M440 dependency audit CI', () => {
       .filter(({ run }) => run.startsWith('npm ci'))
       .map(({ index }) => index);
     const firstAuditIndex = steps.findIndex((step) => String(step.run ?? '').startsWith('npm audit'));
-    expect(installIndexes).toEqual([3, 4]);
+    expect(installIndexes).toEqual([4, 5]);
     expect(Math.max(...installIndexes)).toBeLessThan(firstAuditIndex);
     for (const index of installIndexes) {
       const command = String(steps[index]?.run ?? '');
@@ -235,7 +249,7 @@ describe('M440 dependency audit CI', () => {
   });
 
   it('pins RustSec tooling and fails on every vulnerability except the open GLib quarantine', () => {
-    expect(steps[2]).toEqual({
+    expect(steps[3]).toEqual({
       name: 'Install pinned cargo-audit',
       shell: 'bash',
       run: cargoAuditInstallCommand,
@@ -244,12 +258,12 @@ describe('M440 dependency audit CI', () => {
     expect(cargoAuditInstallCommand).toContain('sha256sum --check --strict');
     expect(cargoAuditInstallCommand).not.toMatch(/cargo install|latest|stable/);
 
-    expect(steps[9]).toEqual({
+    expect(steps[10]).toEqual({
       name: 'Audit desktop Cargo dependencies',
       run: 'cargo-audit audit --file desktop/src-tauri/Cargo.lock --ignore RUSTSEC-2024-0429',
     });
-    expect(String(steps[9]?.run).match(/--ignore\s+RUSTSEC-/g)).toHaveLength(1);
-    expect(String(steps[9]?.run)).not.toMatch(/continue|allow|deny warnings/i);
+    expect(String(steps[10]?.run).match(/--ignore\s+RUSTSEC-/g)).toHaveLength(1);
+    expect(String(steps[10]?.run)).not.toMatch(/continue|allow|deny warnings/i);
     expect(steps.some((step) => step['continue-on-error'] === true)).toBe(false);
   });
 
