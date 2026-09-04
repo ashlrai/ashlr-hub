@@ -391,7 +391,9 @@ function beginActiveJournal(
   value: Fixture,
   selectedRequest: AgentOsObservationSandboxRequestV1,
   selectedEvidence: ExecutionCapacityEvidenceEnvelopeV1,
-  targetStage: Extract<AgentOsLocalContainerBrokerJournalStageV1, 'lease-held' | 'created' | 'removed'>,
+  targetStage: Extract<AgentOsLocalContainerBrokerJournalStageV1,
+  'lease-held' | 'create-ambiguous' | 'created' | 'started' | 'cleanup-pending' | 'removed' | 'finalized'>,
+  leaseExpiresAt = new Date(NOW + 300_000).toISOString(),
 ): AgentOsLocalContainerBrokerJournalRecordV1 {
   const selectedPolicy = policy();
   const selectedPermit = permit(selectedRequest, selectedEvidence);
@@ -422,7 +424,7 @@ function beginActiveJournal(
       capacityEvidenceDigest: selectedEvidence.evidenceDigest,
       allocationDigest: prefixed('recovery-allocation'),
       leaseEpoch: 1,
-      leaseExpiresAt: new Date(NOW + 300_000).toISOString(),
+      leaseExpiresAt,
       containerName: agentOsDockerContainerNameV1(selectedRequest.requestNonce)!,
       containerId: null,
       engineCreateRequestDigest: null,
@@ -434,18 +436,39 @@ function beginActiveJournal(
       outcome: null,
     }, acquired.lock);
     if (!mutation.ok) throw new Error(mutation.reason);
-    if (targetStage !== 'lease-held') {
-      mutation = value.journal.advance(mutation.record.runId, mutation.record.recordDigest, 'created', {
+    const advance = (
+      stage: Parameters<typeof value.journal.advance>[2],
+      updates: Parameters<typeof value.journal.advance>[3] = {},
+    ): void => {
+      mutation = value.journal.advance(mutation.record.runId, mutation.record.recordDigest, stage, updates,
+        acquired.lock);
+      if (!mutation.ok) throw new Error(mutation.reason);
+    };
+    if (targetStage === 'create-ambiguous') advance('create-ambiguous');
+    if (!['lease-held', 'create-ambiguous'].includes(targetStage)) {
+      advance('created', {
         containerId: CONTAINER_ID,
         engineCreateRequestDigest: agentOsDockerEngineCreateRequestDigestV1(selectedPolicy, SECCOMP),
-      }, acquired.lock);
-      if (!mutation.ok) throw new Error(mutation.reason);
+      });
     }
-    if (targetStage === 'removed') {
-      mutation = value.journal.advance(mutation.record.runId, mutation.record.recordDigest, 'removed', {
+    if (['started', 'finalized'].includes(targetStage)) {
+      advance('prepared', {
+        prestartInspectionDigest: raw('recovery-prestart-inspection'),
+        prepareAttestationDigest: raw('recovery-prepare-attestation'),
+      });
+      advance('started');
+    }
+    if (targetStage === 'finalized') {
+      advance('stopped', { finalInspectionDigest: raw('recovery-final-inspection') });
+    }
+    if (targetStage === 'cleanup-pending') advance('cleanup-pending');
+    if (['removed', 'finalized'].includes(targetStage)) {
+      advance('removed', {
         removalEvidenceDigest: raw('recovery-removal'),
-      }, acquired.lock);
-      if (!mutation.ok) throw new Error(mutation.reason);
+      });
+    }
+    if (targetStage === 'finalized') {
+      advance('finalized', { finalAttestationDigest: raw('recovery-final-attestation') });
     }
     return mutation.record;
   } finally {
@@ -732,12 +755,12 @@ describe('M567 default-off local-container broker', () => {
     expect(fake.startContainer).not.toHaveBeenCalled();
   });
 
-  it('resolves and removes a container after an ambiguous create receipt without starting it', async () => {
+  it('resolves and removes a container after an ambiguous response-invalid receipt without starting it', async () => {
     const value = fixture();
     const selectedRequest = request();
     const selectedEvidence = evidence();
     const fake = engine(selectedRequest);
-    fake.createContainer.mockResolvedValueOnce({ ok: false, reason: 'request-timed-out', disposition: 'ambiguous' });
+    fake.createContainer.mockResolvedValueOnce({ ok: false, reason: 'response-invalid', disposition: 'ambiguous' });
     fake.resolveContainerIdByName.mockResolvedValueOnce({ ok: true, value: CONTAINER_ID });
 
     expect(await broker(value, fake).run({
@@ -755,12 +778,12 @@ describe('M567 default-off local-container broker', () => {
     expect(fake.confirmContainerAbsent).toHaveBeenCalledOnce();
   });
 
-  it('keeps ambiguous create state active when name resolution is unavailable', async () => {
+  it('keeps an ambiguous response-invalid create active when name resolution is unavailable', async () => {
     const value = fixture();
     const selectedRequest = request();
     const selectedEvidence = evidence();
     const fake = engine(selectedRequest);
-    fake.createContainer.mockResolvedValueOnce({ ok: false, reason: 'request-timed-out', disposition: 'ambiguous' });
+    fake.createContainer.mockResolvedValueOnce({ ok: false, reason: 'response-invalid', disposition: 'ambiguous' });
     fake.resolveContainerIdByName.mockResolvedValueOnce({ ok: false, reason: 'request-failed' });
 
     expect(await broker(value, fake).run({
@@ -815,6 +838,79 @@ describe('M567 default-off local-container broker', () => {
     expect(fake.confirmContainerAbsent).toHaveBeenCalledOnce();
     expect(value.journal.inspect()).toMatchObject({ activeRuns: [], terminalRunCount: 1 });
   });
+
+  it.each(['lease-held', 'create-ambiguous'] as const)(
+    'admits an unrelated nonce past an expired %s record with no known container',
+    async (targetStage) => {
+      const value = fixture();
+      const priorRequest = request({ requestNonce: raw(`expired-${targetStage}-nonce`) });
+      const selectedEvidence = evidence();
+      beginActiveJournal(
+        value, priorRequest, selectedEvidence, targetStage, new Date(NOW - 1).toISOString(),
+      );
+      const unrelated = request({ requestNonce: raw(`unrelated-${targetStage}-nonce`) });
+      const fake = engine(unrelated);
+
+      expect(await broker(value, fake).run({
+        request: unrelated, permit: permit(unrelated, selectedEvidence), capacityEvidence: selectedEvidence,
+      })).toMatchObject({ state: 'completed', reason: 'succeeded' });
+      expect(fake.createContainer).toHaveBeenCalledOnce();
+      expect(fake.startContainer).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(['created', 'started', 'cleanup-pending'] as const)(
+    'continues to block unrelated admission for a known container in %s',
+    async (targetStage) => {
+      const value = fixture();
+      const priorRequest = request({ requestNonce: raw(`known-${targetStage}-nonce`) });
+      const selectedEvidence = evidence();
+      beginActiveJournal(value, priorRequest, selectedEvidence, targetStage);
+      const unrelated = request({ requestNonce: raw(`blocked-${targetStage}-nonce`) });
+      const fake = engine(unrelated);
+
+      expect(await broker(value, fake).run({
+        request: unrelated, permit: permit(unrelated, selectedEvidence), capacityEvidence: selectedEvidence,
+      })).toMatchObject({ state: 'withheld', reason: 'recovery-required' });
+      expect(fake.inspectEngine).not.toHaveBeenCalled();
+      expect(fake.createContainer).not.toHaveBeenCalled();
+    },
+  );
+
+  it('continues to block the same nonce while its lifecycle is active', async () => {
+    const value = fixture();
+    const selectedRequest = request({ requestNonce: raw('same-active-nonce') });
+    const selectedEvidence = evidence();
+    beginActiveJournal(value, selectedRequest, selectedEvidence, 'lease-held');
+    const fake = engine(selectedRequest);
+
+    expect(await broker(value, fake).run({
+      request: selectedRequest, permit: permit(selectedRequest, selectedEvidence),
+      capacityEvidence: selectedEvidence,
+    })).toMatchObject({ state: 'withheld', reason: 'recovery-required' });
+    expect(fake.inspectEngine).not.toHaveBeenCalled();
+    expect(fake.createContainer).not.toHaveBeenCalled();
+  });
+
+  it.each(['removed', 'finalized'] as const)(
+    'admits an unrelated nonce past an expired removal-confirmed %s record',
+    async (targetStage) => {
+      const value = fixture();
+      const priorRequest = request({ requestNonce: raw(`removed-${targetStage}-nonce`) });
+      const selectedEvidence = evidence();
+      beginActiveJournal(
+        value, priorRequest, selectedEvidence, targetStage, new Date(NOW - 1).toISOString(),
+      );
+      const unrelated = request({ requestNonce: raw(`after-${targetStage}-nonce`) });
+      const fake = engine(unrelated);
+
+      expect(await broker(value, fake).run({
+        request: unrelated, permit: permit(unrelated, selectedEvidence), capacityEvidence: selectedEvidence,
+      })).toMatchObject({ state: 'completed', reason: 'succeeded' });
+      expect(fake.createContainer).toHaveBeenCalledOnce();
+      expect(fake.startContainer).toHaveBeenCalledOnce();
+    },
+  );
 
   it('kills and removes a running journaled container during cleanup-only recovery', async () => {
     const value = fixture();

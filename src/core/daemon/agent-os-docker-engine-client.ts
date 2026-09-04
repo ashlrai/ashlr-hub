@@ -548,7 +548,7 @@ export class AgentOsDockerEngineClientV1 {
     if (!response.ok) return { ...response, disposition: ['disabled', 'invalid-input', 'unsafe-socket']
       .includes(response.reason) ? 'definite-no-effect' : 'ambiguous' };
     if (response.value.statusCode !== 201) {
-      const definite = [400, 404, 409, 422].includes(response.value.statusCode);
+      const definite = [404, 409].includes(response.value.statusCode);
       return { ok: false, reason: response.value.statusCode === 409
         ? 'container-conflict' : 'response-invalid', disposition: definite
           ? 'definite-no-effect' : 'ambiguous' };

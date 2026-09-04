@@ -177,6 +177,69 @@ describe('M567 local-container broker journal', () => {
     expect(value.journal.releaseLifecycleLock(first.lock)).toBe(true);
   });
 
+  it('reserves two maximal ten-record lifecycles before either advances and compacts for the next run', () => {
+    const value = fixture(true, 20);
+    const acquired = value.journal.acquireLifecycleLock();
+    if (acquired.state !== 'acquired') throw new Error('fixture lock failed');
+    const selected = ['first', 'second'].map((label) => state({
+      runId: raw(`max-run-${label}`),
+      requestNonceDigest: raw(`max-nonce-${label}`),
+      containerName: `ashlr-agent-os-${raw(`max-name-${label}`).slice(0, 32)}`,
+    }));
+    const begun = selected.map((entry) => value.journal.begin(entry, acquired.lock));
+    expect(begun.every((entry) => entry.ok)).toBe(true);
+
+    for (const [index, entry] of selected.entries()) {
+      const initial = begun[index];
+      if (!initial?.ok) throw new Error('maximal lifecycle begin failed');
+      let current = initial.record;
+      const advance = (
+        stage: Parameters<typeof value.journal.advance>[2],
+        updates: Parameters<typeof value.journal.advance>[3] = {},
+      ): void => {
+        value.now.value += 1;
+        const next = value.journal.advance(entry.runId, current.recordDigest, stage, updates, acquired.lock);
+        expect(next.ok).toBe(true);
+        if (!next.ok) throw new Error(next.reason);
+        current = next.record;
+      };
+      advance('create-ambiguous');
+      advance('created', {
+        containerId: raw(`max-container-${index}`),
+        engineCreateRequestDigest: raw(`max-create-${index}`),
+      });
+      advance('prepared', {
+        prestartInspectionDigest: raw(`max-prestart-${index}`),
+        prepareAttestationDigest: raw(`max-prepare-${index}`),
+      });
+      advance('started');
+      advance('stopped', { finalInspectionDigest: raw(`max-final-inspection-${index}`) });
+      advance('cleanup-pending');
+      advance('removed', { removalEvidenceDigest: raw(`max-removal-${index}`) });
+      advance('finalized', { finalAttestationDigest: raw(`max-finalize-${index}`) });
+      advance('settled', { outcome: 'succeeded', leaseEpoch: 2 });
+      expect(current).toMatchObject({ sequence: 10, stage: 'settled' });
+    }
+    expect(value.journal.inspect()).toMatchObject({
+      complete: true, recordCount: 20, terminalRunCount: 2, activeRuns: [],
+    });
+
+    const third = state({
+      runId: raw('max-run-third'), requestNonceDigest: raw('max-nonce-third'),
+      containerName: `ashlr-agent-os-${raw('max-name-third').slice(0, 32)}`,
+    });
+    expect(value.journal.begin(third, acquired.lock)).toMatchObject({
+      ok: true, record: { sequence: 1, stage: 'lease-held' },
+    });
+    expect(value.journal.inspect()).toMatchObject({
+      complete: true, recordCount: 3, terminalRunCount: 2,
+      activeRuns: [{ runId: third.runId, stage: 'lease-held' }],
+    });
+    expect(readdirSync(join(value.root, 'records')).filter((file) => file.endsWith('.summary.json')))
+      .toHaveLength(2);
+    expect(value.journal.releaseLifecycleLock(acquired.lock)).toBe(true);
+  });
+
   it('rejects proxy and accessor inputs without executing their traps', () => {
     const value = fixture();
     const acquired = value.journal.acquireLifecycleLock();
@@ -262,7 +325,7 @@ describe('M567 local-container broker journal', () => {
     advance('removed', { removalEvidenceDigest: raw('near-cap-removal') });
     advance('finalized', { finalAttestationDigest: raw('near-cap-finalize') });
     advance('settled', { outcome: 'succeeded', leaseEpoch: 2 });
-    expect(value.journal.inspect()).toMatchObject({ complete: true, recordCount: 16, terminalRunCount: 6 });
+    expect(value.journal.inspect()).toMatchObject({ complete: true, recordCount: 14, terminalRunCount: 6 });
 
     const before = new Map(readdirSync(join(value.root, 'records')).map((file) =>
       [file, readFileSync(join(value.root, 'records', file))]));

@@ -27,7 +27,7 @@ export const AGENT_OS_LOCAL_CONTAINER_BROKER_JOURNAL_V1 =
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const MAX_RECORDS = 4_096;
 const MIN_RECORDS = 16;
-const MAX_RECORDS_PER_LIFECYCLE = 8;
+const MAX_RECORDS_PER_LIFECYCLE = 10;
 const MAX_RECORD_BYTES = 16 * 1024;
 // One-record overage is reserved for publishing a durable summary before the
 // old terminal chain is pruned.

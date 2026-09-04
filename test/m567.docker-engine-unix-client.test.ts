@@ -333,6 +333,13 @@ describe('M567 constrained Docker Engine Unix client', () => {
     expect(await engine.createContainer(name, policy(), SECCOMP)).toEqual({
       ok: false, reason: 'container-conflict', disposition: 'definite-no-effect',
     });
+    for (const statusCode of [400, 422]) {
+      value.createStatus = statusCode;
+      value.createPayload = { message: 'daemon rejected request after receipt' };
+      expect(await engine.createContainer(name, policy(), SECCOMP)).toEqual({
+        ok: false, reason: 'response-invalid', disposition: 'ambiguous',
+      });
+    }
     value.createStatus = 500;
     value.createPayload = { message: 'unknown server failure' };
     expect(await engine.createContainer(name, policy(), SECCOMP)).toEqual({

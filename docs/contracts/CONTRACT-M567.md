@@ -106,7 +106,7 @@ immutable private-record, exact-mode, stable-read, atomic rename/fsync, and loca
 lock primitives. Symlinks, hardlinks, unsafe modes, unexpected entries,
 replacement, malformed transitions, digest-chain corruption, and ambiguous
 durability fail closed. Public inspection is values-free and explicitly reports
-no same-user tamper resistance. Admission reserves the worst-case eight-record
+no same-user tamper resistance. Admission reserves the worst-case ten-record
 lifecycle before `lease-held`. Near the bound, complete terminal chains are
 replaced by a durable one-record summary anchored to the terminal record digest;
 only after that publication are exact old records pruned, making interrupted

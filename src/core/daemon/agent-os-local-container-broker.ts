@@ -498,9 +498,7 @@ export class AgentOsLocalContainerBrokerV1 {
     try {
       if (ports.journal.recoverStore(locked.lock)) {
         const active = ports.journal.readActive(locked.lock);
-        const activeNow = this.#clock().getTime();
         const recoveryBlocksAdmission = active?.some((entry) => entry.runId === runId ||
-          Date.parse(entry.leaseExpiresAt) <= activeNow ||
           (entry.containerId !== null && !['removed', 'finalized'].includes(entry.stage)));
         if (recoveryBlocksAdmission) {
           finalResult = result('withheld', 'recovery-required', {
