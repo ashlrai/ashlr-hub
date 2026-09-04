@@ -483,8 +483,12 @@ export function handleRunEventsSse(
   let lastGrowthAt = Date.now();
   let stallLastEmitAt: number | null = null;
   let ended = false;
+  // Assigned only after the initial replay because finish() must also be safe
+  // during that replay, before either handle exists.
+  // eslint-disable-next-line prefer-const
   let intervalId: ReturnType<typeof setInterval> | undefined;
   let expiryTimer: ReturnType<typeof setTimeout> | undefined;
+  // eslint-disable-next-line prefer-const
   let sseId: string | undefined;
 
   const finish = (): void => {
