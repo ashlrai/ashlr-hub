@@ -29,8 +29,16 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..');
 const testDir = join(repoRoot, 'test');
 
-const realIoSet = new Set(REAL_IO_TEST_FILES);
-const knownFastSpawnSet = new Set(KNOWN_FAST_SPAWN_FILES);
+// All classifier identities are repository-relative POSIX paths, independent
+// of the runner's native separator. Without this normalization Windows emits
+// paths such as `test/setup\\home.test.ts`, which cannot match the canonical
+// lane and measured-fast manifests and creates contradictory classifications.
+function canonicalTestPath(value) {
+  return value.replaceAll('\\', '/');
+}
+
+const realIoSet = new Set(REAL_IO_TEST_FILES.map(canonicalTestPath));
+const knownFastSpawnSet = new Set(KNOWN_FAST_SPAWN_FILES.map(canonicalTestPath));
 
 // Real subprocess spawn: execFileSync/execSync/spawnSync/spawn/execFile.
 const SPAWN_MARKER = /\b(?:execFileSync|execSync|spawnSync|execFile|spawn)\s*\(/;
@@ -67,7 +75,7 @@ function findTestFiles(dir) {
 }
 
 function relPath(absPath) {
-  return `test/${absPath.slice(testDir.length + 1)}`;
+  return canonicalTestPath(`test/${absPath.slice(testDir.length + 1)}`);
 }
 
 const files = findTestFiles(testDir);
