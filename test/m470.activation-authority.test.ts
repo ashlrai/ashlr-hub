@@ -554,6 +554,24 @@ describe('M470 activation authority — standing residentStanding grant (unatten
     // path never opens, reads, or unlinks it.
     expect(existsSync(permitPath)).toBe(true);
   });
+
+  it('preserves valid resident-standing authority when one-shot inspection is blocked', () => {
+    isolateHome();
+    daemonActivationInit({});
+    const cfg = config('independent-status-shapes');
+    daemonActivationMintStandingGrant({ scope: scope({ residentStanding: true }), ttlMs: 60_000 });
+
+    const oneShot = inspectDaemonActivationPermit(cfg, { once: true, dryRun: false });
+
+    expect(oneShot).toMatchObject({
+      requestedShape: 'proposal-once',
+      state: 'degraded',
+      commandEligible: false,
+      reason: 'activation-permit-inspection-failed',
+      residentStandingAuthorized: true,
+      residentAuthorized: false,
+    });
+  });
 });
 
 describe('M470 activation authority — daemonActivationMintOneShotPermit pre-flight', () => {

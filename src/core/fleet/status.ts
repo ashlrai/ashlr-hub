@@ -5037,6 +5037,15 @@ function dispatchYieldRecommendation(input: {
   return `Tighten context or reslice ${subject}; capture/gate blocking dominates the low-yield sample.`;
 }
 
+function proposalOnceActivationEligible(status: FleetStatus): boolean {
+  const activation = status.daemon.activation;
+  return activation?.requestedShape === 'proposal-once' && activation.commandEligible === true;
+}
+
+function residentStandingActivationAuthorized(status: FleetStatus): boolean {
+  return status.daemon.activation?.residentStandingAuthorized === true;
+}
+
 function buildAutonomyEffectiveness(status: FleetStatus): FleetAutonomyEffectivenessStatus {
   const readiness = status.autoMergeReadiness;
   const eligibleBacklogItems = status.queue.eligibleBacklogItems ?? status.queue.backlogItems;
@@ -5088,8 +5097,10 @@ function buildAutonomyEffectiveness(status: FleetStatus): FleetAutonomyEffective
     const reason = status.killed
       ? 'kill switch is engaged'
       : !status.daemon.running
-        ? status.daemon.activation?.commandEligible === true
+        ? proposalOnceActivationEligible(status)
           ? 'daemon is stopped with one exact proposal activation eligible'
+          : residentStandingActivationAuthorized(status)
+            ? 'daemon is stopped with valid resident-standing activation authority'
           : `daemon activation is blocked (${status.daemon.activation?.reason ?? 'activation-readiness-unavailable'})`
         : firstGuardBlock?.detail ?? 'guard is blocking';
     return {
@@ -5317,7 +5328,7 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
 
   if (!status.daemon.running) {
     const activation = status.daemon.activation;
-    if (activation?.commandEligible === true) {
+    if (proposalOnceActivationEligible(status)) {
       add({
         id: 'start-daemon',
         priority: 'critical',
@@ -5330,6 +5341,22 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
             ['ashlr', 'daemon', 'start', '--once'],
             'autonomous-dispatch',
             { note: 'Snapshot-only recommendation; daemon start owns final authority and consumption.' },
+          ),
+        ],
+      });
+    } else if (residentStandingActivationAuthorized(status)) {
+      add({
+        id: 'start-daemon',
+        priority: 'critical',
+        label: 'Start resident daemon',
+        detail:
+          'A valid resident-standing grant is present; daemon start will revalidate it before entering the resident loop.',
+        commands: [
+          nextActionCommand(
+            'Start resident daemon',
+            ['ashlr', 'daemon', 'start'],
+            'autonomous-dispatch',
+            { note: 'Snapshot-only recommendation; daemon start owns final authority and revalidation.' },
           ),
         ],
       });
@@ -6224,8 +6251,10 @@ function shipReadinessSources(
     ? `daemon state source is degraded (${status.daemon.sourceQuality?.reason ?? 'unavailable'})`
     : status.daemon.running
     ? `daemon running; last tick ${status.daemon.lastTickAt ?? 'unknown'}`
-    : status.daemon.activation?.commandEligible === true
+    : proposalOnceActivationEligible(status)
       ? 'daemon is stopped; one exact proposal activation is snapshot-eligible'
+      : residentStandingActivationAuthorized(status)
+        ? 'daemon is stopped; resident-standing activation is snapshot-authorized'
       : `daemon is stopped; activation blocked (${status.daemon.activation?.reason ?? 'activation-readiness-unavailable'})`;
   const daemonSource = readinessSource(
     'daemon',
@@ -6513,7 +6542,7 @@ function chooseReadinessBlocker(
     );
   }
   if (!status.daemon.running) {
-    if (status.daemon.activation?.commandEligible !== true) {
+    if (!proposalOnceActivationEligible(status) && !residentStandingActivationAuthorized(status)) {
       return readinessBlocker(
         'daemon-activation-blocked',
         'Daemon activation blocked',
@@ -6526,7 +6555,9 @@ function chooseReadinessBlocker(
     return readinessBlocker(
       'daemon-stopped',
       'Daemon stopped',
-      'The daemon is stopped; an exact one-shot proposal activation is eligible but must be revalidated at execution.',
+      proposalOnceActivationEligible(status)
+        ? 'The daemon is stopped; an exact one-shot proposal activation is eligible but must be revalidated at execution.'
+        : 'The daemon is stopped; resident-standing activation is authorized but must be revalidated at execution.',
       'critical',
       'daemon',
     );
@@ -6874,7 +6905,11 @@ function missionDirective(
   if (action?.id === 'inspect-guard-health-source') return 'Inspect guard health';
   if (status.killed) return 'Clear the kill switch';
   if (action?.id === 'inspect-daemon-activation') return 'Inspect daemon activation authority';
-  if (!status.daemon.running) return 'Start one proposal cycle';
+  if (!status.daemon.running) {
+    return residentStandingActivationAuthorized(status)
+      ? 'Start resident daemon'
+      : 'Start one proposal cycle';
+  }
   if (status.guardHealth?.blocked) return 'Repair the guard block';
 
   switch (action?.id) {

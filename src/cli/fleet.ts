@@ -133,13 +133,18 @@ export function formatFleetStatus(s: FleetStatus): string {
     lines.push(`  heartbeat:     ${s.daemon.lockHeartbeatAt}`);
   }
   if (s.daemon.activation) {
+    const proposalOnceEligible = s.daemon.activation.requestedShape === 'proposal-once'
+      && s.daemon.activation.commandEligible;
     lines.push(
-      `  activation:    ${s.daemon.activation.state} (${s.daemon.activation.reason}; ` +
+      `  activation:    proposal-once=${s.daemon.activation.state} ` +
+        `(${s.daemon.activation.reason}; ` +
         `${s.daemon.activation.authority})`,
     );
     lines.push(
-      `  start scope:   proposal-once=${s.daemon.activation.commandEligible ? 'eligible' : 'blocked'}, ` +
-        'resident=false, install=false, repair=false',
+      `  start scope:   proposal-once=${proposalOnceEligible ? 'eligible' : 'blocked'}, ` +
+        `resident-standing=${s.daemon.activation.residentStandingAuthorized ? 'authorized' : 'blocked'}, ` +
+        `install=${s.daemon.activation.installAuthorized ? 'authorized' : 'blocked'}, ` +
+        `repair=${s.daemon.activation.repairAuthorized ? 'authorized' : 'blocked'}`,
     );
   }
   lines.push(

@@ -2041,7 +2041,7 @@ function inspectWithAuthority(
         ? 'activation-permit-missing'
         : 'activation-permit-inspection-failed',
       trustRoots.length,
-      { requestedShape: shapeLabel, installAuthorized: standingAuth.install, repairAuthorized: standingAuth.repair },
+      { requestedShape: shapeLabel, ...standingAuthorizedFields },
     );
   }
   if (pinned) {
@@ -2052,7 +2052,7 @@ function inspectWithAuthority(
         'degraded',
         'activation-permit-close-failed',
         trustRoots.length,
-        { requestedShape: shapeLabel, installAuthorized: standingAuth.install, repairAuthorized: standingAuth.repair },
+        { requestedShape: shapeLabel, ...standingAuthorizedFields },
       );
     }
   }

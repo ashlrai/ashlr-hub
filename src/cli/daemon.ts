@@ -1209,7 +1209,29 @@ async function cmdDaemonServiceStatus(jsonMode: boolean): Promise<number> {
     return 1;
   }
 
-  const status = svcMod.serviceStatus({});
+  const daemonServiceInstallOptions = await importServiceConfig();
+  const loadConfig = await importConfig(true, true);
+  if (!daemonServiceInstallOptions || !loadConfig) {
+    console.error(
+      col.red('error: ')
+      + 'daemon service configuration is unavailable; configured service arguments cannot be verified.',
+    );
+    return 1;
+  }
+
+  let opts: ServiceInstallOptions;
+  try {
+    opts = daemonServiceInstallOptions(loadConfig());
+  } catch (error) {
+    console.error(
+      col.red('error: ')
+      + 'daemon service configuration is unreadable; configured service arguments cannot be verified: '
+      + (error instanceof Error ? error.message : String(error)),
+    );
+    return 1;
+  }
+
+  const status = svcMod.serviceStatus(opts);
   const activity = serviceActivity(status);
 
   if (jsonMode) {
