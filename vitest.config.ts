@@ -83,10 +83,10 @@ export default defineConfig({
     // single `vitest run`, not concurrently — accepted here because it also
     // means the real-io lane gets the machine to itself while it runs (no
     // contention from the unit lane's 4 workers), which is exactly the
-    // reliability property this split exists for. `npm run test:ci` sidesteps
-    // the ordering entirely: it always passes `--no-file-parallelism`, which
-    // normalizes every project's effective worker count to 1, so CI never hits
-    // the differing-`maxWorkers` constraint regardless of group order.
+    // reliability property this split exists for. The hermetic `test:ci`
+    // wrapper deliberately preserves these per-project worker caps. Callers
+    // that exercise a specifically measured native-authority subset may still
+    // request `--no-file-parallelism` explicitly.
     projects: [
       {
         extends: true,

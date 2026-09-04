@@ -84,6 +84,7 @@ jobs:
               test/m457.external-skill-artifact-firewall.test.ts
               test/m460.policy-assignment-receipts.test.ts
               test/m463.claimed-batch-admission.test.ts
+              test/m526.execution-identity-v1.test.ts
           - os: windows-latest
             label: windows, portability overflow
             test_args: >-

@@ -55,7 +55,6 @@ const hasExplicitReporter = extraArgs.some((arg) => arg === '--reporter' || arg.
 const args = [
   vitestBin,
   'run',
-  '--no-file-parallelism',
   ...(!hasExplicitReporter ? ['--reporter=default'] : []),
   `--reporter=${progressReporter}`,
   ...extraArgs,
