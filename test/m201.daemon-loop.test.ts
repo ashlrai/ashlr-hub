@@ -11109,7 +11109,10 @@ describe('M201 — Group H: M505 learning-sweep observability', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     try {
-      const result = await tick(cfgBuiltin({}), { dryRun: false });
+      const result = await tick(
+        { ...cfgBuiltin({}), foundry: { selfImprove: true } } as AshlrConfig,
+        { dryRun: false },
+      );
 
       expect(result.reason).toBe('no-backlog');
       expect(result.producerMaintenance).toMatchObject({
@@ -11134,7 +11137,10 @@ describe('M201 — Group H: M505 learning-sweep observability', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     try {
-      const result = await tick(cfgBuiltin({}), { dryRun: false });
+      const result = await tick(
+        { ...cfgBuiltin({}), foundry: { selfImprove: true } } as AshlrConfig,
+        { dryRun: false },
+      );
 
       expect(result.producerMaintenance).toMatchObject({
         rejectionLearningScanned: 0,

@@ -466,6 +466,14 @@ describe('m141 judge-trace — round-trip', () => {
 // ---------------------------------------------------------------------------
 
 describe('scrubSecrets (shared util) — comprehensive redaction', () => {
+  it('redacts URL passwords even when the valid userinfo username is empty', async () => {
+    const { scrubSecrets } = await import('../src/core/util/scrub.js');
+    const secret = 'SENSITIVEVALUE_0123456789';
+    const text = `https://:${secret}@example.com/path`;
+    expect(new URL(text).password).toBe(secret);
+    expect(scrubSecrets(text)).toBe('https://:[REDACTED]@example.com/path');
+  });
+
   it('scrubs sk- API keys', async () => {
     const { scrubSecrets } = await import('../src/core/util/scrub.js');
     expect(scrubSecrets('key=sk-abcdefghijklmnopqrstuvwxyz123456')).toContain('[REDACTED]');

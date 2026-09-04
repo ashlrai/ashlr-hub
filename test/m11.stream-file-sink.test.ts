@@ -171,6 +171,7 @@ describe('fileSink — scrubs secrets before they touch disk', () => {
       ['gl', 'pat-abcdefghijklmnop123456'].join(''),
       ['AI', 'zaSyD1234567890abcdefghijklmnopqrstuv'].join(''),
       'https://operator:supersecretpassword@example.com/path',
+      'https://:SENSITIVEVALUE_0123456789@example.com/path',
       'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmn0123456789+/',
       ['-----BE', 'GIN PRIVATE KEY-----\nprivatekeymaterial\n-----END PRIVATE KEY-----'].join(''),
     ];

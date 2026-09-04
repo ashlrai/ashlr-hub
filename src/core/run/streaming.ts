@@ -401,7 +401,7 @@ export function fileSink(runId: string): StreamSink {
         /\bAKIA[0-9A-Z]*/.test(text) ||
         /\beyJ[A-Za-z0-9_-]*\./.test(text) ||
         /\b(?:glpat-|hf_|npm_|AIza)/i.test(text) ||
-        /:\/\/[^:\s/@]+:/.test(text) ||
+        /:\/\/[^:\s/@]*:/.test(text) ||
         // Bound otherwise-unbounded URL userinfo candidates before their
         // credential-separating colon arrives. Ordinary hostnames stay live;
         // implausibly long authority tokens fail closed.
