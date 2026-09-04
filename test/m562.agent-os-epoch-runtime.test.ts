@@ -539,8 +539,9 @@ describe('M562 authenticated epoch observation runtime', () => {
     });
   });
 
-  it('recovers exact crash-left source, snapshot, and attempt stages before observing', () => {
-    for (const store of ['sources', 'snapshots', 'attempts'] as const) {
+  it.each(['sources', 'snapshots', 'attempts'] as const)(
+    'recovers the exact crash-left %s stage before observing',
+    (store) => {
       const value = fixture();
       value.appendSourceRenewal();
       expect(runAgentOsEpochObservationV1({
@@ -570,8 +571,9 @@ describe('M562 authenticated epoch observation runtime', () => {
       }, value.dependencies)).toMatchObject({ disposition: 'completed', reason: 'succeeded' });
       expect(observed).toBe(true);
       expect(readdirSync(join(epochPath, store, 'staging'))).toEqual([]);
-    }
-  }, 20_000);
+    },
+    20_000,
+  );
 
   it('never calls observe when guarded stage recovery encounters hostile evidence', () => {
     const value = fixture();
