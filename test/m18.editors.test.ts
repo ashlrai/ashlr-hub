@@ -11,6 +11,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { EventEmitter } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
+import { parse as parseYaml } from 'yaml';
 
 import {
   ASHLR_HUB_MCP_SERVER,
@@ -155,6 +156,29 @@ afterEach(() => {
     fs.rmSync(root, { recursive: true, force: true });
   }
   tempRoots.length = 0;
+});
+
+describe('hosted portability coverage', () => {
+  it('keeps the editor lifecycle contract in a Windows CI lane', () => {
+    const workflow = parseYaml(
+      fs.readFileSync(path.join(process.cwd(), '.github', 'workflows', 'ci.yml'), 'utf8'),
+    ) as {
+      jobs?: {
+        ci?: {
+          strategy?: {
+            matrix?: {
+              include?: Array<{ os?: string; test_args?: string }>;
+            };
+          };
+        };
+      };
+    };
+    const jobs = workflow.jobs?.ci?.strategy?.matrix?.include ?? [];
+    expect(jobs.some(job =>
+      job.os === 'windows-latest' &&
+      job.test_args?.split(/\s+/).includes('test/m18.editors.test.ts'),
+    )).toBe(true);
+  });
 });
 
 describe('detectEditors', () => {
