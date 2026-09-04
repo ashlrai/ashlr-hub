@@ -311,7 +311,7 @@ const KNOWN_FOUNDRY_KEYS: ReadonlySet<string> = new Set([
   'bestOfNCandidates', 'bestOfNMinItemScore', 'blastRadius', 'browserVerify',
   'cascade', 'claude5', 'claudeResource', 'completenessGate', 'confinement',
   'counterfactual', 'counterfactualSampleCap', 'diffSafety', 'dispatchRetries',
-  'edvUnverifiedWeight', 'edvVerify', 'engineFallbackOrder', 'engines',
+  'edvUnverifiedWeight', 'edvVerify', 'engineFallbackOrder', 'engines', 'executionIdentityV1',
   'eventBus', 'fabric', 'feedbackEnabled', 'fleetMcp', 'generative',
   'goalFocusActiveThreshold', 'goalFocusMode', 'goalPlanning', 'grok', 'intelligence', 'inventPerCycle',
   'judgeAllowedBackends', 'judgePerPass', 'killSwitch', 'kimi',

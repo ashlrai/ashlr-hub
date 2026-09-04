@@ -292,6 +292,10 @@ import {
   scheduleCutoffCheckpointCapture,
   type ScheduledCutoffCapture,
 } from './cutoff-checkpoint-scheduler.js';
+import {
+  scheduleAgentOsObserverV1,
+  type ScheduledAgentOsObserverV1,
+} from './agent-os-observer-scheduler.js';
 import { writePrivateFileAtomically } from '../util/private-file-write.js';
 import { readStableRegularFile } from '../util/stable-file-read.js';
 import { fsyncDirectory } from '../util/durability.js';
@@ -1035,6 +1039,17 @@ const DEFAULTS: DaemonConfig = {
 };
 const KILL_SWITCH_POLL_MS = 50;
 const pendingDaemonTickEffects = new WeakMap<DaemonTick, Set<Promise<void>>>();
+const durableAgentOsObserverTicks = new WeakSet<object>();
+
+function markDurableAgentOsObserverTick(tickResult: DaemonTick): void {
+  if (tickResult.reason === 'ok' && tickResult.dryRun !== true) {
+    durableAgentOsObserverTicks.add(tickResult);
+  }
+}
+
+function isDurableAgentOsObserverTick(tickResult: DaemonTick): boolean {
+  return durableAgentOsObserverTicks.has(tickResult);
+}
 
 /** Register detached work that must settle before this tick can be called quiescent. */
 export function trackDaemonTickEffect(
@@ -1109,6 +1124,20 @@ export function scheduleCutoffCheckpointAfterTick(
   if (opts.dryRun || opts.once || tickResult.reason === 'state-persistence-failed' ||
     !tickResult.backlogSnapshotAt || !tickResult.backlogSnapshotId || killSwitchOn()) return null;
   return schedule();
+}
+
+/** Schedule the default-off Agent OS observer only after a durable resident tick. */
+export function scheduleAgentOsObserverAfterTick(
+  tickResult: DaemonTick,
+  cfg: AshlrConfig,
+  opts: Pick<DaemonRunOptions, 'dryRun' | 'once'>,
+  schedule: typeof scheduleAgentOsObserverV1 = scheduleAgentOsObserverV1,
+  killIsOn: typeof killSwitchOn = killSwitchOn,
+  durableTick: (tick: DaemonTick) => boolean = isDurableAgentOsObserverTick,
+): ScheduledAgentOsObserverV1 | null {
+  if (opts.dryRun || opts.once || tickResult.reason !== 'ok' || killIsOn()) return null;
+  if (!durableTick(tickResult)) return null;
+  return schedule({ tick: tickResult, config: cfg });
 }
 
 interface ResolvedContextRollupConfig {
@@ -3621,6 +3650,7 @@ export async function tick(
         recordTickAgentAction(failedTick);
         return failedTick;
       }
+      markDurableAgentOsObserverTick(tick);
     } catch (err) {
       console.warn('[ashlr] daemon:recordTick persistence failed:', (err as Error)?.message ?? err);
       const failedTick = nonResidentPersistenceFailureTick(tick);
@@ -7820,6 +7850,7 @@ export async function tick(
     state = rolledState;
   }
 
+  markDurableAgentOsObserverTick(tickRecord);
   recordTickAgentAction(tickRecord, machineId);
 
   // M89/M91: best-effort fleet→pulse telemetry export. Runs OUTSIDE the proposal
@@ -8182,6 +8213,7 @@ export async function runDaemon(
   refreshActivity();
   let scheduledResolutionObserver: ScheduledResolutionObserverChild | null = null;
   let scheduledCutoffCapture: ScheduledCutoffCapture | null = null;
+  let scheduledAgentOsObserver: ScheduledAgentOsObserverV1 | null = null;
   let forcedShutdownTimer: ReturnType<typeof setTimeout> | null = null;
   const transitionToStopping = (): void => {
     if (ownershipLost) return;
@@ -8192,6 +8224,7 @@ export async function runDaemon(
     if (!shutdown.signal.aborted) shutdown.abort();
     scheduledResolutionObserver?.cancel();
     scheduledCutoffCapture?.cancel();
+    scheduledAgentOsObserver?.cancel();
     if (forcedShutdownTimer === null) {
       const finalSignal = signal ?? 'SIGTERM';
       forcedShutdownTimer = setTimeout(() => {
@@ -8210,6 +8243,7 @@ export async function runDaemon(
     if (!shutdown.signal.aborted) shutdown.abort();
     scheduledResolutionObserver?.cancel();
     scheduledCutoffCapture?.cancel();
+    scheduledAgentOsObserver?.cancel();
   };
   const ownsDaemonLock = (): boolean => {
     if (ownershipLost) return false;
@@ -8428,6 +8462,12 @@ export async function runDaemon(
         const afterTickCfg = reloadLiveConfigForDaemon(liveCfg);
         scheduledResolutionObserver = scheduleResolutionObserverAfterTick(tickResult, opts);
         scheduledCutoffCapture = scheduleCutoffCheckpointAfterTick(tickResult, opts);
+        const agentOsObserverSchedule = scheduleAgentOsObserverAfterTick(tickResult, afterTickCfg, opts);
+        // An overlap handle intentionally cannot cancel the active owner. Keep
+        // the original scheduled handle for shutdown cancellation/await.
+        if (agentOsObserverSchedule?.disposition === 'scheduled') {
+          scheduledAgentOsObserver = agentOsObserverSchedule;
+        }
         const postTickChildren: Promise<unknown>[] = [];
         if (scheduledResolutionObserver?.disposition === 'scheduled' ||
           scheduledResolutionObserver?.disposition === 'overlap-suppressed') {
@@ -8436,6 +8476,10 @@ export async function runDaemon(
         if (scheduledCutoffCapture?.disposition === 'scheduled' ||
           scheduledCutoffCapture?.disposition === 'overlap-suppressed') {
           postTickChildren.push(scheduledCutoffCapture.completion);
+        }
+        if (agentOsObserverSchedule?.disposition === 'scheduled' ||
+          agentOsObserverSchedule?.disposition === 'overlap-suppressed') {
+          postTickChildren.push(agentOsObserverSchedule.completion);
         }
         if (postTickChildren.length > 0) {
           const postTickEpoch = transitionActivity('post-tick', postTickChildren.length);
@@ -8486,7 +8530,11 @@ export async function runDaemon(
   }
   transitionToStopping();
   clearInterval(killSwitchPoll);
-  await cancelDaemonPostTickChildren(scheduledResolutionObserver, scheduledCutoffCapture);
+  await cancelDaemonPostTickChildren(
+    scheduledResolutionObserver,
+    scheduledCutoffCapture,
+    scheduledAgentOsObserver,
+  );
   if (forcedShutdownTimer !== null) clearTimeout(forcedShutdownTimer);
   process.removeListener('SIGINT', requestSigint);
   process.removeListener('SIGTERM', requestSigterm);
@@ -8547,12 +8595,15 @@ export async function cancelResolutionObserverBeforeShutdown(
 export async function cancelDaemonPostTickChildren(
   observer: ScheduledResolutionObserverChild | null,
   cutoff: ScheduledCutoffCapture | null,
+  agentOsObserver: ScheduledAgentOsObserverV1 | null = null,
 ): Promise<void> {
   observer?.cancel();
   cutoff?.cancel();
+  agentOsObserver?.cancel();
   await Promise.allSettled([
     ...(observer ? [observer.completion] : []),
     ...(cutoff ? [cutoff.completion] : []),
+    ...(agentOsObserver ? [agentOsObserver.completion] : []),
   ]);
 }
 
