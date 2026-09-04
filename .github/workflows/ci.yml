@@ -217,6 +217,67 @@ jobs:
           node -e "import('@ashlr/hub/types').then(() => console.log('exports map ok'))"
           node -e "import('@ashlr/hub/core').then((m) => { if (typeof m.loadConfig !== 'function') throw new Error('core surface broken'); console.log('core surface ok'); })"
 
+  native-macos-broker-foundation:
+    name: Native macOS broker foundation (Rust 1.97.1)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up pinned Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: "1.97.1"
+          components: rustfmt, clippy
+
+      - name: Create disposable Tauri sidecar fixture
+        shell: bash
+        run: |
+          HOST_TRIPLE=$(rustc -vV | sed -n 's/^host: //p')
+          SIDECAR="desktop/src-tauri/binaries/ashlr-${HOST_TRIPLE}"
+          if [[ -e "$SIDECAR" || -L "$SIDECAR" ]]; then
+            echo "refusing unexpected sidecar fixture target: $SIDECAR" >&2
+            exit 1
+          fi
+          trap 'rm -f -- "$SIDECAR"' ERR INT TERM
+          (set -o noclobber; umask 077; : > "$SIDECAR")
+          chmod 700 "$SIDECAR"
+          echo "ASHLR_TEST_SIDECAR=$SIDECAR" >> "$GITHUB_ENV"
+          echo "ASHLR_TEST_SIDECAR_CREATED=1" >> "$GITHUB_ENV"
+          trap - ERR INT TERM
+
+      - name: Check native broker formatting
+        run: >-
+          rustfmt --edition 2021 --check
+          desktop/src-tauri/src/lib.rs
+          desktop/src-tauri/src/native_launchd_broker.rs
+
+      - name: Check native broker library
+        run: >-
+          cargo check --manifest-path desktop/src-tauri/Cargo.toml
+          --lib --locked
+
+      - name: Lint native broker library
+        run: >-
+          cargo clippy --manifest-path desktop/src-tauri/Cargo.toml
+          --lib --locked -- -D warnings
+
+      - name: Test native broker library
+        run: >-
+          cargo test --manifest-path desktop/src-tauri/Cargo.toml
+          --lib --locked native_launchd_broker -- --nocapture
+
+      - name: Remove disposable Tauri sidecar fixture
+        if: always()
+        shell: bash
+        run: |
+          if [[ "${ASHLR_TEST_SIDECAR_CREATED:-}" == "1" ]]; then
+            rm -f -- "$ASHLR_TEST_SIDECAR"
+            test ! -e "$ASHLR_TEST_SIDECAR"
+          fi
+
   windows-service-authority:
     name: Windows service authority (Server 2022)
     runs-on: windows-2022
