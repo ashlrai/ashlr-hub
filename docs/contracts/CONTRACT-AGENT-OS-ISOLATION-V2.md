@@ -13,8 +13,11 @@ broker. The two source modules are deliberately pure:
 
 ## Canonical Docker policy
 
-The policy requires an immutable `repository@sha256:<digest>` image and an
-absolute, non-shell entrypoint. It hard-codes all of the following:
+The policy requires an immutable `repository@sha256:<digest>` image. It embeds
+a sorted caller-approved digest allowlist and selects one native producer at the
+single fixed `/opt/ashlr/bin/agent-os-observation-producer --stdio` entrypoint.
+Arbitrary commands and interpreters are not representable. It hard-codes all of
+the following:
 
 - an empty environment rather than inherited host variables;
 - no mounts, published ports, or devices;
@@ -23,7 +26,8 @@ absolute, non-shell entrypoint. It hard-codes all of the following:
 - a read-only root filesystem and `no-new-privileges`;
 - a caller-pinned seccomp-profile digest;
 - no restart and no container logging;
-- mandatory CPU, memory, swap, PID, wall-clock, and output limits.
+- mandatory CPU, memory, swap, wall-clock, and output limits, with an exact
+  one-process PID ceiling.
 
 The policy digest is domain-separated canonical JSON. A future broker adapter
 must translate every field to the Docker Engine create request and fail closed
@@ -49,16 +53,33 @@ future broker starts and observes the container
 signed FINALIZE attestation
   exact PREPARE digest and all original bindings
   request / response / final-inspect / exit / removal evidence digests
-  exit code, OOM/timeout facts, finish/removal times
+  output byte count, truncation, and limit-exceeded facts
+  exit code, OOM/timeout facts, deadline-kill evidence and timing
+  bounded cleanup start/removal timing
   confirmed removal and post-removal absence
 ```
 
-Prepare and finalize signatures use distinct domain-separated payloads. Each
+The verifier first takes one recursively owned immutable snapshot of every data
+argument. Proxy-backed inputs, accessors, cycles, and non-plain data graphs are
+rejected before signature validation. Prepare and finalize signatures use
+distinct domain-separated payloads. Each
 attestation has its own domain-separated digest, a canonical 64-byte Ed25519
 signature, a bounded validity window, and exact-key validation. Verification
 rejects substituted nonces, container IDs, implementation digests, limits,
 post-run evidence, signatures, prepare links, expired records, impossible
-chronology, extra properties, accessors, and mutating verifier callbacks.
+deadline/kill/cleanup chronology, extra properties, accessors, and mutating
+verifier callbacks. Image, seccomp, native producer, resource limits, and the
+create-config digest must all agree with one admitted canonical policy snapshot.
+
+## Replay consumption is a later stateful gate
+
+This pure verifier is mismatch-resistant, not replay-proof. A request nonce is
+cryptographically bound and caller-pinned, so an attestation for request A
+cannot satisfy request B. The verifier does not durably consume that nonce.
+Every inspection reports `replayConsumptionRequired: true` and
+`replayConsumptionVerified: false`. A later broker/runtime slice must place a
+durable atomic consume-once ledger in front of admission and recovery-test it
+before any production activation claim.
 
 ## Authority boundary
 
