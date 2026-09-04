@@ -16,7 +16,7 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 - Carries forward the reviewed fail-closed runtime and operator-console closure
   prepared for 3.3.1, plus the deterministic trajectory-fixture clock repair
   merged at protected revision
-  `abd49a5049759e417d99089b88c628fd2364f79c`. That exact protected revision is
+  `d6c1a5ec3626f715018a8ffb929906ac0f52f5c9`. That exact protected revision is
   the required first-parent rollback for the 3.3.2 release merge.
 - Preserves the failed lightweight `v3.3.1` tag at
   `f2c9353db35fbf12889bddafd8acc2b7ca5ae67c` and its failed release workflow

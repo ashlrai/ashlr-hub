@@ -9,7 +9,7 @@
 > procedure remains historical evidence and must not be executed. This
 > failed `v3.3.1` attempt remains immutable and unpublished. This protected
 > release-only change prepares 3.3.2 from exact rollback revision
-> `abd49a5049759e417d99089b88c628fd2364f79c`; 3.3.2 is the sole successor lane.
+> `d6c1a5ec3626f715018a8ffb929906ac0f52f5c9`; 3.3.2 is the sole successor lane.
 
 The controlled successor lane is tag-triggered and fully gated. It publishes only under
 npm dist-tag `candidate` and creates a GitHub prerelease; it cannot move npm
@@ -86,7 +86,7 @@ be absent. The failed lightweight `v3.3.1` tag must remain at
 GitHub Release must remain absent. Never rerun that workflow, move or delete
 the tag, publish or reuse version 3.3.1, or create a GitHub Release for it.
 The tagged 3.3.2 merge commit's first parent must be the exact protected safe
-rollback revision `abd49a5049759e417d99089b88c628fd2364f79c`.
+rollback revision `d6c1a5ec3626f715018a8ffb929906ac0f52f5c9`.
 It fails closed if any precondition changes. Before authorizing the tag, an
 authenticated npm maintainer must run the pinned npm 11 client and
 verify `npm trust list @ashlr/hub` exactly matches the repository, workflow,
@@ -114,7 +114,7 @@ tags fail closed.
    release tag (do not force, move, delete, or recreate it):
 
    ```bash
-   test "$(git rev-parse HEAD^1)" = "abd49a5049759e417d99089b88c628fd2364f79c"
+   test "$(git rev-parse HEAD^1)" = "d6c1a5ec3626f715018a8ffb929906ac0f52f5c9"
    git tag v3.3.2
    git push origin v3.3.2
    ```
@@ -381,7 +381,7 @@ attempt 1, completed with failure before npm publication or GitHub Release
 creation. Preserve that exact failed attempt and both absences. Never move,
 delete, recreate, rerun, publish, or reuse v3.3.1. Version 3.3.2 is the sole
 successor lane and uses protected revision
-`abd49a5049759e417d99089b88c628fd2364f79c` as its exact first-parent rollback.
+`d6c1a5ec3626f715018a8ffb929906ac0f52f5c9` as its exact first-parent rollback.
 
 If **publish succeeded and only `verify_publish` or the GitHub `release` job
 failed**, first verify that npm contains the intended tag artifact from a clean
