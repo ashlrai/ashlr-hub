@@ -3,6 +3,7 @@ import { lstatSync, type BigIntStats } from 'node:fs';
 import { request as httpRequest, type IncomingMessage } from 'node:http';
 import type { Socket } from 'node:net';
 import { dirname, isAbsolute, parse, resolve } from 'node:path';
+import { isProxy } from 'node:util/types';
 
 import {
   AGENT_OS_LOCAL_CONTAINER_NATIVE_PRODUCER_ENTRYPOINT_V1,
@@ -16,6 +17,8 @@ export const AGENT_OS_DOCKER_ENGINE_API_VERSION_V1 = '1.54' as const;
 export const AGENT_OS_DOCKER_ENGINE_MAX_JSON_BYTES_V1 = 1024 * 1024;
 export const AGENT_OS_DOCKER_ENGINE_MAX_SECCOMP_BYTES_V1 = 64 * 1024;
 export const AGENT_OS_DOCKER_ENGINE_MAX_STDERR_BYTES_V1 = 64 * 1024;
+export const AGENT_OS_DOCKER_ENGINE_MAX_REQUEST_FRAME_BYTES_V1 = 3 * 1024 * 1024;
+export const AGENT_OS_DOCKER_ENGINE_CONTROL_TIMEOUT_MS_V1 = 5_000;
 
 const CONTAINER_ID_RE = /^[a-f0-9]{64}$/u;
 const CONTAINER_NAME_RE = /^ashlr-agent-os-[a-f0-9]{32}$/u;
@@ -116,7 +119,7 @@ interface HttpResponse {
   body: Buffer;
 }
 
-interface ExpectedInspection {
+export interface AgentOsDockerExpectedInspectionV1 {
   containerId: string;
   containerName: string;
   policy: AgentOsLocalContainerCreatePolicyV1;
@@ -145,6 +148,16 @@ function plainRecord(value: unknown): Record<string, unknown> | null {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null ? value as Record<string, unknown> : null;
+}
+
+function ownValue(value: unknown, key: string): unknown {
+  if (value === null || typeof value !== 'object' || isProxy(value)) return undefined;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function parseJsonRecord(bytes: Buffer): Record<string, unknown> | null {
@@ -238,7 +251,7 @@ function seccompAdmitted(profile: Uint8Array, expectedDigest: string): boolean {
 
 function inspectEffectivePolicy(
   row: Record<string, unknown>,
-  expected: ExpectedInspection,
+  expected: AgentOsDockerExpectedInspectionV1,
 ): AgentOsDockerContainerInspectionV1 | null {
   const config = plainRecord(row['Config']);
   const host = plainRecord(row['HostConfig']);
@@ -348,15 +361,25 @@ export class AgentOsDockerEngineClientV1 {
   readonly #expectedUid: number;
 
   constructor(dependencies: AgentOsDockerEngineClientDependenciesV1) {
-    this.#anchorPath = dependencies.anchorPath;
-    this.#socketPath = dependencies.socketPath;
-    this.#enabled = dependencies.enabled === true;
-    this.#apiVersion = dependencies.apiVersion ?? AGENT_OS_DOCKER_ENGINE_API_VERSION_V1;
-    this.#requestTimeoutMs = Number.isSafeInteger(dependencies.requestTimeoutMs)
-      ? Math.max(1, Math.min(MAX_REQUEST_TIMEOUT_MS, dependencies.requestTimeoutMs!))
-      : 10_000;
-    this.#expectedUid = dependencies.expectedSocketOwnerUid ??
-      (typeof process.getuid === 'function' ? process.getuid() : -1);
+    const anchorPath = ownValue(dependencies, 'anchorPath');
+    const socketPath = ownValue(dependencies, 'socketPath');
+    const enabled = ownValue(dependencies, 'enabled');
+    const apiVersion = ownValue(dependencies, 'apiVersion');
+    const requestTimeoutMs = ownValue(dependencies, 'requestTimeoutMs');
+    const expectedSocketOwnerUid = ownValue(dependencies, 'expectedSocketOwnerUid');
+    this.#anchorPath = typeof anchorPath === 'string' ? anchorPath : '';
+    this.#socketPath = typeof socketPath === 'string' ? socketPath : '';
+    this.#enabled = enabled === true;
+    // A caller may restate the protocol version, but cannot widen or swap it.
+    this.#apiVersion = apiVersion === undefined || apiVersion === AGENT_OS_DOCKER_ENGINE_API_VERSION_V1
+      ? AGENT_OS_DOCKER_ENGINE_API_VERSION_V1
+      : '';
+    this.#requestTimeoutMs = Number.isSafeInteger(requestTimeoutMs)
+      ? Math.max(1, Math.min(AGENT_OS_DOCKER_ENGINE_CONTROL_TIMEOUT_MS_V1, requestTimeoutMs as number))
+      : AGENT_OS_DOCKER_ENGINE_CONTROL_TIMEOUT_MS_V1;
+    this.#expectedUid = expectedSocketOwnerUid === undefined
+      ? (typeof process.getuid === 'function' ? process.getuid() : -1)
+      : Number.isSafeInteger(expectedSocketOwnerUid) ? expectedSocketOwnerUid as number : -1;
   }
 
   #preflightSocket(): AgentOsDockerEngineResultV1<SocketIdentity> {
@@ -365,7 +388,8 @@ export class AgentOsDockerEngineClientV1 {
       if (process.platform === 'win32' || !isAbsolute(this.#anchorPath) ||
         !isAbsolute(this.#socketPath) || resolve(this.#anchorPath) !== this.#anchorPath ||
         resolve(this.#socketPath) !== this.#socketPath || this.#anchorPath === parse(this.#anchorPath).root ||
-        dirname(this.#socketPath) !== this.#anchorPath || !API_VERSION_RE.test(this.#apiVersion) ||
+        dirname(this.#socketPath) !== this.#anchorPath ||
+        this.#apiVersion !== AGENT_OS_DOCKER_ENGINE_API_VERSION_V1 ||
         !Number.isSafeInteger(this.#expectedUid) || this.#expectedUid < 0) {
         return { ok: false, reason: 'invalid-input' };
       }
@@ -520,7 +544,7 @@ export class AgentOsDockerEngineClientV1 {
     }) };
   }
 
-  async inspectContainer(expected: ExpectedInspection):
+  async inspectContainer(expected: AgentOsDockerExpectedInspectionV1):
   Promise<AgentOsDockerEngineResultV1<AgentOsDockerContainerInspectionV1>> {
     if (!CONTAINER_ID_RE.test(expected.containerId) || !CONTAINER_NAME_RE.test(expected.containerName) ||
       !seccompAdmitted(expected.seccompProfile, expected.policy.seccompProfileDigest)) {
@@ -539,6 +563,21 @@ export class AgentOsDockerEngineClientV1 {
       return { ok: false, reason: 'container-policy-mismatch' };
     }
     return { ok: true, value: inspection };
+  }
+
+  async resolveContainerIdByName(containerName: string): Promise<AgentOsDockerEngineResultV1<string>> {
+    if (!CONTAINER_NAME_RE.test(containerName)) return { ok: false, reason: 'invalid-input' };
+    const response = await this.#request(
+      'GET', `/v${this.#apiVersion}/containers/${encodeURIComponent(containerName)}/json`, null,
+    );
+    if (!response.ok) return response;
+    if (response.value.statusCode === 404) return { ok: false, reason: 'container-not-found' };
+    if (response.value.statusCode !== 200) return { ok: false, reason: 'response-invalid' };
+    const row = parseJsonRecord(response.value.body);
+    return row && typeof row['Id'] === 'string' && CONTAINER_ID_RE.test(row['Id']) &&
+      row['Name'] === `/${containerName}`
+      ? { ok: true, value: row['Id'] }
+      : { ok: false, reason: 'response-invalid' };
   }
 
   async startContainer(containerId: string): Promise<AgentOsDockerEngineResultV1<true>> {
@@ -734,7 +773,8 @@ export class AgentOsDockerEngineClientV1 {
     if (head.byteLength > 0) consume(head);
     return Object.freeze({
       writeAndClose: (input: Uint8Array): boolean => {
-        if (completed || !(input instanceof Uint8Array) || input.byteLength > AGENT_OS_DOCKER_ENGINE_MAX_JSON_BYTES_V1) {
+        if (completed || !(input instanceof Uint8Array) ||
+          input.byteLength > AGENT_OS_DOCKER_ENGINE_MAX_REQUEST_FRAME_BYTES_V1) {
           return false;
         }
         socket.end(Buffer.from(input));
@@ -761,4 +801,15 @@ export function agentOsDockerResponseFrameLimitV1(maxOutputBytes: number): numbe
 
 export function agentOsDockerOutputEvidenceDigestV1(value: Uint8Array): string {
   return bytesDigest('ashlr.agent-os.docker-output-evidence.v1', value);
+}
+
+export function agentOsDockerEngineCreateRequestDigestV1(
+  policy: AgentOsLocalContainerCreatePolicyV1,
+  seccompProfile: Uint8Array,
+): string | null {
+  const inspected = inspectAgentOsLocalContainerCreatePolicyV1(policy);
+  return inspected.policy && seccompAdmitted(seccompProfile, inspected.policy.seccompProfileDigest)
+    ? rawDigest('ashlr.agent-os.docker-create-request.v1',
+      createRequestBody(inspected.policy, seccompProfile))
+    : null;
 }

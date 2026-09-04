@@ -49,7 +49,7 @@ const MAX_BATCH_ITEMS = 32;
 const MAX_TRUSTED_SLOTS = 1_024;
 const MAX_ALLOCATION_ID_BYTES = 4_096;
 const MAX_AUTHENTICATOR_BYTES = 4_096;
-const MAX_LEASE_TTL_MS = 5 * 60_000;
+export const EXECUTION_CAPACITY_LEASE_MAX_TTL_MS_V1 = 5 * 60_000;
 const MIN_LEASE_TTL_MS = 1_000;
 const MAX_EVIDENCE_AGE_MS = 5 * 60_000;
 const MAX_FUTURE_SKEW_MS = 60_000;
@@ -765,7 +765,7 @@ function validateBatch(
     const rawItems = snapshotPlainArray(inputRow['items'], MAX_BATCH_ITEMS);
     if (typeof allocationId !== 'string' || allocationId.length < 1 ||
       Buffer.byteLength(allocationId, 'utf8') > MAX_ALLOCATION_ID_BYTES ||
-      !safeInteger(leaseTtlMs, MIN_LEASE_TTL_MS, MAX_LEASE_TTL_MS) ||
+      !safeInteger(leaseTtlMs, MIN_LEASE_TTL_MS, EXECUTION_CAPACITY_LEASE_MAX_TTL_MS_V1) ||
       !rawItems) {
       return { ok: false, reason: 'invalid-input' };
     }

@@ -673,6 +673,11 @@ export function verifyAgentOsObservationSandboxRequestV1(
   }
 }
 
+/** Exact newline-delimited JSON frame sent over the native producer's stdin. */
+export function canonicalAgentOsObservationSandboxRequestFrameBytesV1(value: unknown): Buffer | null {
+  return validRequest(value) ? Buffer.from(`${canonicalJson(value)}\n`, 'utf8') : null;
+}
+
 export type AgentOsObservationSandboxUnsignedResponseV1 = Omit<AgentOsObservationSandboxResponseV1,
 'authenticator' | 'frameKeyId' | 'responseDigest'>;
 

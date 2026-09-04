@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { chmodSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { chmodSync, linkSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -106,7 +106,8 @@ async function fixture(): Promise<Fixture> {
       json(response, 201, { Id: CONTAINER_ID, Warnings: [] });
       return;
     }
-    if (request.method === 'GET' && request.url === `${prefix}/containers/${CONTAINER_ID}/json`) {
+    if (request.method === 'GET' && request.url?.startsWith(`${prefix}/containers/`) &&
+      request.url.endsWith('/json')) {
       if (state.removed) { json(response, 404, { message: 'not found' }); return; }
       const created = state.createdBody;
       if (!created) { json(response, 404, { message: 'not found' }); return; }
@@ -203,6 +204,25 @@ describe('M567 constrained Docker Engine Unix client', () => {
     });
     expect(await unsafe.inspectEngine()).toEqual({ ok: false, reason: 'unsafe-socket' });
     expect(value.requests).toHaveLength(0);
+    const widenedApi = new AgentOsDockerEngineClientV1({
+      anchorPath: value.root, socketPath: value.socketPath, enabled: true, apiVersion: '1.55',
+    });
+    expect(await widenedApi.inspectEngine()).toEqual({ ok: false, reason: 'invalid-input' });
+    expect(value.requests).toHaveLength(0);
+    const hardlink = join(value.root, 'hardlink.sock');
+    linkSync(value.socketPath, hardlink);
+    expect(await client(value).inspectEngine()).toEqual({ ok: false, reason: 'unsafe-socket' });
+    expect(value.requests).toHaveLength(0);
+    let getterCalls = 0;
+    const hostile = {};
+    Object.defineProperty(hostile, 'enabled', {
+      enumerable: true,
+      get: () => { getterCalls += 1; return true; },
+    });
+    expect(await new AgentOsDockerEngineClientV1(
+      hostile as ConstructorParameters<typeof AgentOsDockerEngineClientV1>[0],
+    ).inspectEngine()).toEqual({ ok: false, reason: 'disabled' });
+    expect(getterCalls).toBe(0);
   });
 
   it('maps only the exact no-effect policy and verifies the effective pre-start state', async () => {
@@ -244,6 +264,7 @@ describe('M567 constrained Docker Engine Unix client', () => {
     const engine = client(value);
     const name = agentOsDockerContainerNameV1(Buffer.alloc(32, 0x41).toString('base64url'))!;
     expect(await engine.createContainer(name, policy(), SECCOMP)).toMatchObject({ ok: true });
+    expect(await engine.resolveContainerIdByName(name)).toEqual({ ok: true, value: CONTAINER_ID });
     expect(await engine.startContainer(CONTAINER_ID)).toEqual({ ok: true, value: true });
     expect(await engine.waitContainer(CONTAINER_ID, 1_000)).toMatchObject({
       ok: true, value: { statusCode: 0 },
