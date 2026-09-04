@@ -402,12 +402,11 @@ export function routeTask(
         : modelTagFrom(entry.id);
 
     // ── M240: Learned-bias score map ──────────────────────────────────────
-    // Build once per routeTask call. When cfg.foundry.learnedRouting === false
-    // (flag-off) we use an empty map so engineScoreFor always returns 0.5
+    // Build once per routeTask call. Only an explicit true enables learned
+    // steering; absent/false use an empty map so engineScoreFor always returns 0.5
     // (neutral) and every downstream sort is a no-op — byte-identical routing.
-    // Default (absent) = true (on).
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const learnedRoutingEnabled = (cfg.foundry as any)?.learnedRouting !== false;
+    // Default (absent) = false (off).
+    const learnedRoutingEnabled = cfg.foundry?.learnedRouting === true;
     const learnedScores: EngineScoreMap = learnedRoutingEnabled
       ? operationalEngineScoresForRouting(item.source)
       : new Map();

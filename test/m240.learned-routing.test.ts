@@ -341,6 +341,7 @@ describe('Operational Learning Firewall V1', () => {
   const admittedSample = (overrides: Record<string, unknown> = {}) => ({
     decisionAuthenticated: true,
     assignmentAuthenticated: true,
+    causalIdentifiable: true,
     policyEligible: true,
     denominatorComplete: true,
     preExposureVerified: true,
@@ -440,6 +441,25 @@ describe('Operational Learning Firewall V1', () => {
       'mixed-policy-cohort',
       'mixed-learning-epoch',
     ]));
+  });
+
+  it('keeps non-identifiable assignment evidence observational and inactive', () => {
+    const authority = evaluateRoutingLearningAuthority({
+      ...healthySources,
+      observedSamples: LEARNED_ROUTING_MIN_SAMPLES,
+      samples: Array.from({ length: LEARNED_ROUTING_MIN_SAMPLES }, (_, index) =>
+        admittedSample({
+          assignmentIdentity: `assignment-${index}`,
+          causalIdentifiable: false,
+        })),
+    });
+
+    expect(authority).toMatchObject({
+      state: 'inactive',
+      operationalSteering: false,
+      samples: { observed: LEARNED_ROUTING_MIN_SAMPLES, eligible: 0 },
+    });
+    expect(authority.blockerCodes).toContain('assignment-causal-identifiability-unavailable');
   });
 
   it('keeps unsigned negative decisions visible diagnostically but neutral operationally', () => {
@@ -628,7 +648,7 @@ describe('Operational Learning Firewall V1 — real causal join', () => {
 
   const now = Date.parse('2026-08-02T01:00:00.000Z');
 
-  it('closes the loop: N authenticated same-cohort samples admit operational steering and recommendRoute nudges away from a poor-history frontier engine', async () => {
+  it('keeps authenticated but explicitly non-identifiable receipts observational and neutral', () => {
     for (let index = 0; index < LEARNED_ROUTING_MIN_SAMPLES; index += 1) {
       mintReceipt(index);
       decideFor(index);
@@ -646,11 +666,11 @@ describe('Operational Learning Firewall V1 — real causal join', () => {
 
     const authority = inspectRoutingLearningAuthority(taskClass, now);
     expect(authority).toMatchObject({
-      state: 'eligible',
-      operationalSteering: true,
-      samples: { observed: LEARNED_ROUTING_MIN_SAMPLES, eligible: LEARNED_ROUTING_MIN_SAMPLES },
-      blockerCodes: [],
+      state: 'inactive',
+      operationalSteering: false,
+      samples: { observed: LEARNED_ROUTING_MIN_SAMPLES, eligible: 0 },
     });
+    expect(authority.blockerCodes).toContain('assignment-causal-identifiability-unavailable');
 
     // operationalEngineScoresForRouting() itself defaults to the real wall
     // clock (correct in production); buildOperationalEngineScores() accepts
@@ -658,37 +678,10 @@ describe('Operational Learning Firewall V1 — real causal join', () => {
     // so the 90-day buildEngineScores() window doesn't exclude synthetic
     // fixture timestamps decided against a fixed test clock.
     const projection = buildOperationalEngineScores(taskClass, now);
-    expect(projection.authority.operationalSteering).toBe(true);
-    expect(projection.operational.size).toBeGreaterThan(0);
-    expect(projection.operational.get('codex:gpt-5.5')?.score).toBeLessThan(0.5);
-
-    // recommendRoute's frontier-success-rate nudge is gated on
-    // routingLearningAuthority.operationalSteering — seed a poor frontier
-    // RunState history and confirm it now actually fires (it stays inert
-    // whenever operationalSteering is false; see "never lets degraded run
-    // history downgrade an operational route" above and the negative twins
-    // below).
-    for (let index = 0; index < 3; index += 1) {
-      saveRun({
-        id: `causal-join-poor-run-${index}`,
-        goal: 'issue investigation',
-        engine: 'claude',
-        provider: 'anthropic',
-        engineTier: 'frontier',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        budget: { maxTokens: 1_000, maxSteps: 10, allowCloud: true },
-        usage: { tokensIn: 1, tokensOut: 1, steps: 1, estCostUsd: 0.01 },
-        tasks: [],
-        steps: [],
-        status: 'failed',
-      } as RunState);
-    }
-    const item = makeItem(taskClass, 5, 5);
-    const cfg = makeCfg({ intelligence: { minFrontierSuccessRate: 0.9 } });
-    const routed = await recommendRoute(item, cfg);
-    expect(routed.tier).not.toBe('frontier');
-    expect(routed.reason).toContain('frontier success rate');
+    expect(projection.authority.operationalSteering).toBe(false);
+    expect(projection.observational.size).toBeGreaterThan(0);
+    expect(projection.observational.get('codex:gpt-5.5')?.score).toBeLessThan(0.5);
+    expect(projection.operational.size).toBe(0);
   });
 
   it('negative: below the per-stratum sample floor stays neutral', () => {
@@ -1079,6 +1072,17 @@ describe('sortEnginesByScore', () => {
 // ---------------------------------------------------------------------------
 
 describe('routeTask — flag-off parity', () => {
+  it('treats an absent learnedRouting flag exactly like explicit false', () => {
+    const item = makeItem('issue', 4, 5);
+    const ctx = makeCtx(['claude', 'codex']);
+    const absent = makeCfg({ routingPolicy: 'quality' });
+    delete absent.foundry?.learnedRouting;
+
+    expect(routeTask(item, absent, ctx)).toEqual(
+      routeTask(item, makeCfg({ learnedRouting: false, routingPolicy: 'quality' }), ctx),
+    );
+  });
+
   it('produces the same engine with learnedRouting:false even when history favors the other', () => {
     // Seed: codex has high reject rate for 'issue' → with learnedRouting:true, claude would be preferred
     writeDecisions([

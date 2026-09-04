@@ -95,6 +95,7 @@ describe('effective config snapshot', () => {
     expect(snapshot.daemon.contextRollup.minTerminalTrajectories.value).toBe(50);
     expect(snapshot.foundry.enabled.value).toBe(false);
     expect(snapshot.foundry.allowedBackends.value).toEqual(['builtin']);
+    expect(snapshot.autonomy.learnedRouting).toMatchObject({ value: false, source: 'default' });
     expect(snapshot.backends.map((b) => b.backend)).toEqual(['builtin']);
     expect(snapshot.warnings.join('\n')).toMatch(/cfg\.daemon is missing/);
     expect(snapshot.warnings.join('\n')).toMatch(/cfg\.foundry is missing/);

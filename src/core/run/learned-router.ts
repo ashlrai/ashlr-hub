@@ -925,6 +925,7 @@ export type RoutingLearningAuthorityBlocker =
   | 'assignment-source-missing'
   | 'assignment-source-degraded'
   | 'assignment-authenticity-unavailable'
+  | 'assignment-causal-identifiability-unavailable'
   | 'assignment-denominator-incomplete'
   | 'assignment-policy-ineligible'
   | 'assignment-pre-exposure-unverified'
@@ -940,6 +941,7 @@ export type RoutingLearningAuthorityBlocker =
 export interface RoutingLearningAuthoritySample {
   decisionAuthenticated: boolean;
   assignmentAuthenticated: boolean;
+  causalIdentifiable: boolean;
   policyEligible: boolean;
   denominatorComplete: boolean;
   preExposureVerified: boolean;
@@ -1033,6 +1035,7 @@ export function evaluateRoutingLearningAuthority(
   if (epochs.size > 1) blockers.add('mixed-learning-epoch');
 
   const eligible = input.samples.filter((sample) => {
+    if (!sample.causalIdentifiable) blockers.add('assignment-causal-identifiability-unavailable');
     if (!sample.policyEligible) blockers.add('assignment-policy-ineligible');
     if (!sample.preExposureVerified) blockers.add('assignment-pre-exposure-unverified');
     if (!sample.assignmentIdentity) blockers.add('assignment-identity-unavailable');
@@ -1042,7 +1045,7 @@ export function evaluateRoutingLearningAuthority(
     if (!sample.denominatorComplete) blockers.add('assignment-denominator-incomplete');
     if (sample.decisionPolicyVersion !== sample.policyVersion) blockers.add('policy-cohort-mismatch');
     if (sample.decisionLearningEpoch !== sample.learningEpoch) blockers.add('learning-epoch-mismatch');
-    return sample.decisionAuthenticated && sample.assignmentAuthenticated &&
+    return sample.decisionAuthenticated && sample.assignmentAuthenticated && sample.causalIdentifiable &&
       sample.policyEligible && sample.denominatorComplete && sample.preExposureVerified &&
       sample.assignmentIdentity !== null && sample.propensity !== null &&
       Number.isFinite(sample.propensity) && sample.propensity > 0 && sample.propensity <= 1 &&
@@ -1205,6 +1208,13 @@ export function inspectRoutingLearningAuthority(
         // reconstructWithKey) — an unauthenticated receipt is never present
         // in `assignments.receipts` at all, it is dropped as invalidFiles.
         assignmentAuthenticated: true,
+        // V1 receipts explicitly declare `not-identifiable`. Keep their
+        // outcomes available for observational diagnostics, but never let
+        // those correlations mutate routing. A future receipt version must
+        // provide authenticated, pre-exposure causal assignment evidence and
+        // expose the exact `identified` value before this gate can open.
+        causalIdentifiable:
+          (receipt as unknown as { causalIdentifiability?: unknown }).causalIdentifiability === 'identified',
         policyEligible: receipt.policyEligible,
         denominatorComplete: assignments.denominatorComplete,
         preExposureVerified: receipt.preExposureVerified,

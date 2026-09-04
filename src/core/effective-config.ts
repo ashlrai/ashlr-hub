@@ -430,7 +430,7 @@ export function buildEffectiveConfigSnapshot(
       controlMode: { value: resolveAutonomyControlMode(cfg), source: 'derived' },
       controlLoop: boolValue(raw, 'foundry.autonomyControlLoop', foundryEnabled ? cfg.foundry?.autonomyControlLoop !== false : false),
       routingPolicy: value(raw, 'foundry.routingPolicy', cfg.foundry?.routingPolicy ?? 'balanced'),
-      learnedRouting: boolValue(raw, 'foundry.learnedRouting', cfg.foundry?.learnedRouting !== false),
+      learnedRouting: boolValue(raw, 'foundry.learnedRouting', cfg.foundry?.learnedRouting === true),
       resourceAwareDispatch: boolValue(raw, 'foundry.resourceAwareDispatch', cfg.foundry?.resourceAwareDispatch !== false),
       killSwitch: boolValue(raw, 'foundry.killSwitch', cfg.foundry?.killSwitch === true),
     },

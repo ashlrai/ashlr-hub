@@ -691,7 +691,7 @@
         },
         "learnedRouting": {
           "type": "boolean",
-          "description": "M240: bias engine/model selection using historical judge outcomes. DEFAULT true."
+          "description": "M240: bias engine/model selection using causally identifiable, authenticated outcomes. DEFAULT false; exact opt-in only."
         },
         "modelRacing": {
           "type": "object",
