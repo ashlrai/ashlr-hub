@@ -239,7 +239,9 @@ describe('durable run-output policy', () => {
         const readSddl = () => {
           const result = spawnSync('powershell.exe', [
             '-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
-            `(Get-Acl -LiteralPath '${escaped}').Sddl`,
+            `$item=[System.IO.DirectoryInfo]::new('${escaped}');` +
+              '[Console]::Out.Write($item.GetAccessControl().' +
+              'GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::Access))',
           ], { windowsHide: true, shell: false, timeout: 5_000, encoding: 'utf8' });
           expect(result.status, result.stderr).toBe(0);
           return result.stdout.trim();
