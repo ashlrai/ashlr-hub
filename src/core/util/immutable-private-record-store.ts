@@ -45,6 +45,14 @@ export type ImmutablePrivateRecordRecoveryDisposition =
   | 'invalid'
   | 'failed';
 
+export type ImmutablePrivateRecordLayoutInitializationDisposition =
+  | 'ready'
+  | 'initialized'
+  | 'missing'
+  | 'withheld'
+  | 'invalid'
+  | 'failed';
+
 export type ImmutablePrivateRecordReadStopReason =
   | 'codec-unavailable'
   | 'unsafe-storage'
@@ -139,7 +147,21 @@ interface StoreDirectories<RecordType> extends ValidatedConfig<RecordType> {
 
 interface DirectorySnapshot {
   entries: string[];
+  identities: DirectoryEntryIdentity[];
   overflow: boolean;
+}
+
+interface DirectoryEntryIdentity {
+  name: string;
+  dev: bigint;
+  ino: bigint;
+  mode: bigint;
+  nlink: bigint;
+  uid: bigint;
+  gid: bigint;
+  size: bigint;
+  mtimeNs: bigint;
+  ctimeNs: bigint;
 }
 
 function nestedWithin(anchor: string, target: string): boolean {
@@ -456,29 +478,48 @@ function fsyncExactFile(
 
 function boundedDirectoryEntries(path: string, hardLimit: number): DirectorySnapshot {
   const directory = opendirSync(path);
-  const entries: string[] = [];
+  const identities: DirectoryEntryIdentity[] = [];
   let overflow = false;
   try {
     for (;;) {
       const entry = directory.readSync();
       if (!entry) break;
-      if (entries.length >= hardLimit) {
+      if (identities.length >= hardLimit) {
         overflow = true;
         break;
       }
-      entries.push(entry.name);
+      const stat = lstatSync(join(path, entry.name), { bigint: true });
+      identities.push({
+        name: entry.name,
+        dev: stat.dev,
+        ino: stat.ino,
+        mode: stat.mode,
+        nlink: stat.nlink,
+        uid: stat.uid,
+        gid: stat.gid,
+        size: stat.size,
+        mtimeNs: stat.mtimeNs,
+        ctimeNs: stat.ctimeNs,
+      });
     }
   } finally {
     directory.closeSync();
   }
-  entries.sort();
-  return { entries, overflow };
+  identities.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
+  return { entries: identities.map((entry) => entry.name), identities, overflow };
 }
 
 function snapshotsEqual(left: DirectorySnapshot, right: DirectorySnapshot): boolean {
   return left.overflow === right.overflow &&
-    left.entries.length === right.entries.length &&
-    left.entries.every((entry, index) => entry === right.entries[index]);
+    left.identities.length === right.identities.length &&
+    left.identities.every((entry, index) => {
+      const other = right.identities[index];
+      return other !== undefined && entry.name === other.name &&
+        entry.dev === other.dev && entry.ino === other.ino && entry.mode === other.mode &&
+        entry.nlink === other.nlink && entry.uid === other.uid && entry.gid === other.gid &&
+        entry.size === other.size && entry.mtimeNs === other.mtimeNs &&
+        entry.ctimeNs === other.ctimeNs;
+    });
 }
 
 function recoverInterruptedPublication<RecordType>(
@@ -675,6 +716,7 @@ function publishWithoutClobber<RecordType>(
   directories: StoreDirectories<RecordType>,
   paths: { target: string; stage: string; temporary: string },
   serialized: string,
+  prepublish?: () => boolean,
 ): 'published' | 'exists' {
   let stagedIdentity: BigIntStats | undefined;
   let targetLinked = false;
@@ -686,6 +728,12 @@ function publishWithoutClobber<RecordType>(
     stagedIdentity = lstatSync(paths.stage, { bigint: true });
     if (!exactPrivateFile(stagedIdentity, 1)) {
       throw new Error('unsafe immutable record publication stage');
+    }
+    // This is the commit boundary: staging is recoverable and grants no record
+    // existence, while the following no-clobber link makes the immutable record
+    // visible. Recheck cancellation/deadline authority after all staging I/O.
+    if (prepublish && prepublish() !== true) {
+      throw new Error('immutable record publication no longer authorized');
     }
     try {
       linkSync(paths.stage, paths.target);
@@ -728,7 +776,7 @@ function publishWithoutClobber<RecordType>(
 export function writeImmutablePrivateRecord<RecordType>(
   config: ImmutablePrivateRecordStoreConfig<RecordType>,
   record: RecordType,
-  options: { lockWaitMs?: number } = {},
+  options: { lockWaitMs?: number; prepublish?: () => boolean } = {},
 ): ImmutablePrivateRecordWriteDisposition {
   const validated = validateConfig(config);
   if (validated === null) return 'invalid';
@@ -757,6 +805,7 @@ export function writeImmutablePrivateRecord<RecordType>(
 
   try {
     verifyDirectories(directories);
+    if (options.prepublish && options.prepublish() !== true) return 'failed';
     const namespaceRecovery = recoverStagingNamespace(directories, codec);
     if (!namespaceRecovery.ok) return 'failed';
     const recordId = codec.recordId(record);
@@ -773,7 +822,13 @@ export function writeImmutablePrivateRecord<RecordType>(
       if (existing === null) return 'failed';
       return recordsEquivalent(codec, existing, record) ? 'replayed' : 'conflicted';
     }
-    const publication = publishWithoutClobber(directories, paths, serialized);
+    if (options.prepublish && options.prepublish() !== true) return 'failed';
+    const publication = publishWithoutClobber(
+      directories,
+      paths,
+      serialized,
+      options.prepublish,
+    );
     if (publication === 'exists') {
       const existing = readRecordFile(paths.target, codec, directories);
       if (existing === null) return 'failed';
@@ -784,6 +839,59 @@ export function writeImmutablePrivateRecord<RecordType>(
     return persisted !== null && recordsEquivalent(codec, persisted, record)
       ? 'recorded'
       : 'failed';
+  } catch {
+    return 'failed';
+  } finally {
+    releaseLocalStoreLock(lock);
+  }
+}
+
+/**
+ * Completes only the fixed `records/` and `staging/` layout below an existing
+ * store root. The caller-provided guard must represent an already-held outer
+ * transaction fence and is rechecked before and after initialization. This
+ * function never creates the configured root and never interprets or removes
+ * staging evidence.
+ */
+export function initializeImmutablePrivateRecordStoreLayout<RecordType>(
+  config: ImmutablePrivateRecordStoreConfig<RecordType>,
+  options: { lockWaitMs?: number; guard: () => boolean },
+): ImmutablePrivateRecordLayoutInitializationDisposition {
+  let validated: ValidatedConfig<RecordType> | null;
+  try { validated = validateConfig(config); } catch { validated = null; }
+  if (validated === null || !options || typeof options.guard !== 'function') return 'invalid';
+  let lockWaitMs: number | null;
+  try {
+    lockWaitMs = options.lockWaitMs === undefined
+      ? MAX_LOCK_WAIT_MS
+      : Number.isFinite(options.lockWaitMs)
+        ? Math.max(0, Math.min(MAX_LOCK_WAIT_MS, Math.floor(options.lockWaitMs)))
+        : null;
+  } catch {
+    return 'invalid';
+  }
+  if (lockWaitMs === null) return 'invalid';
+  if (!existsSync(validated.rootPath)) return 'missing';
+
+  try {
+    pinAnchor(validated.anchorPath);
+    assureDirectory(validated.rootPath, validated.anchorPath, false);
+    pinPrivateDirectory(validated.rootPath);
+  } catch {
+    return 'failed';
+  }
+  const lock = acquireLocalStoreLock(validated.lockPath, lockWaitMs, {
+    anchorPath: validated.anchorPath,
+    exactPrivateStorage: true,
+  });
+  if (lock === null) return 'failed';
+  try {
+    if (options.guard() !== true) return 'withheld';
+    const needsInitialization = !existsSync(validated.recordsPath) || !existsSync(validated.stagingPath);
+    const directories = loadDirectories(validated, true);
+    verifyDirectories(directories);
+    if (options.guard() !== true) return 'withheld';
+    return needsInitialization ? 'initialized' : 'ready';
   } catch {
     return 'failed';
   } finally {
@@ -868,14 +976,45 @@ function boundedLimit(value: number | undefined, fallback: number, hardMax: numb
     : null;
 }
 
+function conservativeLinkedRecoveryTargets<RecordType>(
+  directories: StoreDirectories<RecordType>,
+  codec: ImmutablePrivateRecordCodec<RecordType>,
+  stagingEntries: readonly string[],
+): Set<string> | null {
+  const targets = new Set<string>();
+  try {
+    for (const entry of stagingEntries) {
+      if (!safePathComponent(entry) || !entry.startsWith('.') || !entry.endsWith('.stage') ||
+        entry.endsWith('.stage.tmp')) return null;
+      const stagePath = join(directories.stagingPath, entry);
+      const stage = lstatSync(stagePath, { bigint: true });
+      if (!exactPrivateFile(stage, 2)) return null;
+      const record = readRecordFile(stagePath, codec, directories, 2);
+      if (record === null) return null;
+      const paths = recordPaths(directories, codec, record);
+      if (!paths || paths.stage !== stagePath || !existsSync(paths.target)) return null;
+      const target = lstatSync(paths.target, { bigint: true });
+      if (!exactPrivateFile(target, 2) || !sameIdentity(stage, target)) return null;
+      const targetRecord = readRecordFile(paths.target, codec, directories, 2);
+      if (targetRecord === null || !recordsEquivalent(codec, record, targetRecord) ||
+        targets.has(paths.target)) return null;
+      targets.add(paths.target);
+    }
+    return targets;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Reads a stable, bounded snapshot without creating directories, keys, locks,
  * or cleanup writes. Any active/crashed writer or namespace anomaly degrades
  * the source; `requireComplete` withholds all records in that state.
  */
-export function readImmutablePrivateRecords<RecordType>(
+function readImmutablePrivateRecordsImpl<RecordType>(
   config: ImmutablePrivateRecordStoreConfig<RecordType>,
   options: ImmutablePrivateRecordReadOptions = {},
+  admitConservativeLinkedRecovery = false,
 ): ImmutablePrivateRecordReadResult<RecordType> {
   const validated = validateConfig(config);
   if (validated === null) {
@@ -937,12 +1076,17 @@ export function readImmutablePrivateRecords<RecordType>(
       (entry) => !safePathComponent(entry) || entry.startsWith('.') ||
         !codec.isRecordFileName(entry),
     );
+    const linkedRecoveryTargets = admitConservativeLinkedRecovery && !stagingBefore.overflow
+      ? conservativeLinkedRecoveryTargets(directories, codec, stagingBefore.entries)
+      : null;
+    const linkedRecoveryRecognized = linkedRecoveryTargets !== null;
     if (rootBefore.overflow || recordsBefore.overflow) stopReasons.add('file-limit');
-    if (writerActive || stagingBefore.entries.length > 0 || stagingBefore.overflow) {
+    if (writerActive || (!linkedRecoveryRecognized && stagingBefore.entries.length > 0) ||
+      stagingBefore.overflow) {
       stopReasons.add('source-mutated');
     }
     if (unexpectedRoot.length > 0 || unexpectedRecords.length > 0 ||
-      stagingBefore.entries.length > 0 || rootBefore.overflow) {
+      (!linkedRecoveryRecognized && stagingBefore.entries.length > 0) || rootBefore.overflow) {
       stopReasons.add('invalid-file');
     }
 
@@ -959,7 +1103,7 @@ export function readImmutablePrivateRecords<RecordType>(
     let filesRead = 0;
     let bytesRead = 0;
     let invalidFiles = unexpectedRoot.length + unexpectedRecords.length +
-      stagingBefore.entries.length + (rootBefore.overflow ? 1 : 0) +
+      (linkedRecoveryRecognized ? 0 : stagingBefore.entries.length) + (rootBefore.overflow ? 1 : 0) +
       (recordsBefore.overflow ? 1 : 0) + (stagingBefore.overflow ? 1 : 0);
 
     for (const fileName of selected) {
@@ -984,7 +1128,12 @@ export function readImmutablePrivateRecords<RecordType>(
       }
       bytesRead += size;
       filesRead += 1;
-      const record = readRecordFile(path, codec, directories);
+      const record = readRecordFile(
+        path,
+        codec,
+        directories,
+        linkedRecoveryTargets?.has(path) ? 2 : 1,
+      );
       if (record === null) {
         invalidFiles += 1;
         stopReasons.add('invalid-file');
@@ -1047,6 +1196,25 @@ export function readImmutablePrivateRecords<RecordType>(
       stopReasons: ['io-error'],
     });
   }
+}
+
+export function readImmutablePrivateRecords<RecordType>(
+  config: ImmutablePrivateRecordStoreConfig<RecordType>,
+  options: ImmutablePrivateRecordReadOptions = {},
+): ImmutablePrivateRecordReadResult<RecordType> {
+  return readImmutablePrivateRecordsImpl(config, options, false);
+}
+
+/**
+ * Read-only admission for an exact already-linked publication crash. It accepts
+ * only canonical stage/target pairs sharing the same two-link inode; it never
+ * removes staging evidence or publishes a record.
+ */
+export function readImmutablePrivateRecordsForRecoveryAdmission<RecordType>(
+  config: ImmutablePrivateRecordStoreConfig<RecordType>,
+  options: ImmutablePrivateRecordReadOptions = {},
+): ImmutablePrivateRecordReadResult<RecordType> {
+  return readImmutablePrivateRecordsImpl(config, options, true);
 }
 
 /**
