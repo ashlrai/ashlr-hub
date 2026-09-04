@@ -23,7 +23,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -32,6 +32,7 @@ import {
   signProvenance,
 } from '../src/core/foundry/provenance.js';
 import { canonicalFilesystemPathIdentity } from '../src/core/sandbox/policy.js';
+import { deriveCandidateAttemptIdentity } from '../src/core/fleet/attempt-identity.js';
 
 // ---------------------------------------------------------------------------
 // Shared fixtures
@@ -158,6 +159,108 @@ describe('M142 — durable candidate run observation', () => {
     const persisted = loadRun(result.candidates[0]!.runId!);
     expect(persisted).toMatchObject({ status: 'failed', result: 'candidate runner failed' });
     expect(JSON.stringify(persisted)).not.toContain('raw provider failure');
+  });
+
+  it('refuses dispatch when the deterministic candidate RunState already exists', async () => {
+    const attemptId = 'attempt-11111111-1111-4111-8111-111111111111' as const;
+    const runId = deriveCandidateAttemptIdentity(attemptId, 0);
+    const existing = terminalCandidateState(runId);
+    existing.result = 'existing owner result';
+    const { saveRun, loadRun } = await import('../src/core/run/orchestrator.js');
+    saveRun(existing);
+
+    const sandboxMock = vi.fn();
+    mockSandboxedEngine(sandboxMock);
+    vi.doMock('../src/core/fleet/manager.js', () => ({ judgeProposal: vi.fn() }));
+    const { runBestOfN } = await import('../src/core/run/best-of-n.js?state-collision=' + randomUUID());
+    const result = await runBestOfN(makeItem(), {
+      foundry: {
+        bestOfN: 1,
+        allowedBackends: ['local-coder'],
+        runOutputPersistence: { enabled: true },
+      },
+    } as never, { n: 1, attemptId });
+
+    expect(sandboxMock).not.toHaveBeenCalled();
+    expect(result.candidates[0]).toMatchObject({
+      runId,
+      providerDispatchAttempted: false,
+      error: 'candidate-observation-state-collision',
+    });
+    expect(loadRun(runId)?.result).toBe('existing owner result');
+    expect(existsSync(join(testHome, '.ashlr', 'run-streams', `${runId}.log`))).toBe(false);
+  });
+
+  it('refuses a reused completed attempt id without changing its state or output', async () => {
+    const attemptId = 'attempt-22222222-2222-4222-8222-222222222222' as const;
+    const runId = deriveCandidateAttemptIdentity(attemptId, 0);
+    const firstRunner = vi.fn(async () => ({ state: terminalCandidateState(runId) }));
+    mockSandboxedEngine(firstRunner);
+    vi.doMock('../src/core/fleet/manager.js', () => ({ judgeProposal: vi.fn() }));
+    const cfg = {
+      foundry: {
+        bestOfN: 1,
+        allowedBackends: ['local-coder'],
+        runOutputPersistence: { enabled: true },
+      },
+    } as never;
+    const firstModule = await import('../src/core/run/best-of-n.js?first-attempt=' + randomUUID());
+    await firstModule.runBestOfN(makeItem(), cfg, { n: 1, attemptId });
+    expect(firstRunner).toHaveBeenCalledOnce();
+
+    const { loadRun } = await import('../src/core/run/orchestrator.js');
+    const beforeState = JSON.stringify(loadRun(runId));
+    const streamPath = join(testHome, '.ashlr', 'run-streams', `${runId}.log`);
+    const beforeStream = readFileSync(streamPath);
+
+    vi.resetModules();
+    const replayRunner = vi.fn();
+    mockSandboxedEngine(replayRunner);
+    vi.doMock('../src/core/fleet/manager.js', () => ({ judgeProposal: vi.fn() }));
+    const replayModule = await import('../src/core/run/best-of-n.js?reused-attempt=' + randomUUID());
+    const replay = await replayModule.runBestOfN(makeItem(), cfg, { n: 1, attemptId });
+
+    expect(replayRunner).not.toHaveBeenCalled();
+    expect(replay.candidates[0]).toMatchObject({
+      runId,
+      providerDispatchAttempted: false,
+      error: 'candidate-observation-stream-collision',
+    });
+    const freshOrchestrator = await import('../src/core/run/orchestrator.js');
+    expect(JSON.stringify(freshOrchestrator.loadRun(runId))).toBe(beforeState);
+    expect(readFileSync(streamPath)).toEqual(beforeStream);
+  });
+
+  it('refuses a pre-existing orphan stream byte-for-byte without creating RunState', async () => {
+    const attemptId = 'attempt-33333333-3333-4333-8333-333333333333' as const;
+    const runId = deriveCandidateAttemptIdentity(attemptId, 0);
+    const streamDir = join(testHome, '.ashlr', 'run-streams');
+    mkdirSync(streamDir, { recursive: true, mode: 0o700 });
+    const streamPath = join(streamDir, `${runId}.log`);
+    const orphan = Buffer.from('{"kind":"log","text":"orphan-owner"}\n', 'utf8');
+    writeFileSync(streamPath, orphan, { mode: 0o600 });
+
+    const sandboxMock = vi.fn();
+    mockSandboxedEngine(sandboxMock);
+    vi.doMock('../src/core/fleet/manager.js', () => ({ judgeProposal: vi.fn() }));
+    const { runBestOfN } = await import('../src/core/run/best-of-n.js?orphan-stream=' + randomUUID());
+    const result = await runBestOfN(makeItem(), {
+      foundry: {
+        bestOfN: 1,
+        allowedBackends: ['local-coder'],
+        runOutputPersistence: { enabled: true },
+      },
+    } as never, { n: 1, attemptId });
+
+    expect(sandboxMock).not.toHaveBeenCalled();
+    expect(result.candidates[0]).toMatchObject({
+      runId,
+      providerDispatchAttempted: false,
+      error: 'candidate-observation-stream-collision',
+    });
+    expect(readFileSync(streamPath)).toEqual(orphan);
+    const { loadRun } = await import('../src/core/run/orchestrator.js');
+    expect(loadRun(runId)).toBeNull();
   });
 });
 

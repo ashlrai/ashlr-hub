@@ -31,6 +31,8 @@ import {
   endStreamSink,
   failStreamSink,
   gcRunStreams,
+  claimRunOutputStream,
+  releaseRunOutputStreamClaim,
   withOptionalRunOutputPersistence,
   readRunStreamChunk,
   setRunStreamReadAfterOpenHookForTests,
@@ -102,9 +104,37 @@ describe('durable run-output policy', () => {
       'utf8',
     );
     expect(orchestrator).toContain('withOptionalRunOutputPersistence(callerSink, runStreamIdentity, cfg)');
-    expect(sandboxed).toContain('withOptionalRunOutputPersistence(nullSink(), id, cfg)');
+    expect(sandboxed).toMatch(/withOptionalRunOutputPersistence\(\s*nullSink\(\),\s*id,\s*cfg,/);
     expect(orchestrator).not.toMatch(/combineSinks\(callerSink, fileSink\(/);
     expect(sandboxed).not.toMatch(/const streamSink = fileSink\(/);
+  });
+
+  it('never recreates a claimed stream whose bound inode was removed', () => {
+    const runId = 'claimed-inode-removed';
+    const claim = claimRunOutputStream(runId);
+    expect(claim).toBeDefined();
+    const streamPath = runStreamFilePath(runId)!;
+    fs.unlinkSync(streamPath);
+
+    const sink = withOptionalRunOutputPersistence(
+      nullSink(),
+      runId,
+      { foundry: { runOutputPersistence: { enabled: true } } },
+      claim,
+    );
+    sink(makeEvent({ text: 'must not reach a replacement inode' }));
+    endStreamSink(sink);
+
+    expect(fs.existsSync(streamPath)).toBe(false);
+  });
+
+  it('releases only an unused, still-empty exclusive claim', () => {
+    const runId = 'claimed-unused-release';
+    const claim = claimRunOutputStream(runId);
+    expect(claim).toBeDefined();
+    const streamPath = runStreamFilePath(runId)!;
+    releaseRunOutputStreamClaim(claim!);
+    expect(fs.existsSync(streamPath)).toBe(false);
   });
 });
 
@@ -578,6 +608,42 @@ describe('gcRunStreams', () => {
       sum + fs.lstatSync(path.join(runStreamsDir(), name)).size, 0);
     expect(total).toBeLessThanOrEqual(MAX_STREAM_AGGREGATE_BYTES);
     expect(fs.existsSync(runStreamFilePath('bytes-0')!)).toBe(false);
+  });
+
+  it('candidate claim runs retention while preserving its exact orphan target', () => {
+    fs.mkdirSync(runStreamsDir(), { recursive: true, mode: 0o700 });
+    const oldPath = runStreamFilePath('claim-gc-old')!;
+    fs.writeFileSync(oldPath, '{}\n', { mode: 0o600 });
+    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+    fs.utimesSync(oldPath, eightDaysAgo, eightDaysAgo);
+    const orphanPath = runStreamFilePath('claim-gc-orphan')!;
+    fs.writeFileSync(orphanPath, 'orphan\n', { mode: 0o600 });
+
+    expect(claimRunOutputStream('claim-gc-orphan')).toBeUndefined();
+    expect(fs.existsSync(oldPath)).toBe(false);
+    expect(fs.readFileSync(orphanPath, 'utf8')).toBe('orphan\n');
+  });
+
+  it('protects an active claimed inode from retention and count-cap sweeps', () => {
+    const activeRunId = 'active-cap-protected';
+    const claim = claimRunOutputStream(activeRunId);
+    expect(claim).toBeDefined();
+    const activePath = runStreamFilePath(activeRunId)!;
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    fs.utimesSync(activePath, oneHourAgo, oneHourAgo);
+
+    for (let i = 0; i < MAX_STREAM_FILES + 2; i += 1) {
+      const file = runStreamFilePath(`active-cap-${i}`)!;
+      fs.writeFileSync(file, '{}\n', { mode: 0o600 });
+      const at = new Date(Date.now() - (MAX_STREAM_FILES + 2 - i) * 1_000);
+      fs.utimesSync(file, at, at);
+    }
+
+    gcRunStreams(true);
+    const logs = fs.readdirSync(runStreamsDir()).filter((name) => name.endsWith('.log'));
+    expect(fs.existsSync(activePath)).toBe(true);
+    expect(logs).toHaveLength(MAX_STREAM_FILES);
+    releaseRunOutputStreamClaim(claim!);
   });
 });
 

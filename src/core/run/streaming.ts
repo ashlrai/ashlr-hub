@@ -31,6 +31,11 @@ import * as path from 'node:path';
 import type { AshlrConfig, RunStreamEvent } from '../types.js';
 import { makeColors } from '../../cli/ui.js';
 import { scrubSecrets } from '../util/scrub.js';
+import {
+  acquireLocalStoreLock,
+  releaseLocalStoreLock,
+  type LocalStoreLock,
+} from '../fleet/local-store-lock.js';
 
 /**
  * A sink that receives live run events. Lifecycle methods are optional so
@@ -173,6 +178,29 @@ export interface StoredStreamChunk {
   text: string;
 }
 
+const runOutputStreamClaimBrand = Symbol('ashlr.run-output-stream-claim');
+
+/**
+ * In-process, non-serializable authority over one exclusively-created output
+ * stream inode. Best-of-N uses this to couple a deterministic candidate id to
+ * a fresh stream before any provider dispatch; a caller cannot accidentally
+ * adopt an orphan/collided pathname merely by knowing the run id.
+ */
+export interface RunOutputStreamClaim {
+  readonly runId: string;
+  readonly filePath: string;
+  readonly dev: bigint;
+  readonly ino: bigint;
+  readonly [runOutputStreamClaimBrand]: true;
+}
+
+const activeRunOutputStreamClaims = new WeakSet<RunOutputStreamClaim>();
+const runOutputStreamClaimLocks = new WeakMap<RunOutputStreamClaim, LocalStoreLock>();
+
+function runOutputStreamLockPath(filePath: string): string {
+  return `${filePath}.active.lock`;
+}
+
 export function runStreamFilePath(runId: string): string | undefined {
   if (!STREAM_RUN_ID_RE.test(runId)) return undefined;
   return path.join(runStreamsDir(), `${runId}.log`);
@@ -254,7 +282,7 @@ const GC_INTERVAL_MS = 10 * 60 * 1_000;
  * GC_INTERVAL_MS per process (per resolved directory — see lastGcAtDir) so
  * normal chunk writes stay cheap.
  */
-export function gcRunStreams(force = false): void {
+export function gcRunStreams(force = false, preserveRunId?: string): void {
   const now = Date.now();
   const dirForThrottle = runStreamsDir();
   if (!force && lastGcAtDir === dirForThrottle && now - lastGcAt < GC_INTERVAL_MS) return;
@@ -267,21 +295,47 @@ export function gcRunStreams(force = false): void {
     const rootStat = fs.lstatSync(root, { bigint: true });
     const dirStat = fs.lstatSync(dir, { bigint: true });
     if (!safePrivateStreamDirectory(rootStat) || !safePrivateStreamDirectory(dirStat)) return;
-    const retained: Array<{ path: string; mtimeMs: number; size: number }> = [];
+    const preservePath = preserveRunId ? runStreamFilePath(preserveRunId) : undefined;
+    const retained: Array<{ path: string; mtimeMs: number; size: number; protected: boolean }> = [];
     for (const name of fs.readdirSync(dir)) {
       if (!name.endsWith('.log')) continue;
       const filePath = path.join(dir, name);
+      let inspectionLock: LocalStoreLock | null = null;
       try {
+        const protectedTarget = filePath === preservePath;
+        // Ordinary streams have no activity lock; avoid creating/probing one
+        // per file on every sweep. A candidate acquires its lock before the
+        // corresponding stream exists, so an absent lock cannot race into an
+        // active claim for this already-enumerated pathname (O_EXCL would
+        // refuse that claimant while the file exists).
+        if (!protectedTarget && fs.existsSync(runOutputStreamLockPath(filePath))) {
+          inspectionLock = acquireLocalStoreLock(runOutputStreamLockPath(filePath), 0, {
+            anchorPath: root,
+            exactPrivateStorage: true,
+          });
+        }
+        // A held/uninspectable cross-process activity lock fails closed. A
+        // candidate may be between exclusive creation and its first write;
+        // mtime alone is not proof that the inode is safe to prune.
+        const protectedActive = !protectedTarget &&
+          fs.existsSync(runOutputStreamLockPath(filePath)) && !inspectionLock;
         const stat = fs.lstatSync(filePath);
         if (stat.isSymbolicLink() || !stat.isFile()) continue;
-        if (now - stat.mtimeMs > STREAM_RETENTION_MS) {
+        if (!protectedTarget && !protectedActive && now - stat.mtimeMs > STREAM_RETENTION_MS) {
           fs.unlinkSync(filePath);
           writeState.delete(filePath);
         } else {
-          retained.push({ path: filePath, mtimeMs: stat.mtimeMs, size: stat.size });
+          retained.push({
+            path: filePath,
+            mtimeMs: stat.mtimeMs,
+            size: stat.size,
+            protected: protectedTarget || protectedActive,
+          });
         }
       } catch {
         // Best-effort; one bad entry must never abort the sweep.
+      } finally {
+        if (inspectionLock) releaseLocalStoreLock(inspectionLock);
       }
     }
     retained.sort((a, b) => a.mtimeMs - b.mtimeMs || a.path.localeCompare(b.path));
@@ -289,6 +343,7 @@ export function gcRunStreams(force = false): void {
     let files = retained.length;
     for (const entry of retained) {
       if (files <= MAX_STREAM_FILES && bytes <= MAX_STREAM_AGGREGATE_BYTES) break;
+      if (entry.protected) continue;
       try {
         const current = fs.lstatSync(entry.path);
         const currentDir = fs.lstatSync(dir, { bigint: true });
@@ -319,11 +374,21 @@ export function withOptionalRunOutputPersistence(
   callerSink: StreamSink,
   runId: string,
   cfg: Pick<AshlrConfig, 'foundry'>,
+  claim?: RunOutputStreamClaim,
 ): StreamSink {
-  gcRunStreams(true);
-  return cfg.foundry?.runOutputPersistence?.enabled === true
-    ? combineSinks(callerSink, fileSink(runId))
-    : callerSink;
+  // A claimed candidate stream has already been initialized exclusively. Do
+  // not run retention between claim and sink construction: a capacity sweep
+  // must never delete that empty inode and let the sink recreate/adopt a
+  // different file at the same pathname.
+  if (!claim) gcRunStreams(true);
+  if (cfg.foundry?.runOutputPersistence?.enabled !== true) {
+    // Config is re-read at the runner boundary. If an operator turns the
+    // privacy-sensitive feature off after the candidate acquired its claim,
+    // retire the unused authority and leave no empty capture behind.
+    if (claim) releaseRunOutputStreamClaim(claim);
+    return callerSink;
+  }
+  return combineSinks(callerSink, fileSink(runId, claim));
 }
 
 function seedWriteState(filePath: string): StreamWriteState {
@@ -340,6 +405,19 @@ function sameStreamFile(
   right: Pick<fs.BigIntStats, 'dev' | 'ino'>,
 ): boolean {
   return left.dev === right.dev && left.ino === right.ino;
+}
+
+function streamClaimMatches(
+  claim: RunOutputStreamClaim,
+  runId: string,
+  filePath: string,
+  file?: Pick<fs.BigIntStats, 'dev' | 'ino'>,
+): boolean {
+  return activeRunOutputStreamClaims.has(claim) &&
+    claim[runOutputStreamClaimBrand] === true &&
+    claim.runId === runId &&
+    claim.filePath === filePath &&
+    (!file || (claim.dev === file.dev && claim.ino === file.ino));
 }
 
 function safePrivateStreamFile(stat: fs.BigIntStats): boolean {
@@ -447,6 +525,110 @@ function bindStreamPath(fd: number, filePath: string): BoundStreamPath | undefin
   return { file, directory, root };
 }
 
+/**
+ * Exclusively create and bind a fresh stream for one candidate attempt.
+ * Existing files are always refused, including empty/orphaned files. The
+ * returned object is meaningful only in this process and is checked against
+ * the originally-created inode on every append.
+ */
+export function claimRunOutputStream(runId: string): RunOutputStreamClaim | undefined {
+  const filePath = runStreamFilePath(runId);
+  if (!filePath) return undefined;
+  // Keep global retention/cap enforcement on candidate-only workloads while
+  // preserving this exact target: a pre-existing orphan must remain visible
+  // to the subsequent O_EXCL claim and be refused, never swept then adopted.
+  gcRunStreams(true, runId);
+  if (!ensureRunStreamsDir()) return undefined;
+
+  let fd: number | undefined;
+  let created = false;
+  let claimed = false;
+  const activityLock = acquireLocalStoreLock(runOutputStreamLockPath(filePath), 0, {
+    anchorPath: runStreamsDirRoot(),
+    exactPrivateStorage: true,
+  });
+  if (!activityLock) return undefined;
+  try {
+    const noFollow = typeof fs.constants.O_NOFOLLOW === 'number' ? fs.constants.O_NOFOLLOW : 0;
+    fd = fs.openSync(
+      filePath,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | noFollow,
+      0o600,
+    );
+    created = true;
+    fs.fchmodSync(fd, 0o600);
+    const bound = bindStreamPath(fd, filePath);
+    if (!bound) return undefined;
+    fs.fsyncSync(fd);
+    const claim = Object.freeze({
+      runId,
+      filePath,
+      dev: bound.file.dev,
+      ino: bound.file.ino,
+      [runOutputStreamClaimBrand]: true as const,
+    });
+    activeRunOutputStreamClaims.add(claim);
+    runOutputStreamClaimLocks.set(claim, activityLock);
+    writeState.set(filePath, { bytes: 0, truncated: false, seeded: true });
+    claimed = true;
+    return claim;
+  } catch {
+    return undefined;
+  } finally {
+    // A failed claim must not strand a new pathname. Only remove the file
+    // when this invocation created it and no active claim was returned.
+    if (created && !claimed && fd !== undefined) {
+      try {
+        const stat = fs.lstatSync(filePath, { bigint: true });
+        const opened = fs.fstatSync(fd, { bigint: true });
+        if (sameStreamFile(stat, opened)) fs.unlinkSync(filePath);
+      } catch { /* best-effort rollback; an empty orphan remains fail-closed */ }
+    }
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* best-effort claim closure */ }
+    }
+    if (!claimed) releaseLocalStoreLock(activityLock);
+  }
+}
+
+/** Release an unused claim without touching a replaced or externally-mutated path. */
+export function releaseRunOutputStreamClaim(claim: RunOutputStreamClaim): void {
+  if (!activeRunOutputStreamClaims.delete(claim)) return;
+  const activityLock = runOutputStreamClaimLocks.get(claim);
+  runOutputStreamClaimLocks.delete(claim);
+  let fd: number | undefined;
+  try {
+    const noFollow = typeof fs.constants.O_NOFOLLOW === 'number' ? fs.constants.O_NOFOLLOW : 0;
+    fd = fs.openSync(claim.filePath, fs.constants.O_RDONLY | noFollow);
+    const bound = bindStreamPath(fd, claim.filePath);
+    if (!bound || !streamClaimMatchesReleased(claim, bound.file) || bound.file.size !== 0n) return;
+    fs.unlinkSync(claim.filePath);
+    writeState.delete(claim.filePath);
+  } catch {
+    // Best-effort rollback. Failure leaves an empty orphan that future claims
+    // refuse; it never grants append authority.
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* best-effort release closure */ }
+    }
+    if (activityLock) releaseLocalStoreLock(activityLock);
+  }
+}
+
+function retireRunOutputStreamClaim(claim: RunOutputStreamClaim): void {
+  if (!activeRunOutputStreamClaims.delete(claim)) return;
+  const activityLock = runOutputStreamClaimLocks.get(claim);
+  runOutputStreamClaimLocks.delete(claim);
+  if (activityLock) releaseLocalStoreLock(activityLock);
+}
+
+function streamClaimMatchesReleased(
+  claim: RunOutputStreamClaim,
+  file: Pick<fs.BigIntStats, 'dev' | 'ino'>,
+): boolean {
+  return claim.dev === file.dev && claim.ino === file.ino;
+}
+
 /** Seed the restart-safe byte cap from descriptor-bound metadata, never from a
  * check-then-reopen pathname observation. Unsafe/unreadable existing state is
  * treated as already full so persistence fails closed. */
@@ -497,12 +679,24 @@ function openStreamAppendFile(filePath: string): number {
   }
 }
 
-function appendStreamLine(filePath: string, line: string): boolean {
+function appendStreamLine(
+  filePath: string,
+  line: string,
+  claim?: RunOutputStreamClaim,
+): boolean {
   let fd: number | undefined;
   try {
-    fd = openStreamAppendFile(filePath);
+    if (claim) {
+      // Claimed paths are never recreated. If the exclusively-created inode
+      // disappeared, this write loses authority and fails closed instead of
+      // leaving a fresh orphan at the same pathname.
+      const noFollow = typeof fs.constants.O_NOFOLLOW === 'number' ? fs.constants.O_NOFOLLOW : 0;
+      fd = fs.openSync(filePath, fs.constants.O_APPEND | fs.constants.O_WRONLY | noFollow);
+    } else {
+      fd = openStreamAppendFile(filePath);
+    }
     const bound = bindStreamPath(fd, filePath);
-    if (!bound) return false;
+    if (!bound || (claim && !streamClaimMatches(claim, claim.runId, filePath, bound.file))) return false;
 
     const bytes = Buffer.from(line, 'utf8');
     let offset = 0;
@@ -545,9 +739,9 @@ function appendStreamLine(filePath: string, line: string): boolean {
  * arbitrarily long value cannot leak after its identifying prefix was removed.
  * Skips events with no meaningful text. Never throws.
  */
-export function fileSink(runId: string): StreamSink {
+export function fileSink(runId: string, claim?: RunOutputStreamClaim): StreamSink {
   const filePath = runStreamFilePath(runId);
-  if (!filePath) return nullSink();
+  if (!filePath || (claim && !streamClaimMatches(claim, runId, filePath))) return nullSink();
 
   interface PendingChunk {
     event: RunStreamEvent;
@@ -583,13 +777,13 @@ export function fileSink(runId: string): StreamSink {
         const marker: StoredStreamChunk = { ts: event.ts, kind: 'log', text: STREAM_TRUNCATION_MARKER };
         const markerLine = `${JSON.stringify(marker)}\n`;
         const markerBytes = Buffer.byteLength(markerLine, 'utf8');
-        if (state.bytes + markerBytes <= MAX_STREAM_FILE_BYTES && appendStreamLine(filePath, markerLine)) {
+        if (state.bytes + markerBytes <= MAX_STREAM_FILE_BYTES && appendStreamLine(filePath, markerLine, claim)) {
           state.bytes += markerBytes;
         }
         return false;
       }
 
-      if (appendStreamLine(filePath, line)) {
+      if (appendStreamLine(filePath, line, claim)) {
         state.bytes += lineBytes;
         return true;
       }
@@ -727,12 +921,14 @@ export function fileSink(runId: string): StreamSink {
       if (!ended && !redactionLocked) finalizePending();
     } catch { /* never throw */ }
     ended = true;
+    if (claim) retireRunOutputStreamClaim(claim);
   };
   sink.error = () => {
     try {
       if (!ended && !redactionLocked) finalizePending();
     } catch { /* never throw */ }
     ended = true;
+    if (claim) retireRunOutputStreamClaim(claim);
   };
   return sink;
 }

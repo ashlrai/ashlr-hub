@@ -58,7 +58,14 @@ import {
   summarizeDelegationScope,
 } from './delegation-scope.js';
 import { buildEngineCommand, spawnEngine, describeRunEventForStream } from './engines.js';
-import { nullSink, withOptionalRunOutputPersistence, emitSinkEvent, endStreamSink, failStreamSink } from './streaming.js';
+import {
+  nullSink,
+  withOptionalRunOutputPersistence,
+  emitSinkEvent,
+  endStreamSink,
+  failStreamSink,
+  type RunOutputStreamClaim,
+} from './streaming.js';
 import {
   applyLocusPreMutateGate,
   formatPreMutateBlockers,
@@ -173,6 +180,8 @@ export interface RunEngineSandboxedOptions {
   signal?: AbortSignal;
   /** Internal whole-attempt generation for mutating-tool evidence. */
   effectGeneration?: string;
+  /** Internal exclusive durable-output authority for a best-of-N candidate. */
+  runOutputStreamClaim?: RunOutputStreamClaim;
   /** Internal TITRR handoff: caller emits the one authoritative terminal action. */
   deferTerminalAction?: boolean;
   /**
@@ -1376,7 +1385,12 @@ export async function runEngineSandboxed(
   );
   // Sandboxed engines have no live caller sink. Durable raw output remains
   // disabled unless the same explicit privacy opt-in used by runGoal is true.
-  const streamSink = withOptionalRunOutputPersistence(nullSink(), id, cfg);
+  const streamSink = withOptionalRunOutputPersistence(
+    nullSink(),
+    id,
+    cfg,
+    opts.runOutputStreamClaim,
+  );
   const runCreatedAtIso = new Date().toISOString();
   const recordSandboxedRunAgentAction = opts.deferTerminalAction
     ? (_fields: Parameters<typeof writeSandboxedRunAgentAction>[0]) => {}
@@ -2418,7 +2432,12 @@ export async function runApiModelSandboxed(
   // Keep in-process API models on the exact same durable-output policy as
   // external CLI engines. The shared helper is an exact typed opt-in and
   // returns the caller sink unchanged for absent/false/string-truthy config.
-  const streamSink = withOptionalRunOutputPersistence(nullSink(), id, cfg);
+  const streamSink = withOptionalRunOutputPersistence(
+    nullSink(),
+    id,
+    cfg,
+    opts.runOutputStreamClaim,
+  );
   const runCreatedAtIso = new Date().toISOString();
   const recordSandboxedRunAgentAction = (
     fields: Parameters<typeof writeSandboxedRunAgentAction>[0],

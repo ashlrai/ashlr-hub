@@ -72,6 +72,7 @@ import type {
   FleetQuotaReservationResult,
 } from '../fleet/quota.js';
 import { sanitizePublicJson } from '../util/public-json.js';
+import type { RunOutputStreamClaim } from './streaming.js';
 
 const SHADOW_REQUEST_TIMEOUT_MS = 120_000;
 const SHADOW_REQUEST_MAX_BYTES = 1024 * 1024;
@@ -91,47 +92,76 @@ function boundedPublicText(value: unknown, limit: number): string | undefined {
 }
 
 /**
- * Durable candidate RunState is observability only. It is created solely by
- * the same exact typed opt-in that enables durable run output, strips raw
- * candidate goals, bounds result/step text, and never changes proposal or
- * execution authority. Returning the saved object preserves saveRun's
- * generation token for atomic refreshes.
+ * Sanitize candidate state before it reaches durable observability storage.
  */
-async function persistCandidateOutputState(
+function safeCandidateOutputState(
+  state: RunState,
+  candidateIndex: number,
+): RunState {
+  return sanitizePublicJson({
+    ...state,
+    goal: `Best-of-N candidate ${candidateIndex + 1}`,
+    result: boundedPublicText(state.result, CANDIDATE_RESULT_PREVIEW_CHARS),
+    tasks: state.tasks.slice(0, MAX_OBSERVED_CANDIDATE_TASKS).map((task, index) => ({
+      ...task,
+      goal: `Candidate task ${index + 1}`,
+      result: boundedPublicText(task.result, CANDIDATE_RESULT_PREVIEW_CHARS),
+      error: boundedPublicText(task.error, CANDIDATE_STEP_SUMMARY_CHARS),
+    })),
+    steps: state.steps.slice(-MAX_OBSERVED_CANDIDATE_STEPS).map((step) => ({
+      ...step,
+      summary: boundedPublicText(step.summary, CANDIDATE_STEP_SUMMARY_CHARS) ?? '',
+    })),
+  }) as RunState;
+}
+
+type CandidateObservationOwnership =
+  | { ok: true; state: RunState; streamClaim: RunOutputStreamClaim }
+  | { ok: false; reason: 'candidate-observation-stream-collision' | 'candidate-observation-state-collision' };
+
+/**
+ * Exclusively claim both durable resources before candidate dispatch. The
+ * stream claim is inode-bound and non-serializable; saveRun atomically refuses
+ * an existing RunState. A failed state claim releases only our still-empty
+ * stream inode, so neither an orphan stream nor a reused attempt can be
+ * adopted by a new provider execution.
+ */
+async function startCandidateOutputObservation(
   cfg: AshlrConfig,
   state: RunState,
   candidateIndex: number,
-  prior?: RunState,
-): Promise<RunState | undefined> {
-  if (cfg.foundry?.runOutputPersistence?.enabled !== true) return undefined;
-  try {
-    const { loadRun, saveRun } = await import('./orchestrator.js');
-    const safe = sanitizePublicJson({
-      ...state,
-      goal: `Best-of-N candidate ${candidateIndex + 1}`,
-      result: boundedPublicText(state.result, CANDIDATE_RESULT_PREVIEW_CHARS),
-      tasks: state.tasks.slice(0, MAX_OBSERVED_CANDIDATE_TASKS).map((task, index) => ({
-        ...task,
-        goal: `Candidate task ${index + 1}`,
-        result: boundedPublicText(task.result, CANDIDATE_RESULT_PREVIEW_CHARS),
-        error: boundedPublicText(task.error, CANDIDATE_STEP_SUMMARY_CHARS),
-      })),
-      steps: state.steps.slice(-MAX_OBSERVED_CANDIDATE_STEPS).map((step) => ({
-        ...step,
-        summary: boundedPublicText(step.summary, CANDIDATE_STEP_SUMMARY_CHARS) ?? '',
-      })),
-    }) as RunState;
-    // Never adopt an unrelated pre-existing run merely because a derived id
-    // collided. Only an object returned by our own initial save carries the
-    // generation authority needed for a refresh.
-    if (!prior && loadRun(state.id)) return undefined;
-    const writable = prior ? Object.assign(prior, safe) : safe;
-    saveRun(writable);
-    return writable;
-  } catch {
-    // Durable output is best-effort observability and cannot affect execution.
-    return undefined;
+): Promise<CandidateObservationOwnership> {
+  if (cfg.foundry?.runOutputPersistence?.enabled !== true) {
+    return { ok: false, reason: 'candidate-observation-state-collision' };
   }
+  const { claimRunOutputStream, releaseRunOutputStreamClaim } = await import('./streaming.js');
+  const streamClaim = claimRunOutputStream(state.id);
+  if (!streamClaim) return { ok: false, reason: 'candidate-observation-stream-collision' };
+  try {
+    const { saveRun } = await import('./orchestrator.js');
+    const safe = safeCandidateOutputState(state, candidateIndex);
+    saveRun(safe);
+    return { ok: true, state: safe, streamClaim };
+  } catch {
+    releaseRunOutputStreamClaim(streamClaim);
+    return { ok: false, reason: 'candidate-observation-state-collision' };
+  }
+}
+
+/** Refresh only the exact object carrying saveRun's generation authority. */
+async function updateCandidateOutputObservation(
+  state: RunState,
+  candidateIndex: number,
+  prior: RunState,
+): Promise<RunState> {
+  try {
+    const { saveRun } = await import('./orchestrator.js');
+    Object.assign(prior, safeCandidateOutputState(state, candidateIndex));
+    saveRun(prior);
+  } catch {
+    // Terminal observation is best effort after exclusive dispatch ownership.
+  }
+  return prior;
 }
 
 export {
@@ -1274,6 +1304,7 @@ async function runBestOfNInternal(
 
     let ownedSandbox: Sandbox | undefined;
     let observedCandidateState: RunState | undefined;
+    let observedCandidateStreamClaim: RunOutputStreamClaim | undefined;
     try {
       const observeExecutedCandidate = (state: RunState, proposalOutcome?: RunProposalOutcome): void => {
         const actionCounts = state.runEventSummary?.actionCounts;
@@ -1348,7 +1379,7 @@ async function runBestOfNInternal(
             allowCloud: false,
           })
         : candidateBudget;
-      const startCandidateObservation = async (): Promise<void> => {
+      const startCandidateObservation = async (): Promise<CandidateObservationOwnership> => {
         const now = new Date().toISOString();
         const candidateState: RunState = {
           id: runId,
@@ -1376,12 +1407,28 @@ async function runBestOfNInternal(
           steps: [],
           status: 'running',
         };
-        observedCandidateState = await persistCandidateOutputState(cfg, candidateState, i);
+        const ownership = await startCandidateOutputObservation(cfg, candidateState, i);
+        if (ownership.ok) {
+          observedCandidateState = ownership.state;
+          observedCandidateStreamClaim = ownership.streamClaim;
+        }
+        return ownership;
       };
       const finishCandidateObservation = async (state: RunState): Promise<void> => {
-        observedCandidateState = await persistCandidateOutputState(cfg, state, i, observedCandidateState)
-          ?? observedCandidateState;
+        if (observedCandidateState) {
+          observedCandidateState = await updateCandidateOutputObservation(state, i, observedCandidateState);
+        }
       };
+      const candidateObservationRefusal = (
+        reason: CandidateObservationOwnership & { ok: false },
+        sandbox?: Sandbox,
+      ): InternalCandidateResult => ({
+        ...base,
+        providerDispatchAttempted: false,
+        latencyMs: Date.now() - t0,
+        error: reason.reason,
+        ...(sandbox ? { sandbox } : {}),
+      });
 
       if (captureSandboxedProposal && createSandbox) {
         let sb: Sandbox;
@@ -1400,7 +1447,10 @@ async function runBestOfNInternal(
         }
 
         if (!admitProviderDispatchAttempt()) return providerFenceRefusal();
-        if (candidateOutputPersistenceEnabled) await startCandidateObservation();
+        if (candidateOutputPersistenceEnabled) {
+          const ownership = await startCandidateObservation();
+          if (!ownership.ok) return candidateObservationRefusal(ownership, sb);
+        }
         const pendingResult = runSandboxed(cEngine as import('../types.js').EngineId, goal, cfg, {
           ...(typeof requestedModel === 'string' ? { model: requestedModel } : {}),
           sourceRepo,
@@ -1420,6 +1470,9 @@ async function runBestOfNInternal(
             : {}),
           existingWorktree: sb,
           runId,
+          ...(observedCandidateStreamClaim
+            ? { runOutputStreamClaim: observedCandidateStreamClaim }
+            : {}),
           workItemId: opts?.workItemId ?? item.id,
           workItemGenerationId: opts?.workItemGenerationId,
           workSource: opts?.workSource ?? item.source,
@@ -1553,13 +1606,19 @@ async function runBestOfNInternal(
       }
 
       if (!admitProviderDispatchAttempt()) return providerFenceRefusal();
-      if (candidateOutputPersistenceEnabled) await startCandidateObservation();
+      if (candidateOutputPersistenceEnabled) {
+        const ownership = await startCandidateObservation();
+        if (!ownership.ok) return candidateObservationRefusal(ownership);
+      }
       const pendingResult = runSandboxed(cEngine as import('../types.js').EngineId, goal, cfg, {
         ...(typeof requestedModel === 'string' ? { model: requestedModel } : {}),
         sourceRepo,
         ...(effectiveCandidateBudget ? { budget: effectiveCandidateBudget } : {}),
         propose: true,
         runId,
+        ...(observedCandidateStreamClaim
+          ? { runOutputStreamClaim: observedCandidateStreamClaim }
+          : {}),
         workItemId: opts?.workItemId ?? item.id,
         workItemGenerationId: opts?.workItemGenerationId,
         workSource: opts?.workSource ?? item.source,
@@ -1610,7 +1669,7 @@ async function runBestOfNInternal(
       } as InternalCandidateResult;
     } catch (err) {
       if (observedCandidateState) {
-        observedCandidateState = await persistCandidateOutputState(cfg, {
+        observedCandidateState = await updateCandidateOutputObservation({
           ...observedCandidateState,
           updatedAt: new Date().toISOString(),
           status: 'failed',
@@ -1620,7 +1679,7 @@ async function runBestOfNInternal(
             status: task.status === 'running' ? 'failed' : task.status,
             ...(task.status === 'running' ? { error: 'candidate runner failed' } : {}),
           })),
-        }, i, observedCandidateState) ?? observedCandidateState;
+        }, i, observedCandidateState);
       }
       return {
         ...base,
