@@ -71,6 +71,9 @@ export type {
   FleetTickEntry,
 } from '../../core/web/control.js';
 export type { VisibilitySnapshot } from '../../core/web/visibility.js';
+export type { AgentOsReadModelV1 } from '../../core/vision/agent-os-read-model.js';
+/** Exact bounded response contract returned by GET /api/agent-os. */
+export type { AgentOsRuntimeReadResultV1 as AgentOsSnapshotResponse } from '../../core/vision/agent-os-runtime-read.js';
 /**
  * Proposal + decisions-ledger types for the inbox (proposal review) view.
  * `DecisionEntry`/`JudgeDecisionReasonCode` back the evidence panel — a

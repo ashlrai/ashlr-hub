@@ -44,7 +44,9 @@ const EVENT_TO_CACHE_KEYS: Record<SseEventName, string[]> = {
   // refreshing on mount.
   'fleet-activity-ping': ['fleet-activity', 'fleet'],
   'fleet-activity-observation': ['fleet-activity', 'fleet'],
-  snapshot: ['dashboard-snapshot'],
+  // Agent OS snapshots are immutable records but their current authenticated
+  // projection advances alongside the server's general snapshot signal.
+  snapshot: ['dashboard-snapshot', 'agent-os-snapshot'],
 };
 
 type RawListener = (payload: unknown) => void;
