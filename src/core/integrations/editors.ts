@@ -141,21 +141,18 @@ function sameSnapshot(left: BigIntStats, right: BigIntStats): boolean {
 function readConfigSnapshot(filePath: string): ConfigSnapshot {
   let fd: number | undefined;
   try {
-    let named: BigIntStats;
+    const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
     try {
-      named = lstatSync(filePath, { bigint: true });
+      fd = openSync(filePath, fsConstants.O_RDONLY | noFollow);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { found: false };
       throw error;
     }
-    if (!safeConfigFile(named) || named.size > BigInt(MAX_JSON_CONFIG_BYTES)) {
-      throw new Error(`refusing unsafe JSON config: ${filePath}`);
-    }
-    const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
-    fd = openSync(filePath, fsConstants.O_RDONLY | noFollow);
     const opened = fstatSync(fd, { bigint: true });
-    if (!safeConfigFile(opened) || !sameSnapshot(named, opened)) {
-      throw new Error(`JSON config changed while opening it: ${filePath}`);
+    const named = lstatSync(filePath, { bigint: true });
+    if (!safeConfigFile(opened) || !safeConfigFile(named) ||
+      opened.size > BigInt(MAX_JSON_CONFIG_BYTES) || !sameSnapshot(opened, named)) {
+      throw new Error(`refusing unsafe JSON config: ${filePath}`);
     }
     const bytes = Buffer.alloc(Number(opened.size));
     let offset = 0;
