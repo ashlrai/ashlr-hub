@@ -13,6 +13,7 @@ import * as path from 'node:path';
 import {
   ASHLR_HUB_MCP_SERVER,
   detectEditors,
+  setEditorConfigTestHooksForTests,
   wireEditor,
   type WireEditorOptions,
 } from '../src/core/integrations/editors.js';
@@ -74,6 +75,7 @@ function sequenceRunner(
 }
 
 afterEach(() => {
+  setEditorConfigTestHooksForTests();
   for (const root of tempRoots) {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -131,6 +133,24 @@ describe('Claude user registry', () => {
     expect(backupNames).toEqual(['.claude.json.bak']);
   });
 
+  it('rotates an existing backup through private exclusive publication', async () => {
+    const configPath = jsonConfig('.claude.json', { generation: 1 });
+    fs.writeFileSync(`${configPath}.bak`, '{"backup":"older"}\n', 'utf8');
+
+    const wired = await wireEditor('claude', { configPath });
+    const backupNames = fs.readdirSync(path.dirname(configPath))
+      .filter(name => name.startsWith('.claude.json.bak.'));
+
+    expect(wired.ok).toBe(true);
+    expect(readJson(`${configPath}.bak`)).toEqual({ generation: 1 });
+    expect(backupNames).toHaveLength(1);
+    expect(readJson(path.join(path.dirname(configPath), backupNames[0]!))).toEqual({ backup: 'older' });
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(`${configPath}.bak`).mode & 0o777).toBe(0o600);
+      expect(fs.statSync(path.join(path.dirname(configPath), backupNames[0]!)).mode & 0o777).toBe(0o600);
+    }
+  });
+
   it('fails closed on malformed JSON without writing a backup', async () => {
     const configPath = path.join(tempRoot(), '.claude.json');
     fs.writeFileSync(configPath, '{"mcpServers":', 'utf8');
@@ -179,6 +199,102 @@ describe('Claude user registry', () => {
     if (process.platform !== 'win32') {
       expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
     }
+  });
+
+  it.skipIf(process.platform === 'win32')('refuses an existing symlink without touching its target', async () => {
+    const root = tempRoot();
+    const configPath = path.join(root, '.claude.json');
+    const externalPath = path.join(root, 'external.json');
+    const external = '{"external":"must-survive"}\n';
+    fs.writeFileSync(externalPath, external, 'utf8');
+    fs.symlinkSync(externalPath, configPath);
+
+    const wired = await wireEditor('claude', { configPath });
+
+    expect(wired.ok).toBe(false);
+    expect(wired.detail).toContain('failed to read config');
+    expect(fs.lstatSync(configPath).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(externalPath, 'utf8')).toBe(external);
+    expect(fs.existsSync(`${configPath}.bak`)).toBe(false);
+  });
+
+  it.skipIf(process.platform === 'win32')('refuses a symlinked backup without touching its target', async () => {
+    const root = tempRoot();
+    const configPath = path.join(root, '.claude.json');
+    const externalPath = path.join(root, 'external-backup.json');
+    const original = '{"original":"must-survive"}\n';
+    const external = '{"external":"must-survive"}\n';
+    fs.writeFileSync(configPath, original, 'utf8');
+    fs.writeFileSync(externalPath, external, 'utf8');
+    fs.symlinkSync(externalPath, `${configPath}.bak`);
+
+    const wired = await wireEditor('claude', { configPath });
+
+    expect(wired.ok).toBe(false);
+    expect(wired.detail).toContain('could not prepare config');
+    expect(fs.readFileSync(configPath, 'utf8')).toBe(original);
+    expect(fs.lstatSync(`${configPath}.bak`).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(externalPath, 'utf8')).toBe(external);
+  });
+
+  it.skipIf(process.platform === 'win32')('refuses a user-controlled symlink in the config ancestor chain', async () => {
+    const root = tempRoot();
+    const realRoot = path.join(root, 'real');
+    const nested = path.join(realRoot, 'nested');
+    const alias = path.join(root, 'alias');
+    fs.mkdirSync(nested, { recursive: true });
+    fs.symlinkSync(realRoot, alias);
+    const configPath = path.join(alias, 'nested', '.claude.json');
+    const original = '{"original":"must-survive"}\n';
+    fs.writeFileSync(configPath, original, 'utf8');
+
+    const wired = await wireEditor('claude', { configPath });
+
+    expect(wired.ok).toBe(false);
+    expect(wired.detail).toContain('user-controlled symlink');
+    expect(fs.readFileSync(configPath, 'utf8')).toBe(original);
+    expect(fs.existsSync(`${configPath}.bak`)).toBe(false);
+  });
+
+  it('preserves an external replacement that lands before publication', async () => {
+    const configPath = jsonConfig('.claude.json', { original: 'captured' });
+    const displacedPath = `${configPath}.displaced`;
+    const replacement = '{"replacement":"must-survive"}\n';
+    setEditorConfigTestHooksForTests({
+      beforeJsonConfigPublish: () => {
+        fs.renameSync(configPath, displacedPath);
+        fs.writeFileSync(configPath, replacement, 'utf8');
+      },
+    });
+
+    const wired = await wireEditor('claude', { configPath });
+
+    expect(wired.ok).toBe(false);
+    expect(wired.detail).toContain('changed before publication');
+    expect(fs.readFileSync(configPath, 'utf8')).toBe(replacement);
+    expect(readJson(displacedPath)).toEqual({ original: 'captured' });
+    expect(readJson(`${configPath}.bak`)).toEqual({ original: 'captured' });
+    expect(fs.readdirSync(path.dirname(configPath)).filter(name => name.endsWith('.tmp'))).toEqual([]);
+  });
+
+  it.skipIf(process.platform === 'win32')('does not follow a symlink created while a missing config is prepared', async () => {
+    const root = tempRoot();
+    const configPath = path.join(root, '.claude.json');
+    const externalPath = path.join(root, 'external.json');
+    const external = '{"external":"must-survive"}\n';
+    fs.writeFileSync(externalPath, external, 'utf8');
+    setEditorConfigTestHooksForTests({
+      beforeJsonConfigPublish: () => fs.symlinkSync(externalPath, configPath),
+    });
+
+    const wired = await wireEditor('claude', { configPath });
+
+    expect(wired.ok).toBe(false);
+    expect(wired.detail).toContain('changed before publication');
+    expect(fs.lstatSync(configPath).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(externalPath, 'utf8')).toBe(external);
+    expect(fs.existsSync(`${configPath}.bak`)).toBe(false);
+    expect(fs.readdirSync(root).filter(name => name.endsWith('.tmp'))).toEqual([]);
   });
 });
 

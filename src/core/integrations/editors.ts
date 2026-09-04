@@ -12,20 +12,34 @@
  */
 
 import {
-  copyFileSync,
+  closeSync,
+  constants as fsConstants,
   existsSync,
+  fchmodSync,
+  fstatSync,
+  fsyncSync,
+  lstatSync,
   mkdirSync,
-  readFileSync,
-  writeFileSync,
+  openSync,
+  readSync,
+  renameSync,
+  unlinkSync,
+  writeSync,
+  type BigIntStats,
 } from 'node:fs';
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
+
+import { fsyncDirectory } from '../util/durability.js';
 
 export type EditorTarget = 'claude' | 'codex' | 'cursor';
 
 export const ASHLR_HUB_MCP_SERVER = 'ashlr-hub';
 const MAX_COMMAND_OUTPUT_BYTES = 256 * 1024;
+const MAX_JSON_CONFIG_BYTES = 4 * 1024 * 1024;
+const PRIVATE_FILE_MODE = 0o600;
 
 const HOME = homedir();
 
@@ -74,6 +88,18 @@ export interface WireEditorOptions {
   runCommand?: CommandRunner;
 }
 
+interface EditorConfigTestHooks {
+  beforeJsonConfigPublish?: () => void;
+}
+
+let editorConfigTestHooks: EditorConfigTestHooks | undefined;
+
+/** Test-only seam for deterministic replacement-race coverage. */
+export function setEditorConfigTestHooksForTests(hooks?: EditorConfigTestHooks): void {
+  if (process.env.NODE_ENV !== 'test') throw new Error('editor config hooks are test-only');
+  editorConfigTestHooks = hooks;
+}
+
 class ConfigParseError extends Error {
   constructor(public readonly path: string, detail = 'config is not valid JSON') {
     super(`${detail}: ${path}`);
@@ -85,10 +111,79 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function parseJsonConfig(filePath: string): ConfigFileShape {
-  if (!existsSync(filePath)) return {};
-  const raw = readFileSync(filePath, 'utf8').trim();
-  if (!raw) return {};
+interface MissingConfigSnapshot { found: false }
+
+interface ExistingConfigSnapshot {
+  found: true;
+  stat: BigIntStats;
+  bytes: Buffer;
+}
+
+type ConfigSnapshot = MissingConfigSnapshot | ExistingConfigSnapshot;
+
+function currentUserOwns(stat: BigIntStats): boolean {
+  return typeof process.getuid !== 'function' || stat.uid === BigInt(process.getuid());
+}
+
+function sameFile(left: BigIntStats, right: BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function safeConfigFile(stat: BigIntStats): boolean {
+  return stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1n && currentUserOwns(stat);
+}
+
+function sameSnapshot(left: BigIntStats, right: BigIntStats): boolean {
+  return sameFile(left, right) && left.size === right.size &&
+    left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+}
+
+function readConfigSnapshot(filePath: string): ConfigSnapshot {
+  let fd: number | undefined;
+  try {
+    let named: BigIntStats;
+    try {
+      named = lstatSync(filePath, { bigint: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { found: false };
+      throw error;
+    }
+    if (!safeConfigFile(named) || named.size > BigInt(MAX_JSON_CONFIG_BYTES)) {
+      throw new Error(`refusing unsafe JSON config: ${filePath}`);
+    }
+    const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+    fd = openSync(filePath, fsConstants.O_RDONLY | noFollow);
+    const opened = fstatSync(fd, { bigint: true });
+    if (!safeConfigFile(opened) || !sameSnapshot(named, opened)) {
+      throw new Error(`JSON config changed while opening it: ${filePath}`);
+    }
+    const bytes = Buffer.alloc(Number(opened.size));
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = readSync(fd, bytes, offset, bytes.length - offset, offset);
+      if (count <= 0) throw new Error(`JSON config read made no progress: ${filePath}`);
+      offset += count;
+    }
+    if (readSync(fd, Buffer.alloc(1), 0, 1, bytes.length) !== 0) {
+      throw new Error(`JSON config grew while reading it: ${filePath}`);
+    }
+    const after = fstatSync(fd, { bigint: true });
+    const namedAfter = lstatSync(filePath, { bigint: true });
+    if (!safeConfigFile(after) || !safeConfigFile(namedAfter) ||
+      !sameSnapshot(opened, after) || !sameSnapshot(after, namedAfter)) {
+      throw new Error(`JSON config changed while reading it: ${filePath}`);
+    }
+    return { found: true, stat: after, bytes };
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function parseJsonConfig(filePath: string): { config: ConfigFileShape; snapshot: ConfigSnapshot } {
+  const snapshot = readConfigSnapshot(filePath);
+  if (!snapshot.found) return { config: {}, snapshot };
+  const raw = snapshot.bytes.toString('utf8').trim();
+  if (!raw) return { config: {}, snapshot };
 
   let parsed: unknown;
   try {
@@ -103,19 +198,124 @@ function parseJsonConfig(filePath: string): ConfigFileShape {
   if (parsed['mcpServers'] !== undefined && !isRecord(parsed['mcpServers'])) {
     throw new ConfigParseError(filePath, 'mcpServers must be a JSON object');
   }
-  return parsed as ConfigFileShape;
+  return { config: parsed as ConfigFileShape, snapshot };
 }
 
-function backupConfig(configPath: string): void {
-  const bakPath = `${configPath}.bak`;
-  if (existsSync(bakPath)) {
-    try {
-      copyFileSync(bakPath, `${bakPath}.${Date.now()}`);
-    } catch {
-      // Best effort only; the current config backup below remains mandatory.
+function rejectUserControlledSymlinkAncestors(directory: string): void {
+  let current = directory;
+  while (true) {
+    const stat = lstatSync(current, { bigint: true });
+    // Root-owned platform aliases such as macOS /var -> private/var are part of
+    // the trusted OS namespace. A symlink owned by this process' user is
+    // mutable by that same user and therefore not accepted in a config path.
+    if (stat.isSymbolicLink() && currentUserOwns(stat)) {
+      throw new Error(`refusing user-controlled symlink in JSON config path: ${current}`);
+    }
+    const parent = dirname(current);
+    if (parent === current) return;
+    current = parent;
+  }
+}
+
+function snapshotStillCurrent(configPath: string, expected: ConfigSnapshot): boolean {
+  try {
+    const current = lstatSync(configPath, { bigint: true });
+    return expected.found && safeConfigFile(current) && sameSnapshot(expected.stat, current);
+  } catch (error) {
+    return !expected.found && (error as NodeJS.ErrnoException).code === 'ENOENT';
+  }
+}
+
+function publishJsonConfig(
+  configPath: string,
+  bytes: Buffer,
+  expected: ConfigSnapshot,
+  beforePublish?: () => void,
+): void {
+  const directory = dirname(configPath);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  rejectUserControlledSymlinkAncestors(directory);
+  const directoryBefore = lstatSync(directory, { bigint: true });
+  if (!directoryBefore.isDirectory() || directoryBefore.isSymbolicLink() || !currentUserOwns(directoryBefore)) {
+    throw new Error(`refusing unsafe JSON config directory: ${directory}`);
+  }
+  const temporary = join(directory,
+    `.${basename(configPath)}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`);
+  let fd: number | undefined;
+  let temporaryIdentity: BigIntStats | undefined;
+  let published = false;
+  try {
+    const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+    fd = openSync(temporary,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollow,
+      PRIVATE_FILE_MODE);
+    temporaryIdentity = fstatSync(fd, { bigint: true });
+    if (!safeConfigFile(temporaryIdentity) || temporaryIdentity.size !== 0n) {
+      throw new Error('refusing unsafe JSON config temporary file');
+    }
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = writeSync(fd, bytes, offset, bytes.length - offset, offset);
+      if (count <= 0) throw new Error('JSON config write made no progress');
+      offset += count;
+    }
+    if (process.platform !== 'win32') fchmodSync(fd, PRIVATE_FILE_MODE);
+    fsyncSync(fd);
+    const written = fstatSync(fd, { bigint: true });
+    const namedTemporary = lstatSync(temporary, { bigint: true });
+    const directoryBeforePublish = lstatSync(directory, { bigint: true });
+    if (!safeConfigFile(written) || !safeConfigFile(namedTemporary) ||
+      !sameFile(temporaryIdentity, written) || !sameSnapshot(written, namedTemporary) ||
+      written.size !== BigInt(bytes.length) || !sameFile(directoryBefore, directoryBeforePublish)) {
+      throw new Error('JSON config paths changed during write');
+    }
+    // Node has no portable compare-and-rename primitive. This revalidation
+    // catches a completed editor/agent replacement before publication, but it
+    // is not an authorization boundary against a malicious same-UID process
+    // acting between this check and rename (that process can write the config
+    // directly anyway). The last observable seam is exposed for deterministic
+    // regression coverage rather than implying stronger kernel-level CAS.
+    beforePublish?.();
+    if (!snapshotStillCurrent(configPath, expected)) {
+      throw new Error('JSON config changed before publication');
+    }
+    renameSync(temporary, configPath);
+    published = true;
+    const installed = lstatSync(configPath, { bigint: true });
+    const openedAfterPublish = fstatSync(fd, { bigint: true });
+    const directoryAfterPublish = lstatSync(directory, { bigint: true });
+    if (!safeConfigFile(installed) || !safeConfigFile(openedAfterPublish) ||
+      !sameFile(written, installed) || installed.size !== written.size ||
+      !sameSnapshot(installed, openedAfterPublish) ||
+      !sameFile(directoryBefore, directoryAfterPublish)) {
+      throw new Error('JSON config installation identity check failed');
+    }
+    fsyncDirectory(directory);
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* preserve the persistence failure */ }
+    }
+    if (!published && temporaryIdentity) {
+      try {
+        const named = lstatSync(temporary, { bigint: true });
+        if (safeConfigFile(named) && sameFile(named, temporaryIdentity)) unlinkSync(temporary);
+      } catch { /* exact temporary already absent or replaced */ }
     }
   }
-  copyFileSync(configPath, bakPath);
+}
+
+function backupConfig(configPath: string, capturedBytes?: Buffer): void {
+  const source = capturedBytes === undefined ? readConfigSnapshot(configPath) : undefined;
+  const bytes = capturedBytes ?? (source?.found ? source.bytes : undefined);
+  if (!bytes) throw new Error(`config disappeared before backup: ${configPath}`);
+
+  const bakPath = `${configPath}.bak`;
+  const previous = readConfigSnapshot(bakPath);
+  if (previous.found) {
+    const archivePath = `${bakPath}.${Date.now()}.${randomBytes(8).toString('hex')}`;
+    publishJsonConfig(archivePath, previous.bytes, { found: false });
+  }
+  publishJsonConfig(bakPath, bytes, previous);
 }
 
 function sameStringArray(left: unknown, right: string[]): boolean {
@@ -291,8 +491,9 @@ function wireJsonEditor(
     : { command: 'ashlr', args: ['mcp'] };
 
   let existing: ConfigFileShape;
+  let snapshot: ConfigSnapshot;
   try {
-    existing = parseJsonConfig(configPath);
+    ({ config: existing, snapshot } = parseJsonConfig(configPath));
   } catch (err) {
     if (err instanceof ConfigParseError) {
       return { ok: false, detail: `refusing to write: ${err.message}` };
@@ -314,11 +515,7 @@ function wireJsonEditor(
   }
 
   try {
-    if (existsSync(configPath)) {
-      backupConfig(configPath);
-    } else {
-      mkdirSync(dirname(configPath), { recursive: true });
-    }
+    if (snapshot.found) backupConfig(configPath, snapshot.bytes);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { ok: false, detail: `could not prepare config: ${msg}` };
@@ -333,10 +530,12 @@ function wireJsonEditor(
   };
 
   try {
-    writeFileSync(configPath, `${JSON.stringify(merged, null, 2)}\n`, {
-      encoding: 'utf8',
-      mode: 0o600,
-    });
+    publishJsonConfig(
+      configPath,
+      Buffer.from(`${JSON.stringify(merged, null, 2)}\n`, 'utf8'),
+      snapshot,
+      editorConfigTestHooks?.beforeJsonConfigPublish,
+    );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { ok: false, detail: `write failed: ${msg}` };
