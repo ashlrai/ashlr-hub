@@ -347,6 +347,9 @@ async function isOllamaUp(): Promise<boolean> {
     const timer = setTimeout(() => controller.abort(), 2_000);
     let response: Response;
     try {
+      // Ollama's local API is intentionally cleartext but is pinned to the IPv4
+      // loopback literal: this probe cannot send model metadata off-host.
+      // nosemgrep: typescript.react.security.react-insecure-request.react-insecure-request
       response = await fetch('http://127.0.0.1:11434/api/tags', {
         method: 'GET',
         signal: controller.signal,
