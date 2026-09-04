@@ -99,14 +99,16 @@ Zero trust in Agent OS means every workload, tool call, repository mutation, pro
 
 ### Decision, administration, and enforcement
 
-The control plane uses the separation in NIST SP 800-207:
+The control plane adapts NIST SP 800-207's policy-engine, policy-administrator,
+and policy-enforcement-point model:
 
-- **Policy decision point:** evaluates signed identity, resource, environment,
+- **Policy engine:** evaluates signed identity, resource, environment,
   risk, budget, freshness, mission, and effect-class facts. It can allow, deny,
   or revoke eligibility, but it performs no effect.
-- **Capability administrator:** converts an allowed decision into one
-  single-purpose, short-lived, audience-bound capability. It cannot broaden the
-  decision or reuse an expired/revoked grant.
+- **Capability administrator:** a constrained specialization of NIST's policy
+  administrator. It converts an allowed engine decision into one single-purpose,
+  short-lived, audience-bound capability and commands only the named enforcement
+  point. It cannot broaden the decision or reuse an expired/revoked grant.
 - **Policy enforcement point:** the local broker immediately rechecks the
   capability and current posture, confines the process/tool session, mediates
   I/O, terminates access, and emits an outcome receipt.
@@ -170,8 +172,11 @@ Every value bet should close with one of four states:
 
 The learning loop retains failed hypotheses, verifier disagreements, elapsed time, token cost, operator intervention, and downstream outcome. It should reward calibrated prediction and durable impact, not code volume or agent agreement.
 
-DoD's zero-trust roadmap treats capability, activity, outcome, assessment, and
-authority as distinct evidence. Agent OS uses the same useful separation:
+The DoD zero-trust roadmap distinguishes capabilities, their intended outcomes
+and impacts, associated activities, responsibilities, and end states. The cATO
+memo separately requires continuous visibility and retains revocable human
+authorization. Inspired by those sources, Ashlr defines its own five-state
+evidence model:
 
 - **implemented** — source and artifact evidence exists for the capability;
 - **enforced** — the exact runtime rejects bypass and degraded inputs;
@@ -192,42 +197,57 @@ and [CISA Zero Trust Maturity Model v2.0](https://www.cisa.gov/sites/default/fil
 
 ## Production acceptance contract
 
-The control loop is not live until one exact release passes all of these gates:
+Before evaluating a candidate, the operator must sign and freeze a versioned
+acceptance manifest. It names the exact candidate and rollback, host and policy
+identities, verifier identities and independence constraints, mission corpus
+and stratification, outcome oracle and normalization, paired FIFO comparison
+protocol, credential-leak attack matrix, component-independence probes,
+load/concurrency/warmup profile, timing boundaries, minimum sample counts,
+allowed failure count, percentile estimator, and evidence retention. The
+candidate cannot write or select its own oracle, corpus, baseline, or verifier.
+A changed manifest creates a new acceptance run and cannot inherit results.
+
+The control loop is not live until one exact release passes all of these gates
+under that frozen manifest:
 
 1. **Fresh composition:** the cockpit reconstructs an authenticated snapshot in
    under 60 seconds, remains fresh for 24 hours, rejects a forged or replayed
    source, and visibly degrades after a producer crash.
 2. **Concurrent allocation:** two separately identified Codex accounts, one
    supported Claude capacity source, and one local model can run concurrently
-   through atomic leases without credential crossover or double allocation.
+   through atomic leases without double allocation and pass every declared
+   credential-isolation attack in the manifest.
 3. **Containment:** execution uses an authenticated deny-default broker;
    network, filesystem, process, environment, time, output, and cleanup limits
    are enforced, and a kill/revoke reaches the broker in under one second at
    p99 during the acceptance run.
 4. **Course-of-action choice:** each material bet records at least two genuinely
    different plans, assumptions, predicted value/cost, red-team findings, and a
-   deterministic selection reason before implementation begins.
+   deterministic selection reason before implementation begins. The manifest's
+   diversity predicate decides whether the plans are materially different.
 5. **Value-loop closure:** at most three active strategic bets each have a
    frozen hypothesis, baseline, budget, stop rule, independent outcome source,
    and terminal classification. A benchmark of at least 20 representative
-   missions must show more than 20 percent improvement in accepted outcome per
-   token over the declared FIFO baseline before adaptive routing is promoted.
+   pre-stratified missions must show more than 20 percent improvement in
+   oracle-scored outcome per token under the paired FIFO protocol before
+   adaptive routing is promoted.
 6. **Effect-class canary:** each new effect class completes at least 50 admitted
    actions over seven days with complete receipts, under 10 percent human
    intervention, zero unreceipted effects, and a tested rollback under five
    minutes before broader standing authority is considered.
 7. **Golden ecosystem mission:** one mission crosses Plugin, Hub, Cortex or
    Locus, an isolated agent, Phantom, and Stack through typed contracts while
-   each product remains independently usable; every handoff retains identity,
-   provenance, sensitivity, and acceptance linkage.
+   each product passes its frozen stand-alone probe; every handoff retains
+   identity, provenance, sensitivity, and acceptance linkage.
 8. **Operator command:** physical and software kill/revoke controls are tested
    under load. The Work Louder emergency action must be authenticated and reach
    local enforcement in under 250 milliseconds at p99 without relying on a
    cloud round trip.
 
 These thresholds are initial promotion criteria, not validated performance
-claims. Acceptance evidence must name its exact release, host, configuration,
-policy epoch, data set, clock interval, and verifier.
+claims. The manifest supplies the exact sampling and timing details; an
+acceptance receipt must bind that manifest plus the exact release, host,
+configuration, policy epoch, clock interval, raw measurements, and verifier.
 
 ## Current implementation boundary
 
