@@ -32,7 +32,11 @@ import {
   type RuntimeReleaseDependencyInventoryV2,
 } from './runtime-release-dependency-inventory.js';
 
-const MANIFEST_DIGEST_DOMAIN = 'ashlr:unsigned-runtime-release-manifest:v2';
+const MANIFEST_DIGEST_DOMAINS = {
+  2: 'ashlr:unsigned-runtime-release-manifest:v2',
+  3: 'ashlr:unsigned-runtime-release-manifest:v3',
+} as const;
+const CURRENT_MANIFEST_SCHEMA_VERSION = 3 as const;
 const MAX_MANIFEST_BYTES = 512 * 1024;
 const MAX_ARTIFACTS = 2_048;
 const MAX_ARTIFACT_BYTES = 128 * 1024 * 1024;
@@ -116,7 +120,7 @@ export interface UnsignedRuntimeReleaseManifest {
     source: 'caller-declared';
     targetManifestDigest: string | null;
   };
-  schemaVersion: 2;
+  schemaVersion: 2 | 3;
 }
 
 export interface BuildUnsignedRuntimeReleaseManifestOptions {
@@ -250,7 +254,7 @@ function manifestPayload(manifest: UnsignedRuntimeReleaseManifest): Omit<Unsigne
 
 function manifestDigest(payload: Omit<UnsignedRuntimeReleaseManifest, 'manifestDigest'>): string {
   return createHash('sha256')
-    .update(MANIFEST_DIGEST_DOMAIN, 'utf8')
+    .update(MANIFEST_DIGEST_DOMAINS[payload.schemaVersion], 'utf8')
     .update('\n', 'utf8')
     .update(canonicalJson(payload), 'utf8')
     .digest('hex');
@@ -479,8 +483,19 @@ function admitArtifact(
   paths.push(relativePath);
 }
 
+function pathEntryExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
 function discoverReleaseLayout(
   packageRoot: string,
+  schemaVersion: UnsignedRuntimeReleaseManifest['schemaVersion'],
   observation?: RuntimeReleaseObservationDeadline,
 ): ReleaseLayout {
   const directories = new Map<string, { identity: string; path: string; realPath: string }>();
@@ -502,7 +517,9 @@ function discoverReleaseLayout(
     maxBytes: MAX_PACKAGE_MANIFEST_BYTES,
   }, observation);
   admitArtifact(packageRoot, VERIFIER_RUNNER_PATH, budget, paths, undefined, observation);
-  admitArtifact(packageRoot, SCORECARD_HISTORY_WORKER_PATH, budget, paths, undefined, observation);
+  if (schemaVersion >= 3 || pathEntryExists(join(packageRoot, ...SCORECARD_HISTORY_WORKER_PATH.split('/')))) {
+    admitArtifact(packageRoot, SCORECARD_HISTORY_WORKER_PATH, budget, paths, undefined, observation);
+  }
 
   const visitRuntime = (relativeDirectory: string, depth: number): void => {
     requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest');
@@ -734,11 +751,12 @@ function completeReleaseScan(
   dependencyRoot: string,
   expectedPackageName: string,
   interpreterPath: string,
+  schemaVersion: UnsignedRuntimeReleaseManifest['schemaVersion'],
   observation?: RuntimeReleaseObservationDeadline,
   afterLayoutDiscovery?: () => void,
 ): ReleaseSnapshot {
   requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest');
-  const layout = discoverReleaseLayout(packageRoot, observation);
+  const layout = discoverReleaseLayout(packageRoot, schemaVersion, observation);
   afterLayoutDiscovery?.();
   requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest scan');
   const artifacts: UnsignedRuntimeReleaseArtifact[] = [];
@@ -783,6 +801,15 @@ function completeReleaseScan(
   requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest scan');
   const packageJson = parseJsonBytes(packageBytes, PACKAGE_MANIFEST_PATH, observation);
   const pkg = packageIdentity(packageJson, expectedPackageName);
+  const declaredFiles = Array.isArray(packageJson['files'])
+    ? packageJson['files'].filter((entry): entry is string => typeof entry === 'string')
+    : [];
+  if (schemaVersion === 3 && !declaredFiles.includes(SCORECARD_HISTORY_WORKER_PATH)) {
+    throw new Error('schema-v3 release package does not declare the scorecard history worker');
+  }
+  if (declaredFiles.includes(SCORECARD_HISTORY_WORKER_PATH)) {
+    artifactByPath(artifacts, SCORECARD_HISTORY_WORKER_PATH);
+  }
   requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest scan');
   const parsedInventory = parseRuntimeReleaseDependencyInventory(dependencyInventoryBytes);
   if (!parsedInventory.ok) throw new Error(parsedInventory.reason);
@@ -842,6 +869,7 @@ function coherentReleaseSnapshot(
   dependencyRoot: string,
   expectedPackageName: string,
   interpreterPath: string,
+  schemaVersion: UnsignedRuntimeReleaseManifest['schemaVersion'],
   afterFirstScan?: () => void,
   afterLayoutDiscovery?: (scan: 'first' | 'second') => void,
   observation?: RuntimeReleaseObservationDeadline,
@@ -854,6 +882,7 @@ function coherentReleaseSnapshot(
     dependencyRoot,
     expectedPackageName,
     interpreterPath,
+    schemaVersion,
     observation,
     () => afterLayoutDiscovery?.('first'),
   );
@@ -864,6 +893,7 @@ function coherentReleaseSnapshot(
     dependencyRoot,
     expectedPackageName,
     interpreterPath,
+    schemaVersion,
     observation,
     () => afterLayoutDiscovery?.('second'),
   );
@@ -898,7 +928,8 @@ function validateManifestShape(value: unknown): UnsignedRuntimeReleaseManifest {
     'rollbackDeclaration',
     'schemaVersion',
   ])) throw new Error('runtime release manifest has an invalid top-level shape');
-  if (value['schemaVersion'] !== 2 || value['algorithm'] !== 'sha256' ||
+  if ((value['schemaVersion'] !== 2 && value['schemaVersion'] !== 3) ||
+    value['algorithm'] !== 'sha256' ||
     value['assurance'] !== 'unsigned-observation-only') {
     throw new Error('runtime release manifest has an unsupported schema');
   }
@@ -982,7 +1013,9 @@ function validateManifestShape(value: unknown): UnsignedRuntimeReleaseManifest {
   }
 
   const artifactsValue = value['artifacts'];
-  if (!Array.isArray(artifactsValue) || artifactsValue.length < 5 || artifactsValue.length > MAX_ARTIFACTS) {
+  const minimumArtifacts = value['schemaVersion'] === 3 ? 6 : 5;
+  if (!Array.isArray(artifactsValue) || artifactsValue.length < minimumArtifacts ||
+    artifactsValue.length > MAX_ARTIFACTS) {
     throw new Error('runtime release manifest artifact count is invalid');
   }
   const artifacts: UnsignedRuntimeReleaseArtifact[] = artifactsValue.map((entry) => {
@@ -1016,7 +1049,9 @@ function validateManifestShape(value: unknown): UnsignedRuntimeReleaseManifest {
   artifactByPath(artifacts, LAUNCHER_PATH);
   artifactByPath(artifacts, RUNTIME_ENTRY_PATH);
   artifactByPath(artifacts, VERIFIER_RUNNER_PATH);
-  artifactByPath(artifacts, SCORECARD_HISTORY_WORKER_PATH);
+  if (value['schemaVersion'] === 3) {
+    artifactByPath(artifacts, SCORECARD_HISTORY_WORKER_PATH);
+  }
   if (packageArtifact.sha256 !== packageValue['sha256'] ||
     dependencyInventoryArtifact.sha256 !== dependencyInventory['sha256']) {
     throw new Error('runtime release manifest identity hash does not match its artifact');
@@ -1088,12 +1123,13 @@ function validateManifestShape(value: unknown): UnsignedRuntimeReleaseManifest {
       source: 'caller-declared',
       targetManifestDigest: rollback['targetManifestDigest'] as string | null,
     },
-    schemaVersion: 2,
+    schemaVersion: value['schemaVersion'],
   };
 }
 
-export function buildUnsignedRuntimeReleaseManifest(
+function buildUnsignedRuntimeReleaseManifestForSchema(
   options: BuildUnsignedRuntimeReleaseManifestOptions,
+  schemaVersion: UnsignedRuntimeReleaseManifest['schemaVersion'],
   observation?: RuntimeReleaseObservationDeadline,
 ): BuildUnsignedRuntimeReleaseManifestResult {
   try {
@@ -1128,6 +1164,7 @@ export function buildUnsignedRuntimeReleaseManifest(
       dependencyRoot,
       expectedPackageName,
       interpreterPath,
+      schemaVersion,
       testHooks?.afterFirstCompleteScan,
       testHooks?.afterReleaseLayoutDiscovery,
       observation,
@@ -1183,7 +1220,7 @@ export function buildUnsignedRuntimeReleaseManifest(
         source: 'caller-declared',
         targetManifestDigest: rollbackTargetDigest,
       },
-      schemaVersion: 2,
+      schemaVersion,
     };
     const manifest: UnsignedRuntimeReleaseManifest = {
       ...payload,
@@ -1202,6 +1239,17 @@ export function buildUnsignedRuntimeReleaseManifest(
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) };
   }
+}
+
+export function buildUnsignedRuntimeReleaseManifest(
+  options: BuildUnsignedRuntimeReleaseManifestOptions,
+  observation?: RuntimeReleaseObservationDeadline,
+): BuildUnsignedRuntimeReleaseManifestResult {
+  return buildUnsignedRuntimeReleaseManifestForSchema(
+    options,
+    CURRENT_MANIFEST_SCHEMA_VERSION,
+    observation,
+  );
 }
 
 export function parseUnsignedRuntimeReleaseManifest(
@@ -1267,7 +1315,11 @@ export function verifyUnsignedRuntimeReleaseManifest(
     declaredRollbackTargetDigest: options.declaredRollbackTargetDigest,
     ...(testHooks ? { __testHooks: testHooks } : {}),
   } as BuildUnsignedRuntimeReleaseManifestOptions;
-  const rebuilt = buildUnsignedRuntimeReleaseManifest(rebuildOptions, observation);
+  const rebuilt = buildUnsignedRuntimeReleaseManifestForSchema(
+    rebuildOptions,
+    parsed.manifest.schemaVersion,
+    observation,
+  );
   if (!rebuilt.ok) return rebuilt;
   try {
     requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest verification');

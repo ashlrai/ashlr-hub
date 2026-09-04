@@ -17,6 +17,7 @@ import {
   buildRuntimeReleaseEvidenceTrustRoot,
   parseRuntimeReleaseEvidenceEnvelope,
   parseRuntimeReleaseEvidenceTrustRoot,
+  RUNTIME_RELEASE_EVIDENCE_CURRENT_COVERAGE_V3,
   RUNTIME_RELEASE_EVIDENCE_ENVELOPE_DOMAIN_V2,
   RUNTIME_RELEASE_EVIDENCE_REQUIRED_COVERAGE_V2,
   runtimeReleaseEvidenceKeyId,
@@ -198,7 +199,7 @@ describe('signed runtime release evidence envelope', () => {
       keyId: runtimeReleaseEvidenceKeyId(keys.publicKey),
       payload: {
         assurance: 'signed-observation-only',
-        coverage: RUNTIME_RELEASE_EVIDENCE_REQUIRED_COVERAGE_V2,
+        coverage: RUNTIME_RELEASE_EVIDENCE_CURRENT_COVERAGE_V3,
         expiresAt: EXPIRES_AT,
         expectedRevision: REVISION,
         issuedAt: ISSUED_AT,
@@ -412,6 +413,20 @@ describe('signed runtime release evidence envelope', () => {
     expect(parseRuntimeReleaseEvidenceEnvelope(encode(overclaim))).toEqual({
       ok: false,
       reason: 'runtime release evidence coverage is incomplete or unsupported',
+    });
+
+    const downgraded = object(signed(manifest, keys.privateKey));
+    const downgradedPayload = downgraded['payload'] as Record<string, unknown>;
+    (downgradedPayload['coverage'] as Record<string, unknown>)['artifactSet'] =
+      RUNTIME_RELEASE_EVIDENCE_REQUIRED_COVERAGE_V2.artifactSet;
+    resign(downgraded, keys.privateKey);
+    expect(verifyRuntimeReleaseEvidenceEnvelope({
+      envelope: encode(downgraded),
+      manifest,
+      trustRoot: trustRoot(keys.publicKey),
+    })).toEqual({
+      ok: false,
+      reason: 'runtime release evidence coverage does not match manifest schema',
     });
   });
 

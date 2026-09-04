@@ -296,7 +296,7 @@ describe('release artifact contract v1', () => {
       ok: true,
       manifest: {
         dependencyInventory: { packageCount: 1 },
-        schemaVersion: 2,
+        schemaVersion: 3,
       },
     });
   });
@@ -766,6 +766,18 @@ describe('release artifact contract v1', () => {
       ok: false,
       reason: 'release package files declaration is not portable',
     });
+  });
+
+  it('keeps pre-worker root declarations portable for legacy rollback inspection', () => {
+    const release = fixture();
+    const packagePath = join(release.packageRoot, 'package.json');
+    const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as Record<string, unknown>;
+    writeFileSync(packagePath, `${JSON.stringify({
+      ...packageJson,
+      files: ['bin', 'dist', 'scripts/run-verify-command.mjs'],
+    })}\n`);
+
+    expect(buildRuntimeReleaseDependencyInventory(release.packageRoot)).toMatchObject({ ok: true });
   });
 
   it('admits the shipped M521 contract through the closed portable root-files allowlist', () => {

@@ -504,7 +504,6 @@ function rootPackageIsPortable(
     'bin',
     'dist',
     'scripts/run-verify-command.mjs',
-    'scripts/scorecard-history-worker.mjs',
   ];
   if (!Array.isArray(declaredFiles) || declaredFiles.length === 0 ||
     declaredFiles.some((entry) => typeof entry !== 'string' || !allowedFiles.has(entry)) ||

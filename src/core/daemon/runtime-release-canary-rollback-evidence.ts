@@ -4,6 +4,7 @@ import {
   verifyRuntimeReleaseEvidenceEnvelope,
   type VerifyRuntimeReleaseEvidenceEnvelopeResult,
 } from './runtime-release-evidence-envelope.js';
+import { parseUnsignedRuntimeReleaseManifest } from './runtime-release-manifest.js';
 
 export const RUNTIME_RELEASE_CANARY_ROLLBACK_EVIDENCE_SCHEMA_VERSION = 2 as const;
 export const RUNTIME_RELEASE_CANARY_ROLLBACK_EVIDENCE_AUTHORITY =
@@ -20,6 +21,7 @@ export type RuntimeReleaseCanaryRollbackEvidenceBlockerCode =
   | 'trust-root-identity-mismatch'
   | 'trust-root-pair-mismatch'
   | 'candidate-signature-invalid'
+  | 'candidate-manifest-schema-unsupported'
   | 'rollback-signature-invalid'
   | 'candidate-release-identity-mismatch'
   | 'rollback-release-identity-mismatch'
@@ -327,6 +329,13 @@ export function evaluateRuntimeReleaseCanaryRollbackEvidence(
     manifest: rollback.manifest,
     trustRoot: rollback.trustRoot,
   });
+  const candidateManifest = parseUnsignedRuntimeReleaseManifest(candidate.manifest);
+  if (candidateManifest.ok && candidateManifest.manifest.schemaVersion !== 3) {
+    blockers.push(blocker(
+      'candidate-manifest-schema-unsupported',
+      'The candidate must use current runtime release manifest schema v3.',
+    ));
+  }
   if (!candidateVerification.ok) {
     blockers.push(blocker(
       'candidate-signature-invalid',

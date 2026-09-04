@@ -551,6 +551,20 @@ observations to match byte-for-byte. Archive builds truthfully retain
 `github-actions` identity. Extraction is supported only on Darwin with checked
 bsdtar or Linux with checked GNU tar and fails closed elsewhere.
 
+New candidate observations emit unsigned runtime-manifest schema v3. Schema v3
+uses its own digest domain and requires
+`scripts/scorecard-history-worker.mjs` to be both declared by the root package
+and bound as an artifact. The verifier retains reader-first compatibility with
+genuine schema-v2 packages that predate that worker, using the unchanged v2
+digest domain. A schema-v2 package that does contain the worker must bind it;
+the candidate slot rejects schema v2, while the rollback slot may use a valid
+v2 or v3 release. This compatibility bridge preserves an independently pinned
+3.3.2 rollback without weakening the current candidate contract.
+The signed envelope names the v3 scorecard-worker artifact set explicitly. Its
+v2 trust-root coverage remains the backward-compatible minimum: a v3 envelope
+may satisfy that minimum only when its coverage exactly matches the v3 manifest
+schema, so re-signing a v3 manifest with the legacy coverage literal is refused.
+
 The release evidence is signed and immediately verified with a fresh Ed25519
 key held only in process memory. Its envelope expires after 10 minutes and its
 key declaration after 15 minutes. The final redacted receipt is also
