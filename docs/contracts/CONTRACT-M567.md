@@ -23,6 +23,8 @@ that any host, image, engine, or seccomp control is commissioned or effective.
 - Permit, request, execution identity, capacity evidence, request deadline,
   broker, engine, image, native producer, seccomp, create configuration, output
   limit, and the exact one-slot reservation must all bind before container I/O.
+- The signed request/permit window is rechecked immediately before create and
+  immediately before start; setup latency cannot turn stale authority into work.
 - One request nonce deterministically names one capacity allocation and one
   container. The durable M566 finalized-allocation tombstone is the consume-once
   replay fence; idempotent acquisition cannot redisclose its owner capability.
@@ -50,6 +52,9 @@ read-only root, `no-new-privileges`, the exact inline seccomp profile, and the
 signed CPU/memory/swap/PID limits. A post-create inspection must match the full
 effective policy before start. Stdin is the one canonical request frame;
 multiplexed stdout/stderr and JSON response framing are bounded and authenticated.
+Docker's empty wire values for private PID/UTS namespaces and its RFC3339Nano
+and zero-value lifecycle timestamps are translated without weakening the signed
+private-namespace policy.
 Non-wait Engine control requests are capped at five seconds; the capacity window
 must cover the signed deadline plus the full kill, wait, frame-drain, inspect,
 remove, absence-confirmation, cleanup-grace, and settlement budget.
@@ -75,6 +80,9 @@ returned only after the signed response, producer digest, wait/final inspection,
 V2 finalize attestation, removal, lease release, and journal settlement all
 agree. Deadline or output overflow causes bounded kill/wait and cleanup. Any
 ambiguous create transport failure remains journaled and is never retried.
+A negative name lookup is not proof that an already-sent create cannot become
+visible later; the lease-held record remains active until cleanup-only recovery
+observes and removes the container.
 
 `recover()` is cleanup-only. It first rechecks the pinned engine identity, then
 resolves a deterministic name if create may have occurred, kills a still-running
@@ -99,8 +107,8 @@ M567 tests cover pure permit verification, fake Unix-socket Engine translation,
 fragmented/bounded attach frames, unsafe socket aliases, private journal
 durability and corruption, default-off behavior, verifier pinning, exact
 admission, replay denial, removal-before-release, capacity-window refusal,
-oversized output cleanup, ambiguous-create recovery, running-container cleanup,
-removal-confirmed settlement, and engine-drift refusal. Commissioning still
+oversized output cleanup, delayed ambiguous-create visibility, running-container
+cleanup, removal-confirmed settlement, and engine-drift refusal. Commissioning still
 requires a separately authorized image/seccomp/key installation, a pinned host
 configuration, live Docker acceptance tests, daemon integration, operational
 rollback, and an explicit activation decision.

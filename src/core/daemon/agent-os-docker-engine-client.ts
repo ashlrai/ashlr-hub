@@ -180,10 +180,18 @@ function sameSocket(left: SocketIdentity, right: BigIntStats): boolean {
 }
 
 function timestampOrEmpty(value: unknown): { valid: boolean; value: string | null } {
-  if (value === '') return { valid: true, value: null };
-  if (typeof value !== 'string') return { valid: false, value: null };
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) && new Date(parsed).toISOString() === value
+  if (value === '' || value === '0001-01-01T00:00:00Z' ||
+    value === '0001-01-01T00:00:00.000000000Z') return { valid: true, value: null };
+  if (typeof value !== 'string' ||
+    !/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z$/u.test(value)) {
+    return { valid: false, value: null };
+  }
+  const normalized = value.includes('.')
+    ? value.replace(/\.([0-9]{1,9})Z$/u, (_match, fraction: string) =>
+      `.${fraction.slice(0, 3).padEnd(3, '0')}Z`)
+    : value.replace(/Z$/u, '.000Z');
+  const parsed = Date.parse(normalized);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === normalized
     ? { valid: true, value }
     : { valid: false, value: null };
 }
@@ -214,9 +222,11 @@ function createRequestBody(
     NetworkDisabled: true,
     HostConfig: {
       NetworkMode: 'none',
-      PidMode: 'private',
+      // Docker represents private PID and UTS namespaces with the empty wire
+      // value. The literal "private" is valid for IPC/cgroup namespaces only.
+      PidMode: '',
       IpcMode: 'private',
-      UtsMode: 'private',
+      UTSMode: '',
       CgroupnsMode: 'private',
       Privileged: false,
       CapAdd: [],
@@ -277,9 +287,9 @@ function inspectEffectivePolicy(
   check('healthcheck', config['Healthcheck'], { Test: ['NONE'] });
   check('network-disabled', config['NetworkDisabled'], true);
   check('network-mode', host['NetworkMode'], 'none');
-  check('pid-mode', host['PidMode'], 'private');
+  check('pid-mode', host['PidMode'], '');
   check('ipc-mode', host['IpcMode'], 'private');
-  check('uts-mode', host['UtsMode'], 'private');
+  check('uts-mode', host['UTSMode'], '');
   check('cgroupns-mode', host['CgroupnsMode'], 'private');
   check('privileged', host['Privileged'], false);
   check('cap-add', host['CapAdd'] ?? [], []);

@@ -414,6 +414,17 @@ export class AgentOsLocalContainerBrokerV1 {
       agentOsDockerEngineCreateRequestDigestV1(this.#policy!, this.#seccompProfile));
   }
 
+  #dispatchWindowOpen(request: AgentOsObservationSandboxRequestV1,
+    permit: AgentOsLocalContainerDispatchPermitEnvelopeV1): boolean {
+    try {
+      const now = this.#clock().getTime();
+      return Number.isSafeInteger(now) && now >= 0 &&
+        now < Date.parse(request.deadlineAt) && now < Date.parse(permit.expiresAt);
+    } catch {
+      return false;
+    }
+  }
+
   async run(input: AgentOsLocalContainerBrokerInputV1): Promise<AgentOsLocalContainerBrokerResultV1> {
     if (!this.#enabled) return result('withheld', 'disabled');
     if (!this.#ready()) return result('unavailable', 'invalid-dependencies');
@@ -602,6 +613,11 @@ export class AgentOsLocalContainerBrokerV1 {
       ports.capacity.release({ allocationId, ownerCapability: lease.ownerCapability, expectedLeaseEpoch: 1 });
       return result('unavailable', 'journal-unavailable', base);
     }
+    if (!this.#dispatchWindowOpen(request, input.permit)) {
+      return this.#settleWithoutContainer(
+        'deadline-exceeded', journal.record, lock, allocationId, lease.ownerCapability, base,
+      );
+    }
     const created = await ports.engine.createContainer(containerName, policy, this.#seccompProfile);
     if (!created.ok) return this.#reconcileAmbiguousCreate(
       journal.record, lock, allocationId, lease.ownerCapability, containerName, base,
@@ -662,6 +678,13 @@ export class AgentOsLocalContainerBrokerV1 {
       'attach-failed', prepare, request, allocationId, lease.ownerCapability,
       created.value.containerId, containerName, null, null, journal.record, lock, base,
     );
+    if (!this.#dispatchWindowOpen(request, input.permit)) {
+      attached.value.abort();
+      return this.#cleanupAfterCreate(
+        'deadline-exceeded', prepare, request, allocationId, lease.ownerCapability,
+        created.value.containerId, containerName, null, bindings, journal.record, lock, base,
+      );
+    }
     const started = await ports.engine.startContainer(created.value.containerId);
     if (!started.ok) {
       attached.value.abort();
@@ -779,9 +802,10 @@ export class AgentOsLocalContainerBrokerV1 {
     const ports = this.#ports!;
     const resolved = await ports.engine.resolveContainerIdByName(containerName);
     if (!resolved.ok && resolved.reason === 'container-not-found') {
-      return this.#settleWithoutContainer(
-        'container-create-failed', journal, lock, allocationId, ownerCapability, base,
-      );
+      // A negative lookup cannot prove that an already-sent create request will
+      // not become visible later. Keep the durable lease-held record and
+      // reservation active so a later cleanup-only recovery can reconcile it.
+      return result('unavailable', 'recovery-required', base);
     }
     if (!resolved.ok) return result('unavailable', 'recovery-required', base);
     const engineCreateRequestDigest = agentOsDockerEngineCreateRequestDigestV1(
@@ -1029,10 +1053,10 @@ export class AgentOsLocalContainerBrokerV1 {
         if (!containerId) {
           const resolved = await ports.engine.resolveContainerIdByName(current.containerName);
           if (!resolved.ok && resolved.reason === 'container-not-found') {
-            const abandoned = ports.journal.advance(current.runId, current.recordDigest, 'abandoned', {
-              outcome: 'recovered-after-crash',
-            }, locked.lock);
-            if (abandoned.ok) recovered += 1; else { unreconciled += 1; stopReasons.push('journal-unavailable'); }
+            // Create may still be completing after a lost transport receipt.
+            // Preserve the active record and retry only cleanup on a later pass.
+            unreconciled += 1;
+            stopReasons.push('ambiguous-create-not-found');
             continue;
           }
           if (!resolved.ok) { unreconciled += 1; stopReasons.push(resolved.reason); continue; }

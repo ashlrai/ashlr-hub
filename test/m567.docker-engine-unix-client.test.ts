@@ -53,6 +53,8 @@ interface Fixture {
   createdBody: Record<string, unknown> | null;
   removed: boolean;
   mismatchEnvironment: boolean;
+  startedAt: string;
+  finishedAt: string;
 }
 
 const fixtures: Fixture[] = [];
@@ -85,6 +87,8 @@ async function fixture(): Promise<Fixture> {
     createdBody: null,
     removed: false,
     mismatchEnvironment: false,
+    startedAt: '2026-09-04T18:00:01.123456789Z',
+    finishedAt: '2026-09-04T18:00:02.987654321Z',
   };
   const server = createServer(async (request, response) => {
     const body = await readBody(request);
@@ -128,7 +132,8 @@ async function fixture(): Promise<Fixture> {
         NetworkSettings: { Networks: { none: {} } },
         State: {
           Running: false, OOMKilled: false, ExitCode: 0,
-          StartedAt: '2026-09-04T18:00:01.000Z', FinishedAt: '2026-09-04T18:00:02.000Z',
+          StartedAt: state.startedAt,
+          FinishedAt: state.finishedAt,
         },
       });
       return;
@@ -171,6 +176,8 @@ async function fixture(): Promise<Fixture> {
       get: () => state.mismatchEnvironment,
       set: (next) => { state.mismatchEnvironment = next; },
     },
+    startedAt: { get: () => state.startedAt, set: (next) => { state.startedAt = next; } },
+    finishedAt: { get: () => state.finishedAt, set: (next) => { state.finishedAt = next; } },
   });
   fixtures.push(value);
   return value;
@@ -241,7 +248,7 @@ describe('M567 constrained Docker Engine Unix client', () => {
       Entrypoint: ['/opt/ashlr/bin/agent-os-observation-producer'],
       Cmd: ['--stdio'], Env: [], Labels: {}, Healthcheck: { Test: ['NONE'] },
       HostConfig: {
-        NetworkMode: 'none', PidMode: 'private', IpcMode: 'private', UtsMode: 'private',
+        NetworkMode: 'none', PidMode: '', IpcMode: 'private', UTSMode: '',
         CgroupnsMode: 'private', Privileged: false, CapAdd: [], CapDrop: ['ALL'],
         ReadonlyRootfs: true, Mounts: [], Binds: [], PortBindings: {}, Devices: [],
         DeviceRequests: [], PublishAllPorts: false, AutoRemove: false, Init: false,
@@ -252,7 +259,22 @@ describe('M567 constrained Docker Engine Unix client', () => {
     expect(JSON.stringify(value.createdBody)).not.toContain('SECRET=');
     expect(await engine.inspectContainer({
       containerId: CONTAINER_ID, containerName: name, policy: policy(), seccompProfile: SECCOMP,
-    })).toMatchObject({ ok: true, value: { effectivePolicyMatched: true, running: false } });
+    })).toMatchObject({ ok: true, value: {
+      effectivePolicyMatched: true,
+      running: false,
+      startedAt: '2026-09-04T18:00:01.123456789Z',
+      finishedAt: '2026-09-04T18:00:02.987654321Z',
+    } });
+    value.startedAt = '0001-01-01T00:00:00Z';
+    value.finishedAt = '0001-01-01T00:00:00.000000000Z';
+    expect(await engine.inspectContainer({
+      containerId: CONTAINER_ID, containerName: name, policy: policy(), seccompProfile: SECCOMP,
+    })).toMatchObject({ ok: true, value: { startedAt: null, finishedAt: null } });
+    value.startedAt = '2026-02-30T18:00:01.123456789Z';
+    expect(await engine.inspectContainer({
+      containerId: CONTAINER_ID, containerName: name, policy: policy(), seccompProfile: SECCOMP,
+    })).toEqual({ ok: false, reason: 'response-invalid' });
+    value.startedAt = '2026-09-04T18:00:01.123456789Z';
     value.mismatchEnvironment = true;
     expect(await engine.inspectContainer({
       containerId: CONTAINER_ID, containerName: name, policy: policy(), seccompProfile: SECCOMP,

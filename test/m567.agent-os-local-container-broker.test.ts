@@ -619,6 +619,63 @@ describe('M567 default-off local-container broker', () => {
     expect(fake.startContainer).not.toHaveBeenCalled();
   });
 
+  it('rechecks the signed dispatch window immediately before create', async () => {
+    const value = fixture();
+    const selectedRequest = request({ deadlineAt: new Date(NOW + 100).toISOString() });
+    const selectedEvidence = evidence();
+    const fake = engine(selectedRequest);
+    const brokerNow = { value: NOW };
+    fake.inspectEngine.mockImplementationOnce(async () => {
+      brokerNow.value = NOW + 101;
+      return { ok: true, value: {
+        engineDigest: ENGINE_DIGEST, apiVersion: '1.54', minApiVersion: '1.40', version: 'fixture',
+        gitCommit: 'fixture', os: 'linux', arch: 'arm64', socketDevice: '1', socketInode: '2',
+      } };
+    });
+
+    expect(await broker(value, fake, true, { clock: () => new Date(brokerNow.value) }).run({
+      request: selectedRequest,
+      permit: permit(selectedRequest, selectedEvidence),
+      capacityEvidence: selectedEvidence,
+    })).toMatchObject({
+      state: 'withheld', reason: 'deadline-exceeded', replayAdmissionConsumed: true,
+      capacityReleased: true, containerRemovalConfirmed: false,
+    });
+    expect(fake.createContainer).not.toHaveBeenCalled();
+    expect(fake.startContainer).not.toHaveBeenCalled();
+    expect(value.journal.inspect()).toMatchObject({ activeRuns: [], terminalRunCount: 1 });
+  });
+
+  it('rechecks the signed dispatch window immediately before start', async () => {
+    const value = fixture();
+    const selectedRequest = request({ deadlineAt: new Date(NOW + 100).toISOString() });
+    const selectedEvidence = evidence();
+    const fake = engine(selectedRequest);
+    const brokerNow = { value: NOW };
+    const abort = vi.fn();
+    fake.openAttachment.mockImplementationOnce(async () => {
+      brokerNow.value = NOW + 101;
+      return { ok: true, value: {
+        writeAndClose: vi.fn(() => true),
+        abort,
+        completion: new Promise(() => {}),
+      } };
+    });
+
+    expect(await broker(value, fake, true, { clock: () => new Date(brokerNow.value) }).run({
+      request: selectedRequest,
+      permit: permit(selectedRequest, selectedEvidence),
+      capacityEvidence: selectedEvidence,
+    })).toMatchObject({
+      state: 'withheld', reason: 'deadline-exceeded', replayAdmissionConsumed: true,
+      containerRemovalConfirmed: true, capacityReleased: true,
+    });
+    expect(abort).toHaveBeenCalledOnce();
+    expect(fake.createContainer).toHaveBeenCalledOnce();
+    expect(fake.startContainer).not.toHaveBeenCalled();
+    expect(fake.removeContainer).toHaveBeenCalledOnce();
+  });
+
   it('kills an oversized response, removes the container, and withholds all output', async () => {
     const value = fixture();
     const selectedRequest = request();
@@ -659,6 +716,7 @@ describe('M567 default-off local-container broker', () => {
     expect(fake.createContainer).toHaveBeenCalledOnce();
     expect(fake.startContainer).not.toHaveBeenCalled();
 
+    fake.resolveContainerIdByName.mockResolvedValueOnce({ ok: true, value: CONTAINER_ID });
     expect(await selectedBroker.recover()).toMatchObject({
       state: 'recovered', recoveredRuns: 1, unreconciledRuns: 0,
     });
@@ -710,6 +768,41 @@ describe('M567 default-off local-container broker', () => {
     expect(fake.removeContainer).not.toHaveBeenCalled();
     expect(value.journal.inspect().activeRuns).toHaveLength(1);
     expect(value.capacityStore.inspect().leases[0]).toMatchObject({ state: 'reserved' });
+  });
+
+  it('keeps a negative ambiguous-create lookup active until delayed visibility permits cleanup', async () => {
+    const value = fixture();
+    const selectedRequest = request();
+    const selectedEvidence = evidence();
+    const fake = engine(selectedRequest);
+    fake.createContainer.mockResolvedValueOnce({ ok: false, reason: 'request-timed-out' });
+
+    expect(await broker(value, fake).run({
+      request: selectedRequest,
+      permit: permit(selectedRequest, selectedEvidence),
+      capacityEvidence: selectedEvidence,
+    })).toMatchObject({
+      state: 'unavailable', reason: 'recovery-required', replayAdmissionConsumed: true,
+      containerRemovalConfirmed: false, capacityReleased: false,
+    });
+    expect(value.journal.inspect().activeRuns).toHaveLength(1);
+    expect(value.capacityStore.inspect().leases[0]).toMatchObject({ state: 'reserved' });
+
+    expect(await broker(value, fake).recover()).toMatchObject({
+      state: 'unavailable', recoveredRuns: 0, unreconciledRuns: 1,
+      stopReasons: ['ambiguous-create-not-found'],
+    });
+    expect(value.journal.inspect().activeRuns).toHaveLength(1);
+
+    fake.resolveContainerIdByName.mockResolvedValueOnce({ ok: true, value: CONTAINER_ID });
+    expect(await broker(value, fake).recover()).toMatchObject({
+      state: 'recovered', recoveredRuns: 1, unreconciledRuns: 0,
+    });
+    expect(fake.createContainer).toHaveBeenCalledOnce();
+    expect(fake.startContainer).not.toHaveBeenCalled();
+    expect(fake.removeContainer).toHaveBeenCalledOnce();
+    expect(fake.confirmContainerAbsent).toHaveBeenCalledOnce();
+    expect(value.journal.inspect()).toMatchObject({ activeRuns: [], terminalRunCount: 1 });
   });
 
   it('kills and removes a running journaled container during cleanup-only recovery', async () => {
