@@ -36,6 +36,12 @@ export const NAV_GROUPS: NavGroup[] = [
         description: 'Repos, activity, runs, swarms, MCP health, genome, and daemon status at a glance.',
         implemented: true,
       },
+      {
+        path: '/agent-os',
+        label: 'Agent OS',
+        description: 'Authenticated, observation-only decision spine for capability runway and value bets.',
+        implemented: true,
+      },
     ],
   },
   {

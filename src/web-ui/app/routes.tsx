@@ -38,6 +38,7 @@ import { FleetView } from '../routes/control/fleet/FleetView.js';
 import { SecurityView } from '../routes/control/security/SecurityView.js';
 import { GoalsView } from '../routes/goals/GoalsView.js';
 import { InboxView } from '../routes/inbox/InboxView.js';
+import { AgentOsView } from '../routes/agent-os/AgentOsView.js';
 import { NAV_GROUPS, ALL_NAV_LEAVES } from './nav-config.js';
 
 export function AppRoutes() {
@@ -55,6 +56,7 @@ export function AppRoutes() {
           ),
         )}
         <Route path="/overview" element={<FleetDashboardView />} />
+        <Route path="/agent-os" element={<AgentOsView />} />
         <Route path="/journal" element={<JournalView />} />
         <Route path="/intelligence/pulse" element={<PulseView />} />
         <Route path="/intelligence/genome" element={<GenomeView />} />
