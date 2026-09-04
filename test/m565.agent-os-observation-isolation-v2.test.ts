@@ -11,6 +11,7 @@ import { describe, expect, it } from 'vitest';
 import {
   AGENT_OS_LOCAL_CONTAINER_POLICY_V1,
   AGENT_OS_LOCAL_CONTAINER_NATIVE_PRODUCER_ENTRYPOINT_V1,
+  agentOsLocalContainerCreatePolicyDigestV1,
   buildAgentOsLocalContainerCreatePolicyV1,
   inspectAgentOsLocalContainerCreatePolicyV1,
   type AgentOsLocalContainerCreatePolicyV1,
@@ -40,6 +41,7 @@ const limits = (): AgentOsLocalContainerLimitsV1 => ({
   pidsLimit: 1,
   maxDurationMs: 60_000,
   maxOutputBytes: 1_048_576,
+  cleanupStartGraceMs: 1_000,
 });
 
 const policyInput = () => ({
@@ -259,8 +261,31 @@ describe('M565 Agent OS local-container create policy', () => {
 
   it('rejects accessors, extra fields, sparse commands, and prototype-bearing nested records', () => {
     const accessor = mutablePolicy() as unknown as Record<string, unknown>;
-    Object.defineProperty(accessor, 'image', { enumerable: true, get: () => policyInput().image });
+    let getterCalls = 0;
+    Object.defineProperty(accessor, 'image', {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        (accessor as any).privileged = true;
+        return policyInput().image;
+      },
+    });
     expect(inspectAgentOsLocalContainerCreatePolicyV1(accessor).reason).toBe('invalid-input');
+    expect(agentOsLocalContainerCreatePolicyDigestV1(accessor)).toBeNull();
+    expect(getterCalls).toBe(0);
+
+    let proxyReads = 0;
+    const proxyTarget = mutablePolicy();
+    const privilegedSwap = new Proxy(proxyTarget, {
+      getOwnPropertyDescriptor(target, property) {
+        proxyReads += 1;
+        if (proxyReads > 2) target.privileged = true;
+        return Reflect.getOwnPropertyDescriptor(target, property);
+      },
+    });
+    expect(inspectAgentOsLocalContainerCreatePolicyV1(privilegedSwap).reason).toBe('invalid-input');
+    expect(agentOsLocalContainerCreatePolicyDigestV1(privilegedSwap)).toBeNull();
+    expect(proxyTarget.privileged).toBe(true);
 
     const extra = { ...mutablePolicy(), HostConfig: { Privileged: true } };
     expect(inspectAgentOsLocalContainerCreatePolicyV1(extra).reason).toBe('invalid-input');
@@ -273,7 +298,7 @@ describe('M565 Agent OS local-container create policy', () => {
     const inheritedLimits = mutablePolicy();
     inheritedLimits.limits = Object.assign(Object.create({ pidsLimit: 64 }), limits());
     expect(inspectAgentOsLocalContainerCreatePolicyV1(inheritedLimits).reason)
-      .toBe('limits-missing-or-invalid');
+      .toBe('invalid-input');
   });
 });
 
@@ -304,6 +329,24 @@ describe('M565 Agent OS observation isolation attestations', () => {
       prepareAttestationDigest: prepared.attestationDigest,
     });
     expectNoAuthority(finalizedResult as unknown as Record<string, unknown>);
+  });
+
+  it('verifies identical bytes twice but explicitly never claims nonce consumption', () => {
+    const prepared = prepare();
+    const first = verifyAgentOsObservationIsolationPrepareAttestationV2(
+      prepared, bindings(), policy(), verifier, NOW,
+    );
+    const second = verifyAgentOsObservationIsolationPrepareAttestationV2(
+      prepared, bindings(), policy(), verifier, NOW,
+    );
+    expect(first).toEqual(second);
+    for (const result of [first, second]) {
+      expect(result).toMatchObject({
+        state: 'verified',
+        replayConsumptionRequired: true,
+        replayConsumptionVerified: false,
+      });
+    }
   });
 
   it.each([
@@ -521,6 +564,10 @@ describe('M565 Agent OS observation isolation attestations', () => {
         cleanupStartedAt: new Date(NOW + 2_000).toISOString(),
         removedAt: new Date(NOW + 12_001).toISOString(),
       }),
+      postRun({
+        cleanupStartedAt: new Date(NOW + 2_001).toISOString(),
+        removedAt: new Date(NOW + 2_500).toISOString(),
+      }),
       postRun({ finishedAt: new Date(NOW + 50_001).toISOString() }),
     ];
     for (const evidence of invalidEvidence) {
@@ -528,6 +575,30 @@ describe('M565 Agent OS observation isolation attestations', () => {
         finalizeInput(prepared.attestationDigest, { postRun: evidence }), signer,
       )).toBeNull();
     }
+
+    const idleGap = postRun({
+      cleanupStartedAt: new Date(NOW + 100_000).toISOString(),
+      removedAt: new Date(NOW + 100_500).toISOString(),
+    });
+    expect(createAgentOsObservationIsolationFinalizeAttestationV2(
+      finalizeInput(prepared.attestationDigest, {
+        issuedAt: new Date(NOW + 101_000).toISOString(),
+        postRun: idleGap,
+      }),
+      signer,
+    )).toBeNull();
+
+    const cleanupBoundary = postRun({
+      cleanupStartedAt: new Date(NOW + 2_000).toISOString(),
+      removedAt: new Date(NOW + 2_500).toISOString(),
+    });
+    const cleanupBoundaryFinalized = createAgentOsObservationIsolationFinalizeAttestationV2(
+      finalizeInput(prepared.attestationDigest, { postRun: cleanupBoundary }), signer,
+    );
+    expect(verifyAgentOsObservationIsolationFinalizeAttestationV2(
+      cleanupBoundaryFinalized, prepared, bindings(), policy(), cleanupBoundary, verifier,
+      NOW + 4_000,
+    )).toMatchObject({ state: 'verified', cleanupTimingVerified: true });
 
     const cappedOutput = postRun({
       outputBytes: limits().maxOutputBytes,
