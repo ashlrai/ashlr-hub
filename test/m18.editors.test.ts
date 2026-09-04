@@ -9,11 +9,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { EventEmitter } from 'node:events';
+import type { ChildProcess } from 'node:child_process';
 
 import {
   ASHLR_HUB_MCP_SERVER,
   detectEditors,
   setEditorConfigTestHooksForTests,
+  terminateWindowsProcessTreeForTests,
   wireEditor,
   type WireEditorOptions,
 } from '../src/core/integrations/editors.js';
@@ -65,15 +68,13 @@ function codexEntry(command = 'ashlr', args = ['mcp']): RunnerResult {
 type AdversarialCodexMode = 'timeout' | 'stdout' | 'stderr';
 
 function installTermIgnoringCodex(root: string, mode: AdversarialCodexMode): {
-  binDir: string;
+  scriptPath: string;
   mutationPath: string;
 } {
-  const binDir = path.join(root, 'bin');
-  const executable = path.join(binDir, process.platform === 'win32' ? 'codex.cmd' : 'codex');
+  const scriptPath = path.join(root, 'term-ignoring-codex.cjs');
   const mutationPath = path.join(root, 'late-mutation');
-  fs.mkdirSync(binDir);
   fs.writeFileSync(path.join(root, 'mode'), mode, 'utf8');
-  const source = `#!/usr/bin/env node
+  const source = `
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
@@ -105,8 +106,8 @@ helper.once('message', () => {
 });
 setInterval(() => {}, 1000);
 `;
-  fs.writeFileSync(executable, source, { encoding: 'utf8', mode: 0o700 });
-  return { binDir, mutationPath };
+  fs.writeFileSync(scriptPath, source, { encoding: 'utf8', mode: 0o700 });
+  return { scriptPath, mutationPath };
 }
 
 async function exerciseTermIgnoringCodex(mode: AdversarialCodexMode): Promise<{
@@ -116,23 +117,24 @@ async function exerciseTermIgnoringCodex(mode: AdversarialCodexMode): Promise<{
 }> {
   const root = tempRoot();
   const configPath = path.join(root, 'config.toml');
-  const { binDir, mutationPath } = installTermIgnoringCodex(root, mode);
-  const originalPath = process.env['PATH'];
-  process.env['PATH'] = `${binDir}${path.delimiter}${originalPath ?? ''}`;
+  const { scriptPath, mutationPath } = installTermIgnoringCodex(root, mode);
   setEditorConfigTestHooksForTests({
+    commandExecutable: process.execPath,
+    commandArgumentPrefix: [scriptPath],
     // Keep the preliminary read on the production deadline. Only the mutating
     // add command is forced into the short timeout exercised by this test.
     commandTimeoutMs: args => args[1] === 'add' && mode === 'timeout' ? 150 : 15_000,
     commandTerminationGraceMs: 50,
   });
   const started = performance.now();
-  try {
-    const wired = await wireEditor('codex', { configPath });
-    return { detail: wired.detail, elapsedMs: performance.now() - started, mutationPath };
-  } finally {
-    if (originalPath === undefined) delete process.env['PATH'];
-    else process.env['PATH'] = originalPath;
-  }
+  const wired = await wireEditor('codex', { configPath });
+  return { detail: wired.detail, elapsedMs: performance.now() - started, mutationPath };
+}
+
+function fakeChildProcess(): ChildProcess {
+  const child = new EventEmitter() as ChildProcess;
+  child.kill = vi.fn(() => true);
+  return child;
 }
 
 function sequenceRunner(
@@ -567,6 +569,96 @@ describe('Codex official CLI registration', () => {
       expect(fs.existsSync(failed.mutationPath)).toBe(false);
     },
   );
+
+  it.runIf(process.platform === 'win32')(
+    'does not report timeout while a Windows descendant tree can still mutate',
+    async () => {
+      const failed = await exerciseTermIgnoringCodex('timeout');
+
+      expect(failed.detail).toContain('codex mcp add failed: command timed out after 15 seconds');
+      expect(failed.elapsedMs).toBeLessThan(5_000);
+      await new Promise(resolve => setTimeout(resolve, 550));
+      expect(fs.existsSync(failed.mutationPath)).toBe(false);
+    },
+  );
+
+  it.runIf(process.platform === 'win32').each(['stdout', 'stderr'] as const)(
+    'does not report $0 overflow while a Windows descendant tree can still mutate',
+    async (stream) => {
+      const failed = await exerciseTermIgnoringCodex(stream);
+
+      expect(failed.detail).toContain('codex mcp add failed: command output exceeded 256 KiB safety limit');
+      expect(failed.elapsedMs).toBeLessThan(5_000);
+      await new Promise(resolve => setTimeout(resolve, 550));
+      expect(fs.existsSync(failed.mutationPath)).toBe(false);
+    },
+  );
+
+  it('invokes taskkill with an argument-safe exact PID and reports non-zero completion', async () => {
+    const killer = fakeChildProcess();
+    const calls: Array<{ executable: string; args: readonly string[]; options: unknown }> = [];
+    const completion = terminateWindowsProcessTreeForTests(4242, (executable, args, options) => {
+      calls.push({ executable, args, options });
+      queueMicrotask(() => killer.emit('close', 5, null));
+      return killer;
+    }, 100);
+
+    await expect(completion).resolves.toEqual({
+      ok: false,
+      detail: 'taskkill.exe exited with code 5',
+    });
+    expect(calls).toEqual([{
+      executable: 'taskkill.exe',
+      args: ['/PID', '4242', '/T', '/F'],
+      options: { shell: false, stdio: 'ignore', windowsHide: true },
+    }]);
+  });
+
+  it('bounds a stuck taskkill attempt and kills the stuck taskkill process', async () => {
+    const killer = fakeChildProcess();
+
+    await expect(terminateWindowsProcessTreeForTests(
+      4242,
+      () => killer,
+      10,
+    )).resolves.toEqual({
+      ok: false,
+      detail: 'taskkill.exe timed out after 10 ms',
+    });
+    expect(killer.kill).toHaveBeenCalledWith('SIGKILL');
+  });
+
+  it('preserves the initiating failure and marks failed Windows tree teardown unconfirmed', async () => {
+    const root = tempRoot();
+    const configPath = path.join(root, 'config.toml');
+    const scriptPath = path.join(root, 'stuck-codex.cjs');
+    fs.writeFileSync(scriptPath, `
+if (process.argv.includes('get')) {
+  process.stderr.write("Error: No MCP server named '${ASHLR_HUB_MCP_SERVER}' found.\\n");
+  process.exit(1);
+}
+setInterval(() => {}, 1000);
+`, 'utf8');
+    const killer = fakeChildProcess();
+    setEditorConfigTestHooksForTests({
+      commandPlatform: 'win32',
+      commandExecutable: process.execPath,
+      commandArgumentPrefix: [scriptPath],
+      commandTimeoutMs: args => args[1] === 'add' ? 25 : 15_000,
+      spawnWindowsTreeKiller: () => {
+        queueMicrotask(() => killer.emit('close', 5, null));
+        return killer;
+      },
+    });
+
+    const wired = await wireEditor('codex', { configPath });
+
+    expect(wired.ok).toBe(false);
+    expect(wired.detail).toContain(
+      'codex mcp add failed: command timed out after 15 seconds; ' +
+      'Windows process-tree teardown unconfirmed: taskkill.exe exited with code 5',
+    );
+  });
 
   it('requires configPath overrides to target config.toml', async () => {
     const runCommand = sequenceRunner([]);

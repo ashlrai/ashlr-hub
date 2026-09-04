@@ -27,7 +27,7 @@ import {
   writeSync,
   type BigIntStats,
 } from 'node:fs';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
@@ -41,6 +41,7 @@ const MAX_COMMAND_OUTPUT_BYTES = 256 * 1024;
 const MAX_JSON_CONFIG_BYTES = 4 * 1024 * 1024;
 const COMMAND_TIMEOUT_MS = 15_000;
 const COMMAND_TERMINATION_GRACE_MS = 1_000;
+const WINDOWS_TREE_TERMINATION_TIMEOUT_MS = 5_000;
 const PRIVATE_FILE_MODE = 0o600;
 
 const HOME = homedir();
@@ -94,6 +95,11 @@ interface EditorConfigTestHooks {
   beforeJsonConfigPublish?: () => void;
   commandTimeoutMs?: number | ((args: readonly string[]) => number);
   commandTerminationGraceMs?: number;
+  commandPlatform?: NodeJS.Platform;
+  commandExecutable?: string;
+  commandArgumentPrefix?: string[];
+  spawnWindowsTreeKiller?: WindowsTreeKillerSpawner;
+  windowsTreeTerminationTimeoutMs?: number;
 }
 
 let editorConfigTestHooks: EditorConfigTestHooks | undefined;
@@ -335,14 +341,97 @@ function sameJsonEntry(entry: McpServerEntry | undefined, expected: McpServerEnt
   return true;
 }
 
+type WindowsTreeKillerSpawner = (
+  executable: string,
+  args: readonly string[],
+  options: {
+    shell: false;
+    stdio: 'ignore';
+    windowsHide: true;
+  },
+) => ChildProcess;
+
+interface WindowsTreeTerminationResult {
+  ok: boolean;
+  detail?: string;
+}
+
+async function terminateWindowsProcessTree(
+  pid: number,
+  spawnTreeKiller: WindowsTreeKillerSpawner = spawn,
+  timeoutMs = WINDOWS_TREE_TERMINATION_TIMEOUT_MS,
+): Promise<WindowsTreeTerminationResult> {
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    return { ok: false, detail: `invalid child PID ${String(pid)}` };
+  }
+
+  return await new Promise(resolve => {
+    let settled = false;
+    let killer: ChildProcess;
+    const finish = (result: WindowsTreeTerminationResult): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      try { killer?.kill('SIGKILL'); } catch { /* the bounded attempt already failed */ }
+      finish({ ok: false, detail: `taskkill.exe timed out after ${timeoutMs} ms` });
+    }, timeoutMs);
+
+    try {
+      // PID is produced by Node, validated as a positive safe integer, and is
+      // passed as its own argument. A shell is never involved in tree teardown.
+      killer = spawnTreeKiller(
+        'taskkill.exe',
+        ['/PID', String(pid), '/T', '/F'],
+        { shell: false, stdio: 'ignore', windowsHide: true },
+      );
+    } catch (error) {
+      finish({
+        ok: false,
+        detail: `taskkill.exe launch failed: ${error instanceof Error ? error.message : String(error)}`,
+      });
+      return;
+    }
+    killer.once('error', error => {
+      finish({ ok: false, detail: `taskkill.exe launch failed: ${error.message}` });
+    });
+    killer.once('close', (code, signal) => {
+      if (code === 0) {
+        finish({ ok: true });
+        return;
+      }
+      finish({
+        ok: false,
+        detail: `taskkill.exe exited ${code === null ? 'without a code' : `with code ${code}`}` +
+          (signal === null ? '' : ` (signal ${signal})`),
+      });
+    });
+  });
+}
+
+/** Test-only seam for portable taskkill timeout/failure coverage. */
+export async function terminateWindowsProcessTreeForTests(
+  pid: number,
+  spawnTreeKiller: WindowsTreeKillerSpawner,
+  timeoutMs: number,
+): Promise<WindowsTreeTerminationResult> {
+  if (process.env.NODE_ENV !== 'test') throw new Error('Windows tree termination seam is test-only');
+  return await terminateWindowsProcessTree(pid, spawnTreeKiller, timeoutMs);
+}
+
 async function defaultCommandRunner(
   executable: string,
   args: string[],
   options: { env: NodeJS.ProcessEnv },
 ): Promise<CommandResult> {
   return await new Promise((resolve) => {
-    const child = spawn(executable, args, {
-      detached: process.platform !== 'win32',
+    const commandPlatform = editorConfigTestHooks?.commandPlatform ?? process.platform;
+    const commandExecutable = editorConfigTestHooks?.commandExecutable ?? executable;
+    const commandArgs = [...(editorConfigTestHooks?.commandArgumentPrefix ?? []), ...args];
+    const child = spawn(commandExecutable, commandArgs, {
+      detached: commandPlatform !== 'win32',
       env: options.env,
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
@@ -351,6 +440,7 @@ async function defaultCommandRunner(
     let stderr = '';
     let settled = false;
     let terminationResult: CommandResult | undefined;
+    let windowsTerminationStarted = false;
     let killTimer: ReturnType<typeof setTimeout> | undefined;
     const finish = (result: CommandResult) => {
       if (settled) return;
@@ -361,11 +451,9 @@ async function defaultCommandRunner(
     };
 
     // A detached POSIX child leads a new process group, so signals cover any
-    // helpers it launches while mutating the registry. Node has no equivalent
-    // portable process-tree primitive on Windows; child.kill is the bounded
-    // direct-process fallback there.
+    // helpers it launches while mutating the registry.
     const signalProcessTree = (signal: 'SIGTERM' | 'SIGKILL'): void => {
-      if (process.platform !== 'win32' && child.pid !== undefined) {
+      if (commandPlatform !== 'win32' && child.pid !== undefined) {
         try {
           process.kill(-child.pid, signal);
           return;
@@ -381,6 +469,31 @@ async function defaultCommandRunner(
     const terminate = (launchError: string): void => {
       if (terminationResult !== undefined) return;
       terminationResult = { ok: false, code: null, stdout, stderr, launchError };
+      if (commandPlatform === 'win32') {
+        windowsTerminationStarted = true;
+        void (async () => {
+          const pid = child.pid;
+          const teardown = pid === undefined
+            ? { ok: false, detail: 'spawned command did not expose a PID' }
+            : await terminateWindowsProcessTree(
+              pid,
+              editorConfigTestHooks?.spawnWindowsTreeKiller ?? spawn,
+              editorConfigTestHooks?.windowsTreeTerminationTimeoutMs ??
+                WINDOWS_TREE_TERMINATION_TIMEOUT_MS,
+            );
+          if (!teardown.ok) {
+            // Best-effort direct-child fallback cannot prove descendant
+            // teardown, so preserve that limitation in the returned evidence.
+            try { child.kill('SIGKILL'); } catch { /* preserve original failure */ }
+            terminationResult = {
+              ...terminationResult!,
+              launchError: `${launchError}; Windows process-tree teardown unconfirmed: ${teardown.detail ?? 'unknown failure'}`,
+            };
+          }
+          finish(terminationResult!);
+        })();
+        return;
+      }
       signalProcessTree('SIGTERM');
       killTimer = setTimeout(() => {
         signalProcessTree('SIGKILL');
@@ -422,6 +535,11 @@ async function defaultCommandRunner(
     });
     child.once('close', code => {
       if (terminationResult !== undefined) {
+        if (windowsTerminationStarted) {
+          // taskkill completion, rather than direct-child close, is the Windows
+          // process-tree confirmation and owns settlement of this failure.
+          return;
+        }
         // The direct child may close while a same-group helper remains alive.
         // A final hard group signal prevents a surviving helper from mutating
         // config after this failure is reported.
