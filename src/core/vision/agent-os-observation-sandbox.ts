@@ -576,8 +576,12 @@ function validDependencies(value: unknown): value is AgentOsObservationSandboxDe
 type UnsignedRequest = Omit<AgentOsObservationSandboxRequestV1,
 'authenticator' | 'frameKeyId' | 'requestDigest'>;
 
+type AgentOsObservationSandboxRequestCreationDependenciesV1 = Pick<
+AgentOsObservationSandboxDependenciesV1,
+'expectedBackendIdentityDigest' | 'expectedPolicyDigest' | 'requestSigner'>;
+
 function unsignedRequest(input: RunAgentOsObservationSandboxInputV1,
-  dependencies: AgentOsObservationSandboxDependenciesV1): UnsignedRequest {
+  dependencies: AgentOsObservationSandboxRequestCreationDependenciesV1): UnsignedRequest {
   return {
     schemaVersion: 1,
     protocol: AGENT_OS_OBSERVATION_SANDBOX_PROTOCOL_V1,
@@ -599,8 +603,11 @@ function unsignedRequest(input: RunAgentOsObservationSandboxInputV1,
   };
 }
 
-function createRequest(input: RunAgentOsObservationSandboxInputV1,
-  dependencies: AgentOsObservationSandboxDependenciesV1): AgentOsObservationSandboxRequestV1 | null {
+/** Controller-side authenticated request framing for asynchronous isolation adapters. */
+export function createAgentOsObservationSandboxRequestV1(
+  input: RunAgentOsObservationSandboxInputV1,
+  dependencies: AgentOsObservationSandboxRequestCreationDependenciesV1,
+): AgentOsObservationSandboxRequestV1 | null {
   const unsigned = unsignedRequest(input, dependencies);
   const requestDigest = digest(REQUEST_DOMAIN, unsigned);
   const bytes = domainBytes(REQUEST_DOMAIN, unsigned);
@@ -765,6 +772,35 @@ function pinValidatedResponse(
   });
 }
 
+/**
+ * Controller-side response authentication for asynchronous isolation adapters.
+ * The returned frame and bytes are owned snapshots; verifier mutation is denied.
+ */
+export function verifyAgentOsObservationSandboxResponseV1(
+  value: unknown,
+  request: AgentOsObservationSandboxRequestV1,
+  verifier: AgentOsObservationSandboxFrameVerifierV1,
+): Readonly<{ response: AgentOsObservationSandboxResponseV1; output: Uint8Array }> | null {
+  const validated = validateResponse(value, request);
+  if (!validated || !validFrameVerifier(verifier) || validated.response.frameKeyId !== verifier.keyId) {
+    return null;
+  }
+  const pinned = pinValidatedResponse(validated);
+  const signedBytes = domainBytes(RESPONSE_DOMAIN, unsignedResponse(pinned.response));
+  const callbackBytes = Buffer.from(signedBytes);
+  let authenticated = false;
+  try {
+    authenticated = verifier.verify(immutable({
+      canonicalDomainSeparatedFrame: callbackBytes,
+      authenticator: pinned.response.authenticator,
+    })) === true;
+  } catch {
+    authenticated = false;
+  }
+  if (!equalBytes(signedBytes, callbackBytes) || !authenticated) return null;
+  return Object.freeze({ response: pinned.response, output: Buffer.from(pinned.output) });
+}
+
 function sameAttestation(left: AgentOsObservationSandboxPreflightV1,
   right: AgentOsObservationSandboxPreflightV1): boolean {
   return left.enforced && right.enforced && left.attestationDigest === right.attestationDigest &&
@@ -822,7 +858,7 @@ export function runAgentOsObservationSandboxV1(
     firstAttestation, expected, dependencies.attestationVerifier,
   );
   if (!preflight.enforced) return runResult('withheld', 'backend-not-enforced', { preflight });
-  const request = createRequest(input, dependencies);
+  const request = createAgentOsObservationSandboxRequestV1(input, dependencies);
   if (!request || !validRequest(request)) {
     return runResult('withheld', 'request-authentication-failed', { preflight });
   }
