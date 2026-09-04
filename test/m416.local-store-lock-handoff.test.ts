@@ -595,7 +595,7 @@ describe('local store lock installation handoff', () => {
     expect(procReads).toBe(1);
   });
 
-  it('falls back to bounded fixed-argv /bin/ps on Darwin', () => {
+  it('uses bounded fixed-argv /bin/ps on Darwin without PATH lookup', () => {
     const calls: Array<{ command: string; args: readonly string[]; options: Record<string, unknown> }> = [];
     const runtime: ProcessStartIdentityRuntime = {
       platform: 'darwin',
@@ -615,7 +615,6 @@ describe('local store lock installation handoff', () => {
       ref: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
     expect(calls.map(({ command, args }) => ({ command, args }))).toEqual([
-      { command: 'ps', args: ['-o', 'lstart=', '-p', '812'] },
       { command: '/bin/ps', args: ['-o', 'lstart=', '-p', '812'] },
     ]);
     for (const call of calls) {
@@ -659,7 +658,7 @@ describe('local store lock installation handoff', () => {
     }
   });
 
-  it('creates authority from self-clock identity when both Darwin probes fail', () => {
+  it('creates authority from self-clock identity when the fixed Darwin probe fails', () => {
     const calls: Array<{ command: string; args: readonly string[] }> = [];
     const runtime: ProcessStartIdentityRuntime = {
       platform: 'darwin',
@@ -675,7 +674,6 @@ describe('local store lock installation handoff', () => {
 
     expect(verifiedProcessStartIdentity(process.pid, { runtime })).toBeUndefined();
     expect(calls).toEqual([
-      { command: 'ps', args: ['-o', 'lstart=', '-p', String(process.pid)] },
       { command: '/bin/ps', args: ['-o', 'lstart=', '-p', String(process.pid)] },
     ]);
     const lock = acquireLocalStoreLock(lockPath, 0);
@@ -688,7 +686,7 @@ describe('local store lock installation handoff', () => {
     expect(fs.readdirSync(tmpDir)).toEqual([]);
   });
 
-  it('uses bounded proc start ticks when ps is unavailable', () => {
+  it('uses bounded proc start ticks when fixed /bin/ps is unavailable', () => {
     const calls: Array<{ command: string; args: readonly string[]; options: Record<string, unknown> }> = [];
     const runtime: ProcessStartIdentityRuntime = {
       platform: 'linux',
@@ -712,7 +710,7 @@ describe('local store lock installation handoff', () => {
     expect(reused).not.toBe(first);
     expect(calls).toHaveLength(2);
     expect(calls[0]).toMatchObject({
-      command: 'ps',
+      command: '/bin/ps',
       args: ['-o', 'lstart=', '-p', '731'],
       options: { timeout: 1_000, maxBuffer: 1_024, shell: false },
     });

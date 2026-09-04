@@ -11,6 +11,8 @@ milestone (including which numbers were spec'd for one thing and shipped as anot
 [`docs/MILESTONE-INDEX.md`](../MILESTONE-INDEX.md) — check it before assigning the next milestone
 number.
 
+- [`CONTRACT-M566.md`](./CONTRACT-M566.md) — private, default-off execution-capacity reservation ledger.
+
 - `CONTRACT-M3.md` … `CONTRACT-M30.md` — v1 (M1–M20) + v2 (M21–M30, the Autonomous Engineering Organization).
 - `CONTRACT-H1.md` … — v2.1 "Harden & Prove" (end-to-end chain harness, crash recovery, concurrency/budget stress, …).
 - `CONTRACT-M486.md`, `CONTRACT-M487.md`, `CONTRACT-M493.md`, `CONTRACT-M501.md` — daemon

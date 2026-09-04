@@ -159,6 +159,7 @@ export const REAL_IO_TEST_FILES = [
   'test/m562.agent-os-epoch-runtime.test.ts', // end-to-end durable transaction and crash stages
   'test/m563.agent-os-epoch-stage-recovery.test.ts', // ordered recovery over three ledgers
   'test/m564.agent-os-epoch-trust-composition.test.ts', // composed trust reads over real stores
+  'test/m566.execution-capacity-lease.test.ts', // exact-private capacity ledger, atomic rename/fsync, and lock contention
 
   // --- hermetic H-suite: every file spins up a real temp git repo + real fs by design.
   // Already forced fully serial via `npm run test:invariants` (--no-file-parallelism); folding
