@@ -20,6 +20,7 @@
  *   GET /api/inbox             -> listProposals({status:'pending'}) (read-only; M23)
  *   GET /api/autonomy/evidence -> list autonomy evidence packs (metadata only)
  *   GET /api/daemon            -> strict provenance-bearing daemon observation
+ *   GET /api/agent-os          -> authenticated observation-only Agent OS snapshot
  *   GET /api/events            -> Server-Sent Events stream
  *
  * Mutating routes (ONLY when ctx.allowDispatch === true + token header):
@@ -91,6 +92,7 @@ import { listGoals } from '../goals/store.js';
 import { progressOf } from '../goals/advance.js';
 import { sanitizePublicJson } from '../util/public-json.js';
 import type { MissionShadowObservation } from '../vision/mission-shadow-observer.js';
+import { readAgentOsRuntimeSnapshotV1 } from '../vision/agent-os-runtime-read.js';
 import type { ProposalsReadResult } from '../inbox/store.js';
 import { handleRunEventsSse, RUN_EVENTS_PATH_RE } from './run-stream.js';
 
@@ -1127,6 +1129,15 @@ export async function handleApi(
     // execution authority.
     if (path === '/api/vision/mission' && method === 'GET') {
       sendJson(res, 200, await buildVisionMissionSnapshot(cfg));
+      return true;
+    }
+
+    // Authenticated by server.ts before dispatch. This route is deliberately
+    // read-only and independent from the control snapshot and daemon. The
+    // public projection withholds private envelopes and all snapshot values
+    // unless the append-only source is complete and authenticated.
+    if (path === '/api/agent-os' && method === 'GET') {
+      sendJson(res, 200, readAgentOsRuntimeSnapshotV1());
       return true;
     }
 

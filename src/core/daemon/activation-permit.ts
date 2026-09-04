@@ -79,9 +79,9 @@ import { diagnoseGuardHealth } from './guard-health.js';
  * Revocation of a standing grant is file-based: it stops the NEXT
  * authorization check, immediately. For `residentStanding` specifically it is
  * stronger than that — because standing grants are not single-use (unlike the
- * one-shot capability, which a resident loop must consume exactly once, see
- * `tick()`'s `activationScope` handling in ../loop.ts), a resident daemon that
- * started off a standing grant re-checks it on every tick and stops at the
+ * one-shot capability, which a resident loop must consume exactly once), a
+ * resident daemon carries an opaque process-local tick capability and
+ * re-checks the underlying standing grant on every tick, stopping at the
  * next one if the grant is revoked, expired, or its trust root is revoked —
  * not just at the next `daemon start`. It cannot interrupt a tick already in
  * flight.
@@ -127,6 +127,7 @@ export const MAX_STANDING_GRANT_VALIDITY_MS = 30 * 24 * 60 * 60 * 1000;
 export const DEFAULT_STANDING_GRANT_VALIDITY_MS = 24 * 60 * 60 * 1000;
 
 const capabilityBrand: unique symbol = Symbol('ashlr.daemon-activation-capability');
+const residentTickCapabilityBrand: unique symbol = Symbol('ashlr.daemon-resident-tick-capability');
 
 /** Every independently grantable scope key, in canonical order. Used by the CLI to validate `grant`/status output. */
 export const DAEMON_ACTIVATION_SCOPE_KEYS = [
@@ -180,6 +181,19 @@ export interface DaemonActivationCapability {
   readonly [capabilityBrand]: true;
 }
 
+/**
+ * Opaque process-local authority carried by a verified daemon run into each
+ * resident tick. The capability intentionally exposes neither its granted
+ * scope nor a serializable claim: loop.ts keeps the live object in a private
+ * WeakMap and rejects lookalike objects. Only runDaemon may issue one after it
+ * has consumed a one-shot DaemonActivationCapability or received a currently
+ * verified residentStanding grant from consumeDaemonActivationPermit().
+ */
+export interface DaemonResidentTickCapability {
+  readonly kind: 'daemon-resident-tick';
+  readonly [residentTickCapabilityBrand]: true;
+}
+
 export interface DaemonActivationOptions {
   once?: boolean;
   dryRun?: boolean;
@@ -198,10 +212,9 @@ export interface DaemonActivationPermitResult {
   configSnapshot?: AshlrConfig;
   /**
    * Present only when authorized via a standing `residentStanding` grant
-   * rather than a one-shot permit. Standing grants are not single-use, so
-   * this scope is handed to the caller directly — there is no WeakMap
-   * capability to consume, and none of `isDaemonActivationCapability`'s
-   * one-shot semantics apply to it.
+   * rather than a one-shot permit. This is verified data returned to the
+   * daemon entrypoint, not authority accepted by tick(): runDaemon must wrap
+   * it in its process-local DaemonResidentTickCapability before use.
    */
   scope?: DaemonActivationGrantScope;
   /** Present only when `scope` is, so callers can re-check liveness per use. */

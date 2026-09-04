@@ -113,6 +113,7 @@ import {
   isDaemonActivationCapability,
   type DaemonActivationCapability,
   type DaemonActivationGrantScope,
+  type DaemonResidentTickCapability,
 } from './activation-permit.js';
 import { nullSink } from '../run/streaming.js';
 import { createOuterAttemptIdentity } from '../fleet/attempt-identity.js';
@@ -294,6 +295,10 @@ import {
   scheduleCutoffCheckpointCapture,
   type ScheduledCutoffCapture,
 } from './cutoff-checkpoint-scheduler.js';
+import {
+  scheduleAgentOsObserverV1,
+  type ScheduledAgentOsObserverV1,
+} from './agent-os-observer-scheduler.js';
 import { writePrivateFileAtomically } from '../util/private-file-write.js';
 import { readStableRegularFile } from '../util/stable-file-read.js';
 import { fsyncDirectory } from '../util/durability.js';
@@ -1037,6 +1042,17 @@ const DEFAULTS: DaemonConfig = {
 };
 const KILL_SWITCH_POLL_MS = 50;
 const pendingDaemonTickEffects = new WeakMap<DaemonTick, Set<Promise<void>>>();
+const durableAgentOsObserverTicks = new WeakSet<object>();
+
+function markDurableAgentOsObserverTick(tickResult: DaemonTick): void {
+  if (tickResult.reason === 'ok' && tickResult.dryRun !== true) {
+    durableAgentOsObserverTicks.add(tickResult);
+  }
+}
+
+function isDurableAgentOsObserverTick(tickResult: DaemonTick): boolean {
+  return durableAgentOsObserverTicks.has(tickResult);
+}
 
 /** Register detached work that must settle before this tick can be called quiescent. */
 export function trackDaemonTickEffect(
@@ -1092,19 +1108,53 @@ const LEGACY_PROPOSAL_ONLY_SCOPE: DaemonActivationGrantScope = Object.freeze({
   proposalOnly: true,
 });
 
+interface ResidentTickAuthority {
+  readonly scope: DaemonActivationGrantScope;
+  readonly recheckStandingGrant: boolean;
+}
+
+/**
+ * Resident tick authority never crosses a serialization boundary. The public
+ * object has no scope to copy and lookalikes fail the WeakMap lookup. This
+ * issuer is deliberately private to this module and is called only by
+ * runDaemon after permit consumption / standing-grant verification.
+ */
+const residentTickAuthorities = new WeakMap<object, ResidentTickAuthority>();
+
+function mintResidentTickCapability(
+  scope: DaemonActivationGrantScope,
+  recheckStandingGrant: boolean,
+): DaemonResidentTickCapability {
+  const capability = Object.freeze({
+    kind: 'daemon-resident-tick' as const,
+  }) as DaemonResidentTickCapability;
+  residentTickAuthorities.set(capability, {
+    scope: Object.freeze({ ...scope }),
+    recheckStandingGrant,
+  });
+  return capability;
+}
+
+function residentTickAuthority(
+  value: unknown,
+): ResidentTickAuthority | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  return residentTickAuthorities.get(value);
+}
+
 interface TickOptions {
   dryRun: boolean;
   activationCapability?: DaemonActivationCapability;
   /**
-   * M470: an already-verified activation scope, for ticks that must NOT consume
-   * a capability.
-   *
-   * `isDaemonActivationCapability()` is single-use by design — it deletes the
-   * WeakMap entry on the first call. A resident loop calling it per tick would
-   * therefore authorize only its first tick and refuse every one after, so the
-   * resident caller verifies once at `runDaemon` entry and passes the resulting
-   * scope down instead. The one-shot path keeps passing `activationCapability`
-   * and keeps consuming it exactly once.
+   * Process-local authority issued by runDaemon after activation verification.
+   * Lookalike objects and serialized/replayed values are rejected.
+   */
+  residentTickCapability?: DaemonResidentTickCapability;
+  /**
+   * @deprecated Compatibility-only input. A structural scope is never
+   * production authority. It is read solely when a legacy test double makes
+   * isDaemonActivationCapability(undefined) return true, which the real
+   * nominal validator categorically cannot do.
    */
   activationScope?: DaemonActivationGrantScope;
   drain?: DaemonDrainMode;
@@ -1144,6 +1194,20 @@ export function scheduleCutoffCheckpointAfterTick(
   if (opts.dryRun || opts.once || tickResult.reason === 'state-persistence-failed' ||
     !tickResult.backlogSnapshotAt || !tickResult.backlogSnapshotId || killSwitchOn()) return null;
   return schedule();
+}
+
+/** Schedule the default-off Agent OS observer only after a durable resident tick. */
+export function scheduleAgentOsObserverAfterTick(
+  tickResult: DaemonTick,
+  cfg: AshlrConfig,
+  opts: Pick<DaemonRunOptions, 'dryRun' | 'once'>,
+  schedule: typeof scheduleAgentOsObserverV1 = scheduleAgentOsObserverV1,
+  killIsOn: typeof killSwitchOn = killSwitchOn,
+  durableTick: (tick: DaemonTick) => boolean = isDurableAgentOsObserverTick,
+): ScheduledAgentOsObserverV1 | null {
+  if (opts.dryRun || opts.once || tickResult.reason !== 'ok' || killIsOn()) return null;
+  if (!durableTick(tickResult)) return null;
+  return schedule({ tick: tickResult, config: cfg });
 }
 
 interface ResolvedContextRollupConfig {
@@ -3525,21 +3589,27 @@ export async function tick(
   opts: TickOptions,
 ): Promise<DaemonTick> {
   const now = new Date().toISOString();
-  // A pre-verified scope (resident path) is accepted WITHOUT consuming, since
-  // runDaemon already consumed the capability once on entry. Otherwise fall back
-  // to consuming the capability here, which is the one-shot path.
-  const preVerifiedScope = !opts.dryRun ? opts.activationScope : undefined;
+  const residentAuthority = !opts.dryRun
+    ? residentTickAuthority(opts.residentTickCapability)
+    : undefined;
   const consumedCapability =
-    !opts.dryRun && preVerifiedScope === undefined
+    !opts.dryRun && residentAuthority === undefined
       ? isDaemonActivationCapability(opts.activationCapability)
       : false;
+  // Compatibility for suites that mock the old nominal validator as an
+  // unconditional true function. The production validator can never validate
+  // undefined, so a structural activationScope remains categorically inert in
+  // production. Never let it override a real capability's bound scope.
+  const legacyMockScope = consumedCapability && opts.activationCapability === undefined
+    ? opts.activationScope
+    : undefined;
   // When the capability check passes but no scope object is readable (a caller
   // or test that supplies only the claim), fall back to the legacy proposal-only
   // scope — the exact authority the pre-M470 boolean check conveyed. Never widen.
   const activationScope: DaemonActivationGrantScope | undefined =
-    preVerifiedScope
+    residentAuthority?.scope
       ?? (consumedCapability
-        ? (opts.activationCapability?.scope ?? LEGACY_PROPOSAL_ONLY_SCOPE)
+        ? (opts.activationCapability?.scope ?? legacyMockScope ?? LEGACY_PROPOSAL_ONLY_SCOPE)
         : undefined);
   const activationAccepted = !opts.dryRun && activationScope !== undefined;
   if (!opts.dryRun && !activationAccepted) {
@@ -3558,16 +3628,16 @@ export async function tick(
       reason: 'activation-refused',
     };
   }
-  // A standing `residentStanding` grant is NOT single-use, unlike the
-  // one-shot WeakMap capability that forces `preVerifiedScope` to be trusted
-  // for the run's whole lifetime (see the TickOptions.activationScope doc).
-  // That means it CAN be safely re-checked on every tick with no consumption
-  // side effect — so a resident daemon that started off a standing grant
+  // A standing `residentStanding` grant is NOT single-use. Its nominal tick
+  // capability carries a private recheck requirement, so the grant is checked
+  // on every tick with no consumption side effect. A daemon started from it
   // gets a real "stop the next tick" guarantee from `ashlr activation
   // revoke --grant <id>`, not just "blocks the next `daemon start`." This is
   // strictly stronger than what the one-shot capability path can offer; it
   // cannot interrupt a tick already in flight.
-  if (!opts.dryRun && preVerifiedScope?.residentStanding === true) {
+  const mustRecheckStandingGrant = residentAuthority?.recheckStandingGrant === true
+    || legacyMockScope?.residentStanding === true;
+  if (!opts.dryRun && mustRecheckStandingGrant) {
     const stillGranted = daemonActivationScopeGranted('residentStanding');
     if (!stillGranted.granted) {
       persistAudit({
@@ -3598,7 +3668,9 @@ export async function tick(
   // `proposalOnlyActivation === false` behavior, otherwise
   // runAncillaryMaintenance — which early-returns on proposal-only — silently
   // stops running self-heal, invent, and drain.
-  const grantedScope = preVerifiedScope ?? opts.activationCapability?.scope;
+  const grantedScope = residentAuthority?.scope
+    ?? opts.activationCapability?.scope
+    ?? legacyMockScope;
   const proposalOnlyActivation =
     activationAccepted &&
     grantedScope !== undefined &&
@@ -3716,6 +3788,7 @@ export async function tick(
         recordTickAgentAction(failedTick);
         return failedTick;
       }
+      markDurableAgentOsObserverTick(tick);
     } catch (err) {
       console.warn('[ashlr] daemon:recordTick persistence failed:', (err as Error)?.message ?? err);
       const failedTick = nonResidentPersistenceFailureTick(tick);
@@ -7911,6 +7984,7 @@ export async function tick(
     state = rolledState;
   }
 
+  markDurableAgentOsObserverTick(tickRecord);
   recordTickAgentAction(tickRecord, machineId);
 
   // M89/M91: best-effort fleet→pulse telemetry export. Runs OUTSIDE the proposal
@@ -8226,21 +8300,22 @@ export async function runDaemon(
   const activationCfg = activation.configSnapshot ?? cfg;
   const dcfg = resolveCfg(activationCfg);
 
-  // M470: verify the capability EXACTLY ONCE, here, and carry the resulting
-  // scope into every tick. isDaemonActivationCapability() consumes on first
-  // call, so verifying per-tick would authorize only the first resident tick
-  // and refuse all subsequent ones. Entering the loop is the authorized act;
-  // each tick then reads the scope as plain data.
-  //
-  // `activation.scope` is the standing-`residentStanding`-grant path
-  // (consumeDaemonActivationPermit tried it first): no WeakMap capability
-  // exists for it at all, since standing grants aren't single-use — tick()
-  // re-checks it live every cycle instead (see its `residentStanding` guard).
-  const runActivationScope: DaemonActivationGrantScope | undefined =
+  // Consume one-shot authority exactly once, then retain only an opaque,
+  // process-local capability for the run. Standing grants arrive as verified
+  // data from consumeDaemonActivationPermit and are wrapped here with a live
+  // per-tick recheck requirement. Neither path passes structural authority to
+  // the exported tick function.
+  const verifiedRunScope: DaemonActivationGrantScope | undefined =
     activation.scope
     ?? (!opts.dryRun && activation.capability && isDaemonActivationCapability(activation.capability)
       ? activation.capability.scope
       : undefined);
+  const runTickCapability = !opts.dryRun && verifiedRunScope
+    ? mintResidentTickCapability(
+        verifiedRunScope,
+        verifiedRunScope.residentStanding === true,
+      )
+    : undefined;
 
   // -------------------------------------------------------------------------
   // Mark daemon as running.
@@ -8289,6 +8364,7 @@ export async function runDaemon(
   refreshActivity();
   let scheduledResolutionObserver: ScheduledResolutionObserverChild | null = null;
   let scheduledCutoffCapture: ScheduledCutoffCapture | null = null;
+  let scheduledAgentOsObserver: ScheduledAgentOsObserverV1 | null = null;
   let forcedShutdownTimer: ReturnType<typeof setTimeout> | null = null;
   const transitionToStopping = (): void => {
     if (ownershipLost) return;
@@ -8299,6 +8375,7 @@ export async function runDaemon(
     if (!shutdown.signal.aborted) shutdown.abort();
     scheduledResolutionObserver?.cancel();
     scheduledCutoffCapture?.cancel();
+    scheduledAgentOsObserver?.cancel();
     if (forcedShutdownTimer === null) {
       const finalSignal = signal ?? 'SIGTERM';
       forcedShutdownTimer = setTimeout(() => {
@@ -8317,6 +8394,7 @@ export async function runDaemon(
     if (!shutdown.signal.aborted) shutdown.abort();
     scheduledResolutionObserver?.cancel();
     scheduledCutoffCapture?.cancel();
+    scheduledAgentOsObserver?.cancel();
   };
   const ownsDaemonLock = (): boolean => {
     if (ownershipLost) return false;
@@ -8447,7 +8525,7 @@ export async function runDaemon(
         transitionActivity('tick');
         const tickResult = await tick(liveCfg, {
           dryRun: opts.dryRun,
-          ...(runActivationScope ? { activationScope: runActivationScope } : {}),
+          ...(runTickCapability ? { residentTickCapability: runTickCapability } : {}),
           ...(opts.drain ? { drain: opts.drain } : {}),
           ...(opts.drainLimit ? { drainLimit: opts.drainLimit } : {}),
           signal: shutdown.signal,
@@ -8500,10 +8578,9 @@ export async function runDaemon(
         transitionActivity('tick');
         const tickResult = await tick(liveCfg, {
           dryRun: opts.dryRun,
-          // M470: the resident loop previously passed NO activation at all, so
-          // every live resident tick was refused. It now carries the scope
-          // verified once at runDaemon entry.
-          ...(runActivationScope ? { activationScope: runActivationScope } : {}),
+          // The resident loop carries opaque authority minted after runDaemon
+          // verified activation. Standing grants are rechecked inside tick.
+          ...(runTickCapability ? { residentTickCapability: runTickCapability } : {}),
           ...(opts.drain ? { drain: opts.drain } : {}),
           ...(opts.drainLimit ? { drainLimit: opts.drainLimit } : {}),
           signal: shutdown.signal,
@@ -8547,6 +8624,12 @@ export async function runDaemon(
         const afterTickCfg = reloadLiveConfigForDaemon(liveCfg);
         scheduledResolutionObserver = scheduleResolutionObserverAfterTick(tickResult, opts);
         scheduledCutoffCapture = scheduleCutoffCheckpointAfterTick(tickResult, opts);
+        const agentOsObserverSchedule = scheduleAgentOsObserverAfterTick(tickResult, afterTickCfg, opts);
+        // An overlap handle intentionally cannot cancel the active owner. Keep
+        // the original scheduled handle for shutdown cancellation/await.
+        if (agentOsObserverSchedule?.disposition === 'scheduled') {
+          scheduledAgentOsObserver = agentOsObserverSchedule;
+        }
         const postTickChildren: Promise<unknown>[] = [];
         if (scheduledResolutionObserver?.disposition === 'scheduled' ||
           scheduledResolutionObserver?.disposition === 'overlap-suppressed') {
@@ -8555,6 +8638,10 @@ export async function runDaemon(
         if (scheduledCutoffCapture?.disposition === 'scheduled' ||
           scheduledCutoffCapture?.disposition === 'overlap-suppressed') {
           postTickChildren.push(scheduledCutoffCapture.completion);
+        }
+        if (agentOsObserverSchedule?.disposition === 'scheduled' ||
+          agentOsObserverSchedule?.disposition === 'overlap-suppressed') {
+          postTickChildren.push(agentOsObserverSchedule.completion);
         }
         if (postTickChildren.length > 0) {
           const postTickEpoch = transitionActivity('post-tick', postTickChildren.length);
@@ -8605,7 +8692,11 @@ export async function runDaemon(
   }
   transitionToStopping();
   clearInterval(killSwitchPoll);
-  await cancelDaemonPostTickChildren(scheduledResolutionObserver, scheduledCutoffCapture);
+  await cancelDaemonPostTickChildren(
+    scheduledResolutionObserver,
+    scheduledCutoffCapture,
+    scheduledAgentOsObserver,
+  );
   if (forcedShutdownTimer !== null) clearTimeout(forcedShutdownTimer);
   process.removeListener('SIGINT', requestSigint);
   process.removeListener('SIGTERM', requestSigterm);
@@ -8666,12 +8757,15 @@ export async function cancelResolutionObserverBeforeShutdown(
 export async function cancelDaemonPostTickChildren(
   observer: ScheduledResolutionObserverChild | null,
   cutoff: ScheduledCutoffCapture | null,
+  agentOsObserver: ScheduledAgentOsObserverV1 | null = null,
 ): Promise<void> {
   observer?.cancel();
   cutoff?.cancel();
+  agentOsObserver?.cancel();
   await Promise.allSettled([
     ...(observer ? [observer.completion] : []),
     ...(cutoff ? [cutoff.completion] : []),
+    ...(agentOsObserver ? [agentOsObserver.completion] : []),
   ]);
 }
 

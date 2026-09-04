@@ -596,6 +596,12 @@ export interface AshlrConfig {
    * may route work across the allowed backends.
    */
   foundry?: {
+    /**
+     * Execution Identity V1: default-off, shadow-only account/runtime capacity
+     * projection. Private locators are consumed only by the internal fabric
+     * module; V1 assignments never reach the live dispatcher.
+     */
+    executionIdentityV1?: ExecutionIdentityConfigV1;
     /** Backends the fleet may use. Absent ⇒ ['builtin'] only. */
     allowedBackends?: EngineId[];
     /**
@@ -2580,6 +2586,55 @@ export type EngineId =
   | 'opencode'
   | 'grok'; // M298: xAI Grok — OpenAI-compatible, tier mid (promotable to frontier via cfg.foundry.grok)
 
+/** Minted private execution identity reference. Runtime validation is stricter. */
+export type ExecutionIdentityRefV1 = string;
+
+/** Opaque reference into the internal 0600 execution-identity private store. */
+export type ExecutionIdentityPrivateRuntimeLocatorRefV1 = string;
+
+export type ExecutionIdentityPlanV1 =
+  | {
+      kind: 'subscription';
+      class: 'codex-max' | 'codex-custom';
+      maxConcurrent: number;
+    }
+  | {
+      kind: 'agent-credit';
+      class: 'claude-agent-sdk-credit';
+      maxConcurrent: number;
+    }
+  | {
+      /** Claude Max remains reserved for direct interactive use in V1. */
+      kind: 'interactive-reserved';
+      class: 'claude-max';
+      maxConcurrent: 0;
+    }
+  | {
+      kind: 'local';
+      class: 'local-runtime';
+      maxConcurrent: number;
+    }
+  | {
+      kind: 'metered';
+      class: 'api-metered';
+      maxConcurrent: number;
+    };
+
+/** One private identity behind a concrete engine. */
+export interface ExecutionIdentitySpecV1 {
+  ref: ExecutionIdentityRefV1;
+  engine: EngineId;
+  privateRuntimeLocatorRef: ExecutionIdentityPrivateRuntimeLocatorRefV1;
+  plan: ExecutionIdentityPlanV1;
+}
+
+/** Default-off V1 gate. `shadowOnly` has no false state in this version. */
+export interface ExecutionIdentityConfigV1 {
+  enabled?: boolean;
+  shadowOnly?: true;
+  identities?: ExecutionIdentitySpecV1[];
+}
+
 /**
  * Explicitly enabled, digest-pinned observation-only local candidate.
  * Absence is the default-off state. Runtime validation additionally requires
@@ -4390,6 +4445,18 @@ export interface DaemonConfig {
     cadenceHours?: number;
     /** Minimum unique terminal trajectories required for a rollup. Default 50, floor 25. */
     minTerminalTrajectories?: number;
+  };
+  /**
+   * Default-off, observation-only Agent OS snapshot compiler. Public keys are
+   * configuration, never effect authority; an empty/invalid policy fails closed.
+   */
+  agentOsObserver?: {
+    /** Exact opt-in. Absent/false schedules no child and performs no reads. */
+    enabled?: boolean;
+    /** Per-attempt wall-clock deadline. Runtime bounds this to 100..30000 ms. */
+    deadlineMs?: number;
+    /** Dedicated Ed25519 observation trust roots; never activation credentials. */
+    trustPolicy?: import('./vision/agent-os-source-bundle.js').AgentOsSourceTrustPolicyV1;
   };
 }
 
