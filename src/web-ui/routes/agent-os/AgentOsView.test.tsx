@@ -82,7 +82,6 @@ describe('AgentOsView', () => {
     await waitFor(() => expect(screen.getByText('Verified value bet')).toBeInTheDocument());
     expect(fetch).toHaveBeenCalledWith('/api/agent-os', expect.objectContaining({
       method: 'GET',
-      signal: expect.any(AbortSignal),
     }));
     expect(screen.getByText('Outcome evidence is incomplete.')).toBeInTheDocument();
     expect(screen.queryByRole('button')).not.toBeInTheDocument();

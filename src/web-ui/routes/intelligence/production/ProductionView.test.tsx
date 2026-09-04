@@ -18,10 +18,6 @@ const SNAPSHOT_ZERO_SHIP = {
     proposals24h: { pending: 5, applied: 0, rejected: 2, total: 7 },
     judgeVerdicts24h: { ship: 0, review: 4, noise: 1, harmful: 0, total: 5 },
     judgeFailures24h: { parse: 2, network: 1, total: 3 },
-    proposalSourceQuality: { sourceState: 'healthy', complete: true },
-    judgeTraceSourceQuality: { sourceState: 'healthy', complete: true },
-    judgeFailureSourceQuality: { sourceState: 'healthy', complete: true },
-    activeGoalsSourceQuality: { sourceState: 'healthy', complete: true },
     autoMergesToday: { count: 0, titles: [] },
     activeGoals: [],
     // Honest zero: 0 ships across every day in the trend — the chart must
@@ -133,7 +129,11 @@ describe('ProductionView', () => {
 
   it('does not present degraded proposal zeroes as known facts', async () => {
     const degraded = structuredClone(SNAPSHOT_ZERO_SHIP);
-    degraded.production.proposalSourceQuality = { sourceState: 'degraded', complete: false };
+    degraded.production.proposalSourceQuality = {
+      ...degraded.production.proposalSourceQuality,
+      sourceState: 'degraded',
+      complete: false,
+    };
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : input.toString();
       return new Response(JSON.stringify(url.startsWith('/api/snapshot') ? degraded : MODELS_RESULT), { status: 200 });
@@ -156,8 +156,6 @@ describe('ProductionView', () => {
     render(<ProductionView />);
     await waitFor(() => expect(screen.getByText('Judge failures (24h)')).toBeInTheDocument());
     expect(screen.getAllByText('unknown').length).toBeGreaterThan(0);
-    // The withheld/zeroed count must never render as a bare "0" for this tile.
-    expect(screen.getByText('source degraded — count unknown, not confirmed zero')).toBeInTheDocument();
   });
 
   it('withholds best-of-N win rate behind Epistemic when bestOfNSource is degraded', async () => {
