@@ -347,7 +347,7 @@ function checkScrubPatterns(read: CoreSourceReader): SafetyCheck {
   // SECRET_PATTERNS array, the raw values survive and this check FAILs — so the
   // self-check tracks the real redaction logic, not a drifting private copy.
   const synthSecret = [
-    'api_key = "abcdefghij0123456789ABCDEFGHIJ"',
+    'api_key = "abcdefghij0123456789ABCDEFGHIJ"', // gitleaks:allow -- synthetic scrub canary
     'aws=AKIAIOSFODNN7EXAMPLE',
     'jwt=eyJhbGci.eyJzdWIiOiIxIn0.SflKxwRJSMeKKF2QT4fwpMeJf36',
   ].join(' ');

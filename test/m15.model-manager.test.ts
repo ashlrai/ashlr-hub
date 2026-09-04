@@ -629,4 +629,17 @@ describe('startOllama', () => {
       expect(hasPull).toBe(false);
     }
   });
+
+  it('pins the startup liveness probe to IPv4 loopback', async () => {
+    mockFetch.mockResolvedValue(mockResponse('{"models":[]}'));
+
+    const result = await startOllama();
+
+    expect(result.ok).toBe(true);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(mockFetch).toHaveBeenCalledWith(
+      'http://127.0.0.1:11434/api/tags',
+      expect.objectContaining({ method: 'GET', signal: expect.any(AbortSignal) }),
+    );
+  });
 });
