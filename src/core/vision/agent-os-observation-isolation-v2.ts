@@ -192,7 +192,8 @@ export interface AgentOsObservationIsolationInspectionV2 {
 
 const AUTHORITY_KEYS = Object.keys(AGENT_OS_OBSERVATION_ISOLATION_NO_AUTHORITY_V2);
 const LIMIT_KEYS = [
-  'cpuNanoCpus', 'maxDurationMs', 'maxOutputBytes', 'memoryBytes', 'memorySwapBytes', 'pidsLimit',
+  'cleanupStartGraceMs', 'cpuNanoCpus', 'maxDurationMs', 'maxOutputBytes', 'memoryBytes',
+  'memorySwapBytes', 'pidsLimit',
 ] as const;
 const BINDING_KEYS = [
   'brokerDigest', 'containerId', 'createConfigDigest', 'deadlineAt', 'engineDigest', 'imageDigest',
@@ -402,7 +403,8 @@ function postRunCoherent(
   }
   const cleanupStarted = Date.parse(evidence.cleanupStartedAt);
   const removed = Date.parse(evidence.removedAt);
-  return removed - cleanupStarted <= AGENT_OS_OBSERVATION_ISOLATION_MAX_CLEANUP_DURATION_MS_V2;
+  return cleanupStarted - finished <= expected.limits.cleanupStartGraceMs &&
+    removed - cleanupStarted <= AGENT_OS_OBSERVATION_ISOLATION_MAX_CLEANUP_DURATION_MS_V2;
 }
 
 function policyBindingsMatch(

@@ -27,7 +27,7 @@ the following:
 - a caller-pinned seccomp-profile digest;
 - no restart and no container logging;
 - mandatory CPU, memory, swap, wall-clock, and output limits, with an exact
-  one-process PID ceiling.
+  one-process PID ceiling and a small signed cleanup-start grace.
 
 The policy digest is domain-separated canonical JSON. A future broker adapter
 must translate every field to the Docker Engine create request and fail closed
@@ -70,6 +70,9 @@ post-run evidence, signatures, prepare links, expired records, impossible
 deadline/kill/cleanup chronology, extra properties, accessors, and mutating
 verifier callbacks. Image, seccomp, native producer, resource limits, and the
 create-config digest must all agree with one admitted canonical policy snapshot.
+The cleanup-start delay is capped by the policy's `cleanupStartGraceMs`, while
+removal itself remains independently capped by the protocol cleanup-duration
+limit.
 
 ## Replay consumption is a later stateful gate
 

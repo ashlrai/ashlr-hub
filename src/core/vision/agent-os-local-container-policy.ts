@@ -41,6 +41,7 @@ export interface AgentOsLocalContainerLimitsV1 {
   pidsLimit: number;
   maxDurationMs: number;
   maxOutputBytes: number;
+  cleanupStartGraceMs: number;
 }
 
 export interface AgentOsLocalContainerCreatePolicyInputV1 {
@@ -149,7 +150,8 @@ const POLICY_KEYS = [
   'readonlyRootfs', 'restart', 'schemaVersion', 'seccompProfileDigest', 'user', 'workingDir',
 ] as const;
 const LIMIT_KEYS = [
-  'cpuNanoCpus', 'maxDurationMs', 'maxOutputBytes', 'memoryBytes', 'memorySwapBytes', 'pidsLimit',
+  'cleanupStartGraceMs', 'cpuNanoCpus', 'maxDurationMs', 'maxOutputBytes', 'memoryBytes',
+  'memorySwapBytes', 'pidsLimit',
 ] as const;
 const NAMESPACE_KEYS = ['cgroup', 'ipc', 'network', 'pid', 'uts'] as const;
 const CAPABILITY_KEYS = ['add', 'drop'] as const;
@@ -205,7 +207,8 @@ export function isAgentOsLocalContainerLimitsV1(value: unknown): value is AgentO
     limits['memorySwapBytes'] === limits['memoryBytes'] &&
     limits['pidsLimit'] === 1 &&
     boundedInteger(limits['maxDurationMs'], 1, AGENT_OS_LOCAL_CONTAINER_MAX_DURATION_MS_V1) &&
-    boundedInteger(limits['maxOutputBytes'], 1, AGENT_OS_LOCAL_CONTAINER_MAX_OUTPUT_BYTES_V1));
+    boundedInteger(limits['maxOutputBytes'], 1, AGENT_OS_LOCAL_CONTAINER_MAX_OUTPUT_BYTES_V1) &&
+    boundedInteger(limits['cleanupStartGraceMs'], 1, 5_000));
 }
 
 function digestPinnedImage(value: unknown): value is string {
@@ -272,16 +275,45 @@ function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
   return value;
 }
 
+function plainDataGraph(value: unknown, seen = new Set<object>(), depth = 0): boolean {
+  if (value === null || typeof value === 'boolean' || typeof value === 'string' ||
+    typeof value === 'number') return typeof value !== 'number' || Number.isSafeInteger(value);
+  if (typeof value !== 'object' || depth > 16 || seen.size >= 256 || seen.has(value)) return false;
+  seen.add(value);
+  try {
+    const prototype = Object.getPrototypeOf(value);
+    if (Array.isArray(value)) {
+      if (prototype !== Array.prototype || value.length > 128) return false;
+    } else if (prototype !== Object.prototype && prototype !== null) return false;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    if (Reflect.ownKeys(value).some((key) => typeof key !== 'string')) return false;
+    for (const descriptor of Object.values(descriptors)) {
+      if (!Object.hasOwn(descriptor, 'value') || !plainDataGraph(descriptor.value, seen, depth + 1)) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function immutableDataSnapshot<T>(value: T): T | null {
+  try {
+    if (!plainDataGraph(value)) return null;
+    const snapshot = structuredClone(value);
+    return plainDataGraph(snapshot) ? deepFreeze(snapshot) : null;
+  } catch {
+    return null;
+  }
+}
+
 function canonicalJson(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   const row = value as Record<string, unknown>;
   return `{${Object.keys(row).sort().map((key) =>
     `${JSON.stringify(key)}:${canonicalJson(row[key])}`).join(',')}}`;
-}
-
-function ownedPolicy(value: AgentOsLocalContainerCreatePolicyV1): AgentOsLocalContainerCreatePolicyV1 {
-  return deepFreeze(JSON.parse(canonicalJson(value)) as AgentOsLocalContainerCreatePolicyV1);
 }
 
 export function agentOsLocalContainerCreatePolicyDigestV1(value: unknown): string | null {
@@ -348,9 +380,11 @@ export function inspectAgentOsLocalContainerCreatePolicyV1(
   value: unknown,
 ): AgentOsLocalContainerPolicyInspectionV1 {
   try {
-    const reason = policyReason(value);
+    const snapshot = immutableDataSnapshot(value);
+    if (!snapshot) return withheld('invalid-input');
+    const reason = policyReason(snapshot);
     if (reason) return withheld(reason);
-    const policy = ownedPolicy(value as AgentOsLocalContainerCreatePolicyV1);
+    const policy = snapshot as AgentOsLocalContainerCreatePolicyV1;
     const createConfigDigest = createHash('sha256')
       .update(AGENT_OS_LOCAL_CONTAINER_POLICY_DIGEST_DOMAIN_V1, 'utf8')
       .update(canonicalJson(policy), 'utf8')
