@@ -84,18 +84,66 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund --force=false --legacy-peer-deps=false --strict-peer-deps
 
       - name: Audit root dependencies
-        run: npm audit --ignore-scripts --audit-level=low
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if timeout --signal=TERM --kill-after=5s 45s npm audit --ignore-scripts --audit-level=low --fetch-retries=0 --fetch-timeout=30000; then
+              exit 0
+            else
+              status=$?
+            fi
+            if [ "${attempt}" -eq 3 ]; then
+              exit "${status}"
+            fi
+            sleep "$((attempt * 5))"
+          done
 
       - name: Audit root production dependencies
-        run: npm audit --ignore-scripts --omit=dev --audit-level=low
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if timeout --signal=TERM --kill-after=5s 45s npm audit --ignore-scripts --omit=dev --audit-level=low --fetch-retries=0 --fetch-timeout=30000; then
+              exit 0
+            else
+              status=$?
+            fi
+            if [ "${attempt}" -eq 3 ]; then
+              exit "${status}"
+            fi
+            sleep "$((attempt * 5))"
+          done
 
       - name: Audit Raycast dependencies
         working-directory: src/raycast
-        run: npm audit --ignore-scripts --audit-level=low
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if timeout --signal=TERM --kill-after=5s 45s npm audit --ignore-scripts --audit-level=low --fetch-retries=0 --fetch-timeout=30000; then
+              exit 0
+            else
+              status=$?
+            fi
+            if [ "${attempt}" -eq 3 ]; then
+              exit "${status}"
+            fi
+            sleep "$((attempt * 5))"
+          done
 
       - name: Audit Raycast production dependencies
         working-directory: src/raycast
-        run: npm audit --ignore-scripts --omit=dev --audit-level=low
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if timeout --signal=TERM --kill-after=5s 45s npm audit --ignore-scripts --omit=dev --audit-level=low --fetch-retries=0 --fetch-timeout=30000; then
+              exit 0
+            else
+              status=$?
+            fi
+            if [ "${attempt}" -eq 3 ]; then
+              exit "${status}"
+            fi
+            sleep "$((attempt * 5))"
+          done
 
       # The only exception is the still-open, externally contained Linux GLib
       # advisory. New RustSec vulnerabilities continue to fail this job.
