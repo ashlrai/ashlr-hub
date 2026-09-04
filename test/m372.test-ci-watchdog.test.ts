@@ -40,7 +40,7 @@ function runFixture(
 }
 
 describe('test-ci watchdog', () => {
-  it('forwards shard argv and preserves successful exit status', () => {
+  it('forwards shard argv without globally disabling project worker budgets', () => {
     const result = runFixture(
       'console.log(JSON.stringify(process.argv.slice(2)));',
       { args: ['--reporter=dot', '--shard=2/3'] },
@@ -48,11 +48,25 @@ describe('test-ci watchdog', () => {
 
     expect(result.status).toBe(0);
     const argv = JSON.parse(result.stdout.trim()) as string[];
-    expect(argv.slice(0, 2)).toEqual(['run', '--no-file-parallelism']);
+    expect(argv[0]).toBe('run');
+    expect(argv).not.toContain('--no-file-parallelism');
     expect(argv.some((arg) => arg.includes('vitest-progress-reporter.mjs'))).toBe(true);
     expect(argv).toContain('--reporter=dot');
     expect(argv).toContain('--shard=2/3');
     expect(argv).not.toContain('--reporter=default');
+  });
+
+  it('preserves an explicit request to serialize a measured subset', () => {
+    const result = runFixture(
+      'console.log(JSON.stringify(process.argv.slice(2)));',
+      { args: ['--maxWorkers=1', '--no-file-parallelism', 'test/native.test.ts'] },
+    );
+
+    expect(result.status).toBe(0);
+    const argv = JSON.parse(result.stdout.trim()) as string[];
+    expect(argv.filter((arg) => arg === '--no-file-parallelism')).toHaveLength(1);
+    expect(argv).toContain('--maxWorkers=1');
+    expect(argv).toContain('test/native.test.ts');
   });
 
   it('keeps the default summary alongside compact module progress', () => {

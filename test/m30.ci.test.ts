@@ -216,6 +216,7 @@ describe('M30 CI workflow', () => {
         externalSkillArtifactFirewallTest,
         policyAssignmentReceiptsTest,
         claimedBatchAdmissionTest,
+        'test/m526.execution-identity-v1.test.ts',
       ],
       [
         'test/activation-readiness-package.test.ts',
