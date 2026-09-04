@@ -134,6 +134,7 @@ export const REAL_IO_TEST_FILES = [
   // --- special cases: fast on a quiet machine but genuinely real I/O, so still contention-prone ---
   'test/m19.telemetry-sink.test.ts', // binds a real local HTTP server (OtlpHttpSink describe block) — 0.0s slowest test in the quiet baseline
   'test/m2.doctor.test.ts', // runs real environment/tool probes against git, npm, and fs — 0.9s slowest test in the quiet baseline
+  'test/m440.dependency-audit-ci.test.ts', // spawns bounded real shell fixtures to prove audit fallback fail-closed behavior
   'test/m93.daemon-service-crash-recovery.test.ts', // real daemon process crash/recovery (24.5s file total) — 1.7s slowest test in the quiet baseline
 
   // --- Agent OS durable stores and runtime: real private filesystem layouts, fsync/link
