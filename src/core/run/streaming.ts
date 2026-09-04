@@ -273,14 +273,59 @@ let lastGcAtDir: string | undefined;
 let lastGcAt = 0;
 const GC_INTERVAL_MS = 10 * 60 * 1_000;
 
+let runStreamGcBeforeCapacityUnlinkHook: ((filePath: string) => void) | undefined;
+
+/** Test-only mutation-boundary hook for deterministic GC/claim races. */
+export function setRunStreamGcBeforeCapacityUnlinkHookForTests(
+  hook?: (filePath: string) => void,
+): void {
+  if (process.env['NODE_ENV'] !== 'test' && process.env['VITEST'] !== 'true') {
+    throw new Error('run stream GC hooks are test-only');
+  }
+  runStreamGcBeforeCapacityUnlinkHook = hook;
+}
+
+/**
+ * Delete only while holding the exact activity lock a candidate must acquire
+ * before O_EXCL stream creation. Path, parent, root, and inode are revalidated
+ * under that lock so enumeration-time observations never authorize unlink.
+ */
+function pruneStreamFileUnderActivityLock(
+  filePath: string,
+  expectedFile: Pick<fs.BigIntStats, 'dev' | 'ino'>,
+  expectedDirectory: Pick<fs.BigIntStats, 'dev' | 'ino'>,
+  expectedRoot: Pick<fs.BigIntStats, 'dev' | 'ino'>,
+): boolean {
+  const pruneLock = acquireLocalStoreLock(runOutputStreamLockPath(filePath), 0, {
+    anchorPath: runStreamsDirRoot(),
+    exactPrivateStorage: true,
+  });
+  if (!pruneLock) return false;
+  try {
+    const current = fs.lstatSync(filePath, { bigint: true });
+    const currentDir = fs.lstatSync(path.dirname(filePath), { bigint: true });
+    const currentRoot = fs.lstatSync(path.dirname(path.dirname(filePath)), { bigint: true });
+    if (!safePrivateStreamFile(current) ||
+      !safePrivateStreamDirectory(currentDir) || !safePrivateStreamDirectory(currentRoot) ||
+      !sameStreamFile(current, expectedFile) ||
+      !sameStreamFile(currentDir, expectedDirectory) || !sameStreamFile(currentRoot, expectedRoot) ||
+      current.dev !== currentDir.dev) return false;
+    fs.unlinkSync(filePath);
+    writeState.delete(filePath);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    releaseLocalStoreLock(pruneLock);
+  }
+}
+
 /**
  * Best-effort retention sweep: deletes run-stream files whose mtime is older
- * than STREAM_RETENTION_MS. Mirrors agent-diagnostics.ts's opportunistic-on-
- * write GC (maintainPrivateStore), deliberately without its multi-process
- * locking — this data is disposable observability, not an audit trail, so a
- * best-effort single-process sweep is enough. Throttled to at most once per
- * GC_INTERVAL_MS per process (per resolved directory — see lastGcAtDir) so
- * normal chunk writes stay cheap.
+ * than STREAM_RETENTION_MS. Candidate stream mutations coordinate through a
+ * cross-process activity lock; no enumeration-time observation authorizes an
+ * unlink. Throttled to at most once per GC_INTERVAL_MS per process (per
+ * resolved directory — see lastGcAtDir) so normal chunk writes stay cheap.
  */
 export function gcRunStreams(force = false, preserveRunId?: string): void {
   const now = Date.now();
@@ -296,7 +341,14 @@ export function gcRunStreams(force = false, preserveRunId?: string): void {
     const dirStat = fs.lstatSync(dir, { bigint: true });
     if (!safePrivateStreamDirectory(rootStat) || !safePrivateStreamDirectory(dirStat)) return;
     const preservePath = preserveRunId ? runStreamFilePath(preserveRunId) : undefined;
-    const retained: Array<{ path: string; mtimeMs: number; size: number; protected: boolean }> = [];
+    const retained: Array<{
+      path: string;
+      mtimeMs: number;
+      size: number;
+      dev: bigint;
+      ino: bigint;
+      protected: boolean;
+    }> = [];
     for (const name of fs.readdirSync(dir)) {
       if (!name.endsWith('.log')) continue;
       const filePath = path.join(dir, name);
@@ -319,17 +371,24 @@ export function gcRunStreams(force = false, preserveRunId?: string): void {
         // mtime alone is not proof that the inode is safe to prune.
         const protectedActive = !protectedTarget &&
           fs.existsSync(runOutputStreamLockPath(filePath)) && !inspectionLock;
-        const stat = fs.lstatSync(filePath);
+        if (inspectionLock) {
+          releaseLocalStoreLock(inspectionLock);
+          inspectionLock = null;
+        }
+        const stat = fs.lstatSync(filePath, { bigint: true });
         if (stat.isSymbolicLink() || !stat.isFile()) continue;
-        if (!protectedTarget && !protectedActive && now - stat.mtimeMs > STREAM_RETENTION_MS) {
-          fs.unlinkSync(filePath);
-          writeState.delete(filePath);
+        const expired = now - Number(stat.mtimeMs) > STREAM_RETENTION_MS;
+        if (!protectedTarget && !protectedActive && expired &&
+          pruneStreamFileUnderActivityLock(filePath, stat, dirStat, rootStat)) {
+          // Deleted while holding the same lock required for candidate claim.
         } else {
           retained.push({
             path: filePath,
-            mtimeMs: stat.mtimeMs,
-            size: stat.size,
-            protected: protectedTarget || protectedActive,
+            mtimeMs: Number(stat.mtimeMs),
+            size: Number(stat.size),
+            dev: stat.dev,
+            ino: stat.ino,
+            protected: protectedTarget || protectedActive || expired,
           });
         }
       } catch {
@@ -344,16 +403,14 @@ export function gcRunStreams(force = false, preserveRunId?: string): void {
     for (const entry of retained) {
       if (files <= MAX_STREAM_FILES && bytes <= MAX_STREAM_AGGREGATE_BYTES) break;
       if (entry.protected) continue;
+      runStreamGcBeforeCapacityUnlinkHook?.(entry.path);
       try {
-        const current = fs.lstatSync(entry.path);
-        const currentDir = fs.lstatSync(dir, { bigint: true });
-        const currentRoot = fs.lstatSync(root, { bigint: true });
-        if (current.isSymbolicLink() || !current.isFile() ||
-          !safePrivateStreamDirectory(currentDir) || !safePrivateStreamDirectory(currentRoot) ||
-          !sameStreamFile(dirStat, currentDir) || !sameStreamFile(rootStat, currentRoot) ||
-          BigInt(current.dev) !== dirStat.dev) continue;
-        fs.unlinkSync(entry.path);
-        writeState.delete(entry.path);
+        if (!pruneStreamFileUnderActivityLock(
+          entry.path,
+          { dev: entry.dev, ino: entry.ino },
+          dirStat,
+          rootStat,
+        )) continue;
         files -= 1;
         bytes -= entry.size;
       } catch {
@@ -534,21 +591,24 @@ function bindStreamPath(fd: number, filePath: string): BoundStreamPath | undefin
 export function claimRunOutputStream(runId: string): RunOutputStreamClaim | undefined {
   const filePath = runStreamFilePath(runId);
   if (!filePath) return undefined;
-  // Keep global retention/cap enforcement on candidate-only workloads while
-  // preserving this exact target: a pre-existing orphan must remain visible
-  // to the subsequent O_EXCL claim and be refused, never swept then adopted.
-  gcRunStreams(true, runId);
   if (!ensureRunStreamsDir()) return undefined;
 
   let fd: number | undefined;
   let created = false;
   let claimed = false;
+  // Acquire intent before retention. This closes the cross-process gap between
+  // preserving the target during our sweep and the later O_EXCL: every other
+  // pruner must acquire this same lock at its unlink boundary.
   const activityLock = acquireLocalStoreLock(runOutputStreamLockPath(filePath), 0, {
     anchorPath: runStreamsDirRoot(),
     exactPrivateStorage: true,
   });
   if (!activityLock) return undefined;
   try {
+    // Keep global retention/cap enforcement on candidate-only workloads while
+    // preserving this exact target. A pre-existing orphan remains visible to
+    // O_EXCL and is refused, never swept then adopted.
+    gcRunStreams(true, runId);
     const noFollow = typeof fs.constants.O_NOFOLLOW === 'number' ? fs.constants.O_NOFOLLOW : 0;
     fd = fs.openSync(
       filePath,

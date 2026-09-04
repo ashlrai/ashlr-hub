@@ -36,7 +36,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { InboxStore } from '../src/core/seams/inbox.js';
@@ -934,7 +934,93 @@ describe('M117 — orchestrator dispatch for api-model engine (mocked)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 8. DURABLE API-MODEL OUTPUT (exact opt-in only)
+// 8. DURABLE CLI-ENGINE CLAIM LIFECYCLE
+// ---------------------------------------------------------------------------
+describe('M117 — durable CLI-engine claim lifecycle', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+    vi.doUnmock('../src/core/sandbox/policy.js');
+    vi.doUnmock('../src/core/sandbox/worktree.js');
+    vi.doUnmock('../src/core/sandbox/mutation-fence.js');
+  });
+
+  it.each([
+    'pre-entry-abort',
+    'kill-switch',
+    'sandbox-failure',
+    'post-sandbox-abort',
+    'mutation-fence-failure',
+  ] as const)('retires exclusive stream authority after %s', async (refusal) => {
+    const previousHome = process.env.HOME;
+    const home = mkdtempSync(join(tmpdir(), 'ashlr-m117-cli-claim-'));
+    process.env.HOME = home;
+    const controller = new AbortController();
+    if (refusal === 'pre-entry-abort') controller.abort();
+
+    vi.doMock('../src/core/sandbox/policy.js', async (importOriginal) => ({
+      ...await importOriginal<typeof import('../src/core/sandbox/policy.js')>(),
+      assertMayMutate: () => {},
+      killSwitchOn: () => refusal === 'kill-switch',
+    }));
+    vi.doMock('../src/core/sandbox/worktree.js', async (importOriginal) => ({
+      ...await importOriginal<typeof import('../src/core/sandbox/worktree.js')>(),
+      createSandbox: (repo: string) => {
+        if (refusal === 'sandbox-failure') throw new Error('fixture sandbox failure');
+        if (refusal === 'post-sandbox-abort') controller.abort();
+        return { id: 'claim-sb', worktreePath: home, sourceRepo: repo, branch: 'claim-test' };
+      },
+      borrowSandboxCleanupAuthority: () => ({ outwardFence: {} }),
+      removeSandbox: () => {},
+      removeSandboxWithBorrowedAuthority: () => {},
+    }));
+    vi.doMock('../src/core/sandbox/mutation-fence.js', async (importOriginal) => ({
+      ...await importOriginal<typeof import('../src/core/sandbox/mutation-fence.js')>(),
+      acquireOutwardMutationFence: () => ({}),
+      ownsOutwardMutationFence: () => refusal !== 'mutation-fence-failure',
+      releaseOutwardMutationFence: () => {},
+    }));
+
+    try {
+      const streaming = await import('../src/core/run/streaming.js');
+      const runId = `cli-claim-${refusal}`;
+      const claim = streaming.claimRunOutputStream(runId);
+      expect(claim).toBeDefined();
+      const streamPath = streaming.runStreamFilePath(runId)!;
+      const activeLockPath = `${streamPath}.active.lock`;
+      expect(existsSync(activeLockPath)).toBe(true);
+
+      const sandboxed = await import('../src/core/run/sandboxed-engine.js?claim-lifecycle=' + randomUUID()) as
+        typeof import('../src/core/run/sandboxed-engine.js');
+      const result = await sandboxed.runEngineSandboxed('codex', 'fixture refusal', {
+        foundry: {
+          models: { codex: 'gpt-5.5' },
+          runOutputPersistence: { enabled: true },
+        },
+      } as never, {
+        sourceRepo: home,
+        propose: false,
+        runId,
+        runOutputStreamClaim: claim,
+        signal: controller.signal,
+      });
+
+      expect(result.state.status).not.toBe('running');
+      expect(existsSync(activeLockPath)).toBe(false);
+      const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+      utimesSync(streamPath, eightDaysAgo, eightDaysAgo);
+      streaming.gcRunStreams(true);
+      expect(existsSync(streamPath)).toBe(false);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 9. DURABLE API-MODEL OUTPUT (exact opt-in only)
 // ---------------------------------------------------------------------------
 describe('M117 — durable api-model output policy', () => {
   let tmpRepo: string;
@@ -1075,7 +1161,7 @@ describe('M117 — durable api-model output policy', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 9. LIVE INTEGRATION (skipped unless OLLAMA_LIVE=1)
+// 10. LIVE INTEGRATION (skipped unless OLLAMA_LIVE=1)
 // ---------------------------------------------------------------------------
 describe('M117 — live Ollama integration (OLLAMA_LIVE=1 only)', () => {
   const isLive = process.env['OLLAMA_LIVE'] === '1';

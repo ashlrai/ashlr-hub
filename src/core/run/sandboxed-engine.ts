@@ -1391,6 +1391,12 @@ export async function runEngineSandboxed(
     cfg,
     opts.runOutputStreamClaim,
   );
+  // This outer lifecycle guard owns the sink from the moment it is created.
+  // The main execution block below also finalizes it, but StreamSink terminal
+  // methods are idempotent; this guard covers every earlier refusal/return
+  // (abort, kill switch, sandbox failure, or mutation-fence failure) and any
+  // exception before that block is entered.
+  try {
   const runCreatedAtIso = new Date().toISOString();
   const recordSandboxedRunAgentAction = opts.deferTerminalAction
     ? (_fields: Parameters<typeof writeSandboxedRunAgentAction>[0]) => {}
@@ -2352,6 +2358,9 @@ export async function runEngineSandboxed(
       }
     }
     releaseOutwardMutationFence(executionFence);
+  }
+  } finally {
+    endStreamSink(streamSink);
   }
 }
 

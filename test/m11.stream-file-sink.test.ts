@@ -35,6 +35,7 @@ import {
   releaseRunOutputStreamClaim,
   withOptionalRunOutputPersistence,
   readRunStreamChunk,
+  setRunStreamGcBeforeCapacityUnlinkHookForTests,
   setRunStreamReadAfterOpenHookForTests,
   runStreamFilePath,
   runStreamsDir,
@@ -45,6 +46,10 @@ import {
   STREAM_REDACTION_WINDOW_CHARS,
   STREAM_TRUNCATION_MARKER,
 } from '../src/core/run/streaming.js';
+import {
+  acquireLocalStoreLock,
+  releaseLocalStoreLock,
+} from '../src/core/fleet/local-store-lock.js';
 
 let tmpHome: string;
 let prevHome: string | undefined;
@@ -53,10 +58,12 @@ beforeEach(() => {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-stream-sink-home-'));
   prevHome = process.env.HOME;
   process.env.HOME = tmpHome;
+  setRunStreamGcBeforeCapacityUnlinkHookForTests(undefined);
   setRunStreamReadAfterOpenHookForTests(undefined);
 });
 
 afterEach(() => {
+  setRunStreamGcBeforeCapacityUnlinkHookForTests(undefined);
   setRunStreamReadAfterOpenHookForTests(undefined);
   if (prevHome === undefined) delete process.env.HOME;
   else process.env.HOME = prevHome;
@@ -135,6 +142,27 @@ describe('durable run-output policy', () => {
     const streamPath = runStreamFilePath(runId)!;
     releaseRunOutputStreamClaim(claim!);
     expect(fs.existsSync(streamPath)).toBe(false);
+  });
+
+  it('double terminal finalization retires a claim without deleting its output', () => {
+    const runId = 'claimed-double-terminal';
+    const claim = claimRunOutputStream(runId);
+    expect(claim).toBeDefined();
+    const streamPath = runStreamFilePath(runId)!;
+    const sink = withOptionalRunOutputPersistence(
+      nullSink(),
+      runId,
+      { foundry: { runOutputPersistence: { enabled: true } } },
+      claim,
+    );
+    sink(makeEvent({ text: 'one durable terminal result' }));
+    endStreamSink(sink);
+    endStreamSink(sink);
+
+    expect(readStoredText(runId)).toBe('one durable terminal result');
+    expect(fs.existsSync(`${streamPath}.active.lock`)).toBe(false);
+    releaseRunOutputStreamClaim(claim!);
+    expect(readStoredText(runId)).toBe('one durable terminal result');
   });
 });
 
@@ -644,6 +672,34 @@ describe('gcRunStreams', () => {
     expect(fs.existsSync(activePath)).toBe(true);
     expect(logs).toHaveLength(MAX_STREAM_FILES);
     releaseRunOutputStreamClaim(claim!);
+  });
+
+  it('rechecks a claim marker created after enumeration before capacity unlink', () => {
+    fs.mkdirSync(runStreamsDir(), { recursive: true, mode: 0o700 });
+    const racedPath = runStreamFilePath('capacity-race-0')!;
+    for (let i = 0; i < MAX_STREAM_FILES + 1; i += 1) {
+      const file = runStreamFilePath(`capacity-race-${i}`)!;
+      fs.writeFileSync(file, '{}\n', { mode: 0o600 });
+      const at = new Date(Date.now() - (MAX_STREAM_FILES + 1 - i) * 1_000);
+      fs.utimesSync(file, at, at);
+    }
+
+    let claimantLock: ReturnType<typeof acquireLocalStoreLock> = null;
+    setRunStreamGcBeforeCapacityUnlinkHookForTests((filePath) => {
+      if (filePath !== racedPath || claimantLock) return;
+      claimantLock = acquireLocalStoreLock(`${racedPath}.active.lock`, 0, {
+        anchorPath: path.dirname(runStreamsDir()),
+        exactPrivateStorage: true,
+      });
+      expect(claimantLock).not.toBeNull();
+    });
+
+    gcRunStreams(true);
+
+    expect(fs.existsSync(racedPath)).toBe(true);
+    expect(fs.readdirSync(runStreamsDir()).filter((name) => name.endsWith('.log')))
+      .toHaveLength(MAX_STREAM_FILES);
+    if (claimantLock) releaseLocalStoreLock(claimantLock);
   });
 });
 
