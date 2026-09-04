@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -24,6 +25,7 @@ import {
   createAgentOsEpochAttemptStartReceiptProviderV1,
   readAgentOsEpochAttemptReceiptsV2,
   recoverAgentOsEpochAttemptStoreV2,
+  setAgentOsEpochAttemptStoreTestHooksForTests,
   type AgentOsAuthenticatedActiveEpochAttemptClosureV1,
   type AgentOsEpochAttemptStoreDependenciesV1,
 } from '../src/core/vision/agent-os-epoch-attempt-store.js';
@@ -95,6 +97,7 @@ function attemptCrypto(label: string) {
 }
 
 afterEach(() => {
+  setAgentOsEpochAttemptStoreTestHooksForTests(undefined);
   for (const lock of locks.splice(0)) releaseAgentOsObservationLockV1(lock);
   for (const lease of leases.splice(0)) releaseAgentOsEpochCoordinationLeaseV1(lease);
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -315,6 +318,41 @@ describe('M557 durable epoch Attempt Receipt V2 store', () => {
     expect(readFileSync(recordPath, 'utf8').endsWith('\n')).toBe(true);
     expectNoAuthority(first as unknown as Record<string, unknown>);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'withholds a start receipt when its pathname is replaced after descriptor open',
+    () => {
+      const value = fixture();
+      const started = value.begin();
+      const active = closure();
+      const provider = createAgentOsEpochAttemptStartReceiptProviderV1(value.dependencies);
+      const recordPath = join(
+        value.attemptsPath,
+        'records',
+        `${started.receipt!.attemptId.slice(7)}.1.json`,
+      );
+      const displaced = `${recordPath}.displaced`;
+      const original = readFileSync(recordPath, 'utf8');
+      const replacement = '{"replacement":"must-survive"}\n';
+      setAgentOsEpochAttemptStoreTestHooksForTests({
+        afterPublishedStartOpen: (path) => {
+          renameSync(path, displaced);
+          writeFileSync(path, replacement, { mode: 0o600 });
+        },
+      });
+
+      expect(provider.readAuthenticatedStartReceipt({
+        epoch: active.epoch,
+        anchoredHeadDigest: active.epochHeadDigest,
+        epochManifestDigest: active.epochManifestDigest,
+        attemptNamespaceDigest: active.attemptNamespaceDigest,
+        producerAttemptId: started.receipt!.attemptId,
+        durableTickDigest: TICK_ONE,
+      })).toEqual({ state: 'missing' });
+      expect(readFileSync(displaced, 'utf8')).toBe(original);
+      expect(readFileSync(recordPath, 'utf8')).toBe(replacement);
+    },
+  );
 
   it('persists and verifies an exact failed start-to-terminal chain and attempt-set digest', () => {
     const value = fixture();

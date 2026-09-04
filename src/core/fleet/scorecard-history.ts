@@ -75,6 +75,19 @@ export interface ScorecardHistoryReadResult extends ScorecardHistorySourceQualit
   records: ScorecardSnapshotRecord[];
 }
 
+interface ScorecardHistoryTestHooks {
+  afterFileOpen?: (operation: 'append' | 'read', path: string) => void;
+  beforeExclusiveCreate?: (path: string) => void;
+}
+
+let scorecardHistoryTestHooks: ScorecardHistoryTestHooks | undefined;
+
+/** Test-only seam for deterministic pathname replacement after descriptor open. */
+export function setScorecardHistoryTestHooksForTests(hooks?: ScorecardHistoryTestHooks): void {
+  if (process.env.NODE_ENV !== 'test') throw new Error('scorecard history hooks are test-only');
+  scorecardHistoryTestHooks = hooks;
+}
+
 // ---------------------------------------------------------------------------
 // Write
 // ---------------------------------------------------------------------------
@@ -95,23 +108,24 @@ function sameFile(left: ReturnType<typeof fstatSync>, right: ReturnType<typeof f
 function appendHistoryLine(path: string, line: string): void {
   let fd: number | undefined;
   try {
-    let pathBefore: ReturnType<typeof lstatSync> | undefined;
+    const openExistingFlags = fsConstants.O_APPEND | fsConstants.O_RDWR | fsConstants.O_NOFOLLOW;
     try {
-      pathBefore = lstatSync(path);
-      if (!isSafeDecisionAuthorityFile(pathBefore)) {
-        throw new Error('scorecard history path is unsafe');
-      }
+      fd = openSync(path, openExistingFlags);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      try {
+        scorecardHistoryTestHooks?.beforeExclusiveCreate?.(path);
+        fd = openSync(path, openExistingFlags | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
+      } catch (createError) {
+        if ((createError as NodeJS.ErrnoException).code !== 'EEXIST') throw createError;
+        fd = openSync(path, openExistingFlags);
+      }
     }
-    fd = openSync(
-      path,
-      fsConstants.O_APPEND | fsConstants.O_RDWR | fsConstants.O_NOFOLLOW |
-        (pathBefore ? 0 : fsConstants.O_CREAT | fsConstants.O_EXCL),
-      0o600,
-    );
     const opened = fstatSync(fd);
-    if (!isSafeDecisionAuthorityFile(opened) || (pathBefore && !sameFile(pathBefore, opened))) {
+    scorecardHistoryTestHooks?.afterFileOpen?.('append', path);
+    const pathBefore = lstatSync(path);
+    if (!isSafeDecisionAuthorityFile(opened) || !isSafeDecisionAuthorityFile(pathBefore) ||
+      !sameFile(pathBefore, opened)) {
       throw new Error('scorecard history is not a safe regular file');
     }
     if (opened.size > 0) {
@@ -192,12 +206,12 @@ function readHistoryFile(
 ): { ok: true; text: string; bytesRead: number } | { ok: false; reason: 'byte-limit' | 'io-error' } {
   let fd: number | undefined;
   try {
-    const pathBefore = lstatSync(path);
-    if (!isSafeDecisionAuthorityFile(pathBefore)) return { ok: false, reason: 'io-error' };
-    if (pathBefore.size > maxBytes) return { ok: false, reason: 'byte-limit' };
     fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
     const before = fstatSync(fd);
-    if (!isSafeDecisionAuthorityFile(before) || !sameFile(pathBefore, before)) return { ok: false, reason: 'io-error' };
+    scorecardHistoryTestHooks?.afterFileOpen?.('read', path);
+    const pathBefore = lstatSync(path);
+    if (!isSafeDecisionAuthorityFile(before) || !isSafeDecisionAuthorityFile(pathBefore) ||
+      !sameFile(pathBefore, before)) return { ok: false, reason: 'io-error' };
     if (before.size > maxBytes) return { ok: false, reason: 'byte-limit' };
     const buffer = Buffer.alloc(before.size);
     const bytesRead = before.size > 0 ? readSync(fd, buffer, 0, before.size, 0) : 0;

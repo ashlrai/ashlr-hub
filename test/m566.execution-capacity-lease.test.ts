@@ -510,6 +510,25 @@ describe('M566 Execution Capacity Lease V1', () => {
     },
   );
 
+  it('fails closed when the ledger pathname is replaced after descriptor open', () => {
+    const entry = fixture();
+    const capacity = evidence(digest('identity'));
+    expect(acquire(entry.store, 'first', [item(capacity)])).toMatchObject({ reason: 'recorded' });
+    const displaced = `${entry.statePath}.displaced`;
+    const original = readFileSync(entry.statePath, 'utf8');
+    const replacement = '{"replacement":"must-survive"}\n';
+    setExecutionCapacityLeaseTestHooksForTests({
+      afterLedgerOpen: (path) => {
+        renameSync(path, displaced);
+        writeFileSync(path, replacement, { mode: 0o600 });
+      },
+    });
+
+    expect(entry.store.inspect()).toMatchObject({ sourceState: 'degraded', complete: false });
+    expect(readFileSync(displaced, 'utf8')).toBe(original);
+    expect(readFileSync(entry.statePath, 'utf8')).toBe(replacement);
+  });
+
   it('fails closed under lock contention and destination replacement races', () => {
     const entry = fixture();
     mkdirSync(entry.root, { recursive: true, mode: 0o700 });

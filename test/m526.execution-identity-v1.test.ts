@@ -11,7 +11,9 @@ import {
   linkSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -24,6 +26,7 @@ import {
   digestExecutionIdentityRefV1,
   ExecutionIdentityResourceBookV1,
   resolveExecutionIdentityRuntimeV1,
+  setExecutionIdentityTestHooksForTests,
 } from '../src/core/fabric/execution-identity.js';
 
 const ID_A = 'eid_11111111111111111111111111111111';
@@ -45,6 +48,7 @@ const describePosix = process.platform === 'win32' ? describe.skip : describe;
 const describeWindows = process.platform === 'win32' ? describe : describe.skip;
 
 afterEach(() => {
+  setExecutionIdentityTestHooksForTests(undefined);
   for (const path of cleanup) rmSync(path, { recursive: true, force: true });
   cleanup.clear();
   vi.restoreAllMocks();
@@ -281,6 +285,29 @@ describePosix('Execution Identity V1 — private account isolation', () => {
         expect(status.stopReasons).toContain('private-store-unsafe');
       }
     }
+  });
+
+  it('fails closed when the private store pathname is replaced after descriptor open', () => {
+    const f = fixture();
+    const displaced = `${f.storePath}.displaced`;
+    const original = readFileSync(f.storePath, 'utf8');
+    const replacement = '{"schemaVersion":1,"bindings":[]}';
+    setExecutionIdentityTestHooksForTests({
+      afterPrivateStoreOpen: (path) => {
+        renameSync(path, displaced);
+        writeFileSync(path, replacement, { mode: 0o600 });
+      },
+    });
+
+    const status = buildExecutionIdentityShadowStatusV1(codexConfig(), {
+      privateStorePath: f.storePath,
+      now: NOW,
+    });
+
+    expect(status).toMatchObject({ sourceState: 'degraded', identities: [], assignments: [] });
+    expect(status.stopReasons).toContain('private-store-unsafe');
+    expect(readFileSync(displaced, 'utf8')).toBe(original);
+    expect(readFileSync(f.storePath, 'utf8')).toBe(replacement);
   });
 });
 

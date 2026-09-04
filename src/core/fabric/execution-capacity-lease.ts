@@ -269,6 +269,7 @@ interface LeaseTestHooks {
   beforeRename?: () => void;
   fsyncDirectory?: typeof fsyncDirectory;
   randomBytes?: (size: number) => Buffer;
+  afterLedgerOpen?: (path: string) => void;
 }
 
 let leaseTestHooks: LeaseTestHooks | undefined;
@@ -501,19 +502,23 @@ function readBoundFile(root: RootIdentity): BoundFile | null {
   const path = join(root.path, STORE_FILE);
   let fd: number | undefined;
   try {
-    let before: BigIntStats;
-    try { before = lstatSync(path, { bigint: true }); }
-    catch (error) {
-      return (error as NodeJS.ErrnoException).code === 'ENOENT' && stableRoot(root)
-        ? { found: false }
-        : null;
-    }
-    if (!safeFile(before) || before.size <= 0n || before.size > BigInt(STORE_MAX_BYTES) ||
-      !assurePrivateStoragePath(path, 'file', 'inspect-existing', { anchorPath: root.path }).ok) return null;
     const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
-    fd = openSync(path, fsConstants.O_RDONLY | noFollow);
+    try { fd = openSync(path, fsConstants.O_RDONLY | noFollow); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || !stableRoot(root)) return null;
+      try {
+        lstatSync(path, { bigint: true });
+        return null;
+      } catch (namedError) {
+        return (namedError as NodeJS.ErrnoException).code === 'ENOENT' ? { found: false } : null;
+      }
+    }
     const opened = fstatSync(fd, { bigint: true });
-    if (!safeFile(opened) || !sameFile(before, opened) || opened.size !== before.size) return null;
+    leaseTestHooks?.afterLedgerOpen?.(path);
+    const namedBefore = lstatSync(path, { bigint: true });
+    if (!safeFile(opened) || !safeFile(namedBefore) || !sameFile(opened, namedBefore) ||
+      opened.size <= 0n || opened.size > BigInt(STORE_MAX_BYTES) ||
+      !assurePrivateStoragePath(path, 'file', 'inspect-existing', { anchorPath: root.path }).ok) return null;
     const bytes = Buffer.alloc(Number(opened.size));
     let offset = 0;
     while (offset < bytes.length) {
@@ -524,8 +529,8 @@ function readBoundFile(root: RootIdentity): BoundFile | null {
     if (readSync(fd, Buffer.alloc(1), 0, 1, bytes.length) !== 0) return null;
     const after = fstatSync(fd, { bigint: true });
     const named = lstatSync(path, { bigint: true });
-    if (!safeFile(after) || !safeFile(named) || !sameFile(before, after) || !sameFile(after, named) ||
-      after.size !== before.size || after.mtimeNs !== before.mtimeNs || after.ctimeNs !== before.ctimeNs ||
+    if (!safeFile(after) || !safeFile(named) || !sameFile(namedBefore, after) || !sameFile(after, named) ||
+      after.size !== opened.size || after.mtimeNs !== opened.mtimeNs || after.ctimeNs !== opened.ctimeNs ||
       !stableRoot(root)) return null;
     return {
       found: true, dev: after.dev, ino: after.ino, size: after.size,

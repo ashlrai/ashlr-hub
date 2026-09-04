@@ -49,6 +49,18 @@ const IDENTITY_DIGEST_DOMAIN = 'ashlr.execution-identity.public-ref.v1';
 const MODEL_RESOURCE_DIGEST_DOMAIN = 'ashlr.execution-identity.model-resources.v1';
 const WORK_DIGEST_DOMAIN = 'ashlr.execution-identity.shadow-work.v1';
 
+interface ExecutionIdentityTestHooks {
+  afterPrivateStoreOpen?: (path: string) => void;
+}
+
+let executionIdentityTestHooks: ExecutionIdentityTestHooks | undefined;
+
+/** Test-only seam for deterministic pathname replacement after descriptor open. */
+export function setExecutionIdentityTestHooksForTests(hooks?: ExecutionIdentityTestHooks): void {
+  if (process.env.NODE_ENV !== 'test') throw new Error('execution identity hooks are test-only');
+  executionIdentityTestHooks = hooks;
+}
+
 type ExecutionIdentityDigestV1 = `sha256:${string}`;
 
 export type ExecutionIdentityV1StopReason =
@@ -281,18 +293,26 @@ function readPrivateStore(
     if (parentBefore.isSymbolicLink() || !parentBefore.isDirectory() ||
         !currentOwner(parentBefore) || !privateMode(parentBefore, 0o700) ||
         realpathSync(parent) !== parent) return { ok: false, reason: 'private-store-unsafe' };
-    const before = lstatSync(path);
-    if (before.isSymbolicLink() || !before.isFile() || before.nlink !== 1 ||
-        before.size <= 0 || before.size > PRIVATE_STORE_MAX_BYTES ||
-        !currentOwner(before) || !privateMode(before, 0o600) || realpathSync(path) !== path) {
-      return { ok: false, reason: 'private-store-unsafe' };
-    }
     const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
-    fd = openSync(path, fsConstants.O_RDONLY | noFollow);
+    try {
+      fd = openSync(path, fsConstants.O_RDONLY | noFollow);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') return { ok: false, reason: 'private-store-missing' };
+      if (code === 'ELOOP' || code === 'EMLINK') {
+        return { ok: false, reason: 'private-store-unsafe' };
+      }
+      throw error;
+    }
     const opened = fstatSync(fd);
-    if (!opened.isFile() || !sameFile(before, opened) || opened.nlink !== 1 ||
-        opened.size <= 0 || opened.size > PRIVATE_STORE_MAX_BYTES || opened.size !== before.size ||
-        !currentOwner(opened) || !privateMode(opened, 0o600)) {
+    executionIdentityTestHooks?.afterPrivateStoreOpen?.(path);
+    const namedBefore = lstatSync(path);
+    if (!opened.isFile() || opened.nlink !== 1 || opened.size <= 0 ||
+        opened.size > PRIVATE_STORE_MAX_BYTES || !currentOwner(opened) ||
+        !privateMode(opened, 0o600) || namedBefore.isSymbolicLink() ||
+        !namedBefore.isFile() || namedBefore.nlink !== 1 || namedBefore.size !== opened.size ||
+        !currentOwner(namedBefore) || !privateMode(namedBefore, 0o600) ||
+        !sameFile(opened, namedBefore) || realpathSync(path) !== path) {
       return { ok: false, reason: 'private-store-unsafe' };
     }
     const bytes = Buffer.alloc(PRIVATE_STORE_MAX_BYTES + 1);
@@ -304,7 +324,7 @@ function readPrivateStore(
     const openedAfter = fstatSync(fd);
     const after = lstatSync(path);
     const parentAfter = lstatSync(parent);
-    if (!sameFile(before, after) || !sameFile(parentBefore, parentAfter) ||
+    if (!sameFile(namedBefore, after) || !sameFile(parentBefore, parentAfter) ||
         !sameFile(opened, openedAfter) || !sameFile(after, openedAfter) ||
         after.isSymbolicLink() || !after.isFile() || after.nlink !== 1 ||
         after.size <= 0 || after.size > PRIVATE_STORE_MAX_BYTES ||

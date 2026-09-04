@@ -11,7 +11,6 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import {
   closeSync,
   constants as fsConstants,
-  existsSync,
   fstatSync,
   lstatSync,
   openSync,
@@ -86,6 +85,20 @@ const HARD_MAX_RECORDS = 100_000;
 const DEFAULT_MAX_BYTES = 128 * 1024 * 1024;
 const HARD_MAX_BYTES = 512 * 1024 * 1024;
 const MAX_LOCK_WAIT_MS = 2_000;
+
+interface AgentOsEpochAttemptStoreTestHooks {
+  afterPublishedStartOpen?: (path: string) => void;
+}
+
+let attemptStoreTestHooks: AgentOsEpochAttemptStoreTestHooks | undefined;
+
+/** Test-only seam for deterministic pathname replacement after descriptor open. */
+export function setAgentOsEpochAttemptStoreTestHooksForTests(
+  hooks?: AgentOsEpochAttemptStoreTestHooks,
+): void {
+  if (process.env.NODE_ENV !== 'test') throw new Error('epoch attempt store hooks are test-only');
+  attemptStoreTestHooks = hooks;
+}
 
 export interface AgentOsAuthenticatedActiveEpochAttemptClosureV1
   extends AgentOsEpochAttemptClosureContextV2 {
@@ -1634,20 +1647,27 @@ function readPublishedStartPointDuringTransaction(
     const { attemptsPath } = epochPaths(dependencies, closure);
     const recordsPath = join(attemptsPath, 'records');
     const filePath = join(recordsPath, `${attemptId.slice(7)}.1.json`);
-    if (!existsSync(filePath)) return null;
     const records = lstatSync(recordsPath, { bigint: true });
-    const before = lstatSync(filePath, { bigint: true });
-    if (!privateDirectory(records) || !privateFile(before) || before.size < 2n ||
-      before.size > BigInt(MAX_RECORD_BYTES) ||
+    if (!privateDirectory(records) ||
       !assurePrivateStoragePath(recordsPath, 'directory', 'inspect-existing', {
-        anchorPath: attemptsPath,
-      }).ok || !assurePrivateStoragePath(filePath, 'file', 'inspect-existing', {
         anchorPath: attemptsPath,
       }).ok) return null;
     const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
-    fd = openSync(filePath, fsConstants.O_RDONLY | noFollow);
+    try {
+      fd = openSync(filePath, fsConstants.O_RDONLY | noFollow);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    }
     const opened = fstatSync(fd, { bigint: true });
-    if (!privateFile(opened) || !sameIdentity(before, opened) || opened.size !== before.size) return null;
+    attemptStoreTestHooks?.afterPublishedStartOpen?.(filePath);
+    const namedBefore = lstatSync(filePath, { bigint: true });
+    if (!privateFile(opened) || !privateFile(namedBefore) ||
+      !sameIdentity(opened, namedBefore) || opened.size !== namedBefore.size ||
+      opened.size < 2n || opened.size > BigInt(MAX_RECORD_BYTES) ||
+      !assurePrivateStoragePath(filePath, 'file', 'inspect-existing', {
+        anchorPath: attemptsPath,
+      }).ok) return null;
     const bytes = Buffer.alloc(Number(opened.size));
     let offset = 0;
     while (offset < bytes.length) {

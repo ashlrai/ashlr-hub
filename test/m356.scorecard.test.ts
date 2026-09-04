@@ -42,6 +42,7 @@ import {
   signLocalMergeIntent,
   signLocalRealizedMergeReceipt,
 } from '../src/core/foundry/provenance.js';
+import { setScorecardHistoryTestHooksForTests } from '../src/core/fleet/scorecard-history.js';
 import { startServer, readAuthHeaders } from './helpers/authenticated-web-server.js';
 
 // ---------------------------------------------------------------------------
@@ -58,6 +59,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setScorecardHistoryTestHooksForTests(undefined);
   fs.rmSync(tmpHome, { recursive: true, force: true });
   process.env.HOME = origHome;
   vi.restoreAllMocks();
@@ -700,6 +702,80 @@ describe('scorecard-history', () => {
     expect(read.invalidRows).toBe(1);
     expect(read.sourceState).toBe('degraded');
     expect(read.complete).toBe(false);
+  });
+
+  it('does not append when the history pathname is replaced after descriptor open', async () => {
+    const { appendScorecardSnapshot, scorecardHistoryDir } =
+      await import('../src/core/fleet/scorecard-history.js');
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    const ts = new Date().toISOString();
+    const record = { ts, window: '7d' as const, scorecard: computeFleetScorecard('7d') };
+    appendScorecardSnapshot(record);
+    const historyPath = path.join(scorecardHistoryDir(), `${ts.slice(0, 7)}.jsonl`);
+    const displaced = `${historyPath}.displaced`;
+    const original = fs.readFileSync(historyPath, 'utf8');
+    const replacement = '{"replacement":"must-survive"}\n';
+    setScorecardHistoryTestHooksForTests({
+      afterFileOpen: (operation, openedPath) => {
+        if (operation !== 'append') return;
+        fs.renameSync(openedPath, displaced);
+        fs.writeFileSync(openedPath, replacement, { mode: 0o600 });
+      },
+    });
+
+    appendScorecardSnapshot({ ...record, ts: new Date(Date.now() + 1_000).toISOString() });
+
+    expect(fs.readFileSync(displaced, 'utf8')).toBe(original);
+    expect(fs.readFileSync(historyPath, 'utf8')).toBe(replacement);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'does not follow a symlink that wins the exclusive-create race',
+    async () => {
+      const { appendScorecardSnapshot, scorecardHistoryDir } =
+        await import('../src/core/fleet/scorecard-history.js');
+      const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+      const ts = new Date().toISOString();
+      const historyPath = path.join(scorecardHistoryDir(), `${ts.slice(0, 7)}.jsonl`);
+      const externalPath = path.join(tmpHome, 'external-history-target.jsonl');
+      const external = '{"external":"must-survive"}\n';
+      fs.writeFileSync(externalPath, external, { mode: 0o600 });
+      setScorecardHistoryTestHooksForTests({
+        beforeExclusiveCreate: (pathToCreate) => fs.symlinkSync(externalPath, pathToCreate),
+      });
+
+      appendScorecardSnapshot({ ts, window: '7d', scorecard: computeFleetScorecard('7d') });
+
+      expect(fs.lstatSync(historyPath).isSymbolicLink()).toBe(true);
+      expect(fs.readFileSync(externalPath, 'utf8')).toBe(external);
+    },
+  );
+
+  it('withholds history when the pathname is replaced after read descriptor open', async () => {
+    const { appendScorecardSnapshot, readScorecardHistory, scorecardHistoryDir } =
+      await import('../src/core/fleet/scorecard-history.js');
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    const ts = new Date().toISOString();
+    appendScorecardSnapshot({ ts, window: '7d', scorecard: computeFleetScorecard('7d') });
+    const historyPath = path.join(scorecardHistoryDir(), `${ts.slice(0, 7)}.jsonl`);
+    const displaced = `${historyPath}.displaced`;
+    const original = fs.readFileSync(historyPath, 'utf8');
+    const replacement = '{"replacement":"must-survive"}\n';
+    setScorecardHistoryTestHooksForTests({
+      afterFileOpen: (operation, openedPath) => {
+        if (operation !== 'read') return;
+        fs.renameSync(openedPath, displaced);
+        fs.writeFileSync(openedPath, replacement, { mode: 0o600 });
+      },
+    });
+
+    const read = readScorecardHistory({});
+
+    expect(read).toMatchObject({
+      sourceState: 'degraded', complete: false, records: [], unreadableFiles: 1,
+    });
+    expect(fs.readFileSync(displaced, 'utf8')).toBe(original);
+    expect(fs.readFileSync(historyPath, 'utf8')).toBe(replacement);
   });
 });
 
