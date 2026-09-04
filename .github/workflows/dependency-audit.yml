@@ -37,6 +37,7 @@ jobs:
     timeout-minutes: 20
     env:
       NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+      NPM_VERSION: "11.6.0"
       CARGO_AUDIT_VERSION: "0.22.2"
       CARGO_AUDIT_TARGET: x86_64-unknown-linux-gnu
       CARGO_AUDIT_SHA256: ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39
@@ -51,6 +52,11 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
+
+      - name: Install pinned npm
+        run: |
+          npm install --global "npm@${NPM_VERSION}" --ignore-scripts --no-audit --no-fund
+          test "$(npm --version)" = "${NPM_VERSION}"
 
       - name: Install pinned cargo-audit
         shell: bash
@@ -78,18 +84,18 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund --force=false --legacy-peer-deps=false --strict-peer-deps
 
       - name: Audit root dependencies
-        run: npm audit --package-lock-only --ignore-scripts --audit-level=low
+        run: npm audit --ignore-scripts --audit-level=low
 
       - name: Audit root production dependencies
-        run: npm audit --package-lock-only --ignore-scripts --omit=dev --audit-level=low
+        run: npm audit --ignore-scripts --omit=dev --audit-level=low
 
       - name: Audit Raycast dependencies
         working-directory: src/raycast
-        run: npm audit --package-lock-only --ignore-scripts --audit-level=low
+        run: npm audit --ignore-scripts --audit-level=low
 
       - name: Audit Raycast production dependencies
         working-directory: src/raycast
-        run: npm audit --package-lock-only --ignore-scripts --omit=dev --audit-level=low
+        run: npm audit --ignore-scripts --omit=dev --audit-level=low
 
       # The only exception is the still-open, externally contained Linux GLib
       # advisory. New RustSec vulnerabilities continue to fail this job.
