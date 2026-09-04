@@ -276,26 +276,117 @@ export function gcRunStreams(force = false): void {
 function seedWriteState(filePath: string): StreamWriteState {
   let state = writeState.get(filePath);
   if (state) return state;
-  let bytes = 0;
-  try {
-    bytes = fs.statSync(filePath).size;
-  } catch {
-    bytes = 0;
-  }
+  const bytes = inspectStreamFileSize(filePath);
   state = { bytes, truncated: bytes >= MAX_STREAM_FILE_BYTES, seeded: true };
   writeState.set(filePath, state);
   return state;
 }
 
+function sameStreamFile(
+  left: Pick<fs.BigIntStats, 'dev' | 'ino'>,
+  right: Pick<fs.BigIntStats, 'dev' | 'ino'>,
+): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function safePrivateStreamFile(stat: fs.BigIntStats): boolean {
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n) return false;
+  if (typeof process.getuid === 'function' && stat.uid !== BigInt(process.getuid())) return false;
+  return process.platform === 'win32' || (stat.mode & 0o077n) === 0n;
+}
+
+function safePrivateStreamDirectory(stat: fs.BigIntStats): boolean {
+  if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
+  if (typeof process.getuid === 'function' && stat.uid !== BigInt(process.getuid())) return false;
+  return process.platform === 'win32' || (stat.mode & 0o077n) === 0n;
+}
+
+interface BoundStreamPath {
+  file: fs.BigIntStats;
+  directory: fs.BigIntStats;
+  root: fs.BigIntStats;
+}
+
+function bindStreamPath(fd: number, filePath: string): BoundStreamPath | undefined {
+  const file = fs.fstatSync(fd, { bigint: true });
+  const named = fs.lstatSync(filePath, { bigint: true });
+  const directory = fs.lstatSync(path.dirname(filePath), { bigint: true });
+  const root = fs.lstatSync(path.dirname(path.dirname(filePath)), { bigint: true });
+  if (!safePrivateStreamFile(file) || !safePrivateStreamFile(named) ||
+    !sameStreamFile(file, named) || !safePrivateStreamDirectory(directory) ||
+    !safePrivateStreamDirectory(root)) return undefined;
+  return { file, directory, root };
+}
+
+/** Seed the restart-safe byte cap from descriptor-bound metadata, never from a
+ * check-then-reopen pathname observation. Unsafe/unreadable existing state is
+ * treated as already full so persistence fails closed. */
+function inspectStreamFileSize(filePath: string): number {
+  let fd: number | undefined;
+  try {
+    const noFollow = typeof fs.constants.O_NOFOLLOW === 'number' ? fs.constants.O_NOFOLLOW : 0;
+    fd = fs.openSync(filePath, fs.constants.O_RDONLY | noFollow);
+    const bound = bindStreamPath(fd, filePath);
+    if (!bound || bound.file.size >= BigInt(MAX_STREAM_FILE_BYTES)) return MAX_STREAM_FILE_BYTES;
+    return Number(bound.file.size);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 0 : MAX_STREAM_FILE_BYTES;
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* best-effort stream metadata read */ }
+    }
+  }
+}
+
+/**
+ * Open an existing stream file without a prior pathname check, or create it
+ * exclusively when absent. O_EXCL closes the absent-to-create race; O_NOFOLLOW
+ * rejects a final-component symlink. The caller still binds the resulting
+ * descriptor to the named inode before writing, because parent/path replacement
+ * can happen independently of the final-component open flags.
+ */
+function openStreamAppendFile(filePath: string): number {
+  const noFollow = typeof fs.constants.O_NOFOLLOW === 'number' ? fs.constants.O_NOFOLLOW : 0;
+  const existingFlags = fs.constants.O_APPEND | fs.constants.O_WRONLY | noFollow;
+  try {
+    return fs.openSync(filePath, existingFlags);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+
+  try {
+    return fs.openSync(
+      filePath,
+      existingFlags | fs.constants.O_CREAT | fs.constants.O_EXCL,
+      0o600,
+    );
+  } catch (error) {
+    // A cooperating writer may win creation after our ENOENT observation.
+    // Re-open without O_CREAT; every safety and identity check still applies.
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    return fs.openSync(filePath, existingFlags);
+  }
+}
+
 function appendStreamLine(filePath: string, line: string): boolean {
   let fd: number | undefined;
   try {
-    if (fs.existsSync(filePath)) {
-      const stat = fs.lstatSync(filePath);
-      if (stat.isSymbolicLink() || !stat.isFile()) return false;
+    fd = openStreamAppendFile(filePath);
+    const bound = bindStreamPath(fd, filePath);
+    if (!bound) return false;
+
+    const bytes = Buffer.from(line, 'utf8');
+    let offset = 0;
+    while (offset < bytes.length) {
+      const written = fs.writeSync(fd, bytes, offset, bytes.length - offset);
+      if (written <= 0) return false;
+      offset += written;
     }
-    fd = fs.openSync(filePath, fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, 0o600);
-    fs.writeSync(fd, line, undefined, 'utf8');
+
+    const after = bindStreamPath(fd, filePath);
+    if (!after || !sameStreamFile(bound.file, after.file) ||
+      !sameStreamFile(bound.directory, after.directory) ||
+      !sameStreamFile(bound.root, after.root)) return false;
     return true;
   } catch {
     return false;
