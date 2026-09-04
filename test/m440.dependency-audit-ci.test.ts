@@ -44,6 +44,20 @@ const npmInstallCommand = `npm install --global "npm@\${NPM_VERSION}" --ignore-s
 test "$(npm --version)" = "\${NPM_VERSION}"
 `;
 
+const npmAuditCommand = (omitDev = false) => `set -euo pipefail
+for attempt in 1 2 3; do
+  if timeout --signal=TERM --kill-after=5s 45s npm audit --ignore-scripts${omitDev ? ' --omit=dev' : ''} --audit-level=low --fetch-retries=0 --fetch-timeout=30000; then
+    exit 0
+  else
+    status=$?
+  fi
+  if [ "\${attempt}" -eq 3 ]; then
+    exit "\${status}"
+  fi
+  sleep "$((attempt * 5))"
+done
+`;
+
 const cargoAuditInstallCommand = `set -euo pipefail
 archive="\${RUNNER_TEMP}/cargo-audit.tgz"
 extract_dir="\${RUNNER_TEMP}/cargo-audit-extract"
@@ -122,21 +136,21 @@ describe('M440 dependency audit CI', () => {
             },
             {
               name: 'Audit root dependencies',
-              run: 'npm audit --ignore-scripts --audit-level=low',
+              run: npmAuditCommand(),
             },
             {
               name: 'Audit root production dependencies',
-              run: 'npm audit --ignore-scripts --omit=dev --audit-level=low',
+              run: npmAuditCommand(true),
             },
             {
               name: 'Audit Raycast dependencies',
               'working-directory': 'src/raycast',
-              run: 'npm audit --ignore-scripts --audit-level=low',
+              run: npmAuditCommand(),
             },
             {
               name: 'Audit Raycast production dependencies',
               'working-directory': 'src/raycast',
-              run: 'npm audit --ignore-scripts --omit=dev --audit-level=low',
+              run: npmAuditCommand(true),
             },
             {
               name: 'Audit desktop Cargo dependencies',
@@ -215,19 +229,19 @@ describe('M440 dependency audit CI', () => {
         cwd: 'src/raycast',
       },
       {
-        run: 'npm audit --ignore-scripts --audit-level=low',
+        run: npmAuditCommand(),
         cwd: undefined,
       },
       {
-        run: 'npm audit --ignore-scripts --omit=dev --audit-level=low',
+        run: npmAuditCommand(true),
         cwd: undefined,
       },
       {
-        run: 'npm audit --ignore-scripts --audit-level=low',
+        run: npmAuditCommand(),
         cwd: 'src/raycast',
       },
       {
-        run: 'npm audit --ignore-scripts --omit=dev --audit-level=low',
+        run: npmAuditCommand(true),
         cwd: 'src/raycast',
       },
     ]);
@@ -236,7 +250,7 @@ describe('M440 dependency audit CI', () => {
       .map((step, index) => ({ index, run: String(step.run ?? '') }))
       .filter(({ run }) => run.startsWith('npm ci'))
       .map(({ index }) => index);
-    const firstAuditIndex = steps.findIndex((step) => String(step.run ?? '').startsWith('npm audit'));
+    const firstAuditIndex = steps.findIndex((step) => String(step.run ?? '').includes('npm audit'));
     expect(installIndexes).toEqual([4, 5]);
     expect(Math.max(...installIndexes)).toBeLessThan(firstAuditIndex);
     for (const index of installIndexes) {
@@ -246,6 +260,14 @@ describe('M440 dependency audit CI', () => {
       expect(command).toContain('--strict-peer-deps');
     }
     expect(steps[1]?.with).not.toHaveProperty('cache');
+    for (const command of [npmAuditCommand(), npmAuditCommand(true)]) {
+      expect(command).toContain('for attempt in 1 2 3');
+      expect(command).toContain('timeout --signal=TERM --kill-after=5s 45s npm audit');
+      expect(command).toContain('--fetch-retries=0 --fetch-timeout=30000');
+      expect(command).toContain('if [ "${attempt}" -eq 3 ]; then');
+      expect(command).toContain('exit "${status}"');
+      expect(command).not.toMatch(/\|\|\s*true|continue-on-error/);
+    }
   });
 
   it('pins RustSec tooling and fails on every vulnerability except the open GLib quarantine', () => {
