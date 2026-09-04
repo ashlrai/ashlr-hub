@@ -82,6 +82,7 @@
     "test:web": "vitest run --config vitest.config.web.ts",
     "test:ci": "node scripts/test-ci.mjs",
     "test:invariants": "vitest run test/h*.test.ts --no-file-parallelism",
+    "conformance:ecosystem": "tsx scripts/run-ecosystem-conformance.ts",
     "lint": "eslint . && npm run lint:realio-lane",
     "lint:realio-lane": "node scripts/check-realio-lane-membership.mjs",
     "typecheck": "tsc --noEmit && npm run typecheck:web",
