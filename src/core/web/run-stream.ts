@@ -3,14 +3,15 @@
  *
  * WHY THIS FILE EXISTS (the honest version):
  *
- * There is no raw stdout/token stream persisted to disk anywhere in this
- * codebase. Confirmed by tracing every candidate:
- *   - StreamSink (src/core/run/streaming.ts:20) carries live model-delta
- *     text, but it is relayed in-process only (makeCliSink writes straight
- *     to process.stderr/stdout — src/core/run/streaming.ts:46-57). Web/daemon
- *     runs pass no sink at all (defaults to nullSink()), so this text never
- *     exists outside the CLI process that happened to launch a run.
- *   - ~/.ashlr/agent-logs/*.jsonl (src/core/run/agent-diagnostics.ts) is
+ * The route tails two distinct durable, bounded sources:
+ *   - ~/.ashlr/run-streams/<id>.log receives exact-opt-in, scrubbed and capped
+ *     StreamSink events while supported CLI, web, daemon, API-model, and
+ *     best-of-N runs execute. It contains engine/model progress at finer
+ *     granularity than completed orchestration steps, but is deliberately not
+ *     an unredacted transcript or a guarantee that every backend emits token
+ *     deltas.
+ * By contrast, ~/.ashlr/agent-logs/*.jsonl
+ *     (src/core/run/agent-diagnostics.ts) is
  *     metadata-only (byte/line COUNTS, never the text itself — see
  *     AgentDiagnosticTextShape, agent-diagnostics.ts:126-130) and is appended
  *     once per engine attempt, at completion, not during execution.
@@ -23,17 +24,16 @@
  *     :3297) — which is a real, disk-persisted "this task just started"
  *     signal that predates its own first step.
  *
- * So ~/.ashlr/runs/<id>.json (loadRun()/saveRun(), orchestrator.ts) is the
- * only genuinely live-growing, tailable source available without changing
- * any engine. This route does not fabricate finer granularity than that: a
- * "step-output-chunk" here is one already-written RunStep.summary, not a
- * model token. What IS genuinely new relative to polling GET /api/run/:id
- * (src/web-ui/components/stream/useRunStream.ts) is delivery: push instead
- * of poll, a tighter server-side tail interval (RUN_TAIL_POLL_MS, 500ms vs.
- * the client's previous 2000ms / the general SSE route's 1500ms), a
- * monotonic resumable sequence id, and server-computed stall detection
- * pushed the instant it's true instead of inferred client-side after several
- * missed polls.
+ * The second source is ~/.ashlr/runs/<id>.json (loadRun()/saveRun(),
+ * orchestrator.ts). Its RunState.steps[].summary grows at task and step
+ * boundaries. A "step-output-chunk" is therefore one already-written
+ * RunStep.summary, not a model token; the separately named "output-chunk"
+ * event is the finer-grained durable stream above. Relative to polling
+ * GET /api/run/:id (src/web-ui/components/stream/useRunStream.ts), this route
+ * also provides push delivery, a tighter server-side tail interval
+ * (RUN_TAIL_POLL_MS, 500ms vs. the client's previous 2000ms / the general SSE
+ * route's 1500ms), monotonic resumable sequence ids, and server-computed stall
+ * detection.
  *
  * EVENT PROTOCOL
  *   id: <seq>                 present on every resumable event (see below)
@@ -46,11 +46,9 @@
  *                              header for what feeds it: engine subprocess
  *                              stdout as it arrives, not just at completion,
  *                              plus builtin-task model-delta/tool-call/log
- *                              events) — {taskId, kind, ts, text}. This is
- *                              the finer-than-step-boundary granularity the
- *                              header comment above once said didn't exist;
- *                              v333 added the durable source, this route just
- *                              tails it, same as it tails RunState.
+ *                              events) — {taskId, kind, ts, text}. This route
+ *                              tails that bounded durable source alongside
+ *                              RunState.
  *   event: run-done           RunState.status left 'running' — {status, result, terminationReason};
  *                              the stream ends cleanly right after this frame
  *   event: stall               (no id — not part of the resumable cursor) the
