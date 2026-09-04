@@ -934,7 +934,148 @@ describe('M117 — orchestrator dispatch for api-model engine (mocked)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 8. LIVE INTEGRATION (skipped unless OLLAMA_LIVE=1)
+// 8. DURABLE API-MODEL OUTPUT (exact opt-in only)
+// ---------------------------------------------------------------------------
+describe('M117 — durable api-model output policy', () => {
+  let tmpRepo: string;
+
+  beforeEach(() => {
+    tmpRepo = mkdtempSync(join(tmpdir(), 'ashlr-m117-stream-'));
+    mkdirSync(join(tmpRepo, '.git'), { recursive: true });
+    vi.doMock('../src/core/sandbox/policy.js', async (importOriginal) => ({
+      ...await importOriginal<typeof import('../src/core/sandbox/policy.js')>(),
+      assertMayMutate: () => {},
+      killSwitchOn: () => false,
+    }));
+    vi.doMock('../src/core/sandbox/mutation-fence.js', () => ({
+      acquireOutwardMutationFence: () => ({}),
+      ownsOutwardMutationFence: () => true,
+      releaseOutwardMutationFence: () => {},
+    }));
+    vi.doMock('../src/core/sandbox/worktree.js', () => ({
+      createSandbox: (repo: string) => ({
+        id: 'sb-stream', worktreePath: tmpRepo, sourceRepo: repo, branch: 'stream-test',
+      }),
+      borrowSandboxCleanupAuthority: () => ({ outwardFence: {} }),
+      removeSandbox: () => {},
+      removeSandboxWithBorrowedAuthority: () => {},
+      sandboxDiff: () => ({ files: 0, patch: '', insertions: 0, deletions: 0 }),
+    }));
+    vi.doMock('../src/core/run/provider-client.js', () => ({
+      buildOpenAICompatibleClient: () => ({ id: 'local', model: 'qwen', supportsTools: true }),
+    }));
+    vi.doMock('../src/core/mcp-native-engineer.js', () => ({
+      buildEngineerToolSpecs: () => [{ name: 'read_file', safety: 'read', fn: async () => 'ok' }],
+    }));
+    vi.doMock('../src/core/run/agent-loop.js', () => ({
+      runTask: async (
+        task: { id: string; goal: string; status: string; result?: string; error?: string },
+        _client: unknown,
+        ctx: {
+          sink?: (event: import('../src/core/types.js').RunStreamEvent) => void;
+          onStep(step: import('../src/core/types.js').RunStep): void;
+        },
+      ) => {
+        const ts = new Date().toISOString();
+        if (task.goal.includes('fail-stream')) {
+          ctx.sink?.({ kind: 'model-delta', taskId: task.id, text: 'api_', ts });
+          ctx.sink?.({ kind: 'model-delta', taskId: task.id, text: 'key=super-secret-canary', ts });
+          task.status = 'failed';
+          task.error = 'provider failed cleanly';
+        } else {
+          ctx.sink?.({ kind: 'model-delta', taskId: task.id, text: 'useful bounded output', ts });
+          ctx.onStep({ ts, taskId: task.id, kind: 'model', summary: 'model completed' });
+          task.status = 'done';
+          task.result = 'complete';
+        }
+        return task;
+      },
+    }));
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+    rmSync(tmpRepo, { recursive: true, force: true });
+  });
+
+  it('is byte-silent unless enabled exactly true and produces reader-compatible lifecycle output', async () => {
+    const previousHome = process.env.HOME;
+    process.env.HOME = tmpRepo;
+    try {
+      const { runApiModelSandboxed } = await import(
+        '../src/core/run/sandboxed-engine.js?stream=' + randomUUID()
+      ) as typeof import('../src/core/run/sandboxed-engine.js');
+      const streaming = await import('../src/core/run/streaming.js');
+
+      for (const [runId, setting] of [
+        ['api-stream-absent', undefined],
+        ['api-stream-false', false],
+        ['api-stream-string', 'true'],
+      ] as const) {
+        const cfg = setting === undefined
+          ? { foundry: { models: { 'local-coder': 'qwen' } } }
+          : { foundry: {
+              models: { 'local-coder': 'qwen' },
+              runOutputPersistence: { enabled: setting },
+            } };
+        await runApiModelSandboxed('local-coder', 'ordinary-stream', cfg as never, {
+          sourceRepo: tmpRepo, propose: false, runId,
+        });
+        expect(streaming.readRunStreamChunk(runId, 0)).toBeUndefined();
+      }
+
+      const enabledId = 'api-stream-enabled';
+      const enabled = await runApiModelSandboxed('local-coder', 'ordinary-stream', {
+        foundry: {
+          models: { 'local-coder': 'qwen' },
+          runOutputPersistence: { enabled: true },
+        },
+      } as never, { sourceRepo: tmpRepo, propose: false, runId: enabledId });
+      expect(enabled.state.status).toBe('done');
+      const read = streaming.readRunStreamChunk(enabledId, 0);
+      expect(read).toBeDefined();
+      const records = read!.bytes.toString('utf8').trim().split('\n').map((line) => JSON.parse(line));
+      expect(records.map((record) => record.kind)).toEqual([
+        'task-start', 'model-delta', 'log', 'task-done',
+      ]);
+      expect(records.map((record) => record.text).join(' ')).toContain('useful bounded output');
+      expect(read!.nextOffset).toBe(read!.bytes.length);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
+  });
+
+  it('redacts a split secret and finalizes the sink when the task fails', async () => {
+    const previousHome = process.env.HOME;
+    process.env.HOME = tmpRepo;
+    try {
+      const { runApiModelSandboxed } = await import(
+        '../src/core/run/sandboxed-engine.js?failure-stream=' + randomUUID()
+      ) as typeof import('../src/core/run/sandboxed-engine.js');
+      const streaming = await import('../src/core/run/streaming.js');
+      const runId = 'api-stream-failed';
+      const result = await runApiModelSandboxed('local-coder', 'fail-stream', {
+        foundry: {
+          models: { 'local-coder': 'qwen' },
+          runOutputPersistence: { enabled: true },
+        },
+      } as never, { sourceRepo: tmpRepo, propose: false, runId });
+      expect(result.state.status).toBe('failed');
+      const raw = streaming.readRunStreamChunk(runId, 0)!.bytes.toString('utf8');
+      expect(raw).toContain('[REDACTED]');
+      expect(raw).not.toContain('super-secret-canary');
+      expect(raw).not.toContain('api_key');
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 9. LIVE INTEGRATION (skipped unless OLLAMA_LIVE=1)
 // ---------------------------------------------------------------------------
 describe('M117 — live Ollama integration (OLLAMA_LIVE=1 only)', () => {
   const isLive = process.env['OLLAMA_LIVE'] === '1';

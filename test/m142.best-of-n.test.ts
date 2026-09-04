@@ -47,6 +47,120 @@ beforeEach(() => {
   process.env.HOME = testHome;
 });
 
+describe('M142 — durable candidate run observation', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  function terminalCandidateState(runId: string): import('../src/core/types.js').RunState {
+    const now = new Date().toISOString();
+    return {
+      id: runId,
+      goal: 'api_key=fanout-secret-goal',
+      engine: 'local-coder',
+      provider: 'openai-compat',
+      engineModel: 'local-coder:qwen',
+      engineTier: 'mid',
+      createdAt: now,
+      updatedAt: now,
+      budget: { maxTokens: 100, maxSteps: 2, allowCloud: false },
+      usage: { tokensIn: 4, tokensOut: 5, steps: 1, estCostUsd: 0 },
+      tasks: [{
+        id: 't1',
+        goal: 'password=fanout-task-secret',
+        deps: [],
+        status: 'done',
+        result: 'safe result',
+      }],
+      steps: [{
+        ts: now,
+        taskId: 't1',
+        kind: 'model',
+        summary: 'Authorization: Bearer fanout-step-secret',
+      }],
+      status: 'done',
+      result: 'safe terminal result',
+    };
+  }
+
+  it('creates a running candidate record before dispatch and refreshes a scrubbed terminal record only when exactly enabled', async () => {
+    const reader: { loadRun?: typeof import('../src/core/run/orchestrator.js').loadRun } = {};
+    let sawRunningAtDispatch = false;
+    const sandboxMock = vi.fn(async (
+      _engine: unknown,
+      _goal: unknown,
+      _cfg: unknown,
+      runOpts: Record<string, unknown>,
+    ) => {
+      const runId = String(runOpts['runId']);
+      sawRunningAtDispatch = reader.loadRun?.(runId)?.status === 'running';
+      return { state: terminalCandidateState(runId) };
+    });
+    mockSandboxedEngine(sandboxMock);
+    vi.doMock('../src/core/fleet/manager.js', () => ({ judgeProposal: vi.fn() }));
+
+    const { runBestOfN } = await import('../src/core/run/best-of-n.js?durable=' + randomUUID());
+    reader.loadRun = (await import('../src/core/run/orchestrator.js')).loadRun;
+    const cfg = {
+      foundry: {
+        bestOfN: 1,
+        allowedBackends: ['local-coder'],
+        runOutputPersistence: { enabled: true },
+      },
+    } as unknown as import('../src/core/types.js').AshlrConfig;
+    const result = await runBestOfN(makeItem(), cfg, { n: 1 });
+    const runId = result.candidates[0]!.runId!;
+    const persisted = reader.loadRun(runId);
+
+    expect(sawRunningAtDispatch).toBe(true);
+    expect(persisted).toMatchObject({ id: runId, status: 'done', result: 'safe terminal result' });
+    expect(persisted?.goal).toBe('Best-of-N candidate 1');
+    expect(persisted?.tasks[0]?.goal).toBe('Candidate task 1');
+    expect(JSON.stringify(persisted)).not.toContain('fanout-secret');
+    expect(JSON.stringify(persisted)).toContain('[REDACTED]');
+  });
+
+  it.each([
+    ['absent', undefined],
+    ['false', false],
+    ['string-truthy', 'true'],
+  ] as const)('does not create candidate RunState when persistence is %s', async (_label, setting) => {
+    const sandboxMock = vi.fn(async (
+      _engine: unknown,
+      _goal: unknown,
+      _cfg: unknown,
+      runOpts: Record<string, unknown>,
+    ) => ({ state: terminalCandidateState(String(runOpts['runId'])) }));
+    mockSandboxedEngine(sandboxMock);
+    vi.doMock('../src/core/fleet/manager.js', () => ({ judgeProposal: vi.fn() }));
+    const { runBestOfN } = await import('../src/core/run/best-of-n.js?off=' + randomUUID());
+    const { loadRun } = await import('../src/core/run/orchestrator.js');
+    const foundry: Record<string, unknown> = { bestOfN: 1, allowedBackends: ['local-coder'] };
+    if (setting !== undefined) foundry['runOutputPersistence'] = { enabled: setting };
+    const result = await runBestOfN(makeItem(), { foundry } as never, { n: 1 });
+    expect(loadRun(result.candidates[0]!.runId!)).toBeNull();
+  });
+
+  it('closes a started observation as failed when the candidate runner throws', async () => {
+    const sandboxMock = vi.fn(async () => { throw new Error('raw provider failure'); });
+    mockSandboxedEngine(sandboxMock);
+    vi.doMock('../src/core/fleet/manager.js', () => ({ judgeProposal: vi.fn() }));
+    const { runBestOfN } = await import('../src/core/run/best-of-n.js?failure=' + randomUUID());
+    const { loadRun } = await import('../src/core/run/orchestrator.js');
+    const result = await runBestOfN(makeItem(), {
+      foundry: {
+        bestOfN: 1,
+        allowedBackends: ['local-coder'],
+        runOutputPersistence: { enabled: true },
+      },
+    } as never, { n: 1 });
+    const persisted = loadRun(result.candidates[0]!.runId!);
+    expect(persisted).toMatchObject({ status: 'failed', result: 'candidate runner failed' });
+    expect(JSON.stringify(persisted)).not.toContain('raw provider failure');
+  });
+});
+
 afterEach(() => {
   vi.resetModules();
   if (originalHome === undefined) delete process.env.HOME;

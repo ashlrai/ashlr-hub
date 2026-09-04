@@ -71,6 +71,7 @@ import type {
   FleetQuotaReservationRequest,
   FleetQuotaReservationResult,
 } from '../fleet/quota.js';
+import { sanitizePublicJson } from '../util/public-json.js';
 
 const SHADOW_REQUEST_TIMEOUT_MS = 120_000;
 const SHADOW_REQUEST_MAX_BYTES = 1024 * 1024;
@@ -78,6 +79,60 @@ const SHADOW_RESPONSE_MAX_BYTES = 1024 * 1024;
 const SHADOW_MAX_TOKENS = 32_768;
 const SHADOW_MAX_STEPS = 20;
 const SHADOW_MAX_OUTPUT_TOKENS = 8_192;
+const CANDIDATE_RESULT_PREVIEW_CHARS = 8_192;
+const CANDIDATE_STEP_SUMMARY_CHARS = 1_024;
+const MAX_OBSERVED_CANDIDATE_TASKS = 64;
+const MAX_OBSERVED_CANDIDATE_STEPS = 256;
+
+function boundedPublicText(value: unknown, limit: number): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const safe = sanitizePublicJson(value);
+  return typeof safe === 'string' ? safe.slice(0, limit) : undefined;
+}
+
+/**
+ * Durable candidate RunState is observability only. It is created solely by
+ * the same exact typed opt-in that enables durable run output, strips raw
+ * candidate goals, bounds result/step text, and never changes proposal or
+ * execution authority. Returning the saved object preserves saveRun's
+ * generation token for atomic refreshes.
+ */
+async function persistCandidateOutputState(
+  cfg: AshlrConfig,
+  state: RunState,
+  candidateIndex: number,
+  prior?: RunState,
+): Promise<RunState | undefined> {
+  if (cfg.foundry?.runOutputPersistence?.enabled !== true) return undefined;
+  try {
+    const { loadRun, saveRun } = await import('./orchestrator.js');
+    const safe = sanitizePublicJson({
+      ...state,
+      goal: `Best-of-N candidate ${candidateIndex + 1}`,
+      result: boundedPublicText(state.result, CANDIDATE_RESULT_PREVIEW_CHARS),
+      tasks: state.tasks.slice(0, MAX_OBSERVED_CANDIDATE_TASKS).map((task, index) => ({
+        ...task,
+        goal: `Candidate task ${index + 1}`,
+        result: boundedPublicText(task.result, CANDIDATE_RESULT_PREVIEW_CHARS),
+        error: boundedPublicText(task.error, CANDIDATE_STEP_SUMMARY_CHARS),
+      })),
+      steps: state.steps.slice(-MAX_OBSERVED_CANDIDATE_STEPS).map((step) => ({
+        ...step,
+        summary: boundedPublicText(step.summary, CANDIDATE_STEP_SUMMARY_CHARS) ?? '',
+      })),
+    }) as RunState;
+    // Never adopt an unrelated pre-existing run merely because a derived id
+    // collided. Only an object returned by our own initial save carries the
+    // generation authority needed for a refresh.
+    if (!prior && loadRun(state.id)) return undefined;
+    const writable = prior ? Object.assign(prior, safe) : safe;
+    saveRun(writable);
+    return writable;
+  } catch {
+    // Durable output is best-effort observability and cannot affect execution.
+    return undefined;
+  }
+}
 
 export {
   MAX_BEST_OF_N_CANDIDATE_SPECS_INSPECTED,
@@ -808,6 +863,8 @@ async function runBestOfNInternal(
 ): Promise<BestOfNResult | { winner: undefined; candidates: CandidateResult[]; critique: BestOfNResult['critique'] }> {
   const n = readN(cfg, opts?.n);
   const goal = goalFor(item);
+  const candidateOutputPersistenceEnabled =
+    cfg.foundry?.runOutputPersistence?.enabled === true;
 
   // ── 1. Resolve sandbox runners ──────────────────────────────────────────
   // Import lazily so the module doesn't blow up when sandboxed-engine isn't
@@ -1216,6 +1273,7 @@ async function runBestOfNInternal(
     }
 
     let ownedSandbox: Sandbox | undefined;
+    let observedCandidateState: RunState | undefined;
     try {
       const observeExecutedCandidate = (state: RunState, proposalOutcome?: RunProposalOutcome): void => {
         const actionCounts = state.runEventSummary?.actionCounts;
@@ -1290,6 +1348,40 @@ async function runBestOfNInternal(
             allowCloud: false,
           })
         : candidateBudget;
+      const startCandidateObservation = async (): Promise<void> => {
+        const now = new Date().toISOString();
+        const candidateState: RunState = {
+          id: runId,
+          goal: `Best-of-N candidate ${i + 1}`,
+          engine: cEngine,
+          provider: engineSpec?.kind === 'api-model'
+            ? (engineSpec.api?.protocol ?? 'openai-compat')
+            : 'external',
+          engineModel: `${cEngine}:${cModel}`,
+          engineTier: engineSpec?.tier,
+          createdAt: now,
+          updatedAt: now,
+          budget: {
+            maxTokens: effectiveCandidateBudget?.maxTokens ?? 0,
+            maxSteps: effectiveCandidateBudget?.maxSteps ?? 0,
+            allowCloud: effectiveCandidateBudget?.allowCloud ?? false,
+          },
+          usage: { tokensIn: 0, tokensOut: 0, steps: 0, estCostUsd: 0 },
+          tasks: [{
+            id: `candidate-${i}`,
+            goal: `Candidate task ${i + 1}`,
+            deps: [],
+            status: 'running',
+          }],
+          steps: [],
+          status: 'running',
+        };
+        observedCandidateState = await persistCandidateOutputState(cfg, candidateState, i);
+      };
+      const finishCandidateObservation = async (state: RunState): Promise<void> => {
+        observedCandidateState = await persistCandidateOutputState(cfg, state, i, observedCandidateState)
+          ?? observedCandidateState;
+      };
 
       if (captureSandboxedProposal && createSandbox) {
         let sb: Sandbox;
@@ -1308,6 +1400,7 @@ async function runBestOfNInternal(
         }
 
         if (!admitProviderDispatchAttempt()) return providerFenceRefusal();
+        if (candidateOutputPersistenceEnabled) await startCandidateObservation();
         const pendingResult = runSandboxed(cEngine as import('../types.js').EngineId, goal, cfg, {
           ...(typeof requestedModel === 'string' ? { model: requestedModel } : {}),
           sourceRepo,
@@ -1335,6 +1428,7 @@ async function runBestOfNInternal(
         });
         try { opts?.onProviderDispatchStarted?.(cEngine, runId); } catch { /* telemetry only */ }
         const result = await pendingResult;
+        if (candidateOutputPersistenceEnabled) await finishCandidateObservation(result.state);
         if (shadowConfig.kind === 'on' && result.providerContacted === true) {
           base = { ...base, shadowParticipated: true };
         }
@@ -1459,6 +1553,7 @@ async function runBestOfNInternal(
       }
 
       if (!admitProviderDispatchAttempt()) return providerFenceRefusal();
+      if (candidateOutputPersistenceEnabled) await startCandidateObservation();
       const pendingResult = runSandboxed(cEngine as import('../types.js').EngineId, goal, cfg, {
         ...(typeof requestedModel === 'string' ? { model: requestedModel } : {}),
         sourceRepo,
@@ -1473,6 +1568,7 @@ async function runBestOfNInternal(
       });
       try { opts?.onProviderDispatchStarted?.(cEngine, runId); } catch { /* telemetry only */ }
       const result = await pendingResult;
+      if (candidateOutputPersistenceEnabled) await finishCandidateObservation(result.state);
       const proposalOutcome = result.proposalOutcome ?? result.state.proposalOutcome;
       observeExecutedCandidate(result.state, proposalOutcome);
       if (opts?.signal?.aborted) {
@@ -1513,6 +1609,19 @@ async function runBestOfNInternal(
         state: result.state,
       } as InternalCandidateResult;
     } catch (err) {
+      if (observedCandidateState) {
+        observedCandidateState = await persistCandidateOutputState(cfg, {
+          ...observedCandidateState,
+          updatedAt: new Date().toISOString(),
+          status: 'failed',
+          result: 'candidate runner failed',
+          tasks: observedCandidateState.tasks.map((task) => ({
+            ...task,
+            status: task.status === 'running' ? 'failed' : task.status,
+            ...(task.status === 'running' ? { error: 'candidate runner failed' } : {}),
+          })),
+        }, i, observedCandidateState) ?? observedCandidateState;
+      }
       return {
         ...base,
         ...(shadowConfig.kind === 'on' ? { shadowIdentityStatus: 'refused' as const } : {}),

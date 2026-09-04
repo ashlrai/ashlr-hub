@@ -16,7 +16,7 @@ nothing auto-merges. Every field below only takes effect when `foundry` is prese
 
 ## `runOutputPersistence`
 
-Durable raw run output is privacy-sensitive and is disabled by default. Only
+Durable run output is privacy-sensitive and is disabled by default. Only
 the exact setting below creates `~/.ashlr/run-streams/<runId>.log` files:
 
 ```json
@@ -27,9 +27,14 @@ the exact setting below creates `~/.ashlr/run-streams/<runId>.log` files:
 }
 ```
 
-When the block is absent, `enabled` is absent, or `enabled` is `false`, no raw
-output file is created for CLI, `--no-stream`, daemon, web, swarm, or sandboxed
-engine runs. Live in-memory CLI streaming is unchanged. Captures are private,
+When the block is absent, `enabled` is absent, or `enabled` is `false`, no durable
+output file is created for CLI, `--no-stream`, daemon, web, swarm, external-CLI,
+or in-process API-model sandbox runs. Best-of-N candidate run records also
+become discoverable through `GET /api/run/:id/events` only under this exact
+opt-in; their goals are replaced with generic labels and their public text is
+scrubbed and bounded. This observation bridge does not grant proposal, merge,
+provider, or repository-mutation authority and does not change default run-state
+persistence. Live in-memory CLI streaming is unchanged. Captures are private,
 scrubbed best-effort observability rather than an audit ledger; per-file,
 aggregate-byte, file-count, and age limits are enforced on run, read, write,
 and web-server startup paths.
