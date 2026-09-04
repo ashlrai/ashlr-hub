@@ -64,6 +64,30 @@ beforeEach(() => {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-stream-sink-home-'));
   prevHome = process.env.HOME;
   process.env.HOME = tmpHome;
+  if (process.platform === 'win32') {
+    // High-cardinality redaction/retention cases create thousands of unique
+    // files. Exercise their storage semantics through the authenticated
+    // adapter seam; dedicated native tests below clear this control and run
+    // the real PowerShell DACL implementation end-to-end.
+    _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+      runner(invocation) {
+        const request = JSON.parse(invocation.input) as {
+          nonce: string;
+          operation: string;
+          mode: string;
+        };
+        return {
+          status: 0,
+          stdout: JSON.stringify({
+            nonce: request.nonce,
+            operation: request.operation,
+            ok: true,
+            reason: request.mode === 'inspect-owned' ? 'owned-safe-path' : 'exact-private-dacl',
+          }),
+        };
+      },
+    });
+  }
   setRunStreamGcBeforeCapacityUnlinkHookForTests(undefined);
   setRunStreamReadAfterOpenHookForTests(undefined);
 });
@@ -82,6 +106,7 @@ describe('durable run-output policy', () => {
   it.runIf(process.platform === 'win32')(
     'rolls back an empty ordinary stream after DACL assurance failure and permits a clean retry',
     () => {
+      _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
       const prime = claimRunOutputStream('windows-assurance-prime');
       expect(prime).toBeDefined();
       releaseRunOutputStreamClaim(prime!);
@@ -168,6 +193,7 @@ describe('durable run-output policy', () => {
   it.runIf(process.platform === 'win32')(
     'establishes exact first-create DACLs and refuses a permissive pre-existing stream directory',
     () => {
+      _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
       const firstClaim = claimRunOutputStream('windows-private-first-create');
       expect(firstClaim).toBeDefined();
       const root = path.dirname(runStreamsDir());
