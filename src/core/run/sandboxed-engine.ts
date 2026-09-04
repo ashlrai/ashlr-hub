@@ -58,7 +58,7 @@ import {
   summarizeDelegationScope,
 } from './delegation-scope.js';
 import { buildEngineCommand, spawnEngine, describeRunEventForStream } from './engines.js';
-import { fileSink, emitSinkEvent, endStreamSink, failStreamSink } from './streaming.js';
+import { nullSink, withOptionalRunOutputPersistence, emitSinkEvent, endStreamSink, failStreamSink } from './streaming.js';
 import {
   applyLocusPreMutateGate,
   formatPreMutateBlockers,
@@ -1374,13 +1374,9 @@ export async function runEngineSandboxed(
   const id = assertSafeExecutionIdentity(
     opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
   );
-  // v333: sandboxed engine runs have no CLI terminal watching them and no
-  // caller-supplied StreamSink at all (this file never plumbed one) — but
-  // they are exactly the highest-value case for durable live output: a real
-  // external agent (claude/codex/etc.) running unattended in a worktree.
-  // Default-on, matching the same reasoning as orchestrator.ts's tee: this is
-  // local-only observability, not a call site to gate.
-  const streamSink = fileSink(id);
+  // Sandboxed engines have no live caller sink. Durable raw output remains
+  // disabled unless the same explicit privacy opt-in used by runGoal is true.
+  const streamSink = withOptionalRunOutputPersistence(nullSink(), id, cfg);
   const runCreatedAtIso = new Date().toISOString();
   const recordSandboxedRunAgentAction = opts.deferTerminalAction
     ? (_fields: Parameters<typeof writeSandboxedRunAgentAction>[0]) => {}

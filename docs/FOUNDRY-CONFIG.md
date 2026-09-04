@@ -14,6 +14,26 @@ configuration serves.
 v4: the builtin local agent runs unmodified, no external CLI is spawned, and
 nothing auto-merges. Every field below only takes effect when `foundry` is present.
 
+## `runOutputPersistence`
+
+Durable raw run output is privacy-sensitive and is disabled by default. Only
+the exact setting below creates `~/.ashlr/run-streams/<runId>.log` files:
+
+```json
+{
+  "foundry": {
+    "runOutputPersistence": { "enabled": true }
+  }
+}
+```
+
+When the block is absent, `enabled` is absent, or `enabled` is `false`, no raw
+output file is created for CLI, `--no-stream`, daemon, web, swarm, or sandboxed
+engine runs. Live in-memory CLI streaming is unchanged. Captures are private,
+scrubbed best-effort observability rather than an audit ledger; per-file,
+aggregate-byte, file-count, and age limits are enforced on run, read, write,
+and web-server startup paths.
+
 All of the v5 fleet safety guarantees are enforced regardless of what you put in
 this block:
 

@@ -28,7 +28,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { RunStreamEvent } from '../types.js';
+import type { AshlrConfig, RunStreamEvent } from '../types.js';
 import { makeColors } from '../../cli/ui.js';
 import { scrubSecrets } from '../util/scrub.js';
 
@@ -137,6 +137,15 @@ const STREAM_RUN_ID_RE = /^[\w.-]{1,200}$/;
 /** 8MB: within the brief's 5-10MB band. Observability, not a ledger — a
  * generous but bounded ceiling per run. */
 export const MAX_STREAM_FILE_BYTES = 8 * 1024 * 1024;
+
+/** Store-wide bounds prevent many individually-small captures from growing
+ * the private observability directory without limit. Oldest files are pruned
+ * first whenever either bound is exceeded. */
+export const MAX_STREAM_FILES = 256;
+export const MAX_STREAM_AGGREGATE_BYTES = 256 * 1024 * 1024;
+
+/** Bound every reader allocation independently of the file-size cap. */
+export const MAX_STREAM_READ_BYTES = 256 * 1024;
 
 /** Ephemeral observability, not evidence: much shorter than agent-
  * diagnostics.ts's 30-day metadata TTL (agent-diagnostics.ts:34). */
@@ -254,6 +263,11 @@ export function gcRunStreams(force = false): void {
   try {
     const dir = dirForThrottle;
     if (!fs.existsSync(dir)) return;
+    const root = runStreamsDirRoot();
+    const rootStat = fs.lstatSync(root, { bigint: true });
+    const dirStat = fs.lstatSync(dir, { bigint: true });
+    if (!safePrivateStreamDirectory(rootStat) || !safePrivateStreamDirectory(dirStat)) return;
+    const retained: Array<{ path: string; mtimeMs: number; size: number }> = [];
     for (const name of fs.readdirSync(dir)) {
       if (!name.endsWith('.log')) continue;
       const filePath = path.join(dir, name);
@@ -263,14 +277,53 @@ export function gcRunStreams(force = false): void {
         if (now - stat.mtimeMs > STREAM_RETENTION_MS) {
           fs.unlinkSync(filePath);
           writeState.delete(filePath);
+        } else {
+          retained.push({ path: filePath, mtimeMs: stat.mtimeMs, size: stat.size });
         }
       } catch {
         // Best-effort; one bad entry must never abort the sweep.
       }
     }
+    retained.sort((a, b) => a.mtimeMs - b.mtimeMs || a.path.localeCompare(b.path));
+    let bytes = retained.reduce((sum, entry) => sum + entry.size, 0);
+    let files = retained.length;
+    for (const entry of retained) {
+      if (files <= MAX_STREAM_FILES && bytes <= MAX_STREAM_AGGREGATE_BYTES) break;
+      try {
+        const current = fs.lstatSync(entry.path);
+        const currentDir = fs.lstatSync(dir, { bigint: true });
+        const currentRoot = fs.lstatSync(root, { bigint: true });
+        if (current.isSymbolicLink() || !current.isFile() ||
+          !safePrivateStreamDirectory(currentDir) || !safePrivateStreamDirectory(currentRoot) ||
+          !sameStreamFile(dirStat, currentDir) || !sameStreamFile(rootStat, currentRoot) ||
+          BigInt(current.dev) !== dirStat.dev) continue;
+        fs.unlinkSync(entry.path);
+        writeState.delete(entry.path);
+        files -= 1;
+        bytes -= entry.size;
+      } catch {
+        // Best-effort; concurrent writers/readers may change an entry.
+      }
+    }
   } catch {
     // Best-effort; retention is not load-bearing for correctness.
   }
+}
+
+/**
+ * Add durable output capture only under an exact, typed opt-in. Calling this
+ * at every run entry point also performs a retention sweep even
+ * when persistence is disabled, so stale captures do not await another write.
+ */
+export function withOptionalRunOutputPersistence(
+  callerSink: StreamSink,
+  runId: string,
+  cfg: Pick<AshlrConfig, 'foundry'>,
+): StreamSink {
+  gcRunStreams(true);
+  return cfg.foundry?.runOutputPersistence?.enabled === true
+    ? combineSinks(callerSink, fileSink(runId))
+    : callerSink;
 }
 
 function seedWriteState(filePath: string): StreamWriteState {
@@ -305,6 +358,82 @@ interface BoundStreamPath {
   file: fs.BigIntStats;
   directory: fs.BigIntStats;
   root: fs.BigIntStats;
+}
+
+export interface RunStreamReadIdentity {
+  dev: bigint;
+  ino: bigint;
+}
+
+export interface RunStreamReadChunk {
+  bytes: Buffer;
+  nextOffset: number;
+  identity: RunStreamReadIdentity;
+}
+
+let runStreamReadAfterOpenHook: (() => void) | undefined;
+
+/** Test-only race hook. Production callers must never install one. */
+export function setRunStreamReadAfterOpenHookForTests(hook?: () => void): void {
+  if (process.env['NODE_ENV'] !== 'test' && process.env['VITEST'] !== 'true') {
+    throw new Error('run stream read hooks are test-only');
+  }
+  runStreamReadAfterOpenHook = hook;
+}
+
+/**
+ * Descriptor-bound, bounded stream read. Opens the final component with
+ * O_NOFOLLOW before inspecting it, rejects unsafe/oversized files before any
+ * allocation, and re-binds the descriptor, path, parent and private root after
+ * the read. Any race or identity change fails closed without advancing offset.
+ */
+export function readRunStreamChunk(
+  runId: string,
+  offset: number,
+  expected?: RunStreamReadIdentity,
+): RunStreamReadChunk | undefined {
+  gcRunStreams();
+  const filePath = runStreamFilePath(runId);
+  if (!filePath || !Number.isSafeInteger(offset) || offset < 0) return undefined;
+  let fd: number | undefined;
+  try {
+    const noFollow = typeof fs.constants.O_NOFOLLOW === 'number' ? fs.constants.O_NOFOLLOW : 0;
+    fd = fs.openSync(filePath, fs.constants.O_RDONLY | noFollow);
+    runStreamReadAfterOpenHook?.();
+    const before = bindStreamPath(fd, filePath);
+    if (!before || before.file.size > BigInt(MAX_STREAM_FILE_BYTES)) return undefined;
+    const identity = { dev: before.file.dev, ino: before.file.ino };
+    if (expected && (expected.dev !== identity.dev || expected.ino !== identity.ino)) return undefined;
+    if (BigInt(offset) >= before.file.size) {
+      const afterEmpty = bindStreamPath(fd, filePath);
+      if (!afterEmpty || !sameStreamFile(before.file, afterEmpty.file) ||
+        !sameStreamFile(before.directory, afterEmpty.directory) ||
+        !sameStreamFile(before.root, afterEmpty.root)) return undefined;
+      return { bytes: Buffer.alloc(0), nextOffset: offset, identity };
+    }
+    const available = Number(before.file.size - BigInt(offset));
+    const readLen = Math.min(available, MAX_STREAM_READ_BYTES);
+    const bytes = Buffer.alloc(readLen);
+    let total = 0;
+    while (total < readLen) {
+      const read = fs.readSync(fd, bytes, total, readLen - total, offset + total);
+      if (read <= 0) return undefined;
+      total += read;
+    }
+    const after = bindStreamPath(fd, filePath);
+    if (!after || !sameStreamFile(before.file, after.file) ||
+      !sameStreamFile(before.directory, after.directory) ||
+      !sameStreamFile(before.root, after.root) || after.file.size > BigInt(MAX_STREAM_FILE_BYTES)) {
+      return undefined;
+    }
+    return { bytes, nextOffset: offset + total, identity };
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* best-effort */ }
+    }
+  }
 }
 
 function bindStreamPath(fd: number, filePath: string): BoundStreamPath | undefined {
@@ -453,8 +582,9 @@ export function fileSink(runId: string): StreamSink {
         state.truncated = true;
         const marker: StoredStreamChunk = { ts: event.ts, kind: 'log', text: STREAM_TRUNCATION_MARKER };
         const markerLine = `${JSON.stringify(marker)}\n`;
-        if (appendStreamLine(filePath, markerLine)) {
-          state.bytes += Buffer.byteLength(markerLine, 'utf8');
+        const markerBytes = Buffer.byteLength(markerLine, 'utf8');
+        if (state.bytes + markerBytes <= MAX_STREAM_FILE_BYTES && appendStreamLine(filePath, markerLine)) {
+          state.bytes += markerBytes;
         }
         return false;
       }

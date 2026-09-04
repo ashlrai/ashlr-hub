@@ -96,11 +96,11 @@
  *    x-ashlr-read-client header.
  */
 
-import * as fs from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { StringDecoder } from 'node:string_decoder';
 import type { RunState, RunTask } from '../types.js';
 import { loadRun } from '../run/orchestrator.js';
-import { runStreamFilePath } from '../run/streaming.js';
+import { gcRunStreams, readRunStreamChunk, type RunStreamReadIdentity } from '../run/streaming.js';
 import { sanitizePublicJson } from '../util/public-json.js';
 import { registerSse, deregisterSse, sseConnectionCapReached, sendJson } from './api.js';
 
@@ -261,10 +261,12 @@ interface OutputTailCursor {
   offset: number;
   lineIndex: number;
   partial: string;
+  identity?: RunStreamReadIdentity;
+  decoder: StringDecoder;
 }
 
 function createOutputTailCursor(): OutputTailCursor {
-  return { offset: 0, lineIndex: 0, partial: '' };
+  return { offset: 0, lineIndex: 0, partial: '', decoder: new StringDecoder('utf8') };
 }
 
 interface StoredStreamChunkLike {
@@ -289,35 +291,15 @@ function emitNewOutputChunks(
   send: Sender,
 ): number {
   let maxSeq = lastSeq;
-  const filePath = runStreamFilePath(runId);
-  if (!filePath) return maxSeq;
-
-  let stat: fs.Stats;
-  try {
-    stat = fs.statSync(filePath);
-  } catch {
-    return maxSeq; // File doesn't exist yet (or was pruned by retention GC).
+  const chunk = readRunStreamChunk(runId, cursor.offset, cursor.identity);
+  if (!chunk || chunk.bytes.length === 0) {
+    if (chunk) cursor.identity = chunk.identity;
+    return maxSeq;
   }
-  if (!stat.isFile() || stat.size <= cursor.offset) return maxSeq;
+  cursor.offset = chunk.nextOffset;
+  cursor.identity = chunk.identity;
 
-  const readLen = stat.size - cursor.offset;
-  let raw: Buffer;
-  let fd: number | undefined;
-  try {
-    fd = fs.openSync(filePath, 'r');
-    const buf = Buffer.alloc(readLen);
-    fs.readSync(fd, buf, 0, readLen, cursor.offset);
-    raw = buf;
-  } catch {
-    return maxSeq; // Transient read failure; retry next tick.
-  } finally {
-    if (fd !== undefined) {
-      try { fs.closeSync(fd); } catch { /* best-effort */ }
-    }
-  }
-  cursor.offset = stat.size;
-
-  const text = cursor.partial + raw.toString('utf8');
+  const text = cursor.partial + cursor.decoder.write(chunk.bytes);
   const lines = text.split('\n');
   // The last split element has no trailing '\n' in this pass — either it's
   // '' (the read ended exactly on a newline) or a genuinely incomplete line
@@ -416,6 +398,10 @@ export function handleRunEventsSse(
     sendJson(res, 400, { error: 'invalid run id' });
     return;
   }
+
+  // A read is also a maintenance path: expire stale/over-budget captures now,
+  // even when the system never produces another durable output write.
+  gcRunStreams(true);
 
   const initial = loadRun(id);
   if (!initial) {

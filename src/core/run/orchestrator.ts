@@ -99,8 +99,8 @@ import { buildEngineCommand, engineInstalled, spawnEngine, describeRunEventForSt
 import { resolveEngineSpec } from './engine-registry.js';
 import {
   nullSink,
-  fileSink,
-  combineSinks,
+  withOptionalRunOutputPersistence,
+  gcRunStreams,
   endStreamSink,
   failStreamSink,
 } from './streaming.js';
@@ -2161,6 +2161,9 @@ export async function runGoal(
   cfg: AshlrConfig,
   opts: RunOptions,
 ): Promise<RunState> {
+  // Retention is independent of capture activation and must not wait for a
+  // later write (including cancelled/default-off runs).
+  gcRunStreams(true);
   if (opts.providerQuota) {
     if (opts.allowCloud === true || (opts.engine !== undefined && opts.engine !== 'builtin')) {
       throw new GoalConductorQuotaRefusal('goal-conductor-provider-route-not-builtin-local');
@@ -2275,14 +2278,8 @@ async function runGoalInternal(
   // Falls back to nullSink() when absent (non-TTY, tests, --no-stream).
   const rawSink = (opts as RunOptions & { __sink?: StreamSink }).__sink;
   const callerSink: StreamSink = typeof rawSink === 'function' ? rawSink : nullSink();
-  // v333: tee EVERY run's sink to a durable, scrubbed, size-capped stream
-  // file — this is the single choke point, deliberately. Whatever the caller
-  // passed (nullSink() for daemon-dispatched/web-launched/swarm-task runs,
-  // makeCliSink() for `ashlr run`/`ashlr swarm`) still runs unchanged; the
-  // file additionally gets a durable copy so the per-run SSE route
-  // (src/core/web/run-stream.ts) can serve live output instead of only step
-  // boundaries. Default-on: this is local-only observability whose cost is a
-  // scrubbed file under ~/.ashlr/run-streams/, not a call site to gate.
+  // Durable raw output is privacy-sensitive and therefore exact opt-in.
+  // The caller's in-memory/live sink is always preserved unchanged.
   // runId is guaranteed set by the caller (runGoal assigns it before ever
   // reaching runGoalInternal — see runGoal's `opts = { ...opts, runId: id }`
   // above); the `undefined` fallback only covers the opts.signal?.aborted
@@ -2290,7 +2287,7 @@ async function runGoalInternal(
   // assignment, where there is nothing worth persisting anyway.
   const runStreamIdentity = opts.resumeId ?? opts.runId;
   const sink: StreamSink = runStreamIdentity
-    ? combineSinks(callerSink, fileSink(runStreamIdentity))
+    ? withOptionalRunOutputPersistence(callerSink, runStreamIdentity, cfg)
     : callerSink;
 
   try {
@@ -3164,7 +3161,7 @@ async function runGoalInternal(
           // here was the two lifecycle emit() calls below (engine failed /
           // engine completed). This closes the gap run-stream.ts's header
           // comment documents: engine subprocess text now reaches the
-          // durable fileSink() teed into `sink` above, live.
+          // optional durable fileSink() teed into `sink` above when opted in.
           onEvent: (ev) => {
             const described = describeRunEventForStream(ev);
             if (described) emit(sink, described);

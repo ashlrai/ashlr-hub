@@ -326,7 +326,7 @@ const KNOWN_FOUNDRY_KEYS: ReadonlySet<string> = new Set([
   'productionVelocity', 'proposalRepair',
   'repairHandoffV2Activation', 'repairHandoffV2Write',
   'outcomeWatcher', 'proposalTtlDays', 'pulseEmit', 'regressionSentinel',
-  'repoMap', 'resourceAwareDispatch', 'resourceOverrides', 'routingPolicy',
+  'repoMap', 'resourceAwareDispatch', 'resourceOverrides', 'routingPolicy', 'runOutputPersistence',
   'sandboxExternal', 'scanDependencyBumps', 'scanDeps', 'scanHygiene',
   'scanLint', 'scanTodos', 'selfHeal', 'selfImprove', 'simpleConductor',
   'skillLibrary', 'specContract', 'stallIdleMs', 'strategistModel',

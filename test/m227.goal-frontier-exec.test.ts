@@ -73,6 +73,8 @@ vi.mock('../src/core/run/streaming.js', () => ({
   nullSink: vi.fn(() => () => {}),
   fileSink: vi.fn(() => () => {}),
   combineSinks: vi.fn((...sinks: Array<(e: unknown) => void>) => sinks[0] ?? (() => {})),
+  withOptionalRunOutputPersistence: vi.fn((sink: (e: unknown) => void) => sink),
+  gcRunStreams: vi.fn(),
   endStreamSink: vi.fn(),
   failStreamSink: vi.fn(),
 }));

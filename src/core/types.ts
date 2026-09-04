@@ -597,6 +597,14 @@ export interface AshlrConfig {
    */
   foundry?: {
     /**
+     * Persist raw run output under ~/.ashlr/run-streams for local SSE replay.
+     * Privacy-sensitive and DEFAULT OFF: only the exact value true enables it.
+     * Live in-memory CLI streaming is unaffected.
+     */
+    runOutputPersistence?: {
+      enabled?: boolean;
+    };
+    /**
      * Execution Identity V1: default-off, shadow-only account/runtime capacity
      * projection. Private locators are consumed only by the internal fabric
      * module; V1 assignments never reach the live dispatcher.

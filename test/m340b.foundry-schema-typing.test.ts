@@ -58,7 +58,7 @@ function foundrySchema(schema: Record<string, unknown>): Record<string, unknown>
 // since TS types erase) so a future property removed from the type without a
 // schema update fails this test.
 const EXPECTED_TYPE_KEYS = [
-  'executionIdentityV1', 'allowedBackends', 'autonomyControlLoop', 'repairHandoffV2Write',
+  'runOutputPersistence', 'executionIdentityV1', 'allowedBackends', 'autonomyControlLoop', 'repairHandoffV2Write',
   'repairHandoffV2Activation', 'models', 'claude5', 'modelGranularRouting',
   'bestOfN', 'bestOfNCandidates', 'bestOfNMinItemScore', 'outcomeWatcher',
   'verifyToGreen', 'sandboxExternal', 'timeoutMs', 'completenessGate',
@@ -91,6 +91,13 @@ describe('schema/config.schema.json — foundry block (M340b)', () => {
     for (const key of EXPECTED_TYPE_KEYS) {
       expect(declared, `schema/config.schema.json foundry.properties is missing "${key}"`).toHaveProperty(key);
     }
+  });
+
+  it('documents durable run output as an exact boolean opt-in', () => {
+    const declared = foundrySchema(loadSchema())['properties'] as Record<string, any>;
+    expect(declared.runOutputPersistence.additionalProperties).toBe(false);
+    expect(declared.runOutputPersistence.properties.enabled.type).toBe('boolean');
+    expect(String(declared.runOutputPersistence.description)).toMatch(/default disabled/i);
   });
 
   it('keeps foundry.additionalProperties permissive, with the reason documented', () => {

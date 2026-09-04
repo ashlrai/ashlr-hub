@@ -235,6 +235,17 @@
       "description": "v4/v5 autonomous-fleet configuration (M45+). Full key reference: docs/FOUNDRY-CONFIG.md. Declared exhaustively from AshlrConfig['foundry'] in src/core/types.ts (M340b). additionalProperties stays true: KNOWN_FOUNDRY_KEYS in src/core/effective-config.ts is the authoritative typo/unknown-key detector at config-load time (an accompanying human-readable warning, not a hard validation failure) and currently recognizes several keys this schema does not yet model 1:1 (e.g. acePlaybook, localization, redTeam, feedbackEnabled, stallIdleMs, strategistModel, managerJudgeModel, managerJudgeEngine, inventPerCycle, blastRadius) plus operator-extension keys consumed by tooling outside this package. This schema is documentation/editor metadata only; it is not loaded or enforced by any code path in src/.",
       "additionalProperties": true,
       "properties": {
+        "runOutputPersistence": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Privacy-sensitive durable raw run-output capture. Default disabled; only enabled:true persists files. Live CLI streaming is unaffected.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Exact opt-in. Absent or false means no run-output file is created."
+            }
+          }
+        },
         "executionIdentityV1": {
           "type": "object",
           "additionalProperties": false,

@@ -24,15 +24,22 @@ import * as path from 'node:path';
 import type { RunStreamEvent } from '../src/core/types.js';
 import {
   fileSink,
+  nullSink,
   combineSinks,
   emitSinkEvent,
   flushStreamSink,
   endStreamSink,
   failStreamSink,
   gcRunStreams,
+  withOptionalRunOutputPersistence,
+  readRunStreamChunk,
+  setRunStreamReadAfterOpenHookForTests,
   runStreamFilePath,
   runStreamsDir,
   MAX_STREAM_FILE_BYTES,
+  MAX_STREAM_FILES,
+  MAX_STREAM_AGGREGATE_BYTES,
+  MAX_STREAM_READ_BYTES,
   STREAM_REDACTION_WINDOW_CHARS,
   STREAM_TRUNCATION_MARKER,
 } from '../src/core/run/streaming.js';
@@ -44,12 +51,61 @@ beforeEach(() => {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-stream-sink-home-'));
   prevHome = process.env.HOME;
   process.env.HOME = tmpHome;
+  setRunStreamReadAfterOpenHookForTests(undefined);
 });
 
 afterEach(() => {
+  setRunStreamReadAfterOpenHookForTests(undefined);
   if (prevHome === undefined) delete process.env.HOME;
   else process.env.HOME = prevHome;
   fs.rmSync(tmpHome, { recursive: true, force: true });
+});
+
+describe('durable run-output policy', () => {
+  it('does not create a file when config is absent or explicitly false', () => {
+    for (const [runId, cfg] of [
+      ['default-off', {}],
+      ['explicit-off', { foundry: { runOutputPersistence: { enabled: false } } }],
+      ['truthy-is-off', { foundry: { runOutputPersistence: { enabled: 'true' } } }],
+    ] as const) {
+      const delivered: RunStreamEvent[] = [];
+      const sink = withOptionalRunOutputPersistence(
+        (event) => delivered.push(event),
+        runId,
+        cfg as Parameters<typeof withOptionalRunOutputPersistence>[2],
+      );
+      sink(makeEvent({ text: 'private prompt and source' }));
+      endStreamSink(sink);
+      expect(delivered).toHaveLength(1);
+      expect(fs.existsSync(runStreamFilePath(runId)!)).toBe(false);
+    }
+  });
+
+  it('persists only with enabled exactly true, including a null live sink', () => {
+    const sink = withOptionalRunOutputPersistence(
+      nullSink(),
+      'explicit-on',
+      { foundry: { runOutputPersistence: { enabled: true } } },
+    );
+    sink(makeEvent({ text: 'opted-in diagnostic' }));
+    endStreamSink(sink);
+    expect(readStoredText('explicit-on')).toContain('opted-in diagnostic');
+  });
+
+  it('routes ordinary and sandboxed production entries through the shared policy choke point', () => {
+    const orchestrator = fs.readFileSync(
+      path.join(import.meta.dirname, '..', 'src', 'core', 'run', 'orchestrator.ts'),
+      'utf8',
+    );
+    const sandboxed = fs.readFileSync(
+      path.join(import.meta.dirname, '..', 'src', 'core', 'run', 'sandboxed-engine.ts'),
+      'utf8',
+    );
+    expect(orchestrator).toContain('withOptionalRunOutputPersistence(callerSink, runStreamIdentity, cfg)');
+    expect(sandboxed).toContain('withOptionalRunOutputPersistence(nullSink(), id, cfg)');
+    expect(orchestrator).not.toMatch(/combineSinks\(callerSink, fileSink\(/);
+    expect(sandboxed).not.toMatch(/const streamSink = fileSink\(/);
+  });
 });
 
 function makeEvent(overrides: Partial<RunStreamEvent> = {}): RunStreamEvent {
@@ -351,7 +407,7 @@ describe('fileSink — size cap', () => {
 
     const raw = readStreamFile('run-cap-1');
     const bytes = Buffer.byteLength(raw, 'utf8');
-    expect(bytes).toBeLessThanOrEqual(MAX_STREAM_FILE_BYTES + 1024 * 1024); // one marker line of slack
+    expect(bytes).toBeLessThanOrEqual(MAX_STREAM_FILE_BYTES);
     const markerCount = raw.split('\n').filter((l) => l.includes(STREAM_TRUNCATION_MARKER)).length;
     expect(markerCount).toBe(1);
 
@@ -493,5 +549,92 @@ describe('gcRunStreams', () => {
 
     expect(fs.existsSync(oldPath)).toBe(false);
     expect(fs.existsSync(runStreamFilePath('run-fresh-1')!)).toBe(true);
+  });
+
+  it('prunes oldest files to the aggregate file-count cap', () => {
+    fs.mkdirSync(runStreamsDir(), { recursive: true, mode: 0o700 });
+    for (let i = 0; i < MAX_STREAM_FILES + 3; i += 1) {
+      const file = runStreamFilePath(`count-${i}`)!;
+      fs.writeFileSync(file, '{}\n', { mode: 0o600 });
+      const at = new Date(Date.now() - (MAX_STREAM_FILES + 3 - i) * 1_000);
+      fs.utimesSync(file, at, at);
+    }
+    gcRunStreams(true);
+    expect(fs.readdirSync(runStreamsDir()).filter((name) => name.endsWith('.log'))).toHaveLength(MAX_STREAM_FILES);
+    expect(fs.existsSync(runStreamFilePath('count-0')!)).toBe(false);
+  });
+
+  it('prunes oldest files to the aggregate byte cap', () => {
+    fs.mkdirSync(runStreamsDir(), { recursive: true, mode: 0o700 });
+    for (let i = 0; i < 33; i += 1) {
+      const file = runStreamFilePath(`bytes-${i}`)!;
+      fs.writeFileSync(file, '', { mode: 0o600 });
+      fs.truncateSync(file, MAX_STREAM_FILE_BYTES);
+      const at = new Date(Date.now() - (33 - i) * 1_000);
+      fs.utimesSync(file, at, at);
+    }
+    gcRunStreams(true);
+    const total = fs.readdirSync(runStreamsDir()).reduce((sum, name) =>
+      sum + fs.lstatSync(path.join(runStreamsDir(), name)).size, 0);
+    expect(total).toBeLessThanOrEqual(MAX_STREAM_AGGREGATE_BYTES);
+    expect(fs.existsSync(runStreamFilePath('bytes-0')!)).toBe(false);
+  });
+});
+
+describe('readRunStreamChunk — fail-closed reader', () => {
+  function privateFile(runId: string, body: string): string {
+    fs.mkdirSync(runStreamsDir(), { recursive: true, mode: 0o700 });
+    const file = runStreamFilePath(runId)!;
+    fs.writeFileSync(file, body, { mode: 0o600 });
+    return file;
+  }
+
+  it('bounds each allocation and preserves descriptor identity across chunks', () => {
+    privateFile('bounded-read', 'x'.repeat(MAX_STREAM_READ_BYTES + 17));
+    const first = readRunStreamChunk('bounded-read', 0);
+    expect(first?.bytes).toHaveLength(MAX_STREAM_READ_BYTES);
+    const second = readRunStreamChunk('bounded-read', first!.nextOffset, first!.identity);
+    expect(second?.bytes).toHaveLength(17);
+  });
+
+  it('rejects final symlinks and oversized files before reading', () => {
+    const target = privateFile('target', 'safe');
+    fs.symlinkSync(target, runStreamFilePath('linked')!);
+    expect(readRunStreamChunk('linked', 0)).toBeUndefined();
+    const oversized = privateFile('oversized', '');
+    fs.truncateSync(oversized, MAX_STREAM_FILE_BYTES + 1);
+    expect(readRunStreamChunk('oversized', 0)).toBeUndefined();
+  });
+
+  it('rejects a pathname replacement after open without returning old bytes', () => {
+    const file = privateFile('raced', 'old private bytes');
+    setRunStreamReadAfterOpenHookForTests(() => {
+      setRunStreamReadAfterOpenHookForTests(undefined);
+      fs.renameSync(file, `${file}.old`);
+      fs.writeFileSync(file, 'replacement', { mode: 0o600 });
+    });
+    expect(readRunStreamChunk('raced', 0)).toBeUndefined();
+  });
+
+  it('rejects parent-directory replacement after open', () => {
+    privateFile('parent-raced', 'private bytes');
+    const dir = runStreamsDir();
+    setRunStreamReadAfterOpenHookForTests(() => {
+      setRunStreamReadAfterOpenHookForTests(undefined);
+      fs.renameSync(dir, `${dir}.old`);
+      fs.mkdirSync(dir, { mode: 0o700 });
+    });
+    expect(readRunStreamChunk('parent-raced', 0)).toBeUndefined();
+  });
+
+  it('rejects private-root replacement after open', () => {
+    privateFile('root-raced', 'private bytes');
+    const root = path.dirname(runStreamsDir());
+    setRunStreamReadAfterOpenHookForTests(() => {
+      setRunStreamReadAfterOpenHookForTests(undefined);
+      fs.renameSync(root, `${root}.old`);
+      fs.mkdirSync(runStreamsDir(), { recursive: true, mode: 0o700 });
+    });
+    expect(readRunStreamChunk('root-raced', 0)).toBeUndefined();
   });
 });

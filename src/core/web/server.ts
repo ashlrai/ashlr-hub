@@ -25,6 +25,7 @@ import type { AshlrConfig, WebServerOptions, WebServerHandle } from '../types.js
 import { handleApi, drainSseConnections, drainSseSession } from './api.js';
 import { ReadSessionRevocations } from './read-session-revocations.js';
 import { serveStatic } from './static.js';
+import { gcRunStreams } from '../run/streaming.js';
 
 // ---------------------------------------------------------------------------
 // Host-header allowlist (anti DNS-rebinding)
@@ -279,6 +280,9 @@ export async function startServer(
   cfg: AshlrConfig,
   opts: WebServerOptions,
 ): Promise<WebServerHandle> {
+  // Sweep expired/over-budget captures at process startup even when no future
+  // run writes output. This is best-effort and never creates the store.
+  gcRunStreams(true);
   // Separate capabilities: read authority can mint a GET-only browser ticket,
   // while the mutation token is accepted only by handleApi mutation gates.
   const readToken = randomBytes(32).toString('hex');
