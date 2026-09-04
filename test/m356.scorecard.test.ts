@@ -112,8 +112,12 @@ function makeMockProposal(overrides: Partial<Proposal> & { createdAt: string }):
   };
 }
 
-function makeAuthenticatedRealizedProposal(proposalId: string, observedAt: string): Proposal {
-  const repo = path.join(tmpHome, 'repos', proposalId);
+function makeAuthenticatedRealizedProposal(
+  proposalId: string,
+  observedAt: string,
+  opts: { repo?: string; mergeCommitOid?: string } = {},
+): Proposal {
+  const repo = opts.repo ?? path.join(tmpHome, 'repos', proposalId);
   fs.mkdirSync(repo, { recursive: true });
   const diff = '--- a/file.ts\n+++ b/file.ts\n@@\n-old\n+new\n';
   const diffHash = 'd'.repeat(64);
@@ -149,7 +153,7 @@ function makeAuthenticatedRealizedProposal(proposalId: string, observedAt: strin
     base: 'main',
     baseBeforeOid: '1'.repeat(40),
     proposalHeadOid: '2'.repeat(40),
-    mergeCommitOid: '3'.repeat(40),
+    mergeCommitOid: opts.mergeCommitOid ?? '3'.repeat(40),
     observedAt,
     proposalId,
     diffHash,
@@ -361,6 +365,49 @@ describe('computeFleetScorecard — merges section (evidence-only)', () => {
     const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
     const sc = computeFleetScorecard('7d');
     expect(sc.merges.realized).toBe(0);
+  });
+
+  it('FALSIFY: a future authenticated observation is not current realized credit', async () => {
+    const id = pid();
+    const futureObservedAt = new Date(Date.now() + 30_000).toISOString();
+    const proposal = makeAuthenticatedRealizedProposal(id, futureObservedAt);
+    const { authenticatedRealizedMergeOf } = await import('../src/core/inbox/realized-merge.js');
+    expect(authenticatedRealizedMergeOf(proposal)).not.toBeNull();
+    mockProposals.push(proposal);
+
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    expect(computeFleetScorecard('7d').merges.realized).toBe(0);
+  });
+
+  it('FALSIFY: partial, non-patch, and empty-diff proposals cannot earn realized credit', async () => {
+    const observedAt = isoAgo(1 * DAY_MS);
+    const partial = makeAuthenticatedRealizedProposal(pid(), observedAt);
+    partial.isPartial = true;
+    const emptyDiff = makeAuthenticatedRealizedProposal(pid(), observedAt);
+    emptyDiff.diff = '   ';
+    const wrongKind = makeAuthenticatedRealizedProposal(pid(), observedAt);
+    wrongKind.kind = 'note';
+    mockProposals.push(partial, emptyDiff, wrongKind);
+
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    expect(computeFleetScorecard('7d').merges.realized).toBe(0);
+  });
+
+  it('FALSIFY: an old/current replay of one canonical merge identity degrades to unknown', async () => {
+    const sharedRepo = path.join(tmpHome, 'repos', 'canonical-duplicate');
+    const mergeCommitOid = '9'.repeat(40);
+    mockProposals.push(
+      makeAuthenticatedRealizedProposal(pid(), isoAgo(10 * DAY_MS), { repo: sharedRepo, mergeCommitOid }),
+      makeAuthenticatedRealizedProposal(pid(), isoAgo(1 * DAY_MS), { repo: sharedRepo, mergeCommitOid }),
+    );
+
+    const { computeFleetScorecard } = await import('../src/core/fleet/scorecard.js');
+    const sc = computeFleetScorecard('7d');
+    expect(sc.merges.realized).toBeNull();
+    expect(sc.merges.sourceQuality).toMatchObject({ sourceState: 'degraded', complete: false });
+    expect(sc.merges.sourceQuality.reasons).toContain('duplicate-canonical-realized-merge-identity');
+    expect(sc.cost.mergedChanges).toBeNull();
+    expect(sc.byEngine).toEqual([]);
   });
 
   it('FALSIFY: exact-timestamp generic rows cannot create or duplicate authenticated credit', async () => {

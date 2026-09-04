@@ -172,7 +172,7 @@ describe('fileSink — scrubs secrets before they touch disk', () => {
       ['AI', 'zaSyD1234567890abcdefghijklmnopqrstuv'].join(''),
       'https://operator:supersecretpassword@example.com/path',
       'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmn0123456789+/',
-      '-----BEGIN PRIVATE KEY-----\nprivatekeymaterial\n-----END PRIVATE KEY-----',
+      ['-----BE', 'GIN PRIVATE KEY-----\nprivatekeymaterial\n-----END PRIVATE KEY-----'].join(''),
     ];
 
     let sequence = 0;
@@ -219,6 +219,57 @@ describe('fileSink — scrubs secrets before they touch disk', () => {
     }
   });
 
+  it('fails closed when an unbounded introducer crosses every boundary before its delimiter', () => {
+    const whitespace = ' '.repeat(STREAM_REDACTION_WINDOW_CHARS + 64);
+    const pemBegin = ['-----BE', 'GIN'].join('');
+    const pemEnd = ['-----E', 'ND PRIVATE KEY-----'].join('');
+    const candidates = [
+      {
+        label: 'generic-key',
+        text: `password${whitespace}=correct-horse-battery-staple`,
+        forbidden: 'correct-horse-battery-staple',
+      },
+      {
+        label: 'pem-header',
+        text: `${pemBegin}${whitespace}PRIVATE KEY-----\nprivatekeymaterial\n${pemEnd}`,
+        forbidden: 'privatekeymaterial',
+      },
+    ];
+
+    let sequence = 0;
+    for (const candidate of candidates) {
+      for (let split = 0; split <= candidate.text.length; split += 1) {
+        const runId = `run-unbounded-${sequence++}`;
+        const sink = fileSink(runId);
+        sink(makeEvent({ text: candidate.text.slice(0, split) }));
+        sink(makeEvent({ text: candidate.text.slice(split) }));
+        endStreamSink(sink);
+
+        const stored = readStoredText(runId);
+        expect(stored, `${candidate.label} split at ${split}`).toContain('[REDACTED]');
+        expect(stored, `${candidate.label} split at ${split}`).not.toContain(candidate.forbidden);
+        expect(stored, `${candidate.label} split at ${split}`).not.toContain(whitespace);
+      }
+    }
+  });
+
+  it('recognizes every generic sensitive key before unbounded delimiter whitespace', () => {
+    const keys = [
+      'api_key', 'api-token', 'secret_key', 'token', 'password', 'passwd', 'pwd',
+      'auth', 'credential', 'client_secret', 'private_key', 'access_token',
+      'refresh-token', 'session_token', 'connection_string', 'ASHLR_SERVICE_TOKEN',
+    ];
+    for (const [index, key] of keys.entries()) {
+      const runId = `run-key-whitespace-${index}`;
+      const sink = fileSink(runId);
+      sink(makeEvent({ text: key }));
+      sink(makeEvent({ text: ' '.repeat(STREAM_REDACTION_WINDOW_CHARS + 1) }));
+      sink(makeEvent({ text: '=sensitivevalue' }));
+      endStreamSink(sink);
+      expect(readStoredText(runId)).toBe('[REDACTED]');
+    }
+  });
+
   it('flush preserves undecidable look-behind without closing, while end finalizes it', () => {
     const sink = fileSink('run-lifecycle-1');
     sink(makeEvent({ text: 'first safe fragment' }));
@@ -247,6 +298,19 @@ describe('fileSink — scrubs secrets before they touch disk', () => {
     expect(stored).toContain('[REDACTED]');
   });
 
+  it('keeps generic-key redaction locked across flush, lifecycle, and benign continuation', () => {
+    const sink = fileSink('run-generic-lifecycle-boundary-1');
+    sink(makeEvent({ text: 'password' }));
+    flushStreamSink(sink);
+    sink(makeEvent({ kind: 'log', text: undefined }));
+    sink(makeEvent({ text: ' '.repeat(STREAM_REDACTION_WINDOW_CHARS + 8) }));
+    sink(makeEvent({ text: '=sensitivevalue' }));
+    sink(makeEvent({ text: ' benign continuation must not be persisted' }));
+    endStreamSink(sink);
+
+    expect(readStoredText('run-generic-lifecycle-boundary-1')).toBe('[REDACTED]');
+  });
+
   it('error drains a split secret safely and closes the sink', () => {
     const secret = 'sk-abcdefghijklmnopqrstuvwxyz';
     const sink = fileSink('run-lifecycle-error-1');
@@ -257,6 +321,16 @@ describe('fileSink — scrubs secrets before they touch disk', () => {
     expect(readStoredText('run-lifecycle-error-1')).toContain('[REDACTED]');
     sink(makeEvent({ text: ' ignored after error' }));
     expect(readStoredText('run-lifecycle-error-1')).not.toContain('ignored after error');
+  });
+
+  it('error closes a generic-key stream already locked before its delimiter', () => {
+    const sink = fileSink('run-generic-error-1');
+    sink(makeEvent({ text: 'client_secret' }));
+    sink(makeEvent({ text: ' '.repeat(STREAM_REDACTION_WINDOW_CHARS + 8) }));
+    sink(makeEvent({ text: ':sensitivevalue' }));
+    failStreamSink(sink, new Error('engine failed'));
+    sink(makeEvent({ text: ' ignored after error' }));
+    expect(readStoredText('run-generic-error-1')).toBe('[REDACTED]');
   });
 });
 
@@ -294,6 +368,20 @@ describe('fileSink — size cap', () => {
     const raw = readStreamFile('run-cap-2');
     expect(raw).not.toContain(STREAM_TRUNCATION_MARKER);
     expect(raw.trim().split('\n')).toHaveLength(20);
+  });
+
+  it('redacts an unbounded generic secret introduced immediately below the cap', () => {
+    const sink = fileSink('run-cap-secret-1');
+    sink(makeEvent({ text: 'x'.repeat(MAX_STREAM_FILE_BYTES - 4_096) }));
+    sink(makeEvent({ text: 'password' }));
+    sink(makeEvent({ text: ' '.repeat(STREAM_REDACTION_WINDOW_CHARS + 8) }));
+    sink(makeEvent({ text: '=sensitivevalue' }));
+    endStreamSink(sink);
+
+    const stored = readStoredText('run-cap-secret-1');
+    expect(stored).toContain('[REDACTED]');
+    expect(stored).not.toContain('sensitivevalue');
+    expect(stored).not.toContain('password');
   });
 });
 
@@ -344,6 +432,20 @@ describe('combineSinks', () => {
 
     expect(rendered).toHaveLength(1);
     expect(readStreamFile('run-tee-1')).toContain('engine output line');
+  });
+
+  it('keeps sibling sinks live after file persistence fails closed', () => {
+    const rendered: RunStreamEvent[] = [];
+    const combined = combineSinks((event) => rendered.push(event), fileSink('run-tee-redacted-1'));
+    combined(makeEvent({ text: 'password' }));
+    combined(makeEvent({ text: ' '.repeat(STREAM_REDACTION_WINDOW_CHARS + 8) }));
+    combined(makeEvent({ text: '=sensitivevalue' }));
+    combined(makeEvent({ text: ' live sibling continues' }));
+    endStreamSink(combined);
+
+    expect(rendered).toHaveLength(4);
+    expect(rendered.map((event) => event.text ?? '').join('')).toContain('live sibling continues');
+    expect(readStoredText('run-tee-redacted-1')).toBe('[REDACTED]');
   });
 });
 

@@ -11,11 +11,13 @@
  * EVIDENCE-ONLY DISCIPLINE (non-negotiable; mirrors quality-metrics.ts and
  * post-merge-credit.ts, this codebase's existing authentication vocabulary):
  *
- *   - "realized" merges are derived directly from complete proposals whose
- *     persisted realized-merge witness passes authenticatedRealizedMergeOf()
- *     on this read. The generic decisions ledger is never treated as merge
- *     authority; its rows may attribute spend/producer metadata but cannot
- *     create, duplicate, or replay realized credit.
+ *   - "realized" merges are derived directly from complete, non-partial
+ *     patch/PR proposals with a non-empty diff whose persisted realized-merge
+ *     witness passes authenticatedRealizedMergeOf() and whose canonical
+ *     identity is available on this read. Duplicate canonical identities
+ *     degrade the section to unknown rather than selecting a winner. The
+ *     generic decisions ledger is never treated as merge authority; its rows
+ *     may attribute spend/producer metadata but cannot create or replay credit.
  *
  *   - "released" merges require action==='merged' plus a label accepted by
  *     hasReleasedPostMergeCredit(labelBasis).
@@ -40,7 +42,10 @@
  */
 
 import { listProposalsDetailed } from '../inbox/store.js';
-import { authenticatedRealizedMergeOf } from '../inbox/realized-merge.js';
+import {
+  authenticatedRealizedMergeOf,
+  canonicalRealizedMergeIdentity,
+} from '../inbox/realized-merge.js';
 import {
   readDecisions,
   readDecisionsDetailed,
@@ -208,15 +213,32 @@ export interface FleetScorecard {
 // Authenticated merge classification
 // ---------------------------------------------------------------------------
 
-function authenticatedRealizedIds(
+interface AuthenticatedRealizedSelection {
+  ids: Set<string>;
+  duplicateCanonicalIdentity: boolean;
+}
+
+function authenticatedRealizedSelection(
   proposalsById: ReadonlyMap<string, Proposal>,
   sinceMs: number,
-): Set<string> {
+): AuthenticatedRealizedSelection {
   const ids = new Set<string>();
+  const proposalByCanonicalIdentity = new Map<string, string>();
+  let duplicateCanonicalIdentity = false;
   const nowMs = Date.now();
   for (const [proposalId, proposal] of proposalsById) {
-    if (proposal.id !== proposalId) continue;
+    if (proposal.id !== proposalId || proposal.isPartial === true ||
+      (proposal.kind !== 'patch' && proposal.kind !== 'pr') ||
+      typeof proposal.diff !== 'string' || proposal.diff.trim().length === 0) continue;
     const evidence = authenticatedRealizedMergeOf(proposal);
+    const identity = canonicalRealizedMergeIdentity(proposal);
+    if (!evidence || !identity) continue;
+    const priorProposalId = proposalByCanonicalIdentity.get(identity.key);
+    if (priorProposalId !== undefined && priorProposalId !== proposalId) {
+      duplicateCanonicalIdentity = true;
+    } else {
+      proposalByCanonicalIdentity.set(identity.key, proposalId);
+    }
     const observedAt = evidence?.source === 'local-default-branch'
       ? evidence.observedAt
       : evidence?.reconciliation.observedAt;
@@ -224,7 +246,7 @@ function authenticatedRealizedIds(
     if (!Number.isFinite(witnessedMs) || witnessedMs < sinceMs || witnessedMs > nowMs) continue;
     ids.add(proposalId);
   }
-  return ids;
+  return { ids, duplicateCanonicalIdentity };
 }
 
 function isReleasedMergedDecision(entry: DecisionEntry): boolean {
@@ -357,17 +379,40 @@ function buildMergesSection(
   sq: ScorecardSourceQuality,
   ok: boolean,
   sinceMs: number,
-): { section: ScorecardMerges; realizedIds: Set<string>; releasedIds: Set<string> } {
+): {
+  section: ScorecardMerges;
+  realizedIds: Set<string>;
+  releasedIds: Set<string>;
+  identityComplete: boolean;
+} {
   if (!ok) {
     return {
       section: { sourceQuality: sq, realized: null, ...releasedMergeFields(null) },
       realizedIds: new Set(),
       releasedIds: new Set(),
+      identityComplete: false,
     };
   }
   // Realized identity comes only from authenticated proposal witnesses. The
   // unsigned decisions ledger cannot create or multiply this set.
-  const realizedIds = authenticatedRealizedIds(proposalsById, sinceMs);
+  const selection = authenticatedRealizedSelection(proposalsById, sinceMs);
+  if (selection.duplicateCanonicalIdentity) {
+    return {
+      section: {
+        sourceQuality: {
+          sourceState: 'degraded',
+          complete: false,
+          reasons: [...sq.reasons, 'duplicate-canonical-realized-merge-identity'],
+        },
+        realized: null,
+        ...releasedMergeFields(null),
+      },
+      realizedIds: new Set(),
+      releasedIds: new Set(),
+      identityComplete: false,
+    };
+  }
+  const realizedIds = selection.ids;
   const latestReleased = new Map<string, DecisionEntry>();
   for (const d of decisions) {
     if (POST_MERGE_CREDIT_OPERATIONAL_RELEASE && isReleasedMergedDecision(d)) {
@@ -386,6 +431,7 @@ function buildMergesSection(
     },
     realizedIds,
     releasedIds,
+    identityComplete: true,
   };
 }
 
@@ -649,17 +695,19 @@ export function computeFleetScorecard(window: ScorecardWindow): FleetScorecard {
   const attributionOk = decisionsOk && proposalEvidence.ok;
 
   const judge = buildJudgeSection(decisions, decisionsSq, decisionsOk);
-  const { section: merges, realizedIds, releasedIds } = buildMergesSection(
+  const { section: merges, realizedIds, releasedIds, identityComplete } = buildMergesSection(
     decisions,
     proposalEvidence.proposalsById,
     mergeSq,
     mergesOk,
     sinceMs,
   );
-  const { section: cost } = buildCostSection(realizedIds, attributionSq, attributionOk);
+  const mergeAttributionOk = attributionOk && identityComplete;
+  const mergeAttributionSq = identityComplete ? attributionSq : merges.sourceQuality;
+  const { section: cost } = buildCostSection(realizedIds, mergeAttributionSq, mergeAttributionOk);
   const latency = buildLatencySection(decisions, decisionsSq, decisionsOk);
   const learning = buildLearningSection(decisions, decisionsSq, decisionsOk);
-  const byEngine = buildEngineSplits(decisions, realizedIds, releasedIds, attributionOk);
+  const byEngine = buildEngineSplits(decisions, realizedIds, releasedIds, mergeAttributionOk);
   const capability = buildCapabilitySection();
 
   return {

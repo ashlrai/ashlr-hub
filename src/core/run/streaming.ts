@@ -390,17 +390,22 @@ export function fileSink(runId: string): StreamSink {
    */
   const containsSecretIntroducer = (text: string): boolean => {
     try {
-      return /-----BEGIN[ A-Z]*PRIVATE KEY-----/i.test(text) ||
+      return /-----BEGIN[ A-Z-]*$/i.test(text) ||
+        /-----BEGIN[ A-Z]*PRIVATE KEY-----/i.test(text) ||
         /\bsk-/i.test(text) ||
         /\bgh[poursa]_/i.test(text) ||
         /\bgithub_pat_/i.test(text) ||
         /\b(?:Bearer|Token|Authorization)\s+/i.test(text) ||
-        /\b(?:api[_-]?key|api[_-]?token|secret|secret[_-]?key|token|password|passwd|pwd|auth|credential|client[_-]?secret|private[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|connection[_-]?string|conn[_-]?str|_?auth[_-]?token|ASHLR_[A-Z_]+)\s*[=:]/i.test(text) ||
+        /\b(?:api[_-]?key|api[_-]?token|secret|secret[_-]?key|token|password|passwd|pwd|auth|credential|client[_-]?secret|private[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|connection[_-]?string|conn[_-]?str|_?auth[_-]?token|ASHLR_[A-Z_]+)(?:\s*[=:]|\s*$)/i.test(text) ||
         /\bxox[baprs]-/i.test(text) ||
         /\bAKIA[0-9A-Z]*/.test(text) ||
         /\beyJ[A-Za-z0-9_-]*\./.test(text) ||
         /\b(?:glpat-|hf_|npm_|AIza)/i.test(text) ||
-        /:\/\/[^:\s/@]+:/.test(text);
+        /:\/\/[^:\s/@]+:/.test(text) ||
+        // Bound otherwise-unbounded URL userinfo candidates before their
+        // credential-separating colon arrives. Ordinary hostnames stay live;
+        // implausibly long authority tokens fail closed.
+        /:\/\/[^/\s@]{128,}$/.test(text);
     } catch {
       return true;
     }
