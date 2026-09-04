@@ -129,6 +129,7 @@ export const REAL_IO_TEST_FILES = [
   'test/m46.fleet.test.ts', // real subprocess/fs work (marker-detected or measured) — 3.2s slowest test in the quiet baseline
   'test/h5.leak-containment.test.ts', // real subprocess/fs work (marker-detected or measured) — 30.6s slowest test in the quiet baseline
   'test/m518.goal-timestamp-repair-faults.test.ts', // real subprocess/fs work (marker-detected or measured) — 3.5s slowest test in the quiet baseline
+  'test/m522.production-promotion-admission.test.ts', // spawns a real Node child to validate immutable promotion admission
 
   // --- special cases: fast on a quiet machine but genuinely real I/O, so still contention-prone ---
   'test/m19.telemetry-sink.test.ts', // binds a real local HTTP server (OtlpHttpSink describe block) — 0.0s slowest test in the quiet baseline
