@@ -23,6 +23,9 @@ osv_bin=${AUDIT_OSV_BIN:-osv-scanner}
 timeout_bin=${AUDIT_TIMEOUT_BIN:-timeout}
 audit_tmp=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/ashlr-npm-audit.XXXXXX")
 trap 'rm -rf "${audit_tmp}"' EXIT
+osv_config="${audit_tmp}/osv-scanner.toml"
+: > "${osv_config}"
+chmod 0600 "${osv_config}"
 
 write_summary() {
   if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
@@ -39,6 +42,21 @@ is_valid_npm_report() {
       if (report?.auditReportVersion !== 2 || typeof counts !== "object") process.exit(1);
       for (const severity of ["info", "low", "moderate", "high", "critical", "total"]) {
         if (!Number.isInteger(counts[severity]) || counts[severity] < 0) process.exit(1);
+      }
+    } catch {
+      process.exit(1);
+    }
+  ' "$1"
+}
+
+is_clean_npm_report() {
+  node -e '
+    const fs = require("node:fs");
+    try {
+      const report = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+      const counts = report?.metadata?.vulnerabilities;
+      for (const severity of ["info", "low", "moderate", "high", "critical", "total"]) {
+        if (counts?.[severity] !== 0) process.exit(1);
       }
     } catch {
       process.exit(1);
@@ -70,6 +88,10 @@ for attempt in 1 2 3; do
       write_summary "${audit_label}: npm returned success without a valid audit v2 report; failed closed."
       exit 70
     fi
+    if ! is_clean_npm_report "${stdout_file}"; then
+      write_summary "${audit_label}: npm returned success with nonzero vulnerability counts; failed closed."
+      exit 1
+    fi
     write_summary "${audit_label}: primary npm audit passed with a valid audit v2 report."
     exit 0
   fi
@@ -94,7 +116,7 @@ done
 
 write_summary "${audit_label}: npm transport failed after 3 bounded attempts; invoking pinned OSV-Scanner."
 if "${timeout_bin}" --signal=TERM --kill-after=5s 60s \
-  "${osv_bin}" scan source --lockfile "${lockfile}" --format table; then
+  "${osv_bin}" scan source --config "${osv_config}" --lockfile "${lockfile}" --format table; then
   write_summary "${audit_label}: pinned OSV-Scanner fallback passed for ${lockfile}."
   exit 0
 else

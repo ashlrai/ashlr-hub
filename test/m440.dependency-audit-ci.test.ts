@@ -298,9 +298,15 @@ describe('M440 dependency audit CI', () => {
     expect(npmAuditFallbackText).toContain('--fetch-retries=0 --fetch-timeout=30000');
     expect(npmAuditFallbackText).toContain('"${npm_bin}" "${npm_args[@]}"');
     expect(npmAuditFallbackText).toContain('if is_valid_npm_report "${stdout_file}"; then');
+    expect(npmAuditFallbackText).toContain('if ! is_clean_npm_report "${stdout_file}"; then');
     expect(npmAuditFallbackText).toContain('fallback was not authorized');
     expect(npmAuditFallbackText).toContain(
-      '"${osv_bin}" scan source --lockfile "${lockfile}"',
+      'audit_tmp=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/ashlr-npm-audit.XXXXXX")',
+    );
+    expect(npmAuditFallbackText).toContain(': > "${osv_config}"');
+    expect(npmAuditFallbackText).toContain('chmod 0600 "${osv_config}"');
+    expect(npmAuditFallbackText).toContain(
+      '"${osv_bin}" scan source --config "${osv_config}" --lockfile "${lockfile}"',
     );
     expect(npmAuditFallbackText).toContain('no provider returned a clean result');
     expect(npmAuditFallbackText).toContain('GITHUB_STEP_SUMMARY');
@@ -309,7 +315,7 @@ describe('M440 dependency audit CI', () => {
     );
   });
 
-  it('uses OSV only for bounded npm transport failures and records the provider outcome', () => {
+  it('fail-closes inconsistent npm success and isolates OSV from repository ignore policy', () => {
     const fixtureRoot = mkdtempSync(resolve(tmpdir(), 'ashlr-m440-audit-'));
     try {
       const binDir = resolve(fixtureRoot, 'bin');
@@ -317,9 +323,14 @@ describe('M440 dependency audit CI', () => {
       const countFile = resolve(fixtureRoot, 'npm-count');
       const markerFile = resolve(fixtureRoot, 'osv-called');
       const summaryFile = resolve(fixtureRoot, 'summary.md');
+      const repositoryConfig = resolve(fixtureRoot, 'osv-scanner.toml');
       const script = resolve(repoRoot, 'scripts/npm-audit-with-osv-fallback.sh');
       writeFileSync(lockfile, '{}\n');
       writeFileSync(countFile, '0\n');
+      writeFileSync(
+        repositoryConfig,
+        '[[PackageOverrides]]\nname = ".*"\nnameIsRegex = true\nignore = true\n',
+      );
       mkdirSync(binDir);
 
       const writeExecutable = (name: string, content: string) => {
@@ -347,6 +358,10 @@ case "$TEST_MODE" in
     printf '%s\n' '{"auditReportVersion":2,"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":1,"critical":0,"total":1}}}'
     exit 1
     ;;
+  false-clean)
+    printf '%s\n' '{"auditReportVersion":2,"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":1,"critical":0,"total":1}}}'
+    exit 0
+    ;;
   transport)
     printf '%s\n' '{"message":"network timeout","error":{"summary":"","detail":""}}'
     echo 'npm error audit endpoint returned an error: network timeout' >&2
@@ -361,7 +376,24 @@ esac
       );
       writeExecutable(
         'osv-scanner',
-        '#!/usr/bin/env bash\nprintf "called\\n" > "$TEST_OSV_MARKER"\nexit "${TEST_OSV_RC:-0}"\n',
+        `#!/usr/bin/env bash
+config_path=''
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == '--config' ]]; then
+    shift
+    config_path="\${1:-}"
+    break
+  fi
+  shift
+done
+[[ -n "$config_path" ]]
+[[ "$config_path" != "$TEST_REPO_CONFIG" ]]
+[[ -f "$config_path" && ! -s "$config_path" ]]
+permissions=$(stat -f '%Lp' "$config_path" 2>/dev/null || stat -c '%a' "$config_path")
+[[ "$permissions" == '600' ]]
+printf '%s\n' "$config_path" > "$TEST_OSV_MARKER"
+exit "\${TEST_OSV_RC:-0}"
+`,
       );
 
       const runScenario = (mode: string, osvRc = '0') => {
@@ -376,6 +408,7 @@ esac
             PATH: `${binDir}:${process.env.PATH ?? ''}`,
             TEST_COUNT_FILE: countFile,
             TEST_OSV_MARKER: markerFile,
+            TEST_REPO_CONFIG: repositoryConfig,
             TEST_OSV_RC: osvRc,
             TEST_MODE: mode,
             GITHUB_STEP_SUMMARY: summaryFile,
@@ -401,6 +434,14 @@ esac
       expect(vulnerability.fallbackCalled).toBe(false);
       expect(vulnerability.summary).toContain('primary npm audit reported vulnerabilities');
 
+      const falseClean = runScenario('false-clean');
+      expect(falseClean.status).toBe(1);
+      expect(falseClean.count).toBe(1);
+      expect(falseClean.fallbackCalled).toBe(false);
+      expect(falseClean.summary).toContain(
+        'npm returned success with nonzero vulnerability counts',
+      );
+
       const nonTransport = runScenario('non-transport');
       expect(nonTransport.status).toBe(2);
       expect(nonTransport.count).toBe(1);
@@ -411,6 +452,7 @@ esac
       expect(transport.status).toBe(0);
       expect(transport.count).toBe(3);
       expect(transport.fallbackCalled).toBe(true);
+      expect(readFileSync(markerFile, 'utf8').trim()).not.toBe(repositoryConfig);
       expect(transport.summary).toContain('npm transport failed after 3 bounded attempts');
       expect(transport.summary).toContain('pinned OSV-Scanner fallback passed');
 
