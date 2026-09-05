@@ -17,6 +17,7 @@ const testDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(testDir, '..');
 const fixturePath = join(testDir, 'fixtures', 'release-policy', 'valid-v1.json');
 const schemaPath = join(repoRoot, '.github', 'release-policies', 'schema-v1.json');
+const productionPolicyPath = join(repoRoot, '.github', 'release-policies', 'v3.4.0.json');
 const verifierPath = join(repoRoot, 'scripts', 'verify-release-policy.mjs');
 const contract = readFileSync(join(repoRoot, 'docs', 'contracts', 'CONTRACT-M570.md'), 'utf8');
 const expectedDigest = '4fc13649b76f0f697683a1fb231bb2ca37f26e2ba15699f9e513155b278ff979';
@@ -79,7 +80,7 @@ describe('M570 release successor policy v1', () => {
     expect(Object.values(RELEASE_SUCCESSOR_POLICY_AUTHORITY)).toEqual(Array(6).fill(false));
   });
 
-  it('ships a closed schema without a production release policy or live identity placeholder', () => {
+  it('ships a closed schema and exact 3.4.0 local-production policy without fixture placeholders', () => {
     const schema = JSON.parse(readFileSync(schemaPath, 'utf8')) as JsonRecord;
     const source = readFileSync(fixturePath, 'utf8');
     expect(schema).toMatchObject({
@@ -95,7 +96,11 @@ describe('M570 release successor policy v1', () => {
       runtime: { additionalProperties: false },
       authority: { additionalProperties: false },
     });
-    expect(existsSync(join(repoRoot, '.github', 'release-policies', 'v3.4.0.json'))).toBe(false);
+    expect(existsSync(productionPolicyPath)).toBe(true);
+    expect(verifyReleaseSuccessorPolicyFile(productionPolicyPath, '3.4.0').policy).toMatchObject({
+      release: { requiredFirstParentRevision: 'c710b62cb83efa5711e7e377dc053a68e2cd005e' },
+      package: { version: '3.4.0' },
+    });
     expect(source).not.toMatch(/3\.3\.2|3\.4\.0|abd49a5049759e417d99089b88c628fd2364f79c|d6c1a5ec/u);
     expect(source).toContain('v9.8.7');
   });

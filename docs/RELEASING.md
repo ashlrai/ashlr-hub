@@ -26,12 +26,11 @@ its immutable package version, or repeat its promotion effect. Their frozen
 workflow assertions remain valuable fail-closed evidence, but a future release
 requires a separately reviewed successor contract.
 
-## Local verification for a future successor
+## Local verification for the 3.4.0 successor
 
-Hosted GitHub workflows are currently disabled. A later M570 release policy is
-verified entirely on the local macOS host with the M571 gate; no production
-policy exists yet, and this local verification does not itself authorize or
-perform publication or promotion.
+GitHub Actions are repository-disabled. The tracked M570 policy for 3.4.0 is
+verified entirely on the local macOS host with the M571 gate; local verification
+does not itself authorize or perform publication or promotion.
 
 The policy must bind the exact committed `ashlr.verify.json` digest and the
 expected tarball SRI. With exact Node 24+ and npm 11+ versions from that policy
