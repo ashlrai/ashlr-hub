@@ -1,0 +1,668 @@
+# finalize-github-release.yml — one-shot GitHub stable-channel alignment for v3.3.2.
+#
+# npm publication and production promotion are complete before this lane runs.
+# This workflow has no npm mutation, publish, install-pointer, or runtime authority.
+# Its sole external effect is one PATCH of the already-published GitHub Release.
+
+name: Finalize GitHub stable release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_run_id:
+        description: Exact successful v3.3.2 Release workflow run ID
+        required: true
+        type: string
+      admission_run_id:
+        description: Exact successful npm production-promotion admission run ID
+        required: true
+        type: string
+      candidate_integrity:
+        description: Exact accepted sha512 SRI for @ashlr/hub@3.3.2
+        required: true
+        type: string
+      confirm_stable_finalization:
+        description: Confirm npm production is accepted and GitHub v3.3.2 should become stable/latest
+        required: true
+        default: false
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: github-stable-release-finalization-v3.3.2
+  cancel-in-progress: false
+
+env:
+  PACKAGE_NAME: "@ashlr/hub"
+  RELEASE_VERSION: "3.3.2"
+  RELEASE_TAG: "v3.3.2"
+  RELEASE_SOURCE_SHA: "2971c9f767c934e12fd056bf8c6dca5164ffe7d2"
+  REQUIRED_ROLLBACK_REVISION: "d6c1a5ec3626f715018a8ffb929906ac0f52f5c9"
+  REQUIRED_RELEASE_RUN_ID: "33932333902"
+  REQUIRED_RELEASE_RUN_ATTEMPT: "1"
+  REQUIRED_ADMISSION_RUN_ID: "33933861238"
+  REQUIRED_ADMISSION_RUN_ATTEMPT: "1"
+  REQUIRED_ADMISSION_ARTIFACT_ID: "9959487443"
+  REQUIRED_ADMISSION_ARTIFACT_NAME: "npm-production-promotion-admission-33933861238-1"
+  REQUIRED_ADMISSION_ARTIFACT_SHA256: "223193104d72509f481907e920a5fda586db055d9efaf3e846dd85c2c835953b"
+  REQUIRED_ADMISSION_RECEIPT_SHA256: "0b3552324284856423356d12e7b04334c530ea5471666f3fc82647426a57b86d"
+  REQUIRED_CANDIDATE_INTEGRITY: "sha512-674ZY76hBxks8j9JR5QifoyMn6uxmRx6dhbgiYAuWRyrnB4Zeuo/H+rgQ1mQ/mNYf62s1ORnJcvTxbxHZFuqTA=="
+  REQUIRED_RELEASE_ID: "383083121"
+  REQUIRED_RELEASE_NAME: "v3.3.2"
+  REQUIRED_RELEASE_BODY_SHA256: "f7b2dc191b3491ce29da3b31a6afb6703d9403f4c5ef3b0066ca0bed5a647ba5"
+  REQUIRED_RELEASE_ASSETS_SHA256: "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+  PRIOR_LATEST_RELEASE_ID: "341086222"
+  PRIOR_LATEST_RELEASE_TAG: "v3.0.0"
+  REQUIRED_FINALIZATION_APPROVER: masonwyatt23
+  FINALIZATION_ENVIRONMENT: github-stable-release-finalization
+
+jobs:
+  verify:
+    name: Verify stable-finalization evidence (NO_MUTATION_AUTHORITY)
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      preflight_artifact_name: ${{ steps.preflight_names.outputs.artifact_name }}
+      preflight_receipt_sha256: ${{ steps.verification.outputs.receipt_sha256 }}
+    steps:
+      - name: Check out protected workflow source without retained credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up pinned provenance-verification Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.19.0"
+          package-manager-cache: false
+
+      - name: Install pinned npm verifier
+        run: >-
+          npm install --global npm@11.19.0 --ignore-scripts --no-audit --no-fund
+          --registry=https://registry.npmjs.org
+
+      - name: Verify pinned npm verifier
+        run: test "$(npm --version)" = "11.19.0"
+
+      - name: Download exact promotion-admission artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ env.REQUIRED_ADMISSION_ARTIFACT_ID }}
+          path: promotion-admission
+          merge-multiple: false
+          digest-mismatch: error
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.REQUIRED_ADMISSION_RUN_ID }}
+
+      - name: Verify exact immutable and public-channel evidence
+        id: verification
+        shell: bash
+        env:
+          CANDIDATE_INTEGRITY_INPUT: ${{ inputs.candidate_integrity }}
+          CONFIRM_STABLE_FINALIZATION: ${{ inputs.confirm_stable_finalization }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_RUN_ID_INPUT: ${{ inputs.release_run_id }}
+          ADMISSION_RUN_ID_INPUT: ${{ inputs.admission_run_id }}
+        run: |
+          set -euo pipefail
+          umask 077
+
+          if [[ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ||
+                "$GITHUB_REF_TYPE" != "branch" ||
+                "$GITHUB_REF_NAME" != "master" ||
+                ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ||
+                "$CONFIRM_STABLE_FINALIZATION" != "true" ]]; then
+            echo "Stable finalization requires an explicit protected-master dispatch." >&2
+            exit 1
+          fi
+          if [[ "$RELEASE_RUN_ID_INPUT" != "$REQUIRED_RELEASE_RUN_ID" ||
+                "$ADMISSION_RUN_ID_INPUT" != "$REQUIRED_ADMISSION_RUN_ID" ||
+                "$CANDIDATE_INTEGRITY_INPUT" != "$REQUIRED_CANDIDATE_INTEGRITY" ]]; then
+            echo "The exact reviewed release, admission, and SRI evidence was not supplied." >&2
+            exit 1
+          fi
+
+          branch_json="$(gh api "repos/${GITHUB_REPOSITORY}/branches/master")"
+          jq -e --arg sha "$GITHUB_SHA" \
+            '.protected == true and .commit.sha == $sha' <<<"$branch_json" >/dev/null
+          comparison="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/compare/${RELEASE_SOURCE_SHA}...${GITHUB_SHA}" \
+            --jq '.status')"
+          [[ "$comparison" == "ahead" || "$comparison" == "identical" ]]
+
+          tag_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}")"
+          jq -e --arg ref "refs/tags/${RELEASE_TAG}" --arg sha "$RELEASE_SOURCE_SHA" \
+            '.ref == $ref and .object.type == "commit" and .object.sha == $sha' \
+            <<<"$tag_json" >/dev/null
+          release_commit="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_SOURCE_SHA}")"
+          jq -e --arg rollback "$REQUIRED_ROLLBACK_REVISION" \
+            '(.parents | length) == 2 and .parents[0].sha == $rollback' \
+            <<<"$release_commit" >/dev/null
+
+          release_run="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${REQUIRED_RELEASE_RUN_ID}")"
+          jq -e --arg sha "$RELEASE_SOURCE_SHA" --arg tag "$RELEASE_TAG" \
+            --argjson attempt "$REQUIRED_RELEASE_RUN_ATTEMPT" \
+            '.id == 33932333902 and .path == ".github/workflows/release.yml" and
+             .event == "push" and .head_branch == $tag and .head_sha == $sha and
+             .status == "completed" and .conclusion == "success" and
+             .run_attempt == $attempt' <<<"$release_run" >/dev/null
+
+          admission_run="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${REQUIRED_ADMISSION_RUN_ID}")"
+          jq -e --arg sha "$RELEASE_SOURCE_SHA" \
+            --argjson attempt "$REQUIRED_ADMISSION_RUN_ATTEMPT" \
+            '.id == 33933861238 and .path == ".github/workflows/promote.yml" and
+             .event == "workflow_dispatch" and .head_branch == "master" and
+             .head_sha == $sha and .status == "completed" and
+             .conclusion == "success" and .run_attempt == $attempt' \
+            <<<"$admission_run" >/dev/null
+          admission_artifacts="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${REQUIRED_ADMISSION_RUN_ID}/artifacts")"
+          jq -e --arg name "$REQUIRED_ADMISSION_ARTIFACT_NAME" \
+            --arg digest "sha256:${REQUIRED_ADMISSION_ARTIFACT_SHA256}" \
+            --argjson id "$REQUIRED_ADMISSION_ARTIFACT_ID" \
+            '.total_count == 1 and (.artifacts | length) == 1 and
+             .artifacts[0].id == $id and .artifacts[0].name == $name and
+             .artifacts[0].digest == $digest and .artifacts[0].expired == false and
+             (.artifacts[0].size_in_bytes >= 2 and .artifacts[0].size_in_bytes <= 32768)' \
+            <<<"$admission_artifacts" >/dev/null
+
+          admission_root="promotion-admission/${REQUIRED_ADMISSION_ARTIFACT_NAME}"
+          if [[ ! -d "$admission_root" ]]; then
+            admission_root="promotion-admission"
+          fi
+          test -d "$admission_root" && test ! -L "$admission_root"
+          admission_entries="$(find "$admission_root" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')"
+          admission_files="$(find "$admission_root" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')"
+          [[ "$admission_entries" == "2" && "$admission_files" == "2" ]]
+          admission_receipt="$admission_root/promotion-admission.json"
+          admission_digest="$admission_root/promotion-admission.sha256"
+          for path in "$admission_receipt" "$admission_digest"; do
+            test -f "$path" && test ! -L "$path"
+            test "$(stat --format='%h' "$path")" = "1"
+          done
+          test "$(wc -c < "$admission_receipt")" -le 16384
+          test "$(wc -c < "$admission_digest")" = "65"
+          observed_admission_sha256="$(sha256sum "$admission_receipt" | cut -d ' ' -f 1)"
+          [[ "$observed_admission_sha256" == "$REQUIRED_ADMISSION_RECEIPT_SHA256" ]]
+          [[ "$(tr -d '\n' < "$admission_digest")" == "$observed_admission_sha256" ]]
+          jq -e --arg integrity "$REQUIRED_CANDIDATE_INTEGRITY" \
+            --arg sha "$RELEASE_SOURCE_SHA" \
+            --arg releaseRun "$REQUIRED_RELEASE_RUN_ID" \
+            --arg admissionRun "$REQUIRED_ADMISSION_RUN_ID" \
+            '.schemaVersion == 1 and .admission == "passed" and
+             .package == "@ashlr/hub" and .version == "3.3.2" and
+             .candidateIntegrity == $integrity and .releaseTag == "v3.3.2" and
+             .releaseTagSha == $sha and .sourceSha == $sha and
+             .releaseRunId == $releaseRun and .workflowRunId == $admissionRun and
+             .environmentProtectionVerified == true and
+             .npmCredentialsPresent == false and .oidcAuthority == false and
+             .npmMutationAuthority == false and .promotionExecuted == false' \
+            "$admission_receipt" >/dev/null
+
+          evidence_root="$(mktemp -d "$RUNNER_TEMP/github-stable-finalization.XXXXXX")"
+          package_root="$evidence_root/package"
+          mkdir -p "$package_root"
+          printf '{"private":true}\n' > "$package_root/package.json"
+          (
+            cd "$package_root"
+            npm install --ignore-scripts --no-audit --no-fund --save-exact \
+              --registry="https://registry.npmjs.org" \
+              "${PACKAGE_NAME}@${RELEASE_VERSION}"
+            timeout 180 npm audit signatures --json --include-attestations \
+              --registry="https://registry.npmjs.org" \
+              > "$evidence_root/npm-audit-signatures.json"
+          )
+          audit_bytes="$(wc -c < "$evidence_root/npm-audit-signatures.json")"
+          (( audit_bytes >= 2 && audit_bytes <= 33554432 ))
+          installed_version="$(node -p \
+            "require('${package_root}/node_modules/@ashlr/hub/package.json').version")"
+          [[ "$installed_version" == "$RELEASE_VERSION" ]]
+          node scripts/verify-npm-release-provenance.mjs \
+            "$evidence_root/npm-audit-signatures.json" "$PACKAGE_NAME" \
+            "$RELEASE_VERSION" "$REQUIRED_CANDIDATE_INTEGRITY" \
+            "https://github.com/${GITHUB_REPOSITORY}" \
+            ".github/workflows/release.yml" "refs/tags/${RELEASE_TAG}" \
+            "$RELEASE_SOURCE_SHA" "$REQUIRED_RELEASE_RUN_ID" \
+            "$REQUIRED_RELEASE_RUN_ATTEMPT"
+
+          packument="$evidence_root/packument.json"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            --max-time 30 --retry 3 --retry-all-errors --max-filesize 8388608 \
+            --output "$packument" "https://registry.npmjs.org/@ashlr%2Fhub"
+          test -f "$packument" && test ! -L "$packument"
+          test "$(stat --format='%h' "$packument")" = "1"
+          packument_bytes="$(wc -c < "$packument")"
+          (( packument_bytes >= 2 && packument_bytes <= 8388608 ))
+          jq -e --arg version "$RELEASE_VERSION" \
+            --arg integrity "$REQUIRED_CANDIDATE_INTEGRITY" \
+            '.name == "@ashlr/hub" and
+             .["dist-tags"].latest == $version and
+             .["dist-tags"].candidate == $version and
+             .versions[$version].version == $version and
+             .versions[$version].dist.integrity == $integrity and
+             (.versions[$version].dist.signatures | type == "array" and length > 0) and
+             .versions[$version].dist.attestations.provenance.predicateType ==
+               "https://slsa.dev/provenance/v1"' "$packument" >/dev/null
+
+          before_release="$evidence_root/release-before.json"
+          before_latest="$evidence_root/latest-before.json"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${REQUIRED_RELEASE_ID}" > "$before_release"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/latest" > "$before_latest"
+          jq -e --argjson id "$REQUIRED_RELEASE_ID" --arg tag "$RELEASE_TAG" \
+            --arg name "$REQUIRED_RELEASE_NAME" \
+            '.id == $id and .tag_name == $tag and .target_commitish == "master" and
+             .name == $name and .draft == false and .prerelease == true and
+             .immutable == false' "$before_release" >/dev/null
+          jq -e --argjson id "$PRIOR_LATEST_RELEASE_ID" \
+            --arg tag "$PRIOR_LATEST_RELEASE_TAG" \
+            '.id == $id and .tag_name == $tag and .draft == false and
+             .prerelease == false' "$before_latest" >/dev/null
+          jq -j '.body' "$before_release" > "$evidence_root/body-before.txt"
+          jq -cjS '[.assets[] | {id,name,label,content_type,size,state,digest}]' \
+            "$before_release" > "$evidence_root/assets-before.json"
+          before_body_sha256="$(sha256sum "$evidence_root/body-before.txt" | cut -d ' ' -f 1)"
+          before_assets_sha256="$(sha256sum "$evidence_root/assets-before.json" | cut -d ' ' -f 1)"
+          [[ "$before_body_sha256" == "$REQUIRED_RELEASE_BODY_SHA256" ]]
+          [[ "$before_assets_sha256" == "$REQUIRED_RELEASE_ASSETS_SHA256" ]]
+          verified_at="$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
+          receipt="$evidence_root/github-stable-finalization-preflight.json"
+          receipt_digest="$evidence_root/github-stable-finalization-preflight.sha256"
+          jq -cnS \
+            --arg actor "$GITHUB_ACTOR" \
+            --arg admissionArtifactSha256 "$REQUIRED_ADMISSION_ARTIFACT_SHA256" \
+            --arg admissionReceiptSha256 "$REQUIRED_ADMISSION_RECEIPT_SHA256" \
+            --arg admissionRunId "$REQUIRED_ADMISSION_RUN_ID" \
+            --arg bodySha256 "$after_body_sha256" \
+            --arg assetsSha256 "$after_assets_sha256" \
+            --arg candidateIntegrity "$REQUIRED_CANDIDATE_INTEGRITY" \
+            --arg releaseRunId "$REQUIRED_RELEASE_RUN_ID" \
+            --arg sourceSha "$RELEASE_SOURCE_SHA" \
+            --arg tag "$RELEASE_TAG" \
+            --arg version "$RELEASE_VERSION" \
+            --arg workflowSha "$GITHUB_SHA" \
+            --arg workflowRunId "$GITHUB_RUN_ID" \
+            --arg workflowRunAttempt "$GITHUB_RUN_ATTEMPT" \
+            --arg verifiedAt "$verified_at" \
+            --argjson releaseId "$REQUIRED_RELEASE_ID" \
+            --argjson priorLatestReleaseId "$PRIOR_LATEST_RELEASE_ID" \
+            '{schemaVersion:1, admission:"github-release-stable-finalization-preflight",
+              package:"@ashlr/hub", version:$version,
+              release:{id:$releaseId, tag:$tag, sourceSha:$sourceSha,
+                prerelease:true, priorLatestReleaseId:$priorLatestReleaseId,
+                bodySha256:$bodySha256, assetsSha256:$assetsSha256},
+              npm:{latest:$version, candidate:$version, integrity:$candidateIntegrity,
+                provenanceVerified:true, mutationAuthority:false},
+              evidence:{releaseRunId:$releaseRunId, admissionRunId:$admissionRunId,
+                admissionArtifactSha256:$admissionArtifactSha256,
+                admissionReceiptSha256:$admissionReceiptSha256},
+              repository:"ashlrai/ashlr-hub", actor:$actor,
+              workflowSha:$workflowSha, workflowRunId:$workflowRunId,
+              workflowRunAttempt:$workflowRunAttempt, verifiedAt:$verifiedAt,
+              githubReleaseMutationExecuted:false,
+              tagMutationAuthority:false, npmMutationAuthority:false,
+              installAuthority:false, activationAuthority:false}' > "$receipt"
+          test -f "$receipt" && test ! -L "$receipt"
+          receipt_bytes="$(wc -c < "$receipt")"
+          (( receipt_bytes >= 2 && receipt_bytes <= 16384 ))
+          sha256sum "$receipt" | cut -d ' ' -f 1 > "$receipt_digest"
+          test "$(wc -c < "$receipt_digest")" = "65"
+          printf 'receipt=%s\n' "$receipt" >> "$GITHUB_OUTPUT"
+          printf 'receipt_digest=%s\n' "$receipt_digest" >> "$GITHUB_OUTPUT"
+          printf 'receipt_sha256=%s\n' "$(tr -d '\n' < "$receipt_digest")" >> "$GITHUB_OUTPUT"
+
+      - name: Bind attempt-specific preflight artifact name
+        id: preflight_names
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ && "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          printf 'artifact_name=github-stable-finalization-preflight-%s-%s\n' \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload bounded no-mutation preflight receipt
+        id: preflight_artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.preflight_names.outputs.artifact_name }}
+          path: |
+            ${{ steps.verification.outputs.receipt }}
+            ${{ steps.verification.outputs.receipt_digest }}
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 9
+          overwrite: false
+          include-hidden-files: false
+
+      - name: Summarize no-mutation preflight
+        shell: bash
+        env:
+          ARTIFACT_SHA256: ${{ steps.preflight_artifact.outputs.artifact-digest }}
+          RECEIPT_SHA256: ${{ steps.verification.outputs.receipt_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          {
+            echo "## GitHub stable release finalization preflight (NO_MUTATION_AUTHORITY)"
+            echo "- Release: \`${RELEASE_TAG}\` / ID \`${REQUIRED_RELEASE_ID}\`"
+            echo "- Source: \`${RELEASE_SOURCE_SHA}\`"
+            echo "- npm: \`latest=candidate=${RELEASE_VERSION}\`; exact provenance verified"
+            echo "- GitHub effect: none; protected finalization job remains separate"
+            echo "- Receipt SHA-256: \`${RECEIPT_SHA256}\`"
+            echo "- Artifact SHA-256: \`${ARTIFACT_SHA256}\`"
+            echo "- No GitHub Release, npm, tag, install, activation, provider, credential, or spend authority"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  finalize:
+    name: Perform one protected GitHub Release PATCH
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: github-stable-release-finalization
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Download exact current-run preflight receipt
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.verify.outputs.preflight_artifact_name }}
+          path: finalization-preflight
+          merge-multiple: false
+          digest-mismatch: error
+
+      - name: Reverify live state, perform one PATCH, and postverify
+        id: finalization
+        shell: bash
+        env:
+          ADMISSION_RUN_ID_INPUT: ${{ inputs.admission_run_id }}
+          CANDIDATE_INTEGRITY_INPUT: ${{ inputs.candidate_integrity }}
+          CONFIRM_STABLE_FINALIZATION: ${{ inputs.confirm_stable_finalization }}
+          EXPECTED_PREFLIGHT_RECEIPT_SHA256: ${{ needs.verify.outputs.preflight_receipt_sha256 }}
+          GH_TOKEN: ${{ github.token }}
+          PREFLIGHT_ARTIFACT_NAME: ${{ needs.verify.outputs.preflight_artifact_name }}
+          RELEASE_RUN_ID_INPUT: ${{ inputs.release_run_id }}
+        run: |
+          set -euo pipefail
+          umask 077
+
+          if [[ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ||
+                "$GITHUB_REF_TYPE" != "branch" ||
+                "$GITHUB_REF_NAME" != "master" ||
+                ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ||
+                "$CONFIRM_STABLE_FINALIZATION" != "true" ]]; then
+            echo "Stable finalization requires an explicit protected-master dispatch." >&2
+            exit 1
+          fi
+          if [[ "$RELEASE_RUN_ID_INPUT" != "$REQUIRED_RELEASE_RUN_ID" ||
+                "$ADMISSION_RUN_ID_INPUT" != "$REQUIRED_ADMISSION_RUN_ID" ||
+                "$CANDIDATE_INTEGRITY_INPUT" != "$REQUIRED_CANDIDATE_INTEGRITY" ||
+                ! "$EXPECTED_PREFLIGHT_RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ||
+                "$PREFLIGHT_ARTIFACT_NAME" !=
+                  "github-stable-finalization-preflight-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" ]]; then
+            echo "The protected effect is not bound to the exact current-run preflight." >&2
+            exit 1
+          fi
+
+          preflight_root="finalization-preflight"
+          test -d "$preflight_root" && test ! -L "$preflight_root"
+          preflight_entries="$(find "$preflight_root" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')"
+          preflight_files="$(find "$preflight_root" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')"
+          [[ "$preflight_entries" == "2" && "$preflight_files" == "2" ]]
+          preflight_receipt="$preflight_root/github-stable-finalization-preflight.json"
+          preflight_digest="$preflight_root/github-stable-finalization-preflight.sha256"
+          for path in "$preflight_receipt" "$preflight_digest"; do
+            test -f "$path" && test ! -L "$path"
+            test "$(stat --format='%h' "$path")" = "1"
+          done
+          test "$(wc -c < "$preflight_receipt")" -le 16384
+          test "$(wc -c < "$preflight_digest")" = "65"
+          observed_preflight_sha256="$(sha256sum "$preflight_receipt" | cut -d ' ' -f 1)"
+          [[ "$observed_preflight_sha256" == "$EXPECTED_PREFLIGHT_RECEIPT_SHA256" ]]
+          [[ "$(tr -d '\n' < "$preflight_digest")" == "$observed_preflight_sha256" ]]
+          jq -e --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg workflowSha "$GITHUB_SHA" --arg sourceSha "$RELEASE_SOURCE_SHA" \
+            --arg integrity "$REQUIRED_CANDIDATE_INTEGRITY" \
+            --arg releaseRun "$REQUIRED_RELEASE_RUN_ID" \
+            --arg admissionRun "$REQUIRED_ADMISSION_RUN_ID" \
+            --arg body "$REQUIRED_RELEASE_BODY_SHA256" \
+            --arg assets "$REQUIRED_RELEASE_ASSETS_SHA256" \
+            --argjson releaseId "$REQUIRED_RELEASE_ID" \
+            '.schemaVersion == 1 and
+             .admission == "github-release-stable-finalization-preflight" and
+             .repository == "ashlrai/ashlr-hub" and .package == "@ashlr/hub" and
+             .version == "3.3.2" and .workflowRunId == $run and
+             .workflowRunAttempt == $attempt and .workflowSha == $workflowSha and
+             .release.id == $releaseId and .release.tag == "v3.3.2" and
+             .release.sourceSha == $sourceSha and .release.prerelease == true and
+             .release.bodySha256 == $body and .release.assetsSha256 == $assets and
+             .npm.latest == "3.3.2" and .npm.candidate == "3.3.2" and
+             .npm.integrity == $integrity and .npm.provenanceVerified == true and
+             .evidence.releaseRunId == $releaseRun and
+             .evidence.admissionRunId == $admissionRun and
+             .githubReleaseMutationExecuted == false and
+             .tagMutationAuthority == false and .npmMutationAuthority == false and
+             .installAuthority == false and .activationAuthority == false' \
+            "$preflight_receipt" >/dev/null
+
+          environment_json="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/environments/${FINALIZATION_ENVIRONMENT}")"
+          jq -e --arg name "$FINALIZATION_ENVIRONMENT" \
+            --arg approver "$REQUIRED_FINALIZATION_APPROVER" \
+            '([.protection_rules[]? | select(.type == "required_reviewers")]) as $rules |
+             .name == $name and .can_admins_bypass == false and
+             .deployment_branch_policy.protected_branches == true and
+             .deployment_branch_policy.custom_branch_policies == false and
+             ($rules | length) == 1 and
+             $rules[0].prevent_self_review == false and
+             ($rules[0].reviewers | type == "array" and length == 1) and
+             $rules[0].reviewers[0].type == "User" and
+             $rules[0].reviewers[0].reviewer.login == $approver' \
+            <<<"$environment_json" >/dev/null
+
+          branch_json="$(gh api "repos/${GITHUB_REPOSITORY}/branches/master")"
+          jq -e --arg sha "$GITHUB_SHA" \
+            '.protected == true and .commit.sha == $sha' <<<"$branch_json" >/dev/null
+          comparison="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/compare/${RELEASE_SOURCE_SHA}...${GITHUB_SHA}" \
+            --jq '.status')"
+          [[ "$comparison" == "ahead" || "$comparison" == "identical" ]]
+
+          tag_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}")"
+          jq -e --arg ref "refs/tags/${RELEASE_TAG}" --arg sha "$RELEASE_SOURCE_SHA" \
+            '.ref == $ref and .object.type == "commit" and .object.sha == $sha' \
+            <<<"$tag_json" >/dev/null
+          release_run="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${REQUIRED_RELEASE_RUN_ID}")"
+          jq -e --arg sha "$RELEASE_SOURCE_SHA" --arg tag "$RELEASE_TAG" \
+            --argjson attempt "$REQUIRED_RELEASE_RUN_ATTEMPT" \
+            '.id == 33932333902 and .path == ".github/workflows/release.yml" and
+             .event == "push" and .head_branch == $tag and .head_sha == $sha and
+             .status == "completed" and .conclusion == "success" and
+             .run_attempt == $attempt' <<<"$release_run" >/dev/null
+          admission_run="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${REQUIRED_ADMISSION_RUN_ID}")"
+          jq -e --arg sha "$RELEASE_SOURCE_SHA" \
+            --argjson attempt "$REQUIRED_ADMISSION_RUN_ATTEMPT" \
+            '.id == 33933861238 and .path == ".github/workflows/promote.yml" and
+             .event == "workflow_dispatch" and .head_branch == "master" and
+             .head_sha == $sha and .status == "completed" and
+             .conclusion == "success" and .run_attempt == $attempt' \
+            <<<"$admission_run" >/dev/null
+
+          evidence_root="$(mktemp -d "$RUNNER_TEMP/github-stable-effect.XXXXXX")"
+          before_release="$evidence_root/release-before.json"
+          before_latest="$evidence_root/latest-before.json"
+          before_packument="$evidence_root/packument-before.json"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${REQUIRED_RELEASE_ID}" > "$before_release"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/latest" > "$before_latest"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            --max-time 30 --retry 3 --retry-all-errors --max-filesize 8388608 \
+            --output "$before_packument" "https://registry.npmjs.org/@ashlr%2Fhub"
+          jq -e --argjson id "$REQUIRED_RELEASE_ID" --arg tag "$RELEASE_TAG" \
+            --arg name "$REQUIRED_RELEASE_NAME" \
+            '.id == $id and .tag_name == $tag and .target_commitish == "master" and
+             .name == $name and .draft == false and .prerelease == true and
+             .immutable == false' "$before_release" >/dev/null
+          jq -e --argjson id "$PRIOR_LATEST_RELEASE_ID" \
+            --arg tag "$PRIOR_LATEST_RELEASE_TAG" \
+            '.id == $id and .tag_name == $tag and .draft == false and
+             .prerelease == false' "$before_latest" >/dev/null
+          jq -e --arg version "$RELEASE_VERSION" \
+            --arg integrity "$REQUIRED_CANDIDATE_INTEGRITY" \
+            '.name == "@ashlr/hub" and .["dist-tags"].latest == $version and
+             .["dist-tags"].candidate == $version and
+             .versions[$version].dist.integrity == $integrity and
+             (.versions[$version].dist.signatures | type == "array" and length > 0) and
+             .versions[$version].dist.attestations.provenance.predicateType ==
+               "https://slsa.dev/provenance/v1"' "$before_packument" >/dev/null
+          jq -j '.body' "$before_release" > "$evidence_root/body-before.txt"
+          jq -cjS '[.assets[] | {id,name,label,content_type,size,state,digest}]' \
+            "$before_release" > "$evidence_root/assets-before.json"
+          before_body_sha256="$(sha256sum "$evidence_root/body-before.txt" | cut -d ' ' -f 1)"
+          before_assets_sha256="$(sha256sum "$evidence_root/assets-before.json" | cut -d ' ' -f 1)"
+          [[ "$before_body_sha256" == "$REQUIRED_RELEASE_BODY_SHA256" ]]
+          [[ "$before_assets_sha256" == "$REQUIRED_RELEASE_ASSETS_SHA256" ]]
+
+          patch_payload="$evidence_root/patch.json"
+          patch_response="$evidence_root/patch-response.json"
+          jq -cn '{prerelease:false, make_latest:"true"}' > "$patch_payload"
+          gh api --method PATCH \
+            "repos/${GITHUB_REPOSITORY}/releases/${REQUIRED_RELEASE_ID}" \
+            --input "$patch_payload" > "$patch_response"
+
+          patch_response_bytes="$(wc -c < "$patch_response")"
+          (( patch_response_bytes >= 2 && patch_response_bytes <= 8388608 ))
+          jq -e --argjson id "$REQUIRED_RELEASE_ID" --arg tag "$RELEASE_TAG" \
+            '.id == $id and .tag_name == $tag and .draft == false and
+             .prerelease == false' "$patch_response" >/dev/null
+
+          after_release="$evidence_root/release-after.json"
+          after_latest="$evidence_root/latest-after.json"
+          after_packument="$evidence_root/packument-after.json"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${REQUIRED_RELEASE_ID}" > "$after_release"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/latest" > "$after_latest"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            --max-time 30 --retry 3 --retry-all-errors --max-filesize 8388608 \
+            --output "$after_packument" "https://registry.npmjs.org/@ashlr%2Fhub"
+          jq -e --argjson id "$REQUIRED_RELEASE_ID" --arg tag "$RELEASE_TAG" \
+            --arg name "$REQUIRED_RELEASE_NAME" \
+            '.id == $id and .tag_name == $tag and .target_commitish == "master" and
+             .name == $name and .draft == false and .prerelease == false and
+             .immutable == false' "$after_release" >/dev/null
+          jq -e --argjson id "$REQUIRED_RELEASE_ID" --arg tag "$RELEASE_TAG" \
+            '.id == $id and .tag_name == $tag and .draft == false and
+             .prerelease == false' "$after_latest" >/dev/null
+          jq -e --arg version "$RELEASE_VERSION" --arg integrity "$REQUIRED_CANDIDATE_INTEGRITY" \
+            '.["dist-tags"].latest == $version and .["dist-tags"].candidate == $version and
+             .versions[$version].dist.integrity == $integrity' "$after_packument" >/dev/null
+          after_tag="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}")"
+          jq -e --arg sha "$RELEASE_SOURCE_SHA" \
+            '.object.type == "commit" and .object.sha == $sha' <<<"$after_tag" >/dev/null
+          jq -j '.body' "$after_release" > "$evidence_root/body-after.txt"
+          jq -cjS '[.assets[] | {id,name,label,content_type,size,state,digest}]' \
+            "$after_release" > "$evidence_root/assets-after.json"
+          after_body_sha256="$(sha256sum "$evidence_root/body-after.txt" | cut -d ' ' -f 1)"
+          after_assets_sha256="$(sha256sum "$evidence_root/assets-after.json" | cut -d ' ' -f 1)"
+          [[ "$after_body_sha256" == "$REQUIRED_RELEASE_BODY_SHA256" ]]
+          [[ "$after_assets_sha256" == "$REQUIRED_RELEASE_ASSETS_SHA256" ]]
+
+          finalized_at="$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
+          receipt="$evidence_root/github-stable-finalization.json"
+          receipt_digest="$evidence_root/github-stable-finalization.sha256"
+          jq -cnS \
+            --arg actor "$GITHUB_ACTOR" \
+            --arg admissionArtifactSha256 "$REQUIRED_ADMISSION_ARTIFACT_SHA256" \
+            --arg admissionReceiptSha256 "$REQUIRED_ADMISSION_RECEIPT_SHA256" \
+            --arg admissionRunId "$REQUIRED_ADMISSION_RUN_ID" \
+            --arg bodySha256 "$after_body_sha256" \
+            --arg assetsSha256 "$after_assets_sha256" \
+            --arg candidateIntegrity "$REQUIRED_CANDIDATE_INTEGRITY" \
+            --arg finalizedAt "$finalized_at" \
+            --arg preflightReceiptSha256 "$observed_preflight_sha256" \
+            --arg releaseRunId "$REQUIRED_RELEASE_RUN_ID" \
+            --arg sourceSha "$RELEASE_SOURCE_SHA" \
+            --arg tag "$RELEASE_TAG" \
+            --arg version "$RELEASE_VERSION" \
+            --arg workflowSha "$GITHUB_SHA" \
+            --arg workflowRunId "$GITHUB_RUN_ID" \
+            --arg workflowRunAttempt "$GITHUB_RUN_ATTEMPT" \
+            --argjson releaseId "$REQUIRED_RELEASE_ID" \
+            --argjson priorLatestReleaseId "$PRIOR_LATEST_RELEASE_ID" \
+            '{schemaVersion:1, effect:"github-release-stable-finalization",
+              package:"@ashlr/hub", version:$version,
+              release:{id:$releaseId, tag:$tag, sourceSha:$sourceSha,
+                prereleaseBefore:true, prereleaseAfter:false,
+                makeLatestRequested:true, latestAfter:true,
+                bodySha256:$bodySha256, assetsSha256:$assetsSha256},
+              npm:{latest:$version, candidate:$version, integrity:$candidateIntegrity,
+                provenanceVerifiedByPreflight:true, mutationAuthority:false},
+              evidence:{releaseRunId:$releaseRunId, admissionRunId:$admissionRunId,
+                admissionArtifactSha256:$admissionArtifactSha256,
+                admissionReceiptSha256:$admissionReceiptSha256,
+                preflightReceiptSha256:$preflightReceiptSha256},
+              priorLatestRelease:{id:$priorLatestReleaseId, tag:"v3.0.0"},
+              mutation:{method:"PATCH", count:1,
+                fields:{prerelease:false, make_latest:"true"}},
+              rollback:{automatic:false,
+                requiresFreshProtectedReviewAndEnvironmentApproval:true,
+                method:"PATCH", releaseId:$releaseId,
+                fields:{prerelease:true, make_latest:"false"},
+                expectedLatestAfter:{id:$priorLatestReleaseId, tag:"v3.0.0"},
+                npmMutationAuthority:false},
+              repository:"ashlrai/ashlr-hub", actor:$actor,
+              workflowSha:$workflowSha, workflowRunId:$workflowRunId,
+              workflowRunAttempt:$workflowRunAttempt, finalizedAt:$finalizedAt,
+              githubReleaseMutationExecuted:true,
+              tagMutationAuthority:false, npmMutationAuthority:false,
+              installAuthority:false, activationAuthority:false}' > "$receipt"
+          test -f "$receipt" && test ! -L "$receipt"
+          receipt_bytes="$(wc -c < "$receipt")"
+          (( receipt_bytes >= 2 && receipt_bytes <= 16384 ))
+          sha256sum "$receipt" | cut -d ' ' -f 1 > "$receipt_digest"
+          test "$(wc -c < "$receipt_digest")" = "65"
+          printf 'receipt=%s\n' "$receipt" >> "$GITHUB_OUTPUT"
+          printf 'receipt_digest=%s\n' "$receipt_digest" >> "$GITHUB_OUTPUT"
+          printf 'receipt_sha256=%s\n' "$(tr -d '\n' < "$receipt_digest")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload bounded post-effect receipt
+        id: receipt_artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: github-stable-release-finalization-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.finalization.outputs.receipt }}
+            ${{ steps.finalization.outputs.receipt_digest }}
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 9
+          overwrite: false
+          include-hidden-files: false
+
+      - name: Summarize exact bounded effect
+        shell: bash
+        env:
+          ARTIFACT_SHA256: ${{ steps.receipt_artifact.outputs.artifact-digest }}
+          RECEIPT_SHA256: ${{ steps.finalization.outputs.receipt_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          {
+            echo "## GitHub stable release finalization"
+            echo "- Release: \`${RELEASE_TAG}\` / ID \`${REQUIRED_RELEASE_ID}\`"
+            echo "- Source: \`${RELEASE_SOURCE_SHA}\`"
+            echo "- npm: \`latest=candidate=${RELEASE_VERSION}\`; exact provenance preverified"
+            echo "- GitHub effect: one PATCH; \`prerelease=false\`, \`make_latest=true\`"
+            echo "- Receipt SHA-256: \`${RECEIPT_SHA256}\`"
+            echo "- Artifact SHA-256: \`${ARTIFACT_SHA256}\`"
+            echo "- No npm, tag, install, activation, provider, credential, or spend authority"
+          } >> "$GITHUB_STEP_SUMMARY"
