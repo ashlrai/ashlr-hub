@@ -259,3 +259,33 @@ create a tag, build a release, change daemon policy, approve proposals, deploy
 provider effects, or make Linux/Windows residents available. A same-UID hostile
 process and coherent rollback of all local trust roots remain outside this
 host-local authority boundary.
+
+## Version-general stopped-selection permit
+
+[`CONTRACT-M568`](./contracts/CONTRACT-M568.md) defines a version-general v2
+permit for a future protected stopped-selection broker. Unlike M520 v1, it does
+not hard-code `3.2.7`: it binds the exact dynamic candidate and rollback
+versions, matching release tags, revisions, trees, manifests, launch receipts,
+service descriptors, service invocations, host, paths, and stopped prior state.
+Its package-version grammar intentionally matches M502 admission, including
+bounded prerelease identifiers and excluding build metadata.
+
+M568 does not reinterpret M520 v1 or join its transaction graph. Its signature
+domain, schema, root set, and future storage/replay namespaces are separate.
+The pure verifier returns only evidence that canonical signed permit bytes match
+an independently supplied complete binding. Every activation, selection,
+pointer, rollback, launch, start, dispatch, and effect authority bit remains
+false.
+
+The production v2 root array is frozen and empty. Its frozen runtime accepts no
+input and returns only `native-version-general-stopped-selection-unavailable`.
+It has no CLI, service, launchd, pointer, plist, configuration, environment, or
+provider-effect consumer. A signed permit therefore cannot select a release in
+this source slice.
+
+The future effectful consumer still requires the protected native boundary
+listed by M521: trusted monotonic time and external one-use replay CAS,
+fd-relative custody, genuine conditional old-inode pointer exchange, a keyed
+fsynced lifecycle journal, every-phase recovery, and exact stopped rollback.
+Resident start/ACK and release-bound dispatch remain later, distinct authority
+boundaries.

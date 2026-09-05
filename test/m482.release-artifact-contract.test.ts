@@ -780,23 +780,26 @@ describe('release artifact contract v1', () => {
     expect(buildRuntimeReleaseDependencyInventory(release.packageRoot)).toMatchObject({ ok: true });
   });
 
-  it('admits the shipped M521 contract through the closed portable root-files allowlist', () => {
-    const release = fixture();
-    const packagePath = join(release.packageRoot, 'package.json');
-    const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as Record<string, unknown>;
-    write(join(release.packageRoot, 'docs', 'contracts', 'CONTRACT-M521.md'), '# M521\n');
-    writeFileSync(packagePath, `${JSON.stringify({
-      ...packageJson,
-      files: [
-        'bin',
-        'dist',
-        'scripts/run-verify-command.mjs',
-        'scripts/scorecard-history-worker.mjs',
-        'docs/contracts/CONTRACT-M521.md',
-      ],
-    })}\n`);
-    expect(buildRuntimeReleaseDependencyInventory(release.packageRoot)).toMatchObject({ ok: true });
-  });
+  it.each(['CONTRACT-M521.md', 'CONTRACT-M568.md'])(
+    'admits shipped %s through the closed portable root-files allowlist',
+    (contractName) => {
+      const release = fixture();
+      const packagePath = join(release.packageRoot, 'package.json');
+      const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as Record<string, unknown>;
+      write(join(release.packageRoot, 'docs', 'contracts', contractName), '# portable contract\n');
+      writeFileSync(packagePath, `${JSON.stringify({
+        ...packageJson,
+        files: [
+          'bin',
+          'dist',
+          'scripts/run-verify-command.mjs',
+          'scripts/scorecard-history-worker.mjs',
+          `docs/contracts/${contractName}`,
+        ],
+      })}\n`);
+      expect(buildRuntimeReleaseDependencyInventory(release.packageRoot)).toMatchObject({ ok: true });
+    },
+  );
 
   it.each([
     ['install lifecycle script', { scripts: { install: 'node install.js' } }, undefined],
