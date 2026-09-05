@@ -781,18 +781,16 @@ jobs:
 
           tag_ref_json="$(gh api \
             "repos/${GITHUB_REPOSITORY}/git/ref/tags/${GITHUB_REF_NAME}")"
-          jq -e \
+          printf '%s\n' "$tag_ref_json" | jq -e \
             --arg ref "$GITHUB_REF" \
             --arg sha "$GITHUB_SHA" \
-            '.ref == $ref and .object.type == "commit" and .object.sha == $sha' \
-            <<<"$tag_ref_json" >/dev/null
+            '.ref == $ref and .object.type == "commit" and .object.sha == $sha' >/dev/null
           previous_tag_ref_json="$(gh api \
             "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${PREVIOUS_CANDIDATE_VERSION}")"
-          jq -e \
+          printf '%s\n' "$previous_tag_ref_json" | jq -e \
             --arg ref "refs/tags/v${PREVIOUS_CANDIDATE_VERSION}" \
             --arg sha "$PREVIOUS_CANDIDATE_TAG_SHA" \
-            '.ref == $ref and .object.type == "commit" and .object.sha == $sha' \
-            <<<"$previous_tag_ref_json" >/dev/null
+            '.ref == $ref and .object.type == "commit" and .object.sha == $sha' >/dev/null
           failed_tag_ref_json="$(gh api \
             "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${FAILED_CANDIDATE_VERSION}")"
           jq -e \
