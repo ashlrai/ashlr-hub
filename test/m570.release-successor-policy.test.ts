@@ -98,7 +98,7 @@ describe('M570 release successor policy v1', () => {
     });
     expect(existsSync(productionPolicyPath)).toBe(true);
     expect(verifyReleaseSuccessorPolicyFile(productionPolicyPath, '3.4.0').policy).toMatchObject({
-      release: { requiredFirstParentRevision: 'b3aa2a23325e1b820bddaad2c1f2e2c34efad7ff' },
+      release: { requiredFirstParentRevision: 'bd1ba6ad85d345ee0b0fdecbb489a9cc548715f1' },
       package: { version: '3.4.0' },
       localVerification: { requiredReceiptSchemaVersion: 2 },
     });

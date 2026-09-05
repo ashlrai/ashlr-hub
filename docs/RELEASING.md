@@ -47,7 +47,10 @@ npm run verify:local-production -- \
 The runner verifies a clean exact commit in a fresh detached worktree, runs the
 complete contract with an allowlisted environment, preserves the exact verified
 tarball, keeps operational Ashlr state and services untouched, and writes a
-canonical authority-free receipt outside the repository. Verify that receipt
+canonical authority-free receipt outside the repository. Its disposable gate
+and sandbox-profile roots are short, exclusive mode-`0700` directories under
+canonical `/private/tmp`, preserving macOS Unix-socket pathname capacity for
+nested tests. Verify that receipt
 and tarball with `scripts/verify-local-production-gate-receipt.mjs` and all six
 independent caller pins before separately considering any registry or GitHub
 mutation. Receipt schema v2 records confinement per gate: build, package,
