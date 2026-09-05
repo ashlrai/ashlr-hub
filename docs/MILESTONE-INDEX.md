@@ -573,7 +573,7 @@ part of a batched CHANGELOG entry instead (see `docs/ARCHITECTURE.md`'s
 | M518 | Goal-conductor permit operator (cold-custody conductor-permit CLI, incl. the reachability guard replacing the old filename-ban test); goal timestamp repair | Shipped | `test/m518.*.test.ts` |
 | M519 | Release candidate supersession | Shipped | `test/m519.*.test.ts` |
 | M568 | Version-general stopped-selection broker permit protocol (authority-free) | Shipped | `test/m568.*.test.ts` |
-| M570 | Version-general release-successor policy schema and canonical verifier (authority-free; no production policy) | Shipped | `test/m570.*.test.ts` |
+| M570 | Version-general release-successor policy schema and canonical verifier (authority-free) | Shipped | `test/m570.*.test.ts` |
 </details>
 
 ---
