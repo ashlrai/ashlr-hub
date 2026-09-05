@@ -159,7 +159,9 @@ fn run_first_time_setup(app: &tauri::App) {
         Err(e) => {
             // Sidecar could not be launched (e.g. binary missing in dev).
             // Log, mark, and continue — the app is still usable.
-            eprintln!("[ashlr-desktop] could not spawn setup sidecar: {e} — skipping first-run setup");
+            eprintln!(
+                "[ashlr-desktop] could not spawn setup sidecar: {e} — skipping first-run setup"
+            );
             mark_initialized();
             let _ = handle.emit("ashlr-setup-done", -1_i32);
         }
@@ -246,21 +248,22 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         while let Some(event) = rx.recv().await {
             match event {
                 CommandEvent::Stdout(line) => {
-                    let _ = handle2
-                        .emit("sidecar-stdout", String::from_utf8_lossy(&line).into_owned());
+                    let _ = handle2.emit(
+                        "sidecar-stdout",
+                        String::from_utf8_lossy(&line).into_owned(),
+                    );
                 }
                 CommandEvent::Stderr(line) => {
-                    let _ = handle2
-                        .emit("sidecar-stderr", String::from_utf8_lossy(&line).into_owned());
+                    let _ = handle2.emit(
+                        "sidecar-stderr",
+                        String::from_utf8_lossy(&line).into_owned(),
+                    );
                 }
                 CommandEvent::Error(e) => {
                     eprintln!("[ashlr-desktop] sidecar error: {e}");
                 }
                 CommandEvent::Terminated(status) => {
-                    eprintln!(
-                        "[ashlr-desktop] sidecar exited with code {:?}",
-                        status.code
-                    );
+                    eprintln!("[ashlr-desktop] sidecar exited with code {:?}", status.code);
                     break;
                 }
                 _ => {}
@@ -279,9 +282,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 let _ = win.set_focus();
             }
         } else {
-            eprintln!(
-                "[ashlr-desktop] timed out waiting for {SERVE_URL} — showing window anyway"
-            );
+            eprintln!("[ashlr-desktop] timed out waiting for {SERVE_URL} — showing window anyway");
             if let Some(win) = handle.get_webview_window("main") {
                 let _ = win.show();
             }
@@ -455,7 +456,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .setup(|app| setup(app).map_err(|e| e.into()))
+        .setup(setup)
         .on_window_event(|window, event| {
             // Hide (don't close) the window when the user presses the X button
             // so the tray icon remains the only quit path.
