@@ -166,7 +166,9 @@ describe('M523 — GitHub stable-release finalization', () => {
       needs: 'verify',
     });
     expect(workflowText).not.toContain('.github/workflows/promote.yml —');
-    expect(releasing).toContain('Do not repurpose\nthe observation-only `promote.yml`');
+    expect(releasing).toMatch(
+      /Do not rerun the\s+completed finalization or repurpose the observation-only `promote\.yml`/u,
+    );
   });
 
   it('requires exact caller-supplied evidence and explicit confirmation', () => {
@@ -315,5 +317,22 @@ describe('M523 — GitHub stable-release finalization', () => {
     expect(contract).toContain('M523 grants no such authority');
     expect(workflowText).toContain('requiresFreshProtectedReviewAndEnvironmentApproval:true');
     expect(workflowText).toContain('automatic:false');
+  });
+
+  it('records the completed finalization with exact post-effect evidence', () => {
+    for (const fragment of [
+      '### Completed GitHub stable-release finalization after npm promotion',
+      '`1a7d44efe7a8383513fea4dbfa6746fdeb9fa93d`',
+      'Workflow run `33937472105`,\nattempt 1, then completed successfully',
+      'ID\n`21286317607`',
+      'Release ID `383083121` is now stable',
+      'artifact is ID `9960674976`',
+      '`sha256:63c910fe2ab554493e2378e44edd9b9657531f7ff03497b8ec96a23b90d57285`',
+      '`089add5ae05d3f439c258fdfe263279857a0fa60f3b51600f322d807d0550a17`',
+      'It grants no npm,\ninstallation, runtime, service, provider, credential, or spend authority',
+      'controlled\nhistorical recovery guidance',
+    ]) expect(releasing).toContain(fragment);
+    expect(releasing).toContain('Do not rerun the\ncompleted finalization');
+    expect(releasing).toContain('it is never automatic and\ndoes not roll back npm');
   });
 });
