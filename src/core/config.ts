@@ -501,6 +501,98 @@ function deepMerge<T extends object>(base: T, override: Partial<T>): T {
   return result as T;
 }
 
+const EXECUTION_IDENTITY_REF_RE = /^eid_[0-9a-f]{32}$/;
+const EXECUTION_LOCATOR_REF_RE = /^erl_[0-9a-f]{32}$/;
+const EXECUTION_IDENTITY_ENGINES = new Set([
+  'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes',
+  'kimi', 'nim', 'opencode', 'grok',
+]);
+
+/**
+ * Public config boundary for Execution Identity V1.
+ *
+ * Persisted config is untrusted JSON and deepMerge intentionally preserves
+ * extension keys. This one security-sensitive block is therefore reconstructed
+ * from its public allowlist before loadConfig* returns it or saveConfig writes
+ * it. Raw locators, env names, account labels, emails, and Phantom references
+ * belong only in the separate internal 0600 private store.
+ */
+function sanitizeExecutionIdentityConfigBoundary(config: AshlrConfig): AshlrConfig {
+  const rawFeature = (config.foundry as Record<string, unknown> | undefined)?.['executionIdentityV1'];
+  if (rawFeature === undefined) return config;
+  const feature = rawFeature !== null && typeof rawFeature === 'object' && !Array.isArray(rawFeature)
+    ? rawFeature as Record<string, unknown>
+    : {};
+  let invalid = rawFeature === null || typeof rawFeature !== 'object' || Array.isArray(rawFeature) ||
+    Object.keys(feature).some((key) => !['enabled', 'shadowOnly', 'identities'].includes(key));
+  const safeIdentities: NonNullable<NonNullable<AshlrConfig['foundry']>['executionIdentityV1']>['identities'] = [];
+  const rawIdentities = feature['identities'];
+  if (Array.isArray(rawIdentities)) {
+    for (const value of rawIdentities.slice(0, 32)) {
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) { invalid = true; continue; }
+      const row = value as Record<string, unknown>;
+      if (Object.keys(row).some((key) => !['ref', 'engine', 'privateRuntimeLocatorRef', 'plan'].includes(key))) {
+        invalid = true;
+        continue;
+      }
+      const ref = row['ref'];
+      const engine = row['engine'];
+      const locatorRef = row['privateRuntimeLocatorRef'];
+      const rawPlan = row['plan'];
+      if (typeof ref !== 'string' || !EXECUTION_IDENTITY_REF_RE.test(ref) ||
+          typeof engine !== 'string' || !EXECUTION_IDENTITY_ENGINES.has(engine) ||
+          typeof locatorRef !== 'string' || !EXECUTION_LOCATOR_REF_RE.test(locatorRef) ||
+          rawPlan === null || typeof rawPlan !== 'object' || Array.isArray(rawPlan)) {
+        invalid = true;
+        continue;
+      }
+      const plan = rawPlan as Record<string, unknown>;
+      if (Object.keys(plan).some((key) => !['kind', 'class', 'maxConcurrent'].includes(key))) {
+        invalid = true;
+        continue;
+      }
+      const maxConcurrent = plan['maxConcurrent'];
+      const validPositiveConcurrent = Number.isSafeInteger(maxConcurrent) && Number(maxConcurrent) >= 1 &&
+        Number(maxConcurrent) <= 32;
+      let safePlan: NonNullable<typeof safeIdentities>[number]['plan'] | null = null;
+      if (plan['kind'] === 'subscription' &&
+          (plan['class'] === 'codex-max' || plan['class'] === 'codex-custom') &&
+          validPositiveConcurrent) {
+        safePlan = { kind: 'subscription', class: plan['class'], maxConcurrent: Number(maxConcurrent) };
+      } else if (plan['kind'] === 'agent-credit' && plan['class'] === 'claude-agent-sdk-credit' &&
+          validPositiveConcurrent) {
+        safePlan = { kind: 'agent-credit', class: 'claude-agent-sdk-credit', maxConcurrent: Number(maxConcurrent) };
+      } else if (plan['kind'] === 'interactive-reserved' && plan['class'] === 'claude-max' && maxConcurrent === 0) {
+        safePlan = { kind: 'interactive-reserved', class: 'claude-max', maxConcurrent: 0 };
+      } else if (plan['kind'] === 'local' && plan['class'] === 'local-runtime' && validPositiveConcurrent) {
+        safePlan = { kind: 'local', class: 'local-runtime', maxConcurrent: Number(maxConcurrent) };
+      } else if (plan['kind'] === 'metered' && plan['class'] === 'api-metered' && validPositiveConcurrent) {
+        safePlan = { kind: 'metered', class: 'api-metered', maxConcurrent: Number(maxConcurrent) };
+      }
+      if (!safePlan) { invalid = true; continue; }
+      safeIdentities.push({
+        ref,
+        engine: engine as NonNullable<typeof safeIdentities>[number]['engine'],
+        privateRuntimeLocatorRef: locatorRef,
+        plan: safePlan,
+      });
+    }
+  } else if (rawIdentities !== undefined) invalid = true;
+  if (Array.isArray(rawIdentities) && (rawIdentities.length === 0 || rawIdentities.length > 32)) invalid = true;
+  const safeFeature: NonNullable<NonNullable<AshlrConfig['foundry']>['executionIdentityV1']> = {
+    ...(feature['enabled'] === true ? { enabled: true } : {}),
+    ...(feature['shadowOnly'] === true ? { shadowOnly: true } : {}),
+    ...(!invalid && safeIdentities.length > 0 ? { identities: safeIdentities } : {}),
+  };
+  return {
+    ...config,
+    foundry: {
+      ...config.foundry,
+      executionIdentityV1: safeFeature,
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // M340b: config-load-time foundry key check
 // ---------------------------------------------------------------------------
@@ -532,7 +624,7 @@ const KNOWN_FOUNDRY_KEYS: ReadonlySet<string> = new Set([
   'blastRadius', 'browserVerify', 'cascade', 'claude5', 'claudeResource',
   'completenessGate', 'confinement', 'counterfactual', 'counterfactualSampleCap',
   'diffSafety', 'dispatchRetries', 'edvUnverifiedWeight', 'edvVerify',
-  'engineFallbackOrder', 'engines', 'eventBus', 'fabric', 'feedbackEnabled',
+  'engineFallbackOrder', 'engines', 'eventBus', 'executionIdentityV1', 'fabric', 'feedbackEnabled',
   'fleetMcp', 'generative', 'goalFocusActiveThreshold', 'goalFocusMode',
   'goalPlanning', 'grok', 'intelligence', 'inventPerCycle', 'judgeAllowedBackends',
   'judgePerPass', 'killSwitch', 'kimi', 'learnedRouting', 'limits', 'local',
@@ -542,7 +634,7 @@ const KNOWN_FOUNDRY_KEYS: ReadonlySet<string> = new Set([
   'productionVelocity', 'proposalRepair', 'proposalTtlDays', 'pulseEmit',
   'redTeam', 'regressionSentinel', 'repairHandoffV2Activation',
   'repairHandoffV2Write', 'repoMap', 'resourceAwareDispatch',
-  'resourceOverrides', 'routingPolicy', 'sandboxExternal',
+  'resourceOverrides', 'routingPolicy', 'runOutputPersistence', 'sandboxExternal',
   'scanDependencyBumps', 'scanDeps', 'scanHygiene', 'scanLint', 'scanTodos',
   'selfHeal', 'selfImprove', 'simpleConductor', 'skillLibrary', 'specContract',
   'stallIdleMs', 'strategistModel', 'subscriptionMaxPercent', 'tasteCritic',
@@ -609,7 +701,9 @@ function readConfigOrDefaults(configPath: string): AshlrConfig {
 
   // Deep-merge the user's persisted config over the defaults so newly-added
   // fields always have a value even on older config files.
-  return deepMerge(defaultConfig(), parsed as Partial<AshlrConfig>);
+  return sanitizeExecutionIdentityConfigBoundary(
+    deepMerge(defaultConfig(), parsed as Partial<AshlrConfig>),
+  );
 }
 
 function readConfigStrict(configPath: string): AshlrConfig {
@@ -639,7 +733,9 @@ function readConfigStrict(configPath: string): AshlrConfig {
 
   warnUnknownFoundryKeys(parsed as Record<string, unknown>, configPath);
 
-  return deepMerge(defaultConfig(), parsed as Partial<AshlrConfig>);
+  return sanitizeExecutionIdentityConfigBoundary(
+    deepMerge(defaultConfig(), parsed as Partial<AshlrConfig>),
+  );
 }
 
 /**
@@ -837,7 +933,10 @@ function currentConfigMatches(configPath: string, expected: FileStat | undefined
 export function saveConfig(c: AshlrConfig): void {
   const configDir = resolveConfigDir();
   const configPath = resolveConfigPath();
-  const bytes = Buffer.from(JSON.stringify(c, null, 2) + '\n', 'utf8');
+  const bytes = Buffer.from(
+    JSON.stringify(sanitizeExecutionIdentityConfigBoundary(c), null, 2) + '\n',
+    'utf8',
+  );
   const securedDirectory = secureConfigDirectory(configDir);
   const directory = securedDirectory.stat;
   const directoryFd = securedDirectory.fd;

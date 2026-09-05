@@ -235,6 +235,109 @@
       "description": "v4/v5 autonomous-fleet configuration (M45+). Full key reference: docs/FOUNDRY-CONFIG.md. Declared exhaustively from AshlrConfig['foundry'] in src/core/types.ts (M340b). additionalProperties stays true: KNOWN_FOUNDRY_KEYS in src/core/effective-config.ts is the authoritative typo/unknown-key detector at config-load time (an accompanying human-readable warning, not a hard validation failure) and currently recognizes several keys this schema does not yet model 1:1 (e.g. acePlaybook, localization, redTeam, feedbackEnabled, stallIdleMs, strategistModel, managerJudgeModel, managerJudgeEngine, inventPerCycle, blastRadius) plus operator-extension keys consumed by tooling outside this package. This schema is documentation/editor metadata only; it is not loaded or enforced by any code path in src/.",
       "additionalProperties": true,
       "properties": {
+        "runOutputPersistence": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Privacy-sensitive durable raw run-output capture. Default disabled; only enabled:true persists files. Live CLI streaming is unaffected.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Exact opt-in. Absent or false means no run-output file is created."
+            }
+          }
+        },
+        "executionIdentityV1": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Default-off, shadow-only execution-account policy. Contains opaque references only; runtime paths and Phantom references live in the internal 0600 private store.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Master switch. Default false."
+            },
+            "shadowOnly": {
+              "const": true,
+              "description": "V1 has no live-dispatch mode and accepts only true."
+            },
+            "identities": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 32,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["ref", "engine", "privateRuntimeLocatorRef", "plan"],
+                "properties": {
+                  "ref": {
+                    "type": "string",
+                    "pattern": "^eid_[0-9a-f]{32}$"
+                  },
+                  "engine": {
+                    "enum": ["builtin", "local-coder", "ashlrcode", "aw", "claude", "codex", "hermes", "kimi", "nim", "opencode", "grok"]
+                  },
+                  "privateRuntimeLocatorRef": {
+                    "type": "string",
+                    "pattern": "^erl_[0-9a-f]{32}$"
+                  },
+                  "plan": {
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["kind", "class", "maxConcurrent"],
+                        "properties": {
+                          "kind": { "const": "subscription" },
+                          "class": { "enum": ["codex-max", "codex-custom"] },
+                          "maxConcurrent": { "type": "integer", "minimum": 1, "maximum": 32 }
+                        }
+                      },
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["kind", "class", "maxConcurrent"],
+                        "properties": {
+                          "kind": { "const": "agent-credit" },
+                          "class": { "const": "claude-agent-sdk-credit" },
+                          "maxConcurrent": { "type": "integer", "minimum": 1, "maximum": 32 }
+                        }
+                      },
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["kind", "class", "maxConcurrent"],
+                        "properties": {
+                          "kind": { "const": "interactive-reserved" },
+                          "class": { "const": "claude-max" },
+                          "maxConcurrent": { "const": 0 }
+                        }
+                      },
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["kind", "class", "maxConcurrent"],
+                        "properties": {
+                          "kind": { "const": "local" },
+                          "class": { "const": "local-runtime" },
+                          "maxConcurrent": { "type": "integer", "minimum": 1, "maximum": 32 }
+                        }
+                      },
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["kind", "class", "maxConcurrent"],
+                        "properties": {
+                          "kind": { "const": "metered" },
+                          "class": { "const": "api-metered" },
+                          "maxConcurrent": { "type": "integer", "minimum": 1, "maximum": 32 }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
         "allowedBackends": {
           "type": "array",
           "items": {
@@ -599,7 +702,7 @@
         },
         "learnedRouting": {
           "type": "boolean",
-          "description": "M240: bias engine/model selection using historical judge outcomes. DEFAULT true."
+          "description": "M240: bias engine/model selection using causally identifiable, authenticated outcomes. DEFAULT false; exact opt-in only."
         },
         "modelRacing": {
           "type": "object",
@@ -1033,7 +1136,55 @@
     "daemon": {
       "type": "object",
       "description": "Daemon loop tuning (M22+): budget caps, tick interval, parallelism, cooldowns.",
-      "additionalProperties": true
+      "additionalProperties": true,
+      "properties": {
+        "agentOsObserver": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Default-off observation-only Agent OS compiler. This block grants no execution or effect authority.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Exact opt-in. Absent or false schedules no observer child."
+            },
+            "deadlineMs": {
+              "type": "integer",
+              "minimum": 100,
+              "maximum": 30000
+            },
+            "trustPolicy": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["schemaVersion", "protocol", "generation", "keys"],
+              "properties": {
+                "schemaVersion": { "const": 1 },
+                "protocol": { "const": "ashlr-agent-os-source-trust-v1" },
+                "generation": { "type": "integer", "minimum": 0 },
+                "keys": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 48,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["keyId", "principalDigest", "role", "signatureAlgorithm", "publicKeySpki", "notBefore", "notAfter", "revokedAt"],
+                    "properties": {
+                      "keyId": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+                      "principalDigest": { "type": "string", "pattern": "^(sha256:)?[a-f0-9]{64}$" },
+                      "role": { "enum": ["source-observer", "evidence-index-observer", "outcome-observer"] },
+                      "signatureAlgorithm": { "const": "ed25519" },
+                      "publicKeySpki": { "type": "string", "minLength": 1, "maxLength": 1024 },
+                      "notBefore": { "type": "string", "format": "date-time" },
+                      "notAfter": { "type": "string", "format": "date-time" },
+                      "revokedAt": { "type": ["string", "null"], "format": "date-time" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     },
     "user": {
       "type": "object",

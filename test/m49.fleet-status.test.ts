@@ -1068,7 +1068,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       || command.endpointPath === '/api/daemon/service/repair'
     )).toBe(false);
     expect(formatFleetStatus(s)).toContain(
-      'activation:    blocked (no-trusted-activation-roots; observation-only)',
+      'activation:    proposal-once=blocked (no-trusted-activation-roots; observation-only)',
     );
     expect(s.autonomy).toMatchObject({
       evidencePacks: 0,
@@ -1188,6 +1188,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       requestedShape: 'proposal-once',
       trustRootCount: 1,
       residentAuthorized: false,
+      residentStandingAuthorized: false,
       installAuthorized: false,
       repairAuthorized: false,
       reason: 'valid-proposal-once-permit',

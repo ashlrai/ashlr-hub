@@ -112,10 +112,25 @@ describe('m135 — Claude CLI first: spawnEngine called, getActiveClient NOT cal
       getActiveClient: getActiveClientMock,
     }));
 
-    vi.doMock('../src/core/inbox/store.js', () => ({
-      listProposals: vi.fn().mockReturnValue([makeProposal()]),
-      setStatus: vi.fn(),
-    }));
+    vi.doMock('../src/core/inbox/store.js', () => {
+      const proposals = [makeProposal()];
+      return {
+        listProposals: vi.fn().mockReturnValue(proposals),
+        listProposalsDetailed: vi.fn().mockReturnValue({
+          proposals,
+          sourceState: 'healthy',
+          sourcePresent: true,
+          complete: true,
+          stopReasons: [],
+          filesDiscovered: proposals.length,
+          filesRead: proposals.length,
+          bytesRead: 0,
+          invalidFiles: 0,
+          unreadableFiles: 0,
+        }),
+        setStatus: vi.fn(),
+      };
+    });
 
     vi.doMock('../src/core/fleet/decisions-ledger.js', () => ({
       recordDecision: vi.fn(),
@@ -180,10 +195,25 @@ describe('m135 — engineInstalled=false: falls through to getActiveClient', () 
       getActiveClient: getActiveClientMock,
     }));
 
-    vi.doMock('../src/core/inbox/store.js', () => ({
-      listProposals: vi.fn().mockReturnValue([makeProposal()]),
-      setStatus: vi.fn(),
-    }));
+    vi.doMock('../src/core/inbox/store.js', () => {
+      const proposals = [makeProposal()];
+      return {
+        listProposals: vi.fn().mockReturnValue(proposals),
+        listProposalsDetailed: vi.fn().mockReturnValue({
+          proposals,
+          sourceState: 'healthy',
+          sourcePresent: true,
+          complete: true,
+          stopReasons: [],
+          filesDiscovered: proposals.length,
+          filesRead: proposals.length,
+          bytesRead: 0,
+          invalidFiles: 0,
+          unreadableFiles: 0,
+        }),
+        setStatus: vi.fn(),
+      };
+    });
 
     vi.doMock('../src/core/fleet/decisions-ledger.js', () => ({
       recordDecision: vi.fn(),
@@ -233,10 +263,25 @@ describe('m135 — managerJudgeEngine=local: spawnEngine NOT called even when cl
       getActiveClient: vi.fn().mockRejectedValue(new Error('no provider')),
     }));
 
-    vi.doMock('../src/core/inbox/store.js', () => ({
-      listProposals: vi.fn().mockReturnValue([makeProposal()]),
-      setStatus: vi.fn(),
-    }));
+    vi.doMock('../src/core/inbox/store.js', () => {
+      const proposals = [makeProposal()];
+      return {
+        listProposals: vi.fn().mockReturnValue(proposals),
+        listProposalsDetailed: vi.fn().mockReturnValue({
+          proposals,
+          sourceState: 'healthy',
+          sourcePresent: true,
+          complete: true,
+          stopReasons: [],
+          filesDiscovered: proposals.length,
+          filesRead: proposals.length,
+          bytesRead: 0,
+          invalidFiles: 0,
+          unreadableFiles: 0,
+        }),
+        setStatus: vi.fn(),
+      };
+    });
 
     vi.doMock('../src/core/fleet/decisions-ledger.js', () => ({
       recordDecision: vi.fn(),

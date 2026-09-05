@@ -304,9 +304,22 @@ All persistent state lives under `~/.ashlr/` (resolved from `os.homedir()` at ru
 │   └── provenance.key   # HMAC signing key (0600, per-machine, never transmitted)
 ├── audit/
 │   └── confinement.jsonl  # Append-only sandbox confinement audit
+├── scorecard-history/
+│   └── <YYYY-MM>.jsonl # POSIX-only observational scorecard snapshots
 └── manager/
     └── <ts>.json        # Manager judge scorecards
 ```
+
+Scorecard history is deliberately non-authoritative. On POSIX, each append or
+read runs in a bounded one-shot helper whose validated current working
+directory begins at the private state root. It enters `scorecard-history` by
+one relative component, pins that directory as its working directory, and then
+uses only single-component relative names with `O_NOFOLLOW` for enumeration and
+child-file I/O. Successful appends fsync the file and fsync newly-created
+directory or partition entries. Node does not expose an equivalent
+directory-handle-relative primitive on Windows, so Windows performs no
+scorecard-history writes and reports the source as degraded with
+`unsupported-platform`; there is no absolute-path fallback.
 
 External paths the hub reads but never writes:
 - `~/.claude/projects/**/*.jsonl` — Claude Code session usage metadata (token counts, model, timestamp; never message content)

@@ -11,6 +11,16 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+## [3.4.0] — Unreleased — Governed agent-native engineering OS
+
+- Integrates the default-off Agent OS control plane, execution identity,
+  observation sandbox, bounded stream custody, and operator-facing fleet
+  surfaces as the next development line after 3.3.2.
+- Keeps the dedicated 3.3.2 release and promotion workflows frozen to their
+  immutable package, tag, and rollback identities. Those workflows are not a
+  publication lane for 3.4.0; a separate reviewed successor release contract
+  is required before this development line can be tagged or published.
+
 ## [3.3.2] — 2026-08-20 — Safe successor after the failed immutable 3.3.1 release attempt
 
 - Carries forward the reviewed fail-closed runtime and operator-console closure

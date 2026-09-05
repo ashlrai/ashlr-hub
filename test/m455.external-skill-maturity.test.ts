@@ -6,8 +6,8 @@ import ts from 'typescript';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 // AST-scans the whole src/ tree for runtime import boundaries; that scan
-// alone takes ~18s on this machine, well past the 5s default.
-vi.setConfig({ testTimeout: 45_000 });
+// alone takes ~18s on this machine, well past the 5s default. Covered by
+// the real-io lane's 60s default now — see scripts/realio-lane-membership.mjs.
 
 const auditOverride = vi.hoisted(() => ({ value: null as unknown }));
 

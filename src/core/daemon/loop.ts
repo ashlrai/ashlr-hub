@@ -80,6 +80,7 @@ import {
   clearDaemonSpendGuard,
   DAEMON_SPEND_GUARD_ITEM_CAPACITY,
   daemonStatePath,
+  heartbeatDaemonLock,
   loadDaemonState,
   loadDaemonStateStrict,
   readDaemonLockOwner,
@@ -90,6 +91,12 @@ import {
   upgradeLegacyDaemonSpendGuard,
 } from './state.js';
 import type { DaemonLock, SaveDaemonStateResult } from './state.js';
+// Type-only: erased at compile time, so this does NOT eagerly load
+// self-improve.js/post-merge-credit.js at module init (those are still
+// reached only via the lazy `await import(...)` calls in
+// runAncillaryMaintenance, unaffected by these type imports).
+import type { RejectionLearningSweepResult } from '../fleet/self-improve.js';
+import type { PostMergeCreditSweepResult } from '../fleet/post-merge-credit.js';
 import {
   acquireLocalStoreLock,
   releaseLocalStoreLock,
@@ -210,11 +217,13 @@ import {
 import {
   causalMetadata,
   evidenceOutcomeSummary,
+  learningEpochFromTimestamp,
   ROUTER_POLICY_VERSION,
   routeSnapshot,
   runEventSummary,
 } from '../learning/causal.js';
 import { productionAttemptLearningLabelFromSignals } from '../learning/attempt-shape.js';
+import { mintRoutingAssignmentReceipt } from '../learning/routing-assignment-receipt.js';
 import { readSkillCards } from '../fleet/skill-records.js';
 import { observeShadowSkills } from '../fleet/skill-shadow-observer.js';
 // worked-ledger is used transitively via LocalWorkQueueCoordinator (selectWorkQueueCoordinator).
@@ -283,6 +292,10 @@ import {
   scheduleCutoffCheckpointCapture,
   type ScheduledCutoffCapture,
 } from './cutoff-checkpoint-scheduler.js';
+import {
+  scheduleAgentOsObserverV1,
+  type ScheduledAgentOsObserverV1,
+} from './agent-os-observer-scheduler.js';
 import { writePrivateFileAtomically } from '../util/private-file-write.js';
 import { readStableRegularFile } from '../util/stable-file-read.js';
 import { fsyncDirectory } from '../util/durability.js';
@@ -1026,6 +1039,17 @@ const DEFAULTS: DaemonConfig = {
 };
 const KILL_SWITCH_POLL_MS = 50;
 const pendingDaemonTickEffects = new WeakMap<DaemonTick, Set<Promise<void>>>();
+const durableAgentOsObserverTicks = new WeakSet<object>();
+
+function markDurableAgentOsObserverTick(tickResult: DaemonTick): void {
+  if (tickResult.reason === 'ok' && tickResult.dryRun !== true) {
+    durableAgentOsObserverTicks.add(tickResult);
+  }
+}
+
+function isDurableAgentOsObserverTick(tickResult: DaemonTick): boolean {
+  return durableAgentOsObserverTicks.has(tickResult);
+}
 
 /** Register detached work that must settle before this tick can be called quiescent. */
 export function trackDaemonTickEffect(
@@ -1100,6 +1124,20 @@ export function scheduleCutoffCheckpointAfterTick(
   if (opts.dryRun || opts.once || tickResult.reason === 'state-persistence-failed' ||
     !tickResult.backlogSnapshotAt || !tickResult.backlogSnapshotId || killSwitchOn()) return null;
   return schedule();
+}
+
+/** Schedule the default-off Agent OS observer only after a durable resident tick. */
+export function scheduleAgentOsObserverAfterTick(
+  tickResult: DaemonTick,
+  cfg: AshlrConfig,
+  opts: Pick<DaemonRunOptions, 'dryRun' | 'once'>,
+  schedule: typeof scheduleAgentOsObserverV1 = scheduleAgentOsObserverV1,
+  killIsOn: typeof killSwitchOn = killSwitchOn,
+  durableTick: (tick: DaemonTick) => boolean = isDurableAgentOsObserverTick,
+): ScheduledAgentOsObserverV1 | null {
+  if (opts.dryRun || opts.once || tickResult.reason !== 'ok' || killIsOn()) return null;
+  if (!durableTick(tickResult)) return null;
+  return schedule({ tick: tickResult, config: cfg });
 }
 
 interface ResolvedContextRollupConfig {
@@ -1320,13 +1358,31 @@ function configuredModelForBackend(backend: EngineId, cfg: AshlrConfig): string 
   return typeof model === 'string' && model.trim() ? model : null;
 }
 
+/**
+ * Refresh the daemon lock's heartbeatAt on a fixed 30s cadence for the
+ * FULL lifetime of runDaemon() — set up once before entering the tick
+ * loop (once=true or once=false), so it keeps firing on Node's timer queue
+ * independent of what a single tick is doing, including a tick blocked on a
+ * long (e.g. 30-minute) engine run. guard-health.ts's 2-minute staleness
+ * threshold depends on this actually writing heartbeatAt; previously this
+ * interval only READ ownership (daemonLockOwned) and refreshed the activity
+ * file, so heartbeatDaemonLock() — the function that writes heartbeatAt —
+ * was never called from the resident loop at all, leaving it frozen at
+ * acquiredAt forever (M303/guard-health).
+ *
+ * Fail-closed: heartbeatDaemonLock() re-derives ownership itself (exact pid
+ * + token match) before writing, and returns false on ANY failure — lost
+ * ownership or a write I/O error alike. Either failure routes to
+ * onOwnershipLost() rather than being swallowed, matching the pre-existing
+ * fail-closed contract of this interval.
+ */
 function startDaemonLockHeartbeat(
   lock: DaemonLock,
   afterHeartbeat?: () => void,
   onOwnershipLost?: () => void,
 ): () => void {
   const interval = setInterval(() => {
-    if (daemonLockOwned(lock)) afterHeartbeat?.();
+    if (heartbeatDaemonLock(lock)) afterHeartbeat?.();
     else onOwnershipLost?.();
   }, 30_000);
   (interval as { unref?: () => void }).unref?.();
@@ -3594,6 +3650,7 @@ export async function tick(
         recordTickAgentAction(failedTick);
         return failedTick;
       }
+      markDurableAgentOsObserverTick(tick);
     } catch (err) {
       console.warn('[ashlr] daemon:recordTick persistence failed:', (err as Error)?.message ?? err);
       const failedTick = nonResidentPersistenceFailureTick(tick);
@@ -3696,6 +3753,11 @@ export async function tick(
   let ancillaryMaintenanceRan = false;
   let proposalRepairMaintenanceRan = false;
   let proposalRepairMaintenanceResult: ProposalRepairWorkResult | null = null;
+  // M505 learning-loop sweeps were previously fire-and-forget (result discarded
+  // by the caller) — surfaced here so "is the fleet actually learning" is
+  // observable from the tick audit row instead of requiring forensics.
+  let rejectionLearningSweepResult: RejectionLearningSweepResult | null = null;
+  let postMergeCreditSweepResult: PostMergeCreditSweepResult | null = null;
   let skipInventAfterSelfHealRefill = false;
   let producerMaintenanceBeforeSelection = false;
   let producerMaintenanceSkippedByCadence = false;
@@ -3927,6 +3989,22 @@ export async function tick(
             : {}),
         }
         : {}),
+      ...(rejectionLearningSweepResult
+        ? {
+          rejectionLearningScanned: rejectionLearningSweepResult.scanned,
+          rejectionLearningWritten: rejectionLearningSweepResult.written,
+          rejectionLearningSkipped: rejectionLearningSweepResult.skipped,
+          rejectionLearningSourceComplete: rejectionLearningSweepResult.sourceComplete,
+        }
+        : {}),
+      ...(postMergeCreditSweepResult
+        ? {
+          postMergeCreditScanned: postMergeCreditSweepResult.scanned,
+          postMergeCreditReleased: postMergeCreditSweepResult.released,
+          postMergeCreditSkipped: postMergeCreditSweepResult.skipped,
+          postMergeCreditSourceComplete: postMergeCreditSweepResult.sourceComplete,
+        }
+        : {}),
       ...(producerMaintenanceSkippedByCadence ? { skippedByCadence: true } : {}),
       ...(producerMaintenanceNextAfter ? { nextAfter: producerMaintenanceNextAfter } : {}),
       ...(ambiguousRepairReservationKeys.size > 0 ? {
@@ -4056,7 +4134,14 @@ export async function tick(
     if (!stopRequested() && (liveCfg.foundry as Record<string, unknown>)?.['selfImprove'] === true) {
       try {
         const { sweepRejectionLearning } = await import('../fleet/self-improve.js');
-        sweepRejectionLearning(liveCfg);
+        const result = sweepRejectionLearning(liveCfg);
+        rejectionLearningSweepResult = result;
+        if (result.scanned > 0 || result.written > 0) {
+          console.warn(
+            `[ashlr] daemon:tick sweepRejectionLearning: scanned=${result.scanned} ` +
+            `written=${result.written} skipped=${result.skipped} sourceComplete=${result.sourceComplete}`,
+          );
+        }
       } catch (err) {
         console.warn('[ashlr] daemon:tick sweepRejectionLearning failed:', (err as Error)?.message ?? err);
       }
@@ -4068,7 +4153,14 @@ export async function tick(
     if (!stopRequested()) {
       try {
         const { sweepPostMergeCreditReleases } = await import('../fleet/post-merge-credit.js');
-        sweepPostMergeCreditReleases();
+        const result = sweepPostMergeCreditReleases();
+        postMergeCreditSweepResult = result;
+        if (result.scanned > 0 || result.released > 0) {
+          console.warn(
+            `[ashlr] daemon:tick sweepPostMergeCreditReleases: scanned=${result.scanned} ` +
+            `released=${result.released} skipped=${result.skipped} sourceComplete=${result.sourceComplete}`,
+          );
+        }
       } catch (err) {
         console.warn('[ashlr] daemon:tick sweepPostMergeCreditReleases failed:', (err as Error)?.message ?? err);
       }
@@ -5627,6 +5719,11 @@ export async function tick(
       let selectedModel: string | null | undefined;
       let dispatch: DaemonDispatchTrace | undefined;
       let runTrajectoryId = `run:${attemptId}`;
+      // M-causal-routing: set only inside the M53 intelligence gate below, so
+      // the routing-assignment receipt is minted only for dispatches actually
+      // routed under the learned policy (a receipt with no learned decision
+      // behind it would have no counterfactual to speak of).
+      let learnedRoutingActive = false;
 
       // M334 stage 1: observe-only gateway shadow. Runs the M247 gateway
       // BESIDE the live legacy decision and records the comparison — THE
@@ -5902,6 +5999,7 @@ export async function tick(
         {
           const intelRaw = routingCfg.foundry?.intelligence;
           if (intelRaw !== undefined && intelRaw !== null) {
+            learnedRoutingActive = true;
             const forecast = buildForecast('7d', routingCfg);
             const goal = buildItemGoal(item);
             const est = await estimateRun(goal, { maxTokens: perItemMaxTokens }, routingCfg);
@@ -6077,6 +6175,30 @@ export async function tick(
             skipReason: 'repair-attempt-reservation-unavailable',
           }),
         };
+      }
+      // M-causal-routing: mint a policy-assignment receipt for this dispatch
+      // BEFORE the engine runs — before any outcome is known — so later
+      // credit assignment is causal rather than post-hoc. Best-effort: a mint
+      // failure is never allowed to block or alter dispatch.
+      if (learnedRoutingActive && backend !== undefined) {
+        try {
+          const finalBackend = backend;
+          const finalTier = backendTier ?? engineTierOf(finalBackend, routingCfg);
+          const configuredAllowed = Array.isArray(routingCfg.foundry?.allowedBackends)
+            ? routingCfg.foundry.allowedBackends
+            : [];
+          const candidateBackends = [...new Set([finalBackend, ...configuredAllowed, 'builtin' as EngineId])]
+            .filter((candidate) => engineTierOf(candidate, routingCfg) === finalTier);
+          mintRoutingAssignmentReceipt({
+            item,
+            dispatchTrajectoryId: runTrajectoryId,
+            policyVersion: ROUTER_POLICY_VERSION,
+            learningEpoch: learningEpochFromTimestamp(new Date().toISOString()),
+            contextStratum: `${item.source}:${finalTier}`,
+            selectedBackend: finalBackend,
+            candidateBackends,
+          });
+        } catch { /* best effort — never block dispatch on receipt minting */ }
       }
       const goal = buildItemGoal(item);
       const dispatchCfg = dispatchConfigForItem(item, routingCfg);
@@ -7728,6 +7850,7 @@ export async function tick(
     state = rolledState;
   }
 
+  markDurableAgentOsObserverTick(tickRecord);
   recordTickAgentAction(tickRecord, machineId);
 
   // M89/M91: best-effort fleet→pulse telemetry export. Runs OUTSIDE the proposal
@@ -8090,6 +8213,7 @@ export async function runDaemon(
   refreshActivity();
   let scheduledResolutionObserver: ScheduledResolutionObserverChild | null = null;
   let scheduledCutoffCapture: ScheduledCutoffCapture | null = null;
+  let scheduledAgentOsObserver: ScheduledAgentOsObserverV1 | null = null;
   let forcedShutdownTimer: ReturnType<typeof setTimeout> | null = null;
   const transitionToStopping = (): void => {
     if (ownershipLost) return;
@@ -8100,6 +8224,7 @@ export async function runDaemon(
     if (!shutdown.signal.aborted) shutdown.abort();
     scheduledResolutionObserver?.cancel();
     scheduledCutoffCapture?.cancel();
+    scheduledAgentOsObserver?.cancel();
     if (forcedShutdownTimer === null) {
       const finalSignal = signal ?? 'SIGTERM';
       forcedShutdownTimer = setTimeout(() => {
@@ -8118,6 +8243,7 @@ export async function runDaemon(
     if (!shutdown.signal.aborted) shutdown.abort();
     scheduledResolutionObserver?.cancel();
     scheduledCutoffCapture?.cancel();
+    scheduledAgentOsObserver?.cancel();
   };
   const ownsDaemonLock = (): boolean => {
     if (ownershipLost) return false;
@@ -8336,6 +8462,12 @@ export async function runDaemon(
         const afterTickCfg = reloadLiveConfigForDaemon(liveCfg);
         scheduledResolutionObserver = scheduleResolutionObserverAfterTick(tickResult, opts);
         scheduledCutoffCapture = scheduleCutoffCheckpointAfterTick(tickResult, opts);
+        const agentOsObserverSchedule = scheduleAgentOsObserverAfterTick(tickResult, afterTickCfg, opts);
+        // An overlap handle intentionally cannot cancel the active owner. Keep
+        // the original scheduled handle for shutdown cancellation/await.
+        if (agentOsObserverSchedule?.disposition === 'scheduled') {
+          scheduledAgentOsObserver = agentOsObserverSchedule;
+        }
         const postTickChildren: Promise<unknown>[] = [];
         if (scheduledResolutionObserver?.disposition === 'scheduled' ||
           scheduledResolutionObserver?.disposition === 'overlap-suppressed') {
@@ -8344,6 +8476,10 @@ export async function runDaemon(
         if (scheduledCutoffCapture?.disposition === 'scheduled' ||
           scheduledCutoffCapture?.disposition === 'overlap-suppressed') {
           postTickChildren.push(scheduledCutoffCapture.completion);
+        }
+        if (agentOsObserverSchedule?.disposition === 'scheduled' ||
+          agentOsObserverSchedule?.disposition === 'overlap-suppressed') {
+          postTickChildren.push(agentOsObserverSchedule.completion);
         }
         if (postTickChildren.length > 0) {
           const postTickEpoch = transitionActivity('post-tick', postTickChildren.length);
@@ -8394,7 +8530,11 @@ export async function runDaemon(
   }
   transitionToStopping();
   clearInterval(killSwitchPoll);
-  await cancelDaemonPostTickChildren(scheduledResolutionObserver, scheduledCutoffCapture);
+  await cancelDaemonPostTickChildren(
+    scheduledResolutionObserver,
+    scheduledCutoffCapture,
+    scheduledAgentOsObserver,
+  );
   if (forcedShutdownTimer !== null) clearTimeout(forcedShutdownTimer);
   process.removeListener('SIGINT', requestSigint);
   process.removeListener('SIGTERM', requestSigterm);
@@ -8455,12 +8595,15 @@ export async function cancelResolutionObserverBeforeShutdown(
 export async function cancelDaemonPostTickChildren(
   observer: ScheduledResolutionObserverChild | null,
   cutoff: ScheduledCutoffCapture | null,
+  agentOsObserver: ScheduledAgentOsObserverV1 | null = null,
 ): Promise<void> {
   observer?.cancel();
   cutoff?.cancel();
+  agentOsObserver?.cancel();
   await Promise.allSettled([
     ...(observer ? [observer.completion] : []),
     ...(cutoff ? [cutoff.completion] : []),
+    ...(agentOsObserver ? [agentOsObserver.completion] : []),
   ]);
 }
 

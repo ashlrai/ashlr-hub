@@ -27,6 +27,7 @@ import {
   buildUnsignedRuntimeReleaseManifest,
   parseUnsignedRuntimeReleaseManifest,
 } from '../src/core/daemon/runtime-release-manifest.js';
+import { buildLegacyRuntimeReleaseManifestV2 } from './helpers/runtime-release-legacy-v2.js';
 
 const NOW = '2026-08-06T12:05:00.000Z';
 const ISSUED_AT = '2026-08-06T12:00:00.000Z';
@@ -50,26 +51,33 @@ function releaseManifest(
   marker: string,
   revision: string,
   rollbackTarget: string | null,
+  generation: 'candidate-v3' | 'legacy-v2' = 'candidate-v3',
 ): string {
+  const legacyV2 = generation === 'legacy-v2';
   const packageRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-canary-rollback-')));
   tempDirs.push(packageRoot);
   write(join(packageRoot, 'package.json'), `${JSON.stringify({
     name: '@ashlr/hub',
-    version: '3.1.0',
+    version: legacyV2 ? '3.3.2' : '3.4.0',
     type: 'module',
     bin: { ashlr: 'bin/ashlr' },
-    files: ['bin', 'dist', 'scripts/run-verify-command.mjs'],
+    files: [
+      'bin',
+      'dist',
+      'scripts/run-verify-command.mjs',
+      ...(legacyV2 ? [] : ['scripts/scorecard-history-worker.mjs']),
+    ],
     dependencies: { example: '1.0.0' },
     bundledDependencies: ['example'],
   }, null, 2)}\n`);
   write(join(packageRoot, 'package-lock.json'), `${JSON.stringify({
     name: '@ashlr/hub',
-    version: '3.1.0',
+    version: legacyV2 ? '3.3.2' : '3.4.0',
     lockfileVersion: 3,
     packages: {
       '': {
         name: '@ashlr/hub',
-        version: '3.1.0',
+        version: legacyV2 ? '3.3.2' : '3.4.0',
         bin: { ashlr: 'bin/ashlr' },
         dependencies: { example: '1.0.0' },
       },
@@ -79,6 +87,9 @@ function releaseManifest(
   write(join(packageRoot, 'bin', 'ashlr'), '#!/usr/bin/env node\n', 0o755);
   write(join(packageRoot, 'dist', 'cli', 'index.js'), `export const marker = '${marker}';\n`);
   write(join(packageRoot, 'scripts', 'run-verify-command.mjs'), 'export const run = true;\n');
+  if (!legacyV2) {
+    write(join(packageRoot, 'scripts', 'scorecard-history-worker.mjs'), 'export const worker = true;\n');
+  }
   const dependencyRoot = join(packageRoot, 'node_modules');
   write(join(dependencyRoot, 'example', 'package.json'), '{"name":"example","version":"1.0.0"}\n');
   write(join(dependencyRoot, 'example', 'index.js'), 'export const example = true;\n');
@@ -90,6 +101,23 @@ function releaseManifest(
   );
   const interpreterPath = join(packageRoot, 'fixture-node');
   write(interpreterPath, 'fixture node binary\n', 0o755);
+  if (legacyV2) {
+    return buildLegacyRuntimeReleaseManifestV2({
+      artifactPaths: [
+        'bin/ashlr',
+        'dist/cli/index.js',
+        RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH,
+        'package.json',
+        'scripts/run-verify-command.mjs',
+      ],
+      declaredInterpreterPath: interpreterPath,
+      declaredInterpreterVersion: 'v22.0.0',
+      expectedPackageName: '@ashlr/hub',
+      expectedRevision: revision,
+      packageRoot,
+      rollbackTargetDigest: rollbackTarget,
+    });
+  }
   const built = buildUnsignedRuntimeReleaseManifest({
     packageRoot,
     dependencyRoot,
@@ -137,15 +165,24 @@ function sha256(value: string | Buffer): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
-function validInput(): RuntimeReleaseCanaryRollbackEvidenceInput {
+function validInput(options: {
+  candidateGeneration?: 'candidate-v3' | 'legacy-v2';
+  rollbackGeneration?: 'candidate-v3' | 'legacy-v2';
+} = {}): RuntimeReleaseCanaryRollbackEvidenceInput {
   const keys = generateKeyPairSync('ed25519');
   const root = trustRoot(keys.publicKey);
-  const rollbackManifest = releaseManifest('rollback', ROLLBACK_REVISION, null);
+  const rollbackManifest = releaseManifest(
+    'rollback',
+    ROLLBACK_REVISION,
+    null,
+    options.rollbackGeneration ?? 'legacy-v2',
+  );
   const rollbackDigest = manifestDigest(rollbackManifest);
   const candidateManifest = releaseManifest(
     'candidate',
     CANDIDATE_REVISION,
     rollbackDigest,
+    options.candidateGeneration ?? 'candidate-v3',
   );
   const candidateEnvelope = envelope(candidateManifest, keys.privateKey);
   const rollbackEnvelope = envelope(rollbackManifest, keys.privateKey);
@@ -227,6 +264,14 @@ describe('runtime release canary and rollback evidence', () => {
     const input = validInput();
     const result = evaluateRuntimeReleaseCanaryRollbackEvidence(input);
 
+    const candidate = parseUnsignedRuntimeReleaseManifest(input.candidate.manifest);
+    const rollback = parseUnsignedRuntimeReleaseManifest(input.rollback.manifest);
+    expect(candidate).toMatchObject({ ok: true, manifest: { schemaVersion: 3 } });
+    expect(rollback).toMatchObject({
+      ok: true,
+      manifest: { package: { version: '3.3.2' }, schemaVersion: 2 },
+    });
+
     expect(result).toMatchObject({
       schemaVersion: 2,
       authority: 'observation-only',
@@ -282,6 +327,20 @@ describe('runtime release canary and rollback evidence', () => {
         activationScopeCaps: { bound: false, maxFiles: null, maxLines: null },
         postMergeObservations: { bound: false, fresh: false },
       },
+    });
+  });
+
+  it('blocks a signed schema-v2 candidate downgrade while retaining v2 rollback support', () => {
+    const input = validInput({ candidateGeneration: 'legacy-v2' });
+    const result = evaluateRuntimeReleaseCanaryRollbackEvidence(input);
+
+    expect(result).toMatchObject({
+      verdict: 'blocked',
+      releasePairVerified: false,
+      blockers: [{
+        code: 'candidate-manifest-schema-unsupported',
+        detail: 'The candidate must use current runtime release manifest schema v3.',
+      }],
     });
   });
 

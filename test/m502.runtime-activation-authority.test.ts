@@ -124,6 +124,7 @@ import {
   runtimeReleaseServiceInvocationDigest,
   runtimeReleaseTrustRootCanonicalSha256,
 } from '../src/core/daemon/runtime-release-launch-revalidation.js';
+import { buildLegacyRuntimeReleaseManifestV2 } from './helpers/runtime-release-legacy-v2.js';
 
 const roots: string[] = [];
 
@@ -290,7 +291,9 @@ function completeBundle(input: {
   directoryName?: string;
   executableInterpreter?: boolean;
   packageVersion?: string;
+  manifestGeneration?: 'current-v3' | 'legacy-v2';
 }): CompleteBundle {
+  const legacyV2 = input.manifestGeneration === 'legacy-v2';
   const packageVersion = input.packageVersion ?? '3.2.0';
   const bundleRoot = join(input.parent, input.directoryName ?? `${input.role}-bundle`);
   const packageRoot = join(bundleRoot, input.revision);
@@ -302,7 +305,12 @@ function completeBundle(input: {
       version: packageVersion,
       type: 'module',
       bin: { ashlr: 'bin/ashlr' },
-      files: ['bin', 'dist', 'scripts/run-verify-command.mjs'],
+      files: [
+        'bin',
+        'dist',
+        'scripts/run-verify-command.mjs',
+        ...(legacyV2 ? [] : ['scripts/scorecard-history-worker.mjs']),
+      ],
       dependencies: { example: '1.0.0' },
       bundledDependencies: ['example'],
     })}\n`,
@@ -327,6 +335,9 @@ function completeBundle(input: {
   writeText(join(packageRoot, 'bin', 'ashlr'), '#!/usr/bin/env node\n', 0o755);
   writeText(join(packageRoot, 'dist', 'cli', 'index.js'), `export const marker = '${input.marker}';\n`);
   writeText(join(packageRoot, 'scripts', 'run-verify-command.mjs'), 'export const run = true;\n');
+  if (!legacyV2) {
+    writeText(join(packageRoot, 'scripts', 'scorecard-history-worker.mjs'), 'export const worker = true;\n');
+  }
   const dependencyRoot = join(packageRoot, 'node_modules');
   writeText(join(dependencyRoot, 'example', 'package.json'), '{"name":"example","version":"1.0.0"}\n');
   writeText(join(dependencyRoot, 'example', 'index.js'), `export const marker = '${input.marker}';\n`);
@@ -342,19 +353,41 @@ function completeBundle(input: {
       : `fixture node ${input.marker}\n`,
     0o755,
   );
-  const built = buildUnsignedRuntimeReleaseManifest({
-    declaredInterpreterPath: interpreterPath,
-    declaredInterpreterVersion: 'v24.0.0',
-    dependencyRoot,
-    expectedRevision: input.revision,
-    packageRoot,
-    declaredRollbackTargetDigest: input.rollbackTargetDigest,
-  });
-  if (!built.ok) throw new Error(built.reason);
+  let manifestCanonicalJson: string;
+  if (legacyV2) {
+    manifestCanonicalJson = buildLegacyRuntimeReleaseManifestV2({
+      artifactPaths: [
+        'bin/ashlr',
+        'dist/cli/index.js',
+        RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH,
+        'package.json',
+        'scripts/run-verify-command.mjs',
+      ],
+      declaredInterpreterPath: interpreterPath,
+      declaredInterpreterVersion: 'v24.0.0',
+      expectedPackageName: '@ashlr/hub',
+      expectedRevision: input.revision,
+      packageRoot,
+      rollbackTargetDigest: input.rollbackTargetDigest,
+    });
+  } else {
+    const built = buildUnsignedRuntimeReleaseManifest({
+      declaredInterpreterPath: interpreterPath,
+      declaredInterpreterVersion: 'v24.0.0',
+      dependencyRoot,
+      expectedRevision: input.revision,
+      packageRoot,
+      declaredRollbackTargetDigest: input.rollbackTargetDigest,
+    });
+    if (!built.ok) throw new Error(built.reason);
+    manifestCanonicalJson = built.canonicalJson;
+  }
+  const parsed = parseUnsignedRuntimeReleaseManifest(manifestCanonicalJson);
+  if (!parsed.ok) throw new Error(parsed.reason);
   const signed = signRuntimeReleaseEvidenceEnvelope({
     expiresAt: '2026-08-10T12:10:00.000Z',
     issuedAt: '2026-08-10T11:55:00.000Z',
-    manifest: built.canonicalJson,
+    manifest: manifestCanonicalJson,
     privateKey: input.privateKey,
   });
   if (!signed.ok) throw new Error(signed.reason);
@@ -366,7 +399,7 @@ function completeBundle(input: {
   const policy = `{"policyEpoch":7,"role":"${input.role}"}\n`;
   const tarball = `independently-packaged-${input.role}-${input.marker}\n`;
   const descriptor = `service=${input.role}\nrevision=${input.revision}\n`;
-  writeText(manifestPath, built.canonicalJson);
+  writeText(manifestPath, manifestCanonicalJson);
   writeText(envelopePath, signed.canonicalJson);
   writeText(policyPath, policy);
   writeText(packageTarballPath, tarball);
@@ -383,9 +416,9 @@ function completeBundle(input: {
     declaredInterpreterPath: interpreterPath,
     declaredInterpreterVersion: 'v24.0.0',
     dependencyRoot,
-    expectedManifestDigest: built.manifest.manifestDigest,
+    expectedManifestDigest: parsed.manifest.manifestDigest,
     expectedRevision: input.revision,
-    manifest: built.canonicalJson,
+    manifest: manifestCanonicalJson,
     packageRoot,
   });
   if (!observed.ok) throw new Error(observed.reason);
@@ -398,8 +431,6 @@ function completeBundle(input: {
   if (!invocation || !policyId || !envelopeCanonicalSha256 || !evidenceTrustRootCanonicalSha256) {
     throw new Error('complete bundle identity could not be derived');
   }
-  const parsed = parseUnsignedRuntimeReleaseManifest(built.canonicalJson);
-  if (!parsed.ok) throw new Error(parsed.reason);
   const buildInputs: Omit<RuntimeActivationArtifactBindingV1, 'declarationBindingSha256'> = {
     dependencyInventoryDigest: parsed.manifest.dependencyInventory.inventoryDigest,
     envelopeCanonicalSha256,
@@ -561,7 +592,10 @@ interface CompleteActivationFixture {
   priorPlist: string;
 }
 
-function completeActivationFixture(executableCandidate = false): CompleteActivationFixture {
+function completeActivationFixture(
+  executableCandidate = false,
+  candidateGeneration: 'current-v3' | 'legacy-v2' = 'current-v3',
+): CompleteActivationFixture {
   const home = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-activation-complete-')));
   roots.push(home);
   chmodSync(home, 0o700);
@@ -609,6 +643,7 @@ function completeActivationFixture(executableCandidate = false): CompleteActivat
     evidenceTrustRoot: evidence.canonicalJson,
     rollbackTargetDigest: null,
     packageVersion: '3.2.7',
+    manifestGeneration: 'legacy-v2',
   });
   const candidate = completeBundle({
     parent: releasesRoot,
@@ -623,6 +658,7 @@ function completeActivationFixture(executableCandidate = false): CompleteActivat
     rollbackTargetDigest: rollback.manifestDigest,
     executableInterpreter: executableCandidate,
     packageVersion: '3.2.7',
+    manifestGeneration: candidateGeneration,
   });
   const config = '{}\n';
   const configPath = join(home, '.ashlr', 'config.json');
@@ -749,6 +785,7 @@ describe('M502 runtime activation authority', () => {
       keyId,
       evidenceTrustRoot: evidence.canonicalJson,
       rollbackTargetDigest: null,
+      manifestGeneration: 'legacy-v2',
     });
     const candidate = completeBundle({
       parent: home,
@@ -788,6 +825,10 @@ describe('M502 runtime activation authority', () => {
       nowMs: Date.parse('2026-08-10T12:00:00.000Z'),
       requestPath,
     });
+    expect(parseUnsignedRuntimeReleaseManifest(readFileSync(candidate.request.manifestPath, 'utf8')))
+      .toMatchObject({ ok: true, manifest: { schemaVersion: 3 } });
+    expect(parseUnsignedRuntimeReleaseManifest(readFileSync(rollback.request.manifestPath, 'utf8')))
+      .toMatchObject({ ok: true, manifest: { schemaVersion: 2 } });
     expect(result).toMatchObject({
       verdict: 'preflight-passed-no-authority',
       preflightPassed: true,
@@ -868,6 +909,28 @@ describe('M502 runtime activation authority', () => {
     expect(observed.rollbackLaunchReceiptSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(observed.preflight.plan.admissionDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(observed.preflight.plan.admissionDigest).not.toBe(observed.preflight.plan.planDigest);
+  });
+
+  it('blocks a schema-v2 candidate downgrade in the complete activation pipeline', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime('2026-08-10T12:00:00.000Z');
+    const f = completeActivationFixture(false, 'legacy-v2');
+
+    const result = preflightRuntimeActivationAuthority({
+      homePath: f.home,
+      nowMs: f.now,
+      requestPath: f.requestPath,
+    });
+
+    expect(result).toMatchObject({
+      verdict: 'blocked',
+      preflightPassed: false,
+      blockers: [{
+        code: 'release-pair-invalid',
+        detail: 'candidate-manifest-schema-unsupported',
+      }],
+    });
+    assertNoMutationAuthority(result);
   });
 
   it('feeds a genuine exact M502 admission through the dormant bounded handoff', async () => {

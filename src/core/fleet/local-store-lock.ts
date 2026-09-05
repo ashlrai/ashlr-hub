@@ -484,10 +484,12 @@ export function verifiedProcessStartIdentity(
   }
 
   if (requiredSource === undefined || requiredSource === 'ps-lstart') {
-    let psValue = commandOutput(runtime, 'ps', ['-o', 'lstart=', '-p', String(pid)]);
-    if (!psValue && runtime.platform === 'darwin') {
-      psValue = commandOutput(runtime, '/bin/ps', ['-o', 'lstart=', '-p', String(pid)]);
-    }
+    // Never resolve a security probe through caller-controlled PATH. The
+    // supported POSIX targets install ps at this fixed system location; other
+    // platforms fail closed instead of searching for an executable.
+    const psValue = runtime.platform === 'darwin' || runtime.platform === 'linux'
+      ? commandOutput(runtime, '/bin/ps', ['-o', 'lstart=', '-p', String(pid)])
+      : undefined;
     if (psValue) {
       const startMs = Date.parse(psValue);
       if (Number.isFinite(startMs)) {

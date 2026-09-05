@@ -133,13 +133,18 @@ export function formatFleetStatus(s: FleetStatus): string {
     lines.push(`  heartbeat:     ${s.daemon.lockHeartbeatAt}`);
   }
   if (s.daemon.activation) {
+    const proposalOnceEligible = s.daemon.activation.requestedShape === 'proposal-once'
+      && s.daemon.activation.commandEligible;
     lines.push(
-      `  activation:    ${s.daemon.activation.state} (${s.daemon.activation.reason}; ` +
+      `  activation:    proposal-once=${s.daemon.activation.state} ` +
+        `(${s.daemon.activation.reason}; ` +
         `${s.daemon.activation.authority})`,
     );
     lines.push(
-      `  start scope:   proposal-once=${s.daemon.activation.commandEligible ? 'eligible' : 'blocked'}, ` +
-        'resident=false, install=false, repair=false',
+      `  start scope:   proposal-once=${proposalOnceEligible ? 'eligible' : 'blocked'}, ` +
+        `resident-standing=${s.daemon.activation.residentStandingAuthorized ? 'authorized' : 'blocked'}, ` +
+        `install=${s.daemon.activation.installAuthorized ? 'authorized' : 'blocked'}, ` +
+        `repair=${s.daemon.activation.repairAuthorized ? 'authorized' : 'blocked'}`,
     );
   }
   lines.push(
@@ -2106,8 +2111,19 @@ async function cmdFleetScorecard(args: string[]): Promise<number> {
     return 1;
   }
 
+  // M356: self-evaluation scorecard (evidence-only; window collapses 'all'
+  // to '30d' since the module only supports trailing 7d/30d windows).
+  const selfEvalWindow: '7d' | '30d' = window === '7d' ? '7d' : '30d';
+  let selfEvaluation: import('../core/fleet/scorecard.js').FleetScorecard | undefined;
+  try {
+    const { computeFleetScorecard } = await import('../core/fleet/scorecard.js');
+    selfEvaluation = computeFleetScorecard(selfEvalWindow);
+  } catch {
+    selfEvaluation = undefined;
+  }
+
   if (jsonMode) {
-    process.stdout.write(JSON.stringify(metrics, null, 2) + '\n');
+    process.stdout.write(JSON.stringify({ ...metrics, selfEvaluation }, null, 2) + '\n');
     return 0;
   }
 
@@ -2169,6 +2185,69 @@ async function cmdFleetScorecard(args: string[]): Promise<number> {
     console.log('  ' + bold('Weekly trend'));
     for (const t of metrics.trend) {
       console.log(`    ${t.period}  merged=${t.merged}  accept=${pct(t.acceptRate)}`);
+    }
+    console.log('');
+  }
+
+  // M356: self-evaluation — "is the fleet measurably better at improving
+  // itself" (docs/NORTH-STAR.md). Evidence-only; unknown renders as '—', never 0.
+  if (selfEvaluation) {
+    const sc = selfEvaluation;
+    const fmt = (n: number | null | undefined) => n === null || n === undefined ? '—' : String(n);
+    const fmtUsd = (n: number | null | undefined) => n === null || n === undefined ? '—' : `$${n.toFixed(4)}`;
+    const fmtPct = (n: number | null | undefined) => n === null || n === undefined ? '—' : pct(n);
+    const fmtMs = (n: number | null | undefined) => n === null || n === undefined ? '—' : `${Math.round(n)}ms`;
+    const sqTag = (sq: { sourceState: string; complete: boolean }) =>
+      sq.sourceState === 'healthy' && sq.complete ? '' : dim(` [${sq.sourceState}]`);
+
+    console.log('  ' + bold(`Self-evaluation (evidence-only, window: ${sc.window})`));
+    console.log(
+      `    proposals filed:    ${fmt(sc.proposals.filed)} ` +
+        `(complete=${fmt(sc.proposals.complete)}, partial=${fmt(sc.proposals.partial)})` +
+        sqTag(sc.proposals.sourceQuality),
+    );
+    console.log(
+      `    judge throughput:   ${fmt(sc.judge.calls)} calls, ${fmt(sc.judge.verdicts)} verdicts, ` +
+        `failure rate ${fmtPct(sc.judge.failureRate)}` + sqTag(sc.judge.sourceQuality),
+    );
+    console.log(
+      `    merges:              realized=${fmt(sc.merges.realized)}  ` +
+        (sc.merges.releasedState === 'uncommissioned'
+          ? 'released=uncommissioned'
+          : `released=${fmt(sc.merges.released)}`) +
+        sqTag(sc.merges.sourceQuality),
+    );
+    console.log(
+      `    cost/merged change:  ${fmtUsd(sc.cost.perMergedChangeUsd)} ` +
+        `(${fmt(sc.cost.mergedChanges)} merges, $${(sc.cost.totalCostUsd ?? 0).toFixed(4)} total)` +
+        sqTag(sc.cost.sourceQuality),
+    );
+    console.log(
+      `    dispatch→verdict:    median ${fmtMs(sc.latency.dispatchToVerdictMsMedian)}, ` +
+        `mean ${fmtMs(sc.latency.dispatchToVerdictMsMean)} (n=${fmt(sc.latency.sampleSize)})` +
+        sqTag(sc.latency.sourceQuality),
+    );
+    console.log(
+      `    rejection lessons:   ${fmt(sc.learning.rejectionLessonsWritten)}` +
+        sqTag(sc.learning.sourceQuality),
+    );
+    console.log(
+      `    capability (eval):   ${sc.capability.state}` +
+        (sc.capability.latest
+          ? ` — resolved ${sc.capability.latest.resolved}/${sc.capability.latest.total} ` +
+            `(${fmtPct(sc.capability.latest.resolveRate)}) via ${sc.capability.latest.engine}`
+          : sc.capability.reason ? ` — ${sc.capability.reason}` : ''),
+    );
+    if (byEngine && sc.byEngine.length > 0) {
+      console.log('    by engine/model (self-eval):');
+      for (const e of sc.byEngine.slice(0, 8)) {
+        console.log(
+          `      ${e.engine}:${e.model}  dispatches=${e.dispatches}  ` +
+            `realized=${e.realizedMerges}  ` +
+            `released=${sc.merges.releasedState === 'uncommissioned' ? 'uncommissioned' : fmt(e.releasedMerges)}  ` +
+            `cost/merge=${fmtUsd(e.costPerRealizedMergeUsd)}`,
+        );
+      }
     }
     console.log('');
   }
@@ -2240,7 +2319,8 @@ function printFleetHelp(): void {
   console.log(`    ashlr fleet evidence doctor <source> [--deep] [--json]`);
   console.log(`                          ${cyan('# bounded read-only ledger diagnosis')}`);
   console.log(`    ashlr fleet scorecard [--window 7d|30d|all] [--by-engine] [--by-repo] [--json]`);
-  console.log(`                          ${cyan('# productivity + quality scorecard (M119)')}`);
+  console.log(`                          ${cyan('# productivity + quality (M119) + self-evaluation (M356: judge throughput,')}`);
+  console.log(`                          ${cyan('#   authenticated merges, cost/merge, dispatch→verdict latency, capability axis)')}`);
   console.log(`    ashlr fleet oversight [--json]    ${cyan('# CEO scorecard: quality + manager + vision + goals (M122)')}`);
   console.log(`    ashlr fleet judge-traces [--limit N] [--outcome-only] [--json]`);
   console.log(`                          ` + cyan('# list/inspect judge traces + outcome-link rate (M141)'));

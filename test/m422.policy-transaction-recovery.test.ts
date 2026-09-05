@@ -9,7 +9,13 @@ import { recoverEnrollmentRegistry } from '../src/core/sandbox/policy.js';
 import { assurePrivateStoragePath } from '../src/core/util/private-storage.js';
 
 const policyModuleUrl = new URL('../src/core/sandbox/policy.ts', import.meta.url).href;
-const policyChildTimeoutMs = process.platform === 'win32' ? 12_000 : 8_000;
+// Hosted Windows shards can take ~20s to cold-start tsx while other authority
+// tests contend for CPU. Match the workflow's existing 30s per-test budget so
+// the harness does not kill a healthy recovery subprocess prematurely.
+const policyChildTimeoutMs = process.platform === 'win32' ? 30_000 : 8_000;
+// The suite deadline must outlive a child's own deadline so Vitest never
+// aborts recovery while spawnSync is still deciding whether the child hung.
+const policySuiteTimeoutMs = process.platform === 'win32' ? policyChildTimeoutMs + 5_000 : 15_000;
 const children = new Set<ChildProcess>();
 let home: string;
 let previousHome: string | undefined;
@@ -130,7 +136,7 @@ function runEnrollmentSnapshot(): unknown {
     cwd: process.cwd(),
     env: { ...process.env, HOME: home, USERPROFILE: home, ASHLR_HOME: join(home, '.ashlr') },
     encoding: 'utf8',
-    timeout: 8_000,
+    timeout: policyChildTimeoutMs,
   });
   if (child.error) throw child.error;
   expect(child.status, child.stderr).toBe(0);
@@ -164,7 +170,7 @@ afterEach(async () => {
   rmSync(home, { recursive: true, force: true });
 });
 
-describe('M422 policy transaction recovery', { timeout: 15_000 }, () => {
+describe('M422 policy transaction recovery', { timeout: policySuiteTimeoutMs }, () => {
   it.each([
     ['zero-byte', Buffer.alloc(0)],
     ['truncated', Buffer.from('{"version":2,"state":"prepared"', 'utf8')],

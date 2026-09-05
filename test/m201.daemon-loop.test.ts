@@ -285,6 +285,40 @@ vi.mock('../src/core/fleet/regression-sentinel.js', () => ({
   bisectAndRevert: (...args: unknown[]) => mockBisectAndRevert(...args),
 }));
 
+// M505 learning-loop sweeps (reached via runAncillaryMaintenance's
+// `await import(...)`). Default to the same all-zero/no-op shape the real
+// sweeps return against an empty isolated H1 fixture home, so every existing
+// test in this file observes byte-identical behavior to before these mocks
+// existed. Group H below overrides these per-test to prove loop.ts's
+// observability wiring (console.warn line + producerMaintenance counters).
+//
+// Both modules export other real functions genuinely depended on elsewhere
+// in this same suite (e.g. skill-attestation.ts's attestSkillCard calls
+// post-merge-credit.js's hasReleasedPostMergeCredit) — so these mocks must
+// preserve everything via importOriginal and override ONLY the two sweep
+// exports, not replace the module wholesale.
+const mockSweepRejectionLearning = vi.fn(() => ({
+  scanned: 0, written: 0, skipped: 0, sourceComplete: true,
+}));
+vi.mock('../src/core/fleet/self-improve.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/fleet/self-improve.js')>();
+  return {
+    ...actual,
+    sweepRejectionLearning: (...args: unknown[]) => mockSweepRejectionLearning(...args),
+  };
+});
+
+const mockSweepPostMergeCreditReleases = vi.fn(() => ({
+  scanned: 0, released: 0, skipped: 0, sourceComplete: true,
+}));
+vi.mock('../src/core/fleet/post-merge-credit.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/fleet/post-merge-credit.js')>();
+  return {
+    ...actual,
+    sweepPostMergeCreditReleases: (...args: unknown[]) => mockSweepPostMergeCreditReleases(...args),
+  };
+});
+
 // ---------------------------------------------------------------------------
 // Auxiliary mocks (benign pass-through — not under test here).
 // ---------------------------------------------------------------------------
@@ -419,10 +453,12 @@ import {
   daemonSpendGuardPath,
   loadDaemonState,
   loadDaemonStateStrict,
+  readDaemonLockOwner,
   readDaemonSpendGuard,
   releaseDaemonLock,
   saveDaemonState,
 } from '../src/core/daemon/state.js';
+import { diagnoseGuardHealth } from '../src/core/daemon/guard-health.js';
 import {
   createProposal,
   inboxDir,
@@ -10856,6 +10892,104 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
       vi.useRealTimers();
     }
   });
+
+  it('E10: the daemon lock heartbeat advances every ~30s through a long-running tick, keeping guard-health healthy past the 2-minute staleness threshold', async () => {
+    // M303/guard-health regression: heartbeatDaemonLock() (the function that
+    // writes daemon.lock's heartbeatAt) was previously called ONLY from
+    // state-recovery.ts restart/recovery flows — never from the resident tick
+    // loop — so heartbeatAt stayed frozen at acquiredAt forever, and
+    // diagnoseGuardHealth() flipped 'critical' ~2 minutes into every ordinary
+    // run despite the daemon being perfectly healthy. This proves the fix
+    // (wiring heartbeatDaemonLock into runDaemon's existing 30s
+    // startDaemonLockHeartbeat interval) survives a single tick that blocks
+    // for well over 2 minutes — e.g. a 30-minute engine run — since the
+    // interval runs on Node's timer queue independent of the in-flight
+    // dispatch.
+    vi.useFakeTimers();
+    enrollWithItems(1);
+    let release!: () => void;
+    mockRunSwarm.mockImplementation(() => new Promise((resolveRun) => {
+      release = () => resolveRun({
+        id: 'e10-long-tick', status: 'done', goal: '', result: '',
+        usage: { totalTokens: 1, estCostUsd: 0.001, steps: 1 },
+      });
+    }));
+
+    const running = runDaemon(cfgBuiltin({ perTickItems: 1, parallel: 1 }), {
+      once: true, dryRun: false,
+    });
+
+    try {
+      await vi.waitFor(() => expect(mockRunSwarm).toHaveBeenCalledTimes(1));
+      const initialOwner = readDaemonLockOwner();
+      expect(initialOwner).not.toBeNull();
+      const initialHeartbeatAt = initialOwner!.heartbeatAt;
+      // The spend guard is armed for the in-flight item before runSwarm is
+      // called (tick() arms it ahead of dispatch) — the exact live condition
+      // under which guard-health's stale-heartbeat check is meaningful.
+      expect(readDaemonSpendGuard()).toMatchObject({ exists: true, malformed: false });
+
+      // Advance well past the 2-minute guard-health staleness threshold
+      // while the tick is STILL in flight (mockRunSwarm has not resolved).
+      await vi.advanceTimersByTimeAsync(150_000);
+
+      const advancedOwner = readDaemonLockOwner();
+      expect(advancedOwner).not.toBeNull();
+      expect(advancedOwner!.heartbeatAt).not.toBe(initialHeartbeatAt);
+      expect(Date.parse(advancedOwner!.heartbeatAt) - Date.parse(initialHeartbeatAt)).toBeGreaterThanOrEqual(120_000);
+
+      const diagnosis = diagnoseGuardHealth();
+      const blockIds = diagnosis.blocks.map((b) => b.id);
+      expect(blockIds).not.toContain('daemon-spend-guard-stale-live-owner');
+      expect(blockIds).not.toContain('daemon-spend-guard-armed');
+
+      release();
+      await running;
+    } finally {
+      release?.();
+      vi.useRealTimers();
+    }
+  });
+
+  it('E11: the daemon lock heartbeat keeps advancing purely from residency in the loop, independent of tick/dispatch activity', async () => {
+    // Complementary to E10: proves the interval is scoped to the WHOLE
+    // runDaemon() lifetime (set up once, before the once/continuous branch),
+    // not to any individual tick — an idle, no-backlog resident loop still
+    // heartbeats every ~30s across its inter-tick sleeps.
+    vi.useFakeTimers();
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [],
+      items: [],
+    });
+    const cfg = cfgBuiltin({});
+    cfg.daemon = {
+      ...cfg.daemon,
+      mode: 'continuous',
+      idleBackoffMs: 40_000,
+    } as AshlrConfig['daemon'];
+    mockLoadConfig.mockReturnValue(cfg);
+
+    const running = runDaemon(cfg, { once: false, dryRun: false, maxCycles: 100 });
+
+    try {
+      await vi.waitFor(() => expect(loadDaemonState().ticks.length).toBeGreaterThanOrEqual(1));
+      const firstHeartbeatAt = readDaemonLockOwner()!.heartbeatAt;
+
+      // >2 minutes of purely idle (no-backlog, nothing dispatched) resident
+      // uptime, spanning several idleBackoffMs sleeps between quick ticks.
+      await vi.advanceTimersByTimeAsync(150_000);
+
+      const laterHeartbeatAt = readDaemonLockOwner()!.heartbeatAt;
+      expect(Date.parse(laterHeartbeatAt) - Date.parse(firstHeartbeatAt)).toBeGreaterThanOrEqual(120_000);
+      expect(mockRunSwarm).not.toHaveBeenCalled();
+    } finally {
+      fx.setKill(true);
+      await vi.advanceTimersByTimeAsync(1_001);
+      await running;
+      vi.useRealTimers();
+    }
+  });
 });
 
 // ===========================================================================
@@ -10953,5 +11087,114 @@ describe('M201 — Group G: concurrent dispatch routing wire guards', () => {
 
     expect(source).toContain('concurrentAssignedRouteReason({');
     expect(source).toContain('candidateAllowed: effectiveGeneratedRepairCandidateAllowed(item, _backend, routingCfg)');
+  });
+});
+
+// ===========================================================================
+// Group H — M505 learning-sweep observability
+// ===========================================================================
+//
+// sweepRejectionLearning/sweepPostMergeCreditReleases results were previously
+// discarded by runAncillaryMaintenance's caller — "is the fleet actually
+// learning" required forensics. This proves both sweeps' {scanned, written|
+// released, skipped, sourceComplete} now land on the tick's
+// producerMaintenance record, and that a concise console.warn line is
+// emitted only when something was actually scanned/written (silent on an
+// all-zero pass, to avoid per-tick noise).
+
+describe('M201 — Group H: M505 learning-sweep observability', () => {
+  it('H1: a rejection-learning sweep with writes logs a concise summary line and records producerMaintenance counters', async () => {
+    enrollWithItems(0);
+    mockSweepRejectionLearning.mockReturnValueOnce({ scanned: 5, written: 2, skipped: 3, sourceComplete: true });
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      const result = await tick(
+        { ...cfgBuiltin({}), foundry: { selfImprove: true } } as AshlrConfig,
+        { dryRun: false },
+      );
+
+      expect(result.reason).toBe('no-backlog');
+      expect(result.producerMaintenance).toMatchObject({
+        rejectionLearningScanned: 5,
+        rejectionLearningWritten: 2,
+        rejectionLearningSkipped: 3,
+        rejectionLearningSourceComplete: true,
+      });
+      const logged = warnSpy.mock.calls.some((call) =>
+        String(call[0]).includes('sweepRejectionLearning') &&
+        String(call[0]).includes('scanned=5') &&
+        String(call[0]).includes('written=2'));
+      expect(logged).toBe(true);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('H2: an all-zero rejection-learning sweep stays quiet but still records producerMaintenance counters', async () => {
+    enrollWithItems(0);
+    mockSweepRejectionLearning.mockReturnValueOnce({ scanned: 0, written: 0, skipped: 0, sourceComplete: true });
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      const result = await tick(
+        { ...cfgBuiltin({}), foundry: { selfImprove: true } } as AshlrConfig,
+        { dryRun: false },
+      );
+
+      expect(result.producerMaintenance).toMatchObject({
+        rejectionLearningScanned: 0,
+        rejectionLearningWritten: 0,
+        rejectionLearningSkipped: 0,
+        rejectionLearningSourceComplete: true,
+      });
+      const logged = warnSpy.mock.calls.some((call) => String(call[0]).includes('sweepRejectionLearning:'));
+      expect(logged).toBe(false);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('H3: a post-merge-credit sweep with releases logs a concise summary line and records producerMaintenance counters', async () => {
+    enrollWithItems(0);
+    mockSweepPostMergeCreditReleases.mockReturnValueOnce({ scanned: 4, released: 1, skipped: 3, sourceComplete: true });
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      const result = await tick(cfgBuiltin({}), { dryRun: false });
+
+      expect(result.producerMaintenance).toMatchObject({
+        postMergeCreditScanned: 4,
+        postMergeCreditReleased: 1,
+        postMergeCreditSkipped: 3,
+        postMergeCreditSourceComplete: true,
+      });
+      const logged = warnSpy.mock.calls.some((call) =>
+        String(call[0]).includes('sweepPostMergeCreditReleases') &&
+        String(call[0]).includes('scanned=4') &&
+        String(call[0]).includes('released=1'));
+      expect(logged).toBe(true);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('H4: an all-zero post-merge-credit sweep stays quiet but still records producerMaintenance counters', async () => {
+    enrollWithItems(0);
+    mockSweepPostMergeCreditReleases.mockReturnValueOnce({ scanned: 0, released: 0, skipped: 0, sourceComplete: true });
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      const result = await tick(cfgBuiltin({}), { dryRun: false });
+
+      expect(result.producerMaintenance).toMatchObject({
+        postMergeCreditScanned: 0,
+        postMergeCreditReleased: 0,
+      });
+      const logged = warnSpy.mock.calls.some((call) => String(call[0]).includes('sweepPostMergeCreditReleases:'));
+      expect(logged).toBe(false);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });

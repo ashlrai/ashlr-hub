@@ -95,9 +95,15 @@ import {
   supportsGovernedModelCalls,
 } from './model-call-authority.js';
 import { withToolEnv } from '../env-bridge.js';
-import { buildEngineCommand, engineInstalled, spawnEngine, DEFAULT_ENGINE_BACKSTOP_MS } from './engines.js';
+import { buildEngineCommand, engineInstalled, spawnEngine, describeRunEventForStream, DEFAULT_ENGINE_BACKSTOP_MS } from './engines.js';
 import { resolveEngineSpec } from './engine-registry.js';
-import { nullSink } from './streaming.js';
+import {
+  nullSink,
+  withOptionalRunOutputPersistence,
+  gcRunStreams,
+  endStreamSink,
+  failStreamSink,
+} from './streaming.js';
 import type { StreamSink } from './streaming.js';
 import { withRetry } from './retry.js';
 import { verifyTaskStructured } from './verify.js';
@@ -2155,6 +2161,9 @@ export async function runGoal(
   cfg: AshlrConfig,
   opts: RunOptions,
 ): Promise<RunState> {
+  // Retention is independent of capture activation and must not wait for a
+  // later write (including cancelled/default-off runs).
+  gcRunStreams(true);
   if (opts.providerQuota) {
     if (opts.allowCloud === true || (opts.engine !== undefined && opts.engine !== 'builtin')) {
       throw new GoalConductorQuotaRefusal('goal-conductor-provider-route-not-builtin-local');
@@ -2268,7 +2277,20 @@ async function runGoalInternal(
   // M11: read __sink (StreamSink) from opts. The CLI attaches it for live progress.
   // Falls back to nullSink() when absent (non-TTY, tests, --no-stream).
   const rawSink = (opts as RunOptions & { __sink?: StreamSink }).__sink;
-  const sink: StreamSink = typeof rawSink === 'function' ? rawSink : nullSink();
+  const callerSink: StreamSink = typeof rawSink === 'function' ? rawSink : nullSink();
+  // Durable raw output is privacy-sensitive and therefore exact opt-in.
+  // The caller's in-memory/live sink is always preserved unchanged.
+  // runId is guaranteed set by the caller (runGoal assigns it before ever
+  // reaching runGoalInternal — see runGoal's `opts = { ...opts, runId: id }`
+  // above); the `undefined` fallback only covers the opts.signal?.aborted
+  // early-return in runGoal that calls runGoalInternal before that
+  // assignment, where there is nothing worth persisting anyway.
+  const runStreamIdentity = opts.resumeId ?? opts.runId;
+  const sink: StreamSink = runStreamIdentity
+    ? withOptionalRunOutputPersistence(callerSink, runStreamIdentity, cfg)
+    : callerSink;
+
+  try {
 
   // M11: opt-in model verification. Default OFF → the per-task verify step is
   // heuristic-only, charging NO extra model calls (preserves M4 deterministic
@@ -3134,6 +3156,16 @@ async function runGoalInternal(
         const engineResult = await spawnEngine(cmd, cfg, {
           timeoutMs: cfg.foundry?.timeoutMs ?? DEFAULT_ENGINE_BACKSTOP_MS,
           ...(opts.signal ? { signal: opts.signal } : {}),
+          // v333: forward per-line engine stdout (as it arrives, not just at
+          // completion) into `sink` — the ONLY thing previously fed into sink
+          // here was the two lifecycle emit() calls below (engine failed /
+          // engine completed). This closes the gap run-stream.ts's header
+          // comment documents: engine subprocess text now reaches the
+          // optional durable fileSink() teed into `sink` above when opted in.
+          onEvent: (ev) => {
+            const described = describeRunEventForStream(ev);
+            if (described) emit(sink, described);
+          },
         });
 
         // Preserve any usage parsed from partial engine output even when the
@@ -4444,8 +4476,14 @@ async function runGoalInternal(
   }
 
   return state;
+    } finally {
+      finalizeEngineer();
+    }
+  } catch (error) {
+    failStreamSink(sink, error);
+    throw error;
   } finally {
-    finalizeEngineer();
+    endStreamSink(sink);
   }
 }
 

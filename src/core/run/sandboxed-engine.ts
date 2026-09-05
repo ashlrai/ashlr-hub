@@ -57,7 +57,15 @@ import {
   scopeHintFiles,
   summarizeDelegationScope,
 } from './delegation-scope.js';
-import { buildEngineCommand, spawnEngine } from './engines.js';
+import { buildEngineCommand, spawnEngine, describeRunEventForStream } from './engines.js';
+import {
+  nullSink,
+  withOptionalRunOutputPersistence,
+  emitSinkEvent,
+  endStreamSink,
+  failStreamSink,
+  type RunOutputStreamClaim,
+} from './streaming.js';
 import {
   applyLocusPreMutateGate,
   formatPreMutateBlockers,
@@ -172,6 +180,8 @@ export interface RunEngineSandboxedOptions {
   signal?: AbortSignal;
   /** Internal whole-attempt generation for mutating-tool evidence. */
   effectGeneration?: string;
+  /** Internal exclusive durable-output authority for a best-of-N candidate. */
+  runOutputStreamClaim?: RunOutputStreamClaim;
   /** Internal TITRR handoff: caller emits the one authoritative terminal action. */
   deferTerminalAction?: boolean;
   /**
@@ -1373,6 +1383,20 @@ export async function runEngineSandboxed(
   const id = assertSafeExecutionIdentity(
     opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
   );
+  // Sandboxed engines have no live caller sink. Durable raw output remains
+  // disabled unless the same explicit privacy opt-in used by runGoal is true.
+  const streamSink = withOptionalRunOutputPersistence(
+    nullSink(),
+    id,
+    cfg,
+    opts.runOutputStreamClaim,
+  );
+  // This outer lifecycle guard owns the sink from the moment it is created.
+  // The main execution block below also finalizes it, but StreamSink terminal
+  // methods are idempotent; this guard covers every earlier refusal/return
+  // (abort, kill switch, sandbox failure, or mutation-fence failure) and any
+  // exception before that block is entered.
+  try {
   const runCreatedAtIso = new Date().toISOString();
   const recordSandboxedRunAgentAction = opts.deferTerminalAction
     ? (_fields: Parameters<typeof writeSandboxedRunAgentAction>[0]) => {}
@@ -1729,6 +1753,12 @@ export async function runEngineSandboxed(
         timeoutMs: cfg.foundry?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         launcher: launcher ?? undefined,
         ...(opts.signal ? { signal: opts.signal } : {}),
+        // v333: forward per-line engine stdout into the durable file sink as
+        // it arrives — see the comment on `streamSink` above.
+        onEvent: (ev) => {
+          const described = describeRunEventForStream(ev);
+          if (described) emitSinkEvent(streamSink, described);
+        },
       });
       const invocationCount = 1 + (res.configRecoveryAttempts ?? 0);
       if (res.configRecoveryAttempts) {
@@ -2308,7 +2338,11 @@ export async function runEngineSandboxed(
       candidateProposalId,
       proposalOutcome: proposalOutcomeResult,
     };
+  } catch (error) {
+    failStreamSink(streamSink, error);
+    throw error;
   } finally {
+    endStreamSink(streamSink);
     if (!sandboxRetention) {
       try {
         rmSync(hooksDir, { recursive: true, force: true });
@@ -2324,6 +2358,9 @@ export async function runEngineSandboxed(
       }
     }
     releaseOutwardMutationFence(executionFence);
+  }
+  } finally {
+    endStreamSink(streamSink);
   }
 }
 
@@ -2401,6 +2438,15 @@ export async function runApiModelSandboxed(
   const id = assertSafeExecutionIdentity(
     opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
   );
+  // Keep in-process API models on the exact same durable-output policy as
+  // external CLI engines. The shared helper is an exact typed opt-in and
+  // returns the caller sink unchanged for absent/false/string-truthy config.
+  const streamSink = withOptionalRunOutputPersistence(
+    nullSink(),
+    id,
+    cfg,
+    opts.runOutputStreamClaim,
+  );
   const runCreatedAtIso = new Date().toISOString();
   const recordSandboxedRunAgentAction = (
     fields: Parameters<typeof writeSandboxedRunAgentAction>[0],
@@ -2461,13 +2507,15 @@ export async function runApiModelSandboxed(
       status: 'aborted',
       actionCounts,
     });
-    return {
+    const result = {
       state: withProposalOutcome(
         mk({ status: 'aborted', result: 'run cancelled before execution', terminationReason: 'cancelled' }),
         undefined,
         actionCounts,
       ),
     };
+    endStreamSink(streamSink);
+    return result;
   }
 
   // Locus identity pre-mutate gate (opt-in via LOCUS_ENFORCE).
@@ -2492,10 +2540,12 @@ export async function runApiModelSandboxed(
         status: 'failed',
         actionCounts,
       });
-      return {
+      const result = {
         state: withProposalOutcome(mk({ status: 'failed', result: msg }), outcome, actionCounts),
         proposalOutcome: outcome,
       };
+      endStreamSink(streamSink);
+      return result;
     }
   }
 
@@ -2529,10 +2579,12 @@ export async function runApiModelSandboxed(
         status: 'failed',
         actionCounts,
       });
-      return {
+      const result = {
         state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts),
         proposalOutcome: outcome,
       };
+      endStreamSink(streamSink);
+      return result;
     }
   }
   if (opts.delegationScope) {
@@ -2571,13 +2623,15 @@ export async function runApiModelSandboxed(
     if (createdHere) {
       try { wt.removeSandbox(sb); } catch { /* removal is idempotent */ }
     }
-    return {
+    const result = {
       state: withProposalOutcome(
         mk({ status: 'aborted', result: 'run cancelled before provider request', terminationReason: 'cancelled' }),
         undefined,
         actionCounts,
       ),
     };
+    endStreamSink(streamSink);
+    return result;
   }
 
   const executionFence = acquireOutwardMutationFence();
@@ -2606,10 +2660,12 @@ export async function runApiModelSandboxed(
       workItemId: opts.workItemId, workSource: opts.workSource,
       outcome, status: 'failed', actionCounts,
     });
-    return {
+    const result = {
       state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts),
       proposalOutcome: outcome,
     };
+    endStreamSink(streamSink);
+    return result;
   }
 
   let proposalId: string | undefined;
@@ -2617,6 +2673,8 @@ export async function runApiModelSandboxed(
   let proposalOutcomeResult: RunProposalOutcome | undefined;
   let providerContacted = false;
   const runStartedAt = Date.now();
+  let streamedTask: RunTask | undefined;
+  let streamFailed = false;
 
   try {
     // A verified local shadow supplies an immutable numeric-loopback binding.
@@ -2723,6 +2781,11 @@ export async function runApiModelSandboxed(
             summary,
             usage: { tokensIn, tokensOut, steps: 1, estCostUsd: 0 },
           });
+          emitSinkEvent(streamSink, {
+            kind: 'log',
+            taskId: 't1',
+            text: `model step: ${summary.slice(0, 1_024)}`,
+          });
         },
       };
     };
@@ -2738,6 +2801,7 @@ export async function runApiModelSandboxed(
       deps: [],
       status: 'pending',
     };
+    streamedTask = task;
 
     // M264: build elite context bundle for local engines (flag-gated, never-throws).
     // Frontier engines are excluded by isLocalContextEnabled. Flag-off → systemPrefix
@@ -2755,10 +2819,18 @@ export async function runApiModelSandboxed(
       }
     }
 
+    // Persist only bounded/redacted output. Do not persist the raw goal as a
+    // lifecycle event: goals can contain credentials or proprietary context.
+    emitSinkEvent(streamSink, {
+      kind: 'task-start',
+      taskId: task.id,
+      text: `api-model task started (${engineModel.slice(0, 256)})`,
+    });
     await runTask(task, client, {
       tools,
       budget,
       usage,
+      sink: streamSink,
       adaptivePrompts: adaptivePromptsEnabled(cfg),
       reserveModelStep,
       onStep: (step) => {
@@ -2770,6 +2842,13 @@ export async function runApiModelSandboxed(
           usage.steps = next.steps;
           usage.estCostUsd = next.estCostUsd;
         }
+        // RunStep summaries are already bounded by agent-loop; the durable
+        // sink applies canonical cross-chunk secret scrubbing before disk.
+        emitSinkEvent(streamSink, {
+          kind: 'log',
+          taskId: step.taskId,
+          text: `${step.kind} step: ${step.summary.slice(0, 1_024)}`,
+        });
       },
       systemPrefix: m264SystemPrefix,
       // Direct API runs expose only reversible sandbox write tools. A fresh
@@ -3006,7 +3085,29 @@ export async function runApiModelSandboxed(
       proposalOutcome: proposalOutcomeResult,
       ...(providerContacted ? { providerContacted: true } : {}),
     };
+  } catch (error) {
+    streamFailed = true;
+    emitSinkEvent(streamSink, {
+      kind: 'log',
+      taskId: streamedTask?.id,
+      text: 'api-model task failed unexpectedly',
+    });
+    failStreamSink(streamSink, error);
+    throw error;
   } finally {
+    if (!streamFailed) {
+      const terminal = opts.signal?.aborted
+        ? 'cancelled'
+        : streamedTask?.status === 'done'
+          ? 'done'
+          : 'failed';
+      emitSinkEvent(streamSink, {
+        kind: 'task-done',
+        taskId: streamedTask?.id,
+        text: `api-model task ${terminal}`,
+      });
+      endStreamSink(streamSink);
+    }
     if (createdHere) {
       try {
         wt.removeSandboxWithBorrowedAuthority(sb!, cleanupAuthority);

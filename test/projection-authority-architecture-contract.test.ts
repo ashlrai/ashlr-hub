@@ -29,30 +29,13 @@ const DORMANT_SPECIFIERS = [
 ] as const;
 
 function importedSpecifiers(path: string): string[] {
-  const source = ts.createSourceFile(
-    path,
-    readFileSync(path, 'utf8'),
-    ts.ScriptTarget.Latest,
-    true,
-  );
-  const specifiers: string[] = [];
-
-  function visit(node: ts.Node): void {
-    const firstArgument = ts.isCallExpression(node) ? node.arguments[0] : undefined;
-    if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
-      node.moduleSpecifier && ts.isStringLiteralLike(node.moduleSpecifier)) {
-      specifiers.push(node.moduleSpecifier.text);
-    } else if (ts.isCallExpression(node) &&
-      (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
-        (ts.isIdentifier(node.expression) && node.expression.text === 'require')) &&
-      node.arguments.length === 1 && firstArgument && ts.isStringLiteralLike(firstArgument)) {
-      specifiers.push(firstArgument.text);
-    }
-    ts.forEachChild(node, visit);
-  }
-
-  visit(source);
-  return specifiers;
+  // preProcessFile extracts static imports, exports, dynamic imports, and
+  // require() specifiers without building and traversing a full AST for every
+  // source file. This keeps the repository-wide contract deterministic under
+  // heavily contended CI shards instead of relying on a larger timeout.
+  return ts.preProcessFile(readFileSync(path, 'utf8'), true, true)
+    .importedFiles
+    .map((entry) => entry.fileName);
 }
 
 describe('projection authority architecture contract', () => {

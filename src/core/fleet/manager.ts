@@ -21,6 +21,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import type { AgentSemanticEventV1, AshlrConfig, Proposal, QualityMetrics } from '../types.js';
+import type { ProposalSourceQuality } from '../inbox/store.js';
 import { recordDecision } from './decisions-ledger.js';
 import { judgeDecisionReasonCode } from './judge-decision-metadata.js';
 import { recordJudgeTrace } from './judge-trace.js';
@@ -188,6 +189,30 @@ export interface ManagerReport {
   narrative: string;
   /** Model id used as the judge (e.g. 'claude-opus-4-5' or 'local'). */
   judgeEngine: string;
+  /**
+   * Quality of the pending-proposal read that seeded `verdicts`. A degraded
+   * or incomplete read must never be indistinguishable from "zero pending
+   * proposals" — `proposals: []` on a store-read failure previously looked
+   * identical to a genuinely quiet queue. `sourceState !== 'healthy'` (or
+   * `complete === false`) means the empty/partial verdict list is UNKNOWN,
+   * not confirmed-empty; only a `healthy` + `complete` read confirms it.
+   */
+  proposalSourceQuality: ProposalSourceQuality;
+}
+
+/** Explicit degraded default — mirrors dashboard.ts's degradedProposalSource(). */
+function degradedProposalSourceQuality(): ProposalSourceQuality {
+  return {
+    sourceState: 'degraded',
+    sourcePresent: false,
+    complete: false,
+    stopReasons: ['io-error'],
+    filesDiscovered: 0,
+    filesRead: 0,
+    bytesRead: 0,
+    invalidFiles: 0,
+    unreadableFiles: 1,
+  };
 }
 
 /** Truncate diff to ~6KB for the judge prompt. */
@@ -1421,6 +1446,7 @@ export async function runManager(
     recommendations: ['runManager failed to initialize — check provider configuration.'],
     narrative: 'Manager could not run due to an initialization error.',
     judgeEngine,
+    proposalSourceQuality: degradedProposalSourceQuality(),
   });
 
   try {
@@ -1479,12 +1505,24 @@ export async function runManager(
     };
 
     // ── Load pending proposals ─────────────────────────────────────────────
+    // A bare read failure must never look identical to "no pending
+    // proposals" — listProposalsDetailed() surfaces sourceState/complete so
+    // a degraded read is distinguishable from a genuinely empty queue.
+    // proposals stays [] (and proposalSourceQuality stays degraded) unless
+    // the read is complete and healthy, mirroring dashboard.ts's buildProduction.
     let proposals: Proposal[] = [];
+    let proposalSourceQuality: ProposalSourceQuality = degradedProposalSourceQuality();
     try {
-      const { listProposals } = await import('../inbox/store.js');
-      proposals = listProposals({ status: 'pending' }).slice(0, limit);
+      const { listProposalsDetailed } = await import('../inbox/store.js');
+      const proposalRead = listProposalsDetailed({ status: 'pending', requireComplete: true });
+      const { proposals: _proposals, ...quality } = proposalRead;
+      proposalSourceQuality = quality;
+      if (proposalRead.complete && proposalRead.sourceState !== 'degraded') {
+        proposals = proposalRead.proposals.slice(0, limit);
+      }
     } catch {
       proposals = [];
+      proposalSourceQuality = degradedProposalSourceQuality();
     }
 
     // ── Judge each proposal ────────────────────────────────────────────────
@@ -1618,6 +1656,12 @@ export async function runManager(
 
     const concerns = buildConcerns(verdicts);
     const recommendations = buildRecommendations(metrics, verdicts);
+    if (proposalSourceQuality.sourceState === 'degraded' || proposalSourceQuality.complete === false) {
+      recommendations.unshift(
+        'Proposal store read degraded or incomplete — pending-proposal count above is UNKNOWN, ' +
+        'not confirmed empty. See proposalSourceQuality for detail.',
+      );
+    }
     const narrative = buildNarrative(metrics, verdicts);
 
     if (judgeEnginesUsed.size > 1) {
@@ -1636,6 +1680,7 @@ export async function runManager(
       recommendations,
       narrative,
       judgeEngine,
+      proposalSourceQuality,
     };
 
     writeReport(report);

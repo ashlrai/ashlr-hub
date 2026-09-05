@@ -19,7 +19,7 @@
 import type { AppNotification, NotificationCategory } from './types.js';
 import { sortNotifications } from './deriveNotifications.js';
 
-const MUTE_STORAGE_KEY = 'ashlr.notifications.mutedCategories.v1';
+const MUTE_STORAGE_KEY = 'ashlr.notifications.mutedCategories.v1'; // gitleaks:allow -- public preference key
 const DESKTOP_PREF_STORAGE_KEY = 'ashlr.notifications.desktopEnabled.v1';
 
 export type DesktopPermission = 'unsupported' | 'default' | 'granted' | 'denied';

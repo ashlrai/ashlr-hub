@@ -44,6 +44,7 @@ jobs:
             test_args: >-
               test/setup/home.test.ts test/classify.test.ts
               test/m2.doctor.test.ts test/m3.tools-registry.test.ts
+              test/m18.editors.test.ts
               test/m43.verify-commands.test.ts
               test/m113.coordinator-wire.test.ts test/m373.directory-durability.test.ts
               test/m395.effect-terminal-retention.test.ts
@@ -84,6 +85,7 @@ jobs:
               test/m457.external-skill-artifact-firewall.test.ts
               test/m460.policy-assignment-receipts.test.ts
               test/m463.claimed-batch-admission.test.ts
+              test/m526.execution-identity-v1.test.ts
           - os: windows-latest
             label: windows, portability overflow
             test_args: >-
@@ -95,6 +97,7 @@ jobs:
               test/m385.cutoff-checkpoint-scheduler.test.ts
               test/m407.verification-mutation-fence.test.ts
               test/m408.sandbox-creation-mutation-fence.test.ts
+              test/m11.stream-file-sink.test.ts
               test/m418.pulse-quiescence.test.ts
               test/m420.remote-handoff-recovery.test.ts
               test/m421.legacy-pulse-quiescence.test.ts

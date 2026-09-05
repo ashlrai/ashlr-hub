@@ -17,6 +17,7 @@ import {
   buildRuntimeReleaseEvidenceTrustRoot,
   parseRuntimeReleaseEvidenceEnvelope,
   parseRuntimeReleaseEvidenceTrustRoot,
+  RUNTIME_RELEASE_EVIDENCE_CURRENT_COVERAGE_V3,
   RUNTIME_RELEASE_EVIDENCE_ENVELOPE_DOMAIN_V2,
   RUNTIME_RELEASE_EVIDENCE_REQUIRED_COVERAGE_V2,
   runtimeReleaseEvidenceKeyId,
@@ -57,7 +58,7 @@ function releaseManifest(marker = 'first', expectedRevision = REVISION): string 
     version: '3.1.0',
     type: 'module',
     bin: { ashlr: 'bin/ashlr' },
-    files: ['bin', 'dist', 'scripts/run-verify-command.mjs'],
+    files: ['bin', 'dist', 'scripts/run-verify-command.mjs', 'scripts/scorecard-history-worker.mjs'],
     dependencies: { example: '1.0.0' },
     bundledDependencies: ['example'],
   }, null, 2)}\n`);
@@ -78,6 +79,7 @@ function releaseManifest(marker = 'first', expectedRevision = REVISION): string 
   write(join(packageRoot, 'bin', 'ashlr'), '#!/usr/bin/env node\n', 0o755);
   write(join(packageRoot, 'dist', 'cli', 'index.js'), `export const marker = '${marker}';\n`);
   write(join(packageRoot, 'scripts', 'run-verify-command.mjs'), 'export const run = true;\n');
+  write(join(packageRoot, 'scripts', 'scorecard-history-worker.mjs'), 'export const worker = true;\n');
   const dependencyRoot = join(packageRoot, 'node_modules');
   write(join(dependencyRoot, 'example', 'package.json'), '{"name":"example","version":"1.0.0"}\n');
   write(join(dependencyRoot, 'example', 'index.js'), 'export const example = true;\n');
@@ -197,7 +199,7 @@ describe('signed runtime release evidence envelope', () => {
       keyId: runtimeReleaseEvidenceKeyId(keys.publicKey),
       payload: {
         assurance: 'signed-observation-only',
-        coverage: RUNTIME_RELEASE_EVIDENCE_REQUIRED_COVERAGE_V2,
+        coverage: RUNTIME_RELEASE_EVIDENCE_CURRENT_COVERAGE_V3,
         expiresAt: EXPIRES_AT,
         expectedRevision: REVISION,
         issuedAt: ISSUED_AT,
@@ -411,6 +413,20 @@ describe('signed runtime release evidence envelope', () => {
     expect(parseRuntimeReleaseEvidenceEnvelope(encode(overclaim))).toEqual({
       ok: false,
       reason: 'runtime release evidence coverage is incomplete or unsupported',
+    });
+
+    const downgraded = object(signed(manifest, keys.privateKey));
+    const downgradedPayload = downgraded['payload'] as Record<string, unknown>;
+    (downgradedPayload['coverage'] as Record<string, unknown>)['artifactSet'] =
+      RUNTIME_RELEASE_EVIDENCE_REQUIRED_COVERAGE_V2.artifactSet;
+    resign(downgraded, keys.privateKey);
+    expect(verifyRuntimeReleaseEvidenceEnvelope({
+      envelope: encode(downgraded),
+      manifest,
+      trustRoot: trustRoot(keys.publicKey),
+    })).toEqual({
+      ok: false,
+      reason: 'runtime release evidence coverage does not match manifest schema',
     });
   });
 

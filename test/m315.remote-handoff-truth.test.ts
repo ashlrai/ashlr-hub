@@ -424,7 +424,7 @@ afterEach(() => {
   }
 });
 
-describe('M315 remote PR handoff truth', { timeout: 60_000 }, () => {
+describe('M315 remote PR handoff truth', () => {
   async function createRemoteHandoffProposal(beforeMerge?: (proposal: Proposal) => void) {
     const diff = addFileDiff('docs/handoff.md', 'truthful remote handoff');
     const diffHash = hashDiff(diff);

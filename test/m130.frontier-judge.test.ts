@@ -147,10 +147,25 @@ describe('m130 — judge uses Claude CLI when available', () => {
       getActiveClient: vi.fn().mockRejectedValue(new Error('no provider')),
     }));
 
-    vi.doMock('../src/core/inbox/store.js', () => ({
-      listProposals: vi.fn().mockReturnValue([makeProposal()]),
-      setStatus: vi.fn(),
-    }));
+    vi.doMock('../src/core/inbox/store.js', () => {
+      const proposals = [makeProposal()];
+      return {
+        listProposals: vi.fn().mockReturnValue(proposals),
+        listProposalsDetailed: vi.fn().mockReturnValue({
+          proposals,
+          sourceState: 'healthy',
+          sourcePresent: true,
+          complete: true,
+          stopReasons: [],
+          filesDiscovered: proposals.length,
+          filesRead: proposals.length,
+          bytesRead: 0,
+          invalidFiles: 0,
+          unreadableFiles: 0,
+        }),
+        setStatus: vi.fn(),
+      };
+    });
 
     vi.doMock('../src/core/fleet/decisions-ledger.js', () => ({
       recordDecision: vi.fn(),
@@ -208,10 +223,25 @@ describe('m130 — judge falls back to local 72b when claude unavailable', () =>
       getActiveClient: vi.fn().mockRejectedValue(new Error('no provider')),
     }));
 
-    vi.doMock('../src/core/inbox/store.js', () => ({
-      listProposals: vi.fn().mockReturnValue([makeProposal()]),
-      setStatus: vi.fn(),
-    }));
+    vi.doMock('../src/core/inbox/store.js', () => {
+      const proposals = [makeProposal()];
+      return {
+        listProposals: vi.fn().mockReturnValue(proposals),
+        listProposalsDetailed: vi.fn().mockReturnValue({
+          proposals,
+          sourceState: 'healthy',
+          sourcePresent: true,
+          complete: true,
+          stopReasons: [],
+          filesDiscovered: proposals.length,
+          filesRead: proposals.length,
+          bytesRead: 0,
+          invalidFiles: 0,
+          unreadableFiles: 0,
+        }),
+        setStatus: vi.fn(),
+      };
+    });
 
     vi.doMock('../src/core/fleet/decisions-ledger.js', () => ({
       recordDecision: vi.fn(),
@@ -273,10 +303,25 @@ describe('m130 — managerJudgeEngine=local forces local path', () => {
       getActiveClient: vi.fn().mockRejectedValue(new Error('no provider')),
     }));
 
-    vi.doMock('../src/core/inbox/store.js', () => ({
-      listProposals: vi.fn().mockReturnValue([makeProposal()]),
-      setStatus: vi.fn(),
-    }));
+    vi.doMock('../src/core/inbox/store.js', () => {
+      const proposals = [makeProposal()];
+      return {
+        listProposals: vi.fn().mockReturnValue(proposals),
+        listProposalsDetailed: vi.fn().mockReturnValue({
+          proposals,
+          sourceState: 'healthy',
+          sourcePresent: true,
+          complete: true,
+          stopReasons: [],
+          filesDiscovered: proposals.length,
+          filesRead: proposals.length,
+          bytesRead: 0,
+          invalidFiles: 0,
+          unreadableFiles: 0,
+        }),
+        setStatus: vi.fn(),
+      };
+    });
 
     vi.doMock('../src/core/fleet/decisions-ledger.js', () => ({
       recordDecision: vi.fn(),
@@ -332,10 +377,25 @@ describe('m130 — parse failure → review (fail-closed)', () => {
       getActiveClient: vi.fn().mockRejectedValue(new Error('no provider')),
     }));
 
-    vi.doMock('../src/core/inbox/store.js', () => ({
-      listProposals: vi.fn().mockReturnValue([makeProposal()]),
-      setStatus: vi.fn(),
-    }));
+    vi.doMock('../src/core/inbox/store.js', () => {
+      const proposals = [makeProposal()];
+      return {
+        listProposals: vi.fn().mockReturnValue(proposals),
+        listProposalsDetailed: vi.fn().mockReturnValue({
+          proposals,
+          sourceState: 'healthy',
+          sourcePresent: true,
+          complete: true,
+          stopReasons: [],
+          filesDiscovered: proposals.length,
+          filesRead: proposals.length,
+          bytesRead: 0,
+          invalidFiles: 0,
+          unreadableFiles: 0,
+        }),
+        setStatus: vi.fn(),
+      };
+    });
 
     vi.doMock('../src/core/fleet/decisions-ledger.js', () => ({
       recordDecision: vi.fn(),

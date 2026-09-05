@@ -46,6 +46,18 @@ The canonical Ed25519-signed manifest binds both candidate and rollback to:
 - policy epoch, activation mode, issuance, expiry, and unique plan ID; and
 - a distinct independently packaged rollback release.
 
+Current candidates must carry unsigned runtime-release manifest schema v3,
+whose domain-separated digest and artifact set bind the packaged scorecard
+history worker. Genuine pre-worker schema-v2 manifests remain parseable and
+byte-verifiable only so an independently pinned legacy release can occupy the
+rollback slot; their digest continues to use the v2 domain. If a v2 package
+does contain or declare the worker, byte verification requires it in the
+artifact set. A v2 candidate is a downgrade and fails admission.
+The evidence envelope names the v3 scorecard-worker coverage explicitly. The
+shared v2 evidence trust root remains a legacy-minimum policy so it can verify
+both sides of the pair, but verification also requires the envelope coverage to
+match its manifest schema exactly; the minimum cannot downgrade a v3 envelope.
+
 The preflight verifies the activation signature only with the distinct
 activation-authority key set. It composes M440 manifest verification, M441 release-evidence signature verification,
 M442 closed-byte launch revalidation, and M488 candidate/rollback pair

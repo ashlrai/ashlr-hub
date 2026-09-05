@@ -1,0 +1,545 @@
+/**
+ * core/web/run-stream.ts — GET /api/run/:id/events: a per-run SSE tail.
+ *
+ * WHY THIS FILE EXISTS (the honest version):
+ *
+ * The route tails two distinct durable, bounded sources:
+ *   - ~/.ashlr/run-streams/<id>.log receives exact-opt-in, scrubbed and capped
+ *     StreamSink events while supported CLI, web, daemon, API-model, and
+ *     best-of-N runs execute. It contains engine/model progress at finer
+ *     granularity than completed orchestration steps, but is deliberately not
+ *     an unredacted transcript or a guarantee that every backend emits token
+ *     deltas.
+ * By contrast, ~/.ashlr/agent-logs/*.jsonl
+ *     (src/core/run/agent-diagnostics.ts) is
+ *     metadata-only (byte/line COUNTS, never the text itself — see
+ *     AgentDiagnosticTextShape, agent-diagnostics.ts:126-130) and is appended
+ *     once per engine attempt, at completion, not during execution.
+ *   - RunState.steps[].summary (src/core/types.ts:1928-1939) IS real,
+ *     human-readable text, and IS the thing that grows on disk WHILE a run
+ *     executes: every task/tool/model/synthesize step appends one entry via
+ *     saveRun() (src/core/run/orchestrator.ts:1201, atomic write at :1271),
+ *     called at every step-completion boundary (e.g. :3103, :3160, :3168)
+ *     AND when a task first transitions to 'running' (:3294-3297, saved at
+ *     :3297) — which is a real, disk-persisted "this task just started"
+ *     signal that predates its own first step.
+ *
+ * The second source is ~/.ashlr/runs/<id>.json (loadRun()/saveRun(),
+ * orchestrator.ts). Its RunState.steps[].summary grows at task and step
+ * boundaries. A "step-output-chunk" is therefore one already-written
+ * RunStep.summary, not a model token; the separately named "output-chunk"
+ * event is the finer-grained durable stream above. Relative to polling
+ * GET /api/run/:id (src/web-ui/components/stream/useRunStream.ts), this route
+ * also provides push delivery, a tighter server-side tail interval
+ * (RUN_TAIL_POLL_MS, 500ms vs. the client's previous 2000ms / the general SSE
+ * route's 1500ms), monotonic resumable sequence ids, and server-computed stall
+ * detection.
+ *
+ * EVENT PROTOCOL
+ *   id: <seq>                 present on every resumable event (see below)
+ *   event: step-started       a RunTask left 'pending' — {taskId, index, goal}
+ *   event: step-output-chunk  a RunStep appended     — {taskId, kind, index, ts, text}
+ *   event: step-done          same RunStep, again     — {taskId, kind, index, ts, usage}
+ *   event: output-chunk        a line appended to the run's durable stream file
+ *                              (~/.ashlr/run-streams/<id>.log, written by
+ *                              streaming.ts's fileSink() — see that file's
+ *                              header for what feeds it: engine subprocess
+ *                              stdout as it arrives, not just at completion,
+ *                              plus builtin-task model-delta/tool-call/log
+ *                              events) — {taskId, kind, ts, text}. This route
+ *                              tails that bounded durable source alongside
+ *                              RunState.
+ *   event: run-done           RunState.status left 'running' — {status, result, terminationReason};
+ *                              the stream ends cleanly right after this frame
+ *   event: stall               (no id — not part of the resumable cursor) the
+ *                              source hasn't grown in >= RUN_STALL_AFTER_MS — {ageMs}
+ *
+ * SEQUENCE / RESUME
+ * Sequence ids are computed deterministically from array position, in two
+ * fixed, non-overlapping ranges, so a reconnect with `Last-Event-ID` can be
+ * served correctly just by re-deriving the same numbers from the current
+ * on-disk state and skipping anything <= that id — no per-connection replay
+ * log needs to be kept:
+ *   [0, STEP_SEQ_BASE)           one id per started task, by tasks[] index
+ *   [STEP_SEQ_BASE, +Infinity)   two ids per RunStep (chunk, done), by
+ *                                 steps[] index — pinned to a fixed base so a
+ *                                 later-appended task can never shift ids
+ *                                 already sent for earlier steps
+ *   run-done reuses the next free id in the step range once steps stop
+ *   growing (status is terminal by construction at that point).
+ *
+ * SECURITY
+ *  - Read-only. No path traversal: `id` is validated against RUN_ID_RE
+ *    (mirrors src/core/run/orchestrator.ts:327's runFilePath() grammar)
+ *    BEFORE loadRun() ever builds a path, and again defensively here even
+ *    though the caller (api.ts) already matched the same shape via
+ *    RUN_EVENTS_PATH_RE.
+ *  - Every payload passes through sanitizePublicJson() (src/core/util/
+ *    public-json.ts), same as the general SSE route's sendNamed() — this
+ *    scrubs secret-shaped substrings (scrubSecrets(), src/core/util/
+ *    scrub.ts) AND redacts concrete home-dir paths from every string in the
+ *    event, so an engine echoing an env var into a step summary cannot leak
+ *    it onto the wire.
+ *  - Shares the general SSE route's connection cap (sseConnectionCapReached()
+ *    / registerSse() / deregisterSse(), src/core/web/api.ts) — one pool, not
+ *    a second unbounded one.
+ *  - Streams from the freshly-loaded RunState on each tick (loadRun() reads
+ *    the whole small JSON record — MAX_PERSISTED_RUN_BYTES-bounded in
+ *    orchestrator.ts) and only ever writes the NEW slice since last tick;
+ *    it never slurps or buffers unbounded history growth.
+ *  - Auth: identical read-session boundary as every other GET /api/* route
+ *    (src/core/web/server.ts, gated before handleApi is even reached), plus
+ *    the same EventSource query-proof allowance as /api/events (server.ts's
+ *    isSseQueryProofPath()) since a browser EventSource cannot set the
+ *    x-ashlr-read-client header.
+ */
+
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { StringDecoder } from 'node:string_decoder';
+import type { RunState, RunTask } from '../types.js';
+import { loadRun } from '../run/orchestrator.js';
+import { gcRunStreams, readRunStreamChunk, type RunStreamReadIdentity } from '../run/streaming.js';
+import { sanitizePublicJson } from '../util/public-json.js';
+import { registerSse, deregisterSse, sseConnectionCapReached, sendJson } from './api.js';
+
+// ---------------------------------------------------------------------------
+// Route matching / run-id grammar
+// ---------------------------------------------------------------------------
+
+/** Mirrors src/core/run/orchestrator.ts:327's runFilePath() validation exactly. */
+const RUN_ID_RE = /^[\w.-]{1,200}$/;
+
+/**
+ * Matches the full route (used by api.ts's dispatcher to extract the id).
+ * Deliberately loose on the id segment — same shape as the existing
+ * `path.startsWith('/api/run/')` handling for GET /api/run/:id — so that an
+ * id shaped wrong for RUN_ID_RE (traversal attempt, stray characters,
+ * percent-encoded slash smuggling, etc.) still reaches handleRunEventsSse()
+ * and gets a real, testable 400 there instead of silently 404ing at the
+ * router. RUN_ID_RE is the one gate that actually decides safety; this is
+ * only routing.
+ */
+export const RUN_EVENTS_PATH_RE = /^\/api\/run\/([^/]+)\/events$/;
+
+// ---------------------------------------------------------------------------
+// Tuning
+// ---------------------------------------------------------------------------
+
+/** Tight-but-sane: this is localhost, and the whole point is beating the
+ * general SSE route's 1500ms poll floor for a single run the operator is
+ * actively watching. */
+const RUN_TAIL_POLL_MS = 500;
+
+/** Matches the honesty threshold the client already used when this was
+ * poll-only (src/web-ui/components/stream/useRunStream.ts's STALL_AFTER_MS)
+ * — moving the computation server-side doesn't mean moving the goalposts. */
+const RUN_STALL_AFTER_MS = 8_000;
+
+/** Once stalled, don't re-announce every 500ms tick — repeat at a calmer
+ * cadence with a fresh age so the client never needs its own timer to keep
+ * the banner's "Ns" text honest. */
+const RUN_STALL_REPEAT_MS = 5_000;
+
+/** Fixed, generous ceiling reserved for task-started ids. Step ids are
+ * pinned to this base regardless of how many tasks a run ends up with, so a
+ * task appearing later can never shift a step id already sent to a client. */
+const STEP_SEQ_BASE = 1_000_000;
+
+/** Fixed ceiling reserved for step/task/run-done ids (STEP_SEQ_BASE + up to
+ * 2 ids per step). Real runs are budget-capped at dozens of steps
+ * (DEFAULT_MAX_STEPS = 40, orchestrator.ts) — this leaves a ~5,000,000-step
+ * margin before output-chunk ids could ever collide with a step id, the same
+ * "fixed, generous ceiling" reasoning STEP_SEQ_BASE already uses. */
+const OUTPUT_SEQ_BASE = 10_000_000;
+
+// ---------------------------------------------------------------------------
+// Deterministic sequence numbering
+// ---------------------------------------------------------------------------
+
+function taskStartedSeq(taskIndex: number): number {
+  return Math.min(taskIndex, STEP_SEQ_BASE - 1);
+}
+
+function stepChunkSeq(stepIndex: number): number {
+  return STEP_SEQ_BASE + stepIndex * 2;
+}
+
+function stepDoneSeq(stepIndex: number): number {
+  return STEP_SEQ_BASE + stepIndex * 2 + 1;
+}
+
+function runDoneSeq(stepCount: number): number {
+  return STEP_SEQ_BASE + stepCount * 2;
+}
+
+type Sender = (seq: number, event: string, data: unknown) => void;
+
+/**
+ * Emit every event whose deterministic seq is > lastSeq, given the CURRENT
+ * on-disk RunState. Returns the highest seq actually emitted (or lastSeq
+ * unchanged if nothing new was found this tick).
+ */
+function emitNewEvents(run: RunState, lastSeq: number, send: Sender): number {
+  let maxSeq = lastSeq;
+
+  run.tasks.forEach((task: RunTask, i: number) => {
+    if (task.status === 'pending') return;
+    const seq = taskStartedSeq(i);
+    if (seq <= lastSeq) return;
+    send(seq, 'step-started', { taskId: task.id, index: i, goal: task.goal });
+    if (seq > maxSeq) maxSeq = seq;
+  });
+
+  run.steps.forEach((step, j) => {
+    const chunkSeq = stepChunkSeq(j);
+    if (chunkSeq > lastSeq) {
+      send(chunkSeq, 'step-output-chunk', {
+        taskId: step.taskId,
+        kind: step.kind,
+        index: j,
+        ts: step.ts,
+        text: step.summary,
+      });
+      if (chunkSeq > maxSeq) maxSeq = chunkSeq;
+    }
+    const doneSeq = stepDoneSeq(j);
+    if (doneSeq > lastSeq) {
+      send(doneSeq, 'step-done', {
+        taskId: step.taskId,
+        kind: step.kind,
+        index: j,
+        ts: step.ts,
+        usage: step.usage ?? null,
+      });
+      if (doneSeq > maxSeq) maxSeq = doneSeq;
+    }
+  });
+
+  if (run.status !== 'running') {
+    const seq = runDoneSeq(run.steps.length);
+    if (seq > lastSeq) {
+      send(seq, 'run-done', {
+        status: run.status,
+        result: run.result ?? null,
+        terminationReason: run.terminationReason ?? null,
+      });
+      if (seq > maxSeq) maxSeq = seq;
+    }
+  }
+
+  return maxSeq;
+}
+
+// ---------------------------------------------------------------------------
+// output-chunk tailing — src/core/run/streaming.ts's fileSink() writes one
+// JSONL record per persisted chunk to ~/.ashlr/run-streams/<id>.log; this
+// section tails that file the same way the rest of this route tails
+// RunState: incrementally, never re-reading history it has already sent.
+// ---------------------------------------------------------------------------
+
+function outputChunkSeq(lineIndex: number): number {
+  return OUTPUT_SEQ_BASE + lineIndex;
+}
+
+/**
+ * Per-connection tail cursor. `offset` is "bytes of the stream file already
+ * read off disk" (monotonic, always advances to the file's current size on
+ * each read); `partial` holds a trailing line read but not yet terminated by
+ * '\n' at the time it was read, carried into the next call. Neither field is
+ * derivable from `lastSeq` alone (a JSONL line's byte length isn't fixed),
+ * so — unlike the deterministic array-index math above — this cursor lives
+ * for the lifetime of ONE connection and is NOT recomputed from scratch on
+ * every tick. It IS recomputed from scratch (offset 0) once, on connection
+ * open — a bounded read (the file is capped at MAX_STREAM_FILE_BYTES,
+ * streaming.ts) — which is what makes both a fresh connection (full replay)
+ * and a reconnect with Last-Event-ID (skip-already-seen via the seq > lastSeq
+ * guard below) work through the exact same code path.
+ */
+interface OutputTailCursor {
+  offset: number;
+  lineIndex: number;
+  partial: string;
+  identity?: RunStreamReadIdentity;
+  decoder: StringDecoder;
+}
+
+function createOutputTailCursor(): OutputTailCursor {
+  return { offset: 0, lineIndex: 0, partial: '', decoder: new StringDecoder('utf8') };
+}
+
+interface StoredStreamChunkLike {
+  ts?: unknown;
+  kind?: unknown;
+  taskId?: unknown;
+  text?: unknown;
+}
+
+/**
+ * Emit every output-chunk whose deterministic seq (OUTPUT_SEQ_BASE + its
+ * line index within the file) is > lastSeq. Reads only the byte range past
+ * `cursor.offset` — never the whole file on a steady-state tick — and
+ * advances `cursor` in place. Missing file (no engine output yet, or a
+ * builtin-only run with nothing text-bearing) is a silent no-op, not an
+ * error: the stream file is best-effort observability, never load-bearing.
+ */
+function emitNewOutputChunks(
+  runId: string,
+  cursor: OutputTailCursor,
+  lastSeq: number,
+  send: Sender,
+): number {
+  let maxSeq = lastSeq;
+  const chunk = readRunStreamChunk(runId, cursor.offset, cursor.identity);
+  if (!chunk || chunk.bytes.length === 0) {
+    if (chunk) cursor.identity = chunk.identity;
+    return maxSeq;
+  }
+  cursor.offset = chunk.nextOffset;
+  cursor.identity = chunk.identity;
+
+  const text = cursor.partial + cursor.decoder.write(chunk.bytes);
+  const lines = text.split('\n');
+  // The last split element has no trailing '\n' in this pass — either it's
+  // '' (the read ended exactly on a newline) or a genuinely incomplete line
+  // (fileSink's write raced this read). Carry it forward either way.
+  cursor.partial = lines.pop() ?? '';
+
+  for (const line of lines) {
+    const lineIndex = cursor.lineIndex;
+    cursor.lineIndex += 1;
+    if (line.length === 0) continue;
+    let parsed: StoredStreamChunkLike | null = null;
+    try {
+      parsed = JSON.parse(line) as StoredStreamChunkLike;
+    } catch {
+      parsed = null; // Corrupt/partial line (e.g. truncated by a crash mid-write); skip.
+    }
+    if (!parsed || typeof parsed.text !== 'string' || typeof parsed.kind !== 'string') continue;
+    const seq = outputChunkSeq(lineIndex);
+    if (seq <= lastSeq) continue;
+    send(seq, 'output-chunk', {
+      taskId: typeof parsed.taskId === 'string' ? parsed.taskId : null,
+      kind: parsed.kind,
+      ts: typeof parsed.ts === 'string' ? parsed.ts : new Date().toISOString(),
+      text: parsed.text,
+    });
+    if (seq > maxSeq) maxSeq = seq;
+  }
+
+  return maxSeq;
+}
+
+// ---------------------------------------------------------------------------
+// Growth / stall detection
+// ---------------------------------------------------------------------------
+
+interface ProgressSnapshot {
+  startedTasks: number;
+  steps: number;
+  status: RunState['status'];
+  updatedAt: string;
+}
+
+function progressOf(run: RunState): ProgressSnapshot {
+  return {
+    startedTasks: run.tasks.filter((t) => t.status !== 'pending').length,
+    steps: run.steps.length,
+    status: run.status,
+    updatedAt: run.updatedAt,
+  };
+}
+
+function progressEqual(a: ProgressSnapshot, b: ProgressSnapshot): boolean {
+  return (
+    a.startedTasks === b.startedTasks
+    && a.steps === b.steps
+    && a.status === b.status
+    && a.updatedAt === b.updatedAt
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Header helpers
+// ---------------------------------------------------------------------------
+
+function singleHeader(req: IncomingMessage, name: string): string {
+  const raw = req.headers[name];
+  if (Array.isArray(raw)) return raw.length === 1 ? (raw[0] ?? '') : '';
+  return raw ?? '';
+}
+
+function parseLastEventId(req: IncomingMessage): number {
+  const raw = singleHeader(req, 'last-event-id');
+  if (!raw) return -1;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) && n >= -1 ? n : -1;
+}
+
+// ---------------------------------------------------------------------------
+// Route handler
+// ---------------------------------------------------------------------------
+
+/**
+ * Handle GET /api/run/:id/events. Synchronous entry point (loadRun() is
+ * synchronous); the SSE lifecycle itself is driven by a bounded poll timer,
+ * torn down on run completion, client disconnect, or server shutdown (via
+ * the shared registerSse()/drainSseConnections() registry in api.ts).
+ */
+export function handleRunEventsSse(
+  req: IncomingMessage,
+  res: ServerResponse,
+  rawId: string,
+  readSession: { id: string; expiresAt: number },
+): void {
+  const id = rawId;
+  if (!RUN_ID_RE.test(id)) {
+    sendJson(res, 400, { error: 'invalid run id' });
+    return;
+  }
+
+  // A read is also a maintenance path: expire stale/over-budget captures now,
+  // even when the system never produces another durable output write.
+  gcRunStreams(true);
+
+  const initial = loadRun(id);
+  if (!initial) {
+    sendJson(res, 404, { error: `run not found: ${id}` });
+    return;
+  }
+
+  if (sseConnectionCapReached()) {
+    sendJson(res, 503, { error: 'too many live connections' });
+    return;
+  }
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-store',
+    'Connection': 'keep-alive',
+    'X-Content-Type-Options': 'nosniff',
+  });
+
+  try {
+    res.write(': connected\n\n');
+  } catch {
+    return; // Socket already gone.
+  }
+
+  function send(seq: number, event: string, data: unknown): void {
+    try {
+      const line = `id: ${seq}\nevent: ${event}\ndata: ${JSON.stringify(sanitizePublicJson(data))}\n\n`;
+      res.write(line);
+    } catch {
+      // Socket closed; cleanup fires on 'close'/'error'.
+    }
+  }
+
+  function sendStall(ageMs: number): void {
+    try {
+      const line = `event: stall\ndata: ${JSON.stringify(sanitizePublicJson({ ageMs }))}\n\n`;
+      res.write(line);
+    } catch {
+      // Socket closed; cleanup fires on 'close'/'error'.
+    }
+  }
+
+  // v333: TWO independent thresholds, not one shared `lastSeq`. Step/task/
+  // run-done seqs live in [0, STEP_SEQ_BASE + a few) and output-chunk seqs
+  // live in [OUTPUT_SEQ_BASE, +Infinity) — numerically disjoint, but
+  // GROWING AT DIFFERENT TIMES. A single shared threshold breaks the moment
+  // an output-chunk seq (huge) gets folded into the same variable a later
+  // step-seq (always small) is compared against — every future step/
+  // run-done event would then look "already sent" and never emit again.
+  // Each family is gated ONLY by its own threshold.
+  //
+  // The incoming Last-Event-ID header is a single number (SSE only tracks
+  // "the last id: value seen", not one per stream), so on reconnect we can
+  // only confidently seed the ONE threshold whose range that id actually
+  // falls in; the other starts at -1 (full replay for that family). This
+  // means a reconnect immediately after an output-chunk frame replays step/
+  // run-done history (and vice versa) — a bounded, harmless duplicate
+  // delivery, not a silent permanent drop.
+  const rawLastEventId = parseLastEventId(req);
+  let lastStepSeq = rawLastEventId < OUTPUT_SEQ_BASE ? rawLastEventId : -1;
+  let lastOutputSeq = rawLastEventId >= OUTPUT_SEQ_BASE ? rawLastEventId : -1;
+  const outputCursor = createOutputTailCursor();
+  let lastProgress = progressOf(initial);
+  let lastGrowthAt = Date.now();
+  let stallLastEmitAt: number | null = null;
+  let ended = false;
+  // Assigned only after the initial replay because finish() must also be safe
+  // during that replay, before either handle exists.
+  // eslint-disable-next-line prefer-const
+  let intervalId: ReturnType<typeof setInterval> | undefined;
+  // eslint-disable-next-line prefer-const
+  let expiryTimer: ReturnType<typeof setTimeout> | undefined;
+  // eslint-disable-next-line prefer-const
+  let sseId: string | undefined;
+
+  const finish = (): void => {
+    if (ended) return;
+    ended = true;
+    if (intervalId !== undefined) clearInterval(intervalId);
+    if (expiryTimer !== undefined) clearTimeout(expiryTimer);
+    if (sseId !== undefined) deregisterSse(sseId);
+    try {
+      res.end();
+    } catch {
+      // Already ended.
+    }
+  };
+
+  const tick = (): void => {
+    if (ended) return;
+    const fresh = loadRun(id);
+    if (!fresh) return; // Transient unreadable state; try again next tick.
+
+    // Output chunks BEFORE step/task events: if this tick is also the one
+    // where the run transitions to a terminal status, emitNewEvents below
+    // sends run-done and finish() ends the connection immediately after —
+    // any engine output written just before completion must be flushed
+    // first or it is lost.
+    lastOutputSeq = emitNewOutputChunks(id, outputCursor, lastOutputSeq, send);
+    lastStepSeq = emitNewEvents(fresh, lastStepSeq, send);
+
+    const progress = progressOf(fresh);
+    if (!progressEqual(progress, lastProgress)) {
+      lastProgress = progress;
+      lastGrowthAt = Date.now();
+      stallLastEmitAt = null;
+    } else if (fresh.status === 'running') {
+      const ageMs = Date.now() - lastGrowthAt;
+      if (
+        ageMs >= RUN_STALL_AFTER_MS
+        && (stallLastEmitAt === null || Date.now() - stallLastEmitAt >= RUN_STALL_REPEAT_MS)
+      ) {
+        sendStall(ageMs);
+        stallLastEmitAt = Date.now();
+      }
+    }
+
+    if (fresh.status !== 'running') {
+      finish();
+    }
+  };
+
+  // Replay everything from each threshold (the full history if this is a
+  // fresh connection, i.e. Last-Event-ID absent) immediately. Output chunks
+  // first, same ordering reasoning as tick() above.
+  lastOutputSeq = emitNewOutputChunks(id, outputCursor, lastOutputSeq, send);
+  lastStepSeq = emitNewEvents(initial, lastStepSeq, send);
+
+  if (initial.status !== 'running') {
+    // Already finished by the time this connected — history (and run-done,
+    // via emitNewEvents above) is sent; close cleanly, no polling needed.
+    finish();
+    return;
+  }
+
+  intervalId = setInterval(tick, RUN_TAIL_POLL_MS);
+  sseId = registerSse(finish, readSession.id);
+  expiryTimer = setTimeout(finish, Math.max(0, readSession.expiresAt - Date.now()));
+
+  req.on('close', finish);
+  req.on('error', finish);
+}

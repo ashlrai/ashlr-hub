@@ -41,7 +41,9 @@ type JsonValue =
 
 export interface RuntimeReleaseEvidenceCoverageV2 {
   artifactCoherence: 'two-complete-scans';
-  artifactSet: 'package-manifest-dependency-inventory-launcher-dist-verifier';
+  artifactSet:
+    | 'package-manifest-dependency-inventory-launcher-dist-verifier'
+    | 'package-manifest-dependency-inventory-launcher-dist-verifier-scorecard-worker';
   authenticity: 'envelope-signer-only';
   authority: 'observation-only';
   configuration: 'excluded';
@@ -62,6 +64,12 @@ Readonly<RuntimeReleaseEvidenceCoverageV2> = Object.freeze({
   interpreter: 'caller-declared-artifact-observed',
   rollback: 'unresolved-caller-declared-reference',
   serviceInvocation: 'unbound',
+});
+
+export const RUNTIME_RELEASE_EVIDENCE_CURRENT_COVERAGE_V3:
+Readonly<RuntimeReleaseEvidenceCoverageV2> = Object.freeze({
+  ...RUNTIME_RELEASE_EVIDENCE_REQUIRED_COVERAGE_V2,
+  artifactSet: 'package-manifest-dependency-inventory-launcher-dist-verifier-scorecard-worker',
 });
 
 export interface RuntimeReleaseEvidencePayloadV2 {
@@ -277,7 +285,9 @@ function coverageFrom(value: unknown, label: string): RuntimeReleaseEvidenceCove
     'serviceInvocation',
   ]) ||
     value['artifactCoherence'] !== 'two-complete-scans' ||
-    value['artifactSet'] !== 'package-manifest-dependency-inventory-launcher-dist-verifier' ||
+    (value['artifactSet'] !== 'package-manifest-dependency-inventory-launcher-dist-verifier' &&
+      value['artifactSet'] !==
+        'package-manifest-dependency-inventory-launcher-dist-verifier-scorecard-worker') ||
     value['authenticity'] !== 'envelope-signer-only' ||
     value['authority'] !== 'observation-only' ||
     value['configuration'] !== 'excluded' ||
@@ -287,7 +297,29 @@ function coverageFrom(value: unknown, label: string): RuntimeReleaseEvidenceCove
     value['serviceInvocation'] !== 'unbound') {
     throw new Error(`${label} is incomplete or unsupported`);
   }
-  return { ...RUNTIME_RELEASE_EVIDENCE_REQUIRED_COVERAGE_V2 };
+  return {
+    ...RUNTIME_RELEASE_EVIDENCE_REQUIRED_COVERAGE_V2,
+    artifactSet: value['artifactSet'],
+  };
+}
+
+function manifestCoverage(
+  schemaVersion: 2 | 3,
+): Readonly<RuntimeReleaseEvidenceCoverageV2> {
+  return schemaVersion === 3
+    ? RUNTIME_RELEASE_EVIDENCE_CURRENT_COVERAGE_V3
+    : RUNTIME_RELEASE_EVIDENCE_REQUIRED_COVERAGE_V2;
+}
+
+function coverageSatisfiesTrustRoot(
+  actual: RuntimeReleaseEvidenceCoverageV2,
+  required: RuntimeReleaseEvidenceCoverageV2,
+): boolean {
+  if (canonicalJson(actual) === canonicalJson(required)) return true;
+  return required.artifactSet ===
+      RUNTIME_RELEASE_EVIDENCE_REQUIRED_COVERAGE_V2.artifactSet &&
+    actual.artifactSet === RUNTIME_RELEASE_EVIDENCE_CURRENT_COVERAGE_V3.artifactSet &&
+    canonicalJson({ ...actual, artifactSet: required.artifactSet }) === canonicalJson(required);
 }
 
 function decodeBase64url(value: unknown, expectedBytes?: number): Buffer | null {
@@ -634,7 +666,7 @@ export function signRuntimeReleaseEvidenceEnvelope(
       keyId,
       payload: {
         assurance: 'signed-observation-only',
-        coverage: { ...RUNTIME_RELEASE_EVIDENCE_REQUIRED_COVERAGE_V2 },
+        coverage: { ...manifestCoverage(manifest.manifest.schemaVersion) },
         expiresAt,
         expectedRevision: manifest.manifest.expectedRevision,
         issuedAt,
@@ -726,9 +758,18 @@ export function verifyRuntimeReleaseEvidenceEnvelope(
         reason: 'runtime release evidence falls outside signing key validity',
       };
     }
-    if (canonicalJson(envelope.envelope.payload.coverage) !==
-      canonicalJson(trustRoot.requiredCoverage)) {
+    if (!coverageSatisfiesTrustRoot(
+      envelope.envelope.payload.coverage,
+      trustRoot.requiredCoverage,
+    )) {
       return { ok: false, reason: 'runtime release evidence does not meet required coverage' };
+    }
+    if (canonicalJson(envelope.envelope.payload.coverage) !==
+      canonicalJson(manifestCoverage(manifest.manifest.schemaVersion))) {
+      return {
+        ok: false,
+        reason: 'runtime release evidence coverage does not match manifest schema',
+      };
     }
     if (!equalHexDigest(
       envelope.envelope.payload.manifestDigest,

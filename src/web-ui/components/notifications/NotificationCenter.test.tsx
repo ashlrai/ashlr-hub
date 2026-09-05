@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { NotificationBell } from './NotificationBell.js';
 import { NotificationCenter } from './NotificationCenter.js';
 import { evictAll } from '../../data/cache.js';
@@ -69,5 +70,45 @@ describe('NotificationBell + NotificationCenter', () => {
 
     await waitFor(() => expect(screen.queryByText('1 critical security finding')).not.toBeInTheDocument());
     expect(screen.getByText('Nothing needs you right now.')).toBeInTheDocument();
+  });
+
+  // Pins keyboard operability for the notification centre: the bell opens
+  // via Enter (a real <button>, no mouse), the panel focus-traps to its
+  // close button on open (Dialog's initialFocusRef), the mute control is
+  // reachable and operable by keyboard, and Escape closes it. Falsified by
+  // changing NotificationItem.tsx's mute button from `onClick` to a
+  // click-only handler that ignores keyboard-synthesized clicks (i.e.
+  // simulating a div with onClick instead of a real <button>) — the test
+  // failed because Enter on the focused mute control no longer removed the
+  // finding, confirming this exercises real keyboard activation rather than
+  // an incidental pass.
+  it('keyboard: bell opens via Enter, mute is reachable and operable via keyboard, Escape closes', async () => {
+    const user = userEvent.setup();
+    render(
+      <>
+        <NotificationBell />
+        <NotificationCenter />
+      </>,
+    );
+
+    const bell = await screen.findByRole('button', { name: /1 urgent/ });
+    bell.focus();
+    await user.keyboard('{Enter}');
+
+    const dialog = await screen.findByRole('dialog', { name: /notifications/i });
+    expect(dialog).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Close notifications' })).toHaveFocus());
+
+    await waitFor(() => expect(screen.getByText('1 critical security finding')).toBeInTheDocument());
+
+    const muteBtn = screen.getByRole('button', { name: 'Mute Security' });
+    muteBtn.focus();
+    await user.keyboard('{Enter}');
+
+    await waitFor(() => expect(screen.queryByText('1 critical security finding')).not.toBeInTheDocument());
+    expect(screen.getByText('Nothing needs you right now.')).toBeInTheDocument();
+
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /notifications/i })).not.toBeInTheDocument());
   });
 });

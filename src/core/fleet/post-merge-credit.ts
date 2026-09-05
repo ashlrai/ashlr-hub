@@ -61,7 +61,7 @@ export const POST_MERGE_CREDIT_POLICY_VERSION = 'post-merge-credit-v1' as const;
  * witness exists. The current adverse-only ledger supports reporting, not
  * authority to steer routing or promote reusable skills.
  */
-const POST_MERGE_CREDIT_OPERATIONAL_RELEASE = false as const;
+export const POST_MERGE_CREDIT_OPERATIONAL_RELEASE = false as const;
 
 /**
  * Minimum wall-clock time since the realized merge before credit MAY be

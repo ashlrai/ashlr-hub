@@ -171,7 +171,7 @@ afterEach(async () => {
   rmSync(home, { recursive: true, force: true });
 });
 
-describe('M417 sandbox cleanup quiescence', { timeout: 20_000 }, () => {
+describe('M417 sandbox cleanup quiescence', () => {
   it.runIf(process.platform !== 'win32')(
     'waits for in-flight cleanup and refuses cleanup after pause quiesces',
     async () => {

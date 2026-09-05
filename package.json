@@ -1,6 +1,6 @@
 {
   "name": "@ashlr/hub",
-  "version": "3.3.2",
+  "version": "3.4.0",
   "description": "Local-first command center for agentic engineers.",
   "publishConfig": {
     "access": "public",
@@ -33,6 +33,7 @@
     "dist",
     "bin",
     "scripts/run-verify-command.mjs",
+    "scripts/scorecard-history-worker.mjs",
     "schema",
     "CHANGELOG.md",
     "docs/MISSION-OS.md",
@@ -82,7 +83,9 @@
     "test:web": "vitest run --config vitest.config.web.ts",
     "test:ci": "node scripts/test-ci.mjs",
     "test:invariants": "vitest run test/h*.test.ts --no-file-parallelism",
-    "lint": "eslint .",
+    "conformance:ecosystem": "tsx scripts/run-ecosystem-conformance.ts",
+    "lint": "eslint . && npm run lint:realio-lane",
+    "lint:realio-lane": "node scripts/check-realio-lane-membership.mjs",
     "typecheck": "tsc --noEmit && npm run typecheck:web",
     "typecheck:web": "tsc --noEmit -p src/web-ui/tsconfig.json"
   },

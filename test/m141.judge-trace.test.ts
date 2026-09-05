@@ -466,6 +466,16 @@ describe('m141 judge-trace — round-trip', () => {
 // ---------------------------------------------------------------------------
 
 describe('scrubSecrets (shared util) — comprehensive redaction', () => {
+  it('redacts URL passwords even when the valid userinfo username is empty', async () => {
+    const { scrubSecrets } = await import('../src/core/util/scrub.js');
+    const secret = 'SENSITIVEVALUE_0123456789';
+    const text = `https://:${secret}@example.com/path`;
+    expect(new URL(text).password).toBe(secret);
+    expect(scrubSecrets(text)).toBe('https://:[REDACTED]@example.com/path');
+    expect(scrubSecrets('https://user:x@example.com/path'))
+      .toBe('https://user:[REDACTED]@example.com/path');
+  });
+
   it('scrubs sk- API keys', async () => {
     const { scrubSecrets } = await import('../src/core/util/scrub.js');
     expect(scrubSecrets('key=sk-abcdefghijklmnopqrstuvwxyz123456')).toContain('[REDACTED]');
@@ -1172,13 +1182,26 @@ describe('m141 runManager — records judge trace per proposal', () => {
     const proposalId = pid();
     vi.doMock('../src/core/inbox/store.js', async (importOriginal) => {
       const actual = await importOriginal<typeof import('../src/core/inbox/store.js')>();
+      const proposals = [makeProposal({
+        id: proposalId,
+        engineModel: 'codex:gpt-5.5',
+        engineTier: 'frontier',
+      })];
       return {
         ...actual,
-        listProposals: vi.fn().mockReturnValue([makeProposal({
-          id: proposalId,
-          engineModel: 'codex:gpt-5.5',
-          engineTier: 'frontier',
-        })]),
+        listProposals: vi.fn().mockReturnValue(proposals),
+        listProposalsDetailed: vi.fn().mockReturnValue({
+          proposals,
+          sourceState: 'healthy',
+          sourcePresent: true,
+          complete: true,
+          stopReasons: [],
+          filesDiscovered: proposals.length,
+          filesRead: proposals.length,
+          bytesRead: 0,
+          invalidFiles: 0,
+          unreadableFiles: 0,
+        }),
         setStatus: vi.fn(),
       };
     });
@@ -1245,13 +1268,26 @@ describe('m141 runManager — records judge trace per proposal', () => {
     const ids = [pid(), pid(), pid()];
     vi.doMock('../src/core/inbox/store.js', async (importOriginal) => {
       const actual = await importOriginal<typeof import('../src/core/inbox/store.js')>();
+      const proposals = ids.map((id) => makeProposal({
+        id,
+        engineModel: 'codex:gpt-5.5',
+        engineTier: 'frontier',
+      }));
       return {
         ...actual,
-        listProposals: vi.fn().mockReturnValue(ids.map((id) => makeProposal({
-          id,
-          engineModel: 'codex:gpt-5.5',
-          engineTier: 'frontier',
-        }))),
+        listProposals: vi.fn().mockReturnValue(proposals),
+        listProposalsDetailed: vi.fn().mockReturnValue({
+          proposals,
+          sourceState: 'healthy',
+          sourcePresent: true,
+          complete: true,
+          stopReasons: [],
+          filesDiscovered: proposals.length,
+          filesRead: proposals.length,
+          bytesRead: 0,
+          invalidFiles: 0,
+          unreadableFiles: 0,
+        }),
         setStatus: vi.fn(),
       };
     });

@@ -5,6 +5,15 @@ Ashlr Hub checks the root and Raycast npm lockfiles plus
 weekly schedule, and manual audit run. The workflow has read-only repository
 authority. Every action is pinned to a full commit, and the RustSec scanner is
 an exact release archive whose SHA-256 digest is verified before execution.
+The npm lockfiles must first reproduce through strict `npm ci`. The primary
+scanner remains pinned npm, with full and production audits for both graphs.
+Only a recognized transport failure after three bounded attempts may invoke an
+exact OSV-Scanner release binary whose SHA-256 digest is verified. A valid npm
+vulnerability report never falls back, and an unavailable or non-clean fallback
+also fails the job. The fallback receives a process-created empty configuration
+from the runner's private temporary directory, so repository-controlled
+`osv-scanner.toml` ignore rules cannot weaken the required check. Each lane
+records its provider result in the job summary.
 
 ## Dependabot cooldown
 

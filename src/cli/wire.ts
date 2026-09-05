@@ -5,9 +5,9 @@
  *   ashlr wire [claude|codex|cursor|all]  [--config <path>]  [--json]
  *
  * Defaults to detected editors when no target is specified.
- * Backup-first, deep-merge mcpServers, idempotent, LOCAL only.
- * `--config <path>` overrides the default config path for the first/only target
- * (temp-config-safe for tests; with `all` it applies to each detected editor).
+ * Target-aware, backup-first, idempotent, LOCAL only.
+ * `--config <path>` overrides the default config path for the first/only target.
+ * Codex overrides must be named config.toml.
  *
  * Exit codes:
  *   0  all targets wired (or already up-to-date)
@@ -73,6 +73,15 @@ function parseWireArgs(args: string[]): ParsedWireArgs {
     i++;
   }
 
+  if (configPath && (explicitTarget === null || explicitTarget === 'all')) {
+    return {
+      targets: [],
+      configPath,
+      json,
+      usageError: '--config requires exactly one explicit target because Claude, Codex, and Cursor use different registry formats',
+    };
+  }
+
   // Resolve targets; 'all' and default (no target) → detect
   if (explicitTarget === 'all' || explicitTarget === null) {
     // Will be filled in at runtime via detectEditors()
@@ -99,7 +108,7 @@ function printWireHelp(): void {
 
   const opts: [string, string][] = [
     ['[target]',          'Editor to wire: claude, codex, cursor, or all. Defaults to detected editors.'],
-    ['--config <path>',   'Override the config path (temp-config-safe for tests).'],
+    ['--config <path>',   'Override the target config path; Codex requires a config.toml path.'],
     ['--json',            'Emit results as JSON on stdout.'],
     ['--claude-md',       'Print a CLAUDE.md snippet teaching agents the CLI-first ashlr usage (read-only).'],
   ];
@@ -110,8 +119,9 @@ function printWireHelp(): void {
   console.log('');
   console.log('  ' + bold('What it does:'));
   console.log('');
-  console.log(`    ${dim('• Backs up the editor config before any write.')}`);
-  console.log(`    ${dim('• Deep-merges the "ashlr" MCP gateway into mcpServers — never clobbers existing entries.')}`);
+  console.log(`    ${dim('• Registers the distinct "ashlr-hub" MCP gateway; legacy "ashlr" plugin entries remain untouched.')}`);
+  console.log(`    ${dim('• Uses codex mcp for config.toml; deep-merges supported JSON registries for Claude and Cursor.')}`);
+  console.log(`    ${dim('• Backs up an existing target config before any write.')}`);
   console.log(`    ${dim('• Idempotent: re-running with the same config is a no-op.')}`);
   console.log(`    ${dim('• LOCAL only: only writes the editor\'s own config file.')}`);
   console.log('');
@@ -120,7 +130,8 @@ function printWireHelp(): void {
   console.log(`    ${cyan('ashlr wire')}                     ${dim('# wire all detected editors')}`);
   console.log(`    ${cyan('ashlr wire claude')}              ${dim('# wire only Claude Code')}`);
   console.log(`    ${cyan('ashlr wire all --json')}          ${dim('# wire all, machine-readable output')}`);
-  console.log(`    ${cyan('ashlr wire claude --config /tmp/test.json')}  ${dim('# test against a temp file')}`);
+  console.log(`    ${cyan('ashlr wire claude --config /tmp/.claude.json')}  ${dim('# test against a temp file')}`);
+  console.log(`    ${cyan('ashlr wire codex --config /tmp/codex/config.toml')} ${dim('# isolated Codex config')}`);
   console.log('');
 }
 
@@ -224,7 +235,7 @@ export async function cmdWire(args: string[]): Promise<number> {
     const allOk = results.every(r => r.ok);
     const anyFailed = results.some(r => !r.ok);
     if (allOk) {
-      console.log(dim('  All editors wired. Restart your editor to pick up the new MCP entry.'));
+      console.log(dim('  All editors wired. Verify with codex mcp list or claude mcp list, then restart the client if needed.'));
     } else if (anyFailed) {
       const failCount = results.filter(r => !r.ok).length;
       console.log(yellow(`  ${failCount} target(s) failed — check the details above.`));

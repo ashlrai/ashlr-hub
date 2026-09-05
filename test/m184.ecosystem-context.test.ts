@@ -395,6 +395,7 @@ describe('M184 — strategist prompt ecosystem injection', () => {
 
     expect(capturedUsers.length).toBeGreaterThan(0);
     const prompt = capturedUsers[0]!;
+    expect(prompt).toContain('BEGIN UNTRUSTED DATA: ECOSYSTEM MAP');
     expect(prompt).toContain('ECOSYSTEM MAP');
     expect(prompt).toContain('phantom-secrets');
   });
@@ -444,7 +445,7 @@ describe('M184 — strategist prompt ecosystem injection', () => {
     expect(prompt).toMatch(/PREFER COMPOSITIONAL MOVES/);
   });
 
-  it('prompt still contains NORTH-STAR + FLEET METRICS when ecosystem map is present', async () => {
+  it('prompt still contains diagnostic leverage + fleet metrics when ecosystem map is present', async () => {
     vi.doMock('../src/core/ecosystem/map.js', () => ({
       loadEcosystemMap: vi.fn(() => MOCK_ECOSYSTEM_MAP),
       ecosystemSummary: vi.fn(() => REALISTIC_ECO_SUMMARY),
@@ -464,8 +465,9 @@ describe('M184 — strategist prompt ecosystem injection', () => {
     await runStrategist(mockCfgBase);
 
     const prompt = capturedUsers[0]!;
-    expect(prompt).toContain('NORTH-STAR');
-    expect(prompt).toContain('FLEET METRICS');
+    expect(prompt).toContain('DIAGNOSTIC: HUMAN LEVERAGE');
+    expect(prompt).toContain('DIAGNOSTIC FLEET METRICS');
+    expect(prompt).toContain('Require executable evidence');
   });
 
   it('returns valid StrategicBriefing when ecosystem map is present', async () => {
@@ -641,7 +643,7 @@ describe('M184 — map absent -> no injection, no throw', () => {
     expect(capturedUsers[0]).not.toContain('COMPOSITION DIRECTIVE');
   });
 
-  it('strategist prompt still contains NORTH-STAR + FLEET METRICS when map is absent', async () => {
+  it('strategist prompt still contains diagnostic leverage + fleet metrics when map is absent', async () => {
     vi.doMock('../src/core/ecosystem/map.js', () => ({
       loadEcosystemMap: vi.fn(() => null),
       ecosystemSummary: vi.fn(() => ''),
@@ -660,8 +662,9 @@ describe('M184 — map absent -> no injection, no throw', () => {
     const { runStrategist } = await import('../src/core/vision/strategist.js');
     await runStrategist(mockCfgBase);
 
-    expect(capturedUsers[0]).toContain('NORTH-STAR');
-    expect(capturedUsers[0]).toContain('FLEET METRICS');
+    expect(capturedUsers[0]).toContain('DIAGNOSTIC: HUMAN LEVERAGE');
+    expect(capturedUsers[0]).toContain('DIAGNOSTIC FLEET METRICS');
+    expect(capturedUsers[0]).toContain('Require executable evidence');
   });
 
   it('inventWorkItems succeeds and returns items when map is absent', async () => {

@@ -166,7 +166,7 @@ function computeUtility(score: EngineScore, λCost: number, λLat: number): numb
 }
 ```
 
-**Constraints.** This only reorders the candidate list — it never changes the candidate set, tier, capability, or `allowedBackends`. The hard floor (`isFrontierItem` classifications never routed to local regardless of cost) is preserved because reordering cannot promote a lower-tier candidate past a capability gate. `LEARNED_ROUTING_MIN_SAMPLES=5` cold-start neutral-0.5 discipline unchanged. Gated on `cfg.foundry.learnedRouting !== false` — off means empty map, no-op, byte-identical.
+**Constraints.** This only reorders the candidate list — it never changes the candidate set, tier, capability, or `allowedBackends`. The hard floor (`isFrontierItem` classifications never routed to local regardless of cost) is preserved because reordering cannot promote a lower-tier candidate past a capability gate. `LEARNED_ROUTING_MIN_SAMPLES=5` cold-start neutral-0.5 discipline unchanged. Gated on `cfg.foundry.learnedRouting === true` and causally identifiable authenticated assignment evidence. False or absent means empty map, no-op, byte-identical.
 
 ---
 
@@ -418,7 +418,7 @@ Every Fabric component follows the M53/M240 contract:
 | `cfg.foundry.fabric?.gateway` | `false` | `decide()` returns `routeBackend()` result unchanged |
 | `cfg.foundry.fabric?.cache` | `false` | `lookup()` returns `null`; `write()` no-ops |
 | `cfg.foundry.fabric?.semanticDiffCache` | `false` | L2 for diffs disabled |
-| `cfg.foundry.learnedRouting` | `true` | off → empty map → sort no-op (M240 existing) |
+| `cfg.foundry.learnedRouting` | `false` | exact opt-in; off/absent → empty map → sort no-op (M240 existing) |
 | `cfg.foundry.intelligence` | absent | M53 recommendRoute not called (existing) |
 | `ASHLR_FABRIC_DISABLE=1` | — | Hard-disables all Fabric at the process level |
 

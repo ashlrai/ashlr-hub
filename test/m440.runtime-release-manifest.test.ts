@@ -24,6 +24,7 @@ import {
   parseRuntimeReleaseDependencyInventory,
   RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH,
 } from '../src/core/daemon/runtime-release-dependency-inventory.js';
+import { buildLegacyRuntimeReleaseManifestV2 } from './helpers/runtime-release-legacy-v2.js';
 
 const tempDirs: string[] = [];
 const REVISION = 'a'.repeat(40);
@@ -39,26 +40,33 @@ function write(path: string, value: string, mode?: number): void {
   writeFileSync(path, value, mode === undefined ? { encoding: 'utf8' } : { encoding: 'utf8', mode });
 }
 
-function fixture(): ReleaseFixture {
+function fixture(options: { legacyV2?: boolean } = {}): ReleaseFixture {
+  const legacyV2 = options.legacyV2 === true;
   const packageRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-runtime-release-')));
   tempDirs.push(packageRoot);
   write(join(packageRoot, 'package.json'), `${JSON.stringify({
     name: '@ashlr/hub',
-    version: '3.1.0',
+    version: legacyV2 ? '3.3.2' : '3.4.0',
     type: 'module',
     bin: { ashlr: 'bin/ashlr' },
-    files: ['bin', 'dist', 'schema', 'scripts/run-verify-command.mjs'],
+    files: [
+      'bin',
+      'dist',
+      'schema',
+      'scripts/run-verify-command.mjs',
+      ...(legacyV2 ? [] : ['scripts/scorecard-history-worker.mjs']),
+    ],
     dependencies: { example: '1.0.0' },
     bundledDependencies: ['example'],
   }, null, 2)}\n`);
   write(join(packageRoot, 'package-lock.json'), `${JSON.stringify({
     name: '@ashlr/hub',
-    version: '3.1.0',
+    version: legacyV2 ? '3.3.2' : '3.4.0',
     lockfileVersion: 3,
     packages: {
       '': {
         name: '@ashlr/hub',
-        version: '3.1.0',
+        version: legacyV2 ? '3.3.2' : '3.4.0',
         bin: { ashlr: 'bin/ashlr' },
         dependencies: { example: '1.0.0' },
       },
@@ -69,6 +77,9 @@ function fixture(): ReleaseFixture {
   write(join(packageRoot, 'dist', 'cli', 'index.js'), 'export const runtime = true;\n');
   write(join(packageRoot, 'dist', 'core', 'worker.js'), 'export const worker = true;\n');
   write(join(packageRoot, 'schema', 'config.schema.json'), '{"type":"object"}\n');
+  if (!legacyV2) {
+    write(join(packageRoot, 'scripts', 'scorecard-history-worker.mjs'), 'export const worker = true;\n');
+  }
   const dependencyRoot = join(packageRoot, 'node_modules');
   write(join(dependencyRoot, 'example', 'package.json'), `${JSON.stringify({
     name: 'example',
@@ -152,7 +163,7 @@ describe('unsigned runtime release manifest', () => {
       algorithm: 'sha256',
       assurance: 'unsigned-observation-only',
       expectedRevision: REVISION,
-      schemaVersion: 2,
+      schemaVersion: 3,
       coverage: {
         artifactCoherence: 'two-complete-scans',
         authenticity: 'unsigned',
@@ -165,7 +176,7 @@ describe('unsigned runtime release manifest', () => {
         binName: 'ashlr',
         manifestPath: 'package.json',
         name: '@ashlr/hub',
-        version: '3.1.0',
+        version: '3.4.0',
       },
       dependencyInventory: {
         packageCount: 1,
@@ -197,6 +208,7 @@ describe('unsigned runtime release manifest', () => {
       'package.json',
       'schema/config.schema.json',
       'scripts/run-verify-command.mjs',
+      'scripts/scorecard-history-worker.mjs',
     ]);
     expect(parseUnsignedRuntimeReleaseManifest(first.canonicalJson)).toEqual({
       ok: true,
@@ -217,6 +229,118 @@ describe('unsigned runtime release manifest', () => {
       ok: true,
       assurance: 'unsigned-observation-only',
       manifestDigest: built.manifest.manifestDigest,
+    });
+  });
+
+  it('verifies a genuine pre-worker schema-v2 rollback package while current builds require v3', () => {
+    const release = fixture({ legacyV2: true });
+    const legacyManifest = buildLegacyRuntimeReleaseManifestV2({
+      artifactPaths: [
+        'bin/ashlr',
+        'dist/cli/index.js',
+        'dist/core/worker.js',
+        RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH,
+        'package.json',
+        'schema/config.schema.json',
+        'scripts/run-verify-command.mjs',
+      ],
+      declaredInterpreterPath: release.interpreterPath,
+      declaredInterpreterVersion: 'v22.0.0',
+      expectedPackageName: '@ashlr/hub',
+      expectedRevision: REVISION,
+      packageRoot: release.packageRoot,
+    });
+    const parsed = parseUnsignedRuntimeReleaseManifest(legacyManifest);
+
+    expect(parsed).toMatchObject({
+      ok: true,
+      manifest: {
+        package: { version: '3.3.2' },
+        schemaVersion: 2,
+      },
+    });
+    if (!parsed.ok) return;
+    expect(parsed.manifest.artifacts.map((artifact) => artifact.path))
+      .not.toContain('scripts/scorecard-history-worker.mjs');
+    expect(verify(release, legacyManifest, {
+      expectedManifestDigest: parsed.manifest.manifestDigest,
+    })).toEqual({
+      ok: true,
+      assurance: 'unsigned-observation-only',
+      manifestDigest: parsed.manifest.manifestDigest,
+    });
+    const currentBuild = build(release);
+    expect(currentBuild.ok).toBe(false);
+    if (currentBuild.ok) return;
+    expect(currentBuild.reason).toContain('scorecard-history-worker.mjs');
+  });
+
+  it('does not let schema v2 omit a scorecard worker that is present and declared', () => {
+    const release = fixture();
+    const incompleteLegacyManifest = buildLegacyRuntimeReleaseManifestV2({
+      artifactPaths: [
+        'bin/ashlr',
+        'dist/cli/index.js',
+        'dist/core/worker.js',
+        RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH,
+        'package.json',
+        'schema/config.schema.json',
+        'scripts/run-verify-command.mjs',
+      ],
+      declaredInterpreterPath: release.interpreterPath,
+      declaredInterpreterVersion: 'v22.0.0',
+      expectedPackageName: '@ashlr/hub',
+      expectedRevision: REVISION,
+      packageRoot: release.packageRoot,
+    });
+
+    expect(parseUnsignedRuntimeReleaseManifest(incompleteLegacyManifest))
+      .toMatchObject({ ok: true, manifest: { schemaVersion: 2 } });
+    expect(verify(release, incompleteLegacyManifest)).toEqual({
+      ok: false,
+      reason: 'runtime release contents do not match manifest',
+    });
+  });
+
+  it('requires current schema-v3 packages to declare the scorecard worker', () => {
+    const release = fixture();
+    const packagePath = join(release.packageRoot, 'package.json');
+    const packageJson = jsonObject(readFileSync(packagePath, 'utf8'));
+    packageJson['files'] = ['bin', 'dist', 'schema', 'scripts/run-verify-command.mjs'];
+    writeFileSync(packagePath, `${JSON.stringify(packageJson)}\n`);
+
+    expect(build(release)).toEqual({
+      ok: false,
+      reason: 'schema-v3 release package does not declare the scorecard history worker',
+    });
+  });
+
+  it('rejects a schema-v3 manifest that omits the scorecard worker artifact', () => {
+    const release = fixture();
+    const built = build(release);
+    expect(built.ok).toBe(true);
+    if (!built.ok) return;
+    const incomplete = jsonObject(built.canonicalJson);
+    incomplete['artifacts'] = (incomplete['artifacts'] as Array<Record<string, unknown>>)
+      .filter((artifact) => artifact['path'] !== 'scripts/scorecard-history-worker.mjs');
+
+    expect(parseUnsignedRuntimeReleaseManifest(`${JSON.stringify(incomplete)}\n`)).toEqual({
+      ok: false,
+      reason: 'required release artifact is missing: scripts/scorecard-history-worker.mjs',
+    });
+  });
+
+  it('domain-separates schema-v3 candidate digests from the legacy v2 contract', () => {
+    const release = fixture();
+    const built = build(release);
+    expect(built.ok).toBe(true);
+    if (!built.ok) return;
+    const downgraded = jsonObject(built.canonicalJson);
+    downgraded['schemaVersion'] = 2;
+
+    expect(parseUnsignedRuntimeReleaseManifest(`${JSON.stringify(downgraded)}\n`)).toEqual({
+      ok: false,
+      reason: 'runtime release manifest digest mismatch',
     });
   });
 
@@ -391,6 +515,7 @@ describe('unsigned runtime release manifest', () => {
     ['package metadata', 'package.json'],
     ['dependency inventory', RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH],
     ['verifier runner', 'scripts/run-verify-command.mjs'],
+    ['scorecard worker', 'scripts/scorecard-history-worker.mjs'],
   ])('rejects %s byte drift', (_label, relativePath) => {
     const release = fixture();
     const built = build(release);

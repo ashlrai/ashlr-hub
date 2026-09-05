@@ -140,6 +140,14 @@
   border-bottom: none;
 }
 
+.row:hover {
+  background: var(--bg-hover);
+}
+.row:focus {
+  outline: 2px solid var(--border-focus);
+  outline-offset: -2px;
+}
+
 .sortHeader {
   background: none;
   border: none;

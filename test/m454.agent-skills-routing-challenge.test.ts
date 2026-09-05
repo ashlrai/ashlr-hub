@@ -552,6 +552,7 @@ describe('M454 pinned upstream routing challenge', () => {
       'dist',
       'bin',
       'scripts/run-verify-command.mjs',
+      'scripts/scorecard-history-worker.mjs',
       'schema',
       'CHANGELOG.md',
       'docs/MISSION-OS.md',

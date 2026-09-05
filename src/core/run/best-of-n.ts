@@ -33,7 +33,7 @@ import type {
   Sandbox,
   BestOfNCandidateSpec,
 } from '../types.js';
-import type { ManagerVerdict } from '../fleet/manager.js';
+import type { ManagerVerdict, FrontierJudgeClient } from '../fleet/manager.js';
 import type { TasteScore } from '../fleet/taste-critic.js';
 import { resolveEngineSpec } from './engine-registry.js';
 import {
@@ -71,6 +71,8 @@ import type {
   FleetQuotaReservationRequest,
   FleetQuotaReservationResult,
 } from '../fleet/quota.js';
+import { sanitizePublicJson } from '../util/public-json.js';
+import type { RunOutputStreamClaim } from './streaming.js';
 
 const SHADOW_REQUEST_TIMEOUT_MS = 120_000;
 const SHADOW_REQUEST_MAX_BYTES = 1024 * 1024;
@@ -78,6 +80,89 @@ const SHADOW_RESPONSE_MAX_BYTES = 1024 * 1024;
 const SHADOW_MAX_TOKENS = 32_768;
 const SHADOW_MAX_STEPS = 20;
 const SHADOW_MAX_OUTPUT_TOKENS = 8_192;
+const CANDIDATE_RESULT_PREVIEW_CHARS = 8_192;
+const CANDIDATE_STEP_SUMMARY_CHARS = 1_024;
+const MAX_OBSERVED_CANDIDATE_TASKS = 64;
+const MAX_OBSERVED_CANDIDATE_STEPS = 256;
+
+function boundedPublicText(value: unknown, limit: number): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const safe = sanitizePublicJson(value);
+  return typeof safe === 'string' ? safe.slice(0, limit) : undefined;
+}
+
+/**
+ * Sanitize candidate state before it reaches durable observability storage.
+ */
+function safeCandidateOutputState(
+  state: RunState,
+  candidateIndex: number,
+): RunState {
+  return sanitizePublicJson({
+    ...state,
+    goal: `Best-of-N candidate ${candidateIndex + 1}`,
+    result: boundedPublicText(state.result, CANDIDATE_RESULT_PREVIEW_CHARS),
+    tasks: state.tasks.slice(0, MAX_OBSERVED_CANDIDATE_TASKS).map((task, index) => ({
+      ...task,
+      goal: `Candidate task ${index + 1}`,
+      result: boundedPublicText(task.result, CANDIDATE_RESULT_PREVIEW_CHARS),
+      error: boundedPublicText(task.error, CANDIDATE_STEP_SUMMARY_CHARS),
+    })),
+    steps: state.steps.slice(-MAX_OBSERVED_CANDIDATE_STEPS).map((step) => ({
+      ...step,
+      summary: boundedPublicText(step.summary, CANDIDATE_STEP_SUMMARY_CHARS) ?? '',
+    })),
+  }) as RunState;
+}
+
+type CandidateObservationOwnership =
+  | { ok: true; state: RunState; streamClaim: RunOutputStreamClaim }
+  | { ok: false; reason: 'candidate-observation-stream-collision' | 'candidate-observation-state-collision' };
+
+/**
+ * Exclusively claim both durable resources before candidate dispatch. The
+ * stream claim is inode-bound and non-serializable; saveRun atomically refuses
+ * an existing RunState. A failed state claim releases only our still-empty
+ * stream inode, so neither an orphan stream nor a reused attempt can be
+ * adopted by a new provider execution.
+ */
+async function startCandidateOutputObservation(
+  cfg: AshlrConfig,
+  state: RunState,
+  candidateIndex: number,
+): Promise<CandidateObservationOwnership> {
+  if (cfg.foundry?.runOutputPersistence?.enabled !== true) {
+    return { ok: false, reason: 'candidate-observation-state-collision' };
+  }
+  const { claimRunOutputStream, releaseRunOutputStreamClaim } = await import('./streaming.js');
+  const streamClaim = claimRunOutputStream(state.id);
+  if (!streamClaim) return { ok: false, reason: 'candidate-observation-stream-collision' };
+  try {
+    const { saveRun } = await import('./orchestrator.js');
+    const safe = safeCandidateOutputState(state, candidateIndex);
+    saveRun(safe);
+    return { ok: true, state: safe, streamClaim };
+  } catch {
+    releaseRunOutputStreamClaim(streamClaim);
+    return { ok: false, reason: 'candidate-observation-state-collision' };
+  }
+}
+
+/** Refresh only the exact object carrying saveRun's generation authority. */
+async function updateCandidateOutputObservation(
+  state: RunState,
+  candidateIndex: number,
+  prior: RunState,
+): Promise<RunState> {
+  try {
+    const { saveRun } = await import('./orchestrator.js');
+    Object.assign(prior, safeCandidateOutputState(state, candidateIndex));
+    saveRun(prior);
+  } catch {
+    // Terminal observation is best effort after exclusive dispatch ownership.
+  }
+  return prior;
+}
 
 export {
   MAX_BEST_OF_N_CANDIDATE_SPECS_INSPECTED,
@@ -103,8 +188,26 @@ export interface CandidateResult {
   runId?: string;
   /** Causal trajectory bound to this candidate run. */
   trajectoryId?: string;
-  /** Verdict from the critic judge. undefined when judging failed. */
+  /**
+   * Verdict from the critic judge. undefined when no real judgment was
+   * obtained — a synthetic manager.ts fallback (verdict.judgeFailure set) is
+   * never surfaced here; see `judgeSource` for why no verdict exists.
+   */
   verdict?: ManagerVerdict;
+  /**
+   * M498: provenance of this candidate's judging.
+   * 'real'        = an independently resolved judge client
+   *                 (resolveFrontierJudgeClient, requireIndependent) produced
+   *                 a considered verdict (or a real call failed — see
+   *                 critique.judge.callsFailed).
+   * 'unavailable' = a real judge was sought but none could be resolved
+   *                 (no independent engine installed/authorized).
+   * 'skipped'     = judging was never attempted — cfg.foundry.bestOfNJudge is
+   *                 not enabled, or fewer than 2 materially distinct
+   *                 candidates existed to differentiate.
+   * undefined     = the manager judge module itself was not importable.
+   */
+  judgeSource?: 'real' | 'unavailable' | 'skipped';
   /** Score derived from verdict dimensions (value+correctness+scope+alignment). */
   score: number;
   /** Whether the real test loop passed (undefined = not attempted / not available). */
@@ -180,6 +283,23 @@ export interface BestOfNResult {
     billableCostUsd: number;
     /** Top terminal reasons for candidates that produced no proposal. */
     noProposalReasons?: Array<{ reason: string; count: number }>;
+    /**
+     * M498: real-judge wiring summary. 'real' only when at least one
+     * candidate received a genuine judge verdict this run; 'unavailable' when
+     * a real judge was sought but none could be resolved; 'skipped' when
+     * judging was never attempted (config off, or <2 materially distinct
+     * candidates). Lets Models/Production views show whether best-of-N is
+     * actually earning its cost.
+     */
+    judge?: {
+      status: 'real' | 'unavailable' | 'skipped';
+      /** Distinct judge model identities actually used this run. */
+      models?: string[];
+      /** Real judge calls attempted (excludes the always-present null-client fallback). */
+      callsAttempted: number;
+      /** Real judge calls that threw or returned a synthetic fallback verdict. */
+      callsFailed: number;
+    };
   };
 }
 
@@ -547,6 +667,7 @@ export async function runBestOfN(
       totalCostUsd: 0,
       billableCostUsd: 0,
       noProposalReasons: [{ reason, count: 1 }],
+      judge: { status: 'skipped', callsAttempted: 0, callsFailed: 0 },
     },
   });
 
@@ -732,6 +853,8 @@ async function runBestOfNInternal(
     budget?: Partial<RunBudget>;
     /** Disable paid taste scoring when no separate judge authority exists. */
     disableTasteCritic?: boolean;
+    /** M498: force-disable real judge resolution for this call regardless of cfg.foundry.bestOfNJudge. */
+    disableJudge?: boolean;
     delegationScope?: DelegationScope;
     /** Opaque outer dispatch identity used to derive stable candidate run ids. */
     attemptId?: OuterAttemptIdentity;
@@ -770,6 +893,8 @@ async function runBestOfNInternal(
 ): Promise<BestOfNResult | { winner: undefined; candidates: CandidateResult[]; critique: BestOfNResult['critique'] }> {
   const n = readN(cfg, opts?.n);
   const goal = goalFor(item);
+  const candidateOutputPersistenceEnabled =
+    cfg.foundry?.runOutputPersistence?.enabled === true;
 
   // ── 1. Resolve sandbox runners ──────────────────────────────────────────
   // Import lazily so the module doesn't blow up when sandboxed-engine isn't
@@ -800,12 +925,41 @@ async function runBestOfNInternal(
 
   // ── 2. Resolve judge ────────────────────────────────────────────────────
   let judgeProposal: typeof import('../fleet/manager.js').judgeProposal | undefined;
+  let resolveFrontierJudgeClient: typeof import('../fleet/manager.js').resolveFrontierJudgeClient | undefined;
   try {
     const mod = await import('../fleet/manager.js');
     judgeProposal = mod.judgeProposal;
+    resolveFrontierJudgeClient = mod.resolveFrontierJudgeClient;
   } catch {
     // manager unavailable — candidates will be unjudged; score falls back to 0
   }
+  // M498: real-judge call accounting, surfaced via critique.judge below.
+  // callsAttempted/callsFailed count ONLY calls made with a real,
+  // independently resolved client — the always-present null-client fallback
+  // call (which lets judgeProposal's own honest-fallback path run exactly as
+  // it did before this change) is never counted as a "judge call" since it
+  // never leaves the process.
+  let judgeCallsAttempted = 0;
+  let judgeCallsFailed = 0;
+  const judgeModelsUsed = new Set<string>();
+  const buildJudgeSummary = (
+    candidatesForStatus: readonly CandidateResult[],
+  ): NonNullable<BestOfNResult['critique']['judge']> => {
+    const sources = new Set(
+      candidatesForStatus
+        .filter(candidateHasProposalMaterial)
+        .map((candidate) => candidate.judgeSource)
+        .filter((source): source is NonNullable<CandidateResult['judgeSource']> => source != null),
+    );
+    const status: NonNullable<BestOfNResult['critique']['judge']>['status'] =
+      sources.has('real') ? 'real' : sources.has('unavailable') ? 'unavailable' : 'skipped';
+    return {
+      status,
+      ...(judgeModelsUsed.size > 0 ? { models: [...judgeModelsUsed] } : {}),
+      callsAttempted: judgeCallsAttempted,
+      callsFailed: judgeCallsFailed,
+    };
+  };
 
   // ── 3b. Resolve taste critic (M183 — flag-gated) ───────────────────────
   const tasteCriticConfigured = (cfg.foundry as { tasteCritic?: unknown } | undefined)?.tasteCritic;
@@ -1149,6 +1303,8 @@ async function runBestOfNInternal(
     }
 
     let ownedSandbox: Sandbox | undefined;
+    let observedCandidateState: RunState | undefined;
+    let observedCandidateStreamClaim: RunOutputStreamClaim | undefined;
     try {
       const observeExecutedCandidate = (state: RunState, proposalOutcome?: RunProposalOutcome): void => {
         const actionCounts = state.runEventSummary?.actionCounts;
@@ -1223,6 +1379,56 @@ async function runBestOfNInternal(
             allowCloud: false,
           })
         : candidateBudget;
+      const startCandidateObservation = async (): Promise<CandidateObservationOwnership> => {
+        const now = new Date().toISOString();
+        const candidateState: RunState = {
+          id: runId,
+          goal: `Best-of-N candidate ${i + 1}`,
+          engine: cEngine,
+          provider: engineSpec?.kind === 'api-model'
+            ? (engineSpec.api?.protocol ?? 'openai-compat')
+            : 'external',
+          engineModel: `${cEngine}:${cModel}`,
+          engineTier: engineSpec?.tier,
+          createdAt: now,
+          updatedAt: now,
+          budget: {
+            maxTokens: effectiveCandidateBudget?.maxTokens ?? 0,
+            maxSteps: effectiveCandidateBudget?.maxSteps ?? 0,
+            allowCloud: effectiveCandidateBudget?.allowCloud ?? false,
+          },
+          usage: { tokensIn: 0, tokensOut: 0, steps: 0, estCostUsd: 0 },
+          tasks: [{
+            id: `candidate-${i}`,
+            goal: `Candidate task ${i + 1}`,
+            deps: [],
+            status: 'running',
+          }],
+          steps: [],
+          status: 'running',
+        };
+        const ownership = await startCandidateOutputObservation(cfg, candidateState, i);
+        if (ownership.ok) {
+          observedCandidateState = ownership.state;
+          observedCandidateStreamClaim = ownership.streamClaim;
+        }
+        return ownership;
+      };
+      const finishCandidateObservation = async (state: RunState): Promise<void> => {
+        if (observedCandidateState) {
+          observedCandidateState = await updateCandidateOutputObservation(state, i, observedCandidateState);
+        }
+      };
+      const candidateObservationRefusal = (
+        reason: CandidateObservationOwnership & { ok: false },
+        sandbox?: Sandbox,
+      ): InternalCandidateResult => ({
+        ...base,
+        providerDispatchAttempted: false,
+        latencyMs: Date.now() - t0,
+        error: reason.reason,
+        ...(sandbox ? { sandbox } : {}),
+      });
 
       if (captureSandboxedProposal && createSandbox) {
         let sb: Sandbox;
@@ -1241,6 +1447,10 @@ async function runBestOfNInternal(
         }
 
         if (!admitProviderDispatchAttempt()) return providerFenceRefusal();
+        if (candidateOutputPersistenceEnabled) {
+          const ownership = await startCandidateObservation();
+          if (!ownership.ok) return candidateObservationRefusal(ownership, sb);
+        }
         const pendingResult = runSandboxed(cEngine as import('../types.js').EngineId, goal, cfg, {
           ...(typeof requestedModel === 'string' ? { model: requestedModel } : {}),
           sourceRepo,
@@ -1260,6 +1470,9 @@ async function runBestOfNInternal(
             : {}),
           existingWorktree: sb,
           runId,
+          ...(observedCandidateStreamClaim
+            ? { runOutputStreamClaim: observedCandidateStreamClaim }
+            : {}),
           workItemId: opts?.workItemId ?? item.id,
           workItemGenerationId: opts?.workItemGenerationId,
           workSource: opts?.workSource ?? item.source,
@@ -1268,6 +1481,7 @@ async function runBestOfNInternal(
         });
         try { opts?.onProviderDispatchStarted?.(cEngine, runId); } catch { /* telemetry only */ }
         const result = await pendingResult;
+        if (candidateOutputPersistenceEnabled) await finishCandidateObservation(result.state);
         if (shadowConfig.kind === 'on' && result.providerContacted === true) {
           base = { ...base, shadowParticipated: true };
         }
@@ -1392,12 +1606,19 @@ async function runBestOfNInternal(
       }
 
       if (!admitProviderDispatchAttempt()) return providerFenceRefusal();
+      if (candidateOutputPersistenceEnabled) {
+        const ownership = await startCandidateObservation();
+        if (!ownership.ok) return candidateObservationRefusal(ownership);
+      }
       const pendingResult = runSandboxed(cEngine as import('../types.js').EngineId, goal, cfg, {
         ...(typeof requestedModel === 'string' ? { model: requestedModel } : {}),
         sourceRepo,
         ...(effectiveCandidateBudget ? { budget: effectiveCandidateBudget } : {}),
         propose: true,
         runId,
+        ...(observedCandidateStreamClaim
+          ? { runOutputStreamClaim: observedCandidateStreamClaim }
+          : {}),
         workItemId: opts?.workItemId ?? item.id,
         workItemGenerationId: opts?.workItemGenerationId,
         workSource: opts?.workSource ?? item.source,
@@ -1406,6 +1627,7 @@ async function runBestOfNInternal(
       });
       try { opts?.onProviderDispatchStarted?.(cEngine, runId); } catch { /* telemetry only */ }
       const result = await pendingResult;
+      if (candidateOutputPersistenceEnabled) await finishCandidateObservation(result.state);
       const proposalOutcome = result.proposalOutcome ?? result.state.proposalOutcome;
       observeExecutedCandidate(result.state, proposalOutcome);
       if (opts?.signal?.aborted) {
@@ -1446,6 +1668,19 @@ async function runBestOfNInternal(
         state: result.state,
       } as InternalCandidateResult;
     } catch (err) {
+      if (observedCandidateState) {
+        observedCandidateState = await updateCandidateOutputObservation({
+          ...observedCandidateState,
+          updatedAt: new Date().toISOString(),
+          status: 'failed',
+          result: 'candidate runner failed',
+          tasks: observedCandidateState.tasks.map((task) => ({
+            ...task,
+            status: task.status === 'running' ? 'failed' : task.status,
+            ...(task.status === 'running' ? { error: 'candidate runner failed' } : {}),
+          })),
+        }, i, observedCandidateState);
+      }
       return {
         ...base,
         ...(shadowConfig.kind === 'on' ? { shadowIdentityStatus: 'refused' as const } : {}),
@@ -1588,6 +1823,7 @@ async function runBestOfNInternal(
           { reason: 'selection cancelled', count: 1 },
           ...actualReasons.filter((entry) => entry.reason !== 'selection cancelled'),
         ].slice(0, 8),
+        judge: buildJudgeSummary(candidates),
       },
     };
   };
@@ -1611,7 +1847,64 @@ async function runBestOfNInternal(
     const withProposals = rawCandidates.filter(candidateHasProposalMaterial);
 
     // ── 7. Score each non-empty candidate via the critic ──────────────────
-    const judgeClient = buildNullJudgeClient(); // fallback when no provider
+    // M498: real judge wiring. Before this fix every call used
+    // buildNullJudgeClient() unconditionally — a client whose complete()
+    // always returns '', so parseJudgeResponse('') always failed and every
+    // candidate "score" was manager.ts's synthetic parse-failure fallback
+    // (value=correctness=scope=alignment=3 → score 8, identical for every
+    // candidate, every run). Selection was therefore always the deterministic
+    // tiebreak heuristic, never a real judgment, despite the config surface
+    // (foundry.bestOfN + tasteCritic) implying a critic scores candidates.
+    //
+    // Fix: attempt a REAL, independent judge using the SAME resolver +
+    // independence rule as inbox/merge.ts's Gate 7 and fleet/model-racing.ts
+    // — a judge must not share a model family with the engine that produced
+    // the candidate it scores, or it could rubber-stamp its own output.
+    //
+    // Cost + safety default: OFF unless the operator explicitly sets
+    // cfg.foundry.bestOfNJudge=true. Judging N candidates costs N judge calls
+    // on top of N generation calls; silently enabling that for every existing
+    // best-of-N dispatch site (including the live daemon, once this ships in
+    // a build) would multiply spend without operator consent. Even when
+    // enabled, judging only runs when ≥2 candidates carry materially distinct
+    // proposal content (by diff string — a cheap proxy; a proposalId-only
+    // candidate without a captured draft compares by its placeholder `diff`,
+    // which may under/over-count distinctness, but this only affects the
+    // cost-bound heuristic, never correctness of an actual judged verdict):
+    // clones of the sole distinct diff can't be usefully ranked, so a call
+    // would just spend money confirming what the heuristic tiebreak already
+    // knows.
+    const bestOfNJudgeConfigured =
+      (cfg.foundry as Record<string, unknown> | undefined)?.['bestOfNJudge'] === true;
+    const judgeEnabled = opts?.disableJudge !== true && bestOfNJudgeConfigured;
+    const distinctCandidateDiffs = new Set(
+      withProposals.map((c) => c.proposalDraft?.diff ?? c.diff),
+    );
+    const judgeCostBoundOk = withProposals.length >= 2 && distinctCandidateDiffs.size >= 2;
+    const judgePolicy: 'attempt' | 'skip' = judgeEnabled && judgeCostBoundOk ? 'attempt' : 'skip';
+
+    // Honest fallback: unlike the pre-fix code, this client is used ONLY when
+    // no real judging was attempted (config off, cost-bound skip, or no
+    // independent client resolvable) — its synthetic verdict is filtered out
+    // below (judgeFailure check) rather than allowed to masquerade as a score.
+    const nullJudgeClient = buildNullJudgeClient();
+    const judgeClientCache = new Map<string, FrontierJudgeClient | null>();
+    const resolveJudgeFor = (c: InternalCandidateResult): FrontierJudgeClient | null => {
+      if (!resolveFrontierJudgeClient) return null;
+      const engine = String(c.engine ?? defaultEngine);
+      const producerModel = `${engine}:${c.model ?? engine}`;
+      const cached = judgeClientCache.get(producerModel);
+      if (cached !== undefined) return cached;
+      let resolved: FrontierJudgeClient | null;
+      try {
+        resolved = resolveFrontierJudgeClient(cfg, { producerModel, requireIndependent: true });
+      } catch {
+        resolved = null;
+      }
+      judgeClientCache.set(producerModel, resolved);
+      return resolved;
+    };
+
     scored = await mapWithConcurrency(
       rawCandidates,
       MAX_BEST_OF_N_CONCURRENCY,
@@ -1625,18 +1918,43 @@ async function runBestOfNInternal(
         const proposal = proposalForCandidate(item, c, loadProposal);
 
         // Score via judge
+        let judgeSource: NonNullable<CandidateResult['judgeSource']> = 'unavailable';
         if (judgeProposal) {
+          let client: FrontierJudgeClient | ReturnType<typeof buildNullJudgeClient> = nullJudgeClient;
+          if (judgePolicy === 'attempt') {
+            const resolved = resolveJudgeFor(c);
+            if (resolved) {
+              judgeSource = 'real';
+              client = resolved;
+              judgeCallsAttempted += 1;
+              judgeModelsUsed.add(resolved.model);
+            } else {
+              judgeSource = 'unavailable';
+            }
+          } else {
+            judgeSource = 'skipped';
+          }
           try {
-            verdict = await judgeProposal(proposal, cfg, judgeClient, {
+            const rawVerdict = await judgeProposal(proposal, cfg, client, {
               recordTrace: false,
               ...(opts?.signal ? { signal: opts.signal } : {}),
             });
-            score = scoreVerdict(verdict);
+            if (rawVerdict.judgeFailure) {
+              // Synthetic fallback (manager.ts's own no-real-judgment marker
+              // — set whether this came from the null client above or a real
+              // client's failed call). Never let it masquerade as a
+              // considered verdict or move the score off its honest 0.
+              if (judgeSource === 'real') judgeCallsFailed += 1;
+            } else {
+              verdict = rawVerdict;
+              score = scoreVerdict(rawVerdict);
+            }
           } catch {
-            // Judge failure — candidate stays with score 0
+            if (judgeSource === 'real') judgeCallsFailed += 1;
+            // Judge failure — candidate stays with score 0, verdict undefined.
           }
         }
-        if (opts?.signal?.aborted) return { ...c, verdict, score };
+        if (opts?.signal?.aborted) return { ...c, verdict, score, judgeSource };
 
         // Deterministic quick verification. Infrastructure errors remain neutral.
         if (c.proposalDraft || c.proposalId) {
@@ -1658,7 +1976,7 @@ async function runBestOfNInternal(
             // test runner unavailable — don't penalise
           }
         }
-        if (opts?.signal?.aborted) return { ...c, verdict, score, testsPassed };
+        if (opts?.signal?.aborted) return { ...c, verdict, score, judgeSource, testsPassed };
 
         // M183: taste scoring (flag-gated; only when tasteCritic enabled)
         let taste: TasteScore | undefined;
@@ -1674,13 +1992,14 @@ async function runBestOfNInternal(
             // taste score failure is non-fatal — candidate is still eligible
           }
         }
-        if (opts?.signal?.aborted) return { ...c, verdict, score, testsPassed, taste };
+        if (opts?.signal?.aborted) return { ...c, verdict, score, judgeSource, testsPassed, taste };
 
         return {
           ...c,
           diff: proposal.diff ?? c.diff,
           verdict,
           score,
+          judgeSource,
           testsPassed,
           taste,
           ...(testsPassed === false && c.proposalDraft
@@ -1873,6 +2192,7 @@ async function runBestOfNInternal(
       totalCostUsd,
       billableCostUsd,
       ...(noProposalReasons.length > 0 ? { noProposalReasons } : {}),
+      judge: buildJudgeSummary(scored),
     };
 
     // Losers remain metadata-only rows; cancelled/no-proposal attempts are

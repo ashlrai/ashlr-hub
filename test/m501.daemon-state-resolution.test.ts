@@ -8,8 +8,8 @@ import type { ServiceStatusResult } from '../src/core/daemon/service.js';
 // Each case does real fsync'd crypto/ACL-signed state writes across staged
 // intent/receipt/marker files; several individually run within a couple
 // hundred ms of the 5s default even in isolation, and comfortably over it
-// under normal test-suite load.
-vi.setConfig({ testTimeout: 20_000 });
+// under normal test-suite load. Covered by the real-io lane's 60s default
+// now — see scripts/realio-lane-membership.mjs.
 import {
   daemonStateResolutionIntentPath,
   daemonStateResolutionReceiptPath,
@@ -687,7 +687,7 @@ describe.runIf(process.platform !== 'win32')('daemon state resolution protocol',
     expect(fs.readFileSync(daemonStatePath())).toEqual(conflictSeeded.bytes);
   });
 
-  it('resumes after crashes following state publication, receipt publication, and marker retirement staging', { timeout: 30_000 }, () => {
+  it('resumes after crashes following state publication, receipt publication, and marker retirement staging', () => {
     const crashHooks: Array<Partial<DaemonStateResolutionRuntime>> = [
       { afterStatePublish: () => { throw new Error('crash after state'); } },
       { afterReceiptStage: () => { throw new Error('crash after receipt staging'); } },

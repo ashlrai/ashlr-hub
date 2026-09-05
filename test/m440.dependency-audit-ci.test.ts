@@ -1,8 +1,18 @@
 /**
  * M440 DEPENDENCY AUDIT CI -- parsed workflow authority contract.
  */
-import { readFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
@@ -16,6 +26,10 @@ const workflowText = readFileSync(
 const dependabotText = readFileSync(resolve(repoRoot, '.github/dependabot.yml'), 'utf8');
 const dependencySecurityPolicy = readFileSync(
   resolve(repoRoot, 'docs/DEPENDENCY-SECURITY.md'),
+  'utf8',
+);
+const npmAuditFallbackText = readFileSync(
+  resolve(repoRoot, 'scripts/npm-audit-with-osv-fallback.sh'),
   'utf8',
 );
 const workflow = parse(workflowText) as Record<string, unknown>;
@@ -33,12 +47,30 @@ const authorityPaths = [
   'src/raycast/package-lock.json',
   'src/raycast/npm-shrinkwrap.json',
   'src/raycast/.npmrc',
+  'scripts/npm-audit-with-osv-fallback.sh',
   'desktop/src-tauri/Cargo.toml',
   'desktop/src-tauri/Cargo.lock',
   'docs/DEPENDENCY-SECURITY.md',
   '.github/dependabot.yml',
   '.github/workflows/dependency-audit.yml',
 ];
+
+const npmInstallCommand = `npm install --global "npm@\${NPM_VERSION}" --ignore-scripts --no-audit --no-fund
+test "$(npm --version)" = "\${NPM_VERSION}"
+`;
+
+const osvScannerInstallCommand = `set -euo pipefail
+binary="\${RUNNER_TEMP}/osv-scanner-download"
+bin_dir="\${RUNNER_TEMP}/osv-scanner-bin"
+url="https://github.com/google/osv-scanner/releases/download/v\${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64"
+curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \\
+  --retry 3 --retry-all-errors --output "\${binary}" "\${url}"
+echo "\${OSV_SCANNER_SHA256}  \${binary}" | sha256sum --check --strict
+mkdir --parents "\${bin_dir}"
+install --mode 0755 "\${binary}" "\${bin_dir}/osv-scanner"
+echo "\${bin_dir}" >> "\${GITHUB_PATH}"
+"\${bin_dir}/osv-scanner" --version
+`;
 
 const cargoAuditInstallCommand = `set -euo pipefail
 archive="\${RUNNER_TEMP}/cargo-audit.tgz"
@@ -78,6 +110,10 @@ describe('M440 dependency audit CI', () => {
           'timeout-minutes': 20,
           env: {
             NPM_CONFIG_REGISTRY: 'https://registry.npmjs.org',
+            NPM_VERSION: '11.6.0',
+            OSV_SCANNER_VERSION: '2.5.1',
+            OSV_SCANNER_SHA256:
+              'f9f25499a2c8cc367b3af45df2ea7eeca7fbccceab9c35079968f4b3652194be',
             CARGO_AUDIT_VERSION: '0.22.2',
             CARGO_AUDIT_TARGET: 'x86_64-unknown-linux-gnu',
             CARGO_AUDIT_SHA256:
@@ -98,6 +134,15 @@ describe('M440 dependency audit CI', () => {
               with: { 'node-version': '22' },
             },
             {
+              name: 'Install pinned npm',
+              run: npmInstallCommand,
+            },
+            {
+              name: 'Install pinned OSV-Scanner',
+              shell: 'bash',
+              run: osvScannerInstallCommand,
+            },
+            {
               name: 'Install pinned cargo-audit',
               shell: 'bash',
               run: cargoAuditInstallCommand,
@@ -113,21 +158,21 @@ describe('M440 dependency audit CI', () => {
             },
             {
               name: 'Audit root dependencies',
-              run: 'npm audit --package-lock-only --ignore-scripts --audit-level=low',
+              run: 'bash scripts/npm-audit-with-osv-fallback.sh "root full graph" package-lock.json',
             },
             {
               name: 'Audit root production dependencies',
-              run: 'npm audit --package-lock-only --ignore-scripts --omit=dev --audit-level=low',
+              run: 'bash scripts/npm-audit-with-osv-fallback.sh "root production graph" package-lock.json --omit=dev',
             },
             {
               name: 'Audit Raycast dependencies',
               'working-directory': 'src/raycast',
-              run: 'npm audit --package-lock-only --ignore-scripts --audit-level=low',
+              run: 'bash ../../scripts/npm-audit-with-osv-fallback.sh "Raycast full graph" package-lock.json',
             },
             {
               name: 'Audit Raycast production dependencies',
               'working-directory': 'src/raycast',
-              run: 'npm audit --package-lock-only --ignore-scripts --omit=dev --audit-level=low',
+              run: 'bash ../../scripts/npm-audit-with-osv-fallback.sh "Raycast production graph" package-lock.json --omit=dev',
             },
             {
               name: 'Audit desktop Cargo dependencies',
@@ -158,6 +203,10 @@ describe('M440 dependency audit CI', () => {
     expect(audit['timeout-minutes']).toBe(20);
     expect(audit.env).toEqual({
       NPM_CONFIG_REGISTRY: 'https://registry.npmjs.org',
+      NPM_VERSION: '11.6.0',
+      OSV_SCANNER_VERSION: '2.5.1',
+      OSV_SCANNER_SHA256:
+        'f9f25499a2c8cc367b3af45df2ea7eeca7fbccceab9c35079968f4b3652194be',
       CARGO_AUDIT_VERSION: '0.22.2',
       CARGO_AUDIT_TARGET: 'x86_64-unknown-linux-gnu',
       CARGO_AUDIT_SHA256:
@@ -172,7 +221,7 @@ describe('M440 dependency audit CI', () => {
   });
 
   it('uses only approved actions with bounded checkout authority', () => {
-    expect(steps).toHaveLength(10);
+    expect(steps).toHaveLength(12);
     expect(steps.filter((step) => step.uses).map((step) => step.uses)).toEqual([
       'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
       'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020',
@@ -190,8 +239,17 @@ describe('M440 dependency audit CI', () => {
     });
   });
 
-  it('fail-closes on clean installs before auditing full and production lockfile graphs', () => {
-    expect(steps.slice(3, 9).map(({ run, ['working-directory']: cwd }) => ({ run, cwd }))).toEqual([
+  it('pins npm and fail-closes on clean installs before auditing complete lockfile graphs', () => {
+    expect(steps[2]).toEqual({
+      name: 'Install pinned npm',
+      run: npmInstallCommand,
+    });
+    expect(steps[3]).toEqual({
+      name: 'Install pinned OSV-Scanner',
+      shell: 'bash',
+      run: osvScannerInstallCommand,
+    });
+    expect(steps.slice(5, 11).map(({ run, ['working-directory']: cwd }) => ({ run, cwd }))).toEqual([
       {
         run: 'npm ci --ignore-scripts --no-audit --no-fund --force=false --legacy-peer-deps=false --strict-peer-deps',
         cwd: undefined,
@@ -201,19 +259,19 @@ describe('M440 dependency audit CI', () => {
         cwd: 'src/raycast',
       },
       {
-        run: 'npm audit --package-lock-only --ignore-scripts --audit-level=low',
+        run: 'bash scripts/npm-audit-with-osv-fallback.sh "root full graph" package-lock.json',
         cwd: undefined,
       },
       {
-        run: 'npm audit --package-lock-only --ignore-scripts --omit=dev --audit-level=low',
+        run: 'bash scripts/npm-audit-with-osv-fallback.sh "root production graph" package-lock.json --omit=dev',
         cwd: undefined,
       },
       {
-        run: 'npm audit --package-lock-only --ignore-scripts --audit-level=low',
+        run: 'bash ../../scripts/npm-audit-with-osv-fallback.sh "Raycast full graph" package-lock.json',
         cwd: 'src/raycast',
       },
       {
-        run: 'npm audit --package-lock-only --ignore-scripts --omit=dev --audit-level=low',
+        run: 'bash ../../scripts/npm-audit-with-osv-fallback.sh "Raycast production graph" package-lock.json --omit=dev',
         cwd: 'src/raycast',
       },
     ]);
@@ -222,8 +280,10 @@ describe('M440 dependency audit CI', () => {
       .map((step, index) => ({ index, run: String(step.run ?? '') }))
       .filter(({ run }) => run.startsWith('npm ci'))
       .map(({ index }) => index);
-    const firstAuditIndex = steps.findIndex((step) => String(step.run ?? '').startsWith('npm audit'));
-    expect(installIndexes).toEqual([3, 4]);
+    const firstAuditIndex = steps.findIndex((step) =>
+      String(step.run ?? '').includes('npm-audit-with-osv-fallback.sh'),
+    );
+    expect(installIndexes).toEqual([5, 6]);
     expect(Math.max(...installIndexes)).toBeLessThan(firstAuditIndex);
     for (const index of installIndexes) {
       const command = String(steps[index]?.run ?? '');
@@ -232,10 +292,182 @@ describe('M440 dependency audit CI', () => {
       expect(command).toContain('--strict-peer-deps');
     }
     expect(steps[1]?.with).not.toHaveProperty('cache');
+    expect(osvScannerInstallCommand).toContain('--proto \'=https\' --tlsv1.2');
+    expect(osvScannerInstallCommand).toContain('sha256sum --check --strict');
+    expect(npmAuditFallbackText).toContain('for attempt in 1 2 3');
+    expect(npmAuditFallbackText).toContain('--fetch-retries=0 --fetch-timeout=30000');
+    expect(npmAuditFallbackText).toContain('"${npm_bin}" "${npm_args[@]}"');
+    expect(npmAuditFallbackText).toContain('if is_valid_npm_report "${stdout_file}"; then');
+    expect(npmAuditFallbackText).toContain('if ! is_clean_npm_report "${stdout_file}"; then');
+    expect(npmAuditFallbackText).toContain('fallback was not authorized');
+    expect(npmAuditFallbackText).toContain(
+      'audit_tmp=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/ashlr-npm-audit.XXXXXX")',
+    );
+    expect(npmAuditFallbackText).toContain(': > "${osv_config}"');
+    expect(npmAuditFallbackText).toContain('chmod 0600 "${osv_config}"');
+    expect(npmAuditFallbackText).toContain(
+      '"${osv_bin}" scan source --config "${osv_config}" --lockfile "${lockfile}"',
+    );
+    expect(npmAuditFallbackText).toContain('no provider returned a clean result');
+    expect(npmAuditFallbackText).toContain('GITHUB_STEP_SUMMARY');
+    expect(npmAuditFallbackText).not.toMatch(
+      /\|\|\s*true|continue-on-error|--allow-no-lockfiles/,
+    );
+  });
+
+  it('fail-closes inconsistent npm success and isolates OSV from repository ignore policy', () => {
+    const fixtureRoot = mkdtempSync(resolve(tmpdir(), 'ashlr-m440-audit-'));
+    try {
+      const binDir = resolve(fixtureRoot, 'bin');
+      const lockfile = resolve(fixtureRoot, 'package-lock.json');
+      const countFile = resolve(fixtureRoot, 'npm-count');
+      const markerFile = resolve(fixtureRoot, 'osv-called');
+      const summaryFile = resolve(fixtureRoot, 'summary.md');
+      const repositoryConfig = resolve(fixtureRoot, 'osv-scanner.toml');
+      const script = resolve(repoRoot, 'scripts/npm-audit-with-osv-fallback.sh');
+      writeFileSync(lockfile, '{}\n');
+      writeFileSync(countFile, '0\n');
+      writeFileSync(
+        repositoryConfig,
+        '[[PackageOverrides]]\nname = ".*"\nnameIsRegex = true\nignore = true\n',
+      );
+      mkdirSync(binDir);
+
+      const writeExecutable = (name: string, content: string) => {
+        const file = resolve(binDir, name);
+        writeFileSync(file, content);
+        chmodSync(file, 0o755);
+      };
+      writeExecutable(
+        'timeout',
+        '#!/usr/bin/env bash\nshift 3\nexec "$@"\n',
+      );
+      writeExecutable('sleep', '#!/usr/bin/env bash\nexit 0\n');
+      writeExecutable(
+        'npm',
+        `#!/usr/bin/env bash
+count=$(cat "$TEST_COUNT_FILE")
+count=$((count + 1))
+printf '%s\n' "$count" > "$TEST_COUNT_FILE"
+case "$TEST_MODE" in
+  success)
+    printf '%s\n' '{"auditReportVersion":2,"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":0,"critical":0,"total":0}}}'
+    exit 0
+    ;;
+  vulnerability)
+    printf '%s\n' '{"auditReportVersion":2,"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":1,"critical":0,"total":1}}}'
+    exit 1
+    ;;
+  false-clean)
+    printf '%s\n' '{"auditReportVersion":2,"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":1,"critical":0,"total":1}}}'
+    exit 0
+    ;;
+  transport)
+    printf '%s\n' '{"message":"network timeout","error":{"summary":"","detail":""}}'
+    echo 'npm error audit endpoint returned an error: network timeout' >&2
+    exit 1
+    ;;
+  *)
+    echo 'npm failed for an invalid package tree' >&2
+    exit 2
+    ;;
+esac
+`,
+      );
+      writeExecutable(
+        'osv-scanner',
+        `#!/usr/bin/env bash
+config_path=''
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == '--config' ]]; then
+    shift
+    config_path="\${1:-}"
+    break
+  fi
+  shift
+done
+[[ -n "$config_path" ]]
+[[ "$config_path" != "$TEST_REPO_CONFIG" ]]
+[[ -f "$config_path" && ! -s "$config_path" ]]
+permissions=$(stat -f '%Lp' "$config_path" 2>/dev/null || stat -c '%a' "$config_path")
+[[ "$permissions" == '600' ]]
+printf '%s\n' "$config_path" > "$TEST_OSV_MARKER"
+exit "\${TEST_OSV_RC:-0}"
+`,
+      );
+
+      const runScenario = (mode: string, osvRc = '0') => {
+        writeFileSync(countFile, '0\n');
+        writeFileSync(summaryFile, '');
+        rmSync(markerFile, { force: true });
+        const result = spawnSync('bash', [script, 'fixture graph', lockfile], {
+          cwd: fixtureRoot,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${binDir}:${process.env.PATH ?? ''}`,
+            TEST_COUNT_FILE: countFile,
+            TEST_OSV_MARKER: markerFile,
+            TEST_REPO_CONFIG: repositoryConfig,
+            TEST_OSV_RC: osvRc,
+            TEST_MODE: mode,
+            GITHUB_STEP_SUMMARY: summaryFile,
+          },
+        });
+        return {
+          ...result,
+          count: Number(readFileSync(countFile, 'utf8').trim()),
+          fallbackCalled: existsSync(markerFile),
+          summary: readFileSync(summaryFile, 'utf8'),
+        };
+      };
+
+      const success = runScenario('success');
+      expect(success.status).toBe(0);
+      expect(success.count).toBe(1);
+      expect(success.fallbackCalled).toBe(false);
+      expect(success.summary).toContain('primary npm audit passed with a valid audit v2 report');
+
+      const vulnerability = runScenario('vulnerability');
+      expect(vulnerability.status).toBe(1);
+      expect(vulnerability.count).toBe(1);
+      expect(vulnerability.fallbackCalled).toBe(false);
+      expect(vulnerability.summary).toContain('primary npm audit reported vulnerabilities');
+
+      const falseClean = runScenario('false-clean');
+      expect(falseClean.status).toBe(1);
+      expect(falseClean.count).toBe(1);
+      expect(falseClean.fallbackCalled).toBe(false);
+      expect(falseClean.summary).toContain(
+        'npm returned success with nonzero vulnerability counts',
+      );
+
+      const nonTransport = runScenario('non-transport');
+      expect(nonTransport.status).toBe(2);
+      expect(nonTransport.count).toBe(1);
+      expect(nonTransport.fallbackCalled).toBe(false);
+      expect(nonTransport.summary).toContain('fallback was not authorized');
+
+      const transport = runScenario('transport');
+      expect(transport.status).toBe(0);
+      expect(transport.count).toBe(3);
+      expect(transport.fallbackCalled).toBe(true);
+      expect(readFileSync(markerFile, 'utf8').trim()).not.toBe(repositoryConfig);
+      expect(transport.summary).toContain('npm transport failed after 3 bounded attempts');
+      expect(transport.summary).toContain('pinned OSV-Scanner fallback passed');
+
+      const unavailable = runScenario('transport', '7');
+      expect(unavailable.status).toBe(7);
+      expect(unavailable.count).toBe(3);
+      expect(unavailable.fallbackCalled).toBe(true);
+      expect(unavailable.summary).toContain('no provider returned a clean result');
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
   });
 
   it('pins RustSec tooling and fails on every vulnerability except the open GLib quarantine', () => {
-    expect(steps[2]).toEqual({
+    expect(steps[4]).toEqual({
       name: 'Install pinned cargo-audit',
       shell: 'bash',
       run: cargoAuditInstallCommand,
@@ -244,12 +476,12 @@ describe('M440 dependency audit CI', () => {
     expect(cargoAuditInstallCommand).toContain('sha256sum --check --strict');
     expect(cargoAuditInstallCommand).not.toMatch(/cargo install|latest|stable/);
 
-    expect(steps[9]).toEqual({
+    expect(steps[11]).toEqual({
       name: 'Audit desktop Cargo dependencies',
       run: 'cargo-audit audit --file desktop/src-tauri/Cargo.lock --ignore RUSTSEC-2024-0429',
     });
-    expect(String(steps[9]?.run).match(/--ignore\s+RUSTSEC-/g)).toHaveLength(1);
-    expect(String(steps[9]?.run)).not.toMatch(/continue|allow|deny warnings/i);
+    expect(String(steps[11]?.run).match(/--ignore\s+RUSTSEC-/g)).toHaveLength(1);
+    expect(String(steps[11]?.run)).not.toMatch(/continue|allow|deny warnings/i);
     expect(steps.some((step) => step['continue-on-error'] === true)).toBe(false);
   });
 

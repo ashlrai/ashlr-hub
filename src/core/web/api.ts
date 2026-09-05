@@ -12,6 +12,7 @@
  *   GET /api/portfolio         -> buildSnapshot(cfg).portfolio | null (read-only; M29)
  *   GET /api/runs              -> listRuns()
  *   GET /api/run/:id           -> loadRun(id) | 404
+ *   GET /api/run/:id/events    -> per-run SSE tail (run-stream.ts) | 400/404
  *   GET /api/swarms            -> listSwarms()
  *   GET /api/swarm/:id         -> loadSwarm(id) | 404
  *   GET /api/pulse?window=7d   -> buildRollup(window, cfg)
@@ -19,6 +20,7 @@
  *   GET /api/inbox             -> listProposals({status:'pending'}) (read-only; M23)
  *   GET /api/autonomy/evidence -> list autonomy evidence packs (metadata only)
  *   GET /api/daemon            -> strict provenance-bearing daemon observation
+ *   GET /api/agent-os          -> authenticated observation-only Agent OS snapshot
  *   GET /api/events            -> Server-Sent Events stream
  *
  * Mutating routes (ONLY when ctx.allowDispatch === true + token header):
@@ -90,7 +92,9 @@ import { listGoals } from '../goals/store.js';
 import { progressOf } from '../goals/advance.js';
 import { sanitizePublicJson } from '../util/public-json.js';
 import type { MissionShadowObservation } from '../vision/mission-shadow-observer.js';
+import { readAgentOsRuntimeSnapshotV1 } from '../vision/agent-os-runtime-read.js';
 import type { ProposalsReadResult } from '../inbox/store.js';
+import { handleRunEventsSse, RUN_EVENTS_PATH_RE } from './run-stream.js';
 
 // ---------------------------------------------------------------------------
 // SSE registry — shared across all open SSE connections so server.ts can
@@ -104,16 +108,26 @@ const _sseCleanups = new Map<string, { cleanup: () => void; sessionId: string }>
 /**
  * Register a cleanup callback for an SSE connection.
  * Returns the id so it can be deregistered on close.
+ *
+ * Exported so src/core/web/run-stream.ts (the per-run SSE tail) shares the
+ * exact same connection registry/cap as the general /api/events stream —
+ * one pool of "how many live SSE sockets does this process hold open",
+ * not two independently-capped pools.
  */
-function registerSse(cleanup: () => void, sessionId: string): string {
+export function registerSse(cleanup: () => void, sessionId: string): string {
   const id = randomBytes(8).toString('hex');
   _sseCleanups.set(id, { cleanup, sessionId });
   return id;
 }
 
 /** Remove a registered SSE cleanup. */
-function deregisterSse(id: string): void {
+export function deregisterSse(id: string): void {
   _sseCleanups.delete(id);
+}
+
+/** True once the shared SSE connection pool is at capacity. */
+export function sseConnectionCapReached(): boolean {
+  return _sseCleanups.size >= SSE_MAX_CONNECTIONS;
 }
 
 /**
@@ -630,7 +644,7 @@ async function buildVisionMissionSnapshot(cfg: AshlrConfig): Promise<Record<stri
 // ---------------------------------------------------------------------------
 
 /** Write a JSON response. Never throws. */
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
+export function sendJson(res: ServerResponse, status: number, body: unknown): void {
   try {
     const boundedBody = body && typeof body === 'object' && 'error' in body
       ? { ...body, error: String((body as { error: unknown }).error).slice(0, 512) }
@@ -1164,11 +1178,37 @@ export async function handleApi(
       return true;
     }
 
+    // Authenticated by server.ts before dispatch. This route is deliberately
+    // read-only and independent from the control snapshot and daemon. The
+    // public projection withholds private envelopes and all snapshot values
+    // unless the append-only source is complete and authenticated.
+    if (path === '/api/agent-os' && method === 'GET') {
+      sendJson(res, 200, readAgentOsRuntimeSnapshotV1());
+      return true;
+    }
+
     // ── GET /api/runs ────────────────────────────────────────────────────────
     if (path === '/api/runs' && method === 'GET') {
       const runs = listRuns({ limit: 200 });
       sendJson(res, 200, runs);
       return true;
+    }
+
+    // ── GET /api/run/:id/events ──────────────────────────────────────────────
+    // Per-run SSE tail — genuine live streaming for one run, distinct from
+    // /api/events' fleet-wide fanout. Must be matched BEFORE
+    // the /api/run/:id prefix check below, which would otherwise treat
+    // "<id>/events" as a (nonexistent) run id. See src/core/web/run-stream.ts.
+    {
+      const eventsMatch = RUN_EVENTS_PATH_RE.exec(path);
+      if (eventsMatch && method === 'GET') {
+        if (!ctx.readSession || ctx.readSession.expiresAt <= Date.now()) {
+          sendJson(res, 401, { code: 'SESSION_REQUIRED', error: 'valid read session required' });
+          return true;
+        }
+        handleRunEventsSse(req, res, eventsMatch[1] ?? '', ctx.readSession);
+        return true;
+      }
     }
 
     // ── GET /api/run/:id ─────────────────────────────────────────────────────
@@ -1229,6 +1269,20 @@ export async function handleApi(
       const { computeModelStatsDetailed } = await import('../fleet/model-stats.js');
       const stats = computeModelStatsDetailed(statsWindow);
       sendJson(res, 200, { window: statsWindow, ...stats });
+      return true;
+    }
+
+    // ── GET /api/scorecard ────────────────────────────────────────────────────
+    // M356: fleet self-evaluation scorecard — velocity/quality/capability,
+    // computed strictly from evidence stores (proposal store + decisions
+    // ledger + persisted eval reports). Read-only, additive route mirroring
+    // the /api/models pattern above. ?window=7d|30d (default 7d).
+    if (path === '/api/scorecard' && method === 'GET') {
+      const rawWindow = getQueryParam(req.url ?? '', 'window');
+      const scWindow = rawWindow === '30d' ? '30d' : '7d';
+      const { computeFleetScorecard } = await import('../fleet/scorecard.js');
+      const scorecard = computeFleetScorecard(scWindow);
+      sendJson(res, 200, scorecard);
       return true;
     }
 
