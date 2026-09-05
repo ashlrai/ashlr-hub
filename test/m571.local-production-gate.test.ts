@@ -1,5 +1,6 @@
 import {
-  existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
+  chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
+  realpathSync, rmSync,
   renameSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -14,6 +15,7 @@ import {
   createPrivateLocalGateCustodyRoot,
   createPrivateLocalGateTempRoot,
   parseLocalGateArgs,
+  parsePrivatePackEvidence,
   prepareDisposableTauriSidecar,
   selectLocalGateSandboxProfile,
   validateLocalGateToolchain,
@@ -384,6 +386,24 @@ describe('M571 local production gate v1', () => {
     ]).status).toBe(0);
     expect(readFileSync(allowedHome, 'utf8')).toBe('ok');
 
+    const packEvidence = join(root, 'pack-evidence.json');
+    for (const profile of [profiles.networkEnabled, profiles.networkDenied]) {
+      expect(spawnSync('/usr/bin/sandbox-exec', [
+        '-f', profile.path, process.execPath, '-e',
+        'require("node:fs").writeFileSync(process.argv[1], "evidence", {flag:"wx",mode:0o600})',
+        packEvidence,
+      ]).status).toBe(0);
+      expect(readFileSync(packEvidence, 'utf8')).toBe('evidence');
+      rmSync(packEvidence);
+    }
+
+    const deniedScratchSibling = join(root, 'pack-evidence.json.extra');
+    expect(spawnSync('/usr/bin/sandbox-exec', [
+      '-f', profiles.networkDenied.path, process.execPath, '-e',
+      'require("node:fs").writeFileSync(process.argv[1], "escape")', deniedScratchSibling,
+    ]).status).not.toBe(0);
+    expect(existsSync(deniedScratchSibling)).toBe(false);
+
     const denied = join(homedir(), '.ashlr-m571-sandbox-denied');
     expect(existsSync(denied)).toBe(false);
 
@@ -431,6 +451,41 @@ describe('M571 local production gate v1', () => {
       },
     });
     expect(gitStatus.status).toBe(0);
+  });
+
+  it.runIf(process.platform === 'darwin')('reads only one exact private, identity-stable pack evidence file', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ashlr-m571-pack-evidence-'));
+    scratch.push(root);
+    const path = join(root, 'pack-evidence.json');
+    const evidence = {
+      schemaVersion: 1,
+      name: '@ashlr/hub',
+      version: '9.8.7',
+      tarballName: 'ashlr-hub-9.8.7.tgz',
+      sha256: digest,
+      integrity,
+      size: 5,
+    };
+    writeFileSync(path, `${JSON.stringify(evidence)}\n`, { mode: 0o600 });
+    chmodSync(path, 0o600);
+    expect(parsePrivatePackEvidence(root)).toEqual(evidence);
+
+    chmodSync(path, 0o644);
+    expect(() => parsePrivatePackEvidence(root)).toThrow(/custody is invalid/u);
+    chmodSync(path, 0o600);
+    writeFileSync(path, 'x'.repeat(4_097), { mode: 0o600 });
+    expect(() => parsePrivatePackEvidence(root)).toThrow(/custody is invalid/u);
+    writeFileSync(path, '{}\n', { mode: 0o600 });
+    expect(() => parsePrivatePackEvidence(root)).toThrow(/pack evidence keys/u);
+    writeFileSync(path, `${JSON.stringify(evidence)}\n`, { mode: 0o600 });
+    const linkedPath = `${path}.linked`;
+    linkSync(path, linkedPath);
+    expect(() => parsePrivatePackEvidence(root)).toThrow(/custody is invalid/u);
+    rmSync(linkedPath);
+    const movedPath = `${path}.owned`;
+    renameSync(path, movedPath);
+    symlinkSync(movedPath, path);
+    expect(() => parsePrivatePackEvidence(root)).toThrow(/custody is invalid/u);
   });
 
   it('recomputes both tarball SHA-256 and npm-compatible sha512 SRI', () => {

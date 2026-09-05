@@ -27,6 +27,7 @@ const REVISION_RE = /^[0-9a-f]{40}$/u;
 const SHA256_RE = /^[0-9a-f]{64}$/u;
 const INTEGRITY_RE = /^sha512-[A-Za-z0-9+/]{86}==$/u;
 const MAX_OUTPUT_HASH_BYTES = 16 * 1024 * 1024;
+const MAX_PACK_EVIDENCE_BYTES = 4 * 1024;
 const PIPE_CLOSE_GRACE_MS = 2_000;
 const LOCAL_GATE_TEMP_PARENT = '/private/tmp';
 const LOCAL_GATE_TEMP_ROOT_MAX_BYTES = 24;
@@ -760,6 +761,7 @@ function sandboxLiteral(value) {
 
 export function writeSandboxProfiles({ verificationRoot, tempRoot, custodyRoot, profileRoot }) {
   const privateRoot = realpathSync(tempRoot);
+  const packEvidencePath = join(privateRoot, 'pack-evidence.json');
   const privateCustodyRoot = realpathSync(custodyRoot);
   const immutableProfileRoot = realpathSync(profileRoot);
   const gitCommonDir = realpathSync(git(verificationRoot, [
@@ -790,7 +792,7 @@ export function writeSandboxProfiles({ verificationRoot, tempRoot, custodyRoot, 
     '(version 1)',
     '(allow default)',
     `(deny file-write* (require-all ${writablePaths
-      .map((path) => `(require-not (subpath ${sandboxLiteral(path)}))`).join(' ')} (require-not (literal "/dev/null"))))`,
+      .map((path) => `(require-not (subpath ${sandboxLiteral(path)}))`).join(' ')} (require-not (literal ${sandboxLiteral(packEvidencePath)})) (require-not (literal "/dev/null"))))`,
     `(deny file-read* (require-all (subpath ${sandboxLiteral(homedir())}) ${readableHomePaths
       .map((path) => `(require-not (subpath ${sandboxLiteral(path)}))`).join(' ')}))`,
   ];
@@ -832,8 +834,43 @@ function assertSandboxProfileUnchanged(profile) {
   }
 }
 
-function parsePackEvidence(path) {
-  const value = JSON.parse(readFileSync(path, 'utf8'));
+function samePackEvidenceIdentity(left, right) {
+  return left.dev === right.dev && left.ino === right.ino && left.uid === right.uid
+    && left.mode === right.mode && left.nlink === right.nlink && left.size === right.size
+    && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+}
+
+export function parsePrivatePackEvidence(tempRoot) {
+  const privateRoot = realpathSync(tempRoot);
+  const path = join(privateRoot, 'pack-evidence.json');
+  const namedBefore = lstatSync(path, { bigint: true });
+  if (!namedBefore.isFile() || namedBefore.isSymbolicLink() || namedBefore.nlink !== 1n
+    || namedBefore.uid !== BigInt(process.getuid()) || (namedBefore.mode & 0o7777n) !== 0o600n
+    || namedBefore.size < 1n || namedBefore.size > BigInt(MAX_PACK_EVIDENCE_BYTES)
+    || dirname(path) !== privateRoot || realpathSync(path) !== path) {
+    fail('pack evidence path or custody is invalid');
+  }
+  const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  let bytes;
+  try {
+    const openedBefore = fstatSync(fd, { bigint: true });
+    if (!samePackEvidenceIdentity(namedBefore, openedBefore)) {
+      fail('pack evidence identity changed before read');
+    }
+    bytes = readFileSync(fd);
+    const openedAfter = fstatSync(fd, { bigint: true });
+    if (!samePackEvidenceIdentity(openedBefore, openedAfter)
+      || bytes.length !== Number(openedAfter.size)) {
+      fail('pack evidence changed during read');
+    }
+  } finally {
+    closeSync(fd);
+  }
+  const namedAfter = lstatSync(path, { bigint: true });
+  if (!samePackEvidenceIdentity(namedBefore, namedAfter) || realpathSync(path) !== path) {
+    fail('pack evidence identity changed after read');
+  }
+  const value = JSON.parse(bytes.toString('utf8'));
   exactKeys(value, ['schemaVersion', 'name', 'version', 'tarballName', 'sha256', 'integrity', 'size'], 'pack evidence');
   if (value.schemaVersion !== 1 || value.name !== '@ashlr/hub'
     || !Number.isSafeInteger(value.size) || value.size < 1 || value.size > 64 * 1024 * 1024
@@ -1095,7 +1132,7 @@ export async function runLocalProductionGate({ repoRoot, options }) {
     profileRoot.assertUnchanged();
     const verificationAfter = ensureCleanExactSource(verificationRoot, options.expectedSha);
     if (verificationAfter.tree !== source.tree) fail('source tree changed during verification');
-    const pack = parsePackEvidence(join(tempRoot, 'pack-evidence.json'));
+    const pack = parsePrivatePackEvidence(tempRoot);
     if (pack.name !== packageJson.name || pack.version !== packageJson.version
       || pack.tarballName !== policyResult.policy.package.tarballName
       || pack.integrity !== policyResult.policy.package.integrity) {

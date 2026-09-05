@@ -54,8 +54,10 @@ for nested tests. Disposable `HOME`, `USERPROFILE`, `ASHLR_HOME`, and Vitest
 worker homes are held separately under a mode-`0700` custody root in the
 validated canonical Darwin per-user temporary directory, so custody-sensitive
 tests do not inherit `/private/tmp`'s world-writable ancestry. The sandbox
-allowlist covers both roots while the real user home remains denied. Verify the
-receipt and tarball with `scripts/verify-local-production-gate-receipt.mjs` and all six
+allowlist covers both roots while the real user home remains denied. Only the
+exact root-level `pack-evidence.json` leaf is additionally writable, and the
+runner reads it through a bounded, no-follow, identity-stable descriptor. Verify
+the receipt and tarball with `scripts/verify-local-production-gate-receipt.mjs` and all six
 independent caller pins before separately considering any registry or GitHub
 mutation. Receipt schema v2 records confinement per gate: build, package,
 dependency, native, and web-test stages remain macOS-sandboxed, while the three

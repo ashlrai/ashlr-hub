@@ -109,6 +109,15 @@ refuses a replacement. All three roots remain disposable and are removed by the
 existing fail-closed cleanup path. As with other pathname checks in this gate,
 identity revalidation does not make hostile same-user path swaps atomic.
 
+The sandbox profiles additionally permit only the exact
+`<scratch-root>/pack-evidence.json` leaf, not general writes at the scratch-root
+level. Pack-smoke creates that evidence with exclusive mode `0600`. The runner
+then opens it with no-follow semantics, requires a current-user-owned single-link
+regular file at that exact canonical location, bounds its size, and verifies
+device, inode, metadata, and size stability before, during, and after the read.
+The independently hashed tarball bytes must still match every value in the
+evidence and the policy SRI.
+
 The contract and receipt classify confinement per gate. Dependency installation,
 advisory audits, and the locked Cargo fetch use a macOS sandbox with a write
 allowlist and user-home read denial, but network access enabled. Typecheck,
