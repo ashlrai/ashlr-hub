@@ -65,9 +65,13 @@ describe('daemon activity — observational private state', () => {
     const read = readDaemonActivity({ nowMs: Date.parse('2026-07-13T05:00:32.000Z') });
     expect(read).toMatchObject({
       sourceState: 'healthy', freshness: 'fresh', ageMs: 1_000,
-      ownerState: process.platform === 'win32' ? 'unknown' : 'alive',
       phaseStartedAt: '2026-07-13T05:00:01.000Z',
     });
+    // A confined reader may be unable to invoke /bin/ps for the process start
+    // reference. Unknown is the intentional fail-closed ownership state.
+    expect(read.ownerState).toBe(
+      read.activity?.processStartRef === null ? 'unknown' : 'alive',
+    );
     expect(read.activity).toMatchObject({
       schemaVersion: 1,
       authority: 'none',

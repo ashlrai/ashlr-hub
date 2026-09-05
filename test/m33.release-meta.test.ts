@@ -547,6 +547,8 @@ describe('release workflow', () => {
       expect(start).toBeGreaterThan(-1);
       expect(end).toBeGreaterThan(start);
       const remoteTagGate = run.slice(start, end);
+      expect(remoteTagGate).not.toContain('<<<');
+      expect(remoteTagGate.match(/printf '%s\\n'/g)).toHaveLength(2);
       const eventSha = '1'.repeat(40);
       const script = `
         set -euo pipefail

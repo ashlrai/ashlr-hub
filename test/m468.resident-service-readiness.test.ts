@@ -13,8 +13,8 @@ import {
   rmSync,
   symlinkSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { tmpdir, userInfo } from 'node:os';
+import { basename, join, resolve } from 'node:path';
 import { generateServiceDefinition } from '../src/core/daemon/service.js';
 import {
   observeResidentServiceDiagnostic,
@@ -448,14 +448,29 @@ describe('observeResidentServiceDiagnostic', () => {
   it('uses the operating-system account HOME when no test identity is injected', () => {
     const alternate = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-m468-production-home-')));
     try {
+      let expectedIdentity: 'unbound' | 'degraded' = 'degraded';
+      try {
+        const accountHome = userInfo().homedir;
+        if (resolve(accountHome) === accountHome && realpathSync(accountHome) === accountHome) {
+          expectedIdentity = 'unbound';
+        }
+      } catch {
+        // The local production gate intentionally denies reads of the real user HOME.
+      }
       const deps = dependencies({ expectedHome: alternate });
       delete deps.testOnlyTrustedAccountIdentity;
       const diagnostic = observeResidentServiceDiagnostic(options({ homeDir: alternate }), deps);
       expect(diagnostic.localChecks).toMatchObject({
-        homeDirectoryIdentity: 'unbound',
+        homeDirectoryIdentity: expectedIdentity,
         homeDirectoryIdentityBasis: 'system-account',
         environmentSafe: false,
       });
+      expect(diagnostic.findings).toContainEqual(expect.objectContaining({
+        code: expectedIdentity === 'unbound'
+          ? 'home-directory-identity-unbound'
+          : 'home-directory-identity-unavailable',
+        severity: expectedIdentity === 'unbound' ? 'blocked' : 'degraded',
+      }));
       expect(diagnostic.operationalAuthority).toBe(false);
     } finally {
       rmSync(alternate, { recursive: true, force: true });

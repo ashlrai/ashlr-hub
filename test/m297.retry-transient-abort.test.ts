@@ -18,7 +18,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, existsSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -28,6 +28,16 @@ import {
   runEngineSandboxed,
 } from '../src/core/run/sandboxed-engine.js';
 import { agentDiagnosticRunRef, agentDiagnosticsDir } from '../src/core/run/agent-diagnostics.js';
+
+const processStartInspectionAvailable = (() => {
+  if (process.platform === 'win32') return false;
+  const result = spawnSync('ps', ['-o', 'lstart=', '-p', String(process.pid)], {
+    encoding: 'utf8',
+    timeout: 1_000,
+    maxBuffer: 1_024,
+  });
+  return result.status === 0 && typeof result.stdout === 'string' && result.stdout.trim() !== '';
+})();
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -230,7 +240,10 @@ describe.skipIf(process.platform === 'win32')('M297 runEngineSandboxed retry int
       const cfg = makeConfig({ dispatchRetries: 0 });
       await runEngineSandboxed('codex', `${promptCanary} first invocation`, cfg, { sourceRepo: srcRepo, propose: false, runId });
       await runEngineSandboxed('codex', `${promptCanary} second invocation`, cfg, { sourceRepo: srcRepo, propose: false, runId });
-      const log = readFileSync(join(agentDiagnosticsDir(), `${agentDiagnosticRunRef(runId)!}.jsonl`), 'utf8');
+      const logPath = join(agentDiagnosticsDir(), `${agentDiagnosticRunRef(runId)!}.jsonl`);
+      expect(existsSync(logPath)).toBe(processStartInspectionAvailable);
+      if (!processStartInspectionAvailable) return;
+      const log = readFileSync(logPath, 'utf8');
       const rows = log.trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
       expect(rows).toHaveLength(2);
       expect(rows.map((row) => row['attempt'])).toEqual([1, 1]);
@@ -285,7 +298,10 @@ describe.skipIf(process.platform === 'win32')('M297 runEngineSandboxed retry int
       expect(result.state.status).toBe('failed');
       expect(countInvocations(counterFile)).toBe(3);
       const runRef = agentDiagnosticRunRef(result.state.id)!;
-      const log = readFileSync(join(agentDiagnosticsDir(), `${runRef}.jsonl`), 'utf8');
+      const logPath = join(agentDiagnosticsDir(), `${runRef}.jsonl`);
+      expect(existsSync(logPath)).toBe(processStartInspectionAvailable);
+      if (!processStartInspectionAvailable) return;
+      const log = readFileSync(logPath, 'utf8');
       const rows = log.trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
       expect(rows).toHaveLength(3);
       expect(rows.map((row) => row['attempt'])).toEqual([1, 2, 3]);

@@ -782,11 +782,16 @@ describe('M24 runDaemon --once — exactly one tick', () => {
     }
 
     expect(mockRunSwarm).toHaveBeenCalledTimes(1);
-    expect(readDaemonActivity()).toMatchObject({
+    const activity = readDaemonActivity();
+    expect(activity).toMatchObject({
       sourceState: 'healthy',
-      ownerState: process.platform === 'win32' ? 'unknown' : 'alive',
       activity: { phase: 'tick', pid: process.pid, activeChildren: null },
     });
+    // macOS sandbox-exec can deny /bin/ps from observing its parent. The
+    // journal must stay truthful in that case instead of claiming liveness.
+    expect(activity.ownerState).toBe(
+      activity.activity?.processStartRef === null ? 'unknown' : 'alive',
+    );
     const signal = (mockRunSwarm.mock.calls[0]?.[2] as { signal?: AbortSignal }).signal;
     expect(signal).toBeInstanceOf(AbortSignal);
     expect(signal?.aborted).toBe(false);

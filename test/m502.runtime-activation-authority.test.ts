@@ -1477,6 +1477,7 @@ describe('M504 dormant stopped-release macOS activation consumer', () => {
 
   it.skipIf(process.platform !== 'darwin')('rejects a poisoned HOME before reading the request', async () => {
     const originalHome = process.env['HOME'];
+    stoppedRuntimeControl.accountHome = realpathSync(tmpdir());
     process.env['HOME'] = '/tmp';
     try {
       const result = await activateRuntimeRelease({
