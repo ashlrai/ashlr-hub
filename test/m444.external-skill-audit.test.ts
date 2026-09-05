@@ -279,7 +279,9 @@ describe('external skill-pack quarantine audit', () => {
 
     const modeRoot = validPack();
     const fixture = join(modeRoot, 'evals', 'fixtures', 'documentation-writing', 'input.txt');
-    chmodSync(fixture, 0o4755);
+    // sandbox-exec clears setuid/setgid bits on chmod, but preserves the sticky
+    // bit. Exercise the same production 07000 rejection with a stable fixture.
+    chmodSync(fixture, 0o1755);
 
     expect(auditExternalSkillPack(symlinkRoot)).toMatchObject({ packDigest: null, trialReady: false });
     expect(auditExternalSkillPack(modeRoot)).toMatchObject({ packDigest: null, trialReady: false });
