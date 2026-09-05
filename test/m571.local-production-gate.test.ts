@@ -1,5 +1,6 @@
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
+  existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
+  renameSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -9,6 +10,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   assertExternalReceiptPath,
+  createPrivateLocalGateTempRoot,
   parseLocalGateArgs,
   prepareDisposableTauriSidecar,
   selectLocalGateSandboxProfile,
@@ -230,6 +232,61 @@ describe('M571 local production gate v1', () => {
     expect(() => prepareDisposableTauriSidecar(fakeRepo, rustc)).toThrow(/already exists/u);
     sidecar.cleanup();
     expect(existsSync(sidecar.path)).toBe(false);
+  });
+
+  it.runIf(process.platform === 'darwin')('keeps private nested Unix sockets inside the Darwin path budget', () => {
+    const tempDirectory = (() => {
+      const inheritedTmpdir = process.env.TMPDIR;
+      process.env.TMPDIR = `/private/tmp/${'inherited-path-component-'.repeat(8)}`;
+      try {
+        return createPrivateLocalGateTempRoot();
+      } finally {
+        if (inheritedTmpdir === undefined) delete process.env.TMPDIR;
+        else process.env.TMPDIR = inheritedTmpdir;
+      }
+    })();
+    const root = tempDirectory.path;
+    scratch.push(root);
+    const identity = lstatSync(root);
+    expect(realpathSync(root)).toBe(root);
+    expect(root).toMatch(/^\/private\/tmp\/alg-[A-Za-z0-9]{6}$/u);
+    expect(identity.isDirectory()).toBe(true);
+    expect(identity.isSymbolicLink()).toBe(false);
+    expect(identity.uid).toBe(process.getuid());
+    expect(identity.mode & 0o777).toBe(0o700);
+
+    const childTmp = join(root, 'tmp');
+    mkdirSync(childTmp, { mode: 0o700 });
+    const fixture = mkdtempSync(join(childTmp, 'ashlr-m567-docker-'));
+    const socketPath = join(fixture, 'engine.sock');
+    expect(Buffer.byteLength(socketPath, 'utf8')).toBeLessThanOrEqual(103);
+    const probe = spawnSync(process.execPath, ['-e', [
+      'const net=require("node:net");',
+      'const server=net.createServer();',
+      'server.once("error",()=>process.exit(42));',
+      'server.listen(process.argv[1],()=>server.close(()=>process.exit(0)));',
+    ].join(''), socketPath], { timeout: 5_000 });
+    expect(probe.status).toBe(0);
+    tempDirectory.cleanup();
+    expect(existsSync(root)).toBe(false);
+    expect(() => tempDirectory.cleanup()).not.toThrow();
+  });
+
+  it.runIf(process.platform === 'darwin')('refuses to clean a replaced private temp root', () => {
+    const tempDirectory = createPrivateLocalGateTempRoot();
+    const root = tempDirectory.path;
+    const movedRoot = `${root}.owned`;
+    const victim = mkdtempSync('/private/tmp/alg-victim-');
+    scratch.push(root, movedRoot, victim);
+    writeFileSync(join(victim, 'keep.txt'), 'keep', 'utf8');
+    renameSync(root, movedRoot);
+    symlinkSync(victim, root);
+    expect(() => tempDirectory.cleanup()).toThrow(/identity changed/u);
+    expect(readFileSync(join(victim, 'keep.txt'), 'utf8')).toBe('keep');
+    rmSync(root);
+    renameSync(movedRoot, root);
+    tempDirectory.cleanup();
+    expect(existsSync(root)).toBe(false);
   });
 
   it.runIf(process.platform === 'darwin')('enforces the private write root and deny-network sandbox', () => {

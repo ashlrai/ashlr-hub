@@ -88,6 +88,16 @@ override variables are not inherited. Native launchd integration is explicitly
 disabled. The runner never invokes `gh`, a workflow, npm publication, a service
 manager, or an Ashlr runtime command with operational authority.
 
+The runner creates its gate and profile roots atomically as current-user-owned
+mode `0700` directories beneath canonical root-owned sticky `/private/tmp`.
+The short fixed prefixes keep nested fixture socket paths within macOS's Unix
+socket pathname budget without weakening the sandbox write allowlist or exposing
+the directories to other users. Cleanup rechecks the exact directory device,
+inode, owner, mode, and canonical path before recursive removal and refuses a
+replacement. Both roots remain disposable and are removed by the existing
+fail-closed cleanup path. As with other pathname checks in this gate, identity
+revalidation does not make hostile same-user path swaps atomic.
+
 The contract and receipt classify confinement per gate. Dependency installation,
 advisory audits, and the locked Cargo fetch use a macOS sandbox with a write
 allowlist and user-home read denial, but network access enabled. Typecheck,
