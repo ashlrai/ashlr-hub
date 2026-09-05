@@ -17,6 +17,7 @@ import {
   parseLocalGateArgs,
   parsePrivatePackEvidence,
   prepareDisposableTauriSidecar,
+  selectExactGateExecutable,
   selectLocalGateSandboxProfile,
   validateLocalGateToolchain,
   validateLocalProductionContract,
@@ -48,8 +49,8 @@ const instant = '2026-09-05T00:00:00.000Z';
 
 function validReceipt(): Record<string, unknown> {
   return {
-    schemaVersion: 2,
-    kind: 'ashlr-local-production-gate-receipt-v2',
+    schemaVersion: 3,
+    kind: 'ashlr-local-production-gate-receipt-v3',
     assurance: 'local-source-verification-only',
     source: { revision, tree, cleanBefore: true, cleanAfter: true },
     toolchain: {
@@ -60,7 +61,7 @@ function validReceipt(): Record<string, unknown> {
       cargoAuditVersion: 'cargo-audit 0.22.2',
       executables: Object.fromEntries([
         'node', 'npmCli', 'npmRuntime', 'bash', 'git', 'rustc', 'rustdoc', 'cargo', 'cargoAudit',
-        'osvScanner', 'sandboxExec',
+        'cargoFmt', 'rustfmt', 'cargoClippy', 'clippyDriver', 'osvScanner', 'sandboxExec',
       ].map((name) => [name, { path: `/tools/${name}`, sha256: digest }])),
     },
     bindings: {
@@ -117,7 +118,7 @@ describe('M571 local production gate v1', () => {
     const contract = JSON.parse(readFileSync(join(repoRoot, 'ashlr.verify.json'), 'utf8'));
     const local = validateLocalProductionContract(contract);
     expect(local.gates.map((gate) => gate.id)).toEqual(LOCAL_PRODUCTION_GATE_IDS);
-    expect(local.receiptSchemaVersion).toBe(2);
+    expect(local.receiptSchemaVersion).toBe(3);
     expect(local.gates.filter((gate) => (
       gate.confinement === LOCAL_PRODUCTION_GATE_CONFINEMENT.sanitizedHost
     )).map((gate) => gate.id)).toEqual(LOCAL_PRODUCTION_GATE_SANITIZED_HOST_IDS);
@@ -204,6 +205,31 @@ describe('M571 local production gate v1', () => {
       .toThrow(/Node/u);
     expect(() => validateLocalGateToolchain({ nodeVersion: '24.18.0', npmVersion: '11.15.0', policy }))
       .toThrow(/exactly match/u);
+  });
+
+  it('binds Rust external subcommands to exact same-toolchain binaries', () => {
+    const runner = readFileSync(join(repoRoot, 'scripts', 'run-local-production-gate.mjs'), 'utf8');
+    expect(runner).toContain("sync(rustupPath, ['which', 'cargo-fmt']");
+    expect(runner).toContain("sync(rustupPath, ['which', 'rustfmt']");
+    expect(runner).toContain("sync(rustupPath, ['which', 'cargo-clippy']");
+    expect(runner).toContain("sync(rustupPath, ['which', 'clippy-driver']");
+    const paths = {
+      cargo: '/toolchain/cargo', cargoFmt: '/toolchain/cargo-fmt',
+      cargoClippy: '/toolchain/cargo-clippy', cargoAudit: '/tools/cargo-audit',
+    };
+    expect(selectExactGateExecutable('cargo', ['fmt', '--check'], paths)).toBe(paths.cargoFmt);
+    expect(selectExactGateExecutable(
+      'cargo', ['clippy', '--locked', '--offline', '--all-targets', '--', '-D', 'warnings'], paths,
+    )).toBe(paths.cargoClippy);
+    expect(selectExactGateExecutable('cargo', ['check', '--locked'], paths)).toBe(paths.cargo);
+    expect(selectExactGateExecutable('cargo-audit', ['audit'], paths)).toBe(paths.cargoAudit);
+    expect(runner).toContain('CARGO: tools.paths.cargo');
+    expect(runner).toContain('RUSTFMT: tools.paths.rustfmt');
+    const isolatedEnvironment = runner.slice(
+      runner.indexOf('export function createIsolatedGateEnvironment'),
+      runner.indexOf('export async function runLocalProductionGate'),
+    );
+    expect(isolatedEnvironment).not.toContain('RUSTUP_HOME');
   });
 
   it('requires a pinned commit, tracked policy argument, and absolute external receipt', () => {
@@ -314,6 +340,8 @@ describe('M571 local production gate v1', () => {
           git: '/usr/bin/git',
           rustc: '/usr/bin/true',
           rustdoc: '/usr/bin/true',
+          cargo: '/usr/bin/true',
+          rustfmt: '/usr/bin/true',
         },
       },
     });
@@ -322,6 +350,9 @@ describe('M571 local production gate v1', () => {
     expect(env.USERPROFILE).toBe(env.HOME);
     expect(env.ASHLR_HOME).toBe(join(env.HOME, '.ashlr'));
     expect(env.ASHLR_VITEST_HOME_PARENT).toBe(join(custodyDirectory.path, 'vitest-homes'));
+    expect(env.CARGO).toBe('/usr/bin/true');
+    expect(env.RUSTFMT).toBe('/usr/bin/true');
+    expect(env).not.toHaveProperty('RUSTUP_HOME');
     expect(lstatSync(env.ASHLR_VITEST_HOME_PARENT).mode & 0o7777).toBe(0o700);
     tempDirectory.cleanup();
     custodyDirectory.cleanup();

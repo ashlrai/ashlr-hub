@@ -98,12 +98,12 @@ describe('M570 release successor policy v1', () => {
     });
     expect(existsSync(productionPolicyPath)).toBe(true);
     expect(verifyReleaseSuccessorPolicyFile(productionPolicyPath, '3.4.0').policy).toMatchObject({
-      release: { requiredFirstParentRevision: '15a92503446829f5975220d04489a9d2b83c7757' },
+      release: { requiredFirstParentRevision: 'de8c728e194a43d291cc1d0082903ca18211b5b5' },
       package: {
         version: '3.4.0',
         integrity: 'sha512-Rvdolf8q4+9Q72aTKp6znG3MhnJIbZiuhHxr4hQraq6UFu9zQMGBmUrN3CM6xxPww3Xv+4MaiNbBvwuEvpaitw==',
       },
-      localVerification: { requiredReceiptSchemaVersion: 2 },
+      localVerification: { requiredReceiptSchemaVersion: 3 },
     });
     expect(source).not.toMatch(/3\.3\.2|3\.4\.0|abd49a5049759e417d99089b88c628fd2364f79c|d6c1a5ec/u);
     expect(source).toContain('v9.8.7');
@@ -168,7 +168,7 @@ describe('M570 release successor policy v1', () => {
       nested(policy, 'localVerification').contractSha256 = '7'.repeat(63);
     }],
     ['unsupported local receipt schema', (policy: JsonRecord) => {
-      nested(policy, 'localVerification').requiredReceiptSchemaVersion = 3;
+      nested(policy, 'localVerification').requiredReceiptSchemaVersion = 4;
     }],
     ['failed candidate receipt digest', (policy: JsonRecord) => {
       const failed = nested(policy, 'registry').failedCandidates as JsonRecord[];

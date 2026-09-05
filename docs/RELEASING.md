@@ -59,7 +59,8 @@ exact root-level `pack-evidence.json` leaf is additionally writable, and the
 runner reads it through a bounded, no-follow, identity-stable descriptor. Verify
 the receipt and tarball with `scripts/verify-local-production-gate-receipt.mjs` and all six
 independent caller pins before separately considering any registry or GitHub
-mutation. Receipt schema v2 records confinement per gate: build, package,
+mutation. Receipt schema v3 records confinement per gate and exact Rust
+formatter/linter component identities: build, package,
 dependency, native, and web-test stages remain macOS-sandboxed, while the three
 exact-source `test:ci` shards use the sanitized disposable environment without
 an outer sandbox so their process, socket, nested-sandbox, and

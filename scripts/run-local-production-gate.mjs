@@ -490,6 +490,21 @@ function resolveToolchain(repoRoot) {
   const cargoPath = realpathSync(sync(rustupPath, ['which', 'cargo'], repoRoot, rustupEnv));
   const rustcPath = realpathSync(sync(rustupPath, ['which', 'rustc'], repoRoot, rustupEnv));
   const rustdocPath = realpathSync(sync(rustupPath, ['which', 'rustdoc'], repoRoot, rustupEnv));
+  const cargoFmtPath = realpathSync(sync(rustupPath, ['which', 'cargo-fmt'], repoRoot, rustupEnv));
+  const rustfmtPath = realpathSync(sync(rustupPath, ['which', 'rustfmt'], repoRoot, rustupEnv));
+  const cargoClippyPath = realpathSync(sync(rustupPath, ['which', 'cargo-clippy'], repoRoot, rustupEnv));
+  const clippyDriverPath = realpathSync(sync(rustupPath, ['which', 'clippy-driver'], repoRoot, rustupEnv));
+  const rustToolchainBin = dirname(cargoPath);
+  for (const [name, path] of Object.entries({
+    rustc: rustcPath,
+    rustdoc: rustdocPath,
+    cargoFmt: cargoFmtPath,
+    rustfmt: rustfmtPath,
+    cargoClippy: cargoClippyPath,
+    clippyDriver: clippyDriverPath,
+  })) {
+    if (dirname(path) !== rustToolchainBin) fail(`${name} must use the same exact Rust toolchain as cargo`);
+  }
   const cargoAuditPath = discoverExecutable('cargo-audit', repoRoot);
   const osvScannerPath = discoverExecutable('osv-scanner', repoRoot);
   const paths = {
@@ -501,6 +516,10 @@ function resolveToolchain(repoRoot) {
     rustc: rustcPath,
     rustdoc: rustdocPath,
     cargo: cargoPath,
+    cargoFmt: cargoFmtPath,
+    rustfmt: rustfmtPath,
+    cargoClippy: cargoClippyPath,
+    clippyDriver: clippyDriverPath,
     cargoAudit: cargoAuditPath,
     osvScanner: osvScannerPath,
     sandboxExec: '/usr/bin/sandbox-exec',
@@ -626,12 +645,18 @@ async function terminateMarkedDescendants(marker) {
   if (markedProcessIds(marker).length > 0) fail('marked gate descendants survived SIGKILL');
 }
 
+export function selectExactGateExecutable(logicalCommand, args, paths) {
+  if (logicalCommand === 'cargo' && args[0] === 'fmt') return paths.cargoFmt;
+  if (logicalCommand === 'cargo' && args[0] === 'clippy') return paths.cargoClippy;
+  const toolKey = logicalCommand === 'cargo-audit' ? 'cargoAudit' : logicalCommand;
+  return paths[toolKey] ?? logicalCommand;
+}
+
 async function runGate(gate, context) {
   assertToolchainUnchanged(context.tools);
   const logicalCommand = expandArg(gate.cmd[0], context);
-  const toolKey = logicalCommand === 'cargo-audit' ? 'cargoAudit' : logicalCommand;
-  let command = context.tools.paths[toolKey] ?? logicalCommand;
   let args = gate.cmd.slice(1).map((arg) => expandArg(arg, context));
+  let command = selectExactGateExecutable(logicalCommand, args, context.tools.paths);
   if (logicalCommand === 'npm') {
     command = context.tools.paths.node;
     args = [context.tools.paths.npmCli, ...args];
@@ -992,8 +1017,10 @@ export function createIsolatedGateEnvironment({ repoRoot, tempRoot, custodyRoot,
     GIT_OPTIONAL_LOCKS: '0',
     CARGO_HOME: cargoHome,
     CARGO_TARGET_DIR: cargoTarget,
+    CARGO: tools.paths.cargo,
     RUSTC: tools.paths.rustc,
     RUSTDOC: tools.paths.rustdoc,
+    RUSTFMT: tools.paths.rustfmt,
   });
 }
 
@@ -1162,7 +1189,7 @@ export async function runLocalProductionGate({ repoRoot, options }) {
     const artifactIdentity = writeBytesExclusive(controllingRepo, artifactOutput, artifactBytes);
     const receipt = {
       schemaVersion: LOCAL_PRODUCTION_GATE_RECEIPT_SCHEMA_VERSION,
-      kind: 'ashlr-local-production-gate-receipt-v2',
+      kind: 'ashlr-local-production-gate-receipt-v3',
       assurance: 'local-source-verification-only',
       source: { ...source, cleanBefore: true, cleanAfter: true },
       toolchain: {

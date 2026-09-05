@@ -160,16 +160,20 @@ The canonical UTF-8 receipt is sorted-key JSON followed by exactly one LF and
 is bounded to 256 KiB. Its closed schema binds:
 
 - exact source revision, source tree, and clean-before/clean-after claims;
-- exact Node, npm, Rust, Cargo, and cargo-audit identities plus absolute
-  executable paths and file digests;
+- exact Node, npm, Rust, Cargo, rustfmt, Clippy, and cargo-audit identities plus
+  absolute executable paths and file digests. Rust external subcommands execute
+  the exact `cargo-fmt` and `cargo-clippy` binaries from the same toolchain as
+  Cargo, with exact `CARGO` and `RUSTFMT` paths; the disposable gate environment
+  does not inherit rustup's mutable default-toolchain selection;
 - policy ID/version/digest and verification-contract path/digest;
 - package name/version/tarball name, tarball SHA-256, and sha512 SRI;
 - ordered gate IDs, exact per-gate confinement classifications, command digests,
   timestamps, duration, exit status, and stdout/stderr digests; and
 - the disclosed local execution boundary plus all-false authority.
 
-Receipt schema v2 replaces the earlier blanket isolation strings with the exact
-closed classification on each gate. The verifier rejects unknown or missing
+Receipt schema v3 retains v2's exact closed confinement classification on each
+gate and adds the exact formatter and linter component identities. The verifier
+rejects unknown or missing
 keys, noncanonical bytes, malformed hashes or SRI, missing/reordered/failed
 gates, old Node/npm versions, source or binding mismatch against the complete
 required caller pins, persisted-artifact byte drift, any authority bit, and any
