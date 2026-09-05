@@ -85,7 +85,7 @@
     "schemaVersion": 1,
     "runner": "scripts/run-local-production-gate.mjs",
     "receiptVerifier": "scripts/verify-local-production-gate-receipt.mjs",
-    "receiptSchemaVersion": 2,
+    "receiptSchemaVersion": 3,
     "gates": [
       {
         "id": "install-root",

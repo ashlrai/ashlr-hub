@@ -32,6 +32,10 @@ const PIPE_CLOSE_GRACE_MS = 2_000;
 const LOCAL_GATE_TEMP_PARENT = '/private/tmp';
 const LOCAL_GATE_TEMP_ROOT_MAX_BYTES = 24;
 const LOCAL_GATE_CUSTODY_ROOT_MAX_BYTES = 1_024;
+const TAURI_CHECK_ICON_BYTES = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAGklEQVRYw+3BAQEAAACCIP+vbkhAAQAAAO8GECAAAZf3V9cAAAAASUVORK5CYII=',
+  'base64',
+);
 function resolveSystemGit() {
   if (process.platform !== 'darwin') return '/usr/bin/git';
   const result = spawnSync('/usr/bin/xcrun', ['-f', 'git'], {
@@ -490,8 +494,48 @@ function resolveToolchain(repoRoot) {
   const cargoPath = realpathSync(sync(rustupPath, ['which', 'cargo'], repoRoot, rustupEnv));
   const rustcPath = realpathSync(sync(rustupPath, ['which', 'rustc'], repoRoot, rustupEnv));
   const rustdocPath = realpathSync(sync(rustupPath, ['which', 'rustdoc'], repoRoot, rustupEnv));
+  const cargoFmtPath = realpathSync(sync(rustupPath, ['which', 'cargo-fmt'], repoRoot, rustupEnv));
+  const rustfmtPath = realpathSync(sync(rustupPath, ['which', 'rustfmt'], repoRoot, rustupEnv));
+  const cargoClippyPath = realpathSync(sync(rustupPath, ['which', 'cargo-clippy'], repoRoot, rustupEnv));
+  const clippyDriverPath = realpathSync(sync(rustupPath, ['which', 'clippy-driver'], repoRoot, rustupEnv));
+  const rustToolchainBin = dirname(cargoPath);
+  for (const [name, path] of Object.entries({
+    rustc: rustcPath,
+    rustdoc: rustdocPath,
+    cargoFmt: cargoFmtPath,
+    rustfmt: rustfmtPath,
+    cargoClippy: cargoClippyPath,
+    clippyDriver: clippyDriverPath,
+  })) {
+    if (dirname(path) !== rustToolchainBin) fail(`${name} must use the same exact Rust toolchain as cargo`);
+  }
   const cargoAuditPath = discoverExecutable('cargo-audit', repoRoot);
   const osvScannerPath = discoverExecutable('osv-scanner', repoRoot);
+  const xcodeSelectPath = '/usr/bin/xcode-select';
+  const xcrunPath = '/usr/bin/xcrun';
+  const developerDirectory = realpathSync(sync(
+    xcodeSelectPath, ['-p'], repoRoot, controlEnvironment(),
+  ));
+  const xcodeEnvironment = { ...controlEnvironment(), DEVELOPER_DIR: developerDirectory };
+  const macosSdkRoot = realpathSync(sync(
+    xcrunPath, ['--sdk', 'macosx', '--show-sdk-path'], repoRoot, xcodeEnvironment,
+  ));
+  const sdkRelative = relative(developerDirectory, macosSdkRoot);
+  if (sdkRelative === '' || sdkRelative === '..' || sdkRelative.startsWith(`..${sep}`)
+    || isAbsolute(sdkRelative)) {
+    fail('macOS SDK must be inside the selected Xcode developer directory');
+  }
+  const macosSdkVersion = sync(
+    xcrunPath, ['--sdk', 'macosx', '--show-sdk-version'], repoRoot, xcodeEnvironment,
+  );
+  if (!/^\d+(?:\.\d+){0,2}$/u.test(macosSdkVersion)) fail('macOS SDK version is invalid');
+  const tauriConfig = JSON.parse(readFileSync(
+    join(repoRoot, 'desktop', 'src-tauri', 'tauri.conf.json'), 'utf8',
+  ));
+  const macosDeploymentTarget = tauriConfig.bundle?.macOS?.minimumSystemVersion;
+  if (!/^\d+(?:\.\d+){1,2}$/u.test(macosDeploymentTarget)) {
+    fail('Tauri macOS minimum system version is invalid');
+  }
   const paths = {
     node: nodePath,
     npmCli: npmCliPath,
@@ -501,8 +545,14 @@ function resolveToolchain(repoRoot) {
     rustc: rustcPath,
     rustdoc: rustdocPath,
     cargo: cargoPath,
+    cargoFmt: cargoFmtPath,
+    rustfmt: rustfmtPath,
+    cargoClippy: cargoClippyPath,
+    clippyDriver: clippyDriverPath,
     cargoAudit: cargoAuditPath,
     osvScanner: osvScannerPath,
+    xcodeSelect: xcodeSelectPath,
+    xcrun: xcrunPath,
     sandboxExec: '/usr/bin/sandbox-exec',
   };
   const executables = Object.fromEntries(Object.entries(paths).map(([name, path]) => [
@@ -512,7 +562,31 @@ function resolveToolchain(repoRoot) {
       sha256: name === 'npmRuntime' ? directorySha256(path) : fileSha256(path),
     }),
   ]));
-  return Object.freeze({ paths: Object.freeze(paths), executables: Object.freeze(executables) });
+  const sdkSettingsPath = realpathSync(join(macosSdkRoot, 'SDKSettings.json'));
+  const sdkSettingsRelative = relative(macosSdkRoot, sdkSettingsPath);
+  if (sdkSettingsRelative === '' || sdkSettingsRelative === '..'
+    || sdkSettingsRelative.startsWith(`..${sep}`) || isAbsolute(sdkSettingsRelative)) {
+    fail('macOS SDK settings must be inside the selected SDK root');
+  }
+  const files = Object.freeze({
+    macosSdkSettings: Object.freeze({ path: sdkSettingsPath, sha256: fileSha256(sdkSettingsPath) }),
+  });
+  const appleIdentities = Object.freeze(Object.fromEntries([
+    ['developerDirectory', developerDirectory], ['macosSdkRoot', macosSdkRoot],
+  ].map(([name, path]) => {
+    const identity = lstatSync(path);
+    if (!identity.isDirectory() || identity.isSymbolicLink()) fail(`${name} must be a real directory`);
+    return [name, Object.freeze({ path, dev: identity.dev, ino: identity.ino })];
+  })));
+  return Object.freeze({
+    paths: Object.freeze(paths),
+    executables: Object.freeze(executables),
+    files,
+    appleIdentities,
+    apple: Object.freeze({
+      developerDirectory, macosSdkRoot, macosSdkVersion, macosDeploymentTarget,
+    }),
+  });
 }
 
 function assertToolchainUnchanged(tools) {
@@ -521,6 +595,17 @@ function assertToolchainUnchanged(tools) {
       ? directorySha256(executable.path)
       : fileSha256(executable.path);
     if (actual !== executable.sha256) fail(`${name} changed during local verification`);
+  }
+  for (const [name, file] of Object.entries(tools.files)) {
+    if (fileSha256(file.path) !== file.sha256) fail(`${name} changed during local verification`);
+  }
+  for (const [name, expected] of Object.entries(tools.appleIdentities)) {
+    const actual = lstatSync(expected.path);
+    if (!actual.isDirectory() || actual.isSymbolicLink()
+      || actual.dev !== expected.dev || actual.ino !== expected.ino
+      || realpathSync(expected.path) !== expected.path) {
+      fail(`${name} changed during local verification`);
+    }
   }
 }
 
@@ -554,6 +639,109 @@ export function prepareDisposableTauriSidecar(repoRoot, rustcVerbose) {
       owned = false;
     },
   });
+}
+
+export function prepareDisposableTauriGeneratedRoot(repoRoot) {
+  const path = join(repoRoot, 'desktop', 'src-tauri', 'gen');
+  const schemasPath = join(path, 'schemas');
+  if (existsSync(path)) fail('disposable Tauri generated root already exists');
+  const parent = dirname(path);
+  if (lstatSync(parent).isSymbolicLink() || realpathSync(parent) !== parent) {
+    fail('Tauri generated-root parent must be a canonical directory');
+  }
+  mkdirSync(path, { mode: 0o700 });
+  mkdirSync(schemasPath, { mode: 0o700 });
+  const identity = lstatSync(path);
+  const schemasIdentity = lstatSync(schemasPath);
+  let owned = true;
+  const assertUnchanged = () => {
+    const current = lstatSync(path);
+    const currentSchemas = lstatSync(schemasPath);
+    for (const [label, actual, expected] of [
+      ['root', current, identity], ['schemas', currentSchemas, schemasIdentity],
+    ]) {
+      if (!actual.isDirectory() || actual.isSymbolicLink()
+        || actual.dev !== expected.dev || actual.ino !== expected.ino
+        || actual.uid !== process.getuid() || (actual.mode & 0o7777) !== 0o700) {
+        fail(`disposable Tauri generated ${label} identity changed`);
+      }
+    }
+  };
+  return Object.freeze({
+    path, schemasPath, assertUnchanged,
+    cleanup: () => {
+      if (!owned) return;
+      assertUnchanged();
+      rmSync(path, { recursive: true });
+      owned = false;
+    },
+  });
+}
+
+export function prepareDisposableTauriCheckIcon(repoRoot) {
+  const path = join(repoRoot, 'desktop', 'src-tauri', 'icons', '32x32.png');
+  if (existsSync(path)) fail('disposable Tauri check icon already exists');
+  const parent = dirname(path);
+  if (lstatSync(parent).isSymbolicLink() || realpathSync(parent) !== parent) {
+    fail('Tauri check-icon parent must be a canonical directory');
+  }
+  const fd = openSync(path, 'wx', 0o600);
+  try {
+    writeFileSync(fd, TAURI_CHECK_ICON_BYTES);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  const identity = lstatSync(path);
+  let owned = true;
+  const assertUnchanged = () => {
+    const current = lstatSync(path);
+    if (!current.isFile() || current.isSymbolicLink()
+      || current.dev !== identity.dev || current.ino !== identity.ino
+      || current.uid !== process.getuid() || (current.mode & 0o7777) !== 0o600
+      || current.size !== TAURI_CHECK_ICON_BYTES.length
+      || fileSha256(path) !== sha256(TAURI_CHECK_ICON_BYTES)) {
+      fail('disposable Tauri check icon identity changed');
+    }
+  };
+  return Object.freeze({
+    path, assertUnchanged,
+    cleanup: () => {
+      if (!owned) return;
+      assertUnchanged();
+      rmSync(path);
+      owned = false;
+    },
+  });
+}
+
+function prepareImmutableToolCopy(sourcePath, expectedSha256, profileRoot, name) {
+  const source = lstatSync(sourcePath);
+  if (!source.isFile() || source.isSymbolicLink() || source.size < 1 || source.size > 64 * 1024 * 1024) {
+    fail(`${name} source executable is invalid`);
+  }
+  const path = join(realpathSync(profileRoot), name);
+  const bytes = readFileSync(sourcePath);
+  const fd = openSync(path, 'wx', 0o700);
+  try {
+    writeFileSync(fd, bytes);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  const identity = lstatSync(path);
+  const digest = sha256(bytes);
+  if (digest !== expectedSha256) fail(`${name} source changed while creating runtime copy`);
+  const assertUnchanged = () => {
+    const current = lstatSync(path);
+    if (!current.isFile() || current.isSymbolicLink()
+      || current.dev !== identity.dev || current.ino !== identity.ino
+      || current.uid !== process.getuid() || (current.mode & 0o7777) !== 0o700
+      || current.size !== bytes.length || fileSha256(path) !== digest) {
+      fail(`${name} immutable runtime copy changed`);
+    }
+  };
+  return Object.freeze({ path, sha256: digest, assertUnchanged });
 }
 
 function expandArg(value, context) {
@@ -626,12 +814,20 @@ async function terminateMarkedDescendants(marker) {
   if (markedProcessIds(marker).length > 0) fail('marked gate descendants survived SIGKILL');
 }
 
+export function selectExactGateExecutable(logicalCommand, args, paths) {
+  if (logicalCommand === 'cargo' && args[0] === 'fmt') return paths.cargoFmt;
+  if (logicalCommand === 'cargo' && args[0] === 'clippy') return paths.cargoClippy;
+  const toolKey = logicalCommand === 'cargo-audit' ? 'cargoAudit' : logicalCommand;
+  return paths[toolKey] ?? logicalCommand;
+}
+
 async function runGate(gate, context) {
   assertToolchainUnchanged(context.tools);
+  for (const runtimeTool of Object.values(context.runtimeTools)) runtimeTool.assertUnchanged();
   const logicalCommand = expandArg(gate.cmd[0], context);
-  const toolKey = logicalCommand === 'cargo-audit' ? 'cargoAudit' : logicalCommand;
-  let command = context.tools.paths[toolKey] ?? logicalCommand;
   let args = gate.cmd.slice(1).map((arg) => expandArg(arg, context));
+  let command = selectExactGateExecutable(logicalCommand, args, context.tools.paths);
+  if (logicalCommand === 'cargo-audit') command = context.runtimeTools.cargoAudit.path;
   if (logicalCommand === 'npm') {
     command = context.tools.paths.node;
     args = [context.tools.paths.npmCli, ...args];
@@ -780,6 +976,8 @@ export function writeSandboxProfiles({ verificationRoot, tempRoot, custodyRoot, 
     join(privateRoot, 'tmp'),
     join(privateRoot, 'cargo-home'),
     join(privateRoot, 'cargo-target'),
+    join(privateRoot, 'clang-module-cache'),
+    join(privateRoot, 'xdg-cache'),
     join(privateRoot, 'npm-cache'),
     join(privateRoot, 'npm-prefix'),
     join(privateRoot, 'pack-smoke'),
@@ -788,11 +986,16 @@ export function writeSandboxProfiles({ verificationRoot, tempRoot, custodyRoot, 
     join(realpathSync(verificationRoot), 'src', 'raycast', 'node_modules'),
     join(realpathSync(verificationRoot), 'dist'),
   ];
+  const tauriSchemaRoot = join(realpathSync(verificationRoot), 'desktop', 'src-tauri', 'gen', 'schemas');
+  const writableFiles = [
+    'acl-manifests.json', 'capabilities.json', 'macOS-schema.json', 'desktop-schema.json',
+  ].map((name) => join(tauriSchemaRoot, name));
   const common = [
     '(version 1)',
     '(allow default)',
     `(deny file-write* (require-all ${writablePaths
-      .map((path) => `(require-not (subpath ${sandboxLiteral(path)}))`).join(' ')} (require-not (literal ${sandboxLiteral(packEvidencePath)})) (require-not (literal "/dev/null"))))`,
+      .map((path) => `(require-not (subpath ${sandboxLiteral(path)}))`).join(' ')} ${writableFiles
+      .map((path) => `(require-not (literal ${sandboxLiteral(path)}))`).join(' ')} (require-not (literal ${sandboxLiteral(packEvidencePath)})) (require-not (literal "/dev/null"))))`,
     `(deny file-read* (require-all (subpath ${sandboxLiteral(homedir())}) ${readableHomePaths
       .map((path) => `(require-not (subpath ${sandboxLiteral(path)}))`).join(' ')}))`,
   ];
@@ -934,9 +1137,12 @@ export function createIsolatedGateEnvironment({ repoRoot, tempRoot, custodyRoot,
   const testHomeParent = join(custodyRoot, 'vitest-homes');
   const cargoHome = join(tempRoot, 'cargo-home');
   const cargoTarget = join(tempRoot, 'cargo-target');
+  const clangModuleCache = join(tempRoot, 'clang-module-cache');
+  const xdgCache = join(tempRoot, 'xdg-cache');
   const npmCache = join(tempRoot, 'npm-cache');
   for (const path of [
     privateTemp, operationalHome, testHomeParent, cargoHome, cargoTarget, npmCache,
+    clangModuleCache, xdgCache,
   ]) {
     mkdirSync(path, { recursive: true, mode: 0o700 });
   }
@@ -992,8 +1198,15 @@ export function createIsolatedGateEnvironment({ repoRoot, tempRoot, custodyRoot,
     GIT_OPTIONAL_LOCKS: '0',
     CARGO_HOME: cargoHome,
     CARGO_TARGET_DIR: cargoTarget,
+    CLANG_MODULE_CACHE_PATH: clangModuleCache,
+    XDG_CACHE_HOME: xdgCache,
+    CARGO: tools.paths.cargo,
     RUSTC: tools.paths.rustc,
     RUSTDOC: tools.paths.rustdoc,
+    RUSTFMT: tools.paths.rustfmt,
+    DEVELOPER_DIR: tools.apple.developerDirectory,
+    SDKROOT: tools.apple.macosSdkRoot,
+    MACOSX_DEPLOYMENT_TARGET: tools.apple.macosDeploymentTarget,
   });
 }
 
@@ -1010,8 +1223,11 @@ export async function runLocalProductionGate({ repoRoot, options }) {
   let custodyRoot = null;
   let profileRoot = null;
   let tools = null;
+  let runtimeTools = null;
   let worktreeAdded = false;
   let sidecar = null;
+  let tauriGeneratedRoot = null;
+  let tauriCheckIcon = null;
   let context = null;
   let interruptedSignal = null;
   let primaryError = null;
@@ -1033,6 +1249,14 @@ export async function runLocalProductionGate({ repoRoot, options }) {
     profileRoot = createPrivateLocalGateTempDirectory('agp-');
     assertDisjointRoots(tempRoot, custodyRoot.path, profileRoot.path);
     tools = resolveToolchain(controllingRepo);
+    runtimeTools = Object.freeze({
+      cargoAudit: prepareImmutableToolCopy(
+        tools.paths.cargoAudit,
+        tools.executables.cargoAudit.sha256,
+        profileRoot.path,
+        'cargo-audit',
+      ),
+    });
     git(controllingRepo, [
       '-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '--detach', verificationRoot,
       options.expectedSha,
@@ -1093,6 +1317,7 @@ export async function runLocalProductionGate({ repoRoot, options }) {
       tempRoot,
       env,
       tools,
+      runtimeTools,
       sandboxProfiles,
       activeChild: null,
       activeMarker: null,
@@ -1110,8 +1335,12 @@ export async function runLocalProductionGate({ repoRoot, options }) {
       }
       if (gate.id === 'native-check') {
         sidecar = prepareDisposableTauriSidecar(verificationRoot, rustcVerbose);
+        tauriGeneratedRoot = prepareDisposableTauriGeneratedRoot(verificationRoot);
+        tauriCheckIcon = prepareDisposableTauriCheckIcon(verificationRoot);
       }
       results.push(await runGate(gate, context));
+      tauriGeneratedRoot?.assertUnchanged();
+      tauriCheckIcon?.assertUnchanged();
       tempDirectory.assertUnchanged();
       custodyRoot.assertUnchanged();
       profileRoot.assertUnchanged();
@@ -1124,6 +1353,14 @@ export async function runLocalProductionGate({ repoRoot, options }) {
     if (sidecar) {
       sidecar.cleanup();
       sidecar = null;
+    }
+    if (tauriGeneratedRoot) {
+      tauriGeneratedRoot.cleanup();
+      tauriGeneratedRoot = null;
+    }
+    if (tauriCheckIcon) {
+      tauriCheckIcon.cleanup();
+      tauriCheckIcon = null;
     }
     if (interruptedSignal) fail(`interrupted by ${interruptedSignal}`);
 
@@ -1162,12 +1399,14 @@ export async function runLocalProductionGate({ repoRoot, options }) {
     const artifactIdentity = writeBytesExclusive(controllingRepo, artifactOutput, artifactBytes);
     const receipt = {
       schemaVersion: LOCAL_PRODUCTION_GATE_RECEIPT_SCHEMA_VERSION,
-      kind: 'ashlr-local-production-gate-receipt-v2',
+      kind: 'ashlr-local-production-gate-receipt-v3',
       assurance: 'local-source-verification-only',
       source: { ...source, cleanBefore: true, cleanAfter: true },
       toolchain: {
         ...toolchain, rustcVersion, cargoVersion, cargoAuditVersion,
+        ...tools.apple,
         executables: tools.executables,
+        files: tools.files,
       },
       bindings: {
         policy: {
@@ -1197,6 +1436,9 @@ export async function runLocalProductionGate({ repoRoot, options }) {
         externalEffects: 'evidence-writes-recorded;same-uid-output-parent-swap-and-other-effects-not-attested',
         operationalAshlrHome: 'redirected-to-disposable-root',
         disposableSidecar: 'created-exclusive-and-removed-before-receipt',
+        disposableTauriGeneratedRoot: 'created-exclusive-and-removed-before-receipt',
+        disposableTauriCheckIcon: 'created-exclusive-and-removed-before-receipt',
+        cargoAuditRuntime: 'digest-matched-copy-in-immutable-profile-root',
       },
       gates: results,
       authority: { ...LOCAL_PRODUCTION_GATE_AUTHORITY },
@@ -1244,6 +1486,14 @@ export async function runLocalProductionGate({ repoRoot, options }) {
     if (sidecar) await cleanup(() => {
       tempDirectory.assertUnchanged();
       sidecar.cleanup();
+    });
+    if (tauriGeneratedRoot) await cleanup(() => {
+      tempDirectory.assertUnchanged();
+      tauriGeneratedRoot.cleanup();
+    });
+    if (tauriCheckIcon) await cleanup(() => {
+      tempDirectory.assertUnchanged();
+      tauriCheckIcon.cleanup();
     });
     if (worktreeAdded) {
       await cleanup(() => {

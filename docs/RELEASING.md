@@ -56,10 +56,17 @@ validated canonical Darwin per-user temporary directory, so custody-sensitive
 tests do not inherit `/private/tmp`'s world-writable ancestry. The sandbox
 allowlist covers both roots while the real user home remains denied. Only the
 exact root-level `pack-evidence.json` leaf is additionally writable, and the
-runner reads it through a bounded, no-follow, identity-stable descriptor. Verify
+runner reads it through a bounded, no-follow, identity-stable descriptor.
+Native compilation additionally receives pre-resolved Xcode/SDK paths, private
+scratch caches, and four narrowly writable leaves below a runner-owned Tauri
+`gen/schemas` root that is identity-checked and removed before source-cleanliness
+verification. A fixed transparent RGBA check-only icon temporarily satisfies
+Tauri's explicitly documented missing generated-icon prerequisite; its identity
+and digest are checked before removal. Verify
 the receipt and tarball with `scripts/verify-local-production-gate-receipt.mjs` and all six
 independent caller pins before separately considering any registry or GitHub
-mutation. Receipt schema v2 records confinement per gate: build, package,
+mutation. Receipt schema v3 records confinement per gate and exact Rust
+formatter/linter component identities: build, package,
 dependency, native, and web-test stages remain macOS-sandboxed, while the three
 exact-source `test:ci` shards use the sanitized disposable environment without
 an outer sandbox so their process, socket, nested-sandbox, and
