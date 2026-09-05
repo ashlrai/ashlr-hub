@@ -180,7 +180,7 @@
         "kind": { "const": "local-production-gate-v1" },
         "contractPath": { "const": "ashlr.verify.json" },
         "contractSha256": { "$ref": "#/$defs/sha256" },
-        "requiredReceiptSchemaVersion": { "const": 1 }
+        "requiredReceiptSchemaVersion": { "enum": [1, 2] }
       }
     },
     "toolchain": {

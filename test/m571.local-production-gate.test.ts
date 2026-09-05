@@ -11,6 +11,7 @@ import {
   assertExternalReceiptPath,
   parseLocalGateArgs,
   prepareDisposableTauriSidecar,
+  selectLocalGateSandboxProfile,
   validateLocalGateToolchain,
   validateLocalProductionContract,
   writeSandboxProfiles,
@@ -20,7 +21,10 @@ import { parseBoundedCommandArgs, runBoundedCommand } from '../scripts/run-bound
 import {
   canonicalizeLocalProductionGateReceipt,
   LOCAL_PRODUCTION_GATE_COMMANDS,
+  LOCAL_PRODUCTION_GATE_CONFINEMENT,
   LOCAL_PRODUCTION_GATE_IDS,
+  LOCAL_PRODUCTION_GATE_SANITIZED_HOST_IDS,
+  localProductionGateConfinement,
   parseCli,
   parseLocalProductionGateReceiptBytes,
   validateLocalProductionGateReceipt,
@@ -38,8 +42,8 @@ const instant = '2026-09-05T00:00:00.000Z';
 
 function validReceipt(): Record<string, unknown> {
   return {
-    schemaVersion: 1,
-    kind: 'ashlr-local-production-gate-receipt-v1',
+    schemaVersion: 2,
+    kind: 'ashlr-local-production-gate-receipt-v2',
     assurance: 'local-source-verification-only',
     source: { revision, tree, cleanBefore: true, cleanAfter: true },
     toolchain: {
@@ -65,13 +69,8 @@ function validReceipt(): Record<string, unknown> {
       startedAt: instant,
       finishedAt: instant,
       hostPlatform: 'darwin',
-      networkIsolation: 'non-loopback-ip-egress-denied-for-source-gates',
-      networkEnabledGateIds: [
-        'install-root', 'install-raycast',
-        'audit-root-full', 'audit-root-production', 'audit-raycast-full',
-        'audit-raycast-production', 'native-fetch', 'native-audit',
-      ],
-      filesystemIsolation: 'write-allowlist-and-user-home-read-deny;host-ipc-system-reads-and-hostile-env-clearing-descendants-not-isolated',
+      confinementModel: 'closed-per-gate-v1',
+      sanitizedEnvironment: 'allowlisted-disposable-home-temp-cache-and-ashlr-home',
       sandboxProfiles: {
         networkEnabledSha256: digest,
         networkDeniedSha256: digest,
@@ -82,6 +81,7 @@ function validReceipt(): Record<string, unknown> {
     },
     gates: LOCAL_PRODUCTION_GATE_IDS.map((id, index) => ({
       id,
+      confinement: localProductionGateConfinement(id),
       commandSha256: createHash('sha256')
         .update(Buffer.from(JSON.stringify({
           argv: LOCAL_PRODUCTION_GATE_COMMANDS[index][1],
@@ -111,6 +111,10 @@ describe('M571 local production gate v1', () => {
     const contract = JSON.parse(readFileSync(join(repoRoot, 'ashlr.verify.json'), 'utf8'));
     const local = validateLocalProductionContract(contract);
     expect(local.gates.map((gate) => gate.id)).toEqual(LOCAL_PRODUCTION_GATE_IDS);
+    expect(local.receiptSchemaVersion).toBe(2);
+    expect(local.gates.filter((gate) => (
+      gate.confinement === LOCAL_PRODUCTION_GATE_CONFINEMENT.sanitizedHost
+    )).map((gate) => gate.id)).toEqual(LOCAL_PRODUCTION_GATE_SANITIZED_HOST_IDS);
     expect(contract.commands.map((gate: { id: string }) => gate.id)).toEqual([
       'typecheck', 'lint', 'build', 'test-ci-1-of-3', 'test-ci-2-of-3', 'test-ci-3-of-3',
     ]);
@@ -121,6 +125,10 @@ describe('M571 local production gate v1', () => {
     const drifted = structuredClone(contract);
     drifted.localProductionGate.gates[0].cmd = ['true'];
     expect(() => validateLocalProductionContract(drifted)).toThrow(/closed v1 command/u);
+    const confinementDrift = structuredClone(contract);
+    confinementDrift.localProductionGate.gates[5].confinement =
+      LOCAL_PRODUCTION_GATE_CONFINEMENT.networkDeniedSandbox;
+    expect(() => validateLocalProductionContract(confinementDrift)).toThrow(/closed v1 command/u);
     const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'));
     expect(pkg.scripts['verify:local-production']).toBe('node scripts/run-local-production-gate.mjs');
   });
@@ -142,6 +150,27 @@ describe('M571 local production gate v1', () => {
     expect(() => parseLocalProductionGateReceiptBytes(Buffer.from(JSON.stringify(receipt)))).toThrow(/canonical/u);
   });
 
+  it('runs only exact-source test stages without an outer sandbox', () => {
+    const profiles = { networkEnabled: { name: 'enabled' }, networkDenied: { name: 'denied' } };
+    const contract = validateLocalProductionContract(
+      JSON.parse(readFileSync(join(repoRoot, 'ashlr.verify.json'), 'utf8')),
+    );
+    expect(contract.gates.map((gate) => [
+      gate.id,
+      selectLocalGateSandboxProfile(gate, profiles)?.name ?? 'host',
+    ])).toEqual([
+      ['install-root', 'enabled'], ['install-raycast', 'enabled'],
+      ['typecheck', 'denied'], ['lint', 'denied'], ['build', 'denied'],
+      ['test-ci-1-of-3', 'host'], ['test-ci-2-of-3', 'host'],
+      ['test-ci-3-of-3', 'host'], ['test-web', 'denied'],
+      ['audit-root-full', 'enabled'], ['audit-root-production', 'enabled'],
+      ['audit-raycast-full', 'enabled'], ['audit-raycast-production', 'enabled'],
+      ['pack-smoke', 'denied'], ['native-fetch', 'enabled'], ['native-fmt', 'denied'],
+      ['native-check', 'denied'], ['native-clippy', 'denied'], ['native-test', 'denied'],
+      ['native-audit', 'enabled'],
+    ]);
+  });
+
   it('rejects failed, reordered, incomplete, or authority-bearing evidence', () => {
     const failed = validReceipt();
     (failed.gates as Array<Record<string, unknown>>)[0].exitCode = 1;
@@ -155,6 +184,10 @@ describe('M571 local production gate v1', () => {
     const authority = validReceipt();
     (authority.authority as Record<string, unknown>).publish = true;
     expect(() => validateLocalProductionGateReceipt(authority)).toThrow(/every effect false/u);
+    const confinement = validReceipt();
+    (confinement.gates as Array<Record<string, unknown>>)[5].confinement =
+      LOCAL_PRODUCTION_GATE_CONFINEMENT.networkDeniedSandbox;
+    expect(() => validateLocalProductionGateReceipt(confinement)).toThrow(/per-gate model/u);
   });
 
   it('requires Node 24+, npm 11+, and exact policy toolchain identity', () => {
@@ -344,7 +377,8 @@ describe('M571 local production gate v1', () => {
     const contract = readFileSync(join(repoRoot, 'docs', 'contracts', 'CONTRACT-M571.md'), 'utf8');
     const runner = readFileSync(join(repoRoot, 'scripts', 'run-local-production-gate.mjs'), 'utf8');
     expect(contract).toContain('does not publish, promote, install a production runtime');
-    expect(contract).toContain('denies non-loopback IP egress while preserving localhost');
+    expect(contract).toContain('host account\'s filesystem');
+    expect(contract).toContain('IPC, and network authority');
     expect(runner).toContain("GIT_CONFIG_GLOBAL: '/dev/null'");
     expect(runner).not.toContain('...process.env');
     expect(runner).toContain("ASHLR_RUN_NATIVE_LAUNCHD_TEST: '0'");

@@ -50,7 +50,12 @@ tarball, keeps operational Ashlr state and services untouched, and writes a
 canonical authority-free receipt outside the repository. Verify that receipt
 and tarball with `scripts/verify-local-production-gate-receipt.mjs` and all six
 independent caller pins before separately considering any registry or GitHub
-mutation. See
+mutation. Receipt schema v2 records confinement per gate: build, package,
+dependency, native, and web-test stages remain macOS-sandboxed, while the three
+exact-source `test:ci` shards use the sanitized disposable environment without
+an outer sandbox so their process, socket, nested-sandbox, and
+filesystem-semantics tests remain truthful. Those test stages retain the host
+account's authority. See
 [`CONTRACT-M571.md`](contracts/CONTRACT-M571.md) for the exact boundary.
 
 ## Trusted-publisher configuration used for 3.3.2

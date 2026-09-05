@@ -85,124 +85,144 @@
     "schemaVersion": 1,
     "runner": "scripts/run-local-production-gate.mjs",
     "receiptVerifier": "scripts/verify-local-production-gate-receipt.mjs",
-    "receiptSchemaVersion": 1,
+    "receiptSchemaVersion": 2,
     "gates": [
       {
         "id": "install-root",
+        "confinement": "sandbox-write-allowlist-home-read-deny-network-enabled",
         "cmd": ["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"],
         "cwd": ".",
         "timeoutMs": 600000
       },
       {
         "id": "install-raycast",
+        "confinement": "sandbox-write-allowlist-home-read-deny-network-enabled",
         "cmd": ["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"],
         "cwd": "src/raycast",
         "timeoutMs": 600000
       },
       {
         "id": "typecheck",
+        "confinement": "sandbox-write-allowlist-home-read-deny-loopback-only",
         "cmd": ["npm", "run", "typecheck"],
         "cwd": ".",
         "timeoutMs": 300000
       },
       {
         "id": "lint",
+        "confinement": "sandbox-write-allowlist-home-read-deny-loopback-only",
         "cmd": ["npm", "run", "lint"],
         "cwd": ".",
         "timeoutMs": 300000
       },
       {
         "id": "build",
+        "confinement": "sandbox-write-allowlist-home-read-deny-loopback-only",
         "cmd": ["npm", "run", "build"],
         "cwd": ".",
         "timeoutMs": 600000
       },
       {
         "id": "test-ci-1-of-3",
+        "confinement": "sanitized-exact-source-host-authority",
         "cmd": ["npm", "run", "test:ci", "--", "--shard=1/3"],
         "cwd": ".",
         "timeoutMs": 1200000
       },
       {
         "id": "test-ci-2-of-3",
+        "confinement": "sanitized-exact-source-host-authority",
         "cmd": ["npm", "run", "test:ci", "--", "--shard=2/3"],
         "cwd": ".",
         "timeoutMs": 1200000
       },
       {
         "id": "test-ci-3-of-3",
+        "confinement": "sanitized-exact-source-host-authority",
         "cmd": ["npm", "run", "test:ci", "--", "--shard=3/3"],
         "cwd": ".",
         "timeoutMs": 1200000
       },
       {
         "id": "test-web",
+        "confinement": "sandbox-write-allowlist-home-read-deny-loopback-only",
         "cmd": ["npm", "run", "test:web"],
         "cwd": ".",
         "timeoutMs": 600000
       },
       {
         "id": "audit-root-full",
+        "confinement": "sandbox-write-allowlist-home-read-deny-network-enabled",
         "cmd": ["bash", "scripts/npm-audit-with-osv-fallback.sh", "root full graph", "package-lock.json"],
         "cwd": ".",
         "timeoutMs": 300000
       },
       {
         "id": "audit-root-production",
+        "confinement": "sandbox-write-allowlist-home-read-deny-network-enabled",
         "cmd": ["bash", "scripts/npm-audit-with-osv-fallback.sh", "root production graph", "package-lock.json", "--omit=dev"],
         "cwd": ".",
         "timeoutMs": 300000
       },
       {
         "id": "audit-raycast-full",
+        "confinement": "sandbox-write-allowlist-home-read-deny-network-enabled",
         "cmd": ["bash", "../../scripts/npm-audit-with-osv-fallback.sh", "Raycast full graph", "package-lock.json"],
         "cwd": "src/raycast",
         "timeoutMs": 300000
       },
       {
         "id": "audit-raycast-production",
+        "confinement": "sandbox-write-allowlist-home-read-deny-network-enabled",
         "cmd": ["bash", "../../scripts/npm-audit-with-osv-fallback.sh", "Raycast production graph", "package-lock.json", "--omit=dev"],
         "cwd": "src/raycast",
         "timeoutMs": 300000
       },
       {
         "id": "pack-smoke",
+        "confinement": "sandbox-write-allowlist-home-read-deny-loopback-only",
         "cmd": ["node", "scripts/run-local-pack-smoke.mjs", "--repo", "{repo}", "--work-dir", "{temp}/pack-smoke", "--output", "{temp}/pack-evidence.json"],
         "cwd": ".",
         "timeoutMs": 600000
       },
       {
         "id": "native-fetch",
+        "confinement": "sandbox-write-allowlist-home-read-deny-network-enabled",
         "cmd": ["cargo", "fetch", "--locked"],
         "cwd": "desktop/src-tauri",
         "timeoutMs": 1200000
       },
       {
         "id": "native-fmt",
+        "confinement": "sandbox-write-allowlist-home-read-deny-loopback-only",
         "cmd": ["cargo", "fmt", "--check"],
         "cwd": "desktop/src-tauri",
         "timeoutMs": 300000
       },
       {
         "id": "native-check",
+        "confinement": "sandbox-write-allowlist-home-read-deny-loopback-only",
         "cmd": ["cargo", "check", "--locked", "--offline", "--all-targets"],
         "cwd": "desktop/src-tauri",
         "timeoutMs": 1200000
       },
       {
         "id": "native-clippy",
+        "confinement": "sandbox-write-allowlist-home-read-deny-loopback-only",
         "cmd": ["cargo", "clippy", "--locked", "--offline", "--all-targets", "--", "-D", "warnings"],
         "cwd": "desktop/src-tauri",
         "timeoutMs": 1200000
       },
       {
         "id": "native-test",
+        "confinement": "sandbox-write-allowlist-home-read-deny-loopback-only",
         "cmd": ["cargo", "test", "--locked", "--offline"],
         "cwd": "desktop/src-tauri",
         "timeoutMs": 1200000
       },
       {
         "id": "native-audit",
+        "confinement": "sandbox-write-allowlist-home-read-deny-network-enabled",
         "cmd": ["cargo-audit", "audit", "--file", "Cargo.lock", "--ignore", "RUSTSEC-2024-0429"],
         "cwd": "desktop/src-tauri",
         "timeoutMs": 600000
