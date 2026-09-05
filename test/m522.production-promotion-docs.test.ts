@@ -6,11 +6,25 @@ import { describe, expect, it } from 'vitest';
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const releaseDocs = readFileSync(join(repoRoot, 'docs/RELEASING.md'), 'utf8');
 const promotionSection = releaseDocs.split(
-  '## Production promotion after 3.3.2 acceptance',
+  '## Completed production promotion after 3.3.2 acceptance',
 )[1]?.split('## Historical failure recovery record')[0] ?? '';
 const promotionShell = promotionSection.match(/```bash\n([\s\S]*?)```/u)?.[1] ?? '';
 
 describe('M522 — production-promotion operator boundary', () => {
+  it('records the completed distribution state without claiming local activation', () => {
+    expect(releaseDocs).toContain('Both npm dist-tags, `latest` and `candidate`');
+    expect(releaseDocs).toContain(
+      'sha512-674ZY76hBxks8j9JR5QifoyMn6uxmRx6dhbgiYAuWRyrnB4Zeuo/H+rgQ1mQ/mNYf62s1ORnJcvTxbxHZFuqTA==',
+    );
+    expect(releaseDocs).toContain('Release run `33932333902` completed successfully');
+    expect(releaseDocs).toContain('admission run `33933861238` completed successfully');
+    expect(releaseDocs).toContain('`promotionExecuted: false`');
+    expect(releaseDocs).toMatch(/no immutable\s+post-effect receipt currently binds/u);
+    expect(releaseDocs).toContain('Registry promotion did not install or activate any local');
+    expect(releaseDocs).toContain('unreleased 3.4.0 development line');
+    expect(releaseDocs).toContain('Do not recreate or move `v3.3.2`');
+  });
+
   it('documents the protected observation-only admission without inventing authority', () => {
     expect(promotionSection).toContain('`npm-production-promotion` environment');
     expect(promotionSection).toContain('protected branches only');
@@ -26,8 +40,8 @@ describe('M522 — production-promotion operator boundary', () => {
     expect(promotionSection).toContain('bounded GitHub receipt artifact');
     expect(promotionSection).toContain('cannot promote the package');
     expect(promotionSection).toMatch(/Any\s+rerun, expired acceptance, or drift/u);
-    expect(promotionSection).toContain('quarantined 3.3.0 package');
-    expect(promotionSection).toContain('remains ineligible for `latest`');
+    expect(promotionSection).toMatch(/quarantined\s+3\.3\.0 package/u);
+    expect(promotionSection).toMatch(/remains ineligible\s+for `latest`/u);
     expect(promotionSection).toContain('failed v3.3.1 tag/run/npm/GitHub-Release absence');
   });
 
@@ -42,7 +56,7 @@ describe('M522 — production-promotion operator boundary', () => {
     expect(promotionShell).toContain('view @ashlr/hub@3.3.0 dist.integrity');
     expect(promotionShell).not.toContain('--otp');
     expect(promotionShell).toContain('NPM_CONFIG_USERCONFIG="$promotion_root/npmrc"');
-    expect(promotionSection).toContain('Enter the fresh OTP only at npm\'s interactive prompt');
+    expect(promotionSection).toContain('fresh OTP was entered only at npm\'s interactive prompt');
     expect(promotionSection).toContain('remain separate gates');
   });
 });
