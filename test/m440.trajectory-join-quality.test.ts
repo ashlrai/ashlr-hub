@@ -2,7 +2,7 @@
  * m440.trajectory-join-quality.test.ts — bounded compositional join diagnostics.
  */
 
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   listOutcomeRecords,
   listOutcomeRecordsDetailed,
@@ -29,21 +29,21 @@ const TS2 = '2026-07-28T20:02:00.000Z';
 const TS3 = '2026-07-28T20:03:00.000Z';
 const TS4 = '2026-07-28T20:04:00.000Z';
 const TS5 = '2026-07-28T20:05:00.000Z';
+const NOW = '2026-07-28T20:05:01.000Z';
 const REPO = '/private/company/ashlr-hub';
 const PROPOSAL_ID = 'prop-trajectory-join-quality';
 const RUN_ID = 'run-trajectory-join-quality';
 const TRAJECTORY_ID = 'trajectory-join-quality';
 const RAW_SECRET = 'RAW_PROMPT_DIFF_STDOUT_SECRET';
-const TEST_NOW = '2026-07-29T00:00:00.000Z';
 
-beforeAll(() => {
-  // Keep the 30-day join window anchored to the July 28 fixture chronology.
-  // Only Date is faked; no async scheduling behavior changes.
+beforeEach(() => {
+  // Keep each test's 30-day join window anchored just after the fixture
+  // chronology without changing async scheduling behavior.
   vi.useFakeTimers({ toFake: ['Date'] });
-  vi.setSystemTime(TEST_NOW);
+  vi.setSystemTime(new Date(NOW));
 });
 
-afterAll(() => {
+afterEach(() => {
   vi.useRealTimers();
 });
 
@@ -402,7 +402,7 @@ describe('trajectory join quality', () => {
       });
     } finally {
       now.mockRestore();
-      vi.setSystemTime(TEST_NOW);
+      vi.setSystemTime(new Date(NOW));
     }
   });
 
