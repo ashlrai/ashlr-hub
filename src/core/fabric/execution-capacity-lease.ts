@@ -49,7 +49,7 @@ const MAX_BATCH_ITEMS = 32;
 const MAX_TRUSTED_SLOTS = 1_024;
 const MAX_ALLOCATION_ID_BYTES = 4_096;
 const MAX_AUTHENTICATOR_BYTES = 4_096;
-const MAX_LEASE_TTL_MS = 5 * 60_000;
+export const EXECUTION_CAPACITY_LEASE_MAX_TTL_MS_V1 = 5 * 60_000;
 const MIN_LEASE_TTL_MS = 1_000;
 const MAX_EVIDENCE_AGE_MS = 5 * 60_000;
 const MAX_FUTURE_SKEW_MS = 60_000;
@@ -123,6 +123,10 @@ export interface ExecutionCapacityLeaseReleaseInputV1 {
   expectedLeaseEpoch: number;
 }
 
+export interface ExecutionCapacityLeaseReclaimInputV1 {
+  expectedAllocationDigest: string;
+}
+
 export type ExecutionCapacityLeaseReasonV1 =
   | 'recorded'
   | 'replayed'
@@ -144,6 +148,7 @@ export type ExecutionCapacityLeaseReasonV1 =
   | 'allocation-finalized'
   | 'lease-not-found'
   | 'lease-expired'
+  | 'lease-not-expired'
   | 'owner-capability-invalid'
   | 'lease-epoch-conflict'
   | 'lease-epoch-exhausted'
@@ -765,7 +770,7 @@ function validateBatch(
     const rawItems = snapshotPlainArray(inputRow['items'], MAX_BATCH_ITEMS);
     if (typeof allocationId !== 'string' || allocationId.length < 1 ||
       Buffer.byteLength(allocationId, 'utf8') > MAX_ALLOCATION_ID_BYTES ||
-      !safeInteger(leaseTtlMs, MIN_LEASE_TTL_MS, MAX_LEASE_TTL_MS) ||
+      !safeInteger(leaseTtlMs, MIN_LEASE_TTL_MS, EXECUTION_CAPACITY_LEASE_MAX_TTL_MS_V1) ||
       !rawItems) {
       return { ok: false, reason: 'invalid-input' };
     }
@@ -1197,6 +1202,37 @@ export class ExecutionCapacityLeaseStoreV1 {
           reclaimed.length > 0 ? 'reclaimed' : 'replayed'),
         changed: reclaimed.length > 0,
       };
+    });
+  }
+
+  reclaimExpiredAllocation(input: ExecutionCapacityLeaseReclaimInputV1):
+  ExecutionCapacityLeaseMutationResultV1 {
+    const preflight = this.#preflight();
+    if (preflight) return preflight;
+    const inputRow = plainRecord(input);
+    const expectedAllocationDigest = inputRow?.['expectedAllocationDigest'];
+    if (!inputRow || !exactKeys(inputRow, ['expectedAllocationDigest']) ||
+      typeof expectedAllocationDigest !== 'string' || !DIGEST_RE.test(expectedAllocationDigest)) {
+      return mutation('withheld', 'invalid-input');
+    }
+    return this.#locked((ledger) => {
+      const now = this.#dependencies.clock();
+      const nowMs = now.getTime();
+      if (!Number.isFinite(nowMs)) return { result: mutation('withheld', 'invalid-input'), changed: false };
+      const lease = ledger.leases.find((candidate) =>
+        sameDigest(candidate.allocationDigest, expectedAllocationDigest));
+      if (!lease) return { result: mutation('withheld', 'lease-not-found'), changed: false };
+      if (lease.state === 'expired' || lease.state === 'released') return { result: mutation('replayed', 'replayed', {
+        allocationDigest: lease.allocationDigest, leaseEpoch: lease.epoch, expiresAt: lease.expiresAt,
+      }), changed: false };
+      if (Date.parse(lease.expiresAt) > nowMs) {
+        return { result: mutation('withheld', 'lease-not-expired'), changed: false };
+      }
+      lease.state = 'expired';
+      lease.updatedAt = now.toISOString();
+      return { result: mutation('recorded', 'reclaimed', {
+        allocationDigest: lease.allocationDigest, leaseEpoch: lease.epoch, expiresAt: lease.expiresAt,
+      }), changed: true };
     });
   }
 

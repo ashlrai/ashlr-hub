@@ -490,6 +490,28 @@ describe('M566 Execution Capacity Lease V1', () => {
     expect(acquire(entry.store, 'other', [item(fresh)], 1_000)).toMatchObject({ reason: 'recorded' });
   });
 
+  it('reclaims only the exact expired allocation digest requested by crash recovery', () => {
+    const entry = fixture();
+    const capacity = evidence(digest('exact-reclaim'), 1, 2);
+    const first = acquire(entry.store, 'exact-first', [item(capacity)], 1_000);
+    const second = acquire(entry.store, 'exact-second', [item(capacity)], 1_000);
+    expect(entry.store.reclaimExpiredAllocation({
+      expectedAllocationDigest: first.allocationDigest!,
+    })).toMatchObject({ disposition: 'withheld', reason: 'lease-not-expired' });
+    entry.now.value += 1_001;
+    expect(entry.store.reclaimExpiredAllocation({
+      expectedAllocationDigest: `sha256:${'0'.repeat(64)}`,
+    })).toMatchObject({ disposition: 'withheld', reason: 'lease-not-found' });
+    expect(entry.store.reclaimExpiredAllocation({
+      expectedAllocationDigest: first.allocationDigest!,
+    })).toMatchObject({ disposition: 'recorded', reason: 'reclaimed', durable: true });
+    expect(entry.store.inspect()).toMatchObject({ expiredPendingReclaim: 1 });
+    expect(entry.store.reclaimExpiredAllocation({
+      expectedAllocationDigest: second.allocationDigest!,
+    })).toMatchObject({ disposition: 'recorded', reason: 'reclaimed', durable: true });
+    expect(entry.store.inspect()).toMatchObject({ expiredPendingReclaim: 0 });
+  });
+
   it.each(['mode', 'hardlink', 'symlink', 'corruption'] as const)(
     'fails closed on unsafe or corrupt private storage: %s',
     (scenario) => {

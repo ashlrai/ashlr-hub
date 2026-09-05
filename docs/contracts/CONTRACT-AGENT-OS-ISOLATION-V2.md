@@ -1,10 +1,10 @@
 # Agent OS Observation Isolation V2 Contract
 
-**Status:** source contract only; not commissioned, wired, installed, activated, or proven on a live Docker engine.
+**Status:** pure evidence contract with a default-off M567 source adapter; not
+commissioned, daemon-wired, installed, activated, or proven on a live Docker engine.
 
-This contract defines the narrow evidence boundary for a future local Docker
-broker that runs an Agent OS observation producer. It does not implement that
-broker. The two source modules are deliberately pure:
+This contract defines the narrow evidence boundary consumed by the default-off
+M567 local Docker broker. The two source modules remain deliberately pure:
 
 - `agent-os-local-container-policy.ts` builds and validates a canonical,
   deny-by-construction create policy.
@@ -29,10 +29,10 @@ the following:
 - mandatory CPU, memory, swap, wall-clock, and output limits, with an exact
   one-process PID ceiling and a small signed cleanup-start grace.
 
-The policy digest is domain-separated canonical JSON. A future broker adapter
-must translate every field to the Docker Engine create request and fail closed
-when the engine cannot represent or confirm one. The current contract does not
-claim that such a translation or enforcement exists.
+The policy digest is domain-separated canonical JSON. M567 translates every
+field to one constrained Docker Engine create request and fails closed when the
+fake protocol engine cannot represent or confirm one. That source adapter and
+its hermetic tests do not establish live Docker enforcement.
 
 ## Attestation sequence
 
@@ -47,7 +47,7 @@ signed PREPARE attestation
   exact limits + short expiry
         |
         v
-future broker starts and observes the container
+explicitly enabled M567 broker starts and observes the container
         |
         v
 signed FINALIZE attestation
@@ -74,25 +74,26 @@ The cleanup-start delay is capped by the policy's `cleanupStartGraceMs`, while
 removal itself remains independently capped by the protocol cleanup-duration
 limit.
 
-## Replay consumption is a later stateful gate
+## Replay consumption in the M567 source adapter
 
-This pure verifier is mismatch-resistant, not replay-proof. A request nonce is
+This pure verifier remains mismatch-resistant, not replay-proof. A request nonce is
 cryptographically bound and caller-pinned, so an attestation for request A
 cannot satisfy request B. The verifier does not durably consume that nonce.
 Every inspection reports `replayConsumptionRequired: true` and
-`replayConsumptionVerified: false`. A later broker/runtime slice must place a
-durable atomic consume-once ledger in front of admission and recovery-test it
-before any production activation claim.
+`replayConsumptionVerified: false`. M567 places the authenticated M566 capacity
+lease/tombstone in front of create as its durable consume-once gate. This does
+not change the pure verifier result and has not been commissioned or live-tested.
 
 ## Authority boundary
 
 An admitted policy means only that the data structure is safe and canonical.
 A verified attestation means only that the configured verifier authenticated an
-exact caller-pinned statement. Every result explicitly leaves execution,
+exact caller-pinned statement. M567 supplies the bounded source adapter, while
+every returned result still leaves reusable execution,
 effects, credentials, commissioning, activation, container provisioning, and
 isolation enforcement unauthorized. Broker truth and Docker enforcement remain
-unverified until a later slice supplies, commissions, wires, and live-tests an
-independent broker and engine evidence path.
+unverified. Commissioning, daemon wiring, live Docker acceptance, and an
+independent engine evidence path remain separate work.
 
 This contract therefore cannot be used by itself to label Agent OS isolation,
 the observer, the daemon, or a release as production-active.
