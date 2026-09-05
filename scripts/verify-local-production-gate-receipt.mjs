@@ -53,6 +53,9 @@ export const LOCAL_PRODUCTION_GATE_NETWORK_ENABLED_IDS = Object.freeze([
   'audit-root-full', 'audit-root-production', 'audit-raycast-full', 'audit-raycast-production',
   'native-fetch', 'native-audit',
 ]);
+export const LOCAL_PRODUCTION_GATE_OUTER_SANDBOX_BYPASS_IDS = Object.freeze([
+  'test-ci-1-of-3', 'test-ci-2-of-3', 'test-ci-3-of-3',
+]);
 
 function fail(message) {
   throw new Error(`local production gate receipt: ${message}`);
@@ -210,16 +213,16 @@ export function validateLocalProductionGateReceipt(value) {
 
   const execution = exactRecord(receipt.execution, [
     'startedAt', 'finishedAt', 'hostPlatform', 'networkIsolation', 'networkEnabledGateIds',
-    'filesystemIsolation', 'sandboxProfiles', 'externalEffects', 'operationalAshlrHome',
-    'disposableSidecar',
+    'outerSandboxBypassGateIds', 'filesystemIsolation', 'sandboxProfiles', 'externalEffects',
+    'operationalAshlrHome', 'disposableSidecar',
   ], 'execution');
   validateIso(execution.startedAt, 'execution.startedAt');
   validateIso(execution.finishedAt, 'execution.finishedAt');
   if (Date.parse(execution.finishedAt) < Date.parse(execution.startedAt)
     || execution.hostPlatform !== 'darwin'
-    || execution.networkIsolation !== 'non-loopback-ip-egress-denied-for-source-gates'
-    || execution.filesystemIsolation !== 'write-allowlist-and-user-home-read-deny;host-ipc-system-reads-and-hostile-env-clearing-descendants-not-isolated'
-    || execution.externalEffects !== 'evidence-writes-recorded;same-uid-output-parent-swap-and-other-effects-not-attested'
+    || execution.networkIsolation !== 'non-loopback-ip-egress-denied-except-network-enabled-and-outer-sandbox-bypass-gates'
+    || execution.filesystemIsolation !== 'write-allowlist-and-user-home-read-deny-except-outer-sandbox-bypass-gates;host-ipc-system-reads-and-hostile-env-clearing-descendants-not-isolated'
+    || execution.externalEffects !== 'evidence-writes-recorded;outer-sandbox-bypass-gate-effects-same-uid-output-parent-swap-and-other-effects-not-attested'
     || execution.operationalAshlrHome !== 'redirected-to-disposable-root'
     || execution.disposableSidecar !== 'created-exclusive-and-removed-before-receipt') {
     fail('execution boundary is invalid');
@@ -231,12 +234,26 @@ export function validateLocalProductionGateReceipt(value) {
     )) {
     fail('network-enabled gate set is invalid');
   }
+  if (!Array.isArray(execution.outerSandboxBypassGateIds)
+    || execution.outerSandboxBypassGateIds.length !== LOCAL_PRODUCTION_GATE_OUTER_SANDBOX_BYPASS_IDS.length
+    || execution.outerSandboxBypassGateIds.some(
+      (id, index) => id !== LOCAL_PRODUCTION_GATE_OUTER_SANDBOX_BYPASS_IDS[index],
+    )) {
+    fail('outer-sandbox bypass gate set is invalid');
+  }
   const networkArrayKeys = Reflect.ownKeys(execution.networkEnabledGateIds);
   const expectedNetworkArrayKeys = [...Array(execution.networkEnabledGateIds.length).keys()]
     .map(String).concat('length');
   if (networkArrayKeys.length !== expectedNetworkArrayKeys.length
     || networkArrayKeys.some((key, index) => key !== expectedNetworkArrayKeys[index])) {
     fail('network-enabled gate set must be dense and undecorated');
+  }
+  const bypassArrayKeys = Reflect.ownKeys(execution.outerSandboxBypassGateIds);
+  const expectedBypassArrayKeys = [...Array(execution.outerSandboxBypassGateIds.length).keys()]
+    .map(String).concat('length');
+  if (bypassArrayKeys.length !== expectedBypassArrayKeys.length
+    || bypassArrayKeys.some((key, index) => key !== expectedBypassArrayKeys[index])) {
+    fail('outer-sandbox bypass gate set must be dense and undecorated');
   }
   const sandboxProfiles = exactRecord(execution.sandboxProfiles, [
     'networkEnabledSha256', 'networkDeniedSha256',

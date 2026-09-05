@@ -68,7 +68,7 @@ in order:
 
 1. clean `npm ci --ignore-scripts` installs for the root and Raycast lockfiles;
 2. typecheck, lint, and build;
-3. all three deterministic hermetic `test:ci` shards;
+3. all three deterministic host-semantic `test:ci` shards;
 4. the web console suite;
 5. full and production npm audits for the root and Raycast lockfiles, using the
    existing bounded npm/OSV failover;
@@ -86,18 +86,35 @@ environment is an allowlist; provider, npm, GitHub, shell-injection, and Git
 override variables are not inherited. Native launchd integration is explicitly
 disabled. The runner never invokes `gh`, a workflow, npm publication, a service
 manager, or an Ashlr runtime command with operational authority. Dependency
-installation, advisory audits, and the locked Cargo fetch may use the network;
-all build, test, offline-native, and pack-smoke gates run under a macOS sandbox
-that denies non-loopback IP egress while preserving localhost and private Unix
-socket fixtures. Every gate sandbox permits writes only to explicit dependency,
+installation, advisory audits, and the locked Cargo fetch may use the network.
+Build, web, offline-native, and pack-smoke gates run under a macOS sandbox that
+denies non-loopback IP egress while preserving localhost and private Unix socket
+fixtures. Every applied gate sandbox permits writes only to explicit dependency,
 build-output, and private temporary paths, and denies reads from the user home
 except the exact Git metadata and installed Rust tool directories needed for
-reproduction. Profiles live in a separate non-writable directory and are
-device/inode/hash checked before every gate.
+reproduction. Profiles live in a separate runner-owned directory and are
+device/inode/hash checked before every sandboxed gate.
 
-This is strong local containment, not a VM boundary. Host IPC and reads of
-non-home system paths are not fully isolated, so the receipt records evidence
-writes but does not attest that arbitrary external effects were impossible.
+The three `test:ci` shards are the closed outer-sandbox bypass set. They must
+exercise nested `sandbox-exec`, set-ID/sticky-mode handling, `/bin/ps`, process
+groups, and cross-process locks against real host semantics; macOS confinement
+cannot nest and suppresses those kernel observations. Each shard still receives
+only the allowlisted environment and redirected `HOME`, `USERPROFILE`,
+`ASHLR_HOME`, npm, Cargo, and temporary paths, and still runs in the disposable
+exact-SHA worktree under the same timeout, output bound, process-group cleanup,
+and descendant sweep. It does not inherit provider, registry, GitHub, or shell
+injection credentials through the child environment. It is nevertheless
+unconfined same-UID source execution:
+absolute-path or operating-system account discovery can reach the real user
+home, and network, host IPC, and other effects are not excluded. Run this trusted
+source only on a dedicated local account or VM if that residual access is not
+acceptable.
+
+This is mixed local containment, not a VM boundary. The receipt binds the exact
+outer-sandbox bypass set. Host IPC and reads of non-home system paths are not
+fully isolated for sandboxed gates, and test-shard effects are explicitly
+unattested, so the receipt does not claim that arbitrary external effects were
+impossible.
 The repository's bounded-command adapter supplies the GNU `timeout` interface
 used by the audit wrapper on macOS; no Homebrew `timeout` dependency is needed.
 

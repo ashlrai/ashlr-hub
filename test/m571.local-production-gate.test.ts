@@ -21,6 +21,7 @@ import {
   canonicalizeLocalProductionGateReceipt,
   LOCAL_PRODUCTION_GATE_COMMANDS,
   LOCAL_PRODUCTION_GATE_IDS,
+  LOCAL_PRODUCTION_GATE_OUTER_SANDBOX_BYPASS_IDS,
   parseCli,
   parseLocalProductionGateReceiptBytes,
   validateLocalProductionGateReceipt,
@@ -65,18 +66,19 @@ function validReceipt(): Record<string, unknown> {
       startedAt: instant,
       finishedAt: instant,
       hostPlatform: 'darwin',
-      networkIsolation: 'non-loopback-ip-egress-denied-for-source-gates',
+      networkIsolation: 'non-loopback-ip-egress-denied-except-network-enabled-and-outer-sandbox-bypass-gates',
       networkEnabledGateIds: [
         'install-root', 'install-raycast',
         'audit-root-full', 'audit-root-production', 'audit-raycast-full',
         'audit-raycast-production', 'native-fetch', 'native-audit',
       ],
-      filesystemIsolation: 'write-allowlist-and-user-home-read-deny;host-ipc-system-reads-and-hostile-env-clearing-descendants-not-isolated',
+      outerSandboxBypassGateIds: [...LOCAL_PRODUCTION_GATE_OUTER_SANDBOX_BYPASS_IDS],
+      filesystemIsolation: 'write-allowlist-and-user-home-read-deny-except-outer-sandbox-bypass-gates;host-ipc-system-reads-and-hostile-env-clearing-descendants-not-isolated',
       sandboxProfiles: {
         networkEnabledSha256: digest,
         networkDeniedSha256: digest,
       },
-      externalEffects: 'evidence-writes-recorded;same-uid-output-parent-swap-and-other-effects-not-attested',
+      externalEffects: 'evidence-writes-recorded;outer-sandbox-bypass-gate-effects-same-uid-output-parent-swap-and-other-effects-not-attested',
       operationalAshlrHome: 'redirected-to-disposable-root',
       disposableSidecar: 'created-exclusive-and-removed-before-receipt',
     },
@@ -111,6 +113,9 @@ describe('M571 local production gate v1', () => {
     const contract = JSON.parse(readFileSync(join(repoRoot, 'ashlr.verify.json'), 'utf8'));
     const local = validateLocalProductionContract(contract);
     expect(local.gates.map((gate) => gate.id)).toEqual(LOCAL_PRODUCTION_GATE_IDS);
+    expect(LOCAL_PRODUCTION_GATE_OUTER_SANDBOX_BYPASS_IDS).toEqual([
+      'test-ci-1-of-3', 'test-ci-2-of-3', 'test-ci-3-of-3',
+    ]);
     expect(contract.commands.map((gate: { id: string }) => gate.id)).toEqual([
       'typecheck', 'lint', 'build', 'test-ci-1-of-3', 'test-ci-2-of-3', 'test-ci-3-of-3',
     ]);
@@ -152,6 +157,9 @@ describe('M571 local production gate v1', () => {
     const incomplete = validReceipt();
     (incomplete.gates as Array<Record<string, unknown>>).pop();
     expect(() => validateLocalProductionGateReceipt(incomplete)).toThrow(/complete ordered/u);
+    const unclassified = validReceipt();
+    (unclassified.execution as Record<string, unknown>).outerSandboxBypassGateIds = [];
+    expect(() => validateLocalProductionGateReceipt(unclassified)).toThrow(/bypass gate set/u);
     const authority = validReceipt();
     (authority.authority as Record<string, unknown>).publish = true;
     expect(() => validateLocalProductionGateReceipt(authority)).toThrow(/every effect false/u);
@@ -348,6 +356,7 @@ describe('M571 local production gate v1', () => {
     expect(runner).toContain("GIT_CONFIG_GLOBAL: '/dev/null'");
     expect(runner).not.toContain('...process.env');
     expect(runner).toContain("ASHLR_RUN_NATIVE_LAUNCHD_TEST: '0'");
+    expect(runner).toContain('LOCAL_PRODUCTION_GATE_OUTER_SANDBOX_BYPASS_IDS.includes(gate.id)');
     expect(runner).not.toMatch(/execSync\(['"]gh|spawn\(['"]gh/u);
   });
 });

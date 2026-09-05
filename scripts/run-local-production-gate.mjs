@@ -18,6 +18,7 @@ import {
   LOCAL_PRODUCTION_GATE_COMMANDS,
   LOCAL_PRODUCTION_GATE_IDS,
   LOCAL_PRODUCTION_GATE_NETWORK_ENABLED_IDS,
+  LOCAL_PRODUCTION_GATE_OUTER_SANDBOX_BYPASS_IDS,
   validateLocalProductionGateReceipt,
 } from './verify-local-production-gate-receipt.mjs';
 
@@ -468,14 +469,15 @@ async function runGate(gate, context) {
     command = context.tools.paths.node;
     args = [context.tools.paths.npmCli, ...args];
   }
-  const profile = LOCAL_PRODUCTION_GATE_NETWORK_ENABLED_IDS.includes(gate.id)
-    ? context.sandboxProfiles.networkEnabled.path
-    : context.sandboxProfiles.networkDenied.path;
-  assertSandboxProfileUnchanged(LOCAL_PRODUCTION_GATE_NETWORK_ENABLED_IDS.includes(gate.id)
-    ? context.sandboxProfiles.networkEnabled
-    : context.sandboxProfiles.networkDenied);
-  args = ['-f', profile, command, ...args];
-  command = context.tools.paths.sandboxExec;
+  if (!LOCAL_PRODUCTION_GATE_OUTER_SANDBOX_BYPASS_IDS.includes(gate.id)) {
+    const networkEnabled = LOCAL_PRODUCTION_GATE_NETWORK_ENABLED_IDS.includes(gate.id);
+    const sandboxProfile = networkEnabled
+      ? context.sandboxProfiles.networkEnabled
+      : context.sandboxProfiles.networkDenied;
+    assertSandboxProfileUnchanged(sandboxProfile);
+    args = ['-f', sandboxProfile.path, command, ...args];
+    command = context.tools.paths.sandboxExec;
+  }
   const cwd = resolve(context.repoRoot, gate.cwd);
   const commandBytes = Buffer.from(JSON.stringify({ argv: gate.cmd, cwd: gate.cwd }), 'utf8');
   const stdoutHash = createHash('sha256');
@@ -938,14 +940,15 @@ export async function runLocalProductionGate({ repoRoot, options }) {
         startedAt,
         finishedAt: new Date().toISOString(),
         hostPlatform: process.platform,
-        networkIsolation: 'non-loopback-ip-egress-denied-for-source-gates',
+        networkIsolation: 'non-loopback-ip-egress-denied-except-network-enabled-and-outer-sandbox-bypass-gates',
         networkEnabledGateIds: [...LOCAL_PRODUCTION_GATE_NETWORK_ENABLED_IDS],
-        filesystemIsolation: 'write-allowlist-and-user-home-read-deny;host-ipc-system-reads-and-hostile-env-clearing-descendants-not-isolated',
+        outerSandboxBypassGateIds: [...LOCAL_PRODUCTION_GATE_OUTER_SANDBOX_BYPASS_IDS],
+        filesystemIsolation: 'write-allowlist-and-user-home-read-deny-except-outer-sandbox-bypass-gates;host-ipc-system-reads-and-hostile-env-clearing-descendants-not-isolated',
         sandboxProfiles: {
           networkEnabledSha256: sandboxProfiles.networkEnabled.sha256,
           networkDeniedSha256: sandboxProfiles.networkDenied.sha256,
         },
-        externalEffects: 'evidence-writes-recorded;same-uid-output-parent-swap-and-other-effects-not-attested',
+        externalEffects: 'evidence-writes-recorded;outer-sandbox-bypass-gate-effects-same-uid-output-parent-swap-and-other-effects-not-attested',
         operationalAshlrHome: 'redirected-to-disposable-root',
         disposableSidecar: 'created-exclusive-and-removed-before-receipt',
       },
