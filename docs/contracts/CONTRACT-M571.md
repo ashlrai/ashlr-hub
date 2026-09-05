@@ -44,8 +44,9 @@ registry advisory endpoint fails.
 The runner terminates the gate process group, independently bounds inherited
 output-pipe closure, and sweeps descendants carrying its per-gate execution
 marker. This is operational cleanup, not a hostile-code VM boundary: source
-that deliberately clears inherited environment markers before detaching, host
-IPC, and system reads remain outside the receipt's isolation claim.
+that deliberately clears inherited environment markers before detaching can
+escape the sweep, and the sanitized host test stages described below are not
+OS-confined.
 
 The artifact and receipt paths must be absolute, outside the real repository,
 beneath existing current-user-owned directories that are not group- or
@@ -68,7 +69,7 @@ in order:
 
 1. clean `npm ci --ignore-scripts` installs for the root and Raycast lockfiles;
 2. typecheck, lint, and build;
-3. all three deterministic hermetic `test:ci` shards;
+3. all three deterministic host-semantic `test:ci` shards;
 4. the web console suite;
 5. full and production npm audits for the root and Raycast lockfiles, using the
    existing bounded npm/OSV failover;
@@ -85,18 +86,31 @@ and temporary paths redirected to the gate's private root. The child
 environment is an allowlist; provider, npm, GitHub, shell-injection, and Git
 override variables are not inherited. Native launchd integration is explicitly
 disabled. The runner never invokes `gh`, a workflow, npm publication, a service
-manager, or an Ashlr runtime command with operational authority. Dependency
-installation, advisory audits, and the locked Cargo fetch may use the network;
-all build, test, offline-native, and pack-smoke gates run under a macOS sandbox
-that denies non-loopback IP egress while preserving localhost and private Unix
-socket fixtures. Every gate sandbox permits writes only to explicit dependency,
-build-output, and private temporary paths, and denies reads from the user home
-except the exact Git metadata and installed Rust tool directories needed for
-reproduction. Profiles live in a separate non-writable directory and are
-device/inode/hash checked before every gate.
+manager, or an Ashlr runtime command with operational authority.
 
-This is strong local containment, not a VM boundary. Host IPC and reads of
-non-home system paths are not fully isolated, so the receipt records evidence
+The contract and receipt classify confinement per gate. Dependency installation,
+advisory audits, and the locked Cargo fetch use a macOS sandbox with a write
+allowlist and user-home read denial, but network access enabled. Typecheck,
+lint, build, pack-smoke, and the offline native gates use the same filesystem
+sandbox while denying non-loopback IP egress and preserving localhost. Profiles
+live in a separate non-writable directory and are device/inode/hash checked
+before every sandboxed gate.
+
+The three `test:ci` shards are deliberately not wrapped in a second macOS
+sandbox. They exercise process inspection, nested confinement, Unix sockets,
+and special filesystem semantics that an outer `sandbox-exec` changes or
+denies. `test:web` does not require those host semantics and remains in the
+loopback-only filesystem sandbox. The three shards still run from the detached
+exact-SHA source with the same closed environment and disposable home, caches,
+Ashlr state, and temporary paths, but run with the host account's filesystem,
+IPC, and network authority.
+The runner rechecks the exact clean source and release-policy Git bindings after
+each such stage. The source must therefore be trusted release-candidate code;
+these stages do not claim containment of hostile test code.
+
+The sandboxed stages provide local containment, not a VM boundary. Host IPC and
+reads of non-home system paths are not fully isolated there, while the sanitized
+test shards have host authority as stated above. The receipt records evidence
 writes but does not attest that arbitrary external effects were impossible.
 The repository's bounded-command adapter supplies the GNU `timeout` interface
 used by the audit wrapper on macOS; no Homebrew `timeout` dependency is needed.
@@ -120,15 +134,17 @@ is bounded to 256 KiB. Its closed schema binds:
   executable paths and file digests;
 - policy ID/version/digest and verification-contract path/digest;
 - package name/version/tarball name, tarball SHA-256, and sha512 SRI;
-- ordered gate IDs, command digests, timestamps, duration, exit status, and
-  stdout/stderr digests; and
+- ordered gate IDs, exact per-gate confinement classifications, command digests,
+  timestamps, duration, exit status, and stdout/stderr digests; and
 - the disclosed local execution boundary plus all-false authority.
 
-The verifier rejects unknown or missing keys, noncanonical bytes, malformed
-hashes or SRI, missing/reordered/failed gates, old Node/npm versions, source or
-binding mismatch against the complete required caller pins, persisted-artifact
-byte drift, any authority bit, and any verdict other than `passed`. Command
-output and environment values are not persisted.
+Receipt schema v2 replaces the earlier blanket isolation strings with the exact
+closed classification on each gate. The verifier rejects unknown or missing
+keys, noncanonical bytes, malformed hashes or SRI, missing/reordered/failed
+gates, old Node/npm versions, source or binding mismatch against the complete
+required caller pins, persisted-artifact byte drift, any authority bit, and any
+verdict other than `passed`. Command output and environment values are not
+persisted.
 
 ## Explicit non-claims
 

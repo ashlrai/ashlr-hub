@@ -328,8 +328,8 @@ export function validateReleaseSuccessorPolicy(value) {
   if (localVerification.contractPath !== 'ashlr.verify.json') {
     fail('localVerification.contractPath must be ashlr.verify.json');
   }
-  if (localVerification.requiredReceiptSchemaVersion !== 1) {
-    fail('localVerification.requiredReceiptSchemaVersion must be 1');
+  if (![1, 2].includes(localVerification.requiredReceiptSchemaVersion)) {
+    fail('localVerification.requiredReceiptSchemaVersion must be 1 or 2');
   }
   exactString(
     localVerification.contractSha256,

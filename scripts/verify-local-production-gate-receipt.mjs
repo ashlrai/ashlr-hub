@@ -14,7 +14,7 @@ const SEMVER_RE = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u;
 const INTEGRITY_RE = /^sha512-[A-Za-z0-9+/]{86}==$/u;
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 
-export const LOCAL_PRODUCTION_GATE_RECEIPT_SCHEMA_VERSION = 1;
+export const LOCAL_PRODUCTION_GATE_RECEIPT_SCHEMA_VERSION = 2;
 export const LOCAL_PRODUCTION_GATE_AUTHORITY = Object.freeze({
   activate: false,
   dispatch: false,
@@ -53,6 +53,25 @@ export const LOCAL_PRODUCTION_GATE_NETWORK_ENABLED_IDS = Object.freeze([
   'audit-root-full', 'audit-root-production', 'audit-raycast-full', 'audit-raycast-production',
   'native-fetch', 'native-audit',
 ]);
+export const LOCAL_PRODUCTION_GATE_SANITIZED_HOST_IDS = Object.freeze([
+  'test-ci-1-of-3', 'test-ci-2-of-3', 'test-ci-3-of-3',
+]);
+export const LOCAL_PRODUCTION_GATE_CONFINEMENT = Object.freeze({
+  networkEnabledSandbox: 'sandbox-write-allowlist-home-read-deny-network-enabled',
+  networkDeniedSandbox: 'sandbox-write-allowlist-home-read-deny-loopback-only',
+  sanitizedHost: 'sanitized-exact-source-host-authority',
+});
+
+export function localProductionGateConfinement(id) {
+  if (!LOCAL_PRODUCTION_GATE_IDS.includes(id)) fail(`unknown gate id ${id}`);
+  if (LOCAL_PRODUCTION_GATE_SANITIZED_HOST_IDS.includes(id)) {
+    return LOCAL_PRODUCTION_GATE_CONFINEMENT.sanitizedHost;
+  }
+  if (LOCAL_PRODUCTION_GATE_NETWORK_ENABLED_IDS.includes(id)) {
+    return LOCAL_PRODUCTION_GATE_CONFINEMENT.networkEnabledSandbox;
+  }
+  return LOCAL_PRODUCTION_GATE_CONFINEMENT.networkDeniedSandbox;
+}
 
 function fail(message) {
   throw new Error(`local production gate receipt: ${message}`);
@@ -151,7 +170,7 @@ export function validateLocalProductionGateReceipt(value) {
     'execution', 'gates', 'authority', 'verdict',
   ], 'receipt');
   if (receipt.schemaVersion !== LOCAL_PRODUCTION_GATE_RECEIPT_SCHEMA_VERSION
-    || receipt.kind !== 'ashlr-local-production-gate-receipt-v1'
+    || receipt.kind !== 'ashlr-local-production-gate-receipt-v2'
     || receipt.assurance !== 'local-source-verification-only'
     || receipt.verdict !== 'passed') {
     fail('receipt identity or verdict is invalid');
@@ -209,34 +228,19 @@ export function validateLocalProductionGateReceipt(value) {
   exactString(pkg.integrity, INTEGRITY_RE, 'bindings.package.integrity', 95);
 
   const execution = exactRecord(receipt.execution, [
-    'startedAt', 'finishedAt', 'hostPlatform', 'networkIsolation', 'networkEnabledGateIds',
-    'filesystemIsolation', 'sandboxProfiles', 'externalEffects', 'operationalAshlrHome',
-    'disposableSidecar',
+    'startedAt', 'finishedAt', 'hostPlatform', 'confinementModel', 'sanitizedEnvironment',
+    'sandboxProfiles', 'externalEffects', 'operationalAshlrHome', 'disposableSidecar',
   ], 'execution');
   validateIso(execution.startedAt, 'execution.startedAt');
   validateIso(execution.finishedAt, 'execution.finishedAt');
   if (Date.parse(execution.finishedAt) < Date.parse(execution.startedAt)
     || execution.hostPlatform !== 'darwin'
-    || execution.networkIsolation !== 'non-loopback-ip-egress-denied-for-source-gates'
-    || execution.filesystemIsolation !== 'write-allowlist-and-user-home-read-deny;host-ipc-system-reads-and-hostile-env-clearing-descendants-not-isolated'
+    || execution.confinementModel !== 'closed-per-gate-v1'
+    || execution.sanitizedEnvironment !== 'allowlisted-disposable-home-temp-cache-and-ashlr-home'
     || execution.externalEffects !== 'evidence-writes-recorded;same-uid-output-parent-swap-and-other-effects-not-attested'
     || execution.operationalAshlrHome !== 'redirected-to-disposable-root'
     || execution.disposableSidecar !== 'created-exclusive-and-removed-before-receipt') {
     fail('execution boundary is invalid');
-  }
-  if (!Array.isArray(execution.networkEnabledGateIds)
-    || execution.networkEnabledGateIds.length !== LOCAL_PRODUCTION_GATE_NETWORK_ENABLED_IDS.length
-    || execution.networkEnabledGateIds.some(
-      (id, index) => id !== LOCAL_PRODUCTION_GATE_NETWORK_ENABLED_IDS[index],
-    )) {
-    fail('network-enabled gate set is invalid');
-  }
-  const networkArrayKeys = Reflect.ownKeys(execution.networkEnabledGateIds);
-  const expectedNetworkArrayKeys = [...Array(execution.networkEnabledGateIds.length).keys()]
-    .map(String).concat('length');
-  if (networkArrayKeys.length !== expectedNetworkArrayKeys.length
-    || networkArrayKeys.some((key, index) => key !== expectedNetworkArrayKeys[index])) {
-    fail('network-enabled gate set must be dense and undecorated');
   }
   const sandboxProfiles = exactRecord(execution.sandboxProfiles, [
     'networkEnabledSha256', 'networkDeniedSha256',
@@ -258,10 +262,13 @@ export function validateLocalProductionGateReceipt(value) {
   for (const [index, gateValue] of receipt.gates.entries()) {
     const label = `gates[${index}]`;
     const gate = exactRecord(gateValue, [
-      'id', 'commandSha256', 'startedAt', 'finishedAt', 'durationMs', 'exitCode',
+      'id', 'confinement', 'commandSha256', 'startedAt', 'finishedAt', 'durationMs', 'exitCode',
       'stdoutSha256', 'stderrSha256',
     ], label);
     if (gate.id !== LOCAL_PRODUCTION_GATE_IDS[index]) fail(`${label}.id is out of order`);
+    if (gate.confinement !== localProductionGateConfinement(gate.id)) {
+      fail(`${label}.confinement does not match the closed per-gate model`);
+    }
     for (const key of ['commandSha256', 'stdoutSha256', 'stderrSha256']) {
       exactString(gate[key], SHA256_RE, `${label}.${key}`, 64);
     }

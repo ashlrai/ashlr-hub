@@ -16,8 +16,10 @@ import {
   canonicalizeLocalProductionGateReceipt,
   LOCAL_PRODUCTION_GATE_AUTHORITY,
   LOCAL_PRODUCTION_GATE_COMMANDS,
+  LOCAL_PRODUCTION_GATE_CONFINEMENT,
   LOCAL_PRODUCTION_GATE_IDS,
-  LOCAL_PRODUCTION_GATE_NETWORK_ENABLED_IDS,
+  LOCAL_PRODUCTION_GATE_RECEIPT_SCHEMA_VERSION,
+  localProductionGateConfinement,
   validateLocalProductionGateReceipt,
 } from './verify-local-production-gate-receipt.mjs';
 
@@ -218,13 +220,17 @@ export function validateLocalProductionContract(raw) {
   ], 'localProductionGate');
   if (local.schemaVersion !== 1 || local.runner !== 'scripts/run-local-production-gate.mjs'
     || local.receiptVerifier !== 'scripts/verify-local-production-gate-receipt.mjs'
-    || local.receiptSchemaVersion !== 1 || !Array.isArray(local.gates)
+    || local.receiptSchemaVersion !== LOCAL_PRODUCTION_GATE_RECEIPT_SCHEMA_VERSION
+    || !Array.isArray(local.gates)
     || local.gates.length !== LOCAL_PRODUCTION_GATE_IDS.length) {
     fail('localProductionGate identity or gate count is invalid');
   }
   const seen = new Set();
   const gates = local.gates.map((value, index) => {
-    const gate = exactKeys(value, ['id', 'cmd', 'cwd', 'timeoutMs'], `localProductionGate.gates[${index}]`);
+    const gate = exactKeys(
+      value, ['id', 'confinement', 'cmd', 'cwd', 'timeoutMs'],
+      `localProductionGate.gates[${index}]`,
+    );
     if (gate.id !== LOCAL_PRODUCTION_GATE_IDS[index] || seen.has(gate.id)) {
       fail(`localProductionGate.gates[${index}] is missing, duplicated, or out of order`);
     }
@@ -235,12 +241,19 @@ export function validateLocalProductionContract(raw) {
       fail(`localProductionGate.gates[${index}] has an invalid cwd or timeout`);
     }
     const [expectedId, expectedCmd, expectedCwd, expectedTimeout] = LOCAL_PRODUCTION_GATE_COMMANDS[index];
-    if (gate.id !== expectedId || gate.cwd !== expectedCwd || gate.timeoutMs !== expectedTimeout
+    if (gate.id !== expectedId || gate.confinement !== localProductionGateConfinement(gate.id)
+      || gate.cwd !== expectedCwd || gate.timeoutMs !== expectedTimeout
       || gate.cmd.length !== expectedCmd.length
       || gate.cmd.some((part, partIndex) => part !== expectedCmd[partIndex])) {
       fail(`localProductionGate.gates[${index}] does not match the closed v1 command`);
     }
-    return Object.freeze({ id: gate.id, cmd: Object.freeze([...gate.cmd]), cwd: gate.cwd, timeoutMs: gate.timeoutMs });
+    return Object.freeze({
+      id: gate.id,
+      confinement: gate.confinement,
+      cmd: Object.freeze([...gate.cmd]),
+      cwd: gate.cwd,
+      timeoutMs: gate.timeoutMs,
+    });
   });
   return Object.freeze({ ...local, gates: Object.freeze(gates) });
 }
@@ -468,14 +481,12 @@ async function runGate(gate, context) {
     command = context.tools.paths.node;
     args = [context.tools.paths.npmCli, ...args];
   }
-  const profile = LOCAL_PRODUCTION_GATE_NETWORK_ENABLED_IDS.includes(gate.id)
-    ? context.sandboxProfiles.networkEnabled.path
-    : context.sandboxProfiles.networkDenied.path;
-  assertSandboxProfileUnchanged(LOCAL_PRODUCTION_GATE_NETWORK_ENABLED_IDS.includes(gate.id)
-    ? context.sandboxProfiles.networkEnabled
-    : context.sandboxProfiles.networkDenied);
-  args = ['-f', profile, command, ...args];
-  command = context.tools.paths.sandboxExec;
+  const profile = selectLocalGateSandboxProfile(gate, context.sandboxProfiles);
+  if (profile !== null) {
+    assertSandboxProfileUnchanged(profile);
+    args = ['-f', profile.path, command, ...args];
+    command = context.tools.paths.sandboxExec;
+  }
   const cwd = resolve(context.repoRoot, gate.cwd);
   const commandBytes = Buffer.from(JSON.stringify({ argv: gate.cmd, cwd: gate.cwd }), 'utf8');
   const stdoutHash = createHash('sha256');
@@ -569,6 +580,7 @@ async function runGate(gate, context) {
   process.stderr.write(`[local-production-gate] pass ${gate.id}\n`);
   return Object.freeze({
     id: gate.id,
+    confinement: gate.confinement,
     commandSha256: sha256(commandBytes),
     startedAt,
     finishedAt: new Date(finished).toISOString(),
@@ -577,6 +589,15 @@ async function runGate(gate, context) {
     stdoutSha256: stdoutHash.digest('hex'),
     stderrSha256: stderrHash.digest('hex'),
   });
+}
+
+export function selectLocalGateSandboxProfile(gate, sandboxProfiles) {
+  const expected = localProductionGateConfinement(gate.id);
+  if (gate.confinement !== expected) fail(`${gate.id} confinement does not match the closed model`);
+  if (expected === LOCAL_PRODUCTION_GATE_CONFINEMENT.sanitizedHost) return null;
+  return expected === LOCAL_PRODUCTION_GATE_CONFINEMENT.networkEnabledSandbox
+    ? sandboxProfiles.networkEnabled
+    : sandboxProfiles.networkDenied;
 }
 
 function sandboxLiteral(value) {
@@ -840,6 +861,10 @@ export async function runLocalProductionGate({ repoRoot, options }) {
       fail('release policy does not bind the exact ashlr.verify.json bytes');
     }
     const contract = validateLocalProductionContract(JSON.parse(contractBytes.toString('utf8')));
+    if (policyResult.policy.localVerification.requiredReceiptSchemaVersion
+      !== contract.receiptSchemaVersion) {
+      fail('release policy receipt schema does not match the local production contract');
+    }
     const env = createIsolatedGateEnvironment({ repoRoot: verificationRoot, tempRoot, tools });
     const npmVersion = sync(
       tools.paths.node, [tools.paths.npmCli, '--version'], verificationRoot, env,
@@ -871,10 +896,20 @@ export async function runLocalProductionGate({ repoRoot, options }) {
     };
     for (const gate of contract.gates) {
       if (interruptedSignal) fail(`interrupted by ${interruptedSignal}`);
+      const sanitizedHost = gate.confinement === LOCAL_PRODUCTION_GATE_CONFINEMENT.sanitizedHost;
+      if (sanitizedHost) {
+        const beforeTest = ensureCleanExactSource(verificationRoot, options.expectedSha);
+        if (beforeTest.tree !== source.tree) fail(`${gate.id} source tree changed before execution`);
+      }
       if (gate.id === 'native-check') {
         sidecar = prepareDisposableTauriSidecar(verificationRoot, rustcVerbose);
       }
       results.push(await runGate(gate, context));
+      if (sanitizedHost) {
+        const afterTest = ensureCleanExactSource(verificationRoot, options.expectedSha);
+        if (afterTest.tree !== source.tree) fail(`${gate.id} source tree changed during execution`);
+        verifyPolicyGitBindings(verificationRoot, policyResult.policy);
+      }
     }
     if (sidecar) {
       sidecar.cleanup();
@@ -911,8 +946,8 @@ export async function runLocalProductionGate({ repoRoot, options }) {
     if (interruptedSignal) fail(`interrupted by ${interruptedSignal}`);
     const artifactIdentity = writeBytesExclusive(controllingRepo, artifactOutput, artifactBytes);
     const receipt = {
-      schemaVersion: 1,
-      kind: 'ashlr-local-production-gate-receipt-v1',
+      schemaVersion: LOCAL_PRODUCTION_GATE_RECEIPT_SCHEMA_VERSION,
+      kind: 'ashlr-local-production-gate-receipt-v2',
       assurance: 'local-source-verification-only',
       source: { ...source, cleanBefore: true, cleanAfter: true },
       toolchain: {
@@ -938,9 +973,8 @@ export async function runLocalProductionGate({ repoRoot, options }) {
         startedAt,
         finishedAt: new Date().toISOString(),
         hostPlatform: process.platform,
-        networkIsolation: 'non-loopback-ip-egress-denied-for-source-gates',
-        networkEnabledGateIds: [...LOCAL_PRODUCTION_GATE_NETWORK_ENABLED_IDS],
-        filesystemIsolation: 'write-allowlist-and-user-home-read-deny;host-ipc-system-reads-and-hostile-env-clearing-descendants-not-isolated',
+        confinementModel: 'closed-per-gate-v1',
+        sanitizedEnvironment: 'allowlisted-disposable-home-temp-cache-and-ashlr-home',
         sandboxProfiles: {
           networkEnabledSha256: sandboxProfiles.networkEnabled.sha256,
           networkDeniedSha256: sandboxProfiles.networkDenied.sha256,

@@ -98,8 +98,9 @@ describe('M570 release successor policy v1', () => {
     });
     expect(existsSync(productionPolicyPath)).toBe(true);
     expect(verifyReleaseSuccessorPolicyFile(productionPolicyPath, '3.4.0').policy).toMatchObject({
-      release: { requiredFirstParentRevision: 'd248d2acc17e5e3b533284d954614ae2ec935581' },
+      release: { requiredFirstParentRevision: 'b3aa2a23325e1b820bddaad2c1f2e2c34efad7ff' },
       package: { version: '3.4.0' },
+      localVerification: { requiredReceiptSchemaVersion: 2 },
     });
     expect(source).not.toMatch(/3\.3\.2|3\.4\.0|abd49a5049759e417d99089b88c628fd2364f79c|d6c1a5ec/u);
     expect(source).toContain('v9.8.7');
@@ -162,6 +163,9 @@ describe('M570 release successor policy v1', () => {
     }],
     ['local verification contract digest', (policy: JsonRecord) => {
       nested(policy, 'localVerification').contractSha256 = '7'.repeat(63);
+    }],
+    ['unsupported local receipt schema', (policy: JsonRecord) => {
+      nested(policy, 'localVerification').requiredReceiptSchemaVersion = 3;
     }],
     ['failed candidate receipt digest', (policy: JsonRecord) => {
       const failed = nested(policy, 'registry').failedCandidates as JsonRecord[];
