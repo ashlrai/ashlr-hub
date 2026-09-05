@@ -5,11 +5,13 @@ import {
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   assertExternalReceiptPath,
+  createIsolatedGateEnvironment,
+  createPrivateLocalGateCustodyRoot,
   createPrivateLocalGateTempRoot,
   parseLocalGateArgs,
   prepareDisposableTauriSidecar,
@@ -272,6 +274,57 @@ describe('M571 local production gate v1', () => {
     expect(() => tempDirectory.cleanup()).not.toThrow();
   });
 
+  it.runIf(process.platform === 'darwin')('separates short scratch paths from private HOME custody', () => {
+    const inheritedTmpdir = process.env.TMPDIR;
+    process.env.TMPDIR = `/private/tmp/${'untrusted-inherited-path-'.repeat(8)}`;
+    const [tempDirectory, custodyDirectory] = (() => {
+      try {
+        const temp = createPrivateLocalGateTempRoot();
+        try {
+          return [temp, createPrivateLocalGateCustodyRoot()] as const;
+        } catch (error) {
+          temp.cleanup();
+          throw error;
+        }
+      } finally {
+        if (inheritedTmpdir === undefined) delete process.env.TMPDIR;
+        else process.env.TMPDIR = inheritedTmpdir;
+      }
+    })();
+    const darwinTemp = realpathSync(spawnSync(
+      '/usr/bin/getconf', ['DARWIN_USER_TEMP_DIR'], { encoding: 'utf8' },
+    ).stdout.trim());
+    expect(tempDirectory.path).toMatch(/^\/private\/tmp\/alg-[A-Za-z0-9]{6}$/u);
+    expect(dirname(custodyDirectory.path)).toBe(darwinTemp);
+    expect(basename(custodyDirectory.path)).toMatch(/^agc-[A-Za-z0-9]{6}$/u);
+    expect(lstatSync(custodyDirectory.path).mode & 0o7777).toBe(0o700);
+
+    const env = createIsolatedGateEnvironment({
+      repoRoot,
+      tempRoot: tempDirectory.path,
+      custodyRoot: custodyDirectory.path,
+      tools: {
+        paths: {
+          node: process.execPath,
+          npmCli: join(repoRoot, 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+          cargoAudit: '/usr/bin/true',
+          osvScanner: '/usr/bin/true',
+          git: '/usr/bin/git',
+          rustc: '/usr/bin/true',
+          rustdoc: '/usr/bin/true',
+        },
+      },
+    });
+    expect(env.TMPDIR).toBe(join(tempDirectory.path, 'tmp'));
+    expect(env.HOME).toBe(join(custodyDirectory.path, 'home'));
+    expect(env.USERPROFILE).toBe(env.HOME);
+    expect(env.ASHLR_HOME).toBe(join(env.HOME, '.ashlr'));
+    expect(env.ASHLR_VITEST_HOME_PARENT).toBe(join(custodyDirectory.path, 'vitest-homes'));
+    expect(lstatSync(env.ASHLR_VITEST_HOME_PARENT).mode & 0o7777).toBe(0o700);
+    tempDirectory.cleanup();
+    custodyDirectory.cleanup();
+  });
+
   it.runIf(process.platform === 'darwin')('refuses to clean a replaced private temp root', () => {
     const tempDirectory = createPrivateLocalGateTempRoot();
     const root = tempDirectory.path;
@@ -289,14 +342,33 @@ describe('M571 local production gate v1', () => {
     expect(existsSync(root)).toBe(false);
   });
 
+  it.runIf(process.platform === 'darwin')('refuses to clean a replaced private custody root', () => {
+    const custodyDirectory = createPrivateLocalGateCustodyRoot();
+    const root = custodyDirectory.path;
+    const movedRoot = `${root}.owned`;
+    const victim = mkdtempSync(join(dirname(root), 'agc-victim-'));
+    scratch.push(root, movedRoot, victim);
+    writeFileSync(join(victim, 'keep.txt'), 'keep', 'utf8');
+    renameSync(root, movedRoot);
+    symlinkSync(victim, root);
+    expect(() => custodyDirectory.cleanup()).toThrow(/identity changed/u);
+    expect(readFileSync(join(victim, 'keep.txt'), 'utf8')).toBe('keep');
+    rmSync(root);
+    renameSync(movedRoot, root);
+    custodyDirectory.cleanup();
+    expect(existsSync(root)).toBe(false);
+  });
+
   it.runIf(process.platform === 'darwin')('enforces the private write root and deny-network sandbox', () => {
     const root = mkdtempSync(join(tmpdir(), 'ashlr-m571-sandbox-'));
     const profileRoot = mkdtempSync(join(tmpdir(), 'ashlr-m571-profiles-'));
-    scratch.push(root, profileRoot);
+    const custodyDirectory = createPrivateLocalGateCustodyRoot();
+    scratch.push(root, profileRoot, custodyDirectory.path);
     mkdirSync(join(root, 'tmp'));
-    mkdirSync(join(root, 'home'));
+    mkdirSync(join(custodyDirectory.path, 'home'));
     const profiles = writeSandboxProfiles({
-      verificationRoot: repoRoot, tempRoot: root, profileRoot,
+      verificationRoot: repoRoot, tempRoot: root,
+      custodyRoot: custodyDirectory.path, profileRoot,
     });
     const allowed = join(root, 'tmp', 'allowed.txt');
     expect(spawnSync('/usr/bin/sandbox-exec', [
@@ -304,6 +376,13 @@ describe('M571 local production gate v1', () => {
       'require("node:fs").writeFileSync(process.argv[1], "ok")', allowed,
     ]).status).toBe(0);
     expect(readFileSync(allowed, 'utf8')).toBe('ok');
+
+    const allowedHome = join(custodyDirectory.path, 'home', 'allowed.txt');
+    expect(spawnSync('/usr/bin/sandbox-exec', [
+      '-f', profiles.networkDenied.path, process.execPath, '-e',
+      'require("node:fs").writeFileSync(process.argv[1], "ok")', allowedHome,
+    ]).status).toBe(0);
+    expect(readFileSync(allowedHome, 'utf8')).toBe('ok');
 
     const denied = join(homedir(), '.ashlr-m571-sandbox-denied');
     expect(existsSync(denied)).toBe(false);
@@ -345,7 +424,7 @@ describe('M571 local production gate v1', () => {
       cwd: repoRoot,
       env: {
         PATH: `${git.slice(0, git.lastIndexOf('/'))}:/usr/bin:/bin`,
-        HOME: join(root, 'home'),
+        HOME: join(custodyDirectory.path, 'home'),
         GIT_CONFIG_GLOBAL: '/dev/null',
         GIT_CONFIG_SYSTEM: '/dev/null',
         GIT_OPTIONAL_LOCKS: '0',

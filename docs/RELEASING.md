@@ -47,11 +47,15 @@ npm run verify:local-production -- \
 The runner verifies a clean exact commit in a fresh detached worktree, runs the
 complete contract with an allowlisted environment, preserves the exact verified
 tarball, keeps operational Ashlr state and services untouched, and writes a
-canonical authority-free receipt outside the repository. Its disposable gate
-and sandbox-profile roots are short, exclusive mode-`0700` directories under
-canonical `/private/tmp`, preserving macOS Unix-socket pathname capacity for
-nested tests. Verify that receipt
-and tarball with `scripts/verify-local-production-gate-receipt.mjs` and all six
+canonical authority-free receipt outside the repository. Its disposable
+scratch and sandbox-profile roots are short, exclusive mode-`0700` directories
+under canonical `/private/tmp`, preserving macOS Unix-socket pathname capacity
+for nested tests. Disposable `HOME`, `USERPROFILE`, `ASHLR_HOME`, and Vitest
+worker homes are held separately under a mode-`0700` custody root in the
+validated canonical Darwin per-user temporary directory, so custody-sensitive
+tests do not inherit `/private/tmp`'s world-writable ancestry. The sandbox
+allowlist covers both roots while the real user home remains denied. Verify the
+receipt and tarball with `scripts/verify-local-production-gate-receipt.mjs` and all six
 independent caller pins before separately considering any registry or GitHub
 mutation. Receipt schema v2 records confinement per gate: build, package,
 dependency, native, and web-test stages remain macOS-sandboxed, while the three

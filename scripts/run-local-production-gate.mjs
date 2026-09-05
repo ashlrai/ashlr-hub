@@ -30,6 +30,7 @@ const MAX_OUTPUT_HASH_BYTES = 16 * 1024 * 1024;
 const PIPE_CLOSE_GRACE_MS = 2_000;
 const LOCAL_GATE_TEMP_PARENT = '/private/tmp';
 const LOCAL_GATE_TEMP_ROOT_MAX_BYTES = 24;
+const LOCAL_GATE_CUSTODY_ROOT_MAX_BYTES = 1_024;
 function resolveSystemGit() {
   if (process.platform !== 'darwin') return '/usr/bin/git';
   const result = spawnSync('/usr/bin/xcrun', ['-f', 'git'], {
@@ -76,7 +77,7 @@ function createPrivateLocalGateTempDirectory(prefix) {
   if (realpathSync(path) !== path || dirname(path) !== parent
     || !new RegExp(`^${prefix}[A-Za-z0-9]{6}$`, 'u').test(basename(path))
     || !identity.isDirectory() || identity.isSymbolicLink()
-    || identity.uid !== process.getuid() || (identity.mode & 0o777) !== 0o700
+    || identity.uid !== process.getuid() || (identity.mode & 0o7777) !== 0o700
     || Buffer.byteLength(path, 'utf8') > LOCAL_GATE_TEMP_ROOT_MAX_BYTES) {
     rmSync(path, { recursive: true, force: true });
     fail('local production gate temporary directory is not short and private');
@@ -89,7 +90,7 @@ function createPrivateLocalGateTempDirectory(prefix) {
     const current = lstatSync(path);
     if (!current.isDirectory() || current.isSymbolicLink()
       || current.dev !== identity.dev || current.ino !== identity.ino
-      || current.uid !== identity.uid || (current.mode & 0o777) !== 0o700
+      || current.uid !== identity.uid || (current.mode & 0o7777) !== 0o700
       || realpathSync(path) !== path) {
       fail('local production gate temporary directory identity changed');
     }
@@ -108,6 +109,109 @@ function createPrivateLocalGateTempDirectory(prefix) {
 
 export function createPrivateLocalGateTempRoot() {
   return createPrivateLocalGateTempDirectory('alg-');
+}
+
+function captureDarwinUserTempDirectory() {
+  if (process.platform !== 'darwin' || typeof process.getuid !== 'function') {
+    fail('local production gate custody is supported only on macOS');
+  }
+  const result = spawnSync('/usr/bin/getconf', ['DARWIN_USER_TEMP_DIR'], {
+    env: {
+      PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
+      HOME: homedir(),
+      LANG: 'C',
+      LC_ALL: 'C',
+    },
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const reported = result.stdout?.trim().replace(/\/$/u, '');
+  if (result.error || result.status !== 0 || !reported || !isAbsolute(reported)
+    || reported.includes('\0') || reported.includes('\n')) {
+    fail(`could not resolve DARWIN_USER_TEMP_DIR: ${(result.stderr || result.error?.message || '').trim()}`);
+  }
+  const path = realpathSync(reported);
+  const identities = [];
+  for (let cursor = path; ; cursor = dirname(cursor)) {
+    const identity = lstatSync(cursor);
+    if (realpathSync(cursor) !== cursor || !identity.isDirectory() || identity.isSymbolicLink()
+      || ![0, process.getuid()].includes(identity.uid) || (identity.mode & 0o022) !== 0) {
+      fail('DARWIN_USER_TEMP_DIR must have canonical, owned, non-writable custody ancestors');
+    }
+    identities.push(Object.freeze({
+      path: cursor, dev: identity.dev, ino: identity.ino, uid: identity.uid,
+      mode: identity.mode & 0o7777,
+    }));
+    if (cursor === sep) break;
+  }
+  const parent = identities[0];
+  if (parent.uid !== process.getuid() || parent.mode !== 0o700) {
+    fail('DARWIN_USER_TEMP_DIR must be a current-user-owned mode 0700 directory');
+  }
+  const assertUnchanged = () => {
+    for (const expected of identities) {
+      if (!existsSync(expected.path)) fail('DARWIN_USER_TEMP_DIR custody ancestor disappeared');
+      const current = lstatSync(expected.path);
+      if (!current.isDirectory() || current.isSymbolicLink()
+        || current.dev !== expected.dev || current.ino !== expected.ino
+        || current.uid !== expected.uid || (current.mode & 0o7777) !== expected.mode
+        || realpathSync(expected.path) !== expected.path) {
+        fail('DARWIN_USER_TEMP_DIR custody ancestor identity changed');
+      }
+    }
+  };
+  return Object.freeze({ path, assertUnchanged });
+}
+
+export function createPrivateLocalGateCustodyRoot() {
+  const parent = captureDarwinUserTempDirectory();
+  parent.assertUnchanged();
+  const path = mkdtempSync(join(parent.path, 'agc-'));
+  const identity = lstatSync(path);
+  if (realpathSync(path) !== path || dirname(path) !== parent.path
+    || !/^agc-[A-Za-z0-9]{6}$/u.test(basename(path))
+    || !identity.isDirectory() || identity.isSymbolicLink()
+    || identity.uid !== process.getuid() || (identity.mode & 0o7777) !== 0o700
+    || Buffer.byteLength(path, 'utf8') > LOCAL_GATE_CUSTODY_ROOT_MAX_BYTES) {
+    rmSync(path, { recursive: true, force: true });
+    fail('local production gate custody root is not canonical and private');
+  }
+  let owned = true;
+  const assertUnchanged = () => {
+    parent.assertUnchanged();
+    if (!owned || !existsSync(path)) fail('local production gate custody root disappeared');
+    const current = lstatSync(path);
+    if (!current.isDirectory() || current.isSymbolicLink()
+      || current.dev !== identity.dev || current.ino !== identity.ino
+      || current.uid !== identity.uid || (current.mode & 0o7777) !== 0o700
+      || realpathSync(path) !== path) {
+      fail('local production gate custody root identity changed');
+    }
+  };
+  return Object.freeze({
+    path,
+    assertUnchanged,
+    cleanup: () => {
+      if (!owned) return;
+      assertUnchanged();
+      rmSync(path, { recursive: true, force: true });
+      owned = false;
+    },
+  });
+}
+
+function assertDisjointRoots(...roots) {
+  for (const [index, left] of roots.entries()) {
+    for (const right of roots.slice(index + 1)) {
+      const fromLeft = relative(left, right);
+      const fromRight = relative(right, left);
+      if (fromLeft === ''
+        || (!fromLeft.startsWith(`..${sep}`) && fromLeft !== '..' && !isAbsolute(fromLeft))
+        || (!fromRight.startsWith(`..${sep}`) && fromRight !== '..' && !isAbsolute(fromRight))) {
+        fail('local production gate private roots must be pairwise disjoint');
+      }
+    }
+  }
 }
 
 function directorySha256(root) {
@@ -654,8 +758,9 @@ function sandboxLiteral(value) {
   return JSON.stringify(value);
 }
 
-export function writeSandboxProfiles({ verificationRoot, tempRoot, profileRoot }) {
+export function writeSandboxProfiles({ verificationRoot, tempRoot, custodyRoot, profileRoot }) {
   const privateRoot = realpathSync(tempRoot);
+  const privateCustodyRoot = realpathSync(custodyRoot);
   const immutableProfileRoot = realpathSync(profileRoot);
   const gitCommonDir = realpathSync(git(verificationRoot, [
     'rev-parse', '--path-format=absolute', '--git-common-dir',
@@ -671,12 +776,12 @@ export function writeSandboxProfiles({ verificationRoot, tempRoot, profileRoot }
   ];
   const writablePaths = [
     join(privateRoot, 'tmp'),
-    join(privateRoot, 'home'),
     join(privateRoot, 'cargo-home'),
     join(privateRoot, 'cargo-target'),
     join(privateRoot, 'npm-cache'),
     join(privateRoot, 'npm-prefix'),
     join(privateRoot, 'pack-smoke'),
+    privateCustodyRoot,
     join(realpathSync(verificationRoot), 'node_modules'),
     join(realpathSync(verificationRoot), 'src', 'raycast', 'node_modules'),
     join(realpathSync(verificationRoot), 'dist'),
@@ -786,13 +891,16 @@ function writeReceiptExclusive(repoRoot, output, receipt) {
   return Object.freeze({ bytes, sha256: sha256(bytes), identity });
 }
 
-export function createIsolatedGateEnvironment({ repoRoot, tempRoot, tools }) {
+export function createIsolatedGateEnvironment({ repoRoot, tempRoot, custodyRoot, tools }) {
   const privateTemp = join(tempRoot, 'tmp');
-  const operationalHome = join(tempRoot, 'home');
+  const operationalHome = join(custodyRoot, 'home');
+  const testHomeParent = join(custodyRoot, 'vitest-homes');
   const cargoHome = join(tempRoot, 'cargo-home');
   const cargoTarget = join(tempRoot, 'cargo-target');
   const npmCache = join(tempRoot, 'npm-cache');
-  for (const path of [privateTemp, operationalHome, cargoHome, cargoTarget, npmCache]) {
+  for (const path of [
+    privateTemp, operationalHome, testHomeParent, cargoHome, cargoTarget, npmCache,
+  ]) {
     mkdirSync(path, { recursive: true, mode: 0o700 });
   }
   const npmrcPaths = {
@@ -828,6 +936,7 @@ export function createIsolatedGateEnvironment({ repoRoot, tempRoot, tools }) {
     NO_COLOR: '1',
     FORCE_COLOR: '0',
     ASHLR_HOME: join(operationalHome, '.ashlr'),
+    ASHLR_VITEST_HOME_PARENT: testHomeParent,
     ASHLR_REPRODUCIBLE_PACKAGE: '1',
     ASHLR_RUN_NATIVE_LAUNCHD_TEST: '0',
     AUDIT_TIMEOUT_BIN: join(repoRoot, 'scripts', 'run-bounded-command.mjs'),
@@ -861,6 +970,7 @@ export async function runLocalProductionGate({ repoRoot, options }) {
   const tempDirectory = createPrivateLocalGateTempRoot();
   const tempRoot = tempDirectory.path;
   const verificationRoot = join(tempRoot, 'source');
+  let custodyRoot = null;
   let profileRoot = null;
   let tools = null;
   let worktreeAdded = false;
@@ -882,7 +992,9 @@ export async function runLocalProductionGate({ repoRoot, options }) {
   const startedAt = new Date().toISOString();
   const results = [];
   try {
+    custodyRoot = createPrivateLocalGateCustodyRoot();
     profileRoot = createPrivateLocalGateTempDirectory('agp-');
+    assertDisjointRoots(tempRoot, custodyRoot.path, profileRoot.path);
     tools = resolveToolchain(controllingRepo);
     git(controllingRepo, [
       '-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '--detach', verificationRoot,
@@ -916,7 +1028,9 @@ export async function runLocalProductionGate({ repoRoot, options }) {
       !== contract.receiptSchemaVersion) {
       fail('release policy receipt schema does not match the local production contract');
     }
-    const env = createIsolatedGateEnvironment({ repoRoot: verificationRoot, tempRoot, tools });
+    const env = createIsolatedGateEnvironment({
+      repoRoot: verificationRoot, tempRoot, custodyRoot: custodyRoot.path, tools,
+    });
     const npmVersion = sync(
       tools.paths.node, [tools.paths.npmCli, '--version'], verificationRoot, env,
     );
@@ -935,7 +1049,7 @@ export async function runLocalProductionGate({ repoRoot, options }) {
       fail('cargo-audit must be exactly 0.22.2');
     }
     const sandboxProfiles = writeSandboxProfiles({
-      verificationRoot, tempRoot, profileRoot: profileRoot.path,
+      verificationRoot, tempRoot, custodyRoot: custodyRoot.path, profileRoot: profileRoot.path,
     });
     context = {
       repoRoot: verificationRoot,
@@ -950,6 +1064,7 @@ export async function runLocalProductionGate({ repoRoot, options }) {
     for (const gate of contract.gates) {
       if (interruptedSignal) fail(`interrupted by ${interruptedSignal}`);
       tempDirectory.assertUnchanged();
+      custodyRoot.assertUnchanged();
       profileRoot.assertUnchanged();
       const sanitizedHost = gate.confinement === LOCAL_PRODUCTION_GATE_CONFINEMENT.sanitizedHost;
       if (sanitizedHost) {
@@ -961,6 +1076,7 @@ export async function runLocalProductionGate({ repoRoot, options }) {
       }
       results.push(await runGate(gate, context));
       tempDirectory.assertUnchanged();
+      custodyRoot.assertUnchanged();
       profileRoot.assertUnchanged();
       if (sanitizedHost) {
         const afterTest = ensureCleanExactSource(verificationRoot, options.expectedSha);
@@ -975,6 +1091,7 @@ export async function runLocalProductionGate({ repoRoot, options }) {
     if (interruptedSignal) fail(`interrupted by ${interruptedSignal}`);
 
     tempDirectory.assertUnchanged();
+    custodyRoot.assertUnchanged();
     profileRoot.assertUnchanged();
     const verificationAfter = ensureCleanExactSource(verificationRoot, options.expectedSha);
     if (verificationAfter.tree !== source.tree) fail('source tree changed during verification');
@@ -999,6 +1116,7 @@ export async function runLocalProductionGate({ repoRoot, options }) {
     }
 
     tempDirectory.assertUnchanged();
+    custodyRoot.assertUnchanged();
     git(controllingRepo, ['worktree', 'remove', '--force', verificationRoot]);
     worktreeAdded = false;
     const sourceAfter = ensureCleanExactSource(controllingRepo, options.expectedSha);
@@ -1097,6 +1215,7 @@ export async function runLocalProductionGate({ repoRoot, options }) {
       });
     }
     await cleanup(() => tempDirectory.cleanup());
+    if (custodyRoot) await cleanup(() => custodyRoot.cleanup());
     if (profileRoot) await cleanup(() => profileRoot.cleanup());
   }
   if (cleanupErrors.length > 0) {
