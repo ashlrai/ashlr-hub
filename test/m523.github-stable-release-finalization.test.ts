@@ -39,10 +39,11 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const workflowText = readFileSync(
   join(root, '.github/workflows/finalize-github-release.yml'),
   'utf8',
-);
-const releasing = readFileSync(join(root, 'docs/RELEASING.md'), 'utf8');
-const contract = readFileSync(join(root, 'docs/contracts/CONTRACT-M523.md'), 'utf8');
-const changelog = readFileSync(join(root, 'CHANGELOG.md'), 'utf8');
+).replace(/\r\n?/gu, '\n');
+const releasing = readFileSync(join(root, 'docs/RELEASING.md'), 'utf8').replace(/\r\n?/gu, '\n');
+const contract = readFileSync(join(root, 'docs/contracts/CONTRACT-M523.md'), 'utf8')
+  .replace(/\r\n?/gu, '\n');
+const changelog = readFileSync(join(root, 'CHANGELOG.md'), 'utf8').replace(/\r\n?/gu, '\n');
 const workflow = parse(workflowText) as Workflow;
 const verifyJob = workflow.jobs?.verify ?? {};
 const finalizationJob = workflow.jobs?.finalize ?? {};
