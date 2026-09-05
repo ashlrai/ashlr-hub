@@ -69,7 +69,9 @@ describe('daemon activity — observational private state', () => {
     });
     // A confined reader may be unable to invoke /bin/ps for the process start
     // reference. Unknown is the intentional fail-closed ownership state.
-    expect(['alive', 'unknown']).toContain(read.ownerState);
+    expect(read.ownerState).toBe(
+      read.activity?.processStartRef === null ? 'unknown' : 'alive',
+    );
     expect(read.activity).toMatchObject({
       schemaVersion: 1,
       authority: 'none',

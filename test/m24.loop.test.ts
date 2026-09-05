@@ -789,7 +789,9 @@ describe('M24 runDaemon --once — exactly one tick', () => {
     });
     // macOS sandbox-exec can deny /bin/ps from observing its parent. The
     // journal must stay truthful in that case instead of claiming liveness.
-    expect(['alive', 'unknown']).toContain(activity.ownerState);
+    expect(activity.ownerState).toBe(
+      activity.activity?.processStartRef === null ? 'unknown' : 'alive',
+    );
     const signal = (mockRunSwarm.mock.calls[0]?.[2] as { signal?: AbortSignal }).signal;
     expect(signal).toBeInstanceOf(AbortSignal);
     expect(signal?.aborted).toBe(false);
