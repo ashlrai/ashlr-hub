@@ -16,7 +16,7 @@ describe('M478 root verification contract', () => {
       mergeProfileCommandCount: 6,
       requiredMergeProfileCommandCount: 6,
       mergeGradeExplicit: true,
-      authorityFileCount: 9,
+      authorityFileCount: 22,
     });
     expect(profile.verifyContract?.errors).toEqual([]);
     expect(profile.verifyCommands.map((command) => ({
@@ -86,6 +86,19 @@ describe('M478 root verification contract', () => {
       'scripts/test-ci.mjs',
       'scripts/copy-assets.mjs',
       'scripts/build-identity.mjs',
+      'scripts/run-bounded-command.mjs',
+      'scripts/run-local-production-gate.mjs',
+      'scripts/run-local-pack-smoke.mjs',
+      'scripts/verify-local-production-gate-receipt.mjs',
+      'scripts/verify-release-policy.mjs',
+      'scripts/npm-audit-with-osv-fallback.sh',
+      'src/raycast/package.json',
+      'src/raycast/package-lock.json',
+      'desktop/src-tauri/Cargo.toml',
+      'desktop/src-tauri/Cargo.lock',
+      'desktop/src-tauri/build.rs',
+      'desktop/src-tauri/tauri.conf.json',
+      'docs/contracts/CONTRACT-M571.md',
     ]);
   });
 });

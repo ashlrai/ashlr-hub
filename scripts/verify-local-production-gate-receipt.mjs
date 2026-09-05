@@ -1,0 +1,317 @@
+#!/usr/bin/env node
+
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { TextDecoder } from 'node:util';
+
+const MAX_RECEIPT_BYTES = 256 * 1024;
+const SHA256_RE = /^[0-9a-f]{64}$/u;
+const REVISION_RE = /^[0-9a-f]{40}$/u;
+const SEMVER_RE = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u;
+const INTEGRITY_RE = /^sha512-[A-Za-z0-9+/]{86}==$/u;
+const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
+
+export const LOCAL_PRODUCTION_GATE_RECEIPT_SCHEMA_VERSION = 1;
+export const LOCAL_PRODUCTION_GATE_AUTHORITY = Object.freeze({
+  activate: false,
+  dispatch: false,
+  install: false,
+  promote: false,
+  providerEffects: false,
+  publish: false,
+});
+export const LOCAL_PRODUCTION_GATE_COMMANDS = Object.freeze([
+  ['typecheck', ['npm', 'run', 'typecheck'], '.', 300_000],
+  ['lint', ['npm', 'run', 'lint'], '.', 300_000],
+  ['build', ['npm', 'run', 'build'], '.', 600_000],
+  ['test-ci-1-of-3', ['npm', 'run', 'test:ci', '--', '--shard=1/3'], '.', 1_200_000],
+  ['test-ci-2-of-3', ['npm', 'run', 'test:ci', '--', '--shard=2/3'], '.', 1_200_000],
+  ['test-ci-3-of-3', ['npm', 'run', 'test:ci', '--', '--shard=3/3'], '.', 1_200_000],
+  ['test-web', ['npm', 'run', 'test:web'], '.', 600_000],
+  ['audit-root-full', ['bash', 'scripts/npm-audit-with-osv-fallback.sh', 'root full graph', 'package-lock.json'], '.', 300_000],
+  ['audit-root-production', ['bash', 'scripts/npm-audit-with-osv-fallback.sh', 'root production graph', 'package-lock.json', '--omit=dev'], '.', 300_000],
+  ['audit-raycast-full', ['bash', '../../scripts/npm-audit-with-osv-fallback.sh', 'Raycast full graph', 'package-lock.json'], 'src/raycast', 300_000],
+  ['audit-raycast-production', ['bash', '../../scripts/npm-audit-with-osv-fallback.sh', 'Raycast production graph', 'package-lock.json', '--omit=dev'], 'src/raycast', 300_000],
+  ['pack-smoke', ['node', 'scripts/run-local-pack-smoke.mjs', '--repo', '{repo}', '--work-dir', '{temp}/pack-smoke', '--output', '{temp}/pack-evidence.json'], '.', 600_000],
+  ['native-fmt', ['cargo', 'fmt', '--check'], 'desktop/src-tauri', 300_000],
+  ['native-check', ['cargo', 'check', '--locked', '--all-targets'], 'desktop/src-tauri', 1_200_000],
+  ['native-clippy', ['cargo', 'clippy', '--locked', '--all-targets', '--', '-D', 'warnings'], 'desktop/src-tauri', 1_200_000],
+  ['native-test', ['cargo', 'test', '--locked'], 'desktop/src-tauri', 1_200_000],
+  ['native-audit', ['cargo-audit', 'audit', '--file', 'Cargo.lock', '--ignore', 'RUSTSEC-2024-0429'], 'desktop/src-tauri', 600_000],
+]);
+export const LOCAL_PRODUCTION_GATE_IDS = Object.freeze(
+  LOCAL_PRODUCTION_GATE_COMMANDS.map(([id]) => id),
+);
+
+function fail(message) {
+  throw new Error(`local production gate receipt: ${message}`);
+}
+
+function exactRecord(value, keys, label) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    fail(`${label} must be a plain object`);
+  }
+  const ownKeys = Reflect.ownKeys(value);
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (Object.getPrototypeOf(value) !== Object.prototype
+    || ownKeys.some((key) => typeof key !== 'string')) {
+    fail(`${label} must be a plain string-keyed object`);
+  }
+  const actual = ownKeys.toSorted();
+  const expected = [...keys].toSorted();
+  if (actual.length !== expected.length
+    || actual.some((key, index) => key !== expected[index])) {
+    fail(`${label} keys do not match the closed schema`);
+  }
+  for (const key of actual) {
+    const descriptor = descriptors[key];
+    if (!descriptor || descriptor.enumerable !== true || !Object.hasOwn(descriptor, 'value')) {
+      fail(`${label}.${key} must be an enumerable data property`);
+    }
+  }
+  return value;
+}
+
+function exactString(value, pattern, label, maxBytes = 512) {
+  if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > maxBytes || !pattern.test(value)) {
+    fail(`${label} is invalid`);
+  }
+  return value;
+}
+
+function exactFalseAuthority(value, label = 'authority') {
+  const authority = exactRecord(value, Object.keys(LOCAL_PRODUCTION_GATE_AUTHORITY), label);
+  if (Object.entries(LOCAL_PRODUCTION_GATE_AUTHORITY)
+    .some(([key, expected]) => authority[key] !== expected)) {
+    fail(`${label} must keep every effect false`);
+  }
+  return authority;
+}
+
+export function canonicalizeLocalProductionGateReceipt(value) {
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') {
+    return JSON.stringify(value);
+  }
+  if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value)) fail('canonical JSON numbers must be safe integers');
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    const keys = Reflect.ownKeys(value);
+    const expected = [...Array(value.length).keys()].map(String).concat('length');
+    if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
+      fail('canonical JSON arrays must be dense and undecorated');
+    }
+    return `[${value.map((entry) => canonicalizeLocalProductionGateReceipt(entry)).join(',')}]`;
+  }
+  if (value !== null && typeof value === 'object') {
+    const keys = Reflect.ownKeys(value);
+    if (Object.getPrototypeOf(value) !== Object.prototype
+      || keys.some((key) => typeof key !== 'string')) {
+      fail('canonical JSON objects must be plain and string-keyed');
+    }
+    return `{${keys.toSorted().map((key) => {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || descriptor.enumerable !== true || !Object.hasOwn(descriptor, 'value')) {
+        fail('canonical JSON accepts enumerable data properties only');
+      }
+      return `${JSON.stringify(key)}:${canonicalizeLocalProductionGateReceipt(descriptor.value)}`;
+    }).join(',')}}`;
+  }
+  fail('canonical JSON contains an unsupported value');
+}
+
+function validateIso(value, label) {
+  exactString(value, ISO_RE, label, 24);
+  if (new Date(value).toISOString() !== value) fail(`${label} is not a canonical instant`);
+}
+
+export function validateLocalProductionGateReceipt(value) {
+  const receipt = exactRecord(value, [
+    'schemaVersion', 'kind', 'assurance', 'source', 'toolchain', 'bindings',
+    'execution', 'gates', 'authority', 'verdict',
+  ], 'receipt');
+  if (receipt.schemaVersion !== LOCAL_PRODUCTION_GATE_RECEIPT_SCHEMA_VERSION
+    || receipt.kind !== 'ashlr-local-production-gate-receipt-v1'
+    || receipt.assurance !== 'local-source-verification-only'
+    || receipt.verdict !== 'passed') {
+    fail('receipt identity or verdict is invalid');
+  }
+
+  const source = exactRecord(receipt.source, ['revision', 'tree', 'cleanBefore', 'cleanAfter'], 'source');
+  exactString(source.revision, REVISION_RE, 'source.revision', 40);
+  exactString(source.tree, REVISION_RE, 'source.tree', 40);
+  if (source.cleanBefore !== true || source.cleanAfter !== true) fail('source must be clean before and after');
+
+  const toolchain = exactRecord(receipt.toolchain, [
+    'nodeVersion', 'npmVersion', 'rustcVersion', 'cargoVersion', 'cargoAuditVersion',
+  ], 'toolchain');
+  exactString(toolchain.nodeVersion, SEMVER_RE, 'toolchain.nodeVersion', 32);
+  exactString(toolchain.npmVersion, SEMVER_RE, 'toolchain.npmVersion', 32);
+  for (const key of ['rustcVersion', 'cargoVersion', 'cargoAuditVersion']) {
+    exactString(toolchain[key], /^[^\r\n]{1,160}$/u, `toolchain.${key}`, 160);
+  }
+  if (toolchain.cargoAuditVersion !== 'cargo-audit 0.22.2') {
+    fail('toolchain.cargoAuditVersion must be cargo-audit 0.22.2');
+  }
+  if (Number(toolchain.nodeVersion.split('.')[0]) < 24
+    || Number(toolchain.npmVersion.split('.')[0]) < 11) {
+    fail('toolchain must use Node 24+ and npm 11+');
+  }
+
+  const bindings = exactRecord(receipt.bindings, ['policy', 'contract', 'package'], 'bindings');
+  const policy = exactRecord(bindings.policy, ['policyId', 'version', 'sha256'], 'bindings.policy');
+  exactString(policy.policyId, /^ashlr-release-successor-v1:(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u, 'bindings.policy.policyId');
+  exactString(policy.version, SEMVER_RE, 'bindings.policy.version', 32);
+  exactString(policy.sha256, SHA256_RE, 'bindings.policy.sha256', 64);
+  if (policy.policyId !== `ashlr-release-successor-v1:${policy.version}`) fail('policy id/version drift');
+  const contract = exactRecord(bindings.contract, ['path', 'sha256'], 'bindings.contract');
+  if (contract.path !== 'ashlr.verify.json') fail('contract path must be ashlr.verify.json');
+  exactString(contract.sha256, SHA256_RE, 'bindings.contract.sha256', 64);
+  const pkg = exactRecord(bindings.package, [
+    'name', 'version', 'tarballName', 'sha256', 'integrity',
+  ], 'bindings.package');
+  if (pkg.name !== '@ashlr/hub') fail('package name must be @ashlr/hub');
+  exactString(pkg.version, SEMVER_RE, 'bindings.package.version', 32);
+  if (pkg.version !== policy.version || pkg.tarballName !== `ashlr-hub-${pkg.version}.tgz`) {
+    fail('package identity must match the policy version');
+  }
+  exactString(pkg.sha256, SHA256_RE, 'bindings.package.sha256', 64);
+  exactString(pkg.integrity, INTEGRITY_RE, 'bindings.package.integrity', 95);
+
+  const execution = exactRecord(receipt.execution, [
+    'startedAt', 'finishedAt', 'hostPlatform', 'networkUse', 'externalMutations',
+    'operationalAshlrHome', 'disposableSidecar',
+  ], 'execution');
+  validateIso(execution.startedAt, 'execution.startedAt');
+  validateIso(execution.finishedAt, 'execution.finishedAt');
+  if (Date.parse(execution.finishedAt) < Date.parse(execution.startedAt)
+    || execution.hostPlatform !== 'darwin'
+    || execution.networkUse !== 'dependency-and-advisory-reads-only'
+    || execution.externalMutations !== false
+    || execution.operationalAshlrHome !== 'redirected-to-disposable-root'
+    || execution.disposableSidecar !== 'created-exclusive-and-removed-before-receipt') {
+    fail('execution boundary is invalid');
+  }
+
+  if (!Array.isArray(receipt.gates) || receipt.gates.length !== LOCAL_PRODUCTION_GATE_IDS.length) {
+    fail('gates must contain the complete ordered local gate');
+  }
+  const arrayKeys = Reflect.ownKeys(receipt.gates);
+  const expectedArrayKeys = [...Array(receipt.gates.length).keys()].map(String).concat('length');
+  if (arrayKeys.length !== expectedArrayKeys.length
+    || arrayKeys.some((key, index) => key !== expectedArrayKeys[index])) {
+    fail('gates must be a dense array without extra properties');
+  }
+  for (const [index, gateValue] of receipt.gates.entries()) {
+    const label = `gates[${index}]`;
+    const gate = exactRecord(gateValue, [
+      'id', 'commandSha256', 'startedAt', 'finishedAt', 'durationMs', 'exitCode',
+      'stdoutSha256', 'stderrSha256',
+    ], label);
+    if (gate.id !== LOCAL_PRODUCTION_GATE_IDS[index]) fail(`${label}.id is out of order`);
+    for (const key of ['commandSha256', 'stdoutSha256', 'stderrSha256']) {
+      exactString(gate[key], SHA256_RE, `${label}.${key}`, 64);
+    }
+    const [, expectedCmd, expectedCwd] = LOCAL_PRODUCTION_GATE_COMMANDS[index];
+    const expectedCommandSha256 = createHash('sha256')
+      .update(Buffer.from(JSON.stringify({ argv: expectedCmd, cwd: expectedCwd }), 'utf8'))
+      .digest('hex');
+    if (gate.commandSha256 !== expectedCommandSha256) {
+      fail(`${label}.commandSha256 does not bind the closed v1 command`);
+    }
+    validateIso(gate.startedAt, `${label}.startedAt`);
+    validateIso(gate.finishedAt, `${label}.finishedAt`);
+    if (!Number.isSafeInteger(gate.durationMs) || gate.durationMs < 0
+      || gate.exitCode !== 0 || Date.parse(gate.finishedAt) < Date.parse(gate.startedAt)) {
+      fail(`${label} did not record one successful bounded execution`);
+    }
+  }
+  exactFalseAuthority(receipt.authority);
+  return receipt;
+}
+
+export function parseLocalProductionGateReceiptBytes(bytes) {
+  if (!Buffer.isBuffer(bytes) || bytes.length < 2 || bytes.length > MAX_RECEIPT_BYTES) {
+    fail(`receipt bytes must contain 2-${MAX_RECEIPT_BYTES} bytes`);
+  }
+  let source;
+  try {
+    source = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    fail('receipt bytes must be valid UTF-8');
+  }
+  let receipt;
+  try {
+    receipt = JSON.parse(source);
+  } catch {
+    fail('receipt bytes must contain one JSON document');
+  }
+  validateLocalProductionGateReceipt(receipt);
+  const canonicalBytes = Buffer.from(`${canonicalizeLocalProductionGateReceipt(receipt)}\n`, 'utf8');
+  if (!bytes.equals(canonicalBytes)) fail('receipt must be canonical JSON followed by one LF');
+  return Object.freeze({
+    receipt: Object.freeze(receipt),
+    sha256: createHash('sha256').update(canonicalBytes).digest('hex'),
+  });
+}
+
+function parseCli(argv) {
+  if (argv.length < 1 || argv.length % 2 === 0) {
+    fail('usage: verify-local-production-gate-receipt.mjs <receipt> [--expect-<binding> <value> ...]');
+  }
+  const options = { path: resolve(argv[0]), expected: {} };
+  const flags = new Map([
+    ['--expect-revision', 'revision'],
+    ['--expect-tree', 'tree'],
+    ['--expect-policy-sha256', 'policySha256'],
+    ['--expect-contract-sha256', 'contractSha256'],
+    ['--expect-tarball-integrity', 'integrity'],
+    ['--expect-receipt-sha256', 'receiptSha256'],
+  ]);
+  for (let index = 1; index < argv.length; index += 2) {
+    const key = flags.get(argv[index]);
+    if (!key || options.expected[key] !== undefined || argv[index + 1] === undefined) {
+      fail(`invalid or duplicate option ${argv[index] ?? '<missing>'}`);
+    }
+    options.expected[key] = argv[index + 1];
+  }
+  return options;
+}
+
+export function verifyExpectedReceiptBindings(parsed, expected) {
+  const actual = {
+    revision: parsed.receipt.source.revision,
+    tree: parsed.receipt.source.tree,
+    policySha256: parsed.receipt.bindings.policy.sha256,
+    contractSha256: parsed.receipt.bindings.contract.sha256,
+    integrity: parsed.receipt.bindings.package.integrity,
+    receiptSha256: parsed.sha256,
+  };
+  for (const [key, expectedValue] of Object.entries(expected)) {
+    if (actual[key] !== expectedValue) fail(`${key} does not match the caller pin`);
+  }
+  return parsed;
+}
+
+const invoked = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : '';
+if (import.meta.url === invoked) {
+  try {
+    const options = parseCli(process.argv.slice(2));
+    const parsed = parseLocalProductionGateReceiptBytes(readFileSync(options.path));
+    verifyExpectedReceiptBindings(parsed, options.expected);
+    process.stdout.write(`${JSON.stringify({
+      ok: true,
+      receiptSha256: parsed.sha256,
+      revision: parsed.receipt.source.revision,
+      tree: parsed.receipt.source.tree,
+      packageIntegrity: parsed.receipt.bindings.package.integrity,
+      authority: parsed.receipt.authority,
+    })}\n`);
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.exitCode = 1;
+  }
+}
