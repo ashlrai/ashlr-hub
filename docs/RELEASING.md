@@ -338,6 +338,36 @@ promotion changes public package discovery only; installing or activating a
 runtime, enabling a resident service, configuring providers or application
 credentials, and authorizing spend remain separate gates.
 
+### GitHub stable-release finalization after npm promotion
+
+After npm `latest` and `candidate` both resolve to the accepted 3.3.2 package,
+GitHub's prerelease can be aligned with the production channel through the
+separate `.github/workflows/finalize-github-release.yml` lane. Do not repurpose
+the observation-only `promote.yml`: it has no mutation authority by design.
+
+Before dispatch, a repository administrator must create the dedicated
+`github-stable-release-finalization` environment with protected branches only,
+no custom branch policies, exactly one required user reviewer
+`masonwyatt23`, self-review permitted, administrator bypass disabled, and no
+secrets. The workflow verifies the reviewer, branch, and bypass policy after
+approval and contains no environment-secret references. An administrator must
+separately confirm the environment's empty secret inventory before dispatch.
+
+Dispatch from current protected `master` with release run ID `33932333902`,
+promotion-admission run ID `33933861238`, the exact 3.3.2 SRI recorded in the
+release receipt, and explicit finalization confirmation. The package, tag, and
+provenance remain bound to exact release source
+`2971c9f767c934e12fd056bf8c6dca5164ffe7d2`. The lane verifies npm SLSA
+provenance and every fixed release invariant, then performs exactly one GitHub
+Release PATCH and postverifies that v3.3.2 is GitHub latest without changing its
+tag, notes, assets, or npm state. Preserve the uploaded receipt and artifact
+digests as the post-effect acceptance record.
+
+The exact authority, evidence, incident, and inverse-PATCH rollback policy is
+defined in [`contracts/CONTRACT-M523.md`](contracts/CONTRACT-M523.md). A GitHub
+rollback does not roll back npm; registry rollback remains a separately
+approved, fresh-2FA mutation.
+
 ## Historical failure recovery record — never republish an immutable npm version
 
 The 3.3.0 publication and GitHub prerelease are already complete. Preserve this
