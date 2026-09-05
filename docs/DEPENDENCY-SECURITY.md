@@ -1,10 +1,12 @@
 # Dependency security policy
 
-Ashlr Hub checks the root and Raycast npm lockfiles plus
-`desktop/src-tauri/Cargo.lock` on every pull request, relevant `master` push,
-weekly schedule, and manual audit run. The workflow has read-only repository
-authority. Every action is pinned to a full commit, and the RustSec scanner is
-an exact release archive whose SHA-256 digest is verified before execution.
+Ashlr Hub's hosted dependency-audit workflow is disabled while GitHub Actions
+capacity is unavailable. Its YAML remains a dormant, read-only reference for
+the root and Raycast npm lockfiles plus `desktop/src-tauri/Cargo.lock`; it does
+not currently run on pull requests, `master`, schedules, or manual dispatch.
+The active release path is local and must reproduce every required lane before
+an exact-source receipt is accepted. The dormant workflow pins every action to
+a full commit and verifies the SHA-256 of its exact RustSec scanner archive.
 The npm lockfiles must first reproduce through strict `npm ci`. The primary
 scanner remains pinned npm, with full and production audits for both graphs.
 Only a recognized transport failure after three bounded attempts may invoke an
@@ -16,6 +18,15 @@ from the runner's private temporary directory, so repository-controlled
 records its provider result in the job summary.
 
 ## Dependabot cooldown
+
+GitHub-hosted Dependabot update jobs are intentionally paused while CI and
+dependency maintenance run through the local engineering fleet. Every configured
+ecosystem remains explicit in `.github/dependabot.yml`, but each
+`open-pull-requests-limit` is `0`. Dependabot alerts and secret-scanning push
+protection remain enabled; automated Dependabot security-update pull requests
+are disabled in repository settings. Re-enabling hosted updates requires an
+explicit capacity decision, restoration of bounded pull-request limits, and a
+reviewed local acceptance pass.
 
 Routine npm and Cargo version updates wait 3 days for patch releases, 7 days
 for minor releases, 30 days for major releases, and 5 days when a SemVer class
