@@ -204,7 +204,7 @@ describe('M479 npm release workflow supply-chain admission', () => {
       FAILED_CANDIDATE_VERSION: '3.3.1',
       FAILED_CANDIDATE_TAG_SHA: 'f2c9353db35fbf12889bddafd8acc2b7ca5ae67c',
       FAILED_CANDIDATE_RELEASE_RUN_ID: '32396250683',
-      REQUIRED_ROLLBACK_REVISION: 'abd49a5049759e417d99089b88c628fd2364f79c',
+      REQUIRED_ROLLBACK_REVISION: 'd6c1a5ec3626f715018a8ffb929906ac0f52f5c9',
     });
     expect(workflowText).toContain('npm publish "$TARBALL"');
     expect(workflowText).toContain('--tag "$RELEASE_DIST_TAG"');
