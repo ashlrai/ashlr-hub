@@ -8,6 +8,8 @@ import { spawnSync } from 'node:child_process';
 const here = dirname(fileURLToPath(import.meta.url));
 const wrapper = resolve(here, '..', 'scripts', 'test-ci.mjs');
 const roots: string[] = [];
+const IDLE_TIMEOUT_FIXTURE_MS = 1_000;
+const HARD_TIMEOUT_FIXTURE_MS = 4_000;
 
 afterEach(() => {
   for (const root of roots.splice(0)) {
@@ -108,12 +110,14 @@ describe('test-ci watchdog', () => {
 
   it('reports silence as an idle timeout without claiming a leaked handle', () => {
     const result = runFixture('setTimeout(() => {}, 2_000);', {
-      idleMs: 80,
-      hardMs: 1_000,
+      idleMs: IDLE_TIMEOUT_FIXTURE_MS,
+      hardMs: HARD_TIMEOUT_FIXTURE_MS,
     });
 
     expect(result.status).toBe(124);
-    expect(result.stderr).toContain('idle-timeout after 80ms without output');
+    expect(result.stderr).toContain(
+      `idle-timeout after ${IDLE_TIMEOUT_FIXTURE_MS}ms without output`,
+    );
     expect(result.stderr).toContain('not proven leaked handles');
     expect(result.stderr).not.toContain('hard-runtime-cap reached');
   });
@@ -122,11 +126,13 @@ describe('test-ci watchdog', () => {
     const result = runFixture(
       `console.log('Test Files  1 passed (1)');
        setTimeout(() => {}, 2_000);`,
-      { idleMs: 80, hardMs: 1_000 },
+      { idleMs: IDLE_TIMEOUT_FIXTURE_MS, hardMs: HARD_TIMEOUT_FIXTURE_MS },
     );
 
     expect(result.status).toBe(124);
-    expect(result.stderr).toContain('idle-timeout after 80ms without output');
+    expect(result.stderr).toContain(
+      `idle-timeout after ${IDLE_TIMEOUT_FIXTURE_MS}ms without output`,
+    );
     expect(result.stderr).toContain('final summary; a leaked handle is plausible');
   });
 
