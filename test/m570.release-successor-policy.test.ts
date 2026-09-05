@@ -19,7 +19,7 @@ const fixturePath = join(testDir, 'fixtures', 'release-policy', 'valid-v1.json')
 const schemaPath = join(repoRoot, '.github', 'release-policies', 'schema-v1.json');
 const verifierPath = join(repoRoot, 'scripts', 'verify-release-policy.mjs');
 const contract = readFileSync(join(repoRoot, 'docs', 'contracts', 'CONTRACT-M570.md'), 'utf8');
-const expectedDigest = '6494f4a45c008ec1846bb4a6c0846d08cc73f95e9f2e40ca08e105d75bc49652';
+const expectedDigest = '4fc13649b76f0f697683a1fb231bb2ca37f26e2ba15699f9e513155b278ff979';
 const scratch: string[] = [];
 
 type JsonRecord = Record<string, unknown>;
@@ -60,6 +60,7 @@ describe('M570 release successor policy v1', () => {
         version: '9.8.7',
         releaseTag: 'v9.8.7',
         tarballName: 'ashlr-hub-9.8.7.tgz',
+        integrity: expect.stringMatching(/^sha512-/u),
       },
       release: {
         distTag: 'candidate',
@@ -67,6 +68,11 @@ describe('M570 release successor policy v1', () => {
         rollback: { version: '9.7.6' },
       },
       authority: { kind: 'evidence-only', ...RELEASE_SUCCESSOR_POLICY_AUTHORITY },
+      localVerification: {
+        kind: 'local-production-gate-v1',
+        contractPath: 'ashlr.verify.json',
+        requiredReceiptSchemaVersion: 1,
+      },
     });
     expect(Object.isFrozen(result)).toBe(true);
     expect(Object.isFrozen(result.policy)).toBe(true);
@@ -85,7 +91,7 @@ describe('M570 release successor policy v1', () => {
       package: { additionalProperties: false },
       release: { additionalProperties: false },
       registry: { additionalProperties: false },
-      workflows: { additionalProperties: false },
+      localVerification: { additionalProperties: false },
       runtime: { additionalProperties: false },
       authority: { additionalProperties: false },
     });
@@ -142,8 +148,18 @@ describe('M570 release successor policy v1', () => {
       const failed = nested(policy, 'registry').failedCandidates as JsonRecord[];
       failed[0].npmVersionAbsent = false;
     }],
-    ['workflow filename', (policy: JsonRecord) => {
-      nested(policy, 'workflows').releasePath = '.github/workflows/release-next.yml';
+    ['candidate integrity', (policy: JsonRecord) => {
+      nested(policy, 'package').integrity = 'sha512-invalid';
+    }],
+    ['local verification contract', (policy: JsonRecord) => {
+      nested(policy, 'localVerification').contractPath = '.github/workflows/release.yml';
+    }],
+    ['local verification contract digest', (policy: JsonRecord) => {
+      nested(policy, 'localVerification').contractSha256 = '7'.repeat(63);
+    }],
+    ['failed candidate receipt digest', (policy: JsonRecord) => {
+      const failed = nested(policy, 'registry').failedCandidates as JsonRecord[];
+      failed[0].attemptReceiptSha256 = '6'.repeat(63);
     }],
     ['old node toolchain', (policy: JsonRecord) => {
       nested(policy, 'toolchain').nodeVersion = '22.15.0';
@@ -210,6 +226,7 @@ describe('M570 release successor policy v1', () => {
     expect(source).not.toMatch(/node:(?:child_process|http|https|net|tls)|\bfetch\s*\(|\bspawn(?:Sync)?\s*\(/u);
     expect(source).not.toMatch(/writeFile|appendFile|rename|unlink|mkdir|chmod|chown|launchctl|npm publish/u);
     expect(source).not.toMatch(/process\.env|NPM_TOKEN|NODE_AUTH_TOKEN|ASHLR_HOME/u);
+    expect(source).not.toMatch(/\.github\/workflows|releaseEnvironment|promotionEnvironment/u);
     expect(source).not.toContain('.github/release-policies/v3.4.0.json');
   });
 });

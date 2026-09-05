@@ -17,8 +17,8 @@ import { fileURLToPath } from 'node:url';
 const MAX_POLICY_BYTES = 64 * 1024;
 const VERSION_RE = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u;
 const REVISION_RE = /^[0-9a-f]{40}$/u;
+const SHA256_RE = /^[0-9a-f]{64}$/u;
 const INTEGRITY_RE = /^sha512-[A-Za-z0-9+/]{86}==$/u;
-const RUN_ID_RE = /^[1-9][0-9]{5,19}$/u;
 
 export const RELEASE_SUCCESSOR_POLICY_SCHEMA_VERSION = 1;
 export const RELEASE_SUCCESSOR_POLICY_AUTHORITY = Object.freeze({
@@ -36,7 +36,7 @@ const TOP_LEVEL_KEYS = [
   'package',
   'release',
   'registry',
-  'workflows',
+  'localVerification',
   'toolchain',
   'runtime',
   'authority',
@@ -196,7 +196,7 @@ export function validateReleaseSuccessorPolicy(value) {
 
   const packagePolicy = exactRecord(
     policy.package,
-    ['name', 'version', 'releaseTag', 'tarballName'],
+    ['name', 'version', 'releaseTag', 'tarballName', 'integrity'],
     'package',
   );
   if (packagePolicy.name !== '@ashlr/hub') fail('package.name must be @ashlr/hub');
@@ -210,6 +210,7 @@ export function validateReleaseSuccessorPolicy(value) {
   if (packagePolicy.tarballName !== `ashlr-hub-${candidateVersion}.tgz`) {
     fail('package.tarballName must match package.version');
   }
+  integrity(packagePolicy.integrity, 'package.integrity');
 
   const release = exactRecord(
     policy.release,
@@ -275,7 +276,7 @@ export function validateReleaseSuccessorPolicy(value) {
       'version',
       'releaseTag',
       'tagRevision',
-      'releaseRunId',
+      'attemptReceiptSha256',
       'npmVersionAbsent',
       'githubReleaseAbsent',
     ], label);
@@ -284,7 +285,12 @@ export function validateReleaseSuccessorPolicy(value) {
       fail(`${label}.releaseTag must match its version`);
     }
     revision(failed.tagRevision, `${label}.tagRevision`);
-    exactString(failed.releaseRunId, `${label}.releaseRunId`, RUN_ID_RE, 20);
+    exactString(
+      failed.attemptReceiptSha256,
+      `${label}.attemptReceiptSha256`,
+      SHA256_RE,
+      64,
+    );
     if (failed.npmVersionAbsent !== true || failed.githubReleaseAbsent !== true) {
       fail(`${label} absence declarations must be true`);
     }
@@ -310,23 +316,27 @@ export function validateReleaseSuccessorPolicy(value) {
     historyRevisions.add(failed.tagRevision);
   }
 
-  const workflows = exactRecord(policy.workflows, [
-    'repository',
-    'releasePath',
-    'promotionPath',
-    'releaseEnvironment',
-    'promotionEnvironment',
-  ], 'workflows');
-  const expectedWorkflows = {
-    repository: 'ashlrai/ashlr-hub',
-    releasePath: '.github/workflows/release.yml',
-    promotionPath: '.github/workflows/promote.yml',
-    releaseEnvironment: 'npm-release',
-    promotionEnvironment: 'npm-production-promotion',
-  };
-  for (const [key, expected] of Object.entries(expectedWorkflows)) {
-    if (workflows[key] !== expected) fail(`workflows.${key} must be ${expected}`);
+  const localVerification = exactRecord(policy.localVerification, [
+    'kind',
+    'contractPath',
+    'contractSha256',
+    'requiredReceiptSchemaVersion',
+  ], 'localVerification');
+  if (localVerification.kind !== 'local-production-gate-v1') {
+    fail('localVerification.kind must be local-production-gate-v1');
   }
+  if (localVerification.contractPath !== 'ashlr.verify.json') {
+    fail('localVerification.contractPath must be ashlr.verify.json');
+  }
+  if (localVerification.requiredReceiptSchemaVersion !== 1) {
+    fail('localVerification.requiredReceiptSchemaVersion must be 1');
+  }
+  exactString(
+    localVerification.contractSha256,
+    'localVerification.contractSha256',
+    SHA256_RE,
+    64,
+  );
 
   const toolchain = exactRecord(policy.toolchain, ['nodeVersion', 'npmVersion'], 'toolchain');
   const nodeVersion = version(toolchain.nodeVersion, 'toolchain.nodeVersion');

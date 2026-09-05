@@ -1,8 +1,8 @@
 # CONTRACT-M570: Release successor policy evidence
 
 Status: schema-and-verifier complete, dormant, and authority-free. No production
-version policy exists in this milestone. Release and promotion workflows remain
-unchanged.
+version policy exists in this milestone. Hosted release workflows remain disabled;
+this contract binds a later successor only to local verification evidence.
 
 ## Purpose
 
@@ -15,7 +15,7 @@ untouched.
 The policy is protected-source evidence only. Validation does not publish,
 promote, tag, install, activate, dispatch, contact npm or GitHub, inspect
 credentials, or change provider effects. Those actions retain their existing,
-separate human and workflow gates.
+separate operator authorization gates.
 
 ## Closed policy
 
@@ -23,14 +23,15 @@ The schema lives at `.github/release-policies/schema-v1.json`. A policy is one
 canonical UTF-8 JSON object followed by exactly one LF and EOF, bounded to
 64 KiB. `scripts/verify-release-policy.mjs` requires:
 
-- the exact `@ashlr/hub` package, version-derived lightweight tag and tarball;
+- the exact `@ashlr/hub` package, version-derived lightweight tag, tarball, and
+  candidate sha512 integrity;
 - a candidate-only dist-tag and exact protected `master` first parent;
 - an older rollback with exact version, tag, revision, tree, and sha512 SRI;
 - npm `latest` and prior-candidate identities equal to that rollback;
 - ordered, disjoint quarantined and failed-version histories with exact tag,
-  integrity, run, and absence declarations;
-- the unchanged trusted-publisher repository, `release.yml` filename, release
-  environment, observation-only promotion workflow, and promotion environment;
+  integrity or local attempt-receipt digest, and absence declarations;
+- a local-production-gate v1 contract at `ashlr.verify.json`, its exact SHA-256,
+  and the required external receipt schema version;
 - pinned Node 24+ and npm 11+ toolchains;
 - runtime-manifest v3 for the candidate, only v2/v3 for rollback, and the M568
   version-general stopped-consumer protocol; and
@@ -63,15 +64,18 @@ and promotion gates at protected source
 not populate an M570 production policy or grant this milestone any effect
 authority. Only a later exact-state change may add a production successor policy.
 
-## Later workflow consumption
+## Later local receipt consumption
 
 A future tranche may derive a policy filename solely from a validated release
 tag and require tag, package, lockfile, policy, changelog, protected source,
-rollback, registry, and workflow identity to agree. It must retain the current
-two-parent release admission, candidate-only OIDC boundary, script-free
-artifact handoff, provenance verification, and observation-only promotion
-split. The final release first parent and accepted rollback are distinct
-bindings; the rollback need only be the separately accepted exact ancestor.
+rollback, registry, and local receipt to agree. The external canonical receipt
+must bind the tested source commit and tree, policy digest, verification-contract
+digest, and packed tarball integrity. Keeping that receipt external avoids a
+self-referential digest inside the source it attests. Publishing to npm and
+creating or promoting a GitHub release remain separately authorized operator
+mutations; validation never grants them. The final release first parent and
+accepted rollback are distinct bindings; the rollback need only be the
+separately accepted exact ancestor.
 
 M568 already makes candidate and rollback versions dynamic inside a signed
 authority-free permit. M570 does not turn that protocol into a consumer. A
