@@ -48,11 +48,12 @@ const upload = steps.find((step) =>
   step.name === 'Upload bounded no-npm-mutation-authority promotion receipt');
 
 const EXPECTED_VERSION = '3.3.2';
+const EXPECTED_DEVELOPMENT_VERSION = '3.4.0';
 const EXPECTED_PREVIOUS_CANDIDATE_VERSION = '3.3.0';
 const EXPECTED_FAILED_CANDIDATE_VERSION = '3.3.1';
 const EXPECTED_FAILED_CANDIDATE_TAG_SHA = 'f2c9353db35fbf12889bddafd8acc2b7ca5ae67c';
 const EXPECTED_FAILED_CANDIDATE_RELEASE_RUN_ID = '32396250683';
-const EXPECTED_ROLLBACK_REVISION = 'abd49a5049759e417d99089b88c628fd2364f79c';
+const EXPECTED_ROLLBACK_REVISION = 'd6c1a5ec3626f715018a8ffb929906ac0f52f5c9';
 const EXPECTED_QUARANTINED_INTEGRITY =
   'sha512-mYVuJZyoXeSnnqivoLzyZggNgpJoWM8glTI7CW0oBfQ0RCHx0xueTrLwLTZBg5W+E4zPOJNbckptYeb5YsdOHw==';
 const EXPECTED_QUARANTINED_TAG_SHA = 'd07f6a96eda664d865b9255f71c6f56e8cd9d7c7';
@@ -69,13 +70,12 @@ function identityViolations(
   const packageIdentity = JSON.parse(packageSource) as { name?: string; version?: string };
   const violations: string[] = [];
   if (packageIdentity.name !== '@ashlr/hub') violations.push('package name');
-  const versions = [
-    promotion.env?.PROMOTION_VERSION,
-    release.env?.RELEASE_VERSION,
-    packageIdentity.version,
-  ];
+  const versions = [promotion.env?.PROMOTION_VERSION, release.env?.RELEASE_VERSION];
   if (versions.some((version) => version !== EXPECTED_VERSION)) {
     violations.push('release version');
+  }
+  if (packageIdentity.version !== EXPECTED_DEVELOPMENT_VERSION) {
+    violations.push('development version');
   }
   if (promotion.env?.REQUIRED_CANDIDATE_TAG !== release.env?.RELEASE_DIST_TAG) {
     violations.push('candidate dist-tag');
@@ -244,13 +244,13 @@ function mutationAuthorityViolations(text: string): string[] {
 }
 
 describe('M522 — production-promotion admission has no npm mutation authority', () => {
-  it('binds the promotion, release workflow, and package to the exact 3.3.2 identity', () => {
+  it('binds the frozen release lane to 3.3.2 and the unreleased product line to 3.4.0', () => {
     expect(identityViolations(promotionText, releaseText, packageText)).toEqual([]);
     expect([
       workflow.env?.PROMOTION_VERSION,
       releaseWorkflow.env?.RELEASE_VERSION,
       packageMetadata.version,
-    ]).toEqual([EXPECTED_VERSION, EXPECTED_VERSION, EXPECTED_VERSION]);
+    ]).toEqual([EXPECTED_VERSION, EXPECTED_VERSION, EXPECTED_DEVELOPMENT_VERSION]);
     expect(packageMetadata.name).toBe('@ashlr/hub');
     expect(releaseWorkflow.env).toMatchObject({
       RELEASE_VERSION: EXPECTED_VERSION,
@@ -287,7 +287,7 @@ describe('M522 — production-promotion admission has no npm mutation authority'
       'package version',
       promotionText,
       releaseText,
-      JSON.stringify({ ...packageMetadata, version: '3.3.3' }),
+      JSON.stringify({ ...packageMetadata, version: '3.4.1' }),
     ],
     [
       'candidate dist-tag',
