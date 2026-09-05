@@ -50,11 +50,11 @@ Tauri v3 / GTK4 migration resolves to `glib >=0.20` and the documented Linux
 desktop quarantine exit review succeeds. The root Linux CLI, Bun sidecar, and
 web dashboard remain supported.
 
-RustSec reports 17 existing warning-class findings in the Tauri v2 dependency
-graph (unmaintained GTK3-era crates and other warning advisories). They are
-visible debt, not green health. The audit fails on every non-excepted
-vulnerability; warning-class findings remain reported while the desktop
-migration is quarantined and tracked separately.
+RustSec reports the existing warning-class findings in the Tauri v2 dependency
+graph (unmaintained GTK3-era crates and other warning advisories). Their count
+can change as the advisory database evolves; they are visible debt, not green
+health. The audit fails on every non-excepted vulnerability, while warning-class
+findings remain reported during the quarantined desktop migration.
 
 The gate's introduction also updates only `plist` 1.9.0 to 1.10.0 and its
 `quick-xml` child from 0.39.4 to 0.41.0. That removes
