@@ -116,6 +116,7 @@ function requiredEffectFragments(text: string): string[] {
     '"$GITHUB_EVENT_NAME" != "workflow_dispatch"',
     '"$GITHUB_REF_NAME" != "master"',
     '"$CONFIRM_STABLE_FINALIZATION" != "true"',
+    '"$PREFLIGHT_ARTIFACT_NAME" != "github-stable-finalization-preflight-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"',
     '"$observed_preflight_sha256" == "$EXPECTED_PREFLIGHT_RECEIPT_SHA256"',
     '.admission == "github-release-stable-finalization-preflight"',
     '.npm.provenanceVerified == true',

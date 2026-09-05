@@ -406,8 +406,7 @@ jobs:
                 "$ADMISSION_RUN_ID_INPUT" != "$REQUIRED_ADMISSION_RUN_ID" ||
                 "$CANDIDATE_INTEGRITY_INPUT" != "$REQUIRED_CANDIDATE_INTEGRITY" ||
                 ! "$EXPECTED_PREFLIGHT_RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ||
-                "$PREFLIGHT_ARTIFACT_NAME" !=
-                  "github-stable-finalization-preflight-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" ]]; then
+                "$PREFLIGHT_ARTIFACT_NAME" != "github-stable-finalization-preflight-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" ]]; then
             echo "The protected effect is not bound to the exact current-run preflight." >&2
             exit 1
           fi
