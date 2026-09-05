@@ -26,6 +26,34 @@ its immutable package version, or repeat its promotion effect. Their frozen
 workflow assertions remain valuable fail-closed evidence, but a future release
 requires a separately reviewed successor contract.
 
+## Local verification for a future successor
+
+Hosted GitHub workflows are currently disabled. A later M570 release policy is
+verified entirely on the local macOS host with the M571 gate; no production
+policy exists yet, and this local verification does not itself authorize or
+perform publication or promotion.
+
+The policy must bind the exact committed `ashlr.verify.json` digest and the
+expected tarball SRI. With exact Node 24+ and npm 11+ versions from that policy
+on `PATH`, run:
+
+```bash
+npm run verify:local-production -- \
+  --expected-sha "$(git rev-parse HEAD)" \
+  --policy .github/release-policies/vX.Y.Z.json \
+  --artifact /absolute/external/path/ashlr-hub-X.Y.Z.tgz \
+  --receipt /absolute/external/path/local-production-receipt.json
+```
+
+The runner verifies a clean exact commit in a fresh detached worktree, runs the
+complete contract with an allowlisted environment, preserves the exact verified
+tarball, keeps operational Ashlr state and services untouched, and writes a
+canonical authority-free receipt outside the repository. Verify that receipt
+and tarball with `scripts/verify-local-production-gate-receipt.mjs` and all six
+independent caller pins before separately considering any registry or GitHub
+mutation. See
+[`CONTRACT-M571.md`](contracts/CONTRACT-M571.md) for the exact boundary.
+
 ## Trusted-publisher configuration used for 3.3.2
 
 The 3.3.2 release used npm **trusted publishing**. Any future publishing

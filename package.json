@@ -76,6 +76,7 @@
     "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs && vite build --config vite.config.web.ts && node scripts/build-release-dependency-inventory.mjs && node scripts/build-identity.mjs",
     "build:binary": "node scripts/build-sea.mjs",
     "release:canary": "node scripts/run-signed-release-canary.mjs",
+    "verify:local-production": "node scripts/run-local-production-gate.mjs",
     "build:web": "vite build --config vite.config.web.ts",
     "dev": "tsx src/cli/index.ts",
     "dev:web": "vite --config vite.config.web.ts",
