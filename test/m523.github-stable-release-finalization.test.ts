@@ -229,6 +229,14 @@ describe('M523 — GitHub stable-release finalization', () => {
     ]) expect(run).toContain(fragment);
   });
 
+  it('builds the read-only preflight receipt only from assigned before-state digests', () => {
+    const run = verification?.run ?? '';
+    expect(run).toContain('--arg bodySha256 "$before_body_sha256"');
+    expect(run).toContain('--arg assetsSha256 "$before_assets_sha256"');
+    expect(run).not.toContain('$after_body_sha256');
+    expect(run).not.toContain('$after_assets_sha256');
+  });
+
   it('uses only pinned actions and binds download to the exact prior run', () => {
     expect([
       ...verificationSteps.flatMap((step) => step.uses ? [step.uses] : []),

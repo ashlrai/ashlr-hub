@@ -280,8 +280,8 @@ jobs:
             --arg admissionArtifactSha256 "$REQUIRED_ADMISSION_ARTIFACT_SHA256" \
             --arg admissionReceiptSha256 "$REQUIRED_ADMISSION_RECEIPT_SHA256" \
             --arg admissionRunId "$REQUIRED_ADMISSION_RUN_ID" \
-            --arg bodySha256 "$after_body_sha256" \
-            --arg assetsSha256 "$after_assets_sha256" \
+            --arg bodySha256 "$before_body_sha256" \
+            --arg assetsSha256 "$before_assets_sha256" \
             --arg candidateIntegrity "$REQUIRED_CANDIDATE_INTEGRITY" \
             --arg releaseRunId "$REQUIRED_RELEASE_RUN_ID" \
             --arg sourceSha "$RELEASE_SOURCE_SHA" \
