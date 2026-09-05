@@ -338,35 +338,42 @@ promotion changes public package discovery only; installing or activating a
 runtime, enabling a resident service, configuring providers or application
 credentials, and authorizing spend remain separate gates.
 
-### GitHub stable-release finalization after npm promotion
+### Completed GitHub stable-release finalization after npm promotion
 
-After npm `latest` and `candidate` both resolve to the accepted 3.3.2 package,
-GitHub's prerelease can be aligned with the production channel through the
-separate `.github/workflows/finalize-github-release.yml` lane. Do not repurpose
-the observation-only `promote.yml`: it has no mutation authority by design.
+After both npm dist-tags resolved to the accepted 3.3.2 package, PR #340 merged
+the one-shot stable-finalization lane to protected `master` at
+`1a7d44efe7a8383513fea4dbfa6746fdeb9fa93d`. Workflow run `33937472105`,
+attempt 1, then completed successfully from that exact commit. Do not rerun the
+completed finalization or repurpose the observation-only `promote.yml`: the
+latter has no mutation authority by design.
 
-Before dispatch, a repository administrator must create the dedicated
-`github-stable-release-finalization` environment with protected branches only,
-no custom branch policies, exactly one required user reviewer
-`masonwyatt23`, self-review permitted, administrator bypass disabled, and no
-secrets. The workflow verifies the reviewer, branch, and bypass policy after
-approval and contains no environment-secret references. An administrator must
-separately confirm the environment's empty secret inventory before dispatch.
+The dedicated `github-stable-release-finalization` environment, ID
+`21286317607`, was verified with protected branches only, no custom branch
+policies, exactly one required user reviewer (`masonwyatt23`), self-review
+permitted, administrator bypass disabled, and no secrets. The workflow verified
+the reviewer, branch, and bypass policy after approval and contained no
+environment-secret references.
 
-Dispatch from current protected `master` with release run ID `33932333902`,
-promotion-admission run ID `33933861238`, the exact 3.3.2 SRI recorded in the
-release receipt, and explicit finalization confirmation. The package, tag, and
-provenance remain bound to exact release source
-`2971c9f767c934e12fd056bf8c6dca5164ffe7d2`. The lane verifies npm SLSA
-provenance and every fixed release invariant, then performs exactly one GitHub
-Release PATCH and postverifies that v3.3.2 is GitHub latest without changing its
-tag, notes, assets, or npm state. Preserve the uploaded receipt and artifact
-digests as the post-effect acceptance record.
+The successful run consumed release run `33932333902`, promotion-admission run
+`33933861238`, the exact 3.3.2 SRI recorded above, and explicit finalization
+confirmation. It preserved the package, lightweight tag, npm provenance, release
+body, and empty asset set bound to release source
+`2971c9f767c934e12fd056bf8c6dca5164ffe7d2`, and performed exactly one GitHub
+Release PATCH. GitHub Release ID `383083121` is now stable and the GitHub latest
+release for `v3.3.2` (`draft: false`, `prerelease: false`). The final bounded
+artifact is ID `9960674976`, named
+`github-stable-release-finalization-33937472105-1`, with artifact digest
+`sha256:63c910fe2ab554493e2378e44edd9b9657531f7ff03497b8ec96a23b90d57285`;
+its post-effect receipt SHA-256 is
+`089add5ae05d3f439c258fdfe263279857a0fa60f3b51600f322d807d0550a17`.
 
-The exact authority, evidence, incident, and inverse-PATCH rollback policy is
-defined in [`contracts/CONTRACT-M523.md`](contracts/CONTRACT-M523.md). A GitHub
-rollback does not roll back npm; registry rollback remains a separately
-approved, fresh-2FA mutation.
+That receipt proves only the bounded GitHub Release mutation. It grants no npm,
+installation, runtime, service, provider, credential, or spend authority. The
+exact authority, evidence, incident, and inverse-PATCH rollback policy remains
+in [`contracts/CONTRACT-M523.md`](contracts/CONTRACT-M523.md) as controlled
+historical recovery guidance. Any inverse PATCH requires a newly reviewed
+incident decision and protected-environment approval; it is never automatic and
+does not roll back npm. Registry rollback remains a separate fresh-2FA mutation.
 
 ## Historical failure recovery record — never republish an immutable npm version
 
