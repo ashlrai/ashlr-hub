@@ -1,5 +1,8 @@
 version: 2
 
+# GitHub-hosted update jobs are intentionally disabled while repository
+# verification and dependency maintenance run through the local fleet. Restore
+# the prior bounded limits only after Actions capacity is explicitly available.
 updates:
   - package-ecosystem: npm
     directory: /
@@ -8,7 +11,7 @@ updates:
       day: monday
       time: "09:17"
       timezone: America/New_York
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
     cooldown:
       default-days: 5
       semver-major-days: 30
@@ -27,7 +30,7 @@ updates:
       day: monday
       time: "09:17"
       timezone: America/New_York
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
     cooldown:
       default-days: 5
       semver-major-days: 30
@@ -46,7 +49,7 @@ updates:
       day: monday
       time: "09:17"
       timezone: America/New_York
-    open-pull-requests-limit: 3
+    open-pull-requests-limit: 0
     cooldown:
       default-days: 5
       semver-major-days: 30

@@ -492,7 +492,7 @@ exit "\${TEST_OSV_RC:-0}"
     expect(workflow).not.toHaveProperty('on.pull_request_target');
   });
 
-  it('covers both npm manifests and desktop Cargo with bounded reviewed cooldowns', () => {
+  it('covers both npm manifests and desktop Cargo while hosted update jobs are disabled', () => {
     const cooldown = {
       'default-days': 5,
       'semver-major-days': 30,
@@ -507,7 +507,7 @@ exit "\${TEST_OSV_RC:-0}"
         time: '09:17',
         timezone: 'America/New_York',
       },
-      'open-pull-requests-limit': 5,
+      'open-pull-requests-limit': 0,
       cooldown,
       groups: {
         'production-dependencies': { 'dependency-type': 'production' },
@@ -529,7 +529,7 @@ exit "\${TEST_OSV_RC:-0}"
             time: '09:17',
             timezone: 'America/New_York',
           },
-          'open-pull-requests-limit': 3,
+          'open-pull-requests-limit': 0,
           cooldown,
         },
       ],
@@ -537,6 +537,10 @@ exit "\${TEST_OSV_RC:-0}"
     expect(dependabotText).not.toMatch(/password|token|secret|credential/i);
     expect(dependabotText).not.toMatch(/registries:|insecure-external-code-execution/i);
     expect(dependabotText).not.toMatch(/^\s+(?:ignore|exclude):/m);
+    expect(dependabotText).toContain('verification and dependency maintenance run through the local fleet');
+    expect(dependencySecurityPolicy).toContain(
+      'GitHub-hosted Dependabot update jobs are intentionally paused',
+    );
     expect(dependencySecurityPolicy).toContain(
       'GitHub applies `cooldown` only to version updates',
     );

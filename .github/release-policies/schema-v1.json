@@ -1,0 +1,240 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ashlr.ai/schemas/release-successor-policy-v1.json",
+  "title": "Ashlr Hub release successor policy v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "policyId",
+    "package",
+    "release",
+    "registry",
+    "localVerification",
+    "toolchain",
+    "runtime",
+    "authority"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "policyId": {
+      "type": "string",
+      "pattern": "^ashlr-release-successor-v1:[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "maxLength": 96
+    },
+    "package": { "$ref": "#/$defs/package" },
+    "release": { "$ref": "#/$defs/release" },
+    "registry": { "$ref": "#/$defs/registry" },
+    "localVerification": { "$ref": "#/$defs/localVerification" },
+    "toolchain": { "$ref": "#/$defs/toolchain" },
+    "runtime": { "$ref": "#/$defs/runtime" },
+    "authority": { "$ref": "#/$defs/authority" }
+  },
+  "$defs": {
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+      "maxLength": 32
+    },
+    "revision": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "integrity": {
+      "type": "string",
+      "pattern": "^sha512-[A-Za-z0-9+/]{86}==$",
+      "maxLength": 95
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "releaseTag", "revision", "integrity"],
+      "properties": {
+        "version": { "$ref": "#/$defs/version" },
+        "releaseTag": {
+          "type": "string",
+          "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$",
+          "maxLength": 33
+        },
+        "revision": { "$ref": "#/$defs/revision" },
+        "integrity": { "$ref": "#/$defs/integrity" }
+      }
+    },
+    "package": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "releaseTag", "tarballName", "integrity"],
+      "properties": {
+        "name": { "const": "@ashlr/hub" },
+        "version": { "$ref": "#/$defs/version" },
+        "releaseTag": {
+          "type": "string",
+          "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$",
+          "maxLength": 33
+        },
+        "tarballName": {
+          "type": "string",
+          "pattern": "^ashlr-hub-[0-9]+\\.[0-9]+\\.[0-9]+\\.tgz$",
+          "maxLength": 64
+        },
+        "integrity": { "$ref": "#/$defs/integrity" }
+      }
+    },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "distTag",
+        "requiredProtectedBranch",
+        "requiredFirstParentRevision",
+        "rollback"
+      ],
+      "properties": {
+        "distTag": { "const": "candidate" },
+        "requiredProtectedBranch": { "const": "master" },
+        "requiredFirstParentRevision": { "$ref": "#/$defs/revision" },
+        "rollback": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "releaseTag", "revision", "tree", "integrity"],
+          "properties": {
+            "version": { "$ref": "#/$defs/version" },
+            "releaseTag": {
+              "type": "string",
+              "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$",
+              "maxLength": 33
+            },
+            "revision": { "$ref": "#/$defs/revision" },
+            "tree": { "$ref": "#/$defs/revision" },
+            "integrity": { "$ref": "#/$defs/integrity" }
+          }
+        }
+      }
+    },
+    "failedCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "releaseTag",
+        "tagRevision",
+        "attemptReceiptSha256",
+        "npmVersionAbsent",
+        "githubReleaseAbsent"
+      ],
+      "properties": {
+        "version": { "$ref": "#/$defs/version" },
+        "releaseTag": {
+          "type": "string",
+          "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$",
+          "maxLength": 33
+        },
+        "tagRevision": { "$ref": "#/$defs/revision" },
+        "attemptReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "npmVersionAbsent": { "const": true },
+        "githubReleaseAbsent": { "const": true }
+      }
+    },
+    "registry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "url",
+        "baselineLatest",
+        "previousCandidate",
+        "quarantined",
+        "failedCandidates"
+      ],
+      "properties": {
+        "url": { "const": "https://registry.npmjs.org/" },
+        "baselineLatest": { "$ref": "#/$defs/artifact" },
+        "previousCandidate": { "$ref": "#/$defs/artifact" },
+        "quarantined": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/artifact" }
+        },
+        "failedCandidates": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/failedCandidate" }
+        }
+      }
+    },
+    "localVerification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "contractPath",
+        "contractSha256",
+        "requiredReceiptSchemaVersion"
+      ],
+      "properties": {
+        "kind": { "const": "local-production-gate-v1" },
+        "contractPath": { "const": "ashlr.verify.json" },
+        "contractSha256": { "$ref": "#/$defs/sha256" },
+        "requiredReceiptSchemaVersion": { "const": 1 }
+      }
+    },
+    "toolchain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nodeVersion", "npmVersion"],
+      "properties": {
+        "nodeVersion": { "$ref": "#/$defs/version" },
+        "npmVersion": { "$ref": "#/$defs/version" }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidateManifestSchemaVersion",
+        "rollbackManifestSchemaVersions",
+        "stoppedConsumerProtocol"
+      ],
+      "properties": {
+        "candidateManifestSchemaVersion": { "const": 3 },
+        "rollbackManifestSchemaVersions": {
+          "type": "array",
+          "prefixItems": [{ "const": 2 }, { "const": 3 }],
+          "items": false,
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "stoppedConsumerProtocol": {
+          "const": "runtime-activation-stopped-consumer-v2"
+        }
+      }
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "publish",
+        "promote",
+        "install",
+        "activate",
+        "dispatch",
+        "providerEffects"
+      ],
+      "properties": {
+        "kind": { "const": "evidence-only" },
+        "publish": { "const": false },
+        "promote": { "const": false },
+        "install": { "const": false },
+        "activate": { "const": false },
+        "dispatch": { "const": false },
+        "providerEffects": { "const": false }
+      }
+    }
+  }
+}
