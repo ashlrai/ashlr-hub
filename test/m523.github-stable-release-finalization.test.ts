@@ -214,8 +214,22 @@ describe('M523 — GitHub stable-release finalization', () => {
       REQUIRED_FINALIZATION_APPROVER: 'masonwyatt23',
       FINALIZATION_ENVIRONMENT: 'github-stable-release-finalization',
     });
-    expect(sha256(changelogBody('3.3.2'))).toBe(BODY_SHA256);
     expect(sha256('[]')).toBe(ASSETS_SHA256);
+  });
+
+  it('records the completed 3.3.2 distribution state without activation authority', () => {
+    const releaseNotes = changelogBody('3.3.2');
+    expect(changelog).toContain(
+      '## [3.3.2] — 2026-09-05 UTC — Safe successor after the failed immutable 3.3.1 release attempt',
+    );
+    expect(releaseNotes).toContain('`2971c9f767c934e12fd056bf8c6dca5164ffe7d2`');
+    expect(releaseNotes).toContain('`33932333902`');
+    expect(releaseNotes).toContain('`33933861238`');
+    expect(releaseNotes).toContain('npm `latest` and `candidate` both resolve to 3.3.2');
+    expect(releaseNotes).toContain('does not install or activate a runtime');
+    expect(releaseNotes).toContain('or authorize spend');
+    expect(releaseNotes).not.toContain('`latest` remains 3.0.1');
+    expect(workflow.env?.REQUIRED_RELEASE_BODY_SHA256).toBe(BODY_SHA256);
   });
 
   it('verifies the exact protected environment policy in executable code', () => {
