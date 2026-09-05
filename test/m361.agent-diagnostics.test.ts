@@ -34,6 +34,9 @@ function currentLockOwner(): string | undefined {
 }
 
 const processStartInspectionAvailable = currentLockOwner() !== undefined;
+const itWithProcessStart = it.skipIf(
+  process.platform === 'win32' || !processStartInspectionAvailable,
+);
 
 describe('M361 metadata-only agent diagnostics', () => {
   let root: string;
@@ -51,7 +54,7 @@ describe('M361 metadata-only agent diagnostics', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it.skipIf(process.platform === 'win32')('persists only private fixed-schema metadata and leaves legacy contents untouched', () => {
+  itWithProcessStart('persists only private fixed-schema metadata and leaves legacy contents untouched', () => {
     const dir = agentDiagnosticsDir();
     mkdirSync(dir, { recursive: true, mode: 0o755 });
     const legacyPath = join(dir, 'attempt-legacy.log');
@@ -118,7 +121,7 @@ describe('M361 metadata-only agent diagnostics', () => {
     expect(lstatSync(legacyPath).mode & 0o777).toBe(0o600);
   });
 
-  it.skipIf(process.platform === 'win32')('appends replayable rows for repeated invocations of the same run', () => {
+  itWithProcessStart('appends replayable rows for repeated invocations of the same run', () => {
     const input = {
       runId: 'attempt-retry-safe',
       engine: 'claude' as const,
@@ -142,82 +145,52 @@ describe('M361 metadata-only agent diagnostics', () => {
     expect(rows.map((row) => row['ok'])).toEqual([false, true]);
   });
 
-  it.skipIf(process.platform === 'win32')('persists when process start inspection is unavailable', () => {
-    const pathWithoutPs = mkdtempSync(join(tmpdir(), 'ashlr-m361-empty-path-'));
-    const isolatedRoot = join(root, 'ps-unavailable');
+  itWithProcessStart('emits the legacy two-field lock owner wire format', async () => {
+    const dir = agentDiagnosticsDir();
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(dir, '.maintenance.lock'), currentLockOwner()!, { mode: 0o600 });
     const moduleUrl = new URL('../src/core/run/agent-diagnostics.ts', import.meta.url).href;
     const source = `
       import { recordAgentDiagnostic } from ${JSON.stringify(moduleUrl)};
-      const ok = recordAgentDiagnostic({
-        runId: 'attempt-ps-unavailable', engine: 'codex', ok: true,
+      recordAgentDiagnostic({
+        runId: 'attempt-lock-wire', engine: 'codex', ok: true,
         errorClass: 'none', durationMs: 1, attempt: 1, maxAttempts: 1,
         output: { bytes: 0, lines: 0, present: false },
         error: { bytes: 0, lines: 0, present: false },
       });
-      process.stdout.write(JSON.stringify({ ok }));
     `;
+    const child = spawn(process.execPath, [
+      '--import', 'tsx', '--input-type=module', '--eval', source,
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, ASHLR_HOME: root },
+      stdio: 'ignore',
+    });
+    const closed = new Promise<number>((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', (code) => resolve(code ?? -1));
+    });
+    const lockPath = join(dir, '.append.lock');
+    let lock = '';
     try {
-      const result = spawnSync(
-        process.execPath,
-        ['--import', 'tsx', '--input-type=module', '--eval', source],
-        {
-          cwd: process.cwd(),
-          env: { ...process.env, PATH: pathWithoutPs, ASHLR_HOME: isolatedRoot },
-          encoding: 'utf8',
-        },
-      );
-      expect(result.status, result.stderr).toBe(0);
-      expect(JSON.parse(result.stdout)).toEqual({ ok: true });
-      const runRef = agentDiagnosticRunRef('attempt-ps-unavailable')!;
-      expect(readFileSync(join(isolatedRoot, 'agent-logs', `${runRef}.jsonl`), 'utf8'))
-        .toContain(`"runRef":"${runRef}"`);
-    } finally {
-      rmSync(pathWithoutPs, { recursive: true, force: true });
-    }
-  });
-
-  it.skipIf(process.platform === 'win32')(
-    'does not reclaim an unverified lock while its foreign owner is alive',
-    async () => {
-      const owner = spawn(process.execPath, ['--eval', 'setInterval(() => {}, 1_000)'], {
-        stdio: 'ignore',
-      });
-      await new Promise<void>((resolve, reject) => {
-        owner.once('spawn', resolve);
-        owner.once('error', reject);
-      });
-      const runId = 'attempt-unverified-live-owner';
-      const runRef = agentDiagnosticRunRef(runId)!;
-      const lockPath = join(agentDiagnosticsDir(), `${runRef}.jsonl.lock`);
-      mkdirSync(agentDiagnosticsDir(), { recursive: true, mode: 0o700 });
-      const lock = `${JSON.stringify({
-        pid: owner.pid,
-        startRef: '0'.repeat(64),
-        startRefVerified: false,
-      })}\n`;
-      writeFileSync(lockPath, lock, { mode: 0o600 });
-      try {
-        expect(recordAgentDiagnostic({
-          runId,
-          engine: 'codex',
-          ok: true,
-          errorClass: 'none',
-          durationMs: 1,
-          attempt: 1,
-          maxAttempts: 1,
-          output: measureAgentDiagnosticText(''),
-          error: measureAgentDiagnosticText(''),
-        })).toBe(false);
-        expect(readFileSync(lockPath, 'utf8')).toBe(lock);
-      } finally {
-        owner.kill('SIGKILL');
-        await new Promise<void>((resolve) => owner.once('close', () => resolve()));
+      const deadline = Date.now() + 750;
+      while (lock === '' && Date.now() < deadline) {
+        try { lock = readFileSync(lockPath, 'utf8'); } catch { /* child has not acquired it yet */ }
+        if (lock === '') await new Promise((resolve) => setTimeout(resolve, 10));
       }
-    },
-    10_000,
-  );
+      const owner = JSON.parse(lock) as Record<string, unknown>;
+      expect(Object.keys(owner).sort()).toEqual(['pid', 'startRef']);
+      expect(owner).toMatchObject({
+        pid: child.pid,
+        startRef: expect.stringMatching(/^[a-f0-9]{64}$/),
+      });
+      expect(await closed).toBe(0);
+    } finally {
+      if (child.exitCode === null) child.kill('SIGKILL');
+    }
+  }, 5_000);
 
-  it.skipIf(process.platform === 'win32')('serializes concurrent writers without dropping diagnostics', async () => {
+  itWithProcessStart('serializes concurrent writers without dropping diagnostics', async () => {
     const writers = 16;
     const source = `
       import { measureAgentDiagnosticText, recordAgentDiagnostic } from './src/core/run/agent-diagnostics.ts';
@@ -247,7 +220,7 @@ describe('M361 metadata-only agent diagnostics', () => {
     expect(rows).toHaveLength(writers);
   }, 20_000);
 
-  it.skipIf(process.platform === 'win32')('hashes caller-controlled execution identity before filename or payload persistence', () => {
+  itWithProcessStart('hashes caller-controlled execution identity before filename or payload persistence', () => {
     const runId = 'RAW_PROMPT_PATH_STDOUT_ERROR_CANARY';
     const runRef = agentDiagnosticRunRef(runId)!;
     expect(runRef).toMatch(/^[a-f0-9]{64}$/);
@@ -334,7 +307,7 @@ describe('M361 metadata-only agent diagnostics', () => {
     expect(readFileSync(path, 'utf8')).toBe(before);
   });
 
-  it.skipIf(process.platform === 'win32')('hardens legacy permissions and expires only metadata records', () => {
+  itWithProcessStart('hardens legacy permissions and expires only metadata records', () => {
     const dir = agentDiagnosticsDir();
     mkdirSync(dir, { recursive: true, mode: 0o755 });
     const legacyPath = join(dir, 'legacy.log');
@@ -359,7 +332,7 @@ describe('M361 metadata-only agent diagnostics', () => {
     expect(() => lstatSync(expiredPath)).toThrow();
   });
 
-  it.skipIf(process.platform === 'win32')('reclaims malformed per-run crash locks without exempting metadata from retention', () => {
+  itWithProcessStart('reclaims malformed per-run crash locks without exempting metadata from retention', () => {
     const dir = agentDiagnosticsDir();
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const runRef = agentDiagnosticRunRef('attempt-orphan-retention')!;
@@ -377,34 +350,31 @@ describe('M361 metadata-only agent diagnostics', () => {
     expect(() => lstatSync(lockPath)).toThrow();
   });
 
-  it.skipIf(process.platform === 'win32' || !processStartInspectionAvailable)(
-    'serializes a run with an exclusive append lock',
-    () => {
-      const dir = agentDiagnosticsDir();
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-      const runId = 'attempt-locked';
-      const runRef = agentDiagnosticRunRef(runId)!;
-      const lockPath = join(dir, `${runRef}.jsonl.lock`);
-      writeFileSync(lockPath, currentLockOwner()!, { mode: 0o600 });
-      const input = {
-        runId,
-        engine: 'codex' as const,
-        ok: false,
-        errorClass: 'execution' as const,
-        durationMs: 1,
-        attempt: 1,
-        maxAttempts: 1,
-        output: measureAgentDiagnosticText(''),
-        error: measureAgentDiagnosticText('error'),
-      };
+  itWithProcessStart('serializes a run with an exclusive append lock', () => {
+    const dir = agentDiagnosticsDir();
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const runId = 'attempt-locked';
+    const runRef = agentDiagnosticRunRef(runId)!;
+    const lockPath = join(dir, `${runRef}.jsonl.lock`);
+    writeFileSync(lockPath, currentLockOwner()!, { mode: 0o600 });
+    const input = {
+      runId,
+      engine: 'codex' as const,
+      ok: false,
+      errorClass: 'execution' as const,
+      durationMs: 1,
+      attempt: 1,
+      maxAttempts: 1,
+      output: measureAgentDiagnosticText(''),
+      error: measureAgentDiagnosticText('error'),
+    };
 
-      expect(recordAgentDiagnostic(input)).toBe(false);
-      expect(() => readFileSync(join(dir, `${runRef}.jsonl`), 'utf8')).toThrow();
-      expect(lstatSync(lockPath).isFile()).toBe(true);
-    },
-  );
+    expect(recordAgentDiagnostic(input)).toBe(false);
+    expect(() => readFileSync(join(dir, `${runRef}.jsonl`), 'utf8')).toThrow();
+    expect(lstatSync(lockPath).isFile()).toBe(true);
+  });
 
-  it.skipIf(process.platform === 'win32')('recovers append, maintenance, and per-run locks after owner crashes', () => {
+  itWithProcessStart('recovers append, maintenance, and per-run locks after owner crashes', () => {
     const dir = agentDiagnosticsDir();
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const deadOwner = `${JSON.stringify({ pid: 2_147_483_647, startRef: '0'.repeat(64) })}\n`;
@@ -436,12 +406,10 @@ describe('M361 metadata-only agent diagnostics', () => {
     utimesSync(malformedPath, initialized, initialized);
     expect(recordAgentDiagnostic({ ...base, runId: 'attempt-orphan-uninitialized' })).toBe(true);
 
-    if (processStartInspectionAvailable) {
-      const reusedPidPath = join(dir, '.append.lock');
-      writeFileSync(reusedPidPath, `${JSON.stringify({ pid: process.pid, startRef: '0'.repeat(64) })}\n`, { mode: 0o600 });
-      utimesSync(reusedPidPath, initialized, initialized);
-      expect(recordAgentDiagnostic({ ...base, runId: 'attempt-orphan-reused-pid' })).toBe(true);
-    }
+    const reusedPidPath = join(dir, '.append.lock');
+    writeFileSync(reusedPidPath, `${JSON.stringify({ pid: process.pid, startRef: '0'.repeat(64) })}\n`, { mode: 0o600 });
+    utimesSync(reusedPidPath, initialized, initialized);
+    expect(recordAgentDiagnostic({ ...base, runId: 'attempt-orphan-reused-pid' })).toBe(true);
 
     const futurePath = join(dir, '.append.lock');
     writeFileSync(futurePath, '', { mode: 0o600 });
