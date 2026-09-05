@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
 import {
   mkdirSync,
   mkdtempSync,
@@ -453,10 +454,17 @@ describe('proposal dedup authority', () => {
         `const result = createProposal(${JSON.stringify(input)});`,
         "process.stdout.write(JSON.stringify({ id: result.id, status: result.status, reason: result.decisionReason }));",
       ].join('\n');
-      const tsx = resolve('node_modules/.bin/tsx');
+      const tsxImportUrl = pathToFileURL(createRequire(import.meta.url).resolve('tsx')).href;
       const runChild = (): Promise<{ id: string; status: string; reason?: string }> =>
         new Promise((resolveChild, rejectChild) => {
-          const child = spawn(tsx, ['-e', script], {
+          // Invoke tsx as a Node loader instead of its CLI. The CLI creates an
+          // IPC socket below TMPDIR, which exceeds macOS's Unix-socket path
+          // limit under the local production gate's nested private temp root.
+          const child = spawn(process.execPath, [
+            '--import', tsxImportUrl,
+            '--input-type=module',
+            '--eval', script,
+          ], {
             env: {
               ...process.env,
               HOME: home,

@@ -56,17 +56,42 @@ function processStartRef(pid: number): string | undefined {
   }
 }
 
-let cachedCurrentProcessStartRef: string | undefined;
+interface CurrentProcessStartIdentity {
+  ref: string;
+  verified: boolean;
+}
+
+let cachedCurrentProcessStartIdentity: CurrentProcessStartIdentity | undefined;
 let currentProcessStartRefResolved = false;
 const observedProcessStarts = new Map<number, { ref: string | undefined; expiresAt: number }>();
 const unknownLockObservations = new Map<string, { dev: number; ino: number; seenAt: number }>();
 
-function currentProcessStartRef(): string | undefined {
+function currentProcessStartIdentity(): CurrentProcessStartIdentity {
   if (!currentProcessStartRefResolved) {
-    cachedCurrentProcessStartRef = process.platform === 'win32' ? undefined : processStartRef(process.pid);
+    const verifiedRef = process.platform === 'win32' ? undefined : processStartRef(process.pid);
+    cachedCurrentProcessStartIdentity = verifiedRef
+      ? { ref: verifiedRef, verified: true }
+      : {
+          // macOS sandbox-exec cannot launch the setuid /bin/ps binary, even
+          // under an allow-default profile. Keep diagnostics available with a
+          // process-local identity while marking it unverified so another
+          // process never mistakes a live owner for a reused PID.
+          ref: createHash('sha256')
+            .update(JSON.stringify([
+              'ashlr:agent-diagnostic-lock:self-start:v1',
+              process.pid,
+              performance.timeOrigin,
+            ]))
+            .digest('hex'),
+          verified: false,
+        };
     currentProcessStartRefResolved = true;
   }
-  return cachedCurrentProcessStartRef;
+  return cachedCurrentProcessStartIdentity!;
+}
+
+function currentProcessStartRef(): string {
+  return currentProcessStartIdentity().ref;
 }
 
 function observedProcessStartRef(pid: number): string | undefined {
@@ -314,25 +339,40 @@ function lockOwnerState(
     ) return 'unknown';
     const buffer = Buffer.alloc(opened.size);
     if (readSync(fd, buffer, 0, buffer.length, 0) !== buffer.length) return 'unknown';
-    const parsed = JSON.parse(buffer.toString('utf8')) as { pid?: unknown; startRef?: unknown };
+    const parsed = JSON.parse(buffer.toString('utf8')) as {
+      pid?: unknown;
+      startRef?: unknown;
+      startRefVerified?: unknown;
+    };
     if (!Number.isSafeInteger(parsed.pid) || Number(parsed.pid) < 1) return 'unknown';
     const recordedStartRef = typeof parsed.startRef === 'string' && /^[a-f0-9]{64}$/.test(parsed.startRef)
       ? parsed.startRef
       : undefined;
     if (!recordedStartRef) return 'unknown';
+    if (parsed.startRefVerified !== undefined && typeof parsed.startRefVerified !== 'boolean') {
+      return 'unknown';
+    }
+    const recordedStartRefVerified = parsed.startRefVerified !== false;
     try {
       const pid = Number(parsed.pid);
       process.kill(pid, 0);
-      const observedStartRef = observedProcessStartRef(pid);
-      if (observedStartRef && observedStartRef !== recordedStartRef) {
-        const confirmedStartRef = processStartRef(pid);
-        if (confirmedStartRef && confirmedStartRef !== recordedStartRef) return 'dead';
-        if (confirmedStartRef === recordedStartRef) {
-          observedProcessStarts.set(pid, {
-            ref: confirmedStartRef,
-            expiresAt: performance.now() + LOCK_INITIALIZATION_GRACE_MS,
-          });
+      if (recordedStartRefVerified) {
+        const observedStartRef = observedProcessStartRef(pid);
+        if (observedStartRef && observedStartRef !== recordedStartRef) {
+          const confirmedStartRef = processStartRef(pid);
+          if (confirmedStartRef && confirmedStartRef !== recordedStartRef) return 'dead';
+          if (confirmedStartRef === recordedStartRef) {
+            observedProcessStarts.set(pid, {
+              ref: confirmedStartRef,
+              expiresAt: performance.now() + LOCK_INITIALIZATION_GRACE_MS,
+            });
+          }
         }
+      } else if (pid === process.pid && currentProcessStartRef() !== recordedStartRef) {
+        // An unverified identity cannot be compared across processes. For our
+        // own PID, however, the process-local fallback is exact and still
+        // detects a stale lock left by a prior PID incarnation.
+        return 'dead';
       }
       return 'alive';
     } catch (error) {
@@ -364,14 +404,11 @@ function acquireLock(lockPath: string, waitMs = 0): number | undefined {
         return undefined;
       }
       fchmodSync(fd, PRIVATE_FILE_MODE);
-      const startRef = currentProcessStartRef();
-      if (!startRef) {
-        releaseLock(lockPath, fd);
-        return undefined;
-      }
+      const startIdentity = currentProcessStartIdentity();
       const owner = `${JSON.stringify({
         pid: process.pid,
-        startRef,
+        startRef: startIdentity.ref,
+        startRefVerified: startIdentity.verified,
       })}\n`;
       if (writeSync(fd, owner, undefined, 'utf8') !== Buffer.byteLength(owner, 'utf8')) {
         releaseLock(lockPath, fd);
