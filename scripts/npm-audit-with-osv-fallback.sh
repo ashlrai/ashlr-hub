@@ -18,7 +18,11 @@ if [[ ! -f "${lockfile}" ]]; then
   exit 66
 fi
 
-npm_bin=${AUDIT_NPM_BIN:-npm}
+npm_bin=${AUDIT_NODE_BIN:-${AUDIT_NPM_BIN:-npm}}
+npm_prefix=()
+if [[ -n "${AUDIT_NPM_CLI:-}" ]]; then
+  npm_prefix+=("${AUDIT_NPM_CLI}")
+fi
 osv_bin=${AUDIT_OSV_BIN:-osv-scanner}
 timeout_bin=${AUDIT_TIMEOUT_BIN:-timeout}
 audit_tmp=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/ashlr-npm-audit.XXXXXX")
@@ -74,7 +78,7 @@ for attempt in 1 2 3; do
   stdout_file="${audit_tmp}/npm-${attempt}.json"
   stderr_file="${audit_tmp}/npm-${attempt}.stderr"
   if "${timeout_bin}" --signal=TERM --kill-after=5s 40s \
-    "${npm_bin}" "${npm_args[@]}" > "${stdout_file}" 2> "${stderr_file}"; then
+    "${npm_bin}" "${npm_prefix[@]}" "${npm_args[@]}" > "${stdout_file}" 2> "${stderr_file}"; then
     audit_rc=0
   else
     audit_rc=$?

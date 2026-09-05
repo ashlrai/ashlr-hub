@@ -88,6 +88,18 @@
     "receiptSchemaVersion": 1,
     "gates": [
       {
+        "id": "install-root",
+        "cmd": ["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"],
+        "cwd": ".",
+        "timeoutMs": 600000
+      },
+      {
+        "id": "install-raycast",
+        "cmd": ["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"],
+        "cwd": "src/raycast",
+        "timeoutMs": 600000
+      },
+      {
         "id": "typecheck",
         "cmd": ["npm", "run", "typecheck"],
         "cwd": ".",
@@ -160,6 +172,12 @@
         "timeoutMs": 600000
       },
       {
+        "id": "native-fetch",
+        "cmd": ["cargo", "fetch", "--locked"],
+        "cwd": "desktop/src-tauri",
+        "timeoutMs": 1200000
+      },
+      {
         "id": "native-fmt",
         "cmd": ["cargo", "fmt", "--check"],
         "cwd": "desktop/src-tauri",
@@ -167,19 +185,19 @@
       },
       {
         "id": "native-check",
-        "cmd": ["cargo", "check", "--locked", "--all-targets"],
+        "cmd": ["cargo", "check", "--locked", "--offline", "--all-targets"],
         "cwd": "desktop/src-tauri",
         "timeoutMs": 1200000
       },
       {
         "id": "native-clippy",
-        "cmd": ["cargo", "clippy", "--locked", "--all-targets", "--", "-D", "warnings"],
+        "cmd": ["cargo", "clippy", "--locked", "--offline", "--all-targets", "--", "-D", "warnings"],
         "cwd": "desktop/src-tauri",
         "timeoutMs": 1200000
       },
       {
         "id": "native-test",
-        "cmd": ["cargo", "test", "--locked"],
+        "cmd": ["cargo", "test", "--locked", "--offline"],
         "cwd": "desktop/src-tauri",
         "timeoutMs": 1200000
       },

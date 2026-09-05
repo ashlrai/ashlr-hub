@@ -2,7 +2,7 @@
 
 import { createHash } from 'node:crypto';
 import {
-  chmodSync, mkdirSync, openSync, closeSync, readFileSync, writeFileSync,
+  chmodSync, mkdirSync, openSync, closeSync, readFileSync, statSync, writeFileSync,
 } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -24,6 +24,12 @@ function run(command, args, options = {}) {
   if (result.stderr) process.stderr.write(result.stderr);
   if (result.error) fail(`${command} could not start: ${result.error.message}`);
   if (result.status !== 0) fail(`${command} exited ${result.status ?? 'without a status'}`);
+}
+
+function runNpm(args, options) {
+  const npmCli = process.env.ASHLR_NPM_CLI;
+  if (npmCli) return run(process.execPath, [npmCli, ...args], options);
+  return run('npm', args, options);
 }
 
 function parseCli(argv) {
@@ -63,13 +69,17 @@ export function runLocalPackSmoke({ repo, workDir, output }) {
   const installDir = join(workDir, 'install');
   mkdirSync(packDir, { recursive: true, mode: 0o700 });
   mkdirSync(installDir, { recursive: true, mode: 0o700 });
-  run('npm', ['pack', '--silent', '--ignore-scripts', '--pack-destination', packDir], { cwd: repo });
+  runNpm(['pack', '--silent', '--ignore-scripts', '--pack-destination', packDir], { cwd: repo });
   const tarballPath = join(packDir, tarballName);
+  const tarball = statSync(tarballPath);
+  if (!tarball.isFile() || tarball.size < 1 || tarball.size > 64 * 1024 * 1024) {
+    fail('packed tarball must be a regular file between 1 byte and 64 MiB');
+  }
   const bytes = readFileSync(tarballPath);
   if (bytes.length < 1) fail('packed tarball is empty');
 
-  run('npm', ['init', '-y'], { cwd: installDir });
-  run('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund', tarballPath], { cwd: installDir });
+  runNpm(['init', '-y'], { cwd: installDir });
+  runNpm(['install', '--offline', '--ignore-scripts', '--no-audit', '--no-fund', tarballPath], { cwd: installDir });
   const bin = process.platform === 'win32'
     ? join(installDir, 'node_modules', '.bin', 'ashlr.cmd')
     : join(installDir, 'node_modules', '.bin', 'ashlr');

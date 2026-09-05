@@ -36,9 +36,25 @@ async function terminate(child, killAfterMs) {
   }
   try { process.kill(-child.pid, 'SIGTERM'); } catch { child.kill('SIGTERM'); }
   await new Promise((resolveDelay) => globalThis.setTimeout(resolveDelay, killAfterMs));
-  if (child.exitCode === null && child.signalCode === null) {
-    try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
+  // The leader may exit while descendants remain in its process group. Always
+  // address the group after the grace period; ESRCH means it is already gone.
+  try { process.kill(-child.pid, 'SIGKILL'); } catch { /* process group is already gone */ }
+}
+
+function processGroupExists(child) {
+  if (!child.pid || process.platform === 'win32') return false;
+  try {
+    process.kill(-child.pid, 0);
+    return true;
+  } catch {
+    return false;
   }
+}
+
+async function ensureProcessTreeGone(child, killAfterMs) {
+  if (process.platform === 'win32') return;
+  if (processGroupExists(child)) await terminate(child, killAfterMs);
+  if (processGroupExists(child)) fail('descendant process group survived SIGKILL');
 }
 
 export async function runBoundedCommand(options) {
@@ -49,15 +65,18 @@ export async function runBoundedCommand(options) {
     windowsHide: true,
   });
   let timedOut = false;
+  let termination = null;
   const timer = globalThis.setTimeout(() => {
     timedOut = true;
-    void terminate(child, options.killAfterMs);
+    termination ??= terminate(child, options.killAfterMs);
   }, options.timeoutMs);
   const result = await new Promise((resolveResult) => {
     child.once('error', (error) => resolveResult({ code: null, error }));
-    child.once('exit', (code, signal) => resolveResult({ code, signal }));
+    child.once('close', (code, signal) => resolveResult({ code, signal }));
   });
   globalThis.clearTimeout(timer);
+  if (termination) await termination;
+  await ensureProcessTreeGone(child, options.killAfterMs);
   if (result.error) fail(`could not start ${options.command}: ${result.error.message}`);
   if (timedOut) return 124;
   if (typeof result.code === 'number') return result.code;

@@ -1,8 +1,9 @@
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -12,16 +13,19 @@ import {
   prepareDisposableTauriSidecar,
   validateLocalGateToolchain,
   validateLocalProductionContract,
+  writeSandboxProfiles,
 } from '../scripts/run-local-production-gate.mjs';
 import { tarballEvidence } from '../scripts/run-local-pack-smoke.mjs';
-import { parseBoundedCommandArgs } from '../scripts/run-bounded-command.mjs';
+import { parseBoundedCommandArgs, runBoundedCommand } from '../scripts/run-bounded-command.mjs';
 import {
   canonicalizeLocalProductionGateReceipt,
   LOCAL_PRODUCTION_GATE_COMMANDS,
   LOCAL_PRODUCTION_GATE_IDS,
+  parseCli,
   parseLocalProductionGateReceiptBytes,
   validateLocalProductionGateReceipt,
   verifyExpectedReceiptBindings,
+  verifyPersistedArtifact,
 } from '../scripts/verify-local-production-gate-receipt.mjs';
 
 const repoRoot = process.cwd();
@@ -44,6 +48,10 @@ function validReceipt(): Record<string, unknown> {
       rustcVersion: 'rustc 1.95.0 (example)',
       cargoVersion: 'cargo 1.95.0 (example)',
       cargoAuditVersion: 'cargo-audit 0.22.2',
+      executables: Object.fromEntries([
+        'node', 'npmCli', 'npmRuntime', 'bash', 'git', 'rustc', 'rustdoc', 'cargo', 'cargoAudit',
+        'osvScanner', 'sandboxExec',
+      ].map((name) => [name, { path: `/tools/${name}`, sha256: digest }])),
     },
     bindings: {
       policy: { policyId: 'ashlr-release-successor-v1:9.8.7', version: '9.8.7', sha256: digest },
@@ -57,8 +65,18 @@ function validReceipt(): Record<string, unknown> {
       startedAt: instant,
       finishedAt: instant,
       hostPlatform: 'darwin',
-      networkUse: 'dependency-and-advisory-reads-only',
-      externalMutations: false,
+      networkIsolation: 'non-loopback-ip-egress-denied-for-source-gates',
+      networkEnabledGateIds: [
+        'install-root', 'install-raycast',
+        'audit-root-full', 'audit-root-production', 'audit-raycast-full',
+        'audit-raycast-production', 'native-fetch', 'native-audit',
+      ],
+      filesystemIsolation: 'write-allowlist-and-user-home-read-deny;host-ipc-system-reads-and-hostile-env-clearing-descendants-not-isolated',
+      sandboxProfiles: {
+        networkEnabledSha256: digest,
+        networkDeniedSha256: digest,
+      },
+      externalEffects: 'evidence-writes-recorded;same-uid-output-parent-swap-and-other-effects-not-attested',
       operationalAshlrHome: 'redirected-to-disposable-root',
       disposableSidecar: 'created-exclusive-and-removed-before-receipt',
     },
@@ -97,7 +115,7 @@ describe('M571 local production gate v1', () => {
       'typecheck', 'lint', 'build', 'test-ci-1-of-3', 'test-ci-2-of-3', 'test-ci-3-of-3',
     ]);
     expect(local.gates.find((gate) => gate.id === 'native-clippy')?.cmd).toEqual([
-      'cargo', 'clippy', '--locked', '--all-targets', '--', '-D', 'warnings',
+      'cargo', 'clippy', '--locked', '--offline', '--all-targets', '--', '-D', 'warnings',
     ]);
     expect(local.gates.find((gate) => gate.id === 'native-audit')?.cmd).toContain('RUSTSEC-2024-0429');
     const drifted = structuredClone(contract);
@@ -153,13 +171,17 @@ describe('M571 local production gate v1', () => {
     const root = mkdtempSync(join(tmpdir(), 'ashlr-m571-args-'));
     scratch.push(root);
     const receipt = join(root, 'receipt.json');
+    const artifact = join(root, 'ashlr-hub-9.8.7.tgz');
     expect(parseLocalGateArgs([
-      '--expected-sha', revision, '--policy', '.github/release-policies/v9.8.7.json', '--receipt', receipt,
-    ])).toMatchObject({ expectedSha: revision, receiptPath: receipt });
+      '--expected-sha', revision, '--policy', '.github/release-policies/v9.8.7.json',
+      '--artifact', artifact, '--receipt', receipt,
+    ])).toMatchObject({ expectedSha: revision, artifactPath: artifact, receiptPath: receipt });
     expect(() => parseLocalGateArgs([
-      '--expected-sha', revision, '--policy', 'policy.json', '--receipt', 'relative.json',
+      '--expected-sha', revision, '--policy', 'policy.json', '--artifact', artifact,
+      '--receipt', 'relative.json',
     ])).toThrow(/absolute/u);
-    expect(assertExternalReceiptPath(repoRoot, receipt)).toMatch(/\/ashlr-m571-args-[^/]+\/receipt\.json$/u);
+    expect(assertExternalReceiptPath(repoRoot, receipt).path)
+      .toMatch(/\/ashlr-m571-args-[^/]+\/receipt\.json$/u);
     expect(() => assertExternalReceiptPath(repoRoot, join(repoRoot, 'receipt.json'))).toThrow(/outside/u);
   });
 
@@ -177,12 +199,96 @@ describe('M571 local production gate v1', () => {
     expect(existsSync(sidecar.path)).toBe(false);
   });
 
+  it.runIf(process.platform === 'darwin')('enforces the private write root and deny-network sandbox', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ashlr-m571-sandbox-'));
+    const profileRoot = mkdtempSync(join(tmpdir(), 'ashlr-m571-profiles-'));
+    scratch.push(root, profileRoot);
+    mkdirSync(join(root, 'tmp'));
+    mkdirSync(join(root, 'home'));
+    const profiles = writeSandboxProfiles({
+      verificationRoot: repoRoot, tempRoot: root, profileRoot,
+    });
+    const allowed = join(root, 'tmp', 'allowed.txt');
+    expect(spawnSync('/usr/bin/sandbox-exec', [
+      '-f', profiles.networkDenied.path, process.execPath, '-e',
+      'require("node:fs").writeFileSync(process.argv[1], "ok")', allowed,
+    ]).status).toBe(0);
+    expect(readFileSync(allowed, 'utf8')).toBe('ok');
+
+    const denied = join(homedir(), '.ashlr-m571-sandbox-denied');
+    expect(existsSync(denied)).toBe(false);
+
+    expect(spawnSync('/usr/bin/sandbox-exec', [
+      '-f', profiles.networkDenied.path, process.execPath, '-e',
+      'require("node:fs").writeFileSync(process.argv[1], "escape")', profiles.networkDenied.path,
+    ]).status).not.toBe(0);
+    expect(spawnSync('/usr/bin/sandbox-exec', [
+      '-f', profiles.networkDenied.path, process.execPath, '-e',
+      'require("node:fs").writeFileSync(process.argv[1], "no")', denied,
+    ]).status).not.toBe(0);
+    expect(existsSync(denied)).toBe(false);
+
+    const network = spawnSync('/usr/bin/sandbox-exec', [
+      '-f', profiles.networkDenied.path, process.execPath, '-e',
+      'const net=require("node:net");const s=net.connect(443,"1.1.1.1");s.on("connect",()=>process.exit(0));s.on("error",()=>process.exit(42));',
+    ]);
+    expect(network.status).toBe(42);
+
+    const loopback = spawnSync('/usr/bin/sandbox-exec', [
+      '-f', profiles.networkDenied.path, process.execPath, '-e',
+      'const http=require("node:http");const h=http.createServer((_,r)=>r.end("ok"));h.listen(0,"127.0.0.1",()=>{const port=h.address().port;http.get(`http://127.0.0.1:${port}`,r=>{let b="";r.on("data",c=>b+=c);r.on("end",()=>h.close(()=>process.exit(b==="ok"?0:43)));}).on("error",()=>process.exit(42));});h.on("error",()=>process.exit(42));',
+    ]);
+    expect(loopback.status).toBe(0);
+
+    const socket = join(root, 'tmp', 'fixture.sock');
+    const localIpc = spawnSync('/usr/bin/sandbox-exec', [
+      '-f', profiles.networkDenied.path, process.execPath, '-e',
+      'const n=require("node:net");const h=n.createServer();h.listen(process.argv[1],()=>h.close(()=>process.exit(0)));h.on("error",()=>process.exit(42));',
+      socket,
+    ]);
+    expect(localIpc.status).toBe(0);
+
+    const git = spawnSync('/usr/bin/xcrun', ['-f', 'git'], { encoding: 'utf8' }).stdout.trim();
+    const gitStatus = spawnSync('/usr/bin/sandbox-exec', [
+      '-f', profiles.networkDenied.path, git, 'status', '--porcelain=v1',
+    ], {
+      cwd: repoRoot,
+      env: {
+        PATH: `${git.slice(0, git.lastIndexOf('/'))}:/usr/bin:/bin`,
+        HOME: join(root, 'home'),
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_SYSTEM: '/dev/null',
+        GIT_OPTIONAL_LOCKS: '0',
+      },
+    });
+    expect(gitStatus.status).toBe(0);
+  });
+
   it('recomputes both tarball SHA-256 and npm-compatible sha512 SRI', () => {
     expect(tarballEvidence(Buffer.from('ashlr', 'utf8'))).toEqual({
       sha256: '7be78d718b02239002e56900741a42d7f4ce6953c69a092d41fe5163236d11ae',
       integrity: 'sha512-0QPHexANJE3e13GBIZZy0RjoNQOazVvzeaUCU/omHM1XkplC2TigkMRSei6L9CS+FUlxYdoITNvFki03plBwkw==',
       size: 5,
     });
+  });
+
+  it('requires complete caller pins and verifies the persisted tarball bytes', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ashlr-m571-artifact-'));
+    scratch.push(root);
+    const artifact = join(root, 'ashlr-hub-9.8.7.tgz');
+    const bytes = Buffer.from('verified artifact', 'utf8');
+    const evidence = tarballEvidence(bytes);
+    const receipt = validReceipt();
+    Object.assign((receipt.bindings as Record<string, Record<string, unknown>>).package, {
+      sha256: evidence.sha256,
+      integrity: evidence.integrity,
+    });
+    const parsed = parseLocalProductionGateReceiptBytes(
+      Buffer.from(`${canonicalizeLocalProductionGateReceipt(receipt)}\n`, 'utf8'),
+    );
+    writeFileSync(artifact, bytes);
+    expect(() => verifyPersistedArtifact(parsed, artifact)).not.toThrow();
+    expect(() => parseCli([artifact])).toThrow(/binding pins/u);
   });
 
   it('provides the exact bounded timeout interface used by local macOS audits', () => {
@@ -197,12 +303,50 @@ describe('M571 local production gate v1', () => {
     expect(() => parseBoundedCommandArgs(['40s', 'npm'])).toThrow(/expected/u);
   });
 
+  it.runIf(process.platform !== 'win32')('kills timeout descendants before returning', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'ashlr-m571-process-group-'));
+    scratch.push(root);
+    const marker = join(root, 'escaped.txt');
+    const program = [
+      'const {spawn}=require("node:child_process");',
+      'const child=spawn(process.execPath,["-e",',
+      '  `setTimeout(()=>require("node:fs").writeFileSync(process.argv[1],"escaped"),500)`,',
+      '  process.argv[1]],{stdio:"ignore"});',
+      'child.unref();setInterval(()=>{},1000);',
+    ].join('');
+    await expect(runBoundedCommand({
+      command: process.execPath,
+      args: ['-e', program, marker],
+      timeoutMs: 100,
+      killAfterMs: 100,
+    })).resolves.toBe(124);
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 700));
+    expect(existsSync(marker)).toBe(false);
+
+    const normalMarker = join(root, 'normal-escaped.txt');
+    const backgroundProgram = [
+      'const {spawn}=require("node:child_process");',
+      'const child=spawn(process.execPath,["-e",',
+      '  `setTimeout(()=>require("node:fs").writeFileSync(process.argv[1],"escaped"),500)`,',
+      '  process.argv[1]],{stdio:"ignore"});child.unref();',
+    ].join('');
+    await expect(runBoundedCommand({
+      command: process.execPath,
+      args: ['-e', backgroundProgram, normalMarker],
+      timeoutMs: 5_000,
+      killAfterMs: 100,
+    })).resolves.toBe(0);
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 700));
+    expect(existsSync(normalMarker)).toBe(false);
+  });
+
   it('documents local execution without claiming release or runtime authority', () => {
     const contract = readFileSync(join(repoRoot, 'docs', 'contracts', 'CONTRACT-M571.md'), 'utf8');
     const runner = readFileSync(join(repoRoot, 'scripts', 'run-local-production-gate.mjs'), 'utf8');
     expect(contract).toContain('does not publish, promote, install a production runtime');
-    expect(contract).toContain('Dependency acquisition and advisory audits may perform\nread-only network queries');
-    expect(runner).toContain("delete env.GITHUB_ACTIONS");
+    expect(contract).toContain('denies non-loopback IP egress while preserving localhost');
+    expect(runner).toContain("GIT_CONFIG_GLOBAL: '/dev/null'");
+    expect(runner).not.toContain('...process.env');
     expect(runner).toContain("ASHLR_RUN_NATIVE_LAUNCHD_TEST: '0'");
     expect(runner).not.toMatch(/execSync\(['"]gh|spawn\(['"]gh/u);
   });

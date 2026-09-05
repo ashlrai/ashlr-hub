@@ -28,53 +28,83 @@ Run from an exactly clean commit with the policy already committed:
 PATH="/opt/homebrew/opt/node@24/bin:$PATH" npm run verify:local-production -- \
   --expected-sha "$(git rev-parse HEAD)" \
   --policy .github/release-policies/vX.Y.Z.json \
+  --artifact /absolute/path/outside/the/repository/ashlr-hub-X.Y.Z.tgz \
   --receipt /absolute/path/outside/the/repository/local-production-receipt.json
 ```
 
-The host must provide `cargo-audit 0.22.2`; the runner rejects other or
-missing versions. The audit fallback also fails closed if neither the npm
-advisory endpoint nor the repository's pinned OSV Scanner is available.
+The host must provide `cargo-audit 0.22.2` and the repository-pinned OSV
+Scanner; the runner rejects missing or mismatched tools before starting. The
+OSV Scanner is mandatory so npm audit fallback remains available if the npm
+registry advisory endpoint fails.
 
-The receipt path must be absolute, outside the real repository, beneath an
-existing real directory, and absent. Publication uses exclusive create mode
-`0600`, flushes the file and parent directory, and never overwrites an existing
-receipt. The standalone verifier can pin the receipt digest, source revision
-and tree, policy digest, verification-contract digest, and tarball SRI.
+The runner terminates the gate process group, independently bounds inherited
+output-pipe closure, and sweeps descendants carrying its per-gate execution
+marker. This is operational cleanup, not a hostile-code VM boundary: source
+that deliberately clears inherited environment markers before detaching, host
+IPC, and system reads remain outside the receipt's isolation claim.
+
+The artifact and receipt paths must be absolute, outside the real repository,
+beneath existing current-user-owned directories that are not group- or
+world-writable, and absent. Publication uses exclusive no-follow create mode
+`0600`, flushes each file and parent directory, revalidates parent identity,
+and never overwrites existing output. The exact packed tarball is preserved;
+the standalone verifier requires it, recomputes SHA-256 and sha512 SRI, and
+requires independent pins for the receipt digest, source revision and tree,
+policy digest, verification-contract digest, and tarball SRI.
+
+The output checks detect ordinary parent replacement and leaf-symlink attacks,
+but do not claim atomic protection against a hostile concurrent process running
+as the same user that swaps the output parent between pathname operations. Use
+a private operator-owned output directory with no concurrent writers.
 
 ## Exact gate
 
 `ashlr.verify.json.localProductionGate` is the closed execution plan. V1 runs,
 in order:
 
-1. typecheck, lint, and build;
-2. all three deterministic hermetic `test:ci` shards;
-3. the web console suite;
-4. full and production npm audits for the root and Raycast lockfiles, using the
+1. clean `npm ci --ignore-scripts` installs for the root and Raycast lockfiles;
+2. typecheck, lint, and build;
+3. all three deterministic hermetic `test:ci` shards;
+4. the web console suite;
+5. full and production npm audits for the root and Raycast lockfiles, using the
    existing bounded npm/OSV failover;
-5. a pack into a private temporary directory, a clean local install, CLI help,
+6. a pack into a private temporary directory, an offline clean local install, CLI help,
    and `types`/`core` export smoke tests;
-6. Cargo format, locked all-target check, locked all-target clippy with warnings
-   denied, and locked tests; and
-7. Cargo audit with only the documented, still-open
+7. a locked Cargo dependency fetch, followed by offline Cargo format, all-target
+   check, all-target clippy with warnings denied, and locked tests; and
+8. Cargo audit with only the documented, still-open
    `RUSTSEC-2024-0429` Linux GLib exception.
 
-Every subprocess runs with `HOME`, `USERPROFILE`, and `ASHLR_HOME` redirected
-to the gate's private temporary root. Native launchd integration is explicitly
-disabled. The runner removes GitHub credentials from the child environment and
-never invokes `gh`, a workflow, npm publication, a service manager, or an Ashlr
-runtime command. Dependency acquisition and advisory audits may perform
-read-only network queries; build, test, pack, and installation effects remain
-confined to the checkout's ignored build products or private temporary root.
-Existing Cargo/Rustup caches may be read or updated by their normal tools.
+Every subprocess runs against a fresh detached exact-SHA worktree with
+`HOME`, `USERPROFILE`, `ASHLR_HOME`, npm cache/config, Cargo home, Cargo target,
+and temporary paths redirected to the gate's private root. The child
+environment is an allowlist; provider, npm, GitHub, shell-injection, and Git
+override variables are not inherited. Native launchd integration is explicitly
+disabled. The runner never invokes `gh`, a workflow, npm publication, a service
+manager, or an Ashlr runtime command with operational authority. Dependency
+installation, advisory audits, and the locked Cargo fetch may use the network;
+all build, test, offline-native, and pack-smoke gates run under a macOS sandbox
+that denies non-loopback IP egress while preserving localhost and private Unix
+socket fixtures. Every gate sandbox permits writes only to explicit dependency,
+build-output, and private temporary paths, and denies reads from the user home
+except the exact Git metadata and installed Rust tool directories needed for
+reproduction. Profiles live in a separate non-writable directory and are
+device/inode/hash checked before every gate.
+
+This is strong local containment, not a VM boundary. Host IPC and reads of
+non-home system paths are not fully isolated, so the receipt records evidence
+writes but does not attest that arbitrary external effects were impossible.
 The repository's bounded-command adapter supplies the GNU `timeout` interface
 used by the audit wrapper on macOS; no Homebrew `timeout` dependency is needed.
 
 Tauri requires a host-triple sidecar to exist while checking its manifest. The
 runner refuses an existing target, creates an inert non-operational placeholder
 with exclusive mode, and removes only the file it created in a `finally` path.
-The repository must return to the same clean commit and tree before receipt
-publication. V1 is intentionally macOS-only; another host fails before the
-native gate instead of claiming untested parity.
+The inert sidecar's device/inode identity is checked before removal. The
+temporary worktree is removed and the controlling repository must return to the
+same clean commit and tree before artifact and receipt publication. V1 is
+intentionally macOS-only; another host fails before the native gate instead of
+claiming untested parity.
 
 ## Receipt and verification
 
@@ -82,7 +112,8 @@ The canonical UTF-8 receipt is sorted-key JSON followed by exactly one LF and
 is bounded to 256 KiB. Its closed schema binds:
 
 - exact source revision, source tree, and clean-before/clean-after claims;
-- exact Node, npm, Rust, Cargo, and cargo-audit identities;
+- exact Node, npm, Rust, Cargo, and cargo-audit identities plus absolute
+  executable paths and file digests;
 - policy ID/version/digest and verification-contract path/digest;
 - package name/version/tarball name, tarball SHA-256, and sha512 SRI;
 - ordered gate IDs, command digests, timestamps, duration, exit status, and
@@ -91,8 +122,9 @@ is bounded to 256 KiB. Its closed schema binds:
 
 The verifier rejects unknown or missing keys, noncanonical bytes, malformed
 hashes or SRI, missing/reordered/failed gates, old Node/npm versions, source or
-binding mismatch against caller pins, any authority bit, and any verdict other
-than `passed`. Command output and environment values are not persisted.
+binding mismatch against the complete required caller pins, persisted-artifact
+byte drift, any authority bit, and any verdict other than `passed`. Command
+output and environment values are not persisted.
 
 ## Explicit non-claims
 

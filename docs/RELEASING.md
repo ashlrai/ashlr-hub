@@ -41,14 +41,17 @@ on `PATH`, run:
 npm run verify:local-production -- \
   --expected-sha "$(git rev-parse HEAD)" \
   --policy .github/release-policies/vX.Y.Z.json \
+  --artifact /absolute/external/path/ashlr-hub-X.Y.Z.tgz \
   --receipt /absolute/external/path/local-production-receipt.json
 ```
 
-The runner requires a clean exact commit and tree, runs the complete contract,
-keeps operational Ashlr state and services untouched, and writes a canonical
-authority-free receipt outside the repository. Verify that receipt with
-`scripts/verify-local-production-gate-receipt.mjs` and independent caller pins
-before separately considering any registry or GitHub mutation. See
+The runner verifies a clean exact commit in a fresh detached worktree, runs the
+complete contract with an allowlisted environment, preserves the exact verified
+tarball, keeps operational Ashlr state and services untouched, and writes a
+canonical authority-free receipt outside the repository. Verify that receipt
+and tarball with `scripts/verify-local-production-gate-receipt.mjs` and all six
+independent caller pins before separately considering any registry or GitHub
+mutation. See
 [`CONTRACT-M571.md`](contracts/CONTRACT-M571.md) for the exact boundary.
 
 ## Trusted-publisher configuration used for 3.3.2

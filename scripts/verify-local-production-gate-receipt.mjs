@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { lstatSync, readFileSync } from 'node:fs';
+import { basename, isAbsolute, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { TextDecoder } from 'node:util';
 
 const MAX_RECEIPT_BYTES = 256 * 1024;
+const MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
 const SHA256_RE = /^[0-9a-f]{64}$/u;
 const REVISION_RE = /^[0-9a-f]{40}$/u;
 const SEMVER_RE = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u;
@@ -23,6 +24,8 @@ export const LOCAL_PRODUCTION_GATE_AUTHORITY = Object.freeze({
   publish: false,
 });
 export const LOCAL_PRODUCTION_GATE_COMMANDS = Object.freeze([
+  ['install-root', ['npm', 'ci', '--ignore-scripts', '--no-audit', '--no-fund'], '.', 600_000],
+  ['install-raycast', ['npm', 'ci', '--ignore-scripts', '--no-audit', '--no-fund'], 'src/raycast', 600_000],
   ['typecheck', ['npm', 'run', 'typecheck'], '.', 300_000],
   ['lint', ['npm', 'run', 'lint'], '.', 300_000],
   ['build', ['npm', 'run', 'build'], '.', 600_000],
@@ -35,15 +38,21 @@ export const LOCAL_PRODUCTION_GATE_COMMANDS = Object.freeze([
   ['audit-raycast-full', ['bash', '../../scripts/npm-audit-with-osv-fallback.sh', 'Raycast full graph', 'package-lock.json'], 'src/raycast', 300_000],
   ['audit-raycast-production', ['bash', '../../scripts/npm-audit-with-osv-fallback.sh', 'Raycast production graph', 'package-lock.json', '--omit=dev'], 'src/raycast', 300_000],
   ['pack-smoke', ['node', 'scripts/run-local-pack-smoke.mjs', '--repo', '{repo}', '--work-dir', '{temp}/pack-smoke', '--output', '{temp}/pack-evidence.json'], '.', 600_000],
+  ['native-fetch', ['cargo', 'fetch', '--locked'], 'desktop/src-tauri', 1_200_000],
   ['native-fmt', ['cargo', 'fmt', '--check'], 'desktop/src-tauri', 300_000],
-  ['native-check', ['cargo', 'check', '--locked', '--all-targets'], 'desktop/src-tauri', 1_200_000],
-  ['native-clippy', ['cargo', 'clippy', '--locked', '--all-targets', '--', '-D', 'warnings'], 'desktop/src-tauri', 1_200_000],
-  ['native-test', ['cargo', 'test', '--locked'], 'desktop/src-tauri', 1_200_000],
+  ['native-check', ['cargo', 'check', '--locked', '--offline', '--all-targets'], 'desktop/src-tauri', 1_200_000],
+  ['native-clippy', ['cargo', 'clippy', '--locked', '--offline', '--all-targets', '--', '-D', 'warnings'], 'desktop/src-tauri', 1_200_000],
+  ['native-test', ['cargo', 'test', '--locked', '--offline'], 'desktop/src-tauri', 1_200_000],
   ['native-audit', ['cargo-audit', 'audit', '--file', 'Cargo.lock', '--ignore', 'RUSTSEC-2024-0429'], 'desktop/src-tauri', 600_000],
 ]);
 export const LOCAL_PRODUCTION_GATE_IDS = Object.freeze(
   LOCAL_PRODUCTION_GATE_COMMANDS.map(([id]) => id),
 );
+export const LOCAL_PRODUCTION_GATE_NETWORK_ENABLED_IDS = Object.freeze([
+  'install-root', 'install-raycast',
+  'audit-root-full', 'audit-root-production', 'audit-raycast-full', 'audit-raycast-production',
+  'native-fetch', 'native-audit',
+]);
 
 function fail(message) {
   throw new Error(`local production gate receipt: ${message}`);
@@ -88,6 +97,14 @@ function exactFalseAuthority(value, label = 'authority') {
     fail(`${label} must keep every effect false`);
   }
   return authority;
+}
+
+function deepFreeze(value) {
+  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const key of Reflect.ownKeys(value)) deepFreeze(value[key]);
+    Object.freeze(value);
+  }
+  return value;
 }
 
 export function canonicalizeLocalProductionGateReceipt(value) {
@@ -147,6 +164,7 @@ export function validateLocalProductionGateReceipt(value) {
 
   const toolchain = exactRecord(receipt.toolchain, [
     'nodeVersion', 'npmVersion', 'rustcVersion', 'cargoVersion', 'cargoAuditVersion',
+    'executables',
   ], 'toolchain');
   exactString(toolchain.nodeVersion, SEMVER_RE, 'toolchain.nodeVersion', 32);
   exactString(toolchain.npmVersion, SEMVER_RE, 'toolchain.npmVersion', 32);
@@ -159,6 +177,15 @@ export function validateLocalProductionGateReceipt(value) {
   if (Number(toolchain.nodeVersion.split('.')[0]) < 24
     || Number(toolchain.npmVersion.split('.')[0]) < 11) {
     fail('toolchain must use Node 24+ and npm 11+');
+  }
+  const executables = exactRecord(toolchain.executables, [
+    'node', 'npmCli', 'npmRuntime', 'bash', 'git', 'rustc', 'rustdoc', 'cargo',
+    'cargoAudit', 'osvScanner', 'sandboxExec',
+  ], 'toolchain.executables');
+  for (const [name, executableValue] of Object.entries(executables)) {
+    const executable = exactRecord(executableValue, ['path', 'sha256'], `toolchain.executables.${name}`);
+    exactString(executable.path, /^\/.{1,1023}$/u, `toolchain.executables.${name}.path`, 1024);
+    exactString(executable.sha256, SHA256_RE, `toolchain.executables.${name}.sha256`, 64);
   }
 
   const bindings = exactRecord(receipt.bindings, ['policy', 'contract', 'package'], 'bindings');
@@ -182,19 +209,40 @@ export function validateLocalProductionGateReceipt(value) {
   exactString(pkg.integrity, INTEGRITY_RE, 'bindings.package.integrity', 95);
 
   const execution = exactRecord(receipt.execution, [
-    'startedAt', 'finishedAt', 'hostPlatform', 'networkUse', 'externalMutations',
-    'operationalAshlrHome', 'disposableSidecar',
+    'startedAt', 'finishedAt', 'hostPlatform', 'networkIsolation', 'networkEnabledGateIds',
+    'filesystemIsolation', 'sandboxProfiles', 'externalEffects', 'operationalAshlrHome',
+    'disposableSidecar',
   ], 'execution');
   validateIso(execution.startedAt, 'execution.startedAt');
   validateIso(execution.finishedAt, 'execution.finishedAt');
   if (Date.parse(execution.finishedAt) < Date.parse(execution.startedAt)
     || execution.hostPlatform !== 'darwin'
-    || execution.networkUse !== 'dependency-and-advisory-reads-only'
-    || execution.externalMutations !== false
+    || execution.networkIsolation !== 'non-loopback-ip-egress-denied-for-source-gates'
+    || execution.filesystemIsolation !== 'write-allowlist-and-user-home-read-deny;host-ipc-system-reads-and-hostile-env-clearing-descendants-not-isolated'
+    || execution.externalEffects !== 'evidence-writes-recorded;same-uid-output-parent-swap-and-other-effects-not-attested'
     || execution.operationalAshlrHome !== 'redirected-to-disposable-root'
     || execution.disposableSidecar !== 'created-exclusive-and-removed-before-receipt') {
     fail('execution boundary is invalid');
   }
+  if (!Array.isArray(execution.networkEnabledGateIds)
+    || execution.networkEnabledGateIds.length !== LOCAL_PRODUCTION_GATE_NETWORK_ENABLED_IDS.length
+    || execution.networkEnabledGateIds.some(
+      (id, index) => id !== LOCAL_PRODUCTION_GATE_NETWORK_ENABLED_IDS[index],
+    )) {
+    fail('network-enabled gate set is invalid');
+  }
+  const networkArrayKeys = Reflect.ownKeys(execution.networkEnabledGateIds);
+  const expectedNetworkArrayKeys = [...Array(execution.networkEnabledGateIds.length).keys()]
+    .map(String).concat('length');
+  if (networkArrayKeys.length !== expectedNetworkArrayKeys.length
+    || networkArrayKeys.some((key, index) => key !== expectedNetworkArrayKeys[index])) {
+    fail('network-enabled gate set must be dense and undecorated');
+  }
+  const sandboxProfiles = exactRecord(execution.sandboxProfiles, [
+    'networkEnabledSha256', 'networkDeniedSha256',
+  ], 'execution.sandboxProfiles');
+  exactString(sandboxProfiles.networkEnabledSha256, SHA256_RE, 'execution.sandboxProfiles.networkEnabledSha256', 64);
+  exactString(sandboxProfiles.networkDeniedSha256, SHA256_RE, 'execution.sandboxProfiles.networkDeniedSha256', 64);
 
   if (!Array.isArray(receipt.gates) || receipt.gates.length !== LOCAL_PRODUCTION_GATE_IDS.length) {
     fail('gates must contain the complete ordered local gate');
@@ -205,6 +253,8 @@ export function validateLocalProductionGateReceipt(value) {
     || arrayKeys.some((key, index) => key !== expectedArrayKeys[index])) {
     fail('gates must be a dense array without extra properties');
   }
+  let priorFinishedAt = Date.parse(execution.startedAt);
+  const executionFinishedAt = Date.parse(execution.finishedAt);
   for (const [index, gateValue] of receipt.gates.entries()) {
     const label = `gates[${index}]`;
     const gate = exactRecord(gateValue, [
@@ -224,10 +274,15 @@ export function validateLocalProductionGateReceipt(value) {
     }
     validateIso(gate.startedAt, `${label}.startedAt`);
     validateIso(gate.finishedAt, `${label}.finishedAt`);
+    const gateStartedAt = Date.parse(gate.startedAt);
+    const gateFinishedAt = Date.parse(gate.finishedAt);
     if (!Number.isSafeInteger(gate.durationMs) || gate.durationMs < 0
-      || gate.exitCode !== 0 || Date.parse(gate.finishedAt) < Date.parse(gate.startedAt)) {
+      || gate.exitCode !== 0 || gateFinishedAt < gateStartedAt
+      || gate.durationMs !== gateFinishedAt - gateStartedAt
+      || gateStartedAt < priorFinishedAt || gateFinishedAt > executionFinishedAt) {
       fail(`${label} did not record one successful bounded execution`);
     }
+    priorFinishedAt = gateFinishedAt;
   }
   exactFalseAuthority(receipt.authority);
   return receipt;
@@ -253,17 +308,36 @@ export function parseLocalProductionGateReceiptBytes(bytes) {
   const canonicalBytes = Buffer.from(`${canonicalizeLocalProductionGateReceipt(receipt)}\n`, 'utf8');
   if (!bytes.equals(canonicalBytes)) fail('receipt must be canonical JSON followed by one LF');
   return Object.freeze({
-    receipt: Object.freeze(receipt),
+    receipt: deepFreeze(receipt),
     sha256: createHash('sha256').update(canonicalBytes).digest('hex'),
   });
 }
 
-function parseCli(argv) {
+export function verifyPersistedArtifact(parsed, artifactPath) {
+  if (!isAbsolute(artifactPath)) fail('artifact path must be absolute');
+  const artifact = lstatSync(artifactPath);
+  if (!artifact.isFile() || artifact.isSymbolicLink()
+    || artifact.size < 1 || artifact.size > MAX_ARTIFACT_BYTES) {
+    fail(`artifact bytes must contain 1-${MAX_ARTIFACT_BYTES} bytes`);
+  }
+  const bytes = readFileSync(artifactPath);
+  const expected = parsed.receipt.bindings.package;
+  const actualSha256 = createHash('sha256').update(bytes).digest('hex');
+  const actualIntegrity = `sha512-${createHash('sha512').update(bytes).digest('base64')}`;
+  if (basename(artifactPath) !== expected.tarballName
+    || actualSha256 !== expected.sha256 || actualIntegrity !== expected.integrity) {
+    fail('persisted artifact does not match the receipt binding');
+  }
+  return parsed;
+}
+
+export function parseCli(argv) {
   if (argv.length < 1 || argv.length % 2 === 0) {
-    fail('usage: verify-local-production-gate-receipt.mjs <receipt> [--expect-<binding> <value> ...]');
+    fail('usage: verify-local-production-gate-receipt.mjs <receipt> --artifact <tgz> plus all six --expect-* pins');
   }
   const options = { path: resolve(argv[0]), expected: {} };
   const flags = new Map([
+    ['--artifact', 'artifactPath'],
     ['--expect-revision', 'revision'],
     ['--expect-tree', 'tree'],
     ['--expect-policy-sha256', 'policySha256'],
@@ -273,15 +347,25 @@ function parseCli(argv) {
   ]);
   for (let index = 1; index < argv.length; index += 2) {
     const key = flags.get(argv[index]);
-    if (!key || options.expected[key] !== undefined || argv[index + 1] === undefined) {
+    if (!key || (key === 'artifactPath' ? options.artifactPath : options.expected[key]) !== undefined
+      || argv[index + 1] === undefined) {
       fail(`invalid or duplicate option ${argv[index] ?? '<missing>'}`);
     }
-    options.expected[key] = argv[index + 1];
+    if (key === 'artifactPath') options.artifactPath = argv[index + 1];
+    else options.expected[key] = argv[index + 1];
   }
+  if (!options.artifactPath || !isAbsolute(options.artifactPath)
+    || Object.keys(options.expected).length !== flags.size - 1) {
+    fail('--artifact and all six independent --expect-* binding pins are required');
+  }
+  options.artifactPath = resolve(options.artifactPath);
   return options;
 }
 
 export function verifyExpectedReceiptBindings(parsed, expected) {
+  exactRecord(expected, [
+    'revision', 'tree', 'policySha256', 'contractSha256', 'integrity', 'receiptSha256',
+  ], 'caller pins');
   const actual = {
     revision: parsed.receipt.source.revision,
     tree: parsed.receipt.source.tree,
@@ -300,7 +384,13 @@ const invoked = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href :
 if (import.meta.url === invoked) {
   try {
     const options = parseCli(process.argv.slice(2));
+    const receiptFile = lstatSync(options.path);
+    if (!receiptFile.isFile() || receiptFile.isSymbolicLink()
+      || receiptFile.size < 2 || receiptFile.size > MAX_RECEIPT_BYTES) {
+      fail(`receipt file must contain 2-${MAX_RECEIPT_BYTES} bytes and not be a symlink`);
+    }
     const parsed = parseLocalProductionGateReceiptBytes(readFileSync(options.path));
+    verifyPersistedArtifact(parsed, options.artifactPath);
     verifyExpectedReceiptBindings(parsed, options.expected);
     process.stdout.write(`${JSON.stringify({
       ok: true,
