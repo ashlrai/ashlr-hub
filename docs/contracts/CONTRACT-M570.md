@@ -55,9 +55,13 @@ This milestone intentionally adds none of the following:
 - imports from M520, M521, or M568 into an effectful transaction or CLI.
 
 The synthetic fixture uses unrelated 9.x identities. The frozen 3.3.2 release
-must first complete its own trusted-publisher, candidate, provenance, isolated
-acceptance, and promotion gates. Only a later exact-state change may add a
-production successor policy.
+completed its own trusted-publisher, candidate, provenance, isolated acceptance,
+and promotion gates at protected source
+`2971c9f767c934e12fd056bf8c6dca5164ffe7d2`, with successful release run
+`33932333902` and observation-only admission run `33933861238`; npm `latest` and
+`candidate` then both resolved to 3.3.2. That completed immutable release does
+not populate an M570 production policy or grant this milestone any effect
+authority. Only a later exact-state change may add a production successor policy.
 
 ## Later workflow consumption
 

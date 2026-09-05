@@ -18,6 +18,7 @@ const repoRoot = join(testDir, '..');
 const fixturePath = join(testDir, 'fixtures', 'release-policy', 'valid-v1.json');
 const schemaPath = join(repoRoot, '.github', 'release-policies', 'schema-v1.json');
 const verifierPath = join(repoRoot, 'scripts', 'verify-release-policy.mjs');
+const contract = readFileSync(join(repoRoot, 'docs', 'contracts', 'CONTRACT-M570.md'), 'utf8');
 const expectedDigest = '6494f4a45c008ec1846bb4a6c0846d08cc73f95e9f2e40ca08e105d75bc49652';
 const scratch: string[] = [];
 
@@ -91,6 +92,16 @@ describe('M570 release successor policy v1', () => {
     expect(existsSync(join(repoRoot, '.github', 'release-policies', 'v3.4.0.json'))).toBe(false);
     expect(source).not.toMatch(/3\.3\.2|3\.4\.0|abd49a5049759e417d99089b88c628fd2364f79c|d6c1a5ec/u);
     expect(source).toContain('v9.8.7');
+  });
+
+  it('records completed 3.3.2 gates without granting successor authority', () => {
+    expect(contract).toContain('completed its own trusted-publisher, candidate, provenance, isolated acceptance');
+    expect(contract).toContain('`2971c9f767c934e12fd056bf8c6dca5164ffe7d2`');
+    expect(contract).toContain('`33932333902`');
+    expect(contract).toContain('`33933861238`');
+    expect(contract).toContain('npm `latest` and\n`candidate` then both resolved to 3.3.2');
+    expect(contract).toContain('does\nnot populate an M570 production policy or grant this milestone any effect\nauthority');
+    expect(contract).not.toContain('must first complete its own trusted-publisher');
   });
 
   it.each([
