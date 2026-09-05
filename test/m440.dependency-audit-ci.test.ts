@@ -296,13 +296,18 @@ describe('M440 dependency audit CI', () => {
     expect(osvScannerInstallCommand).toContain('sha256sum --check --strict');
     expect(npmAuditFallbackText).toContain('for attempt in 1 2 3');
     expect(npmAuditFallbackText).toContain('--fetch-retries=0 --fetch-timeout=30000');
-    expect(npmAuditFallbackText).toContain('"${npm_bin}" "${npm_args[@]}"');
+    expect(npmAuditFallbackText).toContain(
+      '"${npm_command[@]}" "${npm_args[@]}"',
+    );
     expect(npmAuditFallbackText).toContain('if is_valid_npm_report "${stdout_file}"; then');
     expect(npmAuditFallbackText).toContain('if ! is_clean_npm_report "${stdout_file}"; then');
     expect(npmAuditFallbackText).toContain('fallback was not authorized');
     expect(npmAuditFallbackText).toContain(
       'audit_tmp=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/ashlr-npm-audit.XXXXXX")',
     );
+    expect(npmAuditFallbackText).toContain('cleanup_rc=$?');
+    expect(npmAuditFallbackText).toContain('trap - EXIT');
+    expect(npmAuditFallbackText).toContain('trap cleanup EXIT');
     expect(npmAuditFallbackText).toContain(': > "${osv_config}"');
     expect(npmAuditFallbackText).toContain('chmod 0600 "${osv_config}"');
     expect(npmAuditFallbackText).toContain(
@@ -320,12 +325,14 @@ describe('M440 dependency audit CI', () => {
     try {
       const binDir = resolve(fixtureRoot, 'bin');
       const lockfile = resolve(fixtureRoot, 'package-lock.json');
+      const npmCli = resolve(fixtureRoot, 'npm-cli.js');
       const countFile = resolve(fixtureRoot, 'npm-count');
       const markerFile = resolve(fixtureRoot, 'osv-called');
       const summaryFile = resolve(fixtureRoot, 'summary.md');
       const repositoryConfig = resolve(fixtureRoot, 'osv-scanner.toml');
       const script = resolve(repoRoot, 'scripts/npm-audit-with-osv-fallback.sh');
       writeFileSync(lockfile, '{}\n');
+      writeFileSync(npmCli, '');
       writeFileSync(countFile, '0\n');
       writeFileSync(
         repositoryConfig,
@@ -375,6 +382,14 @@ esac
 `,
       );
       writeExecutable(
+        'audit-node',
+        `#!/usr/bin/env bash
+[[ "\${1:-}" == "$TEST_NPM_CLI" ]] || exit 97
+shift
+exec "$TEST_NPM_BIN" "$@"
+`,
+      );
+      writeExecutable(
         'osv-scanner',
         `#!/usr/bin/env bash
 config_path=''
@@ -396,7 +411,7 @@ exit "\${TEST_OSV_RC:-0}"
 `,
       );
 
-      const runScenario = (mode: string, osvRc = '0') => {
+      const runScenario = (mode: string, osvRc = '0', pinnedNpm = false) => {
         writeFileSync(countFile, '0\n');
         writeFileSync(summaryFile, '');
         rmSync(markerFile, { force: true });
@@ -406,6 +421,13 @@ exit "\${TEST_OSV_RC:-0}"
           env: {
             ...process.env,
             PATH: `${binDir}:${process.env.PATH ?? ''}`,
+            AUDIT_NODE_BIN: pinnedNpm ? resolve(binDir, 'audit-node') : '',
+            AUDIT_NPM_BIN: pinnedNpm ? 'must-not-run' : 'npm',
+            AUDIT_NPM_CLI: pinnedNpm ? npmCli : '',
+            AUDIT_OSV_BIN: 'osv-scanner',
+            AUDIT_TIMEOUT_BIN: 'timeout',
+            TEST_NPM_BIN: resolve(binDir, 'npm'),
+            TEST_NPM_CLI: npmCli,
             TEST_COUNT_FILE: countFile,
             TEST_OSV_MARKER: markerFile,
             TEST_REPO_CONFIG: repositoryConfig,
@@ -427,6 +449,14 @@ exit "\${TEST_OSV_RC:-0}"
       expect(success.count).toBe(1);
       expect(success.fallbackCalled).toBe(false);
       expect(success.summary).toContain('primary npm audit passed with a valid audit v2 report');
+
+      const pinnedSuccess = runScenario('success', '0', true);
+      expect(pinnedSuccess.status).toBe(0);
+      expect(pinnedSuccess.count).toBe(1);
+      expect(pinnedSuccess.fallbackCalled).toBe(false);
+      expect(pinnedSuccess.summary).toContain(
+        'primary npm audit passed with a valid audit v2 report',
+      );
 
       const vulnerability = runScenario('vulnerability');
       expect(vulnerability.status).toBe(1);

@@ -82,21 +82,32 @@ in order:
 
 Every subprocess runs against a fresh detached exact-SHA worktree with
 `HOME`, `USERPROFILE`, `ASHLR_HOME`, npm cache/config, Cargo home, Cargo target,
-and temporary paths redirected to the gate's private root. The child
+and temporary paths redirected to disposable private roots. The child
 environment is an allowlist; provider, npm, GitHub, shell-injection, and Git
 override variables are not inherited. Native launchd integration is explicitly
 disabled. The runner never invokes `gh`, a workflow, npm publication, a service
 manager, or an Ashlr runtime command with operational authority.
 
-The runner creates its gate and profile roots atomically as current-user-owned
+The runner creates its scratch and profile roots atomically as current-user-owned
 mode `0700` directories beneath canonical root-owned sticky `/private/tmp`.
-The short fixed prefixes keep nested fixture socket paths within macOS's Unix
-socket pathname budget without weakening the sandbox write allowlist or exposing
-the directories to other users. Cleanup rechecks the exact directory device,
-inode, owner, mode, and canonical path before recursive removal and refuses a
-replacement. Both roots remain disposable and are removed by the existing
-fail-closed cleanup path. As with other pathname checks in this gate, identity
-revalidation does not make hostile same-user path swaps atomic.
+Their short fixed prefixes keep the detached worktree, `TMPDIR`, npm/Cargo
+caches, and nested fixture socket paths within macOS's Unix-socket pathname
+budget without exposing them to other users. `HOME`, `USERPROFILE`,
+`ASHLR_HOME`, and an explicit Vitest worker-home parent instead live under a
+separate mode-`0700` custody root beneath the canonical directory reported by
+`/usr/bin/getconf DARWIN_USER_TEMP_DIR`. The runner requires that per-user
+directory to be current-user-owned mode `0700` and requires its complete
+canonical ancestry to be owned by root or the current user and not group- or
+world-writable. This split preserves truthful custody tests that must reject
+world-writable `/private/tmp` ancestors while retaining short IPC paths.
+
+The sandbox write allowlist covers both disposable roots but continues to deny
+the real user home. Before and after every gate, and again during cleanup, the
+runner rechecks each root's exact device, inode, owner, mode, and canonical path;
+the custody root also rechecks every captured ancestor. Recursive removal
+refuses a replacement. All three roots remain disposable and are removed by the
+existing fail-closed cleanup path. As with other pathname checks in this gate,
+identity revalidation does not make hostile same-user path swaps atomic.
 
 The contract and receipt classify confinement per gate. Dependency installation,
 advisory audits, and the locked Cargo fetch use a macOS sandbox with a write

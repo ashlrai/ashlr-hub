@@ -27,15 +27,40 @@
  *   override, is now a thrown error — the offending test fails immediately and
  *   loudly instead of the suite quietly writing through the isolation boundary.
  */
-import { mkdtempSync, rmSync } from 'node:fs';
+import { lstatSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { vi } from 'vitest';
 
 const workerHomeKey = 'ASHLR_VITEST_WORKER_HOME';
 const workerPidKey = 'ASHLR_VITEST_WORKER_PID';
 const realHomeKey = 'ASHLR_VITEST_REAL_HOME';
+const workerHomeParentKey = 'ASHLR_VITEST_HOME_PARENT';
 let workerHome = process.env[workerHomeKey];
+
+export function resolveWorkerHomeParent(
+  configured = process.env[workerHomeParentKey],
+): string {
+  if (!configured) return tmpdir();
+  if (!isAbsolute(configured) || typeof process.getuid !== 'function') {
+    throw new Error(`${workerHomeParentKey} must name an absolute owned private directory`);
+  }
+  const canonical = realpathSync(configured);
+  const identity = lstatSync(configured);
+  if (resolve(configured) !== canonical || !identity.isDirectory() || identity.isSymbolicLink()
+    || identity.uid !== process.getuid() || (identity.mode & 0o7777) !== 0o700) {
+    throw new Error(`${workerHomeParentKey} must name a canonical current-user-owned mode 0700 directory`);
+  }
+  for (let cursor = canonical; ; cursor = dirname(cursor)) {
+    const ancestor = lstatSync(cursor);
+    if (realpathSync(cursor) !== cursor || !ancestor.isDirectory() || ancestor.isSymbolicLink()
+      || ![0, process.getuid()].includes(ancestor.uid) || (ancestor.mode & 0o022) !== 0) {
+      throw new Error(`${workerHomeParentKey} must have owned non-writable custody ancestors`);
+    }
+    if (cursor === sep) break;
+  }
+  return canonical;
+}
 
 if (!workerHome || process.env[workerPidKey] !== String(process.pid)) {
   // First setup-file execution for this worker process: process.env.HOME (if
@@ -48,13 +73,20 @@ if (!workerHome || process.env[workerPidKey] !== String(process.pid)) {
     if (ambientHome) process.env[realHomeKey] = resolve(ambientHome);
   }
 
-  workerHome = mkdtempSync(join(tmpdir(), 'ashlr-vitest-home-'));
+  workerHome = mkdtempSync(join(resolveWorkerHomeParent(), 'ashlr-vitest-home-'));
   process.env[workerHomeKey] = workerHome;
   process.env[workerPidKey] = String(process.pid);
   const homeToRemove = workerHome;
+  const homeIdentity = lstatSync(homeToRemove);
   process.once('exit', () => {
     try {
-      rmSync(homeToRemove, { recursive: true, force: true });
+      const current = lstatSync(homeToRemove);
+      if (current.isDirectory() && !current.isSymbolicLink()
+        && current.dev === homeIdentity.dev && current.ino === homeIdentity.ino
+        && current.uid === homeIdentity.uid && (current.mode & 0o7777) === 0o700
+        && realpathSync(homeToRemove) === homeToRemove) {
+        rmSync(homeToRemove, { recursive: true, force: true });
+      }
     } catch {
       // Process shutdown must not turn a best-effort fixture cleanup into a failure.
     }

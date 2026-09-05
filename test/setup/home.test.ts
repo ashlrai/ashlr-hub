@@ -1,9 +1,10 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { expect, it } from 'vitest';
 import { daemonStatePath } from '../../src/core/daemon/state.js';
+import { resolveWorkerHomeParent } from './home.js';
 
 it('establishes an isolated HOME and ASHLR_HOME before test modules load', () => {
   const home = process.env.HOME;
@@ -17,6 +18,38 @@ it('establishes an isolated HOME and ASHLR_HOME before test modules load', () =>
   expect(execFileSync(process.execPath, ['-e', 'process.stdout.write(require("node:os").homedir())'], {
     encoding: 'utf8',
   })).toBe(home);
+});
+
+it('honors the validated local-gate worker-home parent when configured', () => {
+  const parent = process.env.ASHLR_VITEST_HOME_PARENT;
+  if (!parent) return;
+  const identity = lstatSync(parent);
+  expect(realpathSync(parent)).toBe(parent);
+  expect(identity.isDirectory()).toBe(true);
+  expect(identity.isSymbolicLink()).toBe(false);
+  expect(identity.uid).toBe(process.getuid());
+  expect(identity.mode & 0o7777).toBe(0o700);
+  expect(dirname(process.env.HOME!)).toBe(parent);
+});
+
+it('rejects a non-absolute or non-private explicit worker-home parent', () => {
+  expect(() => resolveWorkerHomeParent('relative-home')).toThrow(/absolute owned private/u);
+  const parent = mkdtempSync(join(realpathSync(tmpdir()), 'ashlr-vitest-parent-validation-'));
+  try {
+    expect(resolveWorkerHomeParent(parent)).toBe(realpathSync(parent));
+    chmodSync(parent, 0o755);
+    expect(() => resolveWorkerHomeParent(parent)).toThrow(/mode 0700/u);
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+  if (process.platform === 'darwin') {
+    const unsafeParent = mkdtempSync('/private/tmp/ashlr-vitest-parent-validation-');
+    try {
+      expect(() => resolveWorkerHomeParent(unsafeParent)).toThrow(/custody ancestors/u);
+    } finally {
+      rmSync(unsafeParent, { recursive: true, force: true });
+    }
+  }
 });
 
 it('allows a test to relocate HOME and restore the isolated worker boundary', () => {
