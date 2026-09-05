@@ -34,7 +34,7 @@ it('honors the validated local-gate worker-home parent when configured', () => {
 
 it('rejects a non-absolute or non-private explicit worker-home parent', () => {
   expect(() => resolveWorkerHomeParent('relative-home')).toThrow(/absolute owned private/u);
-  const parent = mkdtempSync(join(realpathSync(tmpdir()), 'ashlr-vitest-parent-validation-'));
+  const parent = mkdtempSync(join(realpathSync(process.env.HOME!), 'ashlr-vitest-parent-validation-'));
   try {
     expect(resolveWorkerHomeParent(parent)).toBe(realpathSync(parent));
     chmodSync(parent, 0o755);
