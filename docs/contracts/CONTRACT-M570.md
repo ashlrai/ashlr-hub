@@ -1,8 +1,8 @@
 # CONTRACT-M570: Release successor policy evidence
 
-Status: schema-and-verifier complete, dormant, and authority-free. No production
-version policy exists in this milestone. Hosted release workflows remain disabled;
-this contract binds a later successor only to local verification evidence.
+Status: schema-and-verifier complete, active for 3.4.0 local verification, and
+authority-free. Hosted release workflows remain disabled; the tracked policy
+binds the successor only to local verification evidence.
 
 ## Purpose
 
@@ -44,11 +44,12 @@ JSON, duplicate keys, BOM, CRLF, trailing bytes, malformed UTF-8, and oversized
 input. A successful receipt contains only the policy/version/tag, canonical
 SHA-256, and the frozen all-false authority object.
 
-## Frozen 3.3.2 boundary
+## Historical M570 schema boundary
 
-This milestone intentionally adds none of the following:
+The original schema milestone intentionally added none of the following; the
+later 3.4.0 release tranche now supplies the versioned policy while preserving
+every authority separation below:
 
-- `.github/release-policies/v3.4.0.json` or any other production policy;
 - registry SRI, release-run, provenance, acceptance, or promotion placeholders;
 - package or lockfile version changes;
 - release or promotion workflow changes;
@@ -60,9 +61,9 @@ completed its own trusted-publisher, candidate, provenance, isolated acceptance,
 and promotion gates at protected source
 `2971c9f767c934e12fd056bf8c6dca5164ffe7d2`, with successful release run
 `33932333902` and observation-only admission run `33933861238`; npm `latest` and
-`candidate` then both resolved to 3.3.2. That completed immutable release does
-not populate an M570 production policy or grant this milestone any effect
-authority. Only a later exact-state change may add a production successor policy.
+`candidate` then both resolved to 3.3.2. That completed immutable release did
+not itself populate an M570 production policy or grant this milestone any
+effect authority. The later tracked 3.4.0 policy remains evidence-only.
 
 ## Later local receipt consumption
 
