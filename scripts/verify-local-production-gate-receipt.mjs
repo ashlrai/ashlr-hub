@@ -183,13 +183,27 @@ export function validateLocalProductionGateReceipt(value) {
 
   const toolchain = exactRecord(receipt.toolchain, [
     'nodeVersion', 'npmVersion', 'rustcVersion', 'cargoVersion', 'cargoAuditVersion',
-    'executables',
+    'developerDirectory', 'macosSdkRoot', 'macosSdkVersion', 'macosDeploymentTarget',
+    'executables', 'files',
   ], 'toolchain');
   exactString(toolchain.nodeVersion, SEMVER_RE, 'toolchain.nodeVersion', 32);
   exactString(toolchain.npmVersion, SEMVER_RE, 'toolchain.npmVersion', 32);
   for (const key of ['rustcVersion', 'cargoVersion', 'cargoAuditVersion']) {
     exactString(toolchain[key], /^[^\r\n]{1,160}$/u, `toolchain.${key}`, 160);
   }
+  for (const key of ['developerDirectory', 'macosSdkRoot']) {
+    exactString(toolchain[key], /^\/.{1,1023}$/u, `toolchain.${key}`, 1024);
+  }
+  if (!toolchain.macosSdkRoot.startsWith(`${toolchain.developerDirectory}/`)) {
+    fail('toolchain.macosSdkRoot must be inside toolchain.developerDirectory');
+  }
+  exactString(toolchain.macosSdkVersion, /^\d+(?:\.\d+){0,2}$/u, 'toolchain.macosSdkVersion', 32);
+  exactString(
+    toolchain.macosDeploymentTarget,
+    /^\d+(?:\.\d+){1,2}$/u,
+    'toolchain.macosDeploymentTarget',
+    32,
+  );
   if (toolchain.cargoAuditVersion !== 'cargo-audit 0.22.2') {
     fail('toolchain.cargoAuditVersion must be cargo-audit 0.22.2');
   }
@@ -200,13 +214,22 @@ export function validateLocalProductionGateReceipt(value) {
   const executables = exactRecord(toolchain.executables, [
     'node', 'npmCli', 'npmRuntime', 'bash', 'git', 'rustc', 'rustdoc', 'cargo',
     'cargoFmt', 'rustfmt', 'cargoClippy', 'clippyDriver', 'cargoAudit', 'osvScanner',
-    'sandboxExec',
+    'xcodeSelect', 'xcrun', 'sandboxExec',
   ], 'toolchain.executables');
   for (const [name, executableValue] of Object.entries(executables)) {
     const executable = exactRecord(executableValue, ['path', 'sha256'], `toolchain.executables.${name}`);
     exactString(executable.path, /^\/.{1,1023}$/u, `toolchain.executables.${name}.path`, 1024);
     exactString(executable.sha256, SHA256_RE, `toolchain.executables.${name}.sha256`, 64);
   }
+  const files = exactRecord(toolchain.files, ['macosSdkSettings'], 'toolchain.files');
+  const sdkSettings = exactRecord(
+    files.macosSdkSettings, ['path', 'sha256'], 'toolchain.files.macosSdkSettings',
+  );
+  exactString(sdkSettings.path, /^\/.{1,1023}$/u, 'toolchain.files.macosSdkSettings.path', 1024);
+  if (sdkSettings.path !== `${toolchain.macosSdkRoot}/SDKSettings.json`) {
+    fail('toolchain.files.macosSdkSettings.path must belong to toolchain.macosSdkRoot');
+  }
+  exactString(sdkSettings.sha256, SHA256_RE, 'toolchain.files.macosSdkSettings.sha256', 64);
 
   const bindings = exactRecord(receipt.bindings, ['policy', 'contract', 'package'], 'bindings');
   const policy = exactRecord(bindings.policy, ['policyId', 'version', 'sha256'], 'bindings.policy');
@@ -231,6 +254,7 @@ export function validateLocalProductionGateReceipt(value) {
   const execution = exactRecord(receipt.execution, [
     'startedAt', 'finishedAt', 'hostPlatform', 'confinementModel', 'sanitizedEnvironment',
     'sandboxProfiles', 'externalEffects', 'operationalAshlrHome', 'disposableSidecar',
+    'disposableTauriGeneratedRoot', 'disposableTauriCheckIcon', 'cargoAuditRuntime',
   ], 'execution');
   validateIso(execution.startedAt, 'execution.startedAt');
   validateIso(execution.finishedAt, 'execution.finishedAt');
@@ -240,7 +264,10 @@ export function validateLocalProductionGateReceipt(value) {
     || execution.sanitizedEnvironment !== 'allowlisted-disposable-home-temp-cache-and-ashlr-home'
     || execution.externalEffects !== 'evidence-writes-recorded;same-uid-output-parent-swap-and-other-effects-not-attested'
     || execution.operationalAshlrHome !== 'redirected-to-disposable-root'
-    || execution.disposableSidecar !== 'created-exclusive-and-removed-before-receipt') {
+    || execution.disposableSidecar !== 'created-exclusive-and-removed-before-receipt'
+    || execution.disposableTauriGeneratedRoot !== 'created-exclusive-and-removed-before-receipt'
+    || execution.disposableTauriCheckIcon !== 'created-exclusive-and-removed-before-receipt'
+    || execution.cargoAuditRuntime !== 'digest-matched-copy-in-immutable-profile-root') {
     fail('execution boundary is invalid');
   }
   const sandboxProfiles = exactRecord(execution.sandboxProfiles, [

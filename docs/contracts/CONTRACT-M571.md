@@ -144,12 +144,25 @@ test shards have host authority as stated above. The receipt records evidence
 writes but does not attest that arbitrary external effects were impossible.
 The repository's bounded-command adapter supplies the GNU `timeout` interface
 used by the audit wrapper on macOS; no Homebrew `timeout` dependency is needed.
+Because cargo-audit canonicalizes its own executable path and the real home is
+read-denied, the runner copies its already-hashed bytes into the immutable
+sandbox-profile root, rechecks the copy's identity and digest before every gate,
+and executes that copy for the native audit.
 
 Tauri requires a host-triple sidecar to exist while checking its manifest. The
 runner refuses an existing target, creates an inert non-operational placeholder
 with exclusive mode, and removes only the file it created in a `finally` path.
-The inert sidecar's device/inode identity is checked before removal. The
-temporary worktree is removed and the controlling repository must return to the
+The exact source intentionally lacks generated icon binaries, so the runner
+likewise refuses an existing `icons/32x32.png`, exclusively creates a fixed
+transparent RGBA check-only icon, continuously verifies its identity and digest,
+and removes it before checking source cleanliness. The inert sidecar's
+device/inode identity is checked before removal. Tauri also
+generates four ignored capability-schema files during native compilation. The runner
+therefore refuses a pre-existing `gen` root, exclusively creates mode-`0700`
+`gen/schemas` directories, grants sandbox writes only to those four exact leaves,
+rechecks both directory identities after every gate, and removes the
+owned root before checking source cleanliness. The temporary worktree is
+removed and the controlling repository must return to the
 same clean commit and tree before artifact and receipt publication. V1 is
 intentionally macOS-only; another host fails before the native gate instead of
 claiming untested parity.
@@ -165,6 +178,11 @@ is bounded to 256 KiB. Its closed schema binds:
   the exact `cargo-fmt` and `cargo-clippy` binaries from the same toolchain as
   Cargo, with exact `CARGO` and `RUSTFMT` paths; the disposable gate environment
   does not inherit rustup's mutable default-toolchain selection;
+- the canonical active Xcode developer directory, macOS SDK root/version,
+  tracked minimum deployment target, exact `xcode-select`/`xcrun` identities,
+  and the SDK settings digest. These values are resolved before confinement,
+  and compiler caches are routed into private scratch rather than granting write
+  access to the Darwin user temp root;
 - policy ID/version/digest and verification-contract path/digest;
 - package name/version/tarball name, tarball SHA-256, and sha512 SRI;
 - ordered gate IDs, exact per-gate confinement classifications, command digests,

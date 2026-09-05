@@ -16,6 +16,8 @@ import {
   createPrivateLocalGateTempRoot,
   parseLocalGateArgs,
   parsePrivatePackEvidence,
+  prepareDisposableTauriCheckIcon,
+  prepareDisposableTauriGeneratedRoot,
   prepareDisposableTauriSidecar,
   selectExactGateExecutable,
   selectLocalGateSandboxProfile,
@@ -59,10 +61,21 @@ function validReceipt(): Record<string, unknown> {
       rustcVersion: 'rustc 1.95.0 (example)',
       cargoVersion: 'cargo 1.95.0 (example)',
       cargoAuditVersion: 'cargo-audit 0.22.2',
+      developerDirectory: '/Applications/Xcode.app/Contents/Developer',
+      macosSdkRoot: '/Applications/Xcode.app/Contents/Developer/SDKs/MacOSX.sdk',
+      macosSdkVersion: '26.2',
+      macosDeploymentTarget: '10.15',
       executables: Object.fromEntries([
         'node', 'npmCli', 'npmRuntime', 'bash', 'git', 'rustc', 'rustdoc', 'cargo', 'cargoAudit',
-        'cargoFmt', 'rustfmt', 'cargoClippy', 'clippyDriver', 'osvScanner', 'sandboxExec',
+        'cargoFmt', 'rustfmt', 'cargoClippy', 'clippyDriver', 'osvScanner', 'xcodeSelect',
+        'xcrun', 'sandboxExec',
       ].map((name) => [name, { path: `/tools/${name}`, sha256: digest }])),
+      files: {
+        macosSdkSettings: {
+          path: '/Applications/Xcode.app/Contents/Developer/SDKs/MacOSX.sdk/SDKSettings.json',
+          sha256: digest,
+        },
+      },
     },
     bindings: {
       policy: { policyId: 'ashlr-release-successor-v1:9.8.7', version: '9.8.7', sha256: digest },
@@ -85,6 +98,9 @@ function validReceipt(): Record<string, unknown> {
       externalEffects: 'evidence-writes-recorded;same-uid-output-parent-swap-and-other-effects-not-attested',
       operationalAshlrHome: 'redirected-to-disposable-root',
       disposableSidecar: 'created-exclusive-and-removed-before-receipt',
+      disposableTauriGeneratedRoot: 'created-exclusive-and-removed-before-receipt',
+      disposableTauriCheckIcon: 'created-exclusive-and-removed-before-receipt',
+      cargoAuditRuntime: 'digest-matched-copy-in-immutable-profile-root',
     },
     gates: LOCAL_PRODUCTION_GATE_IDS.map((id, index) => ({
       id,
@@ -264,6 +280,31 @@ describe('M571 local production gate v1', () => {
     expect(existsSync(sidecar.path)).toBe(false);
   });
 
+  it.runIf(process.platform === 'darwin')('owns and removes only the disposable Tauri generated root', () => {
+    const fakeRepo = mkdtempSync(join(tmpdir(), 'ashlr-m571-tauri-gen-'));
+    scratch.push(fakeRepo);
+    mkdirSync(join(fakeRepo, 'desktop', 'src-tauri'), { recursive: true });
+    const generated = prepareDisposableTauriGeneratedRoot(realpathSync(fakeRepo));
+    expect(lstatSync(generated.path).mode & 0o7777).toBe(0o700);
+    writeFileSync(join(generated.schemasPath, 'generated.json'), '{}', 'utf8');
+    expect(() => prepareDisposableTauriGeneratedRoot(realpathSync(fakeRepo))).toThrow(/already exists/u);
+    generated.cleanup();
+    expect(existsSync(generated.path)).toBe(false);
+    expect(() => generated.cleanup()).not.toThrow();
+  });
+
+  it.runIf(process.platform === 'darwin')('creates a deterministic disposable RGBA Tauri check icon', () => {
+    const fakeRepo = mkdtempSync(join(tmpdir(), 'ashlr-m571-tauri-icon-'));
+    scratch.push(fakeRepo);
+    mkdirSync(join(fakeRepo, 'desktop', 'src-tauri', 'icons'), { recursive: true });
+    const icon = prepareDisposableTauriCheckIcon(realpathSync(fakeRepo));
+    expect(readFileSync(icon.path).subarray(1, 4).toString('ascii')).toBe('PNG');
+    expect(lstatSync(icon.path).mode & 0o7777).toBe(0o600);
+    expect(() => prepareDisposableTauriCheckIcon(realpathSync(fakeRepo))).toThrow(/already exists/u);
+    icon.cleanup();
+    expect(existsSync(icon.path)).toBe(false);
+  });
+
   it.runIf(process.platform === 'darwin')('keeps private nested Unix sockets inside the Darwin path budget', () => {
     const tempDirectory = (() => {
       const inheritedTmpdir = process.env.TMPDIR;
@@ -343,6 +384,12 @@ describe('M571 local production gate v1', () => {
           cargo: '/usr/bin/true',
           rustfmt: '/usr/bin/true',
         },
+        apple: {
+          developerDirectory: '/Applications/Xcode.app/Contents/Developer',
+          macosSdkRoot: '/Applications/Xcode.app/SDKs/MacOSX.sdk',
+          macosSdkVersion: '26.2',
+          macosDeploymentTarget: '10.15',
+        },
       },
     });
     expect(env.TMPDIR).toBe(join(tempDirectory.path, 'tmp'));
@@ -352,6 +399,10 @@ describe('M571 local production gate v1', () => {
     expect(env.ASHLR_VITEST_HOME_PARENT).toBe(join(custodyDirectory.path, 'vitest-homes'));
     expect(env.CARGO).toBe('/usr/bin/true');
     expect(env.RUSTFMT).toBe('/usr/bin/true');
+    expect(env.SDKROOT).toBe('/Applications/Xcode.app/SDKs/MacOSX.sdk');
+    expect(env.DEVELOPER_DIR).toBe('/Applications/Xcode.app/Contents/Developer');
+    expect(env.MACOSX_DEPLOYMENT_TARGET).toBe('10.15');
+    expect(env.CLANG_MODULE_CACHE_PATH).toBe(join(tempDirectory.path, 'clang-module-cache'));
     expect(env).not.toHaveProperty('RUSTUP_HOME');
     expect(lstatSync(env.ASHLR_VITEST_HOME_PARENT).mode & 0o7777).toBe(0o700);
     tempDirectory.cleanup();
@@ -398,6 +449,8 @@ describe('M571 local production gate v1', () => {
     const custodyDirectory = createPrivateLocalGateCustodyRoot();
     scratch.push(root, profileRoot, custodyDirectory.path);
     mkdirSync(join(root, 'tmp'));
+    mkdirSync(join(root, 'clang-module-cache'));
+    mkdirSync(join(root, 'xdg-cache'));
     mkdirSync(join(custodyDirectory.path, 'home'));
     const profiles = writeSandboxProfiles({
       verificationRoot: repoRoot, tempRoot: root,
@@ -409,6 +462,22 @@ describe('M571 local production gate v1', () => {
       'require("node:fs").writeFileSync(process.argv[1], "ok")', allowed,
     ]).status).toBe(0);
     expect(readFileSync(allowed, 'utf8')).toBe('ok');
+
+    for (const cacheName of ['clang-module-cache', 'xdg-cache']) {
+      const cacheFile = join(root, cacheName, 'allowed.cache');
+      expect(spawnSync('/usr/bin/sandbox-exec', [
+        '-f', profiles.networkDenied.path, process.execPath, '-e',
+        'require("node:fs").writeFileSync(process.argv[1], "cache")', cacheFile,
+      ]).status).toBe(0);
+      expect(readFileSync(cacheFile, 'utf8')).toBe('cache');
+    }
+
+    const deniedCacheSibling = join(root, 'clang-module-cache.escape');
+    expect(spawnSync('/usr/bin/sandbox-exec', [
+      '-f', profiles.networkDenied.path, process.execPath, '-e',
+      'require("node:fs").writeFileSync(process.argv[1], "escape")', deniedCacheSibling,
+    ]).status).not.toBe(0);
+    expect(existsSync(deniedCacheSibling)).toBe(false);
 
     const allowedHome = join(custodyDirectory.path, 'home', 'allowed.txt');
     expect(spawnSync('/usr/bin/sandbox-exec', [
@@ -426,6 +495,24 @@ describe('M571 local production gate v1', () => {
       ]).status).toBe(0);
       expect(readFileSync(packEvidence, 'utf8')).toBe('evidence');
       rmSync(packEvidence);
+    }
+
+    const generated = prepareDisposableTauriGeneratedRoot(repoRoot);
+    try {
+      const allowedSchema = join(generated.schemasPath, 'capabilities.json');
+      expect(spawnSync('/usr/bin/sandbox-exec', [
+        '-f', profiles.networkDenied.path, process.execPath, '-e',
+        'require("node:fs").writeFileSync(process.argv[1], "schema")', allowedSchema,
+      ]).status).toBe(0);
+      expect(readFileSync(allowedSchema, 'utf8')).toBe('schema');
+      const deniedSchemaSibling = join(generated.schemasPath, 'unexpected.json');
+      expect(spawnSync('/usr/bin/sandbox-exec', [
+        '-f', profiles.networkDenied.path, process.execPath, '-e',
+        'require("node:fs").writeFileSync(process.argv[1], "escape")', deniedSchemaSibling,
+      ]).status).not.toBe(0);
+      expect(existsSync(deniedSchemaSibling)).toBe(false);
+    } finally {
+      generated.cleanup();
     }
 
     const deniedScratchSibling = join(root, 'pack-evidence.json.extra');
