@@ -47,7 +47,11 @@ describe('emergency authority release truth', () => {
     expect(release).toContain('f2c9353db35fbf12889bddafd8acc2b7ca5ae67c');
     expect(release).toContain('32396250683');
     expect(release).toMatch(/npm version 3\.3\.1[\s\S]{0,80}GitHub Release remain\s+absent/i);
-    expect(release).toMatch(/3\.3\.2 as the sole candidate successor/i);
+    expect(release).toContain('2971c9f767c934e12fd056bf8c6dca5164ffe7d2');
+    expect(release).toContain('33932333902');
+    expect(release).toContain('33933861238');
+    expect(release).toMatch(/npm `latest` and `candidate` both resolve to 3\.3\.2/i);
+    expect(release).toMatch(/does not install or activate a runtime/i);
     expect(release).toContain('d6c1a5ec3626f715018a8ffb929906ac0f52f5c9');
 
     for (const removedClaim of [
