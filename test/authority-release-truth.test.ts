@@ -48,7 +48,7 @@ describe('emergency authority release truth', () => {
     expect(release).toContain('32396250683');
     expect(release).toMatch(/npm version 3\.3\.1[\s\S]{0,80}GitHub Release remain\s+absent/i);
     expect(release).toMatch(/3\.3\.2 as the sole candidate successor/i);
-    expect(release).toContain('abd49a5049759e417d99089b88c628fd2364f79c');
+    expect(release).toContain('d6c1a5ec3626f715018a8ffb929906ac0f52f5c9');
 
     for (const removedClaim of [
       'RUNTIME-FLEET-ACTIVATION.md',
