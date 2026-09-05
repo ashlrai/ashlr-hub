@@ -17,6 +17,15 @@ records its provider result in the job summary.
 
 ## Dependabot cooldown
 
+GitHub-hosted Dependabot update jobs are intentionally paused while CI and
+dependency maintenance run through the local engineering fleet. Every configured
+ecosystem remains explicit in `.github/dependabot.yml`, but each
+`open-pull-requests-limit` is `0`. Dependabot alerts and secret-scanning push
+protection remain enabled; automated Dependabot security-update pull requests
+are disabled in repository settings. Re-enabling hosted updates requires an
+explicit capacity decision, restoration of bounded pull-request limits, and a
+reviewed local acceptance pass.
+
 Routine npm and Cargo version updates wait 3 days for patch releases, 7 days
 for minor releases, 30 days for major releases, and 5 days when a SemVer class
 is unavailable. This is a review window for newly published packages, not a
