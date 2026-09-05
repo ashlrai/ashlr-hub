@@ -21,7 +21,7 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   publication lane for 3.4.0; a separate reviewed successor release contract
   is required before this development line can be tagged or published.
 
-## [3.3.2] — 2026-08-20 — Safe successor after the failed immutable 3.3.1 release attempt
+## [3.3.2] — 2026-09-05 UTC — Safe successor after the failed immutable 3.3.1 release attempt
 
 - Carries forward the reviewed fail-closed runtime and operator-console closure
   prepared for 3.3.1, plus the deterministic trajectory-fixture clock repair
@@ -33,10 +33,14 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   run `32396250683`, attempt 1. npm version 3.3.1 and its GitHub Release remain
   absent; the tag, version, run, and absence must never be rewritten, rerun,
   published, or reused.
-- Keeps the immutable public 3.3.0 predecessor quarantined at its exact package
-  integrity and tag while preparing 3.3.2 as the sole candidate successor. npm
-  `latest` remains 3.0.1 until isolated acceptance and a separate observation-
-  only promotion admission approved solely by `masonwyatt23` both succeed.
+- Published from protected merge
+  `2971c9f767c934e12fd056bf8c6dca5164ffe7d2` through successful release run
+  `33932333902`, while preserving the immutable public 3.3.0 predecessor as
+  quarantined incident evidence at its exact package integrity and tag.
+- After isolated acceptance and successful observation-only admission run
+  `33933861238`, npm `latest` and `candidate` both resolve to 3.3.2. This
+  distribution state does not install or activate a runtime, enable a resident
+  service, configure providers or credentials, or authorize spend.
 
 ## [3.3.1] — 2026-08-18 — Fail-closed runtime boundaries and emergency neutralization of the quarantined 3.3.0 candidate
 
