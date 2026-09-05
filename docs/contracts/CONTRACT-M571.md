@@ -12,13 +12,17 @@ later release successor. It verifies a single exact clean Git commit and tree,
 runs every required source, package, dependency, web, and native check, and
 writes a canonical receipt to a caller-selected path outside the repository.
 The external receipt avoids self-reference: no receipt or receipt digest is
-committed into the source tree it attests.
+committed into the source tree it attests. The local registry archive is also
+built with `ASHLR_REPRODUCIBLE_PACKAGE=1`, so its `build-identity.json` is the
+deterministic, uncommissioned identity (`revision:null`, `dirty:null`,
+`provenance:"unavailable"`). A registry package therefore cannot claim desktop
+runtime activation provenance; that remains a separate artifact and authority.
 
 The gate consumes an M570 policy. That policy must be a tracked canonical file
 under `.github/release-policies/`, match the package and lockfile version, bind
 the exact raw SHA-256 of `ashlr.verify.json`, pin the exact Node 24+ and npm 11+
 versions executing the gate, and contain the exact SRI later reproduced by the
-packed tarball. No production policy is added by this milestone.
+packed tarball.
 
 ## Invocation
 

@@ -98,7 +98,7 @@ describe('M570 release successor policy v1', () => {
     });
     expect(existsSync(productionPolicyPath)).toBe(true);
     expect(verifyReleaseSuccessorPolicyFile(productionPolicyPath, '3.4.0').policy).toMatchObject({
-      release: { requiredFirstParentRevision: 'ab9c97d7383d12f074dead99df87f56abe4cd9c8' },
+      release: { requiredFirstParentRevision: '22adafc995a4c9f95fd48bf9572f90f95db1923e' },
       package: { version: '3.4.0' },
     });
     expect(source).not.toMatch(/3\.3\.2|3\.4\.0|abd49a5049759e417d99089b88c628fd2364f79c|d6c1a5ec/u);
@@ -111,7 +111,8 @@ describe('M570 release successor policy v1', () => {
     expect(contract).toContain('`33932333902`');
     expect(contract).toContain('`33933861238`');
     expect(contract).toContain('npm `latest` and\n`candidate` then both resolved to 3.3.2');
-    expect(contract).toContain('does\nnot populate an M570 production policy or grant this milestone any effect\nauthority');
+    expect(contract).toContain('did\nnot itself populate an M570 production policy or grant this milestone any\neffect authority');
+    expect(contract).toContain('later tracked 3.4.0 policy remains evidence-only');
     expect(contract).not.toContain('must first complete its own trusted-publisher');
   });
 

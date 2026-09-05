@@ -67,6 +67,21 @@ describe('build identity generation', () => {
     });
   });
 
+  it('emits a deterministic uncommissioned identity for reproducible local registry packages', () => {
+    const root = fixture();
+    initGit(root);
+    expect(createBuildIdentity({
+      repoRoot: root,
+      env: { ASHLR_REPRODUCIBLE_PACKAGE: '1' },
+    })).toEqual({
+      schemaVersion: 1,
+      packageVersion: '3.1.0',
+      revision: null,
+      dirty: null,
+      provenance: 'unavailable',
+    });
+  });
+
   it('fails closed for absent or malformed provenance', () => {
     const root = fixture();
     expect(createBuildIdentity({ repoRoot: root, env: {} })).toMatchObject({

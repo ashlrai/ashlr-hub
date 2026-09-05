@@ -757,6 +757,7 @@ export function createIsolatedGateEnvironment({ repoRoot, tempRoot, tools }) {
     NO_COLOR: '1',
     FORCE_COLOR: '0',
     ASHLR_HOME: join(operationalHome, '.ashlr'),
+    ASHLR_REPRODUCIBLE_PACKAGE: '1',
     ASHLR_RUN_NATIVE_LAUNCHD_TEST: '0',
     AUDIT_TIMEOUT_BIN: join(repoRoot, 'scripts', 'run-bounded-command.mjs'),
     AUDIT_NODE_BIN: tools.paths.node,

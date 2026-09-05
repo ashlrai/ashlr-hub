@@ -43,6 +43,11 @@ export function createBuildIdentity({ repoRoot, env = process.env }) {
   const packageVersion = readPackageVersion(repoRoot);
   if (!packageVersion) return unavailable();
 
+  // Registry archives must be reproducible before their policy-bearing merge
+  // commit exists. Runtime activation therefore treats local npm archives as
+  // uncommissioned until a separately attested desktop artifact is installed.
+  if (env.ASHLR_REPRODUCIBLE_PACKAGE === '1') return unavailable(packageVersion);
+
   if (!existsSync(join(repoRoot, '.git'))) {
     const ciRevision = env.GITHUB_SHA?.trim() ?? '';
     if (!REVISION_RE.test(ciRevision)) return unavailable(packageVersion);
