@@ -77,3 +77,25 @@ successor local publishing path; the frozen 3.3.2 OIDC workflow is not one.
 The final external handoff must record the exact feature/merge SHA, tarball
 digest, installed acceptance, live console state, and rollback source. The
 pre-increment rollback source is the base SHA above.
+
+## Packaged acceptance and browser follow-up
+
+Feature commit `6a0fe2c3fd60945b425116b8444a04b36d34be0b` was built clean and
+installed offline. The enhanced package smoke passed. Independent fresh
+extraction checked every file and ran the packaged deterministic demo, then
+delivered its elite to an isolated Git branch with unchanged checkout/index/HEAD
+and exact repeat idempotence. All five native demo checks passed.
+
+The installed feature build also delivered the already evaluated calendar
+benchmark `campaign-calendar-94544f09` to local branch
+`codex/universe-calendar-delivery`, commit
+`57ff416c55868b543beefa37378d0ed5bb8068f4`. Only `format.ts` changed in that
+branch; the seed checkout/index/HEAD remained unchanged. The result is a delivery
+of existing evidence, not a new model call, fresh evaluation, or production fix.
+
+Live browser inspection caught a privacy-filter interaction: the API abbreviates
+home paths to `~/...`, but quoting that string literally prevents shell
+expansion. The follow-up UI patch separates quoted home expansion from safely
+quoted path data and explains hidden digests without disabling privacy filters.
+The successor package must be rebuilt and reverified; the initial artifact is
+intermediate, not the final handoff.

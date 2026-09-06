@@ -4,6 +4,10 @@ import styles from './UniverseView.module.css';
 type DeliveryReport = NonNullable<UniverseOverview['deliveryReports']>[number];
 
 const quote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
+// The authenticated API abbreviates this user's home. A quoted tilde does not
+// expand in the shell, so keep the home expansion separate from the path data.
+const repoArgument = (value: string): string => value.startsWith('~/') ? `"$HOME"/${quote(value.slice(2))}` : quote(value);
+const visibleDigest = (value: string): string => value === '[REDACTED]' ? 'Hidden by the console privacy filter' : value;
 
 export function UniverseDeliveries({ summary, report, onInspectTrial }: {
   summary: UniverseSummary;
@@ -30,14 +34,16 @@ export function UniverseDeliveries({ summary, report, onInspectTrial }: {
               <div><dt>Repository</dt><dd><code>{delivery.repo}</code></dd></div>
               <div><dt>Commit</dt><dd><code>{delivery.commit}</code></dd></div>
               <div><dt>Pinned base</dt><dd><code>{delivery.baseCommit}</code></dd></div>
-              <div><dt>Artifact digest</dt><dd><code>{delivery.artifactDigest}</code></dd></div>
-              <div><dt>Comparator digest</dt><dd><code>{delivery.comparatorDigest}</code></dd></div>
+              <div><dt>Artifact digest</dt><dd><code>{visibleDigest(delivery.artifactDigest)}</code></dd></div>
+              <div><dt>Comparator digest</dt><dd><code>{visibleDigest(delivery.comparatorDigest)}</code></dd></div>
               <div><dt>Changed files</dt><dd>{delivery.changedFiles.length ? delivery.changedFiles.map((path) => <code key={path}>{path}<br /></code>) : 'None'}</dd></div>
             </dl>
             {summary.runs.some((run) => run.id === delivery.runId && run.trials.some((trial) => trial.id === delivery.trialId)) ?
               <button type="button" className={styles.eliteButton} onClick={() => onInspectTrial(delivery.runId, delivery.trialId)}>Inspect source trial</button> :
               <p>Source trial unavailable in the current history.</p>}
-            {verified && delivery.status === 'delivered' ? <pre className={styles.command}><code>{`git -C ${quote(delivery.repo)} show --stat ${quote(delivery.commit)}`}</code></pre> : null}
+            {verified && delivery.status === 'delivered' ? <pre className={styles.command}><code>{`git -C ${repoArgument(delivery.repo)} show --stat ${quote(delivery.commit)}`}</code></pre> : null}
+            {delivery.artifactDigest === '[REDACTED]' || delivery.comparatorDigest === '[REDACTED]' ?
+              <p>Read exact identities locally with <code>ashlr universe deliveries {quote(summary.manifest.id)} --json</code>.</p> : null}
           </details>
         )) : <p>{degraded ? 'No delivery can be confirmed from this read.' : 'No local branches delivered yet.'}</p>}
         {summary.sourceState === 'healthy' && !degraded && summary.elites.length ? (

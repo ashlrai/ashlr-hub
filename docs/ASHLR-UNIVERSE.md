@@ -310,6 +310,10 @@ integration may therefore need conflict resolution and fresh tests.
    evidence, not another accepted change. The console exposes the same evidence
    under **Repository delivery** and links back to the source generation.
 
+   The console's privacy filter may abbreviate home paths and hide full digests.
+   Its Git example expands the abbreviated home safely; use the local
+   `deliveries --json` command for exact identity values.
+
 The delivery intent is persisted before the branch becomes visible. If a call
 is interrupted, repeat the exact universe, trial, and branch command to
 reconcile its intent; never delete a receipt to force a retry. `pending` is not

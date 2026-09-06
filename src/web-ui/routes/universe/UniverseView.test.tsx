@@ -156,6 +156,19 @@ describe('UniverseView', () => {
     expect(within(region).queryByRole('button', { name: 'Inspect source trial' })).not.toBeInTheDocument();
   });
 
+  it('keeps privacy-filtered home paths runnable and explains hidden digests', async () => {
+    const report = deliveryReport();
+    report.deliveries[0]!.repo = "~/projects/compiler's library";
+    report.deliveries[0]!.artifactDigest = '[REDACTED]';
+    report.deliveries[0]!.comparatorDigest = '[REDACTED]';
+    mount(overview({ deliveryReports: [report] }));
+    const region = await screen.findByRole('region', { name: 'Repository delivery' });
+    expect(within(region).getByText(`git -C "$HOME"/'projects/compiler'\\''s library' show --stat '${'b'.repeat(40)}'`)).toBeInTheDocument();
+    expect(within(region).getAllByText('Hidden by the console privacy filter')).toHaveLength(2);
+    expect(within(region).getByText("ashlr universe deliveries 'compiler' --json")).toBeInTheDocument();
+    expect(within(region).queryByText('[REDACTED]')).not.toBeInTheDocument();
+  });
+
   it('offers delivery only for the current verified elite, not every passing trial', async () => {
     mount(overview());
     const region = await screen.findByRole('region', { name: 'Repository delivery' });
