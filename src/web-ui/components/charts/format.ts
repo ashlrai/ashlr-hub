@@ -44,8 +44,10 @@ export function formatSignedCompact(n: number): string {
 
 /** YYYY-MM-DD -> short label, e.g. "Aug 14". Local-independent (UTC parse). */
 export function formatDayLabel(day: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return day;
   const d = new Date(`${day}T00:00:00Z`);
-  if (Number.isNaN(d.getTime())) return day;
+  // Date normalizes impossible dates; compare the padded UTC date to reject rollover.
+  if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== day) return day;
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
