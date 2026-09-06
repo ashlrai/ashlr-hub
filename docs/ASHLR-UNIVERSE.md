@@ -37,6 +37,16 @@ variant population, successive generations rotate through that population.
 
 Local execution currently requires macOS `sandbox-exec`. Linux execution awaits a verified isolation profile; Windows execution is unsupported. The console at `/next#/universe` reads the default store. Use CLI inspection with the same `--root` for experiments in a custom store.
 
+The local web server moves its expensive global dashboard, fleet, control,
+history, and proposal reads to one bounded background thread. Universe reads and
+HTTP authentication remain responsive while those summaries are calculated.
+Identical pending reads share work; the queue and deadlines are bounded. A failed
+summary returns an unavailable response, not an empty-success result. Daemon
+observation becomes explicitly unknown if its reader fails. Successful or partial
+token-authorized mutation attempts invalidate the worker's cached state. This
+thread is a performance boundary, not an untrusted-code sandbox; it does not
+change the authority of the existing readers or enable fleet dispatch.
+
 ## Five engines, one feedback loop
 
 | Engine | Responsibility | First useful integration |

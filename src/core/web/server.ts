@@ -22,7 +22,8 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypt
 import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
 import type { AshlrConfig, WebServerOptions, WebServerHandle } from '../types.js';
-import { handleApi, drainSseConnections, drainSseSession } from './api.js';
+import { handleApi, drainSseConnections, drainSseSession, invalidateWebReadCaches } from './api.js';
+import { createReadProjectionWorker, type ReadProjectionReader } from './read-projections.js';
 import { ReadSessionRevocations } from './read-session-revocations.js';
 import { serveStatic } from './static.js';
 import { gcRunStreams } from '../run/streaming.js';
@@ -279,6 +280,7 @@ export function assetsDir(): string {
 export async function startServer(
   cfg: AshlrConfig,
   opts: WebServerOptions,
+  dependencies: { readProjections?: ReadProjectionReader | null } = {},
 ): Promise<WebServerHandle> {
   // Sweep expired/over-budget captures at process startup even when no future
   // run writes output. This is best-effort and never creates the store.
@@ -289,6 +291,12 @@ export async function startServer(
   const token = randomBytes(32).toString('hex');
   let readSessionSigningKey = randomBytes(32).toString('hex');
   const readSessionRevocations = new ReadSessionRevocations(READ_SESSION_REVOCATION_CAPACITY);
+  // The production default isolates synchronous metadata aggregation from the
+  // HTTP loop. Explicit null keeps injected, in-process readers available to
+  // hermetic route tests; there is no runtime fallback after a worker failure.
+  const readProjections = dependencies.readProjections === undefined
+    ? createReadProjectionWorker(cfg)
+    : dependencies.readProjections;
 
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     // The EventSource client proof appears in its same-origin URL because the
@@ -402,8 +410,19 @@ export async function startServer(
       token,
       allowDispatch: opts.allowDispatch,
       readSession: authority?.kind === 'session' ? authority.session : undefined,
+      readProjections: readProjections ?? undefined,
     })
       .then((handled) => {
+        // A mutation can partially succeed and still return 409/500 (for
+        // example a pause whose daemon has not quiesced yet). Invalidate after
+        // every token-authorized attempt, never after an unauthenticated POST.
+        if (handled && req.method === 'POST' && opts.allowDispatch
+          && safeEqual(headerValue(req, 'x-ashlr-token'), token)) {
+          invalidateWebReadCaches(cfg);
+          // Start invalidation before another request can observe stale worker
+          // caches. It only tears down readers, never starts a daemon or work.
+          void readProjections?.invalidate().catch(() => {});
+        }
         if (handled) return;
 
         // ── 3. Static assets ───────────────────────────────────────────────
@@ -444,6 +463,9 @@ export async function startServer(
         reject(new Error('Failed to determine bound port'));
       }
     });
+  }).catch(async (error: unknown) => {
+    await readProjections?.close();
+    throw error;
   });
 
   const url = `http://127.0.0.1:${port}`;
@@ -454,8 +476,8 @@ export async function startServer(
     readToken,
     token,
     url,
-    close(): Promise<void> {
-      return new Promise((resolve) => {
+    async close(): Promise<void> {
+      await Promise.all([readProjections?.close(), new Promise<void>((resolve) => {
         // Drain all open SSE response streams registered by handleApi, then
         // close the HTTP server (stops accepting new connections).
         drainSseConnections();
@@ -464,7 +486,7 @@ export async function startServer(
           server.closeAllConnections();
         }
         server.close(() => resolve());
-      });
+      })]);
     },
   };
 
