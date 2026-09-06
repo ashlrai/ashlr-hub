@@ -73,6 +73,17 @@ describe('northStarDocSummary', () => {
     expect(summary).toMatch(/composition/i);
   });
 
+  it('grounds planning in Universe and verified engineering yield', async () => {
+    const { _resetNorthStarDocCache, northStarDocSummary } = await import(
+      '../src/core/ecosystem/map.js'
+    );
+    _resetNorthStarDocCache();
+    const summary = northStarDocSummary();
+    expect(summary).toContain('Ashlr Universe');
+    expect(summary).toContain('useful accepted changes per measured token and hour');
+    expect(summary).toContain('unknown usage is not zero');
+  });
+
   it('contains the "measure grand not vanity" directive', async () => {
     const { _resetNorthStarDocCache, northStarDocSummary } = await import(
       '../src/core/ecosystem/map.js'

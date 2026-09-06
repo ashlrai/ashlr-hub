@@ -42,6 +42,12 @@ export const NAV_GROUPS: NavGroup[] = [
         description: 'Authenticated, observation-only decision spine for capability runway and value bets.',
         implemented: true,
       },
+      {
+        path: '/universe',
+        label: 'Universe',
+        description: 'Compare experiments, follow variant lineages, and inspect the retained population.',
+        implemented: true,
+      },
     ],
   },
   {

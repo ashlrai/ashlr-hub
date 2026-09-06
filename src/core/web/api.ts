@@ -93,6 +93,7 @@ import { progressOf } from '../goals/advance.js';
 import { sanitizePublicJson } from '../util/public-json.js';
 import type { MissionShadowObservation } from '../vision/mission-shadow-observer.js';
 import { readAgentOsRuntimeSnapshotV1 } from '../vision/agent-os-runtime-read.js';
+import { readUniverseOverview } from '../universe/index.js';
 import type { ProposalsReadResult } from '../inbox/store.js';
 import { handleRunEventsSse, RUN_EVENTS_PATH_RE } from './run-stream.js';
 
@@ -1175,6 +1176,13 @@ export async function handleApi(
     // execution authority.
     if (path === '/api/vision/mission' && method === 'GET') {
       sendJson(res, 200, await buildVisionMissionSnapshot(cfg));
+      return true;
+    }
+
+    // The server authenticates this persisted experiment projection before
+    // dispatch. Reading the population never starts a run or mutates its store.
+    if (path === '/api/universe' && method === 'GET') {
+      sendJson(res, 200, readUniverseOverview());
       return true;
     }
 

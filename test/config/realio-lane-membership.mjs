@@ -43,6 +43,9 @@ export const REAL_IO_LANE_TIMEOUT_MS = 60_000;
  * lane by default instead of silently rejoining the flaky pile.
  */
 export const REAL_IO_TEST_FILES = [
+  'test/universe-core.test.ts', // real Git snapshots and confined experiment subprocesses
+  'test/universe-demo.test.ts', // two real Universe generations and artifact lineage
+  'test/universe-confinement.test.ts', // real macOS filesystem boundary checks with test-owned sentinels
   // --- confirmed-flaky repeat offenders (this session's evidence: isolation re-runs pass;
   // only fail under parallel load with the 5s default) ---
   'test/m201.daemon-loop.test.ts', // real daemon subprocess loop — 16.5s slowest test in the quiet baseline

@@ -1,82 +1,69 @@
-# Ashlr North Star
+# Ashlr Universe — North Star
 
-> The grand, ambitious direction the fleet orients around. The strategist and
-> invent-engine should ground their goals + ideas in THIS, not just incremental
-> internal plumbing. Set by Mason; pursued autonomously by the fleet.
+> Build for a factory whose models become ten times more capable. The objective
+> should become more ambitious without replacing the factory.
 
 > **Aspirational design context — not current runtime activation guidance.**
-> This document defines the target state, not a claim that a resident fleet is
-> active. Current compiled daemon and conductor trust roots are empty, so
-> non-dry daemon and resident loop execution is dormant. Owner-invoked `ashlr
-> goal "<objective>"` remains a live proposal-only path.
+> This document defines the target state. The local Universe experiment kernel
+> executes and measures bounded code experiments; it is not a resident engineering
+> firm. Current compiled daemon and conductor trust roots remain empty.
 
 ## Vision
 
-An **autonomous engineering organization** that conceives, builds, ships, and
-operates a whole ecosystem of best-in-class developer tools — using frontier AI
-(Claude Code, Codex, Kimi K2) as its hands and a human director (Mason, via
-Telegram) as its vision — **improving its own ability to improve**, on a platform
-where every tool it builds also makes it stronger.
+**Ashlr Universe is an agent-native operating system for engineers and builders, optimizing verified engineering yield: useful accepted changes per token and hour.**
 
-This is **not a demo**. It is real production infrastructure: the goal is to make
-Mason's computer the **best autonomous 24/7 engineering machine ever built for a
-startup (Ashlr.ai)** — a genuine force of nature that (1) builds + operates the
-open-source ecosystem, (2) relentlessly improves *itself*, and (3) is **pointable
-at Ashlr.ai's real work** — client delivery, internal tools, and the company's own
-products — shipping faster and at higher margin than any traditional team. ashlr-hub
-makes itself incredible *and* makes the company incredible. The ecosystem repos are
-the proving ground; the company's leverage is the payoff. Success = Ashlr.ai ships
-more, better, cheaper because this machine runs day and night.
+Give it an idea, a starting portfolio, resources, and the scope of work it may
+undertake. It should discover worthwhile opportunities, design experiments,
+build competing approaches, test real artifacts, judge outcomes, and invest its
+next unit of effort using what it learned. Its product vision can evolve from
+evidence rather than freezing into a backlog of the first ideas it generated.
 
-The scarce resource is not intelligence (the frontier models are already enough).
-It is the **harness that lets that intelligence compound safely** — sensing its own
-compute (the god-view), running every backend at once within their limits, and
-self-directing toward the highest-leverage work. We build the harness.
+Hub is the local execution and observation kernel. Universe is the continuing
+search, resource allocation, and organizational learning above it. Subscription
+capacity, cloud models, and local compute are resources to allocate according to
+measured usefulness and provider limits. More tokens spent is not itself progress.
 
 ## Three pillars (in order of ambition)
 
-1. **Recursive self-improvement (the frontier).** The fleet improves its own
-   engine — routing, judgment, invention, taste, speed, cost — so each week it
-   ships better + cheaper than the last. Success = a system *measurably better at
-   improving itself over time*. Its substrate is code it can edit, so this is tractable.
+1. **Recursive self-improvement.** Experiment on harnesses, tools, memory, model selection, and coordination using independent, comparable evidence.
+   Keep diverse useful variants and retain their ancestry. A candidate may improve
+   the evaluator, but cannot rewrite the acceptance evidence used to select itself.
 
-2. **Ecosystem product factory.** The 13 repos are a portfolio shipped to
-   best-in-class, real, open-source products with users: phantom (secret manager),
-   binshield (supply-chain security), ashlr-md, morphkit (web→iOS), ashlr-pulse,
-   stack, ashlrcode, webfetch, prompt-trackr. Excellent, adopted — not demos.
+2. **Ecosystem product factory.** Turn real engineering work into useful, tested, shipped products with users.
+   Ideation, implementation, integration, operation, and learning belong in the
+   same loop. Evaluate product outcomes, not only code quantity or benchmark wins.
 
-3. **The composition platform (the flywheel).** Every tool the fleet builds also
-   amplifies it: pulse to see itself, phantom to secure itself, binshield to vet
-   its own deps, stack to provision its own infra, ashlrcode as its hands. The
-   ecosystem becomes self-hosting; each tool compounds the others.
+3. **The composition platform.** Independently valuable projects become stronger through shared interfaces and evidence.
+   Hub, Cortex, Phantom, Locus, Plugin, Stack, and Core Efficiency retain their own
+   repositories and identities. The desktop console and physical agent board are
+   views and controls for the same system, not separate sources of truth.
 
-## The human (Mason)
+## The engineer
 
-Sets grand direction (Telegram / the Elon agent) + approves the highest-stakes,
-least-reversible calls (enrollment, major architecture, public releases, spend).
-The fleet conceives, builds, judges, ships, and operates everything else.
+Sets intent and delegates scope and resources. Routine decisions and effectiveness
+assessment should run automatically from observable evidence. Bring the engineer
+decisions that require new direction or authority, not every implementation step.
+An operator can inspect, interrupt, redirect, and reproduce the system's work.
 
 ## How we measure "grand" (not vanity)
 
-- **Products shipped + adopted** — real features, releases, users.
-- **Capabilities invented** — net-new, not just fixes.
-- **Compounding velocity** — merges/week trending UP, cost/merge trending DOWN.
-- **Safety never weakened** — every gate (M54 never-weaken-safety, sandbox
-  confinement, judge, scope-cap, kill-switch, enrollment) holds, always.
+- **Verified engineering yield:** useful accepted changes per measured token and hour.
+- **Products shipped + adopted:** real features, releases, reliability, and users.
+- **Capabilities invented:** useful net-new functionality, not just maintenance.
+- **Compounding capability:** compare current and prior systems on the same tasks.
+- **Measurement integrity:** unknown tokens remain unknown; local test scores are
+  not customer acceptance, revenue, or deployment proof. Preserve raw dimensions.
 
 ## Near-term ambitious bets (vs internal plumbing)
 
-These are the *kind* of goals the strategist + invent should generate:
-- Take ONE ecosystem product to genuinely best-in-class + launched (the killer
-  feature + docs + tests + release) — e.g. phantom team-vaults or binshield's scanner.
-- Invent BOLD compositional capabilities weekly (use the ecosystem to build things
-  that matter), grounded in this north-star.
-- The fleet *operates* its products: triages issues, ships releases, watches telemetry.
-- A fleet-intelligence layer that learns from every merge/reject to get sharper.
+- Run competing implementations, retain per-niche winners, and use them as the next generation's parents.
+- Connect measured experiments to a real ecosystem product's local acceptance suite.
+- Allocate frontier and local model work using observed quality and resource use.
+- Learn from accepted and rejected changes, operational behavior, and user feedback.
 
 ## Wiring
 
-`docs/NORTH-STAR.md` + `docs/ECOSYSTEM-MAP.md` are the strategist's + invent-engine's
-grounding context. Goals derived from this should be substantive (value ≥ 4),
-bound to a concrete enrolled repo, and decomposed into shippable milestones the
-frontier trio executes — sandboxed, judged, scope-capped, gated.
+`docs/NORTH-STAR.md` and `docs/ECOSYSTEM-MAP.md` ground strategy and invention.
+Goals should be substantive (value ≥ 4), bound to a concrete repo and verifiable
+outcome, and decomposed into shippable milestones. The [Universe architecture](ASHLR-UNIVERSE.md)
+describes its five engines, current executable scope, and path to the full system.

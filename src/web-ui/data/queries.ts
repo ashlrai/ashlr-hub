@@ -8,6 +8,7 @@
 import { apiGet } from './client.js';
 import type {
   AgentOsSnapshotResponse,
+  UniverseOverview,
   ControlLogEntry,
   ControlSnapshot,
   DashboardSnapshot,
@@ -45,6 +46,11 @@ export const controlSnapshotQuery: QueryDef<ControlSnapshot> = {
 export const agentOsSnapshotQuery: QueryDef<AgentOsSnapshotResponse> = {
   key: 'agent-os-snapshot',
   fetch: (signal) => apiGet<AgentOsSnapshotResponse>('/api/agent-os', signal),
+};
+
+export const universeOverviewQuery: QueryDef<UniverseOverview> = {
+  key: 'universe-overview',
+  fetch: (signal) => apiGet<UniverseOverview>('/api/universe', signal),
 };
 
 // NOTE: there is no standalone GET /api/visibility route — VisibilitySnapshot

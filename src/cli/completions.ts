@@ -29,7 +29,7 @@ export const TOP_LEVEL_COMMANDS: string[] = [
   'conductor-permit',
   'onboard', 'demo', 'orient', 'docs', 'completions', 'plugins', 'x', 'comms',
   'director', 'best-of-n', 'invent', 'resources', 'usage', 'version', 'help',
-  'skills',
+  'skills', 'universe',
 ];
 
 /** Subcommands per top-level command (first-position completion only). */
@@ -79,6 +79,7 @@ const SUBCOMMANDS: Record<string, string[]> = {
   completions: ['zsh', 'bash'],
   plugins: ['init', 'list', 'info', 'enable', 'disable'],
   skills: ['audit'],
+  universe: ['demo', 'init', 'run', 'status', 'archive', 'help'],
 };
 
 const FLEET_AUTOMERGE_CANARY_SUBCOMMANDS = [

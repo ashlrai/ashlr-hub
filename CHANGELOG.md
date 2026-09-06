@@ -11,6 +11,23 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Ashlr Universe local experiment kernel
+
+- Adds `ashlr universe demo|init|run|status|archive` and the
+  `@ashlr/hub/universe` programmatic interface.
+- Executes budgeted, network-denied local candidate commands on macOS, checks
+  frozen artifacts with a pinned evaluator, and persists raw measurements.
+- Retains per-niche winners, reuses their artifacts in later generations, and
+  rotates small trial budgets so later variants are not permanently starved.
+- Adds an authenticated Universe console with lineage, comparison, failure
+  evidence, and explicit unmeasured token and cost fields.
+- Grounds strategy in verified engineering yield. The credential-free demo
+  verifies experiment mechanics; model-driven mutation, portfolio acceptance,
+  and resident operation remain separate integrations.
+
+Verification for this feature runs locally without GitHub Actions. The existing
+3.4.0 release candidate's receipt does not certify these new source changes.
+
 ## [3.4.0] — Unreleased — Governed agent-native engineering OS
 
 - Integrates the default-off Agent OS control plane, execution identity,

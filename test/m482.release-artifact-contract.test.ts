@@ -780,6 +780,26 @@ describe('release artifact contract v1', () => {
     expect(buildRuntimeReleaseDependencyInventory(release.packageRoot)).toMatchObject({ ok: true });
   });
 
+  it.each(['ASHLR-UNIVERSE.md', 'UNIVERSE-RESEARCH.md', 'NORTH-STAR.md'])(
+    'admits shipped Universe documentation %s without opening arbitrary package paths',
+    (documentName) => {
+      const release = fixture();
+      const packagePath = join(release.packageRoot, 'package.json');
+      const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as Record<string, unknown>;
+      write(join(release.packageRoot, 'docs', documentName), '# portable Universe documentation\n');
+      writeFileSync(packagePath, `${JSON.stringify({
+        ...packageJson,
+        files: [...packageJson.files as string[], `docs/${documentName}`],
+      })}\n`);
+      expect(buildRuntimeReleaseDependencyInventory(release.packageRoot)).toMatchObject({ ok: true });
+      writeFileSync(packagePath, `${JSON.stringify({
+        ...packageJson,
+        files: [...packageJson.files as string[], 'docs/arbitrary-private-file.md'],
+      })}\n`);
+      expect(buildRuntimeReleaseDependencyInventory(release.packageRoot)).toMatchObject({ ok: false });
+    },
+  );
+
   it.each(['CONTRACT-M521.md', 'CONTRACT-M568.md'])(
     'admits shipped %s through the closed portable root-files allowlist',
     (contractName) => {
