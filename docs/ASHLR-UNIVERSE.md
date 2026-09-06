@@ -8,7 +8,7 @@ The useful unit of progress is an improvement demonstrated in a working environm
 
 The Universe kernel runs a complete local experiment: a manifest describes candidates and a fixed evaluator; a bounded run executes operator commands or requests candidate edits from an explicitly configured local model, records observations, and selects elites within defined niches. A later run can select parents from the archive. The bundled deterministic demonstration provides a reproducible way to inspect this behavior without model credentials or a running model service.
 
-This is a development feature in Hub. Its evidence establishes local candidate generation, evaluation, selection, and bounded multi-generation campaigns. Subscription-backed generation, resident execution, multi-repository product delivery, customer feedback, and external payments are later integrations. Existing fleet activation and release behavior is documented in the [Hub architecture](ARCHITECTURE.md).
+This is a development feature in Hub. Its evidence establishes local candidate generation, evaluation, selection, bounded multi-generation campaigns, and delivery of a retained artifact to a new local Git branch. Subscription-backed generation, resident execution, multi-repository product delivery, customer feedback, and external payments are later integrations. Existing fleet activation and release behavior is documented in the [Hub architecture](ARCHITECTURE.md).
 
 The command surface is `ashlr universe`. From a source checkout with dependencies installed, build locally with `npm run build`, then run:
 
@@ -268,6 +268,70 @@ If records are degraded, inspect the reported reason before retrying. Do not
 delete evidence or reset the definition to make a refusal disappear. To change
 an immutable campaign budget or experiment contract, register a new, explicitly
 identified campaign or universe as appropriate.
+
+## Deliver a retained artifact to a repository
+
+Delivery connects a current niche elite to a usable branch in the experiment's
+pinned seed repository. It does not edit the working tree, index, or current
+HEAD. A dirty checkout can remain dirty and untouched. The new commit's parent
+is the pinned seed revision, not the repository's current branch tip; later
+integration may therefore need conflict resolution and fresh tests.
+
+1. Read the archive and choose the exact current elite's `trialId`:
+
+   ```bash
+   ashlr universe archive <universe-id> --json
+   ```
+
+2. Explicitly authorize the local branch mutation by invoking delivery with a
+   new `codex/` branch name:
+
+   ```bash
+   ashlr universe deliver <universe-id> \
+     --trial <elite-trial-id> --branch codex/my-evaluated-change --json
+   ```
+
+   This writes Git objects and creates only that local branch. It does not
+   switch branches, invoke hooks or working-tree filters, merge, push, execute
+   candidate code, or deploy. If the artifact matches the pinned base, the
+   result is `unchanged` and no branch is created. A pre-existing unrelated
+   branch is never overwritten.
+
+3. Inspect the durable receipt and local commit:
+
+   ```bash
+   ashlr universe deliveries <universe-id> --json
+   git -C /absolute/path/to/seed-repository show --stat <receipt-commit>
+   ```
+
+   Receipts bind the universe, trial, run, manifest, comparator, artifact,
+   base commit, new commit, tree, and changed files. Reading checks the
+   branch against its receipt. An altered or missing branch is degraded
+   evidence, not another accepted change. The console exposes the same evidence
+   under **Repository delivery** and links back to the source generation.
+
+   The console's privacy filter may abbreviate home paths and hide full digests.
+   Its Git example expands the abbreviated home safely; use the local
+   `deliveries --json` command for exact identity values.
+
+The delivery intent is persisted before the branch becomes visible. If a call
+is interrupted, repeat the exact universe, trial, and branch command to
+reconcile its intent; never delete a receipt to force a retry. `pending` is not
+confirmation that a branch was delivered. Reads do not resume pending work.
+Use `--root /absolute/private/store` consistently for a nondefault store.
+
+The SDK exports `deliverUniverseElite(id, { trialId, branch, root? })` and
+`readUniverseDeliveries(id, { root? })` from `@ashlr/hub/universe`.
+Delivery requires a healthy experiment and a verified retained artifact; it
+shares the campaign/generation execution lease. A live campaign must finish
+or acknowledge a pause before delivery can start.
+
+The committed tree is checked against the evaluated artifact before branch
+creation. This preserves the existing result; it is **not a fresh evaluation**
+or proof of product usefulness. Local branch delivery, merge acceptance,
+package publication, deployment, and customer value are separate outcomes.
+Keep the source branch and receipt for review or later integration; removal of
+either is a separate explicit repository/storage operation.
 
 ## Five engines, one feedback loop
 

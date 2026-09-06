@@ -54,7 +54,8 @@ export function ensureUniverseRoot(root?: string): string {
   return path;
 }
 
-interface Entry { path: string; data: Buffer; executable: boolean }
+export interface UniverseArtifactEntry { path: string; data: Buffer; executable: boolean }
+type Entry = UniverseArtifactEntry;
 
 /** Read bounded regular files while checking descriptor and path stability. */
 function treeEntries(root: string): Entry[] {
@@ -111,6 +112,12 @@ function entriesDigest(entries: Entry[]): string {
 }
 
 export function artifactDigest(root: string): string { return entriesDigest(treeEntries(root)); }
+
+/** One bounded, descriptor-checked snapshot binds the bytes subsequently delivered. */
+export function readArtifactSnapshot(root: string): { entries: UniverseArtifactEntry[]; digest: string } {
+  const entries = treeEntries(root);
+  return { entries, digest: entriesDigest(entries) };
+}
 
 export function copyArtifact(source: string, destination: string): string {
   const entries = treeEntries(source);

@@ -14,6 +14,9 @@ const USAGE = `usage: ashlr universe <command> [--root <private directory>] [--j
   status [id]                  Read objectives, runs, and measurements
   archive [id]                 Read the winning artifact in each niche
   campaign <command>           Run or inspect a bounded multi-generation campaign
+  deliver <id> --trial <id> --branch codex/<new-branch>
+                               Create a local branch from the exact current elite
+  deliveries <id>              Read delivery receipts without changing the repository
   help                         Show this help
 
 Candidate and evaluator commands run with network access denied. An optional
@@ -21,6 +24,7 @@ local-chat generation variant contacts its explicitly configured loopback model
 endpoint; it sends declared files and experiment context, without auth or tools.
 The evaluator is pinned separately from candidate edits. Results are local
 experiments, not accepted production changes. --root defaults to ~/.ashlr/universe.
+Delivery creates only a local branch; it never pushes, merges, or deploys.
 Exit codes: 0 success, 1 failed/degraded execution, 2 invalid arguments.
 `;
 
@@ -117,6 +121,10 @@ function renderOverview(overview: UniverseOverview, archiveOnly: boolean): strin
 
 /** CLI and dashboard share the same persisted experiment records. */
 export async function cmdUniverse(args: string[]): Promise<number> {
+  if (args[0] === 'deliver' || args[0] === 'deliveries') {
+    const { cmdUniverseDelivery } = await import('./universe-delivery.js');
+    return cmdUniverseDelivery(args);
+  }
   if (args[0] === 'campaign') {
     const { cmdUniverseCampaign } = await import('./universe-campaign.js');
     return cmdUniverseCampaign(args.slice(1));

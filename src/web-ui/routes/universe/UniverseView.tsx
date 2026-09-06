@@ -7,6 +7,7 @@ import { universeOverviewQuery } from '../../data/queries.js';
 import type { UniverseOverview, UniverseRun, UniverseSummary, UniverseTrial } from '../../data/api-types.js';
 import { useScrollRestore } from '../../hooks/useScrollRestore.js';
 import styles from './UniverseView.module.css';
+import { UniverseDeliveries } from './UniverseDeliveries.js';
 
 type Campaign = NonNullable<UniverseOverview['campaigns']>[number];
 const ACTIVE_CAMPAIGN_STATES = new Set(['running', 'pause-requested', 'stop-requested']);
@@ -200,7 +201,11 @@ function Campaigns({ campaigns, summary, onInspectRun }: {
   );
 }
 
-function UniverseExperiment({ summary, campaigns }: { summary: UniverseSummary; campaigns: Campaign[] }) {
+function UniverseExperiment({ summary, campaigns, deliveryReport }: {
+  summary: UniverseSummary;
+  campaigns: Campaign[];
+  deliveryReport?: NonNullable<UniverseOverview['deliveryReports']>[number];
+}) {
   const [runId, setRunId] = useState<string | null>(null);
   const [trialId, setTrialId] = useState<string | null>(null);
   const runs = summary.activeRun && !summary.runs.some((run) => run.id === summary.activeRun!.id)
@@ -294,6 +299,8 @@ function UniverseExperiment({ summary, campaigns }: { summary: UniverseSummary; 
         </section>
       )}
 
+      <UniverseDeliveries summary={summary} report={deliveryReport} onInspectTrial={(run, trial) => { setRunId(run); setTrialId(trial); }} />
+
       <footer className={styles.resources} aria-label="Generation resources">
         <h2>Recorded resources</h2>
         <dl><div><dt>Runtime across {runs.length} generations</dt><dd>{duration(totalDuration)}</dd></div><div><dt>Model tokens{run ? ` in generation ${run.generation}` : ''}</dt><dd>{run?.tokensUsed == null ? 'Unavailable' : number(run.tokensUsed)}</dd></div><div><dt>Model cost</dt><dd>Unavailable</dd></div></dl>
@@ -338,7 +345,7 @@ export function UniverseView() {
       {query.status === 'loading' ? <section className={styles.empty} aria-label="Loading Universe experiments"><SkeletonLine width="60%" /><SkeletonLine width="90%" /><SkeletonLine width="80%" /></section> : null}
       {query.status === 'error' ? <div className={styles.notice} role="alert"><h2>Universe records unavailable</h2><p>{query.error?.message ?? 'The experiment store could not be read.'}</p><p>Refresh to retry. Any records below are from the last successful read.</p></div> : null}
       {overview?.sourceState === 'degraded' ? <div className={styles.notice} role="status"><strong>Experiment history is incomplete.</strong><p>{overview.reasons.join('; ') || 'Some persisted records could not be verified.'}</p></div> : null}
-      {universe ? <UniverseExperiment key={universe.manifest.id} summary={universe} campaigns={overview?.campaigns?.filter((item) => item.definition.universeId === universe.manifest.id) ?? []} /> : overview && overview.sourceState !== 'degraded' ? <FirstExperiment /> : null}
+      {universe ? <UniverseExperiment key={universe.manifest.id} summary={universe} campaigns={overview?.campaigns?.filter((item) => item.definition.universeId === universe.manifest.id) ?? []} deliveryReport={overview?.deliveryReports?.find((report) => report.universeId === universe.manifest.id)} /> : overview && overview.sourceState !== 'degraded' ? <FirstExperiment /> : null}
     </div>
   );
 }

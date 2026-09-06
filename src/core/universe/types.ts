@@ -1,3 +1,5 @@
+import type { UniverseDeliveryReceipt } from './delivery.js';
+
 /** Universe experiments report local measurements, never inferred business value. */
 export interface UniverseManifest {
   schemaVersion: 1;
@@ -151,6 +153,12 @@ export interface UniverseOverview {
   reasons: string[];
   universes: UniverseSummary[];
   campaigns?: UniverseCampaignSummary[];
+  deliveryReports?: Array<{
+    universeId: string;
+    deliveries: UniverseDeliveryReceipt[];
+    sourceState: 'missing' | 'healthy' | 'degraded';
+    reasons: string[];
+  }>;
   measurementScope: 'local-experiment';
 }
 
