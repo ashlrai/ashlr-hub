@@ -8,7 +8,48 @@ export interface UniverseManifest {
   metric: { name: string; direction: 'maximize' | 'minimize'; minImprovement: number };
   budget: { maxTrials: number; maxDurationMs: number; trialTimeoutMs: number; maxParallel: number };
   evaluation: { command: string[]; timeoutMs: number };
-  variants: Array<{ id: string; niche: string; hypothesis: string; command: string[]; model?: string }>;
+  variants: UniverseVariant[];
+}
+
+export interface UniverseGenerationConfig {
+  kind: 'local-chat';
+  /** Explicit numeric-loopback OpenAI-compatible endpoint; no account discovery. */
+  endpoint: string;
+  model: string;
+  /** Existing relative text files; also the complete replacement allowlist. */
+  files: string[];
+  maxOutputTokens: number;
+}
+
+export type UniverseVariant = { id: string; niche: string; hypothesis: string } & (
+  { command: string[]; model?: string; generation?: never } |
+  { generation: UniverseGenerationConfig; command?: never; model?: never }
+);
+
+export interface UniverseGenerationReceipt {
+  schemaVersion: 1;
+  provider: 'local-openai-compatible';
+  endpoint: string;
+  model: string;
+  status: 'succeeded' | 'failed' | 'timed-out' | 'cancelled';
+  requestStarted: boolean;
+  promptDigest: string | null;
+  responseDigest: string | null;
+  durationMs: number;
+  /** Transport-reported counts only, never estimates or model-authored JSON. */
+  usage: { state: 'reported' | 'unavailable'; inputTokens: number | null; outputTokens: number | null };
+  changedFiles: string[];
+  error?: string;
+}
+
+export interface UniverseGenerationUsage {
+  scope: 'model-generation';
+  trials: number;
+  requestsStarted: number;
+  reportedRequests: number;
+  /** Null unless the generation completed and every recorded request reported usage. */
+  inputTokens: number | null;
+  outputTokens: number | null;
 }
 
 export interface UniverseArtifact {
@@ -30,6 +71,7 @@ export interface UniverseTrial {
   durationMs: number;
   delta: number | null;
   selected: boolean;
+  generation?: UniverseGenerationReceipt;
   error?: string;
 }
 
@@ -44,9 +86,10 @@ export interface UniverseRun {
   status: 'running' | 'completed' | 'interrupted' | 'failed';
   trials: UniverseTrial[];
   durationMs: number;
-  /** Local programs do not provide model billing or token telemetry. */
-  tokensUsed: null;
+  /** Completed generations with full recorded usage only; commands remain unmeasured. */
+  tokensUsed: number | null;
   costUsd: null;
+  generationUsage?: UniverseGenerationUsage;
   error?: string;
 }
 

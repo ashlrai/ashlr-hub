@@ -68,6 +68,44 @@ describe('Universe CLI', () => {
     expect(output.mock.calls[0]![0]).toContain('tokens: unmeasured · cost: unmeasured');
   });
 
+  it('shows provider-reported generation tokens with their coverage and scope', async () => {
+    core.runUniverse.mockResolvedValue({ ...run(), tokensUsed: 1350,
+      generationUsage: { scope: 'model-generation', trials: 1, requestsStarted: 1, reportedRequests: 1, inputTokens: 1200, outputTokens: 150 },
+      trials: [{ id: 'trial-model', variantId: 'local-coder', niche: 'efficient', parentTrialId: null,
+        status: 'passed', score: 10, metrics: {}, artifact: null, durationMs: 900, delta: null, selected: true,
+        generation: { schemaVersion: 1, provider: 'local-openai-compatible', endpoint: 'http://127.0.0.1:11434/v1', model: 'local-coder',
+          status: 'succeeded', requestStarted: true, promptDigest: 'a'.repeat(64), responseDigest: 'b'.repeat(64), durationMs: 700,
+          usage: { state: 'reported', inputTokens: 1200, outputTokens: 150 }, changedFiles: ['candidate.mjs'] } }],
+    });
+    expect(await cmdUniverse(['run', 'demo'])).toBe(0);
+    const text = output.mock.calls[0]![0] as string;
+    expect(text).toContain('Trials: 1/1 passed · 1 admitted to niche archive');
+    expect(text).toContain('local-openai-compatible · local-coder');
+    expect(text).toContain('http://127.0.0.1:11434/v1 · request started');
+    expect(text).toContain('Provider-reported tokens: input=1200 output=150');
+    expect(text).toContain('tokens: 1350 (model generation only) · cost: unmeasured');
+    expect(text).toContain('Generation usage coverage: 1/1 recorded started requests reported tokens');
+  });
+
+  it('keeps incomplete generation accounting unknown instead of summing partial coverage', async () => {
+    core.runUniverse.mockResolvedValue({ ...run(), generationUsage: {
+      scope: 'model-generation', trials: 2, requestsStarted: 2, reportedRequests: 1,
+      inputTokens: null, outputTokens: null,
+    } });
+    expect(await cmdUniverse(['run', 'demo'])).toBe(0);
+    expect(output.mock.calls[0]![0]).toContain('tokens: unmeasured · cost: unmeasured');
+    expect(output.mock.calls[0]![0]).toContain('Generation usage coverage: 1/2 recorded started requests reported tokens');
+  });
+
+  it('preserves a reported zero token total without inventing a dollar cost', async () => {
+    core.runUniverse.mockResolvedValue({ ...run(), tokensUsed: 0, generationUsage: {
+      scope: 'model-generation', trials: 1, requestsStarted: 1, reportedRequests: 1,
+      inputTokens: 0, outputTokens: 0,
+    } });
+    expect(await cmdUniverse(['run', 'demo'])).toBe(0);
+    expect(output.mock.calls[0]![0]).toContain('tokens: 0 (model generation only) · cost: unmeasured');
+  });
+
   it('passes the chosen root and abort signal to execution and removes signal handlers', async () => {
     const beforeInt = process.listenerCount('SIGINT');
     const beforeTerm = process.listenerCount('SIGTERM');
@@ -115,6 +153,8 @@ describe('Universe CLI', () => {
   it('prints help without reading a store', async () => {
     expect(await cmdUniverse(['help'])).toBe(0);
     expect(output.mock.calls[0]![0]).toContain('init --manifest');
+    expect(output.mock.calls[0]![0]).toContain('explicitly configured loopback model');
+    expect(output.mock.calls[0]![0]).toContain('without auth or tools');
     expect(core.readUniverseOverview).not.toHaveBeenCalled();
   });
 });

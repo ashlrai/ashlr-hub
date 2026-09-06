@@ -25,6 +25,14 @@ function run(overrides: Partial<UniverseRun> = {}): UniverseRun {
   };
 }
 
+function generation(overrides: Partial<NonNullable<UniverseTrial['generation']>> = {}): NonNullable<UniverseTrial['generation']> {
+  return {
+    schemaVersion: 1, provider: 'local-openai-compatible', endpoint: 'http://127.0.0.1:11434/v1', model: 'local-coder',
+    status: 'succeeded', requestStarted: true, promptDigest: 'a'.repeat(64), responseDigest: 'b'.repeat(64), durationMs: 700,
+    usage: { state: 'reported', inputTokens: 1200, outputTokens: 150 }, changedFiles: ['candidate.mjs'], ...overrides,
+  };
+}
+
 function summary(): UniverseSummary {
   const latest = trial({ id: 'trial-next', variantId: 'better-motor', parentTrialId: 'trial-first', score: 18, metrics: { quality: 18, latencyMs: 23 }, delta: 6 });
   return {
@@ -93,6 +101,84 @@ describe('UniverseView', () => {
     expect(screen.getByRole('button', { name: 'Inspect better-motor in efficient' })).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Inspect better-motor in efficient' }));
     expect(screen.getByRole('region', { name: 'Evidence for better-motor' })).toBeInTheDocument();
+  });
+
+  it('shows trial model evidence and generation-scoped usage without calling it billing', async () => {
+    const current = summary();
+    const latest = current.runs[1]!;
+    latest.trials = [trial({ variantId: 'better-motor', generation: generation() })];
+    latest.tokensUsed = 1350;
+    latest.generationUsage = { scope: 'model-generation', trials: 1, requestsStarted: 1, reportedRequests: 1, inputTokens: 1200, outputTokens: 150 };
+    mount(overview({ universes: [current] }));
+    const evidence = await screen.findByRole('region', { name: 'Model generation evidence' });
+    expect(within(evidence).getByText('local-coder')).toBeInTheDocument();
+    expect(within(evidence).getByText('Provider-reported')).toBeInTheDocument();
+    expect(within(evidence).getByText('1,200')).toBeInTheDocument();
+    expect(within(evidence).getByText('150')).toBeInTheDocument();
+    expect(within(evidence).getByText('http://127.0.0.1:11434/v1')).toBeInTheDocument();
+    expect(within(evidence).getByText('candidate.mjs')).toBeInTheDocument();
+    expect(within(evidence).getByText(/Generation success means a valid replacement response, not evaluator acceptance/)).toBeInTheDocument();
+    expect(screen.getByText('1 / 1 trials passed')).toBeInTheDocument();
+    expect(screen.getByText('1 admitted')).toBeInTheDocument();
+    const resources = screen.getByRole('contentinfo', { name: 'Generation resources' });
+    expect(within(resources).getByText('Model tokens in generation 2')).toBeInTheDocument();
+    expect(within(resources).getByText('1,350')).toBeInTheDocument();
+    expect(within(resources).getByText(/1 \/ 1 recorded started requests reported tokens across 1 model trials/)).toBeInTheDocument();
+    expect(within(resources).getByText('Unavailable')).toBeInTheDocument();
+    expect(screen.queryByText('$0')).not.toBeInTheDocument();
+  });
+
+  it('does not turn missing generation usage or failed evaluation into a successful outcome', async () => {
+    const current = summary();
+    const latest = current.runs[1]!;
+    latest.trials = [trial({ selected: false, status: 'failed', score: null, metrics: {}, generation: generation({
+      usage: { state: 'unavailable', inputTokens: null, outputTokens: null },
+    }) })];
+    latest.generationUsage = { scope: 'model-generation', trials: 1, requestsStarted: 1, reportedRequests: 0, inputTokens: null, outputTokens: null };
+    mount(overview({ universes: [current] }));
+    await screen.findByRole('region', { name: 'Model generation evidence' });
+    expect(screen.getByText('0 / 1 trials passed')).toBeInTheDocument();
+    expect(screen.getByText('0 admitted')).toBeInTheDocument();
+    expect(screen.getByText('Not admitted. The trial did not finish with a passing measurement.')).toBeInTheDocument();
+    const resources = screen.getByRole('contentinfo', { name: 'Generation resources' });
+    expect(within(resources).getAllByText('Unavailable')).toHaveLength(2);
+    expect(within(resources).getByText(/0 \/ 1 recorded started requests reported tokens/)).toBeInTheDocument();
+    expect(within(resources).queryByText('0')).not.toBeInTheDocument();
+  });
+
+  it('preserves reported zero and switches usage with the selected generation', async () => {
+    const user = userEvent.setup();
+    const current = summary();
+    const latest = current.runs[1]!;
+    latest.trials = [trial({ generation: generation({ usage: { state: 'reported', inputTokens: 0, outputTokens: 0 } }) })];
+    latest.tokensUsed = 0;
+    latest.generationUsage = { scope: 'model-generation', trials: 1, requestsStarted: 1, reportedRequests: 1, inputTokens: 0, outputTokens: 0 };
+    mount(overview({ universes: [current] }));
+    await screen.findByRole('region', { name: 'Model generation evidence' });
+    const resources = screen.getByRole('contentinfo', { name: 'Generation resources' });
+    expect(within(resources).getByText('0')).toBeInTheDocument();
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Generation' }), 'run-first');
+    expect(within(resources).getByText('Model tokens in generation 1')).toBeInTheDocument();
+    expect(within(resources).getAllByText('Unavailable')).toHaveLength(2);
+    expect(within(resources).queryByText(/Generation usage coverage/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Model generation evidence' })).not.toBeInTheDocument();
+  });
+
+  it('distinguishes a cancelled request that never started from measured zero consumption', async () => {
+    const current = summary();
+    const latest = current.runs[1]!;
+    latest.trials = [trial({ status: 'cancelled', selected: false, score: null, generation: generation({
+      status: 'cancelled', requestStarted: false, changedFiles: [], promptDigest: null, responseDigest: null,
+      usage: { state: 'unavailable', inputTokens: null, outputTokens: null },
+    }) })];
+    latest.generationUsage = { scope: 'model-generation', trials: 1, requestsStarted: 0, reportedRequests: 0, inputTokens: null, outputTokens: null };
+    mount(overview({ universes: [current] }));
+    const evidence = await screen.findByRole('region', { name: 'Model generation evidence' });
+    expect(within(evidence).getByText('Not started')).toBeInTheDocument();
+    expect(within(evidence).getByText('None')).toBeInTheDocument();
+    const resources = screen.getByRole('contentinfo', { name: 'Generation resources' });
+    expect(within(resources).getAllByText('Unavailable')).toHaveLength(2);
+    expect(within(resources).getByText(/0 \/ 0 recorded started requests reported tokens/)).toBeInTheDocument();
   });
 
   it('distinguishes historical admission from the current elite', async () => {

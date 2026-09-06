@@ -55,6 +55,10 @@
 .view .currentElite { margin-top: calc(-1 * var(--space-2)); color: var(--status-success-fg); font-size: var(--text-xs-size); }
 .measurements { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: var(--space-4); }
 .measurements dd { font-size: var(--text-lg-size); font-variant-numeric: tabular-nums; margin-top: var(--space-1); overflow-wrap: anywhere; }
+.generationEvidence { display: flex; flex-direction: column; gap: var(--space-3); padding-top: var(--space-4); border-top: 1px solid var(--border-subtle); }
+.generationEvidence h4 { margin: 0; font-size: var(--text-sm-size); font-weight: var(--font-weight-semibold); }
+.generationEvidence .measurements dd { font-size: var(--text-sm-size); }
+.generationEvidence p { font-size: var(--text-xs-size); }
 .artifact { color: var(--text-secondary); font-size: var(--text-xs-size); }
 .artifact summary { width: fit-content; padding: var(--space-1) 0; }
 .artifact dl { display: flex; flex-direction: column; gap: var(--space-3); padding-top: var(--space-3); }

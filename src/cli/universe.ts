@@ -15,9 +15,11 @@ const USAGE = `usage: ashlr universe <command> [--root <private directory>] [--j
   archive [id]                 Read the winning artifact in each niche
   help                         Show this help
 
-Commands run locally with no network or provider credentials. The evaluator
-is pinned separately from candidate edits. Results are local experiments,
-not accepted production changes. --root defaults to ~/.ashlr/universe.
+Candidate and evaluator commands run with network access denied. An optional
+local-chat generation variant contacts its explicitly configured loopback model
+endpoint; it sends declared files and experiment context, without auth or tools.
+The evaluator is pinned separately from candidate edits. Results are local
+experiments, not accepted production changes. --root defaults to ~/.ashlr/universe.
 Exit codes: 0 success, 1 failed/degraded execution, 2 invalid arguments.
 `;
 
@@ -70,12 +72,24 @@ function renderRun(run: UniverseRun): string {
     `  ${trial.variantId} [${trial.niche}] ${trial.status}` +
     ` score=${trial.score ?? 'unavailable'} ${trial.selected ? '→ selected' : ''}` +
     ` parent=${trial.parentTrialId ?? 'seed'}` +
+    (trial.generation ?
+      `\n    Model generation: ${trial.generation.status} · ${trial.generation.provider} · ${trial.generation.model}` +
+      `\n    Endpoint: ${trial.generation.endpoint} · request ${trial.generation.requestStarted ? 'started' : 'not started'}` +
+      `\n    Provider-reported tokens: input=${trial.generation.usage.inputTokens ?? 'unavailable'} output=${trial.generation.usage.outputTokens ?? 'unavailable'}` +
+      ` · accounting=${trial.generation.usage.state} · files changed=${trial.generation.changedFiles.length}` : '') +
     (trial.error ? `\n    ${trial.error}` : ''),
   );
+  const usage = run.generationUsage;
   return [
     `${run.universeId} · generation ${run.generation} · ${run.status}`,
+    `Trials: ${run.trials.filter((trial) => trial.status === 'passed').length}/${run.trials.length} passed` +
+      (run.status === 'completed' ? ` · ${run.trials.filter((trial) => trial.selected).length} admitted to niche archive` :
+        run.status === 'running' ? ' · selection pending' : ' · selection not applied'),
     ...rows,
-    `Elapsed: ${run.durationMs} ms · tokens: unmeasured · cost: unmeasured`,
+    `Elapsed: ${run.durationMs} ms · tokens: ${run.tokensUsed === null ? 'unmeasured' : `${run.tokensUsed} (model generation only)`} · cost: unmeasured`,
+    ...(usage ? [`Generation usage coverage: ${usage.reportedRequests}/${usage.requestsStarted} recorded started requests reported tokens · ${usage.trials} model trials`,
+      'Aggregate tokens require a completed generation; interrupted in-flight usage may be missing.',
+      'Token totals cover model generation only, not command/evaluator work or accepted production changes.'] : []),
     ...(run.error ? [run.error] : []),
   ].join('\n');
 }

@@ -13,6 +13,8 @@ import { appendRecord, assertComparatorUnchanged, manifestRecord, newRun, parseE
 import { scheduledVariants, selectWinners } from './store.js';
 import { sanitizePublicJson } from '../util/public-json.js';
 import type { UniverseElite, UniverseManifest, UniverseRun, UniverseRunOptions, UniverseTrial } from './types.js';
+import { generationResources, newGenerationReceipt } from './generation.js';
+import { generateModelCandidate } from './model-candidate.js';
 
 function shortError(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).slice(0, 1_024) || 'Experiment failed';
@@ -77,7 +79,8 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
   const evaluatorScratch = privateDirectory(join(scratch, 'evaluator'));
   const trial: UniverseTrial = { id: trialId, variantId: variant.id, niche: variant.niche,
     parentTrialId: parent?.trialId ?? null, status: 'failed', score: null, metrics: {}, artifact: null,
-    durationMs: 0, delta: null, selected: false };
+    durationMs: 0, delta: null, selected: false,
+    ...(variant.generation ? { generation: newGenerationReceipt(variant.generation) } : {}) };
   try {
     if (signal.aborted) { trial.status = 'cancelled'; trial.error = 'Run cancelled before trial'; return trial; }
     const source = parent?.artifact ?? record.seedArtifact;
@@ -85,19 +88,33 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
     if (artifactDigest(source.path) !== source.digest) throw new Error('Parent artifact changed; cannot reproduce lineage');
     const copiedDigest = copyArtifact(source.path, candidate);
     if (copiedDigest !== source.digest) throw new Error('Parent artifact changed during copy');
-    const worker = executable(variant.command, candidate);
     const phaseExpired = (): boolean => performance.now() - started >= record.manifest.budget.trialTimeoutMs || Date.now() >= deadline;
     const remaining = (): number => Math.max(1, Math.min(record.manifest.budget.trialTimeoutMs - (performance.now() - started), deadline - Date.now()));
     if (phaseExpired()) { trial.status = 'timed-out'; trial.error = 'Trial budget exhausted before worker'; return trial; }
-    const result = await runVerifySubprocessAsync(confinedArgv(worker, candidate, workerScratch, [], root), {
-      cwd: candidate, env: phaseEnvironment(record, run.generation, candidate, workerScratch, parent),
-      timeoutMs: remaining(), signal,
-    });
-    const workerError = commandResultError(result, 'Worker');
-    if (workerError) {
-      trial.error = workerError;
-      trial.status = result.cancelled ? 'cancelled' : result.timedOut ? 'timed-out' : 'failed';
-      return trial;
+    if (variant.generation) {
+      // The broker receives only declared text. Model output is replacement data,
+      // never a tool call or executable command; the fixed evaluator is unchanged.
+      trial.generation = await generateModelCandidate(variant.generation, {
+        candidatePath: candidate, objective: record.manifest.objective, hypothesis: variant.hypothesis,
+        generation: run.generation, parentTrialId: parent?.trialId ?? null, timeoutMs: Math.max(1, Math.floor(remaining())), signal,
+      });
+      if (trial.generation.status !== 'succeeded') {
+        trial.status = trial.generation.status;
+        trial.error = trial.generation.error ?? 'Model candidate generation failed';
+        return trial;
+      }
+    } else {
+      const worker = executable(variant.command, candidate);
+      const result = await runVerifySubprocessAsync(confinedArgv(worker, candidate, workerScratch, [], root), {
+        cwd: candidate, env: phaseEnvironment(record, run.generation, candidate, workerScratch, parent),
+        timeoutMs: remaining(), signal,
+      });
+      const workerError = commandResultError(result, 'Worker');
+      if (workerError) {
+        trial.error = workerError;
+        trial.status = result.cancelled ? 'cancelled' : result.timedOut ? 'timed-out' : 'failed';
+        return trial;
+      }
     }
     if (signal.aborted) { trial.status = 'cancelled'; trial.error = 'Run cancelled after worker'; return trial; }
 
@@ -138,6 +155,9 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
     return trial;
   } finally {
     trial.durationMs = Math.max(0, performance.now() - started);
+    if (trial.generation && !trial.generation.requestStarted && (trial.status === 'cancelled' || trial.status === 'timed-out')) {
+      trial.generation.status = trial.status;
+    }
     // This exact path was created for this invocation, never the archive or seed.
     try { rmSync(scratch, { recursive: true, force: true }); } catch { /* Evidence remains readable if scratch cleanup is delayed. */ }
   }
@@ -224,6 +244,7 @@ export async function runUniverse(id: string, options: UniverseRunOptions = {}):
     options.signal?.removeEventListener('abort', onAbort);
     try {
       if (run) {
+        Object.assign(run, generationResources(run.trials, run.status === 'completed'));
         run.finishedAt = new Date().toISOString();
         run.durationMs = Math.max(0, performance.now() - started);
         recordFinishedRun(directory, run, lock);
