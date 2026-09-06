@@ -7,14 +7,17 @@ import { buildSandboxLauncher, escapeSbplPath } from '../sandbox/confine.js';
 import { runVerifySubprocessAsync, type VerifySubprocessResult } from '../run/verify-commands.js';
 import { acquireLocalStoreLock, ownsLocalStoreLock, releaseLocalStoreLock, verifiedProcessStartRef } from '../fleet/local-store-lock.js';
 import type { LocalStoreLock } from '../fleet/local-store-lock.js';
-import { artifactDigest, copyArtifact, digest, ensureUniverseRoot, executable, freezeArtifact, privateDirectory } from './artifacts.js';
+import { artifactDigest, canonical, copyArtifact, digest, ensureUniverseRoot, executable, freezeArtifact, privateDirectory } from './artifacts.js';
 import { appendRecord, assertComparatorUnchanged, manifestRecord, newRun, parseEvaluation,
   projectUniverse, readRecords, universePath, type ManifestRecord, type UniverseRecord } from './store.js';
 import { scheduledVariants, selectWinners } from './store.js';
 import { sanitizePublicJson } from '../util/public-json.js';
-import type { UniverseElite, UniverseManifest, UniverseRun, UniverseRunOptions, UniverseTrial } from './types.js';
+import type { UniverseElite, UniverseFeedback, UniverseManifest, UniverseRun, UniverseRunOptions, UniverseTrial } from './types.js';
 import { generationResources, newGenerationReceipt } from './generation.js';
 import { generateModelCandidate } from './model-candidate.js';
+import { buildUniverseFeedback, feedbackReceipt } from './feedback.js';
+import { assertUniverseExecution, withUniverseExecution } from './execution.js';
+import { assertRunEvidenceBudget, assertTrialEvidenceBudget, preflightTrialEvidenceBudget } from './evidence-size.js';
 
 function shortError(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).slice(0, 1_024) || 'Experiment failed';
@@ -65,16 +68,19 @@ function phaseEnvironment(record: ManifestRecord, generation: number, candidate:
 
 function recordFinishedRun(directory: string, run: UniverseRun, lock: LocalStoreLock): void {
   if (!ownsLocalStoreLock(lock)) throw new Error('Universe ownership lost before final evidence');
+  assertRunEvidenceBudget(run);
   appendRecord(directory, { id: `${run.id}.final`, kind: 'final', run });
 }
 
 async function runTrial(record: ManifestRecord, run: UniverseRun, variant: UniverseManifest['variants'][number],
-  parent: UniverseElite | undefined, directory: string, root: string, signal: AbortSignal, deadline: number): Promise<UniverseTrial> {
+  parent: UniverseElite | undefined, directory: string, root: string, signal: AbortSignal, deadline: number,
+  feedback?: UniverseFeedback): Promise<UniverseTrial> {
   const started = performance.now();
   const trialId = randomUUID();
   const scratch = join(directory, 'scratch', run.id, trialId);
   privateDirectory(scratch);
   const candidate = join(scratch, 'candidate');
+  const archivePath = join(directory, 'artifacts', run.id, trialId);
   const workerScratch = privateDirectory(join(scratch, 'worker'));
   const evaluatorScratch = privateDirectory(join(scratch, 'evaluator'));
   const trial: UniverseTrial = { id: trialId, variantId: variant.id, niche: variant.niche,
@@ -91,12 +97,19 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
     const phaseExpired = (): boolean => performance.now() - started >= record.manifest.budget.trialTimeoutMs || Date.now() >= deadline;
     const remaining = (): number => Math.max(1, Math.min(record.manifest.budget.trialTimeoutMs - (performance.now() - started), deadline - Date.now()));
     if (phaseExpired()) { trial.status = 'timed-out'; trial.error = 'Trial budget exhausted before worker'; return trial; }
+    // Reserve room for the full receipt before spending a model request. Large
+    // evaluator measurements are rejected intact below, never silently trimmed.
+    preflightTrialEvidenceBudget(trial, {
+      artifact: { path: archivePath, digest: 'f'.repeat(64), revision: record.manifest.seed.revision },
+      changedFiles: variant.generation?.files ?? [], ...(feedback ? { feedback: feedbackReceipt(feedback) } : {}),
+    });
     if (variant.generation) {
       // The broker receives only declared text. Model output is replacement data,
       // never a tool call or executable command; the fixed evaluator is unchanged.
       trial.generation = await generateModelCandidate(variant.generation, {
         candidatePath: candidate, objective: record.manifest.objective, hypothesis: variant.hypothesis,
         generation: run.generation, parentTrialId: parent?.trialId ?? null, timeoutMs: Math.max(1, Math.floor(remaining())), signal,
+        ...(feedback ? { feedback } : {}),
       });
       if (trial.generation.status !== 'succeeded') {
         trial.status = trial.generation.status;
@@ -121,7 +134,6 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
     // The worker can write only its scratch candidate. Copy before evaluating:
     // the independently scored bytes are never writable by that worker, even
     // if it left a process behind after its leader exited.
-    const archivePath = join(directory, 'artifacts', run.id, trialId);
     const snapshotDigest = copyArtifact(candidate, archivePath);
     freezeArtifact(archivePath);
     trial.artifact = { path: archivePath, digest: snapshotDigest, revision: record.manifest.seed.revision };
@@ -144,10 +156,13 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
     assertComparatorUnchanged(record);
     if (artifactDigest(archivePath) !== snapshotDigest) throw new Error('Scored artifact changed during evaluation');
     const measurement = parseEvaluation(evaluation.stdout);
-    trial.metrics = measurement.metrics;
-    trial.score = measurement.score;
-    trial.status = measurement.passed ? 'passed' : 'failed';
-    if (!measurement.passed) trial.error = 'Fixed evaluator rejected the candidate';
+    const measuredTrial: UniverseTrial = { ...trial, metrics: measurement.metrics, score: measurement.score,
+      status: measurement.passed ? 'passed' : 'failed',
+      ...(measurement.diagnostics ? { diagnostics: measurement.diagnostics } : {}),
+      ...(!measurement.passed ? { error: 'Fixed evaluator rejected the candidate' } : {}),
+    };
+    assertTrialEvidenceBudget(measuredTrial);
+    Object.assign(trial, measuredTrial);
     return trial;
   } catch (error) {
     trial.error = shortError(error);
@@ -168,8 +183,34 @@ export async function runUniverse(id: string, options: UniverseRunOptions = {}):
   if (process.platform !== 'darwin') {
     throw new Error('Universe local execution currently requires macOS sandbox-exec; other platforms have no verified Universe confinement profile');
   }
+  return withUniverseExecution(id, options, (lock) => runUniverseOwned(id, options, lock));
+}
+
+export interface UniverseOwnedRunOptions extends UniverseRunOptions {
+  runId?: string;
+  campaign?: UniverseRun['campaign'];
+  deadlineMs?: number;
+  trialLimit?: number;
+  feedback?: true;
+}
+
+/** Internal lease-bearing seam: a persisted run identity is never dispatched twice. */
+export async function runUniverseOwned(id: string, options: UniverseOwnedRunOptions,
+  execution: LocalStoreLock): Promise<UniverseRun> {
+  if (process.platform !== 'darwin') {
+    throw new Error('Universe local execution currently requires macOS sandbox-exec; other platforms have no verified Universe confinement profile');
+  }
   const root = ensureUniverseRoot(options.root);
   const directory = universePath(root, id);
+  assertUniverseExecution(directory, execution);
+  if (options.runId !== undefined && !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(options.runId)) {
+    throw new Error('Invalid reserved Universe run identity');
+  }
+  if (options.deadlineMs !== undefined && (!Number.isSafeInteger(options.deadlineMs) || options.deadlineMs <= 0)) throw new Error('Invalid campaign deadline');
+  if (options.trialLimit !== undefined && (!Number.isSafeInteger(options.trialLimit) || options.trialLimit < 1 || options.trialLimit > 64)) throw new Error('Invalid campaign trial limit');
+  if (options.campaign && (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(options.campaign.id) ||
+    !Number.isSafeInteger(options.campaign.ordinal) || options.campaign.ordinal < 1 || options.campaign.ordinal > 128 ||
+    !/^[a-f0-9]{64}$/.test(options.campaign.definitionDigest))) throw new Error('Invalid campaign identity');
   if (!existsSync(directory)) throw new Error(`Universe does not exist: ${id}`);
   privateDirectory(directory);
   const lock = acquireLocalStoreLock(join(directory, '.run.lock'), 0, { anchorPath: directory, exactPrivateStorage: true });
@@ -191,6 +232,7 @@ export async function runUniverse(id: string, options: UniverseRunOptions = {}):
     // An abandoned start is not a successful generation. Preserve completed
     // measurements, append an interruption, and only then start fresh work.
     for (const previous of overview.runs.filter((item) => item.finishedAt === null)) {
+      assertUniverseExecution(directory, execution);
       if (!ownsLocalStoreLock(lock)) throw new Error('Universe run ownership lost');
       appendRecord(directory, { id: `${previous.id}.final`, kind: 'final', run: { ...previous,
         status: 'interrupted', finishedAt: new Date().toISOString(),
@@ -199,21 +241,41 @@ export async function runUniverse(id: string, options: UniverseRunOptions = {}):
     }
     records = readRecords(directory);
     overview = projectUniverse(directory, records);
-    run = newRun(record, overview.runs.length + 1);
+    if (overview.sourceState !== 'healthy') throw new Error(overview.reasons.join('; '));
+    const existing = options.runId ? overview.runs.find((item) => item.id === options.runId) : undefined;
+    if (existing) {
+      if (canonical(existing.campaign ?? null) !== canonical(options.campaign ?? null) ||
+          Boolean(existing.feedbackEnabled) !== Boolean(options.feedback)) throw new Error('Reserved run context changed');
+      return existing;
+    }
+    if (options.deadlineMs !== undefined && Date.now() >= options.deadlineMs) throw new Error('Campaign deadline exhausted before generation');
+    if (controller.signal.aborted) throw new Error('Run cancelled before generation');
+    const nextRun = newRun(record, overview.runs.length + 1);
+    if (options.runId) nextRun.id = options.runId;
+    if (options.campaign) nextRun.campaign = options.campaign;
+    if (options.feedback) nextRun.feedbackEnabled = true;
+    const scheduled = scheduledVariants(record.manifest, nextRun.generation);
+    if (options.trialLimit !== undefined && options.trialLimit > scheduled.length) throw new Error('Campaign trial limit exceeds scheduled variants');
     const ownerStart = verifiedProcessStartRef(process.pid);
     if (!ownerStart) throw new Error('Cannot identify the Universe run process');
-    appendRecord(directory, { id: `${run.id}.start`, kind: 'start', run, ownerPid: process.pid, ownerStart });
+    assertRunEvidenceBudget(nextRun);
+    assertUniverseExecution(directory, execution);
+    appendRecord(directory, { id: `${nextRun.id}.start`, kind: 'start', run: nextRun, ownerPid: process.pid, ownerStart });
+    run = nextRun;
     const artifactDirectory = join(directory, 'artifacts', run.id);
     mkdirSync(artifactDirectory, { mode: 0o700 });
-    const deadline = Date.now() + record.manifest.budget.maxDurationMs;
-    timer = setTimeout(() => controller.abort(), record.manifest.budget.maxDurationMs);
-    const variants = scheduledVariants(record.manifest, run.generation);
+    const deadline = Math.min(Date.now() + record.manifest.budget.maxDurationMs, options.deadlineMs ?? Infinity);
+    timer = setTimeout(() => controller.abort(), Math.max(1, deadline - Date.now()));
+    const variants = scheduled.slice(0, options.trialLimit ?? scheduled.length);
     for (let index = 0; index < variants.length && !controller.signal.aborted; index += record.manifest.budget.maxParallel) {
+      assertUniverseExecution(directory, execution);
       if (!ownsLocalStoreLock(lock)) throw new Error('Universe run ownership lost');
       const batch = variants.slice(index, index + record.manifest.budget.maxParallel);
       const results = await Promise.allSettled(batch.map(async (variant) => {
         const trial = await runTrial(record, run!, variant, overview.elites.find((elite) => elite.niche === variant.niche),
-          directory, root, controller.signal, deadline);
+          directory, root, controller.signal, deadline,
+          options.feedback && variant.generation ? buildUniverseFeedback(overview, variant, directory) : undefined);
+        assertUniverseExecution(directory, execution);
         if (!ownsLocalStoreLock(lock)) throw new Error('Universe run ownership lost before evidence write');
         appendRecord(directory, { id: `${run!.id}.trial.${trial.id}`, kind: 'trial', runId: run!.id, trial });
         return trial;
@@ -244,6 +306,7 @@ export async function runUniverse(id: string, options: UniverseRunOptions = {}):
     options.signal?.removeEventListener('abort', onAbort);
     try {
       if (run) {
+        assertUniverseExecution(directory, execution);
         Object.assign(run, generationResources(run.trials, run.status === 'completed'));
         run.finishedAt = new Date().toISOString();
         run.durationMs = Math.max(0, performance.now() - started);

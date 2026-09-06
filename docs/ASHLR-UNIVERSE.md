@@ -8,7 +8,7 @@ The useful unit of progress is an improvement demonstrated in a working environm
 
 The Universe kernel runs a complete local experiment: a manifest describes candidates and a fixed evaluator; a bounded run executes operator commands or requests candidate edits from an explicitly configured local model, records observations, and selects elites within defined niches. A later run can select parents from the archive. The bundled deterministic demonstration provides a reproducible way to inspect this behavior without model credentials or a running model service.
 
-This is a development feature in Hub. Its evidence establishes local candidate generation, evaluation, and selection mechanics. Subscription-backed generation, resident execution, multi-repository product delivery, customer feedback, and external payments are later integrations. Existing fleet activation and release behavior is documented in the [Hub architecture](ARCHITECTURE.md).
+This is a development feature in Hub. Its evidence establishes local candidate generation, evaluation, selection, and bounded multi-generation campaigns. Subscription-backed generation, resident execution, multi-repository product delivery, customer feedback, and external payments are later integrations. Existing fleet activation and release behavior is documented in the [Hub architecture](ARCHITECTURE.md).
 
 The command surface is `ashlr universe`. From a source checkout with dependencies installed, build locally with `npm run build`, then run:
 
@@ -99,8 +99,9 @@ The broker asks for replacement text, not executable tool calls:
 
 Each edit must target a unique, declared, existing regular file. New paths,
 duplicate paths, extra JSON keys, NUL bytes, non-UTF-8 files, and malformed output
-are rejected. The limits are 16 declared files, 64 KiB per file, 128 KiB total
-file content in each direction, 256 KiB request/response bodies, and 1–16,384 requested output
+are rejected. The limits are 16 declared files, 64 KiB per file, 128 KiB current-parent
+file content, 128 KiB replacement content, 256 KiB complete request/response bodies,
+and 1–16,384 requested output
 tokens. If complete valid reported usage shows that output budget was exceeded, the candidate is
 rejected and reported consumption is retained; this cannot undo tokens already
 spent or independently enforce an unreported provider limit. The run's time budget also bounds generation. Valid edits are frozen and
@@ -136,6 +137,138 @@ electricity cost, or hardware amortization is inferred. The console shows passed
 trials and archive admissions separately from generation success; none of these
 counts establishes accepted production changes or customer value.
 
+## Continue autonomously with a bounded campaign
+
+A campaign runs successive generations of one registered universe in the current
+process. It keeps searching after the first passing candidate. Its original
+budget, completed work, interruptions, and stop reason remain inspectable across
+invocations. It does not install a daemon, start a model service, or publish code.
+
+First register a universe with a working fixed evaluator. Save a campaign
+manifest such as this, replacing `my-experiment` with that universe's ID:
+
+```json
+{
+  "schemaVersion": 1,
+  "id": "local-search",
+  "universeId": "my-experiment",
+  "budget": {
+    "maxGenerations": 12,
+    "maxDurationMs": 600000,
+    "maxModelRequests": 48,
+    "maxStagnantGenerations": 4,
+    "maxReportedTokens": null
+  },
+  "feedback": true
+}
+```
+
+From the built Hub checkout:
+
+1. Register the local definition:
+
+   ```sh
+   node bin/ashlr universe campaign init --manifest /absolute/path/to/campaign.json
+   ```
+
+   Registration persists the definition but makes no model requests.
+
+2. Start the execution process:
+
+   ```sh
+   node bin/ashlr universe campaign run local-search
+   ```
+
+   This action runs configured commands and model requests within the campaign
+   budget. It continues without approval between generations; keep the process
+   running while it works. With `feedback: true`, bounded observations from prior
+   evaluation accompany subsequent generation prompts. The original objective
+   and evaluator remain fixed; feedback is evidence, not authority to change them.
+
+   Feedback uses the latest completed generation containing that same variant.
+   It can include a failed trial's score, numeric metrics, deliberately shareable
+   diagnostics, and the declared files from its verified artifact. A failed
+   attempt does not become the retained parent. Previous-attempt file context is
+   separately limited to 128 KiB total and 64 KiB per file; the complete request,
+   including current files and feedback, must still fit the 256 KiB transport cap.
+
+3. Inspect persisted progress from another terminal or the Universe console:
+
+   ```sh
+   node bin/ashlr universe campaign status local-search --json
+   ```
+
+   The console shows campaigns for the selected universe, budget progress,
+   reservations, archive admissions, strict improvements, and generation links.
+   It keeps refreshing while a campaign runs, including gaps between generations.
+   The console is read-only; its command examples do not execute automatically.
+
+Control the exact campaign from a terminal:
+
+```sh
+node bin/ashlr universe campaign pause local-search
+node bin/ashlr universe campaign stop local-search
+node bin/ashlr universe campaign resume local-search
+```
+
+`pause` and `stop` request cooperation from the campaign owner. A
+`pause-requested` or `stop-requested` response is not acknowledgment that work has
+stopped; inspect status until the owner acknowledges it. A paused or interrupted
+campaign can continue with `run` or its `resume` alias. Terminal campaigns remain
+terminal. Resume does not refund attempts or reservations and does not restart
+the original deadline. Ctrl+C interrupts the foreground invocation; inspect its
+recorded state before continuing. These controls do not clear the legacy fleet
+kill switch or reactivate its daemon.
+
+Use `--root <private directory>` consistently on every campaign command when the
+universe is in a custom store. The console reads the default store. `status`
+without an ID lists recorded campaigns, and `--json` returns one result document
+for agents. Successful command handling or campaign termination is not a claim
+that the project succeeded.
+
+### Interpret campaign limits and evidence
+
+Generation attempts and model-request reservations are budget allocations, not
+counts of accepted work. A campaign step is tied to its durable run identity;
+recovery reconciles that identity rather than treating a missing campaign update
+as permission to execute completed work again. Interrupted work remains visible
+and is not promoted as a completed generation.
+
+Stagnation measures generations without an archive change. Initial admission to
+an empty niche is distinct from a strict improvement over its prior elite; the
+console reports both. A campaign may end at its stagnation limit with no passing
+candidate. Read its reason and individual evaluator evidence before drawing a
+conclusion about usefulness.
+
+Evaluators may supply structured `diagnostics` in addition to numeric metrics:
+
+```json
+{"passed":false,"score":0,"diagnostics":[{"code":"INVALID_DATE","message":"Reject calendar rollover instead of formatting it.","path":"format.ts","line":48}]}
+```
+
+Only deliberately shareable messages belong here: they are saved locally and
+may be sent to the configured model when campaign feedback is enabled. Raw
+process output and arbitrary failure stacks are not substituted for this
+contract. Diagnostics are bounded to 16 entries, 512 characters per message,
+and 8 KiB serialized in total; optional paths must be relative and line numbers
+positive integers. The console displays diagnostic codes only and omits messages
+and private locations. Generation receipts preserve feedback provenance and a
+digest, not an additional copy of the feedback file contents.
+
+`maxReportedTokens` is an optional stop threshold based on reported consumption,
+not a preventive spending ceiling. Requests can consume tokens before a result
+arrives, and interrupted requests may have incomplete accounting. The recorded
+token subtotal does not prove complete spend. Missing usage remains unavailable,
+and no dollar cost or business yield is inferred. When `maxReportedTokens` is set,
+incomplete model usage prevents further requests; resuming does not reset this
+uncertainty. The absolute duration limit
+continues to elapse while the process is paused or absent.
+
+If records are degraded, inspect the reported reason before retrying. Do not
+delete evidence or reset the definition to make a refusal disappear. To change
+an immutable campaign budget or experiment contract, register a new, explicitly
+identified campaign or universe as appropriate.
+
 ## Five engines, one feedback loop
 
 | Engine | Responsibility | First useful integration |
@@ -164,13 +297,22 @@ manifest + prior archive
 
 Candidate identity, evaluator identity, objective version, and resource limits must accompany the result. A candidate's self-description is useful context; the evaluator's observed result determines selection.
 
-Command workers execute in a writable copy of their selected parent; model-generation variants replace declared files in that copy through the local broker. The evaluator runs from the pinned seed and receives the frozen candidate path through `ASHLR_UNIVERSE_CANDIDATE`. Its standard output must be one JSON object containing `passed` (boolean), `score` (finite number), and optional `metrics` (named finite numbers). A nonzero exit, timeout, or malformed result fails the trial. Scores become comparable only within the same pinned experiment definition.
+Command workers execute in a writable copy of their selected parent; model-generation variants replace declared files in that copy through the local broker. The evaluator runs from the pinned seed and receives the frozen candidate path through `ASHLR_UNIVERSE_CANDIDATE`. Its standard output must be one JSON object containing `passed` (boolean), `score` (finite number), optional `metrics` (named finite numbers), and optional deliberately shareable `diagnostics`. A nonzero exit, timeout, or malformed result fails the trial. Scores become comparable only within the same pinned experiment definition.
 
 Commands are supplied by the operator and execute with network access denied and scoped filesystem writes. The process boundary is suitable for these local experiments, rather than arbitrary hostile-code execution in a VM. Cancellation and timeouts target the invocation's owned process group; termination of deliberately detached descendants is not established by this runner.
 
+Newly written evidence is budgeted to 15 KiB per trial and 1 MiB per final record,
+including its envelope. The existing shared private-store hard ceiling and the
+Universe ledger's 64 MiB aggregate limit are unchanged. Before model contact, the
+runner preflights space for the declared generation receipt. Evaluator measurements
+are accepted only when the complete trial fits: an oversized measurement fails
+the trial before assignment, without silently trimming metrics or diagnostics.
+The generation receipt and frozen candidate artifact remain available. This is a
+writer policy; existing version-one records retain their reader compatibility.
+
 The archive preserves raw dimensions so future comparisons can use a consistent objective. When objective weights or evaluation conditions change, both challenger and incumbent need comparable measurements. Partial progress and complete task success remain distinct fields in the measurement model.
 
-Niches represent meaningful differences such as task family, execution cost, or latency. A global winner can hide useful low-cost or specialized variants. A retained failure can also be a useful parent when a later mutation builds on its strengths.
+Niches represent meaningful differences such as task family, execution cost, or latency. A global winner can hide useful low-cost or specialized variants. A retained failure can supply correction context without becoming an archive parent.
 
 ## Architecture that can absorb better models
 

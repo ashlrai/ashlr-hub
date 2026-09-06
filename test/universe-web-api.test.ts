@@ -89,6 +89,63 @@ describe('GET /api/universe', () => {
     expect(captured.body).toContain('[REDACTED]');
   });
 
+  it('omits diagnostic messages and locations in saved and active runs while preserving codes and campaign evidence', async () => {
+    const diagnostic = { code: 'DATE_ROLLOVER', message: 'Private evaluator diagnostic marker', path: 'private-notes/customer.md', line: 88431 };
+    const trial = {
+      id: 'trial-first', variantId: 'local-coder', niche: 'dates', parentTrialId: null,
+      status: 'failed' as const, score: 0, metrics: { casesPassed: 3 }, durationMs: 100,
+      artifact: { path: '/experiments/artifacts/run-first/trial-first', digest: 'a'.repeat(64), revision: 'b'.repeat(40) },
+      delta: null, selected: false, diagnostics: [diagnostic],
+    };
+    const savedRun = {
+      id: 'run-first', universeId: 'dates', generation: 1, manifestDigest: 'c'.repeat(64), comparatorDigest: 'd'.repeat(64),
+      startedAt: '2026-09-06T12:00:00.000Z', finishedAt: '2026-09-06T12:00:01.000Z', status: 'completed' as const,
+      trials: [trial], durationMs: 1000, tokensUsed: null, costUsd: null,
+    };
+    const body: UniverseOverview = overview({ sourceState: 'healthy', universes: [{
+      manifest: { schemaVersion: 1, id: 'dates', name: 'Date formatter', objective: 'Reject calendar rollover',
+        seed: { repo: '/experiments/source', revision: 'b'.repeat(40) },
+        metric: { name: 'casesPassed', direction: 'maximize', minImprovement: 0 },
+        budget: { maxTrials: 1, maxDurationMs: 10000, trialTimeoutMs: 5000, maxParallel: 1 },
+        evaluation: { command: ['node', 'evaluate.mjs'], timeoutMs: 2000 },
+        variants: [{ id: 'local-coder', niche: 'dates', hypothesis: 'Check the parsed date', command: ['node', 'worker.mjs'] }] },
+      manifestDigest: 'c'.repeat(64), comparatorDigest: 'd'.repeat(64), runs: [savedRun], elites: [],
+      activeRun: { ...savedRun, id: 'run-active', generation: 2, status: 'running', finishedAt: null,
+        trials: [{ ...trial, id: 'trial-active', diagnostics: [{ ...diagnostic, code: 'ACTIVE_DATE_CASE', message: 'Private active diagnostic marker' }] }] },
+      sourceState: 'healthy', reasons: [],
+    }], campaigns: [{
+      definition: { schemaVersion: 1, id: 'date-search', universeId: 'dates', feedback: true,
+        budget: { maxGenerations: 3, maxDurationMs: 60000, maxModelRequests: 3, maxStagnantGenerations: 2, maxReportedTokens: null } },
+      definitionDigest: 'e'.repeat(64), manifestDigest: 'c'.repeat(64), comparatorDigest: 'd'.repeat(64),
+      createdAt: '2026-09-06T12:00:00.000Z', startedAt: '2026-09-06T12:00:00.000Z',
+      deadlineAt: '2026-09-06T12:01:00.000Z', finishedAt: null, state: 'running', reason: null,
+      owner: { pid: 123, startRef: 'f'.repeat(64) }, sourceState: 'healthy', reasons: [],
+      steps: [{ ordinal: 1, runId: 'run-first', generation: 1, variantIds: ['local-coder'], reservedModelRequests: 0,
+        createdAt: '2026-09-06T12:00:00.000Z', state: 'completed', trialCount: 1, passedTrials: 0,
+        admissions: 0, improvements: 0, tokensUsed: null }],
+      progress: { attempts: 1, completedRuns: 1, interruptedRuns: 0, reservedModelRequests: 0,
+        reportedTokens: 0, recordedTokens: 0, usageComplete: true, admissions: 0, improvements: 0, stagnantGenerations: 1 },
+    }] });
+    const original = JSON.stringify(body);
+    reader.read.mockReturnValue(body);
+    const handle = await startServer(cfg, { port: 0, open: false, allowDispatch: false });
+    try {
+      const authorized = await serverRequest(handle, handle.readToken);
+      expect(authorized.status).toBe(200);
+      const rendered = JSON.parse(authorized.body) as UniverseOverview;
+      expect(rendered.universes[0]!.runs[0]!.trials[0]!.diagnostics).toEqual([{ code: 'DATE_ROLLOVER', message: '[omitted from web view]' }]);
+      expect(rendered.universes[0]!.activeRun!.trials[0]!.diagnostics).toEqual([{ code: 'ACTIVE_DATE_CASE', message: '[omitted from web view]' }]);
+      expect(authorized.body).not.toContain('Private evaluator diagnostic marker');
+      expect(authorized.body).not.toContain('Private active diagnostic marker');
+      expect(authorized.body).not.toContain('private-notes/customer.md');
+      expect(rendered.campaigns).toHaveLength(1);
+      expect(rendered.campaigns![0]).toMatchObject({ definition: body.campaigns![0]!.definition,
+        state: 'running', progress: body.campaigns![0]!.progress, steps: body.campaigns![0]!.steps });
+      expect(rendered.universes[0]!.runs[0]!.trials[0]!.metrics).toEqual({ casesPassed: 3 });
+      expect(JSON.stringify(body)).toBe(original);
+    } finally { await handle.close(); }
+  });
+
   it('returns a transport error if the reader throws, rather than an empty-success archive', async () => {
     reader.read.mockImplementation(() => { throw new Error('private-path-and-error'); });
     const { req, res, captured } = localRequest();

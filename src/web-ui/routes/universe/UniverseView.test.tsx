@@ -59,6 +59,22 @@ function overview(overrides: Partial<UniverseOverview> = {}): UniverseOverview {
   return { schemaVersion: 1, sampledAt: '2026-09-06T12:05:00.000Z', sourceState: 'healthy', reasons: [], universes: [summary()], measurementScope: 'local-experiment', ...overrides };
 }
 
+function campaign(overrides: Partial<NonNullable<UniverseOverview['campaigns']>[number]> = {}): NonNullable<UniverseOverview['campaigns']>[number] {
+  return {
+    definition: { schemaVersion: 1, id: 'compiler-search', universeId: 'compiler', feedback: true,
+      budget: { maxGenerations: 6, maxDurationMs: 60_000, maxModelRequests: 12, maxStagnantGenerations: 3, maxReportedTokens: 5000 } },
+    definitionDigest: 'definition-digest', manifestDigest: 'manifest-digest', comparatorDigest: 'comparator-digest',
+    createdAt: '2026-09-06T12:00:00.000Z', startedAt: '2026-09-06T12:00:00.000Z',
+    deadlineAt: '2026-09-06T12:01:00.000Z', finishedAt: null, state: 'running', reason: null,
+    owner: { pid: 123, startRef: 'a'.repeat(64) }, sourceState: 'healthy', reasons: [],
+    steps: [{ ordinal: 1, runId: 'run-first', generation: 1, variantIds: ['small-motor'], reservedModelRequests: 1,
+      createdAt: '2026-09-06T12:00:00.000Z', state: 'completed', trialCount: 1, passedTrials: 1, admissions: 1, improvements: 0, tokensUsed: 100 }],
+    progress: { attempts: 1, completedRuns: 1, interruptedRuns: 0, reservedModelRequests: 1,
+      reportedTokens: 100, recordedTokens: 100, usageComplete: true, admissions: 1, improvements: 0, stagnantGenerations: 0 },
+    ...overrides,
+  };
+}
+
 function mount(body: UniverseOverview) {
   const fetch = vi.fn(async () => new Response(JSON.stringify(body), { status: 200 }));
   vi.stubGlobal('fetch', fetch);
@@ -243,5 +259,115 @@ describe('UniverseView', () => {
     expect(screen.getByText('This generation has not completed. Its measurements have not been admitted to the archive.')).toBeInTheDocument();
     await act(async () => { tick?.(); });
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+  });
+
+  it('shows campaign budgets and links a recorded campaign step to its existing generation evidence', async () => {
+    const user = userEvent.setup();
+    mount(overview({ campaigns: [campaign({ state: 'completed', reason: 'generation-limit', finishedAt: '2026-09-06T12:01:00.000Z' })] }));
+    const campaigns = await screen.findByRole('region', { name: 'Campaigns' });
+    expect(within(campaigns).getByText('compiler-search')).toBeInTheDocument();
+    expect(within(campaigns).getByText('generation-limit')).toBeInTheDocument();
+    expect(within(campaigns).getByText('1 / 6')).toBeInTheDocument();
+    expect(within(campaigns).getByText('1 / 12')).toBeInTheDocument();
+    expect(within(campaigns).getByText('Strict improvements')).toBeInTheDocument();
+    expect(within(campaigns).getByText(/Campaign termination is not project success/)).toBeInTheDocument();
+    expect(within(campaigns).queryByText('ashlr universe campaign run compiler-search')).not.toBeInTheDocument();
+    await user.click(within(campaigns).getByRole('button', { name: 'Inspect campaign generation 1' }));
+    expect(screen.getByRole('region', { name: 'Evidence for small-motor' })).toBeInTheDocument();
+  });
+
+  it('continues polling an active campaign between generations without an active run', async () => {
+    let tick: (() => void) | undefined;
+    vi.spyOn(window, 'setInterval').mockImplementation((handler) => {
+      tick = handler as () => void;
+      return 45 as unknown as ReturnType<typeof window.setInterval>;
+    });
+    const fetch = mount(overview({ campaigns: [campaign()] }));
+    await screen.findByRole('heading', { name: 'Autonomous campaign' });
+    expect(window.setInterval).toHaveBeenCalledWith(expect.any(Function), 3000);
+    await act(async () => { tick?.(); });
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+  });
+
+  it.each(['pause-requested', 'stop-requested'] as const)('keeps %s distinct from acknowledged termination', async (state) => {
+    const timer = vi.spyOn(window, 'setInterval').mockReturnValue(46 as unknown as ReturnType<typeof window.setInterval>);
+    mount(overview({ campaigns: [campaign({ state, reason: 'owner-control-request' })] }));
+    const campaigns = await screen.findByRole('region', { name: 'Campaigns' });
+    expect(within(campaigns).getByText('Control requested. The owner has not yet acknowledged that work has stopped.')).toBeInTheDocument();
+    expect(within(campaigns).getByText(state)).toBeInTheDocument();
+    expect(timer).toHaveBeenCalled();
+    expect(within(campaigns).queryByRole('button', { name: /pause|stop/i })).not.toBeInTheDocument();
+  });
+
+  it('stops campaign polling after a terminal update', async () => {
+    const active = overview({ campaigns: [campaign()] });
+    const stopped = overview({ campaigns: [campaign({ state: 'stopped', reason: 'owner-stop' })] });
+    const fetch = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify(active))).mockResolvedValueOnce(new Response(JSON.stringify(stopped)));
+    vi.stubGlobal('fetch', fetch);
+    let tick: (() => void) | undefined;
+    vi.spyOn(window, 'setInterval').mockImplementation((handler) => {
+      tick = handler as () => void;
+      return 47 as unknown as ReturnType<typeof window.setInterval>;
+    });
+    const clear = vi.spyOn(window, 'clearInterval');
+    render(<MemoryRouter><UniverseView /></MemoryRouter>);
+    await screen.findByRole('heading', { name: 'Autonomous campaign' });
+    await act(async () => { tick?.(); });
+    await screen.findByText('owner-stop');
+    expect(clear).toHaveBeenCalledWith(47);
+  });
+
+  it('keeps incomplete campaign spend separate from the recorded subtotal', async () => {
+    const current = campaign({ state: 'interrupted', reason: 'owner-exited' });
+    current.progress.usageComplete = false;
+    current.progress.reportedTokens = null;
+    current.progress.recordedTokens = 240;
+    mount(overview({ campaigns: [current] }));
+    const campaigns = await screen.findByRole('region', { name: 'Campaigns' });
+    expect(within(campaigns).getByText('240')).toBeInTheDocument();
+    expect(within(campaigns).getByText('Unavailable')).toBeInTheDocument();
+    expect(within(campaigns).getByText(/recorded subtotal is not proof of complete spend/)).toBeInTheDocument();
+    expect(within(campaigns).getByText(/ashlr universe campaign run compiler-search/)).toBeInTheDocument();
+  });
+
+  it('marks degraded campaign progress as unavailable rather than verified counters', async () => {
+    mount(overview({ campaigns: [campaign({ sourceState: 'degraded', reasons: ['Invalid step reservation'] })] }));
+    const campaigns = await screen.findByRole('region', { name: 'Campaigns' });
+    expect(within(campaigns).getByText('Campaign history is incomplete.')).toBeInTheDocument();
+    expect(within(campaigns).getByText('Invalid step reservation')).toBeInTheDocument();
+    expect(within(campaigns).getByText('Unavailable / 6')).toBeInTheDocument();
+    expect(within(campaigns).queryByText('1 / 6')).not.toBeInTheDocument();
+  });
+
+  it('shows only campaigns belonging to the selected universe', async () => {
+    const other = campaign();
+    other.definition = { ...other.definition, id: 'other-search', universeId: 'another-universe' };
+    mount(overview({ campaigns: [other, campaign({ state: 'paused' })] }));
+    const campaigns = await screen.findByRole('region', { name: 'Campaigns' });
+    expect(within(campaigns).getByText('compiler-search')).toBeInTheDocument();
+    expect(within(campaigns).queryByText('other-search')).not.toBeInTheDocument();
+  });
+
+  it('shows evaluator diagnostic codes without rendering messages or private locations, including raw details', async () => {
+    const current = summary();
+    current.runs[1]!.trials[0]!.diagnostics = [{ code: 'FORMAT_DATE_INVALID', message: 'private diagnostic marker', path: '/private/customer/location', line: 19 }];
+    mount(overview({ universes: [current] }));
+    const evidence = await screen.findByRole('region', { name: 'Evidence for better-motor' });
+    expect(within(evidence).getByText('FORMAT_DATE_INVALID', { selector: 'code' })).toBeInTheDocument();
+    expect(evidence.textContent).not.toContain('private diagnostic marker');
+    expect(evidence.textContent).not.toContain('/private/customer/location');
+  });
+
+  it('distinguishes feedback from a failed attempt from the retained candidate parent', async () => {
+    const current = summary();
+    current.runs[1]!.trials[0]!.generation = generation({ feedback: {
+      runId: 'run-first', trialId: 'previous-failed-attempt', generation: 1,
+      comparatorDigest: 'c'.repeat(64), artifactDigest: 'd'.repeat(64), digest: 'e'.repeat(64),
+    } });
+    mount(overview({ universes: [current] }));
+    const evidence = await screen.findByRole('region', { name: 'Model generation evidence' });
+    expect(within(evidence).getByText('Generation 1 · trial previous-failed-attempt')).toBeInTheDocument();
+    expect(within(evidence).getByText('Feedback can come from a failed attempt. It is distinct from the retained parent shown in the lineage.')).toBeInTheDocument();
+    expect(screen.getByText('Current niche elite')).toBeInTheDocument();
   });
 });
