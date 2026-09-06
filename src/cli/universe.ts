@@ -13,6 +13,7 @@ const USAGE = `usage: ashlr universe <command> [--root <private directory>] [--j
   run <id>                     Execute one budgeted generation
   status [id]                  Read objectives, runs, and measurements
   archive [id]                 Read the winning artifact in each niche
+  campaign <command>           Run or inspect a bounded multi-generation campaign
   help                         Show this help
 
 Candidate and evaluator commands run with network access denied. An optional
@@ -116,6 +117,10 @@ function renderOverview(overview: UniverseOverview, archiveOnly: boolean): strin
 
 /** CLI and dashboard share the same persisted experiment records. */
 export async function cmdUniverse(args: string[]): Promise<number> {
+  if (args[0] === 'campaign') {
+    const { cmdUniverseCampaign } = await import('./universe-campaign.js');
+    return cmdUniverseCampaign(args.slice(1));
+  }
   const jsonRequested = args.includes('--json');
   const controller = new AbortController();
   const abort = (): void => controller.abort();

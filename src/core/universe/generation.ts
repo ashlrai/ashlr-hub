@@ -41,7 +41,7 @@ export function newGenerationReceipt(config: UniverseGenerationConfig): Universe
 
 export function validGenerationReceipt(value: unknown): value is UniverseGenerationReceipt {
   if (!object(value) || !exact(value, ['schemaVersion', 'provider', 'endpoint', 'model', 'status', 'requestStarted',
-    'promptDigest', 'responseDigest', 'durationMs', 'usage', 'changedFiles', 'error']) ||
+    'promptDigest', 'responseDigest', 'durationMs', 'usage', 'changedFiles', 'error', 'feedback']) ||
       value.schemaVersion !== 1 || value.provider !== 'local-openai-compatible' || !boundedText(value.endpoint, 512) ||
       normalizeNumericLoopbackOllamaBaseUrl(value.endpoint) !== value.endpoint || !boundedText(value.model, 160) ||
       !['succeeded', 'failed', 'timed-out', 'cancelled'].includes(String(value.status)) || typeof value.requestStarted !== 'boolean' ||
@@ -50,6 +50,7 @@ export function validGenerationReceipt(value: unknown): value is UniverseGenerat
       !object(value.usage) || !exact(value.usage, ['state', 'inputTokens', 'outputTokens']) ||
       !Array.isArray(value.changedFiles) || value.changedFiles.length > 16 || !value.changedFiles.every(validGenerationPath) ||
       new Set(value.changedFiles).size !== value.changedFiles.length ||
+      (value.feedback !== undefined && (!validFeedbackReceipt(value.feedback) || value.promptDigest === null)) ||
       (value.error !== undefined && (typeof value.error !== 'string' || value.error.length < 1 || value.error.length > 1_024 || value.error.includes('\0')))) return false;
   const usage = value.usage;
   if (usage.state === 'reported') {
@@ -59,6 +60,14 @@ export function validGenerationReceipt(value: unknown): value is UniverseGenerat
   if (value.requestStarted && value.promptDigest === null) return false;
   if (value.status === 'succeeded' && (value.responseDigest === null || value.error !== undefined)) return false;
   return value.status === 'succeeded' || value.changedFiles.length === 0;
+}
+
+function validFeedbackReceipt(value: unknown): boolean {
+  return object(value) && exact(value, ['runId', 'trialId', 'generation', 'comparatorDigest', 'artifactDigest', 'digest']) &&
+    [value.runId, value.trialId].every((item) => typeof item === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(item)) &&
+    count(value.generation) && value.generation >= 1 &&
+    [value.comparatorDigest, value.digest].every((item) => typeof item === 'string' && /^[a-f0-9]{64}$/.test(item)) &&
+    (value.artifactDigest === null || (typeof value.artifactDigest === 'string' && /^[a-f0-9]{64}$/.test(value.artifactDigest)));
 }
 
 export function validGenerationUsage(value: unknown): value is UniverseGenerationUsage {

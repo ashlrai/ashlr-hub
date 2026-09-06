@@ -1212,7 +1212,17 @@ export async function handleApi(
     // The server authenticates this persisted experiment projection before
     // dispatch. Reading the population never starts a run or mutates its store.
     if (path === '/api/universe' && method === 'GET') {
-      sendJson(res, 200, readUniverseOverview());
+      const overview = readUniverseOverview();
+      // Evaluator messages are explicitly shared with the local generator, not
+      // implicitly republished to browser clients. Codes remain useful in UI.
+      const redactRun = (run: (typeof overview.universes)[number]['runs'][number]) => ({ ...run,
+        trials: run.trials.map((trial) => ({ ...trial, ...(trial.diagnostics ? {
+          diagnostics: trial.diagnostics.map(({ code }) => ({ code, message: '[omitted from web view]' })),
+        } : {}) })),
+      });
+      sendJson(res, 200, { ...overview, universes: overview.universes.map((universe) => ({ ...universe,
+        runs: universe.runs.map(redactRun), activeRun: universe.activeRun ? redactRun(universe.activeRun) : null,
+      })) });
       return true;
     }
 

@@ -174,8 +174,8 @@ describe.runIf(process.platform === 'darwin')('Universe confined local execution
     initUniverse(manifest, { root });
     const controller = new AbortController();
     const pending = runUniverse(manifest.id, { root, signal: controller.signal });
-    await expect(runUniverse(manifest.id, { root })).rejects.toThrow(/active run/);
-    controller.abort();
+    try { await expect(runUniverse(manifest.id, { root })).rejects.toThrow(/active (?:run|execution owner)/); }
+    finally { controller.abort(); await pending; }
     const run = await pending;
     expect(run.status).toBe('interrupted');
     expect(run.trials.every((trial) => !trial.selected)).toBe(true);
