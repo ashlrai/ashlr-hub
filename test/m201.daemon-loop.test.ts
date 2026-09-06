@@ -10435,15 +10435,16 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
   });
 
   it('E3l: unreceipted concurrent v2 exposure is charged once and survives a later cap increase', async () => {
-    const budgetDay = today();
-    const daemonStartedAt = `${budgetDay}T00:00:00.000Z`;
+    const observedAt = new Date().toISOString();
+    const budgetDay = observedAt.slice(0, 10);
+    const daemonStartedAt = observedAt;
     const guard = {
       schemaVersion: 2,
       accountingId: '123e4567-e89b-42d3-a456-426614174011',
       token: '123e4567-e89b-42d3-a456-426614174012',
       pid: 2_147_483_647,
       hostname: hostname(),
-      armedAt: `${budgetDay}T00:01:00.000Z`,
+      armedAt: observedAt,
       daemonStartedAt,
       budgetDay,
       // Three concurrent $0.05 workers can realize $0.15 after all observe a
@@ -10501,15 +10502,16 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
   });
 
   it('E3m: an exact persisted receipt permits same-process replay clearing without a second charge', () => {
-    const budgetDay = today();
-    const daemonStartedAt = `${budgetDay}T00:00:00.000Z`;
+    const observedAt = new Date().toISOString();
+    const budgetDay = observedAt.slice(0, 10);
+    const daemonStartedAt = observedAt;
     const guard = {
       schemaVersion: 2 as const,
       accountingId: '123e4567-e89b-42d3-a456-426614174021',
       token: '123e4567-e89b-42d3-a456-426614174022',
       pid: process.pid,
       hostname: hostname(),
-      armedAt: `${budgetDay}T00:01:00.000Z`,
+      armedAt: observedAt,
       daemonStartedAt,
       budgetDay,
       dailyBudgetUsd: 1,
@@ -10539,15 +10541,16 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
   });
 
   it('E3n: a same-process guard without its exact receipt remains fail-closed', () => {
-    const budgetDay = today();
-    const daemonStartedAt = `${budgetDay}T00:00:00.000Z`;
+    const observedAt = new Date().toISOString();
+    const budgetDay = observedAt.slice(0, 10);
+    const daemonStartedAt = observedAt;
     const guard = {
       schemaVersion: 2 as const,
       accountingId: '123e4567-e89b-42d3-a456-426614174031',
       token: '123e4567-e89b-42d3-a456-426614174032',
       pid: process.pid,
       hostname: hostname(),
-      armedAt: `${budgetDay}T00:01:00.000Z`, daemonStartedAt, budgetDay,
+      armedAt: observedAt, daemonStartedAt, budgetDay,
       dailyBudgetUsd: 1, spentUsdAtArm: 0.25, reservedUsd: 0.75,
       exhaustBudgetDay: false, itemIds: ['same-process-unaccounted'],
     };
@@ -10571,12 +10574,13 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
   });
 
   it('E3o: a state-bound same-host dead-owner v1 guard upgrades, exhausts the day, and clears', async () => {
-    const budgetDay = today();
-    const daemonStartedAt = `${budgetDay}T00:00:00.000Z`;
+    const observedAt = new Date().toISOString();
+    const budgetDay = observedAt.slice(0, 10);
+    const daemonStartedAt = observedAt;
     const deadPid = 2_147_483_647;
     const legacy = {
       token: 'legacy-exact-token', pid: deadPid, hostname: hostname(),
-      armedAt: `${budgetDay}T00:01:00.000Z`, itemIds: ['legacy-crash-item'],
+      armedAt: observedAt, itemIds: ['legacy-crash-item'],
     };
     saveDaemonState({
       running: true, pid: deadPid, startedAt: daemonStartedAt, lastTickAt: null,
