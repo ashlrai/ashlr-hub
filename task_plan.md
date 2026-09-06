@@ -1,5 +1,13 @@
 # Task Plan: Ashlr Autonomous Fleet Ambition Push
 
+## Candidate Observation Trust Closure (2026-08-10)
+- [x] Remove inherited gh config, proxy, socket, transport, and host override authority.
+- [x] Require a validated root-owned empty config/home root and one normalized GitHub token.
+- [x] Replace admission-ready authority semantics with schema-v8 non-consumable observation evidence.
+- [x] Add a bounded display-freshness lease and mandatory future consumer-fence contract.
+- [x] Prove final-read remote races cannot produce enrollable authority.
+- [x] Complete expanded authority, invariant, build, lint, and security verification.
+
 ## Deterministic Ubuntu CI Authority Shards (2026-07-21)
 - [x] Confirm the full Ubuntu suite is active but can exceed the 15-minute hermetic runtime cap.
 - [x] Partition the complete suite through Vitest's deterministic three-way file sharding.

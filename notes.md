@@ -1,5 +1,11 @@
 # Notes: Ashlr Autonomous Fleet Ambition Push
 
+## Candidate Observation Trust Closure (2026-08-10)
+- Authoritative `gh` reads now fail closed unless a statically listed empty directory has root-owned, attacker-nonwritable custody. That directory is used for `HOME`, `GH_CONFIG_DIR`, and `XDG_CONFIG_HOME`; inherited proxy, Unix-socket, host, repository, CA, temp, and alternate-token settings are not forwarded.
+- The preflight no longer publishes `admissionReady`, `judgeFreeEligible`, or remote `ready` fields. Schema v8 reports observation completeness only, with `authorityGranted:false`, `consumableForEnrollment:false`, and a 30-second display-freshness lease.
+- Finite consistency rounds are explicitly not atomic. There is no current admission-report consumer; any future enrollment action must recollect all bound sources under its own lifecycle/consuming fence immediately before mutation.
+- Deterministic attacks cover hostile gh config/socket/proxy inputs and a remote mutation after the final remote read. Even when the collected evidence remains internally consistent, it cannot be consumed for enrollment.
+
 - Deterministic Ubuntu CI authority shards (2026-07-21):
   - The exhaustive Ubuntu suite was active but could reach the hermetic 15-minute hard cap, leaving no scheduler margin. CI now runs Vitest's deterministic file shards 1/3, 2/3, and 3/3 in separate fresh hermetic homes.
   - Every shard retains typecheck, lint, build, the same test runner/watchdogs, and protected status gating. The pack smoke runs once on shard 1/3; Windows portability and native-authority jobs are unchanged.
