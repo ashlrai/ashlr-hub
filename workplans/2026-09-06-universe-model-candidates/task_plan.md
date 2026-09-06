@@ -13,8 +13,8 @@ verification without GitHub Actions.
 - [x] Explore existing model adapters, usage evidence, runner contracts, and UX.
 - [x] Select and document one complete integration slice and its acceptance tests.
 - [x] Implement collision-free runtime, CLI/console, and accounting changes.
-- [ ] Independently test real behavior, failure paths, build/package compatibility,
-  then integrate via normal GitHub PR and report exact limits.
+- [x] Independently test real behavior, failure paths, build/package compatibility,
+  submit the normal GitHub PR, and report exact limits.
 
 ## Decisions
 
@@ -46,4 +46,6 @@ Runtime, UI, durable accounting, and independent fixture tests are implemented.
 Three real local model trials all failed the unchanged 5,236-check evaluator;
 none was admitted. A separately authored Hub date fix passed all 5,236 checks and
 51 independent regression tests, without claiming a successful local-model artifact.
-Final source integration and exact artifact/preview verification remain.
+Local implementation and verification are complete. PR #354 is the authoritative
+source integration status: https://github.com/ashlrai/ashlr-hub/pull/354.
+Package publication and persistent fleet activation are not part of this change.

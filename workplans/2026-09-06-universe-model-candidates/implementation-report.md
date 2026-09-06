@@ -17,6 +17,9 @@ a numeric-loopback endpoint/model and existing text-file allowlist; the broker
 generates strictly validated replacements. The independently pinned evaluator
 determines pass/fail and the existing archive selects measured niche winners.
 Source integration is separate from package publication or persistent operation.
+The exact-head source integration is tracked in
+[PR #354](https://github.com/ashlrai/ashlr-hub/pull/354); its current status is
+authoritative rather than this pre-merge verification snapshot.
 
 ## Measured behavior
 
@@ -80,3 +83,7 @@ Entire resume found no previous branch checkpoint. Entire status was enabled in
 manual-commit mode, but `entire explain --commit 3b96d849...` reported no associated
 checkpoint or trailer; session capture is not claimed from configuration alone.
 The primary checkout and its unrelated workplans were preserved.
+
+At push time, GitHub reported the existing default-branch moderate Dependabot
+alert #32. No dependency or workflow files were changed by this work; these
+focused checks do not constitute a fresh repository-wide vulnerability audit.
