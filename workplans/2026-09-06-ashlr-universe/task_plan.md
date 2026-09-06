@@ -11,7 +11,7 @@ Make Universe a working experiment and evolution layer in Hub: instantiate an ob
 - [x] Verify research claims that affect implementation; distinguish aspiration from tested capability.
 - [x] Build a complete local Universe experiment loop and product surface.
 - [x] Run focused regressions, typecheck, lint, production build, and an independent end-to-end review.
-- [ ] Commit and push reviewable source with exact evidence and an honest remaining roadmap.
+- [x] Commit and push reviewable source with exact evidence and an honest remaining roadmap.
 
 ## Decisions
 
@@ -29,5 +29,6 @@ Make Universe a working experiment and evolution layer in Hub: instantiate an ob
 
 The executable loop, interfaces, and independent review are complete for the local
 kernel. All five two-generation demo checks pass in source and extracted-package
-runs. Normal source PR integration is in progress. Full model-driven portfolio operation
+runs. Implementation commit 0273343281856b1b18990249abe1dd6c980e5db4 is pushed;
+normal source PR integration is in progress. Full model-driven portfolio operation
 and npm publication are not represented as complete.

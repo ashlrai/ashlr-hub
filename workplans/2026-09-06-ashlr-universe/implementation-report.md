@@ -82,5 +82,7 @@ scratch writes, and denied evaluator writes/chmod of frozen artifacts.
   an npm publication or resident-fleet activation.
 
 Entire is enabled in manual-commit mode; branch resume found no previous checkpoint.
+The implementation commit has no associated Entire checkpoint; no session capture
+is claimed from the enabled configuration alone.
 Commit and PR identifiers are recorded by Git/GitHub rather than embedded here
 self-referentially.
