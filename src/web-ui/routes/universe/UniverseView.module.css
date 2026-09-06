@@ -29,6 +29,14 @@
 .campaignFacts dd { margin-top: var(--space-1); font-size: var(--text-sm-size); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .view .campaignNote, .campaignBody > p { font-size: var(--text-xs-size); }
 .campaignBody .command { margin-top: 0; }
+.delivery { border-top: 1px solid var(--border-subtle); padding-top: var(--space-3); font-size: var(--text-sm-size); }
+.delivery summary { display: flex; align-items: baseline; gap: var(--space-3); flex-wrap: wrap; overflow-wrap: anywhere; }
+.delivery summary::before { content: '+'; color: var(--text-link); }
+.delivery[open] summary::before { content: '−'; }
+.delivery summary span { color: var(--text-secondary); font-size: var(--text-xs-size); }
+.deliveryFacts { display: grid; gap: var(--space-3); padding: var(--space-4) 0; }
+.deliveryFacts dt { color: var(--text-tertiary); font-size: var(--text-xs-size); }
+.deliveryFacts dd { overflow-wrap: anywhere; margin-top: var(--space-1); }
 .sectionHeading { padding: var(--space-5); }
 .sectionHeading p { margin-top: var(--space-1); font-size: var(--text-sm-size); }
 .archiveCount { color: var(--text-secondary); font-size: var(--text-xs-size); white-space: nowrap; padding-top: var(--space-1); }

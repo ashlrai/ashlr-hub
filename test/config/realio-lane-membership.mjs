@@ -44,6 +44,9 @@ export const REAL_IO_LANE_TIMEOUT_MS = 60_000;
  */
 export const REAL_IO_TEST_FILES = [
   'test/universe-core.test.ts', // real Git snapshots and confined experiment subprocesses
+  'test/universe-delivery.test.ts', // real Git object/ref delivery and private receipts
+  'test/universe-delivery-review.test.ts', // independent Git provenance and historical receipt review
+  'test/local-pack-universe-smoke.test.ts', // installed SDK/CLI contract with real Git fixtures
   'test/universe-model-integration.test.ts', // real pinned evaluator plus bounded local HTTP model fixtures
   'test/universe-campaign-integration.test.ts', // native multi-generation ownership, feedback and durable resource limits
   'test/universe-feedback-replay.test.ts', // durable feedback integrity and a complete 64-trial record footprint

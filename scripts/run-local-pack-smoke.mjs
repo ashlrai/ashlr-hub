@@ -61,6 +61,132 @@ export function tarballEvidence(bytes) {
   });
 }
 
+// This self-contained function runs in the clean install directory, so package
+// exports and CLI imports resolve from the tarball, never the source checkout.
+async function verifyInstalledUniverse(fixtureRoot, bin) {
+  const { default: assert } = await import('node:assert/strict');
+  const { chmodSync, existsSync, lstatSync, mkdirSync, writeFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { spawnSync } = await import('node:child_process');
+  const sdk = await import('@ashlr/hub/universe');
+  for (const name of ['defaultUniverseRoot', 'ensureUniverseRoot', 'validateUniverseManifest',
+    'initUniverse', 'readUniverseOverview', 'runUniverse', 'validateUniverseCampaignDefinition',
+    'initUniverseCampaign', 'readUniverseCampaign', 'readUniverseCampaigns',
+    'requestUniverseCampaignControl', 'runUniverseCampaign', 'deliverUniverseElite',
+    'readUniverseDeliveries', 'validUniverseDeliveryBranch']) {
+    assert.equal(typeof sdk[name], 'function', `Universe SDK export missing: ${name}`);
+  }
+  mkdirSync(fixtureRoot, { mode: 0o700 });
+  const execute = (command, args, cwd, expectedStatus = 0) => {
+    const result = spawnSync(command, args, { cwd, env: process.env, encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024 });
+    assert.ifError(result.error);
+    assert.equal(result.status, expectedStatus,
+      `Installed Universe command failed (${args.join(' ')}): ${result.stderr}`);
+    return result.stdout;
+  };
+  const cli = (args, expectedStatus = 0) => execute(bin, ['universe', ...args], fixtureRoot, expectedStatus);
+  const json = (args, expectedStatus = 0) => JSON.parse(cli([...args, '--json'], expectedStatus));
+  const missing = join(fixtureRoot, 'missing-store');
+  assert.equal(sdk.readUniverseOverview({ root: missing }).sourceState, 'missing');
+  assert.equal(sdk.readUniverseCampaigns({ root: missing }).sourceState, 'missing');
+  assert.equal(sdk.readUniverseDeliveries('pack-universe', { root: missing }).sourceState, 'missing');
+  assert.equal(json(['status', '--root', missing]).sourceState, 'missing');
+  assert.equal(json(['campaign', 'status', '--root', missing]).sourceState, 'missing');
+  assert.equal(json(['deliveries', 'pack-universe', '--root', missing]).sourceState, 'missing');
+  assert.equal(existsSync(missing), false, 'Status reads must not create a missing store');
+  assert.match(cli(['help']), /campaign/);
+  assert.match(cli(['campaign', 'help']), /resume/);
+  assert.match(cli(['deliver', '--help']), /deliveries/);
+  assert.match(cli(['deliveries', '--help']), /deliver/);
+  assert.equal(typeof json(['status', '--unexpected', '--root', missing], 2).error, 'string');
+  assert.equal(typeof json(['campaign', 'run', '--unexpected', '--root', missing], 2).error, 'string');
+  assert.equal(typeof json(['deliver', 'pack-universe', '--unexpected', '--root', missing], 2).error, 'string');
+  assert.equal(existsSync(missing), false, 'Invalid CLI flags must not create a store');
+
+  const seed = join(fixtureRoot, 'seed');
+  mkdirSync(seed, { mode: 0o700 });
+  writeFileSync(join(seed, 'never-run.mjs'),
+    "throw new Error('Package smoke must not execute a worker or evaluator');\n", { mode: 0o600 });
+  const git = (...args) => execute('git', args, seed).trim();
+  git('init', '-q');
+  git('add', 'never-run.mjs');
+  git('-c', 'user.name=Package Smoke', '-c', 'user.email=package-smoke@example.invalid',
+    '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'private smoke fixture');
+  const root = join(fixtureRoot, 'store');
+  const manifest = { schemaVersion: 1, id: 'pack-universe', name: 'Installed package smoke',
+    objective: 'Verify registration and observation without executing work',
+    seed: { repo: seed, revision: git('rev-parse', 'HEAD') },
+    metric: { name: 'score', direction: 'maximize', minImprovement: 0 },
+    budget: { maxTrials: 1, maxDurationMs: 1000, trialTimeoutMs: 1000, maxParallel: 1 },
+    evaluation: { command: [process.execPath, 'never-run.mjs'], timeoutMs: 1000 },
+    variants: [{ id: 'never-run', niche: 'smoke', hypothesis: 'No execution is expected',
+      command: [process.execPath, 'never-run.mjs'] }] };
+  const definition = { schemaVersion: 1, id: 'pack-sdk', universeId: manifest.id, feedback: false,
+    budget: { maxGenerations: 1, maxDurationMs: 1000, maxModelRequests: 0,
+      maxStagnantGenerations: 1, maxReportedTokens: null } };
+  const assertIdle = (summary, state) => {
+    assert.equal(summary.sourceState, 'healthy');
+    assert.equal(summary.state, state);
+    assert.equal(summary.owner, null);
+    assert.equal(summary.startedAt, null);
+    assert.equal(summary.deadlineAt, null);
+    assert.deepEqual(summary.steps, []);
+    assert.equal(summary.progress.attempts, 0);
+    assert.equal(summary.progress.reservedModelRequests, 0);
+  };
+  const pinnedSeed = join(root, 'universes', manifest.id, 'seed');
+  try {
+    assert.equal(sdk.initUniverse(manifest, { root }).id, manifest.id);
+    const beforeRefs = git('show-ref');
+    await assert.rejects(sdk.deliverUniverseElite(manifest.id, {
+      root, trialId: 'missing-trial', branch: 'codex/never-delivered',
+    }), /current independently selected elite/);
+    assert.equal(typeof json(['deliver', manifest.id, '--trial', 'missing-trial',
+      '--branch', 'codex/never-delivered', '--root', root], 1).error, 'string');
+    assert.equal(git('show-ref'), beforeRefs, 'Rejected delivery must not change repository refs');
+    assert.deepEqual(sdk.readUniverseDeliveries(manifest.id, { root }).deliveries, []);
+    assertIdle(sdk.initUniverseCampaign(definition, { root }), 'ready');
+    assertIdle(sdk.readUniverseCampaign(definition.id, { root }), 'ready');
+    assertIdle(sdk.requestUniverseCampaignControl(definition.id, 'pause', { root }), 'paused');
+    const stopped = sdk.requestUniverseCampaignControl(definition.id, 'stop', { root });
+    assertIdle(stopped, 'stopped');
+    // Terminal idempotence exercises the public entrypoint without starting work.
+    assert.deepEqual(await sdk.runUniverseCampaign(definition.id, { root }), stopped,
+      'A stopped campaign must not begin work or change its evidence');
+
+    const path = join(fixtureRoot, 'campaign.json');
+    writeFileSync(path, JSON.stringify({ ...definition, id: 'pack-cli' }), { mode: 0o600 });
+    assertIdle(json(['campaign', 'init', '--manifest', path, '--root', root]), 'ready');
+    assertIdle(json(['campaign', 'status', 'pack-cli', '--root', root]), 'ready');
+    assertIdle(json(['campaign', 'pause', 'pack-cli', '--root', root]), 'paused');
+    assertIdle(json(['campaign', 'stop', 'pack-cli', '--root', root]), 'stopped');
+    assertIdle(json(['campaign', 'resume', 'pack-cli', '--root', root]), 'stopped');
+    assert.equal(json(['campaign', 'status', '--root', root]).campaigns.length, 2);
+    const overview = sdk.readUniverseOverview({ root });
+    assert.equal(overview.sourceState, 'healthy');
+    assert.equal(overview.campaigns.length, 2);
+    assert.equal(overview.universes.length, 1);
+    assert.deepEqual(overview.universes[0].runs, []);
+    assert.deepEqual(overview.universes[0].elites, []);
+    assert.equal(overview.universes[0].activeRun, null);
+  } finally {
+    // The fixture is a single-file seed created by this invocation. Unfreeze
+    // only its directory so the surrounding gate can remove its disposable root.
+    if (existsSync(pinnedSeed)) {
+      const identity = lstatSync(pinnedSeed);
+      assert(identity.isDirectory() && !identity.isSymbolicLink());
+      chmodSync(pinnedSeed, 0o700);
+    }
+  }
+  process.stdout.write('Installed Universe SDK and campaign smoke: passed (no work executed)\n');
+}
+
+export function installedUniverseSmokeArgs(fixtureRoot, bin) {
+  return ['--input-type=module', '-e',
+    `await (${verifyInstalledUniverse.toString()})(${JSON.stringify(fixtureRoot)}, ${JSON.stringify(bin)});`];
+}
+
 export function runLocalPackSmoke({ repo, workDir, output }) {
   const pkg = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'));
   if (pkg.name !== '@ashlr/hub' || typeof pkg.version !== 'string') fail('unexpected package identity');
@@ -91,6 +217,7 @@ export function runLocalPackSmoke({ repo, workDir, output }) {
   run(process.execPath, ['--input-type=module', '-e',
     "const core = await import('@ashlr/hub/core'); if (typeof core.loadConfig !== 'function') throw new Error('core surface broken');"],
   { cwd: installDir });
+  run(process.execPath, installedUniverseSmokeArgs(join(workDir, 'universe-smoke'), bin), { cwd: installDir });
 
   const evidence = Object.freeze({
     schemaVersion: 1,

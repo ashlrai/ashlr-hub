@@ -82,9 +82,87 @@ function mount(body: UniverseOverview) {
   return fetch;
 }
 
+function deliveryReport(overrides: Partial<NonNullable<UniverseOverview['deliveryReports']>[number]> = {}): NonNullable<UniverseOverview['deliveryReports']>[number] {
+  return {
+    universeId: 'compiler', sourceState: 'healthy', reasons: [], deliveries: [{
+      schemaVersion: 1, id: 'delivery-1', universeId: 'compiler', trialId: 'trial-first', runId: 'run-first',
+      niche: 'efficient', manifestDigest: 'manifest-digest', comparatorDigest: 'comparator-digest',
+      artifactDigest: 'artifact-digest', repo: '/repos/compiler', branch: 'codex/compiler-first',
+      baseCommit: 'a'.repeat(40), commit: 'b'.repeat(40), tree: 'c'.repeat(40), changedFiles: ['compiler.ts'],
+      status: 'delivered', createdAt: '2026-09-06T12:00:00.000Z', completedAt: '2026-09-06T12:00:01.000Z',
+    }], ...overrides,
+  };
+}
+
 describe('UniverseView', () => {
   beforeEach(() => evictAll());
   afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+  it('shows verified local branch provenance and navigates to its source generation', async () => {
+    const user = userEvent.setup();
+    mount(overview({ deliveryReports: [deliveryReport()] }));
+    const region = await screen.findByRole('region', { name: 'Repository delivery' });
+    await user.click(within(region).getByText('codex/compiler-first'));
+    expect(within(region).getByText('Local branch verified')).toBeInTheDocument();
+    expect(within(region).getByText('compiler.ts')).toBeInTheDocument();
+    expect(within(region).getByText('artifact-digest')).toBeInTheDocument();
+    expect(within(region).getByText(/not a fresh evaluation, a merge, or a production deployment/)).toBeInTheDocument();
+    expect(within(region).getByText(`git -C '/repos/compiler' show --stat '${'b'.repeat(40)}'`)).toBeInTheDocument();
+    await user.click(within(region).getByRole('button', { name: 'Inspect source trial' }));
+    expect(screen.getByRole('region', { name: 'Evidence for small-motor' })).toBeInTheDocument();
+  });
+
+  it('opens the exact delivered trial when its generation has multiple retained niches', async () => {
+    const user = userEvent.setup();
+    const current = summary();
+    current.runs[0]!.trials.push(trial({ id: 'trial-other', variantId: 'other-niche-motor', niche: 'explorer' }));
+    const report = deliveryReport();
+    report.deliveries[0]!.trialId = 'trial-other';
+    report.deliveries[0]!.niche = 'explorer';
+    mount(overview({ universes: [current], deliveryReports: [report] }));
+    const region = await screen.findByRole('region', { name: 'Repository delivery' });
+    await user.click(within(region).getByText('codex/compiler-first'));
+    await user.click(within(region).getByRole('button', { name: 'Inspect source trial' }));
+    expect(screen.getByRole('region', { name: 'Evidence for other-niche-motor' })).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Evidence for small-motor' })).not.toBeInTheDocument();
+  });
+
+  it.each(['pending', 'unchanged'] as const)('does not count a %s receipt as a delivered branch', async (status) => {
+    const report = deliveryReport();
+    report.deliveries[0]!.status = status;
+    if (status === 'unchanged') report.deliveries[0]!.changedFiles = [];
+    mount(overview({ deliveryReports: [report] }));
+    const region = await screen.findByRole('region', { name: 'Repository delivery' });
+    expect(within(region).getByText(status === 'pending' ? 'Pending; not confirmed delivered' : 'No change; no branch created')).toBeInTheDocument();
+    expect(within(region).queryByText('Local branch verified')).not.toBeInTheDocument();
+    expect(within(region).queryByText(/show --stat/)).not.toBeInTheDocument();
+  });
+
+  it('withholds verified status and delivery commands for drifted branch evidence', async () => {
+    mount(overview({ deliveryReports: [deliveryReport({ sourceState: 'degraded', reasons: ['Branch target changed'] })] }));
+    const region = await screen.findByRole('region', { name: 'Repository delivery' });
+    expect(within(region).getByText('Branch target changed')).toBeInTheDocument();
+    expect(within(region).getByText('Unverified record (delivered)')).toBeInTheDocument();
+    expect(within(region).queryByText('Local branch verified')).not.toBeInTheDocument();
+    expect(within(region).queryByText('Deliver a retained artifact from your terminal')).not.toBeInTheDocument();
+  });
+
+  it('does not navigate to an unrelated generation when delivery source history is missing', async () => {
+    const report = deliveryReport({ sourceState: 'degraded', reasons: ['Source history unavailable'] });
+    report.deliveries[0]!.runId = 'missing-run';
+    mount(overview({ deliveryReports: [report] }));
+    const region = await screen.findByRole('region', { name: 'Repository delivery' });
+    expect(within(region).getByText('Source trial unavailable in the current history.')).toBeInTheDocument();
+    expect(within(region).queryByRole('button', { name: 'Inspect source trial' })).not.toBeInTheDocument();
+  });
+
+  it('offers delivery only for the current verified elite, not every passing trial', async () => {
+    mount(overview());
+    const region = await screen.findByRole('region', { name: 'Repository delivery' });
+    expect(within(region).getByText('No local branches delivered yet.')).toBeInTheDocument();
+    expect(within(region).getByText("ashlr universe deliver 'compiler' --trial 'trial-next' --branch 'codex/universe-compiler-trial-ne' --json")).toBeInTheDocument();
+    expect(within(region).queryByText(/--trial 'trial-first'/)).not.toBeInTheDocument();
+  });
 
   it('shows persisted archive selection, lineage, raw metrics and unknown model spend', async () => {
     const fetch = mount(overview());
