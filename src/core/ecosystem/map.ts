@@ -185,7 +185,7 @@ export function northStarDocSummary(maxChars = 1200): string {
       pillars.forEach((p, i) => parts.push(`  ${i + 1}. ${p.slice(0, 160)}`));
     }
     parts.push('');
-    parts.push('Measure GRAND not vanity: products shipped+adopted, net-new capabilities invented, compounding velocity (merges/week UP, cost/merge DOWN), safety never weakened.');
+    parts.push('Measure GRAND not vanity: verified engineering yield (useful accepted changes per measured token and hour), products shipped+adopted, net-new capabilities. Preserve raw evidence; unknown usage is not zero.');
     parts.push('');
     parts.push('Every goal/idea MUST be: substantive (value≥4 — real capability or product, NOT docs/version-bumps/lint), bound to a concrete enrolled repo, decomposable into shippable milestones.');
     if (bets.length > 0) {

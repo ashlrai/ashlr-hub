@@ -621,6 +621,12 @@ const loadInventCmd = lazyCmd(
   'invent command requires src/cli/invent.ts (M181 generative engine).',
 );
 
+const loadUniverseCmd = lazyCmd(
+  () => import('./universe.js'),
+  (m) => m.cmdUniverse as Cmd,
+  'universe command requires a current build of src/cli/universe.ts.',
+);
+
 // ─── M18 integration reads (best-effort, never throw, used in cmdStatus) ──────
 
 import type { GithubStatus, VercelStatus, Identity } from '../core/types.js';
@@ -2086,6 +2092,12 @@ async function main(): Promise<void> {
         // M181: generative engine — invent bold, net-new features for a repo.
         const cmdInvent = await loadInventCmd();
         process.exitCode = await cmdInvent(rest);
+        break;
+      }
+
+      case 'universe': {
+        const cmdUniverse = await loadUniverseCmd();
+        process.exitCode = await cmdUniverse(rest);
         break;
       }
 

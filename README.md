@@ -1,16 +1,42 @@
 # ashlr-hub
 
-**A governed autonomous-engineering fleet architecture — proposal-first, sandboxed, and gated by explicit runtime and merge authority.**
+**The local kernel for Ashlr Universe: an agent-native engineering system that builds, evaluates, and learns from competing approaches.**
 
 [![npm](https://img.shields.io/npm/v/@ashlr/hub.svg?logo=npm&label=%40ashlr%2Fhub&color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
 [![npm downloads](https://img.shields.io/npm/dm/@ashlr/hub.svg?color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
-[![CI](https://github.com/ashlrai/ashlr-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/ashlrai/ashlr-hub/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22-339933.svg?logo=node.js&logoColor=white)](https://nodejs.org)
 
 ---
 
 ## What is this?
+
+Ashlr Universe is the [North Star](docs/NORTH-STAR.md): turn an objective and a
+resource budget into useful accepted engineering changes, then use measured
+results to improve the next attempt. Hub provides the local runtime, integrations,
+CLI, and dashboard. Ecosystem projects stay independently useful.
+
+The new **local experiment kernel** runs competing code variants from a pinned
+Git seed, evaluates artifacts with a fixed evaluator, retains winners in different
+niches, and uses that archive in subsequent generations. Run the credential-free
+example from a source checkout:
+
+```sh
+npm ci
+npm run build
+node bin/ashlr universe demo
+node bin/ashlr universe status --json
+```
+
+The example produces and tests actual code through two generations. It demonstrates
+the local learning loop, not model intelligence or production engineering yield.
+Records remain private under `~/.ashlr/universe`; `--root` selects an isolated store.
+The React console exposes the same results at `/next#/universe`.
+See [Universe usage and architecture](docs/ASHLR-UNIVERSE.md) and its
+[research grounding](docs/UNIVERSE-RESEARCH.md). Verification runs locally; GitHub
+Actions are not required. This source feature is not yet in the published npm release.
+
+### Existing fleet runtime
 
 ashlr-hub is a single Node binary containing an autonomous agent fleet for enrolled repositories. In the current production build, compiled daemon and conductor trust roots are empty, so live non-dry fleet execution is deliberately dormant; verified dry-run, status, and local-console paths remain available.
 

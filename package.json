@@ -37,6 +37,9 @@
     "schema",
     "CHANGELOG.md",
     "docs/MISSION-OS.md",
+    "docs/ASHLR-UNIVERSE.md",
+    "docs/UNIVERSE-RESEARCH.md",
+    "docs/NORTH-STAR.md",
     "docs/ELITE-AGENT-EFFICIENCY.md",
     "docs/RUNTIME_ACTIVATION_AUTHORITY.md",
     "docs/contracts/CONTRACT-M515.md",
@@ -64,6 +67,10 @@
     "./plugin": {
       "types": "./dist/api/plugin.d.ts",
       "import": "./dist/api/plugin.js"
+    },
+    "./universe": {
+      "types": "./dist/core/universe/index.d.ts",
+      "import": "./dist/core/universe/index.js"
     },
     "./package.json": "./package.json"
   },

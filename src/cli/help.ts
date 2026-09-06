@@ -39,6 +39,18 @@ export interface AgentCommandDoc {
  */
 export const AGENT_COMMANDS: AgentCommandDoc[] = [
   {
+    usage: 'ashlr universe status [id] [--root <path>] --json',
+    description: 'Read local experiments, raw measurements, lineage, and per-niche winning artifacts. No provider calls.',
+    safety: 'read',
+    jsonShape: 'UniverseOverview',
+  },
+  {
+    usage: 'ashlr universe run <id> [--root <path>] --json',
+    description: 'Execute registered local commands in isolated candidate trees, evaluate, and append one budgeted generation. No network, merge, deploy, or model credentials.',
+    safety: 'append',
+    jsonShape: 'UniverseRun',
+  },
+  {
     usage: 'ashlr orient [--repo <path>] --json',
     description: 'Session-start context: genome hits, health, backlog, pending proposals, attention. Run once when starting work.',
     safety: 'read',
@@ -349,6 +361,7 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'comms <status|cycle|digest>',  desc: 'Operator comms channel (Telegram/iMessage): digests, approve-by-text.', topic: 'autonomy' },
   { cmd: 'director [--dry-run]',         desc: 'Elon Director: read-only strategic reasoning cycle; --dry-run prints the digest without sending Telegram.', topic: 'autonomy' },
   { cmd: 'invent',                       desc: 'Generative backlog invention — propose novel high-value work items.', topic: 'autonomy' },
+  { cmd: 'universe <demo|init|run|status|archive>', desc: 'Local experiment evolution: run competing code variants, measure them, and reuse winning artifacts.', topic: 'autonomy' },
   { cmd: 'eval [--limit N]',             desc: 'Local-agent eval harness: adaptive prompts OFF vs ON, steps/done/tokens (M44).', topic: 'run' },
   { cmd: 'eval attention [--window 1d|7d|30d]', desc: 'Metadata-only fleet attention report: context pressure, retrieval, yield, routing, and traces.', topic: 'run' },
   { cmd: 'skills audit <pack-path> [--json]', desc: 'Read-only quarantine audit for external skill structure, trigger routing, collisions, and behavioral fixtures.', topic: 'run' },
