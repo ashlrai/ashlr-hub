@@ -44,6 +44,7 @@ export const REAL_IO_LANE_TIMEOUT_MS = 60_000;
  */
 export const REAL_IO_TEST_FILES = [
   'test/universe-core.test.ts', // real Git snapshots and confined experiment subprocesses
+  'test/universe-model-integration.test.ts', // real pinned evaluator plus bounded local HTTP model fixtures
   'test/universe-demo.test.ts', // two real Universe generations and artifact lineage
   'test/universe-confinement.test.ts', // real macOS filesystem boundary checks with test-owned sentinels
   // --- confirmed-flaky repeat offenders (this session's evidence: isolation re-runs pass;

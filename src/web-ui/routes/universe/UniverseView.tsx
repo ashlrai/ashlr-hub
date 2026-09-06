@@ -46,6 +46,36 @@ function selectionReason(trial: UniverseTrial, summary: UniverseSummary, run: Un
   return `Not admitted in this generation. Selection compares passing trials within each niche and requires an improvement of ${number(summary.manifest.metric.minImprovement)}.`;
 }
 
+function GenerationEvidence({ trial }: { trial: UniverseTrial }) {
+  const receipt = trial.generation;
+  if (!receipt) return <p className={styles.hypothesis}>Operator command. Model usage was not measured.</p>;
+  const tokenCount = (value: number | null) => value === null ? 'Unavailable' : number(value);
+  return (
+    <section className={styles.generationEvidence} aria-label="Model generation evidence">
+      <div className={styles.detailHeading}><h4>Model generation</h4><StatusBadge status={receipt.status} tone={receipt.status === 'succeeded' ? 'success' : undefined} /></div>
+      <dl className={styles.measurements}>
+        <div><dt>Model</dt><dd>{receipt.model}</dd></div>
+        <div><dt>Accounting</dt><dd>{receipt.usage.state === 'reported' ? 'Provider-reported' : 'Unavailable'}</dd></div>
+        <div><dt>Input tokens</dt><dd>{tokenCount(receipt.usage.inputTokens)}</dd></div>
+        <div><dt>Output tokens</dt><dd>{tokenCount(receipt.usage.outputTokens)}</dd></div>
+        <div><dt>Generation duration</dt><dd>{duration(receipt.durationMs)}</dd></div>
+        <div><dt>Request</dt><dd>{receipt.requestStarted ? 'Started' : 'Not started'}</dd></div>
+      </dl>
+      <details className={styles.artifact}>
+        <summary>Generation source and changes</summary>
+        <dl>
+          <div><dt>Provider</dt><dd>{receipt.provider}</dd></div>
+          <div><dt>Endpoint</dt><dd><code>{receipt.endpoint}</code></dd></div>
+          <div><dt>Changed files</dt><dd>{receipt.changedFiles.length ? receipt.changedFiles.join(', ') : 'None'}</dd></div>
+          <div><dt>Prompt digest</dt><dd><code>{receipt.promptDigest ?? 'Unavailable'}</code></dd></div>
+          <div><dt>Response digest</dt><dd><code>{receipt.responseDigest ?? 'Unavailable'}</code></dd></div>
+        </dl>
+      </details>
+      <p>Generation success means a valid replacement response, not evaluator acceptance. Token counts come from the endpoint response; model identity is the configured name.</p>
+    </section>
+  );
+}
+
 function TrialDetail({ trial, summary, run }: { trial: UniverseTrial; summary: UniverseSummary; run: UniverseRun }) {
   const parent = summary.runs.flatMap((item) => item.trials).find((item) => item.id === trial.parentTrialId);
   const current = summary.elites.some((elite) => elite.trialId === trial.id);
@@ -73,6 +103,7 @@ function TrialDetail({ trial, summary, run }: { trial: UniverseTrial; summary: U
           <div key={key}><dt>{key}</dt><dd>{number(value)}</dd></div>
         ))}
       </dl>
+      <GenerationEvidence trial={trial} />
       {trial.error ? <pre role="status" aria-label="Trial failure evidence" className={styles.failureEvidence}>{trial.error}</pre> : null}
       {trial.artifact ? (
         <details className={styles.artifact}>
@@ -162,7 +193,7 @@ function UniverseExperiment({ summary }: { summary: UniverseSummary }) {
               </select>
             </label>
           </div>
-          <div className={styles.runMeta}><StatusBadge status={run.status} tone={run.status === 'completed' ? 'success' : undefined} /><span>Started {timestamp(run.startedAt)}</span><span>{duration(run.durationMs)} recorded</span></div>
+          <div className={styles.runMeta}><StatusBadge status={run.status} tone={run.status === 'completed' ? 'success' : undefined} /><span>Started {timestamp(run.startedAt)}</span><span>{duration(run.durationMs)} recorded</span><span>{run.trials.filter((item) => item.status === 'passed').length} / {run.trials.length} trials passed</span><span>{run.status === 'completed' ? `${run.trials.filter((item) => item.selected).length} admitted` : run.status === 'running' ? 'Selection pending' : 'Selection not applied'}</span></div>
           {run.error ? <p className={styles.failure} role="status">{run.error}</p> : null}
           {trial ? (
             <div className={styles.comparisonBody}>
@@ -186,10 +217,11 @@ function UniverseExperiment({ summary }: { summary: UniverseSummary }) {
         </section>
       )}
 
-      <footer className={styles.resources}>
+      <footer className={styles.resources} aria-label="Generation resources">
         <h2>Recorded resources</h2>
-        <dl><div><dt>Runtime across {runs.length} generations</dt><dd>{duration(totalDuration)}</dd></div><div><dt>Model tokens</dt><dd>Unavailable</dd></div><div><dt>Model cost</dt><dd>Unavailable</dd></div></dl>
-        <p>These are local experiment measurements. Model usage and business outcomes are not inferred from evaluator scores.</p>
+        <dl><div><dt>Runtime across {runs.length} generations</dt><dd>{duration(totalDuration)}</dd></div><div><dt>Model tokens{run ? ` in generation ${run.generation}` : ''}</dt><dd>{run?.tokensUsed == null ? 'Unavailable' : number(run.tokensUsed)}</dd></div><div><dt>Model cost</dt><dd>Unavailable</dd></div></dl>
+        {run?.generationUsage ? <p>Generation usage coverage: {run.generationUsage.reportedRequests} / {run.generationUsage.requestsStarted} recorded started requests reported tokens across {run.generationUsage.trials} model trials. Totals require a completed generation, at least one recorded request, and usage from every recorded request. Interrupted in-flight usage may be missing.</p> : null}
+        <p>Tokens cover model generation only, not command or evaluator work. Missing usage and dollar costs stay unavailable. Evaluator scores do not establish business value or accepted production changes.</p>
       </footer>
     </>
   );

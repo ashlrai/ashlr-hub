@@ -12,6 +12,7 @@ import {
 } from './artifacts.js';
 import type { UniverseArtifact, UniverseElite, UniverseManifest, UniverseOverview, UniverseRun,
   UniverseStoreOptions, UniverseSummary, UniverseTrial } from './types.js';
+import { generationResources, newGenerationReceipt, validateGenerationConfig, validGenerationReceipt, validGenerationUsage } from './generation.js';
 
 const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -54,10 +55,15 @@ export function validateUniverseManifest(value: unknown): UniverseManifest {
   }
   const ids = new Set<string>();
   for (const variant of value.variants) {
-    if (!object(variant) || !exact(variant, ['id', 'niche', 'hypothesis', 'command', 'model']) ||
+    if (!object(variant) || !exact(variant, ['id', 'niche', 'hypothesis', 'command', 'model', 'generation']) ||
         !text(variant.id, 64) || !ID.test(variant.id) || ids.has(variant.id) || !text(variant.niche, 64) ||
-        !ID.test(variant.niche) || !text(variant.hypothesis) || !command(variant.command) ||
-        (variant.model !== undefined && !text(variant.model, 160))) throw new Error('Invalid or duplicate Universe variant');
+        !ID.test(variant.niche) || !text(variant.hypothesis)) throw new Error('Invalid or duplicate Universe variant');
+    if (variant.generation !== undefined) {
+      if (variant.command !== undefined || variant.model !== undefined) throw new Error('Universe variants must choose a command or local generation, not both');
+      validateGenerationConfig(variant.generation);
+    } else if (!command(variant.command) || (variant.model !== undefined && !text(variant.model, 160))) {
+      throw new Error('Invalid Universe command variant');
+    }
     ids.add(variant.id);
   }
   return JSON.parse(canonical(value)) as UniverseManifest;
@@ -84,7 +90,7 @@ function validArtifact(value: unknown): value is UniverseArtifact {
     /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value.revision);
 }
 function validTrial(value: unknown): value is UniverseTrial {
-  return object(value) && exact(value, ['id', 'variantId', 'niche', 'parentTrialId', 'status', 'score', 'metrics', 'artifact', 'durationMs', 'delta', 'selected', 'error']) &&
+  return object(value) && exact(value, ['id', 'variantId', 'niche', 'parentTrialId', 'status', 'score', 'metrics', 'artifact', 'durationMs', 'delta', 'selected', 'error', 'generation']) &&
     text(value.id, 64) && RECORD_ID.test(value.id) && text(value.variantId, 64) && ID.test(value.variantId) &&
     text(value.niche, 64) && ID.test(value.niche) && (value.parentTrialId === null || text(value.parentTrialId, 64)) &&
     ['passed', 'failed', 'timed-out', 'cancelled'].includes(String(value.status)) &&
@@ -92,19 +98,27 @@ function validTrial(value: unknown): value is UniverseTrial {
     (value.artifact === null || validArtifact(value.artifact)) && finite(value.durationMs) && value.durationMs >= 0 &&
     (value.delta === null || finite(value.delta)) && typeof value.selected === 'boolean' &&
     (value.error === undefined || text(value.error, 1_024)) &&
+    (value.generation === undefined || validGenerationReceipt(value.generation)) &&
     (value.status !== 'passed' || (finite(value.score) && validArtifact(value.artifact))) &&
     (!value.selected || value.status === 'passed');
 }
 function validRun(value: unknown): value is UniverseRun {
-  return object(value) && exact(value, ['id', 'universeId', 'generation', 'manifestDigest', 'comparatorDigest', 'startedAt', 'finishedAt', 'status', 'trials', 'durationMs', 'tokensUsed', 'costUsd', 'error']) &&
+  return object(value) && exact(value, ['id', 'universeId', 'generation', 'manifestDigest', 'comparatorDigest', 'startedAt', 'finishedAt', 'status', 'trials', 'durationMs', 'tokensUsed', 'costUsd', 'error', 'generationUsage']) &&
     text(value.id, 64) && RECORD_ID.test(value.id) && text(value.universeId, 64) && ID.test(value.universeId) &&
     integer(value.generation, 1, MAX_RECORDS) && text(value.manifestDigest, 64) && HASH.test(value.manifestDigest) &&
     text(value.comparatorDigest, 64) && HASH.test(value.comparatorDigest) && text(value.startedAt, 40) &&
     Number.isFinite(Date.parse(value.startedAt)) && (value.finishedAt === null || (text(value.finishedAt, 40) && Number.isFinite(Date.parse(value.finishedAt)))) &&
     ['running', 'completed', 'interrupted', 'failed'].includes(String(value.status)) && Array.isArray(value.trials) && value.trials.length <= 64 && value.trials.every(validTrial) &&
     new Set(value.trials.map((trial) => trial.id)).size === value.trials.length &&
-    finite(value.durationMs) && value.durationMs >= 0 && value.tokensUsed === null && value.costUsd === null &&
-    (value.error === undefined || text(value.error, 1_024));
+    finite(value.durationMs) && value.durationMs >= 0 && (value.tokensUsed === null || integer(value.tokensUsed, 0, Number.MAX_SAFE_INTEGER)) && value.costUsd === null &&
+    (value.generationUsage === undefined || validGenerationUsage(value.generationUsage)) &&
+    (value.error === undefined || text(value.error, 1_024)) && resourceEvidenceMatches(value, value.trials);
+}
+
+function resourceEvidenceMatches(run: Record<string, unknown> | UniverseRun, trials: UniverseTrial[]): boolean {
+  const resources = generationResources(trials, run.status === 'completed');
+  return run.tokensUsed === resources.tokensUsed && run.costUsd === resources.costUsd &&
+    canonical(run.generationUsage ?? null) === canonical(resources.generationUsage ?? null);
 }
 
 function parseRecord(value: unknown): UniverseRecord | null {
@@ -246,13 +260,13 @@ export function projectUniverse(directory: string, records = readRecords(directo
       run = final.run;
       if (run.universeId !== start.run.universeId || run.generation !== start.run.generation || run.manifestDigest !== start.run.manifestDigest ||
           run.comparatorDigest !== start.run.comparatorDigest || run.startedAt !== start.run.startedAt ||
-          run.trials.length !== trials.length || run.trials.some((trial) => !trials.some((raw) =>
+          !resourceEvidenceMatches(run, trials) || run.trials.length !== trials.length || run.trials.some((trial) => !trials.some((raw) =>
             canonical({ ...trial, selected: false, delta: null }) === canonical({ ...raw, selected: false, delta: null })))) {
         throw new Error('Final run does not match durable trial evidence');
       }
     } else {
       const alive = verifiedProcessStartRef(start.ownerPid) === start.ownerStart;
-      run = { ...start.run, trials, status: alive ? 'running' : 'interrupted',
+      run = { ...start.run, trials, ...generationResources(trials, false), status: alive ? 'running' : 'interrupted',
         ...(alive ? {} : { error: 'Run owner exited before writing final evidence' }) };
       if (alive) activeRun = run;
     }
@@ -267,6 +281,14 @@ export function projectUniverse(directory: string, records = readRecords(directo
       if (!variant || variant.niche !== trial.niche || trial.parentTrialId !== (previous.get(trial.niche)?.trialId ?? null)) {
         throw new Error('Trial variant or lineage does not match the manifest and prior archive');
       }
+      if (variant.generation) {
+        const identity = newGenerationReceipt(variant.generation);
+        if (!trial.generation || trial.generation.model !== identity.model || trial.generation.endpoint !== identity.endpoint ||
+            trial.generation.changedFiles.some((path) => !variant.generation!.files.includes(path)) ||
+            (trial.generation.status !== 'succeeded' && (trial.status === 'passed' || trial.artifact !== null))) {
+          throw new Error('Trial generation evidence does not match its declared model and file scope');
+        }
+      } else if (trial.generation) throw new Error('Command trial cannot claim model generation usage');
       if (trial.artifact && (trial.artifact.path !== join(directory, 'artifacts', run.id, trial.id) ||
           trial.artifact.revision !== stored.manifest.seed.revision)) {
         throw new Error('Trial artifact path is outside its exact archive slot');
