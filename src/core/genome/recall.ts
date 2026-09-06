@@ -10,6 +10,7 @@
  */
 
 import type { AshlrConfig, GenomeEntry, RecallHit } from '../types.js';
+import { stripTrailingSlashes } from '../util/linear-input.js';
 import { loadGenome } from './store.js';
 
 const SKILL_TAG = 'm243:skill';
@@ -26,6 +27,45 @@ const EMBED_TIMEOUT_MS = 8000;
 
 /** Minimum keyword score for an entry to be included at all (0 = include everything). */
 const MIN_SCORE = 0;
+
+/** Maximum canonical Ollama origin length accepted by the recall boundary. */
+const OLLAMA_ORIGIN_MAX_BYTES = 2048;
+
+const LOCAL_OLLAMA_ORIGIN_PATTERN =
+  /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::([1-9][0-9]{0,4}))?$/;
+
+/**
+ * Convert a configured Ollama base URL into a detached, local-only origin.
+ *
+ * Genome recall promises that optional embedding text never leaves this host,
+ * so persisted config is not treated as network authority. Redirects are also
+ * refused at each fetch below to keep a local service from forwarding data.
+ */
+function localOllamaOrigin(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  // Preserve the legacy slash-only suffix normalization, but reduce it with
+  // the monotonic scanner before applying the strict, bounded origin grammar.
+  const originValue = stripTrailingSlashes(value);
+  if (
+    originValue.length === 0 ||
+    Buffer.byteLength(originValue, 'utf8') > OLLAMA_ORIGIN_MAX_BYTES ||
+    !LOCAL_OLLAMA_ORIGIN_PATTERN.test(originValue)
+  ) return null;
+
+  try {
+    const match = LOCAL_OLLAMA_ORIGIN_PATTERN.exec(originValue);
+    const port = match?.[2];
+    if (port !== undefined && Number(port) > 65_535) return null;
+
+    const parsed = new URL(originValue);
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Tokenisation helpers
@@ -113,9 +153,12 @@ async function detectEmbeddingModel(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 3000);
   try {
-    const res = await fetch(`${ollamaBase.replace(/\/+$/, '')}/api/tags`, {
+    // The base is reconstructed by localOllamaOrigin from an exact loopback-only grammar.
+    // codeql[js/file-access-to-http]
+    const res = await fetch(`${stripTrailingSlashes(ollamaBase)}/api/tags`, {
       signal: controller.signal,
       headers: { Accept: 'application/json' },
+      redirect: 'error',
     });
     if (!res.ok) return { available: false };
     const body = (await res.json()) as unknown;
@@ -154,11 +197,14 @@ async function fetchEmbedding(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), EMBED_TIMEOUT_MS);
   try {
-    const res = await fetch(`${ollamaBase.replace(/\/+$/, '')}/api/embeddings`, {
+    // The base is reconstructed by localOllamaOrigin from an exact loopback-only grammar.
+    // codeql[js/file-access-to-http]
+    const res = await fetch(`${stripTrailingSlashes(ollamaBase)}/api/embeddings`, {
       method: 'POST',
       signal: controller.signal,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model, prompt: text }),
+      redirect: 'error',
     });
     if (!res.ok) return null;
     const body = (await res.json()) as unknown;
@@ -303,7 +349,12 @@ export async function recall(
   const candidates = [...positiveHits, ...remaining];
 
   try {
-    const ollamaBase = cfg.models.ollama ?? 'http://localhost:11434';
+    const ollamaBase = localOllamaOrigin(
+      cfg.models.ollama ?? 'http://localhost:11434',
+    );
+    if (ollamaBase === null) {
+      return keywordHits.slice(0, limit);
+    }
     const modelProbe = await detectEmbeddingModel(ollamaBase);
     if (!modelProbe.available) {
       // No embedding model — return keyword results
