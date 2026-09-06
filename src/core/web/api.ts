@@ -91,6 +91,7 @@ import { listEnrolled, setKill } from '../sandbox/policy.js';
 import { listGoals } from '../goals/store.js';
 import { progressOf } from '../goals/advance.js';
 import { sanitizePublicJson } from '../util/public-json.js';
+import { ReadProjectionError, type ReadProjectionReader } from './read-projections.js';
 import type { MissionShadowObservation } from '../vision/mission-shadow-observer.js';
 import { readAgentOsRuntimeSnapshotV1 } from '../vision/agent-os-runtime-read.js';
 import { readUniverseOverview } from '../universe/index.js';
@@ -190,7 +191,10 @@ interface SnapshotCacheEntry {
 
 const snapshotCache = new WeakMap<AshlrConfig, SnapshotCacheEntry>();
 
-function buildCachedSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshotWithSourceQuality> {
+function buildCachedSnapshot(
+  cfg: AshlrConfig,
+  projections?: ReadProjectionReader,
+): Promise<DashboardSnapshotWithSourceQuality> {
   const now = Date.now();
   let entry = snapshotCache.get(cfg);
   if (!entry) {
@@ -200,7 +204,7 @@ function buildCachedSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshotWithSou
   if (entry.value && now < entry.expiresAt) return Promise.resolve(entry.value);
   if (entry.inFlight) return entry.inFlight;
 
-  entry.inFlight = buildSnapshot(cfg).then((value) => {
+  entry.inFlight = (projections ? projections.read('snapshot') : buildSnapshot(cfg)).then((value) => {
     entry!.value = value;
     entry!.expiresAt = Date.now() + SNAPSHOT_CACHE_MS;
     return value;
@@ -208,6 +212,12 @@ function buildCachedSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshotWithSou
     entry!.inFlight = null;
   });
   return entry.inFlight;
+}
+
+/** Discard read projections after an authenticated mutation attempt. */
+export function invalidateWebReadCaches(cfg: AshlrConfig): void {
+  snapshotCache.delete(cfg);
+  sseHistoryProjection = null;
 }
 
 function legacyDaemonProjection(
@@ -231,7 +241,12 @@ function legacyDaemonProjection(
   };
 }
 
-async function readFreshDaemonObservation(): Promise<PublicDaemonObservation> {
+async function readFreshDaemonObservation(projections?: ReadProjectionReader): Promise<PublicDaemonObservation> {
+  // Await this only after the enclosing snapshot so authority is observed last.
+  if (projections) {
+    try { return await projections.read('daemon-observation'); }
+    catch { return readPublicDaemonObservation(undefined); }
+  }
   try {
     const read = await readFleetDaemonStatus();
     return readPublicDaemonObservation(read.daemon);
@@ -790,8 +805,8 @@ function reqPath(req: IncomingMessage): string {
 // ---------------------------------------------------------------------------
 
 /** Build the current runs slice payload for SSE. */
-function buildSseRunsPayload(): unknown {
-  return listRuns({ limit: 20 }).map((r) => ({
+function buildSseRunsPayload(runs = listRuns({ limit: 20 })): unknown {
+  return runs.slice(0, 20).map((r) => ({
     id: r.id,
     goal: r.goal,
     status: r.status,
@@ -801,8 +816,8 @@ function buildSseRunsPayload(): unknown {
 }
 
 /** Build the current swarms slice payload for SSE. */
-function buildSseSwarmsPayload(): unknown {
-  return listSwarms({ limit: 20 }).map((s) => ({
+function buildSseSwarmsPayload(swarms = listSwarms({ limit: 20 })): unknown {
+  return swarms.slice(0, 20).map((s) => ({
     id: s.id,
     goal: s.goal,
     status: s.status,
@@ -815,15 +830,18 @@ function buildSseSwarmsPayload(): unknown {
 }
 
 /** Share one bounded history projection across every SSE client in a poll window. */
-function cachedSseHistoryProjection(): SseHistoryProjection {
+async function cachedSseHistoryProjection(projections?: ReadProjectionReader): Promise<SseHistoryProjection> {
   const now = Date.now();
   if (sseHistoryProjection && now < sseHistoryProjection.expiresAt) {
     return sseHistoryProjection;
   }
+  const history = projections
+    ? await Promise.all([projections.read('runs'), projections.read('swarms')])
+    : undefined;
   sseHistoryProjection = {
-    runs: buildSseRunsPayload(),
-    swarms: buildSseSwarmsPayload(),
-    expiresAt: now + SSE_HISTORY_CACHE_MS,
+    runs: buildSseRunsPayload(history?.[0]),
+    swarms: buildSseSwarmsPayload(history?.[1]),
+    expiresAt: Date.now() + SSE_HISTORY_CACHE_MS,
   };
   return sseHistoryProjection;
 }
@@ -851,6 +869,7 @@ function handleSseEvents(
   cfg: AshlrConfig,
   allowDispatch: boolean,
   readSession: { id: string; expiresAt: number },
+  projections?: ReadProjectionReader,
 ): void {
   // Cap concurrent SSE connections to bound timer/socket growth.
   if (_sseCleanups.size >= SSE_MAX_CONNECTIONS) {
@@ -912,13 +931,19 @@ function handleSseEvents(
     if (updateInFlight || backpressured) return;
     updateInFlight = true;
     try {
-      const history = cachedSseHistoryProjection();
-      sendNamed('runs', history.runs);
-      sendNamed('swarms', history.swarms);
+      try {
+        const history = await cachedSseHistoryProjection(projections);
+        if (cleaned) return;
+        sendNamed('runs', history.runs);
+        sendNamed('swarms', history.swarms);
+      } catch { /* Keep sending explicit daemon provenance if history is unavailable. */ }
       // M32: live inbox + daemon state for the web command center. Metadata
       // only — the inbox event carries id/title/kind, never diffs.
       try {
-        const pending = listProposals({ status: 'pending' });
+        const pending = projections
+          ? (await projections.read('proposals')).filter((proposal) => proposal.status === 'pending')
+          : listProposals({ status: 'pending' });
+        if (cleaned) return;
         sendNamed('inbox', {
           pending: pending.length,
           proposals: pending.slice(0, 20).map((p) => ({
@@ -933,12 +958,12 @@ function handleSseEvents(
       } catch { /* inbox slice is best-effort */ }
       let snap: DashboardSnapshotWithSourceQuality | null = null;
       try {
-        snap = await buildCachedSnapshot(cfg);
+        snap = await buildCachedSnapshot(cfg, projections);
       } catch {
         // Keep the event stream alive with explicit unavailable provenance.
       }
       if (cleaned) return;
-      const daemon = await readFreshDaemonObservation();
+      const daemon = await readFreshDaemonObservation(projections);
       if (cleaned) return;
       sendNamed('daemon', legacyDaemonProjection(daemon));
       sendNamed('daemon-observation', daemon);
@@ -971,7 +996,7 @@ function handleSseEvents(
 
   // Send an initial snapshot immediately.
   try {
-    void emitUpdate();
+    void emitUpdate().catch(() => { /* A failed read must not reject outside the stream. */ });
   } catch {
     // If the initial read fails, the client gets no data until the next tick.
   }
@@ -979,7 +1004,7 @@ function handleSseEvents(
   // Poll on a bounded interval.
   const intervalId = setInterval(() => {
     try {
-      void emitUpdate();
+      void emitUpdate().catch(() => { /* Retry a failed read on the next bounded tick. */ });
     } catch {
       // Socket may be gone; 'close' event will clean up.
     }
@@ -1123,7 +1148,12 @@ export async function handleApi(
   req: IncomingMessage,
   res: ServerResponse,
   cfg: AshlrConfig,
-  ctx: { token: string; allowDispatch: boolean; readSession?: { id: string; expiresAt: number } },
+  ctx: {
+    token: string;
+    allowDispatch: boolean;
+    readSession?: { id: string; expiresAt: number };
+    readProjections?: ReadProjectionReader;
+  },
 ): Promise<boolean> {
   const path = reqPath(req);
 
@@ -1137,10 +1167,10 @@ export async function handleApi(
   try {
     // ── GET /api/snapshot ───────────────────────────────────────────────────
     if (path === '/api/snapshot' && method === 'GET') {
-      const snapshot = await buildCachedSnapshot(cfg);
+      const snapshot = await buildCachedSnapshot(cfg, ctx.readProjections);
       // Read authority after the potentially slow snapshot build so the
       // serialized daemon verdict is the final observation in this response.
-      const daemonObservation = await readFreshDaemonObservation();
+      const daemonObservation = await readFreshDaemonObservation(ctx.readProjections);
       // M32: additive field so the frontend can show (not guess) whether the
       // dispatch/approve surfaces exist on this server instance.
       sendJson(res, 200, {
@@ -1165,7 +1195,7 @@ export async function handleApi(
     // producer / empty enrollment). NO mutation endpoint — there is no apply/
     // approve/dispatch here; aggregation only. Never throws (caught below).
     if (path === '/api/portfolio' && method === 'GET') {
-      const snapshot = await buildCachedSnapshot(cfg);
+      const snapshot = await buildCachedSnapshot(cfg, ctx.readProjections);
       sendJson(res, 200, snapshot.portfolio ?? null);
       return true;
     }
@@ -1197,7 +1227,9 @@ export async function handleApi(
 
     // ── GET /api/runs ────────────────────────────────────────────────────────
     if (path === '/api/runs' && method === 'GET') {
-      const runs = listRuns({ limit: 200 });
+      const runs = ctx.readProjections
+        ? await ctx.readProjections.read('runs')
+        : listRuns({ limit: 200 });
       sendJson(res, 200, runs);
       return true;
     }
@@ -1237,7 +1269,9 @@ export async function handleApi(
 
     // ── GET /api/swarms ──────────────────────────────────────────────────────
     if (path === '/api/swarms' && method === 'GET') {
-      const swarms = listSwarms({ limit: 200 });
+      const swarms = ctx.readProjections
+        ? await ctx.readProjections.read('swarms')
+        : listSwarms({ limit: 200 });
       sendJson(res, 200, swarms);
       return true;
     }
@@ -1262,7 +1296,9 @@ export async function handleApi(
     if (path === '/api/pulse' && method === 'GET') {
       const rawWindow = getQueryParam(req.url ?? '', 'window');
       const window = parseWindow(rawWindow);
-      const rollup = buildRollup(window, cfg);
+      const rollup = ctx.readProjections
+        ? await ctx.readProjections.read('pulse', { window })
+        : buildRollup(window, cfg);
       sendJson(res, 200, rollup);
       return true;
     }
@@ -1394,7 +1430,10 @@ export async function handleApi(
       const effectiveStatus: ProposalStatus | 'all' =
         (statusParam as ProposalStatus | 'all' | undefined) ?? (sinceMs !== undefined ? 'all' : 'pending');
 
-      const all = listProposals(); // newest-first; same full-directory read the pending-only call already did.
+      // Offload the full-directory read; filtering/response shape stay identical.
+      const all = ctx.readProjections
+        ? await ctx.readProjections.read('proposals')
+        : listProposals();
       let matched = effectiveStatus === 'all' ? all : all.filter((p) => p.status === effectiveStatus);
       if (sinceMs !== undefined) {
         const floor = sinceMs;
@@ -1521,12 +1560,12 @@ export async function handleApi(
     // M24: legacy read-only daemon state. Keep the established response shape;
     // first-party and autonomous consumers use /api/daemon-observation.
     if (path === '/api/daemon' && method === 'GET') {
-      sendJson(res, 200, legacyDaemonProjection(await readFreshDaemonObservation()));
+      sendJson(res, 200, legacyDaemonProjection(await readFreshDaemonObservation(ctx.readProjections)));
       return true;
     }
 
     if (path === '/api/daemon-observation' && method === 'GET') {
-      sendJson(res, 200, await readFreshDaemonObservation());
+      sendJson(res, 200, await readFreshDaemonObservation(ctx.readProjections));
       return true;
     }
 
@@ -1630,7 +1669,9 @@ export async function handleApi(
       // buildIdentity must be able to trust that what it received is exactly
       // what buildFleetStatus produced. Freshness is still reported on the
       // snapshot and control payloads, where their builders attach it.
-      const cached = await getCachedFleetStatus(cfg);
+      const cached = ctx.readProjections
+        ? await ctx.readProjections.read('fleet')
+        : await getCachedFleetStatus(cfg);
       sendJson(res, 200, cached.status);
       return true;
     }
@@ -1703,7 +1744,7 @@ export async function handleApi(
         sendJson(res, 401, { code: 'SESSION_REQUIRED', error: 'valid read session required' });
         return true;
       }
-      handleSseEvents(req, res, cfg, ctx.allowDispatch, ctx.readSession);
+      handleSseEvents(req, res, cfg, ctx.allowDispatch, ctx.readSession, ctx.readProjections);
       return true;
     }
 
@@ -1722,7 +1763,9 @@ export async function handleApi(
     // M61: unified Mission Control snapshot. No auth — same read class as
     // /api/fleet and /api/daemon. Never throws; each section degrades independently.
     if (path === '/api/control' && method === 'GET') {
-      const snapshot = await buildControlSnapshot(cfg);
+      const snapshot = ctx.readProjections
+        ? await ctx.readProjections.read('control')
+        : await buildControlSnapshot(cfg);
       sendJson(res, 200, snapshot);
       return true;
     }
@@ -1732,7 +1775,9 @@ export async function handleApi(
     // readiness (throttled 10s), subscription burn-down, cooldown count, recent
     // ticks. No auth — same read class as /api/control.
     if (path === '/api/fleet-activity' && method === 'GET') {
-      const activity = await buildFleetActivity(cfg);
+      const activity = ctx.readProjections
+        ? await ctx.readProjections.read('fleet-activity')
+        : await buildFleetActivity(cfg);
       sendJson(res, 200, activity);
       return true;
     }
@@ -1741,7 +1786,9 @@ export async function handleApi(
     // M61: live local-model provider probe (Ollama/LM Studio). Returns the
     // `models` section of the control snapshot only.
     if (path === '/api/models' && method === 'GET') {
-      const snapshot = await buildControlSnapshot(cfg);
+      const snapshot = ctx.readProjections
+        ? await ctx.readProjections.read('control')
+        : await buildControlSnapshot(cfg);
       sendJson(res, 200, snapshot.models);
       return true;
     }
@@ -1753,7 +1800,9 @@ export async function handleApi(
       const tail = rawTail !== undefined && /^\d+$/.test(rawTail)
         ? Math.min(Number(rawTail), 200)
         : 50;
-      const snapshot = await buildControlSnapshot(cfg);
+      const snapshot = ctx.readProjections
+        ? await ctx.readProjections.read('control')
+        : await buildControlSnapshot(cfg);
       sendJson(res, 200, (snapshot.logs ?? []).slice(0, tail));
       return true;
     }
@@ -1765,7 +1814,9 @@ export async function handleApi(
       const tail = rawTail !== undefined && /^\d+$/.test(rawTail)
         ? Math.min(Number(rawTail), 200)
         : 50;
-      const snapshot = await buildControlSnapshot(cfg);
+      const snapshot = ctx.readProjections
+        ? await ctx.readProjections.read('control')
+        : await buildControlSnapshot(cfg);
       sendJson(res, 200, {
         entries: snapshot.logsSourceQuality.sourceState === 'healthy' &&
           snapshot.logsSourceQuality.complete
@@ -1930,7 +1981,7 @@ export async function handleApi(
       const { buildOversightSnapshot } = await import('../fleet/oversight-export.js');
 
       // daemon + digest (parallel)
-      const daemon = await readFreshDaemonObservation();
+      const daemon = await readFreshDaemonObservation(ctx.readProjections);
       let daemonSection: unknown = {
         runtimeState: daemon.runtimeState,
         sourceQuality: daemon.sourceQuality,
@@ -2005,6 +2056,10 @@ export async function handleApi(
     sendJson(res, 404, { error: `not found: ${method} ${path}` });
     return true;
   } catch (err) {
+    if (err instanceof ReadProjectionError) {
+      sendJson(res, 503, { code: 'READ_PROJECTION_UNAVAILABLE', error: 'read projection temporarily unavailable' });
+      return true;
+    }
     // Catch-all: never let an unhandled error escape.
     const msg = err instanceof Error ? err.message : String(err);
     send500(res, msg);

@@ -21,6 +21,9 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   rotates small trial budgets so later variants are not permanently starved.
 - Adds an authenticated Universe console with lineage, comparison, failure
   evidence, and explicit unmeasured token and cost fields.
+- Keeps the console responsive during expensive global summaries with a bounded
+  background read worker, and removes duplicate notification polling. Reader
+  failures remain explicit and mutation attempts invalidate cached observations.
 - Grounds strategy in verified engineering yield. The credential-free demo
   verifies experiment mechanics; model-driven mutation, portfolio acceptance,
   and resident operation remain separate integrations.

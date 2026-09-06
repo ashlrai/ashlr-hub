@@ -15,7 +15,9 @@ export async function startServer(
   cfg: AshlrConfig,
   opts: WebServerOptions,
 ): Promise<WebServerHandle> {
-  const handle = await startRealServer(cfg, opts);
+  // These legacy route tests inject/mock in-process data builders. Worker
+  // transport and real built-server concurrency are verified separately.
+  const handle = await startRealServer(cfg, opts, { readProjections: null });
   tokensByPort.set(handle.port, handle.readToken);
   const close = handle.close.bind(handle);
   return {

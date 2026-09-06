@@ -8,7 +8,8 @@
  *      ASHLR_WEB_PUBLIC to the sibling `public/` dir before importing the CLI.
  *      This means the compiled binary self-configures the asset path at runtime
  *      without any external launcher wrapper needed.
- *   3. Compiles shim → dist-bin/ashlr  via `bun build --compile`.
+ *   3. Writes a sibling read-worker shim with the same build identity, then
+ *      compiles both entrypoints → dist-bin/ashlr via `bun build --compile`.
  *   4. Copies dist/core/web/public/ → dist-bin/public/ so the binary and its
  *      assets are co-located.
  *
@@ -38,6 +39,7 @@ const repoRoot = resolve(join(here, '..'));
 const distBin = join(repoRoot, 'dist-bin');
 const distWeb = join(repoRoot, 'dist', 'core', 'web', 'public');
 const entry   = join(distBin, '_entry.js');
+const workerEntry = join(distBin, 'read-projection-worker.js');
 const outBin  = join(distBin, process.platform === 'win32' ? 'ashlr.exe' : 'ashlr');
 const pubDest = join(distBin, 'public');
 const buildIdentityPath = join(repoRoot, 'dist', 'build-identity.json');
@@ -65,6 +67,24 @@ Reflect.set(
 );
 await import('../dist/cli/index.js');
 `;
+}
+
+export function createSeaWorkerShim({ buildIdentityJson }) {
+  return `// Auto-generated sibling entry for the compiled read-projection worker.
+// Worker globals are separate, so embed the same trusted artifact identity.
+Reflect.set(
+  globalThis,
+  Symbol.for('ashlr.build-identity.v1'),
+  ${javascriptStringLiteral(buildIdentityJson)},
+);
+await import('../dist/core/web/read-projection-worker.js');
+`;
+}
+
+export function createSeaCompileArgs({ entry, workerEntry, outBin }) {
+  // Bun does not discover Worker URLs automatically. Both shims must be
+  // siblings: bundled import.meta.url resolves relative to the main entry.
+  return ['build', '--compile', entry, workerEntry, '--outfile', outBin];
 }
 
 async function main() {
@@ -121,6 +141,7 @@ const buildIdentityJson = readFileSync(buildIdentityPath, 'utf8').trim();
 const shimSrc = createSeaShim({ pkgVersion, buildIdentityJson });
 
 writeFileSync(entry, shimSrc, 'utf8');
+writeFileSync(workerEntry, createSeaWorkerShim({ buildIdentityJson }), 'utf8');
 console.log(`[build-sea] Wrote shim entry: ${entry}`);
 
 // ── 3. bun build --compile ───────────────────────────────────────────────────
@@ -130,7 +151,7 @@ if (existsSync(outBin)) rmSync(outBin);
 console.log(`[build-sea] Compiling → ${outBin} …`);
 const result = spawnSync(
   BUN,
-  ['build', '--compile', entry, '--outfile', outBin],
+  createSeaCompileArgs({ entry, workerEntry, outBin }),
   { cwd: repoRoot, encoding: 'utf8' },
 );
 if (result.stdout) process.stdout.write(result.stdout);
