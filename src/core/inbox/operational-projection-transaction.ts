@@ -1,9 +1,10 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { lstatSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 import { loadExistingProvenanceKeyReadOnly } from '../foundry/provenance.js';
+import { fsyncDirectory } from '../util/durability.js';
 import { assurePrivateStoragePath } from '../util/private-storage.js';
 import { writePrivateFileAtomically } from '../util/private-file-write.js';
 import { readStableRegularFile } from '../util/stable-file-read.js';
@@ -176,19 +177,69 @@ function loadKey(): { key: Buffer; id: string } | null {
   }
 }
 
-function safeDirectory(): boolean {
+function safePrivateDirectory(path: string, anchorPath: string): boolean {
   try {
-    const dir = operationalProposalProjectionDir();
-    const stat = lstatSync(dir, { bigint: true });
+    const stat = lstatSync(path, { bigint: true });
     if (stat.isSymbolicLink() || !stat.isDirectory()) return false;
     if (typeof process.getuid === 'function' && stat.uid !== BigInt(process.getuid())) return false;
     if (process.platform !== 'win32' && Number(stat.mode & 0o777n) !== 0o700) return false;
-    return assurePrivateStoragePath(dir, 'directory', 'inspect-existing', {
-      anchorPath: homedir(),
+    return assurePrivateStoragePath(path, 'directory', 'inspect-existing', {
+      anchorPath,
     }).ok;
   } catch {
     return false;
   }
+}
+
+function storageHierarchy(): { home: string; root: string; directory: string } | null {
+  try {
+    const home = resolve(homedir());
+    const root = join(home, '.ashlr');
+    const directory = operationalProposalProjectionDir();
+    return dirname(root) === home && dirname(directory) === root
+      ? { home, root, directory }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function safeDirectory(): boolean {
+  const hierarchy = storageHierarchy();
+  return hierarchy !== null &&
+    safePrivateDirectory(hierarchy.root, hierarchy.home) &&
+    safePrivateDirectory(hierarchy.directory, hierarchy.root);
+}
+
+function ensurePrivateDirectory(path: string, anchorPath: string): boolean {
+  let created = false;
+  try {
+    mkdirSync(path, { mode: 0o700 });
+    created = true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return false;
+  }
+  try {
+    if (process.platform !== 'win32' && created) chmodSync(path, 0o700);
+    const assurance = assurePrivateStoragePath(
+      path,
+      'directory',
+      created ? 'secure-created' : 'inspect-existing',
+      { anchorPath },
+    );
+    if (!assurance.ok || !safePrivateDirectory(path, anchorPath)) return false;
+    if (created) fsyncDirectory(dirname(path));
+    return safePrivateDirectory(path, anchorPath);
+  } catch {
+    return false;
+  }
+}
+
+function ensurePrivateHierarchy(): boolean {
+  const hierarchy = storageHierarchy();
+  return hierarchy !== null &&
+    ensurePrivateDirectory(hierarchy.root, hierarchy.home) &&
+    ensurePrivateDirectory(hierarchy.directory, hierarchy.root);
 }
 
 export function operationalProjectionTransactionPath(): string {
@@ -206,7 +257,21 @@ export function readOperationalProjectionTransaction(): OperationalProjectionTra
     try {
       lstatSync(operationalProposalProjectionDir());
     } catch (directoryError) {
-      return (directoryError as NodeJS.ErrnoException).code === 'ENOENT'
+      if ((directoryError as NodeJS.ErrnoException).code !== 'ENOENT') {
+        return { state: 'degraded', reason: 'transaction-directory-unsafe', transaction: null };
+      }
+      const hierarchy = storageHierarchy();
+      if (hierarchy === null) {
+        return { state: 'degraded', reason: 'transaction-directory-unsafe', transaction: null };
+      }
+      try {
+        lstatSync(hierarchy.root);
+      } catch (rootError) {
+        return (rootError as NodeJS.ErrnoException).code === 'ENOENT'
+          ? { state: 'missing', transaction: null }
+          : { state: 'degraded', reason: 'transaction-directory-unsafe', transaction: null };
+      }
+      return safePrivateDirectory(hierarchy.root, hierarchy.home)
         ? { state: 'missing', transaction: null }
         : { state: 'degraded', reason: 'transaction-directory-unsafe', transaction: null };
     }
@@ -286,6 +351,9 @@ export function prepareOperationalProjectionTransactionJournalOnly(
   if (current.state === 'healthy' &&
     now.getTime() < Date.parse(current.transaction.updatedAt)) {
     return { state: 'degraded', reason: 'transaction-input-invalid', transaction: null };
+  }
+  if (!ensurePrivateHierarchy()) {
+    return { state: 'degraded', reason: 'transaction-write-failed', transaction: null };
   }
   const timestamp = now.toISOString();
   const transactionId = createHmac('sha256', signing.key)
