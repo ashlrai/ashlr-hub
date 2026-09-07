@@ -70,6 +70,7 @@ describe('installed Universe package smoke', () => {
   it.each(['runUniverseCampaign', 'deliverUniverseElite', 'readUniverseGraph', 'traverseUniverseGraph',
     'validateUniversePortfolioDefinition', 'readUniversePortfolioPlan', 'buildUniversePortfolioPlan', 'runUniversePortfolio',
     'buildUniverseSearchContext', 'validateUniverseSearchContext', 'searchContextReceipt',
+    'buildUniverseFileOperationsContext', 'validateUniverseFileOperationsContext', 'fileOperationsContextDigest',
     'buildUniverseCampaignComparison', 'readUniverseCampaignComparison'])('rejects missing public SDK export %s before creating the smoke store', (name) => {
     const { smokeRoot, run } = fixture({ sdkOverride: `export const ${name} = undefined;` });
     const result = run();
@@ -88,6 +89,25 @@ describe('installed Universe package smoke', () => {
     const result = run();
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('Status reads must not create a missing store');
+  });
+
+  it('detects a file-state validator that silently accepts omitted paths', () => {
+    const { run } = fixture({ sdkOverride:
+      'export function validateUniverseFileOperationsContext(value) { return value; }' });
+    const result = run();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('Missing file state must not be silently interpreted as absence');
+  });
+
+  it('detects a manifest validator that silently removes file operations', () => {
+    const sdk = pathToFileURL(resolve('src/core/universe/index.ts')).href;
+    const { run } = fixture({ sdkOverride:
+      `import { validateUniverseManifest as originalValidate } from ${JSON.stringify(sdk)};\n` +
+      'export function validateUniverseManifest(value) { const result = originalValidate(value); ' +
+      'for (const variant of result.variants) if (variant.generation) delete variant.generation.fileOperations; return result; }' });
+    const result = run();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('fileOperations');
   });
 
   it('rejects a CLI that treats invalid flags as success', () => {

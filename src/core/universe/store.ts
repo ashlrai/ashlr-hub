@@ -16,6 +16,7 @@ import { generationResources, newGenerationReceipt, validateGenerationConfig, va
 import { buildUniverseFeedback, feedbackReceipt, validateDiagnostics } from './feedback.js';
 import { buildUniverseSearchContext, searchContextReceipt } from './search-context.js';
 import { MAX_UNIVERSE_RECORD_BYTES } from './evidence-size.js';
+import { buildUniverseFileOperationsContext, fileOperationsContextDigest, verifyUniverseFileOperationOutcome } from './file-operations-context.js';
 
 const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -295,12 +296,28 @@ export function projectUniverse(directory: string, records = readRecords(directo
       if (!variant || variant.niche !== trial.niche || trial.parentTrialId !== (previous.get(trial.niche)?.trialId ?? null)) {
         throw new Error('Trial variant or lineage does not match the manifest and prior archive');
       }
+      if (trial.artifact && (trial.artifact.path !== join(directory, 'artifacts', run.id, trial.id) ||
+          trial.artifact.revision !== stored.manifest.seed.revision)) {
+        throw new Error('Trial artifact path is outside its exact archive slot');
+      }
       if (variant.generation) {
         const identity = newGenerationReceipt(variant.generation);
         if (!trial.generation || trial.generation.model !== identity.model || trial.generation.endpoint !== identity.endpoint ||
+            Boolean(trial.generation.fileOperations) !== Boolean(variant.generation.fileOperations) ||
             trial.generation.changedFiles.some((path) => !variant.generation!.files.includes(path)) ||
             (trial.generation.status !== 'succeeded' && (trial.status === 'passed' || trial.artifact !== null))) {
           throw new Error('Trial generation evidence does not match its declared model and file scope');
+        }
+        if (variant.generation.fileOperations && trial.generation.promptDigest !== null) {
+          const expectedFiles = buildUniverseFileOperationsContext({ manifest: stored.manifest,
+            manifestDigest: stored.manifestDigest, comparatorDigest: stored.comparatorDigest,
+            runs, elites: [...previous.values()], activeRun: null, sourceState: 'healthy', reasons: [] }, variant, directory,
+          stored.seedArtifact, run.feedbackEnabled ? { feedback: true } : {});
+          if (trial.generation.fileOperations?.contextDigest !== fileOperationsContextDigest(expectedFiles)) {
+            throw new Error('Trial file-state context does not match its immutable parent and previous attempt');
+          }
+          if (trial.artifact) verifyUniverseFileOperationOutcome(variant.generation, trial.generation,
+            previous.get(trial.niche)?.artifact ?? stored.seedArtifact, trial.artifact);
         }
         const feedback = trial.generation.feedback;
         if (feedback) {
@@ -335,10 +352,6 @@ export function projectUniverse(directory: string, records = readRecords(directo
           }
         }
       } else if (trial.generation) throw new Error('Command trial cannot claim model generation usage');
-      if (trial.artifact && (trial.artifact.path !== join(directory, 'artifacts', run.id, trial.id) ||
-          trial.artifact.revision !== stored.manifest.seed.revision)) {
-        throw new Error('Trial artifact path is outside its exact archive slot');
-      }
       if (run.status === 'completed' && trial.selected && trial.score !== null && trial.artifact) {
         elites.set(trial.niche, { niche: trial.niche, variantId: trial.variantId, trialId: trial.id, runId: run.id,
           generation: run.generation, score: trial.score, metrics: trial.metrics, artifact: trial.artifact,

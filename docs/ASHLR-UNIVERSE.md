@@ -80,7 +80,8 @@ choose the intended port. Only numeric-loopback HTTP endpoints are accepted;
 the broker and receipt endpoint is normalized to `/v1`. Review the declared files before
 running: their contents, the objective, hypothesis, generation, and parent
 identity are sent to that endpoint. Ambient provider credentials, repository-wide context,
-evaluator files not declared in `files`, and tool access are not provided.
+evaluator files not explicitly declared as mutable files or read-only context,
+and tool access are not provided.
 An endpoint may itself proxy another service; a loopback address is not proof
 that inference stays on this machine. Configure the server accordingly.
 
@@ -113,6 +114,72 @@ trial's generation receipt and error. An attempted request can consume tokens
 even if no candidate is accepted. Fix the endpoint or define a new experiment
 when changing an immutable manifest, then explicitly run the next generation;
 there is no implicit paid-provider retry.
+
+### Create, replace, and delete declared files
+
+Opt into file operations when an experiment needs new modules, removed files,
+or supporting source that the model may read but must not change:
+
+```json
+{
+  "kind": "local-chat",
+  "endpoint": "http://127.0.0.1:11434/v1",
+  "model": "your-loaded-model",
+  "files": ["src/parser.ts", "src/markdown/lines.ts", "src/obsolete.ts"],
+  "maxOutputTokens": 4096,
+  "fileOperations": {
+    "schemaVersion": 1,
+    "contextFiles": ["src/types.ts"]
+  }
+}
+```
+
+This is the `generation` object inside a variant. `files` remains an immutable
+list of at most 16 mutable paths; `contextFiles` adds at most 16 disjoint,
+read-only regular UTF-8 files. Mutable paths may be absent in the current parent.
+The model sees explicit present/absent state, current contents, and read-only
+context. Without `fileOperations`, the existing replacement-only protocol and
+its requirement that every declared file exists are unchanged.
+
+The opt-in response is exactly one JSON object with an `operations` array:
+
+```json
+{"operations":[{"op":"replace","path":"src/parser.ts","content":"complete replacement text"},{"op":"create","path":"src/markdown/lines.ts","content":"complete new file text"},{"op":"delete","path":"src/obsolete.ts"}]}
+```
+
+Create requires an absent file; replace and delete require a present file.
+Delete has no `content` key. Each path may appear once, must exactly match a
+declared mutable path, and cannot name a directory. Missing parent directories
+for a new file are created inside the candidate. Empty operations are valid;
+an identical replacement does not count as a changed file. No globs, renames,
+undeclared paths, case/Unicode aliases, overlapping ancestor paths, links, or
+read-only-context edits are accepted. The complete batch and its byte budget
+are validated before applying any operation.
+
+The combined current contents, read-only context, and previous-attempt text must
+fit 128 KiB; each file remains limited to 64 KiB. Replacement/new content remains
+bounded by 128 KiB, with the same 256 KiB transport and requested-output limits.
+A constant package-owned worker applies data under macOS filesystem confinement
+with network denied; this mode verifies that confinement is available before
+contacting the model. The batch is not an atomic filesystem transaction. A
+partial write, detected file-state race, cancellation, or worker failure fails the trial and discards
+its scratch candidate without evaluation or archive admission. Reported usage
+from an already-started request is retained.
+
+Receipts pin the file-state context digest and each actual operation's before/
+after content digests. `null` means absent, not an empty file. Replay reconstructs
+the retained parent and verifies the artifact's actual file states; receipt
+claims alone cannot establish the transition. With campaign feedback enabled,
+the previous attempt's state is separate from the retained parent: a failed
+attempt may have created a file while the retained parent still lacks it. An
+attempt without an artifact has unknown file state, not an empty repository.
+When feedback is disabled, previous-attempt state and text are omitted.
+
+Use the same run/campaign, archive, graph, comparison, and delivery commands.
+Adding file operations does not change the fixed evaluator, acceptance metric,
+resource limits, or the distinction between a locally retained artifact and an
+accepted production change. Changing the immutable file scope requires a new
+experiment definition.
 
 ### Read generation usage accurately
 
@@ -669,7 +736,7 @@ manifest + prior archive
 
 Candidate identity, evaluator identity, objective version, and resource limits must accompany the result. A candidate's self-description is useful context; the evaluator's observed result determines selection.
 
-Command workers execute in a writable copy of their selected parent; model-generation variants replace declared files in that copy through the local broker. The evaluator runs from the pinned seed and receives the frozen candidate path through `ASHLR_UNIVERSE_CANDIDATE`. Its standard output must be one JSON object containing `passed` (boolean), `score` (finite number), optional `metrics` (named finite numbers), and optional deliberately shareable `diagnostics`. A nonzero exit, timeout, or malformed result fails the trial. Scores become comparable only within the same pinned experiment definition.
+Command workers execute in a writable copy of their selected parent; model-generation variants replace declared files, or opt into declared create/replace/delete operations, through the local broker. The evaluator runs from the pinned seed and receives the frozen candidate path through `ASHLR_UNIVERSE_CANDIDATE`. Its standard output must be one JSON object containing `passed` (boolean), `score` (finite number), optional `metrics` (named finite numbers), and optional deliberately shareable `diagnostics`. A nonzero exit, timeout, or malformed result fails the trial. Scores become comparable only within the same pinned experiment definition.
 
 Commands are supplied by the operator and execute with network access denied and scoped filesystem writes. The process boundary is suitable for these local experiments, rather than arbitrary hostile-code execution in a VM. Cancellation and timeouts target the invocation's owned process group; termination of deliberately detached descendants is not established by this runner.
 

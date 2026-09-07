@@ -33,6 +33,7 @@ export function preflightTrialEvidenceBudget(trial: UniverseTrial, planned: {
   changedFiles: string[];
   feedback?: NonNullable<UniverseGenerationReceipt['feedback']>;
   search?: NonNullable<UniverseGenerationReceipt['search']>;
+  fileOperations?: NonNullable<UniverseGenerationReceipt['fileOperations']>;
 }): void {
   const hash = 'f'.repeat(64);
   // These are serialization-size placeholders, never counters, source evidence,
@@ -44,6 +45,10 @@ export function preflightTrialEvidenceBudget(trial: UniverseTrial, planned: {
       usage: { state: 'reported', inputTokens: Number.MAX_SAFE_INTEGER, outputTokens: Number.MAX_SAFE_INTEGER },
       changedFiles: [...planned.changedFiles], ...(planned.feedback ? { feedback: planned.feedback } : {}),
       ...(planned.search ? { search: planned.search } : {}),
+      ...(trial.generation.fileOperations ? { fileOperations: { schemaVersion: 1,
+        contextDigest: planned.fileOperations?.contextDigest ?? hash,
+        // Replace uses both digests and therefore bounds create/delete as well.
+        operations: planned.changedFiles.map((path) => ({ op: 'replace', path, beforeDigest: hash, afterDigest: hash })) } } : {}),
       // Current local broker errors are fixed ASCII validation messages capped
       // at 512 characters; raw provider bodies never enter this receipt.
       error: 'x'.repeat(512) } } : {}),

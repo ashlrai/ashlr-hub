@@ -1,9 +1,12 @@
 export type * from './types.js';
+export type * from './file-operations-types.js';
 export { defaultUniverseRoot, ensureUniverseRoot } from './artifacts.js';
 export { initUniverse, validateUniverseManifest } from './store.js';
 export { readUniverseOverview } from './overview.js';
 export { runUniverse } from './runner.js';
 export { buildUniverseSearchContext, validateUniverseSearchContext, searchContextReceipt } from './search-context.js';
+export { buildUniverseFileOperationsContext, validateUniverseFileOperationsContext,
+  fileOperationsContextDigest } from './file-operations-context.js';
 export { initUniverseCampaign, readUniverseCampaign, readUniverseCampaigns, requestUniverseCampaignControl,
   validateUniverseCampaignDefinition } from './campaign-store.js';
 export { runUniverseCampaign } from './campaign.js';

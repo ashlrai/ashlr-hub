@@ -3,6 +3,7 @@ import { dirname, join, resolve } from 'node:path';
 import { artifactDigest, canonical, digest, inspectPrivateDirectory } from './artifacts.js';
 import { validGenerationPath, validateGenerationConfig } from './generation.js';
 import type { UniverseDiagnostic, UniverseFeedback, UniverseGenerationReceipt, UniverseSummary, UniverseVariant } from './types.js';
+import { readUniverseFileOperationInputs } from './file-operations-context.js';
 
 export const MAX_FEEDBACK_FILE_BYTES = 64 * 1024;
 export const MAX_FEEDBACK_CONTEXT_BYTES = 128 * 1024;
@@ -137,7 +138,12 @@ export function buildUniverseFeedback(summary: UniverseSummary, variant: Univers
     }
     inspectPrivateDirectory(directory);
     if (realpathSync(path) !== path || artifactDigest(path) !== trial.artifact.digest) throw new Error('Universe feedback artifact changed before reading');
-    previousAttemptFiles = readPreviousFiles(path, config.files);
+    // Legacy mode still requires every path and keeps its exact feedback bytes.
+    // The explicit new protocol binds absent paths in a separate file-state
+    // context; this text-only legacy-shaped array includes present files only.
+    previousAttemptFiles = config.fileOperations ? readUniverseFileOperationInputs(trial.artifact, config).files
+      .flatMap((file) => file.content === null ? [] : [{ path: file.path, contentDigest: file.contentDigest!, content: file.content }]) :
+      readPreviousFiles(path, config.files);
     if (artifactDigest(path) !== trial.artifact.digest || realpathSync(path) !== path) throw new Error('Universe feedback artifact changed while reading');
   }
   return validateUniverseFeedback({ schemaVersion: 1,

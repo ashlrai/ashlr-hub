@@ -49,6 +49,11 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-graph-reader.test.ts', // targeted real Git/private-ledger graph observation
   'test/local-pack-universe-smoke.test.ts', // installed SDK/CLI contract with real Git fixtures
   'test/universe-model-integration.test.ts', // real pinned evaluator plus bounded local HTTP model fixtures
+  'test/universe-file-operations.test.ts', // confined create/replace/delete and local transport fixtures
+  'test/universe-file-operations-replay.test.ts', // private artifact presence and operation ledger replay
+  'test/universe-file-operations-integration.test.ts', // native multi-file parser challenge and Git delivery
+  'test/universe-file-operations-review.test.ts', // independent operation conflicts and cancellation review
+  'test/universe-file-operations-runner.test.ts', // frozen snapshot admission with private Git fixtures
   'test/universe-campaign-integration.test.ts', // native multi-generation ownership, feedback and durable resource limits
   'test/universe-portfolio-integration.test.ts', // native cross-Universe dependency ordering and concurrent campaign settlement
   'test/universe-feedback-replay.test.ts', // durable feedback integrity and a complete 64-trial record footprint

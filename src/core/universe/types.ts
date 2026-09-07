@@ -1,4 +1,5 @@
 import type { UniverseDeliveryReceipt } from './delivery.js';
+import type { UniverseFileOperationsConfig, UniverseFileOperationsReceipt } from './file-operations-types.js';
 
 /** Universe experiments report local measurements, never inferred business value. */
 export interface UniverseManifest {
@@ -18,9 +19,10 @@ export interface UniverseGenerationConfig {
   /** Explicit numeric-loopback OpenAI-compatible endpoint; no account discovery. */
   endpoint: string;
   model: string;
-  /** Existing relative text files; also the complete replacement allowlist. */
+  /** Mutable path scope. Paths must exist unless fileOperations explicitly opts in. */
   files: string[];
   maxOutputTokens: number;
+  fileOperations?: UniverseFileOperationsConfig;
 }
 
 export type UniverseVariant = { id: string; niche: string; hypothesis: string } & (
@@ -111,6 +113,7 @@ export interface UniverseGenerationReceipt {
   changedFiles: string[];
   feedback?: UniverseFeedback['source'] & { digest: string };
   search?: UniverseSearchContextReceipt;
+  fileOperations?: UniverseFileOperationsReceipt;
   error?: string;
 }
 

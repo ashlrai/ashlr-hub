@@ -17,6 +17,9 @@ import { generationResources, newGenerationReceipt } from './generation.js';
 import { generateModelCandidate } from './model-candidate.js';
 import { buildUniverseFeedback, feedbackReceipt } from './feedback.js';
 import { buildUniverseSearchContext, searchContextReceipt } from './search-context.js';
+import { buildUniverseFileOperationsContext, fileOperationsContextDigest,
+  verifyUniverseFileOperationOutcome } from './file-operations-context.js';
+import type { UniverseFileOperationsContext } from './file-operations-types.js';
 import { assertUniverseExecution, withUniverseExecution } from './execution.js';
 import { assertRunEvidenceBudget, assertTrialEvidenceBudget, preflightTrialEvidenceBudget } from './evidence-size.js';
 
@@ -75,7 +78,8 @@ function recordFinishedRun(directory: string, run: UniverseRun, lock: LocalStore
 
 async function runTrial(record: ManifestRecord, run: UniverseRun, variant: UniverseManifest['variants'][number],
   parent: UniverseElite | undefined, directory: string, root: string, signal: AbortSignal, deadline: number,
-  feedback?: UniverseFeedback, searchContext?: UniverseSearchContext): Promise<UniverseTrial> {
+  feedback?: UniverseFeedback, searchContext?: UniverseSearchContext,
+  fileOperationsContext?: UniverseFileOperationsContext): Promise<UniverseTrial> {
   const started = performance.now();
   const trialId = randomUUID();
   const scratch = join(directory, 'scratch', run.id, trialId);
@@ -104,15 +108,18 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
       artifact: { path: archivePath, digest: 'f'.repeat(64), revision: record.manifest.seed.revision },
       changedFiles: variant.generation?.files ?? [], ...(feedback ? { feedback: feedbackReceipt(feedback) } : {}),
       ...(searchContext ? { search: searchContextReceipt(searchContext) } : {}),
+      ...(fileOperationsContext ? { fileOperations: { schemaVersion: 1 as const,
+        contextDigest: fileOperationsContextDigest(fileOperationsContext), operations: [] } } : {}),
     });
     if (variant.generation) {
-      // The broker receives only declared text. Model output is replacement data,
-      // never a tool call or executable command; the fixed evaluator is unchanged.
+      // The broker receives only declared text and file state. Model output is
+      // operation data, never a tool call; the fixed evaluator is unchanged.
       trial.generation = await generateModelCandidate(variant.generation, {
         candidatePath: candidate, objective: record.manifest.objective, hypothesis: variant.hypothesis,
         generation: run.generation, parentTrialId: parent?.trialId ?? null, timeoutMs: Math.max(1, Math.floor(remaining())), signal,
         ...(feedback ? { feedback } : {}),
         ...(searchContext ? { searchContext, variantId: variant.id, niche: variant.niche } : {}),
+        ...(fileOperationsContext ? { fileOperationsContext, variantId: variant.id, niche: variant.niche } : {}),
       });
       if (trial.generation.status !== 'succeeded') {
         trial.status = trial.generation.status;
@@ -139,7 +146,13 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
     // if it left a process behind after its leader exited.
     const snapshotDigest = copyArtifact(candidate, archivePath);
     freezeArtifact(archivePath);
-    trial.artifact = { path: archivePath, digest: snapshotDigest, revision: record.manifest.seed.revision };
+    const artifact = { path: archivePath, digest: snapshotDigest, revision: record.manifest.seed.revision };
+    // Check the frozen snapshot as well as the broker's mutable candidate: a
+    // change during snapshotting must not enter evaluation or archive selection.
+    if (variant.generation?.fileOperations && trial.generation) {
+      verifyUniverseFileOperationOutcome(variant.generation, trial.generation, source, artifact);
+    }
+    trial.artifact = artifact;
     assertComparatorUnchanged(record);
     if (phaseExpired()) { trial.status = 'timed-out'; trial.error = 'Trial budget exhausted before evaluator'; return trial; }
     const evaluator = record.evaluationCommand;
@@ -280,7 +293,9 @@ export async function runUniverseOwned(id: string, options: UniverseOwnedRunOpti
         const trial = await runTrial(record, run!, variant, overview.elites.find((elite) => elite.niche === variant.niche),
           directory, root, controller.signal, deadline,
           run!.feedbackEnabled && variant.generation ? buildUniverseFeedback(overview, variant, directory) : undefined,
-          run!.feedbackVersion === 2 && variant.generation ? buildUniverseSearchContext(overview, variant) : undefined);
+          run!.feedbackVersion === 2 && variant.generation ? buildUniverseSearchContext(overview, variant) : undefined,
+          variant.generation?.fileOperations ? buildUniverseFileOperationsContext(overview, variant, directory,
+            record.seedArtifact, run!.feedbackEnabled ? { feedback: true } : undefined) : undefined);
         assertUniverseExecution(directory, execution);
         if (!ownsLocalStoreLock(lock)) throw new Error('Universe run ownership lost before evidence write');
         appendRecord(directory, { id: `${run!.id}.trial.${trial.id}`, kind: 'trial', runId: run!.id, trial });
