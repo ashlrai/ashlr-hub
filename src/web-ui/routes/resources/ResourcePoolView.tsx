@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { ResourceConsoleScope, ResourceConsoleSnapshot, ResourceConsoleTaskInput } from '../../../core/resources/console-types.js';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ResourceConsoleScope, ResourceConsoleTaskInput } from '../../../core/resources/console-types.js';
 import { MutationTokenDialog } from '../../components/auth/MutationTokenDialog.js';
 import { RefreshIndicator } from '../../components/primitives/RefreshIndicator.js';
 import { SkeletonLine } from '../../components/primitives/Skeleton.js';
@@ -11,21 +11,10 @@ import { CapacityBoard, resourceNumber, resourceTime, WorkerInspector } from './
 import { TaskComposer } from './TaskComposer.js';
 import { PerformancePanel } from './PerformancePanel.js';
 import { QuotaRefreshPanel } from './QuotaRefreshPanel.js';
-import { TaskInspector, taskOwnership, taskState, taskTone, type ResourceTaskRow } from './TaskInspector.js';
+import { TaskInspector, taskOwnership, taskState, taskTone } from './TaskInspector.js';
+import { FleetMap } from './FleetMap.js';
+import { buildResourceFleet } from './fleet-model.js';
 import styles from './ResourcePoolView.module.css';
-
-function taskRows(snapshot: ResourceConsoleSnapshot): ResourceTaskRow[] {
-  const rows = new Map<string, ResourceTaskRow>();
-  for (const job of snapshot.supervisor?.jobs ?? []) rows.set(job.id, { id: job.id, job });
-  for (const receipt of [...snapshot.activeAttempts, ...snapshot.recentAttempts]) {
-    rows.set(receipt.id, { ...rows.get(receipt.id), id: receipt.id, receipt });
-  }
-  return [...rows.values()].sort((a, b) => {
-    const active = (row: ResourceTaskRow) => ['queued', 'dispatching', 'reserved', 'unresolved', 'uncertain'].includes(taskState(row));
-    if (active(a) !== active(b)) return active(a) ? -1 : 1;
-    return (b.job?.updatedAt ?? b.receipt?.startedAt ?? '').localeCompare(a.job?.updatedAt ?? a.receipt?.startedAt ?? '');
-  });
-}
 
 export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
   const definition = useMemo(() => resourceConsoleSnapshotQuery(scope.poolId), [scope.poolId]);
@@ -40,15 +29,35 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
   const [tab, setTab] = useState<'inspect' | 'compose'>('compose');
   const [filter, setFilter] = useState<'all' | 'active' | 'completed'>('all');
   const [showAllOwned, setShowAllOwned] = useState(false);
+  const inspector = useRef<HTMLDivElement>(null);
+  const fleetMapRegion = useRef<HTMLDivElement>(null);
+  const focusVersion = useRef(0);
+  const [inspectionRequest, setInspectionRequest] = useState(0);
   const snapshot = query.data;
   const supervisor = snapshot?.supervisor;
-  const rows = useMemo(() => snapshot ? taskRows(snapshot) : [], [snapshot]);
+  // Share the map's conservative assignment interpretation with every inspector
+  // and row. Independently sampled records may not yet agree on a worker.
+  const historical = !!query.error;
+  const fleet = useMemo(() => snapshot ? buildResourceFleet(snapshot, historical) : null, [snapshot, historical]);
+  const rows = fleet?.tasks ?? [];
   const ownedRows = rows.filter((row) => row.job?.state === 'dispatching');
   const selectedWorker = snapshot?.pool.workers.find((worker) => worker.id === selection?.id && selection.kind === 'worker');
   const selectedTask = rows.find((row) => row.id === selection?.id && selection.kind === 'task');
   const stopEnabled = !scope.readOnly && !!supervisor && !supervisor.closing;
+  // The cache retains its error during a retry. Starting that retry is not
+  // evidence of recovery and must not reopen dispatch or hide stale labels.
   const enabled = stopEnabled && !supervisor.error &&
-    snapshot?.sourceState !== 'degraded' && query.status !== 'error' && query.status !== 'loading';
+    snapshot?.sourceState !== 'degraded' && !historical && query.status !== 'loading';
+
+  function inspectSelection(next = selection) {
+    setSelection(next); setTab('inspect'); setInspectionRequest((request) => request + 1);
+  }
+
+  useEffect(() => {
+    // Only explicit inspection requests move focus. Polling must not pull the
+    // keyboard away from the operator's current control or unsent draft.
+    if (inspectionRequest > 0) inspector.current?.querySelector<HTMLElement>('[data-inspector-heading]')?.focus();
+  }, [inspectionRequest]);
 
   useEffect(() => {
     const poll = () => { if (document.visibilityState !== 'hidden') void refresh(); };
@@ -69,13 +78,24 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
   }
 
   async function submit(task: ResourceConsoleTaskInput): Promise<boolean> {
-    return action(async () => { await submitResourceTask(task); setSelection({ kind: 'task', id: task.id }); },
+    const requestedAtFocus = focusVersion.current;
+    const submitted = await action(() => submitResourceTask(task),
       `Task ${task.id} queued. The supervisor will recheck capacity before dispatch.`);
+    if (submitted && requestedAtFocus === focusVersion.current) inspectSelection({ kind: 'task', id: task.id });
+    return submitted;
+  }
+
+  async function cancel(id: string) {
+    const requestedAtFocus = focusVersion.current;
+    const succeeded = await action(() => cancelResourceTask(id), `Cancellation requested for ${id}.`, true);
+    // Cancellation can remove its focused button. Repair that focus only when
+    // the operator has not moved elsewhere during the request and refresh.
+    if (succeeded && requestedAtFocus === focusVersion.current) inspectSelection({ kind: 'task', id });
   }
 
   const visibleRows = rows.filter((row) => filter === 'all' || (filter === 'active'
-    ? ['queued', 'dispatching', 'reserved', 'unresolved', 'uncertain'].includes(taskState(row)) : taskState(row) === 'completed'));
-  return <div className={styles.view}>
+    ? row.active : taskState(row) === 'completed'));
+  return <div className={styles.view} onFocusCapture={() => { focusVersion.current += 1; }}>
     <header className={styles.pageHeading}>
       <div><h1>Resource dispatch desk</h1><p>Route work across your enrolled accounts and local models.</p></div>
       <div className={styles.headerActions}>
@@ -85,10 +105,10 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
       </div>
     </header>
     <div className={styles.freshness}>
-      <strong>{scope.poolId}</strong>{snapshot ? <span>{query.status === 'error' ? 'Last successful read' : 'Observed'} {resourceTime(snapshot.sampledAt)}</span> : null}
+      <strong>{scope.poolId}</strong>{snapshot ? <span>{historical ? 'Last successful read' : 'Observed'} {resourceTime(snapshot.sampledAt)}</span> : null}
       <span>Refreshes every 3 seconds while visible</span>{query.status === 'refreshing' ? <RefreshIndicator /> : null}
     </div>
-    {query.status === 'error' ? <div className={styles.notice} role="alert"><strong>Resource records unavailable</strong>
+    {historical ? <div className={styles.notice} role="alert"><strong>Resource records unavailable</strong>
       <p>{query.error?.message} Any records below are from the last successful read. New tasks and queue resume wait for a fresh read; pause and owned-task cancellation remain available.</p></div> : null}
     {snapshot?.sourceState === 'degraded' ? <div className={styles.notice} role="alert"><strong>Resource evidence is incomplete</strong>
       <p>{snapshot.reasons.join('; ') || 'The selected records could not be verified.'} New tasks and queue resume are unavailable; pause and owned-task cancellation remain available.</p></div> : null}
@@ -107,12 +127,12 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
         {supervisor?.error || supervisor?.closing ? <p role="alert" className={styles.warning}>{supervisor.closing ? 'Supervisor is closing; new work is withheld.' : `Supervisor unavailable: ${supervisor.error}`}</p> : null}
         {ownedRows.length ? <section className={styles.ownedStrip} aria-label="Owned task dispatches">
           <div className={styles.ownedHeading}><h3>Owned task dispatches</h3>
-            <span>{query.status === 'error' ? 'Last observed state' : 'This supervisor’s recorded assignments'}</span></div>
+            <span>{historical ? 'Last observed state' : 'This supervisor’s recorded assignments'}</span></div>
           <ul className={styles.ownedTasks}>{(showAllOwned ? ownedRows : ownedRows.slice(0, 4)).map((row) => <li key={row.id}>
             <button type="button" className={styles.ownedTask} aria-label={`Inspect owned dispatch ${row.id}`}
               aria-pressed={selection?.kind === 'task' && selection.id === row.id}
-              onClick={() => { setSelection({ kind: 'task', id: row.id }); setTab('inspect'); }}>
-              <strong>{row.id}</strong><span>{row.job?.workerId ?? row.receipt?.workerId ?? 'Assignment pending'}</span>
+              onClick={() => inspectSelection({ kind: 'task', id: row.id })}>
+              <strong>{row.id}</strong><span>{row.workerId ?? (row.assignment === 'conflict' ? 'Assignment evidence conflicts' : 'Assignment pending')}</span>
               <StatusBadge status="dispatching" tone="running" />
             </button>
           </li>)}</ul>
@@ -120,22 +140,23 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
             {showAllOwned ? 'Show first 4' : `Show ${ownedRows.length - 4} more owned dispatches`}</button> : null}
         </section> : null}
       </section>
+      <div ref={fleetMapRegion}><FleetMap snapshot={snapshot} stale={historical} selection={selection} onSelect={inspectSelection} /></div>
       <div className={styles.workspaceGrid}>
         <div className={styles.mainColumn}>
           <QuotaRefreshPanel refresh={snapshot.quotaRefresh} selectedWorkerId={selection?.kind === 'worker' ? selection.id : null}
-            onSelect={(id) => { setSelection({ kind: 'worker', id }); setTab('inspect'); }} />
+            onSelect={(id) => inspectSelection({ kind: 'worker', id })} />
           <CapacityBoard snapshot={snapshot} selectedWorkerId={selection?.kind === 'worker' ? selection.id : null}
-            onSelect={(id) => { setSelection({ kind: 'worker', id }); setTab('inspect'); }} />
-          <PerformancePanel report={snapshot.performance} onSelect={(id) => { setSelection({ kind: 'worker', id }); setTab('inspect'); }} />
+            historical={historical} onSelect={(id) => inspectSelection({ kind: 'worker', id })} />
+          <PerformancePanel report={snapshot.performance} onSelect={(id) => inspectSelection({ kind: 'worker', id })} />
           <section className={styles.tasks} aria-labelledby="tasks-title">
             <div className={styles.sectionHeading}><div><h2 id="tasks-title">Task activity</h2><p>Queue ownership and durable receipts, not inferred process liveness.</p></div>
               <label className={styles.filter}>Show<select aria-label="Task activity filter" value={filter} onChange={(event) => setFilter(event.target.value as typeof filter)}>
                 <option value="all">All tasks</option><option value="active">Queued / occupied</option><option value="completed">Completed</option></select></label></div>
             {visibleRows.length ? <ul className={styles.taskRows}>{visibleRows.map((row) => <li key={row.id}>
               <button type="button" className={styles.taskRow} aria-pressed={selection?.kind === 'task' && selection.id === row.id}
-                onClick={() => { setSelection({ kind: 'task', id: row.id }); setTab('inspect'); }}>
+                onClick={() => inspectSelection({ kind: 'task', id: row.id })}>
                 <span><strong>{row.id}</strong><small>{taskOwnership(row)}</small></span>
-                <span className={styles.taskWorker}>{row.job?.workerId ?? row.receipt?.workerId ?? 'Waiting for assignment'}</span>
+                <span className={styles.taskWorker}>{row.workerId ?? (row.assignment === 'conflict' ? 'Assignment evidence conflicts' : 'No confirmed assignment')}</span>
                 <StatusBadge status={taskState(row)} tone={taskTone(row)} />
               </button></li>)}</ul> : <div className={styles.empty}><h3>{filter === 'all' ? 'No recorded tasks yet' : 'No matching tasks'}</h3>
                 <p>{filter === 'all' ? 'Inspect a worker’s quota, then queue a concrete task when execution is enabled.' : 'Choose another filter to inspect the recorded task history.'}</p></div>}
@@ -149,15 +170,21 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
         <aside className={styles.sideColumn} aria-label="Resource workspace">
           <div className={styles.tabs} role="group" aria-label="Workspace panel">
             <button type="button" aria-pressed={tab === 'compose'} onClick={() => setTab('compose')}>Compose task</button>
-            <button type="button" aria-pressed={tab === 'inspect'} onClick={() => setTab('inspect')}>Inspect selection</button>
+            <button type="button" aria-pressed={tab === 'inspect'} onClick={() => inspectSelection()}>Inspect selection</button>
           </div>
+          {tab === 'inspect' ? <button type="button" className={styles.returnToMap}
+            onClick={() => fleetMapRegion.current?.querySelector<HTMLElement>('h2')?.focus()}>Back to fleet map</button> : null}
           {/* Keep unsent text while inspecting evidence; hidden forms are not interactive. */}
           <div hidden={tab !== 'compose'}><TaskComposer scope={scope} workers={snapshot.pool.workers} enabled={enabled}
             unlocked={hold.hasHold} busy={busy} onUnlock={() => setUnlockOpen(true)} onSubmit={submit} /></div>
-          {tab === 'inspect' ? selectedWorker ? <WorkerInspector worker={selectedWorker} snapshot={snapshot} /> : selectedTask
-            ? <TaskInspector key={selectedTask.id} row={selectedTask} enabled={stopEnabled} busy={busy}
-              onCancel={(id) => { void action(() => cancelResourceTask(id), `Cancellation requested for ${id}.`, true); }} />
-            : <section className={styles.empty}><h2>Select a worker or task</h2><p>Inspect quota evidence, ownership, outcomes, and session-local output here.</p></section> : null}
+          {tab === 'inspect' ? <div ref={inspector} className={styles.inspectionTarget}>{selectedWorker ? <WorkerInspector worker={selectedWorker} snapshot={snapshot} historical={historical} /> : selectedTask
+            ? <TaskInspector key={`${supervisor?.instanceId ?? 'external'}:${selectedTask.id}`} row={selectedTask} fleetTask={selectedTask} enabled={stopEnabled} busy={busy}
+              onCancel={(id) => { void cancel(id); }} />
+            : <section className={styles.empty}><h2 tabIndex={-1} data-inspector-heading>{selection
+              ? `${selection.kind === 'worker' ? 'Worker' : 'Task'} ${selection.id} is not in this snapshot`
+              : 'Select a worker or task'}</h2><p>{selection
+              ? 'It may have left the retained history or this console session. Select another record or refresh to check again; no outcome is inferred.'
+              : 'Inspect quota evidence, ownership, outcomes, and session-local output here.'}</p></section>}</div> : null}
         </aside>
       </div>
     </> : null}
