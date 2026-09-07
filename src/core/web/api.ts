@@ -95,6 +95,7 @@ import { ReadProjectionError, type ReadProjectionReader } from './read-projectio
 import type { MissionShadowObservation } from '../vision/mission-shadow-observer.js';
 import { readAgentOsRuntimeSnapshotV1 } from '../vision/agent-os-runtime-read.js';
 import { readUniverseOverview } from '../universe/index.js';
+import { readUniverseGraph } from '../universe/graph-reader.js';
 import type { ProposalsReadResult } from '../inbox/store.js';
 import { handleRunEventsSse, RUN_EVENTS_PATH_RE } from './run-stream.js';
 
@@ -1206,6 +1207,20 @@ export async function handleApi(
     // execution authority.
     if (path === '/api/vision/mission' && method === 'GET') {
       sendJson(res, 200, await buildVisionMissionSnapshot(cfg));
+      return true;
+    }
+
+    // The graph reads a single selected universe. It never accepts a filesystem
+    // root from browser input, and the server requires read authority first.
+    if (path === '/api/universe/graph' && method === 'GET') {
+      const params = new URL(req.url ?? '', 'http://localhost').searchParams;
+      const ids = params.getAll('universeId');
+      if (ids.length !== 1 || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(ids[0]!) ||
+          [...params.keys()].some((key) => key !== 'universeId')) {
+        sendJson(res, 400, { error: 'Expected exactly one universeId and no other query parameters' });
+        return true;
+      }
+      sendJson(res, 200, readUniverseGraph(ids[0]!));
       return true;
     }
 

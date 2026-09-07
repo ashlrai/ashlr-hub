@@ -61,7 +61,7 @@ describe('installed Universe package smoke', () => {
     expect(campaign.budget.maxModelRequests).toBe(0);
   });
 
-  it.each(['runUniverseCampaign', 'deliverUniverseElite'])('rejects missing public SDK export %s before creating the smoke store', (name) => {
+  it.each(['runUniverseCampaign', 'deliverUniverseElite', 'readUniverseGraph', 'traverseUniverseGraph'])('rejects missing public SDK export %s before creating the smoke store', (name) => {
     const { smokeRoot, run } = fixture({ sdkOverride: `export const ${name} = undefined;` });
     const result = run();
     expect(result.status).toBe(1);

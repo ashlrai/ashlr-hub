@@ -8,3 +8,7 @@ export { initUniverseCampaign, readUniverseCampaign, readUniverseCampaigns, requ
 export { runUniverseCampaign } from './campaign.js';
 export { deliverUniverseElite, readUniverseDeliveries, validUniverseDeliveryBranch } from './delivery.js';
 export type { UniverseDeliveryReceipt, UniverseDeliveryReport } from './delivery.js';
+export { buildUniverseGraph } from './graph.js';
+export { traverseUniverseGraph } from './graph-query.js';
+export { readUniverseGraph } from './graph-reader.js';
+export type * from './graph-types.js';

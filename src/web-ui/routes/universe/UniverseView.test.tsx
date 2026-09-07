@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { UniverseOverview, UniverseRun, UniverseSummary, UniverseTrial } from '../../data/api-types.js';
+import type { UniverseGraph } from '../../../core/universe/graph-types.js';
 import { evictAll } from '../../data/cache.js';
 import { UniverseView } from './UniverseView.js';
 
@@ -97,6 +98,36 @@ function deliveryReport(overrides: Partial<NonNullable<UniverseOverview['deliver
 describe('UniverseView', () => {
   beforeEach(() => evictAll());
   afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+  it.each([true, false])('navigates only when an exact graph source exists in the current overview (%s)', async (present) => {
+    const body = overview();
+    const graph: UniverseGraph = {
+      schemaVersion: 1, sampledAt: body.sampledAt, universeId: 'compiler', sourceState: 'healthy', complete: true,
+      authority: 'observation-only', measurementScope: 'local-experiment',
+      nodes: [{ id: 'graph-source', kind: 'trial', label: 'Graph source candidate', universeId: 'compiler', state: 'passed', evidence: 'recorded',
+        generation: present ? 1 : 99, runId: present ? 'run-first' : 'run-unavailable', trialId: present ? 'trial-first' : 'trial-unavailable' }],
+      edges: [], findings: [], issues: [], counts: { nodes: 1, edges: 0, trials: 1, currentElites: 0, verifiedDeliveries: 0 },
+      limits: { maxNodes: 25000, maxEdges: 100000, maxFindings: 128 },
+    };
+    const fetch = vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify(String(input).includes('/api/universe/graph?') ? graph : body), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    render(<MemoryRouter><UniverseView /></MemoryRouter>);
+    await screen.findByRole('region', { name: 'Evidence for better-motor' });
+    expect(fetch).toHaveBeenCalledOnce();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Open graph' }));
+    await screen.findByRole('button', { name: 'Inspect exact trial evidence' });
+    await user.click(screen.getByRole('button', { name: 'Inspect exact trial evidence' }));
+    if (present) {
+      expect(screen.getByRole('region', { name: 'Evidence for small-motor' })).toBeInTheDocument();
+      expect(screen.getByLabelText('Generation')).toHaveValue('run-first');
+    } else {
+      expect(screen.getByText(/exact trial is not present in the current overview/)).toBeInTheDocument();
+      expect(screen.getByRole('region', { name: 'Evidence for better-motor' })).toBeInTheDocument();
+      expect(screen.getByLabelText('Generation')).toHaveValue('run-next');
+    }
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
 
   it('shows verified local branch provenance and navigates to its source generation', async () => {
     const user = userEvent.setup();

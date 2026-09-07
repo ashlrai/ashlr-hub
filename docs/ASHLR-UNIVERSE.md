@@ -333,6 +333,82 @@ package publication, deployment, and customer value are separate outcomes.
 Keep the source branch and receipt for review or later integration; removal of
 either is a separate explicit repository/storage operation.
 
+## Trace results through the evidence graph
+
+Use the graph to answer which code a trial inherited, which earlier outcome
+provided feedback, which evaluator measured it, and whether a retained artifact
+has a verified local branch delivery. It is derived from the existing records;
+there is no separate graph database to synchronize.
+
+These commands only read evidence. Replace `my-experiment` with a registered ID
+and copy a node ID from the first response into the second command:
+
+```sh
+ashlr universe graph my-experiment --json
+ashlr universe graph my-experiment --node '<node-id>' --direction ancestors --depth 64 --json
+```
+
+Use `descendants` to inspect downstream relationships. Depth is bounded to
+1–64; a depth-limited result is explicitly incomplete. Traversal JSON contains
+`{graph, traversal}`: graph counts cover the full included projection, while
+`traversal.nodeIds` and `traversal.edgeIds` identify the selected subgraph.
+`--root` selects a private custom store. A missing store is not created, and a
+missing, degraded, or incomplete read exits with code 1 rather than claiming
+complete results. Invalid CLI arguments exit with code 2.
+
+The SDK exposes the same graph and browser-safe traversal:
+
+```js
+import { readUniverseGraph, traverseUniverseGraph } from '@ashlr/hub/universe';
+
+const graph = readUniverseGraph('my-experiment', { root });
+const trial = graph.nodes.find((node) => node.kind === 'trial' && node.currentElite);
+if (trial) {
+  const ancestry = traverseUniverseGraph(graph, {
+    nodeId: trial.id, direction: 'ancestors', maxDepth: 64,
+  });
+}
+```
+
+`buildUniverseGraph(overview, universeId)` is a pure projection for callers
+that already hold a validated overview. It does not authenticate arbitrary
+caller-supplied objects. The storage reader validates the selected experiment,
+projects matching campaign histories against that sample, and inspects only that
+experiment's delivery repository. Unreadable campaign identity records make the
+inventory incomplete because their membership cannot be established.
+
+### Read relationships and findings accurately
+
+- **Parent** means inherited candidate code. **Feedback** means a preceding
+  same-variant evaluator outcome that informed the attempt. A failed attempt can
+  provide feedback without becoming a parent.
+- Trials and artifacts are separate occurrences, even when their content digests
+  match. Repeated outputs are grouped as findings, not merged into a single node.
+- Campaign reservations remain distinguishable from runs that actually started.
+- A repeated-output finding identifies matching recorded content, not why the
+  model repeated it or whether another attempt is worthwhile. Reported token
+  coverage remains explicit; missing counters are not treated as zero spend.
+- An undelivered-current-elite finding is an observation for inspection, not an
+  instruction to deliver or a promise that the change is useful in production.
+- Historical artifact digests are recorded evidence, not fresh byte checks of
+  every artifact. Verified local delivery uses the existing receipt, artifact,
+  Git object and ref checks. Neither graph consistency nor delivery establishes
+  a remote push, merge, deployment or accepted production change.
+
+Fixed node, edge and finding bounds are returned in `limits`. `complete: false`
+and structured `issues` expose truncated or unresolved evidence; counts describe
+included nodes, not unknown omitted totals. Graph traversal never starts work,
+changes a campaign budget or grants execution authority.
+
+In the Universe console, open **Evidence graph** to load the selected experiment
+on demand. Filter or select nodes, follow relationships, and inspect the exact
+source trial using the existing trial view. Refresh is explicit; changing graph
+focus does not reread the filesystem. The authenticated read-only endpoint is
+`GET /api/universe/graph?universeId=my-experiment`; it rejects other query fields,
+including filesystem roots. Opaque graph IDs preserve topology through privacy
+filtering, while exact digest and other secret-shaped metadata may be hidden in
+the browser. Use local CLI JSON for exact provenance.
+
 ## Five engines, one feedback loop
 
 | Engine | Responsibility | First useful integration |

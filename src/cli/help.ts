@@ -45,8 +45,14 @@ export const AGENT_COMMANDS: AgentCommandDoc[] = [
     jsonShape: 'UniverseOverview',
   },
   {
+    usage: 'ashlr universe graph <id> [--node <node-id> --direction ancestors|descendants --depth N] [--root <path>] --json',
+    description: 'Read recorded experiment lineage and evidence relationships; optionally traverse one node. No provider calls, execution, or delivery.',
+    safety: 'read',
+    jsonShape: 'UniverseGraph | {graph: UniverseGraph, traversal: UniverseGraphTraversal}',
+  },
+  {
     usage: 'ashlr universe run <id> [--root <path>] --json',
-    description: 'Execute registered local commands in isolated candidate trees, evaluate, and append one budgeted generation. No network, merge, deploy, or model credentials.',
+    description: 'Execute one budgeted local generation and fixed evaluation. Command subprocesses deny network; optional local-chat uses its declared loopback endpoint. No merge or deploy.',
     safety: 'append',
     jsonShape: 'UniverseRun',
   },
@@ -362,6 +368,7 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'director [--dry-run]',         desc: 'Elon Director: read-only strategic reasoning cycle; --dry-run prints the digest without sending Telegram.', topic: 'autonomy' },
   { cmd: 'invent',                       desc: 'Generative backlog invention — propose novel high-value work items.', topic: 'autonomy' },
   { cmd: 'universe <demo|init|run|status|archive>', desc: 'Local experiment evolution: run competing code variants, measure them, and reuse winning artifacts.', topic: 'autonomy' },
+  { cmd: 'universe graph <id> [--node <node-id>]', desc: 'Read-only experiment evidence graph: trace selected parents, feedback, campaigns, and local branch receipts.', topic: 'autonomy' },
   { cmd: 'eval [--limit N]',             desc: 'Local-agent eval harness: adaptive prompts OFF vs ON, steps/done/tokens (M44).', topic: 'run' },
   { cmd: 'eval attention [--window 1d|7d|30d]', desc: 'Metadata-only fleet attention report: context pressure, retrieval, yield, routing, and traces.', topic: 'run' },
   { cmd: 'skills audit <pack-path> [--json]', desc: 'Read-only quarantine audit for external skill structure, trigger routing, collisions, and behavioral fixtures.', topic: 'run' },
