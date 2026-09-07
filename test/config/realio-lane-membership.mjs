@@ -46,6 +46,7 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-core.test.ts', // real Git snapshots and confined experiment subprocesses
   'test/universe-delivery.test.ts', // real Git object/ref delivery and private receipts
   'test/universe-delivery-review.test.ts', // independent Git provenance and historical receipt review
+  'test/universe-graph-reader.test.ts', // targeted real Git/private-ledger graph observation
   'test/local-pack-universe-smoke.test.ts', // installed SDK/CLI contract with real Git fixtures
   'test/universe-model-integration.test.ts', // real pinned evaluator plus bounded local HTTP model fixtures
   'test/universe-campaign-integration.test.ts', // native multi-generation ownership, feedback and durable resource limits

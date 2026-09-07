@@ -288,6 +288,43 @@ export function readUniverseCampaigns(options: UniverseStoreOptions = {}): {
   return { campaigns, sourceState: reasons.length ? 'degraded' : 'healthy', reasons };
 }
 
+/** Read only matching histories, using the caller's already validated experiment sample. */
+export function readUniverseCampaignsForUniverse(universe: UniverseSummary, options: UniverseStoreOptions = {}): {
+  campaigns: UniverseCampaignSummary[]; sourceState: 'missing' | 'healthy' | 'degraded'; reasons: string[];
+} {
+  const directory = join(resolve(options.root ?? defaultUniverseRoot()), 'campaigns');
+  const campaigns: UniverseCampaignSummary[] = [];
+  const reasons: string[] = [];
+  try {
+    try { lstatSync(directory); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { campaigns, sourceState: 'missing', reasons }; throw error; }
+    inspectPrivateDirectory(directory);
+    const names = readdirSync(directory).sort();
+    if (names.length > 64) throw new Error('Campaign inventory limit exceeded');
+    for (const id of names) {
+      try {
+        const path = campaignDirectory(id, options);
+        inspectPrivateDirectory(path);
+        const first = readImmutablePrivateRecordPoint(config(path), '00000000', '00000000.json').record;
+        if (first?.kind !== 'created' || first.definition.id !== id) throw new Error('Campaign identity unavailable');
+        if (first.definition.universeId !== universe.manifest.id) continue;
+        const events = readCampaignEvents(path);
+        if (canonical(foldCampaignEvents(events).created) !== canonical(first)) {
+          throw new Error('Campaign identity changed during graph observation');
+        }
+        const summary = projectCampaign(events, universe);
+        campaigns.push(summary);
+        if (summary.sourceState !== 'healthy') reasons.push(`${id}: ${summary.reasons.join('; ')}`);
+      } catch (error) {
+        // An unreadable creation record cannot be assigned to another universe.
+        // Keep the inventory explicitly incomplete instead of silently skipping it.
+        reasons.push(`${id}: ${error instanceof Error ? error.message : 'Campaign evidence unavailable'}`);
+      }
+    }
+  } catch (error) { reasons.push(error instanceof Error ? error.message : 'Campaign inventory unavailable'); }
+  return { campaigns, sourceState: reasons.length ? 'degraded' : 'healthy', reasons };
+}
+
 export function initUniverseCampaign(input: UniverseCampaignDefinition, options: UniverseStoreOptions = {}): UniverseCampaignSummary {
   const definition = validateUniverseCampaignDefinition(input);
   const root = resolve(options.root ?? defaultUniverseRoot());

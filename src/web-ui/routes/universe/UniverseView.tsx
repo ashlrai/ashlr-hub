@@ -8,6 +8,7 @@ import type { UniverseOverview, UniverseRun, UniverseSummary, UniverseTrial } fr
 import { useScrollRestore } from '../../hooks/useScrollRestore.js';
 import styles from './UniverseView.module.css';
 import { UniverseDeliveries } from './UniverseDeliveries.js';
+import { UniverseGraph } from './UniverseGraph.js';
 
 type Campaign = NonNullable<UniverseOverview['campaigns']>[number];
 const ACTIVE_CAMPAIGN_STATES = new Set(['running', 'pause-requested', 'stop-requested']);
@@ -208,6 +209,7 @@ function UniverseExperiment({ summary, campaigns, deliveryReport }: {
 }) {
   const [runId, setRunId] = useState<string | null>(null);
   const [trialId, setTrialId] = useState<string | null>(null);
+  const comparisonRef = useRef<HTMLElement>(null);
   const runs = summary.activeRun && !summary.runs.some((run) => run.id === summary.activeRun!.id)
     ? [...summary.runs, summary.activeRun] : summary.runs;
   const run = runs.find((item) => item.id === runId) ?? summary.activeRun ?? runs.at(-1);
@@ -240,6 +242,13 @@ function UniverseExperiment({ summary, campaigns, deliveryReport }: {
 
       <Campaigns campaigns={campaigns} summary={summary} onInspectRun={(id) => { setRunId(id); setTrialId(null); }} />
 
+      <UniverseGraph universeId={summary.manifest.id} onInspectTrial={(run, trial) => {
+        if (!runs.some((item) => item.id === run && item.trials.some((candidate) => candidate.id === trial))) return false;
+        setRunId(run); setTrialId(trial);
+        window.requestAnimationFrame(() => comparisonRef.current?.scrollIntoView?.({ block: 'start' }));
+        return true;
+      }} />
+
       <section className={styles.archive} aria-labelledby="universe-archive-title">
         <div className={styles.sectionHeading}>
           <div><h2 id="universe-archive-title">Population archive</h2><p>Each niche keeps its best measured variant. Inspect an elite to see the experiment that earned its place.</p></div>
@@ -266,7 +275,7 @@ function UniverseExperiment({ summary, campaigns, deliveryReport }: {
       </section>
 
       {run ? (
-        <section className={styles.comparison} aria-labelledby="universe-comparison-title">
+        <section ref={comparisonRef} className={styles.comparison} aria-labelledby="universe-comparison-title">
           <div className={styles.sectionHeading}>
             <div><h2 id="universe-comparison-title">Experiment comparison</h2><p>Selection is local to a niche. Positive improvement means better in either metric direction.</p></div>
             <label className={styles.selectLabel}>Generation

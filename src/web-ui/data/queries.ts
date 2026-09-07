@@ -6,6 +6,7 @@
  * so caching, de-dupe, and SSE-driven refresh are automatic.
  */
 import { apiGet } from './client.js';
+import type { UniverseGraph } from '../../core/universe/graph-types.js';
 import type {
   AgentOsSnapshotResponse,
   UniverseOverview,
@@ -52,6 +53,14 @@ export const universeOverviewQuery: QueryDef<UniverseOverview> = {
   key: 'universe-overview',
   fetch: (signal) => apiGet<UniverseOverview>('/api/universe', signal),
 };
+
+/** Read only on demand; never invalidate this alongside the overview poll. */
+export function universeGraphQuery(universeId: string): QueryDef<UniverseGraph> {
+  return {
+    key: `universe-graph-${universeId}`,
+    fetch: (signal) => apiGet<UniverseGraph>(`/api/universe/graph?universeId=${encodeURIComponent(universeId)}`, signal),
+  };
+}
 
 // NOTE: there is no standalone GET /api/visibility route — VisibilitySnapshot
 // is an optional field on DashboardSnapshot (`.visibility`), populated by

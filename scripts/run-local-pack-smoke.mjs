@@ -73,7 +73,8 @@ async function verifyInstalledUniverse(fixtureRoot, bin) {
     'initUniverse', 'readUniverseOverview', 'runUniverse', 'validateUniverseCampaignDefinition',
     'initUniverseCampaign', 'readUniverseCampaign', 'readUniverseCampaigns',
     'requestUniverseCampaignControl', 'runUniverseCampaign', 'deliverUniverseElite',
-    'readUniverseDeliveries', 'validUniverseDeliveryBranch']) {
+    'readUniverseDeliveries', 'validUniverseDeliveryBranch', 'buildUniverseGraph',
+    'readUniverseGraph', 'traverseUniverseGraph']) {
     assert.equal(typeof sdk[name], 'function', `Universe SDK export missing: ${name}`);
   }
   mkdirSync(fixtureRoot, { mode: 0o700 });
@@ -91,17 +92,21 @@ async function verifyInstalledUniverse(fixtureRoot, bin) {
   assert.equal(sdk.readUniverseOverview({ root: missing }).sourceState, 'missing');
   assert.equal(sdk.readUniverseCampaigns({ root: missing }).sourceState, 'missing');
   assert.equal(sdk.readUniverseDeliveries('pack-universe', { root: missing }).sourceState, 'missing');
+  assert.equal(sdk.readUniverseGraph('pack-universe', { root: missing }).sourceState, 'missing');
   assert.equal(json(['status', '--root', missing]).sourceState, 'missing');
   assert.equal(json(['campaign', 'status', '--root', missing]).sourceState, 'missing');
   assert.equal(json(['deliveries', 'pack-universe', '--root', missing]).sourceState, 'missing');
+  assert.equal(json(['graph', 'pack-universe', '--root', missing], 1).sourceState, 'missing');
   assert.equal(existsSync(missing), false, 'Status reads must not create a missing store');
   assert.match(cli(['help']), /campaign/);
   assert.match(cli(['campaign', 'help']), /resume/);
   assert.match(cli(['deliver', '--help']), /deliveries/);
   assert.match(cli(['deliveries', '--help']), /deliver/);
+  assert.match(cli(['graph', '--help']), /ancestors/);
   assert.equal(typeof json(['status', '--unexpected', '--root', missing], 2).error, 'string');
   assert.equal(typeof json(['campaign', 'run', '--unexpected', '--root', missing], 2).error, 'string');
   assert.equal(typeof json(['deliver', 'pack-universe', '--unexpected', '--root', missing], 2).error, 'string');
+  assert.equal(typeof json(['graph', 'pack-universe', '--depth', '0', '--root', missing], 2).error, 'string');
   assert.equal(existsSync(missing), false, 'Invalid CLI flags must not create a store');
 
   const seed = join(fixtureRoot, 'seed');
@@ -170,6 +175,22 @@ async function verifyInstalledUniverse(fixtureRoot, bin) {
     assert.deepEqual(overview.universes[0].runs, []);
     assert.deepEqual(overview.universes[0].elites, []);
     assert.equal(overview.universes[0].activeRun, null);
+    const graph = sdk.readUniverseGraph(manifest.id, { root });
+    assert.equal(graph.sourceState, 'healthy');
+    assert.equal(graph.complete, true);
+    assert.equal(graph.authority, 'observation-only');
+    assert.equal(graph.nodes.filter((node) => node.kind === 'campaign').length, 2);
+    assert.equal(graph.nodes.some((node) => node.kind === 'trial'), false);
+    const cliGraph = json(['graph', manifest.id, '--root', root]);
+    assert.deepEqual(cliGraph.nodes, graph.nodes, 'Installed SDK and CLI must expose the same graph');
+    const focus = graph.nodes.find((node) => node.kind === 'universe');
+    assert(focus, 'Registered graph must contain its Universe');
+    const traversal = json(['graph', manifest.id, '--root', root, '--node', focus.id,
+      '--direction', 'descendants', '--depth', '64']);
+    assert.equal(traversal.traversal.complete, true);
+    assert(traversal.traversal.nodeIds.includes(focus.id));
+    assert.deepEqual(sdk.traverseUniverseGraph(graph, { nodeId: focus.id, direction: 'descendants', maxDepth: 64 }),
+      traversal.traversal, 'Installed traversal must agree across SDK and CLI');
   } finally {
     // The fixture is a single-file seed created by this invocation. Unfreeze
     // only its directory so the surrounding gate can remove its disposable root.
