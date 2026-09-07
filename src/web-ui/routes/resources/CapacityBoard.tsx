@@ -21,16 +21,16 @@ const REASONS: Record<string, string> = {
 };
 export const resourceReason = (reason: string) => REASONS[reason] ?? reason.replaceAll('-', ' ');
 
-export function QuotaEvidence({ observation, sampledAt, workerId }: {
-  observation: ResourceObservation | undefined; sampledAt: string; workerId: string;
+export function QuotaEvidence({ observation, sampledAt, workerId, historical = false }: {
+  observation: ResourceObservation | undefined; sampledAt: string; workerId: string; historical?: boolean;
 }) {
   if (!observation) return <p className={styles.muted}>No observation recorded. Unknown quota is not unused capacity.</p>;
   const stale = Date.parse(observation.expiresAt) <= Date.parse(sampledAt);
   const future = Date.parse(observation.updatedAt ?? observation.observedAt) > Date.parse(sampledAt);
   return <div className={styles.quotaEvidence}>
-    <div className={styles.inline}><StatusBadge status={stale || future ? 'unknown' : observation.health}
-      tone={stale || future ? 'unknown' : observation.health === 'ready' ? 'info' : 'warning'}>
-      {future ? 'Future capture time' : stale ? 'Stale observation' : observation.health === 'ready' ? 'Fresh observation' : 'Unavailable'}
+    <div className={styles.inline}><StatusBadge status={historical || stale || future ? 'unknown' : observation.health}
+      tone={historical || stale || future ? 'unknown' : observation.health === 'ready' ? 'info' : 'warning'}>
+      {historical ? 'Evidence at last successful read' : future ? 'Future capture time' : stale ? 'Stale observation' : observation.health === 'ready' ? 'Fresh observation' : 'Unavailable'}
     </StatusBadge></div>
     <dl className={styles.facts}>
       <div><dt>Oldest retained capture</dt><dd>{resourceTime(observation.observedAt)}</dd></div>
@@ -52,12 +52,14 @@ export function QuotaEvidence({ observation, sampledAt, workerId }: {
   </div>;
 }
 
-export function WorkerInspector({ worker, snapshot }: { worker: ConsoleWorker; snapshot: ResourceConsoleSnapshot }) {
+export function WorkerInspector({ worker, snapshot, historical = false }: { worker: ConsoleWorker; snapshot: ResourceConsoleSnapshot; historical?: boolean }) {
   const candidate = snapshot.plan?.candidates.find((item) => item.workerId === worker.id);
   const exclusion = snapshot.plan?.exclusions.find((item) => item.workerId === worker.id);
   return <section className={styles.inspector} aria-label={`Worker ${worker.id}`}>
-    <div className={styles.sectionHeading}><div><h2>{worker.id}</h2><p>{worker.provider} · {worker.model}</p></div></div>
+    <div className={styles.sectionHeading}><div><h2 tabIndex={-1} data-inspector-heading>{worker.id}</h2><p>{worker.provider} · {worker.model}</p></div></div>
+    {historical ? <p className={styles.warning}>Last successful read only. This routing preview and quota evidence do not establish current eligibility.</p> : null}
     {snapshot.sourceState === 'degraded' ? <p className={styles.warning}>Routing evidence is unavailable. No admission is implied.</p>
+      : historical ? <p className={styles.muted}>{candidate ? 'Eligible in the last observed preview.' : 'Not eligible in the last observed preview.'}</p>
       : candidate ? <p className={styles.routeNote}>{candidate.reason === 'operator-capped-unknown-quota'
         ? 'Eligible under operator caps only. Provider quota is unknown.' : 'Eligible in the all-enrolled-worker preview. Actual tasks recheck capacity before reservation.'}</p>
         : <ul className={styles.reasonList}>{exclusion?.reasons.map((reason) => <li key={reason}>{resourceReason(reason)}</li>) ?? <li>Routing evidence unavailable</li>}</ul>}
@@ -70,12 +72,12 @@ export function WorkerInspector({ worker, snapshot }: { worker: ConsoleWorker; s
       <div><dt>Unknown-quota policy</dt><dd>{worker.allowUnknownQuota ? 'Explicit operator-capped dispatch' : 'Wait for known quota'}</dd></div>
     </dl>
     <h3>Quota evidence</h3>
-    <QuotaEvidence observation={snapshot.observations.find((item) => item.workerId === worker.id)} sampledAt={snapshot.sampledAt} workerId={worker.id} />
+    <QuotaEvidence observation={snapshot.observations.find((item) => item.workerId === worker.id)} sampledAt={snapshot.sampledAt} workerId={worker.id} historical={historical} />
   </section>;
 }
 
-function CapacityLane({ group, snapshot, selectedWorkerId, onSelect }: {
-  group: ResourceConsoleGroup; snapshot: ResourceConsoleSnapshot; selectedWorkerId: string | null; onSelect: (id: string) => void;
+function CapacityLane({ group, snapshot, selectedWorkerId, onSelect, historical }: {
+  group: ResourceConsoleGroup; snapshot: ResourceConsoleSnapshot; selectedWorkerId: string | null; onSelect: (id: string) => void; historical: boolean;
 }) {
   const workers = snapshot.pool.workers.filter((worker) => group.workerIds.includes(worker.id));
   return <section className={styles.capacityLane} aria-label={`Capacity group ${group.capacityKey}`}>
@@ -90,14 +92,14 @@ function CapacityLane({ group, snapshot, selectedWorkerId, onSelect }: {
       {workers.map((worker) => {
         const candidate = snapshot.plan?.candidates.find((item) => item.workerId === worker.id);
         const exclusion = snapshot.plan?.exclusions.find((item) => item.workerId === worker.id);
-        const next = snapshot.plan?.selectedWorkerId === worker.id;
+        const next = !historical && snapshot.sourceState !== 'degraded' && snapshot.plan?.selectedWorkerId === worker.id;
         const occupied = snapshot.activeAttempts.filter((attempt) => attempt.workerId === worker.id).length;
         return <li key={worker.id} className={styles.workerLane}>
           <button className={`${styles.workerButton} ${next ? styles.nextWorker : ''}`} type="button"
             aria-pressed={selectedWorkerId === worker.id} onClick={() => onSelect(worker.id)}>
             <span className={styles.workerHeading}><strong>{worker.id}</strong>
-              <StatusBadge status={candidate ? 'eligible' : 'blocked'} tone={candidate ? 'info' : snapshot.sourceState === 'degraded' ? 'unknown' : 'warning'}>
-                {next ? 'Next eligible' : candidate ? 'Eligible' : 'Not eligible'}</StatusBadge></span>
+              <StatusBadge status={historical || snapshot.sourceState === 'degraded' ? 'unknown' : candidate ? 'eligible' : 'blocked'} tone={historical || snapshot.sourceState === 'degraded' ? 'unknown' : candidate ? 'info' : 'warning'}>
+                {historical ? candidate ? 'Previously eligible' : 'Previously not eligible' : snapshot.sourceState === 'degraded' ? 'Evidence unavailable' : next ? 'Next eligible' : candidate ? 'Eligible' : 'Not eligible'}</StatusBadge></span>
             <span className={styles.muted}>{worker.provider} · {worker.model}</span>
             <span className={styles.caption}>{candidate?.reason === 'operator-capped-unknown-quota' ? 'Unknown quota · operator caps only'
               : candidate ? `${candidate.usedPercent === null ? 'Quota not measured' : `${candidate.usedPercent}% maximum window utilization`} · inspect all windows`
@@ -110,17 +112,19 @@ function CapacityLane({ group, snapshot, selectedWorkerId, onSelect }: {
   </section>;
 }
 
-export function CapacityBoard({ snapshot, selectedWorkerId, onSelect }: {
-  snapshot: ResourceConsoleSnapshot; selectedWorkerId: string | null; onSelect: (id: string) => void;
+export function CapacityBoard({ snapshot, selectedWorkerId, onSelect, historical = false }: {
+  snapshot: ResourceConsoleSnapshot; selectedWorkerId: string | null; onSelect: (id: string) => void; historical?: boolean;
 }) {
   return <section className={styles.board} aria-labelledby="capacity-title">
     <div className={styles.sectionHeading}><div><h2 id="capacity-title">Routing board</h2>
       <p>Shared capacity → enrolled workers. Select a worker to inspect every quota window.</p></div></div>
     <div className={styles.preview}><span className={styles.routeDot} aria-hidden="true" />
-      <span>{snapshot.plan?.selectedWorkerId ? <>Next eligible worker: <strong>{snapshot.plan.selectedWorkerId}</strong></> : 'No worker is currently eligible'}</span>
+      <span>{snapshot.sourceState === 'degraded' ? 'Routing evidence unavailable' : snapshot.plan?.selectedWorkerId
+        ? <>{historical ? 'Last observed preview:' : 'Next eligible worker:'} <strong>{snapshot.plan.selectedWorkerId}</strong></>
+        : historical ? 'No eligible worker in the last observed preview' : 'No worker is currently eligible'}</span>
       <small>All-enrolled preview, not a reserved assignment</small></div>
     {snapshot.groups.map((group) => <CapacityLane key={group.capacityKey} group={group} snapshot={snapshot}
-      selectedWorkerId={selectedWorkerId} onSelect={onSelect} />)}
+      selectedWorkerId={selectedWorkerId} onSelect={onSelect} historical={historical} />)}
     {snapshot.groups.length === 0 ? <p className={styles.empty}>No capacity groups are available in this snapshot.</p> : null}
     <p className={styles.boardNote}>Configured workers are not proof of account login or live OS processes. Occupancy comes from task receipts; unresolved reservations retain their slot.</p>
   </section>;

@@ -326,6 +326,37 @@ Activity distinguishes console-owned dispatches from external reservations whose
 process liveness is unknown. Reported token subtotals and missing coverage remain
 separate; completed work is not automatically verified engineering value.
 
+### Follow work through the fleet map
+
+The map connects **declared shared capacity → enrolled workers → recorded
+assignments**. Select any worker or task to open its inspector and move keyboard
+focus to the selected heading. Inspection preserves an unsent task draft;
+background refreshes do not move focus. Successful submission opens the queued
+task's inspector so its assignment and cancellation controls are easy to find.
+Use **Back to fleet map** to return without losing the map search or selection.
+
+Search by worker, provider, model, capacity key or task ID. The map pages through
+eight workers at a time, three assignments per worker and eight tasks per waiting
+lane; displayed counts distinguish the current page from all included records.
+The source's omitted-history count remains visible. On narrow screens the same
+relationships stack vertically, with native buttons and readable relationship
+text rather than hover-only controls.
+
+Queued tasks occupy a separate lane: their allowed workers are possibilities,
+not assignment edges. Queue previews explain quota, occupancy, parallel limits,
+pause and unavailable evidence. Recorded quota recheck times are hints, not
+promised task start times. Pending or conflicting assignments are shown separately
+until records agree. A settled supervisor job and an earlier occupied receipt
+can coexist because sources are sampled separately; that remaining occupancy is
+explicit rather than silently treated as released capacity.
+
+After a failed refresh, retained records stay labeled as historical throughout
+retry. New submission and resume wait for a successful read; pause and owned-task
+cancellation remain available. Output is loaded only on request. A failed output
+reload identifies previously loaded text as an older read, and changing console
+instances clears session-local output. The map itself never starts workers,
+probes accounts or changes scheduling policy.
+
 ### Keep Codex quota evidence fresh in the foreground
 
 Create a private `0600` quota configuration using the exact `poolDigest` and
