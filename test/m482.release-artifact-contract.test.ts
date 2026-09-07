@@ -780,8 +780,8 @@ describe('release artifact contract v1', () => {
     expect(buildRuntimeReleaseDependencyInventory(release.packageRoot)).toMatchObject({ ok: true });
   });
 
-  it.each(['ASHLR-UNIVERSE.md', 'UNIVERSE-RESEARCH.md', 'NORTH-STAR.md'])(
-    'admits shipped Universe documentation %s without opening arbitrary package paths',
+  it.each(['ASHLR-UNIVERSE.md', 'UNIVERSE-RESEARCH.md', 'NORTH-STAR.md', 'RESOURCE-POOLS.md'])(
+    'admits shipped documentation %s without opening arbitrary package paths',
     (documentName) => {
       const release = fixture();
       const packagePath = join(release.packageRoot, 'package.json');

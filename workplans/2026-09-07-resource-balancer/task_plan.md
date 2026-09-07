@@ -35,6 +35,8 @@ Connect a local-first resource scheduler to Hub/Universe execution, maximizing v
 - Optional unknown-quota admission must be explicitly configured and operator-capped; known exhaustion cannot be converted to unknown to bypass it. Provider limits remain independently enforced by each native tool.
 - Assignments are durable before launch, concurrency is tracked across processes, and ambiguous attempts remain occupied rather than silently replaying after a lease timeout.
 - Verification of a worker result is not verification of a useful engineering change. Universe's fixed evaluation/archive stays unchanged.
+- Package build initially refused the newly shipped guide because its closed portable-file allowlist did not yet include `docs/RESOURCE-POOLS.md`. Delivery fixes that one filename and extends the existing arbitrary-path-refusal regression; it does not widen daemon execution authority.
+- Entire is enabled in manual-commit mode. Resume found no checkpoint; the implementation commit has no associated Entire checkpoint, confirmed with `entire explain --commit`.
 
 ## Status
 
@@ -42,6 +44,8 @@ Implementation and independent source review complete. Final combined verificati
 662 passed across 15 files, one Windows-only skip. Full backend/frontend
 typecheck passed. Full lint passed with 106 existing warnings and no errors;
 real-I/O registration passed. Overflow regressions passed in both provider normalization
-and native task settlement. Exact installed-package acceptance and source publication
+and native task settlement. The package allowlist correction additionally passed all
+60 m482 release-artifact tests (722 passed in total across the selected 16 files).
+Exact installed-package acceptance and source publication
 are the post-commit delivery steps; their immutable evidence is emitted separately.
 No provider executions, account changes, or production activation.
