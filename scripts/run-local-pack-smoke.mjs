@@ -93,6 +93,14 @@ async function verifyInstalledUniverse(fixtureRoot, bin) {
   const cli = (args, expectedStatus = 0) => execute(bin, ['universe', ...args], fixtureRoot, expectedStatus);
   const json = (args, expectedStatus = 0) => JSON.parse(cli([...args, '--json'], expectedStatus));
   const missing = join(fixtureRoot, 'missing-store');
+  const missingRuntime = join(fixtureRoot, 'missing-runtime-store');
+  assert.match(execute(bin, ['runtime', 'help'], fixtureRoot), /unsigned local candidate/);
+  const runtimeStatus = JSON.parse(execute(bin,
+    ['runtime', 'status', '--store', missingRuntime, '--json'], fixtureRoot, 1));
+  assert.equal(runtimeStatus.sourceState, 'missing');
+  assert.equal(runtimeStatus.current, null);
+  assert.equal(runtimeStatus.previous, null);
+  assert.equal(existsSync(missingRuntime), false, 'Runtime inspection must not create a missing store');
   const portfolio = { schemaVersion: 1, id: 'pack-portfolio', tasks: [{ campaignId: 'pack-sdk', dependsOn: [] }],
     maxParallel: 1, maxDurationMs: 1000 };
   const portfolioPath = join(fixtureRoot, 'portfolio.json');

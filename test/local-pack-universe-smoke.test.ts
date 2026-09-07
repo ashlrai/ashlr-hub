@@ -21,7 +21,7 @@ afterEach(() => {
 });
 
 /** Source-backed package wrappers test the exact smoke program without npm install. */
-function fixture(options: { sdkOverride?: string; ignoreInvalidFlags?: boolean; ignorePortfolioInvalidFlags?: boolean;
+function fixture(options: { sdkOverride?: string; ignoreInvalidFlags?: boolean; ignorePortfolioInvalidFlags?: boolean; brokenRuntimeRead?: boolean;
   ignoreComparisonInvalidFlags?: boolean } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pack-universe-')));
   scratch.push(root);
@@ -35,7 +35,11 @@ function fixture(options: { sdkOverride?: string; ignoreInvalidFlags?: boolean; 
     `export * from ${JSON.stringify(sdk)};\n${options.sdkOverride ?? ''}\n`);
   const bin = join(packageRoot, 'ashlr');
   const cli = pathToFileURL(resolve('src/cli/universe.ts')).href;
+  const runtimeCli = pathToFileURL(resolve('src/cli/runtime.ts')).href;
   writeFileSync(bin, `#!/usr/bin/env node\nimport { cmdUniverse } from ${JSON.stringify(cli)};\n` +
+    `import { cmdRuntime } from ${JSON.stringify(runtimeCli)};\n` +
+    (options.brokenRuntimeRead ? "if (process.argv[2] === 'runtime' && process.argv[3] === 'status') { console.log('{}'); process.exit(1); }\n" : '') +
+    "if (process.argv[2] === 'runtime') { process.exit(await cmdRuntime(process.argv.slice(3))); }\n" +
     (options.ignoreInvalidFlags ? "if (process.argv.includes('--unexpected')) { console.log('{}'); process.exit(0); }\n" : '') +
     (options.ignorePortfolioInvalidFlags ? "if (process.argv[3] === 'portfolio' && process.argv.includes('--unexpected')) { console.log('{}'); process.exit(0); }\n" : '') +
     (options.ignoreComparisonInvalidFlags ? "if (process.argv[3] === 'compare' && process.argv.includes('--unexpected')) { console.log('{}'); process.exit(0); }\n" : '') +
@@ -65,6 +69,14 @@ describe('installed Universe package smoke', () => {
     const portfolio = JSON.parse(readFileSync(join(smokeRoot, 'portfolio.json'), 'utf8'));
     expect(portfolio.tasks).toEqual([{ campaignId: 'pack-sdk', dependsOn: [] }]);
     expect(existsSync(join(smokeRoot, 'missing-store'))).toBe(false);
+    expect(existsSync(join(smokeRoot, 'missing-runtime-store'))).toBe(false);
+  });
+
+  it('rejects an installed runtime CLI that omits missing-store evidence', () => {
+    const { run } = fixture({ brokenRuntimeRead: true });
+    const result = run();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('missing');
   });
 
   it.each(['runUniverseCampaign', 'deliverUniverseElite', 'readUniverseGraph', 'traverseUniverseGraph',

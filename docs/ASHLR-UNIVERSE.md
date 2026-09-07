@@ -47,6 +47,89 @@ token-authorized mutation attempts invalidate the worker's cached state. This
 thread is a performance boundary, not an untrusted-code sandbox; it does not
 change the authority of the existing readers or enable fleet dispatch.
 
+## Install a pinned local runtime
+
+Use `ashlr runtime` to install a trusted, locally built Hub package independently
+of its source checkout. This is an **unsigned local candidate**, not a registry
+publication or a production-qualified resident service. Obtain the archive's
+SHA256, clean Git revision and package version from your trusted build handoff;
+matching a hash proves identity, not that unknown code is safe to execute.
+
+The bootstrap CLI must already be built or installed. The archive must contain
+its bundled dependencies and clean Git build identity. Installation accepts
+bounded USTAR regular-file archives, rejects links and ambiguous paths, verifies
+the package and dependency inventory, and smoke-tests the installed CLI and SDK.
+It invokes neither npm nor lifecycle scripts and performs no registry download.
+Smoke checks execute the explicitly trusted candidate; they are not a sandbox
+for arbitrary package code.
+
+Choose an absolute, private runtime store with an existing physical parent.
+Do not use a source checkout or an existing application-data directory. The
+following install command authorizes local writes and candidate smoke execution
+only in the managed installation workflow; it does not start a campaign or
+resident service:
+
+```sh
+node bin/ashlr runtime install \
+  --store /absolute/private/runtime-store \
+  --artifact /absolute/path/ashlr-hub-3.4.0.tgz \
+  --sha256 <trusted-archive-sha256> \
+  --revision <trusted-clean-git-revision> \
+  --version 3.4.0 --json
+node bin/ashlr runtime status --store /absolute/private/runtime-store --json
+```
+
+Each installed version has its own package directory, manifest and receipt.
+Selection changes atomically after validation; a failed replacement keeps the
+previous selection. Status and launch recheck the installed runtime, bundled
+dependencies and recorded Node executable. Missing-store status does not create
+the store. Packages and failed staging directories are retained, not pruned.
+Installation never changes your existing `ashlr` executable, PATH, startup items
+or kill switch.
+
+Run an installed Universe command in the foreground through the managed
+launcher. Operational commands require their own absolute `--root`, distinct
+from the runtime `--store`. This example explicitly authorizes the deterministic
+demo to create a seed repository and run bounded local experiments:
+
+```sh
+node bin/ashlr runtime run --store /absolute/private/runtime-store -- \
+  universe demo --root /absolute/private/experiments --json
+node bin/ashlr runtime run --store /absolute/private/runtime-store -- \
+  universe status --root /absolute/private/experiments --json
+```
+
+`runtime run` pins one installation for the lifetime of its child process,
+forwards terminal I/O and cancellation, and propagates the child's exit status.
+After cancellation it allows five seconds for shutdown, then kills that exact
+child if necessary; a repeated interrupt also escalates. This is not a claim of
+process-tree cleanup by the launcher.
+It does not choose models or accounts or create background work. A campaign or
+portfolio command performs the work declared by its existing manifest and
+budgets, including configured local model requests. Normal Universe execution
+requirements, including the macOS isolation profile, still apply.
+
+To explicitly restore the retained verified predecessor, run:
+
+```sh
+node bin/ashlr runtime rollback --store /absolute/private/runtime-store --json
+node bin/ashlr runtime status --store /absolute/private/runtime-store --json
+```
+
+Rollback changes the selected package for future launches only; it does not
+restart a running process or roll back experiment data. An invalid current
+package can be replaced by a verified predecessor, but an invalid predecessor
+is never selected. A damaged previous package does not prevent launching a
+verified current package. If neither verifies, preserve the store and inspect
+the installation evidence; no automatic repair or deletion occurs.
+
+Only Universe commands are accepted by `runtime run`. Ordinary `update`,
+general Hub commands and `serve` are not forwarded. The existing web console
+still reads the default experiment store and has shared configuration/stream
+maintenance paths; this installation workflow does not claim console isolation.
+The versioned package's absolute `binPath` is also returned for trusted direct
+use, but direct invocation bypasses managed launch-time verification.
+
 ## Generate candidates with an existing local model
 
 Use a local OpenAI-compatible chat endpoint you already operate, such as a

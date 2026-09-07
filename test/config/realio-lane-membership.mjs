@@ -152,6 +152,8 @@ export const REAL_IO_TEST_FILES = [
   'test/m522.production-promotion-admission.test.ts', // spawns a real Node child to validate immutable promotion admission
 
   // --- special cases: fast on a quiet machine but genuinely real I/O, so still contention-prone ---
+  'test/local-runtime-acceptance.test.ts', // pinned archives, real installed Node smoke and durable selection failure recovery
+  'test/local-runtime-store.test.ts', // private runtime installation/rollback, manifests, fsync and subprocess smoke
   'test/m19.telemetry-sink.test.ts', // binds a real local HTTP server (OtlpHttpSink describe block) — 0.0s slowest test in the quiet baseline
   'test/m571.local-production-gate.test.ts', // validates the macOS sandbox with real loopback HTTP, Unix sockets, subprocesses, and filesystem writes
   'test/m2.doctor.test.ts', // runs real environment/tool probes against git, npm, and fs — 0.9s slowest test in the quiet baseline

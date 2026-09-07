@@ -36,6 +36,11 @@ See [Universe usage and architecture](docs/ASHLR-UNIVERSE.md) and its
 [research grounding](docs/UNIVERSE-RESEARCH.md). Verification runs locally; GitHub
 Actions are not required. This source feature is not yet in the published npm release.
 
+For checkout-independent execution, [install a pinned local runtime](docs/ASHLR-UNIVERSE.md#install-a-pinned-local-runtime).
+`ashlr runtime` installs a trusted offline package, verifies it before foreground
+Universe launches, and retains a verified rollback target without changing your
+global command or starting a service.
+
 ### Existing fleet runtime
 
 ashlr-hub is a single Node binary containing an autonomous agent fleet for enrolled repositories. In the current production build, compiled daemon and conductor trust roots are empty, so live non-dry fleet execution is deliberately dormant; verified dry-run, status, and local-console paths remain available.

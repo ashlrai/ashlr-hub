@@ -39,6 +39,18 @@ export interface AgentCommandDoc {
  */
 export const AGENT_COMMANDS: AgentCommandDoc[] = [
   {
+    usage: 'ashlr runtime status --store <absolute> --json',
+    description: 'Verify the explicitly selected local candidate and rollback slot without installing, publishing, or starting services.',
+    safety: 'read',
+    jsonShape: 'LocalRuntimeStatus',
+  },
+  {
+    usage: 'ashlr runtime run --store <absolute> -- universe status --root <absolute> --json',
+    description: 'Read an explicit Universe store through the exact installed candidate and Node interpreter. No source-checkout fallback.',
+    safety: 'read',
+    jsonShape: 'UniverseOverview from the selected installed candidate',
+  },
+  {
     usage: 'ashlr universe status [id] [--root <path>] --json',
     description: 'Read local experiments, raw measurements, lineage, and per-niche winning artifacts. No provider calls.',
     safety: 'read',
@@ -295,6 +307,9 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'doctor',                       desc: 'One-glance health check: config, phantom, providers, ecosystem.', topic: 'core' },
   { cmd: 'init [--yes]',                 desc: 'Idempotent onboarding: ensure config, detect phantom + models, set editor.', topic: 'core' },
   { cmd: 'update [--check] [--json]',    desc: 'Self-update; mutation requires service registration proven absent and not running. --check remains read-only.', topic: 'core' },
+  { cmd: 'runtime install --store <absolute> --artifact <absolute> --sha256 <hash> --revision <sha> --version <version>', desc: 'Install exact offline candidate bytes into a private store; not production qualification or service activation.', topic: 'core' },
+  { cmd: 'runtime status|rollback --store <absolute> [--json]', desc: 'Verify local candidate selection or explicitly restore the previous verified installation.', topic: 'core' },
+  { cmd: 'runtime run --store <absolute> -- universe <args>', desc: 'Run Universe in the foreground using the verified installed candidate; operational commands require explicit absolute --root.', topic: 'core' },
   { cmd: 'orient [--repo <r>] [--json]', desc: 'Session-start context: genome hits, health, backlog, pending proposals, attention (read-only).', topic: 'core' },
   { cmd: 'docs --agent [--json]',        desc: 'Agent cheat sheet: the CLI-first contract (commands, safety classes, JSON shapes).', topic: 'core' },
   { cmd: 'completions zsh|bash',         desc: 'Print a shell completion script to stdout.', topic: 'core' },
