@@ -79,7 +79,7 @@ const SUBCOMMANDS: Record<string, string[]> = {
   completions: ['zsh', 'bash'],
   plugins: ['init', 'list', 'info', 'enable', 'disable'],
   skills: ['audit'],
-  universe: ['demo', 'init', 'run', 'status', 'archive', 'campaign', 'deliver', 'deliveries', 'graph', 'help'],
+  universe: ['demo', 'init', 'run', 'status', 'archive', 'campaign', 'portfolio', 'deliver', 'deliveries', 'graph', 'help'],
 };
 
 const FLEET_AUTOMERGE_CANARY_SUBCOMMANDS = [

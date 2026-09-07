@@ -51,6 +51,18 @@ export const AGENT_COMMANDS: AgentCommandDoc[] = [
     jsonShape: 'UniverseGraph | {graph: UniverseGraph, traversal: UniverseGraphTraversal}',
   },
   {
+    usage: 'ashlr universe portfolio plan --manifest <file.json> [--root <path>] --json',
+    description: 'Read explicit campaign dependencies, readiness, and progress without executing or changing any campaign.',
+    safety: 'read',
+    jsonShape: 'UniversePortfolioPlan',
+  },
+  {
+    usage: 'ashlr universe portfolio run --manifest <file.json> [--root <path>] --json',
+    description: 'Run declared campaign dependencies in the foreground within invocation-only concurrency and duration bounds; no daemon, artifact transfer, merge, or deployment.',
+    safety: 'append',
+    jsonShape: 'UniversePortfolioResult',
+  },
+  {
     usage: 'ashlr universe run <id> [--root <path>] --json',
     description: 'Execute one budgeted local generation and fixed evaluation. Command subprocesses deny network; optional local-chat uses its declared loopback endpoint. No merge or deploy.',
     safety: 'append',
@@ -369,6 +381,7 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'invent',                       desc: 'Generative backlog invention — propose novel high-value work items.', topic: 'autonomy' },
   { cmd: 'universe <demo|init|run|status|archive>', desc: 'Local experiment evolution: run competing code variants, measure them, and reuse winning artifacts.', topic: 'autonomy' },
   { cmd: 'universe graph <id> [--node <node-id>]', desc: 'Read-only experiment evidence graph: trace selected parents, feedback, campaigns, and local branch receipts.', topic: 'autonomy' },
+  { cmd: 'universe portfolio <plan|run> --manifest <file.json>', desc: 'Plan or run explicit campaign dependencies with foreground invocation bounds; completed campaigns are not accepted artifacts.', topic: 'autonomy' },
   { cmd: 'eval [--limit N]',             desc: 'Local-agent eval harness: adaptive prompts OFF vs ON, steps/done/tokens (M44).', topic: 'run' },
   { cmd: 'eval attention [--window 1d|7d|30d]', desc: 'Metadata-only fleet attention report: context pressure, retrieval, yield, routing, and traces.', topic: 'run' },
   { cmd: 'skills audit <pack-path> [--json]', desc: 'Read-only quarantine audit for external skill structure, trigger routing, collisions, and behavioral fixtures.', topic: 'run' },

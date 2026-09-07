@@ -163,8 +163,15 @@ export function foldCampaignEvents(records: CampaignEvent[]): {
   return { created, state, reason, owner, startedAt, deadlineAt, finishedAt, steps };
 }
 
+/** Admission conflicts must not be converted into a settlement of another owner's control. */
+export class CampaignControlConflictError extends Error {}
+
 /** Short transaction lock is separate from the entire campaign execution lease. */
-export function appendCampaignEvent(directory: string, input: CampaignEventInput): CampaignEvent[] {
+export function appendCampaignEvent(directory: string, input: CampaignEventInput,
+  options: { expectedRecordsDigest?: string } = {}): CampaignEvent[] {
+  if (options.expectedRecordsDigest !== undefined && !hash(options.expectedRecordsDigest)) {
+    throw new Error('Invalid campaign control checkpoint');
+  }
   inspectPrivateDirectory(directory);
   const lock = acquireLocalStoreLock(join(directory, '.control.lock'), 0, { anchorPath: directory, exactPrivateStorage: true });
   if (!lock) throw new Error('Campaign control transaction is busy');
@@ -172,6 +179,9 @@ export function appendCampaignEvent(directory: string, input: CampaignEventInput
     let records: CampaignEvent[] = [];
     try { lstatSync(join(directory, 'ledger')); records = readCampaignEvents(directory); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    if (options.expectedRecordsDigest !== undefined && options.expectedRecordsDigest !== digest(canonical(records))) {
+      throw new CampaignControlConflictError('Campaign controls changed after execution admission');
+    }
     if (records.length >= MAX_EVENTS) throw new Error('Campaign evidence capacity exhausted');
     const event = { ...input, sequence: records.length, id: String(records.length).padStart(8, '0') } as CampaignEvent;
     const next = [...records, event];

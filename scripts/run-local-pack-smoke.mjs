@@ -74,7 +74,8 @@ async function verifyInstalledUniverse(fixtureRoot, bin) {
     'initUniverseCampaign', 'readUniverseCampaign', 'readUniverseCampaigns',
     'requestUniverseCampaignControl', 'runUniverseCampaign', 'deliverUniverseElite',
     'readUniverseDeliveries', 'validUniverseDeliveryBranch', 'buildUniverseGraph',
-    'readUniverseGraph', 'traverseUniverseGraph']) {
+    'readUniverseGraph', 'traverseUniverseGraph', 'validateUniversePortfolioDefinition',
+    'readUniversePortfolioPlan', 'buildUniversePortfolioPlan', 'runUniversePortfolio']) {
     assert.equal(typeof sdk[name], 'function', `Universe SDK export missing: ${name}`);
   }
   mkdirSync(fixtureRoot, { mode: 0o700 });
@@ -89,6 +90,18 @@ async function verifyInstalledUniverse(fixtureRoot, bin) {
   const cli = (args, expectedStatus = 0) => execute(bin, ['universe', ...args], fixtureRoot, expectedStatus);
   const json = (args, expectedStatus = 0) => JSON.parse(cli([...args, '--json'], expectedStatus));
   const missing = join(fixtureRoot, 'missing-store');
+  const portfolio = { schemaVersion: 1, id: 'pack-portfolio', tasks: [{ campaignId: 'pack-sdk', dependsOn: [] }],
+    maxParallel: 1, maxDurationMs: 1000 };
+  const portfolioPath = join(fixtureRoot, 'portfolio.json');
+  writeFileSync(portfolioPath, JSON.stringify(portfolio), { mode: 0o600 });
+  assert.deepEqual(sdk.validateUniversePortfolioDefinition(portfolio), portfolio);
+  assert.throws(() => sdk.validateUniversePortfolioDefinition({ ...portfolio, maxParallel: 0 }));
+  const stablePlan = (plan) => { const value = { ...plan }; delete value.sampledAt; return value; };
+  const missingPlan = sdk.readUniversePortfolioPlan(portfolio, { root: missing });
+  assert.equal(missingPlan.sourceState, 'degraded');
+  assert.equal(missingPlan.nodes[0].state, 'unavailable');
+  assert.deepEqual(stablePlan(json(['portfolio', 'plan', '--manifest', portfolioPath, '--root', missing], 1)),
+    stablePlan(missingPlan), 'Installed SDK and CLI must agree on a missing portfolio source');
   assert.equal(sdk.readUniverseOverview({ root: missing }).sourceState, 'missing');
   assert.equal(sdk.readUniverseCampaigns({ root: missing }).sourceState, 'missing');
   assert.equal(sdk.readUniverseDeliveries('pack-universe', { root: missing }).sourceState, 'missing');
@@ -103,10 +116,14 @@ async function verifyInstalledUniverse(fixtureRoot, bin) {
   assert.match(cli(['deliver', '--help']), /deliveries/);
   assert.match(cli(['deliveries', '--help']), /deliver/);
   assert.match(cli(['graph', '--help']), /ancestors/);
+  assert.match(cli(['portfolio', '--help']), /foreground/);
   assert.equal(typeof json(['status', '--unexpected', '--root', missing], 2).error, 'string');
   assert.equal(typeof json(['campaign', 'run', '--unexpected', '--root', missing], 2).error, 'string');
   assert.equal(typeof json(['deliver', 'pack-universe', '--unexpected', '--root', missing], 2).error, 'string');
   assert.equal(typeof json(['graph', 'pack-universe', '--depth', '0', '--root', missing], 2).error, 'string');
+  assert.equal(typeof json(['portfolio', 'plan', '--manifest', portfolioPath, '--unexpected', '--root', missing], 2).error, 'string');
+  assert.equal(typeof json(['portfolio', 'run', '--manifest', portfolioPath, '--manifest', portfolioPath, '--root', missing], 2).error, 'string');
+  assert.equal(typeof json(['portfolio', 'run', '--root', missing], 2).error, 'string');
   assert.equal(existsSync(missing), false, 'Invalid CLI flags must not create a store');
 
   const seed = join(fixtureRoot, 'seed');
@@ -168,6 +185,34 @@ async function verifyInstalledUniverse(fixtureRoot, bin) {
     assertIdle(json(['campaign', 'stop', 'pack-cli', '--root', root]), 'stopped');
     assertIdle(json(['campaign', 'resume', 'pack-cli', '--root', root]), 'stopped');
     assert.equal(json(['campaign', 'status', '--root', root]).campaigns.length, 2);
+    // Enroll only one of the two campaigns: portfolio tasks must have distinct
+    // Universes. A stopped task exercises both entrypoints without dispatch.
+    const plan = sdk.readUniversePortfolioPlan(portfolio, { root });
+    assert.equal(plan.sourceState, 'healthy');
+    assert.equal(plan.nodes.length, 1);
+    assert.equal(plan.nodes[0].state, 'blocked');
+    assert.deepEqual(plan.nodes[0].campaign, stopped);
+    assert.deepEqual(sdk.buildUniversePortfolioPlan(portfolio, new Map([[definition.id, stopped]]), plan.sampledAt), plan);
+    assert.deepEqual(stablePlan(json(['portfolio', 'plan', '--manifest', portfolioPath, '--root', root], 1)),
+      stablePlan(plan), 'Installed SDK and CLI must expose the same portfolio plan');
+    const result = await sdk.runUniversePortfolio(portfolio, { root });
+    assert.equal(result.status, 'incomplete', 'A stopped campaign must remain blocked in a portfolio');
+    assert.equal(result.measurementScope, 'local-experiment');
+    assert.equal(result.definitionDigest, plan.definitionDigest);
+    assert.equal(result.outcomes.length, 1);
+    assert.equal(result.outcomes[0].status, 'blocked');
+    assert.equal(result.outcomes[0].attempted, false, 'Portfolio smoke must not dispatch a stopped campaign');
+    assert.deepEqual(result.outcomes[0].campaign, stopped);
+    const stableResult = (result) => {
+      const value = { ...result, plan: stablePlan(result.plan) };
+      delete value.startedAt; delete value.deadlineAt; delete value.finishedAt;
+      return value;
+    };
+    const cliResult = json(['portfolio', 'run', '--manifest', portfolioPath, '--root', root], 1);
+    assert.deepEqual(stableResult(cliResult), stableResult(result),
+      'Installed SDK and CLI must expose the same blocked portfolio result');
+    assert.deepEqual(sdk.readUniverseCampaign(definition.id, { root }), stopped,
+      'Portfolio plan and blocked run must not change campaign execution evidence');
     const overview = sdk.readUniverseOverview({ root });
     assert.equal(overview.sourceState, 'healthy');
     assert.equal(overview.campaigns.length, 2);
@@ -200,7 +245,7 @@ async function verifyInstalledUniverse(fixtureRoot, bin) {
       chmodSync(pinnedSeed, 0o700);
     }
   }
-  process.stdout.write('Installed Universe SDK and campaign smoke: passed (no work executed)\n');
+  process.stdout.write('Installed Universe SDK, campaign, and portfolio smoke: passed (no work executed)\n');
 }
 
 export function installedUniverseSmokeArgs(fixtureRoot, bin) {

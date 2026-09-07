@@ -14,6 +14,7 @@ const USAGE = `usage: ashlr universe <command> [--root <private directory>] [--j
   status [id]                  Read objectives, runs, and measurements
   archive [id]                 Read the winning artifact in each niche
   campaign <command>           Run or inspect a bounded multi-generation campaign
+  portfolio <plan|run>         Coordinate explicitly declared campaign dependencies
   deliver <id> --trial <id> --branch codex/<new-branch>
                                Create a local branch from the exact current elite
   deliveries <id>              Read delivery receipts without changing the repository
@@ -122,6 +123,10 @@ function renderOverview(overview: UniverseOverview, archiveOnly: boolean): strin
 
 /** CLI and dashboard share the same persisted experiment records. */
 export async function cmdUniverse(args: string[]): Promise<number> {
+  if (args[0] === 'portfolio') {
+    const { cmdUniversePortfolio } = await import('./universe-portfolio.js');
+    return cmdUniversePortfolio(args.slice(1));
+  }
   if (args[0] === 'graph') {
     const { cmdUniverseGraph } = await import('./universe-graph.js');
     return cmdUniverseGraph(args.slice(1));

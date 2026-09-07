@@ -12,3 +12,7 @@ export { buildUniverseGraph } from './graph.js';
 export { traverseUniverseGraph } from './graph-query.js';
 export { readUniverseGraph } from './graph-reader.js';
 export type * from './graph-types.js';
+export { validateUniversePortfolioDefinition, readUniversePortfolioPlan, buildUniversePortfolioPlan } from './portfolio-plan.js';
+export { runUniversePortfolio } from './portfolio.js';
+export type { UniversePortfolioResult, UniversePortfolioOutcome } from './portfolio.js';
+export type * from './portfolio-types.js';

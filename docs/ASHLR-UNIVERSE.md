@@ -8,7 +8,7 @@ The useful unit of progress is an improvement demonstrated in a working environm
 
 The Universe kernel runs a complete local experiment: a manifest describes candidates and a fixed evaluator; a bounded run executes operator commands or requests candidate edits from an explicitly configured local model, records observations, and selects elites within defined niches. A later run can select parents from the archive. The bundled deterministic demonstration provides a reproducible way to inspect this behavior without model credentials or a running model service.
 
-This is a development feature in Hub. Its evidence establishes local candidate generation, evaluation, selection, bounded multi-generation campaigns, and delivery of a retained artifact to a new local Git branch. Subscription-backed generation, resident execution, multi-repository product delivery, customer feedback, and external payments are later integrations. Existing fleet activation and release behavior is documented in the [Hub architecture](ARCHITECTURE.md).
+This is a development feature in Hub. Its evidence establishes local candidate generation, evaluation, selection, bounded multi-generation campaigns, foreground orchestration across campaigns, and delivery of a retained artifact to a new local Git branch. Subscription-backed generation, resident execution, multi-repository product delivery, customer feedback, and external payments are later integrations. Existing fleet activation and release behavior is documented in the [Hub architecture](ARCHITECTURE.md).
 
 The command surface is `ashlr universe`. From a source checkout with dependencies installed, build locally with `npm run build`, then run:
 
@@ -268,6 +268,102 @@ If records are degraded, inspect the reported reason before retrying. Do not
 delete evidence or reset the definition to make a refusal disappear. To change
 an immutable campaign budget or experiment contract, register a new, explicitly
 identified campaign or universe as appropriate.
+
+## Coordinate campaigns with a dependency graph
+
+A portfolio composes already registered campaigns across distinct Universes.
+Independent campaigns run concurrently, up to `maxParallel`; a dependent campaign
+waits for its prerequisites to reach `completed`. This is **ordering**, not artifact
+transfer or an acceptance gate: a campaign can complete because its budget or
+stagnation limit was reached without finding a useful artifact. An already
+completed campaign satisfies its node without rerunning, even if the portfolio's
+dependency edges were declared later. These edges do not create historical causal
+evidence in the experiment graph.
+
+Save a caller-owned portfolio file after registering the three campaigns below
+with their own evaluators and budgets, each in a different Universe:
+
+```json
+{
+  "schemaVersion": 1,
+  "id": "builder-portfolio",
+  "maxParallel": 2,
+  "maxDurationMs": 600000,
+  "tasks": [
+    { "campaignId": "parser-search", "dependsOn": [] },
+    { "campaignId": "formatter-search", "dependsOn": [] },
+    { "campaignId": "integration-search", "dependsOn": ["parser-search", "formatter-search"] }
+  ]
+}
+```
+
+1. Inspect the proposed ordering without executing or creating a store:
+
+   ```sh
+   node bin/ashlr universe portfolio plan --manifest /absolute/path/to/portfolio.json --json
+   ```
+
+   The plan reads only the enrolled campaigns and reports ready, waiting,
+   completed, blocked, busy, or unavailable nodes. Unknown dependencies, duplicate
+   IDs, cycles, and malformed definitions are rejected. Missing/degraded selected
+   evidence or multiple campaigns sharing one Universe prevent all dispatch.
+   A healthy plan containing only ready, waiting, or completed nodes exits 0;
+   blocked, busy, unavailable, or degraded plans exit 1. Planning never runs work.
+
+2. Start the explicitly enrolled campaigns in the foreground:
+
+   ```sh
+   node bin/ashlr universe portfolio run --manifest /absolute/path/to/portfolio.json --json
+   ```
+
+   This executes configured commands and any configured local model requests.
+   Each campaign retains its original evaluator, lease, generation/request/token
+   accounting, stagnation limit, and deadline. A campaign is attempted at most
+   once per invocation. Failures and operator pauses block descendants while
+   independent branches can continue. A campaign already owned elsewhere is
+   reported busy; the portfolio neither adopts nor cancels that owner.
+
+3. Inspect individual campaign progress using `campaign status <id> --json` or
+   the existing Universe console. `portfolio run` returns one final result:
+   `plan` is the initial snapshot; `outcomes` records each attempted or skipped
+   campaign and its observed evidence. Exit 0 means all portfolio nodes completed,
+   not that all projects succeeded. Incomplete, cancelled, timed-out, failed, or
+   blocked execution exits 1; invalid arguments or manifests exit 2.
+
+Ctrl+C or the portfolio duration limit cancels and awaits owned campaign calls
+before returning. Cancellation is cooperative and cleanup may exceed that time
+limit. Use the existing campaign pause/stop commands for individual controls;
+a pause arriving between planning and execution is not silently resumed.
+
+To continue after inspecting the result, run the same portfolio file again.
+This explicit invocation may resume campaigns already paused or interrupted at
+its start. Completed work is not replayed; attempts and reservations are not
+refunded, and original campaign deadlines do not restart. A portfolio invocation
+has a new duration window, but cannot replenish any campaign's budget.
+
+The file is the portfolio definition, not a new durable scheduler database.
+Campaign ledgers remain the recovery state. The result is a per-invocation
+observation, not a globally atomic snapshot or a persisted portfolio history.
+Keep the foreground process running; no daemon, model service, account, or
+background restart is installed. The limits are 64 enrolled campaigns, 8 active
+campaign calls, and 24 hours per invocation. `maxParallel` limits this invocation's
+campaign calls, not each campaign's trial workers, host-wide concurrency, account
+quota, or aggregate token spend. Independent invocations retain their own limits.
+
+Use `--root <private directory>` consistently when campaigns use a custom store.
+The SDK exposes the same workflow:
+
+```ts
+import { readUniversePortfolioPlan, runUniversePortfolio } from '@ashlr/hub/universe';
+
+const plan = readUniversePortfolioPlan(definition, { root });
+const result = await runUniversePortfolio(definition, { root, signal });
+```
+
+`validateUniversePortfolioDefinition` validates caller input without I/O.
+`buildUniversePortfolioPlan` is a pure projection of already validated campaign
+snapshots, not an authentication API. Actual execution always performs its own
+targeted reads and admission checks; supplying a plan does not authorize work.
 
 ## Deliver a retained artifact to a repository
 
