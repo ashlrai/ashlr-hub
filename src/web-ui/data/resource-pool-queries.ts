@@ -10,6 +10,39 @@ function absolutePath(value: unknown): value is string {
       character.charCodeAt(0) >= 127 && character.charCodeAt(0) <= 159);
 }
 
+const QUOTA_STATES = new Set(['pending', 'refreshing', 'observed', 'failed', 'timed-out', 'cancelled', 'uncertain', 'expired', 'closed']);
+const QUOTA_REASONS = new Set(['pending', 'refreshing', 'observed', 'failed', 'timed-out', 'cancelled', 'uncertain',
+  'expired', 'closed', 'future', 'unavailable', 'unknown', 'reserve-reached'].map((reason) => `managed-quota-${reason}`));
+function record(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+function exact(value: Record<string, unknown>, keys: string[]): boolean {
+  return Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+function timestamp(value: unknown): value is string {
+  return typeof value === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value) &&
+    Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+}
+/** This optional extension is observation-only; malformed metadata never becomes a successful empty panel. */
+function validQuotaRefresh(value: unknown, workers: ResourceConsoleSnapshot['pool']['workers']): boolean {
+  if (value === undefined || value === null) return true; // Older servers have no collector.
+  if (!record(value) || !exact(value, ['schemaVersion', 'scope', 'state', 'sampledAt', 'workers']) || value.schemaVersion !== 1 ||
+    value.scope !== 'codex-native-metadata' || value.state !== 'running' && value.state !== 'closed' || !timestamp(value.sampledAt) ||
+    !Array.isArray(value.workers) || value.workers.length < 1 || value.workers.length > 32 || !Array.isArray(workers)) return false;
+  const known = new Set(workers.filter((worker) => worker?.provider === 'codex').map((worker) => worker.id));
+  const seen = new Set<string>();
+  for (const row of value.workers) {
+    if (!record(row) || !exact(row, ['workerId', 'status', 'lastAttemptAt', 'lastSuccessAt', 'nextAttemptAt', 'reason']) ||
+      typeof row.workerId !== 'string' || !known.has(row.workerId) || seen.has(row.workerId) ||
+      typeof row.status !== 'string' || !QUOTA_STATES.has(row.status) || typeof row.reason !== 'string' || !QUOTA_REASONS.has(row.reason) ||
+      ![row.lastAttemptAt, row.lastSuccessAt, row.nextAttemptAt].every((time) => time === null || timestamp(time)) ||
+      row.lastSuccessAt !== null && row.lastAttemptAt === null ||
+      value.state === 'closed' && (row.nextAttemptAt !== null || row.status !== 'closed' && row.status !== 'uncertain')) return false;
+    seen.add(row.workerId);
+  }
+  return true;
+}
+
 export const resourceConsoleScopeQuery: QueryDef<ResourceConsoleScope> = {
   key: 'resource-console-scope',
   async fetch(signal) {
@@ -18,7 +51,8 @@ export const resourceConsoleScopeQuery: QueryDef<ResourceConsoleScope> = {
       !absolutePath(scope.root) || typeof scope.poolId !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(scope.poolId) ||
       (scope.workspace !== null && !absolutePath(scope.workspace)) || (!scope.readOnly && scope.workspace === null) ||
       !Number.isSafeInteger(scope.maxParallel) || scope.maxParallel < (scope.readOnly ? 0 : 1) || scope.maxParallel > 32 ||
-      !Number.isSafeInteger(scope.maxQueued) || scope.maxQueued < (scope.readOnly ? 0 : 1) || scope.maxQueued > 64) {
+      !Number.isSafeInteger(scope.maxQueued) || scope.maxQueued < (scope.readOnly ? 0 : 1) || scope.maxQueued > 64 ||
+      scope.quotaRefreshEnabled !== undefined && typeof scope.quotaRefreshEnabled !== 'boolean') {
       throw new Error('The server did not establish an explicit resource-pool scope.');
     }
     return scope;
@@ -32,7 +66,8 @@ export function resourceConsoleSnapshotQuery(poolId: string): QueryDef<ResourceC
       const snapshot = await apiGet<ResourceConsoleSnapshot>('/api/resources', signal);
       if (snapshot?.schemaVersion !== 1 || snapshot.mode !== 'resource-pool' || snapshot.pool?.id !== poolId ||
         snapshot.authority !== 'local-evidence' || !['healthy', 'missing', 'degraded'].includes(snapshot.sourceState) ||
-        !Array.isArray(snapshot.groups) || !Array.isArray(snapshot.activeAttempts) || !Array.isArray(snapshot.recentAttempts)) {
+        !Array.isArray(snapshot.groups) || !Array.isArray(snapshot.activeAttempts) || !Array.isArray(snapshot.recentAttempts) ||
+        !validQuotaRefresh(snapshot.quotaRefresh, snapshot.pool.workers)) {
         throw new Error('The resource response did not match the selected pool.');
       }
       return snapshot;

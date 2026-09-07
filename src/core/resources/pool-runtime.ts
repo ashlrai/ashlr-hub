@@ -68,6 +68,21 @@ function path(value: unknown): value is string {
     isAbsolute(value) && resolve(value) === value && value !== parse(value).root;
 }
 
+/** Invocation-only admission vetoes; never part of durable quota or task identity. */
+export function validateUnavailableResourceWorkerIds(value: unknown, pool: ResourcePool): string[] {
+  if (!Array.isArray(value) || value.length > 32 || Reflect.ownKeys(value).length !== value.length + 1 ||
+    !Array.from({ length: value.length }, (_, index) => Object.hasOwn(value, index) &&
+      'value' in Object.getOwnPropertyDescriptor(value, index)!).every(Boolean)) {
+    throw new Error('Invalid unavailable resource workers');
+  }
+  const ids = Array.from({ length: value.length }, (_, index) => value[index]);
+  const known = new Set(pool.workers.map((worker) => worker.id));
+  if (ids.some((id) => typeof id !== 'string' || !known.has(id)) || new Set(ids).size !== ids.length) {
+    throw new Error('Invalid unavailable resource workers');
+  }
+  return Object.freeze(ids) as string[];
+}
+
 /** Owner-controlled task text; never accepted from a provider response or stored in the ledger. */
 export function validateResourceTask(value: unknown): ResourceTask {
   if (!object(value) || !exact(value, ['schemaVersion', 'id', 'allowedWorkerIds', 'prompt', 'cwd',
@@ -231,7 +246,8 @@ export function mergeResourceObservations(previous: ResourceObservation[], incom
   return [...merged.values()];
 }
 
-function plan(state: PoolState, pool: ResourcePool, bindings: ResourceBinding[], allowedWorkerIds: string[], nowMs: number): ResourceAssignmentPlan {
+function plan(state: PoolState, pool: ResourcePool, bindings: ResourceBinding[], allowedWorkerIds: string[], nowMs: number,
+  unavailableWorkerIds: string[]): ResourceAssignmentPlan {
   const activeCounts: Record<string, number> = {};
   const taskReservationCounts: Record<string, { count: number; nextEligibleAt: string | null }> = {};
   // Aliases share all hard denials conservatively until per-model account scope
@@ -264,6 +280,17 @@ function plan(state: PoolState, pool: ResourcePool, bindings: ResourceBinding[],
         expiresAt: new Date(nowMs + 1_000).toISOString(), health: 'ready', windows: [], retryAfter: retry });
     }
   }
+  const unavailable = new Set(unavailableWorkerIds);
+  const unavailableCapacities = new Set(bindings.filter((binding) => unavailable.has(binding.workerId)).map((binding) => binding.capacityKey));
+  for (const binding of bindings) {
+    if (!unavailableCapacities.has(binding.capacityKey)) continue;
+    const current = observations.find((row) => row.workerId === binding.workerId);
+    if (current) current.health = 'unavailable';
+    else observations.push({ workerId: binding.workerId, observedAt: new Date(nowMs).toISOString(),
+      expiresAt: new Date(nowMs + 1_000).toISOString(), health: 'unavailable', windows: [], retryAfter: null });
+  }
+  // The synthetic health veto exists only in this planning clone. The returned
+  // evidence and persisted ledger retain the actual captured observations.
   return planResourceAssignment({ pool, observations, allowedWorkerIds, activeCounts, taskReservationCounts, nowMs });
 }
 
@@ -273,14 +300,16 @@ function scope(poolValue: ResourcePool, bindingsValue: ResourceBinding[]): { poo
 }
 
 /** Read-only: no directory, lock, observation, or assignment is published. */
-export function resourcePoolStatus(root: string, poolValue: ResourcePool, bindingsValue: ResourceBinding[], incoming: ResourceObservation[]) {
+export function resourcePoolStatus(root: string, poolValue: ResourcePool, bindingsValue: ResourceBinding[], incoming: ResourceObservation[],
+  unavailableWorkerIds: string[] = []) {
   const { pool, bindings, poolDigest } = scope(poolValue, bindingsValue);
+  const unavailable = validateUnavailableResourceWorkerIds(unavailableWorkerIds, pool);
   const observed = validateResourceObservations(incoming, pool);
   const exists = inspectRoot(root, false);
   const state = exists ? loadState(root, pool, bindings, poolDigest) : { schemaVersion: 1 as const, poolDigest, observations: [], attempts: [] };
   state.observations = mergeResourceObservations(state.observations, observed);
   return { schemaVersion: 1 as const, sourceState: exists ? 'healthy' as const : 'missing' as const,
-    poolId: pool.id, plan: plan(state, pool, bindings, pool.workers.map((row) => row.id), Date.now()),
+    poolId: pool.id, plan: plan(state, pool, bindings, pool.workers.map((row) => row.id), Date.now(), unavailable),
     observations: state.observations, attempts: state.attempts };
 }
 
@@ -305,14 +334,16 @@ function transaction<T>(root: string, pool: ResourcePool, bindings: ResourceBind
 }
 
 export async function runResourceTask(options: { root: string; pool: ResourcePool; bindings: ResourceBinding[];
-  observations: ResourceObservation[]; task: ResourceTask; signal?: AbortSignal }): Promise<{
+  observations: ResourceObservation[]; task: ResourceTask; signal?: AbortSignal; unavailableWorkerIds?: string[] }): Promise<{
     receipt: ResourceTaskReceipt | null; plan: ResourceAssignmentPlan | null; replayed: boolean; output: string | null;
   }> {
+  const { root, signal } = options;
   const { pool, bindings, poolDigest } = scope(options.pool, options.bindings);
+  const unavailable = validateUnavailableResourceWorkerIds(options.unavailableWorkerIds === undefined ? [] : options.unavailableWorkerIds, pool);
   const task = validateResourceTask(options.task);
   if (task.allowedWorkerIds.some((id) => !pool.workers.some((worker) => worker.id === id))) throw new Error('Resource task references an unknown worker');
-  if (!path(options.root)) throw new Error('Invalid resource store');
-  const storeWithinTask = relative(task.cwd, options.root);
+  if (!path(root)) throw new Error('Invalid resource store');
+  const storeWithinTask = relative(task.cwd, root);
   if (task.mode === 'workspace-write' && (storeWithinTask === '' ||
     !storeWithinTask.startsWith(`..${sep}`) && storeWithinTask !== '..' && !isAbsolute(storeWithinTask))) {
     throw new Error('Writable resource task must not contain its accounting store');
@@ -320,15 +351,15 @@ export async function runResourceTask(options: { root: string; pool: ResourcePoo
   if (realpathSync(task.cwd) !== task.cwd || !lstatSync(task.cwd).isDirectory()) throw new Error('Resource task directory unavailable');
   const incoming = validateResourceObservations(options.observations, pool);
   const taskDigest = digest(canonical(task));
-  if (options.signal?.aborted) throw new Error('Resource task cancelled before reservation');
-  const admission = transaction(options.root, pool, bindings, poolDigest, (state) => {
+  if (signal?.aborted) throw new Error('Resource task cancelled before reservation');
+  const admission = transaction(root, pool, bindings, poolDigest, (state) => {
     state.observations = mergeResourceObservations(state.observations, incoming);
     const previous = state.attempts.find((row) => row.id === task.id);
     if (previous) {
       if (previous.taskDigest !== taskDigest) throw new Error('Resource task identity conflict');
       return { receipt: previous, plan: null, replayed: true };
     }
-    const assignment = plan(state, pool, bindings, task.allowedWorkerIds, Date.now());
+    const assignment = plan(state, pool, bindings, task.allowedWorkerIds, Date.now(), unavailable);
     if (!assignment.selectedWorkerId) return { receipt: null, plan: assignment, replayed: false };
     if (state.attempts.length >= MAX_ATTEMPTS) throw new Error('Resource ledger capacity reached');
     const binding = bindings.find((row) => row.workerId === assignment.selectedWorkerId)!;
@@ -346,7 +377,7 @@ export async function runResourceTask(options: { root: string; pool: ResourcePoo
   // Adapter preparation, execution and cleanup are included; it is not provider latency.
   const executionStarted = performance.now();
   const result = await executeResourceWorker(worker, binding, { prompt: task.prompt, cwd: task.cwd,
-    timeoutMs: task.timeoutMs, maxOutputTokens: task.maxOutputTokens, mode: task.mode }, options.signal);
+    timeoutMs: task.timeoutMs, maxOutputTokens: task.maxOutputTokens, mode: task.mode }, signal);
   const elapsed = performance.now() - executionStarted;
   const finishedAt = new Date(Math.max(Date.now(), Date.parse(reserved.startedAt))).toISOString();
   const knownUsage = count(result.inputTokens) && count(result.outputTokens) && count(result.inputTokens + result.outputTokens);
@@ -356,7 +387,7 @@ export async function runResourceTask(options: { root: string; pool: ResourcePoo
     reason: result.reason, execution: { schemaVersion: 1, scope: 'worker-execution',
       durationMs: validResourceExecutionDuration(elapsed) ? elapsed : null, usageScope: result.usageScope ?? null } };
   if (!checkedReceipt(receipt, poolDigest, bindings, pool)) throw new Error('Resource worker returned invalid settlement evidence');
-  transaction(options.root, pool, bindings, poolDigest, (state) => {
+  transaction(root, pool, bindings, poolDigest, (state) => {
     const index = state.attempts.findIndex((row) => row.id === reserved.id);
     if (index < 0 || canonical(state.attempts[index]) !== canonical(reserved)) throw new Error('Resource assignment changed before settlement');
     if (result.observation) state.observations = mergeResourceObservations(state.observations,

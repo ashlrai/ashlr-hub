@@ -102,6 +102,82 @@ async function nearCapacityFixture(f: Awaited<ReturnType<typeof fixture>>, reser
 }
 
 describe.skipIf(process.platform === 'win32')('durable foreground resource supervisor', () => {
+  it('queues gated aliases, uses independent capacity, and recovers without durable quota poisoning', async () => {
+    const f = await fixture({ workers: [worker('one'), worker('two'), worker('three')] });
+    f.bindings[0]!.capacityKey = 'shared'; f.bindings[1]!.capacityKey = 'shared';
+    let unavailable = ['one']; const supervisor = await f.start({ readUnavailableWorkerIds: () => unavailable });
+    const blocked = f.task('blocked', { allowedWorkerIds: ['two'] }); supervisor.submit(blocked);
+    supervisor.submit(f.task('independent', { allowedWorkerIds: ['three'] })); await settled(supervisor, 'independent');
+    expect(f.requests).toHaveLength(1); expect(supervisor.snapshot().jobs.find((job) => job.id === 'blocked')?.state).toBe('queued');
+    expect(f.ledger().observations.every((row: ResourceObservation) => row.health === 'ready')).toBe(true);
+    unavailable = []; await settled(supervisor, 'blocked'); expect(f.requests).toHaveLength(2);
+    expect(f.ledger().attempts.find((row: { id: string }) => row.id === 'blocked').taskDigest)
+      .toBe(digest(canonical({ ...blocked, schemaVersion: 1, cwd: f.workspace })));
+    expect(JSON.stringify(f.ledger())).not.toContain('unavailableWorkerIds');
+    expect(JSON.stringify(f.state())).not.toContain('unavailableWorkerIds');
+  });
+
+  it.each(['throw', 'invalid'] as const)('recovers a %s admission callback without aborting active work or blocking controls', async (failure) => {
+    const f = await fixture({ workers: [worker('one'), worker('two')], hold: true }); let failed = false;
+    const supervisor = await f.start({ readUnavailableWorkerIds() {
+      if (!failed) return [];
+      if (failure === 'throw') throw new Error('PRIVATE_CALLBACK_DIAGNOSTIC');
+      return ['not-enrolled'];
+    } });
+    supervisor.submit(f.task('one', { allowedWorkerIds: ['one'] })); await vi.waitFor(() => expect(f.requests).toHaveLength(1));
+    failed = true; supervisor.submit(f.task('two', { allowedWorkerIds: ['two'] }));
+    await vi.waitFor(() => expect(supervisor.snapshot().error).toBe('supervisor-admission-constraint-unavailable'));
+    expect(f.held[0]!.destroyed).toBe(false); expect(f.ledger().attempts[0].status).toBe('reserved');
+    supervisor.setPaused(true); supervisor.setPaused(false);
+    supervisor.submit(f.task('cancel', { allowedWorkerIds: ['two'] })); expect(supervisor.cancel('cancel').state).toBe('cancelled');
+    expect(JSON.stringify(supervisor.snapshot())).not.toContain('PRIVATE_CALLBACK_DIAGNOSTIC');
+    f.held[0]!.end(result()); await settled(supervisor, 'one'); expect(f.requests).toHaveLength(1);
+    failed = false; await vi.waitFor(() => expect(f.requests).toHaveLength(2)); expect(supervisor.snapshot().error).toBeNull();
+    f.held[1]!.end(result()); await settled(supervisor, 'two');
+  });
+
+  it('keeps initially unavailable admission evidence recoverable without starting queued work', async () => {
+    const f = await fixture(); let failed = true;
+    const supervisor = await f.start({ readUnavailableWorkerIds() { if (failed) throw new Error('unavailable'); return []; } });
+    supervisor.submit(f.task()); await vi.waitFor(() => expect(supervisor.snapshot().error).toBe('supervisor-admission-constraint-unavailable'));
+    expect(f.requests).toHaveLength(0); expect(existsSync(join(f.root, 'pool-state.json'))).toBe(false);
+    failed = false; await settled(supervisor); expect(supervisor.snapshot().error).toBeNull(); expect(f.requests).toHaveLength(1);
+  });
+
+  it('rejects a non-function admission source and prior cancellation before store creation', async () => {
+    const f = await fixture();
+    await expect(f.start({ readUnavailableWorkerIds: null as unknown as () => string[] })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    const read = vi.fn(() => []);
+    await expect(f.start({ readUnavailableWorkerIds: read, signal: AbortSignal.abort() })).rejects.toMatchObject({ code: 'UNAVAILABLE' });
+    expect(read).not.toHaveBeenCalled(); expect(existsSync(f.root)).toBe(false); expect(f.requests).toHaveLength(0);
+  });
+
+  it('pins the callback function while reading its current gate for every task admission', async () => {
+    const f = await fixture({ workers: [worker('one'), worker('two')], hold: true });
+    let firstHeld = false; const replacement = vi.fn(() => []);
+    const options = { ...f.options, readUnavailableWorkerIds: () => {
+      firstHeld = existsSync(join(f.root, 'pool-state.json')) && f.ledger().attempts.some((row: { id: string; status: string }) => row.id === 'one' && row.status === 'reserved');
+      return firstHeld ? ['two'] : [];
+    } };
+    const supervisor = await createResourcePoolSupervisor(options); supervisors.push(supervisor);
+    options.readUnavailableWorkerIds = replacement;
+    supervisor.submit(f.task('one', { allowedWorkerIds: ['one'] })); supervisor.submit(f.task('two', { allowedWorkerIds: ['two'] }));
+    await vi.waitFor(() => expect(f.requests).toHaveLength(1)); await sleep(60);
+    expect(firstHeld).toBe(true); expect(f.requests).toHaveLength(1); expect(replacement).not.toHaveBeenCalled();
+    f.held[0]!.end(result()); await settled(supervisor, 'one'); await vi.waitFor(() => expect(f.requests).toHaveLength(2));
+    f.held[1]!.end(result()); await settled(supervisor, 'two');
+  });
+
+  it('does not dispatch if the admission callback aborts its owner synchronously', async () => {
+    const f = await fixture(); const controller = new AbortController(); let reads = 0;
+    const supervisor = await f.start({ signal: controller.signal, readUnavailableWorkerIds() {
+      if (++reads === 2) controller.abort(); return [];
+    } });
+    supervisor.submit(f.task()); await vi.waitFor(() => expect(controller.signal.aborted).toBe(true));
+    await expect(supervisor.close()).resolves.toBeUndefined(); expect(f.requests).toHaveLength(0);
+    expect(existsSync(join(f.root, 'pool-state.json'))).toBe(false);
+  });
+
   it('creates one private queue owner and no runtime assignment until a task is submitted', async () => {
     const f = await fixture(); const supervisor = await f.start();
     expect(supervisor.snapshot()).toMatchObject({ paused: false, activeCount: 0, queuedCount: 0, jobs: [] });

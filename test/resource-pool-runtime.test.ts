@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
-import { mergeResourceObservations, readResourceJson, resourcePoolStatus, runResourceTask, type ResourceTask } from '../src/core/resources/pool-runtime.js';
+import { mergeResourceObservations, readResourceJson, resourcePoolStatus, runResourceTask, validateUnavailableResourceWorkerIds,
+  type ResourceTask } from '../src/core/resources/pool-runtime.js';
 import type { ResourceBinding } from '../src/core/resources/worker.js';
 import { validateResourceObservations, type ResourceObservation, type ResourcePool, type ResourceWorker } from '../src/core/resources/pool-policy.js';
 import { mergeClaudeResourceObservation } from '../src/core/resources/provider-observations.js';
@@ -90,6 +91,101 @@ async function quotaFixture(provider: 'codex' | 'claude' = 'codex', allowUnknown
 }
 
 describe.skipIf(process.platform === 'win32')('durable resource task runtime acceptance', () => {
+  it.each([null, 'local-a', ['missing'], ['local-a', 'local-a'], Array(1), Array(33).fill('local-a')])(
+    'rejects malformed admission constraints before store initialization or worker contact: %#', async (value) => {
+      const f = await fixture();
+      expect(() => resourcePoolStatus(f.root, f.pool, f.bindings, f.observations, value as string[])).toThrow('unavailable resource workers');
+      await expect(runResourceTask({ root: f.root, pool: f.pool, bindings: f.bindings, observations: f.observations,
+        task: f.task(), unavailableWorkerIds: value as string[] })).rejects.toThrow('unavailable resource workers');
+      expect(existsSync(f.root)).toBe(false); expect(f.requests).toHaveLength(0);
+    });
+
+  it('detaches validated gates and leaves missing-store observation evidence untouched', async () => {
+    const f = await fixture(); const source = ['local-a']; const unavailable = validateUnavailableResourceWorkerIds(source, f.pool);
+    source.length = 0; expect(unavailable).toEqual(['local-a']); expect(Object.isFrozen(unavailable)).toBe(true);
+    const result = resourcePoolStatus(f.root, f.pool, f.bindings, [], unavailable);
+    expect(result).toMatchObject({ sourceState: 'missing', observations: [], attempts: [], plan: { selectedWorkerId: null } });
+    expect(result.plan.exclusions[0]?.reasons).toContain('worker-unavailable'); expect(existsSync(f.root)).toBe(false);
+  });
+
+  it('rejects accessor or extended gate arrays and accepts the exact 32-worker bound', async () => {
+    const f = await fixture({ workers: Array.from({ length: 32 }, (_, index) => worker(`worker-${index}`)) });
+    const ids = f.pool.workers.map((item) => item.id);
+    expect(validateUnavailableResourceWorkerIds(ids, f.pool)).toEqual(ids);
+    const getter = vi.fn(() => ids[0]); const accessor = [ids[0]];
+    Object.defineProperty(accessor, 0, { get: getter });
+    expect(() => validateUnavailableResourceWorkerIds(accessor, f.pool)).toThrow('unavailable resource workers');
+    expect(getter).not.toHaveBeenCalled();
+    expect(() => validateUnavailableResourceWorkerIds(Object.assign([...ids], { extra: true }), f.pool)).toThrow('unavailable resource workers');
+    const iterator = vi.fn(() => { throw new Error('Custom iteration must not run'); });
+    const custom = Object.setPrototypeOf([...ids], Object.assign(Object.create(Array.prototype), { [Symbol.iterator]: iterator }));
+    expect(validateUnavailableResourceWorkerIds(custom, f.pool)).toEqual(ids); expect(iterator).not.toHaveBeenCalled();
+    expect(existsSync(f.root)).toBe(false); expect(f.requests).toHaveLength(0);
+  });
+
+  it('applies native gates after newer ready evidence without persisting a fabricated denial', async () => {
+    const f = await fixture(); const id = 'native-a';
+    const pool: ResourcePool = { schemaVersion: 1, id: 'native-gate', workers: [worker(id, { provider: 'codex', allowUnknownQuota: true })] };
+    const bindings: ResourceBinding[] = [{ workerId: id, capacityKey: 'native-account', kind: 'native-cli', command: [process.execPath] }];
+    const first = observation(id); const capturedAt = new Date().toISOString();
+    const newer = observation(id, { observedAt: capturedAt, updatedAt: capturedAt });
+    const input = { root: f.root, pool, bindings, task: f.task('gated', { allowedWorkerIds: [id] }), unavailableWorkerIds: [id] };
+    expect((await runResourceTask({ ...input, observations: [first] })).receipt).toBeNull();
+    expect((await runResourceTask({ ...input, observations: [newer] })).receipt).toBeNull();
+    const before = f.ledger();
+    const gated = resourcePoolStatus(f.root, pool, bindings, [], [id]);
+    expect(gated.plan.selectedWorkerId).toBeNull(); expect(gated.plan.exclusions[0]?.reasons).toContain('worker-unavailable');
+    expect(gated.observations).toEqual([newer]); expect(gated.attempts).toEqual([]);
+    expect(resourcePoolStatus(f.root, pool, bindings, [], []).plan.selectedWorkerId).toBe(id);
+    expect(f.ledger()).toBe(before); expect(JSON.parse(before).observations).toEqual([newer]);
+    expect(before).not.toContain('unavailableWorkerIds'); expect(f.requests).toHaveLength(0);
+  });
+
+  it('blocks every capacity alias but permits an independent worker without changing identities', async () => {
+    const f = await fixture({ workers: [worker('one'), worker('two'), worker('three')] });
+    f.bindings[0]!.capacityKey = 'shared'; f.bindings[1]!.capacityKey = 'shared';
+    const original = f.task(); const expectedTaskDigest = digest(canonical(original));
+    const expectedPoolDigest = digest(canonical({ pool: f.pool, bindings: f.bindings }));
+    const result = await runResourceTask({ root: f.root, pool: f.pool, bindings: f.bindings, observations: f.observations,
+      task: original, unavailableWorkerIds: ['one'] });
+    expect(result.receipt).toMatchObject({ workerId: 'three', taskDigest: expectedTaskDigest, poolDigest: expectedPoolDigest });
+    for (const id of ['one', 'two']) expect(result.plan?.exclusions.find((row) => row.workerId === id)?.reasons).toContain('worker-unavailable');
+    expect(JSON.parse(f.ledger()).observations).toEqual(f.observations);
+    expect(original.allowedWorkerIds).toEqual(['one', 'two', 'three']); expect(f.requests).toHaveLength(1);
+    expect(resourcePoolStatus(f.root, f.pool, f.bindings, [], []).plan.selectedWorkerId).toBe('one');
+  });
+
+  it('does not block or rewrite an exact completed replay when its worker becomes unavailable', async () => {
+    const f = await fixture(); const first = await f.run(); const before = f.ledger();
+    const replay = await runResourceTask({ root: f.root, pool: f.pool, bindings: f.bindings, observations: [], task: f.task(),
+      unavailableWorkerIds: ['local-a'] });
+    expect(replay).toMatchObject({ receipt: first.receipt, replayed: true, output: null, plan: null });
+    expect(f.ledger()).toBe(before); expect(f.requests).toHaveLength(1);
+  });
+
+  it('pins store and cancellation options across a held invocation and does not cancel from a later gate mutation', async () => {
+    const f = await fixture({ respond: () => {} }); const controller = new AbortController(); const unavailable: string[] = [];
+    const options = { root: f.root, pool: f.pool, bindings: f.bindings, observations: f.observations, task: f.task(),
+      signal: controller.signal, unavailableWorkerIds: unavailable };
+    const pending = runResourceTask(options); const changedRoot = join(fixtureRoot, 'not-used');
+    options.root = changedRoot; options.signal = new AbortController().signal; unavailable.push('local-a');
+    await vi.waitFor(() => expect(f.requests).toHaveLength(1));
+    const reserved = f.status().attempts[0]; expect(reserved?.status).toBe('reserved');
+    const replay = await runResourceTask({ ...options, root: f.root, observations: [] });
+    expect(replay).toMatchObject({ replayed: true, receipt: reserved }); expect(f.status().attempts[0]?.status).toBe('reserved');
+    controller.abort(); const result = await pending;
+    expect(result.receipt?.status).toBe('cancelled'); expect(f.status().attempts).toEqual([result.receipt]);
+    expect(existsSync(changedRoot)).toBe(false); expect(f.requests).toHaveLength(1);
+    expect(f.status().observations).toEqual(f.observations);
+  });
+
+  it('honors prior cancellation with a valid gate before any persistent admission', async () => {
+    const f = await fixture();
+    await expect(runResourceTask({ root: f.root, pool: f.pool, bindings: f.bindings, observations: f.observations,
+      task: f.task(), unavailableWorkerIds: ['local-a'], signal: AbortSignal.abort() })).rejects.toThrow('cancelled');
+    expect(existsSync(f.root)).toBe(false); expect(f.requests).toHaveLength(0);
+  });
+
   it('reads missing explicit stores without creating directories, locks, or contacting workers', async () => {
     const f = await fixture();
     expect(f.status(f.observations)).toMatchObject({ sourceState: 'missing', attempts: [], plan: { selectedWorkerId: 'local-a' } });

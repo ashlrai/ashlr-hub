@@ -6,6 +6,7 @@ const USAGE = `usage: ashlr resources pool status --root ABS --pool ABS --bindin
        ashlr resources pool observe --pool ABS --worker ID --provider codex|claude --input ABS --captured-at ISO [--previous ABS] [--bucket ID ...] [--json]
        ashlr resources pool console --help
        ashlr resources pool benchmark --help
+       ashlr resources pool probe --help
 
 An explicit foreground task pool; no default configuration, credential discovery,
 account login/switching, service activation, or automatic task retry.
@@ -136,6 +137,10 @@ function outputMetadata(reservation: OutputReservation | undefined) {
 
 /** Parse scope before importing execution, and keep transient worker text out of CLI metadata. */
 export async function cmdResourcePool(args: string[]): Promise<number> {
+  if (args[0] === 'probe') {
+    const { cmdResourceProbe } = await import('./resource-probe.js');
+    return cmdResourceProbe(args.slice(1));
+  }
   if (args[0] === 'benchmark') {
     const { cmdResourceBenchmark } = await import('./resource-benchmark.js');
     return cmdResourceBenchmark(args.slice(1));

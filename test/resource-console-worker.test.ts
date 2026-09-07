@@ -2,7 +2,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { planResourceAssignment } from '../src/core/resources/pool-policy.js';
+import { planResourceAssignment, type ResourceObservation } from '../src/core/resources/pool-policy.js';
 import { validateResourceConsoleResponse } from '../src/core/web/resource-console-public.js';
 import { createResourceConsoleReader, type ResourceConsoleReadScope } from '../src/core/web/resource-console-reads.js';
 
@@ -70,6 +70,60 @@ describe('resource evidence worker protocol', () => {
   it.each([null, [], { type: 'read', id: 0, kind: 'snapshot' }, { type: 'execute', id: 1 }])('ignores invalid framing %#', (request) => {
     dispatch(request); expect(fixture.read).not.toHaveBeenCalled(); expect(fixture.postMessage).not.toHaveBeenCalled();
   });
+
+  it('rejects framing accessors and symbol fields before source reads without invoking getters', () => {
+    const getter = vi.fn(() => 'snapshot');
+    dispatch(Object.defineProperty({ type: 'read', id: 1 }, 'kind', { get: getter }));
+    dispatch({ type: 'read', id: 2, kind: 'snapshot', [Symbol('private')]: true });
+    dispatch(Object.defineProperty({ type: 'read', kind: 'snapshot' }, 'id', { get: getter }));
+    expect(getter).not.toHaveBeenCalled(); expect(fixture.read).not.toHaveBeenCalled();
+    expect(fixture.postMessage.mock.calls.map((call) => call[0])).toEqual([
+      { type: 'result', id: 1, ok: false }, { type: 'result', id: 2, ok: false },
+    ]);
+  });
+});
+
+describe('managed quota gate through the actual read worker', () => {
+  async function runCase(kind: 'fresh' | 'missing-alias' | 'explicit-veto' | 'expired' | 'future-update' | 'unknown') {
+    const temporary = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-managed-resource-read-')));
+    const root = join(temporary, 'absent-ledger'); const observationsFile = join(temporary, 'observations.json');
+    const worker = { ...scope.pool.workers[0]!, provider: 'codex' as const, allowUnknownQuota: true };
+    const selectedScope: ResourceConsoleReadScope = { root, observationsFile,
+      pool: { schemaVersion: 1, id: 'managed', workers: [{ ...worker, id: 'codex-a' }, { ...worker, id: 'codex-b' }] },
+      bindings: ['codex-a', 'codex-b'].map((workerId) => ({ workerId, capacityKey: 'shared', kind: 'native-cli',
+        command: ['/fixture/this-command-must-never-execute'] })), managedWorkerIds: ['codex-a', 'codex-b'] };
+    const now = Date.now();
+    const observed = (workerId: string): ResourceObservation => ({ workerId, observedAt: new Date(now).toISOString(),
+      updatedAt: new Date(now).toISOString(), expiresAt: new Date(now + 60_000).toISOString(), health: 'ready', retryAfter: null,
+      windows: [{ id: 'codex_primary', usedPercent: 25, resetsAt: new Date(now + 90_000).toISOString() }] });
+    // The private owner file is fresh in every case; it must not mask a missing
+    // or stale reading from the explicitly commissioned collector itself.
+    writeFileSync(observationsFile, JSON.stringify([observed('codex-a'), observed('codex-b')]), { mode: 0o600 });
+    const managed = { observations: [observed('codex-a'), observed('codex-b')], unavailableWorkerIds: [] as string[] };
+    if (kind === 'missing-alias') managed.observations.pop();
+    if (kind === 'explicit-veto') managed.unavailableWorkerIds.push('codex-b');
+    if (kind === 'expired') Object.assign(managed.observations[1]!, { observedAt: new Date(now - 61_000).toISOString(),
+      updatedAt: new Date(now - 61_000).toISOString(), expiresAt: new Date(now - 1_000).toISOString() });
+    if (kind === 'future-update') managed.observations[1]!.updatedAt = new Date(now + 50_000).toISOString();
+    if (kind === 'unknown') managed.observations[1]!.windows[0]!.usedPercent = null;
+    const reader = createResourceConsoleReader(selectedScope);
+    try {
+      const original = readFileSync(observationsFile); const stat = statSync(observationsFile);
+      const result = await reader.snapshot(managed);
+      expect(result.sourceState).toBe('missing'); expect(result.counts.total).toBe(0);
+      if (kind === 'fresh') expect(result.plan?.candidates.map((row) => row.workerId)).toEqual(['codex-a', 'codex-b']);
+      else {
+        expect(result.plan?.selectedWorkerId).toBeNull(); expect(result.plan?.candidates).toEqual([]);
+        for (const id of ['codex-a', 'codex-b']) expect(result.plan?.exclusions.find((row) => row.workerId === id)?.reasons).toContain('worker-unavailable');
+      }
+      expect(existsSync(root)).toBe(false); expect(readdirSync(temporary)).toEqual(['observations.json']);
+      expect(readFileSync(observationsFile)).toEqual(original); expect(statSync(observationsFile).mtimeMs).toBe(stat.mtimeMs);
+      expect(JSON.stringify(result)).not.toContain('this-command-must-never-execute');
+    } finally { await reader.close(); rmSync(temporary, { recursive: true, force: true }); }
+  }
+
+  it.each(['fresh', 'missing-alias', 'explicit-veto', 'expired', 'future-update', 'unknown'] as const)(
+    'preserves source bytes and applies %s managed evidence after IPC', runCase);
 });
 
 describe('actual bounded resource read worker with private temporary evidence', () => {
