@@ -2,6 +2,7 @@ import { useId, useMemo, useState } from 'react';
 import type { UniverseGraph as GraphReport, UniverseGraphNode, UniverseGraphEdge } from '../../../core/universe/graph-types.js';
 import { traverseUniverseGraph } from '../../../core/universe/graph-query.js';
 import { useQuery, useRefetch } from '../../data/hooks.js';
+import { useUniverseCommand } from './UniverseScope.js';
 import { universeGraphQuery } from '../../data/queries.js';
 import styles from './UniverseGraph.module.css';
 
@@ -69,6 +70,7 @@ function NodeInspector({ node, graph, byId, select, onInspectTrial }: {
   select: (id: string) => void; onInspectTrial: InspectTrial;
 }) {
   const [unavailableTrial, setUnavailableTrial] = useState<string | null>(null);
+  const command = useUniverseCommand();
   const relationships = graph.edges.filter((edge) => edge.from === node.id || edge.to === node.id);
   return <section className={styles.inspector} aria-label="Selected graph evidence">
     <h3>{node.label}</h3>
@@ -107,7 +109,7 @@ function NodeInspector({ node, graph, byId, select, onInspectTrial }: {
         {node.comparatorDigest ? <div><dt>Comparator digest</dt><dd><code>{node.comparatorDigest === '[REDACTED]' ? 'Hidden by the console privacy filter' : node.comparatorDigest}</code></dd></div> : null}
         {node.artifactDigest ? <div><dt>Artifact digest</dt><dd><code>{node.artifactDigest === '[REDACTED]' ? 'Hidden by the console privacy filter' : node.artifactDigest}</code></dd></div> : null}
       </dl>
-      <p>Read exact local provenance with <code>ashlr universe graph {graph.universeId} --json</code>.</p>
+      <p>Read exact local provenance with <code>{command(`ashlr universe graph ${graph.universeId} --json`)}</code>.</p>
     </details>
   </section>;
 }

@@ -9,6 +9,7 @@ import { useScrollRestore } from '../../hooks/useScrollRestore.js';
 import styles from './UniverseView.module.css';
 import { UniverseDeliveries } from './UniverseDeliveries.js';
 import { UniverseGraph } from './UniverseGraph.js';
+import { useUniverseCommand } from './UniverseScope.js';
 
 type Campaign = NonNullable<UniverseOverview['campaigns']>[number];
 const ACTIVE_CAMPAIGN_STATES = new Set(['running', 'pause-requested', 'stop-requested']);
@@ -29,15 +30,16 @@ function timestamp(value: string): string {
 }
 
 function FirstExperiment() {
+  const command = useUniverseCommand();
   return (
     <section className={styles.empty} aria-labelledby="universe-start-title">
       <h2 id="universe-start-title">Start your first universe</h2>
       <p>Run two measured generations on a disposable seed, then inspect which variants earned a place in the archive.</p>
-      <pre className={styles.command}><code>ashlr universe demo</code></pre>
+      <pre className={styles.command}><code>{command('ashlr universe demo')}</code></pre>
       <p>The local demonstration needs no model credentials. Refresh this page after running it.</p>
       <details>
         <summary>Bring your own experiment</summary>
-        <pre className={styles.command}><code>{'ashlr universe init --manifest path/to/universe.json\nashlr universe run <id>\nashlr universe status <id> --json\nashlr universe archive <id> --json'}</code></pre>
+        <pre className={styles.command}><code>{command('ashlr universe init --manifest path/to/universe.json\nashlr universe run <id>\nashlr universe status <id> --json\nashlr universe archive <id> --json')}</code></pre>
       </details>
     </section>
   );
@@ -86,6 +88,7 @@ function GenerationEvidence({ trial }: { trial: UniverseTrial }) {
 }
 
 function TrialDetail({ trial, summary, run }: { trial: UniverseTrial; summary: UniverseSummary; run: UniverseRun }) {
+  const command = useUniverseCommand();
   const parent = summary.runs.flatMap((item) => item.trials).find((item) => item.id === trial.parentTrialId);
   const current = summary.elites.some((elite) => elite.trialId === trial.id);
   const variant = summary.manifest.variants.find((item) => item.id === trial.variantId);
@@ -124,7 +127,7 @@ function TrialDetail({ trial, summary, run }: { trial: UniverseTrial; summary: U
             <div><dt>Seed revision</dt><dd><code>{trial.artifact.revision}</code></dd></div>
             <div><dt>Comparator digest</dt><dd><code>{run.comparatorDigest}</code></dd></div>
           </dl>
-          <p>For exact local records, run <code>ashlr universe status {summary.manifest.id} --json</code>.</p>
+          <p>For exact local records, run <code>{command(`ashlr universe status ${summary.manifest.id} --json`)}</code>.</p>
         </details>
       ) : null}
       <details className={styles.artifact}>
@@ -139,6 +142,7 @@ function Campaigns({ campaigns, summary, onInspectRun }: {
   campaigns: Campaign[]; summary: UniverseSummary; onInspectRun: (runId: string) => void;
 }) {
   const [campaignId, setCampaignId] = useState<string | null>(null);
+  const command = useUniverseCommand();
   const campaign = campaigns.find((item) => item.definition.id === campaignId) ??
     campaigns.find((item) => ACTIVE_CAMPAIGN_STATES.has(item.state)) ?? campaigns.at(-1);
   if (!campaign) return (
@@ -146,7 +150,7 @@ function Campaigns({ campaigns, summary, onInspectRun }: {
       <div className={styles.sectionHeading}><div><h2>Continue with a campaign</h2><p>Run successive generations automatically within a fixed resource budget. A passing trial does not end the search.</p></div></div>
       <div className={styles.campaignBody}>
         <p>Set <code>universeId</code> to <code>{summary.manifest.id}</code> in your campaign manifest.</p>
-        <pre className={styles.command}><code>{'ashlr universe campaign init --manifest campaign.json\nashlr universe campaign run <campaign-id>'}</code></pre>
+        <pre className={styles.command}><code>{command('ashlr universe campaign init --manifest campaign.json\nashlr universe campaign run <campaign-id>')}</code></pre>
         <p>The console observes saved evidence. These commands run in your terminal, without installing a background service.</p>
       </div>
     </section>
@@ -197,7 +201,7 @@ function Campaigns({ campaigns, summary, onInspectRun }: {
         </table>
       </div> : null}
       <div className={styles.campaignBody}>
-        <details className={styles.artifact}><summary>Inspect or control from your terminal</summary><pre className={styles.command}><code>{controls.join('\n')}</code></pre><p>Pause and stop are requests until acknowledged. These controls do not change the legacy fleet daemon or its kill switch.</p></details>
+        <details className={styles.artifact}><summary>Inspect or control from your terminal</summary><pre className={styles.command}><code>{command(controls.join('\n'))}</code></pre><p>Pause and stop are requests until acknowledged. These controls do not change the legacy fleet daemon or its kill switch.</p></details>
         <p className={styles.campaignNote}>Campaign termination is not project success. Archive admissions are local evaluator results, not accepted production changes.</p>
       </div>
     </section>
@@ -210,6 +214,7 @@ function UniverseExperiment({ summary, campaigns, deliveryReport }: {
   deliveryReport?: NonNullable<UniverseOverview['deliveryReports']>[number];
 }) {
   const [runId, setRunId] = useState<string | null>(null);
+  const command = useUniverseCommand();
   const [trialId, setTrialId] = useState<string | null>(null);
   const comparisonRef = useRef<HTMLElement>(null);
   const runs = summary.activeRun && !summary.runs.some((run) => run.id === summary.activeRun!.id)
@@ -305,7 +310,7 @@ function UniverseExperiment({ summary, campaigns, deliveryReport }: {
       ) : (
         <section className={styles.empty}>
           <h2>This universe is ready for its first generation</h2>
-          <pre className={styles.command}><code>ashlr universe run {summary.manifest.id}</code></pre>
+          <pre className={styles.command}><code>{command(`ashlr universe run ${summary.manifest.id}`)}</code></pre>
           <p>Run the experiment, then refresh to compare its measurements.</p>
         </section>
       )}

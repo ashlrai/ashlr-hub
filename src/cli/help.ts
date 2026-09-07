@@ -51,6 +51,12 @@ export const AGENT_COMMANDS: AgentCommandDoc[] = [
     jsonShape: 'UniverseOverview from the selected installed candidate',
   },
   {
+    usage: 'ashlr universe console --root <absolute> [--port N] --json',
+    description: 'Start a foreground, read-only loopback console scoped to one explicit Universe root. No general dashboard, provider calls, execution, or service activation.',
+    safety: 'read',
+    jsonShape: 'One startup record: {schemaVersion:1, mode:"universe", root, readOnly:true, url, consoleUrl, port, readToken, readTokenHeader}',
+  },
+  {
     usage: 'ashlr universe status [id] [--root <path>] --json',
     description: 'Read local experiments, raw measurements, lineage, and per-niche winning artifacts. No provider calls.',
     safety: 'read',
@@ -401,6 +407,7 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'director [--dry-run]',         desc: 'Elon Director: read-only strategic reasoning cycle; --dry-run prints the digest without sending Telegram.', topic: 'autonomy' },
   { cmd: 'invent',                       desc: 'Generative backlog invention — propose novel high-value work items.', topic: 'autonomy' },
   { cmd: 'universe <demo|init|run|status|archive>', desc: 'Local experiment evolution: run competing code variants, measure them, and reuse winning artifacts.', topic: 'autonomy' },
+  { cmd: 'universe console --root <absolute> [--port N] [--json]', desc: 'Foreground read-only Universe console on loopback; explicit root, ephemeral port by default, no service activation.', topic: 'autonomy' },
   { cmd: 'universe graph <id> [--node <node-id>]', desc: 'Read-only experiment evidence graph: trace selected parents, feedback, campaigns, and local branch receipts.', topic: 'autonomy' },
   { cmd: 'universe compare <baseline> <challenger>', desc: 'Compare explicit campaign outcomes and resource coverage; read-only local evidence, not production acceptance.', topic: 'autonomy' },
   { cmd: 'universe portfolio <plan|run> --manifest <file.json>', desc: 'Plan or run explicit campaign dependencies with foreground invocation bounds; completed campaigns are not accepted artifacts.', topic: 'autonomy' },

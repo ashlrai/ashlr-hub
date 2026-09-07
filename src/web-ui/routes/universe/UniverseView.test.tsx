@@ -6,6 +6,7 @@ import type { UniverseOverview, UniverseRun, UniverseSummary, UniverseTrial } fr
 import type { UniverseGraph } from '../../../core/universe/graph-types.js';
 import { evictAll } from '../../data/cache.js';
 import { UniverseView } from './UniverseView.js';
+import { UniverseRootContext, withUniverseRoot } from './UniverseScope.js';
 
 function trial(overrides: Partial<UniverseTrial> = {}): UniverseTrial {
   return {
@@ -76,10 +77,10 @@ function campaign(overrides: Partial<NonNullable<UniverseOverview['campaigns']>[
   };
 }
 
-function mount(body: UniverseOverview) {
+function mount(body: UniverseOverview, root: string | null = null) {
   const fetch = vi.fn(async () => new Response(JSON.stringify(body), { status: 200 }));
   vi.stubGlobal('fetch', fetch);
-  render(<MemoryRouter><UniverseView /></MemoryRouter>);
+  render(<MemoryRouter><UniverseRootContext.Provider value={root}><UniverseView /></UniverseRootContext.Provider></MemoryRouter>);
   return fetch;
 }
 
@@ -99,7 +100,20 @@ describe('UniverseView', () => {
   beforeEach(() => evictAll());
   afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
-  it.each([true, false])('navigates only when an exact graph source exists in the current overview (%s)', async (present) => {
+  it.each([false, true])('pins every displayed operational command to the scoped store (populated: %s)', async (populated) => {
+    const root = "/private/lab's $data; with spaces";
+    mount(populated ? overview({ campaigns: [campaign()], deliveryReports: [deliveryReport()] }) : overview({ universes: [] }), root);
+    await screen.findByRole('heading', { name: populated ? 'Compiler laboratory' : 'Start your first universe' });
+    const commands = [...document.querySelectorAll('code')]
+      .flatMap((node) => (node.textContent ?? '').split('\n'))
+      .filter((line) => line.startsWith('ashlr universe '));
+    expect(commands.length).toBeGreaterThan(3);
+    for (const command of commands) expect(command).toMatch(/ --root '\/private\/lab'\\''s \$data; with spaces'$/);
+    expect(withUniverseRoot('ashlr universe demo', null)).toBe('ashlr universe demo');
+  });
+
+  it.each([true, false].flatMap((present) => [null, '/private/graph scope'].map((root) => ({ present, root }))))(
+    'navigates only to exact graph evidence (present: $present, root: $root)', async ({ present, root }) => {
     const body = overview();
     const graph: UniverseGraph = {
       schemaVersion: 1, sampledAt: body.sampledAt, universeId: 'compiler', sourceState: 'healthy', complete: true,
@@ -111,12 +125,13 @@ describe('UniverseView', () => {
     };
     const fetch = vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify(String(input).includes('/api/universe/graph?') ? graph : body), { status: 200 }));
     vi.stubGlobal('fetch', fetch);
-    render(<MemoryRouter><UniverseView /></MemoryRouter>);
+    render(<MemoryRouter><UniverseRootContext.Provider value={root}><UniverseView /></UniverseRootContext.Provider></MemoryRouter>);
     await screen.findByRole('region', { name: 'Evidence for better-motor' });
     expect(fetch).toHaveBeenCalledOnce();
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Open graph' }));
     await screen.findByRole('button', { name: 'Inspect exact trial evidence' });
+    expect(screen.getByText(withUniverseRoot('ashlr universe graph compiler --json', root))).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Inspect exact trial evidence' }));
     if (present) {
       expect(screen.getByRole('region', { name: 'Evidence for small-motor' })).toBeInTheDocument();

@@ -35,7 +35,7 @@ const overview = readUniverseOverview({ root });
 Each `run` creates one generation. When the trial budget is smaller than the
 variant population, successive generations rotate through that population.
 
-Local execution currently requires macOS `sandbox-exec`. Linux execution awaits a verified isolation profile; Windows execution is unsupported. The console at `/next#/universe` reads the default store. Use CLI inspection with the same `--root` for experiments in a custom store.
+Local execution currently requires macOS `sandbox-exec`. Linux execution awaits a verified isolation profile; Windows execution is unsupported. The general Hub console at `/next#/universe` reads the default store. Use the [scoped foreground console](#observe-one-universe-store) or CLI inspection with the same `--root` for experiments in a custom store.
 
 The local web server moves its expensive global dashboard, fleet, control,
 history, and proposal reads to one bounded background thread. Universe reads and
@@ -124,11 +124,71 @@ verified current package. If neither verifies, preserve the store and inspect
 the installation evidence; no automatic repair or deletion occurs.
 
 Only Universe commands are accepted by `runtime run`. Ordinary `update`,
-general Hub commands and `serve` are not forwarded. The existing web console
-still reads the default experiment store and has shared configuration/stream
-maintenance paths; this installation workflow does not claim console isolation.
+general Hub commands and `serve` are not forwarded. Use `universe console` below
+for scoped observation through the managed runtime; the general `serve` command
+still reads shared configuration and performs stream maintenance.
 The versioned package's absolute `binPath` is also returned for trusted direct
 use, but direct invocation bypasses managed launch-time verification.
+
+## Observe one Universe store
+
+Open a foreground, read-only console for an explicit absolute experiment root:
+
+```sh
+node bin/ashlr universe console --root /absolute/private/experiments --json
+```
+
+Or use an already installed, verified local runtime:
+
+```sh
+node bin/ashlr runtime run --store /absolute/private/runtime-store -- \
+  universe console --root /absolute/private/experiments --json
+```
+
+These commands authorize a loopback listener for observation, not experiment
+execution. The default port is an available ephemeral port; `--port N` accepts
+0 through 65535. Keep the command running. Open its `consoleUrl` in your browser
+and paste the `readToken` from its startup record. No browser opens automatically.
+The token is private authority: do not share startup output or retain it in logs.
+URLs never contain the token. The browser exchanges it for a short-lived,
+HttpOnly session cookie bound to a per-tab client proof. Separate console
+instances have independent sessions.
+
+The console shows the authenticated store path, experiment measurements,
+campaign progress, retained artifacts, delivery evidence and the on-demand
+evidence graph. Operational command examples include that same shell-quoted
+root. The page observes saved evidence; it has no execution buttons. Use the CLI
+to start or control work, then refresh. Active runs and campaigns refresh their
+overview every three seconds; the graph refreshes only when requested.
+
+The dedicated server does not initialize the default Hub configuration, clean
+streams, discover providers, or start the general dashboard's event channel.
+Its bounded worker reads Universe records from the startup-selected store and
+checks recorded repository-delivery references. A missing store is reported
+without creating it; unavailable and incomplete records do not
+become successful empty results. This is process separation for responsiveness,
+not a sandbox for an untrusted store or arbitrary repository code.
+Public redaction and serialization happen inside the worker. Each JSON projection
+has a 16 MiB UTF-8 response limit and a 30-second default read deadline; excess
+or failed work returns unavailable rather than a truncated successful graph.
+Use targeted CLI inspection when a store exceeds the console's response budget.
+
+The protected read surface consists of `/api/universe/console` (scope metadata),
+`/api/universe` (overview) and `/api/universe/graph?universeId=ID` (graph).
+Browser-supplied roots, unknown parameters, unrelated Hub APIs and data mutations
+are rejected. Session exchange/logout use `/api/session`. The public `/health`
+route establishes listener liveness only; it does not attest store health.
+Browser requests must match the advertised loopback origin when an Origin header
+is present. There is no cross-origin API support. Native clients may use the
+read-token header without an Origin header.
+
+Press Ctrl-C to close the console, or send SIGTERM to its exact foreground
+process. Shutdown closes its listener, connections and read worker; it does not
+pause a separately running campaign. Restarting creates new session authority.
+An occupied port or invalid arguments fail before printing a successful startup
+record. Choose another explicit port or the default rather than stopping an
+unrelated process. No service, launch item, registry release or fleet activation
+is part of this workflow.
 
 ## Generate candidates with an existing local model
 

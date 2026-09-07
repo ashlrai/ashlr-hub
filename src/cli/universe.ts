@@ -13,6 +13,7 @@ const USAGE = `usage: ashlr universe <command> [--root <private directory>] [--j
   run <id>                     Execute one budgeted generation
   status [id]                  Read objectives, runs, and measurements
   archive [id]                 Read the winning artifact in each niche
+  console --root <absolute>    Start a foreground, read-only Universe console
   campaign <command>           Run or inspect a bounded multi-generation campaign
   portfolio <plan|run>         Coordinate explicitly declared campaign dependencies
   deliver <id> --trial <id> --branch codex/<new-branch>
@@ -29,6 +30,7 @@ endpoint; it sends declared files and experiment context, without auth or tools.
 The evaluator is pinned separately from candidate edits. Results are local
 experiments, not accepted production changes. --root defaults to ~/.ashlr/universe.
 Delivery creates only a local branch; it never pushes, merges, or deploys.
+Console requires an explicit absolute root; --port defaults to 0 (ephemeral).
 Exit codes: 0 success, 1 failed/degraded execution, 2 invalid arguments.
 `;
 
@@ -125,6 +127,10 @@ function renderOverview(overview: UniverseOverview, archiveOnly: boolean): strin
 
 /** CLI and dashboard share the same persisted experiment records. */
 export async function cmdUniverse(args: string[]): Promise<number> {
+  if (args[0] === 'console') {
+    const { cmdUniverseConsole } = await import('./universe-console.js');
+    return cmdUniverseConsole(args.slice(1));
+  }
   if (args[0] === 'compare') {
     const { cmdUniverseCompare } = await import('./universe-compare.js');
     return cmdUniverseCompare(args.slice(1));

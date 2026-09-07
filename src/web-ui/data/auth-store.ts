@@ -127,7 +127,7 @@ export async function establishReadSession(rawReadToken: string): Promise<void> 
     return;
   }
   if (res.status === 401) {
-    throw new Error('Server rejected that token. Double-check the value ashlr serve printed.');
+    throw new Error('Server rejected that token. Double-check the read token printed by this server at startup.');
   }
   throw new Error(`Unexpected response establishing session (HTTP ${res.status}).`);
 }

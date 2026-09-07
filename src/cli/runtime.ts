@@ -48,7 +48,7 @@ function helpOnly(args: string[]): boolean {
   if (args.length === 1 && ['help', '--help', '-h'].includes(args[0]!)) return true;
   const command = args[0];
   if (args.length === 2 && ['demo', 'init', 'run', 'status', 'archive', 'campaign', 'portfolio', 'deliver',
-    'deliveries', 'graph', 'compare'].includes(command ?? '') && ['--help', '-h'].includes(args[1]!)) return true;
+    'deliveries', 'graph', 'compare', 'console'].includes(command ?? '') && ['--help', '-h'].includes(args[1]!)) return true;
   return args.length === 2 && ['campaign', 'portfolio'].includes(command ?? '') && args[1] === 'help';
 }
 

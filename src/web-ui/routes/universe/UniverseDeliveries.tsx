@@ -1,9 +1,9 @@
 import type { UniverseOverview, UniverseSummary } from '../../data/api-types.js';
 import styles from './UniverseView.module.css';
+import { quoteShellArgument as quote, useUniverseCommand } from './UniverseScope.js';
 
 type DeliveryReport = NonNullable<UniverseOverview['deliveryReports']>[number];
 
-const quote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
 // The authenticated API abbreviates this user's home. A quoted tilde does not
 // expand in the shell, so keep the home expansion separate from the path data.
 const repoArgument = (value: string): string => value.startsWith('~/') ? `"$HOME"/${quote(value.slice(2))}` : quote(value);
@@ -15,6 +15,7 @@ export function UniverseDeliveries({ summary, report, onInspectTrial }: {
   onInspectTrial: (runId: string, trialId: string) => void;
 }) {
   const verified = report?.sourceState === 'healthy';
+  const command = useUniverseCommand();
   const degraded = report?.sourceState === 'degraded';
   const deliveries = report?.deliveries ?? [];
   return (
@@ -43,7 +44,7 @@ export function UniverseDeliveries({ summary, report, onInspectTrial }: {
               <p>Source trial unavailable in the current history.</p>}
             {verified && delivery.status === 'delivered' ? <pre className={styles.command}><code>{`git -C ${repoArgument(delivery.repo)} show --stat ${quote(delivery.commit)}`}</code></pre> : null}
             {delivery.artifactDigest === '[REDACTED]' || delivery.comparatorDigest === '[REDACTED]' ?
-              <p>Read exact identities locally with <code>ashlr universe deliveries {quote(summary.manifest.id)} --json</code>.</p> : null}
+              <p>Read exact identities locally with <code>{command(`ashlr universe deliveries ${quote(summary.manifest.id)} --json`)}</code>.</p> : null}
           </details>
         )) : <p>{degraded ? 'No delivery can be confirmed from this read.' : 'No local branches delivered yet.'}</p>}
         {summary.sourceState === 'healthy' && !degraded && summary.elites.length ? (
@@ -52,7 +53,7 @@ export function UniverseDeliveries({ summary, report, onInspectTrial }: {
             <p>Choose a new branch name. Each command writes only a new local branch in <code>{summary.manifest.seed.repo}</code>; it does not switch branches, merge, or push.</p>
             {summary.elites.map((elite) => <div key={elite.trialId}>
               <p>{elite.niche}: {elite.variantId}</p>
-              <pre className={styles.command}><code>{`ashlr universe deliver ${quote(summary.manifest.id)} --trial ${quote(elite.trialId)} --branch ${quote(`codex/universe-${summary.manifest.id}-${elite.trialId.slice(0, 8)}`)} --json`}</code></pre>
+              <pre className={styles.command}><code>{command(`ashlr universe deliver ${quote(summary.manifest.id)} --trial ${quote(elite.trialId)} --branch ${quote(`codex/universe-${summary.manifest.id}-${elite.trialId.slice(0, 8)}`)} --json`)}</code></pre>
             </div>)}
           </details>
         ) : null}
