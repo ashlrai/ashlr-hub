@@ -231,7 +231,7 @@ describe('foreground resource task result, output and cancellation', () => {
     expect(await cmdResources(['pool', 'run', '--help'])).toBe(0);
     expect(output.mock.calls[0]![0]).toContain('ashlr resources pool'); expect(backend.run).not.toHaveBeenCalled();
     output.mockClear(); expect(await cmdResources(['--help'])).toBe(0);
-    expect(output.mock.calls.flat().join('\n')).toContain('pool status|run|observe --help');
+    expect(output.mock.calls.flat().join('\n')).toContain('pool status|run|observe|console --help');
   });
 });
 

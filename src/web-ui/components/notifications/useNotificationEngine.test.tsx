@@ -28,6 +28,9 @@ function healthyControl() {
 
 describe('notification refresh channel', () => {
   beforeEach(() => {
+    // Keep the recorded failure inside the production 24-hour notification
+    // window; the test exercises refresh behavior, not the wall-clock date.
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-09-06T12:05:00.000Z'));
     markCheckComplete(false);
     evictAll();
     __resetNotificationStoreForTests();

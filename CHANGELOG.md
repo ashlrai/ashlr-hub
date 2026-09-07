@@ -11,6 +11,19 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Resource pool operations console
+
+- Adds `ashlr resources pool console` and a scoped `/resources/` operations desk
+  with shared-capacity lanes, all-window quota evidence, routing exclusions,
+  task inspection and explicit missing token coverage.
+- Opt-in `--execute --workspace` enables durable bounded task scheduling with
+  pause/resume, cancellation of owned work, no ambiguous restart replay, and
+  bounded session-local output. Read and control capabilities remain separate.
+- Handles transient observation failures without abandoning admitted work;
+  isolates conflicting task identities and reports unconfirmed owned shutdown.
+- Preserves local-only verification and independent Universe/legacy daemon scope.
+  No account commissioning, resident activation or registry publication is implied.
+
 ### Account-aware foreground resource pools
 
 - Adds `ashlr resources pool status|observe|run` for explicit Codex, Claude Code,

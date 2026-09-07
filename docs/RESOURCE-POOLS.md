@@ -4,7 +4,8 @@ Use `ashlr resources pool` to assign an explicit engineering task to one enrolle
 Codex, Claude Code, or local-model worker. Admission combines quota evidence,
 operator task limits, and shared-account concurrency. Each assignment is durably
 recorded before launch. This is a foreground task runner, not a resident scheduler
-or an extension of the legacy daemon's authority.
+or an extension of the legacy daemon's authority. The scoped operations console
+adds a durable queue and visual dispatch controls for that same pool.
 
 This source feature is not yet a published registry release. Native adapter
 contracts were checked against Codex CLI 0.136.0 and Claude Code 2.1.257 on
@@ -206,6 +207,92 @@ does not span model execution. Each native task may make multiple vendor request
 single request with `max_tokens`; native `maxOutputTokens` is only an observed
 post-completion cutoff. Missing token counts remain null. No dollar-cost estimate
 or unused-subscription-token estimate is invented.
+
+## Operate the resource console
+
+Start with an authenticated, read-only view of the explicit pool:
+
+```sh
+ashlr resources pool console --root /absolute/private/ledger \
+  --pool /absolute/private/pool.json --bindings /absolute/private/bindings.json \
+  --observations /absolute/private/observations.json
+```
+
+Open the printed `/resources/` URL and enter the printed read token. The server
+binds only to `127.0.0.1`, uses an instance-specific read session, and never places
+tokens in URLs. Read-only mode does not create a missing ledger or launch workers.
+The pool and bindings are fixed at startup; only the selected observations file
+is reread. Reloading the dashboard does not refresh the age of quota evidence.
+
+The capacity board groups worker aliases by account/resource key. It shows all
+reported quota windows, exclusion reasons, occupied slots, and the next eligible
+worker under current policy. That routing preview is not a promised assignment.
+Activity distinguishes console-owned dispatches from external reservations whose
+process liveness is unknown. Reported token subtotals and missing coverage remain
+separate; completed work is not automatically verified engineering value.
+
+To enable task submission, explicitly select a workspace and execution capability:
+
+```sh
+ashlr resources pool console --root /absolute/private/ledger \
+  --pool /absolute/private/pool.json --bindings /absolute/private/bindings.json \
+  --observations /absolute/private/observations.json \
+  --execute --workspace /absolute/project-worktree --max-parallel 4
+```
+
+**This command can execute durable queued tasks immediately.** Confirm the enrolled
+accounts, billing settings, workspace and existing queue before starting. The
+ledger and all three control files must be outside the writable workspace. Treat
+native bindings as trusted local programs, not a sandbox. Review workspace changes
+and task receipts before accepting results; use the checkout's normal versioned
+recovery process for unwanted edits.
+
+Enter the separately printed control token through **Unlock controls**. A read
+token or read-session cookie cannot submit, pause, resume or cancel work. The
+browser can choose only the task ID, prompt, eligible workers, mode, timeout and
+output bound; it cannot change the workspace, command, endpoint or environment.
+Read sessions expire after 15 minutes; the browser keeps the control token only
+in memory for 20 minutes. Token expiry, closing a tab, or losing the HTTP connection
+does not stop already queued or dispatched work.
+
+The foreground supervisor provides:
+
+- **Durable scheduling:** queued tasks and pause state survive restart. Unattempted
+  work resumes when unpaused and capacity becomes available. A dispatch intent is
+  saved before invoking a worker; previously dispatching work is never replayed
+  after a crash, even when no receipt is available.
+- **Pause and cancel:** pause blocks new starts, not in-flight work. Cancel removes
+  queued work or aborts a dispatch owned by this server instance. It cannot stop
+  an external reservation. These stop controls remain available when evidence is
+  stale or unavailable.
+- **Evidence recovery:** missing/corrupt observations stop new admissions but do
+  not cancel admitted work. Polling recovers automatically after the selected
+  private file is repaired with fresh evidence. Quota reset time alone does not
+  release a denial. Storage or lock failures stop the supervisor.
+- **Private output:** results are fetched only on demand and retained in server
+  memory, at most 256 KiB per task and 4 MiB total. Eviction, restart or shutdown
+  loses raw output. The durable queue retains prompts only while queued or
+  dispatching; metadata views omit them. A read session can view retained output.
+- **Bounded execution:** default four parallel jobs, configurable from one to 16;
+  at most 64 queued jobs, a 32 KiB prompt per task, and 256 retained queue identities
+  within a 4 MiB state file. History is not silently evicted into replayable work.
+  Admission reserves future metadata space; large escaped prompts can reach the
+  byte limit before the count limits.
+  Capacity exhaustion requires an explicit migration, not deleting state to reuse
+  identities. The underlying pool ledger has its separate limits below.
+
+SIGINT/SIGTERM closes the server, aborts its owned work and awaits cleanup. An
+unconfirmed termination makes shutdown fail rather than claiming a clean stop.
+Already external or unresolved reservations remain distinguishable from this
+instance's work. Preserve their receipts and reconcile them before retrying with
+a new task ID. Only one supervisor can own a selected ledger at a time.
+
+`--json` emits one private startup record containing scope, URL and tokens; do not
+paste it into logs or source control. `--port 0` chooses an available port. This
+console has no resident-service installation, autonomous quota collector, account
+login, global fleet discovery, or connection to Universe's evaluator. It does not
+expose the general Hub API or event stream. The process must remain running for
+its queue to advance.
 
 ## Failure and recovery
 
