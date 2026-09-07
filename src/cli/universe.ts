@@ -19,6 +19,8 @@ const USAGE = `usage: ashlr universe <command> [--root <private directory>] [--j
                                Create a local branch from the exact current elite
   deliveries <id>              Read delivery receipts without changing the repository
   graph <id>                   Trace recorded lineage and evidence (read-only)
+  compare <baseline> <challenger>
+                               Compare two explicit campaigns (read-only)
   help                         Show this help
 
 Candidate and evaluator commands run with network access denied. An optional
@@ -123,6 +125,10 @@ function renderOverview(overview: UniverseOverview, archiveOnly: boolean): strin
 
 /** CLI and dashboard share the same persisted experiment records. */
 export async function cmdUniverse(args: string[]): Promise<number> {
+  if (args[0] === 'compare') {
+    const { cmdUniverseCompare } = await import('./universe-compare.js');
+    return cmdUniverseCompare(args.slice(1));
+  }
   if (args[0] === 'portfolio') {
     const { cmdUniversePortfolio } = await import('./universe-portfolio.js');
     return cmdUniversePortfolio(args.slice(1));
