@@ -52,6 +52,50 @@ export interface UniverseFeedback {
   previousAttemptFiles: Array<{ path: string; contentDigest: string; content: string }>;
 }
 
+export interface UniverseSearchAttempt {
+  runId: string;
+  trialId: string;
+  generation: number;
+  /** Recorded content identity, not a fresh artifact byte verification. */
+  artifactDigest: string | null;
+}
+
+/** Separate decision context: legacy evaluator feedback and its byte digest remain unchanged. */
+export interface UniverseSearchContext {
+  schemaVersion: 2;
+  universeId: string;
+  manifestDigest: string;
+  comparatorDigest: string;
+  variantId: string;
+  niche: string;
+  generation: number;
+  metric: UniverseManifest['metric'];
+  /** Null means the pinned seed is the edit base; its score has not been measured. */
+  parent: (Omit<UniverseSearchAttempt, 'artifactDigest'> & { artifactDigest: string; score: number }) | null;
+  previous: (UniverseSearchAttempt & {
+    status: UniverseTrial['status'];
+    score: number | null;
+    selected: boolean;
+    delta: number | null;
+  }) | null;
+  repetition: {
+    scope: 'same-variant-current-parent';
+    limit: 16;
+    totalAttempts: number;
+    /** Latest 16 eligible completed attempts, in chronological order. */
+    sampledAttempts: UniverseSearchAttempt[];
+    truncated: boolean;
+    latestArtifactDigest: string | null;
+    /** Exact matches to the latest sampled non-null digest, including that occurrence. */
+    matchingArtifactCount: number;
+  };
+}
+
+export interface UniverseSearchContextReceipt {
+  schemaVersion: 2;
+  digest: string;
+}
+
 export interface UniverseGenerationReceipt {
   schemaVersion: 1;
   provider: 'local-openai-compatible';
@@ -66,6 +110,7 @@ export interface UniverseGenerationReceipt {
   usage: { state: 'reported' | 'unavailable'; inputTokens: number | null; outputTokens: number | null };
   changedFiles: string[];
   feedback?: UniverseFeedback['source'] & { digest: string };
+  search?: UniverseSearchContextReceipt;
   error?: string;
 }
 
@@ -120,6 +165,8 @@ export interface UniverseRun {
   generationUsage?: UniverseGenerationUsage;
   campaign?: { id: string; ordinal: number; definitionDigest: string };
   feedbackEnabled?: true;
+  /** Absent denotes legacy v1 feedback; new decision-context runs pin version 2 before execution. */
+  feedbackVersion?: 2;
   error?: string;
 }
 

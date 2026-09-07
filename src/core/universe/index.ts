@@ -3,6 +3,7 @@ export { defaultUniverseRoot, ensureUniverseRoot } from './artifacts.js';
 export { initUniverse, validateUniverseManifest } from './store.js';
 export { readUniverseOverview } from './overview.js';
 export { runUniverse } from './runner.js';
+export { buildUniverseSearchContext, validateUniverseSearchContext, searchContextReceipt } from './search-context.js';
 export { initUniverseCampaign, readUniverseCampaign, readUniverseCampaigns, requestUniverseCampaignControl,
   validateUniverseCampaignDefinition } from './campaign-store.js';
 export { runUniverseCampaign } from './campaign.js';

@@ -12,10 +12,11 @@ import { appendRecord, assertComparatorUnchanged, manifestRecord, newRun, parseE
   projectUniverse, readRecords, universePath, type ManifestRecord, type UniverseRecord } from './store.js';
 import { scheduledVariants, selectWinners } from './store.js';
 import { sanitizePublicJson } from '../util/public-json.js';
-import type { UniverseElite, UniverseFeedback, UniverseManifest, UniverseRun, UniverseRunOptions, UniverseTrial } from './types.js';
+import type { UniverseElite, UniverseFeedback, UniverseManifest, UniverseRun, UniverseRunOptions, UniverseSearchContext, UniverseTrial } from './types.js';
 import { generationResources, newGenerationReceipt } from './generation.js';
 import { generateModelCandidate } from './model-candidate.js';
 import { buildUniverseFeedback, feedbackReceipt } from './feedback.js';
+import { buildUniverseSearchContext, searchContextReceipt } from './search-context.js';
 import { assertUniverseExecution, withUniverseExecution } from './execution.js';
 import { assertRunEvidenceBudget, assertTrialEvidenceBudget, preflightTrialEvidenceBudget } from './evidence-size.js';
 
@@ -74,7 +75,7 @@ function recordFinishedRun(directory: string, run: UniverseRun, lock: LocalStore
 
 async function runTrial(record: ManifestRecord, run: UniverseRun, variant: UniverseManifest['variants'][number],
   parent: UniverseElite | undefined, directory: string, root: string, signal: AbortSignal, deadline: number,
-  feedback?: UniverseFeedback): Promise<UniverseTrial> {
+  feedback?: UniverseFeedback, searchContext?: UniverseSearchContext): Promise<UniverseTrial> {
   const started = performance.now();
   const trialId = randomUUID();
   const scratch = join(directory, 'scratch', run.id, trialId);
@@ -102,6 +103,7 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
     preflightTrialEvidenceBudget(trial, {
       artifact: { path: archivePath, digest: 'f'.repeat(64), revision: record.manifest.seed.revision },
       changedFiles: variant.generation?.files ?? [], ...(feedback ? { feedback: feedbackReceipt(feedback) } : {}),
+      ...(searchContext ? { search: searchContextReceipt(searchContext) } : {}),
     });
     if (variant.generation) {
       // The broker receives only declared text. Model output is replacement data,
@@ -110,6 +112,7 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
         candidatePath: candidate, objective: record.manifest.objective, hypothesis: variant.hypothesis,
         generation: run.generation, parentTrialId: parent?.trialId ?? null, timeoutMs: Math.max(1, Math.floor(remaining())), signal,
         ...(feedback ? { feedback } : {}),
+        ...(searchContext ? { searchContext, variantId: variant.id, niche: variant.niche } : {}),
       });
       if (trial.generation.status !== 'succeeded') {
         trial.status = trial.generation.status;
@@ -253,7 +256,9 @@ export async function runUniverseOwned(id: string, options: UniverseOwnedRunOpti
     const nextRun = newRun(record, overview.runs.length + 1);
     if (options.runId) nextRun.id = options.runId;
     if (options.campaign) nextRun.campaign = options.campaign;
-    if (options.feedback) nextRun.feedbackEnabled = true;
+    // Version the new prompt contract at its durable start. Returning or
+    // interrupting an existing run above preserves its originally recorded pin.
+    if (options.feedback) { nextRun.feedbackEnabled = true; nextRun.feedbackVersion = 2; }
     const scheduled = scheduledVariants(record.manifest, nextRun.generation);
     if (options.trialLimit !== undefined && options.trialLimit > scheduled.length) throw new Error('Campaign trial limit exceeds scheduled variants');
     const ownerStart = verifiedProcessStartRef(process.pid);
@@ -274,7 +279,8 @@ export async function runUniverseOwned(id: string, options: UniverseOwnedRunOpti
       const results = await Promise.allSettled(batch.map(async (variant) => {
         const trial = await runTrial(record, run!, variant, overview.elites.find((elite) => elite.niche === variant.niche),
           directory, root, controller.signal, deadline,
-          options.feedback && variant.generation ? buildUniverseFeedback(overview, variant, directory) : undefined);
+          run!.feedbackEnabled && variant.generation ? buildUniverseFeedback(overview, variant, directory) : undefined,
+          run!.feedbackVersion === 2 && variant.generation ? buildUniverseSearchContext(overview, variant) : undefined);
         assertUniverseExecution(directory, execution);
         if (!ownsLocalStoreLock(lock)) throw new Error('Universe run ownership lost before evidence write');
         appendRecord(directory, { id: `${run!.id}.trial.${trial.id}`, kind: 'trial', runId: run!.id, trial });

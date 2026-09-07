@@ -14,6 +14,7 @@ import type { UniverseArtifact, UniverseDiagnostic, UniverseElite, UniverseManif
   UniverseStoreOptions, UniverseSummary, UniverseTrial } from './types.js';
 import { generationResources, newGenerationReceipt, validateGenerationConfig, validGenerationReceipt, validGenerationUsage } from './generation.js';
 import { buildUniverseFeedback, feedbackReceipt, validateDiagnostics } from './feedback.js';
+import { buildUniverseSearchContext, searchContextReceipt } from './search-context.js';
 import { MAX_UNIVERSE_RECORD_BYTES } from './evidence-size.js';
 
 const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -109,7 +110,7 @@ function validTrial(value: unknown): value is UniverseTrial {
     (!value.selected || value.status === 'passed');
 }
 function validRun(value: unknown): value is UniverseRun {
-  return object(value) && exact(value, ['id', 'universeId', 'generation', 'manifestDigest', 'comparatorDigest', 'startedAt', 'finishedAt', 'status', 'trials', 'durationMs', 'tokensUsed', 'costUsd', 'error', 'generationUsage', 'campaign', 'feedbackEnabled']) &&
+  return object(value) && exact(value, ['id', 'universeId', 'generation', 'manifestDigest', 'comparatorDigest', 'startedAt', 'finishedAt', 'status', 'trials', 'durationMs', 'tokensUsed', 'costUsd', 'error', 'generationUsage', 'campaign', 'feedbackEnabled', 'feedbackVersion']) &&
     text(value.id, 64) && RECORD_ID.test(value.id) && text(value.universeId, 64) && ID.test(value.universeId) &&
     integer(value.generation, 1, MAX_RECORDS) && text(value.manifestDigest, 64) && HASH.test(value.manifestDigest) &&
     text(value.comparatorDigest, 64) && HASH.test(value.comparatorDigest) && text(value.startedAt, 40) &&
@@ -119,6 +120,7 @@ function validRun(value: unknown): value is UniverseRun {
     finite(value.durationMs) && value.durationMs >= 0 && (value.tokensUsed === null || integer(value.tokensUsed, 0, Number.MAX_SAFE_INTEGER)) && value.costUsd === null &&
     (value.generationUsage === undefined || validGenerationUsage(value.generationUsage)) &&
     (value.feedbackEnabled === undefined || value.feedbackEnabled === true) &&
+    (value.feedbackVersion === undefined || (value.feedbackVersion === 2 && value.feedbackEnabled === true)) &&
     (value.campaign === undefined || (object(value.campaign) && exact(value.campaign, ['id', 'ordinal', 'definitionDigest']) &&
       text(value.campaign.id, 64) && ID.test(value.campaign.id) && integer(value.campaign.ordinal, 1, 128) &&
       text(value.campaign.definitionDigest, 64) && HASH.test(value.campaign.definitionDigest))) &&
@@ -271,6 +273,7 @@ export function projectUniverse(directory: string, records = readRecords(directo
       if (run.universeId !== start.run.universeId || run.generation !== start.run.generation || run.manifestDigest !== start.run.manifestDigest ||
           run.comparatorDigest !== start.run.comparatorDigest || run.startedAt !== start.run.startedAt ||
           canonical(run.campaign ?? null) !== canonical(start.run.campaign ?? null) || run.feedbackEnabled !== start.run.feedbackEnabled ||
+          run.feedbackVersion !== start.run.feedbackVersion ||
           !resourceEvidenceMatches(run, trials) || run.trials.length !== trials.length || run.trials.some((trial) => !trials.some((raw) =>
             canonical({ ...trial, selected: false, delta: null }) === canonical({ ...raw, selected: false, delta: null })))) {
         throw new Error('Final run does not match durable trial evidence');
@@ -316,6 +319,19 @@ export function projectUniverse(directory: string, records = readRecords(directo
             runs, elites: [...previous.values()], activeRun: null, sourceState: 'healthy', reasons: [] }, variant, directory);
           if (canonical(feedback ?? null) !== canonical(expectedFeedback ? feedbackReceipt(expectedFeedback) : null)) {
             throw new Error('Trial feedback digest does not match the preceding recorded outcome and source');
+          }
+        }
+        if (trial.generation.search && run.feedbackVersion !== 2) {
+          throw new Error('Legacy run cannot claim versioned search context');
+        }
+        if (run.feedbackVersion === 2 && trial.generation.promptDigest !== null) {
+          // Reconstruct only from the verified historical prefix and the archive
+          // before this generation. A sibling's new selection is not prompt data.
+          const expectedSearch = buildUniverseSearchContext({ manifest: stored.manifest,
+            manifestDigest: stored.manifestDigest, comparatorDigest: stored.comparatorDigest,
+            runs, elites: [...previous.values()], activeRun: null, sourceState: 'healthy', reasons: [] }, variant);
+          if (canonical(trial.generation.search ?? null) !== canonical(searchContextReceipt(expectedSearch))) {
+            throw new Error('Trial search context digest does not match the preceding recorded search state');
           }
         }
       } else if (trial.generation) throw new Error('Command trial cannot claim model generation usage');

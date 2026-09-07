@@ -41,7 +41,7 @@ export function newGenerationReceipt(config: UniverseGenerationConfig): Universe
 
 export function validGenerationReceipt(value: unknown): value is UniverseGenerationReceipt {
   if (!object(value) || !exact(value, ['schemaVersion', 'provider', 'endpoint', 'model', 'status', 'requestStarted',
-    'promptDigest', 'responseDigest', 'durationMs', 'usage', 'changedFiles', 'error', 'feedback']) ||
+    'promptDigest', 'responseDigest', 'durationMs', 'usage', 'changedFiles', 'error', 'feedback', 'search']) ||
       value.schemaVersion !== 1 || value.provider !== 'local-openai-compatible' || !boundedText(value.endpoint, 512) ||
       normalizeNumericLoopbackOllamaBaseUrl(value.endpoint) !== value.endpoint || !boundedText(value.model, 160) ||
       !['succeeded', 'failed', 'timed-out', 'cancelled'].includes(String(value.status)) || typeof value.requestStarted !== 'boolean' ||
@@ -51,6 +51,9 @@ export function validGenerationReceipt(value: unknown): value is UniverseGenerat
       !Array.isArray(value.changedFiles) || value.changedFiles.length > 16 || !value.changedFiles.every(validGenerationPath) ||
       new Set(value.changedFiles).size !== value.changedFiles.length ||
       (value.feedback !== undefined && (!validFeedbackReceipt(value.feedback) || value.promptDigest === null)) ||
+      (value.search !== undefined && (!object(value.search) || !exact(value.search, ['schemaVersion', 'digest']) ||
+        value.search.schemaVersion !== 2 || typeof value.search.digest !== 'string' || !/^[a-f0-9]{64}$/.test(value.search.digest) ||
+        value.promptDigest === null)) ||
       (value.error !== undefined && (typeof value.error !== 'string' || value.error.length < 1 || value.error.length > 1_024 || value.error.includes('\0')))) return false;
   const usage = value.usage;
   if (usage.state === 'reported') {

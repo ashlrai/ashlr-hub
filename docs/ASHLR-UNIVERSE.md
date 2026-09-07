@@ -192,6 +192,37 @@ From the built Hub checkout:
    separately limited to 128 KiB total and 64 KiB per file; the complete request,
    including current files and feedback, must still fit the 256 KiB transport cap.
 
+   New feedback-enabled generations also pin `feedbackVersion: 2` in their run
+   records and send a separate `searchContext` block, including on the first
+   request when there is no previous attempt. It contains the fixed metric name,
+   direction and minimum improvement; the retained parent's run/trial occurrence,
+   score and recorded artifact digest; and the previous same-variant outcome's
+   selection result and delta. A seed has no measured baseline score. A passing
+   trial is not necessarily an improvement: replacing an elite requires a
+   positive delta that also meets the minimum improvement.
+
+   Repetition evidence covers completed attempts of the same variant against the
+   current parent occurrence. It includes only the latest 16 eligible attempts,
+   with total count and truncation made explicit. Its matching count includes the
+   latest sampled artifact itself and counts recorded digest matches, not fresh
+   artifact verification or identical evaluator outcomes. It does not skip model
+   requests, cache evaluation, change scheduling, or estimate wasted/saved tokens.
+
+   Each prepared v2 prompt binds this context in its receipt with
+   `search.schemaVersion` and `search.digest`; failures before prompt preparation
+   have no search digest. Store replay independently rebuilds it from the prior run
+   history and retained archive; current or future trials cannot supply prompt
+   evidence. Existing v1 feedback bytes and receipts remain unchanged. Old runs
+   without `feedbackVersion` replay and recover as legacy runs; the version is not
+   retroactively added to their records.
+
+   The SDK exports `buildUniverseSearchContext(summary, variant)`,
+   `validateUniverseSearchContext(value)`, and `searchContextReceipt(context)`.
+   These are pure context helpers, not ledger verification: use a healthy summary
+   from `readUniverseOverview` as the builder input. Runtime replay performs the
+   independent history checks; passing a structural validator alone grants no
+   execution or acceptance authority.
+
 3. Inspect persisted progress from another terminal or the Universe console:
 
    ```sh
@@ -253,7 +284,10 @@ contract. Diagnostics are bounded to 16 entries, 512 characters per message,
 and 8 KiB serialized in total; optional paths must be relative and line numbers
 positive integers. The console displays diagnostic codes only and omits messages
 and private locations. Generation receipts preserve feedback provenance and a
-digest, not an additional copy of the feedback file contents.
+digest, not an additional copy of the feedback file contents. The console also
+shows the search-context version and digest when recorded; it does not display
+an additional copy of prompt content. Receipt validity establishes the supplied
+context, not a measured improvement in model decision quality.
 
 `maxReportedTokens` is an optional stop threshold based on reported consumption,
 not a preventive spending ceiling. Requests can consume tokens before a result
