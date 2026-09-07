@@ -56,10 +56,14 @@ with measured model quality.
   evidence remains below the existing 4 MiB limit.
 - Broad local run passed 831 tests with one stale CLI-help assertion; assertion
   updated for the new command and the entire selected set rerun.
-- Final selected source gates: 832 backend/adjacent, 269 web and 60 release
+- Final selected source gates: 836 backend/adjacent, 269 web and 60 release
   artifact contract tests passed. Full typecheck/scoped lint passed. Browser
   acceptance confirmed desktop/mobile and corrected a narrow worker-name column.
   Exact installed-artifact verification is retained outside the committed source.
+- Final independent review found overflowing JSON numbers could match expected
+  null values. Added bounded finite-number validation and four regressions;
+  the full selected backend set passed again. Preserve earlier artifact evidence
+  separately and rebuild the candidate with the correction before release.
 
 ## Implementation decisions
 

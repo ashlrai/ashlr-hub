@@ -92,6 +92,16 @@ describe('fixed review calibration evaluator', () => {
     result.failedChecks.push('caller mutation');
     expect(evaluateResourceReview('shared-array', '{}').failedChecks).toEqual(['source', 'result', 'sameReference', 'fix']);
   });
+  it.each(['1e309', '-1e309'])('rejects overflowing JSON number %s instead of matching expected null', (number) => {
+    const output = `{"zero":${number},"stringZero":0,"empty":${number},"fix":"nullish-check"}`;
+    expect(evaluateResourceReview('zero-value', output)).toEqual({ passed: false, checksPassed: 0, checksTotal: 4,
+      failedChecks: ['zero', 'stringZero', 'empty', 'fix'], reason: 'invalid-json-contract' });
+  });
+  it.each(['[1e309]', '{"nested":[{"value":-1e309}]}'])('rejects non-finite values throughout the JSON tree: %s', (value) => {
+    const output = `{"first":${value},"second":[30],"last":[50],"fix":"remove-minus-one"}`;
+    expect(evaluateResourceReview('page-boundary', output)).toEqual({ passed: false, checksPassed: 0, checksTotal: 4,
+      failedChecks: ['first', 'second', 'last', 'fix'], reason: 'invalid-json-contract' });
+  });
 });
 
 describe.skipIf(process.platform === 'win32')('resource review benchmark local acceptance', () => {

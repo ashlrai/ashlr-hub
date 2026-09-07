@@ -23,7 +23,7 @@ web tests and lint were run locally. A separate installed-artifact harness check
 archive identity, HTTP authority, task lifecycle and the actual benchmark CLI.
 Exact final counts and results are retained in the handoff; no Actions are used.
 
-Source gates: 832 selected backend/adjacent tests (23 files), 269 web tests
+Source gates: 836 selected backend/adjacent tests (23 files), 269 web tests
 (38 files), 60 release-artifact contract tests (one file); full backend/web
 typecheck, scoped lint and lane membership passed. Full lint had no errors and
 105 existing warnings. Browser acceptance used the real local calibration ledger:
@@ -35,6 +35,9 @@ Temporary viewport/theme changes were restored and the test tab was closed.
 Three real local calibration runs made 18 bounded requests. Each produced six
 completed task receipts, but only two cases fully passed per run. These are real
 local-model measurements, not verified accepted repository changes. See notes.
+Final independent review caught and fixed overflowing JSON numbers being
+canonicalized as null. Four new regressions pass; original real-model reports
+predate that numeric-contract fix, with prompts and expected answers unchanged.
 
 ## Remaining commissioning
 

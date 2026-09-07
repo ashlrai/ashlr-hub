@@ -44,6 +44,20 @@ export interface ResourceReviewEvaluation {
   failedChecks: string[];
   reason: 'matched' | 'answer-mismatch' | 'invalid-json-contract';
 }
+function hasOnlyFiniteJsonNumbers(value: unknown): boolean {
+  const pending: unknown[] = [value]; let visited = 0;
+  while (pending.length) {
+    // Parsed JSON is already limited to 16 KiB. Bound the iterative walk as
+    // well, without recursive traversal of model-provided nesting.
+    if (++visited > 16_384) return false;
+    const current = pending.pop();
+    if (typeof current === 'number' && !Number.isFinite(current)) return false;
+    if (current !== null && typeof current === 'object') {
+      for (const child of Object.values(current)) pending.push(child);
+    }
+  }
+  return true;
+}
 export function evaluateResourceReview(caseId: string, output: string): ResourceReviewEvaluation {
   const test = CASES.find((row) => row.id === caseId);
   if (!test) throw new Error('Unknown resource review case');
@@ -54,6 +68,9 @@ export function evaluateResourceReview(caseId: string, output: string): Resource
     const answer: unknown = JSON.parse(output);
     if (!answer || typeof answer !== 'object' || Array.isArray(answer) ||
         Object.keys(answer).length !== keys.length || !keys.every((key) => Object.hasOwn(answer, key))) return invalid;
+    // JSON.parse can produce Infinity from a large numeric exponent. Canonical
+    // JSON would serialize it as null and falsely match an expected null value.
+    if (!hasOnlyFiniteJsonNumbers(answer)) return invalid;
     const failedChecks = keys.filter((key) => canonical((answer as Record<string, unknown>)[key]) !==
       canonical((test.expected as Record<string, unknown>)[key]));
     const checksPassed = keys.length - failedChecks.length;
