@@ -780,7 +780,7 @@ describe('release artifact contract v1', () => {
     expect(buildRuntimeReleaseDependencyInventory(release.packageRoot)).toMatchObject({ ok: true });
   });
 
-  it.each(['ASHLR-UNIVERSE.md', 'UNIVERSE-RESEARCH.md', 'NORTH-STAR.md', 'RESOURCE-POOLS.md'])(
+  it.each(['README.md', 'QUICKSTART.md', 'ARCHITECTURE.md', 'ASHLR-UNIVERSE.md', 'UNIVERSE-RESEARCH.md', 'NORTH-STAR.md', 'RESOURCE-POOLS.md'])(
     'admits shipped documentation %s without opening arbitrary package paths',
     (documentName) => {
       const release = fixture();
@@ -797,6 +797,22 @@ describe('release artifact contract v1', () => {
         files: [...packageJson.files as string[], 'docs/arbitrary-private-file.md'],
       })}\n`);
       expect(buildRuntimeReleaseDependencyInventory(release.packageRoot)).toMatchObject({ ok: false });
+    },
+  );
+
+  it.each(['docs', 'docs/**', 'docs/../docs/README.md'])(
+    'keeps the curated documentation allowance closed against %s',
+    (declaration) => {
+      const release = fixture();
+      const packagePath = join(release.packageRoot, 'package.json');
+      const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as Record<string, unknown>;
+      writeFileSync(packagePath, `${JSON.stringify({
+        ...packageJson,
+        files: [...packageJson.files as string[], declaration],
+      })}\n`);
+      expect(buildRuntimeReleaseDependencyInventory(release.packageRoot)).toEqual({
+        ok: false, reason: 'release package files declaration is not portable',
+      });
     },
   );
 

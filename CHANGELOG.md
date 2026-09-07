@@ -11,6 +11,19 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Universe commissioning and usable operator documentation
+
+- Keeps occupied task receipts ahead of completed history even when a separately
+  sampled supervisor has already settled or cancelled the work. The fleet map
+  and task desk now share the same occupancy predicate and stable ordering.
+- Adds a canonical documentation map and current-source quickstart. Separates
+  Universe evaluation, resource-pool execution, pinned installation and dormant
+  resident operation; corrects dependency, browser-session and contribution
+  guidance without treating the North Star as completed functionality.
+- Bundles the operator index, quickstart and architecture with local packages.
+  Adds a network-free documentation navigation check for source and installed
+  artifacts, including heading anchors and explicit source-only references.
+
 ### Resource pool operations console
 
 - Adds `ashlr resources pool console` and a scoped `/resources/` operations desk
@@ -58,6 +71,12 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 Verification for this feature runs locally without GitHub Actions. The existing
 3.4.0 release candidate's receipt does not certify these new source changes.
+
+The frozen 3.3.0 record below references `docs/RUNTIME-FLEET-ACTIVATION.md`,
+which is absent from current source. That historical activation description is
+superseded, not a setup procedure. Use [runtime activation authority](docs/RUNTIME_ACTIVATION_AUTHORITY.md)
+and the [current architecture boundary](docs/ARCHITECTURE.md#legacy-fleet-activation-boundary).
+Neither the historical record nor a successful test activates a resident fleet.
 
 ## [3.4.0] — Unreleased — Governed agent-native engineering OS
 

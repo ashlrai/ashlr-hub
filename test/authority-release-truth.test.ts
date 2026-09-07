@@ -32,7 +32,11 @@ describe('emergency authority release truth', () => {
     const failed = releaseBlock('3.3.1');
     const release = releaseBlock('3.3.2');
 
-    expect(releaseBlock('Unreleased').trim()).toBe('## [Unreleased]');
+    // Development entries can accumulate without becoming published-release evidence.
+    const unreleased = releaseBlock('Unreleased');
+    expect(unreleased).toMatch(/Verification[\s\S]{0,80}runs locally without GitHub Actions/);
+    expect(unreleased).toMatch(/receipt does not certify these new source changes/);
+    expect(unreleased).toMatch(/does not activate accounts, publish a registry release, or start a resident\s+scheduler/);
 
     expect(historical).toContain('Fleet activation unblocked, autonomous merge wired, learning loop closed');
     expect(createHash('sha256').update(historical).digest('hex'))
@@ -246,7 +250,7 @@ describe('emergency authority release truth', () => {
       const normalized = source.replace(/^>\s?/gm, '').replace(/\s+/g, ' ');
       expect(source, relativePath).toMatch(/(?:historical|aspirational)[^\n]*design|historical implementation contract/i);
       expect(normalized, relativePath).toMatch(/not current runtime activation guidance/i);
-      expect(normalized, relativePath).toMatch(/compiled daemon and conductor trust roots are empty|compiled conductor trust roots are empty/i);
+      expect(normalized, relativePath).toMatch(/compiled (?:daemon and conductor|conductor) trust roots (?:are|remain) empty/i);
     }
 
     const daemonContract = read('docs/contracts/CONTRACT-M24.md');

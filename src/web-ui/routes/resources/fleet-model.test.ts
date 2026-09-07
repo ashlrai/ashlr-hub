@@ -28,6 +28,22 @@ describe('resource task row projection', () => {
     expect(resourceTaskRows(snapshot).map((row) => row.id)).toEqual(['queued-task', 'owned-task', 'external-task', 'done-task']);
   });
 
+  it.each((['settled', 'cancelled'] as const).flatMap((state) =>
+    (['reserved', 'uncertain'] as const).map((status) => [state, status] as const)))('keeps %s supervisor / %s receipt work ahead of newer history', (state, status) => {
+    const snapshot = fixture();
+    const job = snapshot.supervisor!.jobs[2]!;
+    job.state = state; job.outcome = state === 'settled' ? 'completed' : 'cancelled';
+    job.updatedAt = '2026-09-07T11:00:00.000Z';
+    const receipt = snapshot.recentAttempts.pop()!;
+    snapshot.activeAttempts.push({ ...receipt, status, finishedAt: null });
+    snapshot.recentAttempts.push({ ...receipt, id: 'newer-history', startedAt: '2026-09-07T13:00:00.000Z' });
+    const rows = resourceTaskRows(snapshot);
+    expect(rows.findIndex((row) => row.id === 'done-task')).toBeLessThan(rows.findIndex((row) => row.id === 'newer-history'));
+    const model = buildResourceFleet(snapshot);
+    expect(model.tasks.find((row) => row.id === 'done-task')).toMatchObject({ active: true, receiptOccupied: true, stateDisagreement: true });
+    expect(model.tasks.at(-1)?.id).toBe('newer-history');
+  });
+
   it('matches settled outcome and ownership precedence without mutating frozen input', () => {
     const snapshot = fixture(); const original = JSON.stringify(snapshot); freeze(snapshot);
     const model = buildResourceFleet(snapshot);

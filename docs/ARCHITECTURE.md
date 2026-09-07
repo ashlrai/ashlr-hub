@@ -1,9 +1,36 @@
 # Architecture
 
-ashlr-hub is a single Node binary (`@ashlr/hub`) containing an autonomous agent
-fleet architecture for enrolled git repositories. It is TypeScript/ESM, Node
-22.15+, with zero runtime dependencies in `core/` and `cli/` except
-`@modelcontextprotocol/sdk` (MCP gateway only).
+Hub is the local execution and observation kernel for [Ashlr Universe](NORTH-STAR.md).
+It ships a TypeScript/ESM CLI and SDK plus a React web console, with Node 22.15+
+as the package runtime floor. The backend primarily uses Node builtins and bundles
+three declared runtime dependencies: MCP transport (`@modelcontextprotocol/sdk`),
+Markdown analysis (`marked`) and archive handling (`tar`). The manifest and lockfile
+are the canonical inventory, not this overview.
+
+## Current runtime map
+
+These are separate executable paths, not one automatically commissioned loop:
+
+| Path | Current responsibility | Evidence and boundary | Operator guide |
+|------|------------------------|-----------------------|----------------|
+| `universe` → `src/core/universe/` | Generate local candidates, evaluate artifacts, retain diverse winners, run bounded campaigns and deliver an artifact to a new local branch | Fixed evaluator and persisted lineage; operator/local-model generation. No subscription-pool bridge or automatic remote release | [Universe](ASHLR-UNIVERSE.md) |
+| `resources pool` → `src/core/resources/` | Admit explicit native/local workers against quota, rolling task and shared concurrency limits; supervise a foreground queue | Durable assignments, output and reported usage. Worker completion is not verified engineering acceptance | [Resource Pools](RESOURCE-POOLS.md) |
+| `runtime` → `src/core/local-runtime/` | Install, verify, select and roll back trusted exact local packages | A selected unsigned candidate is not npm publication or resident-service qualification; forwarded commands remain explicitly scoped | [Pinned runtime](ASHLR-UNIVERSE.md#install-a-pinned-local-runtime) |
+| Scoped consoles → `src/core/web/` + `src/web-ui/` | Observe one Universe store or inspect/control one explicit resource pool | Loopback authentication; Universe console is read-only, resource mutations require execution enablement and separate authority | [Universe console](ASHLR-UNIVERSE.md#observe-one-universe-store), [resource console](RESOURCE-POOLS.md#operate-the-resource-console) |
+| General Hub / legacy fleet | Shared configuration, enrolled-repository status, proposal and goal workflows | General dashboard is distinct from the scoped consoles; resident dispatch remains dormant as described below | [General Hub setup](QUICKSTART.md#general-hub-and-legacy-fleet-setup) |
+
+The [North Star](NORTH-STAR.md) is the integrated product objective: useful accepted
+changes per measured token and hour. Do not join Universe measurements to resource
+worker receipts as if an execution/evaluation bridge already exists. Automatic
+effectiveness assessment requires evidence tied to the actual produced artifact,
+not merely a successful process or a populated fleet map.
+
+Ecosystem products retain their repositories and product boundaries. Shared
+contracts connect capabilities; their presence in an architecture map is not proof
+that a provider, desktop controller or cross-product runtime is commissioned.
+See the [source ecosystem design](https://github.com/ashlrai/ashlr-hub/blob/master/docs/AGENT-NATIVE-ECOSYSTEM.md).
+
+## Legacy fleet activation boundary
 
 **Current production boundary:** compiled daemon and conductor trust roots are
 empty. Non-dry `ashlr loop` and daemon starts refuse before effects; only their
@@ -16,7 +43,8 @@ recipe.
 
 ## The autonomous loop
 
-The high-level control flow, end to end:
+The legacy fleet's high-level source flow, not the current Universe/resource
+execution path or an activation recipe:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -106,7 +134,10 @@ Key files:
 
 ## Sandboxed execution — security model
 
-Every external agent CLI is treated as a black box. The containment layers:
+The legacy `runEngineSandboxed` path treats each external engine as a black box.
+The layers below apply to that path; Resource Pool workers instead use an
+explicit `cwd` and native adapter controls, while Universe has its own candidate
+and evaluator isolation profile. Do not infer one path's confinement from another.
 
 **Layer 1 — git worktree isolation** (`src/core/sandbox/worktree.ts`):
 - A throwaway `git worktree` is created for each run. The agent's `cwd` is the worktree, not the live tree.
@@ -268,11 +299,18 @@ from referrer disclosure by `Referrer-Policy: no-referrer`.
 The ticket is signed with the current read token, making restart/token rotation
 an immediate revocation mechanism. Mutations do not accept tickets or client
 proofs and retain their explicit enablement plus an independent raw-header
-token. The browser persists only the read token and non-authority client proof;
-mutation authority is prompted independently for every exact action and is
-discarded after that request rather than retained in JavaScript state.
-Ticket expiry does not revoke the raw read token: that per-process capability
-remains valid until server restart, and a tab retaining it can renew its ticket.
+token. The React console at `/next/` discards the raw read token after its session
+exchange; only the non-authority client proof is stored in `sessionStorage`.
+Cookie plus proof survives reload until ticket expiry, when the user must supply
+the read token again. An explicitly unlocked mutation token is held only in module
+memory with a 20-minute idle expiry; **Lock** clears it immediately.
+
+The separately labelled legacy dashboard at `/` retains its raw read token in tab
+`sessionStorage` for session renewal and prompts independently for mutation
+authority. Do not apply that legacy storage contract to `/next/`. Ticket expiry
+does not revoke the process's raw read token; server restart does. Scoped
+Universe and resource consoles use their own server instances and authority
+surfaces, as documented in their operator guides.
 
 The loopback server intentionally speaks HTTP, so its browser cookie cannot use
 the `Secure` attribute. No forwarded-protocol header is trusted and no CORS
@@ -283,7 +321,13 @@ trusted transport boundary before changing that behavior.
 
 ## The `~/.ashlr/` home layout
 
-All persistent state lives under `~/.ashlr/` (resolved from `os.homedir()` at runtime; never hardcoded). The CLI is the sole writer.
+The general Hub defaults to `~/.ashlr/` (resolved at runtime, never a hardcoded
+personal path). It is not the only supported state root. Universe can select an
+explicit `--root`; Resource Pools use an explicit ledger root and private pool,
+binding and observation files; managed packages use a separate `--store`.
+Keep these stores distinct from source worktrees and from each other. A
+foreground resource console can write its owned queue and ledger through
+authenticated control requests; it is not a read-only CLI-owned store.
 
 ```
 ~/.ashlr/
@@ -344,25 +388,33 @@ root; `ashlr loop --dry-run` remains available.
 6. Kill-switch and daily budget are checked before any dispatch.
 7. Summary printed; exit 0.
 
-### `ashlr inbox approve <id>` (human gate)
+### `ashlr inbox approve <id>` (explicit operator action)
 
-1. `cmdInboxApprove` (`src/cli/inbox.ts`) reads the proposal.
-2. Prompts for confirmation (TTY required; `--yes` skips prompt but still checks TTY).
-3. `setStatus(proposal, 'approved')`.
-4. `applyProposal` (`core/inbox/apply.ts`) applies the diff to the live tree.
-5. If `mergeAuthority` is configured and the proposal carries matching frontier provenance with a valid HMAC + green CI: optionally merges to `main`.
-6. Exit 0.
+1. `cmdInboxApprove` (`src/cli/inbox.ts`) resolves the proposal and checks its state;
+   partial review evidence cannot be applied.
+2. The operator confirms the displayed proposal kind and exact target. Non-TTY
+   invocation requires `--yes`, which records caller intent, not authenticated
+   human identity.
+3. The proposal becomes approved, then `applyProposal` checks its mutation locks,
+   enrollment and kill switch before any effect.
+4. A `patch` proposal is applied through an isolated worktree to a new local
+   `ashlr/proposal/<id>` branch, leaving the user's current branch/index/tree
+   untouched. Other proposal kinds have their own explicitly displayed and gated
+   effects; approval is not inherently a local-only action for every kind.
+5. The result records success or failure. Patch approval does not automatically
+   push or merge the default branch; protected submission and auto-merge are
+   separate entrypoints and authority paths.
 
 ---
 
 ## Design invariants
 
-- **Local-first.** No network call without explicit opt-in (`--allow-cloud`). Genome recall, observability, and the backlog are fully offline.
+- **Local-first.** Network effects belong to explicitly selected command/provider paths. The scoped Universe evaluator denies network; configured local-model generation and native workers have different documented transports. There is no one flag that authorizes every subsystem.
 - **Privacy.** Usage rollups read only token metadata from Claude transcripts — never message content. Phantom is read-only (names/status, never values).
-- **Append-only memory.** The hub store, project genomes, inbox records, and audit log are only ever appended to. Existing entries are never modified or deleted.
+- **Preserve evidence.** Append-only logs retain events and provenance; mutable queue, proposal and selection records use their owning subsystem's persistence contract. Do not confuse a current-state record with immutable history.
 - **Fault tolerance.** Scans, probes, and gateway server starts degrade gracefully — one failure never crashes the whole operation.
 - **Portability.** All home paths resolve from `os.homedir()`; no personal absolute paths in source.
-- **No new runtime deps.** The fleet drives CLIs and APIs the user already has.
+- **Explicit dependency boundary.** The package's declared and bundled dependencies must match its verified inventory; reuse existing utilities before changing that contract.
 
 ---
 
@@ -370,7 +422,7 @@ root; `ashlr loop --dry-run` remains available.
 
 This is a batched, series-level view. For an ID-by-ID lookup (including
 milestone numbers that were spec'd for one thing and shipped as another),
-see [`docs/MILESTONE-INDEX.md`](MILESTONE-INDEX.md).
+see the [source milestone index](https://github.com/ashlrai/ashlr-hub/blob/master/docs/MILESTONE-INDEX.md).
 
 | Milestones | Theme | Primary modules |
 |-----------|-------|-----------------|

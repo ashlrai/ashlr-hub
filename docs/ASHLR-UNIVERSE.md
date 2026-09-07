@@ -20,7 +20,7 @@ node bin/ashlr universe archive --json
 
 The demo creates a private seed repository and two generations under `~/.ashlr/universe`. It compares stable-deduplication implementations using fixed correctness cases and measured source size. Expect passing variants in separate niches, a rejected order-breaking variant, and second-generation parent references. `--root <absolute private directory>` chooses a separate experiment store.
 
-Use `ashlr universe init --manifest <file.json>` to register an experiment and `ashlr universe run <id>` for one generation. `status [id]` and `archive [id]` inspect persisted results. These commands also accept `--root` and `--json`; see the [manifest type](../src/core/universe/types.ts) and `ashlr universe help`. The CLI and JSON results serve engineers and other agents.
+Use `ashlr universe init --manifest <file.json>` to register an experiment and `ashlr universe run <id>` for one generation. `status [id]` and `archive [id]` inspect persisted results. These commands also accept `--root` and `--json`; see the [source manifest type](https://github.com/ashlrai/ashlr-hub/blob/master/src/core/universe/types.ts) and `ashlr universe help`. The CLI and JSON results serve engineers and other agents.
 
 Applications can use the same typed interface via `@ashlr/hub/universe`:
 
