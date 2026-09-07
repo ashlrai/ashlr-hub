@@ -495,6 +495,7 @@ function rootPackageIsPortable(
     'docs/ASHLR-UNIVERSE.md',
     'docs/UNIVERSE-RESEARCH.md',
     'docs/NORTH-STAR.md',
+    'docs/RESOURCE-POOLS.md',
     'docs/RUNTIME_ACTIVATION_AUTHORITY.md',
     'docs/contracts/CONTRACT-M515.md',
     'docs/contracts/CONTRACT-M521.md',

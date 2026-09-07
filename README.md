@@ -49,6 +49,13 @@ the general Hub dashboard. It also runs through the pinned local runtime.
 
 ### Existing fleet runtime
 
+For explicitly enrolled account and local-model tasks, the new
+[resource pool runner](docs/RESOURCE-POOLS.md) combines quota windows, rolling task
+caps, and shared-account concurrency before dispatch. `ashlr resources pool`
+records assignments and reported usage without switching credentials or starting
+a daemon. It is separate from Universe's evaluator and is not yet a commissioned
+unattended multi-account fleet.
+
 ashlr-hub is a single Node binary containing an autonomous agent fleet for enrolled repositories. In the current production build, compiled daemon and conductor trust roots are empty, so live non-dry fleet execution is deliberately dormant; verified dry-run, status, and local-console paths remain available.
 
 When an independently provisioned runtime admits it, the fleet scans your backlog, dispatches sandboxed agent swarms across multiple backends (local Ollama/LM Studio, Claude Code, Codex, any OpenAI-compatible API), and deposits proposed diffs into an **Approval Inbox**. By default, nothing touches a branch until you explicitly approve it. A separate, default-off auto-merge subsystem can be enabled only with explicit authority and fail-closed verification. The kill-switch is a single file.

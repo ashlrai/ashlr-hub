@@ -43,6 +43,10 @@ export const REAL_IO_LANE_TIMEOUT_MS = 60_000;
  * lane by default instead of silently rejoining the flaky pile.
  */
 export const REAL_IO_TEST_FILES = [
+  'test/resource-worker-process.test.ts', // real bounded stdin and process ownership
+  'test/resource-worker.test.ts', // native worker fixtures and numeric-loopback model transport
+  'test/resource-pool-runtime.test.ts', // durable admission, concurrent tasks, and replay
+  'test/resource-pool-cli.test.ts', // explicit private manifests and CLI output files
   'test/universe-core.test.ts', // real Git snapshots and confined experiment subprocesses
   'test/universe-delivery.test.ts', // real Git object/ref delivery and private receipts
   'test/universe-delivery-review.test.ts', // independent Git provenance and historical receipt review

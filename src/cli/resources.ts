@@ -10,8 +10,7 @@
  *   ashlr resources --watch   — refresh every 30s (Ctrl-C to stop)
  */
 
-import { loadConfig } from '../core/config.js';
-import { getResourceSnapshot, type BackendResourceState } from '../core/fabric/resource-monitor.js';
+import type { BackendResourceState } from '../core/fabric/resource-monitor.js';
 
 // ---------------------------------------------------------------------------
 // ANSI color helpers (inline — avoids circular dep on cli/ui.ts)
@@ -160,6 +159,7 @@ function printResourcesHelp(): void {
   console.log(bold('  ashlr resources') + dim(' — per-backend resource control plane (read-only)'));
   console.log('');
   console.log('  Usage: ashlr resources [--json] [--watch]');
+  console.log('         ashlr resources pool status|run|observe --help');
   console.log('');
   console.log(`    ${cyan('ashlr resources')}          ${dim('table view of availability/used%/cap/resets')}`);
   console.log(`    ${cyan('ashlr resources --json')}   ${dim('raw JSON (ResourceSnapshot)')}`);
@@ -168,12 +168,20 @@ function printResourcesHelp(): void {
 }
 
 export async function cmdResources(args: string[]): Promise<number> {
+  if (args[0] === 'pool') {
+    const { cmdResourcePool } = await import('./resource-pool.js');
+    return cmdResourcePool(args.slice(1));
+  }
   if (args.includes('--help') || args.includes('-h')) {
     printResourcesHelp();
     return 0;
   }
   const jsonMode  = args.includes('--json');
   const watchMode = args.includes('--watch');
+
+  // Explicit resource pools never import the default-home legacy monitor/config.
+  const { loadConfig } = await import('../core/config.js');
+  const { getResourceSnapshot } = await import('../core/fabric/resource-monitor.js');
 
   let cfg: unknown;
   try {
@@ -222,6 +230,7 @@ export async function cmdResources(args: string[]): Promise<number> {
  */
 export async function resourceStatusLine(cfg: unknown): Promise<string | null> {
   try {
+    const { getResourceSnapshot } = await import('../core/fabric/resource-monitor.js');
     const snapshot = await getResourceSnapshot(cfg);
     const parts: string[] = [];
 
