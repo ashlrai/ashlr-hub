@@ -6,6 +6,7 @@ import { StatusBadge, type Tone } from '../../components/primitives/StatusBadge.
 import { readResourceTaskOutput } from '../../data/resource-pool-queries.js';
 import { resourceNumber, resourceReason, resourceTime } from './CapacityBoard.js';
 import type { ResourceFleetTask } from './fleet-model.js';
+import { TaskDiagnosis, taskReasonLabel } from './TaskDiagnosis.js';
 import styles from './ResourcePoolView.module.css';
 
 export interface ResourceTaskRow { id: string; job?: ResourceSupervisorJob; receipt?: ResourceTaskReceipt }
@@ -62,10 +63,11 @@ export function TaskInspector({ row, fleetTask, enabled, busy, onCancel }: {
         <div><dt>Worker execution</dt><dd>{executionTime(row.receipt.execution?.durationMs)}</dd></div>
         <div><dt>Token scope</dt><dd>{usageScopeLabel(row.receipt.execution?.usageScope)}</dd></div>
         <div><dt>Reported input tokens</dt><dd>{resourceNumber(row.receipt.inputTokens)}</dd></div><div><dt>Reported output tokens</dt><dd>{resourceNumber(row.receipt.outputTokens)}</dd></div></> : null}
-      <div><dt>Reason</dt><dd>{resourceReason(row.job?.reason ?? row.receipt?.reason ?? 'not-yet-dispatched')}</dd></div>
+      <div><dt>{row.job ? 'Supervisor reason' : 'Receipt reason'}</dt><dd>{taskReasonLabel(row.job ? row.job.reason : row.receipt?.reason)}</dd></div>
       <div><dt>Verified accepted work</dt><dd>Not measured</dd></div>
     </dl>
     {fleetTask?.stateDisagreement ? <p className={styles.warning}>Supervisor and receipt states differ in this snapshot. These sources are sampled separately; refresh to reconcile them.</p> : null}
+    <TaskDiagnosis receipt={row.receipt} />
     {['unresolved', 'uncertain', 'reserved'].includes(taskState(row)) ? <p className={styles.warning}>This reservation is occupancy evidence, not a process heartbeat. The console cannot cancel work it does not currently own.</p> : null}
     {row.job?.cancellable ? <button type="button" className={styles.secondaryButton} disabled={!enabled || busy}
       onClick={() => onCancel(row.id)}>{row.job.state === 'queued' ? 'Cancel queued task' : 'Cancel owned task'}</button> : null}

@@ -12,6 +12,7 @@ import { MAX_RESOURCE_OBSERVATION_WINDOWS, RESOURCE_OBSERVATION_OVERFLOW, planRe
   type ResourceAssignmentPlan, type ResourceObservation, type ResourcePool } from './pool-policy.js';
 import { executeResourceWorker, validateResourceBindings, type ResourceBinding, type ResourceWorkerTask } from './worker.js';
 import { resourceUsageScopeForProvider, validResourceExecutionDuration, validResourceExecutionMeasurement, type ResourceExecutionMeasurement } from './performance.js';
+import { RESOURCE_NATIVE_PROCESS_SIGNALS, validResourceNativeProcessForReceipt, type ResourceNativeProcessDiagnostic } from './native-diagnostics.js';
 
 const MAX_STATE_BYTES = 4 * 1024 * 1024;
 const MAX_ATTEMPTS = 4_096;
@@ -41,6 +42,8 @@ export interface ResourceTaskReceipt {
   verifiedAccepted: false;
   /** Absent on legacy receipts. No wall-clock-derived timing is backfilled. */
   execution?: ResourceExecutionMeasurement;
+  /** Optional native invocation facts. Legacy receipts are never reconstructed from current host state. */
+  nativeProcess?: ResourceNativeProcessDiagnostic;
 }
 interface PoolState {
   schemaVersion: 1;
@@ -143,7 +146,8 @@ function inspectRoot(root: string, create: boolean): boolean {
 function checkedReceipt(value: unknown, stateDigest: string, bindings: ResourceBinding[], pool: ResourcePool): value is ResourceTaskReceipt {
   if (!object(value) || !exact(value, ['schemaVersion', 'id', 'taskDigest', 'poolDigest', 'workerId', 'capacityKey',
     'status', 'startedAt', 'finishedAt', 'outputDigest', 'inputTokens', 'outputTokens', 'reason', 'verifiedAccepted',
-    ...(Object.hasOwn(value, 'execution') ? ['execution'] : [])]) ||
+    ...(Object.hasOwn(value, 'execution') ? ['execution'] : []),
+    ...(Object.hasOwn(value, 'nativeProcess') ? ['nativeProcess'] : [])]) ||
     value.schemaVersion !== 1 || typeof value.id !== 'string' || !ID.test(value.id) ||
     typeof value.taskDigest !== 'string' || !HASH.test(value.taskDigest) || value.poolDigest !== stateDigest ||
     !bindings.some((binding) => binding.workerId === value.workerId && binding.capacityKey === value.capacityKey) ||
@@ -155,9 +159,11 @@ function checkedReceipt(value: unknown, stateDigest: string, bindings: ResourceB
     value.verifiedAccepted !== false || Object.hasOwn(value, 'execution') &&
       (!validResourceExecutionMeasurement(value.execution) || value.status === 'reserved' ||
         value.execution.usageScope !== null && value.inputTokens === null)) return false;
-  if (value.status === 'reserved') return value.finishedAt === null && value.outputDigest === null && value.inputTokens === null;
+  if (value.status === 'reserved') return value.finishedAt === null && value.outputDigest === null && value.inputTokens === null &&
+    !Object.hasOwn(value, 'nativeProcess');
   const worker = pool.workers.find((candidate) => candidate.id === value.workerId);
   if (!worker) return false;
+  if (Object.hasOwn(value, 'nativeProcess') && !validResourceNativeProcessForReceipt(value.nativeProcess, value.status, worker.provider)) return false;
   if (value.execution !== undefined && (!validResourceExecutionMeasurement(value.execution) ||
     value.execution.usageScope !== null && value.execution.usageScope !== resourceUsageScopeForProvider(worker.provider))) return false;
   return value.finishedAt !== null && (value.status !== 'completed' || value.outputDigest !== null);
@@ -195,6 +201,37 @@ function writeState(root: string, state: PoolState): void {
   } finally {
     if (fd !== undefined) closeSync(fd);
     try { unlinkSync(temporary); } catch { /* Only this transaction's private temporary file. */ }
+  }
+}
+
+/** Budget future evidence before contact; never turn settlement into another admission gate. */
+function requireSettlementHeadroom(state: PoolState, pool: ResourcePool): void {
+  // A nonnegative IEEE-754 value can need 17 significant digits plus the seven
+  // characters preceding them at the smallest non-exponential decimal scale.
+  // This actual valid sample has that maximal JSON width (24 characters).
+  const widestNumber = 1.0000000000000002e-6;
+  const widestDate = new Date(8_640_000_000_000_000).toISOString();
+  const quotaDate = '9999-12-31T23:59:59.999Z';
+  const longestSignal = RESOURCE_NATIVE_PROCESS_SIGNALS.reduce((longest, signal) => signal.length > longest.length ? signal : longest);
+  const attempts = state.attempts.map((receipt) => {
+    if (receipt.status !== 'reserved') return receipt;
+    const provider = pool.workers.find((worker) => worker.id === receipt.workerId)!.provider;
+    return { ...receipt, status: 'completed', finishedAt: widestDate, outputDigest: '0'.repeat(64),
+      inputTokens: Number.MAX_SAFE_INTEGER, outputTokens: Number.MAX_SAFE_INTEGER,
+      reason: 'x'.repeat(120), execution: { schemaVersion: 1, scope: 'worker-execution',
+        durationMs: widestNumber, usageScope: resourceUsageScopeForProvider(provider) },
+      ...(provider === 'local' ? {} : { nativeProcess: { schemaVersion: 1, scope: 'native-process',
+        exitCode: null, signal: longestSignal, stderrPresent: false, outputTruncated: false } }) };
+  });
+  // Other admissions can persist quota refreshes while these tasks run. Reserve
+  // the bounded enrollment inventory as well, including native result events.
+  // These are byte envelopes, not accepted observations or fabricated receipts.
+  const observations = pool.workers.map((worker) => ({ workerId: worker.id, observedAt: quotaDate,
+    expiresAt: quotaDate, updatedAt: quotaDate, health: 'unavailable', retryAfter: quotaDate,
+    windows: Array.from({ length: MAX_RESOURCE_OBSERVATION_WINDOWS }, (_, index) => ({
+      id: String(index).padStart(64, '0'), usedPercent: widestNumber, resetsAt: quotaDate })) }));
+  if (Buffer.byteLength(canonical({ ...state, attempts, observations }) + '\n') > MAX_STATE_BYTES) {
+    throw new Error('Resource ledger settlement capacity reached');
   }
 }
 
@@ -367,6 +404,7 @@ export async function runResourceTask(options: { root: string; pool: ResourcePoo
       workerId: binding.workerId, capacityKey: binding.capacityKey, status: 'reserved', startedAt: new Date().toISOString(),
       finishedAt: null, outputDigest: null, inputTokens: null, outputTokens: null, reason: 'task-reserved', verifiedAccepted: false };
     state.attempts.push(receipt);
+    requireSettlementHeadroom(state, pool);
     return { receipt, plan: assignment, replayed: false };
   });
   if (!admission.receipt || admission.replayed) return { ...admission, output: null };
@@ -384,7 +422,8 @@ export async function runResourceTask(options: { root: string; pool: ResourcePoo
   const receipt: ResourceTaskReceipt = { ...reserved, status: result.status, finishedAt,
     outputDigest: result.output ? digest(result.output) : null, inputTokens: knownUsage ? result.inputTokens : null,
     outputTokens: knownUsage ? result.outputTokens : null,
-    reason: result.reason, execution: { schemaVersion: 1, scope: 'worker-execution',
+    reason: result.reason, ...(result.nativeProcess === undefined ? {} : { nativeProcess: { ...result.nativeProcess } }),
+    execution: { schemaVersion: 1, scope: 'worker-execution',
       durationMs: validResourceExecutionDuration(elapsed) ? elapsed : null, usageScope: result.usageScope ?? null } };
   if (!checkedReceipt(receipt, poolDigest, bindings, pool)) throw new Error('Resource worker returned invalid settlement evidence');
   transaction(root, pool, bindings, poolDigest, (state) => {

@@ -4,6 +4,7 @@ import type { ResourceBinding } from '../resources/worker.js';
 import type { ResourceTaskReceipt, resourcePoolStatus } from '../resources/pool-runtime.js';
 import { buildResourcePerformance, resourceUsageScopeForProvider, validateResourcePerformanceReport,
   validResourceExecutionMeasurement } from '../resources/performance.js';
+import { validResourceNativeProcessForReceipt } from '../resources/native-diagnostics.js';
 
 export const MAX_RESOURCE_CONSOLE_RESPONSE_BYTES = 4 * 1024 * 1024;
 export const MAX_RESOURCE_CONSOLE_RECENT_ATTEMPTS = 100;
@@ -87,7 +88,8 @@ function receipt(row: ResourceTaskReceipt): ResourceTaskReceipt {
     workerId: row.workerId, capacityKey: row.capacityKey, status: row.status, startedAt: row.startedAt,
     finishedAt: row.finishedAt, outputDigest: row.outputDigest, inputTokens: row.inputTokens,
     outputTokens: row.outputTokens, reason: row.reason, verifiedAccepted: false,
-    ...(row.execution === undefined ? {} : { execution: { ...row.execution } }) };
+    ...(row.execution === undefined ? {} : { execution: { ...row.execution } }),
+    ...(row.nativeProcess === undefined ? {} : { nativeProcess: { ...row.nativeProcess } }) };
 }
 
 /** Pure projection of one validated ledger sample; no process liveness or provider polling. */
@@ -133,8 +135,10 @@ export function projectResourceConsoleEvidence(pool: ResourcePool, bindings: Res
 
 function validateReceipt(value: unknown, pool: ResourceConsoleEvidence['pool']): asserts value is ResourceTaskReceipt {
   const hasExecution = value !== null && typeof value === 'object' && Object.hasOwn(value, 'execution');
+  const hasNativeProcess = value !== null && typeof value === 'object' && Object.hasOwn(value, 'nativeProcess');
   object(value, ['schemaVersion', 'id', 'taskDigest', 'poolDigest', 'workerId', 'capacityKey', 'status', 'startedAt',
-    'finishedAt', 'outputDigest', 'inputTokens', 'outputTokens', 'reason', 'verifiedAccepted', ...(hasExecution ? ['execution'] : [])]);
+    'finishedAt', 'outputDigest', 'inputTokens', 'outputTokens', 'reason', 'verifiedAccepted', ...(hasExecution ? ['execution'] : []),
+    ...(hasNativeProcess ? ['nativeProcess'] : [])]);
   const worker = pool.workers.find((row) => row.id === value.workerId);
   if (value.schemaVersion !== 1 || typeof value.id !== 'string' || !ID.test(value.id) ||
     !worker || worker.capacityKey !== value.capacityKey || typeof value.status !== 'string' || !STATUSES.includes(value.status) ||
@@ -146,6 +150,7 @@ function validateReceipt(value: unknown, pool: ResourceConsoleEvidence['pool']):
     typeof value.reason !== 'string' || !/^[a-z0-9-]{1,120}$/.test(value.reason) || value.verifiedAccepted !== false) invalid();
   if (hasExecution && (!validResourceExecutionMeasurement(value.execution) || value.status === 'reserved' ||
     value.execution.usageScope !== null && (value.inputTokens === null || value.execution.usageScope !== resourceUsageScopeForProvider(worker.provider)))) invalid();
+  if (hasNativeProcess && !validResourceNativeProcessForReceipt(value.nativeProcess, value.status, worker.provider)) invalid();
   if (value.status === 'reserved') {
     if (value.finishedAt !== null || value.inputTokens !== null || value.outputDigest !== null) invalid();
   } else if (!iso(value.finishedAt) || value.finishedAt < value.startedAt || value.status === 'completed' && value.outputDigest === null) invalid();

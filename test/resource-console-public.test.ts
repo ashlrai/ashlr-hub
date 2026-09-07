@@ -25,6 +25,52 @@ function source(attempts: ResourceTaskReceipt[] = []): ReturnType<typeof resourc
 }
 const project = (rows: ResourceTaskReceipt[] = []) => projectResourceConsoleEvidence(pool, bindings, source(rows));
 const parse = (value: unknown) => validateResourceConsoleResponse(JSON.stringify(value), pool, bindings);
+const nativeProcess = () => ({ schemaVersion: 1 as const, scope: 'native-process' as const, exitCode: 1,
+  signal: null, stderrPresent: true, outputTruncated: false });
+
+describe('native process diagnostic public boundary', () => {
+  it('round trips only bounded metadata without reinterpreting failure as accepted work', () => {
+    const row = { ...attempt('native-failure', 'failed'), nativeProcess: nativeProcess(), reason: 'worker-exit-failed',
+      inputTokens: null, outputTokens: null, stderr: 'PRIVATE_PROVIDER_DIAGNOSTIC', command: '/private/native' };
+    const value = project([row]);
+    expect(parse(value).recentAttempts[0]?.nativeProcess).toEqual(nativeProcess());
+    expect(value.recentAttempts[0]).toMatchObject({ status: 'failed', verifiedAccepted: false, inputTokens: null });
+    expect(serializeResourceConsoleEvidence(value, pool, bindings)).not.toMatch(/PRIVATE_PROVIDER_DIAGNOSTIC|\/private\/native|"stderr"/);
+    row.nativeProcess.exitCode = 2;
+    expect(value.recentAttempts[0]?.nativeProcess?.exitCode).toBe(1);
+  });
+  it('keeps legacy absence absent', () => { expect(parse(project([attempt('old')])).recentAttempts[0]).not.toHaveProperty('nativeProcess'); });
+  it.each([
+    ['raw stderr', { ...nativeProcess(), stderr: 'PRIVATE_PROVIDER_DIAGNOSTIC' }],
+    ['raw error', { ...nativeProcess(), error: '/private/credential' }],
+    ['unknown signal', { ...nativeProcess(), signal: 'SECRET' }],
+    ['synthetic negative exit', { ...nativeProcess(), exitCode: -1 }],
+    ['oversized exit', { ...nativeProcess(), exitCode: 256 }],
+    ['fractional exit', { ...nativeProcess(), exitCode: 0.5 }],
+    ['wrong scope', { ...nativeProcess(), scope: 'provider-response' }],
+    ['null extension', null],
+  ])('rejects %s', (_label, diagnostic) => {
+    const value = project([attempt('failure', 'failed')]);
+    Object.assign(value.recentAttempts[0]!, { nativeProcess: diagnostic });
+    expect(() => parse(value)).toThrow();
+  });
+  it.each(['completed', 'timed-out', 'cancelled', 'uncertain', 'reserved'] as const)(
+    'rejects native exit1 contradicting %s', (status) => {
+      const value = project([attempt('contradiction', status)]);
+      Object.assign((value.activeAttempts[0] ?? value.recentAttempts[0])!, { nativeProcess: nativeProcess() });
+      expect(() => parse(value)).toThrow();
+    });
+  it('rejects native process evidence on a local worker', () => {
+    const localPool: ResourcePool = { ...pool, workers: [{ ...worker, id: 'local', provider: 'local' }] };
+    const localBindings: ResourceBinding[] = [{ workerId: 'local', capacityKey: 'local', kind: 'local-chat', endpoint: 'http://127.0.0.1:11434/v1' }];
+    const localSource = source([{ ...attempt('local-failure', 'failed'), workerId: 'local', capacityKey: 'local' }]);
+    localSource.plan = planResourceAssignment({ pool: localPool, observations: [], allowedWorkerIds: ['local'],
+      activeCounts: {}, taskReservationCounts: {}, nowMs: NOW });
+    const value = projectResourceConsoleEvidence(localPool, localBindings, localSource);
+    Object.assign(value.recentAttempts[0]!, { nativeProcess: nativeProcess() });
+    expect(() => validateResourceConsoleResponse(JSON.stringify(value), localPool, localBindings)).toThrow();
+  });
+});
 
 describe('resource console public evidence projection', () => {
   it('deduplicates occupied shared capacity and keeps uncertain attempts active despite finishedAt', () => {

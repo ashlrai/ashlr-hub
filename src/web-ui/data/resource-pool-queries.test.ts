@@ -20,6 +20,32 @@ async function query(value?: unknown) {
 }
 beforeEach(() => { vi.clearAllMocks(); });
 
+describe('optional native execution response boundary', () => {
+  const diagnostic = { schemaVersion: 1, scope: 'native-process', exitCode: 1, signal: null,
+    stderrPresent: true, outputTruncated: false };
+  async function withDiagnostic(nativeProcess: unknown, status = 'failed', workerId = 'codex-a') {
+    const { snapshot } = resourceFixture();
+    read.mockResolvedValue({ ...snapshot, recentAttempts: [{ id: 'diagnostic', workerId, status, nativeProcess }] });
+    return resourceConsoleSnapshotQuery(snapshot.pool.id).fetch();
+  }
+  it('accepts bounded native failure metadata without extra requests', async () => {
+    await expect(withDiagnostic(diagnostic)).resolves.toBeDefined();
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(read).toHaveBeenCalledWith('/api/resources', undefined);
+  });
+  it.each([null, undefined, { ...diagnostic, stderr: 'PRIVATE_PROVIDER_TEXT' }, { ...diagnostic, exitCode: -1 },
+    { ...diagnostic, signal: 'PRIVATE_SIGNAL' }, { ...diagnostic, scope: 'other' }])('rejects malformed diagnostics %#', async (value) => {
+    await expect(withDiagnostic(value)).rejects.toThrow('did not match the selected pool');
+  });
+  it.each(['completed', 'timed-out', 'cancelled', 'uncertain', 'reserved', 'unknown'])(
+    'rejects exit1 contradicting %s', async (status) => {
+      await expect(withDiagnostic(diagnostic, status)).rejects.toThrow('did not match the selected pool');
+    });
+  it.each(['local-a', 'orphan'])('rejects native diagnostics for %s', async (workerId) => {
+    await expect(withDiagnostic(diagnostic, 'failed', workerId)).rejects.toThrow('did not match the selected pool');
+  });
+});
+
 describe('optional native quota response boundary', () => {
   it.each([undefined, null])('preserves legacy absence %#', async (value) => { await expect(query(value)).resolves.toBeDefined(); });
   it('accepts a bounded enrolled-Codex snapshot and forwards only the existing fixed endpoint', async () => {

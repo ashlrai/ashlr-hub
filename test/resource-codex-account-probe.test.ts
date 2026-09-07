@@ -57,8 +57,8 @@ reader.on('line', (line) => {
  if (config.rawAt===request.id) {process.stdout.write(config.raw);return;}
  if (config.bytesAt===request.id) {process.stdout.write(Buffer.from(config.bytes));return;}
  if (config.errorAt===request.id) {write({id:request.id,error:{code:-1,message:'PRIVATE_ERROR '+${JSON.stringify(EMAIL)}}});return;}
- if (config.requestAt===request.id) {write({id:'native-request',method:'account/chatgptAuthTokens/refresh',params:{PRIVATE_SECRET:'do-not-expose'}});return;}
- if (config.notificationsAt===request.id) for(let i=0;i<(config.notificationCount||1);i++) write({method:config.notificationMethod||'fixture/notice',params:{PRIVATE_SECRET:'do-not-expose'}});
+ if (config.requestAt===request.id) {write({id:'native-request',method:'account/chatgptAuthTokens/refresh',params:{PRIVATE_SECRET:'do-not-expose'},...config.requestExtra});return;}
+ if (config.notificationsAt===request.id) for(let i=0;i<(config.notificationCount||1);i++) write({method:config.notificationMethod||'fixture/notice',params:{PRIVATE_SECRET:'do-not-expose'},...config.notificationExtra});
  const result=request.id===1?init:request.id===2?account:request.id===3?quota:after;
  write({id:config.wrongIdAt===request.id?999:request.id,result});
  if (config.duplicateAt===request.id) write({id:request.id,result});
@@ -170,6 +170,36 @@ describe('explicit Codex metadata protocol and identity hints', () => {
     const result = await probeCodexResourceAccount(options({ notificationsAt: 3, notificationMethod: 'account/updated' }));
     expect(result).toMatchObject({ status: 'failed', reason: 'probe-account-changed', observation: null });
   });
+
+  it.each([1, 2, 3, 4])('accepts timestamped native notifications at protocol step %s without changing quota freshness', async (notificationsAt) => {
+    const result = await probeCodexResourceAccount(options({ notificationsAt, notificationMethod: 'remoteControl/status/changed',
+      notificationExtra: { emittedAtMs: 1_000 } }, { expectedAccountHint: HINT }));
+    expect(result).toMatchObject({ status: 'observed', reason: 'probe-observed', accountHint: HINT });
+    expect(result.observation?.observedAt).toBe(result.startedAt);
+    expect(result.observation?.updatedAt).toBe(result.startedAt);
+    expect(Date.parse(result.observation!.expiresAt)).toBe(Date.parse(result.startedAt) + 60_000);
+    expect(invocation().requests.map((request) => request.method)).toEqual([
+      'initialize', 'initialized', 'account/read', 'account/rateLimits/read', 'account/read',
+    ]);
+    for (const secret of ['PRIVATE_SECRET', 'emittedAtMs', EMAIL]) expect(JSON.stringify(result)).not.toContain(secret);
+  });
+
+  it.each([0, Number.MAX_SAFE_INTEGER])('accepts a safe notification timestamp boundary %s', async (emittedAtMs) => {
+    expect(await probeCodexResourceAccount(options({ notificationsAt: 2, notificationExtra: { emittedAtMs } })))
+      .toMatchObject({ status: 'observed', reason: 'probe-observed', accountHint: HINT });
+  });
+
+  it('still rejects an account-updated notification with an emission timestamp', async () => {
+    expect(await probeCodexResourceAccount(options({ notificationsAt: 3, notificationMethod: 'account/updated',
+      notificationExtra: { emittedAtMs: 1_000 } }))).toMatchObject({ status: 'failed', reason: 'probe-account-changed', observation: null });
+  });
+
+  it('still checks a pinned account after accepting notification metadata', async () => {
+    const result = await probeCodexResourceAccount(options({ notificationsAt: 2, notificationExtra: { emittedAtMs: 1_000 } },
+      { expectedAccountHint: 'a'.repeat(64) }));
+    expect(result).toMatchObject({ status: 'failed', reason: 'probe-account-hint-mismatch', observation: null });
+    expect(invocation().requests.map((request) => request.method)).not.toContain('account/rateLimits/read');
+  });
 });
 
 describe('bounded Codex protocol and quota failures', () => {
@@ -190,6 +220,33 @@ describe('bounded Codex protocol and quota failures', () => {
     const result = await probeCodexResourceAccount(options({ requestAt }));
     expect(result).toMatchObject({ status: 'failed', reason: 'probe-server-request-refused', observation: null });
     expect(invocation().requests.every((request) => !Object.hasOwn(request, 'result') && !Object.hasOwn(request, 'error'))).toBe(true);
+  });
+  it.each([1, 2, 3, 4])('refuses timestamped server/token requests at protocol step %s', async (requestAt) => {
+    const result = await probeCodexResourceAccount(options({ requestAt, requestExtra: { emittedAtMs: 1_000 } }));
+    expect(result).toMatchObject({ status: 'failed', reason: 'probe-server-request-refused', observation: null });
+    expect(invocation().requests.every((request) => !Object.hasOwn(request, 'result') && !Object.hasOwn(request, 'error'))).toBe(true);
+  });
+  it.each([null, '1000', true, [], {}, -1, 0.5, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects malformed notification timestamps %#', async (emittedAtMs) => {
+      expect(await probeCodexResourceAccount(options({ notificationsAt: 2, notificationExtra: { emittedAtMs } })))
+        .toMatchObject({ status: 'failed', reason: 'probe-protocol-invalid', observation: null });
+    });
+  it('rejects a non-finite decoded notification timestamp', async () => {
+    expect(await probeCodexResourceAccount(options({ rawAt: 2,
+      raw: '{"method":"fixture/notice","params":{},"emittedAtMs":1e400}\n' })))
+      .toMatchObject({ status: 'failed', reason: 'probe-protocol-invalid', observation: null });
+  });
+  it('still rejects unknown notification metadata beside a valid timestamp', async () => {
+    expect(await probeCodexResourceAccount(options({ notificationsAt: 2, notificationExtra: { emittedAtMs: 1_000, unexpected: true } })))
+      .toMatchObject({ status: 'failed', reason: 'probe-protocol-invalid', observation: null });
+  });
+  it('does not relax response envelopes to accept notification metadata', async () => {
+    expect(await probeCodexResourceAccount(options({ rawAt: 1, raw: JSON.stringify({ id: 1, result: INIT, emittedAtMs: 1_000 }) + '\n' })))
+      .toMatchObject({ status: 'failed', reason: 'probe-protocol-invalid', observation: null });
+  });
+  it('still rejects malformed quota following timestamped notifications', async () => {
+    expect(await probeCodexResourceAccount(options({ notificationsAt: 3, notificationExtra: { emittedAtMs: 1_000 }, quota: {} })))
+      .toMatchObject({ status: 'failed', reason: 'probe-quota-invalid', observation: null });
   });
   it.each(['[]\n', '{}\n', '{broken}\n', '{"id":1,"result":{},"error":{}}\n'])('rejects malformed native envelopes %#', async (raw) => {
     expect(await probeCodexResourceAccount(options({ rawAt: 1, raw }))).toMatchObject({
