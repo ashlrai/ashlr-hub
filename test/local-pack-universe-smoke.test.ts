@@ -21,7 +21,8 @@ afterEach(() => {
 });
 
 /** Source-backed package wrappers test the exact smoke program without npm install. */
-function fixture(options: { sdkOverride?: string; ignoreInvalidFlags?: boolean; ignorePortfolioInvalidFlags?: boolean } = {}) {
+function fixture(options: { sdkOverride?: string; ignoreInvalidFlags?: boolean; ignorePortfolioInvalidFlags?: boolean;
+  ignoreComparisonInvalidFlags?: boolean } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pack-universe-')));
   scratch.push(root);
   const installed = join(root, 'install');
@@ -37,6 +38,7 @@ function fixture(options: { sdkOverride?: string; ignoreInvalidFlags?: boolean; 
   writeFileSync(bin, `#!/usr/bin/env node\nimport { cmdUniverse } from ${JSON.stringify(cli)};\n` +
     (options.ignoreInvalidFlags ? "if (process.argv.includes('--unexpected')) { console.log('{}'); process.exit(0); }\n" : '') +
     (options.ignorePortfolioInvalidFlags ? "if (process.argv[3] === 'portfolio' && process.argv.includes('--unexpected')) { console.log('{}'); process.exit(0); }\n" : '') +
+    (options.ignoreComparisonInvalidFlags ? "if (process.argv[3] === 'compare' && process.argv.includes('--unexpected')) { console.log('{}'); process.exit(0); }\n" : '') +
     "if (process.argv[2] !== 'universe') throw new Error('Unexpected smoke command');\n" +
     'process.exitCode = await cmdUniverse(process.argv.slice(3));\n');
   chmodSync(bin, 0o755);
@@ -67,7 +69,8 @@ describe('installed Universe package smoke', () => {
 
   it.each(['runUniverseCampaign', 'deliverUniverseElite', 'readUniverseGraph', 'traverseUniverseGraph',
     'validateUniversePortfolioDefinition', 'readUniversePortfolioPlan', 'buildUniversePortfolioPlan', 'runUniversePortfolio',
-    'buildUniverseSearchContext', 'validateUniverseSearchContext', 'searchContextReceipt'])('rejects missing public SDK export %s before creating the smoke store', (name) => {
+    'buildUniverseSearchContext', 'validateUniverseSearchContext', 'searchContextReceipt',
+    'buildUniverseCampaignComparison', 'readUniverseCampaignComparison'])('rejects missing public SDK export %s before creating the smoke store', (name) => {
     const { smokeRoot, run } = fixture({ sdkOverride: `export const ${name} = undefined;` });
     const result = run();
     expect(result.status).toBe(1);
@@ -114,6 +117,26 @@ describe('installed Universe package smoke', () => {
     expect(result.stderr).toContain('Installed Universe command failed');
     expect(result.stderr).toContain('portfolio plan');
     expect(result.stderr).toContain('--unexpected');
+  });
+
+  it('detects comparison observation that creates a missing store', () => {
+    const sdk = pathToFileURL(resolve('src/core/universe/index.ts')).href;
+    const { run } = fixture({ sdkOverride:
+      `import { readUniverseCampaignComparison as originalRead } from ${JSON.stringify(sdk)};\n` +
+      "import { mkdirSync } from 'node:fs';\n" +
+      'export function readUniverseCampaignComparison(baseline, challenger, options) { const result = originalRead(baseline, challenger, options); ' +
+      'mkdirSync(options.root, { recursive: true, mode: 0o700 }); return result; }' });
+    const result = run();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('Status reads must not create a missing store');
+  });
+
+  it('rejects a comparison CLI that treats invalid flags as success', () => {
+    const { run } = fixture({ ignoreComparisonInvalidFlags: true });
+    const result = run();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('Installed Universe command failed');
+    expect(result.stderr).toContain('compare pack-sdk pack-cli --unexpected');
   });
 
   it('rejects a portfolio entrypoint that claims dispatch of a stopped campaign', () => {

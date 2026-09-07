@@ -76,7 +76,8 @@ async function verifyInstalledUniverse(fixtureRoot, bin) {
     'readUniverseDeliveries', 'validUniverseDeliveryBranch', 'buildUniverseGraph',
     'readUniverseGraph', 'traverseUniverseGraph', 'validateUniversePortfolioDefinition',
     'readUniversePortfolioPlan', 'buildUniversePortfolioPlan', 'runUniversePortfolio',
-    'buildUniverseSearchContext', 'validateUniverseSearchContext', 'searchContextReceipt']) {
+    'buildUniverseSearchContext', 'validateUniverseSearchContext', 'searchContextReceipt',
+    'buildUniverseCampaignComparison', 'readUniverseCampaignComparison']) {
     assert.equal(typeof sdk[name], 'function', `Universe SDK export missing: ${name}`);
   }
   mkdirSync(fixtureRoot, { mode: 0o700 });
@@ -103,6 +104,13 @@ async function verifyInstalledUniverse(fixtureRoot, bin) {
   assert.equal(missingPlan.nodes[0].state, 'unavailable');
   assert.deepEqual(stablePlan(json(['portfolio', 'plan', '--manifest', portfolioPath, '--root', missing], 1)),
     stablePlan(missingPlan), 'Installed SDK and CLI must agree on a missing portfolio source');
+  const missingComparison = sdk.readUniverseCampaignComparison('pack-sdk', 'pack-cli', { root: missing });
+  assert.equal(missingComparison.sourceState, 'missing');
+  assert.equal(missingComparison.authority, 'observation-only');
+  assert.equal(missingComparison.matching.comparable, false);
+  assert.equal(missingComparison.acceptedChanges, null);
+  assert.deepEqual(stablePlan(json(['compare', 'pack-sdk', 'pack-cli', '--root', missing], 1)),
+    stablePlan(missingComparison), 'Installed SDK and CLI must agree on a missing comparison source');
   assert.equal(sdk.readUniverseOverview({ root: missing }).sourceState, 'missing');
   assert.equal(sdk.readUniverseCampaigns({ root: missing }).sourceState, 'missing');
   assert.equal(sdk.readUniverseDeliveries('pack-universe', { root: missing }).sourceState, 'missing');
@@ -118,6 +126,7 @@ async function verifyInstalledUniverse(fixtureRoot, bin) {
   assert.match(cli(['deliveries', '--help']), /deliver/);
   assert.match(cli(['graph', '--help']), /ancestors/);
   assert.match(cli(['portfolio', '--help']), /foreground/);
+  assert.match(cli(['compare', '--help']), /baseline/i);
   assert.equal(typeof json(['status', '--unexpected', '--root', missing], 2).error, 'string');
   assert.equal(typeof json(['campaign', 'run', '--unexpected', '--root', missing], 2).error, 'string');
   assert.equal(typeof json(['deliver', 'pack-universe', '--unexpected', '--root', missing], 2).error, 'string');
@@ -125,6 +134,8 @@ async function verifyInstalledUniverse(fixtureRoot, bin) {
   assert.equal(typeof json(['portfolio', 'plan', '--manifest', portfolioPath, '--unexpected', '--root', missing], 2).error, 'string');
   assert.equal(typeof json(['portfolio', 'run', '--manifest', portfolioPath, '--manifest', portfolioPath, '--root', missing], 2).error, 'string');
   assert.equal(typeof json(['portfolio', 'run', '--root', missing], 2).error, 'string');
+  assert.equal(typeof json(['compare', 'pack-sdk', 'pack-cli', '--unexpected', '--root', missing], 2).error, 'string');
+  assert.equal(typeof json(['compare', 'pack-sdk', 'pack-sdk', '--root', missing], 2).error, 'string');
   assert.equal(existsSync(missing), false, 'Invalid CLI flags must not create a store');
 
   const seed = join(fixtureRoot, 'seed');
@@ -205,6 +216,24 @@ async function verifyInstalledUniverse(fixtureRoot, bin) {
     assertIdle(json(['campaign', 'stop', 'pack-cli', '--root', root]), 'stopped');
     assertIdle(json(['campaign', 'resume', 'pack-cli', '--root', root]), 'stopped');
     assert.equal(json(['campaign', 'status', '--root', root]).campaigns.length, 2);
+    const comparisonBefore = sdk.readUniverseOverview({ root });
+    const comparison = sdk.readUniverseCampaignComparison('pack-sdk', 'pack-cli', { root });
+    assert.equal(comparison.sourceState, 'healthy');
+    assert.equal(comparison.measurementScope, 'local-experiment');
+    assert.equal(comparison.authority, 'observation-only');
+    assert.equal(comparison.matching.comparable, false, 'Stopped empty campaigns cannot establish matched yield');
+    assert.equal(comparison.acceptedChanges, null);
+    for (const arm of [comparison.baseline, comparison.challenger]) {
+      assert.equal(arm.counts.attempts, 0);
+      assert.equal(arm.rates.improvementsPerMillionTokens, null);
+      assert.equal(arm.rates.distinctSelectedArtifactsPerHour, null);
+      assert.equal(arm.acceptedChanges, null);
+    }
+    assert.deepEqual(stablePlan(json(['compare', 'pack-sdk', 'pack-cli', '--root', root], 1)),
+      stablePlan(comparison), 'Installed SDK and CLI must expose the same comparison');
+    assert.deepEqual(stablePlan(sdk.readUniverseOverview({ root })), stablePlan(comparisonBefore),
+      'Comparison must not change campaign or Universe execution evidence');
+    assert.equal(git('show-ref'), beforeRefs, 'Comparison must not change repository refs');
     // Enroll only one of the two campaigns: portfolio tasks must have distinct
     // Universes. A stopped task exercises both entrypoints without dispatch.
     const plan = sdk.readUniversePortfolioPlan(portfolio, { root });

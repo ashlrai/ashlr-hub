@@ -51,6 +51,12 @@ export const AGENT_COMMANDS: AgentCommandDoc[] = [
     jsonShape: 'UniverseGraph | {graph: UniverseGraph, traversal: UniverseGraphTraversal}',
   },
   {
+    usage: 'ashlr universe compare <baseline> <challenger> [--root <path>] --json',
+    description: 'Read matched campaign outcomes, model-token coverage, recorded time, and local delivery evidence. No provider calls or execution; not accepted production changes.',
+    safety: 'read',
+    jsonShape: 'UniverseCampaignComparison',
+  },
+  {
     usage: 'ashlr universe portfolio plan --manifest <file.json> [--root <path>] --json',
     description: 'Read explicit campaign dependencies, readiness, and progress without executing or changing any campaign.',
     safety: 'read',
@@ -381,6 +387,7 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'invent',                       desc: 'Generative backlog invention — propose novel high-value work items.', topic: 'autonomy' },
   { cmd: 'universe <demo|init|run|status|archive>', desc: 'Local experiment evolution: run competing code variants, measure them, and reuse winning artifacts.', topic: 'autonomy' },
   { cmd: 'universe graph <id> [--node <node-id>]', desc: 'Read-only experiment evidence graph: trace selected parents, feedback, campaigns, and local branch receipts.', topic: 'autonomy' },
+  { cmd: 'universe compare <baseline> <challenger>', desc: 'Compare explicit campaign outcomes and resource coverage; read-only local evidence, not production acceptance.', topic: 'autonomy' },
   { cmd: 'universe portfolio <plan|run> --manifest <file.json>', desc: 'Plan or run explicit campaign dependencies with foreground invocation bounds; completed campaigns are not accepted artifacts.', topic: 'autonomy' },
   { cmd: 'eval [--limit N]',             desc: 'Local-agent eval harness: adaptive prompts OFF vs ON, steps/done/tokens (M44).', topic: 'run' },
   { cmd: 'eval attention [--window 1d|7d|30d]', desc: 'Metadata-only fleet attention report: context pressure, retrieval, yield, routing, and traces.', topic: 'run' },

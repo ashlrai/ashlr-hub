@@ -303,6 +303,108 @@ delete evidence or reset the definition to make a refusal disappear. To change
 an immutable campaign budget or experiment contract, register a new, explicitly
 identified campaign or universe as appropriate.
 
+## Compare measured campaign progress
+
+Compare two explicitly named campaigns without executing either one:
+
+```sh
+node bin/ashlr universe compare baseline-search challenger-search --root /absolute/private/store --json
+```
+
+The report separates source integrity, matched controls, observed feedback,
+executed workload, evaluator progress, and reported resources. It reads only the
+selected campaigns and their pinned Universes, including independent local Git
+delivery verification. Each source is sampled and rechecked once; this is a
+bounded consistency check, not an atomic global snapshot. Missing or changing
+evidence remains unavailable or degraded. Reading does not create a store,
+acquire an execution lease, contact a model, or run candidates.
+
+Exit 0 means healthy, complete, comparable evidence—not a winning challenger.
+Exit 1 means missing, degraded, incomplete, or unmatched evidence; descriptive
+per-campaign results remain available. Exit 2 means invalid arguments. The two
+campaign IDs must be distinct. Unknown and duplicate flags are rejected.
+
+### Set up a paired feedback experiment
+
+1. Prepare one committed seed and a working fixed evaluator. Create two Universe
+   manifests with distinct IDs but the same objective, exact seed repository and
+   commit, metric, evaluator, ordered variants, and run budget. Keep the model,
+   endpoint, hypothesis, editable files, output cap, and concurrency identical.
+2. Prefer evaluator arguments relative to the pinned seed, for example
+   `["/absolute/path/to/node", "evaluate.mjs"]`. The exact comparator digest
+   includes the pinned command and executable identity. Absolute seed arguments
+   can expand to different per-Universe paths and make the pair incompatible;
+   the comparison deliberately does not normalize this difference away.
+3. Register both Universes with `universe init --manifest <file> --root <store>`.
+   Register one new campaign for each with `campaign init`, identical campaign
+   budgets, and distinct IDs. For a bundled-feedback comparison, set baseline
+   `feedback: false` and challenger `feedback: true`.
+4. Run both campaigns with the existing `campaign run <id> --root <store>`
+   command. These explicit run commands execute the configured work. Keep the
+   host/model configuration stable, and let each campaign finish. Do not run
+   other generations in these Universes before, between, or after their steps.
+5. Run `compare` with the two campaign IDs and the same store. Different stop
+   points, interrupted work, unequal variant schedules, or other history can
+   prevent matched comparison even when the configured budgets were equal.
+
+New feedback-enabled runs use search-context v2. Disabling feedback removes
+both evaluator/file feedback and the v2 search context, so this contrast is
+labeled `feedback-bundle-v2`. It is **not** an isolated measurement of the new
+search context. Repeated, independently paired experiments are needed before
+drawing conclusions about real-model performance; a deterministic fixture or a
+single pair does not establish general uplift or a causal winner.
+
+A campaign containing both legacy-v1 and search-v2 requests has a mixed treatment.
+Its measured per-campaign rates remain descriptive, but paired comparison is
+ineligible and comparative score deltas are withheld.
+
+### Interpret the comparison
+
+`matching.comparator` requires exact comparator identity. Configuration matching
+covers ordered variants and both levels of budgets; feedback is reported
+separately. Workload matching compares the executed campaign work. Comparative
+score deltas require matched controls/workload and healthy, fresh, complete,
+fully attributed histories. Positive `directionAdjustedDelta` means the
+challenger's retained score is better under the declared metric, including a
+minimization metric. It is not a business-value estimate.
+
+Counts distinguish passed trials, first niche admissions, strict retained
+improvements, and distinct selected artifact digests excluding the seed. A
+passing unchanged trial is not a new useful artifact. Final niche scores come
+from selected occurrences in that campaign, never from a later global elite.
+Prior, interleaved, and later unrelated runs make normalized comparison
+ineligible rather than silently contributing credit.
+
+Rates use all recorded attempted work, not only successful requests. Token rates
+require complete reported usage and a positive denominator. Time rates use summed
+recorded run duration, **not** inference time or elapsed campaign wall time;
+`timing.wallSpanMs` is separate. Incomplete work or unusable denominators produce
+`null` rates with reasons. These are local experimental progress rates, not
+accepted changes per token, subscription savings, or independently metered cost.
+
+Delivery counts require exact campaign run/trial attribution and verified Git
+evidence. Multiple branches carrying the same artifact for the same repository
+and base commit count as one distinct delivered artifact. Delivery to a local
+branch is not merge, production deployment, or customer acceptance:
+`acceptedChanges` remains `null`, and report authority is `observation-only`.
+Raw prompts, source files, and evaluator diagnostics are not copied into this
+report.
+
+The SDK exposes the same observation:
+
+```js
+import { readUniverseCampaignComparison } from '@ashlr/hub/universe';
+
+const root = '/absolute/private/store';
+const report = readUniverseCampaignComparison('baseline-search', 'challenger-search', { root });
+if (report.matching.comparable) {
+  console.log(report.scoreDeltas);
+}
+```
+
+`buildUniverseCampaignComparison` is a pure projection of detached, independently
+validated source snapshots. It does not authenticate caller-invented evidence.
+
 ## Coordinate campaigns with a dependency graph
 
 A portfolio composes already registered campaigns across distinct Universes.

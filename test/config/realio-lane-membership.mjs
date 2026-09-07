@@ -54,6 +54,8 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-feedback-replay.test.ts', // durable feedback integrity and a complete 64-trial record footprint
   'test/universe-search-feedback-integration.test.ts', // native metric-directed search after repeated unchanged trials
   'test/universe-search-feedback-replay.test.ts', // independent versioned search-context replay and legacy recovery
+  'test/universe-comparison-reader.test.ts', // targeted private-ledger and Git delivery observation
+  'test/universe-comparison-integration.test.ts', // native paired campaigns with loopback model fixtures
   'test/universe-demo.test.ts', // two real Universe generations and artifact lineage
   'test/universe-confinement.test.ts', // real macOS filesystem boundary checks with test-owned sentinels
   // --- confirmed-flaky repeat offenders (this session's evidence: isolation re-runs pass;
