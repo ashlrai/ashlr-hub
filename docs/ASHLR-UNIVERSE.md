@@ -326,13 +326,14 @@ experiment definition.
 
 ### Read generation usage accurately
 
-Each model trial records provider and configured model, normalized endpoint,
+Each direct-local model trial records provider and configured model, normalized endpoint,
 request-start status, prompt/response digests, generation duration, changed
 files, and token-accounting coverage. Counters come from the endpoint's transport
 response, not the model-authored edit JSON. They are provider-reported values,
 not independent metering or proof of model identity.
 
-`generationUsage` summarizes only model-generation requests. `tokensUsed` is
+For direct-local-only generations, `generationUsage` summarizes model-generation
+requests. `tokensUsed` is
 the sum of input and output tokens only for a completed generation where at least
 one recorded request started and every recorded request reported valid counters.
 Otherwise totals remain `null`; complete reports from a subset of requests remain
@@ -346,6 +347,140 @@ scope, and `costUsd` remains `null`: no API-equivalent subscription bill,
 electricity cost, or hardware amortization is inferred. The console shows passed
 trials and archive admissions separately from generation success; none of these
 counts establishes accepted production changes or customer value.
+
+## Generate candidates through an enrolled resource pool
+
+This opt-in source path uses the [resource pool runtime](RESOURCE-POOLS.md) as a
+generation transport. It does not replace the local-chat path, configure accounts,
+start services, install models, or fall back to an undeclared provider. Enroll and
+commission the intended workers first, retain their shared ledger, and confirm
+the exact native CLI/model pair can run under the selected account. Admission
+still checks fresh observations, shared capacity, reserves, and operator caps.
+
+Existing local-chat manifests and receipts retain their original shape. Older
+builds do not understand `resource-pool` generation configurations or receipts.
+Once a store contains them, inspect it with the supporting runtime build or a
+compatible successor. Downgrading the runtime does not make those records
+readable; do not strip or rewrite evidence to make an older build accept it.
+
+Replace a variant's local generation configuration with this shape. Set
+`poolDigest` to the SHA-256 digest of the canonical validated `{pool, bindings}`
+used by the resource runtime; it is not the hash of either raw JSON file.
+The example's digest placeholder must be replaced before registration.
+
+From the built checkout, this read-only command validates the selected private
+pool and bindings and prints that digest; it does not contact a worker:
+
+```sh
+node --input-type=module -e '
+import { readResourceJson } from "./dist/core/resources/pool-runtime.js";
+import { validateResourcePool } from "./dist/core/resources/pool-policy.js";
+import { validateResourceBindings } from "./dist/core/resources/worker.js";
+import { canonical, digest } from "./dist/core/universe/artifacts.js";
+const [poolPath, bindingsPath] = process.argv.slice(1);
+const pool = validateResourcePool(readResourceJson(poolPath));
+const bindings = validateResourceBindings(readResourceJson(bindingsPath), pool);
+console.log(digest(canonical({ pool, bindings })));
+' /absolute/private/pool.json /absolute/private/bindings.json
+```
+
+```json
+{
+  "kind": "resource-pool",
+  "poolId": "builder-pool",
+  "poolDigest": "REPLACE_WITH_64_LOWERCASE_HEX_DIGEST",
+  "allowedWorkerIds": ["native-builder", "local-reviewer"],
+  "files": ["candidate.mjs"],
+  "maxOutputTokens": 2048
+}
+```
+
+The existing `fileOperations` opt-in can also declare create/delete operations.
+The worker returns text; Universe validates and applies only the declared file
+operations, freezes the candidate, and runs the same pinned evaluator. Resource
+task completion alone cannot validate candidate JSON or admit an artifact.
+Native CLI read-only mode is not tool-free operation or a filesystem-read
+confinement guarantee. It must not be described as the local chat broker's
+tool-free security boundary. Review the native launcher's own environment and
+read access before authorizing it to receive this experiment's context.
+
+Keep execution locators in a separate private JSON file, outside the manifest,
+candidate, and version control:
+
+```json
+{
+  "schemaVersion": 1,
+  "poolPath": "/absolute/private/pool.json",
+  "bindingsPath": "/absolute/private/bindings.json",
+  "observationsPath": "/absolute/private/observations.json",
+  "root": "/absolute/private/shared-pool-ledger",
+  "workspace": "/absolute/private/empty-generation-workspace"
+}
+```
+
+The runtime file and referenced configuration must be canonical absolute private
+regular files with mode `0600`.
+`root` is the existing shared pool ledger, not a new per-trial ledger that bypasses
+shared capacity. `workspace` is a mode-`0700`, empty Git root containing only its
+`.git` directory, with no tracked files, dedicated to response generation. It
+must be separate from the entire Universe store, pool ledger, and candidate
+directory. Keep
+credentials in the enrolled native account setup, not in this runtime file.
+Fresh explicit worker observations are required even when the pool allows
+unknown quota; unknown quota permission is not fresh health evidence.
+The runtime reads the explicit observation file; it does not activate a quota
+collector. Ongoing refresh requires a separately commissioned collector. Without
+fresh evidence, admission is withheld and the campaign pauses; this is not a
+claim of uninterrupted unattended operation.
+
+From the built Hub checkout, after explicitly authorizing the selected workers
+to receive the declared files and generation context:
+
+```sh
+node bin/ashlr universe run experiment-id --root /absolute/private/universe \
+  --resource-runtime /absolute/private/resource-runtime.json --json
+node bin/ashlr universe campaign run campaign-id --root /absolute/private/universe \
+  --resource-runtime /absolute/private/resource-runtime.json --json
+```
+
+These commands consume enrolled worker resources and write trial/task receipts.
+Use campaign `resume` with the same explicit runtime option to continue; the
+runtime path is not persisted as campaign authority. It is accepted only by
+`universe run` and campaign `run/resume`, not `init`, status, archive, or the
+read-only console. Inspect the experiment and pool receipts before resuming a
+withheld, unavailable, or unresolved attempt. Existing task IDs are not a reason
+to redispatch or apply an unavailable historical response. No automatic retry,
+account change, capacity release, or model/CLI upgrade is implied.
+
+The portfolio runner does not yet accept or forward `--resource-runtime`.
+Run resource-backed campaigns directly with campaign `run/resume`; portfolio
+execution cannot supply their private binding and would record a not-started
+attempt, consume its generation-invocation reservation, and pause the campaign.
+
+The generation receipt records resource pool, allowed workers, selected worker
+and model when known, task/receipt digests, dispatch evidence, and the task's
+outcome separately from generation validity and evaluator acceptance. Private
+runtime paths, launcher commands, credentials, and raw worker output are not
+part of that provenance. The Universe inspector and its existing graph-to-trial
+link show recorded evidence; they do not inspect another pool root or establish
+current worker liveness.
+Some digests are redacted by the existing web privacy filter; use scoped CLI
+JSON output for exact digest comparison. A displayed task ID is a provenance
+reference, not a cross-store authorization or a live resource-console link.
+
+Resource generation keeps `requestStarted: false`: a CLI invocation can make
+zero or multiple provider requests, whose count is not measured here. Optional
+`generationUsage.resourceAttempts` counts attempted handoffs with settled,
+replayed, or unavailable evidence; known not-started/withheld attempts are
+excluded. `resourceReportedAttempts` counts settled handoffs with reported usage.
+Unknown or replayed usage cannot establish a complete new spend total. Per-worker
+usage scopes remain visible, including Claude main-loop-only accounting. Reported
+zero stays zero; absent, partial, or interrupted accounting stays unavailable.
+For mixed local/resource generations, combined totals require a completed run,
+usage from every started direct-local request and every attempted resource
+handoff, and at least one measured request or handoff. Incomplete resource
+coverage cannot be hidden by fully measured local requests.
+This bridge is not proof of unattended production reliability or accepted work.
 
 ## Continue autonomously with a bounded campaign
 
@@ -469,11 +604,17 @@ that the project succeeded.
 
 ### Interpret campaign limits and evidence
 
-Generation attempts and model-request reservations are budget allocations, not
+Generation attempts and generation-invocation reservations are budget allocations, not
 counts of accepted work. A campaign step is tied to its durable run identity;
 recovery reconciles that identity rather than treating a missing campaign update
 as permission to execute completed work again. Interrupted work remains visible
 and is not promoted as a completed generation.
+
+The legacy JSON field `maxModelRequests` and recorded `reservedModelRequests`
+retain their names. Each reservation budgets one generation transport invocation,
+not a native provider API request. Native invocations may make zero or multiple
+provider calls. Resource-pool campaigns still require the explicit private
+`--resource-runtime` file on each run/resume; a console visit does not supply it.
 
 Stagnation measures generations without an archive change. Initial admission to
 an empty niche is distinct from a strict improvement over its prior elite; the
@@ -911,7 +1052,7 @@ Custom evaluator authors must keep acceptance logic outside the process executin
 ## Path toward the full Universe
 
 1. **Local evidence loop:** reproducible candidate execution, fixed evaluation, bounded resources, durable decisions, and archive-driven selection.
-2. **Model-driven discovery:** local model edit generation now joins the same experiment contract. Extend it to verified subscription adapters and experiments on prompts, tools, routing, and memory.
+2. **Model-driven discovery:** direct-local and explicitly bound resource-pool generation join the same experiment contract. Commission and measure each model/account pairing; extend experiments to prompts, tools, routing, and memory.
 3. **Engineering portfolio:** connect experiments to enrolled repositories, integration branches, local verification, release artifacts, and operational observations.
 4. **Product learning:** connect measured reliability and customer outcomes to the objective; compare variants through explicit experiments and attribute outcomes to the deployed artifact.
 5. **Ecosystem participation:** expose capabilities and evidence through agent-facing interfaces; add delegated work and economic integrations with accountable resource settlement.

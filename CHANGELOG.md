@@ -11,6 +11,22 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Resource-backed Universe generation
+
+- Connects explicitly enrolled Codex, Claude and local resource workers to the
+  existing scoped candidate parser, frozen evaluator, feedback and niche archive.
+  Portable manifests pin pool identity; private runtime paths are supplied only
+  to foreground run/campaign execution.
+- Links generation evidence to durable task receipts and separates resource
+  handoffs from direct-local requests. Unknown usage and replayed output remain
+  unavailable; process completion alone is never artifact acceptance.
+- Pauses campaigns on unavailable resource work without refunding reservations,
+  honors current quota refusals across aliases, and preserves successful
+  generation evidence when the subsequent evaluator times out or is cancelled.
+- Adds recorded resource provenance to the CLI and Universe inspector. No
+  automatic account commissioning, quota collector activation, portfolio runtime
+  forwarding, registry publication or resident-fleet activation is implied.
+
 ### Universe commissioning and usable operator documentation
 
 - Keeps occupied task receipts ahead of completed history even when a separately

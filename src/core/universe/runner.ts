@@ -79,7 +79,7 @@ function recordFinishedRun(directory: string, run: UniverseRun, lock: LocalStore
 async function runTrial(record: ManifestRecord, run: UniverseRun, variant: UniverseManifest['variants'][number],
   parent: UniverseElite | undefined, directory: string, root: string, signal: AbortSignal, deadline: number,
   feedback?: UniverseFeedback, searchContext?: UniverseSearchContext,
-  fileOperationsContext?: UniverseFileOperationsContext): Promise<UniverseTrial> {
+  fileOperationsContext?: UniverseFileOperationsContext, resourceRuntime?: string): Promise<UniverseTrial> {
   const started = performance.now();
   const trialId = randomUUID();
   const scratch = join(directory, 'scratch', run.id, trialId);
@@ -117,6 +117,8 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
       trial.generation = await generateModelCandidate(variant.generation, {
         candidatePath: candidate, objective: record.manifest.objective, hypothesis: variant.hypothesis,
         generation: run.generation, parentTrialId: parent?.trialId ?? null, timeoutMs: Math.max(1, Math.floor(remaining())), signal,
+        ...(variant.generation.kind === 'resource-pool' ? { resourceRuntime, resourceUniverseRoot: root,
+          resourceIdentity: { universeId: record.manifest.id, runId: run.id, variantId: variant.id } } : {}),
         ...(feedback ? { feedback } : {}),
         ...(searchContext ? { searchContext, variantId: variant.id, niche: variant.niche } : {}),
         ...(fileOperationsContext ? { fileOperationsContext, variantId: variant.id, niche: variant.niche } : {}),
@@ -186,7 +188,10 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
     return trial;
   } finally {
     trial.durationMs = Math.max(0, performance.now() - started);
-    if (trial.generation && !trial.generation.requestStarted && (trial.status === 'cancelled' || trial.status === 'timed-out')) {
+    const generationNotStarted = trial.generation?.resource
+      ? trial.generation.resource.dispatch === 'not-started' : !trial.generation?.requestStarted;
+    if (trial.generation && generationNotStarted && trial.generation.status !== 'succeeded' &&
+        (trial.status === 'cancelled' || trial.status === 'timed-out')) {
       trial.generation.status = trial.status;
     }
     // This exact path was created for this invocation, never the archive or seed.
@@ -295,7 +300,7 @@ export async function runUniverseOwned(id: string, options: UniverseOwnedRunOpti
           run!.feedbackEnabled && variant.generation ? buildUniverseFeedback(overview, variant, directory) : undefined,
           run!.feedbackVersion === 2 && variant.generation ? buildUniverseSearchContext(overview, variant) : undefined,
           variant.generation?.fileOperations ? buildUniverseFileOperationsContext(overview, variant, directory,
-            record.seedArtifact, run!.feedbackEnabled ? { feedback: true } : undefined) : undefined);
+            record.seedArtifact, run!.feedbackEnabled ? { feedback: true } : undefined) : undefined, options.resourceRuntime);
         assertUniverseExecution(directory, execution);
         if (!ownsLocalStoreLock(lock)) throw new Error('Universe run ownership lost before evidence write');
         appendRecord(directory, { id: `${run!.id}.trial.${trial.id}`, kind: 'trial', runId: run!.id, trial });

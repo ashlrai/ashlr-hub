@@ -40,11 +40,16 @@ export function preflightTrialEvidenceBudget(trial: UniverseTrial, planned: {
   // or persisted errors. A 1024-code-unit error can require six bytes per unit.
   const profile = { ...trial, artifact: planned.artifact, durationMs: Number.MAX_VALUE,
     error: '\u0001'.repeat(1024), score: -Number.MAX_VALUE, delta: -Number.MAX_VALUE,
-    ...(trial.generation ? { generation: { ...trial.generation, status: 'succeeded', requestStarted: true,
+    ...(trial.generation ? { generation: { ...trial.generation, status: 'succeeded', requestStarted: !trial.generation.resource,
       promptDigest: hash, responseDigest: hash, durationMs: Number.MAX_VALUE,
       usage: { state: 'reported', inputTokens: Number.MAX_SAFE_INTEGER, outputTokens: Number.MAX_SAFE_INTEGER },
       changedFiles: [...planned.changedFiles], ...(planned.feedback ? { feedback: planned.feedback } : {}),
       ...(planned.search ? { search: planned.search } : {}),
+      ...(trial.generation.resource ? { resource: { ...trial.generation.resource,
+        taskId: `u-${hash.slice(0, 30)}-${hash.slice(30, 60)}`, taskDigest: hash, workerId: 'x'.repeat(64), workerProvider: 'claude',
+        // A permitted lone surrogate can require six JSON bytes per code unit.
+        workerModel: '\ud800'.repeat(160), receiptDigest: hash, dispatch: 'unavailable', taskStatus: 'completed',
+        usageScope: 'local-chat-completion' } } : {}),
       ...(trial.generation.fileOperations ? { fileOperations: { schemaVersion: 1,
         contextDigest: planned.fileOperations?.contextDigest ?? hash,
         // Replace uses both digests and therefore bounds create/delete as well.

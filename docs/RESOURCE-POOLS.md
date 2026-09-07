@@ -545,8 +545,9 @@ lost settlement stops the suite without retrying. Inspect the ledger before
 starting a new run. Reusing a recorded run ID/worker is refused because raw
 responses are not durably available for rescoring. Existing report files are
 never overwritten; failed preflight can leave an empty reserved output file.
-Benchmark reports do not change routing priorities, accept changes, or connect
-the resource pool to Universe's evaluator automatically.
+Benchmark reports do not change routing priorities or accept changes. The
+separate opt-in [Universe resource generation path](ASHLR-UNIVERSE.md#generate-candidates-through-an-enrolled-resource-pool)
+can use the shared pool for candidate responses; a benchmark does not enable it.
 
 ## Failure and recovery
 
@@ -618,8 +619,11 @@ behavior are unchanged. The store does not prune old identities into replayable
 work. These limits, explicit enrollment, incomplete
 vendor quota coverage, and manual ambiguous-run recovery mean this is not yet an
 unattended production fleet. Universe's versioned generation receipts, measured
-feedback, evaluator, and archive selection are unchanged. `ashlr runtime run`
-still forwards Universe commands only; it does not forward this new pool runner.
+feedback, evaluator, and archive selection remain independent acceptance steps.
+The opt-in [generation bridge](ASHLR-UNIVERSE.md#generate-candidates-through-an-enrolled-resource-pool)
+links recorded pool tasks to Universe trials without activating a service.
+`ashlr runtime run` still forwards Universe commands only; it does not forward
+the standalone resource-pool CLI.
 
 ## Provider research and billing boundaries
 
