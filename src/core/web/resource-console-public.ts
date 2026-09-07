@@ -2,6 +2,8 @@ import { validateResourceObservations, validateResourcePool, type ResourceAssign
 import type { ResourceConsoleEvidence, ResourceConsoleGroup } from '../resources/console-types.js';
 import type { ResourceBinding } from '../resources/worker.js';
 import type { ResourceTaskReceipt, resourcePoolStatus } from '../resources/pool-runtime.js';
+import { buildResourcePerformance, resourceUsageScopeForProvider, validateResourcePerformanceReport,
+  validResourceExecutionMeasurement } from '../resources/performance.js';
 
 export const MAX_RESOURCE_CONSOLE_RESPONSE_BYTES = 4 * 1024 * 1024;
 export const MAX_RESOURCE_CONSOLE_RECENT_ATTEMPTS = 100;
@@ -77,14 +79,15 @@ export function degradedResourceConsoleEvidence(pool: ResourcePool, bindings: Re
     activeAttempts: [], recentAttempts: [], counts: { total: null, active: null, completed: null, failed: null,
       cancelled: null, timedOut: null, uncertain: null, omittedHistory: null },
     usage: { reportedAttempts: null, unknownAttempts: null, reportedInputTokens: null, reportedOutputTokens: null,
-      totalInputTokens: null, totalOutputTokens: null, complete: false } };
+      totalInputTokens: null, totalOutputTokens: null, complete: false }, performance: null };
 }
 
 function receipt(row: ResourceTaskReceipt): ResourceTaskReceipt {
   return { schemaVersion: 1, id: row.id, taskDigest: row.taskDigest, poolDigest: row.poolDigest,
     workerId: row.workerId, capacityKey: row.capacityKey, status: row.status, startedAt: row.startedAt,
     finishedAt: row.finishedAt, outputDigest: row.outputDigest, inputTokens: row.inputTokens,
-    outputTokens: row.outputTokens, reason: row.reason, verifiedAccepted: false };
+    outputTokens: row.outputTokens, reason: row.reason, verifiedAccepted: false,
+    ...(row.execution === undefined ? {} : { execution: { ...row.execution } }) };
 }
 
 /** Pure projection of one validated ledger sample; no process liveness or provider polling. */
@@ -124,12 +127,14 @@ export function projectResourceConsoleEvidence(pool: ResourcePool, bindings: Res
   result.usage = { reportedAttempts: reported.length, unknownAttempts: status.attempts.length - reported.length,
     reportedInputTokens: reported.length ? input : null, reportedOutputTokens: reported.length ? output : null,
     totalInputTokens: complete ? input : null, totalOutputTokens: complete ? output : null, complete };
+  result.performance = buildResourcePerformance(pool, status.attempts);
   return result;
 }
 
 function validateReceipt(value: unknown, pool: ResourceConsoleEvidence['pool']): asserts value is ResourceTaskReceipt {
+  const hasExecution = value !== null && typeof value === 'object' && Object.hasOwn(value, 'execution');
   object(value, ['schemaVersion', 'id', 'taskDigest', 'poolDigest', 'workerId', 'capacityKey', 'status', 'startedAt',
-    'finishedAt', 'outputDigest', 'inputTokens', 'outputTokens', 'reason', 'verifiedAccepted']);
+    'finishedAt', 'outputDigest', 'inputTokens', 'outputTokens', 'reason', 'verifiedAccepted', ...(hasExecution ? ['execution'] : [])]);
   const worker = pool.workers.find((row) => row.id === value.workerId);
   if (value.schemaVersion !== 1 || typeof value.id !== 'string' || !ID.test(value.id) ||
     !worker || worker.capacityKey !== value.capacityKey || typeof value.status !== 'string' || !STATUSES.includes(value.status) ||
@@ -139,6 +144,8 @@ function validateReceipt(value: unknown, pool: ResourceConsoleEvidence['pool']):
     !((value.inputTokens === null && value.outputTokens === null) ||
       count(value.inputTokens) && count(value.outputTokens) && count(value.inputTokens + value.outputTokens)) ||
     typeof value.reason !== 'string' || !/^[a-z0-9-]{1,120}$/.test(value.reason) || value.verifiedAccepted !== false) invalid();
+  if (hasExecution && (!validResourceExecutionMeasurement(value.execution) || value.status === 'reserved' ||
+    value.execution.usageScope !== null && (value.inputTokens === null || value.execution.usageScope !== resourceUsageScopeForProvider(worker.provider)))) invalid();
   if (value.status === 'reserved') {
     if (value.finishedAt !== null || value.inputTokens !== null || value.outputDigest !== null) invalid();
   } else if (!iso(value.finishedAt) || value.finishedAt < value.startedAt || value.status === 'completed' && value.outputDigest === null) invalid();
@@ -178,8 +185,9 @@ export function validateResourceConsoleResponse(value: unknown, pool: ResourcePo
   if (typeof value !== 'string' || value.length < 2 || Buffer.byteLength(value, 'utf8') > MAX_RESOURCE_CONSOLE_RESPONSE_BYTES) invalid();
   let parsed: unknown;
   try { parsed = JSON.parse(value); } catch { invalid(); }
+  const hasPerformance = parsed !== null && typeof parsed === 'object' && Object.hasOwn(parsed, 'performance');
   object(parsed, ['schemaVersion', 'mode', 'authority', 'sampledAt', 'sourceState', 'reasons', 'pool', 'groups', 'plan',
-    'observations', 'activeAttempts', 'recentAttempts', 'counts', 'usage']);
+    'observations', 'activeAttempts', 'recentAttempts', 'counts', 'usage', ...(hasPerformance ? ['performance'] : [])]);
   if (parsed.schemaVersion !== 1 || parsed.mode !== 'resource-pool' || parsed.authority !== 'local-evidence' ||
     !iso(parsed.sampledAt) || !['missing', 'healthy', 'degraded'].includes(parsed.sourceState as string)) invalid();
   const expected = configuration(pool, bindings);
@@ -212,7 +220,7 @@ export function validateResourceConsoleResponse(value: unknown, pool: ResourcePo
   const counts = parsed.counts; const usage = parsed.usage;
   if (parsed.sourceState === 'degraded') {
     if (parsed.plan !== null || observations.length || rows.length || countKeys.some((key) => counts[key] !== null) ||
-      usageKeys.some((key) => usage[key] !== null) || usage.complete !== false) invalid();
+      usageKeys.some((key) => usage[key] !== null) || usage.complete !== false || hasPerformance && parsed.performance !== null) invalid();
   } else {
     validatePlan(parsed.plan, expected.pool, parsed.sampledAt);
     if (countKeys.some((key) => !count(counts[key], MAX_ATTEMPTS)) ||
@@ -223,6 +231,7 @@ export function validateResourceConsoleResponse(value: unknown, pool: ResourcePo
         Number(parsed.counts.cancelled) + Number(parsed.counts.timedOut)) invalid();
     if (!count(parsed.usage.reportedAttempts, MAX_ATTEMPTS) || !count(parsed.usage.unknownAttempts, MAX_ATTEMPTS) ||
       parsed.usage.reportedAttempts + parsed.usage.unknownAttempts !== parsed.counts.total ||
+      parsed.usage.reportedAttempts > Number(counts.total) - Number(counts.active) + Number(counts.uncertain) ||
       typeof parsed.usage.complete !== 'boolean' || usageKeys.slice(2).some((key) => usage[key] !== null && !count(usage[key]))) invalid();
     if (parsed.usage.reportedAttempts === 0 && (parsed.usage.reportedInputTokens !== null || parsed.usage.reportedOutputTokens !== null)) invalid();
     if (parsed.usage.complete) {
@@ -231,6 +240,30 @@ export function validateResourceConsoleResponse(value: unknown, pool: ResourcePo
         !count(parsed.usage.totalInputTokens + parsed.usage.totalOutputTokens) ||
         parsed.usage.totalInputTokens !== parsed.usage.reportedInputTokens || parsed.usage.totalOutputTokens !== parsed.usage.reportedOutputTokens) invalid();
     } else if (parsed.usage.totalInputTokens !== null || parsed.usage.totalOutputTokens !== null) invalid();
+    if (hasPerformance) {
+      const performance = validateResourcePerformanceReport(parsed.performance, pool);
+      const sum = (key: keyof typeof performance.workers[number]['counts']) => performance.workers.reduce((total, row) => total + row.counts[key], 0);
+      if (performance.attempts !== counts.total || sum('reserved') + sum('uncertain') !== counts.active ||
+        ['completed', 'failed', 'cancelled', 'timedOut', 'uncertain'].some((key) => sum(key as keyof typeof performance.workers[number]['counts']) !== counts[key]) ||
+        performance.workers.reduce((total, row) => total + row.usage.reportedAttempts, 0) !== usage.reportedAttempts ||
+        performance.workers.reduce((total, row) => total + row.usage.unknownAttempts, 0) !== usage.unknownAttempts) invalid();
+      // The displayed rows can be truncated, but the independent whole-ledger
+      // worker and global summaries must still describe the same token evidence.
+      const subtotal = (key: 'reportedInputTokens' | 'reportedOutputTokens'): number | null => {
+        if (usage.reportedAttempts === 0) return null;
+        const reported = performance.workers.filter((row) => row.usage.reportedAttempts > 0);
+        if (reported.some((row) => row.usage[key] === null)) return null;
+        return safeSum(reported.map((row) => row.usage[key]!));
+      };
+      const input = subtotal('reportedInputTokens'); const output = subtotal('reportedOutputTokens');
+      const complete = Number(counts.total) > 0 && counts.active === 0 && usage.unknownAttempts === 0 &&
+        input !== null && output !== null && count(input + output);
+      if (usage.reportedInputTokens !== input || usage.reportedOutputTokens !== output || usage.complete !== complete ||
+        usage.totalInputTokens !== (complete ? input : null) || usage.totalOutputTokens !== (complete ? output : null)) invalid();
+      // When the public history is complete, recompute rather than trusting a
+      // second, potentially inconsistent summary of the same included records.
+      if (counts.omittedHistory === 0 && !equal(performance, buildResourcePerformance(pool, rows))) invalid();
+    }
   }
   return parsed as unknown as ResourceConsoleEvidence;
 }

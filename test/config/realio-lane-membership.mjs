@@ -50,6 +50,8 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-worker-process.test.ts', // real bounded stdin and process ownership
   'test/resource-worker.test.ts', // native worker fixtures and numeric-loopback model transport
   'test/resource-pool-runtime.test.ts', // durable admission, concurrent tasks, and replay
+  'test/resource-performance-runtime.test.ts', // monotonic measurements in the private task ledger
+  'test/resource-review-benchmark.test.ts', // fixed calibration through real ledger and loopback transport
   'test/resource-pool-cli.test.ts', // explicit private manifests and CLI output files
   'test/universe-core.test.ts', // real Git snapshots and confined experiment subprocesses
   'test/universe-delivery.test.ts', // real Git object/ref delivery and private receipts

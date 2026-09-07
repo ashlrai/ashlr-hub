@@ -5,6 +5,7 @@ const USAGE = `usage: ashlr resources pool status --root ABS --pool ABS --bindin
        ashlr resources pool run --root ABS --pool ABS --bindings ABS --observations ABS --task ABS [--output ABS] [--json]
        ashlr resources pool observe --pool ABS --worker ID --provider codex|claude --input ABS --captured-at ISO [--previous ABS] [--bucket ID ...] [--json]
        ashlr resources pool console --help
+       ashlr resources pool benchmark --help
 
 An explicit foreground task pool; no default configuration, credential discovery,
 account login/switching, service activation, or automatic task retry.
@@ -135,6 +136,10 @@ function outputMetadata(reservation: OutputReservation | undefined) {
 
 /** Parse scope before importing execution, and keep transient worker text out of CLI metadata. */
 export async function cmdResourcePool(args: string[]): Promise<number> {
+  if (args[0] === 'benchmark') {
+    const { cmdResourceBenchmark } = await import('./resource-benchmark.js');
+    return cmdResourceBenchmark(args.slice(1));
+  }
   if (args[0] === 'console') {
     const { cmdResourceConsole } = await import('./resource-console.js');
     return cmdResourceConsole(args.slice(1));
@@ -232,3 +237,6 @@ export async function cmdResourcePool(args: string[]): Promise<number> {
     return error instanceof UsageError ? 2 : 1;
   } finally { if (reserved) closeSync(reserved.fd); }
 }
+
+// Shared bounded, exclusive output reservation for explicit pool commands.
+export { reserveOutput, saveOutput, outputMetadata };

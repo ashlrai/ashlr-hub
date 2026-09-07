@@ -599,7 +599,7 @@ export async function applyProposal(
       }
 
       case 'browser-action': {
-        // ── Phase 2b: gated browser automation via Claude-in-Chrome MCP ──────
+        // ── Gated browser observations via Claude-in-Chrome MCP ─────────────
         //
         // GATES (same chain as desktop-action):
         //   approved + confirmed + assertMayMutate(repo) + enrollment — all
@@ -684,26 +684,30 @@ export async function applyProposal(
             }
           }
 
-          // Step 2: execute the instructions via the computer tool (Claude-in-Chrome).
-          // 'computer' is the primary action surface; fall back to 'read_page'.
+          // Step 2 is observation only. Neither screenshot nor read_page executes
+          // the natural-language instructions or proves the requested outcome.
+          // Keep this useful observation without promoting it to task acceptance.
           const hasComputer = probeResult.availableTools.includes('computer');
           const actionTool = hasComputer ? 'computer' : 'read_page';
           const toolArgs: Record<string, unknown> = hasComputer
             ? { action: 'screenshot' }
             : {};
 
-          const execResult = await callBrowserTool(spec, actionTool, toolArgs);
-          if (!execResult.ok) {
+          const observationResult = await callBrowserTool(spec, actionTool, toolArgs);
+          if (!observationResult.ok) {
             return {
               ok: false,
-              detail: `browser-action execution failed: ${execResult.detail}`,
+              detail: `browser-action observation failed: ${observationResult.detail}; instructions were not executed and task completion is unverified`,
             };
           }
 
           const urlPart = action.url ? ` at ${action.url}` : '';
+          const observation = hasComputer ? 'screenshot call completed' : 'page-read call completed';
           return {
-            ok: true,
-            detail: `browser-action executed${urlPart} via ${probeResult.serverName} (instructions: ${instructions.slice(0, 80)}${instructions.length > 80 ? '…' : ''})`,
+            // The existing failed status means the requested task was not applied;
+            // it also prevents blind re-application of a completed navigation.
+            ok: false,
+            detail: `browser-action observation only${urlPart} via ${probeResult.serverName}: ${action.url ? 'navigation call completed; ' : ''}${observation}; instructions were not executed and task completion is unverified`,
           };
         })().catch((err: unknown) => ({
           ok: false,

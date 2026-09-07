@@ -106,6 +106,43 @@ without ambient API keys, account-switching variables, proxy variables, or Node
 loader overrides. A wrapper or cached native profile can still select paid
 billing; confirm its account, model eligibility, and overage settings before use.
 
+### Commission native accounts and local capacity
+
+Commissioning is an operator step outside the runner. Adding a worker to JSON
+does not authenticate it or establish its quota. Keep native account directories
+and launcher files outside task-writable workspaces.
+
+1. Select a supported, version-pinned native executable. For two Codex accounts,
+   use separate owner-managed launchers and native state directories. `CODEX_HOME`
+   selects Codex's state location; `--profile` only selects configuration and is
+   **not** evidence of a separate account. Verify the active account and storage
+   mode through each exact launcher using native login/status before enrollment;
+   do not duplicate credential files. [Codex state and profiles](https://learn.chatgpt.com/docs/config-file/config-advanced#config-and-state-locations),
+   [native authentication](https://learn.chatgpt.com/docs/auth).
+2. For Claude Code, select a dedicated `CLAUDE_CONFIG_DIR` in the owner-managed
+   launcher and authenticate with the native flow. That directory also scopes
+   its macOS Keychain entry. Confirm the account and billing source in the native
+   client: cached API profiles or an API key selected by a wrapper can supersede
+   subscription login. Hub deliberately does not inherit ambient account-selector
+   variables. [Claude authentication and precedence](https://code.claude.com/docs/en/authentication).
+3. Enroll each verified identity separately, for example `codex-a`, `codex-b`,
+   and `claude-a`. Give aliases of the **same** account one `capacityKey`; different
+   worker names, models, or launcher paths do not establish separate allowances.
+   Start with one concurrent task per account and explicit task limits. Capture
+   quota evidence before dispatch, or deliberately select bounded unknown-quota
+   bootstrap. Never rotate identities to evade an account's known denial.
+4. For local calibration, an existing `qwen3-coder:30b` Q4_K_M installation is a
+   useful starting candidate with `maxConcurrent:1`, not a hardwired best model.
+   Pin the installed model digest and measure its results on the same tasks as
+   the native workers before expanding concurrency. Use only the explicitly
+   selected, already-running loopback endpoint. Hub neither downloads the model
+   nor starts its server, and local-chat cannot use native workspace file tools.
+
+Test the exact launcher first with a small explicit task in an expendable
+workspace, then inspect its result, resource observation, and diff before using
+the queue. This dispatch consumes the selected provider's allowance; a healthy
+local fixture is not evidence that native credentials or plan entitlements work.
+
 ## Supply quota observations
 
 The observations file is an array. A complete observation contains `workerId`,
@@ -208,6 +245,28 @@ single request with `max_tokens`; native `maxOutputTokens` is only an observed
 post-completion cutoff. Missing token counts remain null. No dollar-cost estimate
 or unused-subscription-token estimate is invented.
 
+### Interpret reported usage
+
+New execution evidence labels known paired token counters with `usageScope`:
+
+| Scope | What the existing counters measure |
+| --- | --- |
+| `codex-turn` | Native completed-turn input and output usage |
+| `claude-main-loop` | Final result's main-loop input, cache-read and cache-creation input, and output usage |
+| `local-chat-completion` | The selected local endpoint's single completion usage |
+
+Claude's `modelUsage` has a broader query-pipeline scope, including subagents and
+other work; Hub does not substitute it for the existing main-loop counters or
+sum it with them. These counters do not establish billing or total account usage.
+Older receipts without execution scope remain unclassified; missing or malformed
+usage remains null. [Claude result accounting](https://code.claude.com/docs/en/agent-sdk/python#resultmessage).
+
+Claude `subtype:success` alone is insufficient: `is_error:true`, aborted/error
+terminal metadata, or deferred tools cannot establish completion. Duplicate
+results, conversation resets, and explicitly nonhuman result origins do not
+establish attributable usage for this one-prompt adapter. Safe terminal counts
+can still be recorded for a failed attempt; reported usage is not acceptance.
+
 ## Operate the resource console
 
 Start with an authenticated, read-only view of the explicit pool:
@@ -294,6 +353,71 @@ login, global fleet discovery, or connection to Universe's evaluator. It does no
 expose the general Hub API or event stream. The process must remain running for
 its queue to advance.
 
+## Measure execution and calibrate a worker
+
+The dispatch desk's **Worker performance** table summarizes all retained ledger
+receipts, including history omitted from the task list. Choose one execution
+outcome to see its measured sample count and nearest-rank p50/p95. These are
+unmatched tasks, not a model ranking. Timing uses a monotonic clock around the
+worker adapter; it includes preparation and cleanup, excludes queue/reservation
+and durable settlement, and is not provider latency. Old receipts retain unknown
+timing. Each receipt and worker summary labels token scope; Claude main-loop
+counts exclude subagents. None of these counters establishes accepted work or a
+billing total. The optional versioned `execution` field preserves old-ledger
+readability; older Hub versions that reject it cannot read a newly measured
+ledger, so preserve a pre-upgrade ledger copy for rollback rather than stripping
+fields from live records.
+
+Use the fixed `review-calibration-v1` suite to establish a small, repeatable
+read-only review baseline. Its three code-comprehension cases have four fixed
+checks each. Generated text is parsed as JSON and is never executed. This is a
+calibration check, not proof of repository implementation skill. All tasks pass
+through normal quota admission, durable reservations and cancellation.
+
+After independently authenticating/enrolling the chosen native worker, or
+selecting a running numeric-loopback Ollama endpoint with an installed model,
+run the following from the installed Hub CLI. This command **executes model
+requests and consumes that worker's resources**. Use an existing canonical
+workspace and private manifests as described above; substitute your own explicit
+paths and enrolled worker ID.
+
+```sh
+ashlr resources pool benchmark \
+  --root /absolute/private/pool-ledger \
+  --pool /absolute/private/pool.json \
+  --bindings /absolute/private/bindings.json \
+  --observations /absolute/private/observations.json \
+  --workspace /absolute/benchmark-workspace \
+  --worker local-reviewer --run-id baseline-001 \
+  --expected-model-digest sha256:REPLACE_WITH_INSTALLED_64_HEX_DIGEST \
+  --repeats 2 --timeout-ms 120000 --max-output-tokens 512 \
+  --output /absolute/private/baseline-001.json --json
+```
+
+Local calibration requires the exact Ollama inventory digest and rechecks it
+before every task; it never downloads a model. Omit `--expected-model-digest` for
+native workers, whose configured model ID is not independently attested. Supply
+fresh, truthful readiness observations; `allowUnknownQuota` alone does not imply
+health. Normal observation expiry and quota denials remain effective throughout
+the run. No service or recurring benchmark is installed.
+
+The exclusive output file contains suite/workload digests, model identity scope,
+per-case checks and durable receipts, without raw prompts or responses. Compare
+only matching suite/workload digests, and separately control machine load,
+runtime version, context allocation, warm/cold state and tool environment before
+attributing differences to a model. Record repeated trials; the default is one
+repeat, with at most three. A complete score measures the fraction of cases with
+every check passing. An interrupted or unscored suite has `score: null`, not a
+fabricated zero or success. Exit 0 requires every case to pass.
+
+SIGINT/SIGTERM abort owned work and await its adapter. A failed/uncertain task or
+lost settlement stops the suite without retrying. Inspect the ledger before
+starting a new run. Reusing a recorded run ID/worker is refused because raw
+responses are not durably available for rescoring. Existing report files are
+never overwritten; failed preflight can leave an empty reserved output file.
+Benchmark reports do not change routing priorities, accept changes, or connect
+the resource pool to Universe's evaluator automatically.
+
 ## Failure and recovery
 
 SIGINT/SIGTERM abort the owned request/process and await bounded cleanup. Native
@@ -355,6 +479,25 @@ Research checked September 7, 2026; provider rules and models can change.
   non-Claude models remain on the local adapter, not a faux-Claude gateway.
   [Status-line resource fields](https://code.claude.com/docs/en/statusline),
   [Claude gateway support](https://code.claude.com/docs/en/llm-gateway).
+- Grok Build has an official native CLI, headless output modes, and an ACP stdio
+  interface. Hub has **no Grok worker transport** yet: a version-pinned terminal
+  result/usage contract and a tested tool/customization boundary are still needed.
+  Its documented child-network restriction is a no-op on macOS, so a similarly
+  named sandbox is not proof of equivalent containment.
+  [Grok Build scripting](https://docs.x.ai/build/cli/headless-scripting),
+  [sandbox limits](https://docs.x.ai/build/features/sandbox).
+- Grok Bot is an external cloud-computer product, not this console's local
+  desktop-control worker. The August 26 announcement expands plan access and
+  describes its own usage pool; a public Hub-controllable Bot API and this user's
+  exact entitlement have not been established. Do not infer either from a Grok
+  subscription. [Grok Bot plan announcement](https://x.ai/news/grok-bot-more-plans),
+  [Grok Bot FAQ](https://docs.x.ai/grok-bot/faq).
+- Consumer access, native Build access, and an xAI API-key billing account are
+  distinct integration choices. The documented API route uses API credentials
+  and metered billing; confirm any account-specific included credits, overage,
+  or auto-top-up before use. Hub does not fall back to a paid xAI endpoint.
+  [xAI API quickstart](https://docs.x.ai/developers/quickstart),
+  [API billing](https://docs.x.ai/developers/faq/billing).
 
 For implementation and local regressions, see `src/core/resources/` and
 `test/resource-*.test.ts`. Run focused tests, backend/web typecheck, and lint

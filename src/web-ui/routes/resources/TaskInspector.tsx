@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ResourceConsoleOutput, ResourceSupervisorJob } from '../../../core/resources/console-types.js';
 import type { ResourceTaskReceipt } from '../../../core/resources/pool-runtime.js';
+import { executionTime, usageScopeLabel } from './PerformancePanel.js';
 import { StatusBadge, type Tone } from '../../components/primitives/StatusBadge.js';
 import { readResourceTaskOutput } from '../../data/resource-pool-queries.js';
 import { resourceNumber, resourceReason, resourceTime } from './CapacityBoard.js';
@@ -45,6 +46,8 @@ export function TaskInspector({ row, enabled, busy, onCancel }: {
       {row.job ? <><div><dt>Allowed workers</dt><dd>{row.job.allowedWorkerIds.join(', ')}</dd></div><div><dt>Workspace access</dt><dd>{row.job.mode}</dd></div>
         <div><dt>Queued</dt><dd>{resourceTime(row.job.enqueuedAt)}</dd></div><div><dt>Last supervisor update</dt><dd>{resourceTime(row.job.updatedAt)}</dd></div></> : null}
       {row.receipt ? <><div><dt>Reserved</dt><dd>{resourceTime(row.receipt.startedAt)}</dd></div><div><dt>Finished</dt><dd>{resourceTime(row.receipt.finishedAt)}</dd></div>
+        <div><dt>Worker execution</dt><dd>{executionTime(row.receipt.execution?.durationMs)}</dd></div>
+        <div><dt>Token scope</dt><dd>{usageScopeLabel(row.receipt.execution?.usageScope)}</dd></div>
         <div><dt>Reported input tokens</dt><dd>{resourceNumber(row.receipt.inputTokens)}</dd></div><div><dt>Reported output tokens</dt><dd>{resourceNumber(row.receipt.outputTokens)}</dd></div></> : null}
       <div><dt>Reason</dt><dd>{resourceReason(row.job?.reason ?? row.receipt?.reason ?? 'not-yet-dispatched')}</dd></div>
       <div><dt>Verified accepted work</dt><dd>Not measured</dd></div>

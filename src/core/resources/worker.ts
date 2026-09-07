@@ -23,6 +23,8 @@ export interface ResourceWorkerResult {
   output: string;
   inputTokens: number | null;
   outputTokens: number | null;
+  /** Meaning of the existing paired counters, not total account usage or billing. */
+  usageScope?: 'codex-turn' | 'claude-main-loop' | 'local-chat-completion';
   /** Fixed adapter code, never raw provider diagnostics or task text. */
   reason: string;
   /** Native quota metadata only; capture time is conservatively dispatch start. */
@@ -149,12 +151,29 @@ function parseClaude(output: string): ResourceWorkerResult {
   const results = rows.filter((row) => row.type === 'result');
   const terminal = rows.at(-1);
   if (results.length !== 1 || terminal?.type !== 'result') return empty('worker-terminal-missing');
+  // This adapter supplies one prompt, not a resumable streaming-input session.
+  // Reset results can omit earlier usage; injected turns are not our task's
+  // result. Neither may establish completed work or attributable token totals.
+  // Wire names are confirmed by Anthropic's native-message parser:
+  // https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/_internal/message_parser.py
+  if (rows.some((row) => row.type === 'conversation_reset')) return empty('worker-conversation-reset');
+  if (terminal.origin !== undefined && terminal.origin !== null &&
+      (!object(terminal.origin) || terminal.origin.kind !== 'human')) return empty('worker-result-origin-unexpected');
   const usage = object(terminal.usage) ? terminal.usage : {};
+  // Preserve the historical main-loop, cache-inclusive counter semantics.
+  // modelUsage is a different, cumulative query-pipeline measurement; it must
+  // not replace these fields or be summed with assistant/child usage. Helpers
+  // outside that pipeline are excluded even from modelUsage (not billing).
+  // https://code.claude.com/docs/en/agent-sdk/python#resultmessage
   let inputTokens = sum([usage.input_tokens, usage.cache_creation_input_tokens, usage.cache_read_input_tokens]);
   let outputTokens = count(usage.output_tokens) ? usage.output_tokens : null;
   if (inputTokens === null || outputTokens === null || !count(inputTokens + outputTokens)) { inputTokens = null; outputTokens = null; }
   const result = typeof terminal.result === 'string' ? terminal.result : '';
-  const success = terminal.subtype === 'success' && terminal.is_error === false && result.trim();
+  const completedReason = terminal.terminal_reason === undefined || terminal.terminal_reason === null ||
+    terminal.terminal_reason === 'completed';
+  const success = terminal.subtype === 'success' && terminal.is_error === false && completedReason &&
+    (terminal.api_error_status === undefined || terminal.api_error_status === null) &&
+    (terminal.deferred_tool_use === undefined || terminal.deferred_tool_use === null) && result.trim();
   return { status: success ? 'completed' : 'failed', output: result, inputTokens, outputTokens,
     reason: success ? 'worker-completed' : 'worker-terminal-failed' };
 }
@@ -257,7 +276,10 @@ export async function executeResourceWorker(worker: ResourceWorker, binding: Res
     validatedTask = validateTask(task);
   } catch { return empty('worker-invalid-configuration'); }
   if (signal?.aborted) return empty('worker-cancelled', 'cancelled');
-  return validatedBinding.kind === 'native-cli'
-    ? executeNative(validatedWorker, validatedBinding, validatedTask, signal)
-    : executeLocal(validatedWorker, validatedBinding, validatedTask, signal);
+  const result = validatedBinding.kind === 'native-cli'
+    ? await executeNative(validatedWorker, validatedBinding, validatedTask, signal)
+    : await executeLocal(validatedWorker, validatedBinding, validatedTask, signal);
+  if (result.inputTokens === null || result.outputTokens === null) return result;
+  return { ...result, usageScope: validatedWorker.provider === 'codex' ? 'codex-turn'
+    : validatedWorker.provider === 'claude' ? 'claude-main-loop' : 'local-chat-completion' };
 }

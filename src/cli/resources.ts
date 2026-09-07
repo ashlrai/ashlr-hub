@@ -159,7 +159,7 @@ function printResourcesHelp(): void {
   console.log(bold('  ashlr resources') + dim(' — per-backend resource control plane (read-only)'));
   console.log('');
   console.log('  Usage: ashlr resources [--json] [--watch]');
-  console.log('         ashlr resources pool status|run|observe|console --help');
+  console.log('         ashlr resources pool status|run|observe|console|benchmark --help');
   console.log('');
   console.log(`    ${cyan('ashlr resources')}          ${dim('table view of availability/used%/cap/resets')}`);
   console.log(`    ${cyan('ashlr resources --json')}   ${dim('raw JSON (ResourceSnapshot)')}`);

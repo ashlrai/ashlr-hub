@@ -1,4 +1,17 @@
 .view { display: grid; gap: var(--space-4); }
+.performanceScroll { overflow-x: auto; }
+.performanceScroll:focus-visible { outline: 2px solid var(--accent-500); outline-offset: -2px; }
+.performanceTable { width: 100%; border-collapse: collapse; font-size: var(--text-sm-size); font-variant-numeric: tabular-nums; }
+.performanceTable caption { text-align: left; padding: 0 var(--space-5) var(--space-3); font-size: var(--text-xs-size); color: var(--text-secondary); }
+.performanceTable th, .performanceTable td { text-align: left; vertical-align: top; padding: var(--space-3); border-top: 1px solid var(--border-subtle); }
+.performanceTable th:first-child, .performanceTable td:first-child { padding-left: var(--space-5); }
+.performanceTable th:last-child, .performanceTable td:last-child { padding-right: var(--space-5); }
+.performanceTable thead th { font-size: var(--text-xs-size); color: var(--text-secondary); font-weight: var(--font-weight-medium); }
+.performanceTable tbody th { font-weight: var(--font-weight-medium); min-width: 150px; max-width: 220px; }
+.performanceTable td { min-width: 105px; }
+.performanceTable small { display: block; font-size: var(--text-xs-size); color: var(--text-secondary); margin-top: var(--space-1); font-weight: var(--font-weight-normal); overflow-wrap: anywhere; }
+.performanceWorker { color: var(--text-link); text-align: left; min-height: 30px; overflow-wrap: anywhere; }
+.performanceWorker:hover { text-decoration: underline; }
 .pageHeading { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); }
 .pageHeading h1 { font-size: var(--text-3xl-size); line-height: var(--text-3xl-line); letter-spacing: -.025em; }
 .pageHeading p, .sectionHeading p { color: var(--text-secondary); margin-top: var(--space-1); max-width: 70ch; }
