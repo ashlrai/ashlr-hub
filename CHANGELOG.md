@@ -11,6 +11,21 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Account-aware foreground resource pools
+
+- Adds `ashlr resources pool status|observe|run` for explicit Codex, Claude Code,
+  and numeric-loopback local-model workers without credential switching.
+- Intersects quota observations with rolling task limits and shared-account
+  concurrency. Persists reservations before dispatch and never automatically
+  redispatches an ambiguous or replayed task.
+- Normalizes native quota evidence, retains partial/stale denials and bounded
+  inventory-overflow refusals, and records reported tokens separately from
+  verified engineering acceptance.
+- Documents native account enrollment, output privacy, billing distinctions,
+  and recovery limitations in `docs/RESOURCE-POOLS.md`. This source increment
+  does not activate accounts, publish a registry release, or start a resident
+  scheduler; Universe's evaluation contract is unchanged.
+
 ### Ashlr Universe local experiment kernel
 
 - Adds `ashlr universe demo|init|run|status|archive` and the

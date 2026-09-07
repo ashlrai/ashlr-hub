@@ -59,6 +59,9 @@ const ASYNC_STREAM_HEAD_CHARS = 20 * 1024;
 const ASYNC_STREAM_TAIL_CHARS = 6 * 1024;
 const ASYNC_STREAM_TRUNCATION_MARK = '\n[ashlr: verify output stream truncated]\n';
 
+/** Optional task input is bounded before any subprocess is started. */
+const ASYNC_STDIN_MAX_BYTES = 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -110,6 +113,10 @@ export interface VerifySubprocessOptions {
   cwd: string;
   env: NodeJS.ProcessEnv;
   timeoutMs: number;
+  /** Optional UTF-8 stdin, at most 1 MiB; never added to argv or diagnostics. */
+  input?: string;
+  /** Optional per-stream character capture ceiling (1..1 MiB); legacy default is unchanged. */
+  maxOutputChars?: number;
   /** Final argv containment check performed in this function immediately before spawn. */
   verifyBoundary?: { repoRoot: string; executable: string };
   /** Windows package-manager shims only; ignored on POSIX. */
@@ -130,6 +137,8 @@ export interface VerifySubprocessResult {
   signal: NodeJS.Signals | null;
   timedOut: boolean;
   cancelled: boolean;
+  /** Present only when either captured output stream exceeded its bound. */
+  outputTruncated?: true;
   error?: string;
 }
 
@@ -144,10 +153,18 @@ export interface RunVerifyCommandAsyncOptions {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-function createBoundedStreamCapture(): { append: (chunk: unknown) => void; text: () => string } {
+function createBoundedStreamCapture(limit = ASYNC_STREAM_CAPTURE_CHARS): {
+  append: (chunk: unknown) => void;
+  text: () => string;
+  isTruncated: () => boolean;
+} {
   let head = '';
   let tail = '';
   let truncated = false;
+  const marker = ASYNC_STREAM_TRUNCATION_MARK.slice(0, limit);
+  const available = limit - marker.length;
+  const headChars = limit === ASYNC_STREAM_CAPTURE_CHARS ? ASYNC_STREAM_HEAD_CHARS : Math.floor(available * 0.75);
+  const tailChars = limit === ASYNC_STREAM_CAPTURE_CHARS ? ASYNC_STREAM_TAIL_CHARS : available - headChars;
 
   return {
     append(chunk: unknown): void {
@@ -156,23 +173,27 @@ function createBoundedStreamCapture(): { append: (chunk: unknown) => void; text:
 
       if (!truncated) {
         const combined = head + text;
-        if (combined.length <= ASYNC_STREAM_CAPTURE_CHARS) {
+        if (combined.length <= limit) {
           head = combined;
           return;
         }
 
         truncated = true;
-        head = combined.slice(0, ASYNC_STREAM_HEAD_CHARS);
-        tail = combined.slice(-ASYNC_STREAM_TAIL_CHARS);
+        head = combined.slice(0, headChars);
+        tail = tailChars ? combined.slice(-tailChars) : '';
         return;
       }
 
-      tail = (tail + text).slice(-ASYNC_STREAM_TAIL_CHARS);
+      tail = tailChars ? (tail + text).slice(-tailChars) : '';
     },
 
     text(): string {
       if (!truncated) return head;
-      return `${head}${ASYNC_STREAM_TRUNCATION_MARK}${tail}`;
+      return `${head}${marker}${tail}`;
+    },
+
+    isTruncated(): boolean {
+      return truncated;
     },
   };
 }
@@ -558,6 +579,14 @@ export async function runVerifySubprocessAsync(
   if (argv.length === 0 || argv.some((arg) => typeof arg !== 'string')) {
     return emptyResult({ error: 'invalid argv: expected a non-empty string array' });
   }
+  if (opts.input !== undefined && (typeof opts.input !== 'string'
+    || Buffer.byteLength(opts.input, 'utf8') > ASYNC_STDIN_MAX_BYTES)) {
+    return emptyResult({ error: 'invalid stdin: expected a UTF-8 string of at most 1 MiB' });
+  }
+  if (opts.maxOutputChars !== undefined && (!Number.isSafeInteger(opts.maxOutputChars)
+    || opts.maxOutputChars < 1 || opts.maxOutputChars > 1024 * 1024)) {
+    return emptyResult({ error: 'invalid output capture: expected an integer limit between 1 and 1048576 characters' });
+  }
   if (opts.signal?.aborted) {
     return emptyResult({
       stderr: '[verify-runner] cancelled before subprocess start',
@@ -585,8 +614,8 @@ export async function runVerifySubprocessAsync(
   }
 
   return await new Promise<VerifySubprocessResult>((resolveDone) => {
-    const stdout = createBoundedStreamCapture();
-    const stderr = createBoundedStreamCapture();
+    const stdout = createBoundedStreamCapture(opts.maxOutputChars);
+    const stderr = createBoundedStreamCapture(opts.maxOutputChars);
     const processKill = opts._processKill ?? ((pid: number, signal: NodeJS.Signals | 0) => {
       process.kill(pid, signal);
     });
@@ -601,6 +630,7 @@ export async function runVerifySubprocessAsync(
     let terminationRequested = false;
     let hardKillSent = false;
     let authorityFailure: string | undefined;
+    let inputFailure: string | undefined;
     let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
     let escalationTimer: ReturnType<typeof setTimeout> | null = null;
     let drainTimer: ReturnType<typeof setTimeout> | null = null;
@@ -610,7 +640,7 @@ export async function runVerifySubprocessAsync(
       child = spawnImpl(argv[0]!, argv.slice(1), {
         cwd: opts.cwd,
         env: opts.env,
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: [opts.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
         shell: platform === 'win32' && opts.windowsShell === true,
         windowsHide: true,
         ...(ownsProcessGroup ? { detached: true } : {}),
@@ -626,11 +656,28 @@ export async function runVerifySubprocessAsync(
       ? child.pid
       : null;
 
-    function captured(): Pick<VerifySubprocessResult, 'stdout' | 'stderr'> {
-      return { stdout: stdout.text(), stderr: stderr.text() };
+    function captured(): Pick<VerifySubprocessResult, 'stdout' | 'stderr' | 'outputTruncated'> {
+      return {
+        stdout: stdout.text(),
+        stderr: stderr.text(),
+        ...(stdout.isTruncated() || stderr.isTruncated() ? { outputTruncated: true as const } : {}),
+      };
+    }
+
+    function onStdinError(): void {
+      // Even an exit-zero worker is not a successful delivery if the input pipe
+      // failed. Keep waiting for the existing process-ownership settlement.
+      inputFailure = 'subprocess stdin delivery failed';
+    }
+
+    function onStdinClose(): void {
+      child.stdin?.removeListener('error', onStdinError);
     }
 
     function releaseProcessResources(): void {
+      // Preserve the error listener until close: destroying a pending write can
+      // queue EPIPE after settlement. The close listener removes it afterward.
+      child.stdin?.destroy();
       child.stdout?.removeAllListeners();
       child.stderr?.removeAllListeners();
       child.stdout?.destroy();
@@ -648,7 +695,7 @@ export async function runVerifySubprocessAsync(
       if (drainTimer !== null) clearTimeout(drainTimer);
       opts.signal?.removeEventListener('abort', onAbort);
       releaseProcessResources();
-      resolveDone(result);
+      resolveDone(inputFailure && !result.error ? { ...result, error: inputFailure } : result);
     }
 
     function processSignalError(err: unknown, operation: string): 'absent' | 'failed' {
@@ -857,6 +904,20 @@ export async function runVerifySubprocessAsync(
         signal,
       }));
     });
+
+    if (opts.input !== undefined) {
+      if (!child.stdin) {
+        inputFailure = 'subprocess stdin delivery unavailable';
+      } else {
+        child.stdin.on('error', onStdinError);
+        child.stdin.once('close', onStdinClose);
+        try {
+          child.stdin.end(opts.input, 'utf8');
+        } catch {
+          onStdinError();
+        }
+      }
+    }
 
     opts.signal?.addEventListener('abort', onAbort, { once: true });
     if (opts.signal?.aborted) onAbort();
