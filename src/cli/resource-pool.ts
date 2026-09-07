@@ -4,6 +4,7 @@ import { isAbsolute, parse as parsePath, resolve } from 'node:path';
 const USAGE = `usage: ashlr resources pool status --root ABS --pool ABS --bindings ABS --observations ABS [--json]
        ashlr resources pool run --root ABS --pool ABS --bindings ABS --observations ABS --task ABS [--output ABS] [--json]
        ashlr resources pool observe --pool ABS --worker ID --provider codex|claude --input ABS --captured-at ISO [--previous ABS] [--bucket ID ...] [--json]
+       ashlr resources pool console --help
 
 An explicit foreground task pool; no default configuration, credential discovery,
 account login/switching, service activation, or automatic task retry.
@@ -134,6 +135,10 @@ function outputMetadata(reservation: OutputReservation | undefined) {
 
 /** Parse scope before importing execution, and keep transient worker text out of CLI metadata. */
 export async function cmdResourcePool(args: string[]): Promise<number> {
+  if (args[0] === 'console') {
+    const { cmdResourceConsole } = await import('./resource-console.js');
+    return cmdResourceConsole(args.slice(1));
+  }
   let reserved: OutputReservation | undefined;
   try {
     const options = parse(args); if (options.help) { console.log(USAGE); return 0; }

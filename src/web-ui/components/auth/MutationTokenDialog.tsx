@@ -22,9 +22,13 @@ export interface MutationTokenDialogProps {
   onUnlocked?: () => void;
   /** Human context for why the token is being requested right now. */
   reason?: string;
+  /** Scoped consoles can name their own startup token without changing the hold. */
+  tokenLabel?: string;
+  tokenHelp?: string;
 }
 
-export function MutationTokenDialog({ open, onClose, onUnlocked, reason }: MutationTokenDialogProps) {
+export function MutationTokenDialog({ open, onClose, onUnlocked, reason, tokenLabel = 'Mutation token',
+  tokenHelp = 'the mutation token ashlr serve printed' }: MutationTokenDialogProps) {
   const { setToken } = useMutationHold();
   const [value, setValue] = useState('');
   const [reveal, setReveal] = useState(false);
@@ -37,7 +41,7 @@ export function MutationTokenDialog({ open, onClose, onUnlocked, reason }: Mutat
     e.preventDefault();
     const trimmed = value.trim();
     if (!TOKEN_RE.test(trimmed)) {
-      setError('Expected 64 hex characters — the mutation token ashlr serve printed.');
+      setError(`Expected 64 hex characters — ${tokenHelp}.`);
       return;
     }
     setToken(trimmed);
@@ -55,7 +59,7 @@ export function MutationTokenDialog({ open, onClose, onUnlocked, reason }: Mutat
       </p>
       <form onSubmit={submit} className={styles.form} noValidate>
         <label htmlFor={inputId} className={styles.label}>
-          Mutation token
+          {tokenLabel}
         </label>
         <div className={styles.inputRow}>
           <input

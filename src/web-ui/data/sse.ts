@@ -13,7 +13,7 @@
  */
 import { getReadClientProof, getAuthSnapshot, reportSessionExpired, subscribeAuth } from './auth-store.js';
 import { invalidate, invalidatePrefix } from './cache.js';
-import { isUniverseConsolePath } from '../app/console-mode.js';
+import { isScopedConsolePath } from '../app/console-mode.js';
 
 export const SSE_EVENT_NAMES = [
   'runs',
@@ -88,7 +88,7 @@ function scheduleReconnect(): void {
 function connect(): void {
   // Shared hooks import this module, but the dedicated console has no global
   // Hub event channel. Check on every reconnect, not just the initial import.
-  if (isUniverseConsolePath()) { teardown(); return; }
+  if (isScopedConsolePath()) { teardown(); return; }
   if (getAuthSnapshot().phase !== 'authenticated') return;
   teardown();
 

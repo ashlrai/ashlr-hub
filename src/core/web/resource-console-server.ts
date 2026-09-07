@@ -1,0 +1,249 @@
+import { randomBytes } from 'node:crypto';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { validateResourcePool, validateResourceObservations } from '../resources/pool-policy.js';
+import { readResourceJson } from '../resources/pool-runtime.js';
+import { validateResourceBindings } from '../resources/worker.js';
+import { createResourcePoolSupervisor, ResourceSupervisorError } from '../resources/pool-supervisor.js';
+import type { ResourceConsoleScope, ResourceConsoleTaskInput } from '../resources/console-types.js';
+import { createResourceConsoleReader } from './resource-console-reads.js';
+import { createReadSessionBoundary, headerValue, requestUrl, safeEqual, sendJson } from './read-session.js';
+import { validateUniverseConsoleRoot } from './universe-console-reads.js';
+import { serveStatic } from './static.js';
+
+export interface ResourceConsoleServerOptions {
+  root: string;
+  poolFile: string;
+  bindingsFile: string;
+  observationsFile: string;
+  port?: number;
+  execute?: boolean;
+  workspace?: string;
+  maxParallel?: number;
+  signal?: AbortSignal;
+}
+export interface ResourceConsoleServerHandle {
+  url: string;
+  consoleUrl: string;
+  port: number;
+  readToken: string;
+  controlToken: string | null;
+  scope: ResourceConsoleScope;
+  close(): Promise<void>;
+}
+
+class RequestError extends Error {
+  constructor(readonly status: number, message: string) { super(message); }
+}
+const MAX_BODY_BYTES = 128 * 1024;
+const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
+const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+
+function exact(value: unknown, keys: string[]): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) &&
+    Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+
+/** Only authenticated, same-origin JSON requests reach this bounded reader. */
+function body(req: IncomingMessage): Promise<unknown> {
+  if (headerValue(req, 'content-type').toLowerCase() !== 'application/json') {
+    return Promise.reject(new RequestError(415, 'Expected application/json'));
+  }
+  const declared = headerValue(req, 'content-length');
+  if (declared && (!/^\d+$/.test(declared) || Number(declared) > MAX_BODY_BYTES)) {
+    return Promise.reject(new RequestError(413, 'Request body exceeds the limit'));
+  }
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = []; let size = 0; let finished = false;
+    const cleanup = () => {
+      clearTimeout(timer); req.removeListener('data', data); req.removeListener('end', end);
+      req.removeListener('aborted', failed); req.removeListener('close', closed);
+    };
+    const fail = (error: RequestError) => {
+      if (finished) return; finished = true; cleanup(); req.resume(); reject(error);
+    };
+    const failed = () => fail(new RequestError(400, 'Request body unavailable'));
+    const closed = () => { if (!req.complete) failed(); };
+    const data = (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > MAX_BODY_BYTES) { fail(new RequestError(413, 'Request body exceeds the limit')); return; }
+      chunks.push(chunk);
+    };
+    const end = () => {
+      if (finished) return;
+      try {
+        const value: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));
+        finished = true; cleanup(); resolve(value);
+      } catch { fail(new RequestError(400, 'Malformed JSON request')); }
+    };
+    const timer = setTimeout(() => fail(new RequestError(408, 'Request body timed out')), 5_000);
+    req.on('data', data); req.once('end', end); req.once('error', failed); req.once('aborted', failed); req.once('close', closed);
+    // A rejected body can still emit a socket error while being drained.
+    req.once('close', () => req.removeListener('error', failed));
+    if (req.aborted || req.destroyed) failed();
+  });
+}
+
+function sendSnapshot(res: ServerResponse, value: unknown): void {
+  const json = JSON.stringify(value);
+  if (Buffer.byteLength(json) > MAX_RESPONSE_BYTES) throw new RequestError(503, 'Resource evidence exceeds the response limit');
+  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff', 'Content-Length': Buffer.byteLength(json) }); res.end(json);
+}
+
+/** One fixed pool; independent read and control capabilities. No default dashboard imports. */
+export async function startResourceConsoleServer(options: ResourceConsoleServerOptions): Promise<ResourceConsoleServerHandle> {
+  const root = validateUniverseConsoleRoot(options.root);
+  const poolFile = validateUniverseConsoleRoot(options.poolFile);
+  const bindingsFile = validateUniverseConsoleRoot(options.bindingsFile);
+  const observationsFile = validateUniverseConsoleRoot(options.observationsFile);
+  const requestedPort = options.port ?? 0;
+  const maxParallel = options.maxParallel ?? 4;
+  if (!Number.isSafeInteger(requestedPort) || requestedPort < 0 || requestedPort > 65_535 ||
+    !Number.isSafeInteger(maxParallel) || maxParallel < 1 || maxParallel > 16 ||
+    (options.execute !== undefined && typeof options.execute !== 'boolean') ||
+    (options.execute === true ? !options.workspace : options.workspace !== undefined || options.maxParallel !== undefined)) {
+    throw new Error('Invalid resource console options');
+  }
+  const workspace = options.execute ? validateUniverseConsoleRoot(options.workspace) : null;
+  if (workspace && [root, poolFile, bindingsFile, observationsFile].some((target) => {
+    const nested = relative(workspace, target);
+    return nested === '' || nested !== '..' && !nested.startsWith(`..${sep}`) && !isAbsolute(nested);
+  })) throw new Error('Resource control files must remain outside the writable workspace');
+  if (options.signal?.aborted) throw new Error('Resource console startup cancelled');
+  const pool = validateResourcePool(readResourceJson(poolFile));
+  const bindings = validateResourceBindings(readResourceJson(bindingsFile), pool);
+  const reader = createResourceConsoleReader({ root, pool, bindings, observationsFile });
+  const sessions = createReadSessionBoundary({ cookieName: `ashlr_resources_${randomBytes(12).toString('hex')}` });
+  const controlToken = options.execute ? randomBytes(32).toString('hex') : null;
+  const scope: ResourceConsoleScope = { schemaVersion: 1, mode: 'resource-pool', root, poolId: pool.id,
+    readOnly: !options.execute, workspace, maxParallel: options.execute ? maxParallel : 0, maxQueued: options.execute ? 64 : 0 };
+  const assets = join(dirname(fileURLToPath(import.meta.url)), 'public');
+  let supervisor: Awaited<ReturnType<typeof createResourcePoolSupervisor>> | null = null;
+  let origin = ''; let port = 0; let closing: Promise<void> | null = null; let ready = false;
+
+  async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Content-Security-Policy', "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'");
+    res.setHeader('X-Frame-Options', 'DENY'); res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    if (![`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`].includes(headerValue(req, 'host'))) {
+      throw new RequestError(403, 'Forbidden: invalid Host header');
+    }
+    if (req.headers.origin !== undefined && headerValue(req, 'origin') !== origin) {
+      throw new RequestError(403, 'Forbidden: invalid Origin header');
+    }
+    const url = requestUrl(req);
+    if (!url || url.search) throw new RequestError(400, 'This console does not accept query parameters');
+    const method = (req.method ?? 'GET').toUpperCase();
+    if (url.pathname === '/health') {
+      if (method !== 'GET' && method !== 'HEAD') throw new RequestError(405, 'Method not allowed');
+      sendJson(res, 200, { ok: true }); return;
+    }
+    if (sessions.handleSession(req, res, url)) return;
+    if (url.pathname === '/api' || url.pathname.startsWith('/api/')) {
+      if (method === 'POST') {
+        if (!supervisor || !controlToken) throw new RequestError(403, 'Execution is disabled for this console');
+        if (!safeEqual(headerValue(req, 'x-ashlr-token'), controlToken)) throw new RequestError(401, 'Control token required');
+        const cancel = /^\/api\/resources\/tasks\/([a-z0-9][a-z0-9_-]{0,63})\/cancel$/.exec(url.pathname);
+        if (url.pathname !== '/api/resources/tasks' && url.pathname !== '/api/resources/queue' && !cancel) {
+          throw new RequestError(404, 'Unknown resource control route');
+        }
+        const input = await body(req);
+        if (closing) throw new RequestError(503, 'Console is closing');
+        if (url.pathname === '/api/resources/tasks') {
+          if (!exact(input, ['id', 'prompt', 'allowedWorkerIds', 'mode', 'timeoutMs', 'maxOutputTokens'])) {
+            throw new RequestError(400, 'Expected a scoped task without filesystem or command fields');
+          }
+          const job = supervisor.submit(input as unknown as ResourceConsoleTaskInput);
+          sendJson(res, 202, { job });
+        } else if (cancel) {
+          if (!exact(input, [])) throw new RequestError(400, 'Cancel expects an empty JSON object');
+          sendJson(res, 200, { job: supervisor.cancel(cancel[1]!) });
+        } else {
+          if (!exact(input, ['paused']) || typeof input.paused !== 'boolean') throw new RequestError(400, 'Expected paused boolean');
+          sendJson(res, 200, { supervisor: supervisor.setPaused(input.paused) });
+        }
+        return;
+      }
+      if (!sessions.authority(req, url)) {
+        sendJson(res, 401, { error: 'Read session required' }, { Vary: 'Cookie, X-Ashlr-Token, X-Ashlr-Read-Client' }); return;
+      }
+      if (method !== 'GET') throw new RequestError(405, 'Method not allowed');
+      if (url.pathname === '/api/resources/console') { sendJson(res, 200, scope); return; }
+      if (url.pathname === '/api/resources') {
+        const evidence = await reader.snapshot();
+        sendSnapshot(res, { ...evidence, supervisor: supervisor?.snapshot() ?? null }); return;
+      }
+      const output = /^\/api\/resources\/tasks\/([^/]+)\/output$/.exec(url.pathname);
+      if (output && ID.test(output[1]!)) {
+        const value = supervisor?.output(output[1]!);
+        if (!value) throw new RequestError(404, 'No retained output for this task in this console session');
+        sendSnapshot(res, value); return;
+      }
+      throw new RequestError(404, 'Route unavailable in this scoped console');
+    }
+    if (method !== 'GET' && method !== 'HEAD') throw new RequestError(405, 'Method not allowed');
+    if (url.pathname === '/' || url.pathname === '/resources') {
+      res.writeHead(308, { Location: '/resources/' }); res.end(); return;
+    }
+    if (url.pathname === '/resources/' || url.pathname.startsWith('/next/assets/')) {
+      const staticRequest = Object.create(req) as IncomingMessage;
+      staticRequest.url = url.pathname === '/resources/' ? '/next/index.html' : url.pathname;
+      if (serveStatic(staticRequest, res, assets)) return;
+    }
+    throw new RequestError(404, 'Not found');
+  }
+
+  const server = createServer((req, res) => {
+    if (closing || !ready) { sendJson(res, 503, { error: 'Console unavailable' }); return; }
+    void route(req, res).catch((error: unknown) => {
+      if (res.headersSent || res.destroyed) { if (!res.writableEnded) res.end(); return; }
+      if (error instanceof RequestError) { sendJson(res, error.status, { error: error.message }); return; }
+      if (error instanceof ResourceSupervisorError) {
+        const statuses = { INVALID_INPUT: 400, CONFLICT: 409, CAPACITY: 429, NOT_FOUND: 404, UNAVAILABLE: 503 };
+        sendJson(res, statuses[error.code] ?? 503, { error: `Resource operation refused: ${error.code.toLowerCase().replaceAll('_', ' ')}` }); return;
+      }
+      sendJson(res, 503, { error: 'Resource evidence or operation is temporarily unavailable' });
+    });
+  });
+  server.requestTimeout = 30_000; server.headersTimeout = 10_000;
+
+  const close = (): Promise<void> => {
+    if (closing) return closing;
+    ready = false; sessions.clear(); options.signal?.removeEventListener('abort', aborted);
+    closing = (async () => {
+      // A reader may be terminated, but task subprocesses must settle through
+      // their owning supervisor before the server can declare shutdown complete.
+      const results = await Promise.allSettled([
+        Promise.resolve().then(() => supervisor?.close()),
+        reader.close(),
+        new Promise<void>((done) => {
+          if (!server.listening) { done(); return; }
+          server.close(() => done()); server.closeIdleConnections(); server.closeAllConnections();
+        }),
+      ]);
+      if (results.some((result) => result.status === 'rejected')) throw new Error('Resource console shutdown uncertain');
+    })();
+    return closing;
+  };
+  const aborted = () => { void close().catch(() => {}); };
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const failed = (error: Error) => { server.removeListener('listening', listening); reject(error); };
+      const listening = () => { server.removeListener('error', failed); resolve(); };
+      server.once('error', failed); server.once('listening', listening); server.listen(requestedPort, '127.0.0.1');
+    });
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Resource console address unavailable');
+    port = address.port; origin = `http://127.0.0.1:${port}`;
+    if (options.signal?.aborted) throw new Error('Resource console startup cancelled');
+    if (workspace) supervisor = await createResourcePoolSupervisor({ root, pool, bindings, workspace, maxParallel,
+      readObservations: () => validateResourceObservations(readResourceJson(observationsFile), pool), signal: options.signal });
+    if (options.signal?.aborted) throw new Error('Resource console startup cancelled');
+    options.signal?.addEventListener('abort', aborted, { once: true }); ready = true;
+    return { url: origin, consoleUrl: `${origin}/resources/`, port, readToken: sessions.readToken, controlToken,
+      scope: { ...scope }, close };
+  } catch (error) { await close(); throw error; }
+}
