@@ -24,6 +24,7 @@
  *   learn "<text>" [opts]      Append a note to shared genome memory.
  *   genome                     Genome status/health: entry count, projects, staleness.
  *   update [--check] [--json]  Safe self-update: git pull --ff-only + rebuild; --check reports only.
+ *   runtime <install|status|rollback|run>  Pinned local candidate installation and foreground Universe commands.
  *   spec new "<goal>" [opts]   Author a versioned end-state spec artifact.
  *   spec list/show/refine      Manage spec artifacts.
  *   swarm "<goal>"|<specId>    Decompose a spec into a contracts-first agent swarm and run it.
@@ -625,6 +626,11 @@ const loadUniverseCmd = lazyCmd(
   () => import('./universe.js'),
   (m) => m.cmdUniverse as Cmd,
   'universe command requires a current build of src/cli/universe.ts.',
+);
+const loadRuntimeCmd = lazyCmd(
+  () => import('./runtime.js'),
+  (m) => m.cmdRuntime as Cmd,
+  'runtime command requires a current build of src/cli/runtime.ts.',
 );
 
 // ─── M18 integration reads (best-effort, never throw, used in cmdStatus) ──────
@@ -2098,6 +2104,12 @@ async function main(): Promise<void> {
       case 'universe': {
         const cmdUniverse = await loadUniverseCmd();
         process.exitCode = await cmdUniverse(rest);
+        break;
+      }
+
+      case 'runtime': {
+        const cmdRuntime = await loadRuntimeCmd();
+        process.exitCode = await cmdRuntime(rest);
         break;
       }
 

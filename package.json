@@ -49,7 +49,8 @@
   ],
   "bundledDependencies": [
     "@modelcontextprotocol/sdk",
-    "marked"
+    "marked",
+    "tar"
   ],
   "exports": {
     ".": {
@@ -130,6 +131,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "marked": "17.0.0"
+    "marked": "17.0.0",
+    "tar": "7.5.22"
   }
 }
