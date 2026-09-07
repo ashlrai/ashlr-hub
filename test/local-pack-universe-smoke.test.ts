@@ -66,7 +66,8 @@ describe('installed Universe package smoke', () => {
   });
 
   it.each(['runUniverseCampaign', 'deliverUniverseElite', 'readUniverseGraph', 'traverseUniverseGraph',
-    'validateUniversePortfolioDefinition', 'readUniversePortfolioPlan', 'buildUniversePortfolioPlan', 'runUniversePortfolio'])('rejects missing public SDK export %s before creating the smoke store', (name) => {
+    'validateUniversePortfolioDefinition', 'readUniversePortfolioPlan', 'buildUniversePortfolioPlan', 'runUniversePortfolio',
+    'buildUniverseSearchContext', 'validateUniverseSearchContext', 'searchContextReceipt'])('rejects missing public SDK export %s before creating the smoke store', (name) => {
     const { smokeRoot, run } = fixture({ sdkOverride: `export const ${name} = undefined;` });
     const result = run();
     expect(result.status).toBe(1);

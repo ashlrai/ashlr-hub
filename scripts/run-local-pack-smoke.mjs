@@ -75,7 +75,8 @@ async function verifyInstalledUniverse(fixtureRoot, bin) {
     'requestUniverseCampaignControl', 'runUniverseCampaign', 'deliverUniverseElite',
     'readUniverseDeliveries', 'validUniverseDeliveryBranch', 'buildUniverseGraph',
     'readUniverseGraph', 'traverseUniverseGraph', 'validateUniversePortfolioDefinition',
-    'readUniversePortfolioPlan', 'buildUniversePortfolioPlan', 'runUniversePortfolio']) {
+    'readUniversePortfolioPlan', 'buildUniversePortfolioPlan', 'runUniversePortfolio',
+    'buildUniverseSearchContext', 'validateUniverseSearchContext', 'searchContextReceipt']) {
     assert.equal(typeof sdk[name], 'function', `Universe SDK export missing: ${name}`);
   }
   mkdirSync(fixtureRoot, { mode: 0o700 });
@@ -144,6 +145,25 @@ async function verifyInstalledUniverse(fixtureRoot, bin) {
     evaluation: { command: [process.execPath, 'never-run.mjs'], timeoutMs: 1000 },
     variants: [{ id: 'never-run', niche: 'smoke', hypothesis: 'No execution is expected',
       command: [process.execPath, 'never-run.mjs'] }] };
+  // Pure SDK contract fixture only: no model store, connection, or dispatch.
+  const modelVariant = { id: 'search-contract', niche: 'smoke', hypothesis: 'Supply the metric before the first request',
+    generation: { kind: 'local-chat', endpoint: 'http://127.0.0.1:11434/v1', model: 'never-contacted',
+      files: ['never-run.mjs'], maxOutputTokens: 256 } };
+  const search = sdk.buildUniverseSearchContext({ manifest: { ...manifest, variants: [modelVariant] },
+    manifestDigest: 'a'.repeat(64), comparatorDigest: 'b'.repeat(64), runs: [], elites: [],
+    activeRun: null, sourceState: 'healthy', reasons: [] }, modelVariant);
+  assert.equal(search.schemaVersion, 2);
+  assert.equal(search.generation, 1);
+  assert.deepEqual(search.metric, manifest.metric);
+  assert.equal(search.parent, null);
+  assert.equal(search.previous, null);
+  assert.equal(search.repetition.totalAttempts, 0);
+  assert.deepEqual(sdk.validateUniverseSearchContext(search), search);
+  assert.throws(() => sdk.validateUniverseSearchContext({ ...search, schemaVersion: 3 }));
+  const searchReceipt = sdk.searchContextReceipt(search);
+  assert.equal(searchReceipt.schemaVersion, 2);
+  assert.match(searchReceipt.digest, /^[a-f0-9]{64}$/);
+  assert.deepEqual(sdk.searchContextReceipt(sdk.validateUniverseSearchContext(search)), searchReceipt);
   const definition = { schemaVersion: 1, id: 'pack-sdk', universeId: manifest.id, feedback: false,
     budget: { maxGenerations: 1, maxDurationMs: 1000, maxModelRequests: 0,
       maxStagnantGenerations: 1, maxReportedTokens: null } };

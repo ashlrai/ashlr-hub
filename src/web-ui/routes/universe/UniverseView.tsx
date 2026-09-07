@@ -75,10 +75,12 @@ function GenerationEvidence({ trial }: { trial: UniverseTrial }) {
           <div><dt>Prompt digest</dt><dd><code>{receipt.promptDigest ?? 'Unavailable'}</code></dd></div>
           <div><dt>Response digest</dt><dd><code>{receipt.responseDigest ?? 'Unavailable'}</code></dd></div>
           {receipt.feedback ? <><div><dt>Evaluator feedback source</dt><dd>Generation {receipt.feedback.generation} · trial {receipt.feedback.trialId}</dd></div><div><dt>Feedback digest</dt><dd><code>{receipt.feedback.digest}</code></dd></div></> : null}
+          {receipt.search ? <><div><dt>Recorded search context</dt><dd>Version {receipt.search.schemaVersion}</dd></div><div><dt>Search context digest</dt><dd><code>{receipt.search.digest}</code></dd></div></> : null}
         </dl>
       </details>
       <p>Generation success means a valid replacement response, not evaluator acceptance. Token counts come from the endpoint response; model identity is the configured name.</p>
       {receipt.feedback ? <p>Feedback can come from a failed attempt. It is distinct from the retained parent shown in the lineage.</p> : null}
+      {receipt.search ? <p>Search context supplies the metric and bounded repetition evidence, with a retained baseline and previous selection result when available. A repeated artifact is not an evaluator result or a reason to skip evaluation.</p> : null}
     </section>
   );
 }

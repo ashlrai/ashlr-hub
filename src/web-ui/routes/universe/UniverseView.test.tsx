@@ -491,5 +491,20 @@ describe('UniverseView', () => {
     expect(within(evidence).getByText('Generation 1 · trial previous-failed-attempt')).toBeInTheDocument();
     expect(within(evidence).getByText('Feedback can come from a failed attempt. It is distinct from the retained parent shown in the lineage.')).toBeInTheDocument();
     expect(screen.getByText('Current niche elite')).toBeInTheDocument();
+    expect(within(evidence).queryByText('Recorded search context')).not.toBeInTheDocument();
+  });
+
+  it('shows the versioned search receipt on the first model request without inventing a previous outcome', async () => {
+    const current = summary();
+    current.runs = [run({ feedbackEnabled: true, feedbackVersion: 2, trials: [trial({ generation: generation({
+      search: { schemaVersion: 2, digest: 'f'.repeat(64) },
+    }) })] })];
+    current.elites = [];
+    mount(overview({ universes: [current] }));
+    const evidence = await screen.findByRole('region', { name: 'Model generation evidence' });
+    expect(within(evidence).getByText('Version 2')).toBeInTheDocument();
+    expect(within(evidence).getByText('f'.repeat(64), { selector: 'code' })).toBeInTheDocument();
+    expect(within(evidence).queryByText('Evaluator feedback source')).not.toBeInTheDocument();
+    expect(within(evidence).getByText(/A repeated artifact is not an evaluator result/)).toBeInTheDocument();
   });
 });

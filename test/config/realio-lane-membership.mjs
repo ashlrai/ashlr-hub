@@ -52,6 +52,8 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-campaign-integration.test.ts', // native multi-generation ownership, feedback and durable resource limits
   'test/universe-portfolio-integration.test.ts', // native cross-Universe dependency ordering and concurrent campaign settlement
   'test/universe-feedback-replay.test.ts', // durable feedback integrity and a complete 64-trial record footprint
+  'test/universe-search-feedback-integration.test.ts', // native metric-directed search after repeated unchanged trials
+  'test/universe-search-feedback-replay.test.ts', // independent versioned search-context replay and legacy recovery
   'test/universe-demo.test.ts', // two real Universe generations and artifact lineage
   'test/universe-confinement.test.ts', // real macOS filesystem boundary checks with test-owned sentinels
   // --- confirmed-flaky repeat offenders (this session's evidence: isolation re-runs pass;
