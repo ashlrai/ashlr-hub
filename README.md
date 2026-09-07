@@ -16,6 +16,11 @@ resource budget into useful accepted engineering changes, then use measured
 results to improve the next attempt. Hub provides the local runtime, integrations,
 CLI, and dashboard. Ecosystem projects stay independently useful.
 
+Start with the [quickstart](docs/QUICKSTART.md) for the supported execution paths,
+or the [documentation map](docs/README.md) to find the right operator or developer
+guide. The target vision, implemented source, installed runtime and provider
+commissioning are separate states; a working dashboard does not establish all four.
+
 The new **local experiment kernel** runs competing code variants from a pinned
 Git seed, evaluates artifacts with a fixed evaluator, retains winners in different
 niches, and uses that archive in subsequent generations. Run the credential-free
@@ -112,26 +117,36 @@ End-State Spec (your vision)
 - High-confidence work can optionally reach `main` without a manual approve, but only through an explicitly enabled authority mode and its deterministic gates. Evidence mode additionally requires a protected remote PR path. This is off by default.
 - Adding a new backend (a NIM, a local Qwen, a different API) is one config entry, no code change.
 
-**Key properties:**
+**Legacy fleet properties:** The following policy describes the enrolled-repo
+daemon/swarm path, not every Hub command. Universe and Resource Pools have
+separate [execution boundaries](docs/ARCHITECTURE.md#current-runtime-map).
 
 - **Preflight-first activation.** `ashlr preflight` verifies daemon readiness, backend connectivity, and key configuration before you enroll any repos. Run it once before your first enroll.
 - **Proposal-only generation floor.** The daemon's generation path emits pending proposals and imports no apply, push, PR, or deploy primitive. Manual inbox approval and the separate default-off auto-merge subsystem are the only code-change authority paths.
 - **Explicit merge authority.** In the default tier mode, local-model proposals stay proposals and allowlisted frontier producers can earn a gated path to `main`. Verification and evidence modes replace producer tier with stricter judge-backed or deterministic evidence authority. Every mode is default off and fail-closed.
-- **Sandboxed by construction.** Every external agent CLI runs in a throwaway git worktree with push credentials severed. Only the scrubbed diff escapes.
+- **Sandboxed by construction.** The legacy autonomous loop routes external engines through `runEngineSandboxed`: a throwaway git worktree with push credentials severed and scrubbed diff capture.
 - **OS-level confinement.** Optionally wraps each run with `sandbox-exec` (macOS) or `bwrap`/`firejail` (Linux) — read-jailed to the worktree, network egress blocked.
-- **Kill-switch.** `touch ~/.ashlr/KILL` — all mutating operations refuse immediately, across every backend and repo.
-- **Zero runtime dependencies.** The entire `core/` and `cli/` tree runs on Node builtins + `@modelcontextprotocol/sdk`. Backends are CLIs or APIs you already have.
+- **Kill-switch.** `touch ~/.ashlr/KILL` gates legacy enrolled-repo mutations. Explicit Universe campaigns and Resource Pool sessions have their own cancellation controls; this is not a universal process kill command.
+- **Small, explicit dependency boundary.** Core and CLI primarily use Node builtins; the package bundles MCP transport, Markdown parsing and archive handling through `@modelcontextprotocol/sdk`, `marked` and `tar`. Backends are CLIs or APIs you explicitly configure.
 - **Self-improving.** The fleet can target its own source, but a self-authored diff is ineligible to merge unless the full invariant suite passes flag-off and flag-on, and any diff that weakens a safety test is refused by construction.
 
 ---
 
 ## Quickstart
 
+For Universe experiments and the resource fleet map, follow the
+[current-source quickstart](docs/QUICKSTART.md#run-the-current-universe-kernel).
+It needs no provider account for the deterministic demonstration. Real workers
+have a separate [commissioning procedure](docs/RESOURCE-POOLS.md#commission-native-accounts-and-local-capacity).
+
+The instructions below cover the **general Hub and legacy fleet configuration**.
+They do not install an unreleased source feature or activate the dormant daemon.
+
 ### Requirements
 
 - Node.js 22.15+
 - Git
-- At least one backend: Ollama running locally, `claude` CLI, `codex` CLI, or an `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`
+- A configured backend only for commands that invoke a model; no model is required for the deterministic Universe demo or saved-evidence inspection
 
 ### Install
 
@@ -318,7 +333,10 @@ ashlr fleet resume
 ashlr enroll kill on/off    # same via enroll subcommand
 ```
 
-The kill-switch is checked before every mutating operation in every backend and repo.
+The legacy enrolled-repo mutation paths check this kill-switch. Do not assume
+it cancels a separate Universe experiment or Resource Pool worker. Use the
+owning foreground command's cancellation, or the resource console's owned-task
+cancel and pause controls, then inspect its recorded shutdown state.
 
 ---
 
@@ -340,7 +358,8 @@ Adding a backend is one entry in `cfg.foundry.engines` — no code change. The b
 
 ## Sandboxed execution
 
-Every external agent (Claude Code CLI, Codex, any engine) runs inside a throwaway git worktree:
+This section describes the legacy `runEngineSandboxed` path. Engines admitted
+through that path run inside a throwaway git worktree:
 
 - `cwd` is the worktree, not your live tree.
 - Git push credentials are severed: env-stripped of `*_TOKEN|SECRET|KEY|PASSWORD|CREDENTIALS`, `GIT_TERMINAL_PROMPT=0`, `SSH_AUTH_SOCK` deleted, `GIT_ASKPASS` emptied, a hard-fail `pre-push` hook injected via `GIT_CONFIG_*` (no shared-config mutation).
@@ -349,7 +368,14 @@ Every external agent (Claude Code CLI, Codex, any engine) runs inside a throwawa
 
 On macOS, `cfg.foundry.confinement` wraps the spawn in `sandbox-exec` (read-jailed to worktree + vendor homes, network egress denied). Linux uses `bwrap` or `firejail`. Unsupported platforms fall back to env-only isolation by default; `onUnsupported: 'fail'` makes that a terminal error instead.
 
-Every run and proposal carries HMAC-signed `{engineModel, engineTier}` provenance (M47.1). The merge gate re-verifies the HMAC before any merge-to-main; a forged or tampered record is refused.
+That legacy path carries HMAC-signed `{engineModel, engineTier}` provenance
+(M47.1); its merge gate re-verifies the HMAC. This is not the provenance or
+containment contract for every Hub operation. Universe runs candidates and a
+pinned evaluator through its own isolation profile. Resource Pool native workers
+run in the explicitly selected `cwd` using the native adapter's read-only or
+workspace-write controls, not an automatically created Hub worktree. Consult
+[Universe](docs/ASHLR-UNIVERSE.md) and [Resource Pools](docs/RESOURCE-POOLS.md#run-one-task)
+before authorizing either path.
 
 ---
 
@@ -475,20 +501,24 @@ next actions point at work the daemon can select now instead of phantom backlog.
 
 ## Safety model
 
-Every safety property below is proven by a named adversarial test. These invariants are never weakened — the fleet itself is blocked from doing so (M54).
+The following invariants describe the **legacy enrolled-repository fleet** and
+its named adversarial test contracts. They are not blanket claims about every
+CLI, model transport or state store in Hub. Universe and Resource Pools enforce
+their separately documented scopes; a green test for one path does not prove
+containment or activation of another.
 
 1. **Proposal-only generation floor.** The daemon's generation path imports no merge/apply primitive. Auto-merge is a separate gated subsystem, default off. Proven by source-scan grep-guard + `test/h1.daemon-gates.test.ts`.
 2. **Enrollment gate.** Only explicitly enrolled repos receive autonomous work. Proven by `test/h6.*`.
-3. **Kill-switch halts everything.** `~/.ashlr/KILL` stops every backend and repo, including in-flight sandboxed runs. Proven by `test/m48.*` kill-all test.
+3. **Legacy fleet kill-switch.** `~/.ashlr/KILL` gates enrolled-repo fleet work, including the legacy sandbox cancellation paths. Test contract: `test/m48.*` kill-all. Separate foreground runtimes require their own cancellation and reconciliation.
 4. **Sandboxed-with-diff-capture only.** External engines run only through `runEngineSandboxed`. No raw-external path in the autonomous loop. Sandbox-creation failure is terminal, never a silent fallback. Proven by `test/m45.*`.
 5. **Git push is blocked.** The pre-push hook + credential strip make every push from the worktree fail. Proven by `test/m45.*` pre-push test.
 6. **Only the diff is consumed.** The loop ingests only the captured, scrubbed diff. The agent's own commits die with the sandbox. Proven by `test/m45.*` diff-only test.
 7. **Immutable signed provenance.** Every run and proposal carries write-once `{engineModel, engineTier}`, HMAC-signed at produce time. The merge gate re-verifies the HMAC before any merge-to-main. Proven by `test/m47.*` and `test/m47-1.*`.
 8. **Merge-to-main requires explicit authority + verification.** Default `trustBasis: "tier"` requires CI/verify green plus a matching frontier `cfg.foundry.mergeAuthority` entry. Opt-in `trustBasis: "verification"` can authorize any producer only with a signed frontier judge ship. Opt-in `trustBasis: "evidence"` skips the judge only when base- and diff-bound deterministic evidence clears and a live protected remote PR path is available; evidence mode refuses local fallback and self-target merges. Proven by `test/m47.*`, `test/m153.*`, and `test/m307.*`.
 9. **Self-improvement cannot self-disarm.** A self-target diff must pass the invariant suite flag-off and flag-on. Any diff weakening a safety test is refused. Proven by `test/m54.*`.
-10. **Zero new runtime dependencies.** Backends are CLIs or APIs the user already has. Proven by dependency-manifest grep-guard.
+10. **Preserve the declared dependency boundary.** Package manifest, lockfile and bundled dependency inventory must agree. Reuse existing utilities and update the dependency contract and verification together for a justified dependency change.
 
-Full invariant set: [`docs/SPEC-V4-FOUNDRY.md`](docs/SPEC-V4-FOUNDRY.md) §9 and [`docs/SPEC-V5-OPEN-FLEET.md`](docs/SPEC-V5-OPEN-FLEET.md) §9.
+Full invariant set: [`docs/SPEC-V4-FOUNDRY.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/SPEC-V4-FOUNDRY.md) §9 and [`docs/SPEC-V5-OPEN-FLEET.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/SPEC-V5-OPEN-FLEET.md) §9.
 
 ---
 
@@ -567,7 +597,7 @@ The config is validated against [`schema/config.schema.json`](schema/config.sche
 ticks. It never invokes a model or mutates memory, routing, proposals, or merge
 state, and it remains distinct from behavior-changing reflection.
 
-See [`docs/FOUNDRY-CONFIG.md`](docs/FOUNDRY-CONFIG.md) for the full foundry reference and [`docs/examples/foundry.config.json`](docs/examples/foundry.config.json) for an annotated example.
+See [`docs/FOUNDRY-CONFIG.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/FOUNDRY-CONFIG.md) for the full foundry reference and [`docs/examples/foundry.config.json`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/examples/foundry.config.json) for an annotated example.
 
 ### Locus firm profile (opt-in identity gates)
 
@@ -600,7 +630,7 @@ Resolution: env → `locus.enforce` → `locus.firm === true` → off. See
 `--locus-firm` / `ASHLR_LOCUS_FIRM=1`.
 
 **Production fleet checklist** (install Locus, firm, CI binding, doctor soft
-warn): [`docs/LOCUS-FIRM-FLEET.md`](docs/LOCUS-FIRM-FLEET.md). When repos are
+warn): [`docs/LOCUS-FIRM-FLEET.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/LOCUS-FIRM-FLEET.md). When repos are
 enrolled, Locus is on PATH, and `locus.firm` is still false, `ashlr doctor` /
 preflight soft-warns *consider locus.firm for production* (non-blocking).
 ---
@@ -614,7 +644,7 @@ preflight soft-warns *consider locus.firm for production* (non-blocking).
 | **v2.1** (H1–H8) | Harden and prove — adversarial test suite, safety invariants proven by tests | Shipped |
 | **v2.2** (M31–M33) | Agent-native — plugin system, Raycast, update channel | Shipped |
 | **v3-Weapon** (M41–M44) | Local Weapon — adaptive model-sized prompts, sandboxed engineer tool surface, verify→repair, eval | Shipped |
-| **v3-Team** (M34–M40) | Team Command Center — multi-machine inbox, coordinated daemons, team visibility | **Spec'd, not built** — see [`docs/SPEC-V3-TEAM.md`](docs/SPEC-V3-TEAM.md) |
+| **v3-Team** (M34–M40) | Team Command Center — multi-machine inbox, coordinated daemons, team visibility | **Spec'd, not built** — see [`docs/SPEC-V3-TEAM.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/SPEC-V3-TEAM.md) |
 | **v4** (M45–M49) | Foundry — multi-backend engines, backend router, tiered-trust merge gate, HMAC provenance, fleet supervisor | Shipped |
 | **v5** (M50–M55) | Open Fleet — declarative engine registry, tri-tier trust, OS confinement, fleet intelligence, self-improving fleet, goal/loop conductor | Shipped |
 | **v5.1** (M320–M324) | Claude 5 Model Intelligence — Sonnet 5 workhorse routing, Fable 5 judge with Opus fallback, per-model ROI telemetry, cost-aware learned routing | Shipped |
@@ -629,29 +659,36 @@ not release evidence.
 
 ## The Ashlr ecosystem
 
-ashlr-hub is the orchestrator at the center of a 13-repo platform. The other repos are **composable capabilities** — the fleet can compose them to fix its own weaknesses and to build products: token-efficiency (`ashlr-plugin`, `@ashlr/core-efficiency`), executors (`ashlrcode`, `ashlr-workbench`), security and trust (`phantom-secrets`, `binshield`), infra and data (`stack`, `webfetch`), and observability and content (`ashlr-pulse`, `ashlr-md`, `morphkit`, `prompt-trackr`).
+ashlr-hub is the local kernel in a federated ecosystem. The other repos retain independent products and become **composable capabilities** through explicit interfaces: token-efficiency (`ashlr-plugin`, `@ashlr/core-efficiency`), executors (`ashlrcode`, `ashlr-workbench`), security and trust (`phantom-secrets`, `binshield`), infra and data (`stack`, `webfetch`), and observability and content (`ashlr-pulse`, `ashlr-md`, `morphkit`, `prompt-trackr`). The capability map includes composition targets; it does not mean every integration is live.
 
-See [`docs/ECOSYSTEM-MAP.md`](docs/ECOSYSTEM-MAP.md) for the full capability map and the composition bets — how the hub uses its own ecosystem as building blocks.
+See [`docs/ECOSYSTEM-MAP.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/ECOSYSTEM-MAP.md) for the full capability map and the composition bets — how the hub uses its own ecosystem as building blocks.
 
 ## Documentation
 
+The [documentation map](docs/README.md) separates current operation, the North
+Star and source-maintainer references. Start with these canonical guides:
+
 | Doc | What it covers |
 |-----|----------------|
+| [`docs/NORTH-STAR.md`](docs/NORTH-STAR.md) | Target outcome: verified engineering yield, evolving objectives and independent ecosystem products |
+| [`docs/QUICKSTART.md`](docs/QUICKSTART.md) | Run the current local kernel, inspect results and choose the correct commissioning path |
+| [`docs/ASHLR-UNIVERSE.md`](docs/ASHLR-UNIVERSE.md) | Experiments, campaigns, portfolio orchestration, evidence graphs and pinned local runtime |
+| [`docs/RESOURCE-POOLS.md`](docs/RESOURCE-POOLS.md) | Native account/local worker commissioning, quotas, foreground queue, fleet map and calibration |
+| [Local verification and release](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING.md) | Source-maintainer procedure; local candidate, npm publication and runtime activation remain distinct |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Module map, the autonomous loop, engine tiers, safety gates, the `~/.ashlr/` layout |
-| [`docs/MILESTONE-INDEX.md`](docs/MILESTONE-INDEX.md) | Authoritative milestone ID → subject → status lookup (M2–M519), incl. confirmed ID collisions (spec-vs-shipped and shipped-vs-shipped) |
+| [`docs/MILESTONE-INDEX.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/MILESTONE-INDEX.md) | Historical milestone ID → subject → status lookup, including confirmed ID collisions; not runtime activation evidence |
 | [`docs/MISSION-OS.md`](docs/MISSION-OS.md) | Mission DAG, receipts, shadow workflow, Cortex/Locus boundaries, privacy, and troubleshooting |
 | [`docs/ELITE-AGENT-EFFICIENCY.md`](docs/ELITE-AGENT-EFFICIENCY.md) | Current primary-source research translated into Hub efficiency priorities and measurable autonomy gates |
 | [`docs/RUNTIME_ACTIVATION_AUTHORITY.md`](docs/RUNTIME_ACTIVATION_AUTHORITY.md) | Signed read-only resident activation admission, explicit mutation refusal, and native launchd v2 requirements |
-| [`docs/ECOSYSTEM-MAP.md`](docs/ECOSYSTEM-MAP.md) | The 13-repo platform and composition bets |
-| [`docs/QUICKSTART.md`](docs/QUICKSTART.md) | Step-by-step first activation |
-| [`docs/LOCUS-FIRM-FLEET.md`](docs/LOCUS-FIRM-FLEET.md) | Production fleet checklist — `locus.firm`, `LOCUS_ENFORCE`, `LOCUS_CI_BINDING` (default off) |
-| [`docs/FOUNDRY-CONFIG.md`](docs/FOUNDRY-CONFIG.md) | Full `cfg.foundry` reference — engines, tiers, confinement, auto-merge |
-| [`docs/RELIABILITY.md`](docs/RELIABILITY.md) | Fault-tolerance and degradation guarantees |
-| [`docs/SPEC-V4-FOUNDRY.md`](docs/SPEC-V4-FOUNDRY.md) · [`docs/SPEC-V5-OPEN-FLEET.md`](docs/SPEC-V5-OPEN-FLEET.md) · [`docs/SPEC-V6-VERIFICATION.md`](docs/SPEC-V6-VERIFICATION.md) | The design specs behind each version series (incl. the full safety-invariant set) |
+| [`docs/ECOSYSTEM-MAP.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/ECOSYSTEM-MAP.md) | Independent product capabilities and composition bets |
+| [`docs/LOCUS-FIRM-FLEET.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/LOCUS-FIRM-FLEET.md) | Production fleet checklist — `locus.firm`, `LOCUS_ENFORCE`, `LOCUS_CI_BINDING` (default off) |
+| [`docs/FOUNDRY-CONFIG.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/FOUNDRY-CONFIG.md) | Full `cfg.foundry` reference — engines, tiers, confinement, auto-merge |
+| [`docs/RELIABILITY.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELIABILITY.md) | Fault-tolerance and degradation guarantees |
+| [`docs/SPEC-V4-FOUNDRY.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/SPEC-V4-FOUNDRY.md) · [`docs/SPEC-V5-OPEN-FLEET.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/SPEC-V5-OPEN-FLEET.md) · [`docs/SPEC-V6-VERIFICATION.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/SPEC-V6-VERIFICATION.md) | The design specs behind each version series (incl. the full safety-invariant set) |
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) — dev setup, test conventions, and the safety invariants contributors must never weaken.
+See [CONTRIBUTING.md](https://github.com/ashlrai/ashlr-hub/blob/master/CONTRIBUTING.md) — dev setup, test conventions, and the safety invariants contributors must never weaken.
 
 ## Architecture
 

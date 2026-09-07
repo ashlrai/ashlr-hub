@@ -1,5 +1,6 @@
 import type { ResourceConsoleGroup, ResourceConsoleSnapshot } from '../../../core/resources/console-types.js';
 import type { ResourceTaskRow } from './TaskInspector.js';
+import { compareResourceTaskRows, hasResourceTaskOccupancy } from './task-order.js';
 
 type ConsoleWorker = ResourceConsoleSnapshot['pool']['workers'][number];
 export type ResourceFleetQueueState = 'unavailable' | 'closing' | 'paused' | 'limited' | 'waiting' | 'ready';
@@ -56,7 +57,6 @@ export interface ResourceFleetModel {
   };
 }
 
-const ACTIVE_STATES = new Set(['queued', 'dispatching', 'reserved', 'unresolved', 'uncertain']);
 const taskState = (row: ResourceTaskRow): string => row.job?.state === 'settled'
   ? row.job.outcome ?? 'settled' : row.job?.state ?? row.receipt?.status ?? 'unknown';
 function taskOwnership(row: ResourceTaskRow): string {
@@ -85,11 +85,7 @@ export function resourceTaskRows(snapshot: ResourceConsoleSnapshot): ResourceTas
   for (const receipt of [...snapshot.activeAttempts, ...snapshot.recentAttempts]) {
     rows.set(receipt.id, { ...rows.get(receipt.id), id: receipt.id, receipt });
   }
-  return [...rows.values()].sort((a, b) => {
-    const active = (row: ResourceTaskRow) => ACTIVE_STATES.has(taskState(row));
-    if (active(a) !== active(b)) return active(a) ? -1 : 1;
-    return (b.job?.updatedAt ?? b.receipt?.startedAt ?? '').localeCompare(a.job?.updatedAt ?? a.receipt?.startedAt ?? '');
-  });
+  return [...rows.values()].sort(compareResourceTaskRows);
 }
 
 function earliest(values: Array<string | null>, sampledAt: string): string | null {
@@ -172,7 +168,7 @@ export function buildResourceFleet(snapshot: ResourceConsoleSnapshot, stale = fa
       : exclusions.get(id)?.reasons ?? ['routing-evidence-unavailable']))];
     const nextRecheckAt = evidenceAvailable && !conflictingQueue ? earliest(blockedWorkerIds.map((id) => exclusions.get(id)?.nextEligibleAt ?? null), snapshot.sampledAt) : null;
     return { ...row, state, ownership: taskOwnership(row), ...recordedAssignment,
-      active: ACTIVE_STATES.has(state) || receiptOccupied, receiptOccupied,
+      active: hasResourceTaskOccupancy(row), receiptOccupied,
       stateDisagreement: sampledStateDisagreement(row, receiptOccupied),
       queuePreview: state === 'queued' ? { state: conflictingQueue ? 'unavailable' : constraint?.state ?? (eligibleWorkerIds.length ? 'ready' : 'waiting'),
         eligibleWorkerIds, blockedWorkerIds,

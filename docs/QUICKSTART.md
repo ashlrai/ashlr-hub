@@ -1,6 +1,79 @@
-# Quickstart — zero to verified local observation in 5 steps
+# Quickstart — run and inspect Ashlr Universe
 
-Requires **Node.js 22.15+**. Works on macOS, Linux, and Windows.
+Start with a bounded local experiment, then commission real workers separately.
+The source implementation and the package currently published to npm can differ;
+check the [release record](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING.md)
+before assuming a globally installed `ashlr` includes these commands.
+
+| What you want to do | Supported path |
+|--------------------|----------------|
+| Run reproducible code experiments without model credentials | [Current Universe kernel](#run-the-current-universe-kernel) |
+| Inspect one experiment store and its evidence graph | [Scoped Universe console](ASHLR-UNIVERSE.md#observe-one-universe-store) |
+| Run explicitly configured Codex, Claude Code or local workers | [Resource Pool commissioning](RESOURCE-POOLS.md#commission-native-accounts-and-local-capacity) |
+| View worker assignments, capacity and a controllable foreground queue | [Resource operations console](RESOURCE-POOLS.md#operate-the-resource-console) |
+| Run independently of a mutable source checkout | [Pinned local runtime](ASHLR-UNIVERSE.md#install-a-pinned-local-runtime) |
+| Inspect existing general Hub configuration and proposals | [General Hub setup](#general-hub-and-legacy-fleet-setup) |
+
+## Run the current Universe kernel
+
+Prerequisites: a trusted source checkout, Git and Node.js 22.15+. Current Universe
+experiment execution additionally requires macOS `sandbox-exec`; Linux isolation
+and Windows execution are not yet supported for that path. Building the CLI and
+reading supported console evidence are separate from executing experiments.
+
+1. In the repository root, install the locked dependencies and build the CLI and
+   web assets. Installation and build execute trusted repository scripts locally:
+
+   ```sh
+   npm ci
+   npm run build
+   node bin/ashlr universe help
+   ```
+
+2. Choose a new absolute private experiment root, outside the source checkout,
+   with an existing physical parent. Run the demonstration only in that selected
+   root; it creates a seed repository and performs bounded local code execution:
+
+   ```sh
+   node bin/ashlr universe demo --root /absolute/private/experiments --json
+   ```
+
+   Expect tested code variants, rejected candidates and later-generation parent
+   references. This deterministic example proves the experiment mechanism, not
+   model capability or accepted product value. No provider account is required.
+
+3. Inspect the same root without starting another experiment:
+
+   ```sh
+   node bin/ashlr universe status --root /absolute/private/experiments --json
+   node bin/ashlr universe archive --root /absolute/private/experiments --json
+   ```
+
+4. Start its foreground, read-only loopback console:
+
+   ```sh
+   node bin/ashlr universe console --root /absolute/private/experiments --json
+   ```
+
+   Open the printed URL, enter its private read token and inspect campaigns,
+   trials and the evidence graph. Keep the terminal running; Ctrl-C stops this
+   console. Never share its startup token or put it in a URL. If records appear
+   missing, compare the console's displayed root with the command above before
+   creating more state. See the [operator guide](ASHLR-UNIVERSE.md) for failure
+   recovery and campaign controls.
+
+The demonstration can be replaced with explicitly configured local-model
+generation. Native subscription tasks currently run through Resource Pools,
+not through an implicit Universe generation bridge. A pool needs real worker
+bindings, fresh observations and resource limits before dispatch; the fleet map
+does not create accounts or evidence. Follow the commissioning guide above.
+
+## General Hub and legacy fleet setup
+
+The remaining steps configure the general dashboard and legacy enrolled-repo
+workflows. They are not prerequisites for a scoped Universe or resource console,
+and do not activate resident autonomous work. The package runtime requires Node
+22.15+; platform support depends on the command being used.
 
 ---
 
@@ -16,8 +89,13 @@ Verify:
 ashlr --version
 ```
 
-> No public desktop release or installer is currently available. Install through
-> npm/CLI as shown above; the web dashboard is included in that runtime.
+> **Desktop distribution — checked 2026-09-07 UTC:** No public desktop release or installer is currently available
+> from this repository. Existing macOS and Windows installer assets are draft-only;
+> their presence is not a published or accepted desktop release. Recheck the
+> [GitHub releases](https://github.com/ashlrai/ashlr-hub/releases) before installation.
+> Use the [release record](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING.md)
+> to distinguish published npm/desktop artifacts from current source. Installing
+> one artifact does not commission the other; the CLI includes a web dashboard.
 > Linux remains supported through npm/CLI and the web dashboard.
 > Linux desktop artifacts are quarantined for `GHSA-wrw7-89jp-8q8g` /
 > `RUSTSEC-2024-0429`.
@@ -94,13 +172,15 @@ it refuses before config or wizard work while resident service authority is
 dormant. Authenticate an owner-invoked engine directly, then use the read-only
 doctor command below. Common engine guidance:
 
-| Engine | How to authenticate |
-|--------|-------------------|
-| Claude (Anthropic) | `export ANTHROPIC_API_KEY=sk-ant-...` (or use Phantom: `phantom add ANTHROPIC_API_KEY`) |
-| Codex (OpenAI) | `export OPENAI_API_KEY=sk-...` |
-| Local (Ollama) | Start Ollama (`ollama serve`) — no key needed |
-| Local (LM Studio) | Start LM Studio server on default port — no key needed |
-| NIMs | `export NVIDIA_NIM_API_KEY=...` (or use Phantom: `phantom add NVIDIA_NIM_API_KEY`) |
+| Engine path | Authentication boundary |
+|-------------|-------------------------|
+| Native Codex or Claude Code subscription | Use the owner's authenticated native CLI and an explicit binding; see [account commissioning](RESOURCE-POOLS.md#commission-native-accounts-and-local-capacity) for account separation and verification |
+| Usage-billed API backend | Separate provider credentials and billing authority; an API key is not evidence of subscription capacity |
+| Local Ollama or LM Studio | An explicitly selected loopback model server with measured health and capability; no provider key is implied |
+
+Do not add API keys as a fallback for unavailable subscription quota. Do not copy
+credential files to manufacture another worker identity. Native login, resource
+enrollment, observed capacity and completed work are distinct checks.
 
 Check engine readiness at any time:
 
@@ -118,7 +198,9 @@ This prints a table of every configured backend — installed, authenticated, re
 ashlr serve
 ```
 
-Opens the web dashboard at **http://127.0.0.1:7777** (bound to localhost only — never externally reachable).
+Serves the web dashboard at **http://127.0.0.1:7777**, bound to loopback. Do not
+expose it through a tunnel or reverse proxy; that is not a supported remote
+authentication deployment.
 
 ```sh
 ashlr serve --open    # also opens the browser automatically

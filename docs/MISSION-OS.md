@@ -300,5 +300,5 @@ The following are roadmap directions, not present authority or commitments:
    budget, and business-outcome authority still independent.
 
 Normative details live in the
-[Ecosystem Mission Graph contract](./contracts/CONTRACT-ECOSYSTEM-MISSION-GRAPH.md)
+[Ecosystem Mission Graph source contract](https://github.com/ashlrai/ashlr-hub/blob/master/docs/contracts/CONTRACT-ECOSYSTEM-MISSION-GRAPH.md)
 and [Mission Observation Receipt V1 contract](./contracts/CONTRACT-MISSION-RECEIPT-V1.md).
