@@ -41,6 +41,12 @@ For checkout-independent execution, [install a pinned local runtime](docs/ASHLR-
 Universe launches, and retains a verified rollback target without changing your
 global command or starting a service.
 
+To inspect an explicit experiment store, run
+`node bin/ashlr universe console --root /absolute/private/experiments` and open
+the printed URL. The [scoped console](docs/ASHLR-UNIVERSE.md#observe-one-universe-store)
+shows campaign, trial and graph evidence without starting experiments or loading
+the general Hub dashboard. It also runs through the pinned local runtime.
+
 ### Existing fleet runtime
 
 ashlr-hub is a single Node binary containing an autonomous agent fleet for enrolled repositories. In the current production build, compiled daemon and conductor trust roots are empty, so live non-dry fleet execution is deliberately dormant; verified dry-run, status, and local-console paths remain available.

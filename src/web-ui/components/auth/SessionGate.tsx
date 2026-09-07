@@ -15,7 +15,9 @@ import { useId, useRef, useState, type FormEvent } from 'react';
 import { establishReadSession } from '../../data/auth-store.js';
 import styles from './SessionGate.module.css';
 
-export function SessionGate({ onAuthenticated }: { onAuthenticated?: () => void }) {
+export function SessionGate({ onAuthenticated, heading = 'Connect to ashlr serve', command = 'ashlr serve' }: {
+  onAuthenticated?: () => void; heading?: string; command?: string;
+}) {
   const [token, setToken] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -45,13 +47,13 @@ export function SessionGate({ onAuthenticated }: { onAuthenticated?: () => void 
         <div className={styles.badge} aria-hidden="true">
           ⛺
         </div>
-        <h1 className={styles.heading}>Connect to ashlr serve</h1>
+        <h1 className={styles.heading}>{heading}</h1>
         <p className={styles.body}>
           This dashboard only ever talks to the ashlr server running on this machine
           (<code>127.0.0.1</code>, never a remote host). To read data, paste the{' '}
           <strong>read token</strong> printed in the terminal where you ran:
         </p>
-        <pre className={styles.code}>ashlr serve</pre>
+        <pre className={styles.code}>{command}</pre>
         <p className={styles.body}>
           It looks like a 64-character hex string, printed once at startup — something like{' '}
           <code className={styles.example}>a1b2c3…</code>. This dialog never stores it: it is

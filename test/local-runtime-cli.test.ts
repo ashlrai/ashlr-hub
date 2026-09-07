@@ -63,6 +63,9 @@ describe('local runtime CLI', () => {
     ['run', '--store', '/private/x', '--', 'universe', 'help', '--root', '/private/a'],
     ['run', '--store', '/private/x', '--', 'universe', 'campaign', 'help', '--unknown'],
     ['run', '--store', '/private/x', '--', 'universe', 'status', '--root', '/private/a\n'],
+    ['run', '--store', '/private/x', '--', 'universe', 'console'],
+    ['run', '--store', '/private/x', '--', 'universe', 'console', '--root', 'relative'],
+    ['run', '--store', '/private/x', '--', 'universe', 'console', '--help', '--root', '/private/u'],
   ])('rejects invalid arguments %j before reads, writes, or launch', async (...args) => {
     expect(await cmdRuntime(args)).toBe(2);
     for (const fn of Object.values(core)) expect(fn).not.toHaveBeenCalled();
@@ -133,11 +136,21 @@ describe('local runtime CLI', () => {
     handle.emit('close', 7, null); expect(await running).toBe(7); expect(output).not.toHaveBeenCalled();
   });
 
-  it.each([['help'], ['--help'], ['status', '--help'], ['campaign', 'help'], ['portfolio', '--help']])('forwards unambiguous Universe help %j without a default root', async (...args) => {
+  it.each([['help'], ['--help'], ['status', '--help'], ['campaign', 'help'], ['portfolio', '--help'], ['console', '--help'], ['console', '-h']])('forwards unambiguous Universe help %j without a default root', async (...args) => {
     const handle = child(); childProcess.spawn.mockReturnValue(handle);
     const running = cmdRuntime(['run', '--store', '/private/fixture/store', '--', 'universe', ...args]);
     handle.emit('close', 0, null); expect(await running).toBe(0);
     expect(childProcess.spawn.mock.calls[0]![1]).toEqual([installation().binPath, 'universe', ...args]);
+  });
+
+  it('forwards the explicit console root and port to one verified foreground runtime', async () => {
+    const handle = child(); childProcess.spawn.mockReturnValue(handle);
+    const forwarded = ['universe', 'console', '--root', '/private/fixture/universe', '--port', '0', '--json'];
+    const running = cmdRuntime(['run', '--store', '/private/fixture/store', '--', ...forwarded]);
+    expect(core.resolveLocalRuntime).toHaveBeenCalledTimes(1);
+    expect(childProcess.spawn).toHaveBeenCalledWith(installation().nodePath, [installation().binPath, ...forwarded],
+      expect.objectContaining({ stdio: 'inherit', shell: false }));
+    handle.emit('close', 0, null); expect(await running).toBe(0); expect(output).not.toHaveBeenCalled();
   });
 
   it('does not confuse a valid universe named help with a help flag', async () => {
