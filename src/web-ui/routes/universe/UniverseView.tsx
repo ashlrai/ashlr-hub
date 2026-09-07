@@ -53,34 +53,69 @@ function selectionReason(trial: UniverseTrial, summary: UniverseSummary, run: Un
   return `Not admitted in this generation. Selection compares passing trials within each niche and requires an improvement of ${number(summary.manifest.metric.minImprovement)}.`;
 }
 
-function GenerationEvidence({ trial }: { trial: UniverseTrial }) {
+const RESOURCE_DISPATCH_LABELS: Record<string, string> = {
+  'not-started': 'Not started', withheld: 'Admission withheld', settled: 'Receipt settled',
+  replayed: 'Recorded task replayed; no redispatch', unavailable: 'Evidence unavailable',
+};
+const RESOURCE_USAGE_LABELS: Record<string, string> = {
+  'codex-turn': 'Codex reported turns', 'claude-main-loop': 'Claude main loop only',
+  'local-chat-completion': 'Local chat completion',
+};
+
+export function GenerationEvidence({ trial }: { trial: UniverseTrial }) {
   const receipt = trial.generation;
   if (!receipt) return <p className={styles.hypothesis}>Operator command. Model usage was not measured.</p>;
+  const pooled = receipt.provider === 'resource-pool';
+  const resource = pooled ? receipt.resource : undefined;
   const tokenCount = (value: number | null) => value === null ? 'Unavailable' : number(value);
   return (
     <section className={styles.generationEvidence} aria-label="Model generation evidence">
       <div className={styles.detailHeading}><h4>Model generation</h4><StatusBadge status={receipt.status} tone={receipt.status === 'succeeded' ? 'success' : undefined} /></div>
       <dl className={styles.measurements}>
-        <div><dt>Model</dt><dd>{receipt.model}</dd></div>
+        <div><dt>Model</dt><dd>{receipt.model ?? resource?.workerModel ?? 'Not assigned'}</dd></div>
         <div><dt>Accounting</dt><dd>{receipt.usage.state === 'reported' ? 'Provider-reported' : 'Unavailable'}</dd></div>
         <div><dt>Input tokens</dt><dd>{tokenCount(receipt.usage.inputTokens)}</dd></div>
         <div><dt>Output tokens</dt><dd>{tokenCount(receipt.usage.outputTokens)}</dd></div>
         <div><dt>Generation duration</dt><dd>{duration(receipt.durationMs)}</dd></div>
-        <div><dt>Request</dt><dd>{receipt.requestStarted ? 'Started' : 'Not started'}</dd></div>
+        <div><dt>{pooled ? 'Provider request count' : 'Request'}</dt><dd>{pooled ? 'Unknown' : receipt.requestStarted ? 'Started' : 'Not started'}</dd></div>
       </dl>
+      {pooled ? <section aria-label="Recorded resource task evidence">
+        <h4>Recorded resource task</h4>
+        <dl className={styles.measurements}>
+          <div><dt>Dispatch evidence</dt><dd>{resource && Object.hasOwn(RESOURCE_DISPATCH_LABELS, resource.dispatch) ? RESOURCE_DISPATCH_LABELS[resource.dispatch] : 'Unavailable'}</dd></div>
+          <div><dt>Pool</dt><dd>{resource?.poolId ?? 'Unavailable'}</dd></div>
+          <div><dt>Worker</dt><dd>{resource?.workerId ?? 'Not assigned'}</dd></div>
+          <div><dt>Worker provider</dt><dd>{resource?.workerProvider ?? 'Not assigned'}</dd></div>
+          <div><dt>Task</dt><dd><code>{resource?.taskId ?? 'Unavailable'}</code></dd></div>
+          <div><dt>Recorded task outcome</dt><dd>{resource?.taskStatus ?? 'Unavailable'}</dd></div>
+          <div><dt>Worker usage scope</dt><dd>{resource?.usageScope && Object.hasOwn(RESOURCE_USAGE_LABELS, resource.usageScope) ? RESOURCE_USAGE_LABELS[resource.usageScope] : 'Unavailable'}</dd></div>
+        </dl>
+        <p>Recorded provenance only, not a current worker heartbeat. Task completion does not mean the candidate response validated or the evaluator accepted it.</p>
+        {resource?.taskStatus === 'reserved' || resource?.taskStatus === 'uncertain'
+          ? <p className={styles.notice}>The resource receipt still occupies capacity. Reconcile the affected pool before another attempt; this view does not release its slot.</p> : null}
+      </section> : null}
       <details className={styles.artifact}>
         <summary>Generation source and changes</summary>
         <dl>
           <div><dt>Provider</dt><dd>{receipt.provider}</dd></div>
-          <div><dt>Endpoint</dt><dd><code>{receipt.endpoint}</code></dd></div>
+          {!pooled ? <div><dt>Endpoint</dt><dd><code>{receipt.endpoint}</code></dd></div> : null}
+          {resource ? <>
+            <div><dt>Allowed workers</dt><dd>{resource.allowedWorkerIds.join(', ')}</dd></div>
+            <div><dt>Pool digest</dt><dd><code>{resource.poolDigest}</code></dd></div>
+            <div><dt>Task digest</dt><dd><code>{resource.taskDigest ?? 'Unavailable'}</code></dd></div>
+            <div><dt>Resource receipt digest</dt><dd><code>{resource.receiptDigest ?? 'Unavailable'}</code></dd></div>
+          </> : null}
           <div><dt>Changed files</dt><dd>{receipt.changedFiles.length ? receipt.changedFiles.join(', ') : 'None'}</dd></div>
           <div><dt>Prompt digest</dt><dd><code>{receipt.promptDigest ?? 'Unavailable'}</code></dd></div>
           <div><dt>Response digest</dt><dd><code>{receipt.responseDigest ?? 'Unavailable'}</code></dd></div>
           {receipt.feedback ? <><div><dt>Evaluator feedback source</dt><dd>Generation {receipt.feedback.generation} · trial {receipt.feedback.trialId}</dd></div><div><dt>Feedback digest</dt><dd><code>{receipt.feedback.digest}</code></dd></div></> : null}
           {receipt.search ? <><div><dt>Recorded search context</dt><dd>Version {receipt.search.schemaVersion}</dd></div><div><dt>Search context digest</dt><dd><code>{receipt.search.digest}</code></dd></div></> : null}
         </dl>
+        {pooled ? <p>Some digests are redacted in the web view. Use scoped CLI JSON for exact evidence; this view does not revalidate the resource ledger.</p> : null}
       </details>
-      <p>Generation success means a valid replacement response, not evaluator acceptance. Token counts come from the endpoint response; model identity is the configured name.</p>
+      <p>Generation success means a valid replacement response, not evaluator acceptance. {pooled
+        ? 'Token counts come from the recorded worker receipt and keep its usage scope; model identity is the configured model name. Native provider request counts and account-wide spend remain unknown.'
+        : 'Token counts come from the endpoint response; model identity is the configured name.'}</p>
       {receipt.feedback ? <p>Feedback can come from a failed attempt. It is distinct from the retained parent shown in the lineage.</p> : null}
       {receipt.search ? <p>Search context supplies the metric and bounded repetition evidence, with a retained baseline and previous selection result when available. A repeated artifact is not an evaluator result or a reason to skip evaluation.</p> : null}
     </section>
@@ -177,7 +212,7 @@ function Campaigns({ campaigns, summary, onInspectRun }: {
         {campaign.state === 'pause-requested' || campaign.state === 'stop-requested' ? <p role="status">Control requested. The owner has not yet acknowledged that work has stopped.</p> : null}
         <dl className={styles.campaignFacts}>
           <div><dt>Generation attempts</dt><dd>{value(progress.attempts)} / {definition.budget.maxGenerations}</dd></div>
-          <div><dt>Reserved model requests</dt><dd>{value(progress.reservedModelRequests)} / {definition.budget.maxModelRequests}</dd></div>
+          <div><dt>Reserved generation invocations</dt><dd>{value(progress.reservedModelRequests)} / {definition.budget.maxModelRequests}</dd></div>
           <div><dt>Stagnant generations</dt><dd>{value(progress.stagnantGenerations)} / {definition.budget.maxStagnantGenerations}</dd></div>
           <div><dt>Deadline</dt><dd>{campaign.deadlineAt ? timestamp(campaign.deadlineAt) : 'Starts on first run'}</dd></div>
           <div><dt>Completed generations</dt><dd>{value(progress.completedRuns)}</dd></div>
@@ -190,10 +225,11 @@ function Campaigns({ campaigns, summary, onInspectRun }: {
           <div><dt>Bounded evaluator feedback</dt><dd>{definition.feedback ? 'Enabled' : 'Disabled'}</dd></div>
         </dl>
         <p className={styles.campaignNote}>Resume keeps the original deadline and consumed budget. Token figures cover recorded model requests; a recorded subtotal is not proof of complete spend. A reported-token threshold cannot prevent spend already incurred.</p>
+        <p className={styles.campaignNote}>The legacy maxModelRequests field reserves generation transport invocations, not native API calls. A native invocation may make zero or multiple provider requests. Resource-pool run/resume requires its explicit private runtime option again; this read-only console does not hold that binding.</p>
       </div>
       {campaign.steps.length ? <div className={styles.tableScroll}>
         <table className={styles.archiveTable} aria-label="Campaign generations">
-          <thead><tr><th scope="col">Generation</th><th scope="col">State</th><th scope="col">Trials passed</th><th scope="col">New niches</th><th scope="col">Improvements</th><th scope="col">Model requests reserved</th></tr></thead>
+          <thead><tr><th scope="col">Generation</th><th scope="col">State</th><th scope="col">Trials passed</th><th scope="col">New niches</th><th scope="col">Improvements</th><th scope="col">Generation invocations reserved</th></tr></thead>
           <tbody>{campaign.steps.map((step) => <tr key={step.runId}>
             <th scope="row">{availableRuns.has(step.runId) ? <button type="button" className={styles.eliteButton} aria-label={`Inspect campaign generation ${step.generation}`} onClick={() => onInspectRun(step.runId)}>{step.generation}</button> : <span>{step.generation} · Evidence pending</span>}</th>
             <td>{step.state}</td><td>{value(step.passedTrials)} / {value(step.trialCount)}</td><td>{value(step.admissions)}</td><td>{value(step.improvements)}</td><td>{value(step.reservedModelRequests)}</td>
@@ -320,7 +356,10 @@ function UniverseExperiment({ summary, campaigns, deliveryReport }: {
       <footer className={styles.resources} aria-label="Generation resources">
         <h2>Recorded resources</h2>
         <dl><div><dt>Runtime across {runs.length} generations</dt><dd>{duration(totalDuration)}</dd></div><div><dt>Model tokens{run ? ` in generation ${run.generation}` : ''}</dt><dd>{run?.tokensUsed == null ? 'Unavailable' : number(run.tokensUsed)}</dd></div><div><dt>Model cost</dt><dd>Unavailable</dd></div></dl>
-        {run?.generationUsage ? <p>Generation usage coverage: {run.generationUsage.reportedRequests} / {run.generationUsage.requestsStarted} recorded started requests reported tokens across {run.generationUsage.trials} model trials. Totals require a completed generation, at least one recorded request, and usage from every recorded request. Interrupted in-flight usage may be missing.</p> : null}
+        {run?.generationUsage ? <p>Generation usage coverage: {run.generationUsage.reportedRequests} / {run.generationUsage.requestsStarted} recorded started requests reported tokens across {run.generationUsage.trials} model trials. {run.generationUsage.resourceAttempts === undefined
+          ? 'Totals require a completed generation, at least one recorded request, and usage from every recorded request. Interrupted in-flight usage may be missing.'
+          : 'These request counters cover the direct local path only. Combined totals also require complete resource-attempt usage and a completed generation; interrupted in-flight usage may be missing.'}</p> : null}
+        {run?.generationUsage?.resourceAttempts !== undefined ? <p>Resource handoff coverage: {run.generationUsage.resourceReportedAttempts ?? 'Unavailable'} / {run.generationUsage.resourceAttempts} attempted handoffs reported worker tokens. Handoffs do not guarantee worker starts or count provider requests; incomplete resource usage keeps the combined total unavailable.</p> : null}
         <p>Tokens cover model generation only, not command or evaluator work. Missing usage and dollar costs stay unavailable. Evaluator scores do not establish business value or accepted production changes.</p>
       </footer>
     </>

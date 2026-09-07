@@ -232,7 +232,11 @@ export function projectCampaign(records: CampaignEvent[], universe: UniverseSumm
       if (trial.generation?.usage.state === 'reported') recordedTokens += trial.generation.usage.inputTokens! + trial.generation.usage.outputTokens!;
     }
     if (step.reservedModelRequests > 0 && (!run || run.status !== 'completed' || run.trials.length !== step.variantIds.length ||
-        run.trials.some((trial) => trial.generation?.requestStarted && trial.generation.usage.state !== 'reported'))) usageComplete = false;
+        run.trials.some((trial) => trial.generation && (
+          trial.generation.requestStarted && trial.generation.usage.state !== 'reported' ||
+          trial.generation.resource && !['not-started', 'withheld'].includes(trial.generation.resource.dispatch) &&
+            (trial.generation.resource.dispatch !== 'settled' || trial.generation.resource.taskStatus === 'uncertain' ||
+             trial.generation.resource.taskStatus === 'reserved' || trial.generation.usage.state !== 'reported'))))) usageComplete = false;
     return { ordinal: step.ordinal, runId: step.runId, generation: step.generation, variantIds: step.variantIds,
       reservedModelRequests: step.reservedModelRequests, createdAt: step.at,
       state: run?.status ?? (alive && folded.state === 'running' && step.sequence > latestSession && index === folded.steps.length - 1 ? 'pending' : 'interrupted'),

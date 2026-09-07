@@ -1,0 +1,205 @@
+/** Explicit resource handoff; native completion is response data, never candidate acceptance. */
+import { execFileSync } from 'node:child_process';
+import { lstatSync, readdirSync, realpathSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
+import { performance } from 'node:perf_hooks';
+import { readResourceJson, runResourceTask, type ResourceTask } from '../resources/pool-runtime.js';
+import { validateResourcePool, validateResourceObservations } from '../resources/pool-policy.js';
+import { validateResourceBindings } from '../resources/worker.js';
+import { resourceUsageScopeForProvider } from '../resources/performance.js';
+import type { ChatMessage } from '../types.js';
+import { canonical, digest, inspectPrivateDirectory } from './artifacts.js';
+import { newGenerationReceipt, resourceGenerationTaskId, validateGenerationConfig, validResourceGenerationEvidence } from './generation.js';
+import type { UniverseGenerationReceipt, UniverseResourceGenerationConfig, UniverseResourceGenerationEvidence } from './types.js';
+
+const MAX_TRANSPORT_BYTES = 256 * 1024;
+interface ResourceGenerationRuntime {
+  schemaVersion: 1;
+  poolPath: string;
+  bindingsPath: string;
+  observationsPath: string;
+  root: string;
+  workspace: string;
+}
+export interface ResourceGenerationContext {
+  messages: ChatMessage[];
+  candidatePath: string;
+  timeoutMs: number;
+  signal: AbortSignal;
+  resourceRuntime?: string;
+  resourceUniverseRoot?: string;
+  resourceIdentity?: { universeId: string; runId: string; variantId: string };
+}
+export interface ResourceGenerationCompletion {
+  status: UniverseGenerationReceipt['status'];
+  content: string | null;
+  resource: UniverseResourceGenerationEvidence;
+  usage: UniverseGenerationReceipt['usage'];
+  error?: string;
+}
+
+function path(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 4096 && isAbsolute(value) && resolve(value) === value &&
+    value !== parse(value).root && [...value].every((character) => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127);
+}
+function contains(parent: string, child: string): boolean {
+  const difference = relative(parent, child);
+  return difference === '' || difference !== '..' && !difference.startsWith(`..${sep}`) && !isAbsolute(difference);
+}
+function overlaps(left: string, right: string): boolean { return contains(left, right) || contains(right, left); }
+function runtimeConfig(value: unknown): ResourceGenerationRuntime {
+  const keys = ['schemaVersion', 'poolPath', 'bindingsPath', 'observationsPath', 'root', 'workspace'];
+  if (value === null || typeof value !== 'object' || Array.isArray(value) ||
+    ![Object.prototype, null].includes(Object.getPrototypeOf(value)) ||
+    Reflect.ownKeys(value).length !== keys.length || Reflect.ownKeys(value).some((key) => typeof key !== 'string' ||
+      !keys.includes(key) || !('value' in Object.getOwnPropertyDescriptor(value, key)!))) throw new Error();
+  const config = value as Record<string, unknown>;
+  if (config.schemaVersion !== 1 || !keys.slice(1).every((key) => path(config[key]))) throw new Error();
+  return config as unknown as ResourceGenerationRuntime;
+}
+function checkWorkspace(workspace: string, remainingMs: () => number): void {
+  inspectPrivateDirectory(workspace);
+  if (contains(workspace, homedir()) || readdirSync(workspace).join('\0') !== '.git') throw new Error();
+  const metadata = join(workspace, '.git'); const stat = lstatSync(metadata);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || realpathSync(metadata) !== metadata ||
+    stat.mode & 0o022 || typeof process.getuid === 'function' && stat.uid !== process.getuid()) throw new Error();
+  const git = (args: string[]): string => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false',
+    '-C', workspace, ...args], { encoding: 'utf8', timeout: Math.min(5000, remainingMs()), maxBuffer: 16 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: process.env.PATH, GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_GLOBAL: '/dev/null', GIT_OPTIONAL_LOCKS: '0' } }).trim();
+  const identities = git(['rev-parse', '--is-inside-work-tree', '--absolute-git-dir', '--git-common-dir', '--show-toplevel']).split('\n');
+  if (identities.length !== 4 || identities[0] !== 'true' || identities[1] !== metadata ||
+    resolve(workspace, identities[2]!) !== metadata || identities[3] !== workspace ||
+    git(['ls-files', '-z']) !== '' || git(['for-each-ref', '--format=%(refname)']) !== '') throw new Error();
+}
+
+/** Exactly one existing runtime admission; no API fallback, account discovery, or automatic retries. */
+export async function generateResourceCompletion(config: UniverseResourceGenerationConfig,
+  context: ResourceGenerationContext): Promise<ResourceGenerationCompletion> {
+  const evidence = newGenerationReceipt(config).resource!;
+  const result: ResourceGenerationCompletion = { status: 'failed', content: null, resource: evidence,
+    usage: { state: 'unavailable', inputTokens: null, outputTokens: null } };
+  const started = performance.now(); const controller = new AbortController(); let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const cancel = (): void => controller.abort();
+  context.signal.addEventListener('abort', cancel, { once: true });
+  if (context.signal.aborted) cancel();
+  const remaining = (): number => {
+    if (context.signal.aborted) throw new Error();
+    const available = Math.floor(context.timeoutMs - (performance.now() - started));
+    if (available < 1) { timedOut = true; controller.abort(); throw new Error(); }
+    return available;
+  };
+  try {
+    const validated = validateGenerationConfig(config);
+    if (validated.kind !== 'resource-pool' || !Number.isSafeInteger(context.timeoutMs) || context.timeoutMs < 1 ||
+      context.timeoutMs > 900_000 || !context.resourceIdentity || !path(context.resourceRuntime) ||
+      !path(context.resourceUniverseRoot) || !path(context.candidatePath)) throw new Error();
+    const taskId = resourceGenerationTaskId(context.resourceIdentity);
+    timer = setTimeout(() => { timedOut = true; controller.abort(); }, context.timeoutMs);
+    remaining();
+    const runtime = runtimeConfig(readResourceJson(context.resourceRuntime));
+    inspectPrivateDirectory(context.resourceUniverseRoot);
+    if (realpathSync(context.candidatePath) !== context.candidatePath || !lstatSync(context.candidatePath).isDirectory()) throw new Error();
+    for (const boundary of [context.candidatePath, context.resourceUniverseRoot, runtime.root]) {
+      if (overlaps(runtime.workspace, boundary)) throw new Error();
+    }
+    if (overlaps(runtime.root, context.resourceUniverseRoot) || overlaps(runtime.root, context.candidatePath)) throw new Error();
+    for (const file of [context.resourceRuntime, runtime.poolPath, runtime.bindingsPath, runtime.observationsPath]) {
+      if ([context.resourceUniverseRoot, context.candidatePath, runtime.workspace].some((boundary) => contains(boundary, file))) throw new Error();
+    }
+    if (realpathSync(dirname(runtime.root)) !== dirname(runtime.root)) throw new Error();
+    checkWorkspace(runtime.workspace, remaining);
+    const pool = validateResourcePool(readResourceJson(runtime.poolPath));
+    const bindings = validateResourceBindings(readResourceJson(runtime.bindingsPath), pool);
+    if (pool.id !== validated.poolId || digest(canonical({ pool, bindings })) !== validated.poolDigest ||
+      validated.allowedWorkerIds.some((id) => !pool.workers.some((worker) => worker.id === id))) throw new Error();
+    const observations = validateResourceObservations(readResourceJson(runtime.observationsPath), pool);
+    const prompt = canonical(context.messages);
+    if (Buffer.byteLength(prompt, 'utf8') > MAX_TRANSPORT_BYTES) throw new Error();
+    remaining();
+    const now = Date.now();
+    // This integration requires current explicit evidence even when a general
+    // resource pool permits operator-capped unknown-quota bootstrap elsewhere.
+    const unavailableWorkerIds = new Set(validated.allowedWorkerIds.filter((id) => {
+      const worker = pool.workers.find((row) => row.id === id)!;
+      const observation = observations.find((row) => row.workerId === id);
+      return !observation || observation.health !== 'ready' || Date.parse(observation.expiresAt) <= now || Date.parse(observation.observedAt) > now ||
+        observation.updatedAt !== undefined && Date.parse(observation.updatedAt) > now || worker.provider !== 'local' &&
+        (!observation.windows.length || observation.windows.some((window) => window.usedPercent === null ||
+          window.resetsAt === null || Date.parse(window.resetsAt) <= now));
+    }));
+    // A current file's explicit denial is a separate invocation veto. A newer
+    // ready ledger snapshot must not erase it during the ordinary merge. Apply
+    // denials across observed aliases, without requiring missing unused aliases.
+    for (const worker of pool.workers) {
+      const observation = observations.find((row) => row.workerId === worker.id);
+      if (!observation) continue;
+      const capacityKey = bindings.find((binding) => binding.workerId === worker.id)!.capacityKey;
+      const allowedAliases = pool.workers.filter((alias) => validated.allowedWorkerIds.includes(alias.id) &&
+        bindings.find((binding) => binding.workerId === alias.id)!.capacityKey === capacityKey);
+      if (!allowedAliases.length) continue;
+      const reserve = Math.max(...allowedAliases.map((alias) => alias.reservePercent));
+      if (observation.health === 'unavailable' || observation.retryAfter !== null && Date.parse(observation.retryAfter) > now ||
+        observation.windows.some((window) => window.usedPercent !== null && window.usedPercent >= 100 - reserve)) {
+        unavailableWorkerIds.add(worker.id);
+      }
+    }
+    // The ID never depends on temporary trial paths. The full task digest also
+    // binds this call's effective budget, workspace and prompt: a changed
+    // envelope conflicts rather than replaying or creating another invocation.
+    const task: ResourceTask = { schemaVersion: 1, id: taskId, allowedWorkerIds: [...validated.allowedWorkerIds],
+      prompt, cwd: runtime.workspace, timeoutMs: context.timeoutMs, maxOutputTokens: validated.maxOutputTokens, mode: 'read-only' };
+    evidence.taskId = taskId; evidence.dispatch = 'unavailable';
+    const handoff = await runResourceTask({ root: runtime.root, pool, bindings, observations, task,
+      signal: controller.signal, unavailableWorkerIds: [...unavailableWorkerIds] });
+    if (!handoff.receipt) {
+      evidence.dispatch = 'withheld'; result.error = 'Resource generation withheld by current capacity evidence'; return result;
+    }
+    const receipt = handoff.receipt; const worker = pool.workers.find((row) => row.id === receipt.workerId);
+    const binding = bindings.find((row) => row.workerId === receipt.workerId);
+    if (!worker || !binding || !validated.allowedWorkerIds.includes(worker.id) || receipt.id !== taskId ||
+      receipt.taskDigest !== digest(canonical(task)) || receipt.poolDigest !== validated.poolDigest ||
+      receipt.capacityKey !== binding.capacityKey || receipt.verifiedAccepted !== false ||
+      !handoff.replayed && receipt.status === 'reserved') throw new Error();
+    const knownUsage = !handoff.replayed && receipt.inputTokens !== null && receipt.outputTokens !== null &&
+      Number.isSafeInteger(receipt.inputTokens) && receipt.inputTokens >= 0 && Number.isSafeInteger(receipt.outputTokens) &&
+      receipt.outputTokens >= 0 && Number.isSafeInteger(receipt.inputTokens + receipt.outputTokens) &&
+      receipt.execution?.usageScope === resourceUsageScopeForProvider(worker.provider);
+    const witness: UniverseResourceGenerationEvidence = { ...evidence, taskDigest: receipt.taskDigest,
+      workerId: worker.id, workerProvider: worker.provider, workerModel: worker.model, receiptDigest: digest(canonical(receipt)),
+      dispatch: handoff.replayed ? 'replayed' : 'settled', taskStatus: receipt.status,
+      usageScope: knownUsage ? receipt.execution!.usageScope : null };
+    if (!validResourceGenerationEvidence(witness)) throw new Error();
+    Object.assign(evidence, witness);
+    if (handoff.replayed) { result.error = 'Resource generation receipt was replayed without recoverable output'; return result; }
+    if (knownUsage) {
+      result.usage = { state: 'reported', inputTokens: receipt.inputTokens, outputTokens: receipt.outputTokens };
+    }
+    if (receipt.status !== 'completed') {
+      result.status = receipt.status === 'timed-out' || receipt.status === 'cancelled' ? receipt.status : 'failed';
+      result.error = receipt.status === 'uncertain' ? 'Resource generation termination remains uncertain' :
+        receipt.reason === 'worker-cli-upgrade-required' ? 'Resource generation requires a compatible native CLI version' :
+          'Resource generation did not complete';
+      return result;
+    }
+    if (typeof handoff.output !== 'string' || Buffer.byteLength(handoff.output, 'utf8') > MAX_TRANSPORT_BYTES ||
+      digest(handoff.output) !== receipt.outputDigest) {
+      result.error = 'Resource generation output was unavailable, oversized, or inconsistent'; return result;
+    }
+    remaining();
+    result.status = 'succeeded'; result.content = handoff.output;
+    return result;
+  } catch {
+    result.status = context.signal.aborted ? 'cancelled' : timedOut ? 'timed-out' : 'failed';
+    result.error = result.status === 'cancelled' ? 'Resource generation cancelled by its owner' :
+      result.status === 'timed-out' ? 'Resource generation exceeded its time budget' :
+        evidence.dispatch === 'not-started' ? 'Resource generation requires valid private runtime, workspace, and pinned enrollment' :
+          'Resource generation handoff unavailable; do not retry this task identity';
+    return result;
+  } finally {
+    if (timer) clearTimeout(timer);
+    context.signal.removeEventListener('abort', cancel);
+  }
+}

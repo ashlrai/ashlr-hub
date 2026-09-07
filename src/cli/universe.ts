@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 import {
   initUniverse, readUniverseOverview, runUniverse,
   type UniverseManifest, type UniverseOverview, type UniverseRun,
@@ -27,6 +27,9 @@ const USAGE = `usage: ashlr universe <command> [--root <private directory>] [--j
 Candidate and evaluator commands run with network access denied. An optional
 local-chat generation variant contacts its explicitly configured loopback model
 endpoint; it sends declared files and experiment context, without auth or tools.
+Resource-pool generation requires run --resource-runtime <private absolute JSON>.
+That execution-only file is not a manifest or a console option. Native provider
+request counts remain unknown; recorded worker usage is not account-wide spend.
 The evaluator is pinned separately from candidate edits. Results are local
 experiments, not accepted production changes. --root defaults to ~/.ashlr/universe.
 Delivery creates only a local branch; it never pushes, merges, or deploys.
@@ -41,20 +44,26 @@ function rootFlag(root?: string): string {
 }
 
 function parse(args: string[]): {
-  command: string; id?: string; root?: string; manifestPath?: string; json: boolean;
+  command: string; id?: string; root?: string; manifestPath?: string; resourceRuntime?: string; json: boolean;
 } {
   const positional: string[] = [];
   let root: string | undefined;
   let manifestPath: string | undefined;
+  let resourceRuntime: string | undefined;
   let json = false;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
     if (arg === '--help' || arg === '-h') return { command: 'help', json: false };
     if (arg === '--json') { json = true; continue; }
-    if (arg === '--root' || arg === '--manifest') {
+    if (arg === '--root' || arg === '--manifest' || arg === '--resource-runtime') {
       const value = args[++i];
       if (!value?.trim() || value.startsWith('--')) throw new UsageError(`${arg} requires a path`);
-      if (arg === '--root') {
+      if (arg === '--resource-runtime') {
+        if (resourceRuntime) throw new UsageError('--resource-runtime may only be specified once');
+        if (!isAbsolute(value) || Buffer.byteLength(value) > 4096 || [...value].some((character) => character.charCodeAt(0) < 32 ||
+          character.charCodeAt(0) >= 127 && character.charCodeAt(0) <= 159)) throw new UsageError('--resource-runtime requires a private absolute JSON path');
+        resourceRuntime = resolve(value);
+      } else if (arg === '--root') {
         if (root) throw new UsageError('--root may only be specified once');
         root = resolve(value);
       } else {
@@ -75,7 +84,8 @@ function parse(args: string[]): {
   if (command === 'run' && !id) throw new UsageError('run requires a universe id');
   if (command === 'init' && !manifestPath) throw new UsageError('init requires --manifest <file.json>');
   if (manifestPath && command !== 'init') throw new UsageError('--manifest is only valid with init');
-  return { command, id, root, manifestPath, json };
+  if (resourceRuntime && command !== 'run') throw new UsageError('--resource-runtime is only valid with run');
+  return { command, id, root, manifestPath, resourceRuntime, json };
 }
 
 function renderRun(run: UniverseRun): string {
@@ -84,8 +94,14 @@ function renderRun(run: UniverseRun): string {
     ` score=${trial.score ?? 'unavailable'} ${trial.selected ? '→ selected' : ''}` +
     ` parent=${trial.parentTrialId ?? 'seed'}` +
     (trial.generation ?
-      `\n    Model generation: ${trial.generation.status} · ${trial.generation.provider} · ${trial.generation.model}` +
-      `\n    Endpoint: ${trial.generation.endpoint} · request ${trial.generation.requestStarted ? 'started' : 'not started'}` +
+      `\n    Model generation: ${trial.generation.status} · ${trial.generation.provider} · ${trial.generation.model ?? trial.generation.resource?.workerModel ?? 'not assigned'}` +
+      (trial.generation.provider === 'resource-pool'
+        ? `\n    Resource dispatch: ${trial.generation.resource?.dispatch ?? 'unavailable'} · task outcome=${trial.generation.resource?.taskStatus ?? 'unavailable'}` +
+          `\n    Recorded pool: ${trial.generation.resource?.poolId ?? 'unavailable'} · worker=${trial.generation.resource?.workerId ?? 'not assigned'} · task=${trial.generation.resource?.taskId ?? 'unavailable'}` +
+          `\n    Task digest: ${trial.generation.resource?.taskDigest ?? 'unavailable'} · receipt digest=${trial.generation.resource?.receiptDigest ?? 'unavailable'}` +
+          `\n    Worker usage scope: ${trial.generation.resource?.usageScope ?? 'unavailable'} · provider request count: unknown` +
+          '\n    Recorded task evidence only; worker completion is not candidate validation or evaluator acceptance.'
+        : `\n    Endpoint: ${trial.generation.endpoint} · request ${trial.generation.requestStarted ? 'started' : 'not started'}`) +
       `\n    Provider-reported tokens: input=${trial.generation.usage.inputTokens ?? 'unavailable'} output=${trial.generation.usage.outputTokens ?? 'unavailable'}` +
       ` · accounting=${trial.generation.usage.state} · files changed=${trial.generation.changedFiles.length}` : '') +
     (trial.error ? `\n    ${trial.error}` : ''),
@@ -99,6 +115,7 @@ function renderRun(run: UniverseRun): string {
     ...rows,
     `Elapsed: ${run.durationMs} ms · tokens: ${run.tokensUsed === null ? 'unmeasured' : `${run.tokensUsed} (model generation only)`} · cost: unmeasured`,
     ...(usage ? [`Generation usage coverage: ${usage.reportedRequests}/${usage.requestsStarted} recorded started requests reported tokens · ${usage.trials} model trials`,
+      ...(usage.resourceAttempts === undefined ? [] : [`Resource handoff coverage: ${usage.resourceReportedAttempts ?? 'unavailable'}/${usage.resourceAttempts} attempted handoffs reported worker tokens; not guaranteed worker starts or provider request counts.`]),
       'Aggregate tokens require a completed generation; interrupted in-flight usage may be missing.',
       'Token totals cover model generation only, not command/evaluator work or accepted production changes.'] : []),
     ...(run.error ? [run.error] : []),
@@ -177,7 +194,8 @@ export async function cmdUniverse(args: string[]): Promise<number> {
           `\nSaved ${demo.universeId}. Inspect: ashlr universe archive ${demo.universeId}${rootFlag(options.root)}`);
         return demo.verified ? 0 : 1;
       }
-      const run = await runUniverse(options.id!, { ...store, signal: controller.signal });
+      const run = await runUniverse(options.id!, { ...store, signal: controller.signal,
+        ...(options.resourceRuntime ? { resourceRuntime: options.resourceRuntime } : {}) });
       console.log(options.json ? JSON.stringify(run, null, 2) : renderRun(run));
       return run.status === 'completed' ? 0 : 1;
     }

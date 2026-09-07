@@ -13,17 +13,18 @@ These are separate executable paths, not one automatically commissioned loop:
 
 | Path | Current responsibility | Evidence and boundary | Operator guide |
 |------|------------------------|-----------------------|----------------|
-| `universe` → `src/core/universe/` | Generate local candidates, evaluate artifacts, retain diverse winners, run bounded campaigns and deliver an artifact to a new local branch | Fixed evaluator and persisted lineage; operator/local-model generation. No subscription-pool bridge or automatic remote release | [Universe](ASHLR-UNIVERSE.md) |
+| `universe` → `src/core/universe/` | Generate local candidates, evaluate artifacts, retain diverse winners, run bounded campaigns and deliver an artifact to a new local branch | Fixed evaluator and persisted lineage; operator, direct-local or explicitly bound resource-pool generation. No automatic remote release | [Universe](ASHLR-UNIVERSE.md) |
 | `resources pool` → `src/core/resources/` | Admit explicit native/local workers against quota, rolling task and shared concurrency limits; supervise a foreground queue | Durable assignments, output and reported usage. Worker completion is not verified engineering acceptance | [Resource Pools](RESOURCE-POOLS.md) |
 | `runtime` → `src/core/local-runtime/` | Install, verify, select and roll back trusted exact local packages | A selected unsigned candidate is not npm publication or resident-service qualification; forwarded commands remain explicitly scoped | [Pinned runtime](ASHLR-UNIVERSE.md#install-a-pinned-local-runtime) |
 | Scoped consoles → `src/core/web/` + `src/web-ui/` | Observe one Universe store or inspect/control one explicit resource pool | Loopback authentication; Universe console is read-only, resource mutations require execution enablement and separate authority | [Universe console](ASHLR-UNIVERSE.md#observe-one-universe-store), [resource console](RESOURCE-POOLS.md#operate-the-resource-console) |
 | General Hub / legacy fleet | Shared configuration, enrolled-repository status, proposal and goal workflows | General dashboard is distinct from the scoped consoles; resident dispatch remains dormant as described below | [General Hub setup](QUICKSTART.md#general-hub-and-legacy-fleet-setup) |
 
 The [North Star](NORTH-STAR.md) is the integrated product objective: useful accepted
-changes per measured token and hour. Do not join Universe measurements to resource
-worker receipts as if an execution/evaluation bridge already exists. Automatic
-effectiveness assessment requires evidence tied to the actual produced artifact,
-not merely a successful process or a populated fleet map.
+changes per measured token and hour. The opt-in [resource generation bridge](ASHLR-UNIVERSE.md#generate-candidates-through-an-enrolled-resource-pool)
+links recorded task receipts to candidate generation and independent artifact
+evaluation; it does not commission accounts or establish production acceptance.
+Effectiveness assessment still requires evidence tied to the actual produced
+artifact, not merely a successful process or a populated fleet map.
 
 Ecosystem products retain their repositories and product boundaries. Shared
 contracts connect capabilities; their presence in an architecture map is not proof

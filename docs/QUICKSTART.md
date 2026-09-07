@@ -63,10 +63,11 @@ reading supported console evidence are separate from executing experiments.
    recovery and campaign controls.
 
 The demonstration can be replaced with explicitly configured local-model
-generation. Native subscription tasks currently run through Resource Pools,
-not through an implicit Universe generation bridge. A pool needs real worker
-bindings, fresh observations and resource limits before dispatch; the fleet map
-does not create accounts or evidence. Follow the commissioning guide above.
+generation or the opt-in [resource generation bridge](ASHLR-UNIVERSE.md#generate-candidates-through-an-enrolled-resource-pool).
+The bridge uses enrolled native or local workers through Resource Pools; it needs
+an explicit private runtime binding, fresh observations and resource limits
+before dispatch. The fleet map does not create accounts or evidence. Follow the
+commissioning guide above before authorizing generation.
 
 ## General Hub and legacy fleet setup
 

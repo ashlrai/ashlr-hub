@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 import {
   initUniverseCampaign, readUniverseCampaign, readUniverseCampaigns, requestUniverseCampaignControl, runUniverseCampaign,
   type UniverseCampaignSummary,
@@ -21,24 +21,34 @@ limit ends it. Paused or interrupted work resumes only with run/resume.
 Requests are not acknowledgments: inspect status before assuming work stopped.
 Terminal campaigns remain terminal. Results are local experiment evidence,
 not accepted production changes. --root defaults to ~/.ashlr/universe.
+Resource-pool run/resume requires --resource-runtime <private absolute JSON>.
+Repeat that explicit runtime option on resume; it is not saved in the campaign.
+maxModelRequests reserves generation transport invocations, not native API calls.
+Native CLI invocations may make zero or multiple provider requests.
 Exit codes: 0 command handled, 1 failed/interrupted/degraded, 2 invalid arguments.
 `;
 
 class UsageError extends Error {}
 
-function parse(args: string[]): { command: string; id?: string; manifest?: string; root?: string; json: boolean } {
+function parse(args: string[]): { command: string; id?: string; manifest?: string; root?: string; resourceRuntime?: string; json: boolean } {
   const positional: string[] = [];
   let root: string | undefined;
   let manifest: string | undefined;
+  let resourceRuntime: string | undefined;
   let json = false;
   for (let index = 0; index < args.length; index++) {
     const arg = args[index]!;
     if (arg === '--help' || arg === '-h') return { command: 'help', json: false };
     if (arg === '--json') { json = true; continue; }
-    if (arg === '--root' || arg === '--manifest') {
+    if (arg === '--root' || arg === '--manifest' || arg === '--resource-runtime') {
       const value = args[++index];
       if (!value?.trim() || value.startsWith('--')) throw new UsageError(`${arg} requires a path`);
-      if (arg === '--root') {
+      if (arg === '--resource-runtime') {
+        if (resourceRuntime) throw new UsageError('--resource-runtime may only be specified once');
+        if (!isAbsolute(value) || Buffer.byteLength(value) > 4096 || [...value].some((character) => character.charCodeAt(0) < 32 ||
+          character.charCodeAt(0) >= 127 && character.charCodeAt(0) <= 159)) throw new UsageError('--resource-runtime requires a private absolute JSON path');
+        resourceRuntime = resolve(value);
+      } else if (arg === '--root') {
         if (root) throw new UsageError('--root may only be specified once');
         root = resolve(value);
       } else {
@@ -57,7 +67,8 @@ function parse(args: string[]): { command: string; id?: string; manifest?: strin
   if (['run', 'pause', 'stop'].includes(command) && !id) throw new UsageError(`${requested} requires a campaign id`);
   if (command === 'init' && !manifest) throw new UsageError('init requires --manifest <file.json>');
   if (manifest && command !== 'init') throw new UsageError('--manifest is only valid with init');
-  return { command, id, root, manifest, json };
+  if (resourceRuntime && command !== 'run') throw new UsageError('--resource-runtime is only valid with campaign run/resume');
+  return { command, id, root, manifest, resourceRuntime, json };
 }
 
 function rootFlag(root?: string): string {
@@ -73,7 +84,7 @@ function render(summary: UniverseCampaignSummary, root?: string): string {
     `Reason: ${summary.reason ?? 'No stop reason recorded'}`,
     `Generation attempts: ${measured(progress.attempts)}/${definition.budget.maxGenerations}` +
       ` · completed=${measured(progress.completedRuns)} interrupted=${measured(progress.interruptedRuns)}`,
-    `Reserved model requests: ${measured(progress.reservedModelRequests)}/${definition.budget.maxModelRequests}`,
+    `Reserved generation invocations: ${measured(progress.reservedModelRequests)}/${definition.budget.maxModelRequests} (maxModelRequests; not native API calls)`,
     `Deadline: ${summary.deadlineAt ?? 'Starts on first run'} · unchanged by resume`,
     `Initial niche admissions: ${measured(progress.admissions)} · strict improvements: ${measured(progress.improvements)}`,
     `Stagnant generations: ${measured(progress.stagnantGenerations)}/${definition.budget.maxStagnantGenerations}`,
@@ -89,6 +100,7 @@ function render(summary: UniverseCampaignSummary, root?: string): string {
       ? [`Continue: ashlr universe campaign run ${definition.id}${rootFlag(root)}`] : []),
     ...summary.reasons,
     'Campaign termination is not project success. Tokens cover recorded model generation only; missing usage is not zero.',
+    'Resource-pool runs require the explicit --resource-runtime option again on resume; no runtime binding is saved in this campaign.',
   ].join('\n');
 }
 
@@ -115,7 +127,8 @@ export async function cmdUniverseCampaign(args: string[]): Promise<number> {
     } else if (options.command === 'run') {
       process.once('SIGINT', abort);
       process.once('SIGTERM', abort);
-      summary = await runUniverseCampaign(options.id!, { ...store, signal: controller.signal });
+      summary = await runUniverseCampaign(options.id!, { ...store, signal: controller.signal,
+        ...(options.resourceRuntime ? { resourceRuntime: options.resourceRuntime } : {}) });
     } else if (options.command === 'pause' || options.command === 'stop') {
       summary = requestUniverseCampaignControl(options.id!, options.command, store);
     } else summary = readUniverseCampaign(options.id!, store);

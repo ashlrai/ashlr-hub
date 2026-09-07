@@ -12,7 +12,7 @@ import {
 } from './artifacts.js';
 import type { UniverseArtifact, UniverseDiagnostic, UniverseElite, UniverseManifest, UniverseOverview, UniverseRun,
   UniverseStoreOptions, UniverseSummary, UniverseTrial } from './types.js';
-import { generationResources, newGenerationReceipt, validateGenerationConfig, validGenerationReceipt, validGenerationUsage } from './generation.js';
+import { generationResources, newGenerationReceipt, resourceGenerationTaskId, validateGenerationConfig, validGenerationReceipt, validGenerationUsage } from './generation.js';
 import { buildUniverseFeedback, feedbackReceipt, validateDiagnostics } from './feedback.js';
 import { buildUniverseSearchContext, searchContextReceipt } from './search-context.js';
 import { MAX_UNIVERSE_RECORD_BYTES } from './evidence-size.js';
@@ -302,11 +302,21 @@ export function projectUniverse(directory: string, records = readRecords(directo
       }
       if (variant.generation) {
         const identity = newGenerationReceipt(variant.generation);
-        if (!trial.generation || trial.generation.model !== identity.model || trial.generation.endpoint !== identity.endpoint ||
+        if (!trial.generation || trial.generation.provider !== identity.provider ||
+            trial.generation.model !== identity.model || trial.generation.endpoint !== identity.endpoint ||
             Boolean(trial.generation.fileOperations) !== Boolean(variant.generation.fileOperations) ||
             trial.generation.changedFiles.some((path) => !variant.generation!.files.includes(path)) ||
             (trial.generation.status !== 'succeeded' && (trial.status === 'passed' || trial.artifact !== null))) {
           throw new Error('Trial generation evidence does not match its declared model and file scope');
+        }
+        if (variant.generation.kind === 'resource-pool') {
+          const resource = trial.generation.resource;
+          if (!resource || resource.poolId !== variant.generation.poolId || resource.poolDigest !== variant.generation.poolDigest ||
+              canonical(resource.allowedWorkerIds) !== canonical(variant.generation.allowedWorkerIds) ||
+              (resource.taskId !== null && resource.taskId !== resourceGenerationTaskId({
+                universeId: run.universeId, runId: run.id, variantId: variant.id }))) {
+            throw new Error('Trial resource generation identity differs from its pinned pool and run');
+          }
         }
         if (variant.generation.fileOperations && trial.generation.promptDigest !== null) {
           const expectedFiles = buildUniverseFileOperationsContext({ manifest: stored.manifest,

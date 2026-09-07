@@ -8,7 +8,7 @@ import {
   appendCampaignEvent, CampaignControlConflictError, campaignDirectory, campaignUniverse, foldCampaignEvents,
   projectCampaign, readCampaignEvents, readUniverseCampaign, terminalCampaign,
 } from './campaign-store.js';
-import type { UniverseCampaignSummary, UniverseStoreOptions } from './types.js';
+import type { UniverseCampaignSummary, UniverseRunOptions } from './types.js';
 
 export interface UniverseCampaignExpectation {
   universeId: string;
@@ -18,7 +18,7 @@ export interface UniverseCampaignExpectation {
   /** Optional exact pre-dispatch state, checked again inside the execution lease. */
   summaryDigest?: string;
 }
-type CampaignOptions = UniverseStoreOptions & { signal?: AbortSignal; expectedIdentity?: UniverseCampaignExpectation };
+type CampaignOptions = UniverseRunOptions & { expectedIdentity?: UniverseCampaignExpectation };
 type Settlement = 'paused' | 'stopped' | 'completed' | 'interrupted' | 'failed';
 
 class CampaignExpectationError extends Error {}
@@ -177,7 +177,7 @@ export async function runUniverseCampaign(id: string, options: CampaignOptions =
         // provider contact. Interrupted/unused reservations are never refunded.
         appendCampaignEvent(directory, { kind: 'step', at: new Date().toISOString(), ordinal, runId, generation,
           variantIds: variants.map((variant) => variant.id), reservedModelRequests });
-        const result = await runUniverseOwned(summary.definition.universeId, { root: options.root,
+        const result = await runUniverseOwned(summary.definition.universeId, { root: options.root, resourceRuntime: options.resourceRuntime,
           signal: controller.signal, runId, campaign: { id, ordinal, definitionDigest: summary.definitionDigest },
           deadlineMs: Date.parse(deadlineAt), trialLimit: variants.length,
           ...(summary.definition.feedback ? { feedback: true as const } : {}),
@@ -185,6 +185,17 @@ export async function runUniverseCampaign(id: string, options: CampaignOptions =
         if (result.status === 'failed') return settle(id, 'failed', 'Universe generation failed; inspect its durable evidence', options);
         if (result.status === 'interrupted' && !controller.signal.aborted) {
           return settle(id, 'interrupted', 'Universe generation interrupted before campaign completion', options);
+        }
+        // Existing owner controls and terminal time budgets take precedence over
+        // an operational pause. The top of the loop reconciles their exact state.
+        if (controller.signal.aborted || Date.now() >= Date.parse(deadlineAt)) continue;
+        // Withheld capacity and lost handoffs are operational outcomes, not
+        // evidence that another candidate would improve the objective. Keep the
+        // reservation, but do not burn the remaining campaign on rapid retries.
+        if (result.trials.some((trial) => trial.generation?.resource &&
+            (trial.generation.resource.dispatch !== 'settled' ||
+             trial.generation.resource.taskStatus !== 'completed'))) {
+          return settle(id, 'paused', 'Resource generation requires attention; inspect task evidence before resuming', options);
         }
       }
     } catch (error) {

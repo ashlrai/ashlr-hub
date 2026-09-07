@@ -1,5 +1,8 @@
 import type { UniverseDeliveryReceipt } from './delivery.js';
 import type { UniverseFileOperationsConfig, UniverseFileOperationsReceipt } from './file-operations-types.js';
+import type { ResourceWorker } from '../resources/pool-policy.js';
+import type { ResourceTaskReceipt } from '../resources/pool-runtime.js';
+import type { ResourceUsageScope } from '../resources/performance.js';
 
 /** Universe experiments report local measurements, never inferred business value. */
 export interface UniverseManifest {
@@ -14,16 +17,29 @@ export interface UniverseManifest {
   variants: UniverseVariant[];
 }
 
-export interface UniverseGenerationConfig {
-  kind: 'local-chat';
-  /** Explicit numeric-loopback OpenAI-compatible endpoint; no account discovery. */
-  endpoint: string;
-  model: string;
+interface UniverseGenerationFileScope {
   /** Mutable path scope. Paths must exist unless fileOperations explicitly opts in. */
   files: string[];
   maxOutputTokens: number;
   fileOperations?: UniverseFileOperationsConfig;
 }
+
+export interface UniverseLocalGenerationConfig extends UniverseGenerationFileScope {
+  kind: 'local-chat';
+  /** Explicit numeric-loopback OpenAI-compatible endpoint; no account discovery. */
+  endpoint: string;
+  model: string;
+}
+
+export interface UniverseResourceGenerationConfig extends UniverseGenerationFileScope {
+  kind: 'resource-pool';
+  poolId: string;
+  /** Pins the operator-owned policy and bindings without disclosing private locators. */
+  poolDigest: string;
+  allowedWorkerIds: string[];
+}
+
+export type UniverseGenerationConfig = UniverseLocalGenerationConfig | UniverseResourceGenerationConfig;
 
 export type UniverseVariant = { id: string; niche: string; hypothesis: string } & (
   { command: string[]; model?: string; generation?: never } |
@@ -98,11 +114,29 @@ export interface UniverseSearchContextReceipt {
   digest: string;
 }
 
+/** Resource handoff evidence is not a provider-request count or artifact acceptance. */
+export interface UniverseResourceGenerationEvidence {
+  schemaVersion: 1;
+  poolId: string;
+  poolDigest: string;
+  allowedWorkerIds: string[];
+  taskId: string | null;
+  taskDigest: string | null;
+  workerId: string | null;
+  workerProvider: ResourceWorker['provider'] | null;
+  workerModel: string | null;
+  receiptDigest: string | null;
+  dispatch: 'not-started' | 'withheld' | 'settled' | 'replayed' | 'unavailable';
+  taskStatus: ResourceTaskReceipt['status'] | null;
+  usageScope: ResourceUsageScope | null;
+}
+
 export interface UniverseGenerationReceipt {
   schemaVersion: 1;
-  provider: 'local-openai-compatible';
-  endpoint: string;
-  model: string;
+  provider: 'local-openai-compatible' | 'resource-pool';
+  /** Null for resources: the selected model is recorded in the resource witness. */
+  endpoint: string | null;
+  model: string | null;
   status: 'succeeded' | 'failed' | 'timed-out' | 'cancelled';
   requestStarted: boolean;
   promptDigest: string | null;
@@ -114,6 +148,7 @@ export interface UniverseGenerationReceipt {
   feedback?: UniverseFeedback['source'] & { digest: string };
   search?: UniverseSearchContextReceipt;
   fileOperations?: UniverseFileOperationsReceipt;
+  resource?: UniverseResourceGenerationEvidence;
   error?: string;
 }
 
@@ -122,6 +157,10 @@ export interface UniverseGenerationUsage {
   trials: number;
   requestsStarted: number;
   reportedRequests: number;
+  /** Resource handoffs, not provider requests. Omitted on legacy local-only runs. */
+  resourceAttempts?: number;
+  /** Measured settled handoffs only; replayed and uncertain attempts are excluded. */
+  resourceReportedAttempts?: number;
   /** Null unless the generation completed and every recorded request reported usage. */
   inputTokens: number | null;
   outputTokens: number | null;
@@ -213,7 +252,11 @@ export interface UniverseOverview {
 }
 
 export interface UniverseStoreOptions { root?: string }
-export interface UniverseRunOptions extends UniverseStoreOptions { signal?: AbortSignal }
+export interface UniverseRunOptions extends UniverseStoreOptions {
+  signal?: AbortSignal;
+  /** Explicit private operator configuration path; never part of a portable manifest. */
+  resourceRuntime?: string;
+}
 
 export interface UniverseCampaignDefinition {
   schemaVersion: 1;
