@@ -37,7 +37,7 @@ Independent review corrected successful-generation evidence being overwritten by
 evaluator cancellation, deadline precedence over attention pauses, and current
 quota/refusal evidence being ignored by a newer stored-ready observation.
 The eight real-I/O integration tests now pass, including deadline expiry during
-the native handoff itself. The final selected regressions pass: 2,984 distinct
+the native handoff itself. The final selected regressions pass: 2,935 distinct
 backend, transport and web tests. Clean installed acceptance and publication
 remain, with exact outcomes recorded in the external release evidence directory.
 

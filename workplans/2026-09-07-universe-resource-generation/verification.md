@@ -6,10 +6,11 @@ provider versus fixture execution, installed acceptance and publication here.
 ## Local source verification
 
 - Selected Universe/resource backend regression: 2,467 tests in 79 files passed.
-- Separate resource transport regression: 49 tests in one file passed (the file
-  arrived after the broad shell glob was expanded).
+- Resource transport regression: 49 tests in one file also passed separately;
+  final JSON inspection confirms these were already included in the broad run.
 - Web regression: 468 tests in 44 files passed.
-- Total selected regression: 2,984 distinct tests in 124 files, all passed.
+- Total selected regression: 2,935 distinct tests in 123 files, all passed,
+  plus the 49-test transport rerun (2,984 executions across these reports).
 - Full core/web typecheck passed; full lint had zero errors and 105 existing
   warnings. Real-I/O lane membership and Git whitespace checks passed.
 - Documentation audit: 8 entrypoints, 64 local links, 28 source links,
