@@ -118,7 +118,10 @@ function start(input: CodexProbeProcessInput): void {
     if (!record(value)) { fail('probe-protocol-invalid'); return; }
     if (Object.hasOwn(value, 'method')) {
       if (Object.hasOwn(value, 'id')) { fail('probe-server-request-refused'); return; }
-      if (!text(value.method, 160) || Object.keys(value).some((key) => !['method', 'params'].includes(key))) {
+      // Native 0.153.4 adds emission time to unsolicited notifications. It is
+      // transport metadata only: never use it as account/quota freshness.
+      if (!text(value.method, 160) || Object.keys(value).some((key) => !['method', 'params', 'emittedAtMs'].includes(key)) ||
+        Object.hasOwn(value, 'emittedAtMs') && (!Number.isSafeInteger(value.emittedAtMs) || Number(value.emittedAtMs) < 0)) {
         fail('probe-protocol-invalid'); return;
       }
       if (before && value.method === 'account/updated') fail('probe-account-changed');

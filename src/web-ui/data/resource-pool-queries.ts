@@ -1,5 +1,6 @@
 import type { ResourceConsoleOutput, ResourceConsoleScope, ResourceConsoleSnapshot, ResourceConsoleTaskInput,
   ResourceSupervisorJob, ResourceSupervisorSnapshot } from '../../core/resources/console-types.js';
+import { validResourceNativeProcessForReceipt } from '../../core/resources/native-diagnostics.js';
 import { clearMutationToken, getMutationToken, touchMutationHold } from './auth-store.js';
 import { ApiError, apiGet, apiPost } from './client.js';
 import type { QueryDef } from './queries.js';
@@ -22,6 +23,17 @@ function exact(value: Record<string, unknown>, keys: string[]): boolean {
 function timestamp(value: unknown): value is string {
   return typeof value === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value) &&
     Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+}
+/** Validate this optional extension before any provider-controlled values reach the inspector. */
+function validNativeDiagnostics(rows: unknown[], workers: ResourceConsoleSnapshot['pool']['workers']): boolean {
+  return rows.every((row) => {
+    if (!record(row)) return false;
+    if (!Object.hasOwn(row, 'nativeProcess')) return true;
+    if (!Array.isArray(workers)) return false;
+    const worker = workers.find((candidate) => candidate?.id === row.workerId);
+    return Boolean(worker && typeof row.status === 'string' &&
+      validResourceNativeProcessForReceipt(row.nativeProcess, row.status, worker.provider));
+  });
 }
 /** This optional extension is observation-only; malformed metadata never becomes a successful empty panel. */
 function validQuotaRefresh(value: unknown, workers: ResourceConsoleSnapshot['pool']['workers']): boolean {
@@ -67,6 +79,8 @@ export function resourceConsoleSnapshotQuery(poolId: string): QueryDef<ResourceC
       if (snapshot?.schemaVersion !== 1 || snapshot.mode !== 'resource-pool' || snapshot.pool?.id !== poolId ||
         snapshot.authority !== 'local-evidence' || !['healthy', 'missing', 'degraded'].includes(snapshot.sourceState) ||
         !Array.isArray(snapshot.groups) || !Array.isArray(snapshot.activeAttempts) || !Array.isArray(snapshot.recentAttempts) ||
+        !validNativeDiagnostics(snapshot.activeAttempts, snapshot.pool.workers) ||
+        !validNativeDiagnostics(snapshot.recentAttempts, snapshot.pool.workers) ||
         !validQuotaRefresh(snapshot.quotaRefresh, snapshot.pool.workers)) {
         throw new Error('The resource response did not match the selected pool.');
       }

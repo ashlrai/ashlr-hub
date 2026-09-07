@@ -134,7 +134,8 @@ describe('resource native worker terminal and accounting evidence', () => {
     const binding = nativeFixture(codexEvents()); const request = task();
     const result = await executeResourceWorker(worker(), binding, request);
     expect(result).toEqual({ status: 'completed', output: 'fixture completed', inputTokens: 12, outputTokens: 4,
-      usageScope: 'codex-turn', reason: 'worker-completed' });
+      usageScope: 'codex-turn', reason: 'worker-completed', nativeProcess: { schemaVersion: 1, scope: 'native-process',
+        exitCode: 0, signal: null, stderrPresent: false, outputTruncated: false } });
     expect(invocation().argv).toEqual(['exec', '--model', 'fixture-model', '--cd', fixtureRoot, '--sandbox', 'read-only',
       '--json', '--ephemeral', '--ignore-user-config', '-']);
     expect(invocation().prompt).toBe(request.prompt); expect(invocation().argv.join(' ')).not.toContain('TASK_ONLY_ON_STDIN');
@@ -318,14 +319,30 @@ describe('resource native worker terminal and accounting evidence', () => {
     const cutoff = await executeResourceWorker(worker(), nativeFixture(codexEvents()), task({ maxOutputTokens: 3 }));
     expect(cutoff).toMatchObject({ status: 'failed', reason: 'worker-output-token-limit', inputTokens: 12, outputTokens: 4 });
     const exit = await executeResourceWorker(worker(), nativeFixture(codexEvents(), '', 2), task());
-    expect(exit).toMatchObject({ status: 'failed', reason: 'worker-exit-failed', inputTokens: 12, outputTokens: 4 });
+    expect(exit).toMatchObject({ status: 'failed', reason: 'worker-exit-failed', inputTokens: 12, outputTokens: 4,
+      nativeProcess: { exitCode: 2, signal: null, stderrPresent: false, outputTruncated: false } });
+  });
+
+  it('records a real inert-process exit and stderr presence without retaining stderr text', async () => {
+    const binding = nativeFixture([], 'process.stderr.write("PRIVATE_NATIVE_STDERR");process.exitCode=23;');
+    const result = await executeResourceWorker(worker(), binding, task());
+    expect(result).toMatchObject({ status: 'failed', reason: 'worker-exit-failed',
+      nativeProcess: { schemaVersion: 1, scope: 'native-process', exitCode: 23, signal: null,
+        stderrPresent: true, outputTruncated: false } });
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_NATIVE_STDERR');
+  });
+
+  it.skipIf(process.platform === 'win32')('keeps a real native signal distinct from a synthesized exit code', async () => {
+    const result = await executeResourceWorker(worker(), nativeFixture([], 'process.kill(process.pid,"SIGTERM");'), task());
+    expect(result).toMatchObject({ status: 'failed', reason: 'worker-exit-failed', nativeProcess: { exitCode: null, signal: 'SIGTERM' } });
   });
 
   it('refuses truncated native output even when the visible tail contains a success event', async () => {
     const result = await executeResourceWorker(worker(), nativeFixture([
       { type: 'item.completed', item: { type: 'agent_message', text: 'x'.repeat(1024 * 1024) } }, ...codexEvents(),
     ]), task());
-    expect(result).toEqual({ status: 'failed', reason: 'worker-output-truncated', output: '', inputTokens: null, outputTokens: null });
+    expect(result).toEqual({ status: 'failed', reason: 'worker-output-truncated', output: '', inputTokens: null, outputTokens: null,
+      nativeProcess: { schemaVersion: 1, scope: 'native-process', exitCode: 0, signal: null, stderrPresent: false, outputTruncated: true } });
   });
 
   it('accepts complete native evidence longer than the legacy verification capture cap', async () => {
@@ -336,7 +353,8 @@ describe('resource native worker terminal and accounting evidence', () => {
 
   it('does not start a fixture process for cancellation or invalid task scope', async () => {
     const binding = nativeFixture(codexEvents()); const controller = new AbortController(); controller.abort();
-    expect(await executeResourceWorker(worker(), binding, task(), controller.signal)).toMatchObject({ status: 'cancelled' });
+    const cancelled = await executeResourceWorker(worker(), binding, task(), controller.signal);
+    expect(cancelled).toMatchObject({ status: 'cancelled' }); expect(cancelled).not.toHaveProperty('nativeProcess');
     expect(existsSync(join(fixtureRoot, 'invocation.json'))).toBe(false);
     for (const patch of [{ cwd: '.' }, { timeoutMs: 0 }, { maxOutputTokens: 0 }, { prompt: 'x'.repeat(1024 * 1024 + 1) }]) {
       expect(await executeResourceWorker(worker(), binding, task(patch))).toMatchObject({ reason: 'worker-invalid-configuration' });
@@ -347,7 +365,8 @@ describe('resource native worker terminal and accounting evidence', () => {
   it.skipIf(process.platform === 'win32')('reports process-ownership uncertainty on cooperative timeout rather than inventing clean termination', async () => {
     const binding = nativeFixture([], 'console.log(JSON.stringify({type:"turn.started"}));setInterval(()=>{},1000);');
     const result = await executeResourceWorker(worker(), binding, task({ timeoutMs: 300 }));
-    expect(result).toMatchObject({ status: 'uncertain', reason: 'worker-termination-uncertain', inputTokens: null, outputTokens: null });
+    expect(result).toMatchObject({ status: 'uncertain', reason: 'worker-termination-uncertain', inputTokens: null, outputTokens: null,
+      nativeProcess: { exitCode: null, signal: 'SIGTERM', stderrPresent: true, outputTruncated: false } });
   });
 });
 

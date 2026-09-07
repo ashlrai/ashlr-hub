@@ -7,6 +7,7 @@ import { normalizeNumericLoopbackOllamaBaseUrl } from '../run/ollama-identity.js
 import { runVerifySubprocessAsync } from '../run/verify-commands.js';
 import { MAX_RESOURCE_OBSERVATION_AGE_MS, validateResourcePool, type ResourceObservation, type ResourcePool, type ResourceWorker } from './pool-policy.js';
 import { mergeClaudeResourceObservation } from './provider-observations.js';
+import { validResourceNativeProcessSignal, type ResourceNativeProcessDiagnostic } from './native-diagnostics.js';
 
 export type ResourceBinding =
   | { workerId: string; capacityKey: string; kind: 'native-cli'; command: string[] }
@@ -27,6 +28,8 @@ export interface ResourceWorkerResult {
   usageScope?: 'codex-turn' | 'claude-main-loop' | 'local-chat-completion';
   /** Fixed adapter code, never raw provider diagnostics or task text. */
   reason: string;
+  /** Only after native subprocess invocation; never raw stdout/stderr or provider error text. */
+  nativeProcess?: ResourceNativeProcessDiagnostic;
   /** Native quota metadata only; capture time is conservatively dispatch start. */
   observation?: ResourceObservation;
 }
@@ -124,7 +127,20 @@ function events(output: string): Record<string, unknown>[] | null {
   } catch { return null; }
 }
 
-function parseCodex(output: string): ResourceWorkerResult {
+/** Recognize only the observed structured compatibility rejection, never infer faults from task text. */
+function codexUpgradeRequired(row: Record<string, unknown>, model: string): boolean {
+  const message = row.type === 'error' ? row.message
+    : row.type === 'turn.failed' && object(row.error) ? row.error.message : undefined;
+  if (typeof message !== 'string') return false;
+  try {
+    const failure: unknown = JSON.parse(message);
+    return object(failure) && failure.type === 'error' && failure.status === 400 && object(failure.error) &&
+      failure.error.type === 'invalid_request_error' && failure.error.message ===
+        `The '${model}' model requires a newer version of Codex. Please upgrade to the latest app or CLI and try again.`;
+  } catch { return false; }
+}
+
+function parseCodex(output: string, model: string): ResourceWorkerResult {
   const rows = events(output);
   if (!rows) return empty('worker-invalid-events');
   const completed = rows.filter((row) => row.type === 'turn.completed');
@@ -141,7 +157,8 @@ function parseCodex(output: string): ResourceWorkerResult {
   const result = typeof (message as Record<string, unknown> | undefined)?.text === 'string'
     ? (message as { text: string }).text : '';
   return { status: terminal && !failure && result.trim() ? 'completed' : 'failed', output: result,
-    inputTokens, outputTokens, reason: failure ? 'worker-terminal-failed' : !terminal ? 'worker-terminal-missing'
+    inputTokens, outputTokens, reason: failure ? rows.some((row) => codexUpgradeRequired(row, model))
+      ? 'worker-cli-upgrade-required' : 'worker-terminal-failed' : !terminal ? 'worker-terminal-missing'
       : !result.trim() ? 'worker-output-missing' : 'worker-completed' };
 }
 
@@ -202,7 +219,15 @@ async function executeNative(worker: ResourceWorker, binding: Extract<ResourceBi
     cwd: task.cwd, env: workerEnvironment(), timeoutMs: task.timeoutMs, input: task.prompt, maxOutputChars: MAX_BYTES, signal,
   });
   const parsed = processResult.outputTruncated ? empty('worker-output-truncated')
-    : worker.provider === 'codex' ? parseCodex(processResult.stdout) : parseClaude(processResult.stdout);
+    : worker.provider === 'codex' ? parseCodex(processResult.stdout, worker.model) : parseClaude(processResult.stdout);
+  // The runner uses synthetic exit codes for timeouts, cancellation and signals.
+  // Preserve only an ordinary observed POSIX exit, not a guessed process outcome.
+  parsed.nativeProcess = { schemaVersion: 1, scope: 'native-process',
+    exitCode: !processResult.timedOut && !processResult.cancelled && !processResult.error && !processResult.signal &&
+      Number.isSafeInteger(processResult.exitCode) && processResult.exitCode >= 0 && processResult.exitCode <= 255
+      ? processResult.exitCode : null,
+    signal: validResourceNativeProcessSignal(processResult.signal) ? processResult.signal : null,
+    stderrPresent: processResult.stderr.length > 0, outputTruncated: processResult.outputTruncated === true };
   if (worker.provider === 'claude' && !processResult.outputTruncated) {
     let observed: ResourceObservation | null = null;
     for (const event of events(processResult.stdout) ?? []) {
@@ -223,7 +248,8 @@ async function executeNative(worker: ResourceWorker, binding: Extract<ResourceBi
   if (processResult.timedOut) return { ...parsed, status: 'timed-out', reason: 'worker-timed-out' };
   if (processResult.outputTruncated) return parsed;
   if (processResult.error) return { ...parsed, status: 'failed', reason: 'worker-process-failed' };
-  if (processResult.exitCode !== 0 || processResult.signal) return { ...parsed, status: 'failed', reason: 'worker-exit-failed' };
+  if (processResult.exitCode !== 0 || processResult.signal) return { ...parsed, status: 'failed',
+    reason: !processResult.signal && parsed.reason === 'worker-cli-upgrade-required' ? parsed.reason : 'worker-exit-failed' };
   // CLI tasks may make multiple internal requests. Their output token setting
   // is a reported-usage cutoff, not a preventive native provider spend cap.
   if (parsed.outputTokens !== null && parsed.outputTokens > task.maxOutputTokens) {

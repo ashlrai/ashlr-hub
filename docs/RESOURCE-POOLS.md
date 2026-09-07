@@ -8,9 +8,11 @@ or an extension of the legacy daemon's authority. The scoped operations console
 adds a durable queue and visual dispatch controls for that same pool.
 
 This source feature is not yet a published registry release. Native adapter
-contracts were checked against Codex CLI 0.136.0 and Claude Code 2.1.257 on
-September 7, 2026. Local validation uses inert executables and loopback fixtures;
-it does not establish authenticated multi-account production acceptance.
+flag and event contracts were checked against Codex CLI 0.136.0 and Claude Code
+2.1.257 on September 7, 2026. This is not proof of model compatibility: the exact
+CLI/model pair needs an explicit authenticated canary with the enrolled account.
+Fixture-based tests use inert executables and loopback responses; they do not
+establish authenticated multi-account production acceptance.
 
 ## Resource semantics
 
@@ -561,6 +563,45 @@ worker and private receipt evidence before resuming; do not delete the ledger to
 manufacture capacity. Pool/binding changes are refused against an existing ledger
 rather than resetting its history. Preserve it for any explicit migration.
 
+### Read a native failure
+
+Select the task in the resource console to read **Receipt diagnosis**. It uses
+the receipt's fixed reason code, not the separately sampled supervisor reason.
+The explanation and next check do not fetch raw output, retry a task, release
+capacity, or mark work accepted. A zero native exit code does not override a
+failed terminal event or another failed receipt check.
+
+After a native invocation returns, its receipt can include `nativeProcess`:
+schema version `1`, scope `native-process`, an observed exit code (`0`–`255`) or
+`null`, an allowlisted signal or `null`, and the boolean fields `stderrPresent`
+and `outputTruncated`. Timeout, cancellation, process-error, and signal paths
+do not turn runner-synthesized codes into measured exits. Captured stderr can
+include runner notices; its presence is not proof of a vendor error, and its
+absence is not proof of success. Truncation refers to bounded stdout or stderr
+capture. This extension contains no captured text or provider error message.
+Legacy receipts, local workers, reservations, and pre-invocation failures can
+omit it; absence is unknown, not zero or empty capture.
+
+Older builds with strict receipt validation may refuse a ledger containing this
+extension. Preserve the ledger and use a compatible build; do not remove receipt
+fields to make an older reader accept it.
+
+| Recorded reason | Next check |
+| --- | --- |
+| `worker-cli-upgrade-required` | The configured model was rejected because the native CLI needs an upgrade. Select or update a compatible CLI, then recheck the enrolled account and quota before a new attempt. Hub does not change the CLI or model automatically. |
+| `worker-exit-failed` / `worker-process-failed` | Check the configured launcher, executable, CLI/model compatibility, and private account environment. Exit status alone does not establish an authentication or quota cause. |
+| `worker-terminal-failed` / `worker-terminal-missing` / `worker-invalid-events` | Check the supported native event format and task scope. Partial output or process exit `0` is not sufficient completion evidence. |
+| `worker-output-truncated` / `worker-output-token-limit` | Review task scope and configured response budget before a deliberate new attempt; do not accept the failed response. |
+| `worker-timed-out` | Review the deadline and task scope, confirm cleanup, and refresh capacity evidence. |
+| `worker-termination-uncertain` | Stop the affected pool and reconcile process ownership and private receipt evidence. The slot remains occupied; do not delete the ledger to release it. |
+
+An unrecognized reason gets a generic explanation, not raw error text or a
+guessed cause. A deliberate new attempt still requires a new task ID and normal
+admission checks. The diagnosis is guidance for recovery, not automatic recovery
+or a claim of unattended production reliability.
+
+### Ledger recovery boundaries
+
 Each observation holds at most eight windows. If successive valid snapshots
 exceed that inventory, the ledger retains seven strongest readings and a
 `hub_observation_overflow` hard-denial marker. Its `100` is a refusal sentinel,
@@ -569,8 +610,12 @@ of discarded windows is unproven; stop and reconcile the pool before a deliberat
 schema migration. The ledger remains readable and does not dispatch through the
 overflow.
 
-The bounded store retains up to 4,096 task identities and 4 MiB. It does not prune
-old identities into replayable work. These limits, explicit enrollment, incomplete
+The bounded store retains up to 4,096 task identities and 4 MiB. Before starting
+a worker, admission budgets worst-case settlement metadata for every reserved
+task and the bounded quota inventory. Insufficient receipt headroom refuses the
+new admission; it does not evict history. Existing receipt reads and replay
+behavior are unchanged. The store does not prune old identities into replayable
+work. These limits, explicit enrollment, incomplete
 vendor quota coverage, and manual ambiguous-run recovery mean this is not yet an
 unattended production fleet. Universe's versioned generation receipts, measured
 feedback, evaluator, and archive selection are unchanged. `ashlr runtime run`
