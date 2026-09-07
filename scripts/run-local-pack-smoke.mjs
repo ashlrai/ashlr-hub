@@ -77,6 +77,7 @@ async function verifyInstalledUniverse(fixtureRoot, bin) {
     'readUniverseGraph', 'traverseUniverseGraph', 'validateUniversePortfolioDefinition',
     'readUniversePortfolioPlan', 'buildUniversePortfolioPlan', 'runUniversePortfolio',
     'buildUniverseSearchContext', 'validateUniverseSearchContext', 'searchContextReceipt',
+    'buildUniverseFileOperationsContext', 'validateUniverseFileOperationsContext', 'fileOperationsContextDigest',
     'buildUniverseCampaignComparison', 'readUniverseCampaignComparison']) {
     assert.equal(typeof sdk[name], 'function', `Universe SDK export missing: ${name}`);
   }
@@ -175,6 +176,24 @@ async function verifyInstalledUniverse(fixtureRoot, bin) {
   assert.equal(searchReceipt.schemaVersion, 2);
   assert.match(searchReceipt.digest, /^[a-f0-9]{64}$/);
   assert.deepEqual(sdk.searchContextReceipt(sdk.validateUniverseSearchContext(search)), searchReceipt);
+  const fileVariant = { ...modelVariant, generation: { ...modelVariant.generation,
+    files: ['never-run.mjs', 'new/helper.mjs'], fileOperations: { schemaVersion: 1, contextFiles: [] } } };
+  const fileManifest = sdk.validateUniverseManifest({ ...manifest, variants: [fileVariant] });
+  assert.deepEqual(fileManifest.variants[0].generation, fileVariant.generation);
+  const fileContext = { schemaVersion: 1, universeId: manifest.id, manifestDigest: 'a'.repeat(64),
+    comparatorDigest: 'b'.repeat(64), variantId: fileVariant.id, generation: 1,
+    parent: { runId: null, trialId: null, generation: 0, artifactDigest: 'c'.repeat(64) },
+    files: [{ path: 'never-run.mjs', contentDigest: 'd'.repeat(64) },
+      { path: 'new/helper.mjs', contentDigest: null }], contextFiles: [], previous: null };
+  assert.deepEqual(sdk.validateUniverseFileOperationsContext(fileContext, fileVariant.generation), fileContext);
+  assert.match(sdk.fileOperationsContextDigest(fileContext), /^[a-f0-9]{64}$/);
+  assert.equal(sdk.fileOperationsContextDigest(fileContext),
+    sdk.fileOperationsContextDigest(sdk.validateUniverseFileOperationsContext(fileContext, fileVariant.generation)));
+  assert.throws(() => sdk.validateUniverseFileOperationsContext({ ...fileContext, files: [fileContext.files[0]] },
+    fileVariant.generation), 'Missing file state must not be silently interpreted as absence');
+  assert.throws(() => sdk.validateUniverseManifest({ ...manifest, variants: [{ ...fileVariant,
+    generation: { ...fileVariant.generation, fileOperations: { schemaVersion: 1, contextFiles: ['never-run.mjs'] } },
+  }] }), 'Read-only context must not overlap mutable scope');
   const definition = { schemaVersion: 1, id: 'pack-sdk', universeId: manifest.id, feedback: false,
     budget: { maxGenerations: 1, maxDurationMs: 1000, maxModelRequests: 0,
       maxStagnantGenerations: 1, maxReportedTokens: null } };
