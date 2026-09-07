@@ -3,23 +3,44 @@ import { verifiedProcessStartRef, ownsLocalStoreLock } from '../fleet/local-stor
 import { withUniverseExecution } from './execution.js';
 import { runUniverseOwned } from './runner.js';
 import { scheduledVariants } from './store.js';
+import { canonical, digest } from './artifacts.js';
 import {
-  appendCampaignEvent, campaignDirectory, campaignUniverse, foldCampaignEvents,
-  readCampaignEvents, readUniverseCampaign, terminalCampaign,
+  appendCampaignEvent, CampaignControlConflictError, campaignDirectory, campaignUniverse, foldCampaignEvents,
+  projectCampaign, readCampaignEvents, readUniverseCampaign, terminalCampaign,
 } from './campaign-store.js';
 import type { UniverseCampaignSummary, UniverseStoreOptions } from './types.js';
 
-type CampaignOptions = UniverseStoreOptions & { signal?: AbortSignal };
+export interface UniverseCampaignExpectation {
+  universeId: string;
+  definitionDigest: string;
+  manifestDigest: string;
+  comparatorDigest: string;
+  /** Optional exact pre-dispatch state, checked again inside the execution lease. */
+  summaryDigest?: string;
+}
+type CampaignOptions = UniverseStoreOptions & { signal?: AbortSignal; expectedIdentity?: UniverseCampaignExpectation };
 type Settlement = 'paused' | 'stopped' | 'completed' | 'interrupted' | 'failed';
 
-function settle(id: string, requested: Settlement, reason: string, options: CampaignOptions): UniverseCampaignSummary {
+class CampaignExpectationError extends Error {}
+function assertExpectation(summary: UniverseCampaignSummary, expected: UniverseCampaignExpectation | undefined, snapshot: boolean): void {
+  if (!expected) return;
+  if (summary.sourceState !== 'healthy' || summary.definition.universeId !== expected.universeId ||
+      summary.definitionDigest !== expected.definitionDigest || summary.manifestDigest !== expected.manifestDigest ||
+      summary.comparatorDigest !== expected.comparatorDigest ||
+      (snapshot && expected.summaryDigest !== undefined && expected.summaryDigest !== digest(canonical(summary)))) {
+    throw new CampaignExpectationError('Campaign evidence changed after portfolio admission');
+  }
+}
+
+function settle(id: string, requested: Settlement, reason: string, options: CampaignOptions,
+  expectedRecordsDigest?: string): UniverseCampaignSummary {
   const directory = campaignDirectory(id, options);
   const state = foldCampaignEvents(readCampaignEvents(directory)).state;
   if (terminalCampaign(state)) return readUniverseCampaign(id, options);
   const selected = state === 'stop-requested' ? 'stopped' : state === 'pause-requested' ? 'paused' : requested;
   appendCampaignEvent(directory, { kind: 'settled', state: selected,
     reason: selected !== requested ? (selected === 'stopped' ? 'Stopped by owner' : 'Paused by owner') : reason,
-    at: new Date().toISOString() });
+    at: new Date().toISOString() }, { expectedRecordsDigest });
   return readUniverseCampaign(id, options);
 }
 
@@ -40,10 +61,19 @@ function limit(summary: UniverseCampaignSummary): { state: Settlement; reason: s
 /** Explicit foreground ownership; resumption never installs or activates a resident daemon. */
 export async function runUniverseCampaign(id: string, options: CampaignOptions = {}): Promise<UniverseCampaignSummary> {
   const initial = readUniverseCampaign(id, options);
+  assertExpectation(initial, options.expectedIdentity, true);
   if (initial.sourceState !== 'healthy') throw new Error('Campaign evidence is degraded');
   if (terminalCampaign(initial.state)) return initial;
   return await withUniverseExecution(initial.definition.universeId, options, async (lock) => {
     const directory = campaignDirectory(id, options);
+    // The execution lease excludes other runners, not owner controls. Project
+    // the exact captured ledger and CAS that checkpoint under the control lock
+    // when starting; a pause cannot slip between a snapshot check and admission.
+    let admissionEvents = readCampaignEvents(directory);
+    const admission = projectCampaign(admissionEvents,
+      campaignUniverse(foldCampaignEvents(admissionEvents).created, options));
+    assertExpectation(admission, options.expectedIdentity, true);
+    let admissionDigest = options.expectedIdentity ? digest(canonical(admissionEvents)) : undefined;
     const controller = new AbortController();
     const cancel = (): void => controller.abort();
     options.signal?.addEventListener('abort', cancel, { once: true });
@@ -53,14 +83,15 @@ export async function runUniverseCampaign(id: string, options: CampaignOptions =
     let deadlineExpired = false;
     let controlError: string | null = null;
     try {
-      let summary = readUniverseCampaign(id, options);
+      let summary = admission;
+      assertExpectation(summary, options.expectedIdentity, false);
       if (summary.sourceState !== 'healthy') throw new Error('Campaign evidence is degraded');
       if (terminalCampaign(summary.state)) return summary;
-      const folded = foldCampaignEvents(readCampaignEvents(directory));
+      const folded = foldCampaignEvents(admissionEvents);
       if (folded.state === 'stop-requested' || folded.state === 'pause-requested') {
-        return settle(id, folded.state === 'stop-requested' ? 'stopped' : 'paused', 'Acknowledged pending owner control', options);
+        return settle(id, folded.state === 'stop-requested' ? 'stopped' : 'paused', 'Acknowledged pending owner control', options, admissionDigest);
       }
-      if (controller.signal.aborted) return settle(id, 'paused', 'Campaign paused by caller cancellation', options);
+      if (controller.signal.aborted) return settle(id, 'paused', 'Campaign paused by caller cancellation', options, admissionDigest);
 
       // The common Universe lease excludes other runs while abandoned starts
       // are reconciled. Existing run IDs finalize interruption; they never replay.
@@ -77,17 +108,22 @@ export async function runUniverseCampaign(id: string, options: CampaignOptions =
         }
       }
       if (folded.state === 'running') {
-        appendCampaignEvent(directory, { kind: 'settled', state: 'interrupted', at: new Date().toISOString(),
-          reason: 'Recovered a campaign owner interruption without replaying reserved work' });
+        admissionEvents = appendCampaignEvent(directory, { kind: 'settled', state: 'interrupted', at: new Date().toISOString(),
+          reason: 'Recovered a campaign owner interruption without replaying reserved work' }, { expectedRecordsDigest: admissionDigest });
+        if (admissionDigest !== undefined) admissionDigest = digest(canonical(admissionEvents));
       }
       summary = readUniverseCampaign(id, options);
+      assertExpectation(summary, options.expectedIdentity, false);
+      if (summary.sourceState !== 'healthy') throw new Error('Campaign evidence is degraded');
       const before = limit(summary);
-      if (before) return settle(id, before.state, before.reason, options);
+      if (before) return settle(id, before.state, before.reason, options, admissionDigest);
       const startRef = verifiedProcessStartRef(process.pid);
       if (!startRef) throw new Error('Cannot establish campaign process ownership');
       const at = new Date().toISOString();
       const deadlineAt = summary.deadlineAt ?? new Date(Date.parse(at) + summary.definition.budget.maxDurationMs).toISOString();
-      appendCampaignEvent(directory, { kind: 'started', at, deadlineAt, owner: { pid: process.pid, startRef } });
+      appendCampaignEvent(directory, { kind: 'started', at, deadlineAt, owner: { pid: process.pid, startRef } },
+        { expectedRecordsDigest: admissionDigest });
+      admissionDigest = undefined;
       deadlineTimer = setTimeout(() => { deadlineExpired = true; cancel(); }, Math.max(1, Date.parse(deadlineAt) - Date.now()));
       poll = setInterval(() => {
         try {
@@ -104,6 +140,7 @@ export async function runUniverseCampaign(id: string, options: CampaignOptions =
       while (true) {
         if (!ownsLocalStoreLock(lock)) throw new Error('Campaign execution ownership was lost');
         summary = readUniverseCampaign(id, options);
+        assertExpectation(summary, options.expectedIdentity, false);
         if (summary.sourceState !== 'healthy') throw new Error('Campaign evidence is degraded');
         if (summary.state === 'pause-requested' || summary.state === 'stop-requested') {
           return settle(id, summary.state === 'stop-requested' ? 'stopped' : 'paused', 'Acknowledged owner control', options);
@@ -152,10 +189,11 @@ export async function runUniverseCampaign(id: string, options: CampaignOptions =
       }
     } catch (error) {
       controller.abort();
+      if (error instanceof CampaignExpectationError || error instanceof CampaignControlConflictError) throw error;
       if (!ownsLocalStoreLock(lock)) throw error;
       const summary = readUniverseCampaign(id, options);
       if (summary.sourceState !== 'healthy') return summary;
-      return settle(id, 'failed', error instanceof Error ? error.message.slice(0, 1_024) : 'Campaign execution failed', options);
+      return settle(id, 'failed', error instanceof Error ? error.message.slice(0, 1_024) : 'Campaign execution failed', options, admissionDigest);
     } finally {
       if (poll) clearInterval(poll);
       if (deadlineTimer) clearTimeout(deadlineTimer);

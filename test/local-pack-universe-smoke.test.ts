@@ -21,7 +21,7 @@ afterEach(() => {
 });
 
 /** Source-backed package wrappers test the exact smoke program without npm install. */
-function fixture(options: { sdkOverride?: string; ignoreInvalidFlags?: boolean } = {}) {
+function fixture(options: { sdkOverride?: string; ignoreInvalidFlags?: boolean; ignorePortfolioInvalidFlags?: boolean } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pack-universe-')));
   scratch.push(root);
   const installed = join(root, 'install');
@@ -36,6 +36,7 @@ function fixture(options: { sdkOverride?: string; ignoreInvalidFlags?: boolean }
   const cli = pathToFileURL(resolve('src/cli/universe.ts')).href;
   writeFileSync(bin, `#!/usr/bin/env node\nimport { cmdUniverse } from ${JSON.stringify(cli)};\n` +
     (options.ignoreInvalidFlags ? "if (process.argv.includes('--unexpected')) { console.log('{}'); process.exit(0); }\n" : '') +
+    (options.ignorePortfolioInvalidFlags ? "if (process.argv[3] === 'portfolio' && process.argv.includes('--unexpected')) { console.log('{}'); process.exit(0); }\n" : '') +
     "if (process.argv[2] !== 'universe') throw new Error('Unexpected smoke command');\n" +
     'process.exitCode = await cmdUniverse(process.argv.slice(3));\n');
   chmodSync(bin, 0o755);
@@ -59,9 +60,13 @@ describe('installed Universe package smoke', () => {
     expect(lstatSync(join(smokeRoot, 'store', 'universes', 'pack-universe', 'seed')).mode & 0o777).toBe(0o700);
     const campaign = JSON.parse(readFileSync(join(smokeRoot, 'campaign.json'), 'utf8'));
     expect(campaign.budget.maxModelRequests).toBe(0);
+    const portfolio = JSON.parse(readFileSync(join(smokeRoot, 'portfolio.json'), 'utf8'));
+    expect(portfolio.tasks).toEqual([{ campaignId: 'pack-sdk', dependsOn: [] }]);
+    expect(existsSync(join(smokeRoot, 'missing-store'))).toBe(false);
   });
 
-  it.each(['runUniverseCampaign', 'deliverUniverseElite', 'readUniverseGraph', 'traverseUniverseGraph'])('rejects missing public SDK export %s before creating the smoke store', (name) => {
+  it.each(['runUniverseCampaign', 'deliverUniverseElite', 'readUniverseGraph', 'traverseUniverseGraph',
+    'validateUniversePortfolioDefinition', 'readUniversePortfolioPlan', 'buildUniversePortfolioPlan', 'runUniversePortfolio'])('rejects missing public SDK export %s before creating the smoke store', (name) => {
     const { smokeRoot, run } = fixture({ sdkOverride: `export const ${name} = undefined;` });
     const result = run();
     expect(result.status).toBe(1);
@@ -87,6 +92,49 @@ describe('installed Universe package smoke', () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('Installed Universe command failed');
     expect(result.stderr).toContain('--unexpected');
+  });
+
+  it('detects portfolio planning that creates a missing store', () => {
+    const sdk = pathToFileURL(resolve('src/core/universe/index.ts')).href;
+    const { run } = fixture({ sdkOverride:
+      `import { readUniversePortfolioPlan as originalPlan } from ${JSON.stringify(sdk)};\n` +
+      "import { mkdirSync } from 'node:fs';\n" +
+      'export function readUniversePortfolioPlan(definition, options) { const result = originalPlan(definition, options); ' +
+      'mkdirSync(options.root, { recursive: true, mode: 0o700 }); return result; }' });
+    const result = run();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('Status reads must not create a missing store');
+  });
+
+  it('rejects a portfolio CLI that treats invalid flags as success', () => {
+    const { run } = fixture({ ignorePortfolioInvalidFlags: true });
+    const result = run();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('Installed Universe command failed');
+    expect(result.stderr).toContain('portfolio plan');
+    expect(result.stderr).toContain('--unexpected');
+  });
+
+  it('rejects a portfolio entrypoint that claims dispatch of a stopped campaign', () => {
+    const sdk = pathToFileURL(resolve('src/core/universe/index.ts')).href;
+    const { run } = fixture({ sdkOverride:
+      `import { runUniversePortfolio as originalRun } from ${JSON.stringify(sdk)};\n` +
+      'export async function runUniversePortfolio(definition, options) { const result = await originalRun(definition, options); ' +
+      'return { ...result, outcomes: result.outcomes.map(outcome => ({ ...outcome, attempted: true })) }; }' });
+    const result = run();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('Portfolio smoke must not dispatch a stopped campaign');
+  });
+
+  it('rejects a portfolio entrypoint that reports stopped work as complete', () => {
+    const sdk = pathToFileURL(resolve('src/core/universe/index.ts')).href;
+    const { run } = fixture({ sdkOverride:
+      `import { runUniversePortfolio as originalRun } from ${JSON.stringify(sdk)};\n` +
+      'export async function runUniversePortfolio(definition, options) { return { ...await originalRun(definition, options), ' +
+      "status: 'completed' }; }" });
+    const result = run();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('A stopped campaign must remain blocked in a portfolio');
   });
 
   it('rejects a stopped campaign entrypoint that changes execution evidence', () => {
