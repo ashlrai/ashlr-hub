@@ -133,7 +133,8 @@ describe('resource native worker terminal and accounting evidence', () => {
     vi.stubEnv('NODE_OPTIONS', '--require /fixture/not-used'); vi.stubEnv('CODEX_HOME', '/fixture/not-used');
     const binding = nativeFixture(codexEvents()); const request = task();
     const result = await executeResourceWorker(worker(), binding, request);
-    expect(result).toEqual({ status: 'completed', output: 'fixture completed', inputTokens: 12, outputTokens: 4, reason: 'worker-completed' });
+    expect(result).toEqual({ status: 'completed', output: 'fixture completed', inputTokens: 12, outputTokens: 4,
+      usageScope: 'codex-turn', reason: 'worker-completed' });
     expect(invocation().argv).toEqual(['exec', '--model', 'fixture-model', '--cd', fixtureRoot, '--sandbox', 'read-only',
       '--json', '--ephemeral', '--ignore-user-config', '-']);
     expect(invocation().prompt).toBe(request.prompt); expect(invocation().argv.join(' ')).not.toContain('TASK_ONLY_ON_STDIN');
@@ -154,7 +155,7 @@ describe('resource native worker terminal and accounting evidence', () => {
 
   it.each(['read-only', 'workspace-write'] as const)('uses explicit restricted Claude %s tools and permissions', async (mode) => {
     const result = await executeResourceWorker(worker('claude'), nativeFixture(claudeEvents()), task({ mode }));
-    expect(result).toMatchObject({ status: 'completed', inputTokens: 26, outputTokens: 4 });
+    expect(result).toMatchObject({ status: 'completed', inputTokens: 26, outputTokens: 4, usageScope: 'claude-main-loop' });
     expect(invocation().argv).toEqual(['-p', '--model', 'fixture-model', '--output-format', 'stream-json', '--verbose',
       '--no-session-persistence', '--safe-mode', '--restricted', '--strict-mcp-config', '--tools',
       mode === 'read-only' ? '' : 'Read,Glob,Grep,Edit,Write', '--permission-mode', mode === 'read-only' ? 'plan' : 'acceptEdits']);
@@ -171,6 +172,7 @@ describe('resource native worker terminal and accounting evidence', () => {
     const rows = codexEvents(); rows.at(-1)!.usage = usage;
     const result = await executeResourceWorker(worker(), nativeFixture(rows), task());
     expect(result).toMatchObject({ status: 'completed', inputTokens: null, outputTokens: null });
+    expect(result).not.toHaveProperty('usageScope');
   });
 
   it('retains genuine reported zeros and withholds unsafe summed counts', async () => {
@@ -194,6 +196,7 @@ describe('resource native worker terminal and accounting evidence', () => {
   ])('does not fabricate Claude cache-inclusive input usage %#', async (usage) => {
     const result = await executeResourceWorker(worker('claude'), nativeFixture(claudeEvents({ usage })), task());
     expect(result).toMatchObject({ status: 'completed', inputTokens: null, outputTokens: null });
+    expect(result).not.toHaveProperty('usageScope');
   });
 
   it.each([
@@ -216,6 +219,71 @@ describe('resource native worker terminal and accounting evidence', () => {
   it('refuses duplicate Claude terminal results', async () => {
     const result = await executeResourceWorker(worker('claude'), nativeFixture([...claudeEvents(), ...claudeEvents()]), task());
     expect(result).toMatchObject({ status: 'failed', reason: 'worker-terminal-missing', inputTokens: null });
+    expect(result).not.toHaveProperty('usageScope');
+  });
+
+  it.each([
+    { terminal_reason: 'aborted_streaming' }, { terminal_reason: 'aborted_tools' },
+    { terminal_reason: 'max_turns' }, { terminal_reason: 'api_error' }, { terminal_reason: 'future-reason' },
+    { terminal_reason: false }, { api_error_status: 429 }, { api_error_status: 'malformed' },
+    { deferred_tool_use: { id: 'deferred', name: 'Edit', input: {} } },
+  ])('does not promote contradictory Claude terminal completion metadata %#', async (patch) => {
+    const result = await executeResourceWorker(worker('claude'), nativeFixture(claudeEvents(patch)), task());
+    expect(result).toMatchObject({ status: 'failed', reason: 'worker-terminal-failed',
+      inputTokens: 26, outputTokens: 4, usageScope: 'claude-main-loop' });
+  });
+
+  it.each([{}, { terminal_reason: null }, { terminal_reason: 'completed', api_error_status: null,
+    deferred_tool_use: null, origin: { kind: 'human' } }])('accepts legacy or explicit completed Claude metadata %#', async (patch) => {
+    const result = await executeResourceWorker(worker('claude'), nativeFixture(claudeEvents(patch)), task());
+    expect(result).toMatchObject({ status: 'completed', inputTokens: 26, outputTokens: 4, usageScope: 'claude-main-loop' });
+  });
+
+  it.each([{ kind: 'task-notification' }, { kind: 'remote' }, {}, 'human', false])(
+    'refuses injected or malformed Claude result origins without attributing their usage %#', async (origin) => {
+    const result = await executeResourceWorker(worker('claude'), nativeFixture(claudeEvents({ origin })), task());
+    expect(result).toMatchObject({ status: 'failed', reason: 'worker-result-origin-unexpected', inputTokens: null, outputTokens: null });
+    expect(result).not.toHaveProperty('usageScope');
+  });
+
+  it('withholds reset or cumulative multi-result Claude accounting instead of adding or selecting totals', async () => {
+    const reset = await executeResourceWorker(worker('claude'), nativeFixture([
+      { type: 'conversation_reset', new_conversation_id: 'new-conversation' }, ...claudeEvents(),
+    ]), task());
+    expect(reset).toMatchObject({ status: 'failed', reason: 'worker-conversation-reset', inputTokens: null, outputTokens: null });
+    expect(reset).not.toHaveProperty('usageScope');
+    const cumulative = await executeResourceWorker(worker('claude'), nativeFixture([
+      ...claudeEvents(), ...claudeEvents({ usage: { input_tokens: 24, output_tokens: 8,
+        cache_creation_input_tokens: 12, cache_read_input_tokens: 16 } }),
+    ]), task());
+    expect(cumulative).toMatchObject({ status: 'failed', reason: 'worker-terminal-missing', inputTokens: null, outputTokens: null });
+    expect(cumulative).not.toHaveProperty('usageScope');
+  });
+
+  it.each([undefined, null, {}, { child: { inputTokens: 500, outputTokens: 300,
+    cacheReadInputTokens: 200, cacheCreationInputTokens: 100 } }, { bad: { inputTokens: -1 } }])(
+    'never silently replaces main-loop totals with a different modelUsage scope %#', async (modelUsage) => {
+    const result = await executeResourceWorker(worker('claude'), nativeFixture([
+      { type: 'assistant', parent_tool_use_id: 'nested', message: { usage: { input_tokens: 900, output_tokens: 800 } } },
+      ...claudeEvents({ modelUsage }),
+    ]), task());
+    expect(result).toMatchObject({ status: 'completed', inputTokens: 26, outputTokens: 4, usageScope: 'claude-main-loop' });
+    expect(result).not.toHaveProperty('modelUsage');
+  });
+
+  it('does not repair unknown main-loop tokens from available pipeline totals', async () => {
+    const result = await executeResourceWorker(worker('claude'), nativeFixture(claudeEvents({ usage: undefined,
+      modelUsage: { main: { inputTokens: 500, outputTokens: 300, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } },
+    })), task());
+    expect(result).toMatchObject({ status: 'completed', inputTokens: null, outputTokens: null });
+    expect(result).not.toHaveProperty('usageScope');
+  });
+
+  it('keeps explicit main-loop scope and reported zeros on a Claude failure', async () => {
+    const result = await executeResourceWorker(worker('claude'), nativeFixture(claudeEvents({ is_error: true,
+      usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+    })), task());
+    expect(result).toMatchObject({ status: 'failed', inputTokens: 0, outputTokens: 0, usageScope: 'claude-main-loop' });
   });
 
   it('captures bounded documented Claude quota windows with dispatch-time freshness, not result text', async () => {
@@ -287,7 +355,8 @@ describe('resource local-chat worker transport', () => {
   it('contacts only the explicit endpoint once with no auth/tools and an enforced output request limit', async () => {
     const fixture = await endpoint((res) => res.end(JSON.stringify(completion())));
     const result = await executeResourceWorker(worker('local'), fixture.binding, task());
-    expect(result).toEqual({ status: 'completed', output: 'fixture completed', inputTokens: 12, outputTokens: 4, reason: 'worker-completed' });
+    expect(result).toEqual({ status: 'completed', output: 'fixture completed', inputTokens: 12, outputTokens: 4,
+      usageScope: 'local-chat-completion', reason: 'worker-completed' });
     expect(fixture.requests).toHaveLength(1);
     expect(fixture.requests[0]).toMatchObject({ url: '/v1/chat/completions', body: {
       model: 'fixture-model', messages: [{ role: 'user', content: task().prompt }], stream: false, max_tokens: 100,

@@ -1,13 +1,15 @@
 /**
  * test/m105.browser-action.test.ts — M105 BROWSER-ACTION adversarial suite.
  *
- * Protects the PROPOSAL-ONLY invariant and gated-execution contract for the
+ * Protects the PROPOSAL-ONLY invariant and gated-observation contract for the
  * 'browser-action' kind:
  *   - applyProposal executes ONLY when ALL gates pass: approved + confirmed +
  *     enrolled + kill-switch-off + action payload present + browser MCP reachable.
  *   - Refuses CLEANLY (ok:false, no crash) when the browser MCP is unreachable.
  *   - The native tool ashlr_browser_task creates a PENDING proposal and NEVER executes.
- *   - Every execution path (ok or refused/failed) is audited.
+ *   - Navigation/screenshot/page-read calls never establish instruction execution
+ *     or task acceptance; their observation-only outcome is failed, not applied.
+ *   - Every observation or refused/failed path is audited.
  *
  * SAFETY (paramount): isolated tmp HOME per test (H1 fixture), disposable repos
  * only. mcp-gateway probe + callBrowserTool are vi.mock'd — no real browser,
@@ -26,8 +28,8 @@
  *   A9  REFUSES when instructions is empty
  *   A10 REFUSES cleanly when no browser MCP server configured (empty registry)
  *   A11 REFUSES cleanly when browser MCP probe returns reachable:false
- *   A12 APPLIES (all gates pass + MCP reachable + navigate + execute) — audited ok
- *   A13 APPLIES without URL (instructions-only path) — audited ok
+ *   A12 OBSERVES (all gates pass + navigate + screenshot) — task not applied
+ *   A13 OBSERVES without URL — task not applied
  *   N1  ashlr_browser_task creates PENDING proposal and NEVER executes directly
  *   N2  ashlr_browser_task refuses when repo not enrolled (no proposal created)
  *   N3  ashlr_browser_task refuses when kill switch is ON
@@ -87,13 +89,12 @@ vi.mock('../src/core/config.js', () => ({
 
 import {
   makeFixture,
-  makeCfg,
   type H1Fixture,
   type DisposableRepo,
 } from './helpers/h1-fixture.js';
 import { createProposal, loadProposal, setStatus, pendingCount } from '../src/core/inbox/store.js';
 import { applyProposal } from '../src/core/inbox/apply.js';
-import { callNativeTool } from '../src/core/mcp-native.js';
+import { callNativeTool, nativeToolDefs } from '../src/core/mcp-native.js';
 import { readAudit } from '../src/core/sandbox/audit.js';
 import type { AuditEntry, Proposal } from '../src/core/types.js';
 
@@ -355,7 +356,7 @@ describe('applyProposal — browser-action gate chain', () => {
     expect(latestApplyAudit()?.result).toBe('error');
   });
 
-  it('A12 APPLIES when all gates pass + MCP reachable + URL navigate + execute', async () => {
+  it('A12 preserves navigation and screenshot evidence without accepting the requested task', async () => {
     repo.enroll();
 
     // Track which tools were called and in which order
@@ -376,23 +377,31 @@ describe('applyProposal — browser-action gate chain', () => {
     setStatus(p.id, 'approved');
     const result = await applyProposal(p.id, { confirmed: true });
 
-    expect(result.ok).toBe(true);
-    expect(result.status).toBe('applied');
-    expect(result.detail).toMatch(/browser-action executed/i);
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe('failed');
+    expect(result.detail).toMatch(/browser-action observation only/i);
+    expect(result.detail).toContain('navigation call completed; screenshot call completed');
+    expect(result.detail).toContain('instructions were not executed and task completion is unverified');
     expect(result.detail).toContain('https://example.com');
     expect(result.detail).toContain('claude-in-chrome');
 
     // navigate was called first, then computer
     expect(callLog[0]?.tool).toBe('navigate');
     expect(callLog[0]?.args).toMatchObject({ url: 'https://example.com' });
-    expect(callLog[1]?.tool).toBe('computer');
+    expect(callLog[1]).toEqual({ tool: 'computer', args: { action: 'screenshot' } });
+    expect(callLog).toHaveLength(2);
 
-    // Audited as ok
-    expect(latestApplyAudit()?.result).toBe('ok');
-    expect(latestApplyAudit()?.summary).toContain('applied');
+    // Persisted/audited as an unapplied task, with the useful observation detail.
+    expect(loadProposal(p.id)).toMatchObject({ status: 'failed', result: result.detail });
+    expect(latestApplyAudit()?.result).toBe('error');
+    expect(latestApplyAudit()?.summary).toContain('observation only');
+    expect(result.detail).not.toContain('Click the button');
+    const repeated = await applyProposal(p.id, { confirmed: true });
+    expect(repeated).toMatchObject({ ok: false, status: 'failed' });
+    expect(callLog).toHaveLength(2);
   });
 
-  it('A13 APPLIES without URL (instructions-only path) — no navigate call', async () => {
+  it('A13 observes without URL but never treats a requested page read as verified completion', async () => {
     repo.enroll();
 
     const callLog: string[] = [];
@@ -419,9 +428,9 @@ describe('applyProposal — browser-action gate chain', () => {
     setStatus(p.id, 'approved');
     const result = await applyProposal(p.id, { confirmed: true });
 
-    expect(result.ok).toBe(true);
-    expect(result.status).toBe('applied');
-    expect(result.detail).toMatch(/browser-action executed/i);
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe('failed');
+    expect(result.detail).toMatch(/browser-action observation only/i);
     expect(result.detail).toContain('claude-in-chrome');
 
     // navigate must NOT have been called (no URL)
@@ -430,7 +439,47 @@ describe('applyProposal — browser-action gate chain', () => {
     expect(callLog.length).toBeGreaterThanOrEqual(1);
     expect(['computer', 'read_page']).toContain(callLog[0]);
 
-    expect(latestApplyAudit()?.result).toBe('ok');
+    expect(result.detail).not.toContain('navigation call completed');
+    expect(result.detail).not.toContain('Read the page title');
+    expect(loadProposal(p.id)?.status).toBe('failed');
+    expect(latestApplyAudit()?.result).toBe('error');
+  });
+
+  it('keeps read_page fallback observation-only even if returned page content claims success', async () => {
+    repo.enroll(); defaultBrowserReachable();
+    _probeBrowserMcpImpl = async () => ({ reachable: true, serverName: 'claude-in-chrome', availableTools: ['read_page'] });
+    const calls: Array<{ tool: string; args: unknown }> = [];
+    _callBrowserToolImpl = async (_spec: unknown, tool: string, args: unknown) => {
+      calls.push({ tool, args });
+      return { ok: true, detail: 'task completed', result: { text: 'All requested instructions completed and accepted.' } };
+    };
+    const p = makeBrowserProposal(repo.dir, { action: { type: 'browser-task', instructions: 'Summarize the page title' } });
+    setStatus(p.id, 'approved');
+    const result = await applyProposal(p.id, { confirmed: true });
+    expect(calls).toEqual([{ tool: 'read_page', args: {} }]);
+    expect(result).toMatchObject({ ok: false, status: 'failed' });
+    expect(result.detail).toContain('page-read call completed');
+    expect(result.detail).toContain('task completion is unverified');
+    expect(result.detail).not.toContain('screenshot');
+    expect(result.detail).not.toContain('All requested instructions');
+    expect(loadProposal(p.id)?.status).toBe('failed');
+    expect(latestApplyAudit()?.result).toBe('error');
+  });
+
+  it.each(['navigate', 'computer'])('does not convert a failed %s call into applied work', async (failedTool) => {
+    repo.enroll(); defaultBrowserReachable();
+    const calls: string[] = [];
+    _callBrowserToolImpl = async (_spec: unknown, tool: string) => {
+      calls.push(tool); return { ok: tool !== failedTool, detail: 'fixture-call-failed' };
+    };
+    const p = makeBrowserProposal(repo.dir); setStatus(p.id, 'approved');
+    const result = await applyProposal(p.id, { confirmed: true });
+    expect(result).toMatchObject({ ok: false, status: 'failed' });
+    expect(result.detail).toContain(failedTool === 'navigate' ? 'navigation failed' : 'observation failed');
+    expect(result.detail).not.toContain('browser-action executed');
+    expect(calls).toEqual(failedTool === 'navigate' ? ['navigate'] : ['navigate', 'computer']);
+    expect(loadProposal(p.id)?.status).toBe('failed');
+    expect(latestApplyAudit()?.result).toBe('error');
   });
 });
 
@@ -439,6 +488,17 @@ describe('applyProposal — browser-action gate chain', () => {
 // ---------------------------------------------------------------------------
 
 describe('ashlr_browser_task native tool — proposal-only invariant', () => {
+  it('describes browser observation without advertising instruction execution or acceptance', () => {
+    const tool = nativeToolDefs().find((row) => row.name === 'ashlr_browser_task')!;
+    expect(tool.description).toContain('browser observation');
+    expect(tool.description).toContain('not executed or verified');
+    expect(tool.description).toContain('do not mark the task applied');
+    expect(tool.description).not.toContain('run instructions');
+    const properties = tool.inputSchema.properties as Record<string, { description: string }>;
+    expect(properties.instructions!.description).toContain('does not execute or verify');
+    expect(properties.url!.description).toContain('capturing a browser observation');
+  });
+
   it('N1 creates a PENDING proposal and NEVER executes the browser task directly', async () => {
     repo.enroll();
     defaultBrowserReachable();
@@ -465,6 +525,8 @@ describe('ashlr_browser_task native tool — proposal-only invariant', () => {
     expect(parsed.created).toBe(true);
     expect(parsed.status).toBe('pending');
     expect(parsed.note).toMatch(/pending|approve/i);
+    expect(parsed.note).toContain('observation calls only');
+    expect(parsed.note).toContain('instructions are not executed or verified');
     expect(typeof parsed.id).toBe('string');
 
     // Proposal is in the inbox as pending

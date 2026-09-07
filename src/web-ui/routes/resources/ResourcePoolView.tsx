@@ -9,6 +9,7 @@ import { useMutationHold, useQuery } from '../../data/hooks.js';
 import { cancelResourceTask, resourceConsoleSnapshotQuery, setResourceQueuePaused, submitResourceTask } from '../../data/resource-pool-queries.js';
 import { CapacityBoard, resourceNumber, resourceTime, WorkerInspector } from './CapacityBoard.js';
 import { TaskComposer } from './TaskComposer.js';
+import { PerformancePanel } from './PerformancePanel.js';
 import { TaskInspector, taskOwnership, taskState, taskTone, type ResourceTaskRow } from './TaskInspector.js';
 import styles from './ResourcePoolView.module.css';
 
@@ -122,6 +123,7 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
         <div className={styles.mainColumn}>
           <CapacityBoard snapshot={snapshot} selectedWorkerId={selection?.kind === 'worker' ? selection.id : null}
             onSelect={(id) => { setSelection({ kind: 'worker', id }); setTab('inspect'); }} />
+          <PerformancePanel report={snapshot.performance} onSelect={(id) => { setSelection({ kind: 'worker', id }); setTab('inspect'); }} />
           <section className={styles.tasks} aria-labelledby="tasks-title">
             <div className={styles.sectionHeading}><div><h2 id="tasks-title">Task activity</h2><p>Queue ownership and durable receipts, not inferred process liveness.</p></div>
               <label className={styles.filter}>Show<select aria-label="Task activity filter" value={filter} onChange={(event) => setFilter(event.target.value as typeof filter)}>

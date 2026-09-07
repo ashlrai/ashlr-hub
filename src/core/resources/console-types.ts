@@ -1,6 +1,7 @@
 /** Browser-safe resource console contracts; no executables, credentials or task text. */
 import type { ResourceAssignmentPlan, ResourceObservation, ResourceWorker } from './pool-policy.js';
 import type { ResourceTaskReceipt } from './pool-runtime.js';
+import type { ResourcePerformanceReport } from './performance.js';
 
 export interface ResourceConsoleScope {
   schemaVersion: 1;
@@ -44,6 +45,8 @@ export interface ResourceConsoleEvidence {
   usage: { reportedAttempts: number | null; unknownAttempts: number | null;
     reportedInputTokens: number | null; reportedOutputTokens: number | null;
     totalInputTokens: number | null; totalOutputTokens: number | null; complete: boolean };
+  /** Absent on legacy projections; null means the source is unavailable. */
+  performance?: ResourcePerformanceReport | null;
 }
 
 export interface ResourceConsoleTaskInput {

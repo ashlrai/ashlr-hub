@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync,
   readSync, realpathSync, renameSync, unlinkSync, writeSync } from 'node:fs';
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { acquireLocalStoreLock, ownsLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
 import { canonical, digest, inspectPrivateDirectory } from '../universe/artifacts.js';
 import { fsyncDirectory } from '../util/durability.js';
@@ -10,6 +11,7 @@ import { assurePrivateStoragePath } from '../util/private-storage.js';
 import { MAX_RESOURCE_OBSERVATION_WINDOWS, RESOURCE_OBSERVATION_OVERFLOW, planResourceAssignment, validateResourceObservations, validateResourcePool,
   type ResourceAssignmentPlan, type ResourceObservation, type ResourcePool } from './pool-policy.js';
 import { executeResourceWorker, validateResourceBindings, type ResourceBinding, type ResourceWorkerTask } from './worker.js';
+import { resourceUsageScopeForProvider, validResourceExecutionDuration, validResourceExecutionMeasurement, type ResourceExecutionMeasurement } from './performance.js';
 
 const MAX_STATE_BYTES = 4 * 1024 * 1024;
 const MAX_ATTEMPTS = 4_096;
@@ -37,6 +39,8 @@ export interface ResourceTaskReceipt {
   outputTokens: number | null;
   reason: string;
   verifiedAccepted: false;
+  /** Absent on legacy receipts. No wall-clock-derived timing is backfilled. */
+  execution?: ResourceExecutionMeasurement;
 }
 interface PoolState {
   schemaVersion: 1;
@@ -121,9 +125,10 @@ function inspectRoot(root: string, create: boolean): boolean {
   return true;
 }
 
-function checkedReceipt(value: unknown, stateDigest: string, bindings: ResourceBinding[]): value is ResourceTaskReceipt {
+function checkedReceipt(value: unknown, stateDigest: string, bindings: ResourceBinding[], pool: ResourcePool): value is ResourceTaskReceipt {
   if (!object(value) || !exact(value, ['schemaVersion', 'id', 'taskDigest', 'poolDigest', 'workerId', 'capacityKey',
-    'status', 'startedAt', 'finishedAt', 'outputDigest', 'inputTokens', 'outputTokens', 'reason', 'verifiedAccepted']) ||
+    'status', 'startedAt', 'finishedAt', 'outputDigest', 'inputTokens', 'outputTokens', 'reason', 'verifiedAccepted',
+    ...(Object.hasOwn(value, 'execution') ? ['execution'] : [])]) ||
     value.schemaVersion !== 1 || typeof value.id !== 'string' || !ID.test(value.id) ||
     typeof value.taskDigest !== 'string' || !HASH.test(value.taskDigest) || value.poolDigest !== stateDigest ||
     !bindings.some((binding) => binding.workerId === value.workerId && binding.capacityKey === value.capacityKey) ||
@@ -132,8 +137,14 @@ function checkedReceipt(value: unknown, stateDigest: string, bindings: ResourceB
     !(value.outputDigest === null || typeof value.outputDigest === 'string' && HASH.test(value.outputDigest)) ||
     !((value.inputTokens === null && value.outputTokens === null) || count(value.inputTokens) && count(value.outputTokens) &&
       count(value.inputTokens + value.outputTokens)) || typeof value.reason !== 'string' || !/^[a-z0-9-]{1,120}$/.test(value.reason) ||
-    value.verifiedAccepted !== false) return false;
+    value.verifiedAccepted !== false || Object.hasOwn(value, 'execution') &&
+      (!validResourceExecutionMeasurement(value.execution) || value.status === 'reserved' ||
+        value.execution.usageScope !== null && value.inputTokens === null)) return false;
   if (value.status === 'reserved') return value.finishedAt === null && value.outputDigest === null && value.inputTokens === null;
+  const worker = pool.workers.find((candidate) => candidate.id === value.workerId);
+  if (!worker) return false;
+  if (value.execution !== undefined && (!validResourceExecutionMeasurement(value.execution) ||
+    value.execution.usageScope !== null && value.execution.usageScope !== resourceUsageScopeForProvider(worker.provider))) return false;
   return value.finishedAt !== null && (value.status !== 'completed' || value.outputDigest !== null);
 }
 
@@ -143,7 +154,7 @@ function loadState(root: string, pool: ResourcePool, bindings: ResourceBinding[]
   const value = readResourceJson(file, MAX_STATE_BYTES);
   if (!object(value) || !exact(value, ['schemaVersion', 'poolDigest', 'observations', 'attempts']) ||
     value.schemaVersion !== 1 || value.poolDigest !== poolDigest || !Array.isArray(value.attempts) ||
-    value.attempts.length > MAX_ATTEMPTS || !value.attempts.every((row) => checkedReceipt(row, poolDigest, bindings)) ||
+    value.attempts.length > MAX_ATTEMPTS || !value.attempts.every((row) => checkedReceipt(row, poolDigest, bindings, pool)) ||
     new Set(value.attempts.map((row) => row.id)).size !== value.attempts.length) throw new Error('Resource ledger invalid or configuration changed');
   return { schemaVersion: 1, poolDigest, observations: validateResourceObservations(value.observations, pool),
     attempts: value.attempts as ResourceTaskReceipt[] };
@@ -331,15 +342,20 @@ export async function runResourceTask(options: { root: string; pool: ResourcePoo
   const reserved = admission.receipt;
   const worker = pool.workers.find((row) => row.id === reserved.workerId)!;
   const binding = bindings.find((row) => row.workerId === reserved.workerId)!;
+  // This interval excludes both durable-store transactions and any supervisor queue.
+  // Adapter preparation, execution and cleanup are included; it is not provider latency.
+  const executionStarted = performance.now();
   const result = await executeResourceWorker(worker, binding, { prompt: task.prompt, cwd: task.cwd,
     timeoutMs: task.timeoutMs, maxOutputTokens: task.maxOutputTokens, mode: task.mode }, options.signal);
+  const elapsed = performance.now() - executionStarted;
   const finishedAt = new Date(Math.max(Date.now(), Date.parse(reserved.startedAt))).toISOString();
   const knownUsage = count(result.inputTokens) && count(result.outputTokens) && count(result.inputTokens + result.outputTokens);
   const receipt: ResourceTaskReceipt = { ...reserved, status: result.status, finishedAt,
     outputDigest: result.output ? digest(result.output) : null, inputTokens: knownUsage ? result.inputTokens : null,
     outputTokens: knownUsage ? result.outputTokens : null,
-    reason: result.reason };
-  if (!checkedReceipt(receipt, poolDigest, bindings)) throw new Error('Resource worker returned invalid settlement evidence');
+    reason: result.reason, execution: { schemaVersion: 1, scope: 'worker-execution',
+      durationMs: validResourceExecutionDuration(elapsed) ? elapsed : null, usageScope: result.usageScope ?? null } };
+  if (!checkedReceipt(receipt, poolDigest, bindings, pool)) throw new Error('Resource worker returned invalid settlement evidence');
   transaction(options.root, pool, bindings, poolDigest, (state) => {
     const index = state.attempts.findIndex((row) => row.id === reserved.id);
     if (index < 0 || canonical(state.attempts[index]) !== canonical(reserved)) throw new Error('Resource assignment changed before settlement');

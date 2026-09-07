@@ -487,10 +487,12 @@ const TOOLS: NativeToolImpl[] = [
   {
     name: 'ashlr_browser_task',
     description:
-      'Propose a browser automation task (navigate to a URL and/or run instructions ' +
-      'via the Claude-in-Chrome MCP server). Creates a PENDING browser-action proposal ' +
-      '— NEVER executes directly. The action runs ONLY after the user explicitly ' +
-      'approves via `ashlr inbox`. Requires a Claude-in-Chrome (or compatible) MCP ' +
+      'Propose a browser observation (optional navigation followed by a screenshot ' +
+      'or page read via the Claude-in-Chrome MCP server). Creates a PENDING browser-action proposal ' +
+      '— NEVER executes directly. Observation calls run ONLY after the user explicitly ' +
+      'approves via `ashlr inbox`. Natural-language instructions are recorded as context, ' +
+      'not executed or verified; observation-only outcomes do not mark the task applied. ' +
+      'Requires a Claude-in-Chrome (or compatible) MCP ' +
       'server to be configured; browser tasks are refused cleanly in headless / ' +
       'daemon contexts where no browser MCP is reachable. ' +
       'Requires the repo to be enrolled and the kill switch to be off.',
@@ -503,11 +505,11 @@ const TOOLS: NativeToolImpl[] = [
         },
         url: {
           type: 'string',
-          description: 'Optional URL to navigate to before running instructions.',
+          description: 'Optional URL to navigate to before capturing a browser observation.',
         },
         instructions: {
           type: 'string',
-          description: 'Natural-language instructions describing what to do in the browser (no secrets).',
+          description: 'Requested task context only; the current observation adapter does not execute or verify these instructions. No secrets.',
         },
         title: {
           type: 'string',
@@ -558,7 +560,7 @@ const TOOLS: NativeToolImpl[] = [
         status: 'pending',
         note:
           'Pending human approval — approve via `ashlr inbox` (CLI). ' +
-          'The browser task will NOT execute until you approve it. ' +
+          'Approval permits observation calls only; instructions are not executed or verified, and the task is not marked applied. ' +
           'A Claude-in-Chrome MCP server must be configured and reachable at apply time.',
       };
     },
