@@ -1,13 +1,18 @@
 import { randomBytes } from 'node:crypto';
+import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { acquireLocalStoreLock, ownsLocalStoreLock, releaseLocalStoreLock, type LocalStoreLock } from '../fleet/local-store-lock.js';
+import { privateDirectory } from '../universe/artifacts.js';
+import { fsyncDirectory } from '../util/durability.js';
 import { validateResourcePool, validateResourceObservations } from '../resources/pool-policy.js';
-import { readResourceJson } from '../resources/pool-runtime.js';
+import { readResourceJson, resourcePoolStatus } from '../resources/pool-runtime.js';
 import { validateResourceBindings } from '../resources/worker.js';
 import { createResourcePoolSupervisor, ResourceSupervisorError } from '../resources/pool-supervisor.js';
+import { createResourceQuotaRefresher, validateResourceQuotaRefreshConfig, type ResourceQuotaRefresher } from '../resources/quota-refresh.js';
 import type { ResourceConsoleScope, ResourceConsoleTaskInput } from '../resources/console-types.js';
-import { createResourceConsoleReader } from './resource-console-reads.js';
+import { createResourceConsoleReader, withholdResourceConsoleWorkers } from './resource-console-reads.js';
 import { createReadSessionBoundary, headerValue, requestUrl, safeEqual, sendJson } from './read-session.js';
 import { validateUniverseConsoleRoot } from './universe-console-reads.js';
 import { serveStatic } from './static.js';
@@ -17,6 +22,8 @@ export interface ResourceConsoleServerOptions {
   poolFile: string;
   bindingsFile: string;
   observationsFile: string;
+  /** Explicit opt-in to no-generation native metadata collection. */
+  quotaConfigFile?: string;
   port?: number;
   execute?: boolean;
   workspace?: string;
@@ -94,10 +101,12 @@ function sendSnapshot(res: ServerResponse, value: unknown): void {
 
 /** One fixed pool; independent read and control capabilities. No default dashboard imports. */
 export async function startResourceConsoleServer(options: ResourceConsoleServerOptions): Promise<ResourceConsoleServerHandle> {
+  const signal = options.signal;
   const root = validateUniverseConsoleRoot(options.root);
   const poolFile = validateUniverseConsoleRoot(options.poolFile);
   const bindingsFile = validateUniverseConsoleRoot(options.bindingsFile);
   const observationsFile = validateUniverseConsoleRoot(options.observationsFile);
+  const quotaConfigFile = options.quotaConfigFile === undefined ? null : validateUniverseConsoleRoot(options.quotaConfigFile);
   const requestedPort = options.port ?? 0;
   const maxParallel = options.maxParallel ?? 4;
   if (!Number.isSafeInteger(requestedPort) || requestedPort < 0 || requestedPort > 65_535 ||
@@ -107,21 +116,64 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     throw new Error('Invalid resource console options');
   }
   const workspace = options.execute ? validateUniverseConsoleRoot(options.workspace) : null;
-  if (workspace && [root, poolFile, bindingsFile, observationsFile].some((target) => {
+  if (workspace && [root, poolFile, bindingsFile, observationsFile, ...(quotaConfigFile ? [quotaConfigFile] : [])].some((target) => {
     const nested = relative(workspace, target);
     return nested === '' || nested !== '..' && !nested.startsWith(`..${sep}`) && !isAbsolute(nested);
   })) throw new Error('Resource control files must remain outside the writable workspace');
-  if (options.signal?.aborted) throw new Error('Resource console startup cancelled');
+  if (signal?.aborted) throw new Error('Resource console startup cancelled');
   const pool = validateResourcePool(readResourceJson(poolFile));
   const bindings = validateResourceBindings(readResourceJson(bindingsFile), pool);
-  const reader = createResourceConsoleReader({ root, pool, bindings, observationsFile });
+  const quotaConfig = quotaConfigFile ? validateResourceQuotaRefreshConfig(readResourceJson(quotaConfigFile), pool, bindings) : null;
+  if (quotaConfig) validateResourceObservations(readResourceJson(observationsFile), pool);
+  const reader = createResourceConsoleReader({ root, pool, bindings, observationsFile,
+    ...(quotaConfig ? { managedWorkerIds: quotaConfig.workers.map((row) => row.workerId) } : {}) });
   const sessions = createReadSessionBoundary({ cookieName: `ashlr_resources_${randomBytes(12).toString('hex')}` });
   const controlToken = options.execute ? randomBytes(32).toString('hex') : null;
   const scope: ResourceConsoleScope = { schemaVersion: 1, mode: 'resource-pool', root, poolId: pool.id,
-    readOnly: !options.execute, workspace, maxParallel: options.execute ? maxParallel : 0, maxQueued: options.execute ? 64 : 0 };
+    readOnly: !options.execute, workspace, maxParallel: options.execute ? maxParallel : 0, maxQueued: options.execute ? 64 : 0,
+    ...(quotaConfig ? { quotaRefreshEnabled: true } : {}) };
   const assets = join(dirname(fileURLToPath(import.meta.url)), 'public');
   let supervisor: Awaited<ReturnType<typeof createResourcePoolSupervisor>> | null = null;
+  let quotaRefresher: ResourceQuotaRefresher | null = null;
+  let quotaLock: LocalStoreLock | null = null;
+  const quotaPendingPath = join(root, '.resource-quota-refresh-pending.json');
+  let quotaPending: { dev: bigint; ino: bigint; record: string } | null = null;
   let origin = ''; let port = 0; let closing: Promise<void> | null = null; let ready = false;
+
+  function ownQuota(): void {
+    if (!quotaLock || !ownsLocalStoreLock(quotaLock)) throw new Error('Quota collection ownership lost');
+    if (quotaPending) {
+      const stat = lstatSync(quotaPendingPath, { bigint: true });
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n ||
+        stat.dev !== quotaPending.dev || stat.ino !== quotaPending.ino ||
+        (typeof process.getuid === 'function' && stat.uid !== BigInt(process.getuid())) ||
+        (process.platform !== 'win32' && (stat.mode & 0o777n) !== 0o600n) ||
+        JSON.stringify(readResourceJson(quotaPendingPath, 512)) !== quotaPending.record) throw new Error('Quota collection marker changed');
+    }
+  }
+  function requireNoPendingQuota(): void {
+    try { lstatSync(quotaPendingPath); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+    throw new Error('Resource quota collector unavailable: prior shutdown requires operator reconciliation');
+  }
+  function markQuotaPending(): void {
+    ownQuota();
+    const fd = openSync(quotaPendingPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    try {
+      // Publish before contact: a crash or unconfirmed cleanup must survive
+      // stale-PID lease reclamation without silently starting another probe.
+      const record = JSON.stringify({ schemaVersion: 1, scope: 'codex-native-metadata',
+        state: 'pending', startedAt: new Date().toISOString() });
+      writeFileSync(fd, record + '\n');
+      fsyncSync(fd); fsyncDirectory(root); ownQuota();
+      const stat = fstatSync(fd, { bigint: true }); quotaPending = { dev: stat.dev, ino: stat.ino, record };
+    } finally { closeSync(fd); }
+  }
+  function clearQuotaPending(): void {
+    if (!quotaPending) return;
+    ownQuota();
+    unlinkSync(quotaPendingPath); fsyncDirectory(root); quotaPending = null;
+  }
 
   async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     res.setHeader('Referrer-Policy', 'no-referrer');
@@ -173,8 +225,24 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       if (method !== 'GET') throw new RequestError(405, 'Method not allowed');
       if (url.pathname === '/api/resources/console') { sendJson(res, 200, scope); return; }
       if (url.pathname === '/api/resources') {
-        const evidence = await reader.snapshot();
-        sendSnapshot(res, { ...evidence, supervisor: supervisor?.snapshot() ?? null }); return;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const managed = quotaRefresher ? { observations: quotaRefresher.readObservations([]),
+            unavailableWorkerIds: quotaRefresher.unavailableWorkerIds() } : undefined;
+          let evidence = await reader.snapshot(managed);
+          if (closing) throw new RequestError(503, 'Console is closing');
+          if (quotaRefresher) {
+            const current = { observations: quotaRefresher.readObservations([]),
+              unavailableWorkerIds: quotaRefresher.unavailableWorkerIds() };
+            // Both successful refresh and failure can race the worker read.
+            // Retry once, then withhold rather than attach newer collector
+            // metadata to an earlier eligibility decision.
+            if (JSON.stringify(managed) !== JSON.stringify(current)) continue;
+            evidence = withholdResourceConsoleWorkers(evidence, current.unavailableWorkerIds);
+          }
+          sendSnapshot(res, { ...evidence, supervisor: supervisor?.snapshot() ?? null,
+            ...(quotaRefresher ? { quotaRefresh: quotaRefresher.snapshot() } : {}) }); return;
+        }
+        throw new RequestError(503, 'Resource quota evidence changed during this read');
       }
       const output = /^\/api\/resources\/tasks\/([^/]+)\/output$/.exec(url.pathname);
       if (output && ID.test(output[1]!)) {
@@ -212,19 +280,27 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
 
   const close = (): Promise<void> => {
     if (closing) return closing;
-    ready = false; sessions.clear(); options.signal?.removeEventListener('abort', aborted);
+    ready = false; sessions.clear(); signal?.removeEventListener('abort', aborted);
     closing = (async () => {
       // A reader may be terminated, but task subprocesses must settle through
       // their owning supervisor before the server can declare shutdown complete.
       const results = await Promise.allSettled([
         Promise.resolve().then(() => supervisor?.close()),
+        Promise.resolve().then(() => quotaRefresher?.close()),
         reader.close(),
         new Promise<void>((done) => {
           if (!server.listening) { done(); return; }
           server.close(() => done()); server.closeIdleConnections(); server.closeAllConnections();
         }),
       ]);
-      if (results.some((result) => result.status === 'rejected')) throw new Error('Resource console shutdown uncertain');
+      // Remove only our own marker and only after confirmed collector cleanup.
+      // On uncertainty it stays durable even after this process exits.
+      let markerCleared = true;
+      if (results[1]?.status === 'fulfilled') {
+        try { clearQuotaPending(); } catch { markerCleared = false; }
+      }
+      const released = quotaLock ? releaseLocalStoreLock(quotaLock) : true; quotaLock = null;
+      if (!released || !markerCleared || results.some((result) => result.status === 'rejected')) throw new Error('Resource console shutdown uncertain');
     })();
     return closing;
   };
@@ -238,11 +314,30 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     const address = server.address();
     if (!address || typeof address === 'string') throw new Error('Resource console address unavailable');
     port = address.port; origin = `http://127.0.0.1:${port}`;
-    if (options.signal?.aborted) throw new Error('Resource console startup cancelled');
+    if (signal?.aborted) throw new Error('Resource console startup cancelled');
+    if (quotaConfig) {
+      // Only explicit quota collection creates this private control root. No
+      // provider is contacted before configuration, ownership and bind succeed.
+      privateDirectory(root);
+      quotaLock = acquireLocalStoreLock(join(root, '.resource-quota-refresh.lock'), 500, { anchorPath: root, exactPrivateStorage: true });
+      if (!quotaLock) throw new Error('Resource quota collector already owned or unavailable');
+      requireNoPendingQuota();
+    }
     if (workspace) supervisor = await createResourcePoolSupervisor({ root, pool, bindings, workspace, maxParallel,
-      readObservations: () => validateResourceObservations(readResourceJson(observationsFile), pool), signal: options.signal });
-    if (options.signal?.aborted) throw new Error('Resource console startup cancelled');
-    options.signal?.addEventListener('abort', aborted, { once: true }); ready = true;
+      readObservations: () => { const base = validateResourceObservations(readResourceJson(observationsFile), pool);
+        return quotaRefresher ? quotaRefresher.readObservations(base) : base; },
+      ...(quotaConfig ? { readUnavailableWorkerIds: () => quotaRefresher ? quotaRefresher.unavailableWorkerIds()
+        : quotaConfig.workers.map((row) => row.workerId) } : {}), signal });
+    if (signal?.aborted) throw new Error('Resource console startup cancelled');
+    if (quotaConfig) {
+      // Execution ownership and all startup preflight must succeed before the
+      // collector can schedule native metadata. Until then its workers are gated.
+      resourcePoolStatus(root, pool, bindings, []);
+      markQuotaPending();
+      quotaRefresher = createResourceQuotaRefresher({ pool, bindings, config: quotaConfig, cwd: root, signal, assertOwnership: ownQuota });
+    }
+    if (signal?.aborted) throw new Error('Resource console startup cancelled');
+    signal?.addEventListener('abort', aborted, { once: true }); ready = true;
     return { url: origin, consoleUrl: `${origin}/resources/`, port, readToken: sessions.readToken, controlToken,
       scope: { ...scope }, close };
   } catch (error) { await close(); throw error; }

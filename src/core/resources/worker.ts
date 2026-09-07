@@ -178,7 +178,7 @@ function parseClaude(output: string): ResourceWorkerResult {
     reason: success ? 'worker-completed' : 'worker-terminal-failed' };
 }
 
-function workerEnvironment(): NodeJS.ProcessEnv {
+export function workerEnvironment(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   // HOME is copied unchanged. Account-specific auth belongs to the explicit
   // wrapper; no API keys, proxy, loader, or account-switching variables pass.

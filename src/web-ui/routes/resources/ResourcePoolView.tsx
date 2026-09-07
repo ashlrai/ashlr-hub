@@ -10,6 +10,7 @@ import { cancelResourceTask, resourceConsoleSnapshotQuery, setResourceQueuePause
 import { CapacityBoard, resourceNumber, resourceTime, WorkerInspector } from './CapacityBoard.js';
 import { TaskComposer } from './TaskComposer.js';
 import { PerformancePanel } from './PerformancePanel.js';
+import { QuotaRefreshPanel } from './QuotaRefreshPanel.js';
 import { TaskInspector, taskOwnership, taskState, taskTone, type ResourceTaskRow } from './TaskInspector.js';
 import styles from './ResourcePoolView.module.css';
 
@@ -121,6 +122,8 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
       </section>
       <div className={styles.workspaceGrid}>
         <div className={styles.mainColumn}>
+          <QuotaRefreshPanel refresh={snapshot.quotaRefresh} selectedWorkerId={selection?.kind === 'worker' ? selection.id : null}
+            onSelect={(id) => { setSelection({ kind: 'worker', id }); setTab('inspect'); }} />
           <CapacityBoard snapshot={snapshot} selectedWorkerId={selection?.kind === 'worker' ? selection.id : null}
             onSelect={(id) => { setSelection({ kind: 'worker', id }); setTab('inspect'); }} />
           <PerformancePanel report={snapshot.performance} onSelect={(id) => { setSelection({ kind: 'worker', id }); setTab('inspect'); }} />

@@ -2,9 +2,16 @@ import { isAbsolute, parse as parsePath, resolve } from 'node:path';
 
 const USAGE = `usage: ashlr resources pool console --root ABS --pool ABS --bindings ABS --observations ABS [--port N] [--json]
        add --execute --workspace ABS [--max-parallel N] to enable foreground queued tasks
+       add --quota-config ABS to refresh explicitly pinned Codex account metadata
 
 The dedicated resource desk runs on 127.0.0.1, with an explicit pool and store.
 Read-only by default; startup never discovers accounts, logs in, or installs a service.
+--quota-config opts into native metadata reads without generation, including in
+read-only mode. It creates a private control root/collector lock, checks reported
+account hints, and refreshes selected quotas while this process runs. Native
+clients may maintain their own auth/cache state. Unavailable managed workers are
+blocked even if unknown quota is otherwise allowed. No account independence is
+inferred. Omit this option to keep the original provider-free observation mode.
 Execution is an explicit capability for the fixed workspace. It can consume native
 provider allowances and edit that workspace when a queued task requests workspace-write.
 Queued intents and pause state are durable; previously dispatching work is never
@@ -16,7 +23,7 @@ Exit codes: 0 clean shutdown/help, 1 startup/shutdown failure, 2 invalid argumen
 `;
 class UsageError extends Error {}
 type Options = { help: true } | { help: false; root: string; poolFile: string; bindingsFile: string;
-  observationsFile: string; port: number; execute: boolean; workspace?: string; maxParallel?: number; json: boolean };
+  observationsFile: string; quotaConfigFile?: string; port: number; execute: boolean; workspace?: string; maxParallel?: number; json: boolean };
 
 function path(value: string): string {
   if (!isAbsolute(value) || resolve(value) === parsePath(value).root || Buffer.byteLength(value) > 4_096) {
@@ -25,7 +32,7 @@ function path(value: string): string {
   return resolve(value);
 }
 function parse(args: string[]): Options {
-  if (args.length > 24 || args.some((arg) => typeof arg !== 'string' || arg.length > 4_096 ||
+  if (args.length > 26 || args.some((arg) => typeof arg !== 'string' || arg.length > 4_096 ||
       [...arg].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) >= 127 && char.charCodeAt(0) <= 159)) ||
     Buffer.byteLength(args.join('\0')) > 32 * 1024) throw new UsageError('Arguments exceed the bounded text contract');
   if (args.length === 1 && ['--help', '-h'].includes(args[0]!)) return { help: true };
@@ -34,7 +41,7 @@ function parse(args: string[]): Options {
     const flag = args[index]!;
     if (flag === '--execute') { if (execute) throw new UsageError('Duplicate console option'); execute = true; continue; }
     if (flag === '--json') { if (json) throw new UsageError('Duplicate console option'); json = true; continue; }
-    if (!['--root', '--pool', '--bindings', '--observations', '--port', '--workspace', '--max-parallel'].includes(flag) || values.has(flag)) {
+    if (!['--root', '--pool', '--bindings', '--observations', '--port', '--workspace', '--max-parallel', '--quota-config'].includes(flag) || values.has(flag)) {
       throw new UsageError('Unknown or duplicate console option');
     }
     const value = args[++index];
@@ -51,6 +58,7 @@ function parse(args: string[]): Options {
     !/^[1-9]\d?$/.test(parallelText) || Number(parallelText) > 16) throw new UsageError('Invalid port or parallel limit');
   return { help: false, root: path(values.get('--root')!), poolFile: path(values.get('--pool')!),
     bindingsFile: path(values.get('--bindings')!), observationsFile: path(values.get('--observations')!),
+    ...(values.has('--quota-config') ? { quotaConfigFile: path(values.get('--quota-config')!) } : {}),
     port: Number(portText), execute, ...(execute ? { workspace: path(values.get('--workspace')!), maxParallel: Number(parallelText) } : {}), json };
 }
 
@@ -80,6 +88,7 @@ export async function cmdResourceConsole(args: string[]): Promise<number> {
         console.log(json ? JSON.stringify(startup) : [
           `Resource desk: ${server.consoleUrl}`, `Pool: ${server.scope.poolId}`, `Store: ${server.scope.root}`,
           `Private read token: ${server.readToken}`,
+          ...(server.scope.quotaRefreshEnabled ? ['Native Codex metadata refresh is enabled; this is separate from task execution.'] : []),
           ...(server.controlToken ? [`Private control token: ${server.controlToken}`, `Execution workspace: ${server.scope.workspace}`,
             'Durable queued tasks may execute while this foreground console is running.'] : ['Read-only. Task execution is disabled.']),
           'Paste tokens into the console; they are never included in URLs.',

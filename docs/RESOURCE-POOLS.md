@@ -108,7 +108,7 @@ billing; confirm its account, model eligibility, and overage settings before use
 
 ### Commission native accounts and local capacity
 
-Commissioning is an operator step outside the runner. Adding a worker to JSON
+Authentication is an operator step outside the runner. Adding a worker to JSON
 does not authenticate it or establish its quota. Keep native account directories
 and launcher files outside task-writable workspaces.
 
@@ -144,6 +144,41 @@ the queue. This dispatch consumes the selected provider's allowance; a healthy
 local fixture is not evidence that native credentials or plan entitlements work.
 
 ## Supply quota observations
+
+### Probe an enrolled Codex launcher without generating work
+
+After authenticating and enrolling the exact launcher, capture a private report:
+
+```sh
+ashlr resources pool probe --pool /absolute/private/pool.json \
+  --bindings /absolute/private/bindings.json --worker codex-a --bucket codex \
+  --output /absolute/private/new-codex-a-probe.json --json
+```
+
+This explicitly contacts the launcher's native App Server for account metadata and
+quota windows. It creates no thread, turn, or model request and does not select a
+different account. Native authentication/cache maintenance can still occur. The
+fixed helper runs in private scratch, not the task project; native global
+configuration remains native-managed. Trusted wrapper prefixes must forward
+`app-server --stdio` and appended configuration arguments.
+
+The private report contains `poolDigest`, an opaque `accountHint`, `planType`, and
+a normalized `observation`, never raw account email, credential material or native
+diagnostics. Account metadata is checked before and after quota capture. The
+hint hashes reported account type/email/plan; the native endpoint supplies no
+stable workspace/account identifier. It is **not proof of independent capacity**.
+Use `--expected-account-hint` to pin a previously checked hint. Null/API-key
+identity, drift, malformed protocol or an unsupported launcher produce no usable
+observation. A successfully observed report can still contain unknown or exhausted
+quota; exit zero means metadata was observed, not that work is admissible.
+
+The report path must be new and is reserved with mode `0600` before native
+contact. Failed preflight can leave an empty report file. The command writes no
+pool ledger or enrollment and never resets quota. Its timeout is 10 seconds by
+default, configurable with `--timeout-ms` from 1 to 30,000. Cancellation awaits
+owned process cleanup; an uncertain result requires reconciliation before retry.
+
+### Import explicitly captured evidence
 
 The observations file is an array. A complete observation contains `workerId`,
 canonical ISO `observedAt` and `expiresAt`, `health` (`ready` or `unavailable`),
@@ -279,7 +314,8 @@ ashlr resources pool console --root /absolute/private/ledger \
 
 Open the printed `/resources/` URL and enter the printed read token. The server
 binds only to `127.0.0.1`, uses an instance-specific read session, and never places
-tokens in URLs. Read-only mode does not create a missing ledger or launch workers.
+tokens in URLs. Without `--quota-config`, read-only mode does not create a missing
+ledger or launch workers.
 The pool and bindings are fixed at startup; only the selected observations file
 is reread. Reloading the dashboard does not refresh the age of quota evidence.
 
@@ -289,6 +325,67 @@ worker under current policy. That routing preview is not a promised assignment.
 Activity distinguishes console-owned dispatches from external reservations whose
 process liveness is unknown. Reported token subtotals and missing coverage remain
 separate; completed work is not automatically verified engineering value.
+
+### Keep Codex quota evidence fresh in the foreground
+
+Create a private `0600` quota configuration using the exact `poolDigest` and
+`accountHint` from successful probe reports for this normalized pool and bindings:
+
+```json
+{
+  "schemaVersion": 1,
+  "poolDigest": "REPLACE_WITH_64_HEX_POOL_DIGEST",
+  "workers": [
+    {
+      "workerId": "codex-a",
+      "accountHint": "REPLACE_WITH_64_HEX_REPORTED_ACCOUNT_HINT",
+      "bucketIds": ["codex"]
+    }
+  ]
+}
+```
+
+Every alias sharing a managed worker's capacity key must be included with the
+same hint and bucket IDs. The same hint across different capacity keys is refused;
+different hints still do not prove independent subscription capacity. Changing
+the pool/bindings requires a newly verified configuration. Missing or unsupported
+bucket information remains unknown; do not choose buckets merely to omit a known
+limit.
+
+Append `--quota-config /absolute/private/quota-config.json` to the console command
+to opt in. This works in read-only or execution mode. It creates the selected
+private root if absent and owns an exclusive collector lock. No native probe
+runs without this flag, and browser requests never trigger probes. Keep this
+fourth control file outside the writable workspace as well.
+
+One collector sequentially probes configured Codex workers, normally every 30
+seconds per worker, with bounded failure backoff up to five minutes and a
+10-second probe deadline. Actual captures expire after 60 seconds; a large or
+slow pool can expire honestly rather than extending its timestamps. Failed,
+unknown, incomplete, exhausted, expired or identity-mismatched managed evidence
+blocks the entire shared-capacity group, **even with `allowUnknownQuota:true`**.
+This transient gate applies after the normal ledger merge; it never fabricates
+fresh health observations or changes durable task/receipt identity. Newer external
+zero readings cannot clear the collector's native reserve/exhaustion gate. Other
+evidence still participates in the existing conservative timestamp/window merge.
+
+The **Native quota reads** panel shows collector state, fixed failure reasons,
+last successful capture and next attempt. Observed metadata is separate from
+quota completeness and dispatch eligibility. Raw account hints are excluded from
+the browser. Closing the console aborts and awaits its collector. Uncertain native
+cleanup or a crash retains `.resource-quota-refresh-pending.json`, which blocks a
+replacement collector even after its old process lease expires. Reconcile the
+owned native processes before deliberately removing that marker; do not delete
+control records simply to retry. The collector is not a
+resident service and cannot recover an ambiguously running native process.
+
+Claude continues to use supplied/native execution events: its documented status
+line quotas are populated after a session API response, not a standalone complete
+quota polling API. Local workers continue to require fresh explicit health.
+No synthetic Claude prompt, undocumented quota scraping, API-key fallback,
+account switching, or Grok subscription entitlement is introduced.
+
+### Enable and control task execution
 
 To enable task submission, explicitly select a workspace and execution capability:
 
@@ -348,7 +445,7 @@ a new task ID. Only one supervisor can own a selected ledger at a time.
 
 `--json` emits one private startup record containing scope, URL and tokens; do not
 paste it into logs or source control. `--port 0` chooses an available port. This
-console has no resident-service installation, autonomous quota collector, account
+console has no resident-service installation, machine-global quota collector, account
 login, global fleet discovery, or connection to Universe's evaluator. It does not
 expose the general Hub API or event stream. The process must remain running for
 its queue to advance.
@@ -442,8 +539,8 @@ schema migration. The ledger remains readable and does not dispatch through the
 overflow.
 
 The bounded store retains up to 4,096 task identities and 4 MiB. It does not prune
-old identities into replayable work. These limits, explicit enrollment, external
-quota capture, and manual ambiguous-run recovery mean this is not yet an
+old identities into replayable work. These limits, explicit enrollment, incomplete
+vendor quota coverage, and manual ambiguous-run recovery mean this is not yet an
 unattended production fleet. Universe's versioned generation receipts, measured
 feedback, evaluator, and archive selection are unchanged. `ashlr runtime run`
 still forwards Universe commands only; it does not forward this new pool runner.

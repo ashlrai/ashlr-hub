@@ -86,4 +86,17 @@ describe('explicit foreground resource console CLI', () => {
     expect(await cmdResourcePool(['console', '--help'])).toBe(0);
     expect(backend.start).not.toHaveBeenCalled(); expect(out.mock.calls[0]![0]).toContain('foreground queued tasks');
   });
+  it('passes explicit quota opt-in independently of task execution', async () => {
+    const handle = server(); backend.start.mockResolvedValue(handle);
+    const before = process.listeners('SIGTERM');
+    const running = cmdResourceConsole([...args, '--quota-config', '/private/fixture/quota.json', '--json']);
+    try {
+      await vi.waitFor(() => expect(out).toHaveBeenCalledOnce());
+      expect(backend.start.mock.calls[0]![0]).toMatchObject({ quotaConfigFile: '/private/fixture/quota.json', execute: false });
+    } finally { signal('SIGTERM', before); await running; }
+    expect(await running).toBe(0);
+  });
+  it.each(['relative', '/', '/private/\u0085'])('refuses invalid quota configuration path %j', async (path) => {
+    expect(await cmdResourceConsole([...args, '--quota-config', path])).toBe(2); expect(backend.start).not.toHaveBeenCalled();
+  });
 });

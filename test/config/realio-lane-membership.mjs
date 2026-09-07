@@ -53,6 +53,9 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-performance-runtime.test.ts', // monotonic measurements in the private task ledger
   'test/resource-review-benchmark.test.ts', // fixed calibration through real ledger and loopback transport
   'test/resource-pool-cli.test.ts', // explicit private manifests and CLI output files
+  'test/resource-codex-account-probe.test.ts', // native metadata protocol and owned subprocess cleanup
+  'test/resource-probe-cli.test.ts', // private commissioning reports and signal ownership
+  'test/resource-quota-console.test.ts', // actual foreground collector, HTTP and subprocess lifecycle
   'test/universe-core.test.ts', // real Git snapshots and confined experiment subprocesses
   'test/universe-delivery.test.ts', // real Git object/ref delivery and private receipts
   'test/universe-delivery-review.test.ts', // independent Git provenance and historical receipt review

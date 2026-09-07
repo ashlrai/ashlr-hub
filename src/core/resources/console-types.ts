@@ -2,6 +2,7 @@
 import type { ResourceAssignmentPlan, ResourceObservation, ResourceWorker } from './pool-policy.js';
 import type { ResourceTaskReceipt } from './pool-runtime.js';
 import type { ResourcePerformanceReport } from './performance.js';
+import type { ResourceQuotaRefreshSnapshot } from './quota-refresh.js';
 
 export interface ResourceConsoleScope {
   schemaVersion: 1;
@@ -12,6 +13,8 @@ export interface ResourceConsoleScope {
   workspace: string | null;
   maxParallel: number;
   maxQueued: number;
+  /** Explicit no-generation metadata collection; independent of task-write capability. */
+  quotaRefreshEnabled?: boolean;
 }
 
 export interface ResourceConsoleGroup {
@@ -86,6 +89,7 @@ export interface ResourceSupervisorSnapshot {
 
 export interface ResourceConsoleSnapshot extends ResourceConsoleEvidence {
   supervisor: ResourceSupervisorSnapshot | null;
+  quotaRefresh?: ResourceQuotaRefreshSnapshot | null;
 }
 
 export interface ResourceConsoleOutput {
