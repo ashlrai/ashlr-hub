@@ -4,7 +4,8 @@ import { lstatSync, readdirSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { readResourceJson, runResourceTask, type ResourceTask } from '../resources/pool-runtime.js';
+import { mergeResourceObservations, readResourceJson, resourcePoolStatus, runResourceTask, type ResourceTask } from '../resources/pool-runtime.js';
+import { refreshResourceQuotaOnce, validateResourceQuotaRefreshConfig } from '../resources/quota-refresh.js';
 import { validateResourcePool, validateResourceObservations } from '../resources/pool-policy.js';
 import { validateResourceBindings } from '../resources/worker.js';
 import { resourceUsageScopeForProvider } from '../resources/performance.js';
@@ -21,6 +22,7 @@ interface ResourceGenerationRuntime {
   observationsPath: string;
   root: string;
   workspace: string;
+  quotaConfigPath?: string;
 }
 export interface ResourceGenerationContext {
   messages: ChatMessage[];
@@ -52,10 +54,11 @@ function runtimeConfig(value: unknown): ResourceGenerationRuntime {
   const keys = ['schemaVersion', 'poolPath', 'bindingsPath', 'observationsPath', 'root', 'workspace'];
   if (value === null || typeof value !== 'object' || Array.isArray(value) ||
     ![Object.prototype, null].includes(Object.getPrototypeOf(value)) ||
-    Reflect.ownKeys(value).length !== keys.length || Reflect.ownKeys(value).some((key) => typeof key !== 'string' ||
-      !keys.includes(key) || !('value' in Object.getOwnPropertyDescriptor(value, key)!))) throw new Error();
+    !keys.every((key) => Object.hasOwn(value, key)) || Reflect.ownKeys(value).some((key) => typeof key !== 'string' ||
+      ![...keys, 'quotaConfigPath'].includes(key) || !('value' in Object.getOwnPropertyDescriptor(value, key)!))) throw new Error();
   const config = value as Record<string, unknown>;
-  if (config.schemaVersion !== 1 || !keys.slice(1).every((key) => path(config[key]))) throw new Error();
+  if (config.schemaVersion !== 1 || !keys.slice(1).every((key) => path(config[key])) ||
+    Object.hasOwn(config, 'quotaConfigPath') && !path(config.quotaConfigPath)) throw new Error();
   return config as unknown as ResourceGenerationRuntime;
 }
 function checkWorkspace(workspace: string, remainingMs: () => number): void {
@@ -81,6 +84,7 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
   const result: ResourceGenerationCompletion = { status: 'failed', content: null, resource: evidence,
     usage: { state: 'unavailable', inputTokens: null, outputTokens: null } };
   const started = performance.now(); const controller = new AbortController(); let timedOut = false;
+  let quotaRefreshStarted = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const cancel = (): void => controller.abort();
   context.signal.addEventListener('abort', cancel, { once: true });
@@ -106,7 +110,8 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
       if (overlaps(runtime.workspace, boundary)) throw new Error();
     }
     if (overlaps(runtime.root, context.resourceUniverseRoot) || overlaps(runtime.root, context.candidatePath)) throw new Error();
-    for (const file of [context.resourceRuntime, runtime.poolPath, runtime.bindingsPath, runtime.observationsPath]) {
+    for (const file of [context.resourceRuntime, runtime.poolPath, runtime.bindingsPath, runtime.observationsPath,
+      ...(runtime.quotaConfigPath ? [runtime.quotaConfigPath] : [])]) {
       if ([context.resourceUniverseRoot, context.candidatePath, runtime.workspace].some((boundary) => contains(boundary, file))) throw new Error();
     }
     if (realpathSync(dirname(runtime.root)) !== dirname(runtime.root)) throw new Error();
@@ -115,10 +120,32 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
     const bindings = validateResourceBindings(readResourceJson(runtime.bindingsPath), pool);
     if (pool.id !== validated.poolId || digest(canonical({ pool, bindings })) !== validated.poolDigest ||
       validated.allowedWorkerIds.some((id) => !pool.workers.some((worker) => worker.id === id))) throw new Error();
-    const observations = validateResourceObservations(readResourceJson(runtime.observationsPath), pool);
+    const fileObservations = validateResourceObservations(readResourceJson(runtime.observationsPath), pool);
+    let observations = fileObservations;
+    let denialObservations = fileObservations;
+    let managedUnavailable: string[] = [];
+    const quotaConfig = runtime.quotaConfigPath ?
+      validateResourceQuotaRefreshConfig(readResourceJson(runtime.quotaConfigPath), pool, bindings) : null;
     const prompt = canonical(context.messages);
     if (Buffer.byteLength(prompt, 'utf8') > MAX_TRANSPORT_BYTES) throw new Error();
     remaining();
+    if (quotaConfig) {
+      // Existing receipts must not cause fresh metadata contact. The eventual
+      // transaction still enforces the full task digest and replay semantics.
+      const prior = resourcePoolStatus(runtime.root, pool, bindings, fileObservations);
+      if (!prior.attempts.some((attempt) => attempt.id === taskId)) {
+        quotaRefreshStarted = true;
+        const refreshed = await refreshResourceQuotaOnce({ pool, bindings, config: quotaConfig,
+          cwd: runtime.root, observations: fileObservations, signal: controller.signal, timeoutMs: remaining() });
+        remaining();
+        const latestFile = validateResourceObservations(readResourceJson(runtime.observationsPath), pool);
+        observations = mergeResourceObservations(latestFile, refreshed.observations);
+        // A refresh renews measured freshness, not the operator's independent
+        // denial. Preserve denials present before contact or supplied during it.
+        denialObservations = [...fileObservations, ...latestFile];
+        managedUnavailable = refreshed.unavailableWorkerIds;
+      }
+    }
     const now = Date.now();
     // This integration requires current explicit evidence even when a general
     // resource pool permits operator-capped unknown-quota bootstrap elsewhere.
@@ -134,18 +161,21 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
     // ready ledger snapshot must not erase it during the ordinary merge. Apply
     // denials across observed aliases, without requiring missing unused aliases.
     for (const worker of pool.workers) {
-      const observation = observations.find((row) => row.workerId === worker.id);
-      if (!observation) continue;
+      const workerDenials = denialObservations.filter((row) => row.workerId === worker.id);
+      if (!workerDenials.length) continue;
       const capacityKey = bindings.find((binding) => binding.workerId === worker.id)!.capacityKey;
       const allowedAliases = pool.workers.filter((alias) => validated.allowedWorkerIds.includes(alias.id) &&
         bindings.find((binding) => binding.workerId === alias.id)!.capacityKey === capacityKey);
       if (!allowedAliases.length) continue;
       const reserve = Math.max(...allowedAliases.map((alias) => alias.reservePercent));
-      if (observation.health === 'unavailable' || observation.retryAfter !== null && Date.parse(observation.retryAfter) > now ||
-        observation.windows.some((window) => window.usedPercent !== null && window.usedPercent >= 100 - reserve)) {
+      if (workerDenials.some((observation) => observation.health === 'unavailable' ||
+        observation.retryAfter !== null && Date.parse(observation.retryAfter) > now ||
+        observation.windows.some((window) => window.usedPercent !== null && window.usedPercent >= 100 - reserve))) {
         unavailableWorkerIds.add(worker.id);
       }
     }
+    for (const id of managedUnavailable) unavailableWorkerIds.add(id);
+    remaining();
     // The ID never depends on temporary trial paths. The full task digest also
     // binds this call's effective budget, workspace and prompt: a changed
     // envelope conflicts rather than replaying or creating another invocation.
@@ -195,7 +225,9 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
     result.status = context.signal.aborted ? 'cancelled' : timedOut ? 'timed-out' : 'failed';
     result.error = result.status === 'cancelled' ? 'Resource generation cancelled by its owner' :
       result.status === 'timed-out' ? 'Resource generation exceeded its time budget' :
-        evidence.dispatch === 'not-started' ? 'Resource generation requires valid private runtime, workspace, and pinned enrollment' :
+        evidence.dispatch === 'not-started' ? quotaRefreshStarted ?
+          'Resource quota refresh unavailable; reconcile collector ownership before retrying' :
+          'Resource generation requires valid private runtime, workspace, and pinned enrollment' :
           'Resource generation handoff unavailable; do not retry this task identity';
     return result;
   } finally {

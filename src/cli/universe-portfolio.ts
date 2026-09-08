@@ -31,6 +31,8 @@ bindings; command and direct-local variants keep their existing execution paths.
 Repeat the option on each invocation; it is not saved in the portfolio manifest.
 Planning checks campaign evidence, not worker readiness or private runtime files.
 Fresh observations and shared pool limits still govern every resource handoff.
+An optional private quotaConfigPath enables bounded Codex metadata capture;
+use maxParallel:1 for generations sharing its exclusive collector root.
 Use maxParallel:1 for a single available worker; capacity withholding pauses a
 campaign, not an automatic queue or retry. Reservations count generation
 invocations, not native API calls; actual native provider request counts are unknown.

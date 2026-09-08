@@ -30,6 +30,8 @@ endpoint; it sends declared files and experiment context, without auth or tools.
 Resource-pool generation requires run --resource-runtime <private absolute JSON>.
 That execution-only file is not a manifest or a console option. Native provider
 request counts remain unknown; recorded worker usage is not account-wide spend.
+Its optional quotaConfigPath enables one bounded Codex metadata pass before new
+resource admission, not a resident collector or an automatic task retry.
 The evaluator is pinned separately from candidate edits. Results are local
 experiments, not accepted production changes. --root defaults to ~/.ashlr/universe.
 Delivery creates only a local branch; it never pushes, merges, or deploys.

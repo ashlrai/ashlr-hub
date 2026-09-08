@@ -412,6 +412,17 @@ owned native processes before deliberately removing that marker; do not delete
 control records simply to retry. The collector is not a
 resident service and cannot recover an ambiguously running native process.
 
+Universe resource generation can reuse this pinned configuration through its
+optional private [`quotaConfigPath`](ASHLR-UNIVERSE.md#generate-candidates-through-an-enrolled-resource-pool).
+That mode performs one bounded capture per configured alias before a new
+generation, confirms cleanup, and then attempts ordinary resource admission
+once. It does not use this console's recurring refresh loop or modify the source
+observations file. Both modes share the same root-level collector lease and
+pending marker, so concurrent collectors are refused rather than duplicated.
+The console's in-memory readings are not automatically supplied to a separate
+Universe process. Existing file-level denials remain vetoes in Universe even
+after fresh metadata is captured.
+
 Claude continues to use supplied/native execution events: its documented status
 line quotas are populated after a session API response, not a standalone complete
 quota polling API. Local workers continue to require fresh explicit health.

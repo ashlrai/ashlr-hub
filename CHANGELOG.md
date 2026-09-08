@@ -11,6 +11,18 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Bounded Universe quota refresh
+
+- Adds an optional private `quotaConfigPath` so resource generation can capture
+  pinned Codex account metadata before admission instead of relying only on a
+  stale observation file. Legacy runtime files retain file-only behavior.
+- Shares the console's exclusive collector lease and durable pending marker;
+  awaits cleanup and preserves uncertainty rather than duplicating a collector.
+  Metadata time counts against the existing generation deadline.
+- Preserves explicit file denials, shared capacity, task identity and replay.
+  No task retries, account switching, quota resets, resident activation or
+  automatic observation-file rewriting are introduced.
+
 ### Resource-backed portfolio execution
 
 - Adds an execution-only `--resource-runtime` option to `universe portfolio run`

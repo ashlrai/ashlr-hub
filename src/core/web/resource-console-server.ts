@@ -1,16 +1,13 @@
 import { randomBytes } from 'node:crypto';
-import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { acquireLocalStoreLock, ownsLocalStoreLock, releaseLocalStoreLock, type LocalStoreLock } from '../fleet/local-store-lock.js';
-import { privateDirectory } from '../universe/artifacts.js';
-import { fsyncDirectory } from '../util/durability.js';
 import { validateResourcePool, validateResourceObservations } from '../resources/pool-policy.js';
 import { readResourceJson, resourcePoolStatus } from '../resources/pool-runtime.js';
 import { validateResourceBindings } from '../resources/worker.js';
 import { createResourcePoolSupervisor, ResourceSupervisorError } from '../resources/pool-supervisor.js';
 import { createResourceQuotaRefresher, validateResourceQuotaRefreshConfig, type ResourceQuotaRefresher } from '../resources/quota-refresh.js';
+import { acquireResourceQuotaRefreshLease, type ResourceQuotaRefreshLease } from '../resources/quota-refresh-lease.js';
 import type { ResourceConsoleScope, ResourceConsoleTaskInput } from '../resources/console-types.js';
 import { createResourceConsoleReader, withholdResourceConsoleWorkers } from './resource-console-reads.js';
 import { createReadSessionBoundary, headerValue, requestUrl, safeEqual, sendJson } from './read-session.js';
@@ -135,45 +132,8 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   const assets = join(dirname(fileURLToPath(import.meta.url)), 'public');
   let supervisor: Awaited<ReturnType<typeof createResourcePoolSupervisor>> | null = null;
   let quotaRefresher: ResourceQuotaRefresher | null = null;
-  let quotaLock: LocalStoreLock | null = null;
-  const quotaPendingPath = join(root, '.resource-quota-refresh-pending.json');
-  let quotaPending: { dev: bigint; ino: bigint; record: string } | null = null;
+  let quotaLease: ResourceQuotaRefreshLease | null = null;
   let origin = ''; let port = 0; let closing: Promise<void> | null = null; let ready = false;
-
-  function ownQuota(): void {
-    if (!quotaLock || !ownsLocalStoreLock(quotaLock)) throw new Error('Quota collection ownership lost');
-    if (quotaPending) {
-      const stat = lstatSync(quotaPendingPath, { bigint: true });
-      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n ||
-        stat.dev !== quotaPending.dev || stat.ino !== quotaPending.ino ||
-        (typeof process.getuid === 'function' && stat.uid !== BigInt(process.getuid())) ||
-        (process.platform !== 'win32' && (stat.mode & 0o777n) !== 0o600n) ||
-        JSON.stringify(readResourceJson(quotaPendingPath, 512)) !== quotaPending.record) throw new Error('Quota collection marker changed');
-    }
-  }
-  function requireNoPendingQuota(): void {
-    try { lstatSync(quotaPendingPath); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
-    throw new Error('Resource quota collector unavailable: prior shutdown requires operator reconciliation');
-  }
-  function markQuotaPending(): void {
-    ownQuota();
-    const fd = openSync(quotaPendingPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-    try {
-      // Publish before contact: a crash or unconfirmed cleanup must survive
-      // stale-PID lease reclamation without silently starting another probe.
-      const record = JSON.stringify({ schemaVersion: 1, scope: 'codex-native-metadata',
-        state: 'pending', startedAt: new Date().toISOString() });
-      writeFileSync(fd, record + '\n');
-      fsyncSync(fd); fsyncDirectory(root); ownQuota();
-      const stat = fstatSync(fd, { bigint: true }); quotaPending = { dev: stat.dev, ino: stat.ino, record };
-    } finally { closeSync(fd); }
-  }
-  function clearQuotaPending(): void {
-    if (!quotaPending) return;
-    ownQuota();
-    unlinkSync(quotaPendingPath); fsyncDirectory(root); quotaPending = null;
-  }
 
   async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     res.setHeader('Referrer-Policy', 'no-referrer');
@@ -295,12 +255,10 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       ]);
       // Remove only our own marker and only after confirmed collector cleanup.
       // On uncertainty it stays durable even after this process exits.
-      let markerCleared = true;
-      if (results[1]?.status === 'fulfilled') {
-        try { clearQuotaPending(); } catch { markerCleared = false; }
-      }
-      const released = quotaLock ? releaseLocalStoreLock(quotaLock) : true; quotaLock = null;
-      if (!released || !markerCleared || results.some((result) => result.status === 'rejected')) throw new Error('Resource console shutdown uncertain');
+      let quotaClosed = true;
+      try { quotaLease?.close(results[1]?.status !== 'fulfilled'); } catch { quotaClosed = false; }
+      quotaLease = null;
+      if (!quotaClosed || results.some((result) => result.status === 'rejected')) throw new Error('Resource console shutdown uncertain');
     })();
     return closing;
   };
@@ -318,10 +276,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     if (quotaConfig) {
       // Only explicit quota collection creates this private control root. No
       // provider is contacted before configuration, ownership and bind succeed.
-      privateDirectory(root);
-      quotaLock = acquireLocalStoreLock(join(root, '.resource-quota-refresh.lock'), 500, { anchorPath: root, exactPrivateStorage: true });
-      if (!quotaLock) throw new Error('Resource quota collector already owned or unavailable');
-      requireNoPendingQuota();
+      quotaLease = await acquireResourceQuotaRefreshLease(root);
     }
     if (workspace) supervisor = await createResourcePoolSupervisor({ root, pool, bindings, workspace, maxParallel,
       readObservations: () => { const base = validateResourceObservations(readResourceJson(observationsFile), pool);
@@ -333,8 +288,9 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       // Execution ownership and all startup preflight must succeed before the
       // collector can schedule native metadata. Until then its workers are gated.
       resourcePoolStatus(root, pool, bindings, []);
-      markQuotaPending();
-      quotaRefresher = createResourceQuotaRefresher({ pool, bindings, config: quotaConfig, cwd: root, signal, assertOwnership: ownQuota });
+      quotaLease!.markPending();
+      quotaRefresher = createResourceQuotaRefresher({ pool, bindings, config: quotaConfig, cwd: root, signal,
+        assertOwnership: quotaLease!.assertOwnership });
     }
     if (signal?.aborted) throw new Error('Resource console startup cancelled');
     signal?.addEventListener('abort', aborted, { once: true }); ready = true;
