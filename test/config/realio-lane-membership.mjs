@@ -56,6 +56,8 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-codex-account-probe.test.ts', // native metadata protocol and owned subprocess cleanup
   'test/resource-probe-cli.test.ts', // private commissioning reports and signal ownership
   'test/resource-quota-console.test.ts', // actual foreground collector, HTTP and subprocess lifecycle
+  'test/resource-quota-refresh-lease.test.ts', // actual collector lease and durable pending marker
+  'test/resource-quota-once.test.ts', // private one-pass collector lifecycle and storage
   'test/universe-core.test.ts', // real Git snapshots and confined experiment subprocesses
   'test/universe-delivery.test.ts', // real Git object/ref delivery and private receipts
   'test/universe-delivery-review.test.ts', // independent Git provenance and historical receipt review
@@ -72,6 +74,7 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-campaign-integration.test.ts', // native multi-generation ownership, feedback and durable resource limits
   'test/universe-portfolio-integration.test.ts', // native cross-Universe dependency ordering and concurrent campaign settlement
   'test/universe-portfolio-resource-integration.test.ts', // shared resource ledger and confined cross-Universe dependency execution
+  'test/universe-resource-quota-integration.test.ts', // inert native metadata capture before confined Universe generation
   'test/universe-feedback-replay.test.ts', // durable feedback integrity and a complete 64-trial record footprint
   'test/universe-search-feedback-integration.test.ts', // native metric-directed search after repeated unchanged trials
   'test/universe-search-feedback-replay.test.ts', // independent versioned search-context replay and legacy recovery

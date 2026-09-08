@@ -1,10 +1,12 @@
 /** Explicit foreground metadata collection. Reads never start probes or refresh capture timestamps. */
 import { isAbsolute, resolve } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { canonical, digest } from '../universe/artifacts.js';
 import { mergeResourceObservations } from './pool-runtime.js';
 import { validateResourceObservations, validateResourcePool, type ResourceObservation, type ResourcePool } from './pool-policy.js';
 import { validateResourceBindings, type ResourceBinding } from './worker.js';
 import { probeCodexResourceAccount, type CodexResourceProbeOptions, type CodexResourceProbeResult } from './codex-account-probe.js';
+import { acquireResourceQuotaRefreshLease, type ResourceQuotaRefreshLease } from './quota-refresh-lease.js';
 
 export const RESOURCE_QUOTA_REFRESH_INTERVAL_MS = 30_000;
 export const RESOURCE_QUOTA_REFRESH_TTL_MS = 60_000;
@@ -121,19 +123,29 @@ interface ManagedWorker {
   observation: ResourceObservation | null;
 }
 
-/**
- * One caller-owned sequential loop, independent of browser polling. Every alias
- * probes its own configured launcher; a shared hint does not attest the wrapper.
- */
-export function createResourceQuotaRefresher(options: ResourceQuotaRefresherOptions): ResourceQuotaRefresher {
+function checkedOptions(options: ResourceQuotaRefresherOptions) {
   const pool = validateResourcePool(options.pool); const bindings = validateResourceBindings(options.bindings, pool);
   const config = validateResourceQuotaRefreshConfig(options.config, pool, bindings);
   if (typeof options.cwd !== 'string' || !isAbsolute(options.cwd) || Buffer.byteLength(options.cwd) > 4096 ||
     [...options.cwd].some((character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127) ||
     options._probe !== undefined && typeof options._probe !== 'function' ||
     options.assertOwnership !== undefined && typeof options.assertOwnership !== 'function') throw new Error('Invalid resource quota refresh options');
-  const cwd = resolve(options.cwd); const probe = options._probe ?? probeCodexResourceAccount; const signal = options.signal;
-  const assertOwnership = options.assertOwnership;
+  return { pool, bindings, config, cwd: resolve(options.cwd), probe: options._probe ?? probeCodexResourceAccount,
+    signal: options.signal, assertOwnership: options.assertOwnership };
+}
+
+/**
+ * One caller-owned sequential loop, independent of browser polling. Every alias
+ * probes its own configured launcher; a shared hint does not attest the wrapper.
+ */
+export function createResourceQuotaRefresher(options: ResourceQuotaRefresherOptions): ResourceQuotaRefresher {
+  return createRefresher(checkedOptions(options), false).refresher;
+}
+
+function createRefresher(options: ReturnType<typeof checkedOptions>, once: boolean): {
+  refresher: ResourceQuotaRefresher; completed: Promise<void>;
+} {
+  const { pool, bindings, config, cwd, probe, signal, assertOwnership } = options;
   const controller = new AbortController();
   let closed = false; let timer: ReturnType<typeof setTimeout> | null = null;
   let active: Promise<void> | null = null; let closing: Promise<void> | null = null;
@@ -222,7 +234,7 @@ export function createResourceQuotaRefresher(options: ResourceQuotaRefresherOpti
       }
     } catch { if (!closed) { row.status = 'failed'; row.reason = 'managed-quota-failed'; } }
     finally {
-      if (!closed) {
+      if (!closed && !once) {
         if (!succeeded) row.failures = Math.min(5, row.failures + 1);
         const delay = succeeded ? RESOURCE_QUOTA_REFRESH_INTERVAL_MS :
           Math.min(MAX_BACKOFF_MS, RESOURCE_QUOTA_REFRESH_INTERVAL_MS * 2 ** (row.failures - 1));
@@ -253,9 +265,21 @@ export function createResourceQuotaRefresher(options: ResourceQuotaRefresherOpti
   }
   function onAbort(): void { void close().catch(() => {}); }
   signal?.addEventListener('abort', onAbort, { once: true });
-  if (signal?.aborted) void close().catch(() => {}); else schedule();
+  let completed = Promise.resolve();
+  if (signal?.aborted) void close().catch(() => {});
+  else if (once) {
+    // Own the complete pass before its first asynchronous probe. Closing during
+    // any alias awaits the pass and no timer can schedule a retry afterward.
+    active = Promise.resolve().then(async () => {
+      for (const row of rows) {
+        if (!owns()) break;
+        await refresh(row);
+      }
+    }).finally(() => { active = null; });
+    completed = active;
+  } else schedule();
 
-  return Object.freeze({
+  const refresher: ResourceQuotaRefresher = Object.freeze({
     readObservations(base: ResourceObservation[]): ResourceObservation[] {
       owns();
       const incoming = validateResourceObservations(base, pool);
@@ -282,4 +306,73 @@ export function createResourceQuotaRefresher(options: ResourceQuotaRefresherOpti
     },
     close,
   });
+  return { refresher, completed };
+}
+
+/** One explicit metadata pass, never a task retry or a resident refresh loop. */
+export async function refreshResourceQuotaOnce(options: ResourceQuotaRefresherOptions & {
+  observations: ResourceObservation[];
+  timeoutMs: number;
+}): Promise<{ observations: ResourceObservation[]; unavailableWorkerIds: string[] }> {
+  const started = performance.now();
+  const timeoutMs = options.timeoutMs;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 900_000) {
+    throw new Error('Invalid resource quota refresh time budget');
+  }
+  // Detach and validate every input before creating durable state or contacting
+  // a provider. An aborted invocation remains inert even with a missing root.
+  const checked = checkedOptions(options);
+  const observations = validateResourceObservations(options.observations, checked.pool);
+  const unavailable = checked.config.workers.map((row) => row.workerId);
+  if (checked.signal?.aborted) return { observations, unavailableWorkerIds: unavailable };
+  const controller = new AbortController();
+  const cancel = (): void => controller.abort();
+  checked.signal?.addEventListener('abort', cancel, { once: true });
+  if (checked.signal?.aborted) cancel();
+  const remaining = (): number => {
+    const value = Math.floor(timeoutMs - (performance.now() - started));
+    if (value < 1) controller.abort();
+    return value;
+  };
+  const timer = setTimeout(cancel, Math.max(1, remaining()));
+  let lease: ResourceQuotaRefreshLease | undefined;
+  let refresher: ResourceQuotaRefresher | undefined;
+  let preservePending = false;
+  let result: { observations: ResourceObservation[]; unavailableWorkerIds: string[] } | undefined;
+  let failure: Error | undefined;
+  try {
+    lease = await acquireResourceQuotaRefreshLease(checked.cwd);
+    if (remaining() < 1 || controller.signal.aborted) result = { observations, unavailableWorkerIds: unavailable };
+    else {
+      const assertOwnership = (): void => {
+        lease!.assertOwnership(); checked.assertOwnership?.();
+        if (remaining() < 1 || controller.signal.aborted) throw new Error('Resource quota refresh ended');
+      };
+      assertOwnership();
+      lease.markPending();
+      const pass = createRefresher({ ...checked, signal: controller.signal, assertOwnership,
+        probe: (probeOptions) => {
+          const available = remaining();
+          if (available < 1 || controller.signal.aborted) throw new Error('Resource quota refresh ended');
+          return checked.probe({ ...probeOptions, timeoutMs: Math.min(PROBE_TIMEOUT_MS, available) });
+        } }, true);
+      refresher = pass.refresher;
+      await pass.completed;
+      remaining();
+      // Preserve capture-time evidence, not the intentionally closed collector's
+      // availability. The caller must recheck freshness after awaited cleanup.
+      result = { observations: refresher.readObservations(observations),
+        unavailableWorkerIds: refresher.unavailableWorkerIds() };
+    }
+  } catch {
+    failure = new Error('Resource quota refresh could not complete');
+  } finally {
+    try { await refresher?.close(); }
+    catch { preservePending = true; failure = new Error('Resource quota refresh cleanup unconfirmed'); }
+    try { lease?.close(preservePending); }
+    catch { failure = new Error('Resource quota refresh lease cleanup unconfirmed'); }
+    clearTimeout(timer); checked.signal?.removeEventListener('abort', cancel);
+  }
+  if (failure) throw failure;
+  return result!;
 }

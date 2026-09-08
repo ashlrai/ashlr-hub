@@ -429,10 +429,40 @@ directory. Keep
 credentials in the enrolled native account setup, not in this runtime file.
 Fresh explicit worker observations are required even when the pool allows
 unknown quota; unknown quota permission is not fresh health evidence.
-The runtime reads the explicit observation file; it does not activate a quota
-collector. Ongoing refresh requires a separately commissioned collector. Without
-fresh evidence, admission is withheld and the campaign pauses; this is not a
-claim of uninterrupted unattended operation.
+By default, the runtime reads only the explicit observation file. To authorize
+bounded Codex metadata reads before a new resource generation, add the optional
+`"quotaConfigPath": "/absolute/private/quota-config.json"` field to this private
+runtime file. The referenced mode-`0600` file uses the existing
+[pinned quota configuration](RESOURCE-POOLS.md#keep-codex-quota-evidence-fresh-in-the-foreground),
+including every alias of each managed capacity key. Keep it outside the entire
+Universe store, candidate and generation workspace. Do not place account
+credentials in it.
+
+This opt-in starts one sequential metadata capture per configured Codex alias,
+within the generation's existing deadline. It confirms collector cleanup before
+task admission; it does not retry a failed capture, wait for worker capacity, or
+run a resident collector. Failed, incomplete, expired or refused captures block
+managed capacity even when an older file or ledger says ready. Fresh observations
+can renew stale evidence, but explicit file-level health, retry-after and reserve
+denials remain independent vetoes. Repair those observations from verified
+evidence before explicitly resuming. Omitted quota windows remain conservatively
+retained by the existing merge.
+
+Captured readings overlay this invocation's input; the observation file is not
+rewritten. A separate resource console's in-memory collector does not refresh
+Universe's file. Console and Universe collectors use the same exclusive lease
+and durable pending marker for a pool root. Concurrent collection is refused,
+not attached to or restarted. Use portfolio `maxParallel: 1` when resource
+generations share this bounded collector; even parallel generations for different
+workers can contend for its root. A crash or unconfirmed metadata shutdown keeps
+the pending marker and requires operator reconciliation before another capture.
+Never remove that marker just to obtain another attempt.
+
+Existing task receipts skip new metadata contact, and terminal campaign/portfolio
+reruns remain no-ops. Claude and local workers still require explicit fresh
+observations; no account login, reset, account switching or provider fallback is
+introduced. Without eligible evidence, admission is withheld and the campaign
+pauses; this is not a claim of uninterrupted unattended operation.
 
 From the built Hub checkout, after explicitly authorizing the selected workers
 to receive the declared files and generation context:
@@ -470,6 +500,10 @@ Some digests are redacted by the existing web privacy filter; use scoped CLI
 JSON output for exact digest comparison. A displayed task ID is a provenance
 reference, not a cross-store authorization or a live resource-console link.
 
+Metadata capture is not a generation request and does not add model-token usage
+or another campaign reservation. It does consume elapsed generation time. These
+captures do not yet have separate persisted Universe metrics; collector shutdown
+failure is reported without exposing private paths or native output.
 Resource generation keeps `requestStarted: false`: a CLI invocation can make
 zero or multiple provider requests, whose count is not measured here. Optional
 `generationUsage.resourceAttempts` counts attempted handoffs with settled,

@@ -12,12 +12,16 @@ import { resourceGenerationTaskId, validGenerationReceipt } from '../src/core/un
 import { runResourceTask, type ResourceTaskReceipt } from '../src/core/resources/pool-runtime.js';
 import { validateResourcePool, type ResourceObservation } from '../src/core/resources/pool-policy.js';
 import { validateResourceBindings } from '../src/core/resources/worker.js';
+import { refreshResourceQuotaOnce } from '../src/core/resources/quota-refresh.js';
 import type { UniverseResourceGenerationConfig } from '../src/core/universe/types.js';
 
 vi.mock('../src/core/resources/pool-runtime.js', async (importOriginal) => {
   const original = await importOriginal<typeof import('../src/core/resources/pool-runtime.js')>();
   return { ...original, runResourceTask: vi.fn() };
 });
+vi.mock('../src/core/resources/quota-refresh.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/core/resources/quota-refresh.js')>(), refreshResourceQuotaOnce: vi.fn(),
+}));
 type TaskOptions = Parameters<typeof runResourceTask>[0];
 type Handoff = Awaited<ReturnType<typeof runResourceTask>>;
 let base: string;
@@ -68,10 +72,40 @@ function fixture(aliases = false) {
 beforeEach(() => {
   base = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-resource-generation-')));
   vi.mocked(runResourceTask).mockReset().mockImplementation(async (options) => returned(options));
+  vi.mocked(refreshResourceQuotaOnce).mockReset();
 });
 afterEach(() => { vi.restoreAllMocks(); rmSync(base, { recursive: true, force: true }); });
 
 describe.skipIf(process.platform === 'win32')('resource candidate transport boundary', () => {
+  it.each([null, '', 'relative.json', '/private/../quota.json', 123])('rejects invalid optional quota locator %s', async (quotaConfigPath) => {
+    const f = fixture(); save(f.runtimePath, { ...f.runtime, quotaConfigPath });
+    expect(await f.run()).toMatchObject({ status: 'failed', resource: { dispatch: 'not-started' } });
+    expect(refreshResourceQuotaOnce).not.toHaveBeenCalled(); expect(runResourceTask).not.toHaveBeenCalled();
+  });
+  it.each(['stale', 'file-denial', 'new-file-denial', 'managed-failure', 'expired-capture'])('merges bounded metadata without erasing %s constraints', async (kind) => {
+    const f = fixture(); const quotaConfigPath = join(base, 'quota.json');
+    save(quotaConfigPath, { schemaVersion: 1, poolDigest: f.config.poolDigest,
+      workers: [{ workerId: 'native', accountHint: 'a'.repeat(64), bucketIds: ['weekly'] }] });
+    save(f.runtimePath, { ...f.runtime, quotaConfigPath });
+    const expired = structuredClone(f.observations);
+    expired[0]!.observedAt = f.at(-120000); expired[0]!.expiresAt = f.at(-60000);
+    if (kind === 'file-denial') expired[0]!.health = 'unavailable';
+    save(f.runtime.observationsPath, expired);
+    vi.mocked(refreshResourceQuotaOnce).mockImplementation(async (options) => {
+      expect(options.timeoutMs).toBeGreaterThan(0); expect(options.timeoutMs).toBeLessThanOrEqual(f.context.timeoutMs);
+      expect(options.cwd).toBe(f.runtime.root); expect(options.observations).toEqual(expired);
+      if (kind === 'new-file-denial') save(f.runtime.observationsPath, [{ ...f.observations[0], health: 'unavailable' }]);
+      return { observations: kind === 'expired-capture' ? expired : f.observations,
+        unavailableWorkerIds: kind === 'managed-failure' ? ['native'] : [] };
+    });
+    vi.mocked(runResourceTask).mockImplementation(async (options) => {
+      if (kind === 'stale') { expect(options.unavailableWorkerIds).toEqual([]); return returned(options); }
+      expect(options.unavailableWorkerIds).toContain('native');
+      return { receipt: null, output: null, replayed: false, plan: null };
+    });
+    expect((await f.run()).status).toBe(kind === 'stale' ? 'succeeded' : 'failed');
+    expect(refreshResourceQuotaOnce).toHaveBeenCalledTimes(1); expect(runResourceTask).toHaveBeenCalledTimes(1);
+  });
   it('uses canonical role messages, exact task identity, read-only workspace, and separate usage evidence', async () => {
     const f = fixture(); const result = await f.run();
     expect(result).toMatchObject({ status: 'succeeded', content: output, usage: { state: 'reported', inputTokens: 7, outputTokens: 3 },

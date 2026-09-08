@@ -22,6 +22,8 @@ Requests are not acknowledgments: inspect status before assuming work stopped.
 Terminal campaigns remain terminal. Results are local experiment evidence,
 not accepted production changes. --root defaults to ~/.ashlr/universe.
 Resource-pool run/resume requires --resource-runtime <private absolute JSON>.
+Optional private quotaConfigPath enables bounded Codex metadata capture before
+new resource admission; stale or refused evidence still pauses the campaign.
 Repeat that explicit runtime option on resume; it is not saved in the campaign.
 maxModelRequests reserves generation transport invocations, not native API calls.
 Native CLI invocations may make zero or multiple provider requests.
