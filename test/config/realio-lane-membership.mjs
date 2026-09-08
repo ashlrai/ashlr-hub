@@ -43,6 +43,9 @@ export const REAL_IO_LANE_TIMEOUT_MS = 60_000;
  * lane by default instead of silently rejoining the flaky pile.
  */
 export const REAL_IO_TEST_FILES = [
+  'test/universe-resource-runtime-check.test.ts', // explicit private runtime and sterile Git workspace reads
+  'test/resource-launcher-compatibility.test.ts', // bounded inert CLI help/version subprocesses
+  'test/resource-commissioning-integration.test.ts', // built public CLI with private inert multi-account fixtures
   'test/resource-pool-supervisor.test.ts', // durable queues, verified locks, native and loopback tasks
   'test/resource-console-worker.test.ts', // fixed-scope worker threads and private evidence files
   'test/resource-console-server.test.ts', // real scoped HTTP listener and authentication fences

@@ -17,7 +17,7 @@ import { newGenerationReceipt, resourceGenerationTaskId, validateGenerationConfi
 import type { UniverseGenerationReceipt, UniverseResourceGenerationConfig, UniverseResourceGenerationEvidence } from './types.js';
 
 const MAX_TRANSPORT_BYTES = 256 * 1024;
-interface ResourceGenerationRuntime {
+export interface ResourceGenerationRuntime {
   schemaVersion: 1;
   poolPath: string;
   bindingsPath: string;
@@ -54,7 +54,7 @@ function contains(parent: string, child: string): boolean {
   return difference === '' || difference !== '..' && !difference.startsWith(`..${sep}`) && !isAbsolute(difference);
 }
 function overlaps(left: string, right: string): boolean { return contains(left, right) || contains(right, left); }
-function runtimeConfig(value: unknown): ResourceGenerationRuntime {
+export function validateResourceGenerationRuntime(value: unknown): ResourceGenerationRuntime {
   const keys = ['schemaVersion', 'poolPath', 'bindingsPath', 'observationsPath', 'root', 'workspace'];
   if (value === null || typeof value !== 'object' || Array.isArray(value) ||
     ![Object.prototype, null].includes(Object.getPrototypeOf(value)) ||
@@ -68,7 +68,7 @@ function runtimeConfig(value: unknown): ResourceGenerationRuntime {
       Number(config.capacityWaitMs) < 0 || Number(config.capacityWaitMs) > 60_000)) throw new Error();
   return config as unknown as ResourceGenerationRuntime;
 }
-function checkWorkspace(workspace: string, remainingMs: () => number): void {
+export function checkResourceGenerationWorkspace(workspace: string, remainingMs: () => number): void {
   inspectPrivateDirectory(workspace);
   if (contains(workspace, homedir()) || readdirSync(workspace).join('\0') !== '.git') throw new Error();
   const metadata = join(workspace, '.git'); const stat = lstatSync(metadata);
@@ -119,7 +119,7 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
     };
     timer = setTimeout(() => { timedOut = true; controller.abort(); }, context.timeoutMs);
     remaining();
-    const runtime = runtimeConfig(readResourceJson(context.resourceRuntime));
+    const runtime = validateResourceGenerationRuntime(readResourceJson(context.resourceRuntime));
     inspectPrivateDirectory(context.resourceUniverseRoot);
     if (realpathSync(context.candidatePath) !== context.candidatePath || !lstatSync(context.candidatePath).isDirectory()) throw new Error();
     for (const boundary of [context.candidatePath, context.resourceUniverseRoot, runtime.root]) {
@@ -132,7 +132,7 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
       if ([context.resourceUniverseRoot, context.candidatePath, runtime.workspace].some((boundary) => contains(boundary, file))) throw new Error();
     }
     if (realpathSync(dirname(runtime.root)) !== dirname(runtime.root)) throw new Error();
-    checkWorkspace(runtime.workspace, remaining);
+    checkResourceGenerationWorkspace(runtime.workspace, remaining);
     const pool = validateResourcePool(readResourceJson(runtime.poolPath));
     const bindings = validateResourceBindings(readResourceJson(runtime.bindingsPath), pool);
     if (pool.id !== validated.poolId || digest(canonical({ pool, bindings })) !== validated.poolDigest ||

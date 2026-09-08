@@ -14,6 +14,8 @@ const USAGE = `usage: ashlr universe <command> [--root <private directory>] [--j
   status [id]                  Read objectives, runs, and measurements
   archive [id]                 Read the winning artifact in each niche
   console --root <absolute>    Start a foreground, read-only Universe console
+  resources check --resource-runtime <absolute>
+                               Check local resource configuration before execution
   campaign <command>           Run or inspect a bounded multi-generation campaign
   portfolio <plan|run>         Coordinate explicitly declared campaign dependencies
   deliver <id> --trial <id> --branch codex/<new-branch>
@@ -28,7 +30,8 @@ Candidate and evaluator commands run with network access denied. An optional
 local-chat generation variant contacts its explicitly configured loopback model
 endpoint; it sends declared files and experiment context, without auth or tools.
 Resource-pool generation requires run --resource-runtime <private absolute JSON>.
-That execution-only file is not a manifest or a console option. Native provider
+That private file is not a manifest or a console option; resources check can
+validate its local setup without executing it. Native provider
 request counts remain unknown; recorded worker usage is not account-wide spend.
 Its optional quotaConfigPath enables one bounded Codex metadata pass before new
 resource admission, not a resident collector or an automatic task retry.
@@ -150,6 +153,10 @@ function renderOverview(overview: UniverseOverview, archiveOnly: boolean): strin
 
 /** CLI and dashboard share the same persisted experiment records. */
 export async function cmdUniverse(args: string[]): Promise<number> {
+  if (args[0] === 'resources') {
+    const { cmdUniverseResources } = await import('./universe-resources.js');
+    return cmdUniverseResources(args.slice(1));
+  }
   if (args[0] === 'console') {
     const { cmdUniverseConsole } = await import('./universe-console.js');
     return cmdUniverseConsole(args.slice(1));

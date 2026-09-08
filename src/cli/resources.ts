@@ -160,6 +160,7 @@ function printResourcesHelp(): void {
   console.log('');
   console.log('  Usage: ashlr resources [--json] [--watch]');
   console.log('         ashlr resources pool status|run|observe|probe|console|benchmark --help');
+  console.log('         ashlr resources launcher --help');
   console.log('');
   console.log(`    ${cyan('ashlr resources')}          ${dim('table view of availability/used%/cap/resets')}`);
   console.log(`    ${cyan('ashlr resources --json')}   ${dim('raw JSON (ResourceSnapshot)')}`);
@@ -168,6 +169,10 @@ function printResourcesHelp(): void {
 }
 
 export async function cmdResources(args: string[]): Promise<number> {
+  if (args[0] === 'launcher') {
+    const { cmdResourceLauncher } = await import('./resource-launcher.js');
+    return cmdResourceLauncher(args.slice(1));
+  }
   if (args[0] === 'pool') {
     const { cmdResourcePool } = await import('./resource-pool.js');
     return cmdResourcePool(args.slice(1));

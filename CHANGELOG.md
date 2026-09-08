@@ -11,6 +11,18 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Multi-account commissioning diagnostics
+
+- Adds a read-only Universe resource runtime check for private configuration,
+  refresh pins, sterile workspace, shared capacity groups and timestamped ledger
+  exclusions, with fixed diagnostics and no provider contact or storage creation.
+- Adds explicit native launcher help/version checks for required Codex/Claude
+  flags, with bounded subprocess cleanup and redacted reports. Grok's advertised
+  ACP capability is identified separately from its unimplemented Hub transport.
+- Documents concurrent Codex account enrollment separately from desktop account
+  switching. Help compatibility and valid configuration do not attest native
+  authentication, billing, current quota or successful model execution.
+
 ### Foreground campaign supervision
 
 - Adds bounded supervision of an explicit queue of registered campaigns, with
