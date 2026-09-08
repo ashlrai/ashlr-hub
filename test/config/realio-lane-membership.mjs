@@ -43,6 +43,9 @@ export const REAL_IO_LANE_TIMEOUT_MS = 60_000;
  * lane by default instead of silently rejoining the flaky pile.
  */
 export const REAL_IO_TEST_FILES = [
+  'test/resource-native-profile.test.ts', // exclusive profile preparation and inert native execve
+  'test/resource-native-profile-review.test.ts', // independent native environment and process identity fixtures
+  'test/resource-profile-integration.test.ts', // actual CLI preparation and generated inert native launchers
   'test/universe-resource-runtime-check.test.ts', // explicit private runtime and sterile Git workspace reads
   'test/resource-launcher-compatibility.test.ts', // bounded inert CLI help/version subprocesses
   'test/resource-commissioning-integration.test.ts', // built public CLI with private inert multi-account fixtures
