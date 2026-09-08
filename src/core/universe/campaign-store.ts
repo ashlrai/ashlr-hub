@@ -366,8 +366,16 @@ export function requestUniverseCampaignControl(id: string, action: 'pause' | 'st
   if (action !== 'pause' && action !== 'stop') throw new Error('Invalid campaign control action');
   const summary = readUniverseCampaign(id, options);
   if (summary.sourceState !== 'healthy') throw new Error('Cannot control degraded campaign evidence');
-  if (terminalCampaign(summary.state) || summary.state === 'stop-requested' || (action === 'pause' && ['paused', 'pause-requested'].includes(summary.state))) return summary;
+  if (terminalCampaign(summary.state) || summary.state === 'stop-requested' || (action === 'pause' && summary.state === 'pause-requested')) return summary;
   const directory = campaignDirectory(id, options);
+  if (action === 'pause' && summary.state === 'paused') {
+    const observed = readCampaignEvents(directory);
+    const sessionSequence = [...observed].reverse().find((event) => event.kind === 'started')?.sequence ?? -1;
+    const control = [...observed].reverse().find((event) => event.kind === 'control' && event.sequence > sessionSequence);
+    // An operational pause is not an owner instruction. Persist explicit intent
+    // so a later supervisor cannot mistake unchanged paused state for permission.
+    if (foldCampaignEvents(observed).state === 'paused' && control?.kind === 'control' && control.action === 'pause') return summary;
+  }
   const records = appendCampaignEvent(directory, { kind: 'control', action, at: new Date().toISOString() });
   const currentOwner = foldCampaignEvents(records).owner;
   if (!currentOwner || !campaignOwnerAlive(currentOwner)) {

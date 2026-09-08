@@ -95,12 +95,51 @@ describe('strict Universe campaign definition and private store', () => {
     const { root, definition } = fixture();
     initUniverseCampaign(definition, { root });
     expect(requestUniverseCampaignControl(definition.id, 'pause', { root }).state).toBe('paused');
+    const paused = readCampaignEvents(campaignDirectory(definition.id, { root }));
     expect(requestUniverseCampaignControl(definition.id, 'pause', { root }).state).toBe('paused');
+    expect(readCampaignEvents(campaignDirectory(definition.id, { root }))).toEqual(paused);
     expect(requestUniverseCampaignControl(definition.id, 'stop', { root }).state).toBe('stopped');
     const before = readCampaignEvents(campaignDirectory(definition.id, { root }));
     expect(requestUniverseCampaignControl(definition.id, 'pause', { root }).state).toBe('stopped');
     expect(requestUniverseCampaignControl(definition.id, 'stop', { root }).state).toBe('stopped');
     expect(readCampaignEvents(campaignDirectory(definition.id, { root }))).toEqual(before);
+  });
+
+  it('records explicit owner intent when an operationally paused campaign is paused again', () => {
+    const { root, definition } = fixture(); initUniverseCampaign(definition, { root });
+    const directory = campaignDirectory(definition.id, { root });
+    const at = new Date().toISOString();
+    appendCampaignEvent(directory, { kind: 'started', at,
+      deadlineAt: new Date(Date.parse(at) + definition.budget.maxDurationMs).toISOString(),
+      owner: { pid: process.pid, startRef: 'fixture-owner' } });
+    appendCampaignEvent(directory, { kind: 'settled', at, state: 'paused', reason: 'Resource generation requires attention' });
+    const before = readUniverseCampaign(definition.id, { root });
+    const held = requestUniverseCampaignControl(definition.id, 'pause', { root });
+    expect(held).toMatchObject({ state: 'paused', reason: 'Paused by owner', owner: null,
+      startedAt: before.startedAt, deadlineAt: before.deadlineAt, progress: before.progress });
+    const records = readCampaignEvents(directory);
+    expect(records.map((event) => event.kind)).toEqual(['created', 'started', 'settled', 'control', 'settled']);
+    expect(records[3]).toMatchObject({ kind: 'control', action: 'pause' });
+    expect(requestUniverseCampaignControl(definition.id, 'pause', { root })).toEqual(held);
+    expect(readCampaignEvents(directory)).toEqual(records);
+  });
+
+  it('does not reuse an old owner pause consumed by a later explicit start', () => {
+    const { root, definition } = fixture(); initUniverseCampaign(definition, { root });
+    const directory = campaignDirectory(definition.id, { root });
+    requestUniverseCampaignControl(definition.id, 'pause', { root });
+    const at = new Date().toISOString();
+    appendCampaignEvent(directory, { kind: 'started', at,
+      deadlineAt: new Date(Date.parse(at) + definition.budget.maxDurationMs).toISOString(),
+      owner: { pid: process.pid, startRef: 'fixture-owner' } });
+    appendCampaignEvent(directory, { kind: 'settled', at, state: 'paused', reason: 'Paused by owner' });
+    const before = readCampaignEvents(directory);
+    requestUniverseCampaignControl(definition.id, 'pause', { root });
+    const records = readCampaignEvents(directory);
+    expect(records).toHaveLength(before.length + 2);
+    expect(records.slice(-2)).toMatchObject([{ kind: 'control', action: 'pause' }, { kind: 'settled', state: 'paused' }]);
+    requestUniverseCampaignControl(definition.id, 'pause', { root });
+    expect(readCampaignEvents(directory)).toEqual(records);
   });
 
   it('persists pause and stop requests without falsely acknowledging a live owner', () => {

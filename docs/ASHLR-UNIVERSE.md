@@ -744,6 +744,62 @@ Successful `check` command handling includes held and terminal reports. Agents
 must read the disposition rather than treating exit zero as permission to dispatch.
 Missing, degraded or changing records return unavailable with a failure exit code.
 
+### Supervise an explicit campaign queue
+
+Use the foreground supervisor to run several registered campaigns without
+manually starting each one. Each campaign retains its frozen evaluator, request
+reservations, deadline and measured-improvement limits. This is an execution
+command: it may run the configured commands and model requests.
+
+From a built checkout, choose the exact existing private store and campaign IDs:
+
+```sh
+node bin/ashlr universe campaign supervise parser-search docs-search \
+  --root /absolute/private/experiments \
+  --max-duration-ms 3600000 --max-concurrent 2 --json
+```
+
+For resource-pool campaigns, also supply
+`--resource-runtime /absolute/private/runtime.json`. The explicit runtime is not
+discovered from global accounts or saved into campaign records. All queue entries
+use this supplied runtime, and normal resource admission still applies.
+
+The fixed queue accepts 1–32 unique IDs and at most four concurrent campaign
+runners (default one). `--max-duration-ms` is required and limited to 24 hours.
+The supervisor dispatches each eligible, never-started campaign at most once. A
+queued campaign may wait for another run to release its Universe, but changed
+campaign definitions or control history invalidate the original admission pins.
+Polling is read-only and defaults to 500 ms; `--poll-interval-ms` accepts 50–60000.
+Campaigns with dependencies should use the existing portfolio workflow instead
+of relying on queue order as a dependency contract.
+
+The queue does not automatically resume resource-withheld, owner-paused,
+interrupted, uncertain or failed work. In particular, resource withholding is not
+proof of temporary contention: it can represent quota denial or stale evidence.
+Repeated run invocations would consume additional generation reservations before
+resource admission. Inspect `campaign check` and current resource evidence before
+choosing an explicit recovery action. An explicit pause on operationally paused
+work now records owner intent; it is not silently ignored.
+
+Text mode emits state changes to stderr and a final summary to stdout; JSON mode
+emits one final machine-readable report. The existing scoped console and campaign
+status show durable run progress while supervision is active. Completion is
+derived from durable campaign evidence, not just a resolved worker promise, and
+does not by itself establish useful accepted engineering changes.
+
+SIGINT, SIGTERM and the invocation time limit cancel only this supervisor's owned
+runners and await their cleanup. Cleanup can outlast the requested time limit;
+the supervisor does not detach unfinished work to report an early success. Exit
+codes are 0 for a completed queue, 1 for incomplete/failed/timed-out work, 2 for
+invalid arguments, and 130 for caller cancellation. No campaigns registered later
+join this queue, no campaign budget is reset, and no resident service is installed.
+
+The same operation is exported as `superviseUniverseCampaigns(ids, options)` from
+`@ashlr/hub/universe`. SDK callers provide an explicit `root`, `maxDurationMs`,
+optional `maxConcurrent`, `pollIntervalMs`, `resourceRuntime`, `signal` and a
+synchronous `onTransition` callback. Transition callbacks observe execution; they
+must not mutate admission inputs or throw. A callback failure cancels owned work.
+
 ### Interpret campaign limits and evidence
 
 Generation attempts and generation-invocation reservations are budget allocations, not

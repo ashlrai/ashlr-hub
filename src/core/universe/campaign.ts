@@ -17,11 +17,19 @@ export interface UniverseCampaignExpectation {
   comparatorDigest: string;
   /** Optional exact pre-dispatch state, checked again inside the execution lease. */
   summaryDigest?: string;
+  /** Optional exact raw control history, including events omitted by the summary projection. */
+  recordsDigest?: string;
 }
 type CampaignOptions = UniverseRunOptions & { expectedIdentity?: UniverseCampaignExpectation };
 type Settlement = 'paused' | 'stopped' | 'completed' | 'interrupted' | 'failed';
 
 class CampaignExpectationError extends Error {}
+function assertRecordsExpectation(records: ReturnType<typeof readCampaignEvents>, expected: UniverseCampaignExpectation | undefined): void {
+  if (expected?.recordsDigest !== undefined && (typeof expected.recordsDigest !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(expected.recordsDigest) || expected.recordsDigest !== digest(canonical(records)))) {
+    throw new CampaignExpectationError('Campaign evidence changed after portfolio admission');
+  }
+}
 function assertExpectation(summary: UniverseCampaignSummary, expected: UniverseCampaignExpectation | undefined, snapshot: boolean): void {
   if (!expected) return;
   if (summary.sourceState !== 'healthy' || summary.definition.universeId !== expected.universeId ||
@@ -66,6 +74,9 @@ export function campaignBudgetLimit(summary: UniverseCampaignSummary, nowMs = Da
 export async function runUniverseCampaign(id: string, options: CampaignOptions = {}): Promise<UniverseCampaignSummary> {
   const initial = readUniverseCampaign(id, options);
   assertExpectation(initial, options.expectedIdentity, true);
+  if (options.expectedIdentity?.recordsDigest !== undefined) {
+    assertRecordsExpectation(readCampaignEvents(campaignDirectory(id, options)), options.expectedIdentity);
+  }
   if (initial.sourceState !== 'healthy') throw new Error('Campaign evidence is degraded');
   if (terminalCampaign(initial.state)) return initial;
   return await withUniverseExecution(initial.definition.universeId, options, async (lock) => {
@@ -74,6 +85,7 @@ export async function runUniverseCampaign(id: string, options: CampaignOptions =
     // the exact captured ledger and CAS that checkpoint under the control lock
     // when starting; a pause cannot slip between a snapshot check and admission.
     let admissionEvents = readCampaignEvents(directory);
+    assertRecordsExpectation(admissionEvents, options.expectedIdentity);
     const admission = projectCampaign(admissionEvents,
       campaignUniverse(foldCampaignEvents(admissionEvents).created, options));
     assertExpectation(admission, options.expectedIdentity, true);
