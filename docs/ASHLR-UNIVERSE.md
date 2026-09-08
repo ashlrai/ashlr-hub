@@ -8,7 +8,7 @@ The useful unit of progress is an improvement demonstrated in a working environm
 
 The Universe kernel runs a complete local experiment: a manifest describes candidates and a fixed evaluator; a bounded run executes operator commands or requests candidate edits from an explicitly configured local model, records observations, and selects elites within defined niches. A later run can select parents from the archive. The bundled deterministic demonstration provides a reproducible way to inspect this behavior without model credentials or a running model service.
 
-This is a development feature in Hub. Its evidence establishes local candidate generation, evaluation, selection, bounded multi-generation campaigns, foreground orchestration across campaigns, and delivery of a retained artifact to a new local Git branch. Subscription-backed generation, resident execution, multi-repository product delivery, customer feedback, and external payments are later integrations. Existing fleet activation and release behavior is documented in the [Hub architecture](ARCHITECTURE.md).
+This is a development feature in Hub. Its evidence establishes local candidate generation, evaluation, selection, bounded multi-generation campaigns, foreground orchestration across campaigns, and delivery of a retained artifact to a new local Git branch. Explicit resource pools support native subscription-backed and local generation; that does not automatically enroll accounts or commission a fleet. Resident execution, multi-repository product delivery, customer feedback, and external payments are later integrations. Existing fleet activation and release behavior is documented in the [Hub architecture](ARCHITECTURE.md).
 
 The command surface is `ashlr universe`. From a source checkout with dependencies installed, build locally with `npm run build`, then run:
 
@@ -465,6 +465,49 @@ observations; no account login, reset, account switching or provider fallback is
 introduced. Without eligible evidence, admission is withheld and the campaign
 pauses; this is not a claim of uninterrupted unattended operation.
 
+### Renew explicitly pinned local model evidence
+
+For an existing local Ollama worker, add `localModelConfigPath` to the private
+resource runtime. The absolute path points to a private JSON file with this shape:
+
+```json
+{
+  "schemaVersion": 1,
+  "poolDigest": "<the generation's pinned pool-and-bindings digest>",
+  "workers": [
+    { "workerId": "local-coder", "modelDigest": "sha256:<64 lowercase hexadecimal characters>" }
+  ]
+}
+```
+
+Obtain and verify the intended model digest from your existing local model
+installation. Each enrolled worker must already be a `local` worker with a
+`local-chat` binding to a numeric-loopback Ollama HTTP endpoint. This option does
+not create bindings, choose a model, start a service, or install model weights.
+
+Before a new resource task, Universe checks each configured model once through
+Ollama's bounded, redirect-refusing `/api/tags` inventory read. Each read takes at
+most five seconds and all reads share the remaining generation deadline (and the
+remaining positive `capacityWaitMs` allowance when configured). A matching digest
+produces a short-lived local observation; it is evidence of inventory availability,
+not a cryptographic attestation of subsequent inference or a benchmark result.
+The actual task still uses the pinned worker binding and normal atomic admission.
+
+The refresh performs no inference, pull, load, remote fallback or account access.
+It creates no collector service and does not rewrite your observations file.
+Failed, cancelled, expired or mismatched captures withhold that managed worker,
+even when older file/ledger evidence says ready. Explicit file denials remain
+invocation vetoes. Existing task identities skip inventory contact. Capacity
+polling rechecks captured freshness without making more inventory requests.
+
+`quotaConfigPath` and `localModelConfigPath` may coexist for separately enrolled
+Codex and local workers. Other workers still need current supplied observations.
+Neither option makes a terminal campaign reusable, installs a resident supervisor,
+or establishes sustained operation by itself. Inventory reads are not counted as
+model generation requests or reported inference tokens.
+
+### Wait for temporary capacity
+
 To tolerate temporary contention, add `"capacityWaitMs": 15000` to the same
 private runtime file. It accepts integers from `0` to `60000`; omission or zero
 preserves immediate admission. This is one monotonic pre-admission allowance
@@ -667,10 +710,39 @@ recorded state before continuing. These controls do not clear the legacy fleet
 kill switch or reactivate its daemon.
 
 Use `--root <private directory>` consistently on every campaign command when the
-universe is in a custom store. The console reads the default store. `status`
+universe is in a custom store. The general Hub console reads the default store;
+the dedicated `universe console --root ABS` observes its explicit store. `status`
 without an ID lists recorded campaigns, and `--json` returns one result document
 for agents. Successful command handling or campaign termination is not a claim
 that the project succeeded.
+
+### Check recorded recovery state before resuming
+
+```sh
+node bin/ashlr universe campaign check local-search --root /absolute/private/experiments --json
+```
+
+`check` requires an explicit absolute root and never starts work, captures model
+inventory, reads private resource runtime files, or acquires an execution lease.
+It distinguishes a never-started campaign from recorded ownership, explicit owner
+controls, terminal or exhausted budgets, resource withholding and cases requiring
+reconciliation. The report uses typed reason codes and correlated durable events,
+not free-text pause messages. Campaign events are reread after projecting Universe
+evidence; changed events make the report unavailable. This is a bounded recorded-state
+observation, not an atomic campaign-and-Universe snapshot. Execution revalidates
+the current state under its own lease.
+
+A startable report means only that the recorded campaign evidence allows a first
+invocation. It does not verify the current worker, quota, model, evaluator or
+execution lease. A recorded clean resource hold is a reason to check the current
+runtime evidence, not permission to automatically resume it. Unknown or incomplete
+work and explicit owner pauses must not become restart-loop inputs. Run/resume
+still requires its own explicit invocation, runtime binding where applicable, and
+atomic execution checks; this report is not durable execution authorization.
+
+Successful `check` command handling includes held and terminal reports. Agents
+must read the disposition rather than treating exit zero as permission to dispatch.
+Missing, degraded or changing records return unavailable with a failure exit code.
 
 ### Interpret campaign limits and evidence
 

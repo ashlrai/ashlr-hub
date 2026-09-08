@@ -1,9 +1,10 @@
 import { readFileSync } from 'node:fs';
-import { isAbsolute, resolve } from 'node:path';
+import { isAbsolute, parse as parsePath, resolve } from 'node:path';
 import {
   initUniverseCampaign, readUniverseCampaign, readUniverseCampaigns, requestUniverseCampaignControl, runUniverseCampaign,
   type UniverseCampaignSummary,
 } from '../core/universe/index.js';
+import type { UniverseCampaignReadiness } from '../core/universe/campaign-readiness.js';
 
 const USAGE = `usage: ashlr universe campaign <command> [id] [--root <private directory>] [--json]
 
@@ -11,6 +12,7 @@ const USAGE = `usage: ashlr universe campaign <command> [id] [--root <private di
   run <id>                     Continue automatically within the original budget
   resume <id>                  Alias for run; does not reset the deadline or budget
   status [id]                  Inspect recorded progress without starting work
+  check <id> --root <absolute>  Inspect recorded recovery evidence without execution
   pause <id>                   Request an owner-acknowledged pause
   stop <id>                    Request a terminal stop
   help                         Show this help
@@ -20,16 +22,24 @@ The campaign continues after a passing trial until its resource or stagnation
 limit ends it. Paused or interrupted work resumes only with run/resume.
 Requests are not acknowledgments: inspect status before assuming work stopped.
 Terminal campaigns remain terminal. Results are local experiment evidence,
-not accepted production changes. --root defaults to ~/.ashlr/universe.
+not accepted production changes. --root defaults to ~/.ashlr/universe except check.
+Check requires an explicit canonical absolute private root. It reads saved
+campaign evidence only: no runtime binding, quota refresh, provider/model check,
+evaluator execution, control request or automatic resume. It does not establish
+current worker readiness. --resource-runtime is not accepted by check.
 Resource-pool run/resume requires --resource-runtime <private absolute JSON>.
 Optional private quotaConfigPath enables bounded Codex metadata capture before
 new resource admission; stale or refused evidence still pauses the campaign.
+Optional private localModelConfigPath refreshes digest-pinned local inventory
+before new resource admission; the inventory read does not perform inference.
 Optional capacityWaitMs (0-60000) waits for eligible contention without adding
 generations or extending the campaign deadline; omission/zero preserves no-wait.
 Repeat that explicit runtime option on resume; it is not saved in the campaign.
 maxModelRequests reserves generation transport invocations, not native API calls.
 Native CLI invocations may make zero or multiple provider requests.
 Exit codes: 0 command handled, 1 failed/interrupted/degraded, 2 invalid arguments.
+Check: 0 valid snapshot (including held or terminal), 1 unavailable/degraded,
+2 invalid arguments. A zero exit code is not permission or readiness to resume.
 `;
 
 class UsageError extends Error {}
@@ -37,6 +47,7 @@ class UsageError extends Error {}
 function parse(args: string[]): { command: string; id?: string; manifest?: string; root?: string; resourceRuntime?: string; json: boolean } {
   const positional: string[] = [];
   let root: string | undefined;
+  let suppliedRoot: string | undefined;
   let manifest: string | undefined;
   let resourceRuntime: string | undefined;
   let json = false;
@@ -54,6 +65,7 @@ function parse(args: string[]): { command: string; id?: string; manifest?: strin
         resourceRuntime = resolve(value);
       } else if (arg === '--root') {
         if (root) throw new UsageError('--root may only be specified once');
+        suppliedRoot = value;
         root = resolve(value);
       } else {
         if (manifest) throw new UsageError('--manifest may only be specified once');
@@ -64,19 +76,49 @@ function parse(args: string[]): { command: string; id?: string; manifest?: strin
   }
   const [requested = 'status', id] = positional;
   const command = requested === 'resume' ? 'run' : requested;
-  if (!['help', 'init', 'run', 'status', 'pause', 'stop'].includes(command)) throw new UsageError(`Unknown campaign command: ${requested}`);
-  const acceptsId = ['run', 'status', 'pause', 'stop'].includes(command);
+  if (!['help', 'init', 'run', 'status', 'check', 'pause', 'stop'].includes(command)) throw new UsageError(`Unknown campaign command: ${requested}`);
+  const acceptsId = ['run', 'status', 'check', 'pause', 'stop'].includes(command);
   if (positional.length > (acceptsId ? 2 : 1)) throw new UsageError(`Too many arguments for ${requested}`);
   if (id && !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id)) throw new UsageError('Invalid campaign id');
-  if (['run', 'pause', 'stop'].includes(command) && !id) throw new UsageError(`${requested} requires a campaign id`);
+  if (['run', 'check', 'pause', 'stop'].includes(command) && !id) throw new UsageError(`${requested} requires a campaign id`);
   if (command === 'init' && !manifest) throw new UsageError('init requires --manifest <file.json>');
   if (manifest && command !== 'init') throw new UsageError('--manifest is only valid with init');
   if (resourceRuntime && command !== 'run') throw new UsageError('--resource-runtime is only valid with campaign run/resume');
+  if (command === 'check' && (!suppliedRoot || !isAbsolute(suppliedRoot) || root !== suppliedRoot ||
+      root === parsePath(suppliedRoot).root || Buffer.byteLength(suppliedRoot) > 4096 ||
+      [...suppliedRoot].some((character) => character.charCodeAt(0) < 32 ||
+        character.charCodeAt(0) >= 127 && character.charCodeAt(0) <= 159))) {
+    throw new UsageError('check requires --root <canonical absolute private directory>');
+  }
   return { command, id, root, manifest, resourceRuntime, json };
 }
 
 function rootFlag(root?: string): string {
   return root ? ` --root '${root.replaceAll("'", "'\\''")}'` : '';
+}
+
+function renderReadiness(report: UniverseCampaignReadiness): string {
+  const nextChecks = {
+    startable: 'Review the recorded snapshot and commission the required runtime before explicitly starting work.',
+    owned: 'Observe the current owner; do not start a competing campaign process.',
+    'owner-held': 'Respect the recorded owner control. Do not automatically resume held work.',
+    'resource-withheld': 'Inspect the recorded resource task and separately recheck current pool evidence before considering a new run.',
+    'recovery-required': 'Inspect interrupted or uncertain work before explicit recovery; do not replay a task automatically.',
+    'attention-required': 'Inspect the recorded failure before considering a new run. This check does not repair or resume work.',
+    'budget-exhausted': 'The original deadline and consumed budget remain in force. This check does not reset them.',
+    terminal: 'The campaign remains terminal. This check does not reopen it.',
+    unavailable: 'Restore or recheck the selected recorded evidence; unavailable history is not a fresh campaign.',
+  };
+  return [
+    `${report.campaignId} · recorded recovery check · ${report.disposition}`,
+    `Source: ${report.sourceState} · recorded state=${report.observedState ?? 'unavailable'}`,
+    `Reason code: ${report.reasonCode}`,
+    `Advisory action: ${report.automaticAction} (no work started)`,
+    `Explicit resource runtime required: ${report.resourceRuntimeRequired === null ? 'unknown' : report.resourceRuntimeRequired ? 'yes' : 'no'}`,
+    `Next check: ${nextChecks[report.disposition]}`,
+    'Scope: recorded campaign evidence only. Current worker, quota, provider/model and evaluator readiness are not checked.',
+    'No execution, quota refresh, control request or automatic resume occurred. This snapshot is not authorization to start work.',
+  ].join('\n');
 }
 
 function render(summary: UniverseCampaignSummary, root?: string): string {
@@ -112,10 +154,18 @@ function render(summary: UniverseCampaignSummary, root?: string): string {
 export async function cmdUniverseCampaign(args: string[]): Promise<number> {
   const controller = new AbortController();
   const abort = (): void => controller.abort();
+  let checking = false;
   try {
     const options = parse(args);
     if (options.command === 'help') { console.log(USAGE); return 0; }
     const store = { root: options.root };
+    if (options.command === 'check') {
+      checking = true;
+      const { readUniverseCampaignReadiness } = await import('../core/universe/campaign-readiness.js');
+      const report = readUniverseCampaignReadiness(options.id!, { root: options.root! });
+      console.log(options.json ? JSON.stringify(report, null, 2) : renderReadiness(report));
+      return report.sourceState === 'healthy' ? 0 : 1;
+    }
     if (options.command === 'status' && !options.id) {
       const result = readUniverseCampaigns(store);
       console.log(options.json ? JSON.stringify(result, null, 2) : result.campaigns.length
@@ -140,7 +190,8 @@ export async function cmdUniverseCampaign(args: string[]): Promise<number> {
     if (summary.sourceState === 'degraded') return 1;
     return options.command === 'run' && ['failed', 'interrupted'].includes(summary.state) ? 1 : 0;
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = checking && !(error instanceof UsageError) ? 'Campaign recorded readiness is unavailable' :
+      error instanceof Error ? error.message : String(error);
     if (args.includes('--json')) console.log(JSON.stringify({ error: message }));
     else console.error(`universe campaign: ${message}`);
     return error instanceof UsageError ? 2 : 1;

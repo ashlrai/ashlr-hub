@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useContext, useEffect, useRef, useState } from 'react';
 import { StatusBadge } from '../../components/primitives/StatusBadge.js';
 import { RefreshIndicator } from '../../components/primitives/RefreshIndicator.js';
 import { SkeletonLine } from '../../components/primitives/Skeleton.js';
@@ -9,7 +9,7 @@ import { useScrollRestore } from '../../hooks/useScrollRestore.js';
 import styles from './UniverseView.module.css';
 import { UniverseDeliveries } from './UniverseDeliveries.js';
 import { UniverseGraph } from './UniverseGraph.js';
-import { useUniverseCommand } from './UniverseScope.js';
+import { UniverseRootContext, useUniverseCommand } from './UniverseScope.js';
 
 type Campaign = NonNullable<UniverseOverview['campaigns']>[number];
 const ACTIVE_CAMPAIGN_STATES = new Set(['running', 'pause-requested', 'stop-requested']);
@@ -178,6 +178,7 @@ function Campaigns({ campaigns, summary, onInspectRun }: {
 }) {
   const [campaignId, setCampaignId] = useState<string | null>(null);
   const command = useUniverseCommand();
+  const root = useContext(UniverseRootContext);
   const campaign = campaigns.find((item) => item.definition.id === campaignId) ??
     campaigns.find((item) => ACTIVE_CAMPAIGN_STATES.has(item.state)) ?? campaigns.at(-1);
   if (!campaign) return (
@@ -196,6 +197,7 @@ function Campaigns({ campaigns, summary, onInspectRun }: {
   const availableRuns = new Set(summary.runs.map((item) => item.id));
   if (summary.activeRun) availableRuns.add(summary.activeRun.id);
   const controls = [`ashlr universe campaign status ${definition.id} --json`];
+  controls.push(`ashlr universe campaign check ${definition.id} --json${root === null ? " --root '/absolute/private/experiments'" : ''}`);
   if (['ready', 'paused', 'interrupted'].includes(campaign.state)) controls.push(`ashlr universe campaign run ${definition.id}`);
   if (ACTIVE_CAMPAIGN_STATES.has(campaign.state)) controls.push(`ashlr universe campaign pause ${definition.id}`);
   if (!['completed', 'stopped', 'failed'].includes(campaign.state)) controls.push(`ashlr universe campaign stop ${definition.id}`);
@@ -208,7 +210,8 @@ function Campaigns({ campaigns, summary, onInspectRun }: {
       <div className={styles.campaignBody}>
         <div className={styles.campaignHeading}><h3>{definition.id}</h3><StatusBadge status={campaign.state} tone={campaign.state === 'ready' ? 'neutral' : undefined} /></div>
         {verified ? null : <div className={styles.notice} role="status"><strong>Campaign history is incomplete.</strong><p>{campaign.reasons.join('; ') || 'Recorded progress could not be verified.'}</p></div>}
-        <p className={styles.reason}><strong>Reason: </strong>{campaign.reason ?? (campaign.state === 'ready' ? 'Ready for its first run.' : 'No stop reason recorded.')}</p>
+        <p className={styles.reason}><strong>Reason: </strong>{campaign.reason ?? (campaign.state === 'ready' ? 'Registered; execution readiness has not been checked.' : 'No stop reason recorded.')}</p>
+        <p>Use the recovery check before resuming. It reads recorded controls and outcomes, not current worker readiness.{root === null ? ' Replace the example root with your exact Universe store.' : ''}</p>
         {campaign.state === 'pause-requested' || campaign.state === 'stop-requested' ? <p role="status">Control requested. The owner has not yet acknowledged that work has stopped.</p> : null}
         <dl className={styles.campaignFacts}>
           <div><dt>Generation attempts</dt><dd>{value(progress.attempts)} / {definition.budget.maxGenerations}</dd></div>
@@ -345,9 +348,9 @@ function UniverseExperiment({ summary, campaigns, deliveryReport }: {
         </section>
       ) : (
         <section className={styles.empty}>
-          <h2>This universe is ready for its first generation</h2>
+          <h2>This universe is registered</h2>
           <pre className={styles.command}><code>{command(`ashlr universe run ${summary.manifest.id}`)}</code></pre>
-          <p>Run the experiment, then refresh to compare its measurements.</p>
+          <p>No generation has run yet. Verify the evaluator and required runtime before starting, then refresh to compare measurements.</p>
         </section>
       )}
 

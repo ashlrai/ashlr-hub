@@ -34,6 +34,8 @@ Its optional quotaConfigPath enables one bounded Codex metadata pass before new
 resource admission, not a resident collector or an automatic task retry.
 Optional private capacityWaitMs (0-60000) enables bounded contention waits within
 the existing generation deadline; it does not retry uncertain worker execution.
+Optional localModelConfigPath renews local evidence through digest-pinned Ollama
+inventory reads; it never downloads, loads or invokes a model during that check.
 The evaluator is pinned separately from candidate edits. Results are local
 experiments, not accepted production changes. --root defaults to ~/.ashlr/universe.
 Delivery creates only a local branch; it never pushes, merges, or deploys.

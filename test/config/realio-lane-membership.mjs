@@ -60,6 +60,7 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-quota-once.test.ts', // private one-pass collector lifecycle and storage
   'test/resource-quota-contention.test.ts', // private collector contention, verified ownership and cancellation
   'test/resource-capacity-wait.test.ts', // read-only admission polls over private resource ledgers
+  'test/resource-local-model-refresh.test.ts', // test-owned loopback inventory, refusal and cancellation
   'test/universe-core.test.ts', // real Git snapshots and confined experiment subprocesses
   'test/universe-delivery.test.ts', // real Git object/ref delivery and private receipts
   'test/universe-delivery-review.test.ts', // independent Git provenance and historical receipt review
@@ -78,6 +79,8 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-portfolio-resource-integration.test.ts', // shared resource ledger and confined cross-Universe dependency execution
   'test/universe-resource-quota-integration.test.ts', // inert native metadata capture before confined Universe generation
   'test/universe-capacity-wait-integration.test.ts', // parallel inert campaigns sharing collector and worker capacity
+  'test/universe-local-refresh-integration.test.ts', // inert inventory and local-chat campaign lifecycle
+  'test/universe-campaign-readiness.test.ts', // immutable private campaign and evaluator readback
   'test/universe-feedback-replay.test.ts', // durable feedback integrity and a complete 64-trial record footprint
   'test/universe-search-feedback-integration.test.ts', // native metric-directed search after repeated unchanged trials
   'test/universe-search-feedback-replay.test.ts', // independent versioned search-context replay and legacy recovery

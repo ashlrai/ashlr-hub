@@ -44,15 +44,19 @@ function settle(id: string, requested: Settlement, reason: string, options: Camp
   return readUniverseCampaign(id, options);
 }
 
-function limit(summary: UniverseCampaignSummary): { state: Settlement; reason: string } | null {
+/** Shared observed-budget policy; a check does not reserve or refund anything. */
+export function campaignBudgetLimit(summary: UniverseCampaignSummary, nowMs = Date.now()): {
+  state: Settlement; reason: string;
+  code: 'duration' | 'generations' | 'stagnation' | 'unknown-usage' | 'reported-tokens';
+} | null {
   const { budget } = summary.definition;
-  if (summary.deadlineAt && Date.now() >= Date.parse(summary.deadlineAt)) return { state: 'completed', reason: 'Campaign duration budget exhausted' };
-  if (summary.progress.attempts >= budget.maxGenerations) return { state: 'completed', reason: 'Campaign generation budget exhausted' };
-  if (summary.progress.stagnantGenerations >= budget.maxStagnantGenerations) return { state: 'completed', reason: 'Campaign measured-improvement stagnation limit reached' };
+  if (summary.deadlineAt && nowMs >= Date.parse(summary.deadlineAt)) return { state: 'completed', code: 'duration', reason: 'Campaign duration budget exhausted' };
+  if (summary.progress.attempts >= budget.maxGenerations) return { state: 'completed', code: 'generations', reason: 'Campaign generation budget exhausted' };
+  if (summary.progress.stagnantGenerations >= budget.maxStagnantGenerations) return { state: 'completed', code: 'stagnation', reason: 'Campaign measured-improvement stagnation limit reached' };
   if (budget.maxReportedTokens !== null) {
-    if (!summary.progress.usageComplete) return { state: 'failed', reason: 'Model usage is unavailable; the token-budgeted campaign cannot make another request' };
+    if (!summary.progress.usageComplete) return { state: 'failed', code: 'unknown-usage', reason: 'Model usage is unavailable; the token-budgeted campaign cannot make another request' };
     if (summary.progress.reportedTokens !== null && summary.progress.reportedTokens >= budget.maxReportedTokens) {
-      return { state: 'completed', reason: 'Campaign observed-token threshold reached' };
+      return { state: 'completed', code: 'reported-tokens', reason: 'Campaign observed-token threshold reached' };
     }
   }
   return null;
@@ -115,7 +119,7 @@ export async function runUniverseCampaign(id: string, options: CampaignOptions =
       summary = readUniverseCampaign(id, options);
       assertExpectation(summary, options.expectedIdentity, false);
       if (summary.sourceState !== 'healthy') throw new Error('Campaign evidence is degraded');
-      const before = limit(summary);
+      const before = campaignBudgetLimit(summary);
       if (before) return settle(id, before.state, before.reason, options, admissionDigest);
       const startRef = verifiedProcessStartRef(process.pid);
       if (!startRef) throw new Error('Cannot establish campaign process ownership');
@@ -148,7 +152,7 @@ export async function runUniverseCampaign(id: string, options: CampaignOptions =
         if (controlError) throw new Error(controlError);
         if (options.signal?.aborted) return settle(id, 'paused', 'Campaign paused by caller cancellation', options);
         if (deadlineExpired) return settle(id, 'completed', 'Campaign duration budget exhausted', options);
-        const exhausted = limit(summary);
+        const exhausted = campaignBudgetLimit(summary);
         if (exhausted) return settle(id, exhausted.state, exhausted.reason, options);
         if (controller.signal.aborted) return settle(id, 'paused', 'Campaign paused by caller cancellation', options);
 

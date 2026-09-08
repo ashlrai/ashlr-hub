@@ -14,6 +14,7 @@ import { validateResourcePool, type ResourceObservation } from '../src/core/reso
 import { validateResourceBindings } from '../src/core/resources/worker.js';
 import { refreshResourceQuotaOnce } from '../src/core/resources/quota-refresh.js';
 import { waitForResourceCapacity } from '../src/core/resources/capacity-wait.js';
+import { refreshResourceLocalModelsOnce } from '../src/core/resources/local-model-refresh.js';
 import * as poolRuntime from '../src/core/resources/pool-runtime.js';
 import type { UniverseResourceGenerationConfig } from '../src/core/universe/types.js';
 
@@ -26,6 +27,9 @@ vi.mock('../src/core/resources/quota-refresh.js', async (importOriginal) => ({
 }));
 vi.mock('../src/core/resources/capacity-wait.js', async (importOriginal) => ({
   ...await importOriginal<typeof import('../src/core/resources/capacity-wait.js')>(), waitForResourceCapacity: vi.fn(),
+}));
+vi.mock('../src/core/resources/local-model-refresh.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/core/resources/local-model-refresh.js')>(), refreshResourceLocalModelsOnce: vi.fn(),
 }));
 type TaskOptions = Parameters<typeof runResourceTask>[0];
 type Handoff = Awaited<ReturnType<typeof runResourceTask>>;
@@ -78,9 +82,154 @@ beforeEach(() => {
   base = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-resource-generation-')));
   vi.mocked(runResourceTask).mockReset().mockImplementation(async (options) => returned(options));
   vi.mocked(refreshResourceQuotaOnce).mockReset();
+  vi.mocked(refreshResourceLocalModelsOnce).mockReset();
   vi.mocked(waitForResourceCapacity).mockReset().mockImplementation(async (options) => ({ ...options.readEvidence(), ready: true }));
 });
 afterEach(() => { vi.restoreAllMocks(); rmSync(base, { recursive: true, force: true }); });
+
+function localFixture() {
+  const f = fixture();
+  const pool = validateResourcePool({ ...f.pool, workers: f.pool.workers.map((worker) => ({ ...worker, provider: 'local' })) });
+  const bindings = validateResourceBindings([{ workerId: 'native', capacityKey: 'account', kind: 'local-chat',
+    endpoint: 'http://127.0.0.1:11434/v1' }], pool);
+  f.config.poolDigest = digest(canonical({ pool, bindings }));
+  const observations = f.observations.map((row) => ({ ...row, windows: [] }));
+  const localModelConfigPath = join(base, 'local-models.json');
+  const runtime = { ...f.runtime, localModelConfigPath };
+  save(f.runtime.poolPath, pool); save(f.runtime.bindingsPath, bindings); save(f.runtime.observationsPath, observations);
+  save(localModelConfigPath, { schemaVersion: 1, poolDigest: f.config.poolDigest,
+    workers: [{ workerId: 'native', modelDigest: `sha256:${'a'.repeat(64)}` }] });
+  save(f.runtimePath, runtime);
+  vi.mocked(refreshResourceLocalModelsOnce).mockResolvedValue({ observations, unavailableWorkerIds: [] });
+  vi.mocked(runResourceTask).mockImplementation(async (options) => returned(options, {
+    execution: { schemaVersion: 1, scope: 'worker-execution', durationMs: 1, usageScope: 'local-chat-completion' },
+  }));
+  return { ...f, pool, bindings, observations, runtime };
+}
+
+describe.skipIf(process.platform === 'win32')('pinned local inventory before resource generation', () => {
+  it('renews stale local evidence once without rewriting the file or counting inventory as model usage', async () => {
+    const f = localFixture();
+    save(f.runtime.observationsPath, f.observations.map((row) => ({ ...row, observedAt: f.at(-120_000), expiresAt: f.at(-60_000) })));
+    const before = readFileSync(f.runtime.observationsPath);
+    expect(await f.run()).toMatchObject({ status: 'succeeded', usage: { state: 'reported', inputTokens: 7, outputTokens: 3 },
+      resource: { dispatch: 'settled', workerProvider: 'local', usageScope: 'local-chat-completion' } });
+    expect(refreshResourceLocalModelsOnce).toHaveBeenCalledOnce(); expect(refreshResourceQuotaOnce).not.toHaveBeenCalled();
+    expect(runResourceTask).toHaveBeenCalledOnce(); expect(readFileSync(f.runtime.observationsPath)).toEqual(before);
+  });
+  it.each(['capture-failure', 'file-denial', 'new-file-denial'])('does not erase %s with cached readiness', async (kind) => {
+    const f = localFixture();
+    if (kind === 'file-denial') save(f.runtime.observationsPath, [{ ...f.observations[0], health: 'unavailable' }]);
+    vi.mocked(refreshResourceLocalModelsOnce).mockImplementation(async () => {
+      if (kind === 'new-file-denial') save(f.runtime.observationsPath, [{ ...f.observations[0], health: 'unavailable' }]);
+      return { observations: kind === 'capture-failure' ? [] : f.observations,
+        unavailableWorkerIds: kind === 'capture-failure' ? ['native'] : [] };
+    });
+    vi.mocked(runResourceTask).mockImplementation(async (options) => {
+      expect(options.unavailableWorkerIds).toContain('native'); return { receipt: null, replayed: false, plan: null, output: null };
+    });
+    expect(await f.run()).toMatchObject({ status: 'failed', resource: { dispatch: 'withheld' } });
+    expect(refreshResourceLocalModelsOnce).toHaveBeenCalledOnce();
+  });
+  it('skips inventory contact for an existing task identity', async () => {
+    const f = localFixture(); const original = poolRuntime.resourcePoolStatus;
+    vi.spyOn(poolRuntime, 'resourcePoolStatus').mockImplementation((...args) => ({ ...original(...args),
+      attempts: [{ id: resourceGenerationTaskId(identity) } as ResourceTaskReceipt] }));
+    vi.mocked(runResourceTask).mockImplementation(async (options) => returned(options, {}, null, true));
+    expect(await f.run()).toMatchObject({ status: 'failed', resource: { dispatch: 'replayed' }, usage: { state: 'unavailable' } });
+    expect(refreshResourceLocalModelsOnce).not.toHaveBeenCalled(); expect(runResourceTask).toHaveBeenCalledOnce();
+  });
+  it('shares positive wait allowance with inventory and never repeats capture while polling', async () => {
+    const f = localFixture(); save(f.runtimePath, { ...f.runtime, capacityWaitMs: 1000 });
+    let now = 0; vi.spyOn(performance, 'now').mockImplementation(() => now);
+    vi.mocked(refreshResourceLocalModelsOnce).mockImplementation(async (options) => {
+      expect(options.timeoutMs).toBe(1000); now = 400; return { observations: f.observations, unavailableWorkerIds: [] };
+    });
+    vi.mocked(waitForResourceCapacity).mockImplementation(async (options) => {
+      expect(options.waitMs).toBe(600); options.readEvidence(); return { ...options.readEvidence(), ready: true };
+    });
+    expect((await f.run()).status).toBe('succeeded'); expect(refreshResourceLocalModelsOnce).toHaveBeenCalledOnce();
+  });
+  it('withholds after inventory consumes the remaining positive allowance', async () => {
+    const f = localFixture(); save(f.runtimePath, { ...f.runtime, capacityWaitMs: 1000 });
+    let now = 0; vi.spyOn(performance, 'now').mockImplementation(() => now);
+    vi.mocked(refreshResourceLocalModelsOnce).mockImplementation(async () => {
+      now = 1001; return { observations: f.observations, unavailableWorkerIds: [] };
+    });
+    expect(await f.run()).toMatchObject({ status: 'failed', resource: { dispatch: 'withheld' } });
+    expect(runResourceTask).not.toHaveBeenCalled(); expect(waitForResourceCapacity).not.toHaveBeenCalled();
+  });
+  it('cancels inventory without dispatch and does not expose raw failures', async () => {
+    const f = localFixture();
+    vi.mocked(refreshResourceLocalModelsOnce).mockImplementation(async () => { f.controller.abort(); throw new Error('PRIVATE_LOCAL_CONFIG'); });
+    const result = await f.run(); expect(result).toMatchObject({ status: 'cancelled', resource: { dispatch: 'not-started' } });
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_LOCAL_CONFIG'); expect(runResourceTask).not.toHaveBeenCalled();
+  });
+  it.each([null, 'relative.json', '/'])('rejects invalid local config path %s before capture', async (localModelConfigPath) => {
+    const f = localFixture(); save(f.runtimePath, { ...f.runtime, localModelConfigPath });
+    expect(await f.run()).toMatchObject({ status: 'failed', resource: { dispatch: 'not-started' } });
+    expect(refreshResourceLocalModelsOnce).not.toHaveBeenCalled(); expect(runResourceTask).not.toHaveBeenCalled();
+  });
+  it.each([false, true])('preserves cross-capture denial and validates all pins before contact (invalid local pin: %s)', async (invalid) => {
+    const f = fixture();
+    const pool = validateResourcePool({ ...f.pool, workers: [...f.pool.workers, { ...f.pool.workers[0], id: 'local', provider: 'local' }] });
+    const bindings = validateResourceBindings([...f.bindings, { workerId: 'local', capacityKey: 'local',
+      kind: 'local-chat', endpoint: 'http://127.0.0.1:11434/v1' }], pool);
+    f.config.poolDigest = digest(canonical({ pool, bindings })); f.config.allowedWorkerIds = ['native', 'local'];
+    const local: ResourceObservation = { ...f.observations[0]!, workerId: 'local', windows: [] };
+    save(f.runtime.poolPath, pool); save(f.runtime.bindingsPath, bindings);
+    save(f.runtime.observationsPath, [...f.observations, local]);
+    const quotaConfigPath = join(base, 'quota.json'); const localModelConfigPath = join(base, 'local.json');
+    save(quotaConfigPath, { schemaVersion: 1, poolDigest: f.config.poolDigest,
+      workers: [{ workerId: 'native', accountHint: 'a'.repeat(64), bucketIds: ['weekly'] }] });
+    save(localModelConfigPath, { schemaVersion: 1, poolDigest: invalid ? '0'.repeat(64) : f.config.poolDigest,
+      workers: [{ workerId: 'local', modelDigest: `sha256:${'a'.repeat(64)}` }] });
+    save(f.runtimePath, { ...f.runtime, quotaConfigPath, localModelConfigPath });
+    if (invalid) {
+      expect(await f.run()).toMatchObject({ status: 'failed', resource: { dispatch: 'not-started' } });
+      expect(refreshResourceQuotaOnce).not.toHaveBeenCalled(); expect(refreshResourceLocalModelsOnce).not.toHaveBeenCalled();
+      expect(runResourceTask).not.toHaveBeenCalled(); return;
+    }
+    vi.mocked(refreshResourceQuotaOnce).mockImplementation(async () => {
+      save(f.runtime.observationsPath, [{ ...f.observations[0], health: 'unavailable' }, local]);
+      return { observations: f.observations, unavailableWorkerIds: [] };
+    });
+    vi.mocked(refreshResourceLocalModelsOnce).mockImplementation(async () => {
+      save(f.runtime.observationsPath, [local]); return { observations: [local], unavailableWorkerIds: [] };
+    });
+    vi.mocked(runResourceTask).mockImplementation(async (options) => {
+      expect(options.unavailableWorkerIds).toContain('native'); expect(options.unavailableWorkerIds).not.toContain('local');
+      return { receipt: null, replayed: false, plan: null, output: null };
+    });
+    expect(await f.run()).toMatchObject({ status: 'failed', resource: { dispatch: 'withheld' } });
+    expect(refreshResourceQuotaOnce).toHaveBeenCalledOnce(); expect(refreshResourceLocalModelsOnce).toHaveBeenCalledOnce();
+  });
+  it.each(['capture', 'poll'])('does not restore an unmanaged local worker removed during %s', async (phase) => {
+    const f = localFixture();
+    const pool = validateResourcePool({ ...f.pool, workers: [...f.pool.workers, { ...f.pool.workers[0], id: 'other' }] });
+    const bindings = validateResourceBindings([...f.bindings, { workerId: 'other', capacityKey: 'other', kind: 'local-chat',
+      endpoint: 'http://127.0.0.1:11435/v1' }], pool);
+    f.config.poolDigest = digest(canonical({ pool, bindings })); f.config.allowedWorkerIds = ['native', 'other'];
+    save(f.runtime.poolPath, pool); save(f.runtime.bindingsPath, bindings);
+    save(f.runtime.localModelConfigPath, { schemaVersion: 1, poolDigest: f.config.poolDigest,
+      workers: [{ workerId: 'native', modelDigest: `sha256:${'a'.repeat(64)}` }] });
+    save(f.runtime.observationsPath, [...f.observations, { ...f.observations[0], workerId: 'other' }]);
+    save(f.runtimePath, { ...f.runtime, capacityWaitMs: 1000 });
+    vi.mocked(refreshResourceLocalModelsOnce).mockImplementation(async () => {
+      if (phase === 'capture') save(f.runtime.observationsPath, f.observations);
+      return { observations: f.observations, unavailableWorkerIds: [] };
+    });
+    vi.mocked(waitForResourceCapacity).mockImplementation(async (options) => {
+      options.readEvidence();
+      if (phase === 'poll') save(f.runtime.observationsPath, f.observations);
+      const current = options.readEvidence(); expect(current.unavailableWorkerIds).toContain('other');
+      expect(current.observations.some((row) => row.workerId === 'other')).toBe(false);
+      return { ...current, ready: false };
+    });
+    expect(await f.run()).toMatchObject({ status: 'failed', resource: { dispatch: 'withheld' } });
+    expect(refreshResourceLocalModelsOnce).toHaveBeenCalledOnce(); expect(runResourceTask).not.toHaveBeenCalled();
+  });
+});
 
 describe.skipIf(process.platform === 'win32')('resource candidate transport boundary', () => {
   it.each([null, -1, 60_001, 1.5, '1000'])('rejects invalid private capacity wait %s before contact', async (capacityWaitMs) => {
