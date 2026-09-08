@@ -313,11 +313,16 @@ function createRefresher(options: ReturnType<typeof checkedOptions>, once: boole
 export async function refreshResourceQuotaOnce(options: ResourceQuotaRefresherOptions & {
   observations: ResourceObservation[];
   timeoutMs: number;
+  capacityWaitMs?: number;
 }): Promise<{ observations: ResourceObservation[]; unavailableWorkerIds: string[] }> {
   const started = performance.now();
   const timeoutMs = options.timeoutMs;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 900_000) {
     throw new Error('Invalid resource quota refresh time budget');
+  }
+  const capacityWaitMs = options.capacityWaitMs === undefined ? 0 : options.capacityWaitMs;
+  if (!Number.isSafeInteger(capacityWaitMs) || capacityWaitMs < 0 || capacityWaitMs > 60_000) {
+    throw new Error('Invalid resource quota refresh capacity wait budget');
   }
   // Detach and validate every input before creating durable state or contacting
   // a provider. An aborted invocation remains inert even with a missing root.
@@ -341,7 +346,11 @@ export async function refreshResourceQuotaOnce(options: ResourceQuotaRefresherOp
   let result: { observations: ResourceObservation[]; unavailableWorkerIds: string[] } | undefined;
   let failure: Error | undefined;
   try {
-    lease = await acquireResourceQuotaRefreshLease(checked.cwd);
+    const available = remaining();
+    if (available < 1 || controller.signal.aborted) throw new Error();
+    lease = await acquireResourceQuotaRefreshLease(checked.cwd, {
+      waitMs: Math.min(capacityWaitMs, available), signal: controller.signal,
+    });
     if (remaining() < 1 || controller.signal.aborted) result = { observations, unavailableWorkerIds: unavailable };
     else {
       const assertOwnership = (): void => {

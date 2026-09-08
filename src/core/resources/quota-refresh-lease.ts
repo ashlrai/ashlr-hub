@@ -1,7 +1,10 @@
 /** Shared foreground quota ownership; a pending fence survives uncertain cleanup. */
 import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, unlinkSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, parse, resolve } from 'node:path';
-import { acquireLocalStoreLock, ownsLocalStoreLock, releaseLocalStoreLock, type LocalStoreLock } from '../fleet/local-store-lock.js';
+import { performance } from 'node:perf_hooks';
+import { setTimeout as delay } from 'node:timers/promises';
+import { acquireLocalStoreLock, acquireLocalStoreLockWithOutcome, ownsLocalStoreLock, releaseLocalStoreLock,
+  type LocalStoreLock } from '../fleet/local-store-lock.js';
 import { privateDirectory } from '../universe/artifacts.js';
 import { fsyncDirectory } from '../util/durability.js';
 import { readResourceJson } from './pool-runtime.js';
@@ -15,18 +18,47 @@ export interface ResourceQuotaRefreshLease {
 }
 
 /** One explicit private root, shared by console and bounded metadata collectors. */
-export async function acquireResourceQuotaRefreshLease(root: string): Promise<ResourceQuotaRefreshLease> {
+export async function acquireResourceQuotaRefreshLease(root: string,
+  options: { waitMs?: number; signal?: AbortSignal } = {}): Promise<ResourceQuotaRefreshLease> {
   if (typeof root !== 'string' || !isAbsolute(root) || resolve(root) !== root || root === parse(root).root ||
       root.length > 4096 || [...root].some((character) => character.charCodeAt(0) < 32 ||
         character.charCodeAt(0) >= 127 && character.charCodeAt(0) <= 159)) {
     throw new Error('Invalid resource quota collector root');
   }
+  const waitMs = options.waitMs === undefined ? 0 : options.waitMs;
+  const signal = options.signal;
+  if (!Number.isSafeInteger(waitMs) || waitMs < 0 || waitMs > 60_000) {
+    throw new Error('Invalid resource quota collector wait budget');
+  }
+  const deadline = waitMs > 0 ? performance.now() + waitMs : null;
+  const assertActive = (): void => {
+    if (signal?.aborted || deadline !== null && performance.now() >= deadline) throw new Error();
+  };
   let lock: LocalStoreLock | null = null;
   const pendingPath = join(root, '.resource-quota-refresh-pending.json');
   try {
+    assertActive();
     privateDirectory(root);
-    lock = acquireLocalStoreLock(join(root, '.resource-quota-refresh.lock'), 500,
-      { anchorPath: root, exactPrivateStorage: true });
+    const lockPath = join(root, '.resource-quota-refresh.lock');
+    const lockOptions = { anchorPath: root, exactPrivateStorage: true };
+    if (deadline === null) lock = acquireLocalStoreLock(lockPath, 500, lockOptions);
+    else {
+      for (;;) {
+        assertActive();
+        const attempt = acquireLocalStoreLockWithOutcome(lockPath, 0, lockOptions);
+        lock = attempt.lock;
+        // Acquisition performs synchronous identity checks. A late acquisition
+        // is released by the catch below, before it may publish a contact marker.
+        assertActive();
+        if (lock) break;
+        if (attempt.state !== 'contended') throw new Error();
+        // Only a verified live owner is waitable. Yield so a same-process owner
+        // can finish; do not block its cleanup with a longer synchronous wait.
+        await delay(Math.min(250, Math.max(1, Math.ceil(deadline - performance.now()))),
+          undefined, { signal });
+      }
+    }
+    assertActive();
     if (!lock) throw new Error();
     let pendingExists = true;
     try { lstatSync(pendingPath); }

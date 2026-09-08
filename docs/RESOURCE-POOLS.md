@@ -415,10 +415,15 @@ resident service and cannot recover an ambiguously running native process.
 Universe resource generation can reuse this pinned configuration through its
 optional private [`quotaConfigPath`](ASHLR-UNIVERSE.md#generate-candidates-through-an-enrolled-resource-pool).
 That mode performs one bounded capture per configured alias before a new
-generation, confirms cleanup, and then attempts ordinary resource admission
-once. It does not use this console's recurring refresh loop or modify the source
+generation, confirms cleanup, and then uses ordinary atomic resource admission
+for one task identity. It does not use this console's recurring refresh loop or modify the source
 observations file. Both modes share the same root-level collector lease and
-pending marker, so concurrent collectors are refused rather than duplicated.
+pending marker, so collectors are never duplicated. Universe's optional private
+`capacityWaitMs` can asynchronously wait for a verified live collector to release
+the lease and for an otherwise eligible reserved worker slot to settle. It shares
+one pre-admission allowance within the generation deadline; capture is not repeated
+on capacity polls. Unknown ownership, retained fences, quota denials and uncertain
+task occupancy still refuse. Without positive waiting, contention remains immediate.
 The console's in-memory readings are not automatically supplied to a separate
 Universe process. Existing file-level denials remain vetoes in Universe even
 after fresh metadata is captured.

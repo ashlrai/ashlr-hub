@@ -6,6 +6,7 @@ import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:p
 import { performance } from 'node:perf_hooks';
 import { mergeResourceObservations, readResourceJson, resourcePoolStatus, runResourceTask, type ResourceTask } from '../resources/pool-runtime.js';
 import { refreshResourceQuotaOnce, validateResourceQuotaRefreshConfig } from '../resources/quota-refresh.js';
+import { waitForResourceCapacity } from '../resources/capacity-wait.js';
 import { validateResourcePool, validateResourceObservations } from '../resources/pool-policy.js';
 import { validateResourceBindings } from '../resources/worker.js';
 import { resourceUsageScopeForProvider } from '../resources/performance.js';
@@ -23,6 +24,7 @@ interface ResourceGenerationRuntime {
   root: string;
   workspace: string;
   quotaConfigPath?: string;
+  capacityWaitMs?: number;
 }
 export interface ResourceGenerationContext {
   messages: ChatMessage[];
@@ -55,10 +57,12 @@ function runtimeConfig(value: unknown): ResourceGenerationRuntime {
   if (value === null || typeof value !== 'object' || Array.isArray(value) ||
     ![Object.prototype, null].includes(Object.getPrototypeOf(value)) ||
     !keys.every((key) => Object.hasOwn(value, key)) || Reflect.ownKeys(value).some((key) => typeof key !== 'string' ||
-      ![...keys, 'quotaConfigPath'].includes(key) || !('value' in Object.getOwnPropertyDescriptor(value, key)!))) throw new Error();
+      ![...keys, 'quotaConfigPath', 'capacityWaitMs'].includes(key) || !('value' in Object.getOwnPropertyDescriptor(value, key)!))) throw new Error();
   const config = value as Record<string, unknown>;
   if (config.schemaVersion !== 1 || !keys.slice(1).every((key) => path(config[key])) ||
-    Object.hasOwn(config, 'quotaConfigPath') && !path(config.quotaConfigPath)) throw new Error();
+    Object.hasOwn(config, 'quotaConfigPath') && !path(config.quotaConfigPath) ||
+    Object.hasOwn(config, 'capacityWaitMs') && (!Number.isSafeInteger(config.capacityWaitMs) ||
+      Number(config.capacityWaitMs) < 0 || Number(config.capacityWaitMs) > 60_000)) throw new Error();
   return config as unknown as ResourceGenerationRuntime;
 }
 function checkWorkspace(workspace: string, remainingMs: () => number): void {
@@ -77,7 +81,10 @@ function checkWorkspace(workspace: string, remainingMs: () => number): void {
     git(['ls-files', '-z']) !== '' || git(['for-each-ref', '--format=%(refname)']) !== '') throw new Error();
 }
 
-/** Exactly one existing runtime admission; no API fallback, account discovery, or automatic retries. */
+/**
+ * One immutable task and at most one new worker execution. Only explicit
+ * no-reservation admission races may recheck; no worker retry or API fallback.
+ */
 export async function generateResourceCompletion(config: UniverseResourceGenerationConfig,
   context: ResourceGenerationContext): Promise<ResourceGenerationCompletion> {
   const evidence = newGenerationReceipt(config).resource!;
@@ -85,6 +92,7 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
     usage: { state: 'unavailable', inputTokens: null, outputTokens: null } };
   const started = performance.now(); const controller = new AbortController(); let timedOut = false;
   let quotaRefreshStarted = false;
+  let capacityWaiting = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const cancel = (): void => controller.abort();
   context.signal.addEventListener('abort', cancel, { once: true });
@@ -101,6 +109,10 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
       context.timeoutMs > 900_000 || !context.resourceIdentity || !path(context.resourceRuntime) ||
       !path(context.resourceUniverseRoot) || !path(context.candidatePath)) throw new Error();
     const taskId = resourceGenerationTaskId(context.resourceIdentity);
+    const withheld = (): ResourceGenerationCompletion => {
+      evidence.taskId = taskId; evidence.dispatch = 'withheld';
+      result.error = 'Resource generation withheld by current capacity evidence'; return result;
+    };
     timer = setTimeout(() => { timedOut = true; controller.abort(); }, context.timeoutMs);
     remaining();
     const runtime = runtimeConfig(readResourceJson(context.resourceRuntime));
@@ -129,64 +141,122 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
     const prompt = canonical(context.messages);
     if (Buffer.byteLength(prompt, 'utf8') > MAX_TRANSPORT_BYTES) throw new Error();
     remaining();
+    // One pre-admission wait allowance spans both collector and worker slots.
+    // It never extends the outer generation budget or resets after a race.
+    const capacityDeadline = performance.now() + (runtime.capacityWaitMs ?? 0);
+    const capacityRemaining = (): number => Math.max(0, Math.floor(capacityDeadline - performance.now()));
     if (quotaConfig) {
       // Existing receipts must not cause fresh metadata contact. The eventual
       // transaction still enforces the full task digest and replay semantics.
       const prior = resourcePoolStatus(runtime.root, pool, bindings, fileObservations);
       if (!prior.attempts.some((attempt) => attempt.id === taskId)) {
+        const quotaTimeoutMs = remaining();
+        const quotaCapacityWaitMs = runtime.capacityWaitMs ? capacityRemaining() : undefined;
+        if (quotaCapacityWaitMs !== undefined && quotaCapacityWaitMs < 1) return withheld();
         quotaRefreshStarted = true;
         const refreshed = await refreshResourceQuotaOnce({ pool, bindings, config: quotaConfig,
-          cwd: runtime.root, observations: fileObservations, signal: controller.signal, timeoutMs: remaining() });
+          cwd: runtime.root, observations: fileObservations, signal: controller.signal, timeoutMs: quotaTimeoutMs,
+          ...(quotaCapacityWaitMs !== undefined ? { capacityWaitMs: quotaCapacityWaitMs } : {}) });
         remaining();
         const latestFile = validateResourceObservations(readResourceJson(runtime.observationsPath), pool);
-        observations = mergeResourceObservations(latestFile, refreshed.observations);
+        observations = mergeResourceObservations(latestFile, refreshed.observations.filter((row) =>
+          quotaConfig.workers.some((managed) => managed.workerId === row.workerId)));
         // A refresh renews measured freshness, not the operator's independent
         // denial. Preserve denials present before contact or supplied during it.
         denialObservations = [...fileObservations, ...latestFile];
         managedUnavailable = refreshed.unavailableWorkerIds;
       }
     }
-    const now = Date.now();
-    // This integration requires current explicit evidence even when a general
-    // resource pool permits operator-capped unknown-quota bootstrap elsewhere.
-    const unavailableWorkerIds = new Set(validated.allowedWorkerIds.filter((id) => {
-      const worker = pool.workers.find((row) => row.id === id)!;
-      const observation = observations.find((row) => row.workerId === id);
-      return !observation || observation.health !== 'ready' || Date.parse(observation.expiresAt) <= now || Date.parse(observation.observedAt) > now ||
-        observation.updatedAt !== undefined && Date.parse(observation.updatedAt) > now || worker.provider !== 'local' &&
-        (!observation.windows.length || observation.windows.some((window) => window.usedPercent === null ||
-          window.resetsAt === null || Date.parse(window.resetsAt) <= now));
-    }));
-    // A current file's explicit denial is a separate invocation veto. A newer
-    // ready ledger snapshot must not erase it during the ordinary merge. Apply
-    // denials across observed aliases, without requiring missing unused aliases.
-    for (const worker of pool.workers) {
-      const workerDenials = denialObservations.filter((row) => row.workerId === worker.id);
-      if (!workerDenials.length) continue;
-      const capacityKey = bindings.find((binding) => binding.workerId === worker.id)!.capacityKey;
-      const allowedAliases = pool.workers.filter((alias) => validated.allowedWorkerIds.includes(alias.id) &&
-        bindings.find((binding) => binding.workerId === alias.id)!.capacityKey === capacityKey);
-      if (!allowedAliases.length) continue;
-      const reserve = Math.max(...allowedAliases.map((alias) => alias.reservePercent));
-      if (workerDenials.some((observation) => observation.health === 'unavailable' ||
-        observation.retryAfter !== null && Date.parse(observation.retryAfter) > now ||
-        observation.windows.some((window) => window.usedPercent !== null && window.usedPercent >= 100 - reserve))) {
-        unavailableWorkerIds.add(worker.id);
+    // Only managed captures can supplement the current file during waiting.
+    // Unmanaged workers removed from that file must not regain cached readiness.
+    const capturedObservations = quotaRefreshStarted ? observations.filter((row) =>
+      quotaConfig!.workers.some((managed) => managed.workerId === row.workerId)) : null;
+    // Bound retention to enrolled worker IDs. Removing a denied file row or
+    // passing its retry time cannot resurrect a cached capture in this invocation.
+    const deniedWorkerIds = new Set<string>();
+    let evidenceRead = false;
+    const readEvidence = () => {
+      if (evidenceRead) {
+        const latestFile = validateResourceObservations(readResourceJson(runtime.observationsPath), pool);
+        observations = capturedObservations ? mergeResourceObservations(latestFile, capturedObservations) : latestFile;
+        denialObservations = [...fileObservations, ...latestFile];
       }
-    }
-    for (const id of managedUnavailable) unavailableWorkerIds.add(id);
-    remaining();
+      evidenceRead = true;
+      const now = Date.now();
+      // This integration requires current explicit evidence even when a general
+      // resource pool permits operator-capped unknown-quota bootstrap elsewhere.
+      const unavailableWorkerIds = new Set(validated.allowedWorkerIds.filter((id) => {
+        const worker = pool.workers.find((row) => row.id === id)!;
+        const observation = observations.find((row) => row.workerId === id);
+        return !observation || observation.health !== 'ready' || Date.parse(observation.expiresAt) <= now || Date.parse(observation.observedAt) > now ||
+          observation.updatedAt !== undefined && Date.parse(observation.updatedAt) > now || worker.provider !== 'local' &&
+          (!observation.windows.length || observation.windows.some((window) => window.usedPercent === null ||
+            window.resetsAt === null || Date.parse(window.resetsAt) <= now));
+      }));
+      // A current file's explicit denial is a separate invocation veto. A newer
+      // ready ledger snapshot must not erase it during the ordinary merge. Apply
+      // denials across observed aliases, without requiring missing unused aliases.
+      for (const worker of pool.workers) {
+        const workerDenials = denialObservations.filter((row) => row.workerId === worker.id);
+        if (!workerDenials.length) continue;
+        const capacityKey = bindings.find((binding) => binding.workerId === worker.id)!.capacityKey;
+        const allowedAliases = pool.workers.filter((alias) => validated.allowedWorkerIds.includes(alias.id) &&
+          bindings.find((binding) => binding.workerId === alias.id)!.capacityKey === capacityKey);
+        if (!allowedAliases.length) continue;
+        const reserve = Math.max(...allowedAliases.map((alias) => alias.reservePercent));
+        if (workerDenials.some((observation) => observation.health === 'unavailable' ||
+          observation.retryAfter !== null && Date.parse(observation.retryAfter) > now ||
+          observation.windows.some((window) => window.usedPercent !== null && window.usedPercent >= 100 - reserve))) {
+          deniedWorkerIds.add(worker.id);
+        }
+      }
+      for (const id of deniedWorkerIds) unavailableWorkerIds.add(id);
+      for (const id of managedUnavailable) unavailableWorkerIds.add(id);
+      return { observations, unavailableWorkerIds: [...unavailableWorkerIds] };
+    };
     // The ID never depends on temporary trial paths. The full task digest also
     // binds this call's effective budget, workspace and prompt: a changed
     // envelope conflicts rather than replaying or creating another invocation.
     const task: ResourceTask = { schemaVersion: 1, id: taskId, allowedWorkerIds: [...validated.allowedWorkerIds],
       prompt, cwd: runtime.workspace, timeoutMs: context.timeoutMs, maxOutputTokens: validated.maxOutputTokens, mode: 'read-only' };
-    evidence.taskId = taskId; evidence.dispatch = 'unavailable';
-    const handoff = await runResourceTask({ root: runtime.root, pool, bindings, observations, task,
-      signal: controller.signal, unavailableWorkerIds: [...unavailableWorkerIds] });
-    if (!handoff.receipt) {
-      evidence.dispatch = 'withheld'; result.error = 'Resource generation withheld by current capacity evidence'; return result;
+    let handoff: Awaited<ReturnType<typeof runResourceTask>>;
+    while (true) {
+      let current: ReturnType<typeof readEvidence>;
+      if (runtime.capacityWaitMs) {
+        capacityWaiting = true;
+        const waitMs = capacityRemaining();
+        if (waitMs < 1) {
+          // Derived zero is not the operator's legacy no-wait setting. After
+          // expiry only an existing identity may reach atomic replay/conflict.
+          current = readEvidence();
+          const prior = resourcePoolStatus(runtime.root, pool, bindings, current.observations, current.unavailableWorkerIds);
+          remaining();
+          if (!prior.attempts.some((attempt) => attempt.id === taskId)) return withheld();
+        } else {
+          const capacity = await waitForResourceCapacity({ root: runtime.root, pool, bindings, task,
+            waitMs, signal: controller.signal, readEvidence });
+          remaining();
+          if (!capacity.ready) return withheld();
+          current = { observations: capacity.observations, unavailableWorkerIds: capacity.unavailableWorkerIds };
+        }
+        capacityWaiting = false;
+      } else current = readEvidence();
+      remaining();
+      if (runtime.capacityWaitMs && capacityRemaining() < 1) {
+        const prior = resourcePoolStatus(runtime.root, pool, bindings, current.observations, current.unavailableWorkerIds);
+        remaining();
+        if (!prior.attempts.some((attempt) => attempt.id === taskId)) return withheld();
+      }
+      evidence.taskId = taskId; evidence.dispatch = 'unavailable';
+      handoff = await runResourceTask({ root: runtime.root, pool, bindings, ...current, task, signal: controller.signal });
+      // Only an explicit no-reservation concurrency race can return to waiting.
+      // Throws and every receipt retain the existing no-retry semantics.
+      if (handoff.receipt || handoff.replayed || !runtime.capacityWaitMs || capacityRemaining() < 1 ||
+        !handoff.plan?.exclusions.some((row) => validated.allowedWorkerIds.includes(row.workerId) &&
+          row.reasons.length === 1 && row.reasons[0] === 'concurrency-exhausted')) break;
+      evidence.dispatch = 'withheld';
     }
+    if (!handoff.receipt) return withheld();
     const receipt = handoff.receipt; const worker = pool.workers.find((row) => row.id === receipt.workerId);
     const binding = bindings.find((row) => row.workerId === receipt.workerId);
     if (!worker || !binding || !validated.allowedWorkerIds.includes(worker.id) || receipt.id !== taskId ||
@@ -225,6 +295,7 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
     result.status = context.signal.aborted ? 'cancelled' : timedOut ? 'timed-out' : 'failed';
     result.error = result.status === 'cancelled' ? 'Resource generation cancelled by its owner' :
       result.status === 'timed-out' ? 'Resource generation exceeded its time budget' :
+        capacityWaiting ? 'Resource capacity wait unavailable; inspect current pool evidence' :
         evidence.dispatch === 'not-started' ? quotaRefreshStarted ?
           'Resource quota refresh unavailable; reconcile collector ownership before retrying' :
           'Resource generation requires valid private runtime, workspace, and pinned enrollment' :

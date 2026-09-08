@@ -13,6 +13,8 @@ import { runResourceTask, type ResourceTaskReceipt } from '../src/core/resources
 import { validateResourcePool, type ResourceObservation } from '../src/core/resources/pool-policy.js';
 import { validateResourceBindings } from '../src/core/resources/worker.js';
 import { refreshResourceQuotaOnce } from '../src/core/resources/quota-refresh.js';
+import { waitForResourceCapacity } from '../src/core/resources/capacity-wait.js';
+import * as poolRuntime from '../src/core/resources/pool-runtime.js';
 import type { UniverseResourceGenerationConfig } from '../src/core/universe/types.js';
 
 vi.mock('../src/core/resources/pool-runtime.js', async (importOriginal) => {
@@ -21,6 +23,9 @@ vi.mock('../src/core/resources/pool-runtime.js', async (importOriginal) => {
 });
 vi.mock('../src/core/resources/quota-refresh.js', async (importOriginal) => ({
   ...await importOriginal<typeof import('../src/core/resources/quota-refresh.js')>(), refreshResourceQuotaOnce: vi.fn(),
+}));
+vi.mock('../src/core/resources/capacity-wait.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/core/resources/capacity-wait.js')>(), waitForResourceCapacity: vi.fn(),
 }));
 type TaskOptions = Parameters<typeof runResourceTask>[0];
 type Handoff = Awaited<ReturnType<typeof runResourceTask>>;
@@ -73,10 +78,211 @@ beforeEach(() => {
   base = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-resource-generation-')));
   vi.mocked(runResourceTask).mockReset().mockImplementation(async (options) => returned(options));
   vi.mocked(refreshResourceQuotaOnce).mockReset();
+  vi.mocked(waitForResourceCapacity).mockReset().mockImplementation(async (options) => ({ ...options.readEvidence(), ready: true }));
 });
 afterEach(() => { vi.restoreAllMocks(); rmSync(base, { recursive: true, force: true }); });
 
 describe.skipIf(process.platform === 'win32')('resource candidate transport boundary', () => {
+  it.each([null, -1, 60_001, 1.5, '1000'])('rejects invalid private capacity wait %s before contact', async (capacityWaitMs) => {
+    const f = fixture(); save(f.runtimePath, { ...f.runtime, capacityWaitMs });
+    expect(await f.run()).toMatchObject({ status: 'failed', resource: { dispatch: 'not-started' } });
+    expect(waitForResourceCapacity).not.toHaveBeenCalled(); expect(runResourceTask).not.toHaveBeenCalled();
+  });
+  it.each([undefined, 0])('preserves the immediate path with wait %s', async (capacityWaitMs) => {
+    const f = fixture(); save(f.runtimePath, { ...f.runtime, capacityWaitMs });
+    expect((await f.run()).status).toBe('succeeded'); expect(waitForResourceCapacity).not.toHaveBeenCalled();
+    expect(runResourceTask).toHaveBeenCalledOnce();
+  });
+  it('rechecks only a known empty concurrency race with the exact same task and decreasing budget', async () => {
+    const f = fixture(); save(f.runtimePath, { ...f.runtime, capacityWaitMs: 1000 });
+    let elapsed = 0; vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+    vi.mocked(runResourceTask).mockImplementationOnce(async () => {
+      elapsed = 100;
+      return { receipt: null, output: null, replayed: false, plan: { schemaVersion: 1, poolId: f.pool.id,
+        sampledAt: new Date().toISOString(), selectedWorkerId: null, candidates: [], nextEligibleAt: null,
+        exclusions: [{ workerId: 'native', reasons: ['concurrency-exhausted'], nextEligibleAt: null }] } };
+    }).mockImplementation(async (options) => returned(options));
+    expect((await f.run()).status).toBe('succeeded');
+    expect(waitForResourceCapacity).toHaveBeenCalledTimes(2); expect(runResourceTask).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(waitForResourceCapacity).mock.calls.map(([options]) => options.waitMs)).toEqual([1000, 900]);
+    const tasks = vi.mocked(runResourceTask).mock.calls.map(([options]) => options.task);
+    expect(tasks[1]).toEqual(tasks[0]); expect(tasks[0]!.timeoutMs).toBe(5000);
+  });
+  it.each(['throw', 'receipt', 'denial'])('does not retry a %s after capacity is observed', async (kind) => {
+    const f = fixture(); save(f.runtimePath, { ...f.runtime, capacityWaitMs: 1000 });
+    vi.mocked(runResourceTask).mockImplementation(async (options) => {
+      if (kind === 'throw') throw new Error('PRIVATE_FAILURE');
+      if (kind === 'receipt') return returned(options, { status: 'uncertain' }, null);
+      return { receipt: null, output: null, replayed: false, plan: { schemaVersion: 1, poolId: f.pool.id,
+        sampledAt: new Date().toISOString(), selectedWorkerId: null, candidates: [], nextEligibleAt: null,
+        exclusions: [{ workerId: 'native', reasons: ['quota-reserve-reached'], nextEligibleAt: null }] } };
+    });
+    const result = await f.run(); expect(result.status).toBe('failed'); expect(JSON.stringify(result)).not.toContain('PRIVATE');
+    expect(waitForResourceCapacity).toHaveBeenCalledOnce(); expect(runResourceTask).toHaveBeenCalledOnce();
+  });
+  it('keeps cancellation during initial waiting known not-started with no task receipt', async () => {
+    const f = fixture(); save(f.runtimePath, { ...f.runtime, capacityWaitMs: 1000 });
+    vi.mocked(waitForResourceCapacity).mockImplementation(async () => { f.controller.abort(); throw new Error('PRIVATE_WAIT'); });
+    const result = await f.run();
+    expect(result).toMatchObject({ status: 'cancelled', resource: { dispatch: 'not-started', taskId: null } });
+    expect(runResourceTask).not.toHaveBeenCalled(); expect(JSON.stringify(result)).not.toContain('PRIVATE');
+  });
+  it('rechecks explicit file denial and freshness on every capacity poll', async () => {
+    const f = fixture(); save(f.runtimePath, { ...f.runtime, capacityWaitMs: 1000 });
+    vi.mocked(waitForResourceCapacity).mockImplementation(async (options) => {
+      expect(options.readEvidence().unavailableWorkerIds).toEqual([]);
+      save(f.runtime.observationsPath, [{ ...f.observations[0], health: 'unavailable' }]);
+      const latest = options.readEvidence(); expect(latest.unavailableWorkerIds).toEqual(['native']);
+      return { ...latest, ready: false };
+    });
+    expect(await f.run()).toMatchObject({ status: 'failed', resource: { dispatch: 'withheld' } });
+    expect(runResourceTask).not.toHaveBeenCalled();
+  });
+  it('shares the allowance with metadata capture without repeating the probe during waiting', async () => {
+    const f = fixture(); const quotaConfigPath = join(base, 'quota.json');
+    save(quotaConfigPath, { schemaVersion: 1, poolDigest: f.config.poolDigest,
+      workers: [{ workerId: 'native', accountHint: 'a'.repeat(64), bucketIds: ['weekly'] }] });
+    save(f.runtimePath, { ...f.runtime, quotaConfigPath, capacityWaitMs: 1000 });
+    let elapsed = 0; vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+    vi.mocked(refreshResourceQuotaOnce).mockImplementation(async (options) => {
+      expect(options.capacityWaitMs).toBe(1000); elapsed = 400;
+      return { observations: f.observations, unavailableWorkerIds: [] };
+    });
+    expect((await f.run()).status).toBe('succeeded');
+    expect(vi.mocked(waitForResourceCapacity).mock.calls[0]![0].waitMs).toBe(600);
+    expect(refreshResourceQuotaOnce).toHaveBeenCalledOnce(); expect(runResourceTask).toHaveBeenCalledOnce();
+  });
+  it('forwards one checked positive quota wait snapshot instead of recomputing it as legacy zero', async () => {
+    const f = fixture(); const quotaConfigPath = join(base, 'quota.json');
+    save(quotaConfigPath, { schemaVersion: 1, poolDigest: f.config.poolDigest,
+      workers: [{ workerId: 'native', accountHint: 'a'.repeat(64), bucketIds: ['weekly'] }] });
+    save(f.runtimePath, { ...f.runtime, quotaConfigPath, capacityWaitMs: 1000 });
+    let afterPreflight = false; let reads = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => afterPreflight ? ++reads <= 2 ? 999 : 1001 : 0);
+    const original = poolRuntime.resourcePoolStatus;
+    vi.spyOn(poolRuntime, 'resourcePoolStatus').mockImplementation((...args) => {
+      const status = original(...args); afterPreflight = true; return status;
+    });
+    vi.mocked(refreshResourceQuotaOnce).mockResolvedValue({ observations: f.observations, unavailableWorkerIds: [] });
+    expect(await f.run()).toMatchObject({ status: 'failed', resource: { dispatch: 'withheld' } });
+    expect(refreshResourceQuotaOnce).toHaveBeenCalledOnce();
+    expect(vi.mocked(refreshResourceQuotaOnce).mock.calls[0]![0]).toMatchObject({ timeoutMs: 4001, capacityWaitMs: 1 });
+    expect(runResourceTask).not.toHaveBeenCalled();
+  });
+  it.each(['health', 'reserve', 'retry'].flatMap((denial) => ['native', 'alias'].map((workerId) => ({ denial, workerId }))))(
+    'retains observed $denial veto for $workerId after its row disappears while another capacity stays reserved', async ({ denial, workerId }) => {
+      const f = fixture(true); const quotaConfigPath = join(base, 'quota.json');
+      const pool = validateResourcePool({ ...f.pool, workers: [...f.pool.workers,
+        { ...f.pool.workers[0], id: 'local', provider: 'local' }] });
+      const bindings = validateResourceBindings([...f.bindings, { workerId: 'local', capacityKey: 'local',
+        kind: 'local-chat', endpoint: 'http://127.0.0.1:12345/v1' }], pool);
+      f.config.poolDigest = digest(canonical({ pool, bindings })); f.config.allowedWorkerIds = ['native', 'local'];
+      const observations = [...f.observations, { ...f.observations[0]!, workerId: 'local', windows: [] }];
+      save(f.runtime.poolPath, pool); save(f.runtime.bindingsPath, bindings); save(f.runtime.observationsPath, observations);
+      save(quotaConfigPath, { schemaVersion: 1, poolDigest: f.config.poolDigest, workers: ['native', 'alias'].map((workerId) =>
+        ({ workerId, accountHint: 'a'.repeat(64), bucketIds: ['weekly'] })) });
+      save(f.runtimePath, { ...f.runtime, quotaConfigPath, capacityWaitMs: 1000 });
+      const reservation: ResourceTaskReceipt = { schemaVersion: 1, id: 'other-task', taskDigest: digest('other-envelope'),
+        poolDigest: f.config.poolDigest, workerId: 'local', capacityKey: 'local', status: 'reserved', startedAt: f.at(-100),
+        finishedAt: null, outputDigest: null, inputTokens: null, outputTokens: null, reason: 'task-reserved', verifiedAccepted: false };
+      mkdirSync(f.runtime.root, { mode: 0o700 });
+      const ledgerPath = join(f.runtime.root, 'pool-state.json');
+      save(ledgerPath, { schemaVersion: 1, poolDigest: f.config.poolDigest, observations, attempts: [reservation] });
+      const before = readFileSync(ledgerPath);
+      const captured = f.observations.map((row) => ({ ...row, observedAt: f.at(0) }));
+      vi.mocked(refreshResourceQuotaOnce).mockResolvedValue({ observations: captured, unavailableWorkerIds: [] });
+      vi.mocked(waitForResourceCapacity).mockImplementation(async (options) => {
+        expect(options.readEvidence().unavailableWorkerIds).toEqual([]);
+        const denied = structuredClone(observations);
+        const row = denied.find((item) => item.workerId === workerId)!;
+        if (denial === 'health') row.health = 'unavailable';
+        if (denial === 'reserve') row.windows[0]!.usedPercent = 90;
+        if (denial === 'retry') row.retryAfter = f.at(30_000);
+        save(f.runtime.observationsPath, denied);
+        const check = () => {
+          const evidence = options.readEvidence(); expect(evidence.unavailableWorkerIds).toContain(workerId);
+          const status = poolRuntime.resourcePoolStatus(f.runtime.root, pool, bindings, evidence.observations, evidence.unavailableWorkerIds);
+          expect(status.plan.exclusions.find((item) => item.workerId === 'native')!.reasons).toContain('worker-unavailable');
+          expect(status.plan.exclusions.find((item) => item.workerId === 'local')!.reasons).toEqual(['concurrency-exhausted']);
+          return evidence;
+        };
+        check(); save(f.runtime.observationsPath, observations.filter((row) => row.workerId !== workerId));
+        const evidence = check();
+        expect(evidence.observations.find((row) => row.workerId === workerId)!.health).toBe('ready');
+        return { ...evidence, ready: false };
+      });
+      expect(await f.run()).toMatchObject({ status: 'failed', resource: { dispatch: 'withheld' } });
+      expect(refreshResourceQuotaOnce).toHaveBeenCalledOnce(); expect(waitForResourceCapacity).toHaveBeenCalledOnce();
+      expect(runResourceTask).not.toHaveBeenCalled(); expect(readFileSync(ledgerPath)).toEqual(before);
+    });
+  it.each(['preflight', 'metadata', 'capacity'])('never restores immediate admission after positive budget expires during %s', async (phase) => {
+    const f = fixture(); const quotaConfigPath = join(base, 'quota.json');
+    save(quotaConfigPath, { schemaVersion: 1, poolDigest: f.config.poolDigest,
+      workers: [{ workerId: 'native', accountHint: 'a'.repeat(64), bucketIds: ['weekly'] }] });
+    save(f.runtimePath, { ...f.runtime, quotaConfigPath, capacityWaitMs: 1000 });
+    let elapsed = 0; vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+    const status = poolRuntime.resourcePoolStatus;
+    vi.spyOn(poolRuntime, 'resourcePoolStatus').mockImplementation((...args) => {
+      const value = status(...args); if (phase === 'preflight') elapsed = 1001; return value;
+    });
+    vi.mocked(refreshResourceQuotaOnce).mockImplementation(async () => {
+      if (phase === 'metadata') elapsed = 1001;
+      return { observations: f.observations, unavailableWorkerIds: [] };
+    });
+    vi.mocked(waitForResourceCapacity).mockImplementation(async (options) => {
+      if (phase === 'capacity') elapsed = 1001;
+      return { ...options.readEvidence(), ready: true };
+    });
+    expect(await f.run()).toMatchObject({ status: 'failed', resource: { dispatch: 'withheld' } });
+    expect(runResourceTask).not.toHaveBeenCalled();
+    expect(refreshResourceQuotaOnce).toHaveBeenCalledTimes(phase === 'preflight' ? 0 : 1);
+    expect(waitForResourceCapacity).toHaveBeenCalledTimes(phase === 'capacity' ? 1 : 0);
+  });
+  it.each(['reserved', 'uncertain', 'completed'] as const)('allows only exact existing %s replay after wait expiry', async (status) => {
+    const f = fixture(); save(f.runtimePath, { ...f.runtime, capacityWaitMs: 1000 });
+    let elapsed = 0; let task!: TaskOptions['task'];
+    vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+    vi.mocked(waitForResourceCapacity).mockImplementation(async (options) => {
+      task = options.task; elapsed = 1001; return { ...options.readEvidence(), ready: true };
+    });
+    const read = poolRuntime.resourcePoolStatus;
+    vi.spyOn(poolRuntime, 'resourcePoolStatus').mockImplementation((...args) => ({ ...read(...args),
+      attempts: [returned({ root: f.runtime.root, pool: f.pool, bindings: f.bindings, observations: f.observations, task },
+        { status }, null, true).receipt!] }));
+    vi.mocked(runResourceTask).mockImplementation(async (options) => returned(options, { status }, null, true));
+    expect(await f.run()).toMatchObject({ status: 'failed', usage: { state: 'unavailable' },
+      resource: { dispatch: 'replayed', taskStatus: status } });
+    expect(runResourceTask).toHaveBeenCalledOnce();
+    expect(vi.mocked(runResourceTask).mock.calls[0]![0].task).toEqual(task);
+  });
+  it.each(['refresh', 'waiting'])('does not restore an unmanaged worker removed from the explicit file during %s', async (phase) => {
+    const f = fixture(); const quotaConfigPath = join(base, 'quota.json');
+    const pool = validateResourcePool({ ...f.pool, workers: [...f.pool.workers,
+      { ...f.pool.workers[0], id: 'local', provider: 'local' }] });
+    const bindings = validateResourceBindings([...f.bindings, { workerId: 'local', capacityKey: 'local',
+      kind: 'local-chat', endpoint: 'http://127.0.0.1:12345/v1' }], pool);
+    f.config.poolDigest = digest(canonical({ pool, bindings })); f.config.allowedWorkerIds = ['local'];
+    const observations = [...f.observations, { ...f.observations[0]!, workerId: 'local', windows: [] }];
+    save(f.runtime.poolPath, pool); save(f.runtime.bindingsPath, bindings); save(f.runtime.observationsPath, observations);
+    save(quotaConfigPath, { schemaVersion: 1, poolDigest: f.config.poolDigest,
+      workers: [{ workerId: 'native', accountHint: 'a'.repeat(64), bucketIds: ['weekly'] }] });
+    save(f.runtimePath, { ...f.runtime, quotaConfigPath, capacityWaitMs: 1000 });
+    vi.mocked(refreshResourceQuotaOnce).mockImplementation(async () => {
+      if (phase === 'refresh') save(f.runtime.observationsPath, f.observations);
+      return { observations, unavailableWorkerIds: [] };
+    });
+    vi.mocked(waitForResourceCapacity).mockImplementation(async (options) => {
+      if (phase === 'waiting') {
+        expect(options.readEvidence().unavailableWorkerIds).toEqual([]);
+        save(f.runtime.observationsPath, f.observations);
+      }
+      const latest = options.readEvidence(); expect(latest.unavailableWorkerIds).toContain('local');
+      expect(latest.observations.some((row) => row.workerId === 'local')).toBe(false);
+      return { ...latest, ready: false };
+    });
+    expect(await f.run()).toMatchObject({ status: 'failed', resource: { dispatch: 'withheld' } });
+    expect(runResourceTask).not.toHaveBeenCalled();
+  });
   it.each([null, '', 'relative.json', '/private/../quota.json', 123])('rejects invalid optional quota locator %s', async (quotaConfigPath) => {
     const f = fixture(); save(f.runtimePath, { ...f.runtime, quotaConfigPath });
     expect(await f.run()).toMatchObject({ status: 'failed', resource: { dispatch: 'not-started' } });
