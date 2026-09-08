@@ -1,5 +1,5 @@
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, type Stats } from 'node:fs';
-import { resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 import {
   readUniversePortfolioPlan, runUniversePortfolio, validateUniversePortfolioDefinition,
   type UniverseCampaignSummary, type UniversePortfolioDefinition, type UniversePortfolioPlan, type UniversePortfolioResult,
@@ -7,7 +7,7 @@ import {
 
 const MAX_MANIFEST_BYTES = 256 * 1024;
 const USAGE = `usage: ashlr universe portfolio <plan|run> --manifest <file.json>
-       [--root <private directory>] [--json]
+       [--root <private directory>] [--resource-runtime <private absolute JSON>] [--json]
 
   plan    Read campaign dependencies, readiness, and progress without changes
   run     Execute the declared campaign dependencies in this foreground process
@@ -25,13 +25,22 @@ a new portfolio deadline, not new campaign budgets. Independent ready branches
 may proceed while other branches are blocked. SIGINT/SIGTERM requests cancellation
 and waits for started work to settle. No resident service is installed.
 No automatic delivery, push, merge, deployment, or production acceptance.
+Only run accepts --resource-runtime: one explicit private runtime shared across
+the enrolled campaigns. Each resource variant must match its pinned pool and
+bindings; command and direct-local variants keep their existing execution paths.
+Repeat the option on each invocation; it is not saved in the portfolio manifest.
+Planning checks campaign evidence, not worker readiness or private runtime files.
+Fresh observations and shared pool limits still govern every resource handoff.
+Use maxParallel:1 for a single available worker; capacity withholding pauses a
+campaign, not an automatic queue or retry. Reservations count generation
+invocations, not native API calls; actual native provider request counts are unknown.
 --root defaults to ~/.ashlr/universe. Planning does not create missing stores.
 Exit codes: 0 healthy unblocked plan/completed run, 1 incomplete/source failure,
             2 invalid arguments or manifest.
 `;
 
 class UsageError extends Error {}
-interface Options { command: 'plan' | 'run' | 'help'; manifest?: string; root?: string; json: boolean }
+interface Options { command: 'plan' | 'run' | 'help'; manifest?: string; root?: string; resourceRuntime?: string; json: boolean }
 
 function containsControls(value: string): boolean {
   return [...value].some((character) => {
@@ -54,25 +63,33 @@ function parse(args: string[]): Options {
     } else if (arg === '--json') {
       if (json) throw new UsageError('--json may only be specified once');
       json = true;
-    } else if (arg === '--manifest' || arg === '--root') {
+    } else if (arg === '--manifest' || arg === '--root' || arg === '--resource-runtime') {
       if (values.has(arg)) throw new UsageError(`${arg} may only be specified once`);
       const value = args[++index];
       if (!value?.trim() || value.startsWith('-') || containsControls(value) || value.length > 4_096) {
         throw new UsageError(`${arg} requires a bounded path`);
       }
+      if (arg === '--resource-runtime' && (!isAbsolute(value) || Buffer.byteLength(value, 'utf8') > 4_096)) {
+        throw new UsageError('--resource-runtime requires a bounded private absolute JSON path');
+      }
       values.set(arg, value);
+    } else if (arg.startsWith('--resource-runtime=')) {
+      throw new UsageError('--resource-runtime requires a separate path argument');
     } else if (arg.startsWith('-')) throw new UsageError(`Unknown option: ${arg}`);
     else positional.push(arg);
   }
   if (positional.length > 1) throw new UsageError('portfolio accepts one command and no positional manifest or campaign id');
   const command = positional[0];
   if (command !== undefined && !['plan', 'run', 'help'].includes(command)) throw new UsageError('Expected portfolio plan, run, or help');
+  const resourceRuntime = values.get('--resource-runtime');
+  if (resourceRuntime !== undefined && command !== 'run') throw new UsageError('--resource-runtime is only valid with portfolio run');
   if (help || command === 'help') return { command: 'help', json: false };
   if (command !== 'plan' && command !== 'run') throw new UsageError('Expected portfolio plan or run');
   const manifest = values.get('--manifest');
   if (!manifest) throw new UsageError(`${command} requires --manifest <file.json>`);
   const root = values.get('--root');
-  return { command, manifest: resolve(manifest), root: root === undefined ? undefined : resolve(root), json };
+  return { command, manifest: resolve(manifest), root: root === undefined ? undefined : resolve(root),
+    ...(resourceRuntime === undefined ? {} : { resourceRuntime: resolve(resourceRuntime) }), json };
 }
 
 function sameFile(before: Stats, after: Stats): boolean {
@@ -114,7 +131,7 @@ function progress(campaign: UniverseCampaignSummary | null): string {
   if (!campaign || campaign.sourceState !== 'healthy') return 'Campaign progress: unavailable';
   const value = campaign.progress;
   return `Campaign progress: ${value.attempts} attempts · ${value.completedRuns} completed runs` +
-    ` · ${value.reservedModelRequests} reserved model requests · ${value.admissions} niche admissions · ${value.improvements} strict improvements` +
+    ` · ${value.reservedModelRequests} reserved generation invocations · ${value.admissions} niche admissions · ${value.improvements} strict improvements` +
     `\n    Model-generation tokens: ${value.usageComplete && value.reportedTokens !== null ? value.reportedTokens : 'unavailable'}` +
     ` · recorded subtotal: ${value.recordedTokens} · campaign deadline: ${campaign.deadlineAt ?? 'not started'}`;
 }
@@ -129,6 +146,7 @@ function renderPlan(plan: UniversePortfolioPlan): string {
       `\n    ${progress(node.campaign)}`),
     ...plan.reasons,
     'Read-only plan. Campaign completion satisfies ordering, not artifact acceptance or production success.',
+    'Planning does not validate private resource bindings or worker readiness. Generation reservations are not native API request counts.',
   ].join('\n');
 }
 
@@ -145,6 +163,7 @@ function renderResult(result: UniversePortfolioResult): string {
     ...result.reasons,
     'Ordering only: no artifact transfer, automatic delivery, push, merge, deployment, or production acceptance.',
     'Token figures cover individual campaigns; unavailable usage is not zero and no portfolio cost is estimated.',
+    'Resource-pool generation requires the explicit --resource-runtime option on each invocation; no runtime path is saved in the portfolio.',
   ].join('\n');
 }
 
@@ -163,7 +182,8 @@ export async function cmdUniversePortfolio(args: string[]): Promise<number> {
     }
     process.once('SIGINT', abort);
     process.once('SIGTERM', abort);
-    const result = await runUniversePortfolio(definition, { root: options.root, signal: controller.signal });
+    const result = await runUniversePortfolio(definition, { root: options.root, signal: controller.signal,
+      ...(options.resourceRuntime === undefined ? {} : { resourceRuntime: options.resourceRuntime }) });
     console.log(options.json ? JSON.stringify(result, null, 2) : renderResult(result));
     return result.status === 'completed' ? 0 : 1;
   } catch (error) {

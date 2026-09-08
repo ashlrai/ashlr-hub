@@ -81,8 +81,8 @@ export const AGENT_COMMANDS: AgentCommandDoc[] = [
     jsonShape: 'UniversePortfolioPlan',
   },
   {
-    usage: 'ashlr universe portfolio run --manifest <file.json> [--root <path>] --json',
-    description: 'Run declared campaign dependencies in the foreground within invocation-only concurrency and duration bounds; no daemon, artifact transfer, merge, or deployment.',
+    usage: 'ashlr universe portfolio run --manifest <file.json> [--root <path>] [--resource-runtime <private-absolute.json>] --json',
+    description: 'Run declared campaign dependencies with optional explicitly bound resource workers; preserve shared pool limits and campaign budgets. Foreground only; no daemon, artifact transfer, merge, or deployment.',
     safety: 'append',
     jsonShape: 'UniversePortfolioResult',
   },

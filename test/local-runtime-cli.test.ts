@@ -153,6 +153,18 @@ describe('local runtime CLI', () => {
     handle.emit('close', 0, null); expect(await running).toBe(0); expect(output).not.toHaveBeenCalled();
   });
 
+  it('forwards a portfolio runtime binding unchanged to the verified child only', async () => {
+    const handle = child(); childProcess.spawn.mockReturnValue(handle);
+    const forwarded = ['universe', 'portfolio', 'run', '--manifest', '/private/fixture/portfolio.json',
+      '--root', '/private/fixture/universe', '--resource-runtime', "/private/fixture owner's/runtime.json", '--json'];
+    const running = cmdRuntime(['run', '--store', '/private/fixture/store', '--', ...forwarded]);
+    expect(core.resolveLocalRuntime).toHaveBeenCalledTimes(1);
+    expect(childProcess.spawn).toHaveBeenCalledWith(installation().nodePath, [installation().binPath, ...forwarded],
+      expect.objectContaining({ stdio: 'inherit', shell: false }));
+    handle.emit('close', 0, null); expect(await running).toBe(0);
+    expect(output).not.toHaveBeenCalled(); expect(errors).not.toHaveBeenCalled();
+  });
+
   it('does not confuse a valid universe named help with a help flag', async () => {
     const handle = child(); childProcess.spawn.mockReturnValue(handle);
     const running = cmdRuntime(['run', '--store', '/private/fixture/store', '--', 'universe', 'run', 'help', '--root', '/private/fixture/universe']);

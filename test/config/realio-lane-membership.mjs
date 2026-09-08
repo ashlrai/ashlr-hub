@@ -71,6 +71,7 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-file-operations-runner.test.ts', // frozen snapshot admission with private Git fixtures
   'test/universe-campaign-integration.test.ts', // native multi-generation ownership, feedback and durable resource limits
   'test/universe-portfolio-integration.test.ts', // native cross-Universe dependency ordering and concurrent campaign settlement
+  'test/universe-portfolio-resource-integration.test.ts', // shared resource ledger and confined cross-Universe dependency execution
   'test/universe-feedback-replay.test.ts', // durable feedback integrity and a complete 64-trial record footprint
   'test/universe-search-feedback-integration.test.ts', // native metric-directed search after repeated unchanged trials
   'test/universe-search-feedback-replay.test.ts', // independent versioned search-context replay and legacy recovery
