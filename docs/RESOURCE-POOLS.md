@@ -113,6 +113,10 @@ billing; confirm its account, model eligibility, and overage settings before use
 Authentication is an operator step outside the runner. Adding a worker to JSON
 does not authenticate it or establish its quota. Keep native account directories
 and launcher files outside task-writable workspaces.
+Switching accounts in a desktop app is not simultaneous CLI enrollment. To run
+two Codex subscriptions concurrently, complete the native sign-in separately for
+each selected state directory; never copy the first account's credentials to
+create the second worker.
 
 1. Select a supported, version-pinned native executable. For two Codex accounts,
    use separate owner-managed launchers and native state directories. `CODEX_HOME`
@@ -144,6 +148,48 @@ Test the exact launcher first with a small explicit task in an expendable
 workspace, then inspect its result, resource observation, and diff before using
 the queue. This dispatch consumes the selected provider's allowance; a healthy
 local fixture is not evidence that native credentials or plan entitlements work.
+
+### Check launcher capabilities before dispatch
+
+Run this against the exact operator-trusted launcher you intend to enroll. The
+mode-`0600` command file contains its argv array, for example
+`["/absolute/owner-managed/codex-a"]`; it contains no credentials. The working
+directory must already be owned, mode `0700`, canonical, and outside candidates.
+
+```sh
+ashlr resources launcher check --provider codex \
+  --command /absolute/private/codex-a-command.json \
+  --cwd /absolute/private/launcher-check --json
+```
+
+Repeat with each distinct launcher and `--provider claude` for Claude Code.
+This command requests only native help/version output through the trusted prefix,
+under one bounded deadline (default 10 seconds, `--timeout-ms` up to 30 seconds).
+Native startup and wrappers can still maintain their own configuration/cache;
+the command does not request login, authentication status, quota, inference,
+reset credits or paid fallback. It writes no Hub enrollment or ledger.
+
+Exit zero and `status:supported` mean required flags were **advertised**, not that
+the full argument combination or a model works. Missing flags, known unsupported
+Claude versions, failures, output limits and uncertain cleanup have fixed reason
+codes. Unknown version formats remain `null`; they are not minimum-version proof.
+Reports omit raw native output, commands, paths and account identifiers. Finish
+commissioning with native identity/billing verification, quota evidence and an
+explicit allowance-consuming canary as described above.
+
+### Grok Build integration status
+
+`--provider grok` checks native `agent stdio` help with auto-updates disabled.
+Even when advertised upstream support is found, it returns exit one with
+`hubTransport:not-implemented`. Grok is not currently an enrollable pool provider.
+
+Grok Build documents headless and ACP interfaces and a separate `GROK_HOME` for
+native state. Subscription entitlement and the selected billing route still need
+account-specific verification. A Hub adapter must establish configuration/tool
+isolation, cached-auth behavior, terminal and usage semantics, and cancellation;
+top-level flags alone do not prove ACP enforcement. Do not substitute a Claude
+binding or silently introduce an API key. [Native integration](https://docs.x.ai/build/cli/headless-scripting),
+[native settings](https://docs.x.ai/build/settings/reference).
 
 ## Supply quota observations
 

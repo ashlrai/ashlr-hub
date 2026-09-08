@@ -427,6 +427,29 @@ shared capacity. `workspace` is a mode-`0700`, empty Git root containing only it
 must be separate from the entire Universe store, pool ledger, and candidate
 directory. Keep
 credentials in the enrolled native account setup, not in this runtime file.
+
+Check the entire local setup before a campaign:
+
+```sh
+ashlr universe resources check \
+  --resource-runtime /absolute/private/resource-runtime.json --json
+```
+
+This reads only the named private files, bounded sterile-workspace Git metadata,
+and existing pool ledger. It validates pool/bindings and configured refresh pins,
+reports capacity groups and timestamped snapshot exclusions, and warns about
+identical native commands assigned to separate capacity keys. Different command
+paths are not proof of different accounts. No launcher, refresh, model or provider
+is contacted; missing storage remains missing and existing ownership is untouched.
+
+Exit zero means locally valid configuration, **not** authenticated fleet readiness
+or permission to dispatch. Workers may all remain excluded by stale, unknown,
+denied or occupied capacity. `sampledAt` dates the local plan, not a new provider
+observation. Invalid input returns fixed failing-stage diagnostics without paths
+or a partial roster. Because no campaign/candidate is supplied, their boundary,
+manifest and digest checks remain mandatory at execution time. For help-only
+native capability checks, see [launcher commissioning](RESOURCE-POOLS.md#check-launcher-capabilities-before-dispatch).
+
 Fresh explicit worker observations are required even when the pool allows
 unknown quota; unknown quota permission is not fresh health evidence.
 By default, the runtime reads only the explicit observation file. To authorize

@@ -12,6 +12,8 @@ export { initUniverseCampaign, readUniverseCampaign, readUniverseCampaigns, requ
 export { runUniverseCampaign } from './campaign.js';
 export { readUniverseCampaignReadiness } from './campaign-readiness.js';
 export type { UniverseCampaignReadiness } from './campaign-readiness.js';
+export { checkResourceGenerationRuntime } from './resource-runtime-check.js';
+export type { ResourceGenerationRuntimeCheck } from './resource-runtime-check.js';
 export { superviseUniverseCampaigns } from './campaign-supervisor.js';
 export type { UniverseCampaignSupervisorOptions, UniverseCampaignSupervisorResult,
   UniverseCampaignSupervisorTransition, UniverseCampaignSupervisorOutcome } from './campaign-supervisor.js';
