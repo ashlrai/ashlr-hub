@@ -428,6 +428,13 @@ The console's in-memory readings are not automatically supplied to a separate
 Universe process. Existing file-level denials remain vetoes in Universe even
 after fresh metadata is captured.
 
+For existing local Ollama bindings, Universe's private `localModelConfigPath`
+option pins exact model digests and renews short-lived evidence via inventory-only
+reads before new generation tasks. It does not run this console's collector or
+perform inference during inventory checks. See the [Universe local refresh
+guide](ASHLR-UNIVERSE.md#renew-explicitly-pinned-local-model-evidence) for enrollment,
+deadline, denial and scope rules.
+
 Claude continues to use supplied/native execution events: its documented status
 line quotas are populated after a session API response, not a standalone complete
 quota polling API. Local workers continue to require fresh explicit health.

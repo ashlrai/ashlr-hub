@@ -100,6 +100,32 @@ describe('UniverseView', () => {
   beforeEach(() => evictAll());
   afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
+  it('describes an unrun experiment as registered rather than execution-ready', async () => {
+    const current = summary();
+    current.runs = [];
+    current.elites = [];
+    const fetch = mount(overview({ universes: [current] }));
+    await screen.findByRole('heading', { name: 'This universe is registered' });
+    expect(screen.getByText(/Verify the evaluator and required runtime before starting/)).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it.each([null, "/private/lab's experiments"])('offers a read-only campaign check with an explicit root (%s)', async (root) => {
+    const fetch = mount(overview({ campaigns: [campaign({ state: 'ready', owner: null, reason: null })] }), root);
+    await screen.findByText('Registered; execution readiness has not been checked.');
+    const check = [...document.querySelectorAll('code')]
+      .flatMap((node) => (node.textContent ?? '').split('\n'))
+      .find((line) => line.startsWith('ashlr universe campaign check '));
+    expect(check).toBe(root === null
+      ? "ashlr universe campaign check compiler-search --json --root '/absolute/private/experiments'"
+      : withUniverseRoot('ashlr universe campaign check compiler-search --json', root));
+    expect(check?.match(/ --root /g)).toHaveLength(1);
+    expect(screen.getByText(/not current worker readiness/)).toBeInTheDocument();
+    if (root === null) expect(screen.getByText(/Replace the example root/)).toBeInTheDocument();
+    else expect(screen.queryByText(/Replace the example root/)).not.toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
   it.each([false, true])('pins every displayed operational command to the scoped store (populated: %s)', async (populated) => {
     const root = "/private/lab's $data; with spaces";
     mount(populated ? overview({ campaigns: [campaign()], deliveryReports: [deliveryReport()] }) : overview({ universes: [] }), root);

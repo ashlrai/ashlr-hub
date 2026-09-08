@@ -33,6 +33,7 @@ Planning checks campaign evidence, not worker readiness or private runtime files
 Fresh observations and shared pool limits still govern every resource handoff.
 An optional private quotaConfigPath enables bounded Codex metadata capture;
 optional capacityWaitMs (0-60000) can wait for collector and worker contention.
+Optional localModelConfigPath enables bounded digest-pinned local inventory reads.
 Without positive waiting, use maxParallel:1 for a single worker/collector;
 capacity withholding pauses a campaign. Neither mode is a durable queue or a
 retry of uncertain work. Reservations count generation

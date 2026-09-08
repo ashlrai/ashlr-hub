@@ -10,6 +10,8 @@ export { buildUniverseFileOperationsContext, validateUniverseFileOperationsConte
 export { initUniverseCampaign, readUniverseCampaign, readUniverseCampaigns, requestUniverseCampaignControl,
   validateUniverseCampaignDefinition } from './campaign-store.js';
 export { runUniverseCampaign } from './campaign.js';
+export { readUniverseCampaignReadiness } from './campaign-readiness.js';
+export type { UniverseCampaignReadiness } from './campaign-readiness.js';
 export { deliverUniverseElite, readUniverseDeliveries, validUniverseDeliveryBranch } from './delivery.js';
 export type { UniverseDeliveryReceipt, UniverseDeliveryReport } from './delivery.js';
 export { buildUniverseGraph } from './graph.js';

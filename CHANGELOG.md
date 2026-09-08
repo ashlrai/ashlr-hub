@@ -11,6 +11,16 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Unattended campaign prerequisites
+
+- Adds read-only scoped campaign checks that distinguish owner controls, recorded
+  resource holds, recovery needs and exhausted budgets without inferring current
+  provider readiness or automatically resuming work.
+- Adds optional pinned local model inventory refresh before resource generation,
+  so explicitly enrolled local workers can renew stale evidence within existing
+  deadlines. No download, model load, inference, account discovery or fallback is
+  performed by the inventory check; failed captures withhold managed capacity.
+
 ### Bounded contention recovery
 
 - Adds private `capacityWaitMs` for foreground Universe generations to wait for
