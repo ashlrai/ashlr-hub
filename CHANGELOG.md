@@ -11,6 +11,17 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Foreground campaign supervision
+
+- Adds bounded supervision of an explicit queue of registered campaigns, with
+  up to four concurrent runners, immutable admission checkpoints, durable outcome
+  readback, and cancellation that awaits owned cleanup.
+- Explicit owner pause is now recorded for operationally paused campaigns;
+  repeated owner pauses remain idempotent. Optional raw-record checkpoints bind
+  execution admission to exact control history as well as projected state.
+- Supervision launches eligible never-started campaigns once, without resetting
+  budgets, automatically retrying resource refusals, or installing a daemon.
+
 ### Unattended campaign prerequisites
 
 - Adds read-only scoped campaign checks that distinguish owner controls, recorded

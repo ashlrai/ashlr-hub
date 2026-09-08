@@ -81,6 +81,7 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-capacity-wait-integration.test.ts', // parallel inert campaigns sharing collector and worker capacity
   'test/universe-local-refresh-integration.test.ts', // inert inventory and local-chat campaign lifecycle
   'test/universe-campaign-readiness.test.ts', // immutable private campaign and evaluator readback
+  'test/universe-supervision-integration.test.ts', // confined multi-campaign supervision and owned cleanup
   'test/universe-feedback-replay.test.ts', // durable feedback integrity and a complete 64-trial record footprint
   'test/universe-search-feedback-integration.test.ts', // native metric-directed search after repeated unchanged trials
   'test/universe-search-feedback-replay.test.ts', // independent versioned search-context replay and legacy recovery

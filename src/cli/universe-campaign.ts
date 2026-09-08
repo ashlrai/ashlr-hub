@@ -13,6 +13,7 @@ const USAGE = `usage: ashlr universe campaign <command> [id] [--root <private di
   resume <id>                  Alias for run; does not reset the deadline or budget
   status [id]                  Inspect recorded progress without starting work
   check <id> --root <absolute>  Inspect recorded recovery evidence without execution
+  supervise <id> [id ...]      Run an explicit queue with bounded foreground supervision
   pause <id>                   Request an owner-acknowledged pause
   stop <id>                    Request a terminal stop
   help                         Show this help
@@ -152,6 +153,10 @@ function render(summary: UniverseCampaignSummary, root?: string): string {
 
 /** Campaign controls remain explicit CLI actions; console reads never dispatch. */
 export async function cmdUniverseCampaign(args: string[]): Promise<number> {
+  if (args[0] === 'supervise') {
+    const { cmdUniverseSupervise } = await import('./universe-supervise.js');
+    return cmdUniverseSupervise(args.slice(1));
+  }
   const controller = new AbortController();
   const abort = (): void => controller.abort();
   let checking = false;

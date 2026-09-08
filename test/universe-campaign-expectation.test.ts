@@ -116,6 +116,66 @@ describe('atomic campaign admission checkpoints', () => {
     expect(hooks.run).not.toHaveBeenCalled(); expect(readCampaignEvents(value.directory)).toEqual(before);
   });
 
+  it.each(['invalid', 'e'.repeat(64), '', null, 17])('rejects an invalid or changed raw checkpoint %j without mutation', async (recordsDigest) => {
+    const value = fixture();
+    value.expectedIdentity.recordsDigest = recordsDigest as string;
+    const before = readCampaignEvents(value.directory);
+    await expect(runUniverseCampaign('campaign', value)).rejects.toThrow(/changed after portfolio admission/);
+    expect(hooks.run).not.toHaveBeenCalled(); expect(readCampaignEvents(value.directory)).toEqual(before);
+  });
+
+  it('accepts an exact raw checkpoint and preserves ordinary campaign execution', async () => {
+    const value = fixture();
+    value.expectedIdentity.recordsDigest = digest(canonical(readCampaignEvents(value.directory)));
+    expect((await runUniverseCampaign('campaign', value)).state).toBe('completed');
+    expect(hooks.run).toHaveBeenCalledOnce();
+  });
+
+  it('rejects changed raw history even when its projected summary is identical', async () => {
+    const value = fixture(); const at = new Date().toISOString();
+    const settlement = { kind: 'settled' as const, state: 'paused' as const, at, reason: 'Operational hold' };
+    appendCampaignEvent(value.directory, settlement);
+    const admitted = readUniverseCampaign('campaign', value);
+    value.expectedIdentity.summaryDigest = digest(canonical(admitted));
+    value.expectedIdentity.recordsDigest = digest(canonical(readCampaignEvents(value.directory)));
+    appendCampaignEvent(value.directory, settlement);
+    expect(readUniverseCampaign('campaign', value)).toEqual(admitted);
+    const before = readCampaignEvents(value.directory);
+    await expect(runUniverseCampaign('campaign', value)).rejects.toThrow(/changed after portfolio admission/);
+    expect(hooks.run).not.toHaveBeenCalled(); expect(readCampaignEvents(value.directory)).toEqual(before);
+  });
+
+  it('checks the raw checkpoint inside the execution lease before recovery or settlement', async () => {
+    const value = fixture(); const at = new Date().toISOString();
+    const settlement = { kind: 'settled' as const, state: 'paused' as const, at, reason: 'Operational hold' };
+    appendCampaignEvent(value.directory, settlement);
+    value.expectedIdentity.summaryDigest = digest(canonical(readUniverseCampaign('campaign', value)));
+    value.expectedIdentity.recordsDigest = digest(canonical(readCampaignEvents(value.directory)));
+    // Initial projection completes first. The subsequent read inside the lease
+    // must reject raw changes even though the repeated settlement projects identically.
+    const ownership = await import('../src/core/universe/execution.js');
+    const actual = ownership.withUniverseExecution;
+    const execution = vi.spyOn(ownership, 'withUniverseExecution').mockImplementation(async (...args) => {
+      appendCampaignEvent(value.directory, settlement);
+      return actual(...args);
+    });
+    try {
+      await expect(runUniverseCampaign('campaign', value)).rejects.toThrow(/changed after portfolio admission/);
+      expect(hooks.run).not.toHaveBeenCalled();
+      expect(readCampaignEvents(value.directory).map((event) => event.kind)).toEqual(['created', 'settled', 'settled']);
+    } finally { execution.mockRestore(); }
+  });
+
+  it('checks an exact raw checkpoint even when the campaign is already terminal', async () => {
+    const value = fixture();
+    const completed = await runUniverseCampaign('campaign', value);
+    value.expectedIdentity.summaryDigest = digest(canonical(completed));
+    value.expectedIdentity.recordsDigest = 'e'.repeat(64);
+    const before = readCampaignEvents(value.directory);
+    await expect(runUniverseCampaign('campaign', value)).rejects.toThrow(/changed after portfolio admission/);
+    expect(hooks.run).toHaveBeenCalledOnce(); expect(readCampaignEvents(value.directory)).toEqual(before);
+  });
+
   it.each(['pause', 'stop'] as const)('never resumes or settles through a late ownerless %s', async (action) => {
     const value = fixture();
     // The first control lock belongs to the started append, after all admission
@@ -127,6 +187,19 @@ describe('atomic campaign admission checkpoints', () => {
     expect(result.state).toBe(action === 'pause' ? 'paused' : 'stopped');
     expect(result.progress.attempts).toBe(0);
     expect(readCampaignEvents(value.directory).map((event) => event.kind)).toEqual(['created', 'control', 'settled']);
+  });
+
+  it.each(['pause', 'stop'] as const)('preserves a late explicit %s of operationally paused work', async (action) => {
+    const value = fixture();
+    appendCampaignEvent(value.directory, { kind: 'settled', at: new Date().toISOString(), state: 'paused', reason: 'Operational hold' });
+    value.expectedIdentity.summaryDigest = digest(canonical(readUniverseCampaign('campaign', value)));
+    value.expectedIdentity.recordsDigest = digest(canonical(readCampaignEvents(value.directory)));
+    hooks.beforeControlLock = () => { requestUniverseCampaignControl('campaign', action, value); };
+    await expect(runUniverseCampaign('campaign', value)).rejects.toThrow(CampaignControlConflictError);
+    expect(hooks.run).not.toHaveBeenCalled();
+    expect(readUniverseCampaign('campaign', value)).toMatchObject({ state: action === 'pause' ? 'paused' : 'stopped',
+      progress: { attempts: 0, reservedModelRequests: 0 } });
+    expect(readCampaignEvents(value.directory).map((event) => event.kind)).toEqual(['created', 'settled', 'control', 'settled']);
   });
 
   it('does not refresh its checkpoint to adopt a pause that occurs during the captured snapshot projection', async () => {
@@ -158,6 +231,7 @@ describe('atomic campaign admission checkpoints', () => {
     appendCampaignEvent(value.directory, { kind: 'started', at, deadlineAt: new Date(Date.parse(at) + 60_000).toISOString(),
       owner: { pid: 2_147_000_000, startRef: 'exited-fixture-owner' } });
     value.expectedIdentity.summaryDigest = digest(canonical(readUniverseCampaign('campaign', value)));
+    value.expectedIdentity.recordsDigest = digest(canonical(readCampaignEvents(value.directory)));
     const completed = await runUniverseCampaign('campaign', value);
     expect(completed.state).toBe('completed'); expect(completed.sourceState).toBe('healthy');
     expect(hooks.run).toHaveBeenCalledOnce();
