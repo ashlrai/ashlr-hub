@@ -11,6 +11,17 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Bounded contention recovery
+
+- Adds private `capacityWaitMs` for foreground Universe generations to wait for
+  verified collector contention and otherwise eligible reserved worker slots.
+  One monotonic allowance stays inside the original generation deadline.
+- Rechecks current evidence without repeated metadata probes or new reservations.
+  Expiry, denial and uncertain occupancy cannot become permission through waiting;
+  atomic admission, task identity and replay protection remain unchanged.
+- Keeps omitted/zero waiting compatible and documents foreground state honestly:
+  no durable queue, live queue-position claim, worker retry or resident activation.
+
 ### Bounded Universe quota refresh
 
 - Adds an optional private `quotaConfigPath` so resource generation can capture

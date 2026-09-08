@@ -32,6 +32,8 @@ That execution-only file is not a manifest or a console option. Native provider
 request counts remain unknown; recorded worker usage is not account-wide spend.
 Its optional quotaConfigPath enables one bounded Codex metadata pass before new
 resource admission, not a resident collector or an automatic task retry.
+Optional private capacityWaitMs (0-60000) enables bounded contention waits within
+the existing generation deadline; it does not retry uncertain worker execution.
 The evaluator is pinned separately from candidate edits. Results are local
 experiments, not accepted production changes. --root defaults to ~/.ashlr/universe.
 Delivery creates only a local branch; it never pushes, merges, or deploys.

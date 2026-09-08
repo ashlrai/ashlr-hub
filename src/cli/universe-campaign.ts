@@ -24,6 +24,8 @@ not accepted production changes. --root defaults to ~/.ashlr/universe.
 Resource-pool run/resume requires --resource-runtime <private absolute JSON>.
 Optional private quotaConfigPath enables bounded Codex metadata capture before
 new resource admission; stale or refused evidence still pauses the campaign.
+Optional capacityWaitMs (0-60000) waits for eligible contention without adding
+generations or extending the campaign deadline; omission/zero preserves no-wait.
 Repeat that explicit runtime option on resume; it is not saved in the campaign.
 maxModelRequests reserves generation transport invocations, not native API calls.
 Native CLI invocations may make zero or multiple provider requests.

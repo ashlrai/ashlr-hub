@@ -32,9 +32,10 @@ Repeat the option on each invocation; it is not saved in the portfolio manifest.
 Planning checks campaign evidence, not worker readiness or private runtime files.
 Fresh observations and shared pool limits still govern every resource handoff.
 An optional private quotaConfigPath enables bounded Codex metadata capture;
-use maxParallel:1 for generations sharing its exclusive collector root.
-Use maxParallel:1 for a single available worker; capacity withholding pauses a
-campaign, not an automatic queue or retry. Reservations count generation
+optional capacityWaitMs (0-60000) can wait for collector and worker contention.
+Without positive waiting, use maxParallel:1 for a single worker/collector;
+capacity withholding pauses a campaign. Neither mode is a durable queue or a
+retry of uncertain work. Reservations count generation
 invocations, not native API calls; actual native provider request counts are unknown.
 --root defaults to ~/.ashlr/universe. Planning does not create missing stores.
 Exit codes: 0 healthy unblocked plan/completed run, 1 incomplete/source failure,

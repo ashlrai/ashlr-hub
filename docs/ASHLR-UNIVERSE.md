@@ -440,8 +440,9 @@ credentials in it.
 
 This opt-in starts one sequential metadata capture per configured Codex alias,
 within the generation's existing deadline. It confirms collector cleanup before
-task admission; it does not retry a failed capture, wait for worker capacity, or
-run a resident collector. Failed, incomplete, expired or refused captures block
+task admission; the capture itself does not retry failures or run a resident
+collector. The separate `capacityWaitMs` option below can wait before admission.
+Failed, incomplete, expired or refused captures block
 managed capacity even when an older file or ledger says ready. Fresh observations
 can renew stale evidence, but explicit file-level health, retry-after and reserve
 denials remain independent vetoes. Repair those observations from verified
@@ -451,10 +452,10 @@ retained by the existing merge.
 Captured readings overlay this invocation's input; the observation file is not
 rewritten. A separate resource console's in-memory collector does not refresh
 Universe's file. Console and Universe collectors use the same exclusive lease
-and durable pending marker for a pool root. Concurrent collection is refused,
-not attached to or restarted. Use portfolio `maxParallel: 1` when resource
-generations share this bounded collector; even parallel generations for different
-workers can contend for its root. A crash or unconfirmed metadata shutdown keeps
+and durable pending marker for a pool root. Without a positive `capacityWaitMs`,
+concurrent collection is refused, not attached to or restarted; use portfolio
+`maxParallel: 1` when sharing a collector without waiting. Even generations for
+different workers can contend for its root. A crash or unconfirmed metadata shutdown keeps
 the pending marker and requires operator reconciliation before another capture.
 Never remove that marker just to obtain another attempt.
 
@@ -463,6 +464,39 @@ reruns remain no-ops. Claude and local workers still require explicit fresh
 observations; no account login, reset, account switching or provider fallback is
 introduced. Without eligible evidence, admission is withheld and the campaign
 pauses; this is not a claim of uninterrupted unattended operation.
+
+To tolerate temporary contention, add `"capacityWaitMs": 15000` to the same
+private runtime file. It accepts integers from `0` to `60000`; omission or zero
+preserves immediate admission. This is one monotonic pre-admission allowance
+shared by collector acquisition, metadata capture and worker-slot waiting, inside
+the original generation/trial/campaign deadlines. It does not add a generation,
+refund its reservation, extend task timeout, or reset the allowance after a race.
+
+Positive waiting yields asynchronously, normally rechecking about every 250 ms:
+
+- Collector acquisition waits only on verified live ownership. Unknown/corrupt
+  ownership or a pending marker remaining after acquisition is a terminal refusal.
+- Worker waiting uses read-only pool snapshots and the variant's worker allowlist.
+  At least one otherwise eligible capacity must be blocked only by concurrency,
+  with a reserved receipt and no uncertain receipt for that capacity.
+- Each check revalidates current file observations, captured freshness and explicit
+  denial signals. Removing an unmanaged worker from the file withholds that worker.
+  An explicit denial observed during this invocation remains a veto for its duration;
+  deleting that row cannot restore a managed worker's cached readiness.
+  Quota/task caps, unknown or stale evidence, retry-after and uncertainty do not
+  become permission merely because time passes. Metadata is captured once, not
+  once per poll. No occupied receipt is cleared by waiting.
+- Final atomic admission remains authoritative. A known no-reservation concurrency
+  race can return to the same remaining wait; an exception or any existing receipt
+  cannot trigger another worker execution. Existing own-task identities may still
+  reach exact replay/conflict after wait expiry, without recovering output.
+
+When waiting ends without eligible capacity, the existing withheld/pause behavior
+applies. Cancellation and the outer deadline remain effective during waiting.
+This is foreground waiting, not a persistent queue, fairness guarantee, or a
+hard provider-start timestamp. The UI continues to show campaign state and settled
+trial evidence; it does not report live queue position or separately measured wait
+duration. Generation duration includes waiting, not additional provider requests.
 
 From the built Hub checkout, after explicitly authorizing the selected workers
 to receive the declared files and generation context:
@@ -480,7 +514,7 @@ runtime path is not persisted as campaign authority. It is accepted only by
 `universe run`, campaign `run/resume`, and portfolio `run`, not `init`, status, archive, or the
 read-only console. Inspect the experiment and pool receipts before resuming a
 withheld, unavailable, or unresolved attempt. Existing task IDs are not a reason
-to redispatch or apply an unavailable historical response. No automatic retry,
+to redispatch or apply an unavailable historical response. No automatic worker retry,
 account change, capacity release, or model/CLI upgrade is implied.
 
 Portfolio `run` can forward one explicit runtime to its enrolled campaigns. Each
@@ -855,7 +889,9 @@ with their own evaluators and budgets, each in a different Universe:
    must match its pinned pool and bindings. Command and direct-local variants
    retain their existing paths. Runtime files, fresh observations, shared ledger
    and workspace requirements are defined in the [resource generation guide](#generate-candidates-through-an-enrolled-resource-pool).
-   The option does not discover accounts, start a collector, or refresh observations.
+   The option does not discover accounts. Optional private `quotaConfigPath`
+   authorizes bounded metadata capture; `capacityWaitMs` authorizes bounded
+   contention waiting, as described in the resource generation guide.
    Missing or stale evidence can pause a resource-backed campaign without
    producing an accepted artifact.
 
