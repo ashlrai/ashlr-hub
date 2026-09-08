@@ -97,7 +97,7 @@ The separate bindings file must cover every worker exactly once:
 A native command is an absolute executable or a trusted owner-managed wrapper
 prefix. It must forward appended native CLI arguments and stdin unchanged, and
 must already select its intended account through the vendor's supported
-authentication. Hub does not create wrappers, log in, copy OAuth tokens, switch
+authentication. The runner does not create wrappers, log in, copy OAuth tokens, switch
 accounts, scrape keychains/transcripts, consume reset credits, or alter billing.
 Direct native executables use their existing default authentication. Do not map
 the same default account to multiple independent capacity keys.
@@ -109,6 +109,58 @@ loader overrides. A wrapper or cached native profile can still select paid
 billing; confirm its account, model eligibility, and overage settings before use.
 
 ### Commission native accounts and local capacity
+
+#### Prepare isolated native profiles
+
+`ashlr resources profile prepare` creates a new owner-private profile; it does
+not sign in or enroll capacity. Choose an existing mode-`0700` parent outside
+repositories, task workspaces and version control. Select the canonical regular
+executable behind the vendor's installation symlink, without updating it.
+
+```sh
+ashlr resources profile prepare --provider codex \
+  --directory /absolute/private/profiles/codex-a \
+  --executable /absolute/canonical/codex-executable --json
+```
+
+Repeat with a **different new directory** for `codex-b`. For an isolated Claude
+login, use `--provider claude` and its canonical native executable. This writes
+`launcher.mjs`, `command.json` and a preparation-only `profile.json` as mode
+`0600`, plus empty private state directories. Existing targets are never reused,
+repaired or overwritten. A partial failure retains its leaf for inspection;
+never delete it automatically because a later login may have added credentials.
+
+The standalone launcher pins the selected native and Node executable paths and
+checks its original private directory identities. It uses `process.execve` to
+preserve PID, process group and stdio. A Node runtime supporting that API and a
+supported POSIX system are required; relocating/replacing state directories or
+removing the pinned runtime can invalidate the launcher. A native OS-level exec
+failure is still a process failure, not a guarantee of a redacted exception.
+
+Codex gets its own `CODEX_HOME` with explicit file credential storage and ChatGPT
+login selection. Forwarded config overrides permit simple unquoted bare/dotted
+keys only; the two selected authentication keys cannot be overridden through
+normal launcher arguments. Claude gets separate `CLAUDE_CONFIG_DIR` and
+`ANTHROPIC_CONFIG_DIR` directories and disabled native updates. This avoids
+reusing the default Anthropic profile directory as a fallback. [Codex native
+authentication](https://learn.chatgpt.com/docs/auth), [Anthropic profile resolution](https://platform.claude.com/docs/en/manage-claude/wif-reference#configuration-directory).
+
+The native child receives only existing PATH/HOME/TMPDIR/LANG/LC_ALL plus the
+fixed profile selectors. HOME is unchanged. This is owner-managed launcher code,
+not a sandbox, account-independence proof or billing attestation. In particular,
+Node startup happens before the launcher sanitizes the native child's environment;
+run manual commands from a trusted shell. Hub dispatch already strips loader
+overrides before starting the wrapper.
+
+The returned `loginCommand` is the **separate interactive native sign-in** to run
+when ready. Codex uses `login`; Claude uses `auth login --claudeai`. Finish the
+vendor's browser flow with the intended account, then verify account/billing and
+quota before enrollment. `authentication:not-checked` in the preparation manifest
+never changes into a live login-status claim. Use its `command.json` with
+`resources launcher check`, and the contained argv as the pool binding's `command`.
+No credential is read or copied, and preparation requests no model inference.
+
+#### Verify identity and capacity
 
 Authentication is an operator step outside the runner. Adding a worker to JSON
 does not authenticate it or establish its quota. Keep native account directories

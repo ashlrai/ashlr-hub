@@ -11,6 +11,15 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Isolated native account preparation
+
+- Adds `resources profile prepare` to create a new private standalone launcher
+  and state directories for Codex or Claude, without copying credentials,
+  changing desktop authentication or executing native login.
+- Preserves native process identity/stdin through execve, strips ambient native
+  authentication overrides and keeps preparation distinct from authentication,
+  quota readiness and pool enrollment. Existing profiles are never overwritten.
+
 ### Multi-account commissioning diagnostics
 
 - Adds a read-only Universe resource runtime check for private configuration,
