@@ -11,6 +11,17 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Resource-backed portfolio execution
+
+- Adds an execution-only `--resource-runtime` option to `universe portfolio run`
+  so explicitly enrolled campaigns can share the existing quota-aware worker pool.
+  Read-only planning, portable definitions, and results do not retain the binding.
+- Captures the runtime path once per invocation and preserves campaign identity checks,
+  original budgets, dependency ordering, cancellation, and shared resource caps.
+  Worker-capacity withholding pauses campaigns; it does not add an implicit queue.
+- Documents sequential dispatch for a single available worker and distinguishes
+  generation invocation reservations from unknown native provider request counts.
+
 ### Resource-backed Universe generation
 
 - Connects explicitly enrolled Codex, Claude and local resource workers to the
@@ -24,8 +35,8 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   honors current quota refusals across aliases, and preserves successful
   generation evidence when the subsequent evaluator times out or is cancelled.
 - Adds recorded resource provenance to the CLI and Universe inspector. No
-  automatic account commissioning, quota collector activation, portfolio runtime
-  forwarding, registry publication or resident-fleet activation is implied.
+  automatic account commissioning, quota collector activation, registry
+  publication or resident-fleet activation is implied.
 
 ### Universe commissioning and usable operator documentation
 

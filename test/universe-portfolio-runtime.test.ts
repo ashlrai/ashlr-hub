@@ -47,16 +47,66 @@ describe('portfolio invocation envelope', () => {
     expect(result.plan.definition.tasks.map((task) => task.campaignId)).toEqual(['a', 'b']);
     expect(result.plan.definition.maxParallel).toBe(1);
     expect(hooks.run.mock.calls.map(([, value]) => value.root)).toEqual([originalRoot, originalRoot]);
+    expect(hooks.run.mock.calls.every(([, value]) => !Object.hasOwn(value, 'resourceRuntime'))).toBe(true);
     expect(hooks.read.mock.calls.every(([, value]) => value.root === originalRoot)).toBe(true);
+  });
+
+  it.each(['planning', 'dispatch'])('captures a private runtime before %s can mutate caller options', async (phase) => {
+    const f = fixture();
+    const runtime = '/private/operator/resource-runtime.json';
+    const changedRuntime = '/private/another/resource-runtime.json';
+    const options = { root: '/unused', resourceRuntime: runtime };
+    if (phase === 'planning') {
+      hooks.read.mockImplementationOnce((id: string) => {
+        options.resourceRuntime = changedRuntime;
+        return structuredClone(f.values.get(id)!);
+      });
+    } else {
+      hooks.run.mockImplementation(async (id: string) => {
+        options.resourceRuntime = changedRuntime;
+        return f.complete(id);
+      });
+    }
+    const result = await runUniversePortfolio(f.definition, options);
+    expect(result.status).toBe('completed');
+    expect(hooks.run.mock.calls.map(([, value]) => value.resourceRuntime)).toEqual([runtime, runtime]);
+    expect(hooks.read.mock.calls.every(([, value]) => canonical(value) === canonical({ root: '/unused' }))).toBe(true);
+    expect(JSON.stringify(result)).not.toMatch(/resourceRuntime|\/private\//);
+    expect(options.resourceRuntime).toBe(changedRuntime);
+  });
+
+  it('preserves the legacy campaign option shape when the runtime is explicitly undefined', async () => {
+    const f = fixture();
+    const result = await runUniversePortfolio(f.definition, { root: '/unused', resourceRuntime: undefined });
+    expect(result.status).toBe('completed');
+    for (const [, options] of hooks.run.mock.calls) {
+      expect(Object.keys(options).sort()).toEqual(['expectedIdentity', 'root', 'signal']);
+    }
+    expect(hooks.read.mock.calls.every(([, value]) => canonical(value) === canonical({ root: '/unused' }))).toBe(true);
+    expect(JSON.stringify(result)).not.toContain('resourceRuntime');
   });
 
   it('does not dispatch any campaign when already cancelled', async () => {
     const f = fixture(); const controller = new AbortController(); controller.abort();
-    const result = await runUniversePortfolio(f.definition, { signal: controller.signal, root: '/unused' });
+    const result = await runUniversePortfolio(f.definition, { signal: controller.signal, root: '/unused',
+      resourceRuntime: '/private/operator/resource-runtime.json' });
     expect(result.status).toBe('cancelled');
     expect(result.outcomes.every((value) => value.status === 'cancelled' && !value.attempted)).toBe(true);
     expect(hooks.run).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toMatch(/resourceRuntime|\/private\//);
   });
+
+  it.each(['stopped', 'failed', 'pause-requested', 'stop-requested'] as const)(
+    'does not dispatch %s work or its dependants merely because a runtime was supplied', async (state) => {
+      const f = fixture(); f.values.set('a', { ...f.values.get('a')!, state });
+      f.definition.tasks[1]!.dependsOn = ['a'];
+      const result = await runUniversePortfolio(f.definition, { root: '/unused',
+        resourceRuntime: '/private/operator/resource-runtime.json' });
+      expect(result.status).toBe('incomplete');
+      expect(result.outcomes.every((value) => value.status === 'blocked' && !value.attempted)).toBe(true);
+      expect(hooks.run).not.toHaveBeenCalled();
+      expect(JSON.stringify(result)).not.toMatch(/resourceRuntime|\/private\//);
+    });
 
   it('checks the deadline in deferred dispatch even before the timer callback runs', async () => {
     vi.useFakeTimers(); vi.setSystemTime('2026-09-07T00:00:00Z');

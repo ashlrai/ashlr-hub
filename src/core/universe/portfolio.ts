@@ -4,7 +4,7 @@ import { readUniverseCampaign } from './campaign-store.js';
 import { runUniverseCampaign } from './campaign.js';
 import { readUniversePortfolioPlan } from './portfolio-plan.js';
 import type { UniversePortfolioPlan, UniversePortfolioPlanNode } from './portfolio-types.js';
-import type { UniverseCampaignSummary, UniverseStoreOptions } from './types.js';
+import type { UniverseCampaignSummary, UniverseRunOptions, UniverseStoreOptions } from './types.js';
 
 export interface UniversePortfolioOutcome {
   campaignId: string;
@@ -28,8 +28,6 @@ export interface UniversePortfolioResult {
   outcomes: UniversePortfolioOutcome[];
   reasons: string[];
 }
-
-type PortfolioOptions = UniverseStoreOptions & { signal?: AbortSignal };
 
 function checkPin(node: UniversePortfolioPlanNode, campaign: UniverseCampaignSummary): void {
   if (campaign.sourceState !== 'healthy' || campaign.definition.id !== node.campaignId ||
@@ -57,11 +55,14 @@ function outcome(node: UniversePortfolioPlanNode, campaign: UniverseCampaignSumm
  * A dependency is an ordering prerequisite, never permission to import code or
  * proof of product success. Each enrolled campaign is attempted at most once.
  */
-export async function runUniversePortfolio(input: unknown, options: PortfolioOptions = {}): Promise<UniversePortfolioResult> {
+export async function runUniversePortfolio(input: unknown, options: UniverseRunOptions = {}): Promise<UniversePortfolioResult> {
   const startedAt = new Date().toISOString();
   // Resolve the root once: a caller must not redirect in-flight work by mutating
   // its options object while another branch is executing.
   const store: UniverseStoreOptions = { root: resolve(options.root ?? defaultUniverseRoot()) };
+  // Snapshot the invocation-only locator separately: planning and durable
+  // observations receive only the store root, never private runtime bindings.
+  const resourceRuntime = options.resourceRuntime;
   const callerSignal = options.signal;
   const plan = readUniversePortfolioPlan(input, store);
   const deadlineMs = Date.parse(startedAt) + plan.definition.maxDurationMs;
@@ -113,6 +114,7 @@ export async function runUniversePortfolio(input: unknown, options: PortfolioOpt
       }
       try {
         const campaign = await runUniverseCampaign(node.campaignId, { ...store, signal: controller.signal,
+          ...(resourceRuntime === undefined ? {} : { resourceRuntime }),
           expectedIdentity: { universeId: node.universeId!, definitionDigest: node.definitionDigest!,
             manifestDigest: node.manifestDigest!, comparatorDigest: node.comparatorDigest!, summaryDigest: digest(canonical(admitted)) } });
         checkPin(node, campaign);

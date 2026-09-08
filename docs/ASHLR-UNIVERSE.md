@@ -106,7 +106,8 @@ child if necessary; a repeated interrupt also escalates. This is not a claim of
 process-tree cleanup by the launcher.
 It does not choose models or accounts or create background work. A campaign or
 portfolio command performs the work declared by its existing manifest and
-budgets, including configured local model requests. Normal Universe execution
+budgets, including configured local model requests and resource generation when
+an explicit private runtime is supplied. Normal Universe execution
 requirements, including the macOS isolation profile, still apply.
 
 To explicitly restore the retained verified predecessor, run:
@@ -446,16 +447,17 @@ node bin/ashlr universe campaign run campaign-id --root /absolute/private/univer
 These commands consume enrolled worker resources and write trial/task receipts.
 Use campaign `resume` with the same explicit runtime option to continue; the
 runtime path is not persisted as campaign authority. It is accepted only by
-`universe run` and campaign `run/resume`, not `init`, status, archive, or the
+`universe run`, campaign `run/resume`, and portfolio `run`, not `init`, status, archive, or the
 read-only console. Inspect the experiment and pool receipts before resuming a
 withheld, unavailable, or unresolved attempt. Existing task IDs are not a reason
 to redispatch or apply an unavailable historical response. No automatic retry,
 account change, capacity release, or model/CLI upgrade is implied.
 
-The portfolio runner does not yet accept or forward `--resource-runtime`.
-Run resource-backed campaigns directly with campaign `run/resume`; portfolio
-execution cannot supply their private binding and would record a not-started
-attempt, consume its generation-invocation reservation, and pause the campaign.
+Portfolio `run` can forward one explicit runtime to its enrolled campaigns. Each
+resource variant must match that runtime's pinned pool and bindings; different
+variants may retain their own worker allowlists. The path is not added to the
+portable portfolio definition or result. See [portfolio operation](#coordinate-campaigns-with-a-dependency-graph)
+for shared-capacity behavior and explicit reruns.
 
 The generation receipt records resource pool, allowed workers, selected worker
 and model when known, task/receipt digests, dispatch evidence, and the task's
@@ -796,6 +798,8 @@ with their own evaluators and budgets, each in a different Universe:
    evidence or multiple campaigns sharing one Universe prevent all dispatch.
    A healthy plan containing only ready, waiting, or completed nodes exits 0;
    blocked, busy, unavailable, or degraded plans exit 1. Planning never runs work.
+   A ready plan does not establish worker readiness: planning does not accept
+   `--resource-runtime`, read private runtime files, or refresh quota observations.
 
 2. Start the explicitly enrolled campaigns in the foreground:
 
@@ -803,8 +807,25 @@ with their own evaluators and budgets, each in a different Universe:
    node bin/ashlr universe portfolio run --manifest /absolute/path/to/portfolio.json --json
    ```
 
-   This executes configured commands and any configured local model requests.
-   Each campaign retains its original evaluator, lease, generation/request/token
+   This executes configured commands and any configured direct-local model requests.
+   For resource-backed generation, explicitly authorize the enrolled workers with
+   the same private runtime used by standalone campaign execution:
+
+   ```sh
+   node bin/ashlr universe portfolio run --manifest /absolute/path/to/portfolio.json \
+     --root /absolute/private/universe \
+     --resource-runtime /absolute/private/resource-runtime.json --json
+   ```
+
+   One runtime is shared across the enrolled campaigns; every resource variant
+   must match its pinned pool and bindings. Command and direct-local variants
+   retain their existing paths. Runtime files, fresh observations, shared ledger
+   and workspace requirements are defined in the [resource generation guide](#generate-candidates-through-an-enrolled-resource-pool).
+   The option does not discover accounts, start a collector, or refresh observations.
+   Missing or stale evidence can pause a resource-backed campaign without
+   producing an accepted artifact.
+
+   Each campaign retains its original evaluator, lease, generation-invocation/token
    accounting, stagnation limit, and deadline. A campaign is attempted at most
    once per invocation. Failures and operator pauses block descendants while
    independent branches can continue. A campaign already owned elsewhere is
@@ -827,6 +848,8 @@ This explicit invocation may resume campaigns already paused or interrupted at
 its start. Completed work is not replayed; attempts and reservations are not
 refunded, and original campaign deadlines do not restart. A portfolio invocation
 has a new duration window, but cannot replenish any campaign's budget.
+Supply `--resource-runtime` again for resource-backed work on every invocation;
+neither the portfolio file nor a previous result stores that execution authority.
 
 The file is the portfolio definition, not a new durable scheduler database.
 Campaign ledgers remain the recovery state. The result is a per-invocation
@@ -837,6 +860,16 @@ campaign calls, and 24 hours per invocation. `maxParallel` limits this invocatio
 campaign calls, not each campaign's trial workers, host-wide concurrency, account
 quota, or aggregate token spend. Independent invocations retain their own limits.
 
+Portfolio concurrency is not a resource-capacity waiting queue. For campaigns
+sharing a single available worker, set `maxParallel` to `1` and keep each
+campaign's trial concurrency within that worker's capacity. With higher campaign
+concurrency, a competing handoff can be withheld and pause its campaign; becoming
+free later does not automatically retry it. Dependencies order campaign
+completion, while the shared pool ledger separately enforces quota, task caps,
+and concurrent slots. Inspect the paused campaign and pool evidence before an
+explicit rerun. Generation-invocation reservations are not actual native API
+request counts, and unknown usage remains unknown.
+
 Use `--root <private directory>` consistently when campaigns use a custom store.
 The SDK exposes the same workflow:
 
@@ -846,6 +879,11 @@ import { readUniversePortfolioPlan, runUniversePortfolio } from '@ashlr/hub/univ
 const plan = readUniversePortfolioPlan(definition, { root });
 const result = await runUniversePortfolio(definition, { root, signal });
 ```
+
+For resource-backed execution, add the absolute `resourceRuntime` path to the
+`runUniversePortfolio` options. Do not add it to `definition` or the planning
+options. The same supplied path is forwarded to every campaign started by this
+invocation.
 
 `validateUniversePortfolioDefinition` validates caller input without I/O.
 `buildUniversePortfolioPlan` is a pure projection of already validated campaign

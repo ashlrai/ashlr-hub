@@ -175,6 +175,9 @@ describe('Universe portfolio CLI', () => {
     expect(text).toContain('Depends on: first');
     expect(text).toContain('Invocation limits: 2 concurrent campaigns · 60000 ms');
     expect(text).toContain('Model-generation tokens: unavailable · recorded subtotal: 42');
+    expect(text).toContain('1 reserved generation invocations');
+    expect(text).toContain('Planning does not validate private resource bindings or worker readiness');
+    expect(text).not.toContain('reserved model requests');
     expect(text).toContain('not artifact acceptance or production success');
   });
 
@@ -192,6 +195,42 @@ describe('Universe portfolio CLI', () => {
     expect(JSON.parse(output.mock.calls[0]![0] as string)).toEqual(result());
     expect(core.readUniversePortfolioPlan).not.toHaveBeenCalled();
     expect([process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')]).toEqual(before);
+  });
+
+  it('forwards one private runtime path only to execution without reading or publishing it', async () => {
+    // Deliberately nonexistent: the CLI reads its portfolio manifest, not this
+    // private runtime. Worker setup remains the execution layer's responsibility.
+    const resourceRuntime = "/private/fixture owner's/machine-runtime.json";
+    expect(await cmdUniversePortfolio(['run', '--manifest', manifest, '--root', root,
+      '--resource-runtime', resourceRuntime, '--json'])).toBe(0);
+    expect(core.runUniversePortfolio).toHaveBeenCalledWith(definition(), { root, signal: expect.any(AbortSignal), resourceRuntime });
+    expect(core.readUniversePortfolioPlan).not.toHaveBeenCalled();
+    const printed = output.mock.calls[0]![0] as string;
+    expect(JSON.parse(printed)).toEqual(result());
+    expect(printed).not.toContain(resourceRuntime);
+    expect(printed).not.toContain('resourceRuntime');
+  });
+
+  it.each([
+    ['plan', '--resource-runtime', '/private/runtime-marker.json'],
+    ['help', '--resource-runtime', '/private/runtime-marker.json'],
+    ['run', '--resource-runtime'],
+    ['run', '--resource-runtime', 'relative-runtime-marker.json'],
+    ['run', '--resource-runtime', '/private/runtime-marker\n.json'],
+    ['run', '--resource-runtime', '/private/runtime-marker\x85.json'],
+    ['run', '--resource-runtime', '/private/runtime-marker.json', '--resource-runtime', '/private/other.json'],
+    ['run', '--resource-runtime', '/' + 'é'.repeat(2048)],
+    ['run', '--resource-runtime=/private/runtime-marker.json'],
+  ])('rejects invalid runtime scope or path without echoing it: %j', async (...args) => {
+    // An unreadable manifest ensures argument rejection happens before any
+    // portfolio file, campaign evidence, or private runtime can be read.
+    expect(await cmdUniversePortfolio([...args, '--manifest', '/private/nonexistent-portfolio.json', '--json'])).toBe(2);
+    const printed = output.mock.calls[0]![0] as string;
+    expect(JSON.parse(printed)).toHaveProperty('error');
+    expect(printed).not.toContain('runtime-marker');
+    expect(printed).not.toContain('/private/');
+    expect(core.readUniversePortfolioPlan).not.toHaveBeenCalled();
+    expect(core.runUniversePortfolio).not.toHaveBeenCalled();
   });
 
   it.each(['SIGINT', 'SIGTERM'] as const)('requests %s cancellation and waits for runner settlement', async (signalName) => {
@@ -229,6 +268,7 @@ describe('Universe portfolio CLI', () => {
     expect(text).toContain('second · completed · attempted');
     expect(text).toContain('existing campaign budgets and deadlines remain unchanged');
     expect(text).toContain('no artifact transfer, automatic delivery, push, merge, deployment, or production acceptance');
+    expect(text).toContain('--resource-runtime option on each invocation');
     expect(text).not.toContain('$');
   });
 
@@ -252,6 +292,8 @@ describe('Universe portfolio CLI', () => {
     expect(await cmdUniversePortfolio(args)).toBe(0);
     expect(output.mock.calls[0]![0]).toContain('at most 256 KiB');
     expect(output.mock.calls[0]![0]).toContain('A new invocation gets');
+    expect(output.mock.calls[0]![0]).toContain('Only run accepts --resource-runtime');
+    expect(output.mock.calls[0]![0]).toContain('actual native provider request counts are unknown');
     expect(core.readUniversePortfolioPlan).not.toHaveBeenCalled();
     expect(core.runUniversePortfolio).not.toHaveBeenCalled();
   });

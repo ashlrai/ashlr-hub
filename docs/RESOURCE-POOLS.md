@@ -622,6 +622,11 @@ unattended production fleet. Universe's versioned generation receipts, measured
 feedback, evaluator, and archive selection remain independent acceptance steps.
 The opt-in [generation bridge](ASHLR-UNIVERSE.md#generate-candidates-through-an-enrolled-resource-pool)
 links recorded pool tasks to Universe trials without activating a service.
+Universe [portfolio execution](ASHLR-UNIVERSE.md#coordinate-campaigns-with-a-dependency-graph)
+can supply one explicit `--resource-runtime` to its enrolled, pinned-pool
+campaigns. Planning does not validate worker readiness. The shared ledger and
+fresh-observation requirements still apply; portfolio concurrency does not add
+an automatic capacity-waiting queue or retry.
 `ashlr runtime run` still forwards Universe commands only; it does not forward
 the standalone resource-pool CLI.
 

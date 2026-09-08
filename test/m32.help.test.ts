@@ -6,7 +6,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
-import { cmdHelp, HELP_ENTRIES } from '../src/cli/help.js';
+import { AGENT_COMMANDS, cmdHelp, HELP_ENTRIES } from '../src/cli/help.js';
 import { TOP_LEVEL_COMMANDS } from '../src/cli/completions.js';
 
 let captured: string[] = [];
@@ -28,6 +28,18 @@ function output(): string {
 }
 
 describe('HELP_ENTRIES — the command table', () => {
+  it('advertises execution-only portfolio resource bindings without changing the plan contract', () => {
+    const run = AGENT_COMMANDS.find((entry) => entry.usage.startsWith('ashlr universe portfolio run '))!;
+    const plan = AGENT_COMMANDS.find((entry) => entry.usage.startsWith('ashlr universe portfolio plan '))!;
+    expect(run.usage).toContain('--resource-runtime <private-absolute.json>');
+    expect(run.description).toContain('shared pool limits and campaign budgets');
+    expect(run.safety).toBe('append');
+    expect(run.jsonShape).toBe('UniversePortfolioResult');
+    expect(plan.usage).not.toContain('--resource-runtime');
+    expect(plan.safety).toBe('read');
+    expect(plan.jsonShape).toBe('UniversePortfolioPlan');
+  });
+
   it('every entry has a command, description, and known topic', () => {
     expect(HELP_ENTRIES.length).toBeGreaterThanOrEqual(80);
     for (const e of HELP_ENTRIES) {
