@@ -1692,6 +1692,93 @@ campaign calls, and 24 hours per invocation. `maxParallel` limits this invocatio
 campaign calls, not each campaign's trial workers, host-wide concurrency, account
 quota, or aggregate token spend. Independent invocations retain their own limits.
 
+### Restart a checkpointed portfolio
+
+Use `controller run` when the portfolio's dispatch history and duration allowance
+must survive process restarts. It accepts the same explicit campaign DAG as
+`portfolio run`, but has different recovery semantics: the controller ID names
+one immutable enrollment and one original deadline, not a fresh invocation budget.
+Campaigns must already be registered. This controller does not discover new
+projects, change priorities, or build integration/handoff nodes automatically.
+
+Save the definition as a private owner-only `0600` JSON file, then run:
+
+```sh
+node bin/ashlr universe controller run \
+  --manifest /absolute/private/portfolio.json \
+  --root /absolute/private/universe --json
+```
+
+The command records initial campaign identities and a fixed deadline before
+dispatch. Ready independent nodes run up to the declared `maxParallel`; verified
+completion releases their dependants in declared-priority order. A completed
+campaign satisfies ordering, not a claim of passing tests or product acceptance.
+For strict local improvement delivery, supply the existing explicit
+`--delivery-plan /absolute/private/delivery-plan.json` option. The plan is frozen
+with enrollment and must be repeated identically on restart; omitting it cannot
+remove a saved delivery prerequisite.
+
+Resource-backed campaigns still require
+`--resource-runtime /absolute/private/resource-runtime.json`. Its locator is not
+persisted; provide it on each invocation that needs those workers. Existing
+account exclusions, reserves, pool pins and admission checks remain in force.
+Controller concurrency is not a host-wide quota or a subscription spending cap.
+Missing runtime configuration leaves the campaign undispatched and reports
+`resource-runtime-required`; the controller does not discover account bindings.
+
+To continue the same enrollment, repeat the exact command. Downtime consumes the
+original duration allowance. Restarts do not renew campaign or controller
+budgets, replace initial campaign pins, or automatically resume paused,
+interrupted, or uncertain work. Changing a definition under an existing
+controller ID is refused.
+
+Each dispatch has durable intent before the campaign or delivery call. A result
+is recorded only after checking the actual settled campaign evidence and any
+required delivery. On restart, verified recorded completions remain usable and
+never-dispatched independent work can continue within the remaining allowance.
+An intent without a matching settlement remains unresolved and is not dispatched
+again, even if an external observer later sees campaign completion. The campaign
+start record does not yet bind a controller dispatch nonce, so that observation
+cannot establish which call completed. Dependants remain held; independent
+untouched branches may still progress if concurrency capacity remains. An
+unresolved intent retains its `maxParallel` slot rather than assuming its worker
+has stopped.
+
+Inspect without running or repairing anything:
+
+```sh
+node bin/ashlr universe controller status build \
+  --root /absolute/private/universe --json
+```
+
+Replace `build` with the portfolio definition's ID. The report includes the
+original deadline, source state, per-campaign outcomes and reason codes.
+`pending` means no recorded dispatch; `in-flight` means intent exists without
+recorded settlement, **not** proof that a worker is alive. `held` is not success.
+`dependency-held` identifies untouched work blocked by a held prerequisite;
+`waiting-for-dependencies` identifies prerequisites that have not settled yet.
+Read-only status never creates missing stores or reconciles uncertain work.
+
+The controller has a separate local execution lock and bounded immutable history
+under `<root>/portfolios/<id>/`. Only one invocation owns that controller at a
+time. History is limited to 512 records and 4 MiB, with a 128 KiB canonical
+enrollment limit. Dispatch reserves space for settlement; repeated run
+observations consume history capacity. Exhaustion refuses new work rather than
+discarding checkpoints. SIGINT/SIGTERM and deadline expiry cancel and await owned calls; cleanup
+can extend elapsed time beyond the allowance. No daemon or background restart is
+installed. Existing campaign pause and stop controls remain authoritative.
+
+Run exits `0` for completion, `130` for cancellation, `1` for incomplete or
+unavailable execution, and `2` for invalid input. Status exits `0` for readable
+healthy state, including incomplete state, and `1` for missing/degraded state;
+readability does not imply successful work.
+
+The SDK exports `runUniversePortfolioController(definition, options)` and
+`readUniversePortfolioController(id, { root })`. Composition, evaluation and
+downstream registration remain separate explicit operations; this release does
+not yet schedule them as controller graph nodes or enable branch advancement,
+remote push, deployment, or automatic product-direction changes.
+
 ### Deliver dependency-ordered campaign results
 
 To carry measured improvements through local integration without manually
