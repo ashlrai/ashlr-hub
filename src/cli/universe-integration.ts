@@ -1,8 +1,9 @@
 import { isAbsolute, parse as parsePath, resolve } from 'node:path';
 import {
-  deliverUniverseIntegration, evaluateUniverseIntegration, readUniverseIntegrationEvaluation,
+  deliverUniverseIntegration, evaluateUniverseIntegration, handoffUniverseIntegration,
+  readUniverseIntegrationDelivery, readUniverseIntegrationEvaluation,
   readUniverseIntegrationPlan, validateUniverseIntegrationDefinition, validateUniverseIntegrationDeliveryRequest,
-  validateUniverseIntegrationEvaluationRequest, type UniverseIntegrationDeliveryReceipt,
+  validateUniverseIntegrationEvaluationRequest, validateUniverseIntegrationHandoffRequest, type UniverseIntegrationDeliveryReceipt,
   type UniverseIntegrationDeliveryRequest, type UniverseIntegrationEvaluationResult, type UniverseIntegrationEvaluationRequest,
   type UniverseIntegrationPlan,
 } from '../core/universe/index.js';
@@ -15,6 +16,8 @@ const USAGE = `usage: ashlr universe integration <command> --manifest <private a
   evaluate  Explicitly execute the target's pinned evaluator against the combined artifact
   inspect   Read a prior durable evaluation result without executing an evaluator
   deliver   Deliver a settled passing evaluation to a new local codex/ branch
+  inspect-delivery  Read and verify completed local delivery evidence without writes
+  handoff   Register a new downstream experiment from an explicitly pinned delivery
 
 The manifest names one pinned seed repository/base and 2-8 delivered source
 trees. Planning verifies source receipt pins and deterministic path overlays only.
@@ -27,21 +30,27 @@ it never reruns an evaluator or provider and never checks out, pushes, merges,
 deploys, or establishes acceptance. If delivery is interrupted, inspect the
 receipt and Git ref; interruption does not prove that a branch was not
 published. A settled identical request replays verified evidence; unfinished
-work is unresolved and is never retried automatically. The manifest must be
+work is unresolved and is never retried automatically. Inspect-delivery reads
+completed evidence only; it never creates a branch or settles pending work.
+Handoff registers a new experiment with its own objective, evaluator, and budget;
+it does not run that experiment or inherit the source score. Neither action
+advances an existing branch or mutates an existing experiment. The manifest must be
 an owner-only (0600) regular JSON file with a canonical absolute path, at most
 256 KiB. --root defaults to ~/.ashlr/universe.
 Exit codes: plan 0 composition-ready, 1 unavailable/conflicting sources;
             evaluate 0 passed, 1 rejected/failed/timed-out/unavailable,
             130 cancelled; inspect 0 readable, 1 unavailable, 2 invalid;
-            deliver 0 delivered/unchanged, 1 pending/unavailable, 130 cancelled,
-            2 invalid arguments or manifest.
+            deliver 0 delivered/unchanged, 1 pending/unavailable, 130 cancelled, 2 invalid;
+            inspect-delivery 0 readable, 1 unavailable, 2 invalid;
+            handoff 0 registered, 1 unavailable, 2 invalid.
+All commands return 2 for invalid arguments or manifests.
 `;
 
 class UsageError extends Error {}
 class CancellationError extends Error {}
 
 interface Options {
-  command: 'plan' | 'evaluate' | 'inspect' | 'deliver' | 'help';
+  command: 'plan' | 'evaluate' | 'inspect' | 'deliver' | 'inspect-delivery' | 'handoff' | 'help';
   manifest?: string;
   root?: string;
   json: boolean;
@@ -60,7 +69,8 @@ function canonicalAbsolutePath(value: string): boolean {
 }
 
 function isActionCommand(value: string | undefined): value is Exclude<Options['command'], 'help'> {
-  return value === 'plan' || value === 'evaluate' || value === 'inspect' || value === 'deliver';
+  return value === 'plan' || value === 'evaluate' || value === 'inspect' || value === 'deliver' ||
+    value === 'inspect-delivery' || value === 'handoff';
 }
 
 function parse(args: string[]): Options {
@@ -97,12 +107,12 @@ function parse(args: string[]): Options {
   }
   if (positional.length > 1) throw new UsageError('integration accepts one command and no positional manifest');
   const command = positional[0];
-  if (command !== undefined && !['plan', 'evaluate', 'inspect', 'deliver', 'help'].includes(command)) {
-    throw new UsageError('Expected integration plan, evaluate, inspect, deliver, or help');
+  if (command !== undefined && !isActionCommand(command) && command !== 'help') {
+    throw new UsageError('Expected integration plan, evaluate, inspect, deliver, inspect-delivery, handoff, or help');
   }
   if (help || command === 'help') return { command: 'help', json: false };
   if (!isActionCommand(command)) {
-    throw new UsageError('Expected integration plan, evaluate, inspect, or deliver');
+    throw new UsageError('Expected integration plan, evaluate, inspect, deliver, inspect-delivery, or handoff');
   }
   const manifest = values.get('--manifest');
   if (!manifest) throw new UsageError(`${command} requires --manifest <private absolute JSON>`);
@@ -180,6 +190,32 @@ function evaluationExitCode(result: UniverseIntegrationEvaluationResult): number
   return result.status === 'passed' ? 0 : result.status === 'cancelled' ? 130 : 1;
 }
 
+function renderDeliveryInspection(evidence: ReturnType<typeof readUniverseIntegrationDelivery>): string {
+  const { receipt } = evidence;
+  return [
+    `${receipt.evaluationId} · integration delivery inspection · ${receipt.status}`,
+    `Receipt digest: ${evidence.receiptDigest} · delivery ${receipt.id}`,
+    `Repository: ${receipt.repo} · branch ${receipt.branch} · commit ${receipt.commit} · tree ${receipt.tree}`,
+    `Pinned comparator: universe ${receipt.universeId} · manifest ${receipt.manifestDigest} · comparator ${receipt.comparatorDigest}`,
+    `Artifact: ${receipt.artifactDigest} · composition ${receipt.compositionDigest}`,
+    'Read-only completed delivery evidence. No branch creation, pending-work reconciliation, evaluator, provider, or experiment registration occurred.',
+    'This receipt identifies a local delivery, not downstream execution or production acceptance.',
+  ].join('\n');
+}
+
+function renderHandoff(result: Awaited<ReturnType<typeof handoffUniverseIntegration>>): string {
+  return [
+    `${result.targetUniverseId} · integration handoff · ${result.status}`,
+    `New manifest: ${result.manifestDigest} · comparator: ${result.comparatorDigest}`,
+    `Seed artifact: ${result.seedArtifactDigest}`,
+    `Origin: universe ${result.origin.acceptanceUniverseId} · evaluation ${result.origin.evaluationId} · delivery ${result.origin.deliveryId}`,
+    `Repository: ${result.origin.repo} · commit ${result.origin.commit} · tree ${result.origin.tree}`,
+    `Delivery digest: ${result.origin.deliveryDigest} · handoff request: ${result.origin.requestDigest}`,
+    'New downstream experiment registered with its own objective, evaluator, and budget. No source score was inherited.',
+    'No experiment, evaluator, provider, or campaign was run. No existing experiment, branch, checkout, push, or deployment was changed.',
+  ].join('\n');
+}
+
 /** Planning is read-only; evaluation is an explicit, bounded foreground action. */
 export async function cmdUniverseIntegration(args: string[]): Promise<number> {
   try {
@@ -211,6 +247,26 @@ export async function cmdUniverseIntegration(args: string[]): Promise<number> {
       try { inspection = readUniverseIntegrationEvaluation(request, { root: options.root }); }
       catch { throw new Error('Integration evaluation evidence unavailable'); }
       console.log(options.json ? JSON.stringify(inspection, null, 2) : renderInspection(inspection));
+      return 0;
+    }
+    if (options.command === 'inspect-delivery') {
+      let request: UniverseIntegrationDeliveryRequest;
+      try { request = validateUniverseIntegrationDeliveryRequest(input); }
+      catch { throw new UsageError('Integration delivery request is invalid or unavailable'); }
+      let evidence: ReturnType<typeof readUniverseIntegrationDelivery>;
+      try { evidence = readUniverseIntegrationDelivery(request, { root: options.root }); }
+      catch { throw new Error('Integration delivery evidence unavailable'); }
+      console.log(options.json ? JSON.stringify(evidence, null, 2) : renderDeliveryInspection(evidence));
+      return 0;
+    }
+    if (options.command === 'handoff') {
+      let request: ReturnType<typeof validateUniverseIntegrationHandoffRequest>;
+      try { request = validateUniverseIntegrationHandoffRequest(input); }
+      catch { throw new UsageError('Integration handoff request is invalid or unavailable'); }
+      let result: Awaited<ReturnType<typeof handoffUniverseIntegration>>;
+      try { result = await handoffUniverseIntegration(request, { root: options.root }); }
+      catch { throw new Error('Integration handoff unavailable'); }
+      console.log(options.json ? JSON.stringify(result, null, 2) : renderHandoff(result));
       return 0;
     }
     if (options.command === 'deliver') {

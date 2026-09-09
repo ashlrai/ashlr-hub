@@ -5,7 +5,7 @@ import {
   type ImmutablePrivateRecordCodec, type ImmutablePrivateRecordStoreConfig,
   readImmutablePrivateRecords, writeImmutablePrivateRecord,
 } from '../util/immutable-private-record-store.js';
-import { acquireLocalStoreLock, releaseLocalStoreLock, verifiedProcessStartRef } from '../fleet/local-store-lock.js';
+import { acquireLocalStoreLock, ownsLocalStoreLock, releaseLocalStoreLock, verifiedProcessStartRef } from '../fleet/local-store-lock.js';
 import {
   artifactDigest, canonical, defaultUniverseRoot, digest, ensureUniverseRoot,
   executable, freezeArtifact, inspectPrivateDirectory, materializeSeed, pinSeed, privateDirectory,
@@ -16,6 +16,7 @@ import { generationResources, newGenerationReceipt, resourceGenerationTaskId, va
 import { buildUniverseFeedback, feedbackReceipt, validateDiagnostics } from './feedback.js';
 import { buildUniverseSearchContext, searchContextReceipt } from './search-context.js';
 import { MAX_UNIVERSE_RECORD_BYTES } from './evidence-size.js';
+import type { UniverseIntegrationOrigin } from './integration-handoff-types.js';
 import { buildUniverseFileOperationsContext, fileOperationsContextDigest, verifyUniverseFileOperationOutcome } from './file-operations-context.js';
 
 const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -77,6 +78,21 @@ export interface ManifestRecord {
   id: 'manifest'; kind: 'manifest'; manifest: UniverseManifest; manifestDigest: string;
   comparatorDigest: string; seedArtifact: UniverseArtifact; evaluationCommand: string[];
   evaluationExecutableDigest: string;
+  integrationOrigin?: UniverseIntegrationOrigin;
+}
+
+function validIntegrationOrigin(value: unknown, manifest: UniverseManifest, seed?: UniverseArtifact): value is UniverseIntegrationOrigin {
+  const keys = ['schemaVersion', 'requestDigest', 'deliveryDigest', 'deliveryId', 'acceptanceUniverseId', 'evaluationId',
+    'repo', 'commit', 'tree', 'artifactDigest'];
+  return object(value) && Reflect.ownKeys(value).length === keys.length && exact(value, keys) &&
+    Reflect.ownKeys(value).every((key) => typeof key === 'string' &&
+      Object.hasOwn(Object.getOwnPropertyDescriptor(value, key)!, 'value')) && value.schemaVersion === 1 &&
+    ['requestDigest', 'deliveryDigest', 'deliveryId', 'artifactDigest'].every((key) => typeof value[key] === 'string' && HASH.test(value[key] as string)) &&
+    typeof value.acceptanceUniverseId === 'string' && ID.test(value.acceptanceUniverseId) && value.acceptanceUniverseId !== manifest.id &&
+    typeof value.evaluationId === 'string' && ID.test(value.evaluationId) && value.repo === manifest.seed.repo &&
+    typeof value.repo === 'string' && isAbsolute(value.repo) && value.commit === manifest.seed.revision &&
+    typeof value.tree === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value.tree) &&
+    (seed === undefined || value.artifactDigest === seed.digest && value.commit === seed.revision);
 }
 export type UniverseRecord = ManifestRecord |
   { id: string; kind: 'start'; run: UniverseRun; ownerPid: number; ownerStart: string } |
@@ -139,10 +155,11 @@ function parseRecord(value: unknown): UniverseRecord | null {
   if (value.kind === 'manifest') {
     try {
       const manifest = validateUniverseManifest(value.manifest);
-      if (!exact(value, ['id', 'kind', 'manifest', 'manifestDigest', 'comparatorDigest', 'seedArtifact', 'evaluationCommand', 'evaluationExecutableDigest']) ||
+      if (!exact(value, ['id', 'kind', 'manifest', 'manifestDigest', 'comparatorDigest', 'seedArtifact', 'evaluationCommand', 'evaluationExecutableDigest', 'integrationOrigin']) ||
           value.id !== 'manifest' || digest(canonical(manifest)) !== value.manifestDigest ||
           !text(value.comparatorDigest, 64) || !HASH.test(value.comparatorDigest) || !validArtifact(value.seedArtifact) ||
-          !command(value.evaluationCommand) || !text(value.evaluationExecutableDigest, 64) || !HASH.test(value.evaluationExecutableDigest)) return null;
+          !command(value.evaluationCommand) || !text(value.evaluationExecutableDigest, 64) || !HASH.test(value.evaluationExecutableDigest) ||
+          (Object.hasOwn(value, 'integrationOrigin') && !validIntegrationOrigin(value.integrationOrigin, manifest, value.seedArtifact))) return null;
       return value as unknown as ManifestRecord;
     } catch { return null; }
   }
@@ -217,32 +234,71 @@ function pinnedEvaluationCommand(manifest: UniverseManifest, seedPath: string): 
 }
 
 export function initUniverse(input: UniverseManifest, options: UniverseStoreOptions = {}): UniverseManifest {
+  return initUniverseRecord(input, options).manifest;
+}
+
+/** Internal enrollment primitive. Provenance and registration share one immutable record. */
+export function initUniverseWithIntegrationOrigin(input: UniverseManifest, origin: UniverseIntegrationOrigin,
+  assertSource: () => void, options: UniverseStoreOptions = {}): ManifestRecord {
+  const manifest = validateUniverseManifest(input);
+  if (!validIntegrationOrigin(origin, manifest)) throw new Error('Invalid Universe integration origin');
+  if (typeof assertSource !== 'function') throw new Error('Universe integration source check must be a function');
+  const pinnedOrigin = JSON.parse(canonical(origin)) as UniverseIntegrationOrigin;
+  return initUniverseRecord(manifest, options, pinnedOrigin, assertSource);
+}
+
+function initUniverseRecord(input: UniverseManifest, options: UniverseStoreOptions,
+  origin?: UniverseIntegrationOrigin, assertSource?: () => void): ManifestRecord {
   const manifest = validateUniverseManifest(input);
   manifest.seed = pinSeed(manifest.seed.repo, manifest.seed.revision);
+  if (origin && !validIntegrationOrigin(origin, manifest)) throw new Error('Universe integration origin seed differs from its pinned source');
   const root = ensureUniverseRoot(options.root);
   privateDirectory(join(root, 'universes'));
   const directory = universePath(root, manifest.id);
   privateDirectory(directory);
   const lock = acquireLocalStoreLock(join(directory, '.run.lock'), 0, { anchorPath: directory, exactPrivateStorage: true });
   if (!lock) throw new Error('Universe is busy');
+  const checkOriginSource = (): void => {
+    if (!ownsLocalStoreLock(lock)) throw new Error('Universe registration ownership lost');
+    const checked: unknown = assertSource!();
+    if (checked !== undefined) {
+      if (checked !== null && (typeof checked === 'object' || typeof checked === 'function') &&
+          typeof (checked as PromiseLike<unknown>).then === 'function') void Promise.resolve(checked).catch(() => undefined);
+      throw new Error('Universe integration source check must complete synchronously without a return value');
+    }
+    if (!ownsLocalStoreLock(lock)) throw new Error('Universe registration ownership lost');
+  };
   try {
+    if (origin && !ownsLocalStoreLock(lock)) throw new Error('Universe registration ownership lost');
     if (existsSync(join(directory, 'ledger'))) {
       const current = manifestRecord(directory);
       if (current.manifestDigest !== digest(canonical(manifest))) throw new Error('Universe manifest is immutable; use a new id for a changed objective or comparator');
-      return current.manifest;
+      if (origin) {
+        if (canonical(current.integrationOrigin ?? null) !== canonical(origin)) throw new Error('Universe integration origin differs from existing registration');
+        assertComparatorUnchanged(current);
+        checkOriginSource();
+      }
+      return current;
     }
     privateDirectory(join(directory, 'artifacts'));
     privateDirectory(join(directory, 'scratch'));
     const seedPath = join(directory, 'seed');
     if (existsSync(seedPath)) throw new Error('Interrupted initialization exists; choose a new Universe id');
     const seedDigest = materializeSeed(manifest.seed, seedPath);
+    if (origin && seedDigest !== origin.artifactDigest) throw new Error('Universe integration seed differs from delivered artifact');
     const evalCommand = pinnedEvaluationCommand(manifest, seedPath);
     const partial: Omit<ManifestRecord, 'comparatorDigest'> = { id: 'manifest', kind: 'manifest', manifest,
       manifestDigest: digest(canonical(manifest)), seedArtifact: { path: seedPath, digest: seedDigest, revision: manifest.seed.revision },
-      evaluationCommand: evalCommand, evaluationExecutableDigest: digest(readFileSync(evalCommand[0]!)) };
+      evaluationCommand: evalCommand, evaluationExecutableDigest: digest(readFileSync(evalCommand[0]!)),
+      ...(origin ? { integrationOrigin: origin } : {}) };
     freezeArtifact(seedPath);
-    appendRecord(directory, { ...partial, comparatorDigest: comparatorDigest(partial) });
-    return manifest;
+    const record = { ...partial, comparatorDigest: comparatorDigest(partial) };
+    if (origin) {
+      assertComparatorUnchanged(record);
+      checkOriginSource();
+    }
+    appendRecord(directory, record);
+    return record;
   } finally { releaseLocalStoreLock(lock); }
 }
 
